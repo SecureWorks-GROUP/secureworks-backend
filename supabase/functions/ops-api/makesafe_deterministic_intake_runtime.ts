@@ -1364,7 +1364,9 @@ function byBuilderReason(
     const builder = intakeCase.identity.builderSlug || "unknown";
     const reason = intakeCase.reasonCode ||
       (intakeCase.state === "blocked_live_job"
-        ? "blocked_secondary"
+        ? intakeCase.blockedReasons.length
+          ? intakeCase.blockedReasons.join("|")
+          : "blocked_without_reason"
         : "confirmed");
     result[builder] ||= {};
     result[builder][reason] = (result[builder][reason] || 0) +
@@ -1971,7 +1973,11 @@ function casePayload(
     last_decision_provenance: "deterministic",
     last_decision_actor: DETERMINISTIC_INTAKE_VERSION,
     last_decision_reason: jobId
-      ? `deterministic ${state}`
+      ? `deterministic ${state}${
+        state === "blocked_live_job" && plan.blockedReasons.length
+          ? ` ${plan.blockedReasons.join("|")}`
+          : ""
+      }`
       : `deterministic ${reason}`,
     received_at: plan.story[0]?.occurredAt || new Date().toISOString(),
     adapter_id: plan.adapterId,
@@ -2787,8 +2793,8 @@ async function ensureDraftAndJob(
         truncated: document.truncated,
         reason: document.reason,
       })),
-      pdf_field_provenance: plan.fieldProvenance,
-      pdf_sourced_fields: Object.keys(plan.fieldProvenance),
+      pdf_field_provenance: plan.pdfFieldProvenance,
+      pdf_sourced_fields: Object.keys(plan.pdfFieldProvenance),
       ...(plan.secondaryObligation
         ? { secondary_obligation: plan.secondaryObligation }
         : {}),

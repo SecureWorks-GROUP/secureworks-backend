@@ -266,13 +266,54 @@ const AFFIRM_TEMP_FENCE_RE =
   /(supply|install|erect|provide|deliver|hire|set\s*up|put\s*up|collect|pick\s*up|pickup|retriev)\w*[^.]{0,60}?(temp(?:orary)?\s*fenc|fence\s*panel|fenc(?:e|ing))|(temp(?:orary)?\s*fenc|fence\s*panel)[^.]{0,60}?(supply|install|erect|provide|deliver|hire|set\s*up|put\s*up|collect|pick\s*up|pickup|retriev)/i;
 const NEG_TEMP_FENCE_RE =
   /\bno\s+(?:temp(?:orary)?\s*)?fenc\w*|\bno\s+fencing\b|(?:temp(?:orary)?\s*fenc\w*|fencing)\s+(?:is\s+|are\s+|will\s+be\s+)?(?:not|n['’]?t|no\s+longer)\s+(?:require|need|necessary)/i;
+const STRONG_PHYSICAL_MAKESAFE_RE =
+  /\b(tarps?|tarping|temporary\s+(?:roof\s+)?repair|temporary\s+(?:roof\s+)?cover(?:ing)?|emergency\s+(?:repair|works?|attendance)|prevent\s+further\s+(?:damage|water\s+ingress)|stop\s+(?:the\s+)?(?:leak|water\s+ingress)|weatherproof|board\s*up|isolate\s+(?:the\s+)?(?:hazard|area|services?)|secure\s+(?:the\s+)?(?:property|site|opening|roof)|remove\s+(?:the\s+)?(?:hazard|danger))\b/i;
+const GENERIC_PHYSICAL_MAKESAFE_RE =
+  /\b(new\s+work\s+order|work\s+order|make\s*-?\s*safe|makesafe)\b/i;
 
-export function classifyMakeSafeJobFamily(
+export interface MakeSafeJobFamilyContext {
+  /** Deterministically extracted work-order PDF text. */
+  pdfScopeText?: string | null;
+  /** Canonical company slug or deterministic adapter id. */
+  builder?: string | null;
+}
+
+export interface MakeSafeJobFamilyDecision {
+  family: MakeSafeJobFamily | null;
+  evidence:
+    | "typed_temp_fence"
+    | "text_temp_fence"
+    | "ajs_make_safe_floor"
+    | "typed_roof_report"
+    | "text_roof_report"
+    | "typed_assessment_report"
+    | "text_assessment_report"
+    | "physical_makesafe"
+    | "ambiguous_scope";
+}
+
+function isAjsBuilder(builder: string | null | undefined): boolean {
+  const key = String(builder || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return key === "aj" || key === "ajs" || key === "ajbr" ||
+    key === "ajsajbr";
+}
+
+/**
+ * Deterministic family decision used by intake. Unlike the legacy convenience
+ * wrapper below, this can abstain so an unclear instruction becomes a
+ * reason-coded exception instead of silently guessing general make-safe.
+ */
+export function decideMakeSafeJobFamily(
   subject: string | null | undefined,
   body: string | null | undefined,
   reportType?: string | null,
-): MakeSafeJobFamily {
-  const text = `${subject || ""}\n${body || ""}`.toLowerCase();
+  context: MakeSafeJobFamilyContext = {},
+): MakeSafeJobFamilyDecision {
+  const text = [
+    subject || "",
+    body || "",
+    context.pdfScopeText || "",
+  ].join("\n").toLowerCase();
   const rt = String(reportType || "").toLowerCase();
 
   if (
@@ -280,7 +321,30 @@ export function classifyMakeSafeJobFamily(
     (TEMP_FENCE_TEXT_RE.test(text) &&
       (AFFIRM_TEMP_FENCE_RE.test(text) || !NEG_TEMP_FENCE_RE.test(text)))
   ) {
-    return "temp_fence_makesafe";
+    return {
+      family: "temp_fence_makesafe",
+      evidence: rt === "temp_fence" ? "typed_temp_fence" : "text_temp_fence",
+    };
+  }
+
+  // Captain's standing ruling: every AJS/AJBR instruction is physical make-safe
+  // work. Report/assessment wording must never promote it into a report-only
+  // family. Temporary fencing above remains a physical make-safe subtype.
+  if (isAjsBuilder(context.builder)) {
+    return {
+      family: "general_makesafe",
+      evidence: "ajs_make_safe_floor",
+    };
+  }
+
+  // Concrete protective work outranks a report phrase. A scope that says to
+  // tarp a roof and provide a report is still physical make-safe work; the
+  // report is a secondary obligation, not a report-only family.
+  if (STRONG_PHYSICAL_MAKESAFE_RE.test(text)) {
+    return {
+      family: "general_makesafe",
+      evidence: "physical_makesafe",
+    };
   }
 
   if (
@@ -288,18 +352,48 @@ export function classifyMakeSafeJobFamily(
     /\b(roof\s+(report|assessment\s*report|inspection\s*report)|report\s+.*\broof\b|prime\s+roof\s+report)\b/i
       .test(text)
   ) {
-    return "roof_report";
+    return {
+      family: "roof_report",
+      evidence: rt === "roof_report" ? "typed_roof_report" : "text_roof_report",
+    };
   }
 
   if (
     rt === "assessment_report" ||
-    /\b(assessment\s*(report)?|assess\s+and\s+quote|inspect\s+and\s+(provide\s+)?quote|quote\s*(request|link|report)?|quotation|scope\s+of\s+works?)\b/i
+    /\b(assessment\s*(report)?|assess\s+and\s+quote|inspect\s+and\s+(provide\s+)?quote|quote\s*(request|link|report)?|quotation)\b/i
       .test(text)
   ) {
-    return "assessment_report_quote";
+    return {
+      family: "assessment_report_quote",
+      evidence: rt === "assessment_report"
+        ? "typed_assessment_report"
+        : "text_assessment_report",
+    };
   }
 
-  return "general_makesafe";
+  if (GENERIC_PHYSICAL_MAKESAFE_RE.test(text)) {
+    return {
+      family: "general_makesafe",
+      evidence: "physical_makesafe",
+    };
+  }
+
+  return { family: null, evidence: "ambiguous_scope" };
+}
+
+/**
+ * Back-compatible classifier for callers whose existing contract requires one
+ * of the four families. New intake code should use decideMakeSafeJobFamily so
+ * genuine ambiguity stays visible.
+ */
+export function classifyMakeSafeJobFamily(
+  subject: string | null | undefined,
+  body: string | null | undefined,
+  reportType?: string | null,
+  context: MakeSafeJobFamilyContext = {},
+): MakeSafeJobFamily {
+  return decideMakeSafeJobFamily(subject, body, reportType, context).family ||
+    "general_makesafe";
 }
 
 // ── M-G FIX 2 — top-down taxonomy (Marnin's Emergency-Insurance-Work model) ────

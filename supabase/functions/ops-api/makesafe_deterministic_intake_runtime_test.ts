@@ -874,6 +874,35 @@ Deno.test("live deterministic intake fills a draft from PDF and persists readabl
   );
 });
 
+Deno.test("portal-only blocker is reported by its actual missing evidence", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "roof-portal-blocker",
+    subject: "Roof report work order Work Order: 445566",
+    body_content: [
+      "Client: Roof Client",
+      "Site Address: 30 Beta Avenue, Perth",
+      "Mobile: 0411 111 111",
+      "Complete roof report https://portal.prime.test/r/445566",
+    ].join("\n"),
+  }));
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: true,
+    selectionMode: "exact",
+    allowSourcePostIds: ["roof-portal-blocker"],
+    maxCases: 1,
+    nowIso: NOW,
+  });
+  assertEquals(
+    report.by_builder_and_reason.mlb["missing:portal_capture"],
+    1,
+  );
+  assertEquals(
+    report.by_builder_and_reason.mlb.adapter_parse_failure,
+    undefined,
+  );
+});
+
 Deno.test("auto-file brake parks a complete deterministic draft without stopping intake", async () => {
   const store = baseStore();
   const pdfBytes = digitalWorkOrderPdf();
