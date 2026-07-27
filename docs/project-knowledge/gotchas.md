@@ -26,8 +26,9 @@ PostgREST rejects a select naming a non-existent column with a 400 (`42703`): `d
 **Fix pattern**: verify names against `information_schema.columns` (not the migrations); alias in the select to keep the response shape (`select('date:invoice_date')`) but use the REAL name in `.eq()`/`.gte()`/`.order()`; and check `error` on any read whose emptiness is business-meaningful — `logQueryErrors()` in `_shared/pgrest.ts` labels a `Promise.all` batch. Live names that commonly surprise are listed in `database-schema.md` and `AGENTS.md`.
 
 ### Apply migrations before deploying edge functions
-Migrations and edge deploys are separate manual steps. Follow the authoritative
-production guard and deployment sequence in
+The production workflow automatically applies reviewed migrations from the
+audited `20260722000001` baseline before the independent read-only schema gate.
+Follow the authoritative deployment sequence in
 `docs/project-knowledge/EDGE_DEPLOY_LANE.md`; its manifest is
 `scripts/edge-function-schema-requirements.txt`. Deploying a function that
 selects a column the migration has not added can report zero instead of failing.

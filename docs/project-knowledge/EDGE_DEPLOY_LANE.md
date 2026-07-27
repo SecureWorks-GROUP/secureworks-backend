@@ -35,7 +35,7 @@ Preferred path:
 2. The GitHub Actions production edge deploy workflow
    (`.github/workflows/deploy-edge-functions.yml`) runs automatically on that
    push, in the `production` environment. For changed functions, its first
-   deploy gate first runs `scripts/apply-pending-migrations.sh`, which applies
+   deploy gate runs `scripts/apply-pending-migrations.sh`, which applies
    repository migrations missing from the production ledger in version order
    through the Management API. It verifies each migration request before
    writing and read-checking that migration's ledger row. The exact-file
