@@ -1,0 +1,150 @@
+[
+  {
+    "name": "full_dependency_envelope_v1",
+    "envelope": {
+      "source_instruction": {
+        "id": "instruction-é",
+        "version": 2,
+        "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "lineage": {
+        "lineage_id": "lineage-1",
+        "case_id": "case-1",
+        "version": 3,
+        "correction_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "supersession_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "attendance": {
+        "attendance_cycle_ids": [
+          "cycle-b",
+          "cycle-a"
+        ],
+        "current_attendance_cycle_id": "cycle-b",
+        "attendance_cycle_set_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "cycles": [
+          {
+            "id": "cycle-b",
+            "version": 2,
+            "content_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          {
+            "id": "cycle-a",
+            "version": 1,
+            "content_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        ]
+      },
+      "current_cycle": {
+        "assignments": [
+          {
+            "id": "assignment-2",
+            "version": 4,
+            "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          {
+            "id": "assignment-1",
+            "version": 1,
+            "content_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        ],
+        "service_reports": [
+          {
+            "id": "report-1",
+            "version": 7,
+            "content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        ],
+        "documents": [],
+        "completion_photos": [
+          {
+            "id": "photo-2",
+            "version": 1,
+            "content_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+          },
+          {
+            "id": "photo-1",
+            "version": 1,
+            "content_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+          }
+        ],
+        "portal_captures": []
+      },
+      "family": {
+        "code": "roof_report",
+        "matrix_revision": "family-2026-07-27",
+        "matrix_content_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      "pricing": {
+        "disposition": "locked_storey_price",
+        "revision": "pricing-3"
+      },
+      "invoice_obligation": {
+        "id": null,
+        "revision": null
+      },
+      "docket": {
+        "revision_id": "docket-9",
+        "artifact_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "manifest_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+      }
+    },
+    "readiness_revision": "sha256:c7855a0a0a7a2bd3aff21795248605ce22c8c4202ed0d75cd4798b19502b9c4d"
+  },
+  {
+    "name": "minimal_dependency_envelope_v1",
+    "envelope": {
+      "source_instruction": {
+        "id": "instruction-1",
+        "version": 1,
+        "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "lineage": {
+        "lineage_id": "lineage-1",
+        "case_id": "case-1",
+        "version": 1,
+        "correction_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "supersession_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "attendance": {
+        "attendance_cycle_ids": [
+          "cycle-1"
+        ],
+        "current_attendance_cycle_id": "cycle-1",
+        "attendance_cycle_set_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "cycles": [
+          {
+            "id": "cycle-1",
+            "version": 1,
+            "content_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        ]
+      },
+      "current_cycle": {
+        "assignments": [],
+        "service_reports": [],
+        "documents": [],
+        "completion_photos": [],
+        "portal_captures": []
+      },
+      "family": {
+        "code": "physical_makesafe",
+        "matrix_revision": "family-1",
+        "matrix_content_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "pricing": {
+        "disposition": "not_required",
+        "revision": "pricing-1"
+      },
+      "invoice_obligation": {
+        "id": null,
+        "revision": null
+      },
+      "docket": {
+        "revision_id": null,
+        "artifact_hash": null,
+        "manifest_hash": null
+      }
+    },
+    "readiness_revision": "sha256:feaf1d310fb67221d1844d130e72ac4d2fa91f0b305d72ad548e70f37f3d76c9"
+  }
+]
