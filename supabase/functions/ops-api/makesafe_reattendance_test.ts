@@ -1,3 +1,5 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
+
 // ════════════════════════════════════════════════════════════
 // MAKE-SAFE RE-ATTENDANCE TESTS (M-C)
 //
