@@ -475,6 +475,7 @@ export function buildCanonicalMakesafeRows(
           applied_at: application.applied_at,
         }
         : null,
+      captain_action: base?.captain_action ?? null,
       computed_status: computation.status,
       computed_status_reasons: computation.reasons,
       computed_status_missing: computation.missing,
