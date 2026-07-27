@@ -41,7 +41,7 @@ Preferred path:
    writing and read-checking that migration's ledger row. The exact-file
    exclusions for audited production debt live in
    `scripts/migration-autoapply-exclusions.txt`; the one reviewed historical
-   ledger-version alias lives in
+   ledger-version alias (including its verified production raw-statement SHA) lives in
    `scripts/migration-autoapply-ledger-aliases.txt`. The runner starts at the
    audited `20260722000001` baseline because older production history predates
    this lane and is intentionally sparse. An exception whose file hash changes

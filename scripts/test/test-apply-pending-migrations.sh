@@ -228,13 +228,16 @@ test_colliding_alias_and_exclusion_are_accounted_without_recording() {
   printf 'supabase/migrations/%s|%s|fixture_skip|fixture reviewed exclusion\n' \
     "20260101000000_excluded.sql" \
     "$(sha256_file "$dir/20260101000000_excluded.sql")" > "$exclusions"
-  printf 'supabase/migrations/%s|%s|20260102000000|applied_elsewhere|fixture historical alias\n' \
+  local ledger_sha
+  ledger_sha="$(printf '%s\n' 'SELECT 1;' | shasum -a 256 | awk '{print $1}')"
+  printf 'supabase/migrations/%s|%s|20260102000000|applied_elsewhere|%s|fixture historical alias\n' \
     "20260101000000_applied_elsewhere.sql" \
-    "$(sha256_file "$dir/20260101000000_applied_elsewhere.sql")" > "$aliases"
+    "$(sha256_file "$dir/20260101000000_applied_elsewhere.sql")" \
+    "$ledger_sha" > "$aliases"
 
   output="$(
     FIXTURE_ALIASES_FILE="$aliases" \
-    FIXTURE_LEDGER_JSON='{"ledger":[{"version":"20260102000000","name":"applied_elsewhere","statement_count":1,"raw_statement_sha256":"fixture"}]}' \
+    FIXTURE_LEDGER_JSON='{"ledger":[{"version":"20260102000000","name":"applied_elsewhere","statement_count":1,"raw_statement_sha256":"'"$ledger_sha"'"}]}' \
       run_fixture "$dir" "$exclusions" --dry-run 2>&1
   )"
   rc=$?
@@ -245,6 +248,60 @@ test_colliding_alias_and_exclusion_are_accounted_without_recording() {
     pass "$name"
   else
     fail "$name" "reviewed alias/collision accounting failed: rc=$rc output=$output"
+  fi
+}
+
+test_matching_ledger_name_requires_other_files_accounted() {
+  local name="test_matching_ledger_name_requires_other_files_accounted"
+  local dir="$TEST_TMP/matching-ledger-migrations" exclusions="$TEST_TMP/matching-ledger-exclusions"
+  local output rc
+  mkdir -p "$dir"
+  printf '%s\n' 'SELECT applied;' > "$dir/20260101000000_applied.sql"
+  printf '%s\n' 'SELECT collision;' > "$dir/20260101000000_collision.sql"
+  printf 'supabase/migrations/%s|%s|fixture_collision|fixture reviewed collision\n' \
+    "20260101000000_collision.sql" "$(sha256_file "$dir/20260101000000_collision.sql")" > "$exclusions"
+  output="$(FIXTURE_LEDGER_JSON='{"ledger":[{"version":"20260101000000","name":"applied","statement_count":1,"raw_statement_sha256":"fixture"}]}' run_fixture "$dir" "$exclusions" --dry-run 2>&1)"
+  rc=$?
+  if [[ "$rc" -eq 0 ]] && grep -q 'ledgered_versions: 1' <<<"$output" && grep -q 'EXCLUDED 20260101000000_collision' <<<"$output"; then
+    pass "$name"
+  else
+    fail "$name" "matching ledger row did not require/account colliding files: rc=$rc output=$output"
+  fi
+}
+
+test_mismatched_ledger_name_collision_refuses() {
+  local name="test_mismatched_ledger_name_collision_refuses"
+  local dir="$TEST_TMP/mismatched-ledger-migrations" exclusions="$TEST_TMP/mismatched-ledger-exclusions"
+  local output rc
+  mkdir -p "$dir"
+  printf '%s\n' 'SELECT one;' > "$dir/20260101000000_one.sql"
+  printf '%s\n' 'SELECT two;' > "$dir/20260101000000_two.sql"
+  : > "$exclusions"
+  output="$(FIXTURE_LEDGER_JSON='{"ledger":[{"version":"20260101000000","name":"elsewhere","statement_count":1,"raw_statement_sha256":"fixture"}]}' run_fixture "$dir" "$exclusions" --dry-run 2>&1)"
+  rc=$?
+  if [[ "$rc" -ne 0 ]] && grep -q 'ledger version/name collision' <<<"$output"; then
+    pass "$name"
+  else
+    fail "$name" "mismatched ledger name did not fail closed: rc=$rc output=$output"
+  fi
+}
+
+test_ledger_alias_raw_checksum_mismatch_refuses() {
+  local name="test_ledger_alias_raw_checksum_mismatch_refuses"
+  local dir="$TEST_TMP/alias-checksum-migrations" exclusions="$TEST_TMP/alias-checksum-exclusions" aliases="$TEST_TMP/alias-checksum-ledger"
+  local output rc
+  mkdir -p "$dir"
+  printf '%s\n' 'SELECT historical;' > "$dir/20260101000000_alias.sql"
+  : > "$exclusions"
+  printf 'supabase/migrations/%s|%s|20260102000000|historical|%s|fixture alias\n' \
+    "20260101000000_alias.sql" "$(sha256_file "$dir/20260101000000_alias.sql")" \
+    "$(printf '%s\n' 'SELECT expected;' | shasum -a 256 | awk '{print $1}')" > "$aliases"
+  output="$(FIXTURE_ALIASES_FILE="$aliases" FIXTURE_LEDGER_JSON='{"ledger":[{"version":"20260102000000","name":"historical","statement_count":1,"raw_statement_sha256":"'"$(printf '%s\n' 'SELECT actual;' | shasum -a 256 | awk '{print $1}')"'"}]}' run_fixture "$dir" "$exclusions" --dry-run 2>&1)"
+  rc=$?
+  if [[ "$rc" -ne 0 ]] && grep -q 'ledger alias' <<<"$output"; then
+    pass "$name"
+  else
+    fail "$name" "ledger alias checksum drift did not fail closed: rc=$rc output=$output"
   fi
 }
 
@@ -276,6 +333,9 @@ main() {
   test_unreviewed_collision_refuses
   test_exclusion_hash_drift_refuses
   test_colliding_alias_and_exclusion_are_accounted_without_recording
+  test_matching_ledger_name_requires_other_files_accounted
+  test_mismatched_ledger_name_collision_refuses
+  test_ledger_alias_raw_checksum_mismatch_refuses
   test_pending_transaction_control_refuses
   echo
   echo "Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed"

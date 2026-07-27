@@ -193,13 +193,20 @@ for line_no, raw in enumerate(aliases_path.read_text().splitlines(), 1):
     line = raw.strip()
     if not line or line.startswith("#"):
         continue
-    parts = line.split("|", 4)
-    if len(parts) != 5:
+    parts = line.split("|", 5)
+    if len(parts) != 6:
         raise SystemExit(
             f"FAIL migration auto-apply: {aliases_path}:{line_no}: "
-            "expected path|sha256|ledger_version|ledger_name|reason"
+            "expected path|sha256|ledger_version|ledger_name|ledger_raw_statement_sha256|reason"
         )
-    path, expected_sha, ledger_version, ledger_name, reason = parts
+    (
+        path,
+        expected_sha,
+        ledger_version,
+        ledger_name,
+        ledger_raw_statement_sha256,
+        reason,
+    ) = parts
     if path in aliases or path in exclusions:
         raise SystemExit(
             f"FAIL migration auto-apply: duplicate migration exception for {path}"
@@ -222,10 +229,15 @@ for line_no, raw in enumerate(aliases_path.read_text().splitlines(), 1):
         raise SystemExit(
             f"FAIL migration auto-apply: invalid ledger alias metadata for {path}"
         )
+    if not sha_re.fullmatch(ledger_raw_statement_sha256):
+        raise SystemExit(
+            f"FAIL migration auto-apply: invalid ledger raw statement SHA-256 for {path}"
+        )
     aliases[path] = {
         "sha256": expected_sha,
         "ledger_version": ledger_version,
         "ledger_name": ledger_name,
+        "ledger_raw_statement_sha256": ledger_raw_statement_sha256,
         "reason": reason,
     }
 
@@ -298,23 +310,61 @@ for path, alias in aliases.items():
     if (
         ledger_row is None
         or ledger_row.get("name") != alias["ledger_name"]
+        or ledger_row.get("statement_count") != 1
+        or ledger_row.get("raw_statement_sha256") != alias["ledger_raw_statement_sha256"]
     ):
         raise SystemExit(
             f"FAIL migration auto-apply: ledger alias for {path} is not "
-            f"present as {alias['ledger_version']}_{alias['ledger_name']}"
+            f"verified as {alias['ledger_version']}_{alias['ledger_name']} "
+            "with one matching raw statement"
+        )
+
+def append_accounted_entry(entry: dict[str, str]) -> None:
+    exclusion = exclusions.get(entry["path"])
+    alias = aliases.get(entry["path"])
+    if exclusion:
+        plan["excluded"].append({**entry, **exclusion})
+    elif alias:
+        plan["ledger_aliases"].append({**entry, **alias})
+    else:
+        raise SystemExit(
+            f"FAIL migration auto-apply: unaccounted migration {entry['path']}"
         )
 
 for version, entries in sorted(by_version.items()):
     entries.sort(key=lambda entry: entry["name"])
     ledger_row = ledger.get(version)
     if ledger_row is not None:
+        exact_entries = [
+            entry for entry in entries if entry["name"] == ledger_row.get("name")
+        ]
+        if len(exact_entries) > 1:
+            raise SystemExit(
+                f"FAIL migration auto-apply: duplicate repository migration name for {version}"
+            )
+        unresolved = [
+            entry["path"]
+            for entry in entries
+            if entry not in exact_entries
+            and entry["path"] not in exclusions
+            and entry["path"] not in aliases
+        ]
+        if unresolved:
+            raise SystemExit(
+                f"FAIL migration auto-apply: ledger version/name collision {version}; "
+                "every non-matching repository file must be explicitly accounted for: "
+                + ", ".join(unresolved)
+            )
         plan["ledgered"].append(
             {
                 "version": version,
                 "ledger_name": ledger_row.get("name"),
-                "repository_files": [entry["path"] for entry in entries],
+                "repository_files": [entry["path"] for entry in exact_entries],
             }
         )
+        for entry in entries:
+            if entry not in exact_entries:
+                append_accounted_entry(entry)
         continue
 
     accounted_entries = [
@@ -335,12 +385,8 @@ for version, entries in sorted(by_version.items()):
         )
 
     for entry in entries:
-        exclusion = exclusions.get(entry["path"])
-        alias = aliases.get(entry["path"])
-        if exclusion:
-            plan["excluded"].append({**entry, **exclusion})
-        elif alias:
-            plan["ledger_aliases"].append({**entry, **alias})
+        if entry["path"] in exclusions or entry["path"] in aliases:
+            append_accounted_entry(entry)
         else:
             plan["pending"].append(entry)
 
