@@ -20,8 +20,8 @@ import { buildDeterministicIntakePlan } from "./makesafe_deterministic_intake.ts
 const NOW = "2026-07-20T12:00:00.000Z";
 const ENCODER = new TextEncoder();
 
-function digitalWorkOrderPdf(): Uint8Array {
-  const lines = [
+function digitalWorkOrderPdf(
+  lines: readonly string[] = [
     "Work Order Number MLB-26770PO-55296",
     "Policyholders Name Amanda Parker",
     "Mobile 0422636182",
@@ -29,7 +29,8 @@ function digitalWorkOrderPdf(): Uint8Array {
     "Scope of Works Install temporary roof tarps and make the storm damaged property safe",
     "Notes",
     "Attend within twenty four hours and protect the occupants and contents from weather damage",
-  ];
+  ],
+): Uint8Array {
   const content = `BT /F1 10 Tf 72 760 Td ${
     lines.map((line) => `(${line}) Tj 0 -14 Td`).join(" ")
   } ET`;
@@ -131,6 +132,11 @@ class FakeQuery {
     private payload: any = null,
     private log?: (table: string, columns: string) => void,
     private inLog?: (table: string, column: string, count: number) => void,
+    private fail?: (
+      table: string,
+      operation: "select" | "insert" | "update" | "upsert",
+      payload: any,
+    ) => any,
   ) {}
 
   private rows(): any[] {
@@ -189,6 +195,8 @@ class FakeQuery {
 
   private run(): { data: any[]; error: any } {
     this.store[this.table] ||= [];
+    const injectedError = this.fail?.(this.table, this.op, this.payload);
+    if (injectedError) return { data: [], error: injectedError };
     if (this.op === "insert") {
       const duplicate = this.table === "makesafe_intake_cases"
         ? this.store[this.table].some((row) =>
@@ -210,6 +218,13 @@ class FakeQuery {
         ? this.store[this.table].some((row) =>
           row.org_id === this.payload.org_id &&
           row.deterministic_key === this.payload.deterministic_key
+        )
+        : this.table === "email_events_raw" &&
+            String(this.payload.change_type || "").startsWith("intake_")
+        ? this.store[this.table].some((row) =>
+          row.org_id === this.payload.org_id &&
+          row.post_id === this.payload.post_id &&
+          row.change_type === this.payload.change_type
         )
         : false;
       if (duplicate) {
@@ -316,6 +331,11 @@ function fakeClient(
   selectLog: Array<[string, string]> = [],
   inLog?: (table: string, column: string, count: number) => void,
   downloadBytes?: (path: string) => Uint8Array,
+  fail?: (
+    table: string,
+    operation: "select" | "insert" | "update" | "upsert",
+    payload: any,
+  ) => any,
 ) {
   return {
     selectLog,
@@ -324,15 +344,15 @@ function fakeClient(
       const log = (t: string, c: string) => selectLog.push([t, c]);
       return {
         select: (columns: string) =>
-          new FakeQuery(store, table, "select", null, log, inLog).select(
+          new FakeQuery(store, table, "select", null, log, inLog, fail).select(
             columns,
           ),
         insert: (payload: any) =>
-          new FakeQuery(store, table, "insert", payload, log, inLog),
+          new FakeQuery(store, table, "insert", payload, log, inLog, fail),
         update: (payload: any) =>
-          new FakeQuery(store, table, "update", payload, log, inLog),
+          new FakeQuery(store, table, "update", payload, log, inLog, fail),
         upsert: (payload: any) =>
-          new FakeQuery(store, table, "upsert", payload, log, inLog),
+          new FakeQuery(store, table, "upsert", payload, log, inLog, fail),
       };
     },
     storage: {
@@ -377,6 +397,10 @@ function baseStore(): Store {
     makesafe_intake_artifacts: [],
     makesafe_intake_drafts: [],
     makesafe_intake_health: [],
+    makesafe_intake_case_events: [],
+    email_events_raw: [],
+    email_classifier_exclusions: [],
+    jobs: [],
     makesafe_job_details: [],
     makesafe_intake_source_authority_corrections: [],
     makesafe_intake_source_authority_correction_supersessions: [],
@@ -403,6 +427,205 @@ function email(input: Record<string, any>) {
 
 const approveDraft = (_client: any, _body: any) =>
   Promise.resolve({ job: { id: "job-abc" } });
+
+function cancellationFixture(
+  statuses: readonly string[] = ["accepted"],
+): Store {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "cancel-source",
+    subject: "CANCELLED WORK ORDER - MLB-27001 Work Order: WO-27001 PO: 99001",
+    body_content: "Please cancel this work order.",
+  }));
+  statuses.forEach((status, index) => {
+    const id = `cancel-job-${index + 1}`;
+    store.jobs.push({ id, status, type: "makesafe" });
+    store.makesafe_job_details.push({
+      job_id: id,
+      external_ref: "MLB-27001",
+      requesting_company_slug: "mlb",
+      requesting_company_name: "MLB",
+      report_type: null,
+      jobs: {
+        id,
+        status,
+        type: "makesafe",
+        site_address: "1 Exact Street",
+        metadata: {
+          builder_work_order_number: "WO-27001",
+          builder_po_number: "99001",
+        },
+      },
+    });
+  });
+  return store;
+}
+
+Deno.test("cancellation resolves one exact job, calls the canonical boundary, and proves cancelled read-back", async () => {
+  const store = cancellationFixture();
+  let command: any = null;
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["cancel-source"],
+    maxCases: 1,
+    approveDraft,
+    applyBuilderCancellation: (args) => {
+      command = args;
+      store.jobs[0].status = "cancelled";
+      store.makesafe_job_details[0].jobs.status = "cancelled";
+      return Promise.resolve({ ok: true, cancelled: true });
+    },
+  });
+
+  assertEquals(command.targetJobId, "cancel-job-1");
+  assertEquals(command.reasonCode, "builder_recalled");
+  const saved = store.makesafe_intake_cases[0];
+  assertEquals(saved.reason_code, "cancellation");
+  assertEquals(saved.target_relation, "cancellation_of");
+  assertEquals(saved.target_job_id, "cancel-job-1");
+  assertEquals(report.evidence.durable_source_fates, {
+    checked: 1,
+    final: 1,
+    transient: 0,
+  });
+  assertEquals(store.makesafe_intake_case_sources.length, 1);
+  assertEquals(
+    store.makesafe_intake_case_events.at(-1).evidence.read_back_status,
+    "cancelled",
+  );
+});
+
+Deno.test("ambiguous cancellation fails closed without calling the cancellation command", async () => {
+  const store = cancellationFixture(["accepted", "scheduled"]);
+  let calls = 0;
+  await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["cancel-source"],
+    maxCases: 1,
+    approveDraft,
+    applyBuilderCancellation: () => {
+      calls++;
+      return Promise.resolve({ ok: true });
+    },
+  });
+  assertEquals(calls, 0);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "cancellation_target_ambiguous",
+  );
+  assertEquals(store.makesafe_intake_cases[0].target_job_id, null);
+  assertEquals(
+    store.makesafe_intake_case_events.at(-1).evidence.candidate_job_ids,
+    ["cancel-job-1", "cancel-job-2"],
+  );
+});
+
+Deno.test("already-cancelled, live-invoice and terminal cancellation outcomes stay typed", async () => {
+  for (
+    const fixture of [
+      {
+        status: "cancelled",
+        result: { ok: true },
+        reason: "cancellation",
+        calls: 0,
+      },
+      {
+        status: "accepted",
+        result: { ok: false, code: "live_invoice" },
+        reason: "cancellation_live_invoice_review",
+        calls: 1,
+      },
+      {
+        status: "archived",
+        result: { ok: true },
+        reason: "cancellation_target_terminal_conflict",
+        calls: 0,
+      },
+    ]
+  ) {
+    const store = cancellationFixture([fixture.status]);
+    let calls = 0;
+    await runDeterministicIntake(fakeClient(store), {
+      dryRun: false,
+      selectionMode: "exact",
+      allowSourcePostIds: ["cancel-source"],
+      maxCases: 1,
+      approveDraft,
+      applyBuilderCancellation: () => {
+        calls++;
+        return Promise.resolve(fixture.result);
+      },
+    });
+    assertEquals(calls, fixture.calls);
+    assertEquals(store.makesafe_intake_cases[0].reason_code, fixture.reason);
+    assertEquals(
+      store.makesafe_intake_cases[0].target_job_id,
+      "cancel-job-1",
+    );
+  }
+});
+
+Deno.test("zero-target cancellation is visible and never calls the command", async () => {
+  const store = cancellationFixture([]);
+  let calls = 0;
+  await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["cancel-source"],
+    maxCases: 1,
+    approveDraft,
+    applyBuilderCancellation: () => {
+      calls++;
+      return Promise.resolve({ ok: true });
+    },
+  });
+  assertEquals(calls, 0);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "cancellation_target_not_found",
+  );
+  assertEquals(store.makesafe_intake_cases[0].target_job_id, null);
+});
+
+Deno.test("cancellation read-back failure stays visible and retries idempotently", async () => {
+  const store = cancellationFixture();
+  let calls = 0;
+  const options = {
+    dryRun: false,
+    selectionMode: "exact" as const,
+    allowSourcePostIds: ["cancel-source"],
+    maxCases: 1,
+    approveDraft,
+    applyBuilderCancellation: () => {
+      calls++;
+      if (calls === 2) {
+        store.jobs[0].status = "cancelled";
+        store.makesafe_job_details[0].jobs.status = "cancelled";
+      }
+      return Promise.resolve({ ok: true, cancelled: true });
+    },
+  };
+
+  await runDeterministicIntake(fakeClient(store), options);
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "cancellation_apply_failed",
+  );
+  assertEquals(store.makesafe_intake_case_sources.length, 1);
+
+  await runDeterministicIntake(fakeClient(store), options);
+  assertEquals(calls, 2);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].reason_code, "cancellation");
+
+  const eventCount = store.makesafe_intake_case_events.length;
+  await runDeterministicIntake(fakeClient(store), options);
+  assertEquals(calls, 2);
+  assertEquals(store.makesafe_intake_case_events.length, eventCount);
+});
 
 Deno.test("PDF extraction quarantines bad records without aborting good records", async () => {
   const goodBytes = digitalWorkOrderPdf();
@@ -576,7 +799,7 @@ Deno.test("U1 causal boundary: readInputs gives the newest recent WO a PDF slot 
   assertEquals(
     input.sources.flatMap((item) => item.pdfDocuments || []).filter((
       document,
-    ) => document.reason === "run_extraction_cap").length,
+    ) => document.reason === "pdf_extraction_cap").length,
     2,
   );
 });
@@ -1187,7 +1410,22 @@ Deno.test("live batch is capped per invocation and defers the remainder", async 
       size_bytes: 1024,
     });
   }
-  const client = fakeClient(store);
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    (path) => {
+      const suffix = path.match(/cap-(\d+)/)?.[1] ?? "1";
+      return digitalWorkOrderPdf([
+        `Work Order Number MLB-6000${suffix}PO-6000${suffix}`,
+        `Policyholders Name Cap Client ${suffix}`,
+        `Site Address ${suffix} Cap Court Perth WA`,
+        "Scope of Works Attend and make the property safe",
+        "Notes",
+        "Attend within twenty four hours and protect the occupants and contents from weather damage",
+      ]);
+    },
+  );
   const report = await runDeterministicIntake(client, {
     dryRun: false,
     days: 30,
@@ -1201,10 +1439,95 @@ Deno.test("live batch is capped per invocation and defers the remainder", async 
   assertEquals(report.totals.cases_attempted, 2);
   assertEquals(report.totals.cases_deferred, 2);
   assertEquals(store.makesafe_intake_cases.length, 2);
+  assertEquals(
+    store.email_events_raw
+      .filter((row) => row.change_type === "intake_deferred_run_cap_deferred")
+      .map((row) => row.post_id)
+      .sort(),
+    ["cap-3", "cap-4"],
+  );
+  assertEquals(report.evidence.durable_source_fates, {
+    checked: 4,
+    final: 2,
+    transient: 2,
+  });
   // Deferred cases keep their sources unstamped so the next invocation picks them up.
   assertEquals(
     store.emails.filter((e) => e.makesafe_scanned_at === null).length,
     2,
+  );
+});
+
+Deno.test("source-issue persistence failure retains the cursor and exact retry accounts the source", async () => {
+  const store = baseStore();
+  store.makesafe_intake_health.push({
+    id: true,
+    deterministic_scan_cursor_at: "2026-07-19T00:00:00.000Z",
+    deterministic_scan_cursor_post_id: "prior",
+  });
+  for (let i = 1; i <= 2; i++) {
+    store.emails.push(email({
+      post_id: `issue-fail-${i}`,
+      subject: `NEW WORK ORDER MLB-6100${i} Work Order: WO-6100${i}`,
+      body_content:
+        `Client: Retry Client ${i}\nAddress: ${i} Retry Road, Perth`,
+    }));
+  }
+  let issueWriteFailures = 0;
+  const failingClient = fakeClient(
+    store,
+    [],
+    undefined,
+    undefined,
+    (table, operation) => {
+      if (table === "email_events_raw" && operation === "insert") {
+        issueWriteFailures++;
+        return { code: "XX001", message: "injected issue ledger failure" };
+      }
+      return null;
+    },
+  );
+
+  await assertRejects(
+    () =>
+      runDeterministicIntake(failingClient, {
+        dryRun: false,
+        selectionMode: "exact",
+        allowSourcePostIds: ["issue-fail-1", "issue-fail-2"],
+        maxCases: 1,
+        approveDraft,
+      }),
+    Error,
+    "issue persistence failed",
+  );
+  assertEquals(issueWriteFailures, 1);
+  assertEquals(
+    store.makesafe_intake_health[0].deterministic_scan_cursor_at,
+    "2026-07-19T00:00:00.000Z",
+  );
+
+  const retryOptions = {
+    dryRun: false,
+    selectionMode: "exact" as const,
+    allowSourcePostIds: ["issue-fail-1", "issue-fail-2"],
+    maxCases: 1,
+    approveDraft,
+  };
+  let retried = await runDeterministicIntake(
+    fakeClient(store),
+    retryOptions,
+  );
+  if (retried.evidence.durable_source_fates?.final !== 2) {
+    retried = await runDeterministicIntake(fakeClient(store), retryOptions);
+  }
+  assertEquals(retried.evidence.durable_source_fates, {
+    checked: 2,
+    final: 2,
+    transient: 0,
+  });
+  assertEquals(
+    store.makesafe_intake_case_sources.map((row) => row.post_id).sort(),
+    ["issue-fail-1", "issue-fail-2"],
   );
 });
 
@@ -1397,6 +1720,15 @@ Deno.test("a fresh cross-case merge spanning distinct persisted deliverables is 
   assertEquals(report.totals.sources_quarantined, 2);
   assertEquals(report.completion_status, "completed_degraded");
   assertEquals(report.totals.write_failures, 1);
+  assertEquals(
+    store.email_events_raw
+      .filter((row) =>
+        row.change_type === "intake_exception_lineage_quarantine"
+      )
+      .map((row) => row.post_id)
+      .sort(),
+    ["merge-a", "merge-b"],
+  );
   assert(
     report.evidence.caveats.includes("lineage_components_quarantined"),
   );
@@ -2171,7 +2503,27 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
     status: "uploaded",
     size_bytes: 1024,
   });
-  const client = fakeClient(store);
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    (path) => {
+      const failingSuffix = path.match(/fail-(\d+)/)?.[1];
+      const suffix = failingSuffix ?? "3";
+      return digitalWorkOrderPdf([
+        `Work Order Number MLB-5910${suffix}PO-5910${suffix}`,
+        `Policyholders Name ${
+          failingSuffix ? `Fail Client ${suffix}` : "Good Client"
+        }`,
+        `Site Address ${suffix} ${
+          failingSuffix ? "Fail Way" : "Good Road"
+        } Perth WA`,
+        "Scope of Works Attend and make the property safe",
+        "Notes",
+        "Attend within twenty four hours and protect the occupants and contents from weather damage",
+      ]);
+    },
+  );
   // The two older cases fail on every run. A budget spent on them would starve
   // every case behind them.
   const flakyApprove = (_client: any, body: any) => {
@@ -2196,6 +2548,15 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
   });
 
   assertEquals(report.write_failure_reasons.approval_no_job, 2);
+  assertEquals(
+    store.email_events_raw
+      .filter((row) =>
+        row.change_type === "intake_exception_source_persist_failed"
+      )
+      .map((row) => row.post_id)
+      .sort(),
+    ["fail-1", "fail-2"],
+  );
   assertEquals(report.totals.jobs_created, 1);
   assert(
     report.evidence.caveats.includes(
@@ -2581,6 +2942,15 @@ Deno.test("storage failure surfaces a storage blocker instead of staying silent"
 
   assertEquals(report.storage_blockers, ["makesafe-emails_download_failed"]);
   assertEquals(report.write_failure_reasons.attachment_staging, 1);
+  assertEquals(
+    store.email_events_raw
+      .filter((row) =>
+        row.change_type ===
+          "intake_deferred_attachment_recovery_failed"
+      )
+      .map((row) => row.post_id),
+    ["blk-1"],
+  );
   assertEquals(report.ai_calls, 0);
   assertEquals(report.totals.drafts_created, 0);
   assertEquals(report.totals.jobs_created, 0);
@@ -3466,7 +3836,7 @@ Deno.test("full-open normalizes selected persisted-root siblings, cancellation, 
     row.parent_relation === "sibling_of"
   );
   const savedCancellation = store.makesafe_intake_cases.find((row: any) =>
-    row.reason_code === "cancellation"
+    row.reason_code === "cancellation_target_not_found"
   );
   assert(savedSibling);
   assert(savedCancellation);

@@ -33,6 +33,10 @@ import {
   loadRefPrefixes,
 } from "../_shared/makesafe_refs.ts";
 import { extractPdfText, PDF_TEXT_MAX_BYTES } from "./makesafe_pdf_text.ts";
+import {
+  type IntakeSourceIssueReason,
+  persistIntakeSourceIssue,
+} from "./makesafe_intake_source_issues.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const SES_MAILBOX = "ses@secureworkswa.com.au";
@@ -55,6 +59,27 @@ export interface DeterministicRuntimeOptions {
   // parked for review instead of crossing the guarded approval boundary.
   advanceDrafts?: boolean;
   approveDraft?: (client: any, body: any) => Promise<any>;
+  applyBuilderCancellation?: (
+    args: BuilderCancellationCommand,
+  ) => Promise<BuilderCancellationResult>;
+}
+
+export interface BuilderCancellationCommand {
+  caseId: string;
+  sourcePostId: string;
+  targetJobId: string;
+  reasonCode: "builder_recalled";
+  note: string;
+  operator: string;
+  idempotencyKey: string;
+}
+
+export interface BuilderCancellationResult {
+  ok: boolean;
+  code?: string;
+  cancelled?: boolean;
+  idempotent?: boolean;
+  warnings?: readonly string[];
 }
 
 export interface DeterministicRolloutControls {
@@ -175,6 +200,11 @@ export interface DeterministicRuntimeReport {
   evidence: {
     source_accounting_complete: boolean;
     zero_unaccounted_proved: boolean;
+    durable_source_fates: {
+      checked: number;
+      final: number;
+      transient: number;
+    };
     caveats: string[];
   };
   identity_floor: {
@@ -786,7 +816,7 @@ async function persistScanCursor(
   }
 }
 
-function eligiblePdfAttachments(
+function allEligiblePdfAttachments(
   source: DeterministicSourceItem,
 ): DeterministicAttachment[] {
   return source.attachments.filter((attachment) =>
@@ -803,7 +833,16 @@ function eligiblePdfAttachments(
     return score(a) - score(b) ||
       String(a.name || "").localeCompare(String(b.name || "")) ||
       a.id.localeCompare(b.id);
-  }).slice(0, MAX_PDF_ATTACHMENTS_PER_SOURCE);
+  });
+}
+
+function eligiblePdfAttachments(
+  source: DeterministicSourceItem,
+): DeterministicAttachment[] {
+  return allEligiblePdfAttachments(source).slice(
+    0,
+    MAX_PDF_ATTACHMENTS_PER_SOURCE,
+  );
 }
 
 function pdfDocument(
@@ -863,7 +902,7 @@ export async function enrichSourcesWithPdfText(
       if (attempted >= MAX_PDF_EXTRACTIONS_PER_RUN) {
         document = pdfDocument(source, attachment, {
           status: "deferred",
-          reason: "run_extraction_cap",
+          reason: "pdf_extraction_cap",
         });
       } else if (
         Number(attachment.sizeBytes || 0) > PDF_TEXT_MAX_BYTES
@@ -964,7 +1003,6 @@ async function readInputs(
     async (from, to) => {
       let query = client.from("emails").select(columns)
         .eq("mailbox", SES_MAILBOX)
-        .is("pii_purged_at", null)
         .gte("received_at", since);
       if (options.cursor) {
         const { receivedAt, postId } = options.cursor;
@@ -988,7 +1026,6 @@ async function readInputs(
     async (from, to) => {
       let query = client.from("emails").select(columns)
         .eq("mailbox", SES_MAILBOX)
-        .is("pii_purged_at", null)
         .gte("received_at", since)
         .order("received_at", { ascending: false })
         .range(from, to);
@@ -1008,7 +1045,6 @@ async function readInputs(
   for (const ids of chunk(missingSeeds)) {
     const { data, error } = await client.from("emails").select(columns)
       .eq("mailbox", SES_MAILBOX)
-      .is("pii_purged_at", null)
       .in("post_id", ids);
     if (error) {
       throw new Error(
@@ -1138,6 +1174,170 @@ async function readInputs(
 }
 
 export const _readInputsForTest = readInputs;
+
+async function persistIssueForSources(
+  client: any,
+  sources: readonly DeterministicSourceItem[],
+  reason: IntakeSourceIssueReason,
+  details: {
+    instructionKey?: string | null;
+    caseId?: string | null;
+    isolatedFailureCode?: string | null;
+    attachmentIds?: readonly string[];
+    attachmentNames?: readonly string[];
+    attachmentCount?: number | null;
+  } = {},
+): Promise<void> {
+  for (const source of sources) {
+    await persistIntakeSourceIssue(client, {
+      orgId: DEFAULT_ORG_ID,
+      mailbox: SES_MAILBOX,
+      postId: source.postId,
+      receivedAt: source.receivedAt,
+      conversationId: source.conversationId,
+      threadId: source.threadId,
+      reason,
+      instructionKey: details.instructionKey,
+      caseId: details.caseId,
+      isolatedFailureCode: details.isolatedFailureCode,
+      attachmentIds: details.attachmentIds,
+      attachmentNames: details.attachmentNames,
+      attachmentCount: details.attachmentCount,
+    });
+  }
+}
+
+async function persistPdfSourceIssues(
+  client: any,
+  sources: readonly DeterministicSourceItem[],
+): Promise<void> {
+  for (const source of sources) {
+    const eligible = allEligiblePdfAttachments(source);
+    if (eligible.length > MAX_PDF_ATTACHMENTS_PER_SOURCE) {
+      await persistIssueForSources(client, [source], "pdf_attachment_limit", {
+        attachmentIds: eligible.map((item) => item.id),
+        attachmentNames: eligible.map((item) => item.name || "unnamed"),
+        attachmentCount: eligible.length,
+      });
+      continue;
+    }
+    const documents = source.pdfDocuments || [];
+    if (
+      documents.some((document) =>
+        document.status === "deferred" &&
+        document.reason === "pdf_extraction_cap"
+      )
+    ) {
+      await persistIssueForSources(client, [source], "pdf_extraction_cap", {
+        attachmentIds: documents.map((item) => item.attachmentId),
+        attachmentNames: documents.map((item) =>
+          item.attachmentName || "unnamed"
+        ),
+        attachmentCount: documents.length,
+      });
+      continue;
+    }
+    const failed = documents.filter((document) =>
+      document.status === "quarantined" && document.reason !== null
+    );
+    if (failed.length) {
+      await persistIssueForSources(
+        client,
+        [source],
+        "attachment_recovery_failed",
+        {
+          attachmentIds: failed.map((item) => item.attachmentId),
+          attachmentNames: failed.map((item) =>
+            item.attachmentName || "unnamed"
+          ),
+          attachmentCount: failed.length,
+        },
+      );
+    }
+  }
+}
+
+export interface DurableSourceFateAssertion {
+  checked: number;
+  final: number;
+  transient: number;
+}
+
+export async function assertDurableSourceFates(
+  client: any,
+  postIds: readonly string[],
+): Promise<DurableSourceFateAssertion> {
+  const unique = [...new Set(postIds)].filter(Boolean);
+  const caseCounts = new Map<string, number>();
+  const nonWork = new Set<string>();
+  const issueCounts = new Map<string, number>();
+  for (const ids of chunk(unique)) {
+    const [sourcesResult, exclusionsResult, eventsResult] = await Promise.all([
+      client.from("makesafe_intake_case_sources")
+        .select("post_id")
+        .eq("org_id", DEFAULT_ORG_ID)
+        .in("post_id", ids),
+      client.from("email_classifier_exclusions")
+        .select("post_id")
+        .eq("mailbox", SES_MAILBOX)
+        .in("post_id", ids),
+      client.from("email_events_raw")
+        .select("post_id,change_type")
+        .eq("org_id", DEFAULT_ORG_ID)
+        .in("post_id", ids),
+    ]);
+    for (
+      const [label, result] of [
+        ["case source", sourcesResult],
+        ["classifier exclusion", exclusionsResult],
+        ["source event", eventsResult],
+      ] as const
+    ) {
+      if (result.error) {
+        throw new Error(
+          `durable source fate ${label} read failed: ${
+            result.error.message || result.error
+          }`,
+        );
+      }
+    }
+    for (const row of sourcesResult.data || []) {
+      caseCounts.set(row.post_id, (caseCounts.get(row.post_id) || 0) + 1);
+    }
+    for (const row of exclusionsResult.data || []) {
+      nonWork.add(row.post_id);
+    }
+    for (const row of eventsResult.data || []) {
+      if (row.change_type === "excluded") {
+        nonWork.add(row.post_id);
+      } else if (
+        String(row.change_type).startsWith("intake_") ||
+        row.change_type === "scan_run_cap_deferred"
+      ) {
+        issueCounts.set(row.post_id, (issueCounts.get(row.post_id) || 0) + 1);
+      }
+    }
+  }
+  let final = 0;
+  let transient = 0;
+  for (const postId of unique) {
+    const finalCount = (caseCounts.get(postId) || 0) +
+      (nonWork.has(postId) ? 1 : 0);
+    const issueCount = issueCounts.get(postId) || 0;
+    if (issueCount === 1 && finalCount <= 1) {
+      transient++;
+      continue;
+    }
+    if (finalCount === 1 && issueCount === 0) {
+      final++;
+      continue;
+    }
+    throw new Error(
+      `source fate assertion failed for ${postId}: ${finalCount} final, ${issueCount} open issues`,
+    );
+  }
+  return { checked: unique.length, final, transient };
+}
 
 function byBuilderOutcome(
   plan: DeterministicIntakePlan,
@@ -1666,7 +1866,7 @@ function inferredParentRelation(
   plan: DeterministicCasePlan,
 ): DeterministicCasePlan["parentRelation"] {
   if (plan.parentRelation) return plan.parentRelation;
-  if (plan.reasonCode === "cancellation") return "cancellation_of";
+  if (plan.targetRelation === "cancellation_of") return "cancellation_of";
   if (plan.story.some((event) => event.kind === "reopen")) return "reopen_of";
   if (plan.story.some((event) => event.kind === "revision")) {
     return "revision_of";
@@ -1762,6 +1962,8 @@ function casePayload(
       : null,
     blocked_reasons: state === "blocked_live_job" ? plan.blockedReasons : [],
     job_id: jobId,
+    target_relation: plan.targetRelation,
+    target_job_id: plan.targetJobId,
     is_authoritative: true,
     // Guarded approval passes suppress_manager_notification for this provenance,
     // so the manager SMS side effect really is suppressed for deterministic cases.
@@ -1909,7 +2111,9 @@ async function findCase(
   instructionKey: string,
 ): Promise<any | null> {
   const { data } = await client.from("makesafe_intake_cases")
-    .select("id,instruction_key,lineage_id,cycle,state,job_id")
+    .select(
+      "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id",
+    )
     .eq("org_id", DEFAULT_ORG_ID)
     .eq("instruction_key", instructionKey)
     .maybeSingle();
@@ -2110,13 +2314,46 @@ function obligationAddressesMatch(left: unknown, right: unknown): boolean {
     (a.includes(b) || b.includes(a)));
 }
 
-async function readExistingObligationJobs(
+export interface CancellationTargetResolution {
+  kind: "not_found" | "ambiguous" | "matched";
+  targetJobId: string | null;
+  targetJobStatus: string | null;
+  candidateJobIds: string[];
+  matchBasis: string[];
+}
+
+async function readObligationMatches(
   client: any,
   cases: readonly DeterministicCasePlan[],
   targetJobByPostId: ReadonlyMap<string, string>,
-): Promise<Map<string, string>> {
-  if (!cases.some((item) => item.identity.externalRefCanonical)) {
-    return new Map();
+): Promise<{
+  existingJobs: Map<string, string>;
+  cancellationTargets: Map<string, CancellationTargetResolution>;
+}> {
+  if (
+    !cases.some((item) =>
+      item.identity.externalRefCanonical ||
+      item.identity.builderWoCanonical ||
+      item.identity.builderPoCanonical
+    )
+  ) {
+    return {
+      existingJobs: new Map(),
+      cancellationTargets: new Map(
+        cases.filter((item) => item.targetRelation === "cancellation_of").map(
+          (item) => [
+            item.instructionKey,
+            {
+              kind: "not_found",
+              targetJobId: null,
+              targetJobStatus: null,
+              candidateJobIds: [],
+              matchBasis: [],
+            },
+          ],
+        ),
+      ),
+    };
   }
   const prefixes = await loadRefPrefixes(client);
   // A truncated page would hide an existing obligation past the PostgREST
@@ -2141,13 +2378,17 @@ async function readExistingObligationJobs(
     data.push(...rows);
     if (rows.length < SOURCE_PAGE_SIZE) break;
   }
-  const matches = new Map<string, string>();
+  const existingJobs = new Map<string, string>();
+  const cancellationTargets = new Map<
+    string,
+    CancellationTargetResolution
+  >();
   for (const item of cases) {
-    // Exception/accounted rows cannot carry a job_id under the case-model DB
-    // checks. They remain safely accounted without a job until evidence makes
-    // them live-ready; the same boundary will bind the recovery job on that run.
+    const cancellation = item.targetRelation === "cancellation_of";
     if (
-      item.state !== "confirmed_live_job" && item.state !== "blocked_live_job"
+      !cancellation &&
+      item.state !== "confirmed_live_job" &&
+      item.state !== "blocked_live_job"
     ) continue;
     const targetRef = canonicalExternalObligationRef(
       item.identity.externalRefCanonical,
@@ -2162,6 +2403,16 @@ async function readExistingObligationJobs(
       }),
     );
     if (correctedTargetJobIds.size > 1) {
+      if (cancellation) {
+        cancellationTargets.set(item.instructionKey, {
+          kind: "ambiguous",
+          targetJobId: null,
+          targetJobStatus: null,
+          candidateJobIds: [...correctedTargetJobIds].sort(),
+          matchBasis: ["multiple_corrected_targets"],
+        });
+        continue;
+      }
       throw new Error(
         "one deterministic instruction maps to multiple corrected target jobs; reconciliation required",
       );
@@ -2174,7 +2425,11 @@ async function readExistingObligationJobs(
       canonicalObligationPoCore(item.identity.builderPoCanonical) ||
       canonicalObligationPoCore(item.identity.builderWoCanonical, true) ||
       canonicalObligationPoCore(item.identity.externalRefCanonical, true);
-    if (!targetRef || !targetCompany) continue;
+    if (
+      !targetCompany ||
+      (!targetRef && !item.identity.builderWoCanonical &&
+        !item.identity.builderPoCanonical)
+    ) continue;
     const targetReportOnly = deterministicPrimaryIsReportOnly(item);
     const matchingRows = (data || []).filter((row: any) => {
       if (!row?.job_id) return false;
@@ -2187,12 +2442,31 @@ async function readExistingObligationJobs(
       if (existingJob?.type && existingJob.type !== "makesafe") return false;
       // A cancelled/void/superseded job is a dead obligation: a later genuine
       // re-issue of the same claim/PO must create a live job, not bind here.
-      if (isDeadObligationJobStatus(existingJob?.status)) return false;
+      if (!cancellation && isDeadObligationJobStatus(existingJob?.status)) {
+        return false;
+      }
       const existingRef = canonicalExternalObligationRef(
         row.external_ref,
         prefixes,
       );
-      const exactRefMatch = existingRef === targetRef;
+      const metadata = existingJob?.metadata &&
+          typeof existingJob.metadata === "object"
+        ? existingJob.metadata
+        : {};
+      const exactRefMatch = !!targetRef && existingRef === targetRef;
+      const exactWoMatch = !!item.identity.builderWoCanonical &&
+        canonicalExternalObligationRef(
+            metadata.builder_work_order_number,
+            prefixes,
+          ) ===
+          canonicalExternalObligationRef(
+            item.identity.builderWoCanonical,
+            prefixes,
+          );
+      const exactPoMatch = !!item.identity.builderPoCanonical &&
+        canonicalObligationPoCore(
+            metadata.builder_po_number,
+          ) === canonicalObligationPoCore(item.identity.builderPoCanonical);
       // Direct-ops jobs can store the same builder-scoped obligation as a bare
       // number (AJBR-70062 versus 70062). Accept that storage difference only
       // when builder and address also agree; reference core alone is insufficient.
@@ -2201,11 +2475,10 @@ async function readExistingObligationJobs(
         targetRefCore !== null &&
         targetRefCore === obligationRefNumericCore(existingRef) &&
         obligationAddressesMatch(targetAddress, existingJob?.site_address);
-      if (!exactRefMatch && !builderScopedBareRefMatch) return false;
-      const metadata = existingJob?.metadata &&
-          typeof existingJob.metadata === "object"
-        ? existingJob.metadata
-        : {};
+      if (
+        !exactRefMatch && !exactWoMatch && !exactPoMatch &&
+        !builderScopedBareRefMatch
+      ) return false;
       // Distinct explicit PO stored only in builder_work_order_number still
       // counts, so two explicitly-different POs are never over-deduped.
       const existingPo =
@@ -2221,6 +2494,47 @@ async function readExistingObligationJobs(
         matchingRows.map((row: any) => [String(row.job_id), row]),
       ).values(),
     ];
+    if (cancellation) {
+      if (
+        correctedTargetJobId &&
+        !uniqueMatches.some((row) =>
+          String(row.job_id) === correctedTargetJobId
+        )
+      ) {
+        cancellationTargets.set(item.instructionKey, {
+          kind: "ambiguous",
+          targetJobId: null,
+          targetJobStatus: null,
+          candidateJobIds: uniqueMatches.map((row) => String(row.job_id))
+            .sort(),
+          matchBasis: ["corrected_target_identity_mismatch"],
+        });
+        continue;
+      }
+      if (uniqueMatches.length !== 1) {
+        cancellationTargets.set(item.instructionKey, {
+          kind: uniqueMatches.length ? "ambiguous" : "not_found",
+          targetJobId: null,
+          targetJobStatus: null,
+          candidateJobIds: uniqueMatches.map((row) => String(row.job_id))
+            .sort(),
+          matchBasis: uniqueMatches.length
+            ? ["multiple_exact_obligation_matches"]
+            : [],
+        });
+        continue;
+      }
+      const row = uniqueMatches[0];
+      const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+      cancellationTargets.set(item.instructionKey, {
+        kind: "matched",
+        targetJobId: String(row.job_id),
+        targetJobStatus: String(job?.status || ""),
+        candidateJobIds: [String(row.job_id)],
+        matchBasis: ["builder", "deliverable", "exact_wo_po_or_reference"],
+      });
+      continue;
+    }
     if (uniqueMatches.length > 1) {
       throw new Error(
         "multiple live jobs matched one deterministic builder reference and address; reconciliation required",
@@ -2235,9 +2549,20 @@ async function readExistingObligationJobs(
         "corrected target job no longer uniquely matches deterministic identity; reconciliation required",
       );
     }
-    if (match) matches.set(item.instructionKey, match.job_id);
+    if (match) existingJobs.set(item.instructionKey, match.job_id);
   }
-  return matches;
+  return { existingJobs, cancellationTargets };
+}
+
+// Retain the established write-boundary name: the result now also carries the
+// cancellation target verdict so both ordinary dedupe and cancellation share
+// one authoritative identity read.
+async function readExistingObligationJobs(
+  client: any,
+  cases: readonly DeterministicCasePlan[],
+  targetJobByPostId: ReadonlyMap<string, string>,
+) {
+  return await readObligationMatches(client, cases, targetJobByPostId);
 }
 
 async function readPersistedCases(
@@ -2248,7 +2573,7 @@ async function readPersistedCases(
   for (const keys of chunk(cases.map((c) => c.instructionKey))) {
     const { data, error } = await client.from("makesafe_intake_cases")
       .select(
-        "id,instruction_key,lineage_id,cycle,state,job_id,last_decision_provenance,normaliser_version",
+        "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id,last_decision_provenance,normaliser_version",
       )
       .eq("org_id", DEFAULT_ORG_ID)
       .in("instruction_key", keys);
@@ -2610,7 +2935,9 @@ async function insertCaseAndSources(
     }
     const { data, error } = await client.from("makesafe_intake_cases")
       .insert(casePayload(plan, jobId, parent))
-      .select("id,instruction_key,lineage_id,cycle,state,job_id")
+      .select(
+        "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id",
+      )
       .single();
     if (error) {
       existing = await findCase(client, plan.instructionKey);
@@ -2629,9 +2956,16 @@ async function insertCaseAndSources(
     // reason-coded exception into a live job rather than staying stuck forever.
     const desired = casePayload(plan, jobId, null);
     const nextState = desired.state as string;
+    const decisionChanged = nextState !== existing.state ||
+      desired.reason_code !== existing.reason_code ||
+      desired.target_relation !== existing.target_relation ||
+      desired.target_job_id !== existing.target_job_id;
     if (
-      nextState !== existing.state &&
-      (ALLOWED_TRANSITIONS[existing.state as string] || []).includes(nextState)
+      decisionChanged &&
+      (nextState === existing.state ||
+        (ALLOWED_TRANSITIONS[existing.state as string] || []).includes(
+          nextState,
+        ))
     ) {
       // Persisted instruction/lineage/identity fields are authority. Resuming a
       // case may enrich its operational facts and state, but a moving page must
@@ -2647,6 +2981,8 @@ async function insertCaseAndSources(
         state: desired.state,
         reason_code: desired.reason_code,
         blocked_reasons: desired.blocked_reasons,
+        target_relation: desired.target_relation,
+        target_job_id: desired.target_job_id,
         is_authoritative: desired.is_authoritative,
         side_effects_suppressed: desired.side_effects_suppressed,
         last_decision_provenance: desired.last_decision_provenance,
@@ -2660,7 +2996,9 @@ async function insertCaseAndSources(
         .update({ ...mutable, job_id: jobId ?? existing.job_id ?? null })
         .eq("org_id", DEFAULT_ORG_ID)
         .eq("instruction_key", plan.instructionKey)
-        .select("id,instruction_key,lineage_id,cycle,state,job_id")
+        .select(
+          "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id",
+        )
         .single();
       if (error) {
         throw new Error(
@@ -2720,6 +3058,192 @@ async function insertCaseAndSources(
     sourceCreated,
     resumed: !caseCreated,
   };
+}
+
+const CANCELLATION_TERMINAL_CONFLICT_STATUSES = new Set([
+  "archived",
+  "lost",
+  "deleted",
+  "void",
+  "voided",
+  "duplicate",
+  "duplicated",
+]);
+
+function cancellationPlan(
+  plan: DeterministicCasePlan,
+  reasonCode: DeterministicCasePlan["reasonCode"],
+  targetJobId: string | null,
+): DeterministicCasePlan {
+  return {
+    ...plan,
+    state: "exception",
+    reasonCode,
+    targetRelation: "cancellation_of",
+    targetJobId,
+  };
+}
+
+async function appendCancellationCaseEvent(
+  client: any,
+  row: any,
+  plan: DeterministicCasePlan,
+  resolution: CancellationTargetResolution,
+  evidence: Record<string, unknown>,
+): Promise<void> {
+  const { error } = await client.from("makesafe_intake_case_events").insert({
+    org_id: DEFAULT_ORG_ID,
+    case_id: row.id,
+    event_kind: "case_update",
+    state_version: row.state_version || 1,
+    from_state: "exception",
+    to_state: "exception",
+    reason_code: plan.reasonCode,
+    decision_provenance: "deterministic",
+    decision_actor: DETERMINISTIC_INTAKE_VERSION,
+    decision_reason: `cancellation disposition ${plan.reasonCode}`,
+    missing_fields_snapshot: plan.missingFields,
+    conflicting_fields_snapshot: plan.conflictingFields,
+    blocked_reasons_snapshot: [],
+    side_effects_suppressed: true,
+    evidence: {
+      target_relation: "cancellation_of",
+      target_job_id: plan.targetJobId,
+      candidate_job_ids: resolution.candidateJobIds,
+      match_basis: resolution.matchBasis,
+      ...evidence,
+    },
+  });
+  if (error) {
+    throw new Error(
+      `cancellation case event persistence failed: ${error.message || error}`,
+    );
+  }
+}
+
+async function accountCancellationCase(
+  client: any,
+  plan: DeterministicCasePlan,
+  resolution: CancellationTargetResolution,
+  sourceMap: Map<string, DeterministicSourceItem>,
+  existing: any | null,
+  applyBuilderCancellation:
+    | DeterministicRuntimeOptions["applyBuilderCancellation"]
+    | undefined,
+): Promise<Awaited<ReturnType<typeof insertCaseAndSources>>> {
+  let stagedPlan = resolution.kind === "not_found"
+    ? cancellationPlan(plan, "cancellation_target_not_found", null)
+    : resolution.kind === "ambiguous"
+    ? cancellationPlan(plan, "cancellation_target_ambiguous", null)
+    : CANCELLATION_TERMINAL_CONFLICT_STATUSES.has(
+        String(resolution.targetJobStatus || "").toLowerCase(),
+      )
+    ? cancellationPlan(
+      plan,
+      "cancellation_target_terminal_conflict",
+      resolution.targetJobId,
+    )
+    : ["cancelled", "canceled"].includes(
+        String(resolution.targetJobStatus || "").toLowerCase(),
+      )
+    ? cancellationPlan(plan, "cancellation", resolution.targetJobId)
+    : cancellationPlan(
+      plan,
+      "cancellation_apply_failed",
+      resolution.targetJobId,
+    );
+
+  let saved = await insertCaseAndSources(
+    client,
+    stagedPlan,
+    null,
+    sourceMap,
+    existing,
+  );
+  if (
+    resolution.kind !== "matched" ||
+    stagedPlan.reasonCode === "cancellation" ||
+    stagedPlan.reasonCode === "cancellation_target_terminal_conflict"
+  ) {
+    await appendCancellationCaseEvent(
+      client,
+      saved.caseRow,
+      stagedPlan,
+      resolution,
+      { command_result: "not_called" },
+    );
+    return saved;
+  }
+
+  let commandCode = applyBuilderCancellation
+    ? "called"
+    : "callback_unavailable";
+  if (applyBuilderCancellation) {
+    try {
+      const command = await applyBuilderCancellation({
+        caseId: saved.caseRow.id,
+        sourcePostId: plan.primarySourcePostId,
+        targetJobId: resolution.targetJobId!,
+        reasonCode: "builder_recalled",
+        note:
+          `Builder cancellation instruction accounted by deterministic intake case ${saved.caseRow.id}`,
+        operator: `deterministic-intake:${saved.caseRow.id}`,
+        idempotencyKey: saved.caseRow.id,
+      });
+      commandCode = command.code || (command.ok ? "ok" : "failed");
+      if (!command.ok && command.code === "live_invoice") {
+        stagedPlan = cancellationPlan(
+          plan,
+          "cancellation_live_invoice_review",
+          resolution.targetJobId,
+        );
+      }
+    } catch (error) {
+      commandCode = classifyWriteFailure(error);
+    }
+  }
+
+  const { data: readBack, error: readBackError } = await client.from("jobs")
+    .select("id,status")
+    .eq("id", resolution.targetJobId)
+    .maybeSingle();
+  const readBackStatus = String(readBack?.status || "").toLowerCase();
+  if (
+    !readBackError &&
+    (readBackStatus === "cancelled" || readBackStatus === "canceled")
+  ) {
+    stagedPlan = cancellationPlan(
+      plan,
+      "cancellation",
+      resolution.targetJobId,
+    );
+  } else if (stagedPlan.reasonCode !== "cancellation_live_invoice_review") {
+    stagedPlan = cancellationPlan(
+      plan,
+      "cancellation_apply_failed",
+      resolution.targetJobId,
+    );
+  }
+
+  saved = await insertCaseAndSources(
+    client,
+    stagedPlan,
+    null,
+    sourceMap,
+    saved.caseRow,
+    true,
+  );
+  await appendCancellationCaseEvent(
+    client,
+    saved.caseRow,
+    stagedPlan,
+    resolution,
+    {
+      command_result: commandCode,
+      read_back_status: readBackError ? "read_failed" : readBackStatus,
+    },
+  );
+  return saved;
 }
 
 // A run that filed nothing because its configuration sat outside the read cap is
@@ -2999,6 +3523,7 @@ export async function runDeterministicIntake(
       source_accounting_complete: sourceAccountingComplete,
       zero_unaccounted_proved: sourceAccountingComplete &&
         plan.totals.unaccounted === 0,
+      durable_source_fates: { checked: 0, final: 0, transient: 0 },
       caveats,
     },
     identity_floor: identityFloorFacts(plan),
@@ -3029,11 +3554,48 @@ export async function runDeterministicIntake(
     return report;
   }
 
+  const sourceByPostId = new Map(
+    input.sources.map((source) => [source.postId, source]),
+  );
+  const accountingPostIds = selectionMode === "full_open"
+    ? input.sources.map((source) => source.postId)
+    : [
+      ...plan.cases.flatMap((item) => item.sourcePostIds),
+      ...isolatedFailures.flatMap((item) => item.source_post_ids),
+    ];
+  const proveDurableFates = async (): Promise<void> => {
+    report.evidence.durable_source_fates = await assertDurableSourceFates(
+      client,
+      accountingPostIds,
+    );
+  };
+
+  await persistPdfSourceIssues(client, input.sources);
+  for (const failed of isolatedFailures) {
+    const sources = failed.source_post_ids.flatMap((postId) => {
+      const source = sourceByPostId.get(postId);
+      return source ? [source] : [];
+    });
+    await persistIssueForSources(client, sources, "lineage_quarantine", {
+      isolatedFailureCode: failed.reason,
+    });
+  }
+  for (const missing of missingParents) {
+    const sources = missing.sourcePostIds.flatMap((postId) => {
+      const source = sourceByPostId.get(postId);
+      return source ? [source] : [];
+    });
+    await persistIssueForSources(client, sources, "awaiting_parent", {
+      instructionKey: missing.instructionKey,
+    });
+  }
+
   if (missingParents.length || isolatedNoOp) {
     report.evidence.caveats.push(
       "scan_page_completed_degraded_retry_next_sweep",
     );
     await writeHealth(client, nowIso, report.totals.write_failures, 0, 0);
+    await proveDurableFates();
     await commitCompletedCursor();
     return report;
   }
@@ -3045,6 +3607,10 @@ export async function runDeterministicIntake(
   // nothing resolved is that the sources sit outside this run's cap, the run ends
   // as a reported no-op and the sweep brings them inside the cap on a later run.
   if (capExposedNoOp) {
+    const capSources = input.sources.filter((source) =>
+      instructionSeeds.postIds.includes(source.postId)
+    );
+    await persistIssueForSources(client, capSources, "run_cap_deferred");
     await writeHealth(
       client,
       nowIso,
@@ -3053,6 +3619,7 @@ export async function runDeterministicIntake(
       0,
       "deterministic_no_cases_readable_within_cap",
     );
+    await proveDurableFates();
     await commitCompletedCursor();
     return report;
   }
@@ -3061,6 +3628,7 @@ export async function runDeterministicIntake(
     // not the exact-allowlist configuration error below.
     if (selectionMode === "full_open") {
       await writeHealth(client, nowIso, 0, 0, 0);
+      await proveDurableFates();
       await commitCompletedCursor();
       return report;
     }
@@ -3073,9 +3641,7 @@ export async function runDeterministicIntake(
       "deterministic live mode requires the guarded approval callback",
     );
   }
-  const sourceMap = new Map(
-    input.sources.map((source) => [source.postId, source]),
-  );
+  const sourceMap = sourceByPostId;
   const onStorageBlocker = (blocker: string) => {
     if (!report.storage_blockers.includes(blocker)) {
       report.storage_blockers.push(blocker);
@@ -3095,11 +3661,13 @@ export async function runDeterministicIntake(
   // evidence arrives, including a case whose job creation failed on an earlier run:
   // its sources were accounted before that attempt, so it is not mistaken for
   // fresh work and cannot re-occupy the priority head of every subsequent run.
-  const existingObligationJobs = await readExistingObligationJobs(
+  const obligationMatches = await readExistingObligationJobs(
     client,
     plan.cases,
     sourceAuthorities.targetJobByPostId,
   );
+  const existingObligationJobs = obligationMatches.existingJobs;
+  const cancellationTargets = obligationMatches.cancellationTargets;
   const persisted = await readPersistedCases(client, plan.cases);
   const persistedSources = await readPersistedSourcePostIds(
     client,
@@ -3140,6 +3708,15 @@ export async function runDeterministicIntake(
     if (row.state !== resolvedState(casePlan, effectiveJobId)) {
       return "fresh";
     }
+    if (
+      casePlan.targetRelation === "cancellation_of" &&
+      [
+        "cancellation_apply_failed",
+        "cancellation_live_invoice_review",
+      ].includes(String(row.reason_code || ""))
+    ) {
+      return "job_retry";
+    }
     if (!row.job_id && obligationJobId) return "fresh";
     // Accounted case whose job creation was deferred or failed earlier. It can
     // still advance, but a systematically failing one must never crowd out work
@@ -3174,6 +3751,36 @@ export async function runDeterministicIntake(
     try {
       const existing = persisted.get(casePlan.instructionKey) || null;
       const stateBeforeRun: string | null = existing?.state ?? null;
+      if (casePlan.targetRelation === "cancellation_of") {
+        const resolution = cancellationTargets.get(casePlan.instructionKey) || {
+          kind: "not_found",
+          targetJobId: null,
+          targetJobStatus: null,
+          candidateJobIds: [],
+          matchBasis: [],
+        };
+        const saved = await accountCancellationCase(
+          client,
+          casePlan,
+          resolution,
+          sourceMap,
+          existing,
+          options.applyBuilderCancellation,
+        );
+        if (saved.caseCreated) report.totals.case_rows_created++;
+        report.totals.source_rows_created += saved.sourceCreated;
+        if (saved.resumed) report.totals.resumed++;
+        committed++;
+        if (saved.caseRow.reason_code === "cancellation") {
+          for (const ids of chunk(casePlan.sourcePostIds)) {
+            const { error } = await client.from("emails")
+              .update({ makesafe_scanned_at: nowIso })
+              .in("post_id", ids);
+            if (error) report.totals.write_failures++;
+          }
+        }
+        continue;
+      }
       let jobId: string | null = existing?.job_id ||
         existingObligationJobs.get(casePlan.instructionKey) || null;
       // Account the case and its sources before any job-creating work. Nothing is
@@ -3262,10 +3869,30 @@ export async function runDeterministicIntake(
         (report.write_failure_reasons[reason] || 0) + 1;
       report.totals.write_failures++;
       report.totals.cases_failed++;
+      const sources = casePlan.sourcePostIds.flatMap((postId) => {
+        const source = sourceMap.get(postId);
+        return source ? [source] : [];
+      });
+      await persistIssueForSources(
+        client,
+        sources,
+        "source_persist_failed",
+        { instructionKey: casePlan.instructionKey },
+      );
     }
   }
   report.totals.cases_attempted = attempted;
-  report.totals.cases_deferred = plan.cases.length - attempted;
+  const deferred = ordered.slice(attempted);
+  report.totals.cases_deferred = deferred.length;
+  for (const casePlan of deferred) {
+    const sources = casePlan.sourcePostIds.flatMap((postId) => {
+      const source = sourceMap.get(postId);
+      return source ? [source] : [];
+    });
+    await persistIssueForSources(client, sources, "run_cap_deferred", {
+      instructionKey: casePlan.instructionKey,
+    });
+  }
   report.attempt_cap_reached_without_commit = attempted >= maxAttempts &&
     committed === 0;
   await writeHealth(
@@ -3286,6 +3913,7 @@ export async function runDeterministicIntake(
       "scan_page_completed_degraded_retry_next_sweep",
     );
   }
+  await proveDurableFates();
   await commitCompletedCursor();
   return report;
 }

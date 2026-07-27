@@ -51,6 +51,7 @@
 //     it, preferring a false draft over a missed work order.
 
 import { isOwnDomain } from "./makesafe_compact_reads.ts";
+import { classifyCancellation } from "./makesafe_cancellation_classifier.ts";
 
 // Reply / forward prefixes — anchored at the START of the (trimmed) subject so
 // "Software Review" is not treated as a forward. Covers RE:, FW:, FWD:, and the
@@ -124,7 +125,9 @@ export function classifyReportType(
 //   (anything else / null / "unknown")                        -> model ABSTAINED.
 // On abstain we fall back to the keyword classifyReportType(subject, body); its
 // unknown_report result is PRESERVED as the safety valve for genuine ambiguity.
-const MODEL_REPORT_TYPE_ALIASES: Readonly<Record<string, ReportType | "general_makesafe">> = {
+const MODEL_REPORT_TYPE_ALIASES: Readonly<
+  Record<string, ReportType | "general_makesafe">
+> = {
   roof_report: "roof_report",
   roof: "roof_report",
   assessment_report: "assessment_report",
@@ -154,7 +157,10 @@ export function resolveCommittedReportType(
   subject: string | null | undefined,
   body: string | null | undefined,
 ): ReportType | null {
-  const raw = String(modelReportType ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const raw = String(modelReportType ?? "").trim().toLowerCase().replace(
+    /[\s-]+/g,
+    "_",
+  );
   const mapped = raw ? MODEL_REPORT_TYPE_ALIASES[raw] : undefined;
   if (mapped) {
     // A committed general/physical make-safe is stored as null (not a report-only type).
@@ -199,13 +205,11 @@ export function computeIntakeDraftStatus(input: {
 }): "draft" | "needs_review" {
   if (input.extractionDegraded) return "needs_review";
   if (input.isReportCapture) return "needs_review";
-  const missingRequired = (
-    !input.hasCompany ||
+  const missingRequired = !input.hasCompany ||
     !input.externalRef ||
     !input.clientName ||
     !input.siteAddress ||
-    input.availableWoCount === 0
-  );
+    input.availableWoCount === 0;
   return missingRequired ? "draft" : "needs_review";
 }
 
@@ -313,16 +317,34 @@ export interface MakeSafeTaxonomy {
   family: MakeSafeJobFamily;
 }
 
-export function taxonomyFromFamily(family: MakeSafeJobFamily | string): MakeSafeTaxonomy {
+export function taxonomyFromFamily(
+  family: MakeSafeJobFamily | string,
+): MakeSafeTaxonomy {
   switch (family) {
     case "assessment_report_quote":
-      return { job_type: "assessment", makesafe_subtype: null, family: "assessment_report_quote" };
+      return {
+        job_type: "assessment",
+        makesafe_subtype: null,
+        family: "assessment_report_quote",
+      };
     case "roof_report":
-      return { job_type: "roof", makesafe_subtype: null, family: "roof_report" };
+      return {
+        job_type: "roof",
+        makesafe_subtype: null,
+        family: "roof_report",
+      };
     case "temp_fence_makesafe":
-      return { job_type: "makesafe", makesafe_subtype: "temp", family: "temp_fence_makesafe" };
+      return {
+        job_type: "makesafe",
+        makesafe_subtype: "temp",
+        family: "temp_fence_makesafe",
+      };
     default:
-      return { job_type: "makesafe", makesafe_subtype: "general", family: "general_makesafe" };
+      return {
+        job_type: "makesafe",
+        makesafe_subtype: "general",
+        family: "general_makesafe",
+      };
   }
 }
 
@@ -331,7 +353,9 @@ export function classifyMakeSafeTaxonomy(
   body: string | null | undefined,
   reportType?: string | null,
 ): MakeSafeTaxonomy {
-  return taxonomyFromFamily(classifyMakeSafeJobFamily(subject, body, reportType));
+  return taxonomyFromFamily(
+    classifyMakeSafeJobFamily(subject, body, reportType),
+  );
 }
 
 // ── REPORT-CAPTURE: map ref prefix -> canonical company slug ──────────────────
@@ -389,13 +413,10 @@ const NEW_WORK_ORDER_SUBJECT_PHRASES: readonly RegExp[] = [
 // A builder retracting an existing work order (e.g. "CANCELLED WORK ORDER - MLB-25769
 // 34 Carbine Loop, Millbridge") carries the words "work order", so it currently slips
 // through subjectLooksLikeNewWorkOrder and MINTS a brand-new intake draft — the exact
-// MLB-25769 twin-draft incident. A cancellation must NEVER become a new job: it is
-// dropped at the gate and (in the scanner) breadcrumbed against the referenced ref so a
-// human can flag/void the matching live job. Matched on the subject only (the gate's
-// pure signal); the two live twins both say "CANCELLED WORK ORDER" in the subject.
-const CANCELLATION_SUBJECT_RE =
-  /\b(cancell?ed|cancellation|cancelling|cancel\s+(?:this|the|work|wo|order|job)|void(?:ed|ing)?\s+(?:this|the|work|wo|order|job)|withdrawn|rescind(?:ed|ing)?)\b/i;
-
+// MLB-25769 twin-draft incident. A cancellation must NEVER become a new job: this gate
+// refuses the legacy draft path and explicitly routes the source to deterministic
+// cancellation accounting. Matched on the subject only (the gate's pure signal); the
+// two live twins both say "CANCELLED WORK ORDER" in the subject.
 /**
  * True when the subject is a recognised CANCELLATION / retraction of an existing work
  * order or job. Narrow by design: a lone "void" or "cancel" without a work/order/job
@@ -406,9 +427,7 @@ const CANCELLATION_SUBJECT_RE =
 export function subjectIsCancellation(
   subject: string | null | undefined,
 ): boolean {
-  const s = (subject || "").trim();
-  if (!s) return false;
-  return CANCELLATION_SUBJECT_RE.test(s);
+  return classifyCancellation({ subject }).isCancellation;
 }
 
 // ── EXPLICIT REPORT-REQUEST wording ─────────────────────────────────────────────
@@ -640,6 +659,7 @@ export function isGenuineNewWorkOrder(
   reason: string;
   kind: "work_order" | "report";
   reportSubjectPattern: boolean;
+  route?: "deterministic_cancellation";
 } {
   const s = (subject || "").trim();
 
@@ -673,16 +693,17 @@ export function isGenuineNewWorkOrder(
 
   // 2.5) CANCELLATION — a retraction of an existing work order ("CANCELLED WORK ORDER
   //      - MLB-25769 ...") carries "work order" and would otherwise pass step 3 and mint
-  //      a NEW draft. Recognise it here, BEFORE the positive-WO keyword check, and drop
-  //      it. The scanner breadcrumbs the referenced ref so a human can flag/void the
-  //      matching live job instead of a phantom new job appearing. This runs after the
-  //      exclusion list so an outbound/photo/invoice cancellation is still handled there.
+  //      a NEW draft. Recognise it here, BEFORE the positive-WO keyword check, refuse
+  //      the legacy draft path, and publish the deterministic cancellation route. This
+  //      runs after the exclusion list so an outbound/photo/invoice cancellation is
+  //      still handled there.
   if (subjectIsCancellation(s)) {
     return {
       ok: false,
       reason: "cancelled_work_order",
       kind: "work_order",
       reportSubjectPattern: false,
+      route: "deterministic_cancellation",
     };
   }
 

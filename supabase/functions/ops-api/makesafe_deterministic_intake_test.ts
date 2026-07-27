@@ -640,7 +640,12 @@ Deno.test("cancellation and unknown-builder work remain visible exceptions", () 
   });
   const plan = buildDeterministicIntakePlan([cancellation, unknown], PROFILES);
   assertEquals(plan.cases.length, 2);
-  assert(plan.cases.some((c) => c.reasonCode === "cancellation"));
+  assert(
+    plan.cases.some((c) =>
+      c.reasonCode === "cancellation_target_not_found" &&
+      c.targetRelation === "cancellation_of"
+    ),
+  );
   assert(plan.cases.some((c) => c.reasonCode === "unknown_builder"));
   assertEquals(plan.totals.unaccounted, 0);
 });

@@ -18,11 +18,14 @@ import {
 } from "./makesafe_template_parser.ts";
 import {
   classifyMakeSafeJobFamily,
-  subjectIsCancellation,
   subjectIsExcludedNonWorkOrder,
   subjectIsKnownBuilderNoise,
   textHasExplicitReportRequest,
 } from "./makesafe_intake_gate.ts";
+import {
+  type CancellationClassification,
+  classifyCancellation,
+} from "./makesafe_cancellation_classifier.ts";
 import { canonicalCompanyDedupeKey } from "../_shared/makesafe_refs.ts";
 import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
 import {
@@ -35,6 +38,8 @@ import {
 export const DETERMINISTIC_INTAKE_VERSION =
   "makesafe-deterministic-intake@2026-07-24.v4";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
+export { classifyCancellation };
+export type { CancellationClassification };
 
 export type AdapterId =
   | "mlb"
@@ -230,6 +235,8 @@ export interface DeterministicCasePlan {
     | "sibling_of"
     | "reopen_of"
     | null;
+  targetRelation: "cancellation_of" | "revision_of" | "reopen_of" | null;
+  targetJobId: string | null;
   cycle: number;
   adapterId: AdapterId | null;
   adapterVersion: string;
@@ -618,6 +625,10 @@ function fieldCandidates(
 
 function storyFor(item: DeterministicSourceItem): StoryEvent[] {
   const hay = text(item);
+  const cancellation = classifyCancellation({
+    subject: item.subject,
+    currentMessageText: item.body,
+  });
   const events: StoryEvent[] = [];
   const add = (kind: StoryEventKind, summaryCode: string, suffix = "") => {
     events.push({
@@ -628,11 +639,12 @@ function storyFor(item: DeterministicSourceItem): StoryEvent[] {
       summaryCode,
     });
   };
-  if (
-    subjectIsCancellation(item.subject) ||
-    /\bcancel(?:led|lation|ling)?\b/i.test(hay)
-  ) add("cancellation", "builder_cancelled_instruction");
-  else if (isRevisionSource(item)) {
+  if (cancellation.isCancellation) {
+    add(
+      "cancellation",
+      `builder_cancelled_instruction:${cancellation.matchedForm}`,
+    );
+  } else if (isRevisionSource(item)) {
     add("revision", "builder_revised_instruction");
   } else add("instruction", "builder_instruction_received");
   if (APPOINTMENT_SIGNAL.test(hay)) {
@@ -829,8 +841,10 @@ function buildKnown(
     jobFamily: classifyMakeSafeJobFamily(item.subject, item.body, null),
   };
   const hay = text(item);
-  const intent = subjectIsCancellation(item.subject) ||
-      /\bwork\s+order\s+(?:is\s+)?cancelled\b/i.test(hay)
+  const intent = classifyCancellation({
+      subject: item.subject,
+      currentMessageText: item.body,
+    }).isCancellation
     ? "cancellation"
     : isChatter(item)
     ? "chatter"
@@ -1618,7 +1632,7 @@ export function buildDeterministicIntakePlan(
         reasonCode = "non_makesafe";
       } else if (intent === "cancellation") {
         state = "exception";
-        reasonCode = "cancellation";
+        reasonCode = "cancellation_target_not_found";
       } else if (
         !instructionItems.some((i) =>
           i.adapterId && i.adapterId !== "chatter"
@@ -1705,6 +1719,8 @@ export function buildDeterministicIntakePlan(
         lineageClusterKey: clusterKey,
         parentInstructionKey: parent,
         parentRelation: relation,
+        targetRelation: intent === "cancellation" ? "cancellation_of" : null,
+        targetJobId: null,
         cycle,
         adapterId: primary.adapterId,
         adapterVersion: primary.adapterVersion,

@@ -16,6 +16,11 @@ export type MakesafeCaseState = typeof MAKESAFE_CASE_STATES[number];
 
 export const MAKESAFE_REASON_CODES = [
   "cancellation",
+  "cancellation_target_not_found",
+  "cancellation_target_ambiguous",
+  "cancellation_live_invoice_review",
+  "cancellation_target_terminal_conflict",
+  "cancellation_apply_failed",
   "duplicate",
   "revision",
   "unknown_builder",
