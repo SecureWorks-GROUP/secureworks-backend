@@ -544,12 +544,15 @@ Load-bearing type rules (see
 The repeatable production-front-door proof is documented in
 `scripts/test-lab/ses-synthetic-livefire/README.md`. Apply
 `20260727080821_makesafe_synthetic_livefire_infrastructure.sql` and
-`20260728030000_synthetic_livefire_readiness_cleanup.sql` before the matching
-`ops-api`; a full pass requires both Supabase management access and the active
-production `SW_API_KEY`. Synthetic traffic is self-addressed, permanently
-release-blocked, and cleanup is exact-marker guarded. Mutable residue is deleted;
-append-only/group evidence is retained only after terminal accounting excludes it
-from live boards, projections, and fresh-source health.
+`20260728030000_synthetic_livefire_readiness_cleanup.sql` plus
+`20260728040000_synthetic_livefire_case_tombstone_cleanup.sql` before the
+matching `ops-api`; the deployed cleanup contract must be
+`ledger-bound-case-tombstone-purge/v2`. A full pass requires both Supabase
+management access and the active production `SW_API_KEY`. Synthetic traffic is
+self-addressed, permanently release-blocked, and cleanup is exact-marker
+guarded. Mutable residue is deleted; append-only/group evidence is retained only
+after terminal accounting excludes it from live boards, projections, and
+fresh-source health.
 
 ## Maintaining this file
 
