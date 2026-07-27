@@ -895,10 +895,12 @@ Deno.test("multiple corrected targets file one binding exception and clean sourc
   addWorkOrder("ambiguous-source-2", "MLB-26210");
   addWorkOrder("clean-source", "MLB-26211");
 
-  for (const [id, jobNumber] of [
-    ["corrected-target-job-1", "SWMS-2101"],
-    ["corrected-target-job-2", "SWMS-2102"],
-  ]) {
+  for (
+    const [id, jobNumber] of [
+      ["corrected-target-job-1", "SWMS-2101"],
+      ["corrected-target-job-2", "SWMS-2102"],
+    ]
+  ) {
     store.jobs.push({
       id,
       job_number: jobNumber,
@@ -921,10 +923,12 @@ Deno.test("multiple corrected targets file one binding exception and clean sourc
       },
     });
   }
-  for (const [index, postId] of [
-    "ambiguous-source-1",
-    "ambiguous-source-2",
-  ].entries()) {
+  for (
+    const [index, postId] of [
+      "ambiguous-source-1",
+      "ambiguous-source-2",
+    ].entries()
+  ) {
     store.makesafe_intake_source_authority_corrections.push({
       id: `multiple-correction-${index + 1}`,
       org_id: ORG,
@@ -963,7 +967,7 @@ Deno.test("multiple corrected targets file one binding exception and clean sourc
   assertEquals(approvals, 1);
   assertEquals(store.makesafe_intake_case_sources.length, 3);
   const bindingCase = store.makesafe_intake_cases.find((row) =>
-    row.conflicting_fields?.corrected_target_job_binding,
+    row.conflicting_fields?.corrected_target_job_binding
   );
   assert(bindingCase, "multiple corrected targets must remain visible");
   assertEquals(bindingCase.state, "exception");

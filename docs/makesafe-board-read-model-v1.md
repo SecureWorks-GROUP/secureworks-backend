@@ -131,9 +131,12 @@ deterministically proven builder work instructions from the recent 15-day
 Captain window that have no live job. Each card has `job_id: null`, builder and
 WO/PO identity, received date, the exact currently missing fields, source
 subject, and attachment pointers. Existing-job follow-ups, duplicates,
-correction residue, deterministic non-work, ambiguous material, and out-of-window
-history remain accounted for but do not become cards; ambiguous material is
-left for the reporting skill.
+correction residue, deterministic non-work, and out-of-window history remain
+accounted for but do not become cards. A live-job binding ambiguity is the
+exception: it becomes a visible review card with the instruction identifier and
+candidate SWMS job numbers, remains unbound, and never auto-creates a job.
+Ambiguous material outside this binding contract remains left for the reporting
+skill.
 
 Cards are review-only: `human_review_required` and `human_approval_required` are
 true, while `auto_create_job` and `auto_create_draft` are false. Fillable
