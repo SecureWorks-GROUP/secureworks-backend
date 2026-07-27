@@ -12,6 +12,7 @@ import {
   type VersionedDependency,
 } from "./makesafe_readiness_revision.ts";
 import {
+  canonicalizeMakesafeDocumentRole,
   type BlockerFact,
   type CancellationDimension,
   diffV1V2State,
@@ -344,6 +345,7 @@ function oneBy(rows: any[], key: string): Map<string, any> {
 }
 
 function versionedFact(row: any): VersionedCycleFact {
+  const rawRole = row?.role || row?.type || null;
   return {
     id: String(row?.id || ""),
     attendance_cycle_id: row?.attendance_cycle_id || null,
@@ -352,7 +354,7 @@ function versionedFact(row: any): VersionedCycleFact {
       : null,
     content_hash: row?.makesafe_content_hash || null,
     status: row?.status || null,
-    role: row?.role || row?.type || null,
+    role: rawRole,
   };
 }
 
@@ -508,13 +510,20 @@ export async function buildMakesafeV2Comparison(
       rules.get(String(identityRevision?.family_rule_key || "")),
     );
     const requiredDocumentTypes = new Set(
-      familyRule?.required_document_types || [],
+      (familyRule?.required_document_types || []).map((type) =>
+        canonicalizeMakesafeDocumentRole(type) || `unmapped:${String(type)}`
+      ),
     );
     const assignmentRows = assignments.get(jobId) || [];
     const reportRows = serviceReports.get(jobId) || [];
-    const documentRows = (documents.get(jobId) || []).filter((item) =>
-      requiredDocumentTypes.has(String(item?.type || ""))
-    );
+    const documentRows = (documents.get(jobId) || [])
+      .map((item) => ({
+        ...item,
+        role: canonicalizeMakesafeDocumentRole(item?.type),
+      }))
+      .filter((item) =>
+        item.role !== null && requiredDocumentTypes.has(item.role)
+      );
     const mediaRows = media.get(jobId) || [];
     const completionMediaRows = mediaRows.filter((item) =>
       String(item?.phase || "").toLowerCase() === "after" ||

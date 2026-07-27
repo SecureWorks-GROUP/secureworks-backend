@@ -219,6 +219,31 @@ export interface VersionedCycleFact {
   role?: string | null;
 }
 
+const MAKESAFE_DOCUMENT_ROLE_ALIASES: Record<string, string> = {
+  roof_report: "roof_report",
+  "roof-report": "roof_report",
+  roof: "roof_report",
+  assessment_report: "assessment_report",
+  assessment: "assessment_report",
+  assessment_report_quote: "assessment_report",
+  photos: "photos",
+  photo: "photos",
+  photo_schedule: "photos",
+  photo_report: "photos",
+  quote: "quote",
+  quotation: "quote",
+  scope: "quote",
+  scope_of_works: "quote",
+  makesafe_report: "makesafe_report",
+};
+
+export function canonicalizeMakesafeDocumentRole(
+  rawType: string | null | undefined,
+): string | null {
+  const raw = String(rawType || "").trim().toLowerCase().replace(/\s+/g, "_");
+  return MAKESAFE_DOCUMENT_ROLE_ALIASES[raw] || null;
+}
+
 export interface MakesafeFamilyRule {
   code: string;
   kind: "physical" | "portal" | "report_only";

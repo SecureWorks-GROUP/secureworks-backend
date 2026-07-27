@@ -6,6 +6,7 @@ import {
 import {
   EMPTY_CANCELLATION,
   EMPTY_TERMINAL_PROOF,
+  canonicalizeMakesafeDocumentRole,
   type MakesafeStateInput,
   projectMakesafeStateV2,
   type VersionedCycleFact,
@@ -319,6 +320,15 @@ Deno.test("portal family uses its typed current-cycle capture recipe", () => {
     projectMakesafeStateV2(input).ops_stage,
     "trade_report_in",
   );
+});
+
+Deno.test("document facts use the canonical roof_report role", () => {
+  assertEquals(canonicalizeMakesafeDocumentRole("roof_report"), "roof_report");
+  assertEquals(canonicalizeMakesafeDocumentRole("roof-report"), "roof_report");
+});
+
+Deno.test("unknown document types remain unmapped", () => {
+  assertEquals(canonicalizeMakesafeDocumentRole("future_document"), null);
 });
 
 Deno.test("next action follows the closed precedence chain", () => {
