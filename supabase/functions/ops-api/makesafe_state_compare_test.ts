@@ -383,6 +383,7 @@ Deno.test("historical pack-cycle attribution cannot poison the current cycle", a
     id: "pack-current",
     job_id: jobId,
     status: "draft",
+    makesafe_content_hash: SHA_A,
   });
   const result = await buildMakesafeV2Comparison(
     fixture.rows,
