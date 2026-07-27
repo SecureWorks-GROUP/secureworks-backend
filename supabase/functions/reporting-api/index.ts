@@ -2368,6 +2368,7 @@ async function matchInvoicesToJobs(sb: any) {
 
   let matched = 0
   let updateErrors = 0
+  const refusals: SealedSesMoneyRefusal[] = []
   const matchLog: string[] = []
   const failLog: string[] = []
   const plannedMatches: Array<{
@@ -2442,9 +2443,7 @@ async function matchInvoicesToJobs(sb: any) {
     }
   }
 
-  // F8 sibling fence: plan the full batch first, then refuse before any update
-  // when an ACCREC would be attached to the sealed SES make-safe population.
-  for (const plan of plannedMatches) {
+  const allowedMatches = plannedMatches.filter((plan) => {
     if (
       String(plan.invoice.invoice_type || '').toUpperCase() === 'ACCREC' &&
       (
@@ -2456,9 +2455,7 @@ async function matchInvoicesToJobs(sb: any) {
         ).sealed
       )
     ) {
-      throw new ReportingApiRefusalError(
-        409,
-        sealedSesMoneyRefusal('reporting-api/match_invoices', {
+      refusals.push(sealedSesMoneyRefusal('reporting-api/match_invoices', {
           xero_invoice_row_id: plan.invoice.id,
           xero_invoice_id: plan.invoice.xero_invoice_id || null,
           invoice_number: plan.invoice.invoice_number || null,
@@ -2469,12 +2466,13 @@ async function matchInvoicesToJobs(sb: any) {
           target_job_id: plan.job.id,
           target_job_number: plan.job.job_number || null,
           match_type: plan.match_type,
-        }),
-      )
+      }))
+      return false
     }
-  }
+    return true
+  })
 
-  for (const plan of plannedMatches) {
+  for (const plan of allowedMatches) {
     const { error } = await sb
       .from('xero_invoices')
       .update({ job_id: plan.job.id })
@@ -2498,6 +2496,7 @@ async function matchInvoicesToJobs(sb: any) {
     unmatched: invoices.length - matched - updateErrors,
     matches: matchLog.slice(0, 50),
     errors: failLog.slice(0, 10),
+    refusals,
   }
 }
 

@@ -2670,6 +2670,29 @@ serve(async (req: Request) => {
         return jsonResponse({ success: false, refusal, error: refusal.fact }, 409, corsHeaders)
       }
 
+      const { data: invoiceRecord, error: invoiceError } = await sb.from('xero_invoices')
+        .select('invoice_type,job_id,invoice_obligation_revision_id,ses_external_token')
+        .eq('xero_invoice_id', xero_invoice_id)
+        .maybeSingle()
+      if (invoiceError || !invoiceRecord) {
+        const refusal = {
+          state: 'refused',
+          code: 'sealed_ses_fence_check_failed',
+          fact: 'The invoice could not be classified before legacy delivery.',
+          recovery_action: 'Sync the invoice mirror and retry only after its binding is confirmed.',
+        }
+        return jsonResponse({ success: false, refusal, error: refusal.fact }, 503, corsHeaders)
+      }
+      if (String(invoiceRecord.invoice_type || 'ACCREC').toUpperCase() !== 'ACCPAY' &&
+          (invoiceRecord.invoice_obligation_revision_id || invoiceRecord.ses_external_token)) {
+        const refusal = sealedSesMoneyRefusal('send-quote/send-invoice', {
+          job_id,
+          invoice_obligation_revision_id: invoiceRecord.invoice_obligation_revision_id || null,
+          has_ses_external_token: !!invoiceRecord.ses_external_token,
+        })
+        return jsonResponse({ success: false, refusal, error: refusal.fact }, 409, corsHeaders)
+      }
+
       // Look up job for reply-to routing and GHL logging
       const { data: invoiceJob } = await sb.from('jobs')
         .select('job_number, type, ghl_contact_id')

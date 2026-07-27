@@ -21604,6 +21604,7 @@ async function assertLegacySesInvoiceActionAllowed(
   client: any,
   xeroInvoiceId: string,
   action: string,
+  targetJobId?: string,
 ) {
   const invoice = await client.from('xero_invoices')
     .select('job_id, invoice_type, invoice_obligation_revision_id, ses_external_token')
@@ -21640,6 +21641,12 @@ async function assertLegacySesInvoiceActionAllowed(
       has_ses_external_token: !!invoice.data.ses_external_token,
     }))
   }
+  if (
+    targetJobId &&
+    String(invoice.data.invoice_type || '').toUpperCase() !== 'ACCPAY'
+  ) {
+    await assertLegacySesMoneyActionAllowedForJob(client, targetJobId, action)
+  }
   if (!invoice.data?.job_id) return
   await assertLegacySesMoneyActionAllowedForJob(
     client,
@@ -21652,10 +21659,11 @@ async function assertLegacySesInvoiceRowsActionAllowed(
   client: any,
   invoiceRowIds: string[],
   action: string,
+  targetJobId?: string,
 ) {
   if (invoiceRowIds.length === 0) return
   const { data, error } = await client.from('xero_invoices')
-    .select('id,xero_invoice_id')
+    .select('id,xero_invoice_id,invoice_type')
     .in('id', invoiceRowIds)
   if (error) {
     throw new SesActionError(503, {
@@ -21677,6 +21685,12 @@ async function assertLegacySesInvoiceRowsActionAllowed(
       invoice.xero_invoice_id,
       action,
     )
+    if (
+      String(invoice.invoice_type || '').toUpperCase() !== 'ACCPAY' &&
+      targetJobId
+    ) {
+      await assertLegacySesMoneyActionAllowedForJob(client, targetJobId, action)
+    }
   }
 }
 
@@ -21747,6 +21761,12 @@ async function createInvoice(
   // action has the same safety guard as completeAndInvoice + createMakesafeDraftInvoice.
   // Normal (non-makesafe) manual invoicing is unaffected.
   const jIdForGate = job_id || jobId
+  if (!jIdForGate) {
+    throw new SesActionError(409, sealedSesMoneyRefusal('create_invoice', {
+      job_id: null,
+      reason: 'legacy ACCREC create has no bound job',
+    }))
+  }
   if (jIdForGate) {
     const inspection = await assertLegacySesMoneyActionAllowedForJob(
       client,
@@ -21754,6 +21774,12 @@ async function createInvoice(
       'create_invoice',
       !!sesContext,
     )
+    if (sesContext && !inspection.sealed) {
+      throw new SesActionError(409, sealedSesMoneyRefusal('create_invoice', {
+        job_id: jIdForGate,
+        reason: 'approved SES release context is not bound to a sealed job',
+      }))
+    }
     if (sesContext && inspection.sealed) {
       await assertSealedSesInvoiceCreateIsUnique(
         client,
@@ -37784,29 +37810,21 @@ async function resolveAnnotation(client: any, body: any) {
       const candidateIds = (ann.structured_data.candidate_invoices || [])
         .map((candidate: any) => candidate.id)
         .filter(Boolean)
-      await assertLegacySesMoneyActionAllowedForJob(
-        client,
-        ann.structured_data.job_id,
-        'resolve_annotation invoice link',
-      )
       await assertLegacySesInvoiceRowsActionAllowed(
         client,
         candidateIds,
         'resolve_annotation invoice link',
+        ann.structured_data.job_id,
       )
     } else if (response_value?.startsWith('link:')) {
       const targetJobId = response_value.slice(5)
       const xeroInvId = ann.structured_data?.xero_invoice_id
       if (targetJobId && xeroInvId) {
-        await assertLegacySesMoneyActionAllowedForJob(
-          client,
-          targetJobId,
-          'resolve_annotation invoice link',
-        )
         await assertLegacySesInvoiceActionAllowed(
           client,
           xeroInvId,
           'resolve_annotation invoice link',
+          targetJobId,
         )
       }
     }
@@ -40700,6 +40718,15 @@ async function sendChaseSms(client: any, body: any) {
   const job_id = body.job_id && String(body.job_id).trim() ? String(body.job_id).trim() : null
   const ghl_contact_id = body.ghl_contact_id || body.contact_id
   if (!ghl_contact_id || !message) throw new ApiError('ghl_contact_id and message required', 400)
+  if (xero_invoice_id) {
+    await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'send_chase_sms')
+  } else if (job_id) {
+    await assertLegacySesMoneyActionAllowedForJob(client, job_id, 'send_chase_sms')
+  } else {
+    throw new SesActionError(409, sealedSesMoneyRefusal('send_chase_sms', {
+      reason: 'payment communication has no bound invoice or job',
+    }))
+  }
 
   // Send via GHL proxy
   const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
@@ -40726,8 +40753,17 @@ async function sendChaseSms(client: any, body: any) {
 }
 
 async function triggerChaseWorkflow(client: any, body: any) {
-  const { ghl_contact_id, overdue_amount, invoice_number, job_number } = body
+  const { ghl_contact_id, overdue_amount, invoice_number, job_number, xero_invoice_id, job_id } = body
   if (!ghl_contact_id) throw new ApiError('ghl_contact_id required', 400)
+  if (xero_invoice_id) {
+    await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'trigger_chase_workflow')
+  } else if (job_id) {
+    await assertLegacySesMoneyActionAllowedForJob(client, job_id, 'trigger_chase_workflow')
+  } else {
+    throw new SesActionError(409, sealedSesMoneyRefusal('trigger_chase_workflow', {
+      reason: 'payment communication has no bound invoice or job',
+    }))
+  }
 
   const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`
 
@@ -40797,6 +40833,7 @@ async function stopChaseWorkflow(client: any, body: any) {
 async function handlePaymentEvent(client: any, body: any) {
   const { xero_contact_id, xero_invoice_id, invoice_number, contact_name, amount_paid, job_id } = body
   if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
+  await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'handle_payment_event')
 
   const results: string[] = []
 

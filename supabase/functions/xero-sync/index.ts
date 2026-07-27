@@ -716,6 +716,24 @@ async function syncInvoices(sb: any) {
               .maybeSingle()
 
             if (invRecord?.job_id) {
+              const paidInvoiceRefusal = await sealedSesXeroLinkRefusal(
+                sb,
+                {
+                  xero_invoice_id: inv.InvoiceID,
+                  invoice_number: inv.InvoiceNumber,
+                  invoice_type: inv.Type,
+                  job_id: invRecord.job_id,
+                  invoice_obligation_revision_id: existingRec?.invoice_obligation_revision_id || null,
+                  ses_external_token: existingRec?.ses_external_token || null,
+                },
+                invRecord.job_id,
+                'xero-sync/payment automation',
+              )
+              if (paidInvoiceRefusal) {
+                sesLinkRefusals.push(paidInvoiceRefusal)
+                console.warn('[xero-sync] sealed SES payment automation refused', paidInvoiceRefusal)
+                continue
+              }
               // Check if ALL invoices for this job are paid
               const { data: unpaid } = await sb.from('xero_invoices')
                 .select('id')
