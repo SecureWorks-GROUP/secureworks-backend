@@ -105,7 +105,9 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
+  v_ledger_job_ids_json jsonb;
   v_ledger_job_ids uuid[];
+  v_ledger_count integer;
   v_case_tombstones jsonb := '[]'::jsonb;
   v_result jsonb;
   v_job_id uuid;
@@ -114,17 +116,25 @@ BEGIN
     RAISE EXCEPTION 'invalid synthetic live-fire marker';
   END IF;
 
+  SELECT run.job_ids
+  INTO v_ledger_job_ids_json
+  FROM public.ses_synthetic_livefire_runs run
+  WHERE run.marker = p_marker
+    AND run.state IN ('active', 'cleanup_complete')
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'synthetic live-fire run is not purgeable';
+  END IF;
+
   SELECT COALESCE(
     array_agg(DISTINCT value::uuid ORDER BY value::uuid),
     ARRAY[]::uuid[]
   )
   INTO v_ledger_job_ids
-  FROM public.ses_synthetic_livefire_runs run
-  CROSS JOIN LATERAL jsonb_array_elements_text(run.job_ids) item(value)
-  WHERE run.marker = p_marker
-    AND run.state IN ('active', 'cleanup_complete');
-  IF NOT FOUND OR v_ledger_job_ids IS NULL THEN
-    RAISE EXCEPTION 'synthetic live-fire run is not purgeable';
+  FROM jsonb_array_elements_text(v_ledger_job_ids_json) item(value);
+  v_ledger_count := jsonb_array_length(v_ledger_job_ids_json);
+  IF cardinality(v_ledger_job_ids) IS DISTINCT FROM v_ledger_count THEN
+    RAISE EXCEPTION 'synthetic live-fire ledger job ids are duplicated';
   END IF;
 
   FOR v_job_id IN
