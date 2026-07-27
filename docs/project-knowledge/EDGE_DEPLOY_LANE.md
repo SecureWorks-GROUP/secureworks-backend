@@ -65,6 +65,14 @@ Preferred path:
    matching `ops-api`; edge deployment does not apply migrations. The migration
    creates the invoice-obligation, review, and release ledgers plus the SES
    invoice identity indexes, but performs no provider or closeout effect.
+
+   Extension objects must be qualified against their live production namespace,
+   not a generic Supabase default. In project `kevgrhcjxspbxgovpmfl`, `pg_trgm`
+   is installed in `public`, so migrations must install it with `SCHEMA public`
+   and use `public.gin_trgm_ops`. `pgcrypto` and `uuid-ossp` remain installed in
+   `extensions`. The PR check in
+   `supabase/functions/ops-api/migration_extension_schema_test.ts` enforces the
+   `pg_trgm` contract across every repository migration.
 3. Confirm its smoke checks pass.
 
 What that run does is decided by `scripts/identify-edge-deploy-changes.sh`:

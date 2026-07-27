@@ -25,7 +25,7 @@ ALTER TABLE public.xero_invoices
     lower(regexp_replace(COALESCE(reference, ''), '[-[:space:]]+', '', 'g'))
   ) STORED;
 
-CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_xero_invoices_ses_external_token
   ON public.xero_invoices (org_id, ses_external_token)
@@ -43,7 +43,7 @@ CREATE INDEX IF NOT EXISTS idx_xero_invoices_ses_reference_normalized
 
 CREATE INDEX IF NOT EXISTS idx_xero_invoices_ses_reference_trgm
   ON public.xero_invoices
-  USING gin (reference_normalized extensions.gin_trgm_ops)
+  USING gin (reference_normalized public.gin_trgm_ops)
   WHERE invoice_type = 'ACCREC'
     AND COALESCE(status, '') NOT IN ('VOIDED', 'DELETED')
     AND reference_normalized <> '';
