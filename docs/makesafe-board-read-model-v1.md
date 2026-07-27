@@ -73,6 +73,10 @@ boundary for both the board enrich path and audit compact flags:
   any-cycle first-match behaviour proven by prior regressions.
 - Prior-cycle invoice/commercial may remain visible as a warning fact but must
   not close the current attendance or imply current-cycle send readiness.
+- The `makesafe_job_details` row must carry the same authoritative
+  `attendance_cycle_id` and `cycle_attribution='bound'` as the current cycle;
+  reconciliation rejects detail-cycle binding drift instead of trusting a
+  fallback job-row value.
 - Holds for the current cycle are exposed on **ops** (`computed_status_hold`)
   and **trade** (`hold: { reason_code, note, held_since, cycle_number }`).
 - Migration `20260727000001_makesafe_attendance_cycles_u2_s1.sql` materialises

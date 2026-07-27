@@ -502,6 +502,8 @@ export async function buildMakesafeV2Comparison(
     );
   }
   const cycles = groupBy(facts.cycles, "job_id");
+  const details = facts.details || [];
+  const dockets = facts.dockets || [];
   const identities = oneBy(facts.identities, "job_id");
   const assignments = groupBy(facts.assignments, "job_id");
   const serviceReports = groupBy(facts.serviceReports, "job_id");
