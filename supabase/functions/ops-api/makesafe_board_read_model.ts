@@ -119,6 +119,7 @@ export interface CanonicalMakesafeExtras {
   intakeCaseByJobId?: Record<string, any>;
   holdsByJobId?: Record<string, MakesafeStatusHold>;
   statusApplicationsByJobId?: Record<string, any>;
+  terminalSyntheticLivefireJobIds?: ReadonlySet<string>;
   computedAt?: string;
 }
 
@@ -428,8 +429,10 @@ export function buildCanonicalMakesafeRows(
   extras: CanonicalMakesafeExtras = {},
 ): any[] {
   const computedAt = extras.computedAt || new Date().toISOString();
+  const terminalSyntheticJobIds = extras.terminalSyntheticLivefireJobIds;
   const rows = (baseRows || []).filter((base) =>
-    !isTerminalSyntheticLivefireJob(base)
+    !(isSyntheticLivefireJob(base) &&
+      terminalSyntheticJobIds?.has(String(base?.id)))
   ).map((base) => {
     // enrichMakesafeBoardJob already cycle-scopes assignments/report/pack on the
     // base row; re-apply photo fail-closed for reattend here (photos are not

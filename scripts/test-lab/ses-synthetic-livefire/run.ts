@@ -43,6 +43,7 @@ export interface Inventory {
   xeroInvoices: JsonRecord[];
   emailEvents: JsonRecord[];
   intakeDrafts: JsonRecord[];
+  mutableOperationalRows: Record<string, JsonRecord[]>;
 }
 
 interface RunEvidence {
@@ -117,10 +118,7 @@ export function operationalCounts(
   inventory: Inventory,
 ): Record<string, number> {
   return {
-    active_jobs:
-      inventory.jobs.filter((job) =>
-        !(job.metadata as JsonRecord)?.synthetic_livefire_terminal_at
-      ).length,
+    active_jobs: inventory.jobs.length,
     attachment_objects:
       inventory.attachments.filter((row) => !!row.storage_path).length,
     intake_drafts: inventory.intakeDrafts.length,
@@ -135,6 +133,8 @@ export function operationalCounts(
     revision_approvals: inventory.revisionApprovals.length,
     external_effects: inventory.externalEffects.length,
     xero_invoices: inventory.xeroInvoices.length,
+    mutable_operational_rows: Object.values(inventory.mutableOperationalRows)
+      .reduce((sum, rows) => sum + rows.length, 0),
   };
 }
 
@@ -163,23 +163,6 @@ function containsMarker(value: unknown, marker: string): boolean {
 
 function fixtureIdFromSubject(subject: unknown): string | null {
   return String(subject || "").match(/\[FIXTURE:([a-z_]+)\]/)?.[1] || null;
-}
-
-function mergeMetadata(
-  current: unknown,
-  marker: string,
-  terminalAt: string,
-): JsonRecord {
-  const metadata = current && typeof current === "object" &&
-      !Array.isArray(current)
-    ? current as JsonRecord
-    : {};
-  return {
-    ...metadata,
-    synthetic_livefire_marker: marker,
-    synthetic_livefire_terminal_at: terminalAt,
-    synthetic_livefire_terminal_reason: "livefire_cleanup_complete",
-  };
 }
 
 async function writeJson(path: URL, value: unknown): Promise<void> {
@@ -353,6 +336,25 @@ async function inventory(
     select: "*",
     subject: `ilike.*${marker}*`,
   });
+  const mutableOperationalRows: Record<string, JsonRecord[]> = {};
+  for (const table of [
+    "job_assignments",
+    "job_media",
+    "job_contacts",
+    "job_service_reports",
+    "makesafe_report_packs",
+    "makesafe_status_holds",
+    "draft_notes",
+    "job_variations",
+    "purchase_orders",
+    "trade_invoices",
+  ]) {
+    mutableOperationalRows[table] = await client.rowsForIds<JsonRecord>(
+      table,
+      "job_id",
+      jobIds,
+    );
+  }
   return {
     marker,
     emails,
@@ -378,6 +380,7 @@ async function inventory(
     xeroInvoices,
     emailEvents,
     intakeDrafts,
+    mutableOperationalRows,
   };
 }
 
@@ -513,6 +516,15 @@ export function guardInventory(run: FixtureRun, found: Inventory): void {
       throw new Error(
         `cleanup refused unmarked self-send event: ${String(event.id)}`,
       );
+    }
+  }
+  for (const [table, rows] of Object.entries(found.mutableOperationalRows)) {
+    for (const row of rows) {
+      if (!jobIds.has(String(row.job_id))) {
+        throw new Error(
+          `cleanup refused mutable operational row outside marker jobs: ${table}/${String(row.id)}`,
+        );
+      }
     }
   }
   const emailPaths = strings(found.attachments, "storage_path");
@@ -1008,16 +1020,22 @@ async function cleanup(
       case_sources: strings(found.caseSources, "id"),
       case_events: strings(found.caseEvents, "id"),
       intake_artifacts: strings(found.intakeArtifacts, "id"),
-      jobs: strings(found.jobs, "id"),
-      job_details: strings(found.details, "job_id"),
       job_events: strings(found.jobEvents, "id"),
-      attendance_cycles: strings(found.attendanceCycles, "id"),
       board_applications: strings(found.boardApplications, "id"),
     },
     hard_delete: {
+      jobs: strings(found.jobs, "id"),
+      job_details: strings(found.details, "job_id"),
+      attendance_cycles: strings(found.attendanceCycles, "id"),
       intake_drafts: strings(found.intakeDrafts, "id"),
       job_documents: strings(found.jobDocuments, "id"),
       email_events: strings(found.emailEvents, "id"),
+      mutable_operational: Object.fromEntries(
+        Object.entries(found.mutableOperationalRows).map(([table, rows]) => [
+          table,
+          strings(rows, "id"),
+        ]),
+      ),
     },
     storage_delete: {
       makesafe_emails: unique(strings(found.attachments, "storage_path")),
@@ -1033,16 +1051,6 @@ async function cleanup(
   await writeJson(new URL("cleanup-dry-run.json", runRoot), dryRunPlan);
 
   const terminalAt = new Date().toISOString();
-  for (const job of found.jobs) {
-    await client.rest<JsonRecord[]>("jobs", { id: `eq.${String(job.id)}` }, {
-      method: "PATCH",
-      body: JSON.stringify({
-        status: "cancelled",
-        metadata: mergeMetadata(job.metadata, run.marker, terminalAt),
-        updated_at: terminalAt,
-      }),
-    });
-  }
 
   await client.removeStorageObjects(
     "makesafe-emails",
@@ -1089,6 +1097,29 @@ async function cleanup(
       strings(found.emailEvents, "id"),
     ),
   };
+  const deletedMutableOperational: Record<string, JsonRecord[]> = {};
+  deletedMutableOperational.makesafe_job_details = await client.deleteIds(
+    "makesafe_job_details",
+    "job_id",
+    strings(found.details, "job_id"),
+  );
+  deletedMutableOperational.makesafe_attendance_cycles = await client.deleteIds(
+    "makesafe_attendance_cycles",
+    "id",
+    strings(found.attendanceCycles, "id"),
+  );
+  for (const [table, rows] of Object.entries(found.mutableOperationalRows)) {
+    deletedMutableOperational[table] = await client.deleteIds(
+      table,
+      "id",
+      strings(rows, "id"),
+    );
+  }
+  const deletedJobs = await client.deleteIds(
+    "jobs",
+    "id",
+    strings(found.jobs, "id"),
+  );
 
   await client.rest<JsonRecord[]>(
     "ses_synthetic_livefire_runs",
@@ -1191,6 +1222,13 @@ async function cleanup(
     deleted_counts: Object.fromEntries(
       Object.entries(deleted).map(([key, rows]) => [key, rows.length]),
     ),
+    mutable_operational_rows_deleted: Object.fromEntries(
+      Object.entries(deletedMutableOperational).map(([table, rows]) => [
+        table,
+        rows.length,
+      ]),
+    ),
+    jobs_deleted: deletedJobs.length,
     retained_audit_counts: {
       emails: after.emails.length,
       cases: after.cases.length,

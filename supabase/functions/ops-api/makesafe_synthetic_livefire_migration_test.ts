@@ -178,7 +178,7 @@ Deno.test("verified marker propagates from deterministic draft into job and even
     index,
     "case 'ses_synthetic_livefire_capabilities'",
   );
-  assertStringIncludes(index, "isTerminalSyntheticLivefireJob(job)");
+  assertStringIncludes(index, "terminalSyntheticLivefireJobIds");
   assertStringIncludes(
     index,
     "synthetic_livefire_release_forbidden:",

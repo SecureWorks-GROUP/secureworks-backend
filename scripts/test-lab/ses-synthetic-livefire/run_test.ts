@@ -95,6 +95,7 @@ async function validInventory(): Promise<{
         id: "draft-1",
         extraction_json: markerObject,
       }],
+      mutableOperationalRows: {},
     },
   };
 }
@@ -116,6 +117,7 @@ Deno.test("cleanup guard accepts only an end-to-end exact marker chain", async (
     revision_approvals: 0,
     external_effects: 0,
     xero_invoices: 0,
+    mutable_operational_rows: 0,
   });
 });
 

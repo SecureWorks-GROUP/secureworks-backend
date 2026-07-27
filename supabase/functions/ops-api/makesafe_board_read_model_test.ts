@@ -434,7 +434,13 @@ Deno.test("terminally accounted synthetic live-fire jobs disappear from both boa
   });
   assertEquals(isSyntheticLivefireJob(synthetic), true);
   assertEquals(isTerminalSyntheticLivefireJob(synthetic), true);
-  assertEquals(buildCanonicalMakesafeRows([synthetic]), []);
+  assertEquals(buildCanonicalMakesafeRows([synthetic]).length, 1);
+  assertEquals(
+    buildCanonicalMakesafeRows([synthetic], {
+      terminalSyntheticLivefireJobIds: new Set([synthetic.id]),
+    }),
+    [],
+  );
 
   const lookalike = baseJob("cancelled", "ordinary-cancelled", {
     metadata: { synthetic_livefire_terminal_at: NOW },

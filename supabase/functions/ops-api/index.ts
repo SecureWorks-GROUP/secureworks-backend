@@ -124,7 +124,6 @@ import {
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
   isSyntheticLivefireJob,
-  isTerminalSyntheticLivefireJob,
   projectTradeMakesafeBoard,
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
@@ -13513,7 +13512,9 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       })
     }
   }
-  const jobs = jobsRaw.filter((job) => !isTerminalSyntheticLivefireJob(job))
+  const terminalSyntheticIds = await terminalSyntheticLivefireJobIds(client)
+  const jobs = jobsRaw.filter((job) =>
+    !(isSyntheticLivefireJob(job) && terminalSyntheticIds.has(String(job.id))))
 
   // Fetch all makesafe_job_details for these jobs
   const jobIds = (jobs || []).map((j: any) => j.id)
@@ -13727,7 +13728,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
     }
   }
   const visibleCancelledRows = cancelledRaw.filter((job) =>
-    !isTerminalSyntheticLivefireJob(job))
+    !(isSyntheticLivefireJob(job) && terminalSyntheticIds.has(String(job.id))))
   if (visibleCancelledRows.length > 0) {
     const cancelledIds = visibleCancelledRows.map((j: any) => j.id)
     const cancelledDetailsMap: Record<string, any> = {}
@@ -13907,6 +13908,23 @@ async function loadCanonicalMakesafeBoard(
     console.error('[ops-api] makesafe_board status application read unavailable:', (error as Error).message)
   }
 
+  let terminalSyntheticLivefireJobIds = new Set<string>()
+  try {
+    const { data: terminalRuns, error } = await client
+      .from('ses_synthetic_livefire_runs')
+      .select('job_ids')
+      .eq('state', 'terminal')
+    if (error) throw error
+    for (const run of terminalRuns || []) {
+      for (const jobId of Array.isArray(run?.job_ids) ? run.job_ids : []) {
+        const normalized = String(jobId || '').trim()
+        if (normalized) terminalSyntheticLivefireJobIds.add(normalized)
+      }
+    }
+  } catch (error) {
+    console.error('[ops-api] makesafe_board terminal synthetic ledger read unavailable:', (error as Error).message)
+  }
+
   const notesByJobId: Record<string, any[]> = {}
   for (const note of notes) {
     const body = note?.detail_json?.text ?? note?.detail_json?.note ?? ''
@@ -13960,6 +13978,7 @@ async function loadCanonicalMakesafeBoard(
     intakeCaseByJobId,
     holdsByJobId,
     statusApplicationsByJobId,
+    terminalSyntheticLivefireJobIds,
   })
 }
 
@@ -14190,6 +14209,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   const since = params.get('since')
   const statusFilter = params.get('status')
   const companyFilter = params.get('company')
+  const terminalSyntheticIds = await terminalSyntheticLivefireJobIds(client)
 
   // ── jobs[] ── one compact row per make-safe job ──
   // Paginate the jobs matching the request instead of silently capping at 500.
@@ -14206,7 +14226,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     if (statusFilter) query = query.eq('status', statusFilter)
     return query
   }, 'makesafe_audit jobs', 'id', false)).filter((job) =>
-    !isTerminalSyntheticLivefireJob(job))
+    !(isSyntheticLivefireJob(job) && terminalSyntheticIds.has(String(job.id))))
 
   const jobIds = (jobs || []).map((j: any) => j.id)
   let detailsMap: Record<string, any> = {}
@@ -21784,6 +21804,9 @@ async function assertLegacySesInvoiceActionAllowed(
         'Sync the invoice from Xero, confirm its job link, then retry only if it is not a sealed SES invoice.',
     })
   }
+  if (invoice.data.job_id) {
+    await assertNoSyntheticLivefireJobs(client, [invoice.data.job_id], action)
+  }
   if (
     invoice.data?.invoice_type &&
     String(invoice.data.invoice_type).toUpperCase() !== 'ACCREC'
@@ -21844,6 +21867,23 @@ async function assertNoSyntheticLivefireJobs(
 }
 export const _assertNoSyntheticLivefireJobsForTest =
   assertNoSyntheticLivefireJobs
+
+async function terminalSyntheticLivefireJobIds(client: any): Promise<Set<string>> {
+  const ids = new Set<string>()
+  const { data, error } = await client.from('ses_synthetic_livefire_runs')
+    .select('job_ids').eq('state', 'terminal')
+  if (error) {
+    console.error('[ops-api] terminal synthetic live-fire ledger read unavailable:', error.message)
+    return ids
+  }
+  for (const run of data || []) {
+    for (const jobId of Array.isArray(run?.job_ids) ? run.job_ids : []) {
+      const normalized = String(jobId || '').trim()
+      if (normalized) ids.add(normalized)
+    }
+  }
+  return ids
+}
 
 async function assertNoSyntheticLivefireReleaseRevision(
   client: any,
@@ -22451,6 +22491,7 @@ async function updateInvoice(client: any, body: any, adminClientOverride?: any) 
     xero_invoice_id,
     'update_invoice',
   )
+
 
   // ── REPORT-JOB $0 GATE ──
   // Mirror the create_invoice / complete_and_invoice guards: a report-type make-safe
@@ -33535,6 +33576,7 @@ async function sendPaymentLink(client: any, body: any) {
     jId,
     'send_payment_link',
   )
+  await assertNoSyntheticLivefireJobs(client, [jId], 'send_payment_link')
 
   // Dedup check: prevent sending same payment link within 24 hours
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
@@ -34032,6 +34074,7 @@ async function sendAcceptanceInvoice(client: any, body: any) {
 async function sendReviewRequest(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
+  await assertNoSyntheticLivefireJobs(client, [jId], 'send_review_request')
 
   const { data: job, error: jobErr } = await client
     .from('jobs')

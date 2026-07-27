@@ -301,6 +301,20 @@ COMMENT ON TABLE public.ses_synthetic_livefire_runs IS
 COMMENT ON FUNCTION public.ses_synthetic_livefire_marker_is_terminal(text) IS
   'Read-only service-role helper for excluding a terminally accounted synthetic live-fire run from live projections and health counts.';
 
+ALTER TABLE public.job_events
+  ALTER COLUMN job_id DROP NOT NULL;
+ALTER TABLE public.job_events
+  DROP CONSTRAINT IF EXISTS job_events_job_id_fkey;
+ALTER TABLE public.job_events
+  ADD CONSTRAINT job_events_job_id_fkey
+  FOREIGN KEY (job_id) REFERENCES public.jobs(id) ON DELETE SET NULL;
+
+ALTER TABLE public.makesafe_intake_cases
+  DROP CONSTRAINT IF EXISTS makesafe_intake_cases_job_id_fkey;
+ALTER TABLE public.makesafe_intake_cases
+  ADD CONSTRAINT makesafe_intake_cases_job_id_fkey
+  FOREIGN KEY (job_id) REFERENCES public.jobs(id) ON DELETE SET NULL;
+
 -- Fresh-source health must not let retained group evidence move work-coverage
 -- timestamps or counts after cleanup. cleanup_complete is the short proof window:
 -- storage/rows are clean, the runner can now observe the exclusion live, and only
