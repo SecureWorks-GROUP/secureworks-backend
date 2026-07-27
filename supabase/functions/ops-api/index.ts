@@ -24849,8 +24849,10 @@ async function tradeJobDetail(
         roof_report_draft_status: roofDraft?.status || null,
         // Flag-only surface: no invoice number, amount, or disposition options
         // enter the trade payload. Captain still owns the option set.
-        billing_review_required: reviewMatchesCurrentCycle &&
-          reviewDetail.disposition == null,
+        billing_review_required: !!billingReviewRes.error || (
+          reviewMatchesCurrentCycle && reviewDetail.disposition == null
+        ),
+        billing_review_unavailable: !!billingReviewRes.error,
       } : null
     } catch (e) {
       console.log('[ops-api] trade makesafe details fetch skipped:', (e as Error).message)
@@ -27323,9 +27325,12 @@ async function resolveRoofReportPhotos(
       500,
     )
   }
+  if (!detail) {
+    throw new ApiError('roof report photo cycle read failed: missing makesafe detail', 500)
+  }
   const currentMedia = filterMediaForCurrentCycle(
     (media as any[]) || [],
-    detail || { cycle_number: 1, reattend_count: 0 },
+    detail,
     detail?.attendance_cycle_id || null,
   )
   const currentUrls = new Set(currentMedia.map((m: any) => String(m?.storage_url || '')).filter(Boolean))
@@ -30468,7 +30473,7 @@ export async function reattendMakesafe(client: any, args: {
   }
 
   const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
-    .select('job_id, substatus, report_received_at, cycle_number, reattend_count, attendance_cycle_id')
+    .select('job_id, substatus, report_received_at, cycle_number, reattend_count, attendance_cycle_id, last_reattend_at, last_reattend_reason')
     .eq('job_id', jobId).maybeSingle()
   if (detailErr) throw new ApiError('reattendMakesafe: detail read failed: ' + detailErr.message, 500)
   if (!detail) {
@@ -30559,8 +30564,12 @@ export async function reattendMakesafe(client: any, args: {
       Number(eventDetail.cycle_number || 0) === currentCycle &&
       String(eventDetail.reason || '') === reason
   })
+  const committedTransition = detail.substatus === 'waiting_on_trade_report' &&
+    !detail.report_received_at &&
+    !!detail.last_reattend_at &&
+    String(detail.last_reattend_reason || '') === reason
   const retryableTransition = detail.substatus === 'waiting_on_trade_report' &&
-    !detail.report_received_at && !!retryEvent
+    !detail.report_received_at && (!!retryEvent || committedTransition)
   const priorInvoiceSummary = (liveInvoices || []).map((inv: any) => ({
     xero_id: inv.xero_invoice_id || inv.id || null,
     status: inv.status || null,
