@@ -296,8 +296,9 @@ brakes remain, but advance-what-passes is the default.
 `makesafe-ses-poll` is called by `pg_net` with a 5-second request deadline, but a
 bounded deterministic batch can legitimately run longer. Keep the nested
 `scan_ses_makesafes` call owned by `EdgeRuntime.waitUntil`; never make the monitor
-await the scan or paper over batch growth with a larger fixed timeout. The scan
-remains bounded by its 500-source read cap, 1..10 case cap and attempt ceiling.
+await the scan or paper over batch growth with a larger fixed timeout. The
+standing entry point passes a four-source read cap to the deterministic runtime;
+the runtime still enforces its 1..10 case cap and attempt ceiling.
 
 Transfer the existing 10-minute mailbox lease to that continuation and release it
 only when the nested scan settles, so the two-minute poll cannot launch overlapping

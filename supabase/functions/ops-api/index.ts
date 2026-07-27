@@ -16821,20 +16821,42 @@ async function landLateWorkOrderPdfOntoDraft(
 }
 export const _landLateWorkOrderPdfOntoDraftForTest = landLateWorkOrderPdfOntoDraft
 
-async function scanSesMakesafes(client: any) {
+// The edge runtime enforces a ~2s CPU budget. Live evidence on 2026-07-27 showed
+// that the runtime default (500 sources -> up to 50 PDF parses) consistently
+// exhausted that budget. Four sources keep the standing scan to at most eight
+// PDF parses while the runtime's completion checkpoint advances the backlog half
+// after every successful invocation.
+const STANDING_SCAN_MAX_SOURCES_PER_RUN = 4
+
+interface StandingScanDeps {
+  loadRollout?: (client: any) => Promise<any>
+  autoApproveEnabled?: () => boolean
+  loadAutoFileEnabled?: (client: any) => Promise<boolean>
+  run?: (client: any, options: any) => Promise<any>
+}
+
+async function scanSesMakesafes(
+  client: any,
+  deps: StandingScanDeps = {},
+) {
   // Standing intake is deterministic unconditionally. The DB row supplies bounded
   // selection controls only; it can no longer select the retired paid-AI engine.
-  const rollout = await _loadDeterministicRolloutControls(client)
+  const rollout = await (deps.loadRollout || _loadDeterministicRolloutControls)(
+    client,
+  )
   // Read the two existing auto-file brakes once. They may park a clean draft, but
   // they never turn off deterministic parsing, accounting or quarantine.
-  const advanceDrafts = autoApproveCleanIntakeEnabled() && await isAutoFileEnabled(client)
-  return await _runDeterministicIntake(client, {
+  const advanceDrafts =
+    (deps.autoApproveEnabled || autoApproveCleanIntakeEnabled)() &&
+    await (deps.loadAutoFileEnabled || isAutoFileEnabled)(client)
+  return await (deps.run || _runDeterministicIntake)(client, {
     dryRun: false,
     selectionMode: rollout.selectionMode,
     days: 60,
-    // Full-open still reads a bounded cursor page and commits at most maxCases.
+    // Full-open reads a small cursor page and commits at most maxCases.
     // Exact selection remains available only on explicit diagnostic actions.
     onlyUnscanned: false,
+    maxSources: STANDING_SCAN_MAX_SOURCES_PER_RUN,
     maxCases: rollout.maxCases,
     allowSourcePostIds: rollout.sourcePostIds,
     allowInstructionKeys: rollout.instructionKeys,
@@ -16842,6 +16864,7 @@ async function scanSesMakesafes(client: any) {
     approveDraft: approveIntakeDraft,
   })
 }
+export const _scanSesMakesafesForTest = scanSesMakesafes
 
 const REPORTING_INTAKE_ADVANCE_LIMIT = 100
 
