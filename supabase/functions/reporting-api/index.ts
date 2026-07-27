@@ -16,6 +16,11 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import {
+  classifySealedSesJob,
+  sealedSesMoneyRefusal,
+  type SealedSesMoneyRefusal,
+} from '../_shared/sealed_ses_money_fence.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -148,6 +153,15 @@ function json(data: unknown, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json', ...CORS },
   })
+}
+
+class ReportingApiRefusalError extends Error {
+  constructor(
+    public status: number,
+    public refusal: SealedSesMoneyRefusal,
+  ) {
+    super(refusal.fact)
+  }
 }
 
 serve(async (req: Request) => {
@@ -296,6 +310,13 @@ serve(async (req: Request) => {
     }
   } catch (err) {
     console.error(`reporting-api [${action}] error:`, err)
+    if (err instanceof ReportingApiRefusalError) {
+      return json({
+        success: false,
+        refusal: err.refusal,
+        error: err.refusal.fact,
+      }, err.status)
+    }
     return json({ error: (err as Error).message || String(err) }, 500)
   }
 })
@@ -2266,7 +2287,7 @@ async function matchInvoicesToJobs(sb: any) {
   // Get all unmatched invoices (sales + bills without a job_id)
   const { data: invoices, error: invErr } = await sb
     .from('xero_invoices')
-    .select('id, contact_name, xero_contact_id, invoice_type, reference')
+    .select('id, xero_invoice_id, invoice_number, contact_name, xero_contact_id, invoice_type, reference, invoice_obligation_revision_id, ses_external_token')
     .eq('org_id', DEFAULT_ORG_ID)
     .is('job_id', null)
     .in('invoice_type', ['ACCREC', 'ACCPAY'])
@@ -2280,7 +2301,7 @@ async function matchInvoicesToJobs(sb: any) {
   // Get all jobs with contact details + job_number for reference matching
   const { data: jobs, error: jobErr } = await sb
     .from('jobs')
-    .select('id, client_name, client_email, client_phone, ghl_contact_id, job_number')
+    .select('id, client_name, client_email, client_phone, ghl_contact_id, job_number, type')
     .eq('org_id', DEFAULT_ORG_ID)
     .limit(5000)
 
@@ -2288,6 +2309,17 @@ async function matchInvoicesToJobs(sb: any) {
   if (!jobs || jobs.length === 0) {
     return { success: true, matched: 0, message: 'No jobs to match against' }
   }
+  let makesafeDetails: any[]
+  try {
+    makesafeDetails = await fetchAll(sb, 'makesafe_job_details', 'job_id')
+  } catch (error) {
+    throw new Error(
+      `The sealed SES make-safe detail could not be checked before invoice matching (${(error as Error).message || 'unknown database error'}).`,
+    )
+  }
+  const makesafeDetailJobIds = new Set(
+    (makesafeDetails || []).map((row: any) => String(row.job_id)),
+  )
 
   // Build job_number lookup for reference matching
   const jobByNumber: Record<string, any> = {}
@@ -2338,6 +2370,11 @@ async function matchInvoicesToJobs(sb: any) {
   let updateErrors = 0
   const matchLog: string[] = []
   const failLog: string[] = []
+  const plannedMatches: Array<{
+    invoice: any
+    job: any
+    match_type: string
+  }> = []
 
   for (const inv of invoices) {
     let matchedJob: any = null
@@ -2397,19 +2434,59 @@ async function matchInvoicesToJobs(sb: any) {
     }
 
     if (matchedJob) {
-      const { error } = await sb
-        .from('xero_invoices')
-        .update({ job_id: matchedJob.id })
-        .eq('id', inv.id)
+      plannedMatches.push({
+        invoice: inv,
+        job: matchedJob,
+        match_type: matchType,
+      })
+    }
+  }
 
-      if (!error) {
-        matched++
-        const invLabel = inv.contact_name || inv.reference || '?'
-        matchLog.push(`${invLabel} → ${matchedJob.client_name} [${matchType}]`)
-      } else {
-        updateErrors++
-        failLog.push(`${inv.contact_name || inv.reference}: ${error.message}`)
-      }
+  // F8 sibling fence: plan the full batch first, then refuse before any update
+  // when an ACCREC would be attached to the sealed SES make-safe population.
+  for (const plan of plannedMatches) {
+    if (
+      String(plan.invoice.invoice_type || '').toUpperCase() === 'ACCREC' &&
+      (
+        plan.invoice.invoice_obligation_revision_id ||
+        plan.invoice.ses_external_token ||
+        classifySealedSesJob(
+          plan.job,
+          makesafeDetailJobIds.has(String(plan.job.id)),
+        ).sealed
+      )
+    ) {
+      throw new ReportingApiRefusalError(
+        409,
+        sealedSesMoneyRefusal('reporting-api/match_invoices', {
+          xero_invoice_row_id: plan.invoice.id,
+          xero_invoice_id: plan.invoice.xero_invoice_id || null,
+          invoice_number: plan.invoice.invoice_number || null,
+          ses_release_binding: !!(
+            plan.invoice.invoice_obligation_revision_id ||
+            plan.invoice.ses_external_token
+          ),
+          target_job_id: plan.job.id,
+          target_job_number: plan.job.job_number || null,
+          match_type: plan.match_type,
+        }),
+      )
+    }
+  }
+
+  for (const plan of plannedMatches) {
+    const { error } = await sb
+      .from('xero_invoices')
+      .update({ job_id: plan.job.id })
+      .eq('id', plan.invoice.id)
+
+    if (!error) {
+      matched++
+      const invLabel = plan.invoice.contact_name || plan.invoice.reference || '?'
+      matchLog.push(`${invLabel} → ${plan.job.client_name} [${plan.match_type}]`)
+    } else {
+      updateErrors++
+      failLog.push(`${plan.invoice.contact_name || plan.invoice.reference}: ${error.message}`)
     }
   }
 

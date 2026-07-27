@@ -206,7 +206,7 @@ export async function resolveSesInvoiceDuplicatesByJob(
   const jobIds = [...new Set(requests.map((request) => request.job_id))];
   const response = await client.from("xero_invoices")
     .select(
-      "id,job_id,xero_invoice_id,invoice_number,status,reference,invoice_type",
+      "id,job_id,xero_invoice_id,invoice_number,status,reference,invoice_type,invoice_obligation_revision_id",
     )
     .eq("org_id", orgId)
     .in("job_id", jobIds);

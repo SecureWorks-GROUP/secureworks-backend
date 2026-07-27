@@ -1,10 +1,11 @@
-// deno-lint-ignore-file no-import-prefix
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   resolveSesInvoiceDuplicates,
+  resolveSesInvoiceDuplicatesByJob,
   type SesInvoiceIndexRow,
 } from "./makesafe_invoice_duplicate_resolver.ts";
 
@@ -95,6 +96,40 @@ Deno.test("obligation binding outranks mirror reference matching", () => {
       }),
     ],
   );
+  assertEquals(result.match_tier, "obligation_binding");
+  assertEquals(result.allows_create, false);
+});
+
+Deno.test("indexed helper selects obligation binding so it cannot miss a bound duplicate", async () => {
+  let selectedColumns = "";
+  const client: any = {
+    from: () => ({
+      select: (columns: string) => {
+        selectedColumns = columns;
+        return {
+          eq: () => ({
+            in: async () => ({
+              data: [invoice({
+                job_id: "40000000-0000-4000-8000-000000000004",
+                invoice_obligation_revision_id:
+                  "30000000-0000-4000-8000-000000000003",
+              })],
+              error: null,
+            }),
+          }),
+        };
+      },
+    }),
+  };
+  const [result] = await resolveSesInvoiceDuplicatesByJob(
+    client,
+    "00000000-0000-0000-0000-000000000001",
+    [{
+      job_id: JOB,
+      obligation_revision_id: "30000000-0000-4000-8000-000000000003",
+    }],
+  );
+  assert(selectedColumns.includes("invoice_obligation_revision_id"));
   assertEquals(result.match_tier, "obligation_binding");
   assertEquals(result.allows_create, false);
 });

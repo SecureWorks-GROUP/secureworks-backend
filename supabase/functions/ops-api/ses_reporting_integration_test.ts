@@ -12,6 +12,18 @@ const ACTIONS = await Deno.readTextFile(
 const EFFECTS = await Deno.readTextFile(
   new URL("./ses_external_effects.ts", import.meta.url),
 );
+const SEND_QUOTE = await Deno.readTextFile(
+  new URL("../send-quote/index.ts", import.meta.url),
+);
+const FENCE = await Deno.readTextFile(
+  new URL("../_shared/sealed_ses_money_fence.ts", import.meta.url),
+);
+const REPORTING = await Deno.readTextFile(
+  new URL("../reporting-api/index.ts", import.meta.url),
+);
+const XERO_SYNC = await Deno.readTextFile(
+  new URL("../xero-sync/index.ts", import.meta.url),
+);
 
 Deno.test("legacy free invoice and combined-send actions are retired", () => {
   for (
@@ -30,26 +42,233 @@ Deno.test("legacy free invoice and combined-send actions are retired", () => {
   assertStringIncludes(INDEX, "legacy_route_send_retired");
 });
 
-Deno.test("legacy invoice sends hit the sealed SES U6R gate before provider effects", () => {
+Deno.test("legacy invoice sends hit the sealed SES release gate before provider effects", () => {
   const sendStart = INDEX.indexOf("case 'send_invoice_email'");
   const sendGate = INDEX.indexOf(
-    "assertLegacySesInvoiceSendAllowed(",
+    "assertLegacySesInvoiceActionAllowed(",
     sendStart,
   );
-  const sendProvider = INDEX.indexOf("xeroPost(`/Invoices/${siId}/Email`,", sendStart);
+  const sendProvider = INDEX.indexOf(
+    "xeroPost(`/Invoices/${siId}/Email`,",
+    sendStart,
+  );
   assert(sendGate > sendStart && sendGate < sendProvider);
 
   const approveStart = INDEX.indexOf("case 'approve_and_send_invoice'");
   const approveGate = INDEX.indexOf(
-    "assertLegacySesInvoiceSendAllowed(",
+    "assertLegacySesInvoiceActionAllowed(",
     approveStart,
   );
-  const approveProvider = INDEX.indexOf("xeroPost(`/Invoices/${asId}`", approveStart);
+  const approveProvider = INDEX.indexOf(
+    "xeroPost(`/Invoices/${asId}`",
+    approveStart,
+  );
   assert(approveGate > approveStart && approveGate < approveProvider);
   assertStringIncludes(INDEX, "invoice_obligation_revision_id");
-  assertStringIncludes(INDEX, "code: 'u6r_release_required'");
-  assertStringIncludes(INDEX, "U6R SEND IT is the only release and provider-effect path.");
-  assertStringIncludes(INDEX, "execute_ses_release_revision");
+  assertStringIncludes(INDEX, "sealedSesMoneyRefusal(action");
+  assertStringIncludes(FENCE, 'code: "sealed_ses_release_required"');
+  assertStringIncludes(FENCE, "execute_ses_invoice_revision");
+  assertStringIncludes(FENCE, "execute_ses_release_revision");
+});
+
+Deno.test("all legacy sealed-SES money and link surfaces fence before effects", () => {
+  const before = (
+    startText: string,
+    gateText: string,
+    effectText: string,
+  ) => {
+    const start = INDEX.indexOf(startText);
+    const gate = INDEX.indexOf(gateText, start);
+    const effect = INDEX.indexOf(effectText, start);
+    assert(
+      start >= 0 && gate > start && effect > gate,
+      `${startText} must call ${gateText} before ${effectText}`,
+    );
+  };
+
+  before(
+    "case 'update_invoice_job_link'",
+    "assertLegacySesInvoiceActionAllowed(",
+    ".update({ job_id: jid",
+  );
+  before(
+    "case 'void_invoice'",
+    "assertLegacySesInvoiceActionAllowed(client, vid",
+    "xeroPost(`/Invoices/${vid}`",
+  );
+  before(
+    "case 'approve_invoice'",
+    "assertLegacySesInvoiceActionAllowed(client, aid",
+    "xeroPost(`/Invoices/${aid}`",
+  );
+  before(
+    "async function updateInvoice(",
+    "assertLegacySesInvoiceActionAllowed(",
+    "xeroPost(`/Invoices/${xero_invoice_id}`",
+  );
+  before(
+    "async function markInvoicePaid(",
+    "assertLegacySesInvoiceActionAllowed(",
+    ".update({\n    status: 'PAID'",
+  );
+  before(
+    "async function completeAndInvoice(",
+    "assertLegacySesMoneyActionAllowedForJob(",
+    ".update({ status: 'complete'",
+  );
+  before(
+    "async function sendPaymentLink(",
+    "assertLegacySesMoneyActionAllowedForJob(",
+    "fetch(ghlUrl",
+  );
+  before(
+    "async function sendAcceptanceInvoice(",
+    "assertLegacySesMoneyActionAllowedForJob(",
+    "createDepositInvoice(client",
+  );
+  before(
+    "async function syncJobInvoices(",
+    "assertLegacySesMoneyActionAllowedForJob(",
+    "xeroGet('/Invoices'",
+  );
+  before(
+    "async function reconcilePayment(",
+    "assertLegacySesInvoiceActionAllowed(",
+    "xeroPost('/Payments'",
+  );
+  before(
+    "async function sendClientUpdate(",
+    "assertLegacySesMoneyActionAllowedForJob(",
+    "fetch(ghlUrl",
+  );
+});
+
+Deno.test("create choke fences F9 email and resolves duplicates before Xero", () => {
+  const start = INDEX.indexOf("async function createInvoice(");
+  const fence = INDEX.indexOf(
+    "assertLegacySesMoneyActionAllowedForJob(",
+    start,
+  );
+  const duplicate = INDEX.indexOf(
+    "assertSealedSesInvoiceCreateIsUnique(",
+    start,
+  );
+  const create = INDEX.indexOf("xeroPost('/Invoices'", start);
+  const email = INDEX.indexOf(
+    "xeroPost(`/Invoices/${xeroInvId}/Email`",
+    start,
+  );
+  assert(start >= 0 && fence > start);
+  assert(duplicate > fence && create > duplicate && email > create);
+  for (
+    const wrapper of [
+      "completeAndInvoice",
+      "createGeneralInvoice",
+      "createUnifiedInvoice",
+      "createDepositInvoice",
+    ]
+  ) {
+    const wrapperStart = INDEX.indexOf(`async function ${wrapper}(`);
+    assert(
+      INDEX.indexOf("createInvoice(client", wrapperStart) > wrapperStart,
+      `${wrapper} must delegate ACCREC creation to the fenced choke`,
+    );
+  }
+});
+
+Deno.test("send-quote branded invoice email refuses sealed SES before Resend", () => {
+  const start = SEND_QUOTE.indexOf("if (path === 'send-invoice'");
+  const fence = SEND_QUOTE.indexOf("inspectSealedSesJob(sb, job_id)", start);
+  const refusal = SEND_QUOTE.indexOf(
+    "sealedSesMoneyRefusal('send-quote/send-invoice'",
+    start,
+  );
+  const provider = SEND_QUOTE.indexOf(
+    "fetch('https://api.resend.com/emails'",
+    start,
+  );
+  assert(start >= 0 && fence > start && refusal > fence && provider > refusal);
+  assertStringIncludes(SEND_QUOTE, "sealed_ses_fence_check_failed");
+});
+
+Deno.test("reporting auto-match cannot become an F8 relink path", () => {
+  const start = REPORTING.indexOf("async function matchInvoicesToJobs(");
+  const details = REPORTING.indexOf(
+    "fetchAll(sb, 'makesafe_job_details'",
+    start,
+  );
+  const fence = REPORTING.indexOf("classifySealedSesJob(", start);
+  const update = REPORTING.indexOf(".update({ job_id: plan.job.id })", start);
+  assert(start >= 0 && details > start && fence > details && update > fence);
+  assertStringIncludes(REPORTING, "ReportingApiRefusalError");
+  assertStringIncludes(
+    REPORTING,
+    "sealedSesMoneyRefusal('reporting-api/match_invoices'",
+  );
+});
+
+Deno.test("all xero-sync ACCREC auto-link writers use the sealed SES fence", () => {
+  assertStringIncludes(XERO_SYNC, "sealedSesXeroLinkRefusal(");
+  assertStringIncludes(XERO_SYNC, "linkContactInvoicesToJob(");
+  assertStringIncludes(XERO_SYNC, "invoice_obligation_revision_id");
+  assertStringIncludes(XERO_SYNC, "ses_external_token");
+  assertStringIncludes(XERO_SYNC, "ses_link_refusals");
+
+  const unlinkedStart = XERO_SYNC.indexOf(
+    "export async function matchUnlinkedInvoices(",
+  );
+  const unlinkedFence = XERO_SYNC.indexOf(
+    "sealedSesXeroLinkRefusal(",
+    unlinkedStart,
+  );
+  const unlinkedUpdate = XERO_SYNC.indexOf(
+    ".update({ job_id: job.id",
+    unlinkedStart,
+  );
+  assert(
+    unlinkedStart >= 0 && unlinkedFence > unlinkedStart &&
+      unlinkedUpdate > unlinkedFence,
+  );
+
+  const referenceStart = XERO_SYNC.indexOf(
+    "async function matchInvoicesByReference(",
+  );
+  const referenceFence = XERO_SYNC.indexOf(
+    "sealedSesXeroLinkRefusal(",
+    referenceStart,
+  );
+  const referenceUpdate = XERO_SYNC.indexOf(
+    ".update({ job_id: job.id })",
+    referenceStart,
+  );
+  assert(
+    referenceStart >= 0 && referenceFence > referenceStart &&
+      referenceUpdate > referenceFence,
+  );
+});
+
+Deno.test("annotation relinking fences before resolving or linking", () => {
+  const start = INDEX.indexOf("async function resolveAnnotation(");
+  const targetFence = INDEX.indexOf(
+    "assertLegacySesMoneyActionAllowedForJob(",
+    start,
+  );
+  const sourceFence = INDEX.indexOf(
+    "assertLegacySesInvoiceRowsActionAllowed(",
+    start,
+  );
+  const resolve = INDEX.indexOf(
+    ".update({\n      status: 'resolved'",
+    start,
+  );
+  const link = INDEX.indexOf(
+    ".update({ job_id: ann.structured_data.job_id })",
+    start,
+  );
+  assert(
+    start >= 0 && targetFence > start && sourceFence > targetFence &&
+      resolve > sourceFence && link > resolve,
+  );
 });
 
 Deno.test("routine allowlist exposes only SES prepare and read actions", () => {
@@ -95,7 +314,7 @@ Deno.test("Xero create is DRAFT-only and suppresses legacy side effects", () => 
   );
   assertStringIncludes(
     INDEX,
-    "This make-safe has a sealed U4 docket but no current human APPROVE INVOICE decision",
+    "assertSealedSesInvoiceCreateIsUnique(",
   );
 });
 
