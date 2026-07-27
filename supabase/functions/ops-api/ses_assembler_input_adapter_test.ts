@@ -9,6 +9,7 @@ import {
   normalizeSesPrepareRequest,
   physicalReportRenderJob,
   SesAssemblerAdapterError,
+  summarizeSesPrepareResponseForHttp,
   type SesAssemblerLiveSnapshot,
 } from "./ses_assembler_input_adapter.ts";
 import {
@@ -347,6 +348,84 @@ Deno.test(
     assertEquals(response.results[0].state, "blocked");
     assertEquals(renderCalls, 0);
     assert(blockerCodes(response.results[0]).includes("spine_missing_source"));
+  },
+);
+
+Deno.test(
+  "U4 HTTP response keeps artifact proof but never serializes raw bytes",
+  async () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.reports[0].checklist_json = {
+      damage_description: "Patio roof damage",
+      work_done: "Removed loose material",
+      access_issues: "",
+      follow_up_required: false,
+      labour_hours: 2,
+      trade_count: 2,
+    };
+    live.media = [
+      {
+        id: "30ad0e72-351c-4f2b-8987-e490c9ffb774",
+        job_id: live.job.id,
+        type: "photo",
+        phase: "completion",
+        attendance_cycle_id: live.detail!.attendance_cycle_id,
+        cycle_attribution: "bound",
+      },
+    ];
+    const input = buildSesAssemblerInput(live);
+    const response = await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: input.identity.job_id },
+        idempotency_key: "physical-http-artifact-summary",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      {
+        resolveInput: async () => input,
+        resolveSourceArtifacts: async () => sourceResolver(input),
+        resolvePhotoArtifacts: async () => [
+          {
+            photo_id: input.cycle_facts.photos[0].id,
+            source_pointer: input.cycle_facts.photos[0].path_or_key,
+            file_name: "completion.jpg",
+            media_type: "image/jpeg",
+            bytes: new Uint8Array([1, 2, 3]),
+          },
+        ],
+        resolveSwmsArtifact: async () => null,
+        now: () => new Date("2026-07-27T08:00:00.000Z"),
+      },
+    );
+    const firstArtifact = response.results[0].artifacts[0];
+    assert(firstArtifact);
+    const largeResponse = {
+      ...response,
+      results: [
+        {
+          ...response.results[0],
+          artifacts: [
+            {
+              ...firstArtifact,
+              bytes: new Uint8Array(5_000_000),
+              size_bytes: 5_000_000,
+            },
+            ...response.results[0].artifacts.slice(1),
+          ],
+        },
+      ],
+    };
+
+    const httpResponse = summarizeSesPrepareResponseForHttp(largeResponse);
+    const firstHttpArtifact = httpResponse.results[0].artifacts[0];
+    assertEquals(Object.hasOwn(firstHttpArtifact, "bytes"), false);
+    assertEquals(firstHttpArtifact.content_hash, firstArtifact.content_hash);
+    assertEquals(firstHttpArtifact.size_bytes, 5_000_000);
+    assert(JSON.stringify(httpResponse).length < 100_000);
   },
 );
 
