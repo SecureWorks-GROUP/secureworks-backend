@@ -28,9 +28,10 @@ Dashboard shows accurate per-job revenue attribution
 
 Sealed SES money boundary: an ACCREC invoice that is bound to an SES
 obligation/token, or that would link to a sealed make-safe job, is refused by
-`xero-sync` and `reporting-api` rather than auto-linked. The refusal is typed
-and leaves the invoice unlinked. ACCPAY invoices and non-SES patio, fencing,
-and general jobs retain the normal link path.
+`ops-api`, `xero-sync`, `reporting-api`, and the legacy `send-quote` invoice
+route rather than being created, changed, sent, or auto-linked through those
+paths. The refusal is typed and leaves the invoice unlinked. ACCPAY invoices
+and non-SES patio, fencing, and general jobs retain the normal link path.
 
 ## Job Number Format
 - **SWP-25001** = Patio
@@ -76,6 +77,11 @@ Enhanced response includes: jobNumber, xeroContact, monetaryValue
 - Builds jobByNumber lookup from jobs with job_number
 - data_quality updated: contact_match_rate_low = false, CLV data_quality = 'moderate'
 - `match_invoices` applies the sealed SES money boundary above.
+
+### ops-api (legacy invoice/money paths)
+- Legacy invoice creation, linking, update, approval, void, payment,
+  reconciliation, chase, and send actions apply the sealed SES money boundary
+  above. Sealed SES work must use the approved release actions instead.
 
 ### send-quote (GHL push added)
 - After quote send + job status update, pushes monetaryValue to GHL opportunity (non-blocking)

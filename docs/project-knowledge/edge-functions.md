@@ -111,6 +111,9 @@ All in `supabase/functions/`. Deploy with:
 - **Purpose**: Ops dashboard CRUD — scheduling, POs, WOs, pipeline, job detail, Xero push
 - **Also**: Trade mobile endpoints (my_jobs, upload_photo, service_report)
 - **Also**: AI/automation (morning_brief, scope_to_po, complete_and_invoice)
+- **Sealed SES boundary**: legacy invoice/money paths refuse sealed SES or
+  SES-bound ACCREC work; use the approved SES release flow. Details live in
+  `docs/project-knowledge/sync-layer.md`.
 - **Canonical source**: `secureworks-site/supabase/functions/ops-api`
 - **Deploy guard**: Do not deploy `ops-api` from `securedash` or any dashboard
   submodule/worktree. Stale dashboard copies previously omitted newer site
