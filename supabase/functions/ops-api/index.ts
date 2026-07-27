@@ -4337,11 +4337,7 @@ if (import.meta.main) serve(async (req: Request) => {
           client,
           xiid,
           'update_invoice_job_link',
-        )
-        await assertLegacySesMoneyActionAllowedForJob(
-          client,
           jid,
-          'update_invoice_job_link',
         )
         const { error: linkErr } = await client.from('xero_invoices')
           .update({ job_id: jid, updated_at: new Date().toISOString() })
@@ -40693,6 +40689,11 @@ Return ONLY the JSON object.`
 async function forceReconcileInvoice(dbClient: any, body: any) {
   const { xero_invoice_id } = body
   if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
+  await assertLegacySesInvoiceActionAllowed(
+    dbClient,
+    xero_invoice_id,
+    'force_reconcile_invoice',
+  )
 
   // Call xero-sync to trigger a full sync (which includes reconciliation)
   const resp = await fetch(`${SUPABASE_URL}/functions/v1/xero-sync?action=sync_invoices`, {

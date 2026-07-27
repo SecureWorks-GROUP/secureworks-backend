@@ -2692,6 +2692,29 @@ serve(async (req: Request) => {
         })
         return jsonResponse({ success: false, refusal, error: refusal.fact }, 409, corsHeaders)
       }
+      if (invoiceRecord.job_id && invoiceRecord.job_id !== job_id) {
+        let linkedJobInspection
+        try {
+          linkedJobInspection = await inspectSealedSesJob(sb, invoiceRecord.job_id)
+        } catch (error) {
+          if (!(error instanceof SealedSesMoneyFenceLookupError)) throw error
+          const refusal = {
+            state: 'refused',
+            code: 'sealed_ses_fence_check_failed',
+            fact: error.message,
+            recovery_action: 'Retry only after the invoice-linked job classification can be checked.',
+          }
+          return jsonResponse({ success: false, refusal, error: refusal.fact }, 503, corsHeaders)
+        }
+        if (linkedJobInspection.sealed) {
+          const refusal = sealedSesMoneyRefusal('send-quote/send-invoice', {
+            job_id,
+            linked_job_id: invoiceRecord.job_id,
+            linked_job_matched_by: linkedJobInspection.matched_by,
+          })
+          return jsonResponse({ success: false, refusal, error: refusal.fact }, 409, corsHeaders)
+        }
+      }
 
       // Look up job for reply-to routing and GHL logging
       const { data: invoiceJob } = await sb.from('jobs')
