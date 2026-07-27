@@ -4,6 +4,7 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  chunkMakesafeStateRows,
   type MakesafeReconcileRow,
   planMakesafeStateReconciliation,
 } from "./makesafe_state_reconcile.ts";
@@ -240,4 +241,12 @@ Deno.test("every full-board row is exactly trustworthy or Captain-marked", () =>
   assertEquals(plan.captain_marked, 53);
   assertEquals(plan.neither, 0);
   assertEquals(plan.outcomes.length, 393);
+});
+
+Deno.test("full-board RPC writes split into resumable chunks", () => {
+  const rows = Array.from({ length: 1001 }, (_, index) => index);
+  const chunks = chunkMakesafeStateRows(rows);
+  assertEquals(chunks.map((chunk) => chunk.length), [500, 500, 1]);
+  assertEquals(chunks.flat(), rows);
+  assertEquals(chunkMakesafeStateRows(rows).flat(), rows);
 });

@@ -131,7 +131,10 @@ import {
   attachMakesafeStateV2Comparison,
   buildPrivilegedMakesafeV2BoardComparison,
 } from './makesafe_state_compare.ts'
-import { planMakesafeStateReconciliation } from './makesafe_state_reconcile.ts'
+import {
+  chunkMakesafeStateRows,
+  planMakesafeStateReconciliation,
+} from './makesafe_state_reconcile.ts'
 import {
   buildMakesafeDisagreementList,
   checkMakesafeStatusCanary,
@@ -3276,6 +3279,9 @@ if (import.meta.main) serve(async (req: Request) => {
         if (!dryRun && !runKey) {
           return json({ error: 'run_key is required for a live seed' }, 400)
         }
+        if (!dryRun && `${runKey}:chunk-999999-of-999999`.length > 160) {
+          return json({ error: 'run_key is too long for resumable chunks' }, 400)
+        }
 
         const canonicalRows = await loadCanonicalMakesafeBoard(client)
         const jobIds = canonicalRows.map((row: any) => String(row.id))
@@ -3287,25 +3293,68 @@ if (import.meta.main) serve(async (req: Request) => {
         const selectionHash = `sha256:${hash}`
         let seedResult: any = null
         if (!dryRun) {
-          const { data, error } = await client.rpc(
-            'seed_makesafe_state_authority_v1',
-            {
-              p_run_key: runKey,
-              p_applied_by: 'makesafe-state.v2-seeder',
-              p_selection_hash: selectionHash,
-              p_job_ids: jobIds,
-            },
-          )
-          if (error) {
+          const jobChunks = chunkMakesafeStateRows(jobIds)
+          const chunkedJobIds = jobChunks.flat()
+          if (
+            chunkedJobIds.length !== jobIds.length ||
+            new Set(chunkedJobIds).size !== jobIds.length
+          ) {
             return json({
               ok: false,
               dry_run: false,
               selection_hash: selectionHash,
               requested: jobIds.length,
-              error: error.message || String(error),
-            }, 409)
+              error: 'seed chunks did not cover the exact server-selected board',
+            }, 503)
           }
-          seedResult = data
+          const chunks: any[] = []
+          for (const [chunkIndex, jobChunk] of jobChunks.entries()) {
+            const chunkRunKey = `${runKey}:chunk-${chunkIndex + 1}-of-${jobChunks.length}`
+            const { data, error } = await client.rpc(
+              'seed_makesafe_state_authority_v1',
+              {
+                p_run_key: chunkRunKey,
+                p_applied_by: 'makesafe-state.v2-seeder',
+                p_selection_hash: selectionHash,
+                p_job_ids: jobChunk,
+              },
+            )
+            if (error) {
+              return json({
+                ok: false,
+                dry_run: false,
+                selection_hash: selectionHash,
+                requested: jobIds.length,
+                completed_chunks: chunks.length,
+                chunk_count: jobChunks.length,
+                error: error.message || String(error),
+              }, 409)
+            }
+            chunks.push(data)
+          }
+          const completed = chunks.reduce(
+            (count, chunk) => count + Number(chunk?.requested || 0),
+            0,
+          )
+          if (completed !== jobIds.length) {
+            return json({
+              ok: false,
+              dry_run: false,
+              selection_hash: selectionHash,
+              requested: jobIds.length,
+              completed,
+              completed_chunks: chunks.length,
+              chunk_count: jobChunks.length,
+              error: 'seed did not account for the exact server-selected board',
+            }, 503)
+          }
+          seedResult = {
+            requested: jobIds.length,
+            completed,
+            completed_chunks: chunks.length,
+            chunk_count: jobChunks.length,
+            chunks,
+          }
         }
 
         const acceptedRows = dryRun
@@ -3374,6 +3423,9 @@ if (import.meta.main) serve(async (req: Request) => {
         if (!dryRun && !runKey) {
           return json({ error: 'run_key is required for a live reconciliation' }, 400)
         }
+        if (!dryRun && `${runKey}:chunk-999999-of-999999`.length > 160) {
+          return json({ error: 'run_key is too long for resumable chunks' }, 400)
+        }
 
         const canonicalRows = await loadCanonicalMakesafeBoard(client)
         const computedAt = new Date().toISOString()
@@ -3383,7 +3435,10 @@ if (import.meta.main) serve(async (req: Request) => {
           computedAt,
         )
         const plan = planMakesafeStateReconciliation(comparison.rows)
-        const selection = plan.outcomes
+        const orderedOutcomes = [...plan.outcomes].sort((a, b) =>
+          a.job_id.localeCompare(b.job_id)
+        )
+        const selection = orderedOutcomes
           .map((outcome) => ({
             job_id: outcome.job_id,
             displayed_status: outcome.displayed_status,
@@ -3433,7 +3488,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const comparisonByJob = new Map(
           comparison.rows.map((row: any) => [String(row.id), row]),
         )
-        const rpcRows = plan.outcomes.map((outcome) => {
+        const rpcRows = orderedOutcomes.map((outcome) => {
           const transition = transitionsByJob.get(outcome.job_id)
           const attention = attentionByJob.get(outcome.job_id)
           const row: any = comparisonByJob.get(outcome.job_id)
@@ -3454,26 +3509,62 @@ if (import.meta.main) serve(async (req: Request) => {
             attention_evidence_refs: attention?.evidence_refs || [],
           }
         })
-        const { data: applied, error: applyError } = await client.rpc(
-          'apply_makesafe_board_reconciliation',
-          {
-            p_run_key: runKey,
-            p_applied_by: 'makesafe-state.v2-reconciler',
-            p_selection_hash: selectionHash,
-            p_rows: rpcRows,
-          },
-        )
-        if (applyError) {
+        const rowChunks = chunkMakesafeStateRows(rpcRows)
+        const chunkedJobIds = rowChunks.flat().map((row: any) => row.job_id)
+        if (
+          chunkedJobIds.length !== rpcRows.length ||
+          new Set(chunkedJobIds).size !== rpcRows.length
+        ) {
           return json({
             ...baseResult,
-            error: applyError.message || String(applyError),
-          }, 409)
+            error: 'reconciliation chunks did not cover the exact server-selected board',
+          }, 503)
+        }
+        const appliedChunks: any[] = []
+        for (const [chunkIndex, rowChunk] of rowChunks.entries()) {
+          const chunkRunKey = `${runKey}:chunk-${chunkIndex + 1}-of-${rowChunks.length}`
+          const { data: applied, error: applyError } = await client.rpc(
+            'apply_makesafe_board_reconciliation',
+            {
+              p_run_key: chunkRunKey,
+              p_applied_by: 'makesafe-state.v2-reconciler',
+              p_selection_hash: selectionHash,
+              p_rows: rowChunk,
+            },
+          )
+          if (applyError) {
+            return json({
+              ...baseResult,
+              completed_chunks: appliedChunks.length,
+              chunk_count: rowChunks.length,
+              error: applyError.message || String(applyError),
+            }, 409)
+          }
+          appliedChunks.push(applied)
+        }
+        const accounted = appliedChunks.reduce(
+          (count, chunk) => count + Number(chunk?.requested || 0),
+          0,
+        )
+        if (accounted !== rpcRows.length) {
+          return json({
+            ...baseResult,
+            completed: accounted,
+            completed_chunks: appliedChunks.length,
+            chunk_count: rowChunks.length,
+            error: 'reconciliation did not account for the exact server-selected board',
+          }, 503)
         }
         return json({
           ...baseResult,
           dry_run: false,
           run_key: runKey,
-          idempotent_replay: applied?.idempotent_replay === true,
+          completed: accounted,
+          completed_chunks: appliedChunks.length,
+          chunk_count: rowChunks.length,
+          idempotent_replay: appliedChunks.every((chunk) =>
+            chunk?.idempotent_replay === true
+          ),
         })
       }
       case 'makesafe_status_apply': {

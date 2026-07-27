@@ -28,6 +28,22 @@ const STAGE_RANK = new Map([
   ["cancelled", 6],
 ]);
 
+export const MAKESAFE_STATE_RPC_CHUNK_SIZE = 500;
+
+export function chunkMakesafeStateRows<T>(
+  rows: readonly T[],
+  size = MAKESAFE_STATE_RPC_CHUNK_SIZE,
+): T[][] {
+  if (!Number.isSafeInteger(size) || size < 1) {
+    throw new Error("chunk size must be a positive integer");
+  }
+  const chunks: T[][] = [];
+  for (let index = 0; index < rows.length; index += size) {
+    chunks.push([...rows.slice(index, index + size)]);
+  }
+  return chunks;
+}
+
 export interface MakesafeCaptainAction {
   code: string;
   message: string;
