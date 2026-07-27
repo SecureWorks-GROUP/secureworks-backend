@@ -3141,7 +3141,7 @@ if (import.meta.main) serve(async (req: Request) => {
           real_front_door: 'm365-group:ses@secureworkswa.com.au',
           synthetic_sender: 'marnin@secureworkswa.com.au',
           terminal_accounting: true,
-          cleanup_contract_version: 'ledger-bound-readiness-purge/v1',
+          cleanup_contract_version: 'ledger-bound-case-tombstone-purge/v2',
           mailbox_retention: true,
           release_refusal_probe: true,
           outbound_actions: false,

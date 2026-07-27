@@ -690,7 +690,7 @@ async function preflight(
     capability.synthetic_sender !== run.sender ||
     capability.terminal_accounting !== true ||
     capability.cleanup_contract_version !==
-      "ledger-bound-readiness-purge/v1" ||
+      "ledger-bound-case-tombstone-purge/v2" ||
     capability.release_refusal_probe !== true ||
     capability.outbound_actions !== false ||
     capability.xero_actions !== false
