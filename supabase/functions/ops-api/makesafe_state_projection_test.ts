@@ -6,6 +6,7 @@ import {
 import {
   EMPTY_CANCELLATION,
   EMPTY_TERMINAL_PROOF,
+  canonicalizeMakesafeDocumentRole,
   type MakesafeStateInput,
   projectMakesafeStateV2,
   type VersionedCycleFact,
@@ -39,6 +40,8 @@ function baseInput(): MakesafeStateInput {
     computed_at: NOW,
     projection_input_errors: [],
     identity: {
+      authority_kind: "effective_intake_case",
+      authority_revision_id: "case-1",
       source_instruction_id: "instruction-1",
       lineage_id: "lineage-1",
       case_id: "case-1",
@@ -317,6 +320,28 @@ Deno.test("portal family uses its typed current-cycle capture recipe", () => {
     projectMakesafeStateV2(input).ops_stage,
     "trade_report_in",
   );
+});
+
+Deno.test("document facts use the canonical roof_report role", () => {
+  assertEquals(canonicalizeMakesafeDocumentRole("roof_report"), "roof_report");
+  assertEquals(canonicalizeMakesafeDocumentRole("roof-report"), "roof_report");
+});
+
+Deno.test("document requirements use the same canonical role aliases", () => {
+  const input = baseInput();
+  input.family_rule = {
+    code: "roof_report",
+    kind: "portal",
+    matrix_revision: "family-2",
+    matrix_content_hash: SHA_A,
+    required_document_types: ["roof-report"],
+  };
+  input.documents = [fact("document-1", "submitted", "roof_report")];
+  assertEquals(projectMakesafeStateV2(input).ops_stage, "trade_report_in");
+});
+
+Deno.test("unknown document types remain unmapped", () => {
+  assertEquals(canonicalizeMakesafeDocumentRole("future_document"), null);
 });
 
 Deno.test("next action follows the closed precedence chain", () => {

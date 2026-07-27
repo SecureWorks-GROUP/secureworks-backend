@@ -14,6 +14,7 @@ import {
 import {
   type BlockerFact,
   type CancellationDimension,
+  canonicalizeMakesafeDocumentRole,
   diffV1V2State,
   EMPTY_CANCELLATION,
   EMPTY_TERMINAL_PROOF,
@@ -50,6 +51,7 @@ export interface MakesafeV2FactSet {
     authority_flipped: boolean;
   };
   jobFamilies: any[];
+  identities: any[];
   cycles: any[];
   cases: any[];
   assignments: any[];
@@ -65,9 +67,13 @@ export interface MakesafeV2FactSet {
   packCycles: any[];
   packs: any[];
   approvals: any[];
+  details: any[];
+  dockets: any[];
 }
 
 const SELECTS = {
+  identities:
+    "id,job_id,authority_kind,effective_case_id,source_instruction_id,source_version,source_content_hash,lineage_id,lineage_version,lineage_correction_hash,lineage_supersession_hash,intake_state,family_state,family_rule_key,evidence_refs,revision_hash",
   cycles:
     "id,job_id,cycle_number,opened_at,closed_at,makesafe_fact_version,makesafe_content_hash",
   cases:
@@ -98,6 +104,10 @@ const SELECTS = {
   approvals:
     "id,job_id,action,decision,readiness_revision,dependency_generation,docket_revision_id,release_revision_id,decided_at",
   jobFamilies: "id,metadata",
+  details:
+    "job_id,substatus,cycle_number,attendance_cycle_id,cycle_attribution,report_type,reopen_reason,reattend_count,last_reattend_at,last_reattend_reason,cancel_reason,cancel_note,cancelled_by,cancelled_at,report_received_at,report_sent_at,invoice_ready_at,invoice_notes,safety_requirements,special_instructions,external_links,billing_rules,portal_verified_at,portal_verified_cycle,portal_verified_signal,portal_verified_by,updated_at",
+  dockets:
+    "id,job_id,source_instruction_id,lineage_id,attendance_cycle_ids,current_attendance_cycle_id,readiness_revision,input_content_hash,output_content_hash,state,pre_xero_docs_ready,envelope,review_spec,release_payload,committed_at",
 } as const;
 
 async function loadByIds(
@@ -137,6 +147,7 @@ export async function loadMakesafeV2Facts(
   }
   const [
     jobFamilies,
+    identities,
     cycles,
     cases,
     assignments,
@@ -151,6 +162,8 @@ export async function loadMakesafeV2Facts(
     packCycles,
     packs,
     approvals,
+    details,
+    dockets,
   ] = await Promise.all([
     loadByIds(
       client,
@@ -160,6 +173,14 @@ export async function loadMakesafeV2Facts(
       "makesafe-state.v2 job family identity",
       "id",
       "id",
+    ),
+    loadByIds(
+      client,
+      "makesafe_state_identity_current_v2",
+      SELECTS.identities,
+      jobIds,
+      "makesafe-state.v2 selected identity",
+      "job_id",
     ),
     loadByIds(
       client,
@@ -262,10 +283,26 @@ export async function loadMakesafeV2Facts(
       jobIds,
       "makesafe-state.v2 approvals",
     ),
+    loadByIds(
+      client,
+      "makesafe_job_details",
+      SELECTS.details,
+      jobIds,
+      "makesafe-state.v2 job details",
+      "job_id",
+    ),
+    loadByIds(
+      client,
+      "makesafe_docket_revisions_current",
+      SELECTS.dockets,
+      jobIds,
+      "makesafe-state.v2 dockets",
+      "job_id",
+    ),
   ]);
-  const effectiveFamilyCodes = familyCodes.length
-    ? familyCodes
-    : jobFamilies.map(familyCode).filter(Boolean);
+  const effectiveFamilyCodes = familyCodes.length ? familyCodes : identities
+    .map((row) => String(row?.family_rule_key || "").trim())
+    .filter(Boolean);
   const loadedJobIds = new Set(
     jobFamilies.map((row) => String(row?.id || "")).filter(Boolean),
   );
@@ -293,6 +330,7 @@ export async function loadMakesafeV2Facts(
   return {
     projectionConfig,
     jobFamilies,
+    identities,
     cycles,
     cases,
     assignments,
@@ -308,6 +346,8 @@ export async function loadMakesafeV2Facts(
     packCycles,
     packs,
     approvals,
+    details,
+    dockets,
   };
 }
 
@@ -330,16 +370,8 @@ function oneBy(rows: any[], key: string): Map<string, any> {
   return result;
 }
 
-function familyCode(row: any): string {
-  return String(
-    row?.metadata?.makesafe_job_family ||
-      row?.metadata?.makesafe_family ||
-      row?.metadata?.job_family ||
-      "",
-  ).trim();
-}
-
 function versionedFact(row: any): VersionedCycleFact {
+  const rawRole = row?.role || row?.type || null;
   return {
     id: String(row?.id || ""),
     attendance_cycle_id: row?.attendance_cycle_id || null,
@@ -348,7 +380,7 @@ function versionedFact(row: any): VersionedCycleFact {
       : null,
     content_hash: row?.makesafe_content_hash || null,
     status: row?.status || null,
-    role: row?.role || row?.type || null,
+    role: rawRole,
   };
 }
 
@@ -472,7 +504,9 @@ export async function buildMakesafeV2Comparison(
     );
   }
   const cycles = groupBy(facts.cycles, "job_id");
-  const cases = groupBy(facts.cases, "job_id");
+  const details = facts.details || [];
+  const dockets = facts.dockets || [];
+  const identities = oneBy(facts.identities, "job_id");
   const assignments = groupBy(facts.assignments, "job_id");
   const serviceReports = groupBy(facts.serviceReports, "job_id");
   const documents = groupBy(facts.documents, "job_id");
@@ -493,23 +527,34 @@ export async function buildMakesafeV2Comparison(
   const rows = await Promise.all(canonicalRows.map(async (row) => {
     const jobId = String(row?.id || "");
     const jobFamily = jobFamilies.get(jobId);
-    const caseRows = cases.get(jobId) || [];
-    const identityCase = caseRows.length === 1 ? caseRows[0] : null;
+    const identityRevision = identities.get(jobId) || null;
     const cycleRows = cycles.get(jobId) || [];
     const cycleIds = cycleRows.map((cycle) => String(cycle.id)).sort();
-    const currentCycleId = row?.attendance_cycle_id || null;
+    const jobDetail = details.find((item) => String(item?.job_id) === jobId) ||
+      null;
+    const currentCycleId = jobDetail?.attendance_cycle_id ||
+      row?.attendance_cycle_id || null;
     const cycleSetHash = cycleIds.length
       ? await computeAttendanceCycleSetHash(cycleIds)
       : null;
-    const familyRule = familyRuleOf(rules.get(familyCode(jobFamily)));
+    const familyRule = familyRuleOf(
+      rules.get(String(identityRevision?.family_rule_key || "")),
+    );
     const requiredDocumentTypes = new Set(
-      familyRule?.required_document_types || [],
+      (familyRule?.required_document_types || []).map((type) =>
+        canonicalizeMakesafeDocumentRole(type) || `unmapped:${String(type)}`
+      ),
     );
     const assignmentRows = assignments.get(jobId) || [];
     const reportRows = serviceReports.get(jobId) || [];
-    const documentRows = (documents.get(jobId) || []).filter((item) =>
-      requiredDocumentTypes.has(String(item?.type || ""))
-    );
+    const documentRows = (documents.get(jobId) || [])
+      .map((item) => ({
+        ...item,
+        role: canonicalizeMakesafeDocumentRole(item?.type),
+      }))
+      .filter((item) =>
+        item.role !== null && requiredDocumentTypes.has(item.role)
+      );
     const mediaRows = media.get(jobId) || [];
     const completionMediaRows = mediaRows.filter((item) =>
       String(item?.phase || "").toLowerCase() === "after" ||
@@ -553,16 +598,18 @@ export async function buildMakesafeV2Comparison(
           );
         const observedEnvelope: ReadinessDependencyEnvelope = {
           source_instruction: {
-            id: identityCase?.instruction_key || null,
-            version: identityCase?.source_version ?? null,
-            content_hash: identityCase?.source_content_hash || null,
+            id: identityRevision?.source_instruction_id || null,
+            version: identityRevision?.source_version ?? null,
+            content_hash: identityRevision?.source_content_hash || null,
           },
           lineage: {
-            lineage_id: identityCase?.lineage_id || null,
-            case_id: identityCase?.id || null,
-            version: identityCase?.lineage_version ?? null,
-            correction_hash: identityCase?.lineage_correction_hash || null,
-            supersession_hash: identityCase?.lineage_supersession_hash || null,
+            lineage_id: identityRevision?.lineage_id || null,
+            case_id: identityRevision?.effective_case_id ||
+              identityRevision?.id || null,
+            version: identityRevision?.lineage_version ?? null,
+            correction_hash: identityRevision?.lineage_correction_hash || null,
+            supersession_hash: identityRevision?.lineage_supersession_hash ||
+              null,
           },
           attendance: {
             attendance_cycle_ids: cycleIds,
@@ -644,6 +691,11 @@ export async function buildMakesafeV2Comparison(
     const staleApproval = approvalRows.some((item) =>
       item.decision === "approved" && !currentApprovals.includes(item)
     );
+    const detailCycleAttributionError = jobDetail &&
+        (!jobDetail.attendance_cycle_id ||
+          jobDetail.cycle_attribution !== "bound")
+      ? "The job detail attendance cycle is not authoritatively bound."
+      : null;
     const cycleAttributionError = [
         ...assignmentRows,
         ...reportRows,
@@ -654,10 +706,10 @@ export async function buildMakesafeV2Comparison(
         ),
       ].some((fact) =>
         !fact.attendance_cycle_id || fact.cycle_attribution !== "bound"
-      ) || portalRows.some((fact) => !fact.attendance_cycle_id)
+      ) ||
+        portalRows.some((fact) => !fact.attendance_cycle_id) ||
+        detailCycleAttributionError
       ? "One or more operational facts lack exact attendance-cycle attribution."
-      : caseRows.length > 1
-      ? "More than one intake case claims current job authority."
       : currentPacks.length > 1
       ? "More than one report pack claims the current attendance cycle."
       : null;
@@ -665,9 +717,11 @@ export async function buildMakesafeV2Comparison(
       computed_at: computedAt,
       projection_input_errors: projectionInputErrors,
       identity: {
-        source_instruction_id: identityCase?.instruction_key || null,
-        lineage_id: identityCase?.lineage_id || null,
-        case_id: identityCase?.id || null,
+        authority_kind: identityRevision?.authority_kind || null,
+        authority_revision_id: identityRevision?.id || null,
+        source_instruction_id: identityRevision?.source_instruction_id || null,
+        lineage_id: identityRevision?.lineage_id || null,
+        case_id: identityRevision?.effective_case_id || null,
         job_id: jobId || null,
         job_number: row?.job_number || null,
         property_id: jobFamily?.metadata?.property_id || null,
@@ -675,19 +729,22 @@ export async function buildMakesafeV2Comparison(
         current_attendance_cycle_id: currentCycleId,
       },
       current_attendance_cycle_set_hash: cycleSetHash as Sha256Revision | null,
-      source_version: identityCase?.source_version ?? null,
-      source_content_hash: identityCase?.source_content_hash || null,
-      lineage_version: identityCase?.lineage_version ?? null,
-      lineage_correction_hash: identityCase?.lineage_correction_hash || null,
-      lineage_supersession_hash: identityCase?.lineage_supersession_hash ||
+      source_version: identityRevision?.source_version ?? null,
+      source_content_hash: identityRevision?.source_content_hash || null,
+      lineage_version: identityRevision?.lineage_version ?? null,
+      lineage_correction_hash: identityRevision?.lineage_correction_hash ||
+        null,
+      lineage_supersession_hash: identityRevision?.lineage_supersession_hash ||
         null,
       substatus_raw: row?.substatus || null,
       job_created_at: null,
       company_contact_present: !!(
         row?.contact?.phone || row?.contact?.client_name
       ),
-      intake_exception: !!identityCase &&
-        ["exception", "blocked_live_job"].includes(identityCase.state),
+      intake_exception: !!identityRevision &&
+        ["exception", "blocked_live_job"].includes(
+          identityRevision.intake_state,
+        ),
       cycle_attribution_error: cycleAttributionError,
       family_rule: familyRule,
       attendance_cycles: cycleRows.map((cycle) => ({
@@ -740,7 +797,49 @@ export async function buildMakesafeV2Comparison(
     if (
       state.diagnostics.some((item) => item.code === "projection_input_error")
     ) inputErrors += 1;
-    return { ...row, state_v2: state, v1_v2_diff: diff };
+    return {
+      ...row,
+      state_v2: state,
+      v1_v2_diff: diff,
+      state_facts: {
+        job: {
+          id: row?.id || null,
+          type: row?.type || null,
+          status: row?.status || null,
+          substatus: row?.substatus || null,
+        },
+        identity: identityRevision,
+        cycles: cycleRows,
+        assignments: assignmentRows,
+        service_reports: reportRows,
+        documents: documents.get(jobId) || [],
+        media: mediaRows,
+        portal_captures: portalRows,
+        cases: facts.cases.filter((item) => String(item?.job_id) === jobId),
+        holds: holds.get(jobId) || [],
+        cancellations: cancellations.get(jobId)
+          ? [cancellations.get(jobId)]
+          : [],
+        terminal_proofs: terminalProofs.get(jobId)
+          ? [terminalProofs.get(jobId)]
+          : [],
+        pack_cycles: packCycles.get(jobId) || [],
+        packs: packs.get(jobId) || [],
+        approvals: approvals.get(jobId) || [],
+        family_rule: familyRule
+          ? rules.get(String(identityRevision?.family_rule_key || "")) || null
+          : null,
+        job_family: jobFamily || null,
+        job_details: jobDetail,
+        detail_cycle_binding: {
+          attendance_cycle_id: jobDetail?.attendance_cycle_id || null,
+          cycle_attribution: jobDetail?.cycle_attribution || null,
+        },
+        docket: dockets.find((item) => String(item?.job_id) === jobId) ||
+          null,
+        readiness: currentReadiness ? currentReadiness : null,
+      },
+    };
   }));
   return {
     rows,

@@ -98,6 +98,7 @@ type LiveRow = Record<string, any>;
 export interface SesAssemblerLiveSnapshot {
   job: LiveRow;
   detail: LiveRow | null;
+  identity_revision?: LiveRow | null;
   cases: LiveRow[];
   cycles: LiveRow[];
   reports: LiveRow[];
@@ -493,6 +494,14 @@ export function buildSesAssemblerInput(
   const metadata = record(job.metadata);
   const company = record(detail.makesafe_companies);
   const intakeCase = sourceCase(snapshot.cases);
+  // An unresolved revision is a durable record of ambiguity, not authority to
+  // borrow an arbitrary source. Keep U4 fail-closed until that ambiguity is
+  // resolved; legacy_job_record is deliberately usable because its evidence
+  // refs bind the existing card, detail and work-order document.
+  const identityRevision =
+    snapshot.identity_revision?.authority_kind === "unresolved_authority"
+      ? null
+      : snapshot.identity_revision || null;
   const builder = builderKey(snapshot);
   const familyId = family(snapshot);
   const cycle = currentCycle(snapshot);
@@ -524,6 +533,8 @@ export function buildSesAssemblerInput(
     intakeCase?.builder_wo_canonical,
     intakeCase?.builder_po_canonical,
     intakeCase?.external_ref_canonical,
+    identityRevision ? detail.external_ref : null,
+    identityRevision ? metadata.external_ref : null,
   );
   const portalLinks = extractPortalLinks(detail.external_links).map((link) => ({
     role: portalRole(familyId, link.role),
@@ -571,11 +582,20 @@ export function buildSesAssemblerInput(
       "other_registered_hrcw",
     ].includes(item)
   ) as SesAssemblerInputV1["hrcw"]["categories"];
-  const sourceVersion = intakeCase?.source_version == null
+  const sourceVersion = (intakeCase?.source_version ??
+      identityRevision?.source_version) == null
     ? ""
-    : String(intakeCase.source_version);
-  const sourceHash = text(intakeCase?.source_content_hash) as SesSha256;
-  const lineageId = text(intakeCase?.lineage_id);
+    : String(
+      intakeCase?.source_version ?? identityRevision?.source_version,
+    );
+  const sourceHash = firstText(
+    intakeCase?.source_content_hash,
+    identityRevision?.source_content_hash,
+  ) as SesSha256;
+  const lineageId = firstText(
+    intakeCase?.lineage_id,
+    identityRevision?.lineage_id,
+  );
   const reportTo = firstText(company.report_recipient);
   const invoiceTo = matrix.ok ? matrix.row.invoice_to : null;
   const priorPack = snapshot.legacy_packs.find(
@@ -585,11 +605,17 @@ export function buildSesAssemblerInput(
   return {
     contract_version: SES_INPUT_CONTRACT_VERSION,
     identity: {
-      source_instruction_id: text(intakeCase?.instruction_key),
+      source_instruction_id: firstText(
+        intakeCase?.instruction_key,
+        identityRevision?.source_instruction_id,
+      ),
       source_version: sourceVersion,
       source_content_hash: sourceHash,
       lineage_id: lineageId,
-      case_id: intakeCase ? text(intakeCase.id) || null : null,
+      case_id: firstText(
+        intakeCase?.id,
+        identityRevision?.effective_case_id,
+      ) || null,
       job_id: text(job.id),
       job_number: text(job.job_number) || null,
       card_id: text(job.id) || null,
@@ -641,7 +667,12 @@ export function buildSesAssemblerInput(
       ) || null,
       deliverables: [
         {
-          id: text(intakeCase?.deliverable_ref_canonical),
+          id: firstText(
+            intakeCase?.deliverable_ref_canonical,
+            identityRevision && workOrders.length
+              ? `job_document:${text(workOrders[0].id)}`
+              : null,
+          ),
           kind: familyId,
         },
       ].filter((item) => item.id),
@@ -747,6 +778,7 @@ export async function loadSesAssemblerLiveSnapshot(
   const jobId = text(job.id);
   const [
     detail,
+    identityRevision,
     casesByJob,
     casesByTarget,
     cycles,
@@ -765,6 +797,11 @@ export async function loadSesAssemblerLiveSnapshot(
         .eq("job_id", jobId)
         .maybeSingle(),
       "makesafe_job_details",
+    ),
+    one(
+      client.from("makesafe_state_identity_current_v2").select("*")
+        .eq("job_id", jobId).maybeSingle(),
+      "makesafe_state_identity_current_v2",
     ),
     many(
       client.from("makesafe_intake_cases").select("*").eq("job_id", jobId),
@@ -846,6 +883,7 @@ export async function loadSesAssemblerLiveSnapshot(
   return {
     job,
     detail,
+    identity_revision: identityRevision,
     cases: [...caseMap.values()],
     cycles,
     reports,

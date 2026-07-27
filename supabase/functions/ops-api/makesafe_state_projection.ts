@@ -178,6 +178,12 @@ export interface MakesafeStateV2 {
   contract_version: "makesafe-state.v2";
   computed_at: string;
   identity: {
+    authority_kind:
+      | "effective_intake_case"
+      | "legacy_job_record"
+      | "unresolved_authority"
+      | null;
+    authority_revision_id: string | null;
     source_instruction_id: string | null;
     lineage_id: string | null;
     case_id: string | null;
@@ -191,6 +197,11 @@ export interface MakesafeStateV2 {
   ops_stage: MakesafeV2OpsStage;
   ops_label: string;
   trade_column: MakesafeV2TradeColumn;
+  stage_evidence: {
+    determinate: boolean;
+    reason: string;
+    evidence_refs: string[];
+  };
   readiness: ReadinessDimension;
   blocker: BlockerDimension;
   cancellation: CancellationDimension;
@@ -206,6 +217,31 @@ export interface VersionedCycleFact {
   content_hash: string | null;
   status?: string | null;
   role?: string | null;
+}
+
+const MAKESAFE_DOCUMENT_ROLE_ALIASES: Record<string, string> = {
+  roof_report: "roof_report",
+  "roof-report": "roof_report",
+  roof: "roof_report",
+  assessment_report: "assessment_report",
+  assessment: "assessment_report",
+  assessment_report_quote: "assessment_report",
+  photos: "photos",
+  photo: "photos",
+  photo_schedule: "photos",
+  photo_report: "photos",
+  quote: "quote",
+  quotation: "quote",
+  scope: "quote",
+  scope_of_works: "quote",
+  makesafe_report: "makesafe_report",
+};
+
+export function canonicalizeMakesafeDocumentRole(
+  rawType: string | null | undefined,
+): string | null {
+  const raw = String(rawType || "").trim().toLowerCase().replace(/\s+/g, "_");
+  return MAKESAFE_DOCUMENT_ROLE_ALIASES[raw] || null;
 }
 
 export interface MakesafeFamilyRule {
@@ -588,8 +624,12 @@ export function projectMakesafeStateV2(
   const currentCycleSetHash = input.current_attendance_cycle_set_hash;
   if (
     !input.identity.job_id || !input.identity.job_number ||
+    !input.identity.authority_kind ||
+    !input.identity.authority_revision_id ||
     !input.identity.source_instruction_id || !input.identity.lineage_id ||
-    !input.identity.case_id || !currentCycleId ||
+    (input.identity.authority_kind === "effective_intake_case" &&
+      !input.identity.case_id) ||
+    !currentCycleId ||
     !sortedCycleIds.includes(currentCycleId) ||
     !isSha256Revision(currentCycleSetHash) ||
     !Number.isSafeInteger(input.source_version) ||
@@ -613,16 +653,11 @@ export function projectMakesafeStateV2(
       ].filter((value): value is string => !!value),
     });
   }
-  if (!input.family_rule) {
-    diagnostics.push({
-      code: "projection_input_error",
-      severity: "hard",
-      reason: "The make-safe family has no versioned completion rule.",
-      evidence_refs: [],
-    });
-  } else if (
-    !input.family_rule.code || !input.family_rule.matrix_revision ||
-    !isSha256Revision(input.family_rule.matrix_content_hash)
+  if (
+    input.family_rule && (
+      !input.family_rule.code || !input.family_rule.matrix_revision ||
+      !isSha256Revision(input.family_rule.matrix_content_hash)
+    )
   ) {
     diagnostics.push({
       code: "projection_input_error",
@@ -722,16 +757,25 @@ export function projectMakesafeStateV2(
     handoffSatisfied = (input.family_rule.required_portal_roles || []).every(
       (role) => roles.has(role),
     ) &&
-      (input.family_rule.required_document_types || []).every((type) =>
-        documentTypes.has(type)
-      ) &&
+      (input.family_rule.required_document_types || []).every((type) => {
+        const canonicalType = canonicalizeMakesafeDocumentRole(type);
+        return canonicalType !== null && documentTypes.has(canonicalType);
+      }) &&
       (reports.length > 0 || captures.length > 0 || documents.length > 0);
   }
 
   let stage: MakesafeV2OpsStage = "new";
+  let stageReason =
+    "No exact current-cycle assignment or completion handoff is recorded.";
+  let stageEvidenceRefs = [
+    input.identity.current_attendance_cycle_id,
+    input.identity.job_id,
+  ].filter((value): value is string => !!value);
   if (terminalExact) {
     if (input.terminal_proof.kind === "approved_nonwork_archive") {
       stage = "archive";
+      stageReason =
+        "An immutable non-work archive decision covers the exact attendance-cycle set.";
     } else {
       const age = input.terminal_proof.proven_at
         ? Date.parse(input.computed_at) -
@@ -740,13 +784,34 @@ export function projectMakesafeStateV2(
       stage = Number.isFinite(age) && age >= 0 && age <= 7 * 24 * 60 * 60 * 1000
         ? "completed"
         : "archive";
+      stageReason =
+        "Immutable closeout proof covers the exact attendance-cycle set.";
     }
+    stageEvidenceRefs = [
+      input.terminal_proof.proof_id,
+      ...input.terminal_proof.evidence_refs,
+    ].filter((value): value is string => !!value);
   } else if (readiness.ready && readiness.state === "ready") {
     stage = "report_ready";
+    stageReason =
+      "The current content-addressed readiness revision is valid and ready.";
+    stageEvidenceRefs = [
+      readiness.readiness_revision,
+      readiness.attendance_cycle_set_hash,
+    ].filter(Boolean) as string[];
   } else if (!authorityInputInvalid && handoffSatisfied) {
     stage = "trade_report_in";
+    stageReason = input.family_rule?.kind === "physical"
+      ? "A submitted current-cycle service report and the required completion photos are present."
+      : "Every current-cycle portal/document role required by the family rule is present.";
+    stageEvidenceRefs = input.family_rule?.kind === "physical"
+      ? [...reports, ...photos].map((row) => row.id)
+      : [...reports, ...captures, ...documents].map((row) => row.id);
   } else if (!authorityInputInvalid && assignments.length > 0) {
     stage = "allocated";
+    stageReason =
+      "An active assignment is bound to the exact current attendance cycle.";
+    stageEvidenceRefs = assignments.map((row) => row.id);
   }
 
   const blockers: BlockerFact[] = [...input.operator_blockers];
@@ -846,7 +911,10 @@ export function projectMakesafeStateV2(
       ));
     }
   }
-  if (!input.family_rule) {
+  if (
+    !input.family_rule && !terminalExact &&
+    input.cancellation.state !== "confirmed"
+  ) {
     blockers.push(blocker(
       input,
       "missing_family_rule",
@@ -993,6 +1061,13 @@ export function projectMakesafeStateV2(
     trade_column: cancellation.state === "confirmed"
       ? "Archive"
       : MAKESAFE_V2_TRADE_COLUMNS[stage],
+    stage_evidence: {
+      determinate: !authorityInputInvalid,
+      reason: authorityInputInvalid
+        ? "The stage is not authoritative because required identity or cycle evidence is ambiguous."
+        : stageReason,
+      evidence_refs: authorityInputInvalid ? [] : stageEvidenceRefs,
+    },
     readiness,
     blocker: {
       blocked: blockers.length > 0,

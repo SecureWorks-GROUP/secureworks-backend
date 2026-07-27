@@ -29,6 +29,17 @@ corresponding additive migration is
 `20260728000001_makesafe_state_authority_u2.sql`; it performs no backfill or
 legacy-substatus conversion.
 
+Migration `20260728030000_makesafe_board_reconcile_truth_u2.sql` adds the
+missing dark bootstrap and reconciliation surfaces. It is not executed by the
+migration itself. `makesafe_state_seed` is API-key-only, defaults to dry-run,
+selects the complete board server-side, and records an idempotent seed run when
+explicitly invoked live. Its acceptance gate is executable: the complete v2
+comparison must report zero `projection_input_error` cards and the deployed U4
+dry-run for `SWMS-26980` must report no `spine_missing_*` blocker.
+The same migration installs fact-identity triggers for later source, lineage,
+cycle, assignment, report, document, media, and pack changes so a successful
+seed is not a one-off snapshot.
+
 ## Canonical truth
 
 Every card originates as one canonical job row with:
@@ -62,6 +73,10 @@ boundary for both the board enrich path and audit compact flags:
   any-cycle first-match behaviour proven by prior regressions.
 - Prior-cycle invoice/commercial may remain visible as a warning fact but must
   not close the current attendance or imply current-cycle send readiness.
+- The `makesafe_job_details` row must carry the same authoritative
+  `attendance_cycle_id` and `cycle_attribution='bound'` as the current cycle;
+  reconciliation rejects detail-cycle binding drift instead of trusting a
+  fallback job-row value.
 - Holds for the current cycle are exposed on **ops** (`computed_status_hold`)
   and **trade** (`hold: { reason_code, note, held_since, cycle_number }`).
 - Migration `20260727000001_makesafe_attendance_cycles_u2_s1.sql` materialises
@@ -110,6 +125,21 @@ Reconciliation actions:
 - `?action=makesafe_status_apply` — dry-runs or atomically appends an exact,
   idempotency-keyed, captain-approved display transition set; live apply is
   API-key/service-role only and rejects terminal or stale cards
+- `?action=makesafe_state_seed` — dark, full-board state-authority bootstrap;
+  defaults to dry-run and requires an explicit idempotency run key for writes
+- `?action=makesafe_state_reconcile` — dark, full-board fact-derived
+  reconciliation; defaults to dry-run, applies only determinate non-terminal
+  corrections, and atomically writes a visible `captain_action` for every
+  unresolved card
+
+`captain_action` is a nullable display-only envelope with `code`, a
+plain-English `message`, `evidence_refs[]`, and `since`. The Ops make-safe card
+renders the message inline under **Waiting on Captain**; it is not hidden in a
+tooltip or a separate ledger. The reconciliation transaction succeeds only
+when every selected card is exactly one of `trustworthy` or `captain_marked`
+and `neither=0`. Neither path mutates `jobs`,
+`makesafe_job_details.substatus`, assignments, invoices, communications, or
+notifications.
 
 A missing status-hold or status-application table in a preview environment is
 tolerated and logged, never fatal to the board. Production remains

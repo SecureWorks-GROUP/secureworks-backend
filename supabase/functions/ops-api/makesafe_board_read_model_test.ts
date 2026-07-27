@@ -259,6 +259,28 @@ Deno.test("canonical row carries report/photos, pack/send, notes, age and separa
   );
 });
 
+Deno.test("canonical row preserves the visible plain-English Captain action", () => {
+  const [row] = buildCanonicalMakesafeRows([
+    baseJob("allocated", "captain-action", {
+      captain_action: {
+        code: "attendance_cycle_ruling",
+        message:
+          "Need you to choose which attendance cycle owns the submitted report.",
+        evidence_refs: ["job_service_reports:report-1"],
+        since: NOW,
+      },
+    }),
+  ]);
+
+  assertEquals(row.captain_action, {
+    code: "attendance_cycle_ruling",
+    message:
+      "Need you to choose which attendance cycle owns the submitted report.",
+    evidence_refs: ["job_service_reports:report-1"],
+    since: NOW,
+  });
+});
+
 Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers without money facts", () => {
   const [ready] = buildCanonicalMakesafeRows([
     baseJob("report_ready", "u4-ready", {

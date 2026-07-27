@@ -186,3 +186,5 @@ makesafe_status_shadow_refresh # probe=source-only
 makesafe_status_disagreements
 makesafe_status_canary
 makesafe_status_apply
+makesafe_state_seed
+makesafe_state_reconcile
