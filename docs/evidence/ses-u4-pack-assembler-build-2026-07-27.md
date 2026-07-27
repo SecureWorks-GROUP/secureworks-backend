@@ -39,10 +39,10 @@ to `service_role`.
 ## What the Captain gets
 
 On this branch, the Captain gets the docket below whenever the single assembler
-function is invoked through a versioned `ses.assembler-input/v1` adapter. The
-deployed Captain surface does **not** change yet: the production read-model
-adapter and ops-api/skill binding are named remaining seams, so this branch does
-not pretend the live button exists.
+function is invoked through the versioned `ses.assembler-input/v1` adapter. This
+change also supplies the production read-model adapter and ops-api/skill
+binding; the deployed Captain surface does **not** change until a separately
+approved deployment.
 
 For a ready physical docket the Captain sees the WO, completion report, every
 current-cycle photo, the explicit SWMS decision/artifact, a local invoice
@@ -77,8 +77,9 @@ input or output hashes.
 Two independent fixture runs with the same input and intent produced identical
 revision IDs, output hashes and artifact hash lists. Every shippable row in the
 11-row matrix has a ready golden and an intentional stale-matrix negative
-golden. The assessment row has an intentional blocker golden because its
-outbound recipe is not Captain-sealed.
+golden. The assessment row retains an intentional blocker golden because the
+original fixture predates the sealed recipe and lacks the required live portal
+proof.
 
 ## Family coverage
 
@@ -89,10 +90,11 @@ outbound recipe is not Captain-sealed.
 | AJBR | ready golden | ready golden | rejected by rule | rejected by rule | rejected by rule |
 | Western | ready golden | ready golden | closed/unsealed class | closed/unsealed class | closed/unsealed class |
 
-Assessment portal triad capture is implemented, but report/photo/invoice draft
-sets remain empty and blocked with `assessment_recipe_unapproved`. This is the
-required fail-closed behavior until the Captain seals the exact outbound recipe.
-CP3 cannot honestly close for assessment before that decision.
+The original assessment fixture blocked report/photo/invoice draft sets with
+`assessment_recipe_unapproved`. That historical negative is superseded by the
+sealed `assessment-triad-invoice-only/2026-07-27` recipe; current assessment
+cards remain fail-closed only when their work order, typed Prime links, or
+screenshot-backed locked captures are missing.
 
 ## Portal truth
 
@@ -216,6 +218,6 @@ communication row is mutated.
 
 The backend still does not pretend it can inspect a Prime SPA: real portal
 screenshots remain owned by the approved agent-side
-`capture_portal_evidence.py` runner. Until that capability is bound into a run,
-portal cards fail closed as `capability_portal_degraded`. Assessment cards use
-the sealed recipe above but remain unavailable until the live adapter is bound.
+`capture_portal_evidence.py` runner. Until that capture capability is bound into
+a run, portal cards fail closed as `capability_portal_degraded`; assessment
+cards otherwise use the sealed recipe above and fail only on missing evidence.

@@ -24,7 +24,7 @@ import {
 } from "./makesafe_cycle_evidence.ts";
 import { extractPortalLinks } from "./makesafe_portal_guard.ts";
 import {
-  SES_ASSESSMENT_RECIPE_PENDING,
+  SES_ASSESSMENT_RECIPE_VERSION,
   type SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
 import { createSesDocketPersistenceAdapter } from "./ses_docket_persistence.ts";
@@ -414,7 +414,7 @@ export function buildSesAssemblerInput(
       lineage_kind: lineageKind(intakeCase?.parent_relation),
       family_matrix_version: SES_FAMILY_MATRIX_VERSION,
       assessment_outbound_recipe_version: familyId === "assessment_quote"
-        ? SES_ASSESSMENT_RECIPE_PENDING
+        ? SES_ASSESSMENT_RECIPE_VERSION
         : null,
     },
     source: {

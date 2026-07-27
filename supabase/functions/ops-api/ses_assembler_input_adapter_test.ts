@@ -18,7 +18,7 @@ import {
 } from "./ses_docket_envelope.ts";
 import {
   prepare_ses_docket_revision,
-  SES_ASSESSMENT_RECIPE_PENDING,
+  SES_ASSESSMENT_RECIPE_VERSION,
 } from "./ses_prepare_docket_revision.ts";
 
 function snapshot(): SesAssemblerLiveSnapshot {
@@ -173,7 +173,7 @@ Deno.test("live adapter leaves an unclassified non-AJS card explicitly unknown",
   assertEquals(input.source.deliverables, []);
 });
 
-Deno.test("live adapter keeps assessment family held on the named Captain recipe blocker", async () => {
+Deno.test("live adapter seals the assessment recipe and leaves only truthful source blockers", async () => {
   const live = snapshot();
   live.job.metadata.job_family = "assessment";
   live.detail!.report_type = "assessment_report_quote";
@@ -185,7 +185,7 @@ Deno.test("live adapter keeps assessment family held on the named Captain recipe
   const input = buildSesAssemblerInput(live);
   assertEquals(
     input.classification.assessment_outbound_recipe_version,
-    SES_ASSESSMENT_RECIPE_PENDING,
+    SES_ASSESSMENT_RECIPE_VERSION,
   );
   const response = await prepare_ses_docket_revision({
     selection: { mode: "job_id", job_id: input.identity.job_id },
@@ -198,9 +198,7 @@ Deno.test("live adapter keeps assessment family held on the named Captain recipe
     resolveSourceArtifacts: async () => sourceResolver(input),
     now: () => new Date("2026-07-27T08:00:00.000Z"),
   });
-  assert(
-    blockerCodes(response.results[0]).includes(
-      "assessment_recipe_unapproved",
-    ),
-  );
+  const codes = blockerCodes(response.results[0]);
+  assert(!codes.includes("assessment_recipe_unapproved"));
+  assert(codes.includes("spine_missing_source"));
 });
