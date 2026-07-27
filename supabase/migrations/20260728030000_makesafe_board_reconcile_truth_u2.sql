@@ -1496,7 +1496,7 @@ BEGIN
     WHERE job_id IS NOT NULL
     ORDER BY job_id
   LOOP
-    PERFORM 1 FROM public.jobs WHERE id = v_job_id FOR SHARE;
+    PERFORM 1 FROM public.jobs WHERE id = v_job_id FOR UPDATE;
     PERFORM 1 FROM public.makesafe_state_identity_revisions
       WHERE job_id = v_job_id ORDER BY id FOR SHARE;
     PERFORM 1 FROM public.makesafe_attendance_cycles
@@ -1741,9 +1741,23 @@ BEGIN
           AND d.special_instructions IS NOT DISTINCT FROM v_token->>'special_instructions'
           AND d.external_links IS NOT DISTINCT FROM v_token->'external_links'
           AND d.billing_rules IS NOT DISTINCT FROM v_token->'billing_rules'
+          AND d.portal_verified_at IS NOT DISTINCT FROM (v_token->>'portal_verified_at')::timestamptz
+          AND d.portal_verified_cycle IS NOT DISTINCT FROM (v_token->>'portal_verified_cycle')::integer
+          AND d.portal_verified_signal IS NOT DISTINCT FROM v_token->>'portal_verified_signal'
+          AND d.portal_verified_by IS NOT DISTINCT FROM v_token->>'portal_verified_by'
           AND d.updated_at IS NOT DISTINCT FROM (v_token->>'updated_at')::timestamptz
       )) THEN
       RAISE EXCEPTION 'reconciliation row % job details changed', v_row.job_id;
+    END IF;
+    v_token := v_row.state_facts->'detail_cycle_binding';
+    IF v_token->>'attendance_cycle_id' IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1
+         FROM public.makesafe_attendance_cycles c
+         WHERE c.id = (v_token->>'attendance_cycle_id')::uuid
+           AND c.job_id = v_row.job_id
+       ) THEN
+      RAISE EXCEPTION 'reconciliation row % detail cycle binding changed', v_row.job_id;
     END IF;
     v_token := v_row.state_facts->'docket';
     IF (SELECT count(*) FROM public.makesafe_docket_revisions_current WHERE job_id = v_row.job_id)
