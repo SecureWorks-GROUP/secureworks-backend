@@ -497,13 +497,7 @@ function pdfScopeText(
   const labelledScope = documents.map((document) =>
     scopeBlockFromPdfText(document.text, adapterId)
   ).filter(Boolean).join("\n");
-  // Unknown builder templates still get a bounded full-text search rather than
-  // losing a clear instruction merely because their label spelling is new.
-  return labelledScope ||
-    documents.map((document) => document.text || "").join("\n").slice(
-      0,
-      PDF_SCOPE_MAX_CHARS,
-    );
+  return labelledScope;
 }
 
 function clean(value: unknown): string | null {

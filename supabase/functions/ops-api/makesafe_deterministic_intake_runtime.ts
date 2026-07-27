@@ -19,6 +19,8 @@ import {
   type DeterministicCasePlan,
   type DeterministicCompanyProfile,
   type DeterministicIntakePlan,
+  type DeterministicIntakeQualityMeasure,
+  measureDeterministicIntakeQuality,
   type DeterministicPdfDocument,
   type DeterministicSourceItem,
   selectIntakeMode,
@@ -207,6 +209,7 @@ export interface DeterministicRuntimeReport {
     };
     caveats: string[];
   };
+  quality_measure: DeterministicIntakeQualityMeasure;
   identity_floor: {
     unit: "canonical_case";
     known_builder_work_candidates: number;
@@ -3532,6 +3535,7 @@ export async function runDeterministicIntake(
       durable_source_fates: { checked: 0, final: 0, transient: 0 },
       caveats,
     },
+    quality_measure: measureDeterministicIntakeQuality(plan),
     identity_floor: identityFloorFacts(plan),
     by_builder_and_outcome: byBuilderOutcome(plan),
     by_builder_and_reason: byBuilderReason(plan),

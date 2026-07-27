@@ -15,7 +15,10 @@ import {
   enrichSourcesWithPdfText,
   runDeterministicIntake,
 } from "./makesafe_deterministic_intake_runtime.ts";
-import { buildDeterministicIntakePlan } from "./makesafe_deterministic_intake.ts";
+import {
+  buildDeterministicIntakePlan,
+  DETERMINISTIC_INTAKE_VERSION,
+} from "./makesafe_deterministic_intake.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 const ENCODER = new TextEncoder();
@@ -477,6 +480,10 @@ Deno.test("cancellation resolves one exact job, calls the canonical boundary, an
       return Promise.resolve({ ok: true, cancelled: true });
     },
   });
+
+  assertEquals(report.quality_measure.version, DETERMINISTIC_INTAKE_VERSION);
+  assertEquals(report.quality_measure.instructions, 1);
+  assert(report.quality_measure.by_builder.mlb !== undefined);
 
   assertEquals(command.targetJobId, "cancel-job-1");
   assertEquals(command.reasonCode, "builder_recalled");

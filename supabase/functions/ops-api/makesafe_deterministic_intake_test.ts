@@ -432,6 +432,31 @@ Deno.test("classification isolates labelled PDF scope from contract boilerplate"
   );
 });
 
+Deno.test("PDFs without a scope heading remain ambiguous despite boilerplate", () => {
+  const item = source({
+    postId: "mlb-boilerplate-only-scope",
+    subject: "NEW WORK ORDER MLB-27116 Work Order: 27116",
+    body:
+      "Client: Unknown Scope Client\nSite Address: 20 Unknown Street, Perth\nMobile: 0410 123 457",
+    attachments: [pdf("mlb-boilerplate-only-scope", "mlb-boilerplate-a")],
+    pdfDocuments: [{
+      sourcePostId: "mlb-boilerplate-only-scope",
+      attachmentId: "mlb-boilerplate-a",
+      attachmentName: "Work Order.pdf",
+      status: "extracted",
+      text: "Temporary fencing contractors must hold current insurance.",
+      charCount: 59,
+      pageCount: 1,
+      extractor: "unpdf@1.6.2",
+      truncated: false,
+      reason: null,
+    }],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].identity.jobFamily, "unclassified");
+  assertEquals(plan.cases[0].reasonCode, "ambiguous_scope");
+});
+
 Deno.test("AJS hard floor refuses report-only classification", () => {
   const item = source({
     postId: "ajs-report-wording",
