@@ -125,7 +125,9 @@ export function classifyReportType(
 //   (anything else / null / "unknown")                        -> model ABSTAINED.
 // On abstain we fall back to the keyword classifyReportType(subject, body); its
 // unknown_report result is PRESERVED as the safety valve for genuine ambiguity.
-const MODEL_REPORT_TYPE_ALIASES: Readonly<Record<string, ReportType | "general_makesafe">> = {
+const MODEL_REPORT_TYPE_ALIASES: Readonly<
+  Record<string, ReportType | "general_makesafe">
+> = {
   roof_report: "roof_report",
   roof: "roof_report",
   assessment_report: "assessment_report",
@@ -155,7 +157,10 @@ export function resolveCommittedReportType(
   subject: string | null | undefined,
   body: string | null | undefined,
 ): ReportType | null {
-  const raw = String(modelReportType ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const raw = String(modelReportType ?? "").trim().toLowerCase().replace(
+    /[\s-]+/g,
+    "_",
+  );
   const mapped = raw ? MODEL_REPORT_TYPE_ALIASES[raw] : undefined;
   if (mapped) {
     // A committed general/physical make-safe is stored as null (not a report-only type).
@@ -200,13 +205,11 @@ export function computeIntakeDraftStatus(input: {
 }): "draft" | "needs_review" {
   if (input.extractionDegraded) return "needs_review";
   if (input.isReportCapture) return "needs_review";
-  const missingRequired = (
-    !input.hasCompany ||
+  const missingRequired = !input.hasCompany ||
     !input.externalRef ||
     !input.clientName ||
     !input.siteAddress ||
-    input.availableWoCount === 0
-  );
+    input.availableWoCount === 0;
   return missingRequired ? "draft" : "needs_review";
 }
 
@@ -314,16 +317,34 @@ export interface MakeSafeTaxonomy {
   family: MakeSafeJobFamily;
 }
 
-export function taxonomyFromFamily(family: MakeSafeJobFamily | string): MakeSafeTaxonomy {
+export function taxonomyFromFamily(
+  family: MakeSafeJobFamily | string,
+): MakeSafeTaxonomy {
   switch (family) {
     case "assessment_report_quote":
-      return { job_type: "assessment", makesafe_subtype: null, family: "assessment_report_quote" };
+      return {
+        job_type: "assessment",
+        makesafe_subtype: null,
+        family: "assessment_report_quote",
+      };
     case "roof_report":
-      return { job_type: "roof", makesafe_subtype: null, family: "roof_report" };
+      return {
+        job_type: "roof",
+        makesafe_subtype: null,
+        family: "roof_report",
+      };
     case "temp_fence_makesafe":
-      return { job_type: "makesafe", makesafe_subtype: "temp", family: "temp_fence_makesafe" };
+      return {
+        job_type: "makesafe",
+        makesafe_subtype: "temp",
+        family: "temp_fence_makesafe",
+      };
     default:
-      return { job_type: "makesafe", makesafe_subtype: "general", family: "general_makesafe" };
+      return {
+        job_type: "makesafe",
+        makesafe_subtype: "general",
+        family: "general_makesafe",
+      };
   }
 }
 
@@ -332,7 +353,9 @@ export function classifyMakeSafeTaxonomy(
   body: string | null | undefined,
   reportType?: string | null,
 ): MakeSafeTaxonomy {
-  return taxonomyFromFamily(classifyMakeSafeJobFamily(subject, body, reportType));
+  return taxonomyFromFamily(
+    classifyMakeSafeJobFamily(subject, body, reportType),
+  );
 }
 
 // ── REPORT-CAPTURE: map ref prefix -> canonical company slug ──────────────────

@@ -283,6 +283,12 @@ reviewed authority splits, and rejects any supersession whose
 first-round result. It installs the table only on a non-production database,
 records 33 correction-only authorities plus 2 cleared identity expectations
 against the guarded snapshot, and likewise writes no operational row.
+The U1 intake-accounting migration
+`20260727012426_makesafe_intake_accounting_u1.sql` must also be applied before
+its matching `ops-api`: cancellation lineage, source-issue accounting,
+operational-fact loading, and legacy-drain reads select its new columns. It
+writes no operational row and does not put the 752 existing exceptions on the
+Captain board; island 2 owns that projector consumption.
 Captain Amendments 45-46 keep paid AI extraction off permanently: automatic,
 terminal-skill and manual intake checks all use the deterministic contract in
 `docs/makesafe-intake-terminal-hook.md`. Every SES reporting skill run calls

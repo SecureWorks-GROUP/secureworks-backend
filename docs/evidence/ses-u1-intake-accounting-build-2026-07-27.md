@@ -74,10 +74,8 @@ production mutation was run from this worktree.
 - `deno check --config deno.jsonc supabase/functions/ops-api/index.ts`: passed.
 - Targeted lint over all changed TypeScript except the repository-excluded
   `index.ts`: passed, 19 files.
-- Targeted formatting: passed for 18 changed TypeScript files and the canary
-  SQL. Repository configuration excludes `index.ts`;
-  `makesafe_intake_gate.ts` has a pre-existing whole-file formatting delta, so
-  it was not bulk-reformatted.
+- Targeted formatting: passed for all 19 changed TypeScript files and the canary
+  SQL. Repository configuration excludes `index.ts`.
 - `git diff --check`: passed.
 
 The full `deno task test:ops-api` cannot provide a green repository baseline in

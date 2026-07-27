@@ -219,6 +219,13 @@ class FakeQuery {
           row.org_id === this.payload.org_id &&
           row.deterministic_key === this.payload.deterministic_key
         )
+        : this.table === "email_events_raw" &&
+            String(this.payload.change_type || "").startsWith("intake_")
+        ? this.store[this.table].some((row) =>
+          row.org_id === this.payload.org_id &&
+          row.post_id === this.payload.post_id &&
+          row.change_type === this.payload.change_type
+        )
         : false;
       if (duplicate) {
         return {

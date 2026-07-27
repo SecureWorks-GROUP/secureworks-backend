@@ -119,7 +119,7 @@ export async function loadIntakeOperationalFacts(
   const mailbox = (options.mailbox || SES_MAILBOX).toLowerCase();
   const nowIso = options.nowIso || new Date().toISOString();
 
-  const [cases, sources, events, exclusions] = await Promise.all([
+  const [cases, sources, events, _exclusions] = await Promise.all([
     loadPagedRows(
       (from, to) =>
         client.from("makesafe_intake_cases")
