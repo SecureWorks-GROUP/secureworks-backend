@@ -27312,11 +27312,17 @@ async function resolveRoofReportPhotos(
   bodyPhotos: unknown,
   draftPhotos: unknown,
 ): Promise<Array<{ url?: string; bytesBase64?: string; contentType?: string; label?: string }>> {
-  const { data: detail } = await client.from('makesafe_job_details')
+  const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
     .select('cycle_number, reattend_count, attendance_cycle_id').eq('job_id', jobId).maybeSingle()
-  const { data: media } = await client.from('job_media')
+  const { data: media, error: mediaErr } = await client.from('job_media')
     .select('storage_url, label, type, phase, attendance_cycle_id, cycle_attribution, cycle_number')
     .eq('job_id', jobId).eq('type', 'photo').limit(20)
+  if (detailErr || mediaErr) {
+    throw new ApiError(
+      `roof report photo cycle read failed: ${detailErr?.message || mediaErr?.message || 'unknown error'}`,
+      500,
+    )
+  }
   const currentMedia = filterMediaForCurrentCycle(
     (media as any[]) || [],
     detail || { cycle_number: 1, reattend_count: 0 },
@@ -28646,6 +28652,41 @@ async function makesafeSendPack(
   // before the atomic send-lock — see the email-required check below.
   const nowIso = () => new Date().toISOString()
 
+  const assertBillingReviewClear = async () => {
+    const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
+      .select('cycle_number, attendance_cycle_id').eq('job_id', jobId).maybeSingle()
+    if (detailErr || !detail) {
+      throw new ApiError('send blocked: billing detail state could not be verified', 500)
+    }
+    const { data: billingReviewEvent, error: billingReviewReadErr } = await client
+      .from('job_events')
+      .select('detail_json')
+      .eq('job_id', jobId)
+      .eq('event_type', 'makesafe_reattend_billing_review_required')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (billingReviewReadErr) {
+      throw new ApiError('send blocked: billing review state could not be verified', 500)
+    }
+    const reviewDetail = parseJsonObject(billingReviewEvent?.detail_json)
+    const matchesCurrentCycle = !!billingReviewEvent && (
+      reviewDetail.attendance_cycle_id && detail.attendance_cycle_id
+        ? String(reviewDetail.attendance_cycle_id) === String(detail.attendance_cycle_id)
+        : Number(reviewDetail.cycle_number || 0) === Number(detail.cycle_number || 1)
+    )
+    if (matchesCurrentCycle && reviewDetail.disposition == null) {
+      await _ensurePackRow(client, jobId, packKind)
+      await _patchPack(client, jobId, packKind, {
+        status: 'failed',
+        failed_step: 'billing_review_gate',
+        error_detail: 'reattendance after invoicing or pack release requires billing review',
+      })
+      throw new ApiError('send blocked: reattendance requires billing review before release', 412)
+    }
+  }
+  await assertBillingReviewClear()
+
   // ── PARTIAL-FAILURE / IDEMPOTENCY STOP (before anything irreversible) ──
   // If the MAKESAFE_PACK_SENT | main marker already exists, UNCONDITIONAL STOP.
   const { data: priorEvents } = await client.from('job_events')
@@ -28798,34 +28839,11 @@ async function makesafeSendPack(
     .select('id, job_number, type, status, metadata, client_name')
     .eq('id', jobId).maybeSingle()
   if (!job) throw new ApiError('job not found', 404)
-  const { data: detail } = await client.from('makesafe_job_details')
+  const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
     .select('*, makesafe_companies(slug,name,report_recipient)')
     .eq('job_id', jobId).maybeSingle()
-  const { data: billingReviewEvent, error: billingReviewReadErr } = await client
-    .from('job_events')
-    .select('detail_json')
-    .eq('job_id', jobId)
-    .eq('event_type', 'makesafe_reattend_billing_review_required')
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  if (billingReviewReadErr) {
-    throw new ApiError('send blocked: billing review state could not be verified', 500)
-  }
-  const billingReviewDetail = parseJsonObject(billingReviewEvent?.detail_json)
-  const billingReviewMatchesCurrentCycle = !!billingReviewEvent && (
-    billingReviewDetail.attendance_cycle_id && detail?.attendance_cycle_id
-      ? String(billingReviewDetail.attendance_cycle_id) === String(detail.attendance_cycle_id)
-      : Number(billingReviewDetail.cycle_number || 0) === Number(detail?.cycle_number || 1)
-  )
-  if (billingReviewMatchesCurrentCycle && billingReviewDetail.disposition == null) {
-    await _ensurePackRow(client, jobId, packKind)
-    await _patchPack(client, jobId, packKind, {
-      status: 'failed',
-      failed_step: 'billing_review_gate',
-      error_detail: 'reattendance after invoicing or pack release requires billing review',
-    })
-    throw new ApiError('send blocked: reattendance requires billing review before release', 412)
+  if (detailErr || !detail) {
+    throw new ApiError('send blocked: billing detail state could not be verified', 500)
   }
   // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
   const requiresSwms = _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job)
@@ -30450,7 +30468,7 @@ export async function reattendMakesafe(client: any, args: {
   }
 
   const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
-    .select('job_id, substatus, report_received_at, cycle_number, reattend_count')
+    .select('job_id, substatus, report_received_at, cycle_number, reattend_count, attendance_cycle_id')
     .eq('job_id', jobId).maybeSingle()
   if (detailErr) throw new ApiError('reattendMakesafe: detail read failed: ' + detailErr.message, 500)
   if (!detail) {
@@ -30527,6 +30545,91 @@ export async function reattendMakesafe(client: any, args: {
     ? 'A prior report pack was sent — office review is required before Docs Ready or send.'
     : null
 
+  const { data: reattendAuditEvents, error: reattendAuditReadErr } = await client
+    .from('job_events')
+    .select('id, event_type, detail_json')
+    .eq('job_id', jobId)
+  if (reattendAuditReadErr) {
+    throw new ApiError('reattendMakesafe: retry state could not be verified', 500)
+  }
+  const currentCycle = Number(detail.cycle_number ?? 1)
+  const retryEvent = (reattendAuditEvents || []).find((event: any) => {
+    const eventDetail = parseJsonObject(event?.detail_json)
+    return event?.event_type === 'makesafe_reattend' &&
+      Number(eventDetail.cycle_number || 0) === currentCycle &&
+      String(eventDetail.reason || '') === reason
+  })
+  const retryableTransition = detail.substatus === 'waiting_on_trade_report' &&
+    !detail.report_received_at && !!retryEvent
+  const priorInvoiceSummary = (liveInvoices || []).map((inv: any) => ({
+    xero_id: inv.xero_invoice_id || inv.id || null,
+    status: inv.status || null,
+    number: inv.invoice_number || null,
+    amount: inv.total ?? inv.amount_due ?? null,
+  }))
+  if (retryableTransition) {
+    let billingReviewEvent = (reattendAuditEvents || []).find((event: any) => {
+      const eventDetail = parseJsonObject(event?.detail_json)
+      return event?.event_type === 'makesafe_reattend_billing_review_required' &&
+        Number(eventDetail.cycle_number || 0) === currentCycle
+    }) || null
+    if (billingReviewRequired && !billingReviewEvent) {
+      const { data: insertedReview, error: reviewInsertErr } = await client
+        .from('job_events')
+        .insert({
+          job_id: jobId,
+          event_type: 'makesafe_reattend_billing_review_required',
+          detail_json: {
+            job_id: jobId,
+            cycle_number: currentCycle,
+            attendance_cycle_id: detail.attendance_cycle_id || null,
+            reattend_count: detail.reattend_count,
+            reason,
+            review_reason: reviewReason,
+            prior_invoice_summary: priorInvoiceSummary,
+            prior_pack_sent: priorPackSent,
+            commercial_evidence_read_failed: commercialEvidenceReadFailed,
+            disposition: null,
+            decided_by: null,
+            decided_at: null,
+            decision_note: null,
+          },
+        })
+        .select('id')
+        .single()
+      if (reviewInsertErr) {
+        throw new ApiError(
+          `reattendMakesafe: required billing review fact could not be persisted: ${reviewInsertErr.message || reviewInsertErr}`,
+          500,
+        )
+      }
+      billingReviewEvent = { id: insertedReview?.id, event_type: 'makesafe_reattend_billing_review_required', detail_json: { id: insertedReview?.id } }
+    }
+    return {
+      ok: true,
+      reattended: true,
+      idempotent_replay: true,
+      job_id: jobId,
+      reattend_count: detail.reattend_count,
+      cycle_number: currentCycle,
+      attendance_cycle_id: detail.attendance_cycle_id || null,
+      substatus: detail.substatus,
+      previous_status: previousStatus,
+      reason,
+      bill_reattend_manually: billReattendManually,
+      prior_pack_sent: priorPackSent,
+      billing_review_required: billingReviewRequired,
+      billing_review_event: {
+        ok: true,
+        required: billingReviewRequired,
+        event_id: billingReviewEvent?.id || parseJsonObject(billingReviewEvent?.detail_json).id || null,
+      },
+      event_sync: { ok: true },
+      warnings: [],
+      ...(reattendWarning ? { warning: reattendWarning } : {}),
+    }
+  }
+
   const nowIso = new Date().toISOString()
   const nextCycle = (detail.cycle_number ?? 1) + 1
   const nextReattend = (detail.reattend_count ?? 0) + 1
@@ -30599,12 +30702,6 @@ export async function reattendMakesafe(client: any, args: {
     event_id: null,
   }
   if (billingReviewRequired) {
-    const priorInvoiceSummary = (liveInvoices || []).map((inv: any) => ({
-      xero_id: inv.xero_invoice_id || inv.id || null,
-      status: inv.status || null,
-      number: inv.invoice_number || null,
-      amount: inv.total ?? inv.amount_due ?? null,
-    }))
     const { data: reviewEvent, error: reviewEventErr } = await client
       .from('job_events')
       .insert({
