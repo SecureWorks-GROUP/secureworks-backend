@@ -1,10 +1,11 @@
 # SES synthetic live-fire lab
 
-This lab sends seven unmistakably synthetic, self-addressed work-order emails
-through the same M365 group and two-minute deterministic scan used by real SES
-traffic. It then proves intake fate, canonical board visibility, state
-projection, correction/reattendance lineage, assessment portal triad behaviour,
-and U4's permanent no-release wall.
+This lab sends one unmistakably synthetic, self-addressed physical make-safe
+work-order email through the same M365 group and two-minute deterministic scan
+used by real SES traffic. It proves the real intake leg through card creation,
+canonical board visibility and classification, then cleans the synthetic card
+away. By Captain order, downstream docket and workflow validation uses existing
+real cards and is not exercised by the synthetic runner.
 
 No fixture contains a real builder, insurer, client, address or reply route.
 Every envelope is exactly:
@@ -13,16 +14,17 @@ Every envelope is exactly:
 - To: `ses@secureworkswa.com.au`
 - Cc/Bcc: empty
 
-The lab never calls a send-pack, invoice, Xero, SMS, GHL, sign-off or release
-action. U4 is invoked only with `dry_run: true`, and every synthetic family has
-the unconditional blocker `synthetic_livefire_release_forbidden`.
+The lab never calls a docket, send-pack, invoice, Xero, SMS, GHL, sign-off or
+release action. Every synthetic family still has the unconditional blocker
+`synthetic_livefire_release_forbidden`.
 
 ## Required deployment — this kit has a migration
 
 The matching edge revision and
-`20260727080821_makesafe_synthetic_livefire_infrastructure.sql` must both reach
-production through the normal migration-before-edge lane. The preflight requires
-the deployed capability version, fixed company profile, legacy own-mail terminal
+`20260727080821_makesafe_synthetic_livefire_infrastructure.sql` plus
+`20260728030000_synthetic_livefire_readiness_cleanup.sql` must reach production
+through the normal migration-before-edge lane. The preflight requires the
+deployed capability version, fixed company profile, legacy own-mail terminal
 accounting and release-refusal probe before it can send anything.
 
 ## Fixture provenance
@@ -35,8 +37,10 @@ messages, 6 re-attend messages, 5 corrected messages and 36 attachment-free
 assessment-report, photos, quote, roof-report, client, mobile and work-order
 fields.
 
-Fixtures copy those structures, not their facts. All names, phones, sites,
-references and links are invented. The reserved builder is
+The repository keeps these local fixture shapes for regression coverage, but
+the production command sends only the physical make-safe fixture. Fixtures copy
+real structures, not their facts. All names, phones, sites, references and links
+are invented. The reserved builder is
 `SYNTHETIC LIVE-FIRE BUILDER - TEST ONLY` with the non-routable identity domain
 `synthetic-livefire.invalid`; all actual mail routing remains inside
 `secureworkswa.com.au`. The four mobile values are exact ACMA
@@ -54,10 +58,9 @@ SUPABASE_ACCESS_TOKEN=... SW_API_KEY=... ./run-full.sh
 
 The wrapper obtains the database service-role key transiently from the Supabase
 CLI and requires the active production `SW_API_KEY` separately for authenticated
-`ops-api` probes. It generates a fresh UUID marker, creates six PDFs plus seven
-email bodies, sends four root instructions, waits for their real intake fates,
-sends the three lineage/non-work follow-ups, verifies every stage, runs a cleanup
-dry-run, then applies cleanup.
+`ops-api` probes. It generates a fresh UUID marker and one PDF/email, sends that
+single physical make-safe instruction, waits for its real intake fate and card
+classification, runs a cleanup dry-run, then applies cleanup.
 
 Evidence is written under the ignored
 `artifacts/ses-synthetic-livefire/<marker>/` directory. The signed token is
@@ -76,7 +79,8 @@ Cleanup is deliberately split by store:
   `ses_synthetic_livefire_runs`.
 - Mutable synthetic jobs and operational rows are deleted after the exact-marker
   guard passes. Only append-only/group evidence and the marked mailbox messages
-  remain; the attendance-cycle purge uses a guarded synthetic-only RPC.
+  remain; attendance cycles and readiness-linked jobs use guarded synthetic-only
+  RPCs bound to the run ledger.
 - Canonical Ops/Trade projections hide retained evidence only from the terminal
   `ses_synthetic_livefire_runs` ledger, never from mutable job metadata.
 
@@ -104,8 +108,8 @@ After cleanup, the runner requires the marker/job IDs to be absent from:
 - `ops_summary`
 
 Raw retained evidence is reported separately and is not misrepresented as
-physical deletion. The M365 group and sender Sent Items retain the seven marked
-messages in v1 by explicit Captain decision.
+physical deletion. The M365 group and sender Sent Items retain the one marked
+message by explicit Captain decision.
 
 If the process is interrupted after the run ledger is created, rerun only the
 guarded cleanup for that exact UUID:

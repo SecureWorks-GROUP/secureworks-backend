@@ -6,10 +6,13 @@ import {
 import { buildFixtureRun } from "./fixtures.ts";
 import {
   assertCleanupSettled,
+  assertExclusiveJobDocumentStorageRefs,
   guardInventory,
   type Inventory,
+  isMissingOptionalMutableTable,
   operationalCounts,
 } from "./run.ts";
+import { LivefireHttpError } from "./client.ts";
 
 const RUN_ID = "018f7f2c-4db4-7c61-92c7-2b2b97e0a111";
 
@@ -77,6 +80,16 @@ async function validInventory(): Promise<{
         data_snapshot_json: markerObject,
       }],
       attendanceCycles: [],
+      readinessCurrent: [{
+        job_id: jobId,
+        dependency_generation: 0,
+      }],
+      readinessInvalidations: [{
+        id: "readiness-invalidation-1",
+        job_id: jobId,
+        generation_before: 0,
+        generation_after: 1,
+      }],
       boardApplications: [],
       docketRevisions: [],
       docketArtifacts: [],
@@ -131,6 +144,16 @@ Deno.test("cleanup guard refuses an unmarked deletable row", async () => {
   );
 });
 
+Deno.test("cleanup guard refuses readiness residue outside marker jobs", async () => {
+  const { run, inventory } = await validInventory();
+  inventory.readinessInvalidations[0].job_id = "foreign-job";
+  assertThrows(
+    () => guardInventory(run, inventory),
+    Error,
+    "operational child outside marker jobs",
+  );
+});
+
 Deno.test("cleanup guard refuses any forbidden release residue", async () => {
   const { run, inventory } = await validInventory();
   inventory.releaseRevisions.push({ id: "release-1" });
@@ -138,6 +161,65 @@ Deno.test("cleanup guard refuses any forbidden release residue", async () => {
     () => guardInventory(run, inventory),
     Error,
     "unexpectedly created 1 release revisions",
+  );
+});
+
+Deno.test("cleanup guard refuses synthetic-linked trade invoice residue", async () => {
+  const { run, inventory } = await validInventory();
+  inventory.mutableOperationalRows.trade_invoice_lines = [{
+    id: "trade-invoice-line-1",
+    job_id: inventory.jobs[0].id,
+    trade_invoice_id: "trade-invoice-1",
+  }];
+  assertThrows(
+    () => guardInventory(run, inventory),
+    Error,
+    "unexpectedly created 1 trade invoice lines",
+  );
+});
+
+Deno.test("cleanup guard retains an unmarked append-only issue only under an exact marker source", async () => {
+  const { run, inventory } = await validInventory();
+  const issue = {
+    id: "source-issue-1",
+    post_id: inventory.emails[0].post_id,
+    mailbox: run.mailbox,
+    change_type: "intake_deferred_scan_run_cap_deferred",
+    page_meta: { source_fate: "deferred_next_run" },
+  };
+  inventory.rawEvents.push(issue);
+  inventory.sourceIssues.push(issue);
+  guardInventory(run, inventory);
+
+  issue.post_id = "foreign-post";
+  assertThrows(
+    () => guardInventory(run, inventory),
+    Error,
+    "source child outside marker roots",
+  );
+});
+
+Deno.test("content-addressed job documents require exact exclusive marker references", async () => {
+  const { run, inventory } = await validInventory();
+  const path =
+    "makesafe-deterministic/0123456789abcdef/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.pdf";
+  inventory.jobDocuments[0].storage_url = path;
+  guardInventory(run, inventory);
+  assertExclusiveJobDocumentStorageRefs(
+    run,
+    inventory,
+    path,
+    [inventory.jobDocuments[0]],
+  );
+
+  assertThrows(
+    () =>
+      assertExclusiveJobDocumentStorageRefs(run, inventory, path, [{
+        ...inventory.jobDocuments[0],
+        id: "foreign-document",
+      }]),
+    Error,
+    "shared or foreign job-document object",
   );
 });
 
@@ -157,4 +239,58 @@ Deno.test("cleanup waits for every attempted message and attachment sync", async
     Error,
     "has not finished attachment sync",
   );
+});
+
+Deno.test("inventory tolerates only the exact missing optional mutable table", () => {
+  const missingDraftNotes = new LivefireHttpError(
+    "GET draft_notes",
+    404,
+    '{"code":"PGRST205","message":"Could not find the table \'public.draft_notes\' in the schema cache"}',
+  );
+  assertEquals(
+    isMissingOptionalMutableTable(missingDraftNotes, "draft_notes"),
+    true,
+  );
+  assertEquals(
+    isMissingOptionalMutableTable(missingDraftNotes, "job_variations"),
+    false,
+  );
+  assertEquals(
+    isMissingOptionalMutableTable(
+      new LivefireHttpError("GET draft_notes", 500, missingDraftNotes.detail),
+      "draft_notes",
+    ),
+    false,
+  );
+});
+
+Deno.test("readiness cleanup migration is marker- and run-ledger-bound", async () => {
+  const migration = await Deno.readTextFile(
+    new URL(
+      "../../../supabase/migrations/20260728030000_synthetic_livefire_readiness_cleanup.sql",
+      import.meta.url,
+    ),
+  );
+  for (
+    const required of [
+      "CREATE OR REPLACE FUNCTION public.purge_synthetic_livefire_jobs",
+      "job.metadata->>'synthetic_livefire_marker' = run.marker",
+      "run.job_ids ? p_job_id::text",
+      "run.state IN ('active', 'cleanup_complete')",
+      "PERFORM set_config('app.synthetic_livefire_purge_marker', p_marker, true)",
+      "TG_TABLE_NAME = 'makesafe_readiness_invalidations'",
+      "DELETE FROM public.makesafe_readiness_invalidations",
+      "DELETE FROM public.makesafe_readiness_current",
+      "DELETE FROM public.jobs",
+      "v_marked_count > v_ledger_count OR v_bound_count <> v_marked_count",
+      "synthetic live-fire purge scope mismatch",
+      "jsonb_array_length(v_jobs) <> v_marked_count",
+      "synthetic live-fire purge refused money, release, docket, projection, or committed-readiness residue",
+      "REVOKE ALL ON FUNCTION public.purge_synthetic_livefire_jobs(text)",
+    ]
+  ) {
+    if (!migration.includes(required)) {
+      throw new Error(`missing readiness cleanup guard: ${required}`);
+    }
+  }
 });
