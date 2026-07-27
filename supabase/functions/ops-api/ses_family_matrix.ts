@@ -4,6 +4,7 @@ export const SES_FAMILY_MATRIX_VERSION =
 export type SesBuilderKey = "MLB" | "AJS" | "AJBR" | "WESTERN" | "UNKNOWN";
 
 export type SesFamilyId =
+  | "unknown"
   | "physical_makesafe"
   | "ordinary_roof_portal"
   | "own_template_roof"
@@ -208,6 +209,17 @@ export function resolveSesFamilyMatrixRow(args: {
   strata?: boolean;
   own_template_requested?: boolean;
 }): SesFamilyMatrixResolution {
+  if (args.family === "unknown") {
+    return {
+      ok: false,
+      failure: {
+        code: "family_unknown",
+        reason: "Card has no sealed SES family classification.",
+        recovery_action:
+          "Recover the family from canonical source authority before preparing the docket.",
+      },
+    };
+  }
   if (
     AJS_KEYS.has(args.builder_key) &&
     AJS_FORBIDDEN_REPORT_FAMILIES.has(args.family)

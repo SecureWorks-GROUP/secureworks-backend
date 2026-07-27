@@ -162,7 +162,7 @@ function family(
     explicit.includes("strata");
   if (ownTemplate) return "own_template_roof";
   if (explicit.includes("roof")) return "ordinary_roof_portal";
-  return "physical_makesafe";
+  return "unknown";
 }
 
 function lineageKind(
@@ -328,9 +328,6 @@ export function buildSesAssemblerInput(
     intakeCase?.builder_wo_canonical,
     intakeCase?.builder_po_canonical,
     intakeCase?.external_ref_canonical,
-    detail.external_ref,
-    metadata.external_ref,
-    job.job_number,
   );
   const portalLinks = extractPortalLinks(detail.external_links).map((link) => ({
     role: portalRole(familyId, link.role),
@@ -426,7 +423,6 @@ export function buildSesAssemblerInput(
       po_or_external_ref: firstText(
         intakeCase?.builder_po_canonical,
         intakeCase?.external_ref_canonical,
-        detail.external_ref,
       ) || null,
       site_address: firstText(intakeCase?.site_address, job.site_address) ||
         null,
@@ -436,12 +432,9 @@ export function buildSesAssemblerInput(
         intakeCase?.raw_identity_json?.scope,
       ) || null,
       deliverables: [{
-        id: firstText(
-          intakeCase?.deliverable_ref_canonical,
-          `${text(job.id)}:${familyId}`,
-        ),
+        id: text(intakeCase?.deliverable_ref_canonical),
         kind: familyId,
-      }],
+      }].filter((item) => item.id),
       attachment_pointers: workOrders.map((item) =>
         `job_document:${text(item.id)}`
       ).filter((item) => !item.endsWith(":")).sort(),

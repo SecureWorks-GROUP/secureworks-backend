@@ -57,6 +57,9 @@ Deno.test("SWMS-26980 live fixture builds canonical v1 input without inventing U
   });
   assertEquals(input.classification.builder_key, "MLB");
   assertEquals(input.classification.family, "ordinary_roof_portal");
+  assertEquals(input.source.builder_reference, "");
+  assertEquals(input.source.po_or_external_ref, null);
+  assertEquals(input.source.deliverables, []);
   assertEquals(input.source.portal_links, [{
     role: "roof_report",
     url: "https://primeeco.tech/share/2ef11c67-8f63-48cb-9ff4-61bf71848f17",
@@ -156,6 +159,18 @@ Deno.test("live adapter applies the Captain AJS physical-makesafe rule before re
   assertEquals(input.classification.builder_key, "AJS");
   assertEquals(input.classification.family, "physical_makesafe");
   assertEquals(input.classification.report_only, false);
+});
+
+Deno.test("live adapter leaves an unclassified non-AJS card explicitly unknown", () => {
+  const live = snapshot();
+  live.detail!.requesting_company_slug = "unsealed-builder";
+  live.detail!.requesting_company_name = "Unsealed Builder";
+  live.detail!.report_type = null;
+  live.job.metadata = {};
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.classification.family, "unknown");
+  assertEquals(input.source.builder_reference, "");
+  assertEquals(input.source.deliverables, []);
 });
 
 Deno.test("live adapter keeps assessment family held on the named Captain recipe blocker", async () => {
