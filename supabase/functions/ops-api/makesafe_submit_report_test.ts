@@ -9,6 +9,7 @@ import {
   _makesafePipelineForTest,
   _normaliseOpsAttachJobPhotoInputForTest,
   _preferBearerForOpsApiAction,
+  _dispatchMakesafeReportForTest,
   _resolveMakesafeReportActor,
   _resolveOpsApiAuthIntent,
   _submitMakesafeReportForTest,
@@ -204,10 +205,9 @@ Deno.test("submit_makesafe_report attributes a mixed-credential Trade request fr
   assertEquals(actor, "hugo-user-id");
 
   const { client, rows } = makeSubmitClient(baseRows());
-  await _submitMakesafeReportForTest(
-    client,
-    validBody({ userId: actor }),
-  );
+  const body = validBody();
+  delete body.userId;
+  await _dispatchMakesafeReportForTest(client, body, authMode, { id: actor });
   assertEquals(rows.job_service_reports[0].submitted_by, "hugo-user-id");
   assertEquals(rows.job_events[0].user_id, "hugo-user-id");
 });

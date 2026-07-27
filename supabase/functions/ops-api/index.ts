@@ -2335,6 +2335,18 @@ export function _resolveMakesafeReportActor(
   return body?.userId || body?.user_id || null
 }
 
+async function dispatchMakesafeReport(
+  client: any,
+  body: any,
+  authMode: 'api_key' | 'jwt' | 'routine',
+  authUser: TradeAuthContext | null,
+) {
+  return submitMakesafeReport(client, {
+    ...body,
+    userId: _resolveMakesafeReportActor(authMode, authUser, body),
+  })
+}
+
 // Trade Board route: always the production canonical loader. There is no
 // injectable loadBoard override on this production-visible path — mission and
 // harness proofs must discover jobs from the jobs table (or a join-capable
@@ -3354,10 +3366,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await scanSesMakesafes(client))
       }
       case 'submit_makesafe_report':
-        return json(await submitMakesafeReport(client, {
-          ...body,
-          userId: _resolveMakesafeReportActor(authMode, authUser, body),
-        }))
+        return json(await dispatchMakesafeReport(client, body, authMode, authUser))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       // ── Job P&L (M3) — pairs with ops.html #119 + M1 migration ──
       case 'job_financials': return json(await listJobFinancials(client))
@@ -14147,6 +14156,7 @@ async function submitMakesafeReport(client: any, body: any) {
   return { ok: true, report, board_sync: boardSync, event_sync: eventSync, warnings }
 }
 export const _submitMakesafeReportForTest = submitMakesafeReport
+export const _dispatchMakesafeReportForTest = dispatchMakesafeReport
 export const _recaptureIntakeDraftForTest = recaptureIntakeDraft
 
 // ── Slice 6: make-safe map data ──
