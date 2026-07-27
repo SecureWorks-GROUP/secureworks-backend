@@ -214,14 +214,19 @@ source = Path(os.environ['PREFLIGHT']).read_text()
 payload = json.loads(Path(os.environ['CAPTURE_FILE']).read_text())
 query = payload['query']
 forbidden = re.compile(
-    r"\b(?:insert\s+into|update\s+\w+\s+set|delete\s+from|merge\s+into|"
-    r"create\s+(?:table|index|policy|trigger|function)|alter\s+table|"
-    r"drop\s+(?:table|index|policy|trigger|function)|truncate\s+table|"
-    r"grant\s+\w|revoke\s+\w)\b|"
+    r"\b(?:insert|update|delete|merge|create|alter|drop|truncate|grant|revoke)\b|"
     r"\bsupabase\s+(?:db\s+push|migration\s+apply)\b",
     re.IGNORECASE,
 )
-if forbidden.search(query) or forbidden.search(source):
+hostile_queries = [
+    'UPDATE public.jobs SET status = \'x\'',
+    'DELETE FROM "public"."jobs"',
+    'CREATE TABLE public.shadow (id integer)',
+]
+if any(not forbidden.search(hostile) for hostile in hostile_queries):
+    raise SystemExit('hostile write statement was not rejected')
+source_without_cleanup_flag = re.sub(r"(?<!\w)-delete\b", "", source)
+if forbidden.search(query) or forbidden.search(source_without_cleanup_flag):
     raise SystemExit('write or migration-application operation found')
 if 'extensions.digest(' not in query:
     raise SystemExit('generated query does not schema-qualify digest')
