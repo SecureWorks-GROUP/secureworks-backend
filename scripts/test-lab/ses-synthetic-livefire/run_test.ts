@@ -267,7 +267,7 @@ Deno.test("inventory tolerates only the exact missing optional mutable table", (
 Deno.test("readiness cleanup migration is marker- and run-ledger-bound", async () => {
   const migration = await Deno.readTextFile(
     new URL(
-      "../../../supabase/migrations/20260728030000_synthetic_livefire_readiness_cleanup.sql",
+      "../../../supabase/migrations/20260728035000_synthetic_livefire_readiness_cleanup.sql",
       import.meta.url,
     ),
   );
