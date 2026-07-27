@@ -13940,10 +13940,30 @@ async function ensureMakesafeAttendanceCycle(
   cycleNumber: number,
   openReason: string,
 ): Promise<{ id: string; cycle_number: number }> {
-  const { data, error } = await client.from('makesafe_attendance_cycles')
-    .upsert({ job_id: jobId, cycle_number: cycleNumber, open_reason: openReason }, { onConflict: 'job_id,cycle_number' })
+  const readCycle = async () => await client.from('makesafe_attendance_cycles')
     .select('id, cycle_number')
-    .single()
+    .eq('job_id', jobId)
+    .eq('cycle_number', cycleNumber)
+    .maybeSingle()
+  const existing = await readCycle()
+  if (existing.error) {
+    throw new ApiError(`attendance cycle read failed: ${existing.error.message || existing.error}`, 500)
+  }
+  if (!existing.data?.id) {
+    const inserted = await client.from('makesafe_attendance_cycles').insert({
+      job_id: jobId,
+      cycle_number: cycleNumber,
+      open_reason: openReason,
+    })
+    if (inserted.error) {
+      const raced = await readCycle()
+      if (raced.error || !raced.data?.id) {
+        throw new ApiError(`attendance cycle bind failed: ${inserted.error.message || inserted.error}`, 500)
+      }
+      return raced.data
+    }
+  }
+  const { data, error } = await readCycle()
   if (error || !data?.id) {
     throw new ApiError(`attendance cycle bind failed: ${error?.message || 'missing cycle identity'}`, 500)
   }
@@ -24856,7 +24876,7 @@ async function tradeJobDetail(
   return {
     job: tradeSafeJob,
     documents: docsRes.data || [],
-    media: mediaRes.data || [],
+    media: currentCycleMedia,
     // Human comms thread only: strip system/audit markers (MAKESAFE_PACK_SENT,
     // MAKESAFE_AGENT_REPLY) so the trade never sees internal breadcrumbs in the
     // notes thread. The markers stay in job_events untouched.
@@ -26126,7 +26146,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
   const limit = Math.min(parseInt(params.get('limit') || '50', 10) || 50, 200)
   const SIGNED_TTL = 600 // 10 min, short-lived signed urls for any private docs
 
-  const DETAIL_SELECT = 'job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_notes, reattend_count, last_reattend_at, last_reattend_reason, cycle_number, makesafe_companies(slug, name, invoice_email, report_recipient)'
+  const DETAIL_SELECT = 'job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, report_sent_at, invoice_notes, reattend_count, last_reattend_at, last_reattend_reason, cycle_number, attendance_cycle_id, cycle_attribution, makesafe_companies(slug, name, invoice_email, report_recipient)'
 
   // 1) The report-draft-ready make-safe details. report_sent_at is loaded so the
   // shared surfacing predicate can exclude an already-sent-but-stale job (the
@@ -26194,7 +26214,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       .select('id, job_id, type, file_name, storage_url, pdf_url, version, created_at')
       .in('job_id', jobIds),
     client.from('job_media')
-      .select('id, job_id, phase, type, storage_url, thumbnail_url, label, taken_at, created_at')
+      .select('id, job_id, phase, type, storage_url, thumbnail_url, label, taken_at, created_at, attendance_cycle_id, cycle_attribution, cycle_number')
       .in('job_id', jobIds)
       .eq('phase', 'completion')
       .order('created_at', { ascending: true }),
@@ -26360,7 +26380,12 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     })
     if (resumeAction === null) return null
 
-    const photos = (mediaByJob[d.job_id] || []).map((m: any) => ({
+    const currentJobMedia = filterMediaForCurrentCycle(
+      mediaByJob[d.job_id] || [],
+      d,
+      d.attendance_cycle_id || null,
+    )
+    const photos = currentJobMedia.map((m: any) => ({
       url: m.storage_url || null,
       thumbnail_url: m.thumbnail_url || m.storage_url || null,
       label: m.label || null,
@@ -27287,24 +27312,35 @@ async function resolveRoofReportPhotos(
   bodyPhotos: unknown,
   draftPhotos: unknown,
 ): Promise<Array<{ url?: string; bytesBase64?: string; contentType?: string; label?: string }>> {
+  const { data: detail } = await client.from('makesafe_job_details')
+    .select('cycle_number, reattend_count, attendance_cycle_id').eq('job_id', jobId).maybeSingle()
+  const { data: media } = await client.from('job_media')
+    .select('storage_url, label, type, phase, attendance_cycle_id, cycle_attribution, cycle_number')
+    .eq('job_id', jobId).eq('type', 'photo').limit(20)
+  const currentMedia = filterMediaForCurrentCycle(
+    (media as any[]) || [],
+    detail || { cycle_number: 1, reattend_count: 0 },
+    detail?.attendance_cycle_id || null,
+  )
+  const currentUrls = new Set(currentMedia.map((m: any) => String(m?.storage_url || '')).filter(Boolean))
+  const retainCurrentPhoto = (p: any) =>
+    p?.bytesBase64 || !hasReattendBoundary(detail) || currentUrls.has(String(p?.url || ''))
   if (Array.isArray(bodyPhotos) && bodyPhotos.length) {
     return (bodyPhotos as any[]).map((p) => ({
       url: typeof p?.url === 'string' ? p.url : undefined,
       bytesBase64: typeof p?.bytesBase64 === 'string' ? p.bytesBase64 : undefined,
       contentType: typeof p?.contentType === 'string' ? p.contentType : undefined,
       label: typeof p?.label === 'string' ? p.label : undefined,
-    })).filter((p) => p.url || p.bytesBase64)
+    })).filter((p) => (p.url || p.bytesBase64) && retainCurrentPhoto(p))
   }
   if (Array.isArray(draftPhotos) && draftPhotos.length) {
     return (draftPhotos as any[]).map((p) => ({
       url: typeof p?.url === 'string' ? p.url : undefined,
       contentType: typeof p?.contentType === 'string' ? p.contentType : undefined,
       label: typeof p?.label === 'string' ? p.label : undefined,
-    })).filter((p) => p.url)
+    })).filter((p) => p.url && retainCurrentPhoto(p))
   }
-  const { data: media } = await client.from('job_media')
-    .select('storage_url, label, type, phase').eq('job_id', jobId).eq('type', 'photo').limit(20)
-  return ((media as any[]) || [])
+  return currentMedia
     .filter((m) => m?.storage_url)
     .map((m) => ({ url: m.storage_url as string, label: (m.label as string) || undefined }))
 }
@@ -28765,6 +28801,32 @@ async function makesafeSendPack(
   const { data: detail } = await client.from('makesafe_job_details')
     .select('*, makesafe_companies(slug,name,report_recipient)')
     .eq('job_id', jobId).maybeSingle()
+  const { data: billingReviewEvent, error: billingReviewReadErr } = await client
+    .from('job_events')
+    .select('detail_json')
+    .eq('job_id', jobId)
+    .eq('event_type', 'makesafe_reattend_billing_review_required')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (billingReviewReadErr) {
+    throw new ApiError('send blocked: billing review state could not be verified', 500)
+  }
+  const billingReviewDetail = parseJsonObject(billingReviewEvent?.detail_json)
+  const billingReviewMatchesCurrentCycle = !!billingReviewEvent && (
+    billingReviewDetail.attendance_cycle_id && detail?.attendance_cycle_id
+      ? String(billingReviewDetail.attendance_cycle_id) === String(detail.attendance_cycle_id)
+      : Number(billingReviewDetail.cycle_number || 0) === Number(detail?.cycle_number || 1)
+  )
+  if (billingReviewMatchesCurrentCycle && billingReviewDetail.disposition == null) {
+    await _ensurePackRow(client, jobId, packKind)
+    await _patchPack(client, jobId, packKind, {
+      status: 'failed',
+      failed_step: 'billing_review_gate',
+      error_detail: 'reattendance after invoicing or pack release requires billing review',
+    })
+    throw new ApiError('send blocked: reattendance requires billing review before release', 412)
+  }
   // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
   const requiresSwms = _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job)
   // Stage 1 (D3): Western Building / Builderwest are PORTAL builders — they do NOT
@@ -30573,10 +30635,9 @@ export async function reattendMakesafe(client: any, args: {
         event_id: null,
         error: reviewEventErr.message || String(reviewEventErr),
       }
-      warnings.push('billing_review_event_sync_failed')
-      console.log(
-        '[ops-api] reattendMakesafe: billing review event failed (non-fatal):',
-        billingReviewEvent.error,
+      throw new ApiError(
+        `reattendMakesafe: required billing review fact could not be persisted: ${billingReviewEvent.error}`,
+        500,
       )
     } else {
       billingReviewEvent.event_id = reviewEvent?.id || null
