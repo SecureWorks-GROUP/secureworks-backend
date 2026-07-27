@@ -248,9 +248,11 @@ is not automatic. The main deploy workflow now runs the read-only guard in
 `scripts/check-edge-schema-preflight.sh` before any function deploy. Declare each
 schema dependency and its complete production markers in
 `scripts/edge-function-schema-requirements.txt` in the same PR as dependent edge
-code. The guard requires the canonical migration ledger name/checksum plus every
-marker and never applies SQL or runs broad `db push`. When a function selects a
-newly added column, apply the migration FIRST — otherwise the query 400s and, per
+code. The guard requires the canonical migration ledger version/name plus every
+marker and never applies SQL or runs broad `db push`. The parsed-ledger checksum
+is advisory only because Supabase cannot reliably reproduce checked-in file
+bytes across CLI versions. When a function selects a newly added column, apply the
+migration FIRST — otherwise the query 400s and, per
 the entry above, silently reports zero. `jobs.quoted_value`
 (`20260717000001_jobs_quoted_value_generated.sql`) is the current example:
 `daily-digest` selects it, and as of 2026-07-20 the migration is still NOT

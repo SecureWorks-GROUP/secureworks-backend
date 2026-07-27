@@ -4,8 +4,10 @@
 #
 # The main-branch deploy workflow checks every requirement for each changed
 # function before running `supabase functions deploy`. The migration ledger row
-# must have the canonical name and exact checked-in statement SHA-256, and every
-# declared marker must still exist in production.
+# must have the canonical version/name, and every declared marker must still
+# exist and be queryable in production. Parsed-ledger checksum drift from the
+# checked-in file is advisory because Supabase cannot reliably reproduce file
+# bytes across CLI versions; blocking on it would create false deploy refusals.
 #
 # Marker kinds:
 #   table       public table name
