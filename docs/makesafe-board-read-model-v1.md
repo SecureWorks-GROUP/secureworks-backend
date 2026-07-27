@@ -14,6 +14,21 @@ Contract version: `makesafe-board.v1`.
 - Clients must not query Supabase tables directly and must not derive a column from `job_assignments.status`.
 - Reads paginate with PostgREST `.range()` and chunk job IDs. The feed is not capped at 1,000 dependent rows.
 
+### Privileged Phase 1 comparison mode
+
+The same endpoint accepts `contract_version=v2` only for the `ops` projection
+with an API key or an `admin`, `owner`, or `ops_manager` JWT. It is a compare-only
+response: the default remains `makesafe-board.v1`, and the v2 projector does not
+become display authority or mutate operational state. When enabled by
+`makesafe_state_projection_config.compare_enabled`, the response is
+`makesafe-board.v2` and adds `state_v2` plus the machine-readable `v1_v2_diff`
+to each row, along with complete `projection_health`; any incomplete required
+join fails the request rather than being reported as an empty board. Phase 1
+leaves `default_contract_version` at `v1` and `authority_flipped` false. The
+corresponding additive migration is
+`20260728000001_makesafe_state_authority_u2.sql`; it performs no backfill or
+legacy-substatus conversion.
+
 ## Canonical truth
 
 Every card originates as one canonical job row with:

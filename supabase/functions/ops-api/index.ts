@@ -126,6 +126,7 @@ import {
   projectTradeMakesafeBoard,
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
+import { buildPrivilegedMakesafeV2BoardComparison } from './makesafe_state_compare.ts'
 import {
   buildMakesafeDisagreementList,
   checkMakesafeStatusCanary,
@@ -2404,11 +2405,21 @@ async function makesafeBoardAction(
   projectionRaw: string | null | undefined,
   options: {
     generatedAt?: string
+    contractVersion?: string | null
   } = {},
 ) {
   const projection = String(projectionRaw || 'ops').toLowerCase()
+  const contractVersion = String(options.contractVersion || 'v1').toLowerCase()
   if (!['ops', 'trade'].includes(projection)) {
     return json({ error: "projection must be 'ops' or 'trade'" }, 400)
+  }
+  if (!['v1', 'v2'].includes(contractVersion)) {
+    return json({ error: "contract_version must be 'v1' or 'v2'" }, 400)
+  }
+  if (contractVersion === 'v2' && (projection !== 'ops' ||
+    (authMode !== 'api_key' && !(authMode === 'jwt' &&
+      ['admin', 'owner', 'ops_manager'].includes(String(authUser?.role || '').toLowerCase()))))) {
+    return json({ error: 'v2 comparison requires privileged ops access' }, 403)
   }
   if (projection === 'trade' && authMode !== 'jwt') {
     return json({ error: 'trade projection requires an authenticated trade session' }, 403)
@@ -2429,6 +2440,14 @@ async function makesafeBoardAction(
   }
 
   const canonicalRows = await loadCanonicalMakesafeBoard(client)
+  if (contractVersion === 'v2') {
+    const generatedAt = options.generatedAt || new Date().toISOString()
+    return json(await buildPrivilegedMakesafeV2BoardComparison(
+      client,
+      canonicalRows,
+      generatedAt,
+    ))
+  }
   const { ops, ...parity } = checkMakesafeBoardParity(canonicalRows)
   if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
   return json({
@@ -2695,6 +2714,7 @@ if (import.meta.main) serve(async (req: Request) => {
           authMode,
           authUser,
           url.searchParams.get('projection'),
+          { contractVersion: url.searchParams.get('contract_version') },
         )
       }
       case 'makesafe_status_shadow_refresh': {
