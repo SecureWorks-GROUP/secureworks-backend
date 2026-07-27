@@ -165,6 +165,10 @@ jobs:
         run: |
           bash scripts/test/test-apply-pending-migrations.sh
 
+      - name: Check migration extension schema contract
+        run: |
+          deno test --allow-read supabase/functions/ops-api/migration_extension_schema_test.ts
+
       - name: Test edge deploy workflow classification
         run: |
           bash scripts/test/test-deploy-edge-functions-workflow.sh
