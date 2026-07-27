@@ -39,6 +39,8 @@ function baseInput(): MakesafeStateInput {
     computed_at: NOW,
     projection_input_errors: [],
     identity: {
+      authority_kind: "effective_intake_case",
+      authority_revision_id: "case-1",
       source_instruction_id: "instruction-1",
       lineage_id: "lineage-1",
       case_id: "case-1",

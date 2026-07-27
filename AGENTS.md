@@ -519,6 +519,16 @@ build-stamped version truth are owned by
 `docs/project-knowledge/OPS_API_SOURCE_OF_TRUTH.md`. The shared runtime
 boundary is `_shared/sealed_ses_money_fence.ts`.
 
+The v2 authority bootstrap and full-board two-way reconciliation are owned by
+`20260728030000_makesafe_board_reconcile_truth_u2.sql`,
+`makesafe_state_seed`, and `makesafe_state_reconcile`. Both actions are
+API-key-only, POST-only, and dry-run by default. A live seed is acceptable only
+when the complete v2 comparison reports zero `projection_input_error` cards and
+the SWMS-26980 U4 dry-run reports no `spine_missing_*` blocker. Reconciliation
+may write only the display status ledger plus the on-card Captain-action ledger;
+it must commit an exact `trustworthy | captain_marked` partition with
+`neither=0`.
+
 ## The Repository Root Stays npm-Package-Free
 
 This repo is Deno-rooted (`deno.jsonc` at the root). Deno 2 auto-discovers a root

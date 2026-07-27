@@ -568,6 +568,22 @@ Deno.test(
       "ordinary_roof_portal",
     );
 
+Deno.test("SWMS-26980 seeded authority preserves the identity spine in U4", () => {
+  const live = snapshot();
+  live.identity_revision = {
+    authority_kind: "legacy_job_record",
+    source_instruction_id: "legacy-job:5383e3c4-eb32-41cf-8e3c-63a754c16d05",
+    source_version: 1,
+    source_content_hash: `sha256:${"a".repeat(64)}`,
+    lineage_id: "5383e3c4-eb32-41cf-8e3c-63a754c16d05",
+    effective_case_id: null,
+  };
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.identity.source_instruction_id, live.identity_revision.source_instruction_id);
+  assertEquals(input.identity.source_version, 1);
+  assertEquals(input.identity.lineage_id, live.identity_revision.lineage_id);
+});
+
     const ownTemplateRoof = snapshot();
     ownTemplateRoof.detail!.report_type = null;
     ownTemplateRoof.detail!.external_links = [];

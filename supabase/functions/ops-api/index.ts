@@ -127,7 +127,11 @@ import {
   projectTradeMakesafeBoard,
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
-import { buildPrivilegedMakesafeV2BoardComparison } from './makesafe_state_compare.ts'
+import {
+  attachMakesafeStateV2Comparison,
+  buildPrivilegedMakesafeV2BoardComparison,
+} from './makesafe_state_compare.ts'
+import { planMakesafeStateReconciliation } from './makesafe_state_reconcile.ts'
 import {
   buildMakesafeDisagreementList,
   checkMakesafeStatusCanary,
@@ -998,9 +1002,11 @@ const CORS = {
 
 class ApiError extends Error {
   status: number
-  constructor(message: string, status: number) {
+  body?: unknown
+  constructor(message: string, status: number, body?: unknown) {
     super(message)
     this.status = status
+    this.body = body
   }
 }
 
@@ -3253,6 +3259,222 @@ if (import.meta.main) serve(async (req: Request) => {
           generated_at: new Date().toISOString(),
           ...(shadow.error ? { error: shadow.error } : {}),
         }, shadow.ok ? 200 : 503)
+      }
+      case 'makesafe_state_seed': {
+        // Dark, API-key-only U2 bootstrap. The server selects the whole
+        // canonical board; callers cannot choose a convenient subset. A live
+        // run is accepted only when the v2 projector is complete and the
+        // deployed U4 SWMS-26980 canary has no correlation-spine blocker.
+        if (authMode !== 'api_key') {
+          return json({ error: 'makesafe_state_seed requires ops privilege' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'makesafe_state_seed requires POST' }, 405)
+        }
+        const dryRun = body?.dry_run !== false
+        const runKey = String(body?.run_key || '').trim()
+        if (!dryRun && !runKey) {
+          return json({ error: 'run_key is required for a live seed' }, 400)
+        }
+
+        const canonicalRows = await loadCanonicalMakesafeBoard(client)
+        const jobIds = canonicalRows.map((row: any) => String(row.id))
+          .filter(Boolean).sort()
+        const { hash } = await canonicalJsonAndHash({
+          contract: 'makesafe-state-authority-seed.v1',
+          job_ids: jobIds,
+        })
+        const selectionHash = `sha256:${hash}`
+        let seedResult: any = null
+        if (!dryRun) {
+          const { data, error } = await client.rpc(
+            'seed_makesafe_state_authority_v1',
+            {
+              p_run_key: runKey,
+              p_applied_by: 'makesafe-state.v2-seeder',
+              p_selection_hash: selectionHash,
+              p_job_ids: jobIds,
+            },
+          )
+          if (error) {
+            return json({
+              ok: false,
+              dry_run: false,
+              selection_hash: selectionHash,
+              requested: jobIds.length,
+              error: error.message || String(error),
+            }, 409)
+          }
+          seedResult = data
+        }
+
+        const acceptedRows = dryRun
+          ? canonicalRows
+          : await loadCanonicalMakesafeBoard(client)
+        const comparison = await attachMakesafeStateV2Comparison(
+          client,
+          acceptedRows,
+          new Date().toISOString(),
+        )
+        const canaryRequest = normalizeSesPrepareRequest({
+          selection: { mode: 'job_number', job_number: 'SWMS-26980' },
+          idempotency_key: `makesafe-state-seed:${runKey || selectionHash}`,
+          dry_run: true,
+          force_refresh: true,
+        })
+        const canary = await prepare_ses_docket_revision(
+          canaryRequest,
+          createSesAssemblerRuntimeDependencies(client, {
+            org_id: DEFAULT_ORG_ID,
+            created_by: 'makesafe-state.v2-seeder-canary',
+          }),
+        )
+        const spineBlockers = canary.results.flatMap((result) =>
+          (result.blockers || [])
+            .filter((blocker) =>
+              String(blocker?.reason_code || '').startsWith('spine_missing_')
+            )
+            .map((blocker) => ({
+              reason_code: blocker.reason_code,
+              reason: blocker.reason,
+              recovery_action: blocker.recovery_action,
+            }))
+        )
+        const inputErrors =
+          comparison.projection_health.projection_input_error_job_count
+        const acceptancePassed = inputErrors === 0 && spineBlockers.length === 0
+        return json({
+          ok: acceptancePassed,
+          dry_run: dryRun,
+          selection_hash: selectionHash,
+          requested: jobIds.length,
+          seed_result: seedResult,
+          acceptance: {
+            projection_input_error_job_count: inputErrors,
+            u4_canary_job_number: 'SWMS-26980',
+            u4_spine_missing_blockers: spineBlockers,
+            passed: acceptancePassed,
+          },
+        }, acceptancePassed || dryRun ? 200 : 409)
+      }
+      case 'makesafe_state_reconcile': {
+        // U2 Captain redirect: server-selected, fact-derived board correction.
+        // This never accepts a caller-selected card batch. It partitions the
+        // complete board into trustworthy status or a visible Captain action,
+        // then writes both display-only ledgers atomically. Production use stays
+        // dark unless dry_run:false is explicit.
+        if (authMode !== 'api_key') {
+          return json({ error: 'makesafe_state_reconcile requires ops privilege' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'makesafe_state_reconcile requires POST' }, 405)
+        }
+        const dryRun = body?.dry_run !== false
+        const runKey = String(body?.run_key || '').trim()
+        if (!dryRun && !runKey) {
+          return json({ error: 'run_key is required for a live reconciliation' }, 400)
+        }
+
+        const canonicalRows = await loadCanonicalMakesafeBoard(client)
+        const computedAt = new Date().toISOString()
+        const comparison = await attachMakesafeStateV2Comparison(
+          client,
+          canonicalRows,
+          computedAt,
+        )
+        const plan = planMakesafeStateReconciliation(comparison.rows)
+        const selection = plan.outcomes
+          .map((outcome) => ({
+            job_id: outcome.job_id,
+            displayed_status: outcome.displayed_status,
+            fact_derived_status: outcome.fact_derived_status,
+            outcome: outcome.outcome,
+          }))
+          .sort((a, b) => a.job_id.localeCompare(b.job_id))
+        const { hash } = await canonicalJsonAndHash({
+          contract: 'makesafe-board-reconciliation.v1',
+          rows: selection,
+        })
+        const selectionHash = `sha256:${hash}`
+        const baseResult = {
+          ok: plan.neither === 0 &&
+            comparison.projection_health.projection_input_error_job_count === 0,
+          dry_run: dryRun,
+          selection_hash: selectionHash,
+          requested: plan.requested,
+          trustworthy: plan.trustworthy,
+          captain_marked: plan.captain_marked,
+          neither: plan.neither,
+          transition_count: plan.transitions.length,
+          attention_write_count: plan.attention_applications.length,
+          projection_input_error_job_count:
+            comparison.projection_health.projection_input_error_job_count,
+        }
+        if (plan.neither !== 0) {
+          return json({
+            ...baseResult,
+            error: 'reconciliation did not classify every card',
+          }, 503)
+        }
+        if (comparison.projection_health.projection_input_error_job_count !== 0) {
+          return json({
+            ...baseResult,
+            error: 'state authority must be seeded before reconciliation can write',
+          }, dryRun ? 200 : 409)
+        }
+        if (dryRun) return json(baseResult)
+
+        const transitionsByJob = new Map(
+          plan.transitions.map((transition) => [transition.job_id, transition]),
+        )
+        const attentionByJob = new Map(
+          plan.attention_applications.map((attention) => [attention.job_id, attention]),
+        )
+        const comparisonByJob = new Map(
+          comparison.rows.map((row: any) => [String(row.id), row]),
+        )
+        const rpcRows = plan.outcomes.map((outcome) => {
+          const transition = transitionsByJob.get(outcome.job_id)
+          const attention = attentionByJob.get(outcome.job_id)
+          const row: any = comparisonByJob.get(outcome.job_id)
+          return {
+            job_id: outcome.job_id,
+            job_number: outcome.job_number,
+            outcome: outcome.outcome,
+            source_status: String(row?.declared_stage || row?.canonical_stage || '').toLowerCase(),
+            before_status: String(row?.canonical_stage || '').toLowerCase(),
+            after_status: transition?.after_status || null,
+            computed_at: row?.state_v2?.computed_at || computedAt,
+            computed_reasons: transition?.computed_reasons || [],
+            attendance_cycle_id: attention?.attendance_cycle_id || null,
+            attention_state: attention?.state || null,
+            attention_code: attention?.code || null,
+            attention_message: attention?.message || null,
+            attention_since: attention?.since || null,
+            attention_evidence_refs: attention?.evidence_refs || [],
+          }
+        })
+        const { data: applied, error: applyError } = await client.rpc(
+          'apply_makesafe_board_reconciliation',
+          {
+            p_run_key: runKey,
+            p_applied_by: 'makesafe-state.v2-reconciler',
+            p_selection_hash: selectionHash,
+            p_rows: rpcRows,
+          },
+        )
+        if (applyError) {
+          return json({
+            ...baseResult,
+            error: applyError.message || String(applyError),
+          }, 409)
+        }
+        return json({
+          ...baseResult,
+          dry_run: false,
+          run_key: runKey,
+          idempotent_replay: applied?.idempotent_replay === true,
+        })
       }
       case 'makesafe_status_apply': {
         // Captain-approved display cutover. This path appends only to the
@@ -7692,7 +7914,7 @@ if (import.meta.main) serve(async (req: Request) => {
       return json(sesError.body, sesError.status)
     }
     if (err instanceof ApiError) {
-      return json({ error: err.message }, err.status)
+      return json(err.body || { error: err.message }, err.status)
     }
     console.error('[ops-api] ERROR:', err)
     return json({ error: (err as Error).message || 'Internal error' }, 500)
@@ -13679,6 +13901,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   let packMap: Record<string, MakesafeReportPackLike> = {}
   let docketMap: Record<string, any> = {}
   let packCyclesByPackId: Record<string, any[]> = {}
+  const captainActionMap: Record<string, any> = {}
   if (jobIds.length > 0) {
     // T1 — id-chunked (details list is one-per-job so row count ~= job count,
     // but chunk the .in() anyway so a multi-thousand-job set can't exceed the
@@ -13760,6 +13983,22 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       }
     }
     docketMap = firstByJobId(dockets || [])
+    // U2 truth reconciliation: a nullable display-only Captain action. The
+    // migration can legitimately lag this edge code in preview environments, so
+    // preserve the board and log loudly if the additive view is unavailable.
+    try {
+      const attention = await _fetchAllByJobIdChunked(
+        client,
+        'makesafe_board_attention_current',
+        'job_id, code, message, evidence_refs, computed_at, marked_at',
+        jobIds,
+      )
+      for (const mark of (attention || [])) {
+        if (mark?.job_id) captainActionMap[mark.job_id] = mark
+      }
+    } catch (error) {
+      console.error('[ops-api] makesafe board Captain actions unavailable:', (error as Error).message)
+    }
   }
 
   // Fetch assignments for these jobs
@@ -13830,6 +14069,17 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       ? { ...rowPack, cycle_attribution: packIsCurrent ? 'bound' : null }
       : null
     const enriched = enrichMakesafeBoardJob(j, detail, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, packForBoard)
+    const captainMark = captainActionMap[j.id]
+    enriched.captain_action = captainMark
+      ? {
+        code: captainMark.code,
+        message: captainMark.message,
+        evidence_refs: Array.isArray(captainMark.evidence_refs)
+          ? captainMark.evidence_refs
+          : [],
+        since: captainMark.computed_at || captainMark.marked_at,
+      }
+      : null
     columns[enriched.board_stage].push(enriched)
   }
 
@@ -13909,8 +14159,44 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       if (!cancelledAssignMap[a.job_id]) cancelledAssignMap[a.job_id] = []
       cancelledAssignMap[a.job_id].push(a)
     }
+    try {
+      const attention = await _fetchAllByJobIdChunked(
+        client,
+        'makesafe_board_attention_current',
+        'job_id, code, message, evidence_refs, computed_at, marked_at',
+        cancelledIds,
+      )
+      for (const mark of (attention || [])) {
+        if (mark?.job_id) captainActionMap[mark.job_id] = mark
+      }
+    } catch (error) {
+      console.error('[ops-api] cancelled make-safe Captain actions unavailable:', (error as Error).message)
+    }
     const cancelledCards = visibleCancelledRows.map((j: any) =>
-      enrichMakesafeBoardJob(j, cancelledDetailsMap[j.id] || null, cancelledAssignMap[j.id] || [], undefined, undefined, undefined, undefined, null))
+      {
+        const card = enrichMakesafeBoardJob(
+          j,
+          cancelledDetailsMap[j.id] || null,
+          cancelledAssignMap[j.id] || [],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          null,
+        )
+        const captainMark = captainActionMap[j.id]
+        card.captain_action = captainMark
+          ? {
+            code: captainMark.code,
+            message: captainMark.message,
+            evidence_refs: Array.isArray(captainMark.evidence_refs)
+              ? captainMark.evidence_refs
+              : [],
+            since: captainMark.computed_at || captainMark.marked_at,
+          }
+          : null
+        return card
+      })
     // Order by cancelled_at (fallback updated_at) — freshest cancel first.
     cancelledCards.sort((a: any, b: any) =>
       String(b.cancelled_at || b.updated_at || '').localeCompare(String(a.cancelled_at || a.updated_at || '')))
@@ -21975,6 +22261,28 @@ async function assertLegacySesInvoiceActionAllowed(
     })
   }
   const invoiceType = String(invoice.data.invoice_type || '').toUpperCase()
+  if (!invoice.data.job_id) {
+    throw new ApiError(
+      `synthetic_livefire_invoice_unresolved: ${action} requires an invoice with an authoritative job link before any external effect.`,
+      409,
+    )
+  }
+  if (invoice.data.job_id) {
+    await assertNoSyntheticLivefireJobs(client, [invoice.data.job_id], action)
+  }
+  if (invoice.data.invoice_obligation_revision_id) {
+    const docket = await client.from('makesafe_docket_revisions')
+      .select('id').eq('job_id', invoice.data.job_id)
+      .eq('invoice_obligation_revision_id', invoice.data.invoice_obligation_revision_id)
+      .eq('stage', 'invoice_bound')
+      .order('committed_at', { ascending: false }).limit(1).maybeSingle()
+    if (docket.error) {
+      throw new SesActionError(503, {
+        state: 'refused',
+        fact: `The ${action} sealed SES gate could not check the sealed docket (${docket.error.message}).`,
+      })
+    }
+  }
   if (
     targetJobId &&
     invoice.data.job_id &&
