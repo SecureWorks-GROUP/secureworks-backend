@@ -178,17 +178,25 @@ Deno.test("create choke fences F9 email and resolves duplicates before Xero", ()
 
 Deno.test("send-quote branded invoice email refuses sealed SES before Resend", () => {
   const start = SEND_QUOTE.indexOf("if (path === 'send-invoice'");
-  const fence = SEND_QUOTE.indexOf("inspectSealedSesJob(sb, job_id)", start);
+  const invoiceLink = SEND_QUOTE.indexOf(".from('xero_invoices')", start);
+  const fence = SEND_QUOTE.indexOf(
+    "inspectSealedSesJob(sb, invoiceRecord.job_id)",
+    start,
+  );
   const refusal = SEND_QUOTE.indexOf(
     "sealedSesMoneyRefusal('send-quote/send-invoice'",
-    start,
+    fence,
   );
   const provider = SEND_QUOTE.indexOf(
     "fetch('https://api.resend.com/emails'",
     start,
   );
-  assert(start >= 0 && fence > start && refusal > fence && provider > refusal);
-  assertStringIncludes(SEND_QUOTE, "sealed_ses_fence_check_failed");
+  assert(
+    start >= 0 && invoiceLink > start && fence > invoiceLink &&
+      refusal > fence && provider > refusal,
+  );
+  assertStringIncludes(FENCE, "sealed_ses_fence_check_failed");
+  assertStringIncludes(FENCE, "invoice_link_required");
 });
 
 Deno.test("reporting auto-match cannot become an F8 relink path", () => {
@@ -270,10 +278,10 @@ Deno.test("annotation relinking fences before resolving or linking", () => {
       resolve > sourceFence && link > resolve,
   );
   assertStringIncludes(INDEX, "synthetic_livefire_invoice_unresolved");
-  assertStringIncludes(INDEX, "code: 'u6r_release_required'");
+  assertStringIncludes(FENCE, "code: \"invoice_link_required\"");
   assertStringIncludes(
-    INDEX,
-    "U6R SEND IT is the only release and provider-effect path.",
+    FENCE,
+    "execute_ses_release_revision",
   );
   assertStringIncludes(INDEX, "execute_ses_release_revision");
 });

@@ -83,15 +83,9 @@ assert_not_unknown "ops-api ops_api_version recognised" "$ops_version"
 assert_contains "ops-api canonical source" "$ops_version" '"source_repo":"secureworks-site"'
 assert_contains "ops-api version includes build label" "$ops_version" '"build_label":'
 
-# S6 drift detection — commit_sha assertion.
-#
-# The deploy script stamps COMMIT_SHA into the edge function's runtime env
-# (via supabase secrets set) before deploy. opsApiVersion() reads it from
-# Deno.env and returns it in the response. If EXPECTED_COMMIT_SHA is set by
-# the caller (deploy-edge-function.sh exports it before invoking smoke), we
-# assert the deployed binary's commit matches the canonical worktree HEAD.
-# When unset (manual smoke runs, CI without git context), we warn-skip
-# rather than fail so the check isn't false-alarm noise.
+# S6 drift detection — the ops-api bundle carries immutable deploy metadata.
+# Runtime project secrets are deliberately ignored because they are mutable
+# across functions and cannot identify the bytes serving this endpoint.
 if [[ -n "${EXPECTED_COMMIT_SHA:-}" ]]; then
   if printf '%s' "$ops_version" | grep -q "\"commit_sha\":\"${EXPECTED_COMMIT_SHA}\""; then
     record_pass "ops-api commit_sha matches expected ${EXPECTED_COMMIT_SHA:0:8}"
@@ -101,6 +95,17 @@ if [[ -n "${EXPECTED_COMMIT_SHA:-}" ]]; then
   fi
 else
   echo "[warn] EXPECTED_COMMIT_SHA not set; skipping commit_sha drift assertion"
+fi
+
+if [[ -n "${EXPECTED_DEPLOYED_AT:-}" ]]; then
+  if printf '%s' "$ops_version" | grep -q "\"deployed_at\":\"${EXPECTED_DEPLOYED_AT}\""; then
+    record_pass "ops-api deployed_at matches expected ${EXPECTED_DEPLOYED_AT}"
+  else
+    actual_block="$(printf '%s' "$ops_version" | grep -oE '"deployed_at":[^,}]*' || echo '"deployed_at":<missing>')"
+    record_fail "ops-api deployed_at mismatch: deployed has ${actual_block}, expected ${EXPECTED_DEPLOYED_AT}"
+  fi
+else
+  echo "[warn] EXPECTED_DEPLOYED_AT not set; skipping deployed_at drift assertion"
 fi
 
 # S6 drift detection — full action-surface iteration. Keep the action requests

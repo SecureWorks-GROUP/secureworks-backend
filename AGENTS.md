@@ -510,6 +510,21 @@ display stages and terminal job states are structurally read-only. The release
 sequence and seven-card first tranche are in
 `docs/makesafe-board-truth-cutover-2026-07-24.md`.
 
+## The SES Money And Outbound Seal Is Write-Once
+
+Apply `20260728030000_makesafe_ses_fence_hardening.sql` before its matching Edge
+functions. The migration owns the write-once `jobs.ses_money_sealed_at`
+classification and the SES-native invoice-void prepare/approve/execute authority.
+All legacy ACCREC effects require the invoice mirror's non-null `job_id`; missing
+invoice/job rows and lookup errors refuse, never classify safe. Delivery guards
+bind to invoice/source identities rather than caller-supplied job ids. The shared
+runtime boundary is `_shared/sealed_ses_money_fence.ts`.
+
+`ops_api_version` reports only build-time metadata from `deploy_metadata.ts`.
+Canonical deploy scripts stamp that module immediately before bundling; an
+unstamped or bypassed build reports `metadata_status: unavailable`, never a
+remembered commit or deployment time.
+
 ## The Repository Root Stays npm-Package-Free
 
 This repo is Deno-rooted (`deno.jsonc` at the root). Deno 2 auto-discovers a root

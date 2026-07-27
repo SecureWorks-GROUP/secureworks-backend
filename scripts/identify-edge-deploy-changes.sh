@@ -39,6 +39,7 @@ is_verification_contract_path() {
       scripts/check-edge-schema-preflight.sh | \
       scripts/edge-function-schema-requirements.txt | \
       scripts/check-ops-api-source-actions.sh | \
+      scripts/stamp-ops-api-build-metadata.sh | \
       scripts/smoke-ops-api-action-surface.sh | \
       scripts/_ops-api-required-actions.txt)
       return 0

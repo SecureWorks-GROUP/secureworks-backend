@@ -13,6 +13,7 @@ on:
       - 'scripts/check-edge-schema-preflight.sh'
       - 'scripts/edge-function-schema-requirements.txt'
       - 'scripts/check-ops-api-source-actions.sh'
+      - 'scripts/stamp-ops-api-build-metadata.sh'
       - 'scripts/smoke-ops-api-action-surface.sh'
       - 'scripts/_ops-api-required-actions.txt'
       - '.github/workflows/deploy-edge-functions.yml'
@@ -86,6 +87,15 @@ jobs:
 
           for func in ${{ steps.changed.outputs.functions }}; do
             echo "━━━ Deploying ${func} ━━━"
+
+            if [ "$func" = "ops-api" ]; then
+              OPS_API_DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              bash scripts/stamp-ops-api-build-metadata.sh \
+                "${{ github.sha }}" \
+                "${OPS_API_DEPLOYED_AT}"
+              echo "EXPECTED_OPS_API_COMMIT_SHA=${{ github.sha }}" >> "$GITHUB_ENV"
+              echo "EXPECTED_OPS_API_DEPLOYED_AT=${OPS_API_DEPLOYED_AT}" >> "$GITHUB_ENV"
+            fi
 
             # Read the JWT flag from the function's header comment (first 30 lines).
             # If the header contains '--no-verify-jwt', deploy without JWT verification.
@@ -169,5 +179,7 @@ jobs:
         if: steps.changed.outputs.verify_ops_api == 'true'
         env:
           SW_API_KEY: ${{ secrets.SW_API_KEY }}
+          EXPECTED_COMMIT_SHA: ${{ env.EXPECTED_OPS_API_COMMIT_SHA }}
+          EXPECTED_DEPLOYED_AT: ${{ env.EXPECTED_OPS_API_DEPLOYED_AT }}
         run: |
           bash scripts/smoke-ops-api-action-surface.sh

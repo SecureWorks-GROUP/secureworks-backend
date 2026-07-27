@@ -11,6 +11,7 @@ MIGRATION="$REPO_ROOT/supabase/migrations/20260727000001_makesafe_attendance_cyc
 MEDIA_MIGRATION="$REPO_ROOT/supabase/migrations/20260728000001_makesafe_state_authority_u2.sql"
 FRESH_HEALTH_MIGRATION="$REPO_ROOT/supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql"
 U5_U6_MIGRATION="$REPO_ROOT/supabase/migrations/20260728020000_makesafe_ses_invoice_release_u5_u6.sql"
+FENCE_HARDENING_MIGRATION="$REPO_ROOT/supabase/migrations/20260728030000_makesafe_ses_fence_hardening.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -50,6 +51,10 @@ u5_u6_migration_sha() {
   shasum -a 256 "$U5_U6_MIGRATION" | awk '{print $1}'
 }
 
+fence_hardening_migration_sha() {
+  shasum -a 256 "$FENCE_HARDENING_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -60,6 +65,7 @@ write_response() {
   MEDIA_EXPECTED_SHA="$(media_migration_sha)" \
   FRESH_HEALTH_EXPECTED_SHA="$(fresh_health_migration_sha)" \
   U5_U6_EXPECTED_SHA="$(u5_u6_migration_sha)" \
+  FENCE_HARDENING_EXPECTED_SHA="$(fence_hardening_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -117,8 +123,22 @@ u5_u6_row = {
     "actual_statement_sha256": os.environ["U5_U6_EXPECTED_SHA"] if actual_name else None,
     "missing_markers": [],
 }
+fence_hardening_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260728030000",
+    "expected_migration_name": "makesafe_ses_fence_hardening",
+    "expected_statement_sha256": os.environ["FENCE_HARDENING_EXPECTED_SHA"],
+    "actual_migration_version": "20260728030000",
+    "actual_migration_name": "makesafe_ses_fence_hardening",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["FENCE_HARDENING_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
-    json.dump([row, fresh_health_row, media_row, u5_u6_row], f)
+    json.dump(
+        [row, fresh_health_row, media_row, u5_u6_row, fence_hardening_row],
+        f,
+    )
 PY
 }
 
@@ -222,7 +242,7 @@ test_unrelated_function_without_requirements_passes_without_credentials() {
   local name="test_unrelated_function_without_requirements_passes_without_credentials"
   local output rc
   output="$(env -u SUPABASE_ACCESS_TOKEN -u SUPABASE_SCHEMA_PREFLIGHT_RESPONSE_FILE \
-    bash "$PREFLIGHT" send-quote 2>&1)"
+    bash "$PREFLIGHT" ghl-proxy 2>&1)"
   rc=$?
   if [[ "$rc" -eq 0 ]] && grep -q 'no declared requirements' <<<"$output"; then
     pass "$name"
@@ -314,7 +334,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared

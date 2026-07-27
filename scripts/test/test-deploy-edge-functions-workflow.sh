@@ -354,6 +354,7 @@ for (const triggerPath of [
   "scripts/check-edge-schema-preflight.sh",
   "scripts/edge-function-schema-requirements.txt",
   "scripts/check-ops-api-source-actions.sh",
+  "scripts/stamp-ops-api-build-metadata.sh",
   "scripts/smoke-ops-api-action-surface.sh",
   "scripts/_ops-api-required-actions.txt",
   ".github/workflows/deploy-edge-functions.yml",
@@ -367,7 +368,10 @@ requireText(deploy, 'bash scripts/apply-pending-migrations.sh', 'migration auto-
 requireText(deploy, 'bash scripts/check-edge-schema-preflight.sh', 'production schema preflight');
 requireText(deploy, 'SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}', 'schema preflight credential');
 requireText(deploy, 'bash scripts/check-ops-api-source-actions.sh', 'authoritative source check');
+requireText(deploy, 'bash scripts/stamp-ops-api-build-metadata.sh', 'bundled deploy metadata');
 requireText(deploy, 'bash scripts/smoke-ops-api-action-surface.sh', 'authoritative live action smoke');
+requireText(deploy, 'EXPECTED_OPS_API_COMMIT_SHA=', 'bundled commit smoke binding');
+requireText(deploy, 'EXPECTED_OPS_API_DEPLOYED_AT=', 'bundled timestamp smoke binding');
 
 const migrationApplyStep = deploy.match(/- name: Apply pending reviewed migrations[\s\S]*?(?=\n      - name:)/);
 if (!migrationApplyStep || !migrationApplyStep[0].includes("if: steps.changed.outputs.functions != ''")) {
@@ -457,6 +461,7 @@ for (const requiredTest of [
   'bash scripts/test/test-apply-pending-migrations.sh',
   'bash scripts/test/test-edge-schema-preflight.sh',
   'bash scripts/test/test-smoke-ops-api-action-surface.sh',
+  'bash scripts/test/test-stamp-ops-api-build-metadata.sh',
 ]) {
   requireText(pr, requiredTest, 'PR workflow safety fixture');
 }

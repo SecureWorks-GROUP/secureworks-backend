@@ -32,7 +32,6 @@ import {
   type POCandidate,
 } from './materials_ingest.ts'
 import {
-  classifySealedSesJob,
   inspectSealedSesJob,
   sealedSesMoneyRefusal,
   type SealedSesJobInspection,
@@ -80,24 +79,15 @@ async function inspectXeroLinkTarget(
   client: any,
   targetJob: string | SealedSesJobRecord,
 ): Promise<SealedSesJobInspection> {
-  if (typeof targetJob === 'string') {
-    return await inspectSealedSesJob(client, targetJob)
-  }
-
-  const direct = classifySealedSesJob(targetJob)
-  if (direct.sealed || !targetJob.id) return direct
-
-  const { data, error } = await client.from('makesafe_job_details')
-    .select('job_id')
-    .eq('job_id', targetJob.id)
-    .limit(1)
-    .maybeSingle()
-  if (error) {
+  const targetJobId = typeof targetJob === 'string' ? targetJob : targetJob.id
+  if (!targetJobId) {
     throw new Error(
-      `The sealed SES make-safe detail could not be checked before invoice linking (${error.message || 'unknown database error'}).`,
+      'The sealed SES job classification could not be checked because the target job id is missing.',
     )
   }
-  return classifySealedSesJob(targetJob, !!data)
+  // Never trust a caller-carried job shape for a money-link decision. Re-read
+  // the authoritative write-once seal and canonical spine from the database.
+  return await inspectSealedSesJob(client, targetJobId)
 }
 
 export async function sealedSesXeroLinkRefusal(

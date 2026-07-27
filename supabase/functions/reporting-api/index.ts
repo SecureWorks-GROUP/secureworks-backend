@@ -2301,7 +2301,7 @@ async function matchInvoicesToJobs(sb: any) {
   // Get all jobs with contact details + job_number for reference matching
   const { data: jobs, error: jobErr } = await sb
     .from('jobs')
-    .select('id, client_name, client_email, client_phone, ghl_contact_id, job_number, type')
+    .select('id, client_name, client_email, client_phone, ghl_contact_id, job_number, type, ses_money_sealed_at, ses_money_seal_source')
     .eq('org_id', DEFAULT_ORG_ID)
     .limit(5000)
 

@@ -12,6 +12,8 @@ node <<'NODE'
 const fs = require('fs');
 const path = 'supabase/functions/ops-api/index.ts';
 const text = fs.readFileSync(path, 'utf8');
+const version = fs.readFileSync('supabase/functions/ops-api/ops_api_version.ts', 'utf8');
+const deploy = fs.readFileSync('.github/workflows/deploy-edge-functions.yml', 'utf8');
 const actions = [...new Set([...text.matchAll(/case\s+['"]([^'"]+)['"]\s*:/g)].map(m => m[1]))];
 const required = [
   'ops_api_version',
@@ -40,13 +42,24 @@ const required = [
   'assemble_job_brain',
   'get_job_context_facts',
   'get_job_conversation',
+  'prepare_ses_invoice_void_revision',
+  'approve_ses_invoice_void_revision',
+  'execute_ses_invoice_void_revision',
 ];
 const missing = required.filter(a => !actions.includes(a));
 console.log(JSON.stringify({ ops_api_actions: actions.length, missing }, null, 2));
 if (missing.length) process.exit(1);
 
-if (!text.includes("const OPS_API_SOURCE_REPO = 'secureworks-site'")) {
+if (!version.includes('const OPS_API_SOURCE_REPO = "secureworks-site"')) {
   console.error('ops_api_version must report source_repo: secureworks-site');
+  process.exit(1);
+}
+if (!version.includes('OPS_API_DEPLOY_METADATA') || !version.includes('metadata_status')) {
+  console.error('ops_api_version must use bundled deploy metadata');
+  process.exit(1);
+}
+if (!deploy.includes('scripts/stamp-ops-api-build-metadata.sh')) {
+  console.error('production workflow must stamp bundled ops-api metadata');
   process.exit(1);
 }
 NODE

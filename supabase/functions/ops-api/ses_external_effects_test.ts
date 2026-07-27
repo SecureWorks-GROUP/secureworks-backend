@@ -225,3 +225,57 @@ Deno.test("route effect key is release and route scoped", async () => {
   });
   assert(report.operation_key !== invoice.operation_key);
 });
+
+Deno.test("SES-native invoice void is exact-once and content-addressed", async () => {
+  const store = new MemoryEffectStore();
+  let dispatches = 0;
+  let status = "AUTHORISED";
+  const effect = await buildSesEffect({
+    org_id: "00000000-0000-4000-8000-000000000001",
+    job_id: "10000000-0000-4000-8000-000000000001",
+    effect_kind: "invoice_void",
+    invoice_obligation_revision_id:
+      "20000000-0000-4000-8000-000000000001",
+    artifact_hash:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    payload: { xero_invoice_id: "xero-1", target_status: "VOIDED" },
+  });
+  const adapter = {
+    async dispatch() {
+      dispatches++;
+      status = "VOIDED";
+      return { xero_invoice_id: "xero-1", status };
+    },
+    reconcile() {
+      return Promise.resolve(
+        status === "VOIDED"
+          ? [{ xero_invoice_id: "xero-1", status }]
+          : [],
+      );
+    },
+    identify(result: { xero_invoice_id: string; status: string }) {
+      return result.xero_invoice_id;
+    },
+    digest(result: { status: string }) {
+      return { status: result.status };
+    },
+  };
+  const first = await executeSesExternalEffect({
+    store,
+    effect,
+    payload: { xero_invoice_id: "xero-1", target_status: "VOIDED" },
+    adapter,
+    actor: "captain@example.com",
+  });
+  const retry = await executeSesExternalEffect({
+    store,
+    effect,
+    payload: { xero_invoice_id: "xero-1", target_status: "VOIDED" },
+    adapter,
+    actor: "captain@example.com",
+  });
+  assertEquals(first.state, "confirmed");
+  assertEquals(retry.state, "confirmed");
+  assertEquals(dispatches, 1);
+  assertEquals(retry.dispatched, false);
+});

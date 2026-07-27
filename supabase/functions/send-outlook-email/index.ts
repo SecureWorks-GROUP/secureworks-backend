@@ -18,6 +18,12 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import {
+  inspectSealedSesJob,
+  invoiceLinkRequiredRefusal,
+  sealedSesFenceCheckFailedRefusal,
+  sealedSesMoneyRefusal,
+} from '../_shared/sealed_ses_money_fence.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_SERVICE_KEY')!
@@ -45,6 +51,279 @@ function json(data: unknown, status = 200) {
     status,
     headers: { ...CORS, 'Content-Type': 'application/json' },
   })
+}
+
+class OutlookFenceError extends Error {
+  constructor(
+    readonly status: number,
+    readonly refusal: {
+      state: 'refused'
+      fact: string
+      code?: string
+      recovery_action?: string
+      evidence?: Record<string, unknown>
+    },
+  ) {
+    super(String(refusal.fact || refusal.code || 'Outlook SES fence refused'))
+  }
+}
+
+async function assertOutlookJobAllowed(
+  client: any,
+  jobId: string,
+  action: string,
+) {
+  try {
+    const inspection = await inspectSealedSesJob(client, jobId)
+    if (inspection.sealed) {
+      throw new OutlookFenceError(
+        409,
+        sealedSesMoneyRefusal(action, {
+          job_id: jobId,
+          matched_by: inspection.matched_by,
+        }),
+      )
+    }
+  } catch (error) {
+    if (error instanceof OutlookFenceError) throw error
+    throw new OutlookFenceError(
+      503,
+      sealedSesFenceCheckFailedRefusal(
+        action,
+        (error as Error).message,
+        { job_id: jobId },
+      ),
+    )
+  }
+}
+
+async function resolveOutlookInvoiceJob(
+  client: any,
+  xeroInvoiceId: string,
+): Promise<string | null> {
+  const mirror = await client.from('xero_invoices')
+    .select('job_id,invoice_type,invoice_obligation_revision_id,ses_external_token')
+    .eq('xero_invoice_id', xeroInvoiceId)
+    .maybeSingle()
+  if (mirror.error) {
+    throw new OutlookFenceError(
+      503,
+      sealedSesFenceCheckFailedRefusal(
+        'send_outlook_email',
+        `The invoice mirror lookup failed (${mirror.error.message}).`,
+        { xero_invoice_id: xeroInvoiceId },
+      ),
+    )
+  }
+  if (!mirror.data) {
+    throw new OutlookFenceError(
+      503,
+      sealedSesFenceCheckFailedRefusal(
+        'send_outlook_email',
+        'The invoice is missing from the local Xero mirror.',
+        { xero_invoice_id: xeroInvoiceId },
+      ),
+    )
+  }
+  const invoiceType = String(mirror.data.invoice_type || '').toUpperCase()
+  if (
+    invoiceType !== 'ACCPAY' &&
+    (mirror.data.invoice_obligation_revision_id || mirror.data.ses_external_token)
+  ) {
+    throw new OutlookFenceError(
+      409,
+      sealedSesMoneyRefusal('send_outlook_email', {
+        xero_invoice_id: xeroInvoiceId,
+        job_id: mirror.data.job_id || null,
+      }),
+    )
+  }
+  if (invoiceType !== 'ACCPAY' && !mirror.data.job_id) {
+    throw new OutlookFenceError(
+      409,
+      invoiceLinkRequiredRefusal('send_outlook_email', {
+        xero_invoice_id: xeroInvoiceId,
+        invoice_type: invoiceType || null,
+      }),
+    )
+  }
+  if (mirror.data.job_id) {
+    await assertOutlookJobAllowed(
+      client,
+      mirror.data.job_id,
+      'send_outlook_email',
+    )
+  }
+  return mirror.data.job_id || null
+}
+
+export async function assertOutlookSesDeliveryAllowed(
+  client: any,
+  body: Record<string, any>,
+) {
+  const recipients = Array.isArray(body.to) ? body.to : [body.to]
+  const syntheticInboundFixture =
+    body.sent_by === 'ses_synthetic_livefire_lab' &&
+    String(body.from || '').toLowerCase() === 'marnin@secureworkswa.com.au' &&
+    recipients.length === 1 &&
+    String(recipients[0] || '').toLowerCase() === 'ses@secureworkswa.com.au' &&
+    !body.action &&
+    !body.job_id &&
+    !body.xero_invoice_id
+  if (syntheticInboundFixture) return
+
+  const bodyJobId = String(body.job_id || '').trim()
+  const bodyInvoiceId = String(body.xero_invoice_id || '').trim()
+
+  if (body.action === 'forward') {
+    const mailboxMessageId = String(body.message_id || '').trim()
+    const groupPostId = String(body.post_id || '').trim()
+    if (!bodyJobId || (!mailboxMessageId && !groupPostId)) {
+      throw new OutlookFenceError(409, {
+        state: 'refused',
+        code: 'pdf_provenance_required',
+        fact:
+          'Graph forwarding preserves opaque attachments, so an authoritative source message and job_id are required before forwarding.',
+        recovery_action:
+          'Resolve the source message to its stored job, then retry with those exact identities.',
+      })
+    }
+    const source = mailboxMessageId
+      ? await client.from('inbox_events')
+        .select('job_id')
+        .eq('graph_message_id', mailboxMessageId)
+        .maybeSingle()
+      : await client.from('makesafe_intake_drafts')
+        .select('approved_job_id')
+        .eq('graph_message_id', groupPostId)
+        .maybeSingle()
+    if (source.error) {
+      throw new OutlookFenceError(
+        503,
+        sealedSesFenceCheckFailedRefusal(
+          'forward_outlook_email',
+          `The source-message job lookup failed (${source.error.message}).`,
+          {
+            message_id: mailboxMessageId || null,
+            post_id: groupPostId || null,
+          },
+        ),
+      )
+    }
+    const sourceJobId = String(
+      source.data?.job_id || source.data?.approved_job_id || '',
+    ).trim()
+    if (!sourceJobId || sourceJobId !== bodyJobId) {
+      throw new OutlookFenceError(409, {
+        state: 'refused',
+        code: 'pdf_provenance_required',
+        fact:
+          'The forwarded source message is not authoritatively linked to the supplied job_id.',
+        recovery_action:
+          'Use the source message and job identities stored together; never use a decoy job.',
+        evidence: {
+          message_id: mailboxMessageId || null,
+          post_id: groupPostId || null,
+          stored_job_id: sourceJobId || null,
+          received_job_id: bodyJobId,
+        },
+      })
+    }
+    await assertOutlookJobAllowed(client, sourceJobId, 'forward_outlook_email')
+    return
+  }
+
+  let invoiceJobId: string | null = null
+  if (bodyInvoiceId) {
+    invoiceJobId = await resolveOutlookInvoiceJob(client, bodyInvoiceId)
+  }
+  if (bodyJobId) {
+    if (invoiceJobId && invoiceJobId !== bodyJobId) {
+      throw new OutlookFenceError(409, invoiceLinkRequiredRefusal(
+        'send_outlook_email',
+        {
+          xero_invoice_id: bodyInvoiceId,
+          expected_job_id: invoiceJobId,
+          received_job_id: bodyJobId,
+        },
+      ))
+    }
+    await assertOutlookJobAllowed(client, bodyJobId, 'send_outlook_email')
+  }
+
+  for (const attachment of Array.isArray(body.attachments) ? body.attachments : []) {
+    const contentBytes = String(attachment?.contentBytes || '').trim()
+    const isPdf =
+      String(attachment?.contentType || '').toLowerCase() === 'application/pdf' ||
+      /\.pdf(?:$|[?#])/i.test(String(attachment?.name || attachment?.url || '')) ||
+      contentBytes.startsWith('JVBERi0')
+    if (!isPdf) continue
+
+    const attachmentInvoiceId = String(
+      attachment?.xero_invoice_id || bodyInvoiceId || '',
+    ).trim()
+    if (attachmentInvoiceId) {
+      const attachmentJobId = attachmentInvoiceId === bodyInvoiceId
+        ? invoiceJobId
+        : await resolveOutlookInvoiceJob(client, attachmentInvoiceId)
+      if (bodyJobId && attachmentJobId && bodyJobId !== attachmentJobId) {
+        throw new OutlookFenceError(409, invoiceLinkRequiredRefusal(
+          'send_outlook_email',
+          {
+            xero_invoice_id: attachmentInvoiceId,
+            expected_job_id: attachmentJobId,
+            received_job_id: bodyJobId,
+          },
+        ))
+      }
+      continue
+    }
+
+    const jobDocumentId = String(
+      attachment?.job_document_id || body.job_document_id || '',
+    ).trim()
+    if (jobDocumentId) {
+      const document = await client.from('job_documents')
+        .select('id,job_id')
+        .eq('id', jobDocumentId)
+        .maybeSingle()
+      if (document.error || !document.data?.job_id) {
+        throw new OutlookFenceError(
+          document.error ? 503 : 409,
+          sealedSesFenceCheckFailedRefusal(
+            'send_outlook_email',
+            document.error
+              ? `The job document lookup failed (${document.error.message}).`
+              : 'The job document is missing or has no job link.',
+            { job_document_id: jobDocumentId },
+          ),
+        )
+      }
+      if (bodyJobId && bodyJobId !== document.data.job_id) {
+        throw new OutlookFenceError(409, {
+          state: 'refused',
+          code: 'pdf_provenance_required',
+          fact: 'The PDF job_document_id does not belong to the supplied job_id.',
+          recovery_action: 'Use the document and job identities stored together.',
+        })
+      }
+      await assertOutlookJobAllowed(
+        client,
+        document.data.job_id,
+        'send_outlook_email',
+      )
+      continue
+    }
+
+    throw new OutlookFenceError(409, {
+      state: 'refused',
+      code: 'pdf_provenance_required',
+      fact:
+        'A PDF attachment requires an authoritative xero_invoice_id or job_document_id before Graph delivery.',
+      recovery_action:
+        'Attach the invoice or job-document identity that owns this PDF, then retry.',
+    })
+  }
 }
 
 // ── Graph OAuth2 Token ──
@@ -375,6 +654,7 @@ async function handleForward(
 
 // ── Main Handler ──
 
+if (import.meta.main) {
 serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
@@ -394,6 +674,8 @@ serve(async (req: Request) => {
 
   try {
     const body = await req.json()
+    const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    await assertOutlookSesDeliveryAllowed(sb, body)
 
     // Build recipients — split comma-separated strings into arrays
     const splitEmails = (v: unknown): string[] => {
@@ -498,7 +780,6 @@ serve(async (req: Request) => {
     // Graph sendMail returns 202 Accepted with no body
 
     // ── Post-send logging (all fire-and-forget) ──
-    const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     const toStr = Array.isArray(to) ? to.join(', ') : to
 
     // 1. Log to po_communications (unified comms timeline)
@@ -552,7 +833,11 @@ serve(async (req: Request) => {
       attachments: (attachments || []).length,
     })
   } catch (err) {
+    if (err instanceof OutlookFenceError) {
+      return json(err.refusal, err.status)
+    }
     console.error('[send-outlook-email] Error:', (err as Error).message)
     return json({ error: (err as Error).message }, 500)
   }
 })
+}

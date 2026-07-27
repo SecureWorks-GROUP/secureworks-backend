@@ -650,8 +650,9 @@ Deno.test("FIX 2 — matching company slug: company-scoped match STILL creates a
 
 // ── 15. FIX 3: updateInvoice report-job $0 gate ───────────────────────────────
 //
-// update_invoice now mirrors the create/complete gates: report-type jobs must
-// carry a non-zero line total. Normal jobs are unaffected.
+// Legacy update_invoice now refuses report-type make-safe jobs at the sealed
+// SES wall before it can reach the older non-zero line-total gate. Normal jobs
+// remain outside the wall.
 
 // Stub for updateInvoice: returns a xero_invoice row with a job_id, then
 // returns makesafe_job_details with the given report_type for that job.
@@ -664,10 +665,33 @@ function makeUpdateInvoiceStub(opts: { reportType: string | null }) {
         eq: (_col: string, _val: string) => ({
           maybeSingle: async () => {
             if (table === "xero_invoices") {
-              return { data: { job_id: "job-r2" }, error: null }
+              return {
+                data: {
+                  job_id: "job-r2",
+                  invoice_type: "ACCREC",
+                  invoice_obligation_revision_id: null,
+                  ses_external_token: null,
+                },
+                error: null,
+              }
+            }
+            if (table === "jobs") {
+              return {
+                data: {
+                  id: "job-r2",
+                  type: opts.reportType ? "makesafe" : "general",
+                  job_number: opts.reportType ? "SWMS-R2" : "GEN-R2",
+                },
+                error: null,
+              }
             }
             if (table === "makesafe_job_details") {
-              return { data: { report_type: opts.reportType }, error: null }
+              return {
+                data: opts.reportType
+                  ? { job_id: "job-r2", report_type: opts.reportType }
+                  : null,
+                error: null,
+              }
             }
             return { data: null, error: null }
           },
@@ -685,7 +709,7 @@ function makeUpdateInvoiceStub(opts: { reportType: string | null }) {
   }
 }
 
-Deno.test("FIX 3 — updateInvoice: report-type job with $0 line total is REJECTED", async () => {
+Deno.test("FIX 3 — updateInvoice: report-type job is sealed before the $0 gate", async () => {
   const stub = makeUpdateInvoiceStub({ reportType: "ajs_builder_report" })
   await assertRejects(
     () => updateInvoice(stub, {
@@ -693,11 +717,11 @@ Deno.test("FIX 3 — updateInvoice: report-type job with $0 line total is REJECT
       line_items: [{ description: "Labour", quantity: 1, unit_price: 0 }],
     }, stub),
     Error,
-    "report job needs a charge amount",
+    "SES make-safe job is sealed",
   )
 })
 
-Deno.test("FIX 3 — updateInvoice: report-type job with $0 total (multi-line summing to 0) is REJECTED", async () => {
+Deno.test("FIX 3 — updateInvoice: report-type multi-line update is sealed", async () => {
   const stub = makeUpdateInvoiceStub({ reportType: "ajs_builder_report" })
   await assertRejects(
     () => updateInvoice(stub, {
@@ -708,7 +732,7 @@ Deno.test("FIX 3 — updateInvoice: report-type job with $0 total (multi-line su
       ],
     }, stub),
     Error,
-    "report job needs a charge amount",
+    "SES make-safe job is sealed",
   )
 })
 
