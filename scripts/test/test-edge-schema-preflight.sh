@@ -106,7 +106,6 @@ fresh_health_row = {
     "actual_statement_sha256": os.environ["FRESH_HEALTH_EXPECTED_SHA"],
     "missing_markers": [],
 }
-with open(sys.argv[1], "w") as f:
 u5_u6_row = {
     "function_name": "ops-api",
     "migration_version": "20260728020000",
