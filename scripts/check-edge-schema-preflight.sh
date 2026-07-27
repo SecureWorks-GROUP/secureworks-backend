@@ -2,8 +2,8 @@
 # Refuse a production Edge Function deploy until its declared database schema
 # requirements are present. This is read-only: it queries catalog + migration
 # ledger state through the Supabase Management API and never applies SQL.
-# The ledger stores parsed statements, so exact raw-file checksum equality is
-# advisory only; deployment gates on ledger identity and required markers.
+# The ledger stores a checksum of the checked-in migration statements; exact
+# checksum equality is required so deployment cannot run against drifted SQL.
 
 set -euo pipefail
 
@@ -296,9 +296,11 @@ for requirement in expected:
         failures.append(
             f"{label}: ledger statement set is missing or empty"
         )
-    if actual_sha and actual_sha != requirement["statement_sha256"]:
-        print(
-            f"  WARN {label}: ledger statement-set checksum differs from the checked-in migration checksum"
+    if not isinstance(actual_sha, str) or not actual_sha:
+        failures.append(f"{label}: ledger statement-set checksum is missing")
+    elif actual_sha != requirement["statement_sha256"]:
+        failures.append(
+            f"{label}: ledger statement-set checksum differs from the checked-in migration checksum"
         )
     if not isinstance(missing_markers, list):
         failures.append(f"{label}: missing-marker result is malformed")
