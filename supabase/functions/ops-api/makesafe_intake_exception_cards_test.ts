@@ -460,6 +460,79 @@ Deno.test("a strong fresh sibling remains a review card", () => {
   assertEquals(projection.dispositions[0].disposition, "visible_review_card");
 });
 
+Deno.test("live-job binding ambiguity stays visible and names every candidate job", () => {
+  const ambiguous = exceptionCase("binding-ambiguity", "MLB-25897", {
+    company_id: "company-mlb",
+    company_slug_raw: "mlb",
+    site_address: "4 Shared Claim Road Perth WA 6000",
+    missing_fields: [],
+    reason_code: "conflicting_fields",
+    conflicting_fields: {
+      live_job_binding: ["SWMS-1001", "SWMS-1002"],
+    },
+  });
+  const projection = buildIntakeExceptionProjection(projectionInput({
+    cases: [ambiguous],
+    sources: [source("binding-ambiguity")],
+    companies: [{ id: "company-mlb", slug: "mlb", name: "MLB" }],
+    jobs: [
+      {
+        job_id: "job-1",
+        external_ref: "MLB-25897",
+        requesting_company_slug: "mlb",
+        requesting_company_name: "MLB",
+        report_type: null,
+        jobs: {
+          id: "job-1",
+          status: "accepted",
+          site_address: "4 Shared Claim Road Perth WA 6000",
+          type: "makesafe",
+          metadata: { builder_work_order_number: "MLB-25897" },
+        },
+      },
+      {
+        job_id: "job-2",
+        external_ref: "MLB-25897",
+        requesting_company_slug: "mlb",
+        requesting_company_name: "MLB",
+        report_type: null,
+        jobs: {
+          id: "job-2",
+          status: "scheduled",
+          site_address: "4 Shared Claim Road Perth WA 6000",
+          type: "makesafe",
+          metadata: { builder_work_order_number: "MLB-25897" },
+        },
+      },
+    ],
+  }));
+
+  assertEquals(projection.cards.length, 1);
+  assertEquals(projection.dispositions[0].disposition, "visible_review_card");
+  assertEquals(
+    projection.cards[0].blocker_sentence,
+    "This instruction MLB-25897 matches 2 live jobs (SWMS-1001 and SWMS-1002) - needs human binding.",
+  );
+  assertEquals(projection.cards[0].human_review_required, true);
+  assertEquals(projection.cards[0].auto_create_job, false);
+
+  const correctedTarget = buildIntakeExceptionProjection(projectionInput({
+    cases: [exceptionCase("corrected-target", "MLB-26190", {
+      missing_fields: [],
+      reason_code: "conflicting_fields",
+      conflicting_fields: {
+        corrected_target_job_binding: ["SWMS-2001", "SWMS-2002"],
+      },
+    })],
+    sources: [source("corrected-target")],
+  }));
+  assertEquals(correctedTarget.cards.length, 1);
+  assertEquals(
+    correctedTarget.cards[0].blocker_sentence,
+    "This instruction MLB-26190 has a corrected-target mismatch across 2 candidate jobs (SWMS-2001 and SWMS-2002) - needs human binding.",
+  );
+});
+
 Deno.test("the deterministic floor never guesses weak or accounted non-work into cards", () => {
   const weak = exceptionCase("weak-case", "BWCWA-6648", {
     company_id: null,

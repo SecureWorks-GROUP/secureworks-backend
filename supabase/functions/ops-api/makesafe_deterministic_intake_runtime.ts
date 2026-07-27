@@ -2641,6 +2641,15 @@ export interface CancellationTargetResolution {
   matchBasis: string[];
 }
 
+interface ObligationBindingException {
+  kind:
+    | "multiple_live_jobs"
+    | "multiple_corrected_targets"
+    | "corrected_target_mismatch";
+  candidateJobIds: string[];
+  candidateJobNumbers: string[];
+}
+
 async function readObligationMatches(
   client: any,
   cases: readonly DeterministicCasePlan[],
@@ -2648,6 +2657,7 @@ async function readObligationMatches(
 ): Promise<{
   existingJobs: Map<string, string>;
   cancellationTargets: Map<string, CancellationTargetResolution>;
+  bindingExceptions: Map<string, ObligationBindingException>;
 }> {
   if (
     !cases.some((item) =>
@@ -2658,6 +2668,7 @@ async function readObligationMatches(
   ) {
     return {
       existingJobs: new Map(),
+      bindingExceptions: new Map(),
       cancellationTargets: new Map(
         cases.filter((item) => item.targetRelation === "cancellation_of").map(
           (item) => [
@@ -2682,7 +2693,7 @@ async function readObligationMatches(
   for (let from = 0;; from += SOURCE_PAGE_SIZE) {
     const { data: page, error } = await client.from("makesafe_job_details")
       .select(
-        "job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs(metadata,status,site_address,type)",
+        "job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs(job_number,metadata,status,site_address,type)",
       )
       .order("job_id", { ascending: true })
       .range(from, from + SOURCE_PAGE_SIZE - 1);
@@ -2702,6 +2713,35 @@ async function readObligationMatches(
     string,
     CancellationTargetResolution
   >();
+  const bindingExceptions = new Map<string, ObligationBindingException>();
+  const jobNumberById = new Map(
+    data.flatMap((row: any) => {
+      if (!row?.job_id) return [];
+      const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+      return [
+        [
+          String(row.job_id),
+          String(job?.job_number || row.job_id),
+        ] as const,
+      ];
+    }),
+  );
+  const bindingException = (
+    kind: ObligationBindingException["kind"],
+    jobIds: readonly string[],
+  ): ObligationBindingException => {
+    const candidateJobIds = [...new Set(jobIds.map(String).filter(Boolean))]
+      .sort();
+    return {
+      kind,
+      candidateJobIds,
+      candidateJobNumbers: [
+        ...new Set(
+          candidateJobIds.map((jobId) => jobNumberById.get(jobId) || jobId),
+        ),
+      ].sort(),
+    };
+  };
   for (const item of cases) {
     const cancellation = item.targetRelation === "cancellation_of";
     if (
@@ -2732,9 +2772,14 @@ async function readObligationMatches(
         });
         continue;
       }
-      throw new Error(
-        "one deterministic instruction maps to multiple corrected target jobs; reconciliation required",
+      bindingExceptions.set(
+        item.instructionKey,
+        bindingException(
+          "multiple_corrected_targets",
+          [...correctedTargetJobIds],
+        ),
       );
+      continue;
     }
     const correctedTargetJobId = [...correctedTargetJobIds][0] || null;
     // Mirror the existing/approve side: a distinct PO carried only in the work
@@ -2855,22 +2900,37 @@ async function readObligationMatches(
       continue;
     }
     if (uniqueMatches.length > 1) {
-      throw new Error(
-        "multiple live jobs matched one deterministic builder reference and address; reconciliation required",
+      // Ambiguity belongs to this instruction, not to the mailbox. Preserve every
+      // candidate for human binding and let the per-case loop account the source
+      // without ever selecting a job.
+      bindingExceptions.set(
+        item.instructionKey,
+        bindingException("multiple_live_jobs", [
+          ...uniqueMatches.map((row) => String(row.job_id)),
+          ...(correctedTargetJobId ? [correctedTargetJobId] : []),
+        ]),
       );
+      continue;
     }
     const match = uniqueMatches[0] || null;
     if (
       correctedTargetJobId &&
       (!match || String(match.job_id) !== correctedTargetJobId)
     ) {
-      throw new Error(
-        "corrected target job no longer uniquely matches deterministic identity; reconciliation required",
+      // A stale correction is the same instruction-local decision shape: visible
+      // and fail-closed, but never a reason to abort unrelated sources.
+      bindingExceptions.set(
+        item.instructionKey,
+        bindingException("corrected_target_mismatch", [
+          correctedTargetJobId,
+          ...(match?.job_id ? [String(match.job_id)] : []),
+        ]),
       );
+      continue;
     }
     if (match) existingJobs.set(item.instructionKey, match.job_id);
   }
-  return { existingJobs, cancellationTargets };
+  return { existingJobs, cancellationTargets, bindingExceptions };
 }
 
 // Retain the established write-boundary name: the result now also carries the
@@ -2882,6 +2942,36 @@ async function readExistingObligationJobs(
   targetJobByPostId: ReadonlyMap<string, string>,
 ) {
   return await readObligationMatches(client, cases, targetJobByPostId);
+}
+
+function obligationBindingExceptionPlan(
+  plan: DeterministicCasePlan,
+  resolution: ObligationBindingException,
+): DeterministicCasePlan {
+  // Reuse the deployed schema's typed conflict exception. Candidate job numbers
+  // live in conflicting_fields so the PR 406 read model can render an honest,
+  // non-PII review card without a migration or an automatic binding.
+  const conflictField = resolution.kind === "multiple_live_jobs"
+    ? "live_job_binding"
+    : "corrected_target_job_binding";
+  const candidates = resolution.candidateJobNumbers.length
+    ? resolution.candidateJobNumbers
+    : resolution.candidateJobIds;
+  return {
+    ...plan,
+    state: "exception",
+    reasonCode: "conflicting_fields",
+    blockedReasons: [],
+    conflictingFields: {
+      ...plan.conflictingFields,
+      [conflictField]: candidates,
+    },
+    sourceClassifications: plan.sourceClassifications.map((classification) => ({
+      ...classification,
+      outcome: "reason_coded_exception",
+      reasonCode: "conflicting_fields",
+    })),
+  };
 }
 
 async function readPersistedCases(
@@ -4125,6 +4215,7 @@ export async function runDeterministicIntake(
   );
   const existingObligationJobs = obligationMatches.existingJobs;
   const cancellationTargets = obligationMatches.cancellationTargets;
+  const bindingExceptions = obligationMatches.bindingExceptions;
   const persisted = await readPersistedCases(client, plan.cases);
   const persistedSources = await readPersistedSourcePostIds(
     client,
@@ -4238,14 +4329,19 @@ export async function runDeterministicIntake(
         }
         continue;
       }
-      let jobId: string | null = existing?.job_id ||
+      const bindingException = bindingExceptions.get(casePlan.instructionKey) ||
+        null;
+      const effectivePlan = bindingException
+        ? obligationBindingExceptionPlan(casePlan, bindingException)
+        : casePlan;
+      let jobId: string | null = bindingException ? null : existing?.job_id ||
         existingObligationJobs.get(casePlan.instructionKey) || null;
       // Account the case and its sources before any job-creating work. Nothing is
       // left outside the accounting invariant when the job attempt fails, and the
       // failed attempt becomes visible to the next run's ordering.
       let saved = await insertCaseAndSources(
         client,
-        casePlan,
+        effectivePlan,
         jobId,
         sourceMap,
         existing,
@@ -4254,8 +4350,8 @@ export async function runDeterministicIntake(
       if (saved.caseCreated) report.totals.case_rows_created++;
       report.totals.source_rows_created += saved.sourceCreated;
       const wantsJob = !jobId &&
-        (casePlan.state === "confirmed_live_job" ||
-          casePlan.state === "blocked_live_job");
+        (effectivePlan.state === "confirmed_live_job" ||
+          effectivePlan.state === "blocked_live_job");
       // Never create a guarded job the case row cannot then be moved to: the
       // update would be skipped and the job left with no case linkage. This is a
       // deferral, not a write failure - the case itself committed. The edge is
@@ -4263,8 +4359,10 @@ export async function runDeterministicIntake(
       // through the permitted exception hop cannot launder a forbidden edge into
       // an allowed one.
       const transitionAllowed = !stateBeforeRun ||
-        stateBeforeRun === casePlan.state ||
-        (ALLOWED_TRANSITIONS[stateBeforeRun] || []).includes(casePlan.state);
+        stateBeforeRun === effectivePlan.state ||
+        (ALLOWED_TRANSITIONS[stateBeforeRun] || []).includes(
+          effectivePlan.state,
+        );
       if (wantsJob && !transitionAllowed) {
         report.totals.job_creation_deferred++;
       }
@@ -4272,7 +4370,7 @@ export async function runDeterministicIntake(
         const live = await ensureDraftAndJob(
           client,
           saved.caseRow.id,
-          casePlan,
+          effectivePlan,
           sourceMap,
           options.approveDraft,
           onStorageBlocker,
@@ -4291,7 +4389,7 @@ export async function runDeterministicIntake(
           // only moves the case onto its job.
           saved = await insertCaseAndSources(
             client,
-            casePlan,
+            effectivePlan,
             jobId,
             sourceMap,
             saved.caseRow,
@@ -4311,7 +4409,7 @@ export async function runDeterministicIntake(
       // awaiting anything, so it settles even when downgraded to an exception.
       const settled = saved.caseRow.state !== "exception" || Boolean(jobId);
       if (!settled) continue;
-      for (const ids of chunk(casePlan.sourcePostIds)) {
+      for (const ids of chunk(effectivePlan.sourcePostIds)) {
         const { error } = await client.from("emails")
           .update({ makesafe_scanned_at: nowIso })
           .in("post_id", ids);

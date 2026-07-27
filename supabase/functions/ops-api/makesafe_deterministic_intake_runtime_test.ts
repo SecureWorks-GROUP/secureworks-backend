@@ -21,6 +21,7 @@ import {
 } from "./makesafe_deterministic_intake.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
+const ORG = "00000000-0000-0000-0000-000000000001";
 const ENCODER = new TextEncoder();
 
 function digitalWorkOrderPdf(
@@ -586,6 +587,244 @@ Deno.test("ambiguous cancellation fails closed without calling the cancellation 
     store.makesafe_intake_case_events.at(-1).evidence.candidate_job_ids,
     ["cancel-job-1", "cancel-job-2"],
   );
+});
+
+Deno.test("one ambiguous live-job binding files one exception while clean sources keep advancing", async () => {
+  const store = baseStore();
+  const pdfs = new Map<string, Uint8Array>();
+  const addWorkOrder = (
+    postId: string,
+    externalRef: string,
+    clientName: string,
+    address: string,
+    receivedAt: string,
+  ) => {
+    const storagePath = `raw/${postId}.pdf`;
+    const bytes = digitalWorkOrderPdf([
+      `Work Order Number ${externalRef}`,
+      `Policyholders Name ${clientName}`,
+      "Mobile 0422636182",
+      `Site Address ${address}`,
+      "Scope of Works Install temporary roof tarps and make the storm damaged property safe",
+      "Notes",
+      "Attend within twenty four hours and protect the occupants and contents from weather damage",
+    ]);
+    store.emails.push(email({
+      post_id: postId,
+      received_at: receivedAt,
+      subject: `NEW WORK ORDER ${externalRef}`,
+      body_content: "Please attend. The builder work order is attached.",
+    }));
+    store.email_attachments.push({
+      id: `${postId}-attachment`,
+      email_id: postId,
+      name: `${externalRef} Work Order.pdf`,
+      content_type: "application/pdf",
+      storage_path: storagePath,
+      status: "uploaded",
+      size_bytes: bytes.length,
+    });
+    pdfs.set(storagePath, bytes);
+  };
+  addWorkOrder(
+    "ambiguous-source",
+    "MLB-25897",
+    "Ambiguous Client",
+    "4 Shared Claim Road Perth WA 6000",
+    "2026-07-20T03:00:00.000Z",
+  );
+  addWorkOrder(
+    "clean-source-1",
+    "MLB-27002",
+    "Clean Client One",
+    "2 Clean Road Perth WA 6000",
+    "2026-07-20T02:00:00.000Z",
+  );
+  addWorkOrder(
+    "clean-source-2",
+    "MLB-27003",
+    "Clean Client Two",
+    "3 Clean Road Perth WA 6000",
+    "2026-07-20T01:00:00.000Z",
+  );
+  for (
+    const [id, jobNumber] of [
+      ["ambiguous-job-1", "SWMS-1001"],
+      ["ambiguous-job-2", "SWMS-1002"],
+    ]
+  ) {
+    store.jobs.push({
+      id,
+      job_number: jobNumber,
+      status: "accepted",
+      type: "makesafe",
+    });
+    store.makesafe_job_details.push({
+      job_id: id,
+      external_ref: "MLB-25897",
+      requesting_company_slug: "mlb",
+      requesting_company_name: "MLB",
+      report_type: null,
+      jobs: {
+        id,
+        job_number: jobNumber,
+        status: "accepted",
+        type: "makesafe",
+        site_address: "4 Shared Claim Road Perth WA 6000",
+        metadata: { builder_work_order_number: "MLB-25897" },
+      },
+    });
+  }
+  let approvals = 0;
+  const report = await runDeterministicIntake(
+    fakeClient(
+      store,
+      [],
+      undefined,
+      (path) => pdfs.get(path) || ENCODER.encode("%PDF-1.7\nmissing"),
+    ),
+    {
+      dryRun: false,
+      selectionMode: "full_open",
+      days: 30,
+      nowIso: NOW,
+      maxSources: 6,
+      maxCases: 3,
+      approveDraft: () =>
+        Promise.resolve({ job: { id: `clean-job-${++approvals}` } }),
+    },
+  );
+
+  assertEquals(report.totals.cases_attempted, 3);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(approvals, 2);
+  assertEquals(store.makesafe_intake_case_sources.length, 3);
+  assertEquals(
+    store.makesafe_intake_cases.filter((row) =>
+      row.reason_code === "conflicting_fields"
+    ).map((row) => ({
+      state: row.state,
+      candidates: row.conflicting_fields.live_job_binding,
+    })),
+    [{
+      state: "exception",
+      candidates: ["SWMS-1001", "SWMS-1002"],
+    }],
+  );
+  assertEquals(
+    store.makesafe_intake_cases.filter((row) =>
+      row.state === "confirmed_live_job"
+    ).length,
+    2,
+  );
+  assertEquals(report.evidence.durable_source_fates, {
+    checked: 3,
+    final: 3,
+    transient: 0,
+  });
+  assertEquals(store.makesafe_intake_health[0].extraction_status, "ok");
+  assertEquals(store.makesafe_intake_health[0].last_scan_at, NOW);
+});
+
+Deno.test("a corrected target mismatch becomes one visible binding exception", async () => {
+  const store = baseStore();
+  const postId = "corrected-target-source";
+  const externalRef = "MLB-26190";
+  const address = "9 Corrected Target Road Perth WA 6000";
+  const storagePath = `raw/${postId}.pdf`;
+  const bytes = digitalWorkOrderPdf([
+    `Work Order Number ${externalRef}`,
+    "Policyholders Name Corrected Target Client",
+    "Mobile 0422636182",
+    `Site Address ${address}`,
+    "Scope of Works Install temporary roof tarps and make the storm damaged property safe",
+  ]);
+  store.emails.push(email({
+    post_id: postId,
+    subject: `NEW WORK ORDER ${externalRef}`,
+    body_content: "Please attend. The builder work order is attached.",
+  }));
+  store.email_attachments.push({
+    id: `${postId}-attachment`,
+    email_id: postId,
+    name: `${externalRef} Work Order.pdf`,
+    content_type: "application/pdf",
+    storage_path: storagePath,
+    status: "uploaded",
+    size_bytes: bytes.length,
+  });
+  for (
+    const [id, jobNumber, candidateRef] of [
+      ["identity-match-job", "SWMS-2001", externalRef],
+      ["corrected-target-job", "SWMS-2002", "MLB-99999"],
+    ]
+  ) {
+    store.jobs.push({
+      id,
+      job_number: jobNumber,
+      status: "accepted",
+      type: "makesafe",
+    });
+    store.makesafe_job_details.push({
+      job_id: id,
+      external_ref: candidateRef,
+      requesting_company_slug: "mlb",
+      requesting_company_name: "MLB",
+      report_type: null,
+      jobs: {
+        id,
+        job_number: jobNumber,
+        status: "accepted",
+        type: "makesafe",
+        site_address: address,
+        metadata: { builder_work_order_number: candidateRef },
+      },
+    });
+  }
+  store.makesafe_intake_source_authority_corrections.push({
+    id: "correction-1",
+    org_id: ORG,
+    source_post_id: postId,
+    legacy_case_id: null,
+    effective_case_id: null,
+    target_job_id: "corrected-target-job",
+    expected_identity_key: null,
+  });
+  let approvals = 0;
+  const report = await runDeterministicIntake(
+    fakeClient(store, [], undefined, () => bytes),
+    {
+      dryRun: false,
+      selectionMode: "exact",
+      allowSourcePostIds: [postId],
+      maxCases: 1,
+      approveDraft: () => {
+        approvals++;
+        return Promise.resolve({ job: { id: "must-not-be-created" } });
+      },
+      nowIso: NOW,
+    },
+  );
+
+  assertEquals(report.totals.cases_attempted, 1);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(approvals, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].state, "exception");
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "conflicting_fields",
+  );
+  assertEquals(
+    store.makesafe_intake_cases[0].conflicting_fields
+      .corrected_target_job_binding,
+    ["SWMS-2001", "SWMS-2002"],
+  );
+  assertEquals(report.evidence.durable_source_fates, {
+    checked: 1,
+    final: 1,
+    transient: 0,
+  });
 });
 
 Deno.test("already-cancelled, live-invoice and terminal cancellation outcomes stay typed", async () => {
