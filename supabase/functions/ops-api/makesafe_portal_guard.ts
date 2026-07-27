@@ -36,6 +36,8 @@ export type PortalVerificationState = {
   // Recorded verification (makesafe_job_details.portal_verified_*).
   verifiedAt: string | null;
   verifiedCycle: number | null;
+  requiresAssessmentProof?: boolean;
+  assessmentProofSatisfied?: boolean;
 };
 
 // A report-type card is portal-verified only when a verification was recorded FOR
@@ -47,6 +49,9 @@ export function portalVerificationSatisfied(
 ): boolean {
   if (!state.isReportType) return true;
   if (!state.verifiedAt) return false;
+  if (state.requiresAssessmentProof && !state.assessmentProofSatisfied) {
+    return false;
+  }
   return Number(state.verifiedCycle) === Number(state.currentCycle);
 }
 
@@ -220,6 +225,9 @@ function captureProblemSentence(
   const label = portalRoleLabel(role);
   const signal = String(evidence?.signal || "").trim();
   const status = String(evidence?.status || "").trim().toLowerCase();
+  if (!evidence) {
+    return `The ${label} capture has no screenshot - run the headless capture again.`;
+  }
   if (
     status === "unreachable" &&
     /expired|no longer active|no longer available/i.test(signal)

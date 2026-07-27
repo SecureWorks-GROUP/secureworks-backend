@@ -12918,7 +12918,7 @@ async function loadMakesafePortalVerification(
   jobId: string,
 ): Promise<PortalVerificationState & { reportType: string | null }> {
   const { data: detail } = await client.from('makesafe_job_details')
-    .select('report_type, cycle_number, portal_verified_at, portal_verified_cycle')
+    .select('report_type, cycle_number, external_links, portal_verified_at, portal_verified_cycle, portal_verified_signal')
     .eq('job_id', jobId)
     .maybeSingle()
   let reportType = String(detail?.report_type || '').trim() || null
@@ -12928,12 +12928,43 @@ async function loadMakesafePortalVerification(
     const fam = parseJsonObject(jobRow?.metadata)?.makesafe_job_family || null
     reportType = _reportTypeForJobFamily(fam) || null
   }
+  const currentCycle = Number(detail?.cycle_number ?? 1)
+  const requiresAssessmentProof = reportType === 'assessment_report' ||
+    reportType === 'assessment_report_quote'
+  let assessmentProofSatisfied = true
+  if (requiresAssessmentProof) {
+    assessmentProofSatisfied = false
+    const signal = detail?.portal_verified_signal
+    if (typeof signal === 'string' && /^[\[{]/.test(signal.trim())) {
+      try {
+        const parsed = JSON.parse(signal)
+        const captures = Array.isArray(parsed)
+          ? parsed
+          : parsed?.entries || parsed?.captures
+        const currentCycleCaptures = Array.isArray(captures) &&
+          captures.length === 3 &&
+          captures.every((capture: any) =>
+            Number(capture?.cycle_number) === currentCycle
+          )
+        assessmentProofSatisfied = currentCycleCaptures &&
+          _validatePortalEvidenceForReportType(
+            reportType,
+            detail?.external_links,
+            captures,
+          ).ready
+      } catch {
+        assessmentProofSatisfied = false
+      }
+    }
+  }
   return {
     isReportType: !!reportType,
     reportType,
-    currentCycle: Number(detail?.cycle_number ?? 1),
+    currentCycle,
     verifiedAt: detail?.portal_verified_at ?? null,
     verifiedCycle: detail?.portal_verified_cycle ?? null,
+    requiresAssessmentProof,
+    assessmentProofSatisfied,
   }
 }
 export const _loadMakesafePortalVerification = loadMakesafePortalVerification

@@ -37,6 +37,8 @@ export interface MakesafePortalCapture {
   kind?: string | null;
   url?: string | null;
   signal?: string | null;
+  screenshot?: string | null;
+  screenshot_path?: string | null;
   cycle_number?: number | null;
 }
 
@@ -148,6 +150,7 @@ function donePortalRoles(input: MakesafeStatusInput): Set<string> {
     (input.evidence?.portalCaptures || [])
       .filter((capture) =>
         String(capture?.status || "").toLowerCase() === "done" &&
+        !!String(capture?.screenshot || capture?.screenshot_path || "").trim() &&
         (capture?.cycle_number == null ||
           Number(capture.cycle_number) === cycle)
       )

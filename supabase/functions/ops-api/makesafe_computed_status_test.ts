@@ -65,7 +65,7 @@ Deno.test("computed status: physical report fails closed on stale cycle or photo
   assert(short.missing.some((value) => value.includes("found 4")));
 });
 
-Deno.test("computed status: roof requires one typed done capture", () => {
+Deno.test("computed status: roof requires one typed done capture with screenshot", () => {
   const base = {
     job: {
       status: "accepted",
@@ -87,6 +87,7 @@ Deno.test("computed status: roof requires one typed done capture", () => {
         portalCaptures: [{
           status: "done",
           role: "roof_report",
+          screenshot: "/tmp/roof.png",
           cycle_number: 1,
         }],
       },
@@ -140,9 +141,24 @@ Deno.test("computed status: assessment is fail-closed until all three typed capt
     },
     evidence: {
       portalCaptures: [
-        { status: "done", role: "assessment_report", cycle_number: 3 },
-        { status: "done", role: "photos", cycle_number: 3 },
-        { status: "done", role: "quote", cycle_number: 3 },
+        {
+          status: "done",
+          role: "assessment_report",
+          screenshot: "/tmp/assessment.png",
+          cycle_number: 3,
+        },
+        {
+          status: "done",
+          role: "photos",
+          screenshot: "/tmp/photos.png",
+          cycle_number: 3,
+        },
+        {
+          status: "done",
+          role: "quote",
+          screenshot: "/tmp/quote.png",
+          cycle_number: 3,
+        },
       ],
     },
   });

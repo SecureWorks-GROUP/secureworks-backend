@@ -56,6 +56,31 @@ Deno.test("guard: report card verified for the CURRENT cycle is satisfied", () =
   );
 });
 
+Deno.test("guard: assessment verification requires stored triad proof", () => {
+  assertEquals(
+    portalVerificationSatisfied({
+      isReportType: true,
+      currentCycle: 2,
+      verifiedAt: "2026-07-07T00:00:00Z",
+      verifiedCycle: 2,
+      requiresAssessmentProof: true,
+      assessmentProofSatisfied: false,
+    }),
+    false,
+  );
+  assertEquals(
+    portalVerificationSatisfied({
+      isReportType: true,
+      currentCycle: 2,
+      verifiedAt: "2026-07-07T00:00:00Z",
+      verifiedCycle: 2,
+      requiresAssessmentProof: true,
+      assessmentProofSatisfied: true,
+    }),
+    true,
+  );
+});
+
 Deno.test("guard: a stale prior-cycle verification does NOT carry over after a reopen/re-attend", () => {
   // Verified in cycle 1, but the card was reopened/re-attended -> cycle 2. Must re-verify.
   assertEquals(
