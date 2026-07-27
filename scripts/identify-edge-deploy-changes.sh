@@ -33,6 +33,9 @@ is_verification_contract_path() {
   case "$1" in
     .github/workflows/deploy-edge-functions.yml | \
       scripts/identify-edge-deploy-changes.sh | \
+      scripts/apply-pending-migrations.sh | \
+      scripts/migration-autoapply-exclusions.txt | \
+      scripts/migration-autoapply-ledger-aliases.txt | \
       scripts/check-edge-schema-preflight.sh | \
       scripts/edge-function-schema-requirements.txt | \
       scripts/check-ops-api-source-actions.sh | \

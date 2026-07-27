@@ -15,11 +15,15 @@ on:
       - 'scripts/smoke-ops-api-action-surface.sh'
       - 'scripts/_ops-api-required-actions.txt'
       - 'scripts/identify-edge-deploy-changes.sh'
+      - 'scripts/apply-pending-migrations.sh'
+      - 'scripts/migration-autoapply-exclusions.txt'
+      - 'scripts/migration-autoapply-ledger-aliases.txt'
       - 'scripts/check-edge-deploy-guardrails.sh'
       - 'scripts/check-edge-schema-preflight.sh'
       - 'scripts/edge-function-schema-requirements.txt'
       - 'scripts/check-ops-api-source-actions.sh'
       - 'scripts/test/test-deploy-edge-functions-workflow.sh'
+      - 'scripts/test/test-apply-pending-migrations.sh'
       - 'scripts/test/test-edge-schema-preflight.sh'
       - 'scripts/test/test-smoke-ops-api-action-surface.sh'
       - '.github/workflows/deploy-edge-functions.yml'
@@ -138,7 +142,7 @@ jobs:
       - name: Shell syntax check on deploy scripts
         run: |
           # Verify shell scripts are syntactically valid
-          for script in scripts/deploy-edge-function.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh; do
+          for script in scripts/deploy-edge-function.sh scripts/smoke-edge-functions.sh scripts/smoke-ops-api-action-surface.sh scripts/identify-edge-deploy-changes.sh scripts/apply-pending-migrations.sh scripts/check-edge-deploy-guardrails.sh scripts/check-edge-schema-preflight.sh scripts/check-ops-api-source-actions.sh; do
             if [ -f "$script" ]; then
               if bash -n "$script"; then
                 echo "✓ ${script}"
@@ -156,6 +160,10 @@ jobs:
       - name: Test Edge Function schema preflight
         run: |
           bash scripts/test/test-edge-schema-preflight.sh
+
+      - name: Test migration auto-apply
+        run: |
+          bash scripts/test/test-apply-pending-migrations.sh
 
       - name: Test edge deploy workflow classification
         run: |

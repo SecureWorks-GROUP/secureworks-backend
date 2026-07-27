@@ -7,6 +7,9 @@ on:
     paths:
       - 'supabase/functions/**'
       - 'scripts/identify-edge-deploy-changes.sh'
+      - 'scripts/apply-pending-migrations.sh'
+      - 'scripts/migration-autoapply-exclusions.txt'
+      - 'scripts/migration-autoapply-ledger-aliases.txt'
       - 'scripts/check-edge-schema-preflight.sh'
       - 'scripts/edge-function-schema-requirements.txt'
       - 'scripts/check-ops-api-source-actions.sh'
@@ -16,6 +19,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: production-edge-deploy-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -37,14 +44,22 @@ jobs:
         run: |
           bash scripts/identify-edge-deploy-changes.sh
 
-      - name: Pre-deploy check required production schema
+      - name: Apply pending reviewed migrations
+        if: steps.changed.outputs.functions != ''
+        env:
+          PROJECT_REF: kevgrhcjxspbxgovpmfl
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          bash scripts/apply-pending-migrations.sh
+
+      - name: Post-apply check required production schema
         if: steps.changed.outputs.functions != ''
         env:
           CHANGED_FUNCTIONS: ${{ steps.changed.outputs.functions }}
           PROJECT_REF: kevgrhcjxspbxgovpmfl
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
-          # Read-only catalog/ledger check. It never applies migrations.
+          # Keep the independent read-only guard after migration application.
           bash scripts/check-edge-schema-preflight.sh
 
       - uses: supabase/setup-cli@v1

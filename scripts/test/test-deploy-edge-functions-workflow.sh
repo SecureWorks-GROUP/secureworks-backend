@@ -348,6 +348,9 @@ function requireText(text, needle, label) {
 
 for (const triggerPath of [
   "scripts/identify-edge-deploy-changes.sh",
+  "scripts/apply-pending-migrations.sh",
+  "scripts/migration-autoapply-exclusions.txt",
+  "scripts/migration-autoapply-ledger-aliases.txt",
   "scripts/check-edge-schema-preflight.sh",
   "scripts/edge-function-schema-requirements.txt",
   "scripts/check-ops-api-source-actions.sh",
@@ -360,12 +363,21 @@ for (const triggerPath of [
 
 requireText(deploy, 'bash scripts/identify-edge-deploy-changes.sh', 'change classifier');
 requireText(deploy, "if: steps.changed.outputs.functions != ''", 'function deploy condition');
+requireText(deploy, 'bash scripts/apply-pending-migrations.sh', 'migration auto-apply');
 requireText(deploy, 'bash scripts/check-edge-schema-preflight.sh', 'production schema preflight');
 requireText(deploy, 'SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}', 'schema preflight credential');
 requireText(deploy, 'bash scripts/check-ops-api-source-actions.sh', 'authoritative source check');
 requireText(deploy, 'bash scripts/smoke-ops-api-action-surface.sh', 'authoritative live action smoke');
 
-const schemaPreflightStep = deploy.match(/- name: Pre-deploy check required production schema[\s\S]*?(?=\n      - (?:uses:|name:))/);
+const migrationApplyStep = deploy.match(/- name: Apply pending reviewed migrations[\s\S]*?(?=\n      - name:)/);
+if (!migrationApplyStep || !migrationApplyStep[0].includes("if: steps.changed.outputs.functions != ''")) {
+  throw new Error('migration auto-apply is not required for every function deploy');
+}
+if (!migrationApplyStep[0].includes('bash scripts/apply-pending-migrations.sh')) {
+  throw new Error('migration auto-apply does not run the authoritative runner');
+}
+
+const schemaPreflightStep = deploy.match(/- name: Post-apply check required production schema[\s\S]*?(?=\n      - (?:uses:|name:))/);
 if (!schemaPreflightStep || !schemaPreflightStep[0].includes("if: steps.changed.outputs.functions != ''")) {
   throw new Error('production schema preflight is not required for every function deploy');
 }
@@ -396,14 +408,17 @@ if (!actionSmokeStep || !actionSmokeStep[0].includes("if: steps.changed.outputs.
   throw new Error('action-surface smoke does not run for verification-only changes');
 }
 
-const schemaPreflightIndex = deploy.indexOf('- name: Pre-deploy check required production schema');
+const migrationApplyIndex = deploy.indexOf('- name: Apply pending reviewed migrations');
+const schemaPreflightIndex = deploy.indexOf('- name: Post-apply check required production schema');
 const preDeployCheckIndex = deploy.indexOf('- name: Pre-deploy check ops-api source action surface');
 const deployIndex = deploy.indexOf('- name: Deploy changed edge functions');
 const basicSmokeIndex = deploy.indexOf('- name: Smoke test deployed functions');
 const actionSmokeIndex = deploy.indexOf('- name: Smoke test ops-api action surface');
-if (!(schemaPreflightIndex < preDeployCheckIndex && preDeployCheckIndex < deployIndex && deployIndex < basicSmokeIndex && basicSmokeIndex < actionSmokeIndex)) {
-  throw new Error('ops-api source path lost schema preflight -> source check -> deploy -> basic smoke -> action-surface smoke order');
+if (!(migrationApplyIndex < schemaPreflightIndex && schemaPreflightIndex < preDeployCheckIndex && preDeployCheckIndex < deployIndex && deployIndex < basicSmokeIndex && basicSmokeIndex < actionSmokeIndex)) {
+  throw new Error('ops-api source path lost migration apply -> schema preflight -> source check -> deploy -> basic smoke -> action-surface smoke order');
 }
+requireText(deploy, 'group: production-edge-deploy-${{ github.repository }}', 'serialized production deploy concurrency');
+requireText(deploy, 'cancel-in-progress: false', 'non-cancelling production deploy concurrency');
 
 const triggerBlock = deploy.match(/\n    paths:\n((?:      - '[^']*'\n)+)/);
 if (!triggerBlock) {
@@ -439,6 +454,7 @@ if (JSON.stringify(verificationTriggerPaths) !== JSON.stringify(classifierContra
 
 for (const requiredTest of [
   'bash scripts/test/test-deploy-edge-functions-workflow.sh',
+  'bash scripts/test/test-apply-pending-migrations.sh',
   'bash scripts/test/test-edge-schema-preflight.sh',
   'bash scripts/test/test-smoke-ops-api-action-surface.sh',
 ]) {

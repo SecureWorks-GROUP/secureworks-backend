@@ -5,10 +5,10 @@
 #
 # Deployment is refused only when the declared migration VERSION is absent or a
 # schema marker the function queries is absent/not queryable. File-byte checksum
-# equality is deliberately advisory: Supabase stores parsed statement arrays,
-# whose comments, whitespace and delimiters vary by CLI version and cannot
-# reliably reproduce the checked-in file bytes. Blocking on that comparison
-# would falsely halt healthy deploys; the warning still makes drift visible.
+# equality is advisory. A one-statement ledger entry is compared directly with
+# the checked-in raw bytes; parsed multi-statement entries cannot be reproduced
+# from the file without the exact writer/parser version, so their checksum stays
+# unavailable rather than comparing unlike JSON-array and raw-file encodings.
 
 set -euo pipefail
 
@@ -202,8 +202,11 @@ SELECT
   m.name AS actual_migration_name,
   CASE WHEN m.version IS NULL THEN NULL ELSE cardinality(m.statements)
   END AS actual_statement_count,
-  CASE WHEN m.version IS NULL THEN NULL
-       ELSE encode(extensions.digest(array_to_json(m.statements)::text, 'sha256'), 'hex')
+  CASE WHEN m.version IS NULL OR cardinality(m.statements) <> 1 THEN NULL
+       ELSE encode(
+         extensions.digest(convert_to(m.statements[1], 'UTF8'), 'sha256'),
+         'hex'
+       )
   END AS actual_statement_sha256,
   COALESCE((
     SELECT json_agg(ms.marker_kind || ':' || ms.marker_name ORDER BY ms.marker_kind, ms.marker_name)
@@ -302,11 +305,16 @@ for requirement in expected:
         )
     if not isinstance(actual_statement_count, int) or actual_statement_count < 1:
         warnings.append(f"{label}: advisory ledger statement set is missing or empty")
-    if not isinstance(actual_sha, str) or not actual_sha:
-        warnings.append(f"{label}: advisory ledger statement-set checksum is unavailable")
+    if actual_statement_count != 1:
+        warnings.append(
+            f"{label}: advisory raw-file checksum is unavailable for "
+            f"{actual_statement_count} parsed ledger statements"
+        )
+    elif not isinstance(actual_sha, str) or not actual_sha:
+        warnings.append(f"{label}: advisory raw-statement checksum is unavailable")
     elif actual_sha != requirement["statement_sha256"]:
         warnings.append(
-            f"{label}: advisory ledger statement-set checksum differs from checked-in file bytes"
+            f"{label}: advisory raw-statement checksum differs from checked-in raw file bytes"
         )
     if not isinstance(missing_markers, list):
         failures.append(f"{label}: missing-marker result is malformed")

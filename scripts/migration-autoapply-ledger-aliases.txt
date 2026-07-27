@@ -1,0 +1,6 @@
+# Repository migrations already represented by a reviewed production ledger row
+# under a different historical version.
+#
+# Format:
+# migration_path|sha256|ledger_version|ledger_name|reason
+supabase/migrations/20260722000001_makesafe_roof_report_drafts.sql|bcfb6927d32250c7b4b84f3881f0e979b933bb31b51de1d817cc5c42fafd0ce9|20260722071657|makesafe_roof_report_drafts|Production records the reviewed roof-report migration under its historical apply version.

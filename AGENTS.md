@@ -246,15 +246,25 @@ and the inbox-to-PO domain matcher in `monitor-inbox`
 
 ## Migrations Apply Before Edge Deploys
 
-Migrations and edge deploys are separate manual steps in this repo, so ordering
-is not automatic. The production guard and its complete marker manifest are
-documented in `docs/project-knowledge/EDGE_DEPLOY_LANE.md` and owned by
-`scripts/check-edge-schema-preflight.sh` plus
-`scripts/edge-function-schema-requirements.txt`. It refuses only when a declared
-migration ledger version or required queryable marker is absent; ledger
-name/checksum drift is advisory. It never applies SQL or runs broad `db push`.
-When a function selects a newly added column, apply the migration FIRST —
-otherwise the query 400s and, per the entry above, silently reports zero.
+The production Edge Function workflow applies pending reviewed migrations before
+deploying function code, then reruns the independent read-only schema gate.
+The lane is documented in `docs/project-knowledge/EDGE_DEPLOY_LANE.md` and owned
+by `scripts/apply-pending-migrations.sh`,
+`scripts/migration-autoapply-exclusions.txt`,
+`scripts/migration-autoapply-ledger-aliases.txt`,
+`scripts/check-edge-schema-preflight.sh`, and
+`scripts/edge-function-schema-requirements.txt`. The apply runner uses the
+Management API, records a ledger row only after the migration transaction
+succeeds, and never runs broad `db push`. Exact-file exclusions preserve audited
+production ledger debt and fail closed on hash drift; serialized workflow runs
+prevent concurrent deploys from racing the same pending migration.
+The audited automatic boundary starts at version `20260722000001`; older sparse
+production history remains in the manual lane.
+
+The post-apply guard refuses only when a declared migration ledger version or
+required queryable marker is absent; ledger name/checksum drift is advisory.
+When a function selects a newly added column, keep the migration in the same
+reviewed merge or land it first — otherwise the post-apply gate refuses deploy.
 `jobs.quoted_value`
 (`20260717000001_jobs_quoted_value_generated.sql`) is the current example:
 `daily-digest` selects it, and as of 2026-07-20 the migration is still NOT
