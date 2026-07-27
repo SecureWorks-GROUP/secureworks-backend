@@ -133,19 +133,13 @@ function builderKey(snapshot: SesAssemblerLiveSnapshot): SesBuilderKey {
 }
 
 function family(snapshot: SesAssemblerLiveSnapshot): SesFamilyId {
-  const detail = snapshot.detail || {};
   const metadata = record(snapshot.job.metadata);
-  const explicit = firstText(
-    metadata.makesafe_job_family,
-    metadata.ses_family,
-    metadata.makesafe_family,
-    metadata.job_family,
-    detail.report_type,
-  ).toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
+  const explicit = text(metadata.makesafe_job_family).toLowerCase()
+    .replaceAll("-", "_").replaceAll(" ", "_");
   const ownTemplate = metadata.own_template_requested === true ||
     metadata.strata === true ||
     metadata.report_delivery === "own_document" ||
-    detail.report_delivery === "own_document";
+    snapshot.detail?.report_delivery === "own_document";
   switch (explicit) {
     case "general_makesafe":
     case "physical_makesafe":

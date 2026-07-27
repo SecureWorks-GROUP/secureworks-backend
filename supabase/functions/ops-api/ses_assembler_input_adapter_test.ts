@@ -204,6 +204,23 @@ Deno.test("live adapter leaves an unmapped canonical family unknown without fall
   assertEquals(input.classification.family, "unknown");
 });
 
+Deno.test("live adapter ignores legacy family fields when the canonical family is absent", () => {
+  const live = snapshot();
+  live.job.metadata = { report_delivery: "own_document" };
+  live.detail!.report_type = "roof_report";
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.classification.family, "unknown");
+});
+
+Deno.test("live adapter keeps canonical roof family ordinary unless typed own-template evidence is present", () => {
+  const live = snapshot();
+  live.job.metadata.makesafe_job_family = "roof_report";
+  live.detail!.report_type = "assessment_report";
+  live.detail!.report_delivery = "own_document";
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.classification.family, "own_template_roof");
+});
+
 Deno.test("live adapter leaves an unclassified non-AJS card explicitly unknown", () => {
   const live = snapshot();
   live.detail!.requesting_company_slug = "unsealed-builder";
