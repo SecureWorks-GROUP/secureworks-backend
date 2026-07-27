@@ -19,7 +19,7 @@ const FENCE = await Deno.readTextFile(
 );
 const MIGRATION = await Deno.readTextFile(
   new URL(
-    "../../migrations/20260728030000_makesafe_ses_fence_hardening.sql",
+    "../../migrations/20260728050000_makesafe_ses_fence_hardening.sql",
     import.meta.url,
   ),
 );
@@ -189,21 +189,26 @@ Deno.test("write-once seal and SES-native void authority are migration-backed", 
   ) {
     assertStringIncludes(
       SCHEMA_MANIFEST,
-      `${fn}|supabase/migrations/20260728030000_makesafe_ses_fence_hardening.sql|column|jobs.ses_money_sealed_at`,
+      `${fn}|supabase/migrations/20260728050000_makesafe_ses_fence_hardening.sql|column|jobs.ses_money_sealed_at`,
     );
   }
 });
 
 Deno.test("confirmed void retry re-proves the current ACCREC mirror", () => {
   const confirmation = MIGRATION.slice(
-    MIGRATION.indexOf("CREATE OR REPLACE FUNCTION public.confirm_ses_invoice_void_execution_v1"),
+    MIGRATION.indexOf(
+      "CREATE OR REPLACE FUNCTION public.confirm_ses_invoice_void_execution_v1",
+    ),
   );
   const confirmedBranch = confirmation.slice(
     confirmation.indexOf("IF target.state = 'confirmed' THEN"),
     confirmation.indexOf("UPDATE public.xero_invoices"),
   );
   assertStringIncludes(confirmedBranch, "org_id = target.org_id");
-  assertStringIncludes(confirmedBranch, "xero_invoice_id = target.xero_invoice_id");
+  assertStringIncludes(
+    confirmedBranch,
+    "xero_invoice_id = target.xero_invoice_id",
+  );
   assertStringIncludes(confirmedBranch, "job_id = target.job_id");
   assertStringIncludes(confirmedBranch, "job_id IS NOT NULL");
   assertStringIncludes(confirmedBranch, "invoice_type = 'ACCREC'");

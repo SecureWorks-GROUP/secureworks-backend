@@ -63,7 +63,7 @@ Preferred path:
    For SES Reporting U5/U6/U6R, apply
    `20260728020000_makesafe_ses_invoice_release_u5_u6.sql` before deploying the
    matching `ops-api`. For the SES money and outbound fence, apply
-   `20260728030000_makesafe_ses_fence_hardening.sql` before deploying the
+   `20260728050000_makesafe_ses_fence_hardening.sql` before deploying the
    matching `ops-api`, `send-quote`, `send-outlook-email`, `reporting-api`, or
    `xero-sync`. These migrations are applied by the production workflow's
    pending-migration lane before the edge-function deploy; the schema preflight
