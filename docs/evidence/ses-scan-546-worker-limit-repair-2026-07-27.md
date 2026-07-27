@@ -21,11 +21,19 @@ change was made while producing this evidence.
 
 The worker was not exhausting memory. Supabase killed it for CPU time.
 
-The standing scan now gives the deterministic runtime four sources per
-invocation instead of its 500-source default. On the current backlog that means
-two oldest cursor rows and two newest rows per run. A successful run persists the
-existing tuple cursor, so repeated two-minute invocations drain old work without
-making new mail wait behind seven weeks of history.
+The standing scan gives the deterministic runtime four physical sources per
+invocation. The historical lane remains cursor-backed, while the recent lane is
+a newest-first queue of physical sources without a final durable fate (a
+canonical case-source row or classifier exclusion). It pages only source
+identifiers, fetches full bodies for the two selected recent sources, and keeps
+transient exceptions eligible. A fresh source reopening an exception must fit
+its persisted authority closure inside the same four-source allowance or is
+deferred with a reason-coded outcome.
+
+Fresh-source health is now based on durable coverage rather than function
+completion or `last_inbound_email_at`: it degrades when the oldest eligible
+unfated source exceeds five minutes. The existing handoff failure path still
+degrades `makesafe_intake_health` when a continuation fails.
 
 A non-2xx or network-failed continuation now also degrades
 `makesafe_intake_health`. The existing per-source exception rows and aggregate
@@ -84,10 +92,11 @@ cursor and persists it only after the run completes its writes and health update
 The entry-point repair uses that mechanism rather than introducing a second
 checkpoint.
 
-With `maxSources: 4`, the runtime reserves `floor(4 × 0.5) = 2` rows for the
-oldest cursor page and uses the remaining two slots for the newest mail. Each
-successful invocation therefore advances two old rows while retaining immediate
-coverage of current arrivals.
+With `maxSources: 4`, the runtime reserves the historical share according to the
+existing backlog cursor and uses the remaining allowance for the newest unfated
+physical sources. The recent identifier queue skips sources with final fates,
+then fetches bodies only for the selected recent rows; the historical lane and
+the eight-PDF standing maximum remain unchanged.
 
 At the measured 1,155-row backlog, a complete sweep needs at most 578
 invocations. At the existing two-minute cadence that is about 19 hours 16
@@ -134,7 +143,10 @@ The new tests prove:
 1. the standing scan invokes the runtime exactly once with `maxSources: 4` and
    returns the runtime's bounded JSON report; and
 2. an HTTP 546 continuation writes the source fate, aggregate alarm, and degraded
-   health row without falsely advancing `last_scan_at`.
+   health row without falsely advancing `last_scan_at`; and
+3. the production-shaped dual-alias fixture proves final-fate filtering and the
+   bounded recent queue, while the migration contract requires
+   `20260727020000_makesafe_intake_fresh_source_health.sql` before `ops-api`.
 
 Both edge entry points also pass their required Deno checks:
 
@@ -162,7 +174,8 @@ release worktree, the required live proof is:
 
 1. `POST .../ops-api?action=scan_ses_makesafes` returns HTTP 200 with a JSON
    deterministic report;
-2. `source_read.cap` is 4 and the tuple cursor advances on successive runs;
+2. `source_read.cap` is 4, the historical tuple cursor advances on successive
+   runs, and the recent queue selects only eligible unfated sources;
 3. recent function logs show neither HTTP 546 nor `CPUTime` shutdown;
 4. `makesafe_intake_health.last_scan_at` advances on success and the prior
    handoff degradation clears through the runtime's normal health write; and

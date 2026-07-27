@@ -9,6 +9,7 @@ PREFLIGHT="$REPO_ROOT/scripts/check-edge-schema-preflight.sh"
 MANIFEST="$REPO_ROOT/scripts/edge-function-schema-requirements.txt"
 MIGRATION="$REPO_ROOT/supabase/migrations/20260727000001_makesafe_attendance_cycles_u2_s1.sql"
 MEDIA_MIGRATION="$REPO_ROOT/supabase/migrations/20260728000001_makesafe_state_authority_u2.sql"
+FRESH_HEALTH_MIGRATION="$REPO_ROOT/supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -40,6 +41,10 @@ media_migration_sha() {
   shasum -a 256 "$MEDIA_MIGRATION" | awk '{print $1}'
 }
 
+fresh_health_migration_sha() {
+  shasum -a 256 "$FRESH_HEALTH_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -48,6 +53,7 @@ write_response() {
   local actual_statement_count="${5:-1}"
   EXPECTED_SHA="$(migration_sha)" \
   MEDIA_EXPECTED_SHA="$(media_migration_sha)" \
+  FRESH_HEALTH_EXPECTED_SHA="$(fresh_health_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -83,8 +89,19 @@ media_row = {
     "actual_statement_sha256": os.environ["MEDIA_EXPECTED_SHA"],
     "missing_markers": [],
 }
+fresh_health_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260727020000",
+    "expected_migration_name": "makesafe_intake_fresh_source_health",
+    "expected_statement_sha256": os.environ["FRESH_HEALTH_EXPECTED_SHA"],
+    "actual_migration_version": "20260727020000",
+    "actual_migration_name": "makesafe_intake_fresh_source_health",
+    "actual_statement_count": 11,
+    "actual_statement_sha256": os.environ["FRESH_HEALTH_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
-    json.dump([row, media_row], f)
+    json.dump([row, fresh_health_row, media_row], f)
 PY
 }
 
@@ -103,11 +120,13 @@ test_incident_dependency_is_declared() {
   local name="test_incident_dependency_is_declared"
   local report_expected='ops-api|supabase/migrations/20260727000001_makesafe_attendance_cycles_u2_s1.sql|column|job_service_reports.attendance_cycle_id'
   local media_expected='ops-api|supabase/migrations/20260728000001_makesafe_state_authority_u2.sql|column|job_media.attendance_cycle_id'
+  local fresh_health_expected='ops-api|supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql|column|makesafe_intake_health.fresh_source_lag_seconds'
   if grep -Fxq "$report_expected" "$MANIFEST" && \
-    grep -Fxq "$media_expected" "$MANIFEST"; then
+    grep -Fxq "$media_expected" "$MANIFEST" && \
+    grep -Fxq "$fresh_health_expected" "$MANIFEST"; then
     pass "$name"
   else
-    fail "$name" "the report and media cycle columns are not permanent ops-api deploy requirements"
+    fail "$name" "the report, media-cycle, and fresh-source health columns are not permanent ops-api deploy requirements"
   fi
 }
 
@@ -278,7 +297,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared

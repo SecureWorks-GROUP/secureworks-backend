@@ -112,6 +112,7 @@ Deno.test("every source issue reason has one typed change type", () => {
     INTAKE_SOURCE_ISSUE_REASONS.map(intakeSourceIssueChangeType),
     [
       "intake_deferred_run_cap_deferred",
+      "intake_deferred_source_closure_cap",
       "intake_deferred_pdf_extraction_cap",
       "intake_deferred_pdf_attachment_limit",
       "intake_exception_lineage_quarantine",

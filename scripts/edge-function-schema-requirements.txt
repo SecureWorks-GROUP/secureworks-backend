@@ -20,6 +20,12 @@
 # Add a complete requirement set in the same PR as schema-dependent edge code.
 # This manifest never applies SQL. It only drives a read-only production check.
 
+ops-api|supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql|column|makesafe_intake_health.latest_ingested_received_at
+ops-api|supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql|column|makesafe_intake_health.latest_final_fate_received_at
+ops-api|supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql|column|makesafe_intake_health.unfated_source_count
+ops-api|supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql|column|makesafe_intake_health.oldest_unfated_received_at
+ops-api|supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql|column|makesafe_intake_health.fresh_source_lag_seconds
+ops-api|supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql|column|makesafe_intake_health.last_fresh_source_accounted_at
 ops-api|supabase/migrations/20260727000001_makesafe_attendance_cycles_u2_s1.sql|table|makesafe_attendance_cycles
 ops-api|supabase/migrations/20260727000001_makesafe_attendance_cycles_u2_s1.sql|table|makesafe_report_pack_cycles
 ops-api|supabase/migrations/20260727000001_makesafe_attendance_cycles_u2_s1.sql|column|makesafe_attendance_cycles.id

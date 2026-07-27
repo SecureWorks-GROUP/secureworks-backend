@@ -2,15 +2,15 @@
 // deno-lint-ignore-file no-explicit-any
 //
 // Reads a capped source window (a sweep half driven by a persisted received_at
-// cursor plus a newest half) together with every allowlisted source by id before
-// planning, so per-run cost is a constant while every in-window source is still
-// eventually read. Live and dry-run runs each advance their own sweep cursor, so
-// that guarantee holds separately in both modes: a live run never moves the
-// dark-observe position and vice versa. Dry-run's only write is that observe
-// cursor - it creates no case, draft, job, storage object or health state, and
-// cutover evidence therefore comes from observation that covers the whole window.
-// Live mode is reachable only through the DB-backed cutover switch and never
-// falls back to AI.
+// cursor plus a newest-first queue of sources without final durable fates)
+// together with every allowlisted source by id before planning, so per-run cost
+// is constant while every in-window source is still eventually read. Live and
+// dry-run runs each advance their own sweep cursor, so that guarantee holds
+// separately in both modes: a live run never moves the dark-observe position and
+// vice versa. Dry-run's only write is that observe cursor - it creates no case,
+// draft, job, storage object or health state, and cutover evidence therefore
+// comes from observation that covers the whole window. Live mode is reachable
+// only through the DB-backed cutover switch and never falls back to AI.
 
 import {
   buildDeterministicIntakePlan,
@@ -120,18 +120,21 @@ const MAX_ATTEMPT_MULTIPLIER = 4;
 // PostgREST caps an unranged response at 1000 rows, so batched source reads page
 // below that cap rather than silently truncating.
 const SOURCE_PAGE_SIZE = 500;
+// Recent selection pages only source coordinates. Long Graph ids keep the fate
+// lookups chunked at 25 below, while a 100-row identifier page avoids rereading
+// bodies or attachments merely to skip already-accounted head rows.
+const RECENT_IDENTIFIER_PAGE_SIZE = 100;
 // A scheduled run reads at most this many window rows regardless of how large the
 // mailbox has grown. Allowlisted sources are read separately by id, so a named
 // source is still proved on every run even once it has aged out of the newest
 // rows, and already-scanned rows inside the bound are still revisited.
 const DEFAULT_MAX_SOURCES_PER_RUN = 500;
 const MAX_SOURCES_PER_RUN = 2000;
-// The bounded read is split sweep-first / newest-last. Newest-only truncation
-// would bound cost but starve anything that ever falls behind the cap. The sweep
-// half walks the window in received_at order from a cursor persisted across runs
-// and restarts once it reaches the end, so progress never depends on a row being
-// stamped: the vast majority of SES mail never settles a case and would otherwise
-// hold the same oldest rows in front of the read forever.
+// The bounded read is split sweep-first / unfated-newest-last. The sweep half
+// walks the window in received_at order from a cursor persisted across runs and
+// restarts once it reaches the end. The recent half skips final case/exclusion
+// fates through lightweight identifier pages, so dual-capture aliases at the head
+// cannot pin current unfated work behind them.
 const BACKLOG_READ_SHARE = 0.5;
 const MAX_PDF_EXTRACTIONS_PER_RUN = 50;
 const MAX_PDF_ATTACHMENTS_PER_SOURCE = 2;
@@ -445,6 +448,168 @@ function chunk<T>(values: readonly T[], size = 25): T[][] {
   return result;
 }
 
+interface DurableSourceFateSnapshot {
+  final: Set<string>;
+  transient: Set<string>;
+  unfated: Set<string>;
+  invalid: Map<string, { final: number; issues: number }>;
+}
+
+async function readDurableSourceFates(
+  client: any,
+  postIds: readonly string[],
+): Promise<DurableSourceFateSnapshot> {
+  const unique = [...new Set(postIds)].filter(Boolean);
+  const caseCounts = new Map<string, number>();
+  const nonWork = new Set<string>();
+  const issueCounts = new Map<string, number>();
+  for (const ids of chunk(unique)) {
+    const [sourcesResult, exclusionsResult, eventsResult] = await Promise.all([
+      client.from("makesafe_intake_case_sources")
+        .select("post_id")
+        .eq("org_id", DEFAULT_ORG_ID)
+        .in("post_id", ids),
+      client.from("email_classifier_exclusions")
+        .select("post_id")
+        .eq("mailbox", SES_MAILBOX)
+        .in("post_id", ids),
+      client.from("email_events_raw")
+        .select("post_id,change_type")
+        .eq("org_id", DEFAULT_ORG_ID)
+        .in("post_id", ids),
+    ]);
+    for (
+      const [label, result] of [
+        ["case source", sourcesResult],
+        ["classifier exclusion", exclusionsResult],
+        ["source event", eventsResult],
+      ] as const
+    ) {
+      if (result.error) {
+        throw new Error(
+          `durable source fate ${label} read failed: ${
+            result.error.message || result.error
+          }`,
+        );
+      }
+    }
+    for (const row of sourcesResult.data || []) {
+      caseCounts.set(row.post_id, (caseCounts.get(row.post_id) || 0) + 1);
+    }
+    for (const row of exclusionsResult.data || []) {
+      nonWork.add(row.post_id);
+    }
+    for (const row of eventsResult.data || []) {
+      if (row.change_type === "excluded") {
+        nonWork.add(row.post_id);
+      } else if (parseIntakeSourceIssueReason(row.change_type)) {
+        issueCounts.set(row.post_id, (issueCounts.get(row.post_id) || 0) + 1);
+      }
+    }
+  }
+
+  const snapshot: DurableSourceFateSnapshot = {
+    final: new Set(),
+    transient: new Set(),
+    unfated: new Set(),
+    invalid: new Map(),
+  };
+  for (const postId of unique) {
+    const finalCount = (caseCounts.get(postId) || 0) +
+      (nonWork.has(postId) ? 1 : 0);
+    const issueCount = issueCounts.get(postId) || 0;
+    if (finalCount === 1) {
+      snapshot.final.add(postId);
+    } else if (finalCount === 0 && issueCount > 0) {
+      snapshot.transient.add(postId);
+    } else if (finalCount === 0 && issueCount === 0) {
+      snapshot.unfated.add(postId);
+    } else {
+      snapshot.invalid.set(postId, {
+        final: finalCount,
+        issues: issueCount,
+      });
+    }
+  }
+  return snapshot;
+}
+
+function assertValidSourceFates(snapshot: DurableSourceFateSnapshot): void {
+  const invalid = snapshot.invalid.entries().next().value as
+    | [string, { final: number; issues: number }]
+    | undefined;
+  if (!invalid) return;
+  const [postId, counts] = invalid;
+  throw new Error(
+    `source fate assertion failed for ${postId}: ${counts.final} final, ${counts.issues} open issues`,
+  );
+}
+
+async function readRecentUnfatedIdentifiers(
+  client: any,
+  options: {
+    since: string;
+    cap: number;
+    onlyUnscanned: boolean;
+    excludedPostIds: ReadonlySet<string>;
+  },
+): Promise<{ rows: any[]; capReached: boolean }> {
+  if (options.cap === 0) return { rows: [], capReached: true };
+  const selected: any[] = [];
+  let before: { receivedAt: string; postId: string } | null = null;
+  let exhausted = false;
+  while (selected.length < options.cap && !exhausted) {
+    let query = client.from("emails").select("post_id,received_at")
+      .eq("mailbox", SES_MAILBOX)
+      .gte("received_at", options.since);
+    if (before) {
+      query = query.or(
+        `received_at.lt."${before.receivedAt}",and(received_at.eq."${before.receivedAt}",post_id.lt."${before.postId}")`,
+      );
+    }
+    if (options.onlyUnscanned) query = query.is("makesafe_scanned_at", null);
+    const { data, error } = await query
+      .order("received_at", { ascending: false })
+      .order("post_id", { ascending: false })
+      .limit(RECENT_IDENTIFIER_PAGE_SIZE);
+    if (error) {
+      throw new Error(
+        `recent source identifier read failed: ${error.message || error}`,
+      );
+    }
+    const page = data || [];
+    exhausted = page.length < RECENT_IDENTIFIER_PAGE_SIZE;
+    const last = page.at(-1);
+    if (last?.post_id && last?.received_at) {
+      before = {
+        receivedAt: String(last.received_at),
+        postId: String(last.post_id),
+      };
+    }
+    const candidates = page.filter((row: any) =>
+      row?.post_id && !options.excludedPostIds.has(String(row.post_id))
+    );
+    const fates = await readDurableSourceFates(
+      client,
+      candidates.map((row: any) => String(row.post_id)),
+    );
+    assertValidSourceFates(fates);
+    for (const row of candidates) {
+      const postId = String(row.post_id);
+      if (fates.final.has(postId)) continue;
+      selected.push(row);
+      if (selected.length >= options.cap) break;
+    }
+    if (page.length === 0) exhausted = true;
+  }
+  return {
+    rows: selected,
+    // Reaching the physical-source allowance means more eligible rows may sit
+    // behind it. Exhausting the identifier queue proves the opposite.
+    capReached: selected.length >= options.cap,
+  };
+}
+
 function linksFromBody(
   postId: string,
   body: string | null,
@@ -454,6 +619,142 @@ function linksFromBody(
     found.add(match[0].replace(/[),.;]+$/, ""));
   }
   return [...found].map((url) => ({ url, label: null, sourcePostId: postId }));
+}
+
+function sourceItemFromEmailRow(
+  row: any,
+  attachments: readonly DeterministicAttachment[] = [],
+): DeterministicSourceItem {
+  const rawBody = row.body_content || row.body_preview || "";
+  // Match the proven legacy intake shape: regexes receive readable text, not a
+  // newline-free HTML document whose tags hide labels and make address captures
+  // consume the rest of a reply chain. Links still come from the raw body.
+  const body = stripEmailHtmlForTrade(rawBody) || row.body_preview || "";
+  return {
+    postId: row.post_id,
+    internetMessageId: row.internet_message_id || null,
+    conversationId: row.conversation_id || null,
+    threadId: row.thread_id || null,
+    fromEmail: row.from_email || null,
+    fromName: row.from_name || null,
+    subject: row.subject || null,
+    body,
+    receivedAt: row.received_at,
+    attachments: [...attachments],
+    links: linksFromBody(row.post_id, rawBody),
+    direction: isOwnDomain(deriveFromDomain(row.from_email))
+      ? "own_outbound"
+      : "inbound",
+  };
+}
+
+async function recentExceptionClosureByInstruction(
+  client: any,
+  recentRows: readonly any[],
+  profiles: readonly DeterministicCompanyProfile[],
+): Promise<Map<string, Set<string>>> {
+  if (!recentRows.length) return new Map();
+  const preliminary = buildDeterministicIntakePlan(
+    recentRows.map((row) => sourceItemFromEmailRow(row)),
+    profiles,
+  );
+  const recentPostIds = new Set(
+    recentRows.map((row) => String(row.post_id)).filter(Boolean),
+  );
+  const selectedCases = preliminary.cases.filter((intakeCase) =>
+    intakeCase.sourcePostIds.some((postId) => recentPostIds.has(postId))
+  );
+  const persistedByInstruction = new Map<string, any>();
+  for (const keys of chunk(selectedCases.map((item) => item.instructionKey))) {
+    const { data, error } = await client.from("makesafe_intake_cases")
+      .select("id,instruction_key,state")
+      .eq("org_id", DEFAULT_ORG_ID)
+      .in("instruction_key", keys);
+    if (error) {
+      throw new Error(
+        `recent exception closure case read failed: ${error.message || error}`,
+      );
+    }
+    for (const row of data || []) {
+      if (row?.id && row?.instruction_key && row.state === "exception") {
+        persistedByInstruction.set(row.instruction_key, row);
+      }
+    }
+  }
+  const persistedSources = await readPersistedSourcePostIds(
+    client,
+    [...persistedByInstruction.values()].map((row) => String(row.id)),
+  );
+  const result = new Map<string, Set<string>>();
+  for (const [instructionKey, row] of persistedByInstruction) {
+    const direct = [...(persistedSources.get(String(row.id)) || [])];
+    const authority = await resolvePersistedSourceAuthorities(client, direct);
+    result.set(
+      instructionKey,
+      new Set([...direct, ...authority.seedPostIds]),
+    );
+  }
+  return result;
+}
+
+function allocateRecentExceptionClosures(
+  recentRows: readonly any[],
+  profiles: readonly DeterministicCompanyProfile[],
+  closureByInstruction: ReadonlyMap<string, ReadonlySet<string>>,
+  excludedPostIds: ReadonlySet<string>,
+  cap: number,
+): {
+  recentPostIds: Set<string>;
+  closurePostIds: Set<string>;
+  deferredPostIds: Set<string>;
+} {
+  const preliminary = buildDeterministicIntakePlan(
+    recentRows.map((row) => sourceItemFromEmailRow(row)),
+    profiles,
+  );
+  const order = new Map(
+    recentRows.map((row, index) => [String(row.post_id), index]),
+  );
+  const groups = preliminary.cases.map((intakeCase) => ({
+    instructionKey: intakeCase.instructionKey,
+    recentPostIds: intakeCase.sourcePostIds.filter((postId) =>
+      order.has(postId)
+    ),
+  })).filter((group) => group.recentPostIds.length).sort((left, right) =>
+    Math.min(...left.recentPostIds.map((postId) => order.get(postId)!)) -
+    Math.min(...right.recentPostIds.map((postId) => order.get(postId)!))
+  );
+  const grouped = new Set(groups.flatMap((group) => group.recentPostIds));
+  for (const row of recentRows) {
+    const postId = String(row.post_id);
+    if (!grouped.has(postId)) {
+      groups.push({ instructionKey: "", recentPostIds: [postId] });
+    }
+  }
+
+  const allocated = new Set<string>();
+  const selectedRecent = new Set<string>();
+  const selectedClosure = new Set<string>();
+  const deferred = new Set<string>();
+  for (const group of groups) {
+    const closure = [
+      ...(closureByInstruction.get(group.instructionKey) || []),
+    ].filter((postId) => !excludedPostIds.has(postId));
+    const required = new Set([...group.recentPostIds, ...closure]);
+    const next = new Set([...allocated, ...required]);
+    if (next.size > cap) {
+      for (const postId of group.recentPostIds) deferred.add(postId);
+      continue;
+    }
+    for (const postId of required) allocated.add(postId);
+    for (const postId of group.recentPostIds) selectedRecent.add(postId);
+    for (const postId of closure) selectedClosure.add(postId);
+  }
+  return {
+    recentPostIds: selectedRecent,
+    closurePostIds: selectedClosure,
+    deferredPostIds: deferred,
+  };
 }
 
 // Resolves allowlisted instruction keys to the source ids their persisted case
@@ -974,6 +1275,7 @@ async function readInputs(
     sources: DeterministicSourceItem[];
     profiles: DeterministicCompanyProfile[];
     read: DeterministicRuntimeReport["source_read"];
+    closureDeferredSources: DeterministicSourceItem[];
     // Internal tuple used to persist sweep progress. Its source-id tie breaker is
     // never copied into the aggregate runtime report.
     nextCursor: SweepCursor | null;
@@ -1025,20 +1327,119 @@ async function readInputs(
     },
   );
   const recentCap = Math.max(0, options.maxSources - backlogRows.length);
-  const recentRows = recentCap === 0 ? [] : await fetchCapped(
+  const recentIdentifiers = await readRecentUnfatedIdentifiers(client, {
+    since,
+    cap: recentCap,
+    onlyUnscanned: options.onlyUnscanned,
+    excludedPostIds: new Set(
+      backlogRows.map((row) => String(row.post_id)).filter(Boolean),
+    ),
+  });
+  const recentByPostId = new Map<string, any>();
+  for (
+    const ids of chunk(
+      recentIdentifiers.rows.map((row) => String(row.post_id)),
+    )
+  ) {
+    const { data, error } = await client.from("emails").select(columns)
+      .eq("mailbox", SES_MAILBOX)
+      .in("post_id", ids);
+    if (error) {
+      throw new Error(
+        `recent source body read failed: ${error.message || error}`,
+      );
+    }
+    for (const row of data || []) {
+      if (row?.post_id) recentByPostId.set(String(row.post_id), row);
+    }
+  }
+  let recentRows = recentIdentifiers.rows.flatMap((identifier) => {
+    const row = recentByPostId.get(String(identifier.post_id));
+    return row ? [row] : [];
+  });
+  if (recentRows.length !== recentIdentifiers.rows.length) {
+    throw new Error(
+      "recent source body read did not resolve every selected identifier",
+    );
+  }
+  const { data: companies, error: companyError } = await client.from(
+    "makesafe_companies",
+  )
+    .select("id,slug,name,sender_patterns,parsing_rules")
+    .eq("active", true);
+  if (companyError) {
+    throw new Error(
+      `makesafe_companies read failed: ${companyError.message || companyError}`,
+    );
+  }
+  const profiles = (companies || []).map((row: any) => ({
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    senderPatterns: Array.isArray(row.sender_patterns)
+      ? row.sender_patterns
+      : [],
+    parsingRules: row.parsing_rules || null,
+  }));
+
+  // A fresh physical source can reopen an already-persisted exception. Preserve
+  // the exact-selection rule: plan with the complete authoritative source
+  // closure, never with whichever partial recent page happened to arrive. Unlike
+  // operator seeds, this automatic closure consumes the recent physical-row
+  // allowance; an oversized closure is deferred visibly instead of escaping the
+  // four-source/eight-PDF standing bound.
+  const backlogPostIds = new Set(
+    backlogRows.map((row) => String(row.post_id)).filter(Boolean),
+  );
+  const closureByInstruction = await recentExceptionClosureByInstruction(
+    client,
+    recentRows,
+    profiles,
+  );
+  const closureAllocation = allocateRecentExceptionClosures(
+    recentRows,
+    profiles,
+    closureByInstruction,
+    backlogPostIds,
     recentCap,
-    async (from, to) => {
-      let query = client.from("emails").select(columns)
-        .eq("mailbox", SES_MAILBOX)
-        .gte("received_at", since)
-        .order("received_at", { ascending: false })
-        .range(from, to);
-      if (options.onlyUnscanned) query = query.is("makesafe_scanned_at", null);
-      return await query;
-    },
+  );
+  const deferredRows = recentRows.filter((row) =>
+    closureAllocation.deferredPostIds.has(String(row.post_id))
+  );
+  recentRows = recentRows.filter((row) =>
+    closureAllocation.recentPostIds.has(String(row.post_id))
+  );
+  const closureRowsByPostId = new Map<string, any>();
+  const missingClosurePostIds = [...closureAllocation.closurePostIds].filter(
+    (postId) =>
+      !backlogPostIds.has(postId) &&
+      !closureAllocation.recentPostIds.has(postId),
+  );
+  for (const ids of chunk(missingClosurePostIds)) {
+    const { data, error } = await client.from("emails").select(columns)
+      .eq("mailbox", SES_MAILBOX)
+      .in("post_id", ids);
+    if (error) {
+      throw new Error(
+        `recent exception closure source read failed: ${
+          error.message || error
+        }`,
+      );
+    }
+    for (const row of data || []) {
+      if (row?.post_id) closureRowsByPostId.set(String(row.post_id), row);
+    }
+  }
+  if (closureRowsByPostId.size !== missingClosurePostIds.length) {
+    throw new Error(
+      "recent exception closure did not resolve every required source",
+    );
+  }
+  const closureRows = missingClosurePostIds.map((postId) =>
+    closureRowsByPostId.get(postId)
   );
   const byPostId = new Map<string, any>();
-  for (const row of [...backlogRows, ...recentRows]) {
+  for (const row of [...backlogRows, ...recentRows, ...closureRows]) {
     if (row?.post_id) byPostId.set(row.post_id, row);
   }
   const windowRows = byPostId.size;
@@ -1094,48 +1495,9 @@ async function readInputs(
       attachment,
     ]);
   }
-  const { data: companies, error: companyError } = await client.from(
-    "makesafe_companies",
-  )
-    .select("id,slug,name,sender_patterns,parsing_rules")
-    .eq("active", true);
-  if (companyError) {
-    throw new Error(
-      `makesafe_companies read failed: ${companyError.message || companyError}`,
-    );
-  }
-  const profiles = (companies || []).map((row: any) => ({
-    id: row.id,
-    slug: row.slug,
-    name: row.name,
-    senderPatterns: Array.isArray(row.sender_patterns)
-      ? row.sender_patterns
-      : [],
-    parsingRules: row.parsing_rules || null,
-  }));
-  const sourceRows = emails.map((row: any): DeterministicSourceItem => {
-    const rawBody = row.body_content || row.body_preview || "";
-    // Match the proven legacy intake shape: regexes receive readable text, not a
-    // newline-free HTML document whose tags hide labels and make address captures
-    // consume the rest of a reply chain. Links still come from the raw body.
-    const body = stripEmailHtmlForTrade(rawBody) || row.body_preview || "";
-    return {
-      postId: row.post_id,
-      internetMessageId: row.internet_message_id || null,
-      conversationId: row.conversation_id || null,
-      threadId: row.thread_id || null,
-      fromEmail: row.from_email || null,
-      fromName: row.from_name || null,
-      subject: row.subject || null,
-      body,
-      receivedAt: row.received_at,
-      attachments: attachmentsByPost.get(row.post_id) || [],
-      links: linksFromBody(row.post_id, rawBody),
-      direction: isOwnDomain(deriveFromDomain(row.from_email))
-        ? "own_outbound"
-        : "inbound",
-    };
-  });
+  const sourceRows = emails.map((row: any) =>
+    sourceItemFromEmailRow(row, attachmentsByPost.get(row.post_id) || [])
+  );
   // Exact diagnostic seeds own the first PDF slots, then the bounded recent half.
   // Without the recent ids in a tier of their own, every full-open run spent all
   // 50 extractions on old sweep rows before it reached a newly-arrived clean
@@ -1148,7 +1510,7 @@ async function readInputs(
     recentRows.map((row) => String(row.post_id)).filter(Boolean),
   );
   const backlogPageFull = backlogRows.length >= backlogCap;
-  const recentPageFull = recentCap === 0 || recentRows.length >= recentCap;
+  const recentPageFull = recentIdentifiers.capReached;
   const nextCursor = backlogPageFull
     ? {
       receivedAt: String(backlogRows[backlogRows.length - 1].received_at),
@@ -1158,11 +1520,14 @@ async function readInputs(
   return {
     sources,
     profiles,
+    closureDeferredSources: deferredRows.map((row) =>
+      sourceItemFromEmailRow(row)
+    ),
     read: {
       cap: options.maxSources,
       backlog_cap: backlogCap,
       backlog_rows: backlogRows.length,
-      recent_rows: recentRows.length,
+      recent_rows: recentRows.length + closureRows.length,
       window_rows: windowRows,
       seed_rows: seedRows,
       // Either full sub-read leaves structural uncertainty. In particular, a
@@ -1272,72 +1637,19 @@ export async function assertDurableSourceFates(
   postIds: readonly string[],
 ): Promise<DurableSourceFateAssertion> {
   const unique = [...new Set(postIds)].filter(Boolean);
-  const caseCounts = new Map<string, number>();
-  const nonWork = new Set<string>();
-  const issueCounts = new Map<string, number>();
-  for (const ids of chunk(unique)) {
-    const [sourcesResult, exclusionsResult, eventsResult] = await Promise.all([
-      client.from("makesafe_intake_case_sources")
-        .select("post_id")
-        .eq("org_id", DEFAULT_ORG_ID)
-        .in("post_id", ids),
-      client.from("email_classifier_exclusions")
-        .select("post_id")
-        .eq("mailbox", SES_MAILBOX)
-        .in("post_id", ids),
-      client.from("email_events_raw")
-        .select("post_id,change_type")
-        .eq("org_id", DEFAULT_ORG_ID)
-        .in("post_id", ids),
-    ]);
-    for (
-      const [label, result] of [
-        ["case source", sourcesResult],
-        ["classifier exclusion", exclusionsResult],
-        ["source event", eventsResult],
-      ] as const
-    ) {
-      if (result.error) {
-        throw new Error(
-          `durable source fate ${label} read failed: ${
-            result.error.message || result.error
-          }`,
-        );
-      }
-    }
-    for (const row of sourcesResult.data || []) {
-      caseCounts.set(row.post_id, (caseCounts.get(row.post_id) || 0) + 1);
-    }
-    for (const row of exclusionsResult.data || []) {
-      nonWork.add(row.post_id);
-    }
-    for (const row of eventsResult.data || []) {
-      if (row.change_type === "excluded") {
-        nonWork.add(row.post_id);
-      } else if (parseIntakeSourceIssueReason(row.change_type)) {
-        issueCounts.set(row.post_id, (issueCounts.get(row.post_id) || 0) + 1);
-      }
-    }
-  }
-  let final = 0;
-  let transient = 0;
-  for (const postId of unique) {
-    const finalCount = (caseCounts.get(postId) || 0) +
-      (nonWork.has(postId) ? 1 : 0);
-    const issueCount = issueCounts.get(postId) || 0;
-    if (finalCount === 1) {
-      final++;
-      continue;
-    }
-    if (issueCount === 1 && finalCount === 0) {
-      transient++;
-      continue;
-    }
+  const snapshot = await readDurableSourceFates(client, unique);
+  assertValidSourceFates(snapshot);
+  const unfated = snapshot.unfated.values().next().value as string | undefined;
+  if (unfated) {
     throw new Error(
-      `source fate assertion failed for ${postId}: ${finalCount} final, ${issueCount} open issues`,
+      `source fate assertion failed for ${unfated}: 0 final, 0 open issues`,
     );
   }
-  return { checked: unique.length, final, transient };
+  return {
+    checked: unique.length,
+    final: snapshot.final.size,
+    transient: snapshot.transient.size,
+  };
 }
 
 function byBuilderOutcome(
@@ -3253,28 +3565,113 @@ async function accountCancellationCase(
   return saved;
 }
 
+const FRESH_SOURCE_SLA_SECONDS = 5 * 60;
+
+interface FreshSourceHealthFacts {
+  latestIngestedReceivedAt: string | null;
+  latestFinalFateReceivedAt: string | null;
+  unfatedSourceCount: number;
+  oldestUnfatedReceivedAt: string | null;
+  freshSourceLagSeconds: number;
+}
+
+async function readFreshSourceHealth(
+  client: any,
+  since: string,
+  nowIso: string,
+): Promise<FreshSourceHealthFacts> {
+  const { data, error } = await client.rpc(
+    "makesafe_intake_fresh_source_health",
+    {
+      p_org_id: DEFAULT_ORG_ID,
+      p_mailbox: SES_MAILBOX,
+      p_since: since,
+      p_now: nowIso,
+    },
+  );
+  if (error) {
+    throw new Error(
+      `deterministic fresh-source health read failed: ${
+        error.message || error
+      }`,
+    );
+  }
+  const row = Array.isArray(data) ? data[0] : data;
+  const unfatedSourceCount = Number(row?.unfated_source_count ?? NaN);
+  const freshSourceLagSeconds = Number(
+    row?.fresh_source_lag_seconds ?? NaN,
+  );
+  if (
+    !Number.isSafeInteger(unfatedSourceCount) || unfatedSourceCount < 0 ||
+    !Number.isSafeInteger(freshSourceLagSeconds) ||
+    freshSourceLagSeconds < 0
+  ) {
+    throw new Error(
+      "deterministic fresh-source health returned invalid counters",
+    );
+  }
+  return {
+    latestIngestedReceivedAt: row?.latest_ingested_received_at ?? null,
+    latestFinalFateReceivedAt: row?.latest_final_fate_received_at ?? null,
+    unfatedSourceCount,
+    oldestUnfatedReceivedAt: row?.oldest_unfated_received_at ?? null,
+    freshSourceLagSeconds,
+  };
+}
+
 // A run that filed nothing because its configuration sat outside the read cap is
-// not a successful extraction. It must degrade the durable health row too, or the
-// alarm and morning-report surfaces keep reading a fresh success while the scan
-// response is the only place the caveat exists.
+// not a successful extraction. Freshness is independently authoritative: a
+// function invocation cannot report ok once any eligible source has remained
+// without a final case/exclusion fate beyond the five-minute SLA.
 async function writeHealth(
   client: any,
   nowIso: string,
   writeFailures: number,
   draftsCreated: number,
   jobsCreated: number,
+  freshness: FreshSourceHealthFacts,
+  freshSourceAccounted: boolean,
   degradedReason?: string,
 ): Promise<void> {
   const reason = writeFailures > 0
     ? "deterministic_write_failure"
-    : (degradedReason ?? null);
+    : degradedReason ??
+      (freshness.freshSourceLagSeconds > FRESH_SOURCE_SLA_SECONDS
+        ? "deterministic_fresh_source_lag"
+        : null);
+  const { data: previous, error: previousError } = await client.from(
+    "makesafe_intake_health",
+  )
+    .select("degraded_reason,degraded_since")
+    .eq("id", true)
+    .maybeSingle();
+  if (previousError) {
+    throw new Error(
+      `deterministic health prior-state read failed: ${
+        previousError.message || previousError
+      }`,
+    );
+  }
+  const degradedSince = reason
+    ? previous?.degraded_reason === reason && previous?.degraded_since
+      ? previous.degraded_since
+      : nowIso
+    : null;
+  const coverageProved = freshSourceAccounted ||
+    freshness.unfatedSourceCount === 0;
   const { error } = await client.from("makesafe_intake_health").upsert({
     id: true,
     extraction_status: reason ? "degraded" : "ok",
     degraded_reason: reason,
-    degraded_since: reason ? nowIso : null,
+    degraded_since: degradedSince,
     last_scan_at: nowIso,
-    ...(reason ? {} : { last_successful_extraction_at: nowIso }),
+    ...(coverageProved ? { last_successful_extraction_at: nowIso } : {}),
+    ...(freshSourceAccounted ? { last_fresh_source_accounted_at: nowIso } : {}),
+    latest_ingested_received_at: freshness.latestIngestedReceivedAt,
+    latest_final_fate_received_at: freshness.latestFinalFateReceivedAt,
+    unfated_source_count: freshness.unfatedSourceCount,
+    oldest_unfated_received_at: freshness.oldestUnfatedReceivedAt,
+    fresh_source_lag_seconds: freshness.freshSourceLagSeconds,
     last_scan_drafts_created: draftsCreated,
     last_scan_auto_filed: jobsCreated,
     intake_mode: "deterministic",
@@ -3356,6 +3753,15 @@ export async function runDeterministicIntake(
       ...exactSourceAuthorities.seedPostIds,
     ],
   });
+  const freshnessSince = new Date(
+    Date.parse(nowIso) - days * 86_400_000,
+  ).toISOString();
+  // Schema-dependent health must be available before any business write. The
+  // deploy preflight enforces the migration in production; this read also makes
+  // a misordered manual deploy fail before it accounts a source or creates a job.
+  if (!dryRun) {
+    await readFreshSourceHealth(client, freshnessSince, nowIso);
+  }
   // Selection and ranking must use canonical ownership for every bounded source.
   // Otherwise a moving page can regroup an already-accounted source under another
   // case, classify it as fresh, and spend the whole case cap on duplicate inserts
@@ -3470,6 +3876,9 @@ export async function runDeterministicIntake(
   if (isolatedFailures.length) {
     caveats.push("lineage_components_quarantined");
   }
+  if (input.closureDeferredSources.length) {
+    caveats.push("source_closure_cap_deferred");
+  }
   // Nothing this run could act on was inside the cap, and every unresolved
   // allowlist entry was cap-exposed rather than stale. That is a no-op the sweep
   // will resolve on a later run, so it is reported loudly instead of throwing.
@@ -3484,7 +3893,8 @@ export async function runDeterministicIntake(
   const report: DeterministicRuntimeReport = {
     ok: true,
     mode: "deterministic",
-    completion_status: missingParents.length || isolatedFailures.length
+    completion_status: missingParents.length || isolatedFailures.length ||
+        input.closureDeferredSources.length
       ? "completed_degraded"
       : "completed",
     dry_run: dryRun,
@@ -3571,13 +3981,60 @@ export async function runDeterministicIntake(
       ...plan.cases.flatMap((item) => item.sourcePostIds),
       ...isolatedFailures.flatMap((item) => item.source_post_ids),
     ];
-  const proveDurableFates = async (): Promise<void> => {
-    report.evidence.durable_source_fates = await assertDurableSourceFates(
+  const initialFates = await readDurableSourceFates(
+    client,
+    accountingPostIds,
+  );
+  assertValidSourceFates(initialFates);
+  const initiallyNonFinal = new Set([
+    ...initialFates.transient,
+    ...initialFates.unfated,
+  ]);
+  const proveDurableFates = async (): Promise<DurableSourceFateSnapshot> => {
+    const snapshot = await readDurableSourceFates(client, accountingPostIds);
+    assertValidSourceFates(snapshot);
+    const unfated = snapshot.unfated.values().next().value as
+      | string
+      | undefined;
+    if (unfated) {
+      throw new Error(
+        `source fate assertion failed for ${unfated}: 0 final, 0 open issues`,
+      );
+    }
+    report.evidence.durable_source_fates = {
+      checked: new Set(accountingPostIds).size,
+      final: snapshot.final.size,
+      transient: snapshot.transient.size,
+    };
+    return snapshot;
+  };
+  const finishHealth = async (degradedReason?: string): Promise<void> => {
+    const finalFates = await proveDurableFates();
+    const freshSourceAccounted = [...initiallyNonFinal].some((postId) =>
+      finalFates.final.has(postId)
+    );
+    const freshness = await readFreshSourceHealth(
       client,
-      accountingPostIds,
+      freshnessSince,
+      nowIso,
+    );
+    await writeHealth(
+      client,
+      nowIso,
+      report.totals.write_failures,
+      report.totals.drafts_created,
+      report.totals.jobs_created,
+      freshness,
+      freshSourceAccounted,
+      degradedReason,
     );
   };
 
+  await persistIssueForSources(
+    client,
+    input.closureDeferredSources,
+    "source_closure_cap",
+  );
   await persistPdfSourceIssues(client, input.sources);
   for (const failed of isolatedFailures) {
     const sources = failed.source_post_ids.flatMap((postId) => {
@@ -3602,8 +4059,7 @@ export async function runDeterministicIntake(
     report.evidence.caveats.push(
       "scan_page_completed_degraded_retry_next_sweep",
     );
-    await writeHealth(client, nowIso, report.totals.write_failures, 0, 0);
-    await proveDurableFates();
+    await finishHealth();
     await commitCompletedCursor();
     return report;
   }
@@ -3619,15 +4075,9 @@ export async function runDeterministicIntake(
       instructionSeeds.postIds.includes(source.postId)
     );
     await persistIssueForSources(client, capSources, "run_cap_deferred");
-    await writeHealth(
-      client,
-      nowIso,
-      0,
-      0,
-      0,
+    await finishHealth(
       "deterministic_no_cases_readable_within_cap",
     );
-    await proveDurableFates();
     await commitCompletedCursor();
     return report;
   }
@@ -3635,8 +4085,7 @@ export async function runDeterministicIntake(
     // A standing full-open scan over a quiet mailbox is a successful bounded no-op,
     // not the exact-allowlist configuration error below.
     if (selectionMode === "full_open") {
-      await writeHealth(client, nowIso, 0, 0, 0);
-      await proveDurableFates();
+      await finishHealth();
       await commitCompletedCursor();
       return report;
     }
@@ -3903,13 +4352,6 @@ export async function runDeterministicIntake(
   }
   report.attempt_cap_reached_without_commit = attempted >= maxAttempts &&
     committed === 0;
-  await writeHealth(
-    client,
-    nowIso,
-    report.totals.write_failures,
-    report.totals.drafts_created,
-    report.totals.jobs_created,
-  );
   if (report.totals.write_failures > 0 || report.totals.cases_failed > 0) {
     report.completion_status = "completed_degraded";
     // This invocation completed and wrote truthful degraded health, so advance
@@ -3921,7 +4363,7 @@ export async function runDeterministicIntake(
       "scan_page_completed_degraded_retry_next_sweep",
     );
   }
-  await proveDurableFates();
+  await finishHealth();
   await commitCompletedCursor();
   return report;
 }
