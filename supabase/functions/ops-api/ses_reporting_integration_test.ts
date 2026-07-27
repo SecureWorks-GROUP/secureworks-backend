@@ -269,6 +269,10 @@ Deno.test("annotation relinking fences before resolving or linking", () => {
     start >= 0 && targetFence > start && sourceFence > targetFence &&
       resolve > sourceFence && link > resolve,
   );
+  assertStringIncludes(INDEX, "synthetic_livefire_invoice_unresolved");
+  assertStringIncludes(INDEX, "code: 'u6r_release_required'");
+  assertStringIncludes(INDEX, "U6R SEND IT is the only release and provider-effect path.");
+  assertStringIncludes(INDEX, "execute_ses_release_revision");
 });
 
 Deno.test("routine allowlist exposes only SES prepare and read actions", () => {

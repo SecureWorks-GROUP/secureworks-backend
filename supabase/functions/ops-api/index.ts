@@ -21847,6 +21847,12 @@ async function assertLegacySesInvoiceActionAllowed(
         'Sync the invoice from Xero, confirm its job link, then retry only if it is not a sealed SES invoice.',
     })
   }
+  if (!invoice.data.job_id) {
+    throw new ApiError(
+      `synthetic_livefire_invoice_unresolved: ${action} requires an invoice with an authoritative job link before any external effect.`,
+      409,
+    )
+  }
   if (invoice.data.job_id) {
     await assertNoSyntheticLivefireJobs(client, [invoice.data.job_id], action)
   }
