@@ -431,6 +431,33 @@ Deno.test("portal done requires a valid content fingerprint", async () => {
   );
 });
 
+Deno.test("ordinary portal roofs draft the invoice without inventing a report PDF", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.family === "ordinary_roof_portal"
+  )!;
+  const input = fixtureInput(row);
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  assertEquals(result.state, "ready");
+  assertEquals(Object.keys(result.email_drafts), ["INVOICE_EMAIL_DRAFT"]);
+  assertEquals(
+    result.envelope.v2.items.draft_builder_report_email.state,
+    "not_applicable",
+  );
+  assertEquals(
+    result.envelope.v2.items.draft_invoice_bundle_email.state,
+    "ready",
+  );
+  assertEquals(
+    result.email_drafts.INVOICE_EMAIL_DRAFT.includes(
+      "ARTIFACTS/invoice_proposal.json",
+    ),
+    true,
+  );
+});
+
 Deno.test("blocked non-assessment packs do not expose email drafts", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" && candidate.family === "physical_makesafe"
@@ -659,6 +686,10 @@ Deno.test("persistence migration is append-only, service-role-only, and enforces
       "send_email",
       "send_sms",
       "close_job",
+      "duration_ms integer NOT NULL",
+      "within_five_minutes boolean NOT NULL",
+      "sla_breach jsonb NOT NULL",
+      "ses_revision_sla_breach",
       "TO service_role",
       "FROM PUBLIC, anon, authenticated",
       "'makesafe-docket-artifacts'",

@@ -648,6 +648,9 @@ function manifestBase(
     items.supporting_report_pdf = notApplicable(
       "report-only-portal-is-the-report",
     );
+    items.draft_builder_report_email = notApplicable(
+      "portal-is-the-report",
+    );
   }
   if (row.family === "assessment_quote") {
     items.supporting_report_pdf = notApplicable(
@@ -793,7 +796,10 @@ function buildEmailDrafts(
   photoFiles: string[],
   invoiceProposal: Record<string, unknown> | null,
 ): Record<string, string> {
-  if (row.family === "assessment_quote" || !reportFile || !invoiceProposal) {
+  if (row.family === "assessment_quote" || !invoiceProposal) {
+    return {};
+  }
+  if (row.family !== "ordinary_roof_portal" && !reportFile) {
     return {};
   }
   const ref = input.source.builder_reference;
@@ -802,15 +808,6 @@ function buildEmailDrafts(
   ).join(", ");
   const reportTo = input.source.work_order_sender || "";
   const invoiceTo = row.invoice_to || input.routing_seed.invoice_to || "";
-  const reportAttachments = reportFile ? [reportFile] : [];
-  const report = draftEmail({
-    to: reportTo,
-    subject: `${ref} - ${row.family.replaceAll("_", " ")}`,
-    body: `Draft only. Please find the prepared ${
-      row.family.replaceAll("_", " ")
-    } evidence for ${address || "the instructed property"}.`,
-    attachments: reportAttachments,
-  });
   const invoiceAttachments = [
     "ARTIFACTS/invoice_proposal.json",
     ...(reportFile ? [reportFile] : []),
@@ -824,10 +821,17 @@ function buildEmailDrafts(
       "Draft only. This docket contains a local invoice proposal. No Xero object exists and no release is approved.",
     attachments: invoiceAttachments,
   });
-  const drafts: Record<string, string> = {
-    REPORT_EMAIL_DRAFT: report,
-    INVOICE_EMAIL_DRAFT: invoice,
-  };
+  const drafts: Record<string, string> = { INVOICE_EMAIL_DRAFT: invoice };
+  if (reportFile) {
+    drafts.REPORT_EMAIL_DRAFT = draftEmail({
+      to: reportTo,
+      subject: `${ref} - ${row.family.replaceAll("_", " ")}`,
+      body: `Draft only. Please find the prepared ${
+        row.family.replaceAll("_", " ")
+      } evidence for ${address || "the instructed property"}.`,
+      attachments: [reportFile],
+    });
+  }
   if (row.photo_route === "work_order_sender") {
     drafts.PHOTO_EMAIL_DRAFT = draftEmail({
       to: reportTo,
@@ -1544,10 +1548,12 @@ async function prepareOne(
     )
       : {}
     : {};
-  if (drafts.REPORT_EMAIL_DRAFT && drafts.INVOICE_EMAIL_DRAFT) {
+  if (drafts.REPORT_EMAIL_DRAFT) {
     manifest.items.draft_builder_report_email = ready(
       "file:DRAFTS/REPORT_EMAIL_DRAFT.txt",
     );
+  }
+  if (drafts.INVOICE_EMAIL_DRAFT) {
     if (drafts.PHOTO_EMAIL_DRAFT) {
       manifest.items.draft_photo_evidence_email = ready(
         "file:DRAFTS/PHOTO_EMAIL_DRAFT.txt",
@@ -1556,6 +1562,8 @@ async function prepareOne(
     manifest.items.draft_invoice_bundle_email = ready(
       "file:DRAFTS/INVOICE_EMAIL_DRAFT.txt",
     );
+  }
+  if (Object.keys(drafts).length) {
     manifest.items.email_drafts_presented = ready(
       "review:review.html#email-drafts",
     );
@@ -1802,13 +1810,7 @@ async function prepareOne(
     within_five_minutes: durationMs <= SES_FIVE_MINUTES_MS,
   };
   if (!timing.within_five_minutes) {
-    console.error("ses_docket_revision_sla_breach", {
-      job_id: timing.job_id,
-      docket_revision_id: docketRevisionId,
-      duration_ms: timing.duration_ms,
-      accepted_at: timing.accepted_at,
-      committed_at: timing.committed_at,
-    });
+    console.error("ses_docket_revision_sla_breach", timing);
   }
   artifacts.push(
     await artifactFromText({

@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS public.makesafe_docket_revisions (
   artifact_size_bytes bigint NOT NULL CHECK (artifact_size_bytes >= 0),
   accepted_at timestamptz NOT NULL,
   committed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  duration_ms integer NOT NULL CHECK (duration_ms >= 0),
+  within_five_minutes boolean NOT NULL,
+  sla_breach jsonb NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(sla_breach) = 'object'),
   stage_durations_ms jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (jsonb_typeof(stage_durations_ms) = 'object'),
   created_by text NOT NULL CHECK (length(btrim(created_by)) > 0),
@@ -163,6 +167,9 @@ DECLARE
   artifact jsonb;
   declared_count integer;
   declared_bytes bigint;
+  commit_time timestamptz;
+  elapsed_ms integer;
+  sla_breach_record jsonb;
 BEGIN
   IF jsonb_typeof(p_revision) IS DISTINCT FROM 'object'
      OR jsonb_typeof(p_artifacts) IS DISTINCT FROM 'array' THEN
@@ -197,6 +204,22 @@ BEGIN
   INTO declared_bytes
   FROM jsonb_array_elements(p_artifacts);
 
+  commit_time := clock_timestamp();
+  elapsed_ms := GREATEST(
+    0,
+    FLOOR(EXTRACT(EPOCH FROM (
+      commit_time - (p_revision->>'accepted_at')::timestamptz
+    )) * 1000)::integer
+  );
+  sla_breach_record := CASE
+    WHEN elapsed_ms > 300000 THEN jsonb_build_object(
+      'code', 'ses_revision_sla_breach',
+      'duration_ms', elapsed_ms,
+      'limit_ms', 300000
+    )
+    ELSE '{}'::jsonb
+  END;
+
   SELECT current_revision.id
   INTO prior_revision_id
   FROM public.makesafe_docket_revisions_current current_revision
@@ -229,6 +252,10 @@ BEGIN
     artifact_count,
     artifact_size_bytes,
     accepted_at,
+    committed_at,
+    duration_ms,
+    within_five_minutes,
+    sla_breach,
     stage_durations_ms,
     created_by
   ) VALUES (
@@ -264,6 +291,10 @@ BEGIN
     declared_count,
     declared_bytes,
     (p_revision->>'accepted_at')::timestamptz,
+    commit_time,
+    elapsed_ms,
+    elapsed_ms <= 300000,
+    sla_breach_record,
     COALESCE(p_revision->'stage_durations_ms', '{}'::jsonb),
     COALESCE(NULLIF(btrim(p_revision->>'created_by'), ''), 'ses-u4-assembler')
   );
