@@ -925,6 +925,9 @@ async function syncInvoices(sb: any) {
 
 /** Exported for regression tests (M1 Strategy 2 / silent-400 guard). */
 export async function matchUnlinkedInvoices(client: any) {
+  let matched = 0
+  let flagged = 0
+  const refusals: SealedSesMoneyRefusal[] = []
   try {
     // Get invoices with no job_id
     const { data: unlinked } = await client.from('xero_invoices')
@@ -934,10 +937,6 @@ export async function matchUnlinkedInvoices(client: any) {
       .limit(100)
 
     if (!unlinked || unlinked.length === 0) return { matched: 0, flagged: 0 }
-
-    let matched = 0
-    let flagged = 0
-    const refusals: SealedSesMoneyRefusal[] = []
 
     for (const inv of unlinked) {
       const ref = inv.reference || ''
@@ -1077,8 +1076,16 @@ export async function matchUnlinkedInvoices(client: any) {
     console.log(`[xero-sync] Invoice matching: ${matched} auto-linked, ${flagged} flagged for review, ${refusals.length} sealed SES links refused`)
     return { matched, flagged, refused: refusals.length, refusals }
   } catch (e: any) {
-    console.log('[xero-sync] Invoice matching failed:', (e as Error).message)
-    return { matched: 0, flagged: 0, refused: 0, refusals: [] }
+    console.error('[xero-sync] Invoice matching degraded:', (e as Error).message)
+    return {
+      success: false,
+      degraded: true,
+      error: (e as Error).message,
+      matched,
+      flagged,
+      refused: refusals.length,
+      refusals,
+    }
   }
 }
 

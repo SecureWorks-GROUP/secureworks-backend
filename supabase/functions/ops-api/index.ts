@@ -40726,12 +40726,9 @@ async function sendChaseSms(client: any, body: any) {
   if (!ghl_contact_id || !message) throw new ApiError('ghl_contact_id and message required', 400)
   if (xero_invoice_id) {
     await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'send_chase_sms')
-  } else if (job_id) {
+  }
+  if (job_id) {
     await assertLegacySesMoneyActionAllowedForJob(client, job_id, 'send_chase_sms')
-  } else {
-    throw new SesActionError(409, sealedSesMoneyRefusal('send_chase_sms', {
-      reason: 'payment communication has no bound invoice or job',
-    }))
   }
 
   // Send via GHL proxy
@@ -40763,12 +40760,9 @@ async function triggerChaseWorkflow(client: any, body: any) {
   if (!ghl_contact_id) throw new ApiError('ghl_contact_id required', 400)
   if (xero_invoice_id) {
     await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'trigger_chase_workflow')
-  } else if (job_id) {
+  }
+  if (job_id) {
     await assertLegacySesMoneyActionAllowedForJob(client, job_id, 'trigger_chase_workflow')
-  } else {
-    throw new SesActionError(409, sealedSesMoneyRefusal('trigger_chase_workflow', {
-      reason: 'payment communication has no bound invoice or job',
-    }))
   }
 
   const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`

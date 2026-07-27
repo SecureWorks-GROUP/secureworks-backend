@@ -2309,18 +2309,6 @@ async function matchInvoicesToJobs(sb: any) {
   if (!jobs || jobs.length === 0) {
     return { success: true, matched: 0, message: 'No jobs to match against' }
   }
-  let makesafeDetails: any[]
-  try {
-    makesafeDetails = await fetchAll(sb, 'makesafe_job_details', 'job_id')
-  } catch (error) {
-    throw new Error(
-      `The sealed SES make-safe detail could not be checked before invoice matching (${(error as Error).message || 'unknown database error'}).`,
-    )
-  }
-  const makesafeDetailJobIds = new Set(
-    (makesafeDetails || []).map((row: any) => String(row.job_id)),
-  )
-
   // Build job_number lookup for reference matching
   const jobByNumber: Record<string, any> = {}
   for (const job of jobs) {
@@ -2441,6 +2429,25 @@ async function matchInvoicesToJobs(sb: any) {
         match_type: matchType,
       })
     }
+  }
+
+  const makesafeDetailJobIds = new Set<string>()
+  const candidateJobIds = [...new Set(
+    plannedMatches.map((plan) => String(plan.job.id)),
+  )]
+  for (let offset = 0; offset < candidateJobIds.length; offset += 100) {
+    const jobIds = candidateJobIds.slice(offset, offset + 100)
+    let details: any[]
+    try {
+      details = await fetchAll(sb, 'makesafe_job_details', 'job_id', {
+        _in: { job_id: jobIds },
+      })
+    } catch (error) {
+      throw new Error(
+        `The sealed SES make-safe detail could not be checked before invoice matching (${(error as Error).message || 'unknown database error'}).`,
+      )
+    }
+    for (const row of details || []) makesafeDetailJobIds.add(String(row.job_id))
   }
 
   const allowedMatches = plannedMatches.filter((plan) => {
