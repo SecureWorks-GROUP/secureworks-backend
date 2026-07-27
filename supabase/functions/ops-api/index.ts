@@ -144,6 +144,14 @@ import {
   projectCycleScopedEvidence,
   selectCurrentCycleReport,
 } from './makesafe_cycle_evidence.ts'
+import {
+  createSesAssemblerRuntimeDependencies,
+  normalizeSesPrepareRequest,
+  SesAssemblerAdapterError,
+} from './ses_assembler_input_adapter.ts'
+import {
+  prepare_ses_docket_revision,
+} from './ses_prepare_docket_revision.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
 // wrapper inside updateJobStatus. Static import so the Supabase deploy
@@ -2999,6 +3007,10 @@ if (import.meta.main) serve(async (req: Request) => {
       // guarded approveIntakeDraft function as the human review button and still
       // cannot send, invoice, authorise, close, or mutate named crew assignments.
       'makesafe_reporting_intake_pass',
+      // U4 draft-only docket preparation. The action writes only the append-only
+      // docket revision/artifact ledger when dry_run=false; it cannot create,
+      // authorise or send an invoice and cannot mutate job/board state.
+      'prepare_ses_docket_revision',
       'create_intake_draft',
       // create_makesafe_job is allow-listed for the routine ONLY so it can reach its
       // own case, where a routine caller is REDIRECTED to a needs_review draft (it can
@@ -3744,6 +3756,37 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'forbidden: makesafe_reporting_intake_pass requires the privileged ops key, the make-safe reporting routine, or an admin/owner session; a non-admin session cannot run the intake scan and advancement sweep' }, 403)
         }
         return json(await runMakesafeReportingIntakePass(client))
+      }
+      case 'prepare_ses_docket_revision': {
+        const assemblerIsPrivileged = authMode === 'api_key' ||
+          authMode === 'routine' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!assemblerIsPrivileged) {
+          return json({
+            error: 'forbidden: prepare_ses_docket_revision requires the privileged ops key, the make-safe reporting routine, or an admin/owner session',
+          }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'prepare_ses_docket_revision requires POST' }, 405)
+        }
+        try {
+          const request = normalizeSesPrepareRequest(body)
+          const actor = authMode === 'routine'
+            ? 'makesafe-reporting-routine'
+            : authUser?.email || `ops-api:${authMode}`
+          return json(await prepare_ses_docket_revision(
+            request,
+            createSesAssemblerRuntimeDependencies(client, {
+              org_id: DEFAULT_ORG_ID,
+              created_by: actor,
+            }),
+          ))
+        } catch (error) {
+          if (error instanceof SesAssemblerAdapterError) {
+            return json({ error: error.message, code: error.code }, error.status)
+          }
+          throw error
+        }
       }
       // scan_ses_makesafes now advances clean drafts inline (Amendment 46), so it
       // crosses the same live-job approval boundary. It is no longer routine-allow-listed
@@ -11871,6 +11914,9 @@ export interface MakesafeReportPackLike {
   cycle_attribution?: string | null
   review_state?: string | null
   sent_at?: string | null
+  docket_revision_id?: string | null
+  pre_xero_docs_ready?: boolean
+  blockers?: Array<Record<string, unknown>> | null
 }
 export interface MakesafeSurfacing {
   normalizedSub: string | null
@@ -11961,14 +12007,16 @@ export function _deriveMakesafeSurfacing(
     !!detail?.report_sent_at ||
     MAKESAFE_PACK_SENT_STATUSES.includes(packStatus)
 
-  // readyForReview — a genuine drafted-not-sent pack awaiting the human send:
-  // not sent, in the admin_to_send_report substatus, with a submitted report, a
-  // rendered report artifact AND a DRAFT invoice (the two close-out artifacts).
+  // readyForReview — either the legacy report+Xero-DRAFT pair or U4's explicit
+  // pre-Xero Docs Ready decision. U4 is intentionally earlier than Xero: its
+  // revision is append-only, draft-only and carries both invoice/send approvals
+  // false, so the Captain can review the assembled docket before any invoice is
+  // created. A blocked U4 revision never satisfies this predicate.
+  const u4DocsReady = pack?.pre_xero_docs_ready === true
   const readyForReview = !sentClosed &&
     normalizedSub === 'admin_to_send_report' &&
     hasSubmittedReport &&
-    hasReportDoc &&
-    invoiceIsDraft
+    (u4DocsReady || (hasReportDoc && invoiceIsDraft))
 
   // resumeNotSent — the irreversible authorise happened but the send did not.
   // Resume re-sends; it must NEVER re-authorise and must NEVER read as a fresh
@@ -12529,6 +12577,9 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
       swms_doc_id: scopedPack.swms_doc_id || null,
       review_state: scopedPack.review_state || null,
       sent_at: scopedPack.sent_at || null,
+      docket_revision_id: scopedPack.docket_revision_id || null,
+      pre_xero_docs_ready: scopedPack.pre_xero_docs_ready === true,
+      blockers: scopedPack.blockers || [],
     } : null,
     ...(scopedDocFlags || {}),
     // pack_sent is only meaningful (defined) when the caller loaded the marker.
@@ -13167,6 +13218,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   // packMap: the durable makesafe_report_packs row (status + report_doc_id) used
   // by the shared surfacing predicate (drafted-not-sent / resume / sent-closed).
   let packMap: Record<string, MakesafeReportPackLike> = {}
+  let docketMap: Record<string, any> = {}
   let packCyclesByPackId: Record<string, any[]> = {}
   if (jobIds.length > 0) {
     // T1 — id-chunked (details list is one-per-job so row count ~= job count,
@@ -13186,7 +13238,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
     // job_documents ROW count can exceed 1000 across full history, so it MUST be
     // row-paginated (not just id-chunked). The chunked helper does both. We keep
     // the original predicate/order via applyFilters.
-    const [reports, invoices, docs, packs, packCycles] = await Promise.all([
+    const [reports, invoices, docs, packs, packCycles, dockets] = await Promise.all([
       _fetchAllByJobIdChunked(
         client,
         'job_service_reports',
@@ -13221,6 +13273,12 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
         'pack_id, job_id, attendance_cycle_id, cycle_attribution',
         jobIds,
       ),
+      _fetchAllByJobIdChunked(
+        client,
+        'makesafe_docket_revisions_current',
+        'id, job_id, state, pre_xero_docs_ready, blockers, current_attendance_cycle_id, committed_at',
+        jobIds,
+      ),
     ])
     const cycleIdByJobId: Record<string, string | null> = {}
     for (const d of details || []) cycleIdByJobId[d.job_id] = d.attendance_cycle_id ?? null
@@ -13242,6 +13300,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
         packCyclesByPackId[pc.pack_id].push(pc)
       }
     }
+    docketMap = firstByJobId(dockets || [])
   }
 
   // Fetch assignments for these jobs
@@ -13287,7 +13346,31 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
     const packIsCurrent = !!packCycle &&
       packCycle.cycle_attribution === 'bound' &&
       String(packCycle.attendance_cycle_id || '') === String(detail?.attendance_cycle_id || '')
-    const enriched = enrichMakesafeBoardJob(j, detail, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, rowPack ? { ...rowPack, cycle_attribution: packIsCurrent ? 'bound' : null } : null)
+    const docket = docketMap[j.id]
+    const docketIsCurrent = !!docket &&
+      String(docket.current_attendance_cycle_id || '') ===
+        String(detail?.attendance_cycle_id || '')
+    // A legacy sent/authorised pack remains authoritative for close-out. U4 only
+    // overlays cards that have not crossed that irreversible boundary.
+    const legacyStatus = String(rowPack?.status || '').toLowerCase()
+    const legacySent = MAKESAFE_PACK_SENT_STATUSES.includes(legacyStatus) ||
+      legacyStatus === 'authorised_not_sent'
+    const packForBoard: MakesafeReportPackLike | null = docket && !legacySent
+      ? {
+        ...(rowPack || {}),
+        status: rowPack?.status || 'drafted',
+        review_state: docket.pre_xero_docs_ready
+          ? 'READY'
+          : 'U4_BLOCKED',
+        docket_revision_id: docket.id,
+        pre_xero_docs_ready: docket.pre_xero_docs_ready === true,
+        blockers: Array.isArray(docket.blockers) ? docket.blockers : [],
+        cycle_attribution: docketIsCurrent ? 'bound' : null,
+      }
+      : rowPack
+      ? { ...rowPack, cycle_attribution: packIsCurrent ? 'bound' : null }
+      : null
+    const enriched = enrichMakesafeBoardJob(j, detail, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, packForBoard)
     columns[enriched.board_stage].push(enriched)
   }
 

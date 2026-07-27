@@ -136,6 +136,10 @@ makesafe_deterministic_intake_dark_observe
 # the live scan and can promote up to 100 clean drafts into live make-safe jobs,
 # so post-deploy recognition stays on the source gate.
 makesafe_reporting_intake_pass # probe=source-only
+# U4 canonical live-card assembler. A bare call could create an append-only
+# draft revision, so deploy recognition stays source-only; the documented
+# production canary always supplies dry_run=true.
+prepare_ses_docket_revision # probe=source-only
 
 # ── Make-safe compact READ endpoints (Mission makesafe-live-truth-2026-06-14, M2)
 #    GAP-1..6: let the make-safe skills read the email-sync Supabase projection

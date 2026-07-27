@@ -259,6 +259,14 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
       "Recover the WO/PO/external reference from the canonical source case.",
     ));
   }
+  if (input.classification.family === "unknown") {
+    const card = text(input.identity.card_id) || text(input.identity.job_id);
+    blockers.push(blocked(
+      "family_unknown",
+      `Card ${card || "(unknown)"} has no canonical family classification.`,
+      "Recover the family classification from canonical source authority before preparing the docket.",
+    ));
+  }
   if (!text(input.source.work_order_sender)) {
     blockers.push(blocked(
       "spine_missing_source",

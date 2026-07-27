@@ -251,6 +251,46 @@ Deno.test("canonical row carries report/photos, pack/send, notes, age and separa
   );
 });
 
+Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers without money facts", () => {
+  const [ready] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", "u4-ready", {
+      report_pack: {
+        status: "drafted",
+        review_state: "READY",
+        docket_revision_id: "revision-ready",
+        pre_xero_docs_ready: true,
+        blockers: [],
+      },
+    }),
+  ]);
+  assertEquals(ready.pack.docket_revision_id, "revision-ready");
+  assertEquals(ready.pack.pre_xero_docs_ready, true);
+  assertEquals(ready.pack.drafted, true);
+  assertEquals(ready.blockers.real, []);
+
+  const [blocked] = buildCanonicalMakesafeRows([
+    baseJob("trade_report_in", "u4-blocked", {
+      report_pack: {
+        status: "drafted",
+        review_state: "U4_BLOCKED",
+        docket_revision_id: "revision-blocked",
+        pre_xero_docs_ready: false,
+        blockers: [{
+          reason_code: "spine_missing_source",
+          reason: "not projected to the board",
+        }],
+      },
+    }),
+  ]);
+  assertEquals(blocked.pack.pre_xero_docs_ready, false);
+  assertEquals(blocked.blockers.real, [{
+    code: "spine_missing_source",
+    category: "ses_docket",
+    docket_revision_id: "revision-blocked",
+  }]);
+  assertEquals("local_invoice_proposal" in blocked.pack, false);
+});
+
 Deno.test("captain-applied status is a display overlay and never rewrites declared or raw state", () => {
   const source = baseJob("new", "overlay", {
     substatus: "company_contact_required",

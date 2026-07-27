@@ -144,8 +144,10 @@ The wall is before invoice creation and release:
    private artifact storage plus `commit_makesafe_docket_revision_v1`.
 
 Nothing in this change creates any Xero object, sends anything to a builder,
-changes the board, changes a job, closes work, applies a migration, schedules a
-cron, deploys, merges or touches production.
+mutates operational board state, changes a job, closes work, applies a migration,
+schedules a cron, deploys, merges or touches production. The shared board
+read-model overlay may project a ready U4 revision as pre-Xero Docs Ready; it
+does not write the board or job state.
 
 ## Validation
 
@@ -160,33 +162,50 @@ cron, deploys, merges or touches production.
   `monitor-ses-makesafes/index.ts:2100-2107` and `ops-api/index.ts:16904`.
 - `deno task test:ops-api` still stops during test-file type-checking on five
   existing errors outside U4
-  (`makesafe_board_test.ts`, `makesafe_intake_recapture_test.ts`,
-  `makesafe_submit_report_test.ts` twice, and
+  (`makesafe_intake_recapture_test.ts`,
+   `makesafe_submit_report_test.ts` twice, and
   `monitor_ses_makesafes_test.ts`). The runtime-only whole directory run then
   recorded 2,152 passed and 26 failed; the failures are existing attendance
-  cycle/U3 fixture drift and no U4 test failed. Those files/routes were not
-  changed.
+  cycle/U3 fixture drift and no U4 test failed. The remaining listed
+  files/routes were not changed.
 
-## Release truth and remaining seams
+## Release truth and live invocation binding
 
-This branch supplies the deterministic assembler, matrix, persistence contract
-and goldens. It does not claim that the Captain can invoke the deployed action
-today:
+The follow-up live binding registers `prepare_ses_docket_revision` in
+`ops-api/index.ts`, adds it to the reporting-routine default-deny allowlist and
+deploy required-action manifest, and supplies the canonical
+`ses.assembler-input/v1` adapter in `ses_assembler_input_adapter.ts`.
 
-- the repository does not yet expose a canonical runtime
-  `ses.assembler-input/v1` read-model adapter; U4 therefore consumes the
-  versioned fixture envelope exactly as §16.4 permits rather than rebuilding U1
-  or U2 state;
-- the wiki `prepare_ses_docket_revision.py` front door, real
-  `capture_portal_evidence.py` binding, pre-Xero `pack_state.py` compatibility
-  and release filename/three-draft compatibility live outside this disposable
-  backend worktree and are not mutated here;
-- `ops-api/index.ts` is not wired to a fake or hand-authored envelope;
-- the legacy Xero-DRAFT cron is not disabled until the new runtime adapter is
-  genuinely callable, because disabling the existing path before replacement
-  activation would create an operational hole;
-- the assessment route remains Captain-held.
+Callers provide a card selector, never a hand-authored envelope:
 
-Accordingly, the code-level docket is deterministic and draft-safe, but the
-mission-wide CP3 verdict remains **BLOCKED**, not PASS, until those named seams
-land and a credentialed staging run proves live portal/storage timing.
+```bash
+curl -sS -X POST \
+  -H "x-api-key: $SW_API_KEY" \
+  -H "Content-Type: application/json" \
+  "https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/ops-api?action=prepare_ses_docket_revision" \
+  --data '{
+    "selection":{"mode":"job_number","job_number":"SWMS-26980"},
+    "idempotency_key":"proof-swms-26980-20260727",
+    "dry_run":true,
+    "force_refresh":true
+  }'
+```
+
+The adapter uses the shared U2 cycle-evidence helpers and exact live card facts.
+It does not invent a missing U1 source/version/hash, portal capture, storey price,
+HR-CW classification or assessment recipe. Missing facts therefore return the
+named U4 blockers. For the sanitized SWMS-26980 production snapshot this is a
+deterministic HTTP-200 dry-run envelope with no persistence call and the specific
+source/lineage, portal-capability and pricing blockers.
+
+`dry_run:false` uses only the existing append-only U4 revision/artifact
+persistence. The shared server board read overlays a current ready revision as
+pre-Xero Docs Ready without creating an invoice; blocked revisions stay in Trade
+Report In and expose their blockers. No job, substatus, assignment, invoice or
+communication row is mutated.
+
+The backend still does not pretend it can inspect a Prime SPA: real portal
+screenshots remain owned by the approved agent-side
+`capture_portal_evidence.py` runner. Until that capability is bound into a run,
+portal cards fail closed as `capability_portal_degraded`. Assessment remains
+Captain-held as `assessment_recipe_unapproved`.
