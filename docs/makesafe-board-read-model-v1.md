@@ -68,6 +68,11 @@ boundary for both the board enrich path and audit compact flags:
   immutable `makesafe_attendance_cycles` rows and nullable attribution columns.
   Apply the migration **before** deploying the matching `ops-api`. Code rollback
   is the previous edge version; additive schema is harmless if left in place.
+- The matching media-cycle columns on `job_media` are owned by
+  `20260728000001_makesafe_state_authority_u2.sql`; apply it before deploying the
+  media upload/read path. MakeSafe reattendance photos are server-bound to the
+  current cycle and prior-cycle photos cannot satisfy the current completion
+  evidence threshold.
 - This slice does **not** complete full U2 (single display authority,
   cryptographic approval invalidation, docket revisions, obligation ids).
 
@@ -141,6 +146,12 @@ Visibility is server-owned. It derives only from the caller's `role` and `manage
 - Khairo remains fencing view-only. His production `sales` role is mapped to this read-only scope when no make-safe manager capability supersedes it; an explicit managed vertical `fencing` produces the same scope. On this make-safe endpoint he receives only a make-safe specifically allocated to him, normally none. `permissions.fencing_view_only` is true and `can_allocate` is false.
 
 The trade projection is an explicit allow-list. It contains no pricing, Xero invoice data, trade invoices, or another trade's invoice data.
+
+For MakeSafe trade detail, the allow-listed overlay also exposes only the
+server-derived completion handoff (`physical`, `own_template`,
+`builder_portal`, or `unknown`), current-cycle evidence, and a boolean billing
+review flag when reattendance follows invoicing or pack release. It does not
+expose invoice identifiers, amounts, or a disposition option set.
 
 ## Sealed SES Reporting visibility boundary
 

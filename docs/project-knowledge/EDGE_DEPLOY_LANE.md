@@ -43,6 +43,10 @@ Preferred path:
    Supabase stores parsed statement arrays whose serialization varies across CLI
    versions, so comparing them to checked-in file bytes would falsely block
    healthy deploys.
+
+   For the U2 cycle-scoped MakeSafe media reads, the same preflight also requires
+   `20260728000001_makesafe_state_authority_u2.sql` (the `job_media` cycle columns,
+   constraint, foreign key, and index), after the attendance-cycle migration.
 3. Confirm its smoke checks pass.
 
 What that run does is decided by `scripts/identify-edge-deploy-changes.sh`:

@@ -3,7 +3,9 @@
 Backend half of the trade-filled, own-letterhead roof report. The trade fills OUR
 roof report through the app (toggles + inputs + free text + labelled photos) and
 ops-api renders a branded PDF on SecureWorks Group letterhead, then advances the
-make-safe reporting checklist. Mirrors the make-safe report pipeline.
+make-safe reporting checklist. On reattendance, the route reads and submits only
+the current attendance cycle and current-cycle photos. Mirrors the make-safe report
+pipeline.
 
 First consumer: SWMS-26861 (Caversham, MLB-17270PO-54939) and strata jobs where a
 builder wants our template on their letterhead.
@@ -25,6 +27,11 @@ Request/response shapes:
 - **submit_roof_report** body: `{ job_id, fields?, photos?: [{ url|bytesBase64, label?, contentType? }] }`.
   Merges any request `fields` over the saved draft. Returns
   `{ ok, status:'submitted', draft_id, report_doc_id, file_name, render_hash, price, board_sync, event_sync }`.
+- The completion route is selected from persisted server facts: `own_template`
+  for an explicit own-template mode or existing roof draft, `builder_portal` for
+  a known builder portal, `physical` for ordinary MakeSafe work, and `unknown`
+  when a roof mode cannot be resolved. The trade surface is flag-only for any
+  post-release billing review and does not choose a disposition.
 - **roof_report_template** returns `{ template, job, draft }`.
 
 ## Storey pricing (locked 2026-07-16, Marnin/Shaun, every builder)

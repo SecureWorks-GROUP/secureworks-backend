@@ -39,6 +39,9 @@ U2-S1 cycle-scoped evidence lives in `makesafe_cycle_evidence.ts` and is shared 
 board enrich and `makesafe_audit`. Apply
 `20260727000001_makesafe_attendance_cycles_u2_s1.sql` **before** the matching
 `ops-api` (new selects include `attendance_cycle_id` / `cycle_attribution`). Do not
+deploy the matching media-cycle reads until
+`20260728000001_makesafe_state_authority_u2.sql` is applied as well; it owns the
+`job_media` cycle-attribution columns and index. Do not
 add a second status engine; later U2 slices own readiness-approval invalidation and
 display-authority cutover. Consumer contract:
 `docs/makesafe-board-read-model-v1.md`.
