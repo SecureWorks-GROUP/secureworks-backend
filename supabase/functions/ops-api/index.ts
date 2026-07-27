@@ -22026,9 +22026,7 @@ async function assertLegacySesInvoiceOrJobActionAllowed(
   const xeroInvoiceId = String(identity.xeroInvoiceId || '').trim()
   const jobId = String(identity.jobId || '').trim()
   if (!xeroInvoiceId && !jobId) {
-    throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
-      reason: 'invoice_or_job_identity_required',
-    }))
+    return { xero_invoice_id: null, job_id: null }
   }
   if (xeroInvoiceId) {
     const mirror = await client.from('xero_invoices')
@@ -41426,19 +41424,21 @@ async function sendChaseSms(client: any, body: any) {
     { xeroInvoiceId: xero_invoice_id, jobId: job_id },
     'send_chase_sms',
   )
-  await assertGhlContactMatchesResolvedJob(
-    client,
-    resolved.job_id,
-    ghl_contact_id,
-    'send_chase_sms',
-  )
+  if (resolved.job_id) {
+    await assertGhlContactMatchesResolvedJob(
+      client,
+      resolved.job_id,
+      ghl_contact_id,
+      'send_chase_sms',
+    )
+  }
 
   // Send via GHL proxy
   const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
   const smsResp = await fetch(ghlUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-    body: JSON.stringify({ contactId: ghl_contact_id, message, jobId: job_id || undefined }),
+    body: JSON.stringify({ contactId: ghl_contact_id, message, jobId: resolved.job_id || undefined }),
   })
   const smsResult = await smsResp.json()
   if (!smsResult.success) throw new Error(smsResult.error || 'SMS send failed')
@@ -41446,7 +41446,7 @@ async function sendChaseSms(client: any, body: any) {
   // Log the chase (job_id optional — some chase SMS target contacts without linked jobs)
   await client.from('payment_chase_logs').insert({
     xero_invoice_id: xero_invoice_id || null,
-    job_id: job_id,
+    job_id: resolved.job_id,
     ghl_contact_id,
     method: 'sms',
     outcome: 'SMS sent',
@@ -41465,12 +41465,14 @@ async function triggerChaseWorkflow(client: any, body: any) {
     { xeroInvoiceId: xero_invoice_id, jobId: job_id },
     'trigger_chase_workflow',
   )
-  await assertGhlContactMatchesResolvedJob(
-    client,
-    resolved.job_id,
-    ghl_contact_id,
-    'trigger_chase_workflow',
-  )
+  if (resolved.job_id) {
+    await assertGhlContactMatchesResolvedJob(
+      client,
+      resolved.job_id,
+      ghl_contact_id,
+      'trigger_chase_workflow',
+    )
+  }
 
   const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`
 
@@ -41511,12 +41513,14 @@ async function stopChaseWorkflow(client: any, body: any) {
     { xeroInvoiceId: xero_invoice_id, jobId: job_id },
     'stop_chase_workflow',
   )
-  await assertGhlContactMatchesResolvedJob(
-    client,
-    resolved.job_id,
-    ghl_contact_id,
-    'stop_chase_workflow',
-  )
+  if (resolved.job_id) {
+    await assertGhlContactMatchesResolvedJob(
+      client,
+      resolved.job_id,
+      ghl_contact_id,
+      'stop_chase_workflow',
+    )
+  }
 
   const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`
 

@@ -73,7 +73,7 @@ Deno.test("every wave-2 outbound action fences the authoritative job before effe
   }
 });
 
-Deno.test("chase workflow actions require invoice or job identity before GHL effects", () => {
+Deno.test("chase workflow actions fence supplied identity before GHL effects", () => {
   for (
     const [start, effect] of [
       ["async function sendChaseSms(", "functions/v1/ghl-proxy"],

@@ -548,18 +548,13 @@ Deno.test("every wave-2 outbound action refuses missing or unreadable job author
   }
 });
 
-Deno.test("optional chase identity is fail-closed and invoice linkage wins", async () => {
-  const missing = await assertRejects(
-    () =>
-      _assertLegacySesInvoiceOrJobActionAllowedForTest(
-        lookupClient({}),
-        {},
-        "stop_chase_workflow",
-      ),
-    SesActionError,
-  ) as SesActionError;
-  assertEquals(missing.status, 409);
-  assertEquals((missing.refusal as any).code, "invoice_link_required");
+Deno.test("contact-only chase remains allowed while supplied identity wins", async () => {
+  const contactOnly = await _assertLegacySesInvoiceOrJobActionAllowedForTest(
+    lookupClient({}),
+    {},
+    "stop_chase_workflow",
+  );
+  assertEquals(contactOnly, { xero_invoice_id: null, job_id: null });
 
   const mismatch = await assertRejects(
     () =>

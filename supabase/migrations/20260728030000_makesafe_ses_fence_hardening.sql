@@ -629,6 +629,7 @@ BEGIN
   SET status = p_final_status, synced_at = clock_timestamp()
   WHERE xero_invoice_id = target.xero_invoice_id
     AND job_id = target.job_id
+    AND invoice_type = 'ACCREC'
     AND org_id = target.org_id;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'the invoice mirror binding disappeared before void confirmation'
