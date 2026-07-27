@@ -131,6 +131,50 @@ Deno.test("legacy prefixed cap issue aliases normalize to one reason", () => {
   );
 });
 
+Deno.test("durable accounting ignores scan handoff receipts without admitting an unaccounted source", async () => {
+  assertEquals(
+    parseIntakeSourceIssueReason(
+      "intake_exception_scan_handoff_http_500",
+    ),
+    null,
+  );
+  assertEquals(
+    parseIntakeSourceIssueReason(
+      "intake_exception_scan_handoff_http_546",
+    ),
+    null,
+  );
+  const store: Record<string, any[]> = {
+    makesafe_intake_case_sources: [
+      { org_id: ORG, post_id: "MLB-26950-source" },
+    ],
+    email_classifier_exclusions: [],
+    email_events_raw: [
+      {
+        org_id: ORG,
+        post_id: "MLB-26950-source",
+        change_type: "intake_exception_scan_handoff_http_500",
+      },
+      {
+        org_id: ORG,
+        post_id: "MLB-26950-source",
+        change_type: "intake_exception_scan_handoff_http_546",
+      },
+    ],
+  };
+  const db = client(store);
+
+  assertEquals(
+    await assertDurableSourceFates(db, ["MLB-26950-source"]),
+    { checked: 1, final: 1, transient: 0 },
+  );
+  await assertRejects(
+    () => assertDurableSourceFates(db, ["genuinely-unaccounted-source"]),
+    Error,
+    "0 final, 0 open issues",
+  );
+});
+
 Deno.test("durable accounting accepts each source exactly once and rejects silent or double fates", async () => {
   const store: Record<string, any[]> = {
     makesafe_intake_case_sources: [
@@ -162,7 +206,7 @@ Deno.test("durable accounting accepts each source exactly once and rejects silen
       "transient",
       "case-with-issue",
     ]),
-    { checked: 4, final: 2, transient: 2 },
+    { checked: 4, final: 3, transient: 1 },
   );
   await assertRejects(
     () => assertDurableSourceFates(db, ["silent"]),

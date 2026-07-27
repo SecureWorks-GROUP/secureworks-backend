@@ -35,6 +35,7 @@ import {
 import { extractPdfText, PDF_TEXT_MAX_BYTES } from "./makesafe_pdf_text.ts";
 import {
   type IntakeSourceIssueReason,
+  parseIntakeSourceIssueReason,
   persistIntakeSourceIssue,
 } from "./makesafe_intake_source_issues.ts";
 
@@ -1310,10 +1311,7 @@ export async function assertDurableSourceFates(
     for (const row of eventsResult.data || []) {
       if (row.change_type === "excluded") {
         nonWork.add(row.post_id);
-      } else if (
-        String(row.change_type).startsWith("intake_") ||
-        row.change_type === "scan_run_cap_deferred"
-      ) {
+      } else if (parseIntakeSourceIssueReason(row.change_type)) {
         issueCounts.set(row.post_id, (issueCounts.get(row.post_id) || 0) + 1);
       }
     }
@@ -1324,12 +1322,12 @@ export async function assertDurableSourceFates(
     const finalCount = (caseCounts.get(postId) || 0) +
       (nonWork.has(postId) ? 1 : 0);
     const issueCount = issueCounts.get(postId) || 0;
-    if (issueCount === 1 && finalCount <= 1) {
-      transient++;
+    if (finalCount === 1) {
+      final++;
       continue;
     }
-    if (finalCount === 1 && issueCount === 0) {
-      final++;
+    if (issueCount === 1 && finalCount === 0) {
+      transient++;
       continue;
     }
     throw new Error(
