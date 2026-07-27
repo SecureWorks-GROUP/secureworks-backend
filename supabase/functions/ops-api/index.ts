@@ -16901,7 +16901,7 @@ async function scanSesMakesafes(
     allowInstructionKeys: rollout.instructionKeys,
     advanceDrafts,
     approveDraft: approveIntakeDraft,
-    applyBuilderCancellation: (command) =>
+    applyBuilderCancellation: (command: any) =>
       applyDeterministicBuilderCancellation(client, command),
   })
 }

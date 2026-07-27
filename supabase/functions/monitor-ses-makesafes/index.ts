@@ -2082,7 +2082,7 @@ async function recordIntakeSourceExceptions(
 }
 
 async function recordIntakeHealthDegradation(
-  sb: ReturnType<typeof createClient>,
+  sb: any,
   reasonCode: string,
   nowIso = new Date().toISOString(),
 ): Promise<void> {
