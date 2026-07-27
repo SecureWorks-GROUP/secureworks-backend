@@ -88,10 +88,11 @@ recorded on the run ledger before Graph is called; cleanup also refuses until
 every attempted message is visible and its attachment sync has settled, so an
 ambiguous send failure cannot be falsely declared clean.
 
-The ledger uses `cleanup_complete` as a one-way proof window. Only after mutable
-stores return to their marker-scoped zero baseline and the live projections plus
-fresh-source health exclude the retained evidence does the runner make the
-immutable `terminal` transition. The migration also terminally accounts the
+The ledger uses `cleanup_complete` as a one-way proof window. During that window,
+fresh-source health must still include the synthetic traffic so the live-fire
+accounting remains honest. After the runner records that pre-terminal inclusion,
+it makes the immutable `terminal` transition and re-reads health to prove the
+retained evidence is excluded. The migration also terminally accounts the
 pre-existing exact own-mail chatter shape required by the Captain's unblock.
 
 After cleanup, the runner requires the marker/job IDs to be absent from:

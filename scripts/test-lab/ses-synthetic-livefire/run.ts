@@ -1189,7 +1189,7 @@ async function cleanup(
       } after=${JSON.stringify(operationalResidue)}`,
     );
   }
-  const healthRows = await client.rpc<JsonRecord[]>(
+  const healthBeforeTerminalRows = await client.rpc<JsonRecord[]>(
     "makesafe_intake_fresh_source_health",
     {
       p_org_id: "00000000-0000-0000-0000-000000000001",
@@ -1198,32 +1198,34 @@ async function cleanup(
       p_now: new Date().toISOString(),
     },
   );
-  const health = healthRows[0] || {};
+  const healthBeforeTerminal = healthBeforeTerminalRows[0] || {};
   const syntheticReceivedAt = new Set(
     found.emails.map((row) => new Date(String(row.received_at)).getTime())
       .filter(Number.isFinite),
   );
-  if (
+  const healthIncludesSynthetic = (
+    health: JsonRecord,
+  ): boolean =>
     syntheticReceivedAt.has(
       new Date(String(health.latest_final_fate_received_at || "")).getTime(),
     ) ||
     syntheticReceivedAt.has(
       new Date(String(health.oldest_unfated_received_at || "")).getTime(),
-    )
-  ) {
+    );
+  if (!healthIncludesSynthetic(healthBeforeTerminal)) {
     throw new Error(
-      "terminal synthetic sources still influence fresh-source health timestamps",
+      "pre-terminal synthetic sources were not included in fresh-source health",
     );
   }
-  const terminalEvidence = {
+  const terminalEvidence: JsonRecord = {
     deletable_store_cleanup_verified: true,
     projection_exclusion_verified: true,
     operational_baseline_restored: true,
     operational_baseline: evidence.baseline,
     operational_residue: operationalResidue,
     projections: projectionProof,
-    fresh_source_health: health,
-    synthetic_health_timestamps_excluded: true,
+    fresh_source_health_before_terminal: healthBeforeTerminal,
+    synthetic_health_timestamps_included_before_terminal: true,
     tombstoned_attachment_count: tombstonedAttachments.length,
     deleted_counts: Object.fromEntries(
       Object.entries(deleted).map(([key, rows]) => [key, rows.length]),
@@ -1263,6 +1265,23 @@ async function cleanup(
       }),
     },
   );
+  const healthAfterTerminalRows = await client.rpc<JsonRecord[]>(
+    "makesafe_intake_fresh_source_health",
+    {
+      p_org_id: "00000000-0000-0000-0000-000000000001",
+      p_mailbox: run.mailbox,
+      p_since: evidence.startedAt,
+      p_now: new Date().toISOString(),
+    },
+  );
+  const healthAfterTerminal = healthAfterTerminalRows[0] || {};
+  if (healthIncludesSynthetic(healthAfterTerminal)) {
+    throw new Error(
+      "terminal synthetic sources still influence fresh-source health timestamps",
+    );
+  }
+  terminalEvidence.fresh_source_health_after_terminal = healthAfterTerminal;
+  terminalEvidence.synthetic_health_timestamps_excluded = true;
   evidence.cleanup = {
     ...evidence.cleanup,
     deleted,
