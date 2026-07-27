@@ -30,8 +30,12 @@ Migrations and edge deploys are separate manual steps. The production deploy
 workflow now runs the read-only schema preflight before deploying any function
 with a declared dependency; see `AGENTS.md` and
 `scripts/edge-function-schema-requirements.txt` for the authoritative guard and
-manifest. Deploying a function that selects a column the migration has not
-added can report zero instead of failing. The current `jobs.quoted_value`
+manifest. The guard blocks on a missing ledger version or missing queryable
+schema marker. Ledger statement checksum drift is advisory because Supabase
+stores parsed statement arrays whose serialization cannot reliably reproduce
+checked-in file bytes across CLI versions; making byte equality blocking would
+falsely halt healthy deploys. Deploying a function that selects a column the
+migration has not added can report zero instead of failing. The current `jobs.quoted_value`
 (`20260717000001`) case affects the four `daily-digest` reads; `ops-api`
 derives its response value from `pricing_json`, and `reporting-api` derives its
 `quoted_value` response key from the same source.

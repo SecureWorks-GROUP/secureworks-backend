@@ -38,7 +38,11 @@ Preferred path:
    deploy gate is the read-only schema preflight in
    `scripts/check-edge-schema-preflight.sh`, driven by
    `scripts/edge-function-schema-requirements.txt`; it refuses deployment when
-   the declared production migration or any required marker is absent.
+   the declared production migration version or any required queryable marker is
+   absent. Ledger name/checksum drift is reported as a non-blocking advisory:
+   Supabase stores parsed statement arrays whose serialization varies across CLI
+   versions, so comparing them to checked-in file bytes would falsely block
+   healthy deploys.
 3. Confirm its smoke checks pass.
 
 What that run does is decided by `scripts/identify-edge-deploy-changes.sh`:
