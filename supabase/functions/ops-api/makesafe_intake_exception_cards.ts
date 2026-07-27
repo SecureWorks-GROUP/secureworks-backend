@@ -475,7 +475,9 @@ function groupedJobBindingBlockerSentence(
     const suffix = candidates.length > MAX_DISPLAYED_BINDING_CANDIDATES
       ? `; ${candidates.length} total, ${candidates.length - displayed.length} more not shown`
       : "";
-    return `${joinPlainList(displayed)}${suffix}`;
+    return `${candidates.length > MAX_DISPLAYED_BINDING_CANDIDATES
+      ? displayed.join(", ")
+      : joinPlainList(displayed)}${suffix}`;
   };
   const instruction = rows[0].builder_wo_canonical ||
     rows[0].external_ref_canonical || rows[0].external_ref_raw || "unknown";

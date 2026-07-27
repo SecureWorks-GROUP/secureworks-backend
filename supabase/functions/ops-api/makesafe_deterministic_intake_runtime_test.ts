@@ -748,9 +748,13 @@ Deno.test("one ambiguous live-job binding files one exception while clean source
   );
   assertEquals(resumed.totals.cases_attempted, 1);
   assertEquals(resumedApprovals, 0);
-  assertEquals(store.makesafe_intake_cases[0].state, "exception");
+  const ambiguousCase = store.makesafe_intake_cases.find((row) =>
+    row.reason_code === "conflicting_fields"
+  );
+  assert(ambiguousCase, "the ambiguous instruction must remain visible");
+  assertEquals(ambiguousCase.state, "exception");
   assertEquals(
-    store.makesafe_intake_cases[0].conflicting_fields.live_job_binding,
+    ambiguousCase.conflicting_fields.live_job_binding,
     ["SWMS-1001", "SWMS-1002"],
   );
 });
@@ -852,6 +856,130 @@ Deno.test("a corrected target mismatch becomes one visible binding exception", a
   assertEquals(report.evidence.durable_source_fates, {
     checked: 1,
     final: 1,
+    transient: 0,
+  });
+});
+
+Deno.test("multiple corrected targets file one binding exception and clean sources continue", async () => {
+  const store = baseStore();
+  const pdfs = new Map<string, Uint8Array>();
+  const addWorkOrder = (postId: string, externalRef: string) => {
+    const storagePath = `raw/${postId}.pdf`;
+    const bytes = digitalWorkOrderPdf([
+      `Work Order Number ${externalRef}`,
+      "Policyholders Name Multi Target Client",
+      "Mobile 0422636182",
+      "Site Address 11 Multi Target Road Perth WA 6000",
+      "Scope of Works Install temporary roof tarps and make the storm damaged property safe",
+    ]);
+    store.emails.push(email({
+      post_id: postId,
+      received_at: postId.startsWith("ambiguous")
+        ? "2026-07-20T03:00:00.000Z"
+        : "2026-07-20T02:00:00.000Z",
+      subject: `NEW WORK ORDER ${externalRef}`,
+      body_content: "Please attend. The builder work order is attached.",
+    }));
+    store.email_attachments.push({
+      id: `${postId}-attachment`,
+      email_id: postId,
+      name: `${externalRef} Work Order.pdf`,
+      content_type: "application/pdf",
+      storage_path: storagePath,
+      status: "uploaded",
+      size_bytes: bytes.length,
+    });
+    pdfs.set(storagePath, bytes);
+  };
+  addWorkOrder("ambiguous-source-1", "MLB-26210");
+  addWorkOrder("ambiguous-source-2", "MLB-26210");
+  addWorkOrder("clean-source", "MLB-26211");
+
+  for (const [id, jobNumber] of [
+    ["corrected-target-job-1", "SWMS-2101"],
+    ["corrected-target-job-2", "SWMS-2102"],
+  ]) {
+    store.jobs.push({
+      id,
+      job_number: jobNumber,
+      status: "accepted",
+      type: "makesafe",
+    });
+    store.makesafe_job_details.push({
+      job_id: id,
+      external_ref: "MLB-26210",
+      requesting_company_slug: "mlb",
+      requesting_company_name: "MLB",
+      report_type: null,
+      jobs: {
+        id,
+        job_number: jobNumber,
+        status: "accepted",
+        type: "makesafe",
+        site_address: "11 Multi Target Road Perth WA 6000",
+        metadata: { builder_work_order_number: "MLB-26210" },
+      },
+    });
+  }
+  for (const [index, postId] of [
+    "ambiguous-source-1",
+    "ambiguous-source-2",
+  ].entries()) {
+    store.makesafe_intake_source_authority_corrections.push({
+      id: `multiple-correction-${index + 1}`,
+      org_id: ORG,
+      source_post_id: postId,
+      legacy_case_id: null,
+      effective_case_id: null,
+      target_job_id: `corrected-target-job-${index + 1}`,
+      expected_identity_key: null,
+    });
+  }
+
+  let approvals = 0;
+  const report = await runDeterministicIntake(
+    fakeClient(
+      store,
+      [],
+      undefined,
+      (path) => pdfs.get(path) || ENCODER.encode("%PDF-1.7\nmissing"),
+    ),
+    {
+      dryRun: false,
+      selectionMode: "full_open",
+      days: 30,
+      nowIso: NOW,
+      maxSources: 6,
+      maxCases: 2,
+      approveDraft: () => {
+        approvals++;
+        return Promise.resolve({ job: { id: "clean-job" } });
+      },
+    },
+  );
+
+  assertEquals(report.totals.cases_attempted, 2);
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(approvals, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 3);
+  const bindingCase = store.makesafe_intake_cases.find((row) =>
+    row.conflicting_fields?.corrected_target_job_binding,
+  );
+  assert(bindingCase, "multiple corrected targets must remain visible");
+  assertEquals(bindingCase.state, "exception");
+  assertEquals(
+    bindingCase.conflicting_fields.corrected_target_job_binding,
+    ["SWMS-2101", "SWMS-2102"],
+  );
+  assertEquals(
+    store.makesafe_intake_cases.filter((row) =>
+      row.state === "confirmed_live_job"
+    ).length,
+    1,
+  );
+  assertEquals(report.evidence.durable_source_fates, {
+    checked: 3,
+    final: 3,
     transient: 0,
   });
 });
