@@ -17,6 +17,8 @@ import {
 } from "./makesafe_cycle_evidence.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
+const SYNTHETIC_LIVEFIRE_MARKER =
+  /^SWG-SES-LIVEFIRE-TEST-ONLY-[0-9A-F]{8}-[0-9A-F]{4}-[1-8][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/;
 export const OPS_MAKESAFE_STAGES = [
   "new",
   "allocated",
@@ -123,6 +125,24 @@ export interface CanonicalMakesafeExtras {
 const txt = (v: unknown): string | null => String(v ?? "").trim() || null;
 const token = (v: unknown) =>
   String(v ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+export function isSyntheticLivefireJob(job: any): boolean {
+  const metadata = job?.metadata && typeof job.metadata === "object"
+    ? job.metadata
+    : {};
+  return SYNTHETIC_LIVEFIRE_MARKER.test(
+    String(metadata.synthetic_livefire_marker || ""),
+  );
+}
+
+export function isTerminalSyntheticLivefireJob(job: any): boolean {
+  const metadata = job?.metadata && typeof job.metadata === "object"
+    ? job.metadata
+    : {};
+  return isSyntheticLivefireJob(job) &&
+    typeof metadata.synthetic_livefire_terminal_at === "string" &&
+    metadata.synthetic_livefire_terminal_at.length > 0;
+}
 
 function phoneHref(value: unknown): string | null {
   const raw = txt(value);
@@ -408,7 +428,9 @@ export function buildCanonicalMakesafeRows(
   extras: CanonicalMakesafeExtras = {},
 ): any[] {
   const computedAt = extras.computedAt || new Date().toISOString();
-  const rows = (baseRows || []).map((base) => {
+  const rows = (baseRows || []).filter((base) =>
+    !isTerminalSyntheticLivefireJob(base)
+  ).map((base) => {
     // enrichMakesafeBoardJob already cycle-scopes assignments/report/pack on the
     // base row; re-apply photo fail-closed for reattend here (photos are not
     // cycle-keyed yet).

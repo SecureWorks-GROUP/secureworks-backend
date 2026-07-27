@@ -202,6 +202,11 @@ function attendanceTime(value: unknown): string {
 function builderKey(snapshot: SesAssemblerLiveSnapshot): SesBuilderKey {
   const detail = snapshot.detail || {};
   const company = record(detail.makesafe_companies);
+  const profileSlugs = [
+    detail.requesting_company_slug,
+    company.slug,
+  ].map((value) => text(value).toLowerCase()).filter(Boolean);
+  if (profileSlugs.includes("synthetic-livefire")) return "SYNTHETIC";
   const token = [
     detail.requesting_company_slug,
     detail.requesting_company_name,

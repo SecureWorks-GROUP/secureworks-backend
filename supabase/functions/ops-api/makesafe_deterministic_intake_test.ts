@@ -56,6 +56,12 @@ const PROFILES: DeterministicCompanyProfile[] = [
     name: "Western Building",
     senderPatterns: ["western.test"],
   },
+  {
+    id: "00000000-0000-0000-0000-000000000099",
+    slug: "synthetic-livefire",
+    name: "SecureWorks Synthetic Live-Fire Builder (TEST ONLY)",
+    senderPatterns: [],
+  },
 ];
 
 function source(
@@ -76,6 +82,8 @@ function source(
     replyToPostId: input.replyToPostId ?? null,
     relatedPostIds: input.relatedPostIds ?? [],
     siblingPostIds: input.siblingPostIds ?? [],
+    direction: input.direction,
+    syntheticLivefireMarker: input.syntheticLivefireMarker ?? null,
   };
 }
 
@@ -93,6 +101,7 @@ function pdf(postId: string, id = `${postId}-pdf`) {
 
 Deno.test("registry keeps specific builder adapters ahead of shared Prime transport", () => {
   assertEquals(DETERMINISTIC_ADAPTER_REGISTRY.map((a) => a.id), [
+    "synthetic_livefire",
     "mlb",
     "ajs_ajbr",
     "western",
@@ -101,6 +110,75 @@ Deno.test("registry keeps specific builder adapters ahead of shared Prime transp
     "rapid",
     "chatter",
   ]);
+});
+
+Deno.test("authorized synthetic adapter wins first and preserves the cleanup marker", () => {
+  const marker = "SWG-SES-LIVEFIRE-TEST-ONLY-RUN-20260727-001";
+  const item = source({
+    postId: "synthetic-livefire-1",
+    fromEmail: "marnin@secureworkswa.com.au",
+    subject:
+      `${marker} NEW WORK ORDER Work Order: SYNTHLIVE-0123456789AB-001 PO: 990001`,
+    body:
+      "Client: Synthetic Test Client\nSite Address: 1 Test Lab Road, Perth\nScope: Install temporary roof tarp.",
+    attachments: [pdf("synthetic-livefire-1")],
+    direction: "inbound",
+    syntheticLivefireMarker: marker,
+  });
+  const adapted = adaptDeterministicSource(item, PROFILES);
+  assertEquals(adapted.adapterId, "synthetic_livefire");
+  assertEquals(adapted.identity.builderSlug, "synthetic-livefire");
+  assertEquals(
+    adapted.identity.externalRefCanonical,
+    "SYNTHLIVE-0123456789AB-001",
+  );
+  assertEquals(
+    adapted.identity.builderWoCanonical,
+    "SYNTHLIVE-0123456789AB-001",
+  );
+  assertEquals(adapted.identity.builderPoCanonical, "PO-990001");
+  assertEquals(adapted.identity.syntheticLivefireMarker, marker);
+});
+
+Deno.test("signed synthetic correction fixture is a revision, not correction-token chatter", () => {
+  const marker = "SWG-SES-LIVEFIRE-TEST-ONLY-RUN-20260727-002";
+  const original = source({
+    postId: "synthetic-roof-original",
+    fromEmail: "marnin@secureworkswa.com.au",
+    subject:
+      `${marker} [FIXTURE:ROOF] NEW WORK ORDER Work Order: SYNTHLIVE-0123456789AB-002 Roof Report`,
+    body:
+      "Client: Synthetic Test Client\nSite Address: 2 Test Lab Road, Perth\nRoof Report: https://synthetic.invalid/roof",
+    attachments: [pdf("synthetic-roof-original")],
+    direction: "inbound",
+    syntheticLivefireMarker: marker,
+  });
+  const correction = source({
+    postId: "synthetic-roof-correction",
+    fromEmail: "marnin@secureworkswa.com.au",
+    subject:
+      `${marker} [FIXTURE:CORRECTION] REVISED WORK ORDER Work Order: SYNTHLIVE-0123456789AB-002 Roof Report`,
+    body:
+      "This revised work order supersedes the earlier instruction.\nClient: Synthetic Test Client\nSite Address: 2 Test Lab Road, Perth\nRoof Report: https://synthetic.invalid/roof-revised",
+    receivedAt: "2026-07-20T00:01:00.000Z",
+    attachments: [pdf("synthetic-roof-correction")],
+    direction: "inbound",
+    syntheticLivefireMarker: marker,
+  });
+  assertEquals(
+    adaptDeterministicSource(correction, PROFILES).intent,
+    "revision",
+  );
+  const plan = buildDeterministicIntakePlan(
+    [original, correction],
+    PROFILES,
+  );
+  const revision = plan.cases.find((intakeCase) =>
+    intakeCase.sourcePostIds.includes("synthetic-roof-correction")
+  );
+  assert(revision);
+  assertEquals(revision.parentRelation, "revision_of");
+  assertNotEquals(revision.state, "accounted_non_wo");
 });
 
 Deno.test("MLB adapter builds a confirmed identity without AI", () => {

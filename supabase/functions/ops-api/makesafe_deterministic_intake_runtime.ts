@@ -40,9 +40,14 @@ import {
   parseIntakeSourceIssueReason,
   persistIntakeSourceIssue,
 } from "./makesafe_intake_source_issues.ts";
+import {
+  stripSyntheticLivefireSignature,
+  verifySyntheticLivefireMarker,
+} from "./makesafe_synthetic_livefire.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const SES_MAILBOX = "ses@secureworkswa.com.au";
+const SYNTHETIC_LIVEFIRE_AUTH = Symbol("syntheticLivefireAuth");
 
 export type DeterministicSelectionMode = "exact" | "full_open";
 
@@ -621,15 +626,86 @@ function linksFromBody(
   return [...found].map((url) => ({ url, label: null, sourcePostId: postId }));
 }
 
+interface SyntheticLivefireRowAuth {
+  marker: string;
+  subject: string;
+  bodyContent: string;
+  bodyPreview: string;
+}
+
+async function authoriseSyntheticLivefireRow(
+  row: any,
+  secret: string,
+): Promise<void> {
+  if (!secret || row[SYNTHETIC_LIVEFIRE_AUTH]) return;
+  const receivedAtMs = Date.parse(String(row.received_at || ""));
+  if (!Number.isFinite(receivedAtMs)) return;
+  const combined = [
+    row.subject || "",
+    row.body_content || "",
+    row.body_preview || "",
+  ].join("\n");
+  const verified = await verifySyntheticLivefireMarker({
+    value: combined,
+    sender: row.from_email,
+    mailbox: SES_MAILBOX,
+    // Admission is anchored to the immutable Graph receive time, not scan time.
+    // A later deterministic replay must classify the same captured source the
+    // same way after the short injection token itself has expired.
+    nowMs: receivedAtMs,
+    secret,
+  });
+  if (!verified) return;
+  const subject = stripSyntheticLivefireSignature(row.subject);
+  const bodyContent = stripSyntheticLivefireSignature(row.body_content);
+  const bodyPreview = stripSyntheticLivefireSignature(row.body_preview);
+  // A valid token authorises only the ref it signed. Requiring the same reserved
+  // ref in the ordinary fixture content prevents a signed token from turning an
+  // unrelated own-mail message into a synthetic work order.
+  if (
+    !`${subject}\n${bodyContent}\n${bodyPreview}`.toUpperCase().includes(
+      verified.ref,
+    )
+  ) return;
+  Object.defineProperty(row, SYNTHETIC_LIVEFIRE_AUTH, {
+    value: {
+      marker: verified.marker,
+      subject,
+      bodyContent,
+      bodyPreview,
+    } satisfies SyntheticLivefireRowAuth,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+}
+
+async function authoriseSyntheticLivefireRows(
+  rows: readonly any[],
+): Promise<void> {
+  // The sender and ops-api share this stable operator-owned secret. Do not bind
+  // fixture admission to Supabase's database key format or rotation lifecycle.
+  const secret = Deno.env.get("SW_API_KEY") || "";
+  if (!secret) return;
+  await Promise.all(
+    rows.map((row) => authoriseSyntheticLivefireRow(row, secret)),
+  );
+}
+
 function sourceItemFromEmailRow(
   row: any,
   attachments: readonly DeterministicAttachment[] = [],
 ): DeterministicSourceItem {
-  const rawBody = row.body_content || row.body_preview || "";
+  const livefire = row[SYNTHETIC_LIVEFIRE_AUTH] as
+    | SyntheticLivefireRowAuth
+    | undefined;
+  const rawBody = livefire?.bodyContent || livefire?.bodyPreview ||
+    row.body_content || row.body_preview || "";
   // Match the proven legacy intake shape: regexes receive readable text, not a
   // newline-free HTML document whose tags hide labels and make address captures
   // consume the rest of a reply chain. Links still come from the raw body.
-  const body = stripEmailHtmlForTrade(rawBody) || row.body_preview || "";
+  const body = stripEmailHtmlForTrade(rawBody) ||
+    livefire?.bodyPreview || row.body_preview || "";
   return {
     postId: row.post_id,
     internetMessageId: row.internet_message_id || null,
@@ -637,14 +713,17 @@ function sourceItemFromEmailRow(
     threadId: row.thread_id || null,
     fromEmail: row.from_email || null,
     fromName: row.from_name || null,
-    subject: row.subject || null,
+    subject: livefire?.subject || row.subject || null,
     body,
     receivedAt: row.received_at,
     attachments: [...attachments],
     links: linksFromBody(row.post_id, rawBody),
-    direction: isOwnDomain(deriveFromDomain(row.from_email))
+    direction: livefire
+      ? "inbound"
+      : isOwnDomain(deriveFromDomain(row.from_email))
       ? "own_outbound"
       : "inbound",
+    syntheticLivefireMarker: livefire?.marker || null,
   };
 }
 
@@ -1381,6 +1460,7 @@ async function readInputs(
       : [],
     parsingRules: row.parsing_rules || null,
   }));
+  await authoriseSyntheticLivefireRows([...backlogRows, ...recentRows]);
 
   // A fresh physical source can reopen an already-persisted exception. Preserve
   // the exact-selection rule: plan with the complete authoritative source
@@ -1466,6 +1546,9 @@ async function readInputs(
   const emails = [...byPostId.values()].sort((a, b) =>
     String(a.received_at).localeCompare(String(b.received_at))
   );
+  // Closure and allowlist rows may have been fetched after the first admission
+  // pass. Re-run the pure verifier over the final bounded set before projection.
+  await authoriseSyntheticLivefireRows(emails);
   const postIds = emails.map((row) => row.post_id).filter(Boolean);
   const attachmentRows: any[] = [];
   for (const ids of chunk(postIds)) {
@@ -1572,6 +1655,7 @@ async function persistIssueForSources(
       attachmentIds: details.attachmentIds,
       attachmentNames: details.attachmentNames,
       attachmentCount: details.attachmentCount,
+      syntheticLivefireMarker: source.syntheticLivefireMarker,
     });
   }
 }
@@ -2235,6 +2319,11 @@ function casePayload(
     wo_po_identity_key: plan.identity.woPoIdentityKey,
     normaliser_version: plan.identity.normaliserVersion,
     raw_identity_json: {
+      ...(plan.identity.syntheticLivefireMarker
+        ? {
+          synthetic_livefire_marker: plan.identity.syntheticLivefireMarker,
+        }
+        : {}),
       builder_slug: plan.identity.builderSlug,
       external_ref: plan.identity.externalRefRaw,
       builder_wo: plan.identity.builderWoRaw,
@@ -2285,13 +2374,19 @@ function casePayload(
     side_effects_suppressed: true,
     last_decision_provenance: "deterministic",
     last_decision_actor: DETERMINISTIC_INTAKE_VERSION,
-    last_decision_reason: jobId
-      ? `deterministic ${state}${
-        state === "blocked_live_job" && plan.blockedReasons.length
-          ? ` ${plan.blockedReasons.join("|")}`
-          : ""
-      }`
-      : `deterministic ${reason}`,
+    last_decision_reason: `${
+      jobId
+        ? `deterministic ${state}${
+          state === "blocked_live_job" && plan.blockedReasons.length
+            ? ` ${plan.blockedReasons.join("|")}`
+            : ""
+        }`
+        : `deterministic ${reason}`
+    }${
+      plan.identity.syntheticLivefireMarker
+        ? ` ${plan.identity.syntheticLivefireMarker}`
+        : ""
+    }`,
     received_at: plan.story[0]?.occurredAt || new Date().toISOString(),
     adapter_id: plan.adapterId,
     adapter_version: plan.adapterVersion,
@@ -2377,10 +2472,22 @@ async function stageAttachments(
         status: "completed",
         storage_locator: path,
         evidence: {
+          ...(plan.identity.syntheticLivefireMarker
+            ? {
+              synthetic_livefire_marker: plan.identity.syntheticLivefireMarker,
+            }
+            : {}),
           content_sha256: contentSha256,
           size_bytes: bytes.byteLength,
         },
-        recovery_cursor: { version: DETERMINISTIC_INTAKE_VERSION },
+        recovery_cursor: {
+          version: DETERMINISTIC_INTAKE_VERSION,
+          ...(plan.identity.syntheticLivefireMarker
+            ? {
+              synthetic_livefire_marker: plan.identity.syntheticLivefireMarker,
+            }
+            : {}),
+        },
         completed_at: new Date().toISOString(),
       });
       if (ledgerError && String(ledgerError.code) !== "23505") {
@@ -3170,9 +3277,18 @@ async function ensureDraftAndJob(
       throw new Error("deterministic work-order attachment staging failed");
     }
     const splitObligation = deterministicSplitObligation(plan);
+    const markedDescription = [
+      plan.identity.description,
+      plan.identity.syntheticLivefireMarker,
+    ].filter(Boolean).join("\n") || plan.identity.jobFamily;
     const extraction = {
       deterministic_intake: true,
       deterministic_version: DETERMINISTIC_INTAKE_VERSION,
+      ...(plan.identity.syntheticLivefireMarker
+        ? {
+          synthetic_livefire_marker: plan.identity.syntheticLivefireMarker,
+        }
+        : {}),
       makesafe_job_family: plan.identity.jobFamily,
       builder_claim_ref: plan.identity.externalRefCanonical,
       builder_work_order_number: plan.identity.builderWoCanonical,
@@ -3183,7 +3299,7 @@ async function ensureDraftAndJob(
       recovery_cursor: plan.recoveryCursor,
       builder_email_subject: primary.subject,
       builder_email_received_at: primary.receivedAt,
-      description: plan.identity.description,
+      description: markedDescription,
       work_order_pdf_text: plan.pdfDocuments.map((document) => ({
         source_post_id: document.sourcePostId,
         attachment_id: document.attachmentId,
@@ -3220,7 +3336,7 @@ async function ensureDraftAndJob(
       client_email: plan.identity.clientEmail,
       site_address: plan.identity.siteAddress,
       site_suburb: plan.identity.siteSuburb,
-      description: plan.identity.description || plan.identity.jobFamily,
+      description: markedDescription,
       confidence: "high",
       missing_fields: plan.blockedReasons,
       extraction_json: extraction,
@@ -3431,8 +3547,19 @@ async function insertCaseAndSources(
       conversation_id: source.conversationId || null,
       thread_id: source.threadId || null,
       attachment_refs: refs,
-      raw_identity_json: {},
+      raw_identity_json: {
+        ...(source.syntheticLivefireMarker
+          ? {
+            synthetic_livefire_marker: source.syntheticLivefireMarker,
+          }
+          : {}),
+      },
       evidence: {
+        ...(source.syntheticLivefireMarker
+          ? {
+            synthetic_livefire_marker: source.syntheticLivefireMarker,
+          }
+          : {}),
         adapter_id: plan.adapterId,
         instruction_key: plan.instructionKey,
         pdf_extraction: (source.pdfDocuments || []).map((document) => ({
@@ -3510,12 +3637,21 @@ async function appendCancellationCaseEvent(
     reason_code: plan.reasonCode,
     decision_provenance: "deterministic",
     decision_actor: DETERMINISTIC_INTAKE_VERSION,
-    decision_reason: `cancellation disposition ${plan.reasonCode}`,
+    decision_reason: `cancellation disposition ${plan.reasonCode}${
+      plan.identity.syntheticLivefireMarker
+        ? ` ${plan.identity.syntheticLivefireMarker}`
+        : ""
+    }`,
     missing_fields_snapshot: plan.missingFields,
     conflicting_fields_snapshot: plan.conflictingFields,
     blocked_reasons_snapshot: [],
     side_effects_suppressed: true,
     evidence: {
+      ...(plan.identity.syntheticLivefireMarker
+        ? {
+          synthetic_livefire_marker: plan.identity.syntheticLivefireMarker,
+        }
+        : {}),
       target_relation: "cancellation_of",
       target_job_id: plan.targetJobId,
       candidate_job_ids: resolution.candidateJobIds,

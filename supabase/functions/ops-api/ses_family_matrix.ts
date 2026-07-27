@@ -3,7 +3,13 @@ export const SES_FAMILY_MATRIX_VERSION =
 export const SES_ASSESSMENT_RECIPE_VERSION =
   "assessment-triad-invoice-only/2026-07-27";
 
-export type SesBuilderKey = "MLB" | "AJS" | "AJBR" | "WESTERN" | "UNKNOWN";
+export type SesBuilderKey =
+  | "MLB"
+  | "AJS"
+  | "AJBR"
+  | "WESTERN"
+  | "SYNTHETIC"
+  | "UNKNOWN";
 
 export type SesFamilyId =
   | "unknown"
@@ -46,7 +52,8 @@ export interface SesFamilyMatrixRow {
     | "mlb-perth-routing"
     | "mlb-south-west-routing"
     | "ajs-routing"
-    | "western-routing";
+    | "western-routing"
+    | "synthetic-internal-routing";
   invoice_to: string | null;
   report_route: "work_order_sender";
   photo_route: "work_order_sender" | "not_applicable";
@@ -73,6 +80,7 @@ export type SesFamilyMatrixResolution =
 const MLB_MAKESAFES = "makesafes@mlbuilders.com.au";
 const AJS_WORK_ORDERS = "workorders@ajs.build";
 const WESTERN_ACCOUNTS = "accounts@westernbuild.com.au";
+const SYNTHETIC_INTERNAL_MAILBOX = "marnin@secureworkswa.com.au";
 
 function physicalRow(
   builder_key: "MLB" | "AJS" | "AJBR" | "WESTERN",
@@ -184,6 +192,71 @@ function mlbReportRow(
   };
 }
 
+function syntheticRow(
+  family:
+    | "physical_makesafe"
+    | "temporary_fencing"
+    | "ordinary_roof_portal"
+    | "assessment_quote",
+): SesFamilyMatrixRow {
+  const assessment = family === "assessment_quote";
+  const roof = family === "ordinary_roof_portal";
+  const temporaryFence = family === "temporary_fencing";
+  const reportOnly = assessment || roof;
+  return {
+    builder_key: "SYNTHETIC",
+    family,
+    job_type: assessment
+      ? "assessment_report_quote"
+      : roof
+      ? "roof_report"
+      : "physical_makesafe",
+    subtype: temporaryFence ? "temporary_fencing" : null,
+    report_only: reportOnly,
+    report_delivery: roof ? "portal" : null,
+    swms_policy: "builder_waiver_unless_hrcw",
+    swms_waiver_rule: "synthetic-livefire-is-internal-only-and-cannot-release",
+    invoice_basis: assessment
+      ? "assessment_fixed"
+      : roof
+      ? "roof_storey_fixed"
+      : temporaryFence
+      ? "mlb_temporary_fence_hire"
+      : "standard_labour_materials",
+    routing_rule: "synthetic-internal-routing",
+    invoice_to: SYNTHETIC_INTERNAL_MAILBOX,
+    report_route: "work_order_sender",
+    photo_route: reportOnly ? "not_applicable" : "work_order_sender",
+    invoice_route: "matrix_invoice_mailbox",
+    required_portal_roles: assessment
+      ? ["assessment", "photos", "scope"]
+      : roof
+      ? ["roof_report"]
+      : [],
+    named_na_rules: assessment
+      ? [
+        "not-a-roof-report",
+        "report-only-has-no-physical-reporting-evidence",
+        "report-only-has-no-photo-email",
+        "synthetic-livefire-release-forbidden",
+      ]
+      : roof
+      ? [
+        "report-only-portal-is-the-report",
+        "not-an-assessment-report",
+        "report-only-has-no-physical-reporting-evidence",
+        "report-only-has-no-photo-email",
+        "synthetic-livefire-release-forbidden",
+      ]
+      : [
+        "physical-work-has-no-portal-deliverable",
+        "not-a-roof-report",
+        "not-an-assessment-report",
+        "synthetic-livefire-release-forbidden",
+      ],
+  };
+}
+
 export const SES_FAMILY_MATRIX: readonly SesFamilyMatrixRow[] = Object.freeze([
   physicalRow("MLB"),
   temporaryFenceRow("MLB"),
@@ -196,6 +269,10 @@ export const SES_FAMILY_MATRIX: readonly SesFamilyMatrixRow[] = Object.freeze([
   temporaryFenceRow("AJBR"),
   physicalRow("WESTERN"),
   temporaryFenceRow("WESTERN"),
+  syntheticRow("physical_makesafe"),
+  syntheticRow("temporary_fencing"),
+  syntheticRow("ordinary_roof_portal"),
+  syntheticRow("assessment_quote"),
 ]);
 
 const AJS_KEYS = new Set<SesBuilderKey>(["AJS", "AJBR"]);

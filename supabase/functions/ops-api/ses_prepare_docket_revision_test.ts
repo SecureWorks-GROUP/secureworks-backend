@@ -240,7 +240,7 @@ function blockerCodes(result: {
 }
 
 Deno.test("family matrix is a closed executable set with the AJS report guard", () => {
-  assertEquals(SES_FAMILY_MATRIX.length, 11);
+  assertEquals(SES_FAMILY_MATRIX.length, 15);
   for (const row of SES_FAMILY_MATRIX) {
     const resolved = resolveSesFamilyMatrixRow({
       builder_key: row.builder_key,
@@ -272,7 +272,8 @@ Deno.test("family matrix is a closed executable set with the AJS report guard", 
 Deno.test("every shippable matrix row has a ready golden and an intentional negative golden", async () => {
   for (
     const row of SES_FAMILY_MATRIX.filter((candidate) =>
-      candidate.family !== "assessment_quote"
+      candidate.family !== "assessment_quote" &&
+      candidate.builder_key !== "SYNTHETIC"
     )
   ) {
     const input = fixtureInput(row);
@@ -299,6 +300,95 @@ Deno.test("every shippable matrix row has a ready golden and an intentional nega
       `${row.builder_key}/${row.family} negative`,
     );
   }
+});
+
+Deno.test("synthetic matrix rows are internal-only and always release-blocked after full evidence validation", async () => {
+  const rows = SES_FAMILY_MATRIX.filter((candidate) =>
+    candidate.builder_key === "SYNTHETIC"
+  );
+  assertEquals(
+    rows.map((row) => row.family),
+    [
+      "physical_makesafe",
+      "temporary_fencing",
+      "ordinary_roof_portal",
+      "assessment_quote",
+    ],
+  );
+  for (const row of rows) {
+    assertEquals(row.routing_rule, "synthetic-internal-routing");
+    assertEquals(row.invoice_to, "marnin@secureworkswa.com.au");
+    const input = fixtureInput(row);
+    input.source.work_order_sender = "marnin@secureworkswa.com.au";
+    input.routing_seed.report_to = "marnin@secureworkswa.com.au";
+    input.routing_seed.invoice_to = "marnin@secureworkswa.com.au";
+    const result = (await prepareSesDocketRevision(
+      request(input.identity.job_id),
+      dependencies(input),
+    )).results[0];
+    assertEquals(result.state, "blocked", row.family);
+    assertEquals(result.envelope.pre_xero_docs_ready, false, row.family);
+    assertEquals(result.envelope.invoice_create_approved, false, row.family);
+    assertEquals(result.envelope.client_send_approved, false, row.family);
+    assertEquals(result.email_drafts, {}, row.family);
+    assert(
+      blockerCodes(result).includes(
+        "synthetic_livefire_release_forbidden",
+      ),
+      row.family,
+    );
+    assertEquals(
+      result.release_payload,
+      {
+        version: "ses-inert-release-proposal/v1",
+        job_id: input.identity.job_id,
+        invoice_create_approved: false,
+        client_send_approved: false,
+        send_email: false,
+        send_sms: false,
+        create_invoice: false,
+        authorise_invoice: false,
+        close_job: false,
+        portal_evidence: result.portal_evidence,
+      },
+      row.family,
+    );
+    if (row.required_portal_roles.length) {
+      assertEquals(
+        result.portal_evidence.map((evidence) => evidence.role),
+        row.required_portal_roles,
+        row.family,
+      );
+    }
+    if (row.family === "assessment_quote") {
+      assertEquals(result.portal_evidence.length, 3);
+      assert(
+        blockerCodes(result).includes("assessment_recipe_unapproved"),
+      );
+    }
+  }
+
+  const assessmentRow = rows.find((row) => row.family === "assessment_quote")!;
+  const incompleteAssessment = fixtureInput(assessmentRow);
+  incompleteAssessment.source.work_order_sender = "marnin@secureworkswa.com.au";
+  incompleteAssessment.source.portal_links = incompleteAssessment.source
+    .portal_links.filter((link) => link.role !== "scope");
+  const incompleteResult = (await prepareSesDocketRevision(
+    request(incompleteAssessment.identity.job_id),
+    dependencies(incompleteAssessment),
+  )).results[0];
+  assert(
+    blockerCodes(incompleteResult).includes("portal_link_absent"),
+  );
+  assert(
+    blockerCodes(incompleteResult).includes(
+      "synthetic_livefire_release_forbidden",
+    ),
+  );
+  assert(
+    blockerCodes(incompleteResult).includes("assessment_recipe_unapproved"),
+  );
+  assertEquals(incompleteResult.portal_evidence.length, 2);
 });
 
 Deno.test("AJS 70062 roof wording assembles the physical make-safe pack", async () => {

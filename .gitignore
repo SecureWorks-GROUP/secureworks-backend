@@ -2,6 +2,7 @@
 .env.*
 node_modules/
 artifacts/ses-reporting-proof/
+artifacts/ses-synthetic-livefire/
 supabase/.temp/
 .DS_Store
 *.pdf

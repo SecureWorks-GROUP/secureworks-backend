@@ -549,3 +549,37 @@ Deno.test(
     assert(codes.includes("spine_missing_source"));
   },
 );
+Deno.test("live adapter resolves only the exact synthetic-livefire company profile", () => {
+  const exact = snapshot();
+  exact.detail!.requesting_company_slug = "synthetic-livefire";
+  exact.detail!.requesting_company_name =
+    "SecureWorks Synthetic Live-Fire Builder";
+  exact.detail!.makesafe_companies = {
+    slug: "synthetic-livefire",
+    name: "SecureWorks Synthetic Live-Fire Builder",
+    report_recipient: "marnin@secureworkswa.com.au",
+  };
+  exact.job.metadata.job_family = "roof_report";
+  assertEquals(
+    buildSesAssemblerInput(exact).classification.builder_key,
+    "SYNTHETIC",
+  );
+
+  const lookalike = snapshot();
+  lookalike.detail!.requesting_company_slug = "synthetic-livefire-lookalike";
+  lookalike.detail!.requesting_company_name = "synthetic-livefire";
+  lookalike.detail!.external_ref = null;
+  lookalike.detail!.makesafe_companies = {
+    slug: "not-synthetic-livefire",
+    name: "synthetic-livefire",
+    report_recipient: "marnin@secureworkswa.com.au",
+  };
+  lookalike.job.metadata.requesting_company = {
+    slug: "synthetic-livefire",
+    name: "synthetic-livefire",
+  };
+  assertEquals(
+    buildSesAssemblerInput(lookalike).classification.builder_key,
+    "UNKNOWN",
+  );
+});
