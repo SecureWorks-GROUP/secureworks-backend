@@ -402,6 +402,18 @@ untyped PL/pgSQL records must be protected by nested `FOUND`/owner guards, never
 `55000`. Legacy non-fence create endpoints remain unchanged until separately
 migrated.
 
+## Assessment Cards Require The Prime Triad And Invoice Only
+
+Assessment/quote cards require the work order plus three typed Prime links:
+assessment report, photos, and quote (the builder may label quote as scope).
+`makesafe_email_links.ts` is the canonical alias/type boundary. Completion
+requires a headless locked/submitted capture with a screenshot for every member;
+human confirmation alone is not evidence. The assessment recipe creates only
+the invoice draft: $150 ex GST ($165 inc), or $130 ex GST ($143 inc) for
+fence-only work. It never requires a SWMS, local report PDF, or separate photo
+pack. The current contract lives in `ses_family_matrix.ts` and
+`ses_prepare_docket_revision.ts`.
+
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
 The SecureWorks own-letterhead roof report is a trade-filled template that

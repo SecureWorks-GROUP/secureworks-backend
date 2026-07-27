@@ -1,6 +1,7 @@
 import { sesSha256, stableUuidFromSha256 } from "./ses_docket_envelope.ts";
 import type { SesPricingDisposition } from "./makesafe_invoice_obligation.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
+import { SES_ASSESSMENT_RECIPE_VERSION } from "./ses_family_matrix.ts";
 
 export const SES_REVIEW_SECTION_ORDER = [
   "job_story",
@@ -77,10 +78,16 @@ function check(
   return { id, passed, fact };
 }
 
-function missingRouteRefusals(routes: SesReviewRoute[]): SesRefusal[] {
+function missingRouteRefusals(
+  routes: SesReviewRoute[],
+  family: string,
+): SesRefusal[] {
   const byKind = new Map(routes.map((route) => [route.route_kind, route]));
   const refusals: SesRefusal[] = [];
-  for (const kind of SES_ROUTE_ORDER) {
+  const requiredRoutes = family === "assessment_quote"
+    ? (["invoice"] as SesRouteKind[])
+    : SES_ROUTE_ORDER;
+  for (const kind of requiredRoutes) {
     const route = byKind.get(kind);
     if (!route || !route.ready || !route.subject.trim() || !route.body.trim()) {
       refusals.push(
@@ -125,7 +132,7 @@ export function evaluateSesMechanicalClean(
     input.portal_capture_status === "done";
   const physical = input.family === "physical_makesafe" ||
     input.family === "temporary_fencing";
-  const routeRefusals = missingRouteRefusals(input.routes);
+  const routeRefusals = missingRouteRefusals(input.routes, input.family);
   const checks: SesCleanCheck[] = [
     check(
       "C1",
@@ -158,7 +165,8 @@ export function evaluateSesMechanicalClean(
       "C7",
       !!input.family_matrix_version &&
         (input.family !== "assessment_quote" ||
-          !!input.assessment_recipe_version),
+          input.assessment_recipe_version ===
+            SES_ASSESSMENT_RECIPE_VERSION),
       "The family matrix and required assessment recipe are versioned.",
     ),
     check("C8", portalClean, "Required portal truth is captured."),
@@ -177,7 +185,7 @@ export function evaluateSesMechanicalClean(
     check(
       "C11",
       routeRefusals.length === 0,
-      "All three current email routes have canonical recipients and drafts.",
+      "Every route required by this family has canonical recipients and a draft.",
     ),
     check(
       "C12",
@@ -220,7 +228,7 @@ export function evaluateSesMechanicalClean(
   }
   if (
     input.family === "assessment_quote" &&
-    !input.assessment_recipe_version
+    input.assessment_recipe_version !== SES_ASSESSMENT_RECIPE_VERSION
   ) {
     blockers.push(
       sesRefusal(
@@ -230,7 +238,7 @@ export function evaluateSesMechanicalClean(
       ),
     );
   }
-  if (input.report_only) {
+  if (input.report_only && input.family !== "assessment_quote") {
     blockers.push(
       sesRefusal(
         "report_only_email_applicability_parked",

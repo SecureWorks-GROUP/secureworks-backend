@@ -23,14 +23,14 @@ import {
 } from "./ses_docket_envelope.ts";
 import {
   resolveSesFamilyMatrixRow,
+  SES_ASSESSMENT_RECIPE_VERSION,
   SES_FAMILY_MATRIX_VERSION,
   type SesFamilyMatrixRow,
 } from "./ses_family_matrix.ts";
 import { roofReportPrice } from "./roof_report_template.ts";
 
 export const SES_FIVE_MINUTES_MS = 300_000;
-export const SES_ASSESSMENT_RECIPE_PENDING =
-  "assessment-outbound-recipe/unsealed";
+export { SES_ASSESSMENT_RECIPE_VERSION };
 
 const MANIFEST_ITEMS = [
   "source_work_order_retrieval",
@@ -277,8 +277,8 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
   if (!input.source.attachment_pointers?.length) {
     blockers.push(blocked(
       "spine_missing_source",
-      "Source work-order attachment pointer is absent.",
-      "Recover the designated WO attachment from the canonical source message.",
+      "The work order email has no work order attachment - ask the builder to send the work order.",
+      "Recover the work order from the builder's source email, then prepare the card again.",
     ));
   }
   if (!input.source.deliverables?.length) {
@@ -286,6 +286,17 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
       "family_unknown",
       "Source instruction has no typed deliverables.",
       "Complete deterministic instruction classification before pack preparation.",
+    ));
+  }
+  if (
+    input.classification.family === "assessment_quote" &&
+    input.classification.assessment_outbound_recipe_version !==
+      SES_ASSESSMENT_RECIPE_VERSION
+  ) {
+    blockers.push(blocked(
+      "input_hash_conflict",
+      "The assessment card does not carry the sealed triad-and-invoice recipe.",
+      "Refresh the assembler input from the current assessment family rule.",
     ));
   }
   return blockers;
@@ -299,6 +310,14 @@ function swmsDecision(
   requirementEvidence: string;
   naRule: string | null;
 } {
+  if (row.report_only) {
+    return {
+      required: false,
+      requirementEvidence:
+        `rule:swms-not-required-under-named-builder-job-rule#${row.swms_waiver_rule}`,
+      naRule: "report-only-has-no-physical-work",
+    };
+  }
   if (
     input.hrcw.hrcw || input.hrcw.categories.length > 0 ||
     input.hrcw.source_hazard_terms.length > 0
@@ -314,14 +333,6 @@ function swmsDecision(
       required: true,
       requirementEvidence: "rule:physical-work-requires-swms",
       naRule: null,
-    };
-  }
-  if (row.report_only) {
-    return {
-      required: false,
-      requirementEvidence:
-        `rule:swms-not-required-under-named-builder-job-rule#${row.swms_waiver_rule}`,
-      naRule: "report-only-has-no-physical-work",
     };
   }
   if (row.swms_policy === "builder_waiver_unless_hrcw") {
@@ -664,6 +675,9 @@ function manifestBase(
     items.supporting_report_pdf = notApplicable(
       "assessment-portal-is-the-report",
     );
+    items.draft_builder_report_email = notApplicable(
+      "assessment-prime-triad-is-the-report",
+    );
   }
   if (row.family === "own_template_roof") {
     items.supporting_portal_links = notApplicable(
@@ -682,8 +696,11 @@ function manifestBase(
     classification: {
       workflow: input.classification.workflow,
       job_type: row.job_type,
-      ...(row.job_type === "roof_report"
-        ? { report_delivery: row.report_delivery }
+      ...(row.report_delivery ? { report_delivery: row.report_delivery } : {}),
+      ...(row.family === "assessment_quote"
+        ? {
+          assessment_outbound_recipe_version: SES_ASSESSMENT_RECIPE_VERSION,
+        }
         : {}),
       builder_reference: input.source.builder_reference,
       report_only: row.report_only,
@@ -742,17 +759,41 @@ function portalRoleItems(
   return ["assessment_scope_link", "assessment_scope_capture"];
 }
 
+function inputPortalRole(
+  role: SesAssemblerInputV1["source"]["portal_links"][number]["role"],
+): "roof_report" | "assessment" | "photos" | "scope" | "other" {
+  if (role === "quote") return "scope";
+  if (role === "builder_portal") return "other";
+  return role;
+}
+
+function portalRoleCardLabel(
+  role: "roof_report" | "assessment" | "photos" | "scope",
+): string {
+  if (role === "assessment") return "assessment";
+  if (role === "photos") return "photos";
+  if (role === "scope") return "quote/scope";
+  return "roof report";
+}
+
 function isValidContentFingerprint(value: unknown): value is SesSha256 {
   return typeof value === "string" &&
     /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
 function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
+  const role = capture.role === "assessment"
+    ? "assessment"
+    : capture.role === "photos"
+    ? "photos"
+    : capture.role === "scope"
+    ? "quote/scope"
+    : "roof report";
   if (capture.status === "done") {
     if (!isValidContentFingerprint(capture.content_fingerprint)) {
       return blocked(
         "portal_capture_invalid",
-        `Portal ${capture.role} returned done without a valid content fingerprint.`,
+        `The ${role} capture returned done without a valid content fingerprint.`,
         "Re-run the approved portal capture and retain a valid content fingerprint.",
         [`portal-capture:${capture.role}`],
       );
@@ -762,19 +803,19 @@ function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
   if (capture.status === "not_done") {
     return blocked(
       "portal_not_submitted",
-      `Portal ${capture.role} is outstanding: ${
+      `The builder's ${role} form is not submitted and locked: ${
         capture.signal || "no locked/submitted banner"
       }.`,
-      "Complete and lock the portal form, then re-run the live capture.",
+      `Ask the trade to finish the ${role} form in Prime, then run the headless capture again.`,
       [`portal-capture:${capture.role}`],
     );
   }
   return blocked(
     "portal_unreachable",
-    `Portal ${capture.role} could not be reached: ${
-      capture.signal || "unreachable"
-    }.`,
-    "Recover/refresh the source portal link and re-run the headless capture.",
+    /expired|no longer active|no longer available/i.test(capture.signal || "")
+      ? `The builder's ${role} link is expired - ask the builder to send a fresh ${role} link.`
+      : `The builder's ${role} link could not be opened - ask the builder to send a working ${role} link.`,
+    `Recover the ${role} link, then run the headless capture again.`,
     [`portal-capture:${capture.role}`],
   );
 }
@@ -804,10 +845,7 @@ function buildEmailDrafts(
   photoFiles: string[],
   invoiceProposal: Record<string, unknown> | null,
 ): Record<string, string> {
-  if (row.family === "assessment_quote" || !invoiceProposal) {
-    return {};
-  }
-  if (row.family !== "ordinary_roof_portal" && !reportFile) {
+  if (!invoiceProposal) {
     return {};
   }
   const ref = input.source.builder_reference;
@@ -821,6 +859,21 @@ function buildEmailDrafts(
     ...(reportFile ? [reportFile] : []),
     ...(swmsFile ? [swmsFile] : []),
   ];
+  if (row.family === "assessment_quote") {
+    return {
+      INVOICE_EMAIL_DRAFT: draftEmail({
+        to: invoiceTo,
+        cc: "finance@secureworkswa.com.au",
+        subject: `${ref} - assessment report and quote invoice`,
+        body:
+          "Draft only. The assessment, photo schedule and quote have been completed and submitted through Prime. Please find our invoice attached. No SWMS, local report or separate photo pack applies to this assessment card.",
+        attachments: ["ARTIFACTS/invoice_proposal.json"],
+      }),
+    };
+  }
+  if (row.family !== "ordinary_roof_portal" && !reportFile) {
+    return {};
+  }
   const invoice = draftEmail({
     to: invoiceTo,
     cc: "finance@secureworkswa.com.au",
@@ -1155,7 +1208,7 @@ async function prepareOne(
   await measure("T4", async () => {
     for (const role of matrix.ok ? row.required_portal_roles : []) {
       const matches = input.source.portal_links.filter((link) =>
-        link.role === role
+        inputPortalRole(link.role) === role
       );
       const [linkItem, captureItem] = portalRoleItems(role);
       if (matches.length !== 1) {
@@ -1168,8 +1221,12 @@ async function prepareOne(
             code,
             matches.length
               ? `Portal role ${role} has ${matches.length} candidates; exactly one is required.`
-              : `Portal role ${role} is absent after canonical recovery.`,
-            "Recover and bind exactly one typed portal link from the source instruction.",
+              : `The work order email contains no ${
+                portalRoleCardLabel(role)
+              } link - ask the builder to send it.`,
+            `Recover and bind exactly one typed ${
+              portalRoleCardLabel(role)
+            } link from the source instruction.`,
             ["canonical-input-envelope", `portal-role:${role}`],
             matches.map((link) => link.url),
           ),
@@ -1525,24 +1582,6 @@ async function prepareOne(
     );
   }
 
-  if (matrix.ok && row.family === "assessment_quote") {
-    const assessmentBlocker = addBlocker(
-      blockers,
-      blocked(
-        "assessment_recipe_unapproved",
-        input.classification.assessment_outbound_recipe_version ===
-            SES_ASSESSMENT_RECIPE_PENDING
-          ? "The only recognised assessment recipe marker is explicitly unsealed and cannot release a route."
-          : "Assessment outbound attachment/route recipe is not Captain-sealed.",
-        "Captain seals the assessment outbound recipe version; re-run prepare_ses_docket_revision.",
-      ),
-    );
-    manifest.items.draft_builder_report_email = assessmentBlocker;
-    manifest.items.draft_photo_evidence_email = assessmentBlocker;
-    manifest.items.draft_invoice_bundle_email = assessmentBlocker;
-    manifest.items.email_drafts_presented = assessmentBlocker;
-  }
-
   stagesMs.T7 = 0;
   const drafts = matrix.ok
     ? blockers.length === 0
@@ -1613,6 +1652,7 @@ async function prepareOne(
       portal_proof: portalEvidence,
       artifact_paths: artifacts.map((artifact) => artifact.path).sort(),
       blocker_codes: blockers.map((item) => item.reason_code),
+      waiting_on: blockers.map((item) => item.reason),
     }],
   };
   const releasePayload: Record<string, unknown> = {

@@ -16,6 +16,7 @@ import {
   reportInSatisfied,
   substatusAdvanceNeedsPortalVerification,
   substatusAdvanceNeedsReportIn,
+  validatePortalEvidenceForReportType,
 } from "./makesafe_portal_guard.ts";
 
 // ── portalVerificationSatisfied: cycle-scoped ──────────────────────────────
@@ -142,6 +143,82 @@ Deno.test("queue: no portal links -> empty", () => {
   );
   assertEquals(extractPortalLinks(null).length, 0);
   assertEquals(extractPortalLinks(undefined).length, 0);
+});
+
+Deno.test("assessment proof: scope is the quote member and all three headless captures are required", () => {
+  const links = [
+    {
+      label: "Assessment report",
+      url: "https://primeeco.tech/share/assessment",
+      kind: "assessment_report",
+    },
+    {
+      label: "Photos",
+      url: "https://primeeco.tech/share/photos",
+      kind: "photos",
+    },
+    {
+      label: "Scope of Works",
+      url: "https://primeeco.tech/share/scope",
+      kind: "scope",
+    },
+  ];
+  const evidence = extractPortalLinks(links).map((link) => ({
+    role: link.role,
+    url: link.url,
+    status: "done",
+    locked: true,
+    signal: "form locked/submitted",
+    screenshot: `/tmp/${link.role}.png`,
+  }));
+  const result = validatePortalEvidenceForReportType(
+    "assessment_report",
+    links,
+    evidence,
+  );
+  assertEquals(result.ready, true);
+  assertEquals(result.evidence.map((item) => item.role), [
+    "assessment_report",
+    "photos",
+    "quote",
+  ]);
+  assertEquals(result.waiting_on, []);
+});
+
+Deno.test("assessment proof: expired and missing Prime members produce plain card sentences", () => {
+  const assessmentUrl = "https://primeeco.tech/share/assessment";
+  const result = validatePortalEvidenceForReportType(
+    "assessment_report",
+    [{
+      label: "Assessment report",
+      url: assessmentUrl,
+      kind: "assessment_report",
+    }],
+    [{
+      role: "assessment_report",
+      url: assessmentUrl,
+      status: "unreachable",
+      locked: null,
+      signal: "link expired",
+      screenshot: "/tmp/assessment.png",
+    }],
+  );
+  assertEquals(result.ready, false);
+  assert(
+    result.waiting_on.includes(
+      "The builder's assessment link is expired - ask the builder to send a fresh assessment link.",
+    ),
+  );
+  assert(
+    result.waiting_on.includes(
+      "The work order email contains no photos link - ask the builder to send it.",
+    ),
+  );
+  assert(
+    result.waiting_on.includes(
+      "The work order email contains no quote/scope link - ask the builder to send it.",
+    ),
+  );
 });
 
 // ── portalRecheckEligible ──────────────────────────────────────────────────
@@ -317,19 +394,34 @@ Deno.test("reportIn: physical make-safe satisfied by a typed makesafe_report doc
 Deno.test("reportIn: only PHYSICAL make-safe advances to a report-complete substatus are gated", () => {
   const physical = { isMakesafe: true, isReportType: false };
   for (const s of PORTAL_GUARDED_ADVANCE_SUBSTATUSES) {
-    assert(substatusAdvanceNeedsReportIn(s, physical), `${s} on a physical card is gated`);
+    assert(
+      substatusAdvanceNeedsReportIn(s, physical),
+      `${s} on a physical card is gated`,
+    );
   }
   // pre-report substatuses are free
-  assertEquals(substatusAdvanceNeedsReportIn("waiting_on_trade_report", physical), false);
-  assertEquals(substatusAdvanceNeedsReportIn("company_contact_done", physical), false);
+  assertEquals(
+    substatusAdvanceNeedsReportIn("waiting_on_trade_report", physical),
+    false,
+  );
+  assertEquals(
+    substatusAdvanceNeedsReportIn("company_contact_done", physical),
+    false,
+  );
   // report-type cards are owned by the portal guard, not this one
   assertEquals(
-    substatusAdvanceNeedsReportIn("ready_to_invoice", { isMakesafe: true, isReportType: true }),
+    substatusAdvanceNeedsReportIn("ready_to_invoice", {
+      isMakesafe: true,
+      isReportType: true,
+    }),
     false,
   );
   // non-make-safe jobs are never gated
   assertEquals(
-    substatusAdvanceNeedsReportIn("ready_to_invoice", { isMakesafe: false, isReportType: false }),
+    substatusAdvanceNeedsReportIn("ready_to_invoice", {
+      isMakesafe: false,
+      isReportType: false,
+    }),
     false,
   );
 });

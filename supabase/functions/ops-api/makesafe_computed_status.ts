@@ -35,6 +35,8 @@ export interface MakesafePortalCapture {
   status?: string | null;
   role?: string | null;
   kind?: string | null;
+  url?: string | null;
+  signal?: string | null;
   cycle_number?: number | null;
 }
 
@@ -154,6 +156,55 @@ function donePortalRoles(input: MakesafeStatusInput): Set<string> {
   );
 }
 
+function externalPortalRoles(input: MakesafeStatusInput): Set<string> {
+  return new Set(
+    (Array.isArray(input.detail?.external_links)
+      ? input.detail.external_links
+      : [])
+      .map((link: any) =>
+        captureRole({
+          role: link?.role,
+          kind: link?.kind,
+        })
+      )
+      .filter(Boolean),
+  );
+}
+
+function portalRoleLabel(role: string): string {
+  if (role === "assessment_report") return "assessment";
+  if (role === "photos") return "photos";
+  if (role === "quote") return "quote/scope";
+  return "roof report";
+}
+
+function portalWaitingSentence(
+  input: MakesafeStatusInput,
+  role: string,
+): string {
+  const label = portalRoleLabel(role);
+  const links = externalPortalRoles(input);
+  if (!links.has(role)) {
+    return `The work order email contains no ${label} link - ask the builder to send it.`;
+  }
+  const cycle = Number(input.detail?.cycle_number ?? 1);
+  const capture = (input.evidence?.portalCaptures || []).find((item) =>
+    captureRole(item) === role &&
+    (item.cycle_number == null || Number(item.cycle_number) === cycle)
+  );
+  const signal = String(capture?.signal || "");
+  if (
+    String(capture?.status || "").toLowerCase() === "unreachable" &&
+    /expired|no longer active|no longer available/i.test(signal)
+  ) {
+    return `The builder's ${label} link is expired - ask the builder to send a fresh ${label} link.`;
+  }
+  if (String(capture?.status || "").toLowerCase() === "not_done") {
+    return `The builder's ${label} form is not submitted and locked - ask the trade to finish it in Prime.`;
+  }
+  return `The ${label} link still needs a headless capture proving the Prime form is submitted and locked.`;
+}
+
 export function reportInEvidence(input: MakesafeStatusInput): {
   satisfied: boolean;
   missing: string[];
@@ -177,9 +228,9 @@ export function reportInEvidence(input: MakesafeStatusInput): {
   const required = kind === "roof_report"
     ? ["roof_report"]
     : ["assessment_report", "photos", "quote"];
-  const missing = required.filter((role) => !done.has(role)).map((role) =>
-    `locked portal capture: ${role}`
-  );
+  const links = externalPortalRoles(input);
+  const missing = required.filter((role) => !done.has(role) || !links.has(role))
+    .map((role) => portalWaitingSentence(input, role));
   return { satisfied: missing.length === 0, missing };
 }
 

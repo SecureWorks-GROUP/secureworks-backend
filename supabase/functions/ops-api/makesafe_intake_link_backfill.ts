@@ -21,17 +21,18 @@
 //     deletes, NEVER reopens, NEVER touches job status/substatus, NEVER re-drafts.
 //   - DRY-RUN FIRST (default). The dry run returns exactly what WOULD be patched,
 //     per job, with the evidence email id. A human runs the live patch.
-//   - It only ADDS links to jobs that are MISSING them; a job that already has any
-//     external_links is left untouched (never overwrites operator edits).
+//   - It completes typed report recipes without replacing operator links. A partial
+//     assessment triad is merged in place; a complete recipe is left untouched.
 //
 // The pure summarizer takes already-read rows so it is fully unit-testable; the DB
 // action does the reads + (only when dryRun=false) the in-place patch.
 
 import {
+  type BuilderEmailLink,
   extractBuilderEmailLinks,
   mergeDeterministicAndClaudeLinks,
+  mergeIntoExternalLinks,
   normalizeReportExternalLinks,
-  type BuilderEmailLink,
 } from "./makesafe_email_links.ts";
 
 // Report-family jobs are the ones whose actionable deliverable is a portal link
@@ -54,6 +55,8 @@ export interface LinkBackfillJobInput {
   current_external_links?: any;
   /** full emails.body_content of the original WO email (null if purged/not found). */
   email_body?: string | null;
+  /** deterministic text recovered from the original WO attachment/PDF. */
+  email_attachment_text?: string | null;
   /** the linking draft's extraction_json (may already hold portal_links). */
   draft_extraction?: any;
   /** the source email post id (evidence for the audit trail). */
@@ -67,6 +70,7 @@ export interface LinkBackfillPatch {
   recovered_links: BuilderEmailLink[];
   sources: string[];
   evidence_email_id: string | null;
+  waiting_on: string[];
 }
 
 export interface LinkBackfillReport {
@@ -81,7 +85,11 @@ export interface LinkBackfillReport {
     jobs_applied: number;
   };
   patches: LinkBackfillPatch[];
-  no_source: Array<{ job_id: string; external_ref: string | null }>;
+  no_source: Array<{
+    job_id: string;
+    external_ref: string | null;
+    waiting_on: string[];
+  }>;
 }
 
 function parseObj(value: any): Record<string, any> {
@@ -98,12 +106,35 @@ function parseObj(value: any): Record<string, any> {
   return {};
 }
 
-function existingLinkCount(current: any): number {
-  // makesafe_job_details.external_links is an array of {label,url,kind,source}. Treat
-  // any non-empty array (or a bare non-empty legacy value) as "already has links".
-  if (Array.isArray(current)) return current.filter((l) => l && (l.url || typeof l === "string")).length;
-  const norm = normalizeReportExternalLinks(current && typeof current === "object" ? current : null);
-  return norm.length;
+function currentLinks(current: any): BuilderEmailLink[] {
+  return mergeIntoExternalLinks(current, []).links;
+}
+
+function requiredKinds(job: LinkBackfillJobInput): string[] {
+  return jobFamilyOf(job) === "assessment_report_quote"
+    ? ["assessment_report", "photos", "quote"]
+    : ["roof_report"];
+}
+
+function missingKinds(
+  job: LinkBackfillJobInput,
+  links: BuilderEmailLink[],
+): string[] {
+  const found = new Set(links.map((link) => link.kind));
+  return requiredKinds(job).filter((kind) => !found.has(kind));
+}
+
+function waitingSentence(kind: string): string {
+  if (kind === "assessment_report") {
+    return "The work order email contains no assessment link - ask the builder to send it.";
+  }
+  if (kind === "photos") {
+    return "The work order email contains no photos link - ask the builder to send it.";
+  }
+  if (kind === "quote") {
+    return "The work order email contains no quote/scope link - ask the builder to send it.";
+  }
+  return "The work order email contains no roof report link - ask the builder to send it.";
 }
 
 function jobFamilyOf(job: LinkBackfillJobInput): string | null {
@@ -131,8 +162,16 @@ export function recoverJobLinks(job: LinkBackfillJobInput): {
   sources: string[];
 } {
   const sources: string[] = [];
-  const bodyLinks = extractBuilderEmailLinks(job.email_body || "");
-  if (bodyLinks.length) sources.push("email_body");
+  const bodyLinks = extractBuilderEmailLinks(
+    job.email_body || "",
+    job.email_attachment_text || "",
+  );
+  if (bodyLinks.some((link) => link.source === "email_body")) {
+    sources.push("email_body");
+  }
+  if (bodyLinks.some((link) => link.source === "attachment_text")) {
+    sources.push("attachment_text");
+  }
 
   // mergeDeterministicAndClaudeLinks unions body-extracted links with any links the
   // draft's extraction already captured (canonical {label,url,kind,source} shape).
@@ -147,6 +186,35 @@ export function recoverJobLinks(job: LinkBackfillJobInput): {
   return { links: merged, sources };
 }
 
+export function selectLegacyWorkOrderEmail(
+  externalRef: string | null | undefined,
+  rows: any[],
+): any | null {
+  const ref = String(externalRef || "").trim().toLowerCase();
+  if (!ref) return null;
+  const escaped = ref.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const exactRef = new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, "i");
+  const candidates = (rows || []).filter((candidate) => {
+    const haystack = `${candidate.subject || ""}\n${
+      candidate.body_preview || ""
+    }\n${candidate.body_content || ""}`;
+    return exactRef.test(haystack);
+  });
+  candidates.sort((a, b) => {
+    const score = (candidate: any) => {
+      const body = candidate.body_content || candidate.body_preview || "";
+      const links = extractBuilderEmailLinks(body).length;
+      const subject = String(candidate.subject || "");
+      return links * 100 +
+        (/new work order|work order/i.test(subject) ? 20 : 0) +
+        (/our ref/i.test(subject) ? 10 : 0);
+    };
+    return score(b) - score(a) ||
+      String(b.received_at || "").localeCompare(String(a.received_at || ""));
+  });
+  return candidates[0] || null;
+}
+
 export function summarizeLinkBackfill(input: {
   jobs: LinkBackfillJobInput[];
   dryRun?: boolean;
@@ -159,20 +227,30 @@ export function summarizeLinkBackfill(input: {
   const jobs = input.jobs || [];
 
   const patches: LinkBackfillPatch[] = [];
-  const noSource: Array<{ job_id: string; external_ref: string | null }> = [];
+  const noSource: LinkBackfillReport["no_source"] = [];
   let reportFamilyMissing = 0;
 
   for (const job of jobs) {
     if (!isReportFamily(job)) continue;
     // OPEN = not archived (default). A report job that is done but link-less can still
     // be patched by opting into includeArchived.
-    if (!includeArchived && String(job.job_status || "").toLowerCase() === "archived") continue;
-    if (existingLinkCount(job.current_external_links) > 0) continue; // already has links
+    if (
+      !includeArchived &&
+      String(job.job_status || "").toLowerCase() === "archived"
+    ) continue;
+    const existing = currentLinks(job.current_external_links);
+    if (missingKinds(job, existing).length === 0) continue;
 
     reportFamilyMissing++;
-    const { links, sources } = recoverJobLinks(job);
-    if (!links.length) {
-      noSource.push({ job_id: job.job_id, external_ref: job.external_ref || null });
+    const recovered = recoverJobLinks(job);
+    const merged = mergeIntoExternalLinks(existing, recovered.links);
+    const waitingOn = missingKinds(job, merged.links).map(waitingSentence);
+    if (!merged.added.length && !merged.upgraded.length) {
+      noSource.push({
+        job_id: job.job_id,
+        external_ref: job.external_ref || null,
+        waiting_on: waitingOn,
+      });
       continue;
     }
     if (patches.length >= limit) continue;
@@ -180,9 +258,10 @@ export function summarizeLinkBackfill(input: {
       job_id: job.job_id,
       external_ref: job.external_ref || null,
       family: jobFamilyOf(job),
-      recovered_links: links,
-      sources,
+      recovered_links: merged.links,
+      sources: recovered.sources,
       evidence_email_id: job.evidence_email_id || null,
+      waiting_on: waitingOn,
     });
   }
 
@@ -222,7 +301,11 @@ export async function makesafeIntakeLinkBackfill(
     )
     .not("external_ref", "is", null)
     .limit(2000);
-  if (detailErr) throw new Error(`makesafe_job_details read failed: ${detailErr.message ?? detailErr}`);
+  if (detailErr) {
+    throw new Error(
+      `makesafe_job_details read failed: ${detailErr.message ?? detailErr}`,
+    );
+  }
 
   const jobIds = (detailRows || []).map((r: any) => r.job_id).filter(Boolean);
 
@@ -232,15 +315,20 @@ export async function makesafeIntakeLinkBackfill(
   if (jobIds.length) {
     const { data: draftRows } = await client
       .from("makesafe_intake_drafts")
-      .select("approved_job_id, graph_message_id, extraction_json, body_preview")
+      .select(
+        "approved_job_id, graph_message_id, extraction_json, body_preview",
+      )
       .in("approved_job_id", jobIds);
     for (const d of (draftRows || [])) {
-      if (d.approved_job_id && !draftByJob.has(d.approved_job_id)) draftByJob.set(d.approved_job_id, d);
+      if (d.approved_job_id && !draftByJob.has(d.approved_job_id)) {
+        draftByJob.set(d.approved_job_id, d);
+      }
     }
   }
 
   // Full original email bodies (deterministic link source). Purged rows return null body.
-  const postIds = [...draftByJob.values()].map((d) => d.graph_message_id).filter(Boolean);
+  const postIds = [...draftByJob.values()].map((d) => d.graph_message_id)
+    .filter(Boolean);
   const emailByPost = new Map<string, any>();
   if (postIds.length) {
     const { data: emailRows } = await client
@@ -250,14 +338,51 @@ export async function makesafeIntakeLinkBackfill(
     for (const e of (emailRows || [])) emailByPost.set(e.post_id, e);
   }
 
+  // Legacy report cards can predate makesafe_intake_drafts. Recover their exact
+  // original work-order email by builder reference instead of treating the missing
+  // draft join as proof that the email is absent.
+  const needsLegacyEmail = (detailRows || []).some((row: any) =>
+    row?.job_id && !draftByJob.has(row.job_id)
+  );
+  const legacyEmailRows: any[] = [];
+  if (needsLegacyEmail) {
+    const { data: rows, error: legacyEmailErr } = await client
+      .from("emails")
+      .select(
+        "post_id, subject, body_content, body_preview, pii_purged_at, received_at",
+      )
+      .is("pii_purged_at", null)
+      .order("received_at", { ascending: false })
+      .limit(5000);
+    if (legacyEmailErr) {
+      console.warn(
+        "[ops-api] link backfill legacy email read failed:",
+        legacyEmailErr.message,
+      );
+    } else {
+      legacyEmailRows.push(...(rows || []));
+    }
+  }
+
   const jobs: LinkBackfillJobInput[] = (detailRows || []).map((r: any) => {
     const jobsData = Array.isArray(r.jobs) ? r.jobs[0] : r.jobs;
     const meta = parseObj(jobsData?.metadata);
     const draft = draftByJob.get(r.job_id);
-    const email = draft?.graph_message_id ? emailByPost.get(draft.graph_message_id) : null;
+    let email = draft?.graph_message_id
+      ? emailByPost.get(draft.graph_message_id)
+      : null;
+    if (!email && r.external_ref) {
+      email = selectLegacyWorkOrderEmail(r.external_ref, legacyEmailRows);
+    }
     const emailBody = email && !email.pii_purged_at
       ? (email.body_content || email.body_preview || null)
       : null;
+    const extraction = parseObj(draft?.extraction_json);
+    const attachmentText = [
+      extraction.attachment_text,
+      extraction.pdf_text,
+      extraction.source_text,
+    ].filter((value) => typeof value === "string" && value.trim()).join("\n");
     return {
       job_id: r.job_id,
       external_ref: r.external_ref,
@@ -268,8 +393,9 @@ export async function makesafeIntakeLinkBackfill(
       job_status: jobsData?.status || null,
       current_external_links: r.external_links,
       email_body: emailBody || draft?.body_preview || null,
+      email_attachment_text: attachmentText || null,
       draft_extraction: draft?.extraction_json ?? null,
-      evidence_email_id: draft?.graph_message_id || null,
+      evidence_email_id: draft?.graph_message_id || email?.post_id || null,
     };
   });
 
@@ -289,18 +415,31 @@ export async function makesafeIntakeLinkBackfill(
     try {
       const { error: detErr } = await client
         .from("makesafe_job_details")
-        .update({ external_links: patch.recovered_links, updated_at: new Date().toISOString() })
+        .update({
+          external_links: patch.recovered_links,
+          updated_at: new Date().toISOString(),
+        })
         .eq("job_id", patch.job_id);
       if (detErr) {
-        console.warn("[ops-api] link backfill detail patch failed:", patch.job_id, detErr.message);
+        console.warn(
+          "[ops-api] link backfill detail patch failed:",
+          patch.job_id,
+          detErr.message,
+        );
         continue;
       }
       // Mirror into jobs.metadata.external_links (client alias) without disturbing other
       // metadata keys.
-      const { data: jobRow } = await client.from("jobs").select("metadata").eq("id", patch.job_id).maybeSingle();
+      const { data: jobRow } = await client.from("jobs").select("metadata").eq(
+        "id",
+        patch.job_id,
+      ).maybeSingle();
       const meta = parseObj(jobRow?.metadata);
       meta.external_links = patch.recovered_links;
-      await client.from("jobs").update({ metadata: meta }).eq("id", patch.job_id);
+      await client.from("jobs").update({ metadata: meta }).eq(
+        "id",
+        patch.job_id,
+      );
       // Audit trail.
       try {
         await client.from("job_events").insert({
@@ -317,7 +456,11 @@ export async function makesafeIntakeLinkBackfill(
       } catch (_) { /* non-blocking audit */ }
       applied++;
     } catch (e) {
-      console.warn("[ops-api] link backfill patch threw:", patch.job_id, (e as Error).message);
+      console.warn(
+        "[ops-api] link backfill patch threw:",
+        patch.job_id,
+        (e as Error).message,
+      );
     }
   }
   report.counts.jobs_applied = applied;

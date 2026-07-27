@@ -411,6 +411,7 @@ import {
   portalRecheckDue as _portalRecheckDue,
   portalRecheckEligible as _portalRecheckEligible,
   portalVerificationSatisfied as _portalVerificationSatisfied,
+  validatePortalEvidenceForReportType as _validatePortalEvidenceForReportType,
   reportInSatisfied as _reportInSatisfied,
   substatusAdvanceNeedsPortalVerification as _substatusAdvanceNeedsPortalVerification,
   substatusAdvanceNeedsReportIn as _substatusAdvanceNeedsReportIn,
@@ -12696,7 +12697,7 @@ async function markMakesafePortalReportDone(client: any, body: any) {
   }
 
   const { data: detail, error } = await client.from('makesafe_job_details')
-    .select('job_id, substatus, report_type, external_links, report_received_at, cycle_number, portal_verified_at, portal_verified_cycle')
+    .select('job_id, substatus, report_type, external_links, report_received_at, cycle_number, portal_verified_at, portal_verified_cycle, portal_verified_signal')
     .eq('job_id', jId)
     .maybeSingle()
   if (error) throw error
@@ -12726,6 +12727,22 @@ async function markMakesafePortalReportDone(client: any, body: any) {
       healReportType = familyType
     }
   }
+
+  const effectiveLinks = mergePortalLink(detail.external_links) ||
+    (Array.isArray(detail.external_links) ? detail.external_links : [])
+  const assessmentProof = reportType === 'assessment_report'
+    ? _validatePortalEvidenceForReportType(
+      reportType,
+      effectiveLinks,
+      body.portal_evidence || body.portalEvidence,
+    )
+    : null
+  if (assessmentProof && !assessmentProof.ready) {
+    throw new ApiError(
+      `assessment triad is not ready: ${assessmentProof.waiting_on.join(' ')}`,
+      409,
+    )
+  }
   if (!reportType) {
     throw new ApiError('mark_makesafe_portal_report_done is restricted to report-type jobs: neither makesafe_job_details.report_type nor a report-family jobs.metadata.makesafe_job_family is set for this job. A normal make-safe must submit its real report.', 409)
   }
@@ -12737,12 +12754,36 @@ async function markMakesafePortalReportDone(client: any, body: any) {
   // fresh verification. The item-14 guard (substatus advance + draft invoice) then
   // requires portal_verified_cycle == cycle_number before automation may proceed.
   const currentCycle = Number(detail.cycle_number ?? 1)
+  let priorAssessmentProof = false
+  if (reportType === 'assessment_report' && typeof detail.portal_verified_signal === 'string') {
+    try {
+      const prior = JSON.parse(detail.portal_verified_signal)
+      priorAssessmentProof = _validatePortalEvidenceForReportType(
+        reportType,
+        detail.external_links,
+        prior?.captures || prior?.entries || prior,
+      ).ready
+    } catch {
+      priorAssessmentProof = false
+    }
+  }
   const alreadyVerifiedThisCycle = !!detail.portal_verified_at &&
-    Number(detail.portal_verified_cycle) === currentCycle
+    Number(detail.portal_verified_cycle) === currentCycle &&
+    (reportType !== 'assessment_report' || priorAssessmentProof)
   const nowIso = new Date().toISOString()
-  const verifySignal = String(body.portal_signal || body.portalSignal || '').trim() ||
-    'operator-confirmed portal locked'
-  const verifyActor = body.operator_email || body.user_email || body.operator || 'portal_done_marker'
+  const verifySignal = assessmentProof
+    ? JSON.stringify({
+      version: 'assessment-prime-triad-proof/v1',
+      captures: assessmentProof.evidence.map((entry) => ({
+        ...entry,
+        cycle_number: currentCycle,
+      })),
+    })
+    : String(body.portal_signal || body.portalSignal || '').trim() ||
+      'operator-confirmed portal locked'
+  const verifyActor = body.verified_by || body.verifiedBy ||
+    body.operator_email || body.user_email || body.operator ||
+    'portal_done_marker'
   // The verification stamp, applied on both the advance path and the graf-recovery
   // idempotent path (see below). Only written when not already verified this cycle.
   const verificationStamp = {
@@ -12844,6 +12885,7 @@ async function markMakesafePortalReportDone(client: any, body: any) {
       portal_verified: true,
       portal_verified_cycle: currentCycle,
       portal_verified_signal: verifySignal,
+      portal_verified_by: verifyActor,
       changed_at: nowIso,
       operator: verifyActor,
     },
@@ -21414,15 +21456,18 @@ async function assertLegacySesInvoiceSendAllowed(
   }
   if (!docket.data) return
 
-  throw new ApiError(409, {
-    success: false,
-    refusal: {
-      state: 'refused',
-      code: 'u6r_release_required',
-      fact: `The sealed SES invoice cannot use legacy ${action}; U6R SEND IT is the only release and provider-effect path.`,
-      recovery_action: 'Complete the U6 review, approve SEND IT, then use execute_ses_release_revision for the exact route and closeout.',
-    },
-  })
+  const refusal = {
+    state: 'refused',
+    code: 'u6r_release_required',
+    fact:
+      `The sealed SES invoice cannot use legacy ${action}; U6R SEND IT is the only release and provider-effect path.`,
+    recovery_action:
+      'Complete the U6 review, approve SEND IT, then use execute_ses_release_revision for the exact route and closeout.',
+  }
+  throw new ApiError(
+    `${refusal.code}: ${refusal.fact} ${refusal.recovery_action}`,
+    409,
+  )
 }
 
 interface CreateInvoiceInternalOptions {

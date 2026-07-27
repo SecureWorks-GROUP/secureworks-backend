@@ -176,6 +176,16 @@ The follow-up live binding registers `prepare_ses_docket_revision` in
 deploy required-action manifest, and supplies the canonical
 `ses.assembler-input/v1` adapter in `ses_assembler_input_adapter.ts`.
 
+### Assessment recipe addendum — 2026-07-27
+
+The Captain subsequently sealed assessment as
+`assessment-triad-invoice-only/2026-07-27`. The intentional assessment hold
+described above is therefore superseded: the ready recipe is work order + typed
+Prime assessment/photos/quote-or-scope links + screenshot-backed locked captures
+for all three + the fixed assessment invoice proposal. It produces one invoice
+draft and no SWMS, local report, or separate photo draft. Human-only portal
+confirmation cannot satisfy the assessment floor.
+
 Callers provide a card selector, never a hand-authored envelope:
 
 ```bash
@@ -207,5 +217,5 @@ communication row is mutated.
 The backend still does not pretend it can inspect a Prime SPA: real portal
 screenshots remain owned by the approved agent-side
 `capture_portal_evidence.py` runner. Until that capability is bound into a run,
-portal cards fail closed as `capability_portal_degraded`. Assessment remains
-Captain-held as `assessment_recipe_unapproved`.
+portal cards fail closed as `capability_portal_degraded`. Assessment cards use
+the sealed recipe above but remain unavailable until the live adapter is bound.

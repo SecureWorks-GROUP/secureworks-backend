@@ -25,7 +25,7 @@ import {
 } from "./ses_docket_persistence.ts";
 import {
   prepare_ses_docket_revision as prepareSesDocketRevision,
-  SES_ASSESSMENT_RECIPE_PENDING,
+  SES_ASSESSMENT_RECIPE_VERSION,
   type SesPersistPayload,
   type SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
@@ -84,7 +84,7 @@ function fixtureInput(
       lineage_kind: "none",
       family_matrix_version: SES_FAMILY_MATRIX_VERSION,
       assessment_outbound_recipe_version: row.family === "assessment_quote"
-        ? SES_ASSESSMENT_RECIPE_PENDING
+        ? SES_ASSESSMENT_RECIPE_VERSION
         : null,
     },
     source: {
@@ -530,26 +530,44 @@ Deno.test("physical docket copies every current-cycle photo and blocks an incomp
   );
 });
 
-Deno.test("assessment triad is captured but the unsealed outbound recipe blocks all drafts", async () => {
+Deno.test("assessment triad produces an invoice-only draft at the sealed price", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.family === "assessment_quote"
   )!;
   const input = fixtureInput(row);
+  input.hrcw = {
+    hrcw: true,
+    categories: ["asbestos"],
+    source_hazard_terms: ["asbestos"],
+  };
   const response = await prepareSesDocketRevision(
     request(input.identity.job_id),
     dependencies(input),
   );
   const result = response.results[0];
-  assertEquals(result.state, "blocked");
+  assertEquals(result.state, "ready");
   assertEquals(result.portal_evidence.length, 3);
-  assertEquals(result.email_drafts, {});
-  assert(
-    blockerCodes(result).includes("assessment_recipe_unapproved"),
+  assertEquals(Object.keys(result.email_drafts), ["INVOICE_EMAIL_DRAFT"]);
+  assertStringIncludes(
+    result.email_drafts.INVOICE_EMAIL_DRAFT,
+    "assessment, photo schedule and quote",
   );
   assertEquals(
     result.envelope.v2.items.draft_invoice_bundle_email.state,
-    "blocked",
+    "ready",
   );
+  assertEquals(result.invoice_proposal?.subtotal_ex_gst, 150);
+  assertEquals(result.invoice_proposal?.total_inc_gst, 165);
+  assertEquals(result.envelope.v2.items.swms_artifact.state, "not_applicable");
+
+  const fenceOnly = fixtureInput(row);
+  fenceOnly.cycle_facts.hours_and_materials = { fence_only: true };
+  const fenceResult = (await prepareSesDocketRevision(
+    request(fenceOnly.identity.job_id),
+    dependencies(fenceOnly),
+  )).results[0];
+  assertEquals(fenceResult.invoice_proposal?.subtotal_ex_gst, 130);
+  assertEquals(fenceResult.invoice_proposal?.total_inc_gst, 143);
 });
 
 Deno.test("temporary fencing rejects missing typed panel/base evidence", async () => {

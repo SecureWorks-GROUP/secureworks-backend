@@ -117,11 +117,27 @@ Deno.test("computed status: assessment is fail-closed until all three typed capt
   };
   const oneOfThree = computeMakesafeStatus(base);
   assertEquals(oneOfThree.status, "allocated");
-  assert(oneOfThree.missing.includes("locked portal capture: photos"));
-  assert(oneOfThree.missing.includes("locked portal capture: quote"));
+  assert(
+    oneOfThree.missing.includes(
+      "The work order email contains no photos link - ask the builder to send it.",
+    ),
+  );
+  assert(
+    oneOfThree.missing.includes(
+      "The work order email contains no quote/scope link - ask the builder to send it.",
+    ),
+  );
 
   const threeOfThree = computeMakesafeStatus({
     ...base,
+    detail: {
+      ...base.detail,
+      external_links: [
+        ...base.detail.external_links,
+        { kind: "photos", url: "https://portal.test/p" },
+        { kind: "scope", url: "https://portal.test/q" },
+      ],
+    },
     evidence: {
       portalCaptures: [
         { status: "done", role: "assessment_report", cycle_number: 3 },

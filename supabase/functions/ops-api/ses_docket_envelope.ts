@@ -57,6 +57,7 @@ export interface SesAssemblerInputV1 {
         | "assessment"
         | "photos"
         | "scope"
+        | "quote"
         | "builder_portal"
         | "other";
       url: string;

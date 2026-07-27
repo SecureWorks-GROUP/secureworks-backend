@@ -154,10 +154,13 @@ export function canonicalizeKind(kind: string | null | undefined): string {
   if (k === "roof_report" || /^roof/.test(k)) return "roof_report";
   if (
     k === "assessment_report" || k.startsWith("assessment") || k === "assess" ||
-    k === "assessment_report_quote" || k === "scope_of_works" || k === "scope" ||
-    k === "inspection"
+    k === "assessment_report_quote" || k === "inspection"
   ) return "assessment_report";
-  if (k === "quote" || k === "quotation" || k === "estimate" || k.startsWith("quote")) {
+  if (
+    k === "quote" || k === "quotation" || k === "estimate" ||
+    k.startsWith("quote") || k === "scope" || k === "scope_of_works" ||
+    k === "scope_quote" || k === "quote_scope"
+  ) {
     return "quote";
   }
   if (
@@ -173,7 +176,7 @@ export function canonicalizeKind(kind: string | null | undefined): string {
 const KIND_LABEL: Record<string, string> = {
   roof_report: "Roof report link",
   assessment_report: "Assessment report link",
-  quote: "Quote link",
+  quote: "Scope / quote link",
   photos: "Photo/report portal link",
   builder_portal: "Builder portal link",
 };
@@ -182,13 +185,18 @@ const KIND_LABEL: Record<string, string> = {
 // heading line above it). Returns null when NO type keyword is present so the caller can
 // decide generic-or-flag rather than guess. Order matters: roof outranks assessment (a
 // "roof assessment" is a roof report); quote before the generic photo net.
-function kindFromText(text: string | null | undefined): { label: string; kind: string } | null {
+function kindFromText(
+  text: string | null | undefined,
+): { label: string; kind: string } | null {
   const c = String(text || "").toLowerCase();
   if (!c.trim()) return null;
   if (/\broof\b|roof[_\-\s]?report|roofing/.test(c)) {
     return { label: KIND_LABEL.roof_report, kind: "roof_report" };
   }
-  if (/assessment|\bassess\b|inspection|\binspect\b|scope of works|scope-of-works/.test(c)) {
+  if (/scope of works|scope-of-works|\bscope(?:\s+link)?\b/.test(c)) {
+    return { label: KIND_LABEL.quote, kind: "quote" };
+  }
+  if (/assessment|\bassess\b|inspection|\binspect\b/.test(c)) {
     return { label: KIND_LABEL.assessment_report, kind: "assessment_report" };
   }
   if (/quote|quotation|estimate|pricing/.test(c)) {
@@ -213,11 +221,13 @@ function kindFromUrlPath(url: string): { label: string; kind: string } | null {
   }
   // The generic share/report/portal path tokens are NOT type signals (every kind uses
   // them); only look at the descriptive segments.
-  if (/roof/.test(path)) return { label: KIND_LABEL.roof_report, kind: "roof_report" };
+  if (/roof/.test(path)) {
+    return { label: KIND_LABEL.roof_report, kind: "roof_report" };
+  }
   if (/assess|inspect/.test(path)) {
     return { label: KIND_LABEL.assessment_report, kind: "assessment_report" };
   }
-  if (/quote|quotation|estimate/.test(path)) {
+  if (/quote|quotation|estimate|scope/.test(path)) {
     return { label: KIND_LABEL.quote, kind: "quote" };
   }
   if (/photo|images?|gallery/.test(path)) {
@@ -240,14 +250,17 @@ export function extractAnchorTextMap(
   const map = new Map<string, string>();
   const raw = String(rawHtmlOrText || "");
   if (!raw) return map;
-  const re = /<a\b[^>]*?href=["'](https?:\/\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const re =
+    /<a\b[^>]*?href=["'](https?:\/\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(raw)) !== null) {
     const url = cleanUrl(m[1]);
     if (!url) continue;
     const key = url.toLowerCase();
     if (map.has(key)) continue;
-    const anchorText = decodeEmailHtmlEntitiesForTest(m[2].replace(/<[^>]+>/g, " "))
+    const anchorText = decodeEmailHtmlEntitiesForTest(
+      m[2].replace(/<[^>]+>/g, " "),
+    )
       .replace(/\s+/g, " ").trim();
     if (anchorText) map.set(key, anchorText);
   }
@@ -283,13 +296,21 @@ function inferTriadFromSiblings(
   portalLinks: BuilderEmailLink[],
 ): void {
   if (portalLinks.length !== 3) return;
-  const typed = portalLinks.filter((l) => canonicalizeKind(l.kind) !== "builder_portal");
-  const generic = portalLinks.filter((l) => canonicalizeKind(l.kind) === "builder_portal");
+  const typed = portalLinks.filter((l) =>
+    canonicalizeKind(l.kind) !== "builder_portal"
+  );
+  const generic = portalLinks.filter((l) =>
+    canonicalizeKind(l.kind) === "builder_portal"
+  );
   if (typed.length !== 2 || generic.length !== 1) return;
   const typedKinds = new Set(typed.map((l) => canonicalizeKind(l.kind)));
   // Both typed members must be DISTINCT triad roles, leaving exactly one triad role open.
   if (typedKinds.size !== 2) return;
-  if (![...typedKinds].every((k) => (TRIAD_ROLES as readonly string[]).includes(k))) return;
+  if (
+    ![...typedKinds].every((k) =>
+      (TRIAD_ROLES as readonly string[]).includes(k)
+    )
+  ) return;
   const missing = TRIAD_ROLES.filter((k) => !typedKinds.has(k));
   if (missing.length !== 1) return;
   const g = generic[0];
@@ -341,7 +362,9 @@ export function extractBuilderEmailLinks(
       const prevLineStart = lineStart > 0
         ? text.lastIndexOf("\n", prevLineEnd - 1) + 1
         : 0;
-      const prevLineRaw = lineStart > 0 ? text.slice(prevLineStart, prevLineEnd) : "";
+      const prevLineRaw = lineStart > 0
+        ? text.slice(prevLineStart, prevLineEnd)
+        : "";
       // Only trust the line above as a heading label when it is NOT itself a link line —
       // a stacked sibling link ("Quote: https://…") must never bleed its type onto the
       // bare link below it.
@@ -362,16 +385,14 @@ export function extractBuilderEmailLinks(
         // and flagged as an evidence gap — never guessed.
         seen.add(key);
         links.push(
-          classified
-            ? { ...classified, url, source }
-            : {
-              label: KIND_LABEL.builder_portal,
-              kind: "builder_portal",
-              url,
-              source,
-              evidence_gap:
-                "portal link captured but type undetermined (no anchor/line/path/sibling signal)",
-            },
+          classified ? { ...classified, url, source } : {
+            label: KIND_LABEL.builder_portal,
+            kind: "builder_portal",
+            url,
+            source,
+            evidence_gap:
+              "portal link captured but type undetermined (no anchor/line/path/sibling signal)",
+          },
         );
         continue;
       }
@@ -381,15 +402,13 @@ export function extractBuilderEmailLinks(
       if (urlLooksLikeFooterOrTracking(url, urlLineContext)) continue;
       seen.add(key);
       links.push(
-        classified
-          ? { ...classified, url, source }
-          : {
-            label: KIND_LABEL.builder_portal,
-            kind: "builder_portal",
-            url,
-            source,
-            evidence_gap: "builder link captured but type undetermined",
-          },
+        classified ? { ...classified, url, source } : {
+          label: KIND_LABEL.builder_portal,
+          kind: "builder_portal",
+          url,
+          source,
+          evidence_gap: "builder link captured but type undetermined",
+        },
       );
     }
   };
@@ -402,10 +421,15 @@ export function extractBuilderEmailLinks(
 
   const labelCounts = new Map<string, number>();
   return links.map((link) => {
-    const canonical: BuilderEmailLink = { ...link, kind: canonicalizeKind(link.kind) };
+    const canonical: BuilderEmailLink = {
+      ...link,
+      kind: canonicalizeKind(link.kind),
+    };
     const count = (labelCounts.get(canonical.label) || 0) + 1;
     labelCounts.set(canonical.label, count);
-    return count === 1 ? canonical : { ...canonical, label: `${canonical.label} ${count}` };
+    return count === 1
+      ? canonical
+      : { ...canonical, label: `${canonical.label} ${count}` };
   });
 }
 
@@ -531,13 +555,16 @@ export function mergeIntoExternalLinks(
     }
     // Same URL already present: idempotent by default (existing wins), except upgrade a
     // generic/untyped existing entry to the incoming specific type.
-    const existingGeneric = canonicalizeKind(existing.kind) === "builder_portal";
+    const existingGeneric =
+      canonicalizeKind(existing.kind) === "builder_portal";
     const incomingSpecific = link.kind !== "builder_portal";
     if (existingGeneric && incomingSpecific) {
       const upgradedLink: BuilderEmailLink = {
         ...existing,
         kind: link.kind,
-        label: isDefaultGenericLabel(existing.label) ? link.label : existing.label,
+        label: isDefaultGenericLabel(existing.label)
+          ? link.label
+          : existing.label,
       };
       delete upgradedLink.evidence_gap;
       byUrl.set(key, upgradedLink);
@@ -576,7 +603,9 @@ export function mergeDeterministicAndClaudeLinks(
       label: parsed.label || existing.label,
       kind: parsedSpecific ? parsed.kind : existing.kind,
     };
-    if (canonicalizeKind(merged.kind) !== "builder_portal") delete merged.evidence_gap;
+    if (canonicalizeKind(merged.kind) !== "builder_portal") {
+      delete merged.evidence_gap;
+    }
     byUrl.set(key, merged);
   }
   const legacy = linkFromAny(

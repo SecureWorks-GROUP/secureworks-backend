@@ -9,7 +9,11 @@
 //     invoice, NO send, NO notification — proven here as ZERO outbound fetches;
 //   - idempotent: a repeat call on an already-marked (or further-advanced) job
 //     returns ok with zero writes and zero duplicate events.
-import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _createMakesafeJob, _markMakesafePortalReportDone } from "./index.ts";
 
 // ── Minimal chainable Supabase mock ─────────────────────────────────────────
@@ -34,16 +38,24 @@ function makeClient(store: Store) {
         const existing = store.details?.[filters.job_id] ?? {};
         return { ...existing, ...updateRow };
       }
-      if (table === "makesafe_job_details") return store.details?.[filters.job_id] ?? null;
+      if (table === "makesafe_job_details") {
+        return store.details?.[filters.job_id] ?? null;
+      }
       if (table === "jobs") return store.jobs?.[filters.id] ?? null;
       return null;
     };
     let updateRec: { table: string; row: any; job_id?: any } | null = null;
     const b: any = {
       select: () => b,
-      insert: (row: any) => { op = "insert"; insertRow = row; store.inserts!.push({ table, row }); return b; },
+      insert: (row: any) => {
+        op = "insert";
+        insertRow = row;
+        store.inserts!.push({ table, row });
+        return b;
+      },
       update: (row: any) => {
-        op = "update"; updateRow = row;
+        op = "update";
+        updateRow = row;
         updateRec = { table, row };
         store.updates!.push(updateRec);
         return b;
@@ -58,9 +70,11 @@ function makeClient(store: Store) {
       ilike: () => b,
       limit: () => b,
       order: () => b,
-      maybeSingle: () => Promise.resolve({ data: resolveSingle(), error: null }),
+      maybeSingle: () =>
+        Promise.resolve({ data: resolveSingle(), error: null }),
       single: () => Promise.resolve({ data: resolveSingle(), error: null }),
-      then: (res: any, rej: any) => Promise.resolve({ data: null, error: null }).then(res, rej),
+      then: (res: any, rej: any) =>
+        Promise.resolve({ data: null, error: null }).then(res, rej),
       catch: () => Promise.resolve({ data: null, error: null }),
     };
     return b;
@@ -79,7 +93,12 @@ function stubFetch() {
     calls.push(String(input instanceof Request ? input.url : input));
     return Promise.resolve(new Response("{}", { status: 200 }));
   }) as typeof fetch;
-  return { calls, restore: () => { globalThis.fetch = original; } };
+  return {
+    calls,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
 
 async function flush() {
@@ -91,31 +110,82 @@ const REPORT_TYPE_DETAIL = {
   substatus: "waiting_on_trade_report",
   report_type: "roof_report",
   external_links: [
-    { label: "Roof report link", url: "https://portal.example/existing", kind: "roof_report", source: "claude" },
+    {
+      label: "Roof report link",
+      url: "https://portal.example/existing",
+      kind: "roof_report",
+      source: "claude",
+    },
   ],
   report_received_at: null,
 };
+
+const ASSESSMENT_LINKS = [
+  {
+    label: "Assessment report",
+    url: "https://primeeco.tech/share/assessment",
+    kind: "assessment_report",
+  },
+  {
+    label: "Photos",
+    url: "https://primeeco.tech/share/photos",
+    kind: "photos",
+  },
+  {
+    label: "Scope of Works",
+    url: "https://primeeco.tech/share/scope",
+    kind: "scope",
+  },
+];
+
+const ASSESSMENT_EVIDENCE = ASSESSMENT_LINKS.map((link) => ({
+  role: link.kind,
+  url: link.url,
+  status: "done",
+  locked: true,
+  signal: "form locked/submitted",
+  screenshot: `/tmp/${link.kind}.png`,
+  checked_at: "2026-07-27T01:00:00Z",
+}));
 
 // ── (a) report-type job: state written, event logged, ok ────────────────────
 Deno.test("portal-done: report-type job -> substatus + report_received_at written, one job_event, ok", async () => {
   const { calls, restore } = stubFetch();
   try {
     const store: Store = { details: { "job-rt": { ...REPORT_TYPE_DETAIL } } };
-    const res = await _markMakesafePortalReportDone(makeClient(store), { job_id: "job-rt" });
+    const res = await _markMakesafePortalReportDone(makeClient(store), {
+      job_id: "job-rt",
+    });
     await flush();
 
     assertEquals(res.ok, true);
     assertEquals(res.already_done, false);
 
-    const upd = store.updates!.filter((u) => u.table === "makesafe_job_details");
+    const upd = store.updates!.filter((u) =>
+      u.table === "makesafe_job_details"
+    );
     assertEquals(upd.length, 1);
     assertEquals(upd[0].job_id, "job-rt");
     assertEquals(upd[0].row.substatus, "admin_to_send_report");
-    assert(typeof upd[0].row.report_received_at === "string" && upd[0].row.report_received_at.length > 0);
-    assertEquals("external_links" in upd[0].row, false, "no portal_url -> external_links untouched");
+    assert(
+      typeof upd[0].row.report_received_at === "string" &&
+        upd[0].row.report_received_at.length > 0,
+    );
+    assertEquals(
+      "external_links" in upd[0].row,
+      false,
+      "no portal_url -> external_links untouched",
+    );
     // W2-C: the marker records a cycle-scoped portal-locked verification (item-14 gate input).
-    assert(typeof upd[0].row.portal_verified_at === "string" && upd[0].row.portal_verified_at.length > 0);
-    assertEquals(upd[0].row.portal_verified_cycle, 1, "verification stamped for the current cycle (default 1)");
+    assert(
+      typeof upd[0].row.portal_verified_at === "string" &&
+        upd[0].row.portal_verified_at.length > 0,
+    );
+    assertEquals(
+      upd[0].row.portal_verified_cycle,
+      1,
+      "verification stamped for the current cycle (default 1)",
+    );
     assertEquals(res.verification_recorded, true);
 
     const events = store.inserts!.filter((i) => i.table === "job_events");
@@ -126,7 +196,10 @@ Deno.test("portal-done: report-type job -> substatus + report_received_at writte
     assertEquals(events[0].row.detail_json.portal_verified, true);
 
     // No report/doc/invoice writes of any kind.
-    assertEquals(store.inserts!.filter((i) => i.table !== "job_events").length, 0);
+    assertEquals(
+      store.inserts!.filter((i) => i.table !== "job_events").length,
+      0,
+    );
     assertEquals(calls.length, 0, "marker must trigger zero outbound fetches");
   } finally {
     restore();
@@ -138,10 +211,22 @@ Deno.test("portal-done: non-report-type job -> 409, zero writes, zero events", a
   const { calls, restore } = stubFetch();
   try {
     const store: Store = {
-      details: { "job-normal": { job_id: "job-normal", substatus: "waiting_on_trade_report", report_type: null, external_links: [] } },
+      details: {
+        "job-normal": {
+          job_id: "job-normal",
+          substatus: "waiting_on_trade_report",
+          report_type: null,
+          external_links: [],
+        },
+      },
     };
     const err: any = await assertRejects(
-      () => _markMakesafePortalReportDone(makeClient(store), { job_id: "job-normal", report_type: "roof_report", is_report_type: true }),
+      () =>
+        _markMakesafePortalReportDone(makeClient(store), {
+          job_id: "job-normal",
+          report_type: "roof_report",
+          is_report_type: true,
+        }),
       Error,
       "restricted to report-type jobs",
     );
@@ -161,7 +246,10 @@ Deno.test("portal-done: no makesafe_job_details row -> 404, zero writes", async 
   try {
     const store: Store = { details: {} };
     const err: any = await assertRejects(
-      () => _markMakesafePortalReportDone(makeClient(store), { job_id: "job-missing" }),
+      () =>
+        _markMakesafePortalReportDone(makeClient(store), {
+          job_id: "job-missing",
+        }),
       Error,
       "only applies to make-safe jobs",
     );
@@ -180,15 +268,34 @@ Deno.test("portal-done: no makesafe_job_details row -> 404, zero writes", async 
 Deno.test("portal-done: repeat on already-marked / further-advanced job -> ok, zero writes, zero events", async () => {
   const { calls, restore } = stubFetch();
   try {
-    for (const sub of ["admin_to_send_report", "ready_to_invoice", "complete"]) {
+    for (
+      const sub of ["admin_to_send_report", "ready_to_invoice", "complete"]
+    ) {
       // Already verified for the current cycle -> the repeat is a true no-op.
-      const store: Store = { details: { "job-rt": { ...REPORT_TYPE_DETAIL, substatus: sub, cycle_number: 1, portal_verified_at: "2026-07-07T00:00:00Z", portal_verified_cycle: 1 } } };
-      const res = await _markMakesafePortalReportDone(makeClient(store), { job_id: "job-rt", portal_url: "https://portal.example/existing" });
+      const store: Store = {
+        details: {
+          "job-rt": {
+            ...REPORT_TYPE_DETAIL,
+            substatus: sub,
+            cycle_number: 1,
+            portal_verified_at: "2026-07-07T00:00:00Z",
+            portal_verified_cycle: 1,
+          },
+        },
+      };
+      const res = await _markMakesafePortalReportDone(makeClient(store), {
+        job_id: "job-rt",
+        portal_url: "https://portal.example/existing",
+      });
       await flush();
       assertEquals(res.ok, true, sub);
       assertEquals(res.already_done, true, sub);
       assertEquals(res.substatus, sub, "never regresses an advanced job");
-      assertEquals(res.verification_recorded, false, `${sub}: already verified this cycle`);
+      assertEquals(
+        res.verification_recorded,
+        false,
+        `${sub}: already verified this cycle`,
+      );
       assertEquals(store.updates!.length, 0, `${sub}: no writes on repeat`);
       assertEquals(store.inserts!.length, 0, `${sub}: no duplicate events`);
     }
@@ -210,12 +317,18 @@ Deno.test("portal-done: portal_url is APPENDED to external_links, existing links
     await flush();
 
     assertEquals(res.ok, true);
-    const upd = store.updates!.filter((u) => u.table === "makesafe_job_details");
+    const upd = store.updates!.filter((u) =>
+      u.table === "makesafe_job_details"
+    );
     assertEquals(upd.length, 1);
     const links = upd[0].row.external_links;
     assertEquals(Array.isArray(links), true);
     assertEquals(links.length, 2, "merge, not replace");
-    assertEquals(links[0].url, "https://portal.example/existing", "existing link survives");
+    assertEquals(
+      links[0].url,
+      "https://portal.example/existing",
+      "existing link survives",
+    );
     assertEquals(links[1].url, "https://portal.example/new-report");
     assertEquals(links[1].kind, "builder_portal");
     assertEquals(calls.length, 0);
@@ -234,9 +347,15 @@ Deno.test("portal-done: a portal_url already in external_links is not duplicated
     );
     await flush();
     assertEquals(res.ok, true);
-    const upd = store.updates!.filter((u) => u.table === "makesafe_job_details");
+    const upd = store.updates!.filter((u) =>
+      u.table === "makesafe_job_details"
+    );
     assertEquals(upd.length, 1); // state still advances…
-    assertEquals("external_links" in upd[0].row, false, "…but external_links is not rewritten");
+    assertEquals(
+      "external_links" in upd[0].row,
+      false,
+      "…but external_links is not rewritten",
+    );
   } finally {
     restore();
   }
@@ -247,7 +366,11 @@ Deno.test("portal-done: non-http(s) portal_url -> 400, zero writes", async () =>
   try {
     const store: Store = { details: { "job-rt": { ...REPORT_TYPE_DETAIL } } };
     const err: any = await assertRejects(
-      () => _markMakesafePortalReportDone(makeClient(store), { job_id: "job-rt", portal_url: "javascript:alert(1)" }),
+      () =>
+        _markMakesafePortalReportDone(makeClient(store), {
+          job_id: "job-rt",
+          portal_url: "javascript:alert(1)",
+        }),
       Error,
       "http(s)",
     );
@@ -277,22 +400,44 @@ Deno.test("BE-2 (a): persisted report family with NO detail report_type -> accep
   const { calls, restore } = stubFetch();
   try {
     const store: Store = {
-      details: { "job-fam": { ...REPORT_TYPE_DETAIL, job_id: "job-fam", report_type: null } },
-      jobs: { "job-fam": { id: "job-fam", metadata: { makesafe_job_family: "roof_report" } } },
+      details: {
+        "job-fam": {
+          ...REPORT_TYPE_DETAIL,
+          job_id: "job-fam",
+          report_type: null,
+        },
+      },
+      jobs: {
+        "job-fam": {
+          id: "job-fam",
+          metadata: { makesafe_job_family: "roof_report" },
+        },
+      },
     };
-    const res = await _markMakesafePortalReportDone(makeClient(store), { job_id: "job-fam" });
+    const res = await _markMakesafePortalReportDone(makeClient(store), {
+      job_id: "job-fam",
+    });
     await flush();
 
     assertEquals(res.ok, true);
     assertEquals(res.already_done, false);
-    const upd = store.updates!.filter((u) => u.table === "makesafe_job_details");
+    const upd = store.updates!.filter((u) =>
+      u.table === "makesafe_job_details"
+    );
     assertEquals(upd.length, 1);
     assertEquals(upd[0].row.substatus, "admin_to_send_report");
-    assertEquals(upd[0].row.report_type, "roof_report", "report_type self-healed onto the detail row in the same update");
+    assertEquals(
+      upd[0].row.report_type,
+      "roof_report",
+      "report_type self-healed onto the detail row in the same update",
+    );
     const events = store.inserts!.filter((i) => i.table === "job_events");
     assertEquals(events.length, 1);
     assertEquals(events[0].row.detail_json.report_type, "roof_report");
-    assertEquals(events[0].row.detail_json.report_type_healed_from_family, true);
+    assertEquals(
+      events[0].row.detail_json.report_type_healed_from_family,
+      true,
+    );
     assertEquals(calls.length, 0);
   } finally {
     restore();
@@ -303,17 +448,67 @@ Deno.test("BE-2 (a2): assessment_report_quote family heals to the 'assessment_re
   const { restore } = stubFetch();
   try {
     const store: Store = {
-      details: { "job-fam": { ...REPORT_TYPE_DETAIL, job_id: "job-fam", report_type: null } },
-      jobs: { "job-fam": { id: "job-fam", metadata: { makesafe_job_family: "assessment_report_quote" } } },
+      details: {
+        "job-fam": {
+          ...REPORT_TYPE_DETAIL,
+          job_id: "job-fam",
+          report_type: null,
+          external_links: ASSESSMENT_LINKS,
+        },
+      },
+      jobs: {
+        "job-fam": {
+          id: "job-fam",
+          metadata: { makesafe_job_family: "assessment_report_quote" },
+        },
+      },
     };
-    const res = await _markMakesafePortalReportDone(makeClient(store), { job_id: "job-fam" });
+    const res = await _markMakesafePortalReportDone(makeClient(store), {
+      job_id: "job-fam",
+      portal_evidence: ASSESSMENT_EVIDENCE,
+      verified_by: "chrome-devtools-axi",
+    });
     await flush();
     assertEquals(res.ok, true);
-    const upd = store.updates!.filter((u) => u.table === "makesafe_job_details");
+    const upd = store.updates!.filter((u) =>
+      u.table === "makesafe_job_details"
+    );
     assertEquals(upd[0].row.report_type, "assessment_report");
+    const proof = JSON.parse(upd[0].row.portal_verified_signal);
+    assertEquals(proof.captures.map((capture: any) => capture.role), [
+      "assessment_report",
+      "photos",
+      "quote",
+    ]);
+    assertEquals(upd[0].row.portal_verified_by, "chrome-devtools-axi");
   } finally {
     restore();
   }
+});
+
+Deno.test("assessment marker rejects a human confirmation without the typed headless triad", async () => {
+  const store: Store = {
+    details: {
+      "job-assessment": {
+        ...REPORT_TYPE_DETAIL,
+        job_id: "job-assessment",
+        report_type: "assessment_report",
+        external_links: ASSESSMENT_LINKS,
+      },
+    },
+  };
+  const error: any = await assertRejects(
+    () =>
+      _markMakesafePortalReportDone(makeClient(store), {
+        job_id: "job-assessment",
+        portal_signal: "operator-confirmed portal locked",
+      }),
+    Error,
+    "assessment triad is not ready",
+  );
+  assertEquals(error.status, 409);
+  assertEquals(store.updates!.length, 0);
+  assertEquals(store.inserts!.length, 0);
 });
 
 Deno.test("BE-2 (b): NON-report family + client-supplied report-type flags -> still 409, zero writes", async () => {
@@ -321,15 +516,32 @@ Deno.test("BE-2 (b): NON-report family + client-supplied report-type flags -> st
   try {
     for (const family of ["general_makesafe", "temp_fence_makesafe"]) {
       const store: Store = {
-        details: { "job-fam": { ...REPORT_TYPE_DETAIL, job_id: "job-fam", report_type: null } },
-        jobs: { "job-fam": { id: "job-fam", metadata: { makesafe_job_family: family } } },
+        details: {
+          "job-fam": {
+            ...REPORT_TYPE_DETAIL,
+            job_id: "job-fam",
+            report_type: null,
+          },
+        },
+        jobs: {
+          "job-fam": {
+            id: "job-fam",
+            metadata: { makesafe_job_family: family },
+          },
+        },
       };
       const err: any = await assertRejects(
-        () => _markMakesafePortalReportDone(
-          makeClient(store),
-          // Client tries to smuggle report-type-ness in the body — ignored.
-          { job_id: "job-fam", report_type: "roof_report", is_report_type: true, makesafe_job_family: "roof_report" },
-        ),
+        () =>
+          _markMakesafePortalReportDone(
+            makeClient(store),
+            // Client tries to smuggle report-type-ness in the body — ignored.
+            {
+              job_id: "job-fam",
+              report_type: "roof_report",
+              is_report_type: true,
+              makesafe_job_family: "roof_report",
+            },
+          ),
         Error,
         "restricted to report-type jobs",
       );
@@ -356,9 +568,15 @@ Deno.test("BE-2 (c): createMakesafeJob with a roof_report family -> detail row c
     await flush();
 
     assertEquals(res.ok, true);
-    const detailInserts = store.inserts!.filter((i) => i.table === "makesafe_job_details");
+    const detailInserts = store.inserts!.filter((i) =>
+      i.table === "makesafe_job_details"
+    );
     assertEquals(detailInserts.length, 1);
-    assertEquals(detailInserts[0].row.report_type, "roof_report", "forward normalisation: family persists its report_type token at creation");
+    assertEquals(
+      detailInserts[0].row.report_type,
+      "roof_report",
+      "forward normalisation: family persists its report_type token at creation",
+    );
   } finally {
     restore();
   }
@@ -376,7 +594,9 @@ Deno.test("BE-2 (c2): createMakesafeJob with a non-report family -> detail repor
     });
     await flush();
     assertEquals(res.ok, true);
-    const detailInserts = store.inserts!.filter((i) => i.table === "makesafe_job_details");
+    const detailInserts = store.inserts!.filter((i) =>
+      i.table === "makesafe_job_details"
+    );
     assertEquals(detailInserts.length, 1);
     assertEquals(detailInserts[0].row.report_type, null);
   } finally {
@@ -392,7 +612,17 @@ Deno.test("FIX4: already-marked+verified job + NEW portal_url -> link merged, no
   const { calls, restore } = stubFetch();
   try {
     // Already verified this cycle -> a late URL is a pure link-merge, no re-stamp.
-    const store: Store = { details: { "job-rt": { ...REPORT_TYPE_DETAIL, substatus: "admin_to_send_report", cycle_number: 1, portal_verified_at: "2026-07-07T00:00:00Z", portal_verified_cycle: 1 } } };
+    const store: Store = {
+      details: {
+        "job-rt": {
+          ...REPORT_TYPE_DETAIL,
+          substatus: "admin_to_send_report",
+          cycle_number: 1,
+          portal_verified_at: "2026-07-07T00:00:00Z",
+          portal_verified_cycle: 1,
+        },
+      },
+    };
     const res = await _markMakesafePortalReportDone(
       makeClient(store),
       { job_id: "job-rt", portal_url: "https://portal.example/late-url" },
@@ -403,13 +633,30 @@ Deno.test("FIX4: already-marked+verified job + NEW portal_url -> link merged, no
     assertEquals(res.already_done, true);
     assertEquals(res.portal_link_added, true);
     assertEquals(res.verification_recorded, false);
-    const upd = store.updates!.filter((u) => u.table === "makesafe_job_details");
+    const upd = store.updates!.filter((u) =>
+      u.table === "makesafe_job_details"
+    );
     assertEquals(upd.length, 1, "exactly one link-merge update");
     const keys = Object.keys(upd[0].row).sort();
-    assertEquals(keys, ["external_links", "updated_at"], "link-only update: no substatus, no report_received_at, no re-stamp");
-    assertEquals(upd[0].row.external_links.length, 2, "existing link preserved + new one appended");
-    assertEquals(upd[0].row.external_links[1].url, "https://portal.example/late-url");
-    assertEquals(store.inserts!.length, 0, "no event on the pure link-merge path");
+    assertEquals(
+      keys,
+      ["external_links", "updated_at"],
+      "link-only update: no substatus, no report_received_at, no re-stamp",
+    );
+    assertEquals(
+      upd[0].row.external_links.length,
+      2,
+      "existing link preserved + new one appended",
+    );
+    assertEquals(
+      upd[0].row.external_links[1].url,
+      "https://portal.example/late-url",
+    );
+    assertEquals(
+      store.inserts!.length,
+      0,
+      "no event on the pure link-merge path",
+    );
     assertEquals(calls.length, 0);
   } finally {
     restore();
@@ -424,29 +671,61 @@ Deno.test("W2-C graf-recovery: advanced-but-UNVERIFIED card + marker -> verifica
   const { calls, restore } = stubFetch();
   try {
     const store: Store = {
-      details: { "job-graf": { ...REPORT_TYPE_DETAIL, job_id: "job-graf", substatus: "ready_to_invoice", cycle_number: 1, portal_verified_at: null, portal_verified_cycle: null } },
+      details: {
+        "job-graf": {
+          ...REPORT_TYPE_DETAIL,
+          job_id: "job-graf",
+          substatus: "ready_to_invoice",
+          cycle_number: 1,
+          portal_verified_at: null,
+          portal_verified_cycle: null,
+        },
+      },
     };
     const res = await _markMakesafePortalReportDone(
       makeClient(store),
-      { job_id: "job-graf", portal_url: "https://portal.example/late-url", portal_signal: "form locked/submitted, 30 of 33 answered" },
+      {
+        job_id: "job-graf",
+        portal_url: "https://portal.example/late-url",
+        portal_signal: "form locked/submitted, 30 of 33 answered",
+      },
     );
     await flush();
 
     assertEquals(res.ok, true);
     assertEquals(res.already_done, true);
-    assertEquals(res.substatus, "ready_to_invoice", "never regresses the advanced substatus");
+    assertEquals(
+      res.substatus,
+      "ready_to_invoice",
+      "never regresses the advanced substatus",
+    );
     assertEquals(res.verification_recorded, true);
-    const upd = store.updates!.filter((u) => u.table === "makesafe_job_details");
+    const upd = store.updates!.filter((u) =>
+      u.table === "makesafe_job_details"
+    );
     assertEquals(upd.length, 1);
-    assert(typeof upd[0].row.portal_verified_at === "string" && upd[0].row.portal_verified_at.length > 0);
+    assert(
+      typeof upd[0].row.portal_verified_at === "string" &&
+        upd[0].row.portal_verified_at.length > 0,
+    );
     assertEquals(upd[0].row.portal_verified_cycle, 1);
-    assertEquals(upd[0].row.portal_verified_signal, "form locked/submitted, 30 of 33 answered");
-    assertEquals("substatus" in upd[0].row, false, "no substatus write on the recovery path");
+    assertEquals(
+      upd[0].row.portal_verified_signal,
+      "form locked/submitted, 30 of 33 answered",
+    );
+    assertEquals(
+      "substatus" in upd[0].row,
+      false,
+      "no substatus write on the recovery path",
+    );
     assertEquals(upd[0].row.external_links.length, 2, "late URL merged too");
     const events = store.inserts!.filter((i) => i.table === "job_events");
     assertEquals(events.length, 1);
     assertEquals(events[0].row.event_type, "makesafe_portal_verified");
-    assertEquals(events[0].row.detail_json.recovery_of_pre_verified_advance, true);
+    assertEquals(
+      events[0].row.detail_json.recovery_of_pre_verified_advance,
+      true,
+    );
     assertEquals(calls.length, 0);
   } finally {
     restore();
