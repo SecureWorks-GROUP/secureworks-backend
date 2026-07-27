@@ -4365,7 +4365,12 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'send_invoice_email': {
         const { xero_invoice_id: siId, to_email: siTo, job_id: siJobId, cc: siCc, subject_override: siSubj } = body
         if (!siId) return json({ error: 'xero_invoice_id required' }, 400)
-        await assertLegacySesInvoiceSendAllowed(client, siId, 'send_invoice_email')
+        await assertLegacySesInvoiceSendAllowed(
+          client,
+          siId,
+          body.release_revision_id,
+          'send_invoice_email',
+        )
 
         // 2026-04-24 backward-compat fix: if to_email omitted, use Xero-direct email (legacy path).
         // Dashboard callers pass only xero_invoice_id; MCP sw_send_invoice_email passes to_email for Outlook+PDF.
@@ -4394,7 +4399,12 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'approve_and_send_invoice': {
         const asId = body.xero_invoice_id
         if (!asId) return json({ error: 'xero_invoice_id required' }, 400)
-        await assertLegacySesInvoiceSendAllowed(client, asId, 'approve_and_send_invoice')
+        await assertLegacySesInvoiceSendAllowed(
+          client,
+          asId,
+          body.release_revision_id,
+          'approve_and_send_invoice',
+        )
 
         // T3: verify email_override BEFORE any state change. When override is absent or
         // use_branded_email: false, the verifier returns {ok: true} and we fall through
@@ -21297,20 +21307,24 @@ function computeReferenceSuffix(jobNumber: string, reference: string): string | 
 async function assertLegacySesInvoiceSendAllowed(
   client: any,
   xeroInvoiceId: string,
+  releaseRevisionId: string | null | undefined,
   action: string,
 ) {
   const invoice = await client.from('xero_invoices')
-    .select('job_id').eq('xero_invoice_id', xeroInvoiceId).maybeSingle()
+    .select('job_id, invoice_obligation_revision_id')
+    .eq('xero_invoice_id', xeroInvoiceId).maybeSingle()
   if (invoice.error) {
     throw new ApiError(
       `The ${action} SES release gate could not check the invoice (${invoice.error.message}).`,
       503,
     )
   }
-  if (!invoice.data?.job_id) return
+  if (!invoice.data?.job_id || !invoice.data.invoice_obligation_revision_id) return
 
   const docket = await client.from('makesafe_docket_revisions')
     .select('id').eq('job_id', invoice.data.job_id)
+    .eq('invoice_obligation_revision_id', invoice.data.invoice_obligation_revision_id)
+    .eq('stage', 'invoice_bound')
     .order('committed_at', { ascending: false }).limit(1).maybeSingle()
   if (docket.error) {
     throw new ApiError(
@@ -21320,12 +21334,42 @@ async function assertLegacySesInvoiceSendAllowed(
   }
   if (!docket.data) return
 
+  const release = await client.from('makesafe_release_revisions')
+    .select('id,state')
+    .eq('id', releaseRevisionId || '')
+    .in('state', ['approved', 'dispatching'])
+    .maybeSingle()
+  const member = release.data
+    ? await client.from('makesafe_release_revision_members')
+      .select('release_revision_id')
+      .eq('release_revision_id', release.data.id)
+      .eq('job_id', invoice.data.job_id)
+      .eq('docket_revision_id', docket.data.id)
+      .eq('invoice_obligation_revision_id', invoice.data.invoice_obligation_revision_id)
+      .maybeSingle()
+    : { data: null, error: null }
+  const route = release.data
+    ? await client.from('makesafe_release_revision_routes')
+      .select('release_revision_id')
+      .eq('release_revision_id', release.data.id)
+      .eq('route_kind', 'invoice')
+      .eq('required', true)
+      .maybeSingle()
+    : { data: null, error: null }
+  if (release.error || member.error || route.error) {
+    throw new ApiError(
+      `The ${action} SES release gate could not check the current U6R authority.`,
+      503,
+    )
+  }
+  if (release.data && member.data && route.data) return
+
   throw new ApiError(409, {
     success: false,
     refusal: {
       state: 'refused',
       code: 'u6r_release_required',
-      fact: `The sealed SES invoice cannot use legacy ${action}; the current U6R release revision is the only release path.`,
+      fact: `The sealed SES invoice cannot use legacy ${action} without a current U6R release revision authorising this exact invoice send.`,
       recovery_action: 'Prepare and approve the exact U6R release revision, then use execute_ses_release_revision.',
     },
   })
