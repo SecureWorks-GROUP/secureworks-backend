@@ -34,19 +34,27 @@ Preferred path:
 1. Merge reviewed changes to `secureworks-site/main`.
 2. The GitHub Actions production edge deploy workflow
    (`.github/workflows/deploy-edge-functions.yml`) runs automatically on that
-   push, in the `production` environment.
+   push, in the `production` environment. For changed functions, its first
+   deploy gate is the read-only schema preflight in
+   `scripts/check-edge-schema-preflight.sh`, driven by
+   `scripts/edge-function-schema-requirements.txt`; it refuses deployment when
+   the declared production migration or any required marker is absent.
 3. Confirm its smoke checks pass.
 
 What that run does is decided by `scripts/identify-edge-deploy-changes.sh`:
 
 - A merge touching `supabase/functions/**` deploys only the changed functions
-  and runs the post-deploy smoke for them. If `ops-api` is one of them, the
-  pre-deploy source check runs first and the action-surface smoke runs last.
+  and runs the post-deploy smoke for them. The schema preflight runs before
+  any function deploy; if `ops-api` is one of them, the pre-deploy source check
+  runs after it and the action-surface smoke runs last.
 - A merge touching only the ops-api verification contract (the deploy workflow
   itself, the classifier, `scripts/check-ops-api-source-actions.sh`,
-  `scripts/smoke-ops-api-action-surface.sh`, or
-  `scripts/_ops-api-required-actions.txt`) deploys zero functions but still runs
-  the pre-deploy ops-api source check and the live action-surface smoke. A
+  `scripts/smoke-ops-api-action-surface.sh`,
+  `scripts/_ops-api-required-actions.txt`,
+  `scripts/check-edge-schema-preflight.sh`, or
+  `scripts/edge-function-schema-requirements.txt`) deploys zero functions but
+  still runs the pre-deploy ops-api source check and the live action-surface
+  smoke. A
   repair to a verifier therefore cannot go green without being exercised
   against production, and cannot silently redeploy a function nobody changed.
 - If the push base commit cannot be resolved, the run fails before any deploy
