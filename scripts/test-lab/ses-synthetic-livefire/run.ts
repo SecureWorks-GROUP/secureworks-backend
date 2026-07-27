@@ -1257,7 +1257,7 @@ async function cleanup(
         state: "terminal",
         source_post_ids: strings(after.emails, "post_id"),
         case_ids: strings(after.cases, "id"),
-        job_ids: strings(after.jobs, "id"),
+        job_ids: strings(found.jobs, "id"),
         evidence: terminalEvidence,
         terminal_at: terminalAt,
       }),

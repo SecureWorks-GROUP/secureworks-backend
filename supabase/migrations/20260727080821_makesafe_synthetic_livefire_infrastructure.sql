@@ -374,6 +374,46 @@ REVOKE ALL ON FUNCTION public.purge_synthetic_livefire_attendance_cycles(text)
 GRANT EXECUTE ON FUNCTION public.purge_synthetic_livefire_attendance_cycles(text)
   TO service_role, postgres;
 
+CREATE OR REPLACE FUNCTION public.register_synthetic_livefire_job(
+  p_marker text,
+  p_job_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF p_marker !~ '^SWG-SES-LIVEFIRE-TEST-ONLY-[0-9A-F]{8}-[0-9A-F]{4}-[1-8][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$' THEN
+    RAISE EXCEPTION 'invalid synthetic live-fire marker';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.ses_synthetic_livefire_runs
+    WHERE marker = p_marker AND state = 'active'
+  ) THEN
+    RAISE EXCEPTION 'synthetic live-fire run is not active';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.jobs
+    WHERE id = p_job_id
+      AND metadata->>'synthetic_livefire_marker' = p_marker
+  ) THEN
+    RAISE EXCEPTION 'job is not bound to the synthetic live-fire marker';
+  END IF;
+  UPDATE public.ses_synthetic_livefire_runs
+  SET job_ids = (
+    SELECT jsonb_agg(DISTINCT value ORDER BY value)
+    FROM jsonb_array_elements(job_ids || jsonb_build_array(p_job_id::text)) AS job_value(value)
+  )
+  WHERE marker = p_marker AND state = 'active';
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.register_synthetic_livefire_job(text, uuid)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.register_synthetic_livefire_job(text, uuid)
+  TO service_role, postgres;
+
 ALTER TABLE public.job_events
   ALTER COLUMN job_id DROP NOT NULL;
 ALTER TABLE public.job_events

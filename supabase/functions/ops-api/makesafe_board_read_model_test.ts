@@ -546,6 +546,28 @@ Deno.test("synthetic-linked invoices are refused before invoice effects", async 
     Error,
     "synthetic_livefire_release_forbidden",
   );
+
+  const unresolvedClient = {
+    from(table: string) {
+      assertEquals(table, "xero_invoices");
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                maybeSingle: () => Promise.resolve({ data: null, error: null }),
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  await assertRejects(
+    () => _assertNoSyntheticLivefireInvoiceForTest(unresolvedClient, "missing", "void_invoice"),
+    Error,
+    "synthetic_livefire_invoice_unresolved",
+  );
 });
 
 Deno.test("synthetic live-fire release members cannot be approved or executed", async () => {

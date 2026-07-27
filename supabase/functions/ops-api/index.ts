@@ -11442,6 +11442,20 @@ async function createMakesafeJob(client: any, body: any) {
 
   if (jobErr) throw jobErr
 
+  if (reviewedSyntheticLivefireMarker) {
+    const { error: registerSyntheticJobError } = await client.rpc(
+      'register_synthetic_livefire_job',
+      { p_marker: reviewedSyntheticLivefireMarker, p_job_id: job.id },
+    )
+    if (registerSyntheticJobError) {
+      await client.from('jobs').delete().eq('id', job.id)
+      throw new ApiError(
+        `synthetic live-fire job ledger registration failed: ${registerSyntheticJobError.message}`,
+        503,
+      )
+    }
+  }
+
   // Geocode address (fire-and-forget, non-blocking)
   if (!reviewedSyntheticLivefireMarker) {
     geocodeAndUpdateJob(client, job.id, site_address, suburb).catch(() => {})
@@ -21910,9 +21924,13 @@ async function assertNoSyntheticLivefireInvoice(
       503,
     )
   }
-  if (data?.job_id) {
-    await assertNoSyntheticLivefireJobs(client, [data.job_id], action)
+  if (!data?.job_id) {
+    throw new ApiError(
+      `synthetic_livefire_invoice_unresolved: ${action} requires an invoice with an authoritative job link before any external effect.`,
+      409,
+    )
   }
+  await assertNoSyntheticLivefireJobs(client, [data.job_id], action)
 }
 export const _assertNoSyntheticLivefireInvoiceForTest =
   assertNoSyntheticLivefireInvoice
@@ -39413,6 +39431,8 @@ async function sendCouncilEmail(client: any, body: any) {
     .eq('id', submission_id)
     .single()
   if (!sub) throw new Error('Submission not found')
+  if (!sub.job_id) throw new ApiError('Council submission has no authoritative job link', 409)
+  await assertNoSyntheticLivefireJobs(client, [sub.job_id], 'send_council_email')
 
   const { data: job } = await client.from('jobs').select('job_number, type, ghl_contact_id').eq('id', sub.job_id).maybeSingle()
   const replyTo = `council+CS${submission_id.slice(0, 8)}-step${step_index || 0}@secureworksgroup.app`
@@ -39532,6 +39552,7 @@ async function listRunAcceptances(client: any, params: URLSearchParams) {
 async function sendCouncilSMS(client: any, body: any) {
   const { job_id, message } = body
   if (!job_id || !message) throw new Error('job_id and message required')
+  await assertNoSyntheticLivefireJobs(client, [job_id], 'send_council_sms')
 
   const { data: job } = await client.from('jobs')
     .select('id, job_number, client_name, client_phone, ghl_contact_id')
@@ -39606,6 +39627,7 @@ async function sendVariation(client: any, body: any) {
     .eq('id', variation_id)
     .single()
   if (!variation) throw new Error('Variation not found')
+  await assertNoSyntheticLivefireJobs(client, [variation.job_id], 'send_variation')
 
   const job = variation.jobs
   if (!job?.client_email) throw new Error('No client email on job')
