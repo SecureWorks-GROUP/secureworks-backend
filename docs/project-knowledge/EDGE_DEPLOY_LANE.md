@@ -60,6 +60,11 @@ Preferred path:
    For the U2 cycle-scoped MakeSafe media reads, the same preflight also requires
    `20260728000001_makesafe_state_authority_u2.sql` (the `job_media` cycle columns,
    constraint, foreign key, and index), after the attendance-cycle migration.
+   For SES Reporting U5/U6/U6R, apply
+   `20260728020000_makesafe_ses_invoice_release_u5_u6.sql` before deploying the
+   matching `ops-api`; edge deployment does not apply migrations. The migration
+   creates the invoice-obligation, review, and release ledgers plus the SES
+   invoice identity indexes, but performs no provider or closeout effect.
 3. Confirm its smoke checks pass.
 
 What that run does is decided by `scripts/identify-edge-deploy-changes.sh`:

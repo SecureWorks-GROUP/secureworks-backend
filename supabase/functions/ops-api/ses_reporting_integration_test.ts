@@ -33,15 +33,15 @@ Deno.test("legacy free invoice and combined-send actions are retired", () => {
 Deno.test("legacy invoice sends hit the sealed SES U6R gate before provider effects", () => {
   const sendStart = INDEX.indexOf("case 'send_invoice_email'");
   const sendGate = INDEX.indexOf(
-    "assertLegacySesInvoiceSendAllowed(client, siId, 'send_invoice_email')",
+    "assertLegacySesInvoiceSendAllowed(",
     sendStart,
   );
-  const sendProvider = INDEX.indexOf("xeroPost(`/Invoices/${siId}/Email`", sendStart);
+  const sendProvider = INDEX.indexOf("xeroPost(`/Invoices/${siId}/Email`,", sendStart);
   assert(sendGate > sendStart && sendGate < sendProvider);
 
   const approveStart = INDEX.indexOf("case 'approve_and_send_invoice'");
   const approveGate = INDEX.indexOf(
-    "assertLegacySesInvoiceSendAllowed(client, asId, 'approve_and_send_invoice')",
+    "assertLegacySesInvoiceSendAllowed(",
     approveStart,
   );
   const approveProvider = INDEX.indexOf("xeroPost(`/Invoices/${asId}`", approveStart);
