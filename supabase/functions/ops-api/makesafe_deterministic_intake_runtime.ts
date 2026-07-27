@@ -520,7 +520,7 @@ async function readDurableSourceFates(
     const issueCount = issueCounts.get(postId) || 0;
     if (finalCount === 1) {
       snapshot.final.add(postId);
-    } else if (finalCount === 0 && issueCount === 1) {
+    } else if (finalCount === 0 && issueCount > 0) {
       snapshot.transient.add(postId);
     } else if (finalCount === 0 && issueCount === 0) {
       snapshot.unfated.add(postId);

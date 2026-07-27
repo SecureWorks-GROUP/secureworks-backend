@@ -1123,6 +1123,41 @@ Deno.test("standing recent queue pages lightweight identifiers past a final-fate
   );
 });
 
+Deno.test("standing recent queue keeps sources with multiple transient issues eligible", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "multi-issue-source",
+    received_at: "2026-07-20T02:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-25403 Work Order: WO-25403 PO: 254030",
+    body_content: "Client: Retry Client\nAddress: 3 Retry Street, Perth",
+  }));
+  store.email_events_raw.push(
+    {
+      org_id: "00000000-0000-0000-0000-000000000001",
+      post_id: "multi-issue-source",
+      change_type: "intake_deferred_run_cap_deferred",
+    },
+    {
+      org_id: "00000000-0000-0000-0000-000000000001",
+      post_id: "multi-issue-source",
+      change_type: "intake_exception_attachment_recovery_failed",
+    },
+  );
+
+  const input = await _readInputsForTest(fakeClient(store), {
+    days: 60,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 2,
+    seedPostIds: [],
+    cursor: null,
+  });
+
+  assertEquals(input.sources.map((source) => source.postId), [
+    "multi-issue-source",
+  ]);
+});
+
 Deno.test("deterministic health degrades when an included source remains unfated beyond five minutes", async () => {
   const store = baseStore();
   for (let index = 1; index <= 4; index++) {
