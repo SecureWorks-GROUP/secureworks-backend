@@ -67,6 +67,8 @@ export interface MakesafeV2FactSet {
   packCycles: any[];
   packs: any[];
   approvals: any[];
+  details: any[];
+  dockets: any[];
 }
 
 const SELECTS = {
@@ -102,6 +104,10 @@ const SELECTS = {
   approvals:
     "id,job_id,action,decision,readiness_revision,dependency_generation,docket_revision_id,release_revision_id,decided_at",
   jobFamilies: "id,metadata",
+  details:
+    "job_id,substatus,cycle_number,report_type,reopen_reason,reattend_count,last_reattend_at,last_reattend_reason,cancel_reason,cancel_note,cancelled_by,cancelled_at,report_received_at,report_sent_at,invoice_ready_at,invoice_notes,safety_requirements,special_instructions,external_links,billing_rules,updated_at",
+  dockets:
+    "id,job_id,source_instruction_id,lineage_id,attendance_cycle_ids,current_attendance_cycle_id,readiness_revision,input_content_hash,output_content_hash,state,pre_xero_docs_ready,envelope,review_spec,release_payload,committed_at",
 } as const;
 
 async function loadByIds(
@@ -156,6 +162,8 @@ export async function loadMakesafeV2Facts(
     packCycles,
     packs,
     approvals,
+    details,
+    dockets,
   ] = await Promise.all([
     loadByIds(
       client,
@@ -274,6 +282,22 @@ export async function loadMakesafeV2Facts(
       SELECTS.approvals,
       jobIds,
       "makesafe-state.v2 approvals",
+    ),
+    loadByIds(
+      client,
+      "makesafe_job_details",
+      SELECTS.details,
+      jobIds,
+      "makesafe-state.v2 job details",
+      "job_id",
+    ),
+    loadByIds(
+      client,
+      "makesafe_docket_revisions_current",
+      SELECTS.dockets,
+      jobIds,
+      "makesafe-state.v2 dockets",
+      "job_id",
     ),
   ]);
   const effectiveFamilyCodes = familyCodes.length ? familyCodes : identities
@@ -792,6 +816,10 @@ export async function buildMakesafeV2Comparison(
           ? rules.get(String(identityRevision?.family_rule_key || "")) || null
           : null,
         job_family: jobFamily || null,
+        job_details: details.find((item) => String(item?.job_id) === jobId) ||
+          null,
+        docket: dockets.find((item) => String(item?.job_id) === jobId) ||
+          null,
         readiness: currentReadiness
           ? currentReadiness
           : null,

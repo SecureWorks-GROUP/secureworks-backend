@@ -44,6 +44,8 @@ function emptyFactSet(): MakesafeV2FactSet {
     packCycles: [],
     packs: [],
     approvals: [],
+    details: [],
+    dockets: [],
   };
 }
 

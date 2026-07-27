@@ -1455,6 +1455,7 @@ DECLARE
   v_staged_count integer;
   v_rows jsonb := '[]'::jsonb;
   v_chunk public.makesafe_board_reconciliation_staged_chunks%ROWTYPE;
+  v_job_id uuid;
   v_result jsonb;
 BEGIN
   IF COALESCE(p_selection_hash, '') !~ '^sha256:[0-9a-f]{64}$'
@@ -1489,30 +1490,64 @@ BEGIN
   LOOP
     v_rows := v_rows || v_chunk.rows_json;
   END LOOP;
-  LOCK TABLE
-    public.jobs,
-    public.makesafe_state_identity_revisions,
-    public.makesafe_attendance_cycles,
-    public.job_assignments,
-    public.job_service_reports,
-    public.job_documents,
-    public.job_media,
-    public.makesafe_portal_capture_revisions,
-    public.makesafe_intake_cases,
-    public.makesafe_status_holds,
-    public.makesafe_readiness_revisions,
-    public.makesafe_readiness_current,
-    public.makesafe_readiness_invalidations,
-    public.makesafe_cancellation_decisions,
-    public.makesafe_terminal_proofs,
-    public.makesafe_report_pack_cycles,
-    public.makesafe_report_packs,
-    public.makesafe_revision_approvals,
-    public.makesafe_family_rule_current,
-    public.makesafe_family_rule_revisions,
-    public.makesafe_board_status_applications,
-    public.makesafe_board_attention_marks
-  IN SHARE MODE;
+  FOR v_job_id IN
+    SELECT DISTINCT job_id
+    FROM jsonb_to_recordset(v_rows) AS x(job_id uuid)
+    WHERE job_id IS NOT NULL
+    ORDER BY job_id
+  LOOP
+    PERFORM 1 FROM public.jobs WHERE id = v_job_id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_state_identity_revisions
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_attendance_cycles
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.job_assignments
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.job_service_reports
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.job_documents
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.job_media
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_portal_capture_revisions
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_intake_cases
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_status_holds
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_job_details
+      WHERE job_id = v_job_id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_readiness_revisions
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_readiness_current
+      WHERE job_id = v_job_id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_readiness_invalidations
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_cancellation_decisions
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_terminal_proofs
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_report_pack_cycles
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_report_packs
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_revision_approvals
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_board_status_applications
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1 FROM public.makesafe_board_attention_marks
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+    PERFORM 1
+      FROM public.makesafe_family_rule_current c
+      JOIN public.makesafe_state_identity_current_v2 i
+        ON i.family_rule_key = c.family_code
+       AND i.job_id = v_job_id
+      JOIN public.makesafe_family_rule_revisions r
+        ON r.id = c.revision_id
+      FOR SHARE;
+    PERFORM 1 FROM public.makesafe_docket_revisions
+      WHERE job_id = v_job_id ORDER BY id FOR SHARE;
+  END LOOP;
   PERFORM public.validate_makesafe_board_reconciliation_state_tokens(v_rows);
   v_result := public.apply_makesafe_board_reconciliation(
     p_run_key, p_applied_by, p_selection_hash, v_rows
@@ -1679,6 +1714,63 @@ BEGIN
         AND j.metadata IS NOT DISTINCT FROM v_row.state_facts->'job_family'->'metadata'
     ) THEN
       RAISE EXCEPTION 'reconciliation row % job state changed', v_row.job_id;
+    END IF;
+    v_token := v_row.state_facts->'job_details';
+    IF (SELECT count(*) FROM public.makesafe_job_details WHERE job_id = v_row.job_id)
+      <> CASE WHEN v_token IS NULL THEN 0 ELSE 1 END
+      OR (v_token IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+        FROM public.makesafe_job_details d
+        WHERE d.job_id = v_row.job_id
+          AND d.substatus IS NOT DISTINCT FROM v_token->>'substatus'
+          AND d.cycle_number IS NOT DISTINCT FROM (v_token->>'cycle_number')::integer
+          AND d.report_type IS NOT DISTINCT FROM v_token->>'report_type'
+          AND d.reopen_reason IS NOT DISTINCT FROM v_token->>'reopen_reason'
+          AND d.reattend_count IS NOT DISTINCT FROM (v_token->>'reattend_count')::integer
+          AND d.last_reattend_at IS NOT DISTINCT FROM (v_token->>'last_reattend_at')::timestamptz
+          AND d.last_reattend_reason IS NOT DISTINCT FROM v_token->>'last_reattend_reason'
+          AND d.cancel_reason IS NOT DISTINCT FROM v_token->>'cancel_reason'
+          AND d.cancel_note IS NOT DISTINCT FROM v_token->>'cancel_note'
+          AND d.cancelled_by IS NOT DISTINCT FROM v_token->>'cancelled_by'
+          AND d.cancelled_at IS NOT DISTINCT FROM (v_token->>'cancelled_at')::timestamptz
+          AND d.report_received_at IS NOT DISTINCT FROM (v_token->>'report_received_at')::timestamptz
+          AND d.report_sent_at IS NOT DISTINCT FROM (v_token->>'report_sent_at')::timestamptz
+          AND d.invoice_ready_at IS NOT DISTINCT FROM (v_token->>'invoice_ready_at')::timestamptz
+          AND d.invoice_notes IS NOT DISTINCT FROM v_token->>'invoice_notes'
+          AND d.safety_requirements IS NOT DISTINCT FROM v_token->>'safety_requirements'
+          AND d.special_instructions IS NOT DISTINCT FROM v_token->>'special_instructions'
+          AND d.external_links IS NOT DISTINCT FROM v_token->'external_links'
+          AND d.billing_rules IS NOT DISTINCT FROM v_token->'billing_rules'
+          AND d.updated_at IS NOT DISTINCT FROM (v_token->>'updated_at')::timestamptz
+      )) THEN
+      RAISE EXCEPTION 'reconciliation row % job details changed', v_row.job_id;
+    END IF;
+    v_token := v_row.state_facts->'docket';
+    IF (SELECT count(*) FROM public.makesafe_docket_revisions_current WHERE job_id = v_row.job_id)
+      <> CASE WHEN v_token IS NULL THEN 0 ELSE 1 END
+      OR (v_token IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+        FROM public.makesafe_docket_revisions_current d
+        WHERE d.job_id = v_row.job_id
+          AND d.id IS NOT DISTINCT FROM (v_token->>'id')::uuid
+          AND d.source_instruction_id IS NOT DISTINCT FROM v_token->>'source_instruction_id'
+          AND d.lineage_id IS NOT DISTINCT FROM v_token->>'lineage_id'
+          AND d.attendance_cycle_ids IS NOT DISTINCT FROM (
+            SELECT COALESCE(array_agg(value::uuid), '{}'::uuid[])
+            FROM jsonb_array_elements_text(COALESCE(v_token->'attendance_cycle_ids', '[]'::jsonb))
+          )
+          AND d.current_attendance_cycle_id IS NOT DISTINCT FROM (v_token->>'current_attendance_cycle_id')::uuid
+          AND d.readiness_revision IS NOT DISTINCT FROM v_token->>'readiness_revision'
+          AND d.input_content_hash IS NOT DISTINCT FROM v_token->>'input_content_hash'
+          AND d.output_content_hash IS NOT DISTINCT FROM v_token->>'output_content_hash'
+          AND d.state IS NOT DISTINCT FROM v_token->>'state'
+          AND d.pre_xero_docs_ready IS NOT DISTINCT FROM (v_token->>'pre_xero_docs_ready')::boolean
+          AND d.envelope IS NOT DISTINCT FROM v_token->'envelope'
+          AND d.review_spec IS NOT DISTINCT FROM v_token->'review_spec'
+          AND d.release_payload IS NOT DISTINCT FROM v_token->'release_payload'
+          AND d.committed_at IS NOT DISTINCT FROM (v_token->>'committed_at')::timestamptz
+      )) THEN
+      RAISE EXCEPTION 'reconciliation row % docket facts changed', v_row.job_id;
     END IF;
     v_token := v_row.state_facts->'cases';
     IF (SELECT count(*) FROM public.makesafe_intake_cases WHERE job_id = v_row.job_id)
