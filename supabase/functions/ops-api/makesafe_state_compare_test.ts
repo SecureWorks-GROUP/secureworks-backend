@@ -349,3 +349,36 @@ Deno.test("duplicate canonical job ids fail loudly", async () => {
     "duplicate canonical job ids",
   );
 });
+
+Deno.test("historical pack-cycle attribution cannot poison the current cycle", async () => {
+  const fixture = comparisonFixture(1);
+  const jobId = fixture.rows[0].id;
+  const currentCycleId = fixture.rows[0].attendance_cycle_id;
+  fixture.facts.packCycles.push(
+    {
+      id: "pack-cycle-current",
+      pack_id: "pack-current",
+      job_id: jobId,
+      attendance_cycle_id: currentCycleId,
+      cycle_attribution: "bound",
+    },
+    {
+      id: "pack-cycle-historical",
+      pack_id: "pack-old",
+      job_id: jobId,
+      attendance_cycle_id: "historical-cycle",
+      cycle_attribution: "legacy_unscoped",
+    },
+  );
+  fixture.facts.packs.push({
+    id: "pack-current",
+    job_id: jobId,
+    status: "draft",
+  });
+  const result = await buildMakesafeV2Comparison(
+    fixture.rows,
+    fixture.facts,
+    GENERATED_AT,
+  );
+  assertEquals(result.rows[0].state_v2.cycle_attribution_error, null);
+});

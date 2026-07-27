@@ -649,7 +649,9 @@ export async function buildMakesafeV2Comparison(
         ...reportRows,
         ...documentRows,
         ...completionMediaRows,
-        ...packCycleRows,
+        ...packCycleRows.filter((fact) =>
+          fact.attendance_cycle_id === currentCycleId
+        ),
       ].some((fact) =>
         !fact.attendance_cycle_id || fact.cycle_attribution !== "bound"
       ) || portalRows.some((fact) => !fact.attendance_cycle_id)

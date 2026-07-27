@@ -108,6 +108,22 @@ Deno.test("SQL readiness hash and current views are independently guarded", () =
   assertStringIncludes(migration, "SECURITY INVOKER");
 });
 
+Deno.test("cancellation and terminal proof views use the authoritative cycle set", () => {
+  const cancellationView = migration.slice(
+    migration.indexOf("CREATE OR REPLACE VIEW public.makesafe_cancellation_current_v2"),
+    migration.indexOf("CREATE OR REPLACE VIEW public.makesafe_terminal_proofs_current_v2"),
+  );
+  const terminalView = migration.slice(
+    migration.indexOf("CREATE OR REPLACE VIEW public.makesafe_terminal_proofs_current_v2"),
+    migration.indexOf("CREATE OR REPLACE VIEW public.makesafe_family_rules_current_v2"),
+  );
+  assertStringIncludes(cancellationView, "makesafe_attendance_cycles");
+  assertStringIncludes(terminalView, "makesafe_attendance_cycles");
+  assert(!cancellationView.includes("JOIN public.makesafe_readiness_current"));
+  assert(!terminalView.includes("JOIN public.makesafe_readiness_current"));
+  assertStringIncludes(terminalView, "makesafe_readiness_revisions");
+});
+
 Deno.test("non-production rollback removes Phase-1 surfaces in dependency order", () => {
   assertStringIncludes(
     rollback,

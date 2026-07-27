@@ -981,9 +981,14 @@ AS
 SELECT DISTINCT ON (d.job_id)
   d.*
 FROM public.makesafe_cancellation_decisions d
-JOIN public.makesafe_readiness_current c
-  ON c.job_id = d.job_id
- AND c.attendance_cycle_set_hash = d.attendance_cycle_set_hash
+WHERE d.attendance_cycle_set_hash =
+  public.makesafe_attendance_cycle_set_hash_v1(
+    ARRAY(
+      SELECT ac.id
+      FROM public.makesafe_attendance_cycles ac
+      WHERE ac.job_id = d.job_id
+    )
+  )
 ORDER BY d.job_id, d.decided_at DESC, d.id DESC;
 
 CREATE OR REPLACE VIEW public.makesafe_terminal_proofs_current_v2
@@ -992,15 +997,25 @@ AS
 SELECT DISTINCT ON (p.job_id)
   p.*
 FROM public.makesafe_terminal_proofs p
-JOIN public.makesafe_readiness_current c
-  ON c.job_id = p.job_id
- AND c.attendance_cycle_set_hash = p.attendance_cycle_set_hash
 WHERE (
     p.readiness_revision IS NULL
-    OR p.readiness_revision = c.readiness_revision
+    OR EXISTS (
+      SELECT 1
+      FROM public.makesafe_readiness_revisions r
+      WHERE r.job_id = p.job_id
+        AND r.readiness_revision = p.readiness_revision
+    )
   )
   AND p.attendance_cycle_set_hash =
     public.makesafe_attendance_cycle_set_hash_v1(p.attendance_cycle_ids)
+  AND p.attendance_cycle_set_hash =
+    public.makesafe_attendance_cycle_set_hash_v1(
+      ARRAY(
+        SELECT ac.id
+        FROM public.makesafe_attendance_cycles ac
+        WHERE ac.job_id = p.job_id
+      )
+    )
 ORDER BY p.job_id, p.proven_at DESC, p.id DESC;
 
 CREATE OR REPLACE VIEW public.makesafe_family_rules_current_v2
