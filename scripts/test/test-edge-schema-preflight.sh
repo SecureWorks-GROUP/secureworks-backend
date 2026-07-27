@@ -11,7 +11,7 @@ MIGRATION="$REPO_ROOT/supabase/migrations/20260727000001_makesafe_attendance_cyc
 MEDIA_MIGRATION="$REPO_ROOT/supabase/migrations/20260728000001_makesafe_state_authority_u2.sql"
 FRESH_HEALTH_MIGRATION="$REPO_ROOT/supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql"
 U5_U6_MIGRATION="$REPO_ROOT/supabase/migrations/20260728020000_makesafe_ses_invoice_release_u5_u6.sql"
-FENCE_HARDENING_MIGRATION="$REPO_ROOT/supabase/migrations/20260728030000_makesafe_ses_fence_hardening.sql"
+FENCE_HARDENING_MIGRATION="$REPO_ROOT/supabase/migrations/20260728050000_makesafe_ses_fence_hardening.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -125,10 +125,10 @@ u5_u6_row = {
 }
 fence_hardening_row = {
     "function_name": "ops-api",
-    "migration_version": "20260728030000",
+    "migration_version": "20260728050000",
     "expected_migration_name": "makesafe_ses_fence_hardening",
     "expected_statement_sha256": os.environ["FENCE_HARDENING_EXPECTED_SHA"],
-    "actual_migration_version": "20260728030000",
+    "actual_migration_version": "20260728050000",
     "actual_migration_name": "makesafe_ses_fence_hardening",
     "actual_statement_count": 1,
     "actual_statement_sha256": os.environ["FENCE_HARDENING_EXPECTED_SHA"],
