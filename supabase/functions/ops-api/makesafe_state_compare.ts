@@ -12,9 +12,9 @@ import {
   type VersionedDependency,
 } from "./makesafe_readiness_revision.ts";
 import {
-  canonicalizeMakesafeDocumentRole,
   type BlockerFact,
   type CancellationDimension,
+  canonicalizeMakesafeDocumentRole,
   diffV1V2State,
   EMPTY_CANCELLATION,
   EMPTY_TERMINAL_PROOF,
@@ -346,6 +346,8 @@ export async function loadMakesafeV2Facts(
     packCycles,
     packs,
     approvals,
+    details,
+    dockets,
   };
 }
 
@@ -704,8 +706,9 @@ export async function buildMakesafeV2Comparison(
         ),
       ].some((fact) =>
         !fact.attendance_cycle_id || fact.cycle_attribution !== "bound"
-      ) || portalRows.some((fact) => !fact.attendance_cycle_id) ||
-      detailCycleAttributionError
+      ) ||
+        portalRows.some((fact) => !fact.attendance_cycle_id) ||
+        detailCycleAttributionError
       ? "One or more operational facts lack exact attendance-cycle attribution."
       : currentPacks.length > 1
       ? "More than one report pack claims the current attendance cycle."
@@ -834,9 +837,7 @@ export async function buildMakesafeV2Comparison(
         },
         docket: dockets.find((item) => String(item?.job_id) === jobId) ||
           null,
-        readiness: currentReadiness
-          ? currentReadiness
-          : null,
+        readiness: currentReadiness ? currentReadiness : null,
       },
     };
   }));
