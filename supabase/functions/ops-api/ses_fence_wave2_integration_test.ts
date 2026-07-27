@@ -193,3 +193,20 @@ Deno.test("write-once seal and SES-native void authority are migration-backed", 
     );
   }
 });
+
+Deno.test("confirmed void retry re-proves the current ACCREC mirror", () => {
+  const confirmation = MIGRATION.slice(
+    MIGRATION.indexOf("CREATE OR REPLACE FUNCTION public.confirm_ses_invoice_void_execution_v1"),
+  );
+  const confirmedBranch = confirmation.slice(
+    confirmation.indexOf("IF target.state = 'confirmed' THEN"),
+    confirmation.indexOf("UPDATE public.xero_invoices"),
+  );
+  assertStringIncludes(confirmedBranch, "org_id = target.org_id");
+  assertStringIncludes(confirmedBranch, "xero_invoice_id = target.xero_invoice_id");
+  assertStringIncludes(confirmedBranch, "job_id = target.job_id");
+  assertStringIncludes(confirmedBranch, "job_id IS NOT NULL");
+  assertStringIncludes(confirmedBranch, "invoice_type = 'ACCREC'");
+  assertStringIncludes(confirmedBranch, "status = target.target_status");
+  assertStringIncludes(confirmedBranch, "USING ERRCODE = '40001'");
+});

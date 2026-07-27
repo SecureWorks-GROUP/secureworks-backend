@@ -606,6 +606,18 @@ BEGIN
   END IF;
 
   IF target.state = 'confirmed' THEN
+    PERFORM 1
+    FROM public.xero_invoices
+    WHERE org_id = target.org_id
+      AND xero_invoice_id = target.xero_invoice_id
+      AND job_id = target.job_id
+      AND job_id IS NOT NULL
+      AND invoice_type = 'ACCREC'
+      AND status = target.target_status;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'the confirmed SES void no longer matches the invoice mirror'
+        USING ERRCODE = '40001';
+    END IF;
     RETURN jsonb_build_object(
       'void_revision_id', target.id,
       'state', 'confirmed',
