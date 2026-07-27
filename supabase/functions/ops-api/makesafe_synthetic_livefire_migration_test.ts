@@ -96,6 +96,8 @@ Deno.test("terminal accounting is marker-bound, service-role-only, and requires 
   assertStringIncludes(sql, "terminalize_synthetic_livefire_run");
   assertStringIncludes(sql, "synthetic live-fire source exclusion proof failed");
   assertStringIncludes(sql, "fresh_source_health_after_terminal");
+  assertStringIncludes(sql, "FOR UPDATE");
+  assertStringIncludes(sql, "transactionally verified against terminal ledger state");
   assertStringIncludes(sql, "ENABLE ROW LEVEL SECURITY");
   assertStringIncludes(
     sql,

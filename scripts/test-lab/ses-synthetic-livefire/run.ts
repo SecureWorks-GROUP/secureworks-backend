@@ -1262,13 +1262,7 @@ async function cleanup(
   const sourceHealthAfterTerminal = await client.rpc<JsonRecord>(
     "terminalize_synthetic_livefire_run",
     {
-      p_org_id: "00000000-0000-0000-0000-000000000001",
-      p_mailbox: run.mailbox,
-      p_since: evidence.startedAt,
       p_marker: run.marker,
-      p_source_post_ids: strings(after.emails, "post_id"),
-      p_case_ids: strings(after.cases, "id"),
-      p_job_ids: strings(found.jobs, "id"),
       p_evidence: terminalEvidence,
       p_terminal_at: terminalAt,
     },

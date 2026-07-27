@@ -635,12 +635,6 @@ GRANT EXECUTE ON FUNCTION public.makesafe_synthetic_livefire_source_health(
 
 CREATE OR REPLACE FUNCTION public.terminalize_synthetic_livefire_run(
   p_marker text,
-  p_org_id uuid,
-  p_mailbox text,
-  p_since timestamptz,
-  p_source_post_ids jsonb,
-  p_case_ids jsonb,
-  p_job_ids jsonb,
   p_evidence jsonb,
   p_terminal_at timestamptz
 )
@@ -650,6 +644,11 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
+  ledger_source_post_ids jsonb;
+  ledger_case_ids jsonb;
+  ledger_job_ids jsonb;
+  ledger_created_at timestamptz;
+  ledger_mailbox text;
   source_health jsonb;
 BEGIN
   IF current_setting('request.jwt.claim.role', true) <> 'service_role' THEN
@@ -658,21 +657,55 @@ BEGIN
   IF p_marker !~ '^SWG-SES-LIVEFIRE-TEST-ONLY-[0-9A-F]{8}-[0-9A-F]{4}-[1-8][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$' THEN
     RAISE EXCEPTION 'invalid synthetic live-fire marker';
   END IF;
-  IF NOT EXISTS (
-    SELECT 1
-    FROM public.ses_synthetic_livefire_runs run
-    WHERE run.marker = p_marker
-      AND run.state = 'cleanup_complete'
-  ) THEN
+  SELECT
+    run.source_post_ids,
+    run.case_ids,
+    run.job_ids,
+    run.created_at
+  INTO
+    ledger_source_post_ids,
+    ledger_case_ids,
+    ledger_job_ids,
+    ledger_created_at
+  FROM public.ses_synthetic_livefire_runs run
+  WHERE run.marker = p_marker
+    AND run.state = 'cleanup_complete'
+  FOR UPDATE;
+  IF NOT FOUND THEN
     RAISE EXCEPTION 'synthetic live-fire run is not ready for terminalization';
   END IF;
+  IF jsonb_array_length(ledger_source_post_ids) = 0 THEN
+    RAISE EXCEPTION 'synthetic live-fire run has no authoritative sources';
+  END IF;
+  SELECT min(email.mailbox)
+  INTO ledger_mailbox
+  FROM public.emails email
+  WHERE email.post_id IN (
+    SELECT value
+    FROM jsonb_array_elements_text(ledger_source_post_ids)
+  );
+  IF ledger_mailbox IS NULL THEN
+    RAISE EXCEPTION 'synthetic live-fire sources are not present in the mailbox';
+  END IF;
+
+  UPDATE public.ses_synthetic_livefire_runs
+  SET state = 'terminal',
+      evidence = p_evidence || jsonb_build_object(
+        'synthetic_health_sources_excluded', true,
+        'fresh_source_health_after_terminal_sources', jsonb_build_object(
+          'proof', 'transactionally verified against terminal ledger state',
+          'source_post_ids', ledger_source_post_ids
+        )
+      ),
+      terminal_at = p_terminal_at
+  WHERE marker = p_marker;
 
   source_health := public.makesafe_synthetic_livefire_source_health(
-    p_org_id,
-    p_mailbox,
-    p_since,
-    p_source_post_ids,
-    true
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    ledger_mailbox,
+    ledger_created_at,
+    ledger_source_post_ids,
+    false
   );
   IF EXISTS (
     SELECT 1
@@ -683,41 +716,17 @@ BEGIN
     RAISE EXCEPTION 'synthetic live-fire source exclusion proof failed';
   END IF;
 
-  UPDATE public.ses_synthetic_livefire_runs
-  SET state = 'terminal',
-      source_post_ids = p_source_post_ids,
-      case_ids = p_case_ids,
-      job_ids = p_job_ids,
-      evidence = p_evidence || jsonb_build_object(
-        'synthetic_health_sources_excluded', true,
-        'fresh_source_health_after_terminal_sources', source_health
-      ),
-      terminal_at = p_terminal_at
-  WHERE marker = p_marker;
-
   RETURN source_health;
 END;
 $$;
 
 REVOKE ALL ON FUNCTION public.terminalize_synthetic_livefire_run(
   text,
-  uuid,
-  text,
-  timestamptz,
-  jsonb,
-  jsonb,
-  jsonb,
   jsonb,
   timestamptz
 ) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.terminalize_synthetic_livefire_run(
   text,
-  uuid,
-  text,
-  timestamptz,
-  jsonb,
-  jsonb,
-  jsonb,
   jsonb,
   timestamptz
 ) TO service_role, postgres;
