@@ -195,7 +195,7 @@ SELECT
   CASE WHEN m.version IS NULL THEN NULL ELSE cardinality(m.statements)
   END AS actual_statement_count,
   CASE WHEN m.version IS NULL THEN NULL
-       ELSE encode(digest(m.statements[1], 'sha256'), 'hex')
+       ELSE encode(digest(array_to_string(m.statements, ''), 'sha256'), 'hex')
   END AS actual_statement_sha256,
   COALESCE((
     SELECT json_agg(ms.marker_kind || ':' || ms.marker_name ORDER BY ms.marker_kind, ms.marker_name)
@@ -290,9 +290,9 @@ for requirement in expected:
         failures.append(
             f"{label}: ledger name mismatch (found {actual_name!r})"
         )
-    if actual_statement_count != 1:
+    if not isinstance(actual_statement_count, int) or actual_statement_count < 1:
         failures.append(
-            f"{label}: ledger must contain exactly one canonical statement"
+            f"{label}: ledger statement set is missing or empty"
         )
     if actual_sha != requirement["statement_sha256"]:
         failures.append(f"{label}: canonical migration checksum mismatch")

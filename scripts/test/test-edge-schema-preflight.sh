@@ -57,7 +57,7 @@ row = {
     "expected_migration_name": "makesafe_attendance_cycles_u2_s1",
     "expected_statement_sha256": os.environ["EXPECTED_SHA"],
     "actual_migration_name": actual_name,
-    "actual_statement_count": 1 if actual_name else None,
+    "actual_statement_count": 2 if actual_name else None,
     "actual_statement_sha256": actual_sha,
     "missing_markers": json.loads(os.environ["MISSING_MARKERS_JSON"]),
 }
@@ -103,9 +103,8 @@ test_missing_migration_refuses_before_deploy() {
   fi
 }
 
-# Fully applied migration with every marker present may cross the deploy gate.
-test_fully_applied_schema_may_deploy() {
-  local name="test_fully_applied_schema_may_deploy"
+test_multi_statement_ledger_may_deploy() {
+  local name="test_multi_statement_ledger_may_deploy"
   local response="$TEST_TMP/applied.json"
   write_response "$response" "makesafe_attendance_cycles_u2_s1" "$(migration_sha)" '[]'
   run_preflight "$response" ops-api
@@ -178,7 +177,7 @@ main() {
   else
     test_incident_dependency_is_declared
     test_missing_migration_refuses_before_deploy
-    test_fully_applied_schema_may_deploy
+    test_multi_statement_ledger_may_deploy
     test_missing_schema_marker_refuses
     test_checksum_mismatch_refuses
     test_unrelated_function_without_requirements_passes_without_credentials
