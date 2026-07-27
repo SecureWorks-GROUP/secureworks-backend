@@ -292,6 +292,25 @@ import {
 } from '../monitor-ses-makesafes/index.ts'
 import { getGraphToken as _getGraphToken, graphFetch as _graphFetch } from '../_shared/graph_client.ts'
 import {
+  approveSesInvoiceRevisionAction,
+  approveSesReleaseRevisionAction,
+  executeSesInvoiceRevisionAction,
+  executeSesReleaseRevisionAction,
+  prepareSesInvoiceObligationAction,
+  prepareSesReleaseRevisionAction,
+  querySesProofLedgerAction,
+  querySesReviewCockpitAction,
+  recordSesReviewFeedbackAction,
+  resolveSesInvoiceDuplicatesAction,
+  sesActionErrorResponse,
+  type SesActionAuth,
+  type SesMailGateway,
+  type SesReleaseXeroReader,
+  type SesRouteSendResult,
+  type SesXeroGateway,
+  type SesXeroInvoiceResult,
+} from './ses_reporting_actions.ts'
+import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
   senderMatchesPattern as _senderMatchesPattern,
   senderMatchesWatchedFloor as _senderMatchesWatchedFloor,
@@ -586,7 +605,7 @@ const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
 const OPS_API_SOURCE_REPO = 'secureworks-site'
 const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
-const OPS_API_EXPECTED_ACTION_COUNT = 236
+const OPS_API_EXPECTED_ACTION_COUNT = 246
 
 // ── M9 r2: external_ref normalisation helper ──────────────────────────────────
 // Strips hyphens, spaces, uppercases — so "MLB-25248", "mlb25248", "MLB 25248" all compare equal.
@@ -963,6 +982,333 @@ function json(data: unknown, status = 200) {
 
 function sb() {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+}
+
+function sesActionAuth(
+  mode: 'api_key' | 'jwt' | 'routine',
+  user: TradeAuthContext | null,
+): SesActionAuth {
+  return {
+    mode,
+    user: user
+      ? { id: user.id, email: user.email, role: user.role }
+      : null,
+  }
+}
+
+function toSesXeroInvoiceResult(invoice: any): SesXeroInvoiceResult {
+  return {
+    xero_invoice_id: String(invoice?.InvoiceID || invoice?.xero_invoice_id || ''),
+    invoice_number: String(invoice?.InvoiceNumber || invoice?.invoice_number || ''),
+    status: String(invoice?.Status || invoice?.status || ''),
+    reference: String(invoice?.Reference || invoice?.reference || ''),
+    total: Number(invoice?.Total ?? invoice?.total ?? 0),
+  }
+}
+
+async function readSesXeroInvoicesByToken(
+  client: any,
+  externalToken: string,
+): Promise<SesXeroInvoiceResult[]> {
+  const { accessToken, tenantId } = await getToken(client)
+  const safeToken = externalToken.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  const response = await xeroGet('/Invoices', accessToken, tenantId, {
+    where: `Reference.Contains("${safeToken}") AND Type=="ACCREC"`,
+    Statuses: 'DRAFT,SUBMITTED,AUTHORISED,PAID',
+  })
+  return (response?.Invoices || [])
+    .map(toSesXeroInvoiceResult)
+    .filter((invoice: SesXeroInvoiceResult) =>
+      invoice.xero_invoice_id && invoice.reference.includes(externalToken)
+    )
+}
+
+function makeSesXeroGateway(client: any): SesXeroGateway {
+  return {
+    async createDraft(proposal, context) {
+      const created = await createInvoice(client, {
+        job_id: proposal.job_id,
+        contact_name: proposal.contact_name,
+        reference: proposal.reference,
+        line_items: proposal.lines,
+        xero_status: 'DRAFT',
+        send_email: false,
+      }, {
+        ses: {
+          obligationRevisionId: proposal.invoice_obligation_revision_id,
+          externalToken: context.external_token,
+          operationKey: context.operation_key,
+        },
+      })
+      return toSesXeroInvoiceResult(created)
+    },
+    async reconcileCreate(externalToken) {
+      return await readSesXeroInvoicesByToken(client, externalToken)
+    },
+    async authorise(invoice, context) {
+      const { accessToken, tenantId } = await getToken(client)
+      const response = await xeroPost(
+        `/Invoices/${invoice.xero_invoice_id}`,
+        accessToken,
+        tenantId,
+        {
+          Invoices: [{
+            InvoiceID: invoice.xero_invoice_id,
+            Status: 'AUTHORISED',
+          }],
+        },
+        'POST',
+        `ses-invoice-authorise-${context.operation_key}`,
+      )
+      const authorised = toSesXeroInvoiceResult(response?.Invoices?.[0])
+      const { error } = await client.from('xero_invoices').update({
+        status: authorised.status,
+        reference: authorised.reference,
+        invoice_number: authorised.invoice_number,
+        total: authorised.total,
+        updated_at: new Date().toISOString(),
+      }).eq('xero_invoice_id', authorised.xero_invoice_id)
+      if (error) {
+        throw new Error(`Xero authorised the invoice but its mirror could not be updated (${error.message})`)
+      }
+      return authorised
+    },
+    async reconcileAuthorise(invoiceId) {
+      const { accessToken, tenantId } = await getToken(client)
+      const response = await xeroGet(`/Invoices/${invoiceId}`, accessToken, tenantId)
+      return (response?.Invoices || [])
+        .map(toSesXeroInvoiceResult)
+        .filter((invoice: SesXeroInvoiceResult) =>
+          invoice.xero_invoice_id === invoiceId &&
+          invoice.status === 'AUTHORISED'
+        )
+    },
+    async fetchAuthorisedPdf(invoiceId) {
+      const { accessToken, tenantId } = await getToken(client)
+      return await _fetchXeroInvoicePdfBytes(accessToken, tenantId, invoiceId)
+    },
+  }
+}
+
+function makeSesReleaseXeroReader(client: any): SesReleaseXeroReader {
+  return {
+    async readAuthorised(invoiceId) {
+      if (!invoiceId) return false
+      const { accessToken, tenantId } = await getToken(client)
+      const response = await xeroGet(`/Invoices/${invoiceId}`, accessToken, tenantId)
+      return (response?.Invoices || []).some((invoice: any) =>
+        invoice?.InvoiceID === invoiceId && invoice?.Status === 'AUTHORISED'
+      )
+    },
+  }
+}
+
+async function sesGraphRequest(
+  url: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const token = await _getGraphToken()
+  return await _graphFetch(url, token, {
+    init,
+    refresh: () => _getGraphToken({ forceRefresh: true }),
+  })
+}
+
+async function sesGraphJson(
+  url: string,
+  init: RequestInit,
+  expected: number[],
+): Promise<any> {
+  const response = await sesGraphRequest(url, init)
+  if (!expected.includes(response.status)) {
+    throw new Error(`Microsoft Graph ${response.status}: ${(await response.text()).slice(0, 500)}`)
+  }
+  if (response.status === 202 || response.status === 204) return null
+  return await response.json()
+}
+
+async function loadSesRouteAttachments(
+  client: any,
+  hashes: string[],
+): Promise<Array<{ name: string; contentType: string; bytes: Uint8Array }>> {
+  const unique = [...new Set(hashes)]
+  if (unique.length === 0) return []
+  const { data, error } = await client.from('makesafe_docket_artifacts')
+    .select('object_key,media_type,content_hash')
+    .in('content_hash', unique)
+  if (error) throw new Error(`The approved release attachments could not be read (${error.message})`)
+  const byHash = new Map<string, any>()
+  for (const row of data || []) {
+    if (!byHash.has(row.content_hash)) byHash.set(row.content_hash, row)
+  }
+  const missing = unique.filter(hash => !byHash.has(hash))
+  if (missing.length) {
+    throw new Error(`The approved release attachment bytes are missing for ${missing.join(', ')}`)
+  }
+  const result: Array<{ name: string; contentType: string; bytes: Uint8Array }> = []
+  for (const hash of unique) {
+    const row = byHash.get(hash)
+    const [bucket, ...pathParts] = String(row.object_key).split('/')
+    const downloaded = await client.storage.from(bucket).download(pathParts.join('/'))
+    if (downloaded.error || !downloaded.data) {
+      throw new Error(`The approved release attachment ${row.object_key} could not be downloaded (${downloaded.error?.message || 'no bytes'})`)
+    }
+    result.push({
+      name: decodeURIComponent(pathParts[pathParts.length - 1] || 'attachment.bin'),
+      contentType: row.media_type || 'application/octet-stream',
+      bytes: new Uint8Array(await downloaded.data.arrayBuffer()),
+    })
+  }
+  return result
+}
+
+async function findSesGraphMessages(
+  mailbox: string,
+  folder: 'drafts' | 'sentitems',
+  externalToken: string,
+): Promise<any[]> {
+  const params = new URLSearchParams({
+    '$select': 'id,internetMessageId,subject,isDraft',
+    '$filter': `contains(subject,'${externalToken}')`,
+    '$top': '10',
+  })
+  const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/mailFolders/${folder}/messages?${params}`
+  const response = await sesGraphJson(url, { method: 'GET' }, [200])
+  return (response?.value || []).filter((message: any) =>
+    String(message?.subject || '').includes(externalToken)
+  )
+}
+
+async function uploadSesGraphAttachment(
+  mailbox: string,
+  messageId: string,
+  attachment: { name: string; contentType: string; bytes: Uint8Array },
+) {
+  const base = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}`
+  if (attachment.bytes.byteLength < 3 * 1024 * 1024) {
+    await sesGraphJson(`${base}/attachments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: attachment.name,
+        contentType: attachment.contentType,
+        contentBytes: _bytesToBase64(attachment.bytes),
+      }),
+    }, [201])
+    return
+  }
+  const session = await sesGraphJson(`${base}/attachments/createUploadSession`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      AttachmentItem: {
+        attachmentType: 'file',
+        name: attachment.name,
+        size: attachment.bytes.byteLength,
+        contentType: attachment.contentType,
+      },
+    }),
+  }, [200, 201])
+  if (!session?.uploadUrl) throw new Error(`Microsoft Graph did not open an upload session for ${attachment.name}`)
+  const chunkSize = 10 * 320 * 1024
+  for (let start = 0; start < attachment.bytes.byteLength; start += chunkSize) {
+    const end = Math.min(start + chunkSize, attachment.bytes.byteLength)
+    const response = await fetch(session.uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Length': String(end - start),
+        'Content-Range': `bytes ${start}-${end - 1}/${attachment.bytes.byteLength}`,
+      },
+      body: attachment.bytes.slice(start, end),
+    })
+    if (![200, 201, 202].includes(response.status)) {
+      throw new Error(`Microsoft Graph attachment upload failed for ${attachment.name} (${response.status}: ${(await response.text()).slice(0, 300)})`)
+    }
+  }
+}
+
+function makeSesGraphMailGateway(client: any): SesMailGateway {
+  const mailbox = 'admin@secureworkswa.com.au'
+  const reconcileSentOnly = async (externalToken: string): Promise<SesRouteSendResult[]> => {
+    const sent = await findSesGraphMessages(mailbox, 'sentitems', externalToken)
+    return sent.map((message: any) => ({
+      message_id: String(message.id),
+      internet_message_id: message.internetMessageId || undefined,
+      state: 'sent' as const,
+      operation_token: externalToken,
+    }))
+  }
+  const waitForSent = async (externalToken: string): Promise<SesRouteSendResult[]> => {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const sent = await reconcileSentOnly(externalToken)
+      if (sent.length) return sent
+      await new Promise(resolve => setTimeout(resolve, 250))
+    }
+    return []
+  }
+  return {
+    async createDraftAndSend(route, context) {
+      const attachments = await loadSesRouteAttachments(
+        client,
+        Array.isArray(route.attachment_hashes) ? route.attachment_hashes : [],
+      )
+      const message = await sesGraphJson(
+        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            subject: `${String(route.subject || '')} [${context.external_token}]`,
+            body: { contentType: 'Text', content: String(route.body || '') },
+            toRecipients: (route.recipients || []).map((address: string) => ({
+              emailAddress: { address },
+            })),
+            ccRecipients: (route.cc || []).map((address: string) => ({
+              emailAddress: { address },
+            })),
+            internetMessageHeaders: [{
+              name: 'x-secureworks-ses-operation',
+              value: context.external_token,
+            }],
+          }),
+        },
+        [201],
+      )
+      if (!message?.id) throw new Error('Microsoft Graph did not return the created draft id')
+      const { error: checkpointError } = await client.from('ses_external_effects').update({
+        external_id: message.id,
+        provider_digest: { phase: 'draft_created', mailbox },
+        updated_at: new Date().toISOString(),
+      }).eq('operation_key', context.operation_key).eq('state', 'dispatching')
+      if (checkpointError) {
+        throw new Error(`The Graph draft exists but its exact draft id was not checkpointed (${checkpointError.message})`)
+      }
+      for (const attachment of attachments) {
+        await uploadSesGraphAttachment(mailbox, message.id, attachment)
+      }
+      await sesGraphJson(
+        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(message.id)}/send`,
+        { method: 'POST' },
+        [202],
+      )
+      const [sent] = await waitForSent(context.external_token)
+      if (!sent) throw new Error('Graph accepted send-by-id but the message is not yet proven in Sent Items')
+      return sent
+    },
+    async reconcileSent(externalToken) {
+      const existingSent = await reconcileSentOnly(externalToken)
+      if (existingSent.length) return existingSent
+      const drafts = await findSesGraphMessages(mailbox, 'drafts', externalToken)
+      if (drafts.length !== 1) return []
+      await sesGraphJson(
+        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(drafts[0].id)}/send`,
+        { method: 'POST' },
+        [202],
+      )
+      return await waitForSent(externalToken)
+    },
+  }
 }
 
 function opsApiVersion() {
@@ -2670,12 +3016,17 @@ if (import.meta.main) serve(async (req: Request) => {
       // 'render_makesafe_report'; the live action is 'makesafe_render_report').
       // Draft / render / read ONLY; the AUTHORISE + SEND stays in makesafe_send_pack,
       // which is DELIBERATELY NOT in this allow-list and so is denied by default-deny.
-      'create_makesafe_draft_invoice', // creates a Xero DRAFT invoice (reversible, no authorise)
       'makesafe_render_report', // renders the report PDF artifact (no send)
       'render_roof_report', // Wave 3: renders OUR letterhead roof report PDF + attaches (no send)
-      'draft_makesafe_report_pack', // Claude Draft Pack: report + DRAFT invoice + draft PDFs only
-      'draft_makesafe_report_pack_due', // cron batch: find trade-report-in jobs and run Draft Pack only
       'makesafe_report_drafts', // READ-only report-draft cockpit feed (no writes)
+      // Sealed SES U5/U6 draft/read surface. These actions can only append local
+      // content-addressed proposal/review facts. They cannot call Xero or Graph.
+      'prepare_ses_invoice_obligation',
+      'resolve_ses_invoice_duplicates',
+      'query_ses_invoice_obligation',
+      'prepare_ses_release_revision',
+      'query_ses_review_cockpit',
+      'query_ses_proof_ledger',
       // Review & Send Revise Pack loop — notes and draft-refresh requests only.
       'list_draft_notes',
       // add_draft_note is intentionally privileged-human only: the routine may
@@ -4014,6 +4365,11 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'send_invoice_email': {
         const { xero_invoice_id: siId, to_email: siTo, job_id: siJobId, cc: siCc, subject_override: siSubj } = body
         if (!siId) return json({ error: 'xero_invoice_id required' }, 400)
+        await assertLegacySesInvoiceSendAllowed(
+          client,
+          siId,
+          'send_invoice_email',
+        )
 
         // 2026-04-24 backward-compat fix: if to_email omitted, use Xero-direct email (legacy path).
         // Dashboard callers pass only xero_invoice_id; MCP sw_send_invoice_email passes to_email for Outlook+PDF.
@@ -4042,6 +4398,11 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'approve_and_send_invoice': {
         const asId = body.xero_invoice_id
         if (!asId) return json({ error: 'xero_invoice_id required' }, 400)
+        await assertLegacySesInvoiceSendAllowed(
+          client,
+          asId,
+          'approve_and_send_invoice',
+        )
 
         // T3: verify email_override BEFORE any state change. When override is absent or
         // use_branded_email: false, the verifier returns {ok: true} and we fall through
@@ -4500,12 +4861,21 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'attach_email_attachment_to_job': return json(await attachEmailAttachmentToJob(client, body))
 
       // ── MakeSafe Reporting Autopilot (Wave 2) ──
-      // create_makesafe_draft_invoice + makesafe_render_report are routine-safe
-      // (no send, no authorise). makesafe_send_pack authorises + emails and is
-      // PRIVILEGED: reachable by the dashboard (master SW_API_KEY) or an
-      // admin/owner JWT only; the make-safe automation routine is rejected.
+      // Sealed SES reporting retired the free Xero-draft and combined send
+      // surfaces. U4 prepares local facts only; U5 executes Xero only under an
+      // exact human invoice approval; U6R alone releases builder mail.
       case 'create_makesafe_draft_invoice':
-        return json(await createMakesafeDraftInvoice(client, body))
+      case 'draft_makesafe_report_pack':
+      case 'draft_makesafe_report_pack_due':
+        return json({
+          success: false,
+          refusal: {
+            state: 'refused',
+            code: 'legacy_free_invoice_path_retired',
+            fact: 'This legacy action can create a Xero DRAFT without the current U6 invoice approval.',
+            recovery_action: 'Prepare the U4 docket, prepare_ses_invoice_obligation, then use APPROVE INVOICE and execute_ses_invoice_revision.',
+          },
+        }, 410)
       case 'makesafe_render_report':
         return json(await makesafeRenderReport(client, body))
       // Wave 3 -- SecureWorks own-letterhead roof report. render_roof_report is
@@ -4514,10 +4884,116 @@ if (import.meta.main) serve(async (req: Request) => {
       // trade-authenticated and live in the trade block below.
       case 'render_roof_report':
         return json(await renderRoofReportAction(client, body))
-      case 'draft_makesafe_report_pack':
-        return json(await draftMakesafeReportPack(client, body, authMode))
-      case 'draft_makesafe_report_pack_due':
-        return json(await draftMakesafeReportPackDue(client, body, authMode))
+      // ── Sealed SES Reporting U5/U6/U6R ──
+      case 'prepare_ses_invoice_obligation':
+        return json(await prepareSesInvoiceObligationAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            job_id: body.job_id,
+            docket_revision_id: body.docket_revision_id,
+            post_release_disposition: body.post_release_disposition || null,
+            created_by: authUser?.email || body.created_by || 'ses-standing-preparer',
+          },
+        ))
+      case 'resolve_ses_invoice_duplicates':
+        return json(await resolveSesInvoiceDuplicatesAction(
+          client,
+          body.org_id || DEFAULT_ORG_ID,
+          body.requests || [],
+        ))
+      case 'query_ses_invoice_obligation': {
+        const obligationJobId = url.searchParams.get('job_id') || body.job_id
+        if (!obligationJobId) throw new ApiError('job_id required', 400)
+        const { data, error } = await client
+          .from('makesafe_invoice_obligation_revisions_current')
+          .select('*, obligation:makesafe_invoice_obligations(*)')
+          .eq('job_id', obligationJobId)
+          .order('created_at', { ascending: false })
+        if (error) throw new ApiError('invoice obligation read failed: ' + error.message, 500)
+        return json({ revisions: data || [] })
+      }
+      case 'query_ses_review_cockpit': {
+        const cockpitJobId = url.searchParams.get('job_id') || body.job_id
+        if (!cockpitJobId) throw new ApiError('job_id required', 400)
+        return json(await querySesReviewCockpitAction(
+          client,
+          cockpitJobId,
+          body.displayed_binding,
+          url.searchParams.get('release_revision_id') || body.release_revision_id,
+        ))
+      }
+      case 'approve_ses_invoice_revision':
+        return json(await approveSesInvoiceRevisionAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            job_id: body.job_id,
+            includes_authorise: body.includes_authorise === true,
+            evidence_refs: body.evidence_refs || [],
+          },
+        ))
+      case 'execute_ses_invoice_revision':
+        return json(await executeSesInvoiceRevisionAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            job_id: body.job_id,
+            invoice_obligation_revision_id: body.invoice_obligation_revision_id,
+            actor: authUser?.email || body.actor || 'ses-invoice-executor',
+          },
+          makeSesXeroGateway(client),
+        ))
+      case 'prepare_ses_release_revision':
+        return json(await prepareSesReleaseRevisionAction(client, {
+          org_id: body.org_id || DEFAULT_ORG_ID,
+          job_ids: body.job_ids || (body.job_id ? [body.job_id] : []),
+          routes: body.routes,
+          created_by: authUser?.email || body.created_by || 'ses-release-preparer',
+        }))
+      case 'approve_ses_release_revision':
+        return json(await approveSesReleaseRevisionAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            release_revision_id: body.release_revision_id,
+            evidence_refs: body.evidence_refs || [],
+          },
+        ))
+      case 'execute_ses_release_revision':
+        return json(await executeSesReleaseRevisionAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            release_revision_id: body.release_revision_id,
+            actor: authUser?.email || body.actor || 'ses-release-executor',
+          },
+          makeSesGraphMailGateway(client),
+          makeSesReleaseXeroReader(client),
+        ))
+      case 'query_ses_proof_ledger': {
+        const releaseRevisionId = url.searchParams.get('release_revision_id') ||
+          body.release_revision_id
+        if (!releaseRevisionId) throw new ApiError('release_revision_id required', 400)
+        return json(await querySesProofLedgerAction(client, releaseRevisionId))
+      }
+      case 'record_ses_review_feedback':
+        return json(await recordSesReviewFeedbackAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            docket_revision_id: body.docket_revision_id,
+            job_id: body.job_id,
+            change_type: body.change_type,
+            before: body.before,
+            after: body.after,
+          },
+        ))
       // Draft Pack / Revise Pack feedback loop. These actions are draft-only:
       // they store/read the human feedback thread and queue a draft refresh note.
       // They never send, authorise, close, charge, or email a builder.
@@ -4528,6 +5004,16 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'rerun_draft_report':
         return json(await rerunDraftReport(client, body, authMode))
       case 'makesafe_send_pack': {
+        return json({
+          success: false,
+          refusal: {
+            state: 'refused',
+            code: 'legacy_combined_release_retired',
+            fact: 'This legacy action combines money and builder send without a U6R release revision.',
+            recovery_action: 'Use separate APPROVE INVOICE and SEND IT controls, then execute_ses_release_revision.',
+          },
+        }, 410)
+        /*
         // auth per decision scoped-routine-key-2026-06-17: privileged SW_API_KEY
         // (dashboard) OR jwt admin/owner; the scoped routine key (authMode='routine',
         // Sentinel Wave 0 PR #179) is rejected here and centrally via
@@ -4542,6 +5028,7 @@ if (import.meta.main) serve(async (req: Request) => {
           approverId: authUser?.id || null,
           approverEmail: authUser?.email || null,
         }))
+        */
       }
       // makesafe_send_photo_followup (Stage 1-2a) — EMAIL 2 for AJS/MLB.
       // Sends the approved site photos as individual attachments after the main
@@ -4549,10 +5036,21 @@ if (import.meta.main) serve(async (req: Request) => {
       // MAKESAFE_PACK_SENT | photo marker. PRIVILEGED-CALLER ONLY (same gate as
       // makesafe_send_pack). NOT routine-callable. No Xero authorise in this path.
       case 'makesafe_send_photo_followup': {
+        return json({
+          success: false,
+          refusal: {
+            state: 'refused',
+            code: 'legacy_route_send_retired',
+            fact: 'This legacy photo sender is not bound to a U6R release revision and route proof.',
+            recovery_action: 'Prepare and approve the exact three-route release, then use execute_ses_release_revision.',
+          },
+        }, 410)
+        /*
         if (!sendPackAllowed(authMode, authUser)) {
           return json({ error: 'forbidden: makesafe_send_photo_followup requires the privileged dashboard key or an admin/owner session' }, 403)
         }
         return json(await makesafeSendPhotoFollowup(client, body))
+        */
       }
       // makesafe_resume_close (TASK B) — CLOSE-ONLY resume for sent_not_closed /
       // close_failed. PRIVILEGED-CALLER ONLY, gated EXACTLY like makesafe_send_pack
@@ -6843,6 +7341,10 @@ if (import.meta.main) serve(async (req: Request) => {
       default: return json({ error: 'Unknown action' }, 400)
     }
   } catch (err) {
+    const sesError = sesActionErrorResponse(err)
+    if (sesError) {
+      return json(sesError.body, sesError.status)
+    }
     if (err instanceof ApiError) {
       return json({ error: err.message }, err.status)
     }
@@ -20800,10 +21302,63 @@ function computeReferenceSuffix(jobNumber: string, reference: string): string | 
   return trimmed
 }
 
-async function createInvoice(client: any, body: any) {
+async function assertLegacySesInvoiceSendAllowed(
+  client: any,
+  xeroInvoiceId: string,
+  action: string,
+) {
+  const invoice = await client.from('xero_invoices')
+    .select('job_id, invoice_obligation_revision_id')
+    .eq('xero_invoice_id', xeroInvoiceId).maybeSingle()
+  if (invoice.error) {
+    throw new ApiError(
+      `The ${action} SES release gate could not check the invoice (${invoice.error.message}).`,
+      503,
+    )
+  }
+  if (!invoice.data?.job_id || !invoice.data.invoice_obligation_revision_id) return
+
+  const docket = await client.from('makesafe_docket_revisions')
+    .select('id').eq('job_id', invoice.data.job_id)
+    .eq('invoice_obligation_revision_id', invoice.data.invoice_obligation_revision_id)
+    .eq('stage', 'invoice_bound')
+    .order('committed_at', { ascending: false }).limit(1).maybeSingle()
+  if (docket.error) {
+    throw new ApiError(
+      `The ${action} SES release gate could not check the sealed docket (${docket.error.message}).`,
+      503,
+    )
+  }
+  if (!docket.data) return
+
+  throw new ApiError(409, {
+    success: false,
+    refusal: {
+      state: 'refused',
+      code: 'u6r_release_required',
+      fact: `The sealed SES invoice cannot use legacy ${action}; U6R SEND IT is the only release and provider-effect path.`,
+      recovery_action: 'Complete the U6 review, approve SEND IT, then use execute_ses_release_revision for the exact route and closeout.',
+    },
+  })
+}
+
+interface CreateInvoiceInternalOptions {
+  ses?: {
+    obligationRevisionId: string
+    externalToken: string
+    operationKey: string
+  }
+}
+
+async function createInvoice(
+  client: any,
+  body: any,
+  internal: CreateInvoiceInternalOptions = {},
+) {
   const { job_id, jobId, contact_name, contactName, xero_contact_id, job_contact_id,
           line_items, lineItems, due_date, dueDate, reference,
           xero_status, send_email } = body
+  const sesContext = internal.ses
 
   const items = line_items || lineItems
   if (!items || items.length === 0) throw new Error('line_items required')
@@ -20816,6 +21371,27 @@ async function createInvoice(client: any, body: any) {
   // action has the same safety guard as completeAndInvoice + createMakesafeDraftInvoice.
   // Normal (non-makesafe) manual invoicing is unaffected.
   const jIdForGate = job_id || jobId
+  if (jIdForGate && !sesContext) {
+    const { data: sealedDocket, error: sealedDocketError } = await client
+      .from('makesafe_docket_revisions')
+      .select('id')
+      .eq('job_id', jIdForGate)
+      .order('committed_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (sealedDocketError) {
+      throw new ApiError(
+        `The sealed make-safe docket authority could not be checked (${sealedDocketError.message}).`,
+        503,
+      )
+    }
+    if (sealedDocket) {
+      throw new ApiError(
+        'This make-safe has a sealed U4 docket but no current human APPROVE INVOICE decision on the exact U5 revision; use approve_ses_invoice_revision and execute_ses_invoice_revision.',
+        409,
+      )
+    }
+  }
   if (jIdForGate) {
     const { data: msGateDetail } = await client.from('makesafe_job_details')
       .select('report_type').eq('job_id', jIdForGate).maybeSingle()
@@ -20889,10 +21465,15 @@ async function createInvoice(client: any, body: any) {
     try {
       const jId = job_id || jobId
 
-      // When billing a neighbour, use their email/phone, not the job's primary client.
+      // Sealed SES invoices bill the classified builder Xero contact. Never let
+      // the policyholder email on jobs redirect that name lookup to the wrong
+      // Xero customer.
       let contactEmail: string | undefined
       let contactPhone: string | undefined
-      if (job_contact_id) {
+      if (sesContext) {
+        contactEmail = undefined
+        contactPhone = undefined
+      } else if (job_contact_id) {
         const { data: jcData } = await client.from('job_contacts')
           .select('client_email, client_phone')
           .eq('id', job_contact_id)
@@ -20950,7 +21531,9 @@ async function createInvoice(client: any, body: any) {
     }
   }
 
-  const ref = reference || ''
+  const ref = sesContext
+    ? `${String(reference || '').trim()} | ${sesContext.externalToken}`
+    : (reference || '')
   // Validate tracking category exists in Xero before including it
   let tracking: any[] = []
   try {
@@ -20973,7 +21556,7 @@ async function createInvoice(client: any, body: any) {
   }))
 
   // Use requested status — DRAFT (for bookkeeper review) or AUTHORISED (approve & send)
-  const invoiceStatus = xero_status || 'DRAFT'
+  const invoiceStatus = sesContext ? 'DRAFT' : (xero_status || 'DRAFT')
 
   // Loop 1B-a-apply: Terms text comes from the preflight context (which
   // already resolved override > jobs.payment_terms > pricing_json.payment_terms
@@ -20992,7 +21575,7 @@ async function createInvoice(client: any, body: any) {
         : { Name: contact },
       LineAmountTypes: 'Exclusive',
       LineItems: xeroLineItems,
-      Reference: reference || '',
+      Reference: ref,
       DueDate: xeroDueDate,
       Status: invoiceStatus,
       ...(xeroTermsText ? { Terms: xeroTermsText } : {}),
@@ -21011,16 +21594,18 @@ async function createInvoice(client: any, body: any) {
   // createMakesafeDraftInvoice (server-side), never by the public route's body.
   // (Adversarial review finding 4.)
   const jIdForKey = job_id || jobId || 'nojob'
-  const invIdempotencyKey = body.makesafe_idempotency_key
-    ? String(body.makesafe_idempotency_key)
-    : `inv-${jIdForKey}-${reference || 'noref'}-${new Date().toISOString().slice(0, 16)}`
+  const invIdempotencyKey = sesContext
+    ? `ses-invoice-create-${sesContext.obligationRevisionId}`
+    : (body.makesafe_idempotency_key
+      ? String(body.makesafe_idempotency_key)
+      : `inv-${jIdForKey}-${reference || 'noref'}-${new Date().toISOString().slice(0, 16)}`)
   const result = await xeroPost('/Invoices', accessToken, tenantId, invoice, 'PUT', invIdempotencyKey)
   const xeroInv = result?.Invoices?.[0]
   const xeroInvId = xeroInv?.InvoiceID
   const invNumber = xeroInv?.InvoiceNumber
 
   // If approve & send, email the invoice to the client via Xero
-  if (send_email && xeroInvId) {
+  if (!sesContext && send_email && xeroInvId) {
     try {
       await xeroPost(`/Invoices/${xeroInvId}/Email`, accessToken, tenantId, {}, 'POST')
     } catch (emailErr: any) {
@@ -21042,7 +21627,7 @@ async function createInvoice(client: any, body: any) {
       // from the strategy doc's W2 traceability set; two close H1's silent
       // drop (job_contact_id, reference_suffix); one surfaces the Xero
       // Project manual-fill queue per the 2026-04-09 ADR.
-      const referenceSuffix = computeReferenceSuffix(traceCtx?.job_number || '', reference || '')
+      const referenceSuffix = computeReferenceSuffix(traceCtx?.job_number || '', ref)
       await client.from('xero_invoices').upsert({
         org_id: DEFAULT_ORG_ID,
         xero_invoice_id: xeroInvId,
@@ -21051,7 +21636,7 @@ async function createInvoice(client: any, body: any) {
         invoice_number: invNumber,
         invoice_type: 'ACCREC',
         status: xeroInv?.Status || invoiceStatus,
-        reference: reference || '',
+        reference: ref,
         sub_total: invSubTotal,
         total_tax: (xeroInv?.TotalTax ?? invTotal - invSubTotal),
         total: invTotal,
@@ -21073,6 +21658,8 @@ async function createInvoice(client: any, body: any) {
         scope_revision_id:          traceCtx?.scope_revision_id || null,
         job_contact_id:             job_contact_id || null,
         reference_suffix:           referenceSuffix,
+        invoice_obligation_revision_id: sesContext?.obligationRevisionId || null,
+        ses_external_token: sesContext?.externalToken || null,
         synced_at: new Date().toISOString(),
       }, { onConflict: 'org_id,xero_invoice_id' })
     } catch (upsertErr: any) {
@@ -21084,23 +21671,39 @@ async function createInvoice(client: any, body: any) {
     await client.from('job_events').insert({
       job_id: jId,
       event_type: 'invoice_created',
-      detail_json: { xero_invoice_id: xeroInvId, invoice_number: invNumber, status: xeroInv?.Status || invoiceStatus, total: invTotal, emailed: !!send_email },
+      detail_json: {
+        xero_invoice_id: xeroInvId,
+        invoice_number: invNumber,
+        status: xeroInv?.Status || invoiceStatus,
+        total: invTotal,
+        emailed: !sesContext && !!send_email,
+        ses_operation_key: sesContext?.operationKey || null,
+      },
     })
-    // Update job status to invoiced if complete
-    await client.from('jobs')
-      .update({ status: 'invoiced' })
-      .eq('id', jId)
-      .eq('status', 'complete')
-    // ── M3d U2b: invoicing a job finishes it — close its still-open crew
-    // assignments. Also covers complete_and_invoice, which reaches its terminal
-    // 'invoiced' state through this createInvoice call. Non-blocking.
-    await closeOpenAssignmentsForJob(client, jId, 'complete')
+    if (!sesContext) {
+      // Update job status to invoiced if complete.
+      await client.from('jobs')
+        .update({ status: 'invoiced' })
+        .eq('id', jId)
+        .eq('status', 'complete')
+      // ── M3d U2b: invoicing a job finishes it — close its still-open crew
+      // assignments. Also covers complete_and_invoice, which reaches its terminal
+      // 'invoiced' state through this createInvoice call. Non-blocking.
+      await closeOpenAssignmentsForJob(client, jId, 'complete')
+    }
   }
 
   // Return the status Xero actually assigned (xeroInv.Status), not just what we
   // requested. Callers that gate client-facing payment links (sendAcceptanceInvoice)
   // must verify the invoice really came back AUTHORISED before emailing a Pay Now.
-  return { success: true, xero_invoice_id: xeroInvId, invoice_number: invNumber, total: invTotal, status: xeroInv?.Status || invoiceStatus }
+  return {
+    success: true,
+    xero_invoice_id: xeroInvId,
+    invoice_number: invNumber,
+    total: invTotal,
+    status: xeroInv?.Status || invoiceStatus,
+    reference: xeroInv?.Reference || ref,
+  }
 }
 
 // ── Sync Job Invoices — pull invoices from Xero for a specific job and link them ──

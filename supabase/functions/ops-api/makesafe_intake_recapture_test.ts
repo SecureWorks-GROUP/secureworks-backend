@@ -366,11 +366,14 @@ Deno.test("AC6 (structural): recapture_intake_draft is NOT in ROUTINE_ALLOWED_AC
     "attach_makesafe_document",
     "submit_makesafe_report",
     "update_makesafe_substatus",
-    "create_makesafe_draft_invoice",
     "makesafe_render_report",
-    "draft_makesafe_report_pack",
-    "draft_makesafe_report_pack_due",
     "makesafe_report_drafts",
+    "prepare_ses_invoice_obligation",
+    "resolve_ses_invoice_duplicates",
+    "query_ses_invoice_obligation",
+    "prepare_ses_release_revision",
+    "query_ses_review_cockpit",
+    "query_ses_proof_ledger",
     "list_draft_notes",
     "add_draft_note",
     "rerun_draft_report",
@@ -417,7 +420,11 @@ Deno.test("AC7 (documented): test count and CI gates confirmed via external run"
 function makeRecaptureStub(opts: {
   draft: Record<string, any>;
   groupEmailPostId: string;
-  jobRows: Array<{ job_id: string; external_ref: string }>;
+  jobRows: Array<{
+    job_id: string;
+    external_ref: string;
+    requesting_company_slug?: string;
+  }>;
 }): { client: any; inserts: Array<{ table: string; row: any }> } {
   const inserts: Array<{ table: string; row: any }> = [];
 

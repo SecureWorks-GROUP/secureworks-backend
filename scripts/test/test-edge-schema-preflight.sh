@@ -10,6 +10,7 @@ MANIFEST="$REPO_ROOT/scripts/edge-function-schema-requirements.txt"
 MIGRATION="$REPO_ROOT/supabase/migrations/20260727000001_makesafe_attendance_cycles_u2_s1.sql"
 MEDIA_MIGRATION="$REPO_ROOT/supabase/migrations/20260728000001_makesafe_state_authority_u2.sql"
 FRESH_HEALTH_MIGRATION="$REPO_ROOT/supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql"
+U5_U6_MIGRATION="$REPO_ROOT/supabase/migrations/20260728020000_makesafe_ses_invoice_release_u5_u6.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -45,6 +46,10 @@ fresh_health_migration_sha() {
   shasum -a 256 "$FRESH_HEALTH_MIGRATION" | awk '{print $1}'
 }
 
+u5_u6_migration_sha() {
+  shasum -a 256 "$U5_U6_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -54,6 +59,7 @@ write_response() {
   EXPECTED_SHA="$(migration_sha)" \
   MEDIA_EXPECTED_SHA="$(media_migration_sha)" \
   FRESH_HEALTH_EXPECTED_SHA="$(fresh_health_migration_sha)" \
+  U5_U6_EXPECTED_SHA="$(u5_u6_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -100,8 +106,19 @@ fresh_health_row = {
     "actual_statement_sha256": os.environ["FRESH_HEALTH_EXPECTED_SHA"],
     "missing_markers": [],
 }
+u5_u6_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260728020000",
+    "expected_migration_name": "makesafe_ses_invoice_release_u5_u6",
+    "expected_statement_sha256": os.environ["U5_U6_EXPECTED_SHA"],
+    "actual_migration_version": "20260728020000" if actual_name else None,
+    "actual_migration_name": "makesafe_ses_invoice_release_u5_u6" if actual_name else None,
+    "actual_statement_count": 1 if actual_name else None,
+    "actual_statement_sha256": os.environ["U5_U6_EXPECTED_SHA"] if actual_name else None,
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
-    json.dump([row, fresh_health_row, media_row], f)
+    json.dump([row, fresh_health_row, media_row, u5_u6_row], f)
 PY
 }
 
@@ -297,7 +314,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared

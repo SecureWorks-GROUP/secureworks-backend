@@ -117,13 +117,15 @@ const ROUTINE_ALLOWED_ACTIONS = new Set([
   "attach_makesafe_document",
   "submit_makesafe_report",
   "update_makesafe_substatus",
-  // Wave 2 (Scribe) — report DRAFT-invoice + RENDER + READ. Draft/render/read only;
-  // the AUTHORISE + SEND stays in makesafe_send_pack (NOT allow-listed -> denied).
-  "create_makesafe_draft_invoice",
+  // Sealed SES local proposal/read surfaces. None can call Xero or Graph.
   "makesafe_render_report",
-  "draft_makesafe_report_pack",
-  "draft_makesafe_report_pack_due",
   "makesafe_report_drafts",
+  "prepare_ses_invoice_obligation",
+  "resolve_ses_invoice_duplicates",
+  "query_ses_invoice_obligation",
+  "prepare_ses_release_revision",
+  "query_ses_review_cockpit",
+  "query_ses_proof_ledger",
   "list_draft_notes",
   "rerun_draft_report",
 ]);
@@ -164,6 +166,15 @@ const ROUTINE_MUST_DENY = [
   "approve_intake_draft",
   "auto_approve_clean_intake_drafts",
   "makesafe_send_pack",
+  "approve_ses_invoice_revision",
+  "execute_ses_invoice_revision",
+  "approve_ses_release_revision",
+  "execute_ses_release_revision",
+  "record_ses_review_feedback",
+  // Retired free-create paths must stay unreachable to the routine.
+  "create_makesafe_draft_invoice",
+  "draft_makesafe_report_pack",
+  "draft_makesafe_report_pack_due",
   "approve_variation",
   "approve_expense",
   // crew / PO / assignment / status-mutation (the broader default-deny the General extended)
@@ -216,12 +227,15 @@ Deno.test("ScopedKey: routine IS ALLOWED on the safe draft/read/render/attach fe
       "submit_makesafe_report",
       "ops_summary",
       "makesafe_pipeline",
-      // Wave 2 (Scribe) draft/render/read actions — routine-safe (no send/authorise).
-      "create_makesafe_draft_invoice",
+      // Sealed SES local proposal/read actions — routine-safe (no send/authorise).
       "makesafe_render_report",
-      "draft_makesafe_report_pack",
-      "draft_makesafe_report_pack_due",
       "makesafe_report_drafts",
+      "prepare_ses_invoice_obligation",
+      "resolve_ses_invoice_duplicates",
+      "query_ses_invoice_obligation",
+      "prepare_ses_release_revision",
+      "query_ses_review_cockpit",
+      "query_ses_proof_ledger",
       "list_draft_notes",
       "rerun_draft_report",
     ]
@@ -233,16 +247,18 @@ Deno.test("ScopedKey: routine IS ALLOWED on the safe draft/read/render/attach fe
   }
 });
 
-Deno.test("ScopedKey (Wave 2/3): draft/render/read/revise actions are allow-listed but makesafe_send_pack stays DENIED", () => {
-  // Scribe/Ludwig's extension adds draft/render/read/revise actions. The SEND verb is
-  // deliberately NOT allow-listed, so the routine still hits the central 403 BEFORE
-  // its per-case sendPackAllowed() gate (belt-and-braces).
-  assert(!routineDenied("routine", "create_makesafe_draft_invoice"));
+Deno.test("ScopedKey (sealed SES): local prepare/read actions are allow-listed but money and release stay DENIED", () => {
   assert(!routineDenied("routine", "makesafe_render_report"));
-  assert(!routineDenied("routine", "draft_makesafe_report_pack"));
-  assert(!routineDenied("routine", "draft_makesafe_report_pack_due"));
   assert(!routineDenied("routine", "makesafe_report_drafts"));
+  assert(!routineDenied("routine", "prepare_ses_invoice_obligation"));
+  assert(!routineDenied("routine", "prepare_ses_release_revision"));
+  assert(!routineDenied("routine", "query_ses_review_cockpit"));
   assert(!routineDenied("routine", "rerun_draft_report"));
+  assert(routineDenied("routine", "create_makesafe_draft_invoice"));
+  assert(routineDenied("routine", "approve_ses_invoice_revision"));
+  assert(routineDenied("routine", "execute_ses_invoice_revision"));
+  assert(routineDenied("routine", "approve_ses_release_revision"));
+  assert(routineDenied("routine", "execute_ses_release_revision"));
   assert(
     routineDenied("routine", "makesafe_send_pack"),
     "send_pack must remain denied by default-deny",
