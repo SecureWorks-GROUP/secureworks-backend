@@ -272,6 +272,7 @@ export interface IntakeExceptionProjectionInput {
   }>;
   excludedPostIds: string[];
   refPrefixes: string[];
+  outOfWindowExceptionCaseRows?: number;
 }
 
 interface EffectiveSource {
@@ -1139,7 +1140,9 @@ export function buildIntakeExceptionProjection(
     ).length;
   const resolvedFromExistingEvidence = dispositionCounts.bound_live_job +
     dispositionCounts.existing_job_follow_up;
-  const accountedSilently = dispositionCounts.out_of_window +
+  const outOfWindowExceptionCaseRows =
+    input.outOfWindowExceptionCaseRows || dispositionCounts.out_of_window;
+  const accountedSilently = outOfWindowExceptionCaseRows +
     dispositionCounts.duplicate_shadow +
     dispositionCounts.correction_residue +
     dispositionCounts.deterministic_non_work +
@@ -1163,10 +1166,9 @@ export function buildIntakeExceptionProjection(
       outside_three: outsideThree,
     },
     totals: {
-      exception_case_rows: dispositions.length,
-      recent_exception_case_rows: dispositions.length -
-        dispositionCounts.out_of_window,
-      out_of_window_exception_case_rows: dispositionCounts.out_of_window,
+      exception_case_rows: dispositions.length + outOfWindowExceptionCaseRows,
+      recent_exception_case_rows: dispositions.length,
+      out_of_window_exception_case_rows: outOfWindowExceptionCaseRows,
       recent_accounted_non_work_rows: recentAccountedNonWorkRows,
       recent_deterministic_non_work_exception_rows:
         dispositionCounts.deterministic_non_work,
@@ -1329,14 +1331,12 @@ export async function loadIntakeExceptionProjection(
   ]);
 
   const caseIds = [...new Set(cases.map((row) => String(row.id)))];
-  const sources = await loadPaged(
-    (from, to) => client.from("makesafe_intake_case_sources")
-      .select("case_id,post_id,role,received_at,attachment_refs")
-      .eq("org_id", orgId)
-      .gte("received_at", windowFrom)
-      .lte("received_at", generatedAt)
-      .order("id", { ascending: true })
-      .range(from, to),
+  const sources = await loadByIds(
+    client,
+    "makesafe_intake_case_sources",
+    "case_id,post_id,role,received_at,attachment_refs",
+    "case_id",
+    caseIds,
     "intake exception sources",
   );
   const postIds = [...new Set(sources.map((row) => String(row.post_id)))];
@@ -1357,10 +1357,23 @@ export async function loadIntakeExceptionProjection(
   ))];
   const companies = await loadByIds(client, "makesafe_companies", "id,slug,name",
     "id", companyIds, "make-safe companies");
-  const { data: jobs, error: jobsError } = await client.from("makesafe_job_details")
-    .select("job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs!inner(id,status,site_address,type,metadata)")
-    .not("jobs.status", "in", "(cancelled,canceled,void,voided,superseded)");
-  if (jobsError) throw new Error(`make-safe live obligations read failed: ${jobsError.message || jobsError}`);
+  const jobs = await loadPaged(
+    (from, to) => client.from("makesafe_job_details")
+      .select("job_id,external_ref,requesting_company_slug,requesting_company_name,report_type,jobs!inner(id,status,site_address,type,metadata)")
+      .not("jobs.status", "in", "(cancelled,canceled,void,voided,superseded)")
+      .order("job_id", { ascending: true })
+      .range(from, to),
+    "make-safe live obligations",
+  );
+  const { count: outOfWindowExceptionCaseRows, error: archiveCountError } =
+    await client.from("makesafe_intake_cases")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", orgId)
+      .eq("state", "exception")
+      .lt("received_at", windowFrom);
+  if (archiveCountError) {
+    throw new Error(`intake exception archive count failed: ${archiveCountError.message || archiveCountError}`);
+  }
   const refPrefixes = await loadRefPrefixes(client);
 
   const projectionInput: IntakeExceptionProjectionInput = {
@@ -1378,6 +1391,7 @@ export async function loadIntakeExceptionProjection(
     attachments: [],
     excludedPostIds: [],
     refPrefixes,
+    outOfWindowExceptionCaseRows: outOfWindowExceptionCaseRows || 0,
   };
   const outline = buildIntakeExceptionProjection(projectionInput);
   const evidencePostIds = evidencePostIdsForVisibleItems(
