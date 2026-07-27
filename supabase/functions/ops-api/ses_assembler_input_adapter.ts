@@ -350,6 +350,17 @@ export function physicalReportRenderJob(
     reportText(checklist.materials),
     reportText(checklist.materials_used),
   );
+  const accessIssues = Object.hasOwn(checklist, "access_issues")
+    ? reportText(checklist.access_issues) || "No access issues reported."
+    : "Access constraints: not recorded in trade submission.";
+  const followUpRequired = !Object.hasOwn(checklist, "follow_up_required")
+    ? "Follow-up status: not recorded in trade submission."
+    : checklist.follow_up_required === true
+    ? "Follow-up required."
+    : checklist.follow_up_required === false
+    ? "No further works required."
+    : reportText(checklist.follow_up_required) ||
+      "Follow-up status: not recorded in trade submission.";
   return {
     ref: input.source.builder_reference,
     address: input.source.site_address || "Address not recorded",
@@ -381,13 +392,8 @@ export function physicalReportRenderJob(
       report.notes,
     ),
     materials,
-    access_issues: reportText(checklist.access_issues) ||
-      "No access issues reported.",
-    follow_up_required: checklist.follow_up_required === true
-      ? "Follow-up required."
-      : checklist.follow_up_required === false
-      ? "No further works required."
-      : reportText(checklist.follow_up_required) || "No follow-up required.",
+    access_issues: accessIssues,
+    follow_up_required: followUpRequired,
     photos: photoArtifacts.map((photo) => {
       const source = input.cycle_facts.photos.find((item) =>
         item.id === photo.photo_id && item.path_or_key === photo.source_pointer
