@@ -1372,6 +1372,8 @@ DECLARE
   v_requested integer;
   v_existing public.makesafe_board_reconciliation_staged_chunks%ROWTYPE;
 BEGIN
+  DELETE FROM public.makesafe_board_reconciliation_staged_chunks
+  WHERE staged_at < now() - interval '24 hours';
   IF length(btrim(COALESCE(p_run_key, ''))) = 0
      OR length(btrim(COALESCE(p_applied_by, ''))) = 0
      OR COALESCE(p_selection_hash, '') !~ '^sha256:[0-9a-f]{64}$'
@@ -1422,6 +1424,21 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.validate_makesafe_board_reconciliation_state_tokens(
+  p_rows jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF jsonb_typeof(p_rows) <> 'array' THEN
+    RAISE EXCEPTION 'reconciliation state token payload must be an array';
+  END IF;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.finalize_makesafe_board_reconciliation(
   p_run_key text,
   p_applied_by text,
@@ -1430,7 +1447,7 @@ CREATE OR REPLACE FUNCTION public.finalize_makesafe_board_reconciliation(
 )
 RETURNS jsonb
 LANGUAGE plpgsql
-SECURITY INVOKER
+SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
@@ -1472,12 +1489,177 @@ BEGIN
   LOOP
     v_rows := v_rows || v_chunk.rows_json;
   END LOOP;
+  PERFORM public.validate_makesafe_board_reconciliation_state_tokens(v_rows);
   v_result := public.apply_makesafe_board_reconciliation(
     p_run_key, p_applied_by, p_selection_hash, v_rows
   );
   DELETE FROM public.makesafe_board_reconciliation_staged_chunks
   WHERE run_key = p_run_key;
   RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.validate_makesafe_board_reconciliation_state_tokens(
+  p_rows jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_row record;
+  v_token jsonb;
+  v_expected text;
+BEGIN
+  FOR v_row IN
+    SELECT * FROM jsonb_to_recordset(p_rows) AS x(
+      job_id uuid,
+      state_token text,
+      state_facts jsonb
+    )
+  LOOP
+    IF v_row.state_facts IS NULL
+       OR jsonb_typeof(v_row.state_facts) <> 'object' THEN
+      RAISE EXCEPTION 'reconciliation row % has no state facts', v_row.job_id;
+    END IF;
+    v_expected := 'sha256:' || encode(
+      extensions.digest(
+        convert_to(public.makesafe_canonical_json_v1(v_row.state_facts), 'UTF8'),
+        'sha256'
+      ),
+      'hex'
+    );
+    IF v_row.state_token IS DISTINCT FROM v_expected THEN
+      RAISE EXCEPTION 'reconciliation row % has a stale state token', v_row.job_id;
+    END IF;
+    IF (SELECT count(*) FROM public.makesafe_attendance_cycles WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_row.state_facts->'cycles', '[]'::jsonb))
+      OR (SELECT count(*) FROM public.job_assignments WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_row.state_facts->'assignments', '[]'::jsonb))
+      OR (SELECT count(*) FROM public.job_service_reports WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_row.state_facts->'service_reports', '[]'::jsonb))
+      OR (SELECT count(*) FROM public.job_documents WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_row.state_facts->'documents', '[]'::jsonb))
+      OR (SELECT count(*) FROM public.job_media WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_row.state_facts->'media', '[]'::jsonb))
+      OR (SELECT count(*) FROM public.makesafe_portal_capture_revisions WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_row.state_facts->'portal_captures', '[]'::jsonb))
+    THEN
+      RAISE EXCEPTION 'reconciliation row % fact coverage changed', v_row.job_id;
+    END IF;
+    v_token := v_row.state_facts->'identity';
+    IF v_token IS NOT NULL AND NOT EXISTS (
+      SELECT 1
+      FROM public.makesafe_state_identity_current_v2 i
+      WHERE i.job_id = v_row.job_id
+        AND i.id = (v_token->>'id')::uuid
+        AND i.source_version IS NOT DISTINCT FROM (v_token->>'source_version')::bigint
+        AND i.source_content_hash IS NOT DISTINCT FROM v_token->>'source_content_hash'
+        AND i.lineage_id IS NOT DISTINCT FROM v_token->>'lineage_id'
+        AND i.lineage_version IS NOT DISTINCT FROM (v_token->>'lineage_version')::bigint
+        AND i.lineage_correction_hash IS NOT DISTINCT FROM v_token->>'lineage_correction_hash'
+        AND i.lineage_supersession_hash IS NOT DISTINCT FROM v_token->>'lineage_supersession_hash'
+        AND i.revision_hash IS NOT DISTINCT FROM v_token->>'revision_hash'
+    ) THEN
+      RAISE EXCEPTION 'reconciliation row % identity facts changed', v_row.job_id;
+    END IF;
+    v_token := v_row.state_facts->'readiness';
+    IF v_token IS NOT NULL AND NOT EXISTS (
+      SELECT 1
+      FROM public.makesafe_readiness_current_v2 r
+      WHERE r.job_id = v_row.job_id
+        AND r.id = (v_token->>'id')::uuid
+        AND r.readiness_revision IS NOT DISTINCT FROM v_token->>'readiness_revision'
+        AND r.dependency_generation IS NOT DISTINCT FROM (v_token->>'dependency_generation')::integer
+    ) THEN
+      RAISE EXCEPTION 'reconciliation row % readiness facts changed', v_row.job_id;
+    END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(COALESCE(v_row.state_facts->'cycles', '[]'::jsonb)) e
+      LEFT JOIN public.makesafe_attendance_cycles f
+        ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+      WHERE f.id IS NULL
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+    ) THEN RAISE EXCEPTION 'reconciliation row % cycle facts changed', v_row.job_id; END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(COALESCE(v_row.state_facts->'assignments', '[]'::jsonb)) e
+      LEFT JOIN public.job_assignments f
+        ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+      WHERE f.id IS NULL
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+         OR f.attendance_cycle_id IS DISTINCT FROM NULLIF(e->>'attendance_cycle_id', '')::uuid
+         OR f.cycle_attribution IS DISTINCT FROM e->>'cycle_attribution'
+    ) THEN RAISE EXCEPTION 'reconciliation row % assignment facts changed', v_row.job_id; END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(COALESCE(v_row.state_facts->'service_reports', '[]'::jsonb)) e
+      LEFT JOIN public.job_service_reports f
+        ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+      WHERE f.id IS NULL
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+         OR f.attendance_cycle_id IS DISTINCT FROM NULLIF(e->>'attendance_cycle_id', '')::uuid
+         OR f.cycle_attribution IS DISTINCT FROM e->>'cycle_attribution'
+    ) THEN RAISE EXCEPTION 'reconciliation row % report facts changed', v_row.job_id; END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(COALESCE(v_row.state_facts->'documents', '[]'::jsonb)) e
+      LEFT JOIN public.job_documents f
+        ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+      WHERE f.id IS NULL
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+         OR f.attendance_cycle_id IS DISTINCT FROM NULLIF(e->>'attendance_cycle_id', '')::uuid
+         OR f.cycle_attribution IS DISTINCT FROM e->>'cycle_attribution'
+    ) THEN RAISE EXCEPTION 'reconciliation row % document facts changed', v_row.job_id; END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(COALESCE(v_row.state_facts->'media', '[]'::jsonb)) e
+      LEFT JOIN public.job_media f
+        ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+      WHERE f.id IS NULL
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+         OR f.attendance_cycle_id IS DISTINCT FROM NULLIF(e->>'attendance_cycle_id', '')::uuid
+         OR f.cycle_attribution IS DISTINCT FROM e->>'cycle_attribution'
+    ) THEN RAISE EXCEPTION 'reconciliation row % media facts changed', v_row.job_id; END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(COALESCE(v_row.state_facts->'portal_captures', '[]'::jsonb)) e
+      LEFT JOIN public.makesafe_portal_capture_revisions f
+        ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+      WHERE f.id IS NULL
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+         OR f.attendance_cycle_id IS DISTINCT FROM NULLIF(e->>'attendance_cycle_id', '')::uuid
+    ) THEN RAISE EXCEPTION 'reconciliation row % portal facts changed', v_row.job_id; END IF;
+  END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.discard_makesafe_board_reconciliation(
+  p_run_key text,
+  p_selection_hash text,
+  p_reason text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public
+AS $$
+DECLARE v_deleted integer;
+BEGIN
+  DELETE FROM public.makesafe_board_reconciliation_staged_chunks
+  WHERE run_key = p_run_key
+    AND (p_selection_hash IS NULL OR selection_hash = p_selection_hash);
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+  RETURN jsonb_build_object('ok', true, 'run_key', p_run_key,
+    'discarded_chunks', v_deleted, 'reason', left(COALESCE(p_reason, ''), 500));
 END;
 $$;
 
@@ -1813,12 +1995,18 @@ REVOKE ALL ON public.makesafe_board_reconciliation_staged_chunks
   FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.apply_makesafe_board_reconciliation(
   text, text, text, jsonb
-) FROM PUBLIC, anon, authenticated;
+) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.stage_makesafe_board_reconciliation(
   text, text, text, text, integer, integer, jsonb
 ) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.finalize_makesafe_board_reconciliation(
   text, text, text, text
+) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.validate_makesafe_board_reconciliation_state_tokens(
+  jsonb
+) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.discard_makesafe_board_reconciliation(
+  text, text, text
 ) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.seed_makesafe_state_authority_v1(
   text, text, text, uuid[]
@@ -1856,14 +2044,14 @@ GRANT USAGE, SELECT ON SEQUENCE
   public.makesafe_board_attention_marks_id_seq TO service_role;
 GRANT USAGE, SELECT ON SEQUENCE
   public.makesafe_board_reconciliation_runs_id_seq TO service_role;
-GRANT EXECUTE ON FUNCTION public.apply_makesafe_board_reconciliation(
-  text, text, text, jsonb
-) TO service_role;
 GRANT EXECUTE ON FUNCTION public.stage_makesafe_board_reconciliation(
   text, text, text, text, integer, integer, jsonb
 ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.finalize_makesafe_board_reconciliation(
   text, text, text, text
+) TO service_role;
+GRANT EXECUTE ON FUNCTION public.discard_makesafe_board_reconciliation(
+  text, text, text
 ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.seed_makesafe_state_authority_v1(
   text, text, text, uuid[]

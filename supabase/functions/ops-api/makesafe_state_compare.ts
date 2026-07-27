@@ -358,6 +358,18 @@ function versionedFact(row: any): VersionedCycleFact {
   };
 }
 
+function reconciliationFactToken(rows: any[]) {
+  return rows.map((row) => ({
+    id: String(row?.id || ""),
+    version: Number.isSafeInteger(Number(row?.makesafe_fact_version))
+      ? Number(row.makesafe_fact_version)
+      : null,
+    content_hash: row?.makesafe_content_hash || null,
+    attendance_cycle_id: row?.attendance_cycle_id || null,
+    cycle_attribution: row?.cycle_attribution || null,
+  })).sort((a, b) => a.id.localeCompare(b.id));
+}
+
 function versionedDependencies(rows: any[]): VersionedDependency[] {
   return rows.map((row) => ({
     id: String(row?.id || ""),
@@ -759,7 +771,39 @@ export async function buildMakesafeV2Comparison(
     if (
       state.diagnostics.some((item) => item.code === "projection_input_error")
     ) inputErrors += 1;
-    return { ...row, state_v2: state, v1_v2_diff: diff };
+    return {
+      ...row,
+      state_v2: state,
+      v1_v2_diff: diff,
+      state_facts: {
+        identity: identityRevision
+          ? {
+            id: identityRevision.id,
+            source_version: identityRevision.source_version,
+            source_content_hash: identityRevision.source_content_hash,
+            lineage_id: identityRevision.lineage_id,
+            lineage_version: identityRevision.lineage_version,
+            lineage_correction_hash: identityRevision.lineage_correction_hash,
+            lineage_supersession_hash:
+              identityRevision.lineage_supersession_hash,
+            revision_hash: identityRevision.revision_hash,
+          }
+          : null,
+        cycles: reconciliationFactToken(cycleRows),
+        assignments: reconciliationFactToken(assignmentRows),
+        service_reports: reconciliationFactToken(reportRows),
+        documents: reconciliationFactToken(documents.get(jobId) || []),
+        media: reconciliationFactToken(mediaRows),
+        portal_captures: reconciliationFactToken(portalRows),
+        readiness: currentReadiness
+          ? {
+            id: currentReadiness.id,
+            readiness_revision: currentReadiness.readiness_revision,
+            dependency_generation: currentReadiness.dependency_generation,
+          }
+          : null,
+      },
+    };
   }));
   return {
     rows,

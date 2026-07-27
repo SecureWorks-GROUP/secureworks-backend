@@ -3508,11 +3508,9 @@ if (import.meta.main) serve(async (req: Request) => {
             attention_since: attention?.since || null,
             attention_evidence_refs: attention?.evidence_refs || [],
             state_token: row?.state_v2
-              ? `sha256:${(await canonicalJsonAndHash({
-                ...row.state_v2,
-                computed_at: null,
-              })).hash}`
+              ? `sha256:${(await canonicalJsonAndHash(row.state_facts)).hash}`
               : null,
+            state_facts: row?.state_facts || null,
           }
         }))
         const tokenPayload = rpcRows.map((row: any) => ({
@@ -3532,6 +3530,13 @@ if (import.meta.main) serve(async (req: Request) => {
           }, 503)
         }
         const stagedChunks: any[] = []
+        const discardStaged = async (reason: string) => {
+          await client.rpc('discard_makesafe_board_reconciliation', {
+            p_run_key: runKey,
+            p_selection_hash: selectionHash,
+            p_reason: reason,
+          })
+        }
         for (const [chunkIndex, rowChunk] of rowChunks.entries()) {
           const { data: staged, error: stageError } = await client.rpc(
             'stage_makesafe_board_reconciliation',
@@ -3546,6 +3551,7 @@ if (import.meta.main) serve(async (req: Request) => {
             },
           )
           if (stageError) {
+            await discardStaged(stageError.message || String(stageError))
             return json({
               ...baseResult,
               completed_chunks: stagedChunks.length,
@@ -3564,16 +3570,15 @@ if (import.meta.main) serve(async (req: Request) => {
         const latestTokenPayload = await Promise.all(latestComparison.rows
           .map(async (row: any) => ({
             job_id: String(row.id),
-            state_token: `sha256:${(await canonicalJsonAndHash({
-              ...row.state_v2,
-              computed_at: null,
-            })).hash}`,
+            state_token: `sha256:${(await canonicalJsonAndHash(row.state_facts)).hash}`,
+            state_facts: row.state_facts,
           })))
         const { hash: latestStateTokenHash } = await canonicalJsonAndHash(
           latestTokenPayload
             .sort((a: any, b: any) => a.job_id.localeCompare(b.job_id)),
         )
         if (latestStateTokenHash !== stateTokenHash) {
+          await discardStaged('v2 fact state changed while staging')
           return json({
             ...baseResult,
             error: 'v2 fact state changed while reconciliation was staged; discard and retry',
@@ -3589,6 +3594,7 @@ if (import.meta.main) serve(async (req: Request) => {
           },
         )
         if (finalizeError) {
+          await discardStaged(finalizeError.message || String(finalizeError))
           return json({
             ...baseResult,
             completed_chunks: stagedChunks.length,
