@@ -219,7 +219,7 @@ Deno.test("verified marker propagates from deterministic draft into job and even
   assertStringIncludes(index, "release_refusal_probe: true");
   assertStringIncludes(
     index,
-    "cleanup_contract_version: 'ledger-bound-readiness-purge/v1'",
+    "cleanup_contract_version: 'ledger-bound-case-tombstone-purge/v2'",
   );
   assertStringIncludes(
     index,

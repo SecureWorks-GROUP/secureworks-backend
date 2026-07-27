@@ -294,3 +294,35 @@ Deno.test("readiness cleanup migration is marker- and run-ledger-bound", async (
     }
   }
 });
+
+Deno.test("case tombstone cleanup stays atomic, explicit, and ledger-bound", async () => {
+  const migration = await Deno.readTextFile(
+    new URL(
+      "../../../supabase/migrations/20260728040000_synthetic_livefire_case_tombstone_cleanup.sql",
+      import.meta.url,
+    ),
+  );
+  for (
+    const required of [
+      "'synthetic_livefire_terminal'",
+      "'synthetic_livefire_cleanup'",
+      "raw_identity_json->>'synthetic_livefire_marker'",
+      "SELECT run.job_ids",
+      "FROM public.ses_synthetic_livefire_runs run",
+      "FOR UPDATE",
+      "v_ledger_job_ids_json",
+      "jsonb_array_length(v_ledger_job_ids_json)",
+      "PERFORM public.assert_synthetic_livefire_purge_job(",
+      "PERFORM set_config('app.synthetic_livefire_purge_marker', p_marker, true)",
+      "UPDATE public.makesafe_intake_cases",
+      "last_decision_provenance = 'backfill'",
+      "last_decision_actor = 'ses-synthetic-livefire-cleanup'",
+      "public.purge_synthetic_livefire_jobs_without_case_tombstones(p_marker)",
+      "REVOKE ALL ON FUNCTION\n  public.purge_synthetic_livefire_jobs_without_case_tombstones(text)",
+    ]
+  ) {
+    if (!migration.includes(required)) {
+      throw new Error(`missing case tombstone cleanup guard: ${required}`);
+    }
+  }
+});

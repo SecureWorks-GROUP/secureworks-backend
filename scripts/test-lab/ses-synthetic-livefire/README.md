@@ -22,10 +22,11 @@ release action. Every synthetic family still has the unconditional blocker
 
 The matching edge revision and
 `20260727080821_makesafe_synthetic_livefire_infrastructure.sql` plus
-`20260728030000_synthetic_livefire_readiness_cleanup.sql` must reach production
-through the normal migration-before-edge lane. The preflight requires the
-deployed capability versions `ses-synthetic-livefire/v1` and
-`ledger-bound-readiness-purge/v1`, fixed company profile, legacy own-mail
+`20260728030000_synthetic_livefire_readiness_cleanup.sql` plus
+`20260728040000_synthetic_livefire_case_tombstone_cleanup.sql` must reach
+production through the normal migration-before-edge lane. The preflight
+requires the deployed capability versions `ses-synthetic-livefire/v1` and
+`ledger-bound-case-tombstone-purge/v2`, fixed company profile, legacy own-mail
 terminal accounting and release-refusal probe before it can send anything.
 
 ## Fixture provenance
@@ -79,9 +80,11 @@ Cleanup is deliberately split by store:
   evidence. Their run is transitioned to `terminal` in
   `ses_synthetic_livefire_runs`.
 - Mutable synthetic jobs and operational rows are deleted after the exact-marker
-  guard passes. Only append-only/group evidence and the marked mailbox messages
-  remain; attendance cycles and readiness-linked jobs use guarded synthetic-only
-  RPCs bound to the run ledger.
+  guard passes. Intake cases bound to those jobs are retained as audited
+  `synthetic_livefire_terminal` tombstones, with their transition events; other
+  append-only/group evidence and the marked mailbox messages remain. Attendance
+  cycles and readiness-linked jobs use guarded synthetic-only RPCs bound to the
+  run ledger.
 - Canonical Ops/Trade projections hide retained evidence only from the terminal
   `ses_synthetic_livefire_runs` ledger, never from mutable job metadata.
 
