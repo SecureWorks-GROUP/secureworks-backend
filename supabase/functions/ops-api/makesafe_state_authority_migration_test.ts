@@ -122,6 +122,7 @@ Deno.test("cancellation and terminal proof views use the authoritative cycle set
   assert(!cancellationView.includes("JOIN public.makesafe_readiness_current"));
   assert(!terminalView.includes("JOIN public.makesafe_readiness_current"));
   assertStringIncludes(terminalView, "makesafe_readiness_revisions");
+  assertStringIncludes(terminalView, "r.attendance_cycle_set_hash = p.attendance_cycle_set_hash");
 });
 
 Deno.test("non-production rollback removes Phase-1 surfaces in dependency order", () => {

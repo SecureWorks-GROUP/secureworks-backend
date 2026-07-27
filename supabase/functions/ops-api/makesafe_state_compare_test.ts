@@ -380,5 +380,10 @@ Deno.test("historical pack-cycle attribution cannot poison the current cycle", a
     fixture.facts,
     GENERATED_AT,
   );
-  assertEquals(result.rows[0].state_v2.cycle_attribution_error, null);
+  assertEquals(result.rows[0].state_v2.ops_stage, "allocated");
+  assert(
+    !result.rows[0].state_v2.blocker.active.some((item: any) =>
+      item.code === "backfill_cycle_scope"
+    ),
+  );
 });

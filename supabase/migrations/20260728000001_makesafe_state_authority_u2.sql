@@ -1004,6 +1004,7 @@ WHERE (
       FROM public.makesafe_readiness_revisions r
       WHERE r.job_id = p.job_id
         AND r.readiness_revision = p.readiness_revision
+        AND r.attendance_cycle_set_hash = p.attendance_cycle_set_hash
     )
   )
   AND p.attendance_cycle_set_hash =

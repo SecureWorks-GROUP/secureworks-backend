@@ -213,6 +213,54 @@ Deno.test("cancellation is a typed overlay, never a seventh stage", () => {
   assertEquals(state.next_action.code, "none");
 });
 
+Deno.test("confirmed cancellation still suppresses actions after readiness invalidation", () => {
+  const input = baseInput();
+  input.readiness = {
+    state: "invalid",
+    ready: false,
+    readiness_revision: null,
+    dependency_generation: 8,
+    attendance_cycle_set_hash: null,
+    invalidated_at: NOW,
+    invalidation_reason: "dependency changed",
+  };
+  input.cancellation = {
+    state: "confirmed",
+    reason_code: "builder_cancelled",
+    note: null,
+    decided_by: "captain",
+    decided_at: NOW,
+    decision_id: "cancel-invalidated-1",
+  };
+  const state = projectMakesafeStateV2(input);
+  assertEquals(state.trade_column, "Archive");
+  assertEquals(state.next_action.code, "none");
+});
+
+Deno.test("terminal proof is accepted only for the exact current cycle set", () => {
+  const input = baseInput();
+  input.terminal_proof = {
+    state: "valid",
+    proof_id: "proof-exact-1",
+    kind: "release_closeout",
+    attendance_cycle_ids: [CYCLE],
+    readiness_revision: null,
+    release_revision_id: "release-1",
+    closeout_revision_id: "closeout-1",
+    proven_at: NOW,
+    evidence_refs: ["proof:exact"],
+  };
+  assertEquals(projectMakesafeStateV2(input).terminal_proof.state, "valid");
+  input.identity.attendance_cycle_ids = [
+    CYCLE,
+    "00000000-0000-0000-0000-000000000100",
+  ];
+  assertEquals(
+    projectMakesafeStateV2(input).terminal_proof.state,
+    "superseded",
+  );
+});
+
 Deno.test("partial and unknown inputs fail closed with visible typed alarms", () => {
   const input = baseInput();
   input.source_content_hash = null;
