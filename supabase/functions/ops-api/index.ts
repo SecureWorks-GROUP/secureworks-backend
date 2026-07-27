@@ -37803,6 +37803,11 @@ async function resolveAnnotation(client: any, body: any) {
   // changed before the typed fence result is returned.
   if (ann.annotation_type === 'unlinked_invoice') {
     if (response_value === 'link' && ann.structured_data?.job_id) {
+      await assertLegacySesMoneyActionAllowedForJob(
+        client,
+        ann.structured_data.job_id,
+        'resolve_annotation invoice link',
+      )
       const candidateIds = (ann.structured_data.candidate_invoices || [])
         .map((candidate: any) => candidate.id)
         .filter(Boolean)

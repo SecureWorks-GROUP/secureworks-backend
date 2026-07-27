@@ -20,10 +20,17 @@ Bookkeeper creates invoice in Xero:
     - Contact already exists (auto-created)
     - Puts SW number in Reference field
     ↓
-Invoice sync (xero-sync) → sees Reference "SWF-25001" → auto-links to job
+Invoice sync (xero-sync) → sees Reference "SWF-25001" → auto-links eligible invoice
+to job
     ↓
 Dashboard shows accurate per-job revenue attribution
 ```
+
+Sealed SES money boundary: an ACCREC invoice that is bound to an SES
+obligation/token, or that would link to a sealed make-safe job, is refused by
+`xero-sync` and `reporting-api` rather than auto-linked. The refusal is typed
+and leaves the invoice unlinked. ACCPAY invoices and non-SES patio, fencing,
+and general jobs retain the normal link path.
 
 ## Job Number Format
 - **SWP-25001** = Patio
@@ -48,10 +55,12 @@ Dashboard shows accurate per-job revenue attribution
 
 ### xero-sync (new actions)
 - `create_or_find_contact` (POST) — searches Xero by email then exact name, creates if not found, updates jobs.xero_contact_id, upserts contact_matches, links existing invoices by xero_contact_id
-- `match_invoices_by_reference` — finds xero_invoices with SW refs and no job_id, links them
+- `match_invoices_by_reference` — finds xero_invoices with SW refs and no job_id,
+  links allowed candidates, and leaves sealed SES/SES-bound ACCREC candidates
+  refused and unlinked
 - `backfill_xero_contacts` — processes active jobs without xero_contact_id in batches (?limit=10). Rate-limited for Xero API (pause every 5 jobs)
 - `xeroPost()` helper added — POST/PUT to Xero API with rate-limit retry (same pattern as xeroGet)
-- `syncInvoices` enhanced — after each invoice upsert, checks Reference for SW number, auto-links to job
+- `syncInvoices` enhanced — after each invoice upsert, checks Reference for SW number and auto-links eligible invoices to jobs
 - `matchContacts` improved — normalizeName() strips Mr/Mrs/Dr, surname+initial matching, logs unmatched to webhook_log
 
 ### ghl-proxy (link action updated)
@@ -66,9 +75,11 @@ Enhanced response includes: jobNumber, xeroContact, monetaryValue
 - Pattern: `/SW[A-Z]?-?(\d{3,5})/i` on invoice reference field
 - Builds jobByNumber lookup from jobs with job_number
 - data_quality updated: contact_match_rate_low = false, CLV data_quality = 'moderate'
+- `match_invoices` applies the sealed SES money boundary above.
 
 ### send-quote (GHL push added)
 - After quote send + job status update, pushes monetaryValue to GHL opportunity (non-blocking)
+- Legacy `/send-invoice` applies the sealed SES money boundary above.
 
 ## Backfill Results (3 March 2026)
 - 232 jobs processed (out of 244 eligible)
