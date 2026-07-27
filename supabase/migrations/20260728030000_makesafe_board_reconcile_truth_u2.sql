@@ -1569,8 +1569,13 @@ BEGIN
       SELECT 1
       FROM public.makesafe_readiness_current_v2 r
       WHERE r.job_id = v_row.job_id
+        AND r.ready IS NOT DISTINCT FROM (v_token->>'ready')::boolean
         AND r.readiness_revision IS NOT DISTINCT FROM v_token->>'readiness_revision'
         AND r.dependency_generation IS NOT DISTINCT FROM (v_token->>'dependency_generation')::integer
+        AND r.attendance_cycle_set_hash IS NOT DISTINCT FROM v_token->>'attendance_cycle_set_hash'
+        AND r.invalidated_at IS NOT DISTINCT FROM (v_token->>'invalidated_at')::timestamptz
+        AND r.invalidation_reason IS NOT DISTINCT FROM v_token->>'invalidation_reason'
+        AND r.dependency_envelope IS NOT DISTINCT FROM v_token->'dependency_envelope'
     ) THEN
       RAISE EXCEPTION 'reconciliation row % readiness facts changed', v_row.job_id;
     END IF;
@@ -1753,7 +1758,7 @@ BEGIN
         WHERE f.id IS NULL
            OR f.kind IS DISTINCT FROM e->>'kind'
            OR f.attendance_cycle_ids IS DISTINCT FROM (
-             SELECT COALESCE(array_agg(value), '{}'::text[])
+             SELECT COALESCE(array_agg(value::uuid), '{}'::uuid[])
              FROM jsonb_array_elements_text(COALESCE(e->'attendance_cycle_ids', '[]'::jsonb))
            )
            OR f.readiness_revision IS DISTINCT FROM e->>'readiness_revision'
