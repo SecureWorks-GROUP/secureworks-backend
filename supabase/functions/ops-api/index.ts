@@ -13136,12 +13136,11 @@ async function scanPortalRecheckCards(client: any): Promise<Array<{
 }>> {
   const { data: details, error } = await client.from('makesafe_job_details')
     .select(PORTAL_RECHECK_DETAIL_SELECT)
-    .not('report_type', 'is', null)
   if (error) throw error
   const rows = (details || []).filter((d: any) => d?.job_id)
   const jobIds = rows.map((d: any) => d.job_id)
   const jobs = await _fetchAllByJobIdChunked(
-    client, 'jobs', 'id, job_number, status, site_address, client_name', jobIds,
+    client, 'jobs', 'id, job_number, status, site_address, client_name, metadata', jobIds,
     undefined, 'id',
   )
   const jobsById: Record<string, any> = {}
@@ -13150,6 +13149,11 @@ async function scanPortalRecheckCards(client: any): Promise<Array<{
   for (const d of rows) {
     const job = jobsById[d.job_id]
     if (!job) continue
+    const reportType = String(d.report_type || '').trim() ||
+      _reportTypeForJobFamily(
+        parseJsonObject(job.metadata)?.makesafe_job_family,
+      )
+    if (!reportType) continue
     const currentCycle = Number(d.cycle_number ?? 1)
     const eligible = _portalRecheckEligible({
       jobStatus: job.status,
@@ -13158,10 +13162,10 @@ async function scanPortalRecheckCards(client: any): Promise<Array<{
       currentCycle,
       verifiedAt: d.portal_verified_at ?? null,
       verifiedCycle: d.portal_verified_cycle ?? null,
-      requiresAssessmentProof: d.report_type === 'assessment_report' ||
-        d.report_type === 'assessment_report_quote',
+      requiresAssessmentProof: reportType === 'assessment_report' ||
+        reportType === 'assessment_report_quote',
       assessmentProofSatisfied: hasStoredAssessmentPortalProof(
-        d.report_type,
+        reportType,
         d.external_links,
         d.portal_verified_signal,
         currentCycle,

@@ -37,6 +37,7 @@ export interface MakesafePortalCapture {
   kind?: string | null;
   url?: string | null;
   signal?: string | null;
+  locked?: boolean | null;
   screenshot?: string | null;
   screenshot_path?: string | null;
   cycle_number?: number | null;
@@ -146,14 +147,31 @@ function captureRole(capture: MakesafePortalCapture): string {
 
 function donePortalRoles(input: MakesafeStatusInput): Set<string> {
   const cycle = Number(input.detail?.cycle_number ?? 1);
+  const requiresTypedAssessmentIdentity =
+    classifyMakesafeJobType(input.detail, input.job) === "assessment_report_quote";
+  const typedLinks = Array.isArray(input.detail?.external_links)
+    ? input.detail.external_links
+    : [];
   return new Set(
     (input.evidence?.portalCaptures || [])
-      .filter((capture) =>
-        String(capture?.status || "").toLowerCase() === "done" &&
-        !!String(capture?.screenshot || capture?.screenshot_path || "").trim() &&
-        (capture?.cycle_number == null ||
-          Number(capture.cycle_number) === cycle)
-      )
+      .filter((capture) => {
+        const role = captureRole(capture);
+        const captureUrl = String(capture?.url || "").trim().toLowerCase();
+        return (
+          String(capture?.status || "").toLowerCase() === "done" &&
+          !!String(capture?.screenshot || capture?.screenshot_path || "").trim() &&
+          (capture?.cycle_number == null ||
+            Number(capture.cycle_number) === cycle) &&
+          (!requiresTypedAssessmentIdentity || (
+            capture?.locked === true &&
+            !!captureUrl &&
+            typedLinks.some((link: any) =>
+              captureRole({ role: link?.role, kind: link?.kind }) === role &&
+              String(link?.url || "").trim().toLowerCase() === captureUrl
+            )
+          ))
+        );
+      })
       .map(captureRole)
       .filter(Boolean),
   );

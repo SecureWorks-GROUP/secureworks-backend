@@ -87,6 +87,8 @@ Deno.test("computed status: roof requires one typed done capture with screenshot
         portalCaptures: [{
           status: "done",
           role: "roof_report",
+          locked: true,
+          url: "https://portal.test/r",
           screenshot: "/tmp/roof.png",
           cycle_number: 1,
         }],
@@ -144,18 +146,24 @@ Deno.test("computed status: assessment is fail-closed until all three typed capt
         {
           status: "done",
           role: "assessment_report",
+          locked: true,
+          url: "https://portal.test/a",
           screenshot: "/tmp/assessment.png",
           cycle_number: 3,
         },
         {
           status: "done",
           role: "photos",
+          locked: true,
+          url: "https://portal.test/p",
           screenshot: "/tmp/photos.png",
           cycle_number: 3,
         },
         {
           status: "done",
           role: "quote",
+          locked: true,
+          url: "https://portal.test/q",
           screenshot: "/tmp/quote.png",
           cycle_number: 3,
         },
