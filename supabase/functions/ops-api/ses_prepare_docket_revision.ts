@@ -204,6 +204,14 @@ function sortedUnique(values: readonly string[]): string[] {
 
 function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
   const blockers: SesBlocker[] = [];
+  if (input.classification.builder_key === "SYNTHETIC") {
+    blockers.push(blocked(
+      "synthetic_livefire_release_forbidden",
+      "Synthetic live-fire dockets are evidence-only and can never be released, sent, signed off, or used to create an invoice.",
+      "Retain the dry-run evidence and terminally account the synthetic fixture; there is no release recovery path.",
+      ["synthetic-livefire-profile", "canonical-input-envelope"],
+    ));
+  }
   if (input.contract_version !== SES_INPUT_CONTRACT_VERSION) {
     blockers.push(
       blocked(

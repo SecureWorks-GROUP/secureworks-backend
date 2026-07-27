@@ -123,6 +123,7 @@ import {
   authorizeMakesafeTradeProjection,
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
+  isSyntheticLivefireJob,
   projectTradeMakesafeBoard,
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
@@ -229,6 +230,9 @@ import {
   loadDeterministicRolloutControls as _loadDeterministicRolloutControls,
   runDeterministicIntake as _runDeterministicIntake,
 } from './makesafe_deterministic_intake_runtime.ts'
+import { DETERMINISTIC_INTAKE_VERSION } from './makesafe_deterministic_intake.ts'
+import { SYNTHETIC_LIVEFIRE_MARKER_PREFIX } from './makesafe_synthetic_livefire.ts'
+import { SES_FAMILY_MATRIX_VERSION } from './ses_family_matrix.ts'
 import {
   assertReportingIntakeAccounting as _assertReportingIntakeAccounting,
 } from './makesafe_reporting_accounting.ts'
@@ -3127,6 +3131,22 @@ if (import.meta.main) serve(async (req: Request) => {
 
     switch (action) {
       case 'ops_api_version': return json(opsApiVersion())
+      case 'ses_synthetic_livefire_capabilities': {
+        return json({
+          success: true,
+          contract_version: 'ses-synthetic-livefire/v1',
+          marker_prefix: SYNTHETIC_LIVEFIRE_MARKER_PREFIX,
+          deterministic_intake_version: DETERMINISTIC_INTAKE_VERSION,
+          family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+          real_front_door: 'm365-group:ses@secureworkswa.com.au',
+          synthetic_sender: 'marnin@secureworkswa.com.au',
+          terminal_accounting: true,
+          mailbox_retention: true,
+          release_refusal_probe: true,
+          outbound_actions: false,
+          xero_actions: false,
+        })
+      }
 
       // ── Ops Dashboard Read ──
       case 'ops_summary': return json(await opsSummary(client))
@@ -3376,6 +3396,11 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await backfillMakesafeJobFamilies(client, body))
       }
       case 'update_makesafe_substatus': {
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'update_makesafe_substatus',
+        )
         // B3 (Wave 0): AUTH-MODE TRANSITION GUARD. The automation routine key
         // (authMode='routine') MUST NOT set ready_to_invoice or complete — those are
         // sent/closed states. The master plan: "automation cannot close a job."
@@ -3414,6 +3439,11 @@ if (import.meta.main) serve(async (req: Request) => {
       // by the dispatch default-deny above; api_key / jwt callers pass like the
       // adjacent make-safe actions.
       case 'mark_makesafe_portal_report_done':
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'mark_makesafe_portal_report_done',
+        )
         return json(await markMakesafePortalReportDone(client, body))
       case 'makesafe_pipeline': return json(await makesafePipeline(client, url.searchParams))
       case 'makesafe_audit': return json(await makesafeAudit(client, url.searchParams))
@@ -4347,8 +4377,21 @@ if (import.meta.main) serve(async (req: Request) => {
         if (linkErr) return json({ error: linkErr.message }, 500)
         return json({ success: true })
       }
-      case 'complete_and_invoice': return json(await completeAndInvoice(client, body))
-      case 'create_deposit_invoice': return json(await createDepositInvoice(client, body))
+      case 'complete_and_invoice':
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'complete_and_invoice',
+        )
+        return json(await completeAndInvoice(client, body))
+      case 'create_deposit_invoice': {
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'create_deposit_invoice',
+        )
+        return json(await createDepositInvoice(client, body))
+      }
       case 'sync_fencing_neighbours': return json(await syncFencingNeighbours(client, body))
       case 'get_comms_upload_url': return json(await getCommsUploadUrl(client, body))
       case 'send_comms_message': return json(await sendCommsMessageAction(body))
@@ -4412,7 +4455,14 @@ if (import.meta.main) serve(async (req: Request) => {
 
         return json({ success: true, migrated: results })
       }
-      case 'create_unified_invoice': return json(await createUnifiedInvoice(client, body))
+      case 'create_unified_invoice': {
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'create_unified_invoice',
+        )
+        return json(await createUnifiedInvoice(client, body))
+      }
       case 'reconcile_payment': return json(await reconcilePayment(client, body))
       case 'sync_suppliers': return json(await syncSuppliers(client))
       case 'update_supplier_email': return json(await updateSupplierEmail(client, body))
@@ -4420,6 +4470,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const vid = body.xero_invoice_id
         if (!vid) return json({ error: 'xero_invoice_id required' }, 400)
         await assertLegacySesInvoiceActionAllowed(client, vid, 'void_invoice')
+        await assertNoSyntheticLivefireInvoice(client, vid, 'void_invoice')
         // Capture previous status before voiding
         const { data: voidInvRecord } = await client.from('xero_invoices')
           .select('invoice_number, total, status')
@@ -4910,7 +4961,13 @@ if (import.meta.main) serve(async (req: Request) => {
       }
 
       // ── Job Completion Package ──
-      case 'complete_job': return json(await completeJob(client, body))
+      case 'complete_job':
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'complete_job',
+        )
+        return json(await completeJob(client, body))
       case 'send_payment_link': return json(await sendPaymentLink(client, body))
       case 'send_acceptance_invoice': return json(await sendAcceptanceInvoice(client, body))
       case 'send_review_request': return json(await sendReviewRequest(client, body))
@@ -4918,7 +4975,14 @@ if (import.meta.main) serve(async (req: Request) => {
       // ── Quick Quote (Miscellaneous Jobs) ──
       case 'search_ghl_contacts': return json(await searchGHLContacts(client, url.searchParams))
       case 'create_misc_job': return json(await createMiscJob(client, body))
-      case 'send_quick_quote_email': return json(await sendQuickQuoteEmail(client, body))
+      case 'send_quick_quote_email': {
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'send_quick_quote_email',
+        )
+        return json(await sendQuickQuoteEmail(client, body))
+      }
       case 'create_ghl_contact': return json(await createGHLContact(client, body))
       case 'get_xero_accounts': return json(await getXeroAccounts(client))
       case 'search_xero_contacts': return json(await searchXeroContacts(client, url.searchParams))
@@ -4981,7 +5045,14 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'resolve_callback': return json(await resolveCallback(client, body))
 
       // ── Spine: Client Comms ──
-      case 'send_client_update': return json(await sendClientUpdate(client, body))
+      case 'send_client_update': {
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'send_client_update',
+        )
+        return json(await sendClientUpdate(client, body))
+      }
 
       // ── Spine: Duration Monitoring ──
       case 'check_job_durations': return json(await checkJobDurations(client))
@@ -5018,6 +5089,11 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await renderRoofReportAction(client, body))
       // ── Sealed SES Reporting U5/U6/U6R ──
       case 'prepare_ses_invoice_obligation':
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id ? [body.job_id] : [],
+          'prepare_ses_invoice_obligation',
+        )
         return json(await prepareSesInvoiceObligationAction(
           client,
           sesActionAuth(authMode, authUser),
@@ -5057,6 +5133,11 @@ if (import.meta.main) serve(async (req: Request) => {
         ))
       }
       case 'approve_ses_invoice_revision':
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id ? [body.job_id] : [],
+          'approve_ses_invoice_revision',
+        )
         return json(await approveSesInvoiceRevisionAction(
           client,
           sesActionAuth(authMode, authUser),
@@ -5068,6 +5149,11 @@ if (import.meta.main) serve(async (req: Request) => {
           },
         ))
       case 'execute_ses_invoice_revision':
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id ? [body.job_id] : [],
+          'execute_ses_invoice_revision',
+        )
         return json(await executeSesInvoiceRevisionAction(
           client,
           sesActionAuth(authMode, authUser),
@@ -5080,6 +5166,11 @@ if (import.meta.main) serve(async (req: Request) => {
           makeSesXeroGateway(client),
         ))
       case 'prepare_ses_release_revision':
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_ids || (body.job_id ? [body.job_id] : []),
+          'prepare_ses_release_revision',
+        )
         return json(await prepareSesReleaseRevisionAction(client, {
           org_id: body.org_id || DEFAULT_ORG_ID,
           job_ids: body.job_ids || (body.job_id ? [body.job_id] : []),
@@ -5087,6 +5178,11 @@ if (import.meta.main) serve(async (req: Request) => {
           created_by: authUser?.email || body.created_by || 'ses-release-preparer',
         }))
       case 'approve_ses_release_revision':
+        await assertNoSyntheticLivefireReleaseRevision(
+          client,
+          body.release_revision_id,
+          'approve_ses_release_revision',
+        )
         return json(await approveSesReleaseRevisionAction(
           client,
           sesActionAuth(authMode, authUser),
@@ -5097,6 +5193,11 @@ if (import.meta.main) serve(async (req: Request) => {
           },
         ))
       case 'execute_ses_release_revision':
+        await assertNoSyntheticLivefireReleaseRevision(
+          client,
+          body.release_revision_id,
+          'execute_ses_release_revision',
+        )
         return json(await executeSesReleaseRevisionAction(
           client,
           sesActionAuth(authMode, authUser),
@@ -5195,6 +5296,11 @@ if (import.meta.main) serve(async (req: Request) => {
         if (!sendPackAllowed(authMode, authUser)) {
           return json({ error: 'forbidden: makesafe_resume_close requires the privileged dashboard key or an admin/owner session; the make-safe automation routine cannot close packs' }, 403)
         }
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'makesafe_resume_close',
+        )
         return json(await makesafeResumeClose(client, body))
       }
       // makesafe_reset_failed_pack (TASK D) — privileged reset of a 'failed' pack
@@ -11222,10 +11328,34 @@ async function createMakesafeJob(client: any, body: any) {
     builder_email_text_for_trade, builder_email_subject, builder_email_received_at,
     makesafe_job_family, makesafe_job_family_label,
     builder_claim_ref, builder_work_order_number, builder_po_number,
+    synthetic_livefire_marker,
     suppress_manager_notification,
   } = body
 
   if (!client_name || !site_address) throw new Error('client_name and site_address required')
+  const reviewedSyntheticLivefireMarker = cleanReviewedString(synthetic_livefire_marker)
+  const usesSyntheticLivefireProfile = requesting_company_slug === 'synthetic-livefire'
+  const validSyntheticLivefireMarker = !!reviewedSyntheticLivefireMarker &&
+    /^SWG-SES-LIVEFIRE-TEST-ONLY-[0-9A-F]{8}-[0-9A-F]{4}-[1-8][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/.test(reviewedSyntheticLivefireMarker)
+  if (
+    usesSyntheticLivefireProfile !== validSyntheticLivefireMarker ||
+    (reviewedSyntheticLivefireMarker && !usesSyntheticLivefireProfile)
+  ) {
+    throw new ApiError('synthetic live-fire profile and UUID-bound marker must be present together', 400)
+  }
+  if (reviewedSyntheticLivefireMarker) {
+    const { data: livefireRun, error: livefireRunError } = await client
+      .from('ses_synthetic_livefire_runs')
+      .select('marker,state')
+      .eq('marker', reviewedSyntheticLivefireMarker)
+      .maybeSingle()
+    if (livefireRunError || livefireRun?.state !== 'active') {
+      throw new ApiError(
+        'synthetic live-fire job creation requires its exact active run ledger',
+        409,
+      )
+    }
+  }
 
   // Look up requesting company
   let companyData: any = null
@@ -11279,6 +11409,9 @@ async function createMakesafeJob(client: any, body: any) {
     builder_claim_ref: builder_claim_ref || null,
     builder_work_order_number: builder_work_order_number || null,
     builder_po_number: builder_po_number || null,
+    ...(reviewedSyntheticLivefireMarker
+      ? { synthetic_livefire_marker: reviewedSyntheticLivefireMarker }
+      : {}),
     makesafe_type: reviewedMakeSafeType,
     job_type_detail: reviewedMakeSafeType,
     invoice_email: companyData?.invoice_email || null,
@@ -11309,8 +11442,24 @@ async function createMakesafeJob(client: any, body: any) {
 
   if (jobErr) throw jobErr
 
+  if (reviewedSyntheticLivefireMarker) {
+    const { error: registerSyntheticJobError } = await client.rpc(
+      'register_synthetic_livefire_job',
+      { p_marker: reviewedSyntheticLivefireMarker, p_job_id: job.id },
+    )
+    if (registerSyntheticJobError) {
+      await client.from('jobs').delete().eq('id', job.id)
+      throw new ApiError(
+        `synthetic live-fire job ledger registration failed: ${registerSyntheticJobError.message}`,
+        503,
+      )
+    }
+  }
+
   // Geocode address (fire-and-forget, non-blocking)
-  geocodeAndUpdateJob(client, job.id, site_address, suburb).catch(() => {})
+  if (!reviewedSyntheticLivefireMarker) {
+    geocodeAndUpdateJob(client, job.id, site_address, suburb).catch(() => {})
+  }
 
   // Make-safe overlay details: keeps requesting-company refs, substatus,
   // safety notes, report handoff and invoice notes out of patio/fencing scope.
@@ -11357,6 +11506,13 @@ async function createMakesafeJob(client: any, body: any) {
           file_name: `work-order-${jobNumber}.pdf`,
           storage_url: pdfPath,
           pdf_url: urlData?.publicUrl || null,
+          ...(reviewedSyntheticLivefireMarker
+            ? {
+              data_snapshot_json: {
+                synthetic_livefire_marker: reviewedSyntheticLivefireMarker,
+              },
+            }
+            : {}),
           visible_to_trades: true,
         })
       }
@@ -11369,7 +11525,14 @@ async function createMakesafeJob(client: any, body: any) {
   await client.from('job_events').insert({
     job_id: job.id,
     event_type: 'makesafe_created',
-    detail_json: { job_number: jobNumber, requesting_company: companyData?.name || null, external_ref },
+    detail_json: {
+      job_number: jobNumber,
+      requesting_company: companyData?.name || null,
+      external_ref,
+      ...(reviewedSyntheticLivefireMarker
+        ? { synthetic_livefire_marker: reviewedSyntheticLivefireMarker }
+        : {}),
+    },
   })
 
   // M3b U2a (D4a, gate G3): text the make-safe manager(s) that a new make-safe
@@ -11379,7 +11542,10 @@ async function createMakesafeJob(client: any, body: any) {
   // Deterministic intake has its own narrow suppress_manager_notification input
   // because that mission owns no communications. Other creation paths are unchanged.
   // Non-blocking; notifyVerticalManagersSms never throws.
-  if (suppress_manager_notification !== true) {
+  if (
+    suppress_manager_notification !== true &&
+    !reviewedSyntheticLivefireMarker
+  ) {
     const msSite = `${site_address || ''}${suburb ? ', ' + suburb : ''}`.trim()
     const msText = [
       `New make-safe: ${jobNumber} - ${client_name || 'Client'}`.trim(),
@@ -13389,7 +13555,9 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       })
     }
   }
-  const jobs = jobsRaw
+  const terminalSyntheticIds = await terminalSyntheticLivefireJobIds(client)
+  const jobs = jobsRaw.filter((job) =>
+    !(isSyntheticLivefireJob(job) && terminalSyntheticIds.has(String(job.id))))
 
   // Fetch all makesafe_job_details for these jobs
   const jobIds = (jobs || []).map((j: any) => j.id)
@@ -13602,8 +13770,10 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       })
     }
   }
-  if (cancelledRaw.length > 0) {
-    const cancelledIds = cancelledRaw.map((j: any) => j.id)
+  const visibleCancelledRows = cancelledRaw.filter((job) =>
+    !(isSyntheticLivefireJob(job) && terminalSyntheticIds.has(String(job.id))))
+  if (visibleCancelledRows.length > 0) {
+    const cancelledIds = visibleCancelledRows.map((j: any) => j.id)
     const cancelledDetailsMap: Record<string, any> = {}
     const cds = await _fetchAllByJobIdChunked(
       client,
@@ -13631,7 +13801,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       if (!cancelledAssignMap[a.job_id]) cancelledAssignMap[a.job_id] = []
       cancelledAssignMap[a.job_id].push(a)
     }
-    const cancelledCards = cancelledRaw.map((j: any) =>
+    const cancelledCards = visibleCancelledRows.map((j: any) =>
       enrichMakesafeBoardJob(j, cancelledDetailsMap[j.id] || null, cancelledAssignMap[j.id] || [], undefined, undefined, undefined, undefined, null))
     // Order by cancelled_at (fallback updated_at) — freshest cancel first.
     cancelledCards.sort((a: any, b: any) =>
@@ -13781,6 +13951,23 @@ async function loadCanonicalMakesafeBoard(
     console.error('[ops-api] makesafe_board status application read unavailable:', (error as Error).message)
   }
 
+  let terminalSyntheticLivefireJobIds = new Set<string>()
+  try {
+    const { data: terminalRuns, error } = await client
+      .from('ses_synthetic_livefire_runs')
+      .select('job_ids')
+      .eq('state', 'terminal')
+    if (error) throw error
+    for (const run of terminalRuns || []) {
+      for (const jobId of Array.isArray(run?.job_ids) ? run.job_ids : []) {
+        const normalized = String(jobId || '').trim()
+        if (normalized) terminalSyntheticLivefireJobIds.add(normalized)
+      }
+    }
+  } catch (error) {
+    console.error('[ops-api] makesafe_board terminal synthetic ledger read unavailable:', (error as Error).message)
+  }
+
   const notesByJobId: Record<string, any[]> = {}
   for (const note of notes) {
     const body = note?.detail_json?.text ?? note?.detail_json?.note ?? ''
@@ -13834,6 +14021,7 @@ async function loadCanonicalMakesafeBoard(
     intakeCaseByJobId,
     holdsByJobId,
     statusApplicationsByJobId,
+    terminalSyntheticLivefireJobIds,
   })
 }
 
@@ -14064,6 +14252,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   const since = params.get('since')
   const statusFilter = params.get('status')
   const companyFilter = params.get('company')
+  const terminalSyntheticIds = await terminalSyntheticLivefireJobIds(client)
 
   // ── jobs[] ── one compact row per make-safe job ──
   // Paginate the jobs matching the request instead of silently capping at 500.
@@ -14071,7 +14260,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   // parity or turn a successful empty dependent read into an error.
   // Unique page key `id` (PK) is appended by the shared reader after the
   // newest-first created_at primary sort so multi-page OFFSET cannot drop a job.
-  const jobs = await _fetchAllRows<any>(() => {
+  const jobs = (await _fetchAllRows<any>(() => {
     let query = client.from('jobs')
       .select('id, job_number, type, status, site_lat, site_lng, metadata, created_at')
       .eq('type', 'makesafe')
@@ -14079,7 +14268,8 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     if (since) query = query.gte('created_at', since)
     if (statusFilter) query = query.eq('status', statusFilter)
     return query
-  }, 'makesafe_audit jobs', 'id', false)
+  }, 'makesafe_audit jobs', 'id', false)).filter((job) =>
+    !(isSyntheticLivefireJob(job) && terminalSyntheticIds.has(String(job.id))))
 
   const jobIds = (jobs || []).map((j: any) => j.id)
   let detailsMap: Record<string, any> = {}
@@ -15970,6 +16160,7 @@ async function _crossLinkCombinedCards(
   client: any,
   primary: { id: string; number: string | null; role: string },
   secondary: { id: string; number: string | null; role: string },
+  syntheticLivefireMarker: string | null = null,
 ): Promise<void> {
   const link = async (
     jobId: string,
@@ -15997,6 +16188,9 @@ async function _crossLinkCombinedCards(
           sibling_job_number: sibling.number,
           sibling_role: sibling.role,
           self_role: self.role,
+          ...(syntheticLivefireMarker
+            ? { synthetic_livefire_marker: syntheticLivefireMarker }
+            : {}),
           note: `Auto-split from one combined make-safe + report work order. Sibling card: ${sibling.number || sibling.id} (${sibling.role}).`,
         },
       })
@@ -16367,6 +16561,12 @@ async function approveIntakeDraft(client: any, body: any) {
       builder_claim_ref: extraction?.builder_claim_ref || null,
       builder_work_order_number: extraction?.builder_work_order_number || null,
       builder_po_number: extraction?.builder_po_number || null,
+      ...(extraction?.synthetic_livefire_marker
+        ? {
+          synthetic_livefire_marker:
+            extraction.synthetic_livefire_marker,
+        }
+        : {}),
       // Deterministic intake and privileged reconciliation own no communications.
       // The reviewed path must opt in explicitly; routine callers cannot reach the
       // approval route and therefore cannot abuse this suppression flag.
@@ -16433,6 +16633,14 @@ async function approveIntakeDraft(client: any, body: any) {
               file_name: att.file_name || att.name || 'work-order.pdf',
               storage_url: att.storage_url || att.pdf_url,
               pdf_url: att.pdf_url || att.storage_url,
+              ...(extraction?.synthetic_livefire_marker
+                ? {
+                  data_snapshot_json: {
+                    synthetic_livefire_marker:
+                      extraction.synthetic_livefire_marker,
+                  },
+                }
+                : {}),
               visible_to_trades: true,
             })
           } catch (_) { /* non-blocking */ }
@@ -16474,6 +16682,12 @@ async function approveIntakeDraft(client: any, body: any) {
           builder_claim_ref: extraction?.builder_claim_ref || null,
           builder_work_order_number: extraction?.builder_work_order_number || null,
           builder_po_number: extraction?.builder_po_number || null,
+          ...(extraction?.synthetic_livefire_marker
+            ? {
+              synthetic_livefire_marker:
+                extraction.synthetic_livefire_marker,
+            }
+            : {}),
           suppress_manager_notification: body?.suppress_manager_notification === true ||
             extraction?.deterministic_intake === true,
         })
@@ -16499,6 +16713,14 @@ async function approveIntakeDraft(client: any, body: any) {
                   file_name: att.file_name || att.name || 'work-order.pdf',
                   storage_url: att.storage_url || att.pdf_url,
                   pdf_url: att.pdf_url || att.storage_url,
+                  ...(extraction?.synthetic_livefire_marker
+                    ? {
+                      data_snapshot_json: {
+                        synthetic_livefire_marker:
+                          extraction.synthetic_livefire_marker,
+                      },
+                    }
+                    : {}),
                   visible_to_trades: true,
                 })
               } catch (_) { /* non-blocking */ }
@@ -16510,6 +16732,7 @@ async function approveIntakeDraft(client: any, body: any) {
             client,
             { id: jobResult.job.id, number: jobResult.job.job_number, role: 'make_safe' },
             { id: secondaryJob.id, number: secondaryJob.job_number, role: splitObligation.reportType },
+            extraction?.synthetic_livefire_marker || null,
           )
         }
       } catch (splitErr) {
@@ -21624,6 +21847,15 @@ async function assertLegacySesInvoiceActionAllowed(
         'Sync the invoice from Xero, confirm its job link, then retry only if it is not a sealed SES invoice.',
     })
   }
+  if (!invoice.data.job_id) {
+    throw new ApiError(
+      `synthetic_livefire_invoice_unresolved: ${action} requires an invoice with an authoritative job link before any external effect.`,
+      409,
+    )
+  }
+  if (invoice.data.job_id) {
+    await assertNoSyntheticLivefireJobs(client, [invoice.data.job_id], action)
+  }
   if (
     invoice.data?.invoice_type &&
     String(invoice.data.invoice_type).toUpperCase() !== 'ACCREC'
@@ -21652,6 +21884,104 @@ async function assertLegacySesInvoiceActionAllowed(
     action,
   )
 }
+
+async function assertNoSyntheticLivefireJobs(
+  client: any,
+  rawJobIds: unknown,
+  action: string,
+): Promise<void> {
+  const jobIds = Array.isArray(rawJobIds)
+    ? Array.from(new Set(
+      rawJobIds.map((value) => String(value || '').trim()).filter(Boolean),
+    ))
+    : []
+  if (jobIds.length === 0) return
+  const { data, error } = await client.from('jobs')
+    .select('id,metadata')
+    .in('id', jobIds)
+  if (error) {
+    throw new ApiError(
+      `The ${action} synthetic live-fire safety gate could not verify its jobs (${error.message}).`,
+      503,
+    )
+  }
+  const synthetic = (data || []).filter((job: any) =>
+    isSyntheticLivefireJob(job))
+  if (synthetic.length > 0) {
+    throw new ApiError(
+      `synthetic_livefire_release_forbidden: ${action} cannot prepare, approve, execute, invoice, send, sign off, or close a synthetic live-fire job.`,
+      409,
+    )
+  }
+}
+export const _assertNoSyntheticLivefireJobsForTest =
+  assertNoSyntheticLivefireJobs
+
+async function assertNoSyntheticLivefireInvoice(
+  client: any,
+  xeroInvoiceId: string,
+  action: string,
+): Promise<void> {
+  const { data, error } = await client.from('xero_invoices')
+    .select('job_id').eq('xero_invoice_id', xeroInvoiceId).maybeSingle()
+  if (error) {
+    throw new ApiError(
+      `The ${action} synthetic live-fire safety gate could not verify its invoice (${error.message}).`,
+      503,
+    )
+  }
+  if (!data?.job_id) {
+    throw new ApiError(
+      `synthetic_livefire_invoice_unresolved: ${action} requires an invoice with an authoritative job link before any external effect.`,
+      409,
+    )
+  }
+  await assertNoSyntheticLivefireJobs(client, [data.job_id], action)
+}
+export const _assertNoSyntheticLivefireInvoiceForTest =
+  assertNoSyntheticLivefireInvoice
+
+async function terminalSyntheticLivefireJobIds(client: any): Promise<Set<string>> {
+  const ids = new Set<string>()
+  const { data, error } = await client.from('ses_synthetic_livefire_runs')
+    .select('job_ids').eq('state', 'terminal')
+  if (error) {
+    console.error('[ops-api] terminal synthetic live-fire ledger read unavailable:', error.message)
+    return ids
+  }
+  for (const run of data || []) {
+    for (const jobId of Array.isArray(run?.job_ids) ? run.job_ids : []) {
+      const normalized = String(jobId || '').trim()
+      if (normalized) ids.add(normalized)
+    }
+  }
+  return ids
+}
+
+async function assertNoSyntheticLivefireReleaseRevision(
+  client: any,
+  rawReleaseRevisionId: unknown,
+  action: string,
+): Promise<void> {
+  const releaseRevisionId = String(rawReleaseRevisionId || '').trim()
+  if (!releaseRevisionId) return
+  const { data, error } = await client.from('makesafe_release_revision_members')
+    .select('job_id')
+    .eq('release_revision_id', releaseRevisionId)
+  if (error) {
+    throw new ApiError(
+      `The ${action} synthetic live-fire safety gate could not verify its release members (${error.message}).`,
+      503,
+    )
+  }
+  await assertNoSyntheticLivefireJobs(
+    client,
+    (data || []).map((member: any) => member.job_id),
+    action,
+  )
+}
+export const _assertNoSyntheticLivefireReleaseRevisionForTest =
+  assertNoSyntheticLivefireReleaseRevision
 
 async function assertLegacySesInvoiceRowsActionAllowed(
   client: any,
@@ -21800,6 +22130,11 @@ async function createInvoice(
       }
     }
   }
+  await assertNoSyntheticLivefireJobs(
+    client,
+    jIdForGate ? [jIdForGate] : [],
+    'create_invoice',
+  )
 
   // ── M-G FIX 1 — REPORT-IN GATE (make-safe premature-invoice kill) ──
   // createInvoice is the reachable choke point (the skill posts create_invoice;
@@ -22229,6 +22564,7 @@ async function updateInvoice(client: any, body: any, adminClientOverride?: any) 
     xero_invoice_id,
     'update_invoice',
   )
+
 
   // ── REPORT-JOB $0 GATE ──
   // Mirror the create_invoice / complete_and_invoice guards: a report-type make-safe
@@ -33313,6 +33649,7 @@ async function sendPaymentLink(client: any, body: any) {
     jId,
     'send_payment_link',
   )
+  await assertNoSyntheticLivefireJobs(client, [jId], 'send_payment_link')
 
   // Dedup check: prevent sending same payment link within 24 hours
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
@@ -33810,6 +34147,7 @@ async function sendAcceptanceInvoice(client: any, body: any) {
 async function sendReviewRequest(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
+  await assertNoSyntheticLivefireJobs(client, [jId], 'send_review_request')
 
   const { data: job, error: jobErr } = await client
     .from('jobs')
@@ -39099,6 +39437,8 @@ async function sendCouncilEmail(client: any, body: any) {
     .eq('id', submission_id)
     .single()
   if (!sub) throw new Error('Submission not found')
+  if (!sub.job_id) throw new ApiError('Council submission has no authoritative job link', 409)
+  await assertNoSyntheticLivefireJobs(client, [sub.job_id], 'send_council_email')
 
   const { data: job } = await client.from('jobs').select('job_number, type, ghl_contact_id').eq('id', sub.job_id).maybeSingle()
   const replyTo = `council+CS${submission_id.slice(0, 8)}-step${step_index || 0}@secureworksgroup.app`
@@ -39218,6 +39558,7 @@ async function listRunAcceptances(client: any, params: URLSearchParams) {
 async function sendCouncilSMS(client: any, body: any) {
   const { job_id, message } = body
   if (!job_id || !message) throw new Error('job_id and message required')
+  await assertNoSyntheticLivefireJobs(client, [job_id], 'send_council_sms')
 
   const { data: job } = await client.from('jobs')
     .select('id, job_number, client_name, client_phone, ghl_contact_id')
@@ -39292,6 +39633,7 @@ async function sendVariation(client: any, body: any) {
     .eq('id', variation_id)
     .single()
   if (!variation) throw new Error('Variation not found')
+  await assertNoSyntheticLivefireJobs(client, [variation.job_id], 'send_variation')
 
   const job = variation.jobs
   if (!job?.client_email) throw new Error('No client email on job')

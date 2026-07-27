@@ -78,6 +78,7 @@ export interface PersistIntakeSourceIssueArgs {
   attachmentIds?: readonly string[];
   attachmentNames?: readonly string[];
   attachmentCount?: number | null;
+  syntheticLivefireMarker?: string | null;
 }
 
 /**
@@ -124,6 +125,9 @@ export async function persistIntakeSourceIssue(
       attachment_ids: [...(args.attachmentIds ?? [])],
       attachment_names: [...(args.attachmentNames ?? [])],
       attachment_count: args.attachmentCount ?? null,
+      ...(args.syntheticLivefireMarker
+        ? { synthetic_livefire_marker: args.syntheticLivefireMarker }
+        : {}),
     },
   });
   if (error && error.code !== "23505") {

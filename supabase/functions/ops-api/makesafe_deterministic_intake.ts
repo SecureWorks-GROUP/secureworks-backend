@@ -35,12 +35,13 @@ import {
 } from "./makesafe_pdf_gap_fill.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
-  "makesafe-deterministic-intake@2026-07-27.v5";
+  "makesafe-deterministic-intake@2026-07-27.v6";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 export { classifyCancellation };
 export type { CancellationClassification };
 
 export type AdapterId =
+  | "synthetic_livefire"
   | "mlb"
   | "ajs_ajbr"
   | "builderwest"
@@ -110,6 +111,9 @@ export interface DeterministicSourceItem {
   // outbound copies still belong in structural source accounting, but they are
   // non-work evidence and must never enter the identity-floor denominator.
   direction?: "inbound" | "own_outbound";
+  // Present only after the runtime has cryptographically admitted the exact
+  // controlled synthetic lane. It is a cleanup/audit marker, never auth proof.
+  syntheticLivefireMarker?: string | null;
 }
 
 export interface DeterministicCompanyProfile {
@@ -121,6 +125,7 @@ export interface DeterministicCompanyProfile {
 }
 
 export interface ExtractedIdentity {
+  syntheticLivefireMarker?: string | null;
   builderSlug: string | null;
   companyId: string | null;
   companyKey: string | null;
@@ -533,6 +538,8 @@ function profileFor(
 ): DeterministicCompanyProfile | null {
   const aliases = adapterId === "ajs_ajbr"
     ? ["ajs-ajbr"]
+    : adapterId === "synthetic_livefire"
+    ? ["synthetic-livefire"]
     : adapterId === "builderwest"
     ? ["builderwest", "bw"]
     : adapterId === "western"
@@ -725,6 +732,9 @@ function extractRawIdentity(
   // Email stays first so an explicit email value wins. PDF text is a fallback for
   // the common builder shape where the body only says "new work order".
   const hay = `${text(item)}\n${pdfText(item)}`;
+  const syntheticExternalRef = adapterId === "synthetic_livefire"
+    ? hay.match(/\b(SYNTHLIVE-[A-Z0-9][A-Z0-9._#/-]{2,})\b/i)?.[1] || null
+    : null;
   const family = adapterId === "mlb" || adapterId === "prime"
     ? hay.match(/\bMLB[-\s#]*(\d{3,})(?:[-\s]*(?:REV|R)\s*([A-Z0-9]+))?\b/i)
     : adapterId === "ajs_ajbr"
@@ -735,6 +745,8 @@ function extractRawIdentity(
     ? hay.match(/\bBWCWA[-\s#]*(\d{3,})\b/i)
     : adapterId === "western"
     ? hay.match(/\bWB[-\s#]*(\d{3,})\b/i)
+    : adapterId === "synthetic_livefire"
+    ? null
     : hay.match(
       /\b(?:RAPID|RR)[-\s#]*(\d{3,})(?:[-\s]*(?:REV|R)\s*([A-Z0-9]+))?\b/i,
     );
@@ -747,10 +759,16 @@ function extractRawIdentity(
     : adapterId === "rapid"
     ? "RAPID"
     : "MLB";
-  const familyExternalRef = family
-    ? `${prefix}-${family[1]}${family[2] ? `-${family[2]}` : ""}`
+  const familyExternalRef = syntheticExternalRef ||
+    (family
+      ? `${prefix}-${family[1]}${family[2] ? `-${family[2]}` : ""}`
+      : null);
+  const syntheticLabelledWo = adapterId === "synthetic_livefire"
+    ? hay.match(
+      /\b(?:work\s*order|works\s*order)\s*(?:number|no\.?)?\s*[:#-]\s*(SYNTHLIVE-[A-Z0-9][A-Z0-9._#/-]{2,})\b/i,
+    )?.[1] || null
     : null;
-  const labelledWo = hay.match(WO_RE)?.[1] || null;
+  const labelledWo = syntheticLabelledWo || hay.match(WO_RE)?.[1] || null;
   const jobNo = hay.match(JOB_NO_RE)?.[1] || null;
   // AJ's production subjects use "Job No 70062" without repeating AJBR in the
   // subject. The sender-selected adapter supplies that builder scope, so the
@@ -1204,6 +1222,17 @@ function evidenceFor(
 
 function isChatter(item: DeterministicSourceItem): boolean {
   const hay = text(item);
+  // The signed lab fixture id is intentionally visible in the subject so the
+  // live-fire runner can correlate results. A correction fixture therefore
+  // contains the otherwise-global "correction" noise token. Once the runtime
+  // has admitted the exact HMAC lane, explicit revision/work-order evidence
+  // plus its PDF remains work; unsigned and ordinary builder mail keeps the
+  // established exclusion unchanged.
+  if (
+    item.syntheticLivefireMarker &&
+    item.attachments.length > 0 &&
+    (isRevisionSource(item) || WORK_SIGNAL.test(hay))
+  ) return false;
   return subjectIsExcludedNonWorkOrder(item.subject) ||
     subjectIsKnownBuilderNoise(item.subject) ||
     /\b(thanks|thank\s+you|noted|received|acknowledged|please\s+disregard|pricing\s+(?:query|enquiry)|photo\s+evidence|invoice\s+attached)\b/i
@@ -1275,9 +1304,19 @@ function buildKnown(
     builderWoRaw: raw.wo,
     builderPoRaw: raw.po,
     deliverableRefRaw: deliverable,
-    prefixes: ["MLB", "AJBR", "AJS", "BWCWA", "WB", "RAPID", "RR"],
+    prefixes: [
+      "SYNTHLIVE",
+      "MLB",
+      "AJBR",
+      "AJS",
+      "BWCWA",
+      "WB",
+      "RAPID",
+      "RR",
+    ],
   });
   const identity: ExtractedIdentity = {
+    syntheticLivefireMarker: item.syntheticLivefireMarker || null,
     // Persist the actual profile slug used by the existing guarded job creator.
     // AJS/AJBR convergence is the stable companyId/companyKey, never slug text.
     builderSlug: profile?.slug ||
@@ -1336,6 +1375,7 @@ function buildKnown(
 
 function blankIdentity(): ExtractedIdentity {
   return {
+    syntheticLivefireMarker: null,
     builderSlug: null,
     companyId: null,
     companyKey: null,
@@ -1359,6 +1399,14 @@ function blankIdentity(): ExtractedIdentity {
   };
 }
 
+const SYNTHETIC_LIVEFIRE_ADAPTER: Adapter = {
+  id: "synthetic_livefire",
+  version: "synthetic_livefire@v1",
+  // The runtime sets this only after exact-sender, exact-mailbox, short-expiry
+  // HMAC verification. Content alone can never select the synthetic adapter.
+  matches: (item) => Boolean(item.syntheticLivefireMarker),
+  build: (item, profiles) => buildKnown(item, profiles, "synthetic_livefire"),
+};
 const MLB_ADAPTER: Adapter = {
   id: "mlb",
   version: "mlb@v1",
@@ -1440,6 +1488,7 @@ const CHATTER_ADAPTER: Adapter = {
 // Load-bearing order approved by the deterministic intake contract.
 export const DETERMINISTIC_ADAPTER_REGISTRY: readonly Adapter[] = Object.freeze(
   [
+    SYNTHETIC_LIVEFIRE_ADAPTER,
     MLB_ADAPTER,
     AJS_ADAPTER,
     WESTERN_ADAPTER,

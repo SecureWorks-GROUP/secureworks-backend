@@ -19,6 +19,10 @@ import {
   buildDeterministicIntakePlan,
   DETERMINISTIC_INTAKE_VERSION,
 } from "./makesafe_deterministic_intake.ts";
+import {
+  signSyntheticLivefireMarker,
+  SYNTHETIC_LIVEFIRE_MARKER_PREFIX,
+} from "./makesafe_synthetic_livefire.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -487,6 +491,140 @@ function email(input: Record<string, any>) {
     makesafe_scanned_at: input.makesafe_scanned_at ?? null,
   };
 }
+
+Deno.test("readInputs admits only a valid short-lived synthetic own-mail token", async () => {
+  const secret = "runtime-test-ops-secret";
+  const previousSecret = Deno.env.get("SW_API_KEY");
+  Deno.env.set("SW_API_KEY", secret);
+  try {
+    const expiresAtMs = Date.parse(NOW) + 5 * 60 * 1000;
+    const signed = await signSyntheticLivefireMarker({
+      runId: "RUNTIME-001",
+      fixtureId: "PHYSICAL",
+      ref: "SYNTHLIVE-700001",
+      expiresAtMs,
+      secret,
+    });
+    const tampered = `${signed.slice(0, -1)}${
+      signed.endsWith("0") ? "1" : "0"
+    }`;
+    const store = baseStore();
+    store.makesafe_companies.push({
+      id: "00000000-0000-0000-0000-000000000099",
+      slug: "synthetic-livefire",
+      name: "SecureWorks Synthetic Live-Fire Builder (TEST ONLY)",
+      sender_patterns: [],
+      parsing_rules: null,
+      active: true,
+    });
+    store.emails.push(
+      email({
+        post_id: "synthetic-valid",
+        from_email: "marnin@secureworkswa.com.au",
+        received_at: NOW,
+        subject:
+          `${signed} NEW WORK ORDER Work Order: SYNTHLIVE-700001 PO: 970001`,
+        body_content:
+          "Client: Synthetic Client\nSite Address: 1 Test Lab Road, Perth\nScope: Install temporary roof tarp.",
+      }),
+      email({
+        post_id: "synthetic-invalid",
+        from_email: "marnin@secureworkswa.com.au",
+        received_at: "2026-07-20T11:59:59.000Z",
+        subject:
+          `${tampered} NEW WORK ORDER Work Order: SYNTHLIVE-700001 PO: 970001`,
+        body_content:
+          "Client: Synthetic Client\nSite Address: 1 Test Lab Road, Perth",
+      }),
+    );
+    store.email_attachments.push({
+      id: "synthetic-valid-pdf",
+      email_id: "synthetic-valid",
+      name: "Synthetic Work Order.pdf",
+      content_type: "application/pdf",
+      storage_path: "raw/synthetic-valid.pdf",
+      status: "uploaded",
+      size_bytes: 3,
+    });
+    const client = fakeClient(store);
+    const inputs = await _readInputsForTest(client, {
+      days: 30,
+      onlyUnscanned: false,
+      nowIso: NOW,
+      maxSources: 4,
+      seedPostIds: [],
+      cursor: null,
+    });
+    const sources = new Map(inputs.sources.map((source) => [
+      source.postId,
+      source,
+    ]));
+    const valid = sources.get("synthetic-valid");
+    const invalid = sources.get("synthetic-invalid");
+    assert(valid);
+    assert(invalid);
+    assertEquals(valid.direction, "inbound");
+    assertEquals(
+      valid.syntheticLivefireMarker,
+      `${SYNTHETIC_LIVEFIRE_MARKER_PREFIX}RUNTIME-001`,
+    );
+    assert(!valid.subject?.includes(signed));
+    assert(!valid.subject?.match(/[0-9a-f]{64}/));
+    assertEquals(invalid.direction, "own_outbound");
+    assertEquals(invalid.syntheticLivefireMarker, null);
+
+    const plan = buildDeterministicIntakePlan(
+      [valid],
+      inputs.profiles,
+    );
+    assertEquals(plan.cases[0].adapterId, "synthetic_livefire");
+    assertEquals(
+      plan.cases[0].identity.externalRefCanonical,
+      "SYNTHLIVE-700001",
+    );
+    const draftResult = await _ensureDraftAndJobForTest(
+      client,
+      "synthetic-case",
+      plan.cases[0],
+      new Map(inputs.sources.map((source) => [source.postId, source])),
+      () => Promise.resolve({ job: { id: "synthetic-job" } }),
+      () => {},
+      () => {},
+    );
+    assertEquals(draftResult.jobId, "synthetic-job");
+    assertEquals(
+      store.makesafe_intake_drafts[0].extraction_json
+        .synthetic_livefire_marker,
+      `${SYNTHETIC_LIVEFIRE_MARKER_PREFIX}RUNTIME-001`,
+    );
+    assert(
+      store.makesafe_intake_drafts[0].description.includes(
+        `${SYNTHETIC_LIVEFIRE_MARKER_PREFIX}RUNTIME-001`,
+      ),
+    );
+
+    const replayStore = structuredClone(store);
+    const replay = await _readInputsForTest(fakeClient(replayStore), {
+      days: 30,
+      onlyUnscanned: false,
+      nowIso: "2026-07-21T12:00:00.000Z",
+      maxSources: 4,
+      seedPostIds: [],
+      cursor: null,
+    });
+    assertEquals(
+      replay.sources.find((source) => source.postId === "synthetic-valid")
+        ?.direction,
+      "inbound",
+    );
+  } finally {
+    if (previousSecret === undefined) {
+      Deno.env.delete("SW_API_KEY");
+    } else {
+      Deno.env.set("SW_API_KEY", previousSecret);
+    }
+  }
+});
 
 const approveDraft = (_client: any, _body: any) =>
   Promise.resolve({ job: { id: "job-abc" } });

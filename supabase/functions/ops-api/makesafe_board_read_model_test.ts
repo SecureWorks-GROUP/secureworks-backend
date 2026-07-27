@@ -2,11 +2,19 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _deriveMakesafeBoardStage } from "./index.ts";
+import {
+  _assertNoSyntheticLivefireInvoiceForTest,
+  _assertNoSyntheticLivefireJobsForTest,
+  _assertNoSyntheticLivefireReleaseRevisionForTest,
+  _deriveMakesafeBoardStage,
+} from "./index.ts";
 import {
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
+  isSyntheticLivefireJob,
+  isTerminalSyntheticLivefireJob,
   mapOpsStageToTradeColumn,
   OPS_MAKESAFE_STAGES,
   projectOpsMakesafeBoard,
@@ -415,4 +423,217 @@ Deno.test("trade payload is an allow-list with no pricing or invoice data", () =
   assert(!payload.includes("xero_invoice"));
   assert(!payload.includes("trade_invoices"));
   assert(!payload.includes("999"));
+});
+
+Deno.test("terminally accounted synthetic live-fire jobs disappear from both boards", () => {
+  const synthetic = baseJob("cancelled", "synthetic-terminal", {
+    metadata: {
+      synthetic_livefire_marker:
+        "SWG-SES-LIVEFIRE-TEST-ONLY-018F7F2C-4DB4-7C61-92C7-2B2B97E0A111",
+      synthetic_livefire_terminal_at: NOW,
+    },
+  });
+  assertEquals(isSyntheticLivefireJob(synthetic), true);
+  assertEquals(isTerminalSyntheticLivefireJob(synthetic), true);
+  assertEquals(buildCanonicalMakesafeRows([synthetic]).length, 1);
+  assertEquals(
+    buildCanonicalMakesafeRows([synthetic], {
+      terminalSyntheticLivefireJobIds: new Set([synthetic.id]),
+    }),
+    [],
+  );
+
+  const lookalike = baseJob("cancelled", "ordinary-cancelled", {
+    metadata: { synthetic_livefire_terminal_at: NOW },
+  });
+  assertEquals(isTerminalSyntheticLivefireJob(lookalike), false);
+  assertEquals(buildCanonicalMakesafeRows([lookalike]).length, 1);
+
+  const prefixLookalike = baseJob("cancelled", "prefix-lookalike", {
+    metadata: {
+      synthetic_livefire_marker: "SWG-SES-LIVEFIRE-TEST-ONLY-not-a-uuid",
+      synthetic_livefire_terminal_at: NOW,
+    },
+  });
+  assertEquals(isSyntheticLivefireJob(prefixLookalike), false);
+  assertEquals(isTerminalSyntheticLivefireJob(prefixLookalike), false);
+});
+
+Deno.test("synthetic live-fire jobs are refused before any release operation", async () => {
+  const client = {
+    from(table: string) {
+      assertEquals(table, "jobs");
+      return {
+        select(columns: string) {
+          assertEquals(columns, "id,metadata");
+          return {
+            in(column: string, ids: string[]) {
+              assertEquals(column, "id");
+              assertEquals(ids, ["synthetic-job"]);
+              return Promise.resolve({
+                data: [{
+                  id: "synthetic-job",
+                  metadata: {
+                    synthetic_livefire_marker:
+                      "SWG-SES-LIVEFIRE-TEST-ONLY-018F7F2C-4DB4-7C61-92C7-2B2B97E0A111",
+                  },
+                }],
+                error: null,
+              });
+            },
+          };
+        },
+      };
+    },
+  };
+
+  await assertRejects(
+    () =>
+      _assertNoSyntheticLivefireJobsForTest(
+        client,
+        ["synthetic-job"],
+        "release",
+      ),
+    Error,
+    "synthetic_livefire_release_forbidden",
+  );
+});
+
+Deno.test("synthetic-linked invoices are refused before invoice effects", async () => {
+  const marker =
+    "SWG-SES-LIVEFIRE-TEST-ONLY-018F7F2C-4DB4-7C61-92C7-2B2B97E0A111";
+  const client = {
+    from(table: string) {
+      if (table === "xero_invoices") {
+        return {
+          select(columns: string) {
+            assertEquals(columns, "job_id");
+            return {
+              eq(column: string, id: string) {
+                assertEquals(column, "xero_invoice_id");
+                assertEquals(id, "invoice-1");
+                return {
+                  maybeSingle: () =>
+                    Promise.resolve({
+                      data: { job_id: "synthetic-job" },
+                      error: null,
+                    }),
+                };
+              },
+            };
+          },
+        };
+      }
+      assertEquals(table, "jobs");
+      return {
+        select(columns: string) {
+          assertEquals(columns, "id,metadata");
+          return {
+            in: () =>
+              Promise.resolve({
+                data: [{
+                  id: "synthetic-job",
+                  metadata: { synthetic_livefire_marker: marker },
+                }],
+                error: null,
+              }),
+          };
+        },
+      };
+    },
+  };
+
+  await assertRejects(
+    () =>
+      _assertNoSyntheticLivefireInvoiceForTest(
+        client,
+        "invoice-1",
+        "void_invoice",
+      ),
+    Error,
+    "synthetic_livefire_release_forbidden",
+  );
+
+  const unresolvedClient = {
+    from(table: string) {
+      assertEquals(table, "xero_invoices");
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                maybeSingle: () => Promise.resolve({ data: null, error: null }),
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  await assertRejects(
+    () =>
+      _assertNoSyntheticLivefireInvoiceForTest(
+        unresolvedClient,
+        "missing",
+        "void_invoice",
+      ),
+    Error,
+    "synthetic_livefire_invoice_unresolved",
+  );
+});
+
+Deno.test("synthetic live-fire release members cannot be approved or executed", async () => {
+  const marker =
+    "SWG-SES-LIVEFIRE-TEST-ONLY-018F7F2C-4DB4-7C61-92C7-2B2B97E0A111";
+  const client = {
+    from(table: string) {
+      if (table === "makesafe_release_revision_members") {
+        return {
+          select(columns: string) {
+            assertEquals(columns, "job_id");
+            return {
+              eq(column: string, id: string) {
+                assertEquals(column, "release_revision_id");
+                assertEquals(id, "release-1");
+                return Promise.resolve({
+                  data: [{ job_id: "synthetic-job" }],
+                  error: null,
+                });
+              },
+            };
+          },
+        };
+      }
+      assertEquals(table, "jobs");
+      return {
+        select(columns: string) {
+          assertEquals(columns, "id,metadata");
+          return {
+            in(column: string, ids: string[]) {
+              assertEquals(column, "id");
+              assertEquals(ids, ["synthetic-job"]);
+              return Promise.resolve({
+                data: [{
+                  id: "synthetic-job",
+                  metadata: { synthetic_livefire_marker: marker },
+                }],
+                error: null,
+              });
+            },
+          };
+        },
+      };
+    },
+  };
+
+  await assertRejects(
+    () =>
+      _assertNoSyntheticLivefireReleaseRevisionForTest(
+        client,
+        "release-1",
+        "execute_ses_release_revision",
+      ),
+    Error,
+    "synthetic_livefire_release_forbidden",
+  );
 });
