@@ -97,6 +97,23 @@ export function selectCurrentCycleReport(
 }
 
 /**
+ * Preserve legacy first-attendance media visibility, but fail closed at the
+ * reattendance boundary so an old visit's photos cannot satisfy or populate the
+ * current visit's completion form.
+ */
+export function filterMediaForCurrentCycle(
+  media: any[] | null | undefined,
+  detail: any,
+  currentAttendanceCycleId?: string | null,
+): any[] {
+  const rows = media || [];
+  if (!hasReattendBoundary(detail)) return rows;
+  return rows.filter((row) =>
+    isEvidenceBoundToCurrentCycle(row, detail, currentAttendanceCycleId)
+  );
+}
+
+/**
  * Same contract as index currentCycleReportMap: reattend → current cycle only;
  * legacy → first-match any cycle. Prefer attendance_cycle_id when present.
  */

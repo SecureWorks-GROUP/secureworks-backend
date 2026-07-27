@@ -1,3 +1,5 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
+
 // ════════════════════════════════════════════════════════════
 // MAKE-SAFE RE-ATTENDANCE TESTS (M-C)
 //
@@ -35,12 +37,14 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
   for (const [table, tableRows] of Object.entries(seed)) {
     rows[table] = tableRows.map((r) => ({ ...r }));
   }
-  const nextId = (table: string) => `${table}-${(rows[table] || []).length + 1}`;
+  const nextId = (table: string) =>
+    `${table}-${(rows[table] || []).length + 1}`;
 
   function builder(table: string) {
     if (!rows[table]) rows[table] = [];
     const preds: Array<(r: any) => boolean> = [];
     let insertRow: any = null;
+    let upsertRow: any = null;
     let updateRow: any = null;
     let maxRows: number | null = null;
 
@@ -67,8 +71,24 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
       for (const row of matched) Object.assign(row, updateRow);
       return { data: matched[0] || null, error: null };
     };
+    const applyUpsert = () => {
+      const failed = failure("upsert");
+      if (failed) return failed;
+      const existing = rows[table].find((row) =>
+        row.job_id === upsertRow.job_id &&
+        row.cycle_number === upsertRow.cycle_number
+      );
+      if (existing) {
+        Object.assign(existing, upsertRow);
+        return { data: existing, error: null };
+      }
+      const row = { id: upsertRow.id || nextId(table), ...upsertRow };
+      rows[table].push(row);
+      return { data: row, error: null };
+    };
     const terminal = (single = false) => {
       if (insertRow) return applyInsert();
+      if (upsertRow) return applyUpsert();
       if (updateRow) return applyUpdate();
       const data = matchingRows();
       return { data: single ? data[0] || null : data, error: null };
@@ -86,6 +106,7 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
       },
       not: () => b,
       gte: () => b,
+      or: () => b,
       in: (col: string, vals: any[]) => {
         preds.push((r) => vals.includes(r?.[col]));
         return b;
@@ -101,6 +122,10 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
       }),
       insert: (row: any) => {
         insertRow = row;
+        return b;
+      },
+      upsert: (row: any) => {
+        upsertRow = row;
         return b;
       },
       update: (row: any) => {
@@ -139,11 +164,21 @@ function reportedRows(overrides: TableRows = {}): TableRows {
       report_sent_at: null,
       cycle_number: 1,
       reattend_count: 0,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
+      open_reason: "first_attendance",
     }],
     job_service_reports: [{
       id: "report-1",
       job_id: "job-1",
       cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
       status: "submitted",
       submitted_at: "2026-07-02T02:00:00Z",
       checklist_json: { work_done: "First visit: temp fence stood up." },
@@ -154,6 +189,8 @@ function reportedRows(overrides: TableRows = {}): TableRows {
       job_id: "job-1",
       type: "photo",
       phase: "completion",
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
     })),
     job_assignments: [{
       id: "assign-1",
@@ -172,7 +209,11 @@ function reportedRows(overrides: TableRows = {}): TableRows {
 
 function reattendArgs(overrides: Record<string, any> = {}) {
   return {
-    body: { job_id: "job-1", reason: "temp fence blew down again", ...overrides },
+    body: {
+      job_id: "job-1",
+      reason: "temp fence blew down again",
+      ...overrides,
+    },
     callerRole: "ops_manager",
     managedVerticals: [],
   };
@@ -195,6 +236,19 @@ function secondReportBody(overrides: Record<string, any> = {}) {
   };
 }
 
+function addCurrentCyclePhotos(rows: TableRows, attendanceCycleId: string) {
+  for (let i = 0; i < 5; i++) {
+    rows.job_media.push({
+      id: `media-cycle-2-${i + 1}`,
+      job_id: "job-1",
+      type: "photo",
+      phase: "completion",
+      attendance_cycle_id: attendanceCycleId,
+      cycle_attribution: "bound",
+    });
+  }
+}
+
 // ── 1. Re-attend transition: reported card → allocated re-attend visit ─────────
 
 Deno.test("reattend_makesafe puts a reported card back to allocated as visit #1", async () => {
@@ -210,7 +264,11 @@ Deno.test("reattend_makesafe puts a reported card back to allocated as visit #1"
 
   const detail = rows.makesafe_job_details[0];
   assertEquals(detail.substatus, "waiting_on_trade_report");
-  assertEquals(detail.report_received_at, null, "report_received_at is cleared for the new visit");
+  assertEquals(
+    detail.report_received_at,
+    null,
+    "report_received_at is cleared for the new visit",
+  );
   assertEquals(detail.cycle_number, 2);
   assertEquals(detail.reattend_count, 1);
   assertEquals(detail.last_reattend_reason, "temp fence blew down again");
@@ -222,18 +280,31 @@ Deno.test("reattend_makesafe puts a reported card back to allocated as visit #1"
   assertEquals(rows.job_service_reports[0].status, "submitted");
 
   // Audit event written.
-  const evt = rows.job_events.find((e: any) => e.event_type === "makesafe_reattend");
+  const evt = rows.job_events.find((e: any) =>
+    e.event_type === "makesafe_reattend"
+  );
   assert(evt, "a makesafe_reattend event is recorded");
   assertEquals(evt.detail_json.reattend_count, 1);
 
   // Board: the card is now in Allocated (not report_ready / trade_report_in).
-  const pipeline: any = await _makesafePipelineForTest(client, new URLSearchParams());
-  const inAllocated = pipeline.columns.allocated.find((j: any) => j.id === "job-1");
+  const pipeline: any = await _makesafePipelineForTest(
+    client,
+    new URLSearchParams(),
+  );
+  const inAllocated = pipeline.columns.allocated.find((j: any) =>
+    j.id === "job-1"
+  );
   assert(inAllocated, "re-attended card sits in Allocated awaiting the visit");
   assertEquals(inAllocated.reattend_count, 1);
   assertEquals(inAllocated.is_reattend, true);
-  assert(!pipeline.columns.report_ready.find((j: any) => j.id === "job-1"), "not in report_ready");
-  assert(!pipeline.columns.trade_report_in.find((j: any) => j.id === "job-1"), "not in trade_report_in");
+  assert(
+    !pipeline.columns.report_ready.find((j: any) => j.id === "job-1"),
+    "not in report_ready",
+  );
+  assert(
+    !pipeline.columns.trade_report_in.find((j: any) => j.id === "job-1"),
+    "not in trade_report_in",
+  );
 });
 
 // ── 2. Second report is ADDITIVE and returns the card to Trade Report In ──────
@@ -241,8 +312,15 @@ Deno.test("reattend_makesafe puts a reported card back to allocated as visit #1"
 Deno.test("second report after re-attend is additive (both reports kept) and card returns to Trade Report In", async () => {
   const { client, rows } = makeClient(reportedRows());
 
-  await _reattendMakesafeForTest(client, reattendArgs());
-  const submitRes: any = await _submitMakesafeReportForTest(client, secondReportBody());
+  const reattend: any = await _reattendMakesafeForTest(
+    client,
+    reattendArgs(),
+  );
+  addCurrentCyclePhotos(rows, reattend.attendance_cycle_id);
+  const submitRes: any = await _submitMakesafeReportForTest(
+    client,
+    secondReportBody(),
+  );
 
   assertEquals(submitRes.ok, true);
   assertEquals(submitRes.board_sync.ok, true);
@@ -252,9 +330,15 @@ Deno.test("second report after re-attend is additive (both reports kept) and car
   const r1 = rows.job_service_reports.find((r: any) => r.id === "report-1");
   const r2 = rows.job_service_reports.find((r: any) => r.id !== "report-1");
   assertEquals(r1.cycle_number, 1);
-  assertEquals(r1.checklist_json.work_done, "First visit: temp fence stood up.");
+  assertEquals(
+    r1.checklist_json.work_done,
+    "First visit: temp fence stood up.",
+  );
   assertEquals(r2.cycle_number, 2);
-  assertEquals(r2.checklist_json.work_done, "Second visit: re-secured the temp fence.");
+  assertEquals(
+    r2.checklist_json.work_done,
+    "Second visit: re-secured the temp fence.",
+  );
 
   // Detail flips back to report-in, keeping the re-attend marker.
   const detail = rows.makesafe_job_details[0];
@@ -262,9 +346,17 @@ Deno.test("second report after re-attend is additive (both reports kept) and car
   assertEquals(detail.reattend_count, 1);
 
   // Board: back in Trade Report In, still flagged as a re-attend.
-  const pipeline: any = await _makesafePipelineForTest(client, new URLSearchParams());
-  const inTradeReportIn = pipeline.columns.trade_report_in.find((j: any) => j.id === "job-1");
-  assert(inTradeReportIn, "re-attend's second report lands back in Trade Report In");
+  const pipeline: any = await _makesafePipelineForTest(
+    client,
+    new URLSearchParams(),
+  );
+  const inTradeReportIn = pipeline.columns.trade_report_in.find((j: any) =>
+    j.id === "job-1"
+  );
+  assert(
+    inTradeReportIn,
+    "re-attend's second report lands back in Trade Report In",
+  );
   assertEquals(inTradeReportIn.reattend_count, 1);
   assertEquals(inTradeReportIn.is_reattend, true);
 });
@@ -272,10 +364,17 @@ Deno.test("second report after re-attend is additive (both reports kept) and car
 // ── 3. submit_makesafe_report does NOT block the re-attend's second submit ─────
 
 Deno.test("second submit after re-attend is not blocked as a duplicate", async () => {
-  const { client } = makeClient(reportedRows());
-  await _reattendMakesafeForTest(client, reattendArgs());
+  const { client, rows } = makeClient(reportedRows());
+  const reattend: any = await _reattendMakesafeForTest(
+    client,
+    reattendArgs(),
+  );
+  addCurrentCyclePhotos(rows, reattend.attendance_cycle_id);
   // Must not throw "Report already submitted" — the cycle-2 lookup finds nothing.
-  const res: any = await _submitMakesafeReportForTest(client, secondReportBody());
+  const res: any = await _submitMakesafeReportForTest(
+    client,
+    secondReportBody(),
+  );
   assertEquals(res.ok, true);
 });
 
@@ -336,7 +435,13 @@ Deno.test("reattend_makesafe PROCEEDS on a job with a live invoice and flags bil
   assertEquals(res.reattended, true);
   assertEquals(res.reattend_count, 1);
   assertEquals(res.cycle_number, 2);
-  assertEquals(res.bill_reattend_manually, true, "admin-visible flag: bill this re-attend manually");
+  assertEquals(
+    res.bill_reattend_manually,
+    true,
+    "admin-visible flag: bill this re-attend manually",
+  );
+  assertEquals(res.billing_review_required, true);
+  assertEquals(res.billing_review_event.ok, true);
   assert(res.warning, "a non-fatal warning is surfaced");
   assert(
     String(res.warning).includes("live invoice"),
@@ -355,9 +460,23 @@ Deno.test("reattend_makesafe PROCEEDS on a job with a live invoice and flags bil
   assertEquals(rows.xero_invoices[0].invoice_number, "INV-100");
 
   // The flag is also stamped on the audit event for the admin card.
-  const evt = rows.job_events.find((e: any) => e.event_type === "makesafe_reattend");
+  const evt = rows.job_events.find((e: any) =>
+    e.event_type === "makesafe_reattend"
+  );
   assert(evt, "a makesafe_reattend event is recorded");
   assertEquals(evt.detail_json.bill_reattend_manually, true);
+  const review = rows.job_events.find((e: any) =>
+    e.event_type === "makesafe_reattend_billing_review_required"
+  );
+  assert(review, "a durable billing-review fact is recorded");
+  assertEquals(review.detail_json.attendance_cycle_id, res.attendance_cycle_id);
+  assertEquals(review.detail_json.prior_invoice_summary, [{
+    xero_id: null,
+    status: "AUTHORISED",
+    number: "INV-100",
+    amount: null,
+  }]);
+  assertEquals(review.detail_json.disposition, null);
 });
 
 Deno.test("reattend_makesafe on a job with only a VOIDED invoice does not flag bill-manually", async () => {
@@ -373,7 +492,49 @@ Deno.test("reattend_makesafe on a job with only a VOIDED invoice does not flag b
   const res: any = await _reattendMakesafeForTest(client, reattendArgs());
   assertEquals(res.ok, true);
   assertEquals(res.bill_reattend_manually, false);
-  assertEquals(res.warning, undefined, "no warning when there is no live invoice");
+  assertEquals(res.billing_review_required, false);
+  assertEquals(
+    res.warning,
+    undefined,
+    "no warning when there is no live invoice",
+  );
+});
+
+Deno.test("reattend_makesafe flags review when a prior pack was sent without a live invoice", async () => {
+  const { client, rows } = makeClient(reportedRows({
+    makesafe_report_packs: [{
+      id: "pack-1",
+      job_id: "job-1",
+      pack_kind: "main",
+      status: "sent",
+      sent_at: "2026-07-03T04:00:00Z",
+    }],
+  }));
+
+  const res: any = await _reattendMakesafeForTest(client, reattendArgs());
+  assertEquals(res.ok, true);
+  assertEquals(res.bill_reattend_manually, false);
+  assertEquals(res.prior_pack_sent, true);
+  assertEquals(res.billing_review_required, true);
+  assert(String(res.warning).includes("prior report pack"));
+  const review = rows.job_events.find((e: any) =>
+    e.event_type === "makesafe_reattend_billing_review_required"
+  );
+  assert(review);
+  assertEquals(review.detail_json.review_reason, "prior_pack_sent");
+  assertEquals(review.detail_json.disposition, null);
+});
+
+Deno.test("reattend current-cycle photo gate rejects five stale photos", async () => {
+  const { client, rows } = makeClient(reportedRows());
+  await _reattendMakesafeForTest(client, reattendArgs());
+
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, secondReportBody()),
+    Error,
+    "at least 5 current-visit photos (found 0)",
+  );
+  assertEquals(rows.job_service_reports.length, 1);
 });
 
 Deno.test("reattend_makesafe refuses a caller who manages neither the vertical nor is a dispatcher", async () => {
@@ -444,13 +605,21 @@ Deno.test("regression: a first-attendance report defaults to cycle 1 and is not 
     job_service_reports: [],
   }));
 
-  const res: any = await _submitMakesafeReportForTest(client, secondReportBody());
+  const res: any = await _submitMakesafeReportForTest(
+    client,
+    secondReportBody(),
+  );
   assertEquals(res.ok, true);
   assertEquals(rows.job_service_reports.length, 1);
   assertEquals(rows.job_service_reports[0].cycle_number, 1);
 
-  const pipeline: any = await _makesafePipelineForTest(client, new URLSearchParams());
-  const card = pipeline.columns.trade_report_in.find((j: any) => j.id === "job-1");
+  const pipeline: any = await _makesafePipelineForTest(
+    client,
+    new URLSearchParams(),
+  );
+  const card = pipeline.columns.trade_report_in.find((j: any) =>
+    j.id === "job-1"
+  );
   assert(card, "a normal first report lands in Trade Report In");
   assertEquals(card.reattend_count, 0);
   assertEquals(card.is_reattend, false);

@@ -6,6 +6,7 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _confirmUploadForTest,
   _dispatchMakesafeReportForTest,
   _makesafePipelineForTest,
   _normaliseOpsAttachJobPhotoInputForTest,
@@ -13,6 +14,7 @@ import {
   _resolveMakesafeReportActor,
   _resolveOpsApiAuthIntent,
   _submitMakesafeReportForTest,
+  _tradeMakesafeCompletionHandoffForTest,
 } from "./index.ts";
 
 type TableRows = Record<string, any[]>;
@@ -203,11 +205,17 @@ Deno.test("submit_makesafe_report attributes a mixed-credential Trade request fr
     {},
   );
   assertEquals(actor, "hugo-user-id");
+  if (!actor) throw new Error("expected JWT actor");
 
   const { client, rows } = makeSubmitClient(baseRows());
-  const body = validBody();
-  delete body.userId;
-  await _dispatchMakesafeReportForTest(client, body, authMode, { id: actor });
+  const { userId: _bodyActor, ...body } = validBody();
+  await _dispatchMakesafeReportForTest(client, body, authMode, {
+    id: actor,
+    email: "hugo@example.test",
+    orgId: "org-test",
+    role: "installer",
+    managedVerticals: [],
+  });
   assertEquals(rows.job_service_reports[0].submitted_by, "hugo-user-id");
   assertEquals(rows.job_events[0].user_id, "hugo-user-id");
 });
@@ -285,6 +293,132 @@ Deno.test("submit_makesafe_report rejects final submit with fewer than 5 photos"
     "MakeSafe report needs at least 5 photos",
   );
   assertEquals(rows.job_service_reports.length, 0);
+});
+
+Deno.test("confirm_upload stamps a MakeSafe photo with the server current cycle", async () => {
+  const { client, rows } = makeSubmitClient(baseRows());
+
+  const result: any = await _confirmUploadForTest(
+    client,
+    {
+      job_id: "job-1",
+      publicUrl: "https://example.test/current-cycle-photo.jpg",
+      phase: "completion",
+    },
+    "trade-1",
+  );
+
+  const media = rows.job_media.find((row: any) =>
+    row.storage_url === "https://example.test/current-cycle-photo.jpg"
+  );
+  assert(media);
+  assertEquals(media.cycle_attribution, "bound");
+  assertEquals(media.attendance_cycle_id, result.attendance_cycle_id);
+  assertEquals(
+    rows.makesafe_job_details[0].attendance_cycle_id,
+    result.attendance_cycle_id,
+  );
+});
+
+Deno.test("submit_makesafe_report requires five photos from the current reattendance cycle", async () => {
+  const stale = Array.from({ length: 5 }, (_, i) => ({
+    id: `old-${i + 1}`,
+    job_id: "job-1",
+    type: "photo",
+    attendance_cycle_id: "cycle-1",
+    cycle_attribution: "bound",
+  }));
+  const current = Array.from({ length: 4 }, (_, i) => ({
+    id: `current-${i + 1}`,
+    job_id: "job-1",
+    type: "photo",
+    attendance_cycle_id: "cycle-2",
+    cycle_attribution: "bound",
+  }));
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 2,
+      reattend_count: 1,
+      attendance_cycle_id: "cycle-2",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-2",
+      job_id: "job-1",
+      cycle_number: 2,
+    }],
+    job_media: [...stale, ...current],
+  }));
+
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, validBody()),
+    Error,
+    "at least 5 current-visit photos (found 4)",
+  );
+  rows.job_media.push({
+    id: "current-5",
+    job_id: "job-1",
+    type: "photo",
+    attendance_cycle_id: "cycle-2",
+    cycle_attribution: "bound",
+  });
+  const result: any = await _submitMakesafeReportForTest(
+    client,
+    validBody(),
+  );
+  assertEquals(result.ok, true);
+  assertEquals(rows.job_service_reports[0].attendance_cycle_id, "cycle-2");
+});
+
+Deno.test("trade completion handoff uses persisted roof mode and fails closed when unknown", () => {
+  assertEquals(
+    _tradeMakesafeCompletionHandoffForTest(
+      {
+        metadata: {
+          makesafe_job_family: "roof_report",
+          roof_report_mode: "own_template",
+        },
+      },
+      { report_type: "roof_report" },
+      null,
+    ).completion_handoff,
+    "own_template",
+  );
+  assertEquals(
+    _tradeMakesafeCompletionHandoffForTest(
+      { metadata: { makesafe_job_family: "roof_report" } },
+      { report_type: "roof_report" },
+      { id: "draft-1", status: "draft" },
+    ).completion_handoff,
+    "own_template",
+  );
+  assertEquals(
+    _tradeMakesafeCompletionHandoffForTest(
+      { metadata: { makesafe_job_family: "roof_report" } },
+      {
+        report_type: "roof_report",
+        external_links: [{
+          kind: "builder_portal",
+          url: "https://builder.example/report",
+        }],
+      },
+      null,
+    ).completion_handoff,
+    "builder_portal",
+  );
+  const unknown = _tradeMakesafeCompletionHandoffForTest(
+    { metadata: { makesafe_job_family: "roof_report" } },
+    { report_type: "roof_report" },
+    null,
+  );
+  assertEquals(unknown.completion_handoff, "unknown");
+  assertEquals(
+    unknown.completion_handoff_reason,
+    "roof_completion_mode_unknown",
+  );
 });
 
 Deno.test("submit_makesafe_report auto-assigns an unassigned submitter, records attribution, and leaves declared board behavior unchanged", async () => {
