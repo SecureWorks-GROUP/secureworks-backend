@@ -341,25 +341,118 @@ Deno.test("AJS report-only input is rejected instead of silently rerouted", asyn
   input.classification.builder_key = "AJS";
   input.classification.builder_label = "AJS";
   input.source.builder_reference = "AJS 70062";
+  let sourceRecoveryCalls = 0;
+  let portalCaptureCalls = 0;
+  let swmsCalls = 0;
+  const deps = dependencies(input);
   const response = await prepareSesDocketRevision(
     request(input.identity.job_id),
-    dependencies(input),
+    {
+      ...deps,
+      resolveSourceArtifacts: async () => {
+        sourceRecoveryCalls += 1;
+        return [];
+      },
+      capturePortal: async (captureRequest) => {
+        portalCaptureCalls += 1;
+        return deps.capturePortal!(captureRequest);
+      },
+      resolveSwmsArtifact: async () => {
+        swmsCalls += 1;
+        return null;
+      },
+    },
   );
-  assertEquals(response.results[0].state, "blocked");
+  const result = response.results[0];
+  assertEquals(result.state, "blocked");
   assert(
-    blockerCodes(response.results[0]).includes(
+    blockerCodes(result).includes(
       "ajs_misclassified_as_roof_report",
     ),
   );
-  assertEquals(response.results[0].invoice_proposal, null);
-  assertEquals(response.results[0].email_drafts, {});
+  assertEquals(result.envelope.v2.classification.job_type, "unknown");
+  assertEquals(result.envelope.v2.routing, {
+    builder: "AJS",
+    report_to: "",
+    photo_to: "",
+    invoice_to: "",
+  });
   assertEquals(
-    response.results[0].artifacts.some((artifact) =>
-      artifact.role === "supporting_report_pdf" ||
-      artifact.role === "completion_photo"
+    Object.values(result.envelope.v2.items).some((item) =>
+      item.state === "ready"
     ),
     false,
   );
+  assertEquals(result.invoice_proposal, null);
+  assertEquals(result.email_drafts, {});
+  assertEquals(
+    result.artifacts.some((artifact) =>
+      artifact.role === "supporting_report_pdf" ||
+      artifact.role === "completion_photo" ||
+      artifact.role === "source_attachment" ||
+      artifact.role === "case_story"
+    ),
+    false,
+  );
+  assertEquals(sourceRecoveryCalls, 0);
+  assertEquals(portalCaptureCalls, 0);
+  assertEquals(swmsCalls, 0);
+});
+
+Deno.test("unknown family hard-stops before any matrix recipe is selected", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.classification.builder_key = "UNKNOWN";
+  input.classification.builder_label = "Unknown Builder";
+  input.classification.family = "unknown";
+  input.classification.subtype = null;
+  input.classification.report_only = false;
+  input.classification.report_delivery = null;
+  let sourceRecoveryCalls = 0;
+  let reportRenderCalls = 0;
+  let swmsCalls = 0;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input, {
+      resolveSourceArtifacts: async () => {
+        sourceRecoveryCalls += 1;
+        return [];
+      },
+      renderPhysicalReport: async () => {
+        reportRenderCalls += 1;
+        throw new Error("physical recipe must not run");
+      },
+      resolveSwmsArtifact: async () => {
+        swmsCalls += 1;
+        return null;
+      },
+    }),
+  )).results[0];
+  assertEquals(result.state, "blocked");
+  assert(blockerCodes(result).includes("family_unknown"));
+  assertEquals(result.envelope.v2.classification.job_type, "unknown");
+  assertEquals(result.envelope.v2.classification.family, "unknown");
+  assertEquals(result.envelope.v2.classification.recipe_selected, false);
+  assertEquals(result.envelope.v2.routing, {
+    builder: "Unknown Builder",
+    report_to: "",
+    photo_to: "",
+    invoice_to: "",
+  });
+  assertEquals(
+    Object.values(result.envelope.v2.items).some((item) =>
+      item.state === "ready"
+    ),
+    false,
+  );
+  assertEquals(result.invoice_proposal, null);
+  assertEquals(result.email_drafts, {});
+  assertEquals(sourceRecoveryCalls, 0);
+  assertEquals(reportRenderCalls, 0);
+  assertEquals(swmsCalls, 0);
 });
 
 Deno.test("portal state is read through the capture adapter and fails closed", async () => {
@@ -570,6 +663,106 @@ Deno.test("assessment triad produces an invoice-only draft at the sealed price",
   assertEquals(fenceResult.invoice_proposal?.total_inc_gst, 143);
 });
 
+Deno.test("assessment invoice requires an explicit fence-only fact and a non-empty builder reference", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.family === "assessment_quote"
+  )!;
+
+  const missingFenceOnly = fixtureInput(row);
+  missingFenceOnly.cycle_facts.hours_and_materials = {};
+  const missingFenceResult = (await prepareSesDocketRevision(
+    request(missingFenceOnly.identity.job_id),
+    dependencies(missingFenceOnly),
+  )).results[0];
+  assertEquals(missingFenceResult.invoice_proposal, null);
+  assert(
+    blockerCodes(missingFenceResult).includes("pricing_evidence_missing"),
+  );
+
+  const missingReference = fixtureInput(row);
+  missingReference.source.builder_reference = "";
+  const missingReferenceResult = (await prepareSesDocketRevision(
+    request(missingReference.identity.job_id),
+    dependencies(missingReference),
+  )).results[0];
+  assertEquals(missingReferenceResult.invoice_proposal, null);
+  assert(
+    blockerCodes(missingReferenceResult).includes(
+      "invoice_reference_missing",
+    ),
+  );
+  assertEquals(
+    missingReferenceResult.artifacts.some((artifact) =>
+      artifact.role === "invoice_proposal"
+    ),
+    false,
+  );
+  assertEquals(
+    missingReferenceResult.envelope.local_invoice_proposal.state,
+    "blocked",
+  );
+});
+
+Deno.test("spine-derived manifest items stay blocked until every named evidence fact and source byte exists", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.identity.source_instruction_id = "";
+  input.identity.lineage_id = "";
+  input.identity.source_content_hash = "" as SesAssemblerInputV1["identity"][
+    "source_content_hash"
+  ];
+  input.source.builder_reference = "";
+  input.source.deliverables = [];
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  for (
+    const item of [
+      "source_work_order_retrieval",
+      "source_work_order_identity",
+      "source_work_order_attachment",
+      "instruction_deliverables",
+      "case_story_recovery",
+      "hrcw_assessment",
+      "swms_requirement",
+    ]
+  ) {
+    assertEquals(
+      result.envelope.v2.items[item].state,
+      "blocked",
+      `${item} must not contradict a missing-spine blocker`,
+    );
+  }
+});
+
+Deno.test("builder routing uses only company/matrix evidence and blocks when the company route is absent", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "WESTERN" &&
+    candidate.family === "temporary_fencing"
+  )!;
+  const input = fixtureInput(row);
+  input.source.work_order_sender = null;
+  input.routing_seed.report_to = "invented-fallback@example.test";
+  input.routing_seed.invoice_to = "invented-fallback@example.test";
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  assert(blockerCodes(result).includes("routing_evidence_missing"));
+  assertEquals(result.envelope.v2.items.builder_routing.state, "blocked");
+  assertEquals(result.envelope.v2.routing, {
+    builder: "WESTERN",
+    report_to: "",
+    photo_to: "",
+    invoice_to: "accounts@westernbuild.com.au",
+  });
+  assertEquals(result.email_drafts, {});
+});
+
 Deno.test("temporary fencing rejects missing typed panel/base evidence", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
@@ -586,6 +779,14 @@ Deno.test("temporary fencing rejects missing typed panel/base evidence", async (
     dependencies(input),
   );
   assertEquals(response.results[0].state, "blocked");
+  assertEquals(
+    response.results[0].envelope.v2.classification.family,
+    "temporary_fencing",
+  );
+  assertEquals(
+    response.results[0].envelope.v2.classification.subtype,
+    "temporary_fencing",
+  );
   assert(
     blockerCodes(response.results[0]).includes("pricing_evidence_missing"),
   );
