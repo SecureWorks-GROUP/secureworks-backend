@@ -22,7 +22,13 @@ unrelated safe components continue and the response reports `completed_degraded`
 ### SES reporting skill
 
 Every reporting run calls `makesafe_reporting_intake_pass` exactly once before its
-reporting work. The action performs:
+reporting work. After intake, a run may prepare the selected card's deterministic
+U4 docket with `POST ops-api?action=prepare_ses_docket_revision`, passing only a
+`job_id` or `job_number` selection, an idempotency key and explicit `dry_run`.
+The server owns the canonical `ses.assembler-input/v1` adapter. The caller must
+never hand-author an assembler envelope.
+
+The intake action performs:
 
 1. one bounded deterministic intake scan; then
 2. one bounded, oldest-first sweep of at most 100 `draft` / `needs_review` rows.
@@ -36,6 +42,13 @@ duplicate or concurrently claimed draft stays parked or fails locally. The repor
 action sends nothing, invoices nothing, and does not choose or mutate a named crew
 assignment.
 
+The U4 action likewise sends nothing, creates or authorises no Xero invoice and
+does not mutate job/substatus/assignment rows. `dry_run:false` appends only the
+draft docket revision and its private artifacts. A ready revision projects the
+card into pre-Xero Docs Ready; a blocked revision remains on its existing board
+stage with named blockers. Assessment stays blocked until the Captain recipe is
+sealed.
+
 `MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE=false` or
 `makesafe_cron_settings.auto_file_enabled=false` remains an explicit emergency brake.
 Without either explicit brake, advance-what-passes is the default.
@@ -45,6 +58,10 @@ call
 `approve_intake_draft` or `auto_approve_clean_intake_drafts` directly, and raw
 `scan_ses_makesafes` is no longer routine-allowlisted. This makes the one-pass
 reporting coupling structural.
+The same credential may call `prepare_ses_docket_revision`; the action is inside
+the routine default-deny allowlist solely because its write path is draft-only and
+append-only. Invoice creation, authorisation and every send remain separate
+privileged-human actions.
 
 ### Terminal make-safe skill
 

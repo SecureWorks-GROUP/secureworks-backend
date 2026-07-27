@@ -254,6 +254,19 @@ function blockerFacts(base: any, assignments: any[]) {
       documents: Array.isArray(base?.missing_docs) ? base.missing_docs : [],
     });
   }
+  for (
+    const blocker of Array.isArray(base?.report_pack?.blockers)
+      ? base.report_pack.blockers
+      : []
+  ) {
+    const code = txt(blocker?.reason_code);
+    if (!code) continue;
+    real.push({
+      code,
+      category: "ses_docket",
+      docket_revision_id: base?.report_pack?.docket_revision_id || null,
+    });
+  }
   return {
     blocked: real.length > 0,
     real,
@@ -529,9 +542,12 @@ export function buildCanonicalMakesafeRows(
           ? (pack?.sent_at || base?.makesafe_details?.report_sent_at || null)
           : null,
         drafted: !!pack?.report_doc_id ||
+          pack?.pre_xero_docs_ready === true ||
           ["drafted", "authorised_not_sent"].includes(
             String(pack?.status || ""),
           ),
+        docket_revision_id: pack?.docket_revision_id || null,
+        pre_xero_docs_ready: pack?.pre_xero_docs_ready === true,
         closeout_documents: {
           report: base?.has_report_doc === true,
           invoice: base?.has_invoice_doc === true,

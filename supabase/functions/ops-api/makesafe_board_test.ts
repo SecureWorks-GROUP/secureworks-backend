@@ -355,3 +355,50 @@ Deno.test("_deriveMakesafeSurfacing: report in, nothing drafted -> tradeReportIn
   assertEquals(surf.readyForReview, false);
   assertEquals(surf.sentClosed, false);
 });
+
+Deno.test("_deriveMakesafeSurfacing: U4 pre-Xero docket is Docs Ready without an invoice", () => {
+  const detail = {
+    substatus: "admin_to_send_report",
+    report_received_at: "2026-07-27T01:00:00Z",
+  };
+  const surf = _deriveMakesafeSurfacing(
+    { status: "processing" },
+    detail,
+    { status: "submitted" },
+    null,
+    undefined,
+    false,
+    {
+      status: "drafted",
+      docket_revision_id: "revision-u4-1",
+      pre_xero_docs_ready: true,
+    },
+  );
+  assertEquals(surf.readyForReview, true);
+  assertEquals(surf.tradeReportIn, false);
+  assertEquals(surf.invoiceIsDraft, false);
+  assertEquals(surf.sentClosed, false);
+});
+
+Deno.test("_deriveMakesafeSurfacing: blocked U4 docket stays Trade Report In", () => {
+  const detail = {
+    substatus: "admin_to_send_report",
+    report_received_at: "2026-07-27T01:00:00Z",
+  };
+  const surf = _deriveMakesafeSurfacing(
+    { status: "processing" },
+    detail,
+    { status: "submitted" },
+    null,
+    undefined,
+    false,
+    {
+      status: "drafted",
+      docket_revision_id: "revision-u4-blocked",
+      pre_xero_docs_ready: false,
+      blockers: [{ reason_code: "spine_missing_source" }],
+    },
+  );
+  assertEquals(surf.readyForReview, false);
+  assertEquals(surf.tradeReportIn, true);
+});

@@ -1,0 +1,86 @@
+{
+  "captured_from": "production read-only retest 2026-07-27",
+  "job": {
+    "id": "5383e3c4-eb32-41cf-8e3c-63a754c16d05",
+    "org_id": "00000000-0000-0000-0000-000000000001",
+    "job_number": "SWMS-26980",
+    "type": "makesafe",
+    "status": "processing",
+    "site_address": null,
+    "site_suburb": null,
+    "metadata": {
+      "job_family": "roof_report",
+      "external_ref": "MLB-26567PO-56164",
+      "requesting_company": {
+        "slug": "mlb",
+        "name": "ML Builders"
+      }
+    }
+  },
+  "detail": {
+    "job_id": "5383e3c4-eb32-41cf-8e3c-63a754c16d05",
+    "requesting_company_slug": "mlb",
+    "requesting_company_name": "ML Builders",
+    "external_ref": "MLB-26567PO-56164",
+    "report_type": "roof_report",
+    "substatus": "admin_to_send_report",
+    "cycle_number": 1,
+    "reattend_count": 0,
+    "attendance_cycle_id": "c7f8f100-3120-4534-880b-bd4bb58928fa",
+    "cycle_attribution": "bound",
+    "external_links": [
+      {
+        "kind": "roof_report",
+        "label": "Prime roof report",
+        "url": "https://primeeco.tech/share/2ef11c67-8f63-48cb-9ff4-61bf71848f17"
+      }
+    ],
+    "makesafe_companies": {
+      "slug": "mlb",
+      "name": "ML Builders",
+      "report_recipient": "makesafes@mlbuilders.com.au"
+    }
+  },
+  "cases": [],
+  "cycles": [
+    {
+      "id": "c7f8f100-3120-4534-880b-bd4bb58928fa",
+      "job_id": "5383e3c4-eb32-41cf-8e3c-63a754c16d05",
+      "cycle_number": 1
+    }
+  ],
+  "reports": [
+    {
+      "id": "4a6597c2-803b-4d58-a0e1-16c0b04ba0df",
+      "job_id": "5383e3c4-eb32-41cf-8e3c-63a754c16d05",
+      "status": "submitted",
+      "submitted_at": "2026-07-25T04:00:00.000Z",
+      "cycle_number": 1,
+      "attendance_cycle_id": "c7f8f100-3120-4534-880b-bd4bb58928fa",
+      "cycle_attribution": "bound",
+      "checklist_json": {}
+    }
+  ],
+  "assignments": [
+    {
+      "id": "78f2c9b2-3572-4bfd-9b92-fef89650f0bd",
+      "job_id": "5383e3c4-eb32-41cf-8e3c-63a754c16d05",
+      "status": "complete",
+      "attendance_cycle_id": "c7f8f100-3120-4534-880b-bd4bb58928fa",
+      "cycle_attribution": "bound"
+    }
+  ],
+  "media": [],
+  "documents": [
+    {
+      "id": "205d0d18-a40f-4617-9e41-0fa0934a112b",
+      "job_id": "5383e3c4-eb32-41cf-8e3c-63a754c16d05",
+      "type": "work_order",
+      "file_name": "MLB-26567PO-56164-work-order.pdf",
+      "file_url": "https://fixture.invalid/MLB-26567PO-56164-work-order.pdf"
+    }
+  ],
+  "roof_draft": null,
+  "readiness": null,
+  "legacy_packs": []
+}
