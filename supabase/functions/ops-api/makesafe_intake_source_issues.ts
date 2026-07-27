@@ -51,7 +51,10 @@ export function parseIntakeSourceIssueReason(
   changeType: string | null | undefined,
 ): IntakeSourceIssueReason | null {
   const value = String(changeType || "");
-  if (value === "scan_run_cap_deferred") return "run_cap_deferred";
+  if (
+    value === "scan_run_cap_deferred" ||
+    value === "intake_deferred_scan_run_cap_deferred"
+  ) return "run_cap_deferred";
   const reason = value.replace(/^intake_(?:deferred|exception)_/, "");
   return (INTAKE_SOURCE_ISSUE_REASONS as readonly string[]).includes(reason)
     ? reason as IntakeSourceIssueReason

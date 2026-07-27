@@ -136,7 +136,7 @@ Deno.test("operational fact loader pages every row and keeps pre-job and open is
     pageSize: 2,
   });
 
-  assertEquals(facts.length, 4);
+  assertEquals(facts.length, 5);
   assertEquals(
     facts.find((fact) => fact.item_id === "case:case-1")
       ?.attachment_issue_codes,
@@ -158,8 +158,8 @@ Deno.test("operational fact loader pages every row and keeps pre-job and open is
     "retry_exact_source",
   );
   assertEquals(
-    facts.some((fact) => fact.item_id === "source:post-1"),
-    false,
+    facts.find((fact) => fact.item_id === "source:post-1")?.fate,
+    "open_source_issue",
   );
 });
 

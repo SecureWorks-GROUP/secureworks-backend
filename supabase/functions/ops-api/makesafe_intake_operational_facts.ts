@@ -168,20 +168,10 @@ export async function loadIntakeOperationalFacts(
   ]);
 
   const sourceIdsByCase = new Map<string, string[]>();
-  const finalSourceIds = new Set<string>();
   for (const source of sources) {
-    finalSourceIds.add(String(source.post_id));
     const current = sourceIdsByCase.get(String(source.case_id)) || [];
     current.push(String(source.post_id));
     sourceIdsByCase.set(String(source.case_id), current);
-  }
-  for (const exclusion of exclusions) {
-    finalSourceIds.add(String(exclusion.post_id));
-  }
-  for (const event of events) {
-    if (event.change_type === "excluded") {
-      finalSourceIds.add(String(event.post_id));
-    }
   }
 
   const issueRows = events.filter((event) => issueReasonFromRow(event));
@@ -250,9 +240,7 @@ export async function loadIntakeOperationalFacts(
     )
   );
   for (const issue of issueRows) {
-    if (!finalSourceIds.has(String(issue.post_id))) {
-      facts.push(buildSourceIssueOperationalFact(issue, nowIso));
-    }
+    facts.push(buildSourceIssueOperationalFact(issue, nowIso));
   }
   return facts.sort((a, b) =>
     a.source_received_at.localeCompare(b.source_received_at) ||

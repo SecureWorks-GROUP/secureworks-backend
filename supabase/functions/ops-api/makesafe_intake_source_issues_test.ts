@@ -8,6 +8,7 @@ import { assertDurableSourceFates } from "./makesafe_deterministic_intake_runtim
 import {
   INTAKE_SOURCE_ISSUE_REASONS,
   intakeSourceIssueChangeType,
+  parseIntakeSourceIssueReason,
   persistIntakeSourceIssue,
 } from "./makesafe_intake_source_issues.ts";
 
@@ -123,10 +124,18 @@ Deno.test("every source issue reason has one typed change type", () => {
   );
 });
 
+Deno.test("legacy prefixed cap issue aliases normalize to one reason", () => {
+  assertEquals(
+    parseIntakeSourceIssueReason("intake_deferred_scan_run_cap_deferred"),
+    "run_cap_deferred",
+  );
+});
+
 Deno.test("durable accounting accepts each source exactly once and rejects silent or double fates", async () => {
   const store: Record<string, any[]> = {
     makesafe_intake_case_sources: [
       { org_id: ORG, post_id: "case-final" },
+      { org_id: ORG, post_id: "case-with-issue" },
     ],
     email_classifier_exclusions: [
       { mailbox: MAILBOX, post_id: "nonwork-final" },
@@ -137,6 +146,11 @@ Deno.test("durable accounting accepts each source exactly once and rejects silen
         post_id: "transient",
         change_type: "intake_deferred_run_cap_deferred",
       },
+      {
+        org_id: ORG,
+        post_id: "case-with-issue",
+        change_type: "intake_exception_lineage_quarantine",
+      },
     ],
   };
   const db = client(store);
@@ -146,8 +160,9 @@ Deno.test("durable accounting accepts each source exactly once and rejects silen
       "case-final",
       "nonwork-final",
       "transient",
+      "case-with-issue",
     ]),
-    { checked: 3, final: 2, transient: 1 },
+    { checked: 4, final: 2, transient: 2 },
   );
   await assertRejects(
     () => assertDurableSourceFates(db, ["silent"]),

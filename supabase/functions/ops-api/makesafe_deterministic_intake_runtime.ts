@@ -1324,12 +1324,12 @@ export async function assertDurableSourceFates(
     const finalCount = (caseCounts.get(postId) || 0) +
       (nonWork.has(postId) ? 1 : 0);
     const issueCount = issueCounts.get(postId) || 0;
-    if (finalCount === 1) {
-      final++;
+    if (issueCount === 1 && finalCount <= 1) {
+      transient++;
       continue;
     }
-    if (finalCount === 0 && issueCount === 1) {
-      transient++;
+    if (finalCount === 1 && issueCount === 0) {
+      final++;
       continue;
     }
     throw new Error(

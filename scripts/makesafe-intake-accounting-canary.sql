@@ -66,7 +66,28 @@ case_accounted AS (
   FROM public.makesafe_intake_case_sources s
   JOIN source_window w ON w.post_id = s.post_id
   WHERE s.org_id = :'org_id'::uuid
+    AND NOT EXISTS (
+      SELECT 1
+      FROM public.email_events_raw i
+      WHERE i.org_id = :'org_id'::uuid
+        AND i.post_id = s.post_id
+        AND (
+          i.change_type LIKE 'intake\_%' ESCAPE '\'
+          OR i.change_type = 'scan_run_cap_deferred'
+        )
+    )
   GROUP BY s.post_id
+),
+issue_accounted AS (
+  SELECT DISTINCT r.post_id
+  FROM public.email_events_raw r
+  JOIN source_window w ON w.post_id = r.post_id
+  WHERE r.org_id = :'org_id'::uuid
+    AND lower(r.mailbox) = 'ses@secureworkswa.com.au'
+    AND (
+      r.change_type LIKE 'intake\_%' ESCAPE '\'
+      OR r.change_type = 'scan_run_cap_deferred'
+    )
 ),
 nonwork_accounted AS (
   SELECT x.post_id
@@ -87,9 +108,11 @@ accounting_counts AS (
   SELECT
     w.post_id,
     coalesce(c.fate_count, 0) +
+      CASE WHEN i.post_id IS NULL THEN 0 ELSE 1 END +
       CASE WHEN n.post_id IS NULL THEN 0 ELSE 1 END AS fate_count
   FROM source_window w
   LEFT JOIN case_accounted c USING (post_id)
+  LEFT JOIN issue_accounted i USING (post_id)
   LEFT JOIN nonwork_accounted n USING (post_id)
 ),
 failures AS (
@@ -120,17 +143,7 @@ WITH cancellation_cases AS (
   WHERE c.org_id = :'org_id'::uuid
     AND c.received_at >= :'window_start'::timestamptz
     AND c.received_at < :'window_end'::timestamptz
-    AND (
-      c.parent_relation = 'cancellation_of'
-      OR c.reason_code IN (
-        'cancellation',
-        'cancellation_target_not_found',
-        'cancellation_target_ambiguous',
-        'cancellation_live_invoice_review',
-        'cancellation_target_terminal_conflict',
-        'cancellation_apply_failed'
-      )
-    )
+    AND c.reason_code = 'cancellation'
 ),
 failures AS (
   SELECT
