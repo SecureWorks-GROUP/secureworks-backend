@@ -570,6 +570,33 @@ Deno.test("grouped binding cards aggregate and cap candidates across member rows
   );
 });
 
+Deno.test("grouped binding cards keep live and corrected candidates distinct", () => {
+  const live = exceptionCase("mixed-live", "MLB-26201", {
+    wo_po_identity_key: "wo:MLB-26201",
+    received_at: "2026-07-27T01:00:00.000Z",
+    missing_fields: [],
+    conflicting_fields: { live_job_binding: ["SWMS-3002", "SWMS-3001"] },
+  });
+  const corrected = exceptionCase("mixed-corrected", "MLB-26201", {
+    wo_po_identity_key: "wo:MLB-26201",
+    received_at: "2026-07-27T02:00:00.000Z",
+    missing_fields: [],
+    conflicting_fields: {
+      corrected_target_job_binding: ["SWMS-4002", "SWMS-4001"],
+    },
+  });
+  const projection = buildIntakeExceptionProjection(projectionInput({
+    cases: [live, corrected],
+    sources: [source("mixed-live"), source("mixed-corrected")],
+  }));
+
+  assertEquals(projection.cards.length, 1);
+  assertEquals(
+    projection.cards[0].blocker_sentence,
+    "This instruction MLB-26201 has mixed binding conflicts: live-job candidates (SWMS-3001 and SWMS-3002); corrected-target candidates (SWMS-4001 and SWMS-4002) - needs human binding.",
+  );
+});
+
 Deno.test("the deterministic floor never guesses weak or accounted non-work into cards", () => {
   const weak = exceptionCase("weak-case", "BWCWA-6648", {
     company_id: null,

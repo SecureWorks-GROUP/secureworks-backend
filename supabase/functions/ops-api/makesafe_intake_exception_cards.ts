@@ -457,24 +457,38 @@ function groupedJobBindingBlockerSentence(
     return conflict ? [conflict] : [];
   });
   if (!conflicts.length) return null;
-  const kind = conflicts.some((conflict) =>
-      conflict.kind === "corrected_target_job_binding"
-    )
-    ? "corrected_target_job_binding"
-    : "live_job_binding";
-  const candidates = [...new Set(conflicts.flatMap((conflict) => conflict.candidates))]
-    .sort();
-  const displayed = candidates.slice(0, MAX_DISPLAYED_BINDING_CANDIDATES);
-  const suffix = candidates.length > MAX_DISPLAYED_BINDING_CANDIDATES
-    ? `; ${candidates.length} total, ${candidates.length - displayed.length} more not shown`
-    : "";
+  const candidatesByKind = new Map<
+    typeof JOB_BINDING_CONFLICT_FIELDS[number],
+    string[]
+  >();
+  for (const conflict of conflicts) {
+    candidatesByKind.set(conflict.kind, [
+      ...new Set([
+        ...(candidatesByKind.get(conflict.kind) || []),
+        ...conflict.candidates,
+      ]),
+    ].sort());
+  }
+  const renderCandidates = (kind: typeof JOB_BINDING_CONFLICT_FIELDS[number]) => {
+    const candidates = candidatesByKind.get(kind) || [];
+    const displayed = candidates.slice(0, MAX_DISPLAYED_BINDING_CANDIDATES);
+    const suffix = candidates.length > MAX_DISPLAYED_BINDING_CANDIDATES
+      ? `; ${candidates.length} total, ${candidates.length - displayed.length} more not shown`
+      : "";
+    return `${joinPlainList(displayed)}${suffix}`;
+  };
   const instruction = rows[0].builder_wo_canonical ||
     rows[0].external_ref_canonical || rows[0].external_ref_raw || "unknown";
-  if (kind === "corrected_target_job_binding") {
-    return `This instruction ${instruction} has a corrected-target mismatch across ${candidates.length} candidate jobs (${joinPlainList(displayed)}${suffix}) - needs human binding.`;
+  const liveCandidates = candidatesByKind.get("live_job_binding") || [];
+  const correctedCandidates = candidatesByKind.get("corrected_target_job_binding") || [];
+  if (liveCandidates.length && correctedCandidates.length) {
+    return `This instruction ${instruction} has mixed binding conflicts: live-job candidates (${renderCandidates("live_job_binding")}); corrected-target candidates (${renderCandidates("corrected_target_job_binding")}) - needs human binding.`;
   }
-  const noun = candidates.length === 1 ? "job" : "jobs";
-  return `This instruction ${instruction} matches ${candidates.length} live ${noun} (${joinPlainList(displayed)}${suffix}) - needs human binding.`;
+  if (correctedCandidates.length) {
+    return `This instruction ${instruction} has a corrected-target mismatch across ${correctedCandidates.length} candidate jobs (${renderCandidates("corrected_target_job_binding")}) - needs human binding.`;
+  }
+  const noun = liveCandidates.length === 1 ? "job" : "jobs";
+  return `This instruction ${instruction} matches ${liveCandidates.length} live ${noun} (${renderCandidates("live_job_binding")}) - needs human binding.`;
 }
 
 function plainCode(value: string | null, fallback: string): string {
