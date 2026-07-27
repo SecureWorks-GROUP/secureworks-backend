@@ -370,6 +370,15 @@ Deno.test("historical pack-cycle attribution cannot poison the current cycle", a
       cycle_attribution: "legacy_unscoped",
     },
   );
+  fixture.facts.assignments.push({
+    id: "assignment-current",
+    job_id: jobId,
+    status: "scheduled",
+    attendance_cycle_id: currentCycleId,
+    cycle_attribution: "bound",
+    makesafe_fact_version: 1,
+    makesafe_content_hash: SHA_A,
+  });
   fixture.facts.packs.push({
     id: "pack-current",
     job_id: jobId,
