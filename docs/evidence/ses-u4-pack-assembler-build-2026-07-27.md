@@ -144,8 +144,10 @@ The wall is before invoice creation and release:
    private artifact storage plus `commit_makesafe_docket_revision_v1`.
 
 Nothing in this change creates any Xero object, sends anything to a builder,
-changes the board, changes a job, closes work, applies a migration, schedules a
-cron, deploys, merges or touches production.
+mutates operational board state, changes a job, closes work, applies a migration,
+schedules a cron, deploys, merges or touches production. The shared board
+read-model overlay may project a ready U4 revision as pre-Xero Docs Ready; it
+does not write the board or job state.
 
 ## Validation
 
@@ -160,12 +162,12 @@ cron, deploys, merges or touches production.
   `monitor-ses-makesafes/index.ts:2100-2107` and `ops-api/index.ts:16904`.
 - `deno task test:ops-api` still stops during test-file type-checking on five
   existing errors outside U4
-  (`makesafe_board_test.ts`, `makesafe_intake_recapture_test.ts`,
-  `makesafe_submit_report_test.ts` twice, and
+  (`makesafe_intake_recapture_test.ts`,
+   `makesafe_submit_report_test.ts` twice, and
   `monitor_ses_makesafes_test.ts`). The runtime-only whole directory run then
   recorded 2,152 passed and 26 failed; the failures are existing attendance
-  cycle/U3 fixture drift and no U4 test failed. Those files/routes were not
-  changed.
+  cycle/U3 fixture drift and no U4 test failed. The remaining listed
+  files/routes were not changed.
 
 ## Release truth and live invocation binding
 
