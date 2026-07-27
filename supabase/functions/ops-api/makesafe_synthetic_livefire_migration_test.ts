@@ -92,6 +92,10 @@ Deno.test("terminal accounting is marker-bound, service-role-only, and requires 
     "fresh-source health must not exclude cleanup_complete runs",
   );
   assertStringIncludes(sql, "run.source_post_ids ? email.post_id");
+  assertStringIncludes(sql, "makesafe_synthetic_livefire_source_health");
+  assertStringIncludes(sql, "terminalize_synthetic_livefire_run");
+  assertStringIncludes(sql, "synthetic live-fire source exclusion proof failed");
+  assertStringIncludes(sql, "fresh_source_health_after_terminal");
   assertStringIncludes(sql, "ENABLE ROW LEVEL SECURITY");
   assertStringIncludes(
     sql,

@@ -1199,22 +1199,30 @@ async function cleanup(
     },
   );
   const healthBeforeTerminal = healthBeforeTerminalRows[0] || {};
-  const syntheticReceivedAt = new Set(
-    found.emails.map((row) => new Date(String(row.received_at)).getTime())
-      .filter(Number.isFinite),
+  const sourceHealthBeforeTerminal = await client.rpc<JsonRecord>(
+    "makesafe_synthetic_livefire_source_health",
+    {
+      p_org_id: "00000000-0000-0000-0000-000000000001",
+      p_mailbox: run.mailbox,
+      p_since: evidence.startedAt,
+      p_source_post_ids: strings(found.emails, "post_id"),
+      p_terminal_override: false,
+    },
   );
-  const healthIncludesSynthetic = (
-    health: JsonRecord,
-  ): boolean =>
-    syntheticReceivedAt.has(
-      new Date(String(health.latest_final_fate_received_at || "")).getTime(),
-    ) ||
-    syntheticReceivedAt.has(
-      new Date(String(health.oldest_unfated_received_at || "")).getTime(),
-    );
-  if (!healthIncludesSynthetic(healthBeforeTerminal)) {
+  const sourceStatesBeforeTerminal = Array.isArray(
+      sourceHealthBeforeTerminal.sources,
+    )
+    ? sourceHealthBeforeTerminal.sources as JsonRecord[]
+    : [];
+  if (
+    sourceStatesBeforeTerminal.length !== found.emails.length ||
+    sourceStatesBeforeTerminal.some((source) =>
+      source.source_present !== true || source.excluded === true ||
+      source.eligible !== true
+    )
+  ) {
     throw new Error(
-      "pre-terminal synthetic sources were not included in fresh-source health",
+      "pre-terminal synthetic source health inclusion proof failed",
     );
   }
   const terminalEvidence: JsonRecord = {
@@ -1225,6 +1233,7 @@ async function cleanup(
     operational_residue: operationalResidue,
     projections: projectionProof,
     fresh_source_health_before_terminal: healthBeforeTerminal,
+    fresh_source_health_before_terminal_sources: sourceHealthBeforeTerminal,
     synthetic_health_timestamps_included_before_terminal: true,
     tombstoned_attachment_count: tombstonedAttachments.length,
     deleted_counts: Object.fromEntries(
@@ -1250,37 +1259,22 @@ async function cleanup(
       mailbox_messages: after.emails.length,
     },
   };
-  await client.rest<JsonRecord[]>(
-    "ses_synthetic_livefire_runs",
-    { marker: `eq.${run.marker}` },
-    {
-      method: "PATCH",
-      body: JSON.stringify({
-        state: "terminal",
-        source_post_ids: strings(after.emails, "post_id"),
-        case_ids: strings(after.cases, "id"),
-        job_ids: strings(found.jobs, "id"),
-        evidence: terminalEvidence,
-        terminal_at: terminalAt,
-      }),
-    },
-  );
-  const healthAfterTerminalRows = await client.rpc<JsonRecord[]>(
-    "makesafe_intake_fresh_source_health",
+  const sourceHealthAfterTerminal = await client.rpc<JsonRecord>(
+    "terminalize_synthetic_livefire_run",
     {
       p_org_id: "00000000-0000-0000-0000-000000000001",
       p_mailbox: run.mailbox,
       p_since: evidence.startedAt,
-      p_now: new Date().toISOString(),
+      p_marker: run.marker,
+      p_source_post_ids: strings(after.emails, "post_id"),
+      p_case_ids: strings(after.cases, "id"),
+      p_job_ids: strings(found.jobs, "id"),
+      p_evidence: terminalEvidence,
+      p_terminal_at: terminalAt,
     },
   );
-  const healthAfterTerminal = healthAfterTerminalRows[0] || {};
-  if (healthIncludesSynthetic(healthAfterTerminal)) {
-    throw new Error(
-      "terminal synthetic sources still influence fresh-source health timestamps",
-    );
-  }
-  terminalEvidence.fresh_source_health_after_terminal = healthAfterTerminal;
+  terminalEvidence.fresh_source_health_after_terminal_sources =
+    sourceHealthAfterTerminal;
   terminalEvidence.synthetic_health_timestamps_excluded = true;
   evidence.cleanup = {
     ...evidence.cleanup,

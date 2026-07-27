@@ -534,6 +534,194 @@ GRANT EXECUTE ON FUNCTION public.makesafe_intake_fresh_source_health(
   timestamptz
 ) TO service_role, postgres;
 
+CREATE OR REPLACE FUNCTION public.makesafe_synthetic_livefire_source_health(
+  p_org_id uuid,
+  p_mailbox text,
+  p_since timestamptz,
+  p_source_post_ids jsonb,
+  p_terminal_override boolean DEFAULT false
+)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  WITH requested AS (
+    SELECT value AS post_id
+    FROM jsonb_array_elements_text(p_source_post_ids)
+  ),
+  source_state AS (
+    SELECT
+      requested.post_id,
+      EXISTS (
+        SELECT 1
+        FROM public.emails email
+        WHERE email.post_id = requested.post_id
+          AND email.mailbox = p_mailbox
+          AND email.received_at >= p_since
+      ) AS source_present,
+      (
+        (
+          SELECT count(*)
+          FROM public.makesafe_intake_case_sources source
+          WHERE source.org_id = p_org_id
+            AND source.post_id = requested.post_id
+        )
+        +
+        CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM public.email_classifier_exclusions exclusion
+            WHERE exclusion.mailbox = p_mailbox
+              AND exclusion.post_id = requested.post_id
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM public.email_events_raw event
+            WHERE event.org_id = p_org_id
+              AND event.post_id = requested.post_id
+              AND event.change_type = 'excluded'
+          )
+          THEN 1
+          ELSE 0
+        END
+      ) = 1 AS final_fate,
+      p_terminal_override OR EXISTS (
+        SELECT 1
+        FROM public.ses_synthetic_livefire_runs run
+        WHERE run.state = 'terminal'
+          AND run.source_post_ids ? requested.post_id
+      ) AS excluded
+    FROM requested
+  )
+  SELECT jsonb_build_object(
+    'sources', COALESCE(
+      jsonb_agg(
+        jsonb_build_object(
+          'post_id', source_state.post_id,
+          'source_present', source_state.source_present,
+          'final_fate', source_state.final_fate,
+          'excluded', source_state.excluded,
+          'eligible', source_state.source_present AND NOT source_state.excluded
+        )
+        ORDER BY source_state.post_id
+      ),
+      '[]'::jsonb
+    ),
+    'source_count', count(*)::bigint,
+    'eligible_count', count(*) FILTER (
+      WHERE source_state.source_present AND NOT source_state.excluded
+    )::bigint,
+    'excluded_count', count(*) FILTER (WHERE source_state.excluded)::bigint
+  )
+  FROM source_state;
+$$;
+
+REVOKE ALL ON FUNCTION public.makesafe_synthetic_livefire_source_health(
+  uuid,
+  text,
+  timestamptz,
+  jsonb,
+  boolean
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.makesafe_synthetic_livefire_source_health(
+  uuid,
+  text,
+  timestamptz,
+  jsonb,
+  boolean
+) TO service_role, postgres;
+
+CREATE OR REPLACE FUNCTION public.terminalize_synthetic_livefire_run(
+  p_marker text,
+  p_org_id uuid,
+  p_mailbox text,
+  p_since timestamptz,
+  p_source_post_ids jsonb,
+  p_case_ids jsonb,
+  p_job_ids jsonb,
+  p_evidence jsonb,
+  p_terminal_at timestamptz
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  source_health jsonb;
+BEGIN
+  IF current_setting('request.jwt.claim.role', true) <> 'service_role' THEN
+    RAISE EXCEPTION 'synthetic live-fire terminalization requires service_role';
+  END IF;
+  IF p_marker !~ '^SWG-SES-LIVEFIRE-TEST-ONLY-[0-9A-F]{8}-[0-9A-F]{4}-[1-8][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$' THEN
+    RAISE EXCEPTION 'invalid synthetic live-fire marker';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.ses_synthetic_livefire_runs run
+    WHERE run.marker = p_marker
+      AND run.state = 'cleanup_complete'
+  ) THEN
+    RAISE EXCEPTION 'synthetic live-fire run is not ready for terminalization';
+  END IF;
+
+  source_health := public.makesafe_synthetic_livefire_source_health(
+    p_org_id,
+    p_mailbox,
+    p_since,
+    p_source_post_ids,
+    true
+  );
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(source_health->'sources') source
+    WHERE NOT COALESCE((source->>'source_present')::boolean, false)
+      OR NOT COALESCE((source->>'excluded')::boolean, false)
+  ) THEN
+    RAISE EXCEPTION 'synthetic live-fire source exclusion proof failed';
+  END IF;
+
+  UPDATE public.ses_synthetic_livefire_runs
+  SET state = 'terminal',
+      source_post_ids = p_source_post_ids,
+      case_ids = p_case_ids,
+      job_ids = p_job_ids,
+      evidence = p_evidence || jsonb_build_object(
+        'synthetic_health_sources_excluded', true,
+        'fresh_source_health_after_terminal_sources', source_health
+      ),
+      terminal_at = p_terminal_at
+  WHERE marker = p_marker;
+
+  RETURN source_health;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.terminalize_synthetic_livefire_run(
+  text,
+  uuid,
+  text,
+  timestamptz,
+  jsonb,
+  jsonb,
+  jsonb,
+  jsonb,
+  timestamptz
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.terminalize_synthetic_livefire_run(
+  text,
+  uuid,
+  text,
+  timestamptz,
+  jsonb,
+  jsonb,
+  jsonb,
+  jsonb,
+  timestamptz
+) TO service_role, postgres;
+
 -- Captain unblock: own-mail chatter already accounted before this kit existed
 -- remains immutable group/case evidence. Bind that exact safe shape to one
 -- terminal marker so fresh-source health excludes it without altering a source,
