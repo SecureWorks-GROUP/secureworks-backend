@@ -266,7 +266,7 @@ BEGIN
   INTO v_jobs
   FROM deleted;
 
-  IF jsonb_array_length(v_jobs) <> v_ledger_count THEN
+  IF jsonb_array_length(v_jobs) <> v_marked_count THEN
     RAISE EXCEPTION
       'synthetic live-fire job purge deleted % of % jobs',
       jsonb_array_length(v_jobs),

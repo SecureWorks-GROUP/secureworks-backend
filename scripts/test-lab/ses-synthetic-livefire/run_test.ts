@@ -284,6 +284,7 @@ Deno.test("readiness cleanup migration is marker- and run-ledger-bound", async (
       "DELETE FROM public.jobs",
       "v_marked_count > v_ledger_count OR v_bound_count <> v_marked_count",
       "synthetic live-fire purge scope mismatch",
+      "jsonb_array_length(v_jobs) <> v_marked_count",
       "synthetic live-fire purge refused money, release, docket, projection, or committed-readiness residue",
       "REVOKE ALL ON FUNCTION public.purge_synthetic_livefire_jobs(text)",
     ]

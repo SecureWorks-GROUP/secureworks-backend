@@ -1164,9 +1164,6 @@ async function cleanup(
       method: "PATCH",
       body: JSON.stringify({
         state: "cleanup_complete",
-        source_post_ids: strings(found.emails, "post_id"),
-        case_ids: strings(found.cases, "id"),
-        job_ids: strings(found.jobs, "id"),
         evidence: {
           deletable_store_cleanup_verified: true,
           projection_exclusion_verified: false,
