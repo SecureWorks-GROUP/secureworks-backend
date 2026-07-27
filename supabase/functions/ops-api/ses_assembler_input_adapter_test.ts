@@ -8,6 +8,7 @@ import fixture from "./fixtures/ses_u4_swms_26980_live_snapshot.json" with {
 };
 import {
   buildSesAssemblerInput,
+  createSesAssemblerRuntimeDependencies,
   normalizeSesPrepareRequest,
   physicalReportRenderJob,
   SesAssemblerAdapterError,
@@ -41,6 +42,52 @@ function sourceResolver(input: ReturnType<typeof buildSesAssemblerInput>) {
 
 function blockerCodes(result: { blockers: Array<{ reason_code: string }> }) {
   return result.blockers.map((item) => item.reason_code);
+}
+
+function liveSnapshotClient(live: SesAssemblerLiveSnapshot) {
+  const rows: Record<string, unknown> = {
+    jobs: [live.job],
+    makesafe_job_details: [live.detail],
+    makesafe_intake_cases: live.cases,
+    makesafe_attendance_cycles: live.cycles,
+    job_service_reports: live.reports,
+    job_assignments: live.assignments,
+    job_media: live.media,
+    job_documents: live.documents,
+    makesafe_roof_report_drafts: live.roof_draft ? [live.roof_draft] : [],
+    makesafe_readiness_current: live.readiness ? [live.readiness] : [],
+    makesafe_report_packs: live.legacy_packs,
+  };
+  return {
+    from(table: string) {
+      let single = false;
+      const query = {
+        select() { return query; },
+        eq() { return query; },
+        neq() { return query; },
+        order() { return query; },
+        limit() { return query; },
+        maybeSingle() {
+          single = true;
+          return query;
+        },
+        then(
+          resolve: (value: { data: unknown; error: null }) => unknown,
+        ) {
+          const data = rows[table] ?? [];
+          return Promise.resolve({
+            data: single && Array.isArray(data) && data.length === 1
+              ? data[0]
+              : single
+              ? null
+              : data,
+            error: null,
+          }).then(resolve);
+        },
+      };
+      return query;
+    },
+  };
 }
 
 Deno.test(
@@ -397,45 +444,59 @@ Deno.test(
       size,
     }));
     const input = buildSesAssemblerInput(live);
-    let binaryResolutionCalls = 0;
+    const client = liveSnapshotClient(live);
+    const dependencies = createSesAssemblerRuntimeDependencies(client, {
+      org_id: "org-test",
+      created_by: "user-test",
+    });
+    const originalFetch = globalThis.fetch;
+    let activeFetches = 0;
+    let maxActiveFetches = 0;
+    const fetchedSizes: number[] = [];
+    globalThis.fetch = async () => {
+      activeFetches++;
+      maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
+      const index = fetchedSizes.length;
+      const bytes = new Uint8Array(realPhotoSizes[index]);
+      bytes.fill(index + 1);
+      fetchedSizes.push(bytes.byteLength);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      activeFetches--;
+      return new Response(bytes.buffer, {
+        status: 200,
+        headers: { "content-type": "image/jpeg" },
+      });
+    };
     let renderCalls = 0;
-    const started = performance.now();
-    const response = await prepare_ses_docket_revision(
-      {
-        selection: { mode: "job_id", job_id: input.identity.job_id },
-        idempotency_key: "physical-http-artifact-summary",
-        assembler_version: SES_ASSEMBLER_VERSION,
-        dry_run: true,
-        force_refresh: true,
-      },
-      {
-        resolveInput: async () => input,
-        resolveSourceArtifacts: async () => sourceResolver(input),
-        resolvePhotoProofs: async () =>
-          input.cycle_facts.photos.map((photo, index) => ({
-            photo_id: photo.id,
-            source_pointer: photo.path_or_key,
-            file_name: `completion-${index + 1}.jpg`,
-            media_type: "image/jpeg",
-            content_hash: `sha256:${String(index + 1).padStart(64, "0")}`,
-            size_bytes: realPhotoSizes[index],
-          })),
-        resolvePhotoArtifacts: async () => {
-          binaryResolutionCalls++;
-          throw new Error("dry-run must not resolve retained photo bytes");
+    try {
+      const started = performance.now();
+      const response = await prepare_ses_docket_revision(
+        {
+          selection: { mode: "job_id", job_id: input.identity.job_id },
+          idempotency_key: "physical-http-artifact-summary",
+          assembler_version: SES_ASSEMBLER_VERSION,
+          dry_run: true,
+          force_refresh: true,
         },
-        renderPhysicalReport: async () => {
-          renderCalls++;
-          throw new Error("dry-run must not render the report PDF");
+        {
+          ...dependencies,
+          resolveSourceArtifacts: async () => sourceResolver(input),
+          resolvePhotoArtifacts: async () => {
+            throw new Error("dry-run must not resolve retained photo bytes");
+          },
+          renderPhysicalReport: async () => {
+            renderCalls++;
+            throw new Error("dry-run must not render the report PDF");
+          },
+          resolveSwmsArtifact: async () => null,
         },
-        resolveSwmsArtifact: async () => null,
-      },
-    );
-    const elapsedMs = performance.now() - started;
+      );
+      const elapsedMs = performance.now() - started;
     const proofs = response.results[0].artifacts.filter((artifact) =>
       artifact.role === "completion_photo_proof"
     );
-    assertEquals(binaryResolutionCalls, 0);
+    assertEquals(fetchedSizes, realPhotoSizes);
+    assertEquals(maxActiveFetches, 1);
     assertEquals(renderCalls, 0);
     assertEquals(proofs.length, 11);
     assertEquals(
@@ -466,6 +527,9 @@ Deno.test(
       elapsedMs < 5_000,
       `11-photo dry-run took ${elapsedMs.toFixed(1)}ms`,
     );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   },
 );
 

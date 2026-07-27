@@ -872,7 +872,7 @@ function artifactUrl(row: LiveRow): string {
   );
 }
 
-async function fetchBytes(url: string, label: string): Promise<Uint8Array> {
+async function fetchBytes(url: string, label: string): Promise<Uint8Array<ArrayBuffer>> {
   if (!/^https:\/\//i.test(url)) {
     throw new SesAssemblerAdapterError(
       "ses_artifact_unrecoverable",
@@ -889,9 +889,11 @@ async function fetchBytes(url: string, label: string): Promise<Uint8Array> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-async function rawPhotoSha256(bytes: Uint8Array): Promise<SesSha256> {
+async function rawPhotoSha256(
+  bytes: Uint8Array<ArrayBuffer>,
+): Promise<SesSha256> {
   const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes).buffer),
+    await crypto.subtle.digest("SHA-256", bytes),
   );
   const hex = Array.from(digest)
     .map((byte) => byte.toString(16).padStart(2, "0"))
