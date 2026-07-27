@@ -25,6 +25,7 @@ export interface MakesafeReportPhoto {
   bytesBase64?: string;
   contentType?: string;
   url?: string;
+  caption?: string;
 }
 
 export interface MakesafeReportJob {
@@ -39,6 +40,8 @@ export interface MakesafeReportJob {
   findings?: string;
   works?: string;
   materials?: string;
+  access_issues?: string;
+  follow_up_required?: string;
   photos?: MakesafeReportPhoto[];
   photo_limit?: number;
 }
@@ -81,6 +84,8 @@ export function makesafeReportHashInput(job: MakesafeReportJob): string {
     findings: job.findings || "",
     works: job.works || "",
     materials: job.materials || "",
+    access_issues: job.access_issues || "",
+    follow_up_required: job.follow_up_required || "",
     photo_limit: job.photo_limit ?? 8,
     photos,
   });
@@ -173,8 +178,8 @@ async function resolvePhotoBytes(
     for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
     return {
       bytesBase64: btoa(bin),
-      contentType: resp.headers.get("content-type") || p.contentType ||
-        "image/jpeg",
+      contentType:
+        resp.headers.get("content-type") || p.contentType || "image/jpeg",
     };
   } catch {
     return null;
@@ -321,6 +326,10 @@ export async function renderMakesafeReportPdf(
     ["Site Findings", job.findings || ""],
     ["Works Completed", job.works || ""],
     ["Materials and Equipment", job.materials || ""],
+    [
+      "Access and Follow-up",
+      [job.access_issues, job.follow_up_required].filter(Boolean).join("\n"),
+    ],
   ];
   for (const [title, text] of proseSections) {
     y = section(title, 10);
@@ -335,12 +344,10 @@ export async function renderMakesafeReportPdf(
     ? Math.max(0, Math.floor(job.photo_limit as number))
     : DEFAULT_REPORT_PHOTO_LIMIT;
   const resolved: MakesafeReportPhoto[] = [];
-  for (
-    const p of (job.photos || []).slice(
-      0,
-      Math.min(limit, MAX_REPORT_PHOTO_LIMIT),
-    )
-  ) {
+  for (const p of (job.photos || []).slice(
+    0,
+    Math.min(limit, MAX_REPORT_PHOTO_LIMIT),
+  )) {
     const r = await resolvePhotoBytes(p);
     if (r) resolved.push(r);
   }
@@ -430,7 +437,7 @@ export async function renderMakesafeReportPdf(
         doc.setFont("helvetica", "normal");
         doc.setFontSize(8);
         doc.text(
-          `Photo evidence ${idx}`,
+          sanitiseText(p.caption || `Photo evidence ${idx}`),
           cellX + cellW / 2,
           cellY + cellH - 4,
           {

@@ -62,7 +62,7 @@ const MANIFEST_ITEMS = [
   "email_drafts_presented",
 ] as const;
 
-type ManifestItem = typeof MANIFEST_ITEMS[number];
+type ManifestItem = (typeof MANIFEST_ITEMS)[number];
 
 export interface SesRenderResult {
   file_name: string;
@@ -123,6 +123,7 @@ export interface SesPrepareDependencies {
   ) => Promise<SesPortalCapture>;
   renderPhysicalReport?: (
     input: SesAssemblerInputV1,
+    photos?: SesPhotoArtifact[],
   ) => Promise<SesRenderResult>;
   renderOwnRoofReport?: (
     input: SesAssemblerInputV1,
@@ -134,9 +135,7 @@ export interface SesPrepareDependencies {
     jobId: string,
     inputContentHash: SesSha256,
   ) => Promise<SesPreparedRevision | null>;
-  persist?: (
-    payload: SesPersistPayload,
-  ) => Promise<{ committed_at: string }>;
+  persist?: (payload: SesPersistPayload) => Promise<{ committed_at: string }>;
   now?: () => Date;
 }
 
@@ -206,28 +205,35 @@ function sortedUnique(values: readonly string[]): string[] {
 function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
   const blockers: SesBlocker[] = [];
   if (input.contract_version !== SES_INPUT_CONTRACT_VERSION) {
-    blockers.push(blocked(
-      "input_hash_conflict",
-      `Unsupported assembler input contract ${input.contract_version}.`,
-      `Supply ${SES_INPUT_CONTRACT_VERSION} from the canonical U1/U2 read model.`,
-    ));
+    blockers.push(
+      blocked(
+        "input_hash_conflict",
+        `Unsupported assembler input contract ${input.contract_version}.`,
+        `Supply ${SES_INPUT_CONTRACT_VERSION} from the canonical U1/U2 read model.`,
+      ),
+    );
   }
   if (!text(input.identity.source_instruction_id)) {
-    blockers.push(blocked(
-      "spine_missing_source",
-      "Correlation spine has no source_instruction_id.",
-      "Repair the U1 source accounting bind and re-run.",
-    ));
+    blockers.push(
+      blocked(
+        "spine_missing_source",
+        "Correlation spine has no source_instruction_id.",
+        "Repair the U1 source accounting bind and re-run.",
+      ),
+    );
   }
   if (
-    !text(input.identity.lineage_id) || !text(input.identity.job_id) ||
+    !text(input.identity.lineage_id) ||
+    !text(input.identity.job_id) ||
     !text(input.identity.source_content_hash)
   ) {
-    blockers.push(blocked(
-      "spine_missing_lineage",
-      "Correlation spine is missing lineage, job, or source content identity.",
-      "Repair the U1 lineage/job authority bind and re-run.",
-    ));
+    blockers.push(
+      blocked(
+        "spine_missing_lineage",
+        "Correlation spine is missing lineage, job, or source content identity.",
+        "Repair the U1 lineage/job authority bind and re-run.",
+      ),
+    );
   }
   const cycles = sortedUnique(input.attendance.attendance_cycle_ids || []);
   if (
@@ -235,69 +241,85 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
     !text(input.attendance.current_attendance_cycle_id) ||
     !cycles.includes(input.attendance.current_attendance_cycle_id)
   ) {
-    blockers.push(blocked(
-      "cycle_scope_ambiguous",
-      "Current attendance cycle is not exactly bound inside the immutable cycle set.",
-      "Bind the current U2/U3 attendance_cycle_id before assembling evidence.",
-    ));
+    blockers.push(
+      blocked(
+        "cycle_scope_ambiguous",
+        "Current attendance cycle is not exactly bound inside the immutable cycle set.",
+        "Bind the current U2/U3 attendance_cycle_id before assembling evidence.",
+      ),
+    );
   }
   if (
     input.classification.family_matrix_version !== SES_FAMILY_MATRIX_VERSION
   ) {
-    blockers.push(blocked(
-      "input_hash_conflict",
-      `Input pins ${
-        input.classification.family_matrix_version || "(blank)"
-      } but assembler requires ${SES_FAMILY_MATRIX_VERSION}.`,
-      "Refresh the U1/U2 assembler envelope against the current family matrix.",
-    ));
+    blockers.push(
+      blocked(
+        "input_hash_conflict",
+        `Input pins ${
+          input.classification.family_matrix_version || "(blank)"
+        } but assembler requires ${SES_FAMILY_MATRIX_VERSION}.`,
+        "Refresh the U1/U2 assembler envelope against the current family matrix.",
+      ),
+    );
   }
   if (!text(input.source.builder_reference)) {
-    blockers.push(blocked(
-      "spine_missing_source",
-      "Builder reference is absent from the canonical source instruction.",
-      "Recover the WO/PO/external reference from the canonical source case.",
-    ));
+    blockers.push(
+      blocked(
+        "spine_missing_source",
+        "Builder reference is absent from the canonical source instruction.",
+        "Recover the WO/PO/external reference from the canonical source case.",
+      ),
+    );
   }
   if (input.classification.family === "unknown") {
     const card = text(input.identity.card_id) || text(input.identity.job_id);
-    blockers.push(blocked(
-      "family_unknown",
-      `Card ${card || "(unknown)"} has no canonical family classification.`,
-      "Recover the family classification from canonical source authority before preparing the docket.",
-    ));
+    blockers.push(
+      blocked(
+        "family_unknown",
+        `Card ${card || "(unknown)"} has no canonical family classification.`,
+        "Recover the family classification from canonical source authority before preparing the docket.",
+      ),
+    );
   }
   if (!text(input.source.work_order_sender)) {
-    blockers.push(blocked(
-      "routing_evidence_missing",
-      "The company routing table has no report recipient for this builder.",
-      "Set the builder report recipient in makesafe_companies; do not substitute a guessed or unrelated address.",
-    ));
+    blockers.push(
+      blocked(
+        "routing_evidence_missing",
+        "The company routing table has no report recipient for this builder.",
+        "Set the builder report recipient in makesafe_companies; do not substitute a guessed or unrelated address.",
+      ),
+    );
   }
   if (!input.source.attachment_pointers?.length) {
-    blockers.push(blocked(
-      "spine_missing_source",
-      "The work order email has no work order attachment - ask the builder to send the work order.",
-      "Recover the work order from the builder's source email, then prepare the card again.",
-    ));
+    blockers.push(
+      blocked(
+        "spine_missing_source",
+        "The work order email has no work order attachment - ask the builder to send the work order.",
+        "Recover the work order from the builder's source email, then prepare the card again.",
+      ),
+    );
   }
   if (!input.source.deliverables?.length) {
-    blockers.push(blocked(
-      "spine_missing_deliverables",
-      "Source instruction has no typed deliverables.",
-      "Complete deterministic instruction classification before pack preparation.",
-    ));
+    blockers.push(
+      blocked(
+        "spine_missing_deliverables",
+        "Source instruction has no typed deliverables.",
+        "Complete deterministic instruction classification before pack preparation.",
+      ),
+    );
   }
   if (
     input.classification.family === "assessment_quote" &&
     input.classification.assessment_outbound_recipe_version !==
       SES_ASSESSMENT_RECIPE_VERSION
   ) {
-    blockers.push(blocked(
-      "input_hash_conflict",
-      "The assessment card does not carry the sealed triad-and-invoice recipe.",
-      "Refresh the assembler input from the current assessment family rule.",
-    ));
+    blockers.push(
+      blocked(
+        "input_hash_conflict",
+        "The assessment card does not carry the sealed triad-and-invoice recipe.",
+        "Refresh the assembler input from the current assessment family rule.",
+      ),
+    );
   }
   return blockers;
 }
@@ -313,13 +335,13 @@ function swmsDecision(
   if (row.report_only) {
     return {
       required: false,
-      requirementEvidence:
-        `rule:swms-not-required-under-named-builder-job-rule#${row.swms_waiver_rule}`,
+      requirementEvidence: `rule:swms-not-required-under-named-builder-job-rule#${row.swms_waiver_rule}`,
       naRule: "report-only-has-no-physical-work",
     };
   }
   if (
-    input.hrcw.hrcw || input.hrcw.categories.length > 0 ||
+    input.hrcw.hrcw ||
+    input.hrcw.categories.length > 0 ||
     input.hrcw.source_hazard_terms.length > 0
   ) {
     return {
@@ -338,8 +360,7 @@ function swmsDecision(
   if (row.swms_policy === "builder_waiver_unless_hrcw") {
     return {
       required: false,
-      requirementEvidence:
-        `rule:swms-not-required-under-named-builder-job-rule#${row.swms_waiver_rule}`,
+      requirementEvidence: `rule:swms-not-required-under-named-builder-job-rule#${row.swms_waiver_rule}`,
       naRule: "swms-not-required-under-named-builder-job-rule",
     };
   }
@@ -384,8 +405,8 @@ function localInvoiceProposal(
     };
   }
   if (row.invoice_basis === "roof_storey_fixed") {
-    const storey = facts.storeys ??
-      input.cycle_facts.roof_report_fields?.storeys;
+    const storey =
+      facts.storeys ?? input.cycle_facts.roof_report_fields?.storeys;
     try {
       const price = roofReportPrice(storey);
       return {
@@ -458,17 +479,21 @@ function localInvoiceProposal(
 
   const trades = nonNegativeInteger(facts.trades);
   const hoursPerTrade = positiveNumber(facts.hours_per_trade);
-  const canonicalRate = row.invoice_basis === "ajs_labour_materials" ||
-      row.invoice_basis === "ajs_temporary_fence_labour_only"
-    ? 80
-    : 85;
-  const minimum = row.family === "temporary_fencing" && trades === 1
-    ? 4
-    : canonicalRate === 80
-    ? 2
-    : 3;
+  const canonicalRate =
+    row.invoice_basis === "ajs_labour_materials" ||
+    row.invoice_basis === "ajs_temporary_fence_labour_only"
+      ? 80
+      : 85;
+  const minimum =
+    row.family === "temporary_fencing" && trades === 1
+      ? 4
+      : canonicalRate === 80
+        ? 2
+        : 3;
   if (
-    trades === null || trades < 1 || hoursPerTrade === null ||
+    trades === null ||
+    trades < 1 ||
+    hoursPerTrade === null ||
     hoursPerTrade < minimum
   ) {
     return {
@@ -480,17 +505,18 @@ function localInvoiceProposal(
       ),
     };
   }
-  const suppliedRate = facts.rate_ex_gst == null
-    ? canonicalRate
-    : positiveNumber(facts.rate_ex_gst);
+  const suppliedRate =
+    facts.rate_ex_gst == null
+      ? canonicalRate
+      : positiveNumber(facts.rate_ex_gst);
   if (suppliedRate !== canonicalRate) {
     return {
       proposal: null,
       blocker: blocked(
         "pricing_evidence_missing",
-        `Rate ${
-          String(facts.rate_ex_gst)
-        } does not match the sealed $${canonicalRate} ex GST schedule.`,
+        `Rate ${String(
+          facts.rate_ex_gst,
+        )} does not match the sealed $${canonicalRate} ex GST schedule.`,
         "Attach a line-specific audited rate override or use the canonical rate.",
       ),
     };
@@ -556,16 +582,13 @@ function localInvoiceProposal(
           ),
         );
       }
-      lines.push(
-        lineItem(`${ref} - Cable ties and small consumables`, 1, 25),
-      );
+      lines.push(lineItem(`${ref} - Cable ties and small consumables`, 1, 25));
     }
   } else {
     const materials = Array.isArray(facts.materials) ? facts.materials : [];
     for (const raw of materials) {
-      const material = raw && typeof raw === "object"
-        ? raw as Record<string, unknown>
-        : {};
+      const material =
+        raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
       const description = text(material.description);
       const quantity = positiveNumber(material.quantity);
       const unitPrice = positiveNumber(material.unit_price_ex_gst);
@@ -582,9 +605,11 @@ function localInvoiceProposal(
       lines.push(lineItem(`${ref} - ${description}`, quantity, unitPrice));
     }
   }
-  const subtotal = Math.round(
-    lines.reduce((sum, line) => sum + Number(line.amount_ex_gst || 0), 0) * 100,
-  ) / 100;
+  const subtotal =
+    Math.round(
+      lines.reduce((sum, line) => sum + Number(line.amount_ex_gst || 0), 0) *
+        100,
+    ) / 100;
   return {
     proposal: {
       version: "ses-local-invoice-proposal/v1",
@@ -631,12 +656,14 @@ function routingBlocker(
 ): SesBlocker | null {
   const missing: string[] = [];
   if (
-    row.report_route === "work_order_sender" && !input.source.work_order_sender
+    row.report_route === "work_order_sender" &&
+    !input.source.work_order_sender
   ) {
     missing.push("makesafe_companies.report_recipient");
   }
   if (
-    row.photo_route === "work_order_sender" && !input.source.work_order_sender
+    row.photo_route === "work_order_sender" &&
+    !input.source.work_order_sender
   ) {
     missing.push("makesafe_companies.report_recipient");
   }
@@ -646,18 +673,15 @@ function routingBlocker(
   if (!missing.length) return null;
   return blocked(
     "routing_evidence_missing",
-    `The sealed routing sources are incomplete: ${
-      [...new Set(missing)].join(", ")
-    }.`,
+    `The sealed routing sources are incomplete: ${[...new Set(missing)].join(
+      ", ",
+    )}.`,
     "Complete the company routing table or seal the matrix row; never default an address.",
     ["makesafe_companies", `family-matrix:${SES_FAMILY_MATRIX_VERSION}`],
   );
 }
 
-function applySpineBlocker(
-  manifest: SesManifestV2,
-  blocker: SesBlocker,
-): void {
+function applySpineBlocker(manifest: SesManifestV2, blocker: SesBlocker): void {
   for (const item of SPINE_MANIFEST_ITEMS) {
     manifest.items[item] = blocker;
   }
@@ -668,14 +692,16 @@ function applySpineBlocker(
 }
 
 function spineFactsComplete(input: SesAssemblerInputV1): boolean {
-  return !!text(input.identity.source_instruction_id) &&
+  return (
+    !!text(input.identity.source_instruction_id) &&
     !!text(input.identity.lineage_id) &&
     /^sha256:[0-9a-f]{64}$/.test(text(input.identity.source_content_hash)) &&
     !!text(input.identity.job_id) &&
     !!text(input.source.builder_reference) &&
     input.source.attachment_pointers.length > 0 &&
     input.source.deliverables.length > 0 &&
-    input.source.deliverables.every((deliverable) => !!text(deliverable.id));
+    input.source.deliverables.every((deliverable) => !!text(deliverable.id))
+  );
 }
 
 function markSpineEvidenceReady(
@@ -688,36 +714,35 @@ function markSpineEvidenceReady(
     `spine:source/${encodeURIComponent(input.identity.source_instruction_id)}`,
   );
   manifest.items.source_work_order_identity = ready(
-    `spine:lineage/${encodeURIComponent(input.identity.lineage_id)}#job/${
-      encodeURIComponent(input.identity.job_id)
-    }#hash/${input.identity.source_content_hash}#reference/${
-      encodeURIComponent(input.source.builder_reference)
-    }`,
+    `spine:lineage/${encodeURIComponent(input.identity.lineage_id)}#job/${encodeURIComponent(
+      input.identity.job_id,
+    )}#hash/${input.identity.source_content_hash}#reference/${encodeURIComponent(
+      input.source.builder_reference,
+    )}`,
   );
   manifest.items.source_work_order_attachment = ready(
     `files:${sourcePaths.join(",")}`,
   );
   manifest.items.instruction_deliverables = ready(
-    `spine:deliverables/${
-      input.source.deliverables.map((deliverable) =>
-        encodeURIComponent(deliverable.id)
-      ).join(",")
-    }`,
+    `spine:deliverables/${input.source.deliverables
+      .map((deliverable) => encodeURIComponent(deliverable.id))
+      .join(",")}`,
   );
-  manifest.items.lineage_review = input.classification.lineage_kind === "none"
-    ? notApplicable("no-related-docket-detected")
-    : ready("file:case_story.json#lineage");
+  manifest.items.lineage_review =
+    input.classification.lineage_kind === "none"
+      ? notApplicable("no-related-docket-detected")
+      : ready("file:case_story.json#lineage");
   manifest.items.case_story_recovery = ready("file:case_story.json");
   manifest.items.exception_disposition =
     input.classification.workflow === "active"
       ? notApplicable("ordinary-active-docket")
       : input.classification.workflow === "revision"
-      ? notApplicable("ordinary-revision-docket")
-      : blocked(
-        "recovery-not-run",
-        `${input.classification.workflow} requires a structured authority decision.`,
-        "Record the workflow-compatible decision before review.",
-      );
+        ? notApplicable("ordinary-revision-docket")
+        : blocked(
+            "recovery-not-run",
+            `${input.classification.workflow} requires a structured authority decision.`,
+            "Record the workflow-compatible decision before review.",
+          );
   manifest.items.hrcw_assessment = ready("file:case_story.json#hrcw");
   manifest.items.swms_requirement = ready(swms.requirementEvidence);
   manifest.deliverables = input.source.deliverables.map((deliverable) => ({
@@ -768,7 +793,8 @@ function manifestBase(
 ): SesManifestV2 {
   const items = initialManifestItems();
   const routeFailure = routingBlocker(input, row);
-  items.builder_routing = routeFailure ||
+  items.builder_routing =
+    routeFailure ||
     ready(
       `company:${input.source.work_order_sender || "not-required"}#matrix:${
         row.invoice_to || "not-required"
@@ -785,16 +811,14 @@ function manifestBase(
     items.roof_report_capture = notApplicable("not-a-roof-report");
   }
   if (row.job_type !== "assessment_report_quote") {
-    for (
-      const item of [
-        "assessment_report_link",
-        "assessment_report_capture",
-        "assessment_photos_link",
-        "assessment_photos_capture",
-        "assessment_scope_link",
-        "assessment_scope_capture",
-      ] as ManifestItem[]
-    ) {
+    for (const item of [
+      "assessment_report_link",
+      "assessment_report_capture",
+      "assessment_photos_link",
+      "assessment_photos_capture",
+      "assessment_scope_link",
+      "assessment_scope_capture",
+    ] as ManifestItem[]) {
       items[item] = notApplicable("not-an-assessment-report");
     }
   }
@@ -815,9 +839,7 @@ function manifestBase(
     items.supporting_report_pdf = notApplicable(
       "report-only-portal-is-the-report",
     );
-    items.draft_builder_report_email = notApplicable(
-      "portal-is-the-report",
-    );
+    items.draft_builder_report_email = notApplicable("portal-is-the-report");
   }
   if (row.family === "assessment_quote") {
     items.supporting_report_pdf = notApplicable(
@@ -851,8 +873,8 @@ function manifestBase(
       ...(row.report_delivery ? { report_delivery: row.report_delivery } : {}),
       ...(row.family === "assessment_quote"
         ? {
-          assessment_outbound_recipe_version: SES_ASSESSMENT_RECIPE_VERSION,
-        }
+            assessment_outbound_recipe_version: SES_ASSESSMENT_RECIPE_VERSION,
+          }
         : {}),
       builder_reference: input.source.builder_reference,
       report_only: row.report_only,
@@ -861,18 +883,20 @@ function manifestBase(
       hrcw: input.hrcw.hrcw,
       hrcw_categories: [...input.hrcw.categories],
       source_hazard_terms: [...input.hrcw.source_hazard_terms],
-      required_deliverable_ids: input.source.deliverables.map((item) =>
-        item.id
+      required_deliverable_ids: input.source.deliverables.map(
+        (item) => item.id,
       ),
     },
     routing: {
       builder: input.classification.builder_label,
-      report_to: row.report_route === "work_order_sender"
-        ? input.source.work_order_sender || ""
-        : "",
-      photo_to: row.photo_route === "work_order_sender"
-        ? input.source.work_order_sender || ""
-        : "",
+      report_to:
+        row.report_route === "work_order_sender"
+          ? input.source.work_order_sender || ""
+          : "",
+      photo_to:
+        row.photo_route === "work_order_sender"
+          ? input.source.work_order_sender || ""
+          : "",
       invoice_to: row.invoice_to || "",
     },
     items,
@@ -887,14 +911,12 @@ function manifestBase(
   };
 }
 
-function addBlocker(
-  blockers: SesBlocker[],
-  blocker: SesBlocker,
-): SesBlocker {
+function addBlocker(blockers: SesBlocker[], blocker: SesBlocker): SesBlocker {
   if (
-    !blockers.some((candidate) =>
-      candidate.reason_code === blocker.reason_code &&
-      candidate.reason === blocker.reason
+    !blockers.some(
+      (candidate) =>
+        candidate.reason_code === blocker.reason_code &&
+        candidate.reason === blocker.reason,
     )
   ) {
     blockers.push(blocker);
@@ -935,18 +957,18 @@ function portalRoleCardLabel(
 }
 
 function isValidContentFingerprint(value: unknown): value is SesSha256 {
-  return typeof value === "string" &&
-    /^sha256:[0-9a-f]{64}$/.test(value);
+  return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
 function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
-  const role = capture.role === "assessment"
-    ? "assessment"
-    : capture.role === "photos"
-    ? "photos"
-    : capture.role === "scope"
-    ? "quote/scope"
-    : "roof report";
+  const role =
+    capture.role === "assessment"
+      ? "assessment"
+      : capture.role === "photos"
+        ? "photos"
+        : capture.role === "scope"
+          ? "quote/scope"
+          : "roof report";
   if (capture.status === "done") {
     if (!isValidContentFingerprint(capture.content_fingerprint)) {
       return blocked(
@@ -1007,9 +1029,9 @@ function buildEmailDrafts(
     return {};
   }
   const ref = input.source.builder_reference;
-  const address = [input.source.site_address, input.source.site_suburb].filter(
-    Boolean,
-  ).join(", ");
+  const address = [input.source.site_address, input.source.site_suburb]
+    .filter(Boolean)
+    .join(", ");
   const reportTo = input.source.work_order_sender || "";
   const invoiceTo = row.invoice_to || "";
   const invoiceAttachments = [
@@ -1023,8 +1045,7 @@ function buildEmailDrafts(
         to: invoiceTo,
         cc: "finance@secureworkswa.com.au",
         subject: `${ref} - assessment report and quote invoice`,
-        body:
-          "Draft only. The assessment, photo schedule and quote have been completed and submitted through Prime. Please find our invoice attached. No SWMS, local report or separate photo pack applies to this assessment card.",
+        body: "Draft only. The assessment, photo schedule and quote have been completed and submitted through Prime. Please find our invoice attached. No SWMS, local report or separate photo pack applies to this assessment card.",
         attachments: ["ARTIFACTS/invoice_proposal.json"],
       }),
     };
@@ -1036,8 +1057,7 @@ function buildEmailDrafts(
     to: invoiceTo,
     cc: "finance@secureworkswa.com.au",
     subject: `${ref} - invoice proposal`,
-    body:
-      "Draft only. This docket contains a local invoice proposal. No Xero object exists and no release is approved.",
+    body: "Draft only. This docket contains a local invoice proposal. No Xero object exists and no release is approved.",
     attachments: invoiceAttachments,
   });
   const drafts: Record<string, string> = { INVOICE_EMAIL_DRAFT: invoice };
@@ -1045,9 +1065,10 @@ function buildEmailDrafts(
     drafts.REPORT_EMAIL_DRAFT = draftEmail({
       to: reportTo,
       subject: `${ref} - ${row.family.replaceAll("_", " ")}`,
-      body: `Draft only. Please find the prepared ${
-        row.family.replaceAll("_", " ")
-      } evidence for ${address || "the instructed property"}.`,
+      body: `Draft only. Please find the prepared ${row.family.replaceAll(
+        "_",
+        " ",
+      )} evidence for ${address || "the instructed property"}.`,
       attachments: [reportFile],
     });
   }
@@ -1055,8 +1076,7 @@ function buildEmailDrafts(
     drafts.PHOTO_EMAIL_DRAFT = draftEmail({
       to: reportTo,
       subject: `Photo Evidence - ${ref}`,
-      body:
-        "Draft only. The complete, ordered original photo set is listed on the docket.",
+      body: "Draft only. The complete, ordered original photo set is listed on the docket.",
       attachments: photoFiles,
     });
   }
@@ -1070,24 +1090,27 @@ function reviewHtml(
   drafts: Record<string, string>,
 ): string {
   const escape = (value: unknown) =>
-    String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;");
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>${
-    escape(input.source.builder_reference)
-  } SES docket</title></head>
+<html lang="en"><head><meta charset="utf-8"><title>${escape(
+    input.source.builder_reference,
+  )} SES docket</title></head>
 <body data-assembler="${SES_ASSEMBLER_VERSION}">
 <main><h1>${escape(input.source.builder_reference)}</h1>
 <p>Family: ${escape(family)}</p>
 <p>State: ${blockers.length ? "BLOCKED" : "PRE-XERO DOCS READY"}</p>
-<section id="blockers"><h2>Blockers</h2><pre>${
-    escape(canonicalSesJson(blockers))
-  }</pre></section>
-<section id="email-drafts"><h2>Email drafts</h2>${
-    Object.entries(drafts).map(([name, body]) =>
-      `<article><h3>${escape(name)}</h3><pre>${escape(body)}</pre></article>`
-    ).join("")
-  }</section>
+<section id="blockers"><h2>Blockers</h2><pre>${escape(
+    canonicalSesJson(blockers),
+  )}</pre></section>
+<section id="email-drafts"><h2>Email drafts</h2>${Object.entries(drafts)
+    .map(
+      ([name, body]) =>
+        `<article><h3>${escape(name)}</h3><pre>${escape(body)}</pre></article>`,
+    )
+    .join("")}</section>
 </main></body></html>`;
 }
 
@@ -1098,12 +1121,10 @@ function validatePreXero(
   blockers: SesBlocker[],
 ): boolean {
   if (blockers.length || !proposal) return false;
-  const required = MANIFEST_ITEMS.filter((name) =>
-    name !== "supporting_invoice_pdf"
+  const required = MANIFEST_ITEMS.filter(
+    (name) => name !== "supporting_invoice_pdf",
   );
-  if (
-    required.some((name) => manifest.items[name]?.state === "blocked")
-  ) {
+  if (required.some((name) => manifest.items[name]?.state === "blocked")) {
     return false;
   }
   if (!artifacts.some((artifact) => artifact.role === "invoice_proposal")) {
@@ -1113,10 +1134,9 @@ function validatePreXero(
 }
 
 function responseSummary(results: SesPreparedRevision[]) {
-  const values = results.map((result) => result.timing.duration_ms).sort((
-    a,
-    b,
-  ) => a - b);
+  const values = results
+    .map((result) => result.timing.duration_ms)
+    .sort((a, b) => a - b);
   const index = values.length
     ? Math.max(0, Math.ceil(values.length * 0.95) - 1)
     : 0;
@@ -1124,8 +1144,8 @@ function responseSummary(results: SesPreparedRevision[]) {
     count: values.length,
     max_ms: values.length ? values[values.length - 1] : 0,
     p95_ms: values.length ? values[index] : 0,
-    all_within_five_minutes: results.every((result) =>
-      result.timing.within_five_minutes
+    all_within_five_minutes: results.every(
+      (result) => result.timing.within_five_minutes,
     ),
   };
 }
@@ -1140,7 +1160,8 @@ function validateRequest(request: SesPrepareRequest): void {
   const mode = request.selection?.mode;
   if (mode === "job_id") {
     if (
-      !text(request.selection.job_id) || request.selection.job_number ||
+      !text(request.selection.job_id) ||
+      request.selection.job_number ||
       request.selection.limit
     ) {
       throw new TypeError("job_id selection requires only job_id");
@@ -1149,7 +1170,8 @@ function validateRequest(request: SesPrepareRequest): void {
   }
   if (mode === "job_number") {
     if (
-      !text(request.selection.job_number) || request.selection.job_id ||
+      !text(request.selection.job_number) ||
+      request.selection.job_id ||
       request.selection.limit
     ) {
       throw new TypeError("job_number selection requires only job_number");
@@ -1159,8 +1181,11 @@ function validateRequest(request: SesPrepareRequest): void {
   if (mode === "board_batch") {
     const limit = Number(request.selection.limit);
     if (
-      !Number.isSafeInteger(limit) || limit < 1 || limit > 50 ||
-      request.selection.job_id || request.selection.job_number
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 50 ||
+      request.selection.job_id ||
+      request.selection.job_number
     ) {
       throw new TypeError("board_batch requires limit between 1 and 50");
     }
@@ -1171,10 +1196,12 @@ function validateRequest(request: SesPrepareRequest): void {
 
 async function prepareOne(
   request: SesPrepareRequest,
-  selection: { mode: "job_id"; job_id: string } | {
-    mode: "job_number";
-    job_number: string;
-  },
+  selection:
+    | { mode: "job_id"; job_id: string }
+    | {
+        mode: "job_number";
+        job_number: string;
+      },
   deps: SesPrepareDependencies,
 ): Promise<SesPreparedRevision> {
   const now = deps.now || (() => new Date());
@@ -1226,15 +1253,11 @@ async function prepareOne(
   const row = matrix.ok ? matrix.row : null;
   if (
     matrix.ok &&
-    (
-      input.classification.report_only !== matrix.row.report_only ||
+    (input.classification.report_only !== matrix.row.report_only ||
       input.classification.report_delivery !== matrix.row.report_delivery ||
       input.classification.subtype !== matrix.row.subtype ||
-      (
-        input.classification.family === "temporary_fencing" &&
-        input.classification.subtype !== "temporary_fencing"
-      )
-    )
+      (input.classification.family === "temporary_fencing" &&
+        input.classification.subtype !== "temporary_fencing"))
   ) {
     addBlocker(
       blockers,
@@ -1258,24 +1281,26 @@ async function prepareOne(
   }
 
   const swms = row ? swmsDecision(input, row) : null;
-  const manifest = row && swms
-    ? manifestBase(input, row, swms)
-    : hardStopManifest(input, applicabilityBlocker!);
+  const manifest =
+    row && swms
+      ? manifestBase(input, row, swms)
+      : hardStopManifest(input, applicabilityBlocker!);
   if (row) {
     const routeFailure = routingBlocker(input, row);
     if (
       routeFailure &&
-      !blockers.some((candidate) =>
-        candidate.reason_code === routeFailure.reason_code
+      !blockers.some(
+        (candidate) => candidate.reason_code === routeFailure.reason_code,
       )
     ) {
       addBlocker(blockers, routeFailure);
     }
   }
-  const inputSpineBlocker = blockers.find((candidate) =>
-    candidate.reason_code === "spine_missing_lineage" ||
-    candidate.reason_code === "spine_missing_source" ||
-    candidate.reason_code === "spine_missing_deliverables"
+  const inputSpineBlocker = blockers.find(
+    (candidate) =>
+      candidate.reason_code === "spine_missing_lineage" ||
+      candidate.reason_code === "spine_missing_source" ||
+      candidate.reason_code === "spine_missing_deliverables",
   );
   if (row && inputSpineBlocker) {
     applySpineBlocker(manifest, inputSpineBlocker);
@@ -1307,9 +1332,8 @@ async function prepareOne(
       resolved.map((artifact) => artifact.source_pointer),
     );
     const missing = [...expected].filter((pointer) => !recovered.has(pointer));
-    let recoveryComplete = !missing.length &&
-      resolved.length === expected.size &&
-      expected.size > 0;
+    let recoveryComplete =
+      !missing.length && resolved.length === expected.size && expected.size > 0;
     const sourcePaths: string[] = [];
     if (missing.length) {
       const sourceBlocker = addBlocker(
@@ -1329,7 +1353,8 @@ async function prepareOne(
       if (
         !expected.has(source.source_pointer) ||
         !text(source.file_name) ||
-        source.file_name.includes("/") || source.file_name.includes("..") ||
+        source.file_name.includes("/") ||
+        source.file_name.includes("..") ||
         !source.bytes.byteLength
       ) {
         recoveryComplete = false;
@@ -1372,8 +1397,8 @@ async function prepareOne(
   await measure("T4", async () => {
     if (!row) return;
     for (const role of row.required_portal_roles) {
-      const matches = input.source.portal_links.filter((link) =>
-        inputPortalRole(link.role) === role
+      const matches = input.source.portal_links.filter(
+        (link) => inputPortalRole(link.role) === role,
       );
       const [linkItem, captureItem] = portalRoleItems(role);
       if (matches.length !== 1) {
@@ -1386,12 +1411,12 @@ async function prepareOne(
             code,
             matches.length
               ? `Portal role ${role} has ${matches.length} candidates; exactly one is required.`
-              : `The work order email contains no ${
-                portalRoleCardLabel(role)
-              } link - ask the builder to send it.`,
-            `Recover and bind exactly one typed ${
-              portalRoleCardLabel(role)
-            } link from the source instruction.`,
+              : `The work order email contains no ${portalRoleCardLabel(
+                  role,
+                )} link - ask the builder to send it.`,
+            `Recover and bind exactly one typed ${portalRoleCardLabel(
+              role,
+            )} link from the source instruction.`,
             ["canonical-input-envelope", `portal-role:${role}`],
             matches.map((link) => link.url),
           ),
@@ -1445,13 +1470,12 @@ async function prepareOne(
         };
       }
       const screenshotBytes = capture.screenshot_bytes;
-      const {
-        screenshot_bytes: _discardedScreenshotBytes,
-        ...captureRecord
-      } = capture;
+      const { screenshot_bytes: _discardedScreenshotBytes, ...captureRecord } =
+        capture;
       portalEvidence.push(captureRecord);
       if (
-        capture.role !== role || capture.url !== link.url ||
+        capture.role !== role ||
+        capture.url !== link.url ||
         capture.job_id !== input.identity.job_id ||
         capture.docket_id !== manifest.docket_id ||
         capture.builder_reference !== input.source.builder_reference
@@ -1505,18 +1529,17 @@ async function prepareOne(
       }
     }
     if (row.required_portal_roles.length) {
-      manifest.items.supporting_portal_links = blockers.some((candidate) =>
+      manifest.items.supporting_portal_links = blockers.some(
+        (candidate) =>
           candidate.reason_code.startsWith("portal_") ||
-          candidate.reason_code === "capability_portal_degraded"
-        )
+          candidate.reason_code === "capability_portal_degraded",
+      )
         ? blocked(
-          "capture-failure",
-          "One or more required portal links/captures are not ready.",
-          "Resolve the typed portal blocker and re-run.",
-          row.required_portal_roles.map((role) =>
-            `portal-role:${role}`
-          ),
-        )
+            "capture-failure",
+            "One or more required portal links/captures are not ready.",
+            "Resolve the typed portal blocker and re-run.",
+            row.required_portal_roles.map((role) => `portal-role:${role}`),
+          )
         : ready("file:EVIDENCE/portal_evidence.json");
     }
   });
@@ -1524,9 +1547,7 @@ async function prepareOne(
   await measure("T5", async () => {
     if (!row || !swms) return;
     if (row.job_type === "physical_makesafe") {
-      if (
-        !input.cycle_facts.trade_report || !input.cycle_facts.photos.length
-      ) {
+      if (!input.cycle_facts.trade_report || !input.cycle_facts.photos.length) {
         const itemBlocker = addBlocker(
           blockers,
           blocked(
@@ -1538,7 +1559,27 @@ async function prepareOne(
         manifest.items.physical_reporting_evidence = itemBlocker;
         manifest.items.supporting_report_pdf = itemBlocker;
       } else {
-        if (!deps.renderPhysicalReport) {
+        let resolvedPhotos: SesPhotoArtifact[] = [];
+        let photosComplete = false;
+        if (!text(input.source.builder_reference)) {
+          const itemBlocker =
+            blockers.find(
+              (candidate) =>
+                candidate.reason_code === "spine_missing_source" &&
+                candidate.reason ===
+                  "Builder reference is absent from the canonical source instruction.",
+            ) ||
+            addBlocker(
+              blockers,
+              blocked(
+                "spine_missing_source",
+                "Builder reference is absent from the canonical source instruction.",
+                "Recover the WO/PO/external reference from the canonical source case.",
+              ),
+            );
+          manifest.items.physical_reporting_evidence = itemBlocker;
+          manifest.items.supporting_report_pdf = itemBlocker;
+        } else if (!deps.renderPhysicalReport) {
           const itemBlocker = addBlocker(
             blockers,
             blocked(
@@ -1549,19 +1590,6 @@ async function prepareOne(
           );
           manifest.items.physical_reporting_evidence = itemBlocker;
           manifest.items.supporting_report_pdf = itemBlocker;
-        } else {
-          const rendered = await deps.renderPhysicalReport(input);
-          reportFile = `ARTIFACTS/${rendered.file_name}`;
-          artifacts.push(
-            await artifactFromBytes({
-              role: "supporting_report_pdf",
-              path: reportFile,
-              media_type: rendered.media_type,
-              bytes: rendered.bytes,
-              metadata: { render_hash: rendered.render_hash || null },
-            }),
-          );
-          manifest.items.supporting_report_pdf = ready(`file:${reportFile}`);
         }
 
         if (!deps.resolvePhotoArtifacts) {
@@ -1575,24 +1603,27 @@ async function prepareOne(
             ),
           );
         } else {
-          const resolvedPhotos = await deps.resolvePhotoArtifacts(input);
-          const expectedPhotos = input.cycle_facts.photos.slice().sort((
-            a,
-            b,
-          ) => a.order - b.order || a.id.localeCompare(b.id));
+          resolvedPhotos = await deps.resolvePhotoArtifacts(input);
+          const expectedPhotos = input.cycle_facts.photos
+            .slice()
+            .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
           const matchedIndexes = new Set<number>();
-          let photosComplete = true;
+          photosComplete = true;
           for (const [index, expected] of expectedPhotos.entries()) {
-            const matches = resolvedPhotos.map((photo, resolvedIndex) => ({
-              photo,
-              resolvedIndex,
-            })).filter(({ photo }) =>
-              photo.photo_id === expected.id &&
-              photo.source_pointer === expected.path_or_key
-            );
+            const matches = resolvedPhotos
+              .map((photo, resolvedIndex) => ({
+                photo,
+                resolvedIndex,
+              }))
+              .filter(
+                ({ photo }) =>
+                  photo.photo_id === expected.id &&
+                  photo.source_pointer === expected.path_or_key,
+              );
             const resolved = matches.length === 1 ? matches[0] : null;
             if (
-              !resolved || matchedIndexes.has(resolved.resolvedIndex) ||
+              !resolved ||
+              matchedIndexes.has(resolved.resolvedIndex) ||
               !text(resolved.photo.file_name) ||
               resolved.photo.file_name.includes("/") ||
               resolved.photo.file_name.includes("..") ||
@@ -1612,9 +1643,10 @@ async function prepareOne(
               continue;
             }
             matchedIndexes.add(resolved.resolvedIndex);
-            const storedPath = `ARTIFACTS/photos/${
-              String(index + 1).padStart(3, "0")
-            }-${resolved.photo.file_name}`;
+            const storedPath = `ARTIFACTS/photos/${String(index + 1).padStart(
+              3,
+              "0",
+            )}-${resolved.photo.file_name}`;
             photoFiles.push(storedPath);
             artifacts.push(
               await artifactFromBytes({
@@ -1655,11 +1687,33 @@ async function prepareOne(
             );
           }
         }
+        if (
+          text(input.source.builder_reference) &&
+          deps.renderPhysicalReport &&
+          photosComplete
+        ) {
+          const rendered = await deps.renderPhysicalReport(
+            input,
+            resolvedPhotos,
+          );
+          reportFile = `ARTIFACTS/${rendered.file_name}`;
+          artifacts.push(
+            await artifactFromBytes({
+              role: "supporting_report_pdf",
+              path: reportFile,
+              media_type: rendered.media_type,
+              bytes: rendered.bytes,
+              metadata: { render_hash: rendered.render_hash || null },
+            }),
+          );
+          manifest.items.supporting_report_pdf = ready(`file:${reportFile}`);
+          manifest.items.physical_reporting_evidence = ready(
+            "file:ARTIFACTS/PHOTO_SELECTION.md",
+          );
+        }
       }
     } else if (row.family === "own_template_roof") {
-      if (
-        !input.cycle_facts.roof_report_fields || !deps.renderOwnRoofReport
-      ) {
+      if (!input.cycle_facts.roof_report_fields || !deps.renderOwnRoofReport) {
         const itemBlocker = addBlocker(
           blockers,
           blocked(
@@ -1721,21 +1775,22 @@ async function prepareOne(
           text: input.cycle_facts.photos
             .slice()
             .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
-            .map((photo, index) =>
-              `${index + 1}. ${
-                photoFiles[index] || `MISSING:${photo.path_or_key}`
-              } - ${photo.caption || "Not provided"}`
-            ).join("\n"),
+            .map(
+              (photo, index) =>
+                `${index + 1}. ${
+                  photoFiles[index] || `MISSING:${photo.path_or_key}`
+                } - ${photo.caption || "Not provided"}`,
+            )
+            .join("\n"),
         }),
       );
     }
   });
 
   const priced = row
-    ? await measure(
-      "T6",
-      () => Promise.resolve(localInvoiceProposal(input, row)),
-    )
+    ? await measure("T6", () =>
+        Promise.resolve(localInvoiceProposal(input, row)),
+      )
     : { proposal: null, blocker: null };
   if (!row) stagesMs.T6 = 0;
   if (priced.blocker) addBlocker(blockers, priced.blocker);
@@ -1754,13 +1809,13 @@ async function prepareOne(
   const drafts = row
     ? blockers.length === 0
       ? buildEmailDrafts(
-        input,
-        row,
-        reportFile,
-        swmsFile,
-        photoFiles,
-        priced.proposal,
-      )
+          input,
+          row,
+          reportFile,
+          swmsFile,
+          photoFiles,
+          priced.proposal,
+        )
       : {}
     : {};
   if (drafts.REPORT_EMAIL_DRAFT) {
@@ -1810,18 +1865,20 @@ async function prepareOne(
   const reviewSpec: Record<string, unknown> = {
     version: "ses-docket-review/v1",
     property_id: input.identity.property_id,
-    address: [input.source.site_address, input.source.site_suburb].filter(
-      Boolean,
-    ).join(", "),
-    cards: [{
-      job_id: input.identity.job_id,
-      family: row?.family || input.classification.family,
-      builder_reference: input.source.builder_reference,
-      portal_proof: portalEvidence,
-      artifact_paths: artifacts.map((artifact) => artifact.path).sort(),
-      blocker_codes: blockers.map((item) => item.reason_code),
-      waiting_on: blockers.map((item) => item.reason),
-    }],
+    address: [input.source.site_address, input.source.site_suburb]
+      .filter(Boolean)
+      .join(", "),
+    cards: [
+      {
+        job_id: input.identity.job_id,
+        family: row?.family || input.classification.family,
+        builder_reference: input.source.builder_reference,
+        portal_proof: portalEvidence,
+        artifact_paths: artifacts.map((artifact) => artifact.path).sort(),
+        blocker_codes: blockers.map((item) => item.reason_code),
+        waiting_on: blockers.map((item) => item.reason),
+      },
+    ],
   };
   const releasePayload: Record<string, unknown> = {
     version: "ses-inert-release-proposal/v1",
@@ -1882,12 +1939,15 @@ async function prepareOne(
   }
   stagesMs.T9 = 0;
 
-  const revisionIdentityHash = await sesSha256({
-    assembler_version: request.assembler_version,
-    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
-    idempotency_key: request.idempotency_key,
-    input_content_hash: inputContentHash,
-  }, "SecureWorks:ses-docket-revision-id:v1\n");
+  const revisionIdentityHash = await sesSha256(
+    {
+      assembler_version: request.assembler_version,
+      family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+      idempotency_key: request.idempotency_key,
+      input_content_hash: inputContentHash,
+    },
+    "SecureWorks:ses-docket-revision-id:v1\n",
+  );
   const docketRevisionId = stableUuidFromSha256(revisionIdentityHash);
   const stableOutput = {
     docket_revision_id: docketRevisionId,
@@ -1897,12 +1957,14 @@ async function prepareOne(
     portal_evidence: portalEvidence,
     review_spec: reviewSpec,
     release_payload: releasePayload,
-    artifact_hashes: artifacts.map((artifact) => ({
-      role: artifact.role,
-      path: artifact.path,
-      content_hash: artifact.content_hash,
-      size_bytes: artifact.size_bytes,
-    })).sort((a, b) => a.path.localeCompare(b.path)),
+    artifact_hashes: artifacts
+      .map((artifact) => ({
+        role: artifact.role,
+        path: artifact.path,
+        content_hash: artifact.content_hash,
+        size_bytes: artifact.size_bytes,
+      }))
+      .sort((a, b) => a.path.localeCompare(b.path)),
     blockers,
   };
   const outputContentHash = await sesSha256(
@@ -1924,9 +1986,7 @@ async function prepareOne(
       job_id: input.identity.job_id,
       card_id: input.identity.card_id,
       property_id: input.identity.property_id,
-      attendance_cycle_ids: sortedUnique(
-        input.attendance.attendance_cycle_ids,
-      ),
+      attendance_cycle_ids: sortedUnique(input.attendance.attendance_cycle_ids),
       current_attendance_cycle_id: input.attendance.current_attendance_cycle_id,
       readiness_revision: input.readiness.readiness_revision,
       docket_revision_id: docketRevisionId,
@@ -1935,13 +1995,13 @@ async function prepareOne(
     local_invoice_proposal: priced.proposal
       ? { state: "ready", evidence: "file:ARTIFACTS/invoice_proposal.json" }
       : {
-        state: "blocked",
-        evidence: `blocker:${
-          priced.blocker?.reason_code ||
-          applicabilityBlocker?.reason_code ||
-          "pricing_evidence_missing"
-        }`,
-      },
+          state: "blocked",
+          evidence: `blocker:${
+            priced.blocker?.reason_code ||
+            applicabilityBlocker?.reason_code ||
+            "pricing_evidence_missing"
+          }`,
+        },
     invoice_create_approved: false,
     client_send_approved: false,
     family_matrix_version: SES_FAMILY_MATRIX_VERSION,
@@ -1971,33 +2031,37 @@ async function prepareOne(
         portal_capture: !row
           ? "not_evaluated"
           : row.required_portal_roles.length
-          ? deps.capturePortal ? "available" : "degraded"
-          : "not_required",
+            ? deps.capturePortal
+              ? "available"
+              : "degraded"
+            : "not_required",
         source_attachment_recovery: !row
           ? "not_evaluated"
           : deps.resolveSourceArtifacts
-          ? "available"
-          : "unavailable",
+            ? "available"
+            : "unavailable",
         photo_artifact_recovery: !row
           ? "not_evaluated"
           : row.job_type === "physical_makesafe"
-          ? deps.resolvePhotoArtifacts ? "available" : "unavailable"
-          : "not_required",
+            ? deps.resolvePhotoArtifacts
+              ? "available"
+              : "unavailable"
+            : "not_required",
         physical_renderer: !row
           ? "not_evaluated"
           : deps.renderPhysicalReport
-          ? "available"
-          : "unavailable",
+            ? "available"
+            : "unavailable",
         own_roof_renderer: !row
           ? "not_evaluated"
           : deps.renderOwnRoofReport
-          ? "available"
-          : "unavailable",
+            ? "available"
+            : "unavailable",
         swms_provider: !row
           ? "not_evaluated"
           : deps.resolveSwmsArtifact
-          ? "available"
-          : "unavailable",
+            ? "available"
+            : "unavailable",
         xero_mutation: "structurally_absent",
         send: "structurally_absent",
       }),
@@ -2034,7 +2098,8 @@ async function prepareOne(
           family_matrix_version: SES_FAMILY_MATRIX_VERSION,
           accepted_at: acceptedAt.toISOString(),
           stage_durations_ms: stagesMs,
-        }));
+        }),
+      );
       committedAt = persistedResult.committed_at;
       persisted = true;
     } else {
@@ -2082,9 +2147,8 @@ async function prepareOne(
   );
   return {
     ...baseRevision,
-    state: envelope.pre_xero_docs_ready && !blockers.length
-      ? "ready"
-      : "blocked",
+    state:
+      envelope.pre_xero_docs_ready && !blockers.length ? "ready" : "blocked",
     artifacts,
     timing,
     persisted,
@@ -2097,10 +2161,11 @@ async function prepareSesDocketRevision(
 ): Promise<SesPrepareResponse> {
   validateRequest(request);
   let selections: Array<
-    { mode: "job_id"; job_id: string } | {
-      mode: "job_number";
-      job_number: string;
-    }
+    | { mode: "job_id"; job_id: string }
+    | {
+        mode: "job_number";
+        job_number: string;
+      }
   >;
   if (request.selection.mode === "board_batch") {
     if (!deps.listBoardJobs) {
@@ -2110,15 +2175,19 @@ async function prepareSesDocketRevision(
     }
     selections = await deps.listBoardJobs(request.selection.limit as number);
   } else if (request.selection.mode === "job_id") {
-    selections = [{
-      mode: "job_id",
-      job_id: request.selection.job_id as string,
-    }];
+    selections = [
+      {
+        mode: "job_id",
+        job_id: request.selection.job_id as string,
+      },
+    ];
   } else {
-    selections = [{
-      mode: "job_number",
-      job_number: request.selection.job_number as string,
-    }];
+    selections = [
+      {
+        mode: "job_number",
+        job_number: request.selection.job_number as string,
+      },
+    ];
   }
   const results = await Promise.all(
     selections.map((selection, index) =>
@@ -2126,13 +2195,14 @@ async function prepareSesDocketRevision(
         {
           ...request,
           selection,
-          idempotency_key: selections.length > 1
-            ? `${request.idempotency_key}:job:${index}`
-            : request.idempotency_key,
+          idempotency_key:
+            selections.length > 1
+              ? `${request.idempotency_key}:job:${index}`
+              : request.idempotency_key,
         },
         selection,
         deps,
-      )
+      ),
     ),
   );
   return {
