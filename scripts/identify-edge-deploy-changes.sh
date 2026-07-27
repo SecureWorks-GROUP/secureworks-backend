@@ -33,6 +33,8 @@ is_verification_contract_path() {
   case "$1" in
     .github/workflows/deploy-edge-functions.yml | \
       scripts/identify-edge-deploy-changes.sh | \
+      scripts/check-edge-schema-preflight.sh | \
+      scripts/edge-function-schema-requirements.txt | \
       scripts/check-ops-api-source-actions.sh | \
       scripts/smoke-ops-api-action-surface.sh | \
       scripts/_ops-api-required-actions.txt)

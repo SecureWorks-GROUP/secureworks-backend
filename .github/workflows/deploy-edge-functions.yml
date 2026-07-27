@@ -7,6 +7,8 @@ on:
     paths:
       - 'supabase/functions/**'
       - 'scripts/identify-edge-deploy-changes.sh'
+      - 'scripts/check-edge-schema-preflight.sh'
+      - 'scripts/edge-function-schema-requirements.txt'
       - 'scripts/check-ops-api-source-actions.sh'
       - 'scripts/smoke-ops-api-action-surface.sh'
       - 'scripts/_ops-api-required-actions.txt'
@@ -34,6 +36,16 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           bash scripts/identify-edge-deploy-changes.sh
+
+      - name: Pre-deploy check required production schema
+        if: steps.changed.outputs.functions != ''
+        env:
+          CHANGED_FUNCTIONS: ${{ steps.changed.outputs.functions }}
+          PROJECT_REF: kevgrhcjxspbxgovpmfl
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          # Read-only catalog/ledger check. It never applies migrations.
+          bash scripts/check-edge-schema-preflight.sh
 
       - uses: supabase/setup-cli@v1
         if: steps.changed.outputs.functions != ''
