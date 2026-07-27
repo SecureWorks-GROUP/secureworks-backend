@@ -56,12 +56,12 @@ Deno.test("SWMS-26980 live fixture builds canonical v1 input without inventing U
     attribution: "bound",
   });
   assertEquals(input.classification.builder_key, "MLB");
-  assertEquals(input.classification.family, "ordinary_roof_portal");
+  assertEquals(input.classification.family, "unknown");
   assertEquals(input.source.builder_reference, "");
   assertEquals(input.source.po_or_external_ref, null);
   assertEquals(input.source.deliverables, []);
   assertEquals(input.source.portal_links, [{
-    role: "roof_report",
+    role: "assessment",
     url: "https://primeeco.tech/share/2ef11c67-8f63-48cb-9ff4-61bf71848f17",
     source: "job_detail",
   }]);
@@ -143,8 +143,7 @@ Deno.test("SWMS-26980 production-shape dry-run is HTTP-envelope ready, write-fre
   const codes = blockerCodes(result);
   assert(codes.includes("spine_missing_source"));
   assert(codes.includes("spine_missing_lineage"));
-  assert(codes.includes("capability_portal_degraded"));
-  assert(codes.includes("invoice_reference_missing"));
+  assert(codes.includes("family_unknown"));
   assert(!codes.includes("recovery-not-run"));
 });
 

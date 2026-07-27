@@ -204,11 +204,11 @@ curl -sS -X POST \
 ```
 
 The adapter uses the shared U2 cycle-evidence helpers and exact live card facts.
-It does not invent a missing U1 source/version/hash, portal capture, storey price,
-HR-CW classification or assessment recipe. Missing facts therefore return the
-named U4 blockers. For the sanitized SWMS-26980 production snapshot this is a
-deterministic HTTP-200 dry-run envelope with no persistence call and the specific
-source/lineage, portal-capability and pricing blockers.
+It does not invent a missing U1 source/version/hash, family classification,
+portal capture, storey price, HR-CW classification or assessment recipe. Missing
+facts therefore return the named U4 blockers. For the sanitized SWMS-26980
+production snapshot this is a deterministic HTTP-200 dry-run envelope with no
+persistence call and the specific source/lineage and `family_unknown` blockers.
 
 `dry_run:false` uses only the existing append-only U4 revision/artifact
 persistence. The shared server board read overlays a current ready revision as
