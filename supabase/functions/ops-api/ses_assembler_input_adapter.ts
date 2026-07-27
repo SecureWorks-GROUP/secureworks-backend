@@ -82,7 +82,7 @@ function text(value: unknown): string {
 
 function record(value: unknown): LiveRow {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as LiveRow
+    ? (value as LiveRow)
     : {};
 }
 
@@ -118,11 +118,14 @@ function hasExplicitValue(value: unknown): boolean {
 
 function reportText(value: unknown): string {
   if (Array.isArray(value)) {
-    return value.map((item) => {
-      if (typeof item === "string") return item.trim();
-      if (item && typeof item === "object") return JSON.stringify(item);
-      return String(item ?? "").trim();
-    }).filter(Boolean).join(", ");
+    return value
+      .map((item) => {
+        if (typeof item === "string") return item.trim();
+        if (item && typeof item === "object") return JSON.stringify(item);
+        return String(item ?? "").trim();
+      })
+      .filter(Boolean)
+      .join(", ");
   }
   if (value && typeof value === "object") return JSON.stringify(value);
   return text(value);
@@ -134,16 +137,14 @@ function tradeCountLabel(value: unknown): string {
   return `${count} ${count === 1 ? "trade" : "trades"}`;
 }
 
-function reportedLabourNote(
-  labourHours: unknown,
-  tradeCount: unknown,
-): string {
+function reportedLabourNote(labourHours: unknown, tradeCount: unknown): string {
   const hours = Number(labourHours);
   if (!Number.isFinite(hours) || hours <= 0) return "";
   const trades = Number(tradeCount);
-  const tradeNote = Number.isFinite(trades) && trades > 0
-    ? ` and ${tradeCountLabel(trades)}`
-    : "";
+  const tradeNote =
+    Number.isFinite(trades) && trades > 0
+      ? ` and ${tradeCountLabel(trades)}`
+      : "";
   return `Trade submission recorded ${hours} labour ${
     hours === 1 ? "hour" : "hours"
   }${tradeNote}.`;
@@ -172,7 +173,9 @@ function builderKey(snapshot: SesAssemblerLiveSnapshot): SesBuilderKey {
     detail.external_ref,
     snapshot.job.metadata?.requesting_company?.slug,
     snapshot.job.metadata?.requesting_company?.name,
-  ].map((value) => text(value).toLowerCase()).join(" ");
+  ]
+    .map((value) => text(value).toLowerCase())
+    .join(" ");
   if (/\bajbr\b/.test(token)) return "AJBR";
   if (/\bajs?\b/.test(token) || token.includes("alliance joinery")) {
     return "AJS";
@@ -180,19 +183,25 @@ function builderKey(snapshot: SesAssemblerLiveSnapshot): SesBuilderKey {
   if (
     /\b(mlb|ml builders?|major loss builders?)\b/.test(token) ||
     token.includes("mlbuilders")
-  ) return "MLB";
+  )
+    return "MLB";
   if (
     /\b(wb|bw|bwcwa)\b/.test(token) ||
-    token.includes("western build") || token.includes("builderwest")
-  ) return "WESTERN";
+    token.includes("western build") ||
+    token.includes("builderwest")
+  )
+    return "WESTERN";
   return "UNKNOWN";
 }
 
 function family(snapshot: SesAssemblerLiveSnapshot): SesFamilyId {
   const metadata = record(snapshot.job.metadata);
-  const explicit = text(metadata.makesafe_job_family).toLowerCase()
-    .replaceAll("-", "_").replaceAll(" ", "_");
-  const ownTemplate = metadata.own_template_requested === true ||
+  const explicit = text(metadata.makesafe_job_family)
+    .toLowerCase()
+    .replaceAll("-", "_")
+    .replaceAll(" ", "_");
+  const ownTemplate =
+    metadata.own_template_requested === true ||
     metadata.strata === true ||
     metadata.report_delivery === "own_document" ||
     snapshot.detail?.report_delivery === "own_document";
@@ -220,9 +229,7 @@ function family(snapshot: SesAssemblerLiveSnapshot): SesFamilyId {
   }
 }
 
-function lineageKind(
-  relation: unknown,
-): "none" | "revision" | "sibling" {
+function lineageKind(relation: unknown): "none" | "revision" | "sibling" {
   const value = text(relation);
   if (value === "sibling_of") return "sibling";
   if (value) return "revision";
@@ -240,17 +247,16 @@ function workflow(
   if (reason === "revision" || relation === "revision_of") return "revision";
   if (
     array(intakeCase?.blocked_reasons).some((item) =>
-      text(item).toLowerCase().includes("no_access")
+      text(item).toLowerCase().includes("no_access"),
     )
-  ) return "no_access";
+  )
+    return "no_access";
   return "active";
 }
 
-function sourceCase(
-  cases: LiveRow[],
-): LiveRow | null {
+function sourceCase(cases: LiveRow[]): LiveRow | null {
   const live = cases.filter((item) =>
-    ["confirmed_live_job", "blocked_live_job"].includes(text(item.state))
+    ["confirmed_live_job", "blocked_live_job"].includes(text(item.state)),
   );
   return live.length === 1 ? live[0] : null;
 }
@@ -356,20 +362,19 @@ export function physicalReportRenderJob(
   const followUpRequired = !Object.hasOwn(checklist, "follow_up_required")
     ? "Follow-up status: not recorded in trade submission."
     : checklist.follow_up_required === true
-    ? "Follow-up required."
-    : checklist.follow_up_required === false
-    ? "No further works required."
-    : reportText(checklist.follow_up_required) ||
-      "Follow-up status: not recorded in trade submission.";
+      ? "Follow-up required."
+      : checklist.follow_up_required === false
+        ? "No further works required."
+        : reportText(checklist.follow_up_required) ||
+          "Follow-up status: not recorded in trade submission.";
   return {
     ref: input.source.builder_reference,
     address: input.source.site_address || "Address not recorded",
     contact: firstText(snapshot.job.client_name),
     date: attendanceDate(attendance),
-    arrival: attendanceTime(firstText(
-      assignment.arrived_at,
-      checklist.arrival_time,
-    )),
+    arrival: attendanceTime(
+      firstText(assignment.arrived_at, checklist.arrival_time),
+    ),
     crew: firstText(
       assignment.crew_name,
       tradeCountLabel(checklist.trade_count),
@@ -395,8 +400,10 @@ export function physicalReportRenderJob(
     access_issues: accessIssues,
     follow_up_required: followUpRequired,
     photos: photoArtifacts.map((photo) => {
-      const source = input.cycle_facts.photos.find((item) =>
-        item.id === photo.photo_id && item.path_or_key === photo.source_pointer
+      const source = input.cycle_facts.photos.find(
+        (item) =>
+          item.id === photo.photo_id &&
+          item.path_or_key === photo.source_pointer,
       );
       let binary = "";
       for (const byte of photo.bytes) binary += String.fromCharCode(byte);
@@ -416,7 +423,9 @@ function currentCycle(snapshot: SesAssemblerLiveSnapshot): {
   attribution: "bound" | "backfill_cycle_scope" | "legacy_unscoped";
 } {
   const detail = snapshot.detail || {};
-  const ids = snapshot.cycles.map((item) => text(item.id)).filter(Boolean)
+  const ids = snapshot.cycles
+    .map((item) => text(item.id))
+    .filter(Boolean)
     .sort();
   const id = text(detail.attendance_cycle_id);
   const attribution = text(detail.cycle_attribution);
@@ -424,11 +433,12 @@ function currentCycle(snapshot: SesAssemblerLiveSnapshot): {
     ids,
     id,
     number: currentCycleNumber(detail),
-    attribution: attribution === "bound"
-      ? "bound"
-      : attribution === "backfill_cycle_scope"
-      ? "backfill_cycle_scope"
-      : "legacy_unscoped",
+    attribution:
+      attribution === "bound"
+        ? "bound"
+        : attribution === "backfill_cycle_scope"
+          ? "backfill_cycle_scope"
+          : "legacy_unscoped",
   };
 }
 
@@ -454,7 +464,7 @@ export function buildSesAssemblerInput(
     cycle.id || null,
   );
   const workOrders = snapshot.documents.filter((item) =>
-    ["work_order", "workorder", "wo"].includes(text(item.type).toLowerCase())
+    ["work_order", "workorder", "wo"].includes(text(item.type).toLowerCase()),
   );
   const reportOnly = [
     "ordinary_roof_portal",
@@ -477,23 +487,31 @@ export function buildSesAssemblerInput(
     url: link.url,
     source: "job_detail" as const,
   }));
-  const photos = currentMedia.filter((item) => {
-    const type = text(item.type).toLowerCase();
-    const phase = text(item.phase).toLowerCase();
-    return type.includes("photo") || type.includes("image") ||
-      phase.includes("completion") || phase.includes("after");
-  }).sort((left, right) =>
-    Number(left.sort_order ?? left.order_index ?? 0) -
-      Number(right.sort_order ?? right.order_index ?? 0) ||
-    text(left.id).localeCompare(text(right.id))
-  ).map((item, index) => ({
-    id: text(item.id),
-    path_or_key: `job_media:${text(item.id)}`,
-    ...(text(item.label || item.caption)
-      ? { caption: text(item.label || item.caption) }
-      : {}),
-    order: index + 1,
-  }));
+  const photos = currentMedia
+    .filter((item) => {
+      const type = text(item.type).toLowerCase();
+      const phase = text(item.phase).toLowerCase();
+      return (
+        type.includes("photo") ||
+        type.includes("image") ||
+        phase.includes("completion") ||
+        phase.includes("after")
+      );
+    })
+    .sort(
+      (left, right) =>
+        Number(left.sort_order ?? left.order_index ?? 0) -
+          Number(right.sort_order ?? right.order_index ?? 0) ||
+        text(left.id).localeCompare(text(right.id)),
+    )
+    .map((item, index) => ({
+      id: text(item.id),
+      path_or_key: `job_media:${text(item.id)}`,
+      ...(text(item.label || item.caption)
+        ? { caption: text(item.label || item.caption) }
+        : {}),
+      order: index + 1,
+    }));
   const roofFields = record(snapshot.roof_draft?.fields_json);
   const hazardTerms = stringArray(
     metadata.hrcw_source_hazard_terms,
@@ -503,18 +521,21 @@ export function buildSesAssemblerInput(
     metadata.hrcw_categories,
     intakeCase?.raw_identity_json?.hrcw_categories,
   ).filter((item) =>
-    ["asbestos", "work_at_height", "structural", "other_registered_hrcw"]
-      .includes(item)
+    [
+      "asbestos",
+      "work_at_height",
+      "structural",
+      "other_registered_hrcw",
+    ].includes(item),
   ) as SesAssemblerInputV1["hrcw"]["categories"];
-  const sourceVersion = intakeCase?.source_version == null
-    ? ""
-    : String(intakeCase.source_version);
+  const sourceVersion =
+    intakeCase?.source_version == null ? "" : String(intakeCase.source_version);
   const sourceHash = text(intakeCase?.source_content_hash) as SesSha256;
   const lineageId = text(intakeCase?.lineage_id);
   const reportTo = firstText(company.report_recipient);
   const invoiceTo = matrix.ok ? matrix.row.invoice_to : null;
-  const priorPack = snapshot.legacy_packs.find((item) =>
-    text(item.status).toLowerCase() === "sent"
+  const priorPack = snapshot.legacy_packs.find(
+    (item) => text(item.status).toLowerCase() === "sent",
   );
 
   return {
@@ -546,58 +567,65 @@ export function buildSesAssemblerInput(
       family: familyId,
       subtype: familyId === "temporary_fencing" ? "temporary_fencing" : null,
       report_only: reportOnly,
-      report_delivery: familyId === "ordinary_roof_portal"
-        ? "portal"
-        : familyId === "own_template_roof"
-        ? "own_document"
-        : null,
+      report_delivery:
+        familyId === "ordinary_roof_portal"
+          ? "portal"
+          : familyId === "own_template_roof"
+            ? "own_document"
+            : null,
       strata: familyId === "own_template_roof",
       own_template_requested: familyId === "own_template_roof",
       workflow: workflow(intakeCase),
       lineage_kind: lineageKind(intakeCase?.parent_relation),
       family_matrix_version: SES_FAMILY_MATRIX_VERSION,
-      assessment_outbound_recipe_version: familyId === "assessment_quote"
-        ? SES_ASSESSMENT_RECIPE_VERSION
-        : null,
+      assessment_outbound_recipe_version:
+        familyId === "assessment_quote" ? SES_ASSESSMENT_RECIPE_VERSION : null,
     },
     source: {
       work_order_sender: reportTo || null,
       builder_reference: builderReference,
-      po_or_external_ref: firstText(
-        intakeCase?.builder_po_canonical,
-        intakeCase?.external_ref_canonical,
-      ) || null,
-      site_address: firstText(intakeCase?.site_address, job.site_address) ||
-        null,
+      po_or_external_ref:
+        firstText(
+          intakeCase?.builder_po_canonical,
+          intakeCase?.external_ref_canonical,
+        ) || null,
+      site_address:
+        firstText(intakeCase?.site_address, job.site_address) || null,
       site_suburb: firstText(intakeCase?.site_suburb, job.site_suburb) || null,
-      instruction_text: firstText(
-        intakeCase?.raw_identity_json?.instruction_text,
-        intakeCase?.raw_identity_json?.scope,
-      ) || null,
-      deliverables: [{
-        id: text(intakeCase?.deliverable_ref_canonical),
-        kind: familyId,
-      }].filter((item) => item.id),
-      attachment_pointers: workOrders.map((item) =>
-        `job_document:${text(item.id)}`
-      ).filter((item) => !item.endsWith(":")).sort(),
+      instruction_text:
+        firstText(
+          intakeCase?.raw_identity_json?.instruction_text,
+          intakeCase?.raw_identity_json?.scope,
+        ) || null,
+      deliverables: [
+        {
+          id: text(intakeCase?.deliverable_ref_canonical),
+          kind: familyId,
+        },
+      ].filter((item) => item.id),
+      attachment_pointers: workOrders
+        .map((item) => `job_document:${text(item.id)}`)
+        .filter((item) => !item.endsWith(":"))
+        .sort(),
       portal_links: portalLinks,
     },
     cycle_facts: {
-      trade_report: reportOnly ? null : report
-        ? {
-          id: report.id ?? null,
-          status: report.status ?? null,
-          submitted_at: report.submitted_at ?? null,
-          checklist_json: report.checklist_json ?? {},
-          notes: report.notes ?? null,
-        }
-        : null,
+      trade_report: reportOnly
+        ? null
+        : report
+          ? {
+              id: report.id ?? null,
+              status: report.status ?? null,
+              submitted_at: report.submitted_at ?? null,
+              checklist_json: report.checklist_json ?? {},
+              notes: report.notes ?? null,
+            }
+          : null,
       photos: reportOnly ? [] : photos,
-      roof_report_fields: familyId === "own_template_roof" &&
-          Object.keys(roofFields).length
-        ? roofFields
-        : null,
+      roof_report_fields:
+        familyId === "own_template_roof" && Object.keys(roofFields).length
+          ? roofFields
+          : null,
       hours_and_materials: explicitHoursAndMaterials(snapshot, report),
       prior_release: {
         released: !!priorPack,
@@ -606,9 +634,11 @@ export function buildSesAssemblerInput(
       },
     },
     hrcw: {
-      hrcw: metadata.hrcw === true ||
+      hrcw:
+        metadata.hrcw === true ||
         intakeCase?.raw_identity_json?.hrcw === true ||
-        categories.length > 0 || hazardTerms.length > 0,
+        categories.length > 0 ||
+        hazardTerms.length > 0,
       categories,
       source_hazard_terms: hazardTerms,
     },
@@ -617,14 +647,13 @@ export function buildSesAssemblerInput(
       invoice_to: invoiceTo,
     },
     readiness: {
-      readiness_revision:
-        (text(snapshot.readiness?.readiness_revision) || null) as
-          | SesSha256
-          | null,
-      dependency_generation:
-        Number.isFinite(Number(snapshot.readiness?.dependency_generation))
-          ? Number(snapshot.readiness?.dependency_generation)
-          : null,
+      readiness_revision: (text(snapshot.readiness?.readiness_revision) ||
+        null) as SesSha256 | null,
+      dependency_generation: Number.isFinite(
+        Number(snapshot.readiness?.dependency_generation),
+      )
+        ? Number(snapshot.readiness?.dependency_generation)
+        : null,
     },
   };
 }
@@ -665,9 +694,10 @@ export async function loadSesAssemblerLiveSnapshot(
   selection: Selection,
 ): Promise<SesAssemblerLiveSnapshot> {
   let jobQuery = client.from("jobs").select("*").eq("type", "makesafe");
-  jobQuery = selection.mode === "job_id"
-    ? jobQuery.eq("id", selection.job_id)
-    : jobQuery.eq("job_number", selection.job_number);
+  jobQuery =
+    selection.mode === "job_id"
+      ? jobQuery.eq("id", selection.job_id)
+      : jobQuery.eq("job_number", selection.job_number);
   const job = await one(jobQuery.maybeSingle(), "jobs");
   if (!job) {
     throw new SesAssemblerAdapterError(
@@ -691,9 +721,11 @@ export async function loadSesAssemblerLiveSnapshot(
     packs,
   ] = await Promise.all([
     one(
-      client.from("makesafe_job_details")
+      client
+        .from("makesafe_job_details")
         .select("*, makesafe_companies:requesting_company_id(*)")
-        .eq("job_id", jobId).maybeSingle(),
+        .eq("job_id", jobId)
+        .maybeSingle(),
       "makesafe_job_details",
     ),
     many(
@@ -701,43 +733,67 @@ export async function loadSesAssemblerLiveSnapshot(
       "makesafe_intake_cases.job_id",
     ),
     many(
-      client.from("makesafe_intake_cases").select("*")
+      client
+        .from("makesafe_intake_cases")
+        .select("*")
         .eq("target_job_id", jobId),
       "makesafe_intake_cases.target_job_id",
     ),
     many(
-      client.from("makesafe_attendance_cycles").select("*")
-        .eq("job_id", jobId).order("cycle_number", { ascending: true }),
+      client
+        .from("makesafe_attendance_cycles")
+        .select("*")
+        .eq("job_id", jobId)
+        .order("cycle_number", { ascending: true }),
       "makesafe_attendance_cycles",
     ),
     many(
-      client.from("job_service_reports").select("*").eq("job_id", jobId)
+      client
+        .from("job_service_reports")
+        .select("*")
+        .eq("job_id", jobId)
         .order("submitted_at", { ascending: false }),
       "job_service_reports",
     ),
     many(
-      client.from("job_assignments").select("*").eq("job_id", jobId)
+      client
+        .from("job_assignments")
+        .select("*")
+        .eq("job_id", jobId)
         .neq("status", "cancelled"),
       "job_assignments",
     ),
     many(
-      client.from("job_media").select("*").eq("job_id", jobId)
+      client
+        .from("job_media")
+        .select("*")
+        .eq("job_id", jobId)
         .order("created_at", { ascending: true }),
       "job_media",
     ),
     many(
-      client.from("job_documents").select("*").eq("job_id", jobId)
+      client
+        .from("job_documents")
+        .select("*")
+        .eq("job_id", jobId)
         .order("created_at", { ascending: true }),
       "job_documents",
     ),
     one(
-      client.from("makesafe_roof_report_drafts").select("*")
-        .eq("job_id", jobId).eq("pack_kind", "roof").maybeSingle(),
+      client
+        .from("makesafe_roof_report_drafts")
+        .select("*")
+        .eq("job_id", jobId)
+        .eq("pack_kind", "roof")
+        .maybeSingle(),
       "makesafe_roof_report_drafts",
     ),
     one(
-      client.from("makesafe_readiness_current").select("*")
-        .eq("job_id", jobId).maybeSingle(),
+      client
+        .from("makesafe_readiness_current")
+        .select("*")
+        .eq("job_id", jobId)
+        .maybeSingle(),
       "makesafe_readiness_current",
     ),
     many(
@@ -765,8 +821,11 @@ export async function loadSesAssemblerLiveSnapshot(
 }
 
 function fileName(row: LiveRow, fallback: string): string {
-  const raw = firstText(row.file_name, row.filename, fallback)
-    .replaceAll("\\", "/").split("/").pop() || fallback;
+  const raw =
+    firstText(row.file_name, row.filename, fallback)
+      .replaceAll("\\", "/")
+      .split("/")
+      .pop() || fallback;
   return raw.replaceAll("..", "").replace(/[^A-Za-z0-9._ -]+/g, "-");
 }
 
@@ -828,23 +887,28 @@ export function createSesAssemblerRuntimeDependencies(
     resolveInput: load,
     listBoardJobs: async (limit) => {
       const rows = await many(
-        client.from("makesafe_job_details").select("job_id")
+        client
+          .from("makesafe_job_details")
+          .select("job_id")
           .eq("substatus", "admin_to_send_report")
           .order("updated_at", { ascending: true })
           .limit(limit),
         "makesafe_job_details.board_batch",
       );
-      return rows.map((item) => ({
-        mode: "job_id" as const,
-        job_id: text(item.job_id),
-      })).filter((item) => item.job_id);
+      return rows
+        .map((item) => ({
+          mode: "job_id" as const,
+          job_id: text(item.job_id),
+        }))
+        .filter((item) => item.job_id);
     },
     resolveSourceArtifacts: async (input) => {
       const snapshot = snapshotFor(input);
       const byPointer = new Map(
-        snapshot.documents.map((
+        snapshot.documents.map((item) => [
+          `job_document:${text(item.id)}`,
           item,
-        ) => [`job_document:${text(item.id)}`, item]),
+        ]),
       );
       const out = [];
       for (const pointer of input.source.attachment_pointers) {
@@ -932,8 +996,8 @@ export function createSesAssemblerRuntimeDependencies(
     },
     resolveSwmsArtifact: async (input) => {
       const snapshot = snapshotFor(input);
-      const row = snapshot.documents.find((item) =>
-        text(item.type).toLowerCase() === "swms"
+      const row = snapshot.documents.find(
+        (item) => text(item.type).toLowerCase() === "swms",
       );
       if (!row) return null;
       const url = artifactUrl(row);
@@ -989,14 +1053,18 @@ export function normalizeSesPrepareRequest(
   const jobId = text(selection.job_id);
   const jobNumber = text(selection.job_number);
   const limit = Number(selection.limit);
-  const valid = mode === "job_id"
-    ? !!jobId && !jobNumber && selection.limit == null
-    : mode === "job_number"
-    ? !!jobNumber && !jobId && selection.limit == null
-    : mode === "board_batch"
-    ? !jobId && !jobNumber && Number.isSafeInteger(limit) && limit >= 1 &&
-      limit <= 50
-    : false;
+  const valid =
+    mode === "job_id"
+      ? !!jobId && !jobNumber && selection.limit == null
+      : mode === "job_number"
+        ? !!jobNumber && !jobId && selection.limit == null
+        : mode === "board_batch"
+          ? !jobId &&
+            !jobNumber &&
+            Number.isSafeInteger(limit) &&
+            limit >= 1 &&
+            limit <= 50
+          : false;
   if (!valid) {
     throw new SesAssemblerAdapterError(
       "ses_selection_invalid",
@@ -1005,11 +1073,12 @@ export function normalizeSesPrepareRequest(
     );
   }
   return {
-    selection: mode === "job_id"
-      ? { mode, job_id: jobId }
-      : mode === "job_number"
-      ? { mode, job_number: jobNumber }
-      : { mode: "board_batch", limit },
+    selection:
+      mode === "job_id"
+        ? { mode, job_id: jobId }
+        : mode === "job_number"
+          ? { mode, job_number: jobNumber }
+          : { mode: "board_batch", limit },
     idempotency_key: idempotencyKey,
     assembler_version: SES_ASSEMBLER_VERSION,
     dry_run: body.dry_run,

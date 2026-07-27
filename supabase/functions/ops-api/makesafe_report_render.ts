@@ -178,8 +178,8 @@ async function resolvePhotoBytes(
     for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
     return {
       bytesBase64: btoa(bin),
-      contentType: resp.headers.get("content-type") || p.contentType ||
-        "image/jpeg",
+      contentType:
+        resp.headers.get("content-type") || p.contentType || "image/jpeg",
     };
   } catch {
     return null;
@@ -326,8 +326,10 @@ export async function renderMakesafeReportPdf(
     ["Site Findings", job.findings || ""],
     ["Works Completed", job.works || ""],
     ["Materials and Equipment", job.materials || ""],
-    ["Access and Follow-up", [job.access_issues, job.follow_up_required]
-      .filter(Boolean).join("\n")],
+    [
+      "Access and Follow-up",
+      [job.access_issues, job.follow_up_required].filter(Boolean).join("\n"),
+    ],
   ];
   for (const [title, text] of proseSections) {
     y = section(title, 10);
@@ -342,12 +344,10 @@ export async function renderMakesafeReportPdf(
     ? Math.max(0, Math.floor(job.photo_limit as number))
     : DEFAULT_REPORT_PHOTO_LIMIT;
   const resolved: MakesafeReportPhoto[] = [];
-  for (
-    const p of (job.photos || []).slice(
-      0,
-      Math.min(limit, MAX_REPORT_PHOTO_LIMIT),
-    )
-  ) {
+  for (const p of (job.photos || []).slice(
+    0,
+    Math.min(limit, MAX_REPORT_PHOTO_LIMIT),
+  )) {
     const r = await resolvePhotoBytes(p);
     if (r) resolved.push(r);
   }
