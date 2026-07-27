@@ -148,6 +148,7 @@ import {
   createSesAssemblerRuntimeDependencies,
   normalizeSesPrepareRequest,
   SesAssemblerAdapterError,
+  summarizeSesPrepareResponseForHttp,
 } from './ses_assembler_input_adapter.ts'
 import {
   prepare_ses_docket_revision,
@@ -3853,13 +3854,14 @@ if (import.meta.main) serve(async (req: Request) => {
           const actor = authMode === 'routine'
             ? 'makesafe-reporting-routine'
             : authUser?.email || `ops-api:${authMode}`
-          return json(await prepare_ses_docket_revision(
+          const response = await prepare_ses_docket_revision(
             request,
             createSesAssemblerRuntimeDependencies(client, {
               org_id: DEFAULT_ORG_ID,
               created_by: actor,
             }),
-          ))
+          )
+          return json(summarizeSesPrepareResponseForHttp(response))
         } catch (error) {
           if (error instanceof SesAssemblerAdapterError) {
             return json({ error: error.message, code: error.code }, error.status)

@@ -30,6 +30,12 @@ For each job it produces one content-addressed pre-Xero revision containing:
 - the Captain review spec/HTML, an inert release proposal, capability evidence,
   timing evidence and hashes.
 
+The internal revision and append-only artifact store retain the complete PDF and
+photo bytes. The `prepare_ses_docket_revision` HTTP response is a bounded proof
+envelope: each artifact exposes only its role, path, media type, SHA-256, byte
+size and metadata. Callers do not receive raw bytes in JSON, which keeps a
+normal multi-megabyte evidence pack below the edge response limit.
+
 The append-only persistence migration adds the private artifact bucket, revision
 and artifact ledgers, a current-revision view, and one idempotent commit RPC. The
 SQL wall rejects any revision whose envelope or release proposal grants invoice,
@@ -156,7 +162,7 @@ does not write the board or job state.
 - `deno check` passed for all five new TypeScript surfaces.
 - `deno fmt --check` passed.
 - `deno lint` passed on the new surfaces.
-- Targeted U4 suite: 14 passed, 0 failed, including full photo-byte recovery,
+- Targeted U4 suite: 15 passed, 0 failed, including full photo-byte recovery,
   missing-photo rejection and submitted-without-screenshot rejection.
 - Required root gate:
   `deno check --config deno.jsonc supabase/functions/ops-api/index.ts` passed.

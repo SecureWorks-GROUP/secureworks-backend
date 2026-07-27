@@ -7,7 +7,9 @@
 import {
   SES_ASSEMBLER_VERSION,
   SES_INPUT_CONTRACT_VERSION,
+  type SesArtifact,
   type SesAssemblerInputV1,
+  type SesPreparedRevision,
   type SesPrepareRequest,
   type SesSha256,
 } from "./ses_docket_envelope.ts";
@@ -27,6 +29,7 @@ import {
   SES_ASSESSMENT_RECIPE_VERSION,
   type SesPhotoArtifact,
   type SesPrepareDependencies,
+  type SesPrepareResponse,
 } from "./ses_prepare_docket_revision.ts";
 import { createSesDocketPersistenceAdapter } from "./ses_docket_persistence.ts";
 import {
@@ -49,6 +52,40 @@ export class SesAssemblerAdapterError extends Error {
     this.status = status;
     this.code = code;
   }
+}
+
+export type SesHttpArtifact = Omit<SesArtifact, "bytes">;
+export type SesHttpPreparedRevision =
+  & Omit<SesPreparedRevision, "artifacts">
+  & { artifacts: SesHttpArtifact[] };
+export type SesHttpPrepareResponse =
+  & Omit<SesPrepareResponse, "results">
+  & { results: SesHttpPreparedRevision[] };
+
+/**
+ * The U4 HTTP response is an evidence envelope, not an artifact transport.
+ * Raw PDFs and photos remain available to the persistence adapter, while the
+ * caller receives their exact paths, hashes, sizes, media types and metadata.
+ * Serializing Uint8Array values into JSON expands every byte into a numeric
+ * object property and can exhaust the edge worker on a normal photo pack.
+ */
+export function summarizeSesPrepareResponseForHttp(
+  response: SesPrepareResponse,
+): SesHttpPrepareResponse {
+  return {
+    ...response,
+    results: response.results.map((result) => ({
+      ...result,
+      artifacts: result.artifacts.map((artifact) => ({
+        role: artifact.role,
+        path: artifact.path,
+        media_type: artifact.media_type,
+        content_hash: artifact.content_hash,
+        size_bytes: artifact.size_bytes,
+        metadata: artifact.metadata,
+      })),
+    })),
+  };
 }
 
 // Supabase rows in this function are intentionally schema-dynamic: production
