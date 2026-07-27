@@ -512,18 +512,12 @@ sequence and seven-card first tranche are in
 
 ## The SES Money And Outbound Seal Is Write-Once
 
-Apply `20260728030000_makesafe_ses_fence_hardening.sql` before its matching Edge
-functions. The migration owns the write-once `jobs.ses_money_sealed_at`
-classification and the SES-native invoice-void prepare/approve/execute authority.
-All legacy ACCREC effects require the invoice mirror's non-null `job_id`; missing
-invoice/job rows and lookup errors refuse, never classify safe. Delivery guards
-bind to invoice/source identities rather than caller-supplied job ids. The shared
-runtime boundary is `_shared/sealed_ses_money_fence.ts`.
-
-`ops_api_version` reports only build-time metadata from `deploy_metadata.ts`.
-Canonical deploy scripts stamp that module immediately before bundling; an
-unstamped or bypassed build reports `metadata_status: unavailable`, never a
-remembered commit or deployment time.
+The write-once SES money/outbound seal and its approved invoice-void release
+path are owned by `docs/project-knowledge/sync-layer.md`; deploy ordering and
+build-stamped version truth are owned by
+`docs/project-knowledge/EDGE_DEPLOY_LANE.md` and
+`docs/project-knowledge/OPS_API_SOURCE_OF_TRUTH.md`. The shared runtime
+boundary is `_shared/sealed_ses_money_fence.ts`.
 
 ## The Repository Root Stays npm-Package-Free
 

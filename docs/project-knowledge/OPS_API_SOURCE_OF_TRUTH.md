@@ -110,6 +110,7 @@ The live function must prove:
 - `source_repo=secureworks-site`
 - `build_label` is present
 - `commit_sha` matches the approved deploy commit
+- `deployed_at` matches the timestamp captured for that bundled deploy
 - all required actions in `scripts/_ops-api-required-actions.txt` are recognised
 
 Recognition is proved without changing production data. Each manifest line may
