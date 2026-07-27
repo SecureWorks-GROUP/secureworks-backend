@@ -47,9 +47,8 @@ Deno.test("legacy invoice sends hit the sealed SES U6R gate before provider effe
   const approveProvider = INDEX.indexOf("xeroPost(`/Invoices/${asId}`", approveStart);
   assert(approveGate > approveStart && approveGate < approveProvider);
   assertStringIncludes(INDEX, "invoice_obligation_revision_id");
-  assertStringIncludes(INDEX, "body.release_revision_id");
-  assertStringIncludes(INDEX, "route_kind', 'invoice'");
   assertStringIncludes(INDEX, "code: 'u6r_release_required'");
+  assertStringIncludes(INDEX, "U6R SEND IT is the only release and provider-effect path.");
   assertStringIncludes(INDEX, "execute_ses_release_revision");
 });
 

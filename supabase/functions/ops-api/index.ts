@@ -4368,7 +4368,6 @@ if (import.meta.main) serve(async (req: Request) => {
         await assertLegacySesInvoiceSendAllowed(
           client,
           siId,
-          body.release_revision_id,
           'send_invoice_email',
         )
 
@@ -4402,7 +4401,6 @@ if (import.meta.main) serve(async (req: Request) => {
         await assertLegacySesInvoiceSendAllowed(
           client,
           asId,
-          body.release_revision_id,
           'approve_and_send_invoice',
         )
 
@@ -21307,7 +21305,6 @@ function computeReferenceSuffix(jobNumber: string, reference: string): string | 
 async function assertLegacySesInvoiceSendAllowed(
   client: any,
   xeroInvoiceId: string,
-  releaseRevisionId: string | null | undefined,
   action: string,
 ) {
   const invoice = await client.from('xero_invoices')
@@ -21334,43 +21331,13 @@ async function assertLegacySesInvoiceSendAllowed(
   }
   if (!docket.data) return
 
-  const release = await client.from('makesafe_release_revisions')
-    .select('id,state')
-    .eq('id', releaseRevisionId || '')
-    .in('state', ['approved', 'dispatching'])
-    .maybeSingle()
-  const member = release.data
-    ? await client.from('makesafe_release_revision_members')
-      .select('release_revision_id')
-      .eq('release_revision_id', release.data.id)
-      .eq('job_id', invoice.data.job_id)
-      .eq('docket_revision_id', docket.data.id)
-      .eq('invoice_obligation_revision_id', invoice.data.invoice_obligation_revision_id)
-      .maybeSingle()
-    : { data: null, error: null }
-  const route = release.data
-    ? await client.from('makesafe_release_revision_routes')
-      .select('release_revision_id')
-      .eq('release_revision_id', release.data.id)
-      .eq('route_kind', 'invoice')
-      .eq('required', true)
-      .maybeSingle()
-    : { data: null, error: null }
-  if (release.error || member.error || route.error) {
-    throw new ApiError(
-      `The ${action} SES release gate could not check the current U6R authority.`,
-      503,
-    )
-  }
-  if (release.data && member.data && route.data) return
-
   throw new ApiError(409, {
     success: false,
     refusal: {
       state: 'refused',
       code: 'u6r_release_required',
-      fact: `The sealed SES invoice cannot use legacy ${action} without a current U6R release revision authorising this exact invoice send.`,
-      recovery_action: 'Prepare and approve the exact U6R release revision, then use execute_ses_release_revision.',
+      fact: `The sealed SES invoice cannot use legacy ${action}; U6R SEND IT is the only release and provider-effect path.`,
+      recovery_action: 'Complete the U6 review, approve SEND IT, then use execute_ses_release_revision for the exact route and closeout.',
     },
   })
 }
