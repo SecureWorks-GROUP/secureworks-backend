@@ -86,9 +86,10 @@ Deno.test("terminal accounting is marker-bound, service-role-only, and requires 
   assertStringIncludes(sql, '"deletable_store_cleanup_verified":true');
   assertStringIncludes(sql, '"projection_exclusion_verified":true');
   assertStringIncludes(sql, "OLD.state = 'cleanup_complete'");
-  assertStringIncludes(
-    sql,
-    "run.state IN ('cleanup_complete', 'terminal')",
+  assertStringIncludes(sql, "run.state = 'terminal'");
+  assert(
+    !sql.includes("run.state IN ('cleanup_complete', 'terminal')"),
+    "fresh-source health must not exclude cleanup_complete runs",
   );
   assertStringIncludes(sql, "run.source_post_ids ? email.post_id");
   assertStringIncludes(sql, "ENABLE ROW LEVEL SECURITY");

@@ -486,7 +486,7 @@ AS $$
       AND NOT EXISTS (
         SELECT 1
         FROM public.ses_synthetic_livefire_runs run
-        WHERE run.state IN ('cleanup_complete', 'terminal')
+        WHERE run.state = 'terminal'
           AND run.source_post_ids ? email.post_id
       )
   ),
