@@ -217,3 +217,44 @@ deno task test:ops-api
 portal queue cardinality, legacy send-pack cycle fixtures, and other tests
 outside the changed U4 files); no changed U4 test failed
 ```
+
+## Post-deploy dry-run resource correction
+
+PR 410 made the physical report complete, including bounded captioned job
+photos and the submitted access/follow-up facts. PR 411 then removed raw
+`Uint8Array` values from the HTTP response. After both deployed successfully,
+the authenticated SWMS-261017 dry-run still returned:
+
+```json
+{
+  "code": "WORKER_RESOURCE_LIMIT",
+  "message": "Function failed due to not having enough compute resources (please check logs)"
+}
+```
+
+The response serializer was no longer the failing boundary. Profiling the exact
+11 production photos (5,749,347 bytes total) showed that the synchronous dry-run
+still did two binary jobs it did not need:
+
+- converting photo bytes into the domain-canonical artifact hash peaked at
+  approximately 247 MB RSS;
+- base64 conversion and jsPDF report rendering peaked at approximately 218 MB
+  RSS.
+
+The corrected physical dry-run is metadata-only. It resolves each photo
+sequentially, records its id, caption, raw SHA-256, byte size, media type and
+intended pack path, then releases the bytes. It never calls the retained-photo
+resolver or the physical PDF renderer. The real non-dry pack build still owns
+full photo embedding and persistence. No migration is added.
+
+Local regression evidence uses the real 11-photo size distribution:
+
+```text
+targeted U4 tests: 34 passed, 0 failed
+11-photo proof assembly: 4 ms in the unit boundary
+real-file SHA-256 proof loop: 18 ms, 1,532-byte proof JSON, ~82 MB peak RSS
+raw photo bytes in dry-run response: none
+```
+
+Fresh authenticated production envelopes for both SWMS-261017 and SWMS-261016
+remain required after this correction merges and deploys.

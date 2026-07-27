@@ -28,6 +28,7 @@ import { extractPortalLinks } from "./makesafe_portal_guard.ts";
 import {
   SES_ASSESSMENT_RECIPE_VERSION,
   type SesPhotoArtifact,
+  type SesPhotoProof,
   type SesPrepareDependencies,
   type SesPrepareResponse,
 } from "./ses_prepare_docket_revision.ts";
@@ -178,10 +179,9 @@ function reportedLabourNote(labourHours: unknown, tradeCount: unknown): string {
   const hours = Number(labourHours);
   if (!Number.isFinite(hours) || hours <= 0) return "";
   const trades = Number(tradeCount);
-  const tradeNote =
-    Number.isFinite(trades) && trades > 0
-      ? ` and ${tradeCountLabel(trades)}`
-      : "";
+  const tradeNote = Number.isFinite(trades) && trades > 0
+    ? ` and ${tradeCountLabel(trades)}`
+    : "";
   return `Trade submission recorded ${hours} labour ${
     hours === 1 ? "hour" : "hours"
   }${tradeNote}.`;
@@ -220,14 +220,16 @@ function builderKey(snapshot: SesAssemblerLiveSnapshot): SesBuilderKey {
   if (
     /\b(mlb|ml builders?|major loss builders?)\b/.test(token) ||
     token.includes("mlbuilders")
-  )
+  ) {
     return "MLB";
+  }
   if (
     /\b(wb|bw|bwcwa)\b/.test(token) ||
     token.includes("western build") ||
     token.includes("builderwest")
-  )
+  ) {
     return "WESTERN";
+  }
   return "UNKNOWN";
 }
 
@@ -237,8 +239,7 @@ function family(snapshot: SesAssemblerLiveSnapshot): SesFamilyId {
     .toLowerCase()
     .replaceAll("-", "_")
     .replaceAll(" ", "_");
-  const ownTemplate =
-    metadata.own_template_requested === true ||
+  const ownTemplate = metadata.own_template_requested === true ||
     metadata.strata === true ||
     metadata.report_delivery === "own_document" ||
     snapshot.detail?.report_delivery === "own_document";
@@ -284,16 +285,17 @@ function workflow(
   if (reason === "revision" || relation === "revision_of") return "revision";
   if (
     array(intakeCase?.blocked_reasons).some((item) =>
-      text(item).toLowerCase().includes("no_access"),
+      text(item).toLowerCase().includes("no_access")
     )
-  )
+  ) {
     return "no_access";
+  }
   return "active";
 }
 
 function sourceCase(cases: LiveRow[]): LiveRow | null {
   const live = cases.filter((item) =>
-    ["confirmed_live_job", "blocked_live_job"].includes(text(item.state)),
+    ["confirmed_live_job", "blocked_live_job"].includes(text(item.state))
   );
   return live.length === 1 ? live[0] : null;
 }
@@ -399,11 +401,11 @@ export function physicalReportRenderJob(
   const followUpRequired = !Object.hasOwn(checklist, "follow_up_required")
     ? "Follow-up status: not recorded in trade submission."
     : checklist.follow_up_required === true
-      ? "Follow-up required."
-      : checklist.follow_up_required === false
-        ? "No further works required."
-        : reportText(checklist.follow_up_required) ||
-          "Follow-up status: not recorded in trade submission.";
+    ? "Follow-up required."
+    : checklist.follow_up_required === false
+    ? "No further works required."
+    : reportText(checklist.follow_up_required) ||
+      "Follow-up status: not recorded in trade submission.";
   return {
     ref: input.source.builder_reference,
     address: input.source.site_address || "Address not recorded",
@@ -470,12 +472,11 @@ function currentCycle(snapshot: SesAssemblerLiveSnapshot): {
     ids,
     id,
     number: currentCycleNumber(detail),
-    attribution:
-      attribution === "bound"
-        ? "bound"
-        : attribution === "backfill_cycle_scope"
-          ? "backfill_cycle_scope"
-          : "legacy_unscoped",
+    attribution: attribution === "bound"
+      ? "bound"
+      : attribution === "backfill_cycle_scope"
+      ? "backfill_cycle_scope"
+      : "legacy_unscoped",
   };
 }
 
@@ -501,7 +502,7 @@ export function buildSesAssemblerInput(
     cycle.id || null,
   );
   const workOrders = snapshot.documents.filter((item) =>
-    ["work_order", "workorder", "wo"].includes(text(item.type).toLowerCase()),
+    ["work_order", "workorder", "wo"].includes(text(item.type).toLowerCase())
   );
   const reportOnly = [
     "ordinary_roof_portal",
@@ -563,10 +564,11 @@ export function buildSesAssemblerInput(
       "work_at_height",
       "structural",
       "other_registered_hrcw",
-    ].includes(item),
+    ].includes(item)
   ) as SesAssemblerInputV1["hrcw"]["categories"];
-  const sourceVersion =
-    intakeCase?.source_version == null ? "" : String(intakeCase.source_version);
+  const sourceVersion = intakeCase?.source_version == null
+    ? ""
+    : String(intakeCase.source_version);
   const sourceHash = text(intakeCase?.source_content_hash) as SesSha256;
   const lineageId = text(intakeCase?.lineage_id);
   const reportTo = firstText(company.report_recipient);
@@ -604,36 +606,34 @@ export function buildSesAssemblerInput(
       family: familyId,
       subtype: familyId === "temporary_fencing" ? "temporary_fencing" : null,
       report_only: reportOnly,
-      report_delivery:
-        familyId === "ordinary_roof_portal"
-          ? "portal"
-          : familyId === "own_template_roof"
-            ? "own_document"
-            : null,
+      report_delivery: familyId === "ordinary_roof_portal"
+        ? "portal"
+        : familyId === "own_template_roof"
+        ? "own_document"
+        : null,
       strata: familyId === "own_template_roof",
       own_template_requested: familyId === "own_template_roof",
       workflow: workflow(intakeCase),
       lineage_kind: lineageKind(intakeCase?.parent_relation),
       family_matrix_version: SES_FAMILY_MATRIX_VERSION,
-      assessment_outbound_recipe_version:
-        familyId === "assessment_quote" ? SES_ASSESSMENT_RECIPE_VERSION : null,
+      assessment_outbound_recipe_version: familyId === "assessment_quote"
+        ? SES_ASSESSMENT_RECIPE_VERSION
+        : null,
     },
     source: {
       work_order_sender: reportTo || null,
       builder_reference: builderReference,
-      po_or_external_ref:
-        firstText(
-          intakeCase?.builder_po_canonical,
-          intakeCase?.external_ref_canonical,
-        ) || null,
-      site_address:
-        firstText(intakeCase?.site_address, job.site_address) || null,
+      po_or_external_ref: firstText(
+        intakeCase?.builder_po_canonical,
+        intakeCase?.external_ref_canonical,
+      ) || null,
+      site_address: firstText(intakeCase?.site_address, job.site_address) ||
+        null,
       site_suburb: firstText(intakeCase?.site_suburb, job.site_suburb) || null,
-      instruction_text:
-        firstText(
-          intakeCase?.raw_identity_json?.instruction_text,
-          intakeCase?.raw_identity_json?.scope,
-        ) || null,
+      instruction_text: firstText(
+        intakeCase?.raw_identity_json?.instruction_text,
+        intakeCase?.raw_identity_json?.scope,
+      ) || null,
       deliverables: [
         {
           id: text(intakeCase?.deliverable_ref_canonical),
@@ -647,17 +647,15 @@ export function buildSesAssemblerInput(
       portal_links: portalLinks,
     },
     cycle_facts: {
-      trade_report: reportOnly
-        ? null
-        : report
-          ? {
-              id: report.id ?? null,
-              status: report.status ?? null,
-              submitted_at: report.submitted_at ?? null,
-              checklist_json: report.checklist_json ?? {},
-              notes: report.notes ?? null,
-            }
-          : null,
+      trade_report: reportOnly ? null : report
+        ? {
+          id: report.id ?? null,
+          status: report.status ?? null,
+          submitted_at: report.submitted_at ?? null,
+          checklist_json: report.checklist_json ?? {},
+          notes: report.notes ?? null,
+        }
+        : null,
       photos: reportOnly ? [] : photos,
       roof_report_fields:
         familyId === "own_template_roof" && Object.keys(roofFields).length
@@ -671,8 +669,7 @@ export function buildSesAssemblerInput(
       },
     },
     hrcw: {
-      hrcw:
-        metadata.hrcw === true ||
+      hrcw: metadata.hrcw === true ||
         intakeCase?.raw_identity_json?.hrcw === true ||
         categories.length > 0 ||
         hazardTerms.length > 0,
@@ -687,8 +684,8 @@ export function buildSesAssemblerInput(
       readiness_revision: (text(snapshot.readiness?.readiness_revision) ||
         null) as SesSha256 | null,
       dependency_generation: Number.isFinite(
-        Number(snapshot.readiness?.dependency_generation),
-      )
+          Number(snapshot.readiness?.dependency_generation),
+        )
         ? Number(snapshot.readiness?.dependency_generation)
         : null,
     },
@@ -731,10 +728,9 @@ export async function loadSesAssemblerLiveSnapshot(
   selection: Selection,
 ): Promise<SesAssemblerLiveSnapshot> {
   let jobQuery = client.from("jobs").select("*").eq("type", "makesafe");
-  jobQuery =
-    selection.mode === "job_id"
-      ? jobQuery.eq("id", selection.job_id)
-      : jobQuery.eq("job_number", selection.job_number);
+  jobQuery = selection.mode === "job_id"
+    ? jobQuery.eq("id", selection.job_id)
+    : jobQuery.eq("job_number", selection.job_number);
   const job = await one(jobQuery.maybeSingle(), "jobs");
   if (!job) {
     throw new SesAssemblerAdapterError(
@@ -858,11 +854,10 @@ export async function loadSesAssemblerLiveSnapshot(
 }
 
 function fileName(row: LiveRow, fallback: string): string {
-  const raw =
-    firstText(row.file_name, row.filename, fallback)
-      .replaceAll("\\", "/")
-      .split("/")
-      .pop() || fallback;
+  const raw = firstText(row.file_name, row.filename, fallback)
+    .replaceAll("\\", "/")
+    .split("/")
+    .pop() || fallback;
   return raw.replaceAll("..", "").replace(/[^A-Za-z0-9._ -]+/g, "-");
 }
 
@@ -892,6 +887,16 @@ async function fetchBytes(url: string, label: string): Promise<Uint8Array> {
     );
   }
   return new Uint8Array(await response.arrayBuffer());
+}
+
+async function rawPhotoSha256(bytes: Uint8Array): Promise<SesSha256> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes).buffer),
+  );
+  const hex = Array.from(digest)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `sha256:${hex}`;
 }
 
 function mediaType(row: LiveRow, fallback: string): string {
@@ -999,6 +1004,42 @@ export function createSesAssemblerRuntimeDependencies(
       }
       return out;
     },
+    resolvePhotoProofs: async (input): Promise<SesPhotoProof[]> => {
+      const snapshot = snapshotFor(input);
+      const byPointer = new Map(
+        snapshot.media.map((item) => [`job_media:${text(item.id)}`, item]),
+      );
+      const out: SesPhotoProof[] = [];
+      for (const photo of input.cycle_facts.photos) {
+        const row = byPointer.get(photo.path_or_key);
+        if (!row) continue;
+        const rawType = mediaType(row, "image/jpeg");
+        if (rawType !== "image/jpeg" && rawType !== "image/png") continue;
+        const media_type: "image/jpeg" | "image/png" = rawType;
+        const url = artifactUrl(row);
+        if (!url) continue;
+        try {
+          // A dry-run keeps only this bounded proof. It never retains the
+          // photo bytes across iterations and never base64-encodes or renders
+          // them into a PDF inside the synchronous request.
+          const bytes = await fetchBytes(url, photo.path_or_key);
+          out.push({
+            photo_id: photo.id,
+            source_pointer: photo.path_or_key,
+            file_name: fileName(
+              row,
+              `${photo.id}.${media_type === "image/png" ? "png" : "jpg"}`,
+            ),
+            media_type,
+            content_hash: await rawPhotoSha256(bytes),
+            size_bytes: bytes.byteLength,
+          });
+        } catch {
+          // Missing proofs remain a typed trade_evidence_missing blocker.
+        }
+      }
+      return out;
+    },
     renderPhysicalReport: async (input, photos = []) => {
       const snapshot = snapshotFor(input);
       const rendered = await renderMakesafeReportPdf(
@@ -1090,18 +1131,17 @@ export function normalizeSesPrepareRequest(
   const jobId = text(selection.job_id);
   const jobNumber = text(selection.job_number);
   const limit = Number(selection.limit);
-  const valid =
-    mode === "job_id"
-      ? !!jobId && !jobNumber && selection.limit == null
-      : mode === "job_number"
-        ? !!jobNumber && !jobId && selection.limit == null
-        : mode === "board_batch"
-          ? !jobId &&
-            !jobNumber &&
-            Number.isSafeInteger(limit) &&
-            limit >= 1 &&
-            limit <= 50
-          : false;
+  const valid = mode === "job_id"
+    ? !!jobId && !jobNumber && selection.limit == null
+    : mode === "job_number"
+    ? !!jobNumber && !jobId && selection.limit == null
+    : mode === "board_batch"
+    ? !jobId &&
+      !jobNumber &&
+      Number.isSafeInteger(limit) &&
+      limit >= 1 &&
+      limit <= 50
+    : false;
   if (!valid) {
     throw new SesAssemblerAdapterError(
       "ses_selection_invalid",
@@ -1110,12 +1150,11 @@ export function normalizeSesPrepareRequest(
     );
   }
   return {
-    selection:
-      mode === "job_id"
-        ? { mode, job_id: jobId }
-        : mode === "job_number"
-          ? { mode, job_number: jobNumber }
-          : { mode: "board_batch", limit },
+    selection: mode === "job_id"
+      ? { mode, job_id: jobId }
+      : mode === "job_number"
+      ? { mode, job_number: jobNumber }
+      : { mode: "board_batch", limit },
     idempotency_key: idempotencyKey,
     assembler_version: SES_ASSEMBLER_VERSION,
     dry_run: body.dry_run,

@@ -51,6 +51,12 @@ stage with named blockers. Assessment uses the sealed
 its required work order, typed Prime links, or screenshot-backed locked
 captures are missing.
 
+For physical work, `dry_run:true` is a proof pass, not a binary pack build. It
+returns the ordered current-cycle photo ids, captions, raw SHA-256 hashes, byte
+sizes and intended artifact paths. It does not retain the photo bytes across
+iterations, base64-encode them, or render the report PDF. Full photo embedding
+and private artifact persistence occur only on the real non-dry pack build.
+
 `MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE=false` or
 `makesafe_cron_settings.auto_file_enabled=false` remains an explicit emergency brake.
 Without either explicit brake, advance-what-passes is the default.

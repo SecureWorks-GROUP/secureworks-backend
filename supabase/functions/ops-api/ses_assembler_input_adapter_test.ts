@@ -3,14 +3,16 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import fixture from "./fixtures/ses_u4_swms_26980_live_snapshot.json" with { type: "json" };
+import fixture from "./fixtures/ses_u4_swms_26980_live_snapshot.json" with {
+  type: "json",
+};
 import {
   buildSesAssemblerInput,
   normalizeSesPrepareRequest,
   physicalReportRenderJob,
   SesAssemblerAdapterError,
-  summarizeSesPrepareResponseForHttp,
   type SesAssemblerLiveSnapshot,
+  summarizeSesPrepareResponseForHttp,
 } from "./ses_assembler_input_adapter.ts";
 import {
   SES_ASSEMBLER_VERSION,
@@ -22,8 +24,9 @@ import {
 } from "./ses_prepare_docket_revision.ts";
 
 function snapshot(): SesAssemblerLiveSnapshot {
-  const { captured_from: _capturedFrom, ...liveSnapshot } =
-    structuredClone(fixture);
+  const { captured_from: _capturedFrom, ...liveSnapshot } = structuredClone(
+    fixture,
+  );
   return liveSnapshot as SesAssemblerLiveSnapshot;
 }
 
@@ -90,21 +93,23 @@ Deno.test(
         force_refresh: false,
       },
     );
-    for (const invalid of [
-      {
-        selection: { mode: "job_number", job_number: "SWMS-26980" },
-        idempotency_key: "key",
-      },
-      {
-        selection: {
-          mode: "job_number",
-          job_number: "SWMS-26980",
-          job_id: "also-present",
+    for (
+      const invalid of [
+        {
+          selection: { mode: "job_number", job_number: "SWMS-26980" },
+          idempotency_key: "key",
         },
-        idempotency_key: "key",
-        dry_run: true,
-      },
-    ]) {
+        {
+          selection: {
+            mode: "job_number",
+            job_number: "SWMS-26980",
+            job_id: "also-present",
+          },
+          idempotency_key: "key",
+          dry_run: true,
+        },
+      ]
+    ) {
       try {
         normalizeSesPrepareRequest(invalid);
         throw new Error("expected request rejection");
@@ -237,8 +242,8 @@ Deno.test(
     const renderJobWithPhoto = physicalReportRenderJob(live, input, [
       {
         photo_id: input.cycle_facts.photos[0]?.id || "photo-1",
-        source_pointer:
-          input.cycle_facts.photos[0]?.path_or_key || "job_media:photo-1",
+        source_pointer: input.cycle_facts.photos[0]?.path_or_key ||
+          "job_media:photo-1",
         file_name: "completion.jpg",
         media_type: "image/jpeg",
         bytes: new Uint8Array([65, 66]),
@@ -321,13 +326,15 @@ Deno.test(
       {
         resolveInput: async () => input,
         resolveSourceArtifacts: async () => sourceResolver(input),
-        resolvePhotoArtifacts: async () => [
+        resolvePhotoProofs: async () => [
           {
             photo_id: input.cycle_facts.photos[0].id,
             source_pointer: input.cycle_facts.photos[0].path_or_key,
             file_name: "completion.jpg",
             media_type: "image/jpeg",
-            bytes: new Uint8Array([1, 2, 3]),
+            content_hash:
+              "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            size_bytes: 3,
           },
         ],
         renderPhysicalReport: async () => {
@@ -352,7 +359,7 @@ Deno.test(
 );
 
 Deno.test(
-  "U4 HTTP response keeps artifact proof but never serializes raw bytes",
+  "11-photo U4 dry-run stays bounded, lists proof metadata and never resolves or renders binary photos",
   async () => {
     const live = snapshot();
     live.job.metadata.makesafe_job_family = "general_makesafe";
@@ -366,17 +373,33 @@ Deno.test(
       labour_hours: 2,
       trade_count: 2,
     };
-    live.media = [
-      {
-        id: "30ad0e72-351c-4f2b-8987-e490c9ffb774",
-        job_id: live.job.id,
-        type: "photo",
-        phase: "completion",
-        attendance_cycle_id: live.detail!.attendance_cycle_id,
-        cycle_attribution: "bound",
-      },
+    const realPhotoSizes = [
+      649_349,
+      532_950,
+      528_799,
+      499_275,
+      898_197,
+      286_155,
+      298_089,
+      554_457,
+      537_395,
+      522_251,
+      442_430,
     ];
+    live.media = realPhotoSizes.map((size, index) => ({
+      id: `30ad0e72-351c-4f2b-8987-${String(index).padStart(12, "0")}`,
+      job_id: live.job.id,
+      type: "photo",
+      phase: "completion",
+      attendance_cycle_id: live.detail!.attendance_cycle_id,
+      cycle_attribution: "bound",
+      label: `Completion photo ${index + 1}`,
+      size,
+    }));
     const input = buildSesAssemblerInput(live);
+    let binaryResolutionCalls = 0;
+    let renderCalls = 0;
+    const started = performance.now();
     const response = await prepare_ses_docket_revision(
       {
         selection: { mode: "job_id", job_id: input.identity.job_id },
@@ -388,55 +411,74 @@ Deno.test(
       {
         resolveInput: async () => input,
         resolveSourceArtifacts: async () => sourceResolver(input),
-        resolvePhotoArtifacts: async () => [
-          {
-            photo_id: input.cycle_facts.photos[0].id,
-            source_pointer: input.cycle_facts.photos[0].path_or_key,
-            file_name: "completion.jpg",
+        resolvePhotoProofs: async () =>
+          input.cycle_facts.photos.map((photo, index) => ({
+            photo_id: photo.id,
+            source_pointer: photo.path_or_key,
+            file_name: `completion-${index + 1}.jpg`,
             media_type: "image/jpeg",
-            bytes: new Uint8Array([1, 2, 3]),
-          },
-        ],
+            content_hash: `sha256:${String(index + 1).padStart(64, "0")}`,
+            size_bytes: realPhotoSizes[index],
+          })),
+        resolvePhotoArtifacts: async () => {
+          binaryResolutionCalls++;
+          throw new Error("dry-run must not resolve retained photo bytes");
+        },
+        renderPhysicalReport: async () => {
+          renderCalls++;
+          throw new Error("dry-run must not render the report PDF");
+        },
         resolveSwmsArtifact: async () => null,
-        now: () => new Date("2026-07-27T08:00:00.000Z"),
       },
     );
-    const firstArtifact = response.results[0].artifacts[0];
-    assert(firstArtifact);
-    const largeResponse = {
-      ...response,
-      results: [
-        {
-          ...response.results[0],
-          artifacts: [
-            {
-              ...firstArtifact,
-              bytes: new Uint8Array(5_000_000),
-              size_bytes: 5_000_000,
-            },
-            ...response.results[0].artifacts.slice(1),
-          ],
-        },
-      ],
-    };
-
-    const httpResponse = summarizeSesPrepareResponseForHttp(largeResponse);
-    const firstHttpArtifact = httpResponse.results[0].artifacts[0];
-    assertEquals(Object.hasOwn(firstHttpArtifact, "bytes"), false);
-    assertEquals(firstHttpArtifact.content_hash, firstArtifact.content_hash);
-    assertEquals(firstHttpArtifact.size_bytes, 5_000_000);
+    const elapsedMs = performance.now() - started;
+    const proofs = response.results[0].artifacts.filter((artifact) =>
+      artifact.role === "completion_photo_proof"
+    );
+    assertEquals(binaryResolutionCalls, 0);
+    assertEquals(renderCalls, 0);
+    assertEquals(proofs.length, 11);
+    assertEquals(
+      proofs.map((proof) => ({
+        photo_id: proof.metadata.photo_id,
+        caption: proof.metadata.caption,
+        content_hash: proof.metadata.content_hash,
+        size_bytes: proof.metadata.size_bytes,
+      })),
+      input.cycle_facts.photos.map((photo, index) => ({
+        photo_id: photo.id,
+        caption: photo.caption || null,
+        content_hash: `sha256:${String(index + 1).padStart(64, "0")}`,
+        size_bytes: realPhotoSizes[index],
+      })),
+    );
+    assertEquals(
+      response.results[0].artifacts.some((artifact) =>
+        artifact.role === "completion_photo" ||
+        artifact.role === "supporting_report_pdf"
+      ),
+      false,
+    );
+    const httpResponse = summarizeSesPrepareResponseForHttp(response);
+    assert(!JSON.stringify(httpResponse).includes('"bytes"'));
     assert(JSON.stringify(httpResponse).length < 100_000);
+    assert(
+      elapsedMs < 5_000,
+      `11-photo dry-run took ${elapsedMs.toFixed(1)}ms`,
+    );
   },
 );
 
 Deno.test(
   "live adapter maps every canonical board family token exactly",
   () => {
-    for (const [signal, expected] of [
-      ["general_makesafe", "physical_makesafe"],
-      ["temp_fence_makesafe", "temporary_fencing"],
-      ["assessment_report_quote", "assessment_quote"],
-    ] as const) {
+    for (
+      const [signal, expected] of [
+        ["general_makesafe", "physical_makesafe"],
+        ["temp_fence_makesafe", "temporary_fencing"],
+        ["assessment_report_quote", "assessment_quote"],
+      ] as const
+    ) {
       const live = snapshot();
       live.detail!.report_type = null;
       live.job.metadata.makesafe_job_family = signal;

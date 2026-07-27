@@ -17,7 +17,8 @@ It obtains the complete `ses.assembler-input/v1` envelope through one resolver;
 callers cannot pass hand-composed family, deliverable, routing or portal-status
 fields into the command.
 
-For each job it produces one content-addressed pre-Xero revision containing:
+For each real (`dry_run:false`) build it produces one content-addressed
+pre-Xero revision containing:
 
 - the source work order and designated source attachments;
 - the v2 manifest inside the v3 correlation-spine envelope;
@@ -31,10 +32,16 @@ For each job it produces one content-addressed pre-Xero revision containing:
   timing evidence and hashes.
 
 The internal revision and append-only artifact store retain the complete PDF and
-photo bytes. The `prepare_ses_docket_revision` HTTP response is a bounded proof
-envelope: each artifact exposes only its role, path, media type, SHA-256, byte
-size and metadata. Callers do not receive raw bytes in JSON, which keeps a
-normal multi-megabyte evidence pack below the edge response limit.
+photo bytes. A physical `dry_run:true` is deliberately lighter: it downloads
+each current-cycle photo only long enough to calculate its raw SHA-256, discards
+the bytes before moving to the next photo, and returns ordered proof records
+containing the photo id, caption, hash, byte size, media type and intended pack
+path. It does not base64-encode photos or invoke the PDF renderer. The real
+non-dry pack build remains the only path that embeds and persists those bytes.
+
+The `prepare_ses_docket_revision` HTTP response is a bounded proof envelope:
+each artifact exposes only its role, path, media type, SHA-256, byte size and
+metadata. Callers never receive raw bytes in JSON.
 
 The append-only persistence migration adds the private artifact bucket, revision
 and artifact ledgers, a current-revision view, and one idempotent commit RPC. The
@@ -134,6 +141,20 @@ between 250 and 300 seconds, with all 20 below the hard five-minute ceiling.
 The hard result is `duration_ms <= 300000`; one over-budget job makes the batch
 summary false. This is a CI boundary proof, not a substitute for the required
 credentialed staging wall-clock run with real portal and storage I/O.
+
+### Physical dry-run resource boundary
+
+The first production proof of the 11-photo MLB-26267 card exposed two synchronous
+memory spikes before the HTTP adapter could return: the old canonical byte-array
+artifact hash peaked at about 247 MB RSS for the real 5.75 MB photo set, while
+base64 conversion plus jsPDF rendering peaked at about 218 MB RSS. The deployed
+edge worker returned `WORKER_RESOURCE_LIMIT`.
+
+The proof-only SHA-256 loop over those same 11 real files completed locally in
+18 ms, produced 1,532 bytes of proof JSON, and peaked at about 82 MB RSS. The
+regression fixture uses the real 11-file size distribution and proves that a
+dry-run never calls the retained-byte resolver or renderer, emits all 11
+id/caption/hash proofs, contains no raw-byte field and remains below 100 kB.
 
 ## Where the wall sits
 

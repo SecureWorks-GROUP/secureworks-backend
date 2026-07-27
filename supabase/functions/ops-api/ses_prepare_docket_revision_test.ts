@@ -197,6 +197,15 @@ function dependencies(
         media_type: "image/jpeg" as const,
         bytes: new Uint8Array([255, 216, 255, index]),
       })),
+    resolvePhotoProofs: async (resolvedInput) =>
+      resolvedInput.cycle_facts.photos.map((photo, index) => ({
+        photo_id: photo.id,
+        source_pointer: photo.path_or_key,
+        file_name: `${String(index + 1).padStart(3, "0")}.jpg`,
+        media_type: "image/jpeg" as const,
+        content_hash: FIXED_CAPTURE_HASH,
+        size_bytes: 500_000 + index,
+      })),
     capturePortal: async (captureRequest): Promise<SesPortalCapture> => ({
       status: "done",
       role: captureRequest.role,
@@ -576,7 +585,7 @@ Deno.test("blocked non-assessment packs do not expose email drafts", async () =>
   );
 });
 
-Deno.test("physical docket copies every current-cycle photo and blocks an incomplete recovery", async () => {
+Deno.test("physical dry-run proves every current-cycle photo without copying bytes and blocks an incomplete proof", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
     candidate.family === "physical_makesafe"
@@ -594,9 +603,16 @@ Deno.test("physical docket copies every current-cycle photo and blocks an incomp
   );
   assertEquals(
     complete.results[0].artifacts.filter((artifact) =>
-      artifact.role === "completion_photo"
+      artifact.role === "completion_photo_proof"
     ).length,
     2,
+  );
+  assertEquals(
+    complete.results[0].artifacts.some((artifact) =>
+      artifact.role === "completion_photo" ||
+      artifact.role === "supporting_report_pdf"
+    ),
+    false,
   );
   assertEquals(
     complete.results[0].email_drafts.PHOTO_EMAIL_DRAFT.includes(
@@ -608,12 +624,13 @@ Deno.test("physical docket copies every current-cycle photo and blocks an incomp
   const incomplete = await prepareSesDocketRevision(
     request(input.identity.job_id),
     dependencies(input, {
-      resolvePhotoArtifacts: async (resolvedInput) => [{
+      resolvePhotoProofs: async (resolvedInput) => [{
         photo_id: resolvedInput.cycle_facts.photos[0].id,
         source_pointer: resolvedInput.cycle_facts.photos[0].path_or_key,
         file_name: "001.jpg",
         media_type: "image/jpeg",
-        bytes: new Uint8Array([255, 216, 255]),
+        content_hash: FIXED_CAPTURE_HASH,
+        size_bytes: 500_000,
       }],
     }),
   );
@@ -945,9 +962,27 @@ Deno.test("persistence adapter writes only private docket artifacts and the appe
   input.attendance.current_attendance_cycle_id =
     "00000000-0000-0000-0000-000000000062";
   const prepared = (await prepareSesDocketRevision(
-    request(input.identity.job_id),
-    dependencies(input),
+    request(input.identity.job_id, false),
+    dependencies(input, {
+      persist: async () => ({
+        committed_at: "2026-07-27T01:00:00.500Z",
+      }),
+    }),
   )).results[0];
+  assert(
+    prepared.artifacts.some((artifact) => artifact.role === "completion_photo"),
+  );
+  assert(
+    prepared.artifacts.some((artifact) =>
+      artifact.role === "supporting_report_pdf"
+    ),
+  );
+  assertEquals(
+    prepared.artifacts.some((artifact) =>
+      artifact.role === "completion_photo_proof"
+    ),
+    false,
+  );
   const calls: Array<{ kind: string; name: string }> = [];
   let rpcArgs: Record<string, unknown> | null = null;
   const client = {
