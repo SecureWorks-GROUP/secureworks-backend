@@ -341,6 +341,10 @@ function makeInvoiceStub(opts: { reportType?: string | null }) {
             return { data: null, error: null }
           },
           single: async () => ({ data: null, error: null }),
+          in: async (_inCol: string, _inVals: string[]) => ({
+            data: [],
+            error: null,
+          }),
         }),
         in: (_col: string, _vals: string[]) => ({ data: [], error: null }),
         not: () => ({ data: [], error: null }),
@@ -368,6 +372,12 @@ Deno.test("Issue A — createInvoice: report-type job with $0 total is rejected"
       job_id: "job-r1",
       contact_name: "Test",
       line_items: [{ description: "Labour", quantity: 1, unit_price: 0 }],
+    }, {
+      ses: {
+        obligationRevisionId: "revision-r1",
+        externalToken: "SES-report-gate-test",
+        operationKey: "ses:report-gate-test",
+      },
     }),
     Error,
     "report job needs a charge amount",

@@ -18,8 +18,9 @@
 import {
   assert,
   assertEquals,
+  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { matchUnlinkedInvoices } from "./index.ts";
+import { matchUnlinkedInvoices, sealedSesXeroLinkRefusal } from "./index.ts";
 
 type Call = {
   table: string;
@@ -165,6 +166,7 @@ const UNLINKED = [{
   contact_name: "Jane Client",
   total: 1200,
   invoice_number: "INV-1001",
+  invoice_type: "ACCREC",
   status: "AUTHORISED",
 }];
 
@@ -323,4 +325,72 @@ Deno.test("Strategy 2: genuine empty result is not an error (no false log)", asy
   } finally {
     console.error = orig;
   }
+});
+
+Deno.test("Strategy 2: sealed SES ACCREC match returns a typed refusal without linking", async () => {
+  const { client, updates } = makeClient({
+    unlinked: UNLINKED,
+    jobsByContact: {
+      "Jane Client": {
+        data: [{
+          id: "job-ses-1",
+          job_number: "SWMS-261055",
+          type: "makesafe",
+          client_name: "Jane Client",
+        }],
+        error: null,
+      },
+    },
+  });
+
+  const result = await matchUnlinkedInvoices(client);
+  const refusals = result.refusals ?? [];
+  assertEquals(result.matched, 0);
+  assertEquals(result.refused, 1);
+  assertEquals(refusals[0]?.code, "sealed_ses_release_required");
+  assertStringIncludes(
+    refusals[0]?.fact || "",
+    "approved SES release flow",
+  );
+  assertEquals(
+    updates.filter((update) => update.table === "xero_invoices").length,
+    0,
+  );
+});
+
+Deno.test("ACCPAY remains outside the sealed SES sales-invoice link fence", async () => {
+  const client = {
+    from: () => {
+      throw new Error("ACCPAY must not perform a sealed SES classification");
+    },
+  };
+  const refusal = await sealedSesXeroLinkRefusal(
+    client,
+    {
+      xero_invoice_id: "bill-1",
+      invoice_number: "BILL-1001",
+      invoice_type: "ACCPAY",
+    },
+    { id: "job-ses-1", job_number: "SWMS-261055", type: "makesafe" },
+    "test ACCPAY link",
+  );
+  assertEquals(refusal, null);
+});
+
+Deno.test("unknown invoice type fails closed when the link target is sealed SES", async () => {
+  const refusal = await sealedSesXeroLinkRefusal(
+    {
+      from: () => {
+        throw new Error("direct SWMS classification must not need a lookup");
+      },
+    },
+    {
+      xero_invoice_id: "unknown-type-1",
+      invoice_number: "INV-UNKNOWN",
+      invoice_type: null,
+    },
+    { id: "job-ses-1", job_number: "SWMS-261055", type: "makesafe" },
+    "test unknown invoice type link",
+  );
+  assertEquals(refusal?.code, "sealed_ses_release_required");
 });

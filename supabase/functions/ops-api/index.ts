@@ -315,6 +315,7 @@ import {
   querySesReviewCockpitAction,
   recordSesReviewFeedbackAction,
   resolveSesInvoiceDuplicatesAction,
+  SesActionError,
   sesActionErrorResponse,
   type SesActionAuth,
   type SesMailGateway,
@@ -323,6 +324,11 @@ import {
   type SesXeroGateway,
   type SesXeroInvoiceResult,
 } from './ses_reporting_actions.ts'
+import {
+  inspectSealedSesJob,
+  sealedSesMoneyRefusal,
+  SealedSesMoneyFenceLookupError,
+} from '../_shared/sealed_ses_money_fence.ts'
 import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
   senderMatchesPattern as _senderMatchesPattern,
@@ -1037,10 +1043,13 @@ async function readSesXeroInvoicesByToken(
     )
 }
 
-function makeSesXeroGateway(client: any): SesXeroGateway {
+function makeSesXeroGateway(
+  client: any,
+  createInvoiceFn: typeof createInvoice = createInvoice,
+): SesXeroGateway {
   return {
     async createDraft(proposal, context) {
-      const created = await createInvoice(client, {
+      const created = await createInvoiceFn(client, {
         job_id: proposal.job_id,
         contact_name: proposal.contact_name,
         reference: proposal.reference,
@@ -4324,6 +4333,12 @@ if (import.meta.main) serve(async (req: Request) => {
         const xiid = body.xero_invoice_id
         const jid = body.job_id
         if (!xiid || !jid) return json({ error: 'xero_invoice_id and job_id required' }, 400)
+        await assertLegacySesInvoiceActionAllowed(
+          client,
+          xiid,
+          'update_invoice_job_link',
+          jid,
+        )
         const { error: linkErr } = await client.from('xero_invoices')
           .update({ job_id: jid, updated_at: new Date().toISOString() })
           .eq('xero_invoice_id', xiid)
@@ -4402,6 +4417,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'void_invoice': {
         const vid = body.xero_invoice_id
         if (!vid) return json({ error: 'xero_invoice_id required' }, 400)
+        await assertLegacySesInvoiceActionAllowed(client, vid, 'void_invoice')
         // Capture previous status before voiding
         const { data: voidInvRecord } = await client.from('xero_invoices')
           .select('invoice_number, total, status')
@@ -4438,6 +4454,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'approve_invoice': {
         const aid = body.xero_invoice_id
         if (!aid) return json({ error: 'xero_invoice_id required' }, 400)
+        await assertLegacySesInvoiceActionAllowed(client, aid, 'approve_invoice')
 
         // H3 (Loop 1B-a): capture previous status + linked job for the business_events row.
         const { data: aPrevInv } = await client.from('xero_invoices')
@@ -4478,7 +4495,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'send_invoice_email': {
         const { xero_invoice_id: siId, to_email: siTo, job_id: siJobId, cc: siCc, subject_override: siSubj } = body
         if (!siId) return json({ error: 'xero_invoice_id required' }, 400)
-        await assertLegacySesInvoiceSendAllowed(
+        await assertLegacySesInvoiceActionAllowed(
           client,
           siId,
           'send_invoice_email',
@@ -4511,7 +4528,7 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'approve_and_send_invoice': {
         const asId = body.xero_invoice_id
         if (!asId) return json({ error: 'xero_invoice_id required' }, 400)
-        await assertLegacySesInvoiceSendAllowed(
+        await assertLegacySesInvoiceActionAllowed(
           client,
           asId,
           'approve_and_send_invoice',
@@ -21057,6 +21074,11 @@ async function reconcilePayment(client: any, body: any) {
   const { invoice_id, amount, payment_date, reference, account_code } = body
 
   if (!invoice_id || !amount) throw new Error('invoice_id and amount required')
+  await assertLegacySesInvoiceActionAllowed(
+    client,
+    invoice_id,
+    'reconcile_payment',
+  )
 
   const { accessToken, tenantId } = await getToken(client)
 
@@ -21549,47 +21571,161 @@ function computeReferenceSuffix(jobNumber: string, reference: string): string | 
   return trimmed
 }
 
-async function assertLegacySesInvoiceSendAllowed(
+async function assertLegacySesMoneyActionAllowedForJob(
+  client: any,
+  jobId: string,
+  action: string,
+  internalSes = false,
+) {
+  let inspection
+  try {
+    inspection = await inspectSealedSesJob(client, jobId)
+  } catch (error) {
+    if (error instanceof SealedSesMoneyFenceLookupError) {
+      throw new SesActionError(503, {
+        state: 'refused',
+        fact: error.message,
+      })
+    }
+    throw error
+  }
+  if (!inspection.sealed || internalSes) return inspection
+  throw new SesActionError(409, sealedSesMoneyRefusal(action, {
+    job_id: jobId,
+    matched_by: inspection.matched_by,
+  }))
+}
+
+async function assertLegacySesInvoiceActionAllowed(
   client: any,
   xeroInvoiceId: string,
   action: string,
+  targetJobId?: string,
 ) {
   const invoice = await client.from('xero_invoices')
-    .select('job_id, invoice_obligation_revision_id')
+    .select('job_id, invoice_type, invoice_obligation_revision_id, ses_external_token')
     .eq('xero_invoice_id', xeroInvoiceId).maybeSingle()
   if (invoice.error) {
-    throw new ApiError(
-      `The ${action} SES release gate could not check the invoice (${invoice.error.message}).`,
-      503,
-    )
+    throw new SesActionError(503, {
+      state: 'refused',
+      fact:
+        `The ${action} sealed SES gate could not check the invoice (${invoice.error.message}).`,
+    })
   }
-  if (!invoice.data?.job_id || !invoice.data.invoice_obligation_revision_id) return
-
-  const docket = await client.from('makesafe_docket_revisions')
-    .select('id').eq('job_id', invoice.data.job_id)
-    .eq('invoice_obligation_revision_id', invoice.data.invoice_obligation_revision_id)
-    .eq('stage', 'invoice_bound')
-    .order('committed_at', { ascending: false }).limit(1).maybeSingle()
-  if (docket.error) {
-    throw new ApiError(
-      `The ${action} SES release gate could not check the sealed docket (${docket.error.message}).`,
-      503,
-    )
+  if (!invoice.data) {
+    throw new SesActionError(503, {
+      state: 'refused',
+      code: 'sealed_ses_fence_check_failed',
+      fact:
+        `The ${action} sealed SES gate could not classify this invoice because its local Xero mirror is missing.`,
+      recovery_action:
+        'Sync the invoice from Xero, confirm its job link, then retry only if it is not a sealed SES invoice.',
+    })
   }
-  if (!docket.data) return
-
-  const refusal = {
-    state: 'refused',
-    code: 'u6r_release_required',
-    fact:
-      `The sealed SES invoice cannot use legacy ${action}; U6R SEND IT is the only release and provider-effect path.`,
-    recovery_action:
-      'Complete the U6 review, approve SEND IT, then use execute_ses_release_revision for the exact route and closeout.',
+  if (
+    invoice.data?.invoice_type &&
+    String(invoice.data.invoice_type).toUpperCase() !== 'ACCREC'
+  ) return
+  if (
+    invoice.data?.invoice_obligation_revision_id ||
+    invoice.data?.ses_external_token
+  ) {
+    throw new SesActionError(409, sealedSesMoneyRefusal(action, {
+      job_id: invoice.data.job_id || null,
+      invoice_obligation_revision_id:
+        invoice.data.invoice_obligation_revision_id || null,
+      has_ses_external_token: !!invoice.data.ses_external_token,
+    }))
   }
-  throw new ApiError(
-    `${refusal.code}: ${refusal.fact} ${refusal.recovery_action}`,
-    409,
+  if (
+    targetJobId &&
+    String(invoice.data.invoice_type || '').toUpperCase() !== 'ACCPAY'
+  ) {
+    await assertLegacySesMoneyActionAllowedForJob(client, targetJobId, action)
+  }
+  if (!invoice.data?.job_id) return
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    invoice.data.job_id,
+    action,
   )
+}
+
+async function assertLegacySesInvoiceRowsActionAllowed(
+  client: any,
+  invoiceRowIds: string[],
+  action: string,
+  targetJobId?: string,
+) {
+  if (invoiceRowIds.length === 0) return
+  const { data, error } = await client.from('xero_invoices')
+    .select('id,xero_invoice_id,invoice_type')
+    .in('id', invoiceRowIds)
+  if (error) {
+    throw new SesActionError(503, {
+      state: 'refused',
+      fact:
+        `The ${action} sealed SES gate could not check the invoice rows (${error.message}).`,
+    })
+  }
+  for (const invoice of data || []) {
+    if (!invoice.xero_invoice_id) {
+      throw new SesActionError(503, {
+        state: 'refused',
+        fact:
+          `The ${action} sealed SES gate found an invoice row without a Xero invoice identifier.`,
+      })
+    }
+    await assertLegacySesInvoiceActionAllowed(
+      client,
+      invoice.xero_invoice_id,
+      action,
+    )
+    if (
+      String(invoice.invoice_type || '').toUpperCase() !== 'ACCPAY' &&
+      targetJobId
+    ) {
+      await assertLegacySesMoneyActionAllowedForJob(client, targetJobId, action)
+    }
+  }
+}
+
+async function assertSealedSesInvoiceCreateIsUnique(
+  client: any,
+  jobId: string,
+  reference: string,
+  obligationRevisionId: string,
+) {
+  const [duplicate] = (await resolveSesInvoiceDuplicatesAction(
+    client,
+    DEFAULT_ORG_ID,
+    [{
+      job_id: jobId,
+      external_ref: reference,
+      obligation_revision_id: obligationRevisionId,
+    }],
+  )).results
+  if (!duplicate?.allows_create) {
+    throw new SesActionError(409, {
+      state: 'refused',
+      code: duplicate?.ambiguity === 'multi_live'
+        ? 'invoice_duplicate_ambiguous'
+        : 'invoice_duplicate_live',
+      fact: duplicate?.ambiguity === 'multi_live'
+        ? 'More than one live Xero invoice already matches this sealed SES job, so no invoice can be created.'
+        : 'A live Xero invoice already matches this sealed SES job, so a second invoice cannot be created.',
+      recovery_action:
+        'Resolve or use the existing live invoice in the SES review cockpit; do not create another invoice.',
+      evidence: {
+        job_id: jobId,
+        match_tier: duplicate?.match_tier || null,
+        ambiguity: duplicate?.ambiguity || 'none',
+        invoice_numbers: (duplicate?.live_invoices || []).map((row: any) =>
+          row.invoice_number || row.xero_invoice_id
+        ),
+      },
+    })
+  }
 }
 
 interface CreateInvoiceInternalOptions {
@@ -21621,24 +21757,31 @@ async function createInvoice(
   // action has the same safety guard as completeAndInvoice + createMakesafeDraftInvoice.
   // Normal (non-makesafe) manual invoicing is unaffected.
   const jIdForGate = job_id || jobId
-  if (jIdForGate && !sesContext) {
-    const { data: sealedDocket, error: sealedDocketError } = await client
-      .from('makesafe_docket_revisions')
-      .select('id')
-      .eq('job_id', jIdForGate)
-      .order('committed_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-    if (sealedDocketError) {
-      throw new ApiError(
-        `The sealed make-safe docket authority could not be checked (${sealedDocketError.message}).`,
-        503,
-      )
+  if (!jIdForGate) {
+    throw new SesActionError(409, sealedSesMoneyRefusal('create_invoice', {
+      job_id: null,
+      reason: 'legacy ACCREC create has no bound job',
+    }))
+  }
+  if (jIdForGate) {
+    const inspection = await assertLegacySesMoneyActionAllowedForJob(
+      client,
+      jIdForGate,
+      'create_invoice',
+      !!sesContext,
+    )
+    if (sesContext && !inspection.sealed) {
+      throw new SesActionError(409, sealedSesMoneyRefusal('create_invoice', {
+        job_id: jIdForGate,
+        reason: 'approved SES release context is not bound to a sealed job',
+      }))
     }
-    if (sealedDocket) {
-      throw new ApiError(
-        'This make-safe has a sealed U4 docket but no current human APPROVE INVOICE decision on the exact U5 revision; use approve_ses_invoice_revision and execute_ses_invoice_revision.',
-        409,
+    if (sesContext && inspection.sealed) {
+      await assertSealedSesInvoiceCreateIsUnique(
+        client,
+        jIdForGate,
+        String(reference || ''),
+        sesContext.obligationRevisionId,
       )
     }
   }
@@ -21974,6 +22117,11 @@ export const _makesafeTrustedInvoiceRefTokenForTest = _makesafeTrustedInvoiceRef
 async function syncJobInvoices(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    jId,
+    'sync_job_invoices',
+  )
 
   const { data: job, error: jobErr } = await client
     .from('jobs')
@@ -22074,6 +22222,11 @@ async function updateInvoice(client: any, body: any, adminClientOverride?: any) 
   // the service-role client (required so the report-job gate reads xero_invoices /
   // makesafe_job_details past RLS — see ea2f778).
   const adminClient = adminClientOverride ?? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+  await assertLegacySesInvoiceActionAllowed(
+    adminClient,
+    xero_invoice_id,
+    'update_invoice',
+  )
 
   // ── REPORT-JOB $0 GATE ──
   // Mirror the create_invoice / complete_and_invoice guards: a report-type make-safe
@@ -22217,6 +22370,11 @@ async function markInvoicePaid(client: any, body: any) {
   if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
   if (!payment_date) throw new ApiError('payment_date required', 400)
   if (amount === undefined || amount === null) throw new ApiError('amount required', 400)
+  await assertLegacySesInvoiceActionAllowed(
+    client,
+    xero_invoice_id,
+    'mark_invoice_paid',
+  )
 
   // Get invoice details before updating
   const { data: inv } = await client.from('xero_invoices')
@@ -22330,6 +22488,11 @@ async function completeAndInvoice(client: any, body: any) {
     .eq('id', jId)
     .single()
   if (jobErr || !job) throw new Error('Job not found')
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    jId,
+    'complete_and_invoice',
+  )
 
   if (!['in_progress', 'complete', 'scheduled', 'processing'].includes(job.status)) {
     throw new Error(`Cannot complete+invoice a job with status "${job.status}". Must be in_progress, processing, scheduled, or complete.`)
@@ -27704,6 +27867,11 @@ async function updateMakesafeExistingDraftInvoice(client: any, args: {
 }): Promise<any> {
   const xeroInvoiceId = args.existing?.xero_invoice_id || args.existing?.id || args.existing?.InvoiceID
   if (!xeroInvoiceId) throw new ApiError('existing draft invoice missing xero_invoice_id; cannot revise safely', 409)
+  await assertLegacySesInvoiceActionAllowed(
+    client,
+    xeroInvoiceId,
+    'update_makesafe_existing_draft_invoice',
+  )
 
   const { accessToken, tenantId } = await getToken(client)
   const live = await xeroGet(`/Invoices/${xeroInvoiceId}`, accessToken, tenantId)
@@ -27837,6 +28005,11 @@ async function deleteMakesafeExistingDraftInvoice(client: any, args: {
 }): Promise<any> {
   const xeroInvoiceId = args.existing?.xero_invoice_id || args.existing?.id || args.existing?.InvoiceID
   if (!xeroInvoiceId) throw new ApiError('existing draft invoice missing xero_invoice_id; cannot replace safely', 409)
+  await assertLegacySesInvoiceActionAllowed(
+    client,
+    xeroInvoiceId,
+    'delete_makesafe_existing_draft_invoice',
+  )
   const existingStatus = String(args.existing?.status || '').toUpperCase()
   if (existingStatus && existingStatus !== 'DRAFT') {
     throw new ApiError(
@@ -33133,6 +33306,11 @@ async function completeJob(client: any, body: any) {
 async function sendPaymentLink(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    jId,
+    'send_payment_link',
+  )
 
   // Dedup check: prevent sending same payment link within 24 hours
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
@@ -33249,6 +33427,11 @@ export function _acceptanceInvoiceChargeable(xeroStatus: unknown, paymentUrl: un
 async function sendAcceptanceInvoice(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    jId,
+    'send_acceptance_invoice',
+  )
 
   // Fetch job with deposit config
   const { data: job, error: jobErr } = await client
@@ -37615,6 +37798,39 @@ async function resolveAnnotation(client: any, body: any) {
     .single()
   if (fetchErr || !ann) throw new Error('Annotation not found or already resolved')
 
+  // F8 sibling preflight: an annotation must remain active when a forbidden
+  // sealed-SES link is refused, and neither the invoice nor annotation may be
+  // changed before the typed fence result is returned.
+  if (ann.annotation_type === 'unlinked_invoice') {
+    if (response_value === 'link' && ann.structured_data?.job_id) {
+      await assertLegacySesMoneyActionAllowedForJob(
+        client,
+        ann.structured_data.job_id,
+        'resolve_annotation invoice link',
+      )
+      const candidateIds = (ann.structured_data.candidate_invoices || [])
+        .map((candidate: any) => candidate.id)
+        .filter(Boolean)
+      await assertLegacySesInvoiceRowsActionAllowed(
+        client,
+        candidateIds,
+        'resolve_annotation invoice link',
+        ann.structured_data.job_id,
+      )
+    } else if (response_value?.startsWith('link:')) {
+      const targetJobId = response_value.slice(5)
+      const xeroInvId = ann.structured_data?.xero_invoice_id
+      if (targetJobId && xeroInvId) {
+        await assertLegacySesInvoiceActionAllowed(
+          client,
+          xeroInvId,
+          'resolve_annotation invoice link',
+          targetJobId,
+        )
+      }
+    }
+  }
+
   // Mark resolved
   const { error: updateErr } = await client.from('ai_annotations')
     .update({
@@ -39290,6 +39506,11 @@ const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string
 async function sendClientUpdate(client: any, body: any) {
   const { job_id, comms_trigger, channel: overrideChannel, custom_message, template_vars, job_contact_id } = body
   if (!job_id || !comms_trigger) throw new Error('job_id and comms_trigger required')
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    job_id,
+    'send_client_update',
+  )
 
   const tmpl = CLIENT_COMMS_TEMPLATES[comms_trigger]
   if (!tmpl && !custom_message) throw new ApiError(`Unknown comms_trigger: ${comms_trigger}. Valid triggers: ${Object.keys(CLIENT_COMMS_TEMPLATES).join(', ')}`, 400)
@@ -40473,6 +40694,11 @@ Return ONLY the JSON object.`
 async function forceReconcileInvoice(dbClient: any, body: any) {
   const { xero_invoice_id } = body
   if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
+  await assertLegacySesInvoiceActionAllowed(
+    dbClient,
+    xero_invoice_id,
+    'force_reconcile_invoice',
+  )
 
   // Call xero-sync to trigger a full sync (which includes reconciliation)
   const resp = await fetch(`${SUPABASE_URL}/functions/v1/xero-sync?action=sync_invoices`, {
@@ -40498,6 +40724,12 @@ async function sendChaseSms(client: any, body: any) {
   const job_id = body.job_id && String(body.job_id).trim() ? String(body.job_id).trim() : null
   const ghl_contact_id = body.ghl_contact_id || body.contact_id
   if (!ghl_contact_id || !message) throw new ApiError('ghl_contact_id and message required', 400)
+  if (xero_invoice_id) {
+    await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'send_chase_sms')
+  }
+  if (job_id) {
+    await assertLegacySesMoneyActionAllowedForJob(client, job_id, 'send_chase_sms')
+  }
 
   // Send via GHL proxy
   const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
@@ -40524,8 +40756,14 @@ async function sendChaseSms(client: any, body: any) {
 }
 
 async function triggerChaseWorkflow(client: any, body: any) {
-  const { ghl_contact_id, overdue_amount, invoice_number, job_number } = body
+  const { ghl_contact_id, overdue_amount, invoice_number, job_number, xero_invoice_id, job_id } = body
   if (!ghl_contact_id) throw new ApiError('ghl_contact_id required', 400)
+  if (xero_invoice_id) {
+    await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'trigger_chase_workflow')
+  }
+  if (job_id) {
+    await assertLegacySesMoneyActionAllowedForJob(client, job_id, 'trigger_chase_workflow')
+  }
 
   const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`
 
@@ -40595,6 +40833,7 @@ async function stopChaseWorkflow(client: any, body: any) {
 async function handlePaymentEvent(client: any, body: any) {
   const { xero_contact_id, xero_invoice_id, invoice_number, contact_name, amount_paid, job_id } = body
   if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
+  await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'handle_payment_event')
 
   const results: string[] = []
 
@@ -40870,5 +41109,12 @@ async function getJobFinancialsDetail(client: any, jobId: string) {
 
 // Test-only exports for Issue A + B + C safety guards.
 export const _createInvoiceForTest = createInvoice
+export const _makeSesXeroGatewayForTest = makeSesXeroGateway
+export const _assertLegacySesMoneyActionAllowedForJobForTest =
+  assertLegacySesMoneyActionAllowedForJob
+export const _assertLegacySesInvoiceActionAllowedForTest =
+  assertLegacySesInvoiceActionAllowed
+export const _assertSealedSesInvoiceCreateIsUniqueForTest =
+  assertSealedSesInvoiceCreateIsUnique
 export const _makesafeRenderReportForTest = makesafeRenderReport
 export const _updateInvoiceForTest = updateInvoice

@@ -31,6 +31,14 @@ import {
   type MatchConfig,
   type POCandidate,
 } from './materials_ingest.ts'
+import {
+  classifySealedSesJob,
+  inspectSealedSesJob,
+  sealedSesMoneyRefusal,
+  type SealedSesJobInspection,
+  type SealedSesJobRecord,
+  type SealedSesMoneyRefusal,
+} from '../_shared/sealed_ses_money_fence.ts'
 
 const XERO_CLIENT_ID = Deno.env.get('XERO_CLIENT_ID') || ''
 const XERO_CLIENT_SECRET = Deno.env.get('XERO_CLIENT_SECRET') || ''
@@ -56,6 +64,130 @@ function json(data: unknown, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json', ...CORS },
   })
+}
+
+type XeroInvoiceLinkRecord = {
+  id?: string | null
+  xero_invoice_id?: string | null
+  invoice_number?: string | null
+  invoice_type?: string | null
+  job_id?: string | null
+  invoice_obligation_revision_id?: string | null
+  ses_external_token?: string | null
+}
+
+async function inspectXeroLinkTarget(
+  client: any,
+  targetJob: string | SealedSesJobRecord,
+): Promise<SealedSesJobInspection> {
+  if (typeof targetJob === 'string') {
+    return await inspectSealedSesJob(client, targetJob)
+  }
+
+  const direct = classifySealedSesJob(targetJob)
+  if (direct.sealed || !targetJob.id) return direct
+
+  const { data, error } = await client.from('makesafe_job_details')
+    .select('job_id')
+    .eq('job_id', targetJob.id)
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    throw new Error(
+      `The sealed SES make-safe detail could not be checked before invoice linking (${error.message || 'unknown database error'}).`,
+    )
+  }
+  return classifySealedSesJob(targetJob, !!data)
+}
+
+export async function sealedSesXeroLinkRefusal(
+  client: any,
+  invoice: XeroInvoiceLinkRecord,
+  targetJob: string | SealedSesJobRecord,
+  action: string,
+): Promise<SealedSesMoneyRefusal | null> {
+  // ACCPAY is explicitly outside the sales-invoice fence. A missing/unknown
+  // type is not proof that the row is safe, so it must still be classified
+  // against its SES bindings and source/target jobs.
+  if (String(invoice.invoice_type || '').toUpperCase() === 'ACCPAY') {
+    return null
+  }
+
+  if (invoice.invoice_obligation_revision_id || invoice.ses_external_token) {
+    return sealedSesMoneyRefusal(action, {
+      xero_invoice_id: invoice.xero_invoice_id || null,
+      invoice_number: invoice.invoice_number || null,
+      ses_release_binding: true,
+    })
+  }
+
+  if (invoice.job_id) {
+    const source = await inspectSealedSesJob(client, invoice.job_id)
+    if (source.sealed) {
+      return sealedSesMoneyRefusal(action, {
+        xero_invoice_id: invoice.xero_invoice_id || null,
+        invoice_number: invoice.invoice_number || null,
+        source_job_id: invoice.job_id,
+        source_matched_by: source.matched_by,
+      })
+    }
+  }
+
+  const target = await inspectXeroLinkTarget(client, targetJob)
+  if (!target.sealed) return null
+
+  return sealedSesMoneyRefusal(action, {
+    xero_invoice_id: invoice.xero_invoice_id || null,
+    invoice_number: invoice.invoice_number || null,
+    target_job_id: target.job?.id || (typeof targetJob === 'string' ? targetJob : null),
+    target_job_number: target.job?.job_number || null,
+    target_matched_by: target.matched_by,
+  })
+}
+
+async function linkContactInvoicesToJob(
+  client: any,
+  xeroContactId: string,
+  targetJobId: string,
+  action: string,
+): Promise<SealedSesMoneyRefusal[]> {
+  const { data: invoices, error } = await client.from('xero_invoices')
+    .select('id,xero_invoice_id,invoice_number,invoice_type,job_id,invoice_obligation_revision_id,ses_external_token')
+    .eq('xero_contact_id', xeroContactId)
+    .eq('org_id', DEFAULT_ORG_ID)
+    .is('job_id', null)
+  if (error) {
+    throw new Error(
+      `The invoice link candidates could not be checked before ${action} (${error.message || 'unknown database error'}).`,
+    )
+  }
+
+  const refusals: SealedSesMoneyRefusal[] = []
+  const allowedInvoiceRowIds: string[] = []
+  for (const invoice of invoices || []) {
+    const refusal = await sealedSesXeroLinkRefusal(
+      client,
+      invoice,
+      targetJobId,
+      action,
+    )
+    if (refusal) {
+      refusals.push(refusal)
+    } else if (invoice.id) {
+      allowedInvoiceRowIds.push(invoice.id)
+    }
+  }
+
+  // A contact can own both trade bills and sales invoices. Link every allowed
+  // row while leaving only the refused sealed/unknown ACCREC candidates
+  // untouched; never make ACCPAY collateral damage of the SES fence.
+  if (allowedInvoiceRowIds.length > 0) {
+    await client.from('xero_invoices')
+      .update({ job_id: targetJobId })
+      .in('id', allowedInvoiceRowIds)
+      .is('job_id', null)
+  }
+  return refusals
 }
 
 // Fetch with timeout — prevents hanging on unresponsive external APIs
@@ -419,6 +551,7 @@ async function syncInvoices(sb: any) {
     : undefined
 
   let totalSynced = 0
+  const sesLinkRefusals: SealedSesMoneyRefusal[] = []
   const syncBoth = ['ACCREC', 'ACCPAY'] // Sales invoices + Bills
 
   for (const invoiceType of syncBoth) {
@@ -452,7 +585,7 @@ async function syncInvoices(sb: any) {
         let existingJobId: string | null = null
         let existingJobContactId: string | null = null
         const { data: existingRec } = await sb.from('xero_invoices')
-          .select('job_id, job_contact_id')
+          .select('job_id, job_contact_id, invoice_obligation_revision_id, ses_external_token')
           .eq('org_id', DEFAULT_ORG_ID)
           .eq('xero_invoice_id', inv.InvoiceID)
           .maybeSingle()
@@ -505,7 +638,7 @@ async function syncInvoices(sb: any) {
           if (swMatch) {
             const swNumber = swMatch[0].toUpperCase()
             const { data: job } = await sb.from('jobs')
-              .select('id')
+              .select('id,type,job_number')
               .eq('org_id', DEFAULT_ORG_ID)
               .eq('job_number', swNumber)
               .maybeSingle()
@@ -520,18 +653,54 @@ async function syncInvoices(sb: any) {
                 .limit(1)
                 .maybeSingle()
               if (xp?.job_id) {
+                const refusal = await sealedSesXeroLinkRefusal(
+                  sb,
+                  {
+                    xero_invoice_id: inv.InvoiceID,
+                    invoice_number: inv.InvoiceNumber,
+                    invoice_type: inv.Type,
+                    job_id: existingRec?.job_id || null,
+                    invoice_obligation_revision_id: existingRec?.invoice_obligation_revision_id || null,
+                    ses_external_token: existingRec?.ses_external_token || null,
+                  },
+                  xp.job_id,
+                  'xero-sync/reference auto-link',
+                )
+                if (refusal) {
+                  sesLinkRefusals.push(refusal)
+                  console.warn('[xero-sync] sealed SES invoice link refused', refusal)
+                } else {
+                  await sb.from('xero_invoices')
+                    .update({ job_id: xp.job_id })
+                    .eq('xero_invoice_id', inv.InvoiceID)
+                    .eq('org_id', DEFAULT_ORG_ID)
+                    .is('job_id', null)
+                }
+              }
+            } else {
+              const refusal = await sealedSesXeroLinkRefusal(
+                sb,
+                {
+                  xero_invoice_id: inv.InvoiceID,
+                  invoice_number: inv.InvoiceNumber,
+                  invoice_type: inv.Type,
+                  job_id: existingRec?.job_id || null,
+                  invoice_obligation_revision_id: existingRec?.invoice_obligation_revision_id || null,
+                  ses_external_token: existingRec?.ses_external_token || null,
+                },
+                job,
+                'xero-sync/reference auto-link',
+              )
+              if (refusal) {
+                sesLinkRefusals.push(refusal)
+                console.warn('[xero-sync] sealed SES invoice link refused', refusal)
+              } else {
                 await sb.from('xero_invoices')
-                  .update({ job_id: xp.job_id })
+                  .update({ job_id: job.id })
                   .eq('xero_invoice_id', inv.InvoiceID)
                   .eq('org_id', DEFAULT_ORG_ID)
                   .is('job_id', null)
               }
-            } else {
-              await sb.from('xero_invoices')
-                .update({ job_id: job.id })
-                .eq('xero_invoice_id', inv.InvoiceID)
-                .eq('org_id', DEFAULT_ORG_ID)
-                .is('job_id', null)
             }
           }
 
@@ -547,6 +716,24 @@ async function syncInvoices(sb: any) {
               .maybeSingle()
 
             if (invRecord?.job_id) {
+              const paidInvoiceRefusal = await sealedSesXeroLinkRefusal(
+                sb,
+                {
+                  xero_invoice_id: inv.InvoiceID,
+                  invoice_number: inv.InvoiceNumber,
+                  invoice_type: inv.Type,
+                  job_id: invRecord.job_id,
+                  invoice_obligation_revision_id: existingRec?.invoice_obligation_revision_id || null,
+                  ses_external_token: existingRec?.ses_external_token || null,
+                },
+                invRecord.job_id,
+                'xero-sync/payment automation',
+              )
+              if (paidInvoiceRefusal) {
+                sesLinkRefusals.push(paidInvoiceRefusal)
+                console.warn('[xero-sync] sealed SES payment automation refused', paidInvoiceRefusal)
+                continue
+              }
               // Check if ALL invoices for this job are paid
               const { data: unpaid } = await sb.from('xero_invoices')
                 .select('id')
@@ -717,11 +904,11 @@ async function syncInvoices(sb: any) {
     org_id: DEFAULT_ORG_ID,
     source: 'xero',
     event_type: 'sync_invoices',
-    payload: { synced: totalSynced, reconciled, modified_since: modifiedSince, ...matchResult, materials: materialsResult, bank_txn_sync: bankTxnResult },
+    payload: { synced: totalSynced, reconciled, modified_since: modifiedSince, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult },
     status: 'processed',
   })
 
-  return { success: true, synced: totalSynced, reconciled, ...matchResult, materials: materialsResult, bank_txn_sync: bankTxnResult }
+  return { success: true, synced: totalSynced, reconciled, ...matchResult, ses_link_refusals: sesLinkRefusals, materials: materialsResult, bank_txn_sync: bankTxnResult }
 }
 
 
@@ -738,18 +925,18 @@ async function syncInvoices(sb: any) {
 
 /** Exported for regression tests (M1 Strategy 2 / silent-400 guard). */
 export async function matchUnlinkedInvoices(client: any) {
+  let matched = 0
+  let flagged = 0
+  const refusals: SealedSesMoneyRefusal[] = []
   try {
     // Get invoices with no job_id
     const { data: unlinked } = await client.from('xero_invoices')
-      .select('id, xero_invoice_id, reference, contact_name, total, invoice_number, status')
+      .select('id, xero_invoice_id, reference, contact_name, total, invoice_number, invoice_type, status, invoice_obligation_revision_id, ses_external_token')
       .is('job_id', null)
       .not('status', 'in', '("VOIDED","DELETED")')
       .limit(100)
 
     if (!unlinked || unlinked.length === 0) return { matched: 0, flagged: 0 }
-
-    let matched = 0
-    let flagged = 0
 
     for (const inv of unlinked) {
       const ref = inv.reference || ''
@@ -763,11 +950,22 @@ export async function matchUnlinkedInvoices(client: any) {
       const jobNum = extractJobNumber(ref)
       if (jobNum) {
         const { data: job } = await client.from('jobs')
-          .select('id, job_number')
+          .select('id, job_number, type')
           .eq('job_number', jobNum)
           .maybeSingle()
 
         if (job) {
+          const refusal = await sealedSesXeroLinkRefusal(
+            client,
+            inv,
+            job,
+            'xero-sync/unlinked reference match',
+          )
+          if (refusal) {
+            refusals.push(refusal)
+            continue
+          }
+
           await client.from('xero_invoices')
             .update({ job_id: job.id, updated_at: new Date().toISOString() })
             .eq('id', inv.id)
@@ -789,7 +987,7 @@ export async function matchUnlinkedInvoices(client: any) {
       // Strategy 2: Contact name matches a job client_name exactly
       if (contactName) {
         const { data: jobs, error: jobsErr } = await client.from('jobs')
-          .select('id, job_number, client_name, pricing_json')
+          .select('id, job_number, client_name, pricing_json, type')
           .eq('org_id', '00000000-0000-0000-0000-000000000001')
           .eq('legacy', false)
           .ilike('client_name', contactName)
@@ -806,6 +1004,17 @@ export async function matchUnlinkedInvoices(client: any) {
 
         if (jobs && jobs.length === 1) {
           // Exact single match — high confidence, auto-link
+          const refusal = await sealedSesXeroLinkRefusal(
+            client,
+            inv,
+            jobs[0],
+            'xero-sync/unlinked contact match',
+          )
+          if (refusal) {
+            refusals.push(refusal)
+            continue
+          }
+
           await client.from('xero_invoices')
             .update({ job_id: jobs[0].id, updated_at: new Date().toISOString() })
             .eq('id', inv.id)
@@ -864,11 +1073,19 @@ export async function matchUnlinkedInvoices(client: any) {
       // These could be direct Xero invoices not related to SW jobs
     }
 
-    console.log(`[xero-sync] Invoice matching: ${matched} auto-linked, ${flagged} flagged for review`)
-    return { matched, flagged }
+    console.log(`[xero-sync] Invoice matching: ${matched} auto-linked, ${flagged} flagged for review, ${refusals.length} sealed SES links refused`)
+    return { matched, flagged, refused: refusals.length, refusals }
   } catch (e: any) {
-    console.log('[xero-sync] Invoice matching failed:', (e as Error).message)
-    return { matched: 0, flagged: 0 }
+    console.error('[xero-sync] Invoice matching degraded:', (e as Error).message)
+    return {
+      success: false,
+      degraded: true,
+      error: (e as Error).message,
+      matched,
+      flagged,
+      refused: refusals.length,
+      refusals,
+    }
   }
 }
 
@@ -1700,6 +1917,7 @@ async function matchContacts(sb: any) {
   // Match unmatched contacts: email → phone → normalized name → surname+initial
   let matchCount = 0
   const unmatchedLog: string[] = []
+  const sesLinkRefusals: SealedSesMoneyRefusal[] = []
 
   for (const contact of unmatched) {
     let xeroMatch = null
@@ -1766,12 +1984,12 @@ async function matchContacts(sb: any) {
 
       // Link invoices from this Xero contact to the job
       if (contact.job_id) {
-        await sb
-          .from('xero_invoices')
-          .update({ job_id: contact.job_id })
-          .eq('xero_contact_id', xeroMatch.ContactID)
-          .eq('org_id', DEFAULT_ORG_ID)
-          .is('job_id', null)
+        sesLinkRefusals.push(...await linkContactInvoicesToJob(
+          sb,
+          xeroMatch.ContactID,
+          contact.job_id,
+          'xero-sync/contact match',
+        ))
       }
 
       matchCount++
@@ -1802,6 +2020,7 @@ async function matchContacts(sb: any) {
       matched: matchCount,
       still_unmatched: unmatchedLog.length,
       xero_contacts_fetched: allXeroContacts.length,
+      ses_link_refusals: sesLinkRefusals,
     },
     status: 'processed',
   })
@@ -1812,6 +2031,8 @@ async function matchContacts(sb: any) {
     total_checked: unmatched.length,
     still_unmatched: unmatchedLog.length,
     xero_contacts: allXeroContacts.length,
+    refused: sesLinkRefusals.length,
+    refusals: sesLinkRefusals,
   }
 }
 
@@ -2187,12 +2408,14 @@ async function createOrFindContact(sb: any, body: any) {
   }
 
   // Link any existing invoices from this Xero contact to the job
+  let sesLinkRefusals: SealedSesMoneyRefusal[] = []
   if (job_id) {
-    await sb.from('xero_invoices')
-      .update({ job_id })
-      .eq('xero_contact_id', xeroContactId)
-      .eq('org_id', DEFAULT_ORG_ID)
-      .is('job_id', null)
+    sesLinkRefusals = await linkContactInvoicesToJob(
+      sb,
+      xeroContactId,
+      job_id,
+      'xero-sync/create-or-find contact link',
+    )
   }
 
   // Log it
@@ -2206,6 +2429,7 @@ async function createOrFindContact(sb: any, body: any) {
       xero_contact_id: xeroContactId,
       created,
       job_id,
+      ses_link_refusals: sesLinkRefusals,
     },
     status: 'processed',
   })
@@ -2215,6 +2439,8 @@ async function createOrFindContact(sb: any, body: any) {
     xero_contact_id: xeroContactId,
     created,
     contact_name: xeroContact.Name,
+    refused: sesLinkRefusals.length,
+    refusals: sesLinkRefusals,
   }
 }
 
@@ -2228,7 +2454,7 @@ async function matchInvoicesByReference(sb: any) {
   // Find invoices with SW-like references that have no job_id
   const { data: invoices, error: invErr } = await sb
     .from('xero_invoices')
-    .select('id, xero_invoice_id, reference, contact_name')
+    .select('id, xero_invoice_id, invoice_number, invoice_type, reference, contact_name, invoice_obligation_revision_id, ses_external_token')
     .eq('org_id', DEFAULT_ORG_ID)
     .is('job_id', null)
     .not('reference', 'is', null)
@@ -2248,6 +2474,7 @@ async function matchInvoicesByReference(sb: any) {
 
   let matched = 0
   const matchLog: string[] = []
+  const sesLinkRefusals: SealedSesMoneyRefusal[] = []
 
   for (const inv of candidates) {
     const swMatch = (inv.reference || '').match(swPattern)
@@ -2257,12 +2484,22 @@ async function matchInvoicesByReference(sb: any) {
 
     // Try jobs.job_number first (new system)
     const { data: job } = await sb.from('jobs')
-      .select('id')
+      .select('id,type,job_number')
       .eq('org_id', DEFAULT_ORG_ID)
       .eq('job_number', swNumber)
       .maybeSingle()
 
     if (job) {
+      const refusal = await sealedSesXeroLinkRefusal(
+        sb,
+        inv,
+        job,
+        'xero-sync/match invoices by reference',
+      )
+      if (refusal) {
+        sesLinkRefusals.push(refusal)
+        continue
+      }
       await sb.from('xero_invoices')
         .update({ job_id: job.id })
         .eq('id', inv.id)
@@ -2281,6 +2518,16 @@ async function matchInvoicesByReference(sb: any) {
       .maybeSingle()
 
     if (xp?.job_id) {
+      const refusal = await sealedSesXeroLinkRefusal(
+        sb,
+        inv,
+        xp.job_id,
+        'xero-sync/match invoices by project reference',
+      )
+      if (refusal) {
+        sesLinkRefusals.push(refusal)
+        continue
+      }
       await sb.from('xero_invoices')
         .update({ job_id: xp.job_id })
         .eq('id', inv.id)
@@ -2298,6 +2545,7 @@ async function matchInvoicesByReference(sb: any) {
       sw_references_found: candidates.length,
       matched,
       matches: matchLog.slice(0, 50),
+      ses_link_refusals: sesLinkRefusals,
     },
     status: 'processed',
   })
@@ -2308,6 +2556,8 @@ async function matchInvoicesByReference(sb: any) {
     sw_references_found: candidates.length,
     total_checked: invoices.length,
     matches: matchLog.slice(0, 50),
+    refused: sesLinkRefusals.length,
+    refusals: sesLinkRefusals,
   }
 }
 

@@ -41,6 +41,11 @@ import {
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { freezeExpectedCostsOnAcceptance } from '../_shared/expected_costs/expected_costs_freeze.ts'
+import {
+  inspectSealedSesJob,
+  sealedSesMoneyRefusal,
+  SealedSesMoneyFenceLookupError,
+} from '../_shared/sealed_ses_money_fence.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
@@ -2639,6 +2644,76 @@ serve(async (req: Request) => {
 
       if (!xero_invoice_id || !job_id || !client_email) {
         return jsonResponse({ error: 'xero_invoice_id, job_id, and client_email required' }, 400, corsHeaders)
+      }
+
+      // SES invoice delivery is content-addressed and release-approved. This
+      // patio-oriented legacy helper must never become a second delivery route
+      // merely because a make-safe job id was supplied.
+      let sealedSesInspection
+      try {
+        sealedSesInspection = await inspectSealedSesJob(sb, job_id)
+      } catch (error) {
+        if (!(error instanceof SealedSesMoneyFenceLookupError)) throw error
+        const refusal = {
+          state: 'refused',
+          code: 'sealed_ses_fence_check_failed',
+          fact: error.message,
+          recovery_action: 'Retry only after the sealed SES job classification can be checked.',
+        }
+        return jsonResponse({ success: false, refusal, error: refusal.fact }, 503, corsHeaders)
+      }
+      if (sealedSesInspection.sealed) {
+        const refusal = sealedSesMoneyRefusal('send-quote/send-invoice', {
+          job_id,
+          matched_by: sealedSesInspection.matched_by,
+        })
+        return jsonResponse({ success: false, refusal, error: refusal.fact }, 409, corsHeaders)
+      }
+
+      const { data: invoiceRecord, error: invoiceError } = await sb.from('xero_invoices')
+        .select('invoice_type,job_id,invoice_obligation_revision_id,ses_external_token')
+        .eq('xero_invoice_id', xero_invoice_id)
+        .maybeSingle()
+      if (invoiceError || !invoiceRecord) {
+        const refusal = {
+          state: 'refused',
+          code: 'sealed_ses_fence_check_failed',
+          fact: 'The invoice could not be classified before legacy delivery.',
+          recovery_action: 'Sync the invoice mirror and retry only after its binding is confirmed.',
+        }
+        return jsonResponse({ success: false, refusal, error: refusal.fact }, 503, corsHeaders)
+      }
+      if (String(invoiceRecord.invoice_type || 'ACCREC').toUpperCase() !== 'ACCPAY' &&
+          (invoiceRecord.invoice_obligation_revision_id || invoiceRecord.ses_external_token)) {
+        const refusal = sealedSesMoneyRefusal('send-quote/send-invoice', {
+          job_id,
+          invoice_obligation_revision_id: invoiceRecord.invoice_obligation_revision_id || null,
+          has_ses_external_token: !!invoiceRecord.ses_external_token,
+        })
+        return jsonResponse({ success: false, refusal, error: refusal.fact }, 409, corsHeaders)
+      }
+      if (invoiceRecord.job_id && invoiceRecord.job_id !== job_id) {
+        let linkedJobInspection
+        try {
+          linkedJobInspection = await inspectSealedSesJob(sb, invoiceRecord.job_id)
+        } catch (error) {
+          if (!(error instanceof SealedSesMoneyFenceLookupError)) throw error
+          const refusal = {
+            state: 'refused',
+            code: 'sealed_ses_fence_check_failed',
+            fact: error.message,
+            recovery_action: 'Retry only after the invoice-linked job classification can be checked.',
+          }
+          return jsonResponse({ success: false, refusal, error: refusal.fact }, 503, corsHeaders)
+        }
+        if (linkedJobInspection.sealed) {
+          const refusal = sealedSesMoneyRefusal('send-quote/send-invoice', {
+            job_id,
+            linked_job_id: invoiceRecord.job_id,
+            linked_job_matched_by: linkedJobInspection.matched_by,
+          })
+          return jsonResponse({ success: false, refusal, error: refusal.fact }, 409, corsHeaders)
+        }
       }
 
       // Look up job for reply-to routing and GHL logging

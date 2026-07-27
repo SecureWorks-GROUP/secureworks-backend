@@ -58,6 +58,8 @@ All in `supabase/functions/`. Deploy with:
 - **Actions**:
   - `token_refresh` — refresh Xero OAuth token (pg_cron every 20 min)
   - `sync_invoices` — pull ACCREC + ACCPAY invoices, auto-link by SW reference
+    except sealed SES/SES-bound ACCREC candidates, which fail closed; see
+    `docs/project-knowledge/sync-layer.md`
   - `sync_reports` — pull P&L reports
   - `sync_projects` — pull Xero Projects (per-job revenue/expenses)
   - `sync_tracking_pl` — pull P&L by business unit
@@ -67,15 +69,18 @@ All in `supabase/functions/`. Deploy with:
   - `sync_purchase_orders` — pull POs from Xero
   - `sync_suppliers` — pull supplier contacts from Xero
   - `create_or_find_contact` (POST) — find/create Xero contact, link to job
-  - `match_invoices_by_reference` — link invoices with SW refs to jobs
+  - `match_invoices_by_reference` — link eligible invoices with SW refs to jobs;
+    see `docs/project-knowledge/sync-layer.md`
   - `backfill_xero_contacts` — batch create Xero contacts for active jobs (?limit=10)
 
 ### reporting-api `--no-verify-jwt`
 - **Purpose**: All dashboard data aggregation
-- **Actions**: `dashboard_summary`, `job_profitability`, `marketing_summary`, `trends`, `sales_breakdown`, `insights`, `match_invoices`, `debt_followup`, `ceo_report` (orchestrator — calls all others)
+- **Actions**: `dashboard_summary`, `job_profitability`, `marketing_summary`, `trends`, `sales_breakdown`, `insights`, `match_invoices`, `debt_followup`, `ceo_report` (orchestrator — calls all others). `match_invoices` refuses sealed SES/SES-bound ACCREC auto-links; see `docs/project-knowledge/sync-layer.md`.
 
 ### send-quote
 - **Purpose**: PDF quote distribution + client portal + GHL monetary value push
+- **Sealed SES boundary**: legacy `/send-invoice` refuses sealed SES jobs and
+  SES-bound ACCREC invoices; use the approved SES release flow.
 - **Deploy**: `--no-verify-jwt` REQUIRED. This function has mixed routes:
   internal send routes (`/send`, `/send-invoice`, `/send-runs`) accept either
   the master `SW_API_KEY`/service-role key (via `x-api-key` or
@@ -106,6 +111,9 @@ All in `supabase/functions/`. Deploy with:
 - **Purpose**: Ops dashboard CRUD — scheduling, POs, WOs, pipeline, job detail, Xero push
 - **Also**: Trade mobile endpoints (my_jobs, upload_photo, service_report)
 - **Also**: AI/automation (morning_brief, scope_to_po, complete_and_invoice)
+- **Sealed SES boundary**: legacy invoice/money paths refuse sealed SES or
+  SES-bound ACCREC work; use the approved SES release flow. Details live in
+  `docs/project-knowledge/sync-layer.md`.
 - **Canonical source**: `secureworks-site/supabase/functions/ops-api`
 - **Deploy guard**: Do not deploy `ops-api` from `securedash` or any dashboard
   submodule/worktree. Stale dashboard copies previously omitted newer site
