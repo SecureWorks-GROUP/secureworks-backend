@@ -2315,6 +2315,38 @@ export function _resolveOpsApiAuthIntent(input: {
   return 'none'
 }
 
+export function _preferBearerForOpsApiAction(url: URL): boolean {
+  const action = url.searchParams.get('action')
+  return action === 'submit_makesafe_report' ||
+    (action === 'makesafe_board' &&
+      String(url.searchParams.get('projection') || '').toLowerCase() === 'trade')
+}
+
+export function _resolveMakesafeReportActor(
+  authMode: 'api_key' | 'jwt' | 'routine',
+  authUser: Pick<TradeAuthContext, 'id'> | null,
+  body: any,
+): string | null {
+  // A Trade browser carries both the legacy x-api-key and its user JWT. Once
+  // classified as JWT, attribution is server-owned and a body value cannot
+  // impersonate another trade. Privileged/routine callers have no user session,
+  // so they must continue to name the actor explicitly.
+  if (authMode === 'jwt') return authUser?.id || null
+  return body?.userId || body?.user_id || null
+}
+
+async function dispatchMakesafeReport(
+  client: any,
+  body: any,
+  authMode: 'api_key' | 'jwt' | 'routine',
+  authUser: TradeAuthContext | null,
+) {
+  return submitMakesafeReport(client, {
+    ...body,
+    userId: _resolveMakesafeReportActor(authMode, authUser, body),
+  })
+}
+
 // Trade Board route: always the production canonical loader. There is no
 // injectable loadBoard override on this production-visible path — mission and
 // harness proofs must discover jobs from the jobs table (or a join-capable
@@ -2471,18 +2503,17 @@ if (import.meta.main) serve(async (req: Request) => {
   let authMode: 'api_key' | 'jwt' | 'routine' = 'api_key'
   let authUser: TradeAuthContext | null = null
   // Bearer-over-x-api-key precedence is scoped to the make-safe Trade board read
-  // ONLY (action=makesafe_board&projection=trade). Every other action keeps the
-  // pre-existing x-api-key-first precedence so mixed-credential calls to privileged
-  // api_key-gated actions are unaffected (decision: auth-precedence-scope NARROW).
-  const preferBearerForTradeBoard = _preAuthUrl.searchParams.get('action') === 'makesafe_board' &&
-    String(_preAuthUrl.searchParams.get('projection') || '').toLowerCase() === 'trade'
+  // and final report submit. Both browser calls legitimately carry both headers,
+  // and the submit must take attribution from the verified JWT rather than a
+  // spoofable body field. Every other action keeps x-api-key-first precedence.
+  const preferBearerForTradeIdentity = _preferBearerForOpsApiAction(_preAuthUrl)
   const authIntent = _resolveOpsApiAuthIntent({
     xApiKey,
     bearerToken,
     validKey,
     serviceKey,
     routineKey,
-    preferBearerOverApiKey: preferBearerForTradeBoard,
+    preferBearerOverApiKey: preferBearerForTradeIdentity,
   })
 
   if (authIntent === 'routine') {
@@ -3335,10 +3366,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await scanSesMakesafes(client))
       }
       case 'submit_makesafe_report':
-        return json(await submitMakesafeReport(client, {
-          ...body,
-          userId: body?.userId || body?.user_id || authUser?.id || null,
-        }))
+        return json(await dispatchMakesafeReport(client, body, authMode, authUser))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
       // ── Job P&L (M3) — pairs with ops.html #119 + M1 migration ──
       case 'job_financials': return json(await listJobFinancials(client))
@@ -13895,6 +13923,16 @@ async function submitMakesafeReport(client: any, body: any) {
   const uId = userId || user_id || null
   if (!jId) throw new Error('job_id required')
   await assertMakesafeJob(client, jId)
+  const submittingFinal = (reportStatus || 'submitted') === 'submitted'
+  // Captain D1: a final report is always attributable. Trade JWT dispatch
+  // supplies this server-side; privileged callers must supply an actor too.
+  // Refuse before attendance-cycle creation or any other write.
+  if (submittingFinal && !uId) {
+    throw new ApiError(
+      'user_id required for final MakeSafe report attribution',
+      400,
+    )
+  }
 
   // Re-attendance (M-C): each report is scoped to the job's current work cycle.
   // A re-attend (reattend_makesafe) increments makesafe_job_details.cycle_number,
@@ -13939,7 +13977,6 @@ async function submitMakesafeReport(client: any, body: any) {
   const { data: existing } = await client.from('job_service_reports')
     .select('id, status').eq('job_id', jId).eq('cycle_number', currentCycle).limit(1).maybeSingle()
 
-  const submittingFinal = (reportStatus || 'submitted') === 'submitted'
   // A report already persisted as 'submitted' whose board sync completed (detail
   // already advanced to the finished substatus) is a genuine duplicate submit and
   // is still rejected. But one saved as 'submitted' whose board never advanced —
@@ -13958,9 +13995,6 @@ async function submitMakesafeReport(client: any, body: any) {
   const resumingSubmitted = submittingFinal &&
     existing?.status === 'submitted' && !boardSyncComplete
   if (submittingFinal) {
-    // Captain D1: a final report is always attributable. Trade JWT dispatch
-    // supplies this server-side; privileged callers must supply an actor too.
-    if (!uId) throw new ApiError('user_id required for final MakeSafe report attribution', 400)
     if (existing?.status === 'submitted' && boardSyncComplete) throw new Error('Report already submitted')
     const { data: mediaRows, error: mediaErr } = await client.from('job_media')
       .select('phase')
@@ -14122,6 +14156,7 @@ async function submitMakesafeReport(client: any, body: any) {
   return { ok: true, report, board_sync: boardSync, event_sync: eventSync, warnings }
 }
 export const _submitMakesafeReportForTest = submitMakesafeReport
+export const _dispatchMakesafeReportForTest = dispatchMakesafeReport
 export const _recaptureIntakeDraftForTest = recaptureIntakeDraft
 
 // ── Slice 6: make-safe map data ──

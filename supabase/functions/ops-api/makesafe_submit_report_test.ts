@@ -6,8 +6,12 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _dispatchMakesafeReportForTest,
   _makesafePipelineForTest,
   _normaliseOpsAttachJobPhotoInputForTest,
+  _preferBearerForOpsApiAction,
+  _resolveMakesafeReportActor,
+  _resolveOpsApiAuthIntent,
   _submitMakesafeReportForTest,
 } from "./index.ts";
 
@@ -25,6 +29,7 @@ function makeSubmitClient(seed: TableRows, fail: Record<string, string> = {}) {
     if (!rows[table]) rows[table] = [];
     const preds: Array<(r: any) => boolean> = [];
     let insertRow: any = null;
+    let upsertRow: any = null;
     let updateRow: any = null;
     let maxRows: number | null = null;
 
@@ -51,8 +56,24 @@ function makeSubmitClient(seed: TableRows, fail: Record<string, string> = {}) {
       for (const row of matched) Object.assign(row, updateRow);
       return { data: matched[0] || null, error: null };
     };
+    const applyUpsert = () => {
+      const failed = failure("upsert");
+      if (failed) return failed;
+      const existing = rows[table].find((row) =>
+        row.job_id === upsertRow.job_id &&
+        row.cycle_number === upsertRow.cycle_number
+      );
+      if (existing) {
+        Object.assign(existing, upsertRow);
+        return { data: existing, error: null };
+      }
+      const row = { id: upsertRow.id || nextId(table), ...upsertRow };
+      rows[table].push(row);
+      return { data: row, error: null };
+    };
     const terminal = (single = false) => {
       if (insertRow) return applyInsert();
+      if (upsertRow) return applyUpsert();
       if (updateRow) return applyUpdate();
       const data = matchingRows();
       return { data: single ? data[0] || null : data, error: null };
@@ -91,6 +112,10 @@ function makeSubmitClient(seed: TableRows, fail: Record<string, string> = {}) {
         insertRow = row;
         return b;
       },
+      upsert: (row: any) => {
+        upsertRow = row;
+        return b;
+      },
       update: (row: any) => {
         updateRow = row;
         return b;
@@ -124,6 +149,7 @@ function baseRows(overrides: TableRows = {}): TableRows {
       substatus: "waiting_on_trade_report",
       report_received_at: null,
     }],
+    makesafe_attendance_cycles: [],
     job_service_reports: [],
     job_media: Array.from({ length: 5 }, (_, i) => ({
       id: `media-${i + 1}`,
@@ -156,6 +182,54 @@ function validBody(overrides: Record<string, any> = {}) {
     ...overrides,
   };
 }
+
+Deno.test("submit_makesafe_report attributes a mixed-credential Trade request from the verified JWT when the body omits userId", async () => {
+  const url = new URL(
+    "https://example.test/functions/v1/ops-api?action=submit_makesafe_report",
+  );
+  const authMode = _resolveOpsApiAuthIntent({
+    xApiKey: "master-key",
+    bearerToken: "hugo-jwt",
+    validKey: "master-key",
+    serviceKey: "service-key",
+    preferBearerOverApiKey: _preferBearerForOpsApiAction(url),
+  });
+  assertEquals(authMode, "jwt");
+  if (authMode !== "jwt") throw new Error("expected JWT auth");
+
+  const actor = _resolveMakesafeReportActor(
+    authMode,
+    { id: "hugo-user-id" },
+    {},
+  );
+  assertEquals(actor, "hugo-user-id");
+
+  const { client, rows } = makeSubmitClient(baseRows());
+  const body = validBody();
+  delete body.userId;
+  await _dispatchMakesafeReportForTest(client, body, authMode, { id: actor });
+  assertEquals(rows.job_service_reports[0].submitted_by, "hugo-user-id");
+  assertEquals(rows.job_events[0].user_id, "hugo-user-id");
+});
+
+Deno.test("submit_makesafe_report ignores a body-spoofed actor for an authenticated Trade request", () => {
+  assertEquals(
+    _resolveMakesafeReportActor(
+      "jwt",
+      { id: "hugo-user-id" },
+      { userId: "other-trade-id" },
+    ),
+    "hugo-user-id",
+  );
+  assertEquals(
+    _resolveMakesafeReportActor(
+      "api_key",
+      null,
+      { user_id: "privileged-supplied-actor" },
+    ),
+    "privileged-supplied-actor",
+  );
+});
 
 Deno.test("ops attach job photo normalises recovered completion photo input", () => {
   const body = {
