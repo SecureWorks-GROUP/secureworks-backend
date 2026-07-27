@@ -243,6 +243,11 @@ import {
   GapFillError as _GapFillError,
   loadGapFillQueue as _loadGapFillQueue,
 } from './makesafe_gap_fill.ts'
+import {
+  findIntakeExceptionItem as _findIntakeExceptionItem,
+  intakeExceptionBoardPayload as _intakeExceptionBoardPayload,
+  loadIntakeExceptionProjection as _loadIntakeExceptionProjection,
+} from './makesafe_intake_exception_cards.ts'
 // M1.5 cost hardening — local PDF text extraction, per-builder template parsers, and
 // the token/cost ledger. See makesafe_pdf_text.ts / makesafe_template_parser.ts /
 // makesafe_cost.ts. All deterministic + key-less; the model call is the only paid step.
@@ -2801,8 +2806,8 @@ async function makesafeBoardAction(
     )
   }
 
-  const canonicalRows = await loadCanonicalMakesafeBoard(client)
   if (contractVersion === 'v2') {
+    const canonicalRows = await loadCanonicalMakesafeBoard(client)
     const generatedAt = options.generatedAt || new Date().toISOString()
     return json(await buildPrivilegedMakesafeV2BoardComparison(
       client,
@@ -2810,18 +2815,57 @@ async function makesafeBoardAction(
       generatedAt,
     ))
   }
+  const generatedAt = options.generatedAt || new Date().toISOString()
+  const [canonicalRows, intakeExceptions] = await Promise.all([
+    loadCanonicalMakesafeBoard(client),
+    _loadIntakeExceptionProjection(client, { generatedAt }),
+  ])
   const { ops, ...parity } = checkMakesafeBoardParity(canonicalRows)
   if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
   return json({
     contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
     projection: 'ops',
-    generated_at: options.generatedAt || new Date().toISOString(),
+    generated_at: generatedAt,
     ...ops,
+    intake_exceptions: _intakeExceptionBoardPayload(intakeExceptions),
     parity,
   })
 }
 
 export const _makesafeBoardActionForTest = makesafeBoardAction
+
+async function makesafeIntakeExceptionReadAction(
+  client: any,
+  authMode: 'api_key' | 'jwt' | 'routine' | 'none',
+  authUser: TradeAuthContext | null | undefined,
+  selector: { cardId?: string | null; caseId?: string | null } | null = null,
+  generatedAt?: string,
+  loadProjection = _loadIntakeExceptionProjection,
+) {
+  const role = String(authUser?.role || '').toLowerCase()
+  const allowed = authMode === 'api_key' || authMode === 'routine' ||
+    (authMode === 'jwt' && ['admin', 'owner', 'ops_manager'].includes(role))
+  if (!allowed) {
+    return json({ error: 'intake exception cards require routine or privileged ops access' }, 403)
+  }
+  const projection = await loadProjection(client, { generatedAt })
+  if (!selector) return json(_intakeExceptionBoardPayload(projection))
+  if (!selector.cardId && !selector.caseId) {
+    return json({ error: 'card_id or case_id is required' }, 400)
+  }
+  const item = _findIntakeExceptionItem(projection, selector)
+  if (!item.card) {
+    return json({ error: 'actionable intake exception card not found' }, 404)
+  }
+  return json({
+    contract_version: projection.contract_version,
+    generated_at: projection.generated_at,
+    card: item.card,
+  })
+}
+
+export const _makesafeIntakeExceptionReadActionForTest =
+  makesafeIntakeExceptionReadAction
 
 if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
@@ -2989,6 +3033,10 @@ if (import.meta.main) serve(async (req: Request) => {
       // report-ready jobs). The paired WRITE (makesafe_gap_fill_apply) is
       // deliberately NOT allow-listed — a routine caller cannot write case fills.
       'makesafe_gap_fill_queue',
+      // U2 exception visibility: read-only recent card/list detail. Historical
+      // and silently-accounted disposition rows are intentionally not exposed.
+      'makesafe_intake_exception_cards',
+      'makesafe_intake_exception_card',
       // Link backfill: routine may run the DRY-RUN only; the live patch (dry_run:false)
       // is blocked inside the case for a routine caller (privileged-only).
       'makesafe_intake_link_backfill',
@@ -3640,6 +3688,27 @@ if (import.meta.main) serve(async (req: Request) => {
           limit: Number(url.searchParams.get('limit') || '') || undefined,
           includeReportReady: url.searchParams.get('include_report_ready') !== 'false',
         }))
+      }
+      // U2 jobs+cases desk seam. These are SELECT-only projections; cards carry
+      // explicit no-auto-create flags and link fillable material to the existing
+      // additive gap-fill queue.
+      case 'makesafe_intake_exception_cards': {
+        return await makesafeIntakeExceptionReadAction(
+          client,
+          authMode,
+          authUser,
+        )
+      }
+      case 'makesafe_intake_exception_card': {
+        return await makesafeIntakeExceptionReadAction(
+          client,
+          authMode,
+          authUser,
+          {
+            cardId: url.searchParams.get('card_id'),
+            caseId: url.searchParams.get('case_id'),
+          },
+        )
       }
       // Apply one AI-judged, additive, audited fill to a single case. Privileged
       // ONLY (api_key or admin/owner jwt) — it writes case facts, so the automation

@@ -148,7 +148,7 @@ function emptyCanonicalBoardClient(compareEnabled = false) {
   };
 }
 
-Deno.test("default makesafe-board response remains the exact v1 byte contract", async () => {
+Deno.test("default makesafe-board v1 includes the additive intake exception desk", async () => {
   const client = emptyCanonicalBoardClient();
   const response = await _makesafeBoardActionForTest(
     client,
@@ -176,6 +176,34 @@ Deno.test("default makesafe-board response remains the exact v1 byte contract", 
       },
       rows: [],
       unmapped_stage_job_ids: [],
+      intake_exceptions: {
+        contract_version: "makesafe-intake-exception-cards.v1",
+        generated_at: GENERATED_AT,
+        org_id: "00000000-0000-0000-0000-000000000001",
+        recent_window: {
+          days: 15,
+          from: "2026-07-12T04:00:00.000Z",
+          to: GENERATED_AT,
+        },
+        summary: {
+          visible_actionable_cards: 0,
+          resolved_from_existing_evidence: 0,
+          accounted_silently: 0,
+          outside_three: 0,
+        },
+        totals: {
+          exception_case_rows: 0,
+          recent_exception_case_rows: 0,
+          out_of_window_exception_case_rows: 0,
+          recent_accounted_non_work_rows: 0,
+          recent_deterministic_non_work_exception_rows: 0,
+          actionable_case_rows: 0,
+          cards: 0,
+          source_alarms: 0,
+        },
+        cards: [],
+        source_alarms: [],
+      },
       parity: {
         ok: true,
         checked: 0,
