@@ -689,6 +689,8 @@ async function preflight(
     capability.real_front_door !== "m365-group:ses@secureworkswa.com.au" ||
     capability.synthetic_sender !== run.sender ||
     capability.terminal_accounting !== true ||
+    capability.cleanup_contract_version !==
+      "ledger-bound-readiness-purge/v1" ||
     capability.release_refusal_probe !== true ||
     capability.outbound_actions !== false ||
     capability.xero_actions !== false

@@ -24,8 +24,9 @@ The matching edge revision and
 `20260727080821_makesafe_synthetic_livefire_infrastructure.sql` plus
 `20260728030000_synthetic_livefire_readiness_cleanup.sql` must reach production
 through the normal migration-before-edge lane. The preflight requires the
-deployed capability version, fixed company profile, legacy own-mail terminal
-accounting and release-refusal probe before it can send anything.
+deployed capability versions `ses-synthetic-livefire/v1` and
+`ledger-bound-readiness-purge/v1`, fixed company profile, legacy own-mail
+terminal accounting and release-refusal probe before it can send anything.
 
 ## Fixture provenance
 

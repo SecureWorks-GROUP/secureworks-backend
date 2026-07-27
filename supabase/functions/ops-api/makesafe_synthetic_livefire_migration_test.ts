@@ -219,6 +219,10 @@ Deno.test("verified marker propagates from deterministic draft into job and even
   assertStringIncludes(index, "release_refusal_probe: true");
   assertStringIncludes(
     index,
+    "cleanup_contract_version: 'ledger-bound-readiness-purge/v1'",
+  );
+  assertStringIncludes(
+    index,
     "synthetic live-fire profile and UUID-bound marker must be present together",
   );
   assertStringIncludes(
