@@ -2082,7 +2082,7 @@ async function recordIntakeSourceExceptions(
 }
 
 async function recordIntakeHealthDegradation(
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   reasonCode: string,
   nowIso = new Date().toISOString(),
 ): Promise<void> {
@@ -2117,7 +2117,7 @@ async function recordIntakeHealthDegradation(
 }
 
 async function recordIntakeScanFailure(
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   sources: readonly IntakeHandoffSource[],
   failure: IntakeScanContinuationFailure,
   syncedWatermark: string | null,

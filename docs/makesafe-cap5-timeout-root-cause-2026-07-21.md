@@ -63,8 +63,9 @@ cost.
 `monitor-ses-makesafes` now registers the nested ops scan with
 `EdgeRuntime.waitUntil` and returns the mail-sync response immediately. The outer
 `pg_net` request is no longer held open for the deterministic batch. The continuation
-is still bounded by the existing 500-source read cap, 1..10 committed-case cap and
-attempt ceiling.
+is still bounded by the deterministic runtime's source cap, 1..10 committed-case
+cap and attempt ceiling. The current standing entry point passes four sources per
+invocation; the 500-row value described above was the pre-repair incident state.
 
 The existing 10-minute mailbox lease is transferred to the continuation and released
 only after the nested scan settles. A later two-minute poll exits cleanly as locked
