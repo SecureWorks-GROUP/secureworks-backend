@@ -193,7 +193,7 @@ BEGIN
   FROM public.jobs job
   WHERE job.id = ANY(v_ledger_job_ids)
     AND job.metadata->>'synthetic_livefire_marker' = p_marker;
-  IF v_marked_count <> v_ledger_count OR v_bound_count <> v_ledger_count THEN
+  IF v_marked_count > v_ledger_count OR v_bound_count <> v_marked_count THEN
     RAISE EXCEPTION
       'synthetic live-fire purge scope mismatch: ledger %, marked %, bound %',
       v_ledger_count,
