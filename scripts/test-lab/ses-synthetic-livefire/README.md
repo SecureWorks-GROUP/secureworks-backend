@@ -80,9 +80,11 @@ Cleanup is deliberately split by store:
   evidence. Their run is transitioned to `terminal` in
   `ses_synthetic_livefire_runs`.
 - Mutable synthetic jobs and operational rows are deleted after the exact-marker
-  guard passes. Only append-only/group evidence and the marked mailbox messages
-  remain; attendance cycles and readiness-linked jobs use guarded synthetic-only
-  RPCs bound to the run ledger.
+  guard passes. Intake cases bound to those jobs are retained as audited
+  `synthetic_livefire_terminal` tombstones, with their transition events; other
+  append-only/group evidence and the marked mailbox messages remain. Attendance
+  cycles and readiness-linked jobs use guarded synthetic-only RPCs bound to the
+  run ledger.
 - Canonical Ops/Trade projections hide retained evidence only from the terminal
   `ses_synthetic_livefire_runs` ledger, never from mutable job metadata.
 
