@@ -30,6 +30,26 @@ Deno.test("legacy free invoice and combined-send actions are retired", () => {
   assertStringIncludes(INDEX, "legacy_route_send_retired");
 });
 
+Deno.test("legacy invoice sends hit the sealed SES U6R gate before provider effects", () => {
+  const sendStart = INDEX.indexOf("case 'send_invoice_email'");
+  const sendGate = INDEX.indexOf(
+    "assertLegacySesInvoiceSendAllowed(client, siId, 'send_invoice_email')",
+    sendStart,
+  );
+  const sendProvider = INDEX.indexOf("xeroPost(`/Invoices/${siId}/Email`", sendStart);
+  assert(sendGate > sendStart && sendGate < sendProvider);
+
+  const approveStart = INDEX.indexOf("case 'approve_and_send_invoice'");
+  const approveGate = INDEX.indexOf(
+    "assertLegacySesInvoiceSendAllowed(client, asId, 'approve_and_send_invoice')",
+    approveStart,
+  );
+  const approveProvider = INDEX.indexOf("xeroPost(`/Invoices/${asId}`", approveStart);
+  assert(approveGate > approveStart && approveGate < approveProvider);
+  assertStringIncludes(INDEX, "code: 'u6r_release_required'");
+  assertStringIncludes(INDEX, "execute_ses_release_revision");
+});
+
 Deno.test("routine allowlist exposes only SES prepare and read actions", () => {
   const start = INDEX.indexOf("const ROUTINE_ALLOWED_ACTIONS");
   const end = INDEX.indexOf("if (authMode === 'routine'", start);
