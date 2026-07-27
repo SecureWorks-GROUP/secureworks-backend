@@ -62,9 +62,13 @@ Preferred path:
    constraint, foreign key, and index), after the attendance-cycle migration.
    For SES Reporting U5/U6/U6R, apply
    `20260728020000_makesafe_ses_invoice_release_u5_u6.sql` before deploying the
-   matching `ops-api`; edge deployment does not apply migrations. The migration
-   creates the invoice-obligation, review, and release ledgers plus the SES
-   invoice identity indexes, but performs no provider or closeout effect.
+   matching `ops-api`. For the SES money and outbound fence, apply
+   `20260728030000_makesafe_ses_fence_hardening.sql` before deploying the
+   matching `ops-api`, `send-quote`, `send-outlook-email`, `reporting-api`, or
+   `xero-sync`. These migrations are applied by the production workflow's
+   pending-migration lane before the edge-function deploy; the schema preflight
+   remains an independent read-only gate. They create only the reviewed
+   database controls and ledgers; they perform no provider or closeout effect.
 
    Extension objects must be qualified against their live production namespace,
    not a generic Supabase default. In project `kevgrhcjxspbxgovpmfl`, `pg_trgm`

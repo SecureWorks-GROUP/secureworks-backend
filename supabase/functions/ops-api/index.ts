@@ -330,10 +330,19 @@ import {
   type SesXeroInvoiceResult,
 } from './ses_reporting_actions.ts'
 import {
+  invoiceLinkRequiredRefusal,
   inspectSealedSesJob,
+  sealedSesFenceCheckFailedRefusal,
   sealedSesMoneyRefusal,
   SealedSesMoneyFenceLookupError,
 } from '../_shared/sealed_ses_money_fence.ts'
+import {
+  approveSesInvoiceVoidRevisionAction,
+  executeSesInvoiceVoidRevisionAction,
+  prepareSesInvoiceVoidRevisionAction,
+  type SesInvoiceVoidGateway,
+} from './ses_invoice_void.ts'
+import { buildOpsApiVersion } from './ops_api_version.ts'
 import {
   findMatchingSenderCompany as _findMatchingSenderCompany,
   senderMatchesPattern as _senderMatchesPattern,
@@ -628,9 +637,6 @@ const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001'
 const SW_API_KEY = Deno.env.get('SW_API_KEY') || ''
 const SECUREWORKS_AGENT_URL = (Deno.env.get('SECUREWORKS_AGENT_URL') || Deno.env.get('RAILWAY_AGENT_URL') || 'https://secureworks-agent-production.up.railway.app').replace(/\/+$/, '')
 const SECUREWORKS_AGENT_BEARER = Deno.env.get('AGENT_BEARER_TOKEN') || SW_API_KEY || SUPABASE_SERVICE_KEY
-const OPS_API_SOURCE_REPO = 'secureworks-site'
-const OPS_API_BUILD_LABEL = 'ops-apiV1-trusted-18MAY-plus-secure-sale'
-const OPS_API_EXPECTED_ACTION_COUNT = 246
 
 // ── M9 r2: external_ref normalisation helper ──────────────────────────────────
 // Strips hyphens, spaces, uppercases — so "MLB-25248", "mlb25248", "MLB 25248" all compare equal.
@@ -1118,6 +1124,49 @@ function makeSesXeroGateway(
   }
 }
 
+function makeSesInvoiceVoidGateway(client: any): SesInvoiceVoidGateway {
+  return {
+    async voidInvoice(invoiceId, targetStatus, context) {
+      const { accessToken, tenantId } = await getToken(client)
+      const response = await xeroPost(
+        `/Invoices/${invoiceId}`,
+        accessToken,
+        tenantId,
+        {
+          Invoices: [{
+            InvoiceID: invoiceId,
+            Status: targetStatus,
+          }],
+        },
+        'POST',
+        `ses-invoice-void-${context.operation_key}`,
+      )
+      const result = toSesXeroInvoiceResult(response?.Invoices?.[0])
+      if (result.xero_invoice_id !== invoiceId || result.status !== targetStatus) {
+        throw new Error('Xero did not confirm the exact approved invoice void')
+      }
+      return {
+        xero_invoice_id: result.xero_invoice_id,
+        status: result.status,
+      }
+    },
+    async reconcileVoid(invoiceId, targetStatus) {
+      const { accessToken, tenantId } = await getToken(client)
+      const response = await xeroGet(`/Invoices/${invoiceId}`, accessToken, tenantId)
+      return (response?.Invoices || [])
+        .map(toSesXeroInvoiceResult)
+        .filter((invoice: SesXeroInvoiceResult) =>
+          invoice.xero_invoice_id === invoiceId &&
+          invoice.status === targetStatus
+        )
+        .map((invoice: SesXeroInvoiceResult) => ({
+          xero_invoice_id: invoice.xero_invoice_id,
+          status: invoice.status,
+        }))
+    },
+  }
+}
+
 function makeSesReleaseXeroReader(client: any): SesReleaseXeroReader {
   return {
     async readAuthorised(invoiceId) {
@@ -1340,23 +1389,7 @@ function makeSesGraphMailGateway(client: any): SesMailGateway {
 }
 
 function opsApiVersion() {
-  return {
-    ok: true,
-    source_repo: OPS_API_SOURCE_REPO,
-    build_label: OPS_API_BUILD_LABEL,
-    expected_action_count: OPS_API_EXPECTED_ACTION_COUNT,
-    commit_sha:
-      Deno.env.get('GITHUB_SHA')
-      || Deno.env.get('VERCEL_GIT_COMMIT_SHA')
-      || Deno.env.get('RAILWAY_GIT_COMMIT_SHA')
-      || Deno.env.get('COMMIT_SHA')
-      || null,
-    deployed_at:
-      Deno.env.get('DEPLOYED_AT')
-      || Deno.env.get('BUILD_TIMESTAMP')
-      || null,
-    canonical_note: 'Production ops-api deploys from secureworks-site/supabase/functions/ops-api only.',
-  }
+  return buildOpsApiVersion()
 }
 
 // Dual-write: log to business_events (CloudEvents pattern)
@@ -2290,28 +2323,54 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   // (token endpoint or /Invoices) cannot mask a structural error like "invoice not in
   // cache" or "caller passed wrong job_id". Those return their specific 400s without
   // requiring Xero connectivity.
-  const { data: siInv } = await client.from('xero_invoices')
-    .select('invoice_number, total, amount_due, job_id, xero_contact_id')
+  const { data: siInv, error: siInvError } = await client.from('xero_invoices')
+    .select('invoice_number, total, amount_due, job_id, xero_contact_id, invoice_type, invoice_obligation_revision_id, ses_external_token')
     .eq('xero_invoice_id', siId).maybeSingle()
+  if (siInvError) {
+    return json(sealedSesFenceCheckFailedRefusal(
+      'send_invoice_email',
+      `The invoice mirror lookup failed (${siInvError.message}).`,
+      { xero_invoice_id: siId },
+    ), 503)
+  }
   if (!siInv) {
-    return json({
-      error: 'Invoice not found in xero_invoices cache',
-      code: 'invoice_not_cached',
-      xero_invoice_id: siId,
-    }, 400)
+    return json(sealedSesFenceCheckFailedRefusal(
+      'send_invoice_email',
+      'The invoice is missing from the local Xero mirror.',
+      { xero_invoice_id: siId },
+    ), 503)
   }
   const siNum = siInv.invoice_number || siId
+  const siInvoiceType = String(siInv.invoice_type || '').toUpperCase()
 
-  // Cross-check job_id linkage: caller-supplied job_id must match xero_invoices.job_id
-  // when both are present. Older invoices may have null job_id in cache → trust caller.
-  if (siJobId && siInv.job_id && siInv.job_id !== siJobId) {
+  if (
+    siInvoiceType !== 'ACCPAY' &&
+    (siInv.invoice_obligation_revision_id || siInv.ses_external_token)
+  ) {
+    return json(sealedSesMoneyRefusal('send_invoice_email', {
+      xero_invoice_id: siId,
+      job_id: siInv.job_id || null,
+      invoice_obligation_revision_id: siInv.invoice_obligation_revision_id || null,
+      has_ses_external_token: Boolean(siInv.ses_external_token),
+    }), 409)
+  }
+  if (siInvoiceType !== 'ACCPAY' && !siInv.job_id) {
+    return json(invoiceLinkRequiredRefusal('send_invoice_email', {
+      xero_invoice_id: siId,
+      invoice_type: siInvoiceType || null,
+    }), 409)
+  }
+
+  // The invoice mirror is authoritative. A caller-supplied job can only confirm
+  // the mirror link; it can never create or replace it.
+  if (siJobId && siInv.job_id !== siJobId) {
     return json({
       error: 'job_id does not belong to this invoice',
       code: 'job_invoice_mismatch',
       xero_invoice_id: siId,
       received_job_id: siJobId,
       expected_job_id: siInv.job_id,
-    }, 400)
+    }, 409)
   }
 
   // Recipient resolver. Two sources, kept SEPARATE so we can detect drift between them:
@@ -2470,7 +2529,14 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
       cc: siCcSafe,
       subject: siSubj || `Invoice ${siNum} — SecureWorks Group`,
       htmlBody: `<p>Please find your invoice attached.</p><p>Invoice: <strong>${siNum}</strong></p>`,
-      attachments: [{ contentBytes: siPdfB64, name: `${siNum}.pdf`, contentType: 'application/pdf' }],
+      job_id: verifiedJobId,
+      xero_invoice_id: siId,
+      attachments: [{
+        contentBytes: siPdfB64,
+        name: `${siNum}.pdf`,
+        contentType: 'application/pdf',
+        xero_invoice_id: siId,
+      }],
     }),
   })
   if (!siEmailResp.ok) throw new ApiError(`Outlook email failed: ${await siEmailResp.text()}`, 502)
@@ -4395,7 +4461,7 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       case 'sync_fencing_neighbours': return json(await syncFencingNeighbours(client, body))
       case 'get_comms_upload_url': return json(await getCommsUploadUrl(client, body))
-      case 'send_comms_message': return json(await sendCommsMessageAction(body))
+      case 'send_comms_message': return json(await sendCommsMessageAction(client, body))
       case 'create_trade_user': {
         const { email, password, name, role, phone } = body
         if (!email || !password || !name) return json({ error: 'email, password, name required' }, 400)
@@ -4549,10 +4615,11 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'send_invoice_email': {
         const { xero_invoice_id: siId, to_email: siTo, job_id: siJobId, cc: siCc, subject_override: siSubj } = body
         if (!siId) return json({ error: 'xero_invoice_id required' }, 400)
-        await assertLegacySesInvoiceActionAllowed(
+        const directSendInvoice = await assertLegacySesInvoiceActionAllowed(
           client,
           siId,
           'send_invoice_email',
+          siJobId || undefined,
         )
 
         // 2026-04-24 backward-compat fix: if to_email omitted, use Xero-direct email (legacy path).
@@ -4562,7 +4629,7 @@ if (import.meta.main) serve(async (req: Request) => {
           await xeroPost(`/Invoices/${siId}/Email`, sAt, sTi, {}, 'POST')
           try {
             await client.from('job_events').insert({
-              job_id: siJobId || null,
+              job_id: directSendInvoice?.job_id || null,
               event_type: 'invoice.emailed',
               detail_json: { xero_invoice_id: siId, via: 'xero_direct' },
             })
@@ -5165,6 +5232,46 @@ if (import.meta.main) serve(async (req: Request) => {
             actor: authUser?.email || body.actor || 'ses-invoice-executor',
           },
           makeSesXeroGateway(client),
+        ))
+      case 'prepare_ses_invoice_void_revision':
+        await assertNoSyntheticLivefireInvoice(
+          client,
+          body.xero_invoice_id,
+          'prepare_ses_invoice_void_revision',
+        )
+        return json(await prepareSesInvoiceVoidRevisionAction(client, {
+          org_id: body.org_id || DEFAULT_ORG_ID,
+          xero_invoice_id: body.xero_invoice_id,
+          reason: body.reason,
+          created_by: authUser?.email || body.created_by || 'ses-void-preparer',
+        }))
+      case 'approve_ses_invoice_void_revision':
+        await assertNoSyntheticLivefireVoidRevision(
+          client,
+          body.void_revision_id,
+          'approve_ses_invoice_void_revision',
+        )
+        return json(await approveSesInvoiceVoidRevisionAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            void_revision_id: body.void_revision_id,
+          },
+        ))
+      case 'execute_ses_invoice_void_revision':
+        await assertNoSyntheticLivefireVoidRevision(
+          client,
+          body.void_revision_id,
+          'execute_ses_invoice_void_revision',
+        )
+        return json(await executeSesInvoiceVoidRevisionAction(
+          client,
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            void_revision_id: body.void_revision_id,
+            actor: authUser?.email || body.actor || 'ses-void-executor',
+          },
+          makeSesInvoiceVoidGateway(client),
         ))
       case 'prepare_ses_release_revision':
         await assertNoSyntheticLivefireJobs(
@@ -21498,6 +21605,12 @@ async function sendWorkOrder(client: any, body: any) {
     .single()
 
   if (error || !wo) throw new Error('Work order not found')
+  if (!wo.job_id) throw new ApiError('Work order has no authoritative job link', 409)
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    wo.job_id,
+    'send_work_order',
+  )
 
   // Mark as sent
   await client.from('work_orders')
@@ -21533,6 +21646,14 @@ async function getInvoicePdf(client: any, params: URLSearchParams) {
     xeroInvoiceId = data.xero_invoice_id
   }
   if (!xeroInvoiceId) throw new ApiError('xero_invoice_id or invoice_number required', 400)
+
+  // PDF bytes are an outbound-capable invoice effect: resolve the invoice's
+  // own mirror link and apply the same sealed-SES wall before touching Xero.
+  await assertLegacySesInvoiceActionAllowed(
+    client,
+    xeroInvoiceId,
+    'get_invoice_pdf',
+  )
 
   const { accessToken, tenantId } = await getToken(client)
 
@@ -21808,10 +21929,12 @@ async function assertLegacySesMoneyActionAllowedForJob(
     inspection = await inspectSealedSesJob(client, jobId)
   } catch (error) {
     if (error instanceof SealedSesMoneyFenceLookupError) {
-      throw new SesActionError(503, {
-        state: 'refused',
-        fact: error.message,
-      })
+      throw new SesActionError(
+        503,
+        sealedSesFenceCheckFailedRefusal(action, error.message, {
+          job_id: jobId,
+        }),
+      )
     }
     throw error
   }
@@ -21832,11 +21955,14 @@ async function assertLegacySesInvoiceActionAllowed(
     .select('job_id, invoice_type, invoice_obligation_revision_id, ses_external_token')
     .eq('xero_invoice_id', xeroInvoiceId).maybeSingle()
   if (invoice.error) {
-    throw new SesActionError(503, {
-      state: 'refused',
-      fact:
-        `The ${action} sealed SES gate could not check the invoice (${invoice.error.message}).`,
-    })
+    throw new SesActionError(
+      503,
+      sealedSesFenceCheckFailedRefusal(
+        action,
+        `The invoice mirror lookup failed (${invoice.error.message}).`,
+        { xero_invoice_id: xeroInvoiceId },
+      ),
+    )
   }
   if (!invoice.data) {
     throw new SesActionError(503, {
@@ -21848,19 +21974,19 @@ async function assertLegacySesInvoiceActionAllowed(
         'Sync the invoice from Xero, confirm its job link, then retry only if it is not a sealed SES invoice.',
     })
   }
-  if (!invoice.data.job_id) {
-    throw new ApiError(
-      `synthetic_livefire_invoice_unresolved: ${action} requires an invoice with an authoritative job link before any external effect.`,
-      409,
-    )
-  }
-  if (invoice.data.job_id) {
-    await assertNoSyntheticLivefireJobs(client, [invoice.data.job_id], action)
-  }
+  const invoiceType = String(invoice.data.invoice_type || '').toUpperCase()
   if (
-    invoice.data?.invoice_type &&
-    String(invoice.data.invoice_type).toUpperCase() !== 'ACCREC'
-  ) return
+    targetJobId &&
+    invoice.data.job_id &&
+    invoice.data.job_id !== targetJobId
+  ) {
+    throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
+      xero_invoice_id: xeroInvoiceId,
+      expected_job_id: invoice.data.job_id,
+      received_job_id: targetJobId,
+    }))
+  }
+  if (invoiceType === 'ACCPAY') return invoice.data
   if (
     invoice.data?.invoice_obligation_revision_id ||
     invoice.data?.ses_external_token
@@ -21872,18 +21998,134 @@ async function assertLegacySesInvoiceActionAllowed(
       has_ses_external_token: !!invoice.data.ses_external_token,
     }))
   }
+  if (!invoice.data.job_id) {
+    throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
+      xero_invoice_id: xeroInvoiceId,
+      invoice_type: invoiceType || null,
+    }))
+  }
   if (
     targetJobId &&
-    String(invoice.data.invoice_type || '').toUpperCase() !== 'ACCPAY'
+    invoiceType !== 'ACCPAY'
   ) {
     await assertLegacySesMoneyActionAllowedForJob(client, targetJobId, action)
   }
-  if (!invoice.data?.job_id) return
   await assertLegacySesMoneyActionAllowedForJob(
     client,
     invoice.data.job_id,
     action,
   )
+  await assertNoSyntheticLivefireJobs(client, [invoice.data.job_id], action)
+  return invoice.data
+}
+
+async function assertLegacySesInvoiceOrJobActionAllowed(
+  client: any,
+  identity: { xeroInvoiceId?: string | null; jobId?: string | null },
+  action: string,
+) {
+  const xeroInvoiceId = String(identity.xeroInvoiceId || '').trim()
+  const jobId = String(identity.jobId || '').trim()
+  if (!xeroInvoiceId && !jobId) {
+    return { xero_invoice_id: null, job_id: null }
+  }
+  if (xeroInvoiceId) {
+    const mirror = await client.from('xero_invoices')
+      .select('job_id,invoice_type')
+      .eq('xero_invoice_id', xeroInvoiceId)
+      .maybeSingle()
+    if (mirror.error) {
+      throw new SesActionError(
+        503,
+        sealedSesFenceCheckFailedRefusal(
+          action,
+          `The invoice mirror lookup failed (${mirror.error.message}).`,
+          { xero_invoice_id: xeroInvoiceId },
+        ),
+      )
+    }
+    if (!mirror.data) {
+      throw new SesActionError(
+        503,
+        sealedSesFenceCheckFailedRefusal(
+          action,
+          'The invoice is missing from the local Xero mirror.',
+          { xero_invoice_id: xeroInvoiceId },
+        ),
+      )
+    }
+    const invoiceType = String(mirror.data.invoice_type || '').toUpperCase()
+    if (invoiceType !== 'ACCPAY' && !mirror.data.job_id) {
+      throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
+        xero_invoice_id: xeroInvoiceId,
+        invoice_type: invoiceType || null,
+      }))
+    }
+    if (jobId && mirror.data.job_id && mirror.data.job_id !== jobId) {
+      throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
+        xero_invoice_id: xeroInvoiceId,
+        expected_job_id: mirror.data.job_id,
+        received_job_id: jobId,
+      }))
+    }
+    await assertLegacySesInvoiceActionAllowed(
+      client,
+      xeroInvoiceId,
+      action,
+      jobId || undefined,
+    )
+    return { xero_invoice_id: xeroInvoiceId, job_id: mirror.data.job_id || null }
+  }
+  await assertLegacySesMoneyActionAllowedForJob(client, jobId, action)
+  return { xero_invoice_id: null, job_id: jobId }
+}
+
+async function assertGhlContactMatchesResolvedJob(
+  client: any,
+  jobId: string | null,
+  ghlContactId: string,
+  action: string,
+) {
+  if (!jobId) {
+    throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
+      reason: 'ghl_contact_job_link_required',
+      ghl_contact_id: ghlContactId,
+    }))
+  }
+  const job = await client.from('jobs')
+    .select('id,ghl_contact_id')
+    .eq('id', jobId)
+    .maybeSingle()
+  if (job.error) {
+    throw new SesActionError(
+      503,
+      sealedSesFenceCheckFailedRefusal(
+        action,
+        `The GHL contact binding lookup failed (${job.error.message}).`,
+        { job_id: jobId, ghl_contact_id: ghlContactId },
+      ),
+    )
+  }
+  if (!job.data) {
+    throw new SesActionError(
+      503,
+      sealedSesFenceCheckFailedRefusal(
+        action,
+        'The resolved job disappeared before its GHL contact could be verified.',
+        { job_id: jobId, ghl_contact_id: ghlContactId },
+      ),
+    )
+  }
+  if (
+    !job.data.ghl_contact_id ||
+    String(job.data.ghl_contact_id) !== String(ghlContactId)
+  ) {
+    throw new SesActionError(409, invoiceLinkRequiredRefusal(action, {
+      job_id: jobId,
+      expected_ghl_contact_id: job.data.ghl_contact_id || null,
+      received_ghl_contact_id: ghlContactId,
+    }))
+  }
 }
 
 async function assertNoSyntheticLivefireJobs(
@@ -21941,6 +22183,34 @@ async function assertNoSyntheticLivefireInvoice(
 }
 export const _assertNoSyntheticLivefireInvoiceForTest =
   assertNoSyntheticLivefireInvoice
+
+async function assertNoSyntheticLivefireVoidRevision(
+  client: any,
+  rawVoidRevisionId: unknown,
+  action: string,
+): Promise<void> {
+  const voidRevisionId = String(rawVoidRevisionId || '').trim()
+  if (!voidRevisionId) {
+    throw new ApiError('void_revision_id required', 400)
+  }
+  const { data, error } = await client.from('makesafe_invoice_void_revisions')
+    .select('job_id')
+    .eq('id', voidRevisionId)
+    .maybeSingle()
+  if (error) {
+    throw new ApiError(
+      `The ${action} synthetic live-fire safety gate could not verify its void revision (${error.message}).`,
+      503,
+    )
+  }
+  if (!data?.job_id) {
+    throw new ApiError(
+      `synthetic_livefire_void_revision_unresolved: ${action} requires an authoritative void revision job link.`,
+      409,
+    )
+  }
+  await assertNoSyntheticLivefireJobs(client, [data.job_id], action)
+}
 
 async function terminalSyntheticLivefireJobIds(client: any): Promise<Set<string>> {
   const ids = new Set<string>()
@@ -23387,6 +23657,11 @@ async function sendQuickQuoteEmail(client: any, body: any) {
     .eq('id', job_id)
     .single()
   if (jobErr || !job) throw new Error('Job not found')
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    job_id,
+    'send_quick_quote_email',
+  )
   if (!job.client_email) throw new Error('No client email on this job')
 
   const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY') || ''
@@ -32305,6 +32580,12 @@ async function sendOpsNoteToTrade(client: any, body: any) {
   if (!note_id) throw new ApiError('note_id required', 400)
   const { data: note, error: fetchErr } = await client.from('ops_notes').select('*').eq('id', note_id).single()
   if (fetchErr || !note) throw new ApiError('Note not found', 404)
+  if (!note.job_id) throw new ApiError('Ops note has no authoritative job link', 409)
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    note.job_id,
+    'send_ops_note_to_trade',
+  )
 
   if (note.attachment_url) {
     const isImage = (note.attachment_type || '').startsWith('image/')
@@ -32361,11 +32642,29 @@ async function getCommsUploadUrl(client: any, body: any) {
   return { signedUrl: data.signedUrl, publicUrl: urlData.publicUrl, path }
 }
 
-async function sendCommsMessageAction(body: any) {
+async function sendCommsMessageAction(client: any, body: any) {
   const { contactId, type, message, attachmentUrls = [], subject, htmlBody } = body
-  if (!contactId || !type) throw new Error('contactId and type required')
+  const jobId = String(body.job_id || body.jobId || '').trim()
+  if (!contactId || !type || !jobId) {
+    throw new ApiError('contactId, type, and job_id required', 400)
+  }
+  const { data: commsJob, error: commsJobError } = await client.from('jobs')
+    .select('id,ghl_contact_id')
+    .eq('id', jobId)
+    .maybeSingle()
+  if (commsJobError || !commsJob) {
+    throw new ApiError('Comms job link could not be verified', 409)
+  }
+  if (commsJob.ghl_contact_id !== contactId) {
+    throw new ApiError('contactId does not belong to job_id', 409)
+  }
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    jobId,
+    'send_comms_message',
+  )
 
-  const payload: any = { type, contactId }
+  const payload: any = { type, contactId, jobId }
 
   // Optional per-message sending number (GHL `fromNumber`, E.164). When the
   // Comms tab supplies a chosen number (e.g. +61489267776 Ops for scheduling),
@@ -33673,7 +33972,6 @@ async function sendPaymentLink(client: any, body: any) {
     .eq('id', jId)
     .single()
   if (jobErr || !job) throw new Error('Job not found')
-
   if (!job.ghl_contact_id) throw new Error('No GHL contact ID on this job — cannot send SMS')
 
   // Find the Xero invoice for this job
@@ -34149,6 +34447,11 @@ async function sendReviewRequest(client: any, body: any) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
   await assertNoSyntheticLivefireJobs(client, [jId], 'send_review_request')
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    jId,
+    'send_review_request',
+  )
 
   const { data: job, error: jobErr } = await client
     .from('jobs')
@@ -35498,6 +35801,12 @@ async function sendProposedSms(client: any, body: any) {
     .single()
 
   if (error || !action) throw new Error('Action not found or already processed')
+  if (!action.job_id) throw new ApiError('Proposed action has no authoritative job link', 409)
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    action.job_id,
+    'send_proposed_sms',
+  )
 
   // ── Canary safety guard (validator hard-block 2026-05-14) ──
   // When BOOKING_CANARY_MODE=1, refuse before any external API call so
@@ -35579,6 +35888,25 @@ async function sendQuoteFollowupSms(client: any, body: any) {
   const { action_id, user_id } = body
   if (!action_id) throw new Error('action_id required')
 
+  // Read-only preflight before the atomic claim. The claim is constrained to
+  // this same job id so a concurrent rewrite cannot move the send across jobs.
+  const { data: pendingAction, error: pendingError } = await client
+    .from('ai_proposed_actions')
+    .select('proposal_id,job_id')
+    .eq('proposal_id', action_id)
+    .eq('status', 'pending')
+    .eq('action_type', 'send_quote_followup_sms')
+    .maybeSingle()
+  if (pendingError) throw pendingError
+  if (!pendingAction?.job_id) {
+    throw new ApiError('Quote follow-up has no authoritative job link', 409)
+  }
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    pendingAction.job_id,
+    'send_quote_followup_sms',
+  )
+
   // Step 1: atomic claim — UPDATE pending → approved with returning.
   // If zero rows returned, another worker already claimed (or row absent).
   const { data: claimed, error: claimErr } = await client
@@ -35591,6 +35919,7 @@ async function sendQuoteFollowupSms(client: any, body: any) {
     .eq('proposal_id', action_id)
     .eq('status', 'pending')
     .eq('action_type', 'send_quote_followup_sms')
+    .eq('job_id', pendingAction.job_id)
     .select('proposal_id, action_type, contact_id, contact_name, contact_phone, drafted_message, job_id, action_payload')
     .limit(1)
   if (claimErr) throw claimErr
@@ -36563,6 +36892,12 @@ async function editAndSend(client: any, body: any): Promise<any> {
   if (loadErr) throw loadErr
   if (!action) throw new Error('proposal not found')
   if (action.status !== 'pending') throw new Error(`cannot edit: status='${action.status}' (must be pending)`)
+  if (!action.job_id) throw new ApiError('Proposed action has no authoritative job link', 409)
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    action.job_id,
+    'edit_and_send',
+  )
 
   const original = String(action.drafted_message || '')
   if (trimmed === original) {
@@ -39440,6 +39775,11 @@ async function sendCouncilEmail(client: any, body: any) {
   if (!sub) throw new Error('Submission not found')
   if (!sub.job_id) throw new ApiError('Council submission has no authoritative job link', 409)
   await assertNoSyntheticLivefireJobs(client, [sub.job_id], 'send_council_email')
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    sub.job_id,
+    'send_council_email',
+  )
 
   const { data: job } = await client.from('jobs').select('job_number, type, ghl_contact_id').eq('id', sub.job_id).maybeSingle()
   const replyTo = `council+CS${submission_id.slice(0, 8)}-step${step_index || 0}@secureworksgroup.app`
@@ -39560,6 +39900,11 @@ async function sendCouncilSMS(client: any, body: any) {
   const { job_id, message } = body
   if (!job_id || !message) throw new Error('job_id and message required')
   await assertNoSyntheticLivefireJobs(client, [job_id], 'send_council_sms')
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    job_id,
+    'send_council_sms',
+  )
 
   const { data: job } = await client.from('jobs')
     .select('id, job_number, client_name, client_phone, ghl_contact_id')
@@ -39635,6 +39980,12 @@ async function sendVariation(client: any, body: any) {
     .single()
   if (!variation) throw new Error('Variation not found')
   await assertNoSyntheticLivefireJobs(client, [variation.job_id], 'send_variation')
+  if (!variation.job_id) throw new ApiError('Variation has no authoritative job link', 409)
+  await assertLegacySesMoneyActionAllowedForJob(
+    client,
+    variation.job_id,
+    'send_variation',
+  )
 
   const job = variation.jobs
   if (!job?.client_email) throw new Error('No client email on job')
@@ -41069,11 +41420,18 @@ async function sendChaseSms(client: any, body: any) {
   const job_id = body.job_id && String(body.job_id).trim() ? String(body.job_id).trim() : null
   const ghl_contact_id = body.ghl_contact_id || body.contact_id
   if (!ghl_contact_id || !message) throw new ApiError('ghl_contact_id and message required', 400)
-  if (xero_invoice_id) {
-    await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'send_chase_sms')
-  }
-  if (job_id) {
-    await assertLegacySesMoneyActionAllowedForJob(client, job_id, 'send_chase_sms')
+  const resolved = await assertLegacySesInvoiceOrJobActionAllowed(
+    client,
+    { xeroInvoiceId: xero_invoice_id, jobId: job_id },
+    'send_chase_sms',
+  )
+  if (resolved.job_id) {
+    await assertGhlContactMatchesResolvedJob(
+      client,
+      resolved.job_id,
+      ghl_contact_id,
+      'send_chase_sms',
+    )
   }
 
   // Send via GHL proxy
@@ -41081,7 +41439,7 @@ async function sendChaseSms(client: any, body: any) {
   const smsResp = await fetch(ghlUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
-    body: JSON.stringify({ contactId: ghl_contact_id, message, jobId: job_id || undefined }),
+    body: JSON.stringify({ contactId: ghl_contact_id, message, jobId: resolved.job_id || undefined }),
   })
   const smsResult = await smsResp.json()
   if (!smsResult.success) throw new Error(smsResult.error || 'SMS send failed')
@@ -41089,7 +41447,7 @@ async function sendChaseSms(client: any, body: any) {
   // Log the chase (job_id optional — some chase SMS target contacts without linked jobs)
   await client.from('payment_chase_logs').insert({
     xero_invoice_id: xero_invoice_id || null,
-    job_id: job_id,
+    job_id: resolved.job_id,
     ghl_contact_id,
     method: 'sms',
     outcome: 'SMS sent',
@@ -41103,11 +41461,18 @@ async function sendChaseSms(client: any, body: any) {
 async function triggerChaseWorkflow(client: any, body: any) {
   const { ghl_contact_id, overdue_amount, invoice_number, job_number, xero_invoice_id, job_id } = body
   if (!ghl_contact_id) throw new ApiError('ghl_contact_id required', 400)
-  if (xero_invoice_id) {
-    await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'trigger_chase_workflow')
-  }
-  if (job_id) {
-    await assertLegacySesMoneyActionAllowedForJob(client, job_id, 'trigger_chase_workflow')
+  const resolved = await assertLegacySesInvoiceOrJobActionAllowed(
+    client,
+    { xeroInvoiceId: xero_invoice_id, jobId: job_id },
+    'trigger_chase_workflow',
+  )
+  if (resolved.job_id) {
+    await assertGhlContactMatchesResolvedJob(
+      client,
+      resolved.job_id,
+      ghl_contact_id,
+      'trigger_chase_workflow',
+    )
   }
 
   const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`
@@ -41142,8 +41507,21 @@ async function triggerChaseWorkflow(client: any, body: any) {
 }
 
 async function stopChaseWorkflow(client: any, body: any) {
-  const { ghl_contact_id } = body
+  const { ghl_contact_id, xero_invoice_id, job_id } = body
   if (!ghl_contact_id) throw new ApiError('ghl_contact_id required', 400)
+  const resolved = await assertLegacySesInvoiceOrJobActionAllowed(
+    client,
+    { xeroInvoiceId: xero_invoice_id, jobId: job_id },
+    'stop_chase_workflow',
+  )
+  if (resolved.job_id) {
+    await assertGhlContactMatchesResolvedJob(
+      client,
+      resolved.job_id,
+      ghl_contact_id,
+      'stop_chase_workflow',
+    )
+  }
 
   const ghlBase = `${SUPABASE_URL}/functions/v1/ghl-proxy`
 
@@ -41179,6 +41557,41 @@ async function handlePaymentEvent(client: any, body: any) {
   const { xero_contact_id, xero_invoice_id, invoice_number, contact_name, amount_paid, job_id } = body
   if (!xero_invoice_id) throw new ApiError('xero_invoice_id required', 400)
   await assertLegacySesInvoiceActionAllowed(client, xero_invoice_id, 'handle_payment_event')
+  const mirror = await client.from('xero_invoices')
+    .select('job_id,xero_contact_id')
+    .eq('xero_invoice_id', xero_invoice_id)
+    .maybeSingle()
+  if (mirror.error || !mirror.data?.job_id) {
+    throw new SesActionError(
+      mirror.error ? 503 : 409,
+      mirror.error
+        ? sealedSesFenceCheckFailedRefusal(
+          'handle_payment_event',
+          `The invoice mirror lookup failed (${mirror.error.message}).`,
+          { xero_invoice_id },
+        )
+        : invoiceLinkRequiredRefusal('handle_payment_event', { xero_invoice_id }),
+    )
+  }
+  if (job_id && job_id !== mirror.data.job_id) {
+    throw new SesActionError(409, invoiceLinkRequiredRefusal(
+      'handle_payment_event',
+      {
+        xero_invoice_id,
+        expected_job_id: mirror.data.job_id,
+        received_job_id: job_id,
+      },
+    ))
+  }
+  if (
+    xero_contact_id &&
+    mirror.data.xero_contact_id &&
+    xero_contact_id !== mirror.data.xero_contact_id
+  ) {
+    throw new ApiError('xero_contact_id does not belong to this invoice', 409)
+  }
+  const verifiedJobId = mirror.data.job_id
+  const verifiedXeroContactId = mirror.data.xero_contact_id || xero_contact_id
 
   const results: string[] = []
 
@@ -41186,7 +41599,7 @@ async function handlePaymentEvent(client: any, body: any) {
   let ghlContactId: string | null = null
   const { data: match } = await client.from('contact_matches')
     .select('ghl_contact_id, phone')
-    .eq('xero_contact_id', xero_contact_id)
+    .eq('xero_contact_id', verifiedXeroContactId)
     .limit(1)
     .maybeSingle()
   if (match?.ghl_contact_id) {
@@ -41196,7 +41609,11 @@ async function handlePaymentEvent(client: any, body: any) {
   // 2. Stop chase workflow if GHL contact exists
   if (ghlContactId) {
     try {
-      await stopChaseWorkflow(client, { ghl_contact_id: ghlContactId })
+      await stopChaseWorkflow(client, {
+        ghl_contact_id: ghlContactId,
+        xero_invoice_id,
+        job_id: verifiedJobId,
+      })
       results.push('chase_stopped')
     } catch (e) {
       console.log(`[ops-api] stopChaseWorkflow failed for ${ghlContactId}:`, e)
@@ -41216,7 +41633,7 @@ async function handlePaymentEvent(client: any, body: any) {
   // 4. Log payment received to chase logs
   await client.from('payment_chase_logs').insert({
     xero_invoice_id,
-    job_id: job_id || null,
+    job_id: verifiedJobId,
     ghl_contact_id: ghlContactId || null,
     contact_name: contact_name || null,
     method: 'status_change',
@@ -41459,6 +41876,10 @@ export const _assertLegacySesMoneyActionAllowedForJobForTest =
   assertLegacySesMoneyActionAllowedForJob
 export const _assertLegacySesInvoiceActionAllowedForTest =
   assertLegacySesInvoiceActionAllowed
+export const _assertLegacySesInvoiceOrJobActionAllowedForTest =
+  assertLegacySesInvoiceOrJobActionAllowed
+export const _assertGhlContactMatchesResolvedJobForTest =
+  assertGhlContactMatchesResolvedJob
 export const _assertSealedSesInvoiceCreateIsUniqueForTest =
   assertSealedSesInvoiceCreateIsUnique
 export const _makesafeRenderReportForTest = makesafeRenderReport

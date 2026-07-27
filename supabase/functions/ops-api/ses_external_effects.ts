@@ -4,6 +4,7 @@ import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
 export type SesEffectKind =
   | "invoice_create"
   | "invoice_authorise"
+  | "invoice_void"
   | "route_send"
   | "document_store";
 export type SesEffectState =
@@ -122,6 +123,11 @@ function unknownRefusal(kind: SesEffectKind): SesRefusal {
     ? sesRefusal(
       "graph_outcome_unknown",
       "Reconcile Drafts and Sent Items by the exact SES operation token; do not press SEND IT again.",
+    )
+    : kind === "invoice_void"
+    ? sesRefusal(
+      "xero_outcome_unknown",
+      "Reconcile the exact invoice status in Xero; never issue the void a second time.",
     )
     : sesRefusal(
       "xero_outcome_unknown",

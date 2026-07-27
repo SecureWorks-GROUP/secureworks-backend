@@ -140,6 +140,9 @@ makesafe_reporting_intake_pass # probe=source-only
 # draft revision, so deploy recognition stays source-only; the documented
 # production canary always supplies dry_run=true.
 prepare_ses_docket_revision # probe=source-only
+prepare_ses_invoice_void_revision # probe=source-only
+approve_ses_invoice_void_revision # probe=source-only
+execute_ses_invoice_void_revision # probe=source-only
 
 # ── Make-safe compact READ endpoints (Mission makesafe-live-truth-2026-06-14, M2)
 #    GAP-1..6: let the make-safe skills read the email-sync Supabase projection

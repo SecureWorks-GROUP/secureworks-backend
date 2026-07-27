@@ -89,6 +89,16 @@ ops_version="$(json_get "${BASE}/ops-api?action=ops_api_version")"
 assert_not_unknown "ops-api ops_api_version recognised" "$ops_version"
 assert_contains "ops-api canonical source" "$ops_version" '"source_repo":"secureworks-site"'
 assert_contains "ops-api version includes build label" "$ops_version" '"build_label":'
+assert_contains "ops-api version uses bundled metadata" "$ops_version" '"metadata_status":"bundled"'
+
+if [[ -n "${EXPECTED_COMMIT_SHA:-}" ]]; then
+  assert_contains "ops-api commit_sha matches deployed source" \
+    "$ops_version" "\"commit_sha\":\"${EXPECTED_COMMIT_SHA}\""
+fi
+if [[ -n "${EXPECTED_DEPLOYED_AT:-}" ]]; then
+  assert_contains "ops-api deployed_at matches deployment" \
+    "$ops_version" "\"deployed_at\":\"${EXPECTED_DEPLOYED_AT}\""
+fi
 
 if [[ ! -f "$REQUIRED_ACTIONS_FILE" ]]; then
   record_fail "required action manifest missing: ${REQUIRED_ACTIONS_FILE}"

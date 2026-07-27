@@ -510,6 +510,15 @@ display stages and terminal job states are structurally read-only. The release
 sequence and seven-card first tranche are in
 `docs/makesafe-board-truth-cutover-2026-07-24.md`.
 
+## The SES Money And Outbound Seal Is Write-Once
+
+The write-once SES money/outbound seal and its approved invoice-void release
+path are owned by `docs/project-knowledge/sync-layer.md`; deploy ordering and
+build-stamped version truth are owned by
+`docs/project-knowledge/EDGE_DEPLOY_LANE.md` and
+`docs/project-knowledge/OPS_API_SOURCE_OF_TRUTH.md`. The shared runtime
+boundary is `_shared/sealed_ses_money_fence.ts`.
+
 ## The Repository Root Stays npm-Package-Free
 
 This repo is Deno-rooted (`deno.jsonc` at the root). Deno 2 auto-discovers a root

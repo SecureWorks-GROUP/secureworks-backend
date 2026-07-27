@@ -9,7 +9,9 @@ import {
   sealedSesMoneyRefusal,
 } from "../_shared/sealed_ses_money_fence.ts";
 import {
+  _assertGhlContactMatchesResolvedJobForTest,
   _assertLegacySesInvoiceActionAllowedForTest,
+  _assertLegacySesInvoiceOrJobActionAllowedForTest,
   _assertLegacySesMoneyActionAllowedForJobForTest,
   _createInvoiceForTest,
   _makeSesXeroGatewayForTest,
@@ -45,26 +47,35 @@ function fluentResponse(response: { data: any; error: any }) {
 
 function lookupClient(options: {
   job?: Record<string, unknown> | null;
+  jobError?: string;
   hasMakesafeDetail?: boolean;
+  detailError?: string;
   invoice?: Record<string, unknown> | null;
+  invoiceError?: string;
   indexedInvoices?: Record<string, unknown>[];
 }) {
   return {
     from(table: string) {
       if (table === "jobs") {
-        return fluentResponse({ data: options.job ?? null, error: null });
+        return fluentResponse({
+          data: options.job ?? null,
+          error: options.jobError ? { message: options.jobError } : null,
+        });
       }
       if (table === "makesafe_job_details") {
         return fluentResponse({
           data: options.hasMakesafeDetail ? { job_id: JOB_ID } : null,
-          error: null,
+          error: options.detailError ? { message: options.detailError } : null,
         });
       }
       if (table === "xero_invoices") {
         const single = options.invoice ?? null;
         const rows = options.indexedInvoices ?? [];
-        const builder: any = fluentResponse({ data: rows, error: null });
-        builder.maybeSingle = async () => ({ data: single, error: null });
+        const error = options.invoiceError
+          ? { message: options.invoiceError }
+          : null;
+        const builder: any = fluentResponse({ data: rows, error });
+        builder.maybeSingle = async () => ({ data: single, error });
         return builder;
       }
       return fluentResponse({ data: null, error: null });
@@ -90,6 +101,8 @@ Deno.test("sealed SES classifier is exact to the make-safe spine", () => {
       id: JOB_ID,
       type: "general",
       job_number: "GEN-100",
+      ses_money_sealed_at: "2026-07-27T00:00:00.000Z",
+      ses_money_seal_source: "makesafe_intake_case",
     }, true).sealed,
     true,
   );
@@ -104,6 +117,96 @@ Deno.test("sealed SES classifier is exact to the make-safe spine", () => {
       `${type} must remain outside the sealed SES fence`,
     );
   }
+});
+
+Deno.test("sealed SES inspection refuses missing or unreadable job identity", async () => {
+  for (
+    const fixture of [
+      lookupClient({ job: null }),
+      lookupClient({ jobError: "jobs unavailable" }),
+    ]
+  ) {
+    await assertRejects(
+      () =>
+        _assertLegacySesMoneyActionAllowedForJobForTest(
+          fixture,
+          JOB_ID,
+          "send_review_request",
+        ),
+      SesActionError,
+      "sealed SES",
+    );
+  }
+
+  await assertRejects(
+    () =>
+      _assertLegacySesMoneyActionAllowedForJobForTest(
+        lookupClient({
+          job: { id: JOB_ID, type: "general", job_number: "GEN-100" },
+          detailError: "details unavailable",
+        }),
+        JOB_ID,
+        "send_review_request",
+      ),
+    SesActionError,
+    "sealed SES",
+  );
+});
+
+Deno.test("chase delivery binds its GHL contact to the resolved job", async () => {
+  for (
+    const fixture of [
+      {
+        client: lookupClient({ job: null }),
+        jobId: JOB_ID,
+        contactId: "ghl-expected",
+        status: 503,
+      },
+      {
+        client: lookupClient({
+          job: { id: JOB_ID, ghl_contact_id: "ghl-other" },
+        }),
+        jobId: JOB_ID,
+        contactId: "ghl-decoy",
+        status: 409,
+      },
+      {
+        client: lookupClient({
+          job: { id: JOB_ID, ghl_contact_id: null },
+        }),
+        jobId: JOB_ID,
+        contactId: "ghl-unlinked",
+        status: 409,
+      },
+      {
+        client: lookupClient({}),
+        jobId: null,
+        contactId: "ghl-unlinked",
+        status: 409,
+      },
+    ]
+  ) {
+    const error = await assertRejects(
+      () =>
+        _assertGhlContactMatchesResolvedJobForTest(
+          fixture.client,
+          fixture.jobId,
+          fixture.contactId,
+          "send_chase_sms",
+        ),
+      SesActionError,
+    ) as SesActionError;
+    assertEquals(error.status, fixture.status);
+  }
+
+  await _assertGhlContactMatchesResolvedJobForTest(
+    lookupClient({
+      job: { id: JOB_ID, ghl_contact_id: "ghl-matched" },
+    }),
+    JOB_ID,
+    "ghl-matched",
+    "send_chase_sms",
+  );
 });
 
 Deno.test("the live $1 create_invoice probe shape now gets a typed refusal before mocked Xero", async () => {
@@ -269,6 +372,28 @@ Deno.test("F8 job-link and legacy invoice effects refuse sealed or SES-bound inv
   );
 });
 
+Deno.test("invoice action rejects a caller job that differs from mirror linkage", async () => {
+  const error = await assertRejects(
+    () =>
+      _assertLegacySesInvoiceActionAllowedForTest(
+        lookupClient({
+          invoice: {
+            job_id: JOB_ID,
+            invoice_type: "ACCREC",
+            invoice_obligation_revision_id: null,
+            ses_external_token: null,
+          },
+        }),
+        "xero-linked",
+        "send_invoice_email",
+        "different-job",
+      ),
+    SesActionError,
+  ) as SesActionError;
+  assertEquals(error.status, 409);
+  assertEquals((error.refusal as any).code, "invoice_link_required");
+});
+
 Deno.test("legacy invoice effects fail closed when the invoice mirror is missing", async () => {
   const error = await assertRejects(
     () =>
@@ -285,6 +410,186 @@ Deno.test("legacy invoice effects fail closed when the invoice mirror is missing
     "sealed_ses_fence_check_failed",
   );
   assertStringIncludes(error.refusal.fact, "local Xero mirror is missing");
+});
+
+Deno.test("every legacy ACCREC effect requires an authoritative invoice job link", async () => {
+  const actions = [
+    "approve_invoice",
+    "send_invoice_email",
+    "approve_and_send_invoice",
+    "void_invoice",
+    "update_invoice",
+    "mark_invoice_paid",
+    "reconcile_payment",
+    "force_reconcile_invoice",
+    "handle_payment_event",
+    "get_invoice_pdf",
+  ];
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  globalThis.fetch = (() => {
+    providerCalls++;
+    return Promise.reject(new Error("provider must not be reached"));
+  }) as typeof fetch;
+  try {
+    for (const action of actions) {
+      const error = await assertRejects(
+        () =>
+          _assertLegacySesInvoiceActionAllowedForTest(
+            lookupClient({
+              invoice: {
+                job_id: null,
+                invoice_type: "ACCREC",
+                invoice_obligation_revision_id: null,
+                ses_external_token: null,
+              },
+            }),
+            `unlinked-${action}`,
+            action,
+          ),
+        SesActionError,
+      ) as SesActionError;
+      assertEquals(error.status, 409);
+      assertEquals((error.refusal as any).code, "invoice_link_required");
+    }
+    assertEquals(providerCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("invoice and classifier lookup errors refuse before provider effects", async () => {
+  for (
+    const client of [
+      lookupClient({ invoiceError: "invoice mirror unavailable" }),
+      lookupClient({
+        invoice: {
+          job_id: JOB_ID,
+          invoice_type: "ACCREC",
+          invoice_obligation_revision_id: null,
+          ses_external_token: null,
+        },
+        jobError: "job authority unavailable",
+      }),
+    ]
+  ) {
+    const error = await assertRejects(
+      () =>
+        _assertLegacySesInvoiceActionAllowedForTest(
+          client,
+          "xero-lookup-error",
+          "approve_invoice",
+        ),
+      SesActionError,
+    ) as SesActionError;
+    assertEquals(error.status, 503);
+  }
+});
+
+Deno.test("every wave-2 outbound action refuses missing or unreadable job authority", async () => {
+  const directJobActions = [
+    "send_review_request",
+    "send_council_email",
+    "send_council_sms",
+    "send_variation",
+    "send_quick_quote_email",
+    "send_proposed_sms",
+    "edit_and_send",
+    "send_quote_followup_sms",
+    "send_comms_message",
+    "send_ops_note_to_trade",
+    "send_work_order",
+  ];
+  for (const action of directJobActions) {
+    for (
+      const client of [
+        lookupClient({ job: null }),
+        lookupClient({ jobError: "job authority unavailable" }),
+      ]
+    ) {
+      const error = await assertRejects(
+        () =>
+          _assertLegacySesMoneyActionAllowedForJobForTest(
+            client,
+            JOB_ID,
+            action,
+          ),
+        SesActionError,
+      ) as SesActionError;
+      assertEquals(error.status, 503);
+      assertEquals(
+        (error.refusal as any).code,
+        "sealed_ses_fence_check_failed",
+      );
+    }
+  }
+
+  for (
+    const action of [
+      "send_chase_sms",
+      "trigger_chase_workflow",
+      "stop_chase_workflow",
+    ]
+  ) {
+    const error = await assertRejects(
+      () =>
+        _assertLegacySesInvoiceOrJobActionAllowedForTest(
+          lookupClient({ jobError: "job authority unavailable" }),
+          { jobId: JOB_ID },
+          action,
+        ),
+      SesActionError,
+    ) as SesActionError;
+    assertEquals(error.status, 503);
+    assertEquals(
+      (error.refusal as any).code,
+      "sealed_ses_fence_check_failed",
+    );
+  }
+});
+
+Deno.test("contact-only chase remains allowed while supplied identity wins", async () => {
+  const contactOnly = await _assertLegacySesInvoiceOrJobActionAllowedForTest(
+    lookupClient({}),
+    {},
+    "stop_chase_workflow",
+  );
+  assertEquals(contactOnly, { xero_invoice_id: null, job_id: null });
+
+  const mismatch = await assertRejects(
+    () =>
+      _assertLegacySesInvoiceOrJobActionAllowedForTest(
+        lookupClient({
+          invoice: {
+            job_id: JOB_ID,
+            invoice_type: "ACCREC",
+          },
+        }),
+        {
+          xeroInvoiceId: "xero-linked",
+          jobId: "90000000-0000-4000-8000-000000000009",
+        },
+        "send_chase_sms",
+      ),
+    SesActionError,
+  ) as SesActionError;
+  assertEquals(mismatch.status, 409);
+  assertEquals((mismatch.refusal as any).code, "invoice_link_required");
+
+  const lookupFailure = await assertRejects(
+    () =>
+      _assertLegacySesInvoiceOrJobActionAllowedForTest(
+        lookupClient({ invoiceError: "mirror unavailable" }),
+        { xeroInvoiceId: "xero-error" },
+        "trigger_chase_workflow",
+      ),
+    SesActionError,
+  ) as SesActionError;
+  assertEquals(lookupFailure.status, 503);
+  assertEquals(
+    (lookupFailure.refusal as any).code,
+    "sealed_ses_fence_check_failed",
+  );
 });
 
 Deno.test("non-SES patio, fencing and general jobs remain unfenced", async () => {

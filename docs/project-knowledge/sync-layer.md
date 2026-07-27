@@ -82,6 +82,11 @@ Enhanced response includes: jobNumber, xeroContact, monetaryValue
 - Legacy invoice creation, linking, update, approval, void, payment,
   reconciliation, chase, and send actions apply the sealed SES money boundary
   above. Sealed SES work must use the approved release actions instead.
+- The sanctioned SES-native invoice void path is the privileged,
+  human-authorised `prepare_ses_invoice_void_revision`,
+  `approve_ses_invoice_void_revision`, then
+  `execute_ses_invoice_void_revision` sequence; it is separate from legacy
+  void actions and is retry-reconciled by its append-only release records.
 
 ### send-quote (GHL push added)
 - After quote send + job status update, pushes monetaryValue to GHL opportunity (non-blocking)

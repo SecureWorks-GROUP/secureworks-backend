@@ -169,7 +169,7 @@ Deno.test("T4: xeroGet throws → 400 xero_contact_lookup_failed, no PDF/Outlook
 // ─────────────────────────────────────────────────────────────────
 // T5 — body.job_id linkage mismatch
 // ─────────────────────────────────────────────────────────────────
-Deno.test("T5: body.job_id != xero_invoices.job_id → 400 job_invoice_mismatch", async () => {
+Deno.test("T5: body.job_id != xero_invoices.job_id → 409 job_invoice_mismatch", async () => {
   const fix = happyFixture()
   const { client } = makeStubClient(fix.seed)
   const { xeroGet, calls: xeroCalls } = makeStubXeroGet({ invoices: { "inv-123": fix.xeroInvoice } })
@@ -182,7 +182,7 @@ Deno.test("T5: body.job_id != xero_invoices.job_id → 400 job_invoice_mismatch"
     getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
   })
 
-  assertEquals(resp.status, 400)
+  assertEquals(resp.status, 409)
   const j = await jsonBody(resp)
   assertEquals(j.code, "job_invoice_mismatch")
   assertEquals(j.received_job_id, "different-job-uuid")
@@ -223,12 +223,10 @@ Deno.test("T6: Xero contact empty + jobs.client_email null → 400 recipient_unv
 })
 
 // ─────────────────────────────────────────────────────────────────
-// T7 — Audit uses verifiedJobId only, never caller-supplied unrelated job_id.
-// Setup: xero_invoices.job_id = null (unlinked). Caller passes body.job_id.
-// Xero contact has the email so the send proceeds. Audit must NOT stamp
-// caller's job_id; it must record null (unlinked).
+// T7 — An unlinked ACCREC invoice cannot borrow a caller-supplied job_id.
+// The mirror link is authoritative and refusal happens before Xero/Outlook.
 // ─────────────────────────────────────────────────────────────────
-Deno.test("T7: unlinked invoice + caller job_id → audit uses null (verifiedJobId only)", async () => {
+Deno.test("T7: unlinked ACCREC invoice + caller job_id → invoice_link_required", async () => {
   const xeroInvoice = {
     InvoiceID: "inv-999",
     Contact: { ContactID: "xero-contact-9", EmailAddress: "client@example.com", ContactPersons: [] },
@@ -236,7 +234,13 @@ Deno.test("T7: unlinked invoice + caller job_id → audit uses null (verifiedJob
   // Crucially, xero_invoices.job_id = null (unlinked)
   const seed = {
     xero_invoices: {
-      "inv-999": { xero_invoice_id: "inv-999", invoice_number: "INV-999", job_id: null, xero_contact_id: "xero-contact-9" },
+      "inv-999": {
+        xero_invoice_id: "inv-999",
+        invoice_number: "INV-999",
+        invoice_type: "ACCREC",
+        job_id: null,
+        xero_contact_id: "xero-contact-9",
+      },
     },
     // The caller's "job_id" exists in jobs but is unrelated — should NOT contribute
     jobs: {
@@ -247,7 +251,7 @@ Deno.test("T7: unlinked invoice + caller job_id → audit uses null (verifiedJob
   const { xeroGet } = makeStubXeroGet({ invoices: { "inv-999": xeroInvoice } })
   const okPdf = () => new Response(new Uint8Array([0x25]), { status: 200 })
   const okOutlook = () => new Response(JSON.stringify({ ok: true }), { status: 200 })
-  const { fetch } = makeStubFetch({
+  const { fetch, calls: fetchCalls } = makeStubFetch({
     [`${STUB_ENV.XERO_API_BASE}/Invoices/`]: okPdf,
     [`${STUB_ENV.SUPABASE_URL}/functions/v1/send-outlook-email`]: okOutlook,
   })
@@ -260,13 +264,10 @@ Deno.test("T7: unlinked invoice + caller job_id → audit uses null (verifiedJob
     getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
   })
 
-  // Send succeeds because Xero contact authorizes "client@example.com"
-  assertEquals(resp.status, 200)
-  // Audit fired: business_events with job_id = undefined (i.e. null), payload.linked = false
-  assertEquals(events.length, 1)
-  assertEquals(events[0].job_id, undefined)
-  assertEquals(events[0].payload.linked, false)
-  // job_events NOT inserted (verifiedJobId is null)
+  assertEquals(resp.status, 409)
+  assertEquals((await jsonBody(resp)).code, "invoice_link_required")
+  assertEquals(fetchCalls.length, 0)
+  assertEquals(events.length, 0)
   const jobEventInserts = dbCalls.inserts.filter(i => i.table === "job_events")
   assertEquals(jobEventInserts.length, 0)
   // Caller's job_id "attacker-chosen-job" must NEVER appear in any audit
@@ -555,10 +556,10 @@ Deno.test("T15: ContactPersons email authorizes send", async () => {
 })
 
 // ─────────────────────────────────────────────────────────────────
-// T15b — invoice_not_cached fires WITHOUT calling getToken
+// T15b — a missing mirror fails the sealed-SES check WITHOUT calling getToken
 // (proves local DB checks run before any Xero connectivity is needed).
 // ─────────────────────────────────────────────────────────────────
-Deno.test("T15b: missing invoice → invoice_not_cached, getToken NOT called", async () => {
+Deno.test("T15b: missing invoice → sealed_ses_fence_check_failed, getToken NOT called", async () => {
   // Empty seed: invoice id won't be found
   const { client } = makeStubClient({ xero_invoices: {}, jobs: {} })
   const { xeroGet, calls: xeroCalls } = makeStubXeroGet({ invoices: {} })
@@ -571,8 +572,8 @@ Deno.test("T15b: missing invoice → invoice_not_cached, getToken NOT called", a
     getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
   })
 
-  assertEquals(resp.status, 400)
-  assertEquals((await jsonBody(resp)).code, "invoice_not_cached")
+  assertEquals(resp.status, 503)
+  assertEquals((await jsonBody(resp)).code, "sealed_ses_fence_check_failed")
   // Local check fired — no Xero side effects whatsoever
   assertEquals(callCount(), 0, "getToken must NOT be called when invoice missing from cache")
   assertEquals(xeroCalls.length, 0)
@@ -583,7 +584,7 @@ Deno.test("T15b: missing invoice → invoice_not_cached, getToken NOT called", a
 // T15c — job_invoice_mismatch fires WITHOUT calling getToken
 // (proves linkage check runs before any Xero connectivity is needed).
 // ─────────────────────────────────────────────────────────────────
-Deno.test("T15c: linkage mismatch → job_invoice_mismatch, getToken NOT called", async () => {
+Deno.test("T15c: linkage mismatch → typed 409, getToken NOT called", async () => {
   const fix = happyFixture()
   const { client } = makeStubClient(fix.seed)
   const { xeroGet, calls: xeroCalls } = makeStubXeroGet({ invoices: { "inv-123": fix.xeroInvoice } })
@@ -596,7 +597,7 @@ Deno.test("T15c: linkage mismatch → job_invoice_mismatch, getToken NOT called"
     getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
   })
 
-  assertEquals(resp.status, 400)
+  assertEquals(resp.status, 409)
   assertEquals((await jsonBody(resp)).code, "job_invoice_mismatch")
   // Linkage check fired — no Xero side effects whatsoever
   assertEquals(callCount(), 0, "getToken must NOT be called when caller's job_id mismatches")

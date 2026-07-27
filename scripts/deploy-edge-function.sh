@@ -85,36 +85,41 @@ if (missing.length) process.exit(1);
 NODE
 }
 
-# Stamp commit_sha + deployed_at into the deployed function's runtime env so
-# opsApiVersion() can return them and smoke-edge-functions can verify the
-# binary matches the canonical commit. supabase secrets set is the supported
-# path for Edge Function runtime env. If the CLI version doesn't accept the
-# args, the deploy still proceeds; the smoke commit-sha assertion will then
-# warn-skip instead of failing.
-stamp_deploy_env() {
-  local commit deployed_at
-  commit="$(git rev-parse HEAD)"
-  deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  if "$SUPABASE_CLI" secrets set \
-      "COMMIT_SHA=${commit}" \
-      "DEPLOYED_AT=${deployed_at}" \
-      --project-ref "$PROJECT_REF" >/dev/null 2>&1; then
-    echo "Stamped deploy env: COMMIT_SHA=${commit:0:8} DEPLOYED_AT=${deployed_at}"
-  else
-    echo "[warn] supabase secrets set failed; commit_sha assertion in smoke will warn-skip" >&2
+OPS_API_METADATA_FILE="supabase/functions/ops-api/deploy_metadata.ts"
+OPS_API_METADATA_BACKUP=""
+OPS_API_DEPLOYED_AT=""
+
+restore_ops_api_metadata() {
+  if [[ -n "$OPS_API_METADATA_BACKUP" && -f "$OPS_API_METADATA_BACKUP" ]]; then
+    cp "$OPS_API_METADATA_BACKUP" "$OPS_API_METADATA_FILE"
+    find "$OPS_API_METADATA_BACKUP" -delete
   fi
+}
+trap restore_ops_api_metadata EXIT
+
+stamp_ops_api_bundle() {
+  OPS_API_METADATA_BACKUP="$(mktemp)"
+  cp "$OPS_API_METADATA_FILE" "$OPS_API_METADATA_BACKUP"
+  OPS_API_DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  bash scripts/stamp-ops-api-build-metadata.sh "$head_sha" "$OPS_API_DEPLOYED_AT"
 }
 
 case "$FUNCTION_NAME" in
   ops-api)
     require_ops_actions
-    stamp_deploy_env
+    stamp_ops_api_bundle
     SECUREWORKS_GUARDED_EDGE_DEPLOY=1 "$SUPABASE_CLI" functions deploy ops-api --no-verify-jwt --project-ref "$PROJECT_REF"
     ;;
   send-quote)
-    stamp_deploy_env
     SECUREWORKS_GUARDED_EDGE_DEPLOY=1 "$SUPABASE_CLI" functions deploy send-quote --no-verify-jwt --project-ref "$PROJECT_REF"
     ;;
 esac
 
-EXPECTED_COMMIT_SHA="$(git rev-parse HEAD)" scripts/smoke-edge-functions.sh
+restore_ops_api_metadata
+if [[ "$FUNCTION_NAME" == "ops-api" ]]; then
+  EXPECTED_COMMIT_SHA="$head_sha" \
+  EXPECTED_DEPLOYED_AT="$OPS_API_DEPLOYED_AT" \
+    scripts/smoke-edge-functions.sh
+else
+  scripts/smoke-edge-functions.sh
+fi

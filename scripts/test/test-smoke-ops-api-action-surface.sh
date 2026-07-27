@@ -66,7 +66,7 @@ action="$(printf '%s' "$url" | sed -n 's/.*[?&]action=\([^&]*\).*/\1/p')"
 printf '%s\t%s\t%s\n' "$method" "$url" "$authorization_header" >> "${CURL_LOG:?}"
 
 if [[ "$action" == "ops_api_version" ]]; then
-  printf '%s\n' '{"source_repo":"secureworks-site","build_label":"test"}'
+  printf '%s\n' '{"source_repo":"secureworks-site","build_label":"test","metadata_status":"bundled","commit_sha":"abcdef0123456789abcdef0123456789abcdef01","deployed_at":"2026-07-27T10:11:12Z"}'
   exit 0
 fi
 

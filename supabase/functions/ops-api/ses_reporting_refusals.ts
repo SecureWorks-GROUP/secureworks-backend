@@ -46,6 +46,12 @@ const FACTS = {
     "Microsoft Graph accepted or may have accepted the message, but its exact sent outcome is not yet proven.",
   xero_outcome_unknown:
     "Xero accepted or may have accepted the invoice operation, but its exact outcome is not yet proven.",
+  ses_invoice_void_status_forbidden:
+    "The invoice status cannot be changed through the SES-native void workflow.",
+  ses_invoice_void_requires_accrec:
+    "The SES-native void workflow applies only to sales invoices.",
+  ses_invoice_void_requires_sealed_job:
+    "The invoice is not bound to an authoritatively sealed SES job.",
 } as const;
 
 export type SesRefusalCode = keyof typeof FACTS;
