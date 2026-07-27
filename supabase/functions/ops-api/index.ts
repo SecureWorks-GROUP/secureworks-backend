@@ -4384,7 +4384,14 @@ if (import.meta.main) serve(async (req: Request) => {
           'complete_and_invoice',
         )
         return json(await completeAndInvoice(client, body))
-      case 'create_deposit_invoice': return json(await createDepositInvoice(client, body))
+      case 'create_deposit_invoice': {
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'create_deposit_invoice',
+        )
+        return json(await createDepositInvoice(client, body))
+      }
       case 'sync_fencing_neighbours': return json(await syncFencingNeighbours(client, body))
       case 'get_comms_upload_url': return json(await getCommsUploadUrl(client, body))
       case 'send_comms_message': return json(await sendCommsMessageAction(body))
@@ -4448,7 +4455,14 @@ if (import.meta.main) serve(async (req: Request) => {
 
         return json({ success: true, migrated: results })
       }
-      case 'create_unified_invoice': return json(await createUnifiedInvoice(client, body))
+      case 'create_unified_invoice': {
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'create_unified_invoice',
+        )
+        return json(await createUnifiedInvoice(client, body))
+      }
       case 'reconcile_payment': return json(await reconcilePayment(client, body))
       case 'sync_suppliers': return json(await syncSuppliers(client))
       case 'update_supplier_email': return json(await updateSupplierEmail(client, body))
@@ -4456,6 +4470,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const vid = body.xero_invoice_id
         if (!vid) return json({ error: 'xero_invoice_id required' }, 400)
         await assertLegacySesInvoiceActionAllowed(client, vid, 'void_invoice')
+        await assertNoSyntheticLivefireInvoice(client, vid, 'void_invoice')
         // Capture previous status before voiding
         const { data: voidInvRecord } = await client.from('xero_invoices')
           .select('invoice_number, total, status')
@@ -4960,7 +4975,14 @@ if (import.meta.main) serve(async (req: Request) => {
       // ── Quick Quote (Miscellaneous Jobs) ──
       case 'search_ghl_contacts': return json(await searchGHLContacts(client, url.searchParams))
       case 'create_misc_job': return json(await createMiscJob(client, body))
-      case 'send_quick_quote_email': return json(await sendQuickQuoteEmail(client, body))
+      case 'send_quick_quote_email': {
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'send_quick_quote_email',
+        )
+        return json(await sendQuickQuoteEmail(client, body))
+      }
       case 'create_ghl_contact': return json(await createGHLContact(client, body))
       case 'get_xero_accounts': return json(await getXeroAccounts(client))
       case 'search_xero_contacts': return json(await searchXeroContacts(client, url.searchParams))
@@ -5023,7 +5045,14 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'resolve_callback': return json(await resolveCallback(client, body))
 
       // ── Spine: Client Comms ──
-      case 'send_client_update': return json(await sendClientUpdate(client, body))
+      case 'send_client_update': {
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
+          'send_client_update',
+        )
+        return json(await sendClientUpdate(client, body))
+      }
 
       // ── Spine: Duration Monitoring ──
       case 'check_job_durations': return json(await checkJobDurations(client))
@@ -21867,6 +21896,26 @@ async function assertNoSyntheticLivefireJobs(
 }
 export const _assertNoSyntheticLivefireJobsForTest =
   assertNoSyntheticLivefireJobs
+
+async function assertNoSyntheticLivefireInvoice(
+  client: any,
+  xeroInvoiceId: string,
+  action: string,
+): Promise<void> {
+  const { data, error } = await client.from('xero_invoices')
+    .select('job_id').eq('xero_invoice_id', xeroInvoiceId).maybeSingle()
+  if (error) {
+    throw new ApiError(
+      `The ${action} synthetic live-fire safety gate could not verify its invoice (${error.message}).`,
+      503,
+    )
+  }
+  if (data?.job_id) {
+    await assertNoSyntheticLivefireJobs(client, [data.job_id], action)
+  }
+}
+export const _assertNoSyntheticLivefireInvoiceForTest =
+  assertNoSyntheticLivefireInvoice
 
 async function terminalSyntheticLivefireJobIds(client: any): Promise<Set<string>> {
   const ids = new Set<string>()

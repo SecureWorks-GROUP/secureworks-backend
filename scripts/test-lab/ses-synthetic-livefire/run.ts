@@ -1103,11 +1103,17 @@ async function cleanup(
     "job_id",
     strings(found.details, "job_id"),
   );
-  deletedMutableOperational.makesafe_attendance_cycles = await client.deleteIds(
-    "makesafe_attendance_cycles",
-    "id",
-    strings(found.attendanceCycles, "id"),
+  const purgedAttendanceCycles = await client.rpc<number>(
+    "purge_synthetic_livefire_attendance_cycles",
+    { p_marker: run.marker },
   );
+  if (Number(purgedAttendanceCycles || 0) !== found.attendanceCycles.length) {
+    throw new Error(
+      `synthetic attendance purge count mismatch: purged ${String(purgedAttendanceCycles)} of ${found.attendanceCycles.length}`,
+    );
+  }
+  deletedMutableOperational.makesafe_attendance_cycles = found.attendanceCycles
+    .slice(0, Number(purgedAttendanceCycles || 0));
   for (const [table, rows] of Object.entries(found.mutableOperationalRows)) {
     deletedMutableOperational[table] = await client.deleteIds(
       table,

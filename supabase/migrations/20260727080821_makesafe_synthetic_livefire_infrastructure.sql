@@ -301,6 +301,79 @@ COMMENT ON TABLE public.ses_synthetic_livefire_runs IS
 COMMENT ON FUNCTION public.ses_synthetic_livefire_marker_is_terminal(text) IS
   'Read-only service-role helper for excluding a terminally accounted synthetic live-fire run from live projections and health counts.';
 
+CREATE OR REPLACE FUNCTION public.prevent_makesafe_attendance_cycle_identity_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  purge_marker text := current_setting('app.synthetic_livefire_purge_marker', true);
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF purge_marker ~ '^SWG-SES-LIVEFIRE-TEST-ONLY-[0-9A-F]{8}-[0-9A-F]{4}-[1-8][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$'
+       AND purge_marker = (
+         SELECT j.metadata->>'synthetic_livefire_marker'
+         FROM public.jobs j
+         WHERE j.id = OLD.job_id
+       )
+    THEN
+      RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'makesafe attendance cycle identities are immutable';
+  END IF;
+  IF NEW.id IS DISTINCT FROM OLD.id
+    OR NEW.job_id IS DISTINCT FROM OLD.job_id
+    OR NEW.cycle_number IS DISTINCT FROM OLD.cycle_number THEN
+    RAISE EXCEPTION 'makesafe attendance cycle identities are immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.purge_synthetic_livefire_attendance_cycles(
+  p_marker text
+)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  deleted_count bigint;
+BEGIN
+  IF p_marker !~ '^SWG-SES-LIVEFIRE-TEST-ONLY-[0-9A-F]{8}-[0-9A-F]{4}-[1-8][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$' THEN
+    RAISE EXCEPTION 'invalid synthetic live-fire marker';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.ses_synthetic_livefire_runs run
+    WHERE run.marker = p_marker
+      AND run.state IN ('active', 'cleanup_complete')
+  ) THEN
+    RAISE EXCEPTION 'synthetic live-fire run is not purgeable';
+  END IF;
+
+  PERFORM set_config('app.synthetic_livefire_purge_marker', p_marker, true);
+  DELETE FROM public.makesafe_attendance_cycles cycle
+  USING public.jobs job
+  WHERE cycle.job_id = job.id
+    AND job.metadata->>'synthetic_livefire_marker' = p_marker
+    AND EXISTS (
+      SELECT 1
+      FROM public.ses_synthetic_livefire_runs run
+      WHERE run.marker = p_marker
+        AND run.job_ids ? cycle.job_id::text
+    );
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  RETURN deleted_count;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.purge_synthetic_livefire_attendance_cycles(text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.purge_synthetic_livefire_attendance_cycles(text)
+  TO service_role, postgres;
+
 ALTER TABLE public.job_events
   ALTER COLUMN job_id DROP NOT NULL;
 ALTER TABLE public.job_events

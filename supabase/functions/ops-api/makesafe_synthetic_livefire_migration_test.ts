@@ -114,6 +114,14 @@ Deno.test("terminal accounting is marker-bound, service-role-only, and requires 
   );
   assertStringIncludes(sql, "OLD.state = 'terminal'");
   assertStringIncludes(sql, "SECURITY INVOKER");
+  assertStringIncludes(
+    sql,
+    "purge_synthetic_livefire_attendance_cycles",
+  );
+  assertStringIncludes(
+    sql,
+    "app.synthetic_livefire_purge_marker",
+  );
 });
 
 Deno.test("pre-existing own-mail chatter is terminally accounted without mutating its source rows", async () => {
@@ -183,6 +191,16 @@ Deno.test("verified marker propagates from deterministic draft into job and even
     index,
     "synthetic_livefire_release_forbidden:",
   );
+  for (const action of [
+    "create_deposit_invoice",
+    "create_unified_invoice",
+    "void_invoice",
+    "send_quick_quote_email",
+    "send_client_update",
+  ]) {
+    assertStringIncludes(index, `synthetic live-fire safety gate`);
+    assertStringIncludes(index, `'${action}'`);
+  }
   assertStringIncludes(index, "release_refusal_probe: true");
   assertStringIncludes(
     index,

@@ -74,9 +74,11 @@ Cleanup is deliberately split by store:
 - Mailbox messages and append-only intake/state ledgers remain as audit
   evidence. Their run is transitioned to `terminal` in
   `ses_synthetic_livefire_runs`.
-- Retained jobs are cancelled and stamped with the exact marker plus
-  `synthetic_livefire_terminal_at`. Canonical Ops/Trade board construction
-  excludes only that two-field terminal shape.
+- Mutable synthetic jobs and operational rows are deleted after the exact-marker
+  guard passes. Only append-only/group evidence and the marked mailbox messages
+  remain; the attendance-cycle purge uses a guarded synthetic-only RPC.
+- Canonical Ops/Trade projections hide retained evidence only from the terminal
+  `ses_synthetic_livefire_runs` ledger, never from mutable job metadata.
 
 The runner refuses cleanup on marker drift, a foreign sender/recipient, an
 unmarked case/job, unsafe storage paths, any docket persistence, any approval,
