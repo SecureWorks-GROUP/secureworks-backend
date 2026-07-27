@@ -731,8 +731,23 @@ function portalRoleItems(
   return ["assessment_scope_link", "assessment_scope_capture"];
 }
 
+function isValidContentFingerprint(value: unknown): value is SesSha256 {
+  return typeof value === "string" &&
+    /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
 function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
-  if (capture.status === "done") return null;
+  if (capture.status === "done") {
+    if (!isValidContentFingerprint(capture.content_fingerprint)) {
+      return blocked(
+        "portal_capture_invalid",
+        `Portal ${capture.role} returned done without a valid content fingerprint.`,
+        "Re-run the approved portal capture and retain a valid content fingerprint.",
+        [`portal-capture:${capture.role}`],
+      );
+    }
+    return null;
+  }
   if (capture.status === "not_done") {
     return blocked(
       "portal_not_submitted",
@@ -776,8 +791,11 @@ function buildEmailDrafts(
   reportFile: string | null,
   swmsFile: string | null,
   photoFiles: string[],
+  invoiceProposal: Record<string, unknown> | null,
 ): Record<string, string> {
-  if (row.family === "assessment_quote") return {};
+  if (row.family === "assessment_quote" || !reportFile || !invoiceProposal) {
+    return {};
+  }
   const ref = input.source.builder_reference;
   const address = [input.source.site_address, input.source.site_suburb].filter(
     Boolean,
@@ -1515,19 +1533,22 @@ async function prepareOne(
 
   stagesMs.T7 = 0;
   const drafts = matrix.ok
-    ? buildEmailDrafts(
+    ? blockers.length === 0
+      ? buildEmailDrafts(
       input,
       row,
       reportFile,
       swmsFile,
       photoFiles,
+      priced.proposal,
     )
+      : {}
     : {};
-  if (matrix.ok && row.family !== "assessment_quote") {
+  if (drafts.REPORT_EMAIL_DRAFT && drafts.INVOICE_EMAIL_DRAFT) {
     manifest.items.draft_builder_report_email = ready(
       "file:DRAFTS/REPORT_EMAIL_DRAFT.txt",
     );
-    if (row.photo_route === "work_order_sender") {
+    if (drafts.PHOTO_EMAIL_DRAFT) {
       manifest.items.draft_photo_evidence_email = ready(
         "file:DRAFTS/PHOTO_EMAIL_DRAFT.txt",
       );
@@ -1535,6 +1556,11 @@ async function prepareOne(
     manifest.items.draft_invoice_bundle_email = ready(
       "file:DRAFTS/INVOICE_EMAIL_DRAFT.txt",
     );
+    manifest.items.email_drafts_presented = ready(
+      "review:review.html#email-drafts",
+    );
+  } else if (blockers.length) {
+    manifest.items.email_drafts_presented = blockers[0];
   }
   stagesMs.T8 = 0;
   for (const [name, body] of Object.entries(drafts)) {
@@ -1775,6 +1801,15 @@ async function prepareOne(
     degraded_capabilities: degradedCapabilities,
     within_five_minutes: durationMs <= SES_FIVE_MINUTES_MS,
   };
+  if (!timing.within_five_minutes) {
+    console.error("ses_docket_revision_sla_breach", {
+      job_id: timing.job_id,
+      docket_revision_id: docketRevisionId,
+      duration_ms: timing.duration_ms,
+      accepted_at: timing.accepted_at,
+      committed_at: timing.committed_at,
+    });
+  }
   artifacts.push(
     await artifactFromText({
       role: "timing",

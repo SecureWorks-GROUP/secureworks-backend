@@ -398,6 +398,64 @@ Deno.test("portal state is read through the capture adapter and fails closed", a
   }
 });
 
+Deno.test("portal done requires a valid content fingerprint", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.family === "ordinary_roof_portal"
+  )!;
+  const input = fixtureInput(row);
+  const base = dependencies(input);
+  const response = await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    {
+      ...base,
+      capturePortal: async (captureRequest) => ({
+        status: "done" as const,
+        role: captureRequest.role,
+        url: captureRequest.url,
+        docket_id: captureRequest.docket_id,
+        job_id: captureRequest.job_id,
+        builder_reference: captureRequest.builder_reference,
+        captured_at: FIXED_TIME.toISOString(),
+        content_fingerprint: "" as SesPortalCapture["content_fingerprint"],
+        idempotency_key: captureRequest.idempotency_key,
+        signal: "submitted-and-locked",
+        screenshot_bytes: new Uint8Array([1, 2, 3]),
+      }),
+    },
+  );
+  assertEquals(response.results[0].state, "blocked");
+  assert(blockerCodes(response.results[0]).includes("portal_capture_invalid"));
+  assertEquals(
+    response.results[0].envelope.v2.items.roof_report_capture.state,
+    "blocked",
+  );
+});
+
+Deno.test("blocked non-assessment packs do not expose email drafts", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" && candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  const response = await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    {
+      ...dependencies(input),
+      renderPhysicalReport: undefined,
+    },
+  );
+  const result = response.results[0];
+  assertEquals(result.state, "blocked");
+  assertEquals(result.email_drafts, {});
+  assertEquals(
+    result.envelope.v2.items.draft_builder_report_email.state,
+    "blocked",
+  );
+  assertEquals(
+    result.envelope.v2.items.draft_invoice_bundle_email.state,
+    "blocked",
+  );
+});
+
 Deno.test("physical docket copies every current-cycle photo and blocks an incomplete recovery", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
