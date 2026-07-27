@@ -442,6 +442,7 @@ Deno.test(
       cycle_attribution: "bound",
       label: `Completion photo ${index + 1}`,
       size,
+      storage_url: `https://storage.example.test/photo-${index + 1}.jpg`,
     }));
     const input = buildSesAssemblerInput(live);
     const client = liveSnapshotClient(live);
@@ -453,6 +454,7 @@ Deno.test(
     let activeFetches = 0;
     let maxActiveFetches = 0;
     const fetchedSizes: number[] = [];
+    const expectedPhotoHashes: string[] = [];
     globalThis.fetch = async () => {
       activeFetches++;
       maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
@@ -460,6 +462,14 @@ Deno.test(
       const bytes = new Uint8Array(realPhotoSizes[index]);
       bytes.fill(index + 1);
       fetchedSizes.push(bytes.byteLength);
+      const digest = new Uint8Array(
+        await crypto.subtle.digest("SHA-256", bytes),
+      );
+      expectedPhotoHashes.push(
+        `sha256:${Array.from(digest).map((byte) =>
+          byte.toString(16).padStart(2, "0")
+        ).join("")}`,
+      );
       await new Promise((resolve) => setTimeout(resolve, 0));
       activeFetches--;
       return new Response(bytes.buffer, {
@@ -492,41 +502,41 @@ Deno.test(
         },
       );
       const elapsedMs = performance.now() - started;
-    const proofs = response.results[0].artifacts.filter((artifact) =>
-      artifact.role === "completion_photo_proof"
-    );
-    assertEquals(fetchedSizes, realPhotoSizes);
-    assertEquals(maxActiveFetches, 1);
-    assertEquals(renderCalls, 0);
-    assertEquals(proofs.length, 11);
-    assertEquals(
-      proofs.map((proof) => ({
-        photo_id: proof.metadata.photo_id,
-        caption: proof.metadata.caption,
-        content_hash: proof.metadata.content_hash,
-        size_bytes: proof.metadata.size_bytes,
-      })),
-      input.cycle_facts.photos.map((photo, index) => ({
-        photo_id: photo.id,
-        caption: photo.caption || null,
-        content_hash: `sha256:${String(index + 1).padStart(64, "0")}`,
-        size_bytes: realPhotoSizes[index],
-      })),
-    );
-    assertEquals(
-      response.results[0].artifacts.some((artifact) =>
-        artifact.role === "completion_photo" ||
-        artifact.role === "supporting_report_pdf"
-      ),
-      false,
-    );
-    const httpResponse = summarizeSesPrepareResponseForHttp(response);
-    assert(!JSON.stringify(httpResponse).includes('"bytes"'));
-    assert(JSON.stringify(httpResponse).length < 100_000);
-    assert(
-      elapsedMs < 5_000,
-      `11-photo dry-run took ${elapsedMs.toFixed(1)}ms`,
-    );
+      const proofs = response.results[0].artifacts.filter((artifact) =>
+        artifact.role === "completion_photo_proof"
+      );
+      assertEquals(fetchedSizes, realPhotoSizes);
+      assertEquals(maxActiveFetches, 1);
+      assertEquals(renderCalls, 0);
+      assertEquals(proofs.length, 11);
+      assertEquals(
+        proofs.map((proof) => ({
+          photo_id: proof.metadata.photo_id,
+          caption: proof.metadata.caption,
+          content_hash: proof.metadata.content_hash,
+          size_bytes: proof.metadata.size_bytes,
+        })),
+        input.cycle_facts.photos.map((photo, index) => ({
+          photo_id: photo.id,
+          caption: photo.caption || null,
+          content_hash: expectedPhotoHashes[index],
+          size_bytes: realPhotoSizes[index],
+        })),
+      );
+      assertEquals(
+        response.results[0].artifacts.some((artifact) =>
+          artifact.role === "completion_photo" ||
+          artifact.role === "supporting_report_pdf"
+        ),
+        false,
+      );
+      const httpResponse = summarizeSesPrepareResponseForHttp(response);
+      assert(!JSON.stringify(httpResponse).includes('"bytes"'));
+      assert(JSON.stringify(httpResponse).length < 100_000);
+      assert(
+        elapsedMs < 5_000,
+        `11-photo dry-run took ${elapsedMs.toFixed(1)}ms`,
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }
