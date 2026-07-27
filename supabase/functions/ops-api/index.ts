@@ -137,10 +137,12 @@ import {
 } from './makesafe_status_apply.ts'
 import {
   currentCycleReportMap as cycleEvidenceReportMap,
+  filterMediaForCurrentCycle,
   hasReattendBoundary,
   isLegacyMakesafeCard,
   filterHoldsForCurrentCycle,
   projectCycleScopedEvidence,
+  selectCurrentCycleReport,
 } from './makesafe_cycle_evidence.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
@@ -13948,6 +13950,74 @@ async function ensureMakesafeAttendanceCycle(
   return data
 }
 
+type MakesafeMediaCycleBinding = {
+  attendance_cycle_id: string
+  cycle_attribution: 'bound'
+  cycle_number: number
+}
+
+/**
+ * Stamp MakeSafe media with the server-owned current attendance identity.
+ * Ordinary jobs have no makesafe_job_details row and retain their existing
+ * upload shape. A MakeSafe pointer is repaired before the media insert so a
+ * photo can never be persisted as "current" from a client-supplied cycle.
+ */
+async function bindMakesafeMediaToCurrentCycle(
+  client: any,
+  jobId: string,
+): Promise<MakesafeMediaCycleBinding | null> {
+  const { data: detail, error: detailErr } = await client
+    .from('makesafe_job_details')
+    .select('job_id, cycle_number, attendance_cycle_id, cycle_attribution')
+    .eq('job_id', jobId)
+    .maybeSingle()
+  if (detailErr) {
+    throw new ApiError(
+      `MakeSafe photo cycle read failed: ${detailErr.message || detailErr}`,
+      500,
+    )
+  }
+  if (!detail) return null
+
+  const cycleNumber = Number(detail.cycle_number ?? 1)
+  const attendanceCycle = detail.attendance_cycle_id
+    ? { id: String(detail.attendance_cycle_id), cycle_number: cycleNumber }
+    : await ensureMakesafeAttendanceCycle(
+      client,
+      jobId,
+      cycleNumber,
+      'makesafe_photo_upload',
+    )
+
+  if (
+    String(detail.attendance_cycle_id || '') !== attendanceCycle.id ||
+    String(detail.cycle_attribution || '') !== 'bound'
+  ) {
+    const { error: pointerErr } = await client
+      .from('makesafe_job_details')
+      .update({
+        attendance_cycle_id: attendanceCycle.id,
+        cycle_attribution: 'bound',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('job_id', jobId)
+    if (pointerErr) {
+      throw new ApiError(
+        `MakeSafe photo cycle bind failed: ${pointerErr.message || pointerErr}`,
+        500,
+      )
+    }
+  }
+
+  return {
+    attendance_cycle_id: attendanceCycle.id,
+    cycle_attribution: 'bound',
+    cycle_number: cycleNumber,
+  }
+}
+export const _bindMakesafeMediaToCurrentCycleForTest =
+  bindMakesafeMediaToCurrentCycle
+
 // ── Slice 5: make-safe completion report ──
 async function submitMakesafeReport(client: any, body: any) {
   const {
@@ -13980,8 +14050,19 @@ async function submitMakesafeReport(client: any, body: any) {
   // cycle 1 and behave exactly as before (the existing-report lookup below is
   // scoped to the same cycle, so a prior-cycle submitted report never blocks the
   // second visit's submission and is never overwritten).
-  const { data: cycleDetail } = await client.from('makesafe_job_details')
-    .select('cycle_number, substatus, attendance_cycle_id').eq('job_id', jId).maybeSingle()
+  const { data: cycleDetail, error: cycleDetailErr } = await client
+    .from('makesafe_job_details')
+    .select('cycle_number, reattend_count, substatus, attendance_cycle_id')
+    .eq('job_id', jId)
+    .maybeSingle()
+  if (cycleDetailErr) {
+    throw new ApiError(
+      `MakeSafe attendance detail read failed: ${
+        cycleDetailErr.message || cycleDetailErr
+      }`,
+      500,
+    )
+  }
   const currentCycle = (cycleDetail as { cycle_number?: number } | null)?.cycle_number ?? 1
   const detailSubstatus = (cycleDetail as { substatus?: string } | null)?.substatus || null
   const attendanceCycle = await ensureMakesafeAttendanceCycle(client, jId, currentCycle, 'submit_makesafe_report')
@@ -14036,14 +14117,25 @@ async function submitMakesafeReport(client: any, body: any) {
   if (submittingFinal) {
     if (existing?.status === 'submitted' && boardSyncComplete) throw new Error('Report already submitted')
     const { data: mediaRows, error: mediaErr } = await client.from('job_media')
-      .select('phase')
+      .select('id, phase, attendance_cycle_id, cycle_attribution')
       .eq('job_id', jId)
       .eq('type', 'photo')
       .limit(200)
     if (mediaErr) throw mediaErr
-    const photoCount = (mediaRows || []).length
+    const currentCycleMedia = filterMediaForCurrentCycle(
+      mediaRows || [],
+      cycleDetail || { cycle_number: currentCycle, reattend_count: 0 },
+      attendanceCycle.id,
+    )
+    const photoCount = currentCycleMedia.length
     if (photoCount < 5) {
-      throw new ApiError(`MakeSafe report needs at least 5 photos (found ${photoCount})`, 400)
+      const scopeLabel = hasReattendBoundary(cycleDetail)
+        ? ' current-visit'
+        : ''
+      throw new ApiError(
+        `MakeSafe report needs at least 5${scopeLabel} photos (found ${photoCount})`,
+        400,
+      )
     }
   }
 
@@ -14177,6 +14269,7 @@ async function submitMakesafeReport(client: any, body: any) {
             auto_assigned_submitter: !!autoAssignment,
             assignment_attribution: autoAssignment ? 'final_makesafe_report_submitter' : null,
             cycle_number: currentCycle,
+            attendance_cycle_id: attendanceCycle.id,
           },
         })
         if (eventErr) {
@@ -24478,6 +24571,135 @@ async function extractScopePhotos(client: any, jobId: string, scopeJson: any): P
   return count
 }
 
+type TradeMakesafeCompletionHandoff =
+  | 'physical'
+  | 'builder_portal'
+  | 'own_template'
+  | 'unknown'
+
+function tradeBuilderPortalUrl(detail: any, metadata: any): string | null {
+  const sources = [
+    detail?.external_links,
+    metadata?.external_links,
+    detail?.builder_portal_url,
+    metadata?.builder_portal_url,
+  ]
+  for (const source of sources) {
+    if (Array.isArray(source)) {
+      const links = source.filter((link: any) => {
+        const kind = String(link?.kind || '').toLowerCase()
+        const label = String(link?.label || '').toLowerCase()
+        return kind === 'builder_portal' || label.includes('builder portal')
+      })
+      for (const link of links) {
+        const url = _cleanBuilderLinkUrl(String(link?.url || ''))
+        if (url) return url
+      }
+      continue
+    }
+    if (source && typeof source === 'object') {
+      const url = _cleanBuilderLinkUrl(
+        String(source.builder_portal_url || ''),
+      )
+      if (url) return url
+      continue
+    }
+    const url = _cleanBuilderLinkUrl(String(source || ''))
+    if (url) return url
+  }
+  return null
+}
+
+/**
+ * Server-owned trade completion routing. It consumes persisted facts only and
+ * fails closed for an unresolved roof-report mode; no WO-text or client guess.
+ */
+function tradeMakesafeCompletionHandoff(
+  job: any,
+  detail: any,
+  roofDraft: any,
+): {
+  completion_handoff: TradeMakesafeCompletionHandoff
+  completion_handoff_reason: string
+  builder_portal_url: string | null
+} {
+  const metadata = parseJsonObject(job?.metadata)
+  const family = String(
+    detail?.makesafe_job_family || metadata.makesafe_job_family || '',
+  ).toLowerCase().trim()
+  const reportType = String(
+    detail?.report_type || _reportTypeForJobFamily(family) || '',
+  ).toLowerCase().trim()
+  const explicitRaw = String(
+    detail?.roof_report_mode ||
+      metadata.roof_report_mode ||
+      metadata.makesafe_roof_report_mode ||
+      '',
+  ).toLowerCase().trim()
+  const portalUrl = tradeBuilderPortalUrl(detail, metadata)
+
+  if (explicitRaw) {
+    if (explicitRaw === 'own_template') {
+      return {
+        completion_handoff: 'own_template',
+        completion_handoff_reason: 'explicit_roof_report_mode',
+        builder_portal_url: portalUrl,
+      }
+    }
+    if (explicitRaw === 'builder_portal') {
+      return {
+        completion_handoff: 'builder_portal',
+        completion_handoff_reason: 'explicit_roof_report_mode',
+        builder_portal_url: portalUrl,
+      }
+    }
+    return {
+      completion_handoff: 'unknown',
+      completion_handoff_reason: 'invalid_explicit_roof_report_mode',
+      builder_portal_url: portalUrl,
+    }
+  }
+
+  if (roofDraft) {
+    return {
+      completion_handoff: 'own_template',
+      completion_handoff_reason: 'existing_own_template_draft',
+      builder_portal_url: portalUrl,
+    }
+  }
+  if ((reportType === 'roof_report' || family === 'roof_report') && portalUrl) {
+    return {
+      completion_handoff: 'builder_portal',
+      completion_handoff_reason: 'roof_report_with_builder_portal',
+      builder_portal_url: portalUrl,
+    }
+  }
+  if (
+    reportType === 'assessment_report_quote' ||
+    family === 'assessment_report_quote'
+  ) {
+    return {
+      completion_handoff: 'builder_portal',
+      completion_handoff_reason: 'assessment_report_family',
+      builder_portal_url: portalUrl,
+    }
+  }
+  if (reportType === 'roof_report' || family === 'roof_report') {
+    return {
+      completion_handoff: 'unknown',
+      completion_handoff_reason: 'roof_completion_mode_unknown',
+      builder_portal_url: null,
+    }
+  }
+  return {
+    completion_handoff: 'physical',
+    completion_handoff_reason: 'physical_makesafe_family',
+    builder_portal_url: portalUrl,
+  }
+}
+export const _tradeMakesafeCompletionHandoffForTest =
+  tradeMakesafeCompletionHandoff
+
 async function tradeJobDetail(
   client: any,
   params: URLSearchParams,
@@ -24503,7 +24725,7 @@ async function tradeJobDetail(
       .select('id, type, pdf_url, storage_url, file_name, visible_to_trades, version, quote_number, created_at')
       .eq('job_id', jobId).order('created_at', { ascending: false }),
     client.from('job_media')
-      .select('id, phase, type, storage_url, thumbnail_url, label, notes, po_id, created_at')
+      .select('id, phase, type, storage_url, thumbnail_url, label, notes, po_id, created_at, attendance_cycle_id, cycle_attribution')
       .eq('job_id', jobId).order('created_at').limit(200),
     client.from('job_events')
       .select('id, event_type, detail_json, created_at, users:user_id(name)')
@@ -24553,11 +24775,62 @@ async function tradeJobDetail(
         .eq('job_id', jobId)
         .maybeSingle()
       const jobMetadata = parseJsonObject(jobRes.data?.metadata)
+      const [roofDraftRes, billingReviewRes] = await Promise.all([
+        client.from('makesafe_roof_report_drafts')
+          .select('id, status, submitted_cycle, updated_at')
+          .eq('job_id', jobId)
+          .eq('pack_kind', ROOF_REPORT_PACK_KIND)
+          .maybeSingle(),
+        client.from('job_events')
+          .select('id, detail_json, created_at')
+          .eq('job_id', jobId)
+          .eq('event_type', 'makesafe_reattend_billing_review_required')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      ])
+      if (roofDraftRes.error) {
+        console.log(
+          '[ops-api] trade roof report draft flag unavailable:',
+          roofDraftRes.error.message,
+        )
+      }
+      if (billingReviewRes.error) {
+        console.log(
+          '[ops-api] trade reattend review flag unavailable:',
+          billingReviewRes.error.message,
+        )
+      }
+      const roofDraft = roofDraftRes.data || null
+      const completion = tradeMakesafeCompletionHandoff(
+        jobRes.data,
+        ms,
+        roofDraft,
+      )
+      const reviewDetail = parseJsonObject(
+        billingReviewRes.data?.detail_json,
+      )
+      const reviewMatchesCurrentCycle = !!billingReviewRes.data && (
+        reviewDetail.attendance_cycle_id && ms?.attendance_cycle_id
+          ? String(reviewDetail.attendance_cycle_id) ===
+            String(ms.attendance_cycle_id)
+          : Number(reviewDetail.cycle_number || 0) ===
+            Number(ms?.cycle_number || 1)
+      )
       makesafeDetails = ms ? {
         ...ms,
+        makesafe_job_family: jobMetadata.makesafe_job_family || null,
         builder_email_text_for_trade: jobMetadata.builder_email_text_for_trade || null,
         builder_email_subject: jobMetadata.builder_email_subject || null,
         builder_email_received_at: jobMetadata.builder_email_received_at || null,
+        completion_handoff: completion.completion_handoff,
+        completion_handoff_reason: completion.completion_handoff_reason,
+        builder_portal_url: completion.builder_portal_url,
+        roof_report_draft_status: roofDraft?.status || null,
+        // Flag-only surface: no invoice number, amount, or disposition options
+        // enter the trade payload. Captain still owns the option set.
+        billing_review_required: reviewMatchesCurrentCycle &&
+          reviewDetail.disposition == null,
       } : null
     } catch (e) {
       console.log('[ops-api] trade makesafe details fetch skipped:', (e as Error).message)
@@ -24565,6 +24838,20 @@ async function tradeJobDetail(
   }
 
   const { metadata: _tradeJobMetadata, ...tradeSafeJob } = jobRes.data || {}
+  const currentServiceReport = makesafeDetails
+    ? selectCurrentCycleReport(
+      reportRes.data || [],
+      makesafeDetails,
+      makesafeDetails.attendance_cycle_id || null,
+    )
+    : (reportRes.data || [])[0] || null
+  const currentCycleMedia = makesafeDetails
+    ? filterMediaForCurrentCycle(
+      mediaRes.data || [],
+      makesafeDetails,
+      makesafeDetails.attendance_cycle_id || null,
+    )
+    : mediaRes.data || []
 
   return {
     job: tradeSafeJob,
@@ -24574,11 +24861,15 @@ async function tradeJobDetail(
     // MAKESAFE_AGENT_REPLY) so the trade never sees internal breadcrumbs in the
     // notes thread. The markers stay in job_events untouched.
     notes: (eventsRes.data || []).filter((n: any) => !noteIsSystemMarker(n?.detail_json?.text ?? n?.detail_json?.note ?? '')),
-    serviceReport: (reportRes.data || [])[0] || null,
+    serviceReport: currentServiceReport,
     // Re-attendance (M-C): all reports (latest first) so a re-attended job shows
-    // every visit's report, not just the latest. serviceReport stays the latest
-    // for existing single-report callers. reattend_count lives on makesafe_details.
+    // every visit's report, not just the latest. serviceReport is the current
+    // attendance only once a reattend boundary exists.
     serviceReports: reportRes.data || [],
+    currentCycleMedia,
+    currentCyclePhotoCount: currentCycleMedia.filter((m: any) =>
+      !m?.type || m.type === 'photo'
+    ).length,
     workOrder: (woRes.data || [])[0] || null,
     crew: crewRes.data || [],
     purchaseOrders: safePOs,
@@ -24854,6 +25145,7 @@ async function uploadPhoto(client: any, body: any) {
 
   // Verify user is assigned, or this is a MakeSafe field-report job.
   if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId)
+  const mediaCycle = await bindMakesafeMediaToCurrentCycle(client, jId)
 
   const base64 = dataUrl.split(',')[1]
   const mimeMatch = dataUrl.match(/data:([^;]+);/)
@@ -24883,6 +25175,10 @@ async function uploadPhoto(client: any, body: any) {
     uploaded_by: userId || user_id || null,
   }
   if (po_id) mediaInsert.po_id = po_id
+  if (mediaCycle) {
+    mediaInsert.attendance_cycle_id = mediaCycle.attendance_cycle_id
+    mediaInsert.cycle_attribution = mediaCycle.cycle_attribution
+  }
 
   const { data: mediaRecord, error: mediaError } = await client.from('job_media').insert(mediaInsert).select().single()
 
@@ -24892,10 +25188,20 @@ async function uploadPhoto(client: any, body: any) {
     job_id: jId,
     user_id: userId || user_id || null,
     event_type: phase === 'receipt' ? 'receipt_added' : 'photo_added',
-    detail_json: { media_id: mediaRecord.id, phase: phase || 'completion', po_id: po_id || null },
+    detail_json: {
+      media_id: mediaRecord.id,
+      phase: phase || 'completion',
+      po_id: po_id || null,
+      cycle_number: mediaCycle?.cycle_number || null,
+      attendance_cycle_id: mediaCycle?.attendance_cycle_id || null,
+    },
   })
 
-  return { id: mediaRecord.id, url: urlData.publicUrl }
+  return {
+    id: mediaRecord.id,
+    url: urlData.publicUrl,
+    attendance_cycle_id: mediaCycle?.attendance_cycle_id || null,
+  }
 }
 
 function normaliseOpsAttachJobPhotoInput(body: any) {
@@ -24939,6 +25245,7 @@ async function opsAttachJobPhoto(client: any, body: any) {
     .maybeSingle()
   if (jobErr) throw jobErr
   if (!job) throw new ApiError('Job not found', 404)
+  const mediaCycle = await bindMakesafeMediaToCurrentCycle(client, parsed.jId)
 
   const photoId = crypto.randomUUID()
   const path = `${DEFAULT_ORG_ID}/${parsed.jId}/photos/${photoId}.${parsed.ext}`
@@ -24961,6 +25268,10 @@ async function opsAttachJobPhoto(client: any, body: any) {
     uploaded_by: null,
     notes: parsed.sourceNote,
   }
+  if (mediaCycle) {
+    mediaInsert.attendance_cycle_id = mediaCycle.attendance_cycle_id
+    mediaInsert.cycle_attribution = mediaCycle.cycle_attribution
+  }
 
   const { data: mediaRecord, error: mediaError } = await client.from('job_media').insert(mediaInsert).select().single()
   if (mediaError) throw mediaError
@@ -24974,10 +25285,19 @@ async function opsAttachJobPhoto(client: any, body: any) {
       phase: parsed.phase,
       source: 'ops_attach_job_photo',
       label: parsed.label,
+      cycle_number: mediaCycle?.cycle_number || null,
+      attendance_cycle_id: mediaCycle?.attendance_cycle_id || null,
     },
   })
 
-  return { ok: true, job_id: parsed.jId, job_number: job.job_number, media_id: mediaRecord.id, url: urlData.publicUrl }
+  return {
+    ok: true,
+    job_id: parsed.jId,
+    job_number: job.job_number,
+    media_id: mediaRecord.id,
+    url: urlData.publicUrl,
+    attendance_cycle_id: mediaCycle?.attendance_cycle_id || null,
+  }
 }
 
 export const _normaliseOpsAttachJobPhotoInputForTest = normaliseOpsAttachJobPhotoInput
@@ -30095,18 +30415,54 @@ export async function reattendMakesafe(client: any, args: {
     )
   }
 
-  // Billing is decoupled from field-work capture (Marnin, 2026-07-09, SWMS-26888):
-  // recording that a trade re-attended must NEVER be blocked. If the job already
-  // carries a LIVE (non-VOIDED/DELETED) ACCREC invoice we still PROCEED, but raise
-  // a non-fatal flag so admin bills the re-attend manually / combines invoices.
-  // This is a read only — we never mutate or auto-create any invoice here.
-  const { data: liveInvoices } = await client.from('xero_invoices')
-    .select('status, invoice_type').eq('job_id', jobId).eq('invoice_type', 'ACCREC')
+  // Commercial evidence is read-only and never blocks field capture. A prior
+  // invoice or released pack opens an append-only human-review fact; this action
+  // never chooses a disposition, creates an invoice, sends, or closes anything.
+  const { data: liveInvoices, error: invoiceReadErr } = await client
+    .from('xero_invoices')
+    .select('id, xero_invoice_id, invoice_number, status, invoice_type, total, amount_due')
+    .eq('job_id', jobId)
+    .eq('invoice_type', 'ACCREC')
+  const { data: priorPacks, error: packReadErr } = await client
+    .from('makesafe_report_packs')
+    .select('id, job_id, pack_kind, status, sent_at')
+    .eq('job_id', jobId)
+  let packMarkerPresent = false
+  let packMarkerReadError: string | null = null
+  try {
+    const markerMap = await buildPackSentMap(client, [jobId])
+    packMarkerPresent = markerMap[jobId] === true
+  } catch (e) {
+    packMarkerReadError = e instanceof Error ? e.message : String(e)
+  }
   const billReattendManually = (liveInvoices || []).some(
     (inv: any) => !['VOIDED', 'DELETED'].includes(String(inv?.status || '').toUpperCase()),
   )
-  const reattendWarning = billReattendManually
-    ? 'This job already has a live invoice — bill this re-attend manually or combine it into one invoice.'
+  const priorPackSent = packMarkerPresent || (priorPacks || []).some(
+    (pack: any) =>
+      (pack?.pack_kind || 'main') === 'main' &&
+      _makesafeSentToBuilder(false, pack),
+  )
+  const commercialEvidenceReadFailed = !!(
+    invoiceReadErr || packReadErr || packMarkerReadError
+  )
+  const billingReviewRequired = billReattendManually || priorPackSent ||
+    commercialEvidenceReadFailed
+  const reviewReason = commercialEvidenceReadFailed
+    ? 'commercial_evidence_read_failed'
+    : billReattendManually && priorPackSent
+    ? 'prior_live_invoice_and_pack'
+    : billReattendManually
+    ? 'prior_live_invoice'
+    : priorPackSent
+    ? 'prior_pack_sent'
+    : null
+  const reattendWarning = commercialEvidenceReadFailed
+    ? 'Re-attend captured, but prior commercial history could not be verified — office review is required before Docs Ready or send.'
+    : billReattendManually
+    ? 'This job already has a live invoice — office billing review is required before Docs Ready or send.'
+    : priorPackSent
+    ? 'A prior report pack was sent — office review is required before Docs Ready or send.'
     : null
 
   const nowIso = new Date().toISOString()
@@ -30141,25 +30497,90 @@ export async function reattendMakesafe(client: any, args: {
     .single()
   if (upErr) throw new ApiError('reattendMakesafe: detail update failed: ' + upErr.message, 500)
 
-  // Audit event (non-fatal, same as reopenMakesafe — a log failure must not roll
-  // back the completed re-attend transition).
-  try {
-    await client.from('job_events').insert({
-      job_id: jobId,
-      event_type: 'makesafe_reattend',
-      detail_json: {
-        reason,
-        reattend_count: nextReattend,
-        cycle_number: nextCycle,
-        previous_substatus: normalizedSub,
-        previous_status: previousStatus,
-        bill_reattend_manually: billReattendManually,
-        operator: body.operator_email || body.user_email || null,
-        changed_at: nowIso,
-      },
-    })
-  } catch (evtErr) {
-    console.log('[ops-api] reattendMakesafe: event log failed (non-fatal):', (evtErr as Error)?.message)
+  // Audit facts are non-fatal after the completed re-attend transition, but any
+  // persistence failure is returned loudly so the caller cannot claim the
+  // review surface exists when it does not.
+  const warnings: string[] = []
+  let reattendEventSync: any = { ok: true }
+  const { error: reattendEventErr } = await client.from('job_events').insert({
+    job_id: jobId,
+    event_type: 'makesafe_reattend',
+    detail_json: {
+      reason,
+      reattend_count: nextReattend,
+      cycle_number: nextCycle,
+      attendance_cycle_id: nextAttendanceCycle.id,
+      previous_substatus: normalizedSub,
+      previous_status: previousStatus,
+      bill_reattend_manually: billReattendManually,
+      prior_pack_sent: priorPackSent,
+      billing_review_required: billingReviewRequired,
+      operator: body.operator_email || body.user_email || null,
+      changed_at: nowIso,
+    },
+  })
+  if (reattendEventErr) {
+    reattendEventSync = {
+      ok: false,
+      error: reattendEventErr.message || String(reattendEventErr),
+    }
+    warnings.push('reattend_event_sync_failed')
+    console.log(
+      '[ops-api] reattendMakesafe: event log failed (non-fatal):',
+      reattendEventSync.error,
+    )
+  }
+
+  let billingReviewEvent: any = {
+    ok: true,
+    required: billingReviewRequired,
+    event_id: null,
+  }
+  if (billingReviewRequired) {
+    const priorInvoiceSummary = (liveInvoices || []).map((inv: any) => ({
+      xero_id: inv.xero_invoice_id || inv.id || null,
+      status: inv.status || null,
+      number: inv.invoice_number || null,
+      amount: inv.total ?? inv.amount_due ?? null,
+    }))
+    const { data: reviewEvent, error: reviewEventErr } = await client
+      .from('job_events')
+      .insert({
+        job_id: jobId,
+        event_type: 'makesafe_reattend_billing_review_required',
+        detail_json: {
+          job_id: jobId,
+          cycle_number: nextCycle,
+          attendance_cycle_id: nextAttendanceCycle.id,
+          reattend_count: nextReattend,
+          reason,
+          review_reason: reviewReason,
+          prior_invoice_summary: priorInvoiceSummary,
+          prior_pack_sent: priorPackSent,
+          commercial_evidence_read_failed: commercialEvidenceReadFailed,
+          disposition: null,
+          decided_by: null,
+          decided_at: null,
+          decision_note: null,
+        },
+      })
+      .select('id')
+      .single()
+    if (reviewEventErr) {
+      billingReviewEvent = {
+        ok: false,
+        required: true,
+        event_id: null,
+        error: reviewEventErr.message || String(reviewEventErr),
+      }
+      warnings.push('billing_review_event_sync_failed')
+      console.log(
+        '[ops-api] reattendMakesafe: billing review event failed (non-fatal):',
+        billingReviewEvent.error,
+      )
+    } else {
+      billingReviewEvent.event_id = reviewEvent?.id || null
+    }
   }
 
   return {
@@ -30168,10 +30589,16 @@ export async function reattendMakesafe(client: any, args: {
     job_id: jobId,
     reattend_count: nextReattend,
     cycle_number: nextCycle,
+    attendance_cycle_id: nextAttendanceCycle.id,
     substatus: updatedDetail?.substatus || 'waiting_on_trade_report',
     previous_status: previousStatus,
     reason,
     bill_reattend_manually: billReattendManually,
+    prior_pack_sent: priorPackSent,
+    billing_review_required: billingReviewRequired,
+    billing_review_event: billingReviewEvent,
+    event_sync: reattendEventSync,
+    warnings,
     ...(reattendWarning ? { warning: reattendWarning } : {}),
   }
 }
@@ -30562,6 +30989,7 @@ async function confirmUpload(client: any, body: any, userId: string, isAdmin = f
 
   // Verify user is assigned, or this is a MakeSafe field-report job.
   await assertAssignedOrMakesafeAccess(client, jId, userId, isAdmin)
+  const mediaCycle = await bindMakesafeMediaToCurrentCycle(client, jId)
 
   const insertData: any = {
     job_id: jId,
@@ -30572,6 +31000,10 @@ async function confirmUpload(client: any, body: any, userId: string, isAdmin = f
     uploaded_by: userId,
   }
   if (po_id) insertData.po_id = po_id
+  if (mediaCycle) {
+    insertData.attendance_cycle_id = mediaCycle.attendance_cycle_id
+    insertData.cycle_attribution = mediaCycle.cycle_attribution
+  }
 
   const { data, error } = await client.from('job_media').insert(insertData).select().single()
 
@@ -30581,11 +31013,22 @@ async function confirmUpload(client: any, body: any, userId: string, isAdmin = f
     job_id: jId,
     user_id: userId,
     event_type: phase === 'receipt' ? 'receipt_added' : 'photo_added',
-    detail_json: { media_id: data.id, phase: phase || 'completion', po_id: po_id || null },
+    detail_json: {
+      media_id: data.id,
+      phase: phase || 'completion',
+      po_id: po_id || null,
+      cycle_number: mediaCycle?.cycle_number || null,
+      attendance_cycle_id: mediaCycle?.attendance_cycle_id || null,
+    },
   })
 
-  return { id: data.id, url: publicUrl }
+  return {
+    id: data.id,
+    url: publicUrl,
+    attendance_cycle_id: mediaCycle?.attendance_cycle_id || null,
+  }
 }
+export const _confirmUploadForTest = confirmUpload
 
 // ── Update assignment status (trade can confirm/start/complete their own) ──
 async function updateMyAssignment(client: any, body: any, userId: string) {

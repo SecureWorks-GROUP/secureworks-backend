@@ -9,6 +9,7 @@ import {
   currentCycleReportMap,
   CYCLE_ATTRIBUTION,
   filterAssignmentsForCurrentCycle,
+  filterMediaForCurrentCycle,
   hasReattendBoundary,
   isEvidenceBoundToCurrentCycle,
   isLegacyMakesafeCard,
@@ -118,6 +119,38 @@ Deno.test("R3b reattend: current-cycle report + bound assignment pass", () => {
   assertEquals(scoped.serviceReport?.id, "r2");
   assertEquals(scoped.assignments.map((a) => a.id), ["a2"]);
   assertEquals(scoped.has_report_record, true);
+});
+
+Deno.test("R3c reattend form sees only current-cycle media", () => {
+  const detail = {
+    cycle_number: 2,
+    reattend_count: 1,
+    attendance_cycle_id: "cycle-2",
+  };
+  const media = [
+    {
+      id: "old-photo",
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+    },
+    {
+      id: "current-photo",
+      attendance_cycle_id: "cycle-2",
+      cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+    },
+    { id: "legacy-unbound-photo" },
+  ];
+  assertEquals(
+    filterMediaForCurrentCycle(media, detail, "cycle-2").map((row) => row.id),
+    ["current-photo"],
+  );
+  assertEquals(
+    filterMediaForCurrentCycle(media, {
+      cycle_number: 1,
+      reattend_count: 0,
+    }, "cycle-1").map((row) => row.id),
+    ["old-photo", "current-photo", "legacy-unbound-photo"],
+  );
 });
 
 Deno.test("R4 post-release reattend: prior pack+invoice cannot close", () => {
