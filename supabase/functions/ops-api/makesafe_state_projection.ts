@@ -757,9 +757,10 @@ export function projectMakesafeStateV2(
     handoffSatisfied = (input.family_rule.required_portal_roles || []).every(
       (role) => roles.has(role),
     ) &&
-      (input.family_rule.required_document_types || []).every((type) =>
-        documentTypes.has(type)
-      ) &&
+      (input.family_rule.required_document_types || []).every((type) => {
+        const canonicalType = canonicalizeMakesafeDocumentRole(type);
+        return canonicalType !== null && documentTypes.has(canonicalType);
+      }) &&
       (reports.length > 0 || captures.length > 0 || documents.length > 0);
   }
 

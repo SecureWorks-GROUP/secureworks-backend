@@ -327,6 +327,19 @@ Deno.test("document facts use the canonical roof_report role", () => {
   assertEquals(canonicalizeMakesafeDocumentRole("roof-report"), "roof_report");
 });
 
+Deno.test("document requirements use the same canonical role aliases", () => {
+  const input = baseInput();
+  input.family_rule = {
+    code: "roof_report",
+    kind: "portal",
+    matrix_revision: "family-2",
+    matrix_content_hash: SHA_A,
+    required_document_types: ["roof-report"],
+  };
+  input.documents = [fact("document-1", "submitted", "roof_report")];
+  assertEquals(projectMakesafeStateV2(input).ops_stage, "trade_report_in");
+});
+
 Deno.test("unknown document types remain unmapped", () => {
   assertEquals(canonicalizeMakesafeDocumentRole("future_document"), null);
 });
