@@ -28,7 +28,10 @@ import {
   type SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
 import { createSesDocketPersistenceAdapter } from "./ses_docket_persistence.ts";
-import { renderMakesafeReportPdf } from "./makesafe_report_render.ts";
+import {
+  type MakesafeReportJob,
+  renderMakesafeReportPdf,
+} from "./makesafe_report_render.ts";
 import {
   renderRoofReportPdf,
   type RoofReportJob,
@@ -103,6 +106,58 @@ function stringArray(...values: unknown[]): string[] {
     }
   }
   return [...out].sort();
+}
+
+function hasExplicitValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim() !== "";
+  if (typeof value === "number") return Number.isFinite(value);
+  return typeof value === "boolean";
+}
+
+function reportText(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (item && typeof item === "object") return JSON.stringify(item);
+      return String(item ?? "").trim();
+    }).filter(Boolean).join(", ");
+  }
+  if (value && typeof value === "object") return JSON.stringify(value);
+  return text(value);
+}
+
+function tradeCountLabel(value: unknown): string {
+  const count = Number(value);
+  if (!Number.isFinite(count) || count <= 0) return "";
+  return `${count} ${count === 1 ? "trade" : "trades"}`;
+}
+
+function reportedLabourNote(
+  labourHours: unknown,
+  tradeCount: unknown,
+): string {
+  const hours = Number(labourHours);
+  if (!Number.isFinite(hours) || hours <= 0) return "";
+  const trades = Number(tradeCount);
+  const tradeNote = Number.isFinite(trades) && trades > 0
+    ? ` and ${tradeCountLabel(trades)}`
+    : "";
+  return `Trade submission recorded ${hours} labour ${
+    hours === 1 ? "hour" : "hours"
+  }${tradeNote}.`;
+}
+
+function attendanceDate(value: unknown): string {
+  const candidate = text(value);
+  const match = candidate.match(/^(\d{4}-\d{2}-\d{2})/);
+  return match?.[1] || candidate;
+}
+
+function attendanceTime(value: unknown): string {
+  const candidate = text(value);
+  const match = candidate.match(/(?:T|\s)(\d{2}:\d{2})(?::\d{2})?/);
+  return match?.[1] || candidate;
 }
 
 function builderKey(snapshot: SesAssemblerLiveSnapshot): SesBuilderKey {
@@ -231,14 +286,24 @@ function explicitHoursAndMaterials(
   const facts: Record<string, unknown> = {};
   const copy = (key: string, ...values: unknown[]) => {
     for (const value of values) {
-      if (value !== null && value !== undefined && text(value) !== "") {
+      if (hasExplicitValue(value)) {
         facts[key] = value;
         return;
       }
     }
   };
   copy("storeys", snapshot.roof_draft?.storey, roofFields.storeys);
-  copy("trades", pricing.trades, completion.trades, checklist.trades);
+  copy(
+    "trades",
+    pricing.trades,
+    completion.trades,
+    checklist.trades,
+    checklist.trade_count,
+  );
+  // submit_makesafe_report's legacy labour_hours field is documented as
+  // ambiguous between total hours and hours per trade. Preserve it in the raw
+  // trade report and report prose, but only price an explicitly typed
+  // hours_per_trade value.
   copy(
     "hours_per_trade",
     pricing.hours_per_trade,
@@ -263,6 +328,59 @@ function explicitHoursAndMaterials(
     : array(checklist.materials);
   if (materials.length) facts.materials = materials;
   return Object.keys(facts).length ? facts : null;
+}
+
+export function physicalReportRenderJob(
+  snapshot: SesAssemblerLiveSnapshot,
+  input: SesAssemblerInputV1,
+): MakesafeReportJob {
+  const report = record(input.cycle_facts.trade_report);
+  const checklist = record(report.checklist_json);
+  const assignment = snapshot.assignments[0] || {};
+  const attendance = firstText(
+    checklist.attendance_date,
+    checklist.arrival_time,
+    assignment.arrived_at,
+    report.submitted_at,
+    assignment.scheduled_date,
+  );
+  const materials = firstText(
+    reportText(checklist.materials),
+    reportText(checklist.materials_used),
+  );
+  return {
+    ref: input.source.builder_reference,
+    address: input.source.site_address || "Address not recorded",
+    contact: firstText(snapshot.job.client_name),
+    date: attendanceDate(attendance),
+    arrival: attendanceTime(firstText(
+      assignment.arrived_at,
+      checklist.arrival_time,
+    )),
+    crew: firstText(
+      assignment.crew_name,
+      tradeCountLabel(checklist.trade_count),
+    ),
+    billing_note: firstText(
+      checklist.billing_note,
+      checklist.invoice_notes,
+      reportedLabourNote(checklist.labour_hours, checklist.trade_count),
+    ),
+    scope: firstText(
+      checklist.scope,
+      input.source.instruction_text,
+      checklist.damage_description,
+    ),
+    findings: firstText(checklist.findings, checklist.damage_cause),
+    works: firstText(
+      checklist.works_completed,
+      checklist.works,
+      checklist.work_done,
+      report.notes,
+    ),
+    materials,
+    photos: [],
+  };
 }
 
 function currentCycle(snapshot: SesAssemblerLiveSnapshot): {
@@ -756,23 +874,9 @@ export function createSesAssemblerRuntimeDependencies(
     },
     renderPhysicalReport: async (input) => {
       const snapshot = snapshotFor(input);
-      const report = record(input.cycle_facts.trade_report);
-      const checklist = record(report.checklist_json);
-      const assignment = snapshot.assignments[0] || {};
-      const rendered = await renderMakesafeReportPdf({
-        ref: input.source.builder_reference,
-        address: input.source.site_address || "Address not recorded",
-        contact: firstText(snapshot.job.client_name),
-        date: firstText(report.submitted_at, assignment.scheduled_date),
-        arrival: firstText(assignment.arrived_at),
-        crew: firstText(assignment.crew_name),
-        billing_note: firstText(checklist.billing_note),
-        scope: firstText(checklist.scope, input.source.instruction_text),
-        findings: firstText(checklist.findings),
-        works: firstText(checklist.works_completed, checklist.works),
-        materials: JSON.stringify(checklist.materials || []),
-        photos: [],
-      });
+      const rendered = await renderMakesafeReportPdf(
+        physicalReportRenderJob(snapshot, input),
+      );
       return {
         file_name: rendered.fileName,
         media_type: "application/pdf",

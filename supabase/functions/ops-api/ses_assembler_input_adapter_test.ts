@@ -9,6 +9,7 @@ import fixture from "./fixtures/ses_u4_swms_26980_live_snapshot.json" with {
 import {
   buildSesAssemblerInput,
   normalizeSesPrepareRequest,
+  physicalReportRenderJob,
   SesAssemblerAdapterError,
   type SesAssemblerLiveSnapshot,
 } from "./ses_assembler_input_adapter.ts";
@@ -158,6 +159,128 @@ Deno.test("live adapter maps the canonical board family without an AJS physical 
   assertEquals(input.classification.builder_key, "AJS");
   assertEquals(input.classification.family, "temporary_fencing");
   assertEquals(input.classification.report_only, false);
+});
+
+Deno.test("live adapter consumes the trade checklist keys written by submit_makesafe_report", () => {
+  const live = snapshot();
+  live.job.client_name = "The Owners of Tranby Villas";
+  live.job.site_address = "U24/28 Peninsula Road";
+  live.job.site_suburb = "Maylands";
+  live.job.metadata.makesafe_job_family = "general_makesafe";
+  live.detail!.report_type = null;
+  live.detail!.external_links = [];
+  live.reports[0].submitted_at = "2026-07-22T04:00:00.000Z";
+  live.reports[0].notes = "Trade completion note";
+  live.reports[0].checklist_json = {
+    arrival_time: "2026-07-20 14:09",
+    damage_description:
+      "Unsecured bricks on the patio roof and broken plastic sheeting.",
+    damage_cause: "Storm / wind",
+    work_done:
+      "Removed unsecured broken sheeting and screws, then moved the bricks to ground.",
+    materials: [],
+    materials_used: [
+      "Tarps / roof materials",
+      "Fixings / consumables",
+    ],
+    labour_hours: 2,
+    trade_count: 2,
+    invoice_notes: "Two trades attended for two hours each.",
+  };
+
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.cycle_facts.hours_and_materials, {
+    trades: 2,
+  });
+  const renderJob = physicalReportRenderJob(live, input);
+  assertEquals(renderJob, {
+    ref: "",
+    address: "U24/28 Peninsula Road",
+    contact: "The Owners of Tranby Villas",
+    date: "2026-07-20",
+    arrival: "14:09",
+    crew: "2 trades",
+    billing_note: "Two trades attended for two hours each.",
+    scope: "Unsecured bricks on the patio roof and broken plastic sheeting.",
+    findings: "Storm / wind",
+    works:
+      "Removed unsecured broken sheeting and screws, then moved the bricks to ground.",
+    materials: "Tarps / roof materials, Fixings / consumables",
+    photos: [],
+  });
+  assertEquals(
+    Object.hasOwn(input.cycle_facts.hours_and_materials || {}, "materials"),
+    false,
+  );
+  assertEquals(
+    Object.hasOwn(
+      input.cycle_facts.hours_and_materials || {},
+      "hours_per_trade",
+    ),
+    false,
+  );
+
+  live.reports[0].checklist_json.invoice_notes = "";
+  assertEquals(
+    physicalReportRenderJob(live, buildSesAssemblerInput(live)).billing_note,
+    "Trade submission recorded 2 labour hours and 2 trades.",
+  );
+});
+
+Deno.test("physical U4 dry-run blocks instead of rendering without a canonical builder reference", async () => {
+  const live = snapshot();
+  live.job.metadata.makesafe_job_family = "general_makesafe";
+  live.detail!.report_type = null;
+  live.detail!.external_links = [];
+  live.reports[0].checklist_json = {
+    damage_description: "Patio roof damage",
+    work_done: "Removed loose material",
+    labour_hours: 2,
+    trade_count: 2,
+  };
+  live.media = [{
+    id: "30ad0e72-351c-4f2b-8987-e490c9ffb774",
+    job_id: live.job.id,
+    type: "photo",
+    phase: "completion",
+    attendance_cycle_id: live.detail!.attendance_cycle_id,
+    cycle_attribution: "bound",
+  }];
+  const input = buildSesAssemblerInput(live);
+  let renderCalls = 0;
+  const response = await prepare_ses_docket_revision({
+    selection: { mode: "job_id", job_id: input.identity.job_id },
+    idempotency_key: "physical-missing-reference",
+    assembler_version: SES_ASSEMBLER_VERSION,
+    dry_run: true,
+    force_refresh: true,
+  }, {
+    resolveInput: async () => input,
+    resolveSourceArtifacts: async () => sourceResolver(input),
+    resolvePhotoArtifacts: async () => [{
+      photo_id: input.cycle_facts.photos[0].id,
+      source_pointer: input.cycle_facts.photos[0].path_or_key,
+      file_name: "completion.jpg",
+      media_type: "image/jpeg",
+      bytes: new Uint8Array([1, 2, 3]),
+    }],
+    renderPhysicalReport: async () => {
+      renderCalls++;
+      throw new Error("must not render without a canonical builder reference");
+    },
+    resolveSwmsArtifact: async () => ({
+      file_name: "SWMS.pdf",
+      media_type: "application/pdf",
+      bytes: new Uint8Array([37, 80, 68, 70]),
+    }),
+    now: () => new Date("2026-07-27T08:00:00.000Z"),
+  });
+
+  assertEquals(response.results[0].state, "blocked");
+  assertEquals(renderCalls, 0);
+  assert(
+    blockerCodes(response.results[0]).includes("spine_missing_source"),
+  );
 });
 
 Deno.test("live adapter maps every canonical board family token exactly", () => {

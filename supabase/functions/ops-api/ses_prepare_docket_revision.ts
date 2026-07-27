@@ -1538,7 +1538,22 @@ async function prepareOne(
         manifest.items.physical_reporting_evidence = itemBlocker;
         manifest.items.supporting_report_pdf = itemBlocker;
       } else {
-        if (!deps.renderPhysicalReport) {
+        if (!text(input.source.builder_reference)) {
+          const itemBlocker = blockers.find((candidate) =>
+            candidate.reason_code === "spine_missing_source" &&
+            candidate.reason ===
+              "Builder reference is absent from the canonical source instruction."
+          ) || addBlocker(
+            blockers,
+            blocked(
+              "spine_missing_source",
+              "Builder reference is absent from the canonical source instruction.",
+              "Recover the WO/PO/external reference from the canonical source case.",
+            ),
+          );
+          manifest.items.physical_reporting_evidence = itemBlocker;
+          manifest.items.supporting_report_pdf = itemBlocker;
+        } else if (!deps.renderPhysicalReport) {
           const itemBlocker = addBlocker(
             blockers,
             blocked(
