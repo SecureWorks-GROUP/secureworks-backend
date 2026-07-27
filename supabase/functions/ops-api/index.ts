@@ -12931,32 +12931,12 @@ async function loadMakesafePortalVerification(
   const currentCycle = Number(detail?.cycle_number ?? 1)
   const requiresAssessmentProof = reportType === 'assessment_report' ||
     reportType === 'assessment_report_quote'
-  let assessmentProofSatisfied = true
-  if (requiresAssessmentProof) {
-    assessmentProofSatisfied = false
-    const signal = detail?.portal_verified_signal
-    if (typeof signal === 'string' && /^[\[{]/.test(signal.trim())) {
-      try {
-        const parsed = JSON.parse(signal)
-        const captures = Array.isArray(parsed)
-          ? parsed
-          : parsed?.entries || parsed?.captures
-        const currentCycleCaptures = Array.isArray(captures) &&
-          captures.length === 3 &&
-          captures.every((capture: any) =>
-            Number(capture?.cycle_number) === currentCycle
-          )
-        assessmentProofSatisfied = currentCycleCaptures &&
-          _validatePortalEvidenceForReportType(
-            reportType,
-            detail?.external_links,
-            captures,
-          ).ready
-      } catch {
-        assessmentProofSatisfied = false
-      }
-    }
-  }
+  const assessmentProofSatisfied = hasStoredAssessmentPortalProof(
+    reportType,
+    detail?.external_links,
+    detail?.portal_verified_signal,
+    currentCycle,
+  )
   return {
     isReportType: !!reportType,
     reportType,
@@ -12968,6 +12948,35 @@ async function loadMakesafePortalVerification(
   }
 }
 export const _loadMakesafePortalVerification = loadMakesafePortalVerification
+
+function hasStoredAssessmentPortalProof(
+  reportType: string | null,
+  externalLinks: unknown,
+  signal: unknown,
+  currentCycle: number,
+): boolean {
+  if (reportType !== 'assessment_report' && reportType !== 'assessment_report_quote') {
+    return true
+  }
+  if (typeof signal !== 'string' || !/^[\[{]/.test(signal.trim())) return false
+  try {
+    const parsed = JSON.parse(signal)
+    const captures = Array.isArray(parsed)
+      ? parsed
+      : parsed?.entries || parsed?.captures
+    if (!Array.isArray(captures) || captures.length !== 3) return false
+    if (!captures.every((capture: any) => Number(capture?.cycle_number) === currentCycle)) {
+      return false
+    }
+    return _validatePortalEvidenceForReportType(
+      reportType,
+      externalLinks,
+      captures,
+    ).ready
+  } catch {
+    return false
+  }
+}
 
 // Item-14 guard for a substatus advance. No-op unless the job is a report-type
 // card advancing to a report-complete substatus without a current-cycle
@@ -13119,7 +13128,8 @@ export const _assertMakesafeReportInForInvoice = assertMakesafeReportInForInvoic
 // cron stamps a rate-limited recheck marker on them.
 const PORTAL_RECHECK_DETAIL_SELECT =
   'job_id, external_ref, substatus, cycle_number, external_links, report_type, ' +
-  'portal_verified_at, portal_verified_cycle, portal_recheck_requested_at, portal_recheck_count'
+  'portal_verified_at, portal_verified_cycle, portal_verified_signal, ' +
+  'portal_recheck_requested_at, portal_recheck_count'
 
 async function scanPortalRecheckCards(client: any): Promise<Array<{
   detail: any; job: any; currentCycle: number; portalLinks: ReturnType<typeof _extractPortalLinks>
@@ -13148,6 +13158,14 @@ async function scanPortalRecheckCards(client: any): Promise<Array<{
       currentCycle,
       verifiedAt: d.portal_verified_at ?? null,
       verifiedCycle: d.portal_verified_cycle ?? null,
+      requiresAssessmentProof: d.report_type === 'assessment_report' ||
+        d.report_type === 'assessment_report_quote',
+      assessmentProofSatisfied: hasStoredAssessmentPortalProof(
+        d.report_type,
+        d.external_links,
+        d.portal_verified_signal,
+        currentCycle,
+      ),
     })
     if (!eligible) continue
     out.push({ detail: d, job, currentCycle, portalLinks: _extractPortalLinks(d.external_links) })

@@ -332,6 +332,8 @@ export type PortalRecheckCard = {
   currentCycle: number;
   verifiedAt: string | null;
   verifiedCycle: number | null;
+  requiresAssessmentProof?: boolean;
+  assessmentProofSatisfied?: boolean;
 };
 
 // Should this card be in the portal-recheck queue an agent run consumes? A card
@@ -351,6 +353,8 @@ export function portalRecheckEligible(card: PortalRecheckCard): boolean {
       currentCycle: card.currentCycle,
       verifiedAt: card.verifiedAt,
       verifiedCycle: card.verifiedCycle,
+      requiresAssessmentProof: card.requiresAssessmentProof,
+      assessmentProofSatisfied: card.assessmentProofSatisfied,
     })
   ) return false; // already verified this cycle
   return extractPortalLinks(card.externalLinks).length > 0;

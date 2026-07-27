@@ -165,6 +165,27 @@ Deno.test("computed status: assessment is fail-closed until all three typed capt
   assertEquals(threeOfThree.status, "trade_report_in");
 });
 
+Deno.test("computed status: assessment READY pack still requires triad evidence", () => {
+  const result = computeMakesafeStatus({
+    job: { status: "accepted" },
+    detail: {
+      report_type: "assessment_report",
+      cycle_number: 1,
+      external_links: [{
+        kind: "assessment_report",
+        url: "https://portal.test/a",
+      }],
+    },
+    evidence: {
+      portalCaptures: [],
+      packState: "READY",
+    },
+    nowIso: NOW,
+  });
+  assertEquals(result.status, "allocated");
+  assert(result.missing.some((item) => item.includes("headless capture")));
+});
+
 Deno.test("computed status: Docs Ready reads durable draft-pack records", () => {
   const result = computeMakesafeStatus(physical({
     serviceReports: [{ status: "submitted", cycle_number: 1 }],

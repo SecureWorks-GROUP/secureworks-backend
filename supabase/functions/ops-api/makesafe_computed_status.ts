@@ -238,13 +238,15 @@ export function reportInEvidence(input: MakesafeStatusInput): {
 }
 
 function docsReady(input: MakesafeStatusInput): boolean {
+  const kind = classifyMakesafeJobType(input.detail, input.job);
   const recorded = String(input.evidence?.packState || "").toUpperCase();
-  if (["READY", "READY_TO_BUILD"].includes(recorded)) return true;
+  if (["READY", "READY_TO_BUILD"].includes(recorded)) {
+    return kind !== "assessment_report_quote" || reportInEvidence(input).satisfied;
+  }
 
   // Legacy durable pack rows predate a persisted pack_state value. Read their
   // already-produced artifacts rather than re-running the reporting skill:
   // first draft pack + DRAFT invoice + SWMS artifact when the docket requires it.
-  const kind = classifyMakesafeJobType(input.detail, input.job);
   const pack = input.evidence?.pack;
   const packStatus = String(pack?.status || "").toLowerCase();
   if (
