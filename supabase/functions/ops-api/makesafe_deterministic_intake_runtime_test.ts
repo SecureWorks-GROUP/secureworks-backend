@@ -1465,15 +1465,6 @@ Deno.test("source-issue persistence failure retains the cursor and exact retry a
       body_content:
         `Client: Retry Client ${i}\nAddress: ${i} Retry Road, Perth`,
     }));
-    store.email_attachments.push({
-      id: `att-issue-fail-${i}`,
-      email_id: `issue-fail-${i}`,
-      name: "wo.pdf",
-      content_type: "application/pdf",
-      storage_path: `raw/issue-fail-${i}.pdf`,
-      status: "uploaded",
-      size_bytes: 1024,
-    });
   }
   let issueWriteFailures = 0;
   const failingClient = fakeClient(
