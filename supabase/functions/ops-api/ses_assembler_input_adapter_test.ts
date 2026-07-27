@@ -241,6 +241,14 @@ Deno.test("live adapter consumes the trade checklist keys written by submit_make
     physicalReportRenderJob(live, buildSesAssemblerInput(live)).billing_note,
     "Trade submission recorded 2 labour hours and 2 trades.",
   );
+  live.reports[0].checklist_json.access_issues = "";
+  live.reports[0].checklist_json.follow_up_required = false;
+  const negativeFacts = physicalReportRenderJob(
+    live,
+    buildSesAssemblerInput(live),
+  );
+  assertEquals(negativeFacts.access_issues, "No access issues reported.");
+  assertEquals(negativeFacts.follow_up_required, "No further works required.");
 });
 
 Deno.test("physical U4 dry-run blocks instead of rendering without a canonical builder reference", async () => {

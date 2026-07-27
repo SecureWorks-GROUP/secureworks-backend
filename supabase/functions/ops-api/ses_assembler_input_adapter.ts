@@ -381,10 +381,13 @@ export function physicalReportRenderJob(
       report.notes,
     ),
     materials,
-    access_issues: reportText(checklist.access_issues),
+    access_issues: reportText(checklist.access_issues) ||
+      "No access issues reported.",
     follow_up_required: checklist.follow_up_required === true
       ? "Follow-up required."
-      : reportText(checklist.follow_up_required),
+      : checklist.follow_up_required === false
+      ? "No further works required."
+      : reportText(checklist.follow_up_required) || "No follow-up required.",
     photos: photoArtifacts.map((photo) => {
       const source = input.cycle_facts.photos.find((item) =>
         item.id === photo.photo_id && item.path_or_key === photo.source_pointer
