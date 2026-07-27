@@ -123,6 +123,32 @@ Ops retains the full stages:
 
 Each row appears exactly once. An unknown stage is retained in `new`, carries `projection_warning`, and is listed in `unmapped_stage_job_ids`. It never disappears.
 
+### Recent deterministic intake exception desk
+
+The Ops response also includes the read-only `intake_exceptions` desk. It is
+loaded from the same `ops-api` request and contains only actionable,
+deterministically proven builder work instructions from the recent 15-day
+Captain window that have no live job. Each card has `job_id: null`, builder and
+WO/PO identity, received date, the exact currently missing fields, source
+subject, and attachment pointers. Existing-job follow-ups, duplicates,
+correction residue, deterministic non-work, ambiguous material, and out-of-window
+history remain accounted for but do not become cards; ambiguous material is
+left for the reporting skill.
+
+Cards are review-only: `human_review_required` and `human_approval_required` are
+true, while `auto_create_job` and `auto_create_draft` are false. Fillable
+client/address gaps point to the existing additive `makesafe_gap_fill_queue`.
+The read routes are:
+
+```text
+GET /functions/v1/ops-api?action=makesafe_intake_exception_cards
+GET /functions/v1/ops-api?action=makesafe_intake_exception_card&card_id=...
+```
+
+The detail route also accepts `case_id`. These routes are available to routine
+callers and privileged Ops access. They are SELECT-only and do not widen the
+Trade projection.
+
 ## Trade projection
 
 The only column names are:

@@ -76,6 +76,8 @@ export interface LoadIntakeOperationalFactsOptions {
   mailbox?: string;
   nowIso?: string;
   pageSize?: number;
+  recentFromIso?: string;
+  recentToIso?: string;
 }
 
 const SES_MAILBOX = "ses@secureworkswa.com.au";
@@ -118,54 +120,72 @@ export async function loadIntakeOperationalFacts(
   const pageSize = Math.max(1, Math.min(options.pageSize ?? 500, 1000));
   const mailbox = (options.mailbox || SES_MAILBOX).toLowerCase();
   const nowIso = options.nowIso || new Date().toISOString();
+  const recentFromIso = options.recentFromIso;
+  const recentToIso = options.recentToIso;
 
-  const [cases, sources, events, _exclusions] = await Promise.all([
+  const [cases, sources, events] = await Promise.all([
     loadPagedRows(
       (from, to) =>
-        client.from("makesafe_intake_cases")
-          .select(
-            "id,instruction_key,lineage_id,parent_case_id,parent_relation,job_id,target_relation,target_job_id,state,reason_code,blocked_reasons,received_at,field_provenance",
-          )
-          .eq("org_id", options.orgId)
-          .order("id", { ascending: true })
-          .range(from, to),
+        (() => {
+          let query = client.from("makesafe_intake_cases")
+            .select(
+              "id,instruction_key,lineage_id,parent_case_id,parent_relation,job_id,target_relation,target_job_id,state,reason_code,blocked_reasons,received_at,field_provenance",
+            )
+            .eq("org_id", options.orgId);
+          if (recentFromIso) query = query.gte("received_at", recentFromIso);
+          if (recentToIso) query = query.lte("received_at", recentToIso);
+          return query.order("id", { ascending: true }).range(from, to);
+        })(),
       pageSize,
       "intake cases",
     ),
     loadPagedRows(
-      (from, to) =>
-        client.from("makesafe_intake_case_sources")
+      (from, to) => {
+        let query = client.from("makesafe_intake_case_sources")
           .select("id,case_id,post_id")
-          .eq("org_id", options.orgId)
-          .order("id", { ascending: true })
-          .range(from, to),
+          .eq("org_id", options.orgId);
+        if (recentFromIso) query = query.gte("received_at", recentFromIso);
+        if (recentToIso) query = query.lte("received_at", recentToIso);
+        return query.order("id", { ascending: true }).range(from, to);
+      },
       pageSize,
       "intake case sources",
     ),
     loadPagedRows(
       (from, to) =>
-        client.from("email_events_raw")
-          .select(
-            "id,post_id,change_type,exclusion_reason,received_at,observed_at,page_meta",
-          )
-          .eq("org_id", options.orgId)
-          .eq("mailbox", mailbox)
-          .order("id", { ascending: true })
-          .range(from, to),
+        (() => {
+          let query = client.from("email_events_raw")
+            .select(
+              "id,post_id,change_type,exclusion_reason,received_at,observed_at,page_meta",
+            )
+            .eq("org_id", options.orgId)
+            .eq("mailbox", mailbox);
+          if (recentFromIso) query = query.gte("received_at", recentFromIso);
+          if (recentToIso) query = query.lte("received_at", recentToIso);
+          return query.order("id", { ascending: true }).range(from, to);
+        })(),
       pageSize,
       "intake source events",
     ),
-    loadPagedRows(
-      (from, to) =>
-        client.from("email_classifier_exclusions")
-          .select("id,post_id")
-          .eq("mailbox", mailbox)
-          .order("id", { ascending: true })
-          .range(from, to),
-      pageSize,
-      "intake non-work exclusions",
-    ),
   ]);
+
+  const eventPostIds = [...new Set(events.map((row) => String(row.post_id)))]
+    .filter(Boolean);
+  const exclusionPostIds: string[] = [];
+  for (let offset = 0; offset < eventPostIds.length; offset += 25) {
+    const { data, error } = await client.from("email_classifier_exclusions")
+      .select("post_id")
+      .eq("mailbox", mailbox)
+      .in("post_id", eventPostIds.slice(offset, offset + 25));
+    if (error) {
+      throw new Error(
+        `intake non-work exclusions read failed: ${error.message || error}`,
+      );
+    }
+    exclusionPostIds.push(
+      ...(data || []).map((row: any) => String(row.post_id)),
+    );
+  }
 
   const sourceIdsByCase = new Map<string, string[]>();
   for (const source of sources) {
@@ -239,7 +259,12 @@ export async function loadIntakeOperationalFacts(
       nowIso,
     )
   );
-  for (const issue of issueRows) {
+  const excludedPosts = new Set(exclusionPostIds);
+  for (
+    const issue of issueRows.filter((row) =>
+      !excludedPosts.has(String(row.post_id))
+    )
+  ) {
     facts.push(buildSourceIssueOperationalFact(issue, nowIso));
   }
   return facts.sort((a, b) =>

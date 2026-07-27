@@ -41,11 +41,13 @@ case-events, classifier exclusions and source issues to exhaustion, keeps pre-jo
 facts with `job_id = null`, and rejects duplicate open issues. It does not derive
 board stages, labels or a second state machine.
 
-The 752 existing exceptions become board-visible only when island 2 imports this
-loader into the sole U2 projector/operational read and releases the matching
-schema projection. That U2 consumption is not present in this branch, so this U1
-commit alone does not put the 752 rows on the Captain's board. The integration
-contract is:
+At the time of this U1 build, the 752 existing exceptions were not yet
+board-visible: island 2 still had to import this loader into the sole U2
+projector/operational read and release the matching schema projection. The
+current U2 read-only consumption is documented in
+`docs/makesafe-board-read-model-v1.md`; this historical build record does not
+claim that the U1 commit itself provided that surface. The integration contract
+is:
 
 ```ts
 loadIntakeOperationalFacts(client, { orgId })
@@ -108,8 +110,8 @@ deterministic fate, and never re-approves them.
 
 - Serialize the minimal `index.ts` wiring with
   `hugo-makesafe-submit-userid-fix-v1` before cherry-pick or merge.
-- Merge U2's projector consumption of `loadIntakeOperationalFacts` before
-  claiming the 752 exceptions are on the Captain's board.
+- Keep the U2 read-only projector and its board contract aligned with
+  `loadIntakeOperationalFacts` before claiming current board counts.
 - Apply the U1 migration before the matching edge code.
 - Run the committed read-only canary with authorised production read access.
 - CP1 still requires independent source/state validation and normal full-suite
