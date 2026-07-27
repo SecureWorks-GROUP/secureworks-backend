@@ -43,6 +43,7 @@ import {
   _parseSenderDomain,
   _persistPost,
   _processAttachments,
+  _recordIntakeScanFailure,
   _recordIntakeSourceDeferrals,
   _recordIntakeSourceExceptions,
   _runBackfillFull,
@@ -164,11 +165,16 @@ Deno.test("successful handoff accounting check returns only sources without a ca
 // appends one duplicate row per post per two-minute poll.
 function fateWriterStub(existingChangeTypes: readonly string[] = []) {
   const inserted: Array<{ table: string; row: Record<string, unknown> }> = [];
+  const upserted: Array<{ table: string; row: Record<string, unknown> }> = [];
   const existing = new Set(existingChangeTypes);
   const sb = {
     from: (table: string) => ({
       insert: (row: Record<string, unknown>) => {
         inserted.push({ table, row });
+        return Promise.resolve({ error: null });
+      },
+      upsert: (row: Record<string, unknown>) => {
+        upserted.push({ table, row });
         return Promise.resolve({ error: null });
       },
       select: () => {
@@ -188,7 +194,7 @@ function fateWriterStub(existingChangeTypes: readonly string[] = []) {
       },
     }),
   };
-  return { sb, inserted };
+  return { sb, inserted, upserted };
 }
 
 const ONE_SOURCE = [{
@@ -297,6 +303,59 @@ Deno.test("intake continuation durably reports non-2xx and network handoff failu
     { kind: "http", status: 503 },
     { kind: "network", status: null },
   ]);
+});
+
+Deno.test("HTTP 546 continuation failure records source fate, aggregate alarm, and degraded health", async () => {
+  const { sb, inserted, upserted } = fateWriterStub();
+  let registered: Promise<void> | undefined;
+  let settled = false;
+
+  _scheduleIntakeScanContinuation(
+    (() =>
+      Promise.resolve(
+        new Response("worker limit", { status: 546 }),
+      )) as typeof fetch,
+    (promise) => registered = promise,
+    "https://example.invalid/ops-api?action=scan_ses_makesafes",
+    {},
+    () => {
+      settled = true;
+      return Promise.resolve();
+    },
+    (failure) =>
+      _recordIntakeScanFailure(
+        sb,
+        ONE_SOURCE,
+        failure,
+        "2026-07-26T00:00:00Z",
+        "2026-07-27T02:00:00Z",
+      ),
+  );
+
+  assert(registered);
+  await registered;
+
+  assertEquals(settled, true);
+  assertEquals(inserted.map((item) => item.table), [
+    "email_events_raw",
+    "business_events",
+  ]);
+  assertEquals(
+    inserted[0].row.change_type,
+    "intake_exception_scan_handoff_http_546",
+  );
+  assertEquals(upserted.length, 1);
+  assertEquals(upserted[0], {
+    table: "makesafe_intake_health",
+    row: {
+      id: true,
+      extraction_status: "degraded",
+      degraded_reason: "scan_handoff_http_546",
+      degraded_since: "2026-07-27T02:00:00Z",
+      updated_at: "2026-07-27T02:00:00Z",
+    },
+  });
+  assertEquals("last_scan_at" in upserted[0].row, false);
 });
 
 Deno.test("intake continuation reports a per-run bound so cap deferral is not read as a drop", async () => {

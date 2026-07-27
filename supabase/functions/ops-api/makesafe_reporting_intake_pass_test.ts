@@ -3,7 +3,53 @@ import {
   assertEquals,
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { _runMakesafeReportingIntakePassForTest } from "./index.ts";
+import {
+  _runMakesafeReportingIntakePassForTest,
+  _scanSesMakesafesForTest,
+} from "./index.ts";
+
+Deno.test("standing SES scan enforces the edge CPU source budget and returns its bounded report", async () => {
+  let capturedOptions: any = null;
+  let runs = 0;
+
+  const report = await _scanSesMakesafesForTest(
+    { fake: "client" },
+    {
+      loadRollout: () =>
+        Promise.resolve({
+          selectionMode: "full_open",
+          maxCases: 10,
+          sourcePostIds: [],
+          instructionKeys: [],
+        }),
+      autoApproveEnabled: () => false,
+      run: (_client, options) => {
+        runs++;
+        capturedOptions = options;
+        return Promise.resolve({
+          ok: true,
+          completion_status: "completed",
+          source_read: {
+            cap: options.maxSources,
+            next_cursor_at: "2026-06-05T05:40:00.000Z",
+          },
+        });
+      },
+    },
+  );
+
+  assertEquals(runs, 1);
+  assertEquals(capturedOptions.maxSources, 4);
+  assertEquals(capturedOptions.dryRun, false);
+  assertEquals(capturedOptions.selectionMode, "full_open");
+  assertEquals(capturedOptions.days, 60);
+  assertEquals(capturedOptions.onlyUnscanned, false);
+  assertEquals(report.ok, true);
+  assertEquals(report.source_read, {
+    cap: 4,
+    next_cursor_at: "2026-06-05T05:40:00.000Z",
+  });
+});
 
 Deno.test("SES reporting run triggers exactly one bounded scan and one bounded guarded advancement sweep", async () => {
   let scans = 0;

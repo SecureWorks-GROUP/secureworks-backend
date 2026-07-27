@@ -2081,6 +2081,69 @@ async function recordIntakeSourceExceptions(
   );
 }
 
+async function recordIntakeHealthDegradation(
+  sb: any,
+  reasonCode: string,
+  nowIso = new Date().toISOString(),
+): Promise<void> {
+  const { data: previous, error: readError } = await sb.from(
+    "makesafe_intake_health",
+  )
+    .select("degraded_reason,degraded_since")
+    .eq("id", true)
+    .maybeSingle();
+  if (readError) {
+    throw new Error(
+      `scan handoff health read failed: ${readError.message || readError}`,
+    );
+  }
+  const sameIncident = previous?.degraded_reason === reasonCode &&
+    previous?.degraded_since;
+  const { error: healthError } = await sb.from("makesafe_intake_health").upsert(
+    {
+      id: true,
+      extraction_status: "degraded",
+      degraded_reason: reasonCode,
+      degraded_since: sameIncident ? previous.degraded_since : nowIso,
+      updated_at: nowIso,
+    },
+    { onConflict: "id" },
+  );
+  if (healthError) {
+    throw new Error(
+      `scan handoff health write failed: ${healthError.message || healthError}`,
+    );
+  }
+}
+
+async function recordIntakeScanFailure(
+  sb: any,
+  sources: readonly IntakeHandoffSource[],
+  failure: IntakeScanContinuationFailure,
+  syncedWatermark: string | null,
+  nowIso = new Date().toISOString(),
+): Promise<void> {
+  const reasonCode = `scan_handoff_${failure.kind}_${
+    failure.status ?? "failed"
+  }`;
+  const summary = `Deterministic intake handoff failed (${failure.kind}${
+    failure.status === null ? "" : ` ${failure.status}`
+  }); synced sources remain queued for retry.`;
+
+  await recordIntakeSourceExceptions(
+    sb,
+    sources,
+    reasonCode,
+    summary,
+    {
+      failure_kind: failure.kind,
+      http_status: failure.status,
+      synced_watermark: syncedWatermark,
+    },
+  );
+  await recordIntakeHealthDegradation(sb, reasonCode, nowIso);
+}
+
 async function recordIntakeSourceDeferrals(
   sb: any,
   sources: readonly IntakeHandoffSource[],
@@ -2469,6 +2532,7 @@ async function handler(req: Request): Promise<Response> {
         "SES email sync completed but EdgeRuntime.waitUntil was unavailable; sources remain queued for intake retry.",
         { synced_watermark: maxReceived },
       );
+      await recordIntakeHealthDegradation(sb, "wait_until_unavailable");
     } else {
       _scheduleIntakeScanContinuation(
         fetch,
@@ -2491,18 +2555,11 @@ async function handler(req: Request): Promise<Response> {
           }
         },
         async (failure) => {
-          await recordIntakeSourceExceptions(
+          await recordIntakeScanFailure(
             sb,
             includedSources,
-            `scan_handoff_${failure.kind}_${failure.status ?? "failed"}`,
-            `Deterministic intake handoff failed (${failure.kind}${
-              failure.status === null ? "" : ` ${failure.status}`
-            }); synced sources remain queued for retry.`,
-            {
-              failure_kind: failure.kind,
-              http_status: failure.status,
-              synced_watermark: maxReceived,
-            },
+            failure,
+            maxReceived,
           );
         },
         async (outcome) => {
@@ -2632,6 +2689,7 @@ export {
   parseSenderDomain as _parseSenderDomain,
   persistPost as _persistPost,
   processAttachments as _processAttachments,
+  recordIntakeScanFailure as _recordIntakeScanFailure,
   recordIntakeSourceDeferrals as _recordIntakeSourceDeferrals,
   recordIntakeSourceExceptions as _recordIntakeSourceExceptions,
   resolveGroupId as _resolveGroupId,
