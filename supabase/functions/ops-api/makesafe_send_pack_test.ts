@@ -104,28 +104,33 @@ Deno.test("gate: routine (the lesser MAKESAFE_ROUTINE_KEY) is REJECTED — draft
   }
 });
 
-// Belt-and-braces: even before the route case runs, Sentinel Wave 0's central
-// deny-list (ROUTINE_FORBIDDEN_ACTIONS in index.ts global auth, branch
-// origin/sentinel/makesafe-wave0-hardening PR #179) 403s the routine for
-// 'makesafe_send_pack'. We model that Set here and assert the cross-check.
-Deno.test("central deny-list: routine + 'makesafe_send_pack' -> 403 (Sentinel Wave 0)", () => {
-  // Mirrors Sentinel's `const ROUTINE_FORBIDDEN_ACTIONS = new Set([... 'makesafe_send_pack' ...])`
-  const ROUTINE_FORBIDDEN_ACTIONS = new Set<string>(["makesafe_send_pack"]);
+// Belt-and-braces: the routine route is default-deny and only local/read verbs
+// are allow-listed. The legacy combined send and free invoice-create verbs fail
+// before their route cases.
+Deno.test("central default-deny keeps sealed SES money and send human-only", () => {
+  const ROUTINE_ALLOWED_ACTIONS = new Set<string>([
+    "prepare_ses_invoice_obligation",
+    "makesafe_render_report",
+  ]);
   function centralAuthStatus(authMode: string, action: string): number {
-    // Mirrors `if (authMode === 'routine' && ROUTINE_FORBIDDEN_ACTIONS.has(action)) return 403`.
-    if (authMode === "routine" && ROUTINE_FORBIDDEN_ACTIONS.has(action)) {
+    if (authMode === "routine" && !ROUTINE_ALLOWED_ACTIONS.has(action)) {
       return 403;
     }
-    return 200; // falls through to the route case (which also gates via sendPackAllowed)
+    return 200;
   }
   assertEquals(centralAuthStatus("routine", "makesafe_send_pack"), 403);
   // The privileged classes are NOT centrally denied — they reach the route case.
   assertEquals(centralAuthStatus("api_key", "makesafe_send_pack"), 200);
   assertEquals(centralAuthStatus("jwt", "makesafe_send_pack"), 200);
-  // The routine CAN reach the draft-only verbs (not on the deny-list).
+  // The routine can prepare/read sealed local facts, but the free-create legacy
+  // verb is retired and remains denied.
+  assertEquals(
+    centralAuthStatus("routine", "prepare_ses_invoice_obligation"),
+    200,
+  );
   assertEquals(
     centralAuthStatus("routine", "create_makesafe_draft_invoice"),
-    200,
+    403,
   );
   assertEquals(centralAuthStatus("routine", "makesafe_render_report"), 200);
 });

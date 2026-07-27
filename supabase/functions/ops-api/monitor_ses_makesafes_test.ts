@@ -324,7 +324,7 @@ Deno.test("HTTP 546 continuation failure records source fate, aggregate alarm, a
     },
     (failure) =>
       _recordIntakeScanFailure(
-        sb,
+        sb as unknown as Parameters<typeof _recordIntakeScanFailure>[0],
         ONE_SOURCE,
         failure,
         "2026-07-26T00:00:00Z",
