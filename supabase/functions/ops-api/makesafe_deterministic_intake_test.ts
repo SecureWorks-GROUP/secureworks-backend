@@ -12,6 +12,7 @@ import {
   type DeterministicCompanyProfile,
   deterministicModeAllowsAiFallback,
   type DeterministicSourceItem,
+  measureDeterministicIntakeQuality,
   selectIntakeMode,
 } from "./makesafe_deterministic_intake.ts";
 import {
@@ -42,6 +43,18 @@ const PROFILES: DeterministicCompanyProfile[] = [
     slug: "rapid",
     name: "RAPID Repair",
     senderPatterns: ["rapid.test"],
+  },
+  {
+    id: "55555555-5555-5555-5555-555555555555",
+    slug: "bw",
+    name: "Builderwest",
+    senderPatterns: ["builderwest.test", "primeeco.test"],
+  },
+  {
+    id: "66666666-6666-6666-6666-666666666666",
+    slug: "wb",
+    name: "Western Building",
+    senderPatterns: ["western.test"],
   },
 ];
 
@@ -166,6 +179,329 @@ Contact the supervisor after attendance.`,
   );
 });
 
+Deno.test("every known builder can source labelled customer fields from work-order PDF text", () => {
+  const builders = [
+    {
+      postId: "mlb-pdf-source",
+      fromEmail: "dispatch@mlb.test",
+      subject: "NEW WORK ORDER MLB-27101 Work Order: 27101",
+      expectedAdapter: "mlb",
+    },
+    {
+      postId: "ajs-pdf-source",
+      fromEmail: "dispatch@ajs.test",
+      subject: "Make Safe - Dianella - Job No 70101",
+      expectedAdapter: "ajs_ajbr",
+    },
+    {
+      postId: "bw-pdf-source",
+      fromEmail: "dispatch@builderwest.test",
+      subject: "70101 - BWCWA70101 - PDF Client - Dianella",
+      expectedAdapter: "builderwest",
+    },
+    {
+      postId: "wb-pdf-source",
+      fromEmail: "dispatch@western.test",
+      subject: "Make Safe Work Order: WB70101 | PDF Client | Dianella",
+      expectedAdapter: "western",
+    },
+  ] as const;
+  for (const builder of builders) {
+    const attachment = pdf(builder.postId, `${builder.postId}-attachment`);
+    const item = source({
+      postId: builder.postId,
+      fromEmail: builder.fromEmail,
+      subject: builder.subject,
+      body: "The work order is attached.",
+      attachments: [attachment],
+      pdfDocuments: [{
+        sourcePostId: builder.postId,
+        attachmentId: attachment.id,
+        attachmentName: attachment.name,
+        status: "extracted",
+        text: `Policyholders Name
+PDF Client & Mr PDF Client
+Mobile
+0400 123 456
+Site Address
+17 PDF Street, Dianella, WA 6059
+Scope of Works
+Make safe the storm damage.`,
+        charCount: 180,
+        pageCount: 1,
+        extractor: "unpdf@1.6.2",
+        truncated: false,
+        reason: null,
+      }],
+    });
+    const adapted = adaptDeterministicSource(item, PROFILES);
+    assertEquals(adapted.adapterId, builder.expectedAdapter);
+    assertEquals(adapted.identity.clientName, "PDF Client & Mr PDF Client");
+    assertEquals(adapted.identity.clientPhone, "0400123456");
+    assert(
+      adapted.identity.description?.includes("Make safe the storm damage"),
+    );
+    assertEquals(
+      adapted.pdfFieldProvenance.client_name?.source,
+      "work_order_pdf_text",
+    );
+    assertEquals(
+      adapted.pdfFieldProvenance.description?.source,
+      "work_order_pdf_text",
+    );
+  }
+});
+
+Deno.test("AJS Contact label captures ampersand-separated policyholders", () => {
+  const item = source({
+    postId: "ajs-contact-name",
+    fromEmail: "dispatch@ajs.test",
+    subject: "Make Safe - Stirling - Job No 70102",
+    body: [
+      "Contact: Laura Audino & Mr Anthony Audino",
+      "Site Address: 23 Plover Way, Stirling",
+      "Mobile: 0412 345 678",
+    ].join("\n"),
+    attachments: [pdf("ajs-contact-name")],
+  });
+  const adapted = adaptDeterministicSource(item, PROFILES);
+  assertEquals(adapted.adapterId, "ajs_ajbr");
+  assertEquals(
+    adapted.identity.clientName,
+    "Laura Audino & Mr Anthony Audino",
+  );
+});
+
+Deno.test("builder office contacts are denied before customer contact selection", () => {
+  const cases = [
+    source({
+      postId: "mlb-office-contact",
+      fromEmail: "dispatch@mlb.test",
+      subject: "NEW WORK ORDER MLB-27103 Work Order: 27103",
+      body: [
+        "Client: MLB Customer",
+        "Site Address: 10 Customer Street, Perth",
+        "Office: 08 6263 0940",
+        "Mobile: 0401 222 333",
+        "Email: admin@mlbuilders.com.au",
+        "Customer Email: mlb.customer@example.com",
+      ].join("\n"),
+      attachments: [pdf("mlb-office-contact")],
+    }),
+    source({
+      postId: "ajs-office-contact",
+      fromEmail: "dispatch@ajs.test",
+      subject: "Make Safe - Perth - Job No 70104",
+      body: [
+        "Contact: AJS Customer",
+        "Site Address: 11 Customer Street, Perth",
+        "Office: 1300 257 253",
+        "Mobile: 0402 333 444",
+      ].join("\n"),
+      attachments: [pdf("ajs-office-contact")],
+    }),
+    source({
+      postId: "bw-office-contact",
+      fromEmail: "dispatch@builderwest.test",
+      subject: "70105 - BWCWA70105 - BW Customer - 12 Customer Street, Perth",
+      body: [
+        "Office: 08 9421 1163",
+        "Mobile: 0403 444 555",
+      ].join("\n"),
+      attachments: [pdf("bw-office-contact")],
+    }),
+  ];
+  const [mlb, ajs, bw] = cases.map((item) =>
+    adaptDeterministicSource(item, PROFILES)
+  );
+  assertEquals(mlb.identity.clientPhone, "0401 222 333");
+  assertEquals(mlb.identity.clientEmail, "mlb.customer@example.com");
+  assertEquals(ajs.identity.clientPhone, "0402 333 444");
+  assertEquals(bw.identity.clientPhone, "0403 444 555");
+});
+
+Deno.test("work-order PDF scope decides temp fence, roof report, and AJS make-safe family", () => {
+  const tempFence = source({
+    postId: "mlb-pdf-temp-fence",
+    subject: "NEW WORK ORDER MLB-27106 Work Order: 27106",
+    body:
+      "Client: Fence Client\nSite Address: 13 Fence Street, Perth\nMobile: 0404 555 666",
+    attachments: [pdf("mlb-pdf-temp-fence", "mlb-pdf-temp-fence-a")],
+    pdfDocuments: [{
+      sourcePostId: "mlb-pdf-temp-fence",
+      attachmentId: "mlb-pdf-temp-fence-a",
+      attachmentName: "Work Order.pdf",
+      status: "extracted",
+      text:
+        "Scope of Works\nSupply and install temporary fencing to the damaged boundary.",
+      charCount: 85,
+      pageCount: 1,
+      extractor: "unpdf@1.6.2",
+      truncated: false,
+      reason: null,
+    }],
+  });
+  const roofReport = source({
+    postId: "mlb-pdf-roof-report",
+    subject: "NEW WORK ORDER MLB-27107 Work Order: 27107",
+    body:
+      "Client: Report Client\nSite Address: 14 Report Street, Perth\nMobile: 0405 666 777\nhttps://portal.prime.test/r/27107",
+    attachments: [pdf("mlb-pdf-roof-report", "mlb-pdf-roof-report-a")],
+    links: [{
+      url: "https://portal.prime.test/r/27107",
+      sourcePostId: "mlb-pdf-roof-report",
+    }],
+    pdfDocuments: [{
+      sourcePostId: "mlb-pdf-roof-report",
+      attachmentId: "mlb-pdf-roof-report-a",
+      attachmentName: "Work Order.pdf",
+      status: "extracted",
+      text: "Scope of Works\nComplete a roof inspection report in the portal.",
+      charCount: 70,
+      pageCount: 1,
+      extractor: "unpdf@1.6.2",
+      truncated: false,
+      reason: null,
+    }],
+  });
+  const ajsTarp = source({
+    postId: "ajs-70062-pdf-scope",
+    fromEmail: "dispatch@ajs.test",
+    subject: "Make Safe - Dianella - Job No 70062",
+    body:
+      "Contact: AJS Customer\nSite Address: 15 Tarp Street, Dianella\nMobile: 0406 777 888",
+    attachments: [pdf("ajs-70062-pdf-scope", "ajs-70062-a")],
+    pdfDocuments: [{
+      sourcePostId: "ajs-70062-pdf-scope",
+      attachmentId: "ajs-70062-a",
+      attachmentName: "Work Order.pdf",
+      status: "extracted",
+      text:
+        "Scope of Works\nPlease reattend the property to conduct Make Safe- Tarp the affected areas of water leaking",
+      charCount: 115,
+      pageCount: 1,
+      extractor: "unpdf@1.6.2",
+      truncated: false,
+      reason: null,
+    }],
+  });
+  assertEquals(
+    adaptDeterministicSource(tempFence, PROFILES).identity.jobFamily,
+    "temp_fence_makesafe",
+  );
+  assertEquals(
+    adaptDeterministicSource(roofReport, PROFILES).identity.jobFamily,
+    "roof_report",
+  );
+  assertEquals(
+    adaptDeterministicSource(ajsTarp, PROFILES).identity.jobFamily,
+    "general_makesafe",
+  );
+});
+
+Deno.test("classification isolates labelled PDF scope from contract boilerplate", () => {
+  const item = source({
+    postId: "mlb-scope-before-terms",
+    subject: "NEW WORK ORDER MLB-27115 Work Order: 27115",
+    body:
+      "Client: Report Client\nSite Address: 19 Report Street, Perth\nMobile: 0410 123 456",
+    attachments: [pdf("mlb-scope-before-terms", "mlb-scope-terms-a")],
+    pdfDocuments: [{
+      sourcePostId: "mlb-scope-before-terms",
+      attachmentId: "mlb-scope-terms-a",
+      attachmentName: "Work Order.pdf",
+      status: "extracted",
+      text: [
+        "Notes/Instructions:",
+        "Complete a roof inspection report.",
+        "WORK ORDER TERMS AND CONDITIONS",
+        "Temporary fencing contractors must hold current insurance.",
+      ].join("\n"),
+      charCount: 150,
+      pageCount: 1,
+      extractor: "unpdf@1.6.2",
+      truncated: false,
+      reason: null,
+    }],
+  });
+  const adapted = adaptDeterministicSource(item, PROFILES);
+  assertEquals(adapted.identity.jobFamily, "roof_report");
+  assertEquals(
+    adapted.identity.description,
+    "Complete a roof inspection report.",
+  );
+});
+
+Deno.test("PDFs without a scope heading remain ambiguous despite boilerplate", () => {
+  const item = source({
+    postId: "mlb-boilerplate-only-scope",
+    subject: "NEW WORK ORDER MLB-27116 Work Order: 27116",
+    body:
+      "Client: Unknown Scope Client\nSite Address: 20 Unknown Street, Perth\nMobile: 0410 123 457",
+    attachments: [pdf("mlb-boilerplate-only-scope", "mlb-boilerplate-a")],
+    pdfDocuments: [{
+      sourcePostId: "mlb-boilerplate-only-scope",
+      attachmentId: "mlb-boilerplate-a",
+      attachmentName: "Work Order.pdf",
+      status: "extracted",
+      text: "Temporary fencing contractors must hold current insurance.",
+      charCount: 59,
+      pageCount: 1,
+      extractor: "unpdf@1.6.2",
+      truncated: false,
+      reason: null,
+    }],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].identity.jobFamily, "unclassified");
+  assertEquals(plan.cases[0].reasonCode, "ambiguous_scope");
+});
+
+Deno.test("AJS hard floor refuses report-only classification", () => {
+  const item = source({
+    postId: "ajs-report-wording",
+    fromEmail: "dispatch@ajs.test",
+    subject: "Roof report - Job No 70108",
+    body:
+      "Contact: AJS Customer\nSite Address: 16 Roof Street, Perth\nMobile: 0407 888 999\nPlease complete the roof report.",
+    attachments: [pdf("ajs-report-wording")],
+  });
+  assertEquals(
+    adaptDeterministicSource(item, PROFILES).identity.jobFamily,
+    "general_makesafe",
+  );
+});
+
+Deno.test("unsettled scope becomes an ambiguous_scope exception instead of a guessed family", () => {
+  const item = source({
+    postId: "mlb-ambiguous-scope",
+    subject: "MLB-27109",
+    body:
+      "Client: Ambiguous Client\nSite Address: 17 Unknown Street, Perth\nMobile: 0408 999 000",
+    attachments: [pdf("mlb-ambiguous-scope")],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].identity.jobFamily, "unclassified");
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(plan.cases[0].reasonCode, "ambiguous_scope");
+});
+
+Deno.test("BWCWA identity routes to Builderwest company rather than MLB", () => {
+  const item = source({
+    postId: "bwcwa-routing",
+    fromEmail: "notification@primeeco.test",
+    subject:
+      "70110 - BWCWA70110 - Builderwest Client - 18 Builderwest Street, Perth",
+    body: "Mobile: 0409 000 111\nMake safe the damaged property.",
+    attachments: [pdf("bwcwa-routing")],
+  });
+  const adapted = adaptDeterministicSource(item, PROFILES);
+  assertEquals(adapted.adapterId, "builderwest");
+  assertEquals(adapted.identity.builderSlug, "bw");
+  assertEquals(adapted.identity.companyId, PROFILES[4].id);
+  assertNotEquals(adapted.identity.companyId, PROFILES[0].id);
+});
+
 Deno.test("email fields outrank older PDF-derived values across a case", () => {
   const pdfSource = source({
     postId: "mlb-pdf-older",
@@ -211,9 +547,9 @@ Site Address
     intakeCase.identity.siteAddress,
     "2 Email Road, Perth, WA 6000",
   );
-  assertEquals(intakeCase.fieldProvenance.client_name, undefined);
-  assertEquals(intakeCase.fieldProvenance.client_phone, undefined);
-  assertEquals(intakeCase.fieldProvenance.site_address, undefined);
+  assertEquals(intakeCase.fieldProvenance.client_name?.source, "email_text");
+  assertEquals(intakeCase.fieldProvenance.client_phone?.source, "email_text");
+  assertEquals(intakeCase.fieldProvenance.site_address?.source, "email_text");
 });
 
 Deno.test("AJS and AJBR aliases resolve to one company adapter", () => {
@@ -269,7 +605,7 @@ Deno.test("Prime wrapper adapter deterministically captures portal report work",
     fromName: "Prime Notification Centre",
     subject: "Roof report work order Work Order: 445566",
     body:
-      "Client: Roof Client\nSite Address: 30 Beta Avenue, Perth\nComplete roof report https://portal.prime.test/r/1",
+      "Client: Roof Client\nSite Address: 30 Beta Avenue, Perth\nMobile: 0411 111 111\nComplete roof report https://portal.prime.test/r/1",
     links: [{ url: "https://portal.prime.test/r/1", sourcePostId: "prime-1" }],
   });
   const adapted = adaptDeterministicSource(item, PROFILES);
@@ -281,8 +617,9 @@ Deno.test("Prime wrapper adapter deterministically captures portal report work",
     plan.cases[0].evidenceMap.portal_capture.status,
     "recovery_staged",
   );
-  assertEquals(plan.cases[0].state, "exception");
-  assertEquals(plan.cases[0].reasonCode, "adapter_parse_failure");
+  assertEquals(plan.cases[0].state, "blocked_live_job");
+  assertEquals(plan.cases[0].reasonCode, null);
+  assertEquals(plan.cases[0].blockedReasons, ["missing:portal_capture"]);
 });
 
 Deno.test("RAPID adapter is pure and reaches confirmed state on complete evidence", () => {
@@ -697,4 +1034,45 @@ Deno.test("deterministic authority is the standing default and has no AI fallbac
     Error,
     "intake mode read failed",
   );
+});
+
+Deno.test("quality measurement is per-builder and excludes accounted non-work", () => {
+  const plan = buildDeterministicIntakePlan([
+    source({
+      postId: "measure-mlb",
+      subject: "NEW WORK ORDER MLB-27120 Work Order: 27120",
+      body:
+        "Client: Measured MLB\nSite Address: 20 Measure Street, Perth\nMobile: 0410 111 222\nMake safe the storm damage.",
+      attachments: [pdf("measure-mlb")],
+    }),
+    source({
+      postId: "measure-ajs",
+      fromEmail: "dispatch@ajs.test",
+      subject: "Make Safe - Perth - Job No 70120",
+      body: "Contact: Measured AJS\nSite Address: 21 Measure Street, Perth",
+      attachments: [pdf("measure-ajs")],
+    }),
+    source({
+      postId: "measure-nonwork",
+      subject: "Thanks, noted",
+      body: "Thank you",
+    }),
+  ], PROFILES);
+  const measured = measureDeterministicIntakeQuality(plan);
+  assertEquals(measured.unit, "canonical_instruction");
+  assertEquals(measured.instructions, 2);
+  assertEquals(measured.confirmed_without_human, 1);
+  assertEquals(measured.confirmed_without_human_percentage, 50);
+  assertEquals(measured.by_builder.mlb.fields.client_name, {
+    filled: 1,
+    total: 1,
+    percentage: 100,
+  });
+  assertEquals(measured.by_builder.aj.blocked_live_job, 1);
+  assertEquals(measured.by_builder.aj.fields.client_phone, {
+    filled: 0,
+    total: 1,
+    percentage: 0,
+  });
+  assertEquals(measured.by_builder.unknown, undefined);
 });

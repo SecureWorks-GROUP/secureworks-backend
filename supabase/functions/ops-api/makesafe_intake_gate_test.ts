@@ -12,11 +12,14 @@
 //   ~/.deno/bin/deno test --allow-all --no-check \
 //     supabase/functions/ops-api/makesafe_intake_gate_test.ts
 
+// deno-lint-ignore-file no-import-prefix
+
 import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  decideMakeSafeJobFamily,
   isGenuineNewWorkOrder,
   subjectHasReplyForwardPrefix,
   subjectIsExcludedNonWorkOrder,
@@ -184,4 +187,55 @@ Deno.test("isGenuineNewWorkOrder: our OWN outbound domain is gated OUT", () => {
 Deno.test("isGenuineNewWorkOrder: empty/whitespace subject with no PDF is gated OUT", () => {
   assertEquals(isGenuineNewWorkOrder("", BUILDER, 0).ok, false);
   assertEquals(isGenuineNewWorkOrder("   ", BUILDER, 0).ok, false);
+});
+
+Deno.test("job-family decision reads PDF scope text", () => {
+  assertEquals(
+    decideMakeSafeJobFamily("NEW WORK ORDER MLB-27111", "", null, {
+      builder: "mlb",
+      pdfScopeText:
+        "Scope of Works\nSupply and install temporary fencing to the boundary.",
+    }).family,
+    "temp_fence_makesafe",
+  );
+  assertEquals(
+    decideMakeSafeJobFamily("NEW WORK ORDER MLB-27112", "", null, {
+      builder: "mlb",
+      pdfScopeText:
+        "Scope of Works\nInspect the roof and complete the roof report in Prime.",
+    }).family,
+    "roof_report",
+  );
+});
+
+Deno.test("job-family decision enforces AJS make-safe floor and abstains when unsettled", () => {
+  assertEquals(
+    decideMakeSafeJobFamily("Roof report - Job No 70062", "roof report", null, {
+      builder: "aj",
+      pdfScopeText:
+        "Please reattend the property to conduct Make Safe- Tarp the affected areas of water leaking",
+    }).family,
+    "general_makesafe",
+  );
+  assertEquals(
+    decideMakeSafeJobFamily("MLB-27113", "", null, {
+      builder: "mlb",
+      pdfScopeText: "Policyholders Name\nExample Client",
+    }),
+    {
+      family: null,
+      evidence: "ambiguous_scope",
+    },
+  );
+});
+
+Deno.test("physical roof protection outranks a secondary report phrase", () => {
+  assertEquals(
+    decideMakeSafeJobFamily("NEW WORK ORDER MLB-27114", "", null, {
+      builder: "mlb",
+      pdfScopeText:
+        "Scope of Works\nTarp the leaking roof to prevent further water ingress and provide a roof report.",
+    }).family,
+    "general_makesafe",
+  );
 });

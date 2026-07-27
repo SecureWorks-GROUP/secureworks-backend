@@ -19,8 +19,10 @@ import {
   type DeterministicCasePlan,
   type DeterministicCompanyProfile,
   type DeterministicIntakePlan,
+  type DeterministicIntakeQualityMeasure,
   type DeterministicPdfDocument,
   type DeterministicSourceItem,
+  measureDeterministicIntakeQuality,
   selectIntakeMode,
 } from "./makesafe_deterministic_intake.ts";
 import { deriveFromDomain, isOwnDomain } from "./makesafe_compact_reads.ts";
@@ -208,6 +210,7 @@ export interface DeterministicRuntimeReport {
     };
     caveats: string[];
   };
+  quality_measure: DeterministicIntakeQualityMeasure;
   identity_floor: {
     unit: "canonical_case";
     known_builder_work_candidates: number;
@@ -1362,7 +1365,9 @@ function byBuilderReason(
     const builder = intakeCase.identity.builderSlug || "unknown";
     const reason = intakeCase.reasonCode ||
       (intakeCase.state === "blocked_live_job"
-        ? "blocked_secondary"
+        ? intakeCase.blockedReasons.length
+          ? intakeCase.blockedReasons.join("|")
+          : "blocked_without_reason"
         : "confirmed");
     result[builder] ||= {};
     result[builder][reason] = (result[builder][reason] || 0) +
@@ -1969,7 +1974,11 @@ function casePayload(
     last_decision_provenance: "deterministic",
     last_decision_actor: DETERMINISTIC_INTAKE_VERSION,
     last_decision_reason: jobId
-      ? `deterministic ${state}`
+      ? `deterministic ${state}${
+        state === "blocked_live_job" && plan.blockedReasons.length
+          ? ` ${plan.blockedReasons.join("|")}`
+          : ""
+      }`
       : `deterministic ${reason}`,
     received_at: plan.story[0]?.occurredAt || new Date().toISOString(),
     adapter_id: plan.adapterId,
@@ -2785,8 +2794,8 @@ async function ensureDraftAndJob(
         truncated: document.truncated,
         reason: document.reason,
       })),
-      pdf_field_provenance: plan.fieldProvenance,
-      pdf_sourced_fields: Object.keys(plan.fieldProvenance),
+      pdf_field_provenance: plan.pdfFieldProvenance,
+      pdf_sourced_fields: Object.keys(plan.pdfFieldProvenance),
       ...(plan.secondaryObligation
         ? { secondary_obligation: plan.secondaryObligation }
         : {}),
@@ -3524,6 +3533,7 @@ export async function runDeterministicIntake(
       durable_source_fates: { checked: 0, final: 0, transient: 0 },
       caveats,
     },
+    quality_measure: measureDeterministicIntakeQuality(plan),
     identity_floor: identityFloorFacts(plan),
     by_builder_and_outcome: byBuilderOutcome(plan),
     by_builder_and_reason: byBuilderReason(plan),

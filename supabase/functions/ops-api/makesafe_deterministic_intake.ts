@@ -17,7 +17,7 @@ import {
   type TemplateParsingRules,
 } from "./makesafe_template_parser.ts";
 import {
-  classifyMakeSafeJobFamily,
+  decideMakeSafeJobFamily,
   subjectIsExcludedNonWorkOrder,
   subjectIsKnownBuilderNoise,
   textHasExplicitReportRequest,
@@ -30,13 +30,12 @@ import { canonicalCompanyDedupeKey } from "../_shared/makesafe_refs.ts";
 import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
 import {
   gapFillFromWorkOrderPdf,
-  type PdfFieldProvenance,
   type PdfGapFillField,
   type PdfGapFillValues,
 } from "./makesafe_pdf_gap_fill.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
-  "makesafe-deterministic-intake@2026-07-24.v4";
+  "makesafe-deterministic-intake@2026-07-27.v5";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 export { classifyCancellation };
 export type { CancellationClassification };
@@ -144,6 +143,18 @@ export interface ExtractedIdentity {
   jobFamily: string;
 }
 
+export type DeterministicIntakeField = PdfGapFillField | "client_email";
+
+export interface DeterministicFieldProvenance {
+  method: "deterministic";
+  source: "email_text" | "email_subject" | "work_order_pdf_text";
+  rule: string;
+  sourcePostId: string;
+  attachmentId?: string;
+  attachmentName?: string | null;
+  extractor?: string;
+}
+
 export interface AdaptedSource {
   source: DeterministicSourceItem;
   adapterId: AdapterId | null;
@@ -153,8 +164,11 @@ export interface AdaptedSource {
   evidence: readonly EvidenceCandidate[];
   story: readonly StoryEvent[];
   parseWarnings: readonly string[];
+  fieldProvenance: Readonly<
+    Partial<Record<DeterministicIntakeField, DeterministicFieldProvenance>>
+  >;
   pdfFieldProvenance: Readonly<
-    Partial<Record<PdfGapFillField, PdfFieldProvenance>>
+    Partial<Record<PdfGapFillField, DeterministicFieldProvenance>>
   >;
 }
 
@@ -256,7 +270,10 @@ export interface DeterministicCasePlan {
   sourceClassifications: readonly DeterministicSourceClassification[];
   recoveryCursor: RecoveryCursor;
   fieldProvenance: Readonly<
-    Partial<Record<PdfGapFillField, PdfFieldProvenance>>
+    Partial<Record<DeterministicIntakeField, DeterministicFieldProvenance>>
+  >;
+  pdfFieldProvenance: Readonly<
+    Partial<Record<PdfGapFillField, DeterministicFieldProvenance>>
   >;
   pdfDocuments: readonly DeterministicPdfDocument[];
   // A combined make-safe + report obligation, when the primary is a physical
@@ -286,6 +303,43 @@ export interface DeterministicIntakePlan {
     nonWork: number;
     unaccounted: number;
   };
+}
+
+export type DeterministicQualityField =
+  | "client_name"
+  | "client_phone"
+  | "client_email"
+  | "site_address"
+  | "site_suburb"
+  | "external_reference"
+  | "builder_work_order"
+  | "purchase_order"
+  | "description";
+
+export interface DeterministicQualityFieldMeasure {
+  filled: number;
+  total: number;
+  percentage: number | null;
+}
+
+export interface DeterministicBuilderQualityMeasure {
+  instructions: number;
+  confirmed_without_human: number;
+  blocked_live_job: number;
+  reason_coded_exception: number;
+  fields: Record<
+    DeterministicQualityField,
+    DeterministicQualityFieldMeasure
+  >;
+}
+
+export interface DeterministicIntakeQualityMeasure {
+  version: string;
+  unit: "canonical_instruction";
+  instructions: number;
+  confirmed_without_human: number;
+  confirmed_without_human_percentage: number | null;
+  by_builder: Record<string, DeterministicBuilderQualityMeasure>;
 }
 
 export interface Adapter {
@@ -337,12 +391,30 @@ const WO_RE =
   /\b(?:work\s*order|works\s*order|w\s*[./]?\s*o\s*\.?)\s*(?:(?:number|no\.?)\s*[:#-]?|[:#-])\s*([A-Z]{1,10}[\s._#/-]*\d{3,}(?:[._#/-][A-Z0-9]+)*|\d{3,}(?:[._#/-][A-Z0-9]+)*)\b/i;
 const JOB_NO_RE =
   /\bjob\s*(?:no\.?|number|#)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._#/-]{2,})\b/i;
-const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
-const PHONE_RE = /(?:\+?61\s*[2-478]|0[2-478])(?:[\s()-]*\d){8}\b/;
+const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+const PHONE_RE = /(?:\+?61\s*[2-478]|0[2-478])(?:[\s()-]*\d){8}\b/g;
 const LABELLED_CLIENT_RE =
-  /(?:client|insured|customer|home\s*owner|homeowner|policy\s*holder|owner)\s*(?:name)?\s*[:\-]\s*([A-Za-z][A-Za-z'\-. ]{1,80})/i;
+  /(?:^|\n)\s*(?:client|insured|customer|contact|home\s*owner|homeowner|policy\s*holders?|owner)\s*(?:name)?\s*[:\-]\s*([A-Za-z][A-Za-z'&.,()/\- ]{1,80})/i;
 const LABELLED_ADDRESS_RE =
-  /(?:site\s*address|risk\s*address|property\s*address|address|property|site)\s*[:\-]\s*([^\n\r]{5,120})/i;
+  /(?:^|\n)\s*(?:site\s*address|risk\s*address|property\s*address|address|property|site)\s*[:\-]\s*([^\n\r]{5,120})/i;
+const LABELLED_MOBILE_RE =
+  /(?:client\s*)?mobile\s*(?:no\.?|number)?\s*[:\-]\s*((?:\+?61\s*4|04)(?:[\s()-]*\d){8})\b/gi;
+const LABELLED_PHONE_RE =
+  /(?:client|customer|policy\s*holder|insured)?\s*(?:phone|contact\s*(?:number|no\.?)|tel(?:ephone)?|ph)\s*(?:no\.?|number)?\s*[:\-]\s*((?:\+?61\s*[2-478]|0[2-478])(?:[\s()-]*\d){8})\b/gi;
+const LABELLED_EMAIL_RE =
+  /(?:client|customer|policy\s*holder|insured)?\s*email\s*[:\-]\s*([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/gi;
+const BUILDER_OFFICE_PHONES = new Set([
+  "0862630940", // MLB
+  "1300257253", // AJS
+  "0894211163", // Builderwest
+]);
+const BUILDER_OFFICE_EMAIL_DOMAINS = new Set([
+  "mlbuilders.com.au",
+  "ajs.build",
+  "primeeco.tech",
+  "secureworkswa.com.au",
+  "secureworksgroup.app",
+]);
 
 function text(item: DeterministicSourceItem): string {
   return `${item.subject || ""}\n${item.body || ""}`;
@@ -365,6 +437,67 @@ function pdfText(item: DeterministicSourceItem): string {
   return extractedPdfDocuments(item).map((document) => document.text).filter(
     Boolean,
   ).join("\n");
+}
+
+const PDF_SCOPE_START_RE =
+  /^(?:(?:additional|special)\s+)?(?:notes?\s*\/\s*)?instructions?\s*:?\s*(.*)$|^scope(?:\s+of\s+works?)?\s*:?\s*(.*)$|^(?:works?|job)\s+description\s*:?\s*(.*)$|^makesafe\s*\/\s*emergency\s+repairs?\b\s*(.*)$/i;
+const PDF_SCOPE_STOP_RE =
+  /^(?:totals?|subtotal|work\s+order\s+terms(?:\s+and\s+conditions)?|period\s+trade\s+contract\s+conditions|conditions|please\s+forward\s+all\s+invoices|bill\s+to:|major\s+lb\s+pty|secure\s+works\s+wa|yours\s+sincerely)\b/i;
+const PDF_SCOPE_MAX_LINES = 25;
+const PDF_SCOPE_MAX_CHARS = 4_000;
+
+function scopeBlockFromPdfText(
+  rawText: string | null | undefined,
+  adapterId: AdapterId | null,
+): string {
+  const lines = String(rawText || "").split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  if (!lines.length) return "";
+  const starts = lines.flatMap((line, index) =>
+    PDF_SCOPE_START_RE.test(line) ? [index] : []
+  );
+  // AJS work orders put the physical instruction directly below the first
+  // "Make Safe" heading rather than under a Notes/Scope label.
+  if (!starts.length && adapterId === "ajs_ajbr") {
+    const makeSafeHeading = lines.findIndex((line) =>
+      /^make\s*-?\s*safe$/i.test(line)
+    );
+    if (makeSafeHeading >= 0) starts.push(makeSafeHeading);
+  }
+  if (!starts.length) return "";
+  const blocks: string[] = [];
+  for (const start of starts) {
+    const startMatch = lines[start].match(PDF_SCOPE_START_RE);
+    const inline = clean(
+      startMatch?.slice(1).find((value) => clean(value)) || "",
+    );
+    const block = inline ? [inline] : [];
+    for (
+      let index = start + 1;
+      index < lines.length && block.length < PDF_SCOPE_MAX_LINES;
+      index++
+    ) {
+      const line = lines[index];
+      if (PDF_SCOPE_STOP_RE.test(line)) break;
+      if (index !== start + 1 && PDF_SCOPE_START_RE.test(line)) break;
+      block.push(line);
+    }
+    const value = clean(block.join("\n"));
+    if (value) blocks.push(value);
+  }
+  return [...new Set(blocks)].join("\n").slice(0, PDF_SCOPE_MAX_CHARS);
+}
+
+function pdfScopeText(
+  item: DeterministicSourceItem,
+  adapterId: AdapterId | null,
+): string {
+  const documents = extractedPdfDocuments(item);
+  const labelledScope = documents.map((document) =>
+    scopeBlockFromPdfText(document.text, adapterId)
+  ).filter(Boolean).join("\n");
+  return labelledScope;
 }
 
 function clean(value: unknown): string | null {
@@ -420,6 +553,127 @@ function profileFor(
     return profiles.find((p) => canonicalSlug(p.slug) === "mlb") || null;
   }
   return null;
+}
+
+function normalisePhone(value: string | null | undefined): string | null {
+  let digits = String(value || "").replace(/[^\d+]/g, "");
+  if (digits.startsWith("+61")) digits = `0${digits.slice(3)}`;
+  else if (digits.startsWith("61") && digits.length === 11) {
+    digits = `0${digits.slice(2)}`;
+  }
+  digits = digits.replace(/\D/g, "");
+  return digits || null;
+}
+
+function builderEmailDomains(
+  item: DeterministicSourceItem,
+  profile: DeterministicCompanyProfile | null,
+): Set<string> {
+  const domains = new Set(BUILDER_OFFICE_EMAIL_DOMAINS);
+  for (const pattern of profile?.senderPatterns || []) {
+    const cleanPattern = String(pattern).trim().toLowerCase()
+      .replace(/^\*@/, "").replace(/^@/, "");
+    const domain = cleanPattern.includes("@")
+      ? cleanPattern.slice(cleanPattern.lastIndexOf("@") + 1)
+      : cleanPattern;
+    if (domain) domains.add(domain);
+  }
+  const sender = String(item.fromEmail || "").trim().toLowerCase();
+  if (sender.includes("@")) {
+    domains.add(sender.slice(sender.lastIndexOf("@") + 1));
+  }
+  return domains;
+}
+
+function isBuilderOfficePhone(value: string | null | undefined): boolean {
+  const phone = normalisePhone(value);
+  return !!phone && BUILDER_OFFICE_PHONES.has(phone);
+}
+
+function isBuilderOfficeEmail(
+  value: string | null | undefined,
+  item: DeterministicSourceItem,
+  profile: DeterministicCompanyProfile | null,
+): boolean {
+  const email = String(value || "").trim().toLowerCase();
+  if (!email.includes("@")) return true;
+  if (email === String(item.fromEmail || "").trim().toLowerCase()) return true;
+  const domain = email.slice(email.lastIndexOf("@") + 1);
+  return [...builderEmailDomains(item, profile)].some((denied) =>
+    domain === denied || domain.endsWith(`.${denied}`)
+  );
+}
+
+function regexCaptureValues(text: string, pattern: RegExp): string[] {
+  return [...text.matchAll(pattern)].map((match) => clean(match[1] || match[0]))
+    .filter((value): value is string => !!value);
+}
+
+function selectCustomerPhone(
+  item: DeterministicSourceItem,
+  parsedValue: string | null | undefined,
+): string | null {
+  const hay = text(item);
+  const candidates = [
+    clean(parsedValue),
+    ...regexCaptureValues(hay, LABELLED_MOBILE_RE),
+    ...regexCaptureValues(hay, LABELLED_PHONE_RE),
+    ...[...hay.matchAll(PHONE_RE)].map((match) => clean(match[0])),
+  ].filter((value): value is string => !!value);
+  const unique = new Map<string, string>();
+  for (const value of candidates) {
+    const normalised = normalisePhone(value);
+    if (!normalised || isBuilderOfficePhone(normalised)) continue;
+    if (!unique.has(normalised)) unique.set(normalised, value);
+  }
+  const values = [...unique.entries()];
+  return values.find(([normalised]) => /^04\d{8}$/.test(normalised))?.[1] ||
+    values[0]?.[1] || null;
+}
+
+function selectCustomerEmail(
+  hay: string,
+  item: DeterministicSourceItem,
+  profile: DeterministicCompanyProfile | null,
+  parsedValue?: string | null,
+): string | null {
+  const candidates = [
+    clean(parsedValue),
+    ...regexCaptureValues(hay, LABELLED_EMAIL_RE),
+    ...[...hay.matchAll(EMAIL_RE)].map((match) => clean(match[0])),
+  ].filter((value): value is string => !!value);
+  return candidates.find((value) =>
+    !isBuilderOfficeEmail(value, item, profile)
+  ) || null;
+}
+
+function emailFieldProvenance(
+  item: DeterministicSourceItem,
+  source: "email_text" | "email_subject",
+  rule: string,
+): DeterministicFieldProvenance {
+  return {
+    method: "deterministic",
+    source,
+    rule,
+    sourcePostId: item.postId,
+  };
+}
+
+function pdfFieldProvenance(
+  item: DeterministicSourceItem,
+  document: DeterministicPdfDocument,
+  rule: string,
+): DeterministicFieldProvenance {
+  return {
+    method: "deterministic",
+    source: "work_order_pdf_text",
+    rule,
+    extractor: document.extractor || "unknown",
+    sourcePostId: item.postId,
+    attachmentId: document.attachmentId,
+    attachmentName: document.attachmentName,
+  };
 }
 
 function senderMatchesAdapter(
@@ -553,23 +807,63 @@ function extractRawIdentity(
   };
 }
 
-function inferDeliverable(item: DeterministicSourceItem): string {
-  const family = classifyMakeSafeJobFamily(item.subject, item.body, null);
-  if (REOPEN_SIGNAL.test(text(item))) return `${family}:reopen`;
+function jobFamilyDecision(
+  item: DeterministicSourceItem,
+  adapterId: AdapterId | null,
+) {
+  const pdfDocuments = extractedPdfDocuments(item);
+  const fullPdfText = pdfText(item);
+  return decideMakeSafeJobFamily(item.subject, item.body, null, {
+    builder: adapterId,
+    pdfScopeText: pdfScopeText(item, adapterId),
+    pdfOnlyBoilerplate: pdfDocuments.length > 0 &&
+      !pdfScopeText(item, adapterId) &&
+      /\b(?:contractors?\s+must|current\s+insurance|terms?\s+and\s+conditions|period\s+trade\s+contract)\b/i
+        .test(fullPdfText),
+  });
+}
+
+function inferDeliverable(
+  item: DeterministicSourceItem,
+  adapterId: AdapterId | null,
+): string {
+  const family = jobFamilyDecision(item, adapterId).family || "unclassified";
+  const fullText = `${text(item)}\n${pdfScopeText(item, adapterId)}`;
+  if (REOPEN_SIGNAL.test(fullText)) return `${family}:reopen`;
   if (
-    /\bcollect|pick\s*up|retriev/i.test(text(item)) && /fenc/i.test(text(item))
+    /\bcollect|pick\s*up|retriev/i.test(fullText) && /fenc/i.test(fullText)
   ) {
     return `${family}:collection`;
   }
   return family;
 }
 
+const PROVENANCE_FIELDS = new Set<DeterministicIntakeField>([
+  "client_name",
+  "client_phone",
+  "client_email",
+  "site_address",
+  "site_suburb",
+  "external_ref",
+  "description",
+]);
+
+function isProvenanceField(value: string): value is DeterministicIntakeField {
+  return PROVENANCE_FIELDS.has(value as DeterministicIntakeField);
+}
+
 function fieldCandidates(
   item: DeterministicSourceItem,
   profile: DeterministicCompanyProfile | null,
+  adapterId: AdapterId | null,
 ): {
   fields: Record<string, string>;
-  provenance: Partial<Record<PdfGapFillField, PdfFieldProvenance>>;
+  provenance: Partial<
+    Record<DeterministicIntakeField, DeterministicFieldProvenance>
+  >;
+  pdfProvenance: Partial<
+    Record<PdfGapFillField, DeterministicFieldProvenance>
+  >;
   warnings: string[];
 } {
   const subjectFields = parseSubjectFields(item.subject);
@@ -586,28 +880,117 @@ function fieldCandidates(
   const address = clean(parsed?.fields.site_address) ||
     clean(subjectFields.site_address) ||
     clean(hay.match(LABELLED_ADDRESS_RE)?.[1]);
-  let fields: Record<string, string> = {
-    ...(parsed?.fields || {}),
-    ...(subjectFields.external_ref
-      ? { external_ref: subjectFields.external_ref }
-      : {}),
-    ...(client ? { client_name: client } : {}),
-    ...(address ? { site_address: address } : {}),
-    ...(subjectFields.site_suburb
-      ? { site_suburb: subjectFields.site_suburb }
-      : {}),
-    ...(hay.match(PHONE_RE)?.[0]
-      ? { client_phone: clean(hay.match(PHONE_RE)?.[0])! }
-      : {}),
-    ...(hay.match(EMAIL_RE)?.[0]
-      ? { client_email: clean(hay.match(EMAIL_RE)?.[0])! }
-      : {}),
-  };
+  let fields: Record<string, string> = { ...(parsed?.fields || {}) };
+  if (isBuilderOfficePhone(fields.client_phone)) delete fields.client_phone;
+  if (isBuilderOfficeEmail(fields.client_email, item, profile)) {
+    delete fields.client_email;
+  }
+  if (subjectFields.external_ref) {
+    fields.external_ref = subjectFields.external_ref;
+  }
+  if (client) fields.client_name = client;
+  if (address) fields.site_address = address;
+  if (subjectFields.site_suburb) {
+    fields.site_suburb = subjectFields.site_suburb;
+  }
+  const phone = selectCustomerPhone(item, fields.client_phone);
+  if (phone) fields.client_phone = phone;
+  else delete fields.client_phone;
+  const email = selectCustomerEmail(hay, item, profile, fields.client_email);
+  if (email) fields.client_email = email;
+  else delete fields.client_email;
+
   const provenance: Partial<
-    Record<PdfGapFillField, PdfFieldProvenance>
+    Record<DeterministicIntakeField, DeterministicFieldProvenance>
   > = {};
+  const pdfProvenance: Partial<
+    Record<PdfGapFillField, DeterministicFieldProvenance>
+  > = {};
+  for (const field of Object.keys(parsed?.fields || {})) {
+    if (!fields[field] || !isProvenanceField(field)) continue;
+    provenance[field] = emailFieldProvenance(
+      item,
+      profile?.parsingRules?.fields?.[field]?.source === "subject"
+        ? "email_subject"
+        : "email_text",
+      `company_template:${profile?.parsingRules?.version ?? 0}:${field}`,
+    );
+  }
+  if (subjectFields.external_ref) {
+    provenance.external_ref = emailFieldProvenance(
+      item,
+      "email_subject",
+      "subject_fields:external_ref",
+    );
+  }
+  if (subjectFields.site_address && address === subjectFields.site_address) {
+    provenance.site_address = emailFieldProvenance(
+      item,
+      "email_subject",
+      "subject_fields:site_address",
+    );
+  } else if (address) {
+    provenance.site_address ||= emailFieldProvenance(
+      item,
+      "email_text",
+      "labelled_email:site_address",
+    );
+  }
+  if (subjectFields.site_suburb) {
+    provenance.site_suburb = emailFieldProvenance(
+      item,
+      "email_subject",
+      "subject_fields:site_suburb",
+    );
+  }
+  if (client) {
+    provenance.client_name ||= emailFieldProvenance(
+      item,
+      "email_text",
+      "labelled_email:client_name",
+    );
+  }
+  if (phone) {
+    provenance.client_phone = emailFieldProvenance(
+      item,
+      "email_text",
+      "ranked_email_contact:client_phone",
+    );
+  }
+  if (email) {
+    provenance.client_email = emailFieldProvenance(
+      item,
+      "email_text",
+      "ranked_email_contact:client_email",
+    );
+  }
   const warnings: string[] = [];
   for (const document of extractedPdfDocuments(item)) {
+    const pdfParsed = parseWithTemplate(profile?.parsingRules, {
+      subject: "",
+      body: "",
+      pdfText: document.text || "",
+    });
+    for (const [field, rawValue] of Object.entries(pdfParsed?.fields || {})) {
+      if (
+        fields[field] || !isProvenanceField(field) ||
+        (field === "client_phone" && isBuilderOfficePhone(rawValue)) ||
+        (field === "client_email" &&
+          isBuilderOfficeEmail(rawValue, item, profile))
+      ) {
+        continue;
+      }
+      const value = clean(rawValue);
+      if (!value) continue;
+      fields[field] = value;
+      const fieldSource = pdfFieldProvenance(
+        item,
+        document,
+        `company_template_pdf:${profile?.parsingRules?.version ?? 0}:${field}`,
+      );
+      provenance[field] = fieldSource;
+      if (field !== "client_email") pdfProvenance[field] = fieldSource;
+    }
     const result = gapFillFromWorkOrderPdf({
       current: fields as PdfGapFillValues,
       pdfText: document.text,
@@ -617,13 +1000,60 @@ function fieldCandidates(
       attachmentName: document.attachmentName,
     });
     fields = { ...fields, ...result.fields } as Record<string, string>;
-    Object.assign(provenance, result.provenance);
+    for (const [field, source] of Object.entries(result.provenance)) {
+      if (!source || !isProvenanceField(field)) continue;
+      provenance[field] = source;
+      pdfProvenance[field as PdfGapFillField] = source;
+    }
+    if (!fields.description) {
+      const scopeDescription = scopeBlockFromPdfText(
+        document.text,
+        adapterId,
+      );
+      if (scopeDescription) {
+        fields.description = scopeDescription;
+        const fieldSource = pdfFieldProvenance(
+          item,
+          document,
+          "labelled_pdf:scope_description",
+        );
+        provenance.description = fieldSource;
+        pdfProvenance.description = fieldSource;
+      }
+    }
+    if (!fields.client_email) {
+      const pdfEmail = selectCustomerEmail(
+        document.text || "",
+        item,
+        profile,
+      );
+      if (pdfEmail) {
+        fields.client_email = pdfEmail;
+        provenance.client_email = pdfFieldProvenance(
+          item,
+          document,
+          "labelled_pdf:client_email",
+        );
+      }
+    }
+    if (isBuilderOfficePhone(fields.client_phone)) {
+      delete fields.client_phone;
+      delete provenance.client_phone;
+      delete pdfProvenance.client_phone;
+    }
+    if (isBuilderOfficeEmail(fields.client_email, item, profile)) {
+      delete fields.client_email;
+      delete provenance.client_email;
+    }
     warnings.push(...result.warnings);
   }
-  return { fields, provenance, warnings };
+  return { fields, provenance, pdfProvenance, warnings };
 }
 
-function storyFor(item: DeterministicSourceItem): StoryEvent[] {
+function storyFor(
+  item: DeterministicSourceItem,
+  adapterId: AdapterId | null,
+): StoryEvent[] {
   const hay = text(item);
   const cancellation = classifyCancellation({
     subject: item.subject,
@@ -657,7 +1087,7 @@ function storyFor(item: DeterministicSourceItem): StoryEvent[] {
   if (REPORT_SIGNAL.test(hay) || textHasExplicitReportRequest(hay)) {
     add("reporting_request", "report_or_quote_requested");
   }
-  add("deliverable", `deliverable:${inferDeliverable(item)}`);
+  add("deliverable", `deliverable:${inferDeliverable(item, adapterId)}`);
   for (const attachment of item.attachments) {
     events.push({
       key: `${item.postId}|attachment|${attachment.id}`,
@@ -686,8 +1116,8 @@ function storyFor(item: DeterministicSourceItem): StoryEvent[] {
 function evidenceFor(
   item: DeterministicSourceItem,
   identity: ExtractedIdentity,
-  pdfFieldProvenance: Readonly<
-    Partial<Record<PdfGapFillField, PdfFieldProvenance>>
+  fieldProvenance: Readonly<
+    Partial<Record<DeterministicIntakeField, DeterministicFieldProvenance>>
   > = {},
 ): EvidenceCandidate[] {
   const out: EvidenceCandidate[] = [{
@@ -729,14 +1159,14 @@ function evidenceFor(
     if (value) {
       const provenanceKey = requirement === "external_reference"
         ? "external_ref"
-        : requirement as PdfGapFillField;
-      const pdfSource = pdfFieldProvenance[provenanceKey];
+        : requirement as DeterministicIntakeField;
+      const fieldSource = fieldProvenance[provenanceKey];
       out.push({
         requirement,
         sourcePostId: item.postId,
         kind: "field",
-        locator: pdfSource
-          ? `attachment:${pdfSource.attachmentId}:field:${requirement}`
+        locator: fieldSource?.source === "work_order_pdf_text"
+          ? `attachment:${fieldSource.attachmentId}:field:${requirement}`
           : `field:${requirement}:${item.postId}`,
         strength: ["external_reference", "builder_work_order", "purchase_order"]
             .includes(requirement)
@@ -788,7 +1218,7 @@ function buildKnown(
 ): AdaptedSource {
   const profile = profileFor(adapterId, item, profiles);
   const raw = extractRawIdentity(item, adapterId);
-  const parsed = fieldCandidates(item, profile);
+  const parsed = fieldCandidates(item, profile, adapterId);
   const fields = { ...parsed.fields };
   if (adapterId === "western") {
     const western = String(item.subject || "").match(
@@ -796,8 +1226,22 @@ function buildKnown(
     );
     if (western) {
       fields.external_ref ||= western[1];
-      fields.client_name ||= western[2].trim();
-      fields.site_address ||= western[3].trim();
+      if (!fields.client_name) {
+        fields.client_name = western[2].trim();
+        parsed.provenance.client_name = emailFieldProvenance(
+          item,
+          "email_subject",
+          "western_subject:client_name",
+        );
+      }
+      if (!fields.site_address) {
+        fields.site_address = western[3].trim();
+        parsed.provenance.site_address = emailFieldProvenance(
+          item,
+          "email_subject",
+          "western_subject:site_address",
+        );
+      }
     }
   }
   if (adapterId === "builderwest") {
@@ -806,11 +1250,26 @@ function buildKnown(
     );
     if (claim) {
       fields.external_ref ||= claim[1];
-      fields.client_name ||= claim[2].trim();
-      fields.site_address ||= claim[3].trim();
+      if (!fields.client_name) {
+        fields.client_name = claim[2].trim();
+        parsed.provenance.client_name = emailFieldProvenance(
+          item,
+          "email_subject",
+          "builderwest_subject:client_name",
+        );
+      }
+      if (!fields.site_address) {
+        fields.site_address = claim[3].trim();
+        parsed.provenance.site_address = emailFieldProvenance(
+          item,
+          "email_subject",
+          "builderwest_subject:site_address",
+        );
+      }
     }
   }
-  const deliverable = inferDeliverable(item);
+  const familyDecision = jobFamilyDecision(item, adapterId);
+  const deliverable = inferDeliverable(item, adapterId);
   const canonical = normaliseMakesafeIdentity({
     externalRefRaw: raw.externalRef || fields.external_ref || null,
     builderWoRaw: raw.wo,
@@ -838,7 +1297,7 @@ function buildKnown(
     siteAddress: clean(fields.site_address),
     siteSuburb: clean(fields.site_suburb),
     description: clean(fields.description),
-    jobFamily: classifyMakeSafeJobFamily(item.subject, item.body, null),
+    jobFamily: familyDecision.family || "unclassified",
   };
   const hay = text(item);
   const intent = classifyCancellation({
@@ -863,13 +1322,15 @@ function buildKnown(
     intent,
     identity,
     evidence: evidenceFor(item, identity, parsed.provenance),
-    story: storyFor(item),
+    story: storyFor(item, adapterId),
     parseWarnings: [
       ...(!profile ? ["company_profile_not_resolved"] : []),
       ...(!raw.wo && raw.externalRef ? ["claim_only_identity"] : []),
+      `job_family:${familyDecision.evidence}`,
       ...parsed.warnings,
     ],
-    pdfFieldProvenance: parsed.provenance,
+    fieldProvenance: parsed.provenance,
+    pdfFieldProvenance: parsed.pdfProvenance,
   };
 }
 
@@ -969,8 +1430,9 @@ const CHATTER_ADAPTER: Adapter = {
     intent: "chatter",
     identity: blankIdentity(),
     evidence: evidenceFor(item, blankIdentity()),
-    story: storyFor(item),
+    story: storyFor(item, "chatter"),
     parseWarnings: [],
+    fieldProvenance: {},
     pdfFieldProvenance: {},
   }),
 };
@@ -1001,8 +1463,9 @@ export function adaptDeterministicSource(
       intent: "chatter",
       identity,
       evidence: evidenceFor(item, identity),
-      story: storyFor(item),
+      story: storyFor(item, "chatter"),
       parseWarnings: ["own_outbound_copy"],
+      fieldProvenance: {},
       pdfFieldProvenance: {},
     };
   }
@@ -1022,8 +1485,9 @@ export function adaptDeterministicSource(
       : "ambiguous",
     identity,
     evidence: evidenceFor(item, identity),
-    story: storyFor(item),
+    story: storyFor(item, null),
     parseWarnings: ["unknown_builder"],
+    fieldProvenance: {},
     pdfFieldProvenance: {},
   };
 }
@@ -1132,7 +1596,12 @@ function bestIdentity(
 ): {
   identity: ExtractedIdentity;
   conflicts: Record<string, string[]>;
-  fieldProvenance: Partial<Record<PdfGapFillField, PdfFieldProvenance>>;
+  fieldProvenance: Partial<
+    Record<DeterministicIntakeField, DeterministicFieldProvenance>
+  >;
+  pdfFieldProvenance: Partial<
+    Record<PdfGapFillField, DeterministicFieldProvenance>
+  >;
 } {
   const ordered = [...items].sort((a, b) =>
     a.source.receivedAt.localeCompare(b.source.receivedAt) ||
@@ -1142,19 +1611,20 @@ function bestIdentity(
   const conflicts: Record<string, string[]> = {};
   const preferredItems = (
     identityField: keyof ExtractedIdentity,
-    provenanceField: PdfGapFillField,
+    provenanceField: DeterministicIntakeField,
   ) => {
     const candidates = ordered.filter((item) =>
       clean(item.identity[identityField]) !== null
     );
     const emailDerived = candidates.filter((item) =>
-      !item.pdfFieldProvenance[provenanceField]
+      item.fieldProvenance[provenanceField]?.source !==
+        "work_order_pdf_text"
     );
     return emailDerived.length ? emailDerived : candidates;
   };
   const preferredMerge = (
     identityField: keyof ExtractedIdentity,
-    provenanceField: PdfGapFillField,
+    provenanceField: DeterministicIntakeField,
   ) => {
     const preferred = preferredItems(identityField, provenanceField);
     return {
@@ -1166,7 +1636,7 @@ function bestIdentity(
   };
   const preferredStrong = (
     identityField: keyof ExtractedIdentity,
-    provenanceField: PdfGapFillField,
+    provenanceField: DeterministicIntakeField,
   ) =>
     clean(
       preferredItems(identityField, provenanceField)[0]?.identity[
@@ -1175,7 +1645,7 @@ function bestIdentity(
     );
   const client = preferredMerge("clientName", "client_name");
   const phone = preferredMerge("clientPhone", "client_phone");
-  const email = mergeField(ordered.map((i) => i.identity.clientEmail));
+  const email = preferredMerge("clientEmail", "client_email");
   const address = preferredMerge("siteAddress", "site_address");
   if (client.conflicts.length) conflicts.client_name = client.conflicts;
   if (phone.conflicts.length) conflicts.client_phone = phone.conflicts;
@@ -1212,34 +1682,45 @@ function bestIdentity(
     jobFamily: strong("jobFamily") || "general_makesafe",
   };
   const fieldMap: Array<
-    [PdfGapFillField, keyof ExtractedIdentity, string | null]
+    [DeterministicIntakeField, keyof ExtractedIdentity, string | null]
   > = [
     ["client_name", "clientName", identity.clientName],
     ["client_phone", "clientPhone", identity.clientPhone],
+    ["client_email", "clientEmail", identity.clientEmail],
     ["site_address", "siteAddress", identity.siteAddress],
     ["site_suburb", "siteSuburb", identity.siteSuburb],
     ["external_ref", "externalRefRaw", identity.externalRefRaw],
     ["description", "description", identity.description],
   ];
   const fieldProvenance: Partial<
-    Record<PdfGapFillField, PdfFieldProvenance>
+    Record<DeterministicIntakeField, DeterministicFieldProvenance>
+  > = {};
+  const pdfFieldProvenance: Partial<
+    Record<PdfGapFillField, DeterministicFieldProvenance>
   > = {};
   for (const [provenanceField, identityField, selectedValue] of fieldMap) {
     if (!selectedValue) continue;
     const preferred = preferredItems(identityField, provenanceField);
     const selected = preferred.find((item) =>
       clean(item.identity[identityField]) === clean(selectedValue) &&
-      !!item.pdfFieldProvenance[provenanceField]
+      !!item.fieldProvenance[provenanceField]
     );
-    if (selected?.pdfFieldProvenance[provenanceField]) {
-      fieldProvenance[provenanceField] =
-        selected.pdfFieldProvenance[provenanceField];
+    const selectedProvenance = selected?.fieldProvenance[provenanceField];
+    if (selectedProvenance) {
+      fieldProvenance[provenanceField] = selectedProvenance;
+      if (
+        provenanceField !== "client_email" &&
+        selectedProvenance.source === "work_order_pdf_text"
+      ) {
+        pdfFieldProvenance[provenanceField] = selectedProvenance;
+      }
     }
   }
   return {
     identity,
     conflicts,
     fieldProvenance,
+    pdfFieldProvenance,
   };
 }
 
@@ -1619,6 +2100,12 @@ export function buildDeterministicIntakePlan(
         r.required && r.blocking === "live" &&
         evidenceMap[r.id]?.status !== "satisfied"
       ).map((r) => r.id);
+      const missingPortalEvidence = missingLive.filter((field) =>
+        field === "portal_link" || field === "portal_capture"
+      );
+      const missingParsedLive = missingLive.filter((field) =>
+        field !== "portal_link" && field !== "portal_capture"
+      );
       const missingSecondary = manifest.filter((r) =>
         r.required && r.blocking === "secondary" &&
         evidenceMap[r.id]?.status !== "satisfied"
@@ -1659,10 +2146,13 @@ export function buildDeterministicIntakePlan(
       } else if (claimOnly || missingIdentity.length) {
         state = "exception";
         reasonCode = "below_identity_floor";
-      } else if (missingLive.length) {
+      } else if (merged.identity.jobFamily === "unclassified") {
+        state = "exception";
+        reasonCode = "ambiguous_scope";
+      } else if (missingParsedLive.length) {
         state = "exception";
         reasonCode = "adapter_parse_failure";
-      } else if (missingSecondary.length) {
+      } else if (missingPortalEvidence.length || missingSecondary.length) {
         state = "blocked_live_job";
       } else {
         state = "confirmed_live_job";
@@ -1687,7 +2177,9 @@ export function buildDeterministicIntakePlan(
       const correlatedSourcePostIds = sortedCluster.map((i) => i.source.postId)
         .sort();
       const blockedReasons = state === "blocked_live_job"
-        ? missingSecondary.map((field) => `missing:${field}`)
+        ? [...missingPortalEvidence, ...missingSecondary].map((field) =>
+          `missing:${field}`
+        )
         : [];
       const missingFields = [
         ...new Set([...missingIdentity, ...missingLive, ...missingSecondary]),
@@ -1739,6 +2231,7 @@ export function buildDeterministicIntakePlan(
         evidenceMap,
         sourceClassifications: classifications,
         fieldProvenance: merged.fieldProvenance,
+        pdfFieldProvenance: merged.pdfFieldProvenance,
         pdfDocuments,
         recoveryCursor: {
           version: DETERMINISTIC_INTAKE_VERSION,
@@ -1804,6 +2297,117 @@ export function buildDeterministicIntakePlan(
       unaccounted: adapted.length -
         new Set(sourceClassifications.map((c) => c.postId)).size,
     },
+  };
+}
+
+const QUALITY_FIELDS: readonly DeterministicQualityField[] = [
+  "client_name",
+  "client_phone",
+  "client_email",
+  "site_address",
+  "site_suburb",
+  "external_reference",
+  "builder_work_order",
+  "purchase_order",
+  "description",
+] as const;
+
+function percentage(filled: number, total: number): number | null {
+  return total === 0 ? null : Math.round((filled / total) * 10_000) / 100;
+}
+
+function qualityFieldValue(
+  intakeCase: DeterministicCasePlan,
+  field: DeterministicQualityField,
+): string | null {
+  switch (field) {
+    case "client_name":
+      return intakeCase.identity.clientName;
+    case "client_phone":
+      return intakeCase.identity.clientPhone;
+    case "client_email":
+      return intakeCase.identity.clientEmail;
+    case "site_address":
+      return intakeCase.identity.siteAddress;
+    case "site_suburb":
+      return intakeCase.identity.siteSuburb;
+    case "external_reference":
+      return intakeCase.identity.externalRefCanonical;
+    case "builder_work_order":
+      return intakeCase.identity.builderWoCanonical;
+    case "purchase_order":
+      return intakeCase.identity.builderPoCanonical;
+    case "description":
+      return intakeCase.identity.description;
+  }
+}
+
+/**
+ * Pure, repeatable quality measurement. Callers can build a plan from a
+ * read-only source/PDF snapshot and compare the result without advancing the
+ * scan cursor or writing any production row.
+ */
+export function measureDeterministicIntakeQuality(
+  plan: DeterministicIntakePlan,
+): DeterministicIntakeQualityMeasure {
+  const instructions = plan.cases.filter((intakeCase) =>
+    intakeCase.state !== "accounted_non_wo"
+  );
+  const byBuilder: Record<string, DeterministicBuilderQualityMeasure> = {};
+  for (const intakeCase of instructions) {
+    const builder = intakeCase.identity.builderSlug || "unknown";
+    const measure = byBuilder[builder] ||= {
+      instructions: 0,
+      confirmed_without_human: 0,
+      blocked_live_job: 0,
+      reason_coded_exception: 0,
+      fields: Object.fromEntries(
+        QUALITY_FIELDS.map((field) => [
+          field,
+          { filled: 0, total: 0, percentage: null },
+        ]),
+      ) as Record<
+        DeterministicQualityField,
+        DeterministicQualityFieldMeasure
+      >,
+    };
+    measure.instructions++;
+    if (intakeCase.state === "confirmed_live_job") {
+      measure.confirmed_without_human++;
+    } else if (intakeCase.state === "blocked_live_job") {
+      measure.blocked_live_job++;
+    } else {
+      measure.reason_coded_exception++;
+    }
+    for (const field of QUALITY_FIELDS) {
+      const fieldMeasure = measure.fields[field];
+      fieldMeasure.total++;
+      if (clean(qualityFieldValue(intakeCase, field))) fieldMeasure.filled++;
+    }
+  }
+  for (const measure of Object.values(byBuilder)) {
+    for (const field of QUALITY_FIELDS) {
+      const fieldMeasure = measure.fields[field];
+      fieldMeasure.percentage = percentage(
+        fieldMeasure.filled,
+        fieldMeasure.total,
+      );
+    }
+  }
+  const confirmed =
+    instructions.filter((intakeCase) =>
+      intakeCase.state === "confirmed_live_job"
+    ).length;
+  return {
+    version: DETERMINISTIC_INTAKE_VERSION,
+    unit: "canonical_instruction",
+    instructions: instructions.length,
+    confirmed_without_human: confirmed,
+    confirmed_without_human_percentage: percentage(
+      confirmed,
+      instructions.length,
+    ),
+    by_builder: byBuilder,
   };
 }
 

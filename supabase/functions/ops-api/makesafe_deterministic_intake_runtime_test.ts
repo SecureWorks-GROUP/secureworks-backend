@@ -15,7 +15,10 @@ import {
   enrichSourcesWithPdfText,
   runDeterministicIntake,
 } from "./makesafe_deterministic_intake_runtime.ts";
-import { buildDeterministicIntakePlan } from "./makesafe_deterministic_intake.ts";
+import {
+  buildDeterministicIntakePlan,
+  DETERMINISTIC_INTAKE_VERSION,
+} from "./makesafe_deterministic_intake.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 const ENCODER = new TextEncoder();
@@ -478,6 +481,10 @@ Deno.test("cancellation resolves one exact job, calls the canonical boundary, an
     },
   });
 
+  assertEquals(report.quality_measure.version, DETERMINISTIC_INTAKE_VERSION);
+  assertEquals(report.quality_measure.instructions, 1);
+  assert(report.quality_measure.by_builder.mlb !== undefined);
+
   assertEquals(command.targetJobId, "cancel-job-1");
   assertEquals(command.reasonCode, "builder_recalled");
   const saved = store.makesafe_intake_cases[0];
@@ -871,6 +878,35 @@ Deno.test("live deterministic intake fills a draft from PDF and persists readabl
   assert(
     store.makesafe_intake_case_sources[0].evidence.pdf_extraction[0].text
       .includes("Amanda Parker"),
+  );
+});
+
+Deno.test("portal-only blocker is reported by its actual missing evidence", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "roof-portal-blocker",
+    subject: "Roof report work order Work Order: 445566",
+    body_content: [
+      "Client: Roof Client",
+      "Site Address: 30 Beta Avenue, Perth",
+      "Mobile: 0411 111 111",
+      "Complete roof report https://portal.prime.test/r/445566",
+    ].join("\n"),
+  }));
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: true,
+    selectionMode: "exact",
+    allowSourcePostIds: ["roof-portal-blocker"],
+    maxCases: 1,
+    nowIso: NOW,
+  });
+  assertEquals(
+    report.by_builder_and_reason.mlb["missing:portal_capture"],
+    1,
+  );
+  assertEquals(
+    report.by_builder_and_reason.mlb.adapter_parse_failure,
+    undefined,
   );
 });
 
