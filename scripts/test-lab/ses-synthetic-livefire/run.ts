@@ -337,18 +337,20 @@ async function inventory(
     subject: `ilike.*${marker}*`,
   });
   const mutableOperationalRows: Record<string, JsonRecord[]> = {};
-  for (const table of [
-    "job_assignments",
-    "job_media",
-    "job_contacts",
-    "job_service_reports",
-    "makesafe_report_packs",
-    "makesafe_status_holds",
-    "draft_notes",
-    "job_variations",
-    "purchase_orders",
-    "trade_invoices",
-  ]) {
+  for (
+    const table of [
+      "job_assignments",
+      "job_media",
+      "job_contacts",
+      "job_service_reports",
+      "makesafe_report_packs",
+      "makesafe_status_holds",
+      "draft_notes",
+      "job_variations",
+      "purchase_orders",
+      "trade_invoices",
+    ]
+  ) {
     mutableOperationalRows[table] = await client.rowsForIds<JsonRecord>(
       table,
       "job_id",
@@ -522,7 +524,9 @@ export function guardInventory(run: FixtureRun, found: Inventory): void {
     for (const row of rows) {
       if (!jobIds.has(String(row.job_id))) {
         throw new Error(
-          `cleanup refused mutable operational row outside marker jobs: ${table}/${String(row.id)}`,
+          `cleanup refused mutable operational row outside marker jobs: ${table}/${
+            String(row.id)
+          }`,
         );
       }
     }
@@ -1109,7 +1113,9 @@ async function cleanup(
   );
   if (Number(purgedAttendanceCycles || 0) !== found.attendanceCycles.length) {
     throw new Error(
-      `synthetic attendance purge count mismatch: purged ${String(purgedAttendanceCycles)} of ${found.attendanceCycles.length}`,
+      `synthetic attendance purge count mismatch: purged ${
+        String(purgedAttendanceCycles)
+      } of ${found.attendanceCycles.length}`,
     );
   }
   deletedMutableOperational.makesafe_attendance_cycles = found.attendanceCycles

@@ -271,7 +271,10 @@ Deno.test("annotation relinking fences before resolving or linking", () => {
   );
   assertStringIncludes(INDEX, "synthetic_livefire_invoice_unresolved");
   assertStringIncludes(INDEX, "code: 'u6r_release_required'");
-  assertStringIncludes(INDEX, "U6R SEND IT is the only release and provider-effect path.");
+  assertStringIncludes(
+    INDEX,
+    "U6R SEND IT is the only release and provider-effect path.",
+  );
   assertStringIncludes(INDEX, "execute_ses_release_revision");
 });
 

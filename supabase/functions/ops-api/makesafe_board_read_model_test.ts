@@ -5,8 +5,8 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  _assertNoSyntheticLivefireJobsForTest,
   _assertNoSyntheticLivefireInvoiceForTest,
+  _assertNoSyntheticLivefireJobsForTest,
   _assertNoSyntheticLivefireReleaseRevisionForTest,
   _deriveMakesafeBoardStage,
 } from "./index.ts";
@@ -513,10 +513,11 @@ Deno.test("synthetic-linked invoices are refused before invoice effects", async 
                 assertEquals(column, "xero_invoice_id");
                 assertEquals(id, "invoice-1");
                 return {
-                  maybeSingle: () => Promise.resolve({
-                    data: { job_id: "synthetic-job" },
-                    error: null,
-                  }),
+                  maybeSingle: () =>
+                    Promise.resolve({
+                      data: { job_id: "synthetic-job" },
+                      error: null,
+                    }),
                 };
               },
             };
@@ -528,13 +529,14 @@ Deno.test("synthetic-linked invoices are refused before invoice effects", async 
         select(columns: string) {
           assertEquals(columns, "id,metadata");
           return {
-            in: () => Promise.resolve({
-              data: [{
-                id: "synthetic-job",
-                metadata: { synthetic_livefire_marker: marker },
-              }],
-              error: null,
-            }),
+            in: () =>
+              Promise.resolve({
+                data: [{
+                  id: "synthetic-job",
+                  metadata: { synthetic_livefire_marker: marker },
+                }],
+                error: null,
+              }),
           };
         },
       };
@@ -542,7 +544,12 @@ Deno.test("synthetic-linked invoices are refused before invoice effects", async 
   };
 
   await assertRejects(
-    () => _assertNoSyntheticLivefireInvoiceForTest(client, "invoice-1", "void_invoice"),
+    () =>
+      _assertNoSyntheticLivefireInvoiceForTest(
+        client,
+        "invoice-1",
+        "void_invoice",
+      ),
     Error,
     "synthetic_livefire_release_forbidden",
   );
@@ -564,7 +571,12 @@ Deno.test("synthetic-linked invoices are refused before invoice effects", async 
     },
   };
   await assertRejects(
-    () => _assertNoSyntheticLivefireInvoiceForTest(unresolvedClient, "missing", "void_invoice"),
+    () =>
+      _assertNoSyntheticLivefireInvoiceForTest(
+        unresolvedClient,
+        "missing",
+        "void_invoice",
+      ),
     Error,
     "synthetic_livefire_invoice_unresolved",
   );

@@ -363,7 +363,8 @@ Deno.test("synthetic matrix rows are internal-only and always release-blocked af
     if (row.family === "assessment_quote") {
       assertEquals(result.portal_evidence.length, 3);
       assert(
-        blockerCodes(result).includes("assessment_recipe_unapproved"),
+        !blockerCodes(result).includes("assessment_recipe_unapproved"),
+        "the fixture carries the current sealed assessment recipe",
       );
     }
   }
@@ -386,7 +387,8 @@ Deno.test("synthetic matrix rows are internal-only and always release-blocked af
     ),
   );
   assert(
-    blockerCodes(incompleteResult).includes("assessment_recipe_unapproved"),
+    !blockerCodes(incompleteResult).includes("assessment_recipe_unapproved"),
+    "the fixture carries the current sealed assessment recipe",
   );
   assertEquals(incompleteResult.portal_evidence.length, 2);
 });

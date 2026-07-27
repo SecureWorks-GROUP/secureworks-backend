@@ -94,10 +94,16 @@ Deno.test("terminal accounting is marker-bound, service-role-only, and requires 
   assertStringIncludes(sql, "run.source_post_ids ? email.post_id");
   assertStringIncludes(sql, "makesafe_synthetic_livefire_source_health");
   assertStringIncludes(sql, "terminalize_synthetic_livefire_run");
-  assertStringIncludes(sql, "synthetic live-fire source exclusion proof failed");
+  assertStringIncludes(
+    sql,
+    "synthetic live-fire source exclusion proof failed",
+  );
   assertStringIncludes(sql, "fresh_source_health_after_terminal");
   assertStringIncludes(sql, "FOR UPDATE");
-  assertStringIncludes(sql, "transactionally verified against terminal ledger state");
+  assertStringIncludes(
+    sql,
+    "transactionally verified against terminal ledger state",
+  );
   assertStringIncludes(sql, "ENABLE ROW LEVEL SECURITY");
   assertStringIncludes(
     sql,
@@ -198,13 +204,15 @@ Deno.test("verified marker propagates from deterministic draft into job and even
     index,
     "synthetic_livefire_release_forbidden:",
   );
-  for (const action of [
-    "create_deposit_invoice",
-    "create_unified_invoice",
-    "void_invoice",
-    "send_quick_quote_email",
-    "send_client_update",
-  ]) {
+  for (
+    const action of [
+      "create_deposit_invoice",
+      "create_unified_invoice",
+      "void_invoice",
+      "send_quick_quote_email",
+      "send_client_update",
+    ]
+  ) {
     assertStringIncludes(index, `synthetic live-fire safety gate`);
     assertStringIncludes(index, `'${action}'`);
   }
