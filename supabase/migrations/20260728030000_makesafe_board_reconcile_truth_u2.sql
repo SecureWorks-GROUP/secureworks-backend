@@ -1724,6 +1724,8 @@ BEGIN
         WHERE d.job_id = v_row.job_id
           AND d.substatus IS NOT DISTINCT FROM v_token->>'substatus'
           AND d.cycle_number IS NOT DISTINCT FROM (v_token->>'cycle_number')::integer
+          AND d.attendance_cycle_id IS NOT DISTINCT FROM NULLIF(v_token->>'attendance_cycle_id', '')::uuid
+          AND d.cycle_attribution IS NOT DISTINCT FROM v_token->>'cycle_attribution'
           AND d.report_type IS NOT DISTINCT FROM v_token->>'report_type'
           AND d.reopen_reason IS NOT DISTINCT FROM v_token->>'reopen_reason'
           AND d.reattend_count IS NOT DISTINCT FROM (v_token->>'reattend_count')::integer

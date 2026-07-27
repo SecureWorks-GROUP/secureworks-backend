@@ -20,6 +20,9 @@ const rollback = await Deno.readTextFile(
 const indexSource = await Deno.readTextFile(
   new URL("./index.ts", import.meta.url),
 );
+const compareSource = await Deno.readTextFile(
+  new URL("./makesafe_state_compare.ts", import.meta.url),
+);
 
 Deno.test("truth migration ships dark and never mutates operational status", () => {
   assertStringIncludes(migration, "SCHEMA/RPC ONLY");
@@ -110,6 +113,24 @@ Deno.test("atomic reconciliation accepts only a complete two-way partition", () 
   );
   assertStringIncludes(migration, "evidence_ref");
   assertStringIncludes(migration, "computed_reasons");
+});
+
+Deno.test("finalize rejects detail cycle-binding drift", () => {
+  assertStringIncludes(
+    compareSource,
+    "job_id,substatus,cycle_number,attendance_cycle_id,cycle_attribution",
+  );
+  assertStringIncludes(compareSource, "jobDetail?.attendance_cycle_id");
+  assertStringIncludes(compareSource, 'jobDetail.cycle_attribution !== "bound"');
+  assertStringIncludes(
+    migration,
+    "d.attendance_cycle_id IS NOT DISTINCT FROM NULLIF(v_token->>'attendance_cycle_id', '')::uuid",
+  );
+  assertStringIncludes(
+    migration,
+    "d.cycle_attribution IS NOT DISTINCT FROM v_token->>'cycle_attribution'",
+  );
+  assertStringIncludes(migration, "detail_cycle_binding");
 });
 
 Deno.test("edge acceptance is the live U4 canary plus zero v2 input errors", () => {

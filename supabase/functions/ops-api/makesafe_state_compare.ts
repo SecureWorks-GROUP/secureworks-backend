@@ -105,7 +105,7 @@ const SELECTS = {
     "id,job_id,action,decision,readiness_revision,dependency_generation,docket_revision_id,release_revision_id,decided_at",
   jobFamilies: "id,metadata",
   details:
-    "job_id,substatus,cycle_number,report_type,reopen_reason,reattend_count,last_reattend_at,last_reattend_reason,cancel_reason,cancel_note,cancelled_by,cancelled_at,report_received_at,report_sent_at,invoice_ready_at,invoice_notes,safety_requirements,special_instructions,external_links,billing_rules,portal_verified_at,portal_verified_cycle,portal_verified_signal,portal_verified_by,updated_at",
+    "job_id,substatus,cycle_number,attendance_cycle_id,cycle_attribution,report_type,reopen_reason,reattend_count,last_reattend_at,last_reattend_reason,cancel_reason,cancel_note,cancelled_by,cancelled_at,report_received_at,report_sent_at,invoice_ready_at,invoice_notes,safety_requirements,special_instructions,external_links,billing_rules,portal_verified_at,portal_verified_cycle,portal_verified_signal,portal_verified_by,updated_at",
   dockets:
     "id,job_id,source_instruction_id,lineage_id,attendance_cycle_ids,current_attendance_cycle_id,readiness_revision,input_content_hash,output_content_hash,state,pre_xero_docs_ready,envelope,review_spec,release_payload,committed_at",
 } as const;
@@ -526,7 +526,10 @@ export async function buildMakesafeV2Comparison(
     const identityRevision = identities.get(jobId) || null;
     const cycleRows = cycles.get(jobId) || [];
     const cycleIds = cycleRows.map((cycle) => String(cycle.id)).sort();
-    const currentCycleId = row?.attendance_cycle_id || null;
+    const jobDetail = details.find((item) => String(item?.job_id) === jobId) ||
+      null;
+    const currentCycleId = jobDetail?.attendance_cycle_id ||
+      row?.attendance_cycle_id || null;
     const cycleSetHash = cycleIds.length
       ? await computeAttendanceCycleSetHash(cycleIds)
       : null;
@@ -684,6 +687,11 @@ export async function buildMakesafeV2Comparison(
     const staleApproval = approvalRows.some((item) =>
       item.decision === "approved" && !currentApprovals.includes(item)
     );
+    const detailCycleAttributionError = jobDetail &&
+        (!jobDetail.attendance_cycle_id ||
+          jobDetail.cycle_attribution !== "bound")
+      ? "The job detail attendance cycle is not authoritatively bound."
+      : null;
     const cycleAttributionError = [
         ...assignmentRows,
         ...reportRows,
@@ -694,7 +702,8 @@ export async function buildMakesafeV2Comparison(
         ),
       ].some((fact) =>
         !fact.attendance_cycle_id || fact.cycle_attribution !== "bound"
-      ) || portalRows.some((fact) => !fact.attendance_cycle_id)
+      ) || portalRows.some((fact) => !fact.attendance_cycle_id) ||
+      detailCycleAttributionError
       ? "One or more operational facts lack exact attendance-cycle attribution."
       : currentPacks.length > 1
       ? "More than one report pack claims the current attendance cycle."
@@ -816,11 +825,10 @@ export async function buildMakesafeV2Comparison(
           ? rules.get(String(identityRevision?.family_rule_key || "")) || null
           : null,
         job_family: jobFamily || null,
-        job_details: details.find((item) => String(item?.job_id) === jobId) ||
-          null,
+        job_details: jobDetail,
         detail_cycle_binding: {
-          attendance_cycle_id: row?.attendance_cycle_id || null,
-          cycle_attribution: row?.cycle_attribution || null,
+          attendance_cycle_id: jobDetail?.attendance_cycle_id || null,
+          cycle_attribution: jobDetail?.cycle_attribution || null,
         },
         docket: dockets.find((item) => String(item?.job_id) === jobId) ||
           null,
