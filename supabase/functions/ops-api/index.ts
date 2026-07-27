@@ -217,6 +217,12 @@ import {
   loadDeterministicRolloutControls as _loadDeterministicRolloutControls,
   runDeterministicIntake as _runDeterministicIntake,
 } from './makesafe_deterministic_intake_runtime.ts'
+import {
+  assertReportingIntakeAccounting as _assertReportingIntakeAccounting,
+} from './makesafe_reporting_accounting.ts'
+import {
+  drainLegacyIntakeDrafts as _drainLegacyIntakeDrafts,
+} from './makesafe_intake_legacy_drain.ts'
 // Batch AI gap-fill for deterministic-intake "needs-a-human" flags. Read (queue)
 // + additive audited write (apply). No paid API: the AI judgment runs on the
 // captain's subscription Claude, which reads this queue and posts fills back here.
@@ -3301,6 +3307,19 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'geocode_job': return json(await geocodeJob(client, body))
       case 'geocode_missing_makesafes': return json(await geocodeMissingMakesafes(client))
       case 'list_intake_drafts': return json(await listIntakeDrafts(client, url.searchParams))
+      case 'makesafe_intake_legacy_drain': {
+        const drainIsPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!drainIsPrivileged) {
+          return json({ error: 'forbidden: makesafe_intake_legacy_drain requires the privileged ops key or an admin/owner session' }, 403)
+        }
+        return json(await _drainLegacyIntakeDrafts(client, {
+          maxDrafts: Number(body?.max_drafts ?? body?.maxDrafts ?? 100),
+          approveDraft: approveIntakeDraft,
+          applyBuilderCancellation: (command) =>
+            applyDeterministicBuilderCancellation(client, command),
+        }))
+      }
       case 'auto_approve_clean_intake_drafts': {
         const autoApproveIsPrivileged = authMode === 'api_key' ||
           (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
@@ -16840,6 +16859,24 @@ async function scanSesMakesafes(client: any) {
     allowInstructionKeys: rollout.instructionKeys,
     advanceDrafts,
     approveDraft: approveIntakeDraft,
+    applyBuilderCancellation: (command) =>
+      applyDeterministicBuilderCancellation(client, command),
+  })
+}
+
+async function applyDeterministicBuilderCancellation(client: any, command: any) {
+  return await cancelMakesafe(client, {
+    body: {
+      job_id: command.targetJobId,
+      reason_code: command.reasonCode,
+      note: command.note,
+      operator_email: command.operator,
+      idempotency_key: command.idempotencyKey,
+      source_post_id: command.sourcePostId,
+      intake_case_id: command.caseId,
+    },
+    authMode: 'api_key',
+    operatorEmail: command.operator,
   })
 }
 
@@ -16856,6 +16893,7 @@ async function runMakesafeReportingIntakePass(
   // sweep advances only drafts that pass the same pure field gate and the same
   // approveIntakeDraft duplicate/atomic-claim guards as a human review-button click.
   const intake = await (deps.scan || scanSesMakesafes)(client)
+  const accounting = _assertReportingIntakeAccounting(intake)
   const advancement = await (deps.advance || autoApproveCleanIntakeDrafts)(client, {
     limit: REPORTING_INTAKE_ADVANCE_LIMIT,
     dry_run: false,
@@ -16867,6 +16905,7 @@ async function runMakesafeReportingIntakePass(
     bounded_intake_passes: 1,
     advancement_limit: REPORTING_INTAKE_ADVANCE_LIMIT,
     intake,
+    accounting,
     advancement,
   }
 }

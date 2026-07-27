@@ -4,6 +4,8 @@
 //   3. one email -> two cards (combined make-safe + report is flagged, never auto-filed),
 // plus the default-on auto-approval flag and explicit false brake. The real live failure cases are named:
 // the MLB-25769 cancellation twins and the wrong-type roof fallback.
+// deno-lint-ignore-file no-import-prefix
+
 import {
   assert,
   assertEquals,
@@ -62,7 +64,7 @@ Deno.test("subjectIsCancellation: does NOT flag genuine new work orders", () => 
   );
 });
 
-Deno.test("isGenuineNewWorkOrder: MLB-25769 CANCELLED WORK ORDER twin is dropped, not minted", () => {
+Deno.test("isGenuineNewWorkOrder: MLB-25769 cancellation routes deterministically, never mints", () => {
   // The live twin-draft incident: this subject carries 'work order' so it used to pass
   // subjectLooksLikeNewWorkOrder and mint a NEW draft (two of them, in fact).
   const r = isGenuineNewWorkOrder(
@@ -72,9 +74,10 @@ Deno.test("isGenuineNewWorkOrder: MLB-25769 CANCELLED WORK ORDER twin is dropped
   );
   assertEquals(r.ok, false);
   assertEquals(r.reason, "cancelled_work_order");
+  assertEquals(r.route, "deterministic_cancellation");
 });
 
-Deno.test("isGenuineNewWorkOrder: a cancellation WITH a PDF is still dropped", () => {
+Deno.test("isGenuineNewWorkOrder: a cancellation with a PDF still routes deterministically", () => {
   const r = isGenuineNewWorkOrder(
     "CANCELLED WORK ORDER - MLB-25769 34 Carbine Loop",
     "admin@mlbuilders.com.au",
@@ -82,6 +85,7 @@ Deno.test("isGenuineNewWorkOrder: a cancellation WITH a PDF is still dropped", (
   );
   assertEquals(r.ok, false);
   assertEquals(r.reason, "cancelled_work_order");
+  assertEquals(r.route, "deterministic_cancellation");
 });
 
 Deno.test("isGenuineNewWorkOrder: genuine NEW WORK ORDER still comes in (no cancellation false-positive)", () => {

@@ -16,8 +16,16 @@ Deno.test("SES reporting run triggers exactly one bounded scan and one bounded g
       scan: () => {
         scans++;
         return Promise.resolve({
+          mode: "deterministic",
           completion_status: "completed",
           cases_committed: 2,
+          evidence: {
+            durable_source_fates: {
+              checked: 3,
+              final: 2,
+              transient: 1,
+            },
+          },
         });
       },
       advance: (_client, body) => {
@@ -43,7 +51,38 @@ Deno.test("SES reporting run triggers exactly one bounded scan and one bounded g
   assertEquals(result.bounded_intake_passes, 1);
   assertEquals(result.advancement_limit, 100);
   assertEquals(result.intake.completion_status, "completed");
+  assertEquals(result.accounting, { checked: 3, final: 2, transient: 1 });
   assertEquals(result.advancement.auto_approved_count, 2);
+});
+
+Deno.test("SES reporting stops before advancement when source-fate evidence is incomplete", async () => {
+  let advances = 0;
+  await assertRejects(
+    () =>
+      _runMakesafeReportingIntakePassForTest(
+        {},
+        {
+          scan: () =>
+            Promise.resolve({
+              mode: "deterministic",
+              evidence: {
+                durable_source_fates: {
+                  checked: 2,
+                  final: 1,
+                  transient: 0,
+                },
+              },
+            }),
+          advance: () => {
+            advances++;
+            return Promise.resolve({});
+          },
+        },
+      ),
+    Error,
+    "source-fate assertion is incomplete",
+  );
+  assertEquals(advances, 0);
 });
 
 Deno.test("SES reporting hook never retries a failed scanner or starts advancement after it", async () => {
