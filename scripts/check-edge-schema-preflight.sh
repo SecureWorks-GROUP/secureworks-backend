@@ -203,7 +203,7 @@ SELECT
   CASE WHEN m.version IS NULL THEN NULL ELSE cardinality(m.statements)
   END AS actual_statement_count,
   CASE WHEN m.version IS NULL THEN NULL
-       ELSE encode(digest(array_to_json(m.statements)::text, 'sha256'), 'hex')
+       ELSE encode(extensions.digest(array_to_json(m.statements)::text, 'sha256'), 'hex')
   END AS actual_statement_sha256,
   COALESCE((
     SELECT json_agg(ms.marker_kind || ':' || ms.marker_name ORDER BY ms.marker_kind, ms.marker_name)

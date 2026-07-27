@@ -176,6 +176,62 @@ test_fixture_response_requires_explicit_test_mode() {
   fi
 }
 
+test_read_only_safety_boundary() {
+  local name="test_read_only_safety_boundary"
+  local response="$TEST_TMP/read-only.json"
+  local capture="$TEST_TMP/request.json"
+  local fake_curl="$TEST_TMP/fake-curl"
+  write_response "$response" "makesafe_attendance_cycles_u2_s1" "$(migration_sha)" '[]'
+  CAPTURE_FILE="$capture" RESPONSE_FILE="$response" python3 - "$fake_curl" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_text("""#!/usr/bin/env python3
+import os
+import shutil
+import sys
+
+args = sys.argv[1:]
+output_path = args[args.index('-o') + 1]
+payload_path = args[args.index('--data-binary') + 1][1:]
+shutil.copyfile(payload_path, os.environ['CAPTURE_FILE'])
+shutil.copyfile(os.environ['RESPONSE_FILE'], output_path)
+print('200', end='')
+""")
+Path(sys.argv[1]).chmod(0o755)
+PY
+  CAPTURE_FILE="$capture" RESPONSE_FILE="$response" CURL_BIN="$fake_curl" \
+    SUPABASE_ACCESS_TOKEN=test bash "$PREFLIGHT" ops-api >"$TEST_TMP/read-only-output" 2>&1
+  local rc=$?
+  local safety_result
+  safety_result="$(CAPTURE_FILE="$capture" PREFLIGHT="$PREFLIGHT" python3 <<'PY'
+import json
+import os
+import re
+from pathlib import Path
+
+source = Path(os.environ['PREFLIGHT']).read_text()
+payload = json.loads(Path(os.environ['CAPTURE_FILE']).read_text())
+query = payload['query']
+forbidden = re.compile(
+    r"\\b(?:insert|update|delete|merge|create|alter|drop|truncate|grant|revoke)\\b|"
+    r"\\bsupabase\\s+(?:db\\s+push|migration\\s+apply)\\b",
+    re.IGNORECASE,
+)
+if forbidden.search(query) or forbidden.search(source):
+    raise SystemExit('write or migration-application operation found')
+if 'extensions.digest(' not in query:
+    raise SystemExit('generated query does not schema-qualify digest')
+print('safe')
+PY
+)"
+  if [[ "$rc" -eq 0 ]] && [[ "$safety_result" == "safe" ]]; then
+    pass "$name"
+  else
+    fail "$name" "read-only boundary failed: rc=$rc result=$safety_result"
+  fi
+}
+
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
@@ -189,6 +245,7 @@ main() {
     test_statement_checksum_drift_is_advisory
     test_unrelated_function_without_requirements_passes_without_credentials
     test_fixture_response_requires_explicit_test_mode
+    test_read_only_safety_boundary
   fi
 
   echo
