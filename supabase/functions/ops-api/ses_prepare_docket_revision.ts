@@ -1539,13 +1539,13 @@ async function prepareOne(
   const drafts = matrix.ok
     ? blockers.length === 0
       ? buildEmailDrafts(
-      input,
-      row,
-      reportFile,
-      swmsFile,
-      photoFiles,
-      priced.proposal,
-    )
+        input,
+        row,
+        reportFile,
+        swmsFile,
+        photoFiles,
+        priced.proposal,
+      )
       : {}
     : {};
   if (drafts.REPORT_EMAIL_DRAFT) {
