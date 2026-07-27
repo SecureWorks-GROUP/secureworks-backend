@@ -56,12 +56,12 @@ Deno.test("SWMS-26980 live fixture builds canonical v1 input without inventing U
     attribution: "bound",
   });
   assertEquals(input.classification.builder_key, "MLB");
-  assertEquals(input.classification.family, "ordinary_roof_portal");
+  assertEquals(input.classification.family, "unknown");
   assertEquals(input.source.builder_reference, "");
   assertEquals(input.source.po_or_external_ref, null);
   assertEquals(input.source.deliverables, []);
   assertEquals(input.source.portal_links, [{
-    role: "roof_report",
+    role: "assessment",
     url: "https://primeeco.tech/share/2ef11c67-8f63-48cb-9ff4-61bf71848f17",
     source: "job_detail",
   }]);
@@ -143,22 +143,81 @@ Deno.test("SWMS-26980 production-shape dry-run is HTTP-envelope ready, write-fre
   const codes = blockerCodes(result);
   assert(codes.includes("spine_missing_source"));
   assert(codes.includes("spine_missing_lineage"));
-  assert(codes.includes("capability_portal_degraded"));
-  assert(codes.includes("pricing_evidence_missing"));
+  assert(codes.includes("family_unknown"));
   assert(!codes.includes("recovery-not-run"));
 });
 
-Deno.test("live adapter applies the Captain AJS physical-makesafe rule before report wording", () => {
+Deno.test("live adapter maps the canonical board family without an AJS physical shortcut", () => {
   const live = snapshot();
   live.detail!.requesting_company_slug = "aj";
   live.detail!.requesting_company_name = "AJS";
-  live.detail!.report_type = "roof_report";
+  live.detail!.report_type = null;
   live.job.metadata.requesting_company = { slug: "aj", name: "AJS" };
-  live.job.metadata.job_family = "roof_report";
+  live.job.metadata.makesafe_job_family = "temp_fence_makesafe";
   const input = buildSesAssemblerInput(live);
   assertEquals(input.classification.builder_key, "AJS");
-  assertEquals(input.classification.family, "physical_makesafe");
+  assertEquals(input.classification.family, "temporary_fencing");
   assertEquals(input.classification.report_only, false);
+});
+
+Deno.test("live adapter maps every canonical board family token exactly", () => {
+  for (
+    const [signal, expected] of [
+      ["general_makesafe", "physical_makesafe"],
+      ["temp_fence_makesafe", "temporary_fencing"],
+      ["assessment_report_quote", "assessment_quote"],
+    ] as const
+  ) {
+    const live = snapshot();
+    live.detail!.report_type = null;
+    live.job.metadata.makesafe_job_family = signal;
+    const input = buildSesAssemblerInput(live);
+    assertEquals(input.classification.family, expected, signal);
+  }
+
+  const portalRoof = snapshot();
+  portalRoof.detail!.report_type = null;
+  portalRoof.job.metadata.makesafe_job_family = "roof_report";
+  assertEquals(
+    buildSesAssemblerInput(portalRoof).classification.family,
+    "ordinary_roof_portal",
+  );
+
+  const ownTemplateRoof = snapshot();
+  ownTemplateRoof.detail!.report_type = null;
+  ownTemplateRoof.detail!.external_links = [];
+  ownTemplateRoof.job.metadata.makesafe_job_family = "roof_report";
+  ownTemplateRoof.job.metadata.report_delivery = "own_document";
+  assertEquals(
+    buildSesAssemblerInput(ownTemplateRoof).classification.family,
+    "own_template_roof",
+  );
+});
+
+Deno.test("live adapter leaves an unmapped canonical family unknown without falling through to prose or legacy fields", () => {
+  const live = snapshot();
+  live.job.metadata.makesafe_job_family = "unsealed_new_family";
+  live.job.metadata.job_family = "roof_report";
+  live.detail!.report_type = "roof_report";
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.classification.family, "unknown");
+});
+
+Deno.test("live adapter ignores legacy family fields when the canonical family is absent", () => {
+  const live = snapshot();
+  live.job.metadata = { report_delivery: "own_document" };
+  live.detail!.report_type = "roof_report";
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.classification.family, "unknown");
+});
+
+Deno.test("live adapter keeps canonical roof family ordinary unless typed own-template evidence is present", () => {
+  const live = snapshot();
+  live.job.metadata.makesafe_job_family = "roof_report";
+  live.detail!.report_type = "assessment_report";
+  live.detail!.report_delivery = "own_document";
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.classification.family, "own_template_roof");
 });
 
 Deno.test("live adapter leaves an unclassified non-AJS card explicitly unknown", () => {
@@ -175,8 +234,8 @@ Deno.test("live adapter leaves an unclassified non-AJS card explicitly unknown",
 
 Deno.test("live adapter seals the assessment recipe and leaves only truthful source blockers", async () => {
   const live = snapshot();
-  live.job.metadata.job_family = "assessment";
-  live.detail!.report_type = "assessment_report_quote";
+  live.job.metadata.makesafe_job_family = "assessment_report_quote";
+  live.detail!.report_type = null;
   live.detail!.external_links = [
     { kind: "assessment_report", url: "https://portal.example.test/report" },
     { kind: "photos", url: "https://portal.example.test/photos" },

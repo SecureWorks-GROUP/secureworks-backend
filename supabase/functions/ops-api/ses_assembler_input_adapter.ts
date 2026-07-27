@@ -132,37 +132,36 @@ function builderKey(snapshot: SesAssemblerLiveSnapshot): SesBuilderKey {
   return "UNKNOWN";
 }
 
-function family(
-  snapshot: SesAssemblerLiveSnapshot,
-  builder: SesBuilderKey,
-): SesFamilyId {
-  const detail = snapshot.detail || {};
+function family(snapshot: SesAssemblerLiveSnapshot): SesFamilyId {
   const metadata = record(snapshot.job.metadata);
-  const explicit = firstText(
-    metadata.ses_family,
-    metadata.makesafe_family,
-    metadata.job_family,
-    detail.report_type,
-  ).toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
-  if (
-    explicit.includes("temporary_fenc") ||
-    explicit === "temp_fence"
-  ) return "temporary_fencing";
-  // Standing Captain rule: AJS/AJBR jobs are physical make-safes even when
-  // roof/report wording appears in the source. Only an explicit temporary
-  // fencing subtype selects the other open AJS family.
-  if (builder === "AJS" || builder === "AJBR") return "physical_makesafe";
-  if (
-    explicit.includes("assessment") ||
-    explicit.includes("report_and_quote")
-  ) return "assessment_quote";
+  const explicit = text(metadata.makesafe_job_family).toLowerCase()
+    .replaceAll("-", "_").replaceAll(" ", "_");
   const ownTemplate = metadata.own_template_requested === true ||
+    metadata.strata === true ||
     metadata.report_delivery === "own_document" ||
-    explicit.includes("own_template") ||
-    explicit.includes("strata");
-  if (ownTemplate) return "own_template_roof";
-  if (explicit.includes("roof")) return "ordinary_roof_portal";
-  return "unknown";
+    snapshot.detail?.report_delivery === "own_document";
+  switch (explicit) {
+    case "general_makesafe":
+    case "physical_makesafe":
+      return "physical_makesafe";
+    case "temp_fence_makesafe":
+    case "temporary_fencing":
+    case "temp_fence":
+      return "temporary_fencing";
+    case "assessment_report_quote":
+    case "assessment_report":
+    case "assessment_quote":
+    case "assessment":
+      return "assessment_quote";
+    case "own_template_roof":
+      return "own_template_roof";
+    case "ordinary_roof_portal":
+      return ownTemplate ? "own_template_roof" : "ordinary_roof_portal";
+    case "roof_report":
+      return ownTemplate ? "own_template_roof" : "ordinary_roof_portal";
+    default:
+      return "unknown";
+  }
 }
 
 function lineageKind(
@@ -298,7 +297,7 @@ export function buildSesAssemblerInput(
   const company = record(detail.makesafe_companies);
   const intakeCase = sourceCase(snapshot.cases);
   const builder = builderKey(snapshot);
-  const familyId = family(snapshot, builder);
+  const familyId = family(snapshot);
   const cycle = currentCycle(snapshot);
   const report = selectCurrentCycleReport(
     snapshot.reports,
