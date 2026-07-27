@@ -15,6 +15,7 @@ const ARTIFACT_ROOT = new URL(
 const POLL_MS = 15_000;
 const SCAN_TIMEOUT_MS = 6 * 60_000;
 const MARKER_PREFIX = "SWG-SES-LIVEFIRE-TEST-ONLY-";
+const OPTIONAL_MUTABLE_TABLES = new Set(["draft_notes"]);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -33,6 +34,8 @@ export interface Inventory {
   jobEvents: JsonRecord[];
   jobDocuments: JsonRecord[];
   attendanceCycles: JsonRecord[];
+  readinessCurrent: JsonRecord[];
+  readinessInvalidations: JsonRecord[];
   boardApplications: JsonRecord[];
   docketRevisions: JsonRecord[];
   docketArtifacts: JsonRecord[];
@@ -85,6 +88,54 @@ function assertRunId(value: string): void {
       .test(value)
   ) {
     throw new Error("synthetic live-fire run id must be a UUID");
+  }
+}
+
+export function isMissingOptionalMutableTable(
+  error: unknown,
+  table: string,
+): boolean {
+  return OPTIONAL_MUTABLE_TABLES.has(table) &&
+    error instanceof LivefireHttpError &&
+    error.operation === `GET ${table}` &&
+    error.status === 404 &&
+    error.detail.includes('"code":"PGRST205"') &&
+    error.detail.includes(`'public.${table}'`);
+}
+
+function isScopedJobDocumentPath(
+  path: string,
+  markedJobPrefixes: readonly string[],
+): boolean {
+  return markedJobPrefixes.some((prefix) => path.startsWith(prefix)) ||
+    /^makesafe-deterministic\/[0-9a-f]{16}\/sha256-[0-9a-f]{64}\.pdf$/i
+      .test(path);
+}
+
+export function assertExclusiveJobDocumentStorageRefs(
+  run: FixtureRun,
+  found: Inventory,
+  path: string,
+  references: readonly JsonRecord[],
+): void {
+  const expectedIds = new Set(
+    found.jobDocuments
+      .filter((row) => row.storage_url === path)
+      .map((row) => String(row.id)),
+  );
+  const markedJobIds = new Set(strings(found.jobs, "id"));
+  if (
+    references.length !== expectedIds.size ||
+    references.some((row) =>
+      !expectedIds.has(String(row.id)) ||
+      !markedJobIds.has(String(row.job_id)) ||
+      row.storage_url !== path ||
+      !containsMarker(row.data_snapshot_json, run.marker)
+    )
+  ) {
+    throw new Error(
+      `cleanup refused shared or foreign job-document object: ${path}`,
+    );
   }
 }
 
@@ -277,6 +328,8 @@ async function inventory(
     jobEvents,
     jobDocuments,
     attendanceCycles,
+    readinessCurrent,
+    readinessInvalidations,
     boardApplications,
     docketRevisions,
     revisionApprovals,
@@ -288,6 +341,16 @@ async function inventory(
     client.rowsForIds<JsonRecord>("job_documents", "job_id", jobIds),
     client.rowsForIds<JsonRecord>(
       "makesafe_attendance_cycles",
+      "job_id",
+      jobIds,
+    ),
+    client.rowsForIds<JsonRecord>(
+      "makesafe_readiness_current",
+      "job_id",
+      jobIds,
+    ),
+    client.rowsForIds<JsonRecord>(
+      "makesafe_readiness_invalidations",
       "job_id",
       jobIds,
     ),
@@ -348,15 +411,26 @@ async function inventory(
       "draft_notes",
       "job_variations",
       "purchase_orders",
-      "trade_invoices",
     ]
   ) {
-    mutableOperationalRows[table] = await client.rowsForIds<JsonRecord>(
-      table,
-      "job_id",
-      jobIds,
-    );
+    try {
+      mutableOperationalRows[table] = await client.rowsForIds<JsonRecord>(
+        table,
+        "job_id",
+        jobIds,
+      );
+    } catch (error) {
+      if (!isMissingOptionalMutableTable(error, table)) throw error;
+      mutableOperationalRows[table] = [];
+    }
   }
+  mutableOperationalRows.trade_invoice_lines = await client.rowsForIds<
+    JsonRecord
+  >(
+    "trade_invoice_lines",
+    "job_id",
+    jobIds,
+  );
   return {
     marker,
     emails,
@@ -372,6 +446,8 @@ async function inventory(
     jobEvents,
     jobDocuments,
     attendanceCycles,
+    readinessCurrent,
+    readinessInvalidations,
     boardApplications,
     docketRevisions,
     docketArtifacts,
@@ -411,9 +487,12 @@ export function guardInventory(run: FixtureRun, found: Inventory): void {
     }
   }
   for (const issue of found.sourceIssues) {
-    if (!containsMarker(issue.page_meta, run.marker)) {
+    if (
+      !postIds.has(String(issue.post_id)) ||
+      String(issue.mailbox).toLowerCase() !== run.mailbox
+    ) {
       throw new Error(
-        `cleanup refused source issue without exact marker: ${
+        `cleanup refused source issue outside exact marker source roots: ${
           String(issue.id)
         }`,
       );
@@ -468,6 +547,8 @@ export function guardInventory(run: FixtureRun, found: Inventory): void {
     const row of [
       ...found.details,
       ...found.attendanceCycles,
+      ...found.readinessCurrent,
+      ...found.readinessInvalidations,
     ]
   ) {
     if (!jobIds.has(String(row.job_id))) {
@@ -548,7 +629,7 @@ export function guardInventory(run: FixtureRun, found: Inventory): void {
   for (const path of strings(found.jobDocuments, "storage_url")) {
     if (
       path.startsWith("/") || path.includes("..") ||
-      !markedJobPrefixes.some((prefix) => path.startsWith(prefix))
+      !isScopedJobDocumentPath(path, markedJobPrefixes)
     ) {
       throw new Error(
         `cleanup refused unscoped job-documents object: ${path}`,
@@ -564,6 +645,10 @@ export function guardInventory(run: FixtureRun, found: Inventory): void {
     ["revision approvals", found.revisionApprovals],
     ["external effects", found.externalEffects],
     ["Xero invoices", found.xeroInvoices],
+    [
+      "trade invoice lines",
+      found.mutableOperationalRows.trade_invoice_lines || [],
+    ],
   ] as const;
   for (const [label, rows] of forbidden) {
     if (rows.length) {
@@ -679,7 +764,7 @@ async function beginRun(
       evidence: {
         own_sender: run.sender,
         own_mailbox: run.mailbox,
-        outbound_scope: "seven_self_addressed_fixture_emails_only",
+        outbound_scope: "one_self_addressed_physical_fixture_email_only",
         xero_disabled: true,
       },
     }),
@@ -709,7 +794,7 @@ async function injectWave(
           evidence: {
             own_sender: run.sender,
             own_mailbox: run.mailbox,
-            outbound_scope: "seven_self_addressed_fixture_emails_only",
+            outbound_scope: "one_self_addressed_physical_fixture_email_only",
             xero_disabled: true,
             attempted_fixture_ids: evidence.injections.map((row) =>
               row.fixtureId
@@ -749,6 +834,11 @@ async function verifyStages(
   evidence: RunEvidence,
 ): Promise<void> {
   guardInventory(run, found);
+  if (found.emails.length !== 1 || found.jobs.length !== 1) {
+    throw new Error(
+      `single-run intake proof expected one email and one job, found ${found.emails.length} emails and ${found.jobs.length} jobs`,
+    );
+  }
   const fixtureById = new Map(
     run.fixtures.map((fixture) => [fixture.id, fixture]),
   );
@@ -839,27 +929,6 @@ async function verifyStages(
       fate_ms: elapsed,
     });
   }
-  const fateByFixture = new Map(
-    fates.map((row) => [String(row.fixture), row]),
-  );
-  for (
-    const [childFixture, parentFixture] of [
-      ["reattend", "physical"],
-      ["correction", "roof"],
-    ] as const
-  ) {
-    const child = fateByFixture.get(childFixture);
-    const parent = fateByFixture.get(parentFixture);
-    if (
-      !child || !parent ||
-      child.parent_case_id !== parent.case_id ||
-      child.job_id !== parent.job_id
-    ) {
-      throw new Error(
-        `${childFixture} did not bind to the exact earlier ${parentFixture} case and job`,
-      );
-    }
-  }
   evidence.stages.push({ stage: "intake_fates", result: "PASS", rows: fates });
 
   const board = await client.action<JsonRecord>(
@@ -906,103 +975,29 @@ async function verifyStages(
     jobs: projected,
   });
 
-  const dryRuns: JsonRecord[] = [];
-  for (const jobId of unique(strings(found.jobs, "id"))) {
-    const dryRun = await client.action<JsonRecord>(
-      "ops-api",
-      "prepare_ses_docket_revision",
-      {
-        method: "POST",
-        body: {
-          dry_run: true,
-          selection: { mode: "job_id", job_id: jobId },
-          idempotency_key: `${run.marker}:${jobId}:dry-run`,
-        },
-      },
-    );
-    const results = Array.isArray(dryRun.results)
-      ? dryRun.results as JsonRecord[]
-      : [];
-    const json = JSON.stringify(dryRun);
-    if (
-      results.length !== 1 ||
-      results.some((result) =>
-        result.persisted !== false || result.state !== "blocked"
-      ) ||
-      !json.includes("synthetic_livefire_release_forbidden")
-    ) {
-      throw new Error(
-        `U4 dry-run for ${jobId} was persisted or lacked the permanent synthetic blocker`,
-      );
-    }
-    dryRuns.push({ job_id: jobId, response: dryRun });
-  }
-  const assessment = run.fixtures.find((fixture) =>
-    fixture.kind === "assessment_quote"
-  )!;
-  const assessmentCase = fates.find((row) => row.fixture === assessment.id);
-  const assessmentDryRun = dryRuns.find((row) =>
-    row.job_id === assessmentCase?.job_id
-  );
-  const assessmentJson = JSON.stringify(assessmentDryRun);
-  for (const role of assessment.expected.portalRoles) {
-    if (!assessmentJson.includes(`"${role}"`)) {
-      throw new Error(`assessment U4 envelope omitted portal role ${role}`);
-    }
-  }
-  evidence.stages.push({
-    stage: "u4_dry_run_and_assessment_triad",
-    result: "PASS",
-    rows: dryRuns,
-  });
-
-  const jobIds = unique(strings(found.jobs, "id"));
-  let releaseRefusal: JsonRecord | null = null;
-  try {
-    await client.action<JsonRecord>(
-      "ops-api",
-      "prepare_ses_release_revision",
-      {
-        method: "POST",
-        body: { job_ids: jobIds },
-      },
-    );
-    throw new Error("synthetic release preparation unexpectedly succeeded");
-  } catch (error) {
-    if (
-      !(error instanceof LivefireHttpError) ||
-      error.status !== 409 ||
-      !error.detail.includes("synthetic_livefire_release_forbidden")
-    ) {
-      throw error;
-    }
-    releaseRefusal = {
-      status: error.status,
-      code: "synthetic_livefire_release_forbidden",
-      operation: error.operation,
-    };
-  }
-
-  const afterDryRun = await inventory(client, run.marker);
+  const afterCardProof = await inventory(client, run.marker);
   if (
-    afterDryRun.docketRevisions.length ||
-    afterDryRun.revisionApprovals.length ||
-    afterDryRun.releaseRevisions.length ||
-    afterDryRun.releaseMembers.length ||
-    afterDryRun.externalEffects.length ||
-    afterDryRun.xeroInvoices.length
+    afterCardProof.docketRevisions.length ||
+    afterCardProof.revisionApprovals.length ||
+    afterCardProof.releaseRevisions.length ||
+    afterCardProof.releaseMembers.length ||
+    afterCardProof.externalEffects.length ||
+    afterCardProof.xeroInvoices.length
   ) {
-    throw new Error("dry-run produced forbidden docket/release/Xero state");
+    throw new Error(
+      "intake-only run produced forbidden docket/release/Xero state",
+    );
   }
   evidence.stages.push({
-    stage: "release_refusal",
-    result: "PASS",
+    stage: "downstream_synthetic_scope",
+    result: "NOT_RUN_BY_CAPTAIN_ORDER",
     docket_revisions: 0,
     release_revisions: 0,
     approvals: 0,
     external_effects: 0,
     xero_invoices: 0,
-    refusal: releaseRefusal,
+    note:
+      "Downstream docket and workflow validation belongs on existing real cards; the synthetic run ends after card classification.",
   });
 }
 
@@ -1015,6 +1010,7 @@ async function cleanup(
 ): Promise<void> {
   assertCleanupSettled(found, expectedAttempted);
   guardInventory(run, found);
+  const jobDocumentStorageReferenceProof: JsonRecord[] = [];
   const dryRunPlan = {
     terminal_accounting: {
       emails: strings(found.emails, "post_id"),
@@ -1031,6 +1027,8 @@ async function cleanup(
       jobs: strings(found.jobs, "id"),
       job_details: strings(found.details, "job_id"),
       attendance_cycles: strings(found.attendanceCycles, "id"),
+      readiness_current: strings(found.readinessCurrent, "job_id"),
+      readiness_invalidations: strings(found.readinessInvalidations, "id"),
       intake_drafts: strings(found.intakeDrafts, "id"),
       job_documents: strings(found.jobDocuments, "id"),
       email_events: strings(found.emailEvents, "id"),
@@ -1045,6 +1043,9 @@ async function cleanup(
       makesafe_emails: unique(strings(found.attachments, "storage_path")),
       job_documents: unique(strings(found.jobDocuments, "storage_url")),
     },
+    storage_reference_proof: {
+      job_documents: jobDocumentStorageReferenceProof,
+    },
     mailbox_retained: found.emails.map((row) => ({
       post_id: row.post_id,
       subject: row.subject,
@@ -1052,9 +1053,20 @@ async function cleanup(
   };
   evidence.cleanup = { dryRunPlan };
   const runRoot = new URL(`${run.marker}/`, ARTIFACT_ROOT);
-  await writeJson(new URL("cleanup-dry-run.json", runRoot), dryRunPlan);
 
   const terminalAt = new Date().toISOString();
+  for (const path of unique(strings(found.jobDocuments, "storage_url"))) {
+    const references = await client.rest<JsonRecord[]>("job_documents", {
+      select: "id,job_id,storage_url,data_snapshot_json",
+      storage_url: `eq.${path}`,
+    });
+    assertExclusiveJobDocumentStorageRefs(run, found, path, references);
+    jobDocumentStorageReferenceProof.push({
+      path,
+      reference_ids: strings(references, "id"),
+    });
+  }
+  await writeJson(new URL("cleanup-dry-run.json", runRoot), dryRunPlan);
 
   await client.removeStorageObjects(
     "makesafe-emails",
@@ -1127,11 +1139,23 @@ async function cleanup(
       strings(rows, "id"),
     );
   }
-  const deletedJobs = await client.deleteIds(
-    "jobs",
-    "id",
-    strings(found.jobs, "id"),
+  const purgedJobState = await client.rpc<JsonRecord>(
+    "purge_synthetic_livefire_jobs",
+    { p_marker: run.marker },
   );
+  const expectedJobIds = unique(strings(found.jobs, "id"));
+  const purgedJobIds = unique(
+    Array.isArray(purgedJobState.jobs_deleted)
+      ? purgedJobState.jobs_deleted.map(String)
+      : [],
+  );
+  if (JSON.stringify(purgedJobIds) !== JSON.stringify(expectedJobIds)) {
+    throw new Error(
+      `synthetic job purge mismatch: expected ${
+        JSON.stringify(expectedJobIds)
+      } but deleted ${JSON.stringify(purgedJobIds)}`,
+    );
+  }
 
   await client.rest<JsonRecord[]>(
     "ses_synthetic_livefire_runs",
@@ -1251,7 +1275,8 @@ async function cleanup(
         rows.length,
       ]),
     ),
-    jobs_deleted: deletedJobs.length,
+    jobs_deleted: purgedJobIds.length,
+    ledger_bound_job_purge: purgedJobState,
     retained_audit_counts: {
       emails: after.emails.length,
       cases: after.cases.length,
@@ -1302,6 +1327,14 @@ async function main(): Promise<void> {
     expiresAtMs: Date.now() + 14 * 60_000,
     secret: signingKey,
   });
+  const productionFixtures = fixtureRun.fixtures.filter((fixture) =>
+    fixture.id === "physical"
+  );
+  if (productionFixtures.length !== 1) {
+    throw new Error(
+      "single physical live-fire fixture is missing or duplicated",
+    );
+  }
   assertMarker(fixtureRun.marker);
   const startedAt = new Date().toISOString();
   const runRoot = new URL(`${fixtureRun.marker}/`, ARTIFACT_ROOT);
@@ -1317,7 +1350,12 @@ async function main(): Promise<void> {
     errors: [],
   };
   if (command !== "cleanup") {
-    await writeFixtures(fixtureRun, runRoot);
+    await writeFixtures(
+      command === "generate"
+        ? fixtureRun
+        : { ...fixtureRun, fixtures: productionFixtures },
+      runRoot,
+    );
   }
   if (command === "generate") {
     console.log(
@@ -1383,10 +1421,10 @@ async function main(): Promise<void> {
   }
   if (
     Deno.env.get("SYNTHETIC_LIVEFIRE_CONFIRM") !==
-      "SEND_7_SELF_ADDRESSED_TEST_EMAILS"
+      "SEND_1_SELF_ADDRESSED_TEST_EMAIL"
   ) {
     throw new Error(
-      "full injection requires SYNTHETIC_LIVEFIRE_CONFIRM=SEND_7_SELF_ADDRESSED_TEST_EMAILS",
+      "full injection requires SYNTHETIC_LIVEFIRE_CONFIRM=SEND_1_SELF_ADDRESSED_TEST_EMAIL",
     );
   }
   await beginRun(client, fixtureRun, baseline);
@@ -1396,22 +1434,12 @@ async function main(): Promise<void> {
     await injectWave(
       client,
       fixtureRun,
-      fixtureRun.fixtures.slice(0, 4),
+      productionFixtures,
       evidence,
     );
-    await waitFor("root fixture intake fates", SCAN_TIMEOUT_MS, async () => {
+    await waitFor("single fixture intake fate", SCAN_TIMEOUT_MS, async () => {
       const found = await inventory(client, fixtureRun.marker, startedAt);
-      return found.emails.length >= 4 && found.caseSources.length >= 4;
-    });
-    await injectWave(
-      client,
-      fixtureRun,
-      fixtureRun.fixtures.slice(4),
-      evidence,
-    );
-    await waitFor("all fixture intake fates", SCAN_TIMEOUT_MS, async () => {
-      const found = await inventory(client, fixtureRun.marker, startedAt);
-      return found.emails.length === 7 && found.caseSources.length === 7;
+      return found.emails.length === 1 && found.caseSources.length === 1;
     });
     const found = await inventory(client, fixtureRun.marker, startedAt);
     evidence.inventory = counts(found);

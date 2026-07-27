@@ -42,7 +42,7 @@ SUPABASE_URL="${supabase_url}" \
 SUPABASE_SERVICE_ROLE_KEY="${service_role_key}" \
 SW_API_KEY="${SW_API_KEY}" \
 SYNTHETIC_LIVEFIRE_RUN_ID="${livefire_run_id}" \
-SYNTHETIC_LIVEFIRE_CONFIRM="SEND_7_SELF_ADDRESSED_TEST_EMAILS" \
+SYNTHETIC_LIVEFIRE_CONFIRM="SEND_1_SELF_ADDRESSED_TEST_EMAIL" \
   "${deno_bin}" run \
     --allow-env \
     --allow-net \
