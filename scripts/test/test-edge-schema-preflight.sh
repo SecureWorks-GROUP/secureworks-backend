@@ -45,11 +45,13 @@ write_response() {
   local actual_name="$2"
   local actual_sha="$3"
   local missing_markers_json="$4"
+  local actual_statement_count="${5:-1}"
   EXPECTED_SHA="$(migration_sha)" \
   MEDIA_EXPECTED_SHA="$(media_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
+  ACTUAL_STATEMENT_COUNT="$actual_statement_count" \
   python3 - "$file" <<'PY'
 import json
 import os
@@ -64,9 +66,9 @@ row = {
     "expected_statement_sha256": os.environ["EXPECTED_SHA"],
     "actual_migration_version": "20260727000001" if actual_name else None,
     "actual_migration_name": actual_name,
-    # A normal Supabase apply records a parsed multi-statement array, not one
-    # byte-identical copy of the migration file.
-    "actual_statement_count": 27 if actual_name else None,
+    "actual_statement_count": (
+        int(os.environ["ACTUAL_STATEMENT_COUNT"]) if actual_name else None
+    ),
     "actual_statement_sha256": actual_sha,
     "missing_markers": json.loads(os.environ["MISSING_MARKERS_JSON"]),
 }
@@ -128,13 +130,12 @@ test_missing_migration_refuses_before_deploy() {
 test_multi_statement_ledger_may_deploy() {
   local name="test_multi_statement_ledger_may_deploy"
   local response="$TEST_TMP/applied.json"
-  # Real Supabase ledger serialization is a parsed statement array, so its
-  # representation hash does not reproduce checked-in file bytes.
-  write_response "$response" "makesafe_attendance_cycles_u2_s1" "1111111111111111111111111111111111111111111111111111111111111111" '[]'
+  # Parsed multi-statement ledgers have no comparable raw-file checksum.
+  write_response "$response" "makesafe_attendance_cycles_u2_s1" "" '[]' 27
   run_preflight "$response" ops-api
   if [[ "$PREFLIGHT_RC" -eq 0 ]] && \
     grep -q 'PASS edge schema preflight' <<<"$PREFLIGHT_OUTPUT" && \
-    grep -q 'advisory ledger statement-set checksum differs' <<<"$PREFLIGHT_OUTPUT"; then
+    grep -q 'advisory raw-file checksum is unavailable for 27 parsed ledger statements' <<<"$PREFLIGHT_OUTPUT"; then
     pass "$name"
   else
     fail "$name" "fully applied multi-statement schema was refused: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
@@ -154,17 +155,30 @@ test_missing_schema_marker_refuses() {
   fi
 }
 
-test_statement_checksum_drift_is_advisory() {
-  local name="test_statement_checksum_drift_is_advisory"
+test_raw_statement_checksum_drift_is_advisory() {
+  local name="test_raw_statement_checksum_drift_is_advisory"
   local response="$TEST_TMP/checksum.json"
   write_response "$response" "makesafe_attendance_cycles_u2_s1" "0000000000000000000000000000000000000000000000000000000000000000" '[]'
   run_preflight "$response" ops-api
   if [[ "$PREFLIGHT_RC" -eq 0 ]] && \
-    grep -q 'advisory ledger statement-set checksum differs' <<<"$PREFLIGHT_OUTPUT" && \
+    grep -q 'advisory raw-statement checksum differs from checked-in raw file bytes' <<<"$PREFLIGHT_OUTPUT" && \
     ! grep -q 'Refusing Edge Function deploy' <<<"$PREFLIGHT_OUTPUT"; then
     pass "$name"
   else
     fail "$name" "checksum representation drift blocked deployment or was hidden: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
+  fi
+}
+
+test_raw_statement_checksum_matches_like_for_like() {
+  local name="test_raw_statement_checksum_matches_like_for_like"
+  local response="$TEST_TMP/checksum-match.json"
+  write_response "$response" "makesafe_attendance_cycles_u2_s1" "$(migration_sha)" '[]'
+  run_preflight "$response" ops-api
+  if [[ "$PREFLIGHT_RC" -eq 0 ]] && \
+    ! grep -q 'advisory raw-statement checksum differs' <<<"$PREFLIGHT_OUTPUT"; then
+    pass "$name"
+  else
+    fail "$name" "byte-identical one-statement ledger produced a false-positive warning: rc=$PREFLIGHT_RC output=$PREFLIGHT_OUTPUT"
   fi
 }
 
@@ -249,6 +263,8 @@ if forbidden.search(query) or forbidden.search(source_without_cleanup_flag):
     raise SystemExit('write or migration-application operation found')
 if 'extensions.digest(' not in query:
     raise SystemExit('generated query does not schema-qualify digest')
+if 'convert_to(m.statements[1]' not in query or 'array_to_json(m.statements)' in query:
+    raise SystemExit('generated query does not compare raw statement bytes like-for-like')
 print('safe')
 PY
 )"
@@ -269,7 +285,8 @@ main() {
     test_missing_migration_refuses_before_deploy
     test_multi_statement_ledger_may_deploy
     test_missing_schema_marker_refuses
-    test_statement_checksum_drift_is_advisory
+    test_raw_statement_checksum_drift_is_advisory
+    test_raw_statement_checksum_matches_like_for_like
     test_unrelated_function_without_requirements_passes_without_credentials
     test_fixture_response_requires_explicit_test_mode
     test_read_only_safety_boundary

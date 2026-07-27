@@ -35,14 +35,27 @@ Preferred path:
 2. The GitHub Actions production edge deploy workflow
    (`.github/workflows/deploy-edge-functions.yml`) runs automatically on that
    push, in the `production` environment. For changed functions, its first
-   deploy gate is the read-only schema preflight in
+   deploy gate runs `scripts/apply-pending-migrations.sh`, which applies
+   repository migrations missing from the production ledger in version order
+   through the Management API. It verifies each migration request before
+   writing and read-checking that migration's ledger row. The exact-file
+   exclusions for audited production debt live in
+   `scripts/migration-autoapply-exclusions.txt`; the one reviewed historical
+   ledger-version alias (including its verified production raw-statement SHA) lives in
+   `scripts/migration-autoapply-ledger-aliases.txt`. The runner starts at the
+   audited `20260722000001` baseline because older production history predates
+   this lane and is intentionally sparse. An exception whose file hash changes
+   fails closed. Production deploy runs are serialized so two workflow runs
+   cannot apply the same pending migration concurrently.
+
+   The independent post-apply gate is the read-only schema preflight in
    `scripts/check-edge-schema-preflight.sh`, driven by
    `scripts/edge-function-schema-requirements.txt`; it refuses deployment when
    the declared production migration version or any required queryable marker is
-   absent. Ledger name/checksum drift is reported as a non-blocking advisory:
-   Supabase stores parsed statement arrays whose serialization varies across CLI
-   versions, so comparing them to checked-in file bytes would falsely block
-   healthy deploys.
+   absent. Ledger name/checksum drift is reported as a non-blocking advisory.
+   One-statement ledger entries are hashed directly against the checked-in raw
+   file; parsed multi-statement entries report checksum-unavailable instead of
+   comparing JSON-array serialization with raw file bytes.
 
    For the U2 cycle-scoped MakeSafe media reads, the same preflight also requires
    `20260728000001_makesafe_state_authority_u2.sql` (the `job_media` cycle columns,

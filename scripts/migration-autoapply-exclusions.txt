@@ -1,0 +1,15 @@
+# Audited production migration exclusions.
+#
+# Format:
+# migration_path|sha256|audit_key|reason
+#
+# An exclusion is valid only while the checked-in file matches the exact SHA-256.
+# Changing an excluded migration invalidates the exclusion and fails the deploy.
+# Versions before the reviewed auto-apply baseline (20260722000001) remain under
+# the historical manual lane and are not candidates for this runner.
+supabase/migrations/20260722000001_scope_test_lab_seed.sql|b99da5d38d2200a92f4e1556fcf9ee8b218cc72c96342265e63f498774d679f0|production_test_seed_excluded|Creates a test tenant and auth principal whose required production route secrets are absent.
+supabase/migrations/20260723000001_fence_job_mint_record_guards.sql|e7489aac54f44a68a8737d82b8439004ef65447760fd6b7f14bbfd2f67a9bf5d|effectively_present_collision|Reviewed RPC definitions are already present in production; shares an unledgerable version with the board shadow migration.
+supabase/migrations/20260723000001_makesafe_board_truth_shadow.sql|52174a04a3e14f967255942d91d6d80a1f87ba1834a2dc537cf315b8268a530b|effectively_present_collision|Reviewed shadow objects are already present in production; shares an unledgerable version with the fence guard migration.
+supabase/migrations/20260724005540_makesafe_board_truth_cutover.sql|14a64c51058b930abd7175f19a09d2179c8e02e0f314b8e74baa8ddf016dce18|effectively_present|Reviewed cutover objects and live applications are already present in production.
+supabase/migrations/20260724025815_makesafe_lineage_authority_corrections.sql|9ef1721c819f82b0c760b3c23cbc52430622a3595ba7c04bab547c70b68d8209|effectively_present|Reviewed append-only correction objects and data are already present in production.
+supabase/migrations/20260724062509_makesafe_lineage_authority_supersessions.sql|15a1068ee9c36626c40306c2b63d89d5446cbf9e5faf02d1359b43177d6d6103|effectively_present|Reviewed append-only supersession objects and data are already present in production.
