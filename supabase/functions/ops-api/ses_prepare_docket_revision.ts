@@ -123,6 +123,7 @@ export interface SesPrepareDependencies {
   ) => Promise<SesPortalCapture>;
   renderPhysicalReport?: (
     input: SesAssemblerInputV1,
+    photos?: SesPhotoArtifact[],
   ) => Promise<SesRenderResult>;
   renderOwnRoofReport?: (
     input: SesAssemblerInputV1,
@@ -1538,6 +1539,8 @@ async function prepareOne(
         manifest.items.physical_reporting_evidence = itemBlocker;
         manifest.items.supporting_report_pdf = itemBlocker;
       } else {
+        let resolvedPhotos: SesPhotoArtifact[] = [];
+        let photosComplete = false;
         if (!text(input.source.builder_reference)) {
           const itemBlocker = blockers.find((candidate) =>
             candidate.reason_code === "spine_missing_source" &&
@@ -1564,19 +1567,6 @@ async function prepareOne(
           );
           manifest.items.physical_reporting_evidence = itemBlocker;
           manifest.items.supporting_report_pdf = itemBlocker;
-        } else {
-          const rendered = await deps.renderPhysicalReport(input);
-          reportFile = `ARTIFACTS/${rendered.file_name}`;
-          artifacts.push(
-            await artifactFromBytes({
-              role: "supporting_report_pdf",
-              path: reportFile,
-              media_type: rendered.media_type,
-              bytes: rendered.bytes,
-              metadata: { render_hash: rendered.render_hash || null },
-            }),
-          );
-          manifest.items.supporting_report_pdf = ready(`file:${reportFile}`);
         }
 
         if (!deps.resolvePhotoArtifacts) {
@@ -1590,13 +1580,13 @@ async function prepareOne(
             ),
           );
         } else {
-          const resolvedPhotos = await deps.resolvePhotoArtifacts(input);
+          resolvedPhotos = await deps.resolvePhotoArtifacts(input);
           const expectedPhotos = input.cycle_facts.photos.slice().sort((
             a,
             b,
           ) => a.order - b.order || a.id.localeCompare(b.id));
           const matchedIndexes = new Set<number>();
-          let photosComplete = true;
+          photosComplete = true;
           for (const [index, expected] of expectedPhotos.entries()) {
             const matches = resolvedPhotos.map((photo, resolvedIndex) => ({
               photo,
@@ -1669,6 +1659,27 @@ async function prepareOne(
               "file:ARTIFACTS/PHOTO_SELECTION.md",
             );
           }
+        }
+        if (
+          text(input.source.builder_reference) &&
+          deps.renderPhysicalReport &&
+          photosComplete
+        ) {
+          const rendered = await deps.renderPhysicalReport(input, resolvedPhotos);
+          reportFile = `ARTIFACTS/${rendered.file_name}`;
+          artifacts.push(
+            await artifactFromBytes({
+              role: "supporting_report_pdf",
+              path: reportFile,
+              media_type: rendered.media_type,
+              bytes: rendered.bytes,
+              metadata: { render_hash: rendered.render_hash || null },
+            }),
+          );
+          manifest.items.supporting_report_pdf = ready(`file:${reportFile}`);
+          manifest.items.physical_reporting_evidence = ready(
+            "file:ARTIFACTS/PHOTO_SELECTION.md",
+          );
         }
       }
     } else if (row.family === "own_template_roof") {

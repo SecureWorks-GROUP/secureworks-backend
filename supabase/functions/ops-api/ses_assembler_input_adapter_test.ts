@@ -185,6 +185,8 @@ Deno.test("live adapter consumes the trade checklist keys written by submit_make
     ],
     labour_hours: 2,
     trade_count: 2,
+    access_issues: "Gate code did not work on arrival.",
+    follow_up_required: true,
     invoice_notes: "Two trades attended for two hours each.",
   };
 
@@ -206,6 +208,8 @@ Deno.test("live adapter consumes the trade checklist keys written by submit_make
     works:
       "Removed unsecured broken sheeting and screws, then moved the bricks to ground.",
     materials: "Tarps / roof materials, Fixings / consumables",
+    access_issues: "Gate code did not work on arrival.",
+    follow_up_required: "Follow-up required.",
     photos: [],
   });
   assertEquals(
@@ -219,6 +223,18 @@ Deno.test("live adapter consumes the trade checklist keys written by submit_make
     ),
     false,
   );
+  const renderJobWithPhoto = physicalReportRenderJob(live, input, [{
+    photo_id: input.cycle_facts.photos[0]?.id || "photo-1",
+    source_pointer: input.cycle_facts.photos[0]?.path_or_key || "job_media:photo-1",
+    file_name: "completion.jpg",
+    media_type: "image/jpeg",
+    bytes: new Uint8Array([65, 66]),
+  }]);
+  assertEquals(renderJobWithPhoto.photos, [{
+    bytesBase64: "QUI=",
+    contentType: "image/jpeg",
+    caption: undefined,
+  }]);
 
   live.reports[0].checklist_json.invoice_notes = "";
   assertEquals(

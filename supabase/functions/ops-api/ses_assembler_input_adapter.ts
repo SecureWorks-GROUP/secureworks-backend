@@ -25,6 +25,7 @@ import {
 import { extractPortalLinks } from "./makesafe_portal_guard.ts";
 import {
   SES_ASSESSMENT_RECIPE_VERSION,
+  type SesPhotoArtifact,
   type SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
 import { createSesDocketPersistenceAdapter } from "./ses_docket_persistence.ts";
@@ -333,6 +334,7 @@ function explicitHoursAndMaterials(
 export function physicalReportRenderJob(
   snapshot: SesAssemblerLiveSnapshot,
   input: SesAssemblerInputV1,
+  photoArtifacts: SesPhotoArtifact[] = [],
 ): MakesafeReportJob {
   const report = record(input.cycle_facts.trade_report);
   const checklist = record(report.checklist_json);
@@ -379,7 +381,22 @@ export function physicalReportRenderJob(
       report.notes,
     ),
     materials,
-    photos: [],
+    access_issues: reportText(checklist.access_issues),
+    follow_up_required: checklist.follow_up_required === true
+      ? "Follow-up required."
+      : reportText(checklist.follow_up_required),
+    photos: photoArtifacts.map((photo) => {
+      const source = input.cycle_facts.photos.find((item) =>
+        item.id === photo.photo_id && item.path_or_key === photo.source_pointer
+      );
+      let binary = "";
+      for (const byte of photo.bytes) binary += String.fromCharCode(byte);
+      return {
+        bytesBase64: btoa(binary),
+        contentType: photo.media_type,
+        caption: source?.caption,
+      };
+    }),
   };
 }
 
@@ -872,10 +889,10 @@ export function createSesAssemblerRuntimeDependencies(
       }
       return out;
     },
-    renderPhysicalReport: async (input) => {
+    renderPhysicalReport: async (input, photos = []) => {
       const snapshot = snapshotFor(input);
       const rendered = await renderMakesafeReportPdf(
-        physicalReportRenderJob(snapshot, input),
+        physicalReportRenderJob(snapshot, input, photos),
       );
       return {
         file_name: rendered.fileName,
