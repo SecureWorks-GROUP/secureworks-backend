@@ -268,12 +268,14 @@ const NEG_TEMP_FENCE_RE =
   /\bno\s+(?:temp(?:orary)?\s*)?fenc\w*|\bno\s+fencing\b|(?:temp(?:orary)?\s*fenc\w*|fencing)\s+(?:is\s+|are\s+|will\s+be\s+)?(?:not|n['’]?t|no\s+longer)\s+(?:require|need|necessary)/i;
 const STRONG_PHYSICAL_MAKESAFE_RE =
   /\b(tarps?|tarping|temporary\s+(?:roof\s+)?repair|temporary\s+(?:roof\s+)?cover(?:ing)?|emergency\s+(?:repair|works?|attendance)|prevent\s+further\s+(?:damage|water\s+ingress)|stop\s+(?:the\s+)?(?:leak|water\s+ingress)|weatherproof|board\s*up|isolate\s+(?:the\s+)?(?:hazard|area|services?)|secure\s+(?:the\s+)?(?:property|site|opening|roof)|remove\s+(?:the\s+)?(?:hazard|danger))\b/i;
-const GENERIC_PHYSICAL_MAKESAFE_RE =
-  /\b(new\s+work\s+order|work\s+order|make\s*-?\s*safe|makesafe)\b/i;
+const GENERIC_PHYSICAL_MAKESAFE_RE = /\b(make\s*-?\s*safe|makesafe)\b/i;
+const GENERIC_WORK_ORDER_RE = /\b(new\s+work\s+order|work\s+order)\b/i;
 
 export interface MakeSafeJobFamilyContext {
   /** Deterministically extracted work-order PDF text. */
   pdfScopeText?: string | null;
+  /** True when extracted PDF text is present but contains only boilerplate. */
+  pdfOnlyBoilerplate?: boolean;
   /** Canonical company slug or deterministic adapter id. */
   builder?: string | null;
 }
@@ -371,7 +373,11 @@ export function decideMakeSafeJobFamily(
     };
   }
 
-  if (GENERIC_PHYSICAL_MAKESAFE_RE.test(text)) {
+  if (
+    (GENERIC_PHYSICAL_MAKESAFE_RE.test(text) ||
+      GENERIC_WORK_ORDER_RE.test(text)) &&
+    !context.pdfOnlyBoilerplate
+  ) {
     return {
       family: "general_makesafe",
       evidence: "physical_makesafe",

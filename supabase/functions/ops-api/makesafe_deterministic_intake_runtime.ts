@@ -20,9 +20,9 @@ import {
   type DeterministicCompanyProfile,
   type DeterministicIntakePlan,
   type DeterministicIntakeQualityMeasure,
-  measureDeterministicIntakeQuality,
   type DeterministicPdfDocument,
   type DeterministicSourceItem,
+  measureDeterministicIntakeQuality,
   selectIntakeMode,
 } from "./makesafe_deterministic_intake.ts";
 import { deriveFromDomain, isOwnDomain } from "./makesafe_compact_reads.ts";

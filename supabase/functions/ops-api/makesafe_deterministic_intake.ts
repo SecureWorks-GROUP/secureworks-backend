@@ -811,9 +811,15 @@ function jobFamilyDecision(
   item: DeterministicSourceItem,
   adapterId: AdapterId | null,
 ) {
+  const pdfDocuments = extractedPdfDocuments(item);
+  const fullPdfText = pdfText(item);
   return decideMakeSafeJobFamily(item.subject, item.body, null, {
     builder: adapterId,
     pdfScopeText: pdfScopeText(item, adapterId),
+    pdfOnlyBoilerplate: pdfDocuments.length > 0 &&
+      !pdfScopeText(item, adapterId) &&
+      /\b(?:contractors?\s+must|current\s+insurance|terms?\s+and\s+conditions|period\s+trade\s+contract)\b/i
+        .test(fullPdfText),
   });
 }
 

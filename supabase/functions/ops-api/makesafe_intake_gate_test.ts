@@ -12,6 +12,8 @@
 //   ~/.deno/bin/deno test --allow-all --no-check \
 //     supabase/functions/ops-api/makesafe_intake_gate_test.ts
 
+// deno-lint-ignore-file no-import-prefix
+
 import {
   assert,
   assertEquals,
