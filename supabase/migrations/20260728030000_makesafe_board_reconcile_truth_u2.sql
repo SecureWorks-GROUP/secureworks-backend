@@ -1569,7 +1569,6 @@ BEGIN
       SELECT 1
       FROM public.makesafe_readiness_current_v2 r
       WHERE r.job_id = v_row.job_id
-        AND r.id = (v_token->>'id')::uuid
         AND r.readiness_revision IS NOT DISTINCT FROM v_token->>'readiness_revision'
         AND r.dependency_generation IS NOT DISTINCT FROM (v_token->>'dependency_generation')::integer
     ) THEN
@@ -1581,8 +1580,11 @@ BEGIN
       LEFT JOIN public.makesafe_attendance_cycles f
         ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
       WHERE f.id IS NULL
-         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
-         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+         OR f.cycle_number IS DISTINCT FROM (e->>'cycle_number')::integer
+         OR f.opened_at IS DISTINCT FROM (e->>'opened_at')::timestamptz
+         OR f.closed_at IS DISTINCT FROM (e->>'closed_at')::timestamptz
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'makesafe_fact_version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'makesafe_content_hash'
     ) THEN RAISE EXCEPTION 'reconciliation row % cycle facts changed', v_row.job_id; END IF;
     IF EXISTS (
       SELECT 1
@@ -1590,8 +1592,8 @@ BEGIN
       LEFT JOIN public.job_assignments f
         ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
       WHERE f.id IS NULL
-         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
-         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'makesafe_fact_version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'makesafe_content_hash'
          OR f.attendance_cycle_id IS DISTINCT FROM NULLIF(e->>'attendance_cycle_id', '')::uuid
          OR f.cycle_attribution IS DISTINCT FROM e->>'cycle_attribution'
     ) THEN RAISE EXCEPTION 'reconciliation row % assignment facts changed', v_row.job_id; END IF;
@@ -1601,8 +1603,8 @@ BEGIN
       LEFT JOIN public.job_service_reports f
         ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
       WHERE f.id IS NULL
-         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
-         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'makesafe_fact_version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'makesafe_content_hash'
          OR f.attendance_cycle_id IS DISTINCT FROM NULLIF(e->>'attendance_cycle_id', '')::uuid
          OR f.cycle_attribution IS DISTINCT FROM e->>'cycle_attribution'
     ) THEN RAISE EXCEPTION 'reconciliation row % report facts changed', v_row.job_id; END IF;
@@ -1612,8 +1614,8 @@ BEGIN
       LEFT JOIN public.job_documents f
         ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
       WHERE f.id IS NULL
-         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
-         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'makesafe_fact_version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'makesafe_content_hash'
          OR f.attendance_cycle_id IS DISTINCT FROM NULLIF(e->>'attendance_cycle_id', '')::uuid
          OR f.cycle_attribution IS DISTINCT FROM e->>'cycle_attribution'
     ) THEN RAISE EXCEPTION 'reconciliation row % document facts changed', v_row.job_id; END IF;
@@ -1623,8 +1625,8 @@ BEGIN
       LEFT JOIN public.job_media f
         ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
       WHERE f.id IS NULL
-         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
-         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'makesafe_fact_version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'makesafe_content_hash'
          OR f.attendance_cycle_id IS DISTINCT FROM NULLIF(e->>'attendance_cycle_id', '')::uuid
          OR f.cycle_attribution IS DISTINCT FROM e->>'cycle_attribution'
     ) THEN RAISE EXCEPTION 'reconciliation row % media facts changed', v_row.job_id; END IF;
@@ -1634,10 +1636,181 @@ BEGIN
       LEFT JOIN public.makesafe_portal_capture_revisions f
         ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
       WHERE f.id IS NULL
-         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'version')::bigint
-         OR f.makesafe_content_hash IS DISTINCT FROM e->>'content_hash'
+         OR f.makesafe_fact_version IS DISTINCT FROM (e->>'makesafe_fact_version')::bigint
+         OR f.makesafe_content_hash IS DISTINCT FROM e->>'makesafe_content_hash'
          OR f.attendance_cycle_id IS DISTINCT FROM NULLIF(e->>'attendance_cycle_id', '')::uuid
     ) THEN RAISE EXCEPTION 'reconciliation row % portal facts changed', v_row.job_id; END IF;
+    v_token := v_row.state_facts->'job';
+    IF NOT EXISTS (
+      SELECT 1 FROM public.jobs j
+      WHERE j.id = v_row.job_id
+        AND j.type IS NOT DISTINCT FROM v_token->>'type'
+        AND j.status IS NOT DISTINCT FROM v_token->>'status'
+        AND j.substatus IS NOT DISTINCT FROM v_token->>'substatus'
+        AND j.metadata IS NOT DISTINCT FROM v_row.state_facts->'job_family'->'metadata'
+    ) THEN
+      RAISE EXCEPTION 'reconciliation row % job state changed', v_row.job_id;
+    END IF;
+    v_token := v_row.state_facts->'cases';
+    IF (SELECT count(*) FROM public.makesafe_intake_cases WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_token, '[]'::jsonb))
+      OR EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(COALESCE(v_token, '[]'::jsonb)) e
+        LEFT JOIN public.makesafe_intake_cases f
+          ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+        WHERE f.id IS NULL
+           OR f.instruction_key IS DISTINCT FROM e->>'instruction_key'
+           OR f.lineage_id IS DISTINCT FROM e->>'lineage_id'
+           OR f.state IS DISTINCT FROM e->>'state'
+           OR f.state_version IS DISTINCT FROM (e->>'state_version')::integer
+           OR f.source_version IS DISTINCT FROM (e->>'source_version')::bigint
+           OR f.source_content_hash IS DISTINCT FROM e->>'source_content_hash'
+           OR f.lineage_version IS DISTINCT FROM (e->>'lineage_version')::bigint
+           OR f.lineage_correction_hash IS DISTINCT FROM e->>'lineage_correction_hash'
+           OR f.lineage_supersession_hash IS DISTINCT FROM e->>'lineage_supersession_hash'
+           OR f.updated_at IS DISTINCT FROM (e->>'updated_at')::timestamptz
+      )
+    THEN RAISE EXCEPTION 'reconciliation row % intake-case facts changed', v_row.job_id; END IF;
+    v_token := v_row.state_facts->'holds';
+    IF (SELECT count(*) FROM public.makesafe_status_holds WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_token, '[]'::jsonb))
+      OR EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(COALESCE(v_token, '[]'::jsonb)) e
+        LEFT JOIN public.makesafe_status_holds f
+          ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+        WHERE f.id IS NULL
+           OR f.attendance_cycle_id IS DISTINCT FROM NULLIF(e->>'attendance_cycle_id', '')::uuid
+           OR f.blocker_code IS DISTINCT FROM e->>'blocker_code'
+           OR f.owner_role IS DISTINCT FROM e->>'owner_role'
+           OR f.recovery_action IS DISTINCT FROM e->>'recovery_action'
+           OR f.recovery_instruction IS DISTINCT FROM e->>'recovery_instruction'
+           OR f.evidence_refs IS DISTINCT FROM e->'evidence_refs'
+           OR f.created_at IS DISTINCT FROM (e->>'created_at')::timestamptz
+           OR f.lifted_at IS DISTINCT FROM (e->>'lifted_at')::timestamptz
+           OR f.note IS DISTINCT FROM e->>'note'
+      )
+    THEN RAISE EXCEPTION 'reconciliation row % hold facts changed', v_row.job_id; END IF;
+    v_token := v_row.state_facts->'family_rule';
+    IF v_token IS NULL THEN
+      IF EXISTS (
+        SELECT 1
+        FROM public.makesafe_family_rules_current_v2 f
+        JOIN public.makesafe_state_identity_current_v2 i
+          ON i.job_id = v_row.job_id
+         AND i.family_rule_key = f.family_code
+      ) THEN
+        RAISE EXCEPTION 'reconciliation row % family rule changed', v_row.job_id;
+      END IF;
+    ELSIF NOT EXISTS (
+      SELECT 1
+      FROM public.makesafe_family_rules_current_v2 f
+      JOIN public.makesafe_state_identity_current_v2 i
+        ON i.job_id = v_row.job_id
+       AND i.family_rule_key = f.family_code
+      WHERE f.family_code IS NOT DISTINCT FROM v_token->>'family_code'
+        AND f.family_kind IS NOT DISTINCT FROM v_token->>'family_kind'
+        AND f.matrix_revision IS NOT DISTINCT FROM v_token->>'matrix_revision'
+        AND f.matrix_content_hash IS NOT DISTINCT FROM v_token->>'matrix_content_hash'
+        AND f.completion_photo_floor IS NOT DISTINCT FROM (v_token->>'completion_photo_floor')::integer
+        AND f.required_document_types IS NOT DISTINCT FROM (
+          SELECT COALESCE(array_agg(value), '{}'::text[])
+          FROM jsonb_array_elements_text(COALESCE(v_token->'required_document_types', '[]'::jsonb))
+        )
+        AND f.required_portal_roles IS NOT DISTINCT FROM (
+          SELECT COALESCE(array_agg(value), '{}'::text[])
+          FROM jsonb_array_elements_text(COALESCE(v_token->'required_portal_roles', '[]'::jsonb))
+        )
+    ) THEN
+      RAISE EXCEPTION 'reconciliation row % family rule changed', v_row.job_id;
+    END IF;
+    v_token := v_row.state_facts->'cancellations';
+    IF (SELECT count(*) FROM public.makesafe_cancellation_current_v2 WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_token, '[]'::jsonb))
+      OR EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(COALESCE(v_token, '[]'::jsonb)) e
+        LEFT JOIN public.makesafe_cancellation_current_v2 f
+          ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+        WHERE f.id IS NULL
+           OR f.attendance_cycle_set_hash IS DISTINCT FROM e->>'attendance_cycle_set_hash'
+           OR f.state IS DISTINCT FROM e->>'state'
+           OR f.reason_code IS DISTINCT FROM e->>'reason_code'
+           OR f.note IS DISTINCT FROM e->>'note'
+           OR f.decided_by IS DISTINCT FROM e->>'decided_by'
+           OR f.decided_at IS DISTINCT FROM (e->>'decided_at')::timestamptz
+      )
+    THEN RAISE EXCEPTION 'reconciliation row % cancellation facts changed', v_row.job_id; END IF;
+    v_token := v_row.state_facts->'terminal_proofs';
+    IF (SELECT count(*) FROM public.makesafe_terminal_proofs_current_v2 WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_token, '[]'::jsonb))
+      OR EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(COALESCE(v_token, '[]'::jsonb)) e
+        LEFT JOIN public.makesafe_terminal_proofs_current_v2 f
+          ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+        WHERE f.id IS NULL
+           OR f.kind IS DISTINCT FROM e->>'kind'
+           OR f.attendance_cycle_ids IS DISTINCT FROM (
+             SELECT COALESCE(array_agg(value), '{}'::text[])
+             FROM jsonb_array_elements_text(COALESCE(e->'attendance_cycle_ids', '[]'::jsonb))
+           )
+           OR f.readiness_revision IS DISTINCT FROM e->>'readiness_revision'
+           OR f.release_revision_id IS DISTINCT FROM NULLIF(e->>'release_revision_id', '')::uuid
+           OR f.closeout_revision_id IS DISTINCT FROM NULLIF(e->>'closeout_revision_id', '')::uuid
+           OR f.proven_at IS DISTINCT FROM (e->>'proven_at')::timestamptz
+      )
+    THEN RAISE EXCEPTION 'reconciliation row % terminal proof facts changed', v_row.job_id; END IF;
+    v_token := v_row.state_facts->'pack_cycles';
+    IF (SELECT count(*) FROM public.makesafe_report_pack_cycles WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_token, '[]'::jsonb))
+      OR EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(COALESCE(v_token, '[]'::jsonb)) e
+        LEFT JOIN public.makesafe_report_pack_cycles f
+          ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+        WHERE f.id IS NULL
+           OR f.pack_id IS DISTINCT FROM (e->>'pack_id')::uuid
+           OR f.attendance_cycle_id IS DISTINCT FROM (e->>'attendance_cycle_id')::uuid
+           OR f.cycle_attribution IS DISTINCT FROM e->>'cycle_attribution'
+      )
+    THEN RAISE EXCEPTION 'reconciliation row % pack-cycle facts changed', v_row.job_id; END IF;
+    v_token := v_row.state_facts->'packs';
+    IF (SELECT count(*) FROM public.makesafe_report_packs WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_token, '[]'::jsonb))
+      OR EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(COALESCE(v_token, '[]'::jsonb)) e
+        LEFT JOIN public.makesafe_report_packs f
+          ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+        WHERE f.id IS NULL
+           OR f.status IS DISTINCT FROM e->>'status'
+           OR f.review_state IS DISTINCT FROM e->>'review_state'
+           OR f.needs_money_review IS DISTINCT FROM (e->>'needs_money_review')::boolean
+           OR f.last_render_hash IS DISTINCT FROM e->>'last_render_hash'
+           OR f.makesafe_fact_version IS DISTINCT FROM (e->>'makesafe_fact_version')::bigint
+           OR f.makesafe_content_hash IS DISTINCT FROM e->>'makesafe_content_hash'
+      )
+    THEN RAISE EXCEPTION 'reconciliation row % pack facts changed', v_row.job_id; END IF;
+    v_token := v_row.state_facts->'approvals';
+    IF (SELECT count(*) FROM public.makesafe_revision_approvals WHERE job_id = v_row.job_id)
+      <> jsonb_array_length(COALESCE(v_token, '[]'::jsonb))
+      OR EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(COALESCE(v_token, '[]'::jsonb)) e
+        LEFT JOIN public.makesafe_revision_approvals f
+          ON f.id = (e->>'id')::uuid AND f.job_id = v_row.job_id
+        WHERE f.id IS NULL
+           OR f.action IS DISTINCT FROM e->>'action'
+           OR f.decision IS DISTINCT FROM e->>'decision'
+           OR f.readiness_revision IS DISTINCT FROM e->>'readiness_revision'
+           OR f.dependency_generation IS DISTINCT FROM (e->>'dependency_generation')::integer
+           OR f.docket_revision_id IS DISTINCT FROM NULLIF(e->>'docket_revision_id', '')::uuid
+           OR f.release_revision_id IS DISTINCT FROM NULLIF(e->>'release_revision_id', '')::uuid
+           OR f.decided_at IS DISTINCT FROM (e->>'decided_at')::timestamptz
+      )
+    THEN RAISE EXCEPTION 'reconciliation row % approval facts changed', v_row.job_id; END IF;
   END LOOP;
 END;
 $$;
