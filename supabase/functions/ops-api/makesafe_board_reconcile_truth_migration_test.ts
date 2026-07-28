@@ -29,6 +29,18 @@ const seedScopeRollback = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const decimalFactMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260729030000_makesafe_decimal_fact_canonicalization.sql",
+    import.meta.url,
+  ),
+);
+const decimalBoundaryContract = await Deno.readTextFile(
+  new URL(
+    "../../tests/makesafe_decimal_fact_boundary_contract.sql",
+    import.meta.url,
+  ),
+);
 const indexSource = await Deno.readTextFile(
   new URL("./index.ts", import.meta.url),
 );
@@ -224,5 +236,72 @@ Deno.test("seed scope accepts canonical restoration and accounts every skip", ()
   assertStringIncludes(
     seedScopeRollback,
     "DROP FUNCTION IF EXISTS public.seed_makesafe_state_authority_scoped_v2",
+  );
+});
+
+Deno.test("fact identity accepts canonical decimals without widening readiness", () => {
+  assertStringIncludes(
+    decimalFactMigration,
+    "CREATE OR REPLACE FUNCTION public.makesafe_fact_canonical_json_v1",
+  );
+  assertStringIncludes(
+    decimalFactMigration,
+    "public.makesafe_fact_canonical_json_v1(p_payload)",
+  );
+  assertStringIncludes(
+    decimalFactMigration,
+    "public.validate_makesafe_board_reconciliation_state_tokens(jsonb)",
+  );
+  assertStringIncludes(
+    decimalFactMigration,
+    "public.makesafe_canonical_json_v1(v_row.state_facts)",
+  );
+  assertStringIncludes(
+    decimalFactMigration,
+    "public.makesafe_reconciliation_state_token_v1(v_row.state_facts)",
+  );
+  assertStringIncludes(
+    decimalFactMigration,
+    "v_scaled_decimal_hash IS DISTINCT FROM v_decimal_hash",
+  );
+  assertStringIncludes(
+    decimalFactMigration,
+    "sha256:6c330f9e8440d0a13ba3bb465798ffbbefff8061e1dc2db2e38cd3f480e0fac0",
+  );
+  assertStringIncludes(
+    decimalFactMigration,
+    "sha256:c49b0fc32037d0f93919bff7aa1aef97225dbb61f78caeee4c5da85498db7a66",
+  );
+  assertEquals(
+    decimalFactMigration.includes(
+      "CREATE OR REPLACE FUNCTION public.makesafe_canonical_json_v1",
+    ),
+    false,
+  );
+  assertStringIncludes(
+    migration,
+    "public.makesafe_canonical_json_v1(v_row.state_facts)",
+  );
+  assertStringIncludes(
+    decimalBoundaryContract,
+    "public.makesafe_reconciliation_state_token_v1(v_facts)",
+  );
+  assertStringIncludes(
+    decimalBoundaryContract,
+    "public.makesafe_canonical_json_v1(v_readiness)",
+  );
+  assertEquals(
+    /UPDATE\s+public\.(jobs|makesafe_job_details)\b/i.test(
+      decimalFactMigration,
+    ),
+    false,
+  );
+  assertStringIncludes(
+    indexSource,
+    "'makesafe_reconciliation_state_token_v1'",
+  );
+  assertEquals(
+    indexSource.includes("canonicalJsonAndHash(row.state_facts)"),
+    false,
   );
 });
