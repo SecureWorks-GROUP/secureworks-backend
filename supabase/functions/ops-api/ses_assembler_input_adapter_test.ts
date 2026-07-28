@@ -116,13 +116,24 @@ Deno.test(
       attribution: "bound",
     });
     assertEquals(input.classification.builder_key, "MLB");
-    assertEquals(input.classification.family, "unknown");
+    assertEquals(input.classification.family, "own_template_roof");
+    assertEquals(
+      input.classification.delivery_render_route,
+      "secureworks_own_letterhead",
+    );
+    assertEquals(
+      input.classification.delivery_render_route_reason_code,
+      "client_relationship_requires_own_letterhead",
+    );
+    assertEquals(input.classification.delivery_render_route_evidence, [
+      "jobs.client_name#relationship:strata",
+    ]);
     assertEquals(input.source.builder_reference, "");
     assertEquals(input.source.po_or_external_ref, null);
     assertEquals(input.source.deliverables, []);
     assertEquals(input.source.portal_links, [
       {
-        role: "assessment",
+        role: "roof_report",
         url: "https://primeeco.tech/share/2ef11c67-8f63-48cb-9ff4-61bf71848f17",
         source: "job_detail",
       },
@@ -214,7 +225,19 @@ Deno.test(
     const codes = blockerCodes(result);
     assert(codes.includes("spine_missing_source"));
     assert(codes.includes("spine_missing_lineage"));
-    assert(codes.includes("family_unknown"));
+    assert(codes.includes("trade_evidence_missing"));
+    assert(!codes.includes("family_unknown"));
+    assert(!codes.includes("delivery_route_unroutable"));
+    assert(!codes.some((code) => code.startsWith("portal_")));
+    assert(!codes.includes("capability_portal_degraded"));
+    assertEquals(
+      result.envelope.v2.classification.delivery_render_route,
+      "secureworks_own_letterhead",
+    );
+    assertEquals(
+      result.envelope.v2.classification.delivery_render_route_reason_code,
+      "client_relationship_requires_own_letterhead",
+    );
     assert(!codes.includes("recovery-not-run"));
   },
 );
@@ -575,9 +598,19 @@ Deno.test(
     const portalRoof = snapshot();
     portalRoof.detail!.report_type = null;
     portalRoof.job.metadata.makesafe_job_family = "roof_report";
+    portalRoof.job.client_name = "Ordinary insured";
+    const portalInput = buildSesAssemblerInput(portalRoof);
     assertEquals(
-      buildSesAssemblerInput(portalRoof).classification.family,
+      portalInput.classification.family,
       "ordinary_roof_portal",
+    );
+    assertEquals(
+      portalInput.classification.delivery_render_route,
+      "builder_portal",
+    );
+    assertEquals(
+      portalInput.classification.delivery_render_route_reason_code,
+      "portal_builder_family",
     );
 
     const ownTemplateRoof = snapshot();
@@ -589,6 +622,67 @@ Deno.test(
       buildSesAssemblerInput(ownTemplateRoof).classification.family,
       "own_template_roof",
     );
+  },
+);
+
+Deno.test(
+  "unsupported roof builder is typed unroutable before any portal capture",
+  async () => {
+    const live = snapshot();
+    live.job.client_name = "Ordinary insured";
+    live.job.metadata = {
+      makesafe_job_family: "roof_report",
+      requesting_company: {
+        slug: "unsealed-builder",
+        name: "Unsealed Builder",
+      },
+    };
+    live.detail!.requesting_company_slug = "unsealed-builder";
+    live.detail!.requesting_company_name = "Unsealed Builder";
+    live.detail!.external_ref = "REF-UNSEALED";
+    live.detail!.report_type = null;
+    live.detail!.makesafe_companies = {
+      slug: "unsealed-builder",
+      name: "Unsealed Builder",
+      report_recipient: "reports@unsealed-builder.test",
+    };
+    const input = buildSesAssemblerInput(live);
+    assertEquals(input.classification.family, "ordinary_roof_portal");
+    assertEquals(input.classification.delivery_render_route, "unroutable");
+    assertEquals(
+      input.classification.delivery_render_route_reason_code,
+      "roof_builder_family_unsealed",
+    );
+
+    let captureCalls = 0;
+    const result = (await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: live.job.id },
+        idempotency_key: "unroutable-roof-proof",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      {
+        resolveInput: async () => input,
+        capturePortal: async () => {
+          captureCalls++;
+          throw new Error("unroutable card must not capture a portal");
+        },
+        now: () => new Date("2026-07-28T08:00:00.000Z"),
+      },
+    )).results[0];
+
+    const routeBlocker = result.blockers.find((blocker) =>
+      blocker.reason_code === "delivery_route_unroutable"
+    );
+    assert(routeBlocker);
+    assert(routeBlocker.reason.includes("Builder UNKNOWN"));
+    assertEquals(
+      routeBlocker.facts?.route_reason_code,
+      "roof_builder_family_unsealed",
+    );
+    assertEquals(captureCalls, 0);
   },
 );
 

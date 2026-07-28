@@ -9,6 +9,12 @@ export const SES_MANIFEST_V2_VERSION =
 
 export type SesSha256 = `sha256:${string}`;
 
+export type SesDeliveryRenderRoute =
+  | "builder_portal"
+  | "secureworks_own_letterhead"
+  | "unroutable"
+  | "not_applicable";
+
 export interface SesAssemblerInputV1 {
   contract_version: "ses.assembler-input/v1";
   identity: {
@@ -35,6 +41,10 @@ export interface SesAssemblerInputV1 {
     subtype: string | null;
     report_only: boolean;
     report_delivery: "portal" | "own_document" | null;
+    delivery_render_route: SesDeliveryRenderRoute;
+    delivery_render_route_reason_code: string;
+    delivery_render_route_reason: string;
+    delivery_render_route_evidence: string[];
     strata: boolean;
     own_template_requested: boolean;
     workflow: "active" | "cancellation" | "revision" | "no_access";

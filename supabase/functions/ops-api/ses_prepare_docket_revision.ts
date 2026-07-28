@@ -304,6 +304,29 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
       ),
     );
   }
+  if (input.classification.delivery_render_route === "unroutable") {
+    blockers.push(
+      blocked(
+        "delivery_route_unroutable",
+        input.classification.delivery_render_route_reason ||
+          "The card has no sealed delivery/render route.",
+        "Bind one source-backed portal or SecureWorks own-letterhead route for this builder-family relationship, then re-run.",
+        [
+          "canonical-input-envelope",
+          ...input.classification.delivery_render_route_evidence,
+        ],
+        [],
+        {
+          builder_key: input.classification.builder_key,
+          family: input.classification.family,
+          delivery_render_route: input.classification.delivery_render_route,
+          route_reason_code:
+            input.classification.delivery_render_route_reason_code,
+          route_evidence: input.classification.delivery_render_route_evidence,
+        },
+      ),
+    );
+  }
   if (!text(input.source.work_order_sender)) {
     blockers.push(
       blocked(
@@ -802,6 +825,13 @@ function hardStopManifest(
         ? "restoration"
         : "unknown",
       recipe_selected: false,
+      delivery_render_route: input.classification.delivery_render_route,
+      delivery_render_route_reason_code:
+        input.classification.delivery_render_route_reason_code,
+      delivery_render_route_reason:
+        input.classification.delivery_render_route_reason,
+      delivery_render_route_evidence:
+        input.classification.delivery_render_route_evidence,
       builder_reference: input.source.builder_reference,
       lineage: input.classification.lineage_kind,
     },
@@ -904,6 +934,13 @@ function manifestBase(
       job_type: row.job_type,
       subtype: row.subtype,
       recipe_selected: true,
+      delivery_render_route: input.classification.delivery_render_route,
+      delivery_render_route_reason_code:
+        input.classification.delivery_render_route_reason_code,
+      delivery_render_route_reason:
+        input.classification.delivery_render_route_reason,
+      delivery_render_route_evidence:
+        input.classification.delivery_render_route_evidence,
       ...(row.report_delivery ? { report_delivery: row.report_delivery } : {}),
       ...(row.family === "assessment_quote"
         ? {
@@ -2230,6 +2267,11 @@ async function prepareOne(
       media_type: "application/json",
       text: canonicalSesJson({
         recipe_selection: row ? "sealed" : "blocked",
+        delivery_render_route: input.classification.delivery_render_route,
+        delivery_render_route_reason_code:
+          input.classification.delivery_render_route_reason_code,
+        delivery_render_route_reason:
+          input.classification.delivery_render_route_reason,
         portal_capture: !row
           ? "not_evaluated"
           : row.required_portal_roles.length

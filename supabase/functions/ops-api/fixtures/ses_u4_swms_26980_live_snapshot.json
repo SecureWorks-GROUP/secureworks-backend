@@ -1,15 +1,16 @@
 {
-  "captured_from": "production read-only retest 2026-07-27",
+  "captured_from": "production read-only retest 2026-07-28",
   "job": {
     "id": "5383e3c4-eb32-41cf-8e3c-63a754c16d05",
     "org_id": "00000000-0000-0000-0000-000000000001",
     "job_number": "SWMS-26980",
     "type": "makesafe",
     "status": "processing",
-    "site_address": null,
-    "site_suburb": null,
+    "client_name": "The Owners of 19A & 19B Waterside Crescent Gwelup Strata Plan 28363",
+    "site_address": "19A & 19B Waterside Crescent",
+    "site_suburb": "Gwelup",
     "metadata": {
-      "job_family": "roof_report",
+      "makesafe_job_family": "roof_report",
       "external_ref": "MLB-26567PO-56164",
       "requesting_company": {
         "slug": "mlb",
