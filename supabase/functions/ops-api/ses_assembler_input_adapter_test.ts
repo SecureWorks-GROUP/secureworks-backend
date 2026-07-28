@@ -2,6 +2,8 @@
 import {
   assert,
   assertEquals,
+  assertStringIncludes,
+  assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import fixture from "./fixtures/ses_u4_swms_26980_live_snapshot.json" with {
   type: "json",
@@ -172,6 +174,11 @@ function liveSnapshotClient(live: SesAssemblerLiveSnapshot) {
     makesafe_roof_report_drafts: live.roof_draft ? [live.roof_draft] : [],
     makesafe_readiness_current: live.readiness ? [live.readiness] : [],
     makesafe_report_packs: live.legacy_packs,
+    job_events: live.events || [],
+    makesafe_sibling_bundle_binding_revisions: live.bundle_bindings || [],
+    makesafe_sibling_evidence_claims: live.bundle_claims || [],
+    xero_invoices: live.bundle_invoices || [],
+    emails: live.bundle_emails || [],
   };
   return {
     from(table: string) {
@@ -184,6 +191,9 @@ function liveSnapshotClient(live: SesAssemblerLiveSnapshot) {
           return query;
         },
         neq() {
+          return query;
+        },
+        in() {
           return query;
         },
         order() {
@@ -256,6 +266,7 @@ Deno.test(
     assertEquals(input.source.attachment_pointers, [
       "job_document:205d0d18-a40f-4617-9e41-0fa0934a112b",
     ]);
+    assertEquals(Object.hasOwn(input, "sibling_bundle_evidence"), false);
   },
 );
 
@@ -356,6 +367,372 @@ Deno.test(
     assert(!codes.includes("recovery-not-run"));
   },
 );
+
+Deno.test(
+  "legacy bundle note without a durable binding emits the suspected-sibling blocker",
+  async () => {
+    const live = snapshot();
+    live.events = [{
+      event_type: "note",
+      detail_json: {
+        text:
+          "BUNDLED into SWMS-26837 temp-fence make-safe; labour+report+SWMS covered under INV-0835.",
+      },
+    }];
+    const input = buildSesAssemblerInput(live);
+    assertEquals(input.sibling_bundle_evidence, {
+      status: "binding_missing",
+      suspected_sibling_job_id: null,
+      suspected_sibling_job_number: "SWMS-26837",
+      suspected_invoice_number: "INV-0835",
+      bundle_id: null,
+      binding_revision_id: null,
+      reverse_binding_revision_id: null,
+      coverage_failures: ["claiming_direction_not_bound"],
+    });
+    const result = (await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: input.identity.job_id },
+        idempotency_key: "bundle-missing-test",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      {
+        resolveInput: async () => input,
+        now: () => new Date("2026-07-28T04:00:00Z"),
+      },
+    )).results[0];
+    const blocker = result.blockers.find((item) =>
+      item.reason_code === "sibling_evidence_bundle_missing"
+    );
+    assert(blocker);
+    assertEquals(blocker.facts?.suspected_sibling_job_number, "SWMS-26837");
+    assertEquals(blocker.facts?.suspected_invoice_number, "INV-0835");
+  },
+);
+
+Deno.test(
+  "a one-way sibling binding remains rejected and cannot unlock evidence sharing",
+  async () => {
+    const live = snapshot();
+    live.events = [{
+      event_type: "note",
+      detail_json: {
+        text:
+          "BUNDLED into SWMS-26837 temp-fence make-safe; labour+report+SWMS covered under INV-0835.",
+      },
+    }];
+    live.bundle_jobs = [{
+      id: "02f614a4-09a7-422e-9381-c89a44aceccd",
+      job_number: "SWMS-26837",
+    }];
+    live.bundle_bindings = [{
+      id: "forward-revision",
+      bundle_id: "bundle-1",
+      org_id: "org-1",
+      job_id: live.job.id,
+      sibling_job_id: "02f614a4-09a7-422e-9381-c89a44aceccd",
+      state: "bound",
+      recorded_by: "operator",
+      recorded_via: "test",
+      provenance: { reason: "reviewed" },
+      recorded_at: "2026-07-28T04:00:00Z",
+    }];
+    const input = buildSesAssemblerInput(live);
+    assertEquals(
+      input.sibling_bundle_evidence?.status,
+      "binding_not_bidirectional",
+    );
+    const result = (await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: input.identity.job_id },
+        idempotency_key: "bundle-one-way-test",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      {
+        resolveInput: async () => input,
+        now: () => new Date("2026-07-28T04:00:00Z"),
+      },
+    )).results[0];
+    assert(
+      blockerCodes(result).includes(
+        "sibling_evidence_bundle_not_bidirectional",
+      ),
+    );
+    assert(
+      !result.artifacts.some((artifact) =>
+        artifact.role === "sibling_bundle_evidence"
+      ),
+    );
+  },
+);
+
+Deno.test(
+  "the adapter accepts only reciprocal bindings with exact positive invoice and delivery scope",
+  () => {
+    const live = snapshot();
+    const siblingId = "02f614a4-09a7-422e-9381-c89a44aceccd";
+    live.events = [{
+      event_type: "note",
+      detail_json: {
+        text:
+          "BUNDLED into SWMS-26837 temp-fence make-safe; labour+report+SWMS covered under INV-0835.",
+      },
+    }];
+    live.bundle_jobs = [{ id: siblingId, job_number: "SWMS-26837" }];
+    live.bundle_bindings = [
+      {
+        id: "forward-revision",
+        bundle_id: "bundle-1",
+        org_id: "org-1",
+        job_id: live.job.id,
+        sibling_job_id: siblingId,
+        state: "bound",
+        recorded_by: "operator",
+        recorded_via: "reviewed_migration",
+        provenance: { reason: "reviewed" },
+        recorded_at: "2026-07-28T04:00:00Z",
+      },
+      {
+        id: "reverse-revision",
+        bundle_id: "bundle-1",
+        org_id: "org-1",
+        job_id: siblingId,
+        sibling_job_id: live.job.id,
+        state: "bound",
+        recorded_by: "operator",
+        recorded_via: "reviewed_migration",
+        provenance: { reason: "reciprocal" },
+        recorded_at: "2026-07-28T04:00:00Z",
+      },
+    ];
+    live.bundle_claims = [{
+      binding_revision_id: "forward-revision",
+      invoice_id: "invoice-0835",
+      invoice_line_item_id: "line-0835",
+      invoice_scope_phrase: "Hardie panel stacking",
+      delivery_email_post_id: "mail-0835",
+      delivery_email_content_sha256:
+        "0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba",
+      delivery_scope_phrase: "displaced Hardie panels stacked safely",
+      photo_scope_phrase: "displaced Hardie panels stacked safely",
+      photo_media_id: "photo-26837",
+      photo_content_hash:
+        "sha256:f46202099887565a5738073440de40efa1b0793bfb13576ff69b7d5d56667f60",
+      report_document_id: "report-26837",
+      swms_document_id: "swms-26837",
+    }];
+    live.bundle_invoices = [{
+      id: "invoice-0835",
+      job_id: siblingId,
+      invoice_number: "INV-0835",
+      status: "AUTHORISED",
+      line_items: [{
+        LineItemID: "line-0835",
+        Description:
+          "Temporary fence make-safe incl Hardie panel stacking - 2 trades x 3 hours",
+      }],
+    }];
+    live.bundle_emails = [{
+      post_id: "mail-0835",
+      subject: "MLB-26393 - 71 Peppermint Way",
+      body_preview:
+        "Temporary fencing installed plus displaced Hardie panels stacked safely on site.",
+      has_attachments: true,
+      content_sha256:
+        "0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba",
+    }];
+    live.bundle_documents = [
+      {
+        id: "report-26837",
+        job_id: siblingId,
+        type: "makesafe_report",
+      },
+      { id: "swms-26837", job_id: siblingId, type: "swms" },
+    ];
+    live.bundle_media = [{
+      id: "photo-26837",
+      job_id: siblingId,
+      type: "photo",
+      label: "Displaced Hardie panels stacked safely",
+      notes: "",
+      makesafe_content_hash:
+        "sha256:f46202099887565a5738073440de40efa1b0793bfb13576ff69b7d5d56667f60",
+    }];
+    const input = buildSesAssemblerInput(live);
+    assertEquals(input.sibling_bundle_evidence?.status, "accepted");
+    if (input.sibling_bundle_evidence?.status !== "accepted") {
+      throw new Error("expected accepted bundle");
+    }
+    assertEquals(
+      input.sibling_bundle_evidence.coverage.invoice.line_item_id,
+      "line-0835",
+    );
+    assertEquals(
+      input.sibling_bundle_evidence.coverage.delivery.email_post_id,
+      "mail-0835",
+    );
+
+    live.bundle_invoices[0].line_items[0].Description =
+      "Temporary fencing installed on sibling card only";
+    const rejected = buildSesAssemblerInput(live);
+    assertEquals(
+      rejected.sibling_bundle_evidence?.status,
+      "scope_evidence_missing",
+    );
+    if (rejected.sibling_bundle_evidence?.status !== "scope_evidence_missing") {
+      throw new Error("expected scope blocker");
+    }
+    assert(
+      rejected.sibling_bundle_evidence.coverage_failures.includes(
+        "invoice_line_scope_not_covered",
+      ),
+    );
+  },
+);
+
+Deno.test(
+  "a reciprocal relationship without a directional claim does not change that card",
+  () => {
+    const live = snapshot();
+    live.bundle_bindings = [{
+      id: "reverse-only-for-this-card",
+      bundle_id: "bundle-1",
+      org_id: "org-1",
+      job_id: live.job.id,
+      sibling_job_id: "sibling-job",
+      state: "bound",
+      recorded_by: "operator",
+      recorded_via: "reviewed_migration",
+      provenance: { reason: "reciprocal relationship only" },
+      recorded_at: "2026-07-28T04:00:00Z",
+    }];
+    live.bundle_jobs = [{
+      id: "sibling-job",
+      job_number: "SWMS-26832",
+    }];
+    assertEquals(
+      Object.hasOwn(buildSesAssemblerInput(live), "sibling_bundle_evidence"),
+      false,
+    );
+  },
+);
+
+type SeedGuardFixture = {
+  jobs: string[];
+  invoice: boolean;
+  delivery: boolean;
+  documents: number;
+  media: number;
+};
+
+function seedGuardOutcome(fixture: SeedGuardFixture): "skip" | "seed" {
+  const hasFootprint = fixture.jobs.length > 0 || fixture.invoice ||
+    fixture.delivery || fixture.documents > 0 || fixture.media > 0;
+  if (!hasFootprint) return "skip";
+  const complete = fixture.jobs.includes("claiming") &&
+    fixture.jobs.includes("sibling") && fixture.invoice && fixture.delivery &&
+    fixture.documents === 2 && fixture.media === 1;
+  if (!complete) {
+    throw new Error(
+      "reviewed sibling evidence seed refused: partial or drifted production footprint",
+    );
+  }
+  return "seed";
+}
+
+Deno.test(
+  "sibling evidence migration seeds the reviewed reciprocal pair and positive claim without operational writes",
+  async () => {
+    const migration = await Deno.readTextFile(
+      new URL(
+        "../../migrations/20260728730000_makesafe_sibling_evidence_bundle_u7.sql",
+        import.meta.url,
+      ),
+    );
+    for (
+      const required of [
+        "makesafe_sibling_bundle_binding_revisions",
+        "makesafe_sibling_evidence_claims",
+        "trg_makesafe_sibling_bundle_binding_validate",
+        "trg_makesafe_sibling_evidence_claim_validate",
+        "c3afc061-0d4a-43ff-8309-0b8b512e307a",
+        "02f614a4-09a7-422e-9381-c89a44aceccd",
+        "3be46700-4d5d-4b91-b96e-8baf43ac9d7c",
+        "edcaa56c-84d5-4a12-be0d-032bd1d422f3",
+        "Hardie panel stacking",
+        "displaced Hardie panels stacked safely",
+        "reviewed sibling evidence seed refused: partial or drifted production footprint",
+        "expected exactly one reviewed photo artifact",
+      ]
+    ) {
+      assertStringIncludes(migration, required);
+    }
+    assert(
+      migration.indexOf("IF NOT EXISTS (\n    SELECT 1\n    FROM public.jobs") <
+        migration.indexOf(
+          "INSERT INTO public.makesafe_sibling_bundle_binding_revisions",
+        ),
+    );
+    assertStringIncludes(
+      migration,
+      "AND NOT EXISTS (\n    SELECT 1\n    FROM public.xero_invoices",
+    );
+    assertStringIncludes(migration, "v_photo_match_count <> 1");
+    for (
+      const forbidden of [
+        "UPDATE public.jobs",
+        "UPDATE public.makesafe_job_details",
+        "INSERT INTO public.xero_invoices",
+        "INSERT INTO public.job_documents",
+        "INSERT INTO public.job_events",
+      ]
+    ) {
+      assertEquals(
+        migration.toUpperCase().includes(forbidden.toUpperCase()),
+        false,
+      );
+    }
+  },
+);
+
+Deno.test("sibling evidence seed guard executes empty, complete, and partial branches", () => {
+  assertEquals(
+    seedGuardOutcome({
+      jobs: [],
+      invoice: false,
+      delivery: false,
+      documents: 0,
+      media: 0,
+    }),
+    "skip",
+  );
+  assertEquals(
+    seedGuardOutcome({
+      jobs: ["claiming", "sibling"],
+      invoice: true,
+      delivery: true,
+      documents: 2,
+      media: 1,
+    }),
+    "seed",
+  );
+  assertThrows(
+    () =>
+      seedGuardOutcome({
+        jobs: ["claiming"],
+        invoice: true,
+        delivery: true,
+        documents: 2,
+        media: 1,
+      }),
+    Error,
+    "partial or drifted production footprint",
+  );
+});
 
 Deno.test(
   "live adapter maps the canonical board family without an AJS physical shortcut",

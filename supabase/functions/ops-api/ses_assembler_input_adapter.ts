@@ -13,6 +13,7 @@ import {
   type SesPreparedRevision,
   type SesPrepareRequest,
   type SesSha256,
+  type SesSiblingBundleEvidence,
 } from "./ses_docket_envelope.ts";
 import {
   canonicalSesFamilyFromCard,
@@ -44,6 +45,7 @@ import {
   type RoofReportJob,
 } from "./roof_report_render.ts";
 import { buildRoofReportJob } from "./roof_report_template.ts";
+import { isBundledCoverageSendNote } from "./makesafe_send_pack.ts";
 
 export class SesAssemblerAdapterError extends Error {
   status: number;
@@ -110,6 +112,14 @@ export interface SesAssemblerLiveSnapshot {
   roof_draft: LiveRow | null;
   readiness: LiveRow | null;
   legacy_packs: LiveRow[];
+  events?: LiveRow[];
+  bundle_bindings?: LiveRow[];
+  bundle_claims?: LiveRow[];
+  bundle_jobs?: LiveRow[];
+  bundle_invoices?: LiveRow[];
+  bundle_documents?: LiveRow[];
+  bundle_emails?: LiveRow[];
+  bundle_media?: LiveRow[];
 }
 
 type Selection = Exclude<
@@ -148,6 +158,342 @@ function stringArray(...values: unknown[]): string[] {
     }
   }
   return [...out].sort();
+}
+
+function legacyBundleCandidate(
+  snapshot: SesAssemblerLiveSnapshot,
+): {
+  suspected_sibling_job_number: string;
+  suspected_invoice_number: string | null;
+} | null {
+  for (const event of snapshot.events || []) {
+    const detail = record(event.detail_json);
+    const note = firstText(detail.text, detail.note);
+    if (!isBundledCoverageSendNote(note)) continue;
+    const currentNumber = text(snapshot.job.job_number).toUpperCase();
+    const sibling = [...note.matchAll(/\bSWMS-\d+\b/gi)]
+      .map((match) => match[0].toUpperCase())
+      .find((number) => number !== currentNumber);
+    if (!sibling) continue;
+    return {
+      suspected_sibling_job_number: sibling,
+      suspected_invoice_number:
+        note.match(/\bINV-?\d{3,}\b/i)?.[0]?.toUpperCase() || null,
+    };
+  }
+  return null;
+}
+
+function currentBindingRows(rows: LiveRow[]): LiveRow[] {
+  const latest = new Map<string, LiveRow>();
+  for (
+    const row of rows.slice().sort((left, right) =>
+      text(left.recorded_at).localeCompare(text(right.recorded_at)) ||
+      text(left.id).localeCompare(text(right.id))
+    )
+  ) {
+    latest.set(
+      `${text(row.org_id)}:${text(row.job_id)}:${text(row.sibling_job_id)}`,
+      row,
+    );
+  }
+  return [...latest.values()];
+}
+
+function phraseCovered(haystack: unknown, phrase: unknown): boolean {
+  const needle = text(phrase).toLowerCase();
+  return needle.length >= 8 &&
+    String(haystack || "").toLowerCase().includes(needle);
+}
+
+function lineItemId(row: LiveRow): string {
+  return firstText(
+    row.LineItemID,
+    row.LineItemId,
+    row.lineItemID,
+    row.line_item_id,
+    row.id,
+  );
+}
+
+function lineItemDescription(row: LiveRow): string {
+  return firstText(row.Description, row.description);
+}
+
+export function resolveSiblingBundleEvidence(
+  snapshot: SesAssemblerLiveSnapshot,
+): SesSiblingBundleEvidence | undefined {
+  const candidate = legacyBundleCandidate(snapshot);
+  const current = currentBindingRows(snapshot.bundle_bindings || []);
+  const currentOutbound = current.filter((row) =>
+    text(row.job_id) === text(snapshot.job.id) && text(row.state) === "bound"
+  );
+  const claimedBindingIds = new Set(
+    (snapshot.bundle_claims || []).map((row) => text(row.binding_revision_id))
+      .filter(Boolean),
+  );
+  const sharingOutbound = candidate
+    ? currentOutbound
+    : currentOutbound.filter((row) => claimedBindingIds.has(text(row.id)));
+  if (!candidate && sharingOutbound.length === 0) return undefined;
+  if (!candidate && sharingOutbound.length > 1) {
+    return {
+      status: "scope_evidence_missing",
+      suspected_sibling_job_id: null,
+      suspected_sibling_job_number: sharingOutbound
+        .map((row) =>
+          firstText(
+            (snapshot.bundle_jobs || []).find((job) =>
+              text(job.id) === text(row.sibling_job_id)
+            )?.job_number,
+            row.sibling_job_id,
+          )
+        )
+        .sort()
+        .join(", "),
+      suspected_invoice_number: null,
+      bundle_id: null,
+      binding_revision_id: null,
+      reverse_binding_revision_id: null,
+      coverage_failures: ["multiple_current_sibling_bindings"],
+    };
+  }
+  const outbound = sharingOutbound.find((row) => (!candidate ||
+    (snapshot.bundle_jobs || []).some((job) =>
+      text(job.id) === text(row.sibling_job_id) &&
+      text(job.job_number).toUpperCase() ===
+        candidate.suspected_sibling_job_number
+    ))
+  );
+  const siblingJob = outbound
+    ? (snapshot.bundle_jobs || []).find((job) =>
+      text(job.id) === text(outbound.sibling_job_id)
+    )
+    : candidate
+    ? (snapshot.bundle_jobs || []).find((job) =>
+      text(job.job_number).toUpperCase() ===
+        candidate.suspected_sibling_job_number
+    )
+    : undefined;
+  const suspectedSiblingNumber = firstText(
+    siblingJob?.job_number,
+    candidate?.suspected_sibling_job_number,
+  );
+  const suspectedSiblingId = firstText(
+    siblingJob?.id,
+    outbound?.sibling_job_id,
+  ) || null;
+
+  if (!outbound) {
+    if (!candidate) return undefined;
+    return {
+      status: "binding_missing",
+      suspected_sibling_job_id: suspectedSiblingId,
+      suspected_sibling_job_number: suspectedSiblingNumber,
+      suspected_invoice_number: candidate.suspected_invoice_number,
+      bundle_id: null,
+      binding_revision_id: null,
+      reverse_binding_revision_id: null,
+      coverage_failures: ["claiming_direction_not_bound"],
+    };
+  }
+
+  const reverse = current.find((row) =>
+    text(row.job_id) === text(outbound.sibling_job_id) &&
+    text(row.sibling_job_id) === text(outbound.job_id) &&
+    text(row.org_id) === text(outbound.org_id) &&
+    text(row.bundle_id) === text(outbound.bundle_id) &&
+    text(row.state) === "bound"
+  );
+  if (!reverse) {
+    return {
+      status: "binding_not_bidirectional",
+      suspected_sibling_job_id: suspectedSiblingId,
+      suspected_sibling_job_number: suspectedSiblingNumber,
+      suspected_invoice_number: candidate?.suspected_invoice_number || null,
+      bundle_id: text(outbound.bundle_id),
+      binding_revision_id: text(outbound.id),
+      reverse_binding_revision_id: null,
+      coverage_failures: ["reverse_direction_not_bound"],
+    };
+  }
+
+  const failures: string[] = [];
+  const claim = (snapshot.bundle_claims || []).find((row) =>
+    text(row.binding_revision_id) === text(outbound.id)
+  );
+  if (!claim) failures.push("positive_scope_claim_missing");
+  const invoice = claim
+    ? (snapshot.bundle_invoices || []).find((row) =>
+      text(row.id) === text(claim.invoice_id) &&
+      text(row.job_id) === text(outbound.sibling_job_id)
+    )
+    : undefined;
+  if (!invoice) failures.push("sibling_invoice_missing");
+  if (
+    invoice &&
+    !["AUTHORISED", "PAID"].includes(text(invoice.status).toUpperCase())
+  ) {
+    failures.push("sibling_invoice_not_authorised");
+  }
+  const invoiceLine = invoice && claim
+    ? array(invoice.line_items).map(record).find((row) =>
+      lineItemId(row) === text(claim.invoice_line_item_id)
+    )
+    : undefined;
+  if (!invoiceLine) failures.push("invoice_line_missing");
+  if (
+    invoiceLine && claim &&
+    !phraseCovered(
+      lineItemDescription(invoiceLine),
+      claim.invoice_scope_phrase,
+    )
+  ) {
+    failures.push("invoice_line_scope_not_covered");
+  }
+  const email = claim
+    ? (snapshot.bundle_emails || []).find((row) =>
+      text(row.post_id) === text(claim.delivery_email_post_id)
+    )
+    : undefined;
+  if (!email) failures.push("delivery_email_missing");
+  if (
+    email &&
+    (text(email.content_sha256) !==
+        text(claim?.delivery_email_content_sha256) ||
+      email.has_attachments !== true)
+  ) {
+    failures.push("delivery_email_identity_mismatch");
+  }
+  if (
+    email && claim &&
+    !phraseCovered(
+      `${firstText(email.subject)} ${firstText(email.body_preview)}`,
+      claim.delivery_scope_phrase,
+    )
+  ) {
+    failures.push("delivery_scope_not_covered");
+  }
+  if (
+    email && claim &&
+    !phraseCovered(
+      `${firstText(email.subject)} ${firstText(email.body_preview)}`,
+      claim.photo_scope_phrase,
+    )
+  ) {
+    failures.push("photo_scope_not_covered");
+  }
+  if (claim && !text(claim.photo_scope_phrase)) {
+    failures.push("photo_scope_claim_missing");
+  }
+  const photo = claim
+    ? (snapshot.bundle_media || []).find((row) =>
+      text(row.id) === text(claim.photo_media_id) &&
+      text(row.job_id) === text(outbound.sibling_job_id) &&
+      text(row.type).toLowerCase() === "photo"
+    )
+    : undefined;
+  if (!photo) failures.push("sibling_photo_artifact_missing");
+  if (
+    photo && claim &&
+    (text(photo.makesafe_content_hash) !== text(claim.photo_content_hash) ||
+      !/^sha256:[0-9a-f]{64}$/.test(text(claim.photo_content_hash)))
+  ) {
+    failures.push("sibling_photo_artifact_hash_mismatch");
+  }
+  if (
+    photo && claim &&
+    !phraseCovered(
+      `${firstText(photo.label)} ${firstText(photo.notes)}`,
+      claim.photo_scope_phrase,
+    )
+  ) {
+    failures.push("photo_artifact_scope_not_covered");
+  }
+  const documents = snapshot.bundle_documents || [];
+  const report = claim
+    ? documents.find((row) =>
+      text(row.id) === text(claim.report_document_id) &&
+      text(row.job_id) === text(outbound.sibling_job_id) &&
+      ["report", "makesafe_report"].includes(text(row.type).toLowerCase())
+    )
+    : undefined;
+  if (!report) failures.push("sibling_report_missing");
+  const swms = claim
+    ? documents.find((row) =>
+      text(row.id) === text(claim.swms_document_id) &&
+      text(row.job_id) === text(outbound.sibling_job_id) &&
+      text(row.type).toLowerCase() === "swms"
+    )
+    : undefined;
+  if (!swms) failures.push("sibling_swms_missing");
+  if (
+    !text(outbound.recorded_by) || !text(outbound.recorded_via) ||
+    !Object.keys(record(outbound.provenance)).length ||
+    !text(reverse.recorded_by) || !text(reverse.recorded_via) ||
+    !Object.keys(record(reverse.provenance)).length
+  ) {
+    failures.push("binding_provenance_missing");
+  }
+
+  if (failures.length || !claim || !invoice || !email || !report || !swms) {
+    return {
+      status: "scope_evidence_missing",
+      suspected_sibling_job_id: suspectedSiblingId,
+      suspected_sibling_job_number: suspectedSiblingNumber,
+      suspected_invoice_number: firstText(
+        invoice?.invoice_number,
+        candidate?.suspected_invoice_number,
+      ) || null,
+      bundle_id: text(outbound.bundle_id),
+      binding_revision_id: text(outbound.id),
+      reverse_binding_revision_id: text(reverse.id),
+      coverage_failures: [...new Set(failures)].sort(),
+    };
+  }
+
+  return {
+    status: "accepted",
+    bundle_id: text(outbound.bundle_id),
+    claiming_binding: {
+      revision_id: text(outbound.id),
+      recorded_by: text(outbound.recorded_by),
+      recorded_via: text(outbound.recorded_via),
+      provenance: record(outbound.provenance),
+    },
+    reverse_binding: {
+      revision_id: text(reverse.id),
+      recorded_by: text(reverse.recorded_by),
+      recorded_via: text(reverse.recorded_via),
+      provenance: record(reverse.provenance),
+    },
+    sibling: {
+      job_id: text(outbound.sibling_job_id),
+      job_number: suspectedSiblingNumber,
+    },
+    coverage: {
+      invoice: {
+        invoice_id: text(invoice.id),
+        invoice_number: text(invoice.invoice_number),
+        line_item_id: text(claim.invoice_line_item_id),
+        scope_phrase: text(claim.invoice_scope_phrase),
+      },
+      delivery: {
+        email_post_id: text(email.post_id),
+        content_sha256: text(email.content_sha256),
+        scope_phrase: text(claim.delivery_scope_phrase),
+      },
+      photo: {
+        email_post_id: text(email.post_id),
+        content_sha256: text(email.content_sha256),
+        scope_phrase: text(claim.photo_scope_phrase),
+        media_id: text(photo!.id),
+        content_hash: text(claim.photo_content_hash) as SesSha256,
+      },
+      report_document_id: text(report.id),
+      swms_document_id: text(swms.id),
+    },
+  };
 }
 
 function hasExplicitValue(value: unknown): boolean {
@@ -805,6 +1151,7 @@ export function buildSesAssemblerInput(
   const priorPack = snapshot.legacy_packs.find(
     (item) => text(item.status).toLowerCase() === "sent",
   );
+  const siblingBundleEvidence = resolveSiblingBundleEvidence(snapshot);
 
   return {
     contract_version: SES_INPUT_CONTRACT_VERSION,
@@ -908,6 +1255,9 @@ export function buildSesAssemblerInput(
         cycle_set_hash: text(priorPack?.makesafe_content_hash) || null,
       },
     },
+    ...(siblingBundleEvidence
+      ? { sibling_bundle_evidence: siblingBundleEvidence }
+      : {}),
     hrcw: {
       hrcw: metadata.hrcw === true ||
         intakeCase?.raw_identity_json?.hrcw === true ||
@@ -999,6 +1349,9 @@ export async function loadSesAssemblerLiveSnapshot(
     roofDraft,
     readiness,
     packs,
+    events,
+    outboundBindings,
+    inboundBindings,
   ] = await Promise.all([
     one(
       client
@@ -1085,11 +1438,136 @@ export async function loadSesAssemblerLiveSnapshot(
       client.from("makesafe_report_packs").select("*").eq("job_id", jobId),
       "makesafe_report_packs",
     ),
+    many(
+      client
+        .from("job_events")
+        .select("id,job_id,event_type,detail_json,created_at")
+        .eq("job_id", jobId)
+        .eq("event_type", "note")
+        .order("created_at", { ascending: false }),
+      "job_events.bundle_candidate",
+    ),
+    many(
+      client
+        .from("makesafe_sibling_bundle_binding_revisions")
+        .select(
+          "id,bundle_id,org_id,job_id,sibling_job_id,state,recorded_by,recorded_via,provenance,recorded_at",
+        )
+        .eq("job_id", jobId),
+      "makesafe_sibling_bundle_binding_revisions.job_id",
+    ),
+    many(
+      client
+        .from("makesafe_sibling_bundle_binding_revisions")
+        .select(
+          "id,bundle_id,org_id,job_id,sibling_job_id,state,recorded_by,recorded_via,provenance,recorded_at",
+        )
+        .eq("sibling_job_id", jobId),
+      "makesafe_sibling_bundle_binding_revisions.sibling_job_id",
+    ),
   ]);
   const caseMap = new Map<string, LiveRow>();
   for (const item of [...casesByJob, ...casesByTarget]) {
     if (text(item.id)) caseMap.set(text(item.id), item);
   }
+  const bindingMap = new Map<string, LiveRow>();
+  for (const row of [...outboundBindings, ...inboundBindings]) {
+    if (text(row.id)) bindingMap.set(text(row.id), row);
+  }
+  const bundleBindings = [...bindingMap.values()];
+  const siblingJobIds = [
+    ...new Set(
+      bundleBindings.flatMap((row) => [
+        text(row.job_id),
+        text(row.sibling_job_id),
+      ]).filter((id) => id && id !== jobId),
+    ),
+  ];
+  const outboundRevisionIds = bundleBindings
+    .filter((row) => text(row.job_id) === jobId)
+    .map((row) => text(row.id))
+    .filter(Boolean);
+  const bundleJobs = siblingJobIds.length
+    ? await many(
+      client.from("jobs").select("id,job_number").in("id", siblingJobIds),
+      "jobs.bundle_siblings",
+    )
+    : [];
+  const bundleClaims = outboundRevisionIds.length
+    ? await many(
+      client
+        .from("makesafe_sibling_evidence_claims")
+        .select("*")
+        .in("binding_revision_id", outboundRevisionIds),
+      "makesafe_sibling_evidence_claims",
+    )
+    : [];
+  const invoiceIds = [
+    ...new Set(bundleClaims.map((row) => text(row.invoice_id)).filter(Boolean)),
+  ];
+  const documentIds = [
+    ...new Set(
+      bundleClaims.flatMap((row) => [
+        text(row.report_document_id),
+        text(row.swms_document_id),
+      ]).filter(Boolean),
+    ),
+  ];
+  const emailIds = [
+    ...new Set(
+      bundleClaims.map((row) => text(row.delivery_email_post_id)).filter(
+        Boolean,
+      ),
+    ),
+  ];
+  const mediaIds = [
+    ...new Set(
+      bundleClaims.map((row) => text(row.photo_media_id)).filter(Boolean),
+    ),
+  ];
+  const [bundleInvoices, bundleDocuments, bundleEmails, bundleMedia] =
+    await Promise.all([
+      invoiceIds.length
+        ? many(
+          client
+            .from("xero_invoices")
+            .select("id,job_id,invoice_number,status,line_items")
+            .in("id", invoiceIds),
+          "xero_invoices.bundle_evidence",
+        )
+        : Promise.resolve([]),
+      documentIds.length
+        ? many(
+          client
+            .from("job_documents")
+            .select("id,job_id,type,file_name,pdf_url,storage_url")
+            .in("id", documentIds),
+          "job_documents.bundle_evidence",
+        )
+        : Promise.resolve([]),
+      emailIds.length
+        ? many(
+          client
+            .from("emails")
+            .select(
+              "post_id,subject,body_preview,has_attachments,content_sha256",
+            )
+            .in("post_id", emailIds),
+          "emails.bundle_evidence",
+        )
+        : Promise.resolve([]),
+      mediaIds.length
+        ? many(
+          client
+            .from("job_media")
+            .select(
+              "id,job_id,type,storage_url,label,notes,makesafe_content_hash",
+            )
+            .in("id", mediaIds),
+          "job_media.bundle_evidence",
+        )
+        : Promise.resolve([]),
+    ]);
   return {
     job,
     detail,
@@ -1103,6 +1581,14 @@ export async function loadSesAssemblerLiveSnapshot(
     roof_draft: roofDraft,
     readiness,
     legacy_packs: packs,
+    events,
+    bundle_bindings: bundleBindings,
+    bundle_claims: bundleClaims,
+    bundle_jobs: bundleJobs,
+    bundle_invoices: bundleInvoices,
+    bundle_documents: bundleDocuments,
+    bundle_emails: bundleEmails,
+    bundle_media: bundleMedia,
   };
 }
 
@@ -1330,11 +1816,79 @@ export function createSesAssemblerRuntimeDependencies(
         render_hash: rendered.renderHash,
       };
     },
+    resolveBundledReportArtifact: async (input) => {
+      const bundle = input.sibling_bundle_evidence;
+      if (!bundle || bundle.status !== "accepted") return null;
+      const snapshot = snapshotFor(input);
+      const row = (snapshot.bundle_documents || []).find((item) =>
+        text(item.id) === bundle.coverage.report_document_id &&
+        text(item.job_id) === bundle.sibling.job_id &&
+        ["report", "makesafe_report"].includes(text(item.type).toLowerCase())
+      );
+      if (!row) return null;
+      const url = artifactUrl(row);
+      if (!url) return null;
+      try {
+        return {
+          file_name: fileName(row, `${bundle.sibling.job_number}-report.pdf`),
+          media_type: "application/pdf",
+          bytes: await fetchBytes(url, "bundled sibling report"),
+        };
+      } catch {
+        return null;
+      }
+    },
+    resolveBundledPhotoArtifacts: async (input) => {
+      const bundle = input.sibling_bundle_evidence;
+      if (!bundle || bundle.status !== "accepted") return [];
+      const snapshot = snapshotFor(input);
+      const row = (snapshot.bundle_media || []).find((item) =>
+        text(item.id) === bundle.coverage.photo.media_id &&
+        text(item.job_id) === bundle.sibling.job_id &&
+        text(item.type).toLowerCase() === "photo" &&
+        text(item.makesafe_content_hash) ===
+          bundle.coverage.photo.content_hash &&
+        phraseCovered(
+          `${firstText(item.label)} ${firstText(item.notes)}`,
+          bundle.coverage.photo.scope_phrase,
+        )
+      );
+      if (!row) return [];
+      const type = mediaType(row, "image/jpeg");
+      if (type !== "image/jpeg" && type !== "image/png") return [];
+      const url = artifactUrl(row);
+      if (!url) return [];
+      try {
+        const bytes = await fetchBytes(url, "bundled sibling photo");
+        if (
+          await rawPhotoSha256(bytes) !== bundle.coverage.photo.content_hash
+        ) {
+          return [];
+        }
+        return [{
+          photo_id: text(row.id),
+          source_pointer: `job_media:${text(row.id)}`,
+          file_name: fileName(row, `${bundle.sibling.job_number}-photo.jpg`),
+          media_type: type,
+          bytes,
+        }];
+      } catch {
+        return [];
+      }
+    },
     resolveSwmsArtifact: async (input) => {
       const snapshot = snapshotFor(input);
-      const row = snapshot.documents.find(
+      let row = snapshot.documents.find(
         (item) => text(item.type).toLowerCase() === "swms",
       );
+      const bundle = input.sibling_bundle_evidence;
+      if (!row && bundle?.status === "accepted") {
+        row = (snapshot.bundle_documents || []).find((item) =>
+          text(item.id) === bundle.coverage.swms_document_id &&
+          text(item.job_id) === bundle.sibling.job_id &&
+          text(item.type).toLowerCase() === "swms"
+        );
+      }
       if (!row) return null;
       const url = artifactUrl(row);
       if (!url) return null;

@@ -848,6 +848,104 @@ Deno.test("physical dry-run proves every current-cycle photo without copying byt
   );
 });
 
+Deno.test("bidirectional positive-scope bundle evidence clears the card-local physical and SWMS blockers", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.identity.job_id = "c3afc061-0d4a-43ff-8309-0b8b512e307a";
+  input.identity.job_number = "SWMS-26832";
+  input.identity.card_id = input.identity.job_id;
+  input.source.builder_reference = "MLB-26393";
+  input.cycle_facts.trade_report = null;
+  input.cycle_facts.photos = [];
+  input.sibling_bundle_evidence = {
+    status: "accepted",
+    bundle_id: "1cd35292-1eb7-438f-bf6e-8dbcdf3fb135",
+    claiming_binding: {
+      revision_id: "7dcf8954-5f8c-412b-898e-bc92987e44fc",
+      recorded_by: "ses-sibling-evidence-v1",
+      recorded_via: "reviewed_migration:20260728730000",
+      provenance: { source: "ses-u7-whole-board-sweep-v1" },
+    },
+    reverse_binding: {
+      revision_id: "a2ebb22e-6f46-463d-87c8-7e7ec71cd399",
+      recorded_by: "ses-sibling-evidence-v1",
+      recorded_via: "reviewed_migration:20260728730000",
+      provenance: { source: "ses-u7-whole-board-sweep-v1" },
+    },
+    sibling: {
+      job_id: "02f614a4-09a7-422e-9381-c89a44aceccd",
+      job_number: "SWMS-26837",
+    },
+    coverage: {
+      invoice: {
+        invoice_id: "3be46700-4d5d-4b91-b96e-8baf43ac9d7c",
+        invoice_number: "INV-0835",
+        line_item_id: "edcaa56c-84d5-4a12-be0d-032bd1d422f3",
+        scope_phrase: "Hardie panel stacking",
+      },
+      delivery: {
+        email_post_id: "mail-0835",
+        content_sha256:
+          "0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba",
+        scope_phrase: "displaced Hardie panels stacked safely",
+      },
+      photo: {
+        email_post_id: "mail-0835",
+        content_sha256:
+          "0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba",
+        scope_phrase: "displaced Hardie panels stacked safely",
+        media_id: "photo-26837",
+        content_hash:
+          "sha256:f46202099887565a5738073440de40efa1b0793bfb13576ff69b7d5d56667f60",
+      },
+      report_document_id: "513cb62a-4f9f-4fd5-ae5c-66b0ce053448",
+      swms_document_id: "878641fc-99ba-4f5f-a0a6-d64708394b6a",
+    },
+  };
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input, {
+      resolveBundledReportArtifact: async () => ({
+        file_name: "SWMS-26837 Make Safe Report.pdf",
+        media_type: "application/pdf",
+        bytes: new Uint8Array([37, 80, 68, 70, 37]),
+      }),
+      resolveBundledPhotoArtifacts: async () => [{
+        photo_id: "photo-26837",
+        source_pointer: "job_media:photo-26837",
+        file_name: "SWMS-26837-photo.jpg",
+        media_type: "image/jpeg",
+        bytes: new Uint8Array([255, 216, 255, 4]),
+      }],
+    }),
+  )).results[0];
+  const codes = blockerCodes(result);
+  assert(!codes.includes("trade_evidence_missing"));
+  assert(!codes.includes("hrcw_swms_missing"));
+  assert(!codes.some((code) => code.startsWith("sibling_evidence_")));
+  assertEquals(
+    result.envelope.v2.items.physical_reporting_evidence.state,
+    "ready",
+  );
+  assertEquals(result.envelope.v2.items.supporting_report_pdf.state, "ready");
+  assertEquals(result.envelope.v2.items.swms_artifact.state, "ready");
+  assert(
+    result.artifacts.some((artifact) =>
+      artifact.path === "PROOF/sibling_bundle_evidence.json"
+    ),
+  );
+  assert(
+    result.artifacts.some((artifact) =>
+      artifact.role === "supporting_report_pdf" &&
+      artifact.metadata?.bundle_id ===
+        "1cd35292-1eb7-438f-bf6e-8dbcdf3fb135"
+    ),
+  );
+});
+
 Deno.test("assessment triad produces an invoice-only draft at the sealed price", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.family === "assessment_quote"

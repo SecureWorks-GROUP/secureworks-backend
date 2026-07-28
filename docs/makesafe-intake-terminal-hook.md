@@ -61,6 +61,14 @@ sizes and intended artifact paths. It does not retain the photo bytes across
 iterations, base64-encode them, or render the report PDF. Full photo embedding
 and private artifact persistence occur only on the real non-dry pack build.
 
+When a physical card has no card-local trade report or photos, U4 may use sibling
+evidence only from an explicit durable bundle. Both directions must be current and
+provenance-recorded under the same bundle, and the claiming direction must carry a
+positive claim for the exact authorised invoice line, hashed delivery artifact,
+photo artifact, report and SWMS. A note, inferred address, one-way binding or
+scope-mismatched claim remains a typed blocker naming the suspected sibling; cards
+without a bundle-evidence claim retain the ordinary local-evidence behavior.
+
 `MAKESAFE_AUTO_APPROVE_CLEAN_INTAKE=false` or
 `makesafe_cron_settings.auto_file_enabled=false` remains an explicit emergency brake.
 Without either explicit brake, advance-what-passes is the default.

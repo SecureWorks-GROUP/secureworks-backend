@@ -15,6 +15,66 @@ export type SesDeliveryRenderRoute =
   | "unroutable"
   | "not_applicable";
 
+interface SesSiblingBundleCandidate {
+  suspected_sibling_job_id: string | null;
+  suspected_sibling_job_number: string;
+  suspected_invoice_number: string | null;
+}
+
+export type SesSiblingBundleEvidence =
+  | (SesSiblingBundleCandidate & {
+    status:
+      | "binding_missing"
+      | "binding_not_bidirectional"
+      | "scope_evidence_missing";
+    bundle_id: string | null;
+    binding_revision_id: string | null;
+    reverse_binding_revision_id: string | null;
+    coverage_failures: string[];
+  })
+  | {
+    status: "accepted";
+    bundle_id: string;
+    claiming_binding: {
+      revision_id: string;
+      recorded_by: string;
+      recorded_via: string;
+      provenance: Record<string, unknown>;
+    };
+    reverse_binding: {
+      revision_id: string;
+      recorded_by: string;
+      recorded_via: string;
+      provenance: Record<string, unknown>;
+    };
+    sibling: {
+      job_id: string;
+      job_number: string;
+    };
+    coverage: {
+      invoice: {
+        invoice_id: string;
+        invoice_number: string;
+        line_item_id: string;
+        scope_phrase: string;
+      };
+      delivery: {
+        email_post_id: string;
+        content_sha256: string;
+        scope_phrase: string;
+      };
+      photo: {
+        email_post_id: string;
+        content_sha256: string;
+        scope_phrase: string;
+        media_id: string;
+        content_hash: SesSha256;
+      };
+      report_document_id: string;
+      swms_document_id: string;
+    };
+  };
+
 export interface SesAssemblerInputV1 {
   contract_version: "ses.assembler-input/v1";
   identity: {
@@ -90,6 +150,7 @@ export interface SesAssemblerInputV1 {
       cycle_set_hash: string | null;
     };
   };
+  sibling_bundle_evidence?: SesSiblingBundleEvidence;
   hrcw: {
     hrcw: boolean;
     categories: Array<

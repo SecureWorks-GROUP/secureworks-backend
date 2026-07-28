@@ -13,6 +13,7 @@ FRESH_HEALTH_MIGRATION="$REPO_ROOT/supabase/migrations/20260727020000_makesafe_i
 U5_U6_MIGRATION="$REPO_ROOT/supabase/migrations/20260728020000_makesafe_ses_invoice_release_u5_u6.sql"
 FENCE_HARDENING_MIGRATION="$REPO_ROOT/supabase/migrations/20260728050000_makesafe_ses_fence_hardening.sql"
 DOCS_READY_MIGRATION="$REPO_ROOT/supabase/migrations/20260728210000_makesafe_ses_docs_ready_signoff.sql"
+SIBLING_EVIDENCE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728730000_makesafe_sibling_evidence_bundle_u7.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -59,6 +60,9 @@ fence_hardening_migration_sha() {
 docs_ready_migration_sha() {
   shasum -a 256 "$DOCS_READY_MIGRATION" | awk '{print $1}'
 }
+sibling_evidence_migration_sha() {
+  shasum -a 256 "$SIBLING_EVIDENCE_MIGRATION" | awk '{print $1}'
+}
 
 write_response() {
   local file="$1"
@@ -72,6 +76,7 @@ write_response() {
   U5_U6_EXPECTED_SHA="$(u5_u6_migration_sha)" \
   FENCE_HARDENING_EXPECTED_SHA="$(fence_hardening_migration_sha)" \
   DOCS_READY_EXPECTED_SHA="$(docs_ready_migration_sha)" \
+  SIBLING_EVIDENCE_EXPECTED_SHA="$(sibling_evidence_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -151,6 +156,17 @@ docs_ready_row = {
     "actual_statement_sha256": os.environ["DOCS_READY_EXPECTED_SHA"],
     "missing_markers": [],
 }
+sibling_evidence_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260728730000",
+    "expected_migration_name": "makesafe_sibling_evidence_bundle_u7",
+    "expected_statement_sha256": os.environ["SIBLING_EVIDENCE_EXPECTED_SHA"],
+    "actual_migration_version": "20260728730000",
+    "actual_migration_name": "makesafe_sibling_evidence_bundle_u7",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["SIBLING_EVIDENCE_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -160,6 +176,7 @@ with open(sys.argv[1], "w") as f:
             u5_u6_row,
             fence_hardening_row,
             docs_ready_row,
+            sibling_evidence_row,
         ],
         f,
     )
@@ -358,7 +375,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared
