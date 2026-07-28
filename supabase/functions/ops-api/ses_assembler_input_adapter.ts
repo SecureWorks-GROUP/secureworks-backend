@@ -1798,7 +1798,7 @@ async function resolvePersistedPortalCapture(
   }
 
   let screenshotBytes: Uint8Array | undefined;
-  if (result === "done") {
+  if (result !== "unreachable") {
     const prefix = `${SES_PORTAL_CAPTURE_BUCKET}/`;
     if (
       !row.screenshot_object_key?.startsWith(prefix) ||
