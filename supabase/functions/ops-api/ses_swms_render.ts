@@ -91,11 +91,7 @@ export async function renderSesSwmsPdf(
     compress: false,
   });
   const submittedAt = new Date(plan.provenance.trade_report_submitted_at);
-  doc.setCreationDate(
-    Number.isNaN(submittedAt.getTime())
-      ? new Date("2000-01-01T00:00:00.000Z")
-      : submittedAt,
-  );
+  doc.setCreationDate(submittedAt);
   doc.setFileId(renderHash.slice(0, 32).toUpperCase());
   doc.setProperties({
     title: plan.output_file_name,

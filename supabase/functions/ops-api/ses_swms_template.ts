@@ -488,6 +488,10 @@ function formatDate(value: string): string {
   }/${parsed.getUTCFullYear()}`;
 }
 
+function isValidDateValue(value: string): boolean {
+  return !!value && !Number.isNaN(new Date(value).getTime());
+}
+
 function templateKind(
   input: SesAssemblerInputV1,
   taskActivity: string,
@@ -642,10 +646,27 @@ export function buildSesSwmsGenerationPlan(
     firstText(input.source.site_address),
     firstText(input.source.site_suburb),
   ].filter(Boolean).join(", ");
+  const submittedAt = firstText(report.submitted_at);
+  const worksDateRaw = firstText(
+    checklist.attendance_date,
+    checklist.date_of_works,
+  );
+  const arrival = firstText(checklist.arrival_time, checklist.arrived_at);
+  const crew = firstText(checklist.crew_name, checklist.crew);
+  const siteContact = firstText(
+    checklist.site_contact,
+    checklist.contact_name,
+    checklist.client_name,
+  );
   const missing = [
     !builderReference ? "builder_reference" : "",
     !address ? "site_address" : "",
     !taskActivity ? "trade_report_task_activity" : "",
+    !isValidDateValue(worksDateRaw) ? "works_date" : "",
+    !arrival ? "arrival_time" : "",
+    !crew ? "crew" : "",
+    !siteContact ? "site_contact" : "",
+    !isValidDateValue(submittedAt) ? "trade_report_submitted_at" : "",
   ].filter(Boolean);
   if (missing.length) {
     return {
@@ -663,30 +684,10 @@ export function buildSesSwmsGenerationPlan(
   const selected = templateKind(input, taskActivity);
   if (!selected.ok) return selected;
 
-  const submittedAt = firstText(report.submitted_at);
-  const worksDateRaw = firstText(
-    checklist.attendance_date,
-    checklist.date_of_works,
-    submittedAt,
-  );
-  const worksDate = formatDate(worksDateRaw) ||
-    "Not recorded in the current-cycle trade report";
-  const arrival = firstText(checklist.arrival_time, checklist.arrived_at) ||
-    "Not recorded in the current-cycle trade report";
-  const crew = firstText(checklist.crew_name, checklist.crew) ||
-    (Number(checklist.trade_count) > 0
-      ? `${Number(checklist.trade_count)} trade${
-        Number(checklist.trade_count) === 1 ? "" : "s"
-      }`
-      : "Not recorded in the current-cycle trade report");
-  const authorisedDate = formatDate(submittedAt || worksDateRaw) || worksDate;
+  const worksDate = formatDate(worksDateRaw);
+  const authorisedDate = formatDate(submittedAt);
   const tradeReportId = firstText(report.id) ||
     `current-cycle:${input.attendance.current_attendance_cycle_id}`;
-  const siteContact = firstText(
-    checklist.site_contact,
-    checklist.contact_name,
-    checklist.client_name,
-  ) || "Not recorded in the work order or current-cycle trade report";
 
   const template = SES_SWMS_TEMPLATES[selected.kind];
   return {
@@ -726,14 +727,10 @@ export function buildSesSwmsGenerationPlan(
           task_activity: taskActivity === input.source.instruction_text
             ? "work_order"
             : "trade_report",
-          site_contact: siteContact.startsWith("Not recorded")
-            ? "missing"
-            : "trade_report",
-          works_date: worksDateRaw ? "trade_report" : "missing",
-          arrival: arrival.startsWith("Not recorded")
-            ? "missing"
-            : "trade_report",
-          crew: crew.startsWith("Not recorded") ? "missing" : "trade_report",
+          site_contact: "trade_report",
+          works_date: "trade_report",
+          arrival: "trade_report",
+          crew: "trade_report",
         },
       },
     },

@@ -175,6 +175,27 @@ Deno.test("sealed SWMS generation plan selects only the matching standard contro
   );
 });
 
+Deno.test("SWMS generation blocks when any required real fact is absent", () => {
+  const blocked = buildSesSwmsGenerationPlan(input({
+    report: {
+      id: "trade-report-70062",
+      checklist_json: {
+        works_completed: "Installed temporary fencing.",
+      },
+    },
+  }));
+  assertEquals(blocked.ok, false);
+  if (blocked.ok) throw new Error("missing SWMS facts must block generation");
+  assertEquals(blocked.reason_code, "swms_generation_facts_missing");
+  assertEquals(blocked.facts.missing_facts, [
+    "works_date",
+    "arrival_time",
+    "crew",
+    "site_contact",
+    "trade_report_submitted_at",
+  ]);
+});
+
 Deno.test("SWMS renderer emits a stable four-page provenance-bound PDF", async () => {
   const built = buildSesSwmsGenerationPlan(input());
   assert(built.ok);
