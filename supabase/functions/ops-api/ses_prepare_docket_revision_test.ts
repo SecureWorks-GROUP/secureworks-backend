@@ -124,7 +124,19 @@ function fixtureInput(
       portal_links: portals,
     },
     cycle_facts: {
-      trade_report: physical ? { summary: "Work completed safely." } : null,
+      trade_report: physical
+        ? {
+          id: "trade-report-fixture",
+          submitted_at: "2026-07-27T01:00:00.000Z",
+          checklist_json: {
+            works_completed: "Work completed safely.",
+            attendance_date: "2026-07-27",
+            arrival_time: "08:30",
+            crew_name: "Field crew",
+            site_contact: "Site representative",
+          },
+        }
+        : null,
       photos: physical
         ? [
           {

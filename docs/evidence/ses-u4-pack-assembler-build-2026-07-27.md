@@ -22,7 +22,7 @@ pre-Xero revision containing:
 
 - the source work order and designated source attachments;
 - the v2 manifest inside the v3 correlation-spine envelope;
-- the applicable SecureWorks report, roof report and/or SWMS artifacts;
+- the applicable SecureWorks report, roof report and/or deterministic SWMS artifact;
 - every current-cycle photo byte plus the complete ordered photo map for
   physical work only;
 - live portal-capture evidence and screenshots where the family requires them;
@@ -58,7 +58,11 @@ binding; the deployed Captain surface does **not** change until a separately
 approved deployment.
 
 For a ready physical docket using card-local evidence, the Captain sees the WO,
-completion report, every current-cycle photo, the explicit SWMS decision/artifact, a local invoice
+completion report, every current-cycle photo, and, when the sealed family/HRCW
+facts require it, a deterministic SWMS generated from the canonical work order
+and current-cycle field trade report. The SWMS carries the sealed template
+provenance and is included in the draft pack and email attachments; staff do not
+need to supply one. The Captain also sees the explicit SWMS decision, a local invoice
 proposal, and three separate report/photo/invoice drafts on one review page.
 
 For an ordinary roof docket the Captain sees the WO, the captured live portal
@@ -75,9 +79,21 @@ and AJBR use their labour-only rows.
 
 AJS 70062 is fixed as a physical make-safe: “tarp affected areas of water
 leaking” produces the completion-report/photo/SWMS-decision/invoice-proposal
-recipe. Any AJS/AJBR input claiming a report-only roof or assessment family is
+recipe, with SWMS generation driven by the sealed family/HRCW facts. Any AJS/AJBR input claiming a report-only roof or assessment family is
 rejected with `ajs_misclassified_as_roof_report`; it is never silently rerouted
 and produces no fallback report, photo, invoice proposal or email draft.
+
+### SWMS generation boundary — 2026-07-28
+
+U4 generates a SWMS only when the sealed family and canonical work-order/trade-report
+facts require it. The renderer may select only the sealed general make-safe,
+roof-height, or fibre-cement fencing templates; unsupported or combined HRCW
+control sets fail closed with a Captain template-decision blocker. A current-cycle
+field trade report and all required real job facts are mandatory inputs. Missing
+inputs remain reason-coded blockers and never instruct staff to attach a SWMS.
+The generated PDF is deterministic and provenance-bound to the selected template,
+work order, and trade report. Report-only and otherwise non-required families mark
+the SWMS not applicable.
 
 ## Repeatability proof
 
