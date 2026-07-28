@@ -32,7 +32,7 @@ pre-Xero revision containing:
   timing evidence and hashes.
 
 The internal revision and append-only artifact store retain the complete PDF and
-photo bytes. A physical `dry_run:true` is deliberately lighter: it downloads
+photo bytes. A card-local physical `dry_run:true` is deliberately lighter: it downloads
 each current-cycle photo only long enough to calculate its raw SHA-256, discards
 the bytes before moving to the next photo, and returns ordered proof records
 containing the photo id, caption, hash, byte size, media type and intended pack
@@ -57,8 +57,8 @@ change also supplies the production read-model adapter and ops-api/skill
 binding; the deployed Captain surface does **not** change until a separately
 approved deployment.
 
-For a ready physical docket the Captain sees the WO, completion report, every
-current-cycle photo, the explicit SWMS decision/artifact, a local invoice
+For a ready physical docket using card-local evidence, the Captain sees the WO,
+completion report, every current-cycle photo, the explicit SWMS decision/artifact, a local invoice
 proposal, and three separate report/photo/invoice drafts on one review page.
 
 For an ordinary roof docket the Captain sees the WO, the captured live portal

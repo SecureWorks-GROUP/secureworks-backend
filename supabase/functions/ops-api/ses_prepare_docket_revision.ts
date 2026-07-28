@@ -102,9 +102,11 @@ async function rawPhotoSha256(bytes: Uint8Array): Promise<SesSha256> {
   const digest = new Uint8Array(
     await crypto.subtle.digest("SHA-256", safeBytes.buffer),
   );
-  return `sha256:${Array.from(digest).map((byte) =>
-    byte.toString(16).padStart(2, "0")
-  ).join("")}`;
+  return `sha256:${
+    Array.from(digest).map((byte) => byte.toString(16).padStart(2, "0")).join(
+      "",
+    )
+  }`;
 }
 
 export interface SesPortalCaptureRequest {
@@ -1837,7 +1839,9 @@ async function prepareOne(
                 scope_phrase: acceptedBundle.coverage.photo.scope_phrase,
               },
             });
-            if (await rawPhotoSha256(resolvedPhoto.bytes) !== expectedPhotoHash) {
+            if (
+              await rawPhotoSha256(resolvedPhoto.bytes) !== expectedPhotoHash
+            ) {
               const itemBlocker = addBlocker(
                 blockers,
                 blocked(
@@ -1848,7 +1852,9 @@ async function prepareOne(
                   [acceptedBundle.coverage.photo.media_id],
                   {
                     expected_content_hash: expectedPhotoHash,
-                    actual_content_hash: await rawPhotoSha256(resolvedPhoto.bytes),
+                    actual_content_hash: await rawPhotoSha256(
+                      resolvedPhoto.bytes,
+                    ),
                   },
                 ),
               );

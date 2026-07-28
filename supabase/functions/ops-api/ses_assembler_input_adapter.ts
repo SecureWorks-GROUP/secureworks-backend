@@ -1525,46 +1525,49 @@ export async function loadSesAssemblerLiveSnapshot(
       bundleClaims.map((row) => text(row.photo_media_id)).filter(Boolean),
     ),
   ];
-  const [bundleInvoices, bundleDocuments, bundleEmails, bundleMedia] = await Promise.all([
-    invoiceIds.length
-      ? many(
-        client
-          .from("xero_invoices")
-          .select("id,job_id,invoice_number,status,line_items")
-          .in("id", invoiceIds),
-        "xero_invoices.bundle_evidence",
-      )
-      : Promise.resolve([]),
-    documentIds.length
-      ? many(
-        client
-          .from("job_documents")
-          .select("id,job_id,type,file_name,pdf_url,storage_url")
-          .in("id", documentIds),
-        "job_documents.bundle_evidence",
-      )
-      : Promise.resolve([]),
-    emailIds.length
-      ? many(
-        client
-          .from("emails")
-          .select(
-            "post_id,subject,body_preview,has_attachments,content_sha256",
-          )
-          .in("post_id", emailIds),
-        "emails.bundle_evidence",
-      )
-      : Promise.resolve([]),
-    mediaIds.length
-      ? many(
-        client
-          .from("job_media")
-          .select("id,job_id,type,storage_url,label,notes,makesafe_content_hash")
-          .in("id", mediaIds),
-        "job_media.bundle_evidence",
-      )
-      : Promise.resolve([]),
-  ]);
+  const [bundleInvoices, bundleDocuments, bundleEmails, bundleMedia] =
+    await Promise.all([
+      invoiceIds.length
+        ? many(
+          client
+            .from("xero_invoices")
+            .select("id,job_id,invoice_number,status,line_items")
+            .in("id", invoiceIds),
+          "xero_invoices.bundle_evidence",
+        )
+        : Promise.resolve([]),
+      documentIds.length
+        ? many(
+          client
+            .from("job_documents")
+            .select("id,job_id,type,file_name,pdf_url,storage_url")
+            .in("id", documentIds),
+          "job_documents.bundle_evidence",
+        )
+        : Promise.resolve([]),
+      emailIds.length
+        ? many(
+          client
+            .from("emails")
+            .select(
+              "post_id,subject,body_preview,has_attachments,content_sha256",
+            )
+            .in("post_id", emailIds),
+          "emails.bundle_evidence",
+        )
+        : Promise.resolve([]),
+      mediaIds.length
+        ? many(
+          client
+            .from("job_media")
+            .select(
+              "id,job_id,type,storage_url,label,notes,makesafe_content_hash",
+            )
+            .in("id", mediaIds),
+          "job_media.bundle_evidence",
+        )
+        : Promise.resolve([]),
+    ]);
   return {
     job,
     detail,
@@ -1843,7 +1846,8 @@ export function createSesAssemblerRuntimeDependencies(
         text(item.id) === bundle.coverage.photo.media_id &&
         text(item.job_id) === bundle.sibling.job_id &&
         text(item.type).toLowerCase() === "photo" &&
-        text(item.makesafe_content_hash) === bundle.coverage.photo.content_hash &&
+        text(item.makesafe_content_hash) ===
+          bundle.coverage.photo.content_hash &&
         phraseCovered(
           `${firstText(item.label)} ${firstText(item.notes)}`,
           bundle.coverage.photo.scope_phrase,
@@ -1856,7 +1860,9 @@ export function createSesAssemblerRuntimeDependencies(
       if (!url) return [];
       try {
         const bytes = await fetchBytes(url, "bundled sibling photo");
-        if (await rawPhotoSha256(bytes) !== bundle.coverage.photo.content_hash) {
+        if (
+          await rawPhotoSha256(bytes) !== bundle.coverage.photo.content_hash
+        ) {
           return [];
         }
         return [{

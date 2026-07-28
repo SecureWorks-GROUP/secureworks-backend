@@ -2,8 +2,8 @@
 import {
   assert,
   assertEquals,
-  assertThrows,
   assertStringIncludes,
+  assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import fixture from "./fixtures/ses_u4_swms_26980_live_snapshot.json" with {
   type: "json",
@@ -673,9 +673,14 @@ Deno.test(
     }
     assert(
       migration.indexOf("IF NOT EXISTS (\n    SELECT 1\n    FROM public.jobs") <
-        migration.indexOf("INSERT INTO public.makesafe_sibling_bundle_binding_revisions"),
+        migration.indexOf(
+          "INSERT INTO public.makesafe_sibling_bundle_binding_revisions",
+        ),
     );
-    assertStringIncludes(migration, "AND NOT EXISTS (\n    SELECT 1\n    FROM public.xero_invoices");
+    assertStringIncludes(
+      migration,
+      "AND NOT EXISTS (\n    SELECT 1\n    FROM public.xero_invoices",
+    );
     assertStringIncludes(migration, "v_photo_match_count <> 1");
     for (
       const forbidden of [
@@ -716,13 +721,14 @@ Deno.test("sibling evidence seed guard executes empty, complete, and partial bra
     "seed",
   );
   assertThrows(
-    () => seedGuardOutcome({
-      jobs: ["claiming"],
-      invoice: true,
-      delivery: true,
-      documents: 2,
-      media: 1,
-    }),
+    () =>
+      seedGuardOutcome({
+        jobs: ["claiming"],
+        invoice: true,
+        delivery: true,
+        documents: 2,
+        media: 1,
+      }),
     Error,
     "partial or drifted production footprint",
   );
