@@ -14,6 +14,7 @@ import {
   type SesSha256,
 } from "./ses_docket_envelope.ts";
 import {
+  canonicalSesFamilyFromCard,
   resolveSesFamilyMatrixRow,
   SES_FAMILY_MATRIX_VERSION,
   type SesBuilderKey,
@@ -241,36 +242,14 @@ function builderKey(snapshot: SesAssemblerLiveSnapshot): SesBuilderKey {
 
 function family(snapshot: SesAssemblerLiveSnapshot): SesFamilyId {
   const metadata = record(snapshot.job.metadata);
-  const explicit = text(metadata.makesafe_job_family)
-    .toLowerCase()
-    .replaceAll("-", "_")
-    .replaceAll(" ", "_");
-  const ownTemplate = metadata.own_template_requested === true ||
-    metadata.strata === true ||
-    metadata.report_delivery === "own_document" ||
-    snapshot.detail?.report_delivery === "own_document";
-  switch (explicit) {
-    case "general_makesafe":
-    case "physical_makesafe":
-      return "physical_makesafe";
-    case "temp_fence_makesafe":
-    case "temporary_fencing":
-    case "temp_fence":
-      return "temporary_fencing";
-    case "assessment_report_quote":
-    case "assessment_report":
-    case "assessment_quote":
-    case "assessment":
-      return "assessment_quote";
-    case "own_template_roof":
-      return "own_template_roof";
-    case "ordinary_roof_portal":
-      return ownTemplate ? "own_template_roof" : "ordinary_roof_portal";
-    case "roof_report":
-      return ownTemplate ? "own_template_roof" : "ordinary_roof_portal";
-    default:
-      return "unknown";
-  }
+  return canonicalSesFamilyFromCard({
+    makesafe_job_family: metadata.makesafe_job_family,
+    insurance_job_type: metadata.insurance_job_type,
+    own_template_requested: metadata.own_template_requested,
+    strata: metadata.strata,
+    report_delivery: metadata.report_delivery ||
+      snapshot.detail?.report_delivery,
+  });
 }
 
 function lineageKind(relation: unknown): "none" | "revision" | "sibling" {
@@ -763,15 +742,21 @@ export async function loadSesAssemblerLiveSnapshot(
   client: any,
   selection: Selection,
 ): Promise<SesAssemblerLiveSnapshot> {
-  let jobQuery = client.from("jobs").select("*").eq("type", "makesafe");
+  let jobQuery = client.from("jobs").select("*");
   jobQuery = selection.mode === "job_id"
     ? jobQuery.eq("id", selection.job_id)
     : jobQuery.eq("job_number", selection.job_number);
   const job = await one(jobQuery.maybeSingle(), "jobs");
-  if (!job) {
+  const metadata = record(job?.metadata);
+  const isRestoration = job?.type === "insurance" &&
+    canonicalSesFamilyFromCard({
+        makesafe_job_family: metadata.makesafe_job_family,
+        insurance_job_type: metadata.insurance_job_type,
+      }) === "restoration";
+  if (!job || (job.type !== "makesafe" && !isRestoration)) {
     throw new SesAssemblerAdapterError(
       "ses_card_not_found",
-      "No make-safe card matched the requested selection.",
+      "No SES reporting card matched the requested selection.",
       404,
     );
   }
@@ -915,7 +900,10 @@ function artifactUrl(row: LiveRow): string {
   );
 }
 
-async function fetchBytes(url: string, label: string): Promise<Uint8Array<ArrayBuffer>> {
+async function fetchBytes(
+  url: string,
+  label: string,
+): Promise<Uint8Array<ArrayBuffer>> {
   if (!/^https:\/\//i.test(url)) {
     throw new SesAssemblerAdapterError(
       "ses_artifact_unrecoverable",

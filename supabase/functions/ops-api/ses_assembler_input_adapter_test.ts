@@ -62,11 +62,21 @@ function liveSnapshotClient(live: SesAssemblerLiveSnapshot) {
     from(table: string) {
       let single = false;
       const query = {
-        select() { return query; },
-        eq() { return query; },
-        neq() { return query; },
-        order() { return query; },
-        limit() { return query; },
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        neq() {
+          return query;
+        },
+        order() {
+          return query;
+        },
+        limit() {
+          return query;
+        },
         maybeSingle() {
           single = true;
           return query;
@@ -466,9 +476,10 @@ Deno.test(
         await crypto.subtle.digest("SHA-256", bytes),
       );
       expectedPhotoHashes.push(
-        `sha256:${Array.from(digest).map((byte) =>
-          byte.toString(16).padStart(2, "0")
-        ).join("")}`,
+        `sha256:${
+          Array.from(digest).map((byte) => byte.toString(16).padStart(2, "0"))
+            .join("")
+        }`,
       );
       await new Promise((resolve) => setTimeout(resolve, 0));
       activeFetches--;
@@ -551,6 +562,7 @@ Deno.test(
         ["general_makesafe", "physical_makesafe"],
         ["temp_fence_makesafe", "temporary_fencing"],
         ["assessment_report_quote", "assessment_quote"],
+        ["restoration", "restoration"],
       ] as const
     ) {
       const live = snapshot();
@@ -568,6 +580,18 @@ Deno.test(
       "ordinary_roof_portal",
     );
 
+    const ownTemplateRoof = snapshot();
+    ownTemplateRoof.detail!.report_type = null;
+    ownTemplateRoof.detail!.external_links = [];
+    ownTemplateRoof.job.metadata.makesafe_job_family = "roof_report";
+    ownTemplateRoof.job.metadata.report_delivery = "own_document";
+    assertEquals(
+      buildSesAssemblerInput(ownTemplateRoof).classification.family,
+      "own_template_roof",
+    );
+  },
+);
+
 Deno.test("SWMS-26980 seeded authority preserves the identity spine in U4", () => {
   const live = snapshot();
   live.identity_revision = {
@@ -579,20 +603,78 @@ Deno.test("SWMS-26980 seeded authority preserves the identity spine in U4", () =
     effective_case_id: null,
   };
   const input = buildSesAssemblerInput(live);
-  assertEquals(input.identity.source_instruction_id, live.identity_revision.source_instruction_id);
-  assertEquals(input.identity.source_version, 1);
+  assertEquals(
+    input.identity.source_instruction_id,
+    live.identity_revision.source_instruction_id,
+  );
+  assertEquals(input.identity.source_version, "1");
   assertEquals(input.identity.lineage_id, live.identity_revision.lineage_id);
 });
 
-    const ownTemplateRoof = snapshot();
-    ownTemplateRoof.detail!.report_type = null;
-    ownTemplateRoof.detail!.external_links = [];
-    ownTemplateRoof.job.metadata.makesafe_job_family = "roof_report";
-    ownTemplateRoof.job.metadata.report_delivery = "own_document";
-    assertEquals(
-      buildSesAssemblerInput(ownTemplateRoof).classification.family,
-      "own_template_roof",
+Deno.test(
+  "real restoration card shape dry-runs to the typed unsealed-recipe blocker",
+  async () => {
+    const live = snapshot();
+    live.job.id = "7dea664a-e0d7-4263-ab0c-bacea9e1d65d";
+    live.job.job_number = "SWMS-26936";
+    live.job.type = "insurance";
+    live.job.status = "accepted";
+    live.job.metadata = {
+      ...live.job.metadata,
+      insurance_job_type: "restoration",
+      insurance_job_type_label: "Restoration Insurance Work",
+      // The real converted card still carries this stale compatibility token.
+      // Insurance restoration authority must win.
+      makesafe_job_family: "general_makesafe",
+      external_ref: "MLB-MW-26873",
+    };
+    live.detail!.job_id = live.job.id;
+    live.detail!.external_ref = "MLB-MW-26873";
+    live.detail!.substatus = "company_contact_required";
+    live.detail!.report_type = null;
+    live.identity_revision = {
+      authority_kind: "legacy_job_record",
+      source_instruction_id: `legacy-job:${live.job.id}`,
+      source_version: 1,
+      source_content_hash: `sha256:${"c".repeat(64)}`,
+      lineage_id: live.job.id,
+      effective_case_id: null,
+    };
+    live.cycles = [];
+    live.reports = [];
+    live.media = [];
+
+    const client = liveSnapshotClient(live);
+    const deps = createSesAssemblerRuntimeDependencies(client, {
+      org_id: "org-test",
+      created_by: "user-test",
+    });
+    const response = await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_number", job_number: "SWMS-26936" },
+        idempotency_key: "restoration-real-card-proof-20260728",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      deps,
     );
+    const result = response.results[0];
+    const codes = blockerCodes(result);
+    assertEquals(result.state, "blocked");
+    assert(codes.includes("restoration_recipe_unsealed"));
+    assert(!codes.includes("family_unknown"));
+    assertEquals(result.envelope.v2.classification.family, "restoration");
+    assertEquals(result.envelope.v2.classification.job_type, "restoration");
+    assertEquals(result.envelope.v2.classification.recipe_selected, false);
+    assertEquals(
+      result.blockers.find((blocker) =>
+        blocker.reason_code === "restoration_recipe_unsealed"
+      )?.facts?.job_number,
+      "SWMS-26936",
+    );
+    assertEquals(result.invoice_proposal, null);
+    assertEquals(result.email_drafts, {});
   },
 );
 

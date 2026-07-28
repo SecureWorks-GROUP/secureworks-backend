@@ -15,6 +15,7 @@ import {
 } from "./ses_docket_envelope.ts";
 import {
   resolveSesFamilyMatrixRow,
+  SES_EMERGENCY_SERVICE_FAMILIES,
   SES_FAMILY_MATRIX,
   SES_FAMILY_MATRIX_VERSION,
   type SesFamilyMatrixRow,
@@ -249,6 +250,12 @@ function blockerCodes(result: {
 }
 
 Deno.test("family matrix is a closed executable set with the AJS report guard", () => {
+  assertEquals(SES_EMERGENCY_SERVICE_FAMILIES, [
+    "roof",
+    "assessment",
+    "makesafe",
+    "restoration",
+  ]);
   assertEquals(SES_FAMILY_MATRIX.length, 15);
   for (const row of SES_FAMILY_MATRIX) {
     const resolved = resolveSesFamilyMatrixRow({
@@ -276,6 +283,93 @@ Deno.test("family matrix is a closed executable set with the AJS report guard", 
     assert(!rejected.ok);
     assertEquals(rejected.failure.code, "ajs_misclassified_as_roof_report");
   }
+});
+
+Deno.test("restoration is typed but hard-stops before any unsealed recipe work", async () => {
+  const physicalRow = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(physicalRow);
+  input.identity.job_id = "7dea664a-e0d7-4263-ab0c-bacea9e1d65d";
+  input.identity.job_number = "SWMS-26936";
+  input.identity.card_id = "7dea664a-e0d7-4263-ab0c-bacea9e1d65d";
+  input.identity.source_instruction_id = "legacy-job:SWMS-26936";
+  input.classification.family = "restoration";
+  input.classification.subtype = null;
+  input.classification.report_only = false;
+  input.classification.report_delivery = null;
+  input.source.builder_reference = "MLB-MW-26873";
+  input.source.site_address = "Real restoration card address";
+  input.source.site_suburb = "Perth";
+  input.source.deliverables = [];
+  input.cycle_facts.trade_report = null;
+  input.cycle_facts.photos = [];
+  input.cycle_facts.hours_and_materials = null;
+
+  let sourceRecoveryCalls = 0;
+  let portalCaptureCalls = 0;
+  let physicalRenderCalls = 0;
+  let roofRenderCalls = 0;
+  let swmsCalls = 0;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input, {
+      resolveSourceArtifacts: async () => {
+        sourceRecoveryCalls++;
+        return [];
+      },
+      capturePortal: async () => {
+        portalCaptureCalls++;
+        throw new Error("restoration portal recipe must not run");
+      },
+      renderPhysicalReport: async () => {
+        physicalRenderCalls++;
+        throw new Error("physical recipe must not run");
+      },
+      renderOwnRoofReport: async () => {
+        roofRenderCalls++;
+        throw new Error("roof recipe must not run");
+      },
+      resolveSwmsArtifact: async () => {
+        swmsCalls++;
+        return null;
+      },
+    }),
+  )).results[0];
+
+  const codes = blockerCodes(result);
+  assertEquals(result.state, "blocked");
+  assert(codes.includes("restoration_recipe_unsealed"));
+  assert(!codes.includes("family_unknown"));
+  assertEquals(result.envelope.v2.classification.family, "restoration");
+  assertEquals(result.envelope.v2.classification.job_type, "restoration");
+  assertEquals(result.envelope.v2.classification.recipe_selected, false);
+  const restorationBlocker = result.blockers.find((blocker) =>
+    blocker.reason_code === "restoration_recipe_unsealed"
+  )!;
+  assertEquals(restorationBlocker.facts, {
+    job_id: "7dea664a-e0d7-4263-ab0c-bacea9e1d65d",
+    job_number: "SWMS-26936",
+    card_id: "7dea664a-e0d7-4263-ab0c-bacea9e1d65d",
+    builder_reference: "MLB-MW-26873",
+    site_address: "Real restoration card address",
+    site_suburb: "Perth",
+    builder_key: "MLB",
+    family: "restoration",
+    subtype: null,
+    workflow: "active",
+    source_instruction_id: "legacy-job:SWMS-26936",
+    current_attendance_cycle_id: "cycle-70062",
+    cycle_number: 1,
+  });
+  assertEquals(result.invoice_proposal, null);
+  assertEquals(result.email_drafts, {});
+  assertEquals(sourceRecoveryCalls, 0);
+  assertEquals(portalCaptureCalls, 0);
+  assertEquals(physicalRenderCalls, 0);
+  assertEquals(roofRenderCalls, 0);
+  assertEquals(swmsCalls, 0);
 });
 
 Deno.test("every shippable matrix row has a ready golden and an intentional negative golden", async () => {

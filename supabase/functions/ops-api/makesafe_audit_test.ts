@@ -123,7 +123,10 @@ function makeQueryClient(
         return b;
       },
       eq: (col: string, val: any) => {
-        preds.push((r) => r?.[col] === val);
+        const jsonPath = col.match(/^(.+)->>([^>]+)$/);
+        preds.push((r) =>
+          jsonPath ? r?.[jsonPath[1]]?.[jsonPath[2]] === val : r?.[col] === val
+        );
         return b;
       },
       neq: (col: string, val: any) => {
@@ -769,6 +772,48 @@ for (const count of [392, 500]) {
   });
 }
 
+Deno.test("2.1 makesafeAudit includes insurance-owned restoration as a typed SES family", async () => {
+  const seed = volumeSeed(1);
+  seed.jobs[0] = {
+    ...seed.jobs[0],
+    id: "7dea664a-e0d7-4263-ab0c-bacea9e1d65d",
+    job_number: "SWMS-26936",
+    type: "insurance",
+    metadata: {
+      insurance_job_type: "restoration",
+      makesafe_job_family: "general_makesafe",
+    },
+  };
+  for (
+    const rows of [
+      seed.makesafe_job_details,
+      seed.job_documents,
+      seed.job_service_reports,
+    ]
+  ) {
+    for (const row of rows) row.job_id = seed.jobs[0].id;
+  }
+
+  const audit: any = await _makesafeAuditForTest(
+    makeQueryClient(seed),
+    new URLSearchParams(),
+  );
+  assertEquals(audit.jobs.length, 1);
+  assertEquals(audit.jobs[0].job_id, seed.jobs[0].id);
+  assertEquals(audit.jobs[0].job_type, "insurance");
+  assertEquals(audit.jobs[0].ses_family, "restoration");
+  assertEquals(audit.jobs[0].ses_recipe_state, "unsealed");
+
+  const pipeline: any = await _makesafePipelineForTest(
+    makeQueryClient(seed),
+    new URLSearchParams("history=all"),
+  );
+  const pipelineRows = Object.values(pipeline.columns).flat() as any[];
+  assertEquals(pipelineRows.length, 1);
+  assertEquals(pipelineRows[0].id, seed.jobs[0].id);
+  assertEquals(pipelineRows[0].type, "insurance");
+});
+
 Deno.test("2.1 makesafeAudit merges a second jobs page beyond the old 500-row cap", async () => {
   const count = 1001;
   const reads: ReadCall[] = [];
@@ -819,6 +864,8 @@ const PAGE_UNIQUE_KEY: Record<string, string> = {
   job_events: "id",
   job_assignments: "id",
   makesafe_report_packs: "id",
+  makesafe_docket_revisions_current: "id",
+  makesafe_board_attention_current: "id",
   // U2 pack-cycle junction: one row per (pack, attendance cycle); PK `id`.
   makesafe_report_pack_cycles: "id",
   xero_invoices: "id",
@@ -926,7 +973,12 @@ Deno.test("2.1 every paginated makesafe_audit read ends on a unique page tie-bre
   assertEquals(keysFor("makesafe_card_story").includes("id"), false);
   // Sort semantics preserved: newest-first jobs and newest-first invoices, with
   // the PK only breaking ties (_resolveLiveMakesafeInvoice relies on that order).
-  assertEquals(keysFor("jobs"), ["created_at", "id"]);
+  assertEquals(keysFor("jobs"), [
+    "created_at",
+    "id",
+    "created_at",
+    "id",
+  ]);
   assertEquals(keysFor("xero_invoices"), ["invoice_date", "id"]);
   assertEquals(
     paginated.filter((r) => r.table === "xero_invoices")
@@ -962,6 +1014,8 @@ Deno.test("2.1 every paginated makesafe board read ends on a unique page tie-bre
   // breaking ties (the board renders in this order).
   assertEquals(jobsReads.map((r) => r.orders.map((o) => o.column)), [
     ["created_at", "id"],
+    ["created_at", "id"],
+    ["updated_at", "id"],
     ["updated_at", "id"],
   ]);
   assertEquals(
@@ -1018,6 +1072,22 @@ Deno.test("2.1 the allocated-only trade scope read paginates on a unique page ti
     "job_id",
     "id",
   ]);
+});
+
+Deno.test("allocated-only trade scope includes assigned insurance restoration", async () => {
+  const jobIds = await _loadMakesafeAssignedJobIdsForTest(
+    makeQueryClient({
+      job_assignments: [{
+        id: "assignment-restoration",
+        job_id: "restoration-job",
+        user_id: "trade-1",
+        "jobs.type": "insurance",
+        "jobs.metadata": { insurance_job_type: "restoration" },
+      }],
+    }),
+    "trade-1",
+  );
+  assertEquals(jobIds, ["restoration-job"]);
 });
 
 Deno.test("2.1 makesafeAudit rejects a required join query error instead of returning partial rows", async () => {

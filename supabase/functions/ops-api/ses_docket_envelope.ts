@@ -117,6 +117,7 @@ export interface SesBlocker {
   searches_attempted: string[];
   rejected_candidates: string[];
   recovery_action: string;
+  facts?: Record<string, unknown>;
 }
 
 export interface SesReadyState {

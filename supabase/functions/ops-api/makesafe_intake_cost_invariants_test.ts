@@ -1,7 +1,11 @@
+// deno-lint-ignore-file no-import-prefix
 // M1.5 MUST-HOLD invariants — pinned so the cost levers can never quietly change what
 // lands in Supabase (Captain's directive: drive cost toward zero WITHOUT changing the
 // extraction contract).
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { classifyMakeSafeJobFamily } from "./makesafe_intake_gate.ts";
 import { _shouldAutoApproveCleanIntakeForTest as shouldAutoApprove } from "./index.ts";
 
@@ -9,20 +13,44 @@ import { _shouldAutoApproveCleanIntakeForTest as shouldAutoApprove } from "./ind
 // touched the family classifier these fixed mappings would move.
 Deno.test("INVARIANT: makesafe_job_family classifier is unchanged", () => {
   assertEquals(
-    classifyMakeSafeJobFamily("Temp fence collection AJBR-1", "please collect the temporary fencing", null),
+    classifyMakeSafeJobFamily(
+      "Temp fence collection AJBR-1",
+      "please collect the temporary fencing",
+      null,
+    ),
     "temp_fence_makesafe",
   );
   assertEquals(
-    classifyMakeSafeJobFamily("Prime roof report MLB-2", "roof report link", "roof_report"),
+    classifyMakeSafeJobFamily(
+      "Prime roof report MLB-2",
+      "roof report link",
+      "roof_report",
+    ),
     "roof_report",
   );
   assertEquals(
-    classifyMakeSafeJobFamily("assess and quote", "please assess and quote", null),
+    classifyMakeSafeJobFamily(
+      "assess and quote",
+      "please assess and quote",
+      null,
+    ),
     "assessment_report_quote",
   );
   assertEquals(
-    classifyMakeSafeJobFamily("NEW WORK ORDER MLB-3", "make safe the roof after storm", null),
+    classifyMakeSafeJobFamily(
+      "NEW WORK ORDER MLB-3",
+      "make safe the roof after storm",
+      null,
+    ),
     "general_makesafe",
+  );
+  assertEquals(
+    classifyMakeSafeJobFamily(
+      "Restoration works MLB-MW-26873",
+      "Complete water damage restoration works to the dwelling",
+      null,
+    ),
+    "restoration",
   );
 });
 
@@ -53,7 +81,10 @@ Deno.test("INVARIANT: a clean template-skipped draft WITH a servable WO PDF pass
     externalRef: "MLB-25795",
     clientName: "Jane Doe",
     siteAddress: "12 Smith Street Perth",
-    attachments: [{ pdf_url: "https://example/job-documents/wo.pdf", is_work_order: true }],
+    attachments: [{
+      pdf_url: "https://example/job-documents/wo.pdf",
+      is_work_order: true,
+    }],
   });
   assert(decision.ok, `expected auto-file ok, got ${decision.reason}`);
 });
@@ -74,7 +105,10 @@ Deno.test("INVARIANT #1: on a CLASSIFICATION FAILURE the WO PDF is STILL present
     externalRef: "MLB-25795",
     clientName: "Jane Doe",
     siteAddress: "12 Smith Street Perth",
-    attachments: [{ pdf_url: "https://example/job-documents/wo.pdf", is_work_order: true }],
+    attachments: [{
+      pdf_url: "https://example/job-documents/wo.pdf",
+      is_work_order: true,
+    }],
   });
   assertEquals(decision.ok, false);
   assertEquals(decision.reason, "confidence_not_high"); // NOT "missing_work_order_pdf"
