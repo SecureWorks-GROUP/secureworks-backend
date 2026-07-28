@@ -189,6 +189,28 @@ export function operationalCounts(
   };
 }
 
+export function operationalCountsEqual(
+  left: Record<string, number>,
+  right: Record<string, number>,
+): boolean {
+  const leftEntries = Object.entries(left).sort(([a], [b]) =>
+    a.localeCompare(b)
+  );
+  const rightEntries = Object.entries(right).sort(([a], [b]) =>
+    a.localeCompare(b)
+  );
+  return JSON.stringify(leftEntries) === JSON.stringify(rightEntries);
+}
+
+export function cleanupLedgerIdentity(
+  inventory: Inventory,
+): { source_post_ids: string[]; case_ids: string[] } {
+  return {
+    source_post_ids: unique(strings(inventory.emails, "post_id")),
+    case_ids: unique(strings(inventory.cases, "id")),
+  };
+}
+
 export function assertCleanupSettled(
   inventory: Inventory,
   expectedAttempted: number,
@@ -1012,6 +1034,39 @@ async function cleanup(
 ): Promise<void> {
   assertCleanupSettled(found, expectedAttempted);
   guardInventory(run, found);
+  const ledgerIdentity = cleanupLedgerIdentity(found);
+  if (
+    ledgerIdentity.source_post_ids.length !== found.emails.length ||
+    ledgerIdentity.case_ids.length !== found.cases.length ||
+    ledgerIdentity.case_ids.length === 0
+  ) {
+    throw new Error(
+      "cleanup refused incomplete or duplicate source/case ledger identity",
+    );
+  }
+  const boundRuns = await client.rest<JsonRecord[]>(
+    "ses_synthetic_livefire_runs",
+    {
+      marker: `eq.${run.marker}`,
+      state: "in.(active,cleanup_complete)",
+      select: "marker,state,source_post_ids,case_ids,job_ids",
+    },
+    {
+      method: "PATCH",
+      body: JSON.stringify(ledgerIdentity),
+    },
+  );
+  if (
+    boundRuns.length !== 1 ||
+    JSON.stringify(boundRuns[0].source_post_ids) !==
+      JSON.stringify(ledgerIdentity.source_post_ids) ||
+    JSON.stringify(boundRuns[0].case_ids) !==
+      JSON.stringify(ledgerIdentity.case_ids)
+  ) {
+    throw new Error(
+      "cleanup refused: source/case identity was not bound to the exact run ledger",
+    );
+  }
   const jobDocumentStorageReferenceProof: JsonRecord[] = [];
   const dryRunPlan = {
     terminal_accounting: {
@@ -1209,9 +1264,7 @@ async function cleanup(
 
   const after = await inventory(client, run.marker);
   const operationalResidue = operationalCounts(after);
-  if (
-    JSON.stringify(operationalResidue) !== JSON.stringify(evidence.baseline)
-  ) {
+  if (!operationalCountsEqual(operationalResidue, evidence.baseline)) {
     throw new Error(
       `cleanup did not restore the marker-scoped operational baseline: before=${
         JSON.stringify(evidence.baseline)

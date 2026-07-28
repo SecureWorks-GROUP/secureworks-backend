@@ -7,10 +7,12 @@ import { buildFixtureRun } from "./fixtures.ts";
 import {
   assertCleanupSettled,
   assertExclusiveJobDocumentStorageRefs,
+  cleanupLedgerIdentity,
   guardInventory,
   type Inventory,
   isMissingOptionalMutableTable,
   operationalCounts,
+  operationalCountsEqual,
 } from "./run.ts";
 import { LivefireHttpError } from "./client.ts";
 
@@ -131,6 +133,33 @@ Deno.test("cleanup guard accepts only an end-to-end exact marker chain", async (
     external_effects: 0,
     xero_invoices: 0,
     mutable_operational_rows: 0,
+  });
+});
+
+Deno.test("operational baseline comparison ignores JSON object key order", () => {
+  assertEquals(
+    operationalCountsEqual(
+      { active_jobs: 0, attachment_objects: 0, email_events: 0 },
+      { email_events: 0, active_jobs: 0, attachment_objects: 0 },
+    ),
+    true,
+  );
+  assertEquals(
+    operationalCountsEqual(
+      { active_jobs: 0, attachment_objects: 0 },
+      { active_jobs: 0, attachment_objects: 1 },
+    ),
+    false,
+  );
+});
+
+Deno.test("cleanup ledger identity is derived from guarded source and case rows", async () => {
+  const { inventory } = await validInventory();
+  inventory.emails.push({ ...inventory.emails[0] });
+  inventory.cases.push({ ...inventory.cases[0] });
+  assertEquals(cleanupLedgerIdentity(inventory), {
+    source_post_ids: ["synthetic-post-1"],
+    case_ids: ["case-1"],
   });
 });
 
