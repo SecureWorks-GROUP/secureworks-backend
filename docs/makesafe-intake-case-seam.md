@@ -60,11 +60,15 @@ After cutover this seam explicitly subsumes these current truth surfaces:
    so accounting is answerable only for a named tenant and is parameterised
    rather than exposed as an org-pinned view. The existing 500/1,000-row truncation
    hazard is explicitly routed to U7; U1 does not edit that active reader.
-3. Ref/message-grain `makesafe_notify_log.dedup_key` is replaced by Mission 2's
-   lineage-grain notification ledger.
+3. Ref/message-grain `makesafe_notify_log.dedup_key` is replaced by the
+   lineage-grain notification ledger. The deterministic physical Hugo
+   notification contract is owned by
+   `docs/evidence/ses-hugo-notification-sla-v1.md`.
 4. Board `known_refs` draft joins are replaced by case-to-job/source joins.
 
-Those runtime sunsets are later units. None is edited or activated in this PR.
+The remaining runtime sunsets are later units. The notification ledger is now
+owned by the Hugo notification seam linked above; this U1 document does not
+duplicate its runtime contract.
 
 ## Case grain and source accounting
 
@@ -180,8 +184,9 @@ with later route-gated server commands.
 
 Backfill decisions require `provenance='backfill'` and
 `side_effects_suppressed=true`. Natural-key `ON CONFLICT DO NOTHING` means a
-second run writes no case, source or event rows. U1 has no notification/domain
-emitter, and the helper contract proves zero effect writes.
+second run writes no case, source or event rows. The U1 helper contract proves
+zero effect writes; the separate deterministic physical Hugo notification
+emitter owns its post-board audit and transport contract.
 
 ## Later consumers
 
@@ -236,11 +241,12 @@ backfill. U4/U5 later own hostile fixtures requiring actual approval races, live
 job flag mutation, portal invalidation or notification emitters. U8/U10 own the
 60-day replay, runtime RLS probes and full current-pipeline byte-parity test.
 Their fixture names remain listed in the Fable review; U1 does not fake those
-runtime proofs.
+runtime proofs. Notification behavior is documented and implemented by the
+later Hugo notification seam; this document does not duplicate that contract.
 
 Adjacent findings are routed, not silently repaired here: the ignored
-`suppress_notifications` input and manager SMS belong to the later notification
-seam; SWMS fallback job-number concurrency belongs to job creation hardening; the
+`suppress_notifications` input belongs to the existing notification seam;
+SWMS fallback job-number concurrency belongs to job creation hardening; the
 residual dropped-after-extraction path belongs to health/reconcile; and the
 best-effort `reopen_candidate` draft insert belongs to reopen wiring.
 

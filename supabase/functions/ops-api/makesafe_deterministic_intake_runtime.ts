@@ -2387,7 +2387,8 @@ function casePayload(
     target_job_id: plan.targetJobId,
     is_authoritative: true,
     // Guarded approval passes suppress_manager_notification for this provenance,
-    // so the manager SMS side effect really is suppressed for deterministic cases.
+    // so the legacy manager SMS side effect is suppressed. The separate physical
+    // Hugo notification runs only after board proof and its audit claim.
     side_effects_suppressed: true,
     last_decision_provenance: "deterministic",
     last_decision_actor: DETERMINISTIC_INTAKE_VERSION,
