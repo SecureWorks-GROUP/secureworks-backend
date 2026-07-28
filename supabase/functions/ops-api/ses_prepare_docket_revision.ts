@@ -29,6 +29,10 @@ import {
 } from "./ses_family_matrix.ts";
 import { makesafeReportFileName } from "./makesafe_report_render.ts";
 import { roofReportPrice } from "./roof_report_template.ts";
+import {
+  buildSesSwmsGenerationPlan,
+  type SesSwmsGenerationPlan,
+} from "./ses_swms_template.ts";
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export { SES_ASSESSMENT_RECIPE_VERSION };
@@ -70,6 +74,7 @@ export interface SesRenderResult {
   media_type: "application/pdf";
   bytes: Uint8Array;
   render_hash?: string;
+  provenance?: Record<string, unknown>;
 }
 
 export interface SesSourceArtifact {
@@ -162,6 +167,9 @@ export interface SesPrepareDependencies {
   ) => Promise<SesPhotoArtifact[]>;
   resolveSwmsArtifact?: (
     input: SesAssemblerInputV1,
+  ) => Promise<SesRenderResult | null>;
+  renderSwmsArtifact?: (
+    plan: SesSwmsGenerationPlan,
   ) => Promise<SesRenderResult | null>;
   findCurrentRevision?: (
     jobId: string,
@@ -2236,31 +2244,82 @@ async function prepareOne(
       }
     }
     if (swms.required) {
-      const resolved = deps.resolveSwmsArtifact
-        ? await deps.resolveSwmsArtifact(input)
-        : null;
-      if (!resolved) {
+      const planned = buildSesSwmsGenerationPlan(input);
+      if (!planned.ok) {
         const itemBlocker = addBlocker(
           blockers,
           blocked(
-            "hrcw_swms_missing",
-            "The matrix/HRCW decision requires a real SWMS artifact.",
-            "Render or recover the SWMS through the existing SWMS engine and re-run.",
+            planned.reason_code,
+            planned.reason,
+            planned.recovery_action,
+            [
+              "canonical-input-envelope",
+              "sealed-swms-template-catalogue",
+            ],
+            [],
+            planned.facts,
           ),
         );
         manifest.items.swms_artifact = itemBlocker;
-      } else {
-        swmsFile = `ARTIFACTS/${resolved.file_name}`;
+      } else if (request.dry_run) {
+        swmsFile = `ARTIFACTS/${planned.plan.output_file_name}`;
+        const planFile = "ARTIFACTS/SWMS_GENERATION_PLAN.json";
         artifacts.push(
-          await artifactFromBytes({
-            role: "swms_artifact",
-            path: swmsFile,
-            media_type: resolved.media_type,
-            bytes: resolved.bytes,
-            metadata: { render_hash: resolved.render_hash || null },
+          await artifactFromText({
+            role: "swms_generation_plan",
+            path: planFile,
+            media_type: "application/json",
+            text: canonicalSesJson(planned.plan),
+            metadata: {
+              generation_plan_version: planned.plan.contract_version,
+              template_version: planned.plan.template_version,
+              template_kind: planned.plan.template.kind,
+              template_source_sha256: planned.plan.template.source_sha256,
+              source_instruction_id:
+                planned.plan.provenance.source_instruction_id,
+              trade_report_id: planned.plan.provenance.trade_report_id,
+            },
           }),
         );
-        manifest.items.swms_artifact = ready(`file:${swmsFile}`);
+        manifest.items.swms_artifact = ready(
+          `planned:${swmsFile}#${planned.plan.template_version}/${planned.plan.template.kind}`,
+        );
+      } else {
+        const rendered = deps.renderSwmsArtifact
+          ? await deps.renderSwmsArtifact(planned.plan)
+          : null;
+        if (!rendered) {
+          const itemBlocker = addBlocker(
+            blockers,
+            blocked(
+              "swms_generation_capability_unavailable",
+              "The deterministic SWMS renderer is unavailable.",
+              "Restore the ops-api SWMS renderer and re-run U4; staff do not need to attach a SWMS.",
+              [
+                "sealed-swms-template-catalogue",
+                "ops-api-runtime-capabilities",
+              ],
+            ),
+          );
+          manifest.items.swms_artifact = itemBlocker;
+        } else {
+          swmsFile = `ARTIFACTS/${rendered.file_name}`;
+          artifacts.push(
+            await artifactFromBytes({
+              role: "swms_artifact",
+              path: swmsFile,
+              media_type: rendered.media_type,
+              bytes: rendered.bytes,
+              metadata: {
+                render_hash: rendered.render_hash || null,
+                provenance: rendered.provenance || {},
+              },
+            }),
+          );
+          manifest.items.swms_artifact = ready(
+            `generated:${swmsFile}#${planned.plan.template_version}/${planned.plan.template.kind}`,
+          );
+        }
       }
     }
     if (row.job_type === "physical_makesafe") {
@@ -2564,8 +2623,10 @@ async function prepareOne(
           : "unavailable",
         swms_provider: !row
           ? "not_evaluated"
-          : deps.resolveSwmsArtifact
-          ? "available"
+          : !swms?.required
+          ? "not_required"
+          : deps.renderSwmsArtifact
+          ? "generated_from_work_order_and_trade_report"
           : "unavailable",
         xero_mutation: "structurally_absent",
         send: "structurally_absent",

@@ -48,6 +48,7 @@ import {
 } from "./roof_report_render.ts";
 import { buildRoofReportJob } from "./roof_report_template.ts";
 import { isBundledCoverageSendNote } from "./makesafe_send_pack.ts";
+import { renderSesSwmsPdf } from "./ses_swms_render.ts";
 import {
   canonicalSesPortalCaptureResult,
   canonicalSesPortalCaptureRole,
