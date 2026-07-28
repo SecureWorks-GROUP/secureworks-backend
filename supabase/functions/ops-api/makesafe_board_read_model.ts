@@ -15,6 +15,10 @@ import {
   photoCountForCurrentCycle,
   tradeSafeHold,
 } from "./makesafe_cycle_evidence.ts";
+import {
+  canonicalSesFamilyFromCard,
+  sesFamilyLabel,
+} from "./ses_family_matrix.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
 const SYNTHETIC_LIVEFIRE_MARKER =
@@ -441,6 +445,14 @@ export function buildCanonicalMakesafeRows(
     const report = base?.report || null;
     const pack = base?.report_pack || null;
     const detail = base?.makesafe_details || {};
+    const sesFamily = canonicalSesFamilyFromCard({
+      makesafe_job_family: base?.metadata?.makesafe_job_family,
+      insurance_job_type: base?.metadata?.insurance_job_type,
+      own_template_requested: base?.metadata?.own_template_requested,
+      strata: base?.metadata?.strata,
+      report_delivery: base?.metadata?.report_delivery ||
+        detail?.report_delivery,
+    });
     const portalCaptures = portalCapturesFromDetail(base);
     const hold = extras.holdsByJobId?.[base?.id] || null;
     const rawPhotoCount = Number(extras.photoCountByJobId?.[base?.id] || 0);
@@ -494,7 +506,14 @@ export function buildCanonicalMakesafeRows(
       contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
       id: base?.id,
       job_number: base?.job_number || null,
-      type: "makesafe",
+      type: base?.type || "makesafe",
+      ses_family: sesFamily,
+      ses_family_label: sesFamilyLabel(sesFamily),
+      ses_recipe_state: sesFamily === "restoration"
+        ? "unsealed"
+        : sesFamily === "unknown"
+        ? "unknown"
+        : "sealed",
       job_state: base?.status || null,
       substatus: base?.substatus || null,
       declared_stage: declaredStage,
@@ -540,10 +559,12 @@ export function buildCanonicalMakesafeRows(
         : [],
       readiness_revision: base?.readiness_revision ?? null,
       commercial_warning: base?.commercial_warning ?? null,
-      makesafe_type: base?.metadata?.makesafe_job_family_label ||
-        base?.metadata?.makesafe_job_family ||
-        base?.makesafe_details?.report_type ||
-        "Make-safe",
+      makesafe_type: sesFamily === "restoration"
+        ? sesFamilyLabel(sesFamily)
+        : base?.metadata?.makesafe_job_family_label ||
+          base?.metadata?.makesafe_job_family ||
+          base?.makesafe_details?.report_type ||
+          "Make-safe",
       builder: {
         name: base?.requesting_company_name || base?.requesting_company || null,
         external_ref: base?.external_ref || null,
@@ -695,6 +716,9 @@ function tradeSafe(row: any, viewer: MakesafeBoardViewer, all: boolean) {
     job_number: row?.job_number,
     type: row?.type,
     makesafe_type: row?.makesafe_type,
+    ses_family: row?.ses_family,
+    ses_family_label: row?.ses_family_label,
+    ses_recipe_state: row?.ses_recipe_state,
     column: mapped.column,
     canonical_stage: row?.canonical_stage,
     projection_warning: mapped.mapped

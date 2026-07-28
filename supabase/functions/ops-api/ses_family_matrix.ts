@@ -1,7 +1,16 @@
 export const SES_FAMILY_MATRIX_VERSION =
-  "ses-builder-family-matrix/2026-07-27.3";
+  "ses-builder-family-matrix/2026-07-28.4";
 export const SES_ASSESSMENT_RECIPE_VERSION =
   "assessment-triad-invoice-only/2026-07-27";
+
+export const SES_EMERGENCY_SERVICE_FAMILIES = [
+  "roof",
+  "assessment",
+  "makesafe",
+  "restoration",
+] as const;
+export type SesEmergencyServiceFamily =
+  (typeof SES_EMERGENCY_SERVICE_FAMILIES)[number];
 
 export type SesBuilderKey =
   | "MLB"
@@ -17,12 +26,14 @@ export type SesFamilyId =
   | "ordinary_roof_portal"
   | "own_template_roof"
   | "assessment_quote"
-  | "temporary_fencing";
+  | "temporary_fencing"
+  | "restoration";
 
 export type SesManifestJobType =
   | "physical_makesafe"
   | "roof_report"
-  | "assessment_report_quote";
+  | "assessment_report_quote"
+  | "restoration";
 
 export type SesSwmsPolicy =
   | "always"
@@ -68,7 +79,8 @@ export interface SesFamilyMatrixFailure {
   code:
     | "ajs_misclassified_as_roof_report"
     | "builder_open_class"
-    | "family_unknown";
+    | "family_unknown"
+    | "restoration_recipe_unsealed";
   reason: string;
   recovery_action: string;
 }
@@ -81,6 +93,75 @@ const MLB_MAKESAFES = "makesafes@mlbuilders.com.au";
 const AJS_WORK_ORDERS = "workorders@ajs.build";
 const WESTERN_ACCOUNTS = "accounts@westernbuild.com.au";
 const SYNTHETIC_INTERNAL_MAILBOX = "marnin@secureworkswa.com.au";
+
+function canonicalToken(value: unknown): string {
+  return typeof value === "string"
+    ? value.trim().toLowerCase().replaceAll("-", "_").replaceAll(" ", "_")
+    : "";
+}
+
+export function canonicalSesFamilyFromCard(args: {
+  makesafe_job_family?: unknown;
+  insurance_job_type?: unknown;
+  strata?: unknown;
+  own_template_requested?: unknown;
+  report_delivery?: unknown;
+}): SesFamilyId {
+  const insuranceType = canonicalToken(args.insurance_job_type);
+  if (
+    insuranceType === "restoration" ||
+    insuranceType === "restoration_work"
+  ) {
+    return "restoration";
+  }
+  const explicit = canonicalToken(args.makesafe_job_family);
+  const ownTemplate = args.own_template_requested === true ||
+    args.strata === true ||
+    canonicalToken(args.report_delivery) === "own_document";
+  switch (explicit) {
+    case "restoration":
+    case "restoration_work":
+    case "insurance_restoration":
+      return "restoration";
+    case "general_makesafe":
+    case "physical_makesafe":
+      return "physical_makesafe";
+    case "temp_fence_makesafe":
+    case "temporary_fencing":
+    case "temp_fence":
+      return "temporary_fencing";
+    case "assessment_report_quote":
+    case "assessment_report":
+    case "assessment_quote":
+    case "assessment":
+      return "assessment_quote";
+    case "own_template_roof":
+      return "own_template_roof";
+    case "ordinary_roof_portal":
+    case "roof_report":
+      return ownTemplate ? "own_template_roof" : "ordinary_roof_portal";
+    default:
+      return "unknown";
+  }
+}
+
+export function sesFamilyLabel(family: SesFamilyId): string {
+  switch (family) {
+    case "restoration":
+      return "Restoration";
+    case "assessment_quote":
+      return "Assessment / Quote Report";
+    case "ordinary_roof_portal":
+    case "own_template_roof":
+      return "Roof Report";
+    case "temporary_fencing":
+      return "Temporary Fence MakeSafe";
+    case "physical_makesafe":
+      return "MakeSafe";
+    default:
+      return "Unknown";
+  }
+}
 
 function physicalRow(
   builder_key: "MLB" | "AJS" | "AJBR" | "WESTERN",
@@ -296,6 +377,18 @@ export function resolveSesFamilyMatrixRow(args: {
         reason: "Card has no sealed SES family classification.",
         recovery_action:
           "Recover the family from canonical source authority before preparing the docket.",
+      },
+    };
+  }
+  if (args.family === "restoration") {
+    return {
+      ok: false,
+      failure: {
+        code: "restoration_recipe_unsealed",
+        reason:
+          "Restoration is a first-class SES family, but the Captain has not sealed its reporting recipe.",
+        recovery_action:
+          "Seal the restoration report/pack recipe before preparing any restoration deliverable, pricing, invoice proposal, or outbound draft.",
       },
     };
   }

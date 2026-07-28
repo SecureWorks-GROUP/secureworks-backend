@@ -414,6 +414,17 @@ fence-only work. It never requires a SWMS, local report PDF, or separate photo
 pack. The current contract lives in `ses_family_matrix.ts` and
 `ses_prepare_docket_revision.ts`.
 
+## Restoration Is A Typed SES Family With An Unsealed Recipe
+
+Restoration is the fourth emergency-service family alongside roof, assessment
+and make-safe. Converted restoration cards use `jobs.type = 'insurance'` with
+`metadata.insurance_job_type = 'restoration'`; that authority outranks any stale
+`metadata.makesafe_job_family` value. The board, audit, trade scope and U4
+adapter must keep those cards visible and typed as restoration. Until the
+Captain seals a restoration reporting recipe, U4 must return
+`restoration_recipe_unsealed` with the card facts and must not select a report,
+pack, portal, SWMS, pricing, invoice-proposal or outbound-draft recipe.
+
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
 The SecureWorks own-letterhead roof report is a trade-filled template that

@@ -321,6 +321,51 @@ Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers wit
   assertEquals("local_invoice_proposal" in blocked.pack, false);
 });
 
+Deno.test("restoration stays explicitly typed through ops and trade board projections", () => {
+  const [canonical] = buildCanonicalMakesafeRows([
+    baseJob("new", "restoration-card", {
+      type: "insurance",
+      job_number: "SWMS-26936",
+      metadata: {
+        insurance_job_type: "restoration",
+        insurance_job_type_label: "Restoration Insurance Work",
+        makesafe_job_family: "general_makesafe",
+      },
+      report_pack: {
+        status: "drafted",
+        review_state: "U4_BLOCKED",
+        docket_revision_id: "restoration-revision",
+        pre_xero_docs_ready: false,
+        blockers: [{
+          reason_code: "restoration_recipe_unsealed",
+          reason: "recipe not sealed",
+        }],
+      },
+    }),
+  ]);
+  assertEquals(canonical.type, "insurance");
+  assertEquals(canonical.ses_family, "restoration");
+  assertEquals(canonical.ses_family_label, "Restoration");
+  assertEquals(canonical.ses_recipe_state, "unsealed");
+  assertEquals(canonical.makesafe_type, "Restoration");
+  assertEquals(canonical.blockers.real, [{
+    code: "restoration_recipe_unsealed",
+    category: "ses_docket",
+    docket_revision_id: "restoration-revision",
+  }]);
+
+  const trade = projectTradeMakesafeBoard([canonical], {
+    userId: "trade-1",
+    name: "Hugo",
+    role: "installer",
+    managedVerticals: ["makesafe"],
+  });
+  assertEquals(trade.rows[0].ses_family, "restoration");
+  assertEquals(trade.rows[0].ses_family_label, "Restoration");
+  assertEquals(trade.rows[0].ses_recipe_state, "unsealed");
+  assertEquals(trade.rows[0].makesafe_type, "Restoration");
+});
+
 Deno.test("captain-applied status is a display overlay and never rewrites declared or raw state", () => {
   const source = baseJob("new", "overlay", {
     substatus: "company_contact_required",

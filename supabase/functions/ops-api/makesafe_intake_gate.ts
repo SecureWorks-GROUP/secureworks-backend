@@ -214,14 +214,15 @@ export function computeIntakeDraftStatus(input: {
 }
 
 // ── PRACTICAL JOB FAMILY classifier ──────────────────────────────────────────
-// This is the operator-facing four-way taxonomy. It deliberately does NOT replace
+// This is the operator-facing emergency-service taxonomy. It deliberately does NOT replace
 // report_type yet; it maps the older report_type/work-order signals into the
 // families Marnin wants the board/trade app to reason about.
 export type MakeSafeJobFamily =
   | "assessment_report_quote"
   | "roof_report"
   | "temp_fence_makesafe"
-  | "general_makesafe";
+  | "general_makesafe"
+  | "restoration";
 
 export function makeSafeJobFamilyLabel(
   family: MakeSafeJobFamily | string | null | undefined,
@@ -235,6 +236,8 @@ export function makeSafeJobFamilyLabel(
       return "Temporary Fence MakeSafe";
     case "general_makesafe":
       return "MakeSafe";
+    case "restoration":
+      return "Restoration";
     default:
       return "MakeSafe";
   }
@@ -243,7 +246,8 @@ export function makeSafeJobFamilyLabel(
 /**
  * Classify the practical job family from full subject/body context plus the
  * legacy report_type when available. Priority is intentional:
- * temp fence > explicit roof report > assessment/quote > general physical make-safe.
+ * temp fence > AJS physical floor > restoration > explicit roof report >
+ * assessment/quote > general physical make-safe.
  * A physical roof make-safe must remain general_makesafe unless the text says
  * roof REPORT / external reporting-system work.
  */
@@ -270,6 +274,8 @@ const STRONG_PHYSICAL_MAKESAFE_RE =
   /\b(tarps?|tarping|temporary\s+(?:roof\s+)?repair|temporary\s+(?:roof\s+)?cover(?:ing)?|emergency\s+(?:repair|works?|attendance)|prevent\s+further\s+(?:damage|water\s+ingress)|stop\s+(?:the\s+)?(?:leak|water\s+ingress)|weatherproof|board\s*up|isolate\s+(?:the\s+)?(?:hazard|area|services?)|secure\s+(?:the\s+)?(?:property|site|opening|roof)|remove\s+(?:the\s+)?(?:hazard|danger))\b/i;
 const GENERIC_PHYSICAL_MAKESAFE_RE = /\b(make\s*-?\s*safe|makesafe)\b/i;
 const GENERIC_WORK_ORDER_RE = /\b(new\s+work\s+order|work\s+order)\b/i;
+const RESTORATION_TEXT_RE =
+  /\b(restoration\s+(work|works|services?|scope)|building\s+restoration|water\s+damage\s+restoration|fire\s+damage\s+restoration|restore\s+(the\s+)?(property|building|dwelling|premises))\b/i;
 
 export interface MakeSafeJobFamilyContext {
   /** Deterministically extracted work-order PDF text. */
@@ -286,6 +292,8 @@ export interface MakeSafeJobFamilyDecision {
     | "typed_temp_fence"
     | "text_temp_fence"
     | "ajs_make_safe_floor"
+    | "typed_restoration"
+    | "text_restoration"
     | "typed_roof_report"
     | "text_roof_report"
     | "typed_assessment_report"
@@ -339,6 +347,13 @@ export function decideMakeSafeJobFamily(
     };
   }
 
+  if (rt === "restoration" || RESTORATION_TEXT_RE.test(text)) {
+    return {
+      family: "restoration",
+      evidence: rt === "restoration" ? "typed_restoration" : "text_restoration",
+    };
+  }
+
   // Concrete protective work outranks a report phrase. A scope that says to
   // tarp a roof and provide a report is still physical make-safe work; the
   // report is a secondary obligation, not a report-only family.
@@ -389,7 +404,7 @@ export function decideMakeSafeJobFamily(
 
 /**
  * Back-compatible classifier for callers whose existing contract requires one
- * of the four families. New intake code should use decideMakeSafeJobFamily so
+ * of the known families. New intake code should use decideMakeSafeJobFamily so
  * genuine ambiguity stays visible.
  */
 export function classifyMakeSafeJobFamily(
@@ -403,13 +418,17 @@ export function classifyMakeSafeJobFamily(
 }
 
 // ── M-G FIX 2 — top-down taxonomy (Marnin's Emergency-Insurance-Work model) ────
-// job_type ∈ {assessment, roof, makesafe}; makesafe alone has subtype ∈ {general, temp}.
+// job_type ∈ {assessment, roof, makesafe, restoration}; makesafe alone has subtype ∈ {general, temp}.
 // Derived from the (now negation-aware) flat family so there is ONE classification path
 // and the flat `makesafe_job_family` stays the back-compat source every reader already uses.
 // The pair is stored alongside the flat family on jobs.metadata (no enum/migration - family
 // is JSONB), and re-running this over the freshest text is the drift signal FIX 2's backfill
 // walk flags on (never the co-set makesafe_type/report_type fields, which agree wrongly).
-export type MakeSafeJobType = "assessment" | "roof" | "makesafe";
+export type MakeSafeJobType =
+  | "assessment"
+  | "roof"
+  | "makesafe"
+  | "restoration";
 export type MakeSafeSubtype = "general" | "temp" | null;
 export interface MakeSafeTaxonomy {
   job_type: MakeSafeJobType;
@@ -438,6 +457,12 @@ export function taxonomyFromFamily(
         job_type: "makesafe",
         makesafe_subtype: "temp",
         family: "temp_fence_makesafe",
+      };
+    case "restoration":
+      return {
+        job_type: "restoration",
+        makesafe_subtype: null,
+        family: "restoration",
       };
     default:
       return {
@@ -672,7 +697,8 @@ const REPORT_FAMILY_TO_TYPE: Readonly<Record<string, ReportType>> = {
 
 /**
  * The report-only ReportType token for a report-family job family, or null for
- * non-report families (temp_fence_makesafe, general_makesafe, unknown). The
+ * non-report families (temp_fence_makesafe, general_makesafe, restoration,
+ * unknown). Restoration remains non-report until its recipe is sealed. The
  * result is validated against REPORT_ONLY_TYPES so this map can never silently
  * mint a token the report-only set does not recognise.
  */

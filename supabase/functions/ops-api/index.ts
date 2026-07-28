@@ -239,7 +239,10 @@ import {
 } from './makesafe_deterministic_intake_runtime.ts'
 import { DETERMINISTIC_INTAKE_VERSION } from './makesafe_deterministic_intake.ts'
 import { SYNTHETIC_LIVEFIRE_MARKER_PREFIX } from './makesafe_synthetic_livefire.ts'
-import { SES_FAMILY_MATRIX_VERSION } from './ses_family_matrix.ts'
+import {
+  canonicalSesFamilyFromCard,
+  SES_FAMILY_MATRIX_VERSION,
+} from './ses_family_matrix.ts'
 import {
   assertReportingIntakeAccounting as _assertReportingIntakeAccounting,
 } from './makesafe_reporting_accounting.ts'
@@ -12089,6 +12092,7 @@ const RECONCILE_MAKESAFE_FAMILIES = new Set([
   'roof_report',
   'temp_fence_makesafe',
   'general_makesafe',
+  'restoration',
 ])
 
 // Privileged exact correction for a reviewed live card. Unlike the additive
@@ -12172,8 +12176,8 @@ const INSURANCE_CONVERSION_CLASSES: Record<string, string> = {
 
 // Captain-reviewed pipeline correction. The original job, job number, evidence,
 // assignment, invoices and status stay in place; only the owning pipeline/type
-// and explicit insurance classification change. This removes non-make-safe work
-// from the make-safe board without archiving or losing the live obligation.
+// and explicit insurance classification change. Most converted work leaves the
+// SES board; restoration remains in the four-family SES reporting projection.
 async function convertMakesafeToInsurance(client: any, body: any) {
   const jId = body?.job_id || body?.jobId
   const expectedBeforeType = cleanReviewedString(body?.expected_before_type || body?.expectedBeforeType)
@@ -12275,6 +12279,7 @@ type ActiveBackfillMakeSafeJobFamily =
   | 'roof_report'
   | 'temp_fence_makesafe'
   | 'general_makesafe'
+  | 'restoration'
 
 function inferMakesafeFamilyForActiveBackfill(args: {
   notes?: string | null
@@ -12296,12 +12301,15 @@ function inferMakesafeFamilyForActiveBackfill(args: {
     try { return JSON.stringify(v) } catch (_) { return String(v) }
   }).filter(Boolean).join('\n').toLowerCase()
 
-  // Match the agreed four-family model. This deliberately does not classify
+  // Match the agreed emergency-service family model. This deliberately does not classify
   // physical roof make-safe, ceiling collapse, board-up, structural, asbestos,
   // watertight, etc. as their own family; if those rows lack canonical metadata
   // they remain exceptions/general work until explicitly reviewed.
   if (/(temp(?:orary)?\s*fenc|fenc(?:e|ing)?\s*(collect|pickup|pick\s*up|retriev)|collect\s+.*fenc|pick\s*up\s+.*fenc|pickup\s+.*fenc|retriev\w*\s+.*fenc)/i.test(text)) {
     return 'temp_fence_makesafe'
+  }
+  if (/\b(restoration\s+(work|works|services?|scope)|building\s+restoration|water\s+damage\s+restoration|fire\s+damage\s+restoration|restore\s+(the\s+)?(property|building|dwelling|premises))\b/i.test(text)) {
+    return 'restoration'
   }
   if (/\b(roof\s+(report|assessment\s*report|inspection\s*report)|report\s+.*\broof\b|prime\s+roof\s+report|single\s+storey\s+roof\s+report|two\s+storey\s+roof\s+report|cause\s+of\s+damage\/point\s+of\s+water\s+entry)\b/i.test(text)) {
     return 'roof_report'
@@ -12386,6 +12394,7 @@ async function backfillMakesafeJobFamilies(client: any, body: any) {
     'roof_report',
     'temp_fence_makesafe',
     'general_makesafe',
+    'restoration',
   ])
 
   const { data: jobs, error: jobsErr } = await client.from('jobs')
@@ -14009,33 +14018,44 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
     const idChunks: Array<string[] | null> = restrict
       ? _chunkByUrlBudget(restrict)
       : [null]
-    for (const idChunk of idChunks) {
-      let offset = 0
-      for (let guard = 0; guard < 1000; guard++) {
-        let activeQuery = client.from('jobs')
-          .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
-          .eq('type', 'makesafe')
-          .not('status', 'in', allHistory ? '("cancelled","lost")' : '("cancelled","archived","lost")')
-        if (idChunk) activeQuery = activeQuery.in('id', idChunk)
-        const { data, error } = await activeQuery
-          .order('created_at', { ascending: false })
-          .order('id', { ascending: false })
-          .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
-        if (error) throw error
-        const batch = data || []
-        jobsRaw.push(...batch)
-        if (batch.length < MAKESAFE_PAGE_SIZE) break
-        offset += MAKESAFE_PAGE_SIZE
+    const sources = [
+      { type: 'makesafe', insurance_job_type: null },
+      { type: 'insurance', insurance_job_type: 'restoration' },
+    ]
+    for (const source of sources) {
+      for (const idChunk of idChunks) {
+        let offset = 0
+        for (let guard = 0; guard < 1000; guard++) {
+          let activeQuery = client.from('jobs')
+            .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
+            .eq('type', source.type)
+            .not('status', 'in', allHistory ? '("cancelled","lost")' : '("cancelled","archived","lost")')
+          if (source.insurance_job_type) {
+            activeQuery = activeQuery.eq('metadata->>insurance_job_type', source.insurance_job_type)
+          }
+          if (idChunk) activeQuery = activeQuery.in('id', idChunk)
+          const { data, error } = await activeQuery
+            .order('created_at', { ascending: false })
+            .order('id', { ascending: false })
+            .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+          if (error) throw error
+          const batch = data || []
+          jobsRaw.push(...batch)
+          if (batch.length < MAKESAFE_PAGE_SIZE) break
+          offset += MAKESAFE_PAGE_SIZE
+        }
       }
     }
-    if (restrict && idChunks.length > 1) {
-      jobsRaw.sort((a: any, b: any) => {
-        const ca = String(a?.created_at || '')
-        const cb = String(b?.created_at || '')
-        if (ca !== cb) return cb.localeCompare(ca)
-        return String(b?.id || '').localeCompare(String(a?.id || ''))
-      })
-    }
+    const uniqueJobs = Array.from(
+      new Map(jobsRaw.map((job: any) => [String(job?.id || ''), job])).values(),
+    )
+    jobsRaw.splice(0, jobsRaw.length, ...uniqueJobs)
+    jobsRaw.sort((a: any, b: any) => {
+      const ca = String(a?.created_at || '')
+      const cb = String(b?.created_at || '')
+      if (ca !== cb) return cb.localeCompare(ca)
+      return String(b?.id || '').localeCompare(String(a?.id || ''))
+    })
   }
   const terminalSyntheticIds = await terminalSyntheticLivefireJobIds(client)
   const jobs = jobsRaw.filter((job) =>
@@ -14251,34 +14271,45 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
     const idChunks: Array<string[] | null> = restrict
       ? _chunkByUrlBudget(restrict)
       : [null]
-    for (const idChunk of idChunks) {
-      let offset = 0
-      for (let guard = 0; guard < 100; guard++) {
-        let cancelledQuery = client.from('jobs')
-          .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
-          .eq('type', 'makesafe')
-          .eq('status', 'cancelled')
-        if (idChunk) cancelledQuery = cancelledQuery.in('id', idChunk)
-        if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
-        const { data, error } = await cancelledQuery
-          .order('updated_at', { ascending: false })
-          .order('id', { ascending: false })
-          .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
-        if (error) throw error
-        const batch = data || []
-        cancelledRaw.push(...batch)
-        if (batch.length < MAKESAFE_PAGE_SIZE) break
-        offset += MAKESAFE_PAGE_SIZE
+    const sources = [
+      { type: 'makesafe', insurance_job_type: null },
+      { type: 'insurance', insurance_job_type: 'restoration' },
+    ]
+    for (const source of sources) {
+      for (const idChunk of idChunks) {
+        let offset = 0
+        for (let guard = 0; guard < 100; guard++) {
+          let cancelledQuery = client.from('jobs')
+            .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
+            .eq('type', source.type)
+            .eq('status', 'cancelled')
+          if (source.insurance_job_type) {
+            cancelledQuery = cancelledQuery.eq('metadata->>insurance_job_type', source.insurance_job_type)
+          }
+          if (idChunk) cancelledQuery = cancelledQuery.in('id', idChunk)
+          if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
+          const { data, error } = await cancelledQuery
+            .order('updated_at', { ascending: false })
+            .order('id', { ascending: false })
+            .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+          if (error) throw error
+          const batch = data || []
+          cancelledRaw.push(...batch)
+          if (batch.length < MAKESAFE_PAGE_SIZE) break
+          offset += MAKESAFE_PAGE_SIZE
+        }
       }
     }
-    if (restrict && idChunks.length > 1) {
-      cancelledRaw.sort((a: any, b: any) => {
-        const ua = String(a?.updated_at || '')
-        const ub = String(b?.updated_at || '')
-        if (ua !== ub) return ub.localeCompare(ua)
-        return String(b?.id || '').localeCompare(String(a?.id || ''))
-      })
-    }
+    const uniqueCancelled = Array.from(
+      new Map(cancelledRaw.map((job: any) => [String(job?.id || ''), job])).values(),
+    )
+    cancelledRaw.splice(0, cancelledRaw.length, ...uniqueCancelled)
+    cancelledRaw.sort((a: any, b: any) => {
+      const ua = String(a?.updated_at || '')
+      const ub = String(b?.updated_at || '')
+      if (ua !== ub) return ub.localeCompare(ua)
+      return String(b?.id || '').localeCompare(String(a?.id || ''))
+    })
   }
   const visibleCancelledRows = cancelledRaw.filter((job) =>
     !(isSyntheticLivefireJob(job) && terminalSyntheticIds.has(String(job.id))))
@@ -14375,20 +14406,30 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
 // restrict set and vanishing their own card from their board. `id` is the PK.
 async function loadMakesafeAssignedJobIds(client: any, userId: string): Promise<string[]> {
   const ids = new Set<string>()
-  let offset = 0
-  for (let guard = 0; guard < 100; guard++) {
-    const { data, error } = await client.from('job_assignments')
-      .select('job_id, jobs:job_id!inner(type)')
-      .eq('user_id', userId)
-      .eq('jobs.type', 'makesafe')
-      .order('job_id', { ascending: true })
-      .order('id', { ascending: true })
-      .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
-    if (error) throw error
-    const batch = data || []
-    for (const a of batch) if (a?.job_id) ids.add(a.job_id)
-    if (batch.length < MAKESAFE_PAGE_SIZE) break
-    offset += MAKESAFE_PAGE_SIZE
+  const sources = [
+    { type: 'makesafe', insurance_job_type: null },
+    { type: 'insurance', insurance_job_type: 'restoration' },
+  ]
+  for (const source of sources) {
+    let offset = 0
+    for (let guard = 0; guard < 100; guard++) {
+      let query = client.from('job_assignments')
+        .select('job_id, jobs:job_id!inner(type, metadata)')
+        .eq('user_id', userId)
+        .eq('jobs.type', source.type)
+      if (source.insurance_job_type) {
+        query = query.eq('jobs.metadata->>insurance_job_type', source.insurance_job_type)
+      }
+      const { data, error } = await query
+        .order('job_id', { ascending: true })
+        .order('id', { ascending: true })
+        .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+      if (error) throw error
+      const batch = data || []
+      for (const a of batch) if (a?.job_id) ids.add(a.job_id)
+      if (batch.length < MAKESAFE_PAGE_SIZE) break
+      offset += MAKESAFE_PAGE_SIZE
+    }
   }
   return Array.from(ids)
 }
@@ -14806,16 +14847,36 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
   // parity or turn a successful empty dependent read into an error.
   // Unique page key `id` (PK) is appended by the shared reader after the
   // newest-first created_at primary sort so multi-page OFFSET cannot drop a job.
-  const jobs = (await _fetchAllRows<any>(() => {
+  const loadAuditJobs = (
+    type: 'makesafe' | 'insurance',
+    insuranceJobType: string | null,
+  ) => _fetchAllRows<any>(() => {
     let query = client.from('jobs')
       .select('id, job_number, type, status, site_lat, site_lng, metadata, created_at')
-      .eq('type', 'makesafe')
+      .eq('type', type)
       .order('created_at', { ascending: false })
+    if (insuranceJobType) {
+      query = query.eq('metadata->>insurance_job_type', insuranceJobType)
+    }
     if (since) query = query.gte('created_at', since)
     if (statusFilter) query = query.eq('status', statusFilter)
     return query
-  }, 'makesafe_audit jobs', 'id', false)).filter((job) =>
-    !(isSyntheticLivefireJob(job) && terminalSyntheticIds.has(String(job.id))))
+  }, `makesafe_audit ${type} jobs`, 'id', false)
+  const [makesafeJobs, restorationJobs] = await Promise.all([
+    loadAuditJobs('makesafe', null),
+    loadAuditJobs('insurance', 'restoration'),
+  ])
+  const jobs = Array.from(
+    new Map([...makesafeJobs, ...restorationJobs].map((job: any) => [
+      String(job?.id || ''),
+      job,
+    ])).values(),
+  ).filter((job: any) =>
+    !(isSyntheticLivefireJob(job) && terminalSyntheticIds.has(String(job.id)))
+  ).sort((a: any, b: any) => {
+    const created = String(b?.created_at || '').localeCompare(String(a?.created_at || ''))
+    return created || String(b?.id || '').localeCompare(String(a?.id || ''))
+  })
 
   const jobIds = (jobs || []).map((j: any) => j.id)
   let detailsMap: Record<string, any> = {}
@@ -14963,6 +15024,13 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     // row, so the audit must count the typed doc too — otherwise every report
     // the skill produces reads as missing. See sw-makesafe-audit-tool-spec.md.
     const hasReportDocTyped = cycleEvidence.hasReportDocTyped
+    const sesFamily = canonicalSesFamilyFromCard({
+      makesafe_job_family: j.metadata?.makesafe_job_family,
+      insurance_job_type: j.metadata?.insurance_job_type,
+      own_template_requested: j.metadata?.own_template_requested,
+      strata: j.metadata?.strata,
+      report_delivery: j.metadata?.report_delivery,
+    })
     const company = detail?.requesting_company_name || detail?.makesafe_companies?.name ||
       j.metadata?.requesting_company?.name || null
     const externalRef = detail?.external_ref || j.metadata?.external_ref || null
@@ -15017,6 +15085,13 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
     return {
       job_id: j.id,
       job_number: j.job_number,
+      job_type: j.type,
+      ses_family: sesFamily,
+      ses_recipe_state: sesFamily === 'restoration'
+        ? 'unsealed'
+        : sesFamily === 'unknown'
+        ? 'unknown'
+        : 'sealed',
       external_ref: externalRef,
       company,
       job_status: j.status,

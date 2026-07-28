@@ -171,6 +171,7 @@ function blocked(
   recovery_action: string,
   searches_attempted: string[] = ["canonical-input-envelope"],
   rejected_candidates: string[] = [],
+  facts?: Record<string, unknown>,
 ): SesBlocker {
   return {
     state: "blocked",
@@ -179,6 +180,7 @@ function blocked(
     searches_attempted,
     rejected_candidates,
     recovery_action,
+    ...(facts ? { facts } : {}),
   };
 }
 
@@ -796,7 +798,9 @@ function hardStopManifest(
       workflow: input.classification.workflow,
       builder_key: input.classification.builder_key,
       family: input.classification.family,
-      job_type: "unknown",
+      job_type: input.classification.family === "restoration"
+        ? "restoration"
+        : "unknown",
       recipe_selected: false,
       builder_reference: input.source.builder_reference,
       lineage: input.classification.lineage_kind,
@@ -1287,6 +1291,26 @@ async function prepareOne(
         matrix.failure.code,
         matrix.failure.reason,
         matrix.failure.recovery_action,
+        ["canonical-input-envelope", "sealed-family-matrix"],
+        [],
+        matrix.failure.code === "restoration_recipe_unsealed"
+          ? {
+            job_id: input.identity.job_id,
+            job_number: input.identity.job_number,
+            card_id: input.identity.card_id,
+            builder_reference: input.source.builder_reference,
+            site_address: input.source.site_address,
+            site_suburb: input.source.site_suburb,
+            builder_key: input.classification.builder_key,
+            family: input.classification.family,
+            subtype: input.classification.subtype,
+            workflow: input.classification.workflow,
+            source_instruction_id: input.identity.source_instruction_id,
+            current_attendance_cycle_id:
+              input.attendance.current_attendance_cycle_id,
+            cycle_number: input.attendance.cycle_number,
+          }
+          : undefined,
       ),
     );
   }

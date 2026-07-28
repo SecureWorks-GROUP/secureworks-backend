@@ -1,10 +1,11 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _filterMakesafeFamilyBackfillCandidatesForScopeForTest,
   _inferMakesafeFamilyForActiveBackfillForTest,
 } from "./index.ts";
 
-Deno.test("active family backfill: only four canonical families and no pseudo-types", () => {
+Deno.test("active family backfill: all canonical families and no pseudo-types", () => {
   assertEquals(
     _inferMakesafeFamilyForActiveBackfillForTest({
       notes:
@@ -24,6 +25,12 @@ Deno.test("active family backfill: only four canonical families and no pseudo-ty
       notes: "Install temporary fencing, approximately 7 panels, 3 month hire",
     }),
     "temp_fence_makesafe",
+  );
+  assertEquals(
+    _inferMakesafeFamilyForActiveBackfillForTest({
+      notes: "Water damage restoration works required throughout the dwelling",
+    }),
+    "restoration",
   );
   assertEquals(
     _inferMakesafeFamilyForActiveBackfillForTest({

@@ -26,6 +26,7 @@ const FAMILY_VALUES = new Set<string>([
   "roof_report",
   "temp_fence_makesafe",
   "general_makesafe",
+  "restoration",
 ]);
 
 const LIVE_OR_SUPPRESSING_STATES = new Set([
@@ -184,7 +185,11 @@ function textInferredFamily(
 ): MakeSafeJobFamily | null {
   const text = `${subject || ""}\n${body || ""}`;
   if (!text.trim()) return null;
-  const classified = classifyMakeSafeJobFamily(subject || null, body || null, null);
+  const classified = classifyMakeSafeJobFamily(
+    subject || null,
+    body || null,
+    null,
+  );
   if (classified !== "general_makesafe" || hasGeneralMakeSafeSignal(text)) {
     return classified;
   }
@@ -351,7 +356,8 @@ export function summarizeMakesafeIntakeBackfillReport(input: {
         items.push({
           kind: "draft",
           state: "family_mismatch_review",
-          reason: "stored_family_disagrees_with_negation_aware_classifier_over_wo_text",
+          reason:
+            "stored_family_disagrees_with_negation_aware_classifier_over_wo_text",
           id: d.id || null,
           external_ref: d.external_ref || null,
           requesting_company: companyLabel(
@@ -428,7 +434,8 @@ export function summarizeMakesafeIntakeBackfillReport(input: {
         items.push({
           kind: "job",
           state: "family_mismatch_review",
-          reason: "stored_family_disagrees_with_negation_aware_classifier_over_wo_text",
+          reason:
+            "stored_family_disagrees_with_negation_aware_classifier_over_wo_text",
           id: j.job_id || null,
           external_ref: j.external_ref || null,
           requesting_company: companyLabel(

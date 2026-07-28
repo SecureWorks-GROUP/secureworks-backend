@@ -1,7 +1,6 @@
+// deno-lint-ignore-file no-import-prefix
 // M-G FIX 2 — negation-aware classifier + top-down taxonomy.
-import {
-  assertEquals,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   classifyMakeSafeJobFamily,
   classifyMakeSafeTaxonomy,
@@ -10,7 +9,10 @@ import {
 
 Deno.test("classifier: affirmative temp-fence text still classifies as temp_fence", () => {
   assertEquals(
-    classifyMakeSafeJobFamily("WO", "Please supply temporary fencing and collect on completion"),
+    classifyMakeSafeJobFamily(
+      "WO",
+      "Please supply temporary fencing and collect on completion",
+    ),
     "temp_fence_makesafe",
   );
   assertEquals(
@@ -30,12 +32,18 @@ Deno.test("classifier: NEGATED temp-fence text does NOT classify as temp_fence (
   );
   // "temp fence not required" -> falls through, general (no other signal)
   assertEquals(
-    classifyMakeSafeJobFamily("WO", "Make safe the ceiling. Temp fence not required."),
+    classifyMakeSafeJobFamily(
+      "WO",
+      "Make safe the ceiling. Temp fence not required.",
+    ),
     "general_makesafe",
   );
   // "no fencing" -> negated
   assertEquals(
-    classifyMakeSafeJobFamily("WO", "Roof report needed, no fencing on this one"),
+    classifyMakeSafeJobFamily(
+      "WO",
+      "Roof report needed, no fencing on this one",
+    ),
     "roof_report",
   );
 });
@@ -43,8 +51,31 @@ Deno.test("classifier: NEGATED temp-fence text does NOT classify as temp_fence (
 Deno.test("classifier: explicit temp_fence report_type STILL wins over a negation in text", () => {
   // an explicit typed signal is authoritative; negation only suppresses a TEXT inference
   assertEquals(
-    classifyMakeSafeJobFamily("WO", "no temp fencing mentioned here", "temp_fence"),
+    classifyMakeSafeJobFamily(
+      "WO",
+      "no temp fencing mentioned here",
+      "temp_fence",
+    ),
     "temp_fence_makesafe",
+  );
+});
+
+Deno.test("classifier: restoration is first-class without defeating the AJS physical floor", () => {
+  assertEquals(
+    classifyMakeSafeJobFamily(
+      "Restoration works MLB-MW-26873",
+      "Complete water damage restoration works to the dwelling.",
+    ),
+    "restoration",
+  );
+  assertEquals(
+    classifyMakeSafeJobFamily(
+      "AJ Building & Restoration work order",
+      "Attend and make safe the damaged roof.",
+      null,
+      { builder: "aj" },
+    ),
+    "general_makesafe",
   );
 });
 
@@ -69,10 +100,18 @@ Deno.test("taxonomy: top-down job_type + subtype derive from the family", () => 
     makesafe_subtype: "general",
     family: "general_makesafe",
   });
+  assertEquals(taxonomyFromFamily("restoration"), {
+    job_type: "restoration",
+    makesafe_subtype: null,
+    family: "restoration",
+  });
 });
 
 Deno.test("taxonomy: classifyMakeSafeTaxonomy runs the negation-aware classifier end-to-end", () => {
-  const t = classifyMakeSafeTaxonomy("WO", "roof report required, no temp fencing needed");
+  const t = classifyMakeSafeTaxonomy(
+    "WO",
+    "roof report required, no temp fencing needed",
+  );
   assertEquals(t.job_type, "roof");
   assertEquals(t.makesafe_subtype, null);
 });

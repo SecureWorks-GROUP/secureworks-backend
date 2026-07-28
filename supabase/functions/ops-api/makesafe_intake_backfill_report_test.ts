@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { summarizeMakesafeIntakeBackfillReport } from "./makesafe_intake_backfill_report.ts";
 
@@ -19,6 +20,24 @@ Deno.test("backfill report: infers missing family from report_type without writi
   assertEquals(summary.items[0].state, "backfill_candidate");
   assertEquals(summary.items[0].inferred_family, "roof_report");
   assertEquals(summary.items[0].confidence, "report_type");
+});
+
+Deno.test("backfill report: infers restoration from specific work text", () => {
+  const summary = summarizeMakesafeIntakeBackfillReport({
+    drafts: [{
+      id: "draft-restoration",
+      external_ref: "MLB-MW-26873",
+      requesting_company_slug: "mlb",
+      status: "needs_review",
+      extraction_json: {
+        description: "Complete water damage restoration works to the dwelling.",
+      },
+    }],
+    jobs: [],
+  });
+
+  assertEquals(summary.items[0].inferred_family, "restoration");
+  assertEquals(summary.items[0].confidence, "text");
 });
 
 Deno.test("backfill report: unknown-family draft sharing ref/company with known variant is a suppression risk", () => {
@@ -78,7 +97,8 @@ Deno.test("backfill report (M-G FIX 2): stored family contradicted by WO text ->
       // stored as temp_fence, but the WO text says NO temp fencing + it's an assessment
       extraction_json: {
         makesafe_job_family: "temp_fence_makesafe",
-        description: "Attend and assess the damage, provide a quote. No temp fencing needed.",
+        description:
+          "Attend and assess the damage, provide a quote. No temp fencing needed.",
       },
     }],
     jobs: [],
