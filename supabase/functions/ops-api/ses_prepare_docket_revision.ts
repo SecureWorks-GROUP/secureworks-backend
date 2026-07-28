@@ -1495,7 +1495,10 @@ async function prepareOne(
   });
 
   await measure("T4", async () => {
-    if (!row) return;
+    if (
+      !row ||
+      input.classification.delivery_render_route !== "builder_portal"
+    ) return;
     for (const role of row.required_portal_roles) {
       const matches = input.source.portal_links.filter(
         (link) => inputPortalRole(link.role) === role,
@@ -1950,7 +1953,11 @@ async function prepareOne(
           );
         }
       }
-    } else if (row.family === "own_template_roof") {
+    } else if (
+      row.family === "own_template_roof" &&
+      input.classification.delivery_render_route ===
+        "secureworks_own_letterhead"
+    ) {
       if (!input.cycle_facts.roof_report_fields || !deps.renderOwnRoofReport) {
         const itemBlocker = addBlocker(
           blockers,

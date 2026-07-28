@@ -303,10 +303,25 @@ export function resolveSesDeliveryRenderRoute(
     metadata.roof_report_mode,
     metadata.makesafe_roof_report_mode,
   ).toLowerCase();
-  const reportDelivery = firstText(
-    metadata.report_delivery,
-    detail.report_delivery,
-  ).toLowerCase();
+  const metadataReportDelivery = text(metadata.report_delivery).toLowerCase();
+  const detailReportDelivery = text(detail.report_delivery).toLowerCase();
+  if (
+    metadataReportDelivery &&
+    detailReportDelivery &&
+    metadataReportDelivery !== detailReportDelivery
+  ) {
+    return {
+      route: "unroutable",
+      reason_code: "conflicting_roof_delivery_facts",
+      reason:
+        "Persisted card facts disagree about portal versus SecureWorks own-letterhead delivery.",
+      evidence: [
+        `jobs.metadata.report_delivery=${metadataReportDelivery}`,
+        `makesafe_job_details.report_delivery=${detailReportDelivery}`,
+      ].sort(),
+    };
+  }
+  const reportDelivery = metadataReportDelivery || detailReportDelivery;
   const relationship = clientRelationshipMarker(snapshot.job.client_name);
   const ownEvidence = [
     familyId === "own_template_roof"

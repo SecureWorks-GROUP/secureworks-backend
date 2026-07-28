@@ -686,6 +686,27 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "conflicting persisted roof delivery facts fail closed before route selection",
+  () => {
+    const live = snapshot();
+    live.detail!.report_type = null;
+    live.job.metadata.makesafe_job_family = "roof_report";
+    live.job.metadata.report_delivery = "own_document";
+    live.detail!.report_delivery = "portal";
+    const input = buildSesAssemblerInput(live);
+    assertEquals(input.classification.delivery_render_route, "unroutable");
+    assertEquals(
+      input.classification.delivery_render_route_reason_code,
+      "conflicting_roof_delivery_facts",
+    );
+    assertEquals(input.classification.delivery_render_route_evidence, [
+      "jobs.metadata.report_delivery=own_document",
+      "makesafe_job_details.report_delivery=portal",
+    ]);
+  },
+);
+
 Deno.test("SWMS-26980 seeded authority preserves the identity spine in U4", () => {
   const live = snapshot();
   live.identity_revision = {
