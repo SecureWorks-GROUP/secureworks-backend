@@ -136,6 +136,21 @@ Deno.test("finalize rejects detail cycle-binding drift", () => {
   assertStringIncludes(migration, "detail_cycle_binding");
 });
 
+Deno.test("nullable row cardinality uses valid PL/pgSQL CASE expressions", () => {
+  assertEquals(
+    migration.match(
+      /<> \(CASE WHEN v_token IS NULL THEN 0 ELSE 1 END\)/g,
+    )?.length,
+    2,
+  );
+  assertEquals(
+    migration.includes(
+      "<> CASE WHEN v_token IS NULL THEN 0 ELSE 1 END",
+    ),
+    false,
+  );
+});
+
 Deno.test("edge acceptance is the live U4 canary plus zero v2 input errors", () => {
   assertStringIncludes(indexSource, "case 'makesafe_state_seed'");
   assertStringIncludes(indexSource, "job_number: 'SWMS-26980'");

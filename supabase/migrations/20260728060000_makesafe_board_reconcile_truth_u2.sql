@@ -1717,7 +1717,7 @@ BEGIN
     END IF;
     v_token := v_row.state_facts->'job_details';
     IF (SELECT count(*) FROM public.makesafe_job_details WHERE job_id = v_row.job_id)
-      <> CASE WHEN v_token IS NULL THEN 0 ELSE 1 END
+      <> (CASE WHEN v_token IS NULL THEN 0 ELSE 1 END)
       OR (v_token IS NOT NULL AND NOT EXISTS (
         SELECT 1
         FROM public.makesafe_job_details d
@@ -1763,7 +1763,7 @@ BEGIN
     END IF;
     v_token := v_row.state_facts->'docket';
     IF (SELECT count(*) FROM public.makesafe_docket_revisions_current WHERE job_id = v_row.job_id)
-      <> CASE WHEN v_token IS NULL THEN 0 ELSE 1 END
+      <> (CASE WHEN v_token IS NULL THEN 0 ELSE 1 END)
       OR (v_token IS NOT NULL AND NOT EXISTS (
         SELECT 1
         FROM public.makesafe_docket_revisions_current d
