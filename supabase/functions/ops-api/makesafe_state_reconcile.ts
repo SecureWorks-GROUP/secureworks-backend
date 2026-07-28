@@ -44,6 +44,86 @@ export function chunkMakesafeStateRows<T>(
   return chunks;
 }
 
+export interface MakesafeStateSeedSummary {
+  valid: boolean;
+  requested: number;
+  accounted: number;
+  seeded: number;
+  skipped: number;
+  error: string | null;
+}
+
+function seedCount(value: unknown): number | null {
+  return typeof value === "number" &&
+      Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+export function summarizeMakesafeStateSeedChunks(
+  chunks: readonly Record<string, unknown>[],
+  expectedRequested: number,
+): MakesafeStateSeedSummary {
+  if (!Number.isSafeInteger(expectedRequested) || expectedRequested < 0) {
+    throw new Error("expected seed count must be a non-negative integer");
+  }
+
+  let requested = 0;
+  let accounted = 0;
+  let seeded = 0;
+  let skipped = 0;
+  for (const [index, chunk] of chunks.entries()) {
+    const chunkRequested = seedCount(chunk?.requested);
+    const chunkAccounted = seedCount(chunk?.accounted);
+    const chunkSeeded = seedCount(chunk?.seeded);
+    const chunkSkipped = seedCount(chunk?.skipped);
+    if (
+      chunkRequested === null || chunkAccounted === null ||
+      chunkSeeded === null || chunkSkipped === null
+    ) {
+      return {
+        valid: false,
+        requested,
+        accounted,
+        seeded,
+        skipped,
+        error: `seed chunk ${index + 1} returned invalid accounting`,
+      };
+    }
+    if (
+      chunkAccounted !== chunkRequested ||
+      chunkSeeded + chunkSkipped !== chunkAccounted
+    ) {
+      return {
+        valid: false,
+        requested,
+        accounted,
+        seeded,
+        skipped,
+        error: `seed chunk ${index + 1} did not partition every request`,
+      };
+    }
+    requested += chunkRequested;
+    accounted += chunkAccounted;
+    seeded += chunkSeeded;
+    skipped += chunkSkipped;
+  }
+
+  const valid = requested === expectedRequested &&
+    accounted === expectedRequested &&
+    seeded + skipped === accounted;
+  return {
+    valid,
+    requested,
+    accounted,
+    seeded,
+    skipped,
+    error: valid
+      ? null
+      : "seed chunks did not account for the exact server-selected board",
+  };
+}
+
 export interface MakesafeCaptainAction {
   code: string;
   message: string;

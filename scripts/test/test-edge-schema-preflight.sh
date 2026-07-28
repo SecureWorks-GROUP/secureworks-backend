@@ -15,6 +15,7 @@ FENCE_HARDENING_MIGRATION="$REPO_ROOT/supabase/migrations/20260728050000_makesaf
 DOCS_READY_MIGRATION="$REPO_ROOT/supabase/migrations/20260728210000_makesafe_ses_docs_ready_signoff.sql"
 SIBLING_EVIDENCE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728730000_makesafe_sibling_evidence_bundle_u7.sql"
 PORTAL_CAPTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728500000_makesafe_portal_capture_bridge_u4.sql"
+SEED_SCOPE_MIGRATION="$REPO_ROOT/supabase/migrations/20260729000000_makesafe_state_seed_scope_accounting.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -68,6 +69,10 @@ portal_capture_migration_sha() {
   shasum -a 256 "$PORTAL_CAPTURE_MIGRATION" | awk '{print $1}'
 }
 
+seed_scope_migration_sha() {
+  shasum -a 256 "$SEED_SCOPE_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -82,6 +87,7 @@ write_response() {
   DOCS_READY_EXPECTED_SHA="$(docs_ready_migration_sha)" \
   SIBLING_EVIDENCE_EXPECTED_SHA="$(sibling_evidence_migration_sha)" \
   PORTAL_CAPTURE_EXPECTED_SHA="$(portal_capture_migration_sha)" \
+  SEED_SCOPE_EXPECTED_SHA="$(seed_scope_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -183,6 +189,17 @@ portal_capture_row = {
     "actual_statement_sha256": os.environ["PORTAL_CAPTURE_EXPECTED_SHA"],
     "missing_markers": [],
 }
+seed_scope_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260729000000",
+    "expected_migration_name": "makesafe_state_seed_scope_accounting",
+    "expected_statement_sha256": os.environ["SEED_SCOPE_EXPECTED_SHA"],
+    "actual_migration_version": "20260729000000",
+    "actual_migration_name": "makesafe_state_seed_scope_accounting",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["SEED_SCOPE_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -194,6 +211,7 @@ with open(sys.argv[1], "w") as f:
             docs_ready_row,
             sibling_evidence_row,
             portal_capture_row,
+            seed_scope_row,
         ],
         f,
     )
@@ -216,12 +234,14 @@ test_incident_dependency_is_declared() {
   local report_expected='ops-api|supabase/migrations/20260727000001_makesafe_attendance_cycles_u2_s1.sql|column|job_service_reports.attendance_cycle_id'
   local media_expected='ops-api|supabase/migrations/20260728000001_makesafe_state_authority_u2.sql|column|job_media.attendance_cycle_id'
   local fresh_health_expected='ops-api|supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql|column|makesafe_intake_health.fresh_source_lag_seconds'
+  local seed_scope_expected='ops-api|supabase/migrations/20260729000000_makesafe_state_seed_scope_accounting.sql|table|makesafe_state_seed_scope_runs'
   if grep -Fxq "$report_expected" "$MANIFEST" && \
     grep -Fxq "$media_expected" "$MANIFEST" && \
-    grep -Fxq "$fresh_health_expected" "$MANIFEST"; then
+    grep -Fxq "$fresh_health_expected" "$MANIFEST" && \
+    grep -Fxq "$seed_scope_expected" "$MANIFEST"; then
     pass "$name"
   else
-    fail "$name" "the report, media-cycle, and fresh-source health columns are not permanent ops-api deploy requirements"
+    fail "$name" "the report, media-cycle, fresh-source health, and seed-scope markers are not permanent ops-api deploy requirements"
   fi
 }
 
@@ -392,7 +412,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared

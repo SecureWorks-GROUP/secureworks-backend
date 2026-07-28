@@ -17,6 +17,18 @@ const rollback = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const seedScopeMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260729000000_makesafe_state_seed_scope_accounting.sql",
+    import.meta.url,
+  ),
+);
+const seedScopeRollback = await Deno.readTextFile(
+  new URL(
+    "../../rollbacks/20260729000000_makesafe_state_seed_scope_accounting_down.sql",
+    import.meta.url,
+  ),
+);
 const indexSource = await Deno.readTextFile(
   new URL("./index.ts", import.meta.url),
 );
@@ -153,6 +165,10 @@ Deno.test("nullable row cardinality uses valid PL/pgSQL CASE expressions", () =>
 
 Deno.test("edge acceptance is the live U4 canary plus zero v2 input errors", () => {
   assertStringIncludes(indexSource, "case 'makesafe_state_seed'");
+  assertStringIncludes(
+    indexSource,
+    "'seed_makesafe_state_authority_scoped_v2'",
+  );
   assertStringIncludes(indexSource, "job_number: 'SWMS-26980'");
   assertStringIncludes(indexSource, ".startsWith('spine_missing_')");
   assertStringIncludes(
@@ -163,5 +179,50 @@ Deno.test("edge acceptance is the live U4 canary plus zero v2 input errors", () 
     indexSource.includes(
       "const acceptancePassed = inputErrors === 0 && spineBlockers.length === 0",
     ),
+  );
+});
+
+Deno.test("seed scope accepts canonical restoration and accounts every skip", () => {
+  assertStringIncludes(
+    seedScopeMigration,
+    "j.type = ''insurance'' AND j.metadata->>''insurance_job_type'' = ''restoration''",
+  );
+  assertStringIncludes(
+    seedScopeMigration,
+    "CREATE OR REPLACE FUNCTION public.seed_makesafe_state_authority_scoped_v2",
+  );
+  assertStringIncludes(seedScopeMigration, "FOR SHARE");
+  assertStringIncludes(
+    seedScopeMigration,
+    "public.stamp_makesafe_fact_identity_v1()",
+  );
+  assertStringIncludes(
+    seedScopeMigration,
+    "j.type = ''insurance'' AND j.metadata->>''insurance_job_type'' = ''restoration''",
+  );
+  assertStringIncludes(
+    seedScopeMigration,
+    "pg_advisory_xact_lock",
+  );
+  assert(
+    seedScopeMigration.indexOf("pg_advisory_xact_lock") <
+      seedScopeMigration.indexOf("SELECT * INTO v_existing"),
+  );
+  assertStringIncludes(seedScopeMigration, "WHERE found_id IS NULL");
+  assertStringIncludes(
+    seedScopeMigration,
+    "'reason_code', 'not_canonical_makesafe_job'",
+  );
+  assertStringIncludes(
+    seedScopeMigration,
+    "seeded_count + skipped_missing_count + skipped_out_of_scope_count",
+  );
+  assertStringIncludes(
+    seedScopeMigration,
+    "seed scope did not partition every requested job exactly once",
+  );
+  assertStringIncludes(
+    seedScopeRollback,
+    "DROP FUNCTION IF EXISTS public.seed_makesafe_state_authority_scoped_v2",
   );
 });
