@@ -140,6 +140,10 @@ makesafe_reporting_intake_pass # probe=source-only
 # draft revision, so deploy recognition stays source-only; the documented
 # production canary always supplies dry_run=true.
 prepare_ses_docket_revision # probe=source-only
+list_ses_docs_ready_reviews # probe=source-only
+get_ses_reviewable_pack # probe=source-only
+sign_off_ses_docket # probe=source-only
+revoke_ses_docket_signoff # probe=source-only
 prepare_ses_invoice_void_revision # probe=source-only
 approve_ses_invoice_void_revision # probe=source-only
 execute_ses_invoice_void_revision # probe=source-only

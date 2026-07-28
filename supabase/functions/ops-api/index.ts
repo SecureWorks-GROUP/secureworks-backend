@@ -324,14 +324,18 @@ import {
   approveSesReleaseRevisionAction,
   executeSesInvoiceRevisionAction,
   executeSesReleaseRevisionAction,
+  getSesReviewablePackAction,
+  listSesDocsReadyReviewsAction,
   prepareSesInvoiceObligationAction,
   prepareSesReleaseRevisionAction,
   querySesProofLedgerAction,
   querySesReviewCockpitAction,
   recordSesReviewFeedbackAction,
+  revokeSesDocketSignoffAction,
   resolveSesInvoiceDuplicatesAction,
   SesActionError,
   sesActionErrorResponse,
+  signOffSesDocketAction,
   type SesActionAuth,
   type SesMailGateway,
   type SesReleaseXeroReader,
@@ -5577,6 +5581,48 @@ if (import.meta.main) serve(async (req: Request) => {
           url.searchParams.get('release_revision_id') || body.release_revision_id,
         ))
       }
+      case 'list_ses_docs_ready_reviews': {
+        const limit = Number(url.searchParams.get('limit') || body.limit || 50)
+        return json(await listSesDocsReadyReviewsAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          limit,
+        ))
+      }
+      case 'get_ses_reviewable_pack': {
+        const docketRevisionId = url.searchParams.get('docket_revision_id') ||
+          body.docket_revision_id
+        return json(await getSesReviewablePackAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          docketRevisionId,
+        ))
+      }
+      case 'sign_off_ses_docket':
+        if (req.method !== 'POST') {
+          return json({ error: 'sign_off_ses_docket requires POST' }, 405)
+        }
+        return json(await signOffSesDocketAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            docket_revision_id: body.docket_revision_id,
+            expected_output_content_hash: body.expected_output_content_hash,
+          },
+        ))
+      case 'revoke_ses_docket_signoff':
+        if (req.method !== 'POST') {
+          return json({ error: 'revoke_ses_docket_signoff requires POST' }, 405)
+        }
+        return json(await revokeSesDocketSignoffAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            docket_revision_id: body.docket_revision_id,
+            expected_output_content_hash: body.expected_output_content_hash,
+            reason: body.reason,
+          },
+        ))
       case 'approve_ses_invoice_revision':
         await assertNoSyntheticLivefireJobs(
           client,

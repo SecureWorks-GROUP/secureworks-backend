@@ -44,9 +44,13 @@ assignment.
 
 The U4 action likewise sends nothing, creates or authorises no Xero invoice and
 does not mutate job/substatus/assignment rows. `dry_run:false` appends only the
-draft docket revision and its private artifacts. A ready revision projects the
-card into pre-Xero Docs Ready; a blocked revision remains on its existing board
-stage with named blockers. Assessment uses the sealed
+draft docket revision and its private artifacts. A ready revision enters the
+append-only Docs Ready `needs_review` queue and may project the card into
+pre-Xero Docs Ready; it is not sendable until the exact docket bytes are signed
+off. A blocked revision remains on its existing board stage with
+named blockers. The exact review API and send precondition are documented in
+the [U4 pack assembler evidence](evidence/ses-u4-pack-assembler-build-2026-07-27.md#docs-ready-review-contract).
+Assessment uses the sealed
 `assessment-triad-invoice-only/2026-07-27` recipe and stays blocked only when
 its required work order, typed Prime links, or screenshot-backed locked
 captures are missing.
