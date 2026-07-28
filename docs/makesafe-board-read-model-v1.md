@@ -56,6 +56,15 @@ explicit to production safeupdate enforcement. Keep the live
 `makesafe_state_seed` invocation dark until the migration-first deploy and its
 schema gate have completed.
 
+Migration `20260729030000_makesafe_decimal_fact_canonicalization.sql` separates
+raw fact identity from the integer-only readiness envelope: canonical decimal
+measurements are hash-stable for fact and reconciliation tokens, while
+`makesafe_canonical_json_v1` continues to reject non-integer readiness values.
+Apply it before deploying the matching `ops-api`, which reselects reconciliation
+tokens through the service-role RPC in bounded batches. Keep
+`makesafe_state_seed` dark until the migration and matching edge code have been
+deployed from merged `main`.
+
 ## Canonical truth
 
 Every card originates as one canonical job row with:
