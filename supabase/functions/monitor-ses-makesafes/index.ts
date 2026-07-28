@@ -2050,8 +2050,7 @@ export interface IntakeScanOutcome {
 type IntakeSourceFate = "reason_coded_exception" | "deferred_next_run";
 
 async function recordIntakeSourceFates(
-  // deno-lint-ignore no-explicit-any
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   sources: readonly IntakeHandoffSource[],
   fate: IntakeSourceFate,
   reasonCode: string,
@@ -2128,8 +2127,7 @@ async function recordIntakeSourceFates(
 }
 
 async function recordIntakeSourceExceptions(
-  // deno-lint-ignore no-explicit-any
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   sources: readonly IntakeHandoffSource[],
   reasonCode: string,
   summary: string,
@@ -2146,8 +2144,7 @@ async function recordIntakeSourceExceptions(
 }
 
 async function recordIntakeHealthDegradation(
-  // deno-lint-ignore no-explicit-any
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   reasonCode: string,
   nowIso = new Date().toISOString(),
 ): Promise<void> {
@@ -2257,8 +2254,7 @@ async function recordPdfExtractionHandoffFailure(
 }
 
 async function recordIntakeSourceDeferrals(
-  // deno-lint-ignore no-explicit-any
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   sources: readonly IntakeHandoffSource[],
   reasonCode: string,
   summary: string,
@@ -2275,8 +2271,7 @@ async function recordIntakeSourceDeferrals(
 }
 
 async function findIntakeSourcesWithoutCase(
-  // deno-lint-ignore no-explicit-any
-  sb: any,
+  sb: ReturnType<typeof createClient>,
   sources: readonly IntakeHandoffSource[],
 ): Promise<IntakeHandoffSource[]> {
   const accounted = new Set<string>();
