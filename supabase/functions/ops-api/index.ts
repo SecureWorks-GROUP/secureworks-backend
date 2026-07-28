@@ -3546,15 +3546,19 @@ if (import.meta.main) serve(async (req: Request) => {
               },
             )
             if (error) {
+              const committed = chunks.length > 0
               return json({
                 ok: false,
                 dry_run: false,
+                state: committed ? 'seed_partially_committed' : 'seed_failed',
+                committed,
+                retry_same_run_key: true,
                 selection_hash: selectionHash,
                 requested: jobIds.length,
                 completed_chunks: chunks.length,
                 chunk_count: jobChunks.length,
                 error: error.message || String(error),
-              }, 409)
+              }, committed ? 202 : 409)
             }
             chunks.push(data)
           }
@@ -3566,6 +3570,9 @@ if (import.meta.main) serve(async (req: Request) => {
             return json({
               ok: false,
               dry_run: false,
+              state: 'seed_committed_accounting_pending',
+              committed: true,
+              retry_same_run_key: true,
               selection_hash: selectionHash,
               requested: jobIds.length,
               accounted: summary.accounted,
@@ -3574,7 +3581,7 @@ if (import.meta.main) serve(async (req: Request) => {
               completed_chunks: chunks.length,
               chunk_count: jobChunks.length,
               error: summary.error,
-            }, 503)
+            }, 202)
           }
           seedResult = {
             requested: jobIds.length,
@@ -3641,10 +3648,20 @@ if (import.meta.main) serve(async (req: Request) => {
             : []
         })
         const acceptancePassed = inputErrors === 0 && spineBlockers.length === 0
+        const liveAcceptancePending = !dryRun && !acceptancePassed
         return json({
           ok: acceptancePassed,
           dry_run: dryRun,
           projection_basis: comparison.projection_basis || 'persisted',
+          ...(dryRun
+            ? {}
+            : {
+              state: acceptancePassed
+                ? 'seed_accepted'
+                : 'seed_committed_acceptance_pending',
+              committed: true,
+              retry_same_run_key: liveAcceptancePending,
+            }),
           selection_hash: selectionHash,
           requested: jobIds.length,
           seed_result: dryRun
@@ -3665,7 +3682,7 @@ if (import.meta.main) serve(async (req: Request) => {
             u4_spine_missing_blockers: spineBlockers,
             passed: acceptancePassed,
           },
-        }, acceptancePassed || dryRun ? 200 : 409)
+        }, acceptancePassed || dryRun ? 200 : 202)
       }
       case 'makesafe_state_reconcile': {
         // U2 Captain redirect: server-selected, fact-derived board correction.
