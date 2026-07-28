@@ -119,14 +119,12 @@ screenshot-backed locked captures are missing.
 
 ## Portal truth
 
-Portal families cannot become ready without the capture adapter opening every
-typed link. `done` is accepted only with tied JSON **and screenshot** evidence;
-`not_done` blocks with
-`portal_not_submitted`; network/runner failure blocks with
-`portal_unreachable`; mismatched job/docket/reference/URL blocks with
-`portal_wrong_reference`; unavailable capture capability blocks with
-`capability_portal_degraded`. No persisted portal timestamp or prose is accepted
-as a substitute for that read.
+The current persisted-evidence producer and consumer contract superseding this
+build note is documented in
+[`ses-u4-portal-capture-evidence-bridge-2026-07-28.md`](ses-u4-portal-capture-evidence-bridge-2026-07-28.md).
+That contract requires exact current-cycle evidence with provenance and a
+hash-verified screenshot; absent or invalid evidence is reported as
+`portal_capture_missing` or `portal_capture_invalid`.
 
 The tests prove invocation and all fail-closed mappings with deterministic
 capture fixtures. A credentialed staging/live browser run was not performed in
@@ -268,9 +266,11 @@ mutated.
 
 The backend still does not pretend it can inspect a Prime SPA: real portal
 screenshots remain owned by the approved agent-side
-`capture_portal_evidence.py` runner. Until that capture capability is bound into
-a run, portal cards fail closed as `capability_portal_degraded`; assessment
-cards otherwise use the sealed recipe above and fail only on missing evidence.
+`capture_portal_evidence.py` runner. The durable producer/consumer binding and
+its typed blockers are defined in
+[`ses-u4-portal-capture-evidence-bridge-2026-07-28.md`](ses-u4-portal-capture-evidence-bridge-2026-07-28.md);
+assessment cards otherwise use the sealed recipe above and fail only on missing
+evidence.
 
 ## Docs Ready review contract
 

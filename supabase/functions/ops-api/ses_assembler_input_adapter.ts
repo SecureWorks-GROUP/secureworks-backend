@@ -10,6 +10,7 @@ import {
   type SesArtifact,
   type SesAssemblerInputV1,
   type SesDeliveryRenderRoute,
+  type SesPortalCapture,
   type SesPreparedRevision,
   type SesPrepareRequest,
   type SesSha256,
@@ -32,6 +33,7 @@ import {
   SES_ASSESSMENT_RECIPE_VERSION,
   type SesPhotoArtifact,
   type SesPhotoProof,
+  type SesPortalCaptureRequest,
   type SesPrepareDependencies,
   type SesPrepareResponse,
 } from "./ses_prepare_docket_revision.ts";
@@ -46,6 +48,19 @@ import {
 } from "./roof_report_render.ts";
 import { buildRoofReportJob } from "./roof_report_template.ts";
 import { isBundledCoverageSendNote } from "./makesafe_send_pack.ts";
+import {
+  canonicalSesPortalCaptureResult,
+  canonicalSesPortalCaptureRole,
+  canonicalSesPortalSourceUrl,
+  isSesPortalCapturePng,
+  isSesSha256,
+  rawSesPortalCaptureSha256,
+  SES_PORTAL_CAPTURE_BUCKET,
+  SES_PORTAL_CAPTURE_PRODUCER,
+  type SesPersistedPortalCaptureRow,
+  type SesPortalCaptureRevisionContent,
+  sesPortalCaptureRevisionHash,
+} from "./ses_portal_capture_contract.ts";
 
 export class SesAssemblerAdapterError extends Error {
   status: number;
@@ -111,6 +126,7 @@ export interface SesAssemblerLiveSnapshot {
   documents: LiveRow[];
   roof_draft: LiveRow | null;
   readiness: LiveRow | null;
+  portal_captures: LiveRow[];
   legacy_packs: LiveRow[];
   events?: LiveRow[];
   bundle_bindings?: LiveRow[];
@@ -1348,6 +1364,7 @@ export async function loadSesAssemblerLiveSnapshot(
     documents,
     roofDraft,
     readiness,
+    portalCaptures,
     packs,
     events,
     outboundBindings,
@@ -1433,6 +1450,14 @@ export async function loadSesAssemblerLiveSnapshot(
         .eq("job_id", jobId)
         .maybeSingle(),
       "makesafe_readiness_current",
+    ),
+    many(
+      client
+        .from("makesafe_portal_capture_revisions")
+        .select("*")
+        .eq("job_id", jobId)
+        .order("makesafe_fact_version", { ascending: false }),
+      "makesafe_portal_capture_revisions",
     ),
     many(
       client.from("makesafe_report_packs").select("*").eq("job_id", jobId),
@@ -1580,6 +1605,7 @@ export async function loadSesAssemblerLiveSnapshot(
     documents,
     roof_draft: roofDraft,
     readiness,
+    portal_captures: portalCaptures,
     legacy_packs: packs,
     events,
     bundle_bindings: bundleBindings,
@@ -1643,6 +1669,193 @@ async function rawPhotoSha256(
   return `sha256:${hex}`;
 }
 
+function persistedCaptureContent(
+  row: SesPersistedPortalCaptureRow,
+): SesPortalCaptureRevisionContent {
+  return {
+    job_id: row.job_id,
+    attendance_cycle_id: row.attendance_cycle_id,
+    role: row.role,
+    capture_result: row.capture_result,
+    source_url: row.source_url,
+    source_content_hash: row.source_content_hash,
+    builder_reference: row.builder_reference,
+    captured_at: row.captured_at,
+    captured_by: row.captured_by,
+    capture_producer: row.capture_producer,
+    capture_idempotency_key: row.capture_idempotency_key,
+    signal: row.signal,
+    screenshot_object_key: row.screenshot_object_key,
+    screenshot_media_type: row.screenshot_media_type,
+    screenshot_content_hash: row.screenshot_content_hash,
+    screenshot_size_bytes: row.screenshot_size_bytes,
+  };
+}
+
+async function missingPersistedPortalCapture(
+  request: SesPortalCaptureRequest,
+  cycleId: string,
+): Promise<SesPortalCapture> {
+  return {
+    status: "missing",
+    role: request.role,
+    url: request.url,
+    docket_id: request.docket_id,
+    job_id: request.job_id,
+    builder_reference: request.builder_reference,
+    captured_at: new Date(0).toISOString(),
+    captured_by: "",
+    capture_producer: "",
+    evidence_revision_id: "",
+    content_fingerprint: await rawPhotoSha256(
+      new TextEncoder().encode(
+        `${request.job_id}:${cycleId}:${request.role}:${request.url}`,
+      ),
+    ),
+    idempotency_key: request.idempotency_key,
+    signal:
+      `No persisted portal capture matches job_id=${request.job_id}, attendance_cycle_id=${
+        cycleId || "(missing)"
+      }, role=${request.role}, source_url=${request.url}.`,
+  };
+}
+
+function invalidPersistedPortalCapture(
+  request: SesPortalCaptureRequest,
+  row: SesPersistedPortalCaptureRow,
+  signal: string,
+): SesPortalCapture {
+  return {
+    status: "invalid",
+    role: request.role,
+    url: request.url,
+    docket_id: request.docket_id,
+    job_id: request.job_id,
+    builder_reference: request.builder_reference,
+    captured_at: row.captured_at,
+    captured_by: row.captured_by,
+    capture_producer: row.capture_producer,
+    evidence_revision_id: row.id,
+    content_fingerprint: row.source_content_hash,
+    idempotency_key: row.capture_idempotency_key,
+    signal,
+  };
+}
+
+async function resolvePersistedPortalCapture(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  snapshot: SesAssemblerLiveSnapshot,
+  request: SesPortalCaptureRequest,
+): Promise<SesPortalCapture> {
+  const cycleId = text(snapshot.detail?.attendance_cycle_id);
+  const sourceUrl = canonicalSesPortalSourceUrl(request.url);
+  const matches = snapshot.portal_captures
+    .map((row) => row as SesPersistedPortalCaptureRow)
+    .filter((row) =>
+      row.job_id === request.job_id &&
+      row.attendance_cycle_id === cycleId &&
+      canonicalSesPortalCaptureRole(row.role) === request.role &&
+      sourceUrl !== null &&
+      canonicalSesPortalSourceUrl(row.source_url) === sourceUrl &&
+      row.builder_reference === request.builder_reference
+    )
+    .sort((left, right) =>
+      Number(right.makesafe_fact_version) -
+        Number(left.makesafe_fact_version) ||
+      String(right.created_at).localeCompare(String(left.created_at))
+    );
+  const row = matches[0];
+  if (!row) return await missingPersistedPortalCapture(request, cycleId);
+
+  const result = canonicalSesPortalCaptureResult(row.capture_result);
+  const role = canonicalSesPortalCaptureRole(row.role);
+  if (
+    !result || role !== request.role ||
+    !isSesSha256(row.source_content_hash) ||
+    !isSesSha256(row.makesafe_content_hash) ||
+    !row.captured_by?.trim() ||
+    row.capture_producer !== SES_PORTAL_CAPTURE_PRODUCER ||
+    !row.id?.trim()
+  ) {
+    return invalidPersistedPortalCapture(
+      request,
+      row,
+      `Persisted portal capture ${
+        row.id || "(missing id)"
+      } has invalid provenance.`,
+    );
+  }
+  if (
+    await sesPortalCaptureRevisionHash(persistedCaptureContent(row)) !==
+      row.makesafe_content_hash
+  ) {
+    return invalidPersistedPortalCapture(
+      request,
+      row,
+      `Persisted portal capture ${row.id} failed its aggregate content-hash check.`,
+    );
+  }
+
+  let screenshotBytes: Uint8Array | undefined;
+  if (result !== "unreachable") {
+    const prefix = `${SES_PORTAL_CAPTURE_BUCKET}/`;
+    if (
+      !row.screenshot_object_key?.startsWith(prefix) ||
+      row.screenshot_media_type !== "image/png" ||
+      !isSesSha256(row.screenshot_content_hash) ||
+      !Number.isSafeInteger(Number(row.screenshot_size_bytes)) ||
+      Number(row.screenshot_size_bytes) <= 0
+    ) {
+      return invalidPersistedPortalCapture(
+        request,
+        row,
+        `Persisted portal capture ${row.id} has no valid tied screenshot reference.`,
+      );
+    }
+    const storagePath = row.screenshot_object_key.slice(prefix.length);
+    const downloaded = await client.storage.from(SES_PORTAL_CAPTURE_BUCKET)
+      .download(storagePath);
+    if (downloaded.error || !downloaded.data) {
+      return invalidPersistedPortalCapture(
+        request,
+        row,
+        `Persisted portal capture ${row.id} screenshot could not be downloaded.`,
+      );
+    }
+    screenshotBytes = new Uint8Array(await downloaded.data.arrayBuffer());
+    if (
+      !isSesPortalCapturePng(screenshotBytes) ||
+      screenshotBytes.byteLength !== Number(row.screenshot_size_bytes) ||
+      await rawSesPortalCaptureSha256(screenshotBytes) !==
+        row.screenshot_content_hash
+    ) {
+      return invalidPersistedPortalCapture(
+        request,
+        row,
+        `Persisted portal capture ${row.id} screenshot failed its byte-hash check.`,
+      );
+    }
+  }
+
+  return {
+    status: result,
+    role: request.role,
+    url: request.url,
+    docket_id: request.docket_id,
+    job_id: request.job_id,
+    builder_reference: request.builder_reference,
+    captured_at: row.captured_at,
+    captured_by: row.captured_by,
+    capture_producer: row.capture_producer,
+    evidence_revision_id: row.id,
+    content_fingerprint: row.source_content_hash,
+    idempotency_key: row.capture_idempotency_key,
+    signal: row.signal,
+    ...(screenshotBytes ? { screenshot_bytes: screenshotBytes } : {}),
+  };
+}
+
 function mediaType(row: LiveRow, fallback: string): string {
   return firstText(row.content_type, row.media_type, row.mime_type, fallback);
 }
@@ -1665,6 +1878,16 @@ export function createSesAssemblerRuntimeDependencies(
       throw new SesAssemblerAdapterError(
         "ses_adapter_snapshot_missing",
         "Assembler artifact recovery ran before the canonical card snapshot.",
+      );
+    }
+    return snapshot;
+  };
+  const snapshotForJobId = (jobId: string) => {
+    const snapshot = snapshots.get(jobId);
+    if (!snapshot) {
+      throw new SesAssemblerAdapterError(
+        "ses_adapter_snapshot_missing",
+        "Portal capture resolution ran before the canonical card snapshot.",
       );
     }
     return snapshot;
@@ -1784,6 +2007,12 @@ export function createSesAssemblerRuntimeDependencies(
       }
       return out;
     },
+    capturePortal: async (request) =>
+      await resolvePersistedPortalCapture(
+        client,
+        snapshotForJobId(request.job_id),
+        request,
+      ),
     renderPhysicalReport: async (input, photos = []) => {
       const snapshot = snapshotFor(input);
       const rendered = await renderMakesafeReportPdf(

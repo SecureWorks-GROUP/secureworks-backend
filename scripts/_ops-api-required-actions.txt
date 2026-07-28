@@ -144,6 +144,10 @@ list_ses_docs_ready_reviews # probe=source-only
 get_ses_reviewable_pack # probe=source-only
 sign_off_ses_docket # probe=source-only
 revoke_ses_docket_signoff # probe=source-only
+# Agent-side Chrome capture producer write. A valid call uploads a private
+# screenshot and appends a current-cycle evidence revision, so recognition is
+# proven by the source gate rather than by firing a production probe.
+record_ses_portal_capture_evidence # probe=source-only
 prepare_ses_invoice_void_revision # probe=source-only
 approve_ses_invoice_void_revision # probe=source-only
 execute_ses_invoice_void_revision # probe=source-only

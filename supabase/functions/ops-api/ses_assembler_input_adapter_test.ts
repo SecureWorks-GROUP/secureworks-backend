@@ -158,6 +158,7 @@ function sanitizedAssessmentSnapshot(args: {
     roof_draft: null,
     readiness: null,
     legacy_packs: [],
+    portal_captures: [],
   };
 }
 
@@ -225,6 +226,54 @@ function liveSnapshotClient(live: SesAssemblerLiveSnapshot) {
   };
 }
 
+function roofPortalSnapshot(
+  jobId = "3ffaf0e2-3080-44eb-bbdc-d2dd812d8b2a",
+  jobNumber = "SWMS-261019",
+): SesAssemblerLiveSnapshot {
+  // The job id/number, current cycle, reference and typed Prime link are the
+  // read-only production values for SWMS-261019 captured on 2026-07-28.
+  const live = snapshot();
+  live.job.id = jobId;
+  live.job.job_number = jobNumber;
+  live.job.metadata.makesafe_job_family = "roof_report";
+  live.job.client_name = "Ordinary insured";
+  live.job.metadata.external_ref = "MLB-27037PO-56395";
+  live.detail!.job_id = jobId;
+  live.detail!.report_type = null;
+  live.detail!.external_ref = "MLB-27037";
+  live.detail!.attendance_cycle_id = "e805ffd2-539f-4266-82ac-1eaa1d869bda";
+  live.detail!.external_links = [{
+    kind: "builder_portal",
+    label: "Builder portal link",
+    url: "https://primeeco.tech/share/d2ff4956-1302-4ef8-a49e-c9d29061ef4b",
+  }];
+  live.cycles[0].id = live.detail!.attendance_cycle_id;
+  for (
+    const rows of [
+      live.cycles,
+      live.reports,
+      live.assignments,
+      live.media,
+      live.documents,
+    ]
+  ) {
+    for (const row of rows) {
+      row.job_id = jobId;
+      if ("attendance_cycle_id" in row) {
+        row.attendance_cycle_id = live.detail!.attendance_cycle_id;
+      }
+    }
+  }
+  live.identity_revision = {
+    authority_kind: "legacy_job_record",
+    source_instruction_id: `legacy-job:${jobId}`,
+    source_version: 1,
+    source_content_hash: `sha256:${"a".repeat(64)}`,
+    lineage_id: jobId,
+    effective_case_id: null,
+  };
+  return live;
+}
 Deno.test(
   "SWMS-26980 live fixture builds canonical v1 input without inventing U1 spine facts",
   () => {
@@ -735,6 +784,204 @@ Deno.test("sibling evidence seed guard executes empty, complete, and partial bra
 });
 
 Deno.test(
+  "SWMS-261019 U4 dry-run binds persisted capture resolution and names the exact missing capture",
+  async () => {
+    const live = roofPortalSnapshot();
+    const input = buildSesAssemblerInput(live);
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live),
+      { org_id: live.job.org_id, created_by: "u4-regression" },
+    );
+    const response = await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: live.job.id },
+        idempotency_key: "swms-261019-persisted-capture-missing",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      {
+        ...dependencies,
+        resolveSourceArtifacts: async () => sourceResolver(input),
+        now: () => new Date("2026-07-28T08:00:00.000Z"),
+      },
+    );
+
+    const result = response.results[0];
+    const codes = blockerCodes(result);
+    assert(codes.includes("portal_capture_missing"));
+    assert(!codes.includes("capability_portal_degraded"));
+    const blocker = result.blockers.find((item) =>
+      item.reason_code === "portal_capture_missing"
+    );
+    assert(blocker);
+    assert(blocker.reason.includes(`job_id=${live.job.id}`));
+    assert(
+      blocker.reason.includes(
+        `attendance_cycle_id=${live.detail!.attendance_cycle_id}`,
+      ),
+    );
+    assert(blocker.reason.includes("role=roof_report"));
+    assert(
+      blocker.reason.includes(
+        "source_url=https://primeeco.tech/share/d2ff4956-1302-4ef8-a49e-c9d29061ef4b",
+      ),
+    );
+  },
+);
+
+Deno.test(
+  "U4 accepts hash-verified current-cycle persisted portal evidence with provenance",
+  async () => {
+    const live = roofPortalSnapshot();
+    const input = buildSesAssemblerInput(live);
+    const sourceUrl = input.source.portal_links[0].url;
+    const screenshotBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const screenshotHash = await rawSesPortalCaptureSha256(screenshotBytes);
+    const storagePath = [
+      "portal-captures",
+      live.job.id,
+      live.detail!.attendance_cycle_id,
+      "roof_report",
+      `${screenshotHash.slice("sha256:".length)}.png`,
+    ].join("/");
+    const content: SesPortalCaptureRevisionContent = {
+      job_id: live.job.id,
+      attendance_cycle_id: live.detail!.attendance_cycle_id,
+      role: "roof_report",
+      capture_result: "done",
+      source_url: sourceUrl,
+      source_content_hash: `sha256:${"b".repeat(64)}`,
+      builder_reference: input.source.builder_reference,
+      captured_at: "2026-07-28T07:55:00.000Z",
+      captured_by: "chrome-agent@secureworks.test",
+      capture_producer: SES_PORTAL_CAPTURE_PRODUCER,
+      capture_idempotency_key: "capture-swms-261019-roof-v1",
+      signal: "submitted-and-locked",
+      screenshot_object_key: `${SES_PORTAL_CAPTURE_BUCKET}/${storagePath}`,
+      screenshot_media_type: "image/png",
+      screenshot_content_hash: screenshotHash,
+      screenshot_size_bytes: screenshotBytes.byteLength,
+    };
+    live.portal_captures = [{
+      id: "9de05ac0-c55f-4f42-a506-acdebad8a1a1",
+      org_id: live.job.org_id,
+      ...content,
+      status: "verified",
+      makesafe_fact_version: 1,
+      makesafe_content_hash: await sesPortalCaptureRevisionHash(content),
+      evidence_refs: [],
+      created_at: "2026-07-28T07:56:00.000Z",
+      created_by: "ops-api:api_key",
+    }];
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live, { [storagePath]: screenshotBytes }),
+      { org_id: live.job.org_id, created_by: "u4-regression" },
+    );
+    const response = await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: live.job.id },
+        idempotency_key: "swms-261019-persisted-capture-present",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      {
+        ...dependencies,
+        resolveSourceArtifacts: async () => sourceResolver(input),
+        now: () => new Date("2026-07-28T08:00:00.000Z"),
+      },
+    );
+
+    const result = response.results[0];
+    const codes = blockerCodes(result);
+    assert(!codes.includes("portal_capture_missing"));
+    assert(!codes.includes("portal_capture_invalid"));
+    assert(!codes.includes("capability_portal_degraded"));
+    const evidence = result.artifacts.find((artifact) =>
+      artifact.path === "EVIDENCE/portal_roof_report.json"
+    );
+    assert(evidence);
+    const persisted = JSON.parse(new TextDecoder().decode(evidence.bytes));
+    assertEquals(persisted.captured_by, content.captured_by);
+    assertEquals(persisted.capture_producer, content.capture_producer);
+    assertEquals(
+      persisted.evidence_revision_id,
+      live.portal_captures[0].id,
+    );
+  },
+);
+
+Deno.test(
+  "U4 rejects malformed not_done screenshot evidence as portal_capture_invalid",
+  async () => {
+    const live = roofPortalSnapshot();
+    const input = buildSesAssemblerInput(live);
+    const sourceUrl = input.source.portal_links[0].url;
+    const screenshotBytes = new Uint8Array([1, 2, 3]);
+    const screenshotHash = await rawSesPortalCaptureSha256(screenshotBytes);
+    const storagePath = [
+      "portal-captures",
+      live.job.id,
+      live.detail!.attendance_cycle_id,
+      "roof_report",
+      `${screenshotHash.slice("sha256:".length)}.png`,
+    ].join("/");
+    const content: SesPortalCaptureRevisionContent = {
+      job_id: live.job.id,
+      attendance_cycle_id: live.detail!.attendance_cycle_id,
+      role: "roof_report",
+      capture_result: "not_done",
+      source_url: sourceUrl,
+      source_content_hash: `sha256:${"b".repeat(64)}`,
+      builder_reference: input.source.builder_reference,
+      captured_at: "2026-07-28T07:55:00.000Z",
+      captured_by: "chrome-agent@secureworks.test",
+      capture_producer: SES_PORTAL_CAPTURE_PRODUCER,
+      capture_idempotency_key: "capture-swms-261019-roof-not-done-v1",
+      signal: "portal-not-submitted",
+      screenshot_object_key: `${SES_PORTAL_CAPTURE_BUCKET}/${storagePath}`,
+      screenshot_media_type: "image/png",
+      screenshot_content_hash: screenshotHash,
+      screenshot_size_bytes: screenshotBytes.byteLength,
+    };
+    live.portal_captures = [{
+      id: "9de05ac0-c55f-4f42-a506-acdebad8a1a2",
+      org_id: live.job.org_id,
+      ...content,
+      status: "captured",
+      makesafe_fact_version: 1,
+      makesafe_content_hash: await sesPortalCaptureRevisionHash(content),
+      evidence_refs: [],
+      created_at: "2026-07-28T07:56:00.000Z",
+      created_by: "ops-api:api_key",
+    }];
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live, { [storagePath]: screenshotBytes }),
+      { org_id: live.job.org_id, created_by: "u4-regression" },
+    );
+    const response = await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: live.job.id },
+        idempotency_key: "swms-261019-not-done-capture-invalid",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      {
+        ...dependencies,
+        resolveSourceArtifacts: async () => sourceResolver(input),
+        now: () => new Date("2026-07-28T08:00:00.000Z"),
+      },
+    );
+
+    const codes = blockerCodes(response.results[0]);
+    assert(codes.includes("portal_capture_invalid"));
+    assert(!codes.includes("portal_not_submitted"));
+  },
+);
+
+Deno.test(
   "live adapter maps the canonical board family without an AJS physical shortcut",
   () => {
     const live = snapshot();
@@ -1104,7 +1351,6 @@ Deno.test(
       portalInput.classification.delivery_render_route_reason_code,
       "portal_builder_family",
     );
-
     const ownTemplateRoof = snapshot();
     ownTemplateRoof.detail!.report_type = null;
     ownTemplateRoof.detail!.external_links = [];
@@ -1326,6 +1572,15 @@ Deno.test(
         force_refresh: true,
       },
       deps,
+    );
+    const ownTemplateRoof = snapshot();
+    ownTemplateRoof.detail!.report_type = null;
+    ownTemplateRoof.detail!.external_links = [];
+    ownTemplateRoof.job.metadata.makesafe_job_family = "roof_report";
+    ownTemplateRoof.job.metadata.report_delivery = "own_document";
+    assertEquals(
+      buildSesAssemblerInput(ownTemplateRoof).classification.family,
+      "own_template_roof",
     );
     const result = response.results[0];
     const codes = blockerCodes(result);
