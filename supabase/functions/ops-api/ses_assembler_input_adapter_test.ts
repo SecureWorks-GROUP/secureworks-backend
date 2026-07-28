@@ -18,7 +18,9 @@ import {
 import {
   SES_ASSEMBLER_VERSION,
   SES_INPUT_CONTRACT_VERSION,
+  sesSha256,
 } from "./ses_docket_envelope.ts";
+import { SES_FAMILY_MATRIX_VERSION } from "./ses_family_matrix.ts";
 import {
   prepare_ses_docket_revision,
   SES_ASSESSMENT_RECIPE_VERSION,
@@ -42,6 +44,80 @@ function sourceResolver(input: ReturnType<typeof buildSesAssemblerInput>) {
 
 function blockerCodes(result: { blockers: Array<{ reason_code: string }> }) {
   return result.blockers.map((item) => item.reason_code);
+}
+
+function sanitizedAssessmentSnapshot(args: {
+  jobNumber: string;
+  reportType: string | null;
+  photoLinkKind: "photos" | "photo_schedule";
+}): SesAssemblerLiveSnapshot {
+  const suffix = args.jobNumber.toLowerCase().replaceAll("-", "");
+  const jobId = `sanitized-job-${suffix}`;
+  const cycleId = `sanitized-cycle-${suffix}`;
+  return {
+    job: {
+      id: jobId,
+      job_number: args.jobNumber,
+      type: "makesafe",
+      client_name: "Sanitized client",
+      site_address: "Sanitized address",
+      site_suburb: "Sanitized suburb",
+      metadata: {
+        makesafe_job_family: "assessment_report_quote",
+      },
+    },
+    detail: {
+      job_id: jobId,
+      requesting_company_slug: "mlb",
+      requesting_company_name: "ML Builders",
+      external_ref: "SANITIZED-BUILDER-REFERENCE",
+      report_type: args.reportType,
+      attendance_cycle_id: cycleId,
+      cycle_attribution: "bound",
+      external_links: [
+        {
+          kind: "assessment_report",
+          label: "Assessment report",
+          source: "sanitized",
+          url: `https://portal.example.test/${suffix}/assessment`,
+        },
+        {
+          kind: args.photoLinkKind,
+          label: "Photos",
+          source: "sanitized",
+          url: `https://portal.example.test/${suffix}/photos`,
+        },
+        {
+          kind: "quote",
+          label: "Quote",
+          source: "sanitized",
+          url: `https://portal.example.test/${suffix}/quote`,
+        },
+      ],
+      makesafe_companies: {
+        slug: "mlb",
+        name: "ML Builders",
+        report_recipient: "reports@example.test",
+      },
+    },
+    identity_revision: null,
+    cases: [],
+    cycles: [{ id: cycleId, job_id: jobId, cycle_number: 1 }],
+    reports: [],
+    assignments: [
+      { id: `sanitized-assignment-a-${suffix}`, job_id: jobId },
+      { id: `sanitized-assignment-b-${suffix}`, job_id: jobId },
+    ],
+    media: [],
+    documents: [{
+      id: `sanitized-work-order-${suffix}`,
+      job_id: jobId,
+      type: "work_order",
+    }],
+    roof_draft: null,
+    readiness: null,
+    legacy_packs: [],
+  };
 }
 
 function liveSnapshotClient(live: SesAssemblerLiveSnapshot) {
@@ -905,38 +981,137 @@ Deno.test(
 );
 
 Deno.test(
-  "live adapter seals the assessment recipe and leaves only truthful source blockers",
+  "four sanitized production assessment shapes conform to the sealed matrix and hash the corrected input",
   async () => {
-    const live = snapshot();
-    live.job.metadata.makesafe_job_family = "assessment_report_quote";
-    live.detail!.report_type = null;
-    live.detail!.external_links = [
-      { kind: "assessment_report", url: "https://portal.example.test/report" },
-      { kind: "photos", url: "https://portal.example.test/photos" },
-      { kind: "scope", url: "https://portal.example.test/scope" },
-    ];
-    const input = buildSesAssemblerInput(live);
+    const shapes = [
+      {
+        jobNumber: "SWMS-26732",
+        reportType: null,
+        photoLinkKind: "photos",
+      },
+      {
+        jobNumber: "SWMS-26740",
+        reportType: "assessment_report",
+        photoLinkKind: "photos",
+      },
+      {
+        jobNumber: "SWMS-26748",
+        reportType: "assessment_report",
+        photoLinkKind: "photos",
+      },
+      {
+        jobNumber: "SWMS-26791",
+        reportType: "assessment_report",
+        photoLinkKind: "photo_schedule",
+      },
+    ] as const;
+
+    for (const shape of shapes) {
+      const input = buildSesAssemblerInput(sanitizedAssessmentSnapshot(shape));
+      assertEquals(input.classification.family, "assessment_quote");
+      assertEquals(input.classification.report_only, true);
+      assertEquals(input.classification.report_delivery, "portal");
+      assertEquals(input.classification.subtype, null);
+      assertEquals(
+        input.classification.family_matrix_version,
+        SES_FAMILY_MATRIX_VERSION,
+      );
+      assertEquals(
+        input.source.portal_links.map((link) => link.role),
+        ["assessment", "photos", "scope"],
+      );
+      assertEquals(
+        input.classification.assessment_outbound_recipe_version,
+        SES_ASSESSMENT_RECIPE_VERSION,
+      );
+      const expectedInputHash = await sesSha256(input);
+      const response = await prepare_ses_docket_revision(
+        {
+          selection: { mode: "job_id", job_id: input.identity.job_id },
+          idempotency_key: `assessment-sanitized-${shape.jobNumber}`,
+          assembler_version: SES_ASSEMBLER_VERSION,
+          dry_run: true,
+          force_refresh: true,
+        },
+        {
+          resolveInput: async () => input,
+          resolveSourceArtifacts: async () => sourceResolver(input),
+          now: () => new Date("2026-07-28T08:00:00.000Z"),
+        },
+      );
+      const result = response.results[0];
+      const codes = blockerCodes(result);
+      assertEquals(result.input_content_hash, expectedInputHash);
+      assertEquals(result.envelope.input_content_hash, expectedInputHash);
+      assertEquals(
+        result.envelope.family_matrix_version,
+        SES_FAMILY_MATRIX_VERSION,
+      );
+      assert(!codes.includes("input_hash_conflict"), shape.jobNumber);
+      assert(codes.includes("spine_missing_source"), shape.jobNumber);
+      assert(codes.includes("capability_portal_degraded"), shape.jobNumber);
+    }
+  },
+);
+
+Deno.test(
+  "matrix-derived classification leaves roof, make-safe and restoration delivery fields unchanged",
+  () => {
+    for (
+      const [signal, expected] of [
+        [
+          "general_makesafe",
+          ["physical_makesafe", null, false, null],
+        ],
+        [
+          "temp_fence_makesafe",
+          ["temporary_fencing", "temporary_fencing", false, null],
+        ],
+        [
+          "roof_report",
+          ["ordinary_roof_portal", null, true, "portal"],
+        ],
+        [
+          "restoration",
+          ["restoration", null, false, null],
+        ],
+      ] as const
+    ) {
+      const live = snapshot();
+      live.detail!.report_type = null;
+      live.job.metadata.makesafe_job_family = signal;
+      const classification = buildSesAssemblerInput(live).classification;
+      assertEquals<string>(classification.family, expected[0], signal);
+      assertEquals<string | null>(classification.subtype, expected[1], signal);
+      assertEquals<boolean>(classification.report_only, expected[2], signal);
+      assertEquals<string | null>(
+        classification.report_delivery,
+        expected[3],
+        signal,
+      );
+    }
+  },
+);
+
+Deno.test(
+  "live adapter keeps the current assessment hash version rather than reusing the deployed predecessor",
+  async () => {
+    const input = buildSesAssemblerInput(sanitizedAssessmentSnapshot({
+      jobNumber: "SWMS-26732",
+      reportType: null,
+      photoLinkKind: "photos",
+    }));
+    const currentHash = await sesSha256(input);
+    const staleInput = structuredClone(input);
+    staleInput.classification.family_matrix_version =
+      "ses-builder-family-matrix/2026-07-27.3";
+    const staleHash = await sesSha256(staleInput);
+
     assertEquals(
-      input.classification.assessment_outbound_recipe_version,
-      SES_ASSESSMENT_RECIPE_VERSION,
+      input.classification.family_matrix_version,
+      SES_FAMILY_MATRIX_VERSION,
     );
-    const response = await prepare_ses_docket_revision(
-      {
-        selection: { mode: "job_id", job_id: input.identity.job_id },
-        idempotency_key: "assessment-held-fixture",
-        assembler_version: SES_ASSEMBLER_VERSION,
-        dry_run: true,
-        force_refresh: true,
-      },
-      {
-        resolveInput: async () => input,
-        resolveSourceArtifacts: async () => sourceResolver(input),
-        now: () => new Date("2026-07-27T08:00:00.000Z"),
-      },
-    );
-    const codes = blockerCodes(response.results[0]);
-    assert(!codes.includes("assessment_recipe_unapproved"));
-    assert(codes.includes("spine_missing_source"));
+    assert(currentHash !== staleHash);
   },
 );
 Deno.test("live adapter resolves only the exact synthetic-livefire company profile", () => {
