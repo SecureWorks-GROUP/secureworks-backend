@@ -735,6 +735,135 @@ Deno.test("sibling evidence seed guard executes empty, complete, and partial bra
 });
 
 Deno.test(
+  "SWMS-261019 U4 dry-run binds persisted capture resolution and names the exact missing capture",
+  async () => {
+    const live = roofPortalSnapshot();
+    const input = buildSesAssemblerInput(live);
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live),
+      { org_id: live.job.org_id, created_by: "u4-regression" },
+    );
+    const response = await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: live.job.id },
+        idempotency_key: "swms-261019-persisted-capture-missing",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      {
+        ...dependencies,
+        resolveSourceArtifacts: async () => sourceResolver(input),
+        now: () => new Date("2026-07-28T08:00:00.000Z"),
+      },
+    );
+
+    const result = response.results[0];
+    const codes = blockerCodes(result);
+    assert(codes.includes("portal_capture_missing"));
+    assert(!codes.includes("capability_portal_degraded"));
+    const blocker = result.blockers.find((item) =>
+      item.reason_code === "portal_capture_missing"
+    );
+    assert(blocker);
+    assert(blocker.reason.includes(`job_id=${live.job.id}`));
+    assert(
+      blocker.reason.includes(
+        `attendance_cycle_id=${live.detail!.attendance_cycle_id}`,
+      ),
+    );
+    assert(blocker.reason.includes("role=roof_report"));
+    assert(
+      blocker.reason.includes(
+        "source_url=https://primeeco.tech/share/d2ff4956-1302-4ef8-a49e-c9d29061ef4b",
+      ),
+    );
+  },
+);
+
+Deno.test(
+  "U4 accepts hash-verified current-cycle persisted portal evidence with provenance",
+  async () => {
+    const live = roofPortalSnapshot();
+    const input = buildSesAssemblerInput(live);
+    const sourceUrl = input.source.portal_links[0].url;
+    const screenshotBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const screenshotHash = await rawSesPortalCaptureSha256(screenshotBytes);
+    const storagePath = [
+      "portal-captures",
+      live.job.id,
+      live.detail!.attendance_cycle_id,
+      "roof_report",
+      `${screenshotHash.slice("sha256:".length)}.png`,
+    ].join("/");
+    const content: SesPortalCaptureRevisionContent = {
+      job_id: live.job.id,
+      attendance_cycle_id: live.detail!.attendance_cycle_id,
+      role: "roof_report",
+      capture_result: "done",
+      source_url: sourceUrl,
+      source_content_hash: `sha256:${"b".repeat(64)}`,
+      builder_reference: input.source.builder_reference,
+      captured_at: "2026-07-28T07:55:00.000Z",
+      captured_by: "chrome-agent@secureworks.test",
+      capture_producer: SES_PORTAL_CAPTURE_PRODUCER,
+      capture_idempotency_key: "capture-swms-261019-roof-v1",
+      signal: "submitted-and-locked",
+      screenshot_object_key: `${SES_PORTAL_CAPTURE_BUCKET}/${storagePath}`,
+      screenshot_media_type: "image/png",
+      screenshot_content_hash: screenshotHash,
+      screenshot_size_bytes: screenshotBytes.byteLength,
+    };
+    live.portal_captures = [{
+      id: "9de05ac0-c55f-4f42-a506-acdebad8a1a1",
+      org_id: live.job.org_id,
+      ...content,
+      status: "verified",
+      makesafe_fact_version: 1,
+      makesafe_content_hash: await sesPortalCaptureRevisionHash(content),
+      evidence_refs: [],
+      created_at: "2026-07-28T07:56:00.000Z",
+      created_by: "ops-api:api_key",
+    }];
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live, { [storagePath]: screenshotBytes }),
+      { org_id: live.job.org_id, created_by: "u4-regression" },
+    );
+    const response = await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: live.job.id },
+        idempotency_key: "swms-261019-persisted-capture-present",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      {
+        ...dependencies,
+        resolveSourceArtifacts: async () => sourceResolver(input),
+        now: () => new Date("2026-07-28T08:00:00.000Z"),
+      },
+    );
+
+    const result = response.results[0];
+    const codes = blockerCodes(result);
+    assert(!codes.includes("portal_capture_missing"));
+    assert(!codes.includes("portal_capture_invalid"));
+    assert(!codes.includes("capability_portal_degraded"));
+    const evidence = result.artifacts.find((artifact) =>
+      artifact.path === "EVIDENCE/portal_roof_report.json"
+    );
+    assert(evidence);
+    const persisted = JSON.parse(new TextDecoder().decode(evidence.bytes));
+    assertEquals(persisted.captured_by, content.captured_by);
+    assertEquals(persisted.capture_producer, content.capture_producer);
+    assertEquals(
+      persisted.evidence_revision_id,
+      live.portal_captures[0].id,
+    );
+  },
+);
+
+Deno.test(
   "live adapter maps the canonical board family without an AJS physical shortcut",
   () => {
     const live = snapshot();
@@ -1591,3 +1720,4 @@ Deno.test("live adapter resolves only the exact synthetic-livefire company profi
     "UNKNOWN",
   );
 });
+

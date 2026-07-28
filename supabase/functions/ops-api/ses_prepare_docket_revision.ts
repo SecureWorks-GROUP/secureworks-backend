@@ -1102,12 +1102,34 @@ function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
     : capture.role === "scope"
     ? "quote/scope"
     : "roof report";
+  if (capture.status === "missing") {
+    return blocked(
+      "portal_capture_missing",
+      capture.signal,
+      `Capture and persist the exact ${role} evidence for this job, current attendance cycle, role and source URL, then retry U4.`,
+      [`portal-capture:${capture.role}`],
+    );
+  }
+  if (capture.status === "invalid") {
+    return blocked(
+      "portal_capture_invalid",
+      capture.signal ||
+        `The persisted ${role} capture failed provenance validation.`,
+      `Re-capture and persist valid ${role} evidence with actor, timestamp, source URL and content hash.`,
+      [`portal-capture:${capture.role}`],
+    );
+  }
   if (capture.status === "done") {
-    if (!isValidContentFingerprint(capture.content_fingerprint)) {
+    if (
+      !isValidContentFingerprint(capture.content_fingerprint) ||
+      !capture.captured_by.trim() ||
+      !capture.capture_producer.trim() ||
+      !capture.evidence_revision_id.trim()
+    ) {
       return blocked(
         "portal_capture_invalid",
-        `The ${role} capture returned done without a valid content fingerprint.`,
-        "Re-run the approved portal capture and retain a valid content fingerprint.",
+        `The ${role} capture returned done without complete persisted provenance and a valid content fingerprint.`,
+        "Re-run the approved portal capture and persist the actor, timestamp, source URL, content hash and tied screenshot.",
         [`portal-capture:${capture.role}`],
       );
     }
@@ -1625,13 +1647,16 @@ async function prepareOne(
         });
       } catch (error) {
         capture = {
-          status: "unreachable",
+          status: "invalid",
           role,
           url: link.url,
           docket_id: manifest.docket_id,
           job_id: input.identity.job_id,
           builder_reference: input.source.builder_reference,
           captured_at: now().toISOString(),
+          captured_by: "",
+          capture_producer: "",
+          evidence_revision_id: "",
           content_fingerprint: await sesSha256({
             role,
             url: link.url,

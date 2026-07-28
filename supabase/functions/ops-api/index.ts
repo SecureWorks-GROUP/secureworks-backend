@@ -161,6 +161,10 @@ import {
 import {
   prepare_ses_docket_revision,
 } from './ses_prepare_docket_revision.ts'
+import {
+  recordSesPortalCaptureEvidence,
+  SesPortalCaptureEvidenceError,
+} from './ses_portal_capture_evidence.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
 // wrapper inside updateJobStatus. Static import so the Supabase deploy
@@ -4341,6 +4345,30 @@ if (import.meta.main) serve(async (req: Request) => {
           )
           return json(summarizeSesPrepareResponseForHttp(response))
         } catch (error) {
+          if (error instanceof SesAssemblerAdapterError) {
+            return json({ error: error.message, code: error.code }, error.status)
+          }
+          throw error
+        }
+      }
+      case 'record_ses_portal_capture_evidence': {
+        const captureIsPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!captureIsPrivileged) {
+          return json({
+            error: 'forbidden: record_ses_portal_capture_evidence requires the privileged ops key or an admin/owner session',
+          }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'record_ses_portal_capture_evidence requires POST' }, 405)
+        }
+        try {
+          const actor = authUser?.email || `ops-api:${authMode}`
+          return json(await recordSesPortalCaptureEvidence(client, body, actor))
+        } catch (error) {
+          if (error instanceof SesPortalCaptureEvidenceError) {
+            return json({ error: error.message, code: error.code }, error.status)
+          }
           if (error instanceof SesAssemblerAdapterError) {
             return json({ error: error.message, code: error.code }, error.status)
           }

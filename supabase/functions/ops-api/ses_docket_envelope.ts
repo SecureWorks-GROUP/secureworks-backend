@@ -217,13 +217,16 @@ export interface SesArtifact {
 }
 
 export interface SesPortalCapture {
-  status: "done" | "not_done" | "unreachable";
+  status: "done" | "not_done" | "unreachable" | "missing" | "invalid";
   role: "roof_report" | "assessment" | "photos" | "scope";
   url: string;
   docket_id: string;
   job_id: string;
   builder_reference: string;
   captured_at: string;
+  captured_by: string;
+  capture_producer: string;
+  evidence_revision_id: string;
   content_fingerprint: SesSha256;
   idempotency_key: string;
   signal: string;
