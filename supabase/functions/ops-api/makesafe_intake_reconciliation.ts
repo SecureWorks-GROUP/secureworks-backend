@@ -551,6 +551,7 @@ export interface IntakeReconcileEvidencePointer {
 
 export interface IntakeReconcileInvariantItem {
   post_id: string | null;
+  internet_message_id: string | null;
   subject: string | null;
   from_email: string | null;
   received_at: string | null;
@@ -1089,6 +1090,7 @@ export function summarizeIntakeReconcileInvariant(input: {
   ): void {
     const item: IntakeReconcileInvariantItem = {
       post_id: e.post_id || null,
+      internet_message_id: e.internet_message_id || null,
       subject: e.subject || null,
       from_email: e.from_email || null,
       received_at: e.received_at || null,

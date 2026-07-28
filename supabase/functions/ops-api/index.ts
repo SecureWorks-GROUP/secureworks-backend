@@ -242,6 +242,11 @@ import {
   loadDeterministicRolloutControls as _loadDeterministicRolloutControls,
   runDeterministicIntake as _runDeterministicIntake,
 } from './makesafe_deterministic_intake_runtime.ts'
+import {
+  notifyDeterministicPhysicalJob as _notifyDeterministicPhysicalJob,
+  type HugoNotificationConfig as _HugoNotificationConfig,
+  type HugoProviderResult as _HugoProviderResult,
+} from './makesafe_hugo_notification.ts'
 import { DETERMINISTIC_INTAKE_VERSION } from './makesafe_deterministic_intake.ts'
 import { SYNTHETIC_LIVEFIRE_MARKER_PREFIX } from './makesafe_synthetic_livefire.ts'
 import {
@@ -435,7 +440,10 @@ import {
 } from './makesafe_intake_gate.ts'
 // B5 SLA: pure email-received -> card-created latency percentiles for the health row
 // + the 24h intake_health rollup. See makesafe_intake_sla.ts.
-import { computeLatencySla as _computeLatencySla } from './makesafe_intake_sla.ts'
+import {
+  computeLatencySla as _computeLatencySla,
+  computeLogicalIntakeSla as _computeLogicalIntakeSla,
+} from './makesafe_intake_sla.ts'
 // BUG 1 (fix/makesafe-intake-bugs): cross-path intake dedup so an email already
 // drafted via the OLD user-mailbox path is not re-drafted by the NEW group-sync
 // scan. See makesafe_intake_dedup.ts.
@@ -1496,9 +1504,19 @@ async function logBusinessEvent(client: any, event: {
 // A4 — SMS delivery glue. Sends one SMS to a RAW E.164 phone via the existing
 // ghl-proxy send_sms path (which now find-or-creates a contact from a bare `phone`).
 // Non-blocking: returns true on a delivered send, false otherwise. Never throws.
-async function sendSmsViaGhl(phone: string, message: string, fromNumber?: string): Promise<boolean> {
+async function sendSmsViaGhlWithReceipt(
+  phone: string,
+  message: string,
+  fromNumber?: string | null,
+): Promise<_HugoProviderResult> {
   const to = String(phone || '').trim()
-  if (!to || !message) return false
+  if (!to || !message) {
+    return {
+      accepted: false,
+      messageId: null,
+      failureReason: !to ? 'recipient_phone_missing' : 'message_missing',
+    }
+  }
   try {
     const resp = await fetch(`${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`, {
       method: 'POST',
@@ -1507,20 +1525,58 @@ async function sendSmsViaGhl(phone: string, message: string, fromNumber?: string
         // service-role auth so the tail-call is accepted by ghl-proxy.
         'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
       },
+      signal: AbortSignal.timeout(15_000),
       body: JSON.stringify({ phone: to, message, ...(fromNumber ? { fromNumber } : {}) }),
     })
+    const body = await resp.json().catch(async () => ({
+      error: await resp.text().catch(() => '<unreadable>'),
+    }))
     if (!resp.ok) {
-      const errBody = await resp.text().catch(() => '<unreadable>')
-      console.error(`[ops-api] send_sms non-OK ${resp.status} to ${to}: ${errBody}`)
-      return false
+      const detail = String(body?.error || body?.message || '<unreadable>')
+      console.error(`[ops-api] send_sms non-OK ${resp.status} to ${to}: ${detail}`)
+      return {
+        accepted: false,
+        messageId: null,
+        failureReason: `ghl_http_${resp.status}:${detail}`.slice(0, 500),
+      }
     }
-    const body = await resp.json().catch(() => ({}))
-    return body?.success !== false
+    const messageId = String(
+      body?.messageId || body?.message_id || body?.id || '',
+    ).trim() || null
+    if (body?.success === false || body?.dedup_blocked === true) {
+      return {
+        accepted: false,
+        messageId: null,
+        failureReason: `ghl_rejected:${
+          String(body?.error || body?.message || 'unknown')
+        }`.slice(0, 500),
+      }
+    }
+    return {
+      accepted: Boolean(messageId),
+      messageId,
+      failureReason: messageId ? null : 'provider_message_id_missing',
+    }
   } catch (e) {
     console.error('[ops-api] send_sms failed to', to, (e as Error).message)
-    return false
+    return {
+      accepted: false,
+      messageId: null,
+      failureReason: `ghl_fetch_failed:${(e as Error).message}`.slice(0, 500),
+    }
   }
 }
+
+async function sendSmsViaGhl(phone: string, message: string, fromNumber?: string): Promise<boolean> {
+  const result = await sendSmsViaGhlWithReceipt(phone, message, fromNumber)
+  // Preserve the legacy boolean callers' pre-existing HTTP-200 semantics. The
+  // audited Hugo path calls the receipt adapter directly and requires a provider
+  // message id before it records acceptance.
+  return result.accepted ||
+    result.failureReason === 'provider_message_id_missing'
+}
+
+export const _sendSmsViaGhlWithReceiptForTest = sendSmsViaGhlWithReceipt
 
 // ── M3b (D1+G1): the crew-ready set ─────────────────────────────────────────
 // jobs.status tokens that mean "this job genuinely needs crew now". Drives BOTH
@@ -1567,6 +1623,106 @@ async function notifyVerticalManagersSms(client: any, vertical: string, text: st
 }
 // Test-only export alias (mirrors the `_`-prefixed convention in this file).
 export const _notifyVerticalManagersSms = notifyVerticalManagersSms
+
+async function loadHugoNotificationConfig(
+  client: any,
+): Promise<_HugoNotificationConfig> {
+  const [settingsResult, usersResult] = await Promise.all([
+    client.from('makesafe_notify_settings')
+      .select('notify_enabled, from_number, arrival_general_phones')
+      .eq('id', true)
+      .maybeSingle(),
+    client.from('users')
+      .select('id, name, phone, managed_verticals')
+      .contains('managed_verticals', ['makesafe'])
+      .not('phone', 'is', null),
+  ])
+  if (settingsResult.error) {
+    throw new Error(
+      `Hugo notification settings read failed: ${settingsResult.error.message || settingsResult.error}`,
+    )
+  }
+  if (usersResult.error) {
+    throw new Error(
+      `Hugo notification staff read failed: ${usersResult.error.message || usersResult.error}`,
+    )
+  }
+  const configuredPhones = Array.from(new Set<string>(
+    (Array.isArray(settingsResult.data?.arrival_general_phones)
+      ? settingsResult.data.arrival_general_phones
+      : [])
+      .map((phone: any) => String(phone || '').trim())
+      .filter(Boolean),
+  ))
+  const configuredPhone = configuredPhones.length === 1
+    ? configuredPhones[0]
+    : null
+  const normalizePhone = (value: any) => {
+    const digits = String(value || '').replace(/\D/g, '')
+    if (digits.startsWith('61')) return `+${digits}`
+    if (digits.startsWith('0')) return `+61${digits.slice(1)}`
+    return digits ? `+${digits}` : ''
+  }
+  const eligible = (usersResult.data || []).filter((user: any) => {
+    return Boolean(String(user?.phone || '').trim()) &&
+      configuredPhone !== null &&
+      normalizePhone(user.phone) === normalizePhone(configuredPhone)
+  })
+  const recipient = eligible.length === 1
+    ? {
+      userId: String(eligible[0].id),
+      name: eligible[0].name ? String(eligible[0].name) : null,
+      phone: String(eligible[0].phone).trim(),
+    }
+    : null
+  return {
+    enabled: settingsResult.data?.notify_enabled === true,
+    fromNumber: String(settingsResult.data?.from_number || '').trim() || null,
+    recipient,
+    failureReason: configuredPhones.length === 0
+      ? 'hugo_recipient_missing'
+      : configuredPhones.length > 1
+      ? 'hugo_recipient_config_ambiguous'
+      : eligible.length === 0
+      ? 'hugo_staff_contact_missing'
+      : eligible.length > 1
+      ? 'hugo_staff_contact_ambiguous'
+      : null,
+  }
+}
+
+async function notifyMintedDeterministicPhysicalJob(
+  client: any,
+  input: {
+    caseId: string
+    sourcePostIds: readonly string[]
+    jobId: string
+    syntheticLivefireMarker?: string | null
+  },
+) {
+  return await _notifyDeterministicPhysicalJob(client, input, {
+    loadBoardJob: async (boardClient, jobId) => {
+      const rows = await loadCanonicalMakesafeBoard(boardClient, {
+        restrictToJobIds: [jobId],
+      })
+      const row = rows.find((candidate: any) => candidate?.id === jobId)
+      if (!row) return null
+      return {
+        jobId,
+        jobNumber: row.job_number || null,
+        canonicalStage: String(row.canonical_stage || ''),
+        sesFamily: String(row.ses_family || ''),
+      }
+    },
+    loadConfig: loadHugoNotificationConfig,
+    sendSms: (phone, message, fromNumber) =>
+      sendSmsViaGhlWithReceipt(phone, message, fromNumber),
+  })
+}
+
+export const _loadHugoNotificationConfigForTest = loadHugoNotificationConfig
+export const _notifyMintedDeterministicPhysicalJobForTest =
+  notifyMintedDeterministicPhysicalJob
 
 // A4 — the make-safe alert channel. Reconcile /
 // heartbeat / extraction-health alarms now deliver by SMS to the configured
@@ -18708,6 +18864,7 @@ async function scanSesMakesafes(
     approveDraft: approveIntakeDraft,
     applyBuilderCancellation: (command: any) =>
       applyDeterministicBuilderCancellation(client, command),
+    notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
   })
 }
 
@@ -20701,16 +20858,81 @@ async function intakeHealth(client: any) {
   }
 
   let unaccounted: any = null
+  let invariant: any = null
   try {
-    const inv = await _makesafeIntakeReconcileInvariant(client, { windowDays: 7, limitUnaccounted: 25 })
+    invariant = await _makesafeIntakeReconcileInvariant(client, {
+      windowDays: 7,
+      limitUnaccounted: 1000,
+    })
     unaccounted = {
-      count: inv.counts.unaccounted,
-      live_and_true: inv.live_and_true,
-      window_days: inv.window_days,
-      sample: inv.unaccounted.slice(0, 10),
+      count: invariant.counts.unaccounted,
+      logical_groups: null,
+      live_and_true: invariant.live_and_true,
+      window_days: invariant.window_days,
+      sample: invariant.unaccounted.slice(0, 10),
     }
   } catch (e) {
     unaccounted = { error: (e as Error).message }
+  }
+
+  // P0 five-minute truth: canonical cases are the logical-email grain, while
+  // genuinely unaccounted source rows are collapsed across the dual-capture
+  // fingerprint and stay in the denominator as misses. The current canonical
+  // board confirms that a linked job is actually visible; jobs.created_at is the
+  // synchronous server-visibility stop until the append-only clock spine lands.
+  let logicalSla24h: any = null
+  try {
+    if (!invariant) throw new Error('source reconciliation unavailable')
+    const [caseResult, notificationResult] = await Promise.all([
+      client.from('makesafe_intake_cases')
+        .select('id, state, job_id, received_at, last_decision_at, raw_identity_json, makesafe_intake_case_sources(post_id, internet_message_id, received_at, raw_identity_json), jobs:job_id(id, created_at)')
+        .gte('received_at', since24h)
+        .order('received_at', { ascending: false })
+        .limit(1000),
+      client.from('makesafe_intake_hugo_notifications')
+        .select('case_id, job_id, state, attempted_at, provider_accepted_at')
+        .gte('attempted_at', since24h)
+        .order('attempted_at', { ascending: false })
+        .limit(1000),
+    ])
+    if (caseResult.error) {
+      throw new Error(
+        `intake case SLA read failed: ${caseResult.error.message || caseResult.error}`,
+      )
+    }
+    if (notificationResult.error) {
+      throw new Error(
+        `Hugo notification SLA read failed: ${notificationResult.error.message || notificationResult.error}`,
+      )
+    }
+    const jobIds: string[] = Array.from(new Set<string>(
+      (caseResult.data || []).map((row: any) => String(row?.job_id || '').trim())
+        .filter(Boolean),
+    ))
+    const boardRows = jobIds.length
+      ? await loadCanonicalMakesafeBoard(client, { restrictToJobIds: jobIds })
+      : []
+    const sourceReadComplete =
+      (caseResult.data || []).length < 1000 &&
+      (notificationResult.data || []).length < 1000 &&
+      invariant.counts.source_emails < 1000 &&
+      invariant.counts.unaccounted === invariant.unaccounted.length
+    logicalSla24h = _computeLogicalIntakeSla({
+      nowIso,
+      windowStartIso: since24h,
+      cases: caseResult.data || [],
+      boardRows,
+      notifications: notificationResult.data || [],
+      unaccountedItems: invariant.unaccounted,
+      sourceReadComplete,
+    })
+    unaccounted.logical_groups = logicalSla24h.unaccounted_logical_groups
+  } catch (e) {
+    logicalSla24h = {
+      target_sec: 300,
+      complete: false,
+      error: (e as Error).message,
+    }
   }
 
   const status = String(health?.extraction_status || 'unknown')
@@ -20734,6 +20956,9 @@ async function intakeHealth(client: any) {
       (unfatedSourceCount > 0 && oldestUnfatedReceivedAt !== null))
   const freshSourceCoverageHealthy = freshSourceCoverageKnown &&
     freshSourceLagSeconds <= 5 * 60
+  const logicalSlaHealthy = logicalSla24h?.complete === true &&
+    logicalSla24h?.outcomes?.missed_or_late === 0 &&
+    logicalSla24h?.hugo_notification?.missed_or_late === 0
   // Application authority is deterministic even while a pre-migration compatibility
   // row still says legacy. A settings read failure remains unknown because bounded
   // selection controls cannot be proved.
@@ -20746,7 +20971,7 @@ async function intakeHealth(client: any) {
     // fresh authenticated alarm delivery readiness must all be proved.
     healthy: status === 'ok' && (unaccounted?.count === 0) &&
       freshSourceCoverageHealthy && intakeMode !== 'unknown' &&
-      alarmReadiness.ready,
+      alarmReadiness.ready && logicalSlaHealthy,
     extraction: {
       status,
       degraded_reason: health?.degraded_reason || null,
@@ -20813,6 +21038,7 @@ async function intakeHealth(client: any) {
       },
       last_24h: sla24h,
       target_sec: 120,
+      logical_last_24h: logicalSla24h,
     },
     // M1.5 cost ledger. `last_24h` is the Captain's headline (model calls, the
     // template-skip share, tokens, and estimated USD at the Haiku 4.5 rate constants);

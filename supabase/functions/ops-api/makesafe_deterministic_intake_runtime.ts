@@ -70,6 +70,20 @@ export interface DeterministicRuntimeOptions {
   applyBuilderCancellation?: (
     args: BuilderCancellationCommand,
   ) => Promise<BuilderCancellationResult>;
+  notifyPhysicalJob?: (
+    client: any,
+    input: {
+      caseId: string;
+      sourcePostIds: readonly string[];
+      jobId: string;
+      syntheticLivefireMarker?: string | null;
+    },
+  ) => Promise<{
+    attempted: boolean;
+    accepted: boolean;
+    reason: string;
+    auditId: string | null;
+  }>;
 }
 
 export interface BuilderCancellationCommand {
@@ -167,6 +181,9 @@ export interface DeterministicRuntimeReport {
     job_creation_deferred: number;
     components_failed: number;
     sources_quarantined: number;
+    hugo_notifications_recorded: number;
+    hugo_notifications_accepted: number;
+    hugo_notifications_failed: number;
   };
   // True when the run spent its attempt ceiling without committing a single case.
   // Repeat failures crowding out advanceable work is then visible, not silent.
@@ -4145,6 +4162,9 @@ export async function runDeterministicIntake(
       sources_quarantined: new Set(
         isolatedFailures.flatMap((failure) => failure.source_post_ids),
       ).size,
+      hugo_notifications_recorded: 0,
+      hugo_notifications_accepted: 0,
+      hugo_notifications_failed: 0,
     },
     attempt_cap_reached_without_commit: false,
     selection: {
@@ -4532,6 +4552,57 @@ export async function runDeterministicIntake(
             saved.caseRow,
             true,
           );
+        }
+        // The deterministic case deliberately suppresses the legacy pre-job
+        // manager side effect. A newly minted physical job gets exactly one
+        // replacement notification only after the canonical case/job linkage has
+        // committed. Synthetic live-fire is suppressed before the callback so no
+        // board/config/audit/transport work can occur for lab traffic.
+        if (
+          live.jobCreated && jobId &&
+          !deterministicPrimaryIsReportOnly(effectivePlan) &&
+          !effectivePlan.identity.syntheticLivefireMarker &&
+          options.notifyPhysicalJob
+        ) {
+          try {
+            const notification = await options.notifyPhysicalJob(client, {
+              caseId: saved.caseRow.id,
+              sourcePostIds: effectivePlan.sourcePostIds,
+              jobId,
+              syntheticLivefireMarker:
+                effectivePlan.identity.syntheticLivefireMarker,
+            });
+            if (notification.auditId) {
+              report.totals.hugo_notifications_recorded++;
+            }
+            if (notification.accepted) {
+              report.totals.hugo_notifications_accepted++;
+            } else if (notification.reason !== "already_recorded") {
+              report.totals.hugo_notifications_failed++;
+              report.write_failure_reasons.hugo_notification_failed =
+                (report.write_failure_reasons.hugo_notification_failed || 0) +
+                1;
+              if (
+                !report.evidence.caveats.includes("hugo_notification_failed")
+              ) {
+                report.evidence.caveats.push("hugo_notification_failed");
+              }
+            }
+          } catch {
+            report.totals.hugo_notifications_failed++;
+            report.write_failure_reasons.hugo_notification_callback_failed =
+              (report.write_failure_reasons.hugo_notification_callback_failed ||
+                0) + 1;
+            if (
+              !report.evidence.caveats.includes(
+                "hugo_notification_callback_failed",
+              )
+            ) {
+              report.evidence.caveats.push(
+                "hugo_notification_callback_failed",
+              );
+            }
+          }
         }
       }
       committed++;

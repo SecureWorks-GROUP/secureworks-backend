@@ -52,6 +52,15 @@ const freshSourceHealthMigration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const hugoNotificationMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260729000000_makesafe_hugo_notification_sla_v1.sql",
+    import.meta.url,
+  ),
+);
+const hugoNotification = await Deno.readTextFile(
+  new URL("./makesafe_hugo_notification.ts", import.meta.url),
+);
 const runtime = await Deno.readTextFile(
   new URL("./makesafe_deterministic_intake_runtime.ts", import.meta.url),
 );
@@ -704,6 +713,55 @@ Deno.test("deterministic runtime has no assignment, work-order, invoice or commu
       `runtime contains forbidden writer ${forbidden}`,
     );
   }
+});
+
+Deno.test("deterministic physical mint wires one audited post-board Hugo notification while synthetic stays suppressed", () => {
+  assertStringIncludes(
+    index,
+    "notifyPhysicalJob: notifyMintedDeterministicPhysicalJob",
+  );
+  assertStringIncludes(runtime, "options.notifyPhysicalJob");
+  assertStringIncludes(
+    runtime,
+    "!effectivePlan.identity.syntheticLivefireMarker",
+  );
+  assertStringIncludes(
+    hugoNotification,
+    "synthetic_livefire_suppressed",
+  );
+  assert(
+    !/\+61\d{8,}/.test(hugoNotification),
+    "notification runtime must resolve the staff recipient from configuration",
+  );
+});
+
+Deno.test("Hugo notification migration records lineage, board proof, provider acceptance and durable failures", () => {
+  for (
+    const marker of [
+      "makesafe_intake_hugo_notifications",
+      "source_post_ids",
+      "case_id",
+      "job_id",
+      "board_stage",
+      "board_observed_at",
+      "attempted_at",
+      "provider_message_id",
+      "provider_accepted_at",
+      "recipient_set",
+      "deep_link",
+      "state",
+      "failure_reason",
+      "UNIQUE (org_id, case_id, job_id)",
+      "ENABLE ROW LEVEL SECURITY",
+      "TO service_role",
+    ]
+  ) {
+    assertStringIncludes(hugoNotificationMigration, marker);
+  }
+  assertStringIncludes(
+    hugoNotificationMigration,
+    "provider_result_not_recorded",
+  );
 });
 
 Deno.test("ruling 5 terminal skill hook stays deterministic and non-privileged", () => {
