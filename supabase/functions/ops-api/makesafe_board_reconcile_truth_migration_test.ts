@@ -189,16 +189,14 @@ Deno.test("nullable row cardinality uses valid PL/pgSQL CASE expressions", () =>
 
 Deno.test("edge acceptance is the live U4 canary plus zero v2 input errors", () => {
   assertStringIncludes(indexSource, "case 'makesafe_state_seed'");
-  assertStringIncludes(
-    indexSource,
-    "'seed_makesafe_state_authority_scoped_v2'",
-  );
+  assertStringIncludes(indexSource, "seed_makesafe_state_authority_atomic_v1");
   assertStringIncludes(indexSource, "job_number: 'SWMS-26980'");
   assertStringIncludes(indexSource, ".startsWith('spine_missing_')");
   assertStringIncludes(
     indexSource,
     "comparison.projection_health.projection_input_error_job_count",
   );
+  assertEquals(indexSource.includes("seed_partially_committed"), false);
   assert(
     indexSource.includes(
       "const acceptancePassed = inputErrors === 0 && spineBlockers.length === 0",
@@ -396,5 +394,21 @@ Deno.test("seed counts the case_id exposed by case_candidates", () => {
       caseAliasMigration,
     ),
     false,
+  );
+});
+
+Deno.test("live seed chunks are committed atomically by one RPC", () => {
+  assertStringIncludes(
+    caseAliasMigration,
+    "CREATE OR REPLACE FUNCTION public.seed_makesafe_state_authority_atomic_v1",
+  );
+  assertStringIncludes(
+    caseAliasMigration,
+    "public.seed_makesafe_state_authority_scoped_v2",
+  );
+  assertStringIncludes(caseAliasMigration, "v_chunk := p_job_ids[v_offset:v_end]");
+  assertStringIncludes(
+    caseAliasMigration,
+    "REVOKE ALL ON FUNCTION public.seed_makesafe_state_authority_atomic_v1",
   );
 });
