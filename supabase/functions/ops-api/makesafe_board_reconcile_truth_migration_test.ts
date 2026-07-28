@@ -192,6 +192,22 @@ Deno.test("seed scope accepts canonical restoration and accounts every skip", ()
     "CREATE OR REPLACE FUNCTION public.seed_makesafe_state_authority_scoped_v2",
   );
   assertStringIncludes(seedScopeMigration, "FOR SHARE");
+  assertStringIncludes(
+    seedScopeMigration,
+    "public.stamp_makesafe_fact_identity_v1()",
+  );
+  assertStringIncludes(
+    seedScopeMigration,
+    "j.type = ''insurance'' AND j.metadata->>''insurance_job_type'' = ''restoration''",
+  );
+  assertStringIncludes(
+    seedScopeMigration,
+    "pg_advisory_xact_lock",
+  );
+  assert(
+    seedScopeMigration.indexOf("pg_advisory_xact_lock") <
+      seedScopeMigration.indexOf("SELECT * INTO v_existing"),
+  );
   assertStringIncludes(seedScopeMigration, "WHERE found_id IS NULL");
   assertStringIncludes(
     seedScopeMigration,
