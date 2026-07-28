@@ -21,6 +21,9 @@ BEGIN
       IF SQLERRM = 'decimal readiness value was accepted' THEN
         RAISE;
       END IF;
+      IF SQLERRM <> 'readiness numbers must be finite base-10 integers' THEN
+        RAISE;
+      END IF;
   END;
 END;
 $$;

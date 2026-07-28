@@ -1049,6 +1049,23 @@ async function reconciliationStateToken(client: any, stateFacts: any): Promise<s
   return String(data)
 }
 
+const RECONCILIATION_TOKEN_BATCH_SIZE = 50
+
+async function reconciliationStateTokens(
+  client: any,
+  rows: readonly { job_id: string; state_facts: any }[],
+): Promise<Map<string, string>> {
+  const tokens = new Map<string, string>()
+  for (const batch of chunkMakesafeStateRows(rows, RECONCILIATION_TOKEN_BATCH_SIZE)) {
+    const results = await Promise.all(batch.map(async (row) => [
+      row.job_id,
+      await reconciliationStateToken(client, row.state_facts),
+    ] as const))
+    for (const [jobId, token] of results) tokens.set(jobId, token)
+  }
+  return tokens
+}
+
 function sb() {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 }
@@ -3670,7 +3687,14 @@ if (import.meta.main) serve(async (req: Request) => {
         const comparisonByJob = new Map(
           comparison.rows.map((row: any) => [String(row.id), row]),
         )
-        const rpcRows = await Promise.all(orderedOutcomes.map(async (outcome) => {
+        const tokenInputs = orderedOutcomes.flatMap((outcome) => {
+          const row: any = comparisonByJob.get(outcome.job_id)
+          return row?.state_v2
+            ? [{ job_id: outcome.job_id, state_facts: row.state_facts }]
+            : []
+        })
+        const stateTokens = await reconciliationStateTokens(client, tokenInputs)
+        const rpcRows = orderedOutcomes.map((outcome) => {
           const transition = transitionsByJob.get(outcome.job_id)
           const attention = attentionByJob.get(outcome.job_id)
           const row: any = comparisonByJob.get(outcome.job_id)
@@ -3689,12 +3713,10 @@ if (import.meta.main) serve(async (req: Request) => {
             attention_message: attention?.message || null,
             attention_since: attention?.since || null,
             attention_evidence_refs: attention?.evidence_refs || [],
-            state_token: row?.state_v2
-              ? await reconciliationStateToken(client, row.state_facts)
-              : null,
+            state_token: stateTokens.get(outcome.job_id) || null,
             state_facts: row?.state_facts || null,
           }
-        }))
+        })
         const tokenPayload = rpcRows.map((row: any) => ({
           job_id: row.job_id,
           state_token: row.state_token,
@@ -3749,12 +3771,18 @@ if (import.meta.main) serve(async (req: Request) => {
           latestRows,
           new Date().toISOString(),
         )
-        const latestTokenPayload = await Promise.all(latestComparison.rows
-          .map(async (row: any) => ({
+        const latestStateTokens = await reconciliationStateTokens(
+          client,
+          latestComparison.rows.map((row: any) => ({
             job_id: String(row.id),
-            state_token: await reconciliationStateToken(client, row.state_facts),
             state_facts: row.state_facts,
-          })))
+          })),
+        )
+        const latestTokenPayload = latestComparison.rows.map((row: any) => ({
+          job_id: String(row.id),
+          state_token: latestStateTokens.get(String(row.id)) || null,
+          state_facts: row.state_facts,
+        }))
         const { hash: latestStateTokenHash } = await canonicalJsonAndHash(
           latestTokenPayload
             .sort((a: any, b: any) => a.job_id.localeCompare(b.job_id)),
