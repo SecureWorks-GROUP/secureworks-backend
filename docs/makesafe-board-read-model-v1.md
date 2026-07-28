@@ -49,6 +49,13 @@ seeded or silently dropped, and an idempotent replay returns the original
 partition. Apply this migration before deploying the matching `ops-api`; the
 edge schema preflight requires it.
 
+Migration `20260729020000_makesafe_family_pointer_safeupdate_guard.sql` is the
+follow-up required before deploying the matching `ops-api`: it preserves the
+intentionally whole-board family-pointer invalidation while making its scope
+explicit to production safeupdate enforcement. Keep the live
+`makesafe_state_seed` invocation dark until the migration-first deploy and its
+schema gate have completed.
+
 ## Canonical truth
 
 Every card originates as one canonical job row with:
