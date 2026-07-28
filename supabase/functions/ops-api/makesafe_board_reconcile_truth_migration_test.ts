@@ -121,7 +121,10 @@ Deno.test("finalize rejects detail cycle-binding drift", () => {
     "job_id,substatus,cycle_number,attendance_cycle_id,cycle_attribution",
   );
   assertStringIncludes(compareSource, "jobDetail?.attendance_cycle_id");
-  assertStringIncludes(compareSource, 'jobDetail.cycle_attribution !== "bound"');
+  assertStringIncludes(
+    compareSource,
+    'jobDetail.cycle_attribution !== "bound"',
+  );
   assertStringIncludes(
     migration,
     "d.attendance_cycle_id IS NOT DISTINCT FROM NULLIF(v_token->>'attendance_cycle_id', '')::uuid",
