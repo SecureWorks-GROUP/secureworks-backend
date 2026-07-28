@@ -90,15 +90,17 @@ input or output hashes.
 Two independent fixture runs with the same input and intent produced identical
 revision IDs, output hashes and artifact hash lists. Every shippable row in the
 11-row matrix has a ready golden and an intentional stale-matrix negative
-golden. The assessment row retains an intentional blocker golden because the
-original fixture predates the sealed recipe and lacks the required live portal
-proof.
+golden. The assessment row's original fixture retains an intentional blocker
+golden because it predates the sealed recipe and lacks the required live portal
+proof; it is not the current classification contract. The four sanitized U4
+production shapes and their hash diagnosis are recorded in
+`docs/evidence/ses-assessment-classification-hash-root-cause-2026-07-28.md`.
 
 ## Family coverage
 
 | Builder | Physical | Temporary fence | Ordinary roof portal | Own-template roof | Assessment |
 | --- | --- | --- | --- | --- | --- |
-| MLB | ready golden | ready golden | ready golden | ready golden | intentionally blocked |
+| MLB | ready golden | ready golden | ready golden | ready golden | historical blocker fixture; superseded |
 | AJS | ready golden | ready golden | rejected by rule | rejected by rule | rejected by rule |
 | AJBR | ready golden | ready golden | rejected by rule | rejected by rule | rejected by rule |
 | Western | ready golden | ready golden | closed/unsealed class | closed/unsealed class | closed/unsealed class |

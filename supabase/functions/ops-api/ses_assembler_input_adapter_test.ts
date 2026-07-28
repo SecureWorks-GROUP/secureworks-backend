@@ -67,10 +67,12 @@ function changedPaths(
         : [...paths, `${path}.length`];
     }
     if (!Array.isArray(before) && !Array.isArray(after)) {
-      const keys = [...new Set([
-        ...Object.keys(before),
-        ...Object.keys(after),
-      ])].sort();
+      const keys = [
+        ...new Set([
+          ...Object.keys(before),
+          ...Object.keys(after),
+        ]),
+      ].sort();
       return keys.flatMap((key) =>
         changedPaths(
           (before as Record<string, unknown>)[key],
