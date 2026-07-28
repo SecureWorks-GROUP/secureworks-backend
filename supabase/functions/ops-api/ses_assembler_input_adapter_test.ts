@@ -678,23 +678,29 @@ type SeedGuardFixture = {
   media: number;
 };
 
-function seedGuardOutcome(fixture: SeedGuardFixture): "skip" | "seed" {
+function seedGuardOutcome(
+  fixture: SeedGuardFixture,
+): "skip" | "binding_only" | "seed_claim" {
   const hasFootprint = fixture.jobs.length > 0 || fixture.invoice ||
     fixture.delivery || fixture.documents > 0 || fixture.media > 0;
   if (!hasFootprint) return "skip";
-  const complete = fixture.jobs.includes("claiming") &&
+  const bindingFootprintComplete = fixture.jobs.includes("claiming") &&
     fixture.jobs.includes("sibling") && fixture.invoice && fixture.delivery &&
-    fixture.documents === 2 && fixture.media === 1;
-  if (!complete) {
+    fixture.documents === 2;
+  if (!bindingFootprintComplete) {
     throw new Error(
       "reviewed sibling evidence seed refused: partial or drifted production footprint",
     );
   }
-  return "seed";
+  if (fixture.media === 0) return "binding_only";
+  if (fixture.media === 1) return "seed_claim";
+  throw new Error(
+    "reviewed sibling evidence claim refused: multiple reviewed photo artifacts matched",
+  );
 }
 
 Deno.test(
-  "sibling evidence migration seeds the reviewed reciprocal pair and positive claim without operational writes",
+  "sibling evidence migration keeps the reviewed binding but never invents a missing photo claim",
   async () => {
     const migration = await Deno.readTextFile(
       new URL(
@@ -715,7 +721,7 @@ Deno.test(
         "Hardie panel stacking",
         "displaced Hardie panels stacked safely",
         "reviewed sibling evidence seed refused: partial or drifted production footprint",
-        "expected exactly one reviewed photo artifact",
+        "reviewed sibling evidence binding retained without an evidence claim",
       ]
     ) {
       assertStringIncludes(migration, required);
@@ -730,7 +736,24 @@ Deno.test(
       migration,
       "AND NOT EXISTS (\n    SELECT 1\n    FROM public.xero_invoices",
     );
-    assertStringIncludes(migration, "v_photo_match_count <> 1");
+    assertStringIncludes(migration, "v_photo_match_count > 1");
+    assertStringIncludes(migration, "IF v_photo_match_count = 0 THEN");
+    assertEquals(
+      migration.includes("expected exactly one reviewed photo artifact"),
+      false,
+    );
+    assert(
+      migration.indexOf(
+        "INSERT INTO public.makesafe_sibling_bundle_binding_revisions",
+      ) <
+        migration.indexOf("IF v_photo_match_count = 0 THEN"),
+    );
+    assert(
+      migration.indexOf("IF v_photo_match_count = 0 THEN") <
+        migration.indexOf(
+          "INSERT INTO public.makesafe_sibling_evidence_claims",
+        ),
+    );
     for (
       const forbidden of [
         "UPDATE public.jobs",
@@ -748,7 +771,7 @@ Deno.test(
   },
 );
 
-Deno.test("sibling evidence seed guard executes empty, complete, and partial branches", () => {
+Deno.test("sibling evidence seed guard executes empty, binding-only, claimed, ambiguous, and partial branches", () => {
   assertEquals(
     seedGuardOutcome({
       jobs: [],
@@ -765,9 +788,31 @@ Deno.test("sibling evidence seed guard executes empty, complete, and partial bra
       invoice: true,
       delivery: true,
       documents: 2,
+      media: 0,
+    }),
+    "binding_only",
+  );
+  assertEquals(
+    seedGuardOutcome({
+      jobs: ["claiming", "sibling"],
+      invoice: true,
+      delivery: true,
+      documents: 2,
       media: 1,
     }),
-    "seed",
+    "seed_claim",
+  );
+  assertThrows(
+    () =>
+      seedGuardOutcome({
+        jobs: ["claiming", "sibling"],
+        invoice: true,
+        delivery: true,
+        documents: 2,
+        media: 2,
+      }),
+    Error,
+    "multiple reviewed photo artifacts matched",
   );
   assertThrows(
     () =>

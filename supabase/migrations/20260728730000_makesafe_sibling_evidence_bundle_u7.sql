@@ -315,23 +315,25 @@ BEGIN
     ) > 0
   ;
 
-  IF v_photo_match_count <> 1 THEN
+  IF v_photo_match_count > 1 THEN
     RAISE EXCEPTION
-      'reviewed sibling evidence seed refused: expected exactly one reviewed photo artifact, found %',
+      'reviewed sibling evidence claim refused: multiple reviewed photo artifacts matched, found %',
       v_photo_match_count;
   END IF;
 
-  SELECT photo.id, photo.makesafe_content_hash
-  INTO v_photo_media_id, v_photo_content_hash
-  FROM public.job_media photo
-  WHERE photo.job_id = '02f614a4-09a7-422e-9381-c89a44aceccd'::uuid
-    AND photo.type = 'photo'
-    AND photo.makesafe_content_hash ~ '^sha256:[0-9a-f]{64}$'
-    AND position(
-      lower('displaced Hardie panels stacked safely') IN lower(
-        coalesce(photo.label, '') || ' ' || coalesce(photo.notes, '')
-      )
-    ) > 0;
+  IF v_photo_match_count = 1 THEN
+    SELECT photo.id, photo.makesafe_content_hash
+    INTO v_photo_media_id, v_photo_content_hash
+    FROM public.job_media photo
+    WHERE photo.job_id = '02f614a4-09a7-422e-9381-c89a44aceccd'::uuid
+      AND photo.type = 'photo'
+      AND photo.makesafe_content_hash ~ '^sha256:[0-9a-f]{64}$'
+      AND position(
+        lower('displaced Hardie panels stacked safely') IN lower(
+          coalesce(photo.label, '') || ' ' || coalesce(photo.notes, '')
+        )
+      ) > 0;
+  END IF;
 
   IF NOT EXISTS (
     SELECT 1
@@ -357,19 +359,22 @@ BEGIN
     JOIN public.job_documents report
       ON report.id = '513cb62a-4f9f-4fd5-ae5c-66b0ce053448'::uuid
      AND report.job_id = sibling.id
+     AND lower(report.type) IN ('report', 'makesafe_report')
     JOIN public.job_documents swms
       ON swms.id = '878641fc-99ba-4f5f-a0a6-d64708394b6a'::uuid
      AND swms.job_id = sibling.id
+     AND lower(swms.type) = 'swms'
     WHERE claiming.id = 'c3afc061-0d4a-43ff-8309-0b8b512e307a'::uuid
       AND claiming.org_id = '00000000-0000-0000-0000-000000000001'::uuid
-  ) OR v_photo_media_id IS NULL THEN
+  ) THEN
     RAISE EXCEPTION
       'reviewed sibling evidence seed refused: partial or drifted production footprint';
   END IF;
 -- Reviewed production repair for MLB-26393 at 71 Peppermint Way:
 -- SWMS-26832's Hardie stacking work was delivered and billed in the
--- SWMS-26837 bundle. Both directions establish the relationship; only the
--- SWMS-26832 -> SWMS-26837 direction claims the sibling-held evidence.
+-- SWMS-26837 bundle. Both directions establish the relationship. The
+-- SWMS-26832 -> SWMS-26837 evidence claim is seeded only when its exact
+-- immutable photo artifact exists.
 INSERT INTO public.makesafe_sibling_bundle_binding_revisions (
   id,
   bundle_id,
@@ -394,6 +399,11 @@ INSERT INTO public.makesafe_sibling_bundle_binding_revisions (
   jsonb_build_object(
     'source', 'ses-u7-whole-board-sweep-v1',
     'reason', 'SWMS-26832 delivery and billing are held on SWMS-26837',
+    'evidence_claim_state', CASE
+      WHEN v_photo_match_count = 1 THEN 'seeded'
+      ELSE 'withheld_missing_photo_artifact'
+    END,
+    'reviewed_photo_match_count', v_photo_match_count,
     'verified_at', '2026-07-28T04:00:00Z'
   ),
   '2026-07-28T04:00:00Z'
@@ -410,10 +420,27 @@ INSERT INTO public.makesafe_sibling_bundle_binding_revisions (
   jsonb_build_object(
     'source', 'ses-u7-whole-board-sweep-v1',
     'reason', 'Reciprocal binding for the SWMS-26832 and SWMS-26837 bundle',
+    'evidence_claim_state', CASE
+      WHEN v_photo_match_count = 1 THEN 'seeded'
+      ELSE 'withheld_missing_photo_artifact'
+    END,
+    'reviewed_photo_match_count', v_photo_match_count,
     'verified_at', '2026-07-28T04:00:00Z'
   ),
   '2026-07-28T04:00:00Z'
 );
+
+-- Production has the reviewed reciprocal relationship, invoice, delivery,
+-- report and SWMS, but no canonical job_media photo row for either card. Keep
+-- the true binding and leave the evidence claim absent so U4 reports the exact
+-- positive-scope gap. A later reviewed photo may be claimed append-only; this
+-- migration must never manufacture a media row or treat an email statement as
+-- an immutable photo artifact.
+IF v_photo_match_count = 0 THEN
+  RAISE NOTICE
+    'reviewed sibling evidence binding retained without an evidence claim: no canonical photo artifact exists for SWMS-26837';
+  RETURN;
+END IF;
 
 INSERT INTO public.makesafe_sibling_evidence_claims (
   id,
