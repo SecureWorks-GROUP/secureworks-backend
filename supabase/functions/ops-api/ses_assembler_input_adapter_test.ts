@@ -133,7 +133,7 @@ Deno.test(
     assertEquals(input.source.deliverables, []);
     assertEquals(input.source.portal_links, [
       {
-        role: "roof_report",
+        role: "assessment",
         url: "https://primeeco.tech/share/2ef11c67-8f63-48cb-9ff4-61bf71848f17",
         source: "job_detail",
       },
@@ -744,6 +744,27 @@ Deno.test(
     assertEquals(input.classification.delivery_render_route_evidence, [
       "jobs.metadata.report_delivery=email",
     ]);
+  },
+);
+
+Deno.test(
+  "own-template roof preserves legacy portal-link role binding",
+  () => {
+    const live = snapshot();
+    live.detail!.report_type = null;
+    live.job.metadata.makesafe_job_family = "roof_report";
+    live.detail!.external_links = [{
+      kind: "photos",
+      label: "Prime photos",
+      url: "https://primeeco.tech/share/photos",
+    }];
+    const input = buildSesAssemblerInput(live);
+    assertEquals(input.classification.family, "own_template_roof");
+    assertEquals(input.source.portal_links, [{
+      role: "photos",
+      url: "https://primeeco.tech/share/photos",
+      source: "job_detail",
+    }]);
   },
 );
 

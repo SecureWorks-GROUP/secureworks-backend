@@ -495,12 +495,7 @@ function portalRole(
   | "builder_portal"
   | "other" {
   const role = rawRole.toLowerCase();
-  if (
-    familyId === "ordinary_roof_portal" ||
-    familyId === "own_template_roof"
-  ) {
-    return "roof_report";
-  }
+  if (familyId === "ordinary_roof_portal") return "roof_report";
   if (role.includes("photo")) return "photos";
   if (role.includes("scope") || role.includes("quote")) return "scope";
   if (role.includes("assessment") || role.includes("report")) {
