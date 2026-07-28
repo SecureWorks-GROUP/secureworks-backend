@@ -79,6 +79,28 @@ function fixtureInput(
       subtype: row.subtype,
       report_only: row.report_only,
       report_delivery: row.report_delivery,
+      delivery_render_route: row.family === "ordinary_roof_portal" ||
+          row.family === "assessment_quote"
+        ? "builder_portal"
+        : row.family === "own_template_roof"
+        ? "secureworks_own_letterhead"
+        : "not_applicable",
+      delivery_render_route_reason_code: row.family === "ordinary_roof_portal"
+        ? "portal_builder_family"
+        : row.family === "assessment_quote"
+        ? "assessment_portal_recipe"
+        : row.family === "own_template_roof"
+        ? "explicit_own_letterhead_route"
+        : "non_roof_family",
+      delivery_render_route_reason: row.family === "ordinary_roof_portal" ||
+          row.family === "assessment_quote"
+        ? "Fixture uses the builder portal route."
+        : row.family === "own_template_roof"
+        ? "Fixture uses the SecureWorks own-letterhead route."
+        : "Fixture family has no roof delivery/render route.",
+      delivery_render_route_evidence: [
+        `fixture:${row.builder_key}/${row.family}`,
+      ],
       strata: row.family === "own_template_roof",
       own_template_requested: row.family === "own_template_roof",
       workflow: "active",

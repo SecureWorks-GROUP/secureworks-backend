@@ -9,6 +9,7 @@ import {
   SES_INPUT_CONTRACT_VERSION,
   type SesArtifact,
   type SesAssemblerInputV1,
+  type SesDeliveryRenderRoute,
   type SesPreparedRevision,
   type SesPrepareRequest,
   type SesSha256,
@@ -252,6 +253,204 @@ function family(snapshot: SesAssemblerLiveSnapshot): SesFamilyId {
   });
 }
 
+export interface SesDeliveryRenderRouteSelection {
+  route: SesDeliveryRenderRoute;
+  reason_code: string;
+  reason: string;
+  evidence: string[];
+}
+
+function clientRelationshipMarker(value: unknown): string | null {
+  const candidate = text(value).toLowerCase();
+  if (/\bstrata\b/.test(candidate)) return "strata";
+  if (/\bowners?\s+corporation\b/.test(candidate)) {
+    return "owners_corporation";
+  }
+  if (/\bbody\s+corporate\b/.test(candidate)) return "body_corporate";
+  return null;
+}
+
+export function resolveSesDeliveryRenderRoute(
+  snapshot: SesAssemblerLiveSnapshot,
+  builder: SesBuilderKey,
+  familyId: SesFamilyId,
+): SesDeliveryRenderRouteSelection {
+  if (familyId === "assessment_quote") {
+    return {
+      route: "builder_portal",
+      reason_code: "assessment_portal_recipe",
+      reason:
+        "The sealed assessment recipe is delivered through the builder portal.",
+      evidence: [`builder-family:${builder}/${familyId}`],
+    };
+  }
+  if (
+    familyId !== "ordinary_roof_portal" &&
+    familyId !== "own_template_roof"
+  ) {
+    return {
+      route: "not_applicable",
+      reason_code: "non_roof_family",
+      reason: `Family ${familyId} has no roof delivery/render route.`,
+      evidence: [`builder-family:${builder}/${familyId}`],
+    };
+  }
+
+  const metadata = record(snapshot.job.metadata);
+  const detail = snapshot.detail || {};
+  const modeFacts = [
+    ["makesafe_job_details.roof_report_mode", detail.roof_report_mode],
+    ["jobs.metadata.roof_report_mode", metadata.roof_report_mode],
+    [
+      "jobs.metadata.makesafe_roof_report_mode",
+      metadata.makesafe_roof_report_mode,
+    ],
+  ]
+    .map(([field, value]) => [field, text(value).toLowerCase()] as const)
+    .filter(([, value]) => value);
+  const modeValues = [...new Set(modeFacts.map(([, value]) => value))];
+  if (modeValues.length > 1) {
+    return {
+      route: "unroutable",
+      reason_code: "conflicting_roof_delivery_facts",
+      reason:
+        "Persisted card facts disagree about the roof delivery/render mode.",
+      evidence: modeFacts.map(([field, value]) => `${field}=${value}`).sort(),
+    };
+  }
+  const explicitMode = modeValues[0] || "";
+  const metadataReportDelivery = text(metadata.report_delivery).toLowerCase();
+  const detailReportDelivery = text(detail.report_delivery).toLowerCase();
+  for (
+    const [field, value] of [
+      ["jobs.metadata.report_delivery", metadataReportDelivery],
+      ["makesafe_job_details.report_delivery", detailReportDelivery],
+    ] as const
+  ) {
+    if (value && value !== "portal" && value !== "own_document") {
+      return {
+        route: "unroutable",
+        reason_code: "delivery_route_unroutable",
+        reason:
+          `Persisted ${field} value "${value}" is not a sealed roof delivery route.`,
+        evidence: [`${field}=${value}`],
+      };
+    }
+  }
+  if (
+    metadataReportDelivery &&
+    detailReportDelivery &&
+    metadataReportDelivery !== detailReportDelivery
+  ) {
+    return {
+      route: "unroutable",
+      reason_code: "conflicting_roof_delivery_facts",
+      reason:
+        "Persisted card facts disagree about portal versus SecureWorks own-letterhead delivery.",
+      evidence: [
+        `jobs.metadata.report_delivery=${metadataReportDelivery}`,
+        `makesafe_job_details.report_delivery=${detailReportDelivery}`,
+      ].sort(),
+    };
+  }
+  const reportDelivery = metadataReportDelivery || detailReportDelivery;
+  const relationship = clientRelationshipMarker(snapshot.job.client_name);
+  const ownEvidence = [
+    familyId === "own_template_roof"
+      ? "canonical-family:own_template_roof"
+      : "",
+    metadata.own_template_requested === true
+      ? "jobs.metadata.own_template_requested=true"
+      : "",
+    metadata.strata === true ? "jobs.metadata.strata=true" : "",
+    reportDelivery === "own_document"
+      ? "card.report_delivery=own_document"
+      : "",
+    explicitMode === "own_template" ? "card.roof_report_mode=own_template" : "",
+    snapshot.roof_draft ? "makesafe_roof_report_drafts=current" : "",
+    relationship ? `jobs.client_name#relationship:${relationship}` : "",
+  ].filter(Boolean);
+  const portalEvidence = [
+    reportDelivery === "portal" ? "card.report_delivery=portal" : "",
+    explicitMode === "builder_portal"
+      ? "card.roof_report_mode=builder_portal"
+      : "",
+  ].filter(Boolean);
+
+  if (
+    explicitMode &&
+    explicitMode !== "own_template" &&
+    explicitMode !== "builder_portal"
+  ) {
+    return {
+      route: "unroutable",
+      reason_code: "invalid_explicit_roof_report_mode",
+      reason:
+        `Persisted roof_report_mode "${explicitMode}" is not a sealed delivery/render route.`,
+      evidence: [`card.roof_report_mode=${explicitMode}`],
+    };
+  }
+  if (ownEvidence.length && portalEvidence.length) {
+    return {
+      route: "unroutable",
+      reason_code: "conflicting_roof_delivery_facts",
+      reason:
+        "Persisted card facts require both portal and SecureWorks own-letterhead delivery.",
+      evidence: [...ownEvidence, ...portalEvidence].sort(),
+    };
+  }
+  if (ownEvidence.length) {
+    if (builder !== "MLB") {
+      return {
+        route: "unroutable",
+        reason_code: "own_letterhead_builder_family_unsealed",
+        reason:
+          `Builder ${builder} has no sealed own-letterhead roof delivery/render route.`,
+        evidence: ownEvidence.sort(),
+      };
+    }
+    return {
+      route: "secureworks_own_letterhead",
+      reason_code: relationship
+        ? "client_relationship_requires_own_letterhead"
+        : snapshot.roof_draft
+        ? "existing_own_letterhead_draft"
+        : "explicit_own_letterhead_route",
+      reason: relationship
+        ? `The persisted ${
+          relationship.replaceAll("_", " ")
+        } client relationship requires SecureWorks Group letterhead.`
+        : snapshot.roof_draft
+        ? "The card has an existing SecureWorks own-letterhead roof draft."
+        : "The card explicitly requires SecureWorks Group own-letterhead delivery.",
+      evidence: ownEvidence.sort(),
+    };
+  }
+  if (builder === "MLB" || builder === "SYNTHETIC") {
+    return {
+      route: "builder_portal",
+      reason_code: portalEvidence.length
+        ? "explicit_builder_portal_route"
+        : "portal_builder_family",
+      reason: portalEvidence.length
+        ? "The card explicitly requires the builder portal route."
+        : `Builder ${builder} uses the sealed portal route for ordinary roof reports.`,
+      evidence: (
+        portalEvidence.length
+          ? portalEvidence
+          : [`builder-family:${builder}/${familyId}`]
+      ).sort(),
+    };
+  }
+  return {
+    route: "unroutable",
+    reason_code: "roof_builder_family_unsealed",
+    reason:
+      `Builder ${builder} has no sealed portal or own-letterhead roof delivery/render route.`,
+    evidence: [`builder-family:${builder}/${familyId}`],
+  };
+}
+
 function lineageKind(relation: unknown): "none" | "revision" | "sibling" {
   const value = text(relation);
   if (value === "sibling_of") return "sibling";
@@ -482,7 +681,18 @@ export function buildSesAssemblerInput(
       ? null
       : snapshot.identity_revision || null;
   const builder = builderKey(snapshot);
-  const familyId = family(snapshot);
+  const canonicalFamilyId = family(snapshot);
+  const deliveryRoute = resolveSesDeliveryRenderRoute(
+    snapshot,
+    builder,
+    canonicalFamilyId,
+  );
+  const familyId = deliveryRoute.route === "secureworks_own_letterhead"
+    ? "own_template_roof"
+    : deliveryRoute.route === "builder_portal" &&
+        canonicalFamilyId === "own_template_roof"
+    ? "ordinary_roof_portal"
+    : canonicalFamilyId;
   const cycle = currentCycle(snapshot);
   const report = selectCurrentCycleReport(
     snapshot.reports,
@@ -621,6 +831,10 @@ export function buildSesAssemblerInput(
         : familyId === "own_template_roof"
         ? "own_document"
         : null,
+      delivery_render_route: deliveryRoute.route,
+      delivery_render_route_reason_code: deliveryRoute.reason_code,
+      delivery_render_route_reason: deliveryRoute.reason,
+      delivery_render_route_evidence: deliveryRoute.evidence,
       strata: familyId === "own_template_roof",
       own_template_requested: familyId === "own_template_roof",
       workflow: workflow(intakeCase),

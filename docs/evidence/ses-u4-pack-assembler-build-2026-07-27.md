@@ -241,7 +241,20 @@ It does not invent a missing U1 source/version/hash, family classification,
 portal capture, storey price, HR-CW classification or assessment recipe. Missing
 facts therefore return the named U4 blockers. For the sanitized SWMS-26980
 production snapshot this is a deterministic HTTP-200 dry-run envelope with no
-persistence call and the specific source/lineage and `family_unknown` blockers.
+persistence call: the persisted MLB strata/client-relationship facts select
+`secureworks_own_letterhead`, with route evidence and no delivery-routing
+blocker.
+
+### Delivery/render route addendum — 2026-07-28
+
+U4 now records one explicit `delivery_render_route`, reason code, reason and
+source-backed evidence set in the assembler input and docket manifest. An MLB
+strata/own-template roof card selects `secureworks_own_letterhead`, while an
+ordinary MLB or synthetic roof card selects `builder_portal`; a conflicting,
+unsupported or invalid roof route is `unroutable` and becomes a typed blocker
+before portal capture or rendering. The own-letterhead path renders only from
+card-backed roof facts and does not send or otherwise expand U4's draft/render-
+only authority.
 
 `dry_run:false` uses only the existing append-only U4 revision/artifact
 persistence. The shared server board read overlays a current ready revision as
