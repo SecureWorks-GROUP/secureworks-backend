@@ -64,6 +64,9 @@ export interface SesSwmsGenerationPlan {
     trade_report_id: string;
     trade_report_submitted_at: string;
     attendance_cycle_id: string;
+    evidence_kind: "current_card" | "sibling_bundle";
+    evidence_job_id: string;
+    evidence_job_number: string | null;
     hrcw_categories: string[];
     source_hazard_terms: string[];
     job_fact_sources: Record<string, string>;
@@ -472,6 +475,16 @@ function firstText(...values: unknown[]): string {
   return "";
 }
 
+function sourcedText(
+  ...candidates: Array<{ value: unknown; source: string }>
+): { value: string; source: string } {
+  for (const candidate of candidates) {
+    const value = firstText(candidate.value);
+    if (value) return { value, source: candidate.source };
+  }
+  return { value: "", source: "" };
+}
+
 function slug(value: unknown): string {
   return firstText(value)
     .replace(/[^A-Za-z0-9]+/g, "-")
@@ -615,31 +628,68 @@ function templateKind(
 export function buildSesSwmsGenerationPlan(
   input: SesAssemblerInputV1,
 ): SesSwmsGenerationPlanResult {
-  const report = record(input.cycle_facts.trade_report);
+  const context = input.cycle_facts.swms_fact_context || null;
+  const report = record(
+    input.cycle_facts.trade_report || context?.trade_report,
+  );
   if (!Object.keys(report).length) {
     return {
       ok: false,
       reason_code: "swms_generation_trade_report_missing",
       reason:
-        "U4 cannot generate the job-specific SWMS until the current-cycle field trade report is submitted.",
+        "U4 cannot generate the job-specific SWMS until the sanctioned field trade report is available.",
       recovery_action:
-        "Submit the current-cycle field trade report and photos, then re-run U4; staff do not need to attach a SWMS.",
+        "Submit or recover the bound field trade report and photos, then re-run U4; staff do not need to attach a SWMS.",
       facts: {
         attendance_cycle_id: input.attendance.current_attendance_cycle_id,
         work_order_pointers: [...input.source.attachment_pointers].sort(),
+        evidence_kind: context?.evidence_kind || "current_card",
+        evidence_job_id: context?.evidence_job_id || input.identity.job_id,
+        evidence_job_number: context?.evidence_job_number ||
+          input.identity.job_number,
       },
     };
   }
 
   const checklist = record(report.checklist_json);
-  const taskActivity = firstText(
-    checklist.works_completed,
-    checklist.works,
-    checklist.work_done,
-    checklist.scope,
-    checklist.damage_description,
-    report.notes,
-    input.source.instruction_text,
+  const evidenceKind = context?.evidence_kind || "current_card";
+  const evidenceJobId = context?.evidence_job_id || input.identity.job_id;
+  const evidenceJobNumber = context?.evidence_job_number ||
+    input.identity.job_number;
+  const sourcePrefix = evidenceKind === "sibling_bundle"
+    ? `sibling_job:${evidenceJobNumber || evidenceJobId}/`
+    : "";
+  const source = (value: string) => `${sourcePrefix}${value}`;
+  const assignment = context?.assignment || null;
+  const taskActivity = sourcedText(
+    {
+      value: checklist.works_completed,
+      source: source("job_service_reports.checklist_json.works_completed"),
+    },
+    {
+      value: checklist.works,
+      source: source("job_service_reports.checklist_json.works"),
+    },
+    {
+      value: checklist.work_done,
+      source: source("job_service_reports.checklist_json.work_done"),
+    },
+    {
+      value: checklist.scope,
+      source: source("job_service_reports.checklist_json.scope"),
+    },
+    {
+      value: checklist.damage_description,
+      source: source("job_service_reports.checklist_json.damage_description"),
+    },
+    {
+      value: report.notes,
+      source: source("job_service_reports.notes"),
+    },
+    {
+      value: input.source.instruction_text,
+      source: "work_order.instruction_text",
+    },
   );
   const builderReference = firstText(input.source.builder_reference);
   const address = [
@@ -647,26 +697,83 @@ export function buildSesSwmsGenerationPlan(
     firstText(input.source.site_suburb),
   ].filter(Boolean).join(", ");
   const submittedAt = firstText(report.submitted_at);
-  const worksDateRaw = firstText(
-    checklist.attendance_date,
-    checklist.date_of_works,
+  const worksDate = sourcedText(
+    {
+      value: checklist.attendance_date,
+      source: source("job_service_reports.checklist_json.attendance_date"),
+    },
+    {
+      value: checklist.date_of_works,
+      source: source("job_service_reports.checklist_json.date_of_works"),
+    },
+    {
+      value: assignment?.scheduled_date,
+      source: source("job_assignments.scheduled_date"),
+    },
+    {
+      value: assignment?.arrived_at,
+      source: source("job_assignments.arrived_at"),
+    },
+    {
+      value: report.submitted_at,
+      source: source("job_service_reports.submitted_at"),
+    },
   );
-  const arrival = firstText(checklist.arrival_time, checklist.arrived_at);
-  const crew = firstText(checklist.crew_name, checklist.crew);
-  const siteContact = firstText(
-    checklist.site_contact,
-    checklist.contact_name,
-    checklist.client_name,
+  const arrival = sourcedText(
+    {
+      value: checklist.arrival_time,
+      source: source("job_service_reports.checklist_json.arrival_time"),
+    },
+    {
+      value: checklist.arrived_at,
+      source: source("job_service_reports.checklist_json.arrived_at"),
+    },
+    {
+      value: assignment?.arrived_at,
+      source: source("job_assignments.arrived_at"),
+    },
+  );
+  const crew = sourcedText(
+    {
+      value: checklist.crew_name,
+      source: source("job_service_reports.checklist_json.crew_name"),
+    },
+    {
+      value: checklist.crew,
+      source: source("job_service_reports.checklist_json.crew"),
+    },
+    {
+      value: assignment?.crew_name,
+      source: source("job_assignments.crew_name"),
+    },
+  );
+  const siteContact = sourcedText(
+    {
+      value: checklist.site_contact,
+      source: source("job_service_reports.checklist_json.site_contact"),
+    },
+    {
+      value: checklist.contact_name,
+      source: source("job_service_reports.checklist_json.contact_name"),
+    },
+    {
+      value: checklist.client_name,
+      source: source("job_service_reports.checklist_json.client_name"),
+    },
+    {
+      value: context?.job_client_name,
+      source: source("jobs.client_name"),
+    },
   );
   const missing = [
-    !builderReference ? "builder_reference" : "",
-    !address ? "site_address" : "",
-    !taskActivity ? "trade_report_task_activity" : "",
-    !isValidDateValue(worksDateRaw) ? "works_date" : "",
-    !arrival ? "arrival_time" : "",
-    !crew ? "crew" : "",
-    !siteContact ? "site_contact" : "",
-    !isValidDateValue(submittedAt) ? "trade_report_submitted_at" : "",
+    !builderReference ? "builder reference" : "",
+    !address ? "site address" : "",
+    !taskActivity.value ? "completed work or task activity" : "",
+    !isValidDateValue(worksDate.value) ? "works date" : "",
+    !arrival.value ? "arrival time" : "",
+    !crew.value ? "crew" : "",
+    !siteContact.value ? "site contact" : "",
+    !isValidDateValue(submittedAt) ? "trade report submission time" : "",
   ].filter(Boolean);
   if (missing.length) {
     return {
@@ -674,17 +781,16 @@ export function buildSesSwmsGenerationPlan(
       reason_code: "swms_generation_facts_missing",
       reason: `U4 cannot generate the job-specific SWMS because ${
         missing.join(", ")
-      } is missing from the work order or current-cycle trade report.`,
+      } is absent from the work order, bound field report, job or assignment.`,
       recovery_action:
-        "Complete the named work-order or trade-report facts and re-run U4; staff do not need to attach a SWMS.",
+        "Recover the named real-world fact from the work order, field report, job or assignment and re-run U4; staff do not need to attach a SWMS.",
       facts: { missing_facts: missing },
     };
   }
 
-  const selected = templateKind(input, taskActivity);
+  const selected = templateKind(input, taskActivity.value);
   if (!selected.ok) return selected;
 
-  const worksDate = formatDate(worksDateRaw);
   const authorisedDate = formatDate(submittedAt);
   const tradeReportId = firstText(report.id) ||
     `current-cycle:${input.attendance.current_attendance_cycle_id}`;
@@ -704,11 +810,11 @@ export function buildSesSwmsGenerationPlan(
         job_number: input.identity.job_number,
         address,
         builder_label: input.classification.builder_label,
-        task_activity: taskActivity,
-        site_contact: siteContact,
-        works_date: worksDate,
-        arrival,
-        crew,
+        task_activity: taskActivity.value,
+        site_contact: siteContact.value,
+        works_date: formatDate(worksDate.value),
+        arrival: arrival.value,
+        crew: crew.value,
         authorised_date: authorisedDate,
         revision: `Rev 1 - ${authorisedDate}`,
       },
@@ -719,18 +825,19 @@ export function buildSesSwmsGenerationPlan(
         trade_report_id: tradeReportId,
         trade_report_submitted_at: submittedAt,
         attendance_cycle_id: input.attendance.current_attendance_cycle_id,
+        evidence_kind: evidenceKind,
+        evidence_job_id: evidenceJobId,
+        evidence_job_number: evidenceJobNumber,
         hrcw_categories: [...input.hrcw.categories].sort(),
         source_hazard_terms: [...input.hrcw.source_hazard_terms].sort(),
         job_fact_sources: {
           builder_reference: "work_order",
           address: "work_order",
-          task_activity: taskActivity === input.source.instruction_text
-            ? "work_order"
-            : "trade_report",
-          site_contact: "trade_report",
-          works_date: "trade_report",
-          arrival: "trade_report",
-          crew: "trade_report",
+          task_activity: taskActivity.source,
+          site_contact: siteContact.source,
+          works_date: worksDate.source,
+          arrival: arrival.source,
+          crew: crew.source,
         },
       },
     },

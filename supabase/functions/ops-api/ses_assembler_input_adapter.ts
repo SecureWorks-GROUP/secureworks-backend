@@ -25,6 +25,7 @@ import {
 } from "./ses_family_matrix.ts";
 import {
   currentCycleNumber,
+  filterAssignmentsForCurrentCycle,
   filterMediaForCurrentCycle,
   selectCurrentCycleReport,
 } from "./makesafe_cycle_evidence.ts";
@@ -132,6 +133,9 @@ export interface SesAssemblerLiveSnapshot {
   bundle_bindings?: LiveRow[];
   bundle_claims?: LiveRow[];
   bundle_jobs?: LiveRow[];
+  bundle_details?: LiveRow[];
+  bundle_reports?: LiveRow[];
+  bundle_assignments?: LiveRow[];
   bundle_invoices?: LiveRow[];
   bundle_documents?: LiveRow[];
   bundle_emails?: LiveRow[];
@@ -522,6 +526,69 @@ function hasExplicitValue(value: unknown): boolean {
   return typeof value === "boolean";
 }
 
+function canonicalFactKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function canonicalFactValue(value: unknown): string {
+  return typeof value === "string"
+    ? `string:${value.trim().toLowerCase()}`
+    : `${typeof value}:${String(value)}`;
+}
+
+function structuredSourceFact(
+  snapshot: SesAssemblerLiveSnapshot,
+  intakeCase: LiveRow | null,
+  aliases: readonly string[],
+): unknown {
+  const acceptedKeys = new Set(aliases.map(canonicalFactKey));
+  const roots = [
+    snapshot.job.scope_json,
+    snapshot.detail?.scope_json,
+    intakeCase?.raw_identity_json,
+    snapshot.job.metadata,
+  ];
+  const matches: unknown[] = [];
+  for (const root of roots) {
+    const queue: Array<{ value: unknown; depth: number }> = [{
+      value: root,
+      depth: 0,
+    }];
+    let visited = 0;
+    while (queue.length && visited < 1_000) {
+      const current = queue.shift()!;
+      visited++;
+      if (
+        !current.value ||
+        typeof current.value !== "object" ||
+        Array.isArray(current.value) ||
+        current.depth > 6
+      ) {
+        continue;
+      }
+      for (const [key, value] of Object.entries(record(current.value))) {
+        if (
+          acceptedKeys.has(canonicalFactKey(key)) && hasExplicitValue(value)
+        ) {
+          matches.push(value);
+        }
+        if (
+          value &&
+          typeof value === "object" &&
+          !Array.isArray(value) &&
+          current.depth < 6
+        ) {
+          queue.push({ value, depth: current.depth + 1 });
+        }
+      }
+    }
+  }
+  const distinct = new Map(
+    matches.map((value) => [canonicalFactValue(value), value]),
+  );
+  return distinct.size === 1 ? [...distinct.values()][0] : undefined;
+}
+
 function reportText(value: unknown): string {
   if (Array.isArray(value)) {
     return value
@@ -873,6 +940,7 @@ function portalRole(
 function explicitHoursAndMaterials(
   snapshot: SesAssemblerLiveSnapshot,
   currentReport: LiveRow | null,
+  intakeCase: LiveRow | null,
 ): Record<string, unknown> | null {
   const checklist = record(currentReport?.checklist_json);
   const completion = record(checklist.completion);
@@ -887,7 +955,19 @@ function explicitHoursAndMaterials(
       }
     }
   };
-  copy("storeys", snapshot.roof_draft?.storey, roofFields.storeys);
+  copy(
+    "storeys",
+    structuredSourceFact(snapshot, intakeCase, [
+      "storeys",
+      "storey",
+      "number_of_storeys",
+      "numberOfStoreys",
+      "storey_count",
+      "storeyCount",
+    ]),
+    snapshot.roof_draft?.storey,
+    roofFields.storeys,
+  );
   copy(
     "trades",
     pricing.trades,
@@ -895,34 +975,186 @@ function explicitHoursAndMaterials(
     checklist.trades,
     checklist.trade_count,
   );
-  // submit_makesafe_report's legacy labour_hours field is documented as
-  // ambiguous between total hours and hours per trade. Preserve it in the raw
-  // trade report and report prose, but only price an explicitly typed
-  // hours_per_trade value.
+  // The sealed reporting skill defines labour_hours as hours for each trade,
+  // paired with trade_count. The live submit path writes exactly that pair.
   copy(
     "hours_per_trade",
     pricing.hours_per_trade,
     completion.hours_per_trade,
     checklist.hours_per_trade,
+    checklist.labour_hours,
   );
   copy("rate_ex_gst", pricing.rate_ex_gst, checklist.rate_ex_gst);
-  copy("panel_count", pricing.panel_count, checklist.panel_count);
-  copy("base_count", pricing.base_count, checklist.base_count);
+  copy(
+    "panel_count",
+    pricing.panel_count,
+    checklist.panel_count,
+    structuredSourceFact(snapshot, intakeCase, [
+      "panel_count",
+      "panelCount",
+      "temporary_fence_panel_count",
+      "temp_fence_panel_count",
+      "number_of_panels",
+      "numberOfPanels",
+    ]),
+  );
+  copy(
+    "base_count",
+    pricing.base_count,
+    checklist.base_count,
+    structuredSourceFact(snapshot, intakeCase, [
+      "base_count",
+      "baseCount",
+      "block_count",
+      "blockCount",
+      "number_of_bases",
+      "numberOfBases",
+      "number_of_blocks",
+      "numberOfBlocks",
+    ]),
+  );
   copy(
     "star_picket_count",
     pricing.star_picket_count,
     checklist.star_picket_count,
+    structuredSourceFact(snapshot, intakeCase, [
+      "star_picket_count",
+      "starPicketCount",
+      "picket_count",
+      "picketCount",
+      "number_of_star_pickets",
+      "numberOfStarPickets",
+    ]),
   );
   if (typeof pricing.fence_only === "boolean") {
     facts.fence_only = pricing.fence_only;
   } else if (typeof checklist.fence_only === "boolean") {
     facts.fence_only = checklist.fence_only;
+  } else {
+    const fenceOnly = structuredSourceFact(snapshot, intakeCase, [
+      "fence_only",
+      "fenceOnly",
+      "is_fence_only",
+      "isFenceOnly",
+      "assessment_fence_only",
+      "assessmentFenceOnly",
+    ]);
+    if (typeof fenceOnly === "boolean") facts.fence_only = fenceOnly;
   }
   const materials = array(pricing.materials).length
     ? array(pricing.materials)
     : array(checklist.materials);
   if (materials.length) facts.materials = materials;
   return Object.keys(facts).length ? facts : null;
+}
+
+function currentAssignment(
+  assignments: LiveRow[],
+  detail: LiveRow,
+  attendanceCycleId: string | null,
+): LiveRow | null {
+  const current = filterAssignmentsForCurrentCycle(
+    assignments,
+    detail,
+    attendanceCycleId,
+  ).assignments.map(record);
+  return current.slice().sort((left, right) =>
+    firstText(
+      right.arrived_at,
+      right.scheduled_date,
+      right.updated_at,
+      right.created_at,
+    ).localeCompare(
+      firstText(
+        left.arrived_at,
+        left.scheduled_date,
+        left.updated_at,
+        left.created_at,
+      ),
+    ) || text(right.id).localeCompare(text(left.id))
+  )[0] || null;
+}
+
+function swmsTradeReport(row: LiveRow): Record<string, unknown> {
+  return {
+    id: row.id ?? null,
+    status: row.status ?? null,
+    submitted_at: row.submitted_at ?? null,
+    checklist_json: row.checklist_json ?? {},
+    notes: row.notes ?? null,
+  };
+}
+
+function swmsFactContext(
+  snapshot: SesAssemblerLiveSnapshot,
+  localReport: LiveRow | null,
+  localCycleId: string,
+  siblingBundleEvidence: SesSiblingBundleEvidence | undefined,
+): SesAssemblerInputV1["cycle_facts"]["swms_fact_context"] {
+  if (localReport) {
+    const assignment = currentAssignment(
+      snapshot.assignments,
+      snapshot.detail || {},
+      localCycleId || null,
+    );
+    return {
+      evidence_kind: "current_card",
+      evidence_job_id: text(snapshot.job.id),
+      evidence_job_number: text(snapshot.job.job_number) || null,
+      trade_report: null,
+      job_client_name: text(snapshot.job.client_name) || null,
+      assignment: assignment
+        ? {
+          id: text(assignment.id) || null,
+          crew_name: text(assignment.crew_name) || null,
+          scheduled_date: text(assignment.scheduled_date) || null,
+          arrived_at: text(assignment.arrived_at) || null,
+        }
+        : null,
+    };
+  }
+  if (!siblingBundleEvidence || siblingBundleEvidence.status !== "accepted") {
+    return null;
+  }
+  const siblingId = siblingBundleEvidence.sibling.job_id;
+  const siblingJob = (snapshot.bundle_jobs || []).find((row) =>
+    text(row.id) === siblingId
+  );
+  const siblingDetail =
+    (snapshot.bundle_details || []).find((row) =>
+      text(row.job_id) === siblingId
+    ) || {};
+  const siblingCycleId = text(siblingDetail.attendance_cycle_id);
+  const siblingReport = selectCurrentCycleReport(
+    (snapshot.bundle_reports || []).filter((row) =>
+      text(row.job_id) === siblingId
+    ),
+    siblingDetail,
+    siblingCycleId || null,
+  );
+  if (!siblingReport) return null;
+  const assignment = currentAssignment(
+    (snapshot.bundle_assignments || []).filter((row) =>
+      text(row.job_id) === siblingId
+    ),
+    siblingDetail,
+    siblingCycleId || null,
+  );
+  return {
+    evidence_kind: "sibling_bundle",
+    evidence_job_id: siblingId,
+    evidence_job_number: siblingBundleEvidence.sibling.job_number,
+    trade_report: swmsTradeReport(record(siblingReport)),
+    job_client_name: text(siblingJob?.client_name) || null,
+    assignment: assignment
+      ? {
+        id: text(assignment.id) || null,
+        crew_name: text(assignment.crew_name) || null,
+        scheduled_date: text(assignment.scheduled_date) || null,
+        arrived_at: text(assignment.arrived_at) || null,
+      }
+      : null,
+  };
 }
 
 export function physicalReportRenderJob(
@@ -1077,6 +1309,7 @@ export function buildSesAssemblerInput(
     family: familyId,
     strata: familyId === "own_template_roof",
     own_template_requested: familyId === "own_template_roof",
+    site_suburb: firstText(intakeCase?.site_suburb, job.site_suburb),
   });
   // The sealed matrix owns these classification fields. Keeping a parallel
   // family switch here allowed MLB assessment inputs to say delivery=null while
@@ -1267,7 +1500,17 @@ export function buildSesAssemblerInput(
         familyId === "own_template_roof" && Object.keys(roofFields).length
           ? roofFields
           : null,
-      hours_and_materials: explicitHoursAndMaterials(snapshot, report),
+      hours_and_materials: explicitHoursAndMaterials(
+        snapshot,
+        report,
+        intakeCase,
+      ),
+      swms_fact_context: swmsFactContext(
+        snapshot,
+        reportOnly ? null : report,
+        cycle.id,
+        siblingBundleEvidence,
+      ),
       prior_release: {
         released: !!priorPack,
         release_revision_id: text(priorPack?.id) || null,
@@ -1515,21 +1758,62 @@ export async function loadSesAssemblerLiveSnapshot(
     .filter((row) => text(row.job_id) === jobId)
     .map((row) => text(row.id))
     .filter(Boolean);
-  const bundleJobs = siblingJobIds.length
-    ? await many(
-      client.from("jobs").select("id,job_number").in("id", siblingJobIds),
-      "jobs.bundle_siblings",
-    )
-    : [];
-  const bundleClaims = outboundRevisionIds.length
-    ? await many(
-      client
-        .from("makesafe_sibling_evidence_claims")
-        .select("*")
-        .in("binding_revision_id", outboundRevisionIds),
-      "makesafe_sibling_evidence_claims",
-    )
-    : [];
+  const [
+    bundleJobs,
+    bundleDetails,
+    bundleReports,
+    bundleAssignments,
+    bundleClaims,
+  ] = await Promise.all([
+    siblingJobIds.length
+      ? many(
+        client.from("jobs").select("id,job_number,client_name").in(
+          "id",
+          siblingJobIds,
+        ),
+        "jobs.bundle_siblings",
+      )
+      : Promise.resolve([]),
+    siblingJobIds.length
+      ? many(
+        client.from("makesafe_job_details")
+          .select("job_id,attendance_cycle_id,cycle_number,reattend_count")
+          .in("job_id", siblingJobIds),
+        "makesafe_job_details.bundle_siblings",
+      )
+      : Promise.resolve([]),
+    siblingJobIds.length
+      ? many(
+        client.from("job_service_reports")
+          .select(
+            "id,job_id,status,submitted_at,attendance_cycle_id,cycle_attribution,cycle_number,checklist_json,notes",
+          )
+          .in("job_id", siblingJobIds)
+          .order("submitted_at", { ascending: false }),
+        "job_service_reports.bundle_siblings",
+      )
+      : Promise.resolve([]),
+    siblingJobIds.length
+      ? many(
+        client.from("job_assignments")
+          .select(
+            "id,job_id,status,attendance_cycle_id,cycle_attribution,cycle_number,crew_name,scheduled_date,arrived_at,updated_at,created_at",
+          )
+          .in("job_id", siblingJobIds)
+          .neq("status", "cancelled"),
+        "job_assignments.bundle_siblings",
+      )
+      : Promise.resolve([]),
+    outboundRevisionIds.length
+      ? many(
+        client
+          .from("makesafe_sibling_evidence_claims")
+          .select("*")
+          .in("binding_revision_id", outboundRevisionIds),
+        "makesafe_sibling_evidence_claims",
+      )
+      : Promise.resolve([]),
+  ]);
   const invoiceIds = [
     ...new Set(bundleClaims.map((row) => text(row.invoice_id)).filter(Boolean)),
   ];
@@ -1614,6 +1898,9 @@ export async function loadSesAssemblerLiveSnapshot(
     bundle_bindings: bundleBindings,
     bundle_claims: bundleClaims,
     bundle_jobs: bundleJobs,
+    bundle_details: bundleDetails,
+    bundle_reports: bundleReports,
+    bundle_assignments: bundleAssignments,
     bundle_invoices: bundleInvoices,
     bundle_documents: bundleDocuments,
     bundle_emails: bundleEmails,
