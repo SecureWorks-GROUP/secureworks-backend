@@ -7,6 +7,7 @@ import {
   chunkMakesafeStateRows,
   type MakesafeReconcileRow,
   planMakesafeStateReconciliation,
+  summarizeMakesafeStateSeedChunks,
 } from "./makesafe_state_reconcile.ts";
 import {
   EMPTY_CANCELLATION,
@@ -249,4 +250,38 @@ Deno.test("full-board RPC writes split into resumable chunks", () => {
   assertEquals(chunks.map((chunk) => chunk.length), [500, 500, 1]);
   assertEquals(chunks.flat(), rows);
   assertEquals(chunkMakesafeStateRows(rows).flat(), rows);
+});
+
+Deno.test("seed chunks account for seeded, missing, and out-of-scope cards", () => {
+  const summary = summarizeMakesafeStateSeedChunks([
+    { requested: 500, accounted: 500, seeded: 498, skipped: 2 },
+    { requested: 101, accounted: 101, seeded: 100, skipped: 1 },
+  ], 601);
+
+  assertEquals(summary, {
+    valid: true,
+    requested: 601,
+    accounted: 601,
+    seeded: 598,
+    skipped: 3,
+    error: null,
+  });
+});
+
+Deno.test("seed chunk accounting fails closed on an unaccounted card", () => {
+  const summary = summarizeMakesafeStateSeedChunks([
+    { requested: 430, accounted: 429, seeded: 429, skipped: 0 },
+  ], 430);
+
+  assertEquals(summary.valid, false);
+  assertStringIncludes(summary.error || "", "did not partition every request");
+});
+
+Deno.test("seed chunk accounting never coerces a missing count to zero", () => {
+  const summary = summarizeMakesafeStateSeedChunks([
+    { requested: 1, accounted: 1, seeded: null, skipped: 0 },
+  ], 1);
+
+  assertEquals(summary.valid, false);
+  assertStringIncludes(summary.error || "", "invalid accounting");
 });

@@ -134,6 +134,7 @@ import {
 import {
   chunkMakesafeStateRows,
   planMakesafeStateReconciliation,
+  summarizeMakesafeStateSeedChunks,
 } from './makesafe_state_reconcile.ts'
 import {
   buildMakesafeDisagreementList,
@@ -3322,7 +3323,7 @@ if (import.meta.main) serve(async (req: Request) => {
           for (const [chunkIndex, jobChunk] of jobChunks.entries()) {
             const chunkRunKey = `${runKey}:chunk-${chunkIndex + 1}-of-${jobChunks.length}`
             const { data, error } = await client.rpc(
-              'seed_makesafe_state_authority_v1',
+              'seed_makesafe_state_authority_scoped_v2',
               {
                 p_run_key: chunkRunKey,
                 p_applied_by: 'makesafe-state.v2-seeder',
@@ -3343,25 +3344,30 @@ if (import.meta.main) serve(async (req: Request) => {
             }
             chunks.push(data)
           }
-          const completed = chunks.reduce(
-            (count, chunk) => count + Number(chunk?.requested || 0),
-            0,
+          const summary = summarizeMakesafeStateSeedChunks(
+            chunks,
+            jobIds.length,
           )
-          if (completed !== jobIds.length) {
+          if (!summary.valid) {
             return json({
               ok: false,
               dry_run: false,
               selection_hash: selectionHash,
               requested: jobIds.length,
-              completed,
+              accounted: summary.accounted,
+              seeded: summary.seeded,
+              skipped: summary.skipped,
               completed_chunks: chunks.length,
               chunk_count: jobChunks.length,
-              error: 'seed did not account for the exact server-selected board',
+              error: summary.error,
             }, 503)
           }
           seedResult = {
             requested: jobIds.length,
-            completed,
+            accounted: summary.accounted,
+            completed: summary.accounted,
+            seeded: summary.seeded,
+            skipped: summary.skipped,
             completed_chunks: chunks.length,
             chunk_count: jobChunks.length,
             chunks,

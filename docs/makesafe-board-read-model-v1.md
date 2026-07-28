@@ -40,6 +40,14 @@ The same migration installs fact-identity triggers for later source, lineage,
 cycle, assignment, report, document, media, and pack changes so a successful
 seed is not a one-off snapshot.
 
+Migration `20260729000000_makesafe_state_seed_scope_accounting.sql` corrects the
+seed boundary to the board's exact canonical job families: `makesafe` plus
+insurance jobs explicitly typed as `restoration`. Each bounded chunk is
+transactionally and append-only accounted as seeded, missing after the board
+read, or outside that canonical scope. Missing and out-of-scope rows are never
+seeded or silently dropped, and an idempotent replay returns the original
+partition.
+
 ## Canonical truth
 
 Every card originates as one canonical job row with:
