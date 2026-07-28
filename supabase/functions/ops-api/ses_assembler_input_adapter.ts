@@ -298,13 +298,45 @@ export function resolveSesDeliveryRenderRoute(
 
   const metadata = record(snapshot.job.metadata);
   const detail = snapshot.detail || {};
-  const explicitMode = firstText(
-    detail.roof_report_mode,
-    metadata.roof_report_mode,
-    metadata.makesafe_roof_report_mode,
-  ).toLowerCase();
+  const modeFacts = [
+    ["makesafe_job_details.roof_report_mode", detail.roof_report_mode],
+    ["jobs.metadata.roof_report_mode", metadata.roof_report_mode],
+    [
+      "jobs.metadata.makesafe_roof_report_mode",
+      metadata.makesafe_roof_report_mode,
+    ],
+  ]
+    .map(([field, value]) => [field, text(value).toLowerCase()] as const)
+    .filter(([, value]) => value);
+  const modeValues = [...new Set(modeFacts.map(([, value]) => value))];
+  if (modeValues.length > 1) {
+    return {
+      route: "unroutable",
+      reason_code: "conflicting_roof_delivery_facts",
+      reason:
+        "Persisted card facts disagree about the roof delivery/render mode.",
+      evidence: modeFacts.map(([field, value]) => `${field}=${value}`).sort(),
+    };
+  }
+  const explicitMode = modeValues[0] || "";
   const metadataReportDelivery = text(metadata.report_delivery).toLowerCase();
   const detailReportDelivery = text(detail.report_delivery).toLowerCase();
+  for (
+    const [field, value] of [
+      ["jobs.metadata.report_delivery", metadataReportDelivery],
+      ["makesafe_job_details.report_delivery", detailReportDelivery],
+    ] as const
+  ) {
+    if (value && value !== "portal" && value !== "own_document") {
+      return {
+        route: "unroutable",
+        reason_code: "delivery_route_unroutable",
+        reason:
+          `Persisted ${field} value "${value}" is not a sealed roof delivery route.`,
+        evidence: [`${field}=${value}`],
+      };
+    }
+  }
   if (
     metadataReportDelivery &&
     detailReportDelivery &&

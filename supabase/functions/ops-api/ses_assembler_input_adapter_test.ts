@@ -707,6 +707,46 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "conflicting persisted roof modes fail closed before route selection",
+  () => {
+    const live = snapshot();
+    live.detail!.report_type = null;
+    live.job.metadata.makesafe_job_family = "roof_report";
+    live.job.metadata.roof_report_mode = "builder_portal";
+    live.detail!.roof_report_mode = "own_template";
+    const input = buildSesAssemblerInput(live);
+    assertEquals(input.classification.delivery_render_route, "unroutable");
+    assertEquals(
+      input.classification.delivery_render_route_reason_code,
+      "conflicting_roof_delivery_facts",
+    );
+    assertEquals(input.classification.delivery_render_route_evidence, [
+      "jobs.metadata.roof_report_mode=builder_portal",
+      "makesafe_job_details.roof_report_mode=own_template",
+    ]);
+  },
+);
+
+Deno.test(
+  "unsupported persisted report delivery fails closed with field evidence",
+  () => {
+    const live = snapshot();
+    live.detail!.report_type = null;
+    live.job.metadata.makesafe_job_family = "roof_report";
+    live.job.metadata.report_delivery = "email";
+    const input = buildSesAssemblerInput(live);
+    assertEquals(input.classification.delivery_render_route, "unroutable");
+    assertEquals(
+      input.classification.delivery_render_route_reason_code,
+      "delivery_route_unroutable",
+    );
+    assertEquals(input.classification.delivery_render_route_evidence, [
+      "jobs.metadata.report_delivery=email",
+    ]);
+  },
+);
+
 Deno.test("SWMS-26980 seeded authority preserves the identity spine in U4", () => {
   const live = snapshot();
   live.identity_revision = {
