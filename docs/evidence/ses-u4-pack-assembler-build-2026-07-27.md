@@ -103,6 +103,12 @@ proof.
 | AJBR | ready golden | ready golden | rejected by rule | rejected by rule | rejected by rule |
 | Western | ready golden | ready golden | closed/unsealed class | closed/unsealed class | closed/unsealed class |
 
+Restoration is now a first-class SES family, but it is intentionally outside the
+builder recipe rows until the Captain seals its reporting recipe. A canonical
+restoration card is retained as typed input and returns the reason-coded
+`restoration_recipe_unsealed` blocker with its real card facts; it does not select
+a report, pack, portal, SWMS, pricing, invoice proposal or outbound draft.
+
 The original assessment fixture blocked report/photo/invoice draft sets with
 `assessment_recipe_unapproved`. That historical negative is superseded by the
 sealed `assessment-triad-invoice-only/2026-07-27` recipe; current assessment
