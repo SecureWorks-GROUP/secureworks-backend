@@ -48,7 +48,6 @@ import {
 } from "./roof_report_render.ts";
 import { buildRoofReportJob } from "./roof_report_template.ts";
 import { isBundledCoverageSendNote } from "./makesafe_send_pack.ts";
-import { renderSesSwmsPdf } from "./ses_swms_render.ts";
 import {
   canonicalSesPortalCaptureResult,
   canonicalSesPortalCaptureRole,
@@ -252,7 +251,10 @@ export function resolveSiblingBundleEvidence(
   const sharingOutbound = candidate
     ? currentOutbound
     : currentOutbound.filter((row) => claimedBindingIds.has(text(row.id)));
-  if (!candidate && sharingOutbound.length === 0) return undefined;
+  if (!candidate && sharingOutbound.length === 0) {
+    if (currentOutbound.length === 0) return undefined;
+    sharingOutbound.push(...currentOutbound);
+  }
   if (!candidate && sharingOutbound.length > 1) {
     return {
       status: "scope_evidence_missing",
