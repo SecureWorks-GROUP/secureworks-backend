@@ -27,15 +27,21 @@ import {
 } from "./index.ts";
 
 // ── Watched-sender floor (item 11b) ───────────────────────────────────────────
-Deno.test("watched-sender floor matches Prime's notification channel, not lookalikes", () => {
+Deno.test("watched-sender floor matches observed builder channels, not lookalikes", () => {
   assert(senderMatchesWatchedFloor("noreply@notifications.primeeco.tech"));
   assert(senderMatchesWatchedFloor("MLB.Mailer@Notifications.PrimeEco.Tech")); // case-insensitive
+  assert(senderMatchesWatchedFloor("human@mlbuilders.com.au"));
+  assert(senderMatchesWatchedFloor("workorders@ajs.build"));
+  assert(senderMatchesWatchedFloor("accounts@builderwest.com.au"));
+  assert(senderMatchesWatchedFloor("dispatch@westernbuild.com.au"));
   // Anchored domain match — a lookalike domain must NOT drift in.
   assertEquals(senderMatchesWatchedFloor("noreply@notifications.primeeco.tech.evil.test"), false);
+  assertEquals(senderMatchesWatchedFloor("spoof@evilmlbuilders.com.au"), false);
   assertEquals(senderMatchesWatchedFloor("someone@primeeco.tech"), false); // parent domain, not the channel
   assertEquals(senderMatchesWatchedFloor(""), false);
   assertEquals(senderMatchesWatchedFloor(null), false);
   assert(WATCHED_SENDER_FLOOR.includes("notifications.primeeco.tech"));
+  assert(WATCHED_SENDER_FLOOR.includes("mlbuilders.com.au"));
 });
 
 // ── pickGraphAttachment (pure) ────────────────────────────────────────────────

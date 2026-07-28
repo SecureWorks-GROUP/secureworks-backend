@@ -485,6 +485,9 @@ function classifyPost(
   // evaded BOTH checks. Now bare/spaced/compact refs get a non-null ref + a row.
   const body = post.body?.content || null;
   const ref = extractRef(subject, body, prefixes);
+  const bodyPrefixedRefMatch = body
+    ? body.replace(/<[^>]+>/g, " ").match(buildSubjectRef(prefixes))
+    : null;
 
   if (matchedCompany) {
     return {
@@ -507,6 +510,18 @@ function classifyPost(
   }
   if (subjectKeyword) {
     return { include: true, reason: "subject_keyword", ref, company: null };
+  }
+  // A forwarded/relayed instruction can have a generic subject while the only
+  // builder reference sits in the body. extractRef already scans that body; use
+  // the result as an inclusion signal instead of calculating it and then
+  // discarding the source into an unreviewed classifier exclusion.
+  if (bodyPrefixedRefMatch) {
+    return {
+      include: true,
+      reason: "body_ref",
+      ref: normaliseRef(bodyPrefixedRefMatch[0], prefixes),
+      company: null,
+    };
   }
   return {
     include: false,

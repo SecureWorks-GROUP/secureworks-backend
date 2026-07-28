@@ -793,6 +793,85 @@ Deno.test("chatter is accounted exactly once rather than dropped", () => {
   assertEquals(plan.totals.unaccounted, 0);
 });
 
+Deno.test("courteous identified operational request becomes a visible exception, not non-work", () => {
+  const item = source({
+    postId: "mlb-urgent-contact",
+    fromEmail: "human@mlbuilders.com.au",
+    subject:
+      "URGENT - Our Ref: MLB-27198 - 12 Example Street - Client Ref: 12345",
+    body: "Please contact the insured urgently and arrange attendance. Thanks.",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(plan.cases[0].reasonCode, "below_identity_floor");
+  assertEquals(plan.sourceClassifications[0].outcome, "reason_coded_exception");
+});
+
+Deno.test("quoted work-order history cannot turn a current thank-you into new work", () => {
+  const item = source({
+    postId: "mlb-thanks-reply",
+    fromEmail: "human@mlbuilders.com.au",
+    subject: "Thanks",
+    body:
+      "Thanks, received.\n\nFrom: Builder\nSubject: NEW WORK ORDER MLB-27197\nPlease attend urgently.",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.sourceClassifications[0].outcome, "accounted_non_work");
+  assertEquals(plan.sourceClassifications[0].reasonCode, "non_makesafe");
+});
+
+Deno.test("identified pricing request is reviewable instead of silently classified as chatter", () => {
+  const item = source({
+    postId: "mlb-pricing-request",
+    fromEmail: "human@mlbuilders.com.au",
+    subject: "Our Ref: MLB-27196 - pricing query",
+    body: "Please price the attached scope. Thanks.",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(plan.cases[0].reasonCode, "below_identity_floor");
+  assertEquals(plan.sourceClassifications[0].outcome, "reason_coded_exception");
+});
+
+Deno.test("explicit system-test ignore message is accounted non-work", () => {
+  const item = source({
+    postId: "system-test-ignore",
+    fromEmail: "test@example.test",
+    subject:
+      "New Work Order MLB-999901 - Roof Report Request (SYSTEM TEST - IGNORE)",
+    body: "Synthetic system test only. Ignore this message.",
+    attachments: [pdf("system-test-ignore")],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.sourceClassifications[0].outcome, "accounted_non_work");
+  assertEquals(plan.sourceClassifications[0].reasonCode, "non_makesafe");
+});
+
+Deno.test("unchanged-subject specialist-report chase becomes a revision pathway", () => {
+  const original = source({
+    postId: "mlb-report-original",
+    fromEmail: "human@mlbuilders.com.au",
+    subject: "NEW WORK ORDER MLB-26950 Work Order: MLB-26950 PO: 55111",
+    body:
+      "Client: Example Resident\nAddress: 23 Example Way, Perth\nPhone: 0412345678",
+    attachments: [pdf("mlb-report-original")],
+  });
+  const chase = source({
+    postId: "mlb-report-chase",
+    fromEmail: "human@mlbuilders.com.au",
+    subject: "Our Ref: MLB-26950 - 23 Example Way - Client Ref: 13351232",
+    body:
+      "Hi Team, Following up on a specialist report for this claim - can you please send it through?",
+    receivedAt: "2026-07-24T00:47:54.000Z",
+  });
+  assertEquals(adaptDeterministicSource(chase, PROFILES).intent, "revision");
+  const plan = buildDeterministicIntakePlan([original, chase], PROFILES);
+  const revision = plan.cases.find((item) =>
+    item.sourcePostIds.includes("mlb-report-chase")
+  );
+  assertEquals(revision?.parentRelation, "revision_of");
+});
+
 Deno.test("case-wide recovery finds a late PDF before declaring it missing", () => {
   const instruction = source({
     postId: "case-1",

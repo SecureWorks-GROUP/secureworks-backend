@@ -598,6 +598,35 @@ Deno.test("classifier: 'make safe' keyword in subject includes", () => {
   assertEquals(r.reason, "subject_keyword");
 });
 
+Deno.test("classifier: body-only builder ref from an odd sender enters accounting", () => {
+  const post = {
+    ...FX_NON_MAKESAFE_POST,
+    subject: "Please action attached instruction",
+    body: {
+      contentType: "html",
+      content: "<p>Builder reference MLB-27199 requires urgent attendance.</p>",
+    },
+  };
+  const r = _classifyPost(post, COMPANIES);
+  assertEquals(r.include, true);
+  assertEquals(r.reason, "body_ref");
+  assertEquals(r.ref, "MLB-27199");
+});
+
+Deno.test("classifier: an unrelated bare number in an odd-sender body stays excluded", () => {
+  const post = {
+    ...FX_NON_MAKESAFE_POST,
+    subject: "Supplier account update",
+    body: {
+      contentType: "text",
+      content: "Please call 04123 456 789 about account 123456.",
+    },
+  };
+  const r = _classifyPost(post, COMPANIES);
+  assertEquals(r.include, false);
+  assertEquals(r.ref, null);
+});
+
 Deno.test("classifier: the four pinned regression refs all classify make-safe", () => {
   // All four (Erskine 67200, Alexander Heights 67005, Tapping 67134, Bassendean
   // 67166) must be INCLUDED with a NON-NULL ref. B1: the classifier now extracts

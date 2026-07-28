@@ -25,6 +25,7 @@ import {
 import {
   type CancellationClassification,
   classifyCancellation,
+  currentMessageOnly,
 } from "./makesafe_cancellation_classifier.ts";
 import { canonicalCompanyDedupeKey } from "../_shared/makesafe_refs.ts";
 import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
@@ -397,6 +398,12 @@ const REVISION_SIGNAL =
 // evidence, so they are scoped to the subject line.
 const REVISION_SUBJECT_SIGNAL =
   /(?:^\s*re\s*:[^\n]*\b(?:MLB|AJBR|AJS|BWCWA|WB|RAPID)[-\s#]*\d{3,}\b|\b(?:info\s+required|follow\s*up|booking\s+(?:update|request)|any\s+update)\b)/i;
+// Production builder chases also arrive under an unchanged "Our Ref" subject.
+// Read only the current message so quoted history cannot manufacture a chase.
+// The narrow "following up on" phrase excludes first-time instructions such as
+// "we will follow up with the tenant", which remain ordinary work.
+const REVISION_CURRENT_MESSAGE_SIGNAL =
+  /\b(?:following\s+up\s+on|chasing\s+(?:an?|the)\s+|can\s+we\s+have\s+an?\s+update)\b/i;
 const REOPEN_SIGNAL =
   /\b(re-?attend|reopen|return\s+(?:visit|to\s+site)|attend\s+again)\b/i;
 // Charter 6b + Ruling 12 (sealed): collection, rectification and "-R" reattend
@@ -491,7 +498,8 @@ function lifecycleText(item: DeterministicSourceItem): string {
 
 function isRevisionSource(item: DeterministicSourceItem): boolean {
   return REVISION_SIGNAL.test(text(item)) ||
-    REVISION_SUBJECT_SIGNAL.test(String(item.subject || ""));
+    REVISION_SUBJECT_SIGNAL.test(String(item.subject || "")) ||
+    REVISION_CURRENT_MESSAGE_SIGNAL.test(currentMessageOnly(item.body));
 }
 
 function extractedPdfDocuments(
@@ -1336,6 +1344,18 @@ function evidenceFor(
 
 function isChatter(item: DeterministicSourceItem): boolean {
   const hay = text(item);
+  const currentMessageHay = `${item.subject || ""}\n${
+    currentMessageOnly(item.body)
+  }`;
+  const hasBuilderIdentity = MLB_SIGNAL.test(hay) || AJS_SIGNAL.test(hay) ||
+    BUILDERWEST_SIGNAL.test(hay) || WESTERN_SIGNAL.test(hay) ||
+    RAPID_SIGNAL.test(hay);
+  const currentOperationalRequest =
+    /\b(?:assign(?:ed|ment)?|attend|book(?:ing)?|arrange|contact|call|price|pricing|quote|provide|complete|repair|urgent|action|required|request(?:ed)?)\b/i
+      .test(currentMessageHay);
+  const explicitDisregard =
+    /\b(?:please\s+disregard|disregard\s+(?:this|the\s+)?(?:previous|last|earlier|below))\b/i
+      .test(currentMessageHay);
   // The signed lab fixture id is intentionally visible in the subject so the
   // live-fire runner can correlate results. A correction fixture therefore
   // contains the otherwise-global "correction" noise token. Once the runtime
@@ -1347,11 +1367,22 @@ function isChatter(item: DeterministicSourceItem): boolean {
     item.attachments.length > 0 &&
     (isRevisionSource(item) || WORK_SIGNAL.test(hay))
   ) return false;
-  return subjectIsExcludedNonWorkOrder(item.subject) ||
-    subjectIsKnownBuilderNoise(item.subject) ||
-    /\b(thanks|thank\s+you|noted|received|acknowledged|please\s+disregard|pricing\s+(?:query|enquiry)|photo\s+evidence|invoice\s+attached)\b/i
-        .test(hay) &&
-      !WORK_SIGNAL.test(hay) && item.attachments.length === 0;
+  if (
+    /\b(?:system\s+test|test\s+only)\b[^\n]{0,80}\bignore\b|\bignore\b[^\n]{0,80}\bsystem\s+test\b/i
+      .test(currentMessageHay)
+  ) return true;
+  if (subjectIsExcludedNonWorkOrder(item.subject) || explicitDisregard) {
+    return true;
+  }
+  // Real builder requests often end with "thanks". Strong builder identity plus
+  // a current-message operational verb must not be demoted to silent non-work.
+  // It may still fail the WO identity floor, in which case the planner creates a
+  // visible reason-coded exception rather than guessing a job.
+  if (hasBuilderIdentity && currentOperationalRequest) return false;
+  return subjectIsKnownBuilderNoise(item.subject) ||
+    /\b(thanks|thank\s+you|noted|received|acknowledged|photo\s+evidence|invoice\s+attached)\b/i
+        .test(currentMessageHay) &&
+      !WORK_SIGNAL.test(currentMessageHay) && item.attachments.length === 0;
 }
 
 function buildKnown(
