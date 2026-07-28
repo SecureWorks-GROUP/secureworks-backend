@@ -538,7 +538,11 @@ when the complete v2 comparison reports zero `projection_input_error` cards and
 the SWMS-26980 U4 dry-run reports no `spine_missing_*` blocker. Reconciliation
 may write only the display status ledger plus the on-card Captain-action ledger;
 it must commit an exact `trustworthy | captain_marked` partition with
-`neither=0`.
+`neither=0`. Apply the safeupdate compatibility follow-up
+`20260729020000_makesafe_family_pointer_safeupdate_guard.sql` before the
+matching `ops-api`; keep live seed invocation dark until the migration-first
+deploy and schema gate complete. Detailed ownership and sequencing live in
+`docs/makesafe-board-read-model-v1.md`.
 
 ## SES Docs Ready Signoff Approves Exact Pack Bytes
 
