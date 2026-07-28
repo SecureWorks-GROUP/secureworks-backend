@@ -175,8 +175,9 @@ The wall is before invoice creation and release:
 Nothing in this change creates any Xero object, sends anything to a builder,
 mutates operational board state, changes a job, closes work, applies a migration,
 schedules a cron, deploys, merges or touches production. The shared board
-read-model overlay may project a ready U4 revision as pre-Xero Docs Ready; it
-does not write the board or job state.
+read-model overlay may project a ready U4 revision as pre-Xero Docs Ready; the
+revision is queued as `needs_review` and cannot enter a sendable release until
+exact-byte signoff. It does not write the board or job state.
 
 ## Validation
 
@@ -238,13 +239,42 @@ production snapshot this is a deterministic HTTP-200 dry-run envelope with no
 persistence call and the specific source/lineage and `family_unknown` blockers.
 
 `dry_run:false` uses only the existing append-only U4 revision/artifact
-persistence. The shared server board read overlays a current ready revision as
-pre-Xero Docs Ready without creating an invoice; blocked revisions stay in Trade
-Report In and expose their blockers. No job, substatus, assignment, invoice or
-communication row is mutated.
+persistence. A ready revision enters the Docs Ready `needs_review` queue; the
+shared server board read may overlay it as pre-Xero Docs Ready without creating
+an invoice. Blocked revisions stay in Trade Report In and expose their
+blockers. No job, substatus, assignment, invoice or communication row is
+mutated.
 
 The backend still does not pretend it can inspect a Prime SPA: real portal
 screenshots remain owned by the approved agent-side
 `capture_portal_evidence.py` runner. Until that capture capability is bound into
 a run, portal cards fail closed as `capability_portal_degraded`; assessment
 cards otherwise use the sealed recipe above and fail only on missing evidence.
+
+## Docs Ready review contract
+
+Audit-grade, family-complete non-dry revisions enter the append-only
+`needs_review` queue. The review API is exposed through `ops-api`:
+
+- `GET ops-api?action=list_ses_docs_ready_reviews[&limit=1..100]` returns the
+  oldest current `needs_review` rows with the docket revision ID, exact output
+  hash, assembler/family versions, stage and review-event metadata.
+- `GET ops-api?action=get_ses_reviewable_pack&docket_revision_id=<uuid>` returns
+  the exact docket metadata, private artifact URLs valid for 300 seconds, and
+  the complete append-only audit trail. The URL is rejected if the artifact is
+  outside the private SES docket bucket or the review metadata no longer
+  matches the docket revision.
+- `POST ops-api?action=sign_off_ses_docket` with
+  `{"docket_revision_id":"<uuid>","expected_output_content_hash":"sha256:<64 lowercase hex>"}`
+  records `signed_off` only for the displayed current hash. Only an identified
+  Captain or admin-owner JWT may sign off; API keys and automation sessions
+  cannot do so.
+- `POST ops-api?action=revoke_ses_docket_signoff` with the same IDs/hash plus a
+  non-empty `reason` records an append-only revocation and returns the docket to
+  `needs_review`.
+
+New docket content or an AUTHORISED Xero PDF binding invalidates prior signoff
+and records the actor, time, exact output hash, assembler version and family
+matrix version. The shared U6R release wall rechecks that every exact member is
+currently `signed_off` immediately before each report, photo and invoice
+provider send; unsigned or stale members are refused.
