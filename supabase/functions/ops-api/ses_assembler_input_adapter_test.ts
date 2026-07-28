@@ -226,6 +226,54 @@ function liveSnapshotClient(live: SesAssemblerLiveSnapshot) {
   };
 }
 
+function roofPortalSnapshot(
+  jobId = "3ffaf0e2-3080-44eb-bbdc-d2dd812d8b2a",
+  jobNumber = "SWMS-261019",
+): SesAssemblerLiveSnapshot {
+  // The job id/number, current cycle, reference and typed Prime link are the
+  // read-only production values for SWMS-261019 captured on 2026-07-28.
+  const live = snapshot();
+  live.job.id = jobId;
+  live.job.job_number = jobNumber;
+  live.job.metadata.makesafe_job_family = "roof_report";
+  live.job.client_name = "Ordinary insured";
+  live.job.metadata.external_ref = "MLB-27037PO-56395";
+  live.detail!.job_id = jobId;
+  live.detail!.report_type = null;
+  live.detail!.external_ref = "MLB-27037";
+  live.detail!.attendance_cycle_id = "e805ffd2-539f-4266-82ac-1eaa1d869bda";
+  live.detail!.external_links = [{
+    kind: "builder_portal",
+    label: "Builder portal link",
+    url: "https://primeeco.tech/share/d2ff4956-1302-4ef8-a49e-c9d29061ef4b",
+  }];
+  live.cycles[0].id = live.detail!.attendance_cycle_id;
+  for (
+    const rows of [
+      live.cycles,
+      live.reports,
+      live.assignments,
+      live.media,
+      live.documents,
+    ]
+  ) {
+    for (const row of rows) {
+      row.job_id = jobId;
+      if ("attendance_cycle_id" in row) {
+        row.attendance_cycle_id = live.detail!.attendance_cycle_id;
+      }
+    }
+  }
+  live.identity_revision = {
+    authority_kind: "legacy_job_record",
+    source_instruction_id: `legacy-job:${jobId}`,
+    source_version: 1,
+    source_content_hash: `sha256:${"a".repeat(64)}`,
+    lineage_id: jobId,
+    effective_case_id: null,
+  };
+  return live;
+}
 Deno.test(
   "SWMS-26980 live fixture builds canonical v1 input without inventing U1 spine facts",
   () => {

@@ -25,6 +25,7 @@ function captureFixture() {
   const detail = live.detail as Row;
   const metadata = job.metadata as Row;
   metadata.makesafe_job_family = "roof_report";
+  job.client_name = "Ordinary insured";
   detail.report_type = null;
   live.identity_revision = {
     authority_kind: "legacy_job_record",
