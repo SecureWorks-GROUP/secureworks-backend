@@ -16,6 +16,12 @@ const rollback = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const safeUpdateMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260729020000_makesafe_family_pointer_safeupdate_guard.sql",
+    import.meta.url,
+  ),
+);
 
 Deno.test("U2 Phase 1 migration is additive and leaves v1 as authority", () => {
   assertStringIncludes(migration, "default_contract_version");
@@ -150,4 +156,23 @@ Deno.test("non-production rollback removes Phase-1 surfaces in dependency order"
     "DROP TABLE IF EXISTS public.makesafe_readiness_current",
   );
   assert(!rollback.match(/UPDATE\s|DELETE\s+FROM|TRUNCATE\s/i));
+});
+
+Deno.test("family pointer invalidation keeps its whole-board scope explicit", () => {
+  assertStringIncludes(
+    safeUpdateMigration,
+    "CREATE OR REPLACE FUNCTION public.invalidate_makesafe_family_pointer()",
+  );
+  assertStringIncludes(
+    safeUpdateMigration,
+    "UPDATE public.makesafe_readiness_current",
+  );
+  assertStringIncludes(safeUpdateMigration, "WHERE job_id IS NOT NULL;");
+  assertStringIncludes(migration, "job_id uuid PRIMARY KEY");
+  assert(
+    !safeUpdateMigration.match(
+      /UPDATE\s+public\.makesafe_readiness_current[\s\S]*?updated_at\s*=\s*transaction_timestamp\(\)\s*;/i,
+    ),
+    "The production safeupdate guard must never see an unbounded readiness update",
+  );
 });
