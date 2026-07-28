@@ -119,6 +119,7 @@ export interface SesAssemblerLiveSnapshot {
   bundle_invoices?: LiveRow[];
   bundle_documents?: LiveRow[];
   bundle_emails?: LiveRow[];
+  bundle_media?: LiveRow[];
 }
 
 type Selection = Exclude<
@@ -385,6 +386,30 @@ export function resolveSiblingBundleEvidence(
   if (claim && !text(claim.photo_scope_phrase)) {
     failures.push("photo_scope_claim_missing");
   }
+  const photo = claim
+    ? (snapshot.bundle_media || []).find((row) =>
+      text(row.id) === text(claim.photo_media_id) &&
+      text(row.job_id) === text(outbound.sibling_job_id) &&
+      text(row.type).toLowerCase() === "photo"
+    )
+    : undefined;
+  if (!photo) failures.push("sibling_photo_artifact_missing");
+  if (
+    photo && claim &&
+    (text(photo.makesafe_content_hash) !== text(claim.photo_content_hash) ||
+      !/^sha256:[0-9a-f]{64}$/.test(text(claim.photo_content_hash)))
+  ) {
+    failures.push("sibling_photo_artifact_hash_mismatch");
+  }
+  if (
+    photo && claim &&
+    !phraseCovered(
+      `${firstText(photo.label)} ${firstText(photo.notes)}`,
+      claim.photo_scope_phrase,
+    )
+  ) {
+    failures.push("photo_artifact_scope_not_covered");
+  }
   const documents = snapshot.bundle_documents || [];
   const report = claim
     ? documents.find((row) =>
@@ -462,6 +487,8 @@ export function resolveSiblingBundleEvidence(
         email_post_id: text(email.post_id),
         content_sha256: text(email.content_sha256),
         scope_phrase: text(claim.photo_scope_phrase),
+        media_id: text(photo!.id),
+        content_hash: text(claim.photo_content_hash) as SesSha256,
       },
       report_document_id: text(report.id),
       swms_document_id: text(swms.id),
@@ -1493,7 +1520,12 @@ export async function loadSesAssemblerLiveSnapshot(
       ),
     ),
   ];
-  const [bundleInvoices, bundleDocuments, bundleEmails] = await Promise.all([
+  const mediaIds = [
+    ...new Set(
+      bundleClaims.map((row) => text(row.photo_media_id)).filter(Boolean),
+    ),
+  ];
+  const [bundleInvoices, bundleDocuments, bundleEmails, bundleMedia] = await Promise.all([
     invoiceIds.length
       ? many(
         client
@@ -1523,6 +1555,15 @@ export async function loadSesAssemblerLiveSnapshot(
         "emails.bundle_evidence",
       )
       : Promise.resolve([]),
+    mediaIds.length
+      ? many(
+        client
+          .from("job_media")
+          .select("id,job_id,type,storage_url,label,notes,makesafe_content_hash")
+          .in("id", mediaIds),
+        "job_media.bundle_evidence",
+      )
+      : Promise.resolve([]),
   ]);
   return {
     job,
@@ -1544,6 +1585,7 @@ export async function loadSesAssemblerLiveSnapshot(
     bundle_invoices: bundleInvoices,
     bundle_documents: bundleDocuments,
     bundle_emails: bundleEmails,
+    bundle_media: bundleMedia,
   };
 }
 
@@ -1791,6 +1833,41 @@ export function createSesAssemblerRuntimeDependencies(
         };
       } catch {
         return null;
+      }
+    },
+    resolveBundledPhotoArtifacts: async (input) => {
+      const bundle = input.sibling_bundle_evidence;
+      if (!bundle || bundle.status !== "accepted") return [];
+      const snapshot = snapshotFor(input);
+      const row = (snapshot.bundle_media || []).find((item) =>
+        text(item.id) === bundle.coverage.photo.media_id &&
+        text(item.job_id) === bundle.sibling.job_id &&
+        text(item.type).toLowerCase() === "photo" &&
+        text(item.makesafe_content_hash) === bundle.coverage.photo.content_hash &&
+        phraseCovered(
+          `${firstText(item.label)} ${firstText(item.notes)}`,
+          bundle.coverage.photo.scope_phrase,
+        )
+      );
+      if (!row) return [];
+      const type = mediaType(row, "image/jpeg");
+      if (type !== "image/jpeg" && type !== "image/png") return [];
+      const url = artifactUrl(row);
+      if (!url) return [];
+      try {
+        const bytes = await fetchBytes(url, "bundled sibling photo");
+        if (await rawPhotoSha256(bytes) !== bundle.coverage.photo.content_hash) {
+          return [];
+        }
+        return [{
+          photo_id: text(row.id),
+          source_pointer: `job_media:${text(row.id)}`,
+          file_name: fileName(row, `${bundle.sibling.job_number}-photo.jpg`),
+          media_type: type,
+          bytes,
+        }];
+      } catch {
+        return [];
       }
     },
     resolveSwmsArtifact: async (input) => {

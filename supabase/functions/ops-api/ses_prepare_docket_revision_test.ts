@@ -897,6 +897,9 @@ Deno.test("bidirectional positive-scope bundle evidence clears the card-local ph
         content_sha256:
           "0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba",
         scope_phrase: "displaced Hardie panels stacked safely",
+        media_id: "photo-26837",
+        content_hash:
+          "sha256:a9381d58a42102fadd0f6cc11fa93e6f446a7d8989d16f2bbb37731667beb17e",
       },
       report_document_id: "513cb62a-4f9f-4fd5-ae5c-66b0ce053448",
       swms_document_id: "878641fc-99ba-4f5f-a0a6-d64708394b6a",
@@ -910,6 +913,13 @@ Deno.test("bidirectional positive-scope bundle evidence clears the card-local ph
         media_type: "application/pdf",
         bytes: new Uint8Array([37, 80, 68, 70, 37]),
       }),
+      resolveBundledPhotoArtifacts: async () => [{
+        photo_id: "photo-26837",
+        source_pointer: "job_media:photo-26837",
+        file_name: "SWMS-26837-photo.jpg",
+        media_type: "image/jpeg",
+        bytes: new Uint8Array([255, 216, 255, 4]),
+      }],
     }),
   )).results[0];
   const codes = blockerCodes(result);

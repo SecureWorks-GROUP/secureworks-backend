@@ -144,6 +144,9 @@ export interface SesPrepareDependencies {
   resolveBundledReportArtifact?: (
     input: SesAssemblerInputV1,
   ) => Promise<SesRenderResult | null>;
+  resolveBundledPhotoArtifacts?: (
+    input: SesAssemblerInputV1,
+  ) => Promise<SesPhotoArtifact[]>;
   resolveSwmsArtifact?: (
     input: SesAssemblerInputV1,
   ) => Promise<SesRenderResult | null>;
@@ -1773,17 +1776,93 @@ async function prepareOne(
           manifest.items.physical_reporting_evidence = ready(
             "file:PROOF/sibling_bundle_evidence.json",
           );
-          await artifactFromText({
-            role: "photo_selection",
-            path: "ARTIFACTS/PHOTO_SELECTION.md",
-            media_type: "text/markdown",
-            text: [
-              "Sibling photo evidence claim",
-              `Email: ${acceptedBundle.coverage.photo.email_post_id}`,
-              `Content SHA-256: ${acceptedBundle.coverage.photo.content_sha256}`,
-              `Scope: ${acceptedBundle.coverage.photo.scope_phrase}`,
-            ].join("\n"),
-          }).then((artifact) => artifacts.push(artifact));
+          const resolvedPhotos = deps.resolveBundledPhotoArtifacts
+            ? await deps.resolveBundledPhotoArtifacts(input)
+            : [];
+          const resolvedPhoto = resolvedPhotos.length === 1
+            ? resolvedPhotos[0]
+            : null;
+          const expectedPhotoHash = acceptedBundle.coverage.photo.content_hash;
+          if (
+            !resolvedPhoto ||
+            !/^sha256:[0-9a-f]{64}$/.test(expectedPhotoHash)
+          ) {
+            const itemBlocker = addBlocker(
+              blockers,
+              blocked(
+                "sibling_evidence_photo_artifact_unrecoverable",
+                `Bundle ${acceptedBundle.bundle_id} is valid, but its exact sibling photo artifact could not be recovered or validated.`,
+                "Restore the exact hashed sibling photo artifact with positive scope coverage; do not substitute an email attachment claim.",
+                [
+                  "canonical-input-envelope",
+                  "sibling-bundle-binding-ledger",
+                  "sibling-positive-scope-claim",
+                  "sibling-photo-artifact",
+                ],
+                [acceptedBundle.coverage.photo.media_id],
+                {
+                  bundle_id: acceptedBundle.bundle_id,
+                  sibling_job_id: acceptedBundle.sibling.job_id,
+                  media_id: acceptedBundle.coverage.photo.media_id,
+                  content_hash: expectedPhotoHash,
+                },
+              ),
+            );
+            manifest.items.physical_reporting_evidence = itemBlocker;
+            manifest.items.supporting_report_pdf = itemBlocker;
+          } else {
+            const photoFile = `ARTIFACTS/photos/${resolvedPhoto.file_name}`;
+            const photoArtifact = await artifactFromBytes({
+              role: "sibling_photo_evidence",
+              path: photoFile,
+              media_type: resolvedPhoto.media_type,
+              bytes: resolvedPhoto.bytes,
+              metadata: {
+                evidence_source: "explicit_sibling_bundle",
+                bundle_id: acceptedBundle.bundle_id,
+                sibling_job_id: acceptedBundle.sibling.job_id,
+                media_id: acceptedBundle.coverage.photo.media_id,
+                claimed_content_hash: expectedPhotoHash,
+                scope_phrase: acceptedBundle.coverage.photo.scope_phrase,
+              },
+            });
+            if (photoArtifact.content_hash !== expectedPhotoHash) {
+              const itemBlocker = addBlocker(
+                blockers,
+                blocked(
+                  "sibling_evidence_photo_artifact_hash_mismatch",
+                  "The recovered sibling photo bytes do not match the durable claimed content hash.",
+                  "Recover the exact immutable sibling photo artifact and re-run.",
+                  ["sibling-photo-artifact"],
+                  [acceptedBundle.coverage.photo.media_id],
+                  {
+                    expected_content_hash: expectedPhotoHash,
+                    actual_content_hash: photoArtifact.content_hash,
+                  },
+                ),
+              );
+              manifest.items.physical_reporting_evidence = itemBlocker;
+              manifest.items.supporting_report_pdf = itemBlocker;
+            } else {
+              photoFiles.push(photoFile);
+              artifacts.push(photoArtifact);
+              artifacts.push(
+                await artifactFromText({
+                  role: "photo_selection",
+                  path: "ARTIFACTS/PHOTO_SELECTION.md",
+                  media_type: "text/markdown",
+                  text: [
+                    "Sibling photo evidence claim",
+                    `Email: ${acceptedBundle.coverage.photo.email_post_id}`,
+                    `Content SHA-256: ${acceptedBundle.coverage.photo.content_sha256}`,
+                    `Media ID: ${acceptedBundle.coverage.photo.media_id}`,
+                    `Content hash: ${expectedPhotoHash}`,
+                    `Scope: ${acceptedBundle.coverage.photo.scope_phrase}`,
+                  ].join("\n"),
+                }),
+              );
+            }
+          }
         }
       } else if (!hasLocalPhysicalEvidence) {
         const itemBlocker = addBlocker(

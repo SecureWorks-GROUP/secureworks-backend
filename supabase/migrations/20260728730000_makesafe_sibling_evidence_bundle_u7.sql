@@ -54,6 +54,10 @@ CREATE TABLE public.makesafe_sibling_evidence_claims (
     CHECK (length(btrim(delivery_scope_phrase)) >= 8),
   photo_scope_phrase text NOT NULL
     CHECK (length(btrim(photo_scope_phrase)) >= 8),
+  photo_media_id uuid NOT NULL
+    REFERENCES public.job_media(id) ON DELETE RESTRICT,
+  photo_content_hash text NOT NULL
+    CHECK (photo_content_hash ~ '^sha256:[0-9a-f]{64}$'),
   report_document_id uuid NOT NULL
     REFERENCES public.job_documents(id) ON DELETE RESTRICT,
   swms_document_id uuid NOT NULL
@@ -142,6 +146,17 @@ BEGIN
       ON swms.id = NEW.swms_document_id
      AND swms.job_id = binding.sibling_job_id
      AND lower(swms.type) = 'swms'
+    JOIN public.job_media photo
+      ON photo.id = NEW.photo_media_id
+     AND photo.job_id = binding.sibling_job_id
+     AND photo.type = 'photo'
+     AND photo.makesafe_content_hash = NEW.photo_content_hash
+     AND photo.makesafe_content_hash ~ '^sha256:[0-9a-f]{64}$'
+     AND position(
+       lower(NEW.photo_scope_phrase) IN lower(
+         coalesce(photo.label, '') || ' ' || coalesce(photo.notes, '')
+       )
+     ) > 0
     WHERE binding.id = NEW.binding_revision_id
       AND binding.org_id = NEW.org_id
       AND binding.state = 'bound'
@@ -248,8 +263,36 @@ COMMENT ON TABLE public.makesafe_sibling_evidence_claims IS
   'Exact positive delivery, invoice-line, report, and SWMS evidence for one directed bundle binding. Similar addresses or loose notes are never claims.';
 
 DO $$
+DECLARE
+  v_photo_media_id uuid;
+  v_photo_content_hash text;
 BEGIN
-  IF EXISTS (
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.jobs
+    WHERE id IN (
+      'c3afc061-0d4a-43ff-8309-0b8b512e307a'::uuid,
+      '02f614a4-09a7-422e-9381-c89a44aceccd'::uuid
+    )
+  ) THEN
+    RETURN;
+  END IF;
+
+  SELECT photo.id, photo.makesafe_content_hash
+  INTO v_photo_media_id, v_photo_content_hash
+  FROM public.job_media photo
+  WHERE photo.job_id = '02f614a4-09a7-422e-9381-c89a44aceccd'::uuid
+    AND photo.type = 'photo'
+    AND photo.makesafe_content_hash ~ '^sha256:[0-9a-f]{64}$'
+    AND position(
+      lower('displaced Hardie panels stacked safely') IN lower(
+        coalesce(photo.label, '') || ' ' || coalesce(photo.notes, '')
+      )
+    ) > 0
+  ORDER BY photo.created_at, photo.id
+  LIMIT 1;
+
+  IF NOT EXISTS (
     SELECT 1
     FROM public.jobs claiming
     JOIN public.jobs sibling
@@ -278,7 +321,10 @@ BEGIN
      AND swms.job_id = sibling.id
     WHERE claiming.id = 'c3afc061-0d4a-43ff-8309-0b8b512e307a'::uuid
       AND claiming.org_id = '00000000-0000-0000-0000-000000000001'::uuid
-  ) THEN
+  ) OR v_photo_media_id IS NULL THEN
+    RAISE EXCEPTION
+      'reviewed sibling evidence seed refused: partial or drifted production footprint';
+  END IF;
 -- Reviewed production repair for MLB-26393 at 71 Peppermint Way:
 -- SWMS-26832's Hardie stacking work was delivered and billed in the
 -- SWMS-26837 bundle. Both directions establish the relationship; only the
@@ -339,6 +385,8 @@ INSERT INTO public.makesafe_sibling_evidence_claims (
   delivery_email_content_sha256,
   delivery_scope_phrase,
   photo_scope_phrase,
+  photo_media_id,
+  photo_content_hash,
   report_document_id,
   swms_document_id,
   recorded_by,
@@ -356,6 +404,8 @@ INSERT INTO public.makesafe_sibling_evidence_claims (
   '0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba',
   'displaced Hardie panels stacked safely',
   'displaced Hardie panels stacked safely',
+  v_photo_media_id,
+  v_photo_content_hash,
   '513cb62a-4f9f-4fd5-ae5c-66b0ce053448',
   '878641fc-99ba-4f5f-a0a6-d64708394b6a',
   'ses-sibling-evidence-v1',
@@ -370,6 +420,5 @@ INSERT INTO public.makesafe_sibling_evidence_claims (
   ),
   '2026-07-28T04:00:00Z'
 );
-  END IF;
 END;
 $$;

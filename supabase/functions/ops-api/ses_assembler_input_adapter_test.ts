@@ -518,6 +518,9 @@ Deno.test(
         "0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba",
       delivery_scope_phrase: "displaced Hardie panels stacked safely",
       photo_scope_phrase: "displaced Hardie panels stacked safely",
+      photo_media_id: "photo-26837",
+      photo_content_hash:
+        "sha256:a9381d58a42102fadd0f6cc11fa93e6f446a7d8989d16f2bbb37731667beb17e",
       report_document_id: "report-26837",
       swms_document_id: "swms-26837",
     }];
@@ -549,6 +552,15 @@ Deno.test(
       },
       { id: "swms-26837", job_id: siblingId, type: "swms" },
     ];
+    live.bundle_media = [{
+      id: "photo-26837",
+      job_id: siblingId,
+      type: "photo",
+      label: "Displaced Hardie panels stacked safely",
+      notes: "",
+      makesafe_content_hash:
+        "sha256:a9381d58a42102fadd0f6cc11fa93e6f446a7d8989d16f2bbb37731667beb17e",
+    }];
     const input = buildSesAssemblerInput(live);
     assertEquals(input.sibling_bundle_evidence?.status, "accepted");
     if (input.sibling_bundle_evidence?.status !== "accepted") {
