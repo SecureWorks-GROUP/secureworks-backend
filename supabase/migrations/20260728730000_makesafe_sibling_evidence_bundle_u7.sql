@@ -344,6 +344,7 @@ BEGIN
     JOIN public.xero_invoices invoice
       ON invoice.id = '3be46700-4d5d-4b91-b96e-8baf43ac9d7c'::uuid
      AND invoice.job_id = sibling.id
+     AND invoice.org_id = claiming.org_id
      AND upper(invoice.status) IN ('AUTHORISED', 'PAID')
      AND EXISTS (
        SELECT 1

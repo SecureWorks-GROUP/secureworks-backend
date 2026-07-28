@@ -252,7 +252,10 @@ export function resolveSiblingBundleEvidence(
   const sharingOutbound = candidate
     ? currentOutbound
     : currentOutbound.filter((row) => claimedBindingIds.has(text(row.id)));
-  if (!candidate && sharingOutbound.length === 0) return undefined;
+  if (!candidate && sharingOutbound.length === 0) {
+    if (currentOutbound.length === 0) return undefined;
+    sharingOutbound.push(...currentOutbound);
+  }
   if (!candidate && sharingOutbound.length > 1) {
     return {
       status: "scope_evidence_missing",
