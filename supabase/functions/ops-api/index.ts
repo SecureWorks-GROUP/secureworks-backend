@@ -3493,6 +3493,7 @@ if (import.meta.main) serve(async (req: Request) => {
         // canonical board; callers cannot choose a convenient subset. A live
         // run is accepted only when the v2 projector is complete and the
         // deployed U4 SWMS-26980 canary has no correlation-spine blocker.
+        // Migration 20260729040000 repairs the seed's case-candidate alias.
         if (authMode !== 'api_key') {
           return json({ error: 'makesafe_state_seed requires ops privilege' }, 403)
         }
