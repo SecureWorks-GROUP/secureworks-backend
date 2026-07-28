@@ -641,10 +641,18 @@ Deno.test(
         "edcaa56c-84d5-4a12-be0d-032bd1d422f3",
         "Hardie panel stacking",
         "displaced Hardie panels stacked safely",
+        "reviewed sibling evidence seed refused: partial or drifted production footprint",
+        "expected exactly one reviewed photo artifact",
       ]
     ) {
       assertStringIncludes(migration, required);
     }
+    assert(
+      migration.indexOf("IF NOT EXISTS (\n    SELECT 1\n    FROM public.jobs") <
+        migration.indexOf("INSERT INTO public.makesafe_sibling_bundle_binding_revisions"),
+    );
+    assertStringIncludes(migration, "AND NOT EXISTS (\n    SELECT 1\n    FROM public.xero_invoices");
+    assertStringIncludes(migration, "v_photo_match_count <> 1");
     for (
       const forbidden of [
         "UPDATE public.jobs",
