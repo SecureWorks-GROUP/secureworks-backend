@@ -46,7 +46,8 @@ insurance jobs explicitly typed as `restoration`. Each bounded chunk is
 transactionally and append-only accounted as seeded, missing after the board
 read, or outside that canonical scope. Missing and out-of-scope rows are never
 seeded or silently dropped, and an idempotent replay returns the original
-partition.
+partition. Apply this migration before deploying the matching `ops-api`; the
+edge schema preflight requires it.
 
 ## Canonical truth
 
