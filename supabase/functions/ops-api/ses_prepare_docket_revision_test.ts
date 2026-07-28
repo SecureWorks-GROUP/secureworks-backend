@@ -1137,7 +1137,8 @@ Deno.test("SWMS-required job with work order and trade report generates a proven
       works_completed: "Installed temporary fencing and made the area safe.",
       attendance_date: "2026-07-27",
       arrival_time: "08:30",
-      trade_count: 2,
+      crew_name: "Field crew",
+      site_contact: "Site representative",
     },
   };
   let generated = 0;
@@ -1245,6 +1246,17 @@ Deno.test("unsupported HRCW combination blocks for a sealed-template decision", 
     candidate.family === "physical_makesafe"
   )!;
   const input = fixtureInput(row);
+  input.cycle_facts.trade_report = {
+    id: "trade-report-unsupported-hrcw",
+    submitted_at: "2026-07-27T01:00:00.000Z",
+    checklist_json: {
+      works_completed: "Installed temporary structural support.",
+      attendance_date: "2026-07-27",
+      arrival_time: "08:30",
+      crew_name: "Field crew",
+      site_contact: "Site representative",
+    },
+  };
   input.hrcw.categories = ["structural"];
   input.hrcw.source_hazard_terms = ["temporary load-bearing support"];
   const response = await prepareSesDocketRevision(
