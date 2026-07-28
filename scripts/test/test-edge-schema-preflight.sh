@@ -16,7 +16,7 @@ DOCS_READY_MIGRATION="$REPO_ROOT/supabase/migrations/20260728210000_makesafe_ses
 SIBLING_EVIDENCE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728730000_makesafe_sibling_evidence_bundle_u7.sql"
 PORTAL_CAPTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728500000_makesafe_portal_capture_bridge_u4.sql"
 SEED_SCOPE_MIGRATION="$REPO_ROOT/supabase/migrations/20260729000000_makesafe_state_seed_scope_accounting.sql"
-HUGO_NOTIFICATION_MIGRATION="$REPO_ROOT/supabase/migrations/20260729000000_makesafe_hugo_notification_sla_v1.sql"
+HUGO_NOTIFICATION_MIGRATION="$REPO_ROOT/supabase/migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -208,10 +208,10 @@ seed_scope_row = {
 }
 hugo_notification_row = {
     "function_name": "ops-api",
-    "migration_version": "20260729000000",
+    "migration_version": "20260729010000",
     "expected_migration_name": "makesafe_hugo_notification_sla_v1",
     "expected_statement_sha256": os.environ["HUGO_NOTIFICATION_EXPECTED_SHA"],
-    "actual_migration_version": "20260729000000",
+    "actual_migration_version": "20260729010000",
     "actual_migration_name": "makesafe_hugo_notification_sla_v1",
     "actual_statement_count": 10,
     "actual_statement_sha256": None,

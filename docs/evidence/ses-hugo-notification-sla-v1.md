@@ -67,7 +67,7 @@ risk from notification-to-assignment.
 
 ## Release activation
 
-Apply `20260729000000_makesafe_hugo_notification_sla_v1.sql` before deploying
+Apply `20260729010000_makesafe_hugo_notification_sla_v1.sql` before deploying
 the matching `ops-api`. Development and validation send no real SMS. After the
 normal production deploy, the first live Hugo notification will fire on the
 next real deterministic physical intake that reaches the canonical board.

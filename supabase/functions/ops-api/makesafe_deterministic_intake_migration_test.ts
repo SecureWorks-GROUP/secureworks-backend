@@ -54,7 +54,7 @@ const freshSourceHealthMigration = await Deno.readTextFile(
 );
 const hugoNotificationMigration = await Deno.readTextFile(
   new URL(
-    "../../migrations/20260729000000_makesafe_hugo_notification_sla_v1.sql",
+    "../../migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql",
     import.meta.url,
   ),
 );

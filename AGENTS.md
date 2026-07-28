@@ -599,7 +599,7 @@ fresh-source health.
 
 The post-mint Hugo notification and honest five-minute denominator are owned by
 `makesafe_hugo_notification.ts`,
-`20260729000000_makesafe_hugo_notification_sla_v1.sql`, and
+`20260729010000_makesafe_hugo_notification_sla_v1.sql`, and
 `docs/evidence/ses-hugo-notification-sla-v1.md`. Notify only a newly minted
 physical job after the canonical server board contains it, resolve the one
 recipient from staff/config authority, and persist the pre-send audit claim
