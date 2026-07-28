@@ -709,7 +709,8 @@ function seedGuardOutcome(
     fixture.documents.some((document) =>
       document.id === "report" &&
       ["report", "makesafe_report"].includes(document.type.toLowerCase())
-    ) && fixture.documents.some((document) =>
+    ) &&
+    fixture.documents.some((document) =>
       document.id === "swms" && document.type.toLowerCase() === "swms"
     );
   if (!bindingFootprintComplete) {
@@ -864,10 +865,15 @@ Deno.test("sibling evidence seed guard executes empty, binding-only, claimed, am
     Error,
     "partial or drifted production footprint",
   );
-  for (const documents of [
-    [{ id: "report", type: "swms" }, { id: "swms", type: "swms" }],
-    [{ id: "report", type: "makesafe_report" }, { id: "swms", type: "report" }],
-  ]) {
+  for (
+    const documents of [
+      [{ id: "report", type: "swms" }, { id: "swms", type: "swms" }],
+      [{ id: "report", type: "makesafe_report" }, {
+        id: "swms",
+        type: "report",
+      }],
+    ]
+  ) {
     assertThrows(
       () =>
         seedGuardOutcome({
