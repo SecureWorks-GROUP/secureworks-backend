@@ -264,6 +264,7 @@ COMMENT ON TABLE public.makesafe_sibling_evidence_claims IS
 
 DO $$
 DECLARE
+  v_photo_match_count integer;
   v_photo_media_id uuid;
   v_photo_content_hash text;
 BEGIN
@@ -274,8 +275,45 @@ BEGIN
       'c3afc061-0d4a-43ff-8309-0b8b512e307a'::uuid,
       '02f614a4-09a7-422e-9381-c89a44aceccd'::uuid
     )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM public.xero_invoices
+      WHERE id = '3be46700-4d5d-4b91-b96e-8baf43ac9d7c'::uuid
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM public.emails
+      WHERE post_id = 'AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAAbMo76AAA='
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM public.job_documents
+      WHERE id IN (
+        '513cb62a-4f9f-4fd5-ae5c-66b0ce053448'::uuid,
+        '878641fc-99ba-4f5f-a0a6-d64708394b6a'::uuid
+      )
+    )
   ) THEN
     RETURN;
+  END IF;
+
+  SELECT count(*)
+  INTO v_photo_match_count
+  FROM public.job_media photo
+  WHERE photo.job_id = '02f614a4-09a7-422e-9381-c89a44aceccd'::uuid
+    AND photo.type = 'photo'
+    AND photo.makesafe_content_hash ~ '^sha256:[0-9a-f]{64}$'
+    AND position(
+      lower('displaced Hardie panels stacked safely') IN lower(
+        coalesce(photo.label, '') || ' ' || coalesce(photo.notes, '')
+      )
+    ) > 0
+  ;
+
+  IF v_photo_match_count <> 1 THEN
+    RAISE EXCEPTION
+      'reviewed sibling evidence seed refused: expected exactly one reviewed photo artifact, found %',
+      v_photo_match_count;
   END IF;
 
   SELECT photo.id, photo.makesafe_content_hash
@@ -288,9 +326,7 @@ BEGIN
       lower('displaced Hardie panels stacked safely') IN lower(
         coalesce(photo.label, '') || ' ' || coalesce(photo.notes, '')
       )
-    ) > 0
-  ORDER BY photo.created_at, photo.id
-  LIMIT 1;
+    ) > 0;
 
   IF NOT EXISTS (
     SELECT 1

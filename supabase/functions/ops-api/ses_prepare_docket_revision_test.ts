@@ -899,7 +899,7 @@ Deno.test("bidirectional positive-scope bundle evidence clears the card-local ph
         scope_phrase: "displaced Hardie panels stacked safely",
         media_id: "photo-26837",
         content_hash:
-          "sha256:a9381d58a42102fadd0f6cc11fa93e6f446a7d8989d16f2bbb37731667beb17e",
+          "sha256:f46202099887565a5738073440de40efa1b0793bfb13576ff69b7d5d56667f60",
       },
       report_document_id: "513cb62a-4f9f-4fd5-ae5c-66b0ce053448",
       swms_document_id: "878641fc-99ba-4f5f-a0a6-d64708394b6a",

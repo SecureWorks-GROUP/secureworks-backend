@@ -520,7 +520,7 @@ Deno.test(
       photo_scope_phrase: "displaced Hardie panels stacked safely",
       photo_media_id: "photo-26837",
       photo_content_hash:
-        "sha256:a9381d58a42102fadd0f6cc11fa93e6f446a7d8989d16f2bbb37731667beb17e",
+        "sha256:f46202099887565a5738073440de40efa1b0793bfb13576ff69b7d5d56667f60",
       report_document_id: "report-26837",
       swms_document_id: "swms-26837",
     }];
@@ -559,7 +559,7 @@ Deno.test(
       label: "Displaced Hardie panels stacked safely",
       notes: "",
       makesafe_content_hash:
-        "sha256:a9381d58a42102fadd0f6cc11fa93e6f446a7d8989d16f2bbb37731667beb17e",
+        "sha256:f46202099887565a5738073440de40efa1b0793bfb13576ff69b7d5d56667f60",
     }];
     const input = buildSesAssemblerInput(live);
     assertEquals(input.sibling_bundle_evidence?.status, "accepted");
