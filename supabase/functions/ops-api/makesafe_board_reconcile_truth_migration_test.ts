@@ -296,4 +296,12 @@ Deno.test("fact identity accepts canonical decimals without widening readiness",
     ),
     false,
   );
+  assertStringIncludes(
+    indexSource,
+    "'makesafe_reconciliation_state_token_v1'",
+  );
+  assertEquals(
+    indexSource.includes("canonicalJsonAndHash(row.state_facts)"),
+    false,
+  );
 });

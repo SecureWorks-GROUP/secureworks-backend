@@ -1040,6 +1040,15 @@ function json(data: unknown, status = 200) {
   })
 }
 
+async function reconciliationStateToken(client: any, stateFacts: any): Promise<string> {
+  const { data, error } = await client.rpc(
+    'makesafe_reconciliation_state_token_v1',
+    { p_state_facts: stateFacts },
+  )
+  if (error) throw error
+  return String(data)
+}
+
 function sb() {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 }
@@ -3681,7 +3690,7 @@ if (import.meta.main) serve(async (req: Request) => {
             attention_since: attention?.since || null,
             attention_evidence_refs: attention?.evidence_refs || [],
             state_token: row?.state_v2
-              ? `sha256:${(await canonicalJsonAndHash(row.state_facts)).hash}`
+              ? await reconciliationStateToken(client, row.state_facts)
               : null,
             state_facts: row?.state_facts || null,
           }
@@ -3743,7 +3752,7 @@ if (import.meta.main) serve(async (req: Request) => {
         const latestTokenPayload = await Promise.all(latestComparison.rows
           .map(async (row: any) => ({
             job_id: String(row.id),
-            state_token: `sha256:${(await canonicalJsonAndHash(row.state_facts)).hash}`,
+            state_token: await reconciliationStateToken(client, row.state_facts),
             state_facts: row.state_facts,
           })))
         const { hash: latestStateTokenHash } = await canonicalJsonAndHash(
