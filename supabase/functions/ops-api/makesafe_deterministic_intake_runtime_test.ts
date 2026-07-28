@@ -3949,6 +3949,18 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
     approvals++;
     return Promise.resolve({ job: { id: "job-twin" } });
   };
+  let notifications = 0;
+  const notifyPhysicalJob = (_client: any, notification: any) => {
+    notifications++;
+    assertEquals(notification.jobId, "job-twin");
+    assertEquals(notification.sourcePostIds.sort(), ["twin-a", "twin-b"]);
+    return Promise.resolve({
+      attempted: true,
+      accepted: true,
+      reason: "accepted",
+      auditId: "audit-twin",
+    });
+  };
   const client = fakeClient(store);
   const first = await runDeterministicIntake(client, {
     dryRun: false,
@@ -3958,6 +3970,7 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
     maxCases: 1,
     allowSourcePostIds: ["twin-a"],
     approveDraft: approving,
+    notifyPhysicalJob,
   });
   assertEquals(first.ai_calls, 0);
   assertEquals(first.totals.jobs_created, 1);
@@ -3966,6 +3979,10 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
   assertEquals(store.makesafe_intake_artifacts.length, 1);
   assertEquals(store.makesafe_intake_drafts[0].attachments_json.length, 1);
   assertEquals(approvals, 1);
+  assertEquals(notifications, 1);
+  assertEquals(first.totals.hugo_notifications_recorded, 1);
+  assertEquals(first.totals.hugo_notifications_accepted, 1);
+  assertEquals(first.totals.hugo_notifications_failed, 0);
 
   const counts = Object.fromEntries(
     Object.entries(store).map(([table, rows]) => [table, rows.length]),
@@ -3979,6 +3996,7 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
     allowSourcePostIds: ["twin-a"],
     requireAllAllowlistMatches: true,
     approveDraft: approving,
+    notifyPhysicalJob,
   });
   assertEquals(second.selection.selected_cases, 1);
   assertEquals(second.totals.cases_attempted, 0);
@@ -3988,6 +4006,7 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
   assertEquals(second.totals.jobs_created, 0);
   assertEquals(second.ai_calls, 0);
   assertEquals(approvals, 1);
+  assertEquals(notifications, 1);
   for (
     const table of [
       "makesafe_intake_cases",

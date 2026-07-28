@@ -595,6 +595,17 @@ guarded. Mutable residue is deleted; append-only/group evidence is retained only
 after terminal accounting excludes it from live boards, projections, and
 fresh-source health.
 
+## Deterministic Physical Intake Notifies After Board Proof
+
+The post-mint Hugo notification and honest five-minute denominator are owned by
+`makesafe_hugo_notification.ts`,
+`20260729010000_makesafe_hugo_notification_sla_v1.sql`, and
+`docs/evidence/ses-hugo-notification-sla-v1.md`. Notify only a newly minted
+physical job after the canonical server board contains it, resolve the one
+recipient from staff/config authority, and persist the pre-send audit claim
+before GHL. Synthetic live-fire must short-circuit before board, config, audit,
+or transport work. Apply the migration before its matching `ops-api`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

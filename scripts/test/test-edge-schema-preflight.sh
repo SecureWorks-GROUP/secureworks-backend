@@ -16,6 +16,7 @@ DOCS_READY_MIGRATION="$REPO_ROOT/supabase/migrations/20260728210000_makesafe_ses
 SIBLING_EVIDENCE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728730000_makesafe_sibling_evidence_bundle_u7.sql"
 PORTAL_CAPTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728500000_makesafe_portal_capture_bridge_u4.sql"
 SEED_SCOPE_MIGRATION="$REPO_ROOT/supabase/migrations/20260729000000_makesafe_state_seed_scope_accounting.sql"
+HUGO_NOTIFICATION_MIGRATION="$REPO_ROOT/supabase/migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -73,6 +74,10 @@ seed_scope_migration_sha() {
   shasum -a 256 "$SEED_SCOPE_MIGRATION" | awk '{print $1}'
 }
 
+hugo_notification_migration_sha() {
+  shasum -a 256 "$HUGO_NOTIFICATION_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -88,6 +93,7 @@ write_response() {
   SIBLING_EVIDENCE_EXPECTED_SHA="$(sibling_evidence_migration_sha)" \
   PORTAL_CAPTURE_EXPECTED_SHA="$(portal_capture_migration_sha)" \
   SEED_SCOPE_EXPECTED_SHA="$(seed_scope_migration_sha)" \
+  HUGO_NOTIFICATION_EXPECTED_SHA="$(hugo_notification_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -200,6 +206,17 @@ seed_scope_row = {
     "actual_statement_sha256": os.environ["SEED_SCOPE_EXPECTED_SHA"],
     "missing_markers": [],
 }
+hugo_notification_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260729010000",
+    "expected_migration_name": "makesafe_hugo_notification_sla_v1",
+    "expected_statement_sha256": os.environ["HUGO_NOTIFICATION_EXPECTED_SHA"],
+    "actual_migration_version": "20260729010000",
+    "actual_migration_name": "makesafe_hugo_notification_sla_v1",
+    "actual_statement_count": 10,
+    "actual_statement_sha256": None,
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -212,6 +229,7 @@ with open(sys.argv[1], "w") as f:
             sibling_evidence_row,
             portal_capture_row,
             seed_scope_row,
+            hugo_notification_row,
         ],
         f,
     )
@@ -412,7 +430,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared
