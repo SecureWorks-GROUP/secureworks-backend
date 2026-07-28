@@ -707,17 +707,32 @@ export function buildSesAssemblerInput(
   const workOrders = snapshot.documents.filter((item) =>
     ["work_order", "workorder", "wo"].includes(text(item.type).toLowerCase())
   );
-  const reportOnly = [
-    "ordinary_roof_portal",
-    "own_template_roof",
-    "assessment_quote",
-  ].includes(familyId);
   const matrix = resolveSesFamilyMatrixRow({
     builder_key: builder,
     family: familyId,
     strata: familyId === "own_template_roof",
     own_template_requested: familyId === "own_template_roof",
   });
+  // The sealed matrix owns these classification fields. Keeping a parallel
+  // family switch here allowed MLB assessment inputs to say delivery=null while
+  // the matrix required portal delivery, which U4 correctly rejected.
+  const reportOnly = matrix.ok ? matrix.row.report_only : [
+    "ordinary_roof_portal",
+    "own_template_roof",
+    "assessment_quote",
+  ].includes(familyId);
+  const reportDelivery = matrix.ok
+    ? matrix.row.report_delivery
+    : familyId === "ordinary_roof_portal"
+    ? "portal"
+    : familyId === "own_template_roof"
+    ? "own_document"
+    : null;
+  const subtype = matrix.ok
+    ? matrix.row.subtype
+    : familyId === "temporary_fencing"
+    ? "temporary_fencing"
+    : null;
   const builderReference = firstText(
     intakeCase?.builder_wo_canonical,
     intakeCase?.builder_po_canonical,
@@ -824,13 +839,9 @@ export function buildSesAssemblerInput(
         builder,
       ),
       family: familyId,
-      subtype: familyId === "temporary_fencing" ? "temporary_fencing" : null,
+      subtype,
       report_only: reportOnly,
-      report_delivery: familyId === "ordinary_roof_portal"
-        ? "portal"
-        : familyId === "own_template_roof"
-        ? "own_document"
-        : null,
+      report_delivery: reportDelivery,
       delivery_render_route: deliveryRoute.route,
       delivery_render_route_reason_code: deliveryRoute.reason_code,
       delivery_render_route_reason: deliveryRoute.reason,
