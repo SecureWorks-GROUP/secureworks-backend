@@ -520,7 +520,7 @@ build-stamped version truth are owned by
 boundary is `_shared/sealed_ses_money_fence.ts`.
 
 The v2 authority bootstrap and full-board two-way reconciliation are owned by
-`20260728030000_makesafe_board_reconcile_truth_u2.sql`,
+`20260728060000_makesafe_board_reconcile_truth_u2.sql`,
 `makesafe_state_seed`, and `makesafe_state_reconcile`. Both actions are
 API-key-only, POST-only, and dry-run by default. A live seed is acceptable only
 when the complete v2 comparison reports zero `projection_input_error` cards and

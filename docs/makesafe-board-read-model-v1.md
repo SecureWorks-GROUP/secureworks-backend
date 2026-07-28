@@ -29,7 +29,7 @@ corresponding additive migration is
 `20260728000001_makesafe_state_authority_u2.sql`; it performs no backfill or
 legacy-substatus conversion.
 
-Migration `20260728030000_makesafe_board_reconcile_truth_u2.sql` adds the
+Migration `20260728060000_makesafe_board_reconcile_truth_u2.sql` adds the
 missing dark bootstrap and reconciliation surfaces. It is not executed by the
 migration itself. `makesafe_state_seed` is API-key-only, defaults to dry-run,
 selects the complete board server-side, and records an idempotent seed run when

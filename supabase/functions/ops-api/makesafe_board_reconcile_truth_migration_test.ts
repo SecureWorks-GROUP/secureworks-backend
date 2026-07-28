@@ -7,13 +7,13 @@ import {
 
 const migration = await Deno.readTextFile(
   new URL(
-    "../../migrations/20260728030000_makesafe_board_reconcile_truth_u2.sql",
+    "../../migrations/20260728060000_makesafe_board_reconcile_truth_u2.sql",
     import.meta.url,
   ),
 );
 const rollback = await Deno.readTextFile(
   new URL(
-    "../../rollbacks/20260728030000_makesafe_board_reconcile_truth_u2_down.sql",
+    "../../rollbacks/20260728060000_makesafe_board_reconcile_truth_u2_down.sql",
     import.meta.url,
   ),
 );
