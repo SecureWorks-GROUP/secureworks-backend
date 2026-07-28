@@ -2194,7 +2194,24 @@ export function buildDeterministicIntakePlan(
         }
       } else if (claimOnly || missingIdentity.length) {
         state = "exception";
-        reasonCode = "below_identity_floor";
+        // Distinguish "we have a builder WO ref but no WO PDF" from a generic
+        // identity shortfall. The former is a reviewable grey area: a human or
+        // the AI skill can create the job from the subject + address without
+        // waiting for a PDF that may never arrive. The latter is a genuine
+        // parse gap.
+        const hasWoRef = !!merged.identity.externalRefCanonical ||
+          !!merged.identity.builderWoCanonical;
+        const hasExtractedPdf = instructionItems.some((i) =>
+          (i.source.pdfDocuments || []).some((d) =>
+            d.status === "extracted" && !!d.text
+          )
+        );
+        const woAttachmentMissing = evidenceMap.work_order_attachment?.status === "missing";
+        if (hasWoRef && !hasExtractedPdf && woAttachmentMissing) {
+          reasonCode = "wo_ref_without_pdf_pending_review";
+        } else {
+          reasonCode = "below_identity_floor";
+        }
       } else if (merged.identity.jobFamily === "unclassified") {
         state = "exception";
         reasonCode = "ambiguous_scope";

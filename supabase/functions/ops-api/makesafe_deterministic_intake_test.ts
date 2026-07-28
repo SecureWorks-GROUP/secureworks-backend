@@ -922,6 +922,44 @@ Deno.test("claim-only evidence cannot enter confirmed-live state", () => {
   assertEquals(plan.cases[0].reasonCode, "below_identity_floor");
 });
 
+Deno.test("WO ref without PDF or client name lands in review maybe-box", () => {
+  // Simulates the "Our Ref: MLB-25876 - 48 Doriot Way, Carine" format:
+  // the MLB ref is in the subject, the address is in the subject, but there
+  // is no WO PDF and no labelled client name in the body. This is the grey
+  // area that should be parked for human/AI review, not silently dropped.
+  const item = source({
+    postId: "wo-no-pdf",
+    subject: "Our Ref: MLB-25876 - 48 Doriot Way, Carine - Client Ref: 13345234",
+    body: "Please see attached site photos for this make safe job.",
+    attachments: [],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].identity.externalRefCanonical, "MLB-25876");
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(
+    plan.cases[0].reasonCode,
+    "wo_ref_without_pdf_pending_review",
+  );
+});
+
+Deno.test("WO ref with client name from body stays below_identity_floor", () => {
+  // When the body DOES supply a client name (e.g. "Client: John Smith"), the
+  // identity shortfall is about the missing WO/PO key, not about a missing
+  // PDF. This stays as below_identity_floor, not the maybe-box code.
+  const item = source({
+    postId: "wo-with-client",
+    subject: "NEW WORK ORDER MLB-32000",
+    body: "Client: Claim Client\nAddress: 100 Theta Circuit, Perth",
+    attachments: [{
+      ...pdf("wo-with-client"),
+      name: "Supporting document.pdf",
+    }],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(plan.cases[0].reasonCode, "below_identity_floor");
+});
+
 Deno.test("revision and reopen cycles remain separate ordered lineage cases", () => {
   const original = source({
     postId: "cycle-1",

@@ -30,6 +30,7 @@ export const MAKESAFE_REASON_CODES = [
   "adapter_parse_failure",
   "conflicting_fields",
   "awaiting_job_creation",
+  "wo_ref_without_pdf_pending_review",
 ] as const;
 export type MakesafeReasonCode = typeof MAKESAFE_REASON_CODES[number];
 

@@ -297,6 +297,8 @@ function nextActionForCase(row: IntakeCaseOperationalRow): string | null {
       return "map_builder_profile";
     case "below_identity_floor":
       return "recover_strong_builder_identity";
+    case "wo_ref_without_pdf_pending_review":
+      return "review_maybe_box_create_job";
     case "adapter_parse_failure":
       return "recover_required_case_fields";
     case "conflicting_fields":

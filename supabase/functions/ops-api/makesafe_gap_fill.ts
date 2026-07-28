@@ -89,6 +89,11 @@ export function describeGap(caseRow: any): string {
     case "below_identity_floor":
       return "Exception: no confirmed builder WO/PO identity. AI cannot mint " +
         "identity; only client/site job material can be recovered.";
+    case "wo_ref_without_pdf_pending_review":
+      return "Maybe-box: builder WO ref extracted from subject but no WO PDF " +
+        "was received. Review the email subject + address and decide whether " +
+        "to create the job. AI may fill client/site material from the email " +
+        "body; the WO ref is already known.";
     case "adapter_parse_failure":
       return missing.length
         ? `Exception: deterministic parse left required field(s) empty: ${
