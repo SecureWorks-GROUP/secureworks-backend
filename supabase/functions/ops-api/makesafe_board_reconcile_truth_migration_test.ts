@@ -35,6 +35,12 @@ const decimalFactMigration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const decimalBoundaryContract = await Deno.readTextFile(
+  new URL(
+    "../../tests/makesafe_decimal_fact_boundary_contract.sql",
+    import.meta.url,
+  ),
+);
 const indexSource = await Deno.readTextFile(
   new URL("./index.ts", import.meta.url),
 );
@@ -252,7 +258,7 @@ Deno.test("fact identity accepts canonical decimals without widening readiness",
   );
   assertStringIncludes(
     decimalFactMigration,
-    "public.makesafe_fact_canonical_json_v1(v_row.state_facts)",
+    "public.makesafe_reconciliation_state_token_v1(v_row.state_facts)",
   );
   assertStringIncludes(
     decimalFactMigration,
@@ -275,6 +281,14 @@ Deno.test("fact identity accepts canonical decimals without widening readiness",
   assertStringIncludes(
     migration,
     "public.makesafe_canonical_json_v1(v_row.state_facts)",
+  );
+  assertStringIncludes(
+    decimalBoundaryContract,
+    "public.makesafe_reconciliation_state_token_v1(v_facts)",
+  );
+  assertStringIncludes(
+    decimalBoundaryContract,
+    "public.makesafe_canonical_json_v1(v_readiness)",
   );
   assertEquals(
     /UPDATE\s+public\.(jobs|makesafe_job_details)\b/i.test(

@@ -89,6 +89,24 @@ AS $$
   );
 $$;
 
+CREATE OR REPLACE FUNCTION public.makesafe_reconciliation_state_token_v1(
+  p_state_facts jsonb
+)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+STRICT
+SET search_path = public, extensions
+AS $$
+  SELECT 'sha256:' || encode(
+    extensions.digest(
+      convert_to(public.makesafe_fact_canonical_json_v1(p_state_facts), 'UTF8'),
+      'sha256'
+    ),
+    'hex'
+  );
+$$;
+
 DO $$
 DECLARE
   v_definition text;
@@ -105,7 +123,7 @@ BEGIN
   EXECUTE replace(
     v_definition,
     'public.makesafe_canonical_json_v1(v_row.state_facts)',
-    'public.makesafe_fact_canonical_json_v1(v_row.state_facts)'
+    'public.makesafe_reconciliation_state_token_v1(v_row.state_facts)'
   );
 END;
 $$;
@@ -144,4 +162,9 @@ $$;
 REVOKE ALL ON FUNCTION public.makesafe_fact_canonical_json_v1(jsonb)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.makesafe_fact_canonical_json_v1(jsonb)
+  TO service_role;
+
+REVOKE ALL ON FUNCTION public.makesafe_reconciliation_state_token_v1(jsonb)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.makesafe_reconciliation_state_token_v1(jsonb)
   TO service_role;
