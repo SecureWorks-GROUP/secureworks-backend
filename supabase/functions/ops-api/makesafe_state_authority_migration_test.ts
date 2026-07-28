@@ -167,6 +167,7 @@ Deno.test("family pointer invalidation keeps its whole-board scope explicit", ()
     safeUpdateMigration,
     "UPDATE public.makesafe_readiness_current",
   );
+  assertStringIncludes(safeUpdateMigration, "PERFORM 1");
   assertStringIncludes(safeUpdateMigration, "WHERE job_id IS NOT NULL;");
   assertStringIncludes(migration, "job_id uuid PRIMARY KEY");
   assert(
