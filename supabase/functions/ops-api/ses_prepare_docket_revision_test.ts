@@ -1076,7 +1076,10 @@ Deno.test("persistence adapter writes only private docket artifacts and the appe
     false,
   );
   const calls: Array<{ kind: string; name: string }> = [];
-  let rpcArgs: Record<string, unknown> | null = null;
+  const rpcCalls: Array<{
+    name: string;
+    args: Record<string, unknown>;
+  }> = [];
   const client = {
     storage: {
       from: (bucket: string) => ({
@@ -1096,9 +1099,11 @@ Deno.test("persistence adapter writes only private docket artifacts and the appe
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
       calls.push({ kind: "rpc", name });
-      rpcArgs = args;
+      rpcCalls.push({ name, args });
       return {
-        data: { committed_at: "2026-07-27T01:00:01.000Z" },
+        data: name === "commit_makesafe_docket_revision_v1"
+          ? { committed_at: "2026-07-27T01:00:01.000Z" }
+          : { review_state: "needs_review" },
         error: null,
       };
     },
@@ -1137,12 +1142,14 @@ Deno.test("persistence adapter writes only private docket artifacts and the appe
     ),
   );
   assertEquals(calls.filter((call) => call.kind === "table"), []);
-  assertEquals(calls.at(-1), {
-    kind: "rpc",
-    name: "commit_makesafe_docket_revision_v1",
-  });
-  assert(rpcArgs);
-  const revisionPayload = (rpcArgs as Record<string, unknown>)
+  assertEquals(
+    calls.filter((call) => call.kind === "rpc"),
+    [
+      { kind: "rpc", name: "commit_makesafe_docket_revision_v1" },
+      { kind: "rpc", name: "record_ses_docket_review_state_v1" },
+    ],
+  );
+  const revisionPayload = rpcCalls[0].args
     .p_revision as Record<string, unknown>;
   assertEquals(revisionPayload.pre_xero_docs_ready, true);
   assertEquals(
@@ -1150,6 +1157,15 @@ Deno.test("persistence adapter writes only private docket artifacts and the appe
       .create_invoice,
     false,
   );
+  assertEquals(rpcCalls[1].args, {
+    p_event: {
+      docket_revision_id: prepared.docket_revision_id,
+      event_kind: "prepared",
+      expected_output_content_hash: prepared.output_content_hash,
+      actor_identity: "ses-u4-test",
+      reason: "The assembler completed the audit-grade family pack.",
+    },
+  });
 
   let orphanDownloads = 0;
   const orphanArtifact = prepared.artifacts[0];

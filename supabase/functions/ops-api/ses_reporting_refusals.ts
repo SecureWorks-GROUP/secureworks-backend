@@ -40,6 +40,8 @@ const FACTS = {
     "Released work has a later attendance, but no human billing disposition has been recorded.",
   release_approval_missing:
     "No current human SEND IT approval exists for this exact release revision.",
+  docs_ready_signoff_missing:
+    "No current Captain Docs Ready signoff exists for the exact docket bytes.",
   invoice_approval_missing:
     "No current human APPROVE INVOICE decision exists for this exact invoice revision.",
   graph_outcome_unknown:

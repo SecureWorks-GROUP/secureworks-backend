@@ -529,6 +529,17 @@ may write only the display status ledger plus the on-card Captain-action ledger;
 it must commit an exact `trustworthy | captain_marked` partition with
 `neither=0`.
 
+## SES Docs Ready Signoff Approves Exact Pack Bytes
+
+Apply `20260728210000_makesafe_ses_docs_ready_signoff.sql` before the matching
+`ops-api`. Audit-grade assembler output enters `needs_review`; only an identified
+Captain/admin-owner can move the exact docket hash and assembler/family versions
+to `signed_off`. Any new docket revision invalidates the old tick, and U6R
+rechecks current signoff before every report/photo/invoice route send. The
+authoritative API and gate code is in `ses_docs_ready.ts`,
+`ses_docket_persistence.ts`, and `ses_reporting_actions.ts`; do not add a
+client-only send bypass or a second family-completeness rule.
+
 ## The Repository Root Stays npm-Package-Free
 
 This repo is Deno-rooted (`deno.jsonc` at the root). Deno 2 auto-discovers a root

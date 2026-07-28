@@ -30,6 +30,11 @@ import {
 } from "./ses_review_cockpit.ts";
 import { sesSha256, stableUuidFromSha256 } from "./ses_docket_envelope.ts";
 import {
+  canManageSesDocsReadySignoff,
+  nextSesDocsReadyState,
+} from "./ses_docs_ready.ts";
+import { SES_DOCKET_BUCKET } from "./ses_docket_persistence.ts";
+import {
   isSesRefusal,
   type SesRefusal,
   sesRefusal,
@@ -53,6 +58,10 @@ export interface SesSupabaseClient {
         bytes: Uint8Array,
         options: { contentType: string; upsert: false },
       ): Promise<SupabaseResponse<any>>;
+      createSignedUrl(
+        path: string,
+        expiresIn: number,
+      ): Promise<SupabaseResponse<{ signedUrl: string }>>;
     };
   };
 }
@@ -791,6 +800,298 @@ async function loadOperatorAuth(
   };
 }
 
+async function requireSesDocsReadyViewer(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+) {
+  if (auth.mode === "api_key") return;
+  const operator = await loadOperatorAuth(client, auth);
+  if (
+    !canManageSesDocsReadySignoff({
+      mode: operator.mode,
+      role: operator.mode === "jwt" ? operator.role : null,
+      operator_class: operator.mode === "jwt" ? operator.operator_class : null,
+    })
+  ) {
+    throw new SesActionError(403, {
+      state: "refused",
+      fact:
+        "The Docs Ready review pack is restricted to the Captain, an admin-owner, or the privileged ops key.",
+    });
+  }
+}
+
+async function requireSesDocsReadySigner(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+) {
+  const operator = await loadOperatorAuth(client, auth);
+  if (
+    operator.mode !== "jwt" || !auth.user ||
+    !canManageSesDocsReadySignoff({
+      mode: operator.mode,
+      role: operator.role,
+      operator_class: operator.operator_class,
+    })
+  ) {
+    throw new SesActionError(403, {
+      state: "refused",
+      fact:
+        "Docs Ready signoff requires an identified Captain or admin-owner session; API and automation keys cannot tick or revoke it.",
+    });
+  }
+  return operator;
+}
+
+export async function listSesDocsReadyReviewsAction(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+  limit = 50,
+) {
+  await requireSesDocsReadyViewer(client, auth);
+  const safeLimit = Number.isSafeInteger(limit)
+    ? Math.max(1, Math.min(limit, 100))
+    : 50;
+  const response = await client.from("ses_docket_review_current").select(
+    "org_id,job_id,docket_revision_id,docket_output_content_hash,assembler_version,family_matrix_version,docket_stage,docket_committed_at,review_event_id,review_event_sequence,review_state,event_kind,review_state_changed_at,invalidated_signoff_event_id",
+  ).eq("review_state", "needs_review")
+    .order("review_state_changed_at", { ascending: true })
+    .limit(safeLimit);
+  if (response.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The Docs Ready review queue could not be read (${
+        response.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  return {
+    state: "needs_review",
+    dockets: response.data || [],
+  };
+}
+
+export async function getSesReviewablePackAction(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+  docketRevisionId: string,
+) {
+  await requireSesDocsReadyViewer(client, auth);
+  if (!docketRevisionId) {
+    throw new SesActionError(400, {
+      state: "refused",
+      fact: "docket_revision_id is required.",
+    });
+  }
+  const review = requireValue(
+    await client.from("ses_docket_review_current").select("*")
+      .eq("docket_revision_id", docketRevisionId).maybeSingle(),
+    "The requested docket is no longer the current reviewable pack.",
+  );
+  const docket = requireValue(
+    await client.from("makesafe_docket_revisions").select(
+      "id,org_id,job_id,output_content_hash,assembler_version,family_matrix_version,stage,committed_at,envelope,blockers,email_drafts,review_spec,local_invoice_proposal,xero_binding,artifact_count,artifact_size_bytes",
+    ).eq("id", docketRevisionId).maybeSingle(),
+    "The exact reviewable docket revision no longer exists.",
+  );
+  if (
+    review.docket_output_content_hash !== docket.output_content_hash ||
+    review.assembler_version !== docket.assembler_version ||
+    review.family_matrix_version !== docket.family_matrix_version
+  ) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "stale_review",
+        "Reload the current Docs Ready queue and open the exact current pack.",
+      ),
+    );
+  }
+  const artifactsResponse = await client.from("makesafe_docket_artifacts")
+    .select("role,object_key,media_type,content_hash,size_bytes,metadata")
+    .eq("revision_id", docketRevisionId)
+    .order("object_key");
+  if (artifactsResponse.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The reviewable pack artifacts could not be read (${
+        artifactsResponse.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  const artifacts = await Promise.all(
+    (artifactsResponse.data || []).map(async (artifact: any) => {
+      const prefix = `${SES_DOCKET_BUCKET}/`;
+      const objectKey = String(artifact.object_key || "");
+      if (!objectKey.startsWith(prefix)) {
+        throw new SesActionError(503, {
+          state: "refused",
+          fact:
+            "A reviewable pack artifact points outside the private SES docket bucket.",
+        });
+      }
+      const signed = await client.storage.from(SES_DOCKET_BUCKET)
+        .createSignedUrl(objectKey.slice(prefix.length), 300);
+      if (signed.error || !signed.data?.signedUrl) {
+        throw new SesActionError(503, {
+          state: "refused",
+          fact: `A reviewable pack artifact URL could not be signed (${
+            signed.error?.message || objectKey
+          }).`,
+        });
+      }
+      return {
+        ...artifact,
+        signed_url: signed.data.signedUrl,
+        signed_url_expires_in_seconds: 300,
+      };
+    }),
+  );
+  const historyResponse = await client.from("ses_docket_review_events").select(
+    "id,event_sequence,review_state,event_kind,actor_user_id,actor_identity,reason,signed_off_at,created_at,docket_output_content_hash,assembler_version,family_matrix_version,invalidated_signoff_event_id",
+  ).eq("docket_revision_id", docketRevisionId)
+    .order("event_sequence", { ascending: true });
+  if (historyResponse.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The review audit trail could not be read (${
+        historyResponse.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  return {
+    review,
+    docket,
+    artifacts,
+    audit_trail: historyResponse.data || [],
+  };
+}
+
+export async function signOffSesDocketAction(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+  args: {
+    docket_revision_id: string;
+    expected_output_content_hash: string;
+  },
+) {
+  await requireSesDocsReadySigner(client, auth);
+  if (
+    !String(args.docket_revision_id || "").trim() ||
+    !/^sha256:[0-9a-f]{64}$/.test(
+      String(args.expected_output_content_hash || ""),
+    )
+  ) {
+    throw new SesActionError(400, {
+      state: "refused",
+      fact:
+        "docket_revision_id and the exact displayed SHA-256 output hash are required.",
+    });
+  }
+  const current = requireValue(
+    await client.from("ses_docket_review_current").select(
+      "docket_revision_id,docket_output_content_hash,review_state",
+    ).eq("docket_revision_id", args.docket_revision_id).maybeSingle(),
+    "The requested docket is no longer the current reviewable pack.",
+  );
+  if (
+    current.docket_output_content_hash !==
+      args.expected_output_content_hash
+  ) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "stale_review",
+        "Reload the current review pack and tick its exact displayed hash.",
+      ),
+    );
+  }
+  if (current.review_state !== "signed_off") {
+    nextSesDocsReadyState(current.review_state, "signed_off");
+  }
+  const recorded = await client.rpc("record_ses_docket_review_state_v1", {
+    p_event: {
+      docket_revision_id: args.docket_revision_id,
+      event_kind: "signed_off",
+      expected_output_content_hash: args.expected_output_content_hash,
+      actor_user_id: auth.user!.id,
+      actor_identity: auth.user!.email || auth.user!.id,
+      reason: "Captain approved the exact displayed pack bytes.",
+    },
+  });
+  return {
+    review: requireValue(
+      recorded,
+      "The exact Docs Ready signoff could not be recorded.",
+    ),
+  };
+}
+
+export async function revokeSesDocketSignoffAction(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+  args: {
+    docket_revision_id: string;
+    expected_output_content_hash: string;
+    reason: string;
+  },
+) {
+  await requireSesDocsReadySigner(client, auth);
+  if (
+    !String(args.docket_revision_id || "").trim() ||
+    !/^sha256:[0-9a-f]{64}$/.test(
+      String(args.expected_output_content_hash || ""),
+    )
+  ) {
+    throw new SesActionError(400, {
+      state: "refused",
+      fact:
+        "docket_revision_id and the exact displayed SHA-256 output hash are required.",
+    });
+  }
+  if (!String(args.reason || "").trim()) {
+    throw new SesActionError(400, {
+      state: "refused",
+      fact: "A concrete signoff revocation reason is required.",
+    });
+  }
+  const current = requireValue(
+    await client.from("ses_docket_review_current").select(
+      "docket_revision_id,docket_output_content_hash,review_state",
+    ).eq("docket_revision_id", args.docket_revision_id).maybeSingle(),
+    "The requested docket is no longer the current reviewable pack.",
+  );
+  if (
+    current.docket_output_content_hash !==
+      args.expected_output_content_hash
+  ) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "stale_review",
+        "Reload the current review pack before revoking its exact signoff.",
+      ),
+    );
+  }
+  nextSesDocsReadyState(current.review_state, "revoked");
+  const recorded = await client.rpc("record_ses_docket_review_state_v1", {
+    p_event: {
+      docket_revision_id: args.docket_revision_id,
+      event_kind: "revoked",
+      expected_output_content_hash: args.expected_output_content_hash,
+      actor_user_id: auth.user!.id,
+      actor_identity: auth.user!.email || auth.user!.id,
+      reason: args.reason.trim(),
+    },
+  });
+  return {
+    review: requireValue(
+      recorded,
+      "The exact Docs Ready signoff revocation could not be recorded.",
+    ),
+  };
+}
+
 export async function approveSesInvoiceRevisionAction(
   client: SesSupabaseClient,
   auth: SesActionAuth,
@@ -1270,13 +1571,28 @@ export async function executeSesInvoiceRevisionAction(
       },
     },
   });
+  const boundDocket = requireValue(
+    bound,
+    "The real AUTHORISED Xero PDF could not be bound to a new docket revision.",
+  );
+  requireValue(
+    await client.rpc("record_ses_docket_review_state_v1", {
+      p_event: {
+        docket_revision_id: boundDocket.id,
+        event_kind: "prepared",
+        expected_output_content_hash: boundDocket.output_content_hash ||
+          docketHash,
+        actor_identity: args.actor,
+        reason:
+          "The AUTHORISED Xero PDF changed the exact pack bytes and requires a fresh Captain tick.",
+      },
+    }),
+    "The invoice-bound pack could not be queued for a fresh Docs Ready review.",
+  );
   return {
     state: "authorised_invoice_bound",
     invoice: authorisedInvoice,
-    docket_revision: requireValue(
-      bound,
-      "The real AUTHORISED Xero PDF could not be bound to a new docket revision.",
-    ),
+    docket_revision: boundDocket,
     invoice_create_dispatched: created.dispatched,
     invoice_authorise_dispatched: authorised.dispatched,
     send_dispatched: false,
@@ -1503,6 +1819,30 @@ export interface SesReleaseXeroReader {
   readAuthorised(invoiceId: string): Promise<boolean>;
 }
 
+export async function assertSesDocketsSignedOffForSend(
+  client: SesSupabaseClient,
+  docketRevisionIds: string[],
+): Promise<void> {
+  const exactIds = [...new Set(docketRevisionIds.filter(Boolean))].sort();
+  const asserted = await client.rpc("assert_ses_dockets_signed_off_v1", {
+    p_docket_revision_ids: exactIds,
+  });
+  if (asserted.error || !asserted.data) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "docs_ready_signoff_missing",
+        "Open each current reviewable pack and record the Captain tick before SEND IT.",
+        {
+          fact: asserted.error?.message ||
+            "No current Captain Docs Ready signoff covers every exact release member.",
+          evidence: { docket_revision_ids: exactIds },
+        },
+      ),
+    );
+  }
+}
+
 export async function executeSesReleaseRevisionAction(
   client: SesSupabaseClient,
   auth: SesActionAuth,
@@ -1544,6 +1884,10 @@ export async function executeSesReleaseRevisionAction(
         "The approved release does not contain the exact member set and all three required routes.",
     });
   }
+  await assertSesDocketsSignedOffForSend(
+    client,
+    members.map((member: any) => String(member.docket_revision_id || "")),
+  );
   requireValue(
     await client.rpc("begin_ses_release_execution_v1", {
       p_release_revision_id: args.release_revision_id,
@@ -1610,6 +1954,9 @@ export async function executeSesReleaseRevisionAction(
 
   const store = createSupabaseSesEffectStore(client);
   const routeProofs = [];
+  const exactDocketRevisionIds = members.map((member: any) =>
+    String(member.docket_revision_id || "")
+  );
   for (const kind of SES_ROUTE_ORDER) {
     const route = routes.find((candidate: any) =>
       candidate.route_kind === kind
@@ -1623,6 +1970,10 @@ export async function executeSesReleaseRevisionAction(
         ),
       );
     }
+    await assertSesDocketsSignedOffForSend(
+      client,
+      exactDocketRevisionIds,
+    );
     const effect = await buildSesEffect({
       org_id: args.org_id,
       effect_kind: "route_send",

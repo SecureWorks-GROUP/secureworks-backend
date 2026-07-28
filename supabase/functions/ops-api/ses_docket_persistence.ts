@@ -1,4 +1,5 @@
 import { type SesArtifact, sesSha256 } from "./ses_docket_envelope.ts";
+import { evaluateSesDocsReadyGate } from "./ses_docs_ready.ts";
 import type {
   SesPersistPayload,
   SesPrepareDependencies,
@@ -202,6 +203,28 @@ export function createSesDocketPersistenceAdapter(
     const committedAt = String(committed.data.committed_at || "");
     if (!committedAt) {
       throw new Error("docket revision commit omitted committed_at");
+    }
+    const docsReady = evaluateSesDocsReadyGate(revision);
+    if (docsReady.state === "needs_review") {
+      const queued = await options.client.rpc(
+        "record_ses_docket_review_state_v1",
+        {
+          p_event: {
+            docket_revision_id: revisionId,
+            event_kind: "prepared",
+            expected_output_content_hash: revision.output_content_hash,
+            actor_identity: options.created_by,
+            reason: "The assembler completed the audit-grade family pack.",
+          },
+        },
+      );
+      if (queued.error || !queued.data) {
+        throw new Error(
+          `docket review queue commit failed: ${
+            queued.error?.message || "empty review event result"
+          }`,
+        );
+      }
     }
     return { committed_at: committedAt };
   };
