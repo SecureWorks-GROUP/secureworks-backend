@@ -238,6 +238,7 @@ import {
 import {
   makesafeIntakeReconciliation as _makesafeIntakeReconciliation,
   makesafeIntakeReconcileInvariant as _makesafeIntakeReconcileInvariant,
+  reconcileFreshSourceCoverage as _reconcileFreshSourceCoverage,
 } from './makesafe_intake_reconciliation.ts'
 import {
   makesafeIntakeBackfillReport as _makesafeIntakeBackfillReport,
@@ -21285,6 +21286,7 @@ async function intakeHealth(client: any) {
       logical_groups: null,
       live_and_true: invariant.live_and_true,
       window_days: invariant.window_days,
+      oldest_received_at: invariant.oldest_unaccounted_received_at,
       sample: invariant.unaccounted.slice(0, 10),
     }
   } catch (e) {
@@ -21365,13 +21367,25 @@ async function intakeHealth(client: any) {
     ? Number(health?.fresh_source_lag_seconds)
     : null
   const oldestUnfatedReceivedAt = health?.oldest_unfated_received_at || null
-  const freshSourceCoverageKnown = unfatedSourceCount !== null &&
-    freshSourceLagSeconds !== null &&
-    ((unfatedSourceCount === 0 && oldestUnfatedReceivedAt === null &&
-      freshSourceLagSeconds === 0) ||
-      (unfatedSourceCount > 0 && oldestUnfatedReceivedAt !== null))
+  // The source ledger and the legacy draft/job invariant historically disagreed
+  // when a source had a canonical exception/non-work case but intentionally had
+  // no draft or job. The invariant now reads that case spine. Still combine both
+  // physical-source denominators and take the worse result so a genuine candidate
+  // miss cannot be hidden by a stale zero during mixed-version rollout.
+  const reconciledFreshCoverage = _reconcileFreshSourceCoverage({
+    storedUnfatedSourceCount: unfatedSourceCount,
+    storedOldestUnfatedReceivedAt: oldestUnfatedReceivedAt,
+    storedFreshSourceLagSeconds: freshSourceLagSeconds,
+    candidateUnaccountedCount: Number.isSafeInteger(Number(unaccounted?.count)) &&
+        Number(unaccounted?.count) >= 0
+      ? Number(unaccounted.count)
+      : null,
+    candidateOldestReceivedAt: unaccounted?.oldest_received_at || null,
+    nowIso,
+  })
+  const freshSourceCoverageKnown = reconciledFreshCoverage.known
   const freshSourceCoverageHealthy = freshSourceCoverageKnown &&
-    freshSourceLagSeconds <= 5 * 60
+    reconciledFreshCoverage.freshSourceLagSeconds! <= 5 * 60
   const logicalSlaHealthy = logicalSla24h?.complete === true &&
     logicalSla24h?.outcomes?.missed_or_late === 0 &&
     logicalSla24h?.hugo_notification?.missed_or_late === 0
@@ -21402,9 +21416,16 @@ async function intakeHealth(client: any) {
       sla_seconds: 5 * 60,
       latest_ingested_received_at: health?.latest_ingested_received_at || null,
       latest_final_fate_received_at: health?.latest_final_fate_received_at || null,
-      unfated_source_count: unfatedSourceCount,
-      oldest_unfated_received_at: oldestUnfatedReceivedAt,
-      fresh_source_lag_seconds: freshSourceLagSeconds,
+      unfated_source_count: reconciledFreshCoverage.unfatedSourceCount,
+      oldest_unfated_received_at:
+        reconciledFreshCoverage.oldestUnfatedReceivedAt,
+      fresh_source_lag_seconds: reconciledFreshCoverage.freshSourceLagSeconds,
+      source_ledger_unfated_source_count: unfatedSourceCount,
+      candidate_no_draft_no_job_count: Number.isSafeInteger(
+          Number(unaccounted?.count),
+        ) && Number(unaccounted?.count) >= 0
+        ? Number(unaccounted.count)
+        : null,
       last_fresh_source_accounted_at: health?.last_fresh_source_accounted_at || null,
     },
     cron: {

@@ -134,8 +134,43 @@ prepared behavior or the existing accountable path intentionally retained.
    matching the safe control “we will follow up with the tenant”.
 6. Account explicit `SYSTEM TEST ... IGNORE` messages as non-work while
    preserving the separately authenticated synthetic live-fire lane.
+7. Make the draft/job reconciliation invariant recognise canonical case-source
+   fates, and fail closed over any genuine candidate miss so the fresh-source
+   and unaccounted health surfaces cannot disagree.
 
 No ES family enumeration or family matrix changed. No migration is required.
+
+## Latency-scout reconciliation
+
+The independent live-clock scout was reproduced read-only at
+`2026-07-28T04:26:19Z`. The same `intake_health` response reported six raw
+unaccounted rows, zero ledger-unfated sources, and three logical dual-capture
+groups:
+
+| Logical candidate | Received UTC | Raw rows | Canonical durable fate | Prepared reconciliation |
+|---|---|---:|---|---|
+| `MLB-24881` | 2026-07-28 00:11:32 | 2 | one case, `exception / below_identity_floor`, committed 92 seconds after receipt | Count the canonical case-source as the visible fate even though safety correctly produced no draft or job. |
+| AJS `70062` | 2026-07-26 22:09:40 | 2 | one case, `accounted_non_wo / non_makesafe` | Count the canonical non-work case; do not invent a job from a bare-number report/invoice message. |
+| `MLB-26721` | 2026-07-22 00:05:14 | 2 | one case, `exception / conflicting_fields`, `sibling_of`, committed 112 seconds after receipt | Count the canonical visible exception instead of requiring a draft or job. |
+
+All six physical rows already had exactly one
+`makesafe_intake_case_sources` row, and each twin pair pointed to the same
+logical case. None had a classifier-exclusion row. Fresh-source health was
+therefore correct to report zero unfated sources. The false positive came from
+the legacy reconciliation invariant, which considered only drafts, jobs, and
+its own classification replay while ignoring the canonical case spine.
+
+The reconciled contract is:
+
+```text
+one physical source -> one canonical case-source fate
+```
+
+The read now resolves those case sources before asking whether a draft or job
+exists. During a mixed-version rollout, the top-level health calculation also
+combines the stored source-ledger count with any genuinely unaccounted
+candidate count and uses the worse result. A missing case cannot be hidden by a
+stale zero, while a safe exception case is no longer misreported as vanished.
 
 ## Captain review points
 
@@ -151,7 +186,7 @@ No ES family enumeration or family matrix changed. No migration is required.
 ## Validation
 
 - Changed-file `deno check`: passed.
-- Focused regression suite: 133 passed, 0 failed.
+- Focused regression suite: 288 passed, 0 failed.
 - Successful 60-day GET-only replay after the main pathway changes: 1,431
   sources, every source accounted, no increase in automatic live-job creation,
   and 30 previously non-work sources moved into visible exception accounting.
