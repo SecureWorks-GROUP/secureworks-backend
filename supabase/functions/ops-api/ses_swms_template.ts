@@ -3,7 +3,7 @@ import type { SesAssemblerInputV1 } from "./ses_docket_envelope.ts";
 // Port of the approved SecureWorks reporting-skill templates:
 // general-makesafe.py, roof-makesafe.py and hardie-fence.py. The upstream file
 // hashes below bind provenance to those sealed sources; job-specific values are
-// derived only from the canonical work-order and current-cycle trade report.
+// derived only from the canonical work order and bound field trade report.
 export const SES_SWMS_GENERATION_PLAN_VERSION =
   "secureworks.swms-generation-plan/v1";
 export const SES_SWMS_TEMPLATE_VERSION =
