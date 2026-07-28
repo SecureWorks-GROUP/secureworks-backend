@@ -373,6 +373,18 @@ export function resolveSiblingBundleEvidence(
   ) {
     failures.push("delivery_scope_not_covered");
   }
+  if (
+    email && claim &&
+    !phraseCovered(
+      `${firstText(email.subject)} ${firstText(email.body_preview)}`,
+      claim.photo_scope_phrase,
+    )
+  ) {
+    failures.push("photo_scope_not_covered");
+  }
+  if (claim && !text(claim.photo_scope_phrase)) {
+    failures.push("photo_scope_claim_missing");
+  }
   const documents = snapshot.bundle_documents || [];
   const report = claim
     ? documents.find((row) =>
@@ -445,6 +457,11 @@ export function resolveSiblingBundleEvidence(
         email_post_id: text(email.post_id),
         content_sha256: text(email.content_sha256),
         scope_phrase: text(claim.delivery_scope_phrase),
+      },
+      photo: {
+        email_post_id: text(email.post_id),
+        content_sha256: text(email.content_sha256),
+        scope_phrase: text(claim.photo_scope_phrase),
       },
       report_document_id: text(report.id),
       swms_document_id: text(swms.id),

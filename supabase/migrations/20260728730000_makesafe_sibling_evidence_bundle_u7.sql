@@ -52,6 +52,8 @@ CREATE TABLE public.makesafe_sibling_evidence_claims (
     CHECK (delivery_email_content_sha256 ~ '^[0-9a-f]{64}$'),
   delivery_scope_phrase text NOT NULL
     CHECK (length(btrim(delivery_scope_phrase)) >= 8),
+  photo_scope_phrase text NOT NULL
+    CHECK (length(btrim(photo_scope_phrase)) >= 8),
   report_document_id uuid NOT NULL
     REFERENCES public.job_documents(id) ON DELETE RESTRICT,
   swms_document_id uuid NOT NULL
@@ -122,6 +124,12 @@ BEGIN
      AND delivery.has_attachments IS TRUE
      AND position(
        lower(NEW.delivery_scope_phrase) IN lower(
+         coalesce(delivery.subject, '') || ' ' ||
+         coalesce(delivery.body_preview, '')
+       )
+     ) > 0
+     AND position(
+       lower(NEW.photo_scope_phrase) IN lower(
          coalesce(delivery.subject, '') || ' ' ||
          coalesce(delivery.body_preview, '')
        )
@@ -239,6 +247,38 @@ COMMENT ON TABLE public.makesafe_sibling_bundle_binding_revisions IS
 COMMENT ON TABLE public.makesafe_sibling_evidence_claims IS
   'Exact positive delivery, invoice-line, report, and SWMS evidence for one directed bundle binding. Similar addresses or loose notes are never claims.';
 
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public.jobs claiming
+    JOIN public.jobs sibling
+      ON sibling.id = '02f614a4-09a7-422e-9381-c89a44aceccd'::uuid
+     AND sibling.org_id = claiming.org_id
+    JOIN public.xero_invoices invoice
+      ON invoice.id = '3be46700-4d5d-4b91-b96e-8baf43ac9d7c'::uuid
+     AND invoice.job_id = sibling.id
+     AND upper(invoice.status) IN ('AUTHORISED', 'PAID')
+     AND EXISTS (
+       SELECT 1
+       FROM jsonb_array_elements(coalesce(invoice.line_items, '[]'::jsonb)) item
+       WHERE coalesce(item->>'LineItemID', item->>'LineItemId', item->>'lineItemID', item->>'line_item_id', item->>'id') = 'edcaa56c-84d5-4a12-be0d-032bd1d422f3'
+         AND position(lower('Hardie panel stacking') IN lower(coalesce(item->>'Description', item->>'description', ''))) > 0
+     )
+    JOIN public.emails delivery
+      ON delivery.post_id = 'AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAAbMo76AAA='
+     AND delivery.content_sha256 = '0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba'
+     AND delivery.has_attachments IS TRUE
+     AND position(lower('displaced Hardie panels stacked safely') IN lower(coalesce(delivery.subject, '') || ' ' || coalesce(delivery.body_preview, ''))) > 0
+    JOIN public.job_documents report
+      ON report.id = '513cb62a-4f9f-4fd5-ae5c-66b0ce053448'::uuid
+     AND report.job_id = sibling.id
+    JOIN public.job_documents swms
+      ON swms.id = '878641fc-99ba-4f5f-a0a6-d64708394b6a'::uuid
+     AND swms.job_id = sibling.id
+    WHERE claiming.id = 'c3afc061-0d4a-43ff-8309-0b8b512e307a'::uuid
+      AND claiming.org_id = '00000000-0000-0000-0000-000000000001'::uuid
+  ) THEN
 -- Reviewed production repair for MLB-26393 at 71 Peppermint Way:
 -- SWMS-26832's Hardie stacking work was delivered and billed in the
 -- SWMS-26837 bundle. Both directions establish the relationship; only the
@@ -298,6 +338,7 @@ INSERT INTO public.makesafe_sibling_evidence_claims (
   delivery_email_post_id,
   delivery_email_content_sha256,
   delivery_scope_phrase,
+  photo_scope_phrase,
   report_document_id,
   swms_document_id,
   recorded_by,
@@ -314,6 +355,7 @@ INSERT INTO public.makesafe_sibling_evidence_claims (
   'AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAAbMo76AAA=',
   '0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba',
   'displaced Hardie panels stacked safely',
+  'displaced Hardie panels stacked safely',
   '513cb62a-4f9f-4fd5-ae5c-66b0ce053448',
   '878641fc-99ba-4f5f-a0a6-d64708394b6a',
   'ses-sibling-evidence-v1',
@@ -328,3 +370,6 @@ INSERT INTO public.makesafe_sibling_evidence_claims (
   ),
   '2026-07-28T04:00:00Z'
 );
+  END IF;
+END;
+$$;

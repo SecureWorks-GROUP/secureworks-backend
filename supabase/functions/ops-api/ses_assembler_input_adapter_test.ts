@@ -517,6 +517,7 @@ Deno.test(
       delivery_email_content_sha256:
         "0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba",
       delivery_scope_phrase: "displaced Hardie panels stacked safely",
+      photo_scope_phrase: "displaced Hardie panels stacked safely",
       report_document_id: "report-26837",
       swms_document_id: "swms-26837",
     }];

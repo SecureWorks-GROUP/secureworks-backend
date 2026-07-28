@@ -63,6 +63,11 @@ export type SesSiblingBundleEvidence =
         content_sha256: string;
         scope_phrase: string;
       };
+      photo: {
+        email_post_id: string;
+        content_sha256: string;
+        scope_phrase: string;
+      };
       report_document_id: string;
       swms_document_id: string;
     };

@@ -1193,7 +1193,7 @@ function buildEmailDrafts(
       attachments: [reportFile],
     });
   }
-  if (row.photo_route === "work_order_sender") {
+  if (row.photo_route === "work_order_sender" && photoFiles.length > 0) {
     drafts.PHOTO_EMAIL_DRAFT = draftEmail({
       to: reportTo,
       subject: `Photo Evidence - ${ref}`,
@@ -1773,6 +1773,17 @@ async function prepareOne(
           manifest.items.physical_reporting_evidence = ready(
             "file:PROOF/sibling_bundle_evidence.json",
           );
+          await artifactFromText({
+            role: "photo_selection",
+            path: "ARTIFACTS/PHOTO_SELECTION.md",
+            media_type: "text/markdown",
+            text: [
+              "Sibling photo evidence claim",
+              `Email: ${acceptedBundle.coverage.photo.email_post_id}`,
+              `Content SHA-256: ${acceptedBundle.coverage.photo.content_sha256}`,
+              `Scope: ${acceptedBundle.coverage.photo.scope_phrase}`,
+            ].join("\n"),
+          }).then((artifact) => artifacts.push(artifact));
         }
       } else if (!hasLocalPhysicalEvidence) {
         const itemBlocker = addBlocker(
