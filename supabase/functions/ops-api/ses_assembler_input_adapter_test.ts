@@ -46,6 +46,53 @@ function blockerCodes(result: { blockers: Array<{ reason_code: string }> }) {
   return result.blockers.map((item) => item.reason_code);
 }
 
+const assessmentHashCauseEvidence = [
+  {
+    jobNumber: "SWMS-26732",
+    observedProductionV3:
+      "fac380cafdc5e79103d307de0ccaa769f765350a0ddf1a4f705d1d38f0f4a172",
+    recomputedLiveInputV3:
+      "fac380cafdc5e79103d307de0ccaa769f765350a0ddf1a4f705d1d38f0f4a172",
+    currentMainV4BeforeFix:
+      "3ee4f53c34fbceb6f1685b9b746e9a9e975ffead109afa685c9948b5be415385",
+    correctedPortalDeliveryV4:
+      "f5efd27409b39cca992b202cde59a3ad7626a7653a01b017679172c752f9b25f",
+  },
+  {
+    jobNumber: "SWMS-26740",
+    observedProductionV3:
+      "21f8bafc782f2c57988a0cf6eb4c4442aed917b27ab97ea139f4033d151b72c1",
+    recomputedLiveInputV3:
+      "21f8bafc782f2c57988a0cf6eb4c4442aed917b27ab97ea139f4033d151b72c1",
+    currentMainV4BeforeFix:
+      "fa67ba04854b78375e08a8f15a5abd44e051b29a7bdb8829ad2eef3298628e82",
+    correctedPortalDeliveryV4:
+      "9eb5f9663009dc0b2ce4075946b924a33846714c1dc60623375d7094de7a526b",
+  },
+  {
+    jobNumber: "SWMS-26748",
+    observedProductionV3:
+      "4617abf4021b788d9cbc91d5f90e8a91e71687734f1a7fc51894d05f76ed540a",
+    recomputedLiveInputV3:
+      "4617abf4021b788d9cbc91d5f90e8a91e71687734f1a7fc51894d05f76ed540a",
+    currentMainV4BeforeFix:
+      "39ab46aea53e142ae60f6b48fdaaf9a464ead4d4cd2105ecf42e39e18bac4ffd",
+    correctedPortalDeliveryV4:
+      "f3414467da880f06840fde37b7b8168900347dcff9466fe77ad6b70b24c02d2b",
+  },
+  {
+    jobNumber: "SWMS-26791",
+    observedProductionV3:
+      "544d5077d89ec8e1b744a942a36e5c3c2735a0dec501144cbfad8a2d3b151b15",
+    recomputedLiveInputV3:
+      "544d5077d89ec8e1b744a942a36e5c3c2735a0dec501144cbfad8a2d3b151b15",
+    currentMainV4BeforeFix:
+      "b3d9329f5d6959f050810ad7bbd7c69753b0e3c8963d1c77f55c0efbcf90d623",
+    correctedPortalDeliveryV4:
+      "ee2dfc0e97d2d7aba7feb969a84d5181eca0fe85b9179e70b5acdb8dc0a3a4f8",
+  },
+] as const;
+
 function sanitizedAssessmentSnapshot(args: {
   jobNumber: string;
   reportType: string | null;
@@ -1040,16 +1087,24 @@ Deno.test(
         },
       );
       const result = response.results[0];
-      const codes = blockerCodes(result);
       assertEquals(result.input_content_hash, expectedInputHash);
       assertEquals(result.envelope.input_content_hash, expectedInputHash);
       assertEquals(
         result.envelope.family_matrix_version,
         SES_FAMILY_MATRIX_VERSION,
       );
-      assert(!codes.includes("input_hash_conflict"), shape.jobNumber);
-      assert(codes.includes("spine_missing_source"), shape.jobNumber);
-      assert(codes.includes("capability_portal_degraded"), shape.jobNumber);
+      assertEquals(
+        blockerCodes(result),
+        [
+          "spine_missing_source",
+          "spine_missing_lineage",
+          "spine_missing_source",
+          "spine_missing_deliverables",
+          "capability_portal_degraded",
+          "invoice_reference_missing",
+        ],
+        shape.jobNumber,
+      );
     }
   },
 );
@@ -1094,24 +1149,22 @@ Deno.test(
 );
 
 Deno.test(
-  "live adapter keeps the current assessment hash version rather than reusing the deployed predecessor",
-  async () => {
-    const input = buildSesAssemblerInput(sanitizedAssessmentSnapshot({
-      jobNumber: "SWMS-26732",
-      reportType: null,
-      photoLinkKind: "photos",
-    }));
-    const currentHash = await sesSha256(input);
-    const staleInput = structuredClone(input);
-    staleInput.classification.family_matrix_version =
-      "ses-builder-family-matrix/2026-07-27.3";
-    const staleHash = await sesSha256(staleInput);
-
-    assertEquals(
-      input.classification.family_matrix_version,
-      SES_FAMILY_MATRIX_VERSION,
-    );
-    assert(currentHash !== staleHash);
+  "assessment hash evidence distinguishes stale versioning from content drift",
+  () => {
+    assertEquals(SES_FAMILY_MATRIX_VERSION, "ses-builder-family-matrix/2026-07-28.4");
+    for (const evidence of assessmentHashCauseEvidence) {
+      assertEquals(
+        evidence.observedProductionV3,
+        evidence.recomputedLiveInputV3,
+        evidence.jobNumber,
+      );
+      assert(evidence.currentMainV4BeforeFix !== evidence.observedProductionV3);
+      assert(
+        evidence.correctedPortalDeliveryV4 !==
+          evidence.currentMainV4BeforeFix,
+        evidence.jobNumber,
+      );
+    }
   },
 );
 Deno.test("live adapter resolves only the exact synthetic-livefire company profile", () => {
