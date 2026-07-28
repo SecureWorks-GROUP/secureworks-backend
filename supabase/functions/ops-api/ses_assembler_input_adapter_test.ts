@@ -2,6 +2,7 @@
 import {
   assert,
   assertEquals,
+  assertThrows,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import fixture from "./fixtures/ses_u4_swms_26980_live_snapshot.json" with {
@@ -620,6 +621,29 @@ Deno.test(
   },
 );
 
+type SeedGuardFixture = {
+  jobs: string[];
+  invoice: boolean;
+  delivery: boolean;
+  documents: number;
+  media: number;
+};
+
+function seedGuardOutcome(fixture: SeedGuardFixture): "skip" | "seed" {
+  const hasFootprint = fixture.jobs.length > 0 || fixture.invoice ||
+    fixture.delivery || fixture.documents > 0 || fixture.media > 0;
+  if (!hasFootprint) return "skip";
+  const complete = fixture.jobs.includes("claiming") &&
+    fixture.jobs.includes("sibling") && fixture.invoice && fixture.delivery &&
+    fixture.documents === 2 && fixture.media === 1;
+  if (!complete) {
+    throw new Error(
+      "reviewed sibling evidence seed refused: partial or drifted production footprint",
+    );
+  }
+  return "seed";
+}
+
 Deno.test(
   "sibling evidence migration seeds the reviewed reciprocal pair and positive claim without operational writes",
   async () => {
@@ -669,6 +693,40 @@ Deno.test(
     }
   },
 );
+
+Deno.test("sibling evidence seed guard executes empty, complete, and partial branches", () => {
+  assertEquals(
+    seedGuardOutcome({
+      jobs: [],
+      invoice: false,
+      delivery: false,
+      documents: 0,
+      media: 0,
+    }),
+    "skip",
+  );
+  assertEquals(
+    seedGuardOutcome({
+      jobs: ["claiming", "sibling"],
+      invoice: true,
+      delivery: true,
+      documents: 2,
+      media: 1,
+    }),
+    "seed",
+  );
+  assertThrows(
+    () => seedGuardOutcome({
+      jobs: ["claiming"],
+      invoice: true,
+      delivery: true,
+      documents: 2,
+      media: 1,
+    }),
+    Error,
+    "partial or drifted production footprint",
+  );
+});
 
 Deno.test(
   "live adapter maps the canonical board family without an AJS physical shortcut",
