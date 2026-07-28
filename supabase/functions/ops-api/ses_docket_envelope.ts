@@ -15,6 +15,50 @@ export type SesDeliveryRenderRoute =
   | "unroutable"
   | "not_applicable";
 
+export type SesOperationalEvidenceKind =
+  | "outbound_delivery"
+  | "crew_bill_attendance"
+  | "crew_bill_claim"
+  | "builder_cancellation"
+  | "work_handed_back"
+  | "booked_forward"
+  | "duplicate_of_closed";
+
+export interface SesOperationalEvidenceFact {
+  id: string;
+  kind: SesOperationalEvidenceKind;
+  occurred_at: string | null;
+  summary: string;
+  provenance: {
+    store:
+      | "emails"
+      | "xero_invoices"
+      | "trade_invoice_lines"
+      | "jobs";
+    row_id: string;
+    matched_key: string;
+  };
+  details: Record<string, unknown>;
+}
+
+export type SesEvidenceTriageDisposition =
+  | "already_delivered"
+  | "cancelled_or_handed_back"
+  | "duplicate_of_closed"
+  | "attendance_evidenced"
+  | "booked_forward"
+  | "evidence_inconclusive";
+
+export interface SesOperationalEvidence {
+  facts: SesOperationalEvidenceFact[];
+  triage: {
+    disposition: SesEvidenceTriageDisposition;
+    reason_code: string;
+    staff_action_allowed: false;
+    consulted_fact_ids: string[];
+  };
+}
+
 export interface SesSwmsFactContext {
   evidence_kind: "current_card" | "sibling_bundle";
   evidence_job_id: string;
@@ -165,6 +209,7 @@ export interface SesAssemblerInputV1 {
       cycle_set_hash: string | null;
     };
   };
+  operational_evidence: SesOperationalEvidence;
   sibling_bundle_evidence?: SesSiblingBundleEvidence;
   hrcw: {
     hrcw: boolean;

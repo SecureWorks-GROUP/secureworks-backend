@@ -192,8 +192,16 @@ function liveSnapshotClient(
     job_events: live.events || [],
     makesafe_sibling_bundle_binding_revisions: live.bundle_bindings || [],
     makesafe_sibling_evidence_claims: live.bundle_claims || [],
-    xero_invoices: live.bundle_invoices || [],
-    emails: live.bundle_emails || [],
+    xero_invoices: [
+      ...(live.bundle_invoices || []),
+      ...(live.evidence_xero_invoices || []),
+    ],
+    emails: [
+      ...(live.bundle_emails || []),
+      ...(live.evidence_emails || []),
+    ],
+    email_attachments: live.evidence_email_attachments || [],
+    trade_invoice_lines: live.evidence_trade_invoice_lines || [],
   };
   return {
     storage: {
@@ -223,6 +231,12 @@ function liveSnapshotClient(
           return query;
         },
         neq() {
+          return query;
+        },
+        or() {
+          return query;
+        },
+        ilike() {
           return query;
         },
         in() {
@@ -392,6 +406,43 @@ Deno.test(
         assertEquals(error.status, 400);
       }
     }
+  },
+);
+
+Deno.test(
+  "live U4 lookup loads separator-normalised outbound delivery evidence from the emails store",
+  async () => {
+    const live = roofPortalSnapshot();
+    live.evidence_emails = [{
+      post_id: "outbound-mlb-27037",
+      conversation_id: "conversation-mlb-27037",
+      thread_id: "thread-mlb-27037",
+      from_email: "SecureWorks <admin@secureworkswa.com.au>",
+      to_recipients: "makesafes@example-builder.test; ses@secureworkswa.com.au",
+      subject: "MLB 27037 Make Safe Report and Invoice",
+      has_attachments: true,
+      received_at: "2026-07-28T05:00:00.000Z",
+    }];
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live),
+      { org_id: live.job.org_id, created_by: "u4-evidence-regression" },
+    );
+    const input = await dependencies.resolveInput({
+      mode: "job_id",
+      job_id: live.job.id,
+    });
+
+    assertEquals(input.source.builder_reference, "MLB-27037");
+    assertEquals(
+      input.operational_evidence.triage.disposition,
+      "already_delivered",
+    );
+    assertEquals(input.operational_evidence.facts.length, 1);
+    assertEquals(input.operational_evidence.facts[0].provenance, {
+      store: "emails",
+      row_id: "outbound-mlb-27037",
+      matched_key: "builder_reference:MLB27037",
+    });
   },
 );
 

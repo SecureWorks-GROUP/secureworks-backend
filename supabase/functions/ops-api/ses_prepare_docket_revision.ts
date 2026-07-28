@@ -244,6 +244,79 @@ function sortedUnique(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => value.normalize("NFC")))].sort();
 }
 
+function evidenceSearches(input: SesAssemblerInputV1): string[] {
+  return sortedUnique([
+    "canonical-input-envelope",
+    ...input.operational_evidence.facts.map((fact) =>
+      `${fact.provenance.store}:${fact.provenance.row_id}`
+    ),
+  ]);
+}
+
+function evidenceTriageBlocker(input: SesAssemblerInputV1): SesBlocker {
+  const evidence = input.operational_evidence;
+  const shared = {
+    triage: evidence.triage,
+    operational_evidence_facts: evidence.facts,
+  };
+  switch (evidence.triage.disposition) {
+    case "cancelled_or_handed_back":
+      return blocked(
+        "builder_cancellation_detected",
+        "The builder mail thread records cancellation or handback of this work.",
+        "Reconcile the card against the source thread and close or correct its display state; do not create fresh attendance work.",
+        evidenceSearches(input),
+        [],
+        shared,
+      );
+    case "duplicate_of_closed":
+      return blocked(
+        "duplicate_of_closed_detected",
+        "This replay-aged source instruction matches an existing closed or cancelled card on the same work-order authority.",
+        "Bind this card as duplicate-of-closed and retain the existing card as operational authority.",
+        evidenceSearches(input),
+        [],
+        shared,
+      );
+    case "already_delivered":
+      return blocked(
+        "prior_delivery_evidence_detected",
+        "SecureWorks outbound mail already proves delivery of the report and invoice for this work-order authority.",
+        "Reconcile the existing delivery evidence before preparing or sending another pack.",
+        evidenceSearches(input),
+        [],
+        shared,
+      );
+    case "attendance_evidenced":
+      return blocked(
+        "attendance_evidence_detected",
+        "A paid crew bill proves attendance for this card even though the current-cycle report/photo store is incomplete.",
+        "Recover or complete the reporting and invoice record from the proven attendance; do not classify this as fresh attendance work.",
+        evidenceSearches(input),
+        [],
+        shared,
+      );
+    case "booked_forward":
+      return blocked(
+        "forward_booking_detected",
+        "The builder mail thread records a forward booking for this work.",
+        "Reconcile the booking with the current schedule before raising any new staff action.",
+        evidenceSearches(input),
+        [],
+        shared,
+      );
+    case "evidence_inconclusive":
+      return blocked(
+        "evidence_net_inconclusive",
+        "No report and zero current-cycle photos do not, by themselves, prove that staff action is outstanding.",
+        "Confirm positive current work-order, attendance, cancellation, delivery, duplicate, and booking evidence before assigning staff work.",
+        evidenceSearches(input),
+        [],
+        shared,
+      );
+  }
+}
+
 function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
   const blockers: SesBlocker[] = [];
   if (input.classification.builder_key === "SYNTHETIC") {
@@ -439,6 +512,15 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
         "Refresh the assembler input from the current assessment family rule.",
       ),
     );
+  }
+  if (
+    input.operational_evidence.triage.disposition ===
+      "cancelled_or_handed_back" ||
+    input.operational_evidence.triage.disposition === "duplicate_of_closed" ||
+    input.operational_evidence.triage.disposition === "already_delivered" ||
+    input.operational_evidence.triage.disposition === "booked_forward"
+  ) {
+    blockers.push(evidenceTriageBlocker(input));
   }
   return blockers;
 }
@@ -907,6 +989,7 @@ function hardStopManifest(
         input.classification.delivery_render_route_evidence,
       builder_reference: input.source.builder_reference,
       lineage: input.classification.lineage_kind,
+      evidence_triage: input.operational_evidence.triage,
     },
     routing: {
       builder: input.classification.builder_label,
@@ -1030,6 +1113,7 @@ function manifestBase(
       required_deliverable_ids: input.source.deliverables.map(
         (item) => item.id,
       ),
+      evidence_triage: input.operational_evidence.triage,
     },
     routing: {
       builder: input.classification.builder_label,
@@ -1272,6 +1356,11 @@ function reviewHtml(
 <main><h1>${escape(input.source.builder_reference)}</h1>
 <p>Family: ${escape(family)}</p>
 <p>State: ${blockers.length ? "BLOCKED" : "PRE-XERO DOCS READY"}</p>
+<section id="operational-evidence"><h2>Operational evidence</h2><pre>${
+    escape(
+      canonicalSesJson(input.operational_evidence),
+    )
+  }</pre></section>
 <section id="blockers"><h2>Blockers</h2><pre>${
     escape(
       canonicalSesJson(blockers),
@@ -1918,11 +2007,7 @@ async function prepareOne(
       } else if (!hasLocalPhysicalEvidence) {
         const itemBlocker = addBlocker(
           blockers,
-          blocked(
-            "trade_evidence_missing",
-            "Physical make-safe requires a current-cycle trade report and complete photo story.",
-            "Submit/bind current-cycle trade evidence and re-run.",
-          ),
+          evidenceTriageBlocker(input),
         );
         manifest.items.physical_reporting_evidence = itemBlocker;
         manifest.items.supporting_report_pdf = itemBlocker;
@@ -2422,6 +2507,14 @@ async function prepareOne(
       }),
     );
   }
+  artifacts.push(
+    await artifactFromText({
+      role: "operational_evidence",
+      path: "EVIDENCE/operational_evidence.json",
+      media_type: "application/json",
+      text: canonicalSesJson(input.operational_evidence),
+    }),
+  );
 
   const reviewSpec: Record<string, unknown> = {
     version: "ses-docket-review/v1",
@@ -2438,6 +2531,8 @@ async function prepareOne(
         artifact_paths: artifacts.map((artifact) => artifact.path).sort(),
         blocker_codes: blockers.map((item) => item.reason_code),
         waiting_on: blockers.map((item) => item.reason),
+        evidence_triage: input.operational_evidence.triage,
+        operational_evidence_facts: input.operational_evidence.facts,
       },
     ],
   };
@@ -2493,7 +2588,8 @@ async function prepareOne(
           deliverables: input.source.deliverables,
           lineage: input.classification.lineage_kind,
           hrcw: input.hrcw,
-          searches_attempted: ["canonical-input-envelope"],
+          operational_evidence: input.operational_evidence,
+          searches_attempted: evidenceSearches(input),
         }),
       }),
     );

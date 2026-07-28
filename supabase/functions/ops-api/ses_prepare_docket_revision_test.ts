@@ -177,6 +177,15 @@ function fixtureInput(
         cycle_set_hash: null,
       },
     },
+    operational_evidence: {
+      facts: [],
+      triage: {
+        disposition: "evidence_inconclusive",
+        reason_code: "positive_staff_action_evidence_missing",
+        staff_action_allowed: false,
+        consulted_fact_ids: [],
+      },
+    },
     hrcw: {
       hrcw: false,
       categories: [],
@@ -838,6 +847,88 @@ Deno.test("blocked non-assessment packs do not expose email drafts", async () =>
   assertEquals(
     result.envelope.v2.items.draft_invoice_bundle_email.state,
     "blocked",
+  );
+});
+
+Deno.test("no report plus zero photos remains evidence-inconclusive, never a staff-action classification", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.cycle_facts.trade_report = null;
+  input.cycle_facts.photos = [];
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  const codes = blockerCodes(result);
+  assert(codes.includes("evidence_net_inconclusive"));
+  assert(!codes.includes("trade_evidence_missing"));
+  assert(!codes.includes("staff_action_required"));
+  assertEquals(
+    result.envelope.v2.items.physical_reporting_evidence,
+    result.blockers.find((blocker) =>
+      blocker.reason_code === "evidence_net_inconclusive"
+    ),
+  );
+  assertEquals(
+    (result.review_spec.cards as Array<Record<string, unknown>>)[0]
+      .evidence_triage,
+    input.operational_evidence.triage,
+  );
+  assert(
+    result.artifacts.some((artifact) =>
+      artifact.path === "EVIDENCE/operational_evidence.json" &&
+      artifact.role === "operational_evidence"
+    ),
+  );
+});
+
+Deno.test("paid crew-bill evidence replaces false fresh-attendance work with a typed docket fact", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.cycle_facts.trade_report = null;
+  input.cycle_facts.photos = [];
+  input.operational_evidence = {
+    facts: [{
+      id: "xero_invoices:bill-1:line:line-1",
+      kind: "crew_bill_attendance",
+      occurred_at: "2026-07-27",
+      summary: "A paid subcontractor bill names this card exactly.",
+      provenance: {
+        store: "xero_invoices",
+        row_id: "bill-1",
+        matched_key: "job_number:SWMS270062",
+      },
+      details: {
+        invoice_number: "BILL-1",
+      },
+    }],
+    triage: {
+      disposition: "attendance_evidenced",
+      reason_code: "subcontractor_bill_evidence",
+      staff_action_allowed: false,
+      consulted_fact_ids: ["xero_invoices:bill-1:line:line-1"],
+    },
+  };
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  const blocker = result.blockers.find((candidate) =>
+    candidate.reason_code === "attendance_evidence_detected"
+  );
+  assert(blocker);
+  assert(
+    blocker.searches_attempted.includes("xero_invoices:bill-1"),
+  );
+  assertEquals(
+    result.envelope.v2.items.physical_reporting_evidence,
+    blocker,
   );
 });
 

@@ -100,6 +100,15 @@ function input(
         cycle_set_hash: null,
       },
     },
+    operational_evidence: {
+      facts: [],
+      triage: {
+        disposition: "evidence_inconclusive",
+        reason_code: "positive_staff_action_evidence_missing",
+        staff_action_allowed: false,
+        consulted_fact_ids: [],
+      },
+    },
     hrcw: overrides.hrcw ?? {
       hrcw: false,
       categories: [],

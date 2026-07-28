@@ -59,6 +59,13 @@ function clientFor(
     makesafe_readiness_current: [],
     makesafe_portal_capture_revisions: [],
     makesafe_report_packs: [],
+    job_events: [],
+    makesafe_sibling_bundle_binding_revisions: [],
+    makesafe_sibling_evidence_claims: [],
+    xero_invoices: [],
+    emails: [],
+    email_attachments: [],
+    trade_invoice_lines: [],
   };
   return {
     storage: {
@@ -89,7 +96,19 @@ function clientFor(
         neq() {
           return query;
         },
+        in() {
+          return query;
+        },
+        or() {
+          return query;
+        },
+        ilike() {
+          return query;
+        },
         order() {
+          return query;
+        },
+        limit() {
           return query;
         },
         maybeSingle() {

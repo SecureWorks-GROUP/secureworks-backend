@@ -62,6 +62,12 @@ import {
   type SesPortalCaptureRevisionContent,
   sesPortalCaptureRevisionHash,
 } from "./ses_portal_capture_contract.ts";
+import {
+  buildSesEvidenceReferenceKeys,
+  matchedSesEvidenceReferenceKey,
+  resolveSesOperationalEvidence,
+  sesEvidenceSearchAnchors,
+} from "./ses_evidence_net.ts";
 
 export class SesAssemblerAdapterError extends Error {
   status: number;
@@ -140,6 +146,12 @@ export interface SesAssemblerLiveSnapshot {
   bundle_documents?: LiveRow[];
   bundle_emails?: LiveRow[];
   bundle_media?: LiveRow[];
+  evidence_emails?: LiveRow[];
+  evidence_email_attachments?: LiveRow[];
+  evidence_xero_invoices?: LiveRow[];
+  evidence_trade_invoice_lines?: LiveRow[];
+  evidence_twin_details?: LiveRow[];
+  evidence_twin_jobs?: LiveRow[];
 }
 
 type Selection = Exclude<
@@ -916,6 +928,38 @@ function sourceCase(cases: LiveRow[]): LiveRow | null {
   return live.length === 1 ? live[0] : null;
 }
 
+function usableIdentityRevision(
+  snapshot: SesAssemblerLiveSnapshot,
+): LiveRow | null {
+  return snapshot.identity_revision?.authority_kind === "unresolved_authority"
+    ? null
+    : snapshot.identity_revision || null;
+}
+
+function evidenceSourceIdentity(
+  snapshot: SesAssemblerLiveSnapshot,
+  intakeCase = sourceCase(snapshot.cases),
+  identityRevision = usableIdentityRevision(snapshot),
+): {
+  builder_reference: string;
+  po_or_external_ref: string | null;
+} {
+  const metadata = record(snapshot.job.metadata);
+  return {
+    builder_reference: firstText(
+      intakeCase?.builder_wo_canonical,
+      intakeCase?.builder_po_canonical,
+      intakeCase?.external_ref_canonical,
+      identityRevision ? snapshot.detail?.external_ref : null,
+      identityRevision ? metadata.external_ref : null,
+    ),
+    po_or_external_ref: firstText(
+      intakeCase?.builder_po_canonical,
+      intakeCase?.external_ref_canonical,
+    ) || null,
+  };
+}
+
 function portalRole(
   familyId: SesFamilyId,
   rawRole: string,
@@ -1273,10 +1317,7 @@ export function buildSesAssemblerInput(
   // borrow an arbitrary source. Keep U4 fail-closed until that ambiguity is
   // resolved; legacy_job_record is deliberately usable because its evidence
   // refs bind the existing card, detail and work-order document.
-  const identityRevision =
-    snapshot.identity_revision?.authority_kind === "unresolved_authority"
-      ? null
-      : snapshot.identity_revision || null;
+  const identityRevision = usableIdentityRevision(snapshot);
   const builder = builderKey(snapshot);
   const canonicalFamilyId = family(snapshot);
   const deliveryRoute = resolveSesDeliveryRenderRoute(
@@ -1331,13 +1372,12 @@ export function buildSesAssemblerInput(
     : familyId === "temporary_fencing"
     ? "temporary_fencing"
     : null;
-  const builderReference = firstText(
-    intakeCase?.builder_wo_canonical,
-    intakeCase?.builder_po_canonical,
-    intakeCase?.external_ref_canonical,
-    identityRevision ? detail.external_ref : null,
-    identityRevision ? metadata.external_ref : null,
+  const evidenceSource = evidenceSourceIdentity(
+    snapshot,
+    intakeCase,
+    identityRevision,
   );
+  const builderReference = evidenceSource.builder_reference;
   const portalLinks = extractPortalLinks(detail.external_links).map((link) => ({
     role: portalRole(familyId, link.role),
     url: link.url,
@@ -1404,6 +1444,16 @@ export function buildSesAssemblerInput(
     (item) => text(item.status).toLowerCase() === "sent",
   );
   const siblingBundleEvidence = resolveSiblingBundleEvidence(snapshot);
+  const operationalEvidence = resolveSesOperationalEvidence({
+    job,
+    source: evidenceSource,
+    emails: snapshot.evidence_emails || [],
+    email_attachments: snapshot.evidence_email_attachments || [],
+    xero_invoices: snapshot.evidence_xero_invoices || [],
+    trade_invoice_lines: snapshot.evidence_trade_invoice_lines || [],
+    twin_details: snapshot.evidence_twin_details || [],
+    twin_jobs: snapshot.evidence_twin_jobs || [],
+  });
 
   return {
     contract_version: SES_INPUT_CONTRACT_VERSION,
@@ -1517,6 +1567,7 @@ export function buildSesAssemblerInput(
         cycle_set_hash: text(priorPack?.makesafe_content_hash) || null,
       },
     },
+    operational_evidence: operationalEvidence,
     ...(siblingBundleEvidence
       ? { sibling_bundle_evidence: siblingBundleEvidence }
       : {}),
@@ -1572,6 +1623,294 @@ async function many(
     );
   }
   return array(data).map(record);
+}
+
+const SES_EVIDENCE_QUERY_LIMIT = 250;
+const SES_EVIDENCE_ID_CHUNK = 25;
+const SES_CREW_BILL_QUERY_LIMIT = 1_000;
+
+function dedupeRows(rows: LiveRow[], key: (row: LiveRow) => string): LiveRow[] {
+  const unique = new Map<string, LiveRow>();
+  for (const row of rows) {
+    const id = key(row);
+    if (id) unique.set(id, row);
+  }
+  return [...unique.values()];
+}
+
+function chunks<T>(
+  items: readonly T[],
+  size = SES_EVIDENCE_ID_CHUNK,
+): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    result.push(items.slice(index, index + size));
+  }
+  return result;
+}
+
+async function readEvidenceEmailsByIds(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  postIds: string[],
+  label: string,
+): Promise<LiveRow[]> {
+  const rows: LiveRow[] = [];
+  for (const ids of chunks([...new Set(postIds.filter(Boolean))])) {
+    rows.push(
+      ...await many(
+        client
+          .from("emails")
+          .select(
+            "post_id,conversation_id,thread_id,from_email,to_recipients,subject,body_preview,body_content,received_at,has_attachments,content_sha256",
+          )
+          .in("post_id", ids),
+        label,
+      ),
+    );
+  }
+  return rows;
+}
+
+async function readEvidenceAttachmentsByEmailIds(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  postIds: string[],
+  label: string,
+): Promise<LiveRow[]> {
+  const rows: LiveRow[] = [];
+  for (const ids of chunks([...new Set(postIds.filter(Boolean))])) {
+    rows.push(
+      ...await many(
+        client
+          .from("email_attachments")
+          .select("id,email_id,name,content_type,size_bytes,status")
+          .in("email_id", ids),
+        label,
+      ),
+    );
+  }
+  return rows;
+}
+
+async function readEvidenceThreadEmails(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  seeds: LiveRow[],
+): Promise<LiveRow[]> {
+  const rows: LiveRow[] = [];
+  const coordinates = [
+    [
+      "conversation_id",
+      [
+        ...new Set(
+          seeds.map((row) => text(row.conversation_id)).filter(
+            Boolean,
+          ),
+        ),
+      ],
+    ],
+    [
+      "thread_id",
+      [...new Set(seeds.map((row) => text(row.thread_id)).filter(Boolean))],
+    ],
+  ] as const;
+  for (const [column, values] of coordinates) {
+    for (const ids of chunks(values)) {
+      rows.push(
+        ...await many(
+          client
+            .from("emails")
+            .select(
+              "post_id,conversation_id,thread_id,from_email,to_recipients,subject,body_preview,body_content,received_at,has_attachments,content_sha256",
+            )
+            .in(column, ids)
+            .limit(SES_EVIDENCE_QUERY_LIMIT),
+          `emails.ses_evidence_threads.${column}`,
+        ),
+      );
+    }
+  }
+  return rows;
+}
+
+async function loadSesEvidenceMailRows(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  source: ReturnType<typeof evidenceSourceIdentity>,
+): Promise<{ emails: LiveRow[]; attachments: LiveRow[] }> {
+  const keys = buildSesEvidenceReferenceKeys(source);
+  const anchors = sesEvidenceSearchAnchors(keys);
+  if (!anchors.length) return { emails: [], attachments: [] };
+  const candidateEmails: LiveRow[] = [];
+  const candidateAttachments: LiveRow[] = [];
+  for (const anchor of anchors) {
+    const safeAnchor = anchor.replace(/[^A-Z0-9]/gi, "");
+    if (!safeAnchor) continue;
+    const [emailRows, attachmentRows] = await Promise.all([
+      many(
+        client
+          .from("emails")
+          .select(
+            "post_id,conversation_id,thread_id,from_email,to_recipients,subject,body_preview,body_content,received_at,has_attachments,content_sha256",
+          )
+          .or(
+            `subject.ilike.%${safeAnchor}%,body_preview.ilike.%${safeAnchor}%,body_content.ilike.%${safeAnchor}%`,
+          )
+          .limit(SES_EVIDENCE_QUERY_LIMIT),
+        `emails.ses_evidence_anchor.${safeAnchor}`,
+      ),
+      many(
+        client
+          .from("email_attachments")
+          .select("id,email_id,name,content_type,size_bytes,status")
+          .ilike("name", `%${safeAnchor}%`)
+          .limit(SES_EVIDENCE_QUERY_LIMIT),
+        `email_attachments.ses_evidence_anchor.${safeAnchor}`,
+      ),
+    ]);
+    candidateEmails.push(...emailRows);
+    candidateAttachments.push(...attachmentRows);
+  }
+  const attachmentEmailRows = await readEvidenceEmailsByIds(
+    client,
+    candidateAttachments.map((row) => text(row.email_id)),
+    "emails.ses_evidence_attachment_hits",
+  );
+  const candidateEmailMap = dedupeRows(
+    [...candidateEmails, ...attachmentEmailRows],
+    (row) => text(row.post_id),
+  );
+  const candidateEmailIds = candidateEmailMap.map((row) => text(row.post_id));
+  const allCandidateAttachments = dedupeRows([
+    ...candidateAttachments,
+    ...await readEvidenceAttachmentsByEmailIds(
+      client,
+      candidateEmailIds,
+      "email_attachments.ses_evidence_candidate_rows",
+    ),
+  ], (row) => text(row.id));
+  const byEmail = new Map<string, LiveRow[]>();
+  for (const row of allCandidateAttachments) {
+    const emailId = text(row.email_id);
+    byEmail.set(emailId, [...(byEmail.get(emailId) || []), row]);
+  }
+  const exactSeeds = candidateEmailMap.filter((row) =>
+    matchedSesEvidenceReferenceKey(
+      row,
+      byEmail.get(text(row.post_id)) || [],
+      keys,
+    )
+  );
+  const threadRows = await readEvidenceThreadEmails(client, exactSeeds);
+  const emails = dedupeRows(
+    [...exactSeeds, ...threadRows],
+    (row) => text(row.post_id),
+  );
+  const attachments = dedupeRows([
+    ...allCandidateAttachments,
+    ...await readEvidenceAttachmentsByEmailIds(
+      client,
+      emails.map((row) => text(row.post_id)),
+      "email_attachments.ses_evidence_thread_rows",
+    ),
+  ], (row) => text(row.id));
+  return { emails, attachments };
+}
+
+async function loadSesEvidenceRows(
+  // deno-lint-ignore no-explicit-any
+  client: any,
+  snapshot: SesAssemblerLiveSnapshot,
+): Promise<
+  Pick<
+    SesAssemblerLiveSnapshot,
+    | "evidence_emails"
+    | "evidence_email_attachments"
+    | "evidence_xero_invoices"
+    | "evidence_trade_invoice_lines"
+    | "evidence_twin_details"
+    | "evidence_twin_jobs"
+  >
+> {
+  const source = evidenceSourceIdentity(snapshot);
+  const anchors = sesEvidenceSearchAnchors(
+    buildSesEvidenceReferenceKeys(source),
+  );
+  const [mail, xeroInvoices, tradeInvoiceLines, twinDetailResults] =
+    await Promise.all([
+      loadSesEvidenceMailRows(client, source),
+      many(
+        client
+          .from("xero_invoices")
+          .select(
+            "id,invoice_number,invoice_type,status,contact_name,invoice_date,fully_paid_on,line_items",
+          )
+          .eq("invoice_type", "ACCPAY")
+          .eq("status", "PAID")
+          .order("invoice_date", { ascending: false })
+          .limit(SES_CREW_BILL_QUERY_LIMIT),
+        "xero_invoices.ses_crew_bill_evidence",
+      ),
+      text(snapshot.job.job_number)
+        ? many(
+          client
+            .from("trade_invoice_lines")
+            .select(
+              "id,trade_invoice_id,job_id,job_number,client_name,description,line_type,total_hours,line_total_ex,created_at,trade_invoices!inner(id,status,week_end,xero_bill_id,xero_pushed_at,submitted_at,notes,users:user_id(name))",
+            )
+            .eq("job_number", text(snapshot.job.job_number))
+            .limit(SES_EVIDENCE_QUERY_LIMIT),
+          "trade_invoice_lines.ses_crew_bill_evidence",
+        )
+        : Promise.resolve([]),
+      Promise.all(anchors.map((anchor) =>
+        many(
+          client
+            .from("makesafe_job_details")
+            .select(
+              "job_id,external_ref,cancelled_at,cancel_reason,updated_at",
+            )
+            .ilike("external_ref", `%${anchor}%`)
+            .limit(SES_EVIDENCE_QUERY_LIMIT),
+          `makesafe_job_details.ses_closed_twin.${anchor}`,
+        )
+      )),
+    ]);
+  if (xeroInvoices.length >= SES_CREW_BILL_QUERY_LIMIT) {
+    console.warn(
+      `[ses-evidence] paid ACCPAY lookup reached the ${SES_CREW_BILL_QUERY_LIMIT}-row safety cap; older crew-bill evidence may require a bounded database-side lookup`,
+    );
+  }
+  const twinDetails = dedupeRows(
+    twinDetailResults.flat(),
+    (row) => text(row.job_id),
+  );
+  const twinJobIds = twinDetails.map((row) => text(row.job_id)).filter(
+    (id) => id && id !== text(snapshot.job.id),
+  );
+  const twinJobs: LiveRow[] = [];
+  for (const ids of chunks([...new Set(twinJobIds)])) {
+    twinJobs.push(
+      ...await many(
+        client
+          .from("jobs")
+          .select(
+            "id,job_number,status,client_name,created_at,updated_at,metadata",
+          )
+          .in("id", ids),
+        "jobs.ses_closed_twin",
+      ),
+    );
+  }
+  return {
+    evidence_emails: mail.emails,
+    evidence_email_attachments: mail.attachments,
+    evidence_xero_invoices: xeroInvoices,
+    evidence_trade_invoice_lines: tradeInvoiceLines,
+    evidence_twin_details: twinDetails,
+    evidence_twin_jobs: dedupeRows(twinJobs, (row) => text(row.id)),
+  };
 }
 
 export async function loadSesAssemblerLiveSnapshot(
@@ -1880,7 +2219,7 @@ export async function loadSesAssemblerLiveSnapshot(
         )
         : Promise.resolve([]),
     ]);
-  return {
+  const snapshot: SesAssemblerLiveSnapshot = {
     job,
     detail,
     identity_revision: identityRevision,
@@ -1905,6 +2244,10 @@ export async function loadSesAssemblerLiveSnapshot(
     bundle_documents: bundleDocuments,
     bundle_emails: bundleEmails,
     bundle_media: bundleMedia,
+  };
+  return {
+    ...snapshot,
+    ...await loadSesEvidenceRows(client, snapshot),
   };
 }
 
