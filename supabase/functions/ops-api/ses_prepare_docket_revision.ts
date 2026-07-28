@@ -141,6 +141,9 @@ export interface SesPrepareDependencies {
   renderOwnRoofReport?: (
     input: SesAssemblerInputV1,
   ) => Promise<SesRenderResult>;
+  resolveBundledReportArtifact?: (
+    input: SesAssemblerInputV1,
+  ) => Promise<SesRenderResult | null>;
   resolveSwmsArtifact?: (
     input: SesAssemblerInputV1,
   ) => Promise<SesRenderResult | null>;
@@ -235,6 +238,52 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
         `Supply ${SES_INPUT_CONTRACT_VERSION} from the canonical U1/U2 read model.`,
       ),
     );
+  }
+  const bundle = input.sibling_bundle_evidence;
+  if (bundle && bundle.status !== "accepted") {
+    const sibling = bundle.suspected_sibling_job_number || "(unknown sibling)";
+    const invoice = bundle.suspected_invoice_number || "(unknown invoice)";
+    const sharedFacts = {
+      suspected_sibling_job_id: bundle.suspected_sibling_job_id,
+      suspected_sibling_job_number: sibling,
+      suspected_invoice_number: bundle.suspected_invoice_number,
+      bundle_id: bundle.bundle_id,
+      binding_revision_id: bundle.binding_revision_id,
+      reverse_binding_revision_id: bundle.reverse_binding_revision_id,
+      coverage_failures: bundle.coverage_failures,
+    };
+    if (bundle.status === "binding_missing") {
+      blockers.push(blocked(
+        "sibling_evidence_bundle_missing",
+        `Card-local evidence is absent and suspected sibling ${sibling} (${invoice}) has no explicit bundle binding.`,
+        `Create a durable, provenance-recorded binding in both directions between this card and ${sibling}; do not infer it from address or freeform notes.`,
+        ["canonical-input-envelope", "sibling-bundle-binding-ledger"],
+        [sibling],
+        sharedFacts,
+      ));
+    } else if (bundle.status === "binding_not_bidirectional") {
+      blockers.push(blocked(
+        "sibling_evidence_bundle_not_bidirectional",
+        `Sibling ${sibling} has only a one-way bundle reference, so its evidence cannot be borrowed.`,
+        `Record the reverse binding under bundle ${bundle.bundle_id} with provenance, then re-run.`,
+        ["canonical-input-envelope", "sibling-bundle-binding-ledger"],
+        [sibling],
+        sharedFacts,
+      ));
+    } else {
+      blockers.push(blocked(
+        "sibling_evidence_scope_not_covered",
+        `The explicit bundle with ${sibling} does not positively prove this card's delivery and invoice scope.`,
+        `Repair the exact ${invoice} line-item and delivery-artifact claim before sharing sibling evidence.`,
+        [
+          "canonical-input-envelope",
+          "sibling-bundle-binding-ledger",
+          "sibling-positive-scope-claim",
+        ],
+        [sibling, invoice],
+        sharedFacts,
+      ));
+    }
   }
   if (!text(input.identity.source_instruction_id)) {
     blockers.push(
@@ -1654,7 +1703,78 @@ async function prepareOne(
   await measure("T5", async () => {
     if (!row || !swms) return;
     if (row.job_type === "physical_makesafe") {
-      if (!input.cycle_facts.trade_report || !input.cycle_facts.photos.length) {
+      const acceptedBundle =
+        input.sibling_bundle_evidence?.status === "accepted"
+          ? input.sibling_bundle_evidence
+          : null;
+      const hasLocalPhysicalEvidence = !!input.cycle_facts.trade_report &&
+        input.cycle_facts.photos.length > 0;
+      if (!hasLocalPhysicalEvidence && acceptedBundle) {
+        const bundleProof = {
+          version: "ses-sibling-bundle-evidence/v1",
+          claiming_job_id: input.identity.job_id,
+          ...acceptedBundle,
+        };
+        artifacts.push(
+          await artifactFromText({
+            role: "sibling_bundle_evidence",
+            path: "PROOF/sibling_bundle_evidence.json",
+            media_type: "application/json",
+            text: canonicalSesJson(bundleProof),
+            metadata: bundleProof,
+          }),
+        );
+        const resolved = deps.resolveBundledReportArtifact
+          ? await deps.resolveBundledReportArtifact(input)
+          : null;
+        if (!resolved) {
+          const itemBlocker = addBlocker(
+            blockers,
+            blocked(
+              "sibling_evidence_artifact_unrecoverable",
+              `Bundle ${acceptedBundle.bundle_id} is valid, but sibling ${acceptedBundle.sibling.job_number}'s claimed report artifact could not be recovered.`,
+              "Restore the exact claimed sibling report document; do not substitute an unclaimed file.",
+              [
+                "canonical-input-envelope",
+                "sibling-bundle-binding-ledger",
+                "sibling-positive-scope-claim",
+              ],
+              [acceptedBundle.coverage.report_document_id],
+              {
+                bundle_id: acceptedBundle.bundle_id,
+                sibling_job_id: acceptedBundle.sibling.job_id,
+                sibling_job_number: acceptedBundle.sibling.job_number,
+                report_document_id: acceptedBundle.coverage.report_document_id,
+              },
+            ),
+          );
+          manifest.items.physical_reporting_evidence = itemBlocker;
+          manifest.items.supporting_report_pdf = itemBlocker;
+        } else {
+          reportFile = `ARTIFACTS/${resolved.file_name}`;
+          artifacts.push(
+            await artifactFromBytes({
+              role: "supporting_report_pdf",
+              path: reportFile,
+              media_type: resolved.media_type,
+              bytes: resolved.bytes,
+              metadata: {
+                render_hash: resolved.render_hash || null,
+                evidence_source: "explicit_sibling_bundle",
+                bundle_id: acceptedBundle.bundle_id,
+                sibling_job_id: acceptedBundle.sibling.job_id,
+                binding_revision_id:
+                  acceptedBundle.claiming_binding.revision_id,
+                report_document_id: acceptedBundle.coverage.report_document_id,
+              },
+            }),
+          );
+          manifest.items.supporting_report_pdf = ready(`file:${reportFile}`);
+          manifest.items.physical_reporting_evidence = ready(
+            "file:PROOF/sibling_bundle_evidence.json",
+          );
+        }
+      } else if (!hasLocalPhysicalEvidence) {
         const itemBlocker = addBlocker(
           blockers,
           blocked(
