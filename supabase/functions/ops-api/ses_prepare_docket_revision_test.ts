@@ -14,6 +14,7 @@ import {
   SES_INPUT_CONTRACT_VERSION,
 } from "./ses_docket_envelope.ts";
 import {
+  MLB_SOUTH_WEST_SUBURBS,
   resolveSesFamilyMatrixRow,
   SES_EMERGENCY_SERVICE_FAMILIES,
   SES_FAMILY_MATRIX,
@@ -115,7 +116,9 @@ function fixtureInput(
       builder_reference: row.builder_key === "AJS" ? "AJS 70062" : "REF-70062",
       po_or_external_ref: "PO-70062",
       site_address: "62 Example Street",
-      site_suburb: "Perth",
+      site_suburb: row.routing_rule === "mlb-south-west-routing"
+        ? "Bunbury"
+        : "Perth",
       instruction_text: row.builder_key === "AJS"
         ? "Tarp affected areas of water leaking"
         : "Fixture instruction",
@@ -293,13 +296,16 @@ Deno.test("family matrix is a closed executable set with the AJS report guard", 
     "makesafe",
     "restoration",
   ]);
-  assertEquals(SES_FAMILY_MATRIX.length, 15);
+  assertEquals(SES_FAMILY_MATRIX.length, 20);
   for (const row of SES_FAMILY_MATRIX) {
     const resolved = resolveSesFamilyMatrixRow({
       builder_key: row.builder_key,
       family: row.family,
       strata: row.family === "own_template_roof",
       own_template_requested: row.family === "own_template_roof",
+      site_suburb: row.routing_rule === "mlb-south-west-routing"
+        ? "Bunbury"
+        : "Perth",
     });
     assert(resolved.ok);
     assertEquals(resolved.row, row);
@@ -320,6 +326,27 @@ Deno.test("family matrix is a closed executable set with the AJS report guard", 
     assert(!rejected.ok);
     assertEquals(rejected.failure.code, "ajs_misclassified_as_roof_report");
   }
+});
+
+Deno.test("MLB South-West suburbs select the Bunbury route while Perth stays on the metro route", () => {
+  for (const suburb of MLB_SOUTH_WEST_SUBURBS) {
+    const resolved = resolveSesFamilyMatrixRow({
+      builder_key: "MLB",
+      family: "physical_makesafe",
+      site_suburb: suburb,
+    });
+    assert(resolved.ok, suburb);
+    assertEquals(resolved.row.routing_rule, "mlb-south-west-routing", suburb);
+    assertEquals(resolved.row.invoice_to, "bunbury@mlbuilders.com.au", suburb);
+  }
+  const perth = resolveSesFamilyMatrixRow({
+    builder_key: "MLB",
+    family: "physical_makesafe",
+    site_suburb: "Perth",
+  });
+  assert(perth.ok);
+  assertEquals(perth.row.routing_rule, "mlb-perth-routing");
+  assertEquals(perth.row.invoice_to, "makesafes@mlbuilders.com.au");
 });
 
 Deno.test("restoration is typed but hard-stops before any unsealed recipe work", async () => {
@@ -881,6 +908,27 @@ Deno.test("bidirectional positive-scope bundle evidence clears the card-local ph
   input.source.builder_reference = "MLB-26393";
   input.cycle_facts.trade_report = null;
   input.cycle_facts.photos = [];
+  input.cycle_facts.swms_fact_context = {
+    evidence_kind: "sibling_bundle",
+    evidence_job_id: "02f614a4-09a7-422e-9381-c89a44aceccd",
+    evidence_job_number: "SWMS-26837",
+    trade_report: {
+      id: "trade-report-26837",
+      submitted_at: "2026-07-20T06:35:00.000Z",
+      checklist_json: {
+        works_completed:
+          "Stacked displaced Hardie panels safely and isolated the area.",
+        arrival_time: "14:05",
+      },
+    },
+    job_client_name: "Sibling site contact",
+    assignment: {
+      id: "assignment-26837",
+      crew_name: "Sibling field crew",
+      scheduled_date: "2026-07-20",
+      arrived_at: "2026-07-20T14:05:00.000Z",
+    },
+  };
   input.sibling_bundle_evidence = {
     status: "accepted",
     bundle_id: "1cd35292-1eb7-438f-bf6e-8dbcdf3fb135",
@@ -953,6 +1001,11 @@ Deno.test("bidirectional positive-scope bundle evidence clears the card-local ph
   );
   assertEquals(result.envelope.v2.items.supporting_report_pdf.state, "ready");
   assertEquals(result.envelope.v2.items.swms_artifact.state, "ready");
+  const swmsPlan = result.artifacts.find((artifact) =>
+    artifact.role === "swms_generation_plan"
+  );
+  assertEquals(swmsPlan?.metadata?.evidence_job_number, "SWMS-26837");
+  assertEquals(swmsPlan?.metadata?.evidence_kind, "sibling_bundle");
   assert(
     result.artifacts.some((artifact) =>
       artifact.path === "PROOF/sibling_bundle_evidence.json"
@@ -1022,6 +1075,12 @@ Deno.test("assessment invoice requires an explicit fence-only fact and a non-emp
   assert(
     blockerCodes(missingFenceResult).includes("pricing_evidence_missing"),
   );
+  const fenceBlocker = missingFenceResult.blockers.find((blocker) =>
+    blocker.reason_code === "pricing_evidence_missing"
+  )!;
+  assertStringIncludes(fenceBlocker.reason.toLowerCase(), "fence-only");
+  assert(!fenceBlocker.reason.includes("fence_only"));
+  assert(!fenceBlocker.recovery_action.includes("fence_only"));
 
   const missingReference = fixtureInput(row);
   missingReference.source.builder_reference = "";
@@ -1134,6 +1193,65 @@ Deno.test("temporary fencing rejects missing typed panel/base evidence", async (
   assert(
     blockerCodes(response.results[0]).includes("pricing_evidence_missing"),
   );
+  const blocker = response.results[0].blockers.find((item) =>
+    item.reason_code === "pricing_evidence_missing"
+  )!;
+  assertStringIncludes(blocker.reason.toLowerCase(), "panels");
+  assertStringIncludes(blocker.reason.toLowerCase(), "bases");
+  assert(!blocker.reason.includes("panel_count"));
+  assert(!blocker.reason.includes("base_count"));
+  assert(!blocker.recovery_action.includes("panel_count"));
+  assert(!blocker.recovery_action.includes("base_count"));
+});
+
+Deno.test("labour pricing blocks on missing field-report labour facts without naming storage fields", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.cycle_facts.hours_and_materials = {
+    trades: 2,
+  };
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  const blocker = result.blockers.find((item) =>
+    item.reason_code === "pricing_evidence_missing"
+  )!;
+  assertStringIncludes(blocker.reason.toLowerCase(), "billable hours");
+  assertStringIncludes(blocker.recovery_action.toLowerCase(), "field report");
+  assert(!blocker.reason.includes("hours_per_trade"));
+  assert(!blocker.recovery_action.includes("hours_per_trade"));
+  assert(!blocker.reason.includes("labour_hours"));
+  assert(!blocker.recovery_action.includes("labour_hours"));
+});
+
+Deno.test("hire-card pricing blocks on a missing star-picket fact without naming its storage field", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "temporary_fencing" &&
+    candidate.routing_rule === "mlb-perth-routing"
+  )!;
+  const input = fixtureInput(row);
+  input.cycle_facts.hours_and_materials = {
+    trades: 1,
+    hours_per_trade: 4,
+    panel_count: 8,
+    base_count: 8,
+  };
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  const blocker = result.blockers.find((item) =>
+    item.reason_code === "pricing_evidence_missing"
+  )!;
+  assertStringIncludes(blocker.reason.toLowerCase(), "star pickets");
+  assertStringIncludes(blocker.recovery_action.toLowerCase(), "work order");
+  assert(!blocker.reason.includes("star_picket_count"));
+  assert(!blocker.recovery_action.includes("star_picket_count"));
 });
 
 Deno.test("SWMS-required job with work order and trade report generates a provenance-bound artifact", async () => {
@@ -1147,10 +1265,20 @@ Deno.test("SWMS-required job with work order and trade report generates a proven
     submitted_at: "2026-07-27T01:00:00.000Z",
     checklist_json: {
       works_completed: "Installed temporary fencing and made the area safe.",
-      attendance_date: "2026-07-27",
       arrival_time: "08:30",
+    },
+  };
+  input.cycle_facts.swms_fact_context = {
+    evidence_kind: "current_card",
+    evidence_job_id: input.identity.job_id,
+    evidence_job_number: input.identity.job_number,
+    trade_report: null,
+    job_client_name: "Site representative",
+    assignment: {
+      id: "assignment-70062",
       crew_name: "Field crew",
-      site_contact: "Site representative",
+      scheduled_date: "2026-07-27",
+      arrived_at: "2026-07-27T08:30:00.000Z",
     },
   };
   let generated = 0;
@@ -1161,6 +1289,19 @@ Deno.test("SWMS-required job with work order and trade report generates a proven
         generated++;
         assertEquals(plan.template.kind, "general_makesafe");
         assertEquals(plan.provenance.trade_report_id, "trade-report-70062");
+        assertEquals(plan.provenance.evidence_kind, "current_card");
+        assertEquals(
+          plan.provenance.job_fact_sources.site_contact,
+          "jobs.client_name",
+        );
+        assertEquals(
+          plan.provenance.job_fact_sources.crew,
+          "job_assignments.crew_name",
+        );
+        assertEquals(
+          plan.provenance.job_fact_sources.works_date,
+          "job_assignments.scheduled_date",
+        );
         return {
           file_name: plan.output_file_name,
           media_type: "application/pdf",
@@ -1195,6 +1336,68 @@ Deno.test("SWMS-required job with work order and trade report generates a proven
     throw new Error("generated SWMS must be ready");
   }
   assertStringIncludes(swmsState.evidence, "generated:ARTIFACTS/SWMS");
+});
+
+Deno.test("SWMS blocks only on genuinely absent real-world facts and never exposes internal field names", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe" &&
+    candidate.routing_rule === "mlb-perth-routing"
+  )!;
+  const input = fixtureInput(row);
+  input.cycle_facts.trade_report = {
+    id: "trade-report-missing-facts",
+    submitted_at: null,
+    checklist_json: {
+      works_completed: "Installed temporary fencing and made the area safe.",
+    },
+  };
+  input.cycle_facts.swms_fact_context = {
+    evidence_kind: "current_card",
+    evidence_job_id: input.identity.job_id,
+    evidence_job_number: input.identity.job_number,
+    trade_report: null,
+    job_client_name: null,
+    assignment: null,
+  };
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  const blocker = result.blockers.find((item) =>
+    item.reason_code === "swms_generation_facts_missing"
+  )!;
+  assertStringIncludes(blocker.reason.toLowerCase(), "crew");
+  assertStringIncludes(blocker.reason.toLowerCase(), "site contact");
+  assertStringIncludes(blocker.reason.toLowerCase(), "arrival time");
+  assertStringIncludes(blocker.reason.toLowerCase(), "works date");
+  assertStringIncludes(
+    blocker.reason.toLowerCase(),
+    "trade report submission time",
+  );
+  assert(!blocker.reason.includes("works_date"));
+  assert(!blocker.reason.includes("site_contact"));
+  assert(!blocker.recovery_action.includes("trade-report facts"));
+});
+
+Deno.test("roof pricing blocks only when the work order states no storey classification", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "ordinary_roof_portal" &&
+    candidate.routing_rule === "mlb-perth-routing"
+  )!;
+  const input = fixtureInput(row);
+  input.cycle_facts.hours_and_materials = {};
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  const blocker = result.blockers.find((item) =>
+    item.reason_code === "pricing_evidence_missing"
+  )!;
+  assertStringIncludes(blocker.reason.toLowerCase(), "single/double storey");
+  assert(!blocker.reason.includes("storeys"));
+  assert(!blocker.recovery_action.includes("storeys"));
 });
 
 Deno.test("non-required report-only family does not plan or generate a SWMS", async () => {

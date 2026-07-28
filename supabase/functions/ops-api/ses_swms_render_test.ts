@@ -188,12 +188,15 @@ Deno.test("SWMS generation blocks when any required real fact is absent", () => 
   if (blocked.ok) throw new Error("missing SWMS facts must block generation");
   assertEquals(blocked.reason_code, "swms_generation_facts_missing");
   assertEquals(blocked.facts.missing_facts, [
-    "works_date",
-    "arrival_time",
+    "works date",
+    "arrival time",
     "crew",
-    "site_contact",
-    "trade_report_submitted_at",
+    "site contact",
+    "trade report submission time",
   ]);
+  assert(!blocked.reason.includes("works_date"));
+  assert(!blocked.reason.includes("site_contact"));
+  assert(!blocked.reason.includes("trade_report_submitted_at"));
 });
 
 Deno.test("SWMS renderer emits a stable four-page provenance-bound PDF", async () => {

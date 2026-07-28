@@ -567,8 +567,8 @@ function localInvoiceProposal(
         proposal: null,
         blocker: blocked(
           "pricing_evidence_missing",
-          "Assessment pricing requires an explicit fence_only true/false fact.",
-          "Record the typed assessment fence-only fact before selecting the $130 or $150 ex-GST price.",
+          "Assessment pricing requires the work order to state whether the scope is fence-only.",
+          "Confirm from the work order whether the assessment is fence-only before selecting the $130 or $150 ex-GST price.",
         ),
       };
     }
@@ -619,8 +619,8 @@ function localInvoiceProposal(
       proposal: null,
       blocker: blocked(
         "pricing_evidence_missing",
-        `Typed labour facts are incomplete or below the sealed ${minimum}-hour per-trade floor.`,
-        "Record trades and evidenced billable hours per trade; do not infer them from prose.",
+        `Pricing requires a positive trade count and at least ${minimum} evidenced billable hours for each trade.`,
+        "Recover the number of trades and the billable hours for each trade from the field report; do not invent either fact.",
       ),
     };
   }
@@ -661,8 +661,8 @@ function localInvoiceProposal(
         proposal: null,
         blocker: blocked(
           "pricing_evidence_missing",
-          "Temporary fencing requires typed panel and base counts.",
-          "Record panel_count and base_count from trade/source evidence.",
+          "Temporary-fencing pricing requires the number of panels and bases or blocks used.",
+          "Recover the panel and base or block quantities from the work order or structured scope before pricing.",
         ),
       };
     }
@@ -676,8 +676,8 @@ function localInvoiceProposal(
           proposal: null,
           blocker: blocked(
             "pricing_evidence_missing",
-            "Hire-card temporary fencing requires an explicit star-picket count, including zero.",
-            "Record star_picket_count as a typed integer.",
+            "Hire-card temporary fencing requires the number of star pickets used, including zero.",
+            "Recover the star-picket quantity from the work order or structured scope before pricing.",
           ),
         };
       }
@@ -1413,6 +1413,7 @@ async function prepareOne(
     family: input.classification.family,
     strata: input.classification.strata,
     own_template_requested: input.classification.own_template_requested,
+    site_suburb: input.source.site_suburb,
   });
   stagesMs.T2 = 0;
   let applicabilityBlocker: SesBlocker | null = null;
@@ -2278,6 +2279,9 @@ async function prepareOne(
               source_instruction_id:
                 planned.plan.provenance.source_instruction_id,
               trade_report_id: planned.plan.provenance.trade_report_id,
+              evidence_kind: planned.plan.provenance.evidence_kind,
+              evidence_job_id: planned.plan.provenance.evidence_job_id,
+              evidence_job_number: planned.plan.provenance.evidence_job_number,
             },
           }),
         );

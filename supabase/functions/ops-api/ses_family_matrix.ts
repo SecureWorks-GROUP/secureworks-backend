@@ -1,5 +1,5 @@
 export const SES_FAMILY_MATRIX_VERSION =
-  "ses-builder-family-matrix/2026-07-28.4";
+  "ses-builder-family-matrix/2026-07-28.5";
 export const SES_ASSESSMENT_RECIPE_VERSION =
   "assessment-triad-invoice-only/2026-07-27";
 
@@ -90,9 +90,50 @@ export type SesFamilyMatrixResolution =
   | { ok: false; failure: SesFamilyMatrixFailure };
 
 const MLB_MAKESAFES = "makesafes@mlbuilders.com.au";
+const MLB_BUNBURY = "bunbury@mlbuilders.com.au";
 const AJS_WORK_ORDERS = "workorders@ajs.build";
 const WESTERN_ACCOUNTS = "accounts@westernbuild.com.au";
 const SYNTHETIC_INTERNAL_MAILBOX = "marnin@secureworkswa.com.au";
+
+export const MLB_SOUTH_WEST_SUBURBS = Object.freeze(
+  [
+    "bunbury",
+    "east bunbury",
+    "south bunbury",
+    "carey park",
+    "withers",
+    "college grove",
+    "glen iris",
+    "picton",
+    "davenport",
+    "usher",
+    "pelican point",
+    "busselton",
+    "west busselton",
+    "geographe",
+    "vasse",
+    "dunsborough",
+    "quindalup",
+    "abbey",
+    "broadwater",
+    "yallingup",
+    "eaton",
+    "australind",
+    "dalyellup",
+    "capel",
+    "gelorup",
+    "margaret river",
+    "cowaramup",
+    "gnarabup",
+  ] as const,
+);
+const MLB_SOUTH_WEST_SUBURB_SET = new Set<string>(MLB_SOUTH_WEST_SUBURBS);
+
+function canonicalSuburb(value: unknown): string {
+  return typeof value === "string"
+    ? value.trim().toLowerCase().replace(/\s+/g, " ")
+    : "";
+}
 
 function canonicalToken(value: unknown): string {
   return typeof value === "string"
@@ -165,6 +206,7 @@ export function sesFamilyLabel(family: SesFamilyId): string {
 
 function physicalRow(
   builder_key: "MLB" | "AJS" | "AJBR" | "WESTERN",
+  southWest = false,
 ): SesFamilyMatrixRow {
   const ajs = builder_key === "AJS" || builder_key === "AJBR";
   const western = builder_key === "WESTERN";
@@ -186,11 +228,15 @@ function physicalRow(
       ? "ajs-routing"
       : western
       ? "western-routing"
+      : southWest
+      ? "mlb-south-west-routing"
       : "mlb-perth-routing",
     invoice_to: ajs
       ? AJS_WORK_ORDERS
       : western
       ? WESTERN_ACCOUNTS
+      : southWest
+      ? MLB_BUNBURY
       : MLB_MAKESAFES,
     report_route: "work_order_sender",
     photo_route: "work_order_sender",
@@ -206,8 +252,9 @@ function physicalRow(
 
 function temporaryFenceRow(
   builder_key: "MLB" | "AJS" | "AJBR" | "WESTERN",
+  southWest = false,
 ): SesFamilyMatrixRow {
-  const base = physicalRow(builder_key);
+  const base = physicalRow(builder_key, southWest);
   const ajs = builder_key === "AJS" || builder_key === "AJBR";
   return {
     ...base,
@@ -223,6 +270,7 @@ function temporaryFenceRow(
 
 function mlbReportRow(
   family: "ordinary_roof_portal" | "own_template_roof" | "assessment_quote",
+  southWest = false,
 ): SesFamilyMatrixRow {
   const assessment = family === "assessment_quote";
   const ownDocument = family === "own_template_roof";
@@ -240,8 +288,8 @@ function mlbReportRow(
     swms_policy: "hrcw_only",
     swms_waiver_rule: "mlb-report-only-card-carries-no-swms",
     invoice_basis: assessment ? "assessment_fixed" : "roof_storey_fixed",
-    routing_rule: "mlb-perth-routing",
-    invoice_to: MLB_MAKESAFES,
+    routing_rule: southWest ? "mlb-south-west-routing" : "mlb-perth-routing",
+    invoice_to: southWest ? MLB_BUNBURY : MLB_MAKESAFES,
     report_route: "work_order_sender",
     photo_route: "not_applicable",
     invoice_route: "matrix_invoice_mailbox",
@@ -340,10 +388,15 @@ function syntheticRow(
 
 export const SES_FAMILY_MATRIX: readonly SesFamilyMatrixRow[] = Object.freeze([
   physicalRow("MLB"),
+  physicalRow("MLB", true),
   temporaryFenceRow("MLB"),
+  temporaryFenceRow("MLB", true),
   mlbReportRow("ordinary_roof_portal"),
+  mlbReportRow("ordinary_roof_portal", true),
   mlbReportRow("own_template_roof"),
+  mlbReportRow("own_template_roof", true),
   mlbReportRow("assessment_quote"),
+  mlbReportRow("assessment_quote", true),
   physicalRow("AJS"),
   temporaryFenceRow("AJS"),
   physicalRow("AJBR"),
@@ -368,6 +421,7 @@ export function resolveSesFamilyMatrixRow(args: {
   family: SesFamilyId;
   strata?: boolean;
   own_template_requested?: boolean;
+  site_suburb?: unknown;
 }): SesFamilyMatrixResolution {
   if (args.family === "unknown") {
     return {
@@ -418,9 +472,12 @@ export function resolveSesFamilyMatrixRow(args: {
       },
     };
   }
+  const southWest = args.builder_key === "MLB" &&
+    MLB_SOUTH_WEST_SUBURB_SET.has(canonicalSuburb(args.site_suburb));
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === args.builder_key &&
-    candidate.family === args.family
+    candidate.family === args.family &&
+    (candidate.routing_rule === "mlb-south-west-routing") === southWest
   );
   if (!row) {
     return {

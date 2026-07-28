@@ -60,9 +60,11 @@ approved deployment.
 For a ready physical docket using card-local evidence, the Captain sees the WO,
 completion report, every current-cycle photo, and, when the sealed family/HRCW
 facts require it, a deterministic SWMS generated from the canonical work order
-and current-cycle field trade report. The SWMS carries the sealed template
-provenance and is included in the draft pack and email attachments; staff do not
-need to supply one. The Captain also sees the explicit SWMS decision, a local invoice
+and bound field trade report. For a sibling-bundle evidence path, that report is
+the accepted report from the bound sibling job; card-local evidence still uses
+the current cycle. The SWMS carries the sealed template provenance and is
+included in the draft pack and email attachments; staff do not need to supply
+one. The Captain also sees the explicit SWMS decision, a local invoice
 proposal, and three separate report/photo/invoice drafts on one review page.
 
 For an ordinary roof docket the Captain sees the WO, the captured live portal
@@ -88,9 +90,11 @@ and produces no fallback report, photo, invoice proposal or email draft.
 U4 generates a SWMS only when the sealed family and canonical work-order/trade-report
 facts require it. The renderer may select only the sealed general make-safe,
 roof-height, or fibre-cement fencing templates; unsupported or combined HRCW
-control sets fail closed with a Captain template-decision blocker. A current-cycle
-field trade report and all required real job facts are mandatory inputs. Missing
-inputs remain reason-coded blockers and never instruct staff to attach a SWMS.
+control sets fail closed with a Captain template-decision blocker. A bound field
+trade report and all required real job facts are mandatory inputs.
+Card-local evidence requires the current-cycle report; an accepted sibling-bundle
+path uses the bound sibling report. Missing inputs remain reason-coded blockers
+and never instruct staff to attach a SWMS.
 The generated PDF is deterministic and provenance-bound to the selected template,
 work order, and trade report. Report-only and otherwise non-required families mark
 the SWMS not applicable.

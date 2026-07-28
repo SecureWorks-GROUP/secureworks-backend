@@ -15,6 +15,20 @@ export type SesDeliveryRenderRoute =
   | "unroutable"
   | "not_applicable";
 
+export interface SesSwmsFactContext {
+  evidence_kind: "current_card" | "sibling_bundle";
+  evidence_job_id: string;
+  evidence_job_number: string | null;
+  trade_report: Record<string, unknown> | null;
+  job_client_name: string | null;
+  assignment: {
+    id: string | null;
+    crew_name: string | null;
+    scheduled_date: string | null;
+    arrived_at: string | null;
+  } | null;
+}
+
 interface SesSiblingBundleCandidate {
   suspected_sibling_job_id: string | null;
   suspected_sibling_job_number: string;
@@ -144,6 +158,7 @@ export interface SesAssemblerInputV1 {
     }>;
     roof_report_fields: Record<string, unknown> | null;
     hours_and_materials: Record<string, unknown> | null;
+    swms_fact_context?: SesSwmsFactContext | null;
     prior_release: {
       released: boolean;
       release_revision_id: string | null;

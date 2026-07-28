@@ -27,6 +27,13 @@ import {
   prepare_ses_docket_revision,
   SES_ASSESSMENT_RECIPE_VERSION,
 } from "./ses_prepare_docket_revision.ts";
+import {
+  rawSesPortalCaptureSha256,
+  SES_PORTAL_CAPTURE_BUCKET,
+  SES_PORTAL_CAPTURE_PRODUCER,
+  type SesPortalCaptureRevisionContent,
+  sesPortalCaptureRevisionHash,
+} from "./ses_portal_capture_contract.ts";
 
 function snapshot(): SesAssemblerLiveSnapshot {
   const { captured_from: _capturedFrom, ...liveSnapshot } = structuredClone(
@@ -162,10 +169,16 @@ function sanitizedAssessmentSnapshot(args: {
   };
 }
 
-function liveSnapshotClient(live: SesAssemblerLiveSnapshot) {
+function liveSnapshotClient(
+  live: SesAssemblerLiveSnapshot,
+  storageObjects: Record<string, Uint8Array> = {},
+) {
   const rows: Record<string, unknown> = {
     jobs: [live.job],
     makesafe_job_details: [live.detail],
+    makesafe_state_identity_current_v2: live.identity_revision
+      ? [live.identity_revision]
+      : [],
     makesafe_intake_cases: live.cases,
     makesafe_attendance_cycles: live.cycles,
     job_service_reports: live.reports,
@@ -174,6 +187,7 @@ function liveSnapshotClient(live: SesAssemblerLiveSnapshot) {
     job_documents: live.documents,
     makesafe_roof_report_drafts: live.roof_draft ? [live.roof_draft] : [],
     makesafe_readiness_current: live.readiness ? [live.readiness] : [],
+    makesafe_portal_capture_revisions: live.portal_captures,
     makesafe_report_packs: live.legacy_packs,
     job_events: live.events || [],
     makesafe_sibling_bundle_binding_revisions: live.bundle_bindings || [],
@@ -182,6 +196,23 @@ function liveSnapshotClient(live: SesAssemblerLiveSnapshot) {
     emails: live.bundle_emails || [],
   };
   return {
+    storage: {
+      from(bucket: string) {
+        return {
+          async download(path: string) {
+            const bytes = bucket === SES_PORTAL_CAPTURE_BUCKET
+              ? storageObjects[path]
+              : undefined;
+            if (!bytes) {
+              return { data: null, error: { message: "not found" } };
+            }
+            const owned = new Uint8Array(bytes.byteLength);
+            owned.set(bytes);
+            return { data: new Blob([owned.buffer]), error: null };
+          },
+        };
+      },
+    },
     from(table: string) {
       let single = false;
       const query = {
@@ -531,7 +562,40 @@ Deno.test(
           "BUNDLED into SWMS-26837 temp-fence make-safe; labour+report+SWMS covered under INV-0835.",
       },
     }];
-    live.bundle_jobs = [{ id: siblingId, job_number: "SWMS-26837" }];
+    live.bundle_jobs = [{
+      id: siblingId,
+      job_number: "SWMS-26837",
+      client_name: "Sibling site contact",
+    }];
+    live.bundle_details = [{
+      job_id: siblingId,
+      attendance_cycle_id: "sibling-cycle-1",
+      cycle_number: 1,
+      reattend_count: 0,
+    }];
+    live.bundle_reports = [{
+      id: "trade-report-26837",
+      job_id: siblingId,
+      status: "submitted",
+      submitted_at: "2026-07-20T06:35:00.000Z",
+      attendance_cycle_id: "sibling-cycle-1",
+      cycle_attribution: "bound",
+      checklist_json: {
+        works_completed:
+          "Stacked displaced Hardie panels safely and isolated the area.",
+        arrival_time: "14:05",
+      },
+    }];
+    live.bundle_assignments = [{
+      id: "assignment-26837",
+      job_id: siblingId,
+      status: "complete",
+      attendance_cycle_id: "sibling-cycle-1",
+      cycle_attribution: "bound",
+      crew_name: "Sibling field crew",
+      scheduled_date: "2026-07-20",
+      arrived_at: "2026-07-20T14:05:00.000Z",
+    }];
     live.bundle_bindings = [
       {
         id: "forward-revision",
@@ -624,6 +688,29 @@ Deno.test(
       input.sibling_bundle_evidence.coverage.delivery.email_post_id,
       "mail-0835",
     );
+    assertEquals(input.cycle_facts.swms_fact_context, {
+      evidence_kind: "sibling_bundle",
+      evidence_job_id: siblingId,
+      evidence_job_number: "SWMS-26837",
+      trade_report: {
+        id: "trade-report-26837",
+        status: "submitted",
+        submitted_at: "2026-07-20T06:35:00.000Z",
+        checklist_json: {
+          works_completed:
+            "Stacked displaced Hardie panels safely and isolated the area.",
+          arrival_time: "14:05",
+        },
+        notes: null,
+      },
+      job_client_name: "Sibling site contact",
+      assignment: {
+        id: "assignment-26837",
+        crew_name: "Sibling field crew",
+        scheduled_date: "2026-07-20",
+        arrived_at: "2026-07-20T14:05:00.000Z",
+      },
+    });
 
     live.bundle_invoices[0].line_items[0].Description =
       "Temporary fencing installed on sibling card only";
@@ -1001,9 +1088,9 @@ Deno.test(
 
     const result = response.results[0];
     const codes = blockerCodes(result);
-    assert(!codes.includes("portal_capture_missing"));
-    assert(!codes.includes("portal_capture_invalid"));
-    assert(!codes.includes("capability_portal_degraded"));
+    assert(!codes.includes("portal_capture_missing"), codes.join(","));
+    assert(!codes.includes("portal_capture_invalid"), codes.join(","));
+    assert(!codes.includes("capability_portal_degraded"), codes.join(","));
     const evidence = result.artifacts.find((artifact) =>
       artifact.path === "EVIDENCE/portal_roof_report.json"
     );
@@ -1082,7 +1169,7 @@ Deno.test(
     );
 
     const codes = blockerCodes(response.results[0]);
-    assert(codes.includes("portal_capture_invalid"));
+    assert(codes.includes("portal_capture_invalid"), codes.join(","));
     assert(!codes.includes("portal_not_submitted"));
   },
 );
@@ -1115,6 +1202,9 @@ Deno.test(
     live.detail!.external_links = [];
     live.reports[0].submitted_at = "2026-07-22T04:00:00.000Z";
     live.reports[0].notes = "Trade completion note";
+    live.assignments[0].crew_name = "Jake and Sam";
+    live.assignments[0].scheduled_date = "2026-07-20";
+    live.assignments[0].arrived_at = "2026-07-20T14:09:00.000Z";
     live.reports[0].checklist_json = {
       arrival_time: "2026-07-20 14:09",
       damage_description:
@@ -1134,6 +1224,20 @@ Deno.test(
     const input = buildSesAssemblerInput(live);
     assertEquals(input.cycle_facts.hours_and_materials, {
       trades: 2,
+      hours_per_trade: 2,
+    });
+    assertEquals(input.cycle_facts.swms_fact_context, {
+      evidence_kind: "current_card",
+      evidence_job_id: live.job.id,
+      evidence_job_number: live.job.job_number,
+      trade_report: null,
+      job_client_name: "The Owners of Tranby Villas",
+      assignment: {
+        id: live.assignments[0].id,
+        crew_name: "Jake and Sam",
+        scheduled_date: "2026-07-20",
+        arrived_at: "2026-07-20T14:09:00.000Z",
+      },
     });
     const renderJob = physicalReportRenderJob(live, input);
     assertEquals(renderJob, {
@@ -1142,7 +1246,7 @@ Deno.test(
       contact: "The Owners of Tranby Villas",
       date: "2026-07-20",
       arrival: "14:09",
-      crew: "2 trades",
+      crew: "Jake and Sam",
       billing_note: "Two trades attended for two hours each.",
       scope: "Unsecured bricks on the patio roof and broken plastic sheeting.",
       findings: "Storm / wind",
@@ -1155,13 +1259,6 @@ Deno.test(
     });
     assertEquals(
       Object.hasOwn(input.cycle_facts.hours_and_materials || {}, "materials"),
-      false,
-    );
-    assertEquals(
-      Object.hasOwn(
-        input.cycle_facts.hours_and_materials || {},
-        "hours_per_trade",
-      ),
       false,
     );
     const renderJobWithPhoto = physicalReportRenderJob(live, input, [
@@ -1211,6 +1308,107 @@ Deno.test(
     assertEquals(
       unknownFacts.follow_up_required,
       "Follow-up status: not recorded in trade submission.",
+    );
+  },
+);
+
+Deno.test(
+  "live adapter resolves pricing only from the sanctioned trade report and structured work-order scope facts",
+  async () => {
+    const temporaryFence = snapshot();
+    temporaryFence.job.metadata.makesafe_job_family = "temp_fence_makesafe";
+    temporaryFence.job.scope_json = {
+      work_order_facts: {
+        temporary_fencing: {
+          panel_count: 8,
+          base_count: 4,
+          star_picket_count: 6,
+        },
+      },
+    };
+    temporaryFence.detail!.report_type = null;
+    temporaryFence.detail!.external_links = [];
+    temporaryFence.identity_revision = {
+      authority_kind: "legacy_job_record",
+      source_instruction_id: `legacy-job:${temporaryFence.job.id}`,
+      source_version: 1,
+      source_content_hash: `sha256:${"a".repeat(64)}`,
+      lineage_id: temporaryFence.job.id,
+      effective_case_id: null,
+    };
+    temporaryFence.detail!.external_ref = "MLB-27062";
+    temporaryFence.reports[0].checklist_json = {
+      works_completed: "Installed the temporary fence.",
+      arrival_time: "08:30",
+      labour_hours: 4,
+      trade_count: 1,
+    };
+    const temporaryFenceInput = buildSesAssemblerInput(temporaryFence);
+    assertEquals(temporaryFenceInput.cycle_facts.hours_and_materials, {
+      trades: 1,
+      hours_per_trade: 4,
+      panel_count: 8,
+      base_count: 4,
+      star_picket_count: 6,
+    });
+
+    const assessment = sanitizedAssessmentSnapshot({
+      jobNumber: "SWMS-27063",
+      reportType: "assessment_report",
+      photoLinkKind: "photos",
+    });
+    assessment.job.scope_json = {
+      work_order_facts: {
+        assessment: { fence_only: true },
+      },
+    };
+    assertEquals(
+      buildSesAssemblerInput(assessment).cycle_facts.hours_and_materials,
+      { fence_only: true },
+    );
+
+    const roof = roofPortalSnapshot();
+    roof.job.scope_json = {
+      work_order_facts: {
+        roof_report: { number_of_storeys: "Double Storey" },
+      },
+    };
+    roof.roof_draft = null;
+    const roofInput = buildSesAssemblerInput(roof);
+    assertEquals(roofInput.cycle_facts.hours_and_materials, {
+      storeys: "Double Storey",
+    });
+    const roofResult = (await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: roofInput.identity.job_id },
+        idempotency_key: "roof-work-order-storey",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      {
+        resolveInput: async () => roofInput,
+        resolveSourceArtifacts: async () => sourceResolver(roofInput),
+        now: () => new Date("2026-07-28T08:00:00.000Z"),
+      },
+    )).results[0];
+    assertEquals(roofResult.invoice_proposal?.storeys, "double");
+    assertEquals(roofResult.invoice_proposal?.subtotal_ex_gst, 350);
+  },
+);
+
+Deno.test(
+  "live adapter selects the MLB South-West route from the canonical job suburb",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.job.site_suburb = "Dunsborough";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    const input = buildSesAssemblerInput(live);
+    assertEquals(
+      input.routing_seed.invoice_to,
+      "bunbury@mlbuilders.com.au",
     );
   },
 );
@@ -1435,6 +1633,12 @@ Deno.test(
     ) {
       const live = snapshot();
       live.detail!.report_type = null;
+      delete live.detail!.report_delivery;
+      delete live.job.metadata.report_delivery;
+      delete live.job.metadata.own_template_requested;
+      delete live.job.metadata.strata;
+      live.roof_draft = null;
+      live.job.client_name = "Ordinary insured client";
       live.job.metadata.makesafe_job_family = signal;
       const input = buildSesAssemblerInput(live);
       assertEquals(input.classification.family, expected, signal);
@@ -1864,6 +2068,15 @@ Deno.test(
     ) {
       const live = snapshot();
       live.detail!.report_type = null;
+      delete live.detail!.report_delivery;
+      delete live.detail!.roof_report_mode;
+      delete live.job.metadata.report_delivery;
+      delete live.job.metadata.roof_report_mode;
+      delete live.job.metadata.makesafe_roof_report_mode;
+      delete live.job.metadata.own_template_requested;
+      delete live.job.metadata.strata;
+      live.roof_draft = null;
+      live.job.client_name = "Ordinary insured client";
       live.job.metadata.makesafe_job_family = signal;
       const classification = buildSesAssemblerInput(live).classification;
       assertEquals<string>(classification.family, expected[0], signal);
@@ -1883,7 +2096,7 @@ Deno.test(
   async () => {
     assertEquals(
       SES_FAMILY_MATRIX_VERSION,
-      "ses-builder-family-matrix/2026-07-28.4",
+      "ses-builder-family-matrix/2026-07-28.5",
     );
     const shapes = [
       ["SWMS-26732", null, "photos"],
