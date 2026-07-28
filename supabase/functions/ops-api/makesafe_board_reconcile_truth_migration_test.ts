@@ -244,6 +244,18 @@ Deno.test("fact identity accepts canonical decimals without widening readiness",
   );
   assertStringIncludes(
     decimalFactMigration,
+    "public.validate_makesafe_board_reconciliation_state_tokens(jsonb)",
+  );
+  assertStringIncludes(
+    decimalFactMigration,
+    "public.makesafe_canonical_json_v1(v_row.state_facts)",
+  );
+  assertStringIncludes(
+    decimalFactMigration,
+    "public.makesafe_fact_canonical_json_v1(v_row.state_facts)",
+  );
+  assertStringIncludes(
+    decimalFactMigration,
     "v_scaled_decimal_hash IS DISTINCT FROM v_decimal_hash",
   );
   assertStringIncludes(
@@ -259,6 +271,10 @@ Deno.test("fact identity accepts canonical decimals without widening readiness",
       "CREATE OR REPLACE FUNCTION public.makesafe_canonical_json_v1",
     ),
     false,
+  );
+  assertStringIncludes(
+    migration,
+    "public.makesafe_canonical_json_v1(v_row.state_facts)",
   );
   assertEquals(
     /UPDATE\s+public\.(jobs|makesafe_job_details)\b/i.test(

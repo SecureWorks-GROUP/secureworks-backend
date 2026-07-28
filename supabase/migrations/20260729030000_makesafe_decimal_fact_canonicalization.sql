@@ -91,6 +91,27 @@ $$;
 
 DO $$
 DECLARE
+  v_definition text;
+BEGIN
+  SELECT pg_get_functiondef(
+    'public.validate_makesafe_board_reconciliation_state_tokens(jsonb)'::regprocedure
+  )
+  INTO v_definition;
+  IF position(
+    'public.makesafe_canonical_json_v1(v_row.state_facts)' IN v_definition
+  ) = 0 THEN
+    RAISE EXCEPTION 'reconciliation validator source is not at the expected revision';
+  END IF;
+  EXECUTE replace(
+    v_definition,
+    'public.makesafe_canonical_json_v1(v_row.state_facts)',
+    'public.makesafe_fact_canonical_json_v1(v_row.state_facts)'
+  );
+END;
+$$;
+
+DO $$
+DECLARE
   v_decimal_hash text;
   v_scaled_decimal_hash text;
   v_integer_hash text;
