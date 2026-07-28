@@ -1351,7 +1351,6 @@ Deno.test(
       portalInput.classification.delivery_render_route_reason_code,
       "portal_builder_family",
     );
-
     const ownTemplateRoof = snapshot();
     ownTemplateRoof.detail!.report_type = null;
     ownTemplateRoof.detail!.external_links = [];
