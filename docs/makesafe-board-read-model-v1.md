@@ -76,6 +76,14 @@ reconcile dry-runs use this prospective basis and label it
 board comparison continue to use persisted authority. A dry-run returns the
 complete projection health plus bounded per-card residual reasons. Apply this
 migration before the matching `ops-api`.
+Migration `20260729040000_makesafe_seed_case_alias_correction.sql` repairs the
+production seed's `case_candidates` reference from `c.id` to its exposed
+`c.case_id` and installs the atomic wrapper used by the matching `ops-api`.
+Apply it before deploying that edge code. A failed atomic seed rolls back every
+internal chunk and returns `committed: false`; after a committed seed whose
+acceptance comparison or U4 canary is still pending, retry with the same
+`run_key` until the complete v2 comparison has zero `projection_input_error`
+cards and `SWMS-26980` has no `spine_missing_*` blocker.
 
 ## Canonical truth
 

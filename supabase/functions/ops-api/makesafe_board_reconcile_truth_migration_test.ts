@@ -406,7 +406,10 @@ Deno.test("live seed chunks are committed atomically by one RPC", () => {
     caseAliasMigration,
     "public.seed_makesafe_state_authority_scoped_v2",
   );
-  assertStringIncludes(caseAliasMigration, "v_chunk := p_job_ids[v_offset:v_end]");
+  assertStringIncludes(
+    caseAliasMigration,
+    "v_chunk := p_job_ids[v_offset:v_end]",
+  );
   assertStringIncludes(
     caseAliasMigration,
     "REVOKE ALL ON FUNCTION public.seed_makesafe_state_authority_atomic_v1",

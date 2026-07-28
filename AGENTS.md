@@ -574,7 +574,11 @@ it must commit an exact `trustworthy | captain_marked` partition with
 `neither=0`. Apply the safeupdate compatibility follow-up
 `20260729020000_makesafe_family_pointer_safeupdate_guard.sql` before the
 matching `ops-api`; keep live seed invocation dark until the migration-first
-deploy and schema gate complete. Detailed ownership and sequencing live in
+deploy and schema gate complete. The follow-up
+`20260729040000_makesafe_seed_case_alias_correction.sql` repairs the
+`case_candidates` `case_id` alias and makes the full seed atomic; apply it before
+the matching `ops-api` and retry a committed-but-pending acceptance with the
+same run key. Detailed ownership and sequencing live in
 `docs/makesafe-board-read-model-v1.md`.
 
 ## SES Docs Ready Signoff Approves Exact Pack Bytes
