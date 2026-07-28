@@ -257,7 +257,7 @@ function dependencies(
       bytes: new Uint8Array([37, 80, 68, 70, 2]),
       render_hash: "roof-render-v1",
     }),
-    resolveSwmsArtifact: async () => ({
+    renderSwmsArtifact: async () => ({
       file_name: "SWMS - REF-70062.pdf",
       media_type: "application/pdf",
       bytes: new Uint8Array([37, 80, 68, 70, 3]),
@@ -356,7 +356,7 @@ Deno.test("restoration is typed but hard-stops before any unsealed recipe work",
         roofRenderCalls++;
         throw new Error("roof recipe must not run");
       },
-      resolveSwmsArtifact: async () => {
+      renderSwmsArtifact: async () => {
         swmsCalls++;
         return null;
       },
@@ -577,7 +577,7 @@ Deno.test("AJS report-only input is rejected instead of silently rerouted", asyn
         portalCaptureCalls += 1;
         return deps.capturePortal!(captureRequest);
       },
-      resolveSwmsArtifact: async () => {
+      renderSwmsArtifact: async () => {
         swmsCalls += 1;
         return null;
       },
@@ -645,7 +645,7 @@ Deno.test("unknown family hard-stops before any matrix recipe is selected", asyn
         reportRenderCalls += 1;
         throw new Error("physical recipe must not run");
       },
-      resolveSwmsArtifact: async () => {
+      renderSwmsArtifact: async () => {
         swmsCalls += 1;
         return null;
       },
@@ -1124,19 +1124,139 @@ Deno.test("temporary fencing rejects missing typed panel/base evidence", async (
   );
 });
 
-Deno.test("HRCW source terms force a real SWMS despite a builder waiver", async () => {
+Deno.test("SWMS-required job with work order and trade report generates a provenance-bound artifact", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.cycle_facts.trade_report = {
+    id: "trade-report-70062",
+    submitted_at: "2026-07-27T01:00:00.000Z",
+    checklist_json: {
+      works_completed: "Installed temporary fencing and made the area safe.",
+      attendance_date: "2026-07-27",
+      arrival_time: "08:30",
+      trade_count: 2,
+    },
+  };
+  let generated = 0;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false),
+    dependencies(input, {
+      renderSwmsArtifact: async (plan) => {
+        generated++;
+        assertEquals(plan.template.kind, "general_makesafe");
+        assertEquals(plan.provenance.trade_report_id, "trade-report-70062");
+        return {
+          file_name: plan.output_file_name,
+          media_type: "application/pdf",
+          bytes: new Uint8Array([37, 80, 68, 70, 3]),
+          render_hash: "generated-swms-v1",
+          provenance: {
+            template_version: plan.template_version,
+            trade_report_id: plan.provenance.trade_report_id,
+          },
+        };
+      },
+      persist: async () => ({
+        committed_at: "2026-07-27T01:00:01.000Z",
+      }),
+    }),
+  )).results[0];
+
+  assertEquals(generated, 1);
+  assertEquals(result.state, "ready");
+  const artifact = result.artifacts.find((item) =>
+    item.role === "swms_artifact"
+  );
+  assert(artifact);
+  assertEquals(artifact.metadata.render_hash, "generated-swms-v1");
+  assertEquals(artifact.metadata.provenance, {
+    template_version: "secureworks.swms-template/2026-06-30-v1",
+    trade_report_id: "trade-report-70062",
+  });
+  const swmsState = result.envelope.v2.items.swms_artifact;
+  assertEquals(swmsState.state, "ready");
+  if (swmsState.state !== "ready") {
+    throw new Error("generated SWMS must be ready");
+  }
+  assertStringIncludes(swmsState.evidence, "generated:ARTIFACTS/SWMS");
+});
+
+Deno.test("non-required report-only family does not plan or generate a SWMS", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "assessment_quote"
+  )!;
+  const input = fixtureInput(row);
+  let generated = 0;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input, {
+      renderSwmsArtifact: async () => {
+        generated++;
+        throw new Error("report-only family must not generate a SWMS");
+      },
+    }),
+  )).results[0];
+
+  assertEquals(generated, 0);
+  assertEquals(result.envelope.v2.items.swms_artifact.state, "not_applicable");
+  assertEquals(
+    result.artifacts.some((artifact) =>
+      artifact.role === "swms_artifact" ||
+      artifact.role === "swms_generation_plan"
+    ),
+    false,
+  );
+});
+
+Deno.test("missing trade report blocks SWMS generation without instructing staff to attach one", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.cycle_facts.trade_report = null;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  const blocker = result.blockers.find((candidate) =>
+    candidate.reason_code === "swms_generation_trade_report_missing"
+  );
+
+  assert(blocker);
+  assertStringIncludes(blocker.reason, "field trade report");
+  assertStringIncludes(blocker.recovery_action, "U4");
+  assertStringIncludes(blocker.recovery_action, "do not need to attach a SWMS");
+  assertEquals(
+    result.blockers.some((candidate) =>
+      candidate.reason_code === "hrcw_swms_missing"
+    ),
+    false,
+  );
+});
+
+Deno.test("unsupported HRCW combination blocks for a sealed-template decision", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
     candidate.family === "physical_makesafe"
   )!;
   const input = fixtureInput(row);
-  input.hrcw.source_hazard_terms = ["asbestos"];
+  input.hrcw.categories = ["structural"];
+  input.hrcw.source_hazard_terms = ["temporary load-bearing support"];
   const response = await prepareSesDocketRevision(
     request(input.identity.job_id),
-    dependencies(input, { resolveSwmsArtifact: async () => null }),
+    dependencies(input),
   );
   assertEquals(response.results[0].state, "blocked");
-  assert(blockerCodes(response.results[0]).includes("hrcw_swms_missing"));
+  assert(
+    blockerCodes(response.results[0]).includes(
+      "swms_generation_template_unavailable",
+    ),
+  );
 });
 
 Deno.test("same input and intent produce stable revision and output hashes", async () => {

@@ -1162,7 +1162,7 @@ Deno.test(
             "must not render without a canonical builder reference",
           );
         },
-        resolveSwmsArtifact: async () => ({
+        renderSwmsArtifact: async () => ({
           file_name: "SWMS.pdf",
           media_type: "application/pdf",
           bytes: new Uint8Array([37, 80, 68, 70]),
@@ -1271,7 +1271,7 @@ Deno.test(
             renderCalls++;
             throw new Error("dry-run must not render the report PDF");
           },
-          resolveSwmsArtifact: async () => null,
+          renderSwmsArtifact: async () => null,
         },
       );
       const elapsedMs = performance.now() - started;
