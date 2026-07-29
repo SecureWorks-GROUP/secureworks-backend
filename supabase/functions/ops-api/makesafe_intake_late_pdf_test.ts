@@ -321,6 +321,9 @@ function makeClient(cfg: { drafts: LatePdfDraftRow[] }) {
         return chain;
       },
       in: () => chain,
+      // fetchAllRows appends `.order(uniqueKey)` before `.range()`; the mock must
+      // expose it so the chain reaches the range terminal.
+      order: () => chain,
       // fetchAllRows terminal: one page under PAGE_SIZE so it stops after one call.
       range: () =>
         Promise.resolve({
