@@ -1262,6 +1262,7 @@ function pdfDocument(
     extractor: null,
     truncated: false,
     reason: null,
+    sha256: attachment.sha256 ?? null,
     ...values,
   };
 }
@@ -1295,11 +1296,32 @@ export async function enrichSourcesWithPdfText(
     return timeDifference || a.postId.localeCompare(b.postId);
   });
   const documentsByPost = new Map<string, DeterministicPdfDocument[]>();
+  // Dual-capture twins carry byte-identical PDFs under distinct attachment
+  // rows. One deterministic outcome per content hash: the first carrier spends
+  // the budget and every sha-identical copy reuses its result, so a twin can
+  // never double-spend the extraction cap or end a run with one twin extracted
+  // and the other deferred. Transient failures (download/extraction errors)
+  // are deliberately not shared; a later copy may still succeed.
+  const outcomeBySha = new Map<string, Partial<DeterministicPdfDocument>>();
+  const transientPdfReasons = new Set(["download_failed", "extraction_failed"]);
+  const shareablePdfOutcome = (document: DeterministicPdfDocument) =>
+    document.status === "extracted" ||
+    (document.status === "quarantined" &&
+      !transientPdfReasons.has(document.reason || ""));
   let attempted = 0;
   for (const source of ordered) {
     if (source.direction === "own_outbound") continue;
     for (const attachment of eligiblePdfAttachments(source)) {
       let document: DeterministicPdfDocument;
+      const contentSha = attachment.sha256 || null;
+      const shared = contentSha ? outcomeBySha.get(contentSha) : undefined;
+      if (shared) {
+        documentsByPost.set(source.postId, [
+          ...(documentsByPost.get(source.postId) || []),
+          pdfDocument(source, attachment, shared),
+        ]);
+        continue;
+      }
       if (attempted >= MAX_PDF_EXTRACTIONS_PER_RUN) {
         document = pdfDocument(source, attachment, {
           status: "deferred",
@@ -1343,6 +1365,22 @@ export async function enrichSourcesWithPdfText(
             reason: "extraction_failed",
           });
         }
+      }
+      if (
+        contentSha && !outcomeBySha.has(contentSha) &&
+        shareablePdfOutcome(document)
+      ) {
+        // Outcome fields only: the shared record must never carry the first
+        // carrier's source/attachment identity into a twin's document.
+        outcomeBySha.set(contentSha, {
+          status: document.status,
+          text: document.text,
+          charCount: document.charCount,
+          pageCount: document.pageCount,
+          extractor: document.extractor,
+          truncated: document.truncated,
+          reason: document.reason,
+        });
       }
       documentsByPost.set(source.postId, [
         ...(documentsByPost.get(source.postId) || []),
@@ -1570,7 +1608,9 @@ async function readInputs(
   const attachmentRows: any[] = [];
   for (const ids of chunk(postIds)) {
     const { data, error } = await client.from("email_attachments")
-      .select("id,email_id,name,content_type,storage_path,status,size_bytes")
+      .select(
+        "id,email_id,name,content_type,storage_path,status,size_bytes,sha256",
+      )
       .in("email_id", ids);
     if (error) {
       throw new Error(
@@ -1589,6 +1629,7 @@ async function readInputs(
       storagePath: row.storage_path || null,
       status: row.status || null,
       sizeBytes: row.size_bytes || null,
+      sha256: row.sha256 || null,
     };
     attachmentsByPost.set(row.email_id, [
       ...(attachmentsByPost.get(row.email_id) || []),

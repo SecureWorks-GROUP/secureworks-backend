@@ -242,6 +242,7 @@ function attachmentFromRow(row: JsonRow): DeterministicAttachment {
     storagePath: typeof row.storage_path === "string" ? row.storage_path : null,
     status: typeof row.status === "string" ? row.status : null,
     sizeBytes: typeof row.size_bytes === "number" ? row.size_bytes : null,
+    sha256: typeof row.sha256 === "string" ? row.sha256 : null,
   };
 }
 
@@ -387,7 +388,8 @@ async function run(): Promise<void> {
       baseUrl,
       key,
       table: "email_attachments",
-      select: "id,email_id,name,content_type,storage_path,status,size_bytes",
+      select:
+        "id,email_id,name,content_type,storage_path,status,size_bytes,sha256",
       column: "email_id",
       values: postIds,
     }),
