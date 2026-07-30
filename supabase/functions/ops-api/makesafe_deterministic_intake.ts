@@ -474,9 +474,9 @@ function text(item: DeterministicSourceItem): string {
 }
 
 function lifecycleText(item: DeterministicSourceItem): string {
-  return `${text(item)}\n${item.attachments.map((attachment) =>
-    attachment.name || ""
-  ).join("\n")}`;
+  return `${text(item)}\n${
+    item.attachments.map((attachment) => attachment.name || "").join("\n")
+  }`;
 }
 
 function isRevisionSource(item: DeterministicSourceItem): boolean {

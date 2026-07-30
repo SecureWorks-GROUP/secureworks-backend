@@ -738,7 +738,8 @@ Deno.test("case-wide recovery finds a late PDF before declaring it missing", () 
     postId: "case-1",
     threadId: "thread-1",
     subject: "NEW WORK ORDER MLB-27040 Work Order: WO 27040",
-    body: "Client: Case Client\nAddress: 50 Delta Street, Perth\nPlease attend and make safe the property.",
+    body:
+      "Client: Case Client\nAddress: 50 Delta Street, Perth\nPlease attend and make safe the property.",
   });
   const latePdf = source({
     postId: "case-2",
@@ -929,7 +930,8 @@ Deno.test("WO ref without PDF or client name lands in review maybe-box", () => {
   // area that should be parked for human/AI review, not silently dropped.
   const item = source({
     postId: "wo-no-pdf",
-    subject: "Our Ref: MLB-25876 - 48 Doriot Way, Carine - Client Ref: 13345234",
+    subject:
+      "Our Ref: MLB-25876 - 48 Doriot Way, Carine - Client Ref: 13345234",
     body: "Please see attached site photos for this make safe job.",
     attachments: [],
   });
@@ -1240,7 +1242,8 @@ Deno.test("D3 (Ruling 12): the '-R' ref suffix opens a reopen cycle on the base 
     threadId: "suffix-thread",
     fromEmail: "jobs@ajbr.test",
     subject: "NEW WORK ORDER AJBR-67217",
-    body: "Client: Suffix Client\nAddress: 9 Sigma Court, Perth\nMake safe roof",
+    body:
+      "Client: Suffix Client\nAddress: 9 Sigma Court, Perth\nMake safe roof",
     attachments: [pdf("suffix-1")],
   });
   const reattend = source({
@@ -1267,7 +1270,8 @@ Deno.test("D3: an attachment-only '-R' ref opens a reopen cycle", () => {
     threadId: "attachment-suffix-thread",
     fromEmail: "jobs@ajbr.test",
     subject: "NEW WORK ORDER AJBR-67218",
-    body: "Client: Attachment Client\nAddress: 10 Sigma Court, Perth\nMake safe roof",
+    body:
+      "Client: Attachment Client\nAddress: 10 Sigma Court, Perth\nMake safe roof",
     attachments: [pdf("attachment-suffix-1")],
   });
   const reattend = source({
@@ -1296,7 +1300,8 @@ Deno.test("owned PDF selection uses the shared PO identity grammar", () => {
   const item = source({
     postId: "owned-po-format",
     subject: "NEW WORK ORDER MLB-35000 PO: 54176",
-    body: "Client: PO Format Client\nAddress: 11 Sigma Court, Perth\nhttps://portal.example.test/owned-po-format",
+    body:
+      "Client: PO Format Client\nAddress: 11 Sigma Court, Perth\nhttps://portal.example.test/owned-po-format",
     links: [{
       url: "https://portal.example.test/owned-po-format",
       sourcePostId: "owned-po-format",

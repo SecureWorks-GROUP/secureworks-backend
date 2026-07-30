@@ -1,3 +1,5 @@
+// deno-lint-ignore-file no-import-prefix
+
 // Track A (TRACK-A-INTAKE-DIFF-2026-07-30) — sealed charter fixtures as CI.
 //
 // FAMILY-CLASSIFICATION-CHARTER.md v1.1: "Once sealed, this charter's examples

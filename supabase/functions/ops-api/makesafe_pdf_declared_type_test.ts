@@ -1,3 +1,5 @@
+// deno-lint-ignore-file no-import-prefix
+
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { extractPdfDeclaredType } from "./makesafe_pdf_declared_type.ts";
 
