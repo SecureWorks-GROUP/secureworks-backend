@@ -2229,7 +2229,8 @@ export function buildDeterministicIntakePlan(
             d.status === "extracted" && !!d.text
           )
         );
-        const woAttachmentMissing = evidenceMap.work_order_attachment?.status === "missing";
+        const woAttachmentMissing =
+          evidenceMap.work_order_attachment?.status === "missing";
         if (hasWoRef && !hasExtractedPdf && woAttachmentMissing) {
           reasonCode = "wo_ref_without_pdf_pending_review";
         } else {

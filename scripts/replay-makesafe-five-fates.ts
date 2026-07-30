@@ -388,7 +388,8 @@ async function run(): Promise<void> {
       baseUrl,
       key,
       table: "email_attachments",
-      select: "id,email_id,name,content_type,storage_path,status,size_bytes,sha256",
+      select:
+        "id,email_id,name,content_type,storage_path,status,size_bytes,sha256",
       column: "email_id",
       values: postIds,
     }),

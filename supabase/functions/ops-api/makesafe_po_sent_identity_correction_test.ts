@@ -43,7 +43,10 @@ Deno.test("po sent: 'PO sent 24/6' is not a PO label in either grammar", () => {
   // No digits follow the label directly, so the canonical grammar skips it and
   // the loose grammar cannot flag it as an unparseable PO either: the case
   // must not be strandable as permanent PO doubt.
-  assertEquals(hasAnyPoLabel("Do we have an install date. PO sent 24/6."), false);
+  assertEquals(
+    hasAnyPoLabel("Do we have an install date. PO sent 24/6."),
+    false,
+  );
   assertEquals(
     hasUnparseablePoLabel("Do we have an install date. PO sent 24/6."),
     false,
