@@ -51,6 +51,9 @@ additive `job_service_reports` row bound to its immutable attendance cycle while
 board remains one card per `jobs.id`. Charging disposition is deliberately separate
 and awaits the Captain's ruling; see
 `docs/evidence/makesafe-trade-reattendance-v1.md`.
+Apply `20260730000001_makesafe_report_cycle_uniqueness.sql` before deploying the
+matching `ops-api`; its unique nullable-cycle index is the database guard that
+makes concurrent report retries converge on one report per attendance cycle.
 
 ## Deterministic Make-Safe Replay Measures Identity, Not Job Readiness
 

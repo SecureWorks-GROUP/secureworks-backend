@@ -13,7 +13,11 @@ Date: 2026-07-30
 - The canonical board deliberately projects one current report and one current evidence state per job. Board rows are keyed by `jobs.id`, not report id, so additive reports do not create extra cards.
 - The Ops job-detail API already returns all `service_reports`, but the Ops UI opens only the first report. That presentation gap makes the existing additive storage look like a continuation.
 
-No schema migration is required. The existing attendance-cycle and report columns are sufficient. This change will not add or alter charging, invoice or send behavior.
+The existing attendance-cycle and report columns are sufficient for the additive
+model. This change also adds the unique, nullable-cycle index in
+`20260730000001_makesafe_report_cycle_uniqueness.sql` so concurrent retries
+cannot create two reports for one attendance cycle. It does not add or alter
+charging, invoice or send behavior.
 
 ### Planned implementation
 

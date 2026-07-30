@@ -470,7 +470,9 @@ Deno.test("a concurrent cycle conflict reuses the existing report", async () => 
         cycle_attribution: "bound",
       })),
     }),
-    { "job_service_reports.insert": { message: "duplicate key", code: "23505" } },
+    {
+      "job_service_reports.insert": { message: "duplicate key", code: "23505" },
+    },
     { hideFirstCycleReportRead: true },
   );
 
@@ -481,7 +483,12 @@ Deno.test("a concurrent cycle conflict reuses the existing report", async () => 
 
   assertEquals(res.ok, true);
   assertEquals(rows.job_service_reports.length, 2);
-  assertEquals(rows.job_service_reports.filter((r: any) => r.attendance_cycle_id === "cycle-2").length, 1);
+  assertEquals(
+    rows.job_service_reports.filter((r: any) =>
+      r.attendance_cycle_id === "cycle-2"
+    ).length,
+    1,
+  );
 });
 
 // ── 3. submit_makesafe_report does NOT block the re-attend's second submit ─────
@@ -673,7 +680,10 @@ Deno.test("an assigned trade may start their own reattendance", async () => {
   assertEquals(res.authorization_relationship, "assigned_trade");
   assertEquals(res.cycle_number, 2);
   assertEquals(rows.job_events[0].user_id, "trade-1");
-  assertEquals(rows.makesafe_job_details[0].last_reattend_reason, "second visit needed");
+  assertEquals(
+    rows.makesafe_job_details[0].last_reattend_reason,
+    "second visit needed",
+  );
 });
 
 Deno.test("reattend_makesafe refuses an unrelated signed-in user", async () => {
