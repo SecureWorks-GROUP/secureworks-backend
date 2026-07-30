@@ -47,6 +47,12 @@ export type WoLabourGroup = {
   entries: WoLabourEntry[]
 }
 
+export function _tradeInvoiceXeroTax(gst: unknown): { taxType: 'INPUT' | 'NONE'; lineAmountTypes: 'Exclusive' | 'NoTax' } {
+  return Number(gst || 0) > 0
+    ? { taxType: 'INPUT', lineAmountTypes: 'Exclusive' }
+    : { taxType: 'NONE', lineAmountTypes: 'NoTax' }
+}
+
 const round2 = (n: number) => Math.round(n * 100) / 100
 
 // Trim + collapse internal whitespace. Production data carries names like
@@ -126,7 +132,7 @@ export function _woNetMismatch(item: any): { allocated: number; labourSum: numbe
     return s + amt
   }, 0))
   const expectedNet = round2(allocated - labourSum)
-  const claimedNet = round2(Number(item?.rate || 0))
+  const claimedNet = round2(Number(item?.quantity || 1) * Number(item?.rate || 0))
   if (Math.abs(expectedNet - claimedNet) > 0.01) {
     return { allocated, labourSum, expectedNet, claimedNet }
   }
@@ -184,6 +190,7 @@ export function _resolveWoLabourUsers(
 export function _buildWoLabourPayoutInvoice(
   group: WoLabourGroup,
   opts: {
+    orgId: string
     weekStart: string | null
     weekEnd: string | null
     invoiceNumber: string
@@ -198,6 +205,7 @@ export function _buildWoLabourPayoutInvoice(
   const totalHours = round2(group.entries.reduce((s, e) => s + e.hours, 0))
   const provenance = `Auto-created from ${opts.sourceTradeName}'s work order invoice ${opts.sourceInvoiceNumber}`
   const invoice = {
+    org_id: opts.orgId,
     user_id: group.user.id,
     week_start: opts.weekStart,
     week_end: opts.weekEnd,

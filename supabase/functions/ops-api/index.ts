@@ -208,6 +208,7 @@ import {
   _cleanWoLabourLines,
   _extractWoLabourEntries,
   _resolveWoLabourUsers,
+  _tradeInvoiceXeroTax,
   _woLabourProblemNote,
   _woNetMismatch,
   type WoLabourEntry,
@@ -5497,6 +5498,7 @@ if (import.meta.main) serve(async (req: Request) => {
         if (Math.abs(computedSubtotal - expectedSubtotal) > 0.01) {
           throw new Error('Xero payload subtotal mismatch: computed $' + computedSubtotal.toFixed(2) + ' vs trade_invoices.subtotal_ex $' + expectedSubtotal.toFixed(2))
         }
+        const xeroTax = _tradeInvoiceXeroTax(inv.gst)
 
         // Past the guard. From here side effects are allowed.
         const { accessToken, tenantId } = await getToken(client)
@@ -5540,7 +5542,7 @@ if (import.meta.main) serve(async (req: Request) => {
             Quantity: useQty,
             UnitAmount: useRate,
             AccountCode: '620', // Subcontractor expense
-            TaxType: 'INPUT',
+            TaxType: xeroTax.taxType,
             Tracking: lineTracking,
           }
         })
@@ -5566,7 +5568,7 @@ if (import.meta.main) serve(async (req: Request) => {
             Reference: reference,
             DueDate: dueDate,
             Status: 'DRAFT',
-            LineAmountTypes: 'Exclusive',
+            LineAmountTypes: xeroTax.lineAmountTypes,
             LineItems: xeroLineItems,
           }],
         }
@@ -7874,6 +7876,7 @@ if (import.meta.main) serve(async (req: Request) => {
                     .eq('user_id', group.user.id)
                   const gInvoiceNumber = `SW-INV-${gInitials}-${today}-${String((gCount || 0) + 1).padStart(3, '0')}`
                   const built = _buildWoLabourPayoutInvoice(group, {
+                    orgId: tradeUser.orgId,
                     weekStart: week_start || null,
                     weekEnd,
                     invoiceNumber: gInvoiceNumber,
@@ -7887,11 +7890,12 @@ if (import.meta.main) serve(async (req: Request) => {
                   const payoutLines = built.lines.map((l) => ({ ...l, trade_invoice_id: payoutInv.id }))
                   const { error: payoutLineErr } = await client.from('trade_invoice_lines').insert(payoutLines)
                   if (payoutLineErr) {
-                    // Leave the shell invoice failed+annotated rather than half-created.
-                    await client.from('trade_invoices').update({
-                      status: 'failed',
+                    // Leave the shell invoice rejected+annotated rather than approvable.
+                    const { error: payoutMarkErr } = await client.from('trade_invoices').update({
+                      status: 'ops-reject',
                       query_note: ('WO labour payout line save failed: ' + payoutLineErr.message).slice(0, 500),
                     }).eq('id', payoutInv.id)
+                    if (payoutMarkErr) console.error('[ops-api] Failed to mark WO labour payout rejected:', payoutMarkErr.message)
                     throw new Error(`payout lines for ${group.user.name}: ${payoutLineErr.message}`)
                   }
                   woLabourPayouts.push({
@@ -7902,7 +7906,7 @@ if (import.meta.main) serve(async (req: Request) => {
                     total_ex: Number(built.invoice.subtotal_ex) || 0,
                   })
                   try {
-                    await client.from('business_events').insert({
+                    const { error: eventErr } = await client.from('business_events').insert({
                       event_type: 'trade.wo_labour_payout_created',
                       source: 'ops-api/generate_trade_invoice',
                       entity_type: 'trade_invoice',
@@ -7915,7 +7919,8 @@ if (import.meta.main) serve(async (req: Request) => {
                         line_count: built.lines.length,
                       },
                     })
-                  } catch (e) { /* non-blocking */ }
+                    if (eventErr) console.error('[ops-api] WO labour payout-created event insert failed:', eventErr.message)
+                  } catch (e) { console.error('[ops-api] WO labour payout-created event insert threw:', (e as Error).message) }
                 }
               }
               const issueNote = _woLabourProblemNote(woLabourIssues)
@@ -7924,6 +7929,16 @@ if (import.meta.main) serve(async (req: Request) => {
                   .select('query_note').eq('id', invoice.id).maybeSingle()
                 const merged = [holderInv?.query_note, issueNote].filter(Boolean).join(' | ').slice(0, 2000)
                 await client.from('trade_invoices').update({ query_note: merged }).eq('id', invoice.id)
+                try {
+                  const { error: eventErr } = await client.from('business_events').insert({
+                    event_type: 'trade.wo_labour_unresolved',
+                    source: 'ops-api/generate_trade_invoice',
+                    entity_type: 'trade_invoice',
+                    entity_id: invoice.id,
+                    payload: { holder_invoice_number: invoiceNumber, problems: woLabourIssues },
+                  })
+                  if (eventErr) console.error('[ops-api] WO labour unresolved event insert failed:', eventErr.message)
+                } catch (e) { console.error('[ops-api] WO labour unresolved event insert threw:', (e as Error).message) }
               }
             } catch (woFanoutErr) {
               const woMsg = (woFanoutErr as Error).message
@@ -7936,15 +7951,16 @@ if (import.meta.main) serve(async (req: Request) => {
                   'WO LABOUR: auto-payout creation FAILED (' + woMsg + ') — the office must pay the named labourers manually from the line breakdown.',
                 ].filter(Boolean).join(' | ').slice(0, 2000)
                 await client.from('trade_invoices').update({ query_note: failNote }).eq('id', invoice.id)
-              } catch { /* non-blocking */ }
+              } catch (e) { console.error('[ops-api] WO labour payout-failed event insert threw:', (e as Error).message) }
               try {
-                await client.from('business_events').insert({
+                const { error: eventErr } = await client.from('business_events').insert({
                   event_type: 'trade.wo_labour_payout_failed',
                   source: 'ops-api/generate_trade_invoice',
                   entity_type: 'trade_invoice',
                   entity_id: invoice.id,
                   payload: { error_message: woMsg, invoice_number: invoiceNumber },
                 })
+                if (eventErr) console.error('[ops-api] WO labour payout-failed event insert failed:', eventErr.message)
               } catch { /* non-blocking */ }
             }
 

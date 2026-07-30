@@ -13,6 +13,7 @@ import {
   _cleanWoName,
   _extractWoLabourEntries,
   _resolveWoLabourUsers,
+  _tradeInvoiceXeroTax,
   _woLabourProblemNote,
   _woNetMismatch,
   type WoLabourEntry,
@@ -104,6 +105,12 @@ Deno.test("_woNetMismatch: per-line rounding matches the client (no false mismat
   assertEquals(_woNetMismatch(item), null);
 });
 
+Deno.test("_woNetMismatch: validates persisted quantity times rate", () => {
+  assertEquals(_woNetMismatch({ ...ALYX_WO_ITEM, quantity: 2, rate: 136 }), null);
+  const bad = _woNetMismatch({ ...ALYX_WO_ITEM, quantity: 2, rate: 272 });
+  assertEquals(bad?.claimedNet, 544);
+});
+
 // ── Cleaned persistence copy ──────────────────────────────────────────────
 Deno.test("_cleanWoLabourLines: recomputes amounts, keeps problem lines, drops empties", () => {
   const cleaned = _cleanWoLabourLines({
@@ -183,6 +190,7 @@ Deno.test("_buildWoLabourPayoutInvoice: Tendo is paid $287.50 pending office rev
     "u-alyx",
   );
   const { invoice, lines } = _buildWoLabourPayoutInvoice(groups[0], {
+    orgId: "org-1",
     weekStart: "2026-07-13",
     weekEnd: "2026-07-19",
     invoiceNumber: "SW-INV-TLA-260730-003",
@@ -191,6 +199,7 @@ Deno.test("_buildWoLabourPayoutInvoice: Tendo is paid $287.50 pending office rev
     nowIso: NOW,
   });
   assertEquals(invoice.user_id, "u-tendo");
+  assertEquals(invoice.org_id, "org-1");
   assertEquals(invoice.status, "pending_ops_review");
   assertEquals(invoice.subtotal_ex, 287.5);
   assertEquals(invoice.gst, 0); // no gstRegistered flag → not registered
@@ -216,6 +225,7 @@ Deno.test("_buildWoLabourPayoutInvoice: gst-registered labourer gets 10% GST", (
     entries: [entryFor("Jean", 10, 35)],
   };
   const { invoice } = _buildWoLabourPayoutInvoice(group, {
+    orgId: "org-1",
     weekStart: "2026-07-13",
     weekEnd: "2026-07-19",
     invoiceNumber: "SW-INV-JC-260730-013",
@@ -234,6 +244,7 @@ Deno.test("_buildWoLabourPayoutInvoice: labour+extras line shapes agree so the p
     entries: [entryFor("Tendo", 11.5, 25), entryFor("Tendo", 4, 25)],
   };
   const { invoice, lines } = _buildWoLabourPayoutInvoice(group, {
+    orgId: "org-1",
     weekStart: "2026-07-13",
     weekEnd: "2026-07-19",
     invoiceNumber: "SW-INV-TLA-260730-003",
@@ -247,6 +258,11 @@ Deno.test("_buildWoLabourPayoutInvoice: labour+extras line shapes agree so the p
   const extrasShape = lines.reduce((s, l) => s + Number(l.quantity) * Number(l.unit_rate), 0);
   assertEquals(labourShape, extrasShape);
   assertEquals(Math.abs(labourShape - Number(invoice.subtotal_ex)) <= 0.01, true);
+});
+
+Deno.test("_tradeInvoiceXeroTax: registered and unregistered invoices use matching Xero conventions", () => {
+  assertEquals(_tradeInvoiceXeroTax(35), { taxType: "INPUT", lineAmountTypes: "Exclusive" });
+  assertEquals(_tradeInvoiceXeroTax(0), { taxType: "NONE", lineAmountTypes: "NoTax" });
 });
 
 // ── Office note for unroutable lines ──────────────────────────────────────
