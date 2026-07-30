@@ -209,6 +209,7 @@ import {
   _extractWoLabourEntries,
   _resolveWoLabourUsers,
   _tradeInvoiceXeroTax,
+  TRADE_INVOICE_XERO_ACCOUNT_CODE,
   _woLabourProblemNote,
   _woNetMismatch,
   type WoLabourEntry,
@@ -5541,7 +5542,7 @@ if (import.meta.main) serve(async (req: Request) => {
             Description: desc,
             Quantity: useQty,
             UnitAmount: useRate,
-            AccountCode: '620', // Subcontractor expense
+            AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // 306 Internal Subcontractors
             TaxType: xeroTax.taxType,
             Tracking: lineTracking,
           }
@@ -6732,7 +6733,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 ].filter(Boolean).join('\n'),
                 Quantity: qty,
                 UnitAmount: price,
-                AccountCode: '620', // expense account for trade ACCPAY bills (matches submitTradeInvoice/generate_trade_invoice/push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax on ACCPAY)
+                AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // 306 Internal Subcontractors (matches submitTradeInvoice/generate_trade_invoice/push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax on ACCPAY)
                 TaxType: woTaxType,
                 Tracking: xeroTracking(woJobNum),
               }
@@ -6746,7 +6747,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 ].filter(Boolean).join('\n'),
                 Quantity: 1,
                 UnitAmount: charge.amount_ex,
-                AccountCode: '620',
+                AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE,
                 TaxType: woTaxType,
                 Tracking: xeroTracking(woJobNum),
               })
@@ -8055,7 +8056,7 @@ if (import.meta.main) serve(async (req: Request) => {
                   ].filter(Boolean).join('\n'),
                   Quantity: l.total_hours,
                   UnitAmount: l.hourly_rate,
-                  AccountCode: '620', // expense account for trade ACCPAY bills (matches push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
+                  AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // expense account for trade ACCPAY bills (matches push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
                   TaxType: taxType,
                   Tracking: xeroTracking(l.job_number || ''),
                   }
@@ -8073,7 +8074,7 @@ if (import.meta.main) serve(async (req: Request) => {
                     ].filter(Boolean).join('\n'),
                     Quantity: e.quantity || 1,
                     UnitAmount: e.unit_rate || 0,
-                    AccountCode: '620', // expense account for trade ACCPAY bills (matches push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
+                    AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // expense account for trade ACCPAY bills (matches push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
                     TaxType: taxType,
                     Tracking: e.job_number ? xeroTracking(e.job_number) : divToTracking(e.division || ''),
                   }
@@ -34553,7 +34554,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         Description: desc,
         Quantity: metres,
         UnitAmount: pmRate,
-        AccountCode: '620', // expense account for trade ACCPAY bills (matches generate_trade_invoice + push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
+        AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // expense account for trade ACCPAY bills (matches generate_trade_invoice + push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
         TaxType: stTaxType,
         Tracking: xeroTracking(job.job_number || ''),
       })
@@ -34603,7 +34604,7 @@ async function submitTradeInvoice(client: any, userId: string, body: any) {
         Description: desc,
         Quantity: hours,
         UnitAmount: rate,
-        AccountCode: '620', // expense account for trade ACCPAY bills (matches generate_trade_invoice + push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
+        AccountCode: TRADE_INVOICE_XERO_ACCOUNT_CODE, // expense account for trade ACCPAY bills (matches generate_trade_invoice + push_trade_invoice_to_xero; revenue codes from accountCodeForJob are invalid with INPUT tax)
         TaxType: stTaxType,
         Tracking: xeroTracking(job?.job_number || ''),
       })

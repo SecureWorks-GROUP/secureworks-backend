@@ -47,6 +47,15 @@ export type WoLabourGroup = {
   entries: WoLabourEntry[];
 };
 
+// Xero chart-of-accounts destination for trade/subcontractor ACCPAY bill lines.
+// Captain's ruling 2026-07-31: trade invoices go to 306 "Internal
+// Subcontractors" (previously 620). Shared by push_trade_invoice_to_xero,
+// submit_work_order_invoice, generate_trade_invoice and submitTradeInvoice so
+// every trade push path routes identically. Must stay an EXPENSE code —
+// revenue codes from accountCodeForJob are invalid with INPUT tax on ACCPAY.
+// Client/sales (ACCREC) invoice routing is deliberately untouched.
+export const TRADE_INVOICE_XERO_ACCOUNT_CODE = "306";
+
 export function _tradeInvoiceXeroTax(
   gst: unknown,
 ): { taxType: "INPUT" | "NONE"; lineAmountTypes: "Exclusive" | "NoTax" } {
