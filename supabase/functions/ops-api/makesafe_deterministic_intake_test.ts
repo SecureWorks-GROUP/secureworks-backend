@@ -1391,3 +1391,55 @@ Deno.test("D4 guard: a WO whose extracted PDF merely mentions a quote keeps its 
   assertEquals(plan.cases[0].reasonCode, null);
   assertEquals(plan.cases[0].identity.jobFamily, "assessment_report_quote");
 });
+
+// Track A D5 (Stage 2a fate taxonomy): portal notification relays are
+// transport, never deliverables. Subject shapes mirror the sealed audit rows.
+Deno.test("D5: a Prime 'Email Uploaded' relay accounts as non-work, no family, no mint", () => {
+  const relay = source({
+    postId: "relay-1",
+    subject:
+      "[PRIME (MLB-26499) Email Uploaded: Re: Our Ref: MLB-26499 - 18 Eagleglen Rise, Gidgegannup",
+    body: "An email has been uploaded against this claim.",
+  });
+  const bracketVariant = source({
+    postId: "relay-2",
+    subject:
+      "[PRIME] (MLB-25828) Email Uploaded: Re: Our Ref: MLB-25828 - 44 Davies Road, Claremont",
+    body: "An email has been uploaded against this claim.",
+    receivedAt: "2026-07-20T01:00:00.000Z",
+  });
+  const plan = buildDeterministicIntakePlan([relay, bracketVariant], PROFILES);
+  for (const intakeCase of plan.cases) {
+    assertEquals(intakeCase.state, "accounted_non_wo");
+    assertEquals(intakeCase.reasonCode, "non_makesafe");
+    assertEquals(intakeCase.identity.woPoIdentityKey, null);
+  }
+  const adapted = adaptDeterministicSource(relay, PROFILES);
+  assertEquals(adapted.intent, "chatter");
+  assertEquals(adapted.adapterVersion, "chatter@v1|notification-relay");
+  assertEquals(adapted.parseWarnings, ["notification_relay"]);
+});
+
+Deno.test("D5 guard: a relay-subject email CARRYING a PDF is not silently chattered", () => {
+  const item = source({
+    postId: "relay-pdf-1",
+    subject:
+      "[PRIME (MLB-26500) Email Uploaded: Re: Our Ref: MLB-26500 - 1 Guard Street",
+    body: "Uploaded with attachment.",
+    attachments: [pdf("relay-pdf-1")],
+  });
+  const adapted = adaptDeterministicSource(item, PROFILES);
+  assertEquals(adapted.intent === "chatter", false);
+});
+
+Deno.test("D5 guard: an ordinary MLB instruction subject never matches the relay rule", () => {
+  const item = source({
+    postId: "relay-neg-1",
+    subject: "NEW WORK ORDER - MLB-26501 2 Ordinary Road, Perth",
+    body: "Please attend. The builder work order is attached.",
+    attachments: [pdf("relay-neg-1")],
+  });
+  const adapted = adaptDeterministicSource(item, PROFILES);
+  assertEquals(adapted.adapterId, "mlb");
+  assertEquals(adapted.intent, "work");
+});

@@ -1557,6 +1557,11 @@ const RAPID_ADAPTER: Adapter = {
     ) || senderMatchesAdapter("rapid", item, profiles),
   build: (item, profiles) => buildKnown(item, profiles, "rapid"),
 };
+// Track A D5: the Prime portal's "Email Uploaded" system notification. Both
+// live variants are covered: "[PRIME (MLB-26499) Email Uploaded: Re: ..." and
+// "[PRIME] (REF) Email Uploaded: Re: ...".
+const NOTIFICATION_RELAY_SUBJECT_RE =
+  /^\s*\[?\s*prime\b[^\n]{0,60}?\bemail\s+uploaded\b\s*:/i;
 const CHATTER_ADAPTER: Adapter = {
   id: "chatter",
   version: "chatter@v1",
@@ -1604,6 +1609,33 @@ export function adaptDeterministicSource(
       evidence: evidenceFor(item, identity),
       story: storyFor(item, "chatter"),
       parseWarnings: ["own_outbound_copy"],
+      fieldProvenance: {},
+      pdfFieldProvenance: {},
+    };
+  }
+  // Track A D5 (Stage 2a fate taxonomy): a portal notification relay
+  // ("[PRIME (REF) Email Uploaded: Re: ...") is transport ABOUT an email,
+  // never a builder instruction. It accounts as non-work with no family and
+  // no identity — the real deliverable arrives on its own source. The branch
+  // deliberately stands down when the relay carries a PDF attachment: a work
+  // order PDF is paramount evidence and must never be silently chattered.
+  if (
+    NOTIFICATION_RELAY_SUBJECT_RE.test(item.subject || "") &&
+    !item.attachments.some((attachment) =>
+      /pdf/i.test(attachment.contentType || "") ||
+      /\.pdf$/i.test(attachment.name || "")
+    )
+  ) {
+    const identity = blankIdentity();
+    return {
+      source: item,
+      adapterId: "chatter",
+      adapterVersion: "chatter@v1|notification-relay",
+      intent: "chatter",
+      identity,
+      evidence: evidenceFor(item, identity),
+      story: storyFor(item, "chatter"),
+      parseWarnings: ["notification_relay"],
       fieldProvenance: {},
       pdfFieldProvenance: {},
     };
