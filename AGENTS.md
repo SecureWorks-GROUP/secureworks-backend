@@ -82,6 +82,15 @@ poisoned component is quarantined into `isolated_failures` and the run reports
 An equal builder PO alone no longer unions two different explicit claims, and a
 persisted authority backing multiple corrected instructions fails its component.
 
+Duplicate email transport rows (Graph group post + mailbox twin, sha-identical
+attachments) are deduped by `email_attachments.sha256` at the planner layer:
+one content hash is one correlation coordinate, one instruction identity
+fallback, one PDF evidence entry, and one extraction-budget spend, while both
+transport rows stay persisted and accounted for audit. Do not regress this to
+per-attachment-id counting; the invariant, tests and replay proof are in
+`makesafe_duplicate_transport_dedupe_test.ts` and
+`docs/evidence/track-a-d8-duplicate-transport-2026-07-30.md`.
+
 ## Never Select `scope_json` In A List/Feed Query
 
 `jobs.scope_json` (and therefore `calendar_events.scope_json`) is NOT a small
