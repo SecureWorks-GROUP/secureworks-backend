@@ -420,6 +420,13 @@ function isLifecycleReopenText(fullText: string): boolean {
     RECTIFICATION_SIGNAL.test(fullText) ||
     REATTEND_REF_SUFFIX_SIGNAL.test(fullText);
 }
+// Ruling 1 (sealed 2026-07-30): an explicit "please price this" request. The
+// verb-phrase anchor matches the live MLB dispatch shorthand ("Pls price:",
+// "plds price", "please quote") without swallowing every WO whose scope merely
+// mentions the word quote — assessment report & quote deliverables keep their
+// own family.
+const QUOTE_REQUEST_SIGNAL =
+  /\b(?:pl(?:ea)?s?e?|plds)\s+(?:price|quote)\b|\bprice\s*[:;]|\bprovide\s+(?:a\s+|us\s+(?:with\s+)?a\s+)?(?:price|quote|quotation|estimate)\b|\b(?:price|quote)\s+(?:required|please)\b/i;
 const REPORT_SIGNAL =
   /\b(report|assessment|inspection|quote|quotation|scope\s+of\s+works)\b/i;
 const RAPID_SIGNAL = /\brapid(?:\s+repair(?:s)?)?\b/i;
@@ -2264,6 +2271,23 @@ export function buildDeterministicIntakePlan(
       ).map((r) => r.id);
       const claimOnly = !!merged.identity.externalRefCanonical &&
         !merged.identity.woPoIdentityKey;
+      // Track A D4 (Ruling 1): a builder "please price this" request with no
+      // work order PDF and no PO is the quote-stage repair lane — a sealed
+      // pre-deliverable exception to the WO+PO unit. It files under its own
+      // reviewable reason code (mirroring the maybe-box) as a repair-family
+      // card the repair manager dispositions; when the real WO+PO arrives the
+      // deliverable case forms normally and takes the PDF's declared family.
+      const quoteStageRequest = intent === "work" &&
+        !instructionItems.some((i) =>
+          (i.source.pdfDocuments || []).some((d) =>
+            d.status === "extracted" && !!d.text
+          )
+        ) &&
+        !merged.identity.builderPoCanonical &&
+        instructionItems.some((i) =>
+          QUOTE_REQUEST_SIGNAL.test(text(i.source))
+        ) &&
+        !instructionItems.some((i) => isLifecycleReopenText(text(i.source)));
       let state: MakesafeCaseState;
       let reasonCode: MakesafeReasonCode | null = null;
       if (intent === "chatter") {
@@ -2279,6 +2303,10 @@ export function buildDeterministicIntakePlan(
       ) {
         state = "exception";
         reasonCode = "unknown_builder";
+      } else if (quoteStageRequest) {
+        state = "exception";
+        reasonCode = "repair_quote_stage";
+        merged.identity = { ...merged.identity, jobFamily: "repair" };
       } else if (Object.keys(merged.conflicts).length) {
         state = "exception";
         reasonCode = "conflicting_fields";

@@ -1275,3 +1275,119 @@ Deno.test("D3 guard: an ORIGINAL temp-fence WO with a future collection clause s
   assertEquals(plan.cases[0].cycle, 1);
   assert(!plan.cases[0].story.some((event) => event.kind === "reopen"));
 });
+
+// Track A D4 (Ruling 1): a builder "please price this" request with no WO PDF
+// and no PO is the quote-stage repair lane — its own reviewable reason code,
+// family repair. Body/subject shapes mirror the sealed audit fixtures
+// (MLB-24363, MLB-25492, MLB-24473, MLB-25876, MLB-26840, MLB-27065).
+Deno.test("D4 (Ruling 1): a price request with no WO PDF files the quote-stage repair lane", () => {
+  const item = source({
+    postId: "quote-req-1",
+    subject:
+      "Our Ref: MLB-24363 - 12 Keane Ct, Noranda - Client Ref: 13328238 - Other Ref:",
+    body:
+      "Hi team plds price: Remove and replace the entire elevation of sole-owned boundary fencing with Colorbond up to 1800mm high as the existing material is no longer available.",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases.length, 1);
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(plan.cases[0].reasonCode, "repair_quote_stage");
+  assertEquals(plan.cases[0].identity.jobFamily, "repair");
+});
+
+Deno.test("D4 (Ruling 10, MLB-25492): roof-sheeting price request stays a repair quote, never a roof report", () => {
+  const item = source({
+    postId: "quote-req-2",
+    subject:
+      "Our Ref: MLB-25492 - 15 Boxhill St, Morley - Client Ref: 13339466 - Other Ref:",
+    body:
+      "Pls price: Remove and replace 40m2 of twin wall polycarbonate roof sheeting",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].reasonCode, "repair_quote_stage");
+  assertEquals(plan.cases[0].identity.jobFamily, "repair");
+});
+
+Deno.test("D4 conversion (MLB-26344): the later real WO+PO forms its own deliverable case with the PDF's declared family", () => {
+  const quote = source({
+    postId: "quote-conv-1",
+    threadId: "quote-conv-thread",
+    subject:
+      "Our Ref: MLB-26344 - 4 Convert Close, Perth - Client Ref: 13350000 - Other Ref:",
+    body: "Hi team Pls price: replace the storm damaged boundary fence",
+  });
+  const wo = source({
+    postId: "quote-conv-2",
+    threadId: "quote-conv-thread",
+    subject: "NEW WORK ORDER - MLB-26344 4 Convert Close, Perth",
+    body: "Please attend. The builder work order is attached.",
+    receivedAt: "2026-07-20T06:00:00.000Z",
+    attachments: [pdf("quote-conv-2")],
+    pdfDocuments: [{
+      attachmentId: "quote-conv-2-pdf",
+      attachmentName: "work_order_MLB-26344PO-57087.pdf",
+      status: "extracted",
+      text: [
+        "Work Order",
+        "Work Order Number MLB-26344PO-57087",
+        "Policyholders Name Convert Client",
+        "Mobile 0422636182",
+        "Site Address 4 Convert Close Perth WA 6000",
+        "Allocation Work Order",
+        "Site Contact: Someone",
+        "Makesafe/Emergency Repairs",
+        "Make Safe",
+        "Scope of Works Remove and make safe the storm damaged boundary fence",
+      ].join("\n"),
+      charCount: 320,
+      pageCount: 1,
+      extractor: "test",
+    }],
+  });
+  const plan = buildDeterministicIntakePlan([quote, wo], PROFILES);
+  assertEquals(plan.cases.length, 2);
+  const quoteCase = plan.cases.find((c) =>
+    c.sourcePostIds.includes("quote-conv-1")
+  )!;
+  const woCase = plan.cases.find((c) =>
+    c.sourcePostIds.includes("quote-conv-2")
+  )!;
+  assertEquals(quoteCase.reasonCode, "repair_quote_stage");
+  assertEquals(quoteCase.identity.jobFamily, "repair");
+  assertEquals(woCase.state, "confirmed_live_job");
+  assertEquals(woCase.identity.jobFamily, "general_makesafe");
+  assertEquals(woCase.identity.woPoIdentityKey?.includes("PO-57087"), true);
+});
+
+Deno.test("D4 guard: a WO whose extracted PDF merely mentions a quote keeps its declared family", () => {
+  const item = source({
+    postId: "quote-guard-1",
+    subject: "NEW WORK ORDER - MLB-26355 6 Guard Grove, Perth",
+    body: "Please attend. The builder work order is attached.",
+    attachments: [pdf("quote-guard-1")],
+    pdfDocuments: [{
+      attachmentId: "quote-guard-1-pdf",
+      attachmentName: "work_order_MLB-26355PO-57100.pdf",
+      status: "extracted",
+      text: [
+        "Work Order",
+        "Work Order Number MLB-26355PO-57100",
+        "Policyholders Name Guard Client",
+        "Mobile 0422636182",
+        "Site Address 6 Guard Grove Perth WA 6000",
+        "Allocation Work Order",
+        "Site Contact: Someone",
+        "Assessment Report & Quote",
+        "INTERNAL",
+        "Scope of Works Contractor inspection and assessment. Please provide a quote for repairs",
+      ].join("\n"),
+      charCount: 330,
+      pageCount: 1,
+      extractor: "test",
+    }],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases.length, 1);
+  assertEquals(plan.cases[0].reasonCode, null);
+  assertEquals(plan.cases[0].identity.jobFamily, "assessment_report_quote");
+});
