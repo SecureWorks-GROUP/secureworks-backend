@@ -7861,6 +7861,27 @@ if (import.meta.main) serve(async (req: Request) => {
             try {
               const woEntriesAll: WoLabourEntry[] = extraLineItems.flatMap((l: any) => l._woEntries || [])
               woLabourIssues = extraLineItems.flatMap((l: any) => l._woProblems || [])
+              const recordWoLabourIssues = async (issues: WoLabourProblem[]) => {
+                const issueNote = _woLabourProblemNote(issues)
+                if (!issueNote) return
+                const { data: holderInv, error: holderReadErr } = await client.from('trade_invoices')
+                  .select('query_note').eq('id', invoice.id).maybeSingle()
+                if (holderReadErr) console.error('[ops-api] WO labour issue note read failed:', holderReadErr.message)
+                const merged = [holderInv?.query_note, issueNote].filter(Boolean).join(' | ').slice(0, 2000)
+                const { error: noteErr } = await client.from('trade_invoices').update({ query_note: merged }).eq('id', invoice.id)
+                if (noteErr) console.error('[ops-api] WO labour issue note update failed:', noteErr.message)
+                try {
+                  const { error: eventErr } = await client.from('business_events').insert({
+                    event_type: 'trade.wo_labour_unresolved',
+                    source: 'ops-api/generate_trade_invoice',
+                    entity_type: 'trade_invoice',
+                    entity_id: invoice.id,
+                    payload: { holder_invoice_number: invoiceNumber, problems: issues },
+                  })
+                  if (eventErr) console.error('[ops-api] WO labour unresolved event insert failed:', eventErr.message)
+                } catch (e) { console.error('[ops-api] WO labour unresolved event insert threw:', (e as Error).message) }
+              }
+              await recordWoLabourIssues(woLabourIssues)
               if (woEntriesAll.length > 0) {
                 const { data: orgUsers, error: orgUsersErr } = await client.from('users')
                   .select('id, name, trade_details')
@@ -7869,24 +7890,7 @@ if (import.meta.main) serve(async (req: Request) => {
                 const resolved = _resolveWoLabourUsers(woEntriesAll, orgUsers || [], tradeUser.id)
                 woLabourIssues = [...woLabourIssues, ...resolved.problems]
                 woLabourGroups = resolved.groups
-              }
-              const issueNote = _woLabourProblemNote(woLabourIssues)
-              if (issueNote) {
-                const { data: holderInv } = await client.from('trade_invoices')
-                  .select('query_note').eq('id', invoice.id).maybeSingle()
-                const merged = [holderInv?.query_note, issueNote].filter(Boolean).join(' | ').slice(0, 2000)
-                const { error: noteErr } = await client.from('trade_invoices').update({ query_note: merged }).eq('id', invoice.id)
-                if (noteErr) console.error('[ops-api] WO labour unresolved note update failed:', noteErr.message)
-                try {
-                  const { error: eventErr } = await client.from('business_events').insert({
-                    event_type: 'trade.wo_labour_unresolved',
-                    source: 'ops-api/generate_trade_invoice',
-                    entity_type: 'trade_invoice',
-                    entity_id: invoice.id,
-                    payload: { holder_invoice_number: invoiceNumber, problems: woLabourIssues },
-                  })
-                  if (eventErr) console.error('[ops-api] WO labour unresolved event insert failed:', eventErr.message)
-                } catch (e) { console.error('[ops-api] WO labour unresolved event insert threw:', (e as Error).message) }
+                await recordWoLabourIssues(resolved.problems)
               }
               for (const group of woLabourGroups) {
                   // Same numbering scheme as the holder's invoice: per-user global
