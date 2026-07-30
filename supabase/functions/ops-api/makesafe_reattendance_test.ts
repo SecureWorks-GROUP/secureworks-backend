@@ -723,12 +723,14 @@ Deno.test("a cancelled assignment does not authorise reattendance", async () => 
 });
 
 Deno.test("declined, observer, ghost, and open-pool assignments do not authorise reattendance", async () => {
-  for (const assignment of [
-    { status: "declined" },
-    { status: "scheduled", role: "observer" },
-    { status: "scheduled", assignment_type: "ghost" },
-    { status: "scheduled", assignment_type: "makesafe_open" },
-  ]) {
+  for (
+    const assignment of [
+      { status: "declined" },
+      { status: "scheduled", role: "observer" },
+      { status: "scheduled", assignment_type: "ghost" },
+      { status: "scheduled", assignment_type: "makesafe_open" },
+    ]
+  ) {
     const seed = reportedRows();
     seed.job_assignments = [{
       id: "assign-1",
@@ -754,14 +756,22 @@ Deno.test("declined, observer, ghost, and open-pool assignments do not authorise
 Deno.test("a reattendance retry replays the winning cycle without creating another transition", async () => {
   const { client, rows } = makeClient(reportedRows());
   const first: any = await _reattendMakesafeForTest(client, reattendArgs());
-  const replay: any = await _reattendMakesafeForTest(client, reattendArgs({ reason: "a different reason" }));
+  const replay: any = await _reattendMakesafeForTest(
+    client,
+    reattendArgs({ reason: "a different reason" }),
+  );
 
   assertEquals(first.cycle_number, 2);
   assertEquals(replay.idempotent_replay, true);
   assertEquals(replay.cycle_number, 2);
   assertEquals(replay.reason, "temp fence blew down again");
   assertEquals(rows.makesafe_job_details[0].cycle_number, 2);
-  assertEquals(rows.job_events.filter((event: any) => event.event_type === "makesafe_reattend").length, 1);
+  assertEquals(
+    rows.job_events.filter((event: any) =>
+      event.event_type === "makesafe_reattend"
+    ).length,
+    1,
+  );
 });
 
 Deno.test("a make-safe vertical manager may re-attend", async () => {
