@@ -200,6 +200,20 @@ import {
   getScopeRevisionForViewer as _getScopeRevisionForViewer,
 } from '../_shared/scope_freeze/get_scope_revision_for_viewer.ts'
 
+// WO labour fan-out — pay the named labourers on a worked-out work order
+// (trade.html Pay tab WO mode). Pure helpers; generate_trade_invoice owns
+// the DB reads/writes.
+import {
+  _buildWoLabourPayoutInvoice,
+  _cleanWoLabourLines,
+  _extractWoLabourEntries,
+  _resolveWoLabourUsers,
+  _woLabourProblemNote,
+  _woNetMismatch,
+  type WoLabourEntry,
+  type WoLabourProblem,
+} from './wo_labour_fanout.ts'
+
 // Mission profit-materials-actuals-2026-07-03 (U2) — outbound PO reference
 // discipline. Single source of truth for the canonical job ref + quote-back ask
 // stamped on the Xero PO (here) and the Resend PO email (send-po-email).
@@ -7440,6 +7454,39 @@ if (import.meta.main) serve(async (req: Request) => {
                   if (extraHoursFlag.flagged) anyHoursFlag = true
                 }
 
+                // ── WO labour lines (Pay-tab work-order mode) ────────────────
+                // The holder's row is already net of the labour they declared
+                // (rate = wo_allocated − Σ labour). Guard the money BEFORE any
+                // insert, persist the cleaned lines on the holder's row, and
+                // carry the payable entries for the post-commit fan-out that
+                // creates each named labourer's payout invoice.
+                const isWoRow = item.row_type === 'work_order'
+                  || (Array.isArray(item.wo_labour_lines) && item.wo_labour_lines.length > 0)
+                let woCleanLines: any[] | null = null
+                let woEntries: WoLabourEntry[] | null = null
+                let woProblems: WoLabourProblem[] | null = null
+                if (isWoRow) {
+                  const mismatch = _woNetMismatch(item)
+                  if (mismatch) {
+                    throw new ApiError(
+                      `Work-order line on ${item.job_number || item.job_id || 'a job'} does not add up: `
+                      + `WO $${mismatch.allocated} − labour $${mismatch.labourSum} = $${mismatch.expectedNet}, `
+                      + `but the line claims $${mismatch.claimedNet}. Re-open the invoice and resubmit.`,
+                      422,
+                    )
+                  }
+                  const extracted = _extractWoLabourEntries({
+                    ...item,
+                    job_id: resolvedJob?.id || item.job_id || null,
+                    job_number: resolvedJob?.job_number || item.job_number || null,
+                    client_name: resolvedJob?.client_name || item.client_name || null,
+                    division: item.division || resolvedJob?.type || null,
+                  })
+                  woEntries = extracted.entries
+                  woProblems = extracted.problems
+                  woCleanLines = _cleanWoLabourLines(item)
+                }
+
                 extraLineItems.push({
                   line_type: item.type ? item.type.toLowerCase() : 'other',
                   description: item.description || item.type || 'Extra item',
@@ -7462,8 +7509,17 @@ if (import.meta.main) serve(async (req: Request) => {
                   query_note: extraHoursFlag?.flagged
                     ? extraHoursFlag.queryNote + ' | ' + extraRateNote
                     : extraRateNote,
+                  // WO facts — persisted (migration 20260730000002) so the deduction
+                  // is queryable and the fan-out reads clean data. NULL elsewhere.
+                  wo_allocated: isWoRow ? (Number(item.wo_allocated) || 0) : null,
+                  wo_labour_deduction: isWoRow
+                    ? Math.round((woCleanLines || []).reduce((s: number, l: any) => s + Number(l.amount || 0), 0) * 100) / 100
+                    : null,
+                  wo_labour_lines: isWoRow ? woCleanLines : null,
                   // Internal — consumed by toTradeInvoiceLineRow + Xero builders; stripped before insert.
                   _hoursFlag: extraHoursFlag,
+                  _woEntries: woEntries,
+                  _woProblems: woProblems,
                 })
               }
             }
@@ -7629,10 +7685,11 @@ if (import.meta.main) serve(async (req: Request) => {
 
             const toTradeInvoiceLineRow = (line: any, defaults: any = {}) => {
               // site_address is used for the Xero description below but is not
-              // a trade_invoice_lines column. _hoursFlag is memory-only metadata
-              // (its fields are unpacked into the flag columns below). Never send
+              // a trade_invoice_lines column. _hoursFlag/_woEntries/_woProblems are
+              // memory-only metadata (_hoursFlag unpacks into the flag columns below;
+              // the _wo* arrays feed the post-commit labour fan-out). Never send
               // memory-only fields to PostgREST.
-              const { site_address: _siteAddress, _hoursFlag: _hf, ...dbLine } = { ...defaults, ...line }
+              const { site_address: _siteAddress, _hoursFlag: _hf, _woEntries: _we, _woProblems: _wp, ...dbLine } = { ...defaults, ...line }
               // M4 U1: land the flag-fact fields (U4 contract) from the resolver
               // outcome. baseline_hours/baseline_source are recorded for EVERY
               // make-safe line; flag_type/hours_justification/flagged_at only when
@@ -7663,6 +7720,9 @@ if (import.meta.main) serve(async (req: Request) => {
                 baseline_source: ff?.lineFields.baseline_source ?? null,
                 hours_justification: ff?.lineFields.hours_justification ?? null,
                 flagged_at: ff?.lineFields.flagged_at ?? null,
+                wo_allocated: dbLine.wo_allocated ?? null,
+                wo_labour_deduction: dbLine.wo_labour_deduction ?? null,
+                wo_labour_lines: dbLine.wo_labour_lines ?? null,
               }
             }
             const lineRows = [
@@ -7781,6 +7841,112 @@ if (import.meta.main) serve(async (req: Request) => {
                 payload: { user_name: userProfile?.name, week_start, total_hours: totalHours, total_inc: totalInc, client_priced_lines: clientPricedExtraCount, possible_duplicate_extra_lines: duplicateExtraCount },
               })
             } catch (e) { /* non-blocking */ }
+
+            // ── WO labour fan-out: pay the named labourers ───────────────────
+            // The WO holder's row is already net of the labour they declared;
+            // this creates each named crew member's payout invoice (status
+            // pending_ops_review) so the office verifies — the name match is
+            // heuristic and the labourer may have self-invoiced the same hours
+            // — then Approve & push sends the Xero bill through the existing
+            // approve_trade_invoice / push_trade_invoice_to_xero actions.
+            // Runs AFTER the holder's invoice + lines are committed; a fan-out
+            // failure must never fail the holder's submission, but it must be
+            // LOUD (query_note + business event) or the labourer's pay silently
+            // vanishes again — that silence is the original bug.
+            let woLabourPayouts: Array<{ user_id: string; name: string; invoice_id: string; invoice_number: string; total_ex: number }> = []
+            let woLabourIssues: WoLabourProblem[] = []
+            try {
+              const woEntriesAll: WoLabourEntry[] = extraLineItems.flatMap((l: any) => l._woEntries || [])
+              woLabourIssues = extraLineItems.flatMap((l: any) => l._woProblems || [])
+              if (woEntriesAll.length > 0) {
+                const { data: orgUsers, error: orgUsersErr } = await client.from('users')
+                  .select('id, name, trade_details')
+                  .eq('org_id', tradeUser.orgId)
+                if (orgUsersErr) throw orgUsersErr
+                const resolved = _resolveWoLabourUsers(woEntriesAll, orgUsers || [], tradeUser.id)
+                woLabourIssues = [...woLabourIssues, ...resolved.problems]
+                for (const group of resolved.groups) {
+                  // Same numbering scheme as the holder's invoice: per-user global
+                  // sequence that never decreases.
+                  const gInitials = (group.user.name || 'XX').split(' ').map((n: string) => n.charAt(0).toUpperCase()).join('').slice(0, 3)
+                  const { count: gCount } = await client.from('trade_invoices')
+                    .select('id', { count: 'exact', head: true })
+                    .eq('user_id', group.user.id)
+                  const gInvoiceNumber = `SW-INV-${gInitials}-${today}-${String((gCount || 0) + 1).padStart(3, '0')}`
+                  const built = _buildWoLabourPayoutInvoice(group, {
+                    weekStart: week_start || null,
+                    weekEnd,
+                    invoiceNumber: gInvoiceNumber,
+                    sourceInvoiceNumber: invoiceNumber,
+                    sourceTradeName: userProfile?.name || 'Trade',
+                    nowIso: new Date().toISOString(),
+                  })
+                  const { data: payoutInv, error: payoutErr } = await client.from('trade_invoices')
+                    .insert(built.invoice).select('id').single()
+                  if (payoutErr) throw new Error(`payout invoice for ${group.user.name}: ${payoutErr.message}`)
+                  const payoutLines = built.lines.map((l) => ({ ...l, trade_invoice_id: payoutInv.id }))
+                  const { error: payoutLineErr } = await client.from('trade_invoice_lines').insert(payoutLines)
+                  if (payoutLineErr) {
+                    // Leave the shell invoice failed+annotated rather than half-created.
+                    await client.from('trade_invoices').update({
+                      status: 'failed',
+                      query_note: ('WO labour payout line save failed: ' + payoutLineErr.message).slice(0, 500),
+                    }).eq('id', payoutInv.id)
+                    throw new Error(`payout lines for ${group.user.name}: ${payoutLineErr.message}`)
+                  }
+                  woLabourPayouts.push({
+                    user_id: group.user.id,
+                    name: group.user.name,
+                    invoice_id: payoutInv.id,
+                    invoice_number: gInvoiceNumber,
+                    total_ex: Number(built.invoice.subtotal_ex) || 0,
+                  })
+                  try {
+                    await client.from('business_events').insert({
+                      event_type: 'trade.wo_labour_payout_created',
+                      source: 'ops-api/generate_trade_invoice',
+                      entity_type: 'trade_invoice',
+                      entity_id: payoutInv.id,
+                      payload: {
+                        labourer: group.user.name,
+                        source_invoice: invoiceNumber,
+                        source_user: userProfile?.name,
+                        total_ex: Number(built.invoice.subtotal_ex) || 0,
+                        line_count: built.lines.length,
+                      },
+                    })
+                  } catch (e) { /* non-blocking */ }
+                }
+              }
+              const issueNote = _woLabourProblemNote(woLabourIssues)
+              if (issueNote) {
+                const { data: holderInv } = await client.from('trade_invoices')
+                  .select('query_note').eq('id', invoice.id).maybeSingle()
+                const merged = [holderInv?.query_note, issueNote].filter(Boolean).join(' | ').slice(0, 2000)
+                await client.from('trade_invoices').update({ query_note: merged }).eq('id', invoice.id)
+              }
+            } catch (woFanoutErr) {
+              const woMsg = (woFanoutErr as Error).message
+              console.error('[ops-api] WO labour fan-out failed (holder invoice unaffected):', woMsg)
+              try {
+                const { data: holderInv } = await client.from('trade_invoices')
+                  .select('query_note').eq('id', invoice.id).maybeSingle()
+                const failNote = [
+                  holderInv?.query_note,
+                  'WO LABOUR: auto-payout creation FAILED (' + woMsg + ') — the office must pay the named labourers manually from the line breakdown.',
+                ].filter(Boolean).join(' | ').slice(0, 2000)
+                await client.from('trade_invoices').update({ query_note: failNote }).eq('id', invoice.id)
+              } catch { /* non-blocking */ }
+              try {
+                await client.from('business_events').insert({
+                  event_type: 'trade.wo_labour_payout_failed',
+                  source: 'ops-api/generate_trade_invoice',
+                  entity_type: 'trade_invoice',
+                  entity_id: invoice.id,
+                  payload: { error_message: woMsg, invoice_number: invoiceNumber },
+                })
+              } catch { /* non-blocking */ }
+            }
 
             // ── Auto-push to Xero as DRAFT ACCPAY bill ──
             // Change 6 (Q18): ALWAYS fires now (no pending_ops_review skip). Every
@@ -8011,6 +8177,8 @@ if (import.meta.main) serve(async (req: Request) => {
                 soft_review_flag: softReviewFlag,
                 review_flag: reviewFlag,
                 xero_warning: 'Invoice saved (recoverable) but could not push to Xero — admin will push manually',
+                wo_labour_payouts: woLabourPayouts.map((p) => ({ name: p.name, invoice_number: p.invoice_number, total_ex: p.total_ex })),
+                wo_labour_unresolved: woLabourIssues.map((i) => i.trade_name),
               })
             }
 
@@ -8030,6 +8198,10 @@ if (import.meta.main) serve(async (req: Request) => {
               pending_ops_review: false,
               soft_review_flag: softReviewFlag,
               review_flag: reviewFlag,
+              // WO labour fan-out: payout invoices created for named labourers
+              // (pending office review) + names the office must pay manually.
+              wo_labour_payouts: woLabourPayouts.map((p) => ({ name: p.name, invoice_number: p.invoice_number, total_ex: p.total_ex })),
+              wo_labour_unresolved: woLabourIssues.map((i) => i.trade_name),
             })
           }
 
