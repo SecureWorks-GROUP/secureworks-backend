@@ -1192,3 +1192,86 @@ Deno.test("quality measurement is per-builder and excludes accounted non-work", 
   });
   assertEquals(measured.by_builder.unknown, undefined);
 });
+
+// Track A D3 (charter 6b + Ruling 12): collection, rectification and "-R"
+// reattendance mail are lifecycle events — cycles on the original instruction's
+// lineage, never fresh sibling instructions that could mint again.
+Deno.test("D3: collection and rectification mail become reopen cycles, not sibling instructions", () => {
+  const original = source({
+    postId: "lifecycle-1",
+    threadId: "lifecycle-thread",
+    subject: "NEW WORK ORDER MLB-34000 Work Order: WO-34000",
+    body:
+      "Client: Lifecycle Client\nAddress: 7 Kappa Way, Perth\nSupply and install temporary fencing to secure the site",
+    attachments: [pdf("lifecycle-1")],
+  });
+  const collection = source({
+    postId: "lifecycle-2",
+    threadId: "lifecycle-thread",
+    subject: "MLB-34000 temp fence",
+    body: "Job complete. Please collect the temporary fencing from site.",
+    receivedAt: "2026-07-20T03:00:00.000Z",
+  });
+  const rectification = source({
+    postId: "lifecycle-3",
+    threadId: "lifecycle-thread",
+    subject: "MLB-34000 fence issue",
+    body:
+      "Please rectify the temporary fence which you installed, it has fallen over.",
+    receivedAt: "2026-07-20T04:00:00.000Z",
+  });
+  const plan = buildDeterministicIntakePlan(
+    [original, collection, rectification],
+    PROFILES,
+  );
+  assertEquals(plan.cases.length, 3);
+  const reopens = plan.cases.filter((c) => c.parentRelation === "reopen_of");
+  assertEquals(reopens.length, 2);
+  assertEquals(
+    plan.cases.filter((c) => c.parentRelation === "sibling_of").length,
+    0,
+  );
+  assert(reopens.every((c) => c.cycle > 1));
+});
+
+Deno.test("D3 (Ruling 12): the '-R' ref suffix opens a reopen cycle on the base ref", () => {
+  const original = source({
+    postId: "suffix-1",
+    threadId: "suffix-thread",
+    fromEmail: "jobs@ajbr.test",
+    subject: "NEW WORK ORDER AJBR-67217",
+    body: "Client: Suffix Client\nAddress: 9 Sigma Court, Perth\nMake safe roof",
+    attachments: [pdf("suffix-1")],
+  });
+  const reattend = source({
+    postId: "suffix-2",
+    threadId: "suffix-thread",
+    fromEmail: "jobs@ajbr.test",
+    subject: "Work order AJBR-67217 - R",
+    body: "Updated task attached for the same property.",
+    receivedAt: "2026-07-20T06:00:00.000Z",
+  });
+  const plan = buildDeterministicIntakePlan([original, reattend], PROFILES);
+  assertEquals(plan.cases.length, 2);
+  assert(
+    plan.cases.some((c) =>
+      c.parentRelation === "reopen_of" &&
+      c.sourcePostIds.includes("suffix-2")
+    ),
+  );
+});
+
+Deno.test("D3 guard: an ORIGINAL temp-fence WO with a future collection clause stays a fresh mintable instruction", () => {
+  const item = source({
+    postId: "supply-collect-1",
+    subject: "NEW WORK ORDER MLB-34010 Work Order: WO-34010",
+    body:
+      "Client: Hire Client\nAddress: 3 Omega Street, Perth\nSupply temporary fencing and collect on completion. 3-month hire including collection.",
+    attachments: [pdf("supply-collect-1")],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases.length, 1);
+  assertEquals(plan.cases[0].parentRelation, null);
+  assertEquals(plan.cases[0].cycle, 1);
+  assert(!plan.cases[0].story.some((event) => event.kind === "reopen"));
+});

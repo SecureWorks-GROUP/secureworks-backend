@@ -389,6 +389,37 @@ const REVISION_SUBJECT_SIGNAL =
   /(?:^\s*re\s*:[^\n]*\b(?:MLB|AJBR|AJS|BWCWA|WB|RAPID)[-\s#]*\d{3,}\b|\b(?:info\s+required|follow\s*up|booking\s+(?:update|request)|any\s+update)\b)/i;
 const REOPEN_SIGNAL =
   /\b(re-?attend|reopen|return\s+(?:visit|to\s+site)|attend\s+again)\b/i;
+// Charter 6b + Ruling 12 (sealed): collection, rectification and "-R" reattend
+// mail are LIFECYCLE events — cycles on the original job's card, never new
+// cards. Each is detected as its own reopen-kind story event so the existing
+// cycle/parent-relation machinery carries all three.
+const COLLECTION_SIGNAL =
+  /\b(?:collect|pick\s*up|pickup|retriev\w*)\b[^.\n]{0,60}\bfenc|\bfenc\w*[^.\n]{0,60}\b(?:collect(?:ion)?|pick\s*up|pickup|retriev\w*)\b/i;
+// An ORIGINAL temp-fence WO routinely says "supply temporary fencing and
+// collect on completion" — a supply/install instruction with a future
+// collection clause is a fresh deliverable, not a collection lifecycle event.
+const FENCE_SUPPLY_SIGNAL =
+  /\b(?:supply|install\w*|deliver\w*|erect\w*|provide|hire)\b[^.\n]{0,60}\bfenc/i;
+function isCollectionLifecycleText(fullText: string): boolean {
+  return COLLECTION_SIGNAL.test(fullText) &&
+    !FENCE_SUPPLY_SIGNAL.test(fullText);
+}
+// "Rectify the X which you installed" — rectification of OUR OWN earlier work.
+// The our-work anchor (you/your/installed) keeps a builder's own rectification
+// scopes out of the lifecycle lane.
+const RECTIFICATION_SIGNAL =
+  /\brectif\w*\b[^.\n]{0,80}\b(?:you|your|installed|erected|supplied)\b|\b(?:you|your)\b[^.\n]{0,40}\brectif\w*\b/i;
+// Ruling 12: the "-R" suffix on a builder ref is the reattend marker. The base
+// ref stays the identity (binds to the parent); the suffix opens the cycle.
+const REATTEND_REF_SUFFIX_SIGNAL =
+  /\b(?:AJBR|ABJR|AJS|MLB|BWCWA|WB)[-\s#]*\d{3,}\s*-\s*R(?![A-Za-z0-9])/i;
+
+function isLifecycleReopenText(fullText: string): boolean {
+  return REOPEN_SIGNAL.test(fullText) ||
+    isCollectionLifecycleText(fullText) ||
+    RECTIFICATION_SIGNAL.test(fullText) ||
+    REATTEND_REF_SUFFIX_SIGNAL.test(fullText);
+}
 const REPORT_SIGNAL =
   /\b(report|assessment|inspection|quote|quotation|scope\s+of\s+works)\b/i;
 const RAPID_SIGNAL = /\brapid(?:\s+repair(?:s)?)?\b/i;
@@ -889,12 +920,15 @@ function inferDeliverable(
 ): string {
   const family = jobFamilyDecision(item, adapterId).family || "unclassified";
   const fullText = `${text(item)}\n${pdfScopeText(item, adapterId)}`;
-  if (REOPEN_SIGNAL.test(fullText)) return `${family}:reopen`;
+  if (
+    REOPEN_SIGNAL.test(fullText) || REATTEND_REF_SUFFIX_SIGNAL.test(fullText)
+  ) return `${family}:reopen`;
   if (
     /\bcollect|pick\s*up|retriev/i.test(fullText) && /fenc/i.test(fullText)
   ) {
     return `${family}:collection`;
   }
+  if (RECTIFICATION_SIGNAL.test(fullText)) return `${family}:rectification`;
   return family;
 }
 
@@ -1144,6 +1178,13 @@ function storyFor(
     add("access_outcome", "site_access_outcome_received");
   }
   if (REOPEN_SIGNAL.test(hay)) add("reopen", "return_attendance_requested");
+  else if (REATTEND_REF_SUFFIX_SIGNAL.test(hay)) {
+    add("reopen", "reattend_ref_suffix_cycle");
+  } else if (isCollectionLifecycleText(hay)) {
+    add("reopen", "fence_collection_requested");
+  } else if (RECTIFICATION_SIGNAL.test(hay)) {
+    add("reopen", "rectification_of_own_work_requested");
+  }
   if (REPORT_SIGNAL.test(hay) || textHasExplicitReportRequest(hay)) {
     add("reporting_request", "report_or_quote_requested");
   }
@@ -1842,7 +1883,10 @@ function instructionDiscriminator(item: AdaptedSource): string {
   if (isRevisionSource(item.source)) {
     return `revision:${base}:${item.source.postId}`;
   }
-  if (REOPEN_SIGNAL.test(text(item.source))) {
+  // D3 (TRACK-A): collection, rectification and "-R" reattendance mail are
+  // lifecycle events on the ORIGINAL deliverable — they open a new cycle in the
+  // same lineage, never a fresh standalone instruction that could mint again.
+  if (isLifecycleReopenText(text(item.source))) {
     return `reopen:${base}:${item.source.postId}`;
   }
   return base;
@@ -2094,7 +2138,7 @@ export function buildDeterministicIntakePlan(
       )
       .filter((item) =>
         item.intent === "work" && !isRevisionSource(item.source) &&
-        !REOPEN_SIGNAL.test(text(item.source))
+        !isLifecycleReopenText(text(item.source))
       )
       .map(instructionDiscriminator);
     const oneStrongInstruction = new Set(strongDiscriminators).size === 1
@@ -2109,7 +2153,7 @@ export function buildDeterministicIntakePlan(
         oneStrongInstruction && item.intent === "work" &&
         !item.identity.woPoIdentityKey && !item.identity.externalRefCanonical &&
         !isRevisionSource(item.source) &&
-        !REOPEN_SIGNAL.test(text(item.source))
+        !isLifecycleReopenText(text(item.source))
       ) discriminator = oneStrongInstruction;
       groups.set(discriminator, [...(groups.get(discriminator) || []), item]);
     }

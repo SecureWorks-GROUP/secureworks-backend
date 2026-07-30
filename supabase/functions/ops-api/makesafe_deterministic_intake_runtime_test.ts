@@ -6116,3 +6116,145 @@ Deno.test("a fully unresolved allowlist fails closed instead of scanning empty",
   );
   assertEquals(store.makesafe_intake_cases.length, 0);
 });
+
+// Track A D3 (charter 6b + Ruling 12): a lifecycle reopen binds the original
+// obligation's job as a cycle; with no findable original it parks for human
+// binding. It never mints a duplicate live job.
+function reattendWorkOrder(
+  store: Store,
+  pdfs: Map<string, Uint8Array>,
+  postId: string,
+  body: string,
+  receivedAt: string,
+) {
+  const storagePath = `raw/${postId}.pdf`;
+  const bytes = digitalWorkOrderPdf([
+    "Work Order Number MLB-30001PO-61001",
+    "Policyholders Name Reattend Client",
+    "Mobile 0422636182",
+    "Site Address 5 Reattend Road Perth WA 6000",
+    "Scope of Works Install temporary roof tarps and make the storm damaged ceiling safe",
+    "Notes",
+    "Attend within twenty four hours and protect the occupants and contents from weather damage",
+  ]);
+  store.emails.push(email({
+    post_id: postId,
+    received_at: receivedAt,
+    subject: "WORK ORDER MLB-30001",
+    body_content: body,
+  }));
+  store.email_attachments.push({
+    id: `${postId}-attachment`,
+    email_id: postId,
+    name: "MLB-30001 Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: storagePath,
+    status: "uploaded",
+    size_bytes: bytes.length,
+  });
+  pdfs.set(storagePath, bytes);
+}
+
+Deno.test("D3: a reattend binds the lineage parent's job instead of minting a duplicate", async () => {
+  const store = baseStore();
+  const pdfs = new Map<string, Uint8Array>();
+  reattendWorkOrder(
+    store,
+    pdfs,
+    "reattend-original",
+    "Please attend. The builder work order is attached.",
+    "2026-07-20T01:00:00.000Z",
+  );
+  let approvals = 0;
+  const client = () =>
+    fakeClient(
+      store,
+      [],
+      undefined,
+      (path) => pdfs.get(path) || ENCODER.encode("%PDF-1.7\nmissing"),
+    );
+  await runDeterministicIntake(client(), {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["reattend-original"],
+    maxCases: 1,
+    nowIso: NOW,
+    approveDraft: () => {
+      approvals++;
+      return Promise.resolve({ job: { id: "reattend-parent-job" } });
+    },
+  });
+  assertEquals(approvals, 1);
+  const parent = store.makesafe_intake_cases[0];
+  assertEquals(parent.state, "confirmed_live_job");
+  assertEquals(parent.job_id, "reattend-parent-job");
+
+  reattendWorkOrder(
+    store,
+    pdfs,
+    "reattend-cycle",
+    "Please re-attend the property and make safe the ceiling again.",
+    "2026-07-20T05:00:00.000Z",
+  );
+  const report = await runDeterministicIntake(client(), {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["reattend-cycle"],
+    maxCases: 2,
+    nowIso: NOW,
+    approveDraft: () => {
+      approvals++;
+      return Promise.resolve({ job: { id: "must-not-mint" } });
+    },
+  });
+  assertEquals(approvals, 1, "the reattend must never mint a second job");
+  assertEquals(report.totals.jobs_created, 0);
+  const reopenCase = store.makesafe_intake_cases.find((row) =>
+    row.id !== parent.id
+  );
+  assert(reopenCase, "the reattend must commit its own cycle case");
+  assertEquals(reopenCase.parent_relation, "reopen_of");
+  assertEquals(reopenCase.parent_case_id, parent.id);
+  assertEquals(reopenCase.job_id, "reattend-parent-job");
+});
+
+Deno.test("D3: a reattend with no findable original parks for review instead of minting", async () => {
+  const store = baseStore();
+  const pdfs = new Map<string, Uint8Array>();
+  reattendWorkOrder(
+    store,
+    pdfs,
+    "reattend-orphan",
+    "Please re-attend the property and make safe the ceiling again.",
+    "2026-07-20T05:00:00.000Z",
+  );
+  let approvals = 0;
+  const report = await runDeterministicIntake(
+    fakeClient(
+      store,
+      [],
+      undefined,
+      (path) => pdfs.get(path) || ENCODER.encode("%PDF-1.7\nmissing"),
+    ),
+    {
+      dryRun: false,
+      selectionMode: "exact",
+      allowSourcePostIds: ["reattend-orphan"],
+      maxCases: 1,
+      nowIso: NOW,
+      approveDraft: () => {
+        approvals++;
+        return Promise.resolve({ job: { id: "must-not-mint" } });
+      },
+    },
+  );
+  assertEquals(approvals, 0);
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].state, "exception");
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "reattendance_target_not_found",
+  );
+  assertEquals(store.makesafe_intake_cases[0].job_id, null);
+});

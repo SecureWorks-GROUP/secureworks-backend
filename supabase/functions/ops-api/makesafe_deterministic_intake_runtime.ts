@@ -4530,11 +4530,36 @@ export async function runDeterministicIntake(
       }
       const bindingException = bindingExceptions.get(casePlan.instructionKey) ||
         null;
-      const effectivePlan = bindingException
+      let effectivePlan = bindingException
         ? obligationBindingExceptionPlan(casePlan, bindingException)
         : casePlan;
       let jobId: string | null = bindingException ? null : existing?.job_id ||
         existingObligationJobs.get(casePlan.instructionKey) || null;
+      // D3 (TRACK-A / Ruling 12): collection, rectification and "-R"
+      // reattendance mail is a cycle on the ORIGINAL obligation, never a fresh
+      // mint. When the exact obligation match did not already bind a job, bind
+      // the persisted lineage parent's job; when no original job is findable,
+      // the case parks for human binding instead of minting a duplicate.
+      const lifecycleReopen = !bindingException &&
+        effectivePlan.targetRelation !== "cancellation_of" &&
+        inferredParentRelation(effectivePlan) === "reopen_of";
+      if (
+        lifecycleReopen && !jobId &&
+        (effectivePlan.state === "confirmed_live_job" ||
+          effectivePlan.state === "blocked_live_job")
+      ) {
+        const lineageParent = await findIdentityParent(client, effectivePlan);
+        if (lineageParent?.job_id) {
+          jobId = String(lineageParent.job_id);
+        } else {
+          effectivePlan = {
+            ...effectivePlan,
+            state: "exception",
+            reasonCode: "reattendance_target_not_found",
+            blockedReasons: [],
+          };
+        }
+      }
       // Account the case and its sources before any job-creating work. Nothing is
       // left outside the accounting invariant when the job attempt fails, and the
       // failed attempt becomes visible to the next run's ordering.
@@ -4548,7 +4573,7 @@ export async function runDeterministicIntake(
       let resumedCase = saved.resumed;
       if (saved.caseCreated) report.totals.case_rows_created++;
       report.totals.source_rows_created += saved.sourceCreated;
-      const wantsJob = !jobId &&
+      const wantsJob = !jobId && !lifecycleReopen &&
         (effectivePlan.state === "confirmed_live_job" ||
           effectivePlan.state === "blocked_live_job");
       // Never create a guarded job the case row cannot then be moved to: the
