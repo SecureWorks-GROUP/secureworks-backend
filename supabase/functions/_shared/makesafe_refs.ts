@@ -227,7 +227,11 @@ export function canonicalExternalObligationRef(
   const match = value.match(
     new RegExp(`\\b(${alt})\\s*-?\\s*(\\d+)`, "i"),
   );
-  if (match) return `${match[1].toUpperCase()}-${match[2]}`;
+  if (match) {
+    const prefix = match[1].toUpperCase();
+    if (prefix === "AJBR" && match[2].length < AJ_REF_MIN_DIGITS) return null;
+    return `${prefix}-${match[2]}`;
+  }
   return normaliseRef(value, prefixes);
 }
 

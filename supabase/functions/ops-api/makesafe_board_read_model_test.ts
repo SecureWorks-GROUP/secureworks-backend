@@ -366,6 +366,17 @@ Deno.test("restoration stays explicitly typed through ops and trade board projec
   assertEquals(trade.rows[0].makesafe_type, "Restoration");
 });
 
+Deno.test("repair stays explicitly typed and unsealed through board projection", () => {
+  const [canonical] = buildCanonicalMakesafeRows([
+    baseJob("new", "repair-card", {
+      metadata: { makesafe_job_family: "repair" },
+    }),
+  ]);
+  assertEquals(canonical.ses_family, "repair");
+  assertEquals(canonical.ses_family_label, "Repair");
+  assertEquals(canonical.ses_recipe_state, "unsealed");
+});
+
 Deno.test("captain-applied status is a display overlay and never rewrites declared or raw state", () => {
   const source = baseJob("new", "overlay", {
     substatus: "company_contact_required",

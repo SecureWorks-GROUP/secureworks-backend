@@ -197,6 +197,8 @@ export function sesFamilyLabel(family: SesFamilyId): string {
   switch (family) {
     case "restoration":
       return "Restoration";
+    case "repair":
+      return "Repair";
     case "assessment_quote":
       return "Assessment / Quote Report";
     case "ordinary_roof_portal":

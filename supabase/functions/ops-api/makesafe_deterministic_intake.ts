@@ -900,7 +900,11 @@ function declaredTypeForSource(
     );
     if (owned) return owned.declared;
   }
-  const distinct = new Set(read.map((entry) => entry.declared.declaredType));
+  const distinct = new Set(
+    read.map((entry) =>
+      `${entry.declared.declaredType}:${entry.declared.fenceSubtype}`
+    ),
+  );
   return distinct.size === 1 ? read[0].declared : null;
 }
 

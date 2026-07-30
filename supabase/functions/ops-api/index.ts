@@ -15571,7 +15571,7 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       job_number: j.job_number,
       job_type: j.type,
       ses_family: sesFamily,
-      ses_recipe_state: sesFamily === 'restoration'
+      ses_recipe_state: sesFamily === 'restoration' || sesFamily === 'repair'
         ? 'unsealed'
         : sesFamily === 'unknown'
         ? 'unknown'
