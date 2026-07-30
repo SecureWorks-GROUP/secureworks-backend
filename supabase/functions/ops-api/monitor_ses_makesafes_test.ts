@@ -581,6 +581,15 @@ Deno.test("extractRef: spaced/bare/body forms all yield a non-null ref (B1)", ()
   assertEquals(_extractRef("make safe please", "no number here"), null);
 });
 
+Deno.test("extractRef: ABJR typo canonicalises before prefix matching (D7)", () => {
+  assertEquals(_extractRef("Make Safe ABJR 67217", null), "AJBR-67217");
+  assertEquals(
+    _extractRef("make safe please", "<p>ref ABJR-69039 attached</p>"),
+    "AJBR-69039",
+  );
+  assertEquals(_extractRef("ABJR 1234", null), null);
+});
+
 // ── B1 (STILL-OPEN fix) — MS-prefixed COMPACT refs ────────────────────────────
 // "MS191190" is a real historically-dropped WO. Pre-fix the recognised prefix set
 // was MLB|AJBR only and the bare-numeric fallback could NOT catch it (the digits

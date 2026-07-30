@@ -294,15 +294,16 @@ export function extractRef(
   prefixes: readonly string[] = REF_PREFIX_FLOOR,
 ): string | null {
   const subjectRef = buildSubjectRef(prefixes);
+  const canonicalSubject = canonicaliseRefTypos(subject);
   // 1) Prefixed ref anywhere in the subject (compact / space- / dash-separated).
-  const subjPrefixed = subject.match(subjectRef);
+  const subjPrefixed = canonicalSubject.match(subjectRef);
   if (subjPrefixed) return normaliseRef(subjPrefixed[0], prefixes);
   // 2) Bare numeric core in the subject (>=5 digits).
-  const subjBare = subject.match(BARE_NUMERIC_REF);
+  const subjBare = canonicalSubject.match(BARE_NUMERIC_REF);
   if (subjBare) return normaliseRef(subjBare[1], prefixes);
   // 3) Body fallback (strip tags first), prefixed then bare-numeric.
   if (body) {
-    const text = body.replace(/<[^>]+>/g, " ");
+    const text = canonicaliseRefTypos(body.replace(/<[^>]+>/g, " "));
     const bodyPrefixed = text.match(subjectRef);
     if (bodyPrefixed) return normaliseRef(bodyPrefixed[0], prefixes);
     const bodyBare = text.match(BARE_NUMERIC_REF);
