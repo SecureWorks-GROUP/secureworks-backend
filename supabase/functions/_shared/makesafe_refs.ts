@@ -195,10 +195,12 @@ export function normaliseRef(
   const alt = sorted.map(escapeRegExp).join("|");
   // Normalise "AJBR 67200" / "AJBR-67200" / "MS191190" -> "<PREFIX>-<digits>".
   const m = s.match(new RegExp(`\\b(${alt})\\s*-?\\s*(\\d+)\\b`, "i"));
-  if (
-    m &&
-    !(m[1].toUpperCase() === "AJBR" && m[2].length < AJ_REF_MIN_DIGITS)
-  ) return `${m[1].toUpperCase()}-${m[2]}`;
+  if (m) {
+    if (m[1].toUpperCase() === "AJBR" && m[2].length < AJ_REF_MIN_DIGITS) {
+      return null;
+    }
+    return `${m[1].toUpperCase()}-${m[2]}`;
+  }
   // Bare numeric ref (>= 5 digits so short tokens can't false-match).
   const bare = s.match(/\b(\d{5,})\b/);
   if (bare) return bare[1];

@@ -291,7 +291,7 @@ Deno.test("D7 (Ruling 11): MS191469 and MS191190 are two jobs, never one key", (
 });
 
 Deno.test("D7 (Ruling 13): ABJR 1234 is junk, never a live-looking AJBR ref", () => {
-  assertEquals(normaliseRef("ABJR 1234") === "AJBR-1234", false);
+  assertEquals(normaliseRef("ABJR 1234"), null);
   assertEquals(canonicalExternalObligationRef("ABJR 1234"), null);
   assertEquals(
     extractBuilderWorkOrderIdentity({
