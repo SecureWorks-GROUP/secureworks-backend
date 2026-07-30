@@ -4775,14 +4775,14 @@ if (import.meta.main) serve(async (req: Request) => {
           actorUserId: tradeUser.id,
         }))
       }
-      // Re-attendance (M-C). Same authz posture as allocate_job: a dispatcher or a
-      // manager of the job's vertical puts an already-reported make-safe card back
-      // into `allocated` as a re-attend visit (second report on the same WO). No
-      // assignment/SMS here — the manager then taps-to-allocate as normal.
+      // Re-attendance (M-C). A dispatcher, vertical manager, or trade assigned to
+      // this job may open the next attendance cycle. The relationship check is
+      // server-owned; an unrelated signed-in user remains refused.
       case 'reattend_makesafe': {
         const tradeUser = await authTrade(req, client)
         return json(await reattendMakesafe(client, {
           body,
+          callerUserId: tradeUser.id,
           callerRole: tradeUser.role,
           managedVerticals: tradeUser.managedVerticals,
         }))
@@ -10201,7 +10201,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     client.from('xero_projects').select('*').eq('job_id', jobId).maybeSingle(),
     client.from('job_contacts').select('*').eq('job_id', jobId).eq('status', 'active').order('contact_label'),
     client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
-    client.from('job_service_reports').select('*').eq('job_id', jobId).order('created_at', { ascending: false }).limit(5),
+    client.from('job_service_reports').select('*').eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
   ])
 
   if (jobRes.error) throw jobRes.error
@@ -32974,8 +32974,9 @@ export const _cancelMakesafeForTest = cancelMakesafe
 // is NO LONGER refused — the re-attend proceeds and we surface a non-fatal
 // `bill_reattend_manually` flag + warning so admin bills the re-attend manually /
 // combines invoices. We never read further into or mutate invoice state here.
-// AUTHZ mirrors allocate_job (dispatcher OR a manager of the job's vertical) and
-// the dispatch wraps it with authTrade the same way.
+// AUTHZ is relationship-based: dispatcher, manager of the job's vertical, or a
+// trade with a non-cancelled assignment on this job. The dispatch supplies the
+// authenticated user id; request-body identity is never trusted.
 // ════════════════════════════════════════════════════════════
 
 // Statuses a make-safe can never be re-attended from (terminally dead).
@@ -32991,10 +32992,11 @@ const _MAKESAFE_REATTEND_CLOSED_STATUSES = [
 
 export async function reattendMakesafe(client: any, args: {
   body: any
+  callerUserId?: string | null
   callerRole?: string | null
   managedVerticals?: unknown
 }): Promise<any> {
-  const { body, callerRole, managedVerticals } = args
+  const { body, callerUserId, callerRole, managedVerticals } = args
   const jobId = body.job_id || body.jobId
   const reason = String(body.reason || '').trim()
   if (!jobId) throw new ApiError('job_id required', 400)
@@ -33014,11 +33016,39 @@ export async function reattendMakesafe(client: any, args: {
     throw new ApiError(`cannot re-attend a ${jobStatus} make-safe`, 409)
   }
 
-  // Authz: dispatcher OR a manager of this job's vertical (same gate as allocate_job).
+  // Relationship authz: management authority keeps its existing path, while an
+  // ordinary trade may act only through their own live/completed assignment on
+  // this exact job. Cancelled assignments do not preserve action authority.
   const jobVertical = _jobVertical(job)
-  const decision = _resolveAllocationAuthz({ authMode: 'jwt', callerRole, managedVerticals, jobVertical })
-  if (!decision.allowed) {
-    throw new ApiError(`Not authorized to re-attend ${jobVertical || 'this'} jobs`, 403)
+  const managementDecision = _resolveAllocationAuthz({
+    authMode: 'jwt',
+    callerRole,
+    managedVerticals,
+    jobVertical,
+  })
+  let authorizationRelationship = managementDecision.reason
+  if (!managementDecision.allowed) {
+    if (!callerUserId) {
+      throw new ApiError(`Not authorized to re-attend ${jobVertical || 'this'} jobs`, 403)
+    }
+    const { data: assignment, error: assignmentErr } = await client
+      .from('job_assignments')
+      .select('id, status')
+      .eq('job_id', jobId)
+      .eq('user_id', callerUserId)
+      .neq('status', 'cancelled')
+      .limit(1)
+      .maybeSingle()
+    if (assignmentErr) {
+      throw new ApiError(
+        `reattendMakesafe: assignment relationship read failed: ${assignmentErr.message || assignmentErr}`,
+        500,
+      )
+    }
+    if (!assignment) {
+      throw new ApiError(`Not authorized to re-attend ${jobVertical || 'this'} jobs`, 403)
+    }
+    authorizationRelationship = 'assigned_trade'
   }
 
   const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
@@ -33136,6 +33166,7 @@ export async function reattendMakesafe(client: any, args: {
         .from('job_events')
         .insert({
           job_id: jobId,
+          user_id: callerUserId || null,
           event_type: 'makesafe_reattend_billing_review_required',
           detail_json: {
             job_id: jobId,
@@ -33182,6 +33213,7 @@ export async function reattendMakesafe(client: any, args: {
         required: billingReviewRequired,
         event_id: billingReviewEvent?.id || parseJsonObject(billingReviewEvent?.detail_json).id || null,
       },
+      authorization_relationship: authorizationRelationship,
       event_sync: { ok: true },
       warnings: [],
       ...(reattendWarning ? { warning: reattendWarning } : {}),
@@ -33191,7 +33223,12 @@ export async function reattendMakesafe(client: any, args: {
   const nowIso = new Date().toISOString()
   const nextCycle = (detail.cycle_number ?? 1) + 1
   const nextReattend = (detail.reattend_count ?? 0) + 1
-  const nextAttendanceCycle = await ensureMakesafeAttendanceCycle(client, jobId, nextCycle, 'reattend_makesafe')
+  const nextAttendanceCycle = await ensureMakesafeAttendanceCycle(
+    client,
+    jobId,
+    nextCycle,
+    `reattend_makesafe: ${reason}`,
+  )
 
   // Reactivate a closed job so it flows through the board again.
   if (_MAKESAFE_REATTEND_CLOSED_STATUSES.includes(jobStatus)) {
@@ -33227,6 +33264,7 @@ export async function reattendMakesafe(client: any, args: {
   let reattendEventSync: any = { ok: true }
   const { error: reattendEventErr } = await client.from('job_events').insert({
     job_id: jobId,
+    user_id: callerUserId || null,
     event_type: 'makesafe_reattend',
     detail_json: {
       reason,
@@ -33264,6 +33302,7 @@ export async function reattendMakesafe(client: any, args: {
       .from('job_events')
       .insert({
         job_id: jobId,
+        user_id: callerUserId || null,
         event_type: 'makesafe_reattend_billing_review_required',
         detail_json: {
           job_id: jobId,
@@ -33313,6 +33352,7 @@ export async function reattendMakesafe(client: any, args: {
     prior_pack_sent: priorPackSent,
     billing_review_required: billingReviewRequired,
     billing_review_event: billingReviewEvent,
+    authorization_relationship: authorizationRelationship,
     event_sync: reattendEventSync,
     warnings,
     ...(reattendWarning ? { warning: reattendWarning } : {}),

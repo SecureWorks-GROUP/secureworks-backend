@@ -1,0 +1,3 @@
+result: "{\"proof\":\"chrome-devtools-axi isolated browser, test data only\",\"url\":\"http://127.0.0.1:4174/trade.html\",\"state\":{\"visitTwoStarted\":true,\"reattendancePayload\":{\"job_id\":\"e2e-makesafe-reattend\",\"reason\":\"storm loosened the temporary fence\"}},\"visitMarker\":\"↻ Re-attend · visit 2\\n— storm loosened the temporary fence\",\"hasSeparateBlankVisitTwoForm\":true,\"priorVisitWorkLeakedIntoVisitTwoForm\":false,\"toast\":\"Reattendance visit 2 started. Complete its separate report now.\"}"
+help[1]:
+  Run `chrome-devtools-axi snapshot` to see current page state
