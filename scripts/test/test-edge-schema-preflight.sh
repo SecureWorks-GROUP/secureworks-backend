@@ -17,6 +17,7 @@ SIBLING_EVIDENCE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728730000_makesa
 PORTAL_CAPTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728500000_makesafe_portal_capture_bridge_u4.sql"
 SEED_SCOPE_MIGRATION="$REPO_ROOT/supabase/migrations/20260729000000_makesafe_state_seed_scope_accounting.sql"
 HUGO_NOTIFICATION_MIGRATION="$REPO_ROOT/supabase/migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql"
+CYCLE_UNIQUENESS_MIGRATION="$REPO_ROOT/supabase/migrations/20260730000001_makesafe_report_cycle_uniqueness.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -78,6 +79,10 @@ hugo_notification_migration_sha() {
   shasum -a 256 "$HUGO_NOTIFICATION_MIGRATION" | awk '{print $1}'
 }
 
+cycle_uniqueness_migration_sha() {
+  shasum -a 256 "$CYCLE_UNIQUENESS_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -94,6 +99,7 @@ write_response() {
   PORTAL_CAPTURE_EXPECTED_SHA="$(portal_capture_migration_sha)" \
   SEED_SCOPE_EXPECTED_SHA="$(seed_scope_migration_sha)" \
   HUGO_NOTIFICATION_EXPECTED_SHA="$(hugo_notification_migration_sha)" \
+  CYCLE_UNIQUENESS_EXPECTED_SHA="$(cycle_uniqueness_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -217,6 +223,17 @@ hugo_notification_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+cycle_uniqueness_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260730000001",
+    "expected_migration_name": "makesafe_report_cycle_uniqueness",
+    "expected_statement_sha256": os.environ["CYCLE_UNIQUENESS_EXPECTED_SHA"],
+    "actual_migration_version": "20260730000001",
+    "actual_migration_name": "makesafe_report_cycle_uniqueness",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["CYCLE_UNIQUENESS_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -230,6 +247,7 @@ with open(sys.argv[1], "w") as f:
             portal_capture_row,
             seed_scope_row,
             hugo_notification_row,
+            cycle_uniqueness_row,
         ],
         f,
     )
