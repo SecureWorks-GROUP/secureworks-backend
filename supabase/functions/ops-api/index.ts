@@ -7947,8 +7947,7 @@ if (import.meta.main) serve(async (req: Request) => {
                     if (eventErr) console.error('[ops-api] WO labour payout-created event insert failed:', eventErr.message)
                   } catch (e) { console.error('[ops-api] WO labour payout-created event insert threw:', (e as Error).message) }
                 }
-              }
-            } catch (woFanoutErr) {
+              } catch (woFanoutErr) {
               const woMsg = (woFanoutErr as Error).message
               console.error('[ops-api] WO labour fan-out failed (holder invoice unaffected):', woMsg)
               try {
