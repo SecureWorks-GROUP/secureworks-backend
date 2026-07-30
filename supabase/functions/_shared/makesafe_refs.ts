@@ -172,18 +172,33 @@ export const BARE_NUMERIC_REF = /\b(\d{5,})\b/;
 // bare numeric core, against the active prefix set. The prefix branch is
 // data-driven so MS191190 -> "MS-191190" AND a company-supplied "KBA88123" ->
 // "KBA-88123". This is THE normaliser used on BOTH sides (email + board).
+// ── Track A D7 ref hygiene (Rulings 12/13, sealed 2026-07-30) ────────────────
+// ABJR is a live-mail typo of AJBR: canonicalise it BEFORE prefix matching so
+// both spellings land on one identity key. Applied only when digits follow, so
+// prose containing "ABJR" alone is untouched.
+const AJBR_TYPO_RE = /\bABJR(?=[-\s#]*\d)/gi;
+// Ruling 13: real AJ refs carry 5+ digits (67xxx-70xxx). "ABJR 1234" is junk
+// and must never canonicalise into a live-looking AJBR ref.
+const AJ_REF_MIN_DIGITS = 5;
+export function canonicaliseRefTypos(raw: string): string {
+  return raw.replace(AJBR_TYPO_RE, "AJBR");
+}
+
 export function normaliseRef(
   raw: string | null | undefined,
   prefixes: readonly string[] = REF_PREFIX_FLOOR,
 ): string | null {
   if (raw == null) return null;
-  const s = String(raw).trim();
+  const s = canonicaliseRefTypos(String(raw).trim());
   if (!s) return null;
   const sorted = cleanPrefixes(prefixes);
   const alt = sorted.map(escapeRegExp).join("|");
   // Normalise "AJBR 67200" / "AJBR-67200" / "MS191190" -> "<PREFIX>-<digits>".
   const m = s.match(new RegExp(`\\b(${alt})\\s*-?\\s*(\\d+)\\b`, "i"));
-  if (m) return `${m[1].toUpperCase()}-${m[2]}`;
+  if (
+    m &&
+    !(m[1].toUpperCase() === "AJBR" && m[2].length < AJ_REF_MIN_DIGITS)
+  ) return `${m[1].toUpperCase()}-${m[2]}`;
   // Bare numeric ref (>= 5 digits so short tokens can't false-match).
   const bare = s.match(/\b(\d{5,})\b/);
   if (bare) return bare[1];
@@ -203,7 +218,7 @@ export function canonicalExternalObligationRef(
   prefixes: readonly string[] = REF_PREFIX_FLOOR,
 ): string | null {
   if (raw == null) return null;
-  const value = String(raw).trim();
+  const value = canonicaliseRefTypos(String(raw).trim());
   if (!value) return null;
   const alt = cleanPrefixes(prefixes).map(escapeRegExp).join("|");
   // Deliberately no trailing word boundary after the digits. In a composite

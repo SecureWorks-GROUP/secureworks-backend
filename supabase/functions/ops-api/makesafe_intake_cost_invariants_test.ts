@@ -44,13 +44,18 @@ Deno.test("INVARIANT: makesafe_job_family classifier is unchanged", () => {
     ),
     "general_makesafe",
   );
+  // Ruling 15 (Track A, sealed 2026-07-30): text-only restoration PARKS in the
+  // deterministic decision; this back-compat wrapper coalesces the park to the
+  // physical default rather than minting a restoration card while the recipe
+  // stays unsealed. Typed restoration passthrough is covered in the taxonomy
+  // tests.
   assertEquals(
     classifyMakeSafeJobFamily(
       "Restoration works MLB-MW-26873",
       "Complete water damage restoration works to the dwelling",
       null,
     ),
-    "restoration",
+    "general_makesafe",
   );
 });
 

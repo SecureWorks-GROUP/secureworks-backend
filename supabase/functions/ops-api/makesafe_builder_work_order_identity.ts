@@ -13,10 +13,12 @@ export interface BuilderWorkOrderIdentity {
   evidence_sources: string[];
 }
 
+// ABJR is a live-mail typo of AJBR (Track A D7): both spellings are read and
+// canonicalClaim collapses them onto the one AJBR identity.
 const BUILDER_REF_WITH_PO_RE =
-  /(?<![A-Z0-9])(AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
+  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
 const BUILDER_REF_RE =
-  /(?<![A-Z0-9])(AJBR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
+  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
 /**
  * The PO label this module can read, as a source pattern. Exported so downstream
  * identity matching derives the SAME grammar instead of keeping a second copy:
@@ -70,7 +72,16 @@ export function hasAnyPoLabel(text: string): boolean {
 }
 
 function canonicalClaim(prefix: string, digits: string): string {
-  return `${prefix.toUpperCase()}-${digits}`;
+  const canonical = prefix.toUpperCase() === "ABJR"
+    ? "AJBR"
+    : prefix.toUpperCase();
+  return `${canonical}-${digits}`;
+}
+
+// Ruling 13 (sealed 2026-07-30): real AJ refs carry 5+ digits (67xxx-70xxx).
+// A short digit run after AJBR/ABJR ("ABJR 1234") is junk, never an identity.
+function isJunkBuilderRef(prefix: string, digits: string): boolean {
+  return /^A[JB][BJ]R$/i.test(prefix) && digits.length < 5;
 }
 
 function canonicalPo(digits: string): string {
@@ -99,7 +110,7 @@ function scanText(
   current: BuilderWorkOrderIdentity,
 ): void {
   const full = text.match(BUILDER_REF_WITH_PO_RE);
-  if (full) {
+  if (full && !isJunkBuilderRef(full[1], full[2])) {
     current.builder_claim_ref = current.builder_claim_ref ||
       canonicalClaim(full[1], full[2]);
     current.builder_po_number = current.builder_po_number ||
@@ -111,7 +122,7 @@ function scanText(
   }
 
   const claim = text.match(BUILDER_REF_RE);
-  if (claim) {
+  if (claim && !isJunkBuilderRef(claim[1], claim[2])) {
     current.builder_claim_ref = current.builder_claim_ref ||
       canonicalClaim(claim[1], claim[2]);
     addSource(current.evidence_sources, source);

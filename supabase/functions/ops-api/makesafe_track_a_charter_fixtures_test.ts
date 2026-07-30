@@ -9,6 +9,10 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { decideMakeSafeJobFamily } from "./makesafe_intake_gate.ts";
 import { extractPdfDeclaredType } from "./makesafe_pdf_declared_type.ts";
 import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
+import {
+  canonicalExternalObligationRef,
+  normaliseRef,
+} from "../_shared/makesafe_refs.ts";
 
 function headered(typeLines: string[], scope: string): string {
   return [
@@ -243,4 +247,73 @@ Deno.test("D6: the subject still fills identity when it is the only evidence", (
     externalRef: null,
   });
   assertEquals(identity.builder_claim_ref, "MLB-24363");
+});
+
+// Track A D7 (Rulings 11/12/13): ref hygiene.
+Deno.test("D7 (typo): ABJR spellings canonicalise onto the one AJBR identity", () => {
+  assertEquals(normaliseRef("ABJR 67217"), "AJBR-67217");
+  assertEquals(normaliseRef("ABJR-69039"), "AJBR-69039");
+  assertEquals(
+    extractBuilderWorkOrderIdentity({
+      subject: "Make Safe - ABJR 67217 - 7 Havenvale Crescent Dianella",
+      attachmentNames: [],
+      bodyText: null,
+      externalRef: null,
+    }).builder_claim_ref,
+    "AJBR-67217",
+  );
+});
+
+Deno.test("D7 (Ruling 12): the -R reattend suffix never enters the identity key", () => {
+  assertEquals(normaliseRef("AJBR 67217 - R"), "AJBR-67217");
+  assertEquals(
+    extractBuilderWorkOrderIdentity({
+      subject: "Work order AJBR-67217 - R",
+      attachmentNames: [],
+      bodyText: null,
+      externalRef: null,
+    }).builder_claim_ref,
+    "AJBR-67217",
+  );
+});
+
+Deno.test("D7 (Ruling 11): MS191469 and MS191190 are two jobs, never one key", () => {
+  const a = normaliseRef("MS191469");
+  const b = normaliseRef("MS191190");
+  assertEquals(a, "MS-191469");
+  assertEquals(b, "MS-191190");
+  assertEquals(a === b, false);
+  assertEquals(
+    canonicalExternalObligationRef("MS191469") ===
+      canonicalExternalObligationRef("MS191190"),
+    false,
+  );
+});
+
+Deno.test("D7 (Ruling 13): ABJR 1234 is junk, never a live-looking AJBR ref", () => {
+  assertEquals(normaliseRef("ABJR 1234") === "AJBR-1234", false);
+  assertEquals(
+    extractBuilderWorkOrderIdentity({
+      subject: "ABJR 1234",
+      attachmentNames: [],
+      bodyText: null,
+      externalRef: null,
+    }).builder_claim_ref,
+    null,
+  );
+});
+
+Deno.test("D7: test-shaped refs are structurally outside the identity grammar", () => {
+  for (const subject of ["TEST-0611", "AJBR TEST-001", "LUDWIG-0001"]) {
+    assertEquals(
+      extractBuilderWorkOrderIdentity({
+        subject,
+        attachmentNames: [],
+        bodyText: null,
+        externalRef: null,
+      }).builder_claim_ref,
+      null,
+      subject,
+    );
+  }
 });
