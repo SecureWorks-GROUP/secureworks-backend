@@ -2196,6 +2196,39 @@ export function buildDeterministicIntakePlan(
       ) discriminator = oneStrongInstruction;
       groups.set(discriminator, [...(groups.get(discriminator) || []), item]);
     }
+    // Track A D6 wildcard recovery: an evidence-only work source whose family
+    // abstains (the subject never decides family, and its body/PDF carry no
+    // family wording) must not fork the instruction it supports. The cluster
+    // is already correlation-bound, so when exactly one classified ordinary
+    // instruction group exists, the wildcard folds into it; with zero or
+    // several candidates it stays separate and visible rather than guessed.
+    // Quote requests, revisions and lifecycle reopens keep their own lanes.
+    for (const [key, items] of [...groups.entries()]) {
+      // deliverableRefCanonical is normalised to upper case, so the wildcard
+      // test is case-insensitive.
+      if (!/\|deliverable:unclassified$/i.test(key)) continue;
+      if (/^(?:reopen:|revision:|cancel:|nonwork:)/.test(key)) continue;
+      if (items.some((i) => i.intent !== "work")) continue;
+      if (
+        items.some((i) =>
+          QUOTE_REQUEST_SIGNAL.test(text(i.source)) ||
+          isRevisionSource(i.source) ||
+          isLifecycleReopenText(text(i.source))
+        )
+      ) continue;
+      const targets = [...groups.keys()].filter((candidate) =>
+        candidate !== key &&
+        !/^(?:reopen:|revision:|cancel:|nonwork:)/.test(candidate) &&
+        /\|deliverable:(?!unclassified$)/i.test(candidate)
+      );
+      if (targets.length !== 1) continue;
+      const merged = [...groups.get(targets[0])!, ...items].sort((a, b) =>
+        a.source.receivedAt.localeCompare(b.source.receivedAt) ||
+        a.source.postId.localeCompare(b.source.postId)
+      );
+      groups.set(targets[0], merged);
+      groups.delete(key);
+    }
     let rootInstructionKey: string | null = null;
     let previousInstructionKey: string | null = null;
     let cycle = 1;
@@ -2376,12 +2409,15 @@ export function buildDeterministicIntakePlan(
         } else {
           reasonCode = "below_identity_floor";
         }
+      } else if (missingParsedLive.length) {
+        // Ordered before the family check: when parsing/extraction failed the
+        // truthful reason is the parse gap — the family is unknown BECAUSE the
+        // scope never parsed, not because a parsed scope was ambiguous (D6).
+        state = "exception";
+        reasonCode = "adapter_parse_failure";
       } else if (merged.identity.jobFamily === "unclassified") {
         state = "exception";
         reasonCode = "ambiguous_scope";
-      } else if (missingParsedLive.length) {
-        state = "exception";
-        reasonCode = "adapter_parse_failure";
       } else if (missingPortalEvidence.length || missingSecondary.length) {
         state = "blocked_live_job";
       } else {

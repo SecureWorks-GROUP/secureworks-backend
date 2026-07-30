@@ -2050,7 +2050,7 @@ Deno.test("sanitized live traces reach canonical identity without mistaking job 
     from_email: "ops@secureworkswa.com.au",
     subject: "NEW WORK ORDER MLB-79999 Work Order: WO-79999",
     body_content:
-      "<p>Client: Outbound Copy</p><p>Address: 99 Redacted Road</p>",
+      "<p>Client: Outbound Copy</p><p>Address: 99 Redacted Road</p><p>Please attend and make safe the property.</p>",
   }));
 
   const report = await runDeterministicIntake(fakeClient(store), {
@@ -2126,7 +2126,7 @@ Deno.test("a late work order promotes a resumed exception into a live job", asyn
       conversation_id: "conv-late",
       subject: "NEW WORK ORDER MLB-57000 Work Order: WO-57000 PO: 57001",
       body_content:
-        "Client: Late Client\nPhone: 0400 000 111\nAddress: 11 Late Street, Perth",
+        "Client: Late Client\nPhone: 0400 000 111\nAddress: 11 Late Street, Perth\nPlease attend and make safe the property.",
     }),
   );
   const client = fakeClient(store);
@@ -2200,20 +2200,20 @@ Deno.test("standing late evidence charges persisted exception closure to the rec
       post_id: "closure-old-final-1",
       received_at: "2026-07-01T01:00:00.000Z",
       subject: "NEW WORK ORDER MLB-24001 Work Order: WO-24001 PO: 240010",
-      body_content: "Address: 1 Old Closure Street, Perth",
+      body_content: "Address: 1 Old Closure Street, Perth\nPlease attend and make safe the property.",
     }),
     email({
       post_id: "closure-old-final-2",
       received_at: "2026-07-01T01:00:01.000Z",
       subject: "NEW WORK ORDER MLB-24002 Work Order: WO-24002 PO: 240020",
-      body_content: "Address: 2 Old Closure Street, Perth",
+      body_content: "Address: 2 Old Closure Street, Perth\nPlease attend and make safe the property.",
     }),
     email({
       post_id: "closure-original",
       conversation_id: "closure-conversation",
       received_at: "2026-07-10T01:00:00.000Z",
       subject: "NEW WORK ORDER MLB-57010 Work Order: WO-57010 PO: 570100",
-      body_content: "Client: Closure Client\nAddress: 10 Closure Street, Perth",
+      body_content: "Client: Closure Client\nAddress: 10 Closure Street, Perth\nPlease attend and make safe the property.",
     }),
   );
   for (let index = 1; index <= 2; index++) {
@@ -2277,14 +2277,14 @@ Deno.test("standing late evidence charges persisted exception closure to the rec
       post_id: "closure-unrelated",
       received_at: "2026-07-20T00:58:00.000Z",
       subject: "NEW WORK ORDER MLB-57011 Work Order: WO-57011 PO: 570110",
-      body_content: "Client: Other Client\nAddress: 11 Closure Street, Perth",
+      body_content: "Client: Other Client\nAddress: 11 Closure Street, Perth\nPlease attend and make safe the property.",
     }),
     email({
       post_id: "closure-late-pdf",
       conversation_id: "closure-conversation",
       received_at: "2026-07-20T00:59:00.000Z",
       subject: "NEW WORK ORDER MLB-57010 Work Order: WO-57010 PO: 570100",
-      body_content: "Client: Closure Client\nAddress: 10 Closure Street, Perth",
+      body_content: "Client: Closure Client\nAddress: 10 Closure Street, Perth\nPlease attend and make safe the property.",
     }),
   );
   store.email_attachments.push({
@@ -2498,7 +2498,7 @@ Deno.test("live batch is capped per invocation and defers the remainder", async 
       email({
         post_id: `cap-${i}`,
         subject: `NEW WORK ORDER MLB-6000${i} Work Order: WO-6000${i}`,
-        body_content: `Client: Cap Client ${i}\nAddress: ${i} Cap Court, Perth`,
+        body_content: `Client: Cap Client ${i}\nAddress: ${i} Cap Court, Perth\nPlease attend and make safe the property.`,
       }),
     );
     store.email_attachments.push({
@@ -2642,7 +2642,7 @@ Deno.test("stuck exceptions cannot consume the whole per-run budget", async () =
         received_at: `2026-07-19T0${i}:00:00.000Z`,
         subject: `NEW WORK ORDER MLB-5900${i} Work Order: WO-5900${i}`,
         body_content:
-          `Client: Stuck Client ${i}\nAddress: ${i} Stuck Way, Perth`,
+          `Client: Stuck Client ${i}\nAddress: ${i} Stuck Way, Perth\nPlease attend and make safe the property.`,
       }),
     );
   }
@@ -2665,7 +2665,7 @@ Deno.test("stuck exceptions cannot consume the whole per-run budget", async () =
       post_id: "fresh-1",
       received_at: "2026-07-20T02:00:00.000Z",
       subject: "NEW WORK ORDER MLB-59003 Work Order: WO-59003",
-      body_content: "Client: Fresh Client\nAddress: 3 Fresh Road, Perth",
+      body_content: "Client: Fresh Client\nAddress: 3 Fresh Road, Perth\nPlease attend and make safe the property.",
     }),
   );
   store.email_attachments.push({
@@ -2967,7 +2967,7 @@ Deno.test("inverse authority binding requires explicit correction across the fou
           subject: `NEW WORK ORDER MLB-${claim} Work Order: WO-${claim}`,
           body_content: `Client: Claim ${claim}\nAddress: ${
             claimIndex + 1
-          } Claim Street, Perth\nPO Box 2143, Malaga WA 6944`,
+          } Claim Street, Perth\nPO Box 2143, Malaga WA 6944\nPlease attend and make safe the property.`,
         }));
         store.makesafe_intake_case_sources.push({
           id: `source-${postId}`,
@@ -2997,7 +2997,7 @@ Deno.test("inverse authority binding requires explicit correction across the fou
         received_at: "2026-07-10T01:00:00.000Z",
         subject: "Roof report required MLB-26950 Work Order: WO-26950",
         body_content:
-          "Client: Claim 26950\nAddress: 4 Claim Street, Perth\nPO Box 2143, Malaga WA 6944",
+          "Roof report required for this claim.\nClient: Claim 26950\nAddress: 4 Claim Street, Perth\nPO Box 2143, Malaga WA 6944",
       }));
     }
     return store;
@@ -3574,7 +3574,7 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
         post_id: `fail-${i}`,
         received_at: `2026-07-19T0${i}:00:00.000Z`,
         subject: `NEW WORK ORDER MLB-5910${i} Work Order: WO-5910${i}`,
-        body_content: `Client: Fail Client ${i}\nAddress: ${i} Fail Way, Perth`,
+        body_content: `Client: Fail Client ${i}\nAddress: ${i} Fail Way, Perth\nPlease attend and make safe the property.`,
       }),
     );
     store.email_attachments.push({
@@ -3592,7 +3592,7 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
       post_id: "good-1",
       received_at: "2026-07-20T02:00:00.000Z",
       subject: "NEW WORK ORDER MLB-59103 Work Order: WO-59103",
-      body_content: "Client: Good Client\nAddress: 3 Good Road, Perth",
+      body_content: "Client: Good Client\nAddress: 3 Good Road, Perth\nPlease attend and make safe the property.",
     }),
   );
   store.email_attachments.push({
@@ -3680,7 +3680,7 @@ Deno.test("repeat failures are deprioritised on the next run", async () => {
         post_id: `dead-${i}`,
         received_at: `2026-07-19T0${i}:00:00.000Z`,
         subject: `NEW WORK ORDER MLB-5920${i} Work Order: WO-5920${i}`,
-        body_content: `Client: Dead Client ${i}\nAddress: ${i} Dead End, Perth`,
+        body_content: `Client: Dead Client ${i}\nAddress: ${i} Dead End, Perth\nPlease attend and make safe the property.`,
       }),
     );
     store.email_attachments.push({
@@ -3723,7 +3723,7 @@ Deno.test("repeat failures are deprioritised on the next run", async () => {
       post_id: "late-1",
       received_at: "2026-07-20T02:00:00.000Z",
       subject: "NEW WORK ORDER MLB-59205 Work Order: WO-59205",
-      body_content: "Client: Late Client\nAddress: 5 Late Lane, Perth",
+      body_content: "Client: Late Client\nAddress: 5 Late Lane, Perth\nPlease attend and make safe the property.",
     }),
   );
   store.email_attachments.push({
@@ -3761,7 +3761,7 @@ Deno.test("a disallowed state transition never creates an orphan job", async () 
     email({
       post_id: "orphan-1",
       subject: "NEW WORK ORDER MLB-59500 Work Order: WO-59500",
-      body_content: "Client: Orphan Client\nAddress: 5 Orphan Rise, Perth",
+      body_content: "Client: Orphan Client\nAddress: 5 Orphan Rise, Perth\nPlease attend and make safe the property.",
     }),
   );
   store.email_attachments.push({
@@ -3825,7 +3825,7 @@ Deno.test("write failures are classified without retaining source content", asyn
     email({
       post_id: "fail-1",
       subject: "NEW WORK ORDER MLB-58000 Work Order: WO-58000",
-      body_content: "Client: Fail Client\nAddress: 12 Fail Way, Perth",
+      body_content: "Client: Fail Client\nAddress: 12 Fail Way, Perth\nPlease attend and make safe the property.",
     }),
   );
   store.email_attachments.push({
@@ -3924,13 +3924,13 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
       post_id: "twin-a",
       conversation_id: "twin-conversation",
       subject: "NEW WORK ORDER MLB-62001 Work Order: WO-62001",
-      body_content: "Client: Twin Client\nAddress: 1 Twin Way, Perth",
+      body_content: "Client: Twin Client\nAddress: 1 Twin Way, Perth\nPlease attend and make safe the property.",
     }),
     email({
       post_id: "twin-b",
       conversation_id: "twin-conversation",
       subject: "NEW WORK ORDER MLB-62001 Work Order: WO-62001",
-      body_content: "Client: Twin Client\nAddress: 1 Twin Way, Perth",
+      body_content: "Client: Twin Client\nAddress: 1 Twin Way, Perth\nPlease attend and make safe the property.",
     }),
   );
   for (const source of ["twin-a", "twin-b"]) {
@@ -4033,7 +4033,7 @@ Deno.test("storage failure surfaces a storage blocker instead of staying silent"
     email({
       post_id: "blk-1",
       subject: "NEW WORK ORDER MLB-59000 Work Order: WO-59000",
-      body_content: "Client: Blocker Client\nAddress: 13 Blocker Bend, Perth",
+      body_content: "Client: Blocker Client\nAddress: 13 Blocker Bend, Perth\nPlease attend and make safe the property.",
     }),
   );
   store.email_attachments.push({
@@ -4991,7 +4991,7 @@ Deno.test("deterministic selection links a canonical MLB ref to its composite-re
     post_id: "canonical-ref-selected",
     received_at: "2026-07-10T01:00:00.000Z",
     subject: "NEW WORK ORDER MLB-26537 Work Order: WO-26537 PO: PO-56922",
-    body_content: "Client: Dedupe Client\nAddress: 10 Canonical Way, Perth",
+    body_content: "Client: Dedupe Client\nAddress: 10 Canonical Way, Perth\nPlease attend and make safe the property.",
   }));
   store.email_attachments.push({
     id: "att-canonical-ref-selected",
@@ -5064,25 +5064,25 @@ Deno.test("live-shaped fresh exception loop converges across cron rerun and same
       post_id: "loop-ambient-po",
       received_at: "2026-07-01T01:00:00.000Z",
       subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: 905011",
-      body_content: "Address: 5 Loop Street, Perth",
+      body_content: "Address: 5 Loop Street, Perth\nPlease attend and make safe the property.",
     }),
     email({
       post_id: "loop-ambient-reopen-1",
       received_at: "2026-07-03T01:00:00.000Z",
       subject: "REOPEN WORK ORDER MLB-90501 Work Order: WO-90501 PO: 905013",
-      body_content: "Address: 5 Loop Street, Perth",
+      body_content: "Address: 5 Loop Street, Perth\nPlease attend and make safe the property.",
     }),
     email({
       post_id: "loop-ambient-reopen-2",
       received_at: "2026-07-05T01:00:00.000Z",
       subject: "REOPEN WORK ORDER MLB-90501 Work Order: WO-90501 PO: 905014",
-      body_content: "Address: 5 Loop Street, Perth",
+      body_content: "Address: 5 Loop Street, Perth\nPlease attend and make safe the property.",
     }),
     email({
       post_id: "loop-selected-po",
       received_at: "2026-07-10T01:00:00.000Z",
       subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: 905012",
-      body_content: "Address: 5 Loop Street, Perth",
+      body_content: "Address: 5 Loop Street, Perth\nPlease attend and make safe the property.",
     }),
   );
   store.email_attachments.push({
@@ -5178,7 +5178,7 @@ Deno.test("live-shaped fresh exception loop converges across cron rerun and same
     received_at: "2026-07-11T01:00:00.000Z",
     subject: "NEW WORK ORDER MLB-90501 Work Order: WO-90501 PO: 905012",
     body_content:
-      "Address: 5 Loop Street, Perth\nFollow-up copy for the same instruction.",
+      "Address: 5 Loop Street, Perth\nPlease attend and make safe the property.\nFollow-up copy for the same instruction.",
   }));
   store.email_attachments.push({
     id: "att-loop-resend",
@@ -5693,7 +5693,7 @@ Deno.test("exact selection pulls the semantic parent chain and advances it withi
       thread_id: "guard-thread",
       received_at: "2026-07-05T01:00:00.000Z",
       subject: "NEW WORK ORDER MLB-91001 Work Order: WO-91001 PO: 910011",
-      body_content: "Client: Parent Client\nAddress: 2 Guard Street, Perth",
+      body_content: "Client: Parent Client\nAddress: 2 Guard Street, Perth\nPlease attend and make safe the property.",
     }),
     email({
       post_id: "guard-revision",
@@ -5701,7 +5701,7 @@ Deno.test("exact selection pulls the semantic parent chain and advances it withi
       received_at: "2026-07-10T01:00:00.000Z",
       subject: "REVISED WORK ORDER MLB-91001 Work Order: WO-91001 PO: 910011",
       body_content:
-        "Client: Parent Client\nAddress: 2 Guard Street, Perth\nUpdated instruction",
+        "Client: Parent Client\nAddress: 2 Guard Street, Perth\nPlease attend and make safe the property.\nUpdated instruction",
     }),
   );
   for (const postId of ["guard-original", "guard-revision"]) {

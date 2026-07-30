@@ -157,8 +157,12 @@ export function extractBuilderWorkOrderIdentity(
   };
 
   if (input.externalRef) scanText(input.externalRef, "external_ref", result);
-  if (input.subject) scanText(input.subject, "subject", result);
 
+  // Track A D6 (standing rule + Ruling 5): the subject line never ANCHORS
+  // identity. The attachment filename (charter S0) and the labelled body/PDF
+  // rows are the anchors; the subject is scanned last, so it corroborates or
+  // fills a gap but can no longer beat filename/body identity when a reused
+  // "NEW WORK ORDER" subject carries a different or partial reference.
   for (const name of input.attachmentNames || []) {
     if (name) scanText(name, "attachment_name", result);
   }
@@ -177,6 +181,8 @@ export function extractBuilderWorkOrderIdentity(
     }).join("\n");
     if (labelledLines) scanText(labelledLines, "body_text", result);
   }
+
+  if (input.subject) scanText(input.subject, "subject", result);
 
   return result;
 }

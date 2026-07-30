@@ -186,7 +186,7 @@ Deno.test("MLB adapter builds a confirmed identity without AI", () => {
     postId: "mlb-1",
     subject: "NEW WORK ORDER MLB-27037 Work Order: WO#27037 PO: 9182",
     body:
-      "Client: Test Client\nSite Address: 10 Test Street, Perth\nPhone: 0400000000",
+      "Client: Test Client\nSite Address: 10 Test Street, Perth\nPhone: 0400000000\nPlease attend and make safe the property.",
     attachments: [pdf("mlb-1")],
   });
   const adapted = adaptDeterministicSource(item, PROFILES);
@@ -706,7 +706,7 @@ Deno.test("RAPID adapter is pure and reaches confirmed state on complete evidenc
     fromEmail: "dispatch@rapid.test",
     subject: "RAPID Repair NEW WORK ORDER RAPID-88001 Work Order: RR#88001",
     body:
-      "Insured: Rapid Client\nRisk Address: 40 Gamma Drive, Perth\nPhone: 0411111111",
+      "Insured: Rapid Client\nRisk Address: 40 Gamma Drive, Perth\nPhone: 0411111111\nPlease attend and make safe the property.",
     attachments: [pdf("rapid-1")],
   });
   assertEquals(adaptDeterministicSource(item, PROFILES).adapterId, "rapid");
@@ -738,7 +738,7 @@ Deno.test("case-wide recovery finds a late PDF before declaring it missing", () 
     postId: "case-1",
     threadId: "thread-1",
     subject: "NEW WORK ORDER MLB-27040 Work Order: WO 27040",
-    body: "Client: Case Client\nAddress: 50 Delta Street, Perth",
+    body: "Client: Case Client\nAddress: 50 Delta Street, Perth\nPlease attend and make safe the property.",
   });
   const latePdf = source({
     postId: "case-2",

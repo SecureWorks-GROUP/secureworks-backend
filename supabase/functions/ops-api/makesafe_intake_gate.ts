@@ -348,8 +348,13 @@ export function decideMakeSafeJobFamily(
   reportType?: string | null,
   context: MakeSafeJobFamilyContext = {},
 ): MakeSafeJobFamilyDecision {
+  // Track A D6 (standing rule + Ruling 5): the subject line never decides
+  // family. The MLB "NEW WORK ORDER" subject is the format for every family,
+  // so family evidence reads the body and the WO PDF scope/header only; the
+  // subject parameter is retained for call-site compatibility but is
+  // format-only and never enters the evidence haystack.
+  void subject;
   const text = [
-    subject || "",
     body || "",
     context.pdfScopeText || "",
   ].join("\n").toLowerCase();

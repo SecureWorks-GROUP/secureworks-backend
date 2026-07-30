@@ -8,6 +8,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { decideMakeSafeJobFamily } from "./makesafe_intake_gate.ts";
 import { extractPdfDeclaredType } from "./makesafe_pdf_declared_type.ts";
+import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
 
 function headered(typeLines: string[], scope: string): string {
   return [
@@ -195,4 +196,51 @@ Deno.test("charter S6 trap: 'make safe report' wording is a makesafe, not an ass
     "Attend site, complete make safe report and secure the property",
   );
   assertEquals(decision.family, "general_makesafe");
+});
+
+// Track A D6 (standing rule + Ruling 5): the subject line never decides
+// family and never anchors identity.
+Deno.test("D6: a report-flavoured subject cannot flip a physical make-safe scope", () => {
+  const decision = decideMakeSafeJobFamily(
+    "Roof report required MLB-27200",
+    "Please attend and make safe the storm damaged ceiling",
+    null,
+    { builder: "mlb" },
+  );
+  assertEquals(decision.family, "general_makesafe");
+});
+
+Deno.test("D6: a 'NEW WORK ORDER' subject alone assigns no family (abstain, not guess)", () => {
+  const decision = decideMakeSafeJobFamily(
+    "NEW WORK ORDER - MLB-27201 12 Format Street, Perth",
+    "",
+    null,
+    { builder: "mlb" },
+  );
+  assertEquals(decision.family, null);
+  assertEquals(decision.evidence, "ambiguous_scope");
+});
+
+Deno.test("D6: the attachment filename (S0) beats a reused subject ref for identity", () => {
+  const identity = extractBuilderWorkOrderIdentity({
+    subject: "NEW WORK ORDER - MLB-11111 1 Reused Subject Way",
+    attachmentNames: [
+      "work_order_MLB-22222PO-33333_Secureworks_Group_Pty_Ltd.pdf",
+    ],
+    bodyText: null,
+    externalRef: null,
+  });
+  assertEquals(identity.builder_claim_ref, "MLB-22222");
+  assertEquals(identity.builder_po_number, "PO-33333");
+});
+
+Deno.test("D6: the subject still fills identity when it is the only evidence", () => {
+  const identity = extractBuilderWorkOrderIdentity({
+    subject:
+      "Our Ref: MLB-24363 - 12 Keane Ct, Noranda - Client Ref: 13328238 - Other Ref:",
+    attachmentNames: [],
+    bodyText: null,
+    externalRef: null,
+  });
+  assertEquals(identity.builder_claim_ref, "MLB-24363");
 });
