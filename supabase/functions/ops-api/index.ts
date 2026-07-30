@@ -2108,15 +2108,17 @@ const VAN_STOCK_JOB_TYPES = ['makesafe', 'inspection', 'report']
 // assignment is a past-dated stale row (e.g. the proof's SWMS-26604) does NOT
 // flip to ready — readiness must reflect a live, actionable allocation.
 const OBSERVER_ROLES = new Set(['observer', 'ghost'])
-function isLiveCrewAssignment(a: any, todayStr: string): boolean {
+function isGenuineTradeAssignment(a: any): boolean {
   if (!a) return false
   const status = String(a.status ?? a.assignment_status ?? '').toLowerCase()
   if (status === 'cancelled' || status === 'declined') return false
   const role = String(a.role ?? '').toLowerCase()
   const aType = String(a.assignment_type ?? '').toLowerCase()
   if (OBSERVER_ROLES.has(role) || OBSERVER_ROLES.has(aType)) return false
-  // Make-safe open-pool synthetic cards are not a real named allocation.
-  if (role === 'makesafe_open' || aType === 'makesafe_open') return false
+  return role !== 'makesafe_open' && aType !== 'makesafe_open'
+}
+function isLiveCrewAssignment(a: any, todayStr: string): boolean {
+  if (!isGenuineTradeAssignment(a)) return false
   const date = a.scheduled_date ?? null
   // No date = treat as live (can't disprove); with a date it must be today/future.
   if (date && String(date) < todayStr) return false
@@ -10201,7 +10203,7 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
     client.from('xero_projects').select('*').eq('job_id', jobId).maybeSingle(),
     client.from('job_contacts').select('*').eq('job_id', jobId).eq('status', 'active').order('contact_label'),
     client.from('business_events').select('id, event_type, source, entity_type, entity_id, payload, metadata, occurred_at').eq('job_id', jobId).order('occurred_at', { ascending: false }).limit(50),
-    client.from('job_service_reports').select('*').eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
+    client.from('job_service_reports').select('*').eq('job_id', jobId).order('created_at', { ascending: false }),
   ])
 
   if (jobRes.error) throw jobRes.error
@@ -33045,21 +33047,18 @@ export async function reattendMakesafe(client: any, args: {
     if (!callerUserId) {
       throw new ApiError(`Not authorized to re-attend ${jobVertical || 'this'} jobs`, 403)
     }
-    const { data: assignment, error: assignmentErr } = await client
+    const { data: assignments, error: assignmentErr } = await client
       .from('job_assignments')
-      .select('id, status')
+      .select('id, status, role, assignment_type')
       .eq('job_id', jobId)
       .eq('user_id', callerUserId)
-      .neq('status', 'cancelled')
-      .limit(1)
-      .maybeSingle()
     if (assignmentErr) {
       throw new ApiError(
         `reattendMakesafe: assignment relationship read failed: ${assignmentErr.message || assignmentErr}`,
         500,
       )
     }
-    if (!assignment) {
+    if (!(assignments || []).some((assignment: any) => isGenuineTradeAssignment(assignment))) {
       throw new ApiError(`Not authorized to re-attend ${jobVertical || 'this'} jobs`, 403)
     }
     authorizationRelationship = 'assigned_trade'
@@ -33151,18 +33150,9 @@ export async function reattendMakesafe(client: any, args: {
     throw new ApiError('reattendMakesafe: retry state could not be verified', 500)
   }
   const currentCycle = Number(detail.cycle_number ?? 1)
-  const retryEvent = (reattendAuditEvents || []).find((event: any) => {
-    const eventDetail = parseJsonObject(event?.detail_json)
-    return event?.event_type === 'makesafe_reattend' &&
-      Number(eventDetail.cycle_number || 0) === currentCycle &&
-      String(eventDetail.reason || '') === reason
-  })
-  const committedTransition = detail.substatus === 'waiting_on_trade_report' &&
-    !detail.report_received_at &&
-    !!detail.last_reattend_at &&
-    String(detail.last_reattend_reason || '') === reason
-  const retryableTransition = detail.substatus === 'waiting_on_trade_report' &&
-    !detail.report_received_at && (!!retryEvent || committedTransition)
+  const transitionAlreadyCommitted = detail.substatus === 'waiting_on_trade_report' &&
+    !detail.report_received_at && !!detail.last_reattend_at
+  const retryableTransition = transitionAlreadyCommitted
   const priorInvoiceSummary = (liveInvoices || []).map((inv: any) => ({
     xero_id: inv.xero_invoice_id || inv.id || null,
     status: inv.status || null,
@@ -33218,7 +33208,7 @@ export async function reattendMakesafe(client: any, args: {
       attendance_cycle_id: detail.attendance_cycle_id || null,
       substatus: detail.substatus,
       previous_status: previousStatus,
-      reason,
+      reason: detail.last_reattend_reason || reason,
       bill_reattend_manually: billReattendManually,
       prior_pack_sent: priorPackSent,
       billing_review_required: billingReviewRequired,
@@ -33244,16 +33234,8 @@ export async function reattendMakesafe(client: any, args: {
     `reattend_makesafe: ${reason}`,
   )
 
-  // Reactivate a closed job so it flows through the board again.
-  if (_MAKESAFE_REATTEND_CLOSED_STATUSES.includes(jobStatus)) {
-    const { error: jobUpdErr } = await client.from('jobs')
-      .update({ status: 'accepted', completed_at: null, updated_at: nowIso })
-      .eq('id', jobId)
-    if (jobUpdErr) throw new ApiError('reattendMakesafe: job reactivation failed: ' + jobUpdErr.message, 500)
-  }
-
   // Reset board signals + increment cycle + write the re-attend marker.
-  const { data: updatedDetail, error: upErr } = await client.from('makesafe_job_details')
+  let detailTransition = client.from('makesafe_job_details')
     .update({
       substatus: 'waiting_on_trade_report',
       report_received_at: null,
@@ -33267,9 +33249,55 @@ export async function reattendMakesafe(client: any, args: {
       updated_at: nowIso,
     })
     .eq('job_id', jobId)
+    .eq('cycle_number', currentCycle)
+    .eq('reattend_count', detail.reattend_count ?? 0)
+    .eq('substatus', detail.substatus)
+  detailTransition = detail.report_received_at == null
+    ? detailTransition.is('report_received_at', null)
+    : detailTransition.eq('report_received_at', detail.report_received_at)
+  const { data: updatedDetail, error: upErr } = await detailTransition
     .select('job_id, substatus, cycle_number, reattend_count, attendance_cycle_id, last_reattend_at')
-    .single()
+    .maybeSingle()
   if (upErr) throw new ApiError('reattendMakesafe: detail update failed: ' + upErr.message, 500)
+
+  if (!updatedDetail) {
+    const { data: winningDetail, error: winningDetailErr } = await client.from('makesafe_job_details')
+      .select('job_id, substatus, cycle_number, reattend_count, attendance_cycle_id, last_reattend_at, last_reattend_reason, report_received_at')
+      .eq('job_id', jobId)
+      .maybeSingle()
+    if (winningDetailErr) throw new ApiError('reattendMakesafe: transition result could not be verified', 500)
+    const winningCycle = Number(winningDetail?.cycle_number ?? 0)
+    if (winningDetail?.substatus !== 'waiting_on_trade_report' || winningDetail?.report_received_at || winningCycle !== nextCycle) {
+      throw new ApiError('reattendMakesafe: transition lost to another state change', 409)
+    }
+    return {
+      ok: true,
+      reattended: true,
+      idempotent_replay: true,
+      job_id: jobId,
+      reattend_count: winningDetail.reattend_count,
+      cycle_number: winningCycle,
+      attendance_cycle_id: winningDetail.attendance_cycle_id || null,
+      substatus: winningDetail.substatus,
+      previous_status: previousStatus,
+      reason: winningDetail.last_reattend_reason || reason,
+      bill_reattend_manually: billReattendManually,
+      prior_pack_sent: priorPackSent,
+      billing_review_required: billingReviewRequired,
+      authorization_relationship: authorizationRelationship,
+      event_sync: { ok: true },
+      warnings: [],
+      ...(reattendWarning ? { warning: reattendWarning } : {}),
+    }
+  }
+
+  // Reactivate a closed job only after this request wins the guarded detail transition.
+  if (_MAKESAFE_REATTEND_CLOSED_STATUSES.includes(jobStatus)) {
+    const { error: jobUpdErr } = await client.from('jobs')
+      .update({ status: 'accepted', completed_at: null, updated_at: nowIso })
+      .eq('id', jobId)
+    if (jobUpdErr) throw new ApiError('reattendMakesafe: job reactivation failed: ' + jobUpdErr.message, 500)
+  }
 
   // Audit facts are non-fatal after the completed re-attend transition, but any
   // persistence failure is returned loudly so the caller cannot claim the
