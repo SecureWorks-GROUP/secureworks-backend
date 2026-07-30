@@ -22,7 +22,10 @@ Deno.test("backfill report: infers missing family from report_type without writi
   assertEquals(summary.items[0].confidence, "report_type");
 });
 
-Deno.test("backfill report: infers restoration from specific work text", () => {
+Deno.test("backfill report: text-only restoration parks unclassified (Ruling 15)", () => {
+  // Ruling 15 (sealed 2026-07-30): the restoration recipe is UNSEALED, so the
+  // deterministic classifier never assigns restoration from text alone — the
+  // draft stays visible for review instead of being guessed.
   const summary = summarizeMakesafeIntakeBackfillReport({
     drafts: [{
       id: "draft-restoration",
@@ -36,8 +39,7 @@ Deno.test("backfill report: infers restoration from specific work text", () => {
     jobs: [],
   });
 
-  assertEquals(summary.items[0].inferred_family, "restoration");
-  assertEquals(summary.items[0].confidence, "text");
+  assertEquals(summary.items[0].inferred_family, null);
 });
 
 Deno.test("backfill report: unknown-family draft sharing ref/company with known variant is a suppression risk", () => {

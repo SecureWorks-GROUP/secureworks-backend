@@ -509,7 +509,7 @@ export function buildCanonicalMakesafeRows(
       type: base?.type || "makesafe",
       ses_family: sesFamily,
       ses_family_label: sesFamilyLabel(sesFamily),
-      ses_recipe_state: sesFamily === "restoration"
+      ses_recipe_state: sesFamily === "restoration" || sesFamily === "repair"
         ? "unsealed"
         : sesFamily === "unknown"
         ? "unknown"

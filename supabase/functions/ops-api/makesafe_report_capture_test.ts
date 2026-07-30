@@ -677,10 +677,12 @@ Deno.test("job family: assessment report and quote are grouped", () => {
 });
 
 Deno.test("job family: temporary fence wins over report wording", () => {
+  // Track A D6: the subject never decides family, so the fence wording sits
+  // in the body — the honest live-mail shape for a collection request.
   assertEquals(
     classifyMakeSafeJobFamily(
       "Retrieve temp fencing - MLB-26001",
-      "Please send report after pickup",
+      "Please retrieve the temp fencing and send report after pickup",
       null,
     ),
     "temp_fence_makesafe",

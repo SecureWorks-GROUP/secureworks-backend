@@ -186,7 +186,7 @@ Deno.test("MLB adapter builds a confirmed identity without AI", () => {
     postId: "mlb-1",
     subject: "NEW WORK ORDER MLB-27037 Work Order: WO#27037 PO: 9182",
     body:
-      "Client: Test Client\nSite Address: 10 Test Street, Perth\nPhone: 0400000000",
+      "Client: Test Client\nSite Address: 10 Test Street, Perth\nPhone: 0400000000\nPlease attend and make safe the property.",
     attachments: [pdf("mlb-1")],
   });
   const adapted = adaptDeterministicSource(item, PROFILES);
@@ -706,7 +706,7 @@ Deno.test("RAPID adapter is pure and reaches confirmed state on complete evidenc
     fromEmail: "dispatch@rapid.test",
     subject: "RAPID Repair NEW WORK ORDER RAPID-88001 Work Order: RR#88001",
     body:
-      "Insured: Rapid Client\nRisk Address: 40 Gamma Drive, Perth\nPhone: 0411111111",
+      "Insured: Rapid Client\nRisk Address: 40 Gamma Drive, Perth\nPhone: 0411111111\nPlease attend and make safe the property.",
     attachments: [pdf("rapid-1")],
   });
   assertEquals(adaptDeterministicSource(item, PROFILES).adapterId, "rapid");
@@ -738,7 +738,8 @@ Deno.test("case-wide recovery finds a late PDF before declaring it missing", () 
     postId: "case-1",
     threadId: "thread-1",
     subject: "NEW WORK ORDER MLB-27040 Work Order: WO 27040",
-    body: "Client: Case Client\nAddress: 50 Delta Street, Perth",
+    body:
+      "Client: Case Client\nAddress: 50 Delta Street, Perth\nPlease attend and make safe the property.",
   });
   const latePdf = source({
     postId: "case-2",
@@ -929,7 +930,8 @@ Deno.test("WO ref without PDF or client name lands in review maybe-box", () => {
   // area that should be parked for human/AI review, not silently dropped.
   const item = source({
     postId: "wo-no-pdf",
-    subject: "Our Ref: MLB-25876 - 48 Doriot Way, Carine - Client Ref: 13345234",
+    subject:
+      "Our Ref: MLB-25876 - 48 Doriot Way, Carine - Client Ref: 13345234",
     body: "Please see attached site photos for this make safe job.",
     attachments: [],
   });
@@ -1191,4 +1193,347 @@ Deno.test("quality measurement is per-builder and excludes accounted non-work", 
     percentage: 0,
   });
   assertEquals(measured.by_builder.unknown, undefined);
+});
+
+// Track A D3 (charter 6b + Ruling 12): collection, rectification and "-R"
+// reattendance mail are lifecycle events — cycles on the original instruction's
+// lineage, never fresh sibling instructions that could mint again.
+Deno.test("D3: collection and rectification mail become reopen cycles, not sibling instructions", () => {
+  const original = source({
+    postId: "lifecycle-1",
+    threadId: "lifecycle-thread",
+    subject: "NEW WORK ORDER MLB-34000 Work Order: WO-34000",
+    body:
+      "Client: Lifecycle Client\nAddress: 7 Kappa Way, Perth\nSupply and install temporary fencing to secure the site",
+    attachments: [pdf("lifecycle-1")],
+  });
+  const collection = source({
+    postId: "lifecycle-2",
+    threadId: "lifecycle-thread",
+    subject: "MLB-34000 temp fence",
+    body: "Job complete. Please collect the temporary fencing from site.",
+    receivedAt: "2026-07-20T03:00:00.000Z",
+  });
+  const rectification = source({
+    postId: "lifecycle-3",
+    threadId: "lifecycle-thread",
+    subject: "MLB-34000 fence issue",
+    body:
+      "Please rectify the temporary fence which you installed, it has fallen over.",
+    receivedAt: "2026-07-20T04:00:00.000Z",
+  });
+  const plan = buildDeterministicIntakePlan(
+    [original, collection, rectification],
+    PROFILES,
+  );
+  assertEquals(plan.cases.length, 3);
+  const reopens = plan.cases.filter((c) => c.parentRelation === "reopen_of");
+  assertEquals(reopens.length, 2);
+  assertEquals(
+    plan.cases.filter((c) => c.parentRelation === "sibling_of").length,
+    0,
+  );
+  assert(reopens.every((c) => c.cycle > 1));
+});
+
+Deno.test("D3 (Ruling 12): the '-R' ref suffix opens a reopen cycle on the base ref", () => {
+  const original = source({
+    postId: "suffix-1",
+    threadId: "suffix-thread",
+    fromEmail: "jobs@ajbr.test",
+    subject: "NEW WORK ORDER AJBR-67217",
+    body:
+      "Client: Suffix Client\nAddress: 9 Sigma Court, Perth\nMake safe roof",
+    attachments: [pdf("suffix-1")],
+  });
+  const reattend = source({
+    postId: "suffix-2",
+    threadId: "suffix-thread",
+    fromEmail: "jobs@ajbr.test",
+    subject: "Work order AJBR-67217 - R",
+    body: "Updated task attached for the same property.",
+    receivedAt: "2026-07-20T06:00:00.000Z",
+  });
+  const plan = buildDeterministicIntakePlan([original, reattend], PROFILES);
+  assertEquals(plan.cases.length, 2);
+  assert(
+    plan.cases.some((c) =>
+      c.parentRelation === "reopen_of" &&
+      c.sourcePostIds.includes("suffix-2")
+    ),
+  );
+});
+
+Deno.test("D3: an attachment-only '-R' ref opens a reopen cycle", () => {
+  const original = source({
+    postId: "attachment-suffix-1",
+    threadId: "attachment-suffix-thread",
+    fromEmail: "jobs@ajbr.test",
+    subject: "NEW WORK ORDER AJBR-67218",
+    body:
+      "Client: Attachment Client\nAddress: 10 Sigma Court, Perth\nMake safe roof",
+    attachments: [pdf("attachment-suffix-1")],
+  });
+  const reattend = source({
+    postId: "attachment-suffix-2",
+    threadId: "attachment-suffix-thread",
+    fromEmail: "jobs@ajbr.test",
+    subject: "Updated task attached",
+    body: "Please action the attached document for the same property.",
+    attachments: [{
+      ...pdf("attachment-suffix-2"),
+      name: "AJBR-67218-R.pdf",
+    }],
+    receivedAt: "2026-07-20T06:00:00.000Z",
+  });
+  const plan = buildDeterministicIntakePlan([original, reattend], PROFILES);
+  assertEquals(plan.cases.length, 2);
+  assert(
+    plan.cases.some((c) =>
+      c.parentRelation === "reopen_of" &&
+      c.sourcePostIds.includes("attachment-suffix-2")
+    ),
+  );
+});
+
+Deno.test("owned PDF selection uses the shared PO identity grammar", () => {
+  const item = source({
+    postId: "owned-po-format",
+    subject: "NEW WORK ORDER MLB-35000 PO: 54176",
+    body:
+      "Client: PO Format Client\nAddress: 11 Sigma Court, Perth\nhttps://portal.example.test/owned-po-format",
+    links: [{
+      url: "https://portal.example.test/owned-po-format",
+      sourcePostId: "owned-po-format",
+    }],
+    attachments: [
+      {
+        ...pdf("owned-po-format", "owned-roof"),
+        name: "MLB-35000PO_54176.pdf",
+      },
+      {
+        ...pdf("owned-po-format", "other-makesafe"),
+        name: "MLB-35000PO-54177.pdf",
+      },
+    ],
+    pdfDocuments: [
+      {
+        sourcePostId: "owned-po-format",
+        attachmentId: "owned-roof",
+        attachmentName: "MLB-35000PO_54176.pdf",
+        status: "extracted",
+        text: "Allocation Work Order\nRoof Reports External",
+        charCount: 50,
+        pageCount: 1,
+        extractor: "test",
+        truncated: false,
+        reason: null,
+      },
+      {
+        sourcePostId: "owned-po-format",
+        attachmentId: "other-makesafe",
+        attachmentName: "MLB-35000PO-54177.pdf",
+        status: "extracted",
+        text: "Allocation Work Order\nMakesafe/Emergency Repairs",
+        charCount: 60,
+        pageCount: 1,
+        extractor: "test",
+        truncated: false,
+        reason: null,
+      },
+    ],
+  });
+  assertEquals(
+    adaptDeterministicSource(item, PROFILES).identity.jobFamily,
+    "roof_report",
+  );
+});
+
+Deno.test("D3 guard: an ORIGINAL temp-fence WO with a future collection clause stays a fresh mintable instruction", () => {
+  const item = source({
+    postId: "supply-collect-1",
+    subject: "NEW WORK ORDER MLB-34010 Work Order: WO-34010",
+    body:
+      "Client: Hire Client\nAddress: 3 Omega Street, Perth\nSupply temporary fencing and collect on completion. 3-month hire including collection.",
+    attachments: [pdf("supply-collect-1")],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases.length, 1);
+  assertEquals(plan.cases[0].parentRelation, null);
+  assertEquals(plan.cases[0].cycle, 1);
+  assert(!plan.cases[0].story.some((event) => event.kind === "reopen"));
+});
+
+// Track A D4 (Ruling 1): a builder "please price this" request with no WO PDF
+// and no PO is the quote-stage repair lane — its own reviewable reason code,
+// family repair. Body/subject shapes mirror the sealed audit fixtures
+// (MLB-24363, MLB-25492, MLB-24473, MLB-25876, MLB-26840, MLB-27065).
+Deno.test("D4 (Ruling 1): a price request with no WO PDF files the quote-stage repair lane", () => {
+  const item = source({
+    postId: "quote-req-1",
+    subject:
+      "Our Ref: MLB-24363 - 12 Keane Ct, Noranda - Client Ref: 13328238 - Other Ref:",
+    body:
+      "Hi team plds price: Remove and replace the entire elevation of sole-owned boundary fencing with Colorbond up to 1800mm high as the existing material is no longer available.",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases.length, 1);
+  assertEquals(plan.cases[0].state, "exception");
+  assertEquals(plan.cases[0].reasonCode, "repair_quote_stage");
+  assertEquals(plan.cases[0].identity.jobFamily, "repair");
+});
+
+Deno.test("D4 (Ruling 10, MLB-25492): roof-sheeting price request stays a repair quote, never a roof report", () => {
+  const item = source({
+    postId: "quote-req-2",
+    subject:
+      "Our Ref: MLB-25492 - 15 Boxhill St, Morley - Client Ref: 13339466 - Other Ref:",
+    body:
+      "Pls price: Remove and replace 40m2 of twin wall polycarbonate roof sheeting",
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases[0].reasonCode, "repair_quote_stage");
+  assertEquals(plan.cases[0].identity.jobFamily, "repair");
+});
+
+Deno.test("D4 conversion (MLB-26344): the later real WO+PO forms its own deliverable case with the PDF's declared family", () => {
+  const quote = source({
+    postId: "quote-conv-1",
+    threadId: "quote-conv-thread",
+    subject:
+      "Our Ref: MLB-26344 - 4 Convert Close, Perth - Client Ref: 13350000 - Other Ref:",
+    body: "Hi team Pls price: replace the storm damaged boundary fence",
+  });
+  const wo = source({
+    postId: "quote-conv-2",
+    threadId: "quote-conv-thread",
+    subject: "NEW WORK ORDER - MLB-26344 4 Convert Close, Perth",
+    body: "Please attend. The builder work order is attached.",
+    receivedAt: "2026-07-20T06:00:00.000Z",
+    attachments: [pdf("quote-conv-2")],
+    pdfDocuments: [{
+      sourcePostId: "quote-conv-2",
+      attachmentId: "quote-conv-2-pdf",
+      attachmentName: "work_order_MLB-26344PO-57087.pdf",
+      status: "extracted",
+      text: [
+        "Work Order",
+        "Work Order Number MLB-26344PO-57087",
+        "Policyholders Name Convert Client",
+        "Mobile 0422636182",
+        "Site Address 4 Convert Close Perth WA 6000",
+        "Allocation Work Order",
+        "Site Contact: Someone",
+        "Makesafe/Emergency Repairs",
+        "Make Safe",
+        "Scope of Works Remove and make safe the storm damaged boundary fence",
+      ].join("\n"),
+      charCount: 320,
+      pageCount: 1,
+      extractor: "test",
+      truncated: false,
+      reason: null,
+    }],
+  });
+  const plan = buildDeterministicIntakePlan([quote, wo], PROFILES);
+  assertEquals(plan.cases.length, 2);
+  const quoteCase = plan.cases.find((c) =>
+    c.sourcePostIds.includes("quote-conv-1")
+  )!;
+  const woCase = plan.cases.find((c) =>
+    c.sourcePostIds.includes("quote-conv-2")
+  )!;
+  assertEquals(quoteCase.reasonCode, "repair_quote_stage");
+  assertEquals(quoteCase.identity.jobFamily, "repair");
+  assertEquals(woCase.state, "confirmed_live_job");
+  assertEquals(woCase.identity.jobFamily, "general_makesafe");
+  assertEquals(woCase.identity.woPoIdentityKey?.includes("PO-57087"), true);
+});
+
+Deno.test("D4 guard: a WO whose extracted PDF merely mentions a quote keeps its declared family", () => {
+  const item = source({
+    postId: "quote-guard-1",
+    subject: "NEW WORK ORDER - MLB-26355 6 Guard Grove, Perth",
+    body: "Please attend. The builder work order is attached.",
+    attachments: [pdf("quote-guard-1")],
+    pdfDocuments: [{
+      sourcePostId: "quote-guard-1",
+      attachmentId: "quote-guard-1-pdf",
+      attachmentName: "work_order_MLB-26355PO-57100.pdf",
+      status: "extracted",
+      text: [
+        "Work Order",
+        "Work Order Number MLB-26355PO-57100",
+        "Policyholders Name Guard Client",
+        "Mobile 0422636182",
+        "Site Address 6 Guard Grove Perth WA 6000",
+        "Allocation Work Order",
+        "Site Contact: Someone",
+        "Assessment Report & Quote",
+        "INTERNAL",
+        "Scope of Works Contractor inspection and assessment. Please provide a quote for repairs",
+      ].join("\n"),
+      charCount: 330,
+      pageCount: 1,
+      extractor: "test",
+      truncated: false,
+      reason: null,
+    }],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(plan.cases.length, 1);
+  assertEquals(plan.cases[0].reasonCode, null);
+  assertEquals(plan.cases[0].identity.jobFamily, "assessment_report_quote");
+});
+
+// Track A D5 (Stage 2a fate taxonomy): portal notification relays are
+// transport, never deliverables. Subject shapes mirror the sealed audit rows.
+Deno.test("D5: a Prime 'Email Uploaded' relay accounts as non-work, no family, no mint", () => {
+  const relay = source({
+    postId: "relay-1",
+    subject:
+      "[PRIME (MLB-26499) Email Uploaded: Re: Our Ref: MLB-26499 - 18 Eagleglen Rise, Gidgegannup",
+    body: "An email has been uploaded against this claim.",
+  });
+  const bracketVariant = source({
+    postId: "relay-2",
+    subject:
+      "[PRIME] (MLB-25828) Email Uploaded: Re: Our Ref: MLB-25828 - 44 Davies Road, Claremont",
+    body: "An email has been uploaded against this claim.",
+    receivedAt: "2026-07-20T01:00:00.000Z",
+  });
+  const plan = buildDeterministicIntakePlan([relay, bracketVariant], PROFILES);
+  for (const intakeCase of plan.cases) {
+    assertEquals(intakeCase.state, "accounted_non_wo");
+    assertEquals(intakeCase.reasonCode, "non_makesafe");
+    assertEquals(intakeCase.identity.woPoIdentityKey, null);
+  }
+  const adapted = adaptDeterministicSource(relay, PROFILES);
+  assertEquals(adapted.intent, "chatter");
+  assertEquals(adapted.adapterVersion, "chatter@v1|notification-relay");
+  assertEquals(adapted.parseWarnings, ["notification_relay"]);
+});
+
+Deno.test("D5 guard: a relay-subject email CARRYING a PDF is not silently chattered", () => {
+  const item = source({
+    postId: "relay-pdf-1",
+    subject:
+      "[PRIME (MLB-26500) Email Uploaded: Re: Our Ref: MLB-26500 - 1 Guard Street",
+    body: "Uploaded with attachment.",
+    attachments: [pdf("relay-pdf-1")],
+  });
+  const adapted = adaptDeterministicSource(item, PROFILES);
+  assertEquals(adapted.intent === "chatter", false);
+});
+
+Deno.test("D5 guard: an ordinary MLB instruction subject never matches the relay rule", () => {
+  const item = source({
+    postId: "relay-neg-1",
+    subject: "NEW WORK ORDER - MLB-26501 2 Ordinary Road, Perth",
+    body: "Please attend. The builder work order is attached.",
+    attachments: [pdf("relay-neg-1")],
+  });
+  const adapted = adaptDeterministicSource(item, PROFILES);
+  assertEquals(adapted.adapterId, "mlb");
+  assertEquals(adapted.intent, "work");
 });

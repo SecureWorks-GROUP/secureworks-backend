@@ -31,6 +31,8 @@ export const MAKESAFE_REASON_CODES = [
   "conflicting_fields",
   "awaiting_job_creation",
   "wo_ref_without_pdf_pending_review",
+  "reattendance_target_not_found",
+  "repair_quote_stage",
 ] as const;
 export type MakesafeReasonCode = typeof MAKESAFE_REASON_CODES[number];
 

@@ -33,9 +33,13 @@ import {
   type PdfGapFillField,
   type PdfGapFillValues,
 } from "./makesafe_pdf_gap_fill.ts";
+import {
+  extractPdfDeclaredType,
+  type PdfDeclaredTypeResult,
+} from "./makesafe_pdf_declared_type.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
-  "makesafe-deterministic-intake@2026-07-27.v6";
+  "makesafe-deterministic-intake@2026-07-30.v7";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 export { classifyCancellation };
 export type { CancellationClassification };
@@ -385,6 +389,44 @@ const REVISION_SUBJECT_SIGNAL =
   /(?:^\s*re\s*:[^\n]*\b(?:MLB|AJBR|AJS|BWCWA|WB|RAPID)[-\s#]*\d{3,}\b|\b(?:info\s+required|follow\s*up|booking\s+(?:update|request)|any\s+update)\b)/i;
 const REOPEN_SIGNAL =
   /\b(re-?attend|reopen|return\s+(?:visit|to\s+site)|attend\s+again)\b/i;
+// Charter 6b + Ruling 12 (sealed): collection, rectification and "-R" reattend
+// mail are LIFECYCLE events — cycles on the original job's card, never new
+// cards. Each is detected as its own reopen-kind story event so the existing
+// cycle/parent-relation machinery carries all three.
+const COLLECTION_SIGNAL =
+  /\b(?:collect|pick\s*up|pickup|retriev\w*)\b[^.\n]{0,60}\bfenc|\bfenc\w*[^.\n]{0,60}\b(?:collect(?:ion)?|pick\s*up|pickup|retriev\w*)\b/i;
+// An ORIGINAL temp-fence WO routinely says "supply temporary fencing and
+// collect on completion" — a supply/install instruction with a future
+// collection clause is a fresh deliverable, not a collection lifecycle event.
+const FENCE_SUPPLY_SIGNAL =
+  /\b(?:supply|install\w*|deliver\w*|erect\w*|provide|hire)\b[^.\n]{0,60}\bfenc/i;
+function isCollectionLifecycleText(fullText: string): boolean {
+  return COLLECTION_SIGNAL.test(fullText) &&
+    !FENCE_SUPPLY_SIGNAL.test(fullText);
+}
+// "Rectify the X which you installed" — rectification of OUR OWN earlier work.
+// The our-work anchor (you/your/installed) keeps a builder's own rectification
+// scopes out of the lifecycle lane.
+const RECTIFICATION_SIGNAL =
+  /\brectif\w*\b[^.\n]{0,80}\b(?:you|your|installed|erected|supplied)\b|\b(?:you|your)\b[^.\n]{0,40}\brectif\w*\b/i;
+// Ruling 12: the "-R" suffix on a builder ref is the reattend marker. The base
+// ref stays the identity (binds to the parent); the suffix opens the cycle.
+const REATTEND_REF_SUFFIX_SIGNAL =
+  /\b(?:AJBR|ABJR|AJS|MLB|BWCWA|WB)[-\s#]*\d{3,}\s*-\s*R(?![A-Za-z0-9])/i;
+
+function isLifecycleReopenText(fullText: string): boolean {
+  return REOPEN_SIGNAL.test(fullText) ||
+    isCollectionLifecycleText(fullText) ||
+    RECTIFICATION_SIGNAL.test(fullText) ||
+    REATTEND_REF_SUFFIX_SIGNAL.test(fullText);
+}
+// Ruling 1 (sealed 2026-07-30): an explicit "please price this" request. The
+// verb-phrase anchor matches the live MLB dispatch shorthand ("Pls price:",
+// "plds price", "please quote") without swallowing every WO whose scope merely
+// mentions the word quote — assessment report & quote deliverables keep their
+// own family.
+const QUOTE_REQUEST_SIGNAL =
+  /\b(?:pl(?:ea)?s?e?|plds)\s+(?:price|quote)\b|\bprice\s*[:;]|\bprovide\s+(?:a\s+|us\s+(?:with\s+)?a\s+)?(?:price|quote|quotation|estimate)\b|\b(?:price|quote)\s+(?:required|please)\b/i;
 const REPORT_SIGNAL =
   /\b(report|assessment|inspection|quote|quotation|scope\s+of\s+works)\b/i;
 const RAPID_SIGNAL = /\brapid(?:\s+repair(?:s)?)?\b/i;
@@ -429,6 +471,12 @@ const BUILDER_OFFICE_EMAIL_DOMAINS = new Set([
 
 function text(item: DeterministicSourceItem): string {
   return `${item.subject || ""}\n${item.body || ""}`;
+}
+
+function lifecycleText(item: DeterministicSourceItem): string {
+  return `${text(item)}\n${
+    item.attachments.map((attachment) => attachment.name || "").join("\n")
+  }`;
 }
 
 function isRevisionSource(item: DeterministicSourceItem): boolean {
@@ -831,6 +879,43 @@ function extractRawIdentity(
   };
 }
 
+// The declared-type header of the deliverable's OWN work-order PDF (charter
+// S1a, Ruling 5). One email can carry several WO PDFs with distinct POs; the
+// document whose filename carries this source's extracted PO is the deliverable
+// being classified. Where no filename identity matches, a unanimous declared
+// type across the extracted documents still decides; documents that disagree
+// abstain so the ladder falls back to scope evidence — never a guess.
+function declaredTypeForSource(
+  item: DeterministicSourceItem,
+): PdfDeclaredTypeResult | null {
+  const documents = extractedPdfDocuments(item);
+  if (!documents.length) return null;
+  const read = documents.map((document) => ({
+    document,
+    declared: extractPdfDeclaredType(document.text),
+  })).filter((entry) => entry.declared.declaredType);
+  if (!read.length) return null;
+  const poDigits = extractBuilderWorkOrderIdentity({
+    attachmentNames: item.attachments.map((attachment) => attachment.name),
+    subject: item.subject,
+    bodyText: item.body,
+  }).builder_po_number?.replace(/\D/g, "") || null;
+  if (poDigits) {
+    const owned = read.find((entry) =>
+      extractBuilderWorkOrderIdentity({
+        attachmentNames: [entry.document.attachmentName],
+      }).builder_po_number?.replace(/\D/g, "") === poDigits
+    );
+    if (owned) return owned.declared;
+  }
+  const distinct = new Set(
+    read.map((entry) =>
+      `${entry.declared.declaredType}:${entry.declared.fenceSubtype}`
+    ),
+  );
+  return distinct.size === 1 ? read[0].declared : null;
+}
+
 function jobFamilyDecision(
   item: DeterministicSourceItem,
   adapterId: AdapterId | null,
@@ -840,6 +925,7 @@ function jobFamilyDecision(
   return decideMakeSafeJobFamily(item.subject, item.body, null, {
     builder: adapterId,
     pdfScopeText: pdfScopeText(item, adapterId),
+    pdfDeclaredType: declaredTypeForSource(item),
     pdfOnlyBoilerplate: pdfDocuments.length > 0 &&
       !pdfScopeText(item, adapterId) &&
       /\b(?:contractors?\s+must|current\s+insurance|terms?\s+and\s+conditions|period\s+trade\s+contract)\b/i
@@ -853,12 +939,15 @@ function inferDeliverable(
 ): string {
   const family = jobFamilyDecision(item, adapterId).family || "unclassified";
   const fullText = `${text(item)}\n${pdfScopeText(item, adapterId)}`;
-  if (REOPEN_SIGNAL.test(fullText)) return `${family}:reopen`;
+  if (
+    REOPEN_SIGNAL.test(fullText) || REATTEND_REF_SUFFIX_SIGNAL.test(fullText)
+  ) return `${family}:reopen`;
   if (
     /\bcollect|pick\s*up|retriev/i.test(fullText) && /fenc/i.test(fullText)
   ) {
     return `${family}:collection`;
   }
+  if (RECTIFICATION_SIGNAL.test(fullText)) return `${family}:rectification`;
   return family;
 }
 
@@ -1079,6 +1168,7 @@ function storyFor(
   adapterId: AdapterId | null,
 ): StoryEvent[] {
   const hay = text(item);
+  const lifecycleHay = lifecycleText(item);
   const cancellation = classifyCancellation({
     subject: item.subject,
     currentMessageText: item.body,
@@ -1107,7 +1197,15 @@ function storyFor(
   if (ACCESS_SIGNAL.test(hay)) {
     add("access_outcome", "site_access_outcome_received");
   }
-  if (REOPEN_SIGNAL.test(hay)) add("reopen", "return_attendance_requested");
+  if (REOPEN_SIGNAL.test(lifecycleHay)) {
+    add("reopen", "return_attendance_requested");
+  } else if (REATTEND_REF_SUFFIX_SIGNAL.test(lifecycleHay)) {
+    add("reopen", "reattend_ref_suffix_cycle");
+  } else if (isCollectionLifecycleText(lifecycleHay)) {
+    add("reopen", "fence_collection_requested");
+  } else if (RECTIFICATION_SIGNAL.test(lifecycleHay)) {
+    add("reopen", "rectification_of_own_work_requested");
+  }
   if (REPORT_SIGNAL.test(hay) || textHasExplicitReportRequest(hay)) {
     add("reporting_request", "report_or_quote_requested");
   }
@@ -1473,6 +1571,11 @@ const RAPID_ADAPTER: Adapter = {
     ) || senderMatchesAdapter("rapid", item, profiles),
   build: (item, profiles) => buildKnown(item, profiles, "rapid"),
 };
+// Track A D5: the Prime portal's "Email Uploaded" system notification. Both
+// live variants are covered: "[PRIME (MLB-26499) Email Uploaded: Re: ..." and
+// "[PRIME] (REF) Email Uploaded: Re: ...".
+const NOTIFICATION_RELAY_SUBJECT_RE =
+  /^\s*\[?\s*prime\b[^\n]{0,60}?\bemail\s+uploaded\b\s*:/i;
 const CHATTER_ADAPTER: Adapter = {
   id: "chatter",
   version: "chatter@v1",
@@ -1520,6 +1623,33 @@ export function adaptDeterministicSource(
       evidence: evidenceFor(item, identity),
       story: storyFor(item, "chatter"),
       parseWarnings: ["own_outbound_copy"],
+      fieldProvenance: {},
+      pdfFieldProvenance: {},
+    };
+  }
+  // Track A D5 (Stage 2a fate taxonomy): a portal notification relay
+  // ("[PRIME (REF) Email Uploaded: Re: ...") is transport ABOUT an email,
+  // never a builder instruction. It accounts as non-work with no family and
+  // no identity — the real deliverable arrives on its own source. The branch
+  // deliberately stands down when the relay carries a PDF attachment: a work
+  // order PDF is paramount evidence and must never be silently chattered.
+  if (
+    NOTIFICATION_RELAY_SUBJECT_RE.test(item.subject || "") &&
+    !item.attachments.some((attachment) =>
+      /pdf/i.test(attachment.contentType || "") ||
+      /\.pdf$/i.test(attachment.name || "")
+    )
+  ) {
+    const identity = blankIdentity();
+    return {
+      source: item,
+      adapterId: "chatter",
+      adapterVersion: "chatter@v1|notification-relay",
+      intent: "chatter",
+      identity,
+      evidence: evidenceFor(item, identity),
+      story: storyFor(item, "chatter"),
+      parseWarnings: ["notification_relay"],
       fieldProvenance: {},
       pdfFieldProvenance: {},
     };
@@ -1806,7 +1936,10 @@ function instructionDiscriminator(item: AdaptedSource): string {
   if (isRevisionSource(item.source)) {
     return `revision:${base}:${item.source.postId}`;
   }
-  if (REOPEN_SIGNAL.test(text(item.source))) {
+  // D3 (TRACK-A): collection, rectification and "-R" reattendance mail are
+  // lifecycle events on the ORIGINAL deliverable — they open a new cycle in the
+  // same lineage, never a fresh standalone instruction that could mint again.
+  if (isLifecycleReopenText(lifecycleText(item.source))) {
     return `reopen:${base}:${item.source.postId}`;
   }
   return base;
@@ -2058,7 +2191,7 @@ export function buildDeterministicIntakePlan(
       )
       .filter((item) =>
         item.intent === "work" && !isRevisionSource(item.source) &&
-        !REOPEN_SIGNAL.test(text(item.source))
+        !isLifecycleReopenText(lifecycleText(item.source))
       )
       .map(instructionDiscriminator);
     const oneStrongInstruction = new Set(strongDiscriminators).size === 1
@@ -2073,9 +2206,42 @@ export function buildDeterministicIntakePlan(
         oneStrongInstruction && item.intent === "work" &&
         !item.identity.woPoIdentityKey && !item.identity.externalRefCanonical &&
         !isRevisionSource(item.source) &&
-        !REOPEN_SIGNAL.test(text(item.source))
+        !isLifecycleReopenText(lifecycleText(item.source))
       ) discriminator = oneStrongInstruction;
       groups.set(discriminator, [...(groups.get(discriminator) || []), item]);
+    }
+    // Track A D6 wildcard recovery: an evidence-only work source whose family
+    // abstains (the subject never decides family, and its body/PDF carry no
+    // family wording) must not fork the instruction it supports. The cluster
+    // is already correlation-bound, so when exactly one classified ordinary
+    // instruction group exists, the wildcard folds into it; with zero or
+    // several candidates it stays separate and visible rather than guessed.
+    // Quote requests, revisions and lifecycle reopens keep their own lanes.
+    for (const [key, items] of [...groups.entries()]) {
+      // deliverableRefCanonical is normalised to upper case, so the wildcard
+      // test is case-insensitive.
+      if (!/\|deliverable:unclassified$/i.test(key)) continue;
+      if (/^(?:reopen:|revision:|cancel:|nonwork:)/.test(key)) continue;
+      if (items.some((i) => i.intent !== "work")) continue;
+      if (
+        items.some((i) =>
+          QUOTE_REQUEST_SIGNAL.test(text(i.source)) ||
+          isRevisionSource(i.source) ||
+          isLifecycleReopenText(lifecycleText(i.source))
+        )
+      ) continue;
+      const targets = [...groups.keys()].filter((candidate) =>
+        candidate !== key &&
+        !/^(?:reopen:|revision:|cancel:|nonwork:)/.test(candidate) &&
+        /\|deliverable:(?!unclassified$)/i.test(candidate)
+      );
+      if (targets.length !== 1) continue;
+      const merged = [...groups.get(targets[0])!, ...items].sort((a, b) =>
+        a.source.receivedAt.localeCompare(b.source.receivedAt) ||
+        a.source.postId.localeCompare(b.source.postId)
+      );
+      groups.set(targets[0], merged);
+      groups.delete(key);
     }
     let rootInstructionKey: string | null = null;
     let previousInstructionKey: string | null = null;
@@ -2184,6 +2350,25 @@ export function buildDeterministicIntakePlan(
       ).map((r) => r.id);
       const claimOnly = !!merged.identity.externalRefCanonical &&
         !merged.identity.woPoIdentityKey;
+      // Track A D4 (Ruling 1): a builder "please price this" request with no
+      // work order PDF and no PO is the quote-stage repair lane — a sealed
+      // pre-deliverable exception to the WO+PO unit. It files under its own
+      // reviewable reason code (mirroring the maybe-box) as a repair-family
+      // card the repair manager dispositions; when the real WO+PO arrives the
+      // deliverable case forms normally and takes the PDF's declared family.
+      const quoteStageRequest = intent === "work" &&
+        !instructionItems.some((i) =>
+          (i.source.pdfDocuments || []).some((d) =>
+            d.status === "extracted" && !!d.text
+          )
+        ) &&
+        !merged.identity.builderPoCanonical &&
+        instructionItems.some((i) =>
+          QUOTE_REQUEST_SIGNAL.test(text(i.source))
+        ) &&
+        !instructionItems.some((i) =>
+          isLifecycleReopenText(lifecycleText(i.source))
+        );
       let state: MakesafeCaseState;
       let reasonCode: MakesafeReasonCode | null = null;
       if (intent === "chatter") {
@@ -2199,6 +2384,10 @@ export function buildDeterministicIntakePlan(
       ) {
         state = "exception";
         reasonCode = "unknown_builder";
+      } else if (quoteStageRequest) {
+        state = "exception";
+        reasonCode = "repair_quote_stage";
+        merged.identity = { ...merged.identity, jobFamily: "repair" };
       } else if (Object.keys(merged.conflicts).length) {
         state = "exception";
         reasonCode = "conflicting_fields";
@@ -2236,12 +2425,15 @@ export function buildDeterministicIntakePlan(
         } else {
           reasonCode = "below_identity_floor";
         }
+      } else if (missingParsedLive.length) {
+        // Ordered before the family check: when parsing/extraction failed the
+        // truthful reason is the parse gap — the family is unknown BECAUSE the
+        // scope never parsed, not because a parsed scope was ambiguous (D6).
+        state = "exception";
+        reasonCode = "adapter_parse_failure";
       } else if (merged.identity.jobFamily === "unclassified") {
         state = "exception";
         reasonCode = "ambiguous_scope";
-      } else if (missingParsedLive.length) {
-        state = "exception";
-        reasonCode = "adapter_parse_failure";
       } else if (missingPortalEvidence.length || missingSecondary.length) {
         state = "blocked_live_job";
       } else {

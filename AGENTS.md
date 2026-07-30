@@ -432,10 +432,15 @@ fence-only work. It never requires a SWMS, local report PDF, or separate photo
 pack. The current contract lives in `ses_family_matrix.ts` and
 `ses_prepare_docket_revision.ts`.
 
-## Restoration Is A Typed SES Family With An Unsealed Recipe
+## Repair And Restoration Are Typed SES Families With Unsealed Recipes
 
-Restoration is the fourth emergency-service family alongside roof, assessment
-and make-safe. Converted restoration cards use `jobs.type = 'insurance'` with
+Repair is a first-class non-urgent family alongside roof, assessment,
+make-safe, and restoration. Its reporting recipe is not sealed, so repair
+cards must remain visible and typed but cannot select a report, pack, portal,
+SWMS, pricing, invoice proposal, or outbound-draft recipe; the matrix returns
+`repair_recipe_unsealed`.
+
+Restoration is a typed emergency-service family. Converted restoration cards use `jobs.type = 'insurance'` with
 `metadata.insurance_job_type = 'restoration'`; that authority outranks any stale
 `metadata.makesafe_job_family` value. The board, audit, trade scope and U4
 adapter must keep those cards visible and typed as restoration. Until the
