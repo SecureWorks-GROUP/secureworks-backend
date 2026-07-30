@@ -15966,7 +15966,7 @@ async function submitMakesafeReport(client: any, body: any) {
 
   // Check for an existing report FOR THIS CYCLE only (cycle-scoped so a prior
   // visit's submitted/approved report is never treated as a duplicate here).
-  const { data: existing } = await client.from('job_service_reports')
+  let { data: existing } = await client.from('job_service_reports')
     .select('id, status').eq('job_id', jId).eq('cycle_number', currentCycle).limit(1).maybeSingle()
 
   // A report already persisted as 'submitted' whose board sync completed (detail
@@ -15984,7 +15984,7 @@ async function submitMakesafeReport(client: any, body: any) {
   // admin_to_send_report and would regress an already-advanced card.
   const FINISHED_SUBSTATUSES = ['admin_to_send_report', 'ready_to_invoice', 'complete']
   const boardSyncComplete = FINISHED_SUBSTATUSES.includes(detailSubstatus || '')
-  const resumingSubmitted = submittingFinal &&
+  let resumingSubmitted = submittingFinal &&
     existing?.status === 'submitted' && !boardSyncComplete
   if (submittingFinal) {
     if (existing?.status === 'submitted' && boardSyncComplete) throw new Error('Report already submitted')
@@ -16012,6 +16012,25 @@ async function submitMakesafeReport(client: any, body: any) {
   }
 
   let report
+  if (!existing) {
+    const { data, error } = await client.from('job_service_reports')
+      .insert({ job_id: jId, ...reportFields }).select().single()
+    if (!error) {
+      report = data
+    } else if (error.code === '23505') {
+      const { data: concurrentExisting, error: concurrentReadErr } = await client
+        .from('job_service_reports')
+        .select('id, status')
+        .eq('attendance_cycle_id', attendanceCycle.id)
+        .maybeSingle()
+      if (concurrentReadErr || !concurrentExisting) throw error
+      existing = concurrentExisting
+      resumingSubmitted = submittingFinal &&
+        existing.status === 'submitted' && !boardSyncComplete
+    } else {
+      throw error
+    }
+  }
   if (existing) {
     if (existing.status === 'approved') throw new Error('Report already approved')
     if (resumingSubmitted) {
@@ -16027,11 +16046,6 @@ async function submitMakesafeReport(client: any, body: any) {
       if (error) throw error
       report = data
     }
-  } else {
-    const { data, error } = await client.from('job_service_reports')
-      .insert({ job_id: jId, ...reportFields }).select().single()
-    if (error) throw error
-    report = data
   }
 
   // Auto-update makesafe substatus + job status on report submission

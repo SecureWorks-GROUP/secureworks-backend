@@ -32,8 +32,13 @@ type TableRows = Record<string, any[]>;
 // Supports the select/eq/neq/not/in/order/limit/range/insert/update/single/then
 // surface the make-safe handlers use. order() is a no-op — cycle logic must not
 // depend on query ordering.
-function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
+function makeClient(
+  seed: TableRows,
+  fail: Record<string, string | { message: string; code?: string }> = {},
+  options: { hideFirstCycleReportRead?: boolean } = {},
+) {
   const rows: TableRows = {};
+  let hidFirstCycleReportRead = false;
   for (const [table, tableRows] of Object.entries(seed)) {
     rows[table] = tableRows.map((r) => ({ ...r }));
   }
@@ -43,6 +48,7 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
   function builder(table: string) {
     if (!rows[table]) rows[table] = [];
     const preds: Array<(r: any) => boolean> = [];
+    const filterColumns = new Set<string>();
     let insertRow: any = null;
     let upsertRow: any = null;
     let updateRow: any = null;
@@ -53,10 +59,14 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
       return maxRows === null ? matched : matched.slice(0, maxRows);
     };
     const failKey = (op: string) => `${table}.${op}`;
-    const failure = (op: string) =>
-      fail[failKey(op)]
-        ? { data: null, error: { message: fail[failKey(op)] } }
-        : null;
+    const failure = (op: string) => {
+      const configured = fail[failKey(op)];
+      if (!configured) return null;
+      const error = typeof configured === "string"
+        ? { message: configured }
+        : configured;
+      return { data: null, error };
+    };
     const applyInsert = () => {
       const failed = failure("insert");
       if (failed) return failed;
@@ -97,6 +107,7 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
     const b: any = {
       select: () => b,
       eq: (col: string, val: any) => {
+        filterColumns.add(col);
         preds.push((r) => r?.[col] === val);
         return b;
       },
@@ -132,7 +143,18 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
         updateRow = row;
         return b;
       },
-      maybeSingle: async () => terminal(true),
+      maybeSingle: async () => {
+        if (
+          options.hideFirstCycleReportRead &&
+          !hidFirstCycleReportRead &&
+          table === "job_service_reports" &&
+          filterColumns.has("cycle_number")
+        ) {
+          hidFirstCycleReportRead = true;
+          return { data: null, error: null };
+        }
+        return terminal(true);
+      },
       single: async () => terminal(true),
       then: (resolve: (v: any) => any) => resolve(terminal()),
     };
@@ -408,6 +430,58 @@ Deno.test("retrying the second report cannot create a third report", async () =>
     rows.job_service_reports.map((report: any) => report.id).sort(),
     reportIds,
   );
+});
+
+Deno.test("a concurrent cycle conflict reuses the existing report", async () => {
+  const { client, rows } = makeClient(
+    reportedRows({
+      makesafe_job_details: [{
+        job_id: "job-1",
+        substatus: "waiting_on_trade_report",
+        report_received_at: null,
+        cycle_number: 2,
+        reattend_count: 1,
+        attendance_cycle_id: "cycle-2",
+        cycle_attribution: "bound",
+      }],
+      makesafe_attendance_cycles: [{
+        id: "cycle-2",
+        job_id: "job-1",
+        cycle_number: 2,
+        open_reason: "reattend_makesafe",
+      }],
+      job_service_reports: [
+        reportedRows().job_service_reports[0],
+        {
+          id: "report-2",
+          job_id: "job-1",
+          cycle_number: 2,
+          attendance_cycle_id: "cycle-2",
+          cycle_attribution: "bound",
+          status: "submitted",
+        },
+      ],
+      job_media: Array.from({ length: 5 }, (_, i) => ({
+        id: `media-cycle-2-${i + 1}`,
+        job_id: "job-1",
+        type: "photo",
+        phase: "completion",
+        attendance_cycle_id: "cycle-2",
+        cycle_attribution: "bound",
+      })),
+    }),
+    { "job_service_reports.insert": { message: "duplicate key", code: "23505" } },
+    { hideFirstCycleReportRead: true },
+  );
+
+  const res: any = await _submitMakesafeReportForTest(
+    client,
+    secondReportBody(),
+  );
+
+  assertEquals(res.ok, true);
+  assertEquals(rows.job_service_reports.length, 2);
+  assertEquals(rows.job_service_reports.filter((r: any) => r.attendance_cycle_id === "cycle-2").length, 1);
 });
 
 // ── 3. submit_makesafe_report does NOT block the re-attend's second submit ─────
