@@ -6,6 +6,7 @@
 // record was ever created for Tendo — the labour lines were dropped by
 // generate_trade_invoice. These tests pin the fan-out that now routes each
 // named labour line into a pending payout invoice for the matched crew member.
+// deno-lint-ignore no-import-prefix -- repository tests use the pinned Deno std URL.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _buildWoLabourPayoutInvoice,
@@ -36,7 +37,12 @@ const ALYX_WO_ITEM = {
   rate: 272,
   wo_allocated: 559.5,
   wo_labour_deduction: 287.5,
-  wo_labour_lines: [{ trade_name: "Tendo", hours: 11.5, rate: 25, amount: 287.5 }],
+  wo_labour_lines: [{
+    trade_name: "Tendo",
+    hours: 11.5,
+    rate: 25,
+    amount: 287.5,
+  }],
   job_id: "j-26767",
   job_number: "SWF-26767",
   client_name: "Kelvin Gillies",
@@ -106,7 +112,10 @@ Deno.test("_woNetMismatch: per-line rounding matches the client (no false mismat
 });
 
 Deno.test("_woNetMismatch: validates persisted quantity times rate", () => {
-  assertEquals(_woNetMismatch({ ...ALYX_WO_ITEM, quantity: 2, rate: 136 }), null);
+  assertEquals(
+    _woNetMismatch({ ...ALYX_WO_ITEM, quantity: 2, rate: 136 }),
+    null,
+  );
   const bad = _woNetMismatch({ ...ALYX_WO_ITEM, quantity: 2, rate: 272 });
   assertEquals(bad?.claimedNet, 544);
 });
@@ -148,7 +157,12 @@ Deno.test("_resolveWoLabourUsers: first name resolves the full production roster
     "u-alyx",
   );
   assertEquals(problems, []);
-  assertEquals(groups.map((g) => g.user.id).sort(), ["u-jean", "u-kim", "u-sonny", "u-tendo"]);
+  assertEquals(groups.map((g) => g.user.id).sort(), [
+    "u-jean",
+    "u-kim",
+    "u-sonny",
+    "u-tendo",
+  ]);
 });
 
 Deno.test("_resolveWoLabourUsers: exact full-name and prefix matches also resolve", () => {
@@ -169,7 +183,11 @@ Deno.test("_resolveWoLabourUsers: unknown, ambiguous and self names become probl
     "u-alyx",
   );
   assertEquals(groups, []);
-  assertEquals(problems.map((p) => p.reason), ["unmatched", "ambiguous", "self"]);
+  assertEquals(problems.map((p) => p.reason), [
+    "unmatched",
+    "ambiguous",
+    "self",
+  ]);
 });
 
 Deno.test("_resolveWoLabourUsers: two lines for one person group onto one payout", () => {
@@ -215,13 +233,20 @@ Deno.test("_buildWoLabourPayoutInvoice: Tendo is paid $287.50 pending office rev
   assertEquals(lines[0].line_total_ex, 287.5);
   assertEquals(lines[0].job_number, "SWF-26767");
   // Provenance is visible to the office on both the invoice and the line.
-  assertEquals(String(invoice.query_note).includes("SW-INV-A-260730-014"), true);
+  assertEquals(
+    String(invoice.query_note).includes("SW-INV-A-260730-014"),
+    true,
+  );
   assertEquals(String(lines[0].description).includes("Alyx"), true);
 });
 
 Deno.test("_buildWoLabourPayoutInvoice: gst-registered labourer gets 10% GST", () => {
   const group = {
-    user: { id: "u-jean", name: "Jean Crous", trade_details: { gstRegistered: true } },
+    user: {
+      id: "u-jean",
+      name: "Jean Crous",
+      trade_details: { gstRegistered: true },
+    },
     entries: [entryFor("Jean", 10, 35)],
   };
   const { invoice } = _buildWoLabourPayoutInvoice(group, {
@@ -254,22 +279,42 @@ Deno.test("_buildWoLabourPayoutInvoice: labour+extras line shapes agree so the p
   });
   // push_trade_invoice_to_xero recomputes: labour shape (total_hours×hourly_rate)
   // wins when both > 0; the extras shape must equal it.
-  const labourShape = lines.reduce((s, l) => s + Number(l.total_hours) * Number(l.hourly_rate), 0);
-  const extrasShape = lines.reduce((s, l) => s + Number(l.quantity) * Number(l.unit_rate), 0);
+  const labourShape = lines.reduce(
+    (s, l) => s + Number(l.total_hours) * Number(l.hourly_rate),
+    0,
+  );
+  const extrasShape = lines.reduce(
+    (s, l) => s + Number(l.quantity) * Number(l.unit_rate),
+    0,
+  );
   assertEquals(labourShape, extrasShape);
-  assertEquals(Math.abs(labourShape - Number(invoice.subtotal_ex)) <= 0.01, true);
+  assertEquals(
+    Math.abs(labourShape - Number(invoice.subtotal_ex)) <= 0.01,
+    true,
+  );
 });
 
 Deno.test("_tradeInvoiceXeroTax: registered and unregistered invoices use matching Xero conventions", () => {
-  assertEquals(_tradeInvoiceXeroTax(35), { taxType: "INPUT", lineAmountTypes: "Exclusive" });
-  assertEquals(_tradeInvoiceXeroTax(0), { taxType: "NONE", lineAmountTypes: "NoTax" });
+  assertEquals(_tradeInvoiceXeroTax(35), {
+    taxType: "INPUT",
+    lineAmountTypes: "Exclusive",
+  });
+  assertEquals(_tradeInvoiceXeroTax(0), {
+    taxType: "NONE",
+    lineAmountTypes: "NoTax",
+  });
 });
 
 // ── Office note for unroutable lines ──────────────────────────────────────
 Deno.test("_woLabourProblemNote: silent when clean, loud and specific when not", () => {
   assertEquals(_woLabourProblemNote([]), "");
   const note = _woLabourProblemNote([
-    { trade_name: "Riley", reason: "unmatched", amount: 192.5, job_number: "SWF-26556" },
+    {
+      trade_name: "Riley",
+      reason: "unmatched",
+      amount: 192.5,
+      job_number: "SWF-26556",
+    },
   ]);
   assertEquals(note.includes("Riley"), true);
   assertEquals(note.includes("SWF-26556"), true);
