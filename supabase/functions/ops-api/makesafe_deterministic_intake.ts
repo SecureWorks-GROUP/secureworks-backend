@@ -69,6 +69,11 @@ export interface DeterministicAttachment {
   storagePath: string | null;
   status: string | null;
   sizeBytes?: number | null;
+  // Content hash from ingest (email_attachments.sha256). Dual-capture stores the
+  // same physical message under a Graph transport row and a mailbox transport
+  // row; the hash is what lets the planner treat their sha-identical attachments
+  // as one document instead of two deliverable signals.
+  sha256?: string | null;
 }
 
 export interface DeterministicLink {
@@ -88,6 +93,7 @@ export interface DeterministicPdfDocument {
   extractor: string | null;
   truncated: boolean;
   reason: string | null;
+  sha256?: string | null;
 }
 
 export interface DeterministicSourceItem {
@@ -1781,8 +1787,17 @@ function instructionDiscriminator(item: AdaptedSource): string {
       item.identity.externalRefCanonical || item.source.postId
     }`;
   }
+  // An identity-less source keys by document content before transport id: a
+  // dual-capture twin pair carrying one uploaded attachment must be one
+  // instruction, not one per transport row. Sources with no hashed attachment
+  // keep the per-post key.
+  const contentIdentity = item.source.attachments
+    .filter((a) => a.status === "uploaded" && a.sha256)
+    .map((a) => `content:${a.sha256}`)
+    .sort()[0] || null;
   const identity = item.identity.woPoIdentityKey ||
-    item.identity.externalRefCanonical || `source:${item.source.postId}`;
+    item.identity.externalRefCanonical || contentIdentity ||
+    `source:${item.source.postId}`;
   const base = `${identity}|deliverable:${
     item.identity.deliverableRefCanonical || item.identity.jobFamily
   }`;
@@ -1962,6 +1977,14 @@ export function buildDeterministicIntakePlan(
         item.threadId ? `thread:${item.threadId}` : null,
         item.conversationId ? `conversation:${item.conversationId}` : null,
         item.internetMessageId ? `message:${item.internetMessageId}` : null,
+        // Sha-identical uploaded attachments are the same physical document, so
+        // their carriers describe one deliverable regardless of transport id.
+        // This is what folds a dual-capture twin (Graph post + mailbox message,
+        // which share no thread coordinate) into one cluster even when only one
+        // twin's PDF made the extraction budget.
+        ...item.attachments
+          .filter((a) => a.status === "uploaded" && a.sha256)
+          .map((a) => `attachment_sha:${a.sha256}`),
       ]
     ) {
       if (!key) continue;
@@ -2258,19 +2281,45 @@ export function buildDeterministicIntakePlan(
         reasonCode,
       }));
       for (const c of classifications) globallyClassified.add(c.postId);
-      const pdfKeys = instructionItems.flatMap((i) => i.source.attachments)
-        .filter((a) =>
-          /pdf/i.test(a.contentType || "") || /\.pdf$/i.test(a.name || "")
-        ).map((a) => `pdf:${instructionKey}:${a.id}`);
+      // Dual-capture twins carry the same bytes under two attachment ids; one
+      // content hash stages one artifact. Rows without a hash keep per-id keys.
+      const pdfKeys = [
+        ...new Map(
+          instructionItems.flatMap((i) => i.source.attachments)
+            .filter((a) =>
+              /pdf/i.test(a.contentType || "") || /\.pdf$/i.test(a.name || "")
+            ).map((a) => [a.sha256 || a.id, a]),
+        ).values(),
+      ].map((a) => `pdf:${instructionKey}:${a.id}`);
       const screenshotKeys =
         evidenceMap.portal_capture?.status === "recovery_staged"
           ? [`screenshot:${instructionKey}:portal`]
           : [];
-      const pdfDocuments = [...new Map(
-        instructionItems.flatMap((item) => item.source.pdfDocuments || []).map(
-          (document) => [document.attachmentId, document],
-        ),
-      ).values()];
+      // One document per content hash: a twin transport row must not double the
+      // instruction's PDF evidence. Keep the most-recovered copy so a twin whose
+      // extraction was deferred never shadows the extracted one.
+      const pdfDocumentRecovery = (document: DeterministicPdfDocument) =>
+        document.status === "extracted"
+          ? 0
+          : document.status === "quarantined"
+          ? 1
+          : 2;
+      const pdfDocumentsByContent = new Map<string, DeterministicPdfDocument>();
+      for (
+        const document of instructionItems.flatMap((item) =>
+          item.source.pdfDocuments || []
+        )
+      ) {
+        const contentKey = document.sha256 || document.attachmentId;
+        const existing = pdfDocumentsByContent.get(contentKey);
+        if (
+          !existing ||
+          pdfDocumentRecovery(document) < pdfDocumentRecovery(existing)
+        ) {
+          pdfDocumentsByContent.set(contentKey, document);
+        }
+      }
+      const pdfDocuments = [...pdfDocumentsByContent.values()];
       cases.push({
         instructionKey,
         instructionFingerprint,
