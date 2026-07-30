@@ -1261,6 +1261,89 @@ Deno.test("D3 (Ruling 12): the '-R' ref suffix opens a reopen cycle on the base 
   );
 });
 
+Deno.test("D3: an attachment-only '-R' ref opens a reopen cycle", () => {
+  const original = source({
+    postId: "attachment-suffix-1",
+    threadId: "attachment-suffix-thread",
+    fromEmail: "jobs@ajbr.test",
+    subject: "NEW WORK ORDER AJBR-67218",
+    body: "Client: Attachment Client\nAddress: 10 Sigma Court, Perth\nMake safe roof",
+    attachments: [pdf("attachment-suffix-1")],
+  });
+  const reattend = source({
+    postId: "attachment-suffix-2",
+    threadId: "attachment-suffix-thread",
+    fromEmail: "jobs@ajbr.test",
+    subject: "Updated task attached",
+    body: "Please action the attached document for the same property.",
+    attachments: [{
+      ...pdf("attachment-suffix-2"),
+      name: "AJBR-67218-R.pdf",
+    }],
+    receivedAt: "2026-07-20T06:00:00.000Z",
+  });
+  const plan = buildDeterministicIntakePlan([original, reattend], PROFILES);
+  assertEquals(plan.cases.length, 2);
+  assert(
+    plan.cases.some((c) =>
+      c.parentRelation === "reopen_of" &&
+      c.sourcePostIds.includes("attachment-suffix-2")
+    ),
+  );
+});
+
+Deno.test("owned PDF selection uses the shared PO identity grammar", () => {
+  const item = source({
+    postId: "owned-po-format",
+    subject: "NEW WORK ORDER MLB-35000 PO: 54176",
+    body: "Client: PO Format Client\nAddress: 11 Sigma Court, Perth\nhttps://portal.example.test/owned-po-format",
+    links: [{
+      url: "https://portal.example.test/owned-po-format",
+      sourcePostId: "owned-po-format",
+    }],
+    attachments: [
+      {
+        ...pdf("owned-po-format", "owned-roof"),
+        name: "MLB-35000PO_54176.pdf",
+      },
+      {
+        ...pdf("owned-po-format", "other-makesafe"),
+        name: "MLB-35000PO-54177.pdf",
+      },
+    ],
+    pdfDocuments: [
+      {
+        sourcePostId: "owned-po-format",
+        attachmentId: "owned-roof",
+        attachmentName: "MLB-35000PO_54176.pdf",
+        status: "extracted",
+        text: "Allocation Work Order\nRoof Reports External",
+        charCount: 50,
+        pageCount: 1,
+        extractor: "test",
+        truncated: false,
+        reason: null,
+      },
+      {
+        sourcePostId: "owned-po-format",
+        attachmentId: "other-makesafe",
+        attachmentName: "MLB-35000PO-54177.pdf",
+        status: "extracted",
+        text: "Allocation Work Order\nMakesafe/Emergency Repairs",
+        charCount: 60,
+        pageCount: 1,
+        extractor: "test",
+        truncated: false,
+        reason: null,
+      },
+    ],
+  });
+  assertEquals(
+    adaptDeterministicSource(item, PROFILES).identity.jobFamily,
+    "roof_report",
+  );
+});
+
 Deno.test("D3 guard: an ORIGINAL temp-fence WO with a future collection clause stays a fresh mintable instruction", () => {
   const item = source({
     postId: "supply-collect-1",

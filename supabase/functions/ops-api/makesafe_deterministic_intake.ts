@@ -473,6 +473,12 @@ function text(item: DeterministicSourceItem): string {
   return `${item.subject || ""}\n${item.body || ""}`;
 }
 
+function lifecycleText(item: DeterministicSourceItem): string {
+  return `${text(item)}\n${item.attachments.map((attachment) =>
+    attachment.name || ""
+  ).join("\n")}`;
+}
+
 function isRevisionSource(item: DeterministicSourceItem): boolean {
   return REVISION_SIGNAL.test(text(item)) ||
     REVISION_SUBJECT_SIGNAL.test(String(item.subject || ""));
@@ -896,7 +902,9 @@ function declaredTypeForSource(
   }).builder_po_number?.replace(/\D/g, "") || null;
   if (poDigits) {
     const owned = read.find((entry) =>
-      String(entry.document.attachmentName || "").includes(`PO-${poDigits}`)
+      extractBuilderWorkOrderIdentity({
+        attachmentNames: [entry.document.attachmentName],
+      }).builder_po_number?.replace(/\D/g, "") === poDigits
     );
     if (owned) return owned.declared;
   }
@@ -1160,6 +1168,7 @@ function storyFor(
   adapterId: AdapterId | null,
 ): StoryEvent[] {
   const hay = text(item);
+  const lifecycleHay = lifecycleText(item);
   const cancellation = classifyCancellation({
     subject: item.subject,
     currentMessageText: item.body,
@@ -1188,12 +1197,13 @@ function storyFor(
   if (ACCESS_SIGNAL.test(hay)) {
     add("access_outcome", "site_access_outcome_received");
   }
-  if (REOPEN_SIGNAL.test(hay)) add("reopen", "return_attendance_requested");
-  else if (REATTEND_REF_SUFFIX_SIGNAL.test(hay)) {
+  if (REOPEN_SIGNAL.test(lifecycleHay)) {
+    add("reopen", "return_attendance_requested");
+  } else if (REATTEND_REF_SUFFIX_SIGNAL.test(lifecycleHay)) {
     add("reopen", "reattend_ref_suffix_cycle");
-  } else if (isCollectionLifecycleText(hay)) {
+  } else if (isCollectionLifecycleText(lifecycleHay)) {
     add("reopen", "fence_collection_requested");
-  } else if (RECTIFICATION_SIGNAL.test(hay)) {
+  } else if (RECTIFICATION_SIGNAL.test(lifecycleHay)) {
     add("reopen", "rectification_of_own_work_requested");
   }
   if (REPORT_SIGNAL.test(hay) || textHasExplicitReportRequest(hay)) {
@@ -1929,7 +1939,7 @@ function instructionDiscriminator(item: AdaptedSource): string {
   // D3 (TRACK-A): collection, rectification and "-R" reattendance mail are
   // lifecycle events on the ORIGINAL deliverable — they open a new cycle in the
   // same lineage, never a fresh standalone instruction that could mint again.
-  if (isLifecycleReopenText(text(item.source))) {
+  if (isLifecycleReopenText(lifecycleText(item.source))) {
     return `reopen:${base}:${item.source.postId}`;
   }
   return base;
@@ -2181,7 +2191,7 @@ export function buildDeterministicIntakePlan(
       )
       .filter((item) =>
         item.intent === "work" && !isRevisionSource(item.source) &&
-        !isLifecycleReopenText(text(item.source))
+        !isLifecycleReopenText(lifecycleText(item.source))
       )
       .map(instructionDiscriminator);
     const oneStrongInstruction = new Set(strongDiscriminators).size === 1
@@ -2196,7 +2206,7 @@ export function buildDeterministicIntakePlan(
         oneStrongInstruction && item.intent === "work" &&
         !item.identity.woPoIdentityKey && !item.identity.externalRefCanonical &&
         !isRevisionSource(item.source) &&
-        !isLifecycleReopenText(text(item.source))
+        !isLifecycleReopenText(lifecycleText(item.source))
       ) discriminator = oneStrongInstruction;
       groups.set(discriminator, [...(groups.get(discriminator) || []), item]);
     }
@@ -2217,7 +2227,7 @@ export function buildDeterministicIntakePlan(
         items.some((i) =>
           QUOTE_REQUEST_SIGNAL.test(text(i.source)) ||
           isRevisionSource(i.source) ||
-          isLifecycleReopenText(text(i.source))
+          isLifecycleReopenText(lifecycleText(i.source))
         )
       ) continue;
       const targets = [...groups.keys()].filter((candidate) =>
@@ -2356,7 +2366,9 @@ export function buildDeterministicIntakePlan(
         instructionItems.some((i) =>
           QUOTE_REQUEST_SIGNAL.test(text(i.source))
         ) &&
-        !instructionItems.some((i) => isLifecycleReopenText(text(i.source)));
+        !instructionItems.some((i) =>
+          isLifecycleReopenText(lifecycleText(i.source))
+        );
       let state: MakesafeCaseState;
       let reasonCode: MakesafeReasonCode | null = null;
       if (intent === "chatter") {
