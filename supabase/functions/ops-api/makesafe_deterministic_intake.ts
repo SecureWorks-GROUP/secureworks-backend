@@ -33,9 +33,13 @@ import {
   type PdfGapFillField,
   type PdfGapFillValues,
 } from "./makesafe_pdf_gap_fill.ts";
+import {
+  extractPdfDeclaredType,
+  type PdfDeclaredTypeResult,
+} from "./makesafe_pdf_declared_type.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
-  "makesafe-deterministic-intake@2026-07-27.v6";
+  "makesafe-deterministic-intake@2026-07-30.v7";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 export { classifyCancellation };
 export type { CancellationClassification };
@@ -831,6 +835,37 @@ function extractRawIdentity(
   };
 }
 
+// The declared-type header of the deliverable's OWN work-order PDF (charter
+// S1a, Ruling 5). One email can carry several WO PDFs with distinct POs; the
+// document whose filename carries this source's extracted PO is the deliverable
+// being classified. Where no filename identity matches, a unanimous declared
+// type across the extracted documents still decides; documents that disagree
+// abstain so the ladder falls back to scope evidence — never a guess.
+function declaredTypeForSource(
+  item: DeterministicSourceItem,
+): PdfDeclaredTypeResult | null {
+  const documents = extractedPdfDocuments(item);
+  if (!documents.length) return null;
+  const read = documents.map((document) => ({
+    document,
+    declared: extractPdfDeclaredType(document.text),
+  })).filter((entry) => entry.declared.declaredType);
+  if (!read.length) return null;
+  const poDigits = extractBuilderWorkOrderIdentity({
+    attachmentNames: item.attachments.map((attachment) => attachment.name),
+    subject: item.subject,
+    bodyText: item.body,
+  }).builder_po_number?.replace(/\D/g, "") || null;
+  if (poDigits) {
+    const owned = read.find((entry) =>
+      String(entry.document.attachmentName || "").includes(`PO-${poDigits}`)
+    );
+    if (owned) return owned.declared;
+  }
+  const distinct = new Set(read.map((entry) => entry.declared.declaredType));
+  return distinct.size === 1 ? read[0].declared : null;
+}
+
 function jobFamilyDecision(
   item: DeterministicSourceItem,
   adapterId: AdapterId | null,
@@ -840,6 +875,7 @@ function jobFamilyDecision(
   return decideMakeSafeJobFamily(item.subject, item.body, null, {
     builder: adapterId,
     pdfScopeText: pdfScopeText(item, adapterId),
+    pdfDeclaredType: declaredTypeForSource(item),
     pdfOnlyBoilerplate: pdfDocuments.length > 0 &&
       !pdfScopeText(item, adapterId) &&
       /\b(?:contractors?\s+must|current\s+insurance|terms?\s+and\s+conditions|period\s+trade\s+contract)\b/i

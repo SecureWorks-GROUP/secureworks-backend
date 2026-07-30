@@ -1,5 +1,5 @@
 export const SES_FAMILY_MATRIX_VERSION =
-  "ses-builder-family-matrix/2026-07-28.5";
+  "ses-builder-family-matrix/2026-07-30.6";
 export const SES_ASSESSMENT_RECIPE_VERSION =
   "assessment-triad-invoice-only/2026-07-27";
 
@@ -27,6 +27,7 @@ export type SesFamilyId =
   | "own_template_roof"
   | "assessment_quote"
   | "temporary_fencing"
+  | "repair"
   | "restoration";
 
 export type SesManifestJobType =
@@ -80,6 +81,7 @@ export interface SesFamilyMatrixFailure {
     | "ajs_misclassified_as_roof_report"
     | "builder_open_class"
     | "family_unknown"
+    | "repair_recipe_unsealed"
     | "restoration_recipe_unsealed";
   reason: string;
   recovery_action: string;
@@ -164,6 +166,11 @@ export function canonicalSesFamilyFromCard(args: {
     case "restoration_work":
     case "insurance_restoration":
       return "restoration";
+    case "repair":
+      // Charter v1.1 (Ruling 15): repair is its own non-urgent family. Its
+      // reporting recipe is unsealed, so the matrix resolver refuses dockets
+      // for it the same way it refuses restoration.
+      return "repair";
     case "general_makesafe":
     case "physical_makesafe":
       return "physical_makesafe";
@@ -431,6 +438,18 @@ export function resolveSesFamilyMatrixRow(args: {
         reason: "Card has no sealed SES family classification.",
         recovery_action:
           "Recover the family from canonical source authority before preparing the docket.",
+      },
+    };
+  }
+  if (args.family === "repair") {
+    return {
+      ok: false,
+      failure: {
+        code: "repair_recipe_unsealed",
+        reason:
+          "Repair is a first-class family (charter v1.1), but no repair reporting recipe is sealed.",
+        recovery_action:
+          "Seal the repair report/pack recipe before preparing any repair deliverable, pricing, invoice proposal, or outbound draft.",
       },
     };
   }

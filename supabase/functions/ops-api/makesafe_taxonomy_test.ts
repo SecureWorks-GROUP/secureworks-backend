@@ -4,6 +4,7 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   classifyMakeSafeJobFamily,
   classifyMakeSafeTaxonomy,
+  decideMakeSafeJobFamily,
   taxonomyFromFamily,
 } from "./makesafe_intake_gate.ts";
 
@@ -61,11 +62,20 @@ Deno.test("classifier: explicit temp_fence report_type STILL wins over a negatio
 });
 
 Deno.test("classifier: restoration is first-class without defeating the AJS physical floor", () => {
+  // Ruling 15 (sealed 2026-07-30): the restoration recipe is UNSEALED, so the
+  // deterministic classifier must never assign restoration from text alone —
+  // it parks (null family), and the back-compat wrapper falls to the physical
+  // default rather than minting a restoration card. Typed restoration
+  // (persisted report_type) still passes through unchanged.
   assertEquals(
-    classifyMakeSafeJobFamily(
+    decideMakeSafeJobFamily(
       "Restoration works MLB-MW-26873",
       "Complete water damage restoration works to the dwelling.",
     ),
+    { family: null, evidence: "text_restoration_park" },
+  );
+  assertEquals(
+    classifyMakeSafeJobFamily(null, null, "restoration"),
     "restoration",
   );
   assertEquals(

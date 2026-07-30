@@ -52,6 +52,7 @@
 
 import { isOwnDomain } from "./makesafe_compact_reads.ts";
 import { classifyCancellation } from "./makesafe_cancellation_classifier.ts";
+import type { PdfDeclaredTypeResult } from "./makesafe_pdf_declared_type.ts";
 
 // Reply / forward prefixes — anchored at the START of the (trimmed) subject so
 // "Software Review" is not treated as a forward. Covers RE:, FW:, FWD:, and the
@@ -222,6 +223,7 @@ export type MakeSafeJobFamily =
   | "roof_report"
   | "temp_fence_makesafe"
   | "general_makesafe"
+  | "repair"
   | "restoration";
 
 export function makeSafeJobFamilyLabel(
@@ -236,6 +238,8 @@ export function makeSafeJobFamilyLabel(
       return "Temporary Fence MakeSafe";
     case "general_makesafe":
       return "MakeSafe";
+    case "repair":
+      return "Repair";
     case "restoration":
       return "Restoration";
     default:
@@ -284,6 +288,13 @@ export interface MakeSafeJobFamilyContext {
   pdfOnlyBoilerplate?: boolean;
   /** Canonical company slug or deterministic adapter id. */
   builder?: string | null;
+  /**
+   * Declared-type header read from the case's WO PDF (charter S1a, Ruling 5).
+   * When present it is the TOP evidence signal and decides the family; the
+   * scope block is secondary. Supplied by the deterministic planner via
+   * extractPdfDeclaredType over the deliverable's own PDF document.
+   */
+  pdfDeclaredType?: PdfDeclaredTypeResult | null;
 }
 
 export interface MakeSafeJobFamilyDecision {
@@ -292,14 +303,23 @@ export interface MakeSafeJobFamilyDecision {
     | "typed_temp_fence"
     | "text_temp_fence"
     | "ajs_make_safe_floor"
+    | "ajs_restoration_park"
+    | "pdf_declared_type_header"
+    | "repair_quote_stage"
     | "typed_restoration"
-    | "text_restoration"
+    | "text_restoration_park"
     | "typed_roof_report"
     | "text_roof_report"
     | "typed_assessment_report"
     | "text_assessment_report"
     | "physical_makesafe"
     | "ambiguous_scope";
+  /**
+   * Ruling 1 quote-stage marker: a builder "please price this" request is a
+   * repair-family card at QUOTE stage (pre-deliverable lane), converting into a
+   * normal WO+PO deliverable when the real work order arrives.
+   */
+  quoteStage?: boolean;
 }
 
 function isAjsBuilder(builder: string | null | undefined): boolean {
@@ -307,6 +327,15 @@ function isAjsBuilder(builder: string | null | undefined): boolean {
   return key === "aj" || key === "ajs" || key === "ajbr" ||
     key === "ajsajbr";
 }
+
+// Ruling 9 (sealed 2026-07-30, AJBR-68592): AJ strip-out works tied to ANOTHER
+// PARTY'S restoration job park in the review lane permanently — "a deterministic
+// system is required to park this class of case, not guess it." The signal is
+// restoration-trade wording in the scope; the park applies only when no physical
+// make-safe / fence instruction is present (MLB-27093-style "restoration label +
+// complete make safe" scopes stay physical per the same ruling).
+const RESTORATION_TRADE_RE =
+  /\b(?:restoration\s+(?:trade|builder|company|works?)|carpentry\s+restoration|for\s+restoration\s+(?:trade\s+)?to\s+commence)\b/i;
 
 /**
  * Deterministic family decision used by intake. Unlike the legacy convenience
@@ -326,32 +355,83 @@ export function decideMakeSafeJobFamily(
   ].join("\n").toLowerCase();
   const rt = String(reportType || "").toLowerCase();
 
-  if (
-    rt === "temp_fence" ||
-    (TEMP_FENCE_TEXT_RE.test(text) &&
-      (AFFIRM_TEMP_FENCE_RE.test(text) || !NEG_TEMP_FENCE_RE.test(text)))
-  ) {
-    return {
-      family: "temp_fence_makesafe",
-      evidence: rt === "temp_fence" ? "typed_temp_fence" : "text_temp_fence",
-    };
+  if (rt === "temp_fence") {
+    return { family: "temp_fence_makesafe", evidence: "typed_temp_fence" };
   }
+  const affirmativeFenceText = TEMP_FENCE_TEXT_RE.test(text) &&
+    (AFFIRM_TEMP_FENCE_RE.test(text) || !NEG_TEMP_FENCE_RE.test(text));
 
   // Captain's standing ruling: every AJS/AJBR instruction is physical make-safe
   // work. Report/assessment wording must never promote it into a report-only
-  // family. Temporary fencing above remains a physical make-safe subtype.
+  // family. Temporary fencing remains a physical make-safe subtype. The ONE
+  // sealed carve-out is Ruling 9's restoration-trade park (AJBR-68592): AJ works
+  // tied to another party's restoration job, with no physical make-safe or
+  // fencing instruction of their own, must park in the review lane unclassified.
   if (isAjsBuilder(context.builder)) {
+    if (affirmativeFenceText) {
+      return { family: "temp_fence_makesafe", evidence: "text_temp_fence" };
+    }
+    if (
+      RESTORATION_TRADE_RE.test(text) &&
+      !STRONG_PHYSICAL_MAKESAFE_RE.test(text) &&
+      !GENERIC_PHYSICAL_MAKESAFE_RE.test(text)
+    ) {
+      return { family: null, evidence: "ajs_restoration_park" };
+    }
     return {
       family: "general_makesafe",
       evidence: "ajs_make_safe_floor",
     };
   }
 
-  if (rt === "restoration" || RESTORATION_TEXT_RE.test(text)) {
-    return {
-      family: "restoration",
-      evidence: rt === "restoration" ? "typed_restoration" : "text_restoration",
-    };
+  // Ruling 5 (charter S1a): the WO PDF's declared-type header line is the top
+  // evidence signal and decides the family where present. The scope block is
+  // secondary; where header and scope/draft inference disagree, the header wins
+  // (real flip: MLB-25765+PO-54176 roof_report -> assessment_report). Within a
+  // makesafe declaration the temporary-fence subtype still refines from the
+  // allocation ("Temporary Fencing") or an affirmative fence scope.
+  const declared = context.pdfDeclaredType;
+  if (declared?.declaredType) {
+    switch (declared.declaredType) {
+      case "assessment":
+        return {
+          family: "assessment_report_quote",
+          evidence: "pdf_declared_type_header",
+        };
+      case "roof":
+        return { family: "roof_report", evidence: "pdf_declared_type_header" };
+      case "repair":
+        // Ruling 8: a scaffolding/access-equipment PO is its own repair
+        // deliverable, never a support leg of another family's job.
+        return { family: "repair", evidence: "pdf_declared_type_header" };
+      case "makesafe":
+        return {
+          family: declared.fenceSubtype || affirmativeFenceText
+            ? "temp_fence_makesafe"
+            : "general_makesafe",
+          evidence: "pdf_declared_type_header",
+        };
+    }
+  }
+
+  if (affirmativeFenceText) {
+    return { family: "temp_fence_makesafe", evidence: "text_temp_fence" };
+  }
+
+  if (rt === "restoration") {
+    return { family: "restoration", evidence: "typed_restoration" };
+  }
+  // Ruling 15 (sealed 2026-07-30): restoration is a real family but its recipe
+  // is UNSEALED — the deterministic intake must not classify anything as
+  // restoration from text. Restoration-flavoured scopes with no physical
+  // make-safe instruction park in the review lane instead of being guessed
+  // (typed legacy report_type passthrough above is unchanged for stored cards).
+  if (
+    RESTORATION_TEXT_RE.test(text) &&
+    !STRONG_PHYSICAL_MAKESAFE_RE.test(text) &&
+    !GENERIC_PHYSICAL_MAKESAFE_RE.test(text)
+  ) {
+    return { family: null, evidence: "text_restoration_park" };
   }
 
   // Concrete protective work outranks a report phrase. A scope that says to
@@ -428,6 +508,7 @@ export type MakeSafeJobType =
   | "assessment"
   | "roof"
   | "makesafe"
+  | "repair"
   | "restoration";
 export type MakeSafeSubtype = "general" | "temp" | null;
 export interface MakeSafeTaxonomy {
@@ -457,6 +538,12 @@ export function taxonomyFromFamily(
         job_type: "makesafe",
         makesafe_subtype: "temp",
         family: "temp_fence_makesafe",
+      };
+    case "repair":
+      return {
+        job_type: "repair",
+        makesafe_subtype: null,
+        family: "repair",
       };
     case "restoration":
       return {
