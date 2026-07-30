@@ -1324,6 +1324,7 @@ Deno.test("D4 conversion (MLB-26344): the later real WO+PO forms its own deliver
     receivedAt: "2026-07-20T06:00:00.000Z",
     attachments: [pdf("quote-conv-2")],
     pdfDocuments: [{
+      sourcePostId: "quote-conv-2",
       attachmentId: "quote-conv-2-pdf",
       attachmentName: "work_order_MLB-26344PO-57087.pdf",
       status: "extracted",
@@ -1342,6 +1343,8 @@ Deno.test("D4 conversion (MLB-26344): the later real WO+PO forms its own deliver
       charCount: 320,
       pageCount: 1,
       extractor: "test",
+      truncated: false,
+      reason: null,
     }],
   });
   const plan = buildDeterministicIntakePlan([quote, wo], PROFILES);
@@ -1366,6 +1369,7 @@ Deno.test("D4 guard: a WO whose extracted PDF merely mentions a quote keeps its 
     body: "Please attend. The builder work order is attached.",
     attachments: [pdf("quote-guard-1")],
     pdfDocuments: [{
+      sourcePostId: "quote-guard-1",
       attachmentId: "quote-guard-1-pdf",
       attachmentName: "work_order_MLB-26355PO-57100.pdf",
       status: "extracted",
@@ -1384,6 +1388,8 @@ Deno.test("D4 guard: a WO whose extracted PDF merely mentions a quote keeps its 
       charCount: 330,
       pageCount: 1,
       extractor: "test",
+      truncated: false,
+      reason: null,
     }],
   });
   const plan = buildDeterministicIntakePlan([item], PROFILES);
