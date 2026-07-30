@@ -44,7 +44,16 @@ deploy the matching media-cycle reads until
 `job_media` cycle-attribution columns and index. Do not
 add a second status engine; later U2 slices own readiness-approval invalidation and
 display-authority cutover. Consumer contract:
-`docs/makesafe-board-read-model-v1.md`.
+`docs/makesafe-board-read-model-v1.md`. `reattend_makesafe` is relationship-gated:
+a dispatcher, manager of the job vertical, or trade with a non-cancelled assignment
+may open the next cycle; unrelated users remain refused. Each attendance submits an
+additive `job_service_reports` row bound to its immutable attendance cycle while the
+board remains one card per `jobs.id`. Charging disposition is deliberately separate
+and awaits the Captain's ruling; see
+`docs/evidence/makesafe-trade-reattendance-v1.md`.
+Apply `20260730000001_makesafe_report_cycle_uniqueness.sql` before deploying the
+matching `ops-api`; its unique nullable-cycle index is the database guard that
+makes concurrent report retries converge on one report per attendance cycle.
 
 ## Deterministic Make-Safe Replay Measures Identity, Not Job Readiness
 

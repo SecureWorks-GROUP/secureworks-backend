@@ -32,8 +32,13 @@ type TableRows = Record<string, any[]>;
 // Supports the select/eq/neq/not/in/order/limit/range/insert/update/single/then
 // surface the make-safe handlers use. order() is a no-op — cycle logic must not
 // depend on query ordering.
-function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
+function makeClient(
+  seed: TableRows,
+  fail: Record<string, string | { message: string; code?: string }> = {},
+  options: { hideFirstCycleReportRead?: boolean } = {},
+) {
   const rows: TableRows = {};
+  let hidFirstCycleReportRead = false;
   for (const [table, tableRows] of Object.entries(seed)) {
     rows[table] = tableRows.map((r) => ({ ...r }));
   }
@@ -43,6 +48,7 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
   function builder(table: string) {
     if (!rows[table]) rows[table] = [];
     const preds: Array<(r: any) => boolean> = [];
+    const filterColumns = new Set<string>();
     let insertRow: any = null;
     let upsertRow: any = null;
     let updateRow: any = null;
@@ -53,10 +59,14 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
       return maxRows === null ? matched : matched.slice(0, maxRows);
     };
     const failKey = (op: string) => `${table}.${op}`;
-    const failure = (op: string) =>
-      fail[failKey(op)]
-        ? { data: null, error: { message: fail[failKey(op)] } }
-        : null;
+    const failure = (op: string) => {
+      const configured = fail[failKey(op)];
+      if (!configured) return null;
+      const error = typeof configured === "string"
+        ? { message: configured }
+        : configured;
+      return { data: null, error };
+    };
     const applyInsert = () => {
       const failed = failure("insert");
       if (failed) return failed;
@@ -97,11 +107,16 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
     const b: any = {
       select: () => b,
       eq: (col: string, val: any) => {
+        filterColumns.add(col);
         preds.push((r) => r?.[col] === val);
         return b;
       },
       neq: (col: string, val: any) => {
         preds.push((r) => r?.[col] !== val);
+        return b;
+      },
+      is: (col: string, val: any) => {
+        preds.push((r) => val === null ? r?.[col] == null : r?.[col] === val);
         return b;
       },
       not: () => b,
@@ -132,7 +147,18 @@ function makeClient(seed: TableRows, fail: Record<string, string> = {}) {
         updateRow = row;
         return b;
       },
-      maybeSingle: async () => terminal(true),
+      maybeSingle: async () => {
+        if (
+          options.hideFirstCycleReportRead &&
+          !hidFirstCycleReportRead &&
+          table === "job_service_reports" &&
+          filterColumns.has("cycle_number")
+        ) {
+          hidFirstCycleReportRead = true;
+          return { data: null, error: null };
+        }
+        return terminal(true);
+      },
       single: async () => terminal(true),
       then: (resolve: (v: any) => any) => resolve(terminal()),
     };
@@ -311,6 +337,7 @@ Deno.test("reattend_makesafe puts a reported card back to allocated as visit #1"
 
 Deno.test("second report after re-attend is additive (both reports kept) and card returns to Trade Report In", async () => {
   const { client, rows } = makeClient(reportedRows());
+  const originalFirstReport = structuredClone(rows.job_service_reports[0]);
 
   const reattend: any = await _reattendMakesafeForTest(
     client,
@@ -329,16 +356,33 @@ Deno.test("second report after re-attend is additive (both reports kept) and car
   assertEquals(rows.job_service_reports.length, 2);
   const r1 = rows.job_service_reports.find((r: any) => r.id === "report-1");
   const r2 = rows.job_service_reports.find((r: any) => r.id !== "report-1");
+  assertEquals(r1, originalFirstReport);
   assertEquals(r1.cycle_number, 1);
   assertEquals(
     r1.checklist_json.work_done,
     "First visit: temp fence stood up.",
   );
   assertEquals(r2.cycle_number, 2);
+  assertEquals(r1.attendance_cycle_id, "cycle-1");
+  assertEquals(r2.attendance_cycle_id, reattend.attendance_cycle_id);
+  assertEquals(r1.cycle_attribution, "bound");
+  assertEquals(r2.cycle_attribution, "bound");
+  assert(r1.submitted_at, "visit one keeps its own submitted time");
+  assert(r2.submitted_at, "visit two gets its own submitted time");
   assertEquals(
     r2.checklist_json.work_done,
     "Second visit: re-secured the temp fence.",
   );
+  const photosByCycle = new Map<string, number>();
+  for (const media of rows.job_media) {
+    if (media.type !== "photo" || !media.attendance_cycle_id) continue;
+    photosByCycle.set(
+      media.attendance_cycle_id,
+      (photosByCycle.get(media.attendance_cycle_id) || 0) + 1,
+    );
+  }
+  assertEquals(photosByCycle.get("cycle-1"), 5);
+  assertEquals(photosByCycle.get(reattend.attendance_cycle_id), 5);
 
   // Detail flips back to report-in, keeping the re-attend marker.
   const detail = rows.makesafe_job_details[0];
@@ -359,6 +403,96 @@ Deno.test("second report after re-attend is additive (both reports kept) and car
   );
   assertEquals(inTradeReportIn.reattend_count, 1);
   assertEquals(inTradeReportIn.is_reattend, true);
+
+  // One job with two reports is still exactly one board card and one active job.
+  const cards = Object.values(pipeline.columns).flat().filter((card: any) =>
+    card.id === "job-1"
+  );
+  assertEquals(cards.length, 1);
+  assertEquals(pipeline.total, 1);
+});
+
+Deno.test("retrying the second report cannot create a third report", async () => {
+  const { client, rows } = makeClient(reportedRows());
+  const reattend: any = await _reattendMakesafeForTest(
+    client,
+    reattendArgs(),
+  );
+  addCurrentCyclePhotos(rows, reattend.attendance_cycle_id);
+
+  await _submitMakesafeReportForTest(client, secondReportBody());
+  const reportIds = rows.job_service_reports.map((report: any) => report.id)
+    .sort();
+
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, secondReportBody()),
+    Error,
+    "Report already submitted",
+  );
+  assertEquals(rows.job_service_reports.length, 2);
+  assertEquals(
+    rows.job_service_reports.map((report: any) => report.id).sort(),
+    reportIds,
+  );
+});
+
+Deno.test("a concurrent cycle conflict reuses the existing report", async () => {
+  const { client, rows } = makeClient(
+    reportedRows({
+      makesafe_job_details: [{
+        job_id: "job-1",
+        substatus: "waiting_on_trade_report",
+        report_received_at: null,
+        cycle_number: 2,
+        reattend_count: 1,
+        attendance_cycle_id: "cycle-2",
+        cycle_attribution: "bound",
+      }],
+      makesafe_attendance_cycles: [{
+        id: "cycle-2",
+        job_id: "job-1",
+        cycle_number: 2,
+        open_reason: "reattend_makesafe",
+      }],
+      job_service_reports: [
+        reportedRows().job_service_reports[0],
+        {
+          id: "report-2",
+          job_id: "job-1",
+          cycle_number: 2,
+          attendance_cycle_id: "cycle-2",
+          cycle_attribution: "bound",
+          status: "submitted",
+        },
+      ],
+      job_media: Array.from({ length: 5 }, (_, i) => ({
+        id: `media-cycle-2-${i + 1}`,
+        job_id: "job-1",
+        type: "photo",
+        phase: "completion",
+        attendance_cycle_id: "cycle-2",
+        cycle_attribution: "bound",
+      })),
+    }),
+    {
+      "job_service_reports.insert": { message: "duplicate key", code: "23505" },
+    },
+    { hideFirstCycleReportRead: true },
+  );
+
+  const res: any = await _submitMakesafeReportForTest(
+    client,
+    secondReportBody(),
+  );
+
+  assertEquals(res.ok, true);
+  assertEquals(rows.job_service_reports.length, 2);
+  assertEquals(
+    rows.job_service_reports.filter((r: any) =>
+      r.attendance_cycle_id === "cycle-2"
+    ).length,
+    1,
+  );
 });
 
 // ── 3. submit_makesafe_report does NOT block the re-attend's second submit ─────
@@ -537,17 +671,106 @@ Deno.test("reattend current-cycle photo gate rejects five stale photos", async (
   assertEquals(rows.job_service_reports.length, 1);
 });
 
-Deno.test("reattend_makesafe refuses a caller who manages neither the vertical nor is a dispatcher", async () => {
+Deno.test("an assigned trade may start their own reattendance", async () => {
+  const { client, rows } = makeClient(reportedRows());
+  const res: any = await _reattendMakesafeForTest(client, {
+    body: { job_id: "job-1", reason: "second visit needed" },
+    callerUserId: "trade-1",
+    callerRole: "installer",
+    managedVerticals: [],
+  });
+
+  assertEquals(res.ok, true);
+  assertEquals(res.authorization_relationship, "assigned_trade");
+  assertEquals(res.cycle_number, 2);
+  assertEquals(rows.job_events[0].user_id, "trade-1");
+  assertEquals(
+    rows.makesafe_job_details[0].last_reattend_reason,
+    "second visit needed",
+  );
+});
+
+Deno.test("reattend_makesafe refuses an unrelated signed-in user", async () => {
   const { client } = makeClient(reportedRows());
   await assertRejects(
     () =>
       _reattendMakesafeForTest(client, {
         body: { job_id: "job-1", reason: "again" },
+        callerUserId: "unrelated-trade",
         callerRole: "lead_installer",
         managedVerticals: [],
       }),
     Error,
     "Not authorized",
+  );
+});
+
+Deno.test("a cancelled assignment does not authorise reattendance", async () => {
+  const seed = reportedRows();
+  seed.job_assignments[0].status = "cancelled";
+  const { client } = makeClient(seed);
+  await assertRejects(
+    () =>
+      _reattendMakesafeForTest(client, {
+        body: { job_id: "job-1", reason: "again" },
+        callerUserId: "trade-1",
+        callerRole: "installer",
+        managedVerticals: [],
+      }),
+    Error,
+    "Not authorized",
+  );
+});
+
+Deno.test("declined, observer, ghost, and open-pool assignments do not authorise reattendance", async () => {
+  for (
+    const assignment of [
+      { status: "declined" },
+      { status: "scheduled", role: "observer" },
+      { status: "scheduled", assignment_type: "ghost" },
+      { status: "scheduled", assignment_type: "makesafe_open" },
+    ]
+  ) {
+    const seed = reportedRows();
+    seed.job_assignments = [{
+      id: "assign-1",
+      job_id: "job-1",
+      user_id: "trade-1",
+      ...assignment,
+    }];
+    const { client } = makeClient(seed);
+    await assertRejects(
+      () =>
+        _reattendMakesafeForTest(client, {
+          body: { job_id: "job-1", reason: "again" },
+          callerUserId: "trade-1",
+          callerRole: "installer",
+          managedVerticals: [],
+        }),
+      Error,
+      "Not authorized",
+    );
+  }
+});
+
+Deno.test("a reattendance retry replays the winning cycle without creating another transition", async () => {
+  const { client, rows } = makeClient(reportedRows());
+  const first: any = await _reattendMakesafeForTest(client, reattendArgs());
+  const replay: any = await _reattendMakesafeForTest(
+    client,
+    reattendArgs({ reason: "a different reason" }),
+  );
+
+  assertEquals(first.cycle_number, 2);
+  assertEquals(replay.idempotent_replay, true);
+  assertEquals(replay.cycle_number, 2);
+  assertEquals(replay.reason, "temp fence blew down again");
+  assertEquals(rows.makesafe_job_details[0].cycle_number, 2);
+  assertEquals(
+    rows.job_events.filter((event: any) =>
+      event.event_type === "makesafe_reattend"
+    ).length,
+    1,
   );
 });
 
