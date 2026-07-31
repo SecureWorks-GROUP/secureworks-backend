@@ -34,8 +34,10 @@ Preferred path:
 1. Merge reviewed changes to `secureworks-site/main`.
 2. The GitHub Actions production edge deploy workflow
    (`.github/workflows/deploy-edge-functions.yml`) runs automatically on that
-   push, in the `production` environment. For changed functions, its first
-   deploy gate runs `scripts/apply-pending-migrations.sh`, which applies
+   push, in the `production` environment. For changed functions and
+   migration-only merges, its reviewed migration lane runs
+   `scripts/apply-pending-migrations.sh`; migration-only merges deploy zero
+   functions. The runner applies
    repository migrations missing from the production ledger in version order
    through the Management API. It verifies each migration request before
    writing and read-checking that migration's ledger row. The exact-file
