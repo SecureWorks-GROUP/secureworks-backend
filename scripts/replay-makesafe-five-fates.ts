@@ -243,6 +243,25 @@ function attachmentFromRow(row: JsonRow): DeterministicAttachment {
     status: typeof row.status === "string" ? row.status : null,
     sizeBytes: typeof row.size_bytes === "number" ? row.size_bytes : null,
     sha256: typeof row.sha256 === "string" ? row.sha256 : null,
+    pdfExtractionStatus: typeof row.pdf_extraction_status === "string"
+      ? row.pdf_extraction_status
+      : null,
+    pdfExtractionText: typeof row.pdf_extraction_text === "string"
+      ? row.pdf_extraction_text
+      : null,
+    pdfExtractionCharCount: typeof row.pdf_extraction_char_count === "number"
+      ? row.pdf_extraction_char_count
+      : null,
+    pdfExtractionPageCount: typeof row.pdf_extraction_page_count === "number"
+      ? row.pdf_extraction_page_count
+      : null,
+    pdfExtractionExtractor: typeof row.pdf_extraction_extractor === "string"
+      ? row.pdf_extraction_extractor
+      : null,
+    pdfExtractionTruncated: row.pdf_extraction_truncated === true,
+    pdfExtractionReason: typeof row.pdf_extraction_reason === "string"
+      ? row.pdf_extraction_reason
+      : null,
   };
 }
 
@@ -389,7 +408,7 @@ async function run(): Promise<void> {
       key,
       table: "email_attachments",
       select:
-        "id,email_id,name,content_type,storage_path,status,size_bytes,sha256",
+        "id,email_id,name,content_type,storage_path,status,size_bytes,sha256,pdf_extraction_status,pdf_extraction_text,pdf_extraction_char_count,pdf_extraction_page_count,pdf_extraction_extractor,pdf_extraction_truncated,pdf_extraction_reason",
       column: "email_id",
       values: postIds,
     }),
@@ -475,10 +494,13 @@ async function run(): Promise<void> {
     };
   });
 
-  // Reuse the production PDF extraction boundary. Its 50-document cap and
-  // deterministic ordering are intentionally retained so replay matches one
-  // bounded scanner invocation instead of inventing an unlimited parser. The
-  // newest half mirrors readInputs' recent page priority.
+  // Reuse the production PDF extraction boundary for rows that have not yet
+  // crossed the belt. Persisted belt results are consumed above as exact
+  // extracted documents and do not spend this local replay fallback budget.
+  // The fallback's 50-document cap and deterministic ordering remain intact so
+  // a read-only replay cannot invent an unlimited parser. The newest half
+  // mirrors readInputs' recent page priority. Live arrivals are handled by the
+  // one-PDF worker; this cap is historical replay protection, not the live law.
   const recentPriority = baseSources.slice(
     -Math.min(
       baseSources.length,

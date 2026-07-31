@@ -1267,6 +1267,37 @@ function pdfDocument(
   };
 }
 
+function persistedPdfDocument(
+  source: DeterministicSourceItem,
+  attachment: DeterministicAttachment,
+): DeterministicPdfDocument | null {
+  const status = attachment.pdfExtractionStatus;
+  if (status === "extracted" && attachment.pdfExtractionText) {
+    return pdfDocument(source, attachment, {
+      status: "extracted",
+      text: attachment.pdfExtractionText,
+      charCount: Number(attachment.pdfExtractionCharCount ||
+        attachment.pdfExtractionText.length),
+      pageCount: attachment.pdfExtractionPageCount ?? null,
+      extractor: attachment.pdfExtractionExtractor || null,
+      truncated: attachment.pdfExtractionTruncated === true,
+      reason: null,
+    });
+  }
+  if (status === "quarantined") {
+    return pdfDocument(source, attachment, {
+      status: "quarantined",
+      text: null,
+      charCount: Number(attachment.pdfExtractionCharCount || 0),
+      pageCount: attachment.pdfExtractionPageCount ?? null,
+      extractor: attachment.pdfExtractionExtractor || null,
+      truncated: attachment.pdfExtractionTruncated === true,
+      reason: attachment.pdfExtractionReason || "no_usable_text",
+    });
+  }
+  return null;
+}
+
 export async function enrichSourcesWithPdfText(
   client: any,
   sources: readonly DeterministicSourceItem[],
@@ -1322,7 +1353,13 @@ export async function enrichSourcesWithPdfText(
         ]);
         continue;
       }
-      if (attempted >= MAX_PDF_EXTRACTIONS_PER_RUN) {
+      const persisted = persistedPdfDocument(source, attachment);
+      if (persisted) {
+        // The dedicated belt has already paid the bounded read cost. Reusing its
+        // exact deterministic result keeps standing scans cheap and preserves the
+        // same classifier/provenance semantics as the former in-process path.
+        document = persisted;
+      } else if (attempted >= MAX_PDF_EXTRACTIONS_PER_RUN) {
         document = pdfDocument(source, attachment, {
           status: "deferred",
           reason: "pdf_extraction_cap",
@@ -1609,7 +1646,7 @@ async function readInputs(
   for (const ids of chunk(postIds)) {
     const { data, error } = await client.from("email_attachments")
       .select(
-        "id,email_id,name,content_type,storage_path,status,size_bytes,sha256",
+        "id,email_id,name,content_type,storage_path,status,size_bytes,sha256,pdf_extraction_status,pdf_extraction_text,pdf_extraction_char_count,pdf_extraction_page_count,pdf_extraction_extractor,pdf_extraction_truncated,pdf_extraction_reason",
       )
       .in("email_id", ids);
     if (error) {
@@ -1630,6 +1667,13 @@ async function readInputs(
       status: row.status || null,
       sizeBytes: row.size_bytes || null,
       sha256: row.sha256 || null,
+      pdfExtractionStatus: row.pdf_extraction_status || null,
+      pdfExtractionText: row.pdf_extraction_text || null,
+      pdfExtractionCharCount: row.pdf_extraction_char_count ?? null,
+      pdfExtractionPageCount: row.pdf_extraction_page_count ?? null,
+      pdfExtractionExtractor: row.pdf_extraction_extractor || null,
+      pdfExtractionTruncated: row.pdf_extraction_truncated === true,
+      pdfExtractionReason: row.pdf_extraction_reason || null,
     };
     attachmentsByPost.set(row.email_id, [
       ...(attachmentsByPost.get(row.email_id) || []),
@@ -2248,7 +2292,8 @@ function identityFloorFacts(
     byBuilder[builder].candidates++;
     // This gate measures canonical instruction identity, not whether every field
     // and artefact needed to create a new job is already available. Client name,
-    // address, phone, WO PDF and portal capture are recovery/job-readiness facts.
+    // address, phone and WO PDF are recovery/job-readiness facts. Portal capture
+    // is optional supporting evidence and must not affect the live-job gate.
     // Treating those as identity made 89 cases with builder WO/PO/ref evidence
     // report 0% merely because all recent MLB client names live in image-font PDFs.
     // Claim-only evidence remains below the floor and cannot create a live job.
@@ -3253,9 +3298,9 @@ function deterministicSplitObligation(
   return isReportOnlyType(so.type) ? { reportType: so.type } : null;
 }
 
-// Mirrors approveIntakeDraft's primaryIsReportOnly: a report family is report-only
-// UNLESS it carries a split obligation, in which case the primary is physical and a
-// servable work-order PDF is required before any storage/artifact/draft write.
+// Mirrors approveIntakeDraft's primaryIsReportOnly for report typing. Every live
+// family still requires the builder WO PDF at the guarded approval boundary; a
+// split obligation additionally keeps the primary card physical.
 function deterministicPrimaryIsReportOnly(
   plan: DeterministicCasePlan,
 ): boolean {
@@ -3276,7 +3321,6 @@ function approvalPrevalidationMissingFields(
   ) missing.push("external_ref");
   if (!plan.identity.clientName) missing.push("client_name");
   if (!plan.identity.siteAddress) missing.push("site_address");
-  const reportOnly = deterministicPrimaryIsReportOnly(plan);
   const hasWorkOrderPdf = plan.sourcePostIds.some((postId) =>
     (sourceMap.get(postId)?.attachments || []).some((attachment) =>
       attachment.status === "uploaded" && Boolean(attachment.storagePath) &&
@@ -3284,7 +3328,7 @@ function approvalPrevalidationMissingFields(
         /\.pdf$/i.test(attachment.name || ""))
     )
   );
-  if (!reportOnly && !hasWorkOrderPdf) missing.push("work_order_pdf");
+  if (!hasWorkOrderPdf) missing.push("work_order_pdf");
   return missing;
 }
 

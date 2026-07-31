@@ -149,7 +149,7 @@ Deno.test("deterministic runtime projections are narrow, paged and attachment re
   assert(!runtime.includes("pricing_json"));
   assertStringIncludes(
     runtime,
-    '"id,email_id,name,content_type,storage_path,status,size_bytes,sha256"',
+    '"id,email_id,name,content_type,storage_path,status,size_bytes,sha256,pdf_extraction_status,pdf_extraction_text,pdf_extraction_char_count,pdf_extraction_page_count,pdf_extraction_extractor,pdf_extraction_truncated,pdf_extraction_reason"',
   );
 });
 

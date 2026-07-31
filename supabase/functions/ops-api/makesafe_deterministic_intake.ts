@@ -78,6 +78,16 @@ export interface DeterministicAttachment {
   // row; the hash is what lets the planner treat their sha-identical attachments
   // as one document instead of two deliverable signals.
   sha256?: string | null;
+  // PDF text extraction is persisted by the bounded one-document worker. These
+  // fields are optional for pre-belt rows and fixtures; the planner consumes the
+  // exact same extracted text shape as the in-process fallback.
+  pdfExtractionStatus?: string | null;
+  pdfExtractionText?: string | null;
+  pdfExtractionCharCount?: number | null;
+  pdfExtractionPageCount?: number | null;
+  pdfExtractionExtractor?: string | null;
+  pdfExtractionTruncated?: boolean | null;
+  pdfExtractionReason?: string | null;
 }
 
 export interface DeterministicLink {
@@ -1962,8 +1972,6 @@ function manifestFor(
       { id: "cancellation_instruction", required: true, blocking: "none" },
     ];
   }
-  const report = identity.jobFamily === "roof_report" ||
-    identity.jobFamily === "assessment_report_quote";
   return [
     { id: "source_email", required: true, blocking: "identity" },
     { id: "sender_routing", required: true, blocking: "identity" },
@@ -1980,11 +1988,12 @@ function manifestFor(
     { id: "client_name", required: true, blocking: "live" },
     { id: "site_address", required: true, blocking: "live" },
     { id: "client_phone", required: true, blocking: "secondary" },
-    { id: "work_order_attachment", required: !report, blocking: "live" },
-    { id: "portal_link", required: report, blocking: "live" },
-    // A staged capture is not proof the builder portal was completed. Keep the
-    // report out of the guarded job/ready-to-invoice path until the capture exists.
-    { id: "portal_capture", required: report, blocking: "live" },
+    { id: "work_order_attachment", required: true, blocking: "live" },
+    // A builder WO PDF is the evidence of record for a live job. Portal links and
+    // captures remain observable supporting evidence for report-family follow-up,
+    // but neither can park the job before it reaches the canonical board.
+    { id: "portal_link", required: false, blocking: "none" },
+    { id: "portal_capture", required: false, blocking: "none" },
   ];
 }
 
@@ -2338,12 +2347,8 @@ export function buildDeterministicIntakePlan(
         r.required && r.blocking === "live" &&
         evidenceMap[r.id]?.status !== "satisfied"
       ).map((r) => r.id);
-      const missingPortalEvidence = missingLive.filter((field) =>
-        field === "portal_link" || field === "portal_capture"
-      );
-      const missingParsedLive = missingLive.filter((field) =>
-        field !== "portal_link" && field !== "portal_capture"
-      );
+      const missingPortalEvidence: string[] = [];
+      const missingParsedLive = missingLive;
       const missingSecondary = manifest.filter((r) =>
         r.required && r.blocking === "secondary" &&
         evidenceMap[r.id]?.status !== "satisfied"

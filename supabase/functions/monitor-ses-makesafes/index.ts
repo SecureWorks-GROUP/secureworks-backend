@@ -1008,6 +1008,28 @@ async function markAttachmentFailed(
   }
 }
 
+// The monitor only schedules rows that are already byte-validated and stored in
+// the private bucket. Extraction itself runs in ops-api's one-PDF worker so the
+// Graph poll isolate never holds the PDF bytes and never competes with the
+// standing classifier's source/case bound.
+async function pendingPdfExtractionIds(
+  sb: any,
+  postId: string,
+): Promise<string[]> {
+  const { data, error } = await sb.from("email_attachments")
+    .select("id")
+    .eq("email_id", postId)
+    .eq("status", "uploaded")
+    .in("pdf_extraction_status", ["pending", "failed"]);
+  if (error) {
+    throw new Error(
+      `pdf extraction queue read failed for ${postId}: ${error.message}`,
+    );
+  }
+  return (data || []).map((row: { id?: string }) => String(row.id || ""))
+    .filter(Boolean);
+}
+
 // ════════════════════════════════════════════════════════════
 // Best-effort target-job match for the pipeline projection. Phase 1 keeps this
 // thin: exact normalised external_ref against makesafe_job_details. Ambiguous /
@@ -1965,7 +1987,7 @@ async function logMailReadFailureEvent(
 }
 
 export interface IntakeScanContinuationFailure {
-  kind: "http" | "network";
+  kind: "http" | "network" | "runtime";
   status: number | null;
 }
 
@@ -2144,6 +2166,50 @@ async function recordIntakeScanFailure(
   await recordIntakeHealthDegradation(sb, reasonCode, nowIso);
 }
 
+async function recordPdfExtractionHandoffFailure(
+  sb: any,
+  attachmentId: string,
+  failure: IntakeScanContinuationFailure,
+  nowIso = new Date().toISOString(),
+): Promise<void> {
+  const reasonCode = `handoff_${failure.kind}_${failure.status ?? "failed"}`
+    .toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+  const { error: rowError } = await sb.from("email_attachments")
+    .update({
+      pdf_extraction_reason: `pdf_extraction_${reasonCode}`,
+      updated_at: nowIso,
+    })
+    .eq("id", attachmentId)
+    .in("pdf_extraction_status", ["pending", "failed"]);
+  if (rowError) {
+    throw new Error(
+      `pdf extraction handoff reason write failed for ${attachmentId}: ${rowError.message}`,
+    );
+  }
+  const { error: eventError } = await sb.from("business_events").insert({
+    event_type: "makesafe.intake.pdf_extraction_handoff_failed",
+    source: "monitor-ses-makesafes",
+    entity_type: "email_attachment",
+    entity_id: attachmentId,
+    body_preview: `PDF extraction worker handoff failed (${failure.kind}${failure.status === null ? "" : ` ${failure.status}`}); row remains queued for retry.`,
+    safe_summary: `PDF extraction worker handoff failed: ${reasonCode}`,
+    payload: {
+      attachment_id: attachmentId,
+      reason_code: reasonCode,
+      failure_kind: failure.kind,
+      http_status: failure.status,
+      retryable: true,
+    },
+    metadata: { mission: "ses-reporting-end-to-end-2026-07", unit: "U1" },
+    schema_version: "1.0",
+  });
+  if (eventError) {
+    throw new Error(
+      `pdf extraction handoff alarm write failed: ${eventError.message}`,
+    );
+  }
+}
+
 async function recordIntakeSourceDeferrals(
   sb: any,
   sources: readonly IntakeHandoffSource[],
@@ -2271,6 +2337,43 @@ export function _scheduleIntakeScanContinuation(
         }
       }
     }
+  })();
+  waitUntil(continuation);
+}
+
+export function _schedulePdfExtractionContinuation(
+  fetchFn: typeof fetch,
+  waitUntil: (promise: Promise<void>) => void,
+  url: string,
+  headers: Record<string, string>,
+  attachmentId: string,
+  onFailure: (failure: IntakeScanContinuationFailure) => Promise<void> = () =>
+    Promise.resolve(),
+): void {
+  const continuation = (async () => {
+    let response: Response;
+    try {
+      response = await fetchFn(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          attachment_id: attachmentId,
+          lane: "fresh",
+        }),
+      });
+    } catch (error) {
+      await onFailure({ kind: "network", status: null });
+      console.error(
+        `[monitor-ses] PDF extraction handoff failed for ${attachmentId}:`,
+        (error as Error).message,
+      );
+      return;
+    }
+    if (response.ok) return;
+    await onFailure({ kind: "http", status: response.status });
+    console.error(
+      `[monitor-ses] PDF extraction handoff status=${response.status} attachment=${attachmentId}`,
+    );
   })();
   waitUntil(continuation);
 }
@@ -2463,6 +2566,7 @@ async function handler(req: Request): Promise<Response> {
     let totalUnresolved = 0;
     let maxReceived = lastMax || null;
     const includedSources: IntakeHandoffSource[] = [];
+    const freshPdfAttachmentIds: string[] = [];
 
     for (const post of posts) {
       const ts = post.receivedDateTime || post.createdDateTime || null;
@@ -2477,6 +2581,7 @@ async function handler(req: Request): Promise<Response> {
       const unresolved = await persistPost(sb, token, groupId, post, cls);
       totalUnresolved += unresolved;
       included++;
+      freshPdfAttachmentIds.push(...await pendingPdfExtractionIds(sb, post.id));
       includedSources.push({
         postId: post.id,
         receivedAt: post.receivedDateTime || post.createdDateTime || null,
@@ -2532,8 +2637,32 @@ async function handler(req: Request): Promise<Response> {
         "SES email sync completed but EdgeRuntime.waitUntil was unavailable; sources remain queued for intake retry.",
         { synced_watermark: maxReceived },
       );
+      for (const attachmentId of [...new Set(freshPdfAttachmentIds)]) {
+        await recordPdfExtractionHandoffFailure(
+          sb,
+          attachmentId,
+          { kind: "runtime", status: null },
+        );
+      }
       await recordIntakeHealthDegradation(sb, "wait_until_unavailable");
     } else {
+      const pdfExtractionUrl =
+        `${SUPABASE_URL}/functions/v1/ops-api?action=makesafe_pdf_extraction_drain`;
+      for (const attachmentId of [...new Set(freshPdfAttachmentIds)]) {
+        _schedulePdfExtractionContinuation(
+          fetch,
+          (promise) => edgeRuntime.waitUntil(promise),
+          pdfExtractionUrl,
+          {
+            "Content-Type": "application/json",
+            "x-api-key": SW_API_KEY,
+            "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+          },
+          attachmentId,
+          (failure) =>
+            recordPdfExtractionHandoffFailure(sb, attachmentId, failure),
+        );
+      }
       _scheduleIntakeScanContinuation(
         fetch,
         (promise) => edgeRuntime.waitUntil(promise),
@@ -2686,6 +2815,7 @@ export {
   isPdfMagic as _isPdfMagic,
   loadCompanyPatterns as _loadCompanyPatterns,
   normaliseRef as _normaliseRef,
+  pendingPdfExtractionIds as _pendingPdfExtractionIds,
   parseSenderDomain as _parseSenderDomain,
   persistPost as _persistPost,
   processAttachments as _processAttachments,

@@ -294,6 +294,9 @@ import {
   extractPdfText as _extractPdfText,
   PDF_TEXT_MIN_CHARS as _PDF_TEXT_MIN_CHARS,
 } from './makesafe_pdf_text.ts'
+import {
+  drainMakesafePdfExtraction as _drainMakesafePdfExtraction,
+} from './makesafe_pdf_extraction_worker.ts'
 // Intake item 5 — deterministic WO-PDF client-block reader. Fills client_name /
 // client_phone / site_address from an unambiguous work-order-PDF client block when
 // the model/template left them null (MLB "NEW WORK ORDER" carries the homeowner
@@ -4601,6 +4604,18 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'forbidden: scan_ses_makesafes requires the privileged ops key or an admin/owner session; the make-safe automation routine uses makesafe_reporting_intake_pass' }, 403)
         }
         return json(await scanSesMakesafes(client))
+      }
+      // One bounded PDF read per invocation. The monitor calls this immediately
+      // for newly uploaded WO PDFs; pg_cron calls it without an id to drain the
+      // oldest historical queue row at one document per minute. It then hands the
+      // exact source to the unchanged deterministic classifier and board/Hugo path.
+      case 'makesafe_pdf_extraction_drain': {
+        const extractionIsPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!extractionIsPrivileged) {
+          return json({ error: 'forbidden: makesafe_pdf_extraction_drain requires the privileged ops key or an admin/owner session' }, 403)
+        }
+        return json(await drainMakesafePdfExtraction(client, body))
       }
       case 'submit_makesafe_report':
         return json(await dispatchMakesafeReport(client, body, authMode, authUser))
@@ -18938,6 +18953,44 @@ async function applyDeterministicBuilderCancellation(client: any, command: any) 
     authMode: 'api_key',
     operatorEmail: command.operator,
   })
+}
+
+async function scanFreshMakesafeSource(client: any, sourcePostId: string) {
+  const rollout = await _loadDeterministicRolloutControls(client)
+  const advanceDrafts = autoApproveCleanIntakeEnabled() &&
+    await isAutoFileEnabled(client)
+  return await _runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: 'exact',
+    days: 60,
+    onlyUnscanned: false,
+    maxSources: 1,
+    maxCases: rollout.maxCases,
+    allowSourcePostIds: [sourcePostId],
+    allowInstructionKeys: [],
+    advanceDrafts,
+    approveDraft: approveIntakeDraft,
+    applyBuilderCancellation: (command: any) =>
+      applyDeterministicBuilderCancellation(client, command),
+    notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
+  })
+}
+
+async function drainMakesafePdfExtraction(
+  client: any,
+  body: any,
+) {
+  const attachmentId = body?.attachment_id || body?.attachmentId || null
+  const freshOnly = body?.lane === 'fresh' || body?.fresh_only === true
+  return await _drainMakesafePdfExtraction(
+    client,
+    { attachmentId, freshOnly },
+    {
+      onSettled: async (sourcePostId) => {
+        await scanFreshMakesafeSource(client, sourcePostId)
+      },
+    },
+  )
 }
 export const _scanSesMakesafesForTest = scanSesMakesafes
 

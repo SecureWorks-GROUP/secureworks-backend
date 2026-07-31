@@ -1812,7 +1812,51 @@ Deno.test("live deterministic intake fills a draft from PDF and persists readabl
   );
 });
 
-Deno.test("portal-only blocker is reported by its actual missing evidence", async () => {
+Deno.test("standing intake consumes belt-extracted PDF text without fallback extraction", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "pdf-belt-1",
+    subject: "NEW WORK ORDER",
+    body_content: "Please attend. The builder work order is attached.",
+  }));
+  store.email_attachments.push({
+    id: "pdf-belt-att",
+    email_id: "pdf-belt-1",
+    name: "MLB Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/pdf-belt.pdf",
+    status: "uploaded",
+    size_bytes: 1200,
+    pdf_extraction_status: "extracted",
+    pdf_extraction_text:
+      "Work Order Number MLB-26770PO-55296\nPolicyholders Name Amanda Parker\nMobile 0422636182\nSite Address 8 Syrinx Pl Mullaloo WA 6027\nScope of Works Install temporary roof tarps and the storm damaged property safe",
+    pdf_extraction_char_count: 220,
+    pdf_extraction_page_count: 1,
+    pdf_extraction_extractor: "unpdf@1.6.2",
+    pdf_extraction_truncated: false,
+    pdf_extraction_reason: null,
+  });
+  // The existing job-artifact seam still copies the uploaded PDF bytes once;
+  // this invalid byte fixture proves the standing scanner does not invoke the
+  // PDF parser again after the belt has persisted extracted text.
+  const client = fakeClient(store, [], undefined, () => new Uint8Array([1, 2, 3]));
+  const report = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["pdf-belt-1"],
+    maxCases: 1,
+    approveDraft,
+    nowIso: NOW,
+  });
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(store.makesafe_intake_cases[0].client_name, "Amanda Parker");
+  assertEquals(
+    store.makesafe_intake_case_sources[0].evidence.pdf_extraction[0].extractor,
+    "unpdf@1.6.2",
+  );
+});
+
+Deno.test("portal capture is not a live blocker when the WO itself is absent", async () => {
   const store = baseStore();
   store.emails.push(email({
     post_id: "roof-portal-blocker",
@@ -1831,12 +1875,13 @@ Deno.test("portal-only blocker is reported by its actual missing evidence", asyn
     maxCases: 1,
     nowIso: NOW,
   });
+  assertEquals(report.by_builder_and_reason.mlb["missing:portal_capture"], undefined);
   assertEquals(
-    report.by_builder_and_reason.mlb["missing:portal_capture"],
+    report.by_builder_and_reason.mlb.adapter_parse_failure,
     1,
   );
   assertEquals(
-    report.by_builder_and_reason.mlb.adapter_parse_failure,
+    report.by_builder_and_reason.mlb.wo_ref_without_pdf_pending_review,
     undefined,
   );
 });
@@ -5353,7 +5398,7 @@ Deno.test("report-family split obligation requires a work-order PDF before any a
   assertEquals(store.makesafe_intake_drafts.length, 0);
 });
 
-Deno.test("report-family plan without a split obligation still needs no work-order PDF", async () => {
+Deno.test("report-family plan without a split obligation still requires a work-order PDF", async () => {
   const store = baseStore();
   store.emails.push(email({
     post_id: "report-only-target",
@@ -5379,23 +5424,26 @@ Deno.test("report-family plan without a split obligation still needs no work-ord
   };
   let approvalCalls = 0;
   const persistedOutcomes: string[] = [];
-  const result = await _ensureDraftAndJobForTest(
-    client,
-    "case-report-only",
-    reportOnly,
-    new Map(inputs.sources.map((source) => [source.postId, source])),
-    () => {
-      approvalCalls++;
-      return Promise.resolve({ job: { id: "job-report" } });
-    },
-    () => {},
-    (outcome) => persistedOutcomes.push(outcome),
+  await assertRejects(
+    () =>
+      _ensureDraftAndJobForTest(
+        client,
+        "case-report-only",
+        reportOnly,
+        new Map(inputs.sources.map((source) => [source.postId, source])),
+        () => {
+          approvalCalls++;
+          return Promise.resolve({ job: { id: "must-not-run" } });
+        },
+        () => {},
+        (outcome) => persistedOutcomes.push(outcome),
+      ),
+    Error,
+    "approval prevalidation failed: work_order_pdf",
   );
-  // Prevalidation passed with no WO PDF: the report-only path is not over-tightened.
-  assertEquals(result.jobId, "job-report");
-  assertEquals(approvalCalls, 1);
-  assert(persistedOutcomes.includes("draft"));
-  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(approvalCalls, 0);
+  assertEquals(persistedOutcomes, []);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
 });
 
 Deno.test("production-shaped moving sweep cannot satisfy a null canonical client from off-case candidates", async () => {
