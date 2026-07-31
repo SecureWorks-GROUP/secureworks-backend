@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Apply repository migrations missing from the production migration ledger.
+# Listed in pr-check.yml paths so changes here always surface the required deno-check.
 #
 # Safety contract:
 # - exact-file audited exclusions are never applied or misrecorded;

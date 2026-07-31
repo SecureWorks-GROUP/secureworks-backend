@@ -6,10 +6,13 @@ on:
       - main
     paths:
       - 'supabase/functions/**'
-      # Migrations-only PRs must still trigger the required deno-check status
-      # (the job no-ops to pass when no function files changed) — otherwise
-      # branch protection waits forever and the PR can never merge.
+      # Migrations-only and scripts-only PRs must still trigger the required
+      # deno-check status (the job no-ops to pass when no function files
+      # changed) — otherwise branch protection waits forever and the PR can
+      # never merge. Prefer scripts/** over a hardcoded list so new files under
+      # scripts/ (e.g. evidence checkers) still fire the required check.
       - 'supabase/migrations/**'
+      - 'scripts/**'
       - 'scripts/deploy-edge-function.sh'
       - 'scripts/smoke-edge-functions.sh'
       - 'scripts/smoke-ops-api-action-surface.sh'
@@ -28,9 +31,10 @@ on:
       - 'scripts/test/test-smoke-ops-api-action-surface.sh'
       - '.github/workflows/deploy-edge-functions.yml'
       - '.github/workflows/pr-check.yml'
-      # Same reason as migrations above: deno-check is a REQUIRED status, so any
-      # path that can be changed alone must trigger it or the PR is unmergeable.
-      # A watchdog-only PR hit exactly that and sat at BLOCKED with zero checks.
+      # Same reason as migrations/scripts above: deno-check is a REQUIRED status,
+      # so any path that can be changed alone must trigger it or the PR is
+      # unmergeable. A watchdog-only PR hit exactly that and sat at BLOCKED
+      # with zero checks.
       - '.github/workflows/makesafe-intake-watchdog.yml'
       # Same reason again for the SES Reporting proof harness: these paths can be
       # changed alone, and the ses-proof-harness job below is the only automated
