@@ -21,11 +21,13 @@ failure was therefore an unread PDF, not the underscore identity grammar.
 1. The monitor stores the validated PDF bytes and queues its
    `email_attachments` row.
 2. The same poll schedules one `ops-api?action=makesafe_pdf_extraction_drain`
-   continuation per queued attachment. The continuation claims exactly one row,
+   continuation per unique queued SHA coordinate. The continuation claims one
+   coordinate under a fenced token,
    downloads at most `PDF_TEXT_MAX_BYTES`, extracts text with the existing
-   deterministic extractor, and persists a reason-coded result.
+   deterministic extractor, and fans the reason-coded result to every carrier
+   row for those bytes.
 3. After an extracted or quarantined result is durable, the worker invokes the
-   existing deterministic intake scanner for that source. The scanner consumes
+   existing deterministic intake scanner for every carrier source. The scanner consumes
    the persisted text and does not invoke PDF text extraction again. The
    existing job-artifact seam may copy the same bytes once into the private job
    document store; that is evidence staging, not a second text read.
@@ -42,18 +44,18 @@ treated as a successful read.
 
 ## Historical drain date and rate
 
-The historical cron drains one PDF per minute, oldest-first, with `SKIP LOCKED`
-claims and a ten-minute stale-claim recovery. The worker returns the live
+The historical cron drains one untouched SHA coordinate per minute before
+retrying failures, with `SKIP LOCKED` claims, a two-minute stale-claim recovery,
+and a three-attempt terminal bound. The worker returns the live
 `remaining_backlog` and `drain_eta_at` after every invocation. For `N` queued
 rows, the upper-bound drain duration at the implemented rate is:
 
-`ceil(N / 1) minutes`
+`sum(attempts remaining + two-minute retry waits) at one attempt per minute`
 
-The last production-shaped replay measured 534 deferred PDF documents. At the
-implemented rate that known replay-shaped backlog is 534 minutes (8 hours 54
-minutes), with a conservative completion date of **2026-08-01** for a drain
-started on 2026-07-31. The actual production backlog may differ; the deployed
-worker's `drain_eta_at` is the authority and must be recorded by the verifier.
+The last production-shaped replay measured 534 deferred PDF documents. The
+actual unique-SHA production backlog and retry allowance may differ; the
+deployed worker's conservative `drain_eta_at` is the authority and must be
+recorded by the verifier.
 This is intentionally a one-document worker, not a raised standing-scan cap,
 so the scope-json OOM failure mode is not reintroduced.
 

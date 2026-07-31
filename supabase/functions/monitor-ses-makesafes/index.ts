@@ -918,6 +918,8 @@ async function processAttachments(
       sha256: sha,
       storage_path: storagePath,
       status: "uploaded",
+      pdf_extraction_status: "pending",
+      pdf_handoff_status: "not_required",
       attachment_kind: "fileAttachment",
       last_error: null,
       attempts,
@@ -1012,12 +1014,17 @@ async function markAttachmentFailed(
 // the private bucket. Extraction itself runs in ops-api's one-PDF worker so the
 // Graph poll isolate never holds the PDF bytes and never competes with the
 // standing classifier's source/case bound.
-async function pendingPdfExtractionIds(
+interface PdfExtractionCoordinate {
+  id: string;
+  sha256: string | null;
+}
+
+async function pendingPdfExtractionCoordinates(
   sb: any,
   postId: string,
-): Promise<string[]> {
+): Promise<PdfExtractionCoordinate[]> {
   const { data, error } = await sb.from("email_attachments")
-    .select("id")
+    .select("id,sha256")
     .eq("email_id", postId)
     .eq("status", "uploaded")
     .in("pdf_extraction_status", ["pending", "failed"]);
@@ -1026,8 +1033,24 @@ async function pendingPdfExtractionIds(
       `pdf extraction queue read failed for ${postId}: ${error.message}`,
     );
   }
-  return (data || []).map((row: { id?: string }) => String(row.id || ""))
-    .filter(Boolean);
+  return (data || []).flatMap((row: { id?: string; sha256?: string | null }) =>
+    row.id
+      ? [{ id: String(row.id), sha256: row.sha256 ? String(row.sha256) : null }]
+      : []
+  );
+}
+
+function uniquePdfExtractionCoordinates(
+  coordinates: readonly PdfExtractionCoordinate[],
+): PdfExtractionCoordinate[] {
+  return [
+    ...new Map(
+      coordinates.map((coordinate) => [
+        coordinate.sha256 || `id:${coordinate.id}`,
+        coordinate,
+      ]),
+    ).values(),
+  ];
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1987,7 +2010,7 @@ async function logMailReadFailureEvent(
 }
 
 export interface IntakeScanContinuationFailure {
-  kind: "http" | "network" | "runtime";
+  kind: "http" | "network" | "runtime" | "application";
   status: number | null;
 }
 
@@ -2369,7 +2392,19 @@ export function _schedulePdfExtractionContinuation(
       );
       return;
     }
-    if (response.ok) return;
+    if (response.ok) {
+      try {
+        const report = await response.clone().json() as {
+          scan_error?: unknown;
+        };
+        if (typeof report.scan_error === "string" && report.scan_error) {
+          await onFailure({ kind: "application", status: response.status });
+        }
+      } catch {
+        // A successful worker response may be empty in older deployments.
+      }
+      return;
+    }
     await onFailure({ kind: "http", status: response.status });
     console.error(
       `[monitor-ses] PDF extraction handoff status=${response.status} attachment=${attachmentId}`,
@@ -2566,7 +2601,7 @@ async function handler(req: Request): Promise<Response> {
     let totalUnresolved = 0;
     let maxReceived = lastMax || null;
     const includedSources: IntakeHandoffSource[] = [];
-    const freshPdfAttachmentIds: string[] = [];
+    const freshPdfCoordinates: PdfExtractionCoordinate[] = [];
 
     for (const post of posts) {
       const ts = post.receivedDateTime || post.createdDateTime || null;
@@ -2581,7 +2616,9 @@ async function handler(req: Request): Promise<Response> {
       const unresolved = await persistPost(sb, token, groupId, post, cls);
       totalUnresolved += unresolved;
       included++;
-      freshPdfAttachmentIds.push(...await pendingPdfExtractionIds(sb, post.id));
+      freshPdfCoordinates.push(
+        ...await pendingPdfExtractionCoordinates(sb, post.id),
+      );
       includedSources.push({
         postId: post.id,
         receivedAt: post.receivedDateTime || post.createdDateTime || null,
@@ -2637,7 +2674,11 @@ async function handler(req: Request): Promise<Response> {
         "SES email sync completed but EdgeRuntime.waitUntil was unavailable; sources remain queued for intake retry.",
         { synced_watermark: maxReceived },
       );
-      for (const attachmentId of [...new Set(freshPdfAttachmentIds)]) {
+      for (
+        const { id: attachmentId } of uniquePdfExtractionCoordinates(
+          freshPdfCoordinates,
+        )
+      ) {
         await recordPdfExtractionHandoffFailure(
           sb,
           attachmentId,
@@ -2648,7 +2689,11 @@ async function handler(req: Request): Promise<Response> {
     } else {
       const pdfExtractionUrl =
         `${SUPABASE_URL}/functions/v1/ops-api?action=makesafe_pdf_extraction_drain`;
-      for (const attachmentId of [...new Set(freshPdfAttachmentIds)]) {
+      for (
+        const { id: attachmentId } of uniquePdfExtractionCoordinates(
+          freshPdfCoordinates,
+        )
+      ) {
         _schedulePdfExtractionContinuation(
           fetch,
           (promise) => edgeRuntime.waitUntil(promise),
@@ -2815,7 +2860,7 @@ export {
   isPdfMagic as _isPdfMagic,
   loadCompanyPatterns as _loadCompanyPatterns,
   normaliseRef as _normaliseRef,
-  pendingPdfExtractionIds as _pendingPdfExtractionIds,
+  pendingPdfExtractionCoordinates as _pendingPdfExtractionCoordinates,
   parseSenderDomain as _parseSenderDomain,
   persistPost as _persistPost,
   processAttachments as _processAttachments,
@@ -2826,4 +2871,5 @@ export {
   runBackfillFull as _runBackfillFull,
   senderMatchesPattern as _senderMatchesPattern,
   sha256Hex as _sha256Hex,
+  uniquePdfExtractionCoordinates as _uniquePdfExtractionCoordinates,
 };

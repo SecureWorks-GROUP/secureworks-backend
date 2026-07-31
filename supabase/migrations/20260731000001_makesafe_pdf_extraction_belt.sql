@@ -16,9 +16,16 @@ ALTER TABLE public.email_attachments
   ADD COLUMN IF NOT EXISTS pdf_extraction_truncated boolean NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS pdf_extraction_reason text,
   ADD COLUMN IF NOT EXISTS pdf_extraction_attempts integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS pdf_extraction_claim_token uuid,
   ADD COLUMN IF NOT EXISTS pdf_extraction_started_at timestamptz,
   ADD COLUMN IF NOT EXISTS pdf_extraction_completed_at timestamptz,
-  ADD COLUMN IF NOT EXISTS pdf_extraction_next_attempt_at timestamptz;
+  ADD COLUMN IF NOT EXISTS pdf_extraction_next_attempt_at timestamptz,
+  ADD COLUMN IF NOT EXISTS pdf_handoff_status text NOT NULL DEFAULT 'not_required',
+  ADD COLUMN IF NOT EXISTS pdf_handoff_reason text,
+  ADD COLUMN IF NOT EXISTS pdf_handoff_attempts integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS pdf_handoff_started_at timestamptz,
+  ADD COLUMN IF NOT EXISTS pdf_handoff_completed_at timestamptz,
+  ADD COLUMN IF NOT EXISTS pdf_handoff_next_attempt_at timestamptz;
 
 ALTER TABLE public.email_attachments
   DROP CONSTRAINT IF EXISTS email_attachments_pdf_extraction_status_check;
@@ -27,6 +34,57 @@ ALTER TABLE public.email_attachments
   CHECK (pdf_extraction_status IN (
     'not_applicable', 'pending', 'processing', 'extracted', 'quarantined', 'failed'
   ));
+
+ALTER TABLE public.email_attachments
+  DROP CONSTRAINT IF EXISTS email_attachments_pdf_handoff_status_check;
+ALTER TABLE public.email_attachments
+  ADD CONSTRAINT email_attachments_pdf_handoff_status_check
+  CHECK (pdf_handoff_status IN (
+    'not_required', 'pending', 'processing', 'completed', 'failed'
+  ));
+
+CREATE OR REPLACE FUNCTION public.enqueue_makesafe_pdf_extraction()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  should_enqueue boolean := false;
+BEGIN
+  IF NEW.status = 'uploaded' THEN
+    IF TG_OP = 'INSERT' THEN
+      should_enqueue := true;
+    ELSE
+      should_enqueue :=
+        OLD.status IS DISTINCT FROM 'uploaded'
+        OR OLD.sha256 IS DISTINCT FROM NEW.sha256
+        OR NEW.pdf_extraction_status = 'not_applicable';
+    END IF;
+  END IF;
+  IF should_enqueue THEN
+    NEW.pdf_extraction_status := 'pending';
+    NEW.pdf_extraction_reason := NULL;
+    NEW.pdf_extraction_claim_token := NULL;
+    NEW.pdf_extraction_started_at := NULL;
+    NEW.pdf_extraction_completed_at := NULL;
+    NEW.pdf_extraction_next_attempt_at := NULL;
+    NEW.pdf_handoff_status := 'not_required';
+    NEW.pdf_handoff_reason := NULL;
+    NEW.pdf_handoff_started_at := NULL;
+    NEW.pdf_handoff_completed_at := NULL;
+    NEW.pdf_handoff_next_attempt_at := NULL;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_enqueue_makesafe_pdf_extraction
+  ON public.email_attachments;
+CREATE TRIGGER trg_enqueue_makesafe_pdf_extraction
+BEFORE INSERT OR UPDATE OF status, sha256
+ON public.email_attachments
+FOR EACH ROW
+EXECUTE FUNCTION public.enqueue_makesafe_pdf_extraction();
 
 -- Existing uploaded rows are validated PDFs. Non-uploaded rows remain outside the
 -- extraction belt and therefore do not create false backlog or health signals.
@@ -38,9 +96,12 @@ UPDATE public.email_attachments
    AND pdf_extraction_status = 'not_applicable';
 
 CREATE INDEX IF NOT EXISTS idx_email_attachments_pdf_extraction_queue
-  ON public.email_attachments (pdf_extraction_status, pdf_extraction_next_attempt_at, created_at, id)
+  ON public.email_attachments (pdf_extraction_status, pdf_extraction_next_attempt_at, pdf_extraction_attempts, created_at, id)
   WHERE status = 'uploaded'
-    AND pdf_extraction_status IN ('pending', 'failed', 'processing');
+    AND (
+      pdf_extraction_status IN ('pending', 'failed', 'processing')
+      OR pdf_handoff_status IN ('pending', 'failed', 'processing')
+    );
 
 COMMENT ON COLUMN public.email_attachments.pdf_extraction_text IS
   'Deterministic text-layer PDF extraction only. Private PII; purged with attachment bytes at the normal retention boundary.';
@@ -49,25 +110,55 @@ COMMENT ON COLUMN public.email_attachments.pdf_extraction_status IS
 
 -- Atomically claim one queued PDF. FOR UPDATE SKIP LOCKED makes concurrent cron,
 -- arrival, and retry workers converge without double-reading the same document.
--- A stale processing claim is recoverable after ten minutes; the prior attempt and
--- reason remain in the row for honest failure accounting.
+-- A stale processing claim is recovered inside the five-minute arrival law. SHA
+-- twins share one extraction claim; their classifier handoffs remain source-scoped.
 CREATE OR REPLACE FUNCTION public.claim_makesafe_pdf_extraction(
   p_attachment_id uuid DEFAULT NULL,
   p_fresh_only boolean DEFAULT false
 )
 RETURNS SETOF public.email_attachments
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
-  WITH candidate AS (
-    SELECT a.id
-      FROM public.email_attachments a
-      JOIN public.emails e ON e.post_id = a.email_id
-     WHERE a.status = 'uploaded'
-       AND (
+DECLARE
+  selected_id uuid;
+  selected_sha text;
+  selected_work text;
+  claim_token uuid := gen_random_uuid();
+  claimed_rows integer := 0;
+BEGIN
+  UPDATE public.email_attachments
+     SET pdf_extraction_status = 'quarantined',
+         pdf_extraction_reason = 'retry_exhausted:processing_lease_expired',
+         pdf_extraction_claim_token = NULL,
+         pdf_extraction_started_at = NULL,
+         pdf_extraction_completed_at = now(),
+         pdf_extraction_next_attempt_at = NULL,
+         pdf_handoff_status = 'pending',
+         pdf_handoff_reason = NULL,
+         pdf_handoff_next_attempt_at = NULL,
+         updated_at = now()
+   WHERE status = 'uploaded'
+     AND pdf_extraction_status = 'processing'
+     AND pdf_extraction_attempts >= 3
+     AND pdf_extraction_started_at < now() - interval '2 minutes';
+
+  SELECT a.id, NULLIF(a.sha256, ''),
+         CASE
+           WHEN a.pdf_extraction_status IN ('pending', 'failed', 'processing')
+             THEN 'extract'
+           ELSE 'handoff'
+         END
+    INTO selected_id, selected_sha, selected_work
+    FROM public.email_attachments a
+    JOIN public.emails e ON e.post_id = a.email_id
+   WHERE a.status = 'uploaded'
+     AND (
+       (
          (
            a.pdf_extraction_status IN ('pending', 'failed')
+           AND a.pdf_extraction_attempts < 3
            AND (
              a.pdf_extraction_next_attempt_at IS NULL
              OR a.pdf_extraction_next_attempt_at <= now()
@@ -75,35 +166,138 @@ AS $$
          )
          OR (
            a.pdf_extraction_status = 'processing'
-           AND a.pdf_extraction_started_at < now() - interval '10 minutes'
+           AND a.pdf_extraction_attempts < 3
+           AND a.pdf_extraction_started_at < now() - interval '2 minutes'
          )
        )
-       AND (p_attachment_id IS NULL OR a.id = p_attachment_id)
-       -- p_fresh_only is a lane/priority hint, not an age filter. If a
-       -- continuation is delayed past five minutes, the exact attachment must
-       -- still be read rather than silently falling through to a later sweep.
-     ORDER BY
-       CASE WHEN p_fresh_only THEN e.received_at END DESC NULLS LAST,
-       e.received_at ASC NULLS LAST,
-       a.created_at ASC,
-       a.id ASC
-     FOR UPDATE OF a SKIP LOCKED
-     LIMIT 1
-  )
-  UPDATE public.email_attachments a
-     SET pdf_extraction_status = 'processing',
-         pdf_extraction_started_at = now(),
-         pdf_extraction_completed_at = NULL,
-         pdf_extraction_attempts = a.pdf_extraction_attempts + 1,
-         updated_at = now()
-    FROM candidate
-   WHERE a.id = candidate.id
-  RETURNING a.*;
+       OR (
+         a.pdf_extraction_status IN ('extracted', 'quarantined')
+         AND (
+           a.pdf_handoff_status = 'pending'
+           OR (
+             a.pdf_handoff_status = 'failed'
+             AND (
+               a.pdf_handoff_next_attempt_at IS NULL
+               OR a.pdf_handoff_next_attempt_at <= now()
+             )
+           )
+           OR (
+             a.pdf_handoff_status = 'processing'
+             AND a.pdf_handoff_started_at < now() - interval '2 minutes'
+           )
+         )
+       )
+     )
+     AND (p_attachment_id IS NULL OR a.id = p_attachment_id)
+   ORDER BY
+     CASE WHEN p_fresh_only THEN e.received_at END DESC NULLS LAST,
+     CASE
+       WHEN a.pdf_extraction_status = 'pending'
+         AND a.pdf_extraction_attempts = 0 THEN 0
+       WHEN a.pdf_extraction_status = 'pending' THEN 1
+       WHEN a.pdf_extraction_status IN ('failed', 'processing') THEN 2
+       ELSE 3
+     END,
+     e.received_at ASC NULLS LAST,
+     a.created_at ASC,
+     a.id ASC
+   FOR UPDATE OF a SKIP LOCKED
+   LIMIT 1;
+
+  IF selected_id IS NULL THEN
+    RETURN;
+  END IF;
+
+  IF selected_work = 'extract' THEN
+    UPDATE public.email_attachments a
+       SET pdf_extraction_status = 'processing',
+           pdf_extraction_claim_token = claim_token,
+           pdf_extraction_started_at = now(),
+           pdf_extraction_completed_at = NULL,
+           pdf_extraction_attempts = a.pdf_extraction_attempts + 1,
+           updated_at = now()
+     WHERE a.status = 'uploaded'
+       AND (
+         (selected_sha IS NOT NULL AND NULLIF(a.sha256, '') = selected_sha)
+         OR (selected_sha IS NULL AND a.id = selected_id)
+       )
+       AND (
+         (
+           a.pdf_extraction_status IN ('pending', 'failed')
+           AND a.pdf_extraction_attempts < 3
+           AND (
+             a.pdf_extraction_next_attempt_at IS NULL
+             OR a.pdf_extraction_next_attempt_at <= now()
+           )
+         )
+         OR (
+           a.pdf_extraction_status = 'processing'
+           AND a.pdf_extraction_attempts < 3
+           AND a.pdf_extraction_started_at < now() - interval '2 minutes'
+         )
+       );
+  ELSE
+    UPDATE public.email_attachments a
+       SET pdf_extraction_claim_token = claim_token,
+           pdf_handoff_status = 'processing',
+           pdf_handoff_started_at = now(),
+           pdf_handoff_completed_at = NULL,
+           pdf_handoff_attempts = a.pdf_handoff_attempts + 1,
+           updated_at = now()
+     WHERE a.id = selected_id
+       AND a.pdf_extraction_status IN ('extracted', 'quarantined')
+       AND a.pdf_handoff_status IN ('pending', 'failed', 'processing');
+  END IF;
+
+  GET DIAGNOSTICS claimed_rows = ROW_COUNT;
+  IF claimed_rows = 0 THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+    SELECT a.*
+      FROM public.email_attachments a
+     WHERE a.id = selected_id
+       AND a.pdf_extraction_claim_token = claim_token;
+END;
 $$;
 
 REVOKE ALL ON FUNCTION public.claim_makesafe_pdf_extraction(uuid, boolean)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.claim_makesafe_pdf_extraction(uuid, boolean)
+  TO service_role, postgres;
+
+CREATE OR REPLACE FUNCTION public.makesafe_pdf_extraction_backlog_estimate()
+RETURNS TABLE (
+  remaining_coordinates bigint,
+  estimated_minutes bigint
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  WITH coordinates AS (
+    SELECT COALESCE(NULLIF(a.sha256, ''), 'id:' || a.id::text) AS coordinate,
+           GREATEST(
+             CASE WHEN BOOL_OR(a.pdf_extraction_status = 'processing') THEN 1 ELSE 0 END,
+             3 - MAX(a.pdf_extraction_attempts)
+           )::bigint AS attempts_left
+      FROM public.email_attachments a
+     WHERE a.status = 'uploaded'
+       AND a.pdf_extraction_status IN ('pending', 'failed', 'processing')
+       AND a.pdf_extraction_attempts < 3
+     GROUP BY 1
+  )
+  SELECT COUNT(*)::bigint,
+         COALESCE(SUM(
+           attempts_left + GREATEST(0, attempts_left - 1) * 2
+         ), 0)::bigint
+    FROM coordinates;
+$$;
+
+REVOKE ALL ON FUNCTION public.makesafe_pdf_extraction_backlog_estimate()
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.makesafe_pdf_extraction_backlog_estimate()
   TO service_role, postgres;
 
 -- The extraction text is PII just like the original PDF bytes. Keep the existing
@@ -156,12 +350,18 @@ BEGIN
          pdf_extraction_page_count = NULL,
          pdf_extraction_extractor = NULL,
          pdf_extraction_reason = NULL,
+         pdf_extraction_claim_token = NULL,
          pdf_extraction_started_at = NULL,
          pdf_extraction_completed_at = NULL,
          pdf_extraction_next_attempt_at = NULL,
+         pdf_handoff_reason = NULL,
+         pdf_handoff_started_at = NULL,
+         pdf_handoff_completed_at = NULL,
+         pdf_handoff_next_attempt_at = NULL,
          pii_purged_at = now(),
          status = 'purged',
          pdf_extraction_status = 'not_applicable',
+         pdf_handoff_status = 'not_required',
          updated_at = now()
     FROM public.emails e
    WHERE e.post_id = a.email_id

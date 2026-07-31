@@ -607,23 +607,24 @@ Deno.test("send pack: normal WO job (no report_type) still sends report + invoic
 // ════════════════════════════════════════════════════════════════════════════
 
 Deno.test("regression: normal WO (report_type null) requires work_order_pdf", () => {
-  // The approve gate should still require work_order_pdf for a normal WO.
-  // We model the gate: isReportOnlyDraft=false -> work_order_pdf IS required.
   function approveGateNeedsWoPdf(
-    reportType: string | null,
+    _reportType: string | null,
     hasWoPdf: boolean,
   ): string | null {
-    const isReportOnlyDraft = isReportOnlyType(reportType);
-    if (!isReportOnlyDraft && !hasWoPdf) return "work_order_pdf";
+    if (!hasWoPdf) return "work_order_pdf";
     return null;
   }
-  assertEquals(approveGateNeedsWoPdf(null, false), "work_order_pdf"); // normal WO, no PDF -> blocked
-  assertEquals(approveGateNeedsWoPdf(null, true), null); // normal WO, has PDF -> ok
-  assertEquals(approveGateNeedsWoPdf("roof_report", false), null); // report-only, no PDF -> ok
+  assertEquals(approveGateNeedsWoPdf(null, false), "work_order_pdf");
+  assertEquals(approveGateNeedsWoPdf(null, true), null);
+  assertEquals(
+    approveGateNeedsWoPdf("roof_report", false),
+    "work_order_pdf",
+  );
+  assertEquals(approveGateNeedsWoPdf("roof_report", true), null);
   assertEquals(
     approveGateNeedsWoPdf("unknown_report", false),
     "work_order_pdf",
-  ); // combined WO, no PDF -> blocked
+  );
 });
 
 Deno.test("regression: combined WO+report (unknown_report) still needs WO PDF", () => {

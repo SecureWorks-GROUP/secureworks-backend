@@ -697,6 +697,20 @@ Deno.test("attachment staging uses a content hash and append-only artifact ledge
   assertStringIncludes(runtime, 'status: "completed"');
 });
 
+Deno.test("guarded approval requires and attaches WO evidence for every family", () => {
+  assertStringIncludes(
+    index,
+    "if (availableAttachments.length === 0) missing.push('work_order_pdf')",
+  );
+  assertStringIncludes(index, "for (const att of availableAttachments)");
+  assertStringIncludes(index, "work-order evidence attach failed");
+  assert(
+    !index.includes(
+      "if (!primaryIsReportOnly && availableAttachments.length === 0)",
+    ),
+  );
+});
+
 Deno.test("deterministic runtime has no assignment, work-order, invoice or communication writer", () => {
   for (
     const forbidden of [
@@ -721,6 +735,10 @@ Deno.test("deterministic physical mint wires one audited post-board Hugo notific
     "notifyPhysicalJob: notifyMintedDeterministicPhysicalJob",
   );
   assertStringIncludes(runtime, "options.notifyPhysicalJob");
+  assertStringIncludes(
+    runtime,
+    "Report-family jobs are deliberately silent",
+  );
   assertStringIncludes(
     runtime,
     "!effectivePlan.identity.syntheticLivefireMarker",

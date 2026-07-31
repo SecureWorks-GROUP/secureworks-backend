@@ -7,6 +7,7 @@ import {
 const STORAGE_BUCKET = "makesafe-emails";
 const RETRY_DELAY_MS = 2 * 60 * 1000;
 const DRAIN_RATE_PER_MINUTE = 1;
+const MAX_EXTRACTION_ATTEMPTS = 3;
 
 export interface PdfExtractionWorkerRow {
   id: string;
@@ -15,6 +16,9 @@ export interface PdfExtractionWorkerRow {
   size_bytes: number | null;
   pdf_extraction_status: string;
   pdf_extraction_attempts: number;
+  pdf_extraction_claim_token: string;
+  pdf_handoff_status: string;
+  pdf_handoff_attempts: number;
 }
 
 export interface PdfExtractionWorkerResult {
@@ -33,6 +37,16 @@ interface WorkerDeps {
   now?: () => Date;
   extract?: typeof extractPdfText;
   onSettled?: (sourcePostId: string) => Promise<void>;
+}
+
+interface ClaimedCarrier {
+  id: string;
+  email_id: string;
+}
+
+interface BacklogEstimate {
+  remaining: number | null;
+  minutes: number | null;
 }
 
 function isoAfter(now: Date, milliseconds: number): string {
@@ -59,41 +73,129 @@ async function updateExtraction(
   client: any,
   row: PdfExtractionWorkerRow,
   patch: Record<string, unknown>,
-): Promise<void> {
-  const { error } = await client.from("email_attachments")
+): Promise<ClaimedCarrier[]> {
+  const { data, error } = await client.from("email_attachments")
     .update(patch)
-    .eq("id", row.id)
-    .eq("pdf_extraction_status", "processing");
+    .eq("pdf_extraction_claim_token", row.pdf_extraction_claim_token)
+    .eq("pdf_extraction_status", "processing")
+    .select("id,email_id");
   if (error) {
     throw new Error(
       `pdf extraction result write failed for ${row.id}: ${error.message || error}`,
     );
   }
+  const carriers = (data || []) as ClaimedCarrier[];
+  if (!carriers.some((carrier) => carrier.id === row.id)) {
+    throw new Error(`pdf extraction claim fence lost for ${row.id}`);
+  }
+  return carriers;
 }
 
-async function backlogCount(client: any): Promise<number | null> {
-  const { count, error } = await client.from("email_attachments")
-    .select("id", { count: "exact", head: true })
-    .eq("status", "uploaded")
-    .in("pdf_extraction_status", ["pending", "failed"]);
+async function updateHandoff(
+  client: any,
+  row: Pick<PdfExtractionWorkerRow, "id" | "pdf_extraction_claim_token">,
+  expectedStatus: "pending" | "processing",
+  patch: Record<string, unknown>,
+): Promise<void> {
+  const { data, error } = await client.from("email_attachments")
+    .update(patch)
+    .eq("id", row.id)
+    .eq("pdf_extraction_claim_token", row.pdf_extraction_claim_token)
+    .eq("pdf_handoff_status", expectedStatus)
+    .select("id");
   if (error) {
-    throw new Error(`pdf extraction backlog read failed: ${error.message || error}`);
+    throw new Error(
+      `pdf handoff state write failed for ${row.id}: ${error.message || error}`,
+    );
   }
-  return typeof count === "number" ? count : null;
+  if ((data || []).length !== 1) {
+    throw new Error(`pdf handoff claim fence lost for ${row.id}`);
+  }
+}
+
+async function backlogEstimate(client: any): Promise<BacklogEstimate> {
+  const { data, error } = await client.rpc(
+    "makesafe_pdf_extraction_backlog_estimate",
+  );
+  if (error) {
+    throw new Error(
+      `pdf extraction backlog read failed: ${error.message || error}`,
+    );
+  }
+  const estimate = Array.isArray(data) ? data[0] : data;
+  return {
+    remaining: Number.isFinite(Number(estimate?.remaining_coordinates))
+      ? Number(estimate.remaining_coordinates)
+      : null,
+    minutes: Number.isFinite(Number(estimate?.estimated_minutes))
+      ? Number(estimate.estimated_minutes)
+      : null,
+  };
 }
 
 function resultWithEta(
   result: Omit<PdfExtractionWorkerResult, "remaining_backlog" | "drain_eta_at">,
-  remaining: number | null,
+  estimate: BacklogEstimate,
   now: Date,
 ): PdfExtractionWorkerResult {
   return {
     ...result,
-    remaining_backlog: remaining,
-    drain_eta_at: remaining === null
+    remaining_backlog: estimate.remaining,
+    drain_eta_at: estimate.minutes === null
       ? null
-      : isoAfter(now, Math.ceil(remaining / DRAIN_RATE_PER_MINUTE) * 60_000),
+      : isoAfter(
+        now,
+        Math.ceil(estimate.minutes / DRAIN_RATE_PER_MINUTE) * 60_000,
+      ),
   };
+}
+
+async function settleHandoff(
+  client: any,
+  carrier: ClaimedCarrier,
+  claimToken: string,
+  onSettled: (sourcePostId: string) => Promise<void>,
+  now: () => Date,
+  alreadyClaimed: boolean,
+): Promise<string | null> {
+  const claimed = { id: carrier.id, pdf_extraction_claim_token: claimToken };
+  if (!alreadyClaimed) {
+    const startedAt = now();
+    await updateHandoff(client, claimed, "pending", {
+      pdf_handoff_status: "processing",
+      pdf_handoff_started_at: startedAt.toISOString(),
+      pdf_handoff_completed_at: null,
+      pdf_handoff_attempts: 1,
+      updated_at: startedAt.toISOString(),
+    });
+  }
+  try {
+    await onSettled(carrier.email_id);
+    const completedAt = now();
+    await updateHandoff(client, claimed, "processing", {
+      pdf_handoff_status: "completed",
+      pdf_handoff_reason: null,
+      pdf_handoff_started_at: null,
+      pdf_handoff_completed_at: completedAt.toISOString(),
+      pdf_handoff_next_attempt_at: null,
+      updated_at: completedAt.toISOString(),
+    });
+    return null;
+  } catch (error) {
+    const failedAt = now();
+    const reason = `classifier_handoff_failed:${
+      (error as Error).message || error
+    }`.slice(0, 500);
+    await updateHandoff(client, claimed, "processing", {
+      pdf_handoff_status: "failed",
+      pdf_handoff_reason: reason,
+      pdf_handoff_started_at: null,
+      pdf_handoff_completed_at: failedAt.toISOString(),
+      pdf_handoff_next_attempt_at: isoAfter(failedAt, RETRY_DELAY_MS),
+      updated_at: failedAt.toISOString(),
+    });
+    return reason;
+  }
 }
 
 /**
@@ -121,7 +223,33 @@ export async function drainMakesafePdfExtraction(
       reason: null,
       char_count: 0,
       extractor: null,
-    }, await backlogCount(client), clock);
+    }, await backlogEstimate(client), clock);
+  }
+
+  if (
+    ["extracted", "quarantined"].includes(row.pdf_extraction_status) &&
+    row.pdf_handoff_status === "processing"
+  ) {
+    let scanError: string | null = null;
+    if (deps.onSettled) {
+      scanError = await settleHandoff(
+        client,
+        { id: row.id, email_id: row.email_id },
+        row.pdf_extraction_claim_token,
+        deps.onSettled,
+        now,
+        true,
+      );
+    }
+    return resultWithEta({
+      outcome: row.pdf_extraction_status as "extracted" | "quarantined",
+      attachment_id: row.id,
+      source_post_id: row.email_id,
+      reason: null,
+      char_count: 0,
+      extractor: null,
+      ...(scanError ? { scan_error: scanError } : {}),
+    }, await backlogEstimate(client), now());
   }
 
   const finish = async (
@@ -130,40 +258,52 @@ export async function drainMakesafePdfExtraction(
     values: Record<string, unknown> = {},
   ): Promise<PdfExtractionWorkerResult> => {
     const completedAt = now();
-    await updateExtraction(client, row, {
-      pdf_extraction_status: outcome,
-      pdf_extraction_reason: reason,
+    const exhausted = outcome === "failed" &&
+      row.pdf_extraction_attempts >= MAX_EXTRACTION_ATTEMPTS;
+    const settledOutcome = exhausted ? "quarantined" : outcome;
+    const settledReason = exhausted ? `retry_exhausted:${reason}`.slice(0, 500) : reason;
+    const carriers = await updateExtraction(client, row, {
+      pdf_extraction_status: settledOutcome,
+      pdf_extraction_reason: settledReason,
       pdf_extraction_completed_at: completedAt.toISOString(),
       pdf_extraction_started_at: null,
-      pdf_extraction_next_attempt_at: outcome === "failed"
+      pdf_extraction_next_attempt_at: settledOutcome === "failed"
         ? isoAfter(completedAt, RETRY_DELAY_MS)
         : null,
+      pdf_handoff_status: settledOutcome === "failed" ? "not_required" : "pending",
+      pdf_handoff_reason: null,
+      pdf_handoff_started_at: null,
+      pdf_handoff_completed_at: null,
+      pdf_handoff_next_attempt_at: null,
       updated_at: completedAt.toISOString(),
       ...values,
     });
-    let scanError: string | null = null;
-    if (deps.onSettled && outcome !== "failed") {
-      try {
-        await deps.onSettled(row.email_id);
-      } catch (error) {
-        // Extraction is durably complete even if the exact classifier handoff is
-        // temporarily unavailable. The normal standing scan and the returned
-        // reason make this visible and retryable; no success is silently assumed.
-        scanError = `classifier_handoff_failed:${(error as Error).message || error}`.slice(
-          0,
-          500,
+    const scanErrors: string[] = [];
+    if (deps.onSettled && settledOutcome !== "failed") {
+      const seenSources = new Set<string>();
+      for (const carrier of carriers) {
+        if (seenSources.has(carrier.email_id)) continue;
+        seenSources.add(carrier.email_id);
+        const scanError = await settleHandoff(
+          client,
+          carrier,
+          row.pdf_extraction_claim_token,
+          deps.onSettled,
+          now,
+          false,
         );
+        if (scanError) scanErrors.push(scanError);
       }
     }
     return resultWithEta({
-      outcome,
+      outcome: settledOutcome,
       attachment_id: row.id,
       source_post_id: row.email_id,
-      reason,
+      reason: settledReason,
       char_count: Number(values.pdf_extraction_char_count || 0),
       extractor: String(values.pdf_extraction_extractor || "") || null,
-      ...(scanError ? { scan_error: scanError } : {}),
-    }, await backlogCount(client), completedAt);
+      ...(scanErrors.length ? { scan_error: scanErrors.join(";").slice(0, 500) } : {}),
+    }, await backlogEstimate(client), completedAt);
   };
 
   if (!row.storage_path) {
@@ -218,3 +358,4 @@ export async function drainMakesafePdfExtraction(
 }
 
 export const _DRAIN_RATE_PER_MINUTE = DRAIN_RATE_PER_MINUTE;
+export const _MAX_EXTRACTION_ATTEMPTS = MAX_EXTRACTION_ATTEMPTS;

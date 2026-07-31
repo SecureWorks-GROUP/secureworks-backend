@@ -17262,7 +17262,7 @@ async function approveIntakeDraft(client: any, body: any) {
   if (!approvedFields.external_ref) missing.push('external_ref')
   if (!approvedFields.client_name) missing.push('client_name')
   if (!approvedFields.site_address) missing.push('site_address')
-  if (!primaryIsReportOnly && availableAttachments.length === 0) missing.push('work_order_pdf')
+  if (availableAttachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
   // On a combined split the primary is a PHYSICAL make-safe: don't inherit the
@@ -17547,32 +17547,26 @@ async function approveIntakeDraft(client: any, body: any) {
       updated_at: new Date().toISOString(),
     }).eq('id', draft_id)
 
-    // Attach any PDF attachments from the original email as visible work orders.
-    // Report-only jobs have no WO PDF — skip the attach loop for them. A combined
-    // split attaches the WO to the physical make-safe primary here (and shares it
-    // onto the report card below).
-    if (!primaryIsReportOnly || body?.attach_work_order_for_report === true) {
-      for (const att of attachments) {
-        if (att.storage_url || att.pdf_url) {
-          try {
-            await client.from('job_documents').insert({
-              job_id: jobResult.job.id,
-              type: 'work_order',
-              file_name: att.file_name || att.name || 'work-order.pdf',
-              storage_url: att.storage_url || att.pdf_url,
-              pdf_url: att.pdf_url || att.storage_url,
-              ...(extraction?.synthetic_livefire_marker
-                ? {
-                  data_snapshot_json: {
-                    synthetic_livefire_marker:
-                      extraction.synthetic_livefire_marker,
-                  },
-                }
-                : {}),
-              visible_to_trades: true,
-            })
-          } catch (_) { /* non-blocking */ }
-        }
+    // Attach the builder work-order evidence to every live family.
+    for (const att of availableAttachments) {
+      const { error: documentError } = await client.from('job_documents').insert({
+        job_id: jobResult.job.id,
+        type: 'work_order',
+        file_name: att.file_name || att.name || 'work-order.pdf',
+        storage_url: att.storage_url || att.pdf_url,
+        pdf_url: att.pdf_url || att.storage_url,
+        ...(extraction?.synthetic_livefire_marker
+          ? {
+            data_snapshot_json: {
+              synthetic_livefire_marker:
+                extraction.synthetic_livefire_marker,
+            },
+          }
+          : {}),
+        visible_to_trades: true,
+      })
+      if (documentError) {
+        throw new Error(`work-order evidence attach failed: ${documentError.message || documentError}`)
       }
     }
 

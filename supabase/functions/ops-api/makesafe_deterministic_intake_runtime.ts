@@ -1295,6 +1295,12 @@ function persistedPdfDocument(
       reason: attachment.pdfExtractionReason || "no_usable_text",
     });
   }
+  if (["pending", "processing", "failed"].includes(status || "")) {
+    return pdfDocument(source, attachment, {
+      status: "deferred",
+      reason: "pdf_extraction_pending",
+    });
+  }
   return null;
 }
 
@@ -1780,10 +1786,17 @@ async function persistPdfSourceIssues(
     if (
       documents.some((document) =>
         document.status === "deferred" &&
-        document.reason === "pdf_extraction_cap"
+        ["pdf_extraction_cap", "pdf_extraction_pending"].includes(
+          document.reason || "",
+        )
       )
     ) {
-      await persistIssueForSources(client, [source], "pdf_extraction_cap", {
+      const reason = documents.some((document) =>
+          document.reason === "pdf_extraction_pending"
+        )
+        ? "pdf_extraction_pending"
+        : "pdf_extraction_cap";
+      await persistIssueForSources(client, [source], reason, {
         attachmentIds: documents.map((item) => item.attachmentId),
         attachmentNames: documents.map((item) =>
           item.attachmentName || "unnamed"
@@ -3376,7 +3389,7 @@ async function ensureDraftAndJob(
       onStorageBlocker,
       onPersistedOutcome,
     );
-    if (!attachments.length && !deterministicPrimaryIsReportOnly(plan)) {
+    if (!attachments.length) {
       throw new Error("deterministic work-order attachment staging failed");
     }
     const splitObligation = deterministicSplitObligation(plan);
@@ -4152,6 +4165,20 @@ export async function runDeterministicIntake(
   );
   const plan = lineage.plan;
   const missingParents = lineage.missingParents;
+  const beltPendingPostIds = new Set(
+    input.sources.filter((source) =>
+      (source.pdfDocuments || []).some((document) =>
+        document.status === "deferred" &&
+        document.reason === "pdf_extraction_pending"
+      )
+    ).map((source) => source.postId),
+  );
+  const beltPendingCases = plan.cases.filter((intakeCase) =>
+    intakeCase.sourcePostIds.some((postId) => beltPendingPostIds.has(postId))
+  );
+  const actionableCases = plan.cases.filter((intakeCase) =>
+    !intakeCase.sourcePostIds.some((postId) => beltPendingPostIds.has(postId))
+  );
   const matchedCaseSources = new Set(
     [
       ...plan.cases.flatMap((intakeCase) => intakeCase.sourcePostIds),
@@ -4208,6 +4235,7 @@ export async function runDeterministicIntake(
   if (input.closureDeferredSources.length) {
     caveats.push("source_closure_cap_deferred");
   }
+  if (beltPendingCases.length) caveats.push("pdf_extraction_pending");
   // Nothing this run could act on was inside the cap, and every unresolved
   // allowlist entry was cap-exposed rather than stale. That is a no-op the sweep
   // will resolve on a later run, so it is reported loudly instead of throwing.
@@ -4368,6 +4396,7 @@ export async function runDeterministicIntake(
     "source_closure_cap",
   );
   await persistPdfSourceIssues(client, input.sources);
+  report.totals.cases_deferred += beltPendingCases.length;
   for (const failed of isolatedFailures) {
     const sources = failed.source_post_ids.flatMap((postId) => {
       const source = sourceByPostId.get(postId);
@@ -4413,6 +4442,11 @@ export async function runDeterministicIntake(
     await commitCompletedCursor();
     return report;
   }
+  if (plan.cases.length && !actionableCases.length) {
+    await finishHealth("pdf_extraction_pending");
+    await commitCompletedCursor();
+    return report;
+  }
   if (!plan.cases.length) {
     // A standing full-open scan over a quiet mailbox is a successful bounded no-op,
     // not the exact-allowlist configuration error below.
@@ -4452,13 +4486,13 @@ export async function runDeterministicIntake(
   // fresh work and cannot re-occupy the priority head of every subsequent run.
   const obligationMatches = await readExistingObligationJobs(
     client,
-    plan.cases,
+    actionableCases,
     sourceAuthorities.targetJobByPostId,
   );
   const existingObligationJobs = obligationMatches.existingJobs;
   const cancellationTargets = obligationMatches.cancellationTargets;
   const bindingExceptions = obligationMatches.bindingExceptions;
-  const persisted = await readPersistedCases(client, plan.cases);
+  const persisted = await readPersistedCases(client, actionableCases);
   const persistedSources = await readPersistedSourcePostIds(
     client,
     [...persisted.values()].map((row) => row.id),
@@ -4522,9 +4556,11 @@ export async function runDeterministicIntake(
     return "stuck";
   };
   const ranked = new Map<DeterministicCasePlan, CaseRank>();
-  for (const c of plan.cases) ranked.set(c, rankCase(c));
-  const fresh = plan.cases.filter((c) => ranked.get(c) === "fresh");
-  const jobRetries = plan.cases.filter((c) => ranked.get(c) === "job_retry");
+  for (const c of actionableCases) ranked.set(c, rankCase(c));
+  const fresh = actionableCases.filter((c) => ranked.get(c) === "fresh");
+  const jobRetries = actionableCases.filter((c) =>
+    ranked.get(c) === "job_retry"
+  );
   const retryHead = Math.max(1, Math.floor(maxCases / 2));
   const ordered = [
     ...jobRetries.slice(0, retryHead),
@@ -4671,6 +4707,7 @@ export async function runDeterministicIntake(
         // board/config/audit/transport work can occur for lab traffic.
         if (
           live.jobCreated && jobId &&
+          // Report-family jobs are deliberately silent; the post-board Hugo contract covers newly minted physical jobs only.
           !deterministicPrimaryIsReportOnly(effectivePlan) &&
           !effectivePlan.identity.syntheticLivefireMarker &&
           options.notifyPhysicalJob
