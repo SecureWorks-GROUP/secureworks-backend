@@ -58,8 +58,17 @@ const hugoNotificationMigration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const settlementClosureMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260731000002_makesafe_intake_settlement_closure.sql",
+    import.meta.url,
+  ),
+);
 const hugoNotification = await Deno.readTextFile(
   new URL("./makesafe_hugo_notification.ts", import.meta.url),
+);
+const intakeSettlement = await Deno.readTextFile(
+  new URL("./makesafe_intake_settlement.ts", import.meta.url),
 );
 const runtime = await Deno.readTextFile(
   new URL("./makesafe_deterministic_intake_runtime.ts", import.meta.url),
@@ -149,7 +158,7 @@ Deno.test("deterministic runtime projections are narrow, paged and attachment re
   assert(!runtime.includes("pricing_json"));
   assertStringIncludes(
     runtime,
-    '"id,email_id,name,content_type,storage_path,status,size_bytes,sha256"',
+    '"id,email_id,name,content_type,storage_path,status,size_bytes,sha256,pdf_extraction_status,pdf_extraction_text,pdf_extraction_char_count,pdf_extraction_page_count,pdf_extraction_extractor,pdf_extraction_truncated,pdf_extraction_reason"',
   );
 });
 
@@ -182,6 +191,28 @@ Deno.test("deterministic normal path has no model import or silent fallback", ()
   assertStringIncludes(index, "approvedWorkOrderIdentity");
   assertStringIncludes(index, "existingWorkOrderIdentity");
   assertStringIncludes(runtime, "ai_calls: 0");
+});
+
+Deno.test("intake settlement is retryable and Hugo idempotency is job-keyed", () => {
+  assertStringIncludes(index, "ensureIntakeWorkOrderEvidence(");
+  assertStringIncludes(index, "intake_minted_job_ids");
+  assertStringIncludes(index, "intake_settlement_pending: true");
+  assertStringIncludes(
+    index,
+    "notification_job_ids: settlement.notificationJobIds",
+  );
+  assertStringIncludes(runtime, "intake_source_post_ids: plan.sourcePostIds");
+  assertStringIncludes(index, "assertFreshMakesafeSourceSettled");
+  assertStringIncludes(
+    runtime,
+    "hugo_notifications_required",
+  );
+  assertStringIncludes(
+    settlementClosureMigration,
+    "UNIQUE (org_id, job_id)",
+  );
+  assert(!hugoNotification.includes("PHYSICAL_SES_FAMILIES"));
+  assert(!runtime.includes("Report-family jobs are deliberately silent"));
 });
 
 Deno.test("canonical external-obligation dedupe covers recovery composite refs at both write boundaries", () => {
@@ -697,6 +728,20 @@ Deno.test("attachment staging uses a content hash and append-only artifact ledge
   assertStringIncludes(runtime, 'status: "completed"');
 });
 
+Deno.test("guarded approval requires and attaches WO evidence for every family", () => {
+  assertStringIncludes(
+    index,
+    "if (availableAttachments.length === 0) missing.push('work_order_pdf')",
+  );
+  assertStringIncludes(index, "ensureIntakeWorkOrderEvidence(");
+  assertStringIncludes(intakeSettlement, "work-order evidence attach failed");
+  assert(
+    !index.includes(
+      "if (!primaryIsReportOnly && availableAttachments.length === 0)",
+    ),
+  );
+});
+
 Deno.test("deterministic runtime has no assignment, work-order, invoice or communication writer", () => {
   for (
     const forbidden of [
@@ -715,7 +760,7 @@ Deno.test("deterministic runtime has no assignment, work-order, invoice or commu
   }
 });
 
-Deno.test("deterministic physical mint wires one audited post-board Hugo notification while synthetic stays suppressed", () => {
+Deno.test("deterministic mint wires job-keyed post-board Hugo notification while synthetic stays suppressed", () => {
   assertStringIncludes(
     index,
     "notifyPhysicalJob: notifyMintedDeterministicPhysicalJob",
@@ -723,7 +768,11 @@ Deno.test("deterministic physical mint wires one audited post-board Hugo notific
   assertStringIncludes(runtime, "options.notifyPhysicalJob");
   assertStringIncludes(
     runtime,
-    "!effectivePlan.identity.syntheticLivefireMarker",
+    "consistently queryable across every family",
+  );
+  assertStringIncludes(
+    runtime,
+    "syntheticLivefireMarker",
   );
   assertStringIncludes(
     hugoNotification,
@@ -751,13 +800,13 @@ Deno.test("Hugo notification migration records lineage, board proof, provider ac
       "deep_link",
       "state",
       "failure_reason",
-      "UNIQUE (org_id, case_id, job_id)",
       "ENABLE ROW LEVEL SECURITY",
       "TO service_role",
     ]
   ) {
     assertStringIncludes(hugoNotificationMigration, marker);
   }
+  assertStringIncludes(settlementClosureMigration, "UNIQUE (org_id, job_id)");
   assertStringIncludes(
     hugoNotificationMigration,
     "provider_result_not_recorded",

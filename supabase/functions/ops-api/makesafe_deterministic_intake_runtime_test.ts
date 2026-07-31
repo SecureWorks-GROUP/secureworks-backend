@@ -1812,7 +1812,175 @@ Deno.test("live deterministic intake fills a draft from PDF and persists readabl
   );
 });
 
-Deno.test("portal-only blocker is reported by its actual missing evidence", async () => {
+Deno.test("standing intake consumes belt-extracted PDF text without fallback extraction", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "pdf-belt-1",
+    subject: "NEW WORK ORDER",
+    body_content: "Please attend. The builder work order is attached.",
+  }));
+  store.email_attachments.push({
+    id: "pdf-belt-att",
+    email_id: "pdf-belt-1",
+    name: "MLB Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/pdf-belt.pdf",
+    status: "uploaded",
+    size_bytes: 1200,
+    pdf_extraction_status: "extracted",
+    pdf_extraction_text:
+      "Work Order Number MLB-26770PO-55296\nPolicyholders Name Amanda Parker\nMobile 0422636182\nSite Address 8 Syrinx Pl Mullaloo WA 6027\nScope of Works Install temporary roof tarps and the storm damaged property safe",
+    pdf_extraction_char_count: 220,
+    pdf_extraction_page_count: 1,
+    pdf_extraction_extractor: "unpdf@1.6.2",
+    pdf_extraction_truncated: false,
+    pdf_extraction_reason: null,
+  });
+  // The existing job-artifact seam still copies the uploaded PDF bytes once;
+  // this invalid byte fixture proves the standing scanner does not invoke the
+  // PDF parser again after the belt has persisted extracted text.
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    () => new Uint8Array([1, 2, 3]),
+  );
+  const report = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["pdf-belt-1"],
+    maxCases: 1,
+    approveDraft,
+    nowIso: NOW,
+  });
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(store.makesafe_intake_cases[0].client_name, "Amanda Parker");
+  assertEquals(
+    store.makesafe_intake_case_sources[0].evidence.pdf_extraction[0].extractor,
+    "unpdf@1.6.2",
+  );
+});
+
+Deno.test("active PDF belt state defers the exact case without fallback extraction", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "pdf-belt-pending",
+    subject: "NEW WORK ORDER MLB-26771 Work Order: WO-26771",
+    body_content:
+      "Client: Pending Client\nAddress: 9 Pending Way, Perth\nPlease make safe.",
+  }));
+  store.email_attachments.push({
+    id: "pdf-belt-pending-att",
+    email_id: "pdf-belt-pending",
+    name: "MLB Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/pdf-belt-pending.pdf",
+    status: "uploaded",
+    size_bytes: 1200,
+    pdf_extraction_status: "processing",
+  });
+  let downloads = 0;
+  let approvals = 0;
+  const client = fakeClient(store, [], undefined, () => {
+    downloads++;
+    return new Uint8Array([1, 2, 3]);
+  });
+  const report = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["pdf-belt-pending"],
+    maxCases: 1,
+    approveDraft: () => {
+      approvals++;
+      return Promise.resolve({ job: { id: "must-not-run" } });
+    },
+    nowIso: NOW,
+  });
+
+  assertEquals(downloads, 0);
+  assertEquals(approvals, 0);
+  assertEquals(report.totals.cases_deferred, 1);
+  assert(report.evidence.caveats.includes("pdf_extraction_pending"));
+  assertEquals(store.makesafe_intake_cases.length, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+  assertEquals(
+    store.email_events_raw[0].change_type,
+    "intake_deferred_pdf_extraction_pending",
+  );
+});
+
+Deno.test("PDF-belt and run-cap deferrals accumulate in one mixed scan", async () => {
+  const store = baseStore();
+  for (
+    const [postId, suffix, status] of [
+      ["mixed-pending", "26772", "processing"],
+      ["mixed-ready-1", "26773", "extracted"],
+      ["mixed-ready-2", "26774", "extracted"],
+    ]
+  ) {
+    store.emails.push(email({
+      post_id: postId,
+      subject: `NEW WORK ORDER MLB-${suffix} Work Order: WO-${suffix}`,
+      body_content:
+        `Client: Mixed ${suffix}\nAddress: ${suffix} Mixed Way, Perth\nPlease make safe.`,
+    }));
+    store.email_attachments.push({
+      id: `att-${postId}`,
+      email_id: postId,
+      name: "MLB Work Order.pdf",
+      content_type: "application/pdf",
+      storage_path: `raw/${postId}.pdf`,
+      status: "uploaded",
+      size_bytes: 1200,
+      pdf_extraction_status: status,
+      ...(status === "extracted"
+        ? {
+          pdf_extraction_text:
+            `Work Order Number MLB-${suffix}PO-${suffix}\nPolicyholders Name Mixed ${suffix}\nSite Address ${suffix} Mixed Way Perth WA\nScope of Works Make the property safe`,
+          pdf_extraction_char_count: 180,
+          pdf_extraction_page_count: 1,
+          pdf_extraction_extractor: "unpdf@1.6.2",
+          pdf_extraction_truncated: false,
+          pdf_extraction_reason: null,
+        }
+        : {}),
+    });
+  }
+  let approvals = 0;
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: [
+      "mixed-pending",
+      "mixed-ready-1",
+      "mixed-ready-2",
+    ],
+    maxCases: 1,
+    approveDraft: () => {
+      approvals++;
+      return Promise.resolve({ job: { id: `mixed-job-${approvals}` } });
+    },
+    nowIso: NOW,
+  });
+
+  assertEquals(approvals, 1);
+  assertEquals(report.totals.cases_deferred, 2);
+  assertEquals(
+    store.email_events_raw
+      .filter((row) =>
+        row.change_type === "intake_deferred_pdf_extraction_pending" ||
+        row.change_type === "intake_deferred_run_cap_deferred"
+      )
+      .map((row) => row.change_type)
+      .sort(),
+    [
+      "intake_deferred_pdf_extraction_pending",
+      "intake_deferred_run_cap_deferred",
+    ],
+  );
+});
+
+Deno.test("portal capture is not a live blocker when the WO itself is absent", async () => {
   const store = baseStore();
   store.emails.push(email({
     post_id: "roof-portal-blocker",
@@ -1833,10 +2001,14 @@ Deno.test("portal-only blocker is reported by its actual missing evidence", asyn
   });
   assertEquals(
     report.by_builder_and_reason.mlb["missing:portal_capture"],
-    1,
+    undefined,
   );
   assertEquals(
     report.by_builder_and_reason.mlb.adapter_parse_failure,
+    1,
+  );
+  assertEquals(
+    report.by_builder_and_reason.mlb.wo_ref_without_pdf_pending_review,
     undefined,
   );
 });
@@ -3962,7 +4134,10 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
   let approvals = 0;
   const approving = () => {
     approvals++;
-    return Promise.resolve({ job: { id: "job-twin" } });
+    return Promise.resolve({
+      job: { id: "job-twin" },
+      notification_job_ids: ["job-twin"],
+    });
   };
   let notifications = 0;
   const notifyPhysicalJob = (_client: any, notification: any) => {
@@ -3995,6 +4170,7 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
   assertEquals(store.makesafe_intake_drafts[0].attachments_json.length, 1);
   assertEquals(approvals, 1);
   assertEquals(notifications, 1);
+  assertEquals(first.totals.hugo_notifications_required, 1);
   assertEquals(first.totals.hugo_notifications_recorded, 1);
   assertEquals(first.totals.hugo_notifications_accepted, 1);
   assertEquals(first.totals.hugo_notifications_failed, 0);
@@ -4040,6 +4216,53 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
       `${table} changed on replay`,
     );
   }
+});
+
+Deno.test("report-family mint receives the job-keyed post-board Hugo notification", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "roof-report-silent",
+    subject: "NEW WORK ORDER MLB-62002 Work Order: WO-62002 Roof Report",
+    body_content:
+      "Client: Roof Client\nAddress: 2 Roof Way, Perth\nComplete roof report.",
+  }));
+  store.email_attachments.push({
+    id: "att-roof-report-silent",
+    email_id: "roof-report-silent",
+    name: "work-order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/roof-report-silent.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  let notifications = 0;
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["roof-report-silent"],
+    maxCases: 1,
+    approveDraft: () =>
+      Promise.resolve({
+        job: { id: "job-roof-report" },
+        notification_job_ids: ["job-roof-report"],
+      }),
+    notifyPhysicalJob: () => {
+      notifications++;
+      return Promise.resolve({
+        attempted: true,
+        accepted: true,
+        reason: "accepted",
+        auditId: "audit-roof-report",
+      });
+    },
+    nowIso: NOW,
+  });
+
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(notifications, 1);
+  assertEquals(report.totals.hugo_notifications_required, 1);
+  assertEquals(report.totals.hugo_notifications_recorded, 1);
+  assertEquals(report.totals.hugo_notifications_accepted, 1);
 });
 
 Deno.test("storage failure surfaces a storage blocker instead of staying silent", async () => {
@@ -5353,7 +5576,7 @@ Deno.test("report-family split obligation requires a work-order PDF before any a
   assertEquals(store.makesafe_intake_drafts.length, 0);
 });
 
-Deno.test("report-family plan without a split obligation still needs no work-order PDF", async () => {
+Deno.test("report-family plan without a split obligation still requires a work-order PDF", async () => {
   const store = baseStore();
   store.emails.push(email({
     post_id: "report-only-target",
@@ -5379,23 +5602,93 @@ Deno.test("report-family plan without a split obligation still needs no work-ord
   };
   let approvalCalls = 0;
   const persistedOutcomes: string[] = [];
-  const result = await _ensureDraftAndJobForTest(
-    client,
-    "case-report-only",
-    reportOnly,
-    new Map(inputs.sources.map((source) => [source.postId, source])),
-    () => {
-      approvalCalls++;
-      return Promise.resolve({ job: { id: "job-report" } });
-    },
-    () => {},
-    (outcome) => persistedOutcomes.push(outcome),
+  await assertRejects(
+    () =>
+      _ensureDraftAndJobForTest(
+        client,
+        "case-report-only",
+        reportOnly,
+        new Map(inputs.sources.map((source) => [source.postId, source])),
+        () => {
+          approvalCalls++;
+          return Promise.resolve({ job: { id: "must-not-run" } });
+        },
+        () => {},
+        (outcome) => persistedOutcomes.push(outcome),
+      ),
+    Error,
+    "approval prevalidation failed: work_order_pdf",
   );
-  // Prevalidation passed with no WO PDF: the report-only path is not over-tightened.
-  assertEquals(result.jobId, "job-report");
-  assertEquals(approvalCalls, 1);
-  assert(persistedOutcomes.includes("draft"));
-  assertEquals(store.makesafe_intake_drafts.length, 1);
+  assertEquals(approvalCalls, 0);
+  assertEquals(persistedOutcomes, []);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
+});
+
+Deno.test("report-family staging failure cannot reach guarded approval", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "report-stage-failure",
+    subject: "NEW WORK ORDER MLB-93012 Work Order: WO-93012 Roof Report",
+    body_content: "Client: Report Client\nAddress: 9 Report Way, Perth",
+  }));
+  store.email_attachments.push({
+    id: "att-report-stage-failure",
+    email_id: "report-stage-failure",
+    name: "work-order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/report-stage-failure.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const readableClient = fakeClient(store);
+  const inputs = await _readInputsForTest(readableClient, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 4,
+    seedPostIds: ["report-stage-failure"],
+    cursor: null,
+  });
+  const built = buildDeterministicIntakePlan(inputs.sources, inputs.profiles)
+    .cases[0];
+  assert(built);
+  const reportOnly = {
+    ...built,
+    identity: { ...built.identity, jobFamily: "roof_report" },
+    state: "confirmed_live_job" as const,
+  };
+  const brokenStorageClient = {
+    ...readableClient,
+    storage: {
+      from: () => ({
+        download: () =>
+          Promise.resolve({
+            data: null,
+            error: new Error("storage unavailable"),
+          }),
+      }),
+    },
+  };
+  let approvals = 0;
+  await assertRejects(
+    () =>
+      _ensureDraftAndJobForTest(
+        brokenStorageClient,
+        "case-report-stage-failure",
+        reportOnly,
+        new Map(inputs.sources.map((source) => [source.postId, source])),
+        () => {
+          approvals++;
+          return Promise.resolve({ job: { id: "must-not-run" } });
+        },
+        () => {},
+        () => {},
+      ),
+    Error,
+    "attachment staging failed",
+  );
+  assertEquals(approvals, 0);
+  assertEquals(store.makesafe_intake_drafts.length, 0);
 });
 
 Deno.test("production-shaped moving sweep cannot satisfy a null canonical client from off-case candidates", async () => {

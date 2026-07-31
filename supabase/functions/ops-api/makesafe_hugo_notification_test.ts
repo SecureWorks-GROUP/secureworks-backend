@@ -21,15 +21,35 @@ function auditClient(options: {
 } = {}) {
   const inserts: any[] = [];
   const updates: any[] = [];
+  let row: any = null;
   return {
     inserts,
     updates,
     client: {
       from(table: string) {
         assertEquals(table, "makesafe_intake_hugo_notifications");
+        const selectQuery = () => {
+          const filters: Array<[string, unknown]> = [];
+          const query: any = {
+            eq(column: string, value: unknown) {
+              filters.push([column, value]);
+              return query;
+            },
+            maybeSingle: () => {
+              const matches = row &&
+                filters.every(([column, value]) => row[column] === value);
+              return Promise.resolve({
+                data: matches ? row : null,
+                error: null,
+              });
+            },
+          };
+          return query;
+        };
         return {
-          insert(row: any) {
-            inserts.push(row);
+          select: selectQuery,
+          insert(payload: any) {
+            inserts.push(payload);
             return {
               select() {
                 return {
@@ -39,10 +59,12 @@ function auditClient(options: {
                     const error = duplicate
                       ? { code: "23505", message: "unique violation" }
                       : options.insertError || null;
-                    return Promise.resolve({
-                      data: error ? null : { id: `audit-${inserts.length}` },
-                      error,
-                    });
+                    if (!error) {
+                      const id = `audit-${inserts.length}`;
+                      row = { id, ...inserts[inserts.length - 1] };
+                      return Promise.resolve({ data: { id }, error: null });
+                    }
+                    return Promise.resolve({ data: null, error });
                   },
                 };
               },
@@ -50,21 +72,32 @@ function auditClient(options: {
           },
           update(patch: any) {
             updates.push(patch);
-            return {
-              eq() {
-                return {
-                  select() {
-                    return {
-                      maybeSingle: () =>
-                        Promise.resolve({
-                          data: options.updateError ? null : { id: "audit-1" },
-                          error: options.updateError || null,
-                        }),
-                    };
-                  },
-                };
+            const filters: Array<[string, unknown]> = [];
+            const query: any = {
+              eq(column: string, value: unknown) {
+                filters.push([column, value]);
+                return query;
+              },
+              select() {
+                return query;
+              },
+              maybeSingle: () => {
+                if (options.updateError) {
+                  return Promise.resolve({
+                    data: null,
+                    error: options.updateError,
+                  });
+                }
+                const matches = row &&
+                  filters.every(([column, value]) => row[column] === value);
+                if (!matches) {
+                  return Promise.resolve({ data: null, error: null });
+                }
+                row = { ...row, ...patch };
+                return Promise.resolve({ data: { id: row.id }, error: null });
               },
             };
+            return query;
           },
         };
       },
@@ -185,12 +218,76 @@ Deno.test("Hugo notification unique claim prevents a second provider dispatch", 
   );
   const second = await notifyDeterministicPhysicalJob(
     audit.client,
-    input(),
+    { ...input(), caseId: "44444444-4444-4444-4444-444444444444" },
     notificationDeps,
   );
 
   assertEquals(first.accepted, true);
+  assertEquals(second.accepted, true);
   assertEquals(second.reason, "already_recorded");
+  assertEquals(sends, 1);
+});
+
+Deno.test("Hugo notification never retries an ambiguous provider failure", async () => {
+  const audit = auditClient({ duplicateAfterFirst: true });
+  let sends = 0;
+  const notificationDeps = deps({
+    sendSms: () => {
+      sends++;
+      return Promise.resolve(
+        {
+          accepted: false,
+          messageId: null,
+          failureReason: "ghl_http_500:provider unavailable",
+        },
+      );
+    },
+  });
+
+  const first = await notifyDeterministicPhysicalJob(
+    audit.client,
+    input(),
+    notificationDeps,
+  );
+  const second = await notifyDeterministicPhysicalJob(
+    audit.client,
+    input(),
+    notificationDeps,
+  );
+
+  assertEquals(first.accepted, false);
+  assertEquals(second.accepted, false);
+  assertEquals(second.reason, "already_recorded_pending");
+  assertEquals(audit.inserts.length, 2);
+  assertEquals(sends, 1);
+});
+
+Deno.test("Hugo notification covers report-family jobs after canonical board proof", async () => {
+  const audit = auditClient();
+  let sends = 0;
+  const result = await notifyDeterministicPhysicalJob(
+    audit.client,
+    input(),
+    deps({
+      loadBoardJob: () =>
+        Promise.resolve({
+          jobId: JOB_ID,
+          jobNumber: "SWMS-270002",
+          canonicalStage: "new",
+          sesFamily: "roof_report",
+        }),
+      sendSms: () => {
+        sends++;
+        return Promise.resolve({
+          accepted: true,
+          messageId: "report-message",
+          failureReason: null,
+        });
+      },
+    }),
+  );
+
+  assertEquals(result.accepted, true);
   assertEquals(sends, 1);
 });
 

@@ -18,6 +18,8 @@ PORTAL_CAPTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728500000_makesafe
 SEED_SCOPE_MIGRATION="$REPO_ROOT/supabase/migrations/20260729000000_makesafe_state_seed_scope_accounting.sql"
 HUGO_NOTIFICATION_MIGRATION="$REPO_ROOT/supabase/migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql"
 CYCLE_UNIQUENESS_MIGRATION="$REPO_ROOT/supabase/migrations/20260730000001_makesafe_report_cycle_uniqueness.sql"
+PDF_EXTRACTION_MIGRATION="$REPO_ROOT/supabase/migrations/20260731000001_makesafe_pdf_extraction_belt.sql"
+INTAKE_SETTLEMENT_MIGRATION="$REPO_ROOT/supabase/migrations/20260731000002_makesafe_intake_settlement_closure.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -83,6 +85,14 @@ cycle_uniqueness_migration_sha() {
   shasum -a 256 "$CYCLE_UNIQUENESS_MIGRATION" | awk '{print $1}'
 }
 
+pdf_extraction_migration_sha() {
+  shasum -a 256 "$PDF_EXTRACTION_MIGRATION" | awk '{print $1}'
+}
+
+intake_settlement_migration_sha() {
+  shasum -a 256 "$INTAKE_SETTLEMENT_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -100,6 +110,8 @@ write_response() {
   SEED_SCOPE_EXPECTED_SHA="$(seed_scope_migration_sha)" \
   HUGO_NOTIFICATION_EXPECTED_SHA="$(hugo_notification_migration_sha)" \
   CYCLE_UNIQUENESS_EXPECTED_SHA="$(cycle_uniqueness_migration_sha)" \
+  PDF_EXTRACTION_EXPECTED_SHA="$(pdf_extraction_migration_sha)" \
+  INTAKE_SETTLEMENT_EXPECTED_SHA="$(intake_settlement_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -234,6 +246,28 @@ cycle_uniqueness_row = {
     "actual_statement_sha256": os.environ["CYCLE_UNIQUENESS_EXPECTED_SHA"],
     "missing_markers": [],
 }
+pdf_extraction_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260731000001",
+    "expected_migration_name": "makesafe_pdf_extraction_belt",
+    "expected_statement_sha256": os.environ["PDF_EXTRACTION_EXPECTED_SHA"],
+    "actual_migration_version": "20260731000001",
+    "actual_migration_name": "makesafe_pdf_extraction_belt",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["PDF_EXTRACTION_EXPECTED_SHA"],
+    "missing_markers": [],
+}
+intake_settlement_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260731000002",
+    "expected_migration_name": "makesafe_intake_settlement_closure",
+    "expected_statement_sha256": os.environ["INTAKE_SETTLEMENT_EXPECTED_SHA"],
+    "actual_migration_version": "20260731000002",
+    "actual_migration_name": "makesafe_intake_settlement_closure",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["INTAKE_SETTLEMENT_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -248,6 +282,8 @@ with open(sys.argv[1], "w") as f:
             seed_scope_row,
             hugo_notification_row,
             cycle_uniqueness_row,
+            pdf_extraction_row,
+            intake_settlement_row,
         ],
         f,
     )
@@ -448,7 +484,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared

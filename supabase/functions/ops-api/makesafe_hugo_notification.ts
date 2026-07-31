@@ -1,10 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
-const PHYSICAL_SES_FAMILIES = new Set([
-  "physical_makesafe",
-  "temporary_fencing",
-]);
 const CANONICAL_BOARD_STAGES = new Set([
   "new",
   "allocated",
@@ -13,6 +9,23 @@ const CANONICAL_BOARD_STAGES = new Set([
   "completed",
   "archive",
   "cancelled",
+]);
+const RETRY_SAFE_PRETRANSPORT_FAILURES = new Set([
+  "source_ids_missing",
+  "canonical_board_read_failed",
+  "job_not_on_canonical_board",
+  "canonical_board_stage_missing",
+  "canonical_board_stage_unsupported",
+  "canonical_board_family_missing",
+  "recipient_config_read_failed",
+  "notification_disabled",
+  "hugo_recipient_not_configured",
+  "hugo_recipient_phone_missing",
+  "sms_from_number_missing",
+  "hugo_recipient_missing",
+  "hugo_recipient_config_ambiguous",
+  "hugo_staff_contact_missing",
+  "hugo_staff_contact_ambiguous",
 ]);
 
 export interface HugoNotificationRecipient {
@@ -125,6 +138,49 @@ async function updateAudit(
   return false;
 }
 
+async function loadExistingAudit(
+  client: any,
+  orgId: string,
+  jobId: string,
+): Promise<any | null> {
+  const { data, error } = await client
+    .from("makesafe_intake_hugo_notifications")
+    .select("id,state,provider_message_id,failure_reason")
+    .eq("org_id", orgId)
+    .eq("job_id", jobId)
+    .maybeSingle();
+  if (error) {
+    console.error(
+      "[ops-api] Hugo notification audit read failed:",
+      error.message || error,
+    );
+    return null;
+  }
+  return data || null;
+}
+
+async function reclaimFailedAudit(
+  client: any,
+  auditId: string,
+  patch: Record<string, unknown>,
+): Promise<boolean> {
+  const { data, error } = await client
+    .from("makesafe_intake_hugo_notifications")
+    .update(patch)
+    .eq("id", auditId)
+    .eq("state", "failed")
+    .select("id")
+    .maybeSingle();
+  if (!error && data?.id) return true;
+  if (error) {
+    console.error(
+      "[ops-api] Hugo notification audit reclaim failed:",
+      error.message || error,
+    );
+  }
+  return false;
+}
+
 export async function notifyDeterministicPhysicalJob(
   client: any,
   input: HugoNotificationInput,
@@ -174,8 +230,8 @@ export async function notifyDeterministicPhysicalJob(
     failureReason = "canonical_board_stage_missing";
   } else if (!CANONICAL_BOARD_STAGES.has(boardStage)) {
     failureReason = "canonical_board_stage_unsupported";
-  } else if (!PHYSICAL_SES_FAMILIES.has(board.sesFamily)) {
-    failureReason = "canonical_board_job_not_physical";
+  } else if (!String(board.sesFamily || "").trim()) {
+    failureReason = "canonical_board_family_missing";
   } else if (configResult.status === "rejected") {
     failureReason = "recipient_config_read_failed";
   } else if (!config.enabled) failureReason = "notification_disabled";
@@ -195,7 +251,7 @@ export async function notifyDeterministicPhysicalJob(
       phone: config.recipient.phone,
     }]
     : [];
-  const audit = await insertAudit(client, {
+  const auditRow = {
     org_id: orgId,
     case_id: input.caseId,
     source_post_ids: sourcePostIds,
@@ -212,18 +268,42 @@ export async function notifyDeterministicPhysicalJob(
     message,
     state: failureReason ? "failed" : "attempting",
     failure_reason: failureReason || "provider_result_not_recorded",
-  });
+  };
+  const audit = await insertAudit(client, auditRow);
+  let auditId = audit.id;
 
   if (audit.duplicate) {
-    return {
-      attempted: false,
-      accepted: false,
-      reason: "already_recorded",
-      auditId: null,
-      providerMessageId: null,
-    };
-  }
-  if (audit.error || !audit.id) {
+    const existing = await loadExistingAudit(client, orgId, input.jobId);
+    if (existing?.state === "accepted") {
+      return {
+        attempted: false,
+        accepted: true,
+        reason: "already_recorded",
+        auditId: existing.id,
+        providerMessageId: existing.provider_message_id || null,
+      };
+    }
+    if (
+      !failureReason && existing?.id && existing.state === "failed" &&
+      RETRY_SAFE_PRETRANSPORT_FAILURES.has(
+        String(existing.failure_reason || ""),
+      ) &&
+      await reclaimFailedAudit(client, existing.id, {
+        ...auditRow,
+        updated_at: attemptedAt,
+      })
+    ) {
+      auditId = existing.id;
+    } else {
+      return {
+        attempted: false,
+        accepted: false,
+        reason: existing ? "already_recorded_pending" : "audit_read_failed",
+        auditId: existing?.id || null,
+        providerMessageId: existing?.provider_message_id || null,
+      };
+    }
+  } else if (audit.error || !auditId) {
     console.error(
       "[ops-api] Hugo notification audit insert failed; SMS suppressed:",
       audit.error?.message || "missing audit id",
@@ -241,7 +321,7 @@ export async function notifyDeterministicPhysicalJob(
       attempted: false,
       accepted: false,
       reason: failureReason || "notification_precondition_failed",
-      auditId: audit.id,
+      auditId,
       providerMessageId: null,
     };
   }
@@ -266,7 +346,7 @@ export async function notifyDeterministicPhysicalJob(
   const resultReason = accepted ? "accepted" : provider.failureReason ||
     (provider.accepted ? "provider_message_id_missing" : "provider_rejected");
   const providerAcceptedAt = accepted ? now() : null;
-  const auditUpdated = await updateAudit(client, audit.id, {
+  const auditUpdated = await updateAudit(client, auditId!, {
     state: accepted ? "accepted" : "failed",
     provider_message_id: accepted ? provider.messageId : null,
     provider_accepted_at: providerAcceptedAt,
@@ -278,7 +358,7 @@ export async function notifyDeterministicPhysicalJob(
       attempted: true,
       accepted: false,
       reason: "audit_update_failed_after_provider_result",
-      auditId: audit.id,
+      auditId,
       providerMessageId: provider.messageId,
     };
   }
@@ -286,7 +366,7 @@ export async function notifyDeterministicPhysicalJob(
     attempted: true,
     accepted,
     reason: resultReason,
-    auditId: audit.id,
+    auditId,
     providerMessageId: provider.messageId,
   };
 }

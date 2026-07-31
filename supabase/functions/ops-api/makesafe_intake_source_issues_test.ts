@@ -65,7 +65,7 @@ function client(store: Record<string, any[]>) {
   } as any;
 }
 
-Deno.test("typed source issues persist one idempotent non-PII fact", async () => {
+Deno.test("typed source issues append reason transitions and deduplicate identical facts", async () => {
   const store: Record<string, any[]> = { email_events_raw: [] };
   const db = client(store);
 
@@ -88,8 +88,16 @@ Deno.test("typed source issues persist one idempotent non-PII fact", async () =>
   });
 
   assertEquals(first.created, true);
-  assertEquals(second.created, false);
-  assertEquals(store.email_events_raw.length, 1);
+  const duplicate = await persistIntakeSourceIssue(db, {
+    orgId: ORG,
+    mailbox: MAILBOX,
+    postId: "post-1",
+    reason: "source_persist_failed",
+  });
+
+  assertEquals(second.created, true);
+  assertEquals(duplicate.created, false);
+  assertEquals(store.email_events_raw.length, 2);
   assertEquals(
     store.email_events_raw[0].change_type,
     "intake_deferred_run_cap_deferred",
@@ -105,6 +113,10 @@ Deno.test("typed source issues persist one idempotent non-PII fact", async () =>
     attachment_count: 1,
   });
   assertEquals("body" in store.email_events_raw[0], false);
+  assertEquals(
+    store.email_events_raw[1].change_type,
+    "intake_exception_source_persist_failed",
+  );
 });
 
 Deno.test("every source issue reason has one typed change type", () => {
@@ -114,6 +126,7 @@ Deno.test("every source issue reason has one typed change type", () => {
       "intake_deferred_run_cap_deferred",
       "intake_deferred_source_closure_cap",
       "intake_deferred_pdf_extraction_cap",
+      "intake_deferred_pdf_extraction_pending",
       "intake_deferred_pdf_attachment_limit",
       "intake_exception_lineage_quarantine",
       "intake_deferred_awaiting_parent",

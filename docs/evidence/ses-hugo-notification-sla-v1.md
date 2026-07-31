@@ -2,12 +2,14 @@
 
 ## Backend contract
 
-The deterministic runtime notifies only when all of these facts are true:
+The shared intake approval-settlement boundary notifies only when all of these
+facts are true:
 
-1. the current run minted a new job;
+1. `makesafe_intake_job_mints` explicitly proves this draft minted the job;
 2. the canonical make-safe server board contains that exact job;
-3. the canonical SES family is `physical_makesafe` or
-   `temporary_fencing`;
+3. the canonical board exposes a non-empty SES family, including physical,
+   temporary fencing, roof report, assessment, repair, restoration, and quote
+   request families;
 4. the source is not a synthetic live-fire fixture; and
 5. `arrival_general_phones` names one recipient whose phone resolves to exactly
    one staff user with `managed_verticals` containing `makesafe`.
@@ -16,12 +18,15 @@ The configured `makesafe_notify_settings.notify_enabled` kill switch and
 `from_number` remain authoritative. No recipient phone is embedded in this
 path.
 
-`makesafe_intake_hugo_notifications` is the once-per-case/job audit boundary.
+`makesafe_intake_hugo_notifications` is the once-per-job audit boundary.
 The row is claimed before GHL is called and records source IDs, canonical case,
 job, board stage, attempt time, configured recipient, deep link, provider
 message ID and acceptance time, or a durable failure reason. A unique collision
-never causes a second dispatch. An ambiguous provider result deliberately
-leaves `provider_result_not_recorded` visible instead of retrying blindly.
+never causes a second dispatch. Transport failures and lost responses are not
+automatically retried because provider acceptance cannot be disproved. Only
+failures proven to occur before transport may reclaim the same job-keyed audit.
+Legacy approved jobs, existing-job bindings, and later lifecycle updates have no
+explicit mint authority and therefore remain silent.
 
 Synthetic live-fire is rejected before board, configuration, audit, or SMS
 work. Tests use injected transports or mocked `fetch`; they never call GHL.
@@ -67,7 +72,8 @@ risk from notification-to-assignment.
 
 ## Release activation
 
-Apply `20260729010000_makesafe_hugo_notification_sla_v1.sql` before deploying
-the matching `ops-api`. Development and validation send no real SMS. After the
-normal production deploy, the first live Hugo notification will fire on the
-next real deterministic physical intake that reaches the canonical board.
+Follow the ordered extraction-belt release sequence in
+`docs/evidence/makesafe-pdf-extraction-belt-2026-07-31.md` before deploying the
+matching `ops-api` or `monitor-ses-makesafes`. The closure migration archives
+any older case-keyed duplicates, installs job-key uniqueness, and adds explicit
+draft mint authority. Development and validation send no real SMS.

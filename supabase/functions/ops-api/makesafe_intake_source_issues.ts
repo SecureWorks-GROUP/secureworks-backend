@@ -4,6 +4,7 @@ export const INTAKE_SOURCE_ISSUE_REASONS = [
   "run_cap_deferred",
   "source_closure_cap",
   "pdf_extraction_cap",
+  "pdf_extraction_pending",
   "pdf_attachment_limit",
   "lineage_quarantine",
   "awaiting_parent",
@@ -20,6 +21,7 @@ const DEFERRED_REASONS = new Set<IntakeSourceIssueReason>([
   "run_cap_deferred",
   "source_closure_cap",
   "pdf_extraction_cap",
+  "pdf_extraction_pending",
   "pdf_attachment_limit",
   "awaiting_parent",
   "attachment_recovery_failed",
@@ -31,6 +33,7 @@ export const INTAKE_SOURCE_ISSUE_NEXT_ACTION: Readonly<
   run_cap_deferred: "retry_exact_source",
   source_closure_cap: "retry_exact_source_with_case_closure",
   pdf_extraction_cap: "retry_exact_source_pdf_priority",
+  pdf_extraction_pending: "wait_for_pdf_belt_then_retry_exact_source",
   pdf_attachment_limit: "review_attachment_selection",
   lineage_quarantine: "correct_lineage_authority",
   awaiting_parent: "replay_parent_or_bind_exact_target",
@@ -102,7 +105,7 @@ export async function persistIntakeSourceIssue(
     );
   }
   const existing = (prior || []).find((row: any) =>
-    parseIntakeSourceIssueReason(row?.change_type)
+    parseIntakeSourceIssueReason(row?.change_type) === args.reason
   );
   if (existing) {
     return { created: false, changeType: String(existing.change_type) };

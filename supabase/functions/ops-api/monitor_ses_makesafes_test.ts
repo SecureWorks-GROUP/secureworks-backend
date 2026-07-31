@@ -48,8 +48,10 @@ import {
   _recordIntakeSourceExceptions,
   _runBackfillFull,
   _scheduleIntakeScanContinuation,
+  _schedulePdfExtractionContinuation,
   _senderMatchesPattern,
   _setTestClientFactory,
+  _uniquePdfExtractionCoordinates,
   isGraphMailReadError,
 } from "../monitor-ses-makesafes/index.ts";
 import { _resetGraphTokenCache } from "../_shared/graph_client.ts";
@@ -126,6 +128,73 @@ Deno.test("intake scan continuation returns before a scan beyond pg_net's five-s
   releaseScan(new Response("{}", { status: 200 }));
   await registered;
   assertEquals(captured.leaseReleased, true);
+});
+
+Deno.test("fresh PDF extraction handoff carries one attachment id and remains non-blocking", async () => {
+  let registered: Promise<void> | undefined;
+  let request: RequestInit | undefined;
+  _schedulePdfExtractionContinuation(
+    ((url: string | URL | Request, init?: RequestInit) => {
+      request = init;
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as typeof fetch,
+    (promise) => registered = promise,
+    "https://example.invalid/ops-api?action=makesafe_pdf_extraction_drain",
+    { "x-api-key": "test-only" },
+    "attachment-19475",
+  );
+  assert(registered);
+  await registered;
+  assertEquals(request?.method, "POST");
+  assertEquals(
+    request?.body,
+    JSON.stringify({
+      attachment_id: "attachment-19475",
+      lane: "fresh",
+    }),
+  );
+});
+
+Deno.test("fresh PDF scheduling collapses duplicate transport rows by SHA", () => {
+  assertEquals(
+    _uniquePdfExtractionCoordinates([
+      { id: "graph-carrier", sha256: "same-sha" },
+      { id: "mailbox-carrier", sha256: "same-sha" },
+      { id: "unhashed", sha256: null },
+    ]),
+    [
+      { id: "mailbox-carrier", sha256: "same-sha" },
+      { id: "unhashed", sha256: null },
+    ],
+  );
+});
+
+Deno.test("fresh PDF continuation surfaces a durable application handoff failure", async () => {
+  let registered: Promise<void> | undefined;
+  const failures: Array<{ kind: string; status: number | null }> = [];
+  _schedulePdfExtractionContinuation(
+    (() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            outcome: "extracted",
+            scan_error: "classifier_handoff_failed:board unavailable",
+          }),
+          { status: 200 },
+        ),
+      )) as typeof fetch,
+    (promise) => registered = promise,
+    "https://example.invalid/ops-api?action=makesafe_pdf_extraction_drain",
+    {},
+    "attachment-19475",
+    (failure) => {
+      failures.push(failure);
+      return Promise.resolve();
+    },
+  );
+  assert(registered);
+  await registered;
+  assertEquals(failures, [{ kind: "application", status: 200 }]);
 });
 
 Deno.test("successful handoff accounting check returns only sources without a canonical case", async () => {
@@ -267,8 +336,10 @@ Deno.test("bounded-run deferrals are a separate non-terminal fate, not an except
 });
 
 Deno.test("intake continuation durably reports non-2xx and network handoff failures", async () => {
-  const observed: Array<{ kind: "http" | "network"; status: number | null }> =
-    [];
+  const observed: Array<{
+    kind: "http" | "network" | "runtime" | "application";
+    status: number | null;
+  }> = [];
   for (
     const fetchStub of [
       (() =>

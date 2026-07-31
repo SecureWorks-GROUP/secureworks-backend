@@ -70,6 +70,15 @@ concurrency guards. Both the environment brake
 The old paid-AI scanner implementation is retained only as unreachable historical
 code. It has no dispatch action, schedule, reporting hook, or standing caller.
 
+## PDF extraction belt
+
+Fresh work-order PDFs now cross the one-coordinate extraction worker before an
+exact deterministic scan. The historical fallback remains bounded, but it is no
+longer the fresh-arrival path. The evidence-of-record rule, reason-coded failure
+accounting, backlog drain, and ordered migration-before-code release sequence
+are owned by
+`docs/evidence/makesafe-pdf-extraction-belt-2026-07-31.md`.
+
 ## Verification
 
 Run the targeted contract:

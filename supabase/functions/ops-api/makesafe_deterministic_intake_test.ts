@@ -684,6 +684,19 @@ Deno.test("Prime wrapper adapter deterministically captures portal report work",
     subject: "Roof report work order Work Order: 445566",
     body:
       "Client: Roof Client\nSite Address: 30 Beta Avenue, Perth\nMobile: 0411 111 111\nComplete roof report https://portal.prime.test/r/1",
+    attachments: [pdf("prime-1", "prime-wo")],
+    pdfDocuments: [{
+      sourcePostId: "prime-1",
+      attachmentId: "prime-wo",
+      attachmentName: "work_order_MLB-445566.pdf",
+      status: "extracted",
+      text: "Work Order Number MLB-445566\nScope: complete roof report",
+      charCount: 58,
+      pageCount: 1,
+      extractor: "fixture",
+      truncated: false,
+      reason: null,
+    }],
     links: [{ url: "https://portal.prime.test/r/1", sourcePostId: "prime-1" }],
   });
   const adapted = adaptDeterministicSource(item, PROFILES);
@@ -695,9 +708,56 @@ Deno.test("Prime wrapper adapter deterministically captures portal report work",
     plan.cases[0].evidenceMap.portal_capture.status,
     "recovery_staged",
   );
-  assertEquals(plan.cases[0].state, "blocked_live_job");
+  assertEquals(plan.cases[0].state, "confirmed_live_job");
   assertEquals(plan.cases[0].reasonCode, null);
-  assertEquals(plan.cases[0].blockedReasons, ["missing:portal_capture"]);
+  assertEquals(plan.cases[0].blockedReasons, []);
+});
+
+Deno.test("MLB parked WO fixtures become live from the uploaded PDF without portal capture", () => {
+  const fixtures = [
+    {
+      postId: "MLB-19475",
+      subject: "NEW WORK ORDER MLB-19475 Work Order: MLB-19475 PO: 56336",
+      receivedAt: "2026-07-31T00:54:28.000Z",
+    },
+    {
+      postId: "MLB-RR-26836",
+      subject: "NEW WORK ORDER MLB-26836 Work Order: MLB-26836 PO: 56337",
+      receivedAt: "2026-07-31T01:00:34.000Z",
+    },
+  ].map((fixture) =>
+    source({
+      ...fixture,
+      fromEmail: "dispatch@mlb.test",
+      body:
+        "Client: Builder Client\nSite Address: 1 Example Street, Perth\nPhone: 0400000000\nThe attached work order is ready.",
+      attachments: [pdf(fixture.postId, `${fixture.postId}-wo`)],
+      pdfDocuments: [{
+        sourcePostId: fixture.postId,
+        attachmentId: `${fixture.postId}-wo`,
+        attachmentName:
+          `work_order_${fixture.postId}_Secureworks_Group_Pty_Ltd.pdf`,
+        status: "extracted",
+        text: `Work Order Number ${
+          fixture.postId === "MLB-RR-26836" ? "MLB-26836" : "MLB-19475"
+        }\nClient: Builder Client\nSite Address: 1 Example Street, Perth\nMobile: 0400000000\nScope of Works: Make the property safe`,
+        charCount: 180,
+        pageCount: 1,
+        extractor: "belt-fixture",
+        truncated: false,
+        reason: null,
+      }],
+      links: [],
+    })
+  );
+
+  const plan = buildDeterministicIntakePlan(fixtures, PROFILES);
+  assertEquals(plan.cases.length, 2);
+  for (const intakeCase of plan.cases) {
+    assertEquals(intakeCase.state, "confirmed_live_job");
+    assertEquals(intakeCase.blockedReasons, []);
+    assertEquals(intakeCase.evidenceMap.portal_capture.required, false);
+  }
 });
 
 Deno.test("RAPID adapter is pure and reaches confirmed state on complete evidence", () => {
