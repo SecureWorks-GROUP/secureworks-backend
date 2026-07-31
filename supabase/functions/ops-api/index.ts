@@ -297,6 +297,13 @@ import {
 import {
   drainMakesafePdfExtraction as _drainMakesafePdfExtraction,
 } from './makesafe_pdf_extraction_worker.ts'
+import {
+  assertFreshMakesafeSourceSettled,
+} from './makesafe_pdf_settlement.ts'
+import {
+  ensureIntakeWorkOrderEvidence,
+  intakeMintedJobIds,
+} from './makesafe_intake_settlement.ts'
 // Intake item 5 — deterministic WO-PDF client-block reader. Fills client_name /
 // client_phone / site_address from an unambiguous work-order-PDF client block when
 // the model/template left them null (MLB "NEW WORK ORDER" carries the homeowner
@@ -17265,6 +17272,46 @@ async function approveIntakeDraft(client: any, body: any) {
   if (availableAttachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
+  if (draft.status === 'approved' && draft.approved_job_id) {
+    const mintedJobIds = intakeMintedJobIds(extraction, draft.approved_job_id)
+    const evidenceJobIds = mintedJobIds.length
+      ? mintedJobIds
+      : [String(draft.approved_job_id)]
+    await ensureIntakeWorkOrderEvidence(
+      client,
+      evidenceJobIds,
+      availableAttachments,
+      extraction,
+    )
+    const settledExtraction = {
+      ...extraction,
+      intake_minted_job_ids: mintedJobIds,
+      intake_settlement_pending: false,
+    }
+    const { error: settlementError } = await client
+      .from('makesafe_intake_drafts')
+      .update({
+        extraction_json: settledExtraction,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', draft_id)
+    if (settlementError) {
+      throw new Error(`intake settlement update failed: ${settlementError.message || settlementError}`)
+    }
+    return {
+      ok: true,
+      job: { id: draft.approved_job_id },
+      draft_id,
+      approved_fields: approvedFields,
+      report_type: effectiveReportType || null,
+      secondary_job: null,
+      split_combined: mintedJobIds.length > 1,
+      job_ids: evidenceJobIds,
+      job_created: false,
+      notification_job_ids: mintedJobIds,
+    }
+  }
+
   // On a combined split the primary is a PHYSICAL make-safe: don't inherit the
   // draft's roof/assessment family (that belongs to the secondary report card).
   const approvedJobFamily = reviewedFamily || (splitObligation
@@ -17330,7 +17377,11 @@ async function approveIntakeDraft(client: any, body: any) {
       safety_requirements: approvedFields.safety_requirements,
       special_instructions: approvedFields.special_instructions,
       report_type: effectiveReportType || draft.report_type || null,
-      extraction_json: extraction,
+      extraction_json: {
+        ...extraction,
+        intake_minted_job_ids: [],
+        intake_settlement_pending: false,
+      },
       updated_at: claimedAt,
     }).eq('id', draft_id)
     if (linkError) {
@@ -17353,6 +17404,8 @@ async function approveIntakeDraft(client: any, body: any) {
       secondary_job: null,
       split_combined: false,
       job_ids: [existingJobBinding.targetJob.id],
+      job_created: false,
+      notification_job_ids: [],
     }
   }
 
@@ -17458,6 +17511,7 @@ async function approveIntakeDraft(client: any, body: any) {
   //     and do NOT re-queue it. A later step failing (audit update / doc attach) is
   //     non-fatal to the job itself; the job exists and the draft stays approved.
   let createdJobId: string | null = null
+  const createdJobIds: string[] = []
   try {
     // Create the make-safe job using reviewed/edited fields, not stale extraction data.
     // Preserve builder email source context for EVERY family so board/trade users can
@@ -17504,6 +17558,7 @@ async function approveIntakeDraft(client: any, body: any) {
     // Record the live job id the instant it exists so the catch path can tell a
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
     createdJobId = jobResult?.job?.id || null
+    if (createdJobId) createdJobIds.push(createdJobId)
 
     // For report-only jobs: set report_type on makesafe_job_details and advance
     // substatus to ready_to_invoice (bypasses the report-production stage). A combined
@@ -17527,7 +17582,12 @@ async function approveIntakeDraft(client: any, body: any) {
     // Link draft to created job and preserve the reviewed values on the draft audit
     // row. Status was already set to 'approved' by the atomic claim above, so this
     // update writes only the audit/linkage fields (no redundant status write).
-    await client.from('makesafe_intake_drafts').update({
+    const pendingExtraction = {
+      ...extraction,
+      intake_minted_job_ids: createdJobIds,
+      intake_settlement_pending: true,
+    }
+    const { error: draftLinkError } = await client.from('makesafe_intake_drafts').update({
       approved_job_id: jobResult.job.id,
       approved_at: new Date().toISOString(),
       approved_by: approved_by || null,
@@ -17544,31 +17604,17 @@ async function approveIntakeDraft(client: any, body: any) {
       safety_requirements: approvedFields.safety_requirements,
       special_instructions: approvedFields.special_instructions,
       report_type: effectiveReportType || draft.report_type || null,
+      extraction_json: pendingExtraction,
       updated_at: new Date().toISOString(),
     }).eq('id', draft_id)
+    if (draftLinkError) throw draftLinkError
 
-    // Attach the builder work-order evidence to every live family.
-    for (const att of availableAttachments) {
-      const { error: documentError } = await client.from('job_documents').insert({
-        job_id: jobResult.job.id,
-        type: 'work_order',
-        file_name: att.file_name || att.name || 'work-order.pdf',
-        storage_url: att.storage_url || att.pdf_url,
-        pdf_url: att.pdf_url || att.storage_url,
-        ...(extraction?.synthetic_livefire_marker
-          ? {
-            data_snapshot_json: {
-              synthetic_livefire_marker:
-                extraction.synthetic_livefire_marker,
-            },
-          }
-          : {}),
-        visible_to_trades: true,
-      })
-      if (documentError) {
-        throw new Error(`work-order evidence attach failed: ${documentError.message || documentError}`)
-      }
-    }
+    await ensureIntakeWorkOrderEvidence(
+      client,
+      [jobResult.job.id],
+      availableAttachments,
+      extraction,
+    )
 
     // ── Item 3b: mint the SECOND card (the report obligation) ────────────────
     // A combined make-safe + report is now expanded into TWO live cards instead of
@@ -17615,6 +17661,19 @@ async function approveIntakeDraft(client: any, body: any) {
         })
         secondaryJob = secondaryResult?.job || null
         if (secondaryJob?.id) {
+          createdJobIds.push(secondaryJob.id)
+          const { error: secondaryLinkError } = await client
+            .from('makesafe_intake_drafts')
+            .update({
+              extraction_json: {
+                ...extraction,
+                intake_minted_job_ids: createdJobIds,
+                intake_settlement_pending: true,
+              },
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', draft_id)
+          if (secondaryLinkError) throw secondaryLinkError
           // Report card carries its report_type. Do NOT auto-advance substatus — a
           // fresh report is unsubmitted; advancing to ready_to_invoice here would be
           // the exact unverified-advance hazard (request item 14). It starts at the
@@ -17625,29 +17684,12 @@ async function approveIntakeDraft(client: any, body: any) {
               updated_at: new Date().toISOString(),
             }).eq('job_id', secondaryJob.id)
           } catch (_) { /* non-blocking */ }
-          // Share the WO PDF onto the report card for on-site context.
-          for (const att of attachments) {
-            if (att.storage_url || att.pdf_url) {
-              try {
-                await client.from('job_documents').insert({
-                  job_id: secondaryJob.id,
-                  type: 'work_order',
-                  file_name: att.file_name || att.name || 'work-order.pdf',
-                  storage_url: att.storage_url || att.pdf_url,
-                  pdf_url: att.pdf_url || att.storage_url,
-                  ...(extraction?.synthetic_livefire_marker
-                    ? {
-                      data_snapshot_json: {
-                        synthetic_livefire_marker:
-                          extraction.synthetic_livefire_marker,
-                      },
-                    }
-                    : {}),
-                  visible_to_trades: true,
-                })
-              } catch (_) { /* non-blocking */ }
-            }
-          }
+          await ensureIntakeWorkOrderEvidence(
+            client,
+            [secondaryJob.id],
+            availableAttachments,
+            extraction,
+          )
           // Cross-link the pair (metadata sibling refs + a job_events note each) so
           // the board/trade view can see they came from one combined work order.
           await _crossLinkCombinedCards(
@@ -17658,9 +17700,23 @@ async function approveIntakeDraft(client: any, body: any) {
           )
         }
       } catch (splitErr) {
+        if (createdJobIds.length > 1) throw splitErr
         console.error('[ops-api] approveIntakeDraft: combined split — secondary report card creation failed (primary stands):', (splitErr as Error).message)
       }
     }
+
+    const { error: settlementError } = await client
+      .from('makesafe_intake_drafts')
+      .update({
+        extraction_json: {
+          ...extraction,
+          intake_minted_job_ids: createdJobIds,
+          intake_settlement_pending: false,
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', draft_id)
+    if (settlementError) throw settlementError
 
     return {
       ok: true,
@@ -17672,6 +17728,8 @@ async function approveIntakeDraft(client: any, body: any) {
       secondary_job: secondaryJob,
       split_combined: !!secondaryJob,
       job_ids: secondaryJob ? [jobResult.job.id, secondaryJob.id] : [jobResult.job.id],
+      job_created: true,
+      notification_job_ids: createdJobIds,
     }
   } catch (postClaimErr) {
     if (!createdJobId) {
@@ -17689,7 +17747,16 @@ async function approveIntakeDraft(client: any, body: any) {
       // audit/attach step failed.
       try {
         await client.from('makesafe_intake_drafts')
-          .update({ status: 'approved', approved_job_id: createdJobId, updated_at: new Date().toISOString() })
+          .update({
+            status: 'approved',
+            approved_job_id: createdJobId,
+            extraction_json: {
+              ...extraction,
+              intake_minted_job_ids: createdJobIds,
+              intake_settlement_pending: true,
+            },
+            updated_at: new Date().toISOString(),
+          })
           .eq('id', draft_id)
       } catch (_) { /* best-effort; do not mask the original error */ }
     }
@@ -18953,7 +19020,7 @@ async function scanFreshMakesafeSource(client: any, sourcePostId: string) {
   const rollout = await _loadDeterministicRolloutControls(client)
   const advanceDrafts = autoApproveCleanIntakeEnabled() &&
     await isAutoFileEnabled(client)
-  return await _runDeterministicIntake(client, {
+  const report = await _runDeterministicIntake(client, {
     dryRun: false,
     selectionMode: 'exact',
     days: 60,
@@ -18968,6 +19035,53 @@ async function scanFreshMakesafeSource(client: any, sourcePostId: string) {
       applyDeterministicBuilderCancellation(client, command),
     notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
   })
+  const { data: pendingDraft, error: pendingDraftError } = await client
+    .from('makesafe_intake_drafts')
+    .select('id')
+    .eq('status', 'approved')
+    .contains('extraction_json', {
+      deterministic_intake: true,
+      intake_source_post_ids: [sourcePostId],
+    })
+    .maybeSingle()
+  if (pendingDraftError) {
+    throw new Error(`fresh source settlement draft read failed: ${pendingDraftError.message || pendingDraftError}`)
+  }
+  if (pendingDraft?.id) {
+    const approved = await approveIntakeDraft(client, {
+      draft_id: pendingDraft.id,
+      approved_by: DETERMINISTIC_INTAKE_VERSION,
+      review_notes:
+        'Deterministic PDF handoff settlement retry for evidence and post-board notification.',
+    })
+    if (Number(report.totals.hugo_notifications_required || 0) === 0) {
+      const { data: caseSource, error: caseSourceError } = await client
+        .from('makesafe_intake_case_sources')
+        .select('case_id')
+        .eq('org_id', DEFAULT_ORG_ID)
+        .eq('post_id', sourcePostId)
+        .maybeSingle()
+      if (caseSourceError || !caseSource?.case_id) {
+        throw new Error(`fresh source settlement case read failed: ${caseSourceError?.message || sourcePostId}`)
+      }
+      for (const jobId of approved.notification_job_ids || []) {
+        report.totals.hugo_notifications_required++
+        const notification = await notifyMintedDeterministicPhysicalJob(client, {
+          caseId: caseSource.case_id,
+          sourcePostIds: [sourcePostId],
+          jobId,
+        })
+        if (notification.auditId) report.totals.hugo_notifications_recorded++
+        if (!notification.accepted) {
+          report.totals.hugo_notifications_failed++
+          throw new Error(`fresh source Hugo settlement failed: ${notification.reason}`)
+        }
+        report.totals.hugo_notifications_accepted++
+      }
+    }
+  }
+  await assertFreshMakesafeSourceSettled(client, sourcePostId, report)
+  return report
 }
 
 async function drainMakesafePdfExtraction(

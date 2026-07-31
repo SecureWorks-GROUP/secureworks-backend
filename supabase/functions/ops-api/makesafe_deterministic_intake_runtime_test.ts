@@ -1839,7 +1839,12 @@ Deno.test("standing intake consumes belt-extracted PDF text without fallback ext
   // The existing job-artifact seam still copies the uploaded PDF bytes once;
   // this invalid byte fixture proves the standing scanner does not invoke the
   // PDF parser again after the belt has persisted extracted text.
-  const client = fakeClient(store, [], undefined, () => new Uint8Array([1, 2, 3]));
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    () => new Uint8Array([1, 2, 3]),
+  );
   const report = await runDeterministicIntake(client, {
     dryRun: false,
     selectionMode: "exact",
@@ -1904,6 +1909,77 @@ Deno.test("active PDF belt state defers the exact case without fallback extracti
   );
 });
 
+Deno.test("PDF-belt and run-cap deferrals accumulate in one mixed scan", async () => {
+  const store = baseStore();
+  for (
+    const [postId, suffix, status] of [
+      ["mixed-pending", "26772", "processing"],
+      ["mixed-ready-1", "26773", "extracted"],
+      ["mixed-ready-2", "26774", "extracted"],
+    ]
+  ) {
+    store.emails.push(email({
+      post_id: postId,
+      subject: `NEW WORK ORDER MLB-${suffix} Work Order: WO-${suffix}`,
+      body_content:
+        `Client: Mixed ${suffix}\nAddress: ${suffix} Mixed Way, Perth\nPlease make safe.`,
+    }));
+    store.email_attachments.push({
+      id: `att-${postId}`,
+      email_id: postId,
+      name: "MLB Work Order.pdf",
+      content_type: "application/pdf",
+      storage_path: `raw/${postId}.pdf`,
+      status: "uploaded",
+      size_bytes: 1200,
+      pdf_extraction_status: status,
+      ...(status === "extracted"
+        ? {
+          pdf_extraction_text:
+            `Work Order Number MLB-${suffix}PO-${suffix}\nPolicyholders Name Mixed ${suffix}\nSite Address ${suffix} Mixed Way Perth WA\nScope of Works Make the property safe`,
+          pdf_extraction_char_count: 180,
+          pdf_extraction_page_count: 1,
+          pdf_extraction_extractor: "unpdf@1.6.2",
+          pdf_extraction_truncated: false,
+          pdf_extraction_reason: null,
+        }
+        : {}),
+    });
+  }
+  let approvals = 0;
+  const report = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: [
+      "mixed-pending",
+      "mixed-ready-1",
+      "mixed-ready-2",
+    ],
+    maxCases: 1,
+    approveDraft: () => {
+      approvals++;
+      return Promise.resolve({ job: { id: `mixed-job-${approvals}` } });
+    },
+    nowIso: NOW,
+  });
+
+  assertEquals(approvals, 1);
+  assertEquals(report.totals.cases_deferred, 2);
+  assertEquals(
+    store.email_events_raw
+      .filter((row) =>
+        row.change_type === "intake_deferred_pdf_extraction_pending" ||
+        row.change_type === "intake_deferred_run_cap_deferred"
+      )
+      .map((row) => row.change_type)
+      .sort(),
+    [
+      "intake_deferred_pdf_extraction_pending",
+      "intake_deferred_run_cap_deferred",
+    ],
+  );
+});
+
 Deno.test("portal capture is not a live blocker when the WO itself is absent", async () => {
   const store = baseStore();
   store.emails.push(email({
@@ -1923,7 +1999,10 @@ Deno.test("portal capture is not a live blocker when the WO itself is absent", a
     maxCases: 1,
     nowIso: NOW,
   });
-  assertEquals(report.by_builder_and_reason.mlb["missing:portal_capture"], undefined);
+  assertEquals(
+    report.by_builder_and_reason.mlb["missing:portal_capture"],
+    undefined,
+  );
   assertEquals(
     report.by_builder_and_reason.mlb.adapter_parse_failure,
     1,
@@ -4055,7 +4134,10 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
   let approvals = 0;
   const approving = () => {
     approvals++;
-    return Promise.resolve({ job: { id: "job-twin" } });
+    return Promise.resolve({
+      job: { id: "job-twin" },
+      notification_job_ids: ["job-twin"],
+    });
   };
   let notifications = 0;
   const notifyPhysicalJob = (_client: any, notification: any) => {
@@ -4088,6 +4170,7 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
   assertEquals(store.makesafe_intake_drafts[0].attachments_json.length, 1);
   assertEquals(approvals, 1);
   assertEquals(notifications, 1);
+  assertEquals(first.totals.hugo_notifications_required, 1);
   assertEquals(first.totals.hugo_notifications_recorded, 1);
   assertEquals(first.totals.hugo_notifications_accepted, 1);
   assertEquals(first.totals.hugo_notifications_failed, 0);
@@ -4135,7 +4218,7 @@ Deno.test("content ledger collapses twin PDFs and an exact run-twice creates no 
   }
 });
 
-Deno.test("report-family mint remains silent on the physical Hugo callback", async () => {
+Deno.test("report-family mint receives the job-keyed post-board Hugo notification", async () => {
   const store = baseStore();
   store.emails.push(email({
     post_id: "roof-report-silent",
@@ -4158,22 +4241,28 @@ Deno.test("report-family mint remains silent on the physical Hugo callback", asy
     selectionMode: "exact",
     allowSourcePostIds: ["roof-report-silent"],
     maxCases: 1,
-    approveDraft: () => Promise.resolve({ job: { id: "job-roof-report" } }),
+    approveDraft: () =>
+      Promise.resolve({
+        job: { id: "job-roof-report" },
+        notification_job_ids: ["job-roof-report"],
+      }),
     notifyPhysicalJob: () => {
       notifications++;
       return Promise.resolve({
         attempted: true,
         accepted: true,
         reason: "accepted",
-        auditId: "must-not-exist",
+        auditId: "audit-roof-report",
       });
     },
     nowIso: NOW,
   });
 
   assertEquals(report.totals.jobs_created, 1);
-  assertEquals(notifications, 0);
-  assertEquals(report.totals.hugo_notifications_recorded, 0);
+  assertEquals(notifications, 1);
+  assertEquals(report.totals.hugo_notifications_required, 1);
+  assertEquals(report.totals.hugo_notifications_recorded, 1);
+  assertEquals(report.totals.hugo_notifications_accepted, 1);
 });
 
 Deno.test("storage failure surfaces a storage blocker instead of staying silent", async () => {

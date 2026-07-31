@@ -105,7 +105,7 @@ export async function persistIntakeSourceIssue(
     );
   }
   const existing = (prior || []).find((row: any) =>
-    parseIntakeSourceIssueReason(row?.change_type)
+    parseIntakeSourceIssueReason(row?.change_type) === args.reason
   );
   if (existing) {
     return { created: false, changeType: String(existing.change_type) };

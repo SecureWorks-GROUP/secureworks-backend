@@ -128,6 +128,54 @@ DECLARE
   claim_token uuid := gen_random_uuid();
   claimed_rows integer := 0;
 BEGIN
+  WITH reusable AS (
+    SELECT DISTINCT ON (target.id)
+           target.id AS target_id,
+           source.pdf_extraction_status,
+           source.pdf_extraction_text,
+           source.pdf_extraction_char_count,
+           source.pdf_extraction_page_count,
+           source.pdf_extraction_extractor,
+           source.pdf_extraction_truncated,
+           source.pdf_extraction_reason,
+           source.pdf_extraction_completed_at
+      FROM public.email_attachments target
+      JOIN public.email_attachments source
+        ON NULLIF(source.sha256, '') = NULLIF(target.sha256, '')
+       AND source.id <> target.id
+       AND source.status = 'uploaded'
+       AND source.pdf_extraction_status IN ('extracted', 'quarantined')
+       AND COALESCE(source.pdf_extraction_reason, '') NOT LIKE 'retry_exhausted:download_failed:%'
+       AND COALESCE(source.pdf_extraction_reason, '') <> 'retry_exhausted:storage_path_missing'
+       AND COALESCE(source.pdf_extraction_reason, '') <> 'retry_exhausted:processing_lease_expired'
+     WHERE target.status = 'uploaded'
+       AND target.pdf_extraction_status IN ('pending', 'failed')
+     ORDER BY target.id,
+              CASE WHEN source.pdf_extraction_status = 'extracted' THEN 0 ELSE 1 END,
+              source.pdf_extraction_completed_at DESC NULLS LAST,
+              source.id
+  )
+  UPDATE public.email_attachments target
+     SET pdf_extraction_status = reusable.pdf_extraction_status,
+         pdf_extraction_text = reusable.pdf_extraction_text,
+         pdf_extraction_char_count = reusable.pdf_extraction_char_count,
+         pdf_extraction_page_count = reusable.pdf_extraction_page_count,
+         pdf_extraction_extractor = reusable.pdf_extraction_extractor,
+         pdf_extraction_truncated = reusable.pdf_extraction_truncated,
+         pdf_extraction_reason = reusable.pdf_extraction_reason,
+         pdf_extraction_claim_token = NULL,
+         pdf_extraction_started_at = NULL,
+         pdf_extraction_completed_at = reusable.pdf_extraction_completed_at,
+         pdf_extraction_next_attempt_at = NULL,
+         pdf_handoff_status = 'pending',
+         pdf_handoff_reason = NULL,
+         pdf_handoff_started_at = NULL,
+         pdf_handoff_completed_at = NULL,
+         pdf_handoff_next_attempt_at = NULL,
+         updated_at = now()
+    FROM reusable
+   WHERE target.id = reusable.target_id;
+
   UPDATE public.email_attachments
      SET pdf_extraction_status = 'quarantined',
          pdf_extraction_reason = 'retry_exhausted:processing_lease_expired',

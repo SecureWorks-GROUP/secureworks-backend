@@ -181,6 +181,7 @@ export interface DeterministicRuntimeReport {
     job_creation_deferred: number;
     components_failed: number;
     sources_quarantined: number;
+    hugo_notifications_required: number;
     hugo_notifications_recorded: number;
     hugo_notifications_accepted: number;
     hugo_notifications_failed: number;
@@ -1276,8 +1277,10 @@ function persistedPdfDocument(
     return pdfDocument(source, attachment, {
       status: "extracted",
       text: attachment.pdfExtractionText,
-      charCount: Number(attachment.pdfExtractionCharCount ||
-        attachment.pdfExtractionText.length),
+      charCount: Number(
+        attachment.pdfExtractionCharCount ||
+          attachment.pdfExtractionText.length,
+      ),
       pageCount: attachment.pdfExtractionPageCount ?? null,
       extractor: attachment.pdfExtractionExtractor || null,
       truncated: attachment.pdfExtractionTruncated === true,
@@ -1797,7 +1800,9 @@ async function persistPdfSourceIssues(
         ? "pdf_extraction_pending"
         : "pdf_extraction_cap";
       await persistIssueForSources(client, [source], reason, {
-        attachmentIds: documents.map((item) => item.attachmentId),
+        attachmentIds: documents.map((item) =>
+          item.attachmentId
+        ),
         attachmentNames: documents.map((item) =>
           item.attachmentName || "unnamed"
         ),
@@ -3359,6 +3364,7 @@ async function ensureDraftAndJob(
     jobId: string | null;
     draftCreated: boolean;
     jobCreated: boolean;
+    notificationJobIds: string[];
     resumed: boolean;
     parked: boolean;
   }
@@ -3406,6 +3412,7 @@ async function ensureDraftAndJob(
         }
         : {}),
       makesafe_job_family: plan.identity.jobFamily,
+      intake_source_post_ids: plan.sourcePostIds,
       builder_claim_ref: plan.identity.externalRefCanonical,
       builder_work_order_number: plan.identity.builderWoCanonical,
       builder_po_number: plan.identity.builderPoCanonical,
@@ -3481,10 +3488,30 @@ async function ensureDraftAndJob(
     }
   }
   if (draft.approved_job_id) {
+    if (approveDraft) {
+      const approved = await approveDraft(client, {
+        draft_id: draft.id,
+        approved_by: DETERMINISTIC_INTAKE_VERSION,
+        review_notes:
+          "Deterministic intake settlement retry for work-order evidence and post-board notification.",
+      });
+      const jobId = approved?.job?.id || draft.approved_job_id;
+      return {
+        jobId,
+        draftCreated,
+        jobCreated: approved?.job_created === true,
+        notificationJobIds: Array.isArray(approved?.notification_job_ids)
+          ? approved.notification_job_ids
+          : [],
+        resumed: true,
+        parked: false,
+      };
+    }
     return {
       jobId: draft.approved_job_id,
       draftCreated,
       jobCreated: false,
+      notificationJobIds: [],
       resumed: true,
       parked: false,
     };
@@ -3496,6 +3523,7 @@ async function ensureDraftAndJob(
         jobId: refreshed.approved_job_id,
         draftCreated,
         jobCreated: false,
+        notificationJobIds: [],
         resumed: true,
         parked: false,
       };
@@ -3509,6 +3537,7 @@ async function ensureDraftAndJob(
       jobId: null,
       draftCreated,
       jobCreated: false,
+      notificationJobIds: [],
       resumed: !draftCreated,
       parked: true,
     };
@@ -3529,7 +3558,10 @@ async function ensureDraftAndJob(
   return {
     jobId,
     draftCreated,
-    jobCreated: true,
+    jobCreated: approved?.job_created !== false,
+    notificationJobIds: Array.isArray(approved?.notification_job_ids)
+      ? approved.notification_job_ids
+      : [],
     resumed: !draftCreated,
     parked: false,
   };
@@ -4276,6 +4308,7 @@ export async function runDeterministicIntake(
       sources_quarantined: new Set(
         isolatedFailures.flatMap((failure) => failure.source_post_ids),
       ).size,
+      hugo_notifications_required: 0,
       hugo_notifications_recorded: 0,
       hugo_notifications_accepted: 0,
       hugo_notifications_failed: 0,
@@ -4653,6 +4686,7 @@ export async function runDeterministicIntake(
       let resumedCase = saved.resumed;
       if (saved.caseCreated) report.totals.case_rows_created++;
       report.totals.source_rows_created += saved.sourceCreated;
+      let notificationSettlementComplete = true;
       const wantsJob = !jobId && !lifecycleReopen &&
         (effectivePlan.state === "confirmed_live_job" ||
           effectivePlan.state === "blocked_live_job");
@@ -4700,23 +4734,28 @@ export async function runDeterministicIntake(
             true,
           );
         }
-        // The deterministic case deliberately suppresses the legacy pre-job
-        // manager side effect. A newly minted physical job gets exactly one
-        // replacement notification only after the canonical case/job linkage has
-        // committed. Synthetic live-fire is suppressed before the callback so no
-        // board/config/audit/transport work can occur for lab traffic.
-        if (
-          live.jobCreated && jobId &&
-          // Report-family jobs are deliberately silent; the post-board Hugo contract covers newly minted physical jobs only.
-          !deterministicPrimaryIsReportOnly(effectivePlan) &&
-          !effectivePlan.identity.syntheticLivefireMarker &&
-          options.notifyPhysicalJob
+        // Job-keyed post-board notification makes newly live SES/insurance work consistently queryable across every family; source retries and later lifecycle updates never create another notification.
+        for (
+          const notificationJobId of effectivePlan.identity
+              .syntheticLivefireMarker
+            ? []
+            : live.notificationJobIds
         ) {
+          report.totals.hugo_notifications_required++;
+          if (!options.notifyPhysicalJob) {
+            notificationSettlementComplete = false;
+            report.totals.hugo_notifications_failed++;
+            report.write_failure_reasons.hugo_notification_callback_missing =
+              (report.write_failure_reasons
+                .hugo_notification_callback_missing ||
+                0) + 1;
+            continue;
+          }
           try {
             const notification = await options.notifyPhysicalJob(client, {
               caseId: saved.caseRow.id,
               sourcePostIds: effectivePlan.sourcePostIds,
-              jobId,
+              jobId: notificationJobId,
               syntheticLivefireMarker:
                 effectivePlan.identity.syntheticLivefireMarker,
             });
@@ -4725,7 +4764,8 @@ export async function runDeterministicIntake(
             }
             if (notification.accepted) {
               report.totals.hugo_notifications_accepted++;
-            } else if (notification.reason !== "already_recorded") {
+            } else {
+              notificationSettlementComplete = false;
               report.totals.hugo_notifications_failed++;
               report.write_failure_reasons.hugo_notification_failed =
                 (report.write_failure_reasons.hugo_notification_failed || 0) +
@@ -4737,6 +4777,7 @@ export async function runDeterministicIntake(
               }
             }
           } catch {
+            notificationSettlementComplete = false;
             report.totals.hugo_notifications_failed++;
             report.write_failure_reasons.hugo_notification_callback_failed =
               (report.write_failure_reasons.hugo_notification_callback_failed ||
@@ -4763,7 +4804,8 @@ export async function runDeterministicIntake(
       // be able to re-read the original instruction alongside the late work order in
       // order to promote the case. A case that already produced a live job is not
       // awaiting anything, so it settles even when downgraded to an exception.
-      const settled = saved.caseRow.state !== "exception" || Boolean(jobId);
+      const settled = (saved.caseRow.state !== "exception" || Boolean(jobId)) &&
+        notificationSettlementComplete;
       if (!settled) continue;
       for (const ids of chunk(effectivePlan.sourcePostIds)) {
         const { error } = await client.from("emails")
@@ -4794,7 +4836,7 @@ export async function runDeterministicIntake(
   }
   report.totals.cases_attempted = attempted;
   const deferred = ordered.slice(attempted);
-  report.totals.cases_deferred = deferred.length;
+  report.totals.cases_deferred += deferred.length;
   for (const casePlan of deferred) {
     const sources = casePlan.sourcePostIds.flatMap((postId) => {
       const source = sourceMap.get(postId);
@@ -4806,7 +4848,11 @@ export async function runDeterministicIntake(
   }
   report.attempt_cap_reached_without_commit = attempted >= maxAttempts &&
     committed === 0;
-  if (report.totals.write_failures > 0 || report.totals.cases_failed > 0) {
+  if (
+    report.totals.write_failures > 0 ||
+    report.totals.cases_failed > 0 ||
+    report.totals.hugo_notifications_failed > 0
+  ) {
     report.completion_status = "completed_degraded";
     // This invocation completed and wrote truthful degraded health, so advance
     // rather than letting one poison case pin every older page. The full sweep
