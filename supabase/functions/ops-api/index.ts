@@ -26425,15 +26425,15 @@ export async function searchAllJobs(
       }
       delete job.org_id
     }
-    const hasMore = capped || offset + jobs.length < materialized.length
+    const canFetchMore = offset + jobs.length < materialized.length
     return {
       jobs,
       lens,
       total: materialized.length,
       page_size: pageSize,
       offset,
-      truncated: hasMore,
-      next_offset: hasMore ? offset + pageSize : null,
+      truncated: capped || canFetchMore,
+      next_offset: canFetchMore ? offset + pageSize : null,
     }
   }
 

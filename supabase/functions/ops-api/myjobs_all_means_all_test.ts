@@ -765,6 +765,36 @@ Deno.test("All tab: paging never returns the same job on two pages", async () =>
   assertEquals(new Set(seen).size, total, "every job appears exactly once across the pages");
 });
 
+Deno.test("search: a capped result keeps truncation honest without looping", async () => {
+  const fixtures: Fixtures = {
+    assignments: [],
+    jobs: Array.from({ length: 501 }, (_, i) => ({
+      id: `00000000-0000-0000-0000-${String(i + 300).padStart(12, "0")}`,
+      type: "fencing",
+      status: "quoted",
+      client_name: "needle result",
+      created_at: `2026-01-${String((i % 28) + 1).padStart(2, "0")}T00:00:00Z`,
+    })),
+  };
+  const pages: Array<{ jobs: Job[]; truncated: boolean; next_offset: number | null }> = [];
+  let offset = 0;
+  for (let i = 0; i < 10; i++) {
+    const page = await searchAllJobs(
+      makeClient(fixtures),
+      new URLSearchParams({ q: "needle", page_size: "200", offset: String(offset) }),
+      viewer(),
+      true,
+    );
+    pages.push(page as typeof pages[number]);
+    assertEquals(page.jobs.length > 0, true, "a continuation never returns an empty page");
+    assertEquals(page.truncated, true, "the cap remains visible to the client");
+    if (page.next_offset === null) break;
+    offset = page.next_offset;
+  }
+  assertEquals(pages.length, 3, "the walk reaches the cap and terminates");
+  assertEquals(pages.at(-1)?.next_offset, null);
+});
+
 Deno.test("All tab: external-ref matches are stable across pages and counted", async () => {
   const externalId = "00000000-0000-0000-0000-000000000099";
   const fixtures: Fixtures = {
