@@ -78,8 +78,19 @@ Deno.test("mint reservation rejects source authority outside the canonical case"
     closureMigration,
     "FROM unnest(COALESCE(p_source_post_ids, '{}')) AS source(post_id)",
   );
-  assertStringIncludes(closureMigration, "s.case_id = p_case_id");
   assertStringIncludes(closureMigration, "s.post_id = source.post_id");
+  assertStringIncludes(
+    closureMigration,
+    "LEFT JOIN public.makesafe_intake_source_authority_corrections c",
+  );
+  assertStringIncludes(
+    closureMigration,
+    "LEFT JOIN public.makesafe_intake_source_authority_correction_supersessions x",
+  );
+  assertStringIncludes(
+    closureMigration,
+    "COALESCE(\n            x.effective_case_id,\n            c.effective_case_id,\n            s.case_id\n          ) = p_case_id",
+  );
   assertStringIncludes(
     closureMigration,
     "source authority does not belong to intake case",

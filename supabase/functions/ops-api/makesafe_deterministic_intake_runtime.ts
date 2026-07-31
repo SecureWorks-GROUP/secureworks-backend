@@ -1151,6 +1151,87 @@ async function resolvePersistedSourceAuthorities(
   };
 }
 
+export async function resolveDeterministicDraftMintAuthority(
+  client: any,
+  input: {
+    deterministicKey?: string | null;
+    sourcePostIds?: readonly string[];
+  },
+): Promise<{ caseId: string; sourcePostIds: string[] } | null> {
+  let sourcePostIds = [
+    ...new Set(
+      (input.sourcePostIds || [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  ].sort();
+
+  if (!sourcePostIds.length) {
+    const deterministicKey = String(input.deterministicKey || "").trim();
+    const instructionKeys = [
+      ...new Set([
+        deterministicKey,
+        deterministicKey.startsWith("draft:")
+          ? deterministicKey.slice("draft:".length)
+          : "",
+      ].filter(Boolean)),
+    ];
+    if (instructionKeys.length) {
+      const { data, error } = await client.from("makesafe_intake_cases")
+        .select("id,instruction_key")
+        .eq("org_id", DEFAULT_ORG_ID)
+        .in("instruction_key", instructionKeys);
+      if (error) {
+        throw new Error(
+          `deterministic draft authority case read failed: ${
+            error.message || error
+          }`,
+        );
+      }
+      const preferredInstructionKey = deterministicKey.startsWith("draft:")
+        ? deterministicKey.slice("draft:".length)
+        : deterministicKey;
+      const intakeCase = (data || []).find(
+        (row: any) => row?.instruction_key === preferredInstructionKey,
+      ) || (data || [])[0];
+      if (intakeCase?.id) {
+        const persistedSources = await readPersistedSourcePostIds(
+          client,
+          [intakeCase.id],
+        );
+        sourcePostIds = [
+          ...new Set(persistedSources.get(intakeCase.id) || []),
+        ].sort();
+      }
+    }
+  }
+
+  if (!sourcePostIds.length) return null;
+  const resolved = await resolvePersistedSourceAuthorities(
+    client,
+    sourcePostIds,
+  );
+  const caseIds = new Set<string>();
+  for (const sourcePostId of sourcePostIds) {
+    const authority = resolved.byPostId.get(sourcePostId);
+    if (!authority?.id) {
+      throw new Error(
+        "deterministic draft source does not have canonical case authority",
+      );
+    }
+    caseIds.add(authority.id);
+  }
+  if (caseIds.size !== 1) {
+    throw new Error(
+      "deterministic draft sources resolve to multiple canonical cases",
+    );
+  }
+  return {
+    caseId: [...caseIds][0],
+    sourcePostIds,
+  };
+}
+
 // Live scanning and dark observation sweep the same window independently, so each
 // owns its own position. Sharing one column would make a live run skip rows an
 // observe run had already passed, and would make pre-cutover observation depend on

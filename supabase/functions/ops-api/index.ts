@@ -254,6 +254,7 @@ import {
 } from './makesafe_intake_golden_replay.ts'
 import {
   loadDeterministicRolloutControls as _loadDeterministicRolloutControls,
+  resolveDeterministicDraftMintAuthority as _resolveDeterministicDraftMintAuthority,
   runDeterministicIntake as _runDeterministicIntake,
 } from './makesafe_deterministic_intake_runtime.ts'
 import {
@@ -17216,31 +17217,38 @@ async function intakeMintAuthority(
   const extractedSourcePostIds = parseJsonArray(
     extraction?.intake_source_post_ids,
   ).map((value: any) => String(value || '').trim()).filter(Boolean)
+  const evidenceSourcePostIds = [
+    ...parseJsonArray(extraction?.work_order_pdf_text)
+      .map((value: any) => value?.source_post_id),
+    ...parseJsonArray(extraction?.story)
+      .map((value: any) => value?.sourcePostId),
+    ...parseJsonArray(extraction?.recovery_cursor?.searchedSourcePostIds),
+    ...parseJsonArray(extraction?.evidence_map).flatMap((entry: any) => [
+      ...parseJsonArray(entry?.searchedSourcePostIds),
+      ...parseJsonArray(entry?.evidence)
+        .map((value: any) => value?.sourcePostId),
+    ]),
+  ].map((value: any) => String(value || '').trim()).filter(Boolean)
+  const graphMessageId = String(draft?.graph_message_id || '').trim()
   const sourcePostIds = Array.from(new Set(
     reviewedSourcePostIds.length
       ? reviewedSourcePostIds
       : extractedSourcePostIds.length
       ? extractedSourcePostIds
-      : [String(draft?.graph_message_id || '').trim()].filter(Boolean),
+      : evidenceSourcePostIds.length
+      ? evidenceSourcePostIds
+      : graphMessageId && !graphMessageId.startsWith('deterministic:')
+      ? [graphMessageId]
+      : [],
   )).sort()
-  let caseId = cleanReviewedString(body?.intake_case_id)
-  if (!caseId && sourcePostIds.length) {
-    const { data, error } = await client
-      .from('makesafe_intake_case_sources')
-      .select('case_id')
-      .eq('org_id', draft.org_id || DEFAULT_ORG_ID)
-      .in('post_id', sourcePostIds)
-      .limit(1)
-      .maybeSingle()
-    if (error) {
-      throw new Error(`intake mint case authority read failed: ${error.message || error}`)
-    }
-    caseId = data?.case_id || null
-  }
-  if (!caseId || !sourcePostIds.length) {
+  const authority = await _resolveDeterministicDraftMintAuthority(client, {
+    deterministicKey: draft?.deterministic_key,
+    sourcePostIds,
+  })
+  if (!authority) {
     throw new Error('new intake job mint requires canonical case and source authority')
   }
-  return { caseId, sourcePostIds }
+  return authority
 }
 export const _intakeMintAuthorityForTest = intakeMintAuthority
 

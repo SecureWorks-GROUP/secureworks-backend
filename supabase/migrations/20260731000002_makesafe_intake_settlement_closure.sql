@@ -813,9 +813,31 @@ BEGIN
       WHERE NOT EXISTS (
         SELECT 1
         FROM public.makesafe_intake_case_sources s
+        LEFT JOIN public.makesafe_intake_source_authority_corrections c
+          ON c.org_id = s.org_id
+         AND c.source_post_id = s.post_id
+        LEFT JOIN public.makesafe_intake_source_authority_correction_supersessions x
+          ON x.org_id = s.org_id
+         AND x.source_post_id = s.post_id
         WHERE s.org_id = p_org_id
-          AND s.case_id = p_case_id
           AND s.post_id = source.post_id
+          AND (
+            c.legacy_case_id IS NULL
+            OR c.legacy_case_id = s.case_id
+          )
+          AND (
+            x.id IS NULL
+            OR (
+              x.superseded_correction_id = c.id
+              AND x.prior_authority_case_id =
+                COALESCE(c.effective_case_id, s.case_id)
+            )
+          )
+          AND COALESCE(
+            x.effective_case_id,
+            c.effective_case_id,
+            s.case_id
+          ) = p_case_id
       )
     )
   ) THEN
