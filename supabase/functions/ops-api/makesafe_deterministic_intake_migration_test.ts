@@ -197,7 +197,10 @@ Deno.test("intake settlement is retryable and Hugo idempotency is job-keyed", ()
   assertStringIncludes(index, "ensureIntakeWorkOrderEvidence(");
   assertStringIncludes(index, "intake_minted_job_ids");
   assertStringIncludes(index, "intake_settlement_pending: true");
-  assertStringIncludes(index, "notification_job_ids: settlement.notificationJobIds");
+  assertStringIncludes(
+    index,
+    "notification_job_ids: settlement.notificationJobIds",
+  );
   assertStringIncludes(runtime, "intake_source_post_ids: plan.sourcePostIds");
   assertStringIncludes(index, "assertFreshMakesafeSourceSettled");
   assertStringIncludes(

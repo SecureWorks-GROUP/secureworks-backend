@@ -61,8 +61,8 @@ After cutover this seam explicitly subsumes these current truth surfaces:
    rather than exposed as an org-pinned view. The existing 500/1,000-row truncation
    hazard is explicitly routed to U7; U1 does not edit that active reader.
 3. Ref/message-grain `makesafe_notify_log.dedup_key` is replaced by the
-   lineage-grain notification ledger. The deterministic physical Hugo
-   notification contract is owned by
+   job-keyed notification ledger. The deterministic Hugo notification contract
+   is owned by
    `docs/evidence/ses-hugo-notification-sla-v1.md`.
 4. Board `known_refs` draft joins are replaced by case-to-job/source joins.
 
@@ -185,8 +185,8 @@ with later route-gated server commands.
 Backfill decisions require `provenance='backfill'` and
 `side_effects_suppressed=true`. Natural-key `ON CONFLICT DO NOTHING` means a
 second run writes no case, source or event rows. The U1 helper contract proves
-zero effect writes; the separate deterministic physical Hugo notification
-emitter owns its post-board audit and transport contract.
+zero effect writes; the separate deterministic Hugo notification emitter owns
+its post-board audit and transport contract.
 
 ## Later consumers
 
@@ -209,8 +209,9 @@ server boundary. No cross-table U1 trigger performs those visible mutations.
 ### Read models
 
 Later board/card reads join case to job, sources and events. They query
-`(org_id, state, received_at)`, use `lineage_id` for grouping and notification
-grain, and never infer sameness from claim ref alone.
+`(org_id, state, received_at)`, use `lineage_id` for grouping, and never infer
+sameness from claim ref alone. The linked Hugo seam owns the separate job-keyed
+notification grain.
 
 ## Test kit and hostile fixtures
 

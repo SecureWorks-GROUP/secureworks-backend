@@ -632,16 +632,18 @@ guarded. Mutable residue is deleted; append-only/group evidence is retained only
 after terminal accounting excludes it from live boards, projections, and
 fresh-source health.
 
-## Deterministic Physical Intake Notifies After Board Proof
+## Deterministic Intake Notifies After Board Proof
 
 The post-mint Hugo notification and honest five-minute denominator are owned by
 `makesafe_hugo_notification.ts`,
 `20260729010000_makesafe_hugo_notification_sla_v1.sql`, and
-`docs/evidence/ses-hugo-notification-sla-v1.md`. Notify only a newly minted
-physical job after the canonical server board contains it, resolve the one
-recipient from staff/config authority, and persist the pre-send audit claim
-before GHL. Synthetic live-fire must short-circuit before board, config, audit,
-or transport work. Apply the migration before its matching `ops-api`.
+`docs/evidence/ses-hugo-notification-sla-v1.md`. Notify only a job with explicit
+deterministic mint authority after the canonical server board contains it,
+resolve the one recipient from staff/config authority, and persist the
+once-per-job pre-send audit claim before GHL. Synthetic live-fire must
+short-circuit before board, config, audit, or transport work. The ordered
+extraction-belt and settlement release sequence lives in
+`docs/evidence/makesafe-pdf-extraction-belt-2026-07-31.md`.
 
 ## Trade App Visibility Contract
 

@@ -146,10 +146,13 @@ Deno.test("fresh PDF extraction handoff carries one attachment id and remains no
   assert(registered);
   await registered;
   assertEquals(request?.method, "POST");
-  assertEquals(request?.body, JSON.stringify({
-    attachment_id: "attachment-19475",
-    lane: "fresh",
-  }));
+  assertEquals(
+    request?.body,
+    JSON.stringify({
+      attachment_id: "attachment-19475",
+      lane: "fresh",
+    }),
+  );
 });
 
 Deno.test("fresh PDF scheduling collapses duplicate transport rows by SHA", () => {
@@ -172,10 +175,13 @@ Deno.test("fresh PDF continuation surfaces a durable application handoff failure
   _schedulePdfExtractionContinuation(
     (() =>
       Promise.resolve(
-        new Response(JSON.stringify({
-          outcome: "extracted",
-          scan_error: "classifier_handoff_failed:board unavailable",
-        }), { status: 200 }),
+        new Response(
+          JSON.stringify({
+            outcome: "extracted",
+            scan_error: "classifier_handoff_failed:board unavailable",
+          }),
+          { status: 200 },
+        ),
       )) as typeof fetch,
     (promise) => registered = promise,
     "https://example.invalid/ops-api?action=makesafe_pdf_extraction_drain",

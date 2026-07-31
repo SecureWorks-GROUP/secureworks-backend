@@ -23,6 +23,7 @@
 //   - Attachment BYTES never returned, never logged.
 //   - sync_state.mode = DEGRADED while any attachment pending/failed.
 
+// deno-lint-ignore no-import-prefix
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { getGraphToken, graphFetch } from "../_shared/graph_client.ts";
 
@@ -70,8 +71,8 @@ const SW_API_KEY = Deno.env.get("SW_API_KEY") || "";
 // stubbed otherwise). Production leaves it null and the real createClient is used.
 // deno-lint-ignore no-explicit-any
 let _testClientFactory: ((url: string, key: string) => any) | null = null;
-// deno-lint-ignore no-explicit-any
 function _setTestClientFactory(
+  // deno-lint-ignore no-explicit-any
   f: ((url: string, key: string) => any) | null,
 ): void {
   _testClientFactory = f;
@@ -1020,6 +1021,7 @@ interface PdfExtractionCoordinate {
 }
 
 async function pendingPdfExtractionCoordinates(
+  // deno-lint-ignore no-explicit-any
   sb: any,
   postId: string,
 ): Promise<PdfExtractionCoordinate[]> {
@@ -2033,6 +2035,7 @@ export interface IntakeScanOutcome {
 type IntakeSourceFate = "reason_coded_exception" | "deferred_next_run";
 
 async function recordIntakeSourceFates(
+  // deno-lint-ignore no-explicit-any
   sb: any,
   sources: readonly IntakeHandoffSource[],
   fate: IntakeSourceFate,
@@ -2110,6 +2113,7 @@ async function recordIntakeSourceFates(
 }
 
 async function recordIntakeSourceExceptions(
+  // deno-lint-ignore no-explicit-any
   sb: any,
   sources: readonly IntakeHandoffSource[],
   reasonCode: string,
@@ -2127,6 +2131,7 @@ async function recordIntakeSourceExceptions(
 }
 
 async function recordIntakeHealthDegradation(
+  // deno-lint-ignore no-explicit-any
   sb: any,
   reasonCode: string,
   nowIso = new Date().toISOString(),
@@ -2190,6 +2195,7 @@ async function recordIntakeScanFailure(
 }
 
 async function recordPdfExtractionHandoffFailure(
+  // deno-lint-ignore no-explicit-any
   sb: any,
   attachmentId: string,
   failure: IntakeScanContinuationFailure,
@@ -2214,7 +2220,9 @@ async function recordPdfExtractionHandoffFailure(
     source: "monitor-ses-makesafes",
     entity_type: "email_attachment",
     entity_id: attachmentId,
-    body_preview: `PDF extraction worker handoff failed (${failure.kind}${failure.status === null ? "" : ` ${failure.status}`}); row remains queued for retry.`,
+    body_preview: `PDF extraction worker handoff failed (${failure.kind}${
+      failure.status === null ? "" : ` ${failure.status}`
+    }); row remains queued for retry.`,
     safe_summary: `PDF extraction worker handoff failed: ${reasonCode}`,
     payload: {
       attachment_id: attachmentId,
@@ -2234,6 +2242,7 @@ async function recordPdfExtractionHandoffFailure(
 }
 
 async function recordIntakeSourceDeferrals(
+  // deno-lint-ignore no-explicit-any
   sb: any,
   sources: readonly IntakeHandoffSource[],
   reasonCode: string,
@@ -2251,6 +2260,7 @@ async function recordIntakeSourceDeferrals(
 }
 
 async function findIntakeSourcesWithoutCase(
+  // deno-lint-ignore no-explicit-any
   sb: any,
   sources: readonly IntakeHandoffSource[],
 ): Promise<IntakeHandoffSource[]> {
@@ -2659,6 +2669,7 @@ async function handler(req: Request): Promise<Response> {
     // cancel a scan between its source read and completion checkpoint.
     const opsApiUrl =
       `${SUPABASE_URL}/functions/v1/ops-api?action=scan_ses_makesafes`;
+    // deno-lint-ignore no-explicit-any
     const edgeRuntime = (globalThis as any).EdgeRuntime;
     if (typeof edgeRuntime?.waitUntil !== "function") {
       console.error(
@@ -2860,8 +2871,8 @@ export {
   isPdfMagic as _isPdfMagic,
   loadCompanyPatterns as _loadCompanyPatterns,
   normaliseRef as _normaliseRef,
-  pendingPdfExtractionCoordinates as _pendingPdfExtractionCoordinates,
   parseSenderDomain as _parseSenderDomain,
+  pendingPdfExtractionCoordinates as _pendingPdfExtractionCoordinates,
   persistPost as _persistPost,
   processAttachments as _processAttachments,
   recordIntakeScanFailure as _recordIntakeScanFailure,

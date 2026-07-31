@@ -1956,7 +1956,7 @@ function instructionDiscriminator(item: AdaptedSource): string {
 }
 
 function manifestFor(
-  identity: ExtractedIdentity,
+  _identity: ExtractedIdentity,
   intent: AdaptedSource["intent"],
 ): ManifestRequirement[] {
   if (intent === "chatter") {

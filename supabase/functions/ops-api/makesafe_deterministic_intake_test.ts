@@ -725,26 +725,31 @@ Deno.test("MLB parked WO fixtures become live from the uploaded PDF without port
       subject: "NEW WORK ORDER MLB-26836 Work Order: MLB-26836 PO: 56337",
       receivedAt: "2026-07-31T01:00:34.000Z",
     },
-  ].map((fixture) => source({
-    ...fixture,
-    fromEmail: "dispatch@mlb.test",
-    body:
-      "Client: Builder Client\nSite Address: 1 Example Street, Perth\nPhone: 0400000000\nThe attached work order is ready.",
-    attachments: [pdf(fixture.postId, `${fixture.postId}-wo`)],
-    pdfDocuments: [{
-      sourcePostId: fixture.postId,
-      attachmentId: `${fixture.postId}-wo`,
-      attachmentName: `work_order_${fixture.postId}_Secureworks_Group_Pty_Ltd.pdf`,
-      status: "extracted",
-      text: `Work Order Number ${fixture.postId === "MLB-RR-26836" ? "MLB-26836" : "MLB-19475"}\nClient: Builder Client\nSite Address: 1 Example Street, Perth\nMobile: 0400000000\nScope of Works: Make the property safe`,
-      charCount: 180,
-      pageCount: 1,
-      extractor: "belt-fixture",
-      truncated: false,
-      reason: null,
-    }],
-    links: [],
-  }));
+  ].map((fixture) =>
+    source({
+      ...fixture,
+      fromEmail: "dispatch@mlb.test",
+      body:
+        "Client: Builder Client\nSite Address: 1 Example Street, Perth\nPhone: 0400000000\nThe attached work order is ready.",
+      attachments: [pdf(fixture.postId, `${fixture.postId}-wo`)],
+      pdfDocuments: [{
+        sourcePostId: fixture.postId,
+        attachmentId: `${fixture.postId}-wo`,
+        attachmentName:
+          `work_order_${fixture.postId}_Secureworks_Group_Pty_Ltd.pdf`,
+        status: "extracted",
+        text: `Work Order Number ${
+          fixture.postId === "MLB-RR-26836" ? "MLB-26836" : "MLB-19475"
+        }\nClient: Builder Client\nSite Address: 1 Example Street, Perth\nMobile: 0400000000\nScope of Works: Make the property safe`,
+        charCount: 180,
+        pageCount: 1,
+        extractor: "belt-fixture",
+        truncated: false,
+        reason: null,
+      }],
+      links: [],
+    })
+  );
 
   const plan = buildDeterministicIntakePlan(fixtures, PROFILES);
   assertEquals(plan.cases.length, 2);

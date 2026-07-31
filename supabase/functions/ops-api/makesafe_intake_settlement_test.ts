@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-import-prefix no-explicit-any
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 
 import {
   assertEquals,

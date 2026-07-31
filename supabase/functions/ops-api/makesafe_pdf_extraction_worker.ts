@@ -1,8 +1,5 @@
-// deno-lint-ignore-file no-explicit-any no-import-prefix
-import {
-  extractPdfText,
-  PDF_TEXT_MAX_BYTES,
-} from "./makesafe_pdf_text.ts";
+// deno-lint-ignore-file no-explicit-any
+import { extractPdfText, PDF_TEXT_MAX_BYTES } from "./makesafe_pdf_text.ts";
 
 const STORAGE_BUCKET = "makesafe-emails";
 const RETRY_DELAY_MS = 2 * 60 * 1000;
@@ -94,7 +91,9 @@ async function updateExtraction(
   );
   if (error) {
     throw new Error(
-      `pdf extraction result write failed for ${row.id}: ${error.message || error}`,
+      `pdf extraction result write failed for ${row.id}: ${
+        error.message || error
+      }`,
     );
   }
   const carriers = (data || []) as ClaimedCarrier[];
@@ -154,12 +153,10 @@ function resultWithEta(
   return {
     ...result,
     remaining_backlog: estimate.remaining,
-    drain_eta_at: estimate.minutes === null
-      ? null
-      : isoAfter(
-        now,
-        Math.ceil(estimate.minutes / DRAIN_RATE_PER_MINUTE) * 60_000,
-      ),
+    drain_eta_at: estimate.minutes === null ? null : isoAfter(
+      now,
+      Math.ceil(estimate.minutes / DRAIN_RATE_PER_MINUTE) * 60_000,
+    ),
   };
 }
 
@@ -229,14 +226,18 @@ export async function drainMakesafePdfExtraction(
     input.freshOnly === true,
   );
   if (!row) {
-    return resultWithEta({
-      outcome: "no_work",
-      attachment_id: null,
-      source_post_id: null,
-      reason: null,
-      char_count: 0,
-      extractor: null,
-    }, await backlogEstimate(client), clock);
+    return resultWithEta(
+      {
+        outcome: "no_work",
+        attachment_id: null,
+        source_post_id: null,
+        reason: null,
+        char_count: 0,
+        extractor: null,
+      },
+      await backlogEstimate(client),
+      clock,
+    );
   }
 
   if (
@@ -254,15 +255,19 @@ export async function drainMakesafePdfExtraction(
         true,
       );
     }
-    return resultWithEta({
-      outcome: row.pdf_extraction_status as "extracted" | "quarantined",
-      attachment_id: row.id,
-      source_post_id: row.email_id,
-      reason: null,
-      char_count: 0,
-      extractor: null,
-      ...(scanError ? { scan_error: scanError } : {}),
-    }, await backlogEstimate(client), now());
+    return resultWithEta(
+      {
+        outcome: row.pdf_extraction_status as "extracted" | "quarantined",
+        attachment_id: row.id,
+        source_post_id: row.email_id,
+        reason: null,
+        char_count: 0,
+        extractor: null,
+        ...(scanError ? { scan_error: scanError } : {}),
+      },
+      await backlogEstimate(client),
+      now(),
+    );
   }
 
   const finish = async (
@@ -304,15 +309,21 @@ export async function drainMakesafePdfExtraction(
         if (scanError) scanErrors.push(scanError);
       }
     }
-    return resultWithEta({
-      outcome: settledOutcome,
-      attachment_id: row.id,
-      source_post_id: row.email_id,
-      reason: settledReason,
-      char_count: Number(values.pdf_extraction_char_count || 0),
-      extractor: String(values.pdf_extraction_extractor || "") || null,
-      ...(scanErrors.length ? { scan_error: scanErrors.join(";").slice(0, 500) } : {}),
-    }, await backlogEstimate(client), completedAt);
+    return resultWithEta(
+      {
+        outcome: settledOutcome,
+        attachment_id: row.id,
+        source_post_id: row.email_id,
+        reason: settledReason,
+        char_count: Number(values.pdf_extraction_char_count || 0),
+        extractor: String(values.pdf_extraction_extractor || "") || null,
+        ...(scanErrors.length
+          ? { scan_error: scanErrors.join(";").slice(0, 500) }
+          : {}),
+      },
+      await backlogEstimate(client),
+      completedAt,
+    );
   };
 
   if (!row.storage_path) {
@@ -331,7 +342,10 @@ export async function drainMakesafePdfExtraction(
     if (downloaded.error || !downloaded.data) {
       return await finish(
         "failed",
-        `download_failed:${downloaded.error?.message || "no blob"}`.slice(0, 500),
+        `download_failed:${downloaded.error?.message || "no blob"}`.slice(
+          0,
+          500,
+        ),
       );
     }
     blob = downloaded.data;
@@ -349,15 +363,17 @@ export async function drainMakesafePdfExtraction(
     }
     const extracted = await (deps.extract || extractPdfText)(bytes);
     const usable = extracted.mode === "text";
-    return await finish(usable ? "extracted" : "quarantined", usable
-      ? null
-      : extracted.note || "no_usable_text", {
-      pdf_extraction_text: usable ? extracted.text : null,
-      pdf_extraction_char_count: extracted.charCount,
-      pdf_extraction_page_count: extracted.pageCount ?? null,
-      pdf_extraction_extractor: extracted.extractor ?? null,
-      pdf_extraction_truncated: extracted.truncated === true,
-    });
+    return await finish(
+      usable ? "extracted" : "quarantined",
+      usable ? null : extracted.note || "no_usable_text",
+      {
+        pdf_extraction_text: usable ? extracted.text : null,
+        pdf_extraction_char_count: extracted.charCount,
+        pdf_extraction_page_count: extracted.pageCount ?? null,
+        pdf_extraction_extractor: extracted.extractor ?? null,
+        pdf_extraction_truncated: extracted.truncated === true,
+      },
+    );
   } catch (error) {
     return await finish(
       "failed",

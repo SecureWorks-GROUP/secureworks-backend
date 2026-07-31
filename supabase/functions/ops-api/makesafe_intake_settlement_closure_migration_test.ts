@@ -1,3 +1,5 @@
+// deno-lint-ignore-file no-import-prefix
+
 import {
   assert,
   assertStringIncludes,
@@ -60,7 +62,10 @@ Deno.test("draft-keyed mint authority is recovered before idempotent job creatio
   assert(
     reserve >= 0 && recover > reserve && create > recover && complete > create,
   );
-  assertStringIncludes(closureMigration, "UNIQUE (org_id, draft_id, mint_role)");
+  assertStringIncludes(
+    closureMigration,
+    "UNIQUE (org_id, draft_id, mint_role)",
+  );
   assertStringIncludes(
     closureMigration,
     "UPDATE public.makesafe_intake_drafts",

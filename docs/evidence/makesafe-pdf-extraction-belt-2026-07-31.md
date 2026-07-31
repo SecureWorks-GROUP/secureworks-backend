@@ -65,6 +65,19 @@ documents and do not spend that local fallback budget. This preserves the
 read-only replay's bounded-memory semantics while allowing the live belt to
 drain independently.
 
+## Release order
+
+Apply these migrations in order before deploying the matching `ops-api` and
+`monitor-ses-makesafes`:
+
+1. `20260729010000_makesafe_hugo_notification_sla_v1.sql`
+2. `20260731000001_makesafe_pdf_extraction_belt.sql`
+3. `20260731000002_makesafe_intake_settlement_closure.sql`
+
+The schema-requirements manifest is the deploy gate for the required tables,
+columns, indexes, constraints, policies, and triggers. Code must not deploy
+ahead of any of these three ledger versions.
+
 ## Post-deploy verification checklist for the PR
 
 The independent verifier should record UTC timestamps and check all of the

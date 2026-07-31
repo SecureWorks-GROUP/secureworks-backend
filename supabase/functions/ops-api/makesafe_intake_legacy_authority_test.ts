@@ -1,11 +1,7 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 
-import {
-  assertEquals,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  _intakeMintAuthorityForTest,
-} from "./index.ts";
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { _intakeMintAuthorityForTest } from "./index.ts";
 
 type QueryState = {
   table: string;

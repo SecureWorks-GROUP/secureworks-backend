@@ -50,7 +50,9 @@ export async function reserveIntakeMint(
   const row = Array.isArray(data) ? data[0] : data;
   if (error || !row?.id) {
     throw new Error(
-      `intake mint reservation failed: ${error?.message || error || "missing row"}`,
+      `intake mint reservation failed: ${
+        error?.message || error || "missing row"
+      }`,
     );
   }
   return row as IntakeMint;
@@ -61,14 +63,19 @@ export async function completeIntakeMint(
   mintId: string,
   jobId: string,
 ): Promise<IntakeMint> {
-  const { data, error } = await client.rpc("complete_makesafe_intake_job_mint", {
-    p_mint_id: mintId,
-    p_job_id: jobId,
-  });
+  const { data, error } = await client.rpc(
+    "complete_makesafe_intake_job_mint",
+    {
+      p_mint_id: mintId,
+      p_job_id: jobId,
+    },
+  );
   const row = Array.isArray(data) ? data[0] : data;
   if (error || !row?.id) {
     throw new Error(
-      `intake mint completion failed: ${error?.message || error || "missing row"}`,
+      `intake mint completion failed: ${
+        error?.message || error || "missing row"
+      }`,
     );
   }
   return row as IntakeMint;
@@ -187,10 +194,12 @@ export async function settleApprovedIntakeDraft(
     );
   }
   const minted = mints.filter((mint) => mint.job_id);
-  const evidenceJobIds = Array.from(new Set([
-    ...minted.map((mint) => String(mint.job_id)),
-    ...(input.approvedJobId ? [input.approvedJobId] : []),
-  ]));
+  const evidenceJobIds = Array.from(
+    new Set([
+      ...minted.map((mint) => String(mint.job_id)),
+      ...(input.approvedJobId ? [input.approvedJobId] : []),
+    ]),
+  );
   await ensureIntakeWorkOrderEvidence(
     client,
     evidenceJobIds,
@@ -221,14 +230,16 @@ export async function settleApprovedIntakeDraft(
       continue;
     }
     if (!mint.case_id || !mint.source_post_ids.length) {
-      throw new Error(`intake mint ${mint.id} lacks canonical source authority`);
+      throw new Error(
+        `intake mint ${mint.id} lacks canonical source authority`,
+      );
     }
     const notification = await input.notify({
       caseId: mint.case_id,
       sourcePostIds: mint.source_post_ids,
       jobId: String(mint.job_id),
-      syntheticLivefireMarker:
-        input.extraction?.synthetic_livefire_marker || null,
+      syntheticLivefireMarker: input.extraction?.synthetic_livefire_marker ||
+        null,
     });
     if (notification.reason === "synthetic_livefire_suppressed") {
       const settledAt = new Date().toISOString();
@@ -301,9 +312,7 @@ export async function settleApprovedIntakeDraft(
       .maybeSingle();
     if (error) {
       throw new Error(
-        `intake settlement completion write failed: ${
-          error?.message || error
-        }`,
+        `intake settlement completion write failed: ${error?.message || error}`,
       );
     }
     if (!data?.id) {
@@ -313,7 +322,9 @@ export async function settleApprovedIntakeDraft(
         current?.state !== "settled" &&
         !current?.notification_accepted_at
       ) {
-        throw new Error(`intake settlement completion fence lost for ${mint.id}`);
+        throw new Error(
+          `intake settlement completion fence lost for ${mint.id}`,
+        );
       }
     }
     notificationsAccepted++;

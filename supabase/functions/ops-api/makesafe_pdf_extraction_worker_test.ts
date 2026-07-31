@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-import-prefix
+// deno-lint-ignore-file no-import-prefix no-explicit-any require-await
 import {
   assert,
   assertEquals,
@@ -21,9 +21,8 @@ function workerClient(
 ) {
   const updates: any[] = [];
   let downloads = 0;
-  const carriers = options.carriers || (row
-    ? [{ id: row.id, email_id: row.email_id }]
-    : []);
+  const carriers = options.carriers ||
+    (row ? [{ id: row.id, email_id: row.email_id }] : []);
   const client = {
     updates,
     get downloads() {
@@ -54,23 +53,21 @@ function workerClient(
           pdf_handoff_status: status === "failed" ? "not_required" : "pending",
         });
         return Promise.resolve({
-          data: options.loseExtractionFence
-            ? []
-            : carriers.map((carrier) => ({
-              ...carrier,
-              pdf_extraction_status: status,
-              pdf_extraction_reason: reason,
-            })),
+          data: options.loseExtractionFence ? [] : carriers.map((carrier) => ({
+            ...carrier,
+            pdf_extraction_status: status,
+            pdf_extraction_reason: reason,
+          })),
           error: null,
         });
       }
       return Promise.resolve({
-          data: [{
-            remaining_coordinates: options.remaining ?? 0,
-            estimated_minutes: options.minutes ?? 0,
-          }],
-          error: null,
-        });
+        data: [{
+          remaining_coordinates: options.remaining ?? 0,
+          estimated_minutes: options.minutes ?? 0,
+        }],
+        error: null,
+      });
     },
     storage: {
       from: () => ({
@@ -84,7 +81,9 @@ function workerClient(
       }),
     },
     from: (table: string) => {
-      if (table !== "email_attachments") throw new Error(`unexpected table ${table}`);
+      if (table !== "email_attachments") {
+        throw new Error(`unexpected table ${table}`);
+      }
       return {
         update: (patch: any) => {
           const chain: any = {

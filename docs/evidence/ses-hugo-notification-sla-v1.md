@@ -72,8 +72,8 @@ risk from notification-to-assignment.
 
 ## Release activation
 
-Apply `20260729010000_makesafe_hugo_notification_sla_v1.sql`, then
-`20260731000002_makesafe_intake_settlement_closure.sql`, before deploying the
-matching `ops-api`. The ordered closure migration archives any older case-keyed
-duplicates, installs job-key uniqueness, and adds explicit draft mint
-authority. Development and validation send no real SMS.
+Follow the ordered extraction-belt release sequence in
+`docs/evidence/makesafe-pdf-extraction-belt-2026-07-31.md` before deploying the
+matching `ops-api` or `monitor-ses-makesafes`. The closure migration archives
+any older case-keyed duplicates, installs job-key uniqueness, and adds explicit
+draft mint authority. Development and validation send no real SMS.
