@@ -72,55 +72,46 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  latest record;
+  drain_request record;
 BEGIN
-  -- pg_net is asynchronous. Check the newest request from a prior minute so
-  -- the response has time to settle without blocking a database transaction.
-  SELECT q.request_id,
-         q.requested_at,
-         r.status_code,
-         r.timed_out,
-         r.error_msg
-    INTO latest
-    FROM public.makesafe_pdf_extraction_drain_requests q
-    LEFT JOIN net._http_response r ON r.id = q.request_id
-   WHERE q.requested_at < now() - interval '10 seconds'
-   ORDER BY q.requested_at DESC
-   LIMIT 1;
-
-  IF latest.request_id IS NULL THEN
-    RAISE NOTICE
-      'check_makesafe_pdf_extraction_drain_response: no settled request to check';
-    RETURN;
-  END IF;
-
-  IF latest.status_code IS NULL THEN
-    IF latest.requested_at < now() - interval '2 minutes' THEN
-      RAISE EXCEPTION
-        'makesafe PDF drain request % has no pg_net response after 2 minutes',
-        latest.request_id;
+  -- pg_net is asynchronous. Check every retained request after its settle
+  -- grace so a later successful request cannot hide an earlier failure.
+  FOR drain_request IN
+    SELECT q.request_id,
+           q.requested_at,
+           r.status_code,
+           r.timed_out,
+           r.error_msg
+      FROM public.makesafe_pdf_extraction_drain_requests q
+      LEFT JOIN net._http_response r ON r.id = q.request_id
+     WHERE q.requested_at < now() - interval '10 seconds'
+     ORDER BY q.requested_at ASC
+  LOOP
+    IF drain_request.status_code IS NULL THEN
+      IF drain_request.requested_at < now() - interval '2 minutes' THEN
+        RAISE EXCEPTION
+          'makesafe PDF drain request % has no pg_net response after 2 minutes',
+          drain_request.request_id;
+      END IF;
+      CONTINUE;
     END IF;
-    RAISE NOTICE
-      'check_makesafe_pdf_extraction_drain_response: request % is still pending',
-      latest.request_id;
-    RETURN;
-  END IF;
 
-  IF COALESCE(latest.timed_out, false)
-     OR latest.error_msg IS NOT NULL
-     OR latest.status_code <> 200 THEN
-    RAISE EXCEPTION
-      'makesafe PDF drain request % failed: status=% timed_out=% error=%',
-      latest.request_id,
-      latest.status_code,
-      COALESCE(latest.timed_out, false),
-      COALESCE(latest.error_msg, '<none>');
-  END IF;
+    IF COALESCE(drain_request.timed_out, false)
+       OR drain_request.error_msg IS NOT NULL
+       OR drain_request.status_code <> 200 THEN
+      RAISE EXCEPTION
+        'makesafe PDF drain request % failed: status=% timed_out=% error=%',
+        drain_request.request_id,
+        drain_request.status_code,
+        COALESCE(drain_request.timed_out, false),
+        COALESCE(drain_request.error_msg, '<none>');
+    END IF;
+  END LOOP;
 END;
 $$;
 
 COMMENT ON FUNCTION public.check_makesafe_pdf_extraction_drain_response IS
-  'Checks the prior asynchronous pg_net drain response and makes its cron job fail loudly on non-200, timeout, network error, or a missing response.';
+  'Checks retained asynchronous pg_net drain responses and makes its cron job fail loudly on non-200, timeout, network error, or a missing response.';
 
 REVOKE ALL ON FUNCTION public.trigger_makesafe_pdf_extraction_drain()
   FROM PUBLIC, anon, authenticated;
