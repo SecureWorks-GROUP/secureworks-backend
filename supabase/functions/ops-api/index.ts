@@ -6447,95 +6447,8 @@ if (import.meta.main) serve(async (req: Request) => {
             }
             return json({ invoice: inv })
           }
-          case 'search_all_jobs': {
-            const q = (url.searchParams.get('q') || '').toLowerCase().trim()
-            // All-tab trade search is the historical/global lookup. When a trade types a
-            // query it should find old/completed/archived jobs across the board, not only
-            // jobs currently allocated to them. Keep only records that are operationally
-            // unsafe/noisy to surface (deleted/void/duplicates) out of typed search results.
-            const GLOBAL_SEARCH_STATUS_EXCLUDE = '("deleted","duplicate","duplicated","void","voided")'
-            const ASSIGNED_BROWSE_STATUS_EXCLUDE = '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
-
-            // M9 FIX A: when q is non-empty, do NOT include the unconditional assigned-jobs
-            // set — it polluted results (a gibberish q returned ~6 rows from the trade's
-            // assigned list with no text filter). When q is empty, keep assigned-jobs as the
-            // browse list (behaviour unchanged for the empty-query case).
-            let seedJobs: any[] = []
-            if (!q) {
-              const { data: assignedRows } = await client.from('job_assignments')
-                .select('jobs:job_id(id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
-                .eq('user_id', tradeUser.id)
-              seedJobs = (assignedRows || [])
-                .map((r: any) => r.jobs)
-                .filter((j: any) => j && !['lost','cancelled','archived','deleted','paid','closed','duplicate','duplicated','void','voided'].includes(String(j.status || '').toLowerCase()))
-            }
-
-            let jobQuery = client.from('jobs')
-              .select('id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at, updated_at, completed_at')
-              .not('status', 'in', q ? GLOBAL_SEARCH_STATUS_EXCLUDE : ASSIGNED_BROWSE_STATUS_EXCLUDE)
-              .order('created_at', { ascending: false })
-              .limit(200)
-            if (q) {
-              // Change 1: search covers job_number + client_name + site_suburb + site_address (full field coverage)
-              jobQuery = jobQuery.or(`job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%,site_address.ilike.%${q}%`)
-            }
-            const { data: allJobs, error: allJobsErr } = await jobQuery
-            if (allJobsErr) throw allJobsErr
-
-            // Merge: assigned-jobs-first when browsing (q empty), text-results only when searching (q present)
-            const byId: Record<string, any> = {}
-            for (const j of [...seedJobs, ...(allJobs || [])]) {
-              if (j?.id) byId[j.id] = j
-            }
-
-            // M9 r2 FIX 1: when q is present, also resolve via external_ref (MLB builder ref).
-            // Trades type "MLB25248" (no hyphen); canonical store is "MLB-25248".
-            // We do NOT add metadata->>external_ref to the PostgREST .or() above (JSON-path in
-            // .or() is unreliable). Instead resolveJobsByExternalRef does a digit-core ilike on
-            // makesafe_job_details.external_ref and merges matches into byId so they flow through
-            // enrichTradeMakesafeJobs and the external_ref surface block below.
-            if (q) {
-              const extRefMatches = await resolveJobsByExternalRef(
-                client,
-                [q],
-                GLOBAL_SEARCH_STATUS_EXCLUDE,
-                'id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at, updated_at, completed_at'
-              )
-              // Merge all matched jobs by UUID — search returns multiple matches correctly.
-              for (const [jobId, job] of Object.entries(extRefMatches.byId)) {
-                if (/^[0-9a-f-]{36}$/i.test(jobId)) byId[jobId] = job
-              }
-            }
-
-            // M9 FIX A (ordering): when searching, sort by exact/prefix job_number match first,
-            // then by created_at desc so results are deterministic rather than insertion-order random.
-            let merged = Object.values(byId)
-            if (q) {
-              merged = merged.sort((a: any, b: any) => {
-                const aNum = String(a.job_number || '').toLowerCase()
-                const bNum = String(b.job_number || '').toLowerCase()
-                const aExact = aNum === q || aNum.startsWith(q) ? 0 : 1
-                const bExact = bNum === q || bNum.startsWith(q) ? 0 : 1
-                if (aExact !== bExact) return aExact - bExact
-                // Fallback: newest first
-                return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
-              })
-            }
-
-            // enrichTradeMakesafeJobs fetches makesafe_job_details (which includes external_ref)
-            // and attaches it as job.makesafe_details.external_ref — M9 FIX A adds external_ref.
-            const jobs = await enrichTradeMakesafeJobs(client, merged)
-            // Surface external_ref at the top level of each job for convenience (trade app reads job.external_ref)
-            for (const job of jobs) {
-              if (!job.external_ref && job.makesafe_details?.external_ref) {
-                job.external_ref = job.makesafe_details.external_ref
-              }
-              if (!job.external_ref) {
-                job.external_ref = job.metadata?.external_ref || null
-              }
-            }
-            return json({ jobs })
-          }
+          case 'search_all_jobs':
+            return json(await searchAllJobs(client, url.searchParams, tradeUser, isDispatcher))
           case 'crew_charges_on_my_jobs': {
             const ccWeekStart = url.searchParams.get('week_start') || body?.week_start
             // Find jobs where this user is lead
@@ -26310,14 +26223,25 @@ export function _backfillOpenMakesafeContactsForTest(openMakesafes: any[], conta
 
 async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
   const list = (jobs || []).filter(Boolean)
-  const jobIds = list.map((job: any) => job?.id).filter(Boolean)
+  const jobIds = collectUniqueStringIds(list.map((job: any) => job?.id))
   if (jobIds.length === 0) return list
 
   const detailByJobId: Record<string, any> = {}
   try {
-    const { data: details } = await client.from('makesafe_job_details')
-      .select('*, makesafe_companies:requesting_company_id(slug, name)')
-      .in('job_id', jobIds)
+    // Chunked: the catalog feed below hands this whole pages of jobs, and a
+    // single `.in()` over hundreds of UUIDs overflows a reliable PostgREST GET
+    // URL. Same 25-id chunk the occupancy probes use.
+    const detailChunks: string[][] = []
+    for (let i = 0; i < jobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+      detailChunks.push(jobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+    }
+    const detailPages = await Promise.all(detailChunks.map(async (chunk) => {
+      const { data } = await client.from('makesafe_job_details')
+        .select('*, makesafe_companies:requesting_company_id(slug, name)')
+        .in('job_id', chunk)
+      return data || []
+    }))
+    const details = detailPages.flat()
     for (const row of (details || [])) if (row?.job_id) detailByJobId[String(row.job_id)] = row
     for (const job of list) {
       if (job?.id && detailByJobId[job.id]) job.makesafe_details = detailByJobId[job.id]
@@ -26326,16 +26250,24 @@ async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
     console.log('[ops-api] trade MakeSafe detail enrichment skipped:', e?.message)
   }
 
-  const phoneMissingJobIds = list
+  const phoneMissingJobIds = collectUniqueStringIds(list
     .filter((job: any) => job?.id && (isMakesafeAccessJob(job) || detailByJobId[job.id]) && !job.client_phone)
-    .map((job: any) => job.id)
+    .map((job: any) => job.id))
   if (phoneMissingJobIds.length > 0) {
     try {
-      const { data: contacts, error: contactErr } = await client.from('job_contacts')
-        .select('job_id, client_name, client_email, client_phone, is_primary, contact_label, status')
-        .in('job_id', phoneMissingJobIds)
-        .eq('status', 'active')
-      if (contactErr) throw contactErr
+      const contactChunks: string[][] = []
+      for (let i = 0; i < phoneMissingJobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+        contactChunks.push(phoneMissingJobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+      }
+      const contactPages = await Promise.all(contactChunks.map(async (chunk) => {
+        const { data, error } = await client.from('job_contacts')
+          .select('job_id, client_name, client_email, client_phone, is_primary, contact_label, status')
+          .in('job_id', chunk)
+          .eq('status', 'active')
+        if (error) throw error
+        return data || []
+      }))
+      const contacts = contactPages.flat()
       _backfillOpenMakesafeContactsForTest(list as any[], contacts || [])
     } catch (e: any) {
       console.log('[ops-api] trade MakeSafe contact enrichment skipped:', e?.message)
@@ -26343,6 +26275,222 @@ async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
   }
 
   return list
+}
+
+// ── Trade "All" job feed (search_all_jobs) ─────────────────────────────────
+// The All tab is the trade app's only surface that reads the JOB table rather
+// than the assignment table, so it is the one place "all jobs" can literally
+// mean all jobs — including the ~2,000 that were never allocated to crew and
+// therefore appear in no assignment-driven view.
+//
+// Captain's ruling (2026-07-31): a user with the Everyone lens who opens All
+// must get every company job, full history, every vertical, one card per job.
+// Before this, an empty query returned only that user's OWN assigned jobs and a
+// typed query stopped at a silent 200-row cap.
+export const TRADE_JOB_FEED_PAGE_DEFAULT = 200
+export const TRADE_JOB_FEED_PAGE_MAX = 500
+export const TRADE_JOB_SEARCH_RESULT_CAP = 500
+export const TRADE_JOB_FEED_SELECT =
+  'id, org_id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at, updated_at, completed_at'
+
+// Records that are operationally unsafe or noisy to surface at all: hard
+// deletes, voids and known duplicates. Deliberately NOT a visibility window —
+// cancelled, archived, lost, complete, invoiced and paid jobs all stay visible,
+// which is the point of the ruling. Keeping duplicates out is also what lets
+// "all" satisfy the captain's condition that one job renders as one card.
+export const _GLOBAL_SEARCH_STATUS_EXCLUDE = '("deleted","duplicate","duplicated","void","voided")'
+export const _ASSIGNED_BROWSE_STATUS_EXCLUDE =
+  '("lost","cancelled","archived","deleted","paid","closed","duplicate","duplicated","void","voided")'
+
+// Which set an empty-query All tab returns. The lens, not the role name, is the
+// authority: anyone the trade app already grants an Everyone view (a dispatcher,
+// or a vertical manager via managed_verticals) browses the whole tenant, and
+// everyone else keeps the pre-existing own-assignments browse. Ordinary crew are
+// untouched by the widening — scope item 3.
+//
+// The company lens is NOT bounded to a manager's managed verticals: typed search
+// has always reached every vertical for every trade user, so bounding browse
+// alone would make the deliberate lens narrower than the incidental one.
+export function _resolveTradeJobFeedLens(
+  input: { isDispatcher: boolean; managedVerticals?: unknown; q?: string | null },
+): { lens: 'search' | 'company' | 'assigned'; canSeeCompany: boolean } {
+  const canSeeCompany = input.isDispatcher === true ||
+    _normalizeManagedVerticals(input.managedVerticals).length > 0
+  const q = String(input.q || '').trim()
+  if (q) return { lens: 'search', canSeeCompany }
+  return { lens: canSeeCompany ? 'company' : 'assigned', canSeeCompany }
+}
+
+export async function searchAllJobs(
+  client: any,
+  params: URLSearchParams,
+  viewer: TradeAuthContext,
+  isDispatcher = false,
+) {
+  const q = (params.get('q') || '').toLowerCase().trim()
+  const { lens } = _resolveTradeJobFeedLens({
+    isDispatcher,
+    managedVerticals: viewer.managedVerticals,
+    q,
+  })
+
+  const requestedPageSize = Number(params.get('page_size') || TRADE_JOB_FEED_PAGE_DEFAULT)
+  const requestedOffset = Number(params.get('offset') || 0)
+  if (!Number.isInteger(requestedPageSize) || requestedPageSize < 1) {
+    throw new ApiError('page_size must be a positive integer', 400)
+  }
+  if (!Number.isInteger(requestedOffset) || requestedOffset < 0) {
+    throw new ApiError('offset must be a non-negative integer', 400)
+  }
+  const pageSize = Math.min(requestedPageSize, TRADE_JOB_FEED_PAGE_MAX)
+  const offset = requestedOffset
+
+  // M9 FIX A: when q is non-empty, do NOT include the unconditional assigned-jobs
+  // set — it polluted results (a gibberish q returned ~6 rows from the trade's
+  // assigned list with no text filter).
+  let seedJobs: any[] = []
+  if (lens === 'assigned') {
+    const { data: assignedRows, error: assignedErr } = await client.from('job_assignments')
+      .select('jobs:job_id(id, org_id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at)')
+      .eq('user_id', viewer.id)
+    if (assignedErr) throw assignedErr
+    seedJobs = (assignedRows || [])
+      .map((r: any) => r.jobs)
+      .filter((j: any) =>
+        j && String(j.org_id || viewer.orgId) === String(viewer.orgId) &&
+        !['lost', 'cancelled', 'archived', 'deleted', 'paid', 'closed', 'duplicate', 'duplicated', 'void', 'voided']
+          .includes(String(j.status || '').toLowerCase())
+      )
+  }
+
+  // Tenant is a boundary, not a display preference. This read was previously
+  // org-unscoped; widening it without closing that would hand another tenant's
+  // whole job table to any trade login here.
+  // supabase-js only exposes filters AFTER select(), so the shared filter set is
+  // applied to a freshly-selected builder rather than to a stored one.
+  const buildJobQuery = (columns: string, options?: { count: 'exact'; head: true }) => {
+    let jobQuery = (options ? client.from('jobs').select(columns, options) : client.from('jobs').select(columns))
+      .eq('org_id', viewer.orgId)
+      .not('status', 'in', lens === 'assigned' ? _ASSIGNED_BROWSE_STATUS_EXCLUDE : _GLOBAL_SEARCH_STATUS_EXCLUDE)
+    if (q) {
+      // Search covers job_number + client_name + site_suburb + site_address.
+      jobQuery = jobQuery.or(
+        `job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%,site_address.ilike.%${q}%`,
+      )
+    }
+    return jobQuery
+  }
+
+  if (q) {
+    const extRefMatches = await resolveJobsByExternalRef(
+      client,
+      [q],
+      _GLOBAL_SEARCH_STATUS_EXCLUDE,
+      TRADE_JOB_FEED_SELECT,
+    )
+    const externalRefJobs = Object.values(extRefMatches.byId).filter((job: any) =>
+      /^[0-9a-f-]{36}$/i.test(String(job?.id || '')) &&
+      String(job?.org_id || viewer.orgId) === String(viewer.orgId)
+    )
+    const { data: baseRows, error: baseErr } = await buildJobQuery(TRADE_JOB_FEED_SELECT)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(0, TRADE_JOB_SEARCH_RESULT_CAP)
+    if (baseErr) throw baseErr
+
+    const byId: Record<string, any> = {}
+    for (const job of [...(baseRows || []), ...externalRefJobs]) {
+      if (job?.id) byId[job.id] = job
+    }
+    const ranked = Object.values(byId).sort((a: any, b: any) => {
+      const aNum = String(a.job_number || '').toLowerCase()
+      const bNum = String(b.job_number || '').toLowerCase()
+      const aExact = aNum === q || aNum.startsWith(q) ? 0 : 1
+      const bExact = bNum === q || bNum.startsWith(q) ? 0 : 1
+      if (aExact !== bExact) return aExact - bExact
+      const createdDiff = new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+      if (createdDiff !== 0) return createdDiff
+      return String(a.id).localeCompare(String(b.id))
+    })
+    const capped = ranked.length > TRADE_JOB_SEARCH_RESULT_CAP || (baseRows || []).length > TRADE_JOB_SEARCH_RESULT_CAP
+    const materialized = ranked.slice(0, TRADE_JOB_SEARCH_RESULT_CAP)
+    const pageJobs = materialized.slice(offset, offset + pageSize)
+    const jobs = await enrichTradeMakesafeJobs(client, pageJobs)
+    for (const job of jobs) {
+      if (!job.external_ref && job.makesafe_details?.external_ref) {
+        job.external_ref = job.makesafe_details.external_ref
+      }
+      if (!job.external_ref) {
+        job.external_ref = job.metadata?.external_ref || null
+      }
+      delete job.org_id
+    }
+    const canFetchMore = offset + jobs.length < materialized.length
+    return {
+      jobs,
+      lens,
+      total: materialized.length,
+      page_size: pageSize,
+      offset,
+      truncated: capped || canFetchMore,
+      next_offset: canFetchMore ? offset + pageSize : null,
+    }
+  }
+
+  // The total is read separately (head count) so the client can say "showing X
+  // of Y" honestly instead of inferring completeness from a full page — the
+  // silent-truncation failure this whole change is about.
+  let total: number | null = null
+  try {
+    const countResult = await buildJobQuery('id', { count: 'exact', head: true })
+    if (countResult?.error) throw countResult.error
+    total = typeof countResult?.count === 'number' ? countResult.count : null
+  } catch (countErr: any) {
+    console.log('[ops-api] search_all_jobs count failed (non-blocking):', countErr?.message)
+  }
+
+  // created_at is not unique, so paging needs the id tiebreak for a total order.
+  const { data: allJobs, error: allJobsErr } = await buildJobQuery(TRADE_JOB_FEED_SELECT)
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: true })
+    .range(offset, offset + pageSize - 1)
+  if (allJobsErr) throw allJobsErr
+
+  // One job = one entry, keyed by job id — the captain's explicit condition.
+  const byId: Record<string, any> = {}
+  for (const j of [...seedJobs, ...(allJobs || [])]) {
+    if (j?.id) byId[j.id] = j
+  }
+
+  const merged = Object.values(byId)
+
+  // enrichTradeMakesafeJobs fetches makesafe_job_details (which includes external_ref)
+  // and attaches it as job.makesafe_details.external_ref — M9 FIX A adds external_ref.
+  const jobs = await enrichTradeMakesafeJobs(client, merged)
+  // Surface external_ref at the top level of each job for convenience (trade app reads job.external_ref)
+  for (const job of jobs) {
+    if (!job.external_ref && job.makesafe_details?.external_ref) {
+      job.external_ref = job.makesafe_details.external_ref
+    }
+    if (!job.external_ref) {
+      job.external_ref = job.metadata?.external_ref || null
+    }
+    delete job.org_id
+  }
+
+  // `total` counts the paged job query only; the assigned seed and external-ref
+  // merges can push a page past it, so never report fewer rows than were sent.
+  const reportedTotal = total === null ? null : Math.max(total, jobs.length)
+  const hasMore = total !== null && offset + jobs.length < total
+  return {
+    jobs,
+    lens,
+    total: reportedTotal,
+    page_size: pageSize,
+    offset,
+    truncated: hasMore,
+    next_offset: hasMore ? offset + pageSize : null,
+  }
 }
 
 export function _groupTradeAssignmentsForTest(assignments: any[], today: string, weekEnd: string) {
@@ -26551,6 +26699,47 @@ export function _resolveAllocationAuthz(input: {
 // boundary. The unique id tiebreak below closes that seam.
 const OCCUPANCY_PROBE_CHUNK = 25
 const OCCUPANCY_PROBE_PAGE = 1000
+
+// Page size for the full-range reads myJobs issues on the widest lenses. Same
+// value the fencing-manager query already pages at; PostgREST caps a single read
+// at 1000 rows regardless, so anything larger just wastes a round trip.
+const SHOW_ALL_ASSIGNMENT_PAGE = 1000
+
+// The open pools used to stop at an arbitrary `limit(80)`/`limit(120)` newest
+// rows. That is silent truncation: allocatable work past the cap simply vanished
+// from the trade app with nothing logged, which is the "jobs are missing" report
+// this change answers. The pools are now paged to completion and bounded only by
+// a ceiling that exists to stop a runaway read — reaching it is a data problem to
+// investigate, so it warns loudly instead of degrading quietly.
+const POOL_READ_PAGE = 1000
+const POOL_READ_MAX = 5000
+
+// Read a PostgREST query to completion. `build(offset, limit)` must return a
+// query already ordered on a TOTAL key — paging without one lets rows tied on
+// the sort column fall through a page boundary. Throws on the underlying error
+// rather than degrading to a short list, because a truncated pool re-creates the
+// false "available" card the occupancy probes exist to prevent.
+async function readPagedRows(
+  build: (offset: number, limit: number) => any,
+  label: string,
+  maxRows = POOL_READ_MAX,
+): Promise<any[]> {
+  const rows: any[] = []
+  let offset = 0
+  while (offset < maxRows) {
+    const limit = Math.min(POOL_READ_PAGE, maxRows - offset)
+    const { data, error } = await build(offset, limit)
+    if (error) throw error
+    const page = data || []
+    rows.push(...page)
+    if (page.length < limit) return rows
+    offset += page.length
+  }
+  console.warn(
+    `[ops-api] myJobs ${label} read hit the ${maxRows}-row ceiling — rows beyond it are NOT in the feed`,
+  )
+  return rows
+}
 const OCCUPANCY_PROBE_SELECT = `
         job_id, id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name,
         started_at, completed_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
@@ -26773,15 +26962,44 @@ export async function myJobs(
     // boundary, not a display preference, and every pool below is already
     // org-scoped. Uses the INNER select so the jobs.org_id filter constrains the
     // parent job_assignments rows (PostgREST semantics — see the note below).
-    const res = await client
-      .from('job_assignments')
-      .select(ASSIGNMENT_SELECT_ADMIN_INNER)
-      .neq('status', 'cancelled')
-      .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
-      .eq('jobs.org_id', orgId)
-      .order('scheduled_date', { ascending: true })
-    assignments = res.data
-    error = res.error
+    //
+    // Captain's ruling (2026-07-31): "when they go to all, all needs to mean
+    // all". This branch carried a 30-day floor while the vertical-manager branch
+    // below ran full-range, so the owner's Everyone board was NARROWER than the
+    // fencing lead's (58 vs 102 fencing jobs live). The floor is gone: the
+    // widest lens now sees every historic, future and unscheduled allocation in
+    // its tenant, which also makes the 180-day make-safe backstop below
+    // redundant for a dispatcher (full range strictly contains it).
+    //
+    // Full-range is paged for the same reason the fencing manager query is: a
+    // company-wide assignment history passes PostgREST's 1000-row cap, and a
+    // silently truncated feed reads as "quiet week" rather than as an error.
+    // Paging demands a TOTAL order — scheduled_date is far from unique here, so
+    // the id tiebreak is what stops a row falling through a page boundary.
+    assignments = []
+    error = null
+    let offset = 0
+    while (true) {
+      const pageResult = await client
+        .from('job_assignments')
+        .select(ASSIGNMENT_SELECT_ADMIN_INNER)
+        .neq('status', 'cancelled')
+        .eq('jobs.org_id', orgId)
+        .order('scheduled_date', { ascending: true })
+        .order('id', { ascending: true })
+        .range(offset, offset + SHOW_ALL_ASSIGNMENT_PAGE - 1)
+      if (pageResult.error) {
+        error = pageResult.error
+        break
+      }
+      const pageRows = pageResult.data || []
+      assignments.push(...pageRows)
+      if (pageRows.length < SHOW_ALL_ASSIGNMENT_PAGE) break
+      offset += SHOW_ALL_ASSIGNMENT_PAGE
+    }
+    // Page boundaries and retries are the only way the same row can arrive
+    // twice; de-duplicating by the canonical assignment id makes both safe.
+    assignments = [...new Map(assignments.map((row: any) => [row.id, row])).values()]
   } else if (managerScope.length > 0) {
     // ── Manager's Board (U2b): all in-vertical assignments across every crew ──
     // A vertical manager (non-dispatcher) on mode:'all' sees the WHOLE vertical,
@@ -26891,7 +27109,10 @@ export async function myJobs(
   // manager the SAME 180-day window runs VERTICAL-WIDE (no user_id filter,
   // admin select so board lanes keep the crew user). Managers without
   // 'makesafe' in scope (e.g. fencing) are unaffected — the backstop is
-  // make-safe-only by its jobs filter. Dispatchers (showAll) unchanged.
+  // make-safe-only by its jobs filter. Dispatchers still skip it, and now for a
+  // stronger reason than before: their feed above is full-range, so the 180-day
+  // window is a strict subset of what they already hold and a second query would
+  // only re-fetch rows the de-dupe would drop.
   const runManagerMakesafeBackstop = managerScope.includes('makesafe')
   if (!showAll && (managerScope.length === 0 || runManagerMakesafeBackstop)) {
     try {
@@ -26933,15 +27154,19 @@ export async function myJobs(
   // de-duplicated via assignedJobIds below. Keep this specific to MakeSafe and
   // expose only the same slim job fields the mobile job list already uses.
   if (_canSeeFullMakesafePool(isDispatcher, isMakesafeManager)) {
-    const { data: openMakesafesByShape, error: msErr } = await client
-      .from('jobs')
-      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
-      .eq('org_id', orgId)
-      .or('type.eq.makesafe,job_number.ilike.SWMS-%')
-      .not('status', 'in', _makesafePoolExcludedStatusFilter())
-      .order('created_at', { ascending: false })
-      .limit(80)
-    if (msErr) throw msErr
+    const openMakesafesByShape = await readPagedRows(
+      (offset, limit) =>
+        client
+          .from('jobs')
+          .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
+          .eq('org_id', orgId)
+          .or('type.eq.makesafe,job_number.ilike.SWMS-%')
+          .not('status', 'in', _makesafePoolExcludedStatusFilter())
+          .order('created_at', { ascending: false })
+          .order('id', { ascending: true })
+          .range(offset, offset + limit - 1),
+      'make-safe pool',
+    )
 
     const openMakesafeById: Record<string, any> = {}
     for (const job of (openMakesafesByShape || [])) if (job?.id) openMakesafeById[job.id] = job
@@ -26949,43 +27174,88 @@ export async function myJobs(
     // Backstop for legacy imports: if a job has a makesafe_job_details row but
     // its jobs.type/job_number has not been normalised, still expose it to the
     // open MakeSafe pool instead of requiring a named assignment.
-    const { data: detailRows, error: detailErr } = await client
-      .from('makesafe_job_details')
-      .select('*, makesafe_companies:requesting_company_id(slug, name)')
-      .limit(120)
-    if (detailErr) throw detailErr
-    const detailByJobId: Record<string, any> = {}
-    for (const row of (detailRows || [])) if (row?.job_id) detailByJobId[String(row.job_id)] = row
+    //
+    // Finding those rows is the ONE read here that must scan the whole table —
+    // a legacy job carries neither the make-safe type nor an SWMS- number, so
+    // there is no narrower filter that can reach it. It therefore selects only
+    // the four columns isAllocatableMakesafePoolDetail actually reads, and the
+    // full `*` rows are fetched afterwards for the pool ids alone. Selecting `*`
+    // across the table (one row per make-safe job ever created, plus a company
+    // join) would put megabytes through the worker on every dispatcher load.
+    const detailIndex = await readPagedRows(
+      (offset, limit) =>
+        client
+          .from('makesafe_job_details')
+          .select('job_id, substatus, report_received_at, report_sent_at, invoice_ready_at')
+          .order('job_id', { ascending: true })
+          .range(offset, offset + limit - 1),
+      'make-safe detail index',
+    )
+    const allocatableByJobId: Record<string, any> = {}
+    for (const row of (detailIndex || [])) if (row?.job_id) allocatableByJobId[String(row.job_id)] = row
     for (const id of Object.keys(openMakesafeById)) {
       // U2c: pool = allocatable only. Excludes finished substatuses (as before)
       // AND company_contact_required (ops's admin queue). Report access is a
       // separate predicate and unchanged.
-      if (!isAllocatableMakesafePoolDetail(detailByJobId[id])) delete openMakesafeById[id]
+      if (!isAllocatableMakesafePoolDetail(allocatableByJobId[id])) delete openMakesafeById[id]
     }
-    const detailJobIds = Array.from(new Set<string>((detailRows || [])
+    const detailJobIds = Array.from(new Set<string>((detailIndex || [])
       .filter((r: any) => isAllocatableMakesafePoolDetail(r))
       .map((r: any) => String(r.job_id || '')).filter(Boolean)))
       .filter((id: string) => !openMakesafeById[id])
     if (detailJobIds.length > 0) {
-      const { data: detailJobs, error: detailJobsErr } = await client
-        .from('jobs')
-        .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
-        .eq('org_id', orgId)
-        .in('id', detailJobIds)
-        .not('status', 'in', _makesafePoolExcludedStatusFilter())
-        .order('created_at', { ascending: false })
-        .limit(80)
-      if (detailJobsErr) throw detailJobsErr
+      const detailChunks: string[][] = []
+      for (let i = 0; i < detailJobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+        detailChunks.push(detailJobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+      }
+      const detailPages = await Promise.all(detailChunks.map((chunk) =>
+        readPagedRows(
+          (offset, limit) =>
+            client
+              .from('jobs')
+              .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
+              .eq('org_id', orgId)
+              .in('id', chunk)
+              .not('status', 'in', _makesafePoolExcludedStatusFilter())
+              .order('created_at', { ascending: false })
+              .order('id', { ascending: true })
+              .range(offset, offset + limit - 1),
+          'make-safe legacy pool',
+        ),
+      ))
+      const detailJobs = detailPages.flat()
       for (const job of (detailJobs || [])) if (job?.id) openMakesafeById[job.id] = job
     }
 
-    for (const id of Object.keys(openMakesafeById)) {
+    // Full detail rows for exactly the jobs that survived into the pool. Chunked
+    // because that id list is now uncapped.
+    const poolDetailIds = Object.keys(openMakesafeById)
+    const detailByJobId: Record<string, any> = {}
+    if (poolDetailIds.length > 0) {
+      const poolDetailChunks: string[][] = []
+      for (let i = 0; i < poolDetailIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+        poolDetailChunks.push(poolDetailIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+      }
+      const poolDetailPages = await Promise.all(poolDetailChunks.map(async (chunk) => {
+        const { data, error } = await client
+          .from('makesafe_job_details')
+          .select('*, makesafe_companies:requesting_company_id(slug, name)')
+          .in('job_id', chunk)
+        if (error) throw error
+        return data || []
+      }))
+      for (const row of poolDetailPages.flat()) {
+        if (row?.job_id) detailByJobId[String(row.job_id)] = row
+      }
+    }
+    for (const id of poolDetailIds) {
       if (detailByJobId[id]) openMakesafeById[id].makesafe_details = detailByJobId[id]
     }
 
+    // Newest first, complete. The old trailing `.slice(0, 80)` was the last
+    // silent cap on this lane and is gone with the query limits above.
     const openMakesafes = Object.values(openMakesafeById)
       .sort((a: any, b: any) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
-      .slice(0, 80)
 
     // Open MakeSafe cards are synthetic pool cards, not normal assigned cards.
     // Some imported MakeSafes have the client phone in job_contacts rather than
@@ -26996,12 +27266,19 @@ export async function myJobs(
       .map((job: any) => job.id)
     if (phoneMissingJobIds.length > 0) {
       try {
-        const { data: contacts, error: contactErr } = await client.from('job_contacts')
-          .select('job_id, client_name, client_email, client_phone, is_primary, contact_label, status')
-          .in('job_id', phoneMissingJobIds)
-          .eq('status', 'active')
-        if (contactErr) throw contactErr
-        _backfillOpenMakesafeContactsForTest(openMakesafes as any[], contacts || [])
+        const contactChunks: string[][] = []
+        for (let i = 0; i < phoneMissingJobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+          contactChunks.push(phoneMissingJobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+        }
+        const contactPages = await Promise.all(contactChunks.map(async (chunk) => {
+          const { data, error } = await client.from('job_contacts')
+            .select('job_id, client_name, client_email, client_phone, is_primary, contact_label, status')
+            .in('job_id', chunk)
+            .eq('status', 'active')
+          if (error) throw error
+          return data || []
+        }))
+        _backfillOpenMakesafeContactsForTest(openMakesafes as any[], contactPages.flat())
       } catch (e: any) {
         console.log('[ops-api] open MakeSafe contact backfill skipped:', e?.message)
       }
@@ -27090,25 +27367,37 @@ export async function myJobs(
   // filter can drop them.
   if (_canSeeFullMakesafePool(isDispatcher, isMakesafeManager)) {
     const cancelledSinceIso = new Date(Date.now() - 90 * 86_400_000).toISOString()
-    const { data: cancelledMakesafes, error: cancelErr } = await client
-      .from('jobs')
-      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
-      .eq('org_id', orgId)
-      .eq('type', 'makesafe')
-      .eq('status', 'cancelled')
-      .gte('updated_at', cancelledSinceIso)
-      .order('updated_at', { ascending: false })
-      .limit(80)
-    if (cancelErr) throw cancelErr
+    const cancelledMakesafes = await readPagedRows(
+      (offset, limit) =>
+        client
+          .from('jobs')
+          .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
+          .eq('org_id', orgId)
+          .eq('type', 'makesafe')
+          .eq('status', 'cancelled')
+          .gte('updated_at', cancelledSinceIso)
+          .order('updated_at', { ascending: false })
+          .order('id', { ascending: true })
+          .range(offset, offset + limit - 1),
+      'cancelled make-safe feed',
+    )
 
     const cancelledJobs = cancelledMakesafes || []
     if (cancelledJobs.length > 0) {
       const cancelledIds = cancelledJobs.map((j: any) => j.id).filter(Boolean)
-      const { data: cancelledDetails, error: cancelledDetailErr } = await client
-        .from('makesafe_job_details')
-        .select('*, makesafe_companies:requesting_company_id(slug, name)')
-        .in('job_id', cancelledIds)
-      if (cancelledDetailErr) throw cancelledDetailErr
+      const cancelledChunks: string[][] = []
+      for (let i = 0; i < cancelledIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+        cancelledChunks.push(cancelledIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+      }
+      const cancelledDetailPages = await Promise.all(cancelledChunks.map(async (chunk) => {
+        const { data, error } = await client
+          .from('makesafe_job_details')
+          .select('*, makesafe_companies:requesting_company_id(slug, name)')
+          .in('job_id', chunk)
+        if (error) throw error
+        return data || []
+      }))
+      const cancelledDetails = cancelledDetailPages.flat()
       const cancelledDetailByJobId: Record<string, any> = {}
       for (const row of (cancelledDetails || [])) {
         if (row?.job_id) cancelledDetailByJobId[String(row.job_id)] = row
@@ -27188,15 +27477,19 @@ export async function myJobs(
         // "available" cards — the 72/76 counts Marnin called out. The make-safe
         // pool above keeps its exclude filter untouched (its "New" = intake-
         // complete jobs, already honest). Assigned-job dedupe below unchanged.
-        const { data: openJobs, error: poolErr } = await client
-          .from('jobs')
-          .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
-          .eq('org_id', orgId)
-          .eq('type', vertical)
-          .in('status', _CREW_READY_STATUSES as unknown as string[])
-          .order('created_at', { ascending: false })
-          .limit(80)
-        if (poolErr) throw poolErr
+        const openJobs = await readPagedRows(
+          (offset, limit) =>
+            client
+              .from('jobs')
+              .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, created_at')
+              .eq('org_id', orgId)
+              .eq('type', vertical)
+              .in('status', _CREW_READY_STATUSES as unknown as string[])
+              .order('created_at', { ascending: false })
+              .order('id', { ascending: true })
+              .range(offset, offset + limit - 1),
+          `${vertical} pool`,
+        )
         // The manager assignment feed intentionally remains 30-day windowed, so
         // ask job_assignments directly whether these already tenant+vertical-
         // authorized pool ids are occupied at any date.
@@ -27245,15 +27538,36 @@ export async function myJobs(
 
   const weekEnd = getAWSTWeekEnd()
 
-  // Enrich with PO delivery info (pickup vs delivery badge)
-  const jobIds = (assignments || []).map((a: any) => a.jobs?.id).filter(Boolean)
+  // Enrich with PO delivery info (pickup vs delivery badge).
+  // Now that the widest lens is full-range, this id list is company-sized rather
+  // than a fortnight's worth, so the read is chunked (URL length) and paged (the
+  // 1000-row cap). An unchunked read would 414 or silently return the newest
+  // 1000 POs, dropping the delivery badge from arbitrary cards.
+  const jobIds = collectUniqueStringIds((assignments || []).map((a: any) => a.jobs?.id))
   let poMap: Record<string, any> = {}
   if (jobIds.length > 0) {
-    const { data: pos } = await client.from('purchase_orders')
-      .select('job_id, delivery_date, notes, status')
-      .in('job_id', jobIds)
-      .neq('status', 'deleted')
-      .order('created_at', { ascending: false })
+    const poChunks: string[][] = []
+    for (let i = 0; i < jobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+      poChunks.push(jobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+    }
+    const poRows = await Promise.all(poChunks.map((chunk) =>
+      readPagedRows(
+        (offset, limit) =>
+          client.from('purchase_orders')
+            .select('job_id, delivery_date, notes, status')
+            .in('job_id', chunk)
+            .neq('status', 'deleted')
+            .order('created_at', { ascending: false })
+            .order('id', { ascending: true })
+            .range(offset, offset + limit - 1),
+        'purchase order enrichment',
+      ).catch((poErr: any) => {
+        // Non-blocking: the delivery badge is enrichment, not the job list.
+        console.log('[ops-api] myJobs PO enrichment chunk failed (non-blocking):', poErr?.message)
+        return [] as any[]
+      })
+    ))
+    const pos = poRows.flat()
     for (const po of (pos || [])) {
       if (!poMap[po.job_id]) {
         // purchase_orders has no delivery_address column — the address is encoded

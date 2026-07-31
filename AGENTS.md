@@ -643,6 +643,15 @@ recipient from staff/config authority, and persist the pre-send audit claim
 before GHL. Synthetic live-fire must short-circuit before board, config, audit,
 or transport work. Apply the migration before its matching `ops-api`.
 
+## Trade App Visibility Contract
+
+The authoritative trade visibility contract, including the server-side lenses,
+full-range Everyone feed, deliberate Mine/open-pool boundaries, pagination,
+tenant scoping, and client follow-up, lives in
+`docs/trade-all-means-all-v1.md`. Keep `_resolveManagerVisibility`,
+`_managerBoardVerticals`, and `_resolveTradeJobFeedLens` in `ops-api/index.ts`
+aligned with that document and their regression tests.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
