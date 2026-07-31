@@ -29,13 +29,20 @@ This was a source-control/deploy-lane problem, not a database corruption problem
 
 ## Vault Prerequisite For Historical PDF Draining
 
-Before the historical PDF drain migration or cron runs in production, Vault
-must contain a decrypted secret named `sw_api_key` whose value is the current
-`SW_API_KEY` used by `ops-api`. A missing or empty secret must fail loudly; the
-drain has no stale credential fallback. The drain deliberately remains paced
-at `max_items: 1` per minute: 947 documents at that pace take about 15 hours
-47 minutes. A separate, benchmarked future change may evaluate a sequential
-SHA-fenced cap of 5; do not change the current pace as part of this lane.
+The reviewed `ops-api` action `vault_sync_sw_api_key` is the one-time bridge
+from the edge runtime's `SW_API_KEY` to the Vault secret `sw_api_key`. It is
+reachable only through the privileged ops/service authentication path, refuses
+an absent or empty runtime key before any write, and returns only a fixed name
+and an eight-character MD5 fingerprint prefix. Do not call it before the
+matching migration and function are merged and deployed. After deployment,
+call it once through the proven privileged caller pattern, then verify the
+Vault secret by name only. The PDF drain still requires that secret to be
+present and non-empty; it has no stale credential fallback.
+
+The drain deliberately remains paced at `max_items: 1` per minute: 947
+documents at that pace take about 15 hours 47 minutes. A separate,
+benchmarked future change may evaluate a sequential SHA-fenced cap of 5; do
+not change the current pace as part of this lane.
 
 ## Allowed Production Deploy Paths
 
