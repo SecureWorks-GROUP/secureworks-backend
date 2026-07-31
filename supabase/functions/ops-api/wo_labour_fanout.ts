@@ -1,18 +1,12 @@
-// WO labour fan-out — pure helpers for paying the named labourers on a
+// WO labour breakdown — pure helpers for validating and recording the named
 // worked-out work order (trade.html Pay tab, Work Order mode).
 //
 // The trade app's WO-mode job card carries structured labour lines
 // (wo_labour_lines: [{trade_name, hours, rate, amount}]) on each work-order
 // extra item. The WO holder's own line is already net of that labour
-// (rate = wo_allocated − Σ labour). These helpers turn those labour lines into
-// payout invoices for the NAMED crew members so the money the holder gave up
-// actually reaches the people who worked the site.
-//
-// Control model: every payout invoice lands in status 'pending_ops_review' —
-// the office verifies (name match is heuristic, and the labourer may have
-// self-invoiced the same hours) and then Approve & push sends it to Xero via
-// the existing approve_trade_invoice / push_trade_invoice_to_xero actions.
-// Nothing here touches Xero directly.
+// (rate = wo_allocated − Σ labour). The structured facts remain on the
+// holder's line for the future reconciliation system; labourers bill
+// SecureWorks Group directly and the office checks their invoices manually.
 //
 // All functions are pure (no I/O) so they are unit-testable; index.ts owns the
 // DB reads/writes.
@@ -22,29 +16,13 @@ export type WoLabourEntry = {
   hours: number;
   rate: number;
   amount: number;
-  job_id: string | null;
-  job_number: string | null;
-  client_name: string | null;
-  division: string | null;
-  line_date: string | null;
 };
 
 export type WoLabourProblem = {
   trade_name: string;
-  reason: "unnamed" | "incomplete" | "unmatched" | "ambiguous" | "self";
+  reason: "unnamed" | "incomplete";
   amount: number;
   job_number: string | null;
-};
-
-export type WoLabourUser = {
-  id: string;
-  name: string;
-  trade_details?: { gstRegistered?: boolean } | null;
-};
-
-export type WoLabourGroup = {
-  user: WoLabourUser;
-  entries: WoLabourEntry[];
 };
 
 // Xero chart-of-accounts destination for trade/subcontractor ACCPAY bill lines.
@@ -72,13 +50,10 @@ export function _cleanWoName(raw: unknown): string {
   return String(raw ?? "").replace(/\s+/g, " ").trim();
 }
 
-function normName(raw: unknown): string {
-  return _cleanWoName(raw).toLowerCase();
-}
-
 // Read the cleaned labour lines off ONE work-order extra item.
-// Returns entries (payable lines) plus problems (lines that carry money or a
-// name but cannot be paid as-is). Fully-empty template rows are dropped.
+// Returns valid named lines plus problems (lines that carry money or a name but
+// are missing required hours or rate data). Fully-empty template rows are
+// dropped.
 export function _extractWoLabourEntries(
   // deno-lint-ignore no-explicit-any -- request payload shape is validated by the caller.
   item: any,
@@ -117,11 +92,6 @@ export function _extractWoLabourEntries(
       hours,
       rate,
       amount,
-      job_id: item?.job_id || null,
-      job_number: item?.job_number || null,
-      client_name: item?.client_name || null,
-      division: item?.division || null,
-      line_date: item?.date || null,
     });
   }
   return { entries, problems };
@@ -149,6 +119,52 @@ export function _cleanWoLabourLines(
     out.push({ trade_name, hours, rate, amount });
   }
   return out;
+}
+
+function _formatNumber(n: number): string {
+  return Number.isInteger(n)
+    ? String(n)
+    : String(n).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function _formatMoney(n: number): string {
+  return `$${n.toFixed(2)}`;
+}
+
+// Human-readable audit trail used as both the stored holder-line description
+// and the Xero line-item description. Newlines are intentional: Xero renders
+// them in the invoice PDF, keeping each named labourer visible as its own line.
+export function _formatWoLabourBreakdown(
+  allocatedRaw: unknown,
+  lines: Array<{
+    trade_name?: unknown;
+    hours?: unknown;
+    rate?: unknown;
+    amount?: unknown;
+  }>,
+): string {
+  const allocated = round2(Number(allocatedRaw) || 0);
+  const details = (lines || []).map((line) => {
+    const name = _cleanWoName(line?.trade_name) || "Unnamed crew member";
+    const hours = Number(line?.hours || 0);
+    const rate = Number(line?.rate || 0);
+    const amount = round2(hours * rate);
+    return `${name} ${_formatNumber(hours)}h x $${_formatNumber(rate)} = ${
+      _formatMoney(amount)
+    }`;
+  });
+  const deduction = round2((lines || []).reduce((sum, line) => {
+    return sum + round2(Number(line?.hours || 0) * Number(line?.rate || 0));
+  }, 0));
+  const labourText = details.length > 0 ? details.join("\n") : "none declared";
+  const net = round2(allocated - deduction);
+  return [
+    `Work order ${_formatMoney(allocated)}.`,
+    `Less labour: ${labourText}.`,
+    `Total labour deducted ${_formatMoney(deduction)}.`,
+    `Net payable to holder ${_formatMoney(net)}.`,
+    "Named crew bill SecureWorks Group directly; office to check their invoices against this breakdown.",
+  ].join("\n");
 }
 
 // Server-side money check for one work-order extra item: the holder's payable
@@ -185,131 +201,6 @@ export function _woNetMismatch(
   return null;
 }
 
-// Deterministic free-text name → org user resolution.
-// A labour-line name resolves only when it matches exactly ONE org user:
-//   1. full-name equality (case/whitespace-insensitive), else
-//   2. unique first-token match ("Tendo" → "Tendo Lugesera Adrian"), else
-//   3. unique name-prefix match ("Jean C" → "Jean Crous").
-// Anything else (no match, several matches, or the submitter naming
-// themselves) is reported as a problem for the office instead of guessing.
-export function _resolveWoLabourUsers(
-  entries: WoLabourEntry[],
-  users: WoLabourUser[],
-  submitterId: string,
-): { groups: WoLabourGroup[]; problems: WoLabourProblem[] } {
-  const groups = new Map<string, WoLabourGroup>();
-  const problems: WoLabourProblem[] = [];
-  const usable = (users || []).filter((u) => u && u.id && _cleanWoName(u.name));
-  for (const entry of entries) {
-    const needle = normName(entry.trade_name);
-    let matches = usable.filter((u) => normName(u.name) === needle);
-    if (matches.length === 0) {
-      matches = usable.filter((u) => normName(u.name).split(" ")[0] === needle);
-    }
-    if (matches.length === 0) {
-      matches = usable.filter((u) => normName(u.name).startsWith(needle));
-    }
-    if (matches.length === 0) {
-      problems.push({
-        trade_name: entry.trade_name,
-        reason: "unmatched",
-        amount: entry.amount,
-        job_number: entry.job_number,
-      });
-      continue;
-    }
-    if (matches.length > 1) {
-      problems.push({
-        trade_name: entry.trade_name,
-        reason: "ambiguous",
-        amount: entry.amount,
-        job_number: entry.job_number,
-      });
-      continue;
-    }
-    const user = matches[0];
-    if (String(user.id) === String(submitterId)) {
-      problems.push({
-        trade_name: entry.trade_name,
-        reason: "self",
-        amount: entry.amount,
-        job_number: entry.job_number,
-      });
-      continue;
-    }
-    const g = groups.get(user.id) || { user, entries: [] };
-    g.entries.push(entry);
-    groups.set(user.id, g);
-  }
-  return { groups: [...groups.values()], problems };
-}
-
-// Build the payout invoice + line rows for one labourer (pure — caller inserts).
-// Lines use the labour shape (total_hours/hourly_rate) AND the extras shape
-// (quantity/unit_rate) with equal totals so push_trade_invoice_to_xero's
-// reconciliation guard passes on either branch.
-export function _buildWoLabourPayoutInvoice(
-  group: WoLabourGroup,
-  opts: {
-    orgId: string;
-    weekStart: string | null;
-    weekEnd: string | null;
-    invoiceNumber: string;
-    sourceInvoiceNumber: string;
-    sourceTradeName: string;
-    nowIso: string;
-  },
-): { invoice: Record<string, unknown>; lines: Record<string, unknown>[] } {
-  const gstRegistered = group.user.trade_details?.gstRegistered === true;
-  const subtotal = round2(group.entries.reduce((s, e) => s + e.amount, 0));
-  const gst = gstRegistered ? round2(subtotal * 0.1) : 0;
-  const totalHours = round2(group.entries.reduce((s, e) => s + e.hours, 0));
-  const provenance =
-    `Auto-created from ${opts.sourceTradeName}'s work order invoice ${opts.sourceInvoiceNumber}`;
-  const invoice = {
-    org_id: opts.orgId,
-    user_id: group.user.id,
-    week_start: opts.weekStart,
-    week_end: opts.weekEnd,
-    total_hours: totalHours,
-    total_breaks_minutes: 0,
-    subtotal_ex: subtotal,
-    gst,
-    total_inc: round2(subtotal + gst),
-    has_manual_overrides: false,
-    override_details: null,
-    notes: provenance,
-    invoice_number: opts.invoiceNumber,
-    submitted_at: opts.nowIso,
-    status: "pending_ops_review",
-    query_note:
-      `${provenance} — pay ${group.user.name} for the labour deducted from that work order. ` +
-      `Verify ${group.user.name} has not also invoiced these hours before approving.`,
-  };
-  const lines = group.entries.map((e) => ({
-    line_type: "labour",
-    description:
-      `WO labour — ${
-        [e.job_number, e.client_name].filter(Boolean).join(" — ") || "job"
-      } — ` +
-      `${e.hours}h @ $${e.rate}/hr (from ${opts.sourceTradeName}'s work order ${opts.sourceInvoiceNumber})`,
-    total_hours: e.hours,
-    hourly_rate: e.rate,
-    quantity: e.hours,
-    unit: "hr",
-    unit_rate: e.rate,
-    line_total_ex: e.amount,
-    line_date: e.line_date,
-    division: e.division,
-    job_id: e.job_id,
-    job_number: e.job_number,
-    client_name: e.client_name,
-    query_note:
-      `${provenance}. Rate entered by ${opts.sourceTradeName} — office verifies before payment.`,
-  }));
-  return { invoice, lines };
-}
-
 // One office-facing sentence for labour lines that could NOT be routed to a
 // person. Empty string when there is nothing to say.
 export function _woLabourProblemNote(problems: WoLabourProblem[]): string {
@@ -322,14 +213,8 @@ export function _woLabourProblemNote(problems: WoLabourProblem[]): string {
         return `an unnamed labour line${where}${money}`;
       case "incomplete":
         return `${p.trade_name}${where}: hours/rate missing${money}`;
-      case "unmatched":
-        return `"${p.trade_name}"${where}${money}: no matching crew member`;
-      case "ambiguous":
-        return `"${p.trade_name}"${where}${money}: matches more than one crew member`;
-      case "self":
-        return `"${p.trade_name}"${where}${money}: names the submitter — not auto-paid`;
     }
   });
-  return "WO LABOUR: could not auto-pay " + parts.join("; ") +
-    ". The office must arrange these payment(s) manually.";
+  return "WO LABOUR: could not route " + parts.join("; ") +
+    ". The office must reconcile these labour lines manually.";
 }
