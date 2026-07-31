@@ -187,6 +187,11 @@ export interface AuditInput {
   pageStats: Record<string, { pages: number; rows: number }>;
 }
 
+interface PagedBoardPopulation {
+  rows: RawJob[];
+  terminalSyntheticJobIds: Set<string>;
+}
+
 export interface AuditResult {
   generated_at: string;
   population_count: number;
@@ -865,7 +870,7 @@ async function fetchByJobIdChunks<T>(
 async function loadPagedBoardPopulation(
   client: any,
   pageStats: Record<string, { pages: number; rows: number }>,
-): Promise<RawJob[]> {
+): Promise<PagedBoardPopulation> {
   const select =
     "id,job_number,type,status,archived,created_at,updated_at,completed_at,insurance_job_type:metadata->>insurance_job_type,synthetic_livefire_marker:metadata->>synthetic_livefire_marker";
   const rows: RawJob[] = [];
@@ -917,12 +922,24 @@ async function loadPagedBoardPopulation(
       Array.isArray(run.job_ids) ? run.job_ids.map(String) : []
     ),
   );
-  return [...new Map(rows.map((row) => [text(row.id), row])).values()]
-    .filter((row) => !terminalIds.has(text(row.id)))
-    .sort((a, b) =>
-      text(b.created_at).localeCompare(text(a.created_at)) ||
-      text(b.id).localeCompare(text(a.id))
-    );
+  return {
+    rows: [...new Map(rows.map((row) => [text(row.id), row])).values()]
+      .filter((row) => !terminalIds.has(text(row.id)))
+      .sort((a, b) =>
+        text(b.created_at).localeCompare(text(a.created_at)) ||
+        text(b.id).localeCompare(text(a.id))
+      ),
+    terminalSyntheticJobIds: terminalIds,
+  };
+}
+
+export function filterCanonicalRowsForAudit(
+  canonicalRows: any[],
+  terminalSyntheticJobIds: Set<string>,
+): any[] {
+  return canonicalRows.filter((row) =>
+    !terminalSyntheticJobIds.has(text(row?.id))
+  );
 }
 
 function requiredEnv(name: string, fallback?: string): string {
@@ -1286,10 +1303,15 @@ async function run(): Promise<void> {
     "../supabase/functions/ops-api/makesafe_state_compare.ts"
   );
 
-  const [rawJobs, canonicalRows] = await Promise.all([
+  const [population, importedCanonicalRows] = await Promise.all([
     loadPagedBoardPopulation(client, pageStats),
     opsModule._loadCanonicalMakesafeBoardForTest(client),
   ]);
+  const rawJobs = population.rows;
+  const canonicalRows = filterCanonicalRowsForAudit(
+    importedCanonicalRows,
+    population.terminalSyntheticJobIds,
+  );
   const jobIds = rawJobs.map((job) => text(job.id)).filter(Boolean);
   const [documents, invoices, packs] = await Promise.all([
     fetchByJobIdChunks<RawDocument>(

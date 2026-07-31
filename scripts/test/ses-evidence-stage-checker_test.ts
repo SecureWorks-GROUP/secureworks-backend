@@ -7,6 +7,7 @@ import {
   type AuditResult,
   buildAudit,
   fetchAllPages,
+  filterCanonicalRowsForAudit,
   type RawInvoice,
   type RawJob,
   type RawPack,
@@ -174,6 +175,20 @@ Deno.test("range reader walks beyond the PostgREST 1000-row cap", async () => {
   assertEquals(rows.length, 1_205);
   assertEquals(ranges, [[0, 999], [1000, 1999]]);
   assertEquals(stats.fixture, { pages: 2, rows: 1_205 });
+});
+
+Deno.test("canonical audit rows exclude terminal synthetic IDs beyond page one", () => {
+  const terminalIds = new Set(
+    Array.from({ length: 1_205 }, (_, index) => `synthetic-${index}`),
+  );
+  const canonicalRows = Array.from({ length: 1_205 }, (_, index) => ({
+    id: `synthetic-${index}`,
+    job_number: `SWMS-SYNTHETIC-${index}`,
+  }));
+  assertEquals(
+    filterCanonicalRowsForAudit(canonicalRows, terminalIds),
+    [],
+  );
 });
 
 Deno.test("report renderer rejects client personal data", () => {
