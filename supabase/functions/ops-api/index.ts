@@ -17210,10 +17210,18 @@ async function intakeMintAuthority(
   body: any,
 ) {
   if (extraction?.deterministic_intake !== true) return null
+  const reviewedSourcePostIds = parseJsonArray(body?.source_post_ids)
+    .map((value: any) => String(value || '').trim())
+    .filter(Boolean)
+  const extractedSourcePostIds = parseJsonArray(
+    extraction?.intake_source_post_ids,
+  ).map((value: any) => String(value || '').trim()).filter(Boolean)
   const sourcePostIds = Array.from(new Set(
-    parseJsonArray(
-      body?.source_post_ids || extraction?.intake_source_post_ids || [],
-    ).map((value: any) => String(value || '').trim()).filter(Boolean),
+    reviewedSourcePostIds.length
+      ? reviewedSourcePostIds
+      : extractedSourcePostIds.length
+      ? extractedSourcePostIds
+      : [String(draft?.graph_message_id || '').trim()].filter(Boolean),
   )).sort()
   let caseId = cleanReviewedString(body?.intake_case_id)
   if (!caseId && sourcePostIds.length) {
@@ -17234,6 +17242,7 @@ async function intakeMintAuthority(
   }
   return { caseId, sourcePostIds }
 }
+export const _intakeMintAuthorityForTest = intakeMintAuthority
 
 async function recoverIntakeMintJob(client: any, mint: any) {
   if (mint?.job_id) {
