@@ -27,6 +27,16 @@ disappear and reappear.
 
 This was a source-control/deploy-lane problem, not a database corruption problem.
 
+## Vault Prerequisite For Historical PDF Draining
+
+Before the historical PDF drain migration or cron runs in production, Vault
+must contain a decrypted secret named `sw_api_key` whose value is the current
+`SW_API_KEY` used by `ops-api`. A missing or empty secret must fail loudly; the
+drain has no stale credential fallback. The drain deliberately remains paced
+at `max_items: 1` per minute: 947 documents at that pace take about 15 hours
+47 minutes. A separate, benchmarked future change may evaluate a sequential
+SHA-fenced cap of 5; do not change the current pace as part of this lane.
+
 ## Allowed Production Deploy Paths
 
 Preferred path:
@@ -34,8 +44,10 @@ Preferred path:
 1. Merge reviewed changes to `secureworks-site/main`.
 2. The GitHub Actions production edge deploy workflow
    (`.github/workflows/deploy-edge-functions.yml`) runs automatically on that
-   push, in the `production` environment. For changed functions, its first
-   deploy gate runs `scripts/apply-pending-migrations.sh`, which applies
+   push, in the `production` environment. For changed functions and
+   migration-only merges, its reviewed migration lane runs
+   `scripts/apply-pending-migrations.sh`; migration-only merges deploy zero
+   functions. The runner applies
    repository migrations missing from the production ledger in version order
    through the Management API. It verifies each migration request before
    writing and read-checking that migration's ledger row. The exact-file

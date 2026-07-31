@@ -59,6 +59,15 @@ recorded by the verifier.
 This is intentionally a one-document worker, not a raised standing-scan cap,
 so the scope-json OOM failure mode is not reintroduced.
 
+The historical cron invokes `ops-api` with `x-api-key` from the Vault secret
+`sw_api_key`. That secret must be present and non-empty before the drain is
+enabled; there is no embedded or stale credential fallback. The pg_net request
+is recorded and checked asynchronously, so timeout, network error, non-200
+response, or a missing response fails the cron visibly rather than appearing as
+a successful drain. The current pace remains one item per minute. A future
+cap-5 change is only a recommendation for a separately benchmarked,
+sequential, SHA-fenced implementation.
+
 The five-fates replay retains its 50-document fallback cap for historical rows
 that have not crossed the belt. Persisted belt results are reused as exact
 documents and do not spend that local fallback budget. This preserves the
@@ -73,6 +82,12 @@ Apply these migrations in order before deploying the matching `ops-api` and
 1. `20260729010000_makesafe_hugo_notification_sla_v1.sql`
 2. `20260731000001_makesafe_pdf_extraction_belt.sql`
 3. `20260731000002_makesafe_intake_settlement_closure.sql`
+4. `20260731081410_fix_makesafe_pdf_drain_auth_and_response_check.sql`
+5. `20260731081411_remove_sw_service_key_fallback.sql`
+
+Migration-only merges enter the same reviewed production migration lane and
+deploy zero functions. The matching function deploy remains after all listed
+migrations are applied.
 
 The schema-requirements manifest is the deploy gate for the required tables,
 columns, indexes, constraints, policies, and triggers. Code must not deploy

@@ -17,6 +17,18 @@ const closureMigration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const drainAuthMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260731081410_fix_makesafe_pdf_drain_auth_and_response_check.sql",
+    import.meta.url,
+  ),
+);
+const serviceKeyHardeningMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260731081411_remove_sw_service_key_fallback.sql",
+    import.meta.url,
+  ),
+);
 
 Deno.test("PDF belt migration creates a durable bounded queue and retention-safe extraction columns", () => {
   for (
@@ -77,6 +89,43 @@ Deno.test("PDF belt migration keeps the standing scanner bounded rather than rai
   assert(!migration.includes("received_at >= now() - interval '5 minutes'"));
   assertStringIncludes(migration, "one document per invocation");
   assertStringIncludes(migration, "one document per minute");
+});
+
+Deno.test("PDF drain cron uses the ops-api key contract and fails loudly on asynchronous HTTP errors", () => {
+  assertStringIncludes(drainAuthMigration, "'x-api-key', api_key");
+  assertStringIncludes(drainAuthMigration, "FROM vault.decrypted_secrets");
+  assertStringIncludes(drainAuthMigration, "WHERE name = 'sw_api_key'");
+  assertStringIncludes(drainAuthMigration, "regexp_replace(decrypted_secret");
+  assert(!drainAuthMigration.includes("public._sw_api_key()"));
+  assert(!drainAuthMigration.includes("'Authorization', 'Bearer '"));
+  assertStringIncludes(
+    drainAuthMigration,
+    "makesafe_pdf_extraction_drain_requests",
+  );
+  assertStringIncludes(drainAuthMigration, "LEFT JOIN net._http_response");
+  assertStringIncludes(drainAuthMigration, "drain_request.status_code <> 200");
+  assertStringIncludes(drainAuthMigration, "IF NOT FOUND THEN");
+  assertStringIncludes(drainAuthMigration, "interval '6 hours'");
+  assertStringIncludes(drainAuthMigration, "q.checked_at IS NULL");
+  assertStringIncludes(drainAuthMigration, "RAISE EXCEPTION");
+  assertStringIncludes(
+    drainAuthMigration,
+    "makesafe-pdf-extraction-drain-response-check",
+  );
+});
+
+Deno.test("service key helper no longer falls back to an embedded stale credential", () => {
+  assertStringIncludes(
+    serviceKeyHardeningMigration,
+    "WHERE name = 'service_role_key'",
+  );
+  assertStringIncludes(
+    serviceKeyHardeningMigration,
+    'vault secret "service_role_key" is missing or empty',
+  );
+  assert(
+    !serviceKeyHardeningMigration.includes("v_key := public._sw_service_key()"),
+  );
 });
 
 Deno.test("PDF belt owns claim, completion, retry budget, and ETA on one SHA coordinate", () => {
