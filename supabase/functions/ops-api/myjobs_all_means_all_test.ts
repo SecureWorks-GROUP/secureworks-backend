@@ -76,7 +76,6 @@ type RecordedQuery = {
   lte: Record<string, string>;
   lt: Record<string, string>;
   notIn: string | null;
-  notIdIn: string | null;
   inCol: string | null;
   inVals: unknown[] | null;
   or: { str: string; referencedTable: string | null } | null;
@@ -198,10 +197,6 @@ function resolve(fx: Fixtures, st: RecordedQuery): { data: unknown[] | null; err
       const excluded = parseNotInSet(st.notIn);
       rows = rows.filter((j) => !excluded.has(j.status));
     }
-    if (st.notIdIn) {
-      const excluded = parseNotInSet(st.notIdIn);
-      rows = rows.filter((j) => !excluded.has(j.id));
-    }
     rows = rows.slice().sort((a, b) =>
       String(b.created_at || "").localeCompare(String(a.created_at || "")) ||
       String(a.id).localeCompare(String(b.id))
@@ -243,7 +238,7 @@ function makeClient(fx: Fixtures, recorded: RecordedQuery[] = []) {
   function from(table: string) {
     const st: RecordedQuery = {
       table, select: "", head: false, eq: {}, neq: {}, gte: {}, lte: {}, lt: {},
-      notIn: null, notIdIn: null, inCol: null, inVals: null, or: null, ors: [], range: null, limit: null,
+      notIn: null, inCol: null, inVals: null, or: null, ors: [], range: null, limit: null,
     };
     // deno-lint-ignore no-explicit-any
     const b: any = {
@@ -260,7 +255,6 @@ function makeClient(fx: Fixtures, recorded: RecordedQuery[] = []) {
       in: (k: string, arr: unknown[]) => { st.inCol = k; st.inVals = arr; return b; },
       not: (k: string, op: string, v: string) => {
         if (k === "status" && op === "in") st.notIn = v;
-        if (k === "id" && op === "in") st.notIdIn = v;
         return b;
       },
       or: (s: string, opts?: { referencedTable?: string }) => {
@@ -800,7 +794,49 @@ Deno.test("All tab: external-ref matches are stable across pages and counted", a
   assertEquals(second.jobs.map((j: { id: string }) => j.id), ["00000000-0000-0000-0000-000000000002"]);
   assertEquals(new Set([...first.jobs, ...second.jobs].map((j: { id: string }) => j.id)).size, 3);
   const baseReads = firstRecorded.filter((q) => q.table === "jobs" && !q.head && q.or);
-  assertEquals(baseReads.every((q) => q.notIdIn?.includes(externalId)), true, "base paging excludes the external-ref match");
+  assertEquals(baseReads[0]?.range, [0, 500], "search materializes one bounded result set before slicing");
+});
+
+Deno.test("search: multiple external-ref matches respect page size", async () => {
+  const extOne = "00000000-0000-0000-0000-000000000101";
+  const extTwo = "00000000-0000-0000-0000-000000000102";
+  const fixtures: Fixtures = {
+    assignments: [],
+    jobs: [
+      { id: extOne, type: "makesafe", status: "quoted", job_number: "SWMS-EXT-1", created_at: "2026-01-03T00:00:00Z" },
+      { id: extTwo, type: "makesafe", status: "quoted", job_number: "SWMS-EXT-2", created_at: "2026-01-02T00:00:00Z" },
+      { id: "00000000-0000-0000-0000-000000000103", type: "fencing", status: "quoted", client_name: "MLB25248 base", created_at: "2026-01-01T00:00:00Z" },
+    ],
+    details: [
+      { job_id: extOne, external_ref: "MLB-25248" },
+      { job_id: extTwo, external_ref: "MLB-25248" },
+    ],
+  };
+  const pages = await Promise.all([0, 1, 2].map((offset) => searchAllJobs(
+    makeClient(fixtures),
+    new URLSearchParams({ q: "MLB25248", page_size: "1", offset: String(offset) }),
+    viewer(),
+    true,
+  )));
+  assertEquals(pages.every((page) => page.jobs.length <= 1), true);
+  assertEquals(new Set(pages.flatMap((page) => page.jobs.map((job: { id: string }) => job.id))).size, 3);
+});
+
+Deno.test("search: exact job-number matches rank before newer weaker matches", async () => {
+  const fixtures: Fixtures = {
+    assignments: [],
+    jobs: [
+      { id: "00000000-0000-0000-0000-000000000201", type: "fencing", status: "quoted", job_number: "MLB25248", created_at: "2020-01-01T00:00:00Z" },
+      { id: "00000000-0000-0000-0000-000000000202", type: "fencing", status: "quoted", client_name: "MLB25248 newer", created_at: "2026-01-01T00:00:00Z" },
+    ],
+  };
+  const res = await searchAllJobs(
+    makeClient(fixtures),
+    new URLSearchParams({ q: "MLB25248", page_size: "1" }),
+    viewer(),
+    true,
+  );
+  assertEquals(res.jobs.map((job: { id: string }) => job.id), ["00000000-0000-0000-0000-000000000201"]);
 });
 
 // ── Calendar (task item 4) ───────────────────────────────────────────────────

@@ -26289,6 +26289,7 @@ async function enrichTradeMakesafeJobs(client: any, jobs: any[]) {
 // typed query stopped at a silent 200-row cap.
 export const TRADE_JOB_FEED_PAGE_DEFAULT = 200
 export const TRADE_JOB_FEED_PAGE_MAX = 500
+export const TRADE_JOB_SEARCH_RESULT_CAP = 500
 export const TRADE_JOB_FEED_SELECT =
   'id, org_id, job_number, client_name, client_phone, client_email, site_address, site_suburb, type, status, notes, metadata, created_at, updated_at, completed_at'
 
@@ -26344,21 +26345,6 @@ export async function searchAllJobs(
   const pageSize = Math.min(requestedPageSize, TRADE_JOB_FEED_PAGE_MAX)
   const offset = requestedOffset
 
-  let externalRefJobs: any[] = []
-  if (q) {
-    const extRefMatches = await resolveJobsByExternalRef(
-      client,
-      [q],
-      _GLOBAL_SEARCH_STATUS_EXCLUDE,
-      TRADE_JOB_FEED_SELECT,
-    )
-    externalRefJobs = Object.values(extRefMatches.byId).filter((job: any) =>
-      /^[0-9a-f-]{36}$/i.test(String(job?.id || '')) &&
-      String(job?.org_id || viewer.orgId) === String(viewer.orgId)
-    )
-  }
-  const externalRefJobIds = new Set(externalRefJobs.map((job: any) => String(job.id)))
-
   // M9 FIX A: when q is non-empty, do NOT include the unconditional assigned-jobs
   // set — it polluted results (a gibberish q returned ~6 rows from the trade's
   // assigned list with no text filter).
@@ -26392,10 +26378,63 @@ export async function searchAllJobs(
         `job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%,site_address.ilike.%${q}%`,
       )
     }
-    if (externalRefJobIds.size > 0) {
-      jobQuery = jobQuery.not('id', 'in', `(${Array.from(externalRefJobIds).map((id) => `"${id}"`).join(',')})`)
-    }
     return jobQuery
+  }
+
+  if (q) {
+    const extRefMatches = await resolveJobsByExternalRef(
+      client,
+      [q],
+      _GLOBAL_SEARCH_STATUS_EXCLUDE,
+      TRADE_JOB_FEED_SELECT,
+    )
+    const externalRefJobs = Object.values(extRefMatches.byId).filter((job: any) =>
+      /^[0-9a-f-]{36}$/i.test(String(job?.id || '')) &&
+      String(job?.org_id || viewer.orgId) === String(viewer.orgId)
+    )
+    const { data: baseRows, error: baseErr } = await buildJobQuery(TRADE_JOB_FEED_SELECT)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(0, TRADE_JOB_SEARCH_RESULT_CAP)
+    if (baseErr) throw baseErr
+
+    const byId: Record<string, any> = {}
+    for (const job of [...(baseRows || []), ...externalRefJobs]) {
+      if (job?.id) byId[job.id] = job
+    }
+    const ranked = Object.values(byId).sort((a: any, b: any) => {
+      const aNum = String(a.job_number || '').toLowerCase()
+      const bNum = String(b.job_number || '').toLowerCase()
+      const aExact = aNum === q || aNum.startsWith(q) ? 0 : 1
+      const bExact = bNum === q || bNum.startsWith(q) ? 0 : 1
+      if (aExact !== bExact) return aExact - bExact
+      const createdDiff = new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+      if (createdDiff !== 0) return createdDiff
+      return String(a.id).localeCompare(String(b.id))
+    })
+    const capped = ranked.length > TRADE_JOB_SEARCH_RESULT_CAP || (baseRows || []).length > TRADE_JOB_SEARCH_RESULT_CAP
+    const materialized = ranked.slice(0, TRADE_JOB_SEARCH_RESULT_CAP)
+    const pageJobs = materialized.slice(offset, offset + pageSize)
+    const jobs = await enrichTradeMakesafeJobs(client, pageJobs)
+    for (const job of jobs) {
+      if (!job.external_ref && job.makesafe_details?.external_ref) {
+        job.external_ref = job.makesafe_details.external_ref
+      }
+      if (!job.external_ref) {
+        job.external_ref = job.metadata?.external_ref || null
+      }
+      delete job.org_id
+    }
+    const hasMore = capped || offset + jobs.length < materialized.length
+    return {
+      jobs,
+      lens,
+      total: materialized.length,
+      page_size: pageSize,
+      offset,
+      truncated: hasMore,
+      next_offset: hasMore ? offset + pageSize : null,
+    }
   }
 
   // The total is read separately (head count) so the client can say "showing X
@@ -26405,22 +26444,16 @@ export async function searchAllJobs(
   try {
     const countResult = await buildJobQuery('id', { count: 'exact', head: true })
     if (countResult?.error) throw countResult.error
-    total = typeof countResult?.count === 'number'
-      ? countResult.count + externalRefJobIds.size
-      : null
+    total = typeof countResult?.count === 'number' ? countResult.count : null
   } catch (countErr: any) {
     console.log('[ops-api] search_all_jobs count failed (non-blocking):', countErr?.message)
   }
 
   // created_at is not unique, so paging needs the id tiebreak for a total order.
-  const baseOffset = Math.max(0, offset - (offset > 0 ? externalRefJobIds.size : 0))
-  const basePageSize = offset === 0
-    ? Math.max(1, pageSize - externalRefJobIds.size)
-    : pageSize
   const { data: allJobs, error: allJobsErr } = await buildJobQuery(TRADE_JOB_FEED_SELECT)
     .order('created_at', { ascending: false })
     .order('id', { ascending: true })
-    .range(baseOffset, baseOffset + basePageSize - 1)
+    .range(offset, offset + pageSize - 1)
   if (allJobsErr) throw allJobsErr
 
   // One job = one entry, keyed by job id — the captain's explicit condition.
@@ -26429,24 +26462,7 @@ export async function searchAllJobs(
     if (j?.id) byId[j.id] = j
   }
 
-  if (offset === 0) {
-    for (const job of externalRefJobs) byId[job.id] = job
-  }
-
-  // M9 FIX A (ordering): when searching, sort by exact/prefix job_number match first,
-  // then by created_at desc so results are deterministic rather than insertion-order random.
-  let merged = Object.values(byId)
-  if (q) {
-    merged = merged.sort((a: any, b: any) => {
-      const aNum = String(a.job_number || '').toLowerCase()
-      const bNum = String(b.job_number || '').toLowerCase()
-      const aExact = aNum === q || aNum.startsWith(q) ? 0 : 1
-      const bExact = bNum === q || bNum.startsWith(q) ? 0 : 1
-      if (aExact !== bExact) return aExact - bExact
-      // Fallback: newest first
-      return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
-    })
-  }
+  const merged = Object.values(byId)
 
   // enrichTradeMakesafeJobs fetches makesafe_job_details (which includes external_ref)
   // and attaches it as job.makesafe_details.external_ref — M9 FIX A adds external_ref.
