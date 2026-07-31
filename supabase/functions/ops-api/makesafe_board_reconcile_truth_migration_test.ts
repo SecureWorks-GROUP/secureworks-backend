@@ -41,6 +41,12 @@ const decimalBoundaryContract = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const previewMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260731085928_board_v2_seed_preview.sql",
+    import.meta.url,
+  ),
+);
 const indexSource = await Deno.readTextFile(
   new URL("./index.ts", import.meta.url),
 );
@@ -192,6 +198,61 @@ Deno.test("edge acceptance is the live U4 canary plus zero v2 input errors", () 
       "const acceptancePassed = inputErrors === 0 && spineBlockers.length === 0",
     ),
   );
+});
+
+Deno.test("seed preview is service-role-only, read-only, and exact-card complete", () => {
+  assertStringIncludes(
+    previewMigration,
+    "CREATE OR REPLACE FUNCTION public.preview_makesafe_state_authority_v2",
+  );
+  assertStringIncludes(previewMigration, "STABLE");
+  assertStringIncludes(previewMigration, "SECURITY INVOKER");
+  assertStringIncludes(
+    previewMigration,
+    "REVOKE ALL ON FUNCTION public.preview_makesafe_state_authority_v2(uuid[])",
+  );
+  assertStringIncludes(
+    previewMigration,
+    "GRANT EXECUTE ON FUNCTION public.preview_makesafe_state_authority_v2(uuid[])",
+  );
+  const previewBody = previewMigration.match(
+    /CREATE OR REPLACE FUNCTION public\.preview_makesafe_state_authority_v2[\s\S]+?AS \$\$([\s\S]+?)\$\$;/,
+  )?.[1] || "";
+  assert(previewBody.length > 0);
+  assertEquals(
+    /\b(?:INSERT|UPDATE|DELETE|MERGE|TRUNCATE)\b/i.test(previewBody),
+    false,
+  );
+  assertStringIncludes(previewBody, "count(c.case_id) AS case_count");
+  assertStringIncludes(previewBody, "count(DISTINCT id)");
+  assertStringIncludes(previewBody, "v_matched <> v_requested");
+});
+
+Deno.test("seed repair fixes the case selector and canonical restoration boundary", () => {
+  assertStringIncludes(previewMigration, "count(c.id) AS case_count");
+  assertStringIncludes(previewMigration, "count(c.case_id) AS case_count");
+  assertStringIncludes(
+    previewMigration,
+    "seed_makesafe_state_authority_v1 no longer matches the reviewed repair anchors",
+  );
+  assertStringIncludes(
+    previewMigration,
+    "j.metadata->>'insurance_job_type' = 'restoration'",
+  );
+  assertStringIncludes(
+    seedScopeMigration,
+    "public.stamp_makesafe_fact_identity_v1()",
+  );
+});
+
+Deno.test("seed and reconcile dry-runs use prospective projection inputs", () => {
+  assertStringIncludes(
+    indexSource,
+    "attachMakesafeStateV2SeedPreviewComparison",
+  );
+  assertStringIncludes(indexSource, "projection_basis");
+  assertStringIncludes(indexSource, "projection_input_error_residual_count");
+  assertStringIncludes(indexSource, "prospective: true");
 });
 
 Deno.test("seed scope accepts canonical restoration and accounts every skip", () => {

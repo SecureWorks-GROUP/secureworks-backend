@@ -66,7 +66,9 @@ migration_re = re.compile(
     r"^supabase/migrations/(?P<version>[0-9]{14})_(?P<name>[a-z0-9_]+)\.sql$"
 )
 identifier_re = re.compile(r"^[a-z_][a-z0-9_]*$")
-marker_kinds = {"table", "column", "constraint", "index", "policy", "trigger"}
+marker_kinds = {
+    "table", "column", "constraint", "index", "policy", "trigger", "function"
+}
 
 def validate_marker(kind: str, marker: str, line_no: int) -> None:
     parts = marker.split(".")
@@ -158,6 +160,12 @@ marker_state AS (
   SELECT rm.req_id, rm.marker_kind, rm.marker_name,
     CASE rm.marker_kind
       WHEN 'table' THEN to_regclass('public.' || rm.marker_name) IS NOT NULL
+      WHEN 'function' THEN EXISTS (
+        SELECT 1
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public' AND p.proname = rm.marker_name
+      )
       WHEN 'column' THEN EXISTS (
         SELECT 1 FROM information_schema.columns c
         WHERE c.table_schema = 'public'

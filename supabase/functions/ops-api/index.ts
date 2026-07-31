@@ -129,6 +129,7 @@ import {
 } from './makesafe_board_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
+  attachMakesafeStateV2SeedPreviewComparison,
   buildPrivilegedMakesafeV2BoardComparison,
 } from './makesafe_state_compare.ts'
 import {
@@ -3589,11 +3590,17 @@ if (import.meta.main) serve(async (req: Request) => {
         const acceptedRows = dryRun
           ? canonicalRows
           : await loadCanonicalMakesafeBoard(client)
-        const comparison = await attachMakesafeStateV2Comparison(
-          client,
-          acceptedRows,
-          new Date().toISOString(),
-        )
+        const comparison = dryRun
+          ? await attachMakesafeStateV2SeedPreviewComparison(
+            client,
+            acceptedRows,
+            new Date().toISOString(),
+          )
+          : await attachMakesafeStateV2Comparison(
+            client,
+            acceptedRows,
+            new Date().toISOString(),
+          )
         const canaryRequest = normalizeSesPrepareRequest({
           selection: { mode: 'job_number', job_number: 'SWMS-26980' },
           idempotency_key: `makesafe-state-seed:${runKey || selectionHash}`,
@@ -3620,13 +3627,37 @@ if (import.meta.main) serve(async (req: Request) => {
         )
         const inputErrors =
           comparison.projection_health.projection_input_error_job_count
+        const projectionInputResiduals = comparison.rows.flatMap((row: any) => {
+          const reasons = (row?.state_v2?.diagnostics || [])
+            .filter((item: any) => item?.code === 'projection_input_error')
+            .map((item: any) => String(item?.reason || 'Unknown projection input error.'))
+          return reasons.length
+            ? [{
+              job_id: String(row?.id || ''),
+              job_number: String(row?.job_number || ''),
+              reasons,
+            }]
+            : []
+        })
         const acceptancePassed = inputErrors === 0 && spineBlockers.length === 0
         return json({
           ok: acceptancePassed,
           dry_run: dryRun,
+          projection_basis: comparison.projection_basis || 'persisted',
           selection_hash: selectionHash,
           requested: jobIds.length,
-          seed_result: seedResult,
+          seed_result: dryRun
+            ? {
+              requested: jobIds.length,
+              prospective: true,
+              persisted_writes: 0,
+            }
+            : seedResult,
+          projection_health: comparison.projection_health,
+          projection_input_error_residuals:
+            projectionInputResiduals.slice(0, 100),
+          projection_input_error_residual_count:
+            projectionInputResiduals.length,
           acceptance: {
             projection_input_error_job_count: inputErrors,
             u4_canary_job_number: 'SWMS-26980',
@@ -3658,11 +3689,17 @@ if (import.meta.main) serve(async (req: Request) => {
 
         const canonicalRows = await loadCanonicalMakesafeBoard(client)
         const computedAt = new Date().toISOString()
-        const comparison = await attachMakesafeStateV2Comparison(
-          client,
-          canonicalRows,
-          computedAt,
-        )
+        const comparison = dryRun
+          ? await attachMakesafeStateV2SeedPreviewComparison(
+            client,
+            canonicalRows,
+            computedAt,
+          )
+          : await attachMakesafeStateV2Comparison(
+            client,
+            canonicalRows,
+            computedAt,
+          )
         const plan = planMakesafeStateReconciliation(comparison.rows)
         const orderedOutcomes = [...plan.outcomes].sort((a, b) =>
           a.job_id.localeCompare(b.job_id)
@@ -3680,10 +3717,23 @@ if (import.meta.main) serve(async (req: Request) => {
           rows: selection,
         })
         const selectionHash = `sha256:${hash}`
+        const projectionInputResiduals = comparison.rows.flatMap((row: any) => {
+          const reasons = (row?.state_v2?.diagnostics || [])
+            .filter((item: any) => item?.code === 'projection_input_error')
+            .map((item: any) => String(item?.reason || 'Unknown projection input error.'))
+          return reasons.length
+            ? [{
+              job_id: String(row?.id || ''),
+              job_number: String(row?.job_number || ''),
+              reasons,
+            }]
+            : []
+        })
         const baseResult = {
           ok: plan.neither === 0 &&
             comparison.projection_health.projection_input_error_job_count === 0,
           dry_run: dryRun,
+          projection_basis: comparison.projection_basis || 'persisted',
           selection_hash: selectionHash,
           requested: plan.requested,
           trustworthy: plan.trustworthy,
@@ -3693,6 +3743,11 @@ if (import.meta.main) serve(async (req: Request) => {
           attention_write_count: plan.attention_applications.length,
           projection_input_error_job_count:
             comparison.projection_health.projection_input_error_job_count,
+          projection_health: comparison.projection_health,
+          projection_input_error_residuals:
+            projectionInputResiduals.slice(0, 100),
+          projection_input_error_residual_count:
+            projectionInputResiduals.length,
         }
         if (plan.neither !== 0) {
           return json({
