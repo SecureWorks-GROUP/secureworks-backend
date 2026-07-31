@@ -2,6 +2,7 @@ import {
   assertReadOnlyRequest,
   assertReportPrivacy,
   auditJob,
+  buildAudit,
   type AuditResult,
   fetchAllPages,
   type RawJob,
@@ -211,4 +212,26 @@ Deno.test("empty report fixture remains privacy-safe", async () => {
     Error,
     "privacy guard",
   );
+});
+
+Deno.test("reconciliation work-list includes board coverage findings", () => {
+  const result = buildAudit({
+    canonicalRows: [{ ...row(), id: "job-extra", job_number: "SWMS-EXTRA" }],
+    rawJobs: [RAW_JOB],
+    documents: [],
+    invoices: [],
+    packs: [],
+    documentFlagsByJob: new Map(),
+    swmsRequiredJobIds: new Set(),
+    v2RowsByJob: new Map(),
+    projectionHealth: null,
+    v2LoadError: null,
+    generatedAt: "2026-07-31T00:00:00Z",
+    pageStats: {},
+  });
+  const markdown = renderMarkdown(result, "/tmp/report.md");
+  assertEquals(markdown.includes("SWMS-TEST-1"), true);
+  assertEquals(markdown.includes("coverage_missing_from_canonical_board"), true);
+  assertEquals(markdown.includes("SWMS-EXTRA"), true);
+  assertEquals(markdown.includes("coverage_extra_on_canonical_board"), true);
 });

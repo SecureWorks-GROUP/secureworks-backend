@@ -984,6 +984,44 @@ function worstOffenders(result: AuditResult, limit = 25): AuditJobResult[] {
     .slice(0, limit);
 }
 
+function reconciliationWorklist(result: AuditResult): AuditJobResult[] {
+  const coverageFindings: AuditJobResult[] = [
+    ...result.coverage_missing_from_board.map((jobRef) => ({
+      job_ref: jobRef,
+      claimed_stage: "new" as SesStage,
+      evidence_stage: "new" as SesStage,
+      report_in: false,
+      docs_ready: false,
+      terminal_proven: false,
+      findings: [{
+        job_ref: jobRef,
+        claimed_stage: "new" as SesStage,
+        evidence_stage: "new" as SesStage,
+        code: "coverage_missing_from_canonical_board",
+        severity: "critical" as const,
+        detail: "Paged board population contains a job omitted by the canonical board loader.",
+      }],
+    })),
+    ...result.coverage_extra_on_board.map((jobRef) => ({
+      job_ref: jobRef,
+      claimed_stage: "new" as SesStage,
+      evidence_stage: "new" as SesStage,
+      report_in: false,
+      docs_ready: false,
+      terminal_proven: false,
+      findings: [{
+        job_ref: jobRef,
+        claimed_stage: "new" as SesStage,
+        evidence_stage: "new" as SesStage,
+        code: "coverage_extra_on_canonical_board",
+        severity: "critical" as const,
+        detail: "Canonical board contains a job outside the independently paged board population.",
+      }],
+    })),
+  ];
+  return [...worstOffenders(result, result.jobs.length), ...coverageFindings];
+}
+
 function rerunCommand(outputPath: string): string {
   return [
     `SUPABASE_URL='${DEFAULT_SUPABASE_URL}' \\`,
@@ -998,7 +1036,7 @@ export function renderMarkdown(
   outputPath: string,
 ): string {
   const failures = Object.entries(result.failure_counts);
-  const worklist = worstOffenders(result, result.jobs.length);
+  const worklist = reconciliationWorklist(result);
   const offenders = worklist.slice(0, 25);
   const cardsWithFindings =
     result.jobs.filter((job) => job.findings.length > 0).length;
