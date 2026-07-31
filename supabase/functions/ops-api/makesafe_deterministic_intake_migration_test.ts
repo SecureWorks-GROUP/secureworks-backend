@@ -58,6 +58,12 @@ const hugoNotificationMigration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const settlementClosureMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260731000002_makesafe_intake_settlement_closure.sql",
+    import.meta.url,
+  ),
+);
 const hugoNotification = await Deno.readTextFile(
   new URL("./makesafe_hugo_notification.ts", import.meta.url),
 );
@@ -191,7 +197,7 @@ Deno.test("intake settlement is retryable and Hugo idempotency is job-keyed", ()
   assertStringIncludes(index, "ensureIntakeWorkOrderEvidence(");
   assertStringIncludes(index, "intake_minted_job_ids");
   assertStringIncludes(index, "intake_settlement_pending: true");
-  assertStringIncludes(index, "notification_job_ids: createdJobIds");
+  assertStringIncludes(index, "notification_job_ids: settlement.notificationJobIds");
   assertStringIncludes(runtime, "intake_source_post_ids: plan.sourcePostIds");
   assertStringIncludes(index, "assertFreshMakesafeSourceSettled");
   assertStringIncludes(
@@ -199,7 +205,7 @@ Deno.test("intake settlement is retryable and Hugo idempotency is job-keyed", ()
     "hugo_notifications_required",
   );
   assertStringIncludes(
-    hugoNotificationMigration,
+    settlementClosureMigration,
     "UNIQUE (org_id, job_id)",
   );
   assert(!hugoNotification.includes("PHYSICAL_SES_FAMILIES"));
@@ -791,13 +797,13 @@ Deno.test("Hugo notification migration records lineage, board proof, provider ac
       "deep_link",
       "state",
       "failure_reason",
-      "UNIQUE (org_id, job_id)",
       "ENABLE ROW LEVEL SECURITY",
       "TO service_role",
     ]
   ) {
     assertStringIncludes(hugoNotificationMigration, marker);
   }
+  assertStringIncludes(settlementClosureMigration, "UNIQUE (org_id, job_id)");
   assertStringIncludes(
     hugoNotificationMigration,
     "provider_result_not_recorded",

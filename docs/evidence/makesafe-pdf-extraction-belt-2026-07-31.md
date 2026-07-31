@@ -78,14 +78,32 @@ following against production after migration-before-function deployment:
    `pdf_extraction_status=extracted`, non-null persisted text, and a completed
    timestamp. Its deterministic case/job path is no longer parked solely on
    `adapter_parse_failure`.
-3. A fresh, non-synthetic inbound builder WO records `received_at`, PDF
-   `pdf_extraction_completed_at`, canonical job creation, board observation, and
-   Hugo notification acceptance. The first PDF read and the board-visible result
-   are each within five minutes of receipt, with no portal-capture dependency.
+3. Submit one fresh physical WO and one fresh report-family WO. For each, record
+   `received_at`, the SHA coordinate's `completed_at`, canonical job creation,
+   board observation, and exactly one accepted Hugo audit keyed by
+   `(org_id, job_id)`. Both jobs must carry a `work_order` row in
+   `job_documents`; extraction and board visibility must each occur within five
+   minutes with no portal-capture dependency.
 4. The extraction endpoint reports a finite `remaining_backlog` and
    `drain_eta_at`; failed rows have a reason and retry/terminal accounting, and
    fresh-source health is based on the oldest eligible source rather than a
    successful HTTP response alone.
+5. Insert or observe a late carrier for a SHA already processing or terminal.
+   Confirm one coordinate row, one shared attempt count no greater than three,
+   one claim token while processing, and no second download/extraction. Confirm
+   every carrier mirrors the coordinate terminal result.
+6. Confirm this query returns zero rows:
+   `select org_id, job_id, count(*) from makesafe_intake_hugo_notifications group by 1,2 having count(*) > 1`.
+   Confirm every accepted audit joins to one explicit
+   `makesafe_intake_job_mints` row with non-null evidence, board, and notification
+   timestamps.
+7. Re-run settlement for both fresh jobs and confirm no second provider send.
+   Then rescan one historical approved draft and perform one later update on an
+   existing job with no mint row; both must create zero Hugo audits.
+8. For one deliberately ambiguous provider response, confirm the durable failed
+   audit remains job-keyed and a retry does not create a second provider
+   dispatch. Separately clear a proven pre-transport configuration failure and
+   confirm it can reclaim the same audit row.
 
 The checks should use the canonical board projection and the existing Hugo audit
 table `makesafe_intake_hugo_notifications`, not a client-side status derivation.

@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS public.makesafe_intake_hugo_notifications (
     FOREIGN KEY (org_id, case_id)
     REFERENCES public.makesafe_intake_cases(org_id, id) ON DELETE RESTRICT,
   CONSTRAINT makesafe_intake_hugo_notifications_once
-    UNIQUE (org_id, job_id),
+    UNIQUE (org_id, case_id, job_id),
   CONSTRAINT makesafe_intake_hugo_notifications_sources_check
     CHECK (
       array_position(source_post_ids, NULL) IS NULL
@@ -81,6 +81,6 @@ CREATE POLICY service_role_all_makesafe_intake_hugo_notifications
   WITH CHECK (true);
 
 COMMENT ON TABLE public.makesafe_intake_hugo_notifications IS
-  'Once-per-job audit for deterministic SES new-work notification. The pre-send claim records lineage, canonical board proof, configured staff recipient, provider acceptance, or a durable failure.';
+  'Once-per-case/job audit for deterministic SES new-work notification. The pre-send claim records lineage, canonical board proof, configured staff recipient, provider acceptance, or a durable failure.';
 COMMENT ON COLUMN public.makesafe_intake_hugo_notifications.failure_reason IS
   'Non-null while attempting or failed. provider_result_not_recorded is deliberately durable if GHL accepts but the final audit update cannot be committed.';

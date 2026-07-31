@@ -301,8 +301,11 @@ import {
   assertFreshMakesafeSourceSettled,
 } from './makesafe_pdf_settlement.ts'
 import {
+  completeIntakeMint,
   ensureIntakeWorkOrderEvidence,
-  intakeMintedJobIds,
+  loadIntakeMints,
+  reserveIntakeMint,
+  settleApprovedIntakeDraft,
 } from './makesafe_intake_settlement.ts'
 // Intake item 5 — deterministic WO-PDF client-block reader. Fills client_name /
 // client_phone / site_address from an unambiguous work-order-PDF client block when
@@ -12113,6 +12116,7 @@ async function createMakesafeJob(client: any, body: any) {
     builder_email_text_for_trade, builder_email_subject, builder_email_received_at,
     makesafe_job_family, makesafe_job_family_label,
     builder_claim_ref, builder_work_order_number, builder_po_number,
+    intake_mint_id,
     synthetic_livefire_marker,
     suppress_manager_notification,
   } = body
@@ -12194,6 +12198,7 @@ async function createMakesafeJob(client: any, body: any) {
     builder_claim_ref: builder_claim_ref || null,
     builder_work_order_number: builder_work_order_number || null,
     builder_po_number: builder_po_number || null,
+    ...(intake_mint_id ? { intake_mint_id } : {}),
     ...(reviewedSyntheticLivefireMarker
       ? { synthetic_livefire_marker: reviewedSyntheticLivefireMarker }
       : {}),
@@ -17198,14 +17203,79 @@ async function loadExistingJobBindingForDraft(client: any, draft: any): Promise<
   return { correction, targetJob, targetDetails }
 }
 
+async function intakeMintAuthority(
+  client: any,
+  draft: any,
+  extraction: Record<string, any>,
+  body: any,
+) {
+  const sourcePostIds = Array.from(new Set(
+    parseJsonArray(
+      body?.source_post_ids || extraction?.intake_source_post_ids || [],
+    ).map((value: any) => String(value || '').trim()).filter(Boolean),
+  )).sort()
+  let caseId = cleanReviewedString(body?.intake_case_id)
+  if (!caseId && sourcePostIds.length) {
+    const { data, error } = await client
+      .from('makesafe_intake_case_sources')
+      .select('case_id')
+      .eq('org_id', draft.org_id || DEFAULT_ORG_ID)
+      .in('post_id', sourcePostIds)
+      .limit(1)
+      .maybeSingle()
+    if (error) {
+      throw new Error(`intake mint case authority read failed: ${error.message || error}`)
+    }
+    caseId = data?.case_id || null
+  }
+  if (!caseId || !sourcePostIds.length) {
+    throw new Error('new intake job mint requires canonical case and source authority')
+  }
+  return { caseId, sourcePostIds }
+}
+
+async function recoverDraftMintLinks(client: any, draft: any) {
+  const mints = await loadIntakeMints(client, draft.id)
+  for (const mint of mints) {
+    if (mint.job_id) continue
+    const { data: job, error } = await client
+      .from('jobs')
+      .select('id')
+      .contains('metadata', { intake_mint_id: mint.id })
+      .maybeSingle()
+    if (error) {
+      throw new Error(`intake mint recovery read failed: ${error.message || error}`)
+    }
+    if (job?.id) await completeIntakeMint(client, mint.id, job.id)
+  }
+  return await loadIntakeMints(client, draft.id)
+}
+
+async function settleIntakeApproval(
+  client: any,
+  draft: any,
+  approvedJobId: string | null,
+  attachments: readonly any[],
+  extraction: Record<string, any>,
+) {
+  return await settleApprovedIntakeDraft(client, {
+    draftId: draft.id,
+    approvedJobId,
+    attachments,
+    extraction,
+    notify: (input) => notifyMintedDeterministicPhysicalJob(client, input),
+  })
+}
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
 
   // Load the draft for its field data (extraction/reviewed values below need draft.*).
-  const { data: draft, error: dErr } = await client.from('makesafe_intake_drafts')
+  const { data: loadedDraft, error: dErr } = await client.from('makesafe_intake_drafts')
     .select('*').eq('id', draft_id).single()
-  if (dErr || !draft) throw new Error('Draft not found')
+  if (dErr || !loadedDraft) throw new Error('Draft not found')
+  const draft = loadedDraft
 
   let extraction = parseJsonObject(draft.extraction_json)
   const ajPrefill = _deriveAjIntakePrefill({
@@ -17272,20 +17342,24 @@ async function approveIntakeDraft(client: any, body: any) {
   if (availableAttachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
-  if (draft.status === 'approved' && draft.approved_job_id) {
-    const mintedJobIds = intakeMintedJobIds(extraction, draft.approved_job_id)
-    const evidenceJobIds = mintedJobIds.length
-      ? mintedJobIds
-      : [String(draft.approved_job_id)]
-    await ensureIntakeWorkOrderEvidence(
+  let approvedJobId = draft.approved_job_id
+  if (draft.status === 'approved') {
+    const recoveredMints = await recoverDraftMintLinks(client, draft)
+    approvedJobId = approvedJobId ||
+      recoveredMints.find((mint) => mint.mint_role === 'primary')?.job_id ||
+      null
+  }
+
+  if (draft.status === 'approved' && approvedJobId) {
+    const settlement = await settleIntakeApproval(
       client,
-      evidenceJobIds,
+      draft,
+      approvedJobId,
       availableAttachments,
       extraction,
     )
     const settledExtraction = {
       ...extraction,
-      intake_minted_job_ids: mintedJobIds,
       intake_settlement_pending: false,
     }
     const { error: settlementError } = await client
@@ -17300,15 +17374,16 @@ async function approveIntakeDraft(client: any, body: any) {
     }
     return {
       ok: true,
-      job: { id: draft.approved_job_id },
+      job: { id: approvedJobId },
       draft_id,
       approved_fields: approvedFields,
       report_type: effectiveReportType || null,
       secondary_job: null,
-      split_combined: mintedJobIds.length > 1,
-      job_ids: evidenceJobIds,
+      split_combined: settlement.jobIds.length > 1,
+      job_ids: settlement.jobIds,
       job_created: false,
-      notification_job_ids: mintedJobIds,
+      notification_job_ids: settlement.notificationJobIds,
+      hugo_notifications_accepted: settlement.notificationsAccepted,
     }
   }
 
@@ -17393,6 +17468,14 @@ async function approveIntakeDraft(client: any, body: any) {
       throw linkError
     }
 
+    const settlement = await settleIntakeApproval(
+      client,
+      draft,
+      existingJobBinding.targetJob.id,
+      availableAttachments,
+      extraction,
+    )
+
     return {
       ok: true,
       job: existingJobBinding.targetJob,
@@ -17405,7 +17488,8 @@ async function approveIntakeDraft(client: any, body: any) {
       split_combined: false,
       job_ids: [existingJobBinding.targetJob.id],
       job_created: false,
-      notification_job_ids: [],
+      notification_job_ids: settlement.notificationJobIds,
+      hugo_notifications_accepted: settlement.notificationsAccepted,
     }
   }
 
@@ -17513,6 +17597,14 @@ async function approveIntakeDraft(client: any, body: any) {
   let createdJobId: string | null = null
   const createdJobIds: string[] = []
   try {
+    const authority = await intakeMintAuthority(client, draft, extraction, body)
+    const primaryMint = await reserveIntakeMint(client, {
+      orgId: draft.org_id || DEFAULT_ORG_ID,
+      draftId: draft.id,
+      mintRole: 'primary',
+      caseId: authority.caseId,
+      sourcePostIds: authority.sourcePostIds,
+    })
     // Create the make-safe job using reviewed/edited fields, not stale extraction data.
     // Preserve builder email source context for EVERY family so board/trade users can
     // see original instructions, links, and received timestamps after approval. For
@@ -17543,6 +17635,7 @@ async function approveIntakeDraft(client: any, body: any) {
       builder_claim_ref: extraction?.builder_claim_ref || null,
       builder_work_order_number: extraction?.builder_work_order_number || null,
       builder_po_number: extraction?.builder_po_number || null,
+      intake_mint_id: primaryMint.id,
       ...(extraction?.synthetic_livefire_marker
         ? {
           synthetic_livefire_marker:
@@ -17559,6 +17652,8 @@ async function approveIntakeDraft(client: any, body: any) {
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
     createdJobId = jobResult?.job?.id || null
     if (createdJobId) createdJobIds.push(createdJobId)
+    if (!createdJobId) throw new Error('guarded approval returned no primary job id')
+    await completeIntakeMint(client, primaryMint.id, createdJobId)
 
     // For report-only jobs: set report_type on makesafe_job_details and advance
     // substatus to ready_to_invoice (bypasses the report-production stage). A combined
@@ -17625,6 +17720,13 @@ async function approveIntakeDraft(client: any, body: any) {
     let secondaryJob: any = null
     if (splitObligation && createdJobId) {
       try {
+        const secondaryMint = await reserveIntakeMint(client, {
+          orgId: draft.org_id || DEFAULT_ORG_ID,
+          draftId: draft.id,
+          mintRole: 'secondary_report',
+          caseId: authority.caseId,
+          sourcePostIds: authority.sourcePostIds,
+        })
         const reportFamily = splitObligation.reportType === 'assessment_report'
           ? 'assessment_report_quote'
           : splitObligation.reportType
@@ -17650,6 +17752,7 @@ async function approveIntakeDraft(client: any, body: any) {
           builder_claim_ref: extraction?.builder_claim_ref || null,
           builder_work_order_number: extraction?.builder_work_order_number || null,
           builder_po_number: extraction?.builder_po_number || null,
+          intake_mint_id: secondaryMint.id,
           ...(extraction?.synthetic_livefire_marker
             ? {
               synthetic_livefire_marker:
@@ -17662,6 +17765,7 @@ async function approveIntakeDraft(client: any, body: any) {
         secondaryJob = secondaryResult?.job || null
         if (secondaryJob?.id) {
           createdJobIds.push(secondaryJob.id)
+          await completeIntakeMint(client, secondaryMint.id, secondaryJob.id)
           const { error: secondaryLinkError } = await client
             .from('makesafe_intake_drafts')
             .update({
@@ -17705,6 +17809,13 @@ async function approveIntakeDraft(client: any, body: any) {
       }
     }
 
+    const settlement = await settleIntakeApproval(
+      client,
+      draft,
+      jobResult.job.id,
+      availableAttachments,
+      extraction,
+    )
     const { error: settlementError } = await client
       .from('makesafe_intake_drafts')
       .update({
@@ -17729,7 +17840,8 @@ async function approveIntakeDraft(client: any, body: any) {
       split_combined: !!secondaryJob,
       job_ids: secondaryJob ? [jobResult.job.id, secondaryJob.id] : [jobResult.job.id],
       job_created: true,
-      notification_job_ids: createdJobIds,
+      notification_job_ids: settlement.notificationJobIds,
+      hugo_notifications_accepted: settlement.notificationsAccepted,
     }
   } catch (postClaimErr) {
     if (!createdJobId) {

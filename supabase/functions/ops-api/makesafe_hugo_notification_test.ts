@@ -228,24 +228,18 @@ Deno.test("Hugo notification unique claim prevents a second provider dispatch", 
   assertEquals(sends, 1);
 });
 
-Deno.test("Hugo notification retries a durable failed job claim without creating another ledger row", async () => {
+Deno.test("Hugo notification never retries an ambiguous provider failure", async () => {
   const audit = auditClient({ duplicateAfterFirst: true });
   let sends = 0;
   const notificationDeps = deps({
     sendSms: () => {
       sends++;
       return Promise.resolve(
-        sends === 1
-          ? {
-            accepted: false,
-            messageId: null,
-            failureReason: "ghl_http_500:provider unavailable",
-          }
-          : {
-            accepted: true,
-            messageId: "message-retry",
-            failureReason: null,
-          },
+        {
+          accepted: false,
+          messageId: null,
+          failureReason: "ghl_http_500:provider unavailable",
+        },
       );
     },
   });
@@ -262,10 +256,10 @@ Deno.test("Hugo notification retries a durable failed job claim without creating
   );
 
   assertEquals(first.accepted, false);
-  assertEquals(second.accepted, true);
-  assertEquals(second.providerMessageId, "message-retry");
+  assertEquals(second.accepted, false);
+  assertEquals(second.reason, "already_recorded_pending");
   assertEquals(audit.inserts.length, 2);
-  assertEquals(sends, 2);
+  assertEquals(sends, 1);
 });
 
 Deno.test("Hugo notification covers report-family jobs after canonical board proof", async () => {

@@ -9,6 +9,12 @@ const migration = await Deno.readTextFile(
     import.meta.url,
   ),
 );
+const closureMigration = await Deno.readTextFile(
+  new URL(
+    "../../migrations/20260731000002_makesafe_intake_settlement_closure.sql",
+    import.meta.url,
+  ),
+);
 
 Deno.test("PDF belt migration creates a durable bounded queue and retention-safe extraction columns", () => {
   for (
@@ -71,38 +77,41 @@ Deno.test("PDF belt migration keeps the standing scanner bounded rather than rai
   assertStringIncludes(migration, "one document per minute");
 });
 
-Deno.test("PDF belt serializes claim allocation before locking any SHA carrier", () => {
-  const claimStart = migration.indexOf(
+Deno.test("PDF belt owns claim, completion, retry budget, and ETA on one SHA coordinate", () => {
+  const claimStart = closureMigration.indexOf(
     "CREATE OR REPLACE FUNCTION public.claim_makesafe_pdf_extraction",
   );
-  const claimEnd = migration.indexOf(
+  const claimEnd = closureMigration.indexOf(
     "REVOKE ALL ON FUNCTION public.claim_makesafe_pdf_extraction",
   );
-  const claim = migration.slice(claimStart, claimEnd);
-  const advisoryLock = claim.indexOf(
-    "pg_advisory_xact_lock",
+  const claim = closureMigration.slice(claimStart, claimEnd);
+  const completeStart = closureMigration.indexOf(
+    "CREATE OR REPLACE FUNCTION public.complete_makesafe_pdf_extraction",
   );
-  const terminalReuse = claim.indexOf("WITH reusable AS");
-  const rowClaim = claim.indexOf("FOR UPDATE OF a SKIP LOCKED");
+  const completeEnd = closureMigration.indexOf(
+    "REVOKE ALL ON FUNCTION public.complete_makesafe_pdf_extraction",
+  );
+  const complete = closureMigration.slice(completeStart, completeEnd);
 
   assert(claimStart >= 0 && claimEnd > claimStart);
-  assert(advisoryLock >= 0);
-  assert(advisoryLock < terminalReuse);
-  assert(advisoryLock < rowClaim);
+  assert(completeStart >= 0 && completeEnd > completeStart);
   assertStringIncludes(
     claim,
-    "hashtextextended('makesafe_pdf_extraction_claim', 0)",
+    "hashtextextended('makesafe_pdf_extraction_coordinate', 0)",
   );
   assertStringIncludes(
-    claim,
-    "AND NULLIF(active.sha256, '') = NULLIF(a.sha256, '')",
+    complete,
+    "hashtextextended('makesafe_pdf_extraction_coordinate', 0)",
+  );
+  assertStringIncludes(claim, "FOR UPDATE OF c SKIP LOCKED");
+  assertStringIncludes(claim, "attempts = attempts + 1");
+  assertStringIncludes(complete, "c.claim_token = p_claim_token");
+  assertStringIncludes(
+    complete,
+    "WHEN p_outcome = 'failed' AND c.attempts >= 3 THEN 'quarantined'",
   );
   assertStringIncludes(
-    claim,
-    "active.pdf_extraction_status = 'processing'",
-  );
-  assertStringIncludes(
-    claim,
-    "active.pdf_extraction_started_at >= now() - interval '2 minutes'",
+    closureMigration,
+    "FROM public.makesafe_pdf_extraction_coordinates c",
   );
 });

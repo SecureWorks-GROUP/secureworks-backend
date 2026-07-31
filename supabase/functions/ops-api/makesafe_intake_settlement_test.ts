@@ -6,7 +6,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   ensureIntakeWorkOrderEvidence,
-  intakeMintedJobIds,
+  settleApprovedIntakeDraft,
 } from "./makesafe_intake_settlement.ts";
 
 function client(existing: any[] = [], insertError: any = null) {
@@ -83,29 +83,43 @@ Deno.test("work-order evidence continuation remains retryable after an insert fa
   );
 });
 
-Deno.test("minted job recovery distinguishes new jobs from existing-job bindings", () => {
-  assertEquals(
-    intakeMintedJobIds(
-      {
-        deterministic_intake: true,
-        intake_minted_job_ids: ["job-1", "job-2", "job-1"],
-      },
-      "job-1",
-    ),
-    ["job-1", "job-2"],
-  );
-  assertEquals(
-    intakeMintedJobIds(
-      {
-        deterministic_intake: true,
-        intake_minted_job_ids: [],
-      },
-      "existing-job",
-    ),
-    [],
-  );
-  assertEquals(
-    intakeMintedJobIds({ deterministic_intake: true }, "legacy-job"),
-    ["legacy-job"],
-  );
+Deno.test("settlement repairs legacy evidence but only explicit mint authority can notify", async () => {
+  const notifications: string[] = [];
+  const mintRows: any[] = [];
+  const db = client([]);
+  const settlementClient: any = db.client;
+  const originalFrom = settlementClient.from;
+  settlementClient.from = (table: string) => {
+    if (table === "makesafe_intake_job_mints") {
+      const query: any = {
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        order() {
+          return Promise.resolve({ data: mintRows, error: null });
+        },
+      };
+      return query;
+    }
+    return originalFrom(table);
+  };
+
+  const result = await settleApprovedIntakeDraft(settlementClient, {
+    draftId: "draft-legacy",
+    approvedJobId: "legacy-job",
+    attachments: [{ pdf_url: "storage/work-order.pdf" }],
+    extraction: { deterministic_intake: true },
+    notify: async (input) => {
+      notifications.push(input.jobId);
+      return { accepted: true, reason: "accepted", auditId: "audit-1" };
+    },
+  });
+
+  assertEquals(result.jobIds, ["legacy-job"]);
+  assertEquals(result.notificationJobIds, []);
+  assertEquals(notifications, []);
+  assertEquals(db.inserts[0].job_id, "legacy-job");
 });

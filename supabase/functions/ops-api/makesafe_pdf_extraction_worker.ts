@@ -42,6 +42,8 @@ interface WorkerDeps {
 interface ClaimedCarrier {
   id: string;
   email_id: string;
+  pdf_extraction_status?: string;
+  pdf_extraction_reason?: string | null;
 }
 
 interface BacklogEstimate {
@@ -74,11 +76,22 @@ async function updateExtraction(
   row: PdfExtractionWorkerRow,
   patch: Record<string, unknown>,
 ): Promise<ClaimedCarrier[]> {
-  const { data, error } = await client.from("email_attachments")
-    .update(patch)
-    .eq("pdf_extraction_claim_token", row.pdf_extraction_claim_token)
-    .eq("pdf_extraction_status", "processing")
-    .select("id,email_id");
+  const { data, error } = await client.rpc(
+    "complete_makesafe_pdf_extraction",
+    {
+      p_attachment_id: row.id,
+      p_claim_token: row.pdf_extraction_claim_token,
+      p_outcome: patch.pdf_extraction_status,
+      p_reason: patch.pdf_extraction_reason,
+      p_text: patch.pdf_extraction_text ?? null,
+      p_char_count: patch.pdf_extraction_char_count ?? 0,
+      p_page_count: patch.pdf_extraction_page_count ?? null,
+      p_extractor: patch.pdf_extraction_extractor ?? null,
+      p_truncated: patch.pdf_extraction_truncated ?? false,
+      p_completed_at: patch.updated_at,
+      p_next_attempt_at: patch.pdf_extraction_next_attempt_at ?? null,
+    },
+  );
   if (error) {
     throw new Error(
       `pdf extraction result write failed for ${row.id}: ${error.message || error}`,
@@ -258,26 +271,22 @@ export async function drainMakesafePdfExtraction(
     values: Record<string, unknown> = {},
   ): Promise<PdfExtractionWorkerResult> => {
     const completedAt = now();
-    const exhausted = outcome === "failed" &&
-      row.pdf_extraction_attempts >= MAX_EXTRACTION_ATTEMPTS;
-    const settledOutcome = exhausted ? "quarantined" : outcome;
-    const settledReason = exhausted ? `retry_exhausted:${reason}`.slice(0, 500) : reason;
     const carriers = await updateExtraction(client, row, {
-      pdf_extraction_status: settledOutcome,
-      pdf_extraction_reason: settledReason,
+      pdf_extraction_status: outcome,
+      pdf_extraction_reason: reason,
       pdf_extraction_completed_at: completedAt.toISOString(),
       pdf_extraction_started_at: null,
-      pdf_extraction_next_attempt_at: settledOutcome === "failed"
+      pdf_extraction_next_attempt_at: outcome === "failed"
         ? isoAfter(completedAt, RETRY_DELAY_MS)
         : null,
-      pdf_handoff_status: settledOutcome === "failed" ? "not_required" : "pending",
-      pdf_handoff_reason: null,
-      pdf_handoff_started_at: null,
-      pdf_handoff_completed_at: null,
-      pdf_handoff_next_attempt_at: null,
       updated_at: completedAt.toISOString(),
       ...values,
     });
+    const settledOutcome = (carriers[0]?.pdf_extraction_status || outcome) as
+      | "extracted"
+      | "quarantined"
+      | "failed";
+    const settledReason = carriers[0]?.pdf_extraction_reason ?? reason;
     const scanErrors: string[] = [];
     if (deps.onSettled && settledOutcome !== "failed") {
       const seenSources = new Set<string>();

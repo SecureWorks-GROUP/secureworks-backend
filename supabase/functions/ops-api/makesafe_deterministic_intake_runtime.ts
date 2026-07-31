@@ -3491,6 +3491,7 @@ async function ensureDraftAndJob(
     if (approveDraft) {
       const approved = await approveDraft(client, {
         draft_id: draft.id,
+        intake_case_id: caseId,
         approved_by: DETERMINISTIC_INTAKE_VERSION,
         review_notes:
           "Deterministic intake settlement retry for work-order evidence and post-board notification.",
@@ -3549,6 +3550,7 @@ async function ensureDraftAndJob(
   }
   const approved = await approveDraft(client, {
     draft_id: draft.id,
+    intake_case_id: caseId,
     approved_by: DETERMINISTIC_INTAKE_VERSION,
     review_notes:
       "Deterministic adapter approval through the existing guarded intake gate. No allocation, invoice, send or money action.",

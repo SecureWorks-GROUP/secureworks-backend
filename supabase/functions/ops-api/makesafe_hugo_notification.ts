@@ -10,6 +10,23 @@ const CANONICAL_BOARD_STAGES = new Set([
   "archive",
   "cancelled",
 ]);
+const RETRY_SAFE_PRETRANSPORT_FAILURES = new Set([
+  "source_ids_missing",
+  "canonical_board_read_failed",
+  "job_not_on_canonical_board",
+  "canonical_board_stage_missing",
+  "canonical_board_stage_unsupported",
+  "canonical_board_family_missing",
+  "recipient_config_read_failed",
+  "notification_disabled",
+  "hugo_recipient_not_configured",
+  "hugo_recipient_phone_missing",
+  "sms_from_number_missing",
+  "hugo_recipient_missing",
+  "hugo_recipient_config_ambiguous",
+  "hugo_staff_contact_missing",
+  "hugo_staff_contact_ambiguous",
+]);
 
 export interface HugoNotificationRecipient {
   userId: string;
@@ -268,6 +285,9 @@ export async function notifyDeterministicPhysicalJob(
     }
     if (
       !failureReason && existing?.id && existing.state === "failed" &&
+      RETRY_SAFE_PRETRANSPORT_FAILURES.has(
+        String(existing.failure_reason || ""),
+      ) &&
       await reclaimFailedAudit(client, existing.id, {
         ...auditRow,
         updated_at: attemptedAt,

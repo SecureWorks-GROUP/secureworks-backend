@@ -29,16 +29,49 @@ function workerClient(
     get downloads() {
       return downloads;
     },
-    rpc: (name: string) =>
-      Promise.resolve(name === "claim_makesafe_pdf_extraction"
-        ? { data: row ? [row] : [], error: null }
-        : {
+    rpc: (name: string, args: any = {}) => {
+      if (name === "claim_makesafe_pdf_extraction") {
+        return Promise.resolve({ data: row ? [row] : [], error: null });
+      }
+      if (name === "complete_makesafe_pdf_extraction") {
+        const exhausted = args.p_outcome === "failed" &&
+          Number(row?.pdf_extraction_attempts || 0) >= 3;
+        const status = exhausted ? "quarantined" : args.p_outcome;
+        const reason = exhausted
+          ? `retry_exhausted:${args.p_reason}`
+          : args.p_reason;
+        updates.push({
+          pdf_extraction_status: status,
+          pdf_extraction_reason: reason,
+          pdf_extraction_text: args.p_text,
+          pdf_extraction_char_count: args.p_char_count,
+          pdf_extraction_page_count: args.p_page_count,
+          pdf_extraction_extractor: args.p_extractor,
+          pdf_extraction_truncated: args.p_truncated,
+          pdf_extraction_next_attempt_at: status === "failed"
+            ? args.p_next_attempt_at
+            : null,
+          pdf_handoff_status: status === "failed" ? "not_required" : "pending",
+        });
+        return Promise.resolve({
+          data: options.loseExtractionFence
+            ? []
+            : carriers.map((carrier) => ({
+              ...carrier,
+              pdf_extraction_status: status,
+              pdf_extraction_reason: reason,
+            })),
+          error: null,
+        });
+      }
+      return Promise.resolve({
           data: [{
             remaining_coordinates: options.remaining ?? 0,
             estimated_minutes: options.minutes ?? 0,
           }],
           error: null,
-        }),
+        });
+    },
     storage: {
       from: () => ({
         download: () => {
