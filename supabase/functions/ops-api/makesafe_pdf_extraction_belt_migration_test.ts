@@ -70,3 +70,39 @@ Deno.test("PDF belt migration keeps the standing scanner bounded rather than rai
   assertStringIncludes(migration, "one document per invocation");
   assertStringIncludes(migration, "one document per minute");
 });
+
+Deno.test("PDF belt serializes claim allocation before locking any SHA carrier", () => {
+  const claimStart = migration.indexOf(
+    "CREATE OR REPLACE FUNCTION public.claim_makesafe_pdf_extraction",
+  );
+  const claimEnd = migration.indexOf(
+    "REVOKE ALL ON FUNCTION public.claim_makesafe_pdf_extraction",
+  );
+  const claim = migration.slice(claimStart, claimEnd);
+  const advisoryLock = claim.indexOf(
+    "pg_advisory_xact_lock",
+  );
+  const terminalReuse = claim.indexOf("WITH reusable AS");
+  const rowClaim = claim.indexOf("FOR UPDATE OF a SKIP LOCKED");
+
+  assert(claimStart >= 0 && claimEnd > claimStart);
+  assert(advisoryLock >= 0);
+  assert(advisoryLock < terminalReuse);
+  assert(advisoryLock < rowClaim);
+  assertStringIncludes(
+    claim,
+    "hashtextextended('makesafe_pdf_extraction_claim', 0)",
+  );
+  assertStringIncludes(
+    claim,
+    "AND NULLIF(active.sha256, '') = NULLIF(a.sha256, '')",
+  );
+  assertStringIncludes(
+    claim,
+    "active.pdf_extraction_status = 'processing'",
+  );
+  assertStringIncludes(
+    claim,
+    "active.pdf_extraction_started_at >= now() - interval '2 minutes'",
+  );
+});

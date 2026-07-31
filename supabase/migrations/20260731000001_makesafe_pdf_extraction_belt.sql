@@ -128,6 +128,10 @@ DECLARE
   claim_token uuid := gen_random_uuid();
   claimed_rows integer := 0;
 BEGIN
+  PERFORM pg_advisory_xact_lock(
+    hashtextextended('makesafe_pdf_extraction_claim', 0)
+  );
+
   WITH reusable AS (
     SELECT DISTINCT ON (target.id)
            target.id AS target_id,
@@ -237,6 +241,19 @@ BEGIN
        )
      )
      AND (p_attachment_id IS NULL OR a.id = p_attachment_id)
+     AND (
+       a.pdf_extraction_status IN ('extracted', 'quarantined')
+       OR NULLIF(a.sha256, '') IS NULL
+       OR NOT EXISTS (
+         SELECT 1
+           FROM public.email_attachments active
+          WHERE active.id <> a.id
+            AND active.status = 'uploaded'
+            AND NULLIF(active.sha256, '') = NULLIF(a.sha256, '')
+            AND active.pdf_extraction_status = 'processing'
+            AND active.pdf_extraction_started_at >= now() - interval '2 minutes'
+       )
+     )
    ORDER BY
      CASE WHEN p_fresh_only THEN e.received_at END DESC NULLS LAST,
      CASE
