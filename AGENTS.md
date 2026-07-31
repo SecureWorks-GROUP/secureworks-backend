@@ -643,6 +643,41 @@ recipient from staff/config authority, and persist the pre-send audit claim
 before GHL. Synthetic live-fire must short-circuit before board, config, audit,
 or transport work. Apply the migration before its matching `ops-api`.
 
+## Trade App Visibility Is A Lens, And "All" Means All
+
+The trade app has three lenses, resolved server-side and never by the client:
+ordinary crew (own assignments), vertical manager (`users.managed_verticals`),
+and dispatcher (`admin` / `ops_manager`). `_resolveManagerVisibility` /
+`_managerBoardVerticals` in `ops-api/index.ts` are the single source of truth;
+`myjobs_all_means_all_test.ts` and `myjobs_manager_scope_test.ts` guard the
+seams.
+
+Captain's ruling (2026-07-31): a user with the Everyone lens sees ALL company
+jobs — full history, every vertical, one card per job. The standing invariant
+that follows is a **parity floor: a dispatcher's set must always contain every
+vertical manager's set.** It was inverted for months (the fencing lead saw 102
+fencing jobs, the owner 58) because the `showAll` branch carried a 30-day floor
+the manager branch did not. Never re-narrow the widest lens.
+
+Two structural facts to know before changing a trade feed:
+
+- Every assignment-driven view can only show jobs that HAVE an assignment
+  (~365 of ~2,369). The All tab (`search_all_jobs` → `searchAllJobs`) is the only
+  trade surface that reads the `jobs` table, so it is the only one where a
+  never-allocated job can appear. It is lens-aware (`_resolveTradeJobFeedLens`),
+  tenant-scoped, and paged with an honest `total`.
+- An arbitrary `limit(N)` on a feed is silent truncation, and in this app it
+  reads as "jobs are missing" rather than as an error. Feeds page to completion
+  via `readPagedRows`, which warns loudly at its ceiling. Any `.in()` id list
+  built from a full-range read must be chunked (`OCCUPANCY_PROBE_CHUNK`) — a
+  company-sized list overflows a PostgREST GET URL.
+
+The Mine lens and ordinary crew are deliberately NOT widened by any of this, and
+the vertical manager's non-fencing lanes stay rolling-windowed (U2b). The trade
+calendar has no server-side date floor beyond the caller's requested range and
+already serves every vertical; `trade.html` registering a fencing-only lane is a
+client limit, not a server one.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
