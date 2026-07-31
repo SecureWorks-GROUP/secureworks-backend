@@ -1,6 +1,8 @@
 -- Keep legacy service-role callers fail-closed. The embedded
 -- legacy helper value is not an acceptable fallback when Vault is missing or
 -- unreadable.
+-- This replacement is intentionally scoped to public.sw_service_key(); the
+-- separately shared public._sw_service_key() helper is outside this incident.
 
 CREATE OR REPLACE FUNCTION public.sw_service_key() RETURNS text AS $$
 DECLARE
