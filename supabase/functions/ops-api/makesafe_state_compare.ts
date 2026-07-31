@@ -1,7 +1,10 @@
 // deno-lint-ignore-file no-explicit-any
 // Privileged Phase-1 comparison loader. Default board reads never import data
 // through this path; every compare-mode join is complete-or-throw.
-import { fetchAllRowsInChunks } from "./makesafe_compact_reads.ts";
+import {
+  chunkByUrlBudget,
+  fetchAllRowsInChunks,
+} from "./makesafe_compact_reads.ts";
 import { checkMakesafeBoardParity } from "./makesafe_board_read_model.ts";
 import {
   computeAttendanceCycleSetHash,
@@ -42,6 +45,7 @@ export interface MakesafeComparisonHealth {
 export interface MakesafeComparisonResult {
   rows: any[];
   projection_health: MakesafeComparisonHealth;
+  projection_basis?: "persisted" | "prospective_seed";
 }
 
 export interface MakesafeV2FactSet {
@@ -348,6 +352,127 @@ export async function loadMakesafeV2Facts(
     approvals,
     details,
     dockets,
+  };
+}
+
+interface MakesafeSeedPreviewRow {
+  job_id: string;
+  projection_inputs: {
+    identity: any;
+    cycles: any[];
+    assignments: any[];
+    service_reports: any[];
+    documents: any[];
+    media: any[];
+    pack_cycles: any[];
+    packs: any[];
+    details: any | null;
+    family_rule: any | null;
+    terminal_proof: any | null;
+    cancellation: any | null;
+  };
+}
+
+async function loadMakesafeSeedPreviewRows(
+  client: any,
+  jobIds: string[],
+): Promise<MakesafeSeedPreviewRow[]> {
+  const rows: MakesafeSeedPreviewRow[] = [];
+  for (const chunk of chunkByUrlBudget(jobIds)) {
+    const { data, error } = await client.rpc(
+      "preview_makesafe_state_authority_v2",
+      { p_job_ids: chunk },
+      { get: true },
+    );
+    if (error) {
+      throw new Error(
+        `makesafe-state.v2 prospective seed preview failed: ${
+          error.message ?? error
+        }`,
+      );
+    }
+    rows.push(...(data || []));
+  }
+  const requested = [...new Set(jobIds)].sort();
+  const returned = rows.map((row) => String(row?.job_id || "")).sort();
+  const duplicateIds = hasDuplicateIds(
+    rows.map((row) => ({ id: row?.job_id })),
+  );
+  if (
+    duplicateIds.length ||
+    returned.length !== requested.length ||
+    returned.some((id, index) => id !== requested[index])
+  ) {
+    throw new Error(
+      `makesafe-state.v2 prospective seed preview incomplete: expected ${requested.length} jobs, got ${returned.length}${
+        duplicateIds.length
+          ? `; duplicate job ids: ${duplicateIds.join(",")}`
+          : ""
+      }`,
+    );
+  }
+  return rows;
+}
+
+export async function loadMakesafeV2SeedPreviewFacts(
+  client: any,
+  jobIds: string[],
+): Promise<MakesafeV2FactSet> {
+  const [persisted, previews] = await Promise.all([
+    loadMakesafeV2Facts(client, jobIds, []),
+    loadMakesafeSeedPreviewRows(client, jobIds),
+  ]);
+  const identities: any[] = [];
+  const cycles: any[] = [];
+  const assignments: any[] = [];
+  const serviceReports: any[] = [];
+  const documents: any[] = [];
+  const media: any[] = [];
+  const packCycles: any[] = [];
+  const packs: any[] = [];
+  const details: any[] = [];
+  const familyRulesByCode = new Map<string, any>();
+  const terminalProofs: any[] = [];
+  const cancellations: any[] = [];
+
+  for (const preview of previews) {
+    const input = preview?.projection_inputs;
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new Error(
+        `makesafe-state.v2 prospective seed preview malformed for ${
+          preview?.job_id || "(blank)"
+        }`,
+      );
+    }
+    if (input.identity) identities.push(input.identity);
+    cycles.push(...(input.cycles || []));
+    assignments.push(...(input.assignments || []));
+    serviceReports.push(...(input.service_reports || []));
+    documents.push(...(input.documents || []));
+    media.push(...(input.media || []));
+    packCycles.push(...(input.pack_cycles || []));
+    packs.push(...(input.packs || []));
+    if (input.details) details.push(input.details);
+    if (input.family_rule?.family_code) {
+      familyRulesByCode.set(input.family_rule.family_code, input.family_rule);
+    }
+    if (input.terminal_proof) terminalProofs.push(input.terminal_proof);
+    if (input.cancellation) cancellations.push(input.cancellation);
+  }
+  return {
+    ...persisted,
+    identities,
+    cycles,
+    assignments,
+    serviceReports,
+    documents,
+    media,
+    familyRules: [...familyRulesByCode.values()],
+    terminalProofs,
+    packCycles,
+    packs,
+    details,
+    cancellations,
   };
 }
 
@@ -874,7 +999,31 @@ export async function attachMakesafeStateV2Comparison(
       `makesafe-state.v2 incomplete projection: expected ${canonicalRows.length}, got ${result.rows.length}`,
     );
   }
-  return result;
+  return { ...result, projection_basis: "persisted" };
+}
+
+export async function attachMakesafeStateV2SeedPreviewComparison(
+  client: any,
+  canonicalRows: any[],
+  computedAt: string,
+  factLoader: typeof loadMakesafeV2SeedPreviewFacts =
+    loadMakesafeV2SeedPreviewFacts,
+): Promise<MakesafeComparisonResult> {
+  const jobIds = canonicalRows.map((row) => String(row?.id || "")).filter(
+    Boolean,
+  );
+  const facts = await factLoader(client, jobIds);
+  const result = await buildMakesafeV2Comparison(
+    canonicalRows,
+    facts,
+    computedAt,
+  );
+  if (result.rows.length !== canonicalRows.length) {
+    throw new Error(
+      `makesafe-state.v2 prospective seed projection incomplete: expected ${canonicalRows.length}, got ${result.rows.length}`,
+    );
+  }
+  return { ...result, projection_basis: "prospective_seed" };
 }
 
 export async function buildPrivilegedMakesafeV2BoardComparison(
@@ -896,6 +1045,7 @@ export async function buildPrivilegedMakesafeV2BoardComparison(
   return {
     contract_version: MAKESAFE_BOARD_V2_CONTRACT_VERSION,
     state_contract_version: MAKESAFE_STATE_CONTRACT_VERSION,
+    projection_basis: comparison.projection_basis || "persisted",
     projection: "ops",
     generated_at: generatedAt,
     ...ops,

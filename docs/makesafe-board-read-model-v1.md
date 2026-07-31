@@ -65,6 +65,18 @@ tokens through the service-role RPC in bounded batches. Keep
 `makesafe_state_seed` dark until the migration and matching edge code have been
 deployed from merged `main`.
 
+Migration `20260731085928_board_v2_seed_preview.sql` repairs the bootstrap
+acceptance deadlock. The service-role-only
+`preview_makesafe_state_authority_v2` RPC is `STABLE`,
+`SECURITY INVOKER`, and SELECT-only. It projects the identity, family, cycle
+binding, fact version/hash, historical close-out, and cancellation inputs the
+seed would establish without invoking the seed or persisting a row. Seed and
+reconcile dry-runs use this prospective basis and label it
+`projection_basis: prospective_seed`; live seed/reconcile and the ordinary v2
+board comparison continue to use persisted authority. A dry-run returns the
+complete projection health plus bounded per-card residual reasons. Apply this
+migration before the matching `ops-api`.
+
 ## Canonical truth
 
 Every card originates as one canonical job row with:

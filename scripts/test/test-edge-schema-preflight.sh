@@ -20,6 +20,7 @@ HUGO_NOTIFICATION_MIGRATION="$REPO_ROOT/supabase/migrations/20260729010000_makes
 CYCLE_UNIQUENESS_MIGRATION="$REPO_ROOT/supabase/migrations/20260730000001_makesafe_report_cycle_uniqueness.sql"
 PDF_EXTRACTION_MIGRATION="$REPO_ROOT/supabase/migrations/20260731000001_makesafe_pdf_extraction_belt.sql"
 INTAKE_SETTLEMENT_MIGRATION="$REPO_ROOT/supabase/migrations/20260731000002_makesafe_intake_settlement_closure.sql"
+BOARD_V2_PREVIEW_MIGRATION="$REPO_ROOT/supabase/migrations/20260731085928_board_v2_seed_preview.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -93,6 +94,10 @@ intake_settlement_migration_sha() {
   shasum -a 256 "$INTAKE_SETTLEMENT_MIGRATION" | awk '{print $1}'
 }
 
+board_v2_preview_migration_sha() {
+  shasum -a 256 "$BOARD_V2_PREVIEW_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -112,6 +117,7 @@ write_response() {
   CYCLE_UNIQUENESS_EXPECTED_SHA="$(cycle_uniqueness_migration_sha)" \
   PDF_EXTRACTION_EXPECTED_SHA="$(pdf_extraction_migration_sha)" \
   INTAKE_SETTLEMENT_EXPECTED_SHA="$(intake_settlement_migration_sha)" \
+  BOARD_V2_PREVIEW_EXPECTED_SHA="$(board_v2_preview_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -268,6 +274,17 @@ intake_settlement_row = {
     "actual_statement_sha256": os.environ["INTAKE_SETTLEMENT_EXPECTED_SHA"],
     "missing_markers": [],
 }
+board_v2_preview_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260731085928",
+    "expected_migration_name": "board_v2_seed_preview",
+    "expected_statement_sha256": os.environ["BOARD_V2_PREVIEW_EXPECTED_SHA"],
+    "actual_migration_version": "20260731085928",
+    "actual_migration_name": "board_v2_seed_preview",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["BOARD_V2_PREVIEW_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -284,6 +301,7 @@ with open(sys.argv[1], "w") as f:
             cycle_uniqueness_row,
             pdf_extraction_row,
             intake_settlement_row,
+            board_v2_preview_row,
         ],
         f,
     )
@@ -307,13 +325,15 @@ test_incident_dependency_is_declared() {
   local media_expected='ops-api|supabase/migrations/20260728000001_makesafe_state_authority_u2.sql|column|job_media.attendance_cycle_id'
   local fresh_health_expected='ops-api|supabase/migrations/20260727020000_makesafe_intake_fresh_source_health.sql|column|makesafe_intake_health.fresh_source_lag_seconds'
   local seed_scope_expected='ops-api|supabase/migrations/20260729000000_makesafe_state_seed_scope_accounting.sql|table|makesafe_state_seed_scope_runs'
+  local board_v2_preview_expected='ops-api|supabase/migrations/20260731085928_board_v2_seed_preview.sql|function|preview_makesafe_state_authority_v2'
   if grep -Fxq "$report_expected" "$MANIFEST" && \
     grep -Fxq "$media_expected" "$MANIFEST" && \
     grep -Fxq "$fresh_health_expected" "$MANIFEST" && \
-    grep -Fxq "$seed_scope_expected" "$MANIFEST"; then
+    grep -Fxq "$seed_scope_expected" "$MANIFEST" && \
+    grep -Fxq "$board_v2_preview_expected" "$MANIFEST"; then
     pass "$name"
   else
-    fail "$name" "the report, media-cycle, fresh-source health, and seed-scope markers are not permanent ops-api deploy requirements"
+    fail "$name" "the report, media-cycle, fresh-source health, seed-scope, and board-v2 preview markers are not permanent ops-api deploy requirements"
   fi
 }
 
@@ -484,7 +504,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" || ! -f "$BOARD_V2_PREVIEW_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared

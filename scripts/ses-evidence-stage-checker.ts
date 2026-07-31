@@ -1342,11 +1342,12 @@ async function run(): Promise<void> {
   let v2LoadError: string | null = null;
   let comparedRows: any[] = [];
   try {
-    const comparison = await compareModule.attachMakesafeStateV2Comparison(
-      client,
-      canonicalRows,
-      generatedAt,
-    );
+    const comparison = await compareModule
+      .attachMakesafeStateV2SeedPreviewComparison(
+        client,
+        canonicalRows,
+        generatedAt,
+      );
     projectionHealth = comparison.projection_health;
     comparedRows = comparison.rows;
   } catch (error) {

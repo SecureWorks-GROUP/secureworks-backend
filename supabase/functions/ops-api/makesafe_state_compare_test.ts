@@ -8,6 +8,7 @@ import { _makesafeBoardActionForTest } from "./index.ts";
 import { computeAttendanceCycleSetHash } from "./makesafe_readiness_revision.ts";
 import {
   attachMakesafeStateV2Comparison,
+  attachMakesafeStateV2SeedPreviewComparison,
   buildMakesafeV2Comparison,
   type MakesafeV2FactSet,
 } from "./makesafe_state_compare.ts";
@@ -343,6 +344,43 @@ Deno.test("comparison loader errors reject the whole response rather than return
       ),
     Error,
     "forced PostgREST failure",
+  );
+});
+
+Deno.test("seed dry-run comparison labels prospective inputs and preserves genuine residuals", async () => {
+  const fixture = comparisonFixture(2);
+  fixture.facts.assignments.push({
+    id: "current-assignment-without-identity",
+    job_id: fixture.rows[1].id,
+    status: "scheduled",
+    attendance_cycle_id: fixture.rows[1].attendance_cycle_id,
+    cycle_attribution: "bound",
+    makesafe_fact_version: null,
+    makesafe_content_hash: null,
+  });
+
+  const result = await attachMakesafeStateV2SeedPreviewComparison(
+    {},
+    fixture.rows,
+    GENERATED_AT,
+    async () => fixture.facts,
+  );
+
+  assertEquals(result.projection_basis, "prospective_seed");
+  assertEquals(result.projection_health.requested_job_count, 2);
+  assertEquals(result.projection_health.projected_job_count, 2);
+  assertEquals(result.projection_health.projection_input_error_job_count, 1);
+  assertEquals(
+    result.rows[0].state_v2.diagnostics.some((item: any) =>
+      item.code === "projection_input_error"
+    ),
+    false,
+  );
+  assert(
+    result.rows[1].state_v2.diagnostics.some((item: any) =>
+      item.code === "projection_input_error" &&
+      item.reason.includes("immutable version/hash identity")
+    ),
   );
 });
 
