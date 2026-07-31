@@ -182,7 +182,7 @@ The production-shaped replay saw:
 
 A causal regression now exercises the exact code boundary: a full old sweep ahead of a newest recent work order, through `_readInputsForTest` and `enrichSourcesWithPdfText`. It proves the candidate ordering gives the recent work order a slot before old sweep PDFs.
 
-It does **not** prove this ordering defect caused the historical production outcome. The corpus shows severe cap pressure, but the production causal claim remains unproved until source selection, attachment eligibility, deployed revision, and scan timing are observed together.
+The later BWCWA6781 fixture disproves PDF-budget causation for that sealed row: the exact extracted-PDF shape still fell below the identity floor because `PO20877` was wedged between underscores in the attachment filename, and the filename-only normalisation fix now pins the corrected fate. This does **not** establish the cause of other historical misses; those still require source selection, attachment eligibility, deployed revision, and scan timing to be observed together.
 
 ## Silent-disappearance hardening
 
@@ -238,7 +238,7 @@ re-observation confirms the same gaps, so `proof_status` stays **NOT PROVED**.
 - zero durable source gaps in production
 - semantic correctness for six of the seven baseline-unhandled examples
 - production deployment of the slug correction, adapters, handoff accounting, or PDF ordering change
-- causal attribution of historical misses to PDF budget ordering
+- causal attribution of other historical misses to PDF budget ordering
 - a clean email reaching Hugo-visible state within five minutes
 - browser-level Hugo authentication and rendering parity
 
