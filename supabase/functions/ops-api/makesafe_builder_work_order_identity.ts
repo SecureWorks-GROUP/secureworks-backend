@@ -71,6 +71,16 @@ export function hasAnyPoLabel(text: string): boolean {
   return PO_RE.test(text) || LOOSE_PO_RE.test(text);
 }
 
+/**
+ * Scan attachment names with underscores treated as word separators. Keep this
+ * normalisation filename-scoped: changing PO_RE would alter body/PDF matching
+ * and requires replay revalidation. The boundary is pinned by
+ * makesafe_bwcwa6781_filename_po_fixture_test.ts and recorded in AGENTS.md.
+ */
+function attachmentNameScanText(name: string): string {
+  return name.replace(/_/g, " ");
+}
+
 function canonicalClaim(prefix: string, digits: string): string {
   const canonical = prefix.toUpperCase() === "ABJR"
     ? "AJBR"
@@ -175,7 +185,7 @@ export function extractBuilderWorkOrderIdentity(
   // fills a gap but can no longer beat filename/body identity when a reused
   // "NEW WORK ORDER" subject carries a different or partial reference.
   for (const name of input.attachmentNames || []) {
-    if (name) scanText(name, "attachment_name", result);
+    if (name) scanText(attachmentNameScanText(name), "attachment_name", result);
   }
 
   if (input.bodyText) {
