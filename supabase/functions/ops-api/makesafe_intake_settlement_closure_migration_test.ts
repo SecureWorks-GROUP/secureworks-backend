@@ -18,6 +18,12 @@ const closureMigration = await Deno.readTextFile(
 const indexSource = await Deno.readTextFile(
   new URL("./index.ts", import.meta.url),
 );
+const verificationGuide = await Deno.readTextFile(
+  new URL(
+    "../../../docs/evidence/makesafe-pdf-extraction-belt-2026-07-31.md",
+    import.meta.url,
+  ),
+);
 
 Deno.test("ordered settlement closure upgrades deployed Hugo uniqueness without rewriting history", () => {
   assertStringIncludes(
@@ -35,19 +41,78 @@ Deno.test("ordered settlement closure upgrades deployed Hugo uniqueness without 
   assertStringIncludes(closureMigration, "UNIQUE (org_id, job_id)");
 });
 
-Deno.test("draft-keyed mint authority is reserved before job creation and completed atomically", () => {
-  const reserve = indexSource.indexOf("const primaryMint = await reserveIntakeMint");
-  const create = indexSource.indexOf("const jobResult = await createMakesafeJob", reserve);
+Deno.test("draft-keyed mint authority is recovered before idempotent job creation", () => {
+  const reserve = indexSource.indexOf(
+    "primaryMint = authority",
+  );
+  const recover = indexSource.indexOf(
+    "const recoveredPrimaryJob = primaryMint",
+    reserve,
+  );
+  const create = indexSource.indexOf(
+    "await createMakesafeJob(client",
+    recover,
+  );
   const complete = indexSource.indexOf(
     "await completeIntakeMint(client, primaryMint.id, createdJobId)",
     create,
   );
-  assert(reserve >= 0 && create > reserve && complete > create);
+  assert(
+    reserve >= 0 && recover > reserve && create > recover && complete > create,
+  );
   assertStringIncludes(closureMigration, "UNIQUE (org_id, draft_id, mint_role)");
   assertStringIncludes(
     closureMigration,
     "UPDATE public.makesafe_intake_drafts",
   );
   assertStringIncludes(indexSource, "intake_mint_id: primaryMint.id");
+  assertStringIncludes(
+    indexSource,
+    ".contains('metadata', { intake_mint_id: mint.id })",
+  );
   assertStringIncludes(indexSource, "settleIntakeApproval(");
+});
+
+Deno.test("mint reservation rejects source authority outside the canonical case", () => {
+  assertStringIncludes(
+    closureMigration,
+    "FROM unnest(COALESCE(p_source_post_ids, '{}')) AS source(post_id)",
+  );
+  assertStringIncludes(closureMigration, "s.case_id = p_case_id");
+  assertStringIncludes(closureMigration, "s.post_id = source.post_id");
+  assertStringIncludes(
+    closureMigration,
+    "source authority does not belong to intake case",
+  );
+});
+
+Deno.test("non-deterministic approval remains an explicit non-notifying path", () => {
+  assertStringIncludes(
+    indexSource,
+    "if (extraction?.deterministic_intake !== true) return null",
+  );
+  assertStringIncludes(
+    indexSource,
+    "const requiredMintRoles = extraction?.deterministic_intake === true",
+  );
+});
+
+Deno.test("post-deploy verification names every supported intake family", () => {
+  for (
+    const expected of [
+      "`general_makesafe`",
+      "`temp_fence_makesafe`",
+      "`roof_report`",
+      "`assessment_report_quote`",
+      "`repair`",
+      "`restoration`",
+      "`repair_quote_stage`",
+    ]
+  ) {
+    assertStringIncludes(verificationGuide, expected);
+  }
+  assertStringIncludes(
+    verificationGuide,
+    "Re-run settlement for every fresh family sample",
+  );
 });

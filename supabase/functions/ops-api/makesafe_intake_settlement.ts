@@ -149,6 +149,7 @@ export async function settleApprovedIntakeDraft(
     approvedJobId: string | null;
     attachments: readonly any[];
     extraction: Record<string, any>;
+    requiredMintRoles?: readonly string[];
     notify: (input: {
       caseId: string;
       sourcePostIds: readonly string[];
@@ -166,6 +167,25 @@ export async function settleApprovedIntakeDraft(
   notificationsAccepted: number;
 }> {
   const mints = await loadIntakeMints(client, input.draftId);
+  const mintRoles = new Set(mints.map((mint) => mint.mint_role));
+  const missingMintRoles = (input.requiredMintRoles || []).filter(
+    (role) => !mintRoles.has(role),
+  );
+  if (missingMintRoles.length) {
+    throw new Error(
+      `intake settlement lacks required mint authority: ${
+        missingMintRoles.join(",")
+      }`,
+    );
+  }
+  const unboundMints = mints.filter((mint) => !mint.job_id);
+  if (unboundMints.length) {
+    throw new Error(
+      `intake settlement has unbound mint authority: ${
+        unboundMints.map((mint) => mint.mint_role).join(",")
+      }`,
+    );
+  }
   const minted = mints.filter((mint) => mint.job_id);
   const evidenceJobIds = Array.from(new Set([
     ...minted.map((mint) => String(mint.job_id)),
@@ -183,6 +203,20 @@ export async function settleApprovedIntakeDraft(
   for (const mint of minted) {
     if (mint.state === "settled") continue;
     if (mint.notification_accepted_at) {
+      const { error } = await client
+        .from("makesafe_intake_job_mints")
+        .update({
+          state: "settled",
+          last_error: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", mint.id)
+        .neq("state", "settled");
+      if (error) {
+        throw new Error(
+          `accepted intake settlement repair failed: ${error.message || error}`,
+        );
+      }
       notificationsAccepted++;
       continue;
     }
@@ -216,18 +250,34 @@ export async function settleApprovedIntakeDraft(
       continue;
     }
     if (!notification.accepted) {
-      const { error } = await client
+      const { data, error } = await client
         .from("makesafe_intake_job_mints")
         .update({
           state: "settlement_failed",
           last_error: notification.reason,
           updated_at: new Date().toISOString(),
         })
-        .eq("id", mint.id);
+        .eq("id", mint.id)
+        .neq("state", "settled")
+        .is("notification_accepted_at", null)
+        .select("id")
+        .maybeSingle();
       if (error) {
         throw new Error(
           `intake settlement failure write failed: ${error.message || error}`,
         );
+      }
+      if (!data?.id) {
+        const current = (await loadIntakeMints(client, input.draftId))
+          .find((candidate) => candidate.id === mint.id);
+        if (
+          current?.state === "settled" ||
+          current?.notification_accepted_at
+        ) {
+          notificationsAccepted++;
+          continue;
+        }
+        throw new Error(`intake settlement failure fence lost for ${mint.id}`);
       }
       throw new Error(
         `post-board Hugo settlement failed for ${mint.job_id}: ${notification.reason}`,
@@ -245,14 +295,26 @@ export async function settleApprovedIntakeDraft(
         updated_at: settledAt,
       })
       .eq("id", mint.id)
+      .neq("state", "settled")
+      .is("notification_accepted_at", null)
       .select("id")
       .maybeSingle();
-    if (error || !data?.id) {
+    if (error) {
       throw new Error(
         `intake settlement completion write failed: ${
-          error?.message || error || "row not updated"
+          error?.message || error
         }`,
       );
+    }
+    if (!data?.id) {
+      const current = (await loadIntakeMints(client, input.draftId))
+        .find((candidate) => candidate.id === mint.id);
+      if (
+        current?.state !== "settled" &&
+        !current?.notification_accepted_at
+      ) {
+        throw new Error(`intake settlement completion fence lost for ${mint.id}`);
+      }
     }
     notificationsAccepted++;
     notificationJobIds.push(String(mint.job_id));

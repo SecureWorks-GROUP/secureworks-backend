@@ -17209,6 +17209,7 @@ async function intakeMintAuthority(
   extraction: Record<string, any>,
   body: any,
 ) {
+  if (extraction?.deterministic_intake !== true) return null
   const sourcePostIds = Array.from(new Set(
     parseJsonArray(
       body?.source_post_ids || extraction?.intake_source_post_ids || [],
@@ -17234,19 +17235,35 @@ async function intakeMintAuthority(
   return { caseId, sourcePostIds }
 }
 
+async function recoverIntakeMintJob(client: any, mint: any) {
+  if (mint?.job_id) {
+    const { data, error } = await client
+      .from('jobs')
+      .select('*')
+      .eq('id', mint.job_id)
+      .maybeSingle()
+    if (error || !data?.id) {
+      throw new Error(`bound intake mint job read failed: ${error?.message || mint.job_id}`)
+    }
+    return data
+  }
+  const { data: job, error } = await client
+    .from('jobs')
+    .select('*')
+    .contains('metadata', { intake_mint_id: mint.id })
+    .maybeSingle()
+  if (error) {
+    throw new Error(`intake mint recovery read failed: ${error.message || error}`)
+  }
+  if (!job?.id) return null
+  await completeIntakeMint(client, mint.id, job.id)
+  return job
+}
+
 async function recoverDraftMintLinks(client: any, draft: any) {
   const mints = await loadIntakeMints(client, draft.id)
   for (const mint of mints) {
-    if (mint.job_id) continue
-    const { data: job, error } = await client
-      .from('jobs')
-      .select('id')
-      .contains('metadata', { intake_mint_id: mint.id })
-      .maybeSingle()
-    if (error) {
-      throw new Error(`intake mint recovery read failed: ${error.message || error}`)
-    }
-    if (job?.id) await completeIntakeMint(client, mint.id, job.id)
+    await recoverIntakeMintJob(client, mint)
   }
   return await loadIntakeMints(client, draft.id)
 }
@@ -17257,12 +17274,14 @@ async function settleIntakeApproval(
   approvedJobId: string | null,
   attachments: readonly any[],
   extraction: Record<string, any>,
+  requiredMintRoles: readonly string[] = [],
 ) {
   return await settleApprovedIntakeDraft(client, {
     draftId: draft.id,
     approvedJobId,
     attachments,
     extraction,
+    requiredMintRoles,
     notify: (input) => notifyMintedDeterministicPhysicalJob(client, input),
   })
 }
@@ -17305,6 +17324,9 @@ async function approveIntakeDraft(client: any, body: any) {
   // even if the draft's own report_type is roof/assessment — otherwise the WO would
   // never attach and the physical make-safe would be lost.
   const splitObligation = combinedSplitObligation(extraction)
+  const requiredMintRoles = extraction?.deterministic_intake === true
+    ? ['primary', ...(splitObligation ? ['secondary_report'] : [])]
+    : []
   const primaryIsReportOnly = splitObligation ? false : isReportOnlyDraft
   assertReviewedFamilyConsistency(reviewedFamily, effectiveReportType, !!splitObligation, primaryIsReportOnly)
   const choose = (key: string, fallback: any = null) => cleanReviewedString(reviewed[key]) || cleanReviewedString(draft[key]) || cleanReviewedString(extraction[key]) || cleanReviewedString(fallback)
@@ -17342,21 +17364,47 @@ async function approveIntakeDraft(client: any, body: any) {
   if (availableAttachments.length === 0) missing.push('work_order_pdf')
   if (missing.length > 0) throw new Error('Cannot approve intake draft; missing required fields: ' + missing.join(', '))
 
-  let approvedJobId = draft.approved_job_id
-  if (draft.status === 'approved') {
-    const recoveredMints = await recoverDraftMintLinks(client, draft)
-    approvedJobId = approvedJobId ||
-      recoveredMints.find((mint) => mint.mint_role === 'primary')?.job_id ||
-      null
+  const recoveredMints = await recoverDraftMintLinks(client, draft)
+  const recoveredPrimaryMint = recoveredMints.find(
+    (mint) => mint.mint_role === 'primary' && mint.job_id,
+  )
+  const recoveredMintRoles = new Set(recoveredMints.map((mint) => mint.mint_role))
+  const missingRequiredMints = requiredMintRoles.some(
+    (role) => !recoveredMintRoles.has(role),
+  )
+  let approvedJobId = draft.approved_job_id ||
+    recoveredPrimaryMint?.job_id ||
+    null
+  let effectiveDraftStatus = draft.status
+  if (
+    effectiveDraftStatus === 'approved' &&
+    (
+      recoveredMints.some((mint) => !mint.job_id) ||
+      missingRequiredMints
+    )
+  ) {
+    const { error } = await client
+      .from('makesafe_intake_drafts')
+      .update({
+        status: 'needs_review',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', draft.id)
+      .eq('status', 'approved')
+    if (error) {
+      throw new Error(`intake mint resume release failed: ${error.message || error}`)
+    }
+    effectiveDraftStatus = 'needs_review'
   }
 
-  if (draft.status === 'approved' && approvedJobId) {
+  if (effectiveDraftStatus === 'approved' && approvedJobId) {
     const settlement = await settleIntakeApproval(
       client,
       draft,
       approvedJobId,
       availableAttachments,
       extraction,
+      requiredMintRoles,
     )
     const settledExtraction = {
       ...extraction,
@@ -17474,6 +17522,7 @@ async function approveIntakeDraft(client: any, body: any) {
       existingJobBinding.targetJob.id,
       availableAttachments,
       extraction,
+      [],
     )
 
     return {
@@ -17498,7 +17547,7 @@ async function approveIntakeDraft(client: any, body: any) {
   // so "AJBR 67200", "AJBR-67200" and "AJBR67200" all collapse to one canonical key
   // rather than relying on near-exact ilike. When there is genuinely no match, this
   // is a no-op and distinct refs still pass.
-  if (approvedFields.external_ref) {
+  if (!recoveredPrimaryMint && approvedFields.external_ref) {
     const prefixes = await loadRefPrefixes(client)
     const normTarget = canonicalExternalObligationRef(approvedFields.external_ref, prefixes)
     if (normTarget) {
@@ -17596,15 +17645,18 @@ async function approveIntakeDraft(client: any, body: any) {
   //     non-fatal to the job itself; the job exists and the draft stays approved.
   let createdJobId: string | null = null
   const createdJobIds: string[] = []
+  let primaryMint: any = null
   try {
     const authority = await intakeMintAuthority(client, draft, extraction, body)
-    const primaryMint = await reserveIntakeMint(client, {
-      orgId: draft.org_id || DEFAULT_ORG_ID,
-      draftId: draft.id,
-      mintRole: 'primary',
-      caseId: authority.caseId,
-      sourcePostIds: authority.sourcePostIds,
-    })
+    primaryMint = authority
+      ? await reserveIntakeMint(client, {
+        orgId: draft.org_id || DEFAULT_ORG_ID,
+        draftId: draft.id,
+        mintRole: 'primary',
+        caseId: authority.caseId,
+        sourcePostIds: authority.sourcePostIds,
+      })
+      : null
     // Create the make-safe job using reviewed/edited fields, not stale extraction data.
     // Preserve builder email source context for EVERY family so board/trade users can
     // see original instructions, links, and received timestamps after approval. For
@@ -17612,7 +17664,12 @@ async function approveIntakeDraft(client: any, body: any) {
     // and the job is advanced to ready_to_invoice below.
     const portalLinks = _normalizeReportExternalLinks(extraction)
     const sourceExternalLinks = portalLinks.length ? portalLinks : null
-    const jobResult = await createMakesafeJob(client, {
+    const recoveredPrimaryJob = primaryMint
+      ? await recoverIntakeMintJob(client, primaryMint)
+      : null
+    const jobResult = recoveredPrimaryJob
+      ? { job: recoveredPrimaryJob }
+      : await createMakesafeJob(client, {
       client_name: approvedFields.client_name,
       site_address: approvedFields.site_address,
       suburb: approvedFields.site_suburb,
@@ -17635,7 +17692,7 @@ async function approveIntakeDraft(client: any, body: any) {
       builder_claim_ref: extraction?.builder_claim_ref || null,
       builder_work_order_number: extraction?.builder_work_order_number || null,
       builder_po_number: extraction?.builder_po_number || null,
-      intake_mint_id: primaryMint.id,
+      ...(primaryMint ? { intake_mint_id: primaryMint.id } : {}),
       ...(extraction?.synthetic_livefire_marker
         ? {
           synthetic_livefire_marker:
@@ -17647,13 +17704,13 @@ async function approveIntakeDraft(client: any, body: any) {
       // approval route and therefore cannot abuse this suppression flag.
       suppress_manager_notification: body?.suppress_manager_notification === true ||
         extraction?.deterministic_intake === true,
-    })
+      })
     // Record the live job id the instant it exists so the catch path can tell a
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
     createdJobId = jobResult?.job?.id || null
     if (createdJobId) createdJobIds.push(createdJobId)
     if (!createdJobId) throw new Error('guarded approval returned no primary job id')
-    await completeIntakeMint(client, primaryMint.id, createdJobId)
+    if (primaryMint) await completeIntakeMint(client, primaryMint.id, createdJobId)
 
     // For report-only jobs: set report_type on makesafe_job_details and advance
     // substatus to ready_to_invoice (bypasses the report-production stage). A combined
@@ -17720,17 +17777,24 @@ async function approveIntakeDraft(client: any, body: any) {
     let secondaryJob: any = null
     if (splitObligation && createdJobId) {
       try {
-        const secondaryMint = await reserveIntakeMint(client, {
-          orgId: draft.org_id || DEFAULT_ORG_ID,
-          draftId: draft.id,
-          mintRole: 'secondary_report',
-          caseId: authority.caseId,
-          sourcePostIds: authority.sourcePostIds,
-        })
+        const secondaryMint = authority
+          ? await reserveIntakeMint(client, {
+            orgId: draft.org_id || DEFAULT_ORG_ID,
+            draftId: draft.id,
+            mintRole: 'secondary_report',
+            caseId: authority.caseId,
+            sourcePostIds: authority.sourcePostIds,
+          })
+          : null
         const reportFamily = splitObligation.reportType === 'assessment_report'
           ? 'assessment_report_quote'
           : splitObligation.reportType
-        const secondaryResult = await createMakesafeJob(client, {
+        const recoveredSecondaryJob = secondaryMint
+          ? await recoverIntakeMintJob(client, secondaryMint)
+          : null
+        const secondaryResult = recoveredSecondaryJob
+          ? { job: recoveredSecondaryJob }
+          : await createMakesafeJob(client, {
           client_name: approvedFields.client_name,
           site_address: approvedFields.site_address,
           suburb: approvedFields.site_suburb,
@@ -17752,7 +17816,7 @@ async function approveIntakeDraft(client: any, body: any) {
           builder_claim_ref: extraction?.builder_claim_ref || null,
           builder_work_order_number: extraction?.builder_work_order_number || null,
           builder_po_number: extraction?.builder_po_number || null,
-          intake_mint_id: secondaryMint.id,
+          ...(secondaryMint ? { intake_mint_id: secondaryMint.id } : {}),
           ...(extraction?.synthetic_livefire_marker
             ? {
               synthetic_livefire_marker:
@@ -17761,11 +17825,13 @@ async function approveIntakeDraft(client: any, body: any) {
             : {}),
           suppress_manager_notification: body?.suppress_manager_notification === true ||
             extraction?.deterministic_intake === true,
-        })
+          })
         secondaryJob = secondaryResult?.job || null
         if (secondaryJob?.id) {
           createdJobIds.push(secondaryJob.id)
-          await completeIntakeMint(client, secondaryMint.id, secondaryJob.id)
+          if (secondaryMint) {
+            await completeIntakeMint(client, secondaryMint.id, secondaryJob.id)
+          }
           const { error: secondaryLinkError } = await client
             .from('makesafe_intake_drafts')
             .update({
@@ -17804,7 +17870,7 @@ async function approveIntakeDraft(client: any, body: any) {
           )
         }
       } catch (splitErr) {
-        if (createdJobIds.length > 1) throw splitErr
+        if (authority || createdJobIds.length > 1) throw splitErr
         console.error('[ops-api] approveIntakeDraft: combined split — secondary report card creation failed (primary stands):', (splitErr as Error).message)
       }
     }
@@ -17815,6 +17881,7 @@ async function approveIntakeDraft(client: any, body: any) {
       jobResult.job.id,
       availableAttachments,
       extraction,
+      requiredMintRoles,
     )
     const { error: settlementError } = await client
       .from('makesafe_intake_drafts')
@@ -17844,12 +17911,15 @@ async function approveIntakeDraft(client: any, body: any) {
       hugo_notifications_accepted: settlement.notificationsAccepted,
     }
   } catch (postClaimErr) {
-    if (!createdJobId) {
+    if (!createdJobId || primaryMint) {
       // Pre-insert failure: no live job exists, so release the claim back to the
       // review queue. This is the only safe path to re-queue a draft.
       try {
         await client.from('makesafe_intake_drafts')
-          .update({ status: 'needs_review', updated_at: new Date().toISOString() })
+          .update({
+            status: 'needs_review',
+            updated_at: new Date().toISOString(),
+          })
           .eq('id', draft_id)
       } catch (_) { /* best-effort; do not mask the original error */ }
     } else {

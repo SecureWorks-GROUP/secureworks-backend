@@ -105,6 +105,19 @@ Deno.test("PDF belt owns claim, completion, retry budget, and ETA on one SHA coo
   );
   assertStringIncludes(claim, "FOR UPDATE OF c SKIP LOCKED");
   assertStringIncludes(claim, "attempts = attempts + 1");
+  assertStringIncludes(
+    claim,
+    "candidate.id = ANY(c.attempted_attachment_ids)",
+  );
+  assertStringIncludes(
+    claim,
+    "array_append(attempted_attachment_ids, selected_id)",
+  );
+  const reconciliation = claim.indexOf("WITH old_worker_completion AS");
+  const selection = claim.indexOf(
+    "SELECT c.coordinate, a.id, 'extract'",
+  );
+  assert(reconciliation >= 0 && selection > reconciliation);
   assertStringIncludes(complete, "c.claim_token = p_claim_token");
   assertStringIncludes(
     complete,
@@ -113,5 +126,25 @@ Deno.test("PDF belt owns claim, completion, retry budget, and ETA on one SHA coo
   assertStringIncludes(
     closureMigration,
     "FROM public.makesafe_pdf_extraction_coordinates c",
+  );
+  assertStringIncludes(
+    closureMigration,
+    "MAX(a.pdf_extraction_attempts) OVER",
+  );
+  assertStringIncludes(
+    closureMigration,
+    "WHEN status = 'extracted' AND extracted_text IS NULL THEN 'pending'",
+  );
+  assertStringIncludes(
+    closureMigration,
+    "WHEN NULLIF(OLD.sha256, '') IS NULL",
+  );
+  assertStringIncludes(
+    closureMigration,
+    "RETURNS TABLE (\n  id uuid,\n  email_id text",
+  );
+  assertStringIncludes(
+    closureMigration,
+    "c.status = 'processing' OR c.attempts < 3",
   );
 });

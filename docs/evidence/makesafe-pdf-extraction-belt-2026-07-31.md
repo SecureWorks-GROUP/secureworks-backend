@@ -78,12 +78,25 @@ following against production after migration-before-function deployment:
    `pdf_extraction_status=extracted`, non-null persisted text, and a completed
    timestamp. Its deterministic case/job path is no longer parked solely on
    `adapter_parse_failure`.
-3. Submit one fresh physical WO and one fresh report-family WO. For each, record
-   `received_at`, the SHA coordinate's `completed_at`, canonical job creation,
-   board observation, and exactly one accepted Hugo audit keyed by
-   `(org_id, job_id)`. Both jobs must carry a `work_order` row in
+3. Submit one fresh WO for every supported intake path and record the exact
+   expected canonical classification:
+
+   | Source path | Expected canonical family or reason |
+   | --- | --- |
+   | Physical make-safe | `general_makesafe` |
+   | Temporary fence | `temp_fence_makesafe` |
+   | Roof report | `roof_report` |
+   | Assessment and quote | `assessment_report_quote` |
+   | Repair work order | `repair` |
+   | Restoration work order | `restoration` |
+   | Quote request without a PO | `repair` with `repair_quote_stage` |
+
+   For every row, record `received_at`, the SHA coordinate's `completed_at`,
+   canonical job creation, board observation, and exactly one accepted Hugo
+   audit keyed by `(org_id, job_id)`. Every job must carry a `work_order` row in
    `job_documents`; extraction and board visibility must each occur within five
-   minutes with no portal-capture dependency.
+   minutes with no portal-capture dependency. A combined physical-plus-report
+   WO must produce and independently verify both job-keyed mint rows.
 4. The extraction endpoint reports a finite `remaining_backlog` and
    `drain_eta_at`; failed rows have a reason and retry/terminal accounting, and
    fresh-source health is based on the oldest eligible source rather than a
@@ -97,7 +110,8 @@ following against production after migration-before-function deployment:
    Confirm every accepted audit joins to one explicit
    `makesafe_intake_job_mints` row with non-null evidence, board, and notification
    timestamps.
-7. Re-run settlement for both fresh jobs and confirm no second provider send.
+7. Re-run settlement for every fresh family sample and confirm no second
+   provider send.
    Then rescan one historical approved draft and perform one later update on an
    existing job with no mint row; both must create zero Hugo audits.
 8. For one deliberately ambiguous provider response, confirm the durable failed

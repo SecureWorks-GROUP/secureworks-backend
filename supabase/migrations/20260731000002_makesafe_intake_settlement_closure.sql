@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS public.makesafe_pdf_extraction_coordinates (
   sha256 text,
   status text NOT NULL DEFAULT 'pending',
   attempts integer NOT NULL DEFAULT 0,
+  attempted_attachment_ids uuid[] NOT NULL DEFAULT '{}',
   claim_token uuid,
   started_at timestamptz,
   completed_at timestamptz,
@@ -18,7 +19,9 @@ CREATE TABLE IF NOT EXISTS public.makesafe_pdf_extraction_coordinates (
   CONSTRAINT makesafe_pdf_extraction_coordinates_status_check
     CHECK (status IN ('pending', 'processing', 'extracted', 'quarantined', 'failed')),
   CONSTRAINT makesafe_pdf_extraction_coordinates_attempts_check
-    CHECK (attempts BETWEEN 0 AND 3)
+    CHECK (attempts BETWEEN 0 AND 3),
+  CONSTRAINT makesafe_pdf_extraction_coordinates_carriers_check
+    CHECK (array_position(attempted_attachment_ids, NULL) IS NULL)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_makesafe_pdf_extraction_coordinates_sha
@@ -44,27 +47,79 @@ LANGUAGE plpgsql
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  coordinate_key text;
+  old_coordinate_key text;
 BEGIN
-  IF OLD.pdf_extraction_text IS NOT NULL AND NEW.pdf_extraction_text IS NULL THEN
-    coordinate_key := CASE
-      WHEN NULLIF(NEW.sha256, '') IS NULL THEN 'id:' || NEW.id::text
-      ELSE 'sha:' || NEW.sha256
+  IF (
+    OLD.pdf_extraction_text IS NOT NULL
+    AND NEW.pdf_extraction_text IS NULL
+  ) OR OLD.sha256 IS DISTINCT FROM NEW.sha256 THEN
+    old_coordinate_key := CASE
+      WHEN NULLIF(OLD.sha256, '') IS NULL THEN 'id:' || OLD.id::text
+      ELSE 'sha:' || OLD.sha256
     END;
     IF NOT EXISTS (
       SELECT 1
       FROM public.email_attachments a
       WHERE a.id <> NEW.id
         AND a.pdf_extraction_text IS NOT NULL
-        AND coordinate_key = CASE
+        AND old_coordinate_key = CASE
           WHEN NULLIF(a.sha256, '') IS NULL THEN 'id:' || a.id::text
           ELSE 'sha:' || a.sha256
         END
     ) THEN
-      UPDATE public.makesafe_pdf_extraction_coordinates
-      SET extracted_text = NULL,
-          updated_at = now()
-      WHERE coordinate = coordinate_key;
+      IF EXISTS (
+        SELECT 1
+        FROM public.email_attachments a
+        WHERE a.status = 'uploaded'
+          AND old_coordinate_key = CASE
+            WHEN NULLIF(a.sha256, '') IS NULL THEN 'id:' || a.id::text
+            ELSE 'sha:' || a.sha256
+          END
+      ) THEN
+        UPDATE public.makesafe_pdf_extraction_coordinates
+        SET status = 'pending',
+            attempts = 0,
+            attempted_attachment_ids = '{}',
+            claim_token = NULL,
+            started_at = NULL,
+            completed_at = NULL,
+            next_attempt_at = NULL,
+            extracted_text = NULL,
+            char_count = 0,
+            page_count = NULL,
+            extractor = NULL,
+            truncated = false,
+            reason = NULL,
+            updated_at = now()
+        WHERE coordinate = old_coordinate_key
+          AND status = 'extracted';
+        UPDATE public.email_attachments a
+        SET pdf_extraction_status = 'pending',
+            pdf_extraction_attempts = 0,
+            pdf_extraction_claim_token = NULL,
+            pdf_extraction_started_at = NULL,
+            pdf_extraction_completed_at = NULL,
+            pdf_extraction_next_attempt_at = NULL,
+            pdf_extraction_char_count = 0,
+            pdf_extraction_page_count = NULL,
+            pdf_extraction_extractor = NULL,
+            pdf_extraction_truncated = false,
+            pdf_extraction_reason = NULL,
+            pdf_handoff_status = 'not_required',
+            pdf_handoff_reason = NULL,
+            pdf_handoff_started_at = NULL,
+            pdf_handoff_completed_at = NULL,
+            pdf_handoff_next_attempt_at = NULL,
+            updated_at = now()
+        WHERE a.status = 'uploaded'
+          AND old_coordinate_key = CASE
+            WHEN NULLIF(a.sha256, '') IS NULL THEN 'id:' || a.id::text
+            ELSE 'sha:' || a.sha256
+          END;
+      ELSE
+        DELETE FROM public.makesafe_pdf_extraction_coordinates
+        WHERE coordinate = old_coordinate_key;
+      END IF;
     END IF;
   END IF;
   RETURN NEW;
@@ -74,7 +129,7 @@ $$;
 DROP TRIGGER IF EXISTS trg_purge_makesafe_pdf_extraction_coordinate_text
   ON public.email_attachments;
 CREATE TRIGGER trg_purge_makesafe_pdf_extraction_coordinate_text
-AFTER UPDATE OF pdf_extraction_text
+AFTER UPDATE OF pdf_extraction_text, sha256
 ON public.email_attachments
 FOR EACH ROW
 EXECUTE FUNCTION public.purge_makesafe_pdf_extraction_coordinate_text();
@@ -98,17 +153,24 @@ WITH ranked AS (
     a.pdf_extraction_extractor AS extractor,
     a.pdf_extraction_truncated AS truncated,
     a.pdf_extraction_reason AS reason,
+    MAX(a.pdf_extraction_attempts) OVER (
+      PARTITION BY CASE
+        WHEN NULLIF(a.sha256, '') IS NULL THEN 'id:' || a.id::text
+        ELSE 'sha:' || a.sha256
+      END
+    ) AS coordinate_attempts,
     ROW_NUMBER() OVER (
       PARTITION BY CASE
         WHEN NULLIF(a.sha256, '') IS NULL THEN 'id:' || a.id::text
         ELSE 'sha:' || a.sha256
       END
       ORDER BY
-        CASE a.pdf_extraction_status
-          WHEN 'extracted' THEN 0
-          WHEN 'quarantined' THEN 1
-          WHEN 'processing' THEN 2
-          WHEN 'failed' THEN 3
+        CASE
+          WHEN a.pdf_extraction_status = 'extracted'
+            AND a.pdf_extraction_text IS NOT NULL THEN 0
+          WHEN a.pdf_extraction_status = 'processing' THEN 1
+          WHEN a.pdf_extraction_status = 'quarantined' THEN 2
+          WHEN a.pdf_extraction_status = 'failed' THEN 3
           ELSE 4
         END,
         a.pdf_extraction_attempts DESC,
@@ -125,9 +187,46 @@ INSERT INTO public.makesafe_pdf_extraction_coordinates (
   reason
 )
 SELECT
-  coordinate, sha256, status, LEAST(attempts, 3), claim_token, started_at,
-  completed_at, next_attempt_at, extracted_text, char_count, page_count,
-  extractor, truncated, reason
+  coordinate,
+  sha256,
+  CASE
+    WHEN status = 'extracted' AND extracted_text IS NULL THEN 'pending'
+    WHEN coordinate_attempts >= 3 AND status IN ('pending', 'failed')
+      THEN 'quarantined'
+    ELSE status
+  END,
+  CASE
+    WHEN status = 'extracted' AND extracted_text IS NULL THEN 0
+    ELSE LEAST(coordinate_attempts, 3)
+  END,
+  claim_token,
+  started_at,
+  CASE
+    WHEN status = 'extracted' AND extracted_text IS NULL THEN NULL
+    WHEN coordinate_attempts >= 3 AND status IN ('pending', 'failed')
+      THEN COALESCE(completed_at, now())
+    ELSE completed_at
+  END,
+  CASE
+    WHEN status = 'extracted' AND extracted_text IS NULL THEN NULL
+    WHEN coordinate_attempts >= 3 AND status IN ('pending', 'failed')
+      THEN NULL
+    ELSE next_attempt_at
+  END,
+  extracted_text,
+  char_count,
+  page_count,
+  extractor,
+  truncated,
+  CASE
+    WHEN status = 'extracted' AND extracted_text IS NULL THEN NULL
+    WHEN coordinate_attempts >= 3 AND status IN ('pending', 'failed')
+      THEN left(
+        'retry_exhausted:' || COALESCE(reason, 'legacy_attempts_exhausted'),
+        500
+      )
+    ELSE reason
+  END
 FROM ranked
 WHERE rank = 1
 ON CONFLICT (coordinate) DO NOTHING;
@@ -202,11 +301,25 @@ DECLARE
   selected_coordinate text;
   selected_id uuid;
   selected_work text;
+  requested_coordinate text;
   new_claim_token uuid := gen_random_uuid();
 BEGIN
   PERFORM pg_advisory_xact_lock(
     hashtextextended('makesafe_pdf_extraction_coordinate', 0)
   );
+
+  IF p_attachment_id IS NOT NULL THEN
+    SELECT CASE
+      WHEN NULLIF(a.sha256, '') IS NULL THEN 'id:' || a.id::text
+      ELSE 'sha:' || a.sha256
+    END
+    INTO requested_coordinate
+    FROM public.email_attachments a
+    WHERE a.id = p_attachment_id;
+    IF requested_coordinate IS NULL THEN
+      RETURN;
+    END IF;
+  END IF;
 
   INSERT INTO public.makesafe_pdf_extraction_coordinates (
     coordinate, sha256, status
@@ -226,6 +339,53 @@ BEGIN
   FROM public.email_attachments a
   WHERE a.status = 'uploaded'
   ON CONFLICT (coordinate) DO NOTHING;
+
+  WITH old_worker_completion AS (
+    SELECT DISTINCT ON (c.coordinate)
+      c.coordinate,
+      a.pdf_extraction_status AS status,
+      a.pdf_extraction_text AS extracted_text,
+      a.pdf_extraction_char_count AS char_count,
+      a.pdf_extraction_page_count AS page_count,
+      a.pdf_extraction_extractor AS extractor,
+      a.pdf_extraction_truncated AS truncated,
+      a.pdf_extraction_reason AS reason,
+      a.pdf_extraction_completed_at AS completed_at,
+      a.pdf_extraction_next_attempt_at AS next_attempt_at,
+      a.updated_at
+    FROM public.makesafe_pdf_extraction_coordinates c
+    JOIN public.email_attachments a
+      ON c.coordinate = CASE
+        WHEN NULLIF(a.sha256, '') IS NULL THEN 'id:' || a.id::text
+        ELSE 'sha:' || a.sha256
+      END
+     AND a.pdf_extraction_claim_token = c.claim_token
+    WHERE c.status = 'processing'
+      AND a.pdf_extraction_status IN ('extracted', 'quarantined', 'failed')
+    ORDER BY c.coordinate, a.updated_at DESC, a.id
+  )
+  UPDATE public.makesafe_pdf_extraction_coordinates c
+  SET status = old_worker_completion.status,
+      claim_token = NULL,
+      started_at = NULL,
+      completed_at = CASE
+        WHEN old_worker_completion.status = 'failed' THEN NULL
+        ELSE old_worker_completion.completed_at
+      END,
+      next_attempt_at = CASE
+        WHEN old_worker_completion.status = 'failed'
+          THEN old_worker_completion.next_attempt_at
+        ELSE NULL
+      END,
+      extracted_text = old_worker_completion.extracted_text,
+      char_count = old_worker_completion.char_count,
+      page_count = old_worker_completion.page_count,
+      extractor = old_worker_completion.extractor,
+      truncated = old_worker_completion.truncated,
+      reason = old_worker_completion.reason,
+      updated_at = old_worker_completion.updated_at
+  FROM old_worker_completion
+  WHERE c.coordinate = old_worker_completion.coordinate;
 
   UPDATE public.makesafe_pdf_extraction_coordinates c
      SET status = CASE WHEN c.attempts >= 3 THEN 'quarantined' ELSE 'failed' END,
@@ -285,8 +445,11 @@ BEGIN
             THEN 'id:' || candidate.id::text
           ELSE 'sha:' || candidate.sha256
         END
-        AND (p_attachment_id IS NULL OR candidate.id = p_attachment_id)
       ORDER BY
+        CASE
+          WHEN candidate.id = ANY(c.attempted_attachment_ids) THEN 1
+          ELSE 0
+        END,
         CASE WHEN p_fresh_only THEN e.received_at END DESC NULLS LAST,
         e.received_at,
         candidate.created_at,
@@ -296,6 +459,10 @@ BEGIN
    WHERE c.status IN ('pending', 'failed')
      AND c.attempts < 3
      AND (c.next_attempt_at IS NULL OR c.next_attempt_at <= now())
+     AND (
+       requested_coordinate IS NULL
+       OR c.coordinate = requested_coordinate
+     )
    ORDER BY
      CASE WHEN p_fresh_only THEN a.received_at END DESC NULLS LAST,
      CASE WHEN c.attempts = 0 THEN 0 ELSE 1 END,
@@ -309,6 +476,11 @@ BEGIN
     UPDATE public.makesafe_pdf_extraction_coordinates
        SET status = 'processing',
            attempts = attempts + 1,
+           attempted_attachment_ids = CASE
+             WHEN selected_id = ANY(attempted_attachment_ids)
+               THEN attempted_attachment_ids
+             ELSE array_append(attempted_attachment_ids, selected_id)
+           END,
            claim_token = new_claim_token,
            started_at = now(),
            completed_at = NULL,
@@ -408,7 +580,12 @@ CREATE OR REPLACE FUNCTION public.complete_makesafe_pdf_extraction(
   p_completed_at timestamptz DEFAULT now(),
   p_next_attempt_at timestamptz DEFAULT NULL
 )
-RETURNS SETOF public.email_attachments
+RETURNS TABLE (
+  id uuid,
+  email_id text,
+  pdf_extraction_status text,
+  pdf_extraction_reason text
+)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
@@ -511,7 +688,11 @@ BEGIN
      END;
 
   RETURN QUERY
-    SELECT a.*
+    SELECT
+      a.id,
+      a.email_id,
+      a.pdf_extraction_status,
+      a.pdf_extraction_reason
     FROM public.email_attachments a
     WHERE a.status = 'uploaded'
       AND a.pdf_extraction_claim_token = p_claim_token
@@ -547,7 +728,7 @@ AS $$
          ), 0)::bigint
   FROM public.makesafe_pdf_extraction_coordinates c
   WHERE c.status IN ('pending', 'failed', 'processing')
-    AND c.attempts < 3
+    AND (c.status = 'processing' OR c.attempts < 3)
     AND EXISTS (
       SELECT 1
       FROM public.email_attachments a
@@ -623,6 +804,22 @@ BEGIN
       AND d.org_id = p_org_id
   ) THEN
     RAISE EXCEPTION 'draft % is not owned by organisation %', p_draft_id, p_org_id;
+  END IF;
+  IF p_case_id IS NOT NULL AND (
+    cardinality(COALESCE(p_source_post_ids, '{}')) = 0
+    OR EXISTS (
+      SELECT 1
+      FROM unnest(COALESCE(p_source_post_ids, '{}')) AS source(post_id)
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM public.makesafe_intake_case_sources s
+        WHERE s.org_id = p_org_id
+          AND s.case_id = p_case_id
+          AND s.post_id = source.post_id
+      )
+    )
+  ) THEN
+    RAISE EXCEPTION 'source authority does not belong to intake case %', p_case_id;
   END IF;
   IF EXISTS (
     SELECT 1
