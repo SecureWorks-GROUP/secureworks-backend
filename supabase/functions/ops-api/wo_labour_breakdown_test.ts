@@ -4,7 +4,7 @@
 // payable to the holder $272.00. The holder keeps the structured facts and
 // the office manually reconciles the named crew invoices. No payout invoice
 // is created by generate_trade_invoice.
-// deno-lint-ignore no-import-prefix -- repository tests use the pinned Deno std URL.
+// deno-lint-ignore-file no-import-prefix
 import {
   assert,
   assertEquals,
