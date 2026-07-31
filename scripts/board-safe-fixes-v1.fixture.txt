@@ -1,0 +1,194 @@
+AJBR 66933 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+AJBR 67170 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+AJBR 67172 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+AJBR 67178 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+AJBR 67205 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+AJBR 67260 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-261054 | makesafe_job_details.requesting_company_slug | ajbr | aj | ajbr is not a registered makesafe_companies slug
+SWMS-26393 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26409 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26410 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26412 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26413 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26414 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26415 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26416 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26417 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26418 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26419 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26420 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26421 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26422 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26423 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26424 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26425 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26426 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26427 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26428 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26429 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26430 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26431 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26432 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26433 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26437 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26455 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26456 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26457 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26458 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26459 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26462 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26463 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26464 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26465 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26477 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26478 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26479 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26480 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26481 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26482 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26483 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26487 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26490 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26491 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26496 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26497 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26503 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26508 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26510 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26511 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26512 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26513 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26514 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26515 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26516 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26518 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26519 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26520 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26521 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26522 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26523 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26524 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26525 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26527 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26528 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26529 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26530 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26533 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26534 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26540 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26546 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26547 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26559 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26560 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26562 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26563 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26579 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26581 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26584 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26587 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26596 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26598 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26599 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26603 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26606 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26618 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26631 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26632 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26641 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26645 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26658 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26659 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26660 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26668 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26671 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26672 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26673 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26674 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26678 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26679 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26680 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26681 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26682 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26683 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26684 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26686 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26687 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26688 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26689 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26690 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26691 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
+SWMS-26708 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26709 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26710 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26711 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26712 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26713 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26715 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26716 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26717 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26718 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26719 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26720 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26721 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26722 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26723 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26724 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26725 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26726 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26727 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26729 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26730 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26732 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26733 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26734 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26735 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26736 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26737 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26739 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26741 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26742 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26744 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26747 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26749 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26750 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26751 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26752 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26753 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26754 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26755 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26757 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26759 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26763 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26766 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26769 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26770 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26772 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26774 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26775 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26779 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26780 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26781 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26785 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26787 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26788 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26789 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26792 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26793 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26803 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26805 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26810 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26814 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26844 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26846 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26847 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26848 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26849 | makesafe_job_details.report_type | NULL | roof_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26851 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26852 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26853 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26855 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26856 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26857 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26858 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-26859 | makesafe_job_details.report_type | NULL | assessment_report | forward map reportTypeForJobFamily; board behaviour unchanged
+SWMS-TEST-001 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | text-derived physical family; board kind already physical_makesafe
