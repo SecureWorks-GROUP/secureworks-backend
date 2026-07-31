@@ -13,11 +13,11 @@ short version — the trade app's *widest* lens was also one of its narrowest.
 
 | Seam | Before | After |
 |---|---|---|
-| `my_jobs?mode=all` dispatcher branch | assignments with `scheduled_date >= today−30d` | full range, paged at 1000, `id`-tiebroken |
-| open make-safe pool | `limit(80)` newest, then `slice(0, 80)` again | paged to completion |
+| `my_jobs?mode=all` dispatcher branch | assignments with `scheduled_date >= today−30d` | full range, paged at 1000, `id`-tiebroken; tenant-scoped |
+| open make-safe pool | `limit(80)` newest, then `slice(0, 80)` again | paged up to the explicit 5,000-row safety ceiling, with a warning at the ceiling |
 | make-safe legacy/detail reads | `select('*')` capped at `limit(120)` | slim 4-column table scan + `*` rows for pool ids only, chunked |
-| cancelled make-safe feed | `limit(80)` | paged to completion |
-| fencing / patio / decking pools | `limit(80)` each | paged to completion |
+| cancelled make-safe feed | `limit(80)` | paged within its existing 90-day window |
+| fencing / patio / decking pools | `limit(80)` each | paged up to the explicit 5,000-row safety ceiling, with a warning at the ceiling |
 | `search_all_jobs` empty query | viewer's own assignments + 200 newest active jobs | Everyone-lens users get the **whole tenant, full history**; crew unchanged |
 | `search_all_jobs` any query | silent `limit(200)`, **no org filter** | paged with honest `total`, tenant-scoped |
 | PO / make-safe-detail / contact enrichment | single unbounded `.in()` | chunked at 25 ids and paged |
@@ -49,6 +49,8 @@ date floor the manager branch did not. `myjobs_all_means_all_test.ts` guards it.
 ## `search_all_jobs` response shape
 
 Additive — `jobs` keeps its existing shape and every previously-returned field.
+The company and assigned browse paths are de-duplicated by job id; assignment
+visits remain separate in `my_jobs` because the Board needs each real visit row.
 
 ```jsonc
 {
