@@ -3182,6 +3182,54 @@ async function makesafeIntakeExceptionReadAction(
 export const _makesafeIntakeExceptionReadActionForTest =
   makesafeIntakeExceptionReadAction
 
+type VaultSyncAuthMode = 'api_key' | 'jwt' | 'routine' | 'none'
+
+async function vaultSyncSwApiKeyAction(
+  client: any,
+  authMode: VaultSyncAuthMode,
+  authUser: Pick<TradeAuthContext, 'role'> | null | undefined,
+  method: string,
+  envGet: (name: string) => string | undefined = (name) => Deno.env.get(name),
+): Promise<Response> {
+  // Keep this exactly aligned with makesafe_pdf_extraction_drain: the master
+  // ops/service credential or an admin/owner session, never the routine key.
+  const isPrivileged = authMode === 'api_key' ||
+    (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+  if (!isPrivileged) {
+    return json({ error: 'forbidden: vault_sync_sw_api_key requires the privileged ops key or an admin/owner session' }, 403)
+  }
+  if (method !== 'POST') {
+    return json({ error: 'vault_sync_sw_api_key requires POST' }, 405)
+  }
+
+  const swApiKey = envGet('SW_API_KEY')
+  if (!swApiKey || swApiKey.trim() === '') {
+    return json({ error: 'SW_API_KEY is missing or empty in the edge runtime' }, 503)
+  }
+
+  const { data, error } = await client.rpc('vault_upsert_sw_api_key', {
+    p_secret: swApiKey,
+  })
+  if (error) {
+    // Do not log the RPC input or return database details on this secret path.
+    return json({ error: 'vault_sync_sw_api_key failed' }, 500)
+  }
+
+  const name = String(data?.name || '')
+  const valueMd5Prefix = String(data?.value_md5_prefix || '')
+  if (name !== 'sw_api_key' || !/^[0-9a-f]{8}$/.test(valueMd5Prefix)) {
+    return json({ error: 'vault_sync_sw_api_key returned an invalid receipt' }, 500)
+  }
+
+  return json({
+    synced: true,
+    name,
+    value_md5_prefix: valueMd5Prefix,
+  })
+}
+
+export const _vaultSyncSwApiKeyActionForTest = vaultSyncSwApiKeyAction
+
 if (import.meta.main) serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
@@ -4683,6 +4731,13 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         return json(await drainMakesafePdfExtraction(client, body))
       }
+      case 'vault_sync_sw_api_key':
+        return await vaultSyncSwApiKeyAction(
+          client,
+          authMode,
+          authUser,
+          req.method,
+        )
       case 'submit_makesafe_report':
         return json(await dispatchMakesafeReport(client, body, authMode, authUser))
       case 'list_invoices': return json(await listInvoices(client, url.searchParams))
