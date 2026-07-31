@@ -61,6 +61,7 @@ make_fixture_repo() {
   mkdir -p \
     "$repo/.github/workflows" \
     "$repo/scripts" \
+    "$repo/supabase/migrations" \
     "$repo/supabase/functions/ops-api" \
     "$repo/supabase/functions/send-quote"
 
@@ -70,6 +71,7 @@ make_fixture_repo() {
   printf '%s\n' '# base smoke' > "$repo/scripts/smoke-ops-api-action-surface.sh"
   printf '%s\n' '# base source check' > "$repo/scripts/check-ops-api-source-actions.sh"
   printf '%s\n' 'ops_api_version' > "$repo/scripts/_ops-api-required-actions.txt"
+  printf '%s\n' '-- base migration' > "$repo/supabase/migrations/20260730000000_base.sql"
   printf '%s\n' 'name: fixture' > "$repo/.github/workflows/deploy-edge-functions.yml"
 
   (
@@ -124,6 +126,47 @@ test_scripts_only_change_requests_verification_without_deploy() {
   fi
   if [[ "$(output_value "$output" verify_ops_api)" != "true" ]]; then
     fail "$name" "scripts-only change did not request ops-api verification"
+    return
+  fi
+
+  pass "$name"
+}
+
+test_migration_only_change_requests_apply_without_function_deploy() {
+  local name="test_migration_only_change_requests_apply_without_function_deploy"
+  local repo output base_sha head_sha
+  repo="$(make_fixture_repo)"
+  output="$TEST_TMP/migration-only.out"
+
+  (
+    cd "$repo" || exit 1
+    base_sha="$(git rev-parse HEAD)"
+    printf '%s\n' '-- migration-only change' \
+      > supabase/migrations/20260731000000_migration_only.sql
+    git add supabase/migrations/20260731000000_migration_only.sql
+    git commit -q -m migration-only
+    head_sha="$(git rev-parse HEAD)"
+    printf '%s\n%s\n' "$base_sha" "$head_sha" \
+      > "$TEST_TMP/migration-only-shas"
+  )
+  base_sha="$(sed -n '1p' "$TEST_TMP/migration-only-shas")"
+  head_sha="$(sed -n '2p' "$TEST_TMP/migration-only-shas")"
+
+  if ! run_classifier "$repo" "$base_sha" "$head_sha" push "$output"; then
+    fail "$name" "classifier failed for a migration-only push"
+    return
+  fi
+
+  if [[ -n "$(output_value "$output" functions)" ]]; then
+    fail "$name" "migration-only change selected a function for deploy"
+    return
+  fi
+  if [[ "$(output_value "$output" migrations_changed)" != "true" ]]; then
+    fail "$name" "migration-only change did not request migration application"
+    return
+  fi
+  if [[ "$(output_value "$output" verification_only)" != "false" ]]; then
+    fail "$name" "migration-only change was misclassified as verification-only"
     return
   fi
 
@@ -269,7 +312,8 @@ test_missing_push_base_fails_safe_without_an_invalid_diff() {
 verification_trigger_paths() {
   sed -n '1,/^jobs:/p' "$DEPLOY_WORKFLOW" |
     sed -n "s/^      - '\(.*\)'\$/\1/p" |
-    grep -v '^supabase/functions/' || true
+    grep -v '^supabase/functions/' |
+    grep -v '^supabase/migrations/' || true
 }
 
 test_every_verification_trigger_path_is_classified() {
@@ -347,6 +391,7 @@ function requireText(text, needle, label) {
 }
 
 for (const triggerPath of [
+  "supabase/migrations/**",
   "scripts/identify-edge-deploy-changes.sh",
   "scripts/apply-pending-migrations.sh",
   "scripts/migration-autoapply-exclusions.txt",
@@ -364,6 +409,11 @@ for (const triggerPath of [
 
 requireText(deploy, 'bash scripts/identify-edge-deploy-changes.sh', 'change classifier');
 requireText(deploy, "if: steps.changed.outputs.functions != ''", 'function deploy condition');
+requireText(
+  deploy,
+  "steps.changed.outputs.migrations_changed == 'true'",
+  'migration-only apply condition',
+);
 requireText(deploy, 'bash scripts/apply-pending-migrations.sh', 'migration auto-apply');
 requireText(deploy, 'bash scripts/check-edge-schema-preflight.sh', 'production schema preflight');
 requireText(deploy, 'SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}', 'schema preflight credential');
@@ -374,8 +424,12 @@ requireText(deploy, 'EXPECTED_OPS_API_COMMIT_SHA=', 'bundled commit smoke bindin
 requireText(deploy, 'EXPECTED_OPS_API_DEPLOYED_AT=', 'bundled timestamp smoke binding');
 
 const migrationApplyStep = deploy.match(/- name: Apply pending reviewed migrations[\s\S]*?(?=\n      - name:)/);
-if (!migrationApplyStep || !migrationApplyStep[0].includes("if: steps.changed.outputs.functions != ''")) {
-  throw new Error('migration auto-apply is not required for every function deploy');
+if (
+  !migrationApplyStep ||
+  !migrationApplyStep[0].includes("steps.changed.outputs.functions != ''") ||
+  !migrationApplyStep[0].includes("steps.changed.outputs.migrations_changed == 'true'")
+) {
+  throw new Error('migration auto-apply is not required for function and migration-only pushes');
 }
 if (!migrationApplyStep[0].includes('bash scripts/apply-pending-migrations.sh')) {
   throw new Error('migration auto-apply does not run the authoritative runner');
@@ -434,6 +488,7 @@ const verificationTriggerPaths = triggerBlock[1]
   .filter(Boolean)
   .map((line) => line.replace(/^- '/, '').replace(/'$/, ''))
   .filter((triggerPath) => !triggerPath.startsWith('supabase/functions/'))
+  .filter((triggerPath) => !triggerPath.startsWith('supabase/migrations/'))
   .sort();
 
 const classifierSource = fs.readFileSync(process.env.CLASSIFIER, 'utf8');
@@ -482,6 +537,7 @@ main() {
     fail "test_setup" "change classifier missing: $CLASSIFIER"
   else
     test_scripts_only_change_requests_verification_without_deploy
+    test_migration_only_change_requests_apply_without_function_deploy
     test_ops_api_source_change_preserves_deploy_and_verification
     test_other_function_change_keeps_existing_deploy_scope
     test_unusual_event_uses_a_valid_fallback_range

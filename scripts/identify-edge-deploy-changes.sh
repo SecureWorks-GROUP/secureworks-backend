@@ -88,6 +88,7 @@ if [[ "$FULL_TREE" == "true" ]]; then
       tr '\n' ' '
   )"
   VERIFICATION_CONTRACT_CHANGED=true
+  MIGRATIONS_CHANGED=true
   SHARED_CHANGED=false
 else
   CHANGED_FILES="$(git diff --name-only "$DIFF_BASE" "$HEAD_COMMIT" --)"
@@ -112,6 +113,11 @@ else
       break
     fi
   done <<< "$CHANGED_FILES"
+
+  MIGRATIONS_CHANGED=false
+  if printf '%s\n' "$CHANGED_FILES" | grep -q '^supabase/migrations/'; then
+    MIGRATIONS_CHANGED=true
+  fi
 
   SHARED_CHANGED=false
   if printf '%s\n' "$CHANGED_FILES" | grep -q '^supabase/functions/_shared/'; then
@@ -143,6 +149,7 @@ emit_output functions "$CHANGED_FUNCTIONS"
 emit_output function_source_changed "$FUNCTION_SOURCE_CHANGED"
 emit_output ops_api_source_changed "$OPS_API_SOURCE_CHANGED"
 emit_output verification_contract_changed "$VERIFICATION_CONTRACT_CHANGED"
+emit_output migrations_changed "$MIGRATIONS_CHANGED"
 emit_output verification_only "$VERIFICATION_ONLY"
 emit_output verify_ops_api "$VERIFY_OPS_API"
 emit_output diff_mode "$DIFF_MODE"
@@ -151,6 +158,7 @@ echo "Diff mode: $DIFF_MODE"
 echo "Changed functions: ${CHANGED_FUNCTIONS:-<none>}"
 echo "Function source changed: $FUNCTION_SOURCE_CHANGED"
 echo "Ops-api verification contract changed: $VERIFICATION_CONTRACT_CHANGED"
+echo "Migrations changed: $MIGRATIONS_CHANGED"
 echo "Verification-only: $VERIFICATION_ONLY"
 echo "Verify ops-api: $VERIFY_OPS_API"
 
