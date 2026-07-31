@@ -26344,6 +26344,21 @@ export async function searchAllJobs(
   const pageSize = Math.min(requestedPageSize, TRADE_JOB_FEED_PAGE_MAX)
   const offset = requestedOffset
 
+  let externalRefJobs: any[] = []
+  if (q) {
+    const extRefMatches = await resolveJobsByExternalRef(
+      client,
+      [q],
+      _GLOBAL_SEARCH_STATUS_EXCLUDE,
+      TRADE_JOB_FEED_SELECT,
+    )
+    externalRefJobs = Object.values(extRefMatches.byId).filter((job: any) =>
+      /^[0-9a-f-]{36}$/i.test(String(job?.id || '')) &&
+      String(job?.org_id || viewer.orgId) === String(viewer.orgId)
+    )
+  }
+  const externalRefJobIds = new Set(externalRefJobs.map((job: any) => String(job.id)))
+
   // M9 FIX A: when q is non-empty, do NOT include the unconditional assigned-jobs
   // set — it polluted results (a gibberish q returned ~6 rows from the trade's
   // assigned list with no text filter).
@@ -26377,6 +26392,9 @@ export async function searchAllJobs(
         `job_number.ilike.%${q}%,client_name.ilike.%${q}%,site_suburb.ilike.%${q}%,site_address.ilike.%${q}%`,
       )
     }
+    if (externalRefJobIds.size > 0) {
+      jobQuery = jobQuery.not('id', 'in', `(${Array.from(externalRefJobIds).map((id) => `"${id}"`).join(',')})`)
+    }
     return jobQuery
   }
 
@@ -26387,16 +26405,22 @@ export async function searchAllJobs(
   try {
     const countResult = await buildJobQuery('id', { count: 'exact', head: true })
     if (countResult?.error) throw countResult.error
-    total = typeof countResult?.count === 'number' ? countResult.count : null
+    total = typeof countResult?.count === 'number'
+      ? countResult.count + externalRefJobIds.size
+      : null
   } catch (countErr: any) {
     console.log('[ops-api] search_all_jobs count failed (non-blocking):', countErr?.message)
   }
 
   // created_at is not unique, so paging needs the id tiebreak for a total order.
+  const baseOffset = Math.max(0, offset - (offset > 0 ? externalRefJobIds.size : 0))
+  const basePageSize = offset === 0
+    ? Math.max(1, pageSize - externalRefJobIds.size)
+    : pageSize
   const { data: allJobs, error: allJobsErr } = await buildJobQuery(TRADE_JOB_FEED_SELECT)
     .order('created_at', { ascending: false })
     .order('id', { ascending: true })
-    .range(offset, offset + pageSize - 1)
+    .range(baseOffset, baseOffset + basePageSize - 1)
   if (allJobsErr) throw allJobsErr
 
   // One job = one entry, keyed by job id — the captain's explicit condition.
@@ -26405,25 +26429,8 @@ export async function searchAllJobs(
     if (j?.id) byId[j.id] = j
   }
 
-  // M9 r2 FIX 1: when q is present, also resolve via external_ref (MLB builder ref).
-  // Trades type "MLB25248" (no hyphen); canonical store is "MLB-25248".
-  // We do NOT add metadata->>external_ref to the PostgREST .or() above (JSON-path in
-  // .or() is unreliable). Instead resolveJobsByExternalRef does a digit-core ilike on
-  // makesafe_job_details.external_ref and merges matches into byId so they flow through
-  // enrichTradeMakesafeJobs and the external_ref surface block below.
-  if (q) {
-    const extRefMatches = await resolveJobsByExternalRef(
-      client,
-      [q],
-      _GLOBAL_SEARCH_STATUS_EXCLUDE,
-      TRADE_JOB_FEED_SELECT,
-    )
-    // Merge all matched jobs by UUID — search returns multiple matches correctly.
-    for (const [jobId, job] of Object.entries(extRefMatches.byId)) {
-      if (!/^[0-9a-f-]{36}$/i.test(jobId)) continue
-      if (String((job as any)?.org_id || viewer.orgId) !== String(viewer.orgId)) continue
-      byId[jobId] = job
-    }
+  if (offset === 0) {
+    for (const job of externalRefJobs) byId[job.id] = job
   }
 
   // M9 FIX A (ordering): when searching, sort by exact/prefix job_number match first,
@@ -27181,19 +27188,26 @@ export async function myJobs(
       .map((r: any) => String(r.job_id || '')).filter(Boolean)))
       .filter((id: string) => !openMakesafeById[id])
     if (detailJobIds.length > 0) {
-      const detailJobs = await readPagedRows(
-        (offset, limit) =>
-          client
-            .from('jobs')
-            .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
-            .eq('org_id', orgId)
-            .in('id', detailJobIds)
-            .not('status', 'in', _makesafePoolExcludedStatusFilter())
-            .order('created_at', { ascending: false })
-            .order('id', { ascending: true })
-            .range(offset, offset + limit - 1),
-        'make-safe legacy pool',
-      )
+      const detailChunks: string[][] = []
+      for (let i = 0; i < detailJobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+        detailChunks.push(detailJobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+      }
+      const detailPages = await Promise.all(detailChunks.map((chunk) =>
+        readPagedRows(
+          (offset, limit) =>
+            client
+              .from('jobs')
+              .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, notes, job_number, metadata, created_at')
+              .eq('org_id', orgId)
+              .in('id', chunk)
+              .not('status', 'in', _makesafePoolExcludedStatusFilter())
+              .order('created_at', { ascending: false })
+              .order('id', { ascending: true })
+              .range(offset, offset + limit - 1),
+          'make-safe legacy pool',
+        ),
+      ))
+      const detailJobs = detailPages.flat()
       for (const job of (detailJobs || [])) if (job?.id) openMakesafeById[job.id] = job
     }
 
@@ -27236,12 +27250,19 @@ export async function myJobs(
       .map((job: any) => job.id)
     if (phoneMissingJobIds.length > 0) {
       try {
-        const { data: contacts, error: contactErr } = await client.from('job_contacts')
-          .select('job_id, client_name, client_email, client_phone, is_primary, contact_label, status')
-          .in('job_id', phoneMissingJobIds)
-          .eq('status', 'active')
-        if (contactErr) throw contactErr
-        _backfillOpenMakesafeContactsForTest(openMakesafes as any[], contacts || [])
+        const contactChunks: string[][] = []
+        for (let i = 0; i < phoneMissingJobIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+          contactChunks.push(phoneMissingJobIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+        }
+        const contactPages = await Promise.all(contactChunks.map(async (chunk) => {
+          const { data, error } = await client.from('job_contacts')
+            .select('job_id, client_name, client_email, client_phone, is_primary, contact_label, status')
+            .in('job_id', chunk)
+            .eq('status', 'active')
+          if (error) throw error
+          return data || []
+        }))
+        _backfillOpenMakesafeContactsForTest(openMakesafes as any[], contactPages.flat())
       } catch (e: any) {
         console.log('[ops-api] open MakeSafe contact backfill skipped:', e?.message)
       }
@@ -27348,11 +27369,19 @@ export async function myJobs(
     const cancelledJobs = cancelledMakesafes || []
     if (cancelledJobs.length > 0) {
       const cancelledIds = cancelledJobs.map((j: any) => j.id).filter(Boolean)
-      const { data: cancelledDetails, error: cancelledDetailErr } = await client
-        .from('makesafe_job_details')
-        .select('*, makesafe_companies:requesting_company_id(slug, name)')
-        .in('job_id', cancelledIds)
-      if (cancelledDetailErr) throw cancelledDetailErr
+      const cancelledChunks: string[][] = []
+      for (let i = 0; i < cancelledIds.length; i += OCCUPANCY_PROBE_CHUNK) {
+        cancelledChunks.push(cancelledIds.slice(i, i + OCCUPANCY_PROBE_CHUNK))
+      }
+      const cancelledDetailPages = await Promise.all(cancelledChunks.map(async (chunk) => {
+        const { data, error } = await client
+          .from('makesafe_job_details')
+          .select('*, makesafe_companies:requesting_company_id(slug, name)')
+          .in('job_id', chunk)
+        if (error) throw error
+        return data || []
+      }))
+      const cancelledDetails = cancelledDetailPages.flat()
       const cancelledDetailByJobId: Record<string, any> = {}
       for (const row of (cancelledDetails || [])) {
         if (row?.job_id) cancelledDetailByJobId[String(row.job_id)] = row

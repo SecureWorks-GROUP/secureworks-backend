@@ -46,7 +46,7 @@ type Assignment = {
   scheduled_date: string | null;
   job_id: string;
 };
-type Detail = { job_id: string; substatus?: string; last_reattend_at?: string };
+type Detail = { job_id: string; substatus?: string; last_reattend_at?: string; external_ref?: string };
 type Fixtures = {
   assignments: Assignment[];
   jobs: Job[];
@@ -76,6 +76,7 @@ type RecordedQuery = {
   lte: Record<string, string>;
   lt: Record<string, string>;
   notIn: string | null;
+  notIdIn: string | null;
   inCol: string | null;
   inVals: unknown[] | null;
   or: { str: string; referencedTable: string | null } | null;
@@ -197,6 +198,10 @@ function resolve(fx: Fixtures, st: RecordedQuery): { data: unknown[] | null; err
       const excluded = parseNotInSet(st.notIn);
       rows = rows.filter((j) => !excluded.has(j.status));
     }
+    if (st.notIdIn) {
+      const excluded = parseNotInSet(st.notIdIn);
+      rows = rows.filter((j) => !excluded.has(j.id));
+    }
     rows = rows.slice().sort((a, b) =>
       String(b.created_at || "").localeCompare(String(a.created_at || "")) ||
       String(a.id).localeCompare(String(b.id))
@@ -238,7 +243,7 @@ function makeClient(fx: Fixtures, recorded: RecordedQuery[] = []) {
   function from(table: string) {
     const st: RecordedQuery = {
       table, select: "", head: false, eq: {}, neq: {}, gte: {}, lte: {}, lt: {},
-      notIn: null, inCol: null, inVals: null, or: null, ors: [], range: null, limit: null,
+      notIn: null, notIdIn: null, inCol: null, inVals: null, or: null, ors: [], range: null, limit: null,
     };
     // deno-lint-ignore no-explicit-any
     const b: any = {
@@ -253,7 +258,11 @@ function makeClient(fx: Fixtures, recorded: RecordedQuery[] = []) {
       lte: (k: string, v: string) => { st.lte[k] = v; return b; },
       lt: (k: string, v: string) => { st.lt[k] = v; return b; },
       in: (k: string, arr: unknown[]) => { st.inCol = k; st.inVals = arr; return b; },
-      not: (k: string, op: string, v: string) => { if (k === "status" && op === "in") st.notIn = v; return b; },
+      not: (k: string, op: string, v: string) => {
+        if (k === "status" && op === "in") st.notIn = v;
+        if (k === "id" && op === "in") st.notIdIn = v;
+        return b;
+      },
       or: (s: string, opts?: { referencedTable?: string }) => {
         st.or = { str: s, referencedTable: opts?.referencedTable ?? null };
         st.ors.push(st.or);
@@ -513,6 +522,8 @@ Deno.test("make-safe detail reads: slim table scan, bounded full-row enrichment"
     assertEquals(read.inCol, "job_id", "scoped to specific pool ids…");
     assertEquals((read.inVals || []).length <= 25, true, "…and chunked for URL length");
   }
+  const contactReads = recorded.filter((q) => q.table === "job_contacts");
+  assertEquals(contactReads.every((q) => (q.inVals || []).length <= 25), true, "contact backfill ids are chunked too");
   const enrichedIds = fullRows.flatMap((r) => (r.inVals || []) as string[]);
   assertEquals(
     enrichedIds.includes("job-ms-admin"),
@@ -758,6 +769,38 @@ Deno.test("All tab: paging never returns the same job on two pages", async () =>
   }
   assertEquals(seen.length, total);
   assertEquals(new Set(seen).size, total, "every job appears exactly once across the pages");
+});
+
+Deno.test("All tab: external-ref matches are stable across pages and counted", async () => {
+  const externalId = "00000000-0000-0000-0000-000000000099";
+  const fixtures: Fixtures = {
+    assignments: [],
+    jobs: [
+      { id: externalId, type: "makesafe", status: "quoted", job_number: "SWMS-EXT", created_at: "2026-01-03T00:00:00Z" },
+      { id: "00000000-0000-0000-0000-000000000001", type: "fencing", status: "quoted", job_number: "SWF-1", client_name: "MLB25248 project one", created_at: "2026-01-02T00:00:00Z" },
+      { id: "00000000-0000-0000-0000-000000000002", type: "fencing", status: "quoted", job_number: "SWF-2", client_name: "MLB25248 project two", created_at: "2026-01-01T00:00:00Z" },
+    ],
+    details: [{ job_id: externalId, external_ref: "MLB-25248" }],
+  };
+  const firstRecorded: RecordedQuery[] = [];
+  const first = await searchAllJobs(
+    makeClient(fixtures, firstRecorded),
+    new URLSearchParams({ q: "MLB25248", page_size: "2" }),
+    viewer(),
+    true,
+  );
+  const second = await searchAllJobs(
+    makeClient(fixtures),
+    new URLSearchParams({ q: "MLB25248", page_size: "2", offset: "2" }),
+    viewer(),
+    true,
+  );
+  assertEquals(first.total, 3);
+  assertEquals(first.jobs.map((j: { id: string }) => j.id), [externalId, "00000000-0000-0000-0000-000000000001"]);
+  assertEquals(second.jobs.map((j: { id: string }) => j.id), ["00000000-0000-0000-0000-000000000002"]);
+  assertEquals(new Set([...first.jobs, ...second.jobs].map((j: { id: string }) => j.id)).size, 3);
+  const baseReads = firstRecorded.filter((q) => q.table === "jobs" && !q.head && q.or);
+  assertEquals(baseReads.every((q) => q.notIdIn?.includes(externalId)), true, "base paging excludes the external-ref match");
 });
 
 // ── Calendar (task item 4) ───────────────────────────────────────────────────
