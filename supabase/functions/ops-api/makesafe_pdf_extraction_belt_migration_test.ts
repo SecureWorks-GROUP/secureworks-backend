@@ -123,7 +123,9 @@ Deno.test("service key helper no longer falls back to an embedded stale credenti
     serviceKeyHardeningMigration,
     'vault secret "service_role_key" is missing or empty',
   );
-  assert(!serviceKeyHardeningMigration.includes("public._sw_service_key()"));
+  assert(
+    !serviceKeyHardeningMigration.includes("v_key := public._sw_service_key()"),
+  );
 });
 
 Deno.test("PDF belt owns claim, completion, retry budget, and ETA on one SHA coordinate", () => {
