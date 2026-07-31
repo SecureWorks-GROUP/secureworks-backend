@@ -60,8 +60,12 @@ This is intentionally a one-document worker, not a raised standing-scan cap,
 so the scope-json OOM failure mode is not reintroduced.
 
 The historical cron invokes `ops-api` with `x-api-key` from the Vault secret
-`sw_api_key`. That secret must be present and non-empty before the drain is
-enabled; there is no embedded or stale credential fallback. The pg_net request
+`sw_api_key`. The one-time `vault_sync_sw_api_key` action populates or updates
+that secret from the edge runtime's `SW_API_KEY` after the reviewed migration
+and function deploy. It must be called once through the proven privileged
+caller pattern only after merge/deploy, then the secret is verified by name
+only. The secret must be present and non-empty before the drain is enabled;
+there is no embedded or stale credential fallback. The pg_net request
 is recorded and checked asynchronously, so timeout, network error, non-200
 response, or a missing response fails the cron visibly rather than appearing as
 a successful drain. The current pace remains one item per minute. A future
@@ -84,14 +88,15 @@ Apply these migrations in order before deploying the matching `ops-api` and
 3. `20260731000002_makesafe_intake_settlement_closure.sql`
 4. `20260731081410_fix_makesafe_pdf_drain_auth_and_response_check.sql`
 5. `20260731081411_remove_sw_service_key_fallback.sql`
+6. `20260731152254_vault_sync_sw_api_key.sql`
 
 Migration-only merges enter the same reviewed production migration lane and
 deploy zero functions. The matching function deploy remains after all listed
 migrations are applied.
 
 The schema-requirements manifest is the deploy gate for the required tables,
-columns, indexes, constraints, policies, and triggers. Code must not deploy
-ahead of any of these three ledger versions.
+columns, indexes, constraints, policies, triggers, and the Vault sync function.
+Code must not deploy ahead of any listed ledger version.
 
 ## Post-deploy verification checklist for the PR
 

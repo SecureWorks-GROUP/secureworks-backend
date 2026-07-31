@@ -136,6 +136,9 @@ makesafe_deterministic_intake_dark_observe
 # the live scan and can promote up to 100 clean drafts into live make-safe jobs,
 # so post-deploy recognition stays on the source gate.
 makesafe_reporting_intake_pass # probe=source-only
+# One-time self-sync of the runtime SW_API_KEY into Vault. It mutates encrypted
+# secret state, so deploy recognition must remain source-only.
+vault_sync_sw_api_key # probe=source-only
 # U4 canonical live-card assembler. A bare call could create an append-only
 # draft revision, so deploy recognition stays source-only; the documented
 # production canary always supplies dry_run=true.
