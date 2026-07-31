@@ -93,7 +93,7 @@ Deno.test("PDF drain cron uses the ops-api key contract and fails loudly on asyn
     "makesafe_pdf_extraction_drain_requests",
   );
   assertStringIncludes(drainAuthMigration, "LEFT JOIN net._http_response");
-  assertStringIncludes(drainAuthMigration, "latest.status_code <> 200");
+  assertStringIncludes(drainAuthMigration, "drain_request.status_code <> 200");
   assertStringIncludes(drainAuthMigration, "RAISE EXCEPTION");
   assertStringIncludes(
     drainAuthMigration,
