@@ -71,6 +71,25 @@ export function hasAnyPoLabel(text: string): boolean {
   return PO_RE.test(text) || LOOSE_PO_RE.test(text);
 }
 
+/**
+ * Filenames separate their words with underscores, and `_` is a word character,
+ * so `\b` never fires around a token wedged between them: the PO in
+ * `work_order_PO20877_Secure_Works_WA.pdf` is invisible to PO_RE while the same
+ * name spelled with spaces parses. Sealed deliverable BWCWA6781 replayed as
+ * below_identity_floor for exactly that reason (fixture:
+ * makesafe_bwcwa6781_filename_po_fixture_test.ts).
+ *
+ * The fix is deliberately scoped to attachment NAMES rather than relaxing the
+ * PO_RE boundaries globally: the verified Track A replay fates were computed
+ * under the current matching behaviour, so a grammar-wide change could shift
+ * outcomes beyond the one sealed row without revalidation. Underscores inside
+ * body or PDF text therefore still do NOT separate a PO token — see the
+ * body-text case in the fixture test, which pins that boundary.
+ */
+function attachmentNameScanText(name: string): string {
+  return name.replace(/_/g, " ");
+}
+
 function canonicalClaim(prefix: string, digits: string): string {
   const canonical = prefix.toUpperCase() === "ABJR"
     ? "AJBR"
@@ -175,7 +194,7 @@ export function extractBuilderWorkOrderIdentity(
   // fills a gap but can no longer beat filename/body identity when a reused
   // "NEW WORK ORDER" subject carries a different or partial reference.
   for (const name of input.attachmentNames || []) {
-    if (name) scanText(name, "attachment_name", result);
+    if (name) scanText(attachmentNameScanText(name), "attachment_name", result);
   }
 
   if (input.bodyText) {

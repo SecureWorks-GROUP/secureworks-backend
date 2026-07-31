@@ -91,6 +91,16 @@ per-attachment-id counting; the invariant, tests and replay proof are in
 `makesafe_duplicate_transport_dedupe_test.ts` and
 `docs/evidence/track-a-d8-duplicate-transport-2026-07-30.md`.
 
+Identity tokens are read out of attachment FILENAMES with underscores
+normalised to spaces, because `_` is a word character and the PO grammar's
+`\b` boundaries otherwise cannot see `PO20877` inside
+`work_order_PO20877_Secure_Works_WA.pdf`. That normalisation is deliberately
+scoped to filenames only — the same underscored token in body or PDF text
+still yields no PO, because the verified Track A replay fates were computed
+under the current text-matching behaviour. Widening it to the shared PO_RE
+boundaries is a fate-moving change that needs its own replay revalidation.
+Both halves are pinned in `makesafe_bwcwa6781_filename_po_fixture_test.ts`.
+
 ## Never Select `scope_json` In A List/Feed Query
 
 `jobs.scope_json` (and therefore `calendar_events.scope_json`) is NOT a small

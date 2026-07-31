@@ -8,19 +8,17 @@
 //     `work_order_PO20877_Secure_Works_WA.pdf`,
 //   - the WO PDF text carries the declared type header.
 //
-// Writing this fixture DISPROVED the PDF-budget hypothesis: the case files
-// below_identity_floor even when the PDF text IS extracted. The mechanism is
+// Writing this fixture DISPROVED the PDF-budget hypothesis: the case filed
+// below_identity_floor even when the PDF text WAS extracted. The mechanism is
 // the PO grammar's `\b` word boundaries in makesafe_builder_work_order_identity
 // (PO_RE): underscore is a word character, so `PO20877` inside
-// `work_order_PO20877_Secure_Works_WA.pdf` has no boundary on either side and
-// never matches. The filename PO is invisible, identity stays claim-only
-// (subject ref without WO/PO), and the deliverable can never mint. The control
-// test below proves the space-separated spelling of the SAME fixture mints
-// confirmed_live_job, so the underscore grammar is the entire gap.
+// `work_order_PO20877_Secure_Works_WA.pdf` had no boundary on either side and
+// never matched. The filename PO was invisible, identity stayed claim-only
+// (subject ref without WO/PO), and the deliverable could never mint.
 //
-// The sealed-truth expectation for the exact underscore shape is committed as
-// an ignored test pending the fix-scope ruling (needs-decision raised
-// 2026-07-31); un-ignore it when the PO grammar fix lands.
+// Fixed under the 2026-07-31 ruling by normalising underscores to spaces for
+// attachment NAMES only (attachmentNameScanText). The scope boundary is itself
+// pinned below: the same token in body text still yields no PO.
 import {
   assert,
   assertEquals,
@@ -43,6 +41,8 @@ const PROFILES: DeterministicCompanyProfile[] = [
 ];
 
 const POST_ID = "bwcwa-6781-fixture";
+const SUBJECT =
+  "New Make Safe and Report Request - BWCWA6781 - 5 Fixture Street, Perth";
 const UNDERSCORE_NAME = "work_order_PO20877_Secure_Works_WA.pdf";
 const SHA = "bb".repeat(32);
 
@@ -98,8 +98,7 @@ function fixture(
     postId: POST_ID,
     fromEmail: "dispatch@builderwest.test",
     fromName: null,
-    subject:
-      "New Make Safe and Report Request - BWCWA6781 - 5 Fixture Street, Perth",
+    subject: SUBJECT,
     body: "Please find the work order attached.",
     receivedAt: "2026-07-20T00:00:00.000Z",
     attachments: [{
@@ -161,10 +160,9 @@ Deno.test("BWCWA6781: unextracted WO PDF parks visibly, never silently", () => {
   assertEquals(classification?.reasonCode, parked.reasonCode);
 });
 
-// Mechanism control: the identical fixture with the filename's underscores as
-// spaces mints confirmed_live_job from subject ref + filename PO. This is the
-// grammar-to-mint path working end to end, proving the underscore spelling is
-// the entire gap (and that the PDF budget is NOT the mechanism).
+// The space-separated filename spelling parsed correctly before the fix and
+// must still parse after it: normalisation rewrites underscores into exactly
+// this shape, so this is the guard that the rewrite target stays valid.
 Deno.test("BWCWA6781 control: space-separated filename PO mints the live job", () => {
   const plan = buildDeterministicIntakePlan(
     [fixture({
@@ -190,36 +188,79 @@ Deno.test("BWCWA6781 control: space-separated filename PO mints the live job", (
 
 // Behaviour 1 (sealed truth, EXACT underscore shape): extracted WO PDF ->
 // deliverable mints, identity resolved from subject ref + filename PO.
-// CURRENTLY FAILS: PO_RE's `\b` cannot match `PO20877` between underscores, so
-// builder_po_number stays null and the case files below_identity_floor even
-// with extraction present. Ignored pending the fix-scope ruling; un-ignore
-// alongside the PO grammar fix.
-Deno.test({
-  name:
-    "BWCWA6781 sealed truth: extracted WO PDF mints from subject ref + underscore filename PO",
-  ignore: true,
-  fn() {
-    const plan = buildDeterministicIntakePlan(
-      [fixture({ extracted: true })],
-      PROFILES,
-    );
+Deno.test("BWCWA6781 sealed truth: extracted WO PDF mints from subject ref + underscore filename PO", () => {
+  const plan = buildDeterministicIntakePlan(
+    [fixture({ extracted: true })],
+    PROFILES,
+  );
 
-    assertEquals(plan.cases.length, 1);
-    const minted = plan.cases[0];
-    assertEquals(minted.state, "confirmed_live_job");
-    assertEquals(minted.identity.externalRefCanonical, "BWCWA-6781");
-    assertEquals(minted.identity.builderPoCanonical, "PO-20877");
+  assertEquals(plan.cases.length, 1);
+  const minted = plan.cases[0];
+  assertEquals(minted.state, "confirmed_live_job");
+  assertEquals(minted.reasonCode, null);
+  assertEquals(minted.identity.externalRefCanonical, "BWCWA-6781");
+  assertEquals(minted.identity.builderPoCanonical, "PO-20877");
+  assertEquals(minted.identity.builderWoCanonical, "BWCWA-6781PO-20877");
+  assertEquals(
+    minted.identity.woPoIdentityKey,
+    "wo:BWCWA-6781PO-20877/po:PO-20877",
+  );
+  assertEquals(minted.identity.jobFamily, "general_makesafe");
+  assertEquals(
+    plan.sourceClassifications.find((c) => c.postId === POST_ID)?.outcome,
+    "confirmed_canonical_input",
+  );
 
-    // The unit-level mechanism the fix must close: the shared identity
-    // extractor reads the PO out of the underscore-separated filename.
-    const identity = extractBuilderWorkOrderIdentity({
-      subject:
-        "New Make Safe and Report Request - BWCWA6781 - 5 Fixture Street, Perth",
-      attachmentNames: [UNDERSCORE_NAME],
-      bodyText: null,
-      externalRef: null,
-    });
-    assertEquals(identity.builder_claim_ref, "BWCWA-6781");
-    assertEquals(identity.builder_po_number, "PO-20877");
-  },
+  // The unit-level mechanism the fix closes: the shared identity extractor
+  // reads the PO out of the underscore-separated filename.
+  const identity = extractBuilderWorkOrderIdentity({
+    subject: SUBJECT,
+    attachmentNames: [UNDERSCORE_NAME],
+    bodyText: null,
+    externalRef: null,
+  });
+  assertEquals(identity.builder_claim_ref, "BWCWA-6781");
+  assertEquals(identity.builder_po_number, "PO-20877");
+  assertEquals(identity.builder_work_order_number, "BWCWA-6781PO-20877");
+});
+
+// The deliberate scope boundary of the fix (option (a), ruled 2026-07-31):
+// underscore separation is normalised for attachment NAMES only. The same token
+// in body/PDF text still yields no PO, because the verified Track A replay fates
+// were computed under the current text-matching behaviour and a grammar-wide
+// boundary relaxation could move fates beyond this one sealed row. If that wider
+// change is ever ruled in, this test is the one that must be revisited.
+Deno.test("underscored PO in BODY text stays unparsed: the fix is filename-scoped", () => {
+  const fromBody = extractBuilderWorkOrderIdentity({
+    subject: SUBJECT,
+    attachmentNames: [],
+    // A labelled line, so the body scan genuinely reaches this text and the
+    // null PO is the grammar's answer rather than the line filter's.
+    bodyText: ["Work Order attached", UNDERSCORE_NAME].join("\n"),
+    externalRef: null,
+  });
+  assertEquals(fromBody.builder_claim_ref, "BWCWA-6781");
+  assertEquals(fromBody.builder_po_number, null);
+  assertEquals(fromBody.builder_work_order_number, null);
+
+  // Same bytes, now as the attachment name: the PO resolves. One input differs.
+  const fromName = extractBuilderWorkOrderIdentity({
+    subject: SUBJECT,
+    attachmentNames: [UNDERSCORE_NAME],
+    bodyText: null,
+    externalRef: null,
+  });
+  assertEquals(fromName.builder_po_number, "PO-20877");
+});
+
+// A PO-shaped postal address must not become identity just because filename
+// underscores now separate words: "PO Box 1234" still carries no PO number.
+Deno.test("filename normalisation does not turn PO Box into a purchase order", () => {
+  const identity = extractBuilderWorkOrderIdentity({
+    subject: SUBJECT,
+    attachmentNames: ["remittance_PO_Box_1234_Secure_Works_WA.pdf"],
+    bodyText: null,
+    externalRef: null,
+  });
+  assertEquals(identity.builder_po_number, null);
 });
