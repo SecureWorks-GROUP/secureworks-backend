@@ -999,7 +999,8 @@ function reconciliationWorklist(result: AuditResult): AuditJobResult[] {
         evidence_stage: "new" as SesStage,
         code: "coverage_missing_from_canonical_board",
         severity: "critical" as const,
-        detail: "Paged board population contains a job omitted by the canonical board loader.",
+        detail:
+          "Paged board population contains a job omitted by the canonical board loader.",
       }],
     })),
     ...result.coverage_extra_on_board.map((jobRef) => ({
@@ -1015,7 +1016,8 @@ function reconciliationWorklist(result: AuditResult): AuditJobResult[] {
         evidence_stage: "new" as SesStage,
         code: "coverage_extra_on_canonical_board",
         severity: "critical" as const,
-        detail: "Canonical board contains a job outside the independently paged board population.",
+        detail:
+          "Canonical board contains a job outside the independently paged board population.",
       }],
     })),
   ];

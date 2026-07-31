@@ -1,11 +1,15 @@
+// deno-lint-ignore-file no-import-prefix
+
 import {
   assertReadOnlyRequest,
   assertReportPrivacy,
   auditJob,
-  buildAudit,
   type AuditResult,
+  buildAudit,
   fetchAllPages,
+  type RawInvoice,
   type RawJob,
+  type RawPack,
   renderMarkdown,
 } from "../ses-evidence-stage-checker.ts";
 import {
@@ -47,8 +51,8 @@ function row(overrides: Record<string, unknown> = {}) {
 function audit(overrides: {
   canonicalRow?: Record<string, unknown>;
   rawJob?: RawJob;
-  invoices?: any[];
-  packs?: any[];
+  invoices?: RawInvoice[];
+  packs?: RawPack[];
   documentFlags?: {
     has_invoice_doc: boolean;
     has_report_doc: boolean;
@@ -231,7 +235,10 @@ Deno.test("reconciliation work-list includes board coverage findings", () => {
   });
   const markdown = renderMarkdown(result, "/tmp/report.md");
   assertEquals(markdown.includes("SWMS-TEST-1"), true);
-  assertEquals(markdown.includes("coverage_missing_from_canonical_board"), true);
+  assertEquals(
+    markdown.includes("coverage_missing_from_canonical_board"),
+    true,
+  );
   assertEquals(markdown.includes("SWMS-EXTRA"), true);
   assertEquals(markdown.includes("coverage_extra_on_canonical_board"), true);
 });
