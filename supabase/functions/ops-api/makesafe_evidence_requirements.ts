@@ -26,10 +26,33 @@
 // Rulings applied on top of the draft (rule 1 is how a QUESTION leaves this
 // table, and each one is recorded here rather than silently absorbed):
 //
-//   - 2026-08-01, `po_floor` — "of course every card needs a po". The PO cell is
-//     REQUIRED on every family at every stage, including the two unsealed
-//     recipes. `Q_PO_FLOOR` stays exported with its `resolution` for provenance
-//     and is no longer in `SES_CAPTAIN_QUESTIONS`; `q()` refuses to name it.
+//   - 2026-08-01, `po_floor` — SUPERSEDED, then re-ruled the same day. The first
+//     answer ("of course every card needs a po") promoted the PO cell to
+//     REQUIRED in all 49 rows. The Captain then clarified that the answer was
+//     about WORK ORDERS: a purchase order is expected but its absence is not a
+//     failure. The PO cell is therefore OPTIONAL in all 49 rows — still observed
+//     and reported on every reading, never a gate. Both rulings are recorded on
+//     `Q_PO_FLOOR.resolution` (the current one) and its `supersedes` chain (the
+//     overturned one); the question stays out of `SES_CAPTAIN_QUESTIONS` and
+//     `q()` still refuses to name it.
+//   - 2026-08-01, work-order floor — "WORK ORDER: required on EVERY card, no
+//     exceptions. We have nothing to invoice against without a work order."
+//     `builder_wo_doc` was already REQUIRED at every live stage of the five
+//     sealed families; this ruling extends it to `completed` and `archive`,
+//     where the draft left it open under `terminal_evidence`. That question
+//     stays OPEN for the other five columns — the ruling names work orders, not
+//     reports, photos, SWMS or the terminal invoice.
+//
+// Deliberately NOT encoded here (2026-08-01 SWMS ruling, "SWMS required only for
+// MLB make-safes"): the ruler's cells are family x stage and carry no builder
+// identity, so an MLB-only rule cannot be expressed in this table at all. The
+// builder-aware rule already lives, sealed, in `ses_family_matrix.ts` (MLB ->
+// `always`, AJS -> `builder_waiver_unless_hrcw`, everyone else -> `hrcw_only`),
+// which is exactly the plan-v2 C.11 reading "MLB always; everyone else only when
+// the work is genuinely high-risk". `Q_REPORT_ONLY_SWMS` therefore stays OPEN
+// pending C.11: flattening the high-risk-construction-work trigger to N-A by
+// builder identity is a safety call, not a paperwork one, and it is not this
+// batch's to make.
 
 import {
   MAKESAFE_COMPUTED_STATUSES,
@@ -41,7 +64,7 @@ import {
 } from "./ses_family_matrix.ts";
 
 export const SES_EVIDENCE_CONTRACT_VERSION =
-  "ses-evidence-requirements/c1-unlinked-invoice-v3";
+  "ses-evidence-requirements/c1-wo-floor-po-optional-v4";
 
 /**
  * The draft contract's source document. Recorded so a measurement run can prove
@@ -49,7 +72,8 @@ export const SES_EVIDENCE_CONTRACT_VERSION =
  */
 export const SES_EVIDENCE_CONTRACT_SOURCE =
   "codex-evidence-ruler-draft-v1/report.md (DRAFT, not Captain-approved) " +
-  "+ Captain ruling 2026-08-01 on po_floor";
+  "+ Captain rulings 2026-08-01 on the work-order floor and po_floor " +
+  "(data/decisions/2026-08-01-po-wo-invoice-ruling.md)";
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -102,7 +126,10 @@ export const SES_EVIDENCE_ITEM_LABELS: Record<SesEvidenceItem, string> = {
   // the matcher in `makesafe_invoice_reference_match.ts` supplies the evidence
   // instead. Ambiguous matches are withheld and the cell stays missing.
   invoice: "Invoice (draft at Docs Ready; issued ledger invoice at close-out)",
-  po: "Builder purchase order",
+  // OPTIONAL in all 49 rows since the 2026-08-01 re-ruling (see `Q_PO_FLOOR`),
+  // but never dropped: `observed_present`, `observed_count` and `detail` are
+  // reported on every reading, so the PO stays visible without gating anything.
+  po: "Builder purchase order (observed, never a gate)",
 };
 
 export type SesEvidenceRequirementLevel =
@@ -154,6 +181,28 @@ export interface SesCaptainQuestionResolution {
   ruling: string;
   /** What the ruling changed in this table, in matrix terms. */
   effect: string;
+  /**
+   * Earlier rulings on this same question that this one overturned, oldest
+   * first. A superseding ruling is recorded exactly the way the original was —
+   * the whole point of this mechanism is that a ruling is RECORDED, never
+   * silently absorbed, and that includes the ruling it replaced.
+   */
+  supersedes?: readonly SesSupersededCaptainRuling[];
+}
+
+/**
+ * A ruling that no longer governs. Kept verbatim so a past measurement taken
+ * under it stays attributable, alongside the date and reason it was replaced.
+ */
+export interface SesSupersededCaptainRuling {
+  ruled_on: string;
+  ruling: string;
+  /** What this ruling did to the table while it governed. */
+  effect: string;
+  /** ISO date of the ruling that replaced it. */
+  superseded_on: string;
+  /** Why it no longer governs, in the Captain's terms. */
+  superseded_reason: string;
 }
 
 export interface SesCaptainQuestion {
@@ -171,8 +220,9 @@ export interface SesCaptainQuestion {
 }
 
 /**
- * RESOLVED 2026-08-01. Kept exported so the 49 promoted PO cells have a named,
- * readable origin rather than an unexplained REQUIRED.
+ * RESOLVED 2026-08-01, then RE-RULED the same day. Kept exported so the 49
+ * OPTIONAL PO cells have a named, readable origin — and so the REQUIRED floor
+ * that governed before it stays on the record rather than vanishing.
  */
 export const Q_PO_FLOOR: SesCaptainQuestion = {
   id: "po_floor",
@@ -185,13 +235,39 @@ export const Q_PO_FLOOR: SesCaptainQuestion = {
   basis: ["D5"],
   resolution: {
     ruled_on: "2026-08-01",
-    ruling: "of course every card needs a po",
+    ruling:
+      "PURCHASE ORDER: NOT required. Expected to usually exist, but absence is " +
+      "not a failure.",
     effect:
-      "The `po` cell is REQUIRED for every family at every display stage — all " +
-      "49 rows, including the unsealed repair and restoration recipes. There is " +
-      "no stage below which the floor is waived and no family exemption. A card " +
-      "with no builder PO is now a real `missing` on a `required` cell, so it " +
-      "fails the ruler rather than degrading to undetermined.",
+      "The `po` cell is OPTIONAL for every family at every display stage — all " +
+      "49 rows, including the unsealed repair and restoration recipes. It stays " +
+      "OBSERVED: every reading still reports `observed_present` and the " +
+      "measured detail, so a purchase order remains visible on the card when " +
+      "one exists. It is simply never a gate — a card with no builder PO reads " +
+      "`not_required`, not `missing`, and the PO alone can no longer fail a " +
+      "card. The work-order floor carries the obligation the first ruling was " +
+      "actually about; see `builder_wo_doc`, REQUIRED at every stage of every " +
+      "sealed family including `completed` and `archive`.",
+    supersedes: [
+      {
+        ruled_on: "2026-08-01",
+        ruling: "of course every card needs a po",
+        effect:
+          "Promoted the `po` cell to REQUIRED for every family at every " +
+          "display stage — all 49 rows, no stage floor and no family " +
+          "exemption. A card with no builder PO was a real `missing` on a " +
+          "`required` cell and failed the ruler. Measured effect while it " +
+          "governed: 359 of 388 measurable cards carried a `po` required-miss " +
+          "and 364 of 407 cards read `fail`.",
+        superseded_on: "2026-08-01",
+        superseded_reason:
+          "The Captain clarified the same day that the quick answer was about " +
+          'WORK ORDERS, not purchase orders: "We have nothing to invoice ' +
+          'against without a work order". A PO is expected to usually exist ' +
+          "but its absence is not a failure. Recorded verbatim in " +
+          "data/decisions/2026-08-01-po-wo-invoice-ruling.md.",
+      },
+    ],
   },
 };
 
@@ -216,6 +292,14 @@ export const Q_REPORT_READY_AUTHORITY: SesCaptainQuestion = {
   basis: ["D3", "W6"],
 };
 
+/**
+ * STILL OPEN, but narrower than its text. The 2026-08-01 work-order ruling
+ * ("required on EVERY card, no exceptions") answered the WO clause of this
+ * question for the five sealed families, so `builder_wo_doc` is REQUIRED at
+ * `completed` and `archive` and no longer names this question. The draft text is
+ * kept verbatim; the remaining columns — family artifacts, photos, the SWMS
+ * decision and the legacy-orphan exemption — are what is still unresolved.
+ */
 export const Q_TERMINAL_EVIDENCE: SesCaptainQuestion = {
   id: "terminal_evidence",
   title: "Terminal evidence and legacy exceptions",
@@ -250,10 +334,12 @@ export const Q_OWN_DOCUMENT_ROOF_REPORT_IN: SesCaptainQuestion = {
 };
 
 /**
- * The draft text still names PO because it predates the 2026-08-01 ruling; it is
- * kept verbatim. The PO column is no longer part of what this question seals —
- * `po_floor` settled it for every family — so this question now covers the other
- * six columns only.
+ * The draft text still names PO because it predates the 2026-08-01 rulings; it
+ * is kept verbatim. The PO column is no longer part of what this question seals
+ * — `po_floor` settled it for every family, as OPTIONAL — so this question now
+ * covers the other six columns only, `builder_wo_doc` included: an unsealed
+ * recipe is not a sealed family, and the work-order ruling promoted only the
+ * cells the draft left open under `terminal_evidence`.
  */
 export const Q_REPAIR_RECIPE: SesCaptainQuestion = {
   id: "repair_recipe",
@@ -401,8 +487,13 @@ function stageRow(row: StageRow): Record<
 /**
  * A family whose reporting recipe the Captain has not sealed. Every cell is open
  * under that family's recipe question EXCEPT `po`: the 2026-08-01 `po_floor`
- * ruling is family-independent ("every card"), so an unsealed recipe does not
- * exempt a card from the PO floor.
+ * ruling is family-independent ("not required"), so an unsealed recipe is
+ * settled on that one column — as OPTIONAL, not as a floor.
+ *
+ * `builder_wo_doc` deliberately stays open here. The work-order ruling promotes
+ * the cells the draft left open under `terminal_evidence`; an unsealed recipe is
+ * a different kind of open, and sealing a recipe by code change is exactly what
+ * rule 1 at the top of this file forbids.
  */
 function unsealedFamily(
   recipe: SesCaptainQuestionId,
@@ -414,7 +505,7 @@ function unsealedFamily(
     q(recipe),
     q(recipe),
     q(recipe),
-    REQ,
+    OPT,
   ]);
   return {
     new: row,
@@ -437,9 +528,9 @@ function physicalShapedFamily(): Record<
   Record<SesEvidenceItem, SesEvidenceRequirement>
 > {
   return {
-    new: stageRow([REQ, NA, OPT, OPT, OPT, OPT, REQ]),
-    allocated: stageRow([REQ, NA, OPT, OPT, OPT, OPT, REQ]),
-    trade_report_in: stageRow([REQ, NA, REQ, REQ, OPT, OPT, REQ]),
+    new: stageRow([REQ, NA, OPT, OPT, OPT, OPT, OPT]),
+    allocated: stageRow([REQ, NA, OPT, OPT, OPT, OPT, OPT]),
+    trade_report_in: stageRow([REQ, NA, REQ, REQ, OPT, OPT, OPT]),
     report_ready: stageRow([
       REQ,
       NA,
@@ -447,25 +538,25 @@ function physicalShapedFamily(): Record<
       q("report_ready_authority"),
       q("report_ready_authority"),
       q("report_ready_authority"),
-      REQ,
+      OPT,
     ]),
     completed: stageRow([
-      q("terminal_evidence"),
+      REQ,
       NA,
       q("terminal_evidence"),
       q("terminal_evidence"),
       q("terminal_evidence"),
       REQ,
-      REQ,
+      OPT,
     ]),
     archive: stageRow([
-      q("terminal_evidence"),
+      REQ,
       NA,
       q("terminal_evidence"),
       q("terminal_evidence"),
       q("terminal_evidence"),
       REQ,
-      REQ,
+      OPT,
     ]),
     cancelled: stageRow([
       q("cancelled_floor"),
@@ -474,7 +565,7 @@ function physicalShapedFamily(): Record<
       q("cancelled_floor"),
       q("cancelled_floor"),
       q("cancelled_floor"),
-      REQ,
+      OPT,
     ]),
   };
 }
@@ -501,9 +592,9 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
   // §4.3 Ordinary roof report, Prime portal mode. The portal IS the report, so
   // trade report and photo/media evidence are N-A for the family.
   ordinary_roof_portal: {
-    new: stageRow([REQ, OPT, NA, NA, OPT, OPT, REQ]),
-    allocated: stageRow([REQ, OPT, NA, NA, OPT, OPT, REQ]),
-    trade_report_in: stageRow([REQ, REQ, NA, NA, OPT, OPT, REQ]),
+    new: stageRow([REQ, OPT, NA, NA, OPT, OPT, OPT]),
+    allocated: stageRow([REQ, OPT, NA, NA, OPT, OPT, OPT]),
+    trade_report_in: stageRow([REQ, REQ, NA, NA, OPT, OPT, OPT]),
     report_ready: stageRow([
       REQ,
       REQ,
@@ -511,25 +602,25 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms"),
       q("report_ready_authority"),
-      REQ,
+      OPT,
     ]),
     completed: stageRow([
-      q("terminal_evidence"),
+      REQ,
       q("terminal_evidence"),
       NA,
       NA,
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      REQ,
+      OPT,
     ]),
     archive: stageRow([
-      q("terminal_evidence"),
+      REQ,
       q("terminal_evidence"),
       NA,
       NA,
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      REQ,
+      OPT,
     ]),
     cancelled: stageRow([
       q("cancelled_floor"),
@@ -538,7 +629,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms", "cancelled_floor"),
       q("cancelled_floor"),
-      REQ,
+      OPT,
     ]),
   },
 
@@ -546,8 +637,8 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
   // slot here. The matrix forbids a portal deliverable while the current stage
   // gate requires one, so both the prime link and the report-in proof are open.
   own_template_roof: {
-    new: stageRow([REQ, NA, OPT, NA, OPT, OPT, REQ]),
-    allocated: stageRow([REQ, NA, OPT, NA, OPT, OPT, REQ]),
+    new: stageRow([REQ, NA, OPT, NA, OPT, OPT, OPT]),
+    allocated: stageRow([REQ, NA, OPT, NA, OPT, OPT, OPT]),
     trade_report_in: stageRow([
       REQ,
       q("own_document_roof_report_in"),
@@ -555,7 +646,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       OPT,
       OPT,
-      REQ,
+      OPT,
     ]),
     report_ready: stageRow([
       REQ,
@@ -564,25 +655,25 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms"),
       q("report_ready_authority"),
-      REQ,
+      OPT,
     ]),
     completed: stageRow([
-      q("terminal_evidence"),
+      REQ,
       q("own_document_roof_report_in", "terminal_evidence"),
       q("terminal_evidence"),
       NA,
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      REQ,
+      OPT,
     ]),
     archive: stageRow([
-      q("terminal_evidence"),
+      REQ,
       q("own_document_roof_report_in", "terminal_evidence"),
       q("terminal_evidence"),
       NA,
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      REQ,
+      OPT,
     ]),
     cancelled: stageRow([
       q("cancelled_floor"),
@@ -591,7 +682,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms", "cancelled_floor"),
       q("cancelled_floor"),
-      REQ,
+      OPT,
     ]),
   },
 
@@ -607,7 +698,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       OPT,
       q("report_only_swms"),
       OPT,
-      REQ,
+      OPT,
     ]),
     allocated: stageRow([
       REQ,
@@ -616,7 +707,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       OPT,
       q("report_only_swms"),
       OPT,
-      REQ,
+      OPT,
     ]),
     trade_report_in: stageRow([
       REQ,
@@ -625,7 +716,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       REQ,
       q("report_only_swms"),
       OPT,
-      REQ,
+      OPT,
     ]),
     report_ready: stageRow([
       REQ,
@@ -634,25 +725,25 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       REQ,
       q("report_only_swms"),
       q("report_ready_authority"),
-      REQ,
+      OPT,
     ]),
     completed: stageRow([
-      q("terminal_evidence"),
+      REQ,
       q("terminal_evidence"),
       NA,
       q("terminal_evidence"),
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      REQ,
+      OPT,
     ]),
     archive: stageRow([
-      q("terminal_evidence"),
+      REQ,
       q("terminal_evidence"),
       NA,
       q("terminal_evidence"),
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      REQ,
+      OPT,
     ]),
     cancelled: stageRow([
       q("cancelled_floor"),
@@ -661,12 +752,12 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       q("cancelled_floor"),
       q("report_only_swms", "cancelled_floor"),
       q("cancelled_floor"),
-      REQ,
+      OPT,
     ]),
   },
 
   // §4.6 Repair: family exists, recipe unsealed. No cell may be promoted by a
-  // code change; only `po` is settled, by the 2026-08-01 Captain ruling.
+  // code change; only `po` is settled (OPTIONAL, by the 2026-08-01 re-ruling).
   repair: unsealedFamily("repair_recipe"),
 
   // §4.7 Restoration: typed first-class family, recipe unsealed.
