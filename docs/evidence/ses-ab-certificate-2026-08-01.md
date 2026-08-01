@@ -447,8 +447,8 @@ PDFs onto cards that were missing them. Two of those attach targets landed on a
 work order an OLDER card already carried, so production began resolving two
 multi-card work-order identity groups that had never been adjudicated, and `d1`
 reported them `unaccounted`. Separately, ordinary intake promoted three
-exception-only identity keys to live jobs (`160 -> 160` live-job, `370 -> 370`
-exception-only, total unchanged at 534; live cases `161 -> 161`), which failed
+exception-only identity keys to live jobs (`157 -> 160` live-job, `373 -> 370`
+exception-only, total unchanged at 534; live cases `158 -> 161`), which failed
 the then-pinned `a3`/`a4` census equality.
 
 Neither was a data defect. The re-attachments are correct and the census move is

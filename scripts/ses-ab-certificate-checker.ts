@@ -359,15 +359,29 @@ export function evaluateCensusInvariants(
   certifiedIdentities: CertifiedIdentity[] = [],
   observedIdentities: CertifiedIdentity[] = [],
 ): CensusInvariants {
-  const current = new Map(observedIdentities.map((identity) => [identity.key, identity.bucket]));
-  const certified = new Map(certifiedIdentities.map((identity) => [identity.key, identity.bucket]));
+  const current = new Map(
+    observedIdentities.map((identity) => [identity.key, identity.bucket]),
+  );
+  const certified = new Map(
+    certifiedIdentities.map((identity) => [identity.key, identity.bucket]),
+  );
   const missing = [...certified.keys()].filter((key) => !current.has(key));
-  const syntheticDrift = [...new Set([
-    ...certifiedIdentities.filter((identity) => identity.bucket === "synthetic" && current.get(identity.key) !== "synthetic").map((identity) => identity.key),
-    ...observedIdentities.filter((identity) => identity.bucket === "synthetic" && certified.get(identity.key) !== "synthetic").map((identity) => identity.key),
-  ])].sort();
+  const syntheticDrift = [
+    ...new Set([
+      ...certifiedIdentities.filter((identity) =>
+        identity.bucket === "synthetic" &&
+        current.get(identity.key) !== "synthetic"
+      ).map((identity) => identity.key),
+      ...observedIdentities.filter((identity) =>
+        identity.bucket === "synthetic" &&
+        certified.get(identity.key) !== "synthetic"
+      ).map((identity) => identity.key),
+    ]),
+  ].sort();
   const liveRegression = certifiedIdentities
-    .filter((identity) => identity.bucket === "live_job" && current.get(identity.key) !== "live_job")
+    .filter((identity) =>
+      identity.bucket === "live_job" && current.get(identity.key) !== "live_job"
+    )
     .map((identity) => identity.key)
     .sort();
   return {
@@ -622,7 +636,8 @@ async function runPhaseA(baseline: Baseline): Promise<CheckResult[]> {
        count(*) filter (where live > 1)::int as two_live
      from k`,
   );
-  const certifiedIdentities = (expected.certified_identity_keys ?? []) as CertifiedIdentity[];
+  const certifiedIdentities =
+    (expected.certified_identity_keys ?? []) as CertifiedIdentity[];
   const [observedIdentityRows, observedLiveCases] = await Promise.all([
     query<CertifiedIdentity>(`select wo_po_identity_key as key,
       case when count(*) filter (where state = 'synthetic_livefire_terminal') > 0 then 'synthetic'
@@ -640,17 +655,22 @@ async function runPhaseA(baseline: Baseline): Promise<CheckResult[]> {
   // What actually has to hold is structural: every key lands in exactly one
   // bucket, no key is destroyed, and promotion only ever runs exception ->
   // live. Growth above the floor is reported, never failed.
-  const invariants = evaluateCensusInvariants({
-    total: expected.identity_keys_total,
-    live_job: expected.identity_keys_live_job,
-    synthetic: expected.identity_keys_synthetic,
-  }, {
-    total: keys.total,
-    live_job: keys.live_job,
-    exception_only: keys.exception_only,
-    synthetic: keys.synthetic,
-    unaccounted: keys.unaccounted,
-  }, certifiedIdentities, observedIdentityRows);
+  const invariants = evaluateCensusInvariants(
+    {
+      total: expected.identity_keys_total,
+      live_job: expected.identity_keys_live_job,
+      synthetic: expected.identity_keys_synthetic,
+    },
+    {
+      total: keys.total,
+      live_job: keys.live_job,
+      exception_only: keys.exception_only,
+      synthetic: keys.synthetic,
+      unaccounted: keys.unaccounted,
+    },
+    certifiedIdentities,
+    observedIdentityRows,
+  );
   const totalGrowth = keys.total - expected.identity_keys_total;
   const liveJobGrowth = keys.live_job - expected.identity_keys_live_job;
   results.push(check(
@@ -703,9 +723,12 @@ async function runPhaseA(baseline: Baseline): Promise<CheckResult[]> {
           where not exists (select 1 from jobs j where j.id = l.job_id))::int as dangling_link_job,
        (select count(*) from makesafe_intake_cases where state = 'confirmed_live_job')::int as live_cases`,
   );
-  const certifiedLiveCases = (expected.certified_live_case_ids ?? []) as string[];
+  const certifiedLiveCases =
+    (expected.certified_live_case_ids ?? []) as string[];
   const observedLiveCaseIds = new Set(observedLiveCases.map((row) => row.id));
-  const missingLiveCases = certifiedLiveCases.filter((id) => !observedLiveCaseIds.has(id)).sort();
+  const missingLiveCases = certifiedLiveCases.filter((id) =>
+    !observedLiveCaseIds.has(id)
+  ).sort();
   const certifiedLiveCasesWithoutJob = observedLiveCases
     .filter((row) => certifiedLiveCases.includes(row.id) && row.job_id === null)
     .map((row) => row.id)

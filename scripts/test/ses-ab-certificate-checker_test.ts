@@ -311,20 +311,38 @@ Deno.test("identity continuity catches substitution and backward transitions", (
     { key: "live", bucket: "live_job" as const },
     { key: "syn", bucket: "synthetic" as const },
   ];
-  const substituted = evaluateCensusInvariants(floor, {
-    total: 2, live_job: 1, exception_only: 0, synthetic: 1, unaccounted: 0,
-  }, certified, [
-    { key: "live", bucket: "live_job" },
-    { key: "replacement", bucket: "synthetic" },
-  ]);
+  const substituted = evaluateCensusInvariants(
+    floor,
+    {
+      total: 2,
+      live_job: 1,
+      exception_only: 0,
+      synthetic: 1,
+      unaccounted: 0,
+    },
+    certified,
+    [
+      { key: "live", bucket: "live_job" },
+      { key: "replacement", bucket: "synthetic" },
+    ],
+  );
   assertEquals(substituted.missing_certified_keys, ["syn"]);
   assertEquals(substituted.synthetic_identity_drift, ["replacement", "syn"]);
-  const regressed = evaluateCensusInvariants(floor, {
-    total: 2, live_job: 0, exception_only: 1, synthetic: 1, unaccounted: 0,
-  }, certified, [
-    { key: "live", bucket: "exception_only" },
-    { key: "syn", bucket: "synthetic" },
-  ]);
+  const regressed = evaluateCensusInvariants(
+    floor,
+    {
+      total: 2,
+      live_job: 0,
+      exception_only: 1,
+      synthetic: 1,
+      unaccounted: 0,
+    },
+    certified,
+    [
+      { key: "live", bucket: "exception_only" },
+      { key: "syn", bucket: "synthetic" },
+    ],
+  );
   assertEquals(regressed.live_job_regression_keys, ["live"]);
 });
 
