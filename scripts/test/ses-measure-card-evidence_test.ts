@@ -33,7 +33,14 @@ function card(overrides: Partial<MeasureCardInput> = {}): MeasureCardInput {
       status: "in_progress",
       makesafe_job_family: "general_makesafe",
     },
-    detail: { cycle_number: 1, external_links: [] },
+    // Since the 2026-08-01 `po_floor` ruling the PO cell is REQUIRED in all 49
+    // matrix rows, so the default fixture carries one. A test that is about the
+    // PO floor itself passes its own `detail` without an `external_ref`.
+    detail: {
+      cycle_number: 1,
+      external_links: [],
+      external_ref: "MLB-260001 PO 90001",
+    },
     assignments: [],
     serviceReports: [],
     documents,
@@ -71,7 +78,7 @@ Deno.test("--stage accepts only the seven Ops stages", () => {
   assertThrows(() => parseStageOption("docs_ready"), Error, "--stage must be");
 });
 
-Deno.test("a fully evidenced physical card at trade_report_in is undetermined only on PO", () => {
+Deno.test("a fully evidenced physical card at trade_report_in passes", () => {
   const result = buildSesCardEvidenceInventory(card({
     docFlags: { ...NO_DOCS, has_wo: true },
     documents: [{ type: "work_order", storage_url: "storage/wo.pdf" }],
@@ -88,9 +95,11 @@ Deno.test("a fully evidenced physical card at trade_report_in is undetermined on
   assertEquals(itemOf(result, "trade_report").status, "present");
   assertEquals(itemOf(result, "photos_media").status, "present");
   assertEquals(itemOf(result, "prime_link").status, "not_required");
+  assertEquals(itemOf(result, "po").status, "present");
   assertEquals(result.reading?.missing, []);
-  assertEquals(result.reading?.unresolved, ["po"]);
-  assertEquals(result.reading?.verdict, "undetermined");
+  // Every cell at this stage is settled, and the PO floor is met.
+  assertEquals(result.reading?.unresolved, []);
+  assertEquals(result.reading?.verdict, "pass");
 });
 
 Deno.test("the five-photo floor is the physical photo evidence rule", () => {
@@ -201,6 +210,7 @@ Deno.test("an ordinary roof card needs a typed link plus a done capture", () => 
     detail: {
       cycle_number: 1,
       external_links: [{ role: "roof_report", url: "https://prime.test/r/1" }],
+      external_ref: "MLB-260002 PO 90002",
     },
   });
   assertEquals(linkOnly.family, "ordinary_roof_portal");
@@ -217,6 +227,7 @@ Deno.test("an ordinary roof card needs a typed link plus a done capture", () => 
         url: "https://prime.test/r/1",
         status: "done",
       }],
+      external_ref: "MLB-260002 PO 90002",
     },
   });
   assertEquals(itemOf(captured, "prime_link").status, "present");
@@ -236,6 +247,7 @@ Deno.test("a GHL-only portal link is reported undetermined, not missing", () => 
         role: "roof_report",
         url: "https://link.msgsndr.com/widget/form/abc",
       }],
+      external_ref: "MLB-260003 PO 90003",
     },
     docFlags: { ...NO_DOCS, has_wo: true },
     stageOverride: "trade_report_in",
@@ -287,6 +299,7 @@ Deno.test("assessment photo evidence is the typed Prime capture, not a local pac
         { role: "photos", url: "https://prime.test/p", status: "done" },
         { role: "scope", url: "https://prime.test/s", status: "done" },
       ],
+      external_ref: "MLB-260005 PO 90005",
     },
     docFlags: { ...NO_DOCS, has_wo: true },
     // Zero local photos: the family owes the typed schedule, not a photo pack.
@@ -298,8 +311,8 @@ Deno.test("assessment photo evidence is the typed Prime capture, not a local pac
   assertEquals(itemOf(result, "prime_link").status, "present");
   assertEquals(itemOf(result, "trade_report").status, "not_required");
   assertEquals(result.reading?.missing, []);
-  // SWMS and PO are both open Captain questions for this family.
-  assertEquals(result.reading?.unresolved, ["swms", "po"]);
+  // SWMS is the only Captain question left on this family's row.
+  assertEquals(result.reading?.unresolved, ["swms"]);
 });
 
 Deno.test("a terminal stage needs an issued invoice, not a draft", () => {
@@ -343,18 +356,25 @@ Deno.test("a PO token is recovered from the persisted external ref", () => {
       external_links: [],
       external_ref: "MLB-26344 PO 57087",
     },
+    docFlags: { ...NO_DOCS, has_wo: true },
     stageOverride: "new",
   }));
   assertEquals(withPo.inventory.po.present, true);
-  // PO stays an unresolved Captain question regardless of the observed fact.
-  assertEquals(itemOf(withPo, "po").status, "unresolved_question");
+  assertEquals(itemOf(withPo, "po").requirement, "required");
+  assertEquals(itemOf(withPo, "po").status, "present");
   assertEquals(itemOf(withPo, "po").observed_present, true);
+  assertEquals(withPo.reading?.missing, []);
 
-  const withoutPo = buildSesCardEvidenceInventory(
-    card({ stageOverride: "new" }),
-  );
+  // No recoverable PO token is a real shortfall since the 2026-08-01 ruling.
+  const withoutPo = buildSesCardEvidenceInventory(card({
+    detail: { cycle_number: 1, external_links: [] },
+    docFlags: { ...NO_DOCS, has_wo: true },
+    stageOverride: "new",
+  }));
   assertEquals(withoutPo.inventory.po.present, false);
-  assertEquals(itemOf(withoutPo, "po").status, "unresolved_question");
+  assertEquals(itemOf(withoutPo, "po").status, "missing");
+  assertEquals(withoutPo.reading?.missing, ["po"]);
+  assertEquals(withoutPo.reading?.verdict, "fail");
 });
 
 Deno.test("restoration authority outranks a stale family token", () => {
@@ -415,11 +435,13 @@ Deno.test("the rendered report names the ruler, the verdict and no client data",
     docFlags: { ...NO_DOCS, has_wo: true },
     serviceReports: [{ status: "submitted", cycle_number: 1 }],
     media: photos(5),
-    stageOverride: "trade_report_in",
+    // report_ready still carries open questions, so the render exercises the
+    // undetermined branch and its Captain-question section.
+    stageOverride: "report_ready",
   }));
   const rendered = renderMeasurement(result);
   assertStringIncludes(rendered, "SWMS-260001");
-  assertStringIncludes(rendered, "ses-evidence-requirements/c1-draft-v1");
+  assertStringIncludes(rendered, "ses-evidence-requirements/c1-po-ruling-v2");
   assertStringIncludes(rendered, "VERDICT: UNDETERMINED");
   assertStringIncludes(rendered, "Open Captain questions");
   assertStringIncludes(rendered, "no write, no backfill and no stage move");

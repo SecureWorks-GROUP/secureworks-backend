@@ -1,0 +1,447 @@
+{
+  "run": "ses-c3-suburb-backfill-v1",
+  "applied": [
+    {
+      "card": "SWMS-261022",
+      "job_id": "8fc27330-b743-49d5-861f-d75f42d1a010",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Helena Valley"
+      },
+      "source_quote": ", Helena Valley, WA 6056",
+      "source_token_verbatim": "Helena Valley",
+      "corroborating_case_id": null,
+      "written_at": "2026-08-01T09:39:09.991Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261064",
+      "job_id": "f706aba3-6431-4653-9f8a-8843bd642845",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Dianella"
+      },
+      "source_quote": ", Dianella WA 6059",
+      "source_token_verbatim": "Dianella",
+      "corroborating_case_id": "4a13518f-d2a6-42ba-9b7d-c6693dd6032e",
+      "written_at": "2026-08-01T09:39:10.345Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261067",
+      "job_id": "6261a9ad-9ad4-494d-8adc-0d2b91b86136",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Waikiki"
+      },
+      "source_quote": ", Waikiki WA 6169",
+      "source_token_verbatim": "Waikiki",
+      "corroborating_case_id": "4023a391-4d25-4700-abcc-ad9f22024420",
+      "written_at": "2026-08-01T09:39:10.445Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261068",
+      "job_id": "36575a25-9580-42be-8cb8-26ba76f1fea7",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Dalkeith"
+      },
+      "source_quote": ", DALKEITH WA 6009",
+      "source_token_verbatim": "DALKEITH",
+      "corroborating_case_id": "0f22d10b-4b54-43d4-8339-2302f7dc4ec4",
+      "written_at": "2026-08-01T09:39:10.882Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261074",
+      "job_id": "253adac6-8d7b-44ab-9881-4703a5d838b3",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Canning Vale"
+      },
+      "source_quote": ", CANNING VALE WA 6155",
+      "source_token_verbatim": "CANNING VALE",
+      "corroborating_case_id": "d4534747-ad27-47ee-98e4-8a89d57b6703",
+      "written_at": "2026-08-01T09:39:11.307Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261075",
+      "job_id": "4b319d53-3345-4de5-adca-3907825b140a",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Thornlie"
+      },
+      "source_quote": ", Thornlie WA 6108",
+      "source_token_verbatim": "Thornlie",
+      "corroborating_case_id": "ac159598-31d0-4152-b653-e6255a5a19e4",
+      "written_at": "2026-08-01T09:39:11.617Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261076",
+      "job_id": "d5dc62f6-4efa-4f6b-ae4e-2efacc0fa74b",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Geographe"
+      },
+      "source_quote": ", Geographe WA 6280",
+      "source_token_verbatim": "Geographe",
+      "corroborating_case_id": "7ebb687e-f6cf-4c28-8f34-490e15dd5d0b",
+      "written_at": "2026-08-01T09:39:11.921Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261077",
+      "job_id": "e673aae5-e58c-48c9-aaa7-452c3c4c81b0",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Connolly"
+      },
+      "source_quote": ", Connolly WA 6027",
+      "source_token_verbatim": "Connolly",
+      "corroborating_case_id": "1b7410ea-c055-4e0f-8836-506aa65c3f11",
+      "written_at": "2026-08-01T09:39:12.205Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261082",
+      "job_id": "02d5f733-cc6d-4ee6-aa40-99e90c232184",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Dalyellup"
+      },
+      "source_quote": ", Dalyellup WA 6230",
+      "source_token_verbatim": "Dalyellup",
+      "corroborating_case_id": "40fc0754-9161-401c-8c9b-0410393dd324",
+      "written_at": "2026-08-01T09:39:12.617Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261083",
+      "job_id": "397785fc-bdc4-4e83-80e3-2f6a64be39cf",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "East Bunbury"
+      },
+      "source_quote": ", East Bunbury WA 6230",
+      "source_token_verbatim": "East Bunbury",
+      "corroborating_case_id": "f2735f7a-1629-4cdb-aa67-5b735410a53b",
+      "written_at": "2026-08-01T09:39:12.945Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261084",
+      "job_id": "0e19ec6d-6ee3-43fe-81a8-08dbe985d413",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Kensington"
+      },
+      "source_quote": ", Kensington WA 6151",
+      "source_token_verbatim": "Kensington",
+      "corroborating_case_id": "9f3a53f5-491d-41ea-af02-ff9cbec3db68",
+      "written_at": "2026-08-01T09:39:13.354Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261085",
+      "job_id": "fad232ab-bdb7-411b-a14a-70953ea93a38",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Yanchep"
+      },
+      "source_quote": ", Yanchep WA 6035",
+      "source_token_verbatim": "Yanchep",
+      "corroborating_case_id": "e2930e65-9a10-499a-8c3b-fca122c60263",
+      "written_at": "2026-08-01T09:39:13.658Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261086",
+      "job_id": "25e4d449-0fad-4248-95af-98a08a11c208",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Ardross"
+      },
+      "source_quote": ", Ardross WA 6153",
+      "source_token_verbatim": "Ardross",
+      "corroborating_case_id": "84d347b4-c3c0-4617-87ff-4bc5a442d8d9",
+      "written_at": "2026-08-01T09:39:13.976Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261087",
+      "job_id": "0b5fcd2f-03d4-4cd5-bb7e-5b4ec0aa37fa",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Hocking"
+      },
+      "source_quote": ", Hocking WA 6065",
+      "source_token_verbatim": "Hocking",
+      "corroborating_case_id": "9a24c328-92d0-4033-a6a1-2b13b0f0ede6",
+      "written_at": "2026-08-01T09:39:14.302Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261088",
+      "job_id": "4839a3e1-73b9-44b8-a104-fb9f6ed2629b",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Ballajura"
+      },
+      "source_quote": ", BALLAJURA WA 6066",
+      "source_token_verbatim": "BALLAJURA",
+      "corroborating_case_id": "0566215b-f024-442a-a4eb-c800b3c061b3",
+      "written_at": "2026-08-01T09:39:14.586Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261089",
+      "job_id": "23e86acf-6115-4cdc-8a0c-60770dbf356d",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Koondoola"
+      },
+      "source_quote": ", KOONDOOLA WA 6064",
+      "source_token_verbatim": "KOONDOOLA",
+      "corroborating_case_id": "27175f06-edba-4d56-bfed-7929683bb0ca",
+      "written_at": "2026-08-01T09:39:14.908Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261091",
+      "job_id": "97b65ae9-f758-4134-bce8-62d245464f50",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Bennett Springs"
+      },
+      "source_quote": ", Bennett Springs WA 6063",
+      "source_token_verbatim": "Bennett Springs",
+      "corroborating_case_id": "9094c3be-db16-4de7-bbe4-9b93184f9e46",
+      "written_at": "2026-08-01T09:39:15.283Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261092",
+      "job_id": "a99e4d75-57ff-4a5a-b32a-a2b901064a36",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Darch"
+      },
+      "source_quote": ", Darch WA 6065",
+      "source_token_verbatim": "Darch",
+      "corroborating_case_id": "9f949948-527b-4e1f-b531-bc2ed7a89a46",
+      "written_at": "2026-08-01T09:39:15.517Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261093",
+      "job_id": "07f3e784-6000-40f1-942f-106c1543dd04",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Willetton"
+      },
+      "source_quote": ", Willetton WA 6155",
+      "source_token_verbatim": "Willetton",
+      "corroborating_case_id": "7060d325-50e5-4d85-ac67-b0beb30b9764",
+      "written_at": "2026-08-01T09:39:15.992Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261094",
+      "job_id": "ee22000f-d204-420e-b07c-be5155838e91",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Riverton"
+      },
+      "source_quote": ", Riverton WA 6148",
+      "source_token_verbatim": "Riverton",
+      "corroborating_case_id": "6831141a-95b1-4bc6-bd90-93ff4b362f84",
+      "written_at": "2026-08-01T09:39:16.203Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261095",
+      "job_id": "7078dac7-ee34-4ae1-95fa-cb355c30bade",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Nollamara"
+      },
+      "source_quote": ", Nollamara WA 6061",
+      "source_token_verbatim": "Nollamara",
+      "corroborating_case_id": "f2a59286-0fac-433a-9666-e0f46381f26b",
+      "written_at": "2026-08-01T09:39:16.515Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261096",
+      "job_id": "72378851-1962-423d-9d9c-8b153a1cd71d",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Joondanna"
+      },
+      "source_quote": ", JOONDANNA WA 6060",
+      "source_token_verbatim": "JOONDANNA",
+      "corroborating_case_id": "df951de4-936c-429f-b286-9f31507b9af6",
+      "written_at": "2026-08-01T09:39:16.841Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261097",
+      "job_id": "17999ba8-b669-4d9f-9561-6e887f92fe9d",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Greenfields"
+      },
+      "source_quote": ", Greenfields WA 6210",
+      "source_token_verbatim": "Greenfields",
+      "corroborating_case_id": "491eacc2-3498-4fb6-bb4d-0d0a661896ac",
+      "written_at": "2026-08-01T09:39:17.195Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261099",
+      "job_id": "518ab499-0310-45c2-9e5b-85801f03038d",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Singleton"
+      },
+      "source_quote": ", SINGLETON WA 6175",
+      "source_token_verbatim": "SINGLETON",
+      "corroborating_case_id": "bfb138b6-ca85-4098-ad82-ce9cd878ae3b",
+      "written_at": "2026-08-01T09:39:17.553Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261100",
+      "job_id": "914ac1f8-606e-4efd-8e4a-8aa89bb9f162",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Bedford"
+      },
+      "source_quote": ", Bedford WA 6052",
+      "source_token_verbatim": "Bedford",
+      "corroborating_case_id": "819522dc-e5ce-405c-82e9-cbd16f213892",
+      "written_at": "2026-08-01T09:39:22.263Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261101",
+      "job_id": "8ed3b7d2-949a-4f5e-8951-34f9d723e59f",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Forrestfield"
+      },
+      "source_quote": ", Forrestfield WA 6058",
+      "source_token_verbatim": "Forrestfield",
+      "corroborating_case_id": "f3683166-d830-4d18-bdfe-c5f8386b4b2f",
+      "written_at": "2026-08-01T09:39:22.607Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261102",
+      "job_id": "f4da9dcc-6dbf-4f79-b072-d88dd5d1a7f7",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Alexander Heights"
+      },
+      "source_quote": ", Alexander Heights WA 6064",
+      "source_token_verbatim": "Alexander Heights",
+      "corroborating_case_id": "b6f69e71-5821-4726-aa09-f2466c108a2d",
+      "written_at": "2026-08-01T09:39:22.919Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-261109",
+      "job_id": "208450c0-7161-4b30-9514-66226b054609",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Bertram"
+      },
+      "source_quote": ", Bertram WA 6167",
+      "source_token_verbatim": "Bertram",
+      "corroborating_case_id": "087c1efa-9119-4f7f-b760-08d5320da61d",
+      "written_at": "2026-08-01T09:39:23.240Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    },
+    {
+      "card": "SWMS-26393",
+      "job_id": "c19c09d2-d7a9-4c36-bd1b-e573503d72e1",
+      "before": {
+        "site_suburb": null
+      },
+      "after": {
+        "site_suburb": "Beeliar"
+      },
+      "source_quote": ", Beeliar WA 6164",
+      "source_token_verbatim": "Beeliar",
+      "corroborating_case_id": null,
+      "written_at": "2026-08-01T09:39:23.515Z",
+      "written_by": "ses-c3-suburb-backfill-v1"
+    }
+  ],
+  "skipped": [
+    {
+      "card": "SWMS-261124",
+      "reason": "no_locatable_suburb_in_source"
+    }
+  ],
+  "plan": "data/ses-c3-suburb-backfill-v1/dry-run.json"
+}
