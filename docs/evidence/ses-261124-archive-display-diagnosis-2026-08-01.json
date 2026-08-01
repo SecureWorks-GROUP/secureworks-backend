@@ -1,0 +1,161 @@
+{
+  "artifact": "ses-261124-archive-display-diagnosis",
+  "captured_at": "2026-08-01T04:00:00Z",
+  "captured_by": "firstmate/ses-261124-archive-fix-v1",
+  "access": {
+    "database": "Supabase Management API /database/query, read_only:true, project kevgrhcjxspbxgovpmfl",
+    "edge": "GET ops-api?action=makesafe_board (ops projection, and contract_version=v2 comparison) from the live ops.html page context",
+    "writes_performed": 0
+  },
+  "card": {
+    "job_id": "46f9bd9e-a3ba-4012-8039-0e1a7cb2c18f",
+    "job_number": "SWMS-261124",
+    "type": "makesafe",
+    "jobs_status": "accepted",
+    "external_ref": "BWCWA-6648",
+    "requesting_company_slug": "bw",
+    "makesafe_job_family": "general_makesafe",
+    "created_at": "2026-08-01T06:32:10.618726Z"
+  },
+  "display_ledger_before": {
+    "table": "makesafe_board_status_applications",
+    "rows_for_job": 1,
+    "row": {
+      "id": 48,
+      "run_key": "ses-historical:46f9bd9e-a3ba-4012-8039-0e1a7cb2c18f:archive",
+      "job_id": "46f9bd9e-a3ba-4012-8039-0e1a7cb2c18f",
+      "job_number": "SWMS-261124",
+      "source_status": "report_ready",
+      "before_status": "report_ready",
+      "after_status": "archive",
+      "computed_at": "2026-08-01T06:34:36.989692Z",
+      "computed_reasons": [
+        "captain_accepted_historical_backfill",
+        "work_completed_and_invoiced_before_job_card_backfill",
+        "legacy_incomplete_evidence"
+      ],
+      "computed_missing": [],
+      "evidence_ref": "data/ses-shadow-adjudicate-v1/report.md#6.1",
+      "applied_by": "captain-ruling-2026-08-01",
+      "applied_at": "2026-08-01T06:34:36.989692Z",
+      "duplicate_of_job_id": null,
+      "duplicate_of_job_number": null,
+      "duplicate_rule": null
+    },
+    "current_view_row_identical": true,
+    "note": "makesafe_board_status_current returns exactly this row for the job."
+  },
+  "display_ledger_after": {
+    "rows_for_job": 1,
+    "changed": false,
+    "reason": "The existing overlay is already bound to the card's current derived stage, so no new transition is warranted and apply_makesafe_board_status would reject one (see rejection_proof)."
+  },
+  "binding_proof": {
+    "rule": "makesafe_board_read_model.ts buildCanonicalMakesafeRows: applicationApplies requires source_status === declaredStage, declaredStage not terminal, jobs.status not terminal.",
+    "declared_stage_now": "report_ready",
+    "overlay_source_status": "report_ready",
+    "jobs_status": "accepted",
+    "bound": true,
+    "canonical_board_rows": [
+      {
+        "column": "report_ready",
+        "job_number": "SWMS-261123",
+        "declared_stage": "report_ready",
+        "canonical_stage": "report_ready",
+        "computed_status": "allocated",
+        "ses_family": "ordinary_roof_portal",
+        "ses_family_label": "Roof Report",
+        "job_state": "accepted"
+      },
+      {
+        "column": "archive",
+        "job_number": "SWMS-261124",
+        "declared_stage": "report_ready",
+        "canonical_stage": "archive",
+        "computed_status": "archive",
+        "ses_family": "physical_makesafe",
+        "ses_family_label": "MakeSafe",
+        "job_state": "accepted"
+      }
+    ],
+    "canonical_column_counts": {
+      "new": 36,
+      "allocated": 30,
+      "trade_report_in": 12,
+      "report_ready": 24,
+      "completed": 2,
+      "archive": 303,
+      "cancelled": 33
+    }
+  },
+  "why_declared_stage_is_report_ready": {
+    "xero_invoice": {
+      "invoice_number": "INV-0754",
+      "invoice_type": "ACCREC",
+      "status": "AUTHORISED",
+      "invoice_date": "2026-06-24",
+      "job_id": "46f9bd9e-a3ba-4012-8039-0e1a7cb2c18f"
+    },
+    "job_documents": 0,
+    "job_assignments": 0,
+    "job_service_reports": 0,
+    "makesafe_report_packs": 0,
+    "makesafe_job_details_substatus": "company_contact_required",
+    "derivation": "_deriveMakesafeBoardStage: an AUTHORISED linked invoice makes invoiceDone true; the card is not verified-sent and every close-out doc is missing, so the hard doc gate holds it in report_ready."
+  },
+  "rejection_proof": {
+    "statement": "A fresh report_ready -> archive transition cannot be appended for this job.",
+    "rpc": "apply_makesafe_board_status",
+    "guard": "COALESCE(latest.after_status, i.source_status) = i.before_status",
+    "latest_after_status_for_source_report_ready": "archive",
+    "attempted_before_status": "report_ready",
+    "outcome": "ineligible -> the guarded apply raises 'guarded apply rejected one or more transitions'",
+    "conclusion": "Re-applying would be rejected, and is unnecessary because the existing row already binds."
+  },
+  "actual_visible_defect": {
+    "summary": "The ops UI is not reading the canonical board at all. ops-api?action=makesafe_board returns HTTP 500, and ops.html falls back to the legacy overlay-blind makesafe_pipeline board.",
+    "board_request": "GET https://kevgrhcjxspbxgovpmfl.supabase.co/functions/v1/ops-api?action=makesafe_board",
+    "http_status": 500,
+    "error_body": "intake source issue uniqueness violated for post AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAApwRrdAAA=",
+    "thrower": "supabase/functions/ops-api/makesafe_intake_operational_facts.ts loadIntakeOperationalFacts",
+    "guard": "at most one issue-bearing email_events_raw row per post_id",
+    "observed_network_sequence": [
+      "GET ops-api?action=makesafe_board -> 500",
+      "GET ops-api?action=makesafe_board -> 500 (retry)",
+      "GET ops-api?action=makesafe_pipeline&type=makesafe -> 200 (legacy fallback actually rendered)"
+    ],
+    "fallback_is_overlay_blind": "makesafePipeline buckets cards with columns[enriched.board_stage] and never reads makesafe_board_status_current, so every captain display-ledger transition is invisible on it.",
+    "first_offending_post_rows": [
+      {
+        "id": "cd9428ee-0382-4047-a8bf-d48e9ef3dab5",
+        "change_type": "intake_exception_lineage_quarantine",
+        "exclusion_reason": "lineage_quarantine",
+        "observed_at": "2026-07-28T00:11:06.739519Z"
+      },
+      {
+        "id": "2a1b9b77-2cea-4919-8492-f26de3efb22f",
+        "change_type": "intake_deferred_pdf_extraction_pending",
+        "exclusion_reason": "pdf_extraction_pending",
+        "observed_at": "2026-07-31T21:20:02.942896Z"
+      }
+    ],
+    "scope": {
+      "posts_with_more_than_one_issue_row": 113,
+      "earliest_observed_at": "2026-07-27T00:21:20.215699Z",
+      "latest_observed_at": "2026-08-01T03:03:05.185714Z",
+      "dominant_pair": "intake_exception_lineage_quarantine + intake_deferred_pdf_extraction_pending"
+    }
+  },
+  "second_card_check": {
+    "job_id": "7e266353-b04d-4e0e-8725-dacfaf0387d7",
+    "job_number": "SWMS-261123",
+    "external_ref": "MLB-27309",
+    "site": "12 Princes Street, Cottesloe",
+    "ses_family": "ordinary_roof_portal",
+    "ses_family_label": "Roof Report",
+    "canonical_stage": "report_ready",
+    "rendered_column": "DOCS READY",
+    "rendered_as_roof_report_card": true,
+    "verdict": "correct"
+  }
+}

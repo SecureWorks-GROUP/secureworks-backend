@@ -132,6 +132,15 @@ export interface IntakeSourceAlarm {
   attachments: IntakeExceptionEvidenceSource["attachments"];
 }
 
+// A projection that could not be read at all. Present ONLY on the degraded
+// board panel (see degradedIntakeExceptionProjection); a healthy projection
+// leaves it null so an empty card list is never mistaken for a clean intake.
+export interface IntakeExceptionProjectionDegradation {
+  reason: "projection_read_failed";
+  error: string;
+  failed_at: string;
+}
+
 export interface IntakeExceptionProjection {
   contract_version: typeof INTAKE_EXCEPTION_CARD_CONTRACT_VERSION;
   generated_at: string;
@@ -161,6 +170,7 @@ export interface IntakeExceptionProjection {
   cards: IntakeExceptionCard[];
   source_alarms: IntakeSourceAlarm[];
   dispositions: IntakeExceptionDispositionRecord[];
+  degraded?: IntakeExceptionProjectionDegradation | null;
 }
 
 export interface IntakeExceptionCaseRow {
@@ -1272,6 +1282,10 @@ export function buildIntakeExceptionProjection(
     dispositions: dispositions.sort((a, b) =>
       a.case_id.localeCompare(b.case_id)
     ),
+    // Explicitly null, never absent: a consumer that reads `degraded` to decide
+    // whether an empty card list is trustworthy must get an answer from a
+    // healthy projection too.
+    degraded: null,
   };
 }
 
@@ -1545,6 +1559,51 @@ export async function loadIntakeExceptionProjection(
     emails,
     attachments,
   });
+}
+
+// Captain ruling 2026-08-01. The intake-exception projection is a PANEL on the
+// make-safe board, not the board. When its read fails, the board must still
+// answer with canonical rows — otherwise ops.html retries `makesafe_board`,
+// falls back to the overlay-blind `makesafe_pipeline`, and every captain
+// display-ledger transition silently disappears from the live board (the
+// 2026-08-01 `intake source issue uniqueness violated` outage; see
+// `docs/evidence/ses-261124-archive-display-diagnosis-2026-08-01.md`).
+//
+// The empty projection this returns is NOT "no exceptions": every consumer must
+// read `degraded` first, which is why the field is populated rather than the
+// counts being quietly zeroed. Board callers degrade; the dedicated
+// `makesafe_intake_exception_read` action still throws, because serving
+// exception cards is its whole purpose.
+export function degradedIntakeExceptionProjection(
+  options: { orgId?: string; generatedAt: string; error: unknown },
+): IntakeExceptionProjection {
+  const message = options.error instanceof Error
+    ? options.error.message
+    : String(options.error ?? "unknown error");
+  const projection = buildIntakeExceptionProjection({
+    orgId: options.orgId || DEFAULT_ORG_ID,
+    generatedAt: options.generatedAt,
+    facts: [],
+    cases: [],
+    sources: [],
+    sourceCorrections: [],
+    sourceSupersessions: [],
+    caseCorrections: [],
+    companies: [],
+    jobs: [],
+    emails: [],
+    attachments: [],
+    excludedPostIds: [],
+    refPrefixes: [],
+  });
+  return {
+    ...projection,
+    degraded: {
+      reason: "projection_read_failed",
+      error: message,
+      failed_at: options.generatedAt,
+    },
+  };
 }
 
 export function intakeExceptionBoardPayload(
