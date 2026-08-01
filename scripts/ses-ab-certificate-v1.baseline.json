@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "certificate": "docs/evidence/ses-ab-certificate-2026-08-01.md",
+  "certified_at": "2026-08-01",
+  "notes": "Certified Phase A/B boundary baseline. The checker asserts production against this file; every number here was read read-only from production at certification time.",
+  "phase_a": {
+    "emails": 1499,
+    "case_source_rows": 1499,
+    "distinct_source_post_ids": 1499,
+    "emails_without_case_source": 0,
+    "identity_keys_total": 534,
+    "identity_keys_live_job": 157,
+    "identity_keys_exception_only": 373,
+    "identity_keys_synthetic": 4,
+    "live_cases": 158,
+    "live_case_without_job": 0,
+    "dangling_job_ids": 0,
+    "identity_keys_with_two_live_case_bound_jobs": 0,
+    "brief_pre_recovery_census": {
+      "identity_keys_total": 533,
+      "identity_keys_live_job": 156,
+      "identity_keys_exception_only": 373,
+      "identity_keys_synthetic": 4,
+      "reconciliation": "The task brief's 533/156 is the pre-recovery snapshot. PR 460's captain-ruled exact rescan promoted one previously key-less exception case (reason_code adapter_parse_failure, therefore no wo_po_identity_key) to confirmed_live_job with the newly extracted key wo:MLB-27309/po:PO-57445. Exception-only stays 373 and synthetic stays 4, which is only possible if the promoted case carried no key before: had it already held one, exception-only would now read 372."
+    },
+    "captain_ruled_creations": [
+      {
+        "job_number": "SWMS-261123",
+        "family": "roof_report",
+        "external_ref": "MLB-27309",
+        "requesting_company_slug": "mlb",
+        "identity_key": "wo:MLB-27309/po:PO-57445",
+        "case_state": "confirmed_live_job",
+        "min_case_sources": 2,
+        "min_work_order_documents": 1
+      },
+      {
+        "job_number": "SWMS-261124",
+        "family": "general_makesafe",
+        "external_ref": "BWCWA-6648",
+        "requesting_company_slug": "bw",
+        "display_after_status": "archive",
+        "invoice_number": "INV-0754",
+        "invoice_status": "AUTHORISED",
+        "invoice_type": "ACCREC",
+        "min_authority_corrections": 2
+      }
+    ]
+  },
+  "phase_b": {
+    "round1_fixture": "scripts/board-safe-fixes-v1.fixture.txt",
+    "round1_ledger": "scripts/board-safe-fixes-v1.apply-ledger.json",
+    "round1_applied": 194,
+    "round1_skipped": 0,
+    "round2_ledger": "scripts/board-fixes-round2-v1.apply-ledger.json",
+    "round2_field_applied": 4,
+    "round2_field_skipped": 7,
+    "round2_temp_fence_applied": 56,
+    "round2_temp_fence_skipped": 1,
+    "round2_link_applied": 260,
+    "round2_link_skipped": 29,
+    "round2_population_rows": 4,
+    "swms_26692_backfill_ledger": "scripts/swms-26692-family-backfill-v1.apply-ledger.json",
+    "expected_field_assertions": 216,
+    "source_job_link_rows": 260,
+    "duplicate_pointer_rows": 3,
+    "family_supersession_card_count": 40,
+    "duplicate_survivor_pointers": [
+      {
+        "loser": "SWMS-26998",
+        "survivor": "SWMS-26736",
+        "run_key": "makesafe-duplicate-survivors-20260801-t1"
+      },
+      {
+        "loser": "SWMS-261118",
+        "survivor": "SWMS-261065",
+        "run_key": "makesafe-duplicate-survivors-20260801-t1"
+      },
+      {
+        "loser": "SWMS-26791",
+        "survivor": "SWMS-26787",
+        "run_key": "makesafe-duplicate-survivors-20260801-t2"
+      }
+    ],
+    "documented_holds": [
+      {
+        "card": "SWMS-26894",
+        "column": "jobs.metadata.makesafe_job_family",
+        "held_value": "general_makesafe",
+        "withheld_value": "temp_fence_makesafe",
+        "ledger_reason": "captain_hold_temp_fence",
+        "decision_key": "ses-held-pile-packet-v1-decision-swms26894-scope-anchor"
+      }
+    ],
+    "documented_link_skip_reasons": {
+      "scope_excluded_remint_supersession_captain_pile": 17,
+      "duplicate_fixture_same_binding": 6,
+      "job_external_ref_mismatch": 5,
+      "target_detail_not_found": 1
+    }
+  },
+  "droid_cross_check": {
+    "accounting_fixture": "scripts/ses-ab-certificate-v1.duplicate-accounting.txt",
+    "merge_groups_total": 19,
+    "merge_groups_historical": 16,
+    "merge_groups_drain_minted": 3,
+    "drain_minted_duplicate_jobs": [
+      "SWMS-261059",
+      "SWMS-261078",
+      "SWMS-261118"
+    ],
+    "disposition_counts": {
+      "archived_duplicate_pointer": 4,
+      "adjudicated_not_duplicate": 8,
+      "captain_excluded": 1,
+      "open_hold": 6
+    },
+    "unaccounted": 0
+  }
+}

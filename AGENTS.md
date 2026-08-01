@@ -607,6 +607,34 @@ For the current duplicate-survivor apply-set adjudication, including display
 overlay handling, per-tranche apply ledgers and captain rulings, see
 `docs/evidence/makesafe-duplicate-survivors-2026-08-01.md`.
 
+## The SES Phase A/B Board State Is Re-Provable, Not Just Documented
+
+`scripts/ses-ab-certificate-checker.ts` re-proves the whole Phase A/B boundary
+against live production, read-only, and exits non-zero on any failure. Run it
+before trusting any claim about intake accounting or adjudicated board truth,
+and after any new correction tranche. It needs only `SUPABASE_ACCESS_TOKEN`
+(Management API `/database/query`, `read_only: true`); it refuses non-SELECT
+statements and client-identifying columns before the request is sent. The dated
+certificate it backs is `docs/evidence/ses-ab-certificate-2026-08-01.md`.
+
+Two rules it encodes, which any later correction pass must respect:
+
+- **The verdict table is never asserted as written.** It is folded forward
+  through the ledgers production actually applied — round 1, round 2 field,
+  round 2 temp fence, the SWMS-26692 backfill, then captain holds — and only the
+  end state is diffed. A fixture read on its own is stale.
+- **FAMILY TRUTH RULE.** Where the production decider on full post-drain inputs
+  re-labels a card an earlier fixture already labelled, the decider wins and the
+  earlier family value is recorded as superseded, not counted as a mismatch.
+  This currently affects exactly 40 cards.
+
+The duplicate/merge accounting is DERIVED at run time from work-order filenames,
+never copied, so a new duplicate cannot appear silently: a group production
+resolves to more than one card and that
+`scripts/ses-ab-certificate-v1.duplicate-accounting.txt` does not adjudicate is
+reported `unaccounted` and fails the run. The correct response to any failure is
+to adjudicate it, never to widen `scripts/ses-ab-certificate-v1.baseline.json`.
+
 ## The SES Money And Outbound Seal Is Write-Once
 
 The write-once SES money/outbound seal and its approved invoice-void release

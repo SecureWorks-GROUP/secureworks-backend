@@ -1,0 +1,202 @@
+// deno-lint-ignore-file no-import-prefix
+import {
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  advanceVerdictTable,
+  assertNoPiiColumns,
+  assertReadOnlySql,
+  buildMergeGroups,
+  parseAccountingFixture,
+  parseRound1Fixture,
+  parseRound2FieldFixture,
+  parseTempFenceFixture,
+} from "../ses-ab-certificate-checker.ts";
+
+const ROOT = new URL("../../", import.meta.url);
+const FAMILY = "jobs.metadata.makesafe_job_family";
+
+function read(relative: string): Promise<string> {
+  return Deno.readTextFile(new URL(relative, ROOT));
+}
+
+Deno.test("read-only guard refuses anything that is not a single SELECT", () => {
+  assertReadOnlySql("select 1");
+  assertReadOnlySql("WITH x as (select 1) select * from x");
+  assertThrows(
+    () => assertReadOnlySql("update jobs set status = 'x'"),
+    Error,
+    "does not start with SELECT or WITH",
+  );
+  assertThrows(
+    () => assertReadOnlySql("select 1; delete from jobs"),
+    Error,
+    "multi-statement",
+  );
+  assertThrows(
+    () => assertReadOnlySql("select 1 /* harmless */ union insert into jobs"),
+    Error,
+    "write verb insert",
+  );
+  assertThrows(() => assertReadOnlySql("   "), Error, "empty statement");
+});
+
+Deno.test("a write verb cannot hide behind a comment", () => {
+  // The comment is stripped, so the trailing DELETE is seen and refused.
+  assertThrows(
+    () => assertReadOnlySql("select 1 -- ok\n delete from jobs"),
+    Error,
+    "write verb delete",
+  );
+  // Conversely a write verb that only appears inside a comment is not a false
+  // positive, because the comment is stripped before the scan.
+  assertReadOnlySql("select 1 -- we never update here\n");
+});
+
+Deno.test("PII guard refuses client-identifying columns", () => {
+  assertNoPiiColumns("select job_number, site_suburb from jobs");
+  assertThrows(
+    () => assertNoPiiColumns("select client_name from jobs"),
+    Error,
+    "client_name",
+  );
+  assertThrows(
+    () => assertNoPiiColumns("select body_content from emails"),
+    Error,
+    "body_content",
+  );
+});
+
+Deno.test("committed fixtures still carry the adjudicated cardinalities", async () => {
+  const round1 = parseRound1Fixture(
+    await read("scripts/board-safe-fixes-v1.fixture.txt"),
+  );
+  const field = parseRound2FieldFixture(
+    await read("scripts/board-fixes-round2-field.fixture.txt"),
+  );
+  const tempFence = parseTempFenceFixture(
+    await read("scripts/board-fixes-round2-temp-fence.fixture.txt"),
+  );
+  assertEquals(round1.length, 194);
+  assertEquals(field.length, 11);
+  assertEquals(tempFence.length, 56);
+  assertEquals(round1.filter((row) => row.column === FAMILY).length, 114);
+});
+
+Deno.test("the advance model supersedes exactly the 40 round-2 relabelled cards", async () => {
+  const round1 = parseRound1Fixture(
+    await read("scripts/board-safe-fixes-v1.fixture.txt"),
+  );
+  const round2Field = parseRound2FieldFixture(
+    await read("scripts/board-fixes-round2-field.fixture.txt"),
+  );
+  const round2TempFence = parseTempFenceFixture(
+    await read("scripts/board-fixes-round2-temp-fence.fixture.txt"),
+  );
+  const result = advanceVerdictTable({
+    round1,
+    round2Field,
+    round2TempFence,
+    backfills: [{
+      card: "SWMS-26692",
+      column: FAMILY,
+      after: "temp_fence_makesafe",
+      provenance: "swms-26692-backfill",
+    }],
+    holds: [{
+      card: "SWMS-26894",
+      column: FAMILY,
+      held_value: "general_makesafe",
+    }],
+  });
+  assertEquals(result.superseded_family_cards.length, 40);
+  assertEquals(result.expected.length, 216);
+
+  const byCard = new Map(
+    result.expected.map((row) => [`${row.card} ${row.column}`, row]),
+  );
+  // The captain hold wins over the round-2 temp-fence relabel.
+  assertEquals(byCard.get(`SWMS-26894 ${FAMILY}`)?.expect, "general_makesafe");
+  assertEquals(byCard.get(`SWMS-26894 ${FAMILY}`)?.provenance, "captain-hold");
+  // SWMS-26692's family came from the follow-up backfill, not the round-2 pass.
+  assertEquals(
+    byCard.get(`SWMS-26692 ${FAMILY}`)?.provenance,
+    "swms-26692-backfill",
+  );
+  // A round-1 card that round 2 relabelled ends on the round-2 value.
+  assertEquals(
+    byCard.get(`AJBR 66933 ${FAMILY}`)?.expect,
+    "temp_fence_makesafe",
+  );
+});
+
+Deno.test("merge groups keep only work orders that resolve to several cards", () => {
+  const groups = buildMergeGroups([
+    { job_number: "SWMS-1", claim_ref: "MLB-1", po: "1000" },
+    { job_number: "SWMS-2", claim_ref: "MLB-1", po: "1000" },
+    { job_number: "SWMS-2", claim_ref: "MLB-1", po: "1000" },
+    { job_number: "SWMS-3", claim_ref: "MLB-2", po: "2000" },
+  ]);
+  assertEquals(groups.length, 1);
+  assertEquals(groups[0].work_order, "MLB-1PO-1000");
+  assertEquals(groups[0].cards, ["SWMS-1", "SWMS-2"]);
+});
+
+Deno.test("the accounting fixture covers every disposition and validates its rows", async () => {
+  const rows = parseAccountingFixture(
+    await read("scripts/ses-ab-certificate-v1.duplicate-accounting.txt"),
+  );
+  assertEquals(rows.length, 19);
+  assertEquals(rows.filter((row) => row.era === "historical").length, 16);
+  assertEquals(rows.filter((row) => row.era === "drain_minted").length, 3);
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    counts.set(row.disposition, (counts.get(row.disposition) ?? 0) + 1);
+  }
+  assertEquals(counts.get("archived_duplicate_pointer"), 4);
+  assertEquals(counts.get("adjudicated_not_duplicate"), 8);
+  assertEquals(counts.get("captain_excluded"), 1);
+  assertEquals(counts.get("open_hold"), 6);
+
+  assertThrows(
+    () =>
+      parseAccountingFixture(
+        "MLB-1PO-1 | historical | invented | SWMS-1,SWMS-2 | - | evidence",
+      ),
+    Error,
+    "unknown disposition",
+  );
+  assertThrows(
+    () =>
+      parseAccountingFixture(
+        "MLB-1PO-1 | historical | open_hold | SWMS-1 | - | evidence",
+      ),
+    Error,
+    "at least two cards",
+  );
+});
+
+Deno.test("the baseline stays consistent with the accounting fixture", async () => {
+  const baseline = JSON.parse(
+    await read("scripts/ses-ab-certificate-v1.baseline.json"),
+  );
+  const rows = parseAccountingFixture(
+    await read("scripts/ses-ab-certificate-v1.duplicate-accounting.txt"),
+  );
+  assertEquals(baseline.droid_cross_check.merge_groups_total, rows.length);
+  assertEquals(
+    baseline.droid_cross_check.merge_groups_historical +
+      baseline.droid_cross_check.merge_groups_drain_minted,
+    rows.length,
+  );
+  const declared = Object.values(
+    baseline.droid_cross_check.disposition_counts as Record<string, number>,
+  ).reduce((total, value) => total + value, 0);
+  assertEquals(declared, rows.length);
+  assertStringIncludes(
+    baseline.phase_a.brief_pre_recovery_census.reconciliation,
+    "wo:MLB-27309/po:PO-57445",
+  );
+});
