@@ -39,7 +39,7 @@ import {
 } from "./makesafe_pdf_declared_type.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
-  "makesafe-deterministic-intake@2026-07-30.v7";
+  "makesafe-deterministic-intake@2026-08-01.v8";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 export { classifyCancellation };
 export type { CancellationClassification };
@@ -1718,6 +1718,16 @@ function strongIdentityConflict(a: AdaptedSource, b: AdaptedSource): boolean {
   return false;
 }
 
+function instructionReferenceConflict(
+  a: AdaptedSource,
+  b: AdaptedSource,
+): boolean {
+  if (strongIdentityConflict(a, b)) return true;
+  return !!a.identity.externalRefCanonical &&
+    !!b.identity.externalRefCanonical &&
+    a.identity.externalRefCanonical !== b.identity.externalRefCanonical;
+}
+
 // Normalised correlation coordinates, computed once per adapted source. The
 // pairwise pass runs inside builder buckets only, so the regex normalisers are
 // never re-run per candidate pair.
@@ -1935,8 +1945,19 @@ function instructionDiscriminator(item: AdaptedSource): string {
     .filter((a) => a.status === "uploaded" && a.sha256)
     .map((a) => `content:${a.sha256}`)
     .sort()[0] || null;
-  const identity = item.identity.woPoIdentityKey ||
-    item.identity.externalRefCanonical || contentIdentity ||
+  // A PO-only key is supporting identity, not permission to erase a source's
+  // own reference. Historical po:BOX rows proved why both coordinates are
+  // load-bearing: once a component was correlation-bound, choosing only
+  // woPoIdentityKey folded every distinct MLB reference into one instruction.
+  const strongIdentity = [
+    item.identity.externalRefCanonical
+      ? `ref:${item.identity.externalRefCanonical}`
+      : null,
+    item.identity.woPoIdentityKey
+      ? `unit:${item.identity.woPoIdentityKey}`
+      : null,
+  ].filter(Boolean).join("|");
+  const identity = strongIdentity || contentIdentity ||
     `source:${item.source.postId}`;
   const base = `${identity}|deliverable:${
     item.identity.deliverableRefCanonical || item.identity.jobFamily
@@ -2239,11 +2260,21 @@ export function buildDeterministicIntakePlan(
           isLifecycleReopenText(lifecycleText(i.source))
         )
       ) continue;
-      const targets = [...groups.keys()].filter((candidate) =>
-        candidate !== key &&
-        !/^(?:reopen:|revision:|cancel:|nonwork:)/.test(candidate) &&
-        /\|deliverable:(?!unclassified$)/i.test(candidate)
-      );
+      const targets = [...groups.entries()].filter(
+        ([candidate, targetItems]) =>
+          candidate !== key &&
+          !/^(?:reopen:|revision:|cancel:|nonwork:)/.test(candidate) &&
+          /\|deliverable:(?!unclassified$)/i.test(candidate) &&
+          // Wildcard recovery may attach identity-less evidence, or evidence
+          // carrying the same instruction identity. It must never use family
+          // classification to absorb a source whose own reference conflicts
+          // with the candidate instruction.
+          items.every((source) =>
+            targetItems.some((target) =>
+              !instructionReferenceConflict(source, target)
+            )
+          ),
+      ).map(([candidate]) => candidate);
       if (targets.length !== 1) continue;
       const merged = [...groups.get(targets[0])!, ...items].sort((a, b) =>
         a.source.receivedAt.localeCompare(b.source.receivedAt) ||

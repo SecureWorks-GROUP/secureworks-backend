@@ -99,9 +99,14 @@ function looksLikeName(v: string): boolean {
   if (LABEL_LIKE.test(s)) return false;
   const letters = (s.match(/[A-Za-z]/g) || []).length;
   if (letters < 2) return false;
-  // Overwhelmingly letters/spaces/&/./-/' (allow "Amanda Parker & Mr S. Parker").
-  if (!/^[A-Za-z][A-Za-z .,'&/()-]*$/.test(s)) return false;
-  return true;
+  // Ordinary people and company names remain overwhelmingly letters and name
+  // punctuation. Strata work orders legitimately name the ownership entity as
+  // "The Owners of <address> Strata Plan <number>"; allow digits only for that
+  // explicit legal-entity shape so a loose numeric value still cannot become a
+  // client name.
+  if (/^[A-Za-z][A-Za-z .,'&/()-]*$/.test(s)) return true;
+  return /^(?:the\s+)?owners?\s+of\s+[A-Za-z0-9][A-Za-z0-9 .,'&/()#-]*\bstrata\s+plan\s+\d+$/i
+    .test(s);
 }
 
 /** Normalise an Australian mobile/landline to a bare national number. */
