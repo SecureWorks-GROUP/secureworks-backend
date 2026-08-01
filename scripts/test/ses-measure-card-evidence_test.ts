@@ -12,6 +12,12 @@ import {
   parseStageOption,
   renderMeasurement,
 } from "../ses-measure-card-evidence.ts";
+// Imported, never restated. This assertion is about the render NAMING its ruler,
+// not about which ruler version is current — restating the literal here made the
+// suite go red on the (correct) `c1-po-ruling-v2` -> `c1-unlinked-invoice-v3`
+// bump. The deliberate version pin lives once, in the ruler's own suite
+// (`makesafe_evidence_requirements_test.ts`), where a bump is meant to be felt.
+import { SES_EVIDENCE_CONTRACT_VERSION } from "../../supabase/functions/ops-api/makesafe_evidence_requirements.ts";
 
 const NO_DOCS = {
   has_wo: false,
@@ -441,7 +447,7 @@ Deno.test("the rendered report names the ruler, the verdict and no client data",
   }));
   const rendered = renderMeasurement(result);
   assertStringIncludes(rendered, "SWMS-260001");
-  assertStringIncludes(rendered, "ses-evidence-requirements/c1-po-ruling-v2");
+  assertStringIncludes(rendered, SES_EVIDENCE_CONTRACT_VERSION);
   assertStringIncludes(rendered, "VERDICT: UNDETERMINED");
   assertStringIncludes(rendered, "Open Captain questions");
   assertStringIncludes(rendered, "no write, no backfill and no stage move");

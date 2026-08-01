@@ -23,9 +23,20 @@ import {
   type MeasureCardResult,
 } from "./ses-measure-card-evidence.ts";
 import {
+  SES_EVIDENCE_CONTRACT_VERSION,
   SES_EVIDENCE_ITEMS,
   type SesEvidenceItem,
 } from "../supabase/functions/ops-api/makesafe_evidence_requirements.ts";
+import {
+  describeSesBoardPopulation,
+  SES_BOARD_POPULATION_CONTRACT_VERSION,
+  sesBoardPopulationPredicate,
+  sesBoardStatusPredicate,
+} from "./ses-board-population-contract.ts";
+import {
+  buildSesMeasurementGeneration,
+  sesCardInputHash,
+} from "./ses-measurement-generation.ts";
 import {
   deriveSesUnlinkedInvoiceMatches,
   indexSesInvoiceMatches,
@@ -119,10 +130,11 @@ async function query<T = Record<string, any>>(sql: string): Promise<T[]> {
 }
 
 /**
- * The board population, mirroring ops-api `makesafePipeline` with
- * `history=all`: makesafe-typed jobs, restoration insurance jobs, and any job
- * carrying a makesafe_job_details row, minus cancelled/lost, minus terminal
- * synthetic live-fire cards.
+ * The board population. The predicate is NOT written here — it comes from the
+ * named, versioned contract in `ses-board-population-contract.ts`, which every
+ * artifact this script writes also records. That contract is a DEFAULT, not a
+ * ruling: Captain decision C.5 (407 active vs 440 including cancelled) is open,
+ * so nothing here may be described as covering "the whole board".
  */
 const BOARD_SQL = `
 select
@@ -135,16 +147,7 @@ select
   j.metadata->>'report_delivery' as report_delivery,
   j.metadata->>'synthetic_livefire_marker' as synthetic_livefire_marker
 from jobs j
-where j.status not in ('cancelled','lost')
-  and (
-    j.type = 'makesafe'
-    or (j.type = 'insurance' and j.metadata->>'insurance_job_type' = 'restoration')
-    or exists (select 1 from makesafe_job_details d where d.job_id = j.id)
-  )
-  and not exists (
-    select 1 from ses_synthetic_livefire_runs r
-    where r.state = 'terminal' and r.job_ids ? j.id::text
-  )
+where ${sesBoardPopulationPredicate()}
 order by j.created_at desc, j.id desc
 `;
 
@@ -157,7 +160,7 @@ select
   d.portal_verified_cycle, d.requesting_company_slug, d.computed_status
 from makesafe_job_details d
 join jobs j on j.id = d.job_id
-where j.status not in ('cancelled','lost')
+where ${sesBoardStatusPredicate()}
 `;
 
 function boardScopedSql(select: string, table: string, alias: string): string {
@@ -165,12 +168,12 @@ function boardScopedSql(select: string, table: string, alias: string): string {
 select ${select}
 from ${table} ${alias}
 join jobs j on j.id = ${alias}.job_id
-where j.status not in ('cancelled','lost')
-  and (
-    j.type = 'makesafe'
-    or (j.type = 'insurance' and j.metadata->>'insurance_job_type' = 'restoration')
-    or exists (select 1 from makesafe_job_details d2 where d2.job_id = j.id)
-  )
+where ${
+    sesBoardPopulationPredicate({
+      detailAlias: "d2",
+      includeSyntheticExclusion: false,
+    })
+  }
 `;
 }
 
@@ -196,13 +199,25 @@ export interface C2CardRow extends MeasureCardResult {
   item_status: Record<SesEvidenceItem, string>;
   item_requirement: Record<SesEvidenceItem, string>;
   item_signal: Record<SesEvidenceItem, string>;
+  /**
+   * Drift key over this card's privacy-safe INPUT facts (D.0 rule 3). A later
+   * apply re-reads the card, recomputes this, and writes only while it still
+   * matches. It deliberately excludes the ruler's verdict, so bumping
+   * `SES_EVIDENCE_CONTRACT_VERSION` does not read as board-wide drift.
+   */
+  input_hash: string;
 }
 
 async function run(): Promise<void> {
   const outPath = Deno.args.find((a) => a.startsWith("--out="))?.slice(6) ??
     "/tmp/ses-c2-measure.json";
 
+  // Stamped before the first read, so `snapshot_at` can never claim the board
+  // was read later than it was.
+  const snapshotAt = new Date().toISOString();
+
   const board = await query(BOARD_SQL);
+  console.error(`population: ${describeSesBoardPopulation()}`);
   console.error(`board cards: ${board.length}`);
 
   const [
@@ -335,7 +350,7 @@ async function run(): Promise<void> {
       itemReq[item] = reading?.requirement ?? "unmeasured";
       itemSignal[item] = reading?.signal ?? "none";
     }
-    results.push({
+    const row: Omit<C2CardRow, "input_hash"> = {
       ...base,
       job_status: String(job.status || ""),
       archived: job.archived === true,
@@ -346,14 +361,29 @@ async function run(): Promise<void> {
       item_status: itemStatus,
       item_requirement: itemReq,
       item_signal: itemSignal,
-    });
+    };
+    results.push({ ...row, input_hash: await sesCardInputHash(row) });
   }
+
+  // D.0 rule 3: the artifact must self-describe its generation, so a later
+  // apply can tell "this is the set I approved" from "this board moved".
+  const generation = await buildSesMeasurementGeneration({
+    snapshotAt,
+    populationContractVersion: SES_BOARD_POPULATION_CONTRACT_VERSION,
+    populationContract: describeSesBoardPopulation(),
+    rulerContractVersion: SES_EVIDENCE_CONTRACT_VERSION,
+    cardHashes: results.map((row) => ({
+      job_id: row.job_id,
+      input_hash: row.input_hash,
+    })),
+  });
 
   await Deno.writeTextFile(
     outPath,
     JSON.stringify(
       {
         generated_from: "management-api /database/query read_only:true",
+        ...generation,
         queries_issued: queryCount,
         board_cards: results.length,
         cards: results,
@@ -362,6 +392,11 @@ async function run(): Promise<void> {
       2,
     ),
   );
+  console.error(
+    `generation ${generation.generation_id} @ ${generation.snapshot_at}`,
+  );
+  console.error(`population ${generation.population_contract}`);
+  console.error(`ruler      ${generation.ruler_contract_version}`);
   console.error(
     `wrote ${outPath} (${results.length} cards, ${queryCount} queries)`,
   );

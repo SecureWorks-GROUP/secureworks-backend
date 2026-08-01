@@ -688,7 +688,7 @@ Families and stages are imported from `ses_family_matrix.ts` and
 `makesafe_computed_status.ts` rather than restated, and `unknown` is refused
 rather than measured. `scripts/ses-measure-card-evidence.ts` is the read-only
 single-card entrypoint, and `scripts/ses-c2-measure-board-evidence.ts` batches
-it over the whole board in nine read-only queries — run that before and after
+it over the named SES population in nine read-only queries — run that before and after
 any ruler change and report both count sets. Contract, modelling decisions,
 transit heuristics and the verification baseline are in
 `docs/evidence/ses-evidence-ruler-c1-2026-08-01.md`; the PO ruling and its
@@ -761,7 +761,7 @@ a re-extraction refuses the write rather than attaching a document nobody read.
 re-attach never moves a board stage — prove it, do not assume it, by bracketing
 the run with a C1 measurement. `scripts/ses-measure-card-evidence.ts` needs a
 service-role key; `scripts/ses-c2-measure-board-evidence.ts` batches the same
-ruler over the whole board through the Management API alone, and lets verify
+ruler over the named SES population through the Management API alone, and lets verify
 assert that NO board card moved.
 
 ## The SES Money And Outbound Seal Is Write-Once
@@ -885,6 +885,39 @@ tenant scoping, and client follow-up, lives in
 `docs/trade-all-means-all-v1.md`. Keep `_resolveManagerVisibility`,
 `_managerBoardVerticals`, and `_resolveTradeJobFeedLens` in `ops-api/index.ts`
 aligned with that document and their regression tests.
+
+## Every SES Measurement Names Its Denominator And Its Generation
+
+Two small modules carry plan v2's write-safety rule D.0/3, and every SES harness
+must consume them rather than hand-writing the equivalent:
+
+- `scripts/ses-board-population-contract.ts` is the named, versioned board
+  population. Never hand-write the `cancelled/lost` + makesafe/restoration/detail
+  predicate again; call `sesBoardPopulationPredicate()`. The default
+  `active-v1` is a DEFAULT, NOT A RULING — Captain decision C.5 (407 active vs
+  440 including the 33 cancelled) is open, so `describeSesBoardPopulation()`
+  renders a "not the whole board" caveat and nothing may claim board-completeness
+  until C.5 lands. When it does, add a NEW version and switch the export; never
+  edit a version in place, or past artifacts stop being attributable.
+- `scripts/ses-measurement-generation.ts` emits `generation_id`, `snapshot_at`,
+  both contract versions and a per-card `input_hash`, so a later apply can skip a
+  card that moved underneath it. Two inversions are load-bearing: the
+  `generation_id` is CONTENT-derived (a rerun over unchanged state reproduces it —
+  that is how a second agent independently verifies a batch), and the per-card
+  hash covers card INPUT facts only, never the ruler's verdict, so bumping
+  `SES_EVIDENCE_CONTRACT_VERSION` does not read as board-wide drift. Free-text
+  `detail` provenance is deliberately outside the hash.
+
+`scripts/ses-stage-parity-harness.ts` runs BOTH stage engines over one set of
+read-only production reads and is the only tool that answers "did the divergence
+move?". It imports the real ladders (`_deriveMakesafeBoardStage` via the read
+model, and `computeMakesafeStatus`) and must never reimplement either. Baseline:
+71 of 407 cards diverge at 2026-08-01 — see
+`docs/evidence/ses-b0-baseline-generation-2026-08-02.md`.
+
+Pin a contract version literal in ONE place only — the owning module's own suite.
+A second suite restating it is what turned the correct `c1-po-ruling-v2` →
+`c1-unlinked-invoice-v3` bump into a red baseline; consumers import the constant.
 
 ## Maintaining this file
 
