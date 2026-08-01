@@ -267,3 +267,40 @@ That confirmation covers the *survivor selection* only. The post-deploy dry run
 (step 3 of the release sequence) still gates the live apply: it must report four
 archives and zero skips, against the same four group keys, before `dry_run` is
 set to false.
+
+## Pre-existing display overlays the plan did not account for (found 2026-08-01)
+
+The plan in `data/board-duplicate-survivors-v1/dry-run-plan.json` derived each
+`before_status` from raw card facts. It did **not** read
+`makesafe_board_status_applications`, and five of the eight cards already carry a
+row there from earlier captain-approved runs. Read-only from production:
+
+```
+job          run_key                                     source -> after      applied
+SWMS-26998   makesafe-board-truth-stage1-20260724        new    -> allocated  2026-07-24
+SWMS-26791   makesafe-board-truth-stage1-20260724        report_ready -> allocated  2026-07-24
+SWMS-26845   makesafe-board-truth-stage3-20260724        report_ready -> archive    2026-07-24
+SWMS-26920   ses-u7-three-net-close-20260728-0755        allocated -> archive       2026-07-28
+SWMS-261065  ses-u7-falsification-dead-close-20260728-v1 new    -> archive          2026-07-28
+```
+
+`SWMS-26845` and `SWMS-261065` are planned **survivors**; `SWMS-26920` is a
+planned **loser**. An overlay only takes effect when its `source_status` still
+equals the card's freshly derived `board_stage` (`makesafe_board_read_model.ts`
+`applicationApplies`), so whether each is live must be read off the deployed
+board, not inferred here. But if the `SWMS-26845` or `SWMS-26920` overlay is
+live, `planMakesafeDuplicateSurvivorArchives` skips `mlb-23067-makesafe` with
+`survivor_terminal_display_status` / `loser_terminal_display_status`, and one
+skip refuses the entire run.
+
+Two things follow, and neither is settled by the delegation above:
+
+- The dry run is expected to diverge from the committed fixture. The fixture is
+  the stale artefact; the live response is truth.
+- `archive` on the display ledger is overloaded. The 2026-07-24 cutover archived
+  `SWMS-26845` because it was **completed more than seven days ago**, not because
+  it was a duplicate — the same card this document selects as the survivor that
+  "carries the entire delivery". The planner's terminal-display guard cannot tell
+  a done-and-archived survivor from a dead one, and deliberately fails closed.
+  Whether MLB-23067 still needs a duplicate archive at all, given both its cards
+  already display `archive`, is a captain question, not a planner question.
