@@ -116,26 +116,23 @@ export function authorizeResumeStamp(
   live: ResumeDocumentRow | null,
 ): { authorized: true; documentId: string } | { authorized: false; reason: string } {
   if (!entry || typeof entry.document_id !== "string") {
-    return { authorized: false, reason: "resume_document_not_named" };
+    return { authorized: false, reason: "resume_no_prior_ledger_entry" };
   }
-  if (!live) return { authorized: false, reason: "resume_document_missing" };
-  if (live.id !== entry.document_id) {
-    return { authorized: false, reason: "resume_document_id_mismatch" };
-  }
+  if (!live) return { authorized: false, reason: "resume_document_row_missing" };
   if (live.job_id !== row.jobId) {
-    return { authorized: false, reason: "resume_document_job_mismatch" };
+    return { authorized: false, reason: "resume_document_wrong_job" };
   }
   if (live.type !== DOCUMENT_TYPE) {
-    return { authorized: false, reason: "resume_document_type_mismatch" };
+    return { authorized: false, reason: "resume_document_wrong_type" };
   }
   if (live.run_label !== null) {
     return { authorized: false, reason: "resume_document_already_stamped" };
   }
   if (live.file_name !== entry.file_name) {
-    return { authorized: false, reason: "resume_document_file_name_mismatch" };
+    return { authorized: false, reason: "resume_document_file_name_changed" };
   }
   if (live.storage_url !== entry.storage_url) {
-    return { authorized: false, reason: "resume_document_storage_url_mismatch" };
+    return { authorized: false, reason: "resume_document_storage_url_changed" };
   }
   return { authorized: true, documentId: live.id };
 }
@@ -547,11 +544,11 @@ select id::text as id from stamped;`;
 async function resumeDocumentId(
   row: FixtureRow,
   entry: any,
-): Promise<string | null> {
+): Promise<ReturnType<typeof authorizeResumeStamp>> {
   const documentId = typeof entry?.document_id === "string"
     ? entry.document_id
     : null;
-  if (!documentId) return null;
+  if (!documentId) return authorizeResumeStamp(entry, row, null);
   const data = await managementQuery(`
 select id::text as id, job_id::text as job_id, type, run_label,
        file_name, storage_url
@@ -569,7 +566,7 @@ where id = ${sqlText(documentId)}::uuid
     }
     : null;
   const verdict = authorizeResumeStamp(entry, row, live);
-  return verdict.authorized ? verdict.documentId : null;
+  return verdict;
 }
 
 /**
@@ -906,11 +903,12 @@ async function runApply(
         resumeEntry && onlyDocumentDrift &&
           verdict.reason === "work_order_already_present",
       );
-      if (resumableStamp) {
-        const documentId = await resumeDocumentId(row, resumeEntry);
-        if (!documentId) {
-          record.reason = "resume_document_identity_mismatch";
-        } else {
+      const resumeRefusal = resumePath && onlyDocumentDrift &&
+        verdict.reason === "work_order_already_present"
+        ? await resumeDocumentId(row, resumeEntry)
+        : null;
+      if (resumableStamp && resumeRefusal?.authorized) {
+        const documentId = resumeRefusal.documentId;
         record.document_id = documentId;
         try {
           record.provenance_stamped = await stampProvenanceWithRetry(
@@ -927,7 +925,8 @@ async function runApply(
           await flush();
           throw new Error(`${row.card} apply failed: ${record.reason}`);
         }
-        }
+      } else if (resumeRefusal && !resumeRefusal.authorized) {
+        record.reason = resumeRefusal.reason;
       } else if (!drift.matches) {
         record.reason = `state_changed_since_dry_run:${
           drift.drifted.join(",")

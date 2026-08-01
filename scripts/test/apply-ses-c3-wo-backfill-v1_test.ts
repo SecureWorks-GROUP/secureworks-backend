@@ -234,15 +234,15 @@ Deno.test("resume stamping requires the ledger-identified exact document", () =>
   });
   assertEquals(
     authorizeResumeStamp(entry, sampleRow, { ...live, file_name: "Other.pdf" }),
-    { authorized: false, reason: "resume_document_file_name_mismatch" },
+    { authorized: false, reason: "resume_document_file_name_changed" },
   );
   assertEquals(
     authorizeResumeStamp(entry, sampleRow, { ...live, storage_url: "other" }),
-    { authorized: false, reason: "resume_document_storage_url_mismatch" },
+    { authorized: false, reason: "resume_document_storage_url_changed" },
   );
   assertEquals(
     authorizeResumeStamp(null, sampleRow, live),
-    { authorized: false, reason: "resume_document_not_named" },
+    { authorized: false, reason: "resume_no_prior_ledger_entry" },
   );
   assertEquals(
     authorizeResumeStamp(entry, sampleRow, { ...live, run_label: RUN_LABEL }),
@@ -250,7 +250,15 @@ Deno.test("resume stamping requires the ledger-identified exact document", () =>
   );
   assertEquals(
     authorizeResumeStamp(entry, sampleRow, { ...live, job_id: "55555555-5555-5555-5555-555555555555" }),
-    { authorized: false, reason: "resume_document_job_mismatch" },
+    { authorized: false, reason: "resume_document_wrong_job" },
+  );
+  assertEquals(
+    authorizeResumeStamp(entry, sampleRow, null),
+    { authorized: false, reason: "resume_document_row_missing" },
+  );
+  assertEquals(
+    authorizeResumeStamp(entry, sampleRow, { ...live, type: "photo" }),
+    { authorized: false, reason: "resume_document_wrong_type" },
   );
 });
 
