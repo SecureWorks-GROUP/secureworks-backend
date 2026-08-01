@@ -22,6 +22,14 @@
 // grounded in the backend evidence register [E1]-[E9], the Captain decision
 // records [D1]-[D5] and the wiki blueprint [W1]-[W6]. Section anchors are
 // repeated per family below so a maintainer can diff code against the draft.
+//
+// Rulings applied on top of the draft (rule 1 is how a QUESTION leaves this
+// table, and each one is recorded here rather than silently absorbed):
+//
+//   - 2026-08-01, `po_floor` — "of course every card needs a po". The PO cell is
+//     REQUIRED on every family at every stage, including the two unsealed
+//     recipes. `Q_PO_FLOOR` stays exported with its `resolution` for provenance
+//     and is no longer in `SES_CAPTAIN_QUESTIONS`; `q()` refuses to name it.
 
 import {
   MAKESAFE_COMPUTED_STATUSES,
@@ -33,14 +41,15 @@ import {
 } from "./ses_family_matrix.ts";
 
 export const SES_EVIDENCE_CONTRACT_VERSION =
-  "ses-evidence-requirements/c1-draft-v1";
+  "ses-evidence-requirements/c1-po-ruling-v2";
 
 /**
  * The draft contract's source document. Recorded so a measurement run can prove
  * which ruler produced it without re-reading the ruler.
  */
 export const SES_EVIDENCE_CONTRACT_SOURCE =
-  "codex-evidence-ruler-draft-v1/report.md (DRAFT, not Captain-approved)";
+  "codex-evidence-ruler-draft-v1/report.md (DRAFT, not Captain-approved) " +
+  "+ Captain ruling 2026-08-01 on po_floor";
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -129,6 +138,20 @@ export type SesCaptainQuestionId =
   | "restoration_recipe"
   | "cancelled_floor";
 
+/**
+ * A Captain ruling that closes a question. Its presence is what moves a question
+ * out of `SES_CAPTAIN_QUESTIONS`; the question constant itself is kept so a
+ * measurement or audit can still resolve the id and read why the cells moved.
+ */
+export interface SesCaptainQuestionResolution {
+  /** ISO date of the ruling. */
+  ruled_on: string;
+  /** The Captain's words, verbatim. */
+  ruling: string;
+  /** What the ruling changed in this table, in matrix terms. */
+  effect: string;
+}
+
 export interface SesCaptainQuestion {
   id: SesCaptainQuestionId;
   title: string;
@@ -136,8 +159,17 @@ export interface SesCaptainQuestion {
   question: string;
   /** Evidence-register anchors from the draft that produced the conflict. */
   basis: readonly string[];
+  /**
+   * Set once the Captain has ruled. A resolved question is provenance only: it
+   * may never gate a cell again, and `q()` throws if one is named.
+   */
+  resolution?: SesCaptainQuestionResolution;
 }
 
+/**
+ * RESOLVED 2026-08-01. Kept exported so the 49 promoted PO cells have a named,
+ * readable origin rather than an unexplained REQUIRED.
+ */
 export const Q_PO_FLOOR: SesCaptainQuestion = {
   id: "po_floor",
   title: "PO floor",
@@ -147,6 +179,16 @@ export const Q_PO_FLOOR: SesCaptainQuestion = {
     "present? The current Captain record says claim remains customer-visible and " +
     "PO is stored separately, but also records live cards with no PO.",
   basis: ["D5"],
+  resolution: {
+    ruled_on: "2026-08-01",
+    ruling: "of course every card needs a po",
+    effect:
+      "The `po` cell is REQUIRED for every family at every display stage — all " +
+      "49 rows, including the unsealed repair and restoration recipes. There is " +
+      "no stage below which the floor is waived and no family exemption. A card " +
+      "with no builder PO is now a real `missing` on a `required` cell, so it " +
+      "fails the ruler rather than degrading to undetermined.",
+  },
 };
 
 export const Q_GHL_EQUIVALENCE: SesCaptainQuestion = {
@@ -203,6 +245,12 @@ export const Q_OWN_DOCUMENT_ROOF_REPORT_IN: SesCaptainQuestion = {
   basis: ["D2", "E4", "E5"],
 };
 
+/**
+ * The draft text still names PO because it predates the 2026-08-01 ruling; it is
+ * kept verbatim. The PO column is no longer part of what this question seals —
+ * `po_floor` settled it for every family — so this question now covers the other
+ * six columns only.
+ */
 export const Q_REPAIR_RECIPE: SesCaptainQuestion = {
   id: "repair_recipe",
   title: "Repair recipe",
@@ -232,9 +280,17 @@ export const Q_CANCELLED_FLOOR: SesCaptainQuestion = {
   basis: ["E8"],
 };
 
-/** The nine open Captain questions, in draft §6 order. */
-export const SES_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
+/**
+ * The Captain questions the ruler has answers for. Provenance only — a resolved
+ * question is unreachable from every cell (see `q()`), so it can never reappear
+ * in a reading's `open_questions`.
+ */
+export const SES_RESOLVED_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
   Q_PO_FLOOR,
+];
+
+/** The eight still-open Captain questions, in draft §6 order. */
+export const SES_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
   Q_GHL_EQUIVALENCE,
   Q_REPORT_READY_AUTHORITY,
   Q_TERMINAL_EVIDENCE,
@@ -245,8 +301,14 @@ export const SES_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
   Q_CANCELLED_FLOOR,
 ];
 
+/** Every question the draft raised, open or ruled, in draft §6 order. */
+export const SES_ALL_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
+  Q_PO_FLOOR,
+  ...SES_CAPTAIN_QUESTIONS,
+];
+
 const QUESTIONS_BY_ID = new Map<SesCaptainQuestionId, SesCaptainQuestion>(
-  SES_CAPTAIN_QUESTIONS.map((question) => [question.id, question]),
+  SES_ALL_CAPTAIN_QUESTIONS.map((question) => [question.id, question]),
 );
 
 export function sesCaptainQuestion(
@@ -292,6 +354,17 @@ function q(
   if (questions.length === 0) {
     throw new Error("a question cell must name at least one Captain question");
   }
+  for (const id of questions) {
+    // A ruled question is settled. Re-opening a cell under it would quietly
+    // undo the Captain's answer, so refuse it at table-construction time.
+    const resolution = sesCaptainQuestion(id).resolution;
+    if (resolution) {
+      throw new Error(
+        `Captain question "${id}" was resolved on ${resolution.ruled_on} ` +
+          `("${resolution.ruling}") and cannot gate a cell`,
+      );
+    }
+  }
   return { level: "question", questions };
 }
 
@@ -321,6 +394,12 @@ function stageRow(row: StageRow): Record<
   };
 }
 
+/**
+ * A family whose reporting recipe the Captain has not sealed. Every cell is open
+ * under that family's recipe question EXCEPT `po`: the 2026-08-01 `po_floor`
+ * ruling is family-independent ("every card"), so an unsealed recipe does not
+ * exempt a card from the PO floor.
+ */
 function unsealedFamily(
   recipe: SesCaptainQuestionId,
 ): Record<SesEvidenceStage, Record<SesEvidenceItem, SesEvidenceRequirement>> {
@@ -331,7 +410,7 @@ function unsealedFamily(
     q(recipe),
     q(recipe),
     q(recipe),
-    q(recipe),
+    REQ,
   ]);
   return {
     new: row,
@@ -354,9 +433,9 @@ function physicalShapedFamily(): Record<
   Record<SesEvidenceItem, SesEvidenceRequirement>
 > {
   return {
-    new: stageRow([REQ, NA, OPT, OPT, OPT, OPT, q("po_floor")]),
-    allocated: stageRow([REQ, NA, OPT, OPT, OPT, OPT, q("po_floor")]),
-    trade_report_in: stageRow([REQ, NA, REQ, REQ, OPT, OPT, q("po_floor")]),
+    new: stageRow([REQ, NA, OPT, OPT, OPT, OPT, REQ]),
+    allocated: stageRow([REQ, NA, OPT, OPT, OPT, OPT, REQ]),
+    trade_report_in: stageRow([REQ, NA, REQ, REQ, OPT, OPT, REQ]),
     report_ready: stageRow([
       REQ,
       NA,
@@ -364,7 +443,7 @@ function physicalShapedFamily(): Record<
       q("report_ready_authority"),
       q("report_ready_authority"),
       q("report_ready_authority"),
-      q("po_floor"),
+      REQ,
     ]),
     completed: stageRow([
       q("terminal_evidence"),
@@ -373,7 +452,7 @@ function physicalShapedFamily(): Record<
       q("terminal_evidence"),
       q("terminal_evidence"),
       REQ,
-      q("po_floor", "terminal_evidence"),
+      REQ,
     ]),
     archive: stageRow([
       q("terminal_evidence"),
@@ -382,7 +461,7 @@ function physicalShapedFamily(): Record<
       q("terminal_evidence"),
       q("terminal_evidence"),
       REQ,
-      q("po_floor", "terminal_evidence"),
+      REQ,
     ]),
     cancelled: stageRow([
       q("cancelled_floor"),
@@ -391,7 +470,7 @@ function physicalShapedFamily(): Record<
       q("cancelled_floor"),
       q("cancelled_floor"),
       q("cancelled_floor"),
-      q("po_floor", "cancelled_floor"),
+      REQ,
     ]),
   };
 }
@@ -418,9 +497,9 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
   // §4.3 Ordinary roof report, Prime portal mode. The portal IS the report, so
   // trade report and photo/media evidence are N-A for the family.
   ordinary_roof_portal: {
-    new: stageRow([REQ, OPT, NA, NA, OPT, OPT, q("po_floor")]),
-    allocated: stageRow([REQ, OPT, NA, NA, OPT, OPT, q("po_floor")]),
-    trade_report_in: stageRow([REQ, REQ, NA, NA, OPT, OPT, q("po_floor")]),
+    new: stageRow([REQ, OPT, NA, NA, OPT, OPT, REQ]),
+    allocated: stageRow([REQ, OPT, NA, NA, OPT, OPT, REQ]),
+    trade_report_in: stageRow([REQ, REQ, NA, NA, OPT, OPT, REQ]),
     report_ready: stageRow([
       REQ,
       REQ,
@@ -428,7 +507,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms"),
       q("report_ready_authority"),
-      q("po_floor"),
+      REQ,
     ]),
     completed: stageRow([
       q("terminal_evidence"),
@@ -437,7 +516,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      q("po_floor", "terminal_evidence"),
+      REQ,
     ]),
     archive: stageRow([
       q("terminal_evidence"),
@@ -446,7 +525,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      q("po_floor", "terminal_evidence"),
+      REQ,
     ]),
     cancelled: stageRow([
       q("cancelled_floor"),
@@ -455,7 +534,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms", "cancelled_floor"),
       q("cancelled_floor"),
-      q("po_floor", "cancelled_floor"),
+      REQ,
     ]),
   },
 
@@ -463,8 +542,8 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
   // slot here. The matrix forbids a portal deliverable while the current stage
   // gate requires one, so both the prime link and the report-in proof are open.
   own_template_roof: {
-    new: stageRow([REQ, NA, OPT, NA, OPT, OPT, q("po_floor")]),
-    allocated: stageRow([REQ, NA, OPT, NA, OPT, OPT, q("po_floor")]),
+    new: stageRow([REQ, NA, OPT, NA, OPT, OPT, REQ]),
+    allocated: stageRow([REQ, NA, OPT, NA, OPT, OPT, REQ]),
     trade_report_in: stageRow([
       REQ,
       q("own_document_roof_report_in"),
@@ -472,7 +551,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       OPT,
       OPT,
-      q("po_floor"),
+      REQ,
     ]),
     report_ready: stageRow([
       REQ,
@@ -481,7 +560,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms"),
       q("report_ready_authority"),
-      q("po_floor"),
+      REQ,
     ]),
     completed: stageRow([
       q("terminal_evidence"),
@@ -490,7 +569,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      q("po_floor", "terminal_evidence"),
+      REQ,
     ]),
     archive: stageRow([
       q("terminal_evidence"),
@@ -499,7 +578,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      q("po_floor", "terminal_evidence"),
+      REQ,
     ]),
     cancelled: stageRow([
       q("cancelled_floor"),
@@ -508,7 +587,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       NA,
       q("report_only_swms", "cancelled_floor"),
       q("cancelled_floor"),
-      q("po_floor", "cancelled_floor"),
+      REQ,
     ]),
   },
 
@@ -524,7 +603,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       OPT,
       q("report_only_swms"),
       OPT,
-      q("po_floor"),
+      REQ,
     ]),
     allocated: stageRow([
       REQ,
@@ -533,7 +612,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       OPT,
       q("report_only_swms"),
       OPT,
-      q("po_floor"),
+      REQ,
     ]),
     trade_report_in: stageRow([
       REQ,
@@ -542,7 +621,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       REQ,
       q("report_only_swms"),
       OPT,
-      q("po_floor"),
+      REQ,
     ]),
     report_ready: stageRow([
       REQ,
@@ -551,7 +630,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       REQ,
       q("report_only_swms"),
       q("report_ready_authority"),
-      q("po_floor"),
+      REQ,
     ]),
     completed: stageRow([
       q("terminal_evidence"),
@@ -560,7 +639,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       q("terminal_evidence"),
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      q("po_floor", "terminal_evidence"),
+      REQ,
     ]),
     archive: stageRow([
       q("terminal_evidence"),
@@ -569,7 +648,7 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       q("terminal_evidence"),
       q("report_only_swms", "terminal_evidence"),
       REQ,
-      q("po_floor", "terminal_evidence"),
+      REQ,
     ]),
     cancelled: stageRow([
       q("cancelled_floor"),
@@ -578,11 +657,12 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
       q("cancelled_floor"),
       q("report_only_swms", "cancelled_floor"),
       q("cancelled_floor"),
-      q("po_floor", "cancelled_floor"),
+      REQ,
     ]),
   },
 
-  // §4.6 Repair: family exists, recipe unsealed. No cell may be promoted.
+  // §4.6 Repair: family exists, recipe unsealed. No cell may be promoted by a
+  // code change; only `po` is settled, by the 2026-08-01 Captain ruling.
   repair: unsealedFamily("repair_recipe"),
 
   // §4.7 Restoration: typed first-class family, recipe unsealed.

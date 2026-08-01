@@ -634,13 +634,45 @@ on a `required` cell fails. `ghl_equivalence` is the one question attached to an
 item rather than a cell, so a GHL-only portal link is undetermined at required
 AND optional cells.
 
+A Captain ruling is recorded, never absorbed. `Q_PO_FLOOR` is the worked
+example: it stays exported carrying a `resolution`, moves out of
+`SES_CAPTAIN_QUESTIONS` into `SES_RESOLVED_CAPTAIN_QUESTIONS`, and `q()` throws
+if a resolved question is ever named by a cell again. Answer a question that
+way, bump `SES_EVIDENCE_CONTRACT_VERSION`, and every past measurement stays
+attributable to the ruler that produced it. `po` is REQUIRED in all 49 rows as
+of 2026-08-01 ("of course every card needs a po"), including the unsealed
+repair and restoration recipes — an unsealed recipe is not a PO exemption.
+
 Families and stages are imported from `ses_family_matrix.ts` and
 `makesafe_computed_status.ts` rather than restated, and `unknown` is refused
 rather than measured. `scripts/ses-measure-card-evidence.ts` is the read-only
-single-card entrypoint C2 batches over; it reuses ops-api's own doc-boolean and
-cycle-scoping derivations, and reports `stage_source` rather than implying a
-stage. Contract, modelling decisions, transit heuristics and the verification
-baseline are in `docs/evidence/ses-evidence-ruler-c1-2026-08-01.md`.
+single-card entrypoint, and `scripts/ses-c2-measure-board-evidence.ts` batches
+it over the whole board in nine read-only queries — run that before and after
+any ruler change and report both count sets. Contract, modelling decisions,
+transit heuristics and the verification baseline are in
+`docs/evidence/ses-evidence-ruler-c1-2026-08-01.md`; the PO ruling and its
+measured board effect are in
+`docs/evidence/ses-c3-po-ruling-and-suburb-backfill-2026-08-01.md`.
+
+## `jobs.site_suburb` Is Suburb-Scoped, And Backfills Are Ledgered
+
+The Ops board renders `jobs.site_suburb` alone and falls back to the literal
+"Suburb TBC", so a full address written into that field would put a client's
+street address on the board. Extract the suburb; never widen the field.
+`scripts/apply-ses-c3-suburb-backfill-v1.ts` is the pattern for any card-data
+backfill here: a closed hand-checked fixture with no discovery step, live
+re-derivation at both dry-run and apply time (production is the data source,
+the fixture only authorises), writes through the existing typed ops-api
+`update_job_field` action rather than raw SQL, a committed before/after ledger,
+and a `--mode verify` re-read that also proves board stage unchanged. Evidence:
+`docs/evidence/ses-c3-po-ruling-and-suburb-backfill-2026-08-01.md`.
+
+The forward extraction bug is still open: `makesafe_deterministic_intake.ts`
+sets `site_suburb` from the email SUBJECT only and no builder parsing rule
+defines the field, so a body-address builder keeps producing blank suburbs. The
+in-repo `addressSuburb()` also misses a comma before `WA` and a trailing
+`, Australia`; `deriveSuburb()` in the backfill script handles both and is the
+reference for that fix.
 
 ## Missing SES Work-Order PDFs Are Re-Attached, Never Re-Minted
 

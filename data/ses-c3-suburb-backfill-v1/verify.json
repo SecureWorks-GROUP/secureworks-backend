@@ -1,0 +1,188 @@
+{
+  "run": "ses-c3-suburb-backfill-v1",
+  "applied": 29,
+  "skipped": 1,
+  "failures": [],
+  "cards": [
+    {
+      "card": "SWMS-261022",
+      "site_suburb": "Helena Valley",
+      "stage_unchanged": true,
+      "source_quote": ", Helena Valley, WA 6056"
+    },
+    {
+      "card": "SWMS-261064",
+      "site_suburb": "Dianella",
+      "stage_unchanged": true,
+      "source_quote": ", Dianella WA 6059"
+    },
+    {
+      "card": "SWMS-261067",
+      "site_suburb": "Waikiki",
+      "stage_unchanged": true,
+      "source_quote": ", Waikiki WA 6169"
+    },
+    {
+      "card": "SWMS-261068",
+      "site_suburb": "Dalkeith",
+      "stage_unchanged": true,
+      "source_quote": ", DALKEITH WA 6009"
+    },
+    {
+      "card": "SWMS-261074",
+      "site_suburb": "Canning Vale",
+      "stage_unchanged": true,
+      "source_quote": ", CANNING VALE WA 6155"
+    },
+    {
+      "card": "SWMS-261075",
+      "site_suburb": "Thornlie",
+      "stage_unchanged": true,
+      "source_quote": ", Thornlie WA 6108"
+    },
+    {
+      "card": "SWMS-261076",
+      "site_suburb": "Geographe",
+      "stage_unchanged": true,
+      "source_quote": ", Geographe WA 6280"
+    },
+    {
+      "card": "SWMS-261077",
+      "site_suburb": "Connolly",
+      "stage_unchanged": true,
+      "source_quote": ", Connolly WA 6027"
+    },
+    {
+      "card": "SWMS-261082",
+      "site_suburb": "Dalyellup",
+      "stage_unchanged": true,
+      "source_quote": ", Dalyellup WA 6230"
+    },
+    {
+      "card": "SWMS-261083",
+      "site_suburb": "East Bunbury",
+      "stage_unchanged": true,
+      "source_quote": ", East Bunbury WA 6230"
+    },
+    {
+      "card": "SWMS-261084",
+      "site_suburb": "Kensington",
+      "stage_unchanged": true,
+      "source_quote": ", Kensington WA 6151"
+    },
+    {
+      "card": "SWMS-261085",
+      "site_suburb": "Yanchep",
+      "stage_unchanged": true,
+      "source_quote": ", Yanchep WA 6035"
+    },
+    {
+      "card": "SWMS-261086",
+      "site_suburb": "Ardross",
+      "stage_unchanged": true,
+      "source_quote": ", Ardross WA 6153"
+    },
+    {
+      "card": "SWMS-261087",
+      "site_suburb": "Hocking",
+      "stage_unchanged": true,
+      "source_quote": ", Hocking WA 6065"
+    },
+    {
+      "card": "SWMS-261088",
+      "site_suburb": "Ballajura",
+      "stage_unchanged": true,
+      "source_quote": ", BALLAJURA WA 6066"
+    },
+    {
+      "card": "SWMS-261089",
+      "site_suburb": "Koondoola",
+      "stage_unchanged": true,
+      "source_quote": ", KOONDOOLA WA 6064"
+    },
+    {
+      "card": "SWMS-261091",
+      "site_suburb": "Bennett Springs",
+      "stage_unchanged": true,
+      "source_quote": ", Bennett Springs WA 6063"
+    },
+    {
+      "card": "SWMS-261092",
+      "site_suburb": "Darch",
+      "stage_unchanged": true,
+      "source_quote": ", Darch WA 6065"
+    },
+    {
+      "card": "SWMS-261093",
+      "site_suburb": "Willetton",
+      "stage_unchanged": true,
+      "source_quote": ", Willetton WA 6155"
+    },
+    {
+      "card": "SWMS-261094",
+      "site_suburb": "Riverton",
+      "stage_unchanged": true,
+      "source_quote": ", Riverton WA 6148"
+    },
+    {
+      "card": "SWMS-261095",
+      "site_suburb": "Nollamara",
+      "stage_unchanged": true,
+      "source_quote": ", Nollamara WA 6061"
+    },
+    {
+      "card": "SWMS-261096",
+      "site_suburb": "Joondanna",
+      "stage_unchanged": true,
+      "source_quote": ", JOONDANNA WA 6060"
+    },
+    {
+      "card": "SWMS-261097",
+      "site_suburb": "Greenfields",
+      "stage_unchanged": true,
+      "source_quote": ", Greenfields WA 6210"
+    },
+    {
+      "card": "SWMS-261099",
+      "site_suburb": "Singleton",
+      "stage_unchanged": true,
+      "source_quote": ", SINGLETON WA 6175"
+    },
+    {
+      "card": "SWMS-261100",
+      "site_suburb": "Bedford",
+      "stage_unchanged": true,
+      "source_quote": ", Bedford WA 6052"
+    },
+    {
+      "card": "SWMS-261101",
+      "site_suburb": "Forrestfield",
+      "stage_unchanged": true,
+      "source_quote": ", Forrestfield WA 6058"
+    },
+    {
+      "card": "SWMS-261102",
+      "site_suburb": "Alexander Heights",
+      "stage_unchanged": true,
+      "source_quote": ", Alexander Heights WA 6064"
+    },
+    {
+      "card": "SWMS-261109",
+      "site_suburb": "Bertram",
+      "stage_unchanged": true,
+      "source_quote": ", Bertram WA 6167"
+    },
+    {
+      "card": "SWMS-26393",
+      "site_suburb": "Beeliar",
+      "stage_unchanged": true,
+      "source_quote": ", Beeliar WA 6164"
+    },
+    {
+      "card": "SWMS-261124",
+      "site_suburb": null,
+      "skipped_reason": "no_locatable_suburb_in_source",
+      "stage_unchanged": true
+    }
+  ]
+}

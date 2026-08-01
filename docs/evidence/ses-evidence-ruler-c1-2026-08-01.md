@@ -2,8 +2,14 @@
 
 **Date:** 2026-08-01 (Australia/Perth)
 **Status:** the ruler is built and tested. The contract it encodes is still a
-DRAFT: nine Captain questions remain open, so the ruler measures but does not
-yet adjudicate.
+DRAFT: nine Captain questions were open at the time of writing, so the ruler
+measures but does not yet adjudicate.
+**Superseded in part, 2026-08-01:** the Captain ruled `po_floor` ("of course
+every card needs a po"). The PO cell is now REQUIRED in all 49 rows, eight
+questions remain open, and the contract version is
+`ses-evidence-requirements/c1-po-ruling-v2`. This document is the C1 record as
+built; the ruling and its measured board effect are in
+`docs/evidence/ses-c3-po-ruling-and-suburb-backfill-2026-08-01.md`.
 **Gate cleared before this ticket:** the Phase A/B certificate
 (`docs/evidence/ses-ab-certificate-2026-08-01.md`, PR 464).
 
@@ -54,7 +60,7 @@ evidence anchors:
 
 | Id | Blocks |
 | --- | --- |
-| `po_floor` | every PO cell of all five defined families, at every stage |
+| `po_floor` | ~~every PO cell of all five defined families, at every stage~~ — RULED 2026-08-01, all 49 PO cells are now REQUIRED |
 | `ghl_equivalence` | whether a GHL object can satisfy a Prime obligation |
 | `report_ready_authority` | the artifacts `report_ready` trusts without rechecking |
 | `terminal_evidence` | what `completed`/`archive` must retain, and the legacy-orphan exception |
@@ -204,6 +210,7 @@ were GET/HEAD only and wrote nothing.
 ## 10. What C1 deliberately did NOT do
 
 - It did not answer, soften or work around any of the nine Captain questions.
+  (`po_floor` was subsequently answered by the Captain, not by C1.)
 - It did not measure the live board. C2 owns batching this entrypoint.
 - It did not promote the draft contract to a versioned source of truth. The
   contract version is `ses-evidence-requirements/c1-draft-v1` precisely so a
