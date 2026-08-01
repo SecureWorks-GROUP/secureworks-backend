@@ -126,6 +126,23 @@ export function authorizeAttachedDocumentStamp(
   return { authorized: true, documentId: live.document_id };
 }
 
+export function verifyLedgerDocumentOutcome(
+  entry: {
+    outcome?: string;
+    reason?: string | null;
+    document_id?: string | null;
+    observed_version?: number | null;
+  } | null,
+): string | null {
+  if (entry?.outcome !== "skipped" ||
+    !entry.reason?.startsWith("attach_updated_preexisting_document:")) {
+    return null;
+  }
+  return `attach_updated_preexisting_document_needs_adjudication:${
+    entry.document_id ?? "unknown"
+  }:version=${entry.observed_version ?? "unknown"}`;
+}
+
 export function authorizeResumeStamp(
   entry: any,
   row: FixtureRow,
@@ -979,6 +996,7 @@ async function runApply(
           if (!ownership.authorized) {
             record.outcome = "skipped";
             record.reason = ownership.reason;
+            record.observed_version = liveDocument?.version ?? null;
             skipped++;
             ledger.push(record);
             await flush();
@@ -1119,7 +1137,9 @@ async function runVerify(
         problems.push("builder_wo_doc_still_absent");
       }
     } else if (cardDocs.length !== 0) {
-      problems.push("skipped_card_gained_a_work_order_row");
+      const explicitOutcome = verifyLedgerDocumentOutcome(applied);
+      if (explicitOutcome) problems.push(explicitOutcome);
+      else problems.push("skipped_card_gained_a_work_order_row");
     }
 
     // Board stage must be untouched on EVERY card, applied or skipped.

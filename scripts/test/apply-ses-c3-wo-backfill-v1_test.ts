@@ -9,6 +9,7 @@ import {
   evaluateEligibility,
   authorizeResumeStamp,
   authorizeAttachedDocumentStamp,
+  verifyLedgerDocumentOutcome,
   type FixtureRow,
   parseFixture,
   parseMode,
@@ -30,6 +31,17 @@ Deno.test("attach stamping requires version-one creation ownership", () => {
     authorized: false,
     reason: "attach_updated_preexisting_document:doc-1:version=2",
   });
+});
+
+Deno.test("verify keeps pre-existing updates as adjudication failures", () => {
+  const problem = verifyLedgerDocumentOutcome({
+    outcome: "skipped",
+    reason: "attach_updated_preexisting_document:doc-1:version=2",
+    document_id: "doc-1",
+    observed_version: 2,
+  });
+  assertEquals(problem, "attach_updated_preexisting_document_needs_adjudication:doc-1:version=2");
+  assertEquals(verifyLedgerDocumentOutcome({ outcome: "skipped" }), null);
 });
 
 const fixtureUrl = new URL(
