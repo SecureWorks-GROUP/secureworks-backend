@@ -38,4 +38,3 @@ CREATE TRIGGER trg_makesafe_source_job_links_append_only
 
 COMMENT ON TABLE public.makesafe_source_job_links IS
   'Append-only adjudicated connectivity between an intake source and an existing MakeSafe job. This table does not alter intake authority or job lifecycle state.';
-
