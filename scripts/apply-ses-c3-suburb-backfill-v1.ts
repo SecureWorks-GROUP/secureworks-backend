@@ -371,12 +371,15 @@ export type Decision =
  *
  * The derivation is recomputed from production rather than trusted from the
  * fixture: the fixture is the authorisation list, not the data source. Any
- * disagreement is a refusal, never a silent overwrite.
+ * identity or data disagreement is a refusal, never a silent overwrite.
  */
 export function evaluateCard(row: FixtureRow, live: LiveCard | null): Decision {
   if (!live) return { action: "refuse", reason: "card_not_found" };
   if (live.jobId !== row.jobId) {
     return { action: "refuse", reason: "job_id_drift" };
+  }
+  if (live.caseId !== row.caseId) {
+    return { action: "refuse", reason: "intake_case_identity_drift" };
   }
   if ((live.siteSuburb ?? "").trim() !== "") {
     return {

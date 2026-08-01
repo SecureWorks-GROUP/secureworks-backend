@@ -151,9 +151,9 @@ across all 407 cards — `job_ref | stage | computed_stage | display_overlay_sta
 | B — builder work-order PDF text | 1 | SWMS-261022: `work_order_MLB-26195PO-56431_…pdf` extracted text reads `Site Address <street>, Helena Valley, WA 6056` |
 | C — job's own make-safe report document | 1 | SWMS-26393: a manually created 2026-06-02 AJ job predating deterministic intake; its report file name embeds `<street>-Beeliar-WA-6164` |
 
-`evaluateCard` refuses to write when the tier-A intake-case address no longer
-derives the same suburb as the job address, so a card whose two sources disagree
-is a loud refusal rather than a coin toss.
+`evaluateCard` refuses to write when the tier-A intake-case identity or address
+no longer agrees with the fixture and job address, so a card whose sources
+disagree is a loud refusal rather than a coin toss.
 
 ---
 

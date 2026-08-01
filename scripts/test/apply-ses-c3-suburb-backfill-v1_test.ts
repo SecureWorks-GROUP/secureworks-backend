@@ -191,6 +191,34 @@ Deno.test("a disagreeing intake case address blocks the write", () => {
   assertEquals(disagrees.reason, "intake_case_address_disagrees");
 });
 
+Deno.test("a disagreeing intake case identity blocks the write", () => {
+  const row = FIXTURE.find((r) => r.card === "SWMS-261064")!;
+  const matching = evaluateCard(row, liveFor(row));
+  assertEquals(matching.action, "fill");
+
+  const repointed = evaluateCard(
+    row,
+    liveFor(row, { caseId: "00000000-0000-4000-8000-000000000000" }),
+  );
+  assertEquals(repointed.action, "refuse");
+  assert(repointed.action === "refuse");
+  assertEquals(repointed.reason, "intake_case_identity_drift");
+
+  const vanished = evaluateCard(row, liveFor(row, { caseId: null }));
+  assertEquals(vanished.action, "refuse");
+  assert(vanished.action === "refuse");
+  assertEquals(vanished.reason, "intake_case_identity_drift");
+
+  const appearedRow = { ...row, caseId: null };
+  const appeared = evaluateCard(
+    appearedRow,
+    liveFor(appearedRow, { caseId: "00000000-0000-4000-8000-000000000000" }),
+  );
+  assertEquals(appeared.action, "refuse");
+  assert(appeared.action === "refuse");
+  assertEquals(appeared.reason, "intake_case_identity_drift");
+});
+
 Deno.test("an unreadable or re-pointed card is refused", () => {
   const row = FIXTURE.find((r) => r.card === "SWMS-261064")!;
   assertEquals(evaluateCard(row, null).action, "refuse");
