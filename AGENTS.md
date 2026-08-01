@@ -294,14 +294,13 @@ directly through the Management API), so a new migration's version must be
 checked against the LIVE ledger — `supabase_migrations.schema_migrations` — not
 just against `supabase/migrations/`. A repository file whose version matches a
 ledger row of a different name is a `ledger version/name collision` and fails the
-whole deploy run before any migration or function ships. That is what happened to
-PR 457: `20260801000001` was already taken in production by the out-of-band
-`makesafe_source_job_links`. The fix is to renumber the repository file (and its
-`supabase/rollbacks/` twin and every reference) to an unused version, never to
-add an exclusion or alias — those account for audited debt, not for a migration
-that still has to run. `bash scripts/apply-pending-migrations.sh --dry-run` with
-a production `SUPABASE_ACCESS_TOKEN` reproduces the gate read-only and is the
-cheap pre-merge check.
+whole deploy run before any migration or function ships. The fix is to renumber
+the repository file (and its `supabase/rollbacks/` twin and every reference) to
+an unused version, never to add an exclusion or alias — those account for
+audited debt, not for a migration that still has to run. `bash
+scripts/apply-pending-migrations.sh --dry-run` with a production
+`SUPABASE_ACCESS_TOKEN` reproduces the gate read-only and is the cheap pre-merge
+check. See the owning evidence document for incident-specific decisions.
 
 The post-apply guard refuses only when a declared migration ledger version or
 required queryable marker is absent; ledger name/checksum drift is advisory.
@@ -595,17 +594,9 @@ an archive can never strand work. Never derive the survivor from the
 `external_ref` string form: SWMS-261118 carries the fuller `MLB-26344PO-57087`
 while the worked card SWMS-261065 carries the bare ref.
 
-A card in one of these groups may already carry a display overlay from an
-earlier run, so a plan derived from raw card facts alone is not the plan the
-deployed board produces — always read `makesafe_board_status_applications` too.
-Display `archive` is overloaded: the 2026-07-24 cutover archived cards for being
-completed over seven days ago, and the terminal-display guard cannot tell such a
-survivor from a dead one. It fails closed, which is correct; the resolution is to
-drop the group from `group_keys` (which scopes the dry run and the apply alike),
-never to relax the guard. MLB-23067 is excluded on exactly that basis by captain
-ruling — both its cards already display `archive`, so the ruled outcome already
-holds — while staying in the authorized list, fully adjudicated, for the day its
-display state changes.
+For the current duplicate-survivor apply-set adjudication, including display
+overlay handling and captain rulings, see
+`docs/evidence/makesafe-duplicate-survivors-2026-08-01.md`.
 
 ## The SES Money And Outbound Seal Is Write-Once
 

@@ -6,8 +6,8 @@ Adjudication and planned dry run for the captain's duplicate-survivor ruling
 
 ## `dry-run-plan.json`
 
-The plan `planMakesafeDuplicateSurvivorArchives` produces for the four
-re-verified groups: four archives, zero skips.
+The historical fixture covers four re-verified groups. It is superseded for
+apply decisions by the three-group ruling in the evidence document below.
 
 ```
 SWMS-26998   allocated     -> archive   pointer SWMS-26736    (MLB-25625 roof, PO-54007)
@@ -30,7 +30,7 @@ sequence in the evidence doc, and its response — not this file — is what gat
 the live apply. If that dry run reports a different `before_status`, the planner
 is reading live truth and this file is the stale one.
 
-## This file is superseded — read it as the adjudication, not as the plan
+## This file is superseded — read it as fixture data, not as the plan
 
 Two things landed after it was written, both in
 `docs/evidence/makesafe-duplicate-survivors-2026-08-01.md`:
