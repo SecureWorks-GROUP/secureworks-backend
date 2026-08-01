@@ -504,9 +504,9 @@ export function buildSesCardEvidenceInventory(
     },
     swms: {
       present: (input.docFlags.has_swms_doc && storedSwms) ||
-        !!pack?.swms_doc_id,
-      transit_record_without_artifact: (input.docFlags.has_swms_doc &&
-        !storedSwms) || (!input.docFlags.has_swms_doc && !!pack?.swms_doc_id),
+        (!input.docFlags.has_swms_doc && !!pack?.swms_doc_id),
+      transit_record_without_artifact: input.docFlags.has_swms_doc &&
+        !storedSwms,
       detail: input.docFlags.has_swms_doc
         ? storedSwms
           ? "typed swms document with stored artifact"

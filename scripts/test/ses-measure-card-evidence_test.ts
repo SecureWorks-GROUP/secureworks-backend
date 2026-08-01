@@ -21,6 +21,10 @@ const NO_DOCS = {
 };
 
 function card(overrides: Partial<MeasureCardInput> = {}): MeasureCardInput {
+  const documents = overrides.documents ??
+    (overrides.docFlags?.has_wo
+      ? [{ type: "work_order", storage_url: "storage/wo.pdf" }]
+      : []);
   return {
     job: {
       id: "11111111-1111-4111-8111-111111111111",
@@ -32,7 +36,7 @@ function card(overrides: Partial<MeasureCardInput> = {}): MeasureCardInput {
     detail: { cycle_number: 1, external_links: [] },
     assignments: [],
     serviceReports: [],
-    documents: [],
+    documents,
     docFlags: { ...NO_DOCS },
     media: [],
     invoices: [],
@@ -146,16 +150,39 @@ Deno.test("a work-order row with no stored artifact is distinguished from none a
 
 Deno.test("a SWMS row with no stored artifact is distinguished from none at all", () => {
   const result = buildSesCardEvidenceInventory(card({
+    job: { makesafe_job_family: "general_makesafe" },
     docFlags: { ...NO_DOCS, has_swms_doc: true },
     documents: [{ type: "swms", storage_url: "" }],
     stageOverride: "report_ready",
   }));
-  assertEquals(itemOf(result, "swms").status, "missing");
-  assertEquals(itemOf(result, "swms").signal, "lost_in_transit");
+  assertEquals(result.inventory.swms.present, false);
+  assertEquals(result.inventory.swms.transit_record_without_artifact, true);
   assertStringIncludes(
     itemOf(result, "swms").detail || "",
     "no stored artifact",
   );
+});
+
+Deno.test("a typed blank SWMS row does not get rescued by a pack reference", () => {
+  const result = buildSesCardEvidenceInventory(card({
+    job: { makesafe_job_family: "general_makesafe" },
+    docFlags: { ...NO_DOCS, has_swms_doc: true },
+    documents: [{ type: "swms", storage_url: "" }],
+    packs: [{ swms_doc_id: "swms-doc-1", status: "sent" }],
+    stageOverride: "report_ready",
+  }));
+  assertEquals(result.inventory.swms.present, false);
+  assertEquals(result.inventory.swms.transit_record_without_artifact, true);
+});
+
+Deno.test("a SWMS pack reference stands in when no typed document row exists", () => {
+  const result = buildSesCardEvidenceInventory(card({
+    job: { makesafe_job_family: "general_makesafe" },
+    packs: [{ swms_doc_id: "swms-doc-2", status: "sent" }],
+    stageOverride: "report_ready",
+  }));
+  assertEquals(result.inventory.swms.present, true);
+  assertEquals(result.inventory.swms.transit_record_without_artifact, false);
 });
 
 Deno.test("an ordinary roof card needs a typed link plus a done capture", () => {
