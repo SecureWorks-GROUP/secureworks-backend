@@ -272,9 +272,11 @@ pairs, MLB-25625, MLB-26189 and MLB-26344 included.** The four survivors recorde
 above are therefore authorized.
 
 That confirmation covers the *survivor selection* only. The post-deploy dry run
-(step 3 of the release sequence) still gates the live apply: it must report four
-archives and zero skips, against the same four group keys, before `dry_run` is
-set to false.
+(step 3 of the release sequence) still gates the live apply: it must report THREE
+archives and zero skips against the THREE group keys (`mlb-25625-roof`,
+`mlb-26189-assessment`, `mlb-26344-makesafe`) before `dry_run` is set to false.
+See **Captain ruling 2026-08-01 — MLB-23067 is excluded from the apply set** below
+for why.
 
 ## Pre-existing display overlays the plan did not account for (found 2026-08-01)
 
