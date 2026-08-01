@@ -595,6 +595,18 @@ an archive can never strand work. Never derive the survivor from the
 `external_ref` string form: SWMS-261118 carries the fuller `MLB-26344PO-57087`
 while the worked card SWMS-261065 carries the bare ref.
 
+A card in one of these groups may already carry a display overlay from an
+earlier run, so a plan derived from raw card facts alone is not the plan the
+deployed board produces — always read `makesafe_board_status_applications` too.
+Display `archive` is overloaded: the 2026-07-24 cutover archived cards for being
+completed over seven days ago, and the terminal-display guard cannot tell such a
+survivor from a dead one. It fails closed, which is correct; the resolution is to
+drop the group from `group_keys` (which scopes the dry run and the apply alike),
+never to relax the guard. MLB-23067 is excluded on exactly that basis by captain
+ruling — both its cards already display `archive`, so the ruled outcome already
+holds — while staying in the authorized list, fully adjudicated, for the day its
+display state changes.
+
 ## The SES Money And Outbound Seal Is Write-Once
 
 The write-once SES money/outbound seal and its approved invoice-void release

@@ -227,22 +227,25 @@ Migration first, per `docs/project-knowledge/EDGE_DEPLOY_LANE.md`:
 > the reviewed file (`sha256 85f12ef63136c998bdff2afcfd38ca6e1d73da908f4aaae1e5a7215557a6ebc5`);
 > only the version changed. Steps 1 and 2 therefore both run from the merge of
 > the renumbered branch to `main`.
-3. Dry run — the default — and confirm four archives and zero skips:
+3. Dry run — the default — scoped to the three groups still in the apply set
+   (see the MLB-23067 exclusion below), and confirm **three** archives and zero
+   skips:
 
    ```bash
    curl --fail-with-body -sS -H "x-api-key: ${SW_API_KEY}" \
      -H 'content-type: application/json' \
      "${MAKESAFE_OPS_URL}?action=makesafe_duplicate_survivor_archive" \
-     --data '{"dry_run": true}'
+     --data '{"dry_run": true, "group_keys": ["mlb-25625-roof",
+              "mlb-26189-assessment", "mlb-26344-makesafe"]}'
    ```
 
-4. Only then, with the captain's confirmation of the four picks:
+4. Only then, with the captain's confirmation of the picks:
 
    ```json
    {
      "dry_run": false,
      "group_keys": ["mlb-25625-roof", "mlb-26189-assessment",
-                    "mlb-23067-makesafe", "mlb-26344-makesafe"],
+                    "mlb-26344-makesafe"],
      "run_key": "makesafe-duplicate-survivors-20260801",
      "applied_by": "captain-approved-duplicate-survivors",
      "evidence_ref": "docs/evidence/makesafe-duplicate-survivors-2026-08-01.md"
@@ -251,6 +254,11 @@ Migration first, per `docs/project-knowledge/EDGE_DEPLOY_LANE.md`:
 
 Any skipped group, any count mismatch, or any stranded survivor in the response
 is a hard stop.
+
+`group_keys` scopes the planner for the dry run and the live apply alike, and a
+live apply refuses without it. Excluding a group is therefore a parameter
+choice, not a code change and not a guard bypass — `MAKESAFE_AUTHORIZED_DUPLICATE_GROUPS`
+keeps all four entries and MLB-23067 stays fully adjudicated in this document.
 
 ## Delegation scope — confirmed 2026-08-01
 
@@ -304,3 +312,28 @@ Two things follow, and neither is settled by the delegation above:
   a done-and-archived survivor from a dead one, and deliberately fails closed.
   Whether MLB-23067 still needs a duplicate archive at all, given both its cards
   already display `archive`, is a captain question, not a planner question.
+
+### Captain ruling 2026-08-01 — MLB-23067 is excluded from the apply set
+
+**`mlb-23067-makesafe` is not applied.** Both its cards already display
+`archive`, so the ruled outcome — the duplicate off the live board, the delivery
+card not shown as outstanding work — already holds. Applying would buy a pointer
+column and nothing else, and the only way to get it would be to force past a
+guard that is correctly refusing.
+
+The ruling is explicit that the guard is **not** to be forced, relaxed or worked
+around. MLB-23067 keeps its full adjudication above and its entry in
+`MAKESAFE_AUTHORIZED_DUPLICATE_GROUPS`; it is simply left out of the `group_keys`
+of the dry run and the apply. If its display state later changes so that either
+card returns to a live stage, the group is already adjudicated and can be applied
+then without re-litigating the survivor pick.
+
+The apply set is therefore **three** groups: `mlb-25625-roof`,
+`mlb-26189-assessment`, `mlb-26344-makesafe`. The gate is three archives and zero
+skips.
+
+`SWMS-261065` (survivor, MLB-26344) also carries an `archive` overlay, but its
+`source_status` is `new` while the card now sits at `admin_to_send_report`, so
+the overlay is expected to read stale and not apply. That expectation is not
+load-bearing: if it turns out to be live, the dry run reports a skip and the run
+stops, exactly as it should.
