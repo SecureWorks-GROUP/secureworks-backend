@@ -567,6 +567,20 @@ display stages and terminal job states are structurally read-only. The release
 sequence and seven-card first tranche are in
 `docs/makesafe-board-truth-cutover-2026-07-24.md`.
 
+An overlay only binds while its `source_status` equals the freshly derived
+`board_stage`, so before calling a ledger row stale, read the card's CURRENT
+derived stage — linking an AUTHORISED invoice to a card with no close-out docs
+moves it to `report_ready` on its own. Never diagnose a display stage from the
+rendered board alone: `ops.html` retries `makesafe_board` twice and then silently
+falls back to `makesafe_pipeline`, which buckets on raw `board_stage` and never
+reads `makesafe_board_status_current`, so on that fallback EVERY captain display
+transition is invisible. `makesafe_board&contract_version=v2` is the read that
+survives an intake-exception failure, because the v1 ops projection awaits
+`_loadIntakeExceptionProjection` in the same `Promise.all` and one bad post 500s
+the whole board. Worked example, including the 2026-08-01 `intake source issue
+uniqueness violated` outage:
+`docs/evidence/ses-261124-archive-display-diagnosis-2026-08-01.md`.
+
 ## Duplicate Board Cards: Prove One Instruction Before Archiving One
 
 A shared claim reference plus a shared street is NOT a duplicate. Two cards are
