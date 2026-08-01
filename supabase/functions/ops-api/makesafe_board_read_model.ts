@@ -549,6 +549,7 @@ export function buildCanonicalMakesafeRows(
       computed_status_hold: computation.hold,
       computed_status_job_type: computation.job_type,
       computed_status_evidence: {
+        closeout_satisfied: computation.closeout_satisfied === true,
         report_received_at: detail?.report_received_at || null,
         has_submitted_service_report: !!report &&
           ["submitted", "approved"].includes(

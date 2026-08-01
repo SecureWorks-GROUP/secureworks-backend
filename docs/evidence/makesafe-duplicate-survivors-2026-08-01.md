@@ -396,11 +396,10 @@ refusal untouched. `survivorArchiveIsNaturalCompletion` in
   `status_application` is null, so no earlier run's decision is being read as
   completion;
 - the card is not itself an archived duplicate, which would build a pointer chain;
-- the independent M1 `computed_status` agrees the work is closed out. That
-  verdict comes from `closeoutSatisfied` — a durable send record plus an
-  `AUTHORISED`/`PAID` `ACCREC` invoice — which is the "done and invoiced"
-  evidence the exception requires, from an engine that knows nothing about
-  duplicates.
+- the read model's independent `closeout_satisfied` verdict is true. It is
+  computed before the display-status short-circuit and requires a durable send
+  record plus an `AUTHORISED`/`PAID` `ACCREC` invoice, which is the "done and
+  invoiced" evidence the exception requires.
 
 No migration accompanies this. The RPC's survivor guard tests raw `jobs.status`
 and the pointer-chain `NOT EXISTS`, never the display stage, so it already

@@ -95,6 +95,7 @@ export interface MakesafeStatusResult {
   reasons: string[];
   missing: string[];
   hold: MakesafeStatusHold | null;
+  closeout_satisfied?: boolean;
 }
 
 const normalizedToken = (value: unknown) =>
@@ -344,6 +345,7 @@ export function computeMakesafeStatus(
       reasons: ["displayed card is already archived"],
       missing,
       hold,
+      closeout_satisfied: closeoutSatisfied(input),
     };
   }
   if (displayedStatus === "completed") {

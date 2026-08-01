@@ -270,11 +270,9 @@ export interface MakesafeDuplicateSurvivorRow extends MakesafeStatusApplyRow {
  *   being read as completion;
  * - the card is not itself an archived duplicate, which would build a pointer
  *   chain;
- * - and the independent M1 computed status agrees the work is closed out. That
- *   verdict comes from `closeoutSatisfied` — a durable send record plus an
- *   AUTHORISED/PAID ACCREC invoice — which is the "done and invoiced" evidence
- *   this exception is meant to require, checked by an engine that knows nothing
- *   about duplicates.
+ * - and the read model's independent closeout verdict is true. That verdict is
+ *   computed before the display-status short-circuit and requires a durable send
+ *   record plus an AUTHORISED/PAID ACCREC invoice.
  *
  * Anything short of all four keeps the original refusal.
  */
@@ -285,7 +283,7 @@ export function survivorArchiveIsNaturalCompletion(
   if (token(survivor?.declared_stage) !== "archive") return false;
   if (survivor?.status_application) return false;
   if (survivor?.duplicate_of_job_id) return false;
-  return ["archive", "completed"].includes(token(survivor?.computed_status));
+  return survivor?.computed_status_evidence?.closeout_satisfied === true;
 }
 
 /**

@@ -176,6 +176,7 @@ const FINISHED_SURVIVOR = {
   computed_status: "archive",
   status_application: null,
   duplicate_of_job_id: null,
+  computed_status_evidence: { closeout_satisfied: true },
 } as const;
 
 Deno.test("a survivor archived by natural completion still absorbs its duplicate", () => {
@@ -189,6 +190,21 @@ Deno.test("a survivor archived by natural completion still absorbs its duplicate
   assertEquals(plan.archives[0].job_number, "SWMS-26791");
   assertEquals(plan.archives[0].duplicate_of_job_number, "SWMS-26787");
   assertEquals(plan.archives[0].after_status, "archive");
+});
+
+Deno.test("display archive without independent closeout evidence is refused", () => {
+  const plan = planMakesafeDuplicateSurvivorArchives(
+    boardRows({
+      "SWMS-26787": {
+        ...FINISHED_SURVIVOR,
+        computed_status_evidence: { closeout_satisfied: false },
+      },
+    }),
+    ["mlb-26189-assessment"],
+    NOW,
+  );
+  assertEquals(plan.archives, []);
+  assertEquals(plan.skipped[0].reason, "survivor_terminal_display_status");
 });
 
 Deno.test("the completion exception does not widen any other survivor refusal", () => {
@@ -220,9 +236,12 @@ Deno.test("the completion exception does not widen any other survivor refusal", 
         { ...FINISHED_SURVIVOR, duplicate_of_job_id: "id-SWMS-26999" },
         "survivor_terminal_display_status",
       ],
-      // The independent computed status does not agree the work is closed out.
+      // The independent closeout evidence does not agree the work is closed out.
       [
-        { ...FINISHED_SURVIVOR, computed_status: "report_ready" },
+        {
+          ...FINISHED_SURVIVOR,
+          computed_status_evidence: { closeout_satisfied: false },
+        },
         "survivor_terminal_display_status",
       ],
       // A terminal job state is refused no matter how the display reads.
