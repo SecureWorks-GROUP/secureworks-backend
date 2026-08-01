@@ -615,42 +615,8 @@ before trusting any claim about intake accounting or adjudicated board truth,
 and after any new correction tranche. It needs only `SUPABASE_ACCESS_TOKEN`
 (Management API `/database/query`, `read_only: true`); it refuses non-SELECT
 statements and client-identifying columns before the request is sent. The dated
-certificate it backs is `docs/evidence/ses-ab-certificate-2026-08-01.md`.
-
-Two rules it encodes, which any later correction pass must respect:
-
-- **The verdict table is never asserted as written.** It is folded forward
-  through the ledgers production actually applied — round 1, round 2 field,
-  round 2 temp fence, the SWMS-26692 backfill, then captain holds — and only the
-  end state is diffed. A fixture read on its own is stale.
-- **FAMILY TRUTH RULE.** Where the production decider on full post-drain inputs
-  re-labels a card an earlier fixture already labelled, the decider wins and the
-  earlier family value is recorded as superseded, not counted as a mismatch.
-  This currently affects exactly 40 cards.
-
-The duplicate/merge accounting is DERIVED at run time from work-order filenames,
-never copied, so a new duplicate cannot appear silently: a group production
-resolves to more than one card and that
-`scripts/ses-ab-certificate-v1.duplicate-accounting.txt` does not adjudicate is
-reported `unaccounted` and fails the run. The correct response to any failure is
-to adjudicate it, never to widen `scripts/ses-ab-certificate-v1.baseline.json`.
-
-Scope: the certificate covers card IDENTITY only — existence, type/family,
-work-order identity, duplicates. It does NOT cover evidence completeness or
-display fields (suburb extraction, PDF attachment presence, reference display);
-those are Phase C. A card can pass every check and still be missing its report,
-photos or suburb.
-
-`b10` (captain rule, 2026-08-01) requires every card in the canonical board
-population to carry a non-blank `makesafe_job_details.external_ref`; a card with
-no detail row counts as an offender. Exactly one card is carved out:
-`SWMS-26001`, the oldest make-safe card, is a named legacy exception under
-decision key `swms-26001-work-order-identity` — pre-window and gmail-sourced, so
-no builder identity is recoverable at the identity floor, though real work is
-evidenced. Exceptions live in `card_work_order_identity_exceptions` in the
-baseline, excuse exactly one named card each, and cannot outlive the defect: a
-named exception whose card has since gained an identity is reported
-`stale_exceptions` and fails the run.
+certificate, scope, ledgers, exceptions, and interpretation rules it backs are
+authoritative in `docs/evidence/ses-ab-certificate-2026-08-01.md`.
 
 ## The SES Money And Outbound Seal Is Write-Once
 
