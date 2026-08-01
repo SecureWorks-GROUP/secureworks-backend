@@ -164,6 +164,84 @@ Deno.test("a dead survivor blocks the archive so work is never stranded", () => 
   }
 });
 
+/**
+ * SWMS-26787 as production actually had it on 2026-08-01: an assessment job that
+ * closed out on 2026-06-30 with an AUTHORISED invoice and a sent report, so the
+ * board archives it as finished. No overlay is involved — this is the card's own
+ * derived stage.
+ */
+const FINISHED_SURVIVOR = {
+  declared_stage: "archive",
+  canonical_stage: "archive",
+  computed_status: "archive",
+  status_application: null,
+  duplicate_of_job_id: null,
+} as const;
+
+Deno.test("a survivor archived by natural completion still absorbs its duplicate", () => {
+  const plan = planMakesafeDuplicateSurvivorArchives(
+    boardRows({ "SWMS-26787": { ...FINISHED_SURVIVOR } }),
+    ["mlb-26189-assessment"],
+    NOW,
+  );
+  assertEquals(plan.skipped, []);
+  assertEquals(plan.archives.length, 1);
+  assertEquals(plan.archives[0].job_number, "SWMS-26791");
+  assertEquals(plan.archives[0].duplicate_of_job_number, "SWMS-26787");
+  assertEquals(plan.archives[0].after_status, "archive");
+});
+
+Deno.test("the completion exception does not widen any other survivor refusal", () => {
+  for (
+    const [override, reason] of [
+      // Cancelled is dead, not finished, however the rest of the card reads.
+      [
+        {
+          ...FINISHED_SURVIVOR,
+          declared_stage: "cancelled",
+          canonical_stage: "cancelled",
+        },
+        "survivor_terminal_display_status",
+      ],
+      // Archived by an earlier run's overlay, not by its own facts.
+      [
+        {
+          ...FINISHED_SURVIVOR,
+          declared_stage: "report_ready",
+          status_application: {
+            run_key: "earlier-run",
+            after_status: "archive",
+          },
+        },
+        "survivor_terminal_display_status",
+      ],
+      // Itself an archived duplicate: accepting it would build a pointer chain.
+      [
+        { ...FINISHED_SURVIVOR, duplicate_of_job_id: "id-SWMS-26999" },
+        "survivor_terminal_display_status",
+      ],
+      // The independent computed status does not agree the work is closed out.
+      [
+        { ...FINISHED_SURVIVOR, computed_status: "report_ready" },
+        "survivor_terminal_display_status",
+      ],
+      // A terminal job state is refused no matter how the display reads.
+      [
+        { ...FINISHED_SURVIVOR, job_state: "cancelled" },
+        "survivor_terminal_job_status",
+      ],
+    ] as const
+  ) {
+    const plan = planMakesafeDuplicateSurvivorArchives(
+      boardRows({ "SWMS-26787": { ...override } }),
+      ["mlb-26189-assessment"],
+      NOW,
+    );
+    assertEquals(plan.archives.length, 0);
+    assertEquals(plan.skipped[0].reason, reason);
+  }
+});
+
 Deno.test("a card already archived as a duplicate is skipped on replay", () => {
   const plan = planMakesafeDuplicateSurvivorArchives(
     boardRows({

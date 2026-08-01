@@ -339,3 +339,79 @@ skips.
 the overlay is expected to read stale and not apply. That expectation is not
 load-bearing: if it turns out to be live, the dry run reports a skip and the run
 stops, exactly as it should.
+
+## Execution record — 2026-08-01
+
+The migration and `ops-api` reached production through workflow run
+`30685465945` (`APPLY 20260801045000`, `PASS migration auto-apply: applied=1`,
+`PASS edge schema preflight`). PR 457's own deploy had failed closed on a ledger
+version collision; see the renumber note under the release sequence.
+
+### First dry run — three groups requested, one skipped
+
+```
+SWMS-26998   allocated -> archive  ptr SWMS-26736   mlb-25625-roof       planned
+SWMS-261118  new       -> archive  ptr SWMS-261065  mlb-26344-makesafe   planned
+mlb-26189-assessment   SKIPPED   survivor_terminal_display_status: archive
+```
+
+Both planned archives matched the committed fixture exactly, `before_status`
+included, and the predicted stale overlay on `SWMS-261065` did read stale. The
+skip was new information, so nothing was applied.
+
+`SWMS-26787` has **zero** rows in `makesafe_board_status_applications`, so its
+`archive` display is not an overlay — it is the card's own derived stage. The
+assessment closed out on 2026-06-30 with an `AUTHORISED` `ACCREC` invoice and a
+report sent 2026-06-29, more than seven days before the run. The board archives
+it because it is **finished**.
+
+That is materially different from MLB-23067, where both cards display `archive`
+and the ruled outcome already holds. Here the loser `SWMS-26791` has no invoice
+and no sent report, so it is not closed out and remains on the live board — the
+duplicate the ruling is meant to remove.
+
+### Tranche 1 — applied
+
+`run_key` `makesafe-duplicate-survivors-20260801-t1`. Dry run rescoped to the two
+clean groups returned two archives and zero skips; the live apply wrote ledger
+rows 45 and 46 and returned an empty `stranded_survivors`.
+
+Verified read-only afterwards, independently of the action's own re-read: both
+losers carry exactly one duplicate row pointing at their survivor, both survivors
+carry none and remain non-terminal, every `jobs.updated_at` still predates the
+apply, assignment and invoice counts are unchanged, and there are **zero**
+`job_events` on any of the four cards since the apply. Evidence:
+`scripts/board-duplicate-survivors-v1.tranche1-{dry-run,apply-ledger,verify}.json`.
+
+### The natural-completion survivor exception
+
+Captain decision: extend the survivor guard minimally so a survivor whose
+`archive` display comes from natural completion is accepted, leaving every other
+refusal untouched. `survivorArchiveIsNaturalCompletion` in
+`makesafe_duplicate_survivor.ts` requires all four of:
+
+- the display is `archive` specifically — `cancelled` still refuses;
+- `declared_stage` is also `archive`, so the stage is the card's own, and
+  `status_application` is null, so no earlier run's decision is being read as
+  completion;
+- the card is not itself an archived duplicate, which would build a pointer chain;
+- the independent M1 `computed_status` agrees the work is closed out. That
+  verdict comes from `closeoutSatisfied` — a durable send record plus an
+  `AUTHORISED`/`PAID` `ACCREC` invoice — which is the "done and invoiced"
+  evidence the exception requires, from an engine that knows nothing about
+  duplicates.
+
+No migration accompanies this. The RPC's survivor guard tests raw `jobs.status`
+and the pointer-chain `NOT EXISTS`, never the display stage, so it already
+accepts `SWMS-26787` (`processing`, no duplicate rows). The change is confined to
+the planner. The RPC's stale-plan guard also still holds for the loser:
+`SWMS-26791` sends `source_status: report_ready` against its 2026-07-24 overlay
+row and `before_status: allocated`, which is that row's `after_status`.
+
+### Tranche 2 — pending
+
+`mlb-26189-assessment` needs this planner change deployed before it can be dry
+run again. It is therefore a separate tranche after this PR merges, gated the
+same way: one archive, zero skips, before `dry_run` goes false.
+
+MLB-23067 stays excluded and is not in either tranche.
