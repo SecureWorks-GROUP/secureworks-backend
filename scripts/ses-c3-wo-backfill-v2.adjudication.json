@@ -1,0 +1,692 @@
+{
+  "run_label": "ses-c3-wo-backfill-tranche2-v1",
+  "generated_for": "SES Phase C3 tranche 2 \u2014 reference/subject-matched builder work orders",
+  "source_worklist": "the 36 current board cards with no typed work_order document, re-derived read-only from production on 2026-08-01; 30 of them have at least one work-order-shaped artifact still in the private makesafe-emails bucket (the C2 report's recoverable tiers B and C)",
+  "adjudication_rule": [
+    "A candidate must be a work-order-shaped PDF in makesafe-emails, status uploaded, not pii-purged, with its storage object still resolving.",
+    "The candidate's extracted PDF text must name the card's own builder reference in the work order's own job/work-order-number field, matched on DIGIT BOUNDARIES. A four-digit reference is a substring of unrelated five- and six-digit job and purchase-order numbers, so a substring hit is not a reference agreement.",
+    "Candidates are grouped by sha256: duplicate transport rows (Graph group post plus mailbox twin) are one artifact, and the earliest row is selected.",
+    "A verdict of attach needs at least TWO independent agreements from {builder reference, street number plus street word, locality, policyholder name token} and no contradiction on any of them.",
+    "When more than one content group survives, the card must additionally be discriminated by a card-bound recorded fact: a purchase-order token named in the card's OWN stored documents, or exactly one candidate whose work-order issue date falls inside the card's creation window. Scope-word similarity and selection-by-exhaustion are inferences and do not qualify.",
+    "Anything less is a skip. Nothing here discovers a card and nothing is guessed."
+  ],
+  "totals": {
+    "cards_adjudicated": 30,
+    "attach": 26,
+    "skip": 4
+  },
+  "attach": [
+    {
+      "card": "AJBR 67005",
+      "verdict": "attach",
+      "reference": "AJBR 67005",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "87f6af26-b061-4b2f-a452-eb1378d77612",
+      "file_name": "Works Order.pdf",
+      "sha256": "8e1a94fdba38d1a157b10dbd20fa0027c9263dfc9d491500f10ccef33d5103a6",
+      "pdf_text_md5": "cb96c1df66b967c0deb8c8f6421b5491",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "03 Jun 2026",
+      "card_created_on": "2026-06-03",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality"
+      ],
+      "agreement_count": 3,
+      "contradictions": []
+    },
+    {
+      "card": "AJBR 67170",
+      "verdict": "attach",
+      "reference": "AJBR 67170",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "4288da56-7c20-46d3-b4a7-8ae197ede6aa",
+      "file_name": "Works Order.pdf",
+      "sha256": "a8e754c6d9da447cc9a550cb3751bf7aa3288daa26fb8b13e2834763a2055aa6",
+      "pdf_text_md5": "6c00e073cb8d2a75d3d922286260e82f",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "02 Jun 2026",
+      "card_created_on": "2026-06-03",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality"
+      ],
+      "agreement_count": 3,
+      "contradictions": []
+    },
+    {
+      "card": "BWCWA6781",
+      "verdict": "attach",
+      "reference": "BWCWA6781",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "dd0e8101-1d35-4132-a9db-771f2b27ad4f",
+      "file_name": "work_order_PO20877_Secure_Works_WA.pdf",
+      "sha256": "0df19ac2564d8ef93a860c13e3e87a28f6aa56452602563983cc8b04f71a5b44",
+      "pdf_text_md5": "b3ad488b54b695ea2c091345ed96e2b6",
+      "selected_work_order_number": "PO-20877",
+      "work_order_issue_date": "03/06/2026",
+      "card_created_on": "2026-06-03",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality"
+      ],
+      "agreement_count": 3,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26440",
+      "verdict": "attach",
+      "reference": "AJBR 67032",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "c245c3c6-ed4d-45e1-b001-28aec872a475",
+      "file_name": "Works Order.pdf",
+      "sha256": "e7b089f39efdbbd5cdd0009c7b794ff46f7c6f7ec76dfde40630a6cc6c40d71f",
+      "pdf_text_md5": "19bd2669ba0a74f8b1b0c728d7c16589",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "02 Jun 2026",
+      "card_created_on": "2026-06-04",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26441",
+      "verdict": "attach",
+      "reference": "AJBR 67004",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "46d10579-67cb-4245-9cce-af68cb5be834",
+      "file_name": "Works Order.pdf",
+      "sha256": "30afb341ad904ff57c5337d9ad12cd175bda022ce3660717f064a5bd3cfba3a0",
+      "pdf_text_md5": "5588bfd08302bc1f3e8c45d402b32902",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "02 Jun 2026",
+      "card_created_on": "2026-06-04",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26442",
+      "verdict": "attach",
+      "reference": "AJBR 66999",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "6419ea02-bcd2-4390-b7f2-cf361aaaca24",
+      "file_name": "Works Order.pdf",
+      "sha256": "20cc81c365b2c6e835f028b21dd4070a68cca0c990699561eef8c5afa21da066",
+      "pdf_text_md5": "2313671c799e9941d3abf1b0bcd20e14",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "02 Jun 2026",
+      "card_created_on": "2026-06-04",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26443",
+      "verdict": "attach",
+      "reference": "AJBR 67142",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "216ae4fb-5229-40e9-8ec1-25bd86277345",
+      "file_name": "Works Order.pdf",
+      "sha256": "42a80bcecfc947c1dd212bfc3c89bcea11dfc6cc5236355e770eeea140815b5f",
+      "pdf_text_md5": "d4f919a84d0740b89a9d0f0523f11199",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "02 Jun 2026",
+      "card_created_on": "2026-06-04",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26444",
+      "verdict": "attach",
+      "reference": "AJBR 66971",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "7980ee31-5d2b-4a68-bc55-69410d3f1438",
+      "file_name": "Works Order.pdf",
+      "sha256": "9197f53f2d5969dce6a59ea8880342f93a730e5eae529d6ee44fc441d34c342f",
+      "pdf_text_md5": "e42dbda54b24d6dbacdd90a327ee3bb9",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "02 Jun 2026",
+      "card_created_on": "2026-06-04",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26445",
+      "verdict": "attach",
+      "reference": "AJBR 67033",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "5419f45f-2cf3-41ee-a426-eff329b9775c",
+      "file_name": "Works Order.pdf",
+      "sha256": "934347ee21d2a48c6b8c75a81702f29be2cfbd7bb207914bc53eed90e806cac2",
+      "pdf_text_md5": "5f550d8dc507f618372fec712830e9e1",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "02 Jun 2026",
+      "card_created_on": "2026-06-04",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26446",
+      "verdict": "attach",
+      "reference": "AJBR 67034",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "bbbcdebc-7652-46f0-bf7e-cb5b98590e3c",
+      "file_name": "Works Order.pdf",
+      "sha256": "0d3677dc0bd2520843beb75b63a6d9e37506dfdb19cd4bb32bdd54d72f86b263",
+      "pdf_text_md5": "124373a86be9751cce67227e031b9d9a",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "02 Jun 2026",
+      "card_created_on": "2026-06-04",
+      "transport": "own_domain_copy",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": [],
+      "note": "pre-archive-window own-copy artifact: the inbound builder email does not exist, the surviving transport row is the SecureWorks own-domain copy. Accepted provenance per the Captain's earlier acceptance."
+    },
+    {
+      "card": "SWMS-26447",
+      "verdict": "attach",
+      "reference": "AJBR 67023",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "5e292373-2322-46c1-a829-0d87313047ea",
+      "file_name": "Works Order.pdf",
+      "sha256": "682e4be245acc3aa94a49466e4a0405dd2f11f25d0d85f351ca67c76eca967e9",
+      "pdf_text_md5": "e31b798d9969b864c25d36cf0447842f",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "02 Jun 2026",
+      "card_created_on": "2026-06-04",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26448",
+      "verdict": "attach",
+      "reference": "AJBR 67045",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "b2502bb2-f425-4379-858d-848d3098c71b",
+      "file_name": "Works Order.pdf",
+      "sha256": "0eb09520bf0d723823e09d507395bde88cd889b29a8264f747e01ef0099bca8f",
+      "pdf_text_md5": "43c3e3af9b71688dcfd9d30cc2147791",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "02 Jun 2026",
+      "card_created_on": "2026-06-04",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26449",
+      "verdict": "attach",
+      "reference": "AJBR 67022",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "a276ebd8-46d4-45cf-ba54-aee7989c5bca",
+      "file_name": "Works Order.pdf",
+      "sha256": "e49b6f2ae2b4e8c56885d5aa855b4a4f7dfdf87988453caa3f3b859bd68e7a07",
+      "pdf_text_md5": "2bc78df08a6bbe1757d8bb248883f834",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "02 Jun 2026",
+      "card_created_on": "2026-06-04",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26450",
+      "verdict": "attach",
+      "reference": "AJBR 66968",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "3faf774a-15c3-4dd5-a965-d053b8c65b4b",
+      "file_name": "Works Order.pdf",
+      "sha256": "758b80525301cfd90fe662b720fa52520466a0faacaeb4477b4e60c736ab79fd",
+      "pdf_text_md5": "5557b9ea6a5387e1d0f27f929aeb01ee",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "01 Jun 2026",
+      "card_created_on": "2026-06-04",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26655",
+      "verdict": "attach",
+      "reference": "MLB-25096",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "5d18d5f3-6911-409e-b268-17c9e9b2302b",
+      "file_name": "work_order_MLB-25096PO-53582_Secureworks_Group_Pty_Ltd.pdf",
+      "sha256": "dc10011165b5fa9b4b151b9bc4593e6b985e6765ca8b53f7b116c382cf949663",
+      "pdf_text_md5": "0eff007631e2b395d01465feb65e058e",
+      "selected_work_order_number": "PO-53582",
+      "work_order_issue_date": "16/06/2026",
+      "card_created_on": "2026-06-17",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality"
+      ],
+      "agreement_count": 3,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26663",
+      "verdict": "attach",
+      "reference": "AJBR 67217-R",
+      "work_order_shaped_content_groups": 2,
+      "content_groups_after_identity_filter": 2,
+      "email_attachment_id": "1cfc181a-269c-4175-948e-88a9e6f0f0ee",
+      "file_name": "Works Order.pdf",
+      "sha256": "c769ada4a614bca9a119bf63d18c12e85cb286163972afb64292d6be4f06b2e2",
+      "pdf_text_md5": "a44d2707e4accae362b6c6d601b357af",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "17 Jun 2026",
+      "card_created_on": "2026-06-17",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": [],
+      "multi_candidate_discriminator": "work_order_issue_date_inside_card_date_window",
+      "note": "two distinct work orders exist for builder job 67217. The 03 Jun one is already the work_order of SWMS-26428 (reference 'AJBR 67217'); this card is the '-R' re-attend round and only the 17 Jun work order falls inside its date window."
+    },
+    {
+      "card": "SWMS-26668",
+      "verdict": "attach",
+      "reference": "AJBR 66883",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "800a4e04-0e72-4191-95b6-7e84c4d76b86",
+      "file_name": "Works Order.pdf",
+      "sha256": "ef2e7d43b87db1103467c33e7de2f3d230dfd29293d023f8cae6049b8e431d8a",
+      "pdf_text_md5": "2b25f7233c93e2ba30140ea0738e18b3",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "01 Jun 2026",
+      "card_created_on": "2026-06-18",
+      "transport": "own_domain_copy",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality"
+      ],
+      "agreement_count": 3,
+      "contradictions": [],
+      "note": "pre-archive-window own-copy artifact: the inbound builder email does not exist, the surviving transport row is the SecureWorks own-domain copy. Accepted provenance per the Captain's earlier acceptance."
+    },
+    {
+      "card": "SWMS-26674",
+      "verdict": "attach",
+      "reference": "AJBR 66923",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "6dd3a970-5465-4ca3-b52a-f3b068c111a9",
+      "file_name": "Works Order.pdf",
+      "sha256": "bedacef899024705947822f0d6bfdb9fa322ff89abdc2152a789a8ab8bb78548",
+      "pdf_text_md5": "49b63a43483e24a2e3d1163e5af77141",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "03 Jun 2026",
+      "card_created_on": "2026-06-18",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality"
+      ],
+      "agreement_count": 3,
+      "contradictions": []
+    },
+    {
+      "card": "SWMS-26679",
+      "verdict": "attach",
+      "reference": "AJBR 66882",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "7d3d8d6e-8e32-4d83-ae4e-2bf93754dfaf",
+      "file_name": "Works Order.pdf",
+      "sha256": "807d0de45651bf2275474a07a568e5fa5a47a761a1e2d92bb51ca311b8fd2504",
+      "pdf_text_md5": "6e9773afc018154db0ced5385efe31cb",
+      "selected_work_order_number": null,
+      "work_order_issue_date": "01 Jun 2026",
+      "card_created_on": "2026-06-18",
+      "transport": "own_domain_copy",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality"
+      ],
+      "agreement_count": 3,
+      "contradictions": [],
+      "note": "own-domain copy is the surviving transport row for this pre-archive-window card."
+    },
+    {
+      "card": "SWMS-26692",
+      "verdict": "attach",
+      "reference": "BWCWA6771",
+      "work_order_shaped_content_groups": 2,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "4707dbb2-c8ea-4ddd-8e49-936f5bc2182c",
+      "file_name": "work_order_PO20854_Secure_Works_WA.pdf",
+      "sha256": "1a8cb80848ab604e298b78b91964cd6b5400c616aede563a4143991b7fffdd77",
+      "pdf_text_md5": "2ad95b670f77f4618833462a79d9a995",
+      "selected_work_order_number": "PO-20854",
+      "work_order_issue_date": "02/06/2026",
+      "card_created_on": "2026-06-18",
+      "transport": "own_domain_copy",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "locality"
+      ],
+      "agreement_count": 2,
+      "contradictions": [],
+      "note": "a second work-order-shaped candidate matched only because the card's 4-digit reference 6771 is a substring of another builder's job number 67713; it names a different builder, claim, locality and policyholder and was rejected on contradiction. The card's stored address holds only the locality, so the street-number agreement could not be asserted; reference and locality carry the verdict."
+    },
+    {
+      "card": "SWMS-26693",
+      "verdict": "attach",
+      "reference": "BWCWA6760",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "762de4a2-d12f-4c93-a2a4-fd7f09d2b6c5",
+      "file_name": "work_order_PO20864_Secure_Works_WA.pdf",
+      "sha256": "79740094db0cd38c7528620662925f562d4e2e773f0539e336edb359b56bf080",
+      "pdf_text_md5": "0d081ec780cfa35d309711a15d2041db",
+      "selected_work_order_number": "PO-20864",
+      "work_order_issue_date": "02/06/2026",
+      "card_created_on": "2026-06-18",
+      "transport": "own_domain_copy",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality"
+      ],
+      "agreement_count": 3,
+      "contradictions": [],
+      "note": "own-domain copy is the surviving transport row."
+    },
+    {
+      "card": "SWMS-26738",
+      "verdict": "attach",
+      "reference": "MLB-24333",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "c35523cd-858d-4303-8b6b-6b741f7ad50b",
+      "file_name": "work_order_MLB-24333PO-54013_Secureworks_Group_Pty_Ltd.pdf",
+      "sha256": "b68adf639797e2621d8ab5e024abb27aeda7f3967df0b6f5490e241416472de1",
+      "pdf_text_md5": "178dbf5d9da6d0749b60aca9448598a4",
+      "selected_work_order_number": "PO-54013",
+      "work_order_issue_date": "19/06/2026",
+      "card_created_on": "2026-06-21",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": [],
+      "note": "two transport rows share one sha256 (Graph group post plus mailbox twin); one content hash is one artifact, earliest row selected."
+    },
+    {
+      "card": "SWMS-26858",
+      "verdict": "attach",
+      "reference": "MLB-26246",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "4ae6ea70-d22d-4c21-bdae-636820770e0b",
+      "file_name": "work_order_MLB-26246PO-54129_Secureworks_Group_Pty_Ltd.pdf",
+      "sha256": "4dedbad6cda7de161d4ca2aea1bc6758e9cade1756dd34e21b1d081e178f4da8",
+      "pdf_text_md5": "1cde798b75ebe5d8d6682dd4e8e0793c",
+      "selected_work_order_number": "PO-54129",
+      "work_order_issue_date": "22/06/2026",
+      "card_created_on": "2026-06-30",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": [],
+      "note": "the same artifact is also the work_order of SWMS-26748 on the same claim. Whether those two cards are duplicates is the duplicate-survivor work's question, not this tranche's; the work order still instructed this card and both cards carrying one PO is the documented normal case."
+    },
+    {
+      "card": "SWMS-26898",
+      "verdict": "attach",
+      "reference": "MLB-26371",
+      "work_order_shaped_content_groups": 2,
+      "content_groups_after_identity_filter": 2,
+      "email_attachment_id": "b16fb56d-afe6-4bfb-b37b-6decb94ee5d4",
+      "file_name": "work_order_MLB-26371PO-55284_Secureworks_Group_Pty_Ltd.pdf",
+      "sha256": "04f87ae28e7489cedcdfdde1ae61c76546902805d4ce3a5101b9b206cc5fe6d5",
+      "pdf_text_md5": "8dfda71829647463026f6f4d2d16ae40",
+      "selected_work_order_number": "PO-55284",
+      "work_order_issue_date": "02/07/2026",
+      "card_created_on": "2026-07-02",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": [],
+      "multi_candidate_discriminator": "work_order_issue_date_inside_card_date_window",
+      "note": "two distinct work orders exist for claim MLB-26371. The 24 Jun assessment order is already the work_order of SWMS-26779; only the 02 Jul make-safe order falls inside this card's date window, and its instruction category matches the card's physical_makesafe family."
+    },
+    {
+      "card": "SWMS-26956",
+      "verdict": "attach",
+      "reference": "MLB-26369",
+      "work_order_shaped_content_groups": 2,
+      "content_groups_after_identity_filter": 2,
+      "email_attachment_id": "f06010df-bc71-4c37-8a17-5dcc218f9d48",
+      "file_name": "work_order_MLB-26369PO-54588_Secureworks_Group_Pty_Ltd.pdf",
+      "sha256": "1d4340de39b63bd1ebb4d81b7abf7b10a4347bf77cb87e77136737da72449dce",
+      "pdf_text_md5": "00bc85299612ddcf796c42f436a1b902",
+      "selected_work_order_number": "PO-54588",
+      "work_order_issue_date": "25/06/2026",
+      "card_created_on": "2026-07-10",
+      "transport": "builder_inbound",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "agreement_count": 4,
+      "contradictions": [],
+      "multi_candidate_discriminator": "purchase_order_token_named_in_the_card_own_stored_documents",
+      "note": "two distinct work orders exist for claim MLB-26369. The card's OWN stored SWMS and invoice documents name MLB-26369PO-54588, which selects exactly one of them; the competing order is a roof report already held by SWMS-26795."
+    },
+    {
+      "card": "WB68792",
+      "verdict": "attach",
+      "reference": "WB68792",
+      "work_order_shaped_content_groups": 1,
+      "content_groups_after_identity_filter": 1,
+      "email_attachment_id": "72845178-68db-4b93-a90b-b7e8835b1383",
+      "file_name": "work_order_WB68792-177207_Secureworks_WA.pdf",
+      "sha256": "b055b7068b44a156126d00451a97c3550666cc2654c478f5315d49b95e4c4bdc",
+      "pdf_text_md5": "507fd5937a7b161d6402f6f02614c2cb",
+      "selected_work_order_number": null,
+      "work_order_issue_date": null,
+      "card_created_on": "2026-06-03",
+      "transport": "own_domain_copy",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality"
+      ],
+      "agreement_count": 3,
+      "contradictions": []
+    }
+  ],
+  "skip": [
+    {
+      "card": "BWCWA6773",
+      "verdict": "skip",
+      "reference": "BWCWA6773",
+      "work_order_shaped_content_groups": 3,
+      "content_groups_after_identity_filter": 2,
+      "reason": "card_record_contradiction_and_multiple_distinct_work_orders",
+      "detail": "Two work-order-shaped candidates matched only because the card's 4-digit reference 6773 is a substring of an unrelated builder purchase order 56773; both were rejected on contradiction. Two genuinely different builder work orders remain against this claim (PO20858 and PO20919, a make-safe and a later make-safe-and-report), and the card's stored street address disagrees with the street both work orders name and with the card's own stored report. A card whose own address record is wrong cannot supply a second independent agreement, and nothing selects one of the two orders.",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "locality"
+      ],
+      "contradictions": [
+        "card_stored_street_disagrees_with_both_candidates_and_with_the_card_own_report"
+      ]
+    },
+    {
+      "card": "SWMS-26844",
+      "verdict": "skip",
+      "reference": "MLB-25769",
+      "work_order_shaped_content_groups": 3,
+      "content_groups_after_identity_filter": 3,
+      "reason": "multiple_distinct_work_orders_no_card_bound_discriminator",
+      "detail": "Three genuinely different work orders exist against claim MLB-25769 (an assessment-and-quote, a roof report and a fencing make-safe). Every one of them agrees with the card on reference, address, locality and policyholder, so those dimensions cannot discriminate. No purchase-order token appears in this card's own stored documents and no candidate falls inside its date window. All three are already the work_order of a sibling card on the same claim, so this card's own instruction is not among the recovered artifacts.",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "contradictions": [
+        "three_distinct_instructions_none_selectable"
+      ]
+    },
+    {
+      "card": "SWMS-26864",
+      "verdict": "skip",
+      "reference": "MLB-25897",
+      "work_order_shaped_content_groups": 4,
+      "content_groups_after_identity_filter": 4,
+      "reason": "multiple_distinct_work_orders_no_card_bound_discriminator",
+      "detail": "Four genuinely different work orders exist against claim MLB-25897 (assessment-and-quote, roof report, and two separate make-safes). All four agree with the card on every identity dimension. Three are already the work_order of sibling cards, which would leave one unclaimed, but selecting it by exhaustion is an inference rather than a card-bound fact: no purchase-order token appears in this card's own stored documents and no candidate falls inside its date window.",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "contradictions": [
+        "four_distinct_instructions_none_selectable"
+      ]
+    },
+    {
+      "card": "SWMS-26871",
+      "verdict": "skip",
+      "reference": "MLB-26364",
+      "work_order_shaped_content_groups": 2,
+      "content_groups_after_identity_filter": 2,
+      "reason": "multiple_distinct_work_orders_no_card_bound_discriminator",
+      "detail": "Two genuinely different work orders exist against claim MLB-26364 (an assessment-and-quote and a combined asbestos-plus-temporary-fence make-safe). Both agree with the card on every identity dimension, both are already the work_order of a sibling card, no purchase-order token appears in this card's own stored documents, and neither falls inside its date window.",
+      "agreements": [
+        "builder_reference_in_work_order_number_field",
+        "street_number_and_street_word",
+        "locality",
+        "policyholder_name_token"
+      ],
+      "contradictions": [
+        "two_distinct_instructions_none_selectable"
+      ]
+    }
+  ]
+}
