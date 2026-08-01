@@ -143,6 +143,8 @@ import {
 } from './makesafe_computed_status.ts'
 import {
   planMakesafeStatusApplications,
+  isMakesafeTerminalDisplayStatus,
+  isMakesafeTerminalJobState,
   type MakesafeStatusApplication,
 } from './makesafe_status_apply.ts'
 import {
@@ -4185,9 +4187,17 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         const strandedSurvivors = plan.survivors.filter((survivor) => {
           const row = afterByJobId.get(String(survivor.job_id))
-          const stage = String(row?.canonical_stage || '').toLowerCase()
-          return !row || stage === 'archive' || stage === 'cancelled'
+          return !row ||
+            isMakesafeTerminalDisplayStatus(row.canonical_stage) ||
+            isMakesafeTerminalJobState(row.job_state)
         })
+        if (strandedSurvivors.length > 0) {
+          return json({
+            error: 'one or more duplicate survivors are no longer live',
+            run_key: runKey,
+            stranded_survivors: strandedSurvivors,
+          }, 409)
+        }
         return json({
           ok: true,
           dry_run: false,
