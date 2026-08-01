@@ -466,7 +466,8 @@ export function buildSesCardEvidenceInventory(
     ...emptySesCardEvidenceInventory(),
     builder_wo_doc: {
       present: input.docFlags.has_wo && storedWorkOrder,
-      transit_record_without_artifact: input.docFlags.has_wo && !storedWorkOrder,
+      transit_record_without_artifact: input.docFlags.has_wo &&
+        !storedWorkOrder,
       detail: input.docFlags.has_wo
         ? storedWorkOrder
           ? "typed work_order job_documents row with stored artifact"
