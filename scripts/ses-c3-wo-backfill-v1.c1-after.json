@@ -1,0 +1,267 @@
+{
+  "run_label": "ses-c3-wo-backfill-tranche1-v1",
+  "mode": "measure",
+  "contract": "scripts/ses-measure-card-evidence.ts --json",
+  "cards": [
+    {
+      "card": "AJBR 66933",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "AJBR 67172",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "AJBR 67178",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "AJBR 67205",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "AJBR 67260",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-261079",
+      "stage": "allocated",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-261081",
+      "stage": "allocated",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-261113",
+      "stage": "allocated",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-261114",
+      "stage": "allocated",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-261116",
+      "stage": "allocated",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26430",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26671",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26672",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26673",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26678",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26680",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26681",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26682",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26683",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26684",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26686",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "undetermined",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26687",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26688",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26689",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26690",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26691",
+      "stage": "archive",
+      "stage_source": "M1 computed status (no display overlay on this card)",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    }
+  ]
+}
