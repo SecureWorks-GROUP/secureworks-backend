@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix
 // Tests for card-unique unlinked-invoice matching.
 //
 // Two layers. The unit tests pin each guard on hand-built rows. The cohort

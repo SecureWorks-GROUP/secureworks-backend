@@ -45,7 +45,7 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-async function query<T = Record<string, any>>(sql: string): Promise<T[]> {
+async function query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
   assertReadOnlySql(sql);
   assertNoPiiColumns(sql);
   queryCount++;
@@ -62,7 +62,7 @@ async function query<T = Record<string, any>>(sql: string): Promise<T[]> {
   if (!response.ok || !Array.isArray(payload)) {
     const message = payload && typeof payload === "object" &&
         "message" in payload
-      ? String((payload as any).message)
+      ? String((payload as Record<string, unknown>).message)
       : `HTTP ${response.status}`;
     throw new Error(`read-only query failed: ${message}`);
   }
