@@ -1,0 +1,2279 @@
+{
+  "run_label": "ses-c3-wo-backfill-tranche2-v1",
+  "mode": "measure",
+  "contract": "scripts/ses-c2-measure-board-evidence.ts (batches the C1 ruler scripts/ses-measure-card-evidence.ts)",
+  "cards": [
+    {
+      "card": "AJBR 67005",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "AJBR 67170",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "BWCWA6781",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26440",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26441",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26442",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26443",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26444",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26445",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26446",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26447",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26448",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26449",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26450",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": null,
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26655",
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26663",
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26668",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26674",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26679",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26692",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26693",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26738",
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26858",
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26898",
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "SWMS-26956",
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    },
+    {
+      "card": "WB68792",
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null,
+      "verdict": "fail",
+      "builder_wo_doc_present": true,
+      "builder_wo_doc_detail": "typed work_order job_documents row with stored artifact"
+    }
+  ],
+  "board_cards": 407,
+  "board_stage_index": {
+    "SWMS-261124": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261123": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-261121": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261120": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261119": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261118": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261116": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-261115": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261114": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-261113": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-261110": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261109": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-261103": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261102": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261101": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261100": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261099": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261097": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261096": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261095": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261094": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261093": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261092": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261091": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261089": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261088": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261087": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261086": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261085": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261084": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261083": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261082": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261081": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-261080": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-261079": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-261078": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261077": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261076": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261075": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261074": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261068": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261067": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261065": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261064": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261059": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261058": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261057": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261056": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261055": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-261051": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-261050": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-261049": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-261039": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-261038": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-261037": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-261036": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-261035": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-261034": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-261033": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261032": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261031": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261030": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261029": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-261028": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-261026": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-261025": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-261024": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-261023": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261022": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-261021": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-261020": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-261019": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": "allocated"
+    },
+    "SWMS-261018": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-261017": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-261016": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-261015": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-261014": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26998": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26981": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26980": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26978": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26965": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26964": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26957": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26956": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26955": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26953": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": "trade_report_in"
+    },
+    "SWMS-26952": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26949": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26948": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26946": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26944": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26940": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26939": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26938": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26937": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26936": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26935": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26934": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": "allocated"
+    },
+    "SWMS-26933": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26932": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26931": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26930": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26929": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26928": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26927": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26926": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26925": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26920": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26919": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26918": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26917": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26910": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26903": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26902": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26901": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26900": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26898": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26896": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26894": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26893": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26891": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26888": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26887": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26885": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26884": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26883": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26882": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26878": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26875": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26871": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26867": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26866": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26865": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26864": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26863": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26862": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26861": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26858": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26857": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26855": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26853": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26852": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26851": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26849": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26848": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26847": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26846": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26845": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26844": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26843": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26841": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26840": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26837": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26836": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26835": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26833": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26832": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26829": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26827": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26825": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26823": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26822": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26821": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26820": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26819": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26816": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26815": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26814": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26812": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26810": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": "allocated"
+    },
+    "SWMS-26807": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26806": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26805": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26804": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26803": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26800": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26795": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26794": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26793": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26792": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26791": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26790": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26789": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26788": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26787": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26786": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26785": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26784": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26783": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26782": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26781": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26780": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26779": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26778": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26777": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26776": {
+      "stage": "new",
+      "computed_stage": "new",
+      "display_overlay_stage": null
+    },
+    "SWMS-26775": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26774": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26773": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26772": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26770": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26769": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26766": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26763": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26762": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26759": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26757": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26756": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26755": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26754": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26753": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26752": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26751": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26750": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26749": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26748": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26747": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26744": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26742": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26741": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26740": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26739": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26738": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26737": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26736": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26735": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26734": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26733": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26732": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26731": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26730": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26729": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26728": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26727": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26726": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26725": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26724": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26723": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26722": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26721": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26720": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26719": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26718": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26717": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26715": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26713": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26712": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26711": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26710": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26709": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26708": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26707": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26706": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26693": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26692": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26691": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26690": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26689": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26688": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26687": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26686": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26684": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26683": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26682": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26681": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26680": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26679": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26678": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26674": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26673": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26672": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26671": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26668": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26663": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26660": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26659": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26658": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26657": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26655": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26654": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26653": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26652": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26651": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": "archive"
+    },
+    "SWMS-26644": {
+      "stage": "trade_report_in",
+      "computed_stage": "trade_report_in",
+      "display_overlay_stage": null
+    },
+    "SWMS-26642": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26633": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": "allocated"
+    },
+    "SWMS-26632": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26630": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26629": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26628": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26619": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26618": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26606": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26604": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26603": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26598": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26597": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26596": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-TEST-0611": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26587": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26585": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26584": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26583": {
+      "stage": "allocated",
+      "computed_stage": "allocated",
+      "display_overlay_stage": null
+    },
+    "SWMS-26582": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26581": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26580": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26579": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26563": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26562": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26560": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26559": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26547": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26546": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26540": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26534": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26533": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26530": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26529": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26528": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26527": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26526": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26525": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26524": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26523": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26522": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26521": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26520": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26517": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "SWMS-26515": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26514": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26513": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26512": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26511": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26510": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26509": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26507": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26506": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26503": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26496": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26491": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26490": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26487": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26483": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26482": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26481": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26480": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26479": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26478": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26477": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26465": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26464": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26463": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26462": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26459": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26458": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26457": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26456": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26455": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26450": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26449": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26448": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26447": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26446": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26445": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26444": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26443": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26442": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26441": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26440": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26438": {
+      "stage": "completed",
+      "computed_stage": "completed",
+      "display_overlay_stage": null
+    },
+    "AJBR 67178": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "AJBR 67005": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "MS191469": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "BWCWA6781": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "WB68792": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "AJBR 67170": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "BWCWA6773": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "AJBR 66933": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "AJBR 67260": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26433": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26432": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26431": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26430": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26429": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26428": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26427": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26426": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26425": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26424": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26422": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26421": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26420": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26419": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26418": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26417": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26416": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26415": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26414": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26413": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26412": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "AJBR 67172": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26410": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26409": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "AJBR 67205": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26393": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    },
+    "SWMS-26001": {
+      "stage": "archive",
+      "computed_stage": "archive",
+      "display_overlay_stage": null
+    }
+  }
+}

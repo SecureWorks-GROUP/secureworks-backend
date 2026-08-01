@@ -706,18 +706,39 @@ its object.
 Only a case-bound, identity-verified artifact may be attached without human
 adjudication: reachable from the card's OWN `makesafe_intake_cases` →
 `makesafe_intake_case_sources.attachment_refs` chain AND with the card's own
-`builder_wo_canonical` digits in its extracted PDF text. A reference-digit,
-filename or subject match is not that — MLB issues several POs per claim, so
-those need per-card adjudication. Two candidates are one artifact only when they
-share a content group (`size_bytes` + extracted-text hash); two genuinely
-different work orders mean the card is left out, not guessed at.
+`builder_wo_canonical` digits in its extracted PDF text (tranche 1,
+`scripts/apply-ses-c3-wo-backfill-v1.ts` +
+`docs/evidence/ses-c3-wo-backfill-tranche1-2026-08-01.md`).
+
+Everything else is adjudicated per card before it is written (tranche 2,
+`scripts/apply-ses-c3-wo-backfill-v2.ts` +
+`docs/evidence/ses-c3-wo-backfill-tranche2-2026-08-01.md`; every verdict and its
+agreement matrix is in `scripts/ses-c3-wo-backfill-v2.adjudication.json`). Two
+rules from that tranche generalise:
+
+- **Match builder references on DIGIT boundaries, never as a substring.** A
+  four-digit reference (`BWCWA6771`, `BWCWA6773`) is a substring of unrelated
+  five- and six-digit job and purchase-order numbers, and a `position()` /
+  `like` test attaches another builder's work order. Require the reference in
+  the document's own job/work-order-number field plus a second independent
+  agreement (street number + street word, locality, or policyholder name).
+- **Several work orders on one claim means SKIP unless a CARD-BOUND fact picks
+  one** — a purchase-order token in the card's OWN stored documents, or exactly
+  one candidate whose issue date falls inside the card's creation window. Scope
+  wording and selection-by-exhaustion are inferences, not evidence. Two
+  candidates are one artifact only when they share a content group (`sha256`,
+  or `size_bytes` + extracted-text hash).
+
+Because a tier-B/C artifact has no case to re-prove it against, the runtime
+guard is the adjudicated `md5(pdf_extraction_text)` plus the artifact `sha256`:
+a re-extraction refuses the write rather than attaching a document nobody read.
 
 `builder_wo_doc` is not an input to `makesafe_computed_status.ts`, so a correct
 re-attach never moves a board stage — prove it, do not assume it, by bracketing
-the run with `scripts/ses-measure-card-evidence.ts`. The tranche-1 tooling,
-closed fixture, dry-run/apply/verify ledgers and the full production proof are
-`scripts/apply-ses-c3-wo-backfill-v1.ts` and
-`docs/evidence/ses-c3-wo-backfill-tranche1-2026-08-01.md`.
+the run with a C1 measurement. `scripts/ses-measure-card-evidence.ts` needs a
+service-role key; `scripts/ses-c2-measure-board-evidence.ts` batches the same
+ruler over the whole board through the Management API alone, and lets verify
+assert that NO board card moved.
 
 ## The SES Money And Outbound Seal Is Write-Once
 
