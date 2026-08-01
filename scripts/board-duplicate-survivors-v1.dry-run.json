@@ -1,0 +1,119 @@
+{
+  "ok": true,
+  "dry_run": true,
+  "requested": 3,
+  "archives": [
+    {
+      "job_id": "30f96ac3-4d58-430c-bc51-a3ae0a78ef66",
+      "job_number": "SWMS-26998",
+      "source_status": "allocated",
+      "before_status": "allocated",
+      "after_status": "archive",
+      "computed_at": "2026-08-01T05:18:46.608Z",
+      "computed_reasons": [
+        "duplicate_survivor_archive",
+        "duplicate_of:SWMS-26736",
+        "builder_po:PO-54007",
+        "external_ref:MLB-25625",
+        "rule:activity_evidence"
+      ],
+      "computed_missing": [],
+      "duplicate_of_job_id": "a7a573a5-2d6d-4a64-aa71-d21f934eac70",
+      "duplicate_of_job_number": "SWMS-26736",
+      "duplicate_rule": "activity_evidence",
+      "duplicate_evidence": {
+        "group_key": "mlb-25625-roof",
+        "external_ref": "MLB-25625",
+        "builder_po": "PO-54007",
+        "reasoning": "MLB-25625 carries two distinct instructions: PO-54006 (Assessment Report & Quote) and PO-54007 (Roof Reports). SWMS-26851 is the assessment card and is NOT part of this duplicate group. The roof instruction produced two cards. SWMS-26736 did the work: four completed assignments explicitly noted 'Roof report ... external' at 9 Keen Court Usher, plus an invoice. SWMS-26998 was minted 2026-07-17, carries one un-worked assignment, no invoice and no report, and sits at company_contact_required.",
+        "activity": {
+          "survivor": {
+            "assignments": 4,
+            "service_reports": 0,
+            "media": 0,
+            "invoices": 1,
+            "calendar_events": 4,
+            "job_events": 8
+          },
+          "loser": {
+            "assignments": 1,
+            "service_reports": 0,
+            "media": 0,
+            "invoices": 0,
+            "calendar_events": 1,
+            "job_events": 6
+          }
+        }
+      }
+    },
+    {
+      "job_id": "ecc81347-dc9c-4abb-bd16-1162ccf00597",
+      "job_number": "SWMS-261118",
+      "source_status": "new",
+      "before_status": "new",
+      "after_status": "archive",
+      "computed_at": "2026-08-01T05:18:46.608Z",
+      "computed_reasons": [
+        "duplicate_survivor_archive",
+        "duplicate_of:SWMS-261065",
+        "builder_po:PO-57087",
+        "external_ref:MLB-26344",
+        "rule:activity_evidence"
+      ],
+      "computed_missing": [],
+      "duplicate_of_job_id": "b406ac52-6134-4105-9ab5-78645bd89057",
+      "duplicate_of_job_number": "SWMS-261065",
+      "duplicate_rule": "activity_evidence",
+      "duplicate_evidence": {
+        "group_key": "mlb-26344-makesafe",
+        "external_ref": "MLB-26344",
+        "builder_po": "PO-57087",
+        "reasoning": "MLB-26344 has exactly one instruction (PO-57087, Makesafe/Emergency Repairs) and both cards carry that same work-order PDF. Note the trap: SWMS-261118's external_ref string is the fuller 'MLB-26344PO-57087', so a naive reading of the PO rule would pick the empty card. The deterministic intake's own canonical case for wo:MLB-26344/po:PO-57087 is confirmed_live_job against SWMS-261065, and SWMS-261065 holds the completed assignment, the submitted report and all 9 media. SWMS-261118 is an empty re-mint: zero assignments, reports, media and calendar events, one lifecycle event.",
+        "activity": {
+          "survivor": {
+            "assignments": 1,
+            "service_reports": 1,
+            "media": 9,
+            "invoices": 0,
+            "calendar_events": 1,
+            "job_events": 12
+          },
+          "loser": {
+            "assignments": 0,
+            "service_reports": 0,
+            "media": 0,
+            "invoices": 0,
+            "calendar_events": 0,
+            "job_events": 1
+          }
+        }
+      }
+    }
+  ],
+  "skipped": [
+    {
+      "group_key": "mlb-26189-assessment",
+      "loser_job_number": "SWMS-26791",
+      "survivor_job_number": "SWMS-26787",
+      "reason": "survivor_terminal_display_status",
+      "detail": "archive"
+    }
+  ],
+  "survivors": [
+    {
+      "group_key": "mlb-25625-roof",
+      "job_number": "SWMS-26736",
+      "job_id": "a7a573a5-2d6d-4a64-aa71-d21f934eac70"
+    },
+    {
+      "group_key": "mlb-26189-assessment",
+      "job_number": "SWMS-26787",
+      "job_id": "70ae5d27-e2ed-4519-a17e-5ea477d9b7ce"
+    },
+    {
+      "group_key": "mlb-26344-makesafe",
+      "job_number": "SWMS-261065",
+      "job_id": "b406ac52-6134-4105-9ab5-78645bd89057"
+    }
+  ]
+}
