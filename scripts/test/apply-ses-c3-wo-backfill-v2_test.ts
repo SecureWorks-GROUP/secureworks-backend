@@ -377,7 +377,7 @@ Deno.test("measure summary reads the shipped board-sweep row shape", () => {
   );
 });
 
-Deno.test("board stage drift reports only cards present in both sweeps", () => {
+Deno.test("board stage drift reports stage and card-set changes", () => {
   const before = boardStageIndex([
     { job_ref: "A", stage: "archive", computed_stage: "archive" },
     { job_ref: "B", stage: "new", computed_stage: "new" },
@@ -388,8 +388,12 @@ Deno.test("board stage drift reports only cards present in both sweeps", () => {
     { job_ref: "B", stage: "allocated", computed_stage: "new" },
     { job_ref: "D", stage: "new", computed_stage: "new" },
   ]);
-  // B moved; C left the board (not this tranche's claim); D is new.
-  assertEquals(boardStageDrift(before, after), ["B"]);
+  // B moved; C left the board; D is new.
+  assertEquals(boardStageDrift(before, after), [
+    "B",
+    "missing_after:C",
+    "missing_before:D",
+  ]);
   assertEquals(boardStageDrift(before, before), []);
 });
 

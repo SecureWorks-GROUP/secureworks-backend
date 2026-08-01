@@ -739,7 +739,7 @@ export function boardStageIndex(
   return index;
 }
 
-/** Cards present in both measurements whose stage triple differs. */
+/** Report stage changes and any card-set changes between measurements. */
 export function boardStageDrift(
   before: Record<string, BoardStageEntry>,
   after: Record<string, BoardStageEntry>,
@@ -747,7 +747,10 @@ export function boardStageDrift(
   const drifted: string[] = [];
   for (const [card, was] of Object.entries(before)) {
     const now = after[card];
-    if (!now) continue;
+    if (!now) {
+      drifted.push(`missing_after:${card}`);
+      continue;
+    }
     if (
       was.stage !== now.stage ||
       was.computed_stage !== now.computed_stage ||
@@ -755,6 +758,9 @@ export function boardStageDrift(
     ) {
       drifted.push(card);
     }
+  }
+  for (const card of Object.keys(after)) {
+    if (!before[card]) drifted.push(`missing_before:${card}`);
   }
   return drifted.sort();
 }
@@ -1021,24 +1027,23 @@ async function runApply(
   let applied = 0;
   let skipped = 0;
   const flush = async () => {
-    await Deno.writeTextFile(
-      ledgerPath,
-      `${
-        JSON.stringify(
-          {
-            run_label: RUN_LABEL,
-            mode: "apply",
-            project_ref: PROJECT_REF,
-            baseline: baselinePath,
-            applied,
-            skipped,
-            cards: ledger,
-          },
-          null,
-          2,
-        )
-      }\n`,
-    );
+    const text = `${
+      JSON.stringify(
+        {
+          run_label: RUN_LABEL,
+          mode: "apply",
+          project_ref: PROJECT_REF,
+          baseline: baselinePath,
+          applied,
+          skipped,
+          cards: ledger,
+        },
+        null,
+        2,
+      )
+    }\n`;
+    assertReportPrivacy(text);
+    await Deno.writeTextFile(ledgerPath, text);
   };
 
   for (const row of rows) {
@@ -1110,6 +1115,23 @@ async function runApply(
         // A failure is recorded and flushed BEFORE the run aborts, so the
         // ledger is never quieter than reality about a half-done card.
         try {
+          // The shared attach boundary intentionally remains unchanged because
+          // other typed attach paths depend on its overwrite semantics. This
+          // fresh exact-key preflight narrows the race; if a concurrent insert
+          // still wins, the post-attach version-1 check detects and refuses the
+          // provenance stamp, rather than treating the overwrite as ours.
+          const preAttachDocs = await loadAttachedDocs([row]);
+          if (
+            (preAttachDocs.get(row.card) || []).some((doc) =>
+              doc.file_name === row.fileName
+            )
+          ) {
+            record.reason = "preexisting_work_order_document";
+            skipped++;
+            ledger.push(record);
+            await flush();
+            continue;
+          }
           const attached = await attachWorkOrder(row);
           record.document_id = attached.documentId;
           record.storage_url = attached.url;
