@@ -1,4 +1,10 @@
-# SES C3 — the PO ruling in the evidence ruler, and the suburb backfill (2026-08-01)
+# SES C3 — the superseded PO ruling and suburb backfill (2026-08-01)
+
+> Historical record only. The PO ruling recorded here was superseded later on
+> 2026-08-01: `po` is now OPTIONAL in all 49 ruler rows and remains observed
+> without gating. The current ruling, supersession chain, and bracketed
+> measurement are authoritative in
+> `docs/evidence/ses-b1-ruler-v2-2026-08-02.md`.
 
 Two Captain rulings, both given verbatim on 2026-08-01, both applied here.
 

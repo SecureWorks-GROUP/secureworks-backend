@@ -322,7 +322,10 @@ Deno.test("assessment photo evidence is the typed Prime capture, not a local pac
 });
 
 Deno.test("a terminal stage needs an issued invoice, not a draft", () => {
+  // `has_wo` throughout: a terminal card also owes its work order since the
+  // 2026-08-01 ruling, and this test is about the invoice column only.
   const draft = buildSesCardEvidenceInventory(card({
+    docFlags: { ...NO_DOCS, has_wo: true },
     invoices: [{ status: "DRAFT", invoice_type: "ACCREC" }],
     stageOverride: "completed",
   }));
@@ -330,6 +333,7 @@ Deno.test("a terminal stage needs an issued invoice, not a draft", () => {
   assertEquals(draft.reading?.verdict, "fail");
 
   const authorised = buildSesCardEvidenceInventory(card({
+    docFlags: { ...NO_DOCS, has_wo: true },
     invoices: [{ status: "AUTHORISED", invoice_type: "ACCREC" }],
     stageOverride: "completed",
   }));
@@ -366,21 +370,23 @@ Deno.test("a PO token is recovered from the persisted external ref", () => {
     stageOverride: "new",
   }));
   assertEquals(withPo.inventory.po.present, true);
-  assertEquals(itemOf(withPo, "po").requirement, "required");
+  // OPTIONAL since the 2026-08-01 re-ruling — but a recovered PO is still read
+  // off the persisted ref and reported, which is the point of this test.
+  assertEquals(itemOf(withPo, "po").requirement, "optional");
   assertEquals(itemOf(withPo, "po").status, "present");
   assertEquals(itemOf(withPo, "po").observed_present, true);
   assertEquals(withPo.reading?.missing, []);
 
-  // No recoverable PO token is a real shortfall since the 2026-08-01 ruling.
+  // No recoverable PO token is no longer a shortfall: absence is not failure.
   const withoutPo = buildSesCardEvidenceInventory(card({
     detail: { cycle_number: 1, external_links: [] },
     docFlags: { ...NO_DOCS, has_wo: true },
     stageOverride: "new",
   }));
   assertEquals(withoutPo.inventory.po.present, false);
-  assertEquals(itemOf(withoutPo, "po").status, "missing");
-  assertEquals(withoutPo.reading?.missing, ["po"]);
-  assertEquals(withoutPo.reading?.verdict, "fail");
+  assertEquals(itemOf(withoutPo, "po").status, "not_required");
+  assertEquals(itemOf(withoutPo, "po").observed_present, false);
+  assertEquals(withoutPo.reading?.missing, []);
 });
 
 Deno.test("restoration authority outranks a stale family token", () => {

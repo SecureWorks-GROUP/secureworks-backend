@@ -675,14 +675,36 @@ on a `required` cell fails. `ghl_equivalence` is the one question attached to an
 item rather than a cell, so a GHL-only portal link is undetermined at required
 AND optional cells.
 
-A Captain ruling is recorded, never absorbed. `Q_PO_FLOOR` is the worked
-example: it stays exported carrying a `resolution`, moves out of
-`SES_CAPTAIN_QUESTIONS` into `SES_RESOLVED_CAPTAIN_QUESTIONS`, and `q()` throws
-if a resolved question is ever named by a cell again. Answer a question that
-way, bump `SES_EVIDENCE_CONTRACT_VERSION`, and every past measurement stays
-attributable to the ruler that produced it. `po` is REQUIRED in all 49 rows as
-of 2026-08-01 ("of course every card needs a po"), including the unsealed
-repair and restoration recipes — an unsealed recipe is not a PO exemption.
+A Captain ruling is recorded, never absorbed — and so is a ruling that
+OVERTURNS one. `Q_PO_FLOOR` is the worked example of both: it stays exported
+carrying a `resolution`, sits in `SES_RESOLVED_CAPTAIN_QUESTIONS` rather than
+`SES_CAPTAIN_QUESTIONS`, `q()` throws if a resolved question is ever named by a
+cell again, and the ruling it replaced is kept verbatim under
+`resolution.supersedes` with its date, its measured effect while it governed,
+and the reason it stopped. Never delete a ruling to make the table read
+cleanly. Answer or re-answer a question that way, bump
+`SES_EVIDENCE_CONTRACT_VERSION`, and every past measurement stays attributable
+to the ruler that produced it.
+
+The current floors, both from the 2026-08-01 rulings
+(`data/decisions/2026-08-01-po-wo-invoice-ruling.md`):
+
+- `po` is OPTIONAL in all 49 rows — a purchase order is expected but its
+  absence is not a failure. It stays OBSERVED: every reading still reports
+  `observed_present` and the measured detail, so the PO is visible on the card
+  without ever being a gate. (The superseded "of course every card needs a po"
+  answer, which made it REQUIRED, was about work orders.)
+- `builder_wo_doc` is REQUIRED at every stage of the five SEALED families,
+  `completed` and `archive` included — nothing to invoice against without a
+  work order. It stays a question only at `cancelled` (under the open
+  `cancelled_floor`) and throughout the two unsealed recipes, which this ruling
+  does not reach; sealing a recipe by code change is what rule 1 forbids.
+- SWMS is deliberately NOT encoded here. "Required only for MLB make-safes"
+  turns on builder identity, which a family x stage table never sees; the
+  builder-aware rule is sealed in `ses_family_matrix.ts` (MLB `always`, AJS
+  `builder_waiver_unless_hrcw`, everyone else `hrcw_only`). `report_only_swms`
+  stays OPEN pending plan-v2 C.11, because flattening the high-risk-work
+  trigger to N-A by builder identity is a safety call, not a paperwork one.
 
 Families and stages are imported from `ses_family_matrix.ts` and
 `makesafe_computed_status.ts` rather than restated, and `unknown` is refused
@@ -691,9 +713,11 @@ single-card entrypoint, and `scripts/ses-c2-measure-board-evidence.ts` batches
 it over the named SES population in nine read-only queries — run that before and after
 any ruler change and report both count sets. Contract, modelling decisions,
 transit heuristics and the verification baseline are in
-`docs/evidence/ses-evidence-ruler-c1-2026-08-01.md`; the PO ruling and its
+`docs/evidence/ses-evidence-ruler-c1-2026-08-01.md`; the first PO ruling and its
 measured board effect are in
-`docs/evidence/ses-c3-po-ruling-and-suburb-backfill-2026-08-01.md`.
+`docs/evidence/ses-c3-po-ruling-and-suburb-backfill-2026-08-01.md`; the
+supersession, the work-order floor and the bracketed before/after sweep are in
+`docs/evidence/ses-b1-ruler-v2-2026-08-02.md`.
 
 ## `jobs.site_suburb` Is Suburb-Scoped, And Backfills Are Ledgered
 
