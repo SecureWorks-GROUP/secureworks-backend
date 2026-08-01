@@ -321,7 +321,7 @@ export interface AdvanceResult {
  */
 export function advanceVerdictTable(input: AdvanceInput): AdvanceResult {
   const expected = new Map<string, ExpectedField>();
-  const key = (card: string, column: string) => `${card} ${column}`;
+  const key = (card: string, column: string) => `${card}\u0000${column}`;
   const put = (
     card: string,
     column: string,
@@ -984,29 +984,63 @@ async function runPhaseB(
          where r.state = 'terminal' and r.job_ids ? j.id::text
        )`,
   );
+  // Each exception is named and keyed to a captain decision. It excuses exactly
+  // one card, and it cannot outlive the defect it covers: an exception whose
+  // card has since gained an identity is reported stale and fails the run, so
+  // the entry has to be removed once that card is backfilled.
+  const exceptions =
+    (expected.card_work_order_identity_exceptions ?? []) as Record<
+      string,
+      string
+    >[];
+  const exceptedCards = new Set(exceptions.map((row) => row.card));
+  const offenderNames = identityOffenders.map((row) => String(row.job_number));
+  const unexcepted = offenderNames.filter((name) => !exceptedCards.has(name));
+  const staleExceptions = [...exceptedCards].filter((card) =>
+    !offenderNames.includes(card)
+  );
   results.push(check(
     "b10_card_work_order_identity",
     "phase_b",
-    "no card carries a blank or absent work-order identity",
+    "no card carries a blank or absent work-order identity, outside named legacy exceptions",
     {
       board_population: expected.board_population,
-      cards_without_work_order_identity:
-        expected.cards_without_work_order_identity,
+      unexcepted_offenders: expected.cards_without_work_order_identity,
+      named_exceptions: exceptions.length,
+      stale_exceptions: 0,
     },
     {
       board_population: Number(populationRow.population),
-      cards_without_work_order_identity: identityOffenders.length,
+      unexcepted_offenders: unexcepted.length,
+      named_exceptions: exceptions.length,
+      stale_exceptions: staleExceptions.length,
     },
-    identityOffenders.length
-      ? `offending cards: ${
-        JSON.stringify(
-          identityOffenders.map((row) => ({
-            job_number: String(row.job_number),
-            makesafe_job_details_rows: Number(row.detail_rows),
-          })),
-        )
-      }`
-      : undefined,
+    [
+      unexcepted.length
+        ? `unexcepted offending cards: ${
+          JSON.stringify(
+            identityOffenders
+              .filter((row) => unexcepted.includes(String(row.job_number)))
+              .map((row) => ({
+                job_number: String(row.job_number),
+                makesafe_job_details_rows: Number(row.detail_rows),
+              })),
+          )
+        }`
+        : null,
+      staleExceptions.length
+        ? `named exceptions that no longer offend, remove them: ${
+          JSON.stringify(staleExceptions)
+        }`
+        : null,
+      exceptions.length
+        ? `named legacy exceptions: ${
+          exceptions.map((row) => `${row.card} (${row.decision_key})`).join(
+            ", ",
+          )
+        }`
+        : null,
+    ].filter(Boolean).join("; ") || undefined,
   ));
 
   const survivors = pointerExpected.map((row) => row.survivor);

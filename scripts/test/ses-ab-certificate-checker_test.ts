@@ -206,11 +206,31 @@ Deno.test("the work-order identity rule states an invariant, not an observation"
     await read("scripts/ses-ab-certificate-v1.baseline.json"),
   );
   // The captain's rule is that a blank or absent work-order identity is
-  // impossible. The expected count must stay 0: raising it to match production
-  // would certify an unadjudicated defect as a fact.
+  // impossible. The expected unexcepted count must stay 0: raising it to match
+  // production would certify an unadjudicated defect as a fact. A new offender
+  // is adjudicated into card_work_order_identity_exceptions instead.
   assertEquals(baseline.phase_b.cards_without_work_order_identity, 0);
   assertStringIncludes(
     baseline.phase_b.card_work_order_identity_rule,
     "never raise the number",
   );
+});
+
+Deno.test("every work-order identity exception is named and convertible", async () => {
+  const baseline = JSON.parse(
+    await read("scripts/ses-ab-certificate-v1.baseline.json"),
+  );
+  const exceptions = baseline.phase_b
+    .card_work_order_identity_exceptions as Record<string, string>[];
+  assertEquals(exceptions.length, 1);
+  const [swms26001] = exceptions;
+  assertEquals(swms26001.card, "SWMS-26001");
+  assertEquals(swms26001.decision_key, "swms-26001-work-order-identity");
+  assertEquals(swms26001.ruled_at, "2026-08-01");
+  // Every exception must carry a reason and the path back to a real backfill,
+  // so the carve-out can never become permanent by default.
+  for (const row of exceptions) {
+    assertStringIncludes(row.reason, "identity floor");
+    assertStringIncludes(row.conversion_path, "remove this entry");
+  }
 });

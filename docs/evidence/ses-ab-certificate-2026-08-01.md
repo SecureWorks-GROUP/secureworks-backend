@@ -6,20 +6,21 @@ read-only against the live database by
 `scripts/ses-ab-certificate-checker.ts` immediately before this document was
 committed, and can be re-proved at any time by running it again.
 
-**Status: NOT YET ISSUED — 21/22 PASS, blocked on one captain decision.**
+**Result: 22/22 PASS — CERTIFIABLE, with one named legacy exception.**
 
-The captain's live board review on 2026-08-01 added a rule after the first
-passing run: no card may carry a blank or absent work-order identity. Production
-has exactly one such card, `SWMS-26001`, so check `b10` fails and this
-certificate is withheld rather than issued around the failure. Everything else
-below passed and is reproducible; see **The one open failure** for the decision
-this is waiting on.
+The captain's live board review on 2026-08-01 added check `b10`: no card may
+carry a blank or absent work-order identity. Production has exactly one such
+card, `SWMS-26001`, ruled a **named legacy exception** on 2026-08-01 under
+decision key `swms-26001-work-order-identity`. The rule stays strict for every
+other card in the 437-card population. See **The named legacy exception —
+`SWMS-26001`** below; it is the one thing a reader of this certificate must
+carry forward.
 
 - Checker: `scripts/ses-ab-certificate-checker.ts`
 - Certified baseline: `scripts/ses-ab-certificate-v1.baseline.json`
 - Work-order merge accounting: `scripts/ses-ab-certificate-v1.duplicate-accounting.txt`
 - Machine-readable run: `docs/evidence/ses-ab-certificate-2026-08-01.run.json`
-  (`started_at` 2026-08-01T07:13:13.902Z, `finished_at` 2026-08-01T07:13:33.438Z)
+  (`started_at` 2026-08-01T07:21:11.837Z, `finished_at` 2026-08-01T07:21:34.384Z)
 
 ```bash
 SUPABASE_ACCESS_TOKEN=... scripts/ses-ab-certificate-checker.ts \
@@ -42,7 +43,8 @@ This certificate covers **card identity** only:
   `makesafe_job_details.report_type` / `.requesting_company_slug`, as the
   adjudicated verdict table advanced by the applied ledgers demands;
 - **work-order identity** — every card carries a non-blank builder work-order
-  reference, and every intake source resolves to exactly one canonical case;
+  reference, and every intake source resolves to exactly one canonical case.
+  One named legacy exception, `SWMS-26001`, is carved out and documented below;
 - **duplicates** — every builder work order that resolves to more than one card
   is adjudicated, and no card is archived as a duplicate outside that set.
 
@@ -119,42 +121,59 @@ round 1 (PR 454)  ->  round 2 field (PR 458)  ->  round 2 temp fence (PR 458)
 | `b7` | every adjudicated stray carries the detail row that puts it on the board | 4/4 |
 | `b8` | the applied duplicate-survivor archives are exactly the adjudicated set | 3 pointers, tranches t1 and t2 |
 | `b9` | no survivor is itself terminal or itself an archived duplicate | 3/3 clean |
-| `b10` | **no card carries a blank or absent work-order identity** | **FAIL — 1 of 437** |
+| `b10` | no card carries a blank or absent work-order identity, outside named legacy exceptions | 437 population, 0 unexcepted, 1 named exception, 0 stale |
 
-### The one open failure — `b10`, `SWMS-26001`
+### The named legacy exception — `SWMS-26001`
 
-The captain's rule: no card may carry a blank or absent work-order identity;
-this should be impossible. The checker takes the canonical board population
-(`makesafe`, plus `insurance`/`restoration`, `status <> 'lost'`, terminal
-synthetic live-fire jobs excluded) — 437 cards — and requires each to have a
-`makesafe_job_details` row whose `external_ref` is non-null and non-blank. A
-card with no detail row at all has no identity in a harsher form, so it counts
-as an offender too.
+**This is the one carve-out in the certificate. Read it before relying on `b10`.**
 
-**One card fails: `SWMS-26001`** — zero `makesafe_job_details` rows.
+The captain's rule is that a blank or absent work-order identity is impossible.
+The checker takes the canonical board population (`makesafe`, plus
+`insurance`/`restoration`, `status <> 'lost'`, terminal synthetic live-fire jobs
+excluded) — 437 cards — and requires each to carry a `makesafe_job_details` row
+whose `external_ref` is non-null and non-blank. A card with no detail row at all
+has no identity in a harsher form, so it counts as an offender too.
 
-Read-only facts:
+Exactly one card offends, and it is ruled an exception rather than a defect to
+fix:
 
 | Fact | Value |
 | --- | --- |
-| Status / created | `archived`, 2026-06-01 — the oldest make-safe card in production |
+| Card | `SWMS-26001` |
+| Decision key | `swms-26001-work-order-identity`, ruled by the captain 2026-08-01 |
+| Status / created | `archived`, 2026-06-01 — the **oldest make-safe card in production** |
 | Suburb | Joondalup |
 | `makesafe_job_details` rows | 0 (so no `external_ref`, no `requesting_company_slug`) |
 | Work-order documents | 0 |
 | Intake cases | 0 |
 | Work evidence | 1 assignment, 1 submitted service report, 4 media, 9 job events |
 
-This is not new damage. It is the single `target_detail_not_found` skip already
-recorded in the round-2 link backfill, and `b6` counts it among that ledger's
-documented skips. What the captain's rule adds is that it was only ever recorded
-as a *link-backfill skip reason*, never as an identity defect in its own right.
-The shadow adjudication could match it only by address-street against a
-`gmail.com` sender, which is below the identity floor, so there may be no builder
-work order to recover at all.
+Why it is an exception and not a repair:
 
-The baseline deliberately records the expected count as **0**, not 1. Raising it
-would convert an unadjudicated defect into a certified fact, which is the one
-thing this checker exists to prevent.
+- **Pre-window and gmail-sourced.** The shadow adjudication could match it only
+  by address-street against a `gmail.com` sender, which is below the identity
+  floor. **No builder work-order identity is recoverable**, so there is nothing
+  correct to write into a detail row.
+- **Real work, evidenced.** A submitted service report, four media and a
+  completed assignment. This is not a phantom card and is not to be deleted.
+- **Not new damage.** It is the single `target_detail_not_found` skip already
+  recorded in the round-2 link backfill, which `b6` counts among that ledger's
+  documented skips. What the captain's rule adds is that it had only ever been
+  recorded as a *link-backfill skip reason*, never as an identity defect in its
+  own right.
+
+**Conversion path.** If the captain later supplies the builder work order for
+this card, convert the exception to a backfill: write the
+`makesafe_job_details` row with that `external_ref`, remove the entry from
+`card_work_order_identity_exceptions` in the baseline, and re-run.
+
+The exception cannot outlive the defect it covers. It excuses exactly one named
+card, and the checker separately reports any named exception whose card has
+since gained an identity as `stale_exceptions`, which fails the run — so a
+backfilled card forces the entry to be removed rather than leaving a permanent
+hole in the rule. The expected unexcepted-offender count stays **0**, and a test
+pins it: adjudicate a new offender under its own decision key, never raise the
+number.
 
 `b2` records one benign artefact. The round-2 ledger hashes a six-file
 concatenation whose first member is the `makesafe_source_job_links` migration,
@@ -319,19 +338,15 @@ SUPABASE_ACCESS_TOKEN=... deno run --allow-env --allow-net --allow-read --allow-
 If a new duplicate work order appears, `d1` reports it as `unaccounted` and the
 run fails. If a hold is quietly written through, `b5` or `d3` fails. If a
 survivor is archived out from under its own duplicate, `b9` fails. If a card
-loses its work-order identity, `b10` fails. The correct response to any failure
-is to adjudicate it, not to widen the baseline.
-
-Once `SWMS-26001` is adjudicated, re-run the checker; a 22/22 run flips the
-status at the top of this document to issued, and its output replaces the run
-embedded below.
+loses its work-order identity, `b10` fails — and so does a named exception that
+no longer offends. The correct response to any failure is to adjudicate it under
+its own decision key, not to widen the baseline.
 
 ## Run output
 
-The run embedded below is the current state of production, reproduced verbatim.
-Its machine-readable form is
-`docs/evidence/ses-ab-certificate-2026-08-01.run.json`. It is a **failing** run:
-`b10` is open, so this certificate is not yet issued.
+The run embedded below is the one this certificate rests on. It is reproduced
+verbatim, and its machine-readable form is
+`docs/evidence/ses-ab-certificate-2026-08-01.run.json`.
 
 ```text
 PASS phase_a  a1_sources_equal_case_rows  every physical SES source has exactly one canonical case-source row
@@ -387,10 +402,10 @@ PASS phase_b  b7_board_population  every adjudicated stray carries the make-safe
 PASS phase_b  b8_duplicate_survivor_pointers  the applied duplicate-survivor archives are exactly the adjudicated set
        expected [{"loser":"SWMS-261118","survivor":"SWMS-261065","run_key":"makesafe-duplicate-survivors-20260801-t1"},{"loser":"SWMS-26791","survivor":"SWMS-26787","run_key":"makesafe-duplicate-survivors-20260801-t2"},{"loser":"SWMS-26998","survivor":"SWMS-26736","run_key":"makesafe-duplicate-survivors-20260801-t1"}]
        observed [{"loser":"SWMS-261118","survivor":"SWMS-261065","run_key":"makesafe-duplicate-survivors-20260801-t1"},{"loser":"SWMS-26791","survivor":"SWMS-26787","run_key":"makesafe-duplicate-survivors-20260801-t2"},{"loser":"SWMS-26998","survivor":"SWMS-26736","run_key":"makesafe-duplicate-survivors-20260801-t1"}]
-FAIL phase_b  b10_card_work_order_identity  no card carries a blank or absent work-order identity
-       expected {"board_population":437,"cards_without_work_order_identity":0}
-       observed {"board_population":437,"cards_without_work_order_identity":1}
-       note     offending cards: [{"job_number":"SWMS-26001","makesafe_job_details_rows":0}]
+PASS phase_b  b10_card_work_order_identity  no card carries a blank or absent work-order identity, outside named legacy exceptions
+       expected {"board_population":437,"unexcepted_offenders":0,"named_exceptions":1,"stale_exceptions":0}
+       observed {"board_population":437,"unexcepted_offenders":0,"named_exceptions":1,"stale_exceptions":0}
+       note     named legacy exceptions: SWMS-26001 (swms-26001-work-order-identity)
 PASS phase_b  b9_survivors_not_stranded  no survivor is itself terminal or itself an archived duplicate
        expected [{"job_number":"SWMS-261065","terminal":false,"pointers":0},{"job_number":"SWMS-26736","terminal":false,"pointers":0},{"job_number":"SWMS-26787","terminal":false,"pointers":0}]
        observed [{"job_number":"SWMS-261065","terminal":false,"pointers":0},{"job_number":"SWMS-26736","terminal":false,"pointers":0},{"job_number":"SWMS-26787","terminal":false,"pointers":0}]
@@ -407,6 +422,6 @@ PASS droid    d4_drain_minted_duplicates  the drain-minted duplicate jobs are ex
        expected ["SWMS-261059","SWMS-261078","SWMS-261118"]
        observed ["SWMS-261059","SWMS-261078","SWMS-261118"]
 
-SES A/B certificate checker: 21/22 PASS (phase A 8/8, phase B 9/10, droid 4/4) — NOT CERTIFIABLE
+SES A/B certificate checker: 22/22 PASS (phase A 8/8, phase B 10/10, droid 4/4) — CERTIFIABLE
 wrote docs/evidence/ses-ab-certificate-2026-08-01.run.json
 ```

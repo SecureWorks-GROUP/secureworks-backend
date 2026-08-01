@@ -643,10 +643,14 @@ photos or suburb.
 
 `b10` (captain rule, 2026-08-01) requires every card in the canonical board
 population to carry a non-blank `makesafe_job_details.external_ref`; a card with
-no detail row counts as an offender. It currently FAILS on `SWMS-26001`, the
-oldest make-safe card, which has no detail row, no work order and no intake case
-but does carry a submitted report and photos. The certificate is withheld until
-that is adjudicated.
+no detail row counts as an offender. Exactly one card is carved out:
+`SWMS-26001`, the oldest make-safe card, is a named legacy exception under
+decision key `swms-26001-work-order-identity` — pre-window and gmail-sourced, so
+no builder identity is recoverable at the identity floor, though real work is
+evidenced. Exceptions live in `card_work_order_identity_exceptions` in the
+baseline, excuse exactly one named card each, and cannot outlive the defect: a
+named exception whose card has since gained an identity is reported
+`stale_exceptions` and fails the run.
 
 ## The SES Money And Outbound Seal Is Write-Once
 

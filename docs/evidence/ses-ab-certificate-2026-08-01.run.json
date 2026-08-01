@@ -3,14 +3,14 @@
   "tool": "scripts/ses-ab-certificate-checker.ts",
   "project_ref": "kevgrhcjxspbxgovpmfl",
   "access": "management-api /database/query, read_only:true",
-  "started_at": "2026-08-01T07:13:13.902Z",
-  "finished_at": "2026-08-01T07:13:33.438Z",
-  "summary": "SES A/B certificate checker: 21/22 PASS (phase A 8/8, phase B 9/10, droid 4/4) — NOT CERTIFIABLE",
-  "certifiable": false,
+  "started_at": "2026-08-01T07:21:11.837Z",
+  "finished_at": "2026-08-01T07:21:34.384Z",
+  "summary": "SES A/B certificate checker: 22/22 PASS (phase A 8/8, phase B 10/10, droid 4/4) — CERTIFIABLE",
+  "certifiable": true,
   "counts": {
     "total": 22,
-    "passed": 21,
-    "failed": 1
+    "passed": 22,
+    "failed": 0
   },
   "superseded_family_cards": [
     "AJBR 66933",
@@ -377,17 +377,21 @@
     {
       "id": "b10_card_work_order_identity",
       "phase": "phase_b",
-      "title": "no card carries a blank or absent work-order identity",
-      "status": "FAIL",
+      "title": "no card carries a blank or absent work-order identity, outside named legacy exceptions",
+      "status": "PASS",
       "expected": {
         "board_population": 437,
-        "cards_without_work_order_identity": 0
+        "unexcepted_offenders": 0,
+        "named_exceptions": 1,
+        "stale_exceptions": 0
       },
       "observed": {
         "board_population": 437,
-        "cards_without_work_order_identity": 1
+        "unexcepted_offenders": 0,
+        "named_exceptions": 1,
+        "stale_exceptions": 0
       },
-      "detail": "offending cards: [{\"job_number\":\"SWMS-26001\",\"makesafe_job_details_rows\":0}]"
+      "detail": "named legacy exceptions: SWMS-26001 (swms-26001-work-order-identity)"
     },
     {
       "id": "b9_survivors_not_stranded",

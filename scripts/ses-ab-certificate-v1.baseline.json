@@ -64,7 +64,17 @@
     "expected_field_assertions": 216,
     "board_population": 437,
     "cards_without_work_order_identity": 0,
-    "card_work_order_identity_rule": "Captain rule, 2026-08-01 live board review: no card in the canonical board population (makesafe, plus insurance/restoration, status <> 'lost', excluding terminal synthetic live-fire jobs) may carry a blank or absent work-order identity. A card with no makesafe_job_details row has no identity at all and counts as an offender. The expected count is the invariant, not the observation: if this check fails, adjudicate the offending cards, never raise the number.",
+    "card_work_order_identity_rule": "Captain rule, 2026-08-01 live board review: no card in the canonical board population (makesafe, plus insurance/restoration, status <> 'lost', excluding terminal synthetic live-fire jobs) may carry a blank or absent work-order identity. A card with no makesafe_job_details row has no identity at all and counts as an offender. The expected count is the invariant, not the observation: if this check fails, adjudicate the offending card and add it to card_work_order_identity_exceptions under its own decision key, never raise the number.",
+    "card_work_order_identity_exceptions": [
+      {
+        "card": "SWMS-26001",
+        "decision_key": "swms-26001-work-order-identity",
+        "ruled_at": "2026-08-01",
+        "ruled_by": "captain",
+        "reason": "Oldest make-safe card in production (created 2026-06-01), archived, Joondalup. Pre-window and gmail-sourced: the shadow adjudication could match it only by address-street against a gmail.com sender, which is below the identity floor, so no builder work-order identity is recoverable. Real work is evidenced - one assignment, one submitted service report, four media, nine job events - so the card is not a phantom and is not to be deleted. It carries zero makesafe_job_details rows, zero work-order documents and zero intake cases, and is the single target_detail_not_found skip already recorded in the round-2 link backfill.",
+        "conversion_path": "If the captain later supplies the builder work order for this card, convert this exception to a backfill: write the makesafe_job_details row with that external_ref, remove this entry, and re-run. The checker reports a named exception that no longer offends as stale and fails, so the entry cannot outlive the defect it covers."
+      }
+    ],
     "source_job_link_rows": 260,
     "duplicate_pointer_rows": 3,
     "family_supersession_card_count": 40,
