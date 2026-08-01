@@ -749,6 +749,28 @@ build-stamped version truth are owned by
 `docs/project-knowledge/OPS_API_SOURCE_OF_TRUTH.md`. The shared runtime
 boundary is `_shared/sealed_ses_money_fence.ts`.
 
+The seal is not a Xero-API fence — it fences the LOCAL money mirror, and
+`linked` is one of the sealed verbs alongside created/authorised/changed/sent.
+So "set `xero_invoices.job_id` on an SES card" is a sealed write even though it
+touches no Xero record and no money column: every sanctioned writer refuses it,
+and `linkContactInvoicesToJob` re-reads the target seal from the database so a
+caller-supplied job shape cannot get around it. As of 2026-08-01 **all 440 SES
+board cards carry an explicit `ses_money_sealed_at`** (source
+`job_spine_backfill`), so this is the universal case, not an edge one. The two
+approved release families void an invoice or release a delivery route; neither
+links one. The Captain's 2026-08-01 ruling was to leave the seal alone and close
+the gap on the READ side instead: `makesafe_invoice_reference_match.ts` is the
+ONE implementation that matches a card to its card-unique UNLINKED issued ACCREC
+(whole digit runs of >=5 digits, never a substring; the reference must be owned
+by exactly one job across the FULL jobs table, both sides of a contest excluded;
+one invoice may fund one card). Anything ambiguous stays `missing` by design.
+The C1 entrypoint, C2 batch, the cohort deriver and **the C4 board UI** must all
+consume it rather than re-deriving the rule. Bump
+`SES_EVIDENCE_CONTRACT_VERSION` on any ruler-semantics change and bracket it with
+a before/after `ses-c2-measure-board-evidence.ts` run. Evidence, the 51-card
+cohort and the measured board effect are in
+`docs/evidence/ses-c3-invoice-link-seal-conflict-2026-08-01.md`.
+
 The v2 authority bootstrap and full-board two-way reconciliation are owned by
 `20260728060000_makesafe_board_reconcile_truth_u2.sql`,
 `makesafe_state_seed`, and `makesafe_state_reconcile`. Both actions are

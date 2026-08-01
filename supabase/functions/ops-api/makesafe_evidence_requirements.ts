@@ -41,7 +41,7 @@ import {
 } from "./ses_family_matrix.ts";
 
 export const SES_EVIDENCE_CONTRACT_VERSION =
-  "ses-evidence-requirements/c1-po-ruling-v2";
+  "ses-evidence-requirements/c1-unlinked-invoice-v3";
 
 /**
  * The draft contract's source document. Recorded so a measurement run can prove
@@ -97,6 +97,10 @@ export const SES_EVIDENCE_ITEM_LABELS: Record<SesEvidenceItem, string> = {
   trade_report: "Trade report, or the SecureWorks roof PDF",
   photos_media: "Family photo/media evidence",
   swms: "SWMS decision or artifact",
+  // A card-unique UNLINKED issued ACCREC counts here too. `xero_invoices.job_id`
+  // cannot be backfilled (the write-once SES money seal refuses `linked`), so
+  // the matcher in `makesafe_invoice_reference_match.ts` supplies the evidence
+  // instead. Ambiguous matches are withheld and the cell stays missing.
   invoice: "Invoice (draft at Docs Ready; issued ledger invoice at close-out)",
   po: "Builder purchase order",
 };

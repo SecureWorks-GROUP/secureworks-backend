@@ -1,0 +1,990 @@
+{
+  "generated_at": "2026-08-01T11:12:31.498Z",
+  "mode": "read_only_derivation",
+  "matcher": "makesafe_invoice_reference_match/deriveSesUnlinkedInvoiceMatches",
+  "queries_run": 2,
+  "population": {
+    "jobs_total": 2383,
+    "board_cards": 440,
+    "unlinked_issued_accrec": 175
+  },
+  "cohort_size": 51,
+  "cohort_money_inc": 27782.7,
+  "cohort_by_invoice_status": {
+    "AUTHORISED": 4,
+    "PAID": 47
+  },
+  "money_sealed_targets": 51,
+  "deposit_shaped_references": 0,
+  "exclusions_total": 28,
+  "exclusions_by_reason": {
+    "builder_reference_shared_with_other_job": 26,
+    "multiple_invoice_candidates": 2
+  },
+  "cohort": [
+    {
+      "job_id": "242b250e-311b-445a-886a-d2ecbed135be",
+      "job_number": "SWMS-261018",
+      "external_ref": "MLB-24881PO-56387",
+      "matched_digits": [
+        "24881",
+        "56387"
+      ],
+      "invoice_row_id": "3344c19f-849a-4836-b28b-87d8cf2011cf",
+      "invoice_number": "INV-1083",
+      "invoice_reference": "MLB-24881PO-56387",
+      "invoice_status": "AUTHORISED",
+      "invoice_total": "385.00",
+      "invoice_date": "2026-07-30",
+      "money_sealed": true
+    },
+    {
+      "job_id": "94a2877d-f1e3-4abf-949c-90d68551c3d4",
+      "job_number": "SWMS-26409",
+      "external_ref": "AJBR 67014",
+      "matched_digits": [
+        "67014"
+      ],
+      "invoice_row_id": "e630da82-ec5a-4ace-9591-120cb06be3ef",
+      "invoice_number": "INV-0551",
+      "invoice_reference": "AJBR 67014",
+      "invoice_status": "PAID",
+      "invoice_total": "555.50",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "e3667ea3-2091-468c-b255-9db7cb10af1f",
+      "job_number": "SWMS-26410",
+      "external_ref": "AJBR 66980",
+      "matched_digits": [
+        "66980"
+      ],
+      "invoice_row_id": "cc9f30f9-e49c-44bc-a5af-ff298392c397",
+      "invoice_number": "INV-0566",
+      "invoice_reference": "AJBR 66980 / MS191267",
+      "invoice_status": "PAID",
+      "invoice_total": "731.50",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "9781e848-aca0-4a5e-8836-c2ba5f451791",
+      "job_number": "SWMS-26412",
+      "external_ref": "AJBR 66988",
+      "matched_digits": [
+        "66988"
+      ],
+      "invoice_row_id": "7af95fbc-06e5-4ad3-8001-2311ae5dbcc7",
+      "invoice_number": "INV-0573",
+      "invoice_reference": "AJBR 66988",
+      "invoice_status": "PAID",
+      "invoice_total": "335.50",
+      "invoice_date": "2026-06-05",
+      "money_sealed": true
+    },
+    {
+      "job_id": "2ada653a-80c3-4fa4-823a-1588f097536e",
+      "job_number": "SWMS-26413",
+      "external_ref": "AJBR 67000",
+      "matched_digits": [
+        "67000"
+      ],
+      "invoice_row_id": "2679f465-5a96-4c7e-8394-784841ed62dc",
+      "invoice_number": "INV-0552",
+      "invoice_reference": "AJBR 67000",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "fb5f66d1-f79b-4da2-a489-e406139e3c85",
+      "job_number": "SWMS-26414",
+      "external_ref": "AJBR 66976",
+      "matched_digits": [
+        "66976"
+      ],
+      "invoice_row_id": "513177f9-e729-4574-baa0-e6c0a4353ec7",
+      "invoice_number": "INV-0584",
+      "invoice_reference": "AJBR 66976",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "a1932cb2-18b4-4962-8e46-fb57b3a4f438",
+      "job_number": "SWMS-26415",
+      "external_ref": "AJBR 67081",
+      "matched_digits": [
+        "67081"
+      ],
+      "invoice_row_id": "49f86794-cbd7-4e97-b5a0-94479d507265",
+      "invoice_number": "INV-0567",
+      "invoice_reference": "AJBR 67081",
+      "invoice_status": "PAID",
+      "invoice_total": "731.50",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "757c724c-bf08-4c32-9531-e20d4c08883a",
+      "job_number": "SWMS-26417",
+      "external_ref": "AJBR 66890",
+      "matched_digits": [
+        "66890"
+      ],
+      "invoice_row_id": "69ef03b6-2ffc-4ade-b8ff-fab316ef293b",
+      "invoice_number": "INV-0564",
+      "invoice_reference": "AJBR 66890 / MS191041",
+      "invoice_status": "PAID",
+      "invoice_total": "429.00",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "dc4da42c-5145-4358-ba3c-3903d1bd7f42",
+      "job_number": "SWMS-26418",
+      "external_ref": "AJBR 67015",
+      "matched_digits": [
+        "67015"
+      ],
+      "invoice_row_id": "cf244b03-9397-4b41-bf29-f9d3092cdcc7",
+      "invoice_number": "INV-0583",
+      "invoice_reference": "AJBR 67015",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "5a569d6e-3fab-4df2-baeb-0c416b854775",
+      "job_number": "SWMS-26419",
+      "external_ref": "AJBR 67256",
+      "matched_digits": [
+        "67256"
+      ],
+      "invoice_row_id": "be05c5bb-5bce-4397-8540-1c967b533320",
+      "invoice_number": "INV-0569",
+      "invoice_reference": "AJBR 67256",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "b873f54b-3522-4223-b7eb-e2e5ef1e8dee",
+      "job_number": "SWMS-26420",
+      "external_ref": "AJBR 66961",
+      "matched_digits": [
+        "66961"
+      ],
+      "invoice_row_id": "3eb49f8a-5236-4861-9a14-88bb5ca611d9",
+      "invoice_number": "INV-0571",
+      "invoice_reference": "AJBR 66961 / SWMS-26420",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "eac5f520-016d-4bf6-92f1-f94faa4b8b85",
+      "job_number": "SWMS-26422",
+      "external_ref": "67040",
+      "matched_digits": [
+        "67040"
+      ],
+      "invoice_row_id": "d2f275fa-cce6-4e65-aefd-6c4f037ef8f8",
+      "invoice_number": "INV-0570",
+      "invoice_reference": "AJBR 67040 / SWMS-26422",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "a32f406b-f12b-444e-9db9-d8a9b6b95a56",
+      "job_number": "SWMS-26424",
+      "external_ref": "67084",
+      "matched_digits": [
+        "67084"
+      ],
+      "invoice_row_id": "45aba505-f174-4969-bd13-93608f1f7f3a",
+      "invoice_number": "INV-0592",
+      "invoice_reference": "AJBR 67084",
+      "invoice_status": "PAID",
+      "invoice_total": "412.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "7fc39f32-c314-46dc-b0cc-cd9327131641",
+      "job_number": "SWMS-26425",
+      "external_ref": "AJBR 67122",
+      "matched_digits": [
+        "67122"
+      ],
+      "invoice_row_id": "0af8277c-d611-4026-a2f6-adad573a6c85",
+      "invoice_number": "INV-0574",
+      "invoice_reference": "AJBR 67122",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-05",
+      "money_sealed": true
+    },
+    {
+      "job_id": "2a21c134-9d03-4b46-a750-270884386f32",
+      "job_number": "SWMS-26426",
+      "external_ref": "AJBR 67105",
+      "matched_digits": [
+        "67105"
+      ],
+      "invoice_row_id": "1669e5d0-968f-4916-8e11-4a3ba04b64e8",
+      "invoice_number": "INV-0575",
+      "invoice_reference": "AJBR 67105",
+      "invoice_status": "PAID",
+      "invoice_total": "423.50",
+      "invoice_date": "2026-06-05",
+      "money_sealed": true
+    },
+    {
+      "job_id": "c3ab86ae-5989-469b-9c98-bbe50478cd1c",
+      "job_number": "SWMS-26427",
+      "external_ref": "67109",
+      "matched_digits": [
+        "67109"
+      ],
+      "invoice_row_id": "6fd1ac14-80c6-4a03-8dcc-062b57b55c7c",
+      "invoice_number": "INV-0568",
+      "invoice_reference": "AJBR 67109",
+      "invoice_status": "PAID",
+      "invoice_total": "643.50",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "4636c017-fb82-4135-9552-c5780ca4df88",
+      "job_number": "SWMS-26429",
+      "external_ref": "67154",
+      "matched_digits": [
+        "67154"
+      ],
+      "invoice_row_id": "3b506d3c-21bc-4a6e-b7ba-59b90f42f342",
+      "invoice_number": "INV-0554",
+      "invoice_reference": "AJBR 67154",
+      "invoice_status": "PAID",
+      "invoice_total": "203.50",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "8aecc0fb-f148-4b21-84c5-6dd3d3dca8de",
+      "job_number": "SWMS-26430",
+      "external_ref": "67201",
+      "matched_digits": [
+        "67201"
+      ],
+      "invoice_row_id": "494a54be-4d56-47f2-b79a-cd9d8501148a",
+      "invoice_number": "INV-0556",
+      "invoice_reference": "AJBR 67201",
+      "invoice_status": "PAID",
+      "invoice_total": "544.50",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "7ab400f1-82ff-46d5-bd00-d3853240ae5a",
+      "job_number": "SWMS-26431",
+      "external_ref": "AJBR 67197",
+      "matched_digits": [
+        "67197"
+      ],
+      "invoice_row_id": "297ebfe1-d750-4044-b4f2-06db81882374",
+      "invoice_number": "INV-0596",
+      "invoice_reference": "AJBR 67197",
+      "invoice_status": "PAID",
+      "invoice_total": "687.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "e00477e3-11f7-4c32-aa68-eb7946d48249",
+      "job_number": "SWMS-26433",
+      "external_ref": "AJBR 67196",
+      "matched_digits": [
+        "67196"
+      ],
+      "invoice_row_id": "34015dc1-f91c-4669-9b67-a55cdbe8ec84",
+      "invoice_number": "INV-0576",
+      "invoice_reference": "AJBR 67196",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-05",
+      "money_sealed": true
+    },
+    {
+      "job_id": "121f6eed-bd15-4285-b7a5-404e48467c0c",
+      "job_number": "SWMS-26456",
+      "external_ref": "AJBR 67126",
+      "matched_digits": [
+        "67126"
+      ],
+      "invoice_row_id": "314e5c53-bd9e-4b59-b0eb-62ac66125b52",
+      "invoice_number": "INV-0588",
+      "invoice_reference": "AJBR 67126",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "ad7d990f-392e-4ab5-b04b-ee68948e68fb",
+      "job_number": "SWMS-26457",
+      "external_ref": "67124",
+      "matched_digits": [
+        "67124"
+      ],
+      "invoice_row_id": "b8a8ad39-60a2-4215-a16e-870eb300f9d3",
+      "invoice_number": "INV-0591",
+      "invoice_reference": "AJBR 67124",
+      "invoice_status": "PAID",
+      "invoice_total": "643.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "ba5ace20-aaad-4c89-aed0-4310eac92d2e",
+      "job_number": "SWMS-26458",
+      "external_ref": "67031",
+      "matched_digits": [
+        "67031"
+      ],
+      "invoice_row_id": "1b0b6ef4-6408-461a-b811-024b1c1c5fd1",
+      "invoice_number": "INV-0578",
+      "invoice_reference": "AJBR 67031",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-05",
+      "money_sealed": true
+    },
+    {
+      "job_id": "dbd520b4-bf80-4aed-b4f0-8ec3f7c8d066",
+      "job_number": "SWMS-26459",
+      "external_ref": "AJBR 67016",
+      "matched_digits": [
+        "67016"
+      ],
+      "invoice_row_id": "c7e37dba-4f8f-4f38-8437-a6d1e27e7b05",
+      "invoice_number": "INV-0577",
+      "invoice_reference": "AJBR 67016",
+      "invoice_status": "PAID",
+      "invoice_total": "514.80",
+      "invoice_date": "2026-06-05",
+      "money_sealed": true
+    },
+    {
+      "job_id": "e46b79c2-39ed-402c-a527-661153097109",
+      "job_number": "SWMS-26465",
+      "external_ref": "67094",
+      "matched_digits": [
+        "67094"
+      ],
+      "invoice_row_id": "f086e826-7403-4e03-bc1f-1cba44a50cdf",
+      "invoice_number": "INV-0585",
+      "invoice_reference": "AJBR 67094",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "653b2b62-036d-4e97-bd5c-99f3ab547e65",
+      "job_number": "SWMS-26477",
+      "external_ref": "67272",
+      "matched_digits": [
+        "67272"
+      ],
+      "invoice_row_id": "329a0b47-01c4-4406-9c95-f8a4c4e35be5",
+      "invoice_number": "INV-0586",
+      "invoice_reference": "AJBR 67272",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "397ff3df-e7bc-47ef-b494-c874b17e99f2",
+      "job_number": "SWMS-26478",
+      "external_ref": "AJBR 67282",
+      "matched_digits": [
+        "67282"
+      ],
+      "invoice_row_id": "6e99d59b-d732-4c06-81e7-7baa1ea3c72c",
+      "invoice_number": "INV-0590",
+      "invoice_reference": "AJBR 67282",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "8a160510-88c6-4b5d-9e7b-6e1647d4bffc",
+      "job_number": "SWMS-26479",
+      "external_ref": "67251",
+      "matched_digits": [
+        "67251"
+      ],
+      "invoice_row_id": "81a9e0ae-7b14-4127-a644-47515478e685",
+      "invoice_number": "INV-0595",
+      "invoice_reference": "AJBR 67251",
+      "invoice_status": "PAID",
+      "invoice_total": "467.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "4e276d48-9df3-4882-bbab-6a42351e744a",
+      "job_number": "SWMS-26480",
+      "external_ref": "AJBR 67294",
+      "matched_digits": [
+        "67294"
+      ],
+      "invoice_row_id": "37c7b2d2-38bd-4f6d-8e0d-0ceaab9a1faa",
+      "invoice_number": "INV-0594",
+      "invoice_reference": "AJBR 67294",
+      "invoice_status": "PAID",
+      "invoice_total": "577.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "a1f4c897-c3e1-4046-95dc-2938fab9c2d9",
+      "job_number": "SWMS-26481",
+      "external_ref": "67249",
+      "matched_digits": [
+        "67249"
+      ],
+      "invoice_row_id": "05f72b3d-247a-4822-9557-e89669edbc47",
+      "invoice_number": "INV-0587",
+      "invoice_reference": "AJBR 67249",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "3f038e35-2392-4301-9ad0-ac8c4f6ea983",
+      "job_number": "SWMS-26482",
+      "external_ref": "67248",
+      "matched_digits": [
+        "67248"
+      ],
+      "invoice_row_id": "da183b50-f68e-4c6a-8687-894390d137ce",
+      "invoice_number": "INV-0610",
+      "invoice_reference": "AJBR 67248",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-08",
+      "money_sealed": true
+    },
+    {
+      "job_id": "0a2c52e2-7d5f-40a1-ac3e-513f53a0e403",
+      "job_number": "SWMS-26483",
+      "external_ref": "AJBR 67123",
+      "matched_digits": [
+        "67123"
+      ],
+      "invoice_row_id": "44ee0784-2a76-45fc-abb8-9d3a0670ca8c",
+      "invoice_number": "INV-0593",
+      "invoice_reference": "AJBR 67123",
+      "invoice_status": "PAID",
+      "invoice_total": "467.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "d1213533-79d5-4c18-b84f-d8e806cca9e7",
+      "job_number": "SWMS-26491",
+      "external_ref": "WB69372",
+      "matched_digits": [
+        "69372"
+      ],
+      "invoice_row_id": "a5cf37fd-49d9-45c5-982a-8e0ca7ea417b",
+      "invoice_number": "INV-0597",
+      "invoice_reference": "WB69372",
+      "invoice_status": "AUTHORISED",
+      "invoice_total": "484.00",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "63aa46ce-838a-4b72-b9a8-82a1a2baab29",
+      "job_number": "SWMS-26522",
+      "external_ref": "AJBR 67365",
+      "matched_digits": [
+        "67365"
+      ],
+      "invoice_row_id": "5daade90-be03-4f5b-af31-c043913dd39e",
+      "invoice_number": "INV-0601",
+      "invoice_reference": "AJBR 67365",
+      "invoice_status": "PAID",
+      "invoice_total": "467.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "a12719c3-a79f-48e1-b03d-7e654baba03a",
+      "job_number": "SWMS-26523",
+      "external_ref": "AJBR 67267",
+      "matched_digits": [
+        "67267"
+      ],
+      "invoice_row_id": "addd94cc-787a-4440-af0d-67fc4ffc1504",
+      "invoice_number": "INV-0603",
+      "invoice_reference": "AJBR 67267",
+      "invoice_status": "PAID",
+      "invoice_total": "467.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "81a98d22-1687-4a38-afbf-a55411e614d2",
+      "job_number": "SWMS-26524",
+      "external_ref": "AJBR 67153",
+      "matched_digits": [
+        "67153"
+      ],
+      "invoice_row_id": "43b093b0-5d51-48ac-a363-9dd4e9ea719d",
+      "invoice_number": "INV-0602",
+      "invoice_reference": "AJBR 67153",
+      "invoice_status": "PAID",
+      "invoice_total": "467.50",
+      "invoice_date": "2026-06-06",
+      "money_sealed": true
+    },
+    {
+      "job_id": "51f63762-cb51-4037-98c1-2b0a18268cb2",
+      "job_number": "SWMS-26668",
+      "external_ref": "AJBR 66883",
+      "matched_digits": [
+        "66883"
+      ],
+      "invoice_row_id": "da4bd7a2-809e-4e72-bc9c-1a48b02782a2",
+      "invoice_number": "INV-0501",
+      "invoice_reference": "AJBR 66883",
+      "invoice_status": "PAID",
+      "invoice_total": "1254.00",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "b3b7781f-ec23-423e-9257-8a865dbd56cd",
+      "job_number": "SWMS-26673",
+      "external_ref": "AJBR 67008",
+      "matched_digits": [
+        "67008"
+      ],
+      "invoice_row_id": "36f78db5-6507-4361-8e7e-e40a0a3ffcbd",
+      "invoice_number": "INV-0516",
+      "invoice_reference": "AJBR 67008",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "d0baa38e-3a06-4a0a-ac9b-a1ba67008ea2",
+      "job_number": "SWMS-26678",
+      "external_ref": "AJBR 66863",
+      "matched_digits": [
+        "66863"
+      ],
+      "invoice_row_id": "32cbe75c-26cf-484a-a1ec-77a92cde028c",
+      "invoice_number": "INV-0505",
+      "invoice_reference": "AJBR 66863",
+      "invoice_status": "PAID",
+      "invoice_total": "440.00",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "62268966-72bf-434c-b85e-284d04346e93",
+      "job_number": "SWMS-26679",
+      "external_ref": "AJBR 66882",
+      "matched_digits": [
+        "66882"
+      ],
+      "invoice_row_id": "aad81aba-178a-461d-86d1-fe321aaf6333",
+      "invoice_number": "INV-0503",
+      "invoice_reference": "AJBR 66882",
+      "invoice_status": "PAID",
+      "invoice_total": "440.00",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "6791ee57-fd39-4611-93a1-0263bc58c036",
+      "job_number": "SWMS-26680",
+      "external_ref": "AJBR 66888",
+      "matched_digits": [
+        "66888"
+      ],
+      "invoice_row_id": "81154ed8-456d-407e-89f8-1429dad3ec8a",
+      "invoice_number": "INV-0504",
+      "invoice_reference": "AJBR 66888",
+      "invoice_status": "PAID",
+      "invoice_total": "440.00",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "db73aa22-a92d-43b1-9827-834d987ded28",
+      "job_number": "SWMS-26681",
+      "external_ref": "AJBR 66896",
+      "matched_digits": [
+        "66896"
+      ],
+      "invoice_row_id": "b7679045-b907-4a9c-85d2-c31bf03de0ba",
+      "invoice_number": "INV-0502",
+      "invoice_reference": "AJBR 66896",
+      "invoice_status": "PAID",
+      "invoice_total": "440.00",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "f2d4f92c-694f-4366-88a7-8ebcafcd9e9a",
+      "job_number": "SWMS-26682",
+      "external_ref": "AJBR 66897",
+      "matched_digits": [
+        "66897"
+      ],
+      "invoice_row_id": "e966a64c-da0b-478f-afb7-6c48228a7220",
+      "invoice_number": "INV-0500",
+      "invoice_reference": "AJBR 66897",
+      "invoice_status": "PAID",
+      "invoice_total": "660.00",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "5c52cde6-5f4e-46a2-a99c-a5bc68473184",
+      "job_number": "SWMS-26684",
+      "external_ref": "AJBR 66909",
+      "matched_digits": [
+        "66909"
+      ],
+      "invoice_row_id": "1ae4ad70-0a08-40c1-bbd6-92b8ebbfefa8",
+      "invoice_number": "INV-0509",
+      "invoice_reference": "AJBR 66909",
+      "invoice_status": "PAID",
+      "invoice_total": "1989.90",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "322ef9dd-ad35-449e-b725-42f7591febed",
+      "job_number": "SWMS-26687",
+      "external_ref": "AJBR 66935",
+      "matched_digits": [
+        "66935"
+      ],
+      "invoice_row_id": "c669a8b3-1289-42bb-b9e3-5876fb875231",
+      "invoice_number": "INV-0519",
+      "invoice_reference": "AJBR 66935",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "2f467bbc-7032-4a7b-bd76-c36b2fffc865",
+      "job_number": "SWMS-26688",
+      "external_ref": "AJBR 66944",
+      "matched_digits": [
+        "66944"
+      ],
+      "invoice_row_id": "406a4b97-0d83-450f-8978-677bf98f7303",
+      "invoice_number": "INV-0512",
+      "invoice_reference": "AJBR 66944",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "aa98af03-2baa-45ff-9844-54d54acfcd98",
+      "job_number": "SWMS-26689",
+      "external_ref": "AJBR 66964",
+      "matched_digits": [
+        "66964"
+      ],
+      "invoice_row_id": "c454746b-bf17-4209-b87a-c28c1875ed54",
+      "invoice_number": "INV-0520",
+      "invoice_reference": "AJBR 66964",
+      "invoice_status": "PAID",
+      "invoice_total": "379.50",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "b3b83bd3-5aba-4687-bac0-566b46826fdb",
+      "job_number": "SWMS-26690",
+      "external_ref": "AJBR 66962",
+      "matched_digits": [
+        "66962"
+      ],
+      "invoice_row_id": "0f0bca42-e544-4e19-9471-00200db04130",
+      "invoice_number": "INV-0527",
+      "invoice_reference": "AJBR 66962",
+      "invoice_status": "PAID",
+      "invoice_total": "1369.50",
+      "invoice_date": "2026-06-02",
+      "money_sealed": true
+    },
+    {
+      "job_id": "bd30900d-d953-46bc-a311-dc816b4752c0",
+      "job_number": "SWMS-26691",
+      "external_ref": "AJBR 67155",
+      "matched_digits": [
+        "67155"
+      ],
+      "invoice_row_id": "2fc13360-9b5e-4c2b-b1e7-49a32dae6820",
+      "invoice_number": "INV-0555",
+      "invoice_reference": "AJBR 67155",
+      "invoice_status": "PAID",
+      "invoice_total": "335.50",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    },
+    {
+      "job_id": "1106dd9c-d459-4e2d-a73d-5df416363a7a",
+      "job_number": "SWMS-26931",
+      "external_ref": "MLB-24664",
+      "matched_digits": [
+        "24664"
+      ],
+      "invoice_row_id": "9f0f3e82-cbb7-4569-9a7d-d99fe90188e9",
+      "invoice_number": "INV-1051",
+      "invoice_reference": "MLB-24664PO-55370",
+      "invoice_status": "AUTHORISED",
+      "invoice_total": "1980.00",
+      "invoice_date": "2026-07-27",
+      "money_sealed": true
+    },
+    {
+      "job_id": "57aaa060-4148-4db0-adfe-238c0836f77b",
+      "job_number": "WB68792",
+      "external_ref": "WB68792",
+      "matched_digits": [
+        "68792"
+      ],
+      "invoice_row_id": "127fd257-7109-48f5-98a2-cfdd5b9364c7",
+      "invoice_number": "INV-0562",
+      "invoice_reference": "WB68792-177207",
+      "invoice_status": "AUTHORISED",
+      "invoice_total": "583.00",
+      "invoice_date": "2026-06-04",
+      "money_sealed": true
+    }
+  ],
+  "exclusions": [
+    {
+      "job_id": "e5f08e4d-e118-49a7-9a65-0253fe274214",
+      "job_number": "AJBR 67005",
+      "external_ref": "AJBR 67005",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67005; also owned by SWMS-261102"
+    },
+    {
+      "job_id": "e6cd23f3-6854-4629-ad0e-209e8a77087d",
+      "job_number": "SWMS-261024",
+      "external_ref": "MLB-27093",
+      "reason": "multiple_invoice_candidates",
+      "detail": "INV-1080, INV-1081"
+    },
+    {
+      "job_id": "9d7e35ae-94b9-4142-a28b-61ea6c7dccb6",
+      "job_number": "SWMS-261025",
+      "external_ref": "MLB-27093",
+      "reason": "multiple_invoice_candidates",
+      "detail": "INV-1080, INV-1081"
+    },
+    {
+      "job_id": "b88809b7-ee6e-497f-a586-25aea586047c",
+      "job_number": "SWMS-261059",
+      "external_ref": "MLB-25857",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 25857; also owned by SWMS-26606"
+    },
+    {
+      "job_id": "25e4d449-0fad-4248-95af-98a08a11c208",
+      "job_number": "SWMS-261086",
+      "external_ref": "AJBR-67045",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67045; also owned by SWMS-26448"
+    },
+    {
+      "job_id": "0b5fcd2f-03d4-4cd5-bb7e-5b4ec0aa37fa",
+      "job_number": "SWMS-261087",
+      "external_ref": "AJBR-67023",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67023; also owned by SWMS-26447"
+    },
+    {
+      "job_id": "4839a3e1-73b9-44b8-a104-fb9f6ed2629b",
+      "job_number": "SWMS-261088",
+      "external_ref": "AJBR-67022",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67022; also owned by SWMS-26449"
+    },
+    {
+      "job_id": "23e86acf-6115-4cdc-8a0c-60770dbf356d",
+      "job_number": "SWMS-261089",
+      "external_ref": "AJBR-67033",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67033; also owned by SWMS-26445"
+    },
+    {
+      "job_id": "97b65ae9-f758-4134-bce8-62d245464f50",
+      "job_number": "SWMS-261091",
+      "external_ref": "AJBR-66971",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 66971; also owned by SWMS-26444"
+    },
+    {
+      "job_id": "a99e4d75-57ff-4a5a-b32a-a2b901064a36",
+      "job_number": "SWMS-261092",
+      "external_ref": "AJBR-67142",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67142; also owned by SWMS-26443"
+    },
+    {
+      "job_id": "07f3e784-6000-40f1-942f-106c1543dd04",
+      "job_number": "SWMS-261093",
+      "external_ref": "AJBR-66999",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 66999; also owned by SWMS-26442"
+    },
+    {
+      "job_id": "ee22000f-d204-420e-b07c-be5155838e91",
+      "job_number": "SWMS-261094",
+      "external_ref": "AJBR-67004",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67004; also owned by SWMS-26441"
+    },
+    {
+      "job_id": "7078dac7-ee34-4ae1-95fa-cb355c30bade",
+      "job_number": "SWMS-261095",
+      "external_ref": "AJBR-67032",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67032; also owned by SWMS-26440"
+    },
+    {
+      "job_id": "f4da9dcc-6dbf-4f79-b072-d88dd5d1a7f7",
+      "job_number": "SWMS-261102",
+      "external_ref": "AJBR-67005",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67005; also owned by AJBR 67005"
+    },
+    {
+      "job_id": "25a3788d-ba9a-4de0-ae94-6476b84f96f1",
+      "job_number": "SWMS-26416",
+      "external_ref": "WB68926",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 68926; also owned by SWMS-26937"
+    },
+    {
+      "job_id": "0550e5a8-a44b-4d94-99ff-69328b51f383",
+      "job_number": "SWMS-26428",
+      "external_ref": "AJBR 67217",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67217; also owned by SWMS-26663"
+    },
+    {
+      "job_id": "edb01aaf-dc93-40f0-a326-4935b738640c",
+      "job_number": "SWMS-26440",
+      "external_ref": "AJBR 67032",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67032; also owned by SWMS-261095"
+    },
+    {
+      "job_id": "b05d95b7-f0d5-4bdc-a8f0-5f8661d74b8d",
+      "job_number": "SWMS-26441",
+      "external_ref": "AJBR 67004",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67004; also owned by SWMS-261094"
+    },
+    {
+      "job_id": "cb5b3f94-a63c-413a-af3b-2bd3f119f54f",
+      "job_number": "SWMS-26442",
+      "external_ref": "AJBR 66999",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 66999; also owned by SWMS-261093"
+    },
+    {
+      "job_id": "e4023e09-0986-4e02-9c5b-61927fb5e115",
+      "job_number": "SWMS-26443",
+      "external_ref": "AJBR 67142",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67142; also owned by SWMS-261092"
+    },
+    {
+      "job_id": "65a00a49-58a6-4d00-83d7-ad677b622006",
+      "job_number": "SWMS-26444",
+      "external_ref": "AJBR 66971",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 66971; also owned by SWMS-261091"
+    },
+    {
+      "job_id": "711f4387-023f-4ce1-ac27-b1e409f19dbe",
+      "job_number": "SWMS-26445",
+      "external_ref": "AJBR 67033",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67033; also owned by SWMS-261089"
+    },
+    {
+      "job_id": "e480c3aa-741a-4987-8124-75f7cd4bad3c",
+      "job_number": "SWMS-26447",
+      "external_ref": "AJBR 67023",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67023; also owned by SWMS-261087"
+    },
+    {
+      "job_id": "7ac9f6d6-a744-467c-87d4-56134c9c52a5",
+      "job_number": "SWMS-26448",
+      "external_ref": "AJBR 67045",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67045; also owned by SWMS-261086"
+    },
+    {
+      "job_id": "3eb2de99-6723-4b74-9bb4-272866e48ea2",
+      "job_number": "SWMS-26449",
+      "external_ref": "AJBR 67022",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67022; also owned by SWMS-261088"
+    },
+    {
+      "job_id": "96997b22-8bf6-4214-906d-351121dcb7f6",
+      "job_number": "SWMS-26606",
+      "external_ref": "MLB-25857",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 25857; also owned by SWMS-261059"
+    },
+    {
+      "job_id": "37012ab4-5df9-4a26-9c82-cffbc2a5bdd8",
+      "job_number": "SWMS-26663",
+      "external_ref": "AJBR 67217-R",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 67217; also owned by SWMS-26428"
+    },
+    {
+      "job_id": "90a238b4-986b-4fdd-83e0-464b00bde16a",
+      "job_number": "SWMS-26937",
+      "external_ref": "AJBR 68926",
+      "reason": "builder_reference_shared_with_other_job",
+      "detail": "contested digits 68926; also owned by SWMS-26416"
+    }
+  ]
+}

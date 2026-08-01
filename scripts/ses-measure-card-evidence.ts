@@ -42,6 +42,13 @@ import {
 } from "../supabase/functions/ops-api/makesafe_cycle_evidence.ts";
 import { extractBuilderWorkOrderIdentity } from "../supabase/functions/ops-api/makesafe_builder_work_order_identity.ts";
 import {
+  deriveSesUnlinkedInvoiceMatches,
+  indexSesInvoiceMatches,
+  SES_ISSUED_INVOICE_STATUSES,
+  type SesInvoiceMatch,
+  sesUnlinkedInvoiceDetail,
+} from "../supabase/functions/ops-api/makesafe_invoice_reference_match.ts";
+import {
   emptySesCardEvidenceInventory,
   readSesCardEvidence,
   SES_EVIDENCE_CONTRACT_SOURCE,
@@ -179,6 +186,15 @@ export interface MeasureCardInput {
   packs: MeasurePackRow[];
   statusApplication: Record<string, any> | null;
   stageOverride?: SesEvidenceStage | null;
+  /**
+   * The card's card-unique UNLINKED issued ACCREC invoice, if the shared
+   * matcher found one. `xero_invoices.job_id` cannot be backfilled - the
+   * write-once SES money seal refuses it - so an invoice that exists in the
+   * mirror but is not linked would otherwise read as no invoice at all. Null
+   * whenever the match is absent OR ambiguous; ambiguity deliberately leaves
+   * the cell missing.
+   */
+  unlinkedInvoiceMatch?: SesInvoiceMatch | null;
 }
 
 export interface MeasureCardResult {
@@ -446,9 +462,17 @@ export function buildSesCardEvidenceInventory(
     : "M1 computed status (no display overlay on this card)";
 
   const terminal = TERMINAL_STAGES.has(stage);
-  const invoicePresent = terminal
+  const linkedInvoicePresent = terminal
     ? !!invoice && ISSUED_INVOICE_STATUSES.has(invoiceStatus)
     : !!invoice;
+  // A card-unique unlinked issued ACCREC is real invoice evidence. It is always
+  // issued by construction, so it satisfies the terminal and non-terminal rules
+  // alike. It is consulted only when the linked read has already come up short,
+  // so a genuinely linked invoice always wins and its detail is preserved.
+  const unlinkedMatch = !linkedInvoicePresent
+    ? (input.unlinkedInvoiceMatch ?? null)
+    : null;
+  const invoicePresent = linkedInvoicePresent || !!unlinkedMatch;
 
   const tradeReportPresent = family === "own_template_roof"
     ? storedRoofPdf
@@ -520,7 +544,9 @@ export function buildSesCardEvidenceInventory(
       present: invoicePresent,
       transit_record_without_artifact: !invoicePresent &&
         !!pack?.invoice_doc_id,
-      detail: invoice
+      detail: unlinkedMatch
+        ? sesUnlinkedInvoiceDetail(unlinkedMatch)
+        : invoice
         ? `strongest live ACCREC invoice is ${invoiceStatus}${
           terminal ? " (terminal stage requires an issued invoice)" : ""
         }`
@@ -677,6 +703,49 @@ async function readRows(
   return data || [];
 }
 
+/**
+ * The card-unique unlinked issued ACCREC match for one card, if any.
+ *
+ * Guard 2 (a builder reference must be owned by exactly one job) needs the FULL
+ * reference-ownership universe, not just this card. `external_ref` lives only
+ * on `makesafe_job_details`, so every row of that table IS the universe - a few
+ * hundred rows, comfortably inside the PostgREST 1000-row cap, and far cheaper
+ * than paging the whole `jobs` table. Both reads check `error`: a wrong column
+ * name would otherwise read as "no candidates" and silently withhold evidence.
+ */
+async function readUnlinkedInvoiceMatch(
+  client: any,
+  jobId: string,
+): Promise<SesInvoiceMatch | null> {
+  const [detailResult, invoiceResult] = await Promise.all([
+    client.from("makesafe_job_details").select("job_id,external_ref"),
+    client.from("xero_invoices")
+      .select("id,job_id,invoice_number,reference,status,invoice_type,total")
+      .is("job_id", null)
+      .eq("invoice_type", "ACCREC")
+      .in("status", [...SES_ISSUED_INVOICE_STATUSES]),
+  ]);
+  if (detailResult.error) {
+    throw new Error(
+      `makesafe_job_details read failed: ${detailResult.error.message}`,
+    );
+  }
+  if (invoiceResult.error) {
+    throw new Error(
+      `unlinked xero_invoices read failed: ${invoiceResult.error.message}`,
+    );
+  }
+  const jobs = (detailResult.data || []).map((row: any) => ({
+    id: text(row.job_id),
+    external_ref: row.external_ref ?? null,
+  }));
+  const { matches } = deriveSesUnlinkedInvoiceMatches(
+    jobs,
+    invoiceResult.data || [],
+  );
+  return indexSesInvoiceMatches(matches).get(jobId) ?? null;
+}
+
 async function run(): Promise<void> {
   const jobArg = option("--job");
   if (!jobArg) {
@@ -783,6 +852,8 @@ async function run(): Promise<void> {
     documents,
   ) as MeasureDocFlags;
 
+  const unlinkedInvoiceMatch = await readUnlinkedInvoiceMatch(client, jobId);
+
   const result = buildSesCardEvidenceInventory({
     job,
     detail: detailRows[0] || null,
@@ -795,6 +866,7 @@ async function run(): Promise<void> {
     packs,
     statusApplication: statusApplications[0] || null,
     stageOverride,
+    unlinkedInvoiceMatch,
   });
 
   const output = asJson
