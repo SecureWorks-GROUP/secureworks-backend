@@ -530,8 +530,17 @@ export function buildCanonicalMakesafeRows(
           evidence_ref: application.evidence_ref,
           applied_by: application.applied_by,
           applied_at: application.applied_at,
+          // Duplicate-survivor archives carry a pointer to the card that
+          // survived, so an archived duplicate never reads as lost work.
+          duplicate_of_job_id: application.duplicate_of_job_id ?? null,
+          duplicate_of_job_number: application.duplicate_of_job_number ?? null,
+          duplicate_rule: application.duplicate_rule ?? null,
         }
         : null,
+      // Present regardless of whether the overlay currently applies, so the
+      // planner can refuse to re-archive a card it already archived.
+      duplicate_of_job_id: application?.duplicate_of_job_id ?? null,
+      duplicate_of_job_number: application?.duplicate_of_job_number ?? null,
       captain_action: base?.captain_action ?? null,
       computed_status: computation.status,
       computed_status_reasons: computation.reasons,

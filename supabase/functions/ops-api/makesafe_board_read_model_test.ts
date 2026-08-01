@@ -415,7 +415,48 @@ Deno.test("captain-applied status is a display overlay and never rewrites declar
     evidence_ref: "review://makesafe-board-review-surface-v1",
     applied_by: "captain-approved-cutover",
     applied_at: NOW,
+    // An ordinary cutover transition carries no duplicate pointer; only the
+    // duplicate-survivor archive path populates these.
+    duplicate_of_job_id: null,
+    duplicate_of_job_number: null,
+    duplicate_rule: null,
   });
+  assertEquals(row.duplicate_of_job_id, null);
+  assertEquals(row.duplicate_of_job_number, null);
+});
+
+Deno.test("a duplicate-survivor archive displays as archive and points at its survivor", () => {
+  const source = baseJob("allocated", "dup-loser", {
+    job_number: "SWMS-26920",
+  });
+  const [row] = buildCanonicalMakesafeRows([source], {
+    statusApplicationsByJobId: {
+      "dup-loser": {
+        run_key: "makesafe-duplicate-survivors-20260801",
+        job_id: "dup-loser",
+        source_status: "allocated",
+        before_status: "allocated",
+        after_status: "archive",
+        evidence_ref:
+          "docs/evidence/makesafe-duplicate-survivors-2026-08-01.md",
+        applied_by: "captain-approved-duplicate-survivors",
+        applied_at: NOW,
+        duplicate_of_job_id: "job-dup-survivor",
+        duplicate_of_job_number: "SWMS-26845",
+        duplicate_rule: "activity_evidence",
+      },
+    },
+  });
+
+  // Display moves; the raw declared stage is untouched.
+  assertEquals(row.declared_stage, "allocated");
+  assertEquals(row.canonical_stage, "archive");
+  assertEquals(row.canonical_stage_label, "Archive");
+  assertEquals(row.job_state, "scheduled");
+  // The pointer is what stops an archived duplicate reading as lost work.
+  assertEquals(row.status_application?.duplicate_of_job_number, "SWMS-26845");
+  assertEquals(row.status_application?.duplicate_rule, "activity_evidence");
+  assertEquals(row.duplicate_of_job_id, "job-dup-survivor");
 });
 
 Deno.test("display overlay fails closed when its source is stale or the card is terminal", () => {

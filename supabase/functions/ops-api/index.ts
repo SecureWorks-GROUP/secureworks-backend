@@ -146,6 +146,11 @@ import {
   type MakesafeStatusApplication,
 } from './makesafe_status_apply.ts'
 import {
+  MAKESAFE_AUTHORIZED_DUPLICATE_GROUPS,
+  planMakesafeDuplicateSurvivorArchives,
+  type MakesafeDuplicateArchive,
+} from './makesafe_duplicate_survivor.ts'
+import {
   currentCycleReportMap as cycleEvidenceReportMap,
   filterMediaForCurrentCycle,
   hasReattendBoundary,
@@ -4097,6 +4102,100 @@ if (import.meta.main) serve(async (req: Request) => {
           after_counts: afterPlan.before_counts,
           terminal_untouched: plan.terminal_untouched,
           disagreement_count: makesafeStatusDisagreementsFromRows(afterRows).length,
+        })
+      }
+      case 'makesafe_duplicate_survivor_archive': {
+        // Captain-authorized duplicate-survivor archive (2026-08-01). Appends to
+        // the same append-only makesafe_board_status_applications ledger with a
+        // pointer to the surviving card. It never rewrites jobs, substatus,
+        // assignments, invoices, communications or notifications, never deletes a
+        // card, and sends nothing.
+        if (authMode !== 'api_key') {
+          return json({ error: 'makesafe_duplicate_survivor_archive requires ops privilege' }, 403)
+        }
+        // Dry run is the DEFAULT here: a live run must be asked for explicitly.
+        const dryRun = body?.dry_run !== false
+        const requestedGroupKeys: string[] | null = Array.isArray(body?.group_keys)
+          ? [
+            ...new Set<string>(
+              body.group_keys.map((value: any) => String(value || '').trim()).filter(Boolean),
+            ),
+          ]
+          : null
+        if (!dryRun && (!requestedGroupKeys || requestedGroupKeys.length === 0)) {
+          return json({ error: 'group_keys is required for a live apply' }, 400)
+        }
+
+        const runKey = String(body?.run_key || '').trim()
+        const appliedBy = String(body?.applied_by || '').trim()
+        const evidenceRef = String(body?.evidence_ref || '').trim()
+        if (!dryRun && (!runKey || !appliedBy || !evidenceRef)) {
+          return json({ error: 'run_key, applied_by, and evidence_ref are required for a live apply' }, 400)
+        }
+
+        const nowIso = new Date().toISOString()
+        const canonicalRows = await loadCanonicalMakesafeBoard(client)
+        const plan = planMakesafeDuplicateSurvivorArchives(canonicalRows, requestedGroupKeys, nowIso)
+        if (dryRun) {
+          return json({
+            ok: true,
+            dry_run: true,
+            authorized_groups: MAKESAFE_AUTHORIZED_DUPLICATE_GROUPS,
+            ...plan,
+          })
+        }
+        if (plan.skipped.length > 0) {
+          return json({
+            error: 'duplicate archive plan contains skipped groups; nothing was written',
+            dry_run: false,
+            ...plan,
+          }, 409)
+        }
+
+        const write = await persistMakesafeDuplicateSurvivorArchives(client, {
+          runKey,
+          appliedBy,
+          evidenceRef,
+          archives: plan.archives,
+        })
+        if (!write.ok) {
+          return json({ error: write.error, run_key: runKey }, 503)
+        }
+        if (write.applied.length !== plan.archives.length) {
+          return json({
+            error: 'archive count did not match the guarded plan',
+            run_key: runKey,
+            planned: plan.archives.length,
+            applied: write.applied.length,
+          }, 409)
+        }
+        // Verify after: every archived loser must now display as archive, and
+        // every survivor must still be live.
+        const afterRows = await loadCanonicalMakesafeBoard(client)
+        const afterByJobId = new Map(afterRows.map((row: any) => [row.id, row]))
+        const unapplied = plan.archives.filter((archive) =>
+          String(afterByJobId.get(archive.job_id)?.canonical_stage || '').toLowerCase() !== 'archive'
+        )
+        if (unapplied.length > 0) {
+          return json({
+            error: 'one or more logged duplicate archives did not become current display truth',
+            run_key: runKey,
+            unapplied,
+          }, 409)
+        }
+        const strandedSurvivors = plan.survivors.filter((survivor) => {
+          const row = afterByJobId.get(String(survivor.job_id))
+          const stage = String(row?.canonical_stage || '').toLowerCase()
+          return !row || stage === 'archive' || stage === 'cancelled'
+        })
+        return json({
+          ok: true,
+          dry_run: false,
+          run_key: runKey,
+          applied_count: write.applied.length,
+          archives: write.applied,
+          survivors: plan.survivors,
+          stranded_survivors: strandedSurvivors,
         })
       }
       case 'makesafe_status_disagreements': {
@@ -14946,7 +15045,7 @@ async function loadCanonicalMakesafeBoard(
     statusApplications = await _fetchAllByJobIdChunked(
       client,
       'makesafe_board_status_current',
-      'id, run_key, job_id, source_status, before_status, after_status, evidence_ref, applied_by, applied_at',
+      'id, run_key, job_id, source_status, before_status, after_status, evidence_ref, applied_by, applied_at, duplicate_of_job_id, duplicate_of_job_number, duplicate_rule',
       jobIds,
       (q) => q.order('applied_at', { ascending: false }),
     )
@@ -15108,6 +15207,34 @@ async function persistMakesafeStatusApplications(
   if (error) {
     const message = error?.message || String(error)
     console.error('[ops-api] makesafe status application failed:', message)
+    return { ok: false, applied: [], error: message }
+  }
+  const applied = Array.isArray(data) ? data : (data?.applied || [])
+  return { ok: true, applied }
+}
+
+async function persistMakesafeDuplicateSurvivorArchives(
+  client: any,
+  args: {
+    runKey: string
+    appliedBy: string
+    evidenceRef: string
+    archives: MakesafeDuplicateArchive[]
+  },
+): Promise<{ ok: boolean; applied: any[]; error?: string }> {
+  if (!client || typeof client.rpc !== 'function') {
+    return { ok: false, applied: [], error: 'Supabase RPC client unavailable' }
+  }
+  if (args.archives.length === 0) return { ok: true, applied: [] }
+  const { data, error } = await client.rpc('apply_makesafe_duplicate_survivor_archive', {
+    p_run_key: args.runKey,
+    p_applied_by: args.appliedBy,
+    p_evidence_ref: args.evidenceRef,
+    p_rows: args.archives,
+  })
+  if (error) {
+    const message = error?.message || String(error)
+    console.error('[ops-api] makesafe duplicate survivor archive failed:', message)
     return { ok: false, applied: [], error: message }
   }
   const applied = Array.isArray(data) ? data : (data?.applied || [])
