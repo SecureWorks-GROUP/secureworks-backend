@@ -618,6 +618,30 @@ statements and client-identifying columns before the request is sent. The dated
 certificate, scope, ledgers, exceptions, and interpretation rules it backs are
 authoritative in `docs/evidence/ses-ab-certificate-2026-08-01.md`.
 
+## The SES Evidence Ruler Never Guesses A Captain Question
+
+`supabase/functions/ops-api/makesafe_evidence_requirements.ts` is the Phase C1
+ruler: the 49 family x display-stage evidence rows plus the pure
+`readSesCardEvidence`. It is a read-only second opinion, NOT a second status
+engine, and it must never gain a write, a stage move, or a dependency from
+`makesafe_computed_status.ts` / the board read model.
+
+Two rules hold the whole of Phase C up. A cell whose governing sources conflict
+stays `question` and reads `unresolved_question` — promoting one requires a
+Captain ruling that answers the named constant, never a code edit. And a card
+short only on question cells is `undetermined`, never `fail`; only a `missing`
+on a `required` cell fails. `ghl_equivalence` is the one question attached to an
+item rather than a cell, so a GHL-only portal link is undetermined at required
+AND optional cells.
+
+Families and stages are imported from `ses_family_matrix.ts` and
+`makesafe_computed_status.ts` rather than restated, and `unknown` is refused
+rather than measured. `scripts/ses-measure-card-evidence.ts` is the read-only
+single-card entrypoint C2 batches over; it reuses ops-api's own doc-boolean and
+cycle-scoping derivations, and reports `stage_source` rather than implying a
+stage. Contract, modelling decisions, transit heuristics and the verification
+baseline are in `docs/evidence/ses-evidence-ruler-c1-2026-08-01.md`.
+
 ## The SES Money And Outbound Seal Is Write-Once
 
 The write-once SES money/outbound seal and its approved invoice-void release
