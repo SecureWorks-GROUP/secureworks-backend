@@ -188,7 +188,7 @@ still need their own captain decision.
 
 ## Mechanism
 
-- Migration `20260801000001_makesafe_duplicate_survivor_archive.sql` extends the
+- Migration `20260801045000_makesafe_duplicate_survivor_archive.sql` extends the
   existing append-only `makesafe_board_status_applications` ledger with nullable
   `duplicate_of_job_id` / `duplicate_of_job_number` / `duplicate_rule` /
   `duplicate_evidence` columns. No second board-status engine is added.
@@ -214,25 +214,38 @@ any kind results from it.**
 
 Migration first, per `docs/project-knowledge/EDGE_DEPLOY_LANE.md`:
 
-1. Apply `20260801000001_makesafe_duplicate_survivor_archive.sql`.
+1. Apply `20260801045000_makesafe_duplicate_survivor_archive.sql`.
 2. Deploy `ops-api` from the authorized release worktree only
    (`scripts/deploy-edge-function.sh ops-api`).
-3. Dry run — the default — and confirm four archives and zero skips:
+
+> **Renumbered 2026-08-01.** The migration originally shipped as
+> `20260801000001`. Production already held an out-of-band migration of a
+> different name at that exact version (`makesafe_source_job_links`), so the
+> production deploy run for PR 457 failed closed on a `ledger version/name
+> collision` before applying anything or deploying any function — production has
+> neither the pointer columns nor this `ops-api`. The SQL is byte-identical to
+> the reviewed file (`sha256 85f12ef63136c998bdff2afcfd38ca6e1d73da908f4aaae1e5a7215557a6ebc5`);
+> only the version changed. Steps 1 and 2 therefore both run from the merge of
+> the renumbered branch to `main`.
+3. Dry run — the default — scoped to the three groups still in the apply set
+   (see the MLB-23067 exclusion below), and confirm **three** archives and zero
+   skips:
 
    ```bash
    curl --fail-with-body -sS -H "x-api-key: ${SW_API_KEY}" \
      -H 'content-type: application/json' \
      "${MAKESAFE_OPS_URL}?action=makesafe_duplicate_survivor_archive" \
-     --data '{"dry_run": true}'
+     --data '{"dry_run": true, "group_keys": ["mlb-25625-roof",
+              "mlb-26189-assessment", "mlb-26344-makesafe"]}'
    ```
 
-4. Only then, with the captain's confirmation of the four picks:
+4. Only then, with the captain's confirmation of the picks:
 
    ```json
    {
      "dry_run": false,
      "group_keys": ["mlb-25625-roof", "mlb-26189-assessment",
-                    "mlb-23067-makesafe", "mlb-26344-makesafe"],
+                    "mlb-26344-makesafe"],
      "run_key": "makesafe-duplicate-survivors-20260801",
      "applied_by": "captain-approved-duplicate-survivors",
      "evidence_ref": "docs/evidence/makesafe-duplicate-survivors-2026-08-01.md"
@@ -241,6 +254,11 @@ Migration first, per `docs/project-knowledge/EDGE_DEPLOY_LANE.md`:
 
 Any skipped group, any count mismatch, or any stranded survivor in the response
 is a hard stop.
+
+`group_keys` scopes the planner for the dry run and the live apply alike, and a
+live apply refuses without it. Excluding a group is therefore a parameter
+choice, not a code change and not a guard bypass — `MAKESAFE_AUTHORIZED_DUPLICATE_GROUPS`
+keeps all four entries and MLB-23067 stays fully adjudicated in this document.
 
 ## Delegation scope — confirmed 2026-08-01
 
@@ -254,6 +272,70 @@ pairs, MLB-25625, MLB-26189 and MLB-26344 included.** The four survivors recorde
 above are therefore authorized.
 
 That confirmation covers the *survivor selection* only. The post-deploy dry run
-(step 3 of the release sequence) still gates the live apply: it must report four
-archives and zero skips, against the same four group keys, before `dry_run` is
-set to false.
+(step 3 of the release sequence) still gates the live apply: it must report THREE
+archives and zero skips against the THREE group keys (`mlb-25625-roof`,
+`mlb-26189-assessment`, `mlb-26344-makesafe`) before `dry_run` is set to false.
+See **Captain ruling 2026-08-01 — MLB-23067 is excluded from the apply set** below
+for why.
+
+## Pre-existing display overlays the plan did not account for (found 2026-08-01)
+
+The plan in `data/board-duplicate-survivors-v1/dry-run-plan.json` derived each
+`before_status` from raw card facts. It did **not** read
+`makesafe_board_status_applications`, and five of the eight cards already carry a
+row there from earlier captain-approved runs. Read-only from production:
+
+```
+job          run_key                                     source -> after      applied
+SWMS-26998   makesafe-board-truth-stage1-20260724        new    -> allocated  2026-07-24
+SWMS-26791   makesafe-board-truth-stage1-20260724        report_ready -> allocated  2026-07-24
+SWMS-26845   makesafe-board-truth-stage3-20260724        report_ready -> archive    2026-07-24
+SWMS-26920   ses-u7-three-net-close-20260728-0755        allocated -> archive       2026-07-28
+SWMS-261065  ses-u7-falsification-dead-close-20260728-v1 new    -> archive          2026-07-28
+```
+
+`SWMS-26845` and `SWMS-261065` are planned **survivors**; `SWMS-26920` is a
+planned **loser**. An overlay only takes effect when its `source_status` still
+equals the card's freshly derived `board_stage` (`makesafe_board_read_model.ts`
+`applicationApplies`), so whether each is live must be read off the deployed
+board, not inferred here. But if the `SWMS-26845` or `SWMS-26920` overlay is
+live, `planMakesafeDuplicateSurvivorArchives` skips `mlb-23067-makesafe` with
+`survivor_terminal_display_status` / `loser_terminal_display_status`, and one
+skip refuses the entire run.
+
+Two things follow, and neither is settled by the delegation above:
+
+- The dry run is expected to diverge from the committed fixture. The fixture is
+  the stale artefact; the live response is truth.
+- `archive` on the display ledger is overloaded. The 2026-07-24 cutover archived
+  `SWMS-26845` because it was **completed more than seven days ago**, not because
+  it was a duplicate — the same card this document selects as the survivor that
+  "carries the entire delivery". The planner's terminal-display guard cannot tell
+  a done-and-archived survivor from a dead one, and deliberately fails closed.
+  Whether MLB-23067 still needs a duplicate archive at all, given both its cards
+  already display `archive`, is a captain question, not a planner question.
+
+### Captain ruling 2026-08-01 — MLB-23067 is excluded from the apply set
+
+**`mlb-23067-makesafe` is not applied.** Both its cards already display
+`archive`, so the ruled outcome — the duplicate off the live board, the delivery
+card not shown as outstanding work — already holds. Applying would buy a pointer
+column and nothing else, and the only way to get it would be to force past a
+guard that is correctly refusing.
+
+The ruling is explicit that the guard is **not** to be forced, relaxed or worked
+around. MLB-23067 keeps its full adjudication above and its entry in
+`MAKESAFE_AUTHORIZED_DUPLICATE_GROUPS`; it is simply left out of the `group_keys`
+of the dry run and the apply. If its display state later changes so that either
+card returns to a live stage, the group is already adjudicated and can be applied
+then without re-litigating the survivor pick.
+
+The apply set is therefore **three** groups: `mlb-25625-roof`,
+`mlb-26189-assessment`, `mlb-26344-makesafe`. The gate is three archives and zero
+skips.
+
+`SWMS-261065` (survivor, MLB-26344) also carries an `archive` overlay, but its
+`source_status` is `new` while the card now sits at `admin_to_send_report`, so
+the overlay is expected to read stale and not apply. That expectation is not
+load-bearing: if it turns out to be live, the dry run reports a skip and the run
+stops, exactly as it should.

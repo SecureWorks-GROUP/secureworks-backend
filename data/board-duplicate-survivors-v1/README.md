@@ -6,8 +6,8 @@ Adjudication and planned dry run for the captain's duplicate-survivor ruling
 
 ## `dry-run-plan.json`
 
-The plan `planMakesafeDuplicateSurvivorArchives` produces for the four
-re-verified groups: four archives, zero skips.
+The historical fixture covers four re-verified groups. It is superseded for
+apply decisions by the three-group ruling in the evidence document below.
 
 ```
 SWMS-26998   allocated     -> archive   pointer SWMS-26736    (MLB-25625 roof, PO-54007)
@@ -29,3 +29,21 @@ authorized release worktree. The authoritative dry run is step 3 of the release
 sequence in the evidence doc, and its response — not this file — is what gates
 the live apply. If that dry run reports a different `before_status`, the planner
 is reading live truth and this file is the stale one.
+
+## This file is superseded — read it as fixture data, not as the plan
+
+Two things landed after it was written, both in
+`docs/evidence/makesafe-duplicate-survivors-2026-08-01.md`:
+
+- **It is known-stale.** It derived `before_status` from raw card facts and never
+  read `makesafe_board_status_applications`. Five of the eight cards already
+  carry a display overlay from the 2026-07-24 cutover and the 2026-07-28 U7 runs.
+- **MLB-23067 is excluded by captain ruling.** Both its cards already display
+  `archive`, so the ruled outcome already holds and the planner's guard is
+  correctly refusing. The row for `SWMS-26920` above is therefore **not** part of
+  the apply set.
+
+The apply set is the three groups `mlb-25625-roof`, `mlb-26189-assessment` and
+`mlb-26344-makesafe`, gated on three archives and zero skips. The live dry-run
+and apply responses are recorded separately under `scripts/` in the apply-ledger
+PR, following the `board-safe-fixes-v1` pattern.

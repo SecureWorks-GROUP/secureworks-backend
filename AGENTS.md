@@ -289,6 +289,19 @@ prevent concurrent deploys from racing the same pending migration.
 The audited automatic boundary starts at version `20260722000001`; older sparse
 production history remains in the manual lane.
 
+Production carries migrations that are NOT in this repo (other lanes apply
+directly through the Management API), so a new migration's version must be
+checked against the LIVE ledger — `supabase_migrations.schema_migrations` — not
+just against `supabase/migrations/`. A repository file whose version matches a
+ledger row of a different name is a `ledger version/name collision` and fails the
+whole deploy run before any migration or function ships. The fix is to renumber
+the repository file (and its `supabase/rollbacks/` twin and every reference) to
+an unused version, never to add an exclusion or alias — those account for
+audited debt, not for a migration that still has to run. `bash
+scripts/apply-pending-migrations.sh --dry-run` with a production
+`SUPABASE_ACCESS_TOKEN` reproduces the gate read-only and is the cheap pre-merge
+check. See the owning evidence document for incident-specific decisions.
+
 The post-apply guard refuses only when a declared migration ledger version or
 required queryable marker is absent; ledger name/checksum drift is advisory.
 When a function selects a newly added column, keep the migration in the same
@@ -570,7 +583,7 @@ Evidence and per-group reasoning:
 
 Archiving a loser is display-only and reuses the one board-status ledger
 (`makesafe_board_status_applications`) via the additive pointer columns in
-`20260801000001_makesafe_duplicate_survivor_archive.sql` — apply it before the
+`20260801045000_makesafe_duplicate_survivor_archive.sql` — apply it before the
 matching `ops-api`. Do not add a second board-status engine. The authorized group
 list in `makesafe_duplicate_survivor.ts` is closed and hand-adjudicated: this path
 has no discovery step by design, so no card that a human did not adjudicate can be
@@ -580,6 +593,10 @@ it refuses a survivor that is itself terminal or already an archived duplicate s
 an archive can never strand work. Never derive the survivor from the
 `external_ref` string form: SWMS-261118 carries the fuller `MLB-26344PO-57087`
 while the worked card SWMS-261065 carries the bare ref.
+
+For the current duplicate-survivor apply-set adjudication, including display
+overlay handling and captain rulings, see
+`docs/evidence/makesafe-duplicate-survivors-2026-08-01.md`.
 
 ## The SES Money And Outbound Seal Is Write-Once
 
