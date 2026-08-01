@@ -758,8 +758,17 @@ caller-supplied job shape cannot get around it. As of 2026-08-01 **all 440 SES
 board cards carry an explicit `ses_money_sealed_at`** (source
 `job_spine_backfill`), so this is the universal case, not an edge one. The two
 approved release families void an invoice or release a delivery route; neither
-links one. Evidence, the read-only cohort deriver, and the recommended read-side
-alternative are in
+links one. The Captain's 2026-08-01 ruling was to leave the seal alone and close
+the gap on the READ side instead: `makesafe_invoice_reference_match.ts` is the
+ONE implementation that matches a card to its card-unique UNLINKED issued ACCREC
+(whole digit runs of >=5 digits, never a substring; the reference must be owned
+by exactly one job across the FULL jobs table, both sides of a contest excluded;
+one invoice may fund one card). Anything ambiguous stays `missing` by design.
+The C1 entrypoint, C2 batch, the cohort deriver and **the C4 board UI** must all
+consume it rather than re-deriving the rule. Bump
+`SES_EVIDENCE_CONTRACT_VERSION` on any ruler-semantics change and bracket it with
+a before/after `ses-c2-measure-board-evidence.ts` run. Evidence, the 51-card
+cohort and the measured board effect are in
 `docs/evidence/ses-c3-invoice-link-seal-conflict-2026-08-01.md`.
 
 The v2 authority bootstrap and full-board two-way reconciliation are owned by

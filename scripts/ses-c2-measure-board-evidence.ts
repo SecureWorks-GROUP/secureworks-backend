@@ -26,6 +26,11 @@ import {
   SES_EVIDENCE_ITEMS,
   type SesEvidenceItem,
 } from "../supabase/functions/ops-api/makesafe_evidence_requirements.ts";
+import {
+  deriveSesUnlinkedInvoiceMatches,
+  indexSesInvoiceMatches,
+  SES_ISSUED_INVOICE_STATUSES,
+} from "../supabase/functions/ops-api/makesafe_invoice_reference_match.ts";
 
 const PROJECT_REF = "kevgrhcjxspbxgovpmfl";
 const MANAGEMENT_QUERY_URL =
@@ -256,6 +261,38 @@ async function run(): Promise<void> {
     `rows: details=${details.length} assignments=${assignments.length} reports=${reports.length} documents=${documents.length} media=${media.length} invoices=${invoices.length} packs=${packs.length} status_apps=${apps.length}`,
   );
 
+  // The card-unique unlinked issued ACCREC matches. `xero_invoices.job_id` can
+  // never be backfilled (the write-once SES money seal refuses `linked`), so a
+  // real invoice sitting unlinked in the mirror would otherwise measure as no
+  // invoice at all. Guard 2 needs the FULL reference-ownership universe, so the
+  // ownership read deliberately does NOT reuse `DETAIL_SQL`, which drops
+  // cancelled/lost jobs - a cancelled sibling still contests a builder
+  // reference, and omitting it would manufacture false uniqueness.
+  const [refUniverse, unlinkedInvoices] = await Promise.all([
+    query("select job_id, external_ref from makesafe_job_details"),
+    query(
+      `select x.id, x.job_id, x.invoice_number, x.reference, x.status,
+              x.invoice_type, x.total
+       from xero_invoices x
+       where x.job_id is null and x.invoice_type = 'ACCREC'
+         and x.status in (${
+        SES_ISSUED_INVOICE_STATUSES.map((s) => `'${s}'`).join(",")
+      })`,
+    ),
+  ]);
+  const { matches: unlinkedMatches, exclusions: unlinkedExclusions } =
+    deriveSesUnlinkedInvoiceMatches(
+      (refUniverse as any[]).map((row) => ({
+        id: String(row.job_id),
+        external_ref: row.external_ref ?? null,
+      })),
+      unlinkedInvoices as any[],
+    );
+  const unlinkedMatchByJob = indexSesInvoiceMatches(unlinkedMatches);
+  console.error(
+    `unlinked invoice matches: ${unlinkedMatches.length} matched, ${unlinkedExclusions.length} excluded as ambiguous`,
+  );
+
   const detailByJob: Record<string, any> = {};
   for (const row of details) detailByJob[String(row.job_id)] = row;
   const assignmentsByJob = groupByJob(assignments as any[]);
@@ -287,6 +324,7 @@ async function run(): Promise<void> {
       invoices: invoicesByJob[jobId] || [],
       packs: packsByJob[jobId] || [],
       statusApplication: (appsByJob[jobId] || [])[0] || null,
+      unlinkedInvoiceMatch: unlinkedMatchByJob.get(jobId) ?? null,
     });
     const itemStatus = {} as Record<SesEvidenceItem, string>;
     const itemReq = {} as Record<SesEvidenceItem, string>;

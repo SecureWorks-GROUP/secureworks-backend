@@ -697,7 +697,7 @@ Deno.test("readings carry the contract version and deduped open questions", () =
   });
   assertEquals(
     reading.contract_version,
-    "ses-evidence-requirements/c1-po-ruling-v2",
+    "ses-evidence-requirements/c1-unlinked-invoice-v3",
   );
   const ids = reading.open_questions.map((question) => question.id);
   assertEquals(new Set(ids).size, ids.length);

@@ -7,11 +7,16 @@ Tranche 3 was dispatched to "re-link the 52 double-verified issued invoices to
 their cards" by setting `xero_invoices.job_id`, on the basis that the write is
 "routine, reversible, no comms, no Xero mutation".
 
-The cohort half of that is sound and is delivered here. The apply half cannot be
-built as specified: **linking an ACCREC invoice to an SES card is exactly what
-the write-once SES money seal refuses**, and every candidate target carries an
-explicit seal. This document records the derivation, the collision, and the
-options — it does not perform the write.
+The cohort half of that is sound and is delivered here. The apply half was NOT
+built, because **linking an ACCREC invoice to an SES card is exactly what the
+write-once SES money seal refuses**, and every candidate target carries an
+explicit seal.
+
+The Captain ruled on this the same day: *"The money seal is doing exactly its job
+and we do not go around it."* The invoice evidence gap is therefore closed on the
+READ side — the C1 ruler learns to see a card-unique unlinked invoice — and **no
+money write is performed anywhere in this change**. Section 4 records what was
+built and its measured board effect.
 
 ## 1. What was delivered
 
@@ -43,6 +48,11 @@ Both guards from `data/codex-po-invoice-verify-v1/report.md` are applied:
 
 A third guard is added here: an invoice claimed by two cards is dropped from
 both rather than arbitrated (`invoice_claimed_by_multiple_cards`).
+
+The deriver counts 440 "board cards" against C2's 407 because it deliberately
+does NOT drop cancelled/lost jobs: a cancelled sibling still contests a builder
+reference, and excluding it would manufacture false uniqueness. The wider
+population can only ever withhold a match, never add one.
 
 ### 51 here vs 52 in the Codex report
 
@@ -127,22 +137,75 @@ said so: *"the SES money and outbound seal is write-once and owned by
 owner document says sealed SES work "must use the approved release actions
 instead", and no approved release action links.
 
-## 4. Options
+## 4. The Captain's ruling (2026-08-01) and what was built
 
-- **A — Read-side fix (recommended; no money write at all.)** The goal is that
-  the C1 ruler's invoice cell stops failing. That can be achieved without
-  touching `xero_invoices` by teaching the ruler's invoice reader to also accept
-  a *card-unique, unlinked, issued* ACCREC that names the card's own builder
-  reference — exactly the 51 bindings derived here, exactly the guards above.
-  It is a read-only evidence change, squarely inside what the captain's
-  evidence-backfill ruling authorised, entirely outside the seal, and trivially
-  reversible. The money mirror stays untouched and the FK question stays open on
-  its merits.
+**Option A was chosen: "The money seal is doing exactly its job and we do not go
+around it."** No money write of any kind. The ruler learns to read the evidence
+that already exists.
+
+`supabase/functions/ops-api/makesafe_invoice_reference_match.ts` is the single
+implementation of the matching rule — pure, in-memory, write-free by
+construction. The C1 single-card entrypoint, the C2 board batch and the cohort
+deriver all consume it, and **the C4 board UI must consume it too** when it
+displays invoice evidence, so a card's invoice reads the same everywhere rather
+than being re-derived per surface.
+
+Strictness is the Captain's: a **unique match only**. Every ambiguity leaves the
+cell `missing` exactly as it reads today, because a wrong invoice attributed to a
+card is worse than a card that still reports its invoice missing.
+
+`SES_EVIDENCE_CONTRACT_VERSION` moves to
+`ses-evidence-requirements/c1-unlinked-invoice-v3`, so every past measurement
+stays attributable to the ruler that produced it.
+
+### Measured board effect (C2, whole board, before vs after)
+
+| Invoice cell | Before | After |
+| --- | ---: | ---: |
+| `present` | 201 | **252** |
+| `missing` | 104 | **55** |
+| `not_required` | 82 | 80 |
+| `unresolved_question` | 1 | 1 |
+
+Exactly **51** cards changed, and nothing else moved:
+
+```
+invoice cell changed:              51
+STAGE changed:                      0
+non-invoice item changed:           0
+verdict changed:                    0
+verdict before: fail=364 pass=17 undetermined=7 refused=19
+verdict after : fail=364 pass=17 undetermined=7 refused=19
+```
+
+**No card's verdict flipped to `pass`, and that is the honest result.** `po` is
+REQUIRED on all 49 family/stage rows and is still missing on these cards, so
+they continue to fail on the PO cell — which is a separate, still-open Captain
+question. This change removes 49 false invoice failures (and promotes 2 optional
+cells) from the ruler's noise; it does not manufacture passes.
+
+The ruler remains a read-only second opinion: it gained no write, no stage move,
+and no dependency on `makesafe_computed_status.ts` or the board read model.
+
+### Option B remains available to the Captain
+
+If physical links are wanted later — so that per-job revenue attribution,
+`reporting-api` and the digest's financial sections see this money against the
+card, none of which the ruler-side fix changes — the route stays open: a Captain
+release of the seal plus a new audited bulk-link ops-api action under the release
+ledger, a migration, and a privileged key. The cohort deriver in this PR produces
+exactly the apply-set that work would consume. It is a money-model change and
+belongs to the Captain, not to firstmate or an agent.
+
+## 5. Options as they stood before the ruling
+
+- **A — Read-side fix. CHOSEN; see section 4.** Teach the ruler's invoice reader
+  to accept a card-unique, unlinked, issued ACCREC naming the card's own builder
+  reference. No money write; entirely outside the seal.
 - **B — Captain releases the seal for this backfill.** Requires a new audited
   ops-api action (bulk link under the release ledger), a migration, and a
-  privileged key. Largest blast radius; genuine money-model change; needs the
-  Captain, not firstmate.
-- **C — Raw SQL write bypassing the fence.** Not recommended and not built. It
+  privileged key. Not taken now; remains available (section 4).
+- **C — Raw SQL write bypassing the fence.** Rejected and not built. It
   contradicts the seal and the repo's own backfill pattern, which writes through
   a typed ops-api action rather than raw SQL
   (`scripts/apply-ses-c3-suburb-backfill-v1.ts`).
@@ -150,7 +213,7 @@ instead", and no approved release action links.
 Independent of the choice: no `SW_API_KEY` or service-role key is present in
 this lane, so no apply path could have been executed here in any case.
 
-## 5. Reproducing
+## 6. Reproducing
 
 ```bash
 SUPABASE_ACCESS_TOKEN=... deno run --allow-env --allow-net --allow-read \
