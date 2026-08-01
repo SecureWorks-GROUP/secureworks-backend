@@ -554,6 +554,33 @@ display stages and terminal job states are structurally read-only. The release
 sequence and seven-card first tranche are in
 `docs/makesafe-board-truth-cutover-2026-07-24.md`.
 
+## Duplicate Board Cards: Prove One Instruction Before Archiving One
+
+A shared claim reference plus a shared street is NOT a duplicate. Two cards are
+duplicates only when they resolve the SAME single builder PO and that PO's
+work-order PDF declares ONE instruction. MLB routinely issues several POs against
+one claim (assessment + roof + make-safe are separate jobs), and the extractor
+often attaches every one of that claim's work-order PDFs to every card, so
+union-finding cards by shared PO token merges distinct jobs into a false group.
+The 2026-08-01 re-verification of nine nominated groups found five were not
+duplicates at all, and that in all four genuine pairs BOTH cards carried the
+identical PO — so a "the card carrying the PO survives" rule decides nothing.
+Evidence and per-group reasoning:
+`docs/evidence/makesafe-duplicate-survivors-2026-08-01.md`.
+
+Archiving a loser is display-only and reuses the one board-status ledger
+(`makesafe_board_status_applications`) via the additive pointer columns in
+`20260801000001_makesafe_duplicate_survivor_archive.sql` — apply it before the
+matching `ops-api`. Do not add a second board-status engine. The authorized group
+list in `makesafe_duplicate_survivor.ts` is closed and hand-adjudicated: this path
+has no discovery step by design, so no card that a human did not adjudicate can be
+archived by it. `makesafe_duplicate_survivor_archive` is API-key-only and
+dry-run-by-default; it refuses to write when the plan has any skipped group, and
+it refuses a survivor that is itself terminal or already an archived duplicate so
+an archive can never strand work. Never derive the survivor from the
+`external_ref` string form: SWMS-261118 carries the fuller `MLB-26344PO-57087`
+while the worked card SWMS-261065 carries the bare ref.
+
 ## The SES Money And Outbound Seal Is Write-Once
 
 The write-once SES money/outbound seal and its approved invoice-void release
