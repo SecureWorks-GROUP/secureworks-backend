@@ -633,7 +633,30 @@ and after any new correction tranche. It needs only `SUPABASE_ACCESS_TOKEN`
 (Management API `/database/query`, `read_only: true`); it refuses non-SELECT
 statements and client-identifying columns before the request is sent. The dated
 certificate, scope, ledgers, exceptions, and interpretation rules it backs are
-authoritative in `docs/evidence/ses-ab-certificate-2026-08-01.md`.
+authoritative in `docs/evidence/ses-ab-certificate-2026-08-01.md` — read its
+2026-08-01 addendum before quoting any count from that document's body.
+
+Two rules govern how a failure may be answered, because the cheap fix for each
+is the wrong one:
+
+- **The phase A census is a FLOOR, not an expected observation.** `a3`/`a4`
+  assert invariants (`evaluateCensusInvariants`): keys partition into
+  live-job / exception-only / synthetic, no key or live case is destroyed,
+  promotion runs exception -> live only, the synthetic set stays closed, and a
+  `confirmed_live_job` case always has its job. Growth above the floor is
+  reported, never failed — pinning the exact counts is what failed the
+  certificate on healthy +3 live-job intake growth. Never answer an `a3`/`a4`
+  failure by re-pinning the numbers; a count moving DOWN is the defect these
+  checks exist to catch.
+- **A merge group may be accounted without being settled.** Adding a work order
+  to `ses-ab-certificate-v1.duplicate-accounting.txt` is what clears a `d1`
+  `unaccounted`, and the disposition records what was actually decided.
+  `captain_hold_live_pair` is the honest disposition for a group proved to be
+  one instruction whose survivor the standing ruling cannot pick while BOTH
+  members are live; it must name a decision key, and `d3` fails if a member goes
+  terminal or gains a duplicate pointer, so a stale hold cannot absorb a real
+  change. Do not widen the older `open_hold` rule (at most one live card per
+  work order) to fit such a group — that guard protects the other holds.
 
 ## The SES Evidence Ruler Never Guesses A Captain Question
 

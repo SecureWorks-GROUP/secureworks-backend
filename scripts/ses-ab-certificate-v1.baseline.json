@@ -16,6 +16,7 @@
     "live_case_without_job": 0,
     "dangling_job_ids": 0,
     "identity_keys_with_two_live_case_bound_jobs": 0,
+    "identity_key_census_rule": "Captain rule, 2026-08-01 addendum: the identity-key and live-case counts above are a certified FLOOR and a partition rule, not an expected observation. Ordinary intake keeps minting keys and keeps promoting exception cases to confirmed_live_job, so a3/a4 assert the invariants those numbers protect - every key lands in exactly one of live-job / exception-only / synthetic, no key or live case is destroyed (no negative growth from the floor), promotion only runs exception -> live, the synthetic set stays closed, and a confirmed_live_job case always has its job - and report growth above the floor instead of failing it. Pinning the exact counts is what made the certificate fail on healthy +3 live-job intake growth on 2026-08-01. Do not re-pin them; if a count must move DOWN, that is a real defect and the invariant is meant to catch it.",
     "brief_pre_recovery_census": {
       "identity_keys_total": 533,
       "identity_keys_live_job": 156,
@@ -114,20 +115,23 @@
   },
   "droid_cross_check": {
     "accounting_fixture": "scripts/ses-ab-certificate-v1.duplicate-accounting.txt",
-    "merge_groups_total": 19,
-    "merge_groups_historical": 16,
-    "merge_groups_drain_minted": 3,
+    "merge_groups_total": 21,
+    "merge_groups_historical": 17,
+    "merge_groups_drain_minted": 4,
     "drain_minted_duplicate_jobs": [
       "SWMS-261059",
       "SWMS-261078",
+      "SWMS-261081",
       "SWMS-261118"
     ],
     "disposition_counts": {
       "archived_duplicate_pointer": 4,
-      "adjudicated_not_duplicate": 8,
+      "adjudicated_not_duplicate": 9,
       "captain_excluded": 1,
-      "open_hold": 6
+      "open_hold": 6,
+      "captain_hold_live_pair": 1
     },
-    "unaccounted": 0
+    "unaccounted": 0,
+    "open_captain_holds": "Seven of the 21 groups are UNRULED: six legacy open_hold rows under duplicate-survivor-policy, plus MLB-27100PO-56960 held as captain_hold_live_pair under decision key duplicate-mlb-27100-po-56960-survivor. The certificate is green because every group is ACCOUNTED, not because every group is settled - see the 2026-08-01 addendum in the certificate document."
   }
 }
