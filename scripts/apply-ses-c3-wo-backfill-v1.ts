@@ -57,6 +57,7 @@ const VALUE_FLAGS = new Set([
   "--output",
   "--baseline",
   "--ledger",
+  "--resume",
   "--before",
   "--after",
 ]);
@@ -93,7 +94,6 @@ export interface CardState {
   work_order_docs: number;
   work_order_docs_with_url: number;
   status_applications: number;
-  matching_work_order_document_id: string | null;
 }
 
 export interface EligibilityVerdict {
@@ -327,12 +327,7 @@ select f.card,
        (select count(*)::int from makesafe_board_status_applications a
          where a.job_id = f.job_id
        ) as status_applications,
-       (select d.id::text from job_documents d
-         where d.job_id = f.job_id and d.type = ${sqlText(DOCUMENT_TYPE)}
-           and d.file_name = f.file_name and coalesce(d.storage_url, '') <> ''
-           and d.run_label is null
-         order by d.id limit 1
-       ) as matching_work_order_document_id
+
 from fixture f
 left join jobs j on j.id = f.job_id and j.job_number = f.card
 left join email_attachments ea on ea.id = f.attachment_id
@@ -358,9 +353,6 @@ order by f.card;`;
       work_order_docs: Number(raw.work_order_docs || 0),
       work_order_docs_with_url: Number(raw.work_order_docs_with_url || 0),
       status_applications: Number(raw.status_applications || 0),
-      matching_work_order_document_id: raw.matching_work_order_document_id
-        ? String(raw.matching_work_order_document_id)
-        : null,
     });
   }
   for (const row of rows) {
@@ -511,6 +503,31 @@ with stamped as (
 select id::text as id from stamped;`;
   const data = await managementQuery(query, { readOnly: false });
   return data.length === 1 && String(data[0]?.id) === documentId;
+}
+
+async function resumeDocumentId(
+  row: FixtureRow,
+  entry: any,
+): Promise<string | null> {
+  const documentId = typeof entry?.document_id === "string"
+    ? entry.document_id
+    : null;
+  const storageUrl = typeof entry?.storage_url === "string"
+    ? entry.storage_url
+    : null;
+  if (!documentId || !storageUrl) return null;
+  const data = await managementQuery(`
+select id::text as id
+from public.job_documents
+where id = ${sqlText(documentId)}::uuid
+  and job_id = ${sqlText(row.jobId)}::uuid
+  and type = ${sqlText(DOCUMENT_TYPE)}
+  and file_name = ${sqlText(row.fileName)}
+  and storage_url = ${sqlText(storageUrl)}
+  and run_label is null;`, { readOnly: true });
+  return data.length === 1 && String(data[0]?.id) === documentId
+    ? documentId
+    : null;
 }
 
 /**
@@ -775,6 +792,7 @@ async function runApply(
   rows: readonly FixtureRow[],
   baselinePath: string,
   ledgerPath: string,
+  resumePath: string | null,
 ): Promise<void> {
   const baseline = await readJson(baselinePath);
   if (baseline?.run_label !== RUN_LABEL || baseline?.mode !== "dry-run") {
@@ -783,6 +801,13 @@ async function runApply(
   const baselineByCard = new Map<string, any>(
     (baseline.cards || []).map((entry: any) => [String(entry.card), entry]),
   );
+  const resumeByCard = new Map<string, any>();
+  if (resumePath) {
+    const resume = await readJson(resumePath);
+    for (const entry of resume?.cards || []) {
+      resumeByCard.set(String(entry.card), entry);
+    }
+  }
   const states = await loadCardStates(rows);
   const ledger: any[] = [];
   let applied = 0;
@@ -831,9 +856,19 @@ async function runApply(
     } else {
       const drift = stateMatchesBaseline(planned.before as CardState, state);
       const verdict = evaluateEligibility(row, state);
-      const resumableStamp = state.matching_work_order_document_id !== null;
+      const resumeEntry = resumeByCard.get(row.card);
+      const onlyDocumentDrift = drift.drifted.every((key) =>
+        key === "work_order_docs" || key === "work_order_docs_with_url"
+      );
+      const resumableStamp = Boolean(
+        resumeEntry && onlyDocumentDrift &&
+          verdict.reason === "work_order_already_present",
+      );
       if (resumableStamp) {
-        const documentId = state.matching_work_order_document_id!;
+        const documentId = await resumeDocumentId(row, resumeEntry);
+        if (!documentId) {
+          record.reason = "resume_document_identity_mismatch";
+        } else {
         record.document_id = documentId;
         try {
           record.provenance_stamped = await stampProvenanceWithRetry(
@@ -849,6 +884,7 @@ async function runApply(
           ledger.push(record);
           await flush();
           throw new Error(`${row.card} apply failed: ${record.reason}`);
+        }
         }
       } else if (!drift.matches) {
         record.reason = `state_changed_since_dry_run:${
@@ -1106,7 +1142,7 @@ async function main(): Promise<void> {
     if (!baseline || !ledger) {
       throw new UsageError("--baseline and --ledger are required for apply");
     }
-    await runApply(rows, baseline, ledger);
+    await runApply(rows, baseline, ledger, option(args, "--resume"));
     return;
   }
   const baseline = option(args, "--baseline");

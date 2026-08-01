@@ -95,7 +95,6 @@ function eligibleState(overrides: Partial<CardState> = {}): CardState {
     work_order_docs: 0,
     work_order_docs_with_url: 0,
     status_applications: 0,
-    matching_work_order_document_id: null,
     ...overrides,
   };
 }
