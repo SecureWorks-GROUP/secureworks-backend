@@ -188,7 +188,7 @@ still need their own captain decision.
 
 ## Mechanism
 
-- Migration `20260801000001_makesafe_duplicate_survivor_archive.sql` extends the
+- Migration `20260801045000_makesafe_duplicate_survivor_archive.sql` extends the
   existing append-only `makesafe_board_status_applications` ledger with nullable
   `duplicate_of_job_id` / `duplicate_of_job_number` / `duplicate_rule` /
   `duplicate_evidence` columns. No second board-status engine is added.
@@ -214,9 +214,19 @@ any kind results from it.**
 
 Migration first, per `docs/project-knowledge/EDGE_DEPLOY_LANE.md`:
 
-1. Apply `20260801000001_makesafe_duplicate_survivor_archive.sql`.
+1. Apply `20260801045000_makesafe_duplicate_survivor_archive.sql`.
 2. Deploy `ops-api` from the authorized release worktree only
    (`scripts/deploy-edge-function.sh ops-api`).
+
+> **Renumbered 2026-08-01.** The migration originally shipped as
+> `20260801000001`. Production already held an out-of-band migration of a
+> different name at that exact version (`makesafe_source_job_links`), so the
+> production deploy run for PR 457 failed closed on a `ledger version/name
+> collision` before applying anything or deploying any function — production has
+> neither the pointer columns nor this `ops-api`. The SQL is byte-identical to
+> the reviewed file (`sha256 85f12ef63136c998bdff2afcfd38ca6e1d73da908f4aaae1e5a7215557a6ebc5`);
+> only the version changed. Steps 1 and 2 therefore both run from the merge of
+> the renumbered branch to `main`.
 3. Dry run — the default — and confirm four archives and zero skips:
 
    ```bash

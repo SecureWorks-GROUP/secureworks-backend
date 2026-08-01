@@ -6,13 +6,13 @@ import {
 
 const migration = await Deno.readTextFile(
   new URL(
-    "../../migrations/20260801000001_makesafe_duplicate_survivor_archive.sql",
+    "../../migrations/20260801045000_makesafe_duplicate_survivor_archive.sql",
     import.meta.url,
   ),
 );
 const rollback = await Deno.readTextFile(
   new URL(
-    "../../rollbacks/20260801000001_makesafe_duplicate_survivor_archive_down.sql",
+    "../../rollbacks/20260801045000_makesafe_duplicate_survivor_archive_down.sql",
     import.meta.url,
   ),
 );

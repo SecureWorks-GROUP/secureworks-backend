@@ -1,4 +1,4 @@
--- Captain-gated rollback for 20260801000001_makesafe_duplicate_survivor_archive.sql.
+-- Captain-gated rollback for 20260801045000_makesafe_duplicate_survivor_archive.sql.
 --
 -- Removes only the duplicate-survivor pointer surface. It deliberately does NOT
 -- drop makesafe_board_status_applications: that ledger predates this migration
