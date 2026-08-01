@@ -22,7 +22,7 @@ PDF_EXTRACTION_MIGRATION="$REPO_ROOT/supabase/migrations/20260731000001_makesafe
 INTAKE_SETTLEMENT_MIGRATION="$REPO_ROOT/supabase/migrations/20260731000002_makesafe_intake_settlement_closure.sql"
 BOARD_V2_PREVIEW_MIGRATION="$REPO_ROOT/supabase/migrations/20260731085928_board_v2_seed_preview.sql"
 VAULT_SYNC_MIGRATION="$REPO_ROOT/supabase/migrations/20260731152254_vault_sync_sw_api_key.sql"
-SES_RECOVERY_MIGRATION="$REPO_ROOT/supabase/migrations/20260801000001_ses_adjudicated_job_recovery.sql"
+SES_RECOVERY_MIGRATION="$REPO_ROOT/supabase/migrations/20260801062000_ses_adjudicated_job_recovery.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -310,10 +310,10 @@ vault_sync_row = {
 }
 ses_recovery_row = {
     "function_name": "ops-api",
-    "migration_version": "20260801000001",
+    "migration_version": "20260801062000",
     "expected_migration_name": "ses_adjudicated_job_recovery",
     "expected_statement_sha256": os.environ["SES_RECOVERY_EXPECTED_SHA"],
-    "actual_migration_version": "20260801000001",
+    "actual_migration_version": "20260801062000",
     "actual_migration_name": "ses_adjudicated_job_recovery",
     "actual_statement_count": 5,
     "actual_statement_sha256": None,
@@ -363,7 +363,7 @@ test_incident_dependency_is_declared() {
   local seed_scope_expected='ops-api|supabase/migrations/20260729000000_makesafe_state_seed_scope_accounting.sql|table|makesafe_state_seed_scope_runs'
   local board_v2_preview_expected='ops-api|supabase/migrations/20260731085928_board_v2_seed_preview.sql|function|preview_makesafe_state_authority_v2'
   local vault_sync_expected='ops-api|supabase/migrations/20260731152254_vault_sync_sw_api_key.sql|function|vault_upsert_sw_api_key'
-  local ses_recovery_expected='ops-api|supabase/migrations/20260801000001_ses_adjudicated_job_recovery.sql|function|bind_adjudicated_ses_existing_job'
+  local ses_recovery_expected='ops-api|supabase/migrations/20260801062000_ses_adjudicated_job_recovery.sql|function|bind_adjudicated_ses_existing_job'
   if grep -Fxq "$report_expected" "$MANIFEST" && \
     grep -Fxq "$media_expected" "$MANIFEST" && \
     grep -Fxq "$fresh_health_expected" "$MANIFEST" && \
