@@ -200,3 +200,17 @@ Deno.test("the baseline stays consistent with the accounting fixture", async () 
     "wo:MLB-27309/po:PO-57445",
   );
 });
+
+Deno.test("the work-order identity rule states an invariant, not an observation", async () => {
+  const baseline = JSON.parse(
+    await read("scripts/ses-ab-certificate-v1.baseline.json"),
+  );
+  // The captain's rule is that a blank or absent work-order identity is
+  // impossible. The expected count must stay 0: raising it to match production
+  // would certify an unadjudicated defect as a fact.
+  assertEquals(baseline.phase_b.cards_without_work_order_identity, 0);
+  assertStringIncludes(
+    baseline.phase_b.card_work_order_identity_rule,
+    "never raise the number",
+  );
+});

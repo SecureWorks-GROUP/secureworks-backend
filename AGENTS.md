@@ -635,6 +635,19 @@ resolves to more than one card and that
 reported `unaccounted` and fails the run. The correct response to any failure is
 to adjudicate it, never to widen `scripts/ses-ab-certificate-v1.baseline.json`.
 
+Scope: the certificate covers card IDENTITY only — existence, type/family,
+work-order identity, duplicates. It does NOT cover evidence completeness or
+display fields (suburb extraction, PDF attachment presence, reference display);
+those are Phase C. A card can pass every check and still be missing its report,
+photos or suburb.
+
+`b10` (captain rule, 2026-08-01) requires every card in the canonical board
+population to carry a non-blank `makesafe_job_details.external_ref`; a card with
+no detail row counts as an offender. It currently FAILS on `SWMS-26001`, the
+oldest make-safe card, which has no detail row, no work order and no intake case
+but does carry a submitted report and photos. The certificate is withheld until
+that is adjudicated.
+
 ## The SES Money And Outbound Seal Is Write-Once
 
 The write-once SES money/outbound seal and its approved invoice-void release

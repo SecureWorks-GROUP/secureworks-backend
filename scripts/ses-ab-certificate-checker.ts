@@ -948,6 +948,67 @@ async function runPhaseB(
     })),
   ));
 
+  // Captain rule (2026-08-01 live board review): no card may carry a blank or
+  // absent work-order identity. A card with no makesafe_job_details row has no
+  // identity at all, which is the same defect in a harsher form, so both are
+  // counted as offenders rather than only the blank string case.
+  const identityOffenders = await query<Record<string, unknown>>(
+    `select j.job_number,
+       (select count(*) from makesafe_job_details d where d.job_id = j.id)::int as detail_rows
+     from jobs j
+     where (j.type = 'makesafe'
+            or (j.type = 'insurance'
+                and j.metadata->>'insurance_job_type' = 'restoration'))
+       and j.status <> 'lost'
+       and not exists (
+         select 1 from ses_synthetic_livefire_runs r
+         where r.state = 'terminal' and r.job_ids ? j.id::text
+       )
+       and not exists (
+         select 1 from makesafe_job_details d
+         where d.job_id = j.id
+           and d.external_ref is not null
+           and btrim(d.external_ref) <> ''
+       )
+     order by j.job_number`,
+  );
+  const [populationRow] = await query<Record<string, number>>(
+    `select count(*)::int as population
+     from jobs j
+     where (j.type = 'makesafe'
+            or (j.type = 'insurance'
+                and j.metadata->>'insurance_job_type' = 'restoration'))
+       and j.status <> 'lost'
+       and not exists (
+         select 1 from ses_synthetic_livefire_runs r
+         where r.state = 'terminal' and r.job_ids ? j.id::text
+       )`,
+  );
+  results.push(check(
+    "b10_card_work_order_identity",
+    "phase_b",
+    "no card carries a blank or absent work-order identity",
+    {
+      board_population: expected.board_population,
+      cards_without_work_order_identity:
+        expected.cards_without_work_order_identity,
+    },
+    {
+      board_population: Number(populationRow.population),
+      cards_without_work_order_identity: identityOffenders.length,
+    },
+    identityOffenders.length
+      ? `offending cards: ${
+        JSON.stringify(
+          identityOffenders.map((row) => ({
+            job_number: String(row.job_number),
+            makesafe_job_details_rows: Number(row.detail_rows),
+          })),
+        )
+      }`
+      : undefined,
+  ));
+
   const survivors = pointerExpected.map((row) => row.survivor);
   const survivorRows = await query<Record<string, unknown>>(
     `select j.job_number, j.status,
