@@ -78,6 +78,10 @@ One transport per job, and each is the narrowest one available:
   `business_events` ledger rows are identical to every other typed attach.
   The source `email_attachments` row and its `makesafe-emails` object are never
   moved, renamed or deleted.
+  After the attach, the returned document is read back and provenance is
+  authorized only when its version is exactly 1, proving this invocation
+  created the row. A higher version records
+  `attach_updated_preexisting_document` and is not counted as applied.
 - **The provenance stamp** — one guarded compare-and-set UPDATE per created row
   (`WHERE id = <document id> AND job_id = … AND type = 'work_order' AND
   run_label IS NULL`), setting `run_label` and merging a `metadata` object that
@@ -113,8 +117,10 @@ cannot create a duplicate later.
   `resume_document_id_mismatch`, `resume_document_wrong_job`,
   `resume_document_wrong_type`, `resume_document_already_stamped`,
   `resume_document_file_name_changed`, `resume_document_storage_url_changed`).
-  A row is never selected by shape, so a pre-existing or concurrently created
-  same-name work order can never be stamped with this tranche's provenance.
+  The `--resume` recovery path never selects a row by shape, so a pre-existing
+  or concurrently created same-name work order cannot be stamped with this
+  tranche's provenance. The normal attach path uses the version-1
+  creation-ownership check above.
   With no `--resume` ledger, a card that already has a work-order row is simply
   skipped.
 - **Crash-truthful ledger.** The ledger is flushed after every card, and a

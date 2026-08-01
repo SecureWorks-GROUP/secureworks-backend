@@ -110,6 +110,22 @@ export interface ResumeDocumentRow {
   storage_url: string;
 }
 
+export function authorizeAttachedDocumentStamp(
+  attached: { documentId: string },
+  live: { document_id: string; version: number | null } | null,
+): { authorized: true; documentId: string } | { authorized: false; reason: string } {
+  if (!live || live.document_id !== attached.documentId) {
+    return { authorized: false, reason: "attach_document_row_missing" };
+  }
+  if (live.version !== 1) {
+    return {
+      authorized: false,
+      reason: `attach_updated_preexisting_document:${live.document_id}:version=${live.version ?? "null"}`,
+    };
+  }
+  return { authorized: true, documentId: live.document_id };
+}
+
 export function authorizeResumeStamp(
   entry: any,
   row: FixtureRow,
@@ -955,9 +971,22 @@ async function runApply(
           const attached = await attachWorkOrder(row);
           record.document_id = attached.documentId;
           record.storage_url = attached.url;
+          const attachedDocs = await loadAttachedDocs([row]);
+          const liveDocument = (attachedDocs.get(row.card) || []).find((doc) =>
+            doc.document_id === attached.documentId
+          ) || null;
+          const ownership = authorizeAttachedDocumentStamp(attached, liveDocument);
+          if (!ownership.authorized) {
+            record.outcome = "skipped";
+            record.reason = ownership.reason;
+            skipped++;
+            ledger.push(record);
+            await flush();
+            continue;
+          }
           record.provenance_stamped = await stampProvenanceWithRetry(
             row,
-            attached.documentId,
+            ownership.documentId,
           );
           if (!record.provenance_stamped) {
             throw new Error(

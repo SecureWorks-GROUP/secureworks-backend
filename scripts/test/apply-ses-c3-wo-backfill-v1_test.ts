@@ -8,6 +8,7 @@ import {
   type CardState,
   evaluateEligibility,
   authorizeResumeStamp,
+  authorizeAttachedDocumentStamp,
   type FixtureRow,
   parseFixture,
   parseMode,
@@ -15,6 +16,21 @@ import {
   RUN_LABEL,
   stateMatchesBaseline,
 } from "../apply-ses-c3-wo-backfill-v1.ts";
+
+Deno.test("attach stamping requires version-one creation ownership", () => {
+  const attached = { documentId: "doc-1" };
+  assertEquals(authorizeAttachedDocumentStamp(attached, {
+    document_id: "doc-1",
+    version: 1,
+  }), { authorized: true, documentId: "doc-1" });
+  assertEquals(authorizeAttachedDocumentStamp(attached, {
+    document_id: "doc-1",
+    version: 2,
+  }), {
+    authorized: false,
+    reason: "attach_updated_preexisting_document:doc-1:version=2",
+  });
+});
 
 const fixtureUrl = new URL(
   "../ses-c3-wo-backfill-v1.fixture.txt",
