@@ -310,6 +310,13 @@ import {
   assertFreshMakesafeSourceSettled,
 } from './makesafe_pdf_settlement.ts'
 import {
+  runAdjudicatedExactRescan,
+  runAdjudicatedHistoricalBackfill,
+  SES_MISSED_JOB_ADJUDICATION_REF,
+  SES_MISSED_JOB_RULING_DATE,
+  SesMissedJobRecoveryError,
+} from './ses_missed_job_recovery.ts'
+import {
   completeIntakeMint,
   ensureIntakeWorkOrderEvidence,
   loadIntakeMints,
@@ -4604,6 +4611,37 @@ if (import.meta.main) serve(async (req: Request) => {
           includeSanitizedCases: true,
           requireAllAllowlistMatches: true,
         }))
+      }
+      // Captain ruling 2026-08-01: a privileged, single-source live counterpart
+      // to dark-observe for sources whose deterministic fate produced no job.
+      // This delegates to the existing exact scanner, approval gate, settlement,
+      // lineage, and Hugo notification path; it is intentionally absent from the
+      // routine allow-list and cannot widen selection beyond one exact post id.
+      case 'makesafe_deterministic_intake_exact_rescan': {
+        const exactRescanAllowed = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!exactRescanAllowed) {
+          return json({ error: 'forbidden: makesafe_deterministic_intake_exact_rescan requires the privileged ops key or an admin/owner session' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'makesafe_deterministic_intake_exact_rescan requires POST' }, 405)
+        }
+        return json(await adjudicatedExactRescanAction(client, body))
+      }
+      // Captain-approved historical recovery. This path creates one make-safe
+      // job without notification callbacks, binds its immutable source lineage,
+      // links one exact Xero-synced invoice locally, and archives only through the
+      // display ledger. It never contacts Hugo, a client, a builder, GHL, or Xero.
+      case 'makesafe_adjudicated_historical_backfill': {
+        const historicalBackfillAllowed = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!historicalBackfillAllowed) {
+          return json({ error: 'forbidden: makesafe_adjudicated_historical_backfill requires the privileged ops key or an admin/owner session' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'makesafe_adjudicated_historical_backfill requires POST' }, 405)
+        }
+        return json(await adjudicatedHistoricalBackfillAction(client, body))
       }
       // ── Batch AI gap-fill (campaign makesafe-gap-fill) ──────────────────────
       // READ-ONLY queue of deterministic-intake "needs-a-human" flags (exception +
@@ -12326,7 +12364,20 @@ async function createMakesafeDraftFromProposal(client: any, body: any) {
   return { ok: true, draft: data, redirected: true, note: 'routine proposal recorded as an intake draft for human approval; no live job created' }
 }
 
-async function createMakesafeJob(client: any, body: any) {
+interface HistoricalMakesafeBackfillMetadata {
+  recovery_key: string
+  captain_ruling_date: string
+  adjudication_ref: string
+  invoice_number: string
+}
+
+async function createMakesafeJob(
+  client: any,
+  body: any,
+  internalOptions: {
+    historicalBackfill?: HistoricalMakesafeBackfillMetadata
+  } = {},
+) {
   const {
     client_name, site_address, suburb, phone, mobile, email,
     requesting_company_slug, requesting_company_name, external_ref, description,
@@ -12433,6 +12484,23 @@ async function createMakesafeJob(client: any, body: any) {
     builder_email_received_at: builder_email_received_at || null,
     makesafe_job_family: reviewedJobFamily,
     makesafe_job_family_label: reviewedJobFamilyLabel,
+    ...(internalOptions.historicalBackfill
+      ? {
+        historical_backfill_key: internalOptions.historicalBackfill.recovery_key,
+        legacy_incomplete_evidence: true,
+        legacy_incomplete_evidence_accepted_by: 'captain',
+        legacy_incomplete_evidence_accepted_at:
+          internalOptions.historicalBackfill.captain_ruling_date,
+        historical_invoice_number:
+          internalOptions.historicalBackfill.invoice_number,
+        ses_recovery_provenance: {
+          captain_ruling_date:
+            internalOptions.historicalBackfill.captain_ruling_date,
+          adjudication_ref:
+            internalOptions.historicalBackfill.adjudication_ref,
+        },
+      }
+      : {}),
   }
 
   // Create the job
@@ -12467,14 +12535,14 @@ async function createMakesafeJob(client: any, body: any) {
   }
 
   // Geocode address (fire-and-forget, non-blocking)
-  if (!reviewedSyntheticLivefireMarker) {
+  if (!reviewedSyntheticLivefireMarker && !internalOptions.historicalBackfill) {
     geocodeAndUpdateJob(client, job.id, site_address, suburb).catch(() => {})
   }
 
   // Make-safe overlay details: keeps requesting-company refs, substatus,
   // safety notes, report handoff and invoice notes out of patio/fencing scope.
   try {
-    await client.from('makesafe_job_details').insert({
+    const { error: detailsInsertError } = await client.from('makesafe_job_details').insert({
       job_id: job.id,
       requesting_company_id: companyData?.id || null,
       requesting_company_slug: companyData?.slug || requesting_company_slug || null,
@@ -12493,7 +12561,14 @@ async function createMakesafeJob(client: any, body: any) {
       // report-type logic. Same value convention as approveIntakeDraft.
       report_type: _reportTypeForJobFamily(reviewedJobFamily),
     })
+    if (detailsInsertError) throw detailsInsertError
   } catch (e: any) {
+    if (internalOptions.historicalBackfill) {
+      throw new ApiError(
+        `historical make-safe job card details failed: ${e?.message || e}`,
+        503,
+      )
+    }
     // Non-blocking until the migration is deployed everywhere. The base job
     // remains visible and the PR/migration note makes this gap explicit.
     console.log('[ops-api] makesafe_job_details insert skipped:', e?.message)
@@ -19518,21 +19593,38 @@ async function applyDeterministicBuilderCancellation(client: any, command: any) 
   })
 }
 
-async function scanFreshMakesafeSource(client: any, sourcePostId: string) {
+async function scanFreshMakesafeSource(
+  client: any,
+  sourcePostId: string,
+  options: {
+    maxCases?: number
+    approvalReviewNote?: string
+  } = {},
+) {
   const rollout = await _loadDeterministicRolloutControls(client)
   const advanceDrafts = autoApproveCleanIntakeEnabled() &&
     await isAutoFileEnabled(client)
+  const approveExactDraft = options.approvalReviewNote
+    ? (approvalClient: any, approvalBody: any) => approveIntakeDraft(
+      approvalClient,
+      {
+        ...approvalBody,
+        review_notes: [approvalBody?.review_notes, options.approvalReviewNote]
+          .filter(Boolean).join(' '),
+      },
+    )
+    : approveIntakeDraft
   const report = await _runDeterministicIntake(client, {
     dryRun: false,
     selectionMode: 'exact',
     days: 60,
     onlyUnscanned: false,
     maxSources: 1,
-    maxCases: rollout.maxCases,
+    maxCases: options.maxCases ?? rollout.maxCases,
     allowSourcePostIds: [sourcePostId],
     allowInstructionKeys: [],
     advanceDrafts,
-    approveDraft: approveIntakeDraft,
+    approveDraft: approveExactDraft,
     applyBuilderCancellation: (command: any) =>
       applyDeterministicBuilderCancellation(client, command),
     notifyPhysicalJob: notifyMintedDeterministicPhysicalJob,
@@ -19550,7 +19642,7 @@ async function scanFreshMakesafeSource(client: any, sourcePostId: string) {
     throw new Error(`fresh source settlement draft read failed: ${pendingDraftError.message || pendingDraftError}`)
   }
   if (pendingDraft?.id) {
-    const approved = await approveIntakeDraft(client, {
+    const approved = await approveExactDraft(client, {
       draft_id: pendingDraft.id,
       approved_by: DETERMINISTIC_INTAKE_VERSION,
       review_notes:
@@ -19585,6 +19677,757 @@ async function scanFreshMakesafeSource(client: any, sourcePostId: string) {
   await assertFreshMakesafeSourceSettled(client, sourcePostId, report)
   return report
 }
+
+const SES_CAPTAIN_ACTOR = 'captain-ruling-2026-08-01'
+
+function sesMissedJobRecoveryApiError(error: unknown): never {
+  if (error instanceof SesMissedJobRecoveryError) {
+    throw new ApiError(error.message, error.status)
+  }
+  throw error
+}
+
+async function loadAdjudicatedExactRescanAuthority(
+  client: any,
+  postId: string,
+) {
+  const resolved = await _resolveDeterministicDraftMintAuthority(client, {
+    sourcePostIds: [postId],
+  })
+  if (!resolved?.caseId) {
+    throw new SesMissedJobRecoveryError(
+      'exact rescan refused: source has no canonical deterministic authority',
+    )
+  }
+  const [
+    { data: intakeCase, error: caseError },
+    { data: correction, error: correctionError },
+    { data: priorMints, error: priorMintsError },
+    { data: priorDrafts, error: priorDraftsError },
+  ] =
+    await Promise.all([
+      client.from('makesafe_intake_cases')
+        .select('id,state,job_id,target_job_id')
+        .eq('org_id', DEFAULT_ORG_ID)
+        .eq('id', resolved.caseId)
+        .maybeSingle(),
+      client.from('makesafe_intake_source_authority_corrections')
+        .select('target_job_id')
+        .eq('org_id', DEFAULT_ORG_ID)
+        .eq('source_post_id', postId)
+        .maybeSingle(),
+      client.from('makesafe_intake_job_mints')
+        .select('job_id')
+        .eq('org_id', DEFAULT_ORG_ID)
+        .eq('case_id', resolved.caseId)
+        .not('job_id', 'is', null)
+        .limit(1),
+      client.from('makesafe_intake_drafts')
+        .select('approved_job_id')
+        .eq('org_id', DEFAULT_ORG_ID)
+        .not('approved_job_id', 'is', null)
+        .contains('extraction_json', {
+          deterministic_intake: true,
+          intake_source_post_ids: [postId],
+        })
+        .limit(1),
+    ])
+  if (caseError || !intakeCase?.id) {
+    throw new SesMissedJobRecoveryError(
+      `exact rescan authority read failed: ${caseError?.message || postId}`,
+      503,
+    )
+  }
+  if (correctionError) {
+    throw new SesMissedJobRecoveryError(
+      `exact rescan correction read failed: ${correctionError.message || correctionError}`,
+      503,
+    )
+  }
+  if (priorMintsError || priorDraftsError) {
+    throw new SesMissedJobRecoveryError(
+      `exact rescan prior-job proof failed: ${priorMintsError?.message || priorDraftsError?.message}`,
+      503,
+    )
+  }
+  return {
+    caseId: intakeCase.id,
+    state: intakeCase.state,
+    jobId: intakeCase.job_id || null,
+    targetJobId: correction?.target_job_id || intakeCase.target_job_id ||
+      (intakeCase.job_id
+        ? null
+        : priorMints?.[0]?.job_id || priorDrafts?.[0]?.approved_job_id || null),
+  }
+}
+
+async function loadAdjudicatedRescanJob(client: any, caseId: string) {
+  const { data: intakeCase, error: caseError } = await client
+    .from('makesafe_intake_cases')
+    .select('job_id')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('id', caseId)
+    .maybeSingle()
+  if (caseError) throw caseError
+  if (!intakeCase?.job_id) return null
+  const { data: job, error: jobError } = await client.from('jobs')
+    .select('id,job_number,metadata')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('id', intakeCase.job_id)
+    .maybeSingle()
+  if (jobError) throw jobError
+  if (!job?.id) return null
+  const { data: details, error: detailsError } = await client
+    .from('makesafe_job_details')
+    .select('report_type')
+    .eq('job_id', job.id)
+    .maybeSingle()
+  if (detailsError) throw detailsError
+  const jobFamily = String(job.metadata?.makesafe_job_family || '')
+  if (jobFamily === 'roof_report' && details?.report_type !== 'roof_report') {
+    throw new SesMissedJobRecoveryError(
+      'exact rescan roof-report postcondition failed: report_type is not roof_report',
+      503,
+    )
+  }
+  return {
+    id: job.id,
+    jobNumber: job.job_number,
+    jobFamily,
+  }
+}
+
+async function appendExactRescanProvenance(
+  client: any,
+  args: {
+    postId: string
+    authority: { caseId: string; state: string }
+    job: { id: string; jobNumber: string; jobFamily: string }
+  },
+) {
+  const { data: intakeCase, error: caseError } = await client
+    .from('makesafe_intake_cases')
+    .select('state,state_version,reason_code,missing_fields,conflicting_fields,blocked_reasons')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('id', args.authority.caseId)
+    .maybeSingle()
+  if (caseError || !intakeCase) {
+    throw new Error(`exact rescan provenance case read failed: ${caseError?.message || args.authority.caseId}`)
+  }
+  const evidence = {
+    recovery_key: `ses-exact-rescan:${args.postId}`,
+    source_post_id: args.postId,
+    job_id: args.job.id,
+    job_number: args.job.jobNumber,
+    job_family: args.job.jobFamily,
+    captain_ruling_date: SES_MISSED_JOB_RULING_DATE,
+    adjudication_ref: SES_MISSED_JOB_ADJUDICATION_REF,
+    prior_state: args.authority.state,
+    deterministic_intake_version: DETERMINISTIC_INTAKE_VERSION,
+  }
+  const [existingCaseResult, existingJobResult] = await Promise.all([
+    client.from('makesafe_intake_case_events')
+      .select('id')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('case_id', args.authority.caseId)
+      .contains('evidence', { recovery_key: evidence.recovery_key })
+      .limit(1),
+    client.from('job_events')
+      .select('id')
+      .eq('job_id', args.job.id)
+      .eq('event_type', 'makesafe_captain_exact_rescan')
+      .contains('detail_json', { recovery_key: evidence.recovery_key })
+      .limit(1),
+  ])
+  if (existingCaseResult.error || existingJobResult.error) {
+    throw existingCaseResult.error || existingJobResult.error
+  }
+  if (!(existingCaseResult.data || []).length) {
+    const { error: caseEventError } = await client.from('makesafe_intake_case_events').insert({
+      org_id: DEFAULT_ORG_ID,
+      case_id: args.authority.caseId,
+      event_kind: 'case_update',
+      state_version: intakeCase.state_version,
+      from_state: intakeCase.state,
+      to_state: intakeCase.state,
+      reason_code: intakeCase.reason_code,
+      decision_provenance: 'human',
+      decision_actor: SES_CAPTAIN_ACTOR,
+      decision_reason: 'Captain-authorized lineage-preserving deterministic exact rescan',
+      missing_fields_snapshot: intakeCase.missing_fields || [],
+      conflicting_fields_snapshot: intakeCase.conflicting_fields || {},
+      blocked_reasons_snapshot: intakeCase.blocked_reasons || [],
+      side_effects_suppressed: false,
+      evidence,
+    })
+    if (caseEventError) throw caseEventError
+  }
+  if (!(existingJobResult.data || []).length) {
+    const { error: jobEventError } = await client.from('job_events').insert({
+      job_id: args.job.id,
+      event_type: 'makesafe_captain_exact_rescan',
+      detail_json: evidence,
+    })
+    if (jobEventError) throw jobEventError
+  }
+}
+
+async function hasExactRescanProvenance(
+  client: any,
+  args: { postId: string; caseId: string; jobId: string },
+) {
+  const recoveryKey = `ses-exact-rescan:${args.postId}`
+  const [jobResult, caseResult] = await Promise.all([
+    client.from('job_events')
+      .select('id')
+      .eq('job_id', args.jobId)
+      .eq('event_type', 'makesafe_captain_exact_rescan')
+      .contains('detail_json', { recovery_key: recoveryKey })
+      .limit(1),
+    client.from('makesafe_intake_case_events')
+      .select('id')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('case_id', args.caseId)
+      .contains('evidence', { recovery_key: recoveryKey })
+      .limit(1),
+  ])
+  if (jobResult.error || caseResult.error) {
+    throw jobResult.error || caseResult.error
+  }
+  return (jobResult.data || []).length === 1 &&
+    (caseResult.data || []).length === 1
+}
+
+async function canRepairExactRescanProvenance(
+  client: any,
+  args: { postId: string; caseId: string; jobId: string },
+) {
+  const [mintResult, notificationResult] = await Promise.all([
+    client.from('makesafe_intake_job_mints')
+      .select('id')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('case_id', args.caseId)
+      .eq('job_id', args.jobId)
+      .eq('state', 'settled')
+      .not('notification_accepted_at', 'is', null)
+      .limit(1),
+    client.from('makesafe_intake_hugo_notifications')
+      .select('id')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('case_id', args.caseId)
+      .eq('job_id', args.jobId)
+      .eq('state', 'accepted')
+      .contains('source_post_ids', [args.postId])
+      .limit(1),
+  ])
+  if (mintResult.error || notificationResult.error) {
+    throw mintResult.error || notificationResult.error
+  }
+  return (mintResult.data || []).length === 1 &&
+    (notificationResult.data || []).length === 1
+}
+
+async function adjudicatedExactRescanAction(client: any, body: any) {
+  try {
+    return await runAdjudicatedExactRescan(body, {
+      loadAuthority: (postId) =>
+        loadAdjudicatedExactRescanAuthority(client, postId),
+      scan: async (postId) => {
+        const report = await scanFreshMakesafeSource(client, postId, {
+          maxCases: 1,
+          approvalReviewNote:
+            `Captain ruling ${SES_MISSED_JOB_RULING_DATE}; adjudication ${SES_MISSED_JOB_ADJUDICATION_REF}; lineage-preserving exact rescan of ${postId}.`,
+        })
+        const totals = report?.totals || {}
+        if (
+          Number(totals.jobs_created || 0) !== 1 ||
+          Number(totals.hugo_notifications_required || 0) !== 1 ||
+          Number(totals.hugo_notifications_recorded || 0) !== 1 ||
+          Number(totals.hugo_notifications_accepted || 0) !== 1 ||
+          Number(totals.hugo_notifications_failed || 0) !== 0
+        ) {
+          throw new SesMissedJobRecoveryError(
+            'exact rescan postcondition failed: expected one job and one recorded, accepted Hugo notification',
+            503,
+          )
+        }
+        return report
+      },
+      loadJob: (caseId) => loadAdjudicatedRescanJob(client, caseId),
+      appendProvenance: (args) => appendExactRescanProvenance(client, args),
+      hasProvenance: (args) => hasExactRescanProvenance(client, args),
+      canRepairProvenance: (args) =>
+        canRepairExactRescanProvenance(client, args),
+    })
+  } catch (error) {
+    sesMissedJobRecoveryApiError(error)
+  }
+}
+
+async function loadHistoricalBackfillAuthority(client: any, postId: string) {
+  const resolved = await _resolveDeterministicDraftMintAuthority(client, {
+    sourcePostIds: [postId],
+  })
+  if (!resolved?.caseId) {
+    throw new SesMissedJobRecoveryError(
+      'historical backfill refused: source has no canonical deterministic authority',
+    )
+  }
+  const [caseResult, sourcesResult, emailResult, priorMintsResult] = await Promise.all([
+    client.from('makesafe_intake_cases')
+      .select('id,state,job_id,target_job_id')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('id', resolved.caseId)
+      .maybeSingle(),
+    client.from('makesafe_intake_case_sources')
+      .select('post_id')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('case_id', resolved.caseId)
+      .order('post_id'),
+    client.from('emails')
+      .select('post_id,from_email,subject')
+      .eq('post_id', postId)
+      .maybeSingle(),
+    client.from('makesafe_intake_job_mints')
+      .select('job_id')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('case_id', resolved.caseId)
+      .not('job_id', 'is', null)
+      .limit(1),
+  ])
+  if (caseResult.error || !caseResult.data?.id) {
+    throw new Error(`historical backfill case read failed: ${caseResult.error?.message || resolved.caseId}`)
+  }
+  if (sourcesResult.error || !(sourcesResult.data || []).length) {
+    throw new Error(`historical backfill source closure read failed: ${sourcesResult.error?.message || postId}`)
+  }
+  if (emailResult.error || !emailResult.data?.post_id) {
+    throw new Error(`historical backfill email read failed: ${emailResult.error?.message || postId}`)
+  }
+  if (priorMintsResult.error) {
+    throw new Error(`historical backfill prior mint read failed: ${priorMintsResult.error.message}`)
+  }
+  const sourcePostIds = (sourcesResult.data || []).map((row: any) => row.post_id)
+  const [correctionsResult, priorDraftsResult] = await Promise.all([
+    client.from('makesafe_intake_source_authority_corrections')
+      .select('correction_kind,target_job_id')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .in('source_post_id', sourcePostIds),
+    client.from('makesafe_intake_drafts')
+      .select('approved_job_id')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .not('approved_job_id', 'is', null)
+      .contains('extraction_json', {
+        deterministic_intake: true,
+        intake_source_post_ids: [postId],
+      })
+      .limit(1),
+  ])
+  if (correctionsResult.error || priorDraftsResult.error) {
+    throw new Error(
+      `historical backfill prior authority read failed: ${correctionsResult.error?.message || priorDraftsResult.error?.message}`,
+    )
+  }
+  return {
+    caseId: caseResult.data.id,
+    state: caseResult.data.state,
+    jobId: caseResult.data.job_id || null,
+    targetJobId: caseResult.data.target_job_id ||
+      priorMintsResult.data?.[0]?.job_id ||
+      priorDraftsResult.data?.[0]?.approved_job_id || null,
+    sourcePostIds,
+    sourceCorrections: (correctionsResult.data || []).map((row: any) => ({
+      correctionKind: row.correction_kind,
+      targetJobId: row.target_job_id || null,
+    })),
+    fromEmail: emailResult.data.from_email || '',
+    subject: emailResult.data.subject || '',
+  }
+}
+
+async function loadHistoricalBackfillInvoice(client: any, invoiceNumber: string) {
+  const { data, error } = await client.from('xero_invoices')
+    .select('xero_invoice_id,invoice_number,invoice_date,invoice_type,status,reference,contact_name,job_id,line_items')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('invoice_number', invoiceNumber)
+    .maybeSingle()
+  if (error) throw error
+  if (!data) return null
+  return {
+    xeroInvoiceId: data.xero_invoice_id,
+    invoiceNumber: data.invoice_number,
+    invoiceDate: data.invoice_date,
+    invoiceType: data.invoice_type,
+    status: data.status,
+    reference: data.reference || '',
+    contactName: data.contact_name || '',
+    jobId: data.job_id || null,
+    lineItems: data.line_items,
+  }
+}
+
+function historicalJobProjection(job: any) {
+  return job?.id
+    ? {
+      id: job.id,
+      jobNumber: job.job_number,
+      jobFamily: String(job.metadata?.makesafe_job_family || ''),
+    }
+    : null
+}
+
+async function loadHistoricalBackfillJob(client: any, recoveryKey: string) {
+  const { data, error } = await client.from('jobs')
+    .select('id,job_number,metadata')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .contains('metadata', { historical_backfill_key: recoveryKey })
+    .maybeSingle()
+  if (error) throw error
+  return historicalJobProjection(data)
+}
+
+async function createHistoricalBackfillJob(
+  client: any,
+  args: {
+    recoveryKey: string
+    externalRef: string
+    requestingCompanySlug: string
+    jobFamily: string
+    invoiceNumber: string
+  },
+) {
+  const { data: company, error: companyError } = await client
+    .from('makesafe_companies')
+    .select('slug,name')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('slug', args.requestingCompanySlug)
+    .eq('active', true)
+    .maybeSingle()
+  if (companyError || !company?.slug) {
+    throw new SesMissedJobRecoveryError(
+      `historical backfill refused: requesting company ${args.requestingCompanySlug} is not active`,
+    )
+  }
+  try {
+    const created = await createMakesafeJob(client, {
+      client_name: 'Legacy backfill - client evidence unavailable',
+      site_address: 'Legacy backfill - site evidence unavailable',
+      requesting_company_slug: company.slug,
+      requesting_company_name: company.name,
+      external_ref: args.externalRef,
+      description:
+        `Historical completed make-safe linked to ${args.invoiceNumber}; trade report and full field evidence unavailable (captain-accepted ${SES_MISSED_JOB_RULING_DATE}).`,
+      makesafe_job_family: args.jobFamily,
+      suppress_manager_notification: true,
+    }, {
+      historicalBackfill: {
+        recovery_key: args.recoveryKey,
+        captain_ruling_date: SES_MISSED_JOB_RULING_DATE,
+        adjudication_ref: SES_MISSED_JOB_ADJUDICATION_REF,
+        invoice_number: args.invoiceNumber,
+      },
+    })
+    const projected = historicalJobProjection(created.job)
+    if (!projected) throw new Error('historical backfill job creation returned no job')
+    return projected
+  } catch (error: any) {
+    const recovered = await loadHistoricalBackfillJob(client, args.recoveryKey)
+    if (recovered) return recovered
+    throw error
+  }
+}
+
+async function ensureHistoricalBackfillJobCard(
+  client: any,
+  args: {
+    job: { id: string }
+    externalRef: string
+    requestingCompanySlug: string
+  },
+) {
+  const [jobResult, detailsResult, companyResult] = await Promise.all([
+    client.from('jobs')
+      .select('id,type,job_number,metadata')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('id', args.job.id)
+      .maybeSingle(),
+    client.from('makesafe_job_details')
+      .select('job_id,requesting_company_slug,external_ref')
+      .eq('job_id', args.job.id)
+      .maybeSingle(),
+    client.from('makesafe_companies')
+      .select('*')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('slug', args.requestingCompanySlug)
+      .eq('active', true)
+      .maybeSingle(),
+  ])
+  if (jobResult.error || !jobResult.data?.id) {
+    throw jobResult.error || new Error('historical backfill job disappeared')
+  }
+  if (detailsResult.error || companyResult.error || !companyResult.data?.id) {
+    throw detailsResult.error || companyResult.error ||
+      new Error('historical backfill company unavailable')
+  }
+  const metadata = jobResult.data.metadata || {}
+  if (
+    jobResult.data.type !== 'makesafe' ||
+    metadata.external_ref !== args.externalRef ||
+    metadata.requesting_company?.slug !== args.requestingCompanySlug ||
+    metadata.legacy_incomplete_evidence !== true
+  ) {
+    throw new SesMissedJobRecoveryError(
+      'historical backfill job identity drifted before card settlement',
+    )
+  }
+  if (detailsResult.data?.job_id) {
+    if (
+      detailsResult.data.requesting_company_slug !== args.requestingCompanySlug ||
+      detailsResult.data.external_ref !== args.externalRef
+    ) {
+      throw new SesMissedJobRecoveryError(
+        'historical backfill make-safe details conflict with the authorized identity',
+      )
+    }
+  } else {
+    const company = companyResult.data
+    const { data: repaired, error: repairError } = await client
+      .from('makesafe_job_details')
+      .insert({
+        job_id: args.job.id,
+        requesting_company_id: company.id,
+        requesting_company_slug: company.slug,
+        requesting_company_name: company.name,
+        external_ref: args.externalRef,
+        substatus: 'company_contact_required',
+        safety_requirements: company.safety_requirements || null,
+        special_instructions: company.special_instructions || null,
+        external_links: company.external_links || [],
+        billing_rules: company.billing_rules || {},
+        report_type: null,
+      })
+      .select('job_id')
+      .maybeSingle()
+    if (repairError || repaired?.job_id !== args.job.id) {
+      throw new SesMissedJobRecoveryError(
+        `historical backfill make-safe details repair failed: ${repairError?.message || args.job.id}`,
+        503,
+      )
+    }
+  }
+  const { data: createdEvents, error: createdEventReadError } = await client
+    .from('job_events')
+    .select('id')
+    .eq('job_id', args.job.id)
+    .eq('event_type', 'makesafe_created')
+    .limit(1)
+  if (createdEventReadError) throw createdEventReadError
+  if (!(createdEvents || []).length) {
+    const { error: createdEventError } = await client.from('job_events').insert({
+      job_id: args.job.id,
+      event_type: 'makesafe_created',
+      detail_json: {
+        job_number: jobResult.data.job_number,
+        requesting_company: companyResult.data.name,
+        external_ref: args.externalRef,
+        historical_recovery: true,
+      },
+    })
+    if (createdEventError) throw createdEventError
+  }
+}
+
+async function bindHistoricalBackfillLineage(
+  client: any,
+  args: {
+    authority: { caseId: string; sourcePostIds: string[] }
+    job: { id: string }
+    expectedIdentityKey: string
+  },
+) {
+  const { data, error } = await client.rpc('bind_adjudicated_ses_existing_job', {
+    p_case_id: args.authority.caseId,
+    p_source_post_ids: args.authority.sourcePostIds,
+    p_target_job_id: args.job.id,
+    p_expected_identity_key: args.expectedIdentityKey,
+    p_evidence: {
+      captain_ruling_date: SES_MISSED_JOB_RULING_DATE,
+      adjudication_ref: SES_MISSED_JOB_ADJUDICATION_REF,
+      legacy_incomplete_evidence: true,
+      side_effects_suppressed: true,
+    },
+  })
+  if (error) throw error
+  if (
+    Number(data?.bound_count || 0) !== args.authority.sourcePostIds.length ||
+    data?.target_job_id !== args.job.id
+  ) {
+    throw new SesMissedJobRecoveryError(
+      'historical lineage binding did not return the complete expected source set',
+      503,
+    )
+  }
+}
+
+async function linkHistoricalBackfillInvoice(
+  client: any,
+  invoice: { xeroInvoiceId: string; jobId: string | null },
+  jobId: string,
+) {
+  if (invoice.jobId === jobId) return
+  const { data, error } = await client.from('xero_invoices')
+    .update({ job_id: jobId, updated_at: new Date().toISOString() })
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('xero_invoice_id', invoice.xeroInvoiceId)
+    .is('job_id', null)
+    .select('job_id')
+    .maybeSingle()
+  if (error || data?.job_id !== jobId) {
+    throw new SesMissedJobRecoveryError(
+      `historical invoice link failed or drifted: ${error?.message || invoice.xeroInvoiceId}`,
+      503,
+    )
+  }
+}
+
+async function archiveHistoricalBackfillDisplay(
+  client: any,
+  job: { id: string; jobNumber: string },
+) {
+  const rows = await loadCanonicalMakesafeBoard(client)
+  const row = rows.find((candidate: any) => candidate.id === job.id)
+  if (!row) throw new Error(`historical backfill board row missing: ${job.id}`)
+  if (row.canonical_stage === 'archive') return
+  if (row.canonical_stage !== 'new') {
+    throw new SesMissedJobRecoveryError(
+      `historical backfill display drifted from new to ${row.canonical_stage}`,
+    )
+  }
+  const result = await persistMakesafeStatusApplications(client, {
+    runKey: `ses-historical:${job.id}:archive`,
+    appliedBy: SES_CAPTAIN_ACTOR,
+    evidenceRef: SES_MISSED_JOB_ADJUDICATION_REF,
+    transitions: [{
+      job_id: job.id,
+      job_number: job.jobNumber,
+      source_status: 'new',
+      before_status: 'new',
+      after_status: 'archive',
+      computed_at: row.computed_status_at || new Date().toISOString(),
+      computed_reasons: [
+        'captain_accepted_historical_backfill',
+        'work_completed_and_invoiced_before_job_card_backfill',
+        'legacy_incomplete_evidence',
+      ],
+      computed_missing: row.computed_status_missing || [],
+    }],
+  })
+  if (!result.ok) {
+    throw new Error(`historical backfill archive display failed: ${result.error}`)
+  }
+  const verifiedRows = await loadCanonicalMakesafeBoard(client)
+  const verified = verifiedRows.find((candidate: any) => candidate.id === job.id)
+  if (verified?.canonical_stage !== 'archive') {
+    throw new SesMissedJobRecoveryError(
+      'historical backfill archive display did not read back as archive',
+      503,
+    )
+  }
+}
+
+async function appendHistoricalBackfillProvenance(
+  client: any,
+  args: {
+    authority: { caseId: string; state: string; sourcePostIds: string[] }
+    invoice: { xeroInvoiceId: string; invoiceNumber: string }
+    job: { id: string; jobNumber: string; jobFamily: string }
+    recoveryKey: string
+  },
+) {
+  const evidence = {
+    recovery_key: args.recoveryKey,
+    captain_ruling_date: SES_MISSED_JOB_RULING_DATE,
+    adjudication_ref: SES_MISSED_JOB_ADJUDICATION_REF,
+    source_post_ids: args.authority.sourcePostIds,
+    invoice_number: args.invoice.invoiceNumber,
+    xero_invoice_id: args.invoice.xeroInvoiceId,
+    legacy_incomplete_evidence: true,
+    side_effects_suppressed: true,
+    communications_sent: 0,
+    display_stage: 'ARCHIVED',
+  }
+  const { data: existingJobEvents, error: existingJobEventError } = await client
+    .from('job_events')
+    .select('id')
+    .eq('job_id', args.job.id)
+    .eq('event_type', 'makesafe_captain_historical_backfill')
+    .contains('detail_json', { recovery_key: args.recoveryKey })
+    .limit(1)
+  if (existingJobEventError) throw existingJobEventError
+  if (!(existingJobEvents || []).length) {
+    const { error } = await client.from('job_events').insert({
+      job_id: args.job.id,
+      event_type: 'makesafe_captain_historical_backfill',
+      detail_json: evidence,
+    })
+    if (error) throw error
+  }
+  const { data: existingCaseEvents, error: existingCaseEventError } = await client
+    .from('makesafe_intake_case_events')
+    .select('id')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('case_id', args.authority.caseId)
+    .contains('evidence', { recovery_key: args.recoveryKey })
+    .limit(1)
+  if (existingCaseEventError) throw existingCaseEventError
+  if ((existingCaseEvents || []).length) return
+  const { data: intakeCase, error: caseError } = await client
+    .from('makesafe_intake_cases')
+    .select('state,state_version,reason_code,missing_fields,conflicting_fields,blocked_reasons')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('id', args.authority.caseId)
+    .maybeSingle()
+  if (caseError || !intakeCase) throw caseError || new Error('historical backfill case missing')
+  const { error: caseEventError } = await client.from('makesafe_intake_case_events').insert({
+    org_id: DEFAULT_ORG_ID,
+    case_id: args.authority.caseId,
+    event_kind: 'case_update',
+    state_version: intakeCase.state_version,
+    from_state: intakeCase.state,
+    to_state: intakeCase.state,
+    reason_code: intakeCase.reason_code,
+    decision_provenance: 'backfill',
+    decision_actor: SES_CAPTAIN_ACTOR,
+    decision_reason: 'Captain-accepted historical job-card backfill with incomplete trade evidence',
+    missing_fields_snapshot: intakeCase.missing_fields || [],
+    conflicting_fields_snapshot: intakeCase.conflicting_fields || {},
+    blocked_reasons_snapshot: intakeCase.blocked_reasons || [],
+    side_effects_suppressed: true,
+    evidence,
+  })
+  if (caseEventError) throw caseEventError
+}
+
+async function adjudicatedHistoricalBackfillAction(client: any, body: any) {
+  try {
+    return await runAdjudicatedHistoricalBackfill(body, {
+      loadAuthority: (postId) => loadHistoricalBackfillAuthority(client, postId),
+      loadInvoice: (invoiceNumber) => loadHistoricalBackfillInvoice(client, invoiceNumber),
+      loadExistingJob: (recoveryKey) => loadHistoricalBackfillJob(client, recoveryKey),
+      createJob: (args) => createHistoricalBackfillJob(client, args),
+      ensureJobCard: (args) => ensureHistoricalBackfillJobCard(client, args),
+      bindLineage: (args) => bindHistoricalBackfillLineage(client, args),
+      linkInvoice: (invoice, jobId) => linkHistoricalBackfillInvoice(client, invoice, jobId),
+      archiveDisplay: (job) => archiveHistoricalBackfillDisplay(client, job),
+      appendProvenance: (args) => appendHistoricalBackfillProvenance(client, args),
+    })
+  } catch (error) {
+    sesMissedJobRecoveryApiError(error)
+  }
+}
+
+export const _adjudicatedExactRescanActionForTest = adjudicatedExactRescanAction
+export const _adjudicatedHistoricalBackfillActionForTest = adjudicatedHistoricalBackfillAction
 
 async function drainMakesafePdfExtraction(
   client: any,

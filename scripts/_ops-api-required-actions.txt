@@ -131,6 +131,10 @@ makesafe_audit
 # handler exists without starting a sweep at all.
 makesafe_deterministic_intake_replay # probe=bounded-refusal probe-args=max_sources=0
 makesafe_deterministic_intake_dark_observe
+# Captain-authorized 2026-08-01 recovery actions. Both are identity-pinned,
+# privileged POST writes and must never be exercised by a deploy smoke probe.
+makesafe_deterministic_intake_exact_rescan # probe=source-only
+makesafe_adjudicated_historical_backfill # probe=source-only
 # SES reporting skill coupling: one bounded deterministic scan followed by the
 # existing guarded clean-draft advancement sweep. A bare privileged call runs
 # the live scan and can promote up to 100 clean drafts into live make-safe jobs,

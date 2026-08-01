@@ -22,6 +22,7 @@ PDF_EXTRACTION_MIGRATION="$REPO_ROOT/supabase/migrations/20260731000001_makesafe
 INTAKE_SETTLEMENT_MIGRATION="$REPO_ROOT/supabase/migrations/20260731000002_makesafe_intake_settlement_closure.sql"
 BOARD_V2_PREVIEW_MIGRATION="$REPO_ROOT/supabase/migrations/20260731085928_board_v2_seed_preview.sql"
 VAULT_SYNC_MIGRATION="$REPO_ROOT/supabase/migrations/20260731152254_vault_sync_sw_api_key.sql"
+SES_RECOVERY_MIGRATION="$REPO_ROOT/supabase/migrations/20260801000001_ses_adjudicated_job_recovery.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -103,6 +104,10 @@ vault_sync_migration_sha() {
   shasum -a 256 "$VAULT_SYNC_MIGRATION" | awk '{print $1}'
 }
 
+ses_recovery_migration_sha() {
+  shasum -a 256 "$SES_RECOVERY_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -124,6 +129,7 @@ write_response() {
   INTAKE_SETTLEMENT_EXPECTED_SHA="$(intake_settlement_migration_sha)" \
   BOARD_V2_PREVIEW_EXPECTED_SHA="$(board_v2_preview_migration_sha)" \
   VAULT_SYNC_EXPECTED_SHA="$(vault_sync_migration_sha)" \
+  SES_RECOVERY_EXPECTED_SHA="$(ses_recovery_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -302,6 +308,17 @@ vault_sync_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+ses_recovery_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260801000001",
+    "expected_migration_name": "ses_adjudicated_job_recovery",
+    "expected_statement_sha256": os.environ["SES_RECOVERY_EXPECTED_SHA"],
+    "actual_migration_version": "20260801000001",
+    "actual_migration_name": "ses_adjudicated_job_recovery",
+    "actual_statement_count": 5,
+    "actual_statement_sha256": None,
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -320,6 +337,7 @@ with open(sys.argv[1], "w") as f:
             intake_settlement_row,
             board_v2_preview_row,
             vault_sync_row,
+            ses_recovery_row,
         ],
         f,
     )
@@ -345,15 +363,17 @@ test_incident_dependency_is_declared() {
   local seed_scope_expected='ops-api|supabase/migrations/20260729000000_makesafe_state_seed_scope_accounting.sql|table|makesafe_state_seed_scope_runs'
   local board_v2_preview_expected='ops-api|supabase/migrations/20260731085928_board_v2_seed_preview.sql|function|preview_makesafe_state_authority_v2'
   local vault_sync_expected='ops-api|supabase/migrations/20260731152254_vault_sync_sw_api_key.sql|function|vault_upsert_sw_api_key'
+  local ses_recovery_expected='ops-api|supabase/migrations/20260801000001_ses_adjudicated_job_recovery.sql|function|bind_adjudicated_ses_existing_job'
   if grep -Fxq "$report_expected" "$MANIFEST" && \
     grep -Fxq "$media_expected" "$MANIFEST" && \
     grep -Fxq "$fresh_health_expected" "$MANIFEST" && \
     grep -Fxq "$seed_scope_expected" "$MANIFEST" && \
     grep -Fxq "$board_v2_preview_expected" "$MANIFEST" && \
-    grep -Fxq "$vault_sync_expected" "$MANIFEST"; then
+    grep -Fxq "$vault_sync_expected" "$MANIFEST" && \
+    grep -Fxq "$ses_recovery_expected" "$MANIFEST"; then
     pass "$name"
   else
-    fail "$name" "the report, media-cycle, fresh-source health, seed-scope, board-v2 preview, and vault-sync markers are not permanent ops-api deploy requirements"
+    fail "$name" "the report, media-cycle, fresh-source health, seed-scope, board-v2 preview, vault-sync, and SES recovery markers are not permanent ops-api deploy requirements"
   fi
 }
 
@@ -524,7 +544,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" || ! -f "$BOARD_V2_PREVIEW_MIGRATION" || ! -f "$VAULT_SYNC_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" || ! -f "$BOARD_V2_PREVIEW_MIGRATION" || ! -f "$VAULT_SYNC_MIGRATION" || ! -f "$SES_RECOVERY_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared
