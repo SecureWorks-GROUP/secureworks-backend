@@ -6,7 +6,7 @@ import {
 
 const migration = await Deno.readTextFile(
   new URL(
-    "../../migrations/20260801000001_ses_adjudicated_job_recovery.sql",
+    "../../migrations/20260801062000_ses_adjudicated_job_recovery.sql",
     import.meta.url,
   ),
 );
