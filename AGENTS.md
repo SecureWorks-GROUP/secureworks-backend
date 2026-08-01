@@ -574,11 +574,14 @@ moves it to `report_ready` on its own. Never diagnose a display stage from the
 rendered board alone: `ops.html` retries `makesafe_board` twice and then silently
 falls back to `makesafe_pipeline`, which buckets on raw `board_stage` and never
 reads `makesafe_board_status_current`, so on that fallback EVERY captain display
-transition is invisible. `makesafe_board&contract_version=v2` is the read that
-survives an intake-exception failure, because the v1 ops projection awaits
-`_loadIntakeExceptionProjection` in the same `Promise.all` and one bad post 500s
-the whole board. Worked example, including the 2026-08-01 `intake source issue
-uniqueness violated` outage:
+transition is invisible. Any non-200 from `makesafe_board` is therefore a
+board-truth outage, not a missing panel. The intake-exception desk may degrade
+and the board may not: `_loadIntakeExceptionProjectionForBoard` catches, alarms,
+and returns `degradedIntakeExceptionProjection`, whose `degraded` marker (null on
+a healthy read) is what tells a consumer an empty desk is unreadable rather than
+clean. Never widen that catch to the canonical rows, and keep
+`makesafe_intake_exception_read` throwing. Worked example, including the
+2026-08-01 `intake source issue uniqueness violated` outage:
 `docs/evidence/ses-261124-archive-display-diagnosis-2026-08-01.md`.
 
 ## Duplicate Board Cards: Prove One Instruction Before Archiving One

@@ -213,6 +213,10 @@ Deno.test("default makesafe-board v1 includes the additive intake exception desk
         },
         cards: [],
         source_alarms: [],
+        // Additive since 2026-08-01: a healthy projection states `degraded: null`
+        // so an empty desk is never mistaken for an unreadable one. See
+        // makesafe_board_intake_exception_degrade_test.ts.
+        degraded: null,
       },
       parity: {
         ok: true,

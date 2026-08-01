@@ -134,5 +134,36 @@ a change to this card:
 3. **Correct the data** for all 113 posts. `email_events_raw` is append-only
    evidence, so this is the destructive option and does not stop recurrence.
 
-Option 2 is the smallest change that restores captain-visible board truth; option
-1 is the durable fix. Both need a ruling.
+## Ruling and what shipped
+
+Captain ruling, 2026-08-01: **option 2 now**, no data edits to
+`email_events_raw`. Option 1 is filed as its own task and remains the durable
+fix.
+
+`makesafeBoardAction` no longer calls `loadIntakeExceptionProjection` directly.
+It goes through `_loadIntakeExceptionProjectionForBoard`, which catches, logs
+`[ops-api] ALARM makesafe_board intake exception projection degraded (board
+still served)` with the guard's own message verbatim, and returns
+`degradedIntakeExceptionProjection(...)`. The uniqueness guard is untouched and
+now serves as the alarm rather than a board-wide outage.
+
+Two properties hold the change up, both covered by
+`makesafe_board_intake_exception_degrade_test.ts`:
+
+- **The empty desk announces itself.** The degraded payload carries
+  `degraded: { reason: "projection_read_failed", error, failed_at }`, and a
+  healthy projection states `degraded: null` rather than omitting the field. Zero
+  exception cards is never readable as a clean intake — this repo's
+  "a wrong column name reads as no data" failure mode, avoided by construction.
+- **Only the board degrades.** `makesafe_intake_exception_read` still throws on
+  the same failure, because serving those cards is its entire purpose.
+
+The end-to-end regression test drives `makesafeBoardAction` against a fixture
+carrying the exact two-issue-rows-on-one-post shape plus a ledger overlay, and
+asserts HTTP 200 with `declared_stage: report_ready` /
+`canonical_stage: archive`. It fails without the fix (the throw escapes the
+action's `Promise.all`) and passes with it.
+
+Post-deploy browser verification of SWMS-261124 rendering under Archive is the
+remaining step; it cannot run until this merges and the Edge Function workflow
+deploys `ops-api`.

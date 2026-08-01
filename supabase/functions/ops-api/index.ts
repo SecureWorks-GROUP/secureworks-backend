@@ -293,7 +293,9 @@ import {
   loadGapFillQueue as _loadGapFillQueue,
 } from './makesafe_gap_fill.ts'
 import {
+  degradedIntakeExceptionProjection as _degradedIntakeExceptionProjection,
   findIntakeExceptionItem as _findIntakeExceptionItem,
+  type IntakeExceptionProjection as _IntakeExceptionProjection,
   intakeExceptionBoardPayload as _intakeExceptionBoardPayload,
   loadIntakeExceptionProjection as _loadIntakeExceptionProjection,
 } from './makesafe_intake_exception_cards.ts'
@@ -3092,6 +3094,38 @@ async function makesafeBoardTradeRoute(
 
 export const _makesafeBoardTradeRouteForTest = makesafeBoardTradeRoute
 
+// Captain ruling 2026-08-01: the intake-exception panel may degrade, the board
+// may not. It used to share the board's `Promise.all`, so one unreadable intake
+// row rejected the entire `makesafe_board` response; ops.html then retried once,
+// fell back to the overlay-blind `makesafe_pipeline`, and EVERY captain
+// display-ledger transition vanished from the live board while looking healthy.
+// The uniqueness guard that threw is kept exactly as-is and becomes the alarm
+// signal here instead of a board-wide outage. Root cause and blast radius:
+// `docs/evidence/ses-261124-archive-display-diagnosis-2026-08-01.md`.
+//
+// The degraded payload carries `degraded` so an empty card list is never read as
+// a clean intake. Only the board takes this path — `makesafe_intake_exception_read`
+// still throws, because serving those cards is its entire job.
+async function _loadIntakeExceptionProjectionForBoard(
+  client: any,
+  generatedAt: string,
+  load = _loadIntakeExceptionProjection,
+): Promise<_IntakeExceptionProjection> {
+  try {
+    return await load(client, { generatedAt })
+  } catch (error) {
+    const message = (error as Error)?.message || String(error)
+    console.error(
+      '[ops-api] ALARM makesafe_board intake exception projection degraded (board still served):',
+      message,
+    )
+    return _degradedIntakeExceptionProjection({ generatedAt, error: message })
+  }
+}
+
+export const _loadIntakeExceptionProjectionForBoardForTest =
+  _loadIntakeExceptionProjectionForBoard
+
 // Outer HTTP envelope for action=makesafe_board: projection validation, the
 // trade JWT gate that sits in the serve switch BEFORE the trade route, and the
 // ops role gate. Tests call this so non-JWT modes cannot bypass the case branch.
@@ -3148,7 +3182,7 @@ async function makesafeBoardAction(
   const generatedAt = options.generatedAt || new Date().toISOString()
   const [canonicalRows, intakeExceptions] = await Promise.all([
     loadCanonicalMakesafeBoard(client),
-    _loadIntakeExceptionProjection(client, { generatedAt }),
+    _loadIntakeExceptionProjectionForBoard(client, generatedAt),
   ])
   const { ops, ...parity } = checkMakesafeBoardParity(canonicalRows)
   if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
