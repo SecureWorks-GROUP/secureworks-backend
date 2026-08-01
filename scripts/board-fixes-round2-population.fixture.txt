@@ -1,0 +1,5 @@
+# Section 6.3 exact strays expected to carry real makesafe_job_details rows.
+SWMS-26931 | MLB-24664
+SWMS-26932 | MLB-24465
+SWMS-26936 | MLB-MW-26873
+SWMS-26978 | MLB-24659PO-56155

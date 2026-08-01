@@ -1015,6 +1015,8 @@ Deno.test("2.1 every paginated makesafe board read ends on a unique page tie-bre
   assertEquals(jobsReads.map((r) => r.orders.map((o) => o.column)), [
     ["created_at", "id"],
     ["created_at", "id"],
+    ["created_at", "id"],
+    ["updated_at", "id"],
     ["updated_at", "id"],
     ["updated_at", "id"],
   ]);
