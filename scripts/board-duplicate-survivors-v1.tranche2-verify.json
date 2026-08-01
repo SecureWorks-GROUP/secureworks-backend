@@ -1,0 +1,62 @@
+{
+  "verified_at": "2026-08-01T06:32:00Z",
+  "run_key": "makesafe-duplicate-survivors-20260801-t2",
+  "group": "mlb-26189-assessment",
+  "method": "read-only SQL against production, independent of the action's own post-apply re-read",
+  "gate": {
+    "required": "exactly 1 archive, 0 skips",
+    "observed": "1 archive, 0 skips",
+    "result": "PASS"
+  },
+  "ledger": {
+    "id": 47,
+    "job_number": "SWMS-26791",
+    "source_status": "report_ready",
+    "before_status": "allocated",
+    "after_status": "archive",
+    "duplicate_of_job_number": "SWMS-26787",
+    "duplicate_rule": "activity_evidence",
+    "applied_by": "captain-approved-duplicate-survivors",
+    "evidence_ref": "docs/evidence/makesafe-duplicate-survivors-2026-08-01.md"
+  },
+  "cards": [
+    {
+      "job_number": "SWMS-26791",
+      "role": "loser",
+      "job_status": "processing",
+      "substatus": "complete",
+      "jobs_updated_at": "2026-07-27T13:39:58.059427+00:00",
+      "ledger_rows": 2,
+      "duplicate_rows": 1,
+      "assignments": 2,
+      "invoices": 0,
+      "job_events": 8,
+      "job_events_since_apply": 0
+    },
+    {
+      "job_number": "SWMS-26787",
+      "role": "survivor",
+      "job_status": "processing",
+      "substatus": "complete",
+      "jobs_updated_at": "2026-07-27T13:39:58.059427+00:00",
+      "ledger_rows": 0,
+      "duplicate_rows": 0,
+      "assignments": 2,
+      "invoices": 1,
+      "job_events": 10,
+      "job_events_since_apply": 0
+    }
+  ],
+  "notes": {
+    "before_status_allocated": "The loser displayed allocated, not report_ready: its 2026-07-24 cutover overlay (report_ready -> allocated) was live. That is the board showing it as active work, which is what this archive removes.",
+    "survivor_natural_completion": "SWMS-26787 displays archive from its own derived stage with no status-application overlay. The hardened guard accepted it because the read model's independent closeout verdict is true - a durable send record plus its AUTHORISED ACCREC invoice of 2026-06-30. The pre-deploy uncertainty about whether it would qualify is resolved: it does.",
+    "post_apply_check": "stranded_survivors came back empty. Without the post-apply fix shipped in PR 461 this apply would have written the ledger and then returned 409, because the survivor still reads archive."
+  },
+  "assertions": {
+    "loser_archived_with_pointer": "PASS - SWMS-26791 carries exactly one duplicate row pointing at SWMS-26787",
+    "survivor_untouched_and_live": "PASS - SWMS-26787 carries zero duplicate rows and remains non-terminal (processing)",
+    "raw_job_rows_unwritten": "PASS - both jobs.updated_at still 2026-07-27, predating the apply",
+    "no_operational_writes": "PASS - assignment and invoice counts unchanged",
+    "no_communications": "PASS - job_events unchanged at 8 and 10, zero since the apply"
+  }
+}

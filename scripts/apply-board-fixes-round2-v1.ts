@@ -542,6 +542,12 @@ export function evaluateField(
   details: DetailRow[],
   allowTempFence = false,
   fixtureClass = "field",
+  /**
+   * Cards the temp-fence class actually covers. Supplied by the safe-field
+   * pass so a `temp_fence_makesafe` target it defers can be checked against
+   * the class that is supposed to pick it up, rather than assumed.
+   */
+  tempFenceCoverage?: ReadonlySet<string>,
 ): FieldEvaluation {
   const base = {
     fixture_key: `${fixtureClass}:${fixture.card}`,
@@ -557,10 +563,20 @@ export function evaluateField(
     reason: null as string | null,
   };
   if (fixture.after === "temp_fence_makesafe" && !allowTempFence) {
+    // `handled_by_temp_fence_class` is a claim that another pass picks this
+    // card up. When coverage is known and the card is NOT in it, that claim is
+    // false and the fix is simply lost — SWMS-26692 sat NULL for exactly this
+    // reason. Report the gap honestly so a certification diff surfaces it
+    // instead of reading a skip as work done elsewhere.
+    const deferredButUncovered = fixture.card !== TEMP_FENCE_HOLD &&
+      tempFenceCoverage !== undefined &&
+      !tempFenceCoverage.has(fixture.card);
     return {
       ...base,
       reason: fixture.card === TEMP_FENCE_HOLD
         ? "captain_hold_temp_fence"
+        : deferredButUncovered
+        ? "temp_fence_target_not_in_class"
         : "handled_by_temp_fence_class",
     };
   }
@@ -960,6 +976,7 @@ async function buildDryRun(
   );
   const jobsByNumber = indexMany(state.jobs, (row) => row.job_number);
   const detailsByJob = indexMany(state.details, (row) => row.job_id);
+  const tempFenceCoverage = new Set(tempFence.map((fixture) => fixture.card));
   const fieldEvaluations = fields.map((fixture) => {
     const jobs = jobsByNumber.get(fixture.card) || [];
     return evaluateField(
@@ -968,6 +985,7 @@ async function buildDryRun(
       jobs.length === 1 ? detailsByJob.get(jobs[0].id) || [] : [],
       false,
       "safe-field",
+      tempFenceCoverage,
     );
   });
   const tempFenceEvaluations = tempFence.map((fixture) => {

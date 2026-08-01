@@ -1,0 +1,31 @@
+{
+  "mode": "apply",
+  "target": "SWMS-26692",
+  "applied_count": 1,
+  "applied": [
+    {
+      "id": "cc83b4eb-81f8-4ff9-ab4c-50b1386e2417",
+      "value": "temp_fence_makesafe"
+    }
+  ],
+  "evaluation": {
+    "fixture_key": "swms-26692-family:SWMS-26692",
+    "card": "SWMS-26692",
+    "column": "jobs.metadata.makesafe_job_family",
+    "expected_before": null,
+    "observed_before": null,
+    "after": "temp_fence_makesafe",
+    "job_id": "cc83b4eb-81f8-4ff9-ab4c-50b1386e2417",
+    "board_kind_before": "physical_makesafe",
+    "board_kind_after": "physical_makesafe",
+    "eligible": true,
+    "reason": null
+  },
+  "temp_fence_hold_untouched": {
+    "card": "SWMS-26894",
+    "observed": {
+      "job_number": "SWMS-26894",
+      "family": "general_makesafe"
+    }
+  }
+}
