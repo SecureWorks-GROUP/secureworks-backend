@@ -1,0 +1,14 @@
+{
+  "mode": "verify",
+  "target": "SWMS-26692",
+  "observed_family": "temp_fence_makesafe",
+  "applied": true,
+  "board_kind": "physical_makesafe",
+  "temp_fence_hold_untouched": {
+    "card": "SWMS-26894",
+    "observed": {
+      "job_number": "SWMS-26894",
+      "family": "general_makesafe"
+    }
+  }
+}

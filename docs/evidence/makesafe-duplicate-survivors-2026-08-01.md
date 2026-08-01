@@ -332,8 +332,9 @@ of the dry run and the apply. If its display state later changes so that either
 card returns to a live stage, the group is already adjudicated and can be applied
 then without re-litigating the survivor pick.
 
-The original apply set was three groups. After tranche 1, only
-`mlb-26189-assessment` remains pending, gated at one archive and zero skips.
+The original apply set was three groups. After tranche 1,
+`mlb-26189-assessment` was the remaining pending group, gated at one archive
+and zero skips; tranche 2's completed execution is recorded below.
 
 `SWMS-261065` (survivor, MLB-26344) also carries an `archive` overlay, but its
 `source_status` is `new` while the card now sits at `admin_to_send_report`, so
@@ -408,10 +409,53 @@ the planner. The RPC's stale-plan guard also still holds for the loser:
 `SWMS-26791` sends `source_status: report_ready` against its 2026-07-24 overlay
 row and `before_status: allocated`, which is that row's `after_status`.
 
-### Tranche 2 — pending
+The following tranche-2 execution supersedes the pre-apply plan described in
+the earlier release notes. MLB-23067 stays excluded and is not in either
+tranche.
 
-`mlb-26189-assessment` needs this planner change deployed before it can be dry
-run again. It is therefore a separate tranche after this PR merges, gated the
-same way: one archive, zero skips, before `dry_run` goes false.
+### Tranche 2 — applied
 
-MLB-23067 stays excluded and is not in either tranche.
+`run_key` `makesafe-duplicate-survivors-20260801-t2`, after the planner change
+deployed (workflow run `30687697549`; PR 461's own deploy had failed behind PR
+460's separate ledger collision, cleared by PR 462).
+
+The dry run returned exactly one archive and zero skips:
+
+```
+SWMS-26791  report_ready -> archive  ptr SWMS-26787  mlb-26189-assessment
+```
+
+Two things the pre-deploy analysis predicted and the live run confirmed:
+
+- `before_status` is **allocated**, not `report_ready`. The loser's 2026-07-24
+  cutover overlay was live, so the board was showing it as active work — the
+  clutter this archive removes. That is the concrete difference from MLB-23067,
+  where both cards already display `archive`.
+- The survivor qualified under the hardened guard. Its independent closeout
+  verdict is true on a durable send record plus the `AUTHORISED` `ACCREC`
+  invoice of 2026-06-30. The open question of whether `SWMS-26787` would still
+  pass once the guard stopped reading the circular `computed_status` is settled:
+  it does.
+
+`stranded_survivors` came back empty. Without the post-apply alignment in PR 461
+this apply would have written the ledger row and then returned 409, because the
+survivor still reads `archive`.
+
+Verified read-only afterwards: the loser carries exactly one duplicate row
+pointing at its survivor, the survivor carries none and stays non-terminal, both
+`jobs.updated_at` still predate the apply, assignment and invoice counts are
+unchanged, and `job_events` are unchanged at 8 and 10 with none since. Evidence:
+`scripts/board-duplicate-survivors-v1.tranche2-{dry-run,apply-ledger,verify}.json`.
+
+### Final state of the four groups
+
+| Group | Loser → Survivor | Outcome |
+| --- | --- | --- |
+| MLB-25625 roof | SWMS-26998 → SWMS-26736 | archived, tranche 1 |
+| MLB-26189 | SWMS-26791 → SWMS-26787 | archived, tranche 2 |
+| MLB-26344 | SWMS-261118 → SWMS-261065 | archived, tranche 1 |
+| MLB-23067 | SWMS-26920 → SWMS-26845 | excluded by captain ruling |
+
+Three archives on the display ledger, three survivors live and untouched, one
+group deliberately not applied. No job, detail, assignment, invoice, status or
+communication row was written by any of it, and nothing was deleted.

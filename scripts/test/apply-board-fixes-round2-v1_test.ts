@@ -54,6 +54,67 @@ Deno.test("round-2 fixtures preserve the adjudicated cardinalities", async () =>
   assert(!tempFence.some((row) => row.card === "SWMS-26894"));
 });
 
+Deno.test("a deferred temp-fence target the class does not cover is reported, not hidden", () => {
+  // SWMS-26692's regression: the safe-field pass deferred it with
+  // `handled_by_temp_fence_class`, but it is absent from the temp-fence
+  // fixture, so nothing applied it and the family stayed NULL. When coverage
+  // is known and the card is missing from it, the reason must say so.
+  const fixture = {
+    card: "SWMS-26692",
+    column: "jobs.metadata.makesafe_job_family" as const,
+    before: null,
+    after: "temp_fence_makesafe",
+    rationale: "fixture",
+    evidence: "sha256:test",
+  };
+  const jobs = [{
+    id: "00000000-0000-4000-8000-000000000002",
+    job_number: "SWMS-26692",
+    type: "makesafe",
+    status: "archived",
+    metadata: {},
+  }];
+  const details = [{
+    job_id: "00000000-0000-4000-8000-000000000002",
+    external_ref: "BWCWA6771",
+    report_type: null,
+    requesting_company_slug: "bw",
+  }];
+
+  const uncovered = evaluateField(
+    fixture,
+    jobs,
+    details,
+    false,
+    "safe-field",
+    new Set<string>(["SWMS-26893"]),
+  );
+  assertEquals(uncovered.eligible, false);
+  assertEquals(uncovered.reason, "temp_fence_target_not_in_class");
+
+  // A card the class genuinely covers keeps the original deferral.
+  const covered = evaluateField(
+    fixture,
+    jobs,
+    details,
+    false,
+    "safe-field",
+    new Set<string>(["SWMS-26692"]),
+  );
+  assertEquals(covered.reason, "handled_by_temp_fence_class");
+
+  // The captain hold outranks coverage bookkeeping either way.
+  const held = evaluateField(
+    { ...fixture, card: "SWMS-26894" },
+    [{ ...jobs[0], job_number: "SWMS-26894" }],
+    details,
+    false,
+    "safe-field",
+    new Set<string>(),
+  );
+  assertEquals(held.reason, "captain_hold_temp_fence");
+});
+
 Deno.test("temp-fence relabel requires explicit umpire-class authority", () => {
   const result = evaluateField(
     {
