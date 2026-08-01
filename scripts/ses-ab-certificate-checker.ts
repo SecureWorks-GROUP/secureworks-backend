@@ -327,6 +327,14 @@ export interface CensusInvariants {
   keys_lost: number;
   live_job_regression: number;
   synthetic: number;
+  missing_certified_keys: string[];
+  synthetic_identity_drift: string[];
+  live_job_regression_keys: string[];
+}
+
+export interface CertifiedIdentity {
+  key: string;
+  bucket: "live_job" | "exception_only" | "synthetic";
 }
 
 /**
@@ -348,7 +356,20 @@ export interface CensusInvariants {
 export function evaluateCensusInvariants(
   floor: { total: number; live_job: number; synthetic: number },
   observed: KeyCensus,
+  certifiedIdentities: CertifiedIdentity[] = [],
+  observedIdentities: CertifiedIdentity[] = [],
 ): CensusInvariants {
+  const current = new Map(observedIdentities.map((identity) => [identity.key, identity.bucket]));
+  const certified = new Map(certifiedIdentities.map((identity) => [identity.key, identity.bucket]));
+  const missing = [...certified.keys()].filter((key) => !current.has(key));
+  const syntheticDrift = [...new Set([
+    ...certifiedIdentities.filter((identity) => identity.bucket === "synthetic" && current.get(identity.key) !== "synthetic").map((identity) => identity.key),
+    ...observedIdentities.filter((identity) => identity.bucket === "synthetic" && certified.get(identity.key) !== "synthetic").map((identity) => identity.key),
+  ])].sort();
+  const liveRegression = certifiedIdentities
+    .filter((identity) => identity.bucket === "live_job" && current.get(identity.key) !== "live_job")
+    .map((identity) => identity.key)
+    .sort();
   return {
     unaccounted: observed.unaccounted,
     partition_complete:
@@ -357,6 +378,9 @@ export function evaluateCensusInvariants(
     keys_lost: Math.max(0, floor.total - observed.total),
     live_job_regression: Math.max(0, floor.live_job - observed.live_job),
     synthetic: observed.synthetic,
+    missing_certified_keys: missing.sort(),
+    synthetic_identity_drift: syntheticDrift,
+    live_job_regression_keys: liveRegression,
   };
 }
 
@@ -598,6 +622,17 @@ async function runPhaseA(baseline: Baseline): Promise<CheckResult[]> {
        count(*) filter (where live > 1)::int as two_live
      from k`,
   );
+  const certifiedIdentities = (expected.certified_identity_keys ?? []) as CertifiedIdentity[];
+  const [observedIdentityRows, observedLiveCases] = await Promise.all([
+    query<CertifiedIdentity>(`select wo_po_identity_key as key,
+      case when count(*) filter (where state = 'synthetic_livefire_terminal') > 0 then 'synthetic'
+           when count(*) filter (where state = 'confirmed_live_job') > 0 then 'live_job'
+           else 'exception_only' end as bucket
+      from makesafe_intake_cases where wo_po_identity_key is not null group by wo_po_identity_key`),
+    query<{ id: string; state: string; job_id: string | null }>(
+      `select id, state, job_id from makesafe_intake_cases where state = 'confirmed_live_job'`,
+    ),
+  ]);
   // The certified census numbers are a FLOOR and a partition rule, not an
   // expected observation. Ordinary intake keeps minting keys and keeps
   // promoting exception cases to live jobs, so pinning the exact counts made
@@ -615,7 +650,7 @@ async function runPhaseA(baseline: Baseline): Promise<CheckResult[]> {
     exception_only: keys.exception_only,
     synthetic: keys.synthetic,
     unaccounted: keys.unaccounted,
-  });
+  }, certifiedIdentities, observedIdentityRows);
   const totalGrowth = keys.total - expected.identity_keys_total;
   const liveJobGrowth = keys.live_job - expected.identity_keys_live_job;
   results.push(check(
@@ -628,6 +663,9 @@ async function runPhaseA(baseline: Baseline): Promise<CheckResult[]> {
       keys_lost: 0,
       live_job_regression: 0,
       synthetic: expected.identity_keys_synthetic,
+      missing_certified_keys: [],
+      synthetic_identity_drift: [],
+      live_job_regression_keys: [],
     },
     invariants,
     `census invariant, not a pinned count: certified floor ${expected.identity_keys_total} total / ` +
@@ -665,26 +703,28 @@ async function runPhaseA(baseline: Baseline): Promise<CheckResult[]> {
           where not exists (select 1 from jobs j where j.id = l.job_id))::int as dangling_link_job,
        (select count(*) from makesafe_intake_cases where state = 'confirmed_live_job')::int as live_cases`,
   );
-  // Same reinterpretation as a3: the invariant is that a confirmed_live_job
-  // case always has its job, and that live cases are never silently destroyed.
-  // The certified live_cases figure is the floor the population may grow from.
-  const liveCaseRegression = Math.max(
-    0,
-    expected.live_cases - integrity.live_cases,
-  );
+  const certifiedLiveCases = (expected.certified_live_case_ids ?? []) as string[];
+  const observedLiveCaseIds = new Set(observedLiveCases.map((row) => row.id));
+  const missingLiveCases = certifiedLiveCases.filter((id) => !observedLiveCaseIds.has(id)).sort();
+  const certifiedLiveCasesWithoutJob = observedLiveCases
+    .filter((row) => certifiedLiveCases.includes(row.id) && row.job_id === null)
+    .map((row) => row.id)
+    .sort();
   results.push(check(
     "a4_live_case_without_job",
     "phase_a",
     "no confirmed_live_job case is missing its job",
     {
       live_case_without_job: expected.live_case_without_job,
-      live_cases_regression: 0,
+      missing_certified_live_cases: [],
+      certified_live_cases_without_job: [],
     },
     {
       live_case_without_job: integrity.live_case_without_job,
-      live_cases_regression: liveCaseRegression,
+      missing_certified_live_cases: missingLiveCases,
+      certified_live_cases_without_job: certifiedLiveCasesWithoutJob,
     },
-    `certified floor ${expected.live_cases} live cases; live now ${integrity.live_cases} ` +
+    `certified identity set ${certifiedLiveCases.length} live cases; live now ${integrity.live_cases} ` +
       `(${integrity.live_cases - expected.live_cases >= 0 ? "+" : ""}${
         integrity.live_cases - expected.live_cases
       } post-baseline intake growth).`,

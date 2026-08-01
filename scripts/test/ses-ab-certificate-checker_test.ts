@@ -247,6 +247,9 @@ Deno.test("healthy intake growth satisfies the census invariants", () => {
       keys_lost: 0,
       live_job_regression: 0,
       synthetic: 4,
+      missing_certified_keys: [],
+      synthetic_identity_drift: [],
+      live_job_regression_keys: [],
     },
   );
   // Brand new intake keys are growth too, not a defect.
@@ -300,6 +303,29 @@ Deno.test("each census invariant still catches the defect it protects", () => {
       .synthetic,
     5,
   );
+});
+
+Deno.test("identity continuity catches substitution and backward transitions", () => {
+  const floor = { total: 2, live_job: 1, synthetic: 1 };
+  const certified = [
+    { key: "live", bucket: "live_job" as const },
+    { key: "syn", bucket: "synthetic" as const },
+  ];
+  const substituted = evaluateCensusInvariants(floor, {
+    total: 2, live_job: 1, exception_only: 0, synthetic: 1, unaccounted: 0,
+  }, certified, [
+    { key: "live", bucket: "live_job" },
+    { key: "replacement", bucket: "synthetic" },
+  ]);
+  assertEquals(substituted.missing_certified_keys, ["syn"]);
+  assertEquals(substituted.synthetic_identity_drift, ["replacement", "syn"]);
+  const regressed = evaluateCensusInvariants(floor, {
+    total: 2, live_job: 0, exception_only: 1, synthetic: 1, unaccounted: 0,
+  }, certified, [
+    { key: "live", bucket: "exception_only" },
+    { key: "syn", bucket: "synthetic" },
+  ]);
+  assertEquals(regressed.live_job_regression_keys, ["live"]);
 });
 
 Deno.test("the identity-key census states invariants, not pinned counts", async () => {
