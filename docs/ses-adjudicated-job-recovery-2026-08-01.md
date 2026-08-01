@@ -1,0 +1,55 @@
+# SES adjudicated job recovery (2026-08-01)
+
+This is the reviewed recovery surface for the two missed instructions proved in
+`data/ses-shadow-adjudicate-v1/report.md` section 6.1. Both actions require the
+privileged ops key or an admin/owner session and `POST`.
+The server pins the exact authorized source identities and expected values shown
+below; the ruling cannot be reused for another source, family, reference, date,
+company, or invoice.
+
+## Deterministic exact rescan
+
+`ops-api?action=makesafe_deterministic_intake_exact_rescan` accepts exactly:
+
+```json
+{
+  "post_id": "<one exact persisted emails.post_id>",
+  "expected_job_family": "roof_report"
+}
+```
+
+The source must already have one canonical `exception` fate with no job and no
+corrected target-job binding. The action delegates to the existing exact
+deterministic intake, guarded approval, settlement, source lineage, and Hugo
+notification path. It requires one created job and one recorded and accepted
+Hugo notification before appending captain provenance. Standing intake and PDF
+drain behavior are unchanged.
+
+## Historical Builderwest backfill
+
+`ops-api?action=makesafe_adjudicated_historical_backfill` accepts exactly:
+
+```json
+{
+  "post_id": "<one exact persisted emails.post_id>",
+  "invoice_number": "INV-0754",
+  "external_ref": "BWCWA-6648",
+  "invoice_date": "2026-06-24",
+  "requesting_company_slug": "bw",
+  "expected_job_family": "general_makesafe"
+}
+```
+
+The action verifies the complete persisted source lineage and exact Xero-synced
+ACCREC invoice evidence before any write. It uses the normal make-safe job
+constructor with manager notification and geocoding suppressed, marks the card
+as captain-accepted legacy incomplete evidence, binds all source transports via
+the append-only authority-correction ledger, links the local invoice mirror, and
+appends `new -> archive` only through `apply_makesafe_board_status`.
+
+This historical path has no Hugo callback and makes no client, builder, GHL,
+Xero-provider, SMS, or email call. The operational `jobs.status` remains under
+its normal authority; `ARCHIVED` is the display-ledger stage.
+
+Both paths pin the captain ruling date `2026-08-01` and adjudication reference
+`data/ses-shadow-adjudicate-v1/report.md#6.1` in durable provenance.
