@@ -45,6 +45,7 @@ import {
   describeSesBoardPopulation,
   SES_BOARD_POPULATION_CONTRACT_VERSION,
   sesBoardPopulationPredicate,
+  sesBoardStatusPredicate,
 } from "./ses-board-population-contract.ts";
 import {
   buildCanonicalMakesafeRows,
@@ -314,7 +315,7 @@ async function run(): Promise<void> {
       from makesafe_job_details d
       left join makesafe_companies c on c.id = d.requesting_company_id
       join jobs j on j.id = d.job_id
-      where j.status not in ('cancelled','lost')
+      where ${sesBoardStatusPredicate()}
     `),
     // ops-api order: .neq(status,'draft').order(submitted_at desc) then id asc.
     query(
