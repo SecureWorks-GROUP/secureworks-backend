@@ -93,6 +93,7 @@ export interface CardState {
   work_order_docs: number;
   work_order_docs_with_url: number;
   status_applications: number;
+  matching_work_order_document_id: string | null;
 }
 
 export interface EligibilityVerdict {
@@ -279,12 +280,12 @@ async function loadCardStates(
   rows: readonly FixtureRow[],
 ): Promise<Map<string, CardState>> {
   const pairs = rows.map((row) =>
-    `(${sqlText(row.card)},${sqlText(row.jobId)}::uuid,${
+    `(${sqlText(row.card)},${sqlText(row.jobId)}::uuid,${sqlText(row.caseId)}::uuid,${
       sqlText(row.attachmentId)
-    }::uuid,${sqlText(row.builderWoCanonical)})`
+    }::uuid,${sqlText(row.builderWoCanonical)},${sqlText(row.fileName)})`
   ).join(",");
   const query = `
-with fixture(card, job_id, attachment_id, wo_canonical) as (values ${pairs})
+with fixture(card, job_id, case_id, attachment_id, wo_canonical, file_name) as (values ${pairs})
 select f.card,
        (j.id is not null) as job_found,
        j.status as job_status,
@@ -293,7 +294,8 @@ select f.card,
        exists (
          select 1 from makesafe_intake_cases c
          join makesafe_intake_case_sources s on s.case_id = c.id
-         where c.job_id = f.job_id
+         where c.id = f.case_id
+           and c.job_id = f.job_id
            and f.attachment_id = any(coalesce(s.attachment_refs, '{}'::uuid[]))
        ) as case_bound,
        (ea.id is not null) as attachment_found,
@@ -324,7 +326,13 @@ select f.card,
        ) as work_order_docs_with_url,
        (select count(*)::int from makesafe_board_status_applications a
          where a.job_id = f.job_id
-       ) as status_applications
+       ) as status_applications,
+       (select d.id::text from job_documents d
+         where d.job_id = f.job_id and d.type = ${sqlText(DOCUMENT_TYPE)}
+           and d.file_name = f.file_name and coalesce(d.storage_url, '') <> ''
+           and d.run_label is null
+         order by d.id limit 1
+       ) as matching_work_order_document_id
 from fixture f
 left join jobs j on j.id = f.job_id and j.job_number = f.card
 left join email_attachments ea on ea.id = f.attachment_id
@@ -350,6 +358,9 @@ order by f.card;`;
       work_order_docs: Number(raw.work_order_docs || 0),
       work_order_docs_with_url: Number(raw.work_order_docs_with_url || 0),
       status_applications: Number(raw.status_applications || 0),
+      matching_work_order_document_id: raw.matching_work_order_document_id
+        ? String(raw.matching_work_order_document_id)
+        : null,
     });
   }
   for (const row of rows) {
@@ -798,7 +809,9 @@ async function runApply(
   };
 
   for (const row of rows) {
-    const state = states.get(row.card)!;
+    // The bulk read is only a pre-pass. Authorization for each write uses a
+    // fresh single-card read so concurrent drift is always observed.
+    const state = await loadCardStates([row]).then((live) => live.get(row.card)!);
     const planned = baselineByCard.get(row.card);
     const record: any = {
       card: row.card,
@@ -818,7 +831,26 @@ async function runApply(
     } else {
       const drift = stateMatchesBaseline(planned.before as CardState, state);
       const verdict = evaluateEligibility(row, state);
-      if (!drift.matches) {
+      const resumableStamp = state.matching_work_order_document_id !== null;
+      if (resumableStamp) {
+        const documentId = state.matching_work_order_document_id!;
+        record.document_id = documentId;
+        try {
+          record.provenance_stamped = await stampProvenanceWithRetry(
+            row,
+            documentId,
+          );
+          record.outcome = "applied";
+          record.reason = "resumed_provenance_stamp";
+          applied++;
+        } catch (error) {
+          record.outcome = "resumable";
+          record.reason = error instanceof Error ? error.message : String(error);
+          ledger.push(record);
+          await flush();
+          throw new Error(`${row.card} apply failed: ${record.reason}`);
+        }
+      } else if (!drift.matches) {
         record.reason = `state_changed_since_dry_run:${
           drift.drifted.join(",")
         }`;
@@ -831,10 +863,7 @@ async function runApply(
           const attached = await attachWorkOrder(row);
           record.document_id = attached.documentId;
           record.storage_url = attached.url;
-          record.provenance_stamped = await stampProvenance(
-            row,
-            attached.documentId,
-          );
+          record.provenance_stamped = await stampProvenanceWithRetry(row, attached.documentId);
           if (!record.provenance_stamped) {
             throw new Error(
               `provenance stamp did not match exactly one row (document ${attached.documentId})`,
@@ -847,6 +876,9 @@ async function runApply(
           record.reason = error instanceof Error
             ? error.message
             : String(error);
+          if (record.reason.startsWith("provenance stamp resumable")) {
+            record.outcome = "resumable";
+          }
           ledger.push(record);
           await flush();
           throw new Error(`${row.card} apply failed: ${record.reason}`);
@@ -864,6 +896,18 @@ async function runApply(
   }
   await flush();
   summarise("apply", { cards: ledger.length, applied, skipped });
+}
+
+async function stampProvenanceWithRetry(
+  row: FixtureRow,
+  documentId: string,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (await stampProvenance(row, documentId)) return true;
+  }
+  throw new Error(
+    `provenance stamp resumable after attach (document ${documentId})`,
+  );
 }
 
 async function runVerify(
