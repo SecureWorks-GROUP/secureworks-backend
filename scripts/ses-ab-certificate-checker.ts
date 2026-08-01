@@ -679,7 +679,7 @@ async function runPhaseA(baseline: Baseline): Promise<CheckResult[]> {
       `${expected.identity_key_census_rule} ` +
       `The brief's pre-recovery census was ${expected.brief_pre_recovery_census.identity_keys_total} total / ` +
       `${expected.brief_pre_recovery_census.identity_keys_live_job} live-job; ` +
-      expected.brief_pre_recovery_census.reconciliation,
+      "the certified manifest is the current re-certification snapshot.",
   ));
   results.push(check(
     "a6_keys_with_two_live_jobs",

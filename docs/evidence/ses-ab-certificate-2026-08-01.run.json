@@ -3,8 +3,8 @@
   "tool": "scripts/ses-ab-certificate-checker.ts",
   "project_ref": "kevgrhcjxspbxgovpmfl",
   "access": "management-api /database/query, read_only:true",
-  "started_at": "2026-08-01T11:57:40.578Z",
-  "finished_at": "2026-08-01T11:58:00.545Z",
+  "started_at": "2026-08-01T12:24:26.723Z",
+  "finished_at": "2026-08-01T12:24:48.055Z",
   "summary": "SES A/B certificate checker: 22/22 PASS (phase A 8/8, phase B 10/10, droid 4/4) — CERTIFIABLE",
   "certifiable": true,
   "counts": {
@@ -90,16 +90,22 @@
         "partition_complete": true,
         "keys_lost": 0,
         "live_job_regression": 0,
-        "synthetic": 4
+        "synthetic": 4,
+        "missing_certified_keys": [],
+        "synthetic_identity_drift": [],
+        "live_job_regression_keys": []
       },
       "observed": {
         "unaccounted": 0,
         "partition_complete": true,
         "keys_lost": 0,
         "live_job_regression": 0,
-        "synthetic": 4
+        "synthetic": 4,
+        "missing_certified_keys": [],
+        "synthetic_identity_drift": [],
+        "live_job_regression_keys": []
       },
-      "detail": "census invariant, not a pinned count: certified floor 534 total / 157 live-job / 373 exception-only / 4 synthetic; live now 534 total (+0) / 160 live-job (+3) / 370 exception-only / 4 synthetic. Captain rule, 2026-08-01 addendum: the identity-key and live-case counts above are a certified FLOOR and a partition rule, not an expected observation. Ordinary intake keeps minting keys and keeps promoting exception cases to confirmed_live_job, so a3/a4 assert the invariants those numbers protect - every key lands in exactly one of live-job / exception-only / synthetic, no key or live case is destroyed (no negative growth from the floor), promotion only runs exception -> live, the synthetic set stays closed, and a confirmed_live_job case always has its job - and report growth above the floor instead of failing it. Pinning the exact counts is what made the certificate fail on healthy +3 live-job intake growth on 2026-08-01. Do not re-pin them; if a count must move DOWN, that is a real defect and the invariant is meant to catch it. The brief's pre-recovery census was 533 total / 156 live-job; The task brief's 533/156 is the pre-recovery snapshot. PR 460's captain-ruled exact rescan promoted one previously key-less exception case (reason_code adapter_parse_failure, therefore no wo_po_identity_key) to confirmed_live_job with the newly extracted key wo:MLB-27309/po:PO-57445. Exception-only stays 373 and synthetic stays 4, which is only possible if the promoted case carried no key before: had it already held one, exception-only would now read 372."
+      "detail": "census invariant, not a pinned count: certified floor 534 total / 160 live-job / 370 exception-only / 4 synthetic; live now 534 total (+0) / 160 live-job (+0) / 370 exception-only / 4 synthetic. Re-certification snapshot, 2026-08-01: certified identity manifests are diffed by membership. Every certified key and live case must remain present, live-job keys may not regress, exception-only keys may promote to live, the synthetic identity set is closed, and growth above the snapshot is reported rather than failed. Never trim or re-snapshot the manifest to make a failure green. The brief's pre-recovery census was 533 total / 156 live-job; the certified manifest is the current re-certification snapshot."
     },
     {
       "id": "a6_keys_with_two_live_jobs",
@@ -116,13 +122,15 @@
       "status": "PASS",
       "expected": {
         "live_case_without_job": 0,
-        "live_cases_regression": 0
+        "missing_certified_live_cases": [],
+        "certified_live_cases_without_job": []
       },
       "observed": {
         "live_case_without_job": 0,
-        "live_cases_regression": 0
+        "missing_certified_live_cases": [],
+        "certified_live_cases_without_job": []
       },
-      "detail": "certified floor 158 live cases; live now 161 (+3 post-baseline intake growth)."
+      "detail": "certified identity set 161 live cases; live now 161 (+0 post-baseline intake growth)."
     },
     {
       "id": "a5_dangling_job_ids",

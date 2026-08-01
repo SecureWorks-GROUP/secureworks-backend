@@ -332,13 +332,11 @@ Deno.test("the identity-key census states invariants, not pinned counts", async 
   const baseline = JSON.parse(
     await read("scripts/ses-ab-certificate-v1.baseline.json"),
   );
-  // a3/a4 previously pinned the exact census and so failed on healthy intake
-  // growth. The recorded numbers are now a floor; the rule text is what keeps a
-  // future maintainer from "fixing" a failure by re-pinning them.
+  // a3/a4 compare certified identity membership and transitions, while growth
+  // remains report-only.
   const rule = baseline.phase_a.identity_key_census_rule as string;
-  assertStringIncludes(rule, "FLOOR");
-  assertStringIncludes(rule, "Do not re-pin them");
-  // The floor itself must stay a real certified observation.
+  assertStringIncludes(rule, "identity manifests");
+  assertStringIncludes(rule, "Never trim or re-snapshot");
   assertEquals(baseline.phase_a.live_case_without_job, 0);
   assertEquals(baseline.phase_a.dangling_job_ids, 0);
   assertEquals(baseline.phase_a.identity_keys_with_two_live_case_bound_jobs, 0);

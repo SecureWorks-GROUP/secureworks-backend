@@ -639,15 +639,16 @@ authoritative in `docs/evidence/ses-ab-certificate-2026-08-01.md` — read its
 Two rules govern how a failure may be answered, because the cheap fix for each
 is the wrong one:
 
-- **The phase A census is a FLOOR, not an expected observation.** `a3`/`a4`
-  assert invariants (`evaluateCensusInvariants`): keys partition into
+- **The phase A census is an identity manifest, not a pinned count.** `a3`/`a4`
+  diff the certified identity sets by membership and assert invariants
+  (`evaluateCensusInvariants`): keys partition into
   live-job / exception-only / synthetic, no key or live case is destroyed,
   promotion runs exception -> live only, the synthetic set stays closed, and a
   `confirmed_live_job` case always has its job. Growth above the floor is
-  reported, never failed — pinning the exact counts is what failed the
-  certificate on healthy +3 live-job intake growth. Never answer an `a3`/`a4`
-  failure by re-pinning the numbers; a count moving DOWN is the defect these
-  checks exist to catch.
+  reported, never failed. The manifests are the re-certification snapshot and
+  must never be trimmed or re-snapshotted to make a failure green; a missing
+  certified identity or a count moving DOWN is the defect these checks exist to
+  catch.
 - **A merge group may be accounted without being settled.** Adding a work order
   to `ses-ab-certificate-v1.duplicate-accounting.txt` is what clears a `d1`
   `unaccounted`, and the disposition records what was actually decided.
