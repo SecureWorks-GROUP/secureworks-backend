@@ -95,6 +95,17 @@ const DISPOSITIONS = new Set([
   "adjudicated_not_duplicate",
   "captain_excluded",
   "open_hold",
+  "captain_hold_live_pair",
+]);
+
+/**
+ * Dispositions that record an unruled group rather than a settled one, and so
+ * must name the decision key the captain will rule under. `open_hold` predates
+ * this rule and its rows already carry keys; `captain_hold_live_pair` is the
+ * stricter successor for a hold whose members are BOTH still live.
+ */
+const DISPOSITIONS_REQUIRING_DECISION_KEY = new Set([
+  "captain_hold_live_pair",
 ]);
 
 const ERAS = new Set(["historical", "drain_minted"]);
@@ -277,6 +288,16 @@ export function parseAccountingFixture(text: string): AccountingRow[] {
     if (!evidence) {
       throw new Error(`accounting fixture line ${index + 1} needs evidence`);
     }
+    if (
+      DISPOSITIONS_REQUIRING_DECISION_KEY.has(disposition) &&
+      decisionKey === "-"
+    ) {
+      throw new Error(
+        `accounting fixture line ${
+          index + 1
+        } has disposition ${disposition} and must name a decision key`,
+      );
+    }
     return {
       work_order: workOrder,
       era,
@@ -286,6 +307,95 @@ export function parseAccountingFixture(text: string): AccountingRow[] {
       evidence,
     };
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/* the phase A census invariants                                               */
+/* -------------------------------------------------------------------------- */
+
+export interface KeyCensus {
+  total: number;
+  live_job: number;
+  exception_only: number;
+  synthetic: number;
+  unaccounted: number;
+}
+
+export interface CensusInvariants {
+  unaccounted: number;
+  partition_complete: boolean;
+  keys_lost: number;
+  live_job_regression: number;
+  synthetic: number;
+  missing_certified_keys: string[];
+  synthetic_identity_drift: string[];
+  live_job_regression_keys: string[];
+}
+
+export interface CertifiedIdentity {
+  key: string;
+  bucket: "live_job" | "exception_only" | "synthetic";
+}
+
+/**
+ * The certified census is a FLOOR plus a partition rule, never an expected
+ * observation: intake keeps minting keys and keeps promoting exception cases to
+ * live jobs, so equality fails on healthy growth. These are the properties that
+ * actually have to hold, and each one is a real defect when it breaks:
+ *
+ * - `unaccounted` / `partition_complete`: a key that is in no bucket, or
+ *   buckets that do not sum to the total, means the census is not a partition
+ *   and every other count is unsafe to read.
+ * - `keys_lost`: identity keys are append-only. A total below the floor means
+ *   keys were destroyed, not that intake was quiet.
+ * - `live_job_regression`: promotion runs exception -> live only. A live-job
+ *   count below the floor means a live job was un-bound from its key.
+ * - `synthetic`: live-fire is a closed, release-blocked set; drift there is
+ *   residue that must be noticed rather than absorbed as growth.
+ */
+export function evaluateCensusInvariants(
+  floor: { total: number; live_job: number; synthetic: number },
+  observed: KeyCensus,
+  certifiedIdentities: CertifiedIdentity[] = [],
+  observedIdentities: CertifiedIdentity[] = [],
+): CensusInvariants {
+  const current = new Map(
+    observedIdentities.map((identity) => [identity.key, identity.bucket]),
+  );
+  const certified = new Map(
+    certifiedIdentities.map((identity) => [identity.key, identity.bucket]),
+  );
+  const missing = [...certified.keys()].filter((key) => !current.has(key));
+  const syntheticDrift = [
+    ...new Set([
+      ...certifiedIdentities.filter((identity) =>
+        identity.bucket === "synthetic" &&
+        current.get(identity.key) !== "synthetic"
+      ).map((identity) => identity.key),
+      ...observedIdentities.filter((identity) =>
+        identity.bucket === "synthetic" &&
+        certified.get(identity.key) !== "synthetic"
+      ).map((identity) => identity.key),
+    ]),
+  ].sort();
+  const liveRegression = certifiedIdentities
+    .filter((identity) =>
+      identity.bucket === "live_job" && current.get(identity.key) !== "live_job"
+    )
+    .map((identity) => identity.key)
+    .sort();
+  return {
+    unaccounted: observed.unaccounted,
+    partition_complete:
+      observed.live_job + observed.exception_only + observed.synthetic ===
+        observed.total,
+    keys_lost: Math.max(0, floor.total - observed.total),
+    live_job_regression: Math.max(0, floor.live_job - observed.live_job),
+    synthetic: observed.synthetic,
+    missing_certified_keys: missing.sort(),
+    synthetic_identity_drift: syntheticDrift,
+    live_job_regression_keys: liveRegression,
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -526,16 +636,30 @@ async function runPhaseA(baseline: Baseline): Promise<CheckResult[]> {
        count(*) filter (where live > 1)::int as two_live
      from k`,
   );
-  results.push(check(
-    "a3_identity_key_census",
-    "phase_a",
-    "identity keys are fully accounted as live-job / exception-only / synthetic",
+  const certifiedIdentities =
+    (expected.certified_identity_keys ?? []) as CertifiedIdentity[];
+  const [observedIdentityRows, observedLiveCases] = await Promise.all([
+    query<CertifiedIdentity>(`select wo_po_identity_key as key,
+      case when count(*) filter (where state = 'synthetic_livefire_terminal') > 0 then 'synthetic'
+           when count(*) filter (where state = 'confirmed_live_job') > 0 then 'live_job'
+           else 'exception_only' end as bucket
+      from makesafe_intake_cases where wo_po_identity_key is not null group by wo_po_identity_key`),
+    query<{ id: string; state: string; job_id: string | null }>(
+      `select id, state, job_id from makesafe_intake_cases where state = 'confirmed_live_job'`,
+    ),
+  ]);
+  // The certified census numbers are a FLOOR and a partition rule, not an
+  // expected observation. Ordinary intake keeps minting keys and keeps
+  // promoting exception cases to live jobs, so pinning the exact counts made
+  // the certificate fail on healthy growth (the 2026-08-01 +3 live-job drift).
+  // What actually has to hold is structural: every key lands in exactly one
+  // bucket, no key is destroyed, and promotion only ever runs exception ->
+  // live. Growth above the floor is reported, never failed.
+  const invariants = evaluateCensusInvariants(
     {
       total: expected.identity_keys_total,
       live_job: expected.identity_keys_live_job,
-      exception_only: expected.identity_keys_exception_only,
       synthetic: expected.identity_keys_synthetic,
-      unaccounted: 0,
     },
     {
       total: keys.total,
@@ -544,8 +668,38 @@ async function runPhaseA(baseline: Baseline): Promise<CheckResult[]> {
       synthetic: keys.synthetic,
       unaccounted: keys.unaccounted,
     },
-    `the brief's pre-recovery census was ${expected.brief_pre_recovery_census.identity_keys_total} total / ${expected.brief_pre_recovery_census.identity_keys_live_job} live-job; ` +
-      expected.brief_pre_recovery_census.reconciliation,
+    certifiedIdentities,
+    observedIdentityRows,
+  );
+  const totalGrowth = keys.total - expected.identity_keys_total;
+  const liveJobGrowth = keys.live_job - expected.identity_keys_live_job;
+  results.push(check(
+    "a3_identity_key_census",
+    "phase_a",
+    "identity keys are fully accounted as live-job / exception-only / synthetic",
+    {
+      unaccounted: 0,
+      partition_complete: true,
+      keys_lost: 0,
+      live_job_regression: 0,
+      synthetic: expected.identity_keys_synthetic,
+      missing_certified_keys: [],
+      synthetic_identity_drift: [],
+      live_job_regression_keys: [],
+    },
+    invariants,
+    `census invariant, not a pinned count: certified floor ${expected.identity_keys_total} total / ` +
+      `${expected.identity_keys_live_job} live-job / ${expected.identity_keys_exception_only} exception-only / ` +
+      `${expected.identity_keys_synthetic} synthetic; live now ` +
+      `${keys.total} total (${totalGrowth >= 0 ? "+" : ""}${totalGrowth}) / ` +
+      `${keys.live_job} live-job (${
+        liveJobGrowth >= 0 ? "+" : ""
+      }${liveJobGrowth}) / ` +
+      `${keys.exception_only} exception-only / ${keys.synthetic} synthetic. ` +
+      `${expected.identity_key_census_rule} ` +
+      `The brief's pre-recovery census was ${expected.brief_pre_recovery_census.identity_keys_total} total / ` +
+      `${expected.brief_pre_recovery_census.identity_keys_live_job} live-job; ` +
+      "the certified manifest is the current re-certification snapshot.",
   ));
   results.push(check(
     "a6_keys_with_two_live_jobs",
@@ -569,18 +723,34 @@ async function runPhaseA(baseline: Baseline): Promise<CheckResult[]> {
           where not exists (select 1 from jobs j where j.id = l.job_id))::int as dangling_link_job,
        (select count(*) from makesafe_intake_cases where state = 'confirmed_live_job')::int as live_cases`,
   );
+  const certifiedLiveCases =
+    (expected.certified_live_case_ids ?? []) as string[];
+  const observedLiveCaseIds = new Set(observedLiveCases.map((row) => row.id));
+  const missingLiveCases = certifiedLiveCases.filter((id) =>
+    !observedLiveCaseIds.has(id)
+  ).sort();
+  const certifiedLiveCasesWithoutJob = observedLiveCases
+    .filter((row) => certifiedLiveCases.includes(row.id) && row.job_id === null)
+    .map((row) => row.id)
+    .sort();
   results.push(check(
     "a4_live_case_without_job",
     "phase_a",
     "no confirmed_live_job case is missing its job",
     {
       live_case_without_job: expected.live_case_without_job,
-      live_cases: expected.live_cases,
+      missing_certified_live_cases: [],
+      certified_live_cases_without_job: [],
     },
     {
       live_case_without_job: integrity.live_case_without_job,
-      live_cases: integrity.live_cases,
+      missing_certified_live_cases: missingLiveCases,
+      certified_live_cases_without_job: certifiedLiveCasesWithoutJob,
     },
+    `certified identity set ${certifiedLiveCases.length} live cases; live now ${integrity.live_cases} ` +
+      `(${integrity.live_cases - expected.live_cases >= 0 ? "+" : ""}${
+        integrity.live_cases - expected.live_cases
+      } post-baseline intake growth).`,
   ));
   results.push(check(
     "a5_dangling_job_ids",
@@ -1187,6 +1357,7 @@ async function runDroid(
     adjudicated_not_duplicate: 0,
     captain_excluded: 0,
     open_hold: 0,
+    captain_hold_live_pair: 0,
   };
   const drainMintedJobs: string[] = [];
   for (const row of accounting) {
@@ -1252,6 +1423,34 @@ async function runDroid(
         });
       }
     }
+    if (row.disposition === "captain_hold_live_pair") {
+      // A hold that openly records BOTH members still live. This is the honest
+      // state for a group proved to be one instruction whose survivor the
+      // standing ruling cannot pick. It is accounted, so the certificate does
+      // not fail; but it is not settled, so the checker pins the exact shape it
+      // was recorded in. If anyone archives a member, points a duplicate
+      // pointer at one, or the pair stops being a live pair, the hold no longer
+      // describes production and this fails - forcing re-adjudication rather
+      // than letting a stale hold silently absorb a real change.
+      const liveMembers = members.filter((member) =>
+        !TERMINAL_JOB_STATUSES.has(String(member.row?.status))
+      );
+      if (liveMembers.length !== members.length) {
+        dispositionFailures.push({
+          work_order: row.work_order,
+          disposition: row.disposition,
+          reason:
+            "the hold recorded every member as live; one is now terminal, so the pair must be re-adjudicated",
+          terminal: members
+            .filter((member) =>
+              TERMINAL_JOB_STATUSES.has(String(member.row?.status))
+            )
+            .map((member) => member.card),
+        });
+      }
+      // A duplicate pointer on a hold member is already reported by the shared
+      // non-archive-disposition branch above; it is not re-reported here.
+    }
     if (row.disposition === "captain_excluded") {
       const notArchived = members.filter((member) =>
         String(member.row?.after_status) !== "archive"
@@ -1281,7 +1480,7 @@ async function runDroid(
   results.push(check(
     "d4_drain_minted_duplicates",
     "droid",
-    "the drain-minted duplicate jobs are exactly the adjudicated three",
+    "the drain-minted duplicate jobs are exactly the adjudicated set",
     (expected.drain_minted_duplicate_jobs as string[]).slice().sort(),
     drainMintedJobs.slice().sort(),
   ));

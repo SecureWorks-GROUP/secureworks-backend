@@ -9,6 +9,7 @@ import {
   assertNoPiiColumns,
   assertReadOnlySql,
   buildMergeGroups,
+  evaluateCensusInvariants,
   parseAccountingFixture,
   parseRound1Fixture,
   parseRound2FieldFixture,
@@ -148,17 +149,18 @@ Deno.test("the accounting fixture covers every disposition and validates its row
   const rows = parseAccountingFixture(
     await read("scripts/ses-ab-certificate-v1.duplicate-accounting.txt"),
   );
-  assertEquals(rows.length, 19);
-  assertEquals(rows.filter((row) => row.era === "historical").length, 16);
-  assertEquals(rows.filter((row) => row.era === "drain_minted").length, 3);
+  assertEquals(rows.length, 21);
+  assertEquals(rows.filter((row) => row.era === "historical").length, 17);
+  assertEquals(rows.filter((row) => row.era === "drain_minted").length, 4);
   const counts = new Map<string, number>();
   for (const row of rows) {
     counts.set(row.disposition, (counts.get(row.disposition) ?? 0) + 1);
   }
   assertEquals(counts.get("archived_duplicate_pointer"), 4);
-  assertEquals(counts.get("adjudicated_not_duplicate"), 8);
+  assertEquals(counts.get("adjudicated_not_duplicate"), 9);
   assertEquals(counts.get("captain_excluded"), 1);
   assertEquals(counts.get("open_hold"), 6);
+  assertEquals(counts.get("captain_hold_live_pair"), 1);
 
   assertThrows(
     () =>
@@ -176,6 +178,32 @@ Deno.test("the accounting fixture covers every disposition and validates its row
     Error,
     "at least two cards",
   );
+  // An unruled live pair with no decision key is a hold nobody can close.
+  assertThrows(
+    () =>
+      parseAccountingFixture(
+        "MLB-1PO-1 | historical | captain_hold_live_pair | SWMS-1,SWMS-2 | - | evidence",
+      ),
+    Error,
+    "must name a decision key",
+  );
+});
+
+Deno.test("every unruled live-pair hold names the captain decision key that closes it", async () => {
+  const rows = parseAccountingFixture(
+    await read("scripts/ses-ab-certificate-v1.duplicate-accounting.txt"),
+  );
+  const holds = rows.filter((row) =>
+    row.disposition === "captain_hold_live_pair"
+  );
+  // A live pair is the one disposition the checker accounts WITHOUT the group
+  // being settled, so it must stay traceable to a ruling that can close it.
+  assertEquals(holds.length, 1);
+  for (const hold of holds) {
+    assertEquals(hold.decision_key, "duplicate-mlb-27100-po-56960-survivor");
+    assertEquals(hold.cards.length, 2);
+    assertStringIncludes(hold.evidence, "one instruction");
+  }
 });
 
 Deno.test("the baseline stays consistent with the accounting fixture", async () => {
@@ -199,6 +227,137 @@ Deno.test("the baseline stays consistent with the accounting fixture", async () 
     baseline.phase_a.brief_pre_recovery_census.reconciliation,
     "wo:MLB-27309/po:PO-57445",
   );
+});
+
+Deno.test("healthy intake growth satisfies the census invariants", () => {
+  const floor = { total: 534, live_job: 157, synthetic: 4 };
+  // The exact 2026-08-01 drift that failed the pinned check: three keys
+  // promoted exception -> live, total unchanged. Every invariant holds.
+  assertEquals(
+    evaluateCensusInvariants(floor, {
+      total: 534,
+      live_job: 160,
+      exception_only: 370,
+      synthetic: 4,
+      unaccounted: 0,
+    }),
+    {
+      unaccounted: 0,
+      partition_complete: true,
+      keys_lost: 0,
+      live_job_regression: 0,
+      synthetic: 4,
+      missing_certified_keys: [],
+      synthetic_identity_drift: [],
+      live_job_regression_keys: [],
+    },
+  );
+  // Brand new intake keys are growth too, not a defect.
+  const grown = evaluateCensusInvariants(floor, {
+    total: 600,
+    live_job: 200,
+    exception_only: 396,
+    synthetic: 4,
+    unaccounted: 0,
+  });
+  assertEquals(grown.keys_lost, 0);
+  assertEquals(grown.live_job_regression, 0);
+  assertEquals(grown.partition_complete, true);
+});
+
+Deno.test("each census invariant still catches the defect it protects", () => {
+  const floor = { total: 534, live_job: 157, synthetic: 4 };
+  const healthy = {
+    total: 534,
+    live_job: 160,
+    exception_only: 370,
+    synthetic: 4,
+    unaccounted: 0,
+  };
+  // Keys destroyed rather than a quiet intake week.
+  assertEquals(
+    evaluateCensusInvariants(floor, { ...healthy, total: 530, live_job: 156 })
+      .keys_lost,
+    4,
+  );
+  // A live job un-bound from its key.
+  assertEquals(
+    evaluateCensusInvariants(floor, { ...healthy, live_job: 150 })
+      .live_job_regression,
+    7,
+  );
+  // A key in no bucket at all.
+  assertEquals(
+    evaluateCensusInvariants(floor, { ...healthy, unaccounted: 2 }).unaccounted,
+    2,
+  );
+  // Buckets that do not sum to the total: the census is not a partition.
+  assertEquals(
+    evaluateCensusInvariants(floor, { ...healthy, exception_only: 369 })
+      .partition_complete,
+    false,
+  );
+  // Live-fire residue must surface rather than be absorbed as growth.
+  assertEquals(
+    evaluateCensusInvariants(floor, { ...healthy, synthetic: 5, total: 535 })
+      .synthetic,
+    5,
+  );
+});
+
+Deno.test("identity continuity catches substitution and backward transitions", () => {
+  const floor = { total: 2, live_job: 1, synthetic: 1 };
+  const certified = [
+    { key: "live", bucket: "live_job" as const },
+    { key: "syn", bucket: "synthetic" as const },
+  ];
+  const substituted = evaluateCensusInvariants(
+    floor,
+    {
+      total: 2,
+      live_job: 1,
+      exception_only: 0,
+      synthetic: 1,
+      unaccounted: 0,
+    },
+    certified,
+    [
+      { key: "live", bucket: "live_job" },
+      { key: "replacement", bucket: "synthetic" },
+    ],
+  );
+  assertEquals(substituted.missing_certified_keys, ["syn"]);
+  assertEquals(substituted.synthetic_identity_drift, ["replacement", "syn"]);
+  const regressed = evaluateCensusInvariants(
+    floor,
+    {
+      total: 2,
+      live_job: 0,
+      exception_only: 1,
+      synthetic: 1,
+      unaccounted: 0,
+    },
+    certified,
+    [
+      { key: "live", bucket: "exception_only" },
+      { key: "syn", bucket: "synthetic" },
+    ],
+  );
+  assertEquals(regressed.live_job_regression_keys, ["live"]);
+});
+
+Deno.test("the identity-key census states invariants, not pinned counts", async () => {
+  const baseline = JSON.parse(
+    await read("scripts/ses-ab-certificate-v1.baseline.json"),
+  );
+  // a3/a4 compare certified identity membership and transitions, while growth
+  // remains report-only.
+  const rule = baseline.phase_a.identity_key_census_rule as string;
+  assertStringIncludes(rule, "identity manifests");
+  assertStringIncludes(rule, "Never trim or re-snapshot");
+  assertEquals(baseline.phase_a.live_case_without_job, 0);
+  assertEquals(baseline.phase_a.dangling_job_ids, 0);
+  assertEquals(baseline.phase_a.identity_keys_with_two_live_case_bound_jobs, 0);
 });
 
 Deno.test("the work-order identity rule states an invariant, not an observation", async () => {

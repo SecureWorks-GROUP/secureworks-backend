@@ -8,6 +8,14 @@ committed, and can be re-proved at any time by running it again.
 
 **Result: 22/22 PASS — CERTIFIABLE, with one named legacy exception.**
 
+> **Read the 2026-08-01 addendum at the end of this document before quoting any
+> count from the body.** The C3 work-order re-attachments briefly took this
+> certificate to 19/22. It is green again, but the merge-group counts, the
+> disposition counts, the drain-minted job list and the phase A census
+> expectations below have all been superseded there — and one newly visible
+> group is held for a captain ruling under decision key
+> `duplicate-mlb-27100-po-56960-survivor`.
+
 The captain's live board review on 2026-08-01 added check `b10`: no card may
 carry a blank or absent work-order identity. Production has exactly one such
 card, `SWMS-26001`, ruled a **named legacy exception** on 2026-08-01 under
@@ -71,8 +79,8 @@ correctly identified and not a duplicate", never as "this card is complete".
 | --- | --- | --- |
 | `a1` | every physical SES source has exactly one canonical case-source row | 1499 emails = 1499 case-source rows = 1499 distinct post ids |
 | `a2` | no persisted SES email lacks a case-source row | 0 |
-| `a3` | identity keys are fully accounted | 534 total = 157 live-job + 373 exception-only + 4 synthetic, 0 residue |
-| `a4` | no `confirmed_live_job` case is missing its job | 0 of 158 live cases |
+| `a3` | identity keys are fully accounted | 534 certified identities, membership-continuous; 160 live-job + 370 exception-only + 4 synthetic, 0 residue |
+| `a4` | certified live-case identity continuity | 0 missing or jobless of 161 certified live cases |
 | `a5` | nothing points at a missing job | 0 dangling case, correction-target and source-link job ids |
 | `a6` | no identity key carries two live case-bound jobs | 0 |
 | `a7` | the first captain-ruled creation exists | `SWMS-261123`, family `roof_report`, `external_ref` MLB-27309, case `confirmed_live_job` on `wo:MLB-27309/po:PO-57445` |
@@ -81,7 +89,7 @@ correctly identified and not a duplicate", never as "this card is complete".
 #### The 533 → 534 reconciliation
 
 The task brief specifies 533 identity keys (156 live-job / 373 exception-only /
-4 synthetic). Production reads **534 (157 / 373 / 4)**, and the two figures
+4 synthetic). Production reads **534 (160 / 370 / 4)**, and the two figures
 cannot both be true at once: the brief's census is the pre-recovery snapshot,
 and the recovery is itself one of the brief's own Phase A requirements.
 
@@ -91,13 +99,12 @@ PR 460's captain-ruled exact rescan promoted one case that was parked as
 `wo:MLB-27309/po:PO-57445`. That is `SWMS-261123`, which check `a7` requires to
 exist.
 
-The arithmetic corroborates it rather than merely allowing it: exception-only
-stays at 373 and synthetic at 4. Had the promoted case already held a key, it
-would have left the exception-only pool and that count would now read 372. It
-did not, so the key is new and the total moved 533 → 534 while live-job moved
-156 → 157. The certified census is therefore the post-recovery one, and
-`scripts/ses-ab-certificate-v1.baseline.json` records both figures with this
-reasoning so a future reader is never left guessing which snapshot they hold.
+The re-certification snapshot now records the current membership: 534 keys,
+160 live-job, 370 exception-only and 4 synthetic, plus all 161 current live
+case ids. It includes the three verified exception-to-live promotions. The
+earlier 158/157 figures were pre-growth certification numbers superseded by
+this snapshot; future checks compare membership and transitions, not pinned
+counts.
 
 ### Phase B — the adjudicated verdict table, advanced by the applied ledgers
 
@@ -349,79 +356,275 @@ verbatim, and its machine-readable form is
 `docs/evidence/ses-ab-certificate-2026-08-01.run.json`.
 
 ```text
-PASS phase_a  a1_sources_equal_case_rows  every physical SES source has exactly one canonical case-source row
+PASS phase_a  a1_sources_equal_case_rows         every physical SES source has exactly one canonical case-source row
        expected {"emails":1499,"case_source_rows":1499,"distinct_source_post_ids":1499}
        observed {"emails":1499,"case_source_rows":1499,"distinct_source_post_ids":1499}
        note     emails == case_source_rows == distinct post ids
-PASS phase_a  a2_emails_without_case  no persisted SES email lacks a case-source row
+PASS phase_a  a2_emails_without_case             no persisted SES email lacks a case-source row
        expected 0
        observed 0
-PASS phase_a  a3_identity_key_census  identity keys are fully accounted as live-job / exception-only / synthetic
-       expected {"total":534,"live_job":157,"exception_only":373,"synthetic":4,"unaccounted":0}
-       observed {"total":534,"live_job":157,"exception_only":373,"synthetic":4,"unaccounted":0}
-       note     the brief's pre-recovery census was 533 total / 156 live-job; The task brief's 533/156 is the pre-recovery snapshot. PR 460's captain-ruled exact rescan promoted one previously key-less exception case (reason_code adapter_parse_failure, therefore no wo_po_identity_key) to confirmed_live_job with the newly extracted key wo:MLB-27309/po:PO-57445. Exception-only stays 373 and synthetic stays 4, which is only possible if the promoted case carried no key before: had it already held one, exception-only would now read 372.
-PASS phase_a  a6_keys_with_two_live_jobs  no identity key carries two live case-bound jobs
+PASS phase_a  a3_identity_key_census             identity keys are fully accounted as live-job / exception-only / synthetic
+       expected {"unaccounted":0,"partition_complete":true,"keys_lost":0,"live_job_regression":0,"synthetic":4,"missing_certified_keys":[],"synthetic_identity_drift":[],"live_job_regression_keys":[]}
+       observed {"unaccounted":0,"partition_complete":true,"keys_lost":0,"live_job_regression":0,"synthetic":4,"missing_certified_keys":[],"synthetic_identity_drift":[],"live_job_regression_keys":[]}
+       note     census invariant, not a pinned count: certified floor 534 total / 160 live-job / 370 exception-only / 4 synthetic; live now 534 total (+0) / 160 live-job (+0) / 370 exception-only / 4 synthetic. Re-certification snapshot, 2026-08-01: certified identity manifests are diffed by membership. Every certified key and live case must remain present, live-job keys may not regress, exception-only keys may promote to live, the synthetic identity set is closed, and growth above the snapshot is reported rather than failed. Never trim or re-snapshot the manifest to make a failure green. The brief's pre-recovery census was 533 total / 156 live-job; the certified manifest is the current re-certification snapshot.
+PASS phase_a  a6_keys_with_two_live_jobs         no identity key carries two live case-bound jobs
        expected 0
        observed 0
-PASS phase_a  a4_live_case_without_job  no confirmed_live_job case is missing its job
-       expected {"live_case_without_job":0,"live_cases":158}
-       observed {"live_case_without_job":0,"live_cases":158}
-PASS phase_a  a5_dangling_job_ids  no case, correction target or source link points at a missing job
+PASS phase_a  a4_live_case_without_job           no confirmed_live_job case is missing its job
+       expected {"live_case_without_job":0,"missing_certified_live_cases":[],"certified_live_cases_without_job":[]}
+       observed {"live_case_without_job":0,"missing_certified_live_cases":[],"certified_live_cases_without_job":[]}
+       note     certified identity set 161 live cases; live now 161 (+0 post-baseline intake growth).
+PASS phase_a  a5_dangling_job_ids                no case, correction target or source link points at a missing job
        expected {"case_job":0,"target_job":0,"link_job":0}
        observed {"case_job":0,"target_job":0,"link_job":0}
-PASS phase_a  a7_captain_creation_roof_report  SWMS-261123 exists as a roof_report card with lineage to MLB-27309
+PASS phase_a  a7_captain_creation_roof_report    SWMS-261123 exists as a roof_report card with lineage to MLB-27309
        expected {"family":"roof_report","external_ref":"MLB-27309","requesting_company_slug":"mlb","case_state":"confirmed_live_job","identity_key":"wo:MLB-27309/po:PO-57445","case_sources_at_least":true,"work_orders_at_least":true}
        observed {"family":"roof_report","external_ref":"MLB-27309","requesting_company_slug":"mlb","case_state":"confirmed_live_job","identity_key":"wo:MLB-27309/po:PO-57445","case_sources_at_least":true,"work_orders_at_least":true}
-PASS phase_a  a8_captain_creation_historical_backfill  SWMS-261124 exists, displays archive and carries INV-0754
+PASS phase_a  a8_captain_creation_historical_backfill SWMS-261124 exists, displays archive and carries INV-0754
        expected {"family":"general_makesafe","external_ref":"BWCWA-6648","requesting_company_slug":"bw","display_after_status":"archive","invoice_rows":1,"corrections_at_least":true}
        observed {"family":"general_makesafe","external_ref":"BWCWA-6648","requesting_company_slug":"bw","display_after_status":"archive","invoice_rows":1,"corrections_at_least":true}
-PASS phase_b  b1_round1_fixture_integrity  the committed round-1 fixture still hashes to the value its apply ledger recorded
+PASS phase_b  b1_round1_fixture_integrity        the committed round-1 fixture still hashes to the value its apply ledger recorded
        expected {"fixture_sha256":"8c2d5e02c2d19de7d2c71014766a5e3a2a37afc36aca3f54f1b4adb4203970df","applied":194,"skipped":0}
        observed {"fixture_sha256":"8c2d5e02c2d19de7d2c71014766a5e3a2a37afc36aca3f54f1b4adb4203970df","applied":194,"skipped":0}
-PASS phase_b  b2_round2_fixture_integrity  the committed round-2 fixture set still hashes to the value its apply ledger recorded
+PASS phase_b  b2_round2_fixture_integrity        the committed round-2 fixture set still hashes to the value its apply ledger recorded
        expected {"matched":true,"field_applied":4,"field_skipped":7,"temp_fence_applied":56,"temp_fence_skipped":1,"link_applied":260,"link_skipped":29}
        observed {"matched":true,"field_applied":4,"field_skipped":7,"temp_fence_applied":56,"temp_fence_skipped":1,"link_applied":260,"link_skipped":29}
        note     hash variant matched: migration_trailing_newline
-PASS phase_b  b3_family_supersession  round 2's production decider superseded the round-1 family axis on exactly the recorded cards
+PASS phase_b  b3_family_supersession             round 2's production decider superseded the round-1 family axis on exactly the recorded cards
        expected 40
        observed 40
        note     FAMILY TRUTH RULE: the production decider on full post-drain inputs is authoritative; the superseded round-1 family values are recorded, not counted as mismatches.
-PASS phase_b  b4_board_field_diff  the live board matches the adjudicated verdict table advanced by the applied ledgers
+PASS phase_b  b4_board_field_diff                the live board matches the adjudicated verdict table advanced by the applied ledgers
        expected {"assertions":216,"mismatches":0}
        observed {"assertions":216,"mismatches":0}
-PASS phase_b  b5_documented_holds_untouched  every documented captain hold still carries its held value
+PASS phase_b  b5_documented_holds_untouched      every documented captain hold still carries its held value
        expected [{"card":"SWMS-26894","family":"general_makesafe"}]
        observed [{"card":"SWMS-26894","family":"general_makesafe"}]
-PASS phase_b  b6_source_job_links  every applied source-to-job link is live and no link exists beyond the ledger
+PASS phase_b  b6_source_job_links                every applied source-to-job link is live and no link exists beyond the ledger
        expected {"ledger_writes":260,"present":260,"table_rows":260}
        observed {"ledger_writes":260,"present":260,"table_rows":260}
        note     documented skips: {"scope_excluded_remint_supersession_captain_pile":17,"duplicate_fixture_same_binding":6,"job_external_ref_mismatch":5,"target_detail_not_found":1}
-PASS phase_b  b7_board_population  every adjudicated stray carries the make-safe detail row that puts it on the board
+PASS phase_b  b7_board_population                every adjudicated stray carries the make-safe detail row that puts it on the board
        expected [{"job_number":"SWMS-26931","external_ref":"MLB-24664","has_detail":true},{"job_number":"SWMS-26932","external_ref":"MLB-24465","has_detail":true},{"job_number":"SWMS-26936","external_ref":"MLB-MW-26873","has_detail":true},{"job_number":"SWMS-26978","external_ref":"MLB-24659PO-56155","has_detail":true}]
        observed [{"job_number":"SWMS-26931","external_ref":"MLB-24664","has_detail":true},{"job_number":"SWMS-26932","external_ref":"MLB-24465","has_detail":true},{"job_number":"SWMS-26936","external_ref":"MLB-MW-26873","has_detail":true},{"job_number":"SWMS-26978","external_ref":"MLB-24659PO-56155","has_detail":true}]
-PASS phase_b  b8_duplicate_survivor_pointers  the applied duplicate-survivor archives are exactly the adjudicated set
+PASS phase_b  b8_duplicate_survivor_pointers     the applied duplicate-survivor archives are exactly the adjudicated set
        expected [{"loser":"SWMS-261118","survivor":"SWMS-261065","run_key":"makesafe-duplicate-survivors-20260801-t1"},{"loser":"SWMS-26791","survivor":"SWMS-26787","run_key":"makesafe-duplicate-survivors-20260801-t2"},{"loser":"SWMS-26998","survivor":"SWMS-26736","run_key":"makesafe-duplicate-survivors-20260801-t1"}]
        observed [{"loser":"SWMS-261118","survivor":"SWMS-261065","run_key":"makesafe-duplicate-survivors-20260801-t1"},{"loser":"SWMS-26791","survivor":"SWMS-26787","run_key":"makesafe-duplicate-survivors-20260801-t2"},{"loser":"SWMS-26998","survivor":"SWMS-26736","run_key":"makesafe-duplicate-survivors-20260801-t1"}]
-PASS phase_b  b10_card_work_order_identity  no card carries a blank or absent work-order identity, outside named legacy exceptions
+PASS phase_b  b10_card_work_order_identity       no card carries a blank or absent work-order identity, outside named legacy exceptions
        expected {"board_population":437,"unexcepted_offenders":0,"named_exceptions":1,"stale_exceptions":0}
        observed {"board_population":437,"unexcepted_offenders":0,"named_exceptions":1,"stale_exceptions":0}
        note     named legacy exceptions: SWMS-26001 (swms-26001-work-order-identity)
-PASS phase_b  b9_survivors_not_stranded  no survivor is itself terminal or itself an archived duplicate
+PASS phase_b  b9_survivors_not_stranded          no survivor is itself terminal or itself an archived duplicate
        expected [{"job_number":"SWMS-261065","terminal":false,"pointers":0},{"job_number":"SWMS-26736","terminal":false,"pointers":0},{"job_number":"SWMS-26787","terminal":false,"pointers":0}]
        observed [{"job_number":"SWMS-261065","terminal":false,"pointers":0},{"job_number":"SWMS-26736","terminal":false,"pointers":0},{"job_number":"SWMS-26787","terminal":false,"pointers":0}]
-PASS droid    d1_merge_list_accounted  every work order production resolves to more than one card is adjudicated
-       expected {"groups":19,"historical":16,"drain_minted":3,"unaccounted":0,"stale_fixture_rows":0}
-       observed {"groups":19,"historical":16,"drain_minted":3,"unaccounted":0,"stale_fixture_rows":0}
-PASS droid    d2_merge_group_membership  each adjudicated group still has exactly the cards it was adjudicated with
+PASS droid    d1_merge_list_accounted            every work order production resolves to more than one card is adjudicated
+       expected {"groups":21,"historical":17,"drain_minted":4,"unaccounted":0,"stale_fixture_rows":0}
+       observed {"groups":21,"historical":17,"drain_minted":4,"unaccounted":0,"stale_fixture_rows":0}
+PASS droid    d2_merge_group_membership          each adjudicated group still has exactly the cards it was adjudicated with
        expected 0
        observed 0
-PASS droid    d3_dispositions_hold  production still matches every adjudicated disposition
-       expected {"failures":0,"counts":{"archived_duplicate_pointer":4,"adjudicated_not_duplicate":8,"captain_excluded":1,"open_hold":6}}
-       observed {"failures":0,"counts":{"archived_duplicate_pointer":4,"adjudicated_not_duplicate":8,"captain_excluded":1,"open_hold":6}}
-PASS droid    d4_drain_minted_duplicates  the drain-minted duplicate jobs are exactly the adjudicated three
-       expected ["SWMS-261059","SWMS-261078","SWMS-261118"]
-       observed ["SWMS-261059","SWMS-261078","SWMS-261118"]
+PASS droid    d3_dispositions_hold               production still matches every adjudicated disposition
+       expected {"failures":0,"counts":{"archived_duplicate_pointer":4,"adjudicated_not_duplicate":9,"captain_excluded":1,"open_hold":6,"captain_hold_live_pair":1}}
+       observed {"failures":0,"counts":{"archived_duplicate_pointer":4,"adjudicated_not_duplicate":9,"captain_excluded":1,"open_hold":6,"captain_hold_live_pair":1}}
+PASS droid    d4_drain_minted_duplicates         the drain-minted duplicate jobs are exactly the adjudicated set
+       expected ["SWMS-261059","SWMS-261078","SWMS-261081","SWMS-261118"]
+       observed ["SWMS-261059","SWMS-261078","SWMS-261081","SWMS-261118"]
 
 SES A/B certificate checker: 22/22 PASS (phase A 8/8, phase B 10/10, droid 4/4) — CERTIFIABLE
-wrote docs/evidence/ses-ab-certificate-2026-08-01.run.json
+```
+
+## Addendum — 2026-08-01, re-certified after the C3 work-order re-attachments
+
+The certificate above was re-proved and is green again. Between the original run
+and this one it went to **19/22**, and this addendum records why and what was
+decided. Nothing in the body above is retracted; this section supersedes the
+`d1`/`d3`/`d4` counts and the phase A census expectations it names.
+
+### What broke it
+
+The C3 work-order re-attachments (PRs 466/469/470) copied builder work-order
+PDFs onto cards that were missing them. Two of those attach targets landed on a
+work order an OLDER card already carried, so production began resolving two
+multi-card work-order identity groups that had never been adjudicated, and `d1`
+reported them `unaccounted`. Separately, ordinary intake promoted three
+exception-only identity keys to live jobs (`157 -> 160` live-job, `373 -> 370`
+exception-only, total unchanged at 534; live cases `158 -> 161`), which failed
+the then-pinned `a3`/`a4` census equality.
+
+Neither was a data defect. The re-attachments are correct and the census move is
+healthy growth.
+
+### The two groups, adjudicated
+
+**`MLB-26246PO-54129` -> `SWMS-26748`, `SWMS-26858` — `adjudicated_not_duplicate`.**
+The single PO-54129 work order declares TWO deliverables in its own text:
+`Notes/Instructions: Assessment Report & Quote`, plus `Notes: ... temp fence
+required`. Each card carries its own separately-priced invoice for a different
+one — `SWMS-26748` holds INV-0820 $786.50 referenced `MLB-26246 - Temp Fence
+Make-Safe` with two 2026-06-24 attendances, and `SWMS-26858` holds INV-0880
+$165.00 AUTHORISED (the assessment price) with the pack sent to the builder on
+2026-07-17 and the portal marked complete. The "one instruction" precondition
+for archiving a duplicate therefore fails, and both cards carry real billed
+work; archiving either would hide a separately invoiced deliverable, one of them
+AUTHORISED. Recorded as not-a-duplicate, no write applied.
+
+Noted in passing, and deliberately NOT fixed here: `SWMS-26748`'s
+`assessment_report_quote` family is a known mis-derivation. Its family was
+"corrected" on 2026-07-21 by reading the shared PDF's assessment line, and U4
+rejected the card on 2026-07-28 because that classification does not match the
+sealed builder-family matrix. It is really the temp-fence card. Repairing it is
+that card's own work.
+
+**`MLB-27100PO-56960` -> `SWMS-261057`, `SWMS-261081` — `captain_hold_live_pair`,
+decision key `duplicate-mlb-27100-po-56960-survivor`.**
+This one IS a single instruction: PO-56960 declares only `Roof Reports / Roof
+Report Request`, a two-storey roof report, and firstmate triage on 2026-07-28
+independently flagged the pair as one job from the same 2026-07-23 email. The
+survivor, however, is genuinely undecidable under the captain's standing
+survivor ruling:
+
+- The PO-bearing `external_ref` sits on `SWMS-261057` (`MLB-27100PO-56960`), but
+  `AGENTS.md` explicitly forbids deriving the survivor from the `external_ref`
+  string form — the `SWMS-261118` / `SWMS-261065` precedent went the other way.
+- The fallback limb, "the evidence-carrying worked card", does not separate them
+  either: neither card has an assignment, service report, media item or invoice.
+- The two discriminators that do exist point in OPPOSITE directions.
+  `SWMS-261057` holds the 2026-07-26 Hugo booking; `SWMS-261081` holds the
+  canonical `confirmed_live_job` intake case bearing
+  `wo:MLB-27100/po:PO-56960`, and the `roof_report` family that matches the PDF.
+- The two 2026-07-28 triage notes each name the OTHER card as the merge target.
+
+Both cards are live, so archiving the wrong one strands either a booked
+attendance or the case-bound identity. Per the task's own fallback clause this
+is held for a captain ruling rather than guessed. **The certificate is green
+because the group is ACCOUNTED, not because it is settled.**
+
+### How a hold can be accounted without going quiet
+
+`captain_hold_live_pair` is a new disposition, deliberately distinct from the
+existing `open_hold` rather than a widening of it. The existing rule — that an
+`open_hold` may not have more than one live card on one work order — is a real
+guard protecting the other six holds and is left strictly intact; this group
+would have violated it.
+
+The new disposition must name a decision key (the fixture parser refuses it
+otherwise), and the checker pins the exact shape it was recorded in: if a member
+goes terminal, or a duplicate pointer appears on either card, the hold no longer
+describes production and `d3` fails. A stale hold cannot silently absorb a real
+change — it forces re-adjudication.
+
+### The census checks now assert invariants, not counts
+
+`a3` and `a4` no longer pin the observed census. The recorded numbers are a
+certified identity manifests diffed by membership, and the checks assert what those numbers
+were protecting:
+
+- every identity key lands in exactly one of live-job / exception-only /
+  synthetic (`unaccounted: 0`, and the buckets must sum to the total);
+- no identity key or live case is destroyed (`keys_lost: 0`, no negative growth
+  from the floor) — keys are append-only, so a total BELOW the floor is a real
+  defect;
+- promotion runs exception -> live only (`live_job_regression: 0`);
+- the synthetic live-fire set stays closed;
+- a `confirmed_live_job` case always has its job (unchanged, still `0`).
+
+Growth above the floor is reported in the run note instead of failing the run,
+so healthy intake can never fail the certificate again. `evaluateCensusInvariants`
+is a pure function with unit tests that prove each invariant still catches the
+defect it protects. **Do not respond to a future `a3`/`a4` failure by re-pinning
+the numbers** — a count that moves DOWN is exactly what these checks exist to
+catch.
+
+### Superseded counts
+
+| | Original | This addendum |
+|---|---|---|
+| merge groups | 19 (16 historical / 3 drain-minted) | 21 (17 / 4) |
+| `adjudicated_not_duplicate` | 8 | 9 |
+| `captain_hold_live_pair` | — | 1 |
+| drain-minted duplicate jobs | 3 | 4 (adds `SWMS-261081`) |
+| unruled groups | 6 | 7 |
+
+`archived_duplicate_pointer` (4), `captain_excluded` (1) and `open_hold` (6) are
+unchanged. **No board write, status application or duplicate archive was applied
+by this work** — it is fixture, checker and documentation only.
+
+### Re-proved run — 22/22, CERTIFIABLE
+
+```text
+PASS phase_a  a1_sources_equal_case_rows         every physical SES source has exactly one canonical case-source row
+       expected {"emails":1499,"case_source_rows":1499,"distinct_source_post_ids":1499}
+       observed {"emails":1499,"case_source_rows":1499,"distinct_source_post_ids":1499}
+       note     emails == case_source_rows == distinct post ids
+PASS phase_a  a2_emails_without_case             no persisted SES email lacks a case-source row
+       expected 0
+       observed 0
+PASS phase_a  a3_identity_key_census             identity keys are fully accounted as live-job / exception-only / synthetic
+       expected {"unaccounted":0,"partition_complete":true,"keys_lost":0,"live_job_regression":0,"synthetic":4,"missing_certified_keys":[],"synthetic_identity_drift":[],"live_job_regression_keys":[]}
+       observed {"unaccounted":0,"partition_complete":true,"keys_lost":0,"live_job_regression":0,"synthetic":4,"missing_certified_keys":[],"synthetic_identity_drift":[],"live_job_regression_keys":[]}
+       note     census invariant, not a pinned count: certified floor 534 total / 160 live-job / 370 exception-only / 4 synthetic; live now 534 total (+0) / 160 live-job (+0) / 370 exception-only / 4 synthetic. Re-certification snapshot, 2026-08-01: certified identity manifests are diffed by membership. Every certified key and live case must remain present, live-job keys may not regress, exception-only keys may promote to live, the synthetic identity set is closed, and growth above the snapshot is reported rather than failed. Never trim or re-snapshot the manifest to make a failure green. The brief's pre-recovery census was 533 total / 156 live-job; the certified manifest is the current re-certification snapshot.
+PASS phase_a  a6_keys_with_two_live_jobs         no identity key carries two live case-bound jobs
+       expected 0
+       observed 0
+PASS phase_a  a4_live_case_without_job           no confirmed_live_job case is missing its job
+       expected {"live_case_without_job":0,"missing_certified_live_cases":[],"certified_live_cases_without_job":[]}
+       observed {"live_case_without_job":0,"missing_certified_live_cases":[],"certified_live_cases_without_job":[]}
+       note     certified identity set 161 live cases; live now 161 (+0 post-baseline intake growth).
+PASS phase_a  a5_dangling_job_ids                no case, correction target or source link points at a missing job
+       expected {"case_job":0,"target_job":0,"link_job":0}
+       observed {"case_job":0,"target_job":0,"link_job":0}
+PASS phase_a  a7_captain_creation_roof_report    SWMS-261123 exists as a roof_report card with lineage to MLB-27309
+       expected {"family":"roof_report","external_ref":"MLB-27309","requesting_company_slug":"mlb","case_state":"confirmed_live_job","identity_key":"wo:MLB-27309/po:PO-57445","case_sources_at_least":true,"work_orders_at_least":true}
+       observed {"family":"roof_report","external_ref":"MLB-27309","requesting_company_slug":"mlb","case_state":"confirmed_live_job","identity_key":"wo:MLB-27309/po:PO-57445","case_sources_at_least":true,"work_orders_at_least":true}
+PASS phase_a  a8_captain_creation_historical_backfill SWMS-261124 exists, displays archive and carries INV-0754
+       expected {"family":"general_makesafe","external_ref":"BWCWA-6648","requesting_company_slug":"bw","display_after_status":"archive","invoice_rows":1,"corrections_at_least":true}
+       observed {"family":"general_makesafe","external_ref":"BWCWA-6648","requesting_company_slug":"bw","display_after_status":"archive","invoice_rows":1,"corrections_at_least":true}
+PASS phase_b  b1_round1_fixture_integrity        the committed round-1 fixture still hashes to the value its apply ledger recorded
+       expected {"fixture_sha256":"8c2d5e02c2d19de7d2c71014766a5e3a2a37afc36aca3f54f1b4adb4203970df","applied":194,"skipped":0}
+       observed {"fixture_sha256":"8c2d5e02c2d19de7d2c71014766a5e3a2a37afc36aca3f54f1b4adb4203970df","applied":194,"skipped":0}
+PASS phase_b  b2_round2_fixture_integrity        the committed round-2 fixture set still hashes to the value its apply ledger recorded
+       expected {"matched":true,"field_applied":4,"field_skipped":7,"temp_fence_applied":56,"temp_fence_skipped":1,"link_applied":260,"link_skipped":29}
+       observed {"matched":true,"field_applied":4,"field_skipped":7,"temp_fence_applied":56,"temp_fence_skipped":1,"link_applied":260,"link_skipped":29}
+       note     hash variant matched: migration_trailing_newline
+PASS phase_b  b3_family_supersession             round 2's production decider superseded the round-1 family axis on exactly the recorded cards
+       expected 40
+       observed 40
+       note     FAMILY TRUTH RULE: the production decider on full post-drain inputs is authoritative; the superseded round-1 family values are recorded, not counted as mismatches.
+PASS phase_b  b4_board_field_diff                the live board matches the adjudicated verdict table advanced by the applied ledgers
+       expected {"assertions":216,"mismatches":0}
+       observed {"assertions":216,"mismatches":0}
+PASS phase_b  b5_documented_holds_untouched      every documented captain hold still carries its held value
+       expected [{"card":"SWMS-26894","family":"general_makesafe"}]
+       observed [{"card":"SWMS-26894","family":"general_makesafe"}]
+PASS phase_b  b6_source_job_links                every applied source-to-job link is live and no link exists beyond the ledger
+       expected {"ledger_writes":260,"present":260,"table_rows":260}
+       observed {"ledger_writes":260,"present":260,"table_rows":260}
+       note     documented skips: {"scope_excluded_remint_supersession_captain_pile":17,"duplicate_fixture_same_binding":6,"job_external_ref_mismatch":5,"target_detail_not_found":1}
+PASS phase_b  b7_board_population                every adjudicated stray carries the make-safe detail row that puts it on the board
+       expected [{"job_number":"SWMS-26931","external_ref":"MLB-24664","has_detail":true},{"job_number":"SWMS-26932","external_ref":"MLB-24465","has_detail":true},{"job_number":"SWMS-26936","external_ref":"MLB-MW-26873","has_detail":true},{"job_number":"SWMS-26978","external_ref":"MLB-24659PO-56155","has_detail":true}]
+       observed [{"job_number":"SWMS-26931","external_ref":"MLB-24664","has_detail":true},{"job_number":"SWMS-26932","external_ref":"MLB-24465","has_detail":true},{"job_number":"SWMS-26936","external_ref":"MLB-MW-26873","has_detail":true},{"job_number":"SWMS-26978","external_ref":"MLB-24659PO-56155","has_detail":true}]
+PASS phase_b  b8_duplicate_survivor_pointers     the applied duplicate-survivor archives are exactly the adjudicated set
+       expected [{"loser":"SWMS-261118","survivor":"SWMS-261065","run_key":"makesafe-duplicate-survivors-20260801-t1"},{"loser":"SWMS-26791","survivor":"SWMS-26787","run_key":"makesafe-duplicate-survivors-20260801-t2"},{"loser":"SWMS-26998","survivor":"SWMS-26736","run_key":"makesafe-duplicate-survivors-20260801-t1"}]
+       observed [{"loser":"SWMS-261118","survivor":"SWMS-261065","run_key":"makesafe-duplicate-survivors-20260801-t1"},{"loser":"SWMS-26791","survivor":"SWMS-26787","run_key":"makesafe-duplicate-survivors-20260801-t2"},{"loser":"SWMS-26998","survivor":"SWMS-26736","run_key":"makesafe-duplicate-survivors-20260801-t1"}]
+PASS phase_b  b10_card_work_order_identity       no card carries a blank or absent work-order identity, outside named legacy exceptions
+       expected {"board_population":437,"unexcepted_offenders":0,"named_exceptions":1,"stale_exceptions":0}
+       observed {"board_population":437,"unexcepted_offenders":0,"named_exceptions":1,"stale_exceptions":0}
+       note     named legacy exceptions: SWMS-26001 (swms-26001-work-order-identity)
+PASS phase_b  b9_survivors_not_stranded          no survivor is itself terminal or itself an archived duplicate
+       expected [{"job_number":"SWMS-261065","terminal":false,"pointers":0},{"job_number":"SWMS-26736","terminal":false,"pointers":0},{"job_number":"SWMS-26787","terminal":false,"pointers":0}]
+       observed [{"job_number":"SWMS-261065","terminal":false,"pointers":0},{"job_number":"SWMS-26736","terminal":false,"pointers":0},{"job_number":"SWMS-26787","terminal":false,"pointers":0}]
+PASS droid    d1_merge_list_accounted            every work order production resolves to more than one card is adjudicated
+       expected {"groups":21,"historical":17,"drain_minted":4,"unaccounted":0,"stale_fixture_rows":0}
+       observed {"groups":21,"historical":17,"drain_minted":4,"unaccounted":0,"stale_fixture_rows":0}
+PASS droid    d2_merge_group_membership          each adjudicated group still has exactly the cards it was adjudicated with
+       expected 0
+       observed 0
+PASS droid    d3_dispositions_hold               production still matches every adjudicated disposition
+       expected {"failures":0,"counts":{"archived_duplicate_pointer":4,"adjudicated_not_duplicate":9,"captain_excluded":1,"open_hold":6,"captain_hold_live_pair":1}}
+       observed {"failures":0,"counts":{"archived_duplicate_pointer":4,"adjudicated_not_duplicate":9,"captain_excluded":1,"open_hold":6,"captain_hold_live_pair":1}}
+PASS droid    d4_drain_minted_duplicates         the drain-minted duplicate jobs are exactly the adjudicated set
+       expected ["SWMS-261059","SWMS-261078","SWMS-261081","SWMS-261118"]
+       observed ["SWMS-261059","SWMS-261078","SWMS-261081","SWMS-261118"]
+
+SES A/B certificate checker: 22/22 PASS (phase A 8/8, phase B 10/10, droid 4/4) — CERTIFIABLE
 ```
