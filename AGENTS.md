@@ -642,6 +642,34 @@ cycle-scoping derivations, and reports `stage_source` rather than implying a
 stage. Contract, modelling decisions, transit heuristics and the verification
 baseline are in `docs/evidence/ses-evidence-ruler-c1-2026-08-01.md`.
 
+## Missing SES Work-Order PDFs Are Re-Attached, Never Re-Minted
+
+An SES card with no `work_order` `job_documents` row usually still has the
+builder PDF in the private `makesafe-emails` bucket. Recovering it is a
+COPY through the sanctioned ops-api `attach_email_attachment_to_job` action
+(which delegates to `attachMakesafeDocument`, so the typed row, the
+`job_id`+`type`+`file_name` idempotency key, trade visibility and the event
+ledger match every other attach). Keep the artifact's own file name so the
+forward intake path `ensureIntakeWorkOrderEvidence` collides with it instead of
+creating a twin, and never move, rename or delete the `email_attachments` row or
+its object.
+
+Only a case-bound, identity-verified artifact may be attached without human
+adjudication: reachable from the card's OWN `makesafe_intake_cases` →
+`makesafe_intake_case_sources.attachment_refs` chain AND with the card's own
+`builder_wo_canonical` digits in its extracted PDF text. A reference-digit,
+filename or subject match is not that — MLB issues several POs per claim, so
+those need per-card adjudication. Two candidates are one artifact only when they
+share a content group (`size_bytes` + extracted-text hash); two genuinely
+different work orders mean the card is left out, not guessed at.
+
+`builder_wo_doc` is not an input to `makesafe_computed_status.ts`, so a correct
+re-attach never moves a board stage — prove it, do not assume it, by bracketing
+the run with `scripts/ses-measure-card-evidence.ts`. The tranche-1 tooling,
+closed fixture, dry-run/apply/verify ledgers and the full production proof are
+`scripts/apply-ses-c3-wo-backfill-v1.ts` and
+`docs/evidence/ses-c3-wo-backfill-tranche1-2026-08-01.md`.
+
 ## The SES Money And Outbound Seal Is Write-Once
 
 The write-once SES money/outbound seal and its approved invoice-void release
