@@ -278,7 +278,7 @@ export interface MakesafeDuplicateSurvivorRow extends MakesafeStatusApplyRow {
  *
  * Anything short of all four keeps the original refusal.
  */
-function survivorArchiveIsNaturalCompletion(
+export function survivorArchiveIsNaturalCompletion(
   survivor: MakesafeDuplicateSurvivorRow,
 ): boolean {
   if (token(survivor?.canonical_stage) !== "archive") return false;
