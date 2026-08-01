@@ -2,6 +2,7 @@
 // REAL MLB "Work Order" text-layer layout (Policyholders Name / Policyholders
 // Contact / Site Address), captured from live WO PDFs, plus the failure shapes
 // that MUST return nothing so a draft stays manual.
+// deno-lint-ignore-file no-import-prefix
 import {
   assert,
   assertEquals,
@@ -41,6 +42,36 @@ Deno.test("item5: a clean MLB block yields name + mobile + address, unambiguous"
   assertEquals(r.fields.client_phone, "0422636182");
   assertEquals(r.fields.site_address, "8 Syrinx Pl, Mullaloo, WA 6027");
   assertEquals(r.found.sort(), ["client_name", "client_phone", "site_address"]);
+});
+
+// Exact client block from the extracted MLB-27309 work-order PDF. The strata
+// ownership entity is the client name even though it contains street and plan
+// numbers; rejecting every digit left this otherwise clean instruction in
+// adapter_parse_failure.
+const MLB_27309_BLOCK = `Work Order
+Work Order Assigned Secureworks Group Pty Ltd Work Order Number MLB-27309PO-57445
+Job Number MLB-27309 Date 30/07/2026
+Supervisor Name Supervisor Contact
+Admin Name SUPPORT MLB Office Contact 08 6263 0940
+Policyholders Name The Owners of 8-12 Princes Street Cottesloe Strata Plan 11624
+Policyholders Contact Mobile: 0412 385 056 Home: Email:
+Insurer Name Strata Community Insurance
+Site Address 12 Princes Street, Cottesloe, WA 6011
+Other Contact Details`;
+
+Deno.test("item5 MLB-27309: a labelled strata-owner entity is a valid client name", () => {
+  const result = extractClientFieldsFromPdfText(MLB_27309_BLOCK);
+
+  assert(result.unambiguous, `expected unambiguous; note=${result.note}`);
+  assertEquals(
+    result.fields.client_name,
+    "The Owners of 8-12 Princes Street Cottesloe Strata Plan 11624",
+  );
+  assertEquals(result.fields.client_phone, "0412385056");
+  assertEquals(
+    result.fields.site_address,
+    "12 Princes Street, Cottesloe, WA 6011",
+  );
 });
 
 Deno.test("item5: home-only phone (no mobile) is accepted as a landline", () => {

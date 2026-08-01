@@ -257,6 +257,70 @@ Contact the supervisor after attendance.`,
   );
 });
 
+Deno.test("MLB-27309 real Prime WO parses its strata owner and clears adapter_parse_failure", () => {
+  const postId = "mlb-27309-prime-wo";
+  const attachmentId = "mlb-27309-attachment";
+  const item = source({
+    postId,
+    fromEmail: "mlb.mailer@primeeco.tech",
+    subject: "NEW WORK ORDER - MLB-27309 12 Princes Street, Cottesloe, WA 6011",
+    body: "The work order is attached.",
+    attachments: [{
+      ...pdf(postId, attachmentId),
+      name: "work_order_MLB-27309PO-57445_Secureworks_Group_Pty_Ltd.pdf",
+    }],
+    pdfDocuments: [{
+      sourcePostId: postId,
+      attachmentId,
+      attachmentName:
+        "work_order_MLB-27309PO-57445_Secureworks_Group_Pty_Ltd.pdf",
+      status: "extracted",
+      text: `Work Order
+Work Order Assigned Secureworks Group Pty Ltd Work Order Number MLB-27309PO-57445
+Job Number MLB-27309 Date 30/07/2026
+Supervisor Name Supervisor Contact
+Admin Name SUPPORT MLB Office Contact 08 6263 0940
+Policyholders Name The Owners of 8-12 Princes Street Cottesloe Strata Plan 11624
+Policyholders Contact Mobile: 0412 385 056 Home: Email:
+Insurer Name Strata Community Insurance
+Site Address 12 Princes Street, Cottesloe, WA 6011
+Other Contact Details
+Allocation Work Order
+Roof Reports External
+DESCRIPTION:
+Please attend site and conduct a two storey roof report noting cause of damage and point of water entry.`,
+      charCount: 620,
+      pageCount: 2,
+      extractor: "unpdf@1.6.2",
+      truncated: false,
+      reason: null,
+    }],
+  });
+
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  const intakeCase = plan.cases[0];
+  assertEquals(plan.aiCalls, 0);
+  assertEquals(intakeCase.state, "confirmed_live_job");
+  assertEquals(intakeCase.reasonCode, null);
+  assertEquals(intakeCase.identity.externalRefCanonical, "MLB-27309");
+  assertEquals(intakeCase.identity.builderWoCanonical, "MLB-27309");
+  assertEquals(intakeCase.identity.builderPoCanonical, "PO-57445");
+  assertEquals(
+    intakeCase.identity.woPoIdentityKey,
+    "wo:MLB-27309/po:PO-57445",
+  );
+  assertEquals(
+    intakeCase.identity.clientName,
+    "The Owners of 8-12 Princes Street Cottesloe Strata Plan 11624",
+  );
+  assertEquals(
+    intakeCase.identity.siteAddress,
+    "12 Princes Street, Cottesloe",
+  );
+  assertEquals(intakeCase.identity.siteSuburb, "Cottesloe");
+  assertEquals(intakeCase.identity.jobFamily, "roof_report");
+});
+
 Deno.test("every known builder can source labelled customer fields from work-order PDF text", () => {
   const builders = [
     {
@@ -938,6 +1002,107 @@ Deno.test("postal PO Box footers never become purchase-order identity or cross-c
     new Set(plan.cases.map((item) => item.lineageClusterKey)).size,
     4,
   );
+});
+
+// Four production cases previously keyed as po:BOX absorbed unrelated MLB
+// instructions before the postal-address grammar was corrected. The exact
+// reference sets below come from those four durable case/source ledgers. A
+// shared historical correlation coordinate is deliberate: even inside one
+// already-bound component, each source's own distinct reference must retain its
+// own instruction rather than being swallowed by the component's first ref.
+const PO_BOX_ABSORBED_CASE_FIXTURES = [
+  {
+    caseId: "f4ae9cc3-d6bc-4e82-b302-419392a91c91",
+    refs: [
+      "MLB-24465",
+      "MLB-24664",
+      "MLB-25074",
+      "MLB-25769",
+      "MLB-25890",
+      "MLB-25902",
+      "MLB-26072",
+      "MLB-26119",
+      "MLB-26122",
+      "MLB-26195",
+      "MLB-26380",
+      "MLB-26499",
+      "MLB-26770",
+    ],
+  },
+  {
+    caseId: "2d9c80da-91dc-4e18-bd77-ef909f33a2e8",
+    refs: [
+      "MLB-24911",
+      "MLB-25881",
+      "MLB-26267",
+      "MLB-26336",
+      "MLB-26401",
+      "MLB-26533",
+      "MLB-26567",
+    ],
+  },
+  {
+    caseId: "1d9206af-94d5-4c46-b29c-8db52688d68d",
+    refs: [
+      "MLB-24363",
+      "MLB-24465",
+      "MLB-25147",
+      "MLB-26336",
+      "MLB-26360",
+      "MLB-26388",
+      "MLB-26401",
+      "MLB-26664",
+    ],
+  },
+  {
+    caseId: "5e537601-4918-4f23-b00a-fc0a3d7c2ebf",
+    refs: [
+      "MLB-24333",
+      "MLB-24465",
+      "MLB-24473",
+      "MLB-25284",
+      "MLB-26344",
+      "MLB-27065",
+    ],
+  },
+] as const;
+
+Deno.test("the four real po:BOX components never absorb a distinct source reference", () => {
+  for (const fixture of PO_BOX_ABSORBED_CASE_FIXTURES) {
+    // The current parser correctly refuses literal "PO Box" text. Reusing one
+    // valid PO here recreates the poisoned shared-key topology independently of
+    // that parser fix, so this test locks the downstream absorption boundary.
+    const sources = fixture.refs.map((ref, index) =>
+      source({
+        postId: `${fixture.caseId}:${ref}`,
+        threadId: `legacy-po-box:${fixture.caseId}`,
+        subject: `Our Ref: ${ref} - PO: 2143`,
+        body: index === 0
+          ? "Make safe works. Client: Reference Anchor\nAddress: 1 Anchor Way, Perth"
+          : `Client: ${ref} Client\nAddress: ${index + 1} Separate Way, Perth`,
+        attachments: [{
+          ...pdf(`${fixture.caseId}:${ref}`),
+          name: "Supporting report.pdf",
+        }],
+      })
+    );
+    const plan = buildDeterministicIntakePlan(sources, PROFILES);
+
+    assertEquals(
+      plan.cases.length,
+      fixture.refs.length,
+      `legacy case ${fixture.caseId} absorbed a distinct reference`,
+    );
+    for (const ref of fixture.refs) {
+      const postId = `${fixture.caseId}:${ref}`;
+      const intakeCase = plan.cases.find((item) =>
+        item.sourcePostIds.includes(postId)
+      );
+      assert(intakeCase, `${ref} did not retain its own instruction`);
+      assertEquals(intakeCase.identity.externalRefCanonical, ref);
+      assertEquals(intakeCase.sourcePostIds, [postId]);
+    }
+  }
 });
 
 Deno.test("equal numeric PO cannot merge different explicit claims without the same WO", () => {
