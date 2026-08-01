@@ -332,8 +332,9 @@ of the dry run and the apply. If its display state later changes so that either
 card returns to a live stage, the group is already adjudicated and can be applied
 then without re-litigating the survivor pick.
 
-The original apply set was three groups. After tranche 1, only
-`mlb-26189-assessment` remains pending, gated at one archive and zero skips.
+The original apply set was three groups. After tranche 1,
+`mlb-26189-assessment` was the remaining pending group, gated at one archive
+and zero skips; tranche 2's completed execution is recorded below.
 
 `SWMS-261065` (survivor, MLB-26344) also carries an `archive` overlay, but its
 `source_status` is `new` while the card now sits at `admin_to_send_report`, so
@@ -408,13 +409,9 @@ the planner. The RPC's stale-plan guard also still holds for the loser:
 `SWMS-26791` sends `source_status: report_ready` against its 2026-07-24 overlay
 row and `before_status: allocated`, which is that row's `after_status`.
 
-### Tranche 2 — pending
-
-`mlb-26189-assessment` needs this planner change deployed before it can be dry
-run again. It is therefore a separate tranche after this PR merges, gated the
-same way: one archive, zero skips, before `dry_run` goes false.
-
-MLB-23067 stays excluded and is not in either tranche.
+The following tranche-2 execution supersedes the pre-apply plan described in
+the earlier release notes. MLB-23067 stays excluded and is not in either
+tranche.
 
 ### Tranche 2 — applied
 
