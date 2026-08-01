@@ -134,10 +134,10 @@ Cheap detections implemented here (full transit forensics is C2's job):
 
 | Item | Lost-in-transit heuristic |
 | --- | --- |
-| `builder_wo_doc` | a typed `work_order` `job_documents` row with a blank `storage_url` |
+| `builder_wo_doc` | a typed `work_order` `job_documents` row exists but no qualifying row has a non-blank `storage_url` |
 | `photos_media` | a `job_media` row with a blank `storage_url`, or a submitted current-cycle service report with zero completion photos |
 | `trade_report` | a non-draft current-cycle service report that is not submitted/approved |
-| `swms` | the pack references a `swms_doc_id` with no typed document row |
+| `swms` | a qualifying typed/filename SWMS row exists but has no stored artifact, or the pack references a `swms_doc_id` with no qualifying document row |
 | `invoice` | the pack references an `invoice_doc_id` with no qualifying ledger invoice |
 
 ## 8. Evidence sourcing
@@ -147,6 +147,9 @@ from ops-api's own `makesafeDocBooleans`, cycle scoping from
 `makesafe_cycle_evidence.ts`, the completion-photo floor and the M1 stage from
 `makesafe_computed_status.ts`, and PO recovery from
 `makesafe_builder_work_order_identity.ts`.
+Document evidence deliberately adds a non-blank `storage_url` requirement on
+top of ops-api's `makesafeDocBooleans`; the production close-out gate remains
+unchanged while this ruler measures lost-in-transit evidence.
 
 One measurement decision the ruler itself does not make: `invoice` presence is
 stage-aware in the entrypoint. At `new`..`report_ready` any live ACCREC invoice

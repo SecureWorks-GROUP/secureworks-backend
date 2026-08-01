@@ -108,6 +108,22 @@ function truthy(value: unknown): boolean {
   return token === "true" || token === "t" || token === "1";
 }
 
+function hasStoredDocument(
+  documents: MeasureDocumentRow[],
+  kind: "work_order" | "swms" | "roof_report",
+): boolean {
+  return documents.some((row) => {
+    if (!text(row.storage_url)) return false;
+    const type = text(row.type).toLowerCase();
+    if (type === kind) return true;
+    if (kind === "work_order" || (type !== "" && type !== "general")) {
+      return false;
+    }
+    const name = text(row.file_name).toLowerCase();
+    return kind === "swms" && /swms(?![-\s]?\d)/i.test(name);
+  });
+}
+
 export interface MeasureDocumentRow {
   id?: string | null;
   type?: string | null;
@@ -362,9 +378,9 @@ export function buildSesCardEvidenceInventory(
   );
   const mediaWithoutArtifact =
     input.media.filter((row) => !text(row.storage_url)).length;
-  const docsWithoutArtifact = input.documents.filter((row) =>
-    !text(row.storage_url)
-  );
+  const storedWorkOrder = hasStoredDocument(input.documents, "work_order");
+  const storedSwms = hasStoredDocument(input.documents, "swms");
+  const storedRoofPdf = hasStoredDocument(input.documents, "roof_report");
   const packs = livePackRows(input.packs);
   const pack = packs[0] || null;
   const packSent = packs.some((row) =>
@@ -434,11 +450,8 @@ export function buildSesCardEvidenceInventory(
     ? !!invoice && ISSUED_INVOICE_STATUSES.has(invoiceStatus)
     : !!invoice;
 
-  const roofPdf = input.documents.some((row) =>
-    text(row.type).toLowerCase() === "roof_report"
-  );
   const tradeReportPresent = family === "own_template_roof"
-    ? roofPdf
+    ? storedRoofPdf
     : reportSubmitted;
   const photosPresent = family === "assessment_quote"
     ? doneCaptureRoles(detail).has("photos")
@@ -452,13 +465,12 @@ export function buildSesCardEvidenceInventory(
   const inventory: SesCardEvidenceInventory = {
     ...emptySesCardEvidenceInventory(),
     builder_wo_doc: {
-      present: input.docFlags.has_wo,
-      transit_record_without_artifact: !input.docFlags.has_wo &&
-        docsWithoutArtifact.some((row) =>
-          text(row.type).toLowerCase() === "work_order"
-        ),
+      present: input.docFlags.has_wo && storedWorkOrder,
+      transit_record_without_artifact: input.docFlags.has_wo && !storedWorkOrder,
       detail: input.docFlags.has_wo
-        ? "typed work_order job_documents row"
+        ? storedWorkOrder
+          ? "typed work_order job_documents row with stored artifact"
+          : "document row exists with no stored artifact"
         : "no typed work_order job_documents row",
     },
     prime_link: prime,
@@ -467,7 +479,7 @@ export function buildSesCardEvidenceInventory(
       count: input.serviceReports.length,
       transit_record_without_artifact: !tradeReportPresent && !!currentReport,
       detail: family === "own_template_roof"
-        ? (roofPdf
+        ? (storedRoofPdf
           ? "typed roof_report document"
           : "no typed roof_report document")
         : currentReport
@@ -491,11 +503,14 @@ export function buildSesCardEvidenceInventory(
         : `${photoCount} current-cycle completion photos (floor ${MAKESAFE_COMPLETION_PHOTO_FLOOR}); ${input.media.length} media rows, ${mediaWithoutArtifact} without a stored artifact`,
     },
     swms: {
-      present: input.docFlags.has_swms_doc || !!pack?.swms_doc_id,
-      transit_record_without_artifact: !input.docFlags.has_swms_doc &&
+      present: (input.docFlags.has_swms_doc && storedSwms) ||
         !!pack?.swms_doc_id,
+      transit_record_without_artifact: (input.docFlags.has_swms_doc &&
+        !storedSwms) || (!input.docFlags.has_swms_doc && !!pack?.swms_doc_id),
       detail: input.docFlags.has_swms_doc
-        ? "typed swms document"
+        ? storedSwms
+          ? "typed swms document with stored artifact"
+          : "document row exists with no stored artifact"
         : pack?.swms_doc_id
         ? "pack references a SWMS doc id with no typed document row"
         : "no SWMS artifact; the policy decision is not stored as evidence",

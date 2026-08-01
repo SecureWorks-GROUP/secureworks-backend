@@ -132,6 +132,7 @@ Deno.test("a media row with no stored artifact reads as lost in transit", () => 
 
 Deno.test("a work-order row with no stored artifact is distinguished from none at all", () => {
   const lost = buildSesCardEvidenceInventory(card({
+    docFlags: { ...NO_DOCS, has_wo: true },
     documents: [{ type: "work_order", storage_url: "" }],
     stageOverride: "new",
   }));
@@ -141,6 +142,20 @@ Deno.test("a work-order row with no stored artifact is distinguished from none a
   const absent = buildSesCardEvidenceInventory(card({ stageOverride: "new" }));
   assertEquals(itemOf(absent, "builder_wo_doc").status, "missing");
   assertEquals(itemOf(absent, "builder_wo_doc").signal, "none");
+});
+
+Deno.test("a SWMS row with no stored artifact is distinguished from none at all", () => {
+  const result = buildSesCardEvidenceInventory(card({
+    docFlags: { ...NO_DOCS, has_swms_doc: true },
+    documents: [{ type: "swms", storage_url: "" }],
+    stageOverride: "report_ready",
+  }));
+  assertEquals(itemOf(result, "swms").status, "missing");
+  assertEquals(itemOf(result, "swms").signal, "lost_in_transit");
+  assertStringIncludes(
+    itemOf(result, "swms").detail || "",
+    "no stored artifact",
+  );
 });
 
 Deno.test("an ordinary roof card needs a typed link plus a done capture", () => {
