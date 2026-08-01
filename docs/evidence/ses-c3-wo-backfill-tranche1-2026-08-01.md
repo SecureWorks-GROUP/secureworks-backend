@@ -51,7 +51,7 @@ and both sub-cases were settled on content, not on filename:
 - **SWMS-261079, SWMS-261081, SWMS-261113, SWMS-261114, SWMS-261116** — the two
   rows are **sha256-identical** (same name, same size, two transport rows: the
   Graph group post and its mailbox twin). One content hash is one artifact, per
-  the duplicate-transport dedupe invariant in `CLAUDE.md`.
+  the duplicate-transport dedupe invariant in `AGENTS.md`.
 - **AJBR 66933** — two rows with different sha256 but identical byte size
   (337,178) and **identical extracted PDF text** (same md5, 3,079 chars) from two
   different source emails. Same document, re-delivered; the bytes differ only in

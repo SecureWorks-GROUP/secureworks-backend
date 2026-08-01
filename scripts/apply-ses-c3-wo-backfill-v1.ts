@@ -781,7 +781,6 @@ async function runDryRun(
   outputPath: string,
   overwrite: boolean,
 ): Promise<void> {
-  const states = await loadCardStates(rows);
   const plan = rows.map((row) => {
     const state = states.get(row.card)!;
     const verdict = evaluateEligibility(row, state);
@@ -850,7 +849,6 @@ async function runApply(
       resumeByCard.set(String(entry.card), entry);
     }
   }
-  const states = await loadCardStates(rows);
   const ledger: any[] = [];
   let applied = 0;
   let skipped = 0;
