@@ -7,6 +7,7 @@ import {
 import {
   type CardState,
   evaluateEligibility,
+  authorizeResumeStamp,
   type FixtureRow,
   parseFixture,
   parseMode,
@@ -210,6 +211,47 @@ Deno.test("a card whose state moved since the dry run is skipped, not forced", (
   );
   assertEquals(drifted.matches, false);
   assertEquals(drifted.drifted.sort(), ["job_status", "work_order_docs"]);
+});
+
+Deno.test("resume stamping requires the ledger-identified exact document", () => {
+  const entry = {
+    card: sampleRow.card,
+    document_id: "44444444-4444-4444-4444-444444444444",
+    file_name: sampleRow.fileName,
+    storage_url: "https://example.test/job-documents/doc.pdf",
+  };
+  const live = {
+    id: entry.document_id,
+    job_id: sampleRow.jobId,
+    type: "work_order",
+    run_label: null,
+    file_name: entry.file_name,
+    storage_url: entry.storage_url,
+  };
+  assertEquals(authorizeResumeStamp(entry, sampleRow, live), {
+    authorized: true,
+    documentId: entry.document_id,
+  });
+  assertEquals(
+    authorizeResumeStamp(entry, sampleRow, { ...live, file_name: "Other.pdf" }),
+    { authorized: false, reason: "resume_document_file_name_mismatch" },
+  );
+  assertEquals(
+    authorizeResumeStamp(entry, sampleRow, { ...live, storage_url: "other" }),
+    { authorized: false, reason: "resume_document_storage_url_mismatch" },
+  );
+  assertEquals(
+    authorizeResumeStamp(null, sampleRow, live),
+    { authorized: false, reason: "resume_document_not_named" },
+  );
+  assertEquals(
+    authorizeResumeStamp(entry, sampleRow, { ...live, run_label: RUN_LABEL }),
+    { authorized: false, reason: "resume_document_already_stamped" },
+  );
+  assertEquals(
+    authorizeResumeStamp(entry, sampleRow, { ...live, job_id: "55555555-5555-5555-5555-555555555555" }),
+    { authorized: false, reason: "resume_document_job_mismatch" },
+  );
 });
 
 Deno.test("mode parsing defaults to dry-run and refuses anything unknown", () => {

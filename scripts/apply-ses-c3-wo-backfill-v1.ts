@@ -101,6 +101,45 @@ export interface EligibilityVerdict {
   reason: string | null;
 }
 
+export interface ResumeDocumentRow {
+  id: string;
+  job_id: string;
+  type: string;
+  run_label: string | null;
+  file_name: string;
+  storage_url: string;
+}
+
+export function authorizeResumeStamp(
+  entry: any,
+  row: FixtureRow,
+  live: ResumeDocumentRow | null,
+): { authorized: true; documentId: string } | { authorized: false; reason: string } {
+  if (!entry || typeof entry.document_id !== "string") {
+    return { authorized: false, reason: "resume_document_not_named" };
+  }
+  if (!live) return { authorized: false, reason: "resume_document_missing" };
+  if (live.id !== entry.document_id) {
+    return { authorized: false, reason: "resume_document_id_mismatch" };
+  }
+  if (live.job_id !== row.jobId) {
+    return { authorized: false, reason: "resume_document_job_mismatch" };
+  }
+  if (live.type !== DOCUMENT_TYPE) {
+    return { authorized: false, reason: "resume_document_type_mismatch" };
+  }
+  if (live.run_label !== null) {
+    return { authorized: false, reason: "resume_document_already_stamped" };
+  }
+  if (live.file_name !== entry.file_name) {
+    return { authorized: false, reason: "resume_document_file_name_mismatch" };
+  }
+  if (live.storage_url !== entry.storage_url) {
+    return { authorized: false, reason: "resume_document_storage_url_mismatch" };
+  }
+  return { authorized: true, documentId: live.id };
+}
+
 /** Parse the closed fixture. Comment and blank lines are ignored. */
 export function parseFixture(text: string): FixtureRow[] {
   const rows: FixtureRow[] = [];
@@ -512,22 +551,25 @@ async function resumeDocumentId(
   const documentId = typeof entry?.document_id === "string"
     ? entry.document_id
     : null;
-  const storageUrl = typeof entry?.storage_url === "string"
-    ? entry.storage_url
-    : null;
-  if (!documentId || !storageUrl) return null;
+  if (!documentId) return null;
   const data = await managementQuery(`
-select id::text as id
+select id::text as id, job_id::text as job_id, type, run_label,
+       file_name, storage_url
 from public.job_documents
 where id = ${sqlText(documentId)}::uuid
-  and job_id = ${sqlText(row.jobId)}::uuid
-  and type = ${sqlText(DOCUMENT_TYPE)}
-  and file_name = ${sqlText(row.fileName)}
-  and storage_url = ${sqlText(storageUrl)}
-  and run_label is null;`, { readOnly: true });
-  return data.length === 1 && String(data[0]?.id) === documentId
-    ? documentId
+;`, { readOnly: true });
+  const live = data.length === 1
+    ? {
+      id: String(data[0].id),
+      job_id: String(data[0].job_id),
+      type: String(data[0].type),
+      run_label: data[0].run_label ?? null,
+      file_name: String(data[0].file_name),
+      storage_url: String(data[0].storage_url),
+    }
     : null;
+  const verdict = authorizeResumeStamp(entry, row, live);
+  return verdict.authorized ? verdict.documentId : null;
 }
 
 /**
