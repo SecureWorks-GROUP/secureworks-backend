@@ -1,7 +1,7 @@
 # board-duplicate-survivors-v1
 
-Adjudication and planned dry run for the captain's duplicate-survivor ruling
-(2026-08-01). Full reasoning, per-group evidence and the five skips are in
+Adjudication fixture for the captain's duplicate-survivor ruling (2026-08-01).
+Full reasoning, execution records and per-group evidence are in
 `docs/evidence/makesafe-duplicate-survivors-2026-08-01.md`.
 
 ## `dry-run-plan.json`
@@ -23,12 +23,11 @@ and is not a stored column, so it was reproduced from `_deriveMakesafeBoardStage
 against each card's live status, substatus, assignment, invoice and document
 facts rather than read back from a live endpoint.
 
-No production write has been made and no live `ops-api` dry run has been run:
-the migration is not applied yet, and `ops-api` may only be deployed from the
-authorized release worktree. The authoritative dry run is step 3 of the release
-sequence in the evidence doc, and its response — not this file — is what gates
-the live apply. If that dry run reports a different `before_status`, the planner
-is reading live truth and this file is the stale one.
+This is historical fixture data, not an apply plan. The migration and matching
+`ops-api` are live. Tranche 1 applied the two clean groups, with its dry run,
+apply ledger and verification recorded under `scripts/`. The
+`mlb-26189-assessment` group remains pending a post-deploy one-archive,
+zero-skip dry run. The evidence document is authoritative for current status.
 
 ## This file is superseded — read it as fixture data, not as the plan
 
@@ -43,7 +42,7 @@ Two things landed after it was written, both in
   correctly refusing. The row for `SWMS-26920` above is therefore **not** part of
   the apply set.
 
-The apply set is the three groups `mlb-25625-roof`, `mlb-26189-assessment` and
-`mlb-26344-makesafe`, gated on three archives and zero skips. The live dry-run
-and apply responses are recorded separately under `scripts/` in the apply-ledger
-PR, following the `board-safe-fixes-v1` pattern.
+The original three-group apply set was rescoped after the first live dry run:
+`mlb-25625-roof` and `mlb-26344-makesafe` formed tranche 1, while
+`mlb-26189-assessment` is tranche 2 pending the planner deployment. The
+`mlb-23067-makesafe` entry remains adjudicated but excluded by group key.

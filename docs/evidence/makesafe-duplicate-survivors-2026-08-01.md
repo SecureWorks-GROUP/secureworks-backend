@@ -227,9 +227,9 @@ Migration first, per `docs/project-knowledge/EDGE_DEPLOY_LANE.md`:
 > the reviewed file (`sha256 85f12ef63136c998bdff2afcfd38ca6e1d73da908f4aaae1e5a7215557a6ebc5`);
 > only the version changed. Steps 1 and 2 therefore both run from the merge of
 > the renumbered branch to `main`.
-3. Dry run — the default — scoped to the three groups still in the apply set
-   (see the MLB-23067 exclusion below), and confirm **three** archives and zero
-   skips:
+3. The completed release sequence is recorded in the execution record below.
+   Any future tranche must use a fresh dry run and confirm its exact archive
+   count with zero skips:
 
    ```bash
    curl --fail-with-body -sS -H "x-api-key: ${SW_API_KEY}" \
@@ -239,21 +239,24 @@ Migration first, per `docs/project-knowledge/EDGE_DEPLOY_LANE.md`:
               "mlb-26189-assessment", "mlb-26344-makesafe"]}'
    ```
 
-4. Only then, with the captain's confirmation of the picks:
+4. Only then, with the captain's confirmation of the picks, apply the selected
+   tranche:
 
    ```json
    {
      "dry_run": false,
      "group_keys": ["mlb-25625-roof", "mlb-26189-assessment",
                     "mlb-26344-makesafe"],
-     "run_key": "makesafe-duplicate-survivors-20260801",
+     "run_key": "makesafe-duplicate-survivors-20260801-tN",
      "applied_by": "captain-approved-duplicate-survivors",
      "evidence_ref": "docs/evidence/makesafe-duplicate-survivors-2026-08-01.md"
    }
    ```
 
-Any skipped group, any count mismatch, or any stranded survivor in the response
-is a hard stop.
+The original three-group command above is historical command shape only. It was
+rescoped after the first dry run; tranche 1 is already applied, and tranche 2
+must be gated separately as documented below. Any skipped group, count mismatch,
+or stranded survivor is a hard stop.
 
 `group_keys` scopes the planner for the dry run and the live apply alike, and a
 live apply refuses without it. Excluding a group is therefore a parameter
@@ -272,9 +275,8 @@ pairs, MLB-25625, MLB-26189 and MLB-26344 included.** The four survivors recorde
 above are therefore authorized.
 
 That confirmation covers the *survivor selection* only. The post-deploy dry run
-(step 3 of the release sequence) still gates the live apply: it must report THREE
-archives and zero skips against the THREE group keys (`mlb-25625-roof`,
-`mlb-26189-assessment`, `mlb-26344-makesafe`) before `dry_run` is set to false.
+still gates each live apply: it must report the exact expected archive count and
+zero skips for that tranche before `dry_run` is set to false.
 See **Captain ruling 2026-08-01 — MLB-23067 is excluded from the apply set** below
 for why.
 
@@ -330,9 +332,8 @@ of the dry run and the apply. If its display state later changes so that either
 card returns to a live stage, the group is already adjudicated and can be applied
 then without re-litigating the survivor pick.
 
-The apply set is therefore **three** groups: `mlb-25625-roof`,
-`mlb-26189-assessment`, `mlb-26344-makesafe`. The gate is three archives and zero
-skips.
+The original apply set was three groups. After tranche 1, only
+`mlb-26189-assessment` remains pending, gated at one archive and zero skips.
 
 `SWMS-261065` (survivor, MLB-26344) also carries an `archive` overlay, but its
 `source_status` is `new` while the card now sits at `admin_to_send_report`, so
