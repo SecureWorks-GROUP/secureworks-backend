@@ -1,0 +1,94 @@
+{
+  "verified_at": "2026-08-01T05:32:00Z",
+  "run_key": "makesafe-duplicate-survivors-20260801-t1",
+  "method": "read-only SQL against production, independent of the action's own post-apply re-read",
+  "ledger": {
+    "duplicate_rows_total": 2,
+    "rows": [
+      {
+        "id": 45,
+        "job_number": "SWMS-26998",
+        "source_status": "allocated",
+        "before_status": "allocated",
+        "after_status": "archive",
+        "duplicate_of_job_number": "SWMS-26736",
+        "duplicate_rule": "activity_evidence",
+        "group_key": "mlb-25625-roof",
+        "applied_by": "captain-approved-duplicate-survivors",
+        "evidence_ref": "docs/evidence/makesafe-duplicate-survivors-2026-08-01.md",
+        "applied_at": "2026-08-01T05:30:15.785036+00:00"
+      },
+      {
+        "id": 46,
+        "job_number": "SWMS-261118",
+        "source_status": "new",
+        "before_status": "new",
+        "after_status": "archive",
+        "duplicate_of_job_number": "SWMS-261065",
+        "duplicate_rule": "activity_evidence",
+        "group_key": "mlb-26344-makesafe",
+        "applied_by": "captain-approved-duplicate-survivors",
+        "evidence_ref": "docs/evidence/makesafe-duplicate-survivors-2026-08-01.md",
+        "applied_at": "2026-08-01T05:30:15.785036+00:00"
+      }
+    ]
+  },
+  "cards": [
+    {
+      "job_number": "SWMS-26998",
+      "role": "loser",
+      "job_status": "processing",
+      "substatus": "company_contact_required",
+      "jobs_updated_at": "2026-07-27T13:39:58.059427+00:00",
+      "ledger_rows": 2,
+      "duplicate_rows": 1,
+      "assignments": 1,
+      "invoices": 0,
+      "job_events_since_apply": 0
+    },
+    {
+      "job_number": "SWMS-26736",
+      "role": "survivor",
+      "job_status": "processing",
+      "substatus": "ready_to_invoice",
+      "jobs_updated_at": "2026-07-27T13:39:58.059427+00:00",
+      "ledger_rows": 0,
+      "duplicate_rows": 0,
+      "assignments": 4,
+      "invoices": 1,
+      "job_events_since_apply": 0
+    },
+    {
+      "job_number": "SWMS-261118",
+      "role": "loser",
+      "job_status": "accepted",
+      "substatus": "company_contact_required",
+      "jobs_updated_at": "2026-07-31T06:52:07.276195+00:00",
+      "ledger_rows": 1,
+      "duplicate_rows": 1,
+      "assignments": 0,
+      "invoices": 0,
+      "job_events_since_apply": 0
+    },
+    {
+      "job_number": "SWMS-261065",
+      "role": "survivor",
+      "job_status": "accepted",
+      "substatus": "admin_to_send_report",
+      "jobs_updated_at": "2026-07-27T13:39:58.059427+00:00",
+      "ledger_rows": 1,
+      "duplicate_rows": 0,
+      "assignments": 1,
+      "invoices": 0,
+      "job_events_since_apply": 0
+    }
+  ],
+  "assertions": {
+    "losers_archived_with_pointer": "PASS - both losers carry exactly one duplicate row pointing at their survivor",
+    "survivors_untouched_and_live": "PASS - both survivors carry zero duplicate rows and remain non-terminal (processing / accepted)",
+    "raw_job_rows_unwritten": "PASS - every jobs.updated_at predates the apply (2026-07-27 / 2026-07-31)",
+    "no_operational_writes": "PASS - assignment and invoice counts unchanged from the pre-apply snapshot",
+    "no_communications": "PASS - zero job_events on any of the four cards since the apply",
+    "stranded_survivors": "PASS - the action's own post-apply board re-read returned an empty stranded_survivors list"
+  }
+}
