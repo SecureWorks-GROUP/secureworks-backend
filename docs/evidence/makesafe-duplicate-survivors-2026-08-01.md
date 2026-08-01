@@ -242,11 +242,18 @@ Migration first, per `docs/project-knowledge/EDGE_DEPLOY_LANE.md`:
 Any skipped group, any count mismatch, or any stranded survivor in the response
 is a hard stop.
 
-## Open for the captain
+## Delegation scope — confirmed 2026-08-01
 
-The ruling authorized the PO rule for seven groups and an evidence pick for two.
-Re-verification found the PO rule decides none, five groups are not duplicates,
-and four pairs need an evidence pick. The four picks above are recorded and
-one-sided, but three of them (MLB-25625, MLB-26189, MLB-26344) were nominated for
-the PO rule rather than delegated, so the live run should carry explicit
-confirmation that the delegation extends to them.
+The original ruling authorized the PO rule for seven groups and an evidence pick
+for two. Re-verification found the PO rule decides none, five groups are not
+duplicates, and four pairs need an evidence pick — three of which (MLB-25625,
+MLB-26189, MLB-26344) had been nominated for the PO rule rather than delegated.
+
+**The captain has confirmed the evidence-pick delegation extends to all four
+pairs, MLB-25625, MLB-26189 and MLB-26344 included.** The four survivors recorded
+above are therefore authorized.
+
+That confirmation covers the *survivor selection* only. The post-deploy dry run
+(step 3 of the release sequence) still gates the live apply: it must report four
+archives and zero skips, against the same four group keys, before `dry_run` is
+set to false.

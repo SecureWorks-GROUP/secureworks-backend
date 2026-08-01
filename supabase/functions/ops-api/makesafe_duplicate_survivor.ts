@@ -100,7 +100,9 @@ function upper(value: unknown): string {
  *
  * In all four surviving groups both cards carry the identical builder PO, so
  * the captain's "card carrying the builder PO survives" test does not
- * discriminate; each pick is therefore an activity_evidence pick.
+ * discriminate; each pick is therefore an activity_evidence pick. The captain
+ * confirmed on 2026-08-01 that the evidence-pick delegation covers all four
+ * pairs, including the three originally nominated for the PO rule.
  */
 export const MAKESAFE_AUTHORIZED_DUPLICATE_GROUPS:
   readonly MakesafeDuplicateGroup[] = [
