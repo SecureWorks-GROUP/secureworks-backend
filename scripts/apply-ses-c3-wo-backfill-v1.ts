@@ -119,6 +119,9 @@ export function authorizeResumeStamp(
     return { authorized: false, reason: "resume_no_prior_ledger_entry" };
   }
   if (!live) return { authorized: false, reason: "resume_document_row_missing" };
+  if (live.id !== entry.document_id) {
+    return { authorized: false, reason: "resume_document_id_mismatch" };
+  }
   if (live.job_id !== row.jobId) {
     return { authorized: false, reason: "resume_document_wrong_job" };
   }

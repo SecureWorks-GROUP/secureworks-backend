@@ -253,6 +253,10 @@ Deno.test("resume stamping requires the ledger-identified exact document", () =>
     { authorized: false, reason: "resume_document_wrong_job" },
   );
   assertEquals(
+    authorizeResumeStamp(entry, sampleRow, { ...live, id: "66666666-6666-6666-6666-666666666666" }),
+    { authorized: false, reason: "resume_document_id_mismatch" },
+  );
+  assertEquals(
     authorizeResumeStamp(entry, sampleRow, null),
     { authorized: false, reason: "resume_document_row_missing" },
   );
