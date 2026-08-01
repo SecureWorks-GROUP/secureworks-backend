@@ -5,32 +5,38 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  authorizeAttachedDocumentStamp,
+  authorizeResumeStamp,
   type CardState,
   evaluateEligibility,
-  authorizeResumeStamp,
-  authorizeAttachedDocumentStamp,
-  verifyLedgerDocumentOutcome,
   type FixtureRow,
   parseFixture,
   parseMode,
   PROVENANCE_NOTE,
   RUN_LABEL,
   stateMatchesBaseline,
+  verifyLedgerDocumentOutcome,
 } from "../apply-ses-c3-wo-backfill-v1.ts";
 
 Deno.test("attach stamping requires version-one creation ownership", () => {
   const attached = { documentId: "doc-1" };
-  assertEquals(authorizeAttachedDocumentStamp(attached, {
-    document_id: "doc-1",
-    version: 1,
-  }), { authorized: true, documentId: "doc-1" });
-  assertEquals(authorizeAttachedDocumentStamp(attached, {
-    document_id: "doc-1",
-    version: 2,
-  }), {
-    authorized: false,
-    reason: "attach_updated_preexisting_document:doc-1:version=2",
-  });
+  assertEquals(
+    authorizeAttachedDocumentStamp(attached, {
+      document_id: "doc-1",
+      version: 1,
+    }),
+    { authorized: true, documentId: "doc-1" },
+  );
+  assertEquals(
+    authorizeAttachedDocumentStamp(attached, {
+      document_id: "doc-1",
+      version: 2,
+    }),
+    {
+      authorized: false,
+      reason: "attach_updated_preexisting_document:doc-1:version=2",
+    },
+  );
 });
 
 Deno.test("verify keeps pre-existing updates as adjudication failures", () => {
@@ -40,7 +46,10 @@ Deno.test("verify keeps pre-existing updates as adjudication failures", () => {
     document_id: "doc-1",
     observed_version: 2,
   });
-  assertEquals(problem, "attach_updated_preexisting_document_needs_adjudication:doc-1:version=2");
+  assertEquals(
+    problem,
+    "attach_updated_preexisting_document_needs_adjudication:doc-1:version=2",
+  );
   assertEquals(verifyLedgerDocumentOutcome({ outcome: "skipped" }), null);
 });
 
@@ -277,11 +286,17 @@ Deno.test("resume stamping requires the ledger-identified exact document", () =>
     { authorized: false, reason: "resume_document_already_stamped" },
   );
   assertEquals(
-    authorizeResumeStamp(entry, sampleRow, { ...live, job_id: "55555555-5555-5555-5555-555555555555" }),
+    authorizeResumeStamp(entry, sampleRow, {
+      ...live,
+      job_id: "55555555-5555-5555-5555-555555555555",
+    }),
     { authorized: false, reason: "resume_document_wrong_job" },
   );
   assertEquals(
-    authorizeResumeStamp(entry, sampleRow, { ...live, id: "66666666-6666-6666-6666-666666666666" }),
+    authorizeResumeStamp(entry, sampleRow, {
+      ...live,
+      id: "66666666-6666-6666-6666-666666666666",
+    }),
     { authorized: false, reason: "resume_document_id_mismatch" },
   );
   assertEquals(

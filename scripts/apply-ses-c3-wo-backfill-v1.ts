@@ -113,14 +113,20 @@ export interface ResumeDocumentRow {
 export function authorizeAttachedDocumentStamp(
   attached: { documentId: string },
   live: { document_id: string; version: number | null } | null,
-): { authorized: true; documentId: string } | { authorized: false; reason: string } {
+): { authorized: true; documentId: string } | {
+  authorized: false;
+  reason: string;
+} {
   if (!live || live.document_id !== attached.documentId) {
     return { authorized: false, reason: "attach_document_row_missing" };
   }
   if (live.version !== 1) {
     return {
       authorized: false,
-      reason: `attach_updated_preexisting_document:${live.document_id}:version=${live.version ?? "null"}`,
+      reason:
+        `attach_updated_preexisting_document:${live.document_id}:version=${
+          live.version ?? "null"
+        }`,
     };
   }
   return { authorized: true, documentId: live.document_id };
@@ -134,8 +140,10 @@ export function verifyLedgerDocumentOutcome(
     observed_version?: number | null;
   } | null,
 ): string | null {
-  if (entry?.outcome !== "skipped" ||
-    !entry.reason?.startsWith("attach_updated_preexisting_document:")) {
+  if (
+    entry?.outcome !== "skipped" ||
+    !entry.reason?.startsWith("attach_updated_preexisting_document:")
+  ) {
     return null;
   }
   return `attach_updated_preexisting_document_needs_adjudication:${
@@ -992,7 +1000,10 @@ async function runApply(
           const liveDocument = (attachedDocs.get(row.card) || []).find((doc) =>
             doc.document_id === attached.documentId
           ) || null;
-          const ownership = authorizeAttachedDocumentStamp(attached, liveDocument);
+          const ownership = authorizeAttachedDocumentStamp(
+            attached,
+            liveDocument,
+          );
           if (!ownership.authorized) {
             record.outcome = "skipped";
             record.reason = ownership.reason;
