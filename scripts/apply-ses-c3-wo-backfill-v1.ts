@@ -114,11 +114,16 @@ export function authorizeResumeStamp(
   entry: any,
   row: FixtureRow,
   live: ResumeDocumentRow | null,
-): { authorized: true; documentId: string } | { authorized: false; reason: string } {
+): { authorized: true; documentId: string } | {
+  authorized: false;
+  reason: string;
+} {
   if (!entry || typeof entry.document_id !== "string") {
     return { authorized: false, reason: "resume_no_prior_ledger_entry" };
   }
-  if (!live) return { authorized: false, reason: "resume_document_row_missing" };
+  if (!live) {
+    return { authorized: false, reason: "resume_document_row_missing" };
+  }
   if (live.id !== entry.document_id) {
     return { authorized: false, reason: "resume_document_id_mismatch" };
   }
@@ -319,9 +324,11 @@ async function loadCardStates(
   rows: readonly FixtureRow[],
 ): Promise<Map<string, CardState>> {
   const pairs = rows.map((row) =>
-    `(${sqlText(row.card)},${sqlText(row.jobId)}::uuid,${sqlText(row.caseId)}::uuid,${
-      sqlText(row.attachmentId)
-    }::uuid,${sqlText(row.builderWoCanonical)},${sqlText(row.fileName)})`
+    `(${sqlText(row.card)},${sqlText(row.jobId)}::uuid,${
+      sqlText(row.caseId)
+    }::uuid,${sqlText(row.attachmentId)}::uuid,${
+      sqlText(row.builderWoCanonical)
+    },${sqlText(row.fileName)})`
   ).join(",");
   const query = `
 with fixture(card, job_id, case_id, attachment_id, wo_canonical, file_name) as (values ${pairs})
@@ -365,8 +372,7 @@ select f.card,
        ) as work_order_docs_with_url,
        (select count(*)::int from makesafe_board_status_applications a
          where a.job_id = f.job_id
-       ) as status_applications,
-
+       ) as status_applications
 from fixture f
 left join jobs j on j.id = f.job_id and j.job_number = f.card
 left join email_attachments ea on ea.id = f.attachment_id
@@ -552,12 +558,15 @@ async function resumeDocumentId(
     ? entry.document_id
     : null;
   if (!documentId) return authorizeResumeStamp(entry, row, null);
-  const data = await managementQuery(`
+  const data = await managementQuery(
+    `
 select id::text as id, job_id::text as job_id, type, run_label,
        file_name, storage_url
 from public.job_documents
 where id = ${sqlText(documentId)}::uuid
-;`, { readOnly: true });
+;`,
+    { readOnly: true },
+  );
   const live = data.length === 1
     ? {
       id: String(data[0].id),
@@ -781,6 +790,7 @@ async function runDryRun(
   outputPath: string,
   overwrite: boolean,
 ): Promise<void> {
+  const states = await loadCardStates(rows);
   const plan = rows.map((row) => {
     const state = states.get(row.card)!;
     const verdict = evaluateEligibility(row, state);
@@ -876,7 +886,9 @@ async function runApply(
   for (const row of rows) {
     // The bulk read is only a pre-pass. Authorization for each write uses a
     // fresh single-card read so concurrent drift is always observed.
-    const state = await loadCardStates([row]).then((live) => live.get(row.card)!);
+    const state = await loadCardStates([row]).then((live) =>
+      live.get(row.card)!
+    );
     const planned = baselineByCard.get(row.card);
     const record: any = {
       card: row.card,
@@ -905,7 +917,7 @@ async function runApply(
           verdict.reason === "work_order_already_present",
       );
       const resumeRefusal = resumePath && onlyDocumentDrift &&
-        verdict.reason === "work_order_already_present"
+          verdict.reason === "work_order_already_present"
         ? await resumeDocumentId(row, resumeEntry)
         : null;
       if (resumableStamp && resumeRefusal?.authorized) {
@@ -921,7 +933,9 @@ async function runApply(
           applied++;
         } catch (error) {
           record.outcome = "resumable";
-          record.reason = error instanceof Error ? error.message : String(error);
+          record.reason = error instanceof Error
+            ? error.message
+            : String(error);
           ledger.push(record);
           await flush();
           throw new Error(`${row.card} apply failed: ${record.reason}`);
@@ -941,7 +955,10 @@ async function runApply(
           const attached = await attachWorkOrder(row);
           record.document_id = attached.documentId;
           record.storage_url = attached.url;
-          record.provenance_stamped = await stampProvenanceWithRetry(row, attached.documentId);
+          record.provenance_stamped = await stampProvenanceWithRetry(
+            row,
+            attached.documentId,
+          );
           if (!record.provenance_stamped) {
             throw new Error(
               `provenance stamp did not match exactly one row (document ${attached.documentId})`,

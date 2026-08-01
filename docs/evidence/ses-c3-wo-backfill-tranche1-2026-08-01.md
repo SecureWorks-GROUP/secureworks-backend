@@ -82,8 +82,9 @@ One transport per job, and each is the narrowest one available:
   (`WHERE id = <document id> AND job_id = … AND type = 'work_order' AND
   run_label IS NULL`), setting `run_label` and merging a `metadata` object that
   names the C2 measurement, the source bucket, the source attachment id and
-  sha256, the intake case id and the canonical WO. A zero-row result aborts the
-  run rather than passing silently.
+  sha256, the intake case id and the canonical WO. A zero-row result is retried
+  and then recorded as an explicit resumable outcome rather than passing
+  silently.
 
 The file name is the artifact's own name, not a synthesised one, so the forward
 intake path (`ensureIntakeWorkOrderEvidence`) hits the same idempotency key and
@@ -92,9 +93,30 @@ cannot create a duplicate later.
 ## Safety properties
 
 - **Skip, never force.** `evaluateEligibility` refuses on any of eleven distinct
-  conditions, and the apply re-reads live state and compares it field-by-field
-  to the dry-run baseline (`stateMatchesBaseline`); any drift skips the card with
-  a recorded reason. Both are pure and unit-tested.
+  conditions, and the apply evaluates it — plus a field-by-field
+  `stateMatchesBaseline` comparison against the dry-run baseline — on a **fresh
+  single-card read taken immediately before that card's write**, so drift that
+  appears part-way through the tranche is still caught. The bulk read is only a
+  pre-pass and never authorizes a write. Both functions are pure and
+  unit-tested.
+- **Case binding is to the card's OWN case.** The state read matches
+  `c.id = <fixture case_id> AND c.job_id = <fixture job_id>`, not merely any
+  intake case on the same job. An attachment reachable from a different case of
+  the same job is refused.
+- **Recovery is identified, never inferred.** If an attach succeeds but the
+  provenance stamp does not, the ledger records a resumable outcome. A later
+  `--resume <ledger.json>` may re-stamp **only** the exact document id that
+  ledger recorded, and only when the live row still matches on id, job, type,
+  file name, storage URL and an unset `run_label`; `authorizeResumeStamp` is
+  pure and returns a distinct reason for each refusal
+  (`resume_no_prior_ledger_entry`, `resume_document_row_missing`,
+  `resume_document_id_mismatch`, `resume_document_wrong_job`,
+  `resume_document_wrong_type`, `resume_document_already_stamped`,
+  `resume_document_file_name_changed`, `resume_document_storage_url_changed`).
+  A row is never selected by shape, so a pre-existing or concurrently created
+  same-name work order can never be stamped with this tranche's provenance.
+  With no `--resume` ledger, a card that already has a work-order row is simply
+  skipped.
 - **Crash-truthful ledger.** The ledger is flushed after every card, and a
   failure is recorded and flushed *before* the run aborts.
 - **No second status engine.** Nothing here touches `jobs`,
@@ -115,6 +137,15 @@ also fetches each published copy and re-hashes it.
 ```
 mode: verify   cards: 26   ok: 26   failures: 0   published_byte_check: true
 ```
+
+The committed `verify.json` was **regenerated after the guards were hardened**
+and came back byte-identical to the pre-hardening result. That is the useful
+part: the stricter read — exact `case_id` binding rather than any case on the
+same job — re-proves all 26 attachments against production, so the tranche
+satisfies the stronger invariant and not merely the weaker one it was applied
+under. The `dry-run`, `apply-ledger` and C1 `before`/`after` files are
+historical records of the applied tranche and are deliberately NOT regenerated;
+re-running a dry run today correctly reports all 26 as already attached.
 
 Independent read-only cross-checks run outside the script:
 
@@ -178,6 +209,11 @@ deno run -A $D --mode verify --check-bytes \
   --after    scripts/ses-c3-wo-backfill-v1.c1-after.json \
   --output   scripts/ses-c3-wo-backfill-v1.verify.json --overwrite-output
 ```
+
+To finish a tranche whose attach landed but whose provenance stamp did not, add
+`--resume <the partial apply ledger>` to the `apply` invocation. Recovery is
+never implicit: without that flag an already-attached card is skipped.
+
 
 A re-run of `--mode apply` against the same baseline was executed after the
 verification above and skipped all 26 with
