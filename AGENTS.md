@@ -594,8 +594,17 @@ an archive can never strand work. Never derive the survivor from the
 `external_ref` string form: SWMS-261118 carries the fuller `MLB-26344PO-57087`
 while the worked card SWMS-261065 carries the bare ref.
 
+Board `archive` is overloaded: it is both "this card is dead" and "this job
+finished more than seven days ago". `survivorArchiveIsNaturalCompletion` is the
+only place that separates them, and a survivor qualifies as finished only with
+its own derived `archive` stage, no status-application overlay, no duplicate
+pointer, and an independent M1 `computed_status` of `archive`/`completed`. Widen
+nothing else in that guard, and never work around it by forcing a plan through.
+The RPC guards raw `jobs.status` and pointer chains rather than display stage, so
+planner-side display rules need no migration.
+
 For the current duplicate-survivor apply-set adjudication, including display
-overlay handling and captain rulings, see
+overlay handling, per-tranche apply ledgers and captain rulings, see
 `docs/evidence/makesafe-duplicate-survivors-2026-08-01.md`.
 
 ## The SES Money And Outbound Seal Is Write-Once

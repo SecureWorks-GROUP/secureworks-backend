@@ -40,6 +40,10 @@ export interface MakesafeStatusApplyRow {
   computed_status_reasons?: string[] | null;
   computed_status_missing?: string[] | null;
   computed_status_at?: string | null;
+  computed_status_evidence?: {
+    closeout_satisfied?: boolean | null;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface MakesafeStatusApplication {

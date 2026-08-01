@@ -150,6 +150,7 @@ import {
 import {
   MAKESAFE_AUTHORIZED_DUPLICATE_GROUPS,
   planMakesafeDuplicateSurvivorArchives,
+  survivorArchiveIsNaturalCompletion,
   type MakesafeDuplicateArchive,
 } from './makesafe_duplicate_survivor.ts'
 import {
@@ -4195,7 +4196,8 @@ if (import.meta.main) serve(async (req: Request) => {
         const strandedSurvivors = plan.survivors.filter((survivor) => {
           const row = afterByJobId.get(String(survivor.job_id))
           return !row ||
-            isMakesafeTerminalDisplayStatus(row.canonical_stage) ||
+            (isMakesafeTerminalDisplayStatus(row.canonical_stage) &&
+              !survivorArchiveIsNaturalCompletion(row)) ||
             isMakesafeTerminalJobState(row.job_state)
         })
         if (strandedSurvivors.length > 0) {

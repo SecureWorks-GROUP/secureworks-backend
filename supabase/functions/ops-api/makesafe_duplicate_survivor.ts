@@ -241,6 +241,49 @@ export const MAKESAFE_AUTHORIZED_DUPLICATE_GROUPS:
 export interface MakesafeDuplicateSurvivorRow extends MakesafeStatusApplyRow {
   /** Set when this card already carries a duplicate pointer from an earlier run. */
   duplicate_of_job_id?: string | null;
+  /**
+   * The status-application overlay currently driving this card's display, or
+   * null when the card derives its own stage. Non-null means an earlier run
+   * decided the stage, which the natural-completion exception must never read
+   * as evidence that the work is finished.
+   */
+  status_application?: Record<string, unknown> | null;
+}
+
+/**
+ * A survivor displaying `archive` because it is genuinely FINISHED, not because
+ * something declared it dead.
+ *
+ * `archive` on this board is overloaded. A make-safe that closed out more than
+ * seven days ago derives to `archive` all on its own — that is the ordinary end
+ * of a completed job, and such a card is the correct survivor to point a
+ * duplicate at. The terminal-display guard cannot tell that apart from a card an
+ * earlier run archived as dead, so by default it refuses both.
+ *
+ * This narrows the refusal to exactly the cases that earn it. Every condition
+ * below must hold:
+ *
+ * - the display is `archive` specifically — `cancelled` and every other terminal
+ *   display still refuse;
+ * - the card derived that stage from its OWN facts (`declared_stage`), with no
+ *   status-application overlay in play, so nothing a previous run decided is
+ *   being read as completion;
+ * - the card is not itself an archived duplicate, which would build a pointer
+ *   chain;
+ * - and the read model's independent closeout verdict is true. That verdict is
+ *   computed before the display-status short-circuit and requires a durable send
+ *   record plus an AUTHORISED/PAID ACCREC invoice.
+ *
+ * Anything short of all four keeps the original refusal.
+ */
+export function survivorArchiveIsNaturalCompletion(
+  survivor: MakesafeDuplicateSurvivorRow,
+): boolean {
+  if (token(survivor?.canonical_stage) !== "archive") return false;
+  if (token(survivor?.declared_stage) !== "archive") return false;
+  if (survivor?.status_application) return false;
+  if (survivor?.duplicate_of_job_id) return false;
+  return survivor?.computed_status_evidence?.closeout_satisfied === true;
 }
 
 /**
@@ -319,8 +362,13 @@ export function planMakesafeDuplicateSurvivorArchives(
       skipped.push({ ...base, reason: "loser_not_found" });
       continue;
     }
-    // A survivor that is itself dead or archived cannot absorb a duplicate.
-    if (isMakesafeTerminalDisplayStatus(survivor.canonical_stage)) {
+    // A survivor that is itself dead or archived cannot absorb a duplicate —
+    // unless its archive is the ordinary end of a finished job, in which case it
+    // is exactly the card the duplicate should point at.
+    if (
+      isMakesafeTerminalDisplayStatus(survivor.canonical_stage) &&
+      !survivorArchiveIsNaturalCompletion(survivor)
+    ) {
       skipped.push({
         ...base,
         reason: "survivor_terminal_display_status",

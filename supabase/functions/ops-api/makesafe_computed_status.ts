@@ -95,6 +95,7 @@ export interface MakesafeStatusResult {
   reasons: string[];
   missing: string[];
   hold: MakesafeStatusHold | null;
+  closeout_satisfied?: boolean;
 }
 
 const normalizedToken = (value: unknown) =>
@@ -148,7 +149,8 @@ function captureRole(capture: MakesafePortalCapture): string {
 function donePortalRoles(input: MakesafeStatusInput): Set<string> {
   const cycle = Number(input.detail?.cycle_number ?? 1);
   const requiresTypedAssessmentIdentity =
-    classifyMakesafeJobType(input.detail, input.job) === "assessment_report_quote";
+    classifyMakesafeJobType(input.detail, input.job) ===
+      "assessment_report_quote";
   const typedLinks = Array.isArray(input.detail?.external_links)
     ? input.detail.external_links
     : [];
@@ -159,7 +161,8 @@ function donePortalRoles(input: MakesafeStatusInput): Set<string> {
         const captureUrl = String(capture?.url || "").trim().toLowerCase();
         return (
           String(capture?.status || "").toLowerCase() === "done" &&
-          !!String(capture?.screenshot || capture?.screenshot_path || "").trim() &&
+          !!String(capture?.screenshot || capture?.screenshot_path || "")
+            .trim() &&
           (capture?.cycle_number == null ||
             Number(capture.cycle_number) === cycle) &&
           (!requiresTypedAssessmentIdentity || (
@@ -259,7 +262,8 @@ function docsReady(input: MakesafeStatusInput): boolean {
   const kind = classifyMakesafeJobType(input.detail, input.job);
   const recorded = String(input.evidence?.packState || "").toUpperCase();
   if (["READY", "READY_TO_BUILD"].includes(recorded)) {
-    return kind !== "assessment_report_quote" || reportInEvidence(input).satisfied;
+    return kind !== "assessment_report_quote" ||
+      reportInEvidence(input).satisfied;
   }
 
   // Legacy durable pack rows predate a persisted pack_state value. Read their
@@ -344,6 +348,7 @@ export function computeMakesafeStatus(
       reasons: ["displayed card is already archived"],
       missing,
       hold,
+      closeout_satisfied: closeoutSatisfied(input),
     };
   }
   if (displayedStatus === "completed") {
