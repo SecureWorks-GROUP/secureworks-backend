@@ -688,7 +688,7 @@ Families and stages are imported from `ses_family_matrix.ts` and
 `makesafe_computed_status.ts` rather than restated, and `unknown` is refused
 rather than measured. `scripts/ses-measure-card-evidence.ts` is the read-only
 single-card entrypoint, and `scripts/ses-c2-measure-board-evidence.ts` batches
-it over the whole board in nine read-only queries — run that before and after
+it over the named SES population in nine read-only queries — run that before and after
 any ruler change and report both count sets. Contract, modelling decisions,
 transit heuristics and the verification baseline are in
 `docs/evidence/ses-evidence-ruler-c1-2026-08-01.md`; the PO ruling and its
@@ -761,7 +761,7 @@ a re-extraction refuses the write rather than attaching a document nobody read.
 re-attach never moves a board stage — prove it, do not assume it, by bracketing
 the run with a C1 measurement. `scripts/ses-measure-card-evidence.ts` needs a
 service-role key; `scripts/ses-c2-measure-board-evidence.ts` batches the same
-ruler over the whole board through the Management API alone, and lets verify
+ruler over the named SES population through the Management API alone, and lets verify
 assert that NO board card moved.
 
 ## The SES Money And Outbound Seal Is Write-Once
