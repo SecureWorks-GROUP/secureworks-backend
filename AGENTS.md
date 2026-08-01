@@ -607,6 +607,17 @@ For the current duplicate-survivor apply-set adjudication, including display
 overlay handling, per-tranche apply ledgers and captain rulings, see
 `docs/evidence/makesafe-duplicate-survivors-2026-08-01.md`.
 
+## The SES Phase A/B Board State Is Re-Provable, Not Just Documented
+
+`scripts/ses-ab-certificate-checker.ts` re-proves the whole Phase A/B boundary
+against live production, read-only, and exits non-zero on any failure. Run it
+before trusting any claim about intake accounting or adjudicated board truth,
+and after any new correction tranche. It needs only `SUPABASE_ACCESS_TOKEN`
+(Management API `/database/query`, `read_only: true`); it refuses non-SELECT
+statements and client-identifying columns before the request is sent. The dated
+certificate, scope, ledgers, exceptions, and interpretation rules it backs are
+authoritative in `docs/evidence/ses-ab-certificate-2026-08-01.md`.
+
 ## The SES Money And Outbound Seal Is Write-Once
 
 The write-once SES money/outbound seal and its approved invoice-void release

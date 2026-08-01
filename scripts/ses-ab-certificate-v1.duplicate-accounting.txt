@@ -1,0 +1,41 @@
+# SES A/B certificate - work-order merge accounting (Droid cross-check fixture).
+#
+# One row per canonical builder work order that production resolves to MORE THAN
+# ONE make-safe job card. The merge list is DERIVED at run time from
+# job_documents work-order filenames through the production identity grammar
+# (underscores normalised to spaces, per AGENTS.md); this file only records the
+# adjudicated disposition of each derived group. A group present in production
+# and absent here is reported `unaccounted` and fails the run.
+#
+# era[2]: historical | drain_minted
+#   drain_minted = the group's newer member was minted in the historical-drain
+#   era (SWMS-2610xx onward) against a work order an older card already held.
+#
+# disposition[4]:
+#   archived_duplicate_pointer  loser archived on makesafe_board_status_applications
+#                               with duplicate_of_job_id set to the survivor
+#   adjudicated_not_duplicate   members resolve different declared instructions;
+#                               the shared PO is an attachment fan-out artefact
+#   captain_excluded            adjudicated, deliberately not applied by ruling
+#   open_hold                   registered captain decision key, not yet ruled
+#
+# work_order | era | disposition | cards | decision_key | evidence
+MLB-25076PO-52377 | historical | open_hold | SWMS-26510,SWMS-26868 | duplicate-survivor-policy | four-vendor board audit 2026-07-31 section 4(c); both cards terminal, none on the live board
+MLB-25321PO-52394 | historical | open_hold | SWMS-26504,SWMS-26505 | duplicate-survivor-policy | four-vendor board audit 2026-07-31 section 4(c); both cards cancelled, none on the live board
+MLB-25795PO-53893 | historical | adjudicated_not_duplicate | SWMS-26721,SWMS-26855 | - | duplicate-survivor re-verification 2026-08-01; roof card plus assessment card, PO-53893 assessment and PO-53896 roof
+MLB-25795PO-53896 | historical | adjudicated_not_duplicate | SWMS-26721,SWMS-26855 | - | duplicate-survivor re-verification 2026-08-01; both work-order PDFs attached to both cards
+MLB-25857PO-53193 | drain_minted | open_hold | SWMS-26606,SWMS-261059 | duplicate-survivor-policy | four-vendor board audit 2026-07-31 section 4(c); SWMS-26606 archived, one live member
+MLB-26177PO-53982 | historical | open_hold | SWMS-26731,SWMS-26857 | duplicate-survivor-policy | four-vendor board audit 2026-07-31 section 4(c); also blocked on the INV-0819 false-draft void decision
+MLB-26183PO-53995 | historical | adjudicated_not_duplicate | SWMS-26735,SWMS-26852 | - | duplicate-survivor re-verification 2026-08-01; roof card plus assessment card, PO-53995 assessment and PO-54000 roof
+MLB-26183PO-54000 | historical | adjudicated_not_duplicate | SWMS-26735,SWMS-26852 | - | duplicate-survivor re-verification 2026-08-01; both work-order PDFs attached to both cards
+MLB-26189PO-54425 | historical | archived_duplicate_pointer | SWMS-26787,SWMS-26791 | - | duplicate-survivor tranche 2, run_key makesafe-duplicate-survivors-20260801-t2
+MLB-26190PO-53964 | historical | adjudicated_not_duplicate | SWMS-26706,SWMS-26957 | - | duplicate-survivor re-verification 2026-08-01; PO-53964 make-safe instruction, PO-53966 roof
+MLB-26190PO-53966 | historical | adjudicated_not_duplicate | SWMS-26774,SWMS-26957 | - | duplicate-survivor re-verification 2026-08-01; SWMS-26774 already archived, no both-live pair
+MLB-23067PO-54811 | historical | captain_excluded | SWMS-26845,SWMS-26920 | duplicate-mlb-23067-po-54811 | captain ruling 2026-08-01; both cards already display archive so the ruled outcome already holds
+MLB-25625PO-54006 | historical | archived_duplicate_pointer | SWMS-26736,SWMS-26851,SWMS-26998 | - | duplicate-survivor re-verification 2026-08-01 narrowed this group: SWMS-26851 is the assessment card and is adjudicated not-a-duplicate; the roof pair SWMS-26998 -> SWMS-26736 is archived with a pointer under the sibling work order PO-54007
+MLB-25625PO-54007 | historical | archived_duplicate_pointer | SWMS-26736,SWMS-26998 | - | duplicate-survivor tranche 1, run_key makesafe-duplicate-survivors-20260801-t1
+MLB-25765PO-54176 | historical | adjudicated_not_duplicate | SWMS-26759,SWMS-26853 | - | duplicate-survivor re-verification 2026-08-01; roof card plus assessment card, PO-54176 assessment and PO-54177 roof
+MLB-25765PO-54177 | historical | adjudicated_not_duplicate | SWMS-26759,SWMS-26853 | - | duplicate-survivor re-verification 2026-08-01; both work-order PDFs attached to both cards
+MLB-26721PO-55622 | historical | open_hold | SWMS-26929,SWMS-26930 | duplicate-survivor-policy | four-vendor board audit 2026-07-31 section 4(c); SWMS-26929 archived, one live member
+MLB-24749PO-56699 | drain_minted | open_hold | SWMS-261027,SWMS-261078 | duplicate-survivor-policy | four-vendor board audit 2026-07-31 section 4(c); SWMS-261027 cancelled, one live member
+MLB-26344PO-57087 | drain_minted | archived_duplicate_pointer | SWMS-261065,SWMS-261118 | - | duplicate-survivor tranche 1, run_key makesafe-duplicate-survivors-20260801-t1
