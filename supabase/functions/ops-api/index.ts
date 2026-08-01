@@ -14423,6 +14423,26 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   if (restrict && restrict.length === 0) {
     return { columns: { new: [], allocated: [], trade_report_in: [], report_ready: [], completed: [], archive: [], cancelled: [] }, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: 0 }
   }
+  // makesafe_job_details is itself durable MakeSafe authority. Historical jobs
+  // can carry that row while their generic jobs.type and job_number markers are
+  // missing or non-canonical. Read the compact authority index first, then union
+  // those jobs into both active and cancelled populations below. This mirrors
+  // the trade-feed backstop and keeps the two board audiences on one population.
+  const detailAuthorityRows = await readPagedRows(
+    (offset, limit) =>
+      client
+        .from('makesafe_job_details')
+        .select('job_id')
+        .order('job_id', { ascending: true })
+        .range(offset, offset + limit - 1),
+    'make-safe board detail authority index',
+  )
+  const restrictSet = restrict ? new Set(restrict) : null
+  const detailAuthorityJobIds = Array.from(new Set<string>(
+    (detailAuthorityRows || [])
+      .map((row: any) => String(row?.job_id || ''))
+      .filter((id: string) => id && (!restrictSet || restrictSet.has(id))),
+  ))
   // T4 — full-history load. The old `.limit(200)` hid older completed/archived
   // make-safes from the archive column. Paginate the jobs query so the board
   // shows the COMPLETE history; T1's row-paginated dependent reads keep this
@@ -14460,6 +14480,23 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
           if (batch.length < MAKESAFE_PAGE_SIZE) break
           offset += MAKESAFE_PAGE_SIZE
         }
+      }
+    }
+    for (const detailChunk of _chunkByUrlBudget(detailAuthorityJobIds)) {
+      let offset = 0
+      for (let guard = 0; guard < 1000; guard++) {
+        const { data, error } = await client.from('jobs')
+          .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
+          .in('id', detailChunk)
+          .not('status', 'in', allHistory ? '("cancelled","lost")' : '("cancelled","archived","lost")')
+          .order('created_at', { ascending: false })
+          .order('id', { ascending: false })
+          .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+        if (error) throw error
+        const batch = data || []
+        jobsRaw.push(...batch)
+        if (batch.length < MAKESAFE_PAGE_SIZE) break
+        offset += MAKESAFE_PAGE_SIZE
       }
     }
     const uniqueJobs = Array.from(
@@ -14714,6 +14751,25 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
           if (batch.length < MAKESAFE_PAGE_SIZE) break
           offset += MAKESAFE_PAGE_SIZE
         }
+      }
+    }
+    for (const detailChunk of _chunkByUrlBudget(detailAuthorityJobIds)) {
+      let offset = 0
+      for (let guard = 0; guard < 100; guard++) {
+        let cancelledQuery = client.from('jobs')
+          .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
+          .in('id', detailChunk)
+          .eq('status', 'cancelled')
+        if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
+        const { data, error } = await cancelledQuery
+          .order('updated_at', { ascending: false })
+          .order('id', { ascending: false })
+          .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+        if (error) throw error
+        const batch = data || []
+        cancelledRaw.push(...batch)
+        if (batch.length < MAKESAFE_PAGE_SIZE) break
+        offset += MAKESAFE_PAGE_SIZE
       }
     }
     const uniqueCancelled = Array.from(

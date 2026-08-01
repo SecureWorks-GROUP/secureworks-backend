@@ -1,0 +1,14 @@
+# Exact RESOLVED-SAFE field-write fixture from board-drain-blocked-fixes-v1.
+# Temp-fence rows remain evidence here but are applied only through the umpire
+# fixture class. SWMS-26894 remains an explicit captain hold.
+BWCWA6773 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | declared Make Safe; board kind unchanged | sha256:5e0a66194a2f
+BWCWA6781 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | declared Make Safe; board kind unchanged | sha256:0df19ac2564d
+SWMS-26692 | jobs.metadata.makesafe_job_family | NULL | temp_fence_makesafe | declared Make Safe plus temporary-fence scope; board kind unchanged | sha256:1a8cb80848ab
+SWMS-26693 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | declared Make Safe; board kind unchanged | sha256:79740094db0c
+SWMS-26893 | jobs.metadata.makesafe_job_family | general_makesafe | temp_fence_makesafe | affirmative temporary-fence scope; board kind unchanged | sha256:f079f32cd36f
+SWMS-26894 | jobs.metadata.makesafe_job_family | general_makesafe | temp_fence_makesafe | affirmative temporary-fence scope; board kind unchanged | sha256:39f39b5493e3
+SWMS-26895 | jobs.metadata.makesafe_job_family | general_makesafe | temp_fence_makesafe | affirmative temporary-fence scope; board kind unchanged | sha256:99051f6d01cf
+SWMS-26896 | jobs.metadata.makesafe_job_family | general_makesafe | temp_fence_makesafe | affirmative temporary-fence scope; board kind unchanged | sha256:6ea63cbaad92
+SWMS-26900 | jobs.metadata.makesafe_job_family | general_makesafe | temp_fence_makesafe | declared Make Safe plus temporary-fence scope; board kind unchanged | sha256:eb238f33e89d
+SWMS-26903 | jobs.metadata.makesafe_job_family | general_makesafe | temp_fence_makesafe | declared Make Safe plus temporary-fence scope; board kind unchanged | sha256:4ea54e32d170
+WB68792 | jobs.metadata.makesafe_job_family | NULL | general_makesafe | physical work-order scope; board kind unchanged | sha256:b055b7068b44
