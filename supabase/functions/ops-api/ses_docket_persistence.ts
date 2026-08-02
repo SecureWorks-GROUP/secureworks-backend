@@ -1,4 +1,4 @@
-import { type SesArtifact, sesSha256 } from "./ses_docket_envelope.ts";
+import { type SesArtifact, sesSha256Bytes } from "./ses_docket_envelope.ts";
 import { evaluateSesDocsReadyGate } from "./ses_docs_ready.ts";
 import type {
   SesPersistPayload,
@@ -95,10 +95,7 @@ async function assertExistingArtifactMatches(
   );
   if (!downloaded.error && downloaded.data) {
     const bytes = new Uint8Array(await downloaded.data.arrayBuffer());
-    const contentHash = await sesSha256(
-      Array.from(bytes),
-      "SecureWorks:ses-docket-artifact-bytes:v1\n",
-    );
+    const contentHash = await sesSha256Bytes(bytes);
     if (
       contentHash === artifact.content_hash &&
       bytes.byteLength === artifact.size_bytes
