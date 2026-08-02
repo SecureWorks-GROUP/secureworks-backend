@@ -36,7 +36,6 @@ import {
   deriveSesStageV2,
   sesOverlayDecisionKind,
   sesStageV2OverlayCandidate,
-  type SesOverlayDecisionKind,
 } from "./ses_stage_engine_v2.ts";
 import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
 
