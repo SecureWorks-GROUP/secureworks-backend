@@ -126,7 +126,6 @@ import {
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
   isSyntheticLivefireJob,
-  makesafeBoardJobStatusExclusionFilter,
   projectTradeMakesafeBoard,
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
@@ -593,8 +592,6 @@ import {
 import { refreshMakesafeIdentityAfterWorkOrderAttach as _refreshMakesafeIdentityAfterWorkOrderAttach } from './makesafe_work_order_identity_refresh.ts'
 import {
   assertInstructionCardMintAvailable as _assertInstructionCardMintAvailable,
-  reserveInstructionCardMint as _reserveInstructionCardMint,
-  releaseInstructionCardMint as _releaseInstructionCardMint,
   InstructionMintConflictError as _InstructionMintConflictError,
 } from './makesafe_instruction_mint_gate.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
@@ -14757,7 +14754,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
           let activeQuery = client.from('jobs')
             .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
             .eq('type', source.type)
-            .not('status', 'in', makesafeBoardJobStatusExclusionFilter(allHistory))
+            .not('status', 'in', allHistory ? '("cancelled","lost")' : '("cancelled","archived","lost")')
           if (source.insurance_job_type) {
             activeQuery = activeQuery.eq('metadata->>insurance_job_type', source.insurance_job_type)
           }
@@ -14780,7 +14777,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
         const { data, error } = await client.from('jobs')
           .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
           .in('id', detailChunk)
-          .not('status', 'in', makesafeBoardJobStatusExclusionFilter(allHistory))
+          .not('status', 'in', allHistory ? '("cancelled","lost")' : '("cancelled","archived","lost")')
           .order('created_at', { ascending: false })
           .order('id', { ascending: false })
           .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
@@ -15253,22 +15250,6 @@ async function loadCanonicalMakesafeBoard(
     ),
   ])
 
-  // F7: the append-only capture ledger is the durable Prime truth source. Read
-  // it into the canonical row; do not mutate details, substatus, or stage.
-  let portalCaptureRows: any[] = []
-  try {
-    portalCaptureRows = await _fetchAllByJobIdChunked(
-      client,
-      'makesafe_portal_capture_revisions',
-      'id, job_id, attendance_cycle_id, role, status, makesafe_fact_version, capture_result, source_url, source_content_hash, builder_reference, captured_at, captured_by, capture_producer, signal, screenshot_object_key, screenshot_media_type, screenshot_content_hash, screenshot_size_bytes',
-      jobIds,
-      (q) => q.order('makesafe_fact_version', { ascending: false }),
-    )
-  } catch (error) {
-    // Fail closed to no capture evidence while keeping the legacy board visible.
-    console.error('[ops-api] makesafe board portal capture read unavailable:', (error as Error).message)
-  }
-
   // The status-holds table is an additive shadow overlay that can legitimately lag
   // the edge function in a preview database. Holds only decorate the board with
   // reason-coded badges, so tolerate a missing table and log loudly rather than
@@ -15364,12 +15345,6 @@ async function loadCanonicalMakesafeBoard(
       statusApplicationsByJobId[application.job_id] = application
     }
   }
-  const portalCaptureRowsByJobId: Record<string, any[]> = {}
-  for (const capture of portalCaptureRows) {
-    if (!capture?.job_id) continue
-    if (!portalCaptureRowsByJobId[capture.job_id]) portalCaptureRowsByJobId[capture.job_id] = []
-    portalCaptureRowsByJobId[capture.job_id].push(capture)
-  }
   const holdsByJobId: Record<string, any> = {}
   // Match the computed-status read model's cycle authority (detail-first) so holds
   // recorded on cycle>1 attach as badges even when the base pipeline row carries no
@@ -15394,7 +15369,6 @@ async function loadCanonicalMakesafeBoard(
     intakeCaseByJobId,
     holdsByJobId,
     statusApplicationsByJobId,
-    portalCaptureRowsByJobId,
     terminalSyntheticLivefireJobIds,
   })
 }
@@ -18225,7 +18199,6 @@ async function approveIntakeDraft(client: any, body: any) {
   if (!recoveredPrimaryMint) {
     const instructionKeys = _builderInstructionKeysForCard({
       requestingCompanySlug: approvedFields.requesting_company_slug,
-      family: approvedJobFamily || null,
       metadata: {
         external_ref: approvedFields.external_ref,
         builder_claim_ref: extraction?.builder_claim_ref,
@@ -18256,21 +18229,6 @@ async function approveIntakeDraft(client: any, body: any) {
       throw error
     }
   }
-  const canonicalInstructionKeys = _builderInstructionKeysForCard({
-    requestingCompanySlug: approvedFields.requesting_company_slug,
-    family: approvedJobFamily || null,
-    metadata: {
-      external_ref: approvedFields.external_ref,
-      builder_claim_ref: extraction?.builder_claim_ref,
-      builder_work_order_number: extraction?.builder_work_order_number,
-      builder_po_number: extraction?.builder_po_number,
-    },
-    detailExternalRef: approvedFields.external_ref,
-    attachmentNames: availableAttachments.map((attachment: any) =>
-      attachment.file_name || attachment.filename || attachment.name ||
-        attachment.pdf_url || attachment.storage_url
-    ),
-  })
 
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
   // creating another job. Compare NORMALISED refs (the shared reconciler normaliser)
@@ -18377,16 +18335,7 @@ async function approveIntakeDraft(client: any, body: any) {
   let createdJobId: string | null = null
   const createdJobIds: string[] = []
   let primaryMint: any = null
-  let instructionMintReserved = false
   try {
-    if (!recoveredPrimaryMint && canonicalInstructionKeys.length) {
-      await _reserveInstructionCardMint(client, {
-        orgId: draft.org_id || DEFAULT_ORG_ID,
-        draftId: draft.id,
-        candidateKeys: canonicalInstructionKeys,
-      })
-      instructionMintReserved = true
-    }
     const authority = await intakeMintAuthority(client, draft, extraction, body)
     primaryMint = authority
       ? await reserveIntakeMint(client, {
@@ -18676,14 +18625,6 @@ async function approveIntakeDraft(client: any, body: any) {
     }
   } catch (postClaimErr) {
     if (!createdJobId || primaryMint) {
-      if (instructionMintReserved && !createdJobId) {
-        try {
-          await _releaseInstructionCardMint(client, {
-            orgId: draft.org_id || DEFAULT_ORG_ID,
-            draftId: draft.id,
-          })
-        } catch (_) { /* best-effort; do not mask the original error */ }
-      }
       // Pre-insert failure: no live job exists, so release the claim back to the
       // review queue. This is the only safe path to re-queue a draft.
       try {

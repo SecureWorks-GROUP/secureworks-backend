@@ -16,7 +16,6 @@ function refreshClient(input: {
   };
   const job = { id: "job-1", metadata: structuredClone(input.metadata) };
   const events: any[] = [];
-  const rpcCalls: any[] = [];
   const from = (table: string) => {
     const query: any = {
       select: () => query,
@@ -44,32 +43,7 @@ function refreshClient(input: {
     };
     return query;
   };
-  return {
-    client: {
-      from,
-      rpc: (name: string, args: any) => {
-        rpcCalls.push({ name, args });
-        if (name === "apply_makesafe_work_order_identity_correction") {
-          detail.external_ref = args.p_external_ref;
-          job.metadata = args.p_metadata;
-          events.push({
-            event_type: "makesafe_work_order_identity_corrected",
-            detail_json: {
-              document_id: args.p_document_id,
-              prior_instruction_keys: args.p_prior_instruction_keys,
-              corrected_instruction_key: args.p_corrected_instruction_key,
-              reason: args.p_reason,
-            },
-          });
-        }
-        return Promise.resolve({ data: null, error: null });
-      },
-    },
-    detail,
-    job,
-    events,
-    rpcCalls,
-  };
+  return { client: { from }, detail, job, events };
 }
 
 Deno.test("attach identity refresh fills a missing key from the new builder WO", () => {
@@ -80,7 +54,7 @@ Deno.test("attach identity refresh fills a missing key from the new builder WO",
     detailExternalRef: "unknown",
   });
   assertEquals(decision.action, "correct");
-  assertEquals(decision.incomingKey, "MLB:PO-57514");
+  assertEquals(decision.incomingKey, "MLB-RR-26836PO-57514");
 });
 
 Deno.test("attach identity refresh never overwrites a good conflicting key", () => {
@@ -97,7 +71,7 @@ Deno.test("attach identity refresh never overwrites a good conflicting key", () 
   });
   assertEquals(decision.action, "conflict");
   assertEquals(decision.reason, "good_key_disagrees");
-  assertEquals(decision.currentKeys, ["MLB:PO-57001"]);
+  assertEquals(decision.currentKeys, ["MLB-27001PO-57001"]);
 });
 
 Deno.test("attach identity refresh resolves only an internal conflict corroborated by the new WO", () => {
@@ -109,7 +83,7 @@ Deno.test("attach identity refresh resolves only an internal conflict corroborat
   });
   assertEquals(decision.action, "correct");
   assertEquals(decision.reason, "internally_conflicting");
-  assertEquals(decision.incomingKey, "AJ:JOB-70062");
+  assertEquals(decision.incomingKey, "AJ-70062");
 });
 
 Deno.test("attach identity refresh ignores the SecureWorks cover sheet", () => {
@@ -137,8 +111,8 @@ Deno.test("attach identity refresh persists a correction and its visible event",
   assertEquals(db.detail.external_ref, "MLB-RR-26836PO-57514");
   assertEquals(db.job.metadata.external_ref, "MLB-RR-26836PO-57514");
   assertEquals(
-    db.rpcCalls[0].name,
-    "apply_makesafe_work_order_identity_correction",
+    db.events[0].event_type,
+    "makesafe_work_order_identity_corrected",
   );
 });
 

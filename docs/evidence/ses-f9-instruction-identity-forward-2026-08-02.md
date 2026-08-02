@@ -12,17 +12,12 @@ so placing it last keeps the mint decision on one shared identity boundary
 
 ## Forward-only changes
 
-- The canonical key is builder scope plus purchase order for MLB/Builderwest/
-  Western Building, AJ plus job number for AJ, and repair plus work order only
-  when a caller explicitly states the repair family. Claim and work-order
-  references remain grouping/provenance, not identity; there is no claim-only
-  fallback for non-AJ builders. MLB business-unit infixes normalise to `MLB`.
-  (`supabase/functions/ops-api/makesafe_builder_work_order_identity.ts:19`,
-  `supabase/functions/ops-api/makesafe_builder_work_order_identity.ts:248`,
-  `docs/evidence/ses-identity-grain-conform-2026-08-02.md`).
-- AJ promotes an exact bare five-or-more-digit external reference only when the
-  requesting company slug is exactly `aj`; the slug-to-scope map is closed and
-  reference prefixes outrank the slug when present
+- F1 accepts and preserves the optional MLB two-letter business-unit infix in
+  the canonical claim/work-order key
+  (`supabase/functions/ops-api/makesafe_builder_work_order_identity.ts:19`).
+- F2 promotes an exact bare five-or-more-digit external reference only when the
+  requesting company slug is exactly `aj`; the R2 key vocabulary remains limited
+  to AJ, WB and KBA
   (`supabase/functions/ops-api/makesafe_builder_work_order_identity.ts:200`,
   `supabase/functions/ops-api/makesafe_builder_work_order_identity.ts:248`).
 - F4 runs only after a newly attached typed work order. Missing/junk or

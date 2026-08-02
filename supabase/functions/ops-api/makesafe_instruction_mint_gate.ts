@@ -27,7 +27,7 @@ export interface ExistingInstructionCardMatch {
 
 export class InstructionMintConflictError extends Error {
   constructor(
-    public readonly candidateKeys: readonly string[],
+    public readonly candidateKeys: string[],
     public readonly matches: ExistingInstructionCardMatch[],
   ) {
     const cards = matches.map((match) => match.jobNumber).join(", ");
@@ -66,10 +66,6 @@ export function matchExistingInstructionCards(
     const instructionKeys = builderInstructionKeysForCard({
       requestingCompanySlug: row.requesting_company_slug ||
         metadata.requesting_company?.slug || null,
-      // Repair keys on the work order rather than a PO, so an existing card's
-      // own family has to travel with it or the gate would read a repair card
-      // under the wrong grain.
-      family: metadata.makesafe_job_family || null,
       metadata,
       detailExternalRef: row.external_ref || null,
       attachmentNames: namesByJob.get(String(row.job_id)) || [],
@@ -149,40 +145,4 @@ export async function assertInstructionCardMintAvailable(
     }
   }
   refuseExistingInstructionCard(candidateKeys, rows, documents);
-}
-
-export async function reserveInstructionCardMint(
-  client: any,
-  input: { orgId: string; draftId: string; candidateKeys: readonly string[] },
-): Promise<void> {
-  if (!input.candidateKeys.length) return;
-  const { error } = await client.rpc(
-    "reserve_makesafe_instruction_key_mint",
-    {
-      p_org_id: input.orgId,
-      p_draft_id: input.draftId,
-      p_instruction_keys: [...new Set(input.candidateKeys)].sort(),
-    },
-  );
-  if (error) {
-    const message = String(error.message || error);
-    if (
-      error.code === "P0001" &&
-      message.startsWith("instruction key already reserved:")
-    ) {
-      throw new InstructionMintConflictError(input.candidateKeys, []);
-    }
-    throw new Error(`instruction mint reservation failed: ${message}`);
-  }
-}
-
-export async function releaseInstructionCardMint(
-  client: any,
-  input: { orgId: string; draftId: string },
-): Promise<void> {
-  const { error } = await client.rpc(
-    "release_makesafe_instruction_key_mint",
-    { p_org_id: input.orgId, p_draft_id: input.draftId },
-  );
-  if (error) throw error;
 }
