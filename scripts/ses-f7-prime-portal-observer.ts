@@ -22,11 +22,14 @@ import {
 import {
   extractPortalLinks,
 } from "../supabase/functions/ops-api/makesafe_portal_guard.ts";
+import {
+  isCanonicalLiveMakesafeBoardJobStatus,
+} from "../supabase/functions/ops-api/makesafe_board_read_model.ts";
 
 const PROJECT_REF = "kevgrhcjxspbxgovpmfl";
 const MANAGEMENT_QUERY_URL =
   `https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query`;
-const OBSERVER_VERSION = "ses-prime-portal-observer/2026-08-02.2";
+const OBSERVER_VERSION = "ses-prime-portal-observer/2026-08-02.3";
 const DEFAULT_OUTPUT_DIR =
   "docs/evidence/ses-f7-prime-portal-capture-dry-run-2026-08-02";
 const DEFAULT_INITIAL_WAIT_MS = 8_000;
@@ -163,23 +166,46 @@ type ObserverOptions = {
 };
 
 type ObserverSummary = {
-  portalLinks: number;
-  submittedLocked: number;
-  inProgress: number;
-  notStarted: number;
-  cannotObserve: number;
-  roofProvable: number;
-  roofCards: number;
+  observedTotal: PopulationCountSummary;
+  canonicalLiveBoard: PopulationCountSummary;
   outputDir: string;
 };
 
+type PopulationName =
+  | "observed_total"
+  | "canonical_live_board"
+  | "off_board_observed";
+
+type PopulationCountSummary = {
+  population: PopulationName;
+  candidate_cards: number;
+  portal_cards: number;
+  portal_links: number;
+  by_outcome: Record<string, number>;
+  by_planned_action: Record<string, number>;
+  existing_capture_rows: number;
+  roof_cards: number;
+  roof_would_become_provable: number;
+  roof_would_remain_unprovable: number;
+  roof_remain_unprovable_by_reason: Record<string, number>;
+};
+
 export class ObserverUsageError extends Error {}
+
+export function observerPopulationForJobStatus(
+  value: unknown,
+): "canonical_live_board" | "off_board_observed" {
+  return isCanonicalLiveMakesafeBoardJobStatus(value)
+    ? "canonical_live_board"
+    : "off_board_observed";
+}
 
 type SanitizedTaskResult = {
   job_id: string;
   job_number: string;
   builder_reference: string;
   family: string;
+  population: "canonical_live_board" | "off_board_observed";
   cycle_number: number;
   attendance_cycle_id: string | null;
   link_index: number;
@@ -738,7 +764,7 @@ select
   d.attendance_cycle_id
 from jobs j
 join makesafe_job_details d on d.job_id = j.id
-where j.status not in ('cancelled', 'archived', 'lost')
+where j.status not in ('cancelled', 'lost')
   and (
     j.type = 'makesafe'
     or (j.type = 'insurance' and j.metadata->>'insurance_job_type' = 'restoration')
@@ -895,16 +921,25 @@ function toonString(value: string): string {
 }
 
 function printSummary(summary: ObserverSummary): void {
+  const total = summary.observedTotal;
+  const board = summary.canonicalLiveBoard;
   console.log(`result:
   mode: dry-run
   production_writes: 0
   stage_moves: 0
-  portal_links: ${summary.portalLinks}
-  submitted_locked: ${summary.submittedLocked}
-  in_progress: ${summary.inProgress}
-  not_started: ${summary.notStarted}
-  cannot_observe: ${summary.cannotObserve}
-  roof_provable: ${summary.roofProvable} of ${summary.roofCards}
+  observed_total_candidate_cards: ${total.candidate_cards} of ${total.candidate_cards} observed-total candidate cards
+  observed_total_portal_cards: ${total.portal_cards} of ${total.candidate_cards} observed-total candidate cards
+  observed_total_portal_links: ${total.portal_links} of ${total.portal_links} observed-total links
+  canonical_live_board_portal_cards: ${board.portal_cards} of ${board.candidate_cards} canonical-live-board candidate cards
+  canonical_live_board_portal_links: ${board.portal_links} of ${total.portal_links} observed-total links
+  observed_total_submitted_locked: ${
+    total.by_outcome.submitted_locked || 0
+  } of ${total.portal_links} observed-total links
+  canonical_live_board_submitted_locked: ${
+    board.by_outcome.submitted_locked || 0
+  } of ${board.portal_links} canonical-live-board links
+  observed_total_roof_provable: ${total.roof_would_become_provable} of ${total.roof_cards} observed-total roof cards
+  canonical_live_board_roof_provable: ${board.roof_would_become_provable} of ${board.roof_cards} canonical-live-board roof cards
 artifacts[2]{kind,path}:
   report,${toonString(`${summary.outputDir}/report.md`)}
   manifest,${toonString(`${summary.outputDir}/dry-run.json`)}`);
@@ -926,20 +961,134 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await Deno.writeTextFile(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function countBy(
+  rows: SanitizedTaskResult[],
+  field: "outcome" | "planned_action",
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const row of rows) {
+    const value = String(row[field] || "unknown");
+    counts[value] = (counts[value] || 0) + 1;
+  }
+  return counts;
+}
+
+function roofUnprovableReasons(
+  cards: BoardCard[],
+  results: SanitizedTaskResult[],
+  provableIds: ReadonlySet<string>,
+): Record<string, number> {
+  const reasons: Record<string, number> = {};
+  for (const card of cards.filter(isRoofCard)) {
+    if (provableIds.has(card.job_id)) continue;
+    const rows = results.filter((result) => result.job_id === card.job_id);
+    let reason = "no_genuine_portal_link";
+    if (rows.some((row) => row.reason_code === "missing_attendance_cycle")) {
+      reason = "missing_attendance_cycle";
+    } else if (
+      rows.some((row) => row.reason_code === "missing_builder_reference")
+    ) {
+      reason = "missing_builder_reference";
+    } else if (rows.some((row) => row.reason_code === "unbound_capture_role")) {
+      reason = "unbound_capture_role";
+    } else if (rows.some((row) => row.outcome === "in_progress")) {
+      reason = "in_progress_not_submitted";
+    } else if (rows.some((row) => row.outcome === "not_started")) {
+      reason = "not_started";
+    } else if (
+      rows.some((row) => row.reason_code === "expired_or_inactive_link")
+    ) {
+      reason = "expired_or_inactive_link";
+    } else if (rows.some((row) => row.outcome === "cannot_observe")) {
+      reason = "cannot_observe_other";
+    }
+    reasons[reason] = (reasons[reason] || 0) + 1;
+  }
+  return reasons;
+}
+
+function summarizePopulation(
+  population: PopulationName,
+  allCards: BoardCard[],
+  allResults: SanitizedTaskResult[],
+  existingRows: ExistingCaptureLike[],
+): PopulationCountSummary {
+  const cards = population === "observed_total"
+    ? allCards
+    : allCards.filter((card) =>
+      (population === "canonical_live_board") ===
+        isCanonicalLiveMakesafeBoardJobStatus(card.job_status)
+    );
+  const cardIds = new Set(cards.map((card) => card.job_id));
+  const results = allResults.filter((row) => cardIds.has(row.job_id));
+  const roofCards = cards.filter(isRoofCard);
+  const roofDoneIds = new Set(
+    results.filter((row) =>
+      row.family === "roof_report" && row.role === "roof_report" &&
+      row.outcome === "submitted_locked" && row.recordable &&
+      !!row.screenshot
+    ).map((row) => row.job_id),
+  );
+  return {
+    population,
+    candidate_cards: cards.length,
+    portal_cards: new Set(results.map((row) => row.job_id)).size,
+    portal_links: results.length,
+    by_outcome: countBy(results, "outcome"),
+    by_planned_action: countBy(results, "planned_action"),
+    existing_capture_rows: existingRows.filter((row) => cardIds.has(row.job_id))
+      .length,
+    roof_cards: roofCards.length,
+    roof_would_become_provable: roofDoneIds.size,
+    roof_would_remain_unprovable: roofCards.length - roofDoneIds.size,
+    roof_remain_unprovable_by_reason: roofUnprovableReasons(
+      cards,
+      results,
+      roofDoneIds,
+    ),
+  };
+}
+
+function outcomeTableRow(
+  label: string,
+  counts: PopulationCountSummary,
+): string {
+  const outcomes = [
+    "submitted_locked",
+    "in_progress",
+    "not_started",
+    "cannot_observe",
+  ];
+  return `| ${label} | ${counts.candidate_cards} candidate cards | ${counts.portal_cards} of ${counts.candidate_cards} candidate cards | ${counts.portal_links} links | ${
+    outcomes.map((outcome) =>
+      `${counts.by_outcome[outcome] || 0} of ${counts.portal_links} links`
+    ).join(" | ")
+  } |`;
+}
+
 function reportMarkdown(manifest: any): string {
-  const c = manifest.counts;
+  const total = manifest.counts.observed_total as PopulationCountSummary;
+  const board = manifest.counts.canonical_live_board as PopulationCountSummary;
+  const offBoard = manifest.counts.off_board_observed as PopulationCountSummary;
   const rows = manifest.results.map((row: SanitizedTaskResult) =>
-    `| ${row.job_number} | ${row.builder_reference || "(unavailable)"} | ${
-      row.role || "unbound"
-    } | ${row.outcome} | ${
+    `| ${row.job_number} | ${row.population} | ${
+      row.builder_reference || "(unavailable)"
+    } | ${row.role || "unbound"} | ${row.outcome} | ${
       row.answered_fields == null
         ? "-"
         : `${row.answered_fields}/${row.total_fields}`
     } | ${row.planned_action} | ${row.plan_reason} |`
   ).join("\n");
-  const roofReasons = Object.entries(c.roof_remain_unprovable_by_reason)
-    .map(([reason, count]) => `- ${reason}: ${count}`)
-    .join("\n");
+  const reasonRows = [
+    ["canonical-live-board", board] as const,
+    ["observed-total", total] as const,
+    ["off-board-observed", offBoard] as const,
+  ].flatMap(([label, counts]) =>
+    Object.entries(counts.roof_remain_unprovable_by_reason).map(
+      ([reason, count]) =>
+        `| ${label} | ${reason} | ${count} of ${counts.roof_would_remain_unprovable} unprovable roof cards |`,
+    )
+  ).join("\n");
   return `# F7 Prime portal observer - production dry run
 
 Generated: ${manifest.generated_at}
@@ -948,36 +1097,73 @@ Observer: \`${manifest.observer_version}\`
 
 ## Result
 
-The observer read ${c.portal_cards} active board cards carrying ${c.portal_links} genuine portal links. It performed no production write and no stage move. Every database query used the Management API with \`read_only: true\`.
+The observer retained the wider read-only set and labelled every result with canonical live-board membership. The observed-total population contains ${total.candidate_cards} of ${total.candidate_cards} candidate cards; ${total.portal_cards} of ${total.candidate_cards} carry ${total.portal_links} genuine portal links. The canonical-live-board partition contains ${board.candidate_cards} of ${total.candidate_cards} observed-total candidate cards; ${board.portal_cards} of ${board.candidate_cards} carry ${board.portal_links} genuine portal links. The off-board-observed partition contains ${offBoard.candidate_cards} of ${total.candidate_cards} observed-total candidate cards; ${offBoard.portal_cards} of ${offBoard.candidate_cards} carry ${offBoard.portal_links} genuine portal links.
 
-Link outcomes:
+It performed 0 production writes among ${total.candidate_cards} observed-total candidate cards and 0 stage moves among ${total.candidate_cards} observed-total candidate cards. Every database query used the Management API with \`read_only: true\`.
 
-- submitted/locked: ${c.by_outcome.submitted_locked || 0}
-- in progress: ${c.by_outcome.in_progress || 0}
-- not started: ${c.by_outcome.not_started || 0}
-- cannot observe: ${c.by_outcome.cannot_observe || 0}
+## Population-partitioned outcomes
 
-Roof result: ${c.roof_would_become_provable} of ${c.roof_cards} active roof cards would become screenshot-provable from this dry run. ${c.roof_would_remain_unprovable} would remain unprovable.
+| Population | Candidate-card denominator | Portal-card denominator | Link denominator | Submitted/locked | In progress | Not started | Cannot observe |
+|---|---:|---:|---:|---:|---:|---:|---:|
+${outcomeTableRow("canonical-live-board", board)}
+${outcomeTableRow("observed-total", total)}
+${outcomeTableRow("off-board-observed", offBoard)}
 
-Why roof cards remain unprovable:
+## Roof result
 
-${roofReasons || "- none"}
+| Population | Roof-card denominator | Screenshot-provable | Remains unprovable |
+|---|---:|---:|---:|
+| canonical-live-board | ${board.roof_cards} roof cards | ${board.roof_would_become_provable} of ${board.roof_cards} roof cards | ${board.roof_would_remain_unprovable} of ${board.roof_cards} roof cards |
+| observed-total | ${total.roof_cards} roof cards | ${total.roof_would_become_provable} of ${total.roof_cards} roof cards | ${total.roof_would_remain_unprovable} of ${total.roof_cards} roof cards |
+| off-board-observed | ${offBoard.roof_cards} roof cards | ${offBoard.roof_would_become_provable} of ${offBoard.roof_cards} roof cards | ${offBoard.roof_would_remain_unprovable} of ${offBoard.roof_cards} roof cards |
+
+Why roof cards remain unprovable, with each reason measured against its named population's unprovable-roof denominator:
+
+| Population | Reason | Count and denominator |
+|---|---|---:|
+${reasonRows || "| observed-total | none | 0 of 0 unprovable roof cards |"}
+
+## Capture-revision plan
+
+| Population | Create revision | Idempotent no-op | Cannot record | Existing ledger rows |
+|---|---:|---:|---:|---:|
+| canonical-live-board | ${
+    board.by_planned_action.create_revision || 0
+  } of ${board.portal_links} links | ${
+    board.by_planned_action.idempotent_noop || 0
+  } of ${board.portal_links} links | ${
+    board.by_planned_action.cannot_record || 0
+  } of ${board.portal_links} links | ${board.existing_capture_rows} rows among ${board.candidate_cards} candidate cards |
+| observed-total | ${
+    total.by_planned_action.create_revision || 0
+  } of ${total.portal_links} links | ${
+    total.by_planned_action.idempotent_noop || 0
+  } of ${total.portal_links} links | ${
+    total.by_planned_action.cannot_record || 0
+  } of ${total.portal_links} links | ${total.existing_capture_rows} rows among ${total.candidate_cards} candidate cards |
+| off-board-observed | ${
+    offBoard.by_planned_action.create_revision || 0
+  } of ${offBoard.portal_links} links | ${
+    offBoard.by_planned_action.idempotent_noop || 0
+  } of ${offBoard.portal_links} links | ${
+    offBoard.by_planned_action.cannot_record || 0
+  } of ${offBoard.portal_links} links | ${offBoard.existing_capture_rows} rows among ${offBoard.candidate_cards} candidate cards |
 
 ## Privacy and write safety
 
-The observer blanked Prime's \`prime-object-summary\` job-details component and then covered the viewport with an opaque evidence-only frame before each screenshot. The frame contains only job reference, builder reference, the classified Prime status phrase, field count, observation time, and the redaction notice. Raw page text and share URLs are omitted from this artifact; only SHA-256 fingerprints remain.
+The observer blanked Prime's \`prime-object-summary\` job-details component and then covered the viewport with an opaque evidence-only frame before each screenshot. The frame contains only job reference, builder reference, the classified Prime status phrase, field count, observation time, and the redaction notice. Raw page text and share URLs are omitted from this artifact; only SHA-256 fingerprints remain. Screenshot verification covers every screenshot referenced by the ${total.portal_links}-link observed-total manifest.
 
 The dry run planned the existing \`record_ses_portal_capture_evidence\` contract but did not call it. Unchanged observations already present in the ledger are \`idempotent_noop\`; changed or absent observations are \`create_revision\` candidates. Expired, inactive, failed, and unclassifiable pages are always \`cannot_observe\`, never \`not_started\`.
 
 ## Per-link result
 
-| Card | Builder ref | Role | Outcome | Fields | Planned action | Reason |
-|---|---|---|---|---:|---|---|
+| Card | Population | Builder ref | Role | Outcome | Fields | Planned action | Reason |
+|---|---|---|---|---|---:|---|---|
 ${rows}
 
 ## Query and code evidence
 
-- Q1: active board cards plus exact current cycle and genuine portal-link source facts, Management API \`read_only: true\`.
+- Q1: observed-total candidate cards plus exact current cycle and genuine portal-link source facts, labelled by the canonical live-board predicate shared with \`loadCanonicalMakesafeBoard\`; Management API \`read_only: true\`.
 - Q2: existing \`makesafe_portal_capture_revisions\` rows for idempotency comparison, Management API \`read_only: true\`.
 - Q3: current intake/identity authority required to derive the exact U4 builder reference, Management API \`read_only: true\`.
 - Detailed sanitized results and screenshot hashes: [dry-run.json](dry-run.json).
@@ -1092,11 +1278,13 @@ async function run(): Promise<ObserverSummary | null> {
       );
     }
 
+    const population = observerPopulationForJobStatus(task.card.job_status);
     results.push({
       job_id: task.card.job_id,
       job_number: task.card.job_number,
       builder_reference: task.builder_reference,
       family: boardFamily(task.card),
+      population,
       cycle_number: Number(task.card.cycle_number || 1),
       attendance_cycle_id: task.card.attendance_cycle_id,
       link_index: task.link_index,
@@ -1123,54 +1311,35 @@ async function run(): Promise<ObserverSummary | null> {
     });
 
     console.error(
-      `[${index + 1}/${tasks.length}] ${task.card.job_number} ${
+      `[observed-total link ${
+        index + 1
+      }/${tasks.length}; ${population}] ${task.card.job_number} ${
         task.role || "unbound"
       } ${verdict.outcome}`,
     );
   }
 
-  const byOutcome: Record<string, number> = {};
-  for (const result of results) {
-    byOutcome[result.outcome] = (byOutcome[result.outcome] || 0) + 1;
-  }
-  const portalCardIds = new Set(results.map((row) => row.job_id));
-  const roofCards = live.cards.filter(isRoofCard);
-  const roofDoneIds = new Set(
-    results.filter((row) =>
-      row.family === "roof_report" && row.role === "roof_report" &&
-      row.outcome === "submitted_locked" && row.recordable &&
-      !!row.screenshot
-    ).map((row) => row.job_id),
+  const observedTotal = summarizePopulation(
+    "observed_total",
+    live.cards,
+    results,
+    live.existing,
   );
-  const roofReasons: Record<string, number> = {};
-  for (const card of roofCards) {
-    if (roofDoneIds.has(card.job_id)) continue;
-    const rows = results.filter((result) => result.job_id === card.job_id);
-    let reason = "no_genuine_portal_link";
-    if (rows.some((row) => row.reason_code === "missing_attendance_cycle")) {
-      reason = "missing_attendance_cycle";
-    } else if (
-      rows.some((row) => row.reason_code === "missing_builder_reference")
-    ) {
-      reason = "missing_builder_reference";
-    } else if (rows.some((row) => row.reason_code === "unbound_capture_role")) {
-      reason = "unbound_capture_role";
-    } else if (rows.some((row) => row.outcome === "in_progress")) {
-      reason = "in_progress_not_submitted";
-    } else if (rows.some((row) => row.outcome === "not_started")) {
-      reason = "not_started";
-    } else if (
-      rows.some((row) => row.reason_code === "expired_or_inactive_link")
-    ) {
-      reason = "expired_or_inactive_link";
-    } else if (rows.some((row) => row.outcome === "cannot_observe")) {
-      reason = "cannot_observe_other";
-    }
-    roofReasons[reason] = (roofReasons[reason] || 0) + 1;
-  }
+  const canonicalLiveBoard = summarizePopulation(
+    "canonical_live_board",
+    live.cards,
+    results,
+    live.existing,
+  );
+  const offBoardObserved = summarizePopulation(
+    "off_board_observed",
+    live.cards,
+    results,
+    live.existing,
+  );
 
   const manifest = {
-    schema_version: "ses-f7-prime-portal-dry-run/v1",
+    schema_version: "ses-f7-prime-portal-dry-run/v2",
     observer_version: OBSERVER_VERSION,
     capture_producer_contract: SES_PORTAL_CAPTURE_PRODUCER,
     generated_at: generatedAt,
@@ -1182,15 +1351,9 @@ async function run(): Promise<ObserverSummary | null> {
       stage_moves: 0,
     },
     counts: {
-      active_board_cards: live.cards.length,
-      portal_cards: portalCardIds.size,
-      portal_links: results.length,
-      by_outcome: byOutcome,
-      existing_capture_rows: live.existing.length,
-      roof_cards: roofCards.length,
-      roof_would_become_provable: roofDoneIds.size,
-      roof_would_remain_unprovable: roofCards.length - roofDoneIds.size,
-      roof_remain_unprovable_by_reason: roofReasons,
+      observed_total: observedTotal,
+      canonical_live_board: canonicalLiveBoard,
+      off_board_observed: offBoardObserved,
     },
     results,
   };
@@ -1200,16 +1363,11 @@ async function run(): Promise<ObserverSummary | null> {
     reportMarkdown(manifest),
   );
   console.error(
-    `complete: ${results.length} links; roof provable ${roofDoneIds.size}/${roofCards.length}`,
+    `complete: observed-total ${observedTotal.portal_links}/${observedTotal.portal_links} links across ${observedTotal.portal_cards}/${observedTotal.candidate_cards} portal/candidate cards; canonical-live-board ${canonicalLiveBoard.portal_links}/${observedTotal.portal_links} links and ${canonicalLiveBoard.roof_would_become_provable}/${canonicalLiveBoard.roof_cards} provable roof cards`,
   );
   return {
-    portalLinks: results.length,
-    submittedLocked: byOutcome.submitted_locked || 0,
-    inProgress: byOutcome.in_progress || 0,
-    notStarted: byOutcome.not_started || 0,
-    cannotObserve: byOutcome.cannot_observe || 0,
-    roofProvable: roofDoneIds.size,
-    roofCards: roofCards.length,
+    observedTotal,
+    canonicalLiveBoard,
     outputDir: options.outputDir,
   };
 }

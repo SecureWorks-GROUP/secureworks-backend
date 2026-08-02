@@ -1,304 +1,334 @@
 # F7 Prime portal observer - production dry run
 
-Generated: 2026-08-02T05:14:00.934Z
-Generation: `sha256:b07887d5904c68fa74aa`
-Observer: `ses-prime-portal-observer/2026-08-02.2`
+Generated: 2026-08-02T06:45:03.128Z
+Generation: `sha256:4625930d912a666fe172`
+Observer: `ses-prime-portal-observer/2026-08-02.3`
 
 ## Result
 
-The ruled design is a deterministic observer against the board, outside the reporting skill, with the trade button preserved as an independent channel (`/Users/marninstobbe/kun-agent-workspace/data/decisions/2026-08-02-card-identity-and-portal-capture.md:27-53`). This run read **111 active board cards carrying 236 genuine portal links**. It performed **zero production writes and zero stage moves**; every database query used the Management API with `read_only: true` (`dry-run.json:7-16`; `scripts/ses-f7-prime-portal-observer.ts:212-241,711-761`).
+The ruled design is deterministic board-side observation, outside the reporting skill, with the trade button retained as an independent channel (`/Users/marninstobbe/kun-agent-workspace/data/decisions/2026-08-02-card-identity-and-portal-capture.md:27-53`). The population correction requires a label rather than a filter: keep observing the wider set, tag each card on-board or off-board from the canonical owner, and publish every count with its population and denominator (`/Users/marninstobbe/kun-agent-workspace/data/ses-f7-portal-capture-engine-v1/decision-f7-001.md:13-36`).
 
-Link outcomes:
+This refreshed run observed 403 of 403 observed-total candidate cards. Of those, 266 of 403 are in the canonical-live-board population and 137 of 403 are in the off-board-observed population. It performed 0 production writes among 403 observed-total candidate cards and 0 stage moves among 403 observed-total candidate cards; every database query used the Management API with `read_only: true` (`dry-run.json:7-18,41-72`; `scripts/ses-f7-prime-portal-observer.ts:238-267,745-814`).
 
-- submitted/locked: **9**
-- in progress: **6**
-- not started: **4**
-- cannot observe: **217**
+## Population-partitioned outcomes
 
-These totals are the manifest's exhaustive 236-row partition (`dry-run.json:13-23`). The classifier maps completion only from observed locked/submitted language, maps answered counts without that language to in-progress/not-started, and maps expired, failed, empty, or unclassifiable pages to `cannot_observe` (`scripts/ses-f7-prime-portal-observer.ts:244-360`).
+| Population | Candidate-card denominator | Portal-card denominator | Link denominator | Submitted/locked | In progress | Not started | Cannot observe |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| canonical-live-board | 266 of 403 observed-total candidate cards | 103 of 266 canonical-live-board candidate cards | 217 of 236 observed-total links | 6 of 217 canonical-live-board links | 6 of 217 canonical-live-board links | 4 of 217 canonical-live-board links | 201 of 217 canonical-live-board links |
+| observed-total | 403 of 403 observed-total candidate cards | 111 of 403 observed-total candidate cards | 236 of 236 observed-total links | 9 of 236 observed-total links | 6 of 236 observed-total links | 4 of 236 observed-total links | 217 of 236 observed-total links |
+| off-board-observed | 137 of 403 observed-total candidate cards | 8 of 137 off-board-observed candidate cards | 19 of 236 observed-total links | 3 of 19 off-board-observed links | 0 of 19 off-board-observed links | 0 of 19 off-board-observed links | 16 of 19 off-board-observed links |
 
-Across all families, **17 links are exact capture-revision candidates**: 3 `done`, 1 `not_done`, and 13 `unreachable`; the other 219 cannot be recorded because the current card lacks a canonical cycle/reference/role binding (Q4 below). Production still contains **zero existing capture rows**, so no candidate was an idempotent no-op in this first run (`dry-run.json:23`; Q4).
+The previously reported 9 submitted/locked, 6 in-progress, 4 not-started, 217 cannot-observe split is unchanged for the 236-link observed-total population. The canonical-live-board result is materially narrower: 6 submitted/locked, 6 in-progress, 4 not-started, and 201 cannot-observe among 217 canonical-live-board links. The remaining 3 submitted/locked and 16 cannot-observe results belong to the 19-link off-board-observed population (`dry-run.json:14-23,41-50,68-75`).
 
-## Roof answer
+The observer's wider SQL still excludes only cancelled/lost jobs, while each result is labelled through the shared canonical live-board predicate; the predicate's owner also supplies the board query filter (`scripts/ses-f7-prime-portal-observer.ts:195-208,745-767,1281-1318`; `supabase/functions/ops-api/makesafe_board_read_model.ts:30-57`; `supabase/functions/ops-api/index.ts:14741-14774`).
 
-**2 of 60 active roof cards would become screenshot-provable: `SWMS-261019` and `SWMS-26980`. The other 58 remain unprovable.** Both passing rows are current-cycle roof captures with an observed lock, non-empty builder reference, screenshot hash/size, and `create_revision` plan (`dry-run.json:36-65,5462-5491`; Q5).
+## Roof result
 
-Primary reasons the 58 roof cards remain unprovable:
+| Population | Roof-card denominator | Screenshot-provable | Remains unprovable |
+|---|---:|---:|---:|
+| canonical-live-board | 51 of 60 observed-total roof cards | 2 of 51 canonical-live-board roof cards | 49 of 51 canonical-live-board roof cards |
+| observed-total | 60 of 60 observed-total roof cards | 2 of 60 observed-total roof cards | 58 of 60 observed-total roof cards |
+| off-board-observed | 9 of 60 observed-total roof cards | 0 of 9 off-board-observed roof cards | 9 of 9 off-board-observed roof cards |
 
-- no genuine portal link: **9**
-- missing current attendance cycle: **6**
-- missing canonical builder reference: **36**
-- expired or inactive link: **6**
-- reachable but in progress, not submitted: **1**
+Plain answer: 2 of 51 canonical-live-board roof cards would become screenshot-provable, and 49 of 51 would remain unprovable. Across the wider observed-total population, 2 of 60 roof cards would become provable and 58 of 60 would remain unprovable. The 9 off-board-observed roof cards contribute 0 provable and 9 unprovable cards. The two provable on-board cards are `SWMS-261019` and `SWMS-26980`; both have a current cycle, canonical builder reference, typed roof link, observed lock, and hash-bound screenshot (`dry-run.json:30-38,57-65,82-88,93-123,5751-5779`).
 
-The primary-reason counts are mutually exclusive and sum to 58; precedence is cycle, canonical reference, typed role, unfinished state, expiry/unavailability (`dry-run.json:24-33`; `scripts/ses-f7-prime-portal-observer.ts:1133-1158`). This is a stricter answer than the pre-F7 audit's 46 unproved roof jobs: direct observation found completed forms, but a completion is not called provable unless the whole ledger binding and screenshot contract can accept it. The earlier baseline was 60 roof cards, 51 with a share link, and zero screenshot capture rows (`/Users/marninstobbe/kun-agent-workspace/data/ses-portal-completion-truth-audit-v1/report.md:23-36,68-76`).
+Why roof cards remain unprovable, with each reason measured against its named population's unprovable-roof denominator:
 
-`SWMS-26934` is confirmed locked at **21 of 23**, with a redacted, hash-bound screenshot, but it remains unrecordable because the canonical U4 builder reference is empty. Calling it provable would make the existing endpoint reject the row; this is a real identity blocker, not unfinished portal work (`dry-run.json:5315-5344`; `supabase/functions/ops-api/ses_portal_capture_evidence.ts:221-280`).
+| Population | Reason | Count and denominator |
+|---|---|---:|
+| canonical-live-board | no_genuine_portal_link | 6 of 49 unprovable roof cards |
+| canonical-live-board | missing_attendance_cycle | 6 of 49 unprovable roof cards |
+| canonical-live-board | missing_builder_reference | 31 of 49 unprovable roof cards |
+| canonical-live-board | expired_or_inactive_link | 5 of 49 unprovable roof cards |
+| canonical-live-board | in_progress_not_submitted | 1 of 49 unprovable roof cards |
+| observed-total | no_genuine_portal_link | 9 of 58 unprovable roof cards |
+| observed-total | missing_attendance_cycle | 6 of 58 unprovable roof cards |
+| observed-total | missing_builder_reference | 36 of 58 unprovable roof cards |
+| observed-total | expired_or_inactive_link | 6 of 58 unprovable roof cards |
+| observed-total | in_progress_not_submitted | 1 of 58 unprovable roof cards |
+| off-board-observed | no_genuine_portal_link | 3 of 9 unprovable roof cards |
+| off-board-observed | missing_builder_reference | 5 of 9 unprovable roof cards |
+| off-board-observed | expired_or_inactive_link | 1 of 9 unprovable roof cards |
+
+Each reason table is a mutually exclusive exhaustive partition of that population's unprovable-roof denominator (`dry-run.json:30-38,57-65,82-88`; `scripts/ses-f7-prime-portal-observer.ts:984-1062`). This corrects the earlier report's mislabeled active population while preserving its wider 60-roof evidence set. The pre-F7 baseline itself reported 60 roof cards, 51 with share links, and 0 screenshot capture rows under its then-stated population (`/Users/marninstobbe/kun-agent-workspace/data/ses-portal-completion-truth-audit-v1/report.md:23-36,68-76`).
+
+`SWMS-26934` remains an important on-board distinction: the portal is observed locked at 21 of 23 with a redacted, hash-bound screenshot, but the row is unrecordable because the canonical U4 builder reference is empty. It is completed portal work, not yet provable ledger evidence (`dry-run.json:5597-5627`; `supabase/functions/ops-api/ses_portal_capture_evidence.ts:221-280`).
+
+## Capture-revision plan
+
+| Population | Create revision | Idempotent no-op | Cannot record | Existing ledger rows |
+|---|---:|---:|---:|---:|
+| canonical-live-board | 11 of 217 canonical-live-board links | 0 of 217 canonical-live-board links | 206 of 217 canonical-live-board links | 0 rows among 266 canonical-live-board candidate cards |
+| observed-total | 17 of 236 observed-total links | 0 of 236 observed-total links | 219 of 236 observed-total links | 0 rows among 403 observed-total candidate cards |
+| off-board-observed | 6 of 19 off-board-observed links | 0 of 19 off-board-observed links | 13 of 19 off-board-observed links | 0 rows among 137 off-board-observed candidate cards |
+
+The plan counts are exhaustive per population and production contains 0 existing ledger rows among all 403 observed-total candidate cards (`dry-run.json:25-29,52-56,77-81`). This is a dry-run plan only; the separate authorised write step has not occurred.
 
 ## Privacy and write safety
 
-The observer blanked Prime's `prime-object-summary` job-details component and then covered the viewport with an opaque evidence-only frame before each screenshot. It fails closed unless every panel is blank, the white frame covers sampled viewport corners and centre, and the frame is still opaque (`scripts/ses-f7-prime-portal-observer.ts:410-458,578-632`). It then verifies PNG signature, minimum dimensions, byte size, and SHA-256 before accepting the file (`scripts/ses-f7-prime-portal-observer.ts:634-685`).
+The observer blanks every Prime `prime-object-summary` job-details component, installs an opaque fixed evidence frame, and fails closed unless every details panel is blank and the frame covers the viewport (`scripts/ses-f7-prime-portal-observer.ts:436-483,612-667`). The frame is derived only from job reference, builder reference, classified state/count, observation time, and a redaction notice; it never interpolates arbitrary portal text (`scripts/ses-f7-prime-portal-observer.ts:436-483`; `scripts/test/ses-f7-prime-portal-observer_test.ts:119-141`).
 
-The frame contains only job reference, builder reference, the classified Prime status phrase, field count, observation time, and the redaction notice. Raw page text and share URLs are omitted from this artifact; only SHA-256 fingerprints remain (`scripts/ses-f7-prime-portal-observer.ts:410-458,1006-1041,1083-1111`). All **19** generated screenshots were hash-reverified against the manifest and visually inspected together; every one showed the opaque evidence frame, every one reported exactly one redacted job-details panel, and none exposed client/contact/address data (Q6-Q7).
+All 19 of 19 observed-total screenshots were independently SHA-256 rechecked and visually inspected. The partition is 16 of 19 screenshots from canonical-live-board links and 3 of 19 from off-board-observed links; all 19 of 19 report exactly one redacted details panel and an opaque verified frame. An `rg` scan found 0 raw URLs, 0 email shapes, and 0 phone/address shapes in the two generated text artifacts. No client/contact/address data is visible in the 19-of-19 screenshot contact sheet (Q7-Q8).
 
-The dry run planned the existing `record_ses_portal_capture_evidence` contract but did not call it. That existing endpoint re-reads the canonical job/cycle/reference/typed URL, requires PNG evidence for `done`/`not_done`, forbids a screenshot for `unreachable`, uploads content-addressed bytes, and commits through the append-only ledger RPC (`supabase/functions/ops-api/ses_portal_capture_evidence.ts:210-280,283-418`; `supabase/migrations/20260728500000_makesafe_portal_capture_bridge_u4.sql:53-106,108-247`). Unchanged observations already present in the ledger are `idempotent_noop`; changed or absent observations are `create_revision` candidates. The stable idempotency identity excludes timestamped screenshot bytes but requires a valid stored screenshot hash for reachable no-ops (`scripts/ses-f7-prime-portal-observer.ts:362-380,1043-1081`).
+The dry run planned the existing `record_ses_portal_capture_evidence` contract but did not call it. The endpoint re-reads the exact job/cycle/reference/typed URL, requires hash-verified PNG evidence for `done`/`not_done`, forbids screenshots for `unreachable`, and commits through the append-only ledger RPC (`supabase/functions/ops-api/ses_portal_capture_evidence.ts:210-280,283-418`; `supabase/migrations/20260728500000_makesafe_portal_capture_bridge_u4.sql:53-106,108-247`). Unchanged exact observations already in the ledger are `idempotent_noop`; changed or absent observations are `create_revision` candidates (`scripts/ses-f7-prime-portal-observer.ts:390-428,1242-1279`). Expired, inactive, failed, empty, and unclassifiable pages are always `cannot_observe`, never `not_started`; only observed locked/submitted language becomes completion (`scripts/ses-f7-prime-portal-observer.ts:287-380`; `scripts/test/ses-f7-prime-portal-observer_test.ts:18-63`).
 
 ## Board connection
 
-The canonical board loader now reads the existing `makesafe_portal_capture_revisions` ledger and fails closed to no new evidence if that additive read fails (`supabase/functions/ops-api/index.ts:15243-15257,15354-15386`). The read model accepts only the exact current job/cycle/role/URL, approved producer and result/status shape, non-empty builder reference, valid source hash, and screenshot floor for `done`/`not_done`; it deduplicates newest-first by role plus URL (`supabase/functions/ops-api/makesafe_board_read_model.ts:155-270`).
+The canonical board loader now reads the existing `makesafe_portal_capture_revisions` ledger and fails closed to no new capture evidence if that additive read fails (`supabase/functions/ops-api/index.ts:15244-15258,15355-15387`). The read model accepts only exact current job/cycle/role/URL rows with the approved producer, result/status shape, non-empty builder reference, valid source hash, and screenshot floor for reachable states; newest accepted ledger evidence supersedes the older embedded detail capture for the same role/URL (`supabase/functions/ops-api/makesafe_board_read_model.ts:209-280,627-640`).
 
-Accepted revisions supersede any older embedded detail capture for the same role and URL, feed the existing evidence computation, and expose sanitized revision provenance. `canonical_stage` remains the existing declared/display value; no placement-authority cutover was made (`supabase/functions/ops-api/makesafe_board_read_model.ts:590-659,660-723`). This closes the exact disconnection identified by the reconciliation audit without inventing a second store or weakening the screenshot floor (`/Users/marninstobbe/kun-agent-workspace/data/ses-stage-engine-reconcile-audit-v1/report.md:147-184`).
+Accepted revisions feed the existing evidence computation, while `canonical_stage` remains the declared/display value. No stage derivation or placement authority changed (`supabase/functions/ops-api/makesafe_board_read_model.ts:650-704`; `supabase/functions/ops-api/makesafe_board_read_model_test.ts:126-176,178-295`). This closes the ledger disconnection identified by the reconciliation audit without inventing a second store or weakening the screenshot floor (`/Users/marninstobbe/kun-agent-workspace/data/ses-stage-engine-reconcile-audit-v1/report.md:147-184`).
 
 ## Per-link result
 
-| Card | Builder ref | Role | Outcome | Fields | Planned action | Reason |
-|---|---|---|---|---:|---|---|
-| SWMS-261019 | MLB-27037 | roof_report | submitted_locked | 22/24 | create_revision | new_or_changed_observation |
-| SWMS-261024 | MLB-27093 | unbound | in_progress | 6/6 | cannot_record | unbound_capture_role |
-| SWMS-261051 | WB69684 | unbound | cannot_observe | - | cannot_record | unbound_capture_role |
-| SWMS-261057 | (unavailable) | unbound | in_progress | 21/23 | cannot_record | unbound_capture_role |
-| SWMS-261079 | MLB-27148 | roof_report | submitted_locked | 22/24 | cannot_record | missing_attendance_cycle |
-| SWMS-261081 | MLB-27100 | roof_report | in_progress | 21/23 | cannot_record | missing_attendance_cycle |
-| SWMS-261103 | BWCWA-6781 | unbound | cannot_observe | - | cannot_record | missing_attendance_cycle |
-| SWMS-261113 | MLB-19475 | roof_report | not_started | 0/22 | cannot_record | missing_attendance_cycle |
-| SWMS-261114 | RR-26836 | roof_report | not_started | 0/22 | cannot_record | missing_attendance_cycle |
-| SWMS-261116 | MLB-27387 | roof_report | in_progress | 17/23 | cannot_record | missing_attendance_cycle |
-| SWMS-261123 | MLB-27309 | roof_report | in_progress | 19/23 | cannot_record | missing_attendance_cycle |
-| SWMS-26618 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26632 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26660 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26706 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26708 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26708 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26708 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26709 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26710 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26710 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26710 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26711 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26711 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26711 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26712 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26712 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26712 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26713 | MLB-26122 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26713 | MLB-26122 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26715 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26717 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26717 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26717 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26718 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26718 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26718 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26719 | MLB-24404 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26720 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26721 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26721 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26721 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26721 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26722 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26722 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26722 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26722 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26722 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26723 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26723 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26723 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26724 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26724 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26724 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26725 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26725 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26725 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26726 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26726 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26726 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26727 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26728 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26728 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26728 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26729 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26729 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26730 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26730 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26730 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26731 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26731 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26731 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26732 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26732 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26732 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26733 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26733 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26733 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26734 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26734 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26735 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26735 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26735 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26735 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26736 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26736 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26736 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26736 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26737 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26737 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26737 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26738 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26738 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26738 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26739 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26739 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26739 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26740 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26740 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26740 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26741 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26741 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26741 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26742 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26742 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26742 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26744 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26744 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26744 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26747 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26747 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26747 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26748 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26748 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26748 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26749 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26749 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26749 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26750 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26750 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26750 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26751 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26751 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26751 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26752 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26752 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26752 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26753 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26753 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26753 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26754 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26755 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26755 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26755 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26755 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26755 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26756 | MLB-25769 | assessment | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26756 | MLB-25769 | photos | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26756 | MLB-25769 | scope | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26756 | MLB-25769 | scope | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26756 | MLB-25769 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26757 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26757 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26757 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26759 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26759 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26759 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26759 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26762 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26763 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26766 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26766 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26766 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26769 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26769 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26769 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26770 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26770 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26770 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26772 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26772 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26772 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26773 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26775 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26775 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26775 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26779 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26779 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26779 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26780 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26780 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26780 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26781 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26781 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26781 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26783 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26785 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26785 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26785 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26786 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26787 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26787 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26787 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26788 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26788 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26788 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26789 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26789 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26789 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26791 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26791 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26791 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26792 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26792 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26792 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26793 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26795 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26803 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26805 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26810 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26814 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26844 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26846 | MLB-25898 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26847 | MLB-26060 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26848 | MLB-26549 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26849 | MLB-26499 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26851 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26851 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26851 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26852 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26852 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26852 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26853 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26853 | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26853 | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26855 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26857 | MLB-26177 | assessment | cannot_observe | - | create_revision | new_or_changed_observation |
-| SWMS-26858 | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26861 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26863 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26865 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26902 | (unavailable) | unbound | not_started | 0/4 | cannot_record | unbound_capture_role |
-| SWMS-26928 | MLB-26705 | roof_report | in_progress | 19/23 | create_revision | new_or_changed_observation |
-| SWMS-26933 | (unavailable) | roof_report | submitted_locked | 19/22 | cannot_record | missing_builder_reference |
-| SWMS-26933 | (unavailable) | roof_report | submitted_locked | 19/22 | cannot_record | missing_builder_reference |
-| SWMS-26934 | (unavailable) | roof_report | submitted_locked | 21/23 | cannot_record | missing_builder_reference |
-| SWMS-26946 | AJBR-69191 | roof_report | submitted_locked | 13/15 | create_revision | new_or_changed_observation |
-| SWMS-26953 | (unavailable) | unbound | not_started | 0/4 | cannot_record | unbound_capture_role |
-| SWMS-26957 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26964 | (unavailable) | roof_report | submitted_locked | 21/23 | cannot_record | missing_builder_reference |
-| SWMS-26980 | MLB-26567 | roof_report | submitted_locked | 20/23 | create_revision | new_or_changed_observation |
-| SWMS-26981 | (unavailable) | unbound | submitted_locked | 5/5 | cannot_record | unbound_capture_role |
-| SWMS-26998 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26998 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26998 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
-| SWMS-26998 | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| Card | Population | Builder ref | Role | Outcome | Fields | Planned action | Reason |
+|---|---|---|---|---|---:|---|---|
+| SWMS-261019 | canonical_live_board | MLB-27037 | roof_report | submitted_locked | 22/24 | create_revision | new_or_changed_observation |
+| SWMS-261024 | canonical_live_board | MLB-27093 | unbound | in_progress | 6/6 | cannot_record | unbound_capture_role |
+| SWMS-261051 | canonical_live_board | WB69684 | unbound | cannot_observe | - | cannot_record | unbound_capture_role |
+| SWMS-261057 | canonical_live_board | (unavailable) | unbound | in_progress | 21/23 | cannot_record | unbound_capture_role |
+| SWMS-261079 | canonical_live_board | MLB-27148 | roof_report | submitted_locked | 22/24 | cannot_record | missing_attendance_cycle |
+| SWMS-261081 | canonical_live_board | MLB-27100 | roof_report | in_progress | 21/23 | cannot_record | missing_attendance_cycle |
+| SWMS-261103 | canonical_live_board | BWCWA-6781 | unbound | cannot_observe | - | cannot_record | missing_attendance_cycle |
+| SWMS-261113 | canonical_live_board | MLB-19475 | roof_report | not_started | 0/22 | cannot_record | missing_attendance_cycle |
+| SWMS-261114 | canonical_live_board | RR-26836 | roof_report | not_started | 0/22 | cannot_record | missing_attendance_cycle |
+| SWMS-261116 | canonical_live_board | MLB-27387 | roof_report | in_progress | 21/24 | cannot_record | missing_attendance_cycle |
+| SWMS-261123 | canonical_live_board | MLB-27309 | roof_report | in_progress | 19/23 | cannot_record | missing_attendance_cycle |
+| SWMS-26618 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26632 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26660 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26706 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26708 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26708 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26708 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26709 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26710 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26710 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26710 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26711 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26711 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26711 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26712 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26712 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26712 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26713 | canonical_live_board | MLB-26122 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26713 | canonical_live_board | MLB-26122 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26715 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26717 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26717 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26717 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26718 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26718 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26718 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26719 | canonical_live_board | MLB-24404 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26720 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26721 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26721 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26721 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26721 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26722 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26722 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26722 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26722 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26722 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26723 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26723 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26723 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26724 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26724 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26724 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26725 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26725 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26725 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26726 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26726 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26726 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26727 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26728 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26728 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26728 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26729 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26729 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26730 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26730 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26730 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26731 | off_board_observed | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26731 | off_board_observed | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26731 | off_board_observed | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26732 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26732 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26732 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26733 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26733 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26733 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26734 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26734 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26735 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26735 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26735 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26735 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26736 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26736 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26736 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26736 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26737 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26737 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26737 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26738 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26738 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26738 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26739 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26739 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26739 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26740 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26740 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26740 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26741 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26741 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26741 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26742 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26742 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26742 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26744 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26744 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26744 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26747 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26747 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26747 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26748 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26748 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26748 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26749 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26749 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26749 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26750 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26750 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26750 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26751 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26751 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26751 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26752 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26752 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26752 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26753 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26753 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26753 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26754 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26755 | off_board_observed | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26755 | off_board_observed | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26755 | off_board_observed | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26755 | off_board_observed | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26755 | off_board_observed | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26756 | off_board_observed | MLB-25769 | assessment | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26756 | off_board_observed | MLB-25769 | photos | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26756 | off_board_observed | MLB-25769 | scope | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26756 | off_board_observed | MLB-25769 | scope | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26756 | off_board_observed | MLB-25769 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26757 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26757 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26757 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26759 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26759 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26759 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26759 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26762 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26763 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26766 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26766 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26766 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26769 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26769 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26769 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26770 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26770 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26770 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26772 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26772 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26772 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26773 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26775 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26775 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26775 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26779 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26779 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26779 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26780 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26780 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26780 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26781 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26781 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26781 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26783 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26785 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26785 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26785 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26786 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26787 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26787 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26787 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26788 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26788 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26788 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26789 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26789 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26789 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26791 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26791 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26791 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26792 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26792 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26792 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26793 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26795 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26803 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26805 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26810 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26814 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26844 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26846 | off_board_observed | MLB-25898 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26847 | canonical_live_board | MLB-26060 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26848 | canonical_live_board | MLB-26549 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26849 | canonical_live_board | MLB-26499 | roof_report | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26851 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26851 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26851 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26852 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26852 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26852 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26853 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26853 | canonical_live_board | (unavailable) | photos | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26853 | canonical_live_board | (unavailable) | scope | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26855 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26857 | canonical_live_board | MLB-26177 | assessment | cannot_observe | - | create_revision | new_or_changed_observation |
+| SWMS-26858 | canonical_live_board | (unavailable) | assessment | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26861 | off_board_observed | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26863 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26865 | off_board_observed | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26902 | canonical_live_board | (unavailable) | unbound | not_started | 0/4 | cannot_record | unbound_capture_role |
+| SWMS-26928 | canonical_live_board | MLB-26705 | roof_report | in_progress | 19/23 | create_revision | new_or_changed_observation |
+| SWMS-26933 | off_board_observed | (unavailable) | roof_report | submitted_locked | 19/22 | cannot_record | missing_builder_reference |
+| SWMS-26933 | off_board_observed | (unavailable) | roof_report | submitted_locked | 19/22 | cannot_record | missing_builder_reference |
+| SWMS-26934 | canonical_live_board | (unavailable) | roof_report | submitted_locked | 21/23 | cannot_record | missing_builder_reference |
+| SWMS-26946 | canonical_live_board | AJBR-69191 | roof_report | submitted_locked | 13/15 | create_revision | new_or_changed_observation |
+| SWMS-26953 | canonical_live_board | (unavailable) | unbound | not_started | 0/4 | cannot_record | unbound_capture_role |
+| SWMS-26957 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26964 | off_board_observed | (unavailable) | roof_report | submitted_locked | 21/23 | cannot_record | missing_builder_reference |
+| SWMS-26980 | canonical_live_board | MLB-26567 | roof_report | submitted_locked | 20/23 | create_revision | new_or_changed_observation |
+| SWMS-26981 | canonical_live_board | (unavailable) | unbound | submitted_locked | 5/5 | cannot_record | unbound_capture_role |
+| SWMS-26998 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26998 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26998 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
+| SWMS-26998 | canonical_live_board | (unavailable) | roof_report | cannot_observe | - | cannot_record | missing_builder_reference |
 
 ## Query and code evidence
 
-- **Q1:** active board cards plus exact current cycle and genuine portal-link source facts. The SQL is reproduced in `scripts/ses-f7-prime-portal-observer.ts:718-740`; the Management API wrapper rejects non-SELECT statements and sends `read_only: true` at `:212-241`.
-- **Q2:** existing `makesafe_portal_capture_revisions` rows for idempotency comparison. SQL: `scripts/ses-f7-prime-portal-observer.ts:743-748`.
-- **Q3:** live/blocked intake cases and current identity authority used to reproduce U4's canonical builder-reference selection. SQL and deterministic grouping: `scripts/ses-f7-prime-portal-observer.ts:749-803`; selection rule: `:477-498`.
-- **Q4:** `jq` over `dry-run.json` grouped all 236 results by planned action/result. Output: `create_revision=17` (`done=3`, `not_done=1`, `unreachable=13`); `cannot_record=219`.
-- **Q5:** `jq` selected unique roof rows where `outcome == "submitted_locked"`, `recordable == true`, and a screenshot exists. Output: `SWMS-261019`, `SWMS-26980`.
-- **Q6:** 19 manifest screenshot paths were independently SHA-256 checked with `shasum -a 256`; output: `screenshots_checked=19 hash_failures=0`. Manifest facts also grouped to `job_details_panels_redacted={1:19}`, `opaque_frame_verified=19`, dimensions `1200x800=9` and `1200x2029=10`.
-- **Q7:** an `ffmpeg` contact sheet normalized both screenshot dimensions and displayed all 19 images for visual inspection. An `rg` privacy scan over the generated text artifacts returned `raw_urls=0` and `email_shapes=0`; the observer's production queries do not select client/contact/address columns (`scripts/ses-f7-prime-portal-observer.ts:718-759`).
-- **Q8:** focused validation passed: observer classifier/privacy/read-only/idempotency suite **9/9** (`scripts/test/ses-f7-prime-portal-observer_test.ts:17-147`); canonical board read-model suite **25/25**, including exact-cycle acceptance, newest-ledger precedence, stale cycle/wrong URL/missing reference/missing screenshot rejection, unchanged canonical stage, and loader wiring (`supabase/functions/ops-api/makesafe_board_read_model_test.ts:124-301`).
+- **Q1:** the observed-total query loaded 403 of 403 observed-total candidates with exact current cycle and genuine portal-link source facts. It deliberately retained archived evidence by excluding only cancelled/lost jobs (`scripts/ses-f7-prime-portal-observer.ts:745-779`). The canonical-live-board label came from the shared predicate used by the board query owner (`supabase/functions/ops-api/makesafe_board_read_model.ts:30-57`; `supabase/functions/ops-api/index.ts:14741-14774`). Every Management API query passed the SELECT-only guard and `read_only: true` (`scripts/ses-f7-prime-portal-observer.ts:238-267`).
+- **Q2:** the idempotency comparison read 0 existing ledger rows among 403 observed-total candidate cards from `makesafe_portal_capture_revisions`, using Management API `read_only: true` (`scripts/ses-f7-prime-portal-observer.ts:780-785`; `dry-run.json:25-29`).
+- **Q3:** current intake/identity authority was read to reproduce U4's canonical builder-reference selection; those reads are also Management API `read_only: true` (`scripts/ses-f7-prime-portal-observer.ts:503-524,786-814`).
+- **Q4:** `jq` over `dry-run.json` proved the population partition and outcome totals. Observed-total: 236 of 236 links, split 9 submitted/locked, 6 in-progress, 4 not-started, 217 cannot-observe. Canonical-live-board: 217 of 236 observed-total links, split 6/217 submitted/locked, 6/217 in-progress, 4/217 not-started, 201/217 cannot-observe. Off-board-observed: 19 of 236 observed-total links, split 3/19 submitted/locked and 16/19 cannot-observe (`dry-run.json:14-23,41-50,68-75`).
+- **Q5:** `jq` grouped planned actions by population and capture result. Canonical-live-board has 11 of 217 `create_revision` links (3 done, 1 not_done, 7 unreachable) and 206 of 217 `cannot_record` links. Off-board-observed has 6 of 19 `create_revision` links (all unreachable) and 13 of 19 `cannot_record` links. Observed-total therefore has 17 of 236 `create_revision` links (3 done, 1 not_done, 13 unreachable) and 219 of 236 `cannot_record` links (`dry-run.json:25-29,52-56,77-81`).
+- **Q6:** `jq` selected unique roof results where `outcome == "submitted_locked"`, `recordable == true`, and screenshot evidence exists. Output: 2 of 51 canonical-live-board roof cards (`SWMS-261019`, `SWMS-26980`), also 2 of 60 observed-total roof cards, and 0 of 9 off-board-observed roof cards (`dry-run.json:30-38,57-65,82-88,93-123,5751-5779`).
+- **Q7:** 19 of 19 observed-total manifest screenshots were independently SHA-256 checked with `shasum -a 256`; output: `screenshots_checked=19 actual_png_files=19 hash_failures=0`. The population split was 16 of 19 canonical-live-board screenshots and 3 of 19 off-board-observed screenshots. Manifest facts were `job_details_panels_redacted={1:19}` and `opaque_frame_verified=19`.
+- **Q8:** an `ffmpeg` contact sheet normalized and displayed all 19 of 19 observed-total screenshots for visual inspection. An `rg` privacy scan over the generated text artifacts found 0 raw URLs, 0 email shapes, and 0 phone/address shapes. No prohibited client data was visible. This follows the standing privacy boundary (`/Users/marninstobbe/kun-agent-workspace/data/board-truth-mandate.md:58-66`).
+- **Q9:** focused validation passed: observer classifier/population/privacy/read-only/idempotency suite 10 of 10 tests (`scripts/test/ses-f7-prime-portal-observer_test.ts:18-159`); canonical board read-model suite 26 of 26 tests, including exact-cycle acceptance, newest-ledger precedence, stale cycle/wrong URL/missing reference/missing screenshot rejection, unchanged canonical stage, ledger-loader wiring, and shared population ownership (`supabase/functions/ops-api/makesafe_board_read_model_test.ts:126-335`).
 
-Detailed sanitized results and screenshot hashes are in [dry-run.json](dry-run.json:1). The raw share URLs and raw page text are deliberately not present.
+Detailed sanitized results and screenshot hashes are in [dry-run.json](dry-run.json:1). Raw share URLs and raw page text are deliberately absent.

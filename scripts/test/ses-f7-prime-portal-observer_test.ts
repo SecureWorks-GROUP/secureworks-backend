@@ -8,6 +8,7 @@ import {
   assertReadOnlySql,
   buildSafeEvidenceFrameHtml,
   classifyPrimePortalText,
+  observerPopulationForJobStatus,
   ObserverUsageError,
   parseOptions,
   planCaptureRevision,
@@ -59,6 +60,17 @@ Deno.test("F7 treats a failed or empty page as cannot observe", () => {
   assertEquals(failed.outcome, "cannot_observe");
   assertEquals(failed.capture_result, "unreachable");
   assertEquals(failed.reason_code, "page_failed_to_load");
+});
+
+Deno.test("F7 labels archived evidence off-board without dropping it", () => {
+  assertEquals(
+    observerPopulationForJobStatus("allocated"),
+    "canonical_live_board",
+  );
+  assertEquals(
+    observerPopulationForJobStatus("archived"),
+    "off_board_observed",
+  );
 });
 
 Deno.test("F7 idempotency planner skips an unchanged exact-cycle capture", () => {

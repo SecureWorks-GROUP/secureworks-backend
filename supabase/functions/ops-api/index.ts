@@ -126,6 +126,7 @@ import {
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
   isSyntheticLivefireJob,
+  makesafeBoardJobStatusExclusionFilter,
   projectTradeMakesafeBoard,
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
@@ -14744,7 +14745,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
           let activeQuery = client.from('jobs')
             .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
             .eq('type', source.type)
-            .not('status', 'in', allHistory ? '("cancelled","lost")' : '("cancelled","archived","lost")')
+            .not('status', 'in', makesafeBoardJobStatusExclusionFilter(allHistory))
           if (source.insurance_job_type) {
             activeQuery = activeQuery.eq('metadata->>insurance_job_type', source.insurance_job_type)
           }
@@ -14767,7 +14768,7 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
         const { data, error } = await client.from('jobs')
           .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
           .in('id', detailChunk)
-          .not('status', 'in', allHistory ? '("cancelled","lost")' : '("cancelled","archived","lost")')
+          .not('status', 'in', makesafeBoardJobStatusExclusionFilter(allHistory))
           .order('created_at', { ascending: false })
           .order('id', { ascending: false })
           .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)

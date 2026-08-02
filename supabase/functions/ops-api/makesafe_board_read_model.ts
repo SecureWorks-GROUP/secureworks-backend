@@ -27,6 +27,35 @@ import {
 import { extractPortalLinks } from "./makesafe_portal_guard.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
+export const MAKESAFE_LIVE_BOARD_EXCLUDED_JOB_STATUSES = [
+  "cancelled",
+  "archived",
+  "lost",
+] as const;
+export const MAKESAFE_ALL_HISTORY_EXCLUDED_JOB_STATUSES = [
+  "cancelled",
+  "lost",
+] as const;
+
+/** Shared by the canonical loader and read-only observers. */
+export function makesafeBoardJobStatusExclusionFilter(
+  allHistory: boolean,
+): string {
+  const statuses = allHistory
+    ? MAKESAFE_ALL_HISTORY_EXCLUDED_JOB_STATUSES
+    : MAKESAFE_LIVE_BOARD_EXCLUDED_JOB_STATUSES;
+  return `("${statuses.join('","')}")`;
+}
+
+/** Membership in the canonical live board, excluding its history-only rows. */
+export function isCanonicalLiveMakesafeBoardJobStatus(value: unknown): boolean {
+  const status = String(value ?? "").trim().toLowerCase();
+  return !!status &&
+    !(MAKESAFE_LIVE_BOARD_EXCLUDED_JOB_STATUSES as readonly string[]).includes(
+      status,
+    );
+}
+
 const SYNTHETIC_LIVEFIRE_MARKER =
   /^SWG-SES-LIVEFIRE-TEST-ONLY-[0-9A-F]{8}-[0-9A-F]{4}-[1-8][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/;
 export const OPS_MAKESAFE_STAGES = [

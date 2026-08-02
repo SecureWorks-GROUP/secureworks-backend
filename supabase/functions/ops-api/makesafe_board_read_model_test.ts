@@ -13,8 +13,10 @@ import {
 import {
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
+  isCanonicalLiveMakesafeBoardJobStatus,
   isSyntheticLivefireJob,
   isTerminalSyntheticLivefireJob,
+  makesafeBoardJobStatusExclusionFilter,
   mapOpsStageToTradeColumn,
   OPS_MAKESAFE_STAGES,
   portalCapturesFromLedger,
@@ -298,6 +300,38 @@ Deno.test("F7 canonical board loader names the existing capture ledger explicitl
   );
   assert(source.includes("'makesafe_portal_capture_revisions'"));
   assert(source.includes("portalCaptureRowsByJobId"));
+});
+
+Deno.test("F7 observer and canonical loader share one live-board population predicate", async () => {
+  assertEquals(
+    makesafeBoardJobStatusExclusionFilter(false),
+    '("cancelled","archived","lost")',
+  );
+  assertEquals(
+    makesafeBoardJobStatusExclusionFilter(true),
+    '("cancelled","lost")',
+  );
+  assertEquals(isCanonicalLiveMakesafeBoardJobStatus("allocated"), true);
+  assertEquals(isCanonicalLiveMakesafeBoardJobStatus("archived"), false);
+  assertEquals(isCanonicalLiveMakesafeBoardJobStatus("cancelled"), false);
+  assertEquals(isCanonicalLiveMakesafeBoardJobStatus("lost"), false);
+
+  const indexSource = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  const observerSource = await Deno.readTextFile(
+    new URL(
+      "../../../scripts/ses-f7-prime-portal-observer.ts",
+      import.meta.url,
+    ),
+  );
+  assert(
+    indexSource.includes("makesafeBoardJobStatusExclusionFilter(allHistory)"),
+  );
+  assert(observerSource.includes("isCanonicalLiveMakesafeBoardJobStatus"));
+  assert(
+    observerSource.includes("where j.status not in ('cancelled', 'lost')"),
+  );
 });
 
 Deno.test("historical divergence: unknown stage never vanishes silently", () => {
