@@ -45,6 +45,8 @@ export interface MakesafeTerminalProofFact {
   proven_at?: string | null;
   evidence_refs?: readonly string[] | null;
   readiness_revision?: string | null;
+  validatedCycleSetHash?: boolean;
+  validatedReadinessRevision?: boolean;
 }
 
 /**
@@ -64,6 +66,22 @@ export function makesafeTerminalProofCoversCycleSet(
   if (card.length === 0) return false;
   return proof.length === card.length &&
     proof.every((value, index) => value === card[index]);
+}
+
+export async function makesafeAttendanceCycleSetHash(
+  cycleIds: readonly string[] | null | undefined,
+): Promise<string> {
+  const normalized = [...(cycleIds || [])]
+    .map((id) => String(id).toLowerCase())
+    .sort();
+  const input =
+    `SecureWorks:make-safe-attendance-cycle-set:v1\n${JSON.stringify(normalized)}`;
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(input),
+  );
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 /**
@@ -91,7 +109,8 @@ export function bindingMakesafeTerminalProof(
       )
     ) continue;
     if (!(proof?.evidence_refs || []).length) continue;
-    if (proof?.readiness_revision != null) continue;
+    if (proof?.validatedCycleSetHash === false) continue;
+    if (proof?.validatedReadinessRevision === false) continue;
     const provenAt = new Date(String(proof?.proven_at || "")).getTime();
     if (!Number.isFinite(provenAt)) continue;
     if (

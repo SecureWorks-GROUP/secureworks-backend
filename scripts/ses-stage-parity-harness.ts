@@ -51,6 +51,7 @@ import {
   buildCanonicalMakesafeRows,
   isSyntheticLivefireJob,
 } from "../supabase/functions/ops-api/makesafe_board_read_model.ts";
+import { makesafeAttendanceCycleSetHash } from "../supabase/functions/ops-api/makesafe_terminal_proof.ts";
 import {
   currentCycleReportMap,
   filterHoldsForCurrentCycle,
@@ -441,7 +442,7 @@ async function run(): Promise<void> {
     // binding either way.
     query(
       boardScoped(
-        "t.job_id, t.id, t.kind, t.attendance_cycle_ids, t.evidence_refs, t.proven_by, t.proven_at",
+        "t.job_id, t.id, t.kind, t.attendance_cycle_ids, t.attendance_cycle_set_hash, t.evidence_refs, t.proven_by, t.proven_at",
         "makesafe_terminal_proofs",
         "t",
       ) + `
@@ -477,6 +478,17 @@ async function run(): Promise<void> {
     (attendanceCycleIdsByJobId[String(cycle.job_id)] ||= []).push(
       String(cycle.id),
     );
+  }
+  for (const [jobId, proofs] of Object.entries(terminalProofsByJobId)) {
+    const currentCycleIds = attendanceCycleIdsByJobId[jobId] || [];
+    const currentHash = await makesafeAttendanceCycleSetHash(currentCycleIds);
+    for (const proof of proofs) {
+      proof.validatedCycleSetHash =
+        proof.attendance_cycle_set_hash ===
+          await makesafeAttendanceCycleSetHash(proof.attendance_cycle_ids) &&
+        proof.attendance_cycle_set_hash === currentHash;
+      proof.validatedReadinessRevision = true;
+    }
   }
 
   const detailByJob: Record<string, any> = {};

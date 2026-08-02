@@ -16,6 +16,7 @@ import {
 import { computeMakesafeStatus } from "./makesafe_computed_status.ts";
 import {
   bindingMakesafeTerminalProof,
+  makesafeAttendanceCycleSetHash,
   makesafeTerminalProofCoversCycleSet,
 } from "./makesafe_terminal_proof.ts";
 import {
@@ -144,6 +145,7 @@ Deno.test("a malformed proof is ignored rather than downgraded", () => {
     ["unusable proven_at", { proven_at: "not a date" }],
     ["revision-bound proof is not accepted without the validated view", {
       readiness_revision: "sha256:stale",
+      validatedReadinessRevision: false,
     }],
     ["covers a cycle this card does not have", {
       attendance_cycle_ids: [CYCLE_2],
@@ -230,6 +232,41 @@ Deno.test("cycle-set coverage is exact, in the one place both consumers read", (
   // contract can speak about.
   assertEquals(
     bindingMakesafeTerminalProof([signoffProof()], [CYCLE_1], CYCLE_2),
+    null,
+  );
+});
+
+Deno.test("attendance-cycle hash matches the production vector", async () => {
+  assertEquals(
+    await makesafeAttendanceCycleSetHash([
+      "20828ff2-6699-4f59-a71f-6c47194444aa",
+    ]),
+    "sha256:84c308706bc740b06366f4da38475a9559d0b5ad8ca1d57bda4ff2f434c27dfb",
+  );
+});
+
+Deno.test("validated raw proof facts preserve revision-bound proofs", () => {
+  const proof = signoffProof({
+    readiness_revision: "sha256:revision",
+    validatedCycleSetHash: true,
+    validatedReadinessRevision: true,
+  });
+  assertEquals(
+    bindingMakesafeTerminalProof([proof], [CYCLE_1], CYCLE_1),
+    proof,
+  );
+  assertEquals(
+    bindingMakesafeTerminalProof([{
+      ...proof,
+      validatedReadinessRevision: false,
+    }], [CYCLE_1], CYCLE_1),
+    null,
+  );
+  assertEquals(
+    bindingMakesafeTerminalProof([{
+      ...proof,
+      validatedCycleSetHash: false,
+    }], [CYCLE_1], CYCLE_1),
     null,
   );
 });
