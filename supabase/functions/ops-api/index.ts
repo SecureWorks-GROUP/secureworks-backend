@@ -18988,6 +18988,7 @@ Check BOTH the email body AND any attached PDF work orders for these details. Th
 For report_type, COMMIT the single best classification of the work using the body AND the PDF: "roof_report" (roof report/inspection), "assessment_report" (assessment / assess-and-quote / scope of works), "temp_fence" (temporary fence collect/pickup), "re_attend" (return visit to an existing job), "general_makesafe" (a physical make-safe work order that is not primarily a report), or "not_a_report". Do not leave it blank; pick "general_makesafe" for an ordinary physical make-safe.
 For MLB/Prime report-only emails, links in the email body are authoritative. Do not assume the attached work-order PDF contains the Prime/report URLs.
 For portal_link: return the first/best https builder-portal URL in the email body. If multiple report/assessment/quote URLs appear, return all of them in portal_links with useful labels and kinds.
+Portal links must be genuine report/share form URLs only (e.g. primeeco.tech/share/<token> or similar share/report/portal paths). NEVER return image, logo, signature, company branding, CDN asset, S3 object, or email open/click tracking URLs in portal_link or portal_links — those are email HTML chrome, not portals.
 If the email is NOT a make-safe work order, set confidence to "low" and missing_fields to ["not_a_work_order"].`
 
 // ── A1 — reextract_intake_draft (in-place re-extraction, immune to the unique key) ──

@@ -15,25 +15,55 @@ export type BuilderEmailLink = {
   evidence_gap?: string;
 };
 
-// Intake item 4 — builder portal / report-share hosts (Prime Eco is the dominant
-// one for MLB/Prime roof & assessment reports). A URL on one of these hosts, or any
-// URL whose path is a share link, is the crew's report portal and MUST be captured
-// even when it sits on a line the generic footer/tracking filter would otherwise
-// drop, and even with no descriptive words around it. Recon proof (SWMS-26632):
-// primeeco.tech share links lived only in the raw email body and never reached
-// makesafe_details.external_links, so the report was invisible to everyone.
-const PORTAL_HOST_RE =
-  /(^|\.)(primeeco\.tech|primeeco\.[a-z.]+|prime-?eco\.[a-z.]+)$/i;
+// Intake item 4 — builder portal / report-share path grammar.
+// A genuine portal is identified by its SHARE/REPORT PATH, not by host alone.
+// Recon (ses-links-truth-audit-v1 / F5): treating any *.primeeco.tech host as a
+// portal stored 43 documents.primeeco.tech logo/signature PNGs as builder_portal.
+// Host alone is therefore never enough. Share-path links still bypass the
+// footer/tracking line filter even with no descriptive words around them
+// (SWMS-26632: primeeco.tech/share links lived only in the raw body).
 const PORTAL_PATH_RE = /\/(share|report|reports|portal|s|r)\//i;
 
+// Static asset extensions — structural reject, not a denylist of today's filenames.
+// Query/hash after the extension still counts (signed CDN URLs).
+const ASSET_EXT_RE =
+  /\.(?:png|jpe?g|gif|webp|svg|ico|bmp|css|js|map|woff2?|ttf|eot)(?:\?|#|$)/i;
+
+/**
+ * Email open/click trackers, image/logo/signature assets, and CDN object URLs.
+ * Structural only — never a filename denylist. Used at the merge boundary and
+ * mirrored in ops/trade display so historical polluted rows stay hidden even
+ * though we do not strip production data in this tranche.
+ */
+export function urlLooksLikeAssetOrTracking(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    // AWS SES open/click trackers (any subdomain of awstrack.me).
+    if (host === "awstrack.me" || host.endsWith(".awstrack.me")) return true;
+    // Path ends in a static asset extension (…/mlb_new_logo.png, …/company.jpg).
+    if (ASSET_EXT_RE.test(u.pathname)) return true;
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * True only for a genuine builder report/share form URL.
+ * Requires a share-style path AND rejects image/CDN/tracking URLs.
+ * Liveness is deliberately NOT checked — an expired share is still a portal
+ * link (aged job), never a stage failure.
+ */
 export function urlIsBuilderPortalLink(url: string): boolean {
   try {
     const u = new URL(url);
-    if (PORTAL_HOST_RE.test(u.hostname)) return true;
-    if (/primeeco/i.test(u.hostname)) return true;
-    // A share-style path on any host (…/share/<token>) is a report portal link.
-    if (PORTAL_PATH_RE.test(u.pathname)) return true;
-    return false;
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    if (urlLooksLikeAssetOrTracking(url)) return false;
+    // Share/report-style path is required. A primeeco (or documents.*) host
+    // alone is NOT enough — branding PNGs live on documents.primeeco.tech.
+    if (!PORTAL_PATH_RE.test(u.pathname)) return false;
+    return true;
   } catch (_) {
     return false;
   }
@@ -350,6 +380,9 @@ export function extractBuilderEmailLinks(
     while ((match = re.exec(text)) !== null) {
       const url = cleanUrl(match[0]);
       if (!url) continue;
+      // Structural reject before kind classification — logos, signatures, CDN
+      // objects and SES trackers are never builder links of any kind.
+      if (urlLooksLikeAssetOrTracking(url)) continue;
       const key = url.toLowerCase();
       if (seen.has(key)) continue;
       const lineStart = text.lastIndexOf("\n", match.index) + 1;
@@ -474,6 +507,9 @@ export function normalizeReportExternalLinks(
   const seen = new Set<string>();
   const add = (candidate: BuilderEmailLink | null) => {
     if (!candidate) return;
+    // portal_links / portal_link are portal claims only — image/CDN/tracking
+    // and non-share paths never become external_links rows.
+    if (!urlIsBuilderPortalLink(candidate.url)) return;
     const key = candidate.url.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
@@ -547,6 +583,10 @@ export function mergeIntoExternalLinks(
   for (const raw of incoming || []) {
     if (!raw) continue;
     const link: BuilderEmailLink = { ...raw, kind: canonicalizeKind(raw.kind) };
+    // Never append branding/tracking noise from a re-scan. Existing polluted
+    // rows are left in place (display filter hides them; cleanup is a separate
+    // captain-gated tranche) — we only refuse to ADD more.
+    if (urlLooksLikeAssetOrTracking(link.url)) continue;
     const key = link.url.toLowerCase();
     const existing = byUrl.get(key);
     if (!existing) {
@@ -580,6 +620,9 @@ export function mergeDeterministicAndClaudeLinks(
 ): BuilderEmailLink[] {
   const byUrl = new Map<string, BuilderEmailLink>();
   for (const link of deterministic || []) {
+    // Deterministic scan already structural-rejects assets; belt-and-braces here
+    // so a caller that hand-builds the array cannot reintroduce logos.
+    if (urlLooksLikeAssetOrTracking(link.url)) continue;
     byUrl.set(link.url.toLowerCase(), link);
   }
   for (
@@ -589,6 +632,10 @@ export function mergeDeterministicAndClaudeLinks(
   ) {
     const parsed = linkFromAny(link, "claude");
     if (!parsed) continue;
+    // Load-bearing filter: Claude's portal_links historically returned email
+    // HTML chrome (logos, signatures, S3 company images, SES trackers). Only a
+    // genuine share/report URL may enter the merge from Claude.
+    if (!urlIsBuilderPortalLink(parsed.url)) continue;
     const key = parsed.url.toLowerCase();
     const existing = byUrl.get(key);
     if (!existing) {
@@ -612,7 +659,11 @@ export function mergeDeterministicAndClaudeLinks(
     claudeExtraction?.portal_link,
     "legacy_portal_link",
   );
-  if (legacy && !byUrl.has(legacy.url.toLowerCase())) {
+  if (
+    legacy &&
+    urlIsBuilderPortalLink(legacy.url) &&
+    !byUrl.has(legacy.url.toLowerCase())
+  ) {
     byUrl.set(legacy.url.toLowerCase(), legacy);
   }
   return [...byUrl.values()];

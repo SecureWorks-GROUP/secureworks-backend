@@ -32,12 +32,12 @@ Deno.test("recoverJobLinks: falls back to the draft extraction when the body is 
     draft_extraction: {
       portal_links: [{
         label: "Roof report",
-        url: "https://portal.mlb.example/x",
+        url: "https://portal.mlb.example/share/x",
         kind: "roof_report",
       }],
     },
   });
-  assert(links.some((l) => l.url.includes("portal.mlb.example")));
+  assert(links.some((l) => l.url.includes("portal.mlb.example/share/x")));
   assert(sources.includes("draft_extraction"));
 });
 
