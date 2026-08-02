@@ -86,6 +86,7 @@ export interface MakesafeStatusEvidence {
   packSent?: boolean;
   documents?: {
     report?: boolean;
+    ownRoofReportDocumentIds?: Set<string>;
     invoice?: boolean;
     swms?: boolean;
   };

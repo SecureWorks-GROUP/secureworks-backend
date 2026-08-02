@@ -352,7 +352,9 @@ export function sesStageOwnRoofReportIn(
   }
   if (!String(draft.report_doc_id || "").trim()) {
     missing.push("the rendered own-template roof report document");
-  } else if (input.evidence?.documents?.report !== true) {
+  } else if (!input.evidence?.documents?.ownRoofReportDocumentIds?.has(
+    String(draft.report_doc_id),
+  )) {
     // The draft names a document that is not attached to the card as a
     // `roof_report`. Evidence that was rendered but never landed is not proof.
     missing.push("the rendered own-template roof report to be attached");

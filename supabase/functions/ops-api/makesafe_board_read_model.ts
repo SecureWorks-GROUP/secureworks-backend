@@ -77,7 +77,7 @@ export function latestOwnRoofDraftByJobId(
     const current = byJob[jobId];
     if (
       !current ||
-      Number(row?.cycle_number ?? 1) > Number(current?.cycle_number ?? 1)
+      Number(row?.submitted_cycle ?? 1) > Number(current?.submitted_cycle ?? 1)
     ) {
       byJob[jobId] = row;
     }
@@ -218,6 +218,7 @@ export interface CanonicalMakesafeExtras {
   portalCaptureRowsByJobId?: Record<string, any[]>;
   /** R5 — current own-template roof draft per job, for that family only. */
   ownRoofDraftByJobId?: Record<string, any>;
+  ownRoofReportDocumentIdsByJobId?: Record<string, Set<string>>;
   terminalSyntheticLivefireJobIds?: ReadonlySet<string>;
   computedAt?: string;
 }
@@ -738,6 +739,9 @@ export function buildCanonicalMakesafeRows(
         packSent,
         documents: {
           report: base?.has_report_doc === true,
+          ownRoofReportDocumentIds: extras?.ownRoofReportDocumentIdsByJobId?.[
+            String(base?.id || "")
+          ] ?? new Set<string>(),
           invoice: base?.has_invoice_doc === true,
           swms: base?.has_swms_doc === true,
         },
