@@ -22,3 +22,7 @@ scratch/
 drafts/
 
 .gstack/
+
+# Read-only SES measurement scratch (parity-harness runs). Frozen artifacts are
+# committed under scripts/ and docs/evidence/, never the raw run files.
+.audit/
