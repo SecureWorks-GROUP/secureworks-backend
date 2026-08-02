@@ -836,6 +836,23 @@ export interface SesStageOverlayApplication {
   decision_kind?: string | null;
 }
 
+export type SesOverlayDecisionKind = "display_override" | "stage_attestation";
+
+export function sesOverlayDecisionKind(
+  application: SesStageOverlayApplication | null | undefined,
+): SesOverlayDecisionKind | null {
+  const raw = application?.decision_kind;
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return "display_override";
+  }
+  const normalized = String(raw).toLowerCase();
+  return normalized === "stage_attestation"
+    ? "stage_attestation"
+    : normalized === "display_override"
+    ? "display_override"
+    : null;
+}
+
 export interface SesStageV2OverlayCandidate {
   stage: string;
   binds: boolean;
@@ -857,9 +874,8 @@ export function sesStageV2OverlayCandidate(
   rawJobState: unknown,
 ): SesStageV2OverlayCandidate {
   const stage = String(derivedStage || "").toLowerCase();
-  const binds = !!application &&
-    String(application.decision_kind || "display_override").toLowerCase() !==
-      "stage_attestation" &&
+  const decisionKind = sesOverlayDecisionKind(application);
+  const binds = decisionKind === "display_override" &&
     !isMakesafeTerminalDisplayStatus(stage) &&
     !isMakesafeTerminalJobState(rawJobState) &&
     String(application.source_status || "").toLowerCase() === stage;

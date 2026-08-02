@@ -1565,6 +1565,41 @@ Deno.test("reanchor: the advisory overlay candidate is unchanged by decision_kin
   assertEquals(displayOverride.stage, "archive");
 });
 
+Deno.test("reanchor: unknown decision_kind is non-binding in both resolvers", () => {
+  const legacy = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+  ], {
+    computedAt: NOW,
+    statusApplicationsByJobId: { j1: CAPTAIN_ARCHIVE },
+  });
+  assertEquals(legacy[0].canonical_stage, "archive");
+
+  const unknown = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+  ], {
+    computedAt: NOW,
+    statusApplicationsByJobId: {
+      j1: { ...CAPTAIN_ARCHIVE, decision_kind: "display_override_v2" },
+    },
+  });
+  assertEquals(unknown[0].canonical_stage, "allocated");
+  assertEquals(unknown[0].status_application, null);
+
+  const advisoryLegacy = sesStageV2OverlayCandidate(
+    "new",
+    { ...CAPTAIN_ARCHIVE, source_status: "new" },
+    "in_progress",
+  );
+  assertEquals(advisoryLegacy.binds, true);
+  const advisoryUnknown = sesStageV2OverlayCandidate(
+    "new",
+    { ...CAPTAIN_ARCHIVE, source_status: "new", decision_kind: "garbage" },
+    "in_progress",
+  );
+  assertEquals(advisoryUnknown.binds, false);
+  assertEquals(advisoryUnknown.stage, "new");
+});
+
 Deno.test("reanchor: decision_kind projections are guarded when Release 9 arrives", async () => {
   const indexSource = await Deno.readTextFile(
     new URL("./index.ts", import.meta.url),

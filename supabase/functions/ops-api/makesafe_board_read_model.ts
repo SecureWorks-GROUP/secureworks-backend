@@ -34,7 +34,9 @@ import {
 } from "./ses_trade_portal_confirmation.ts";
 import {
   deriveSesStageV2,
+  sesOverlayDecisionKind,
   sesStageV2OverlayCandidate,
+  type SesOverlayDecisionKind,
 } from "./ses_stage_engine_v2.ts";
 import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
 
@@ -51,17 +53,6 @@ export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
  * A row with no `decision_kind` is a legacy display override. Every row in the
  * ledger today is one, which is why this release moves nothing.
  */
-export type SesOverlayDecisionKind = "display_override" | "stage_attestation";
-
-export function sesOverlayDecisionKind(
-  application: any,
-): SesOverlayDecisionKind {
-  return String(application?.decision_kind || "").toLowerCase() ===
-      "stage_attestation"
-    ? "stage_attestation"
-    : "display_override";
-}
-
 /** The canonical family of a raw board row, from the one canonical deriver. */
 export function boardRowSesFamily(base: any) {
   const detail = base?.makesafe_details || {};
