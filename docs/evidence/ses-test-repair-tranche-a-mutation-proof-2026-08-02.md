@@ -87,7 +87,14 @@ outside this tranche.
 
 ## Verification
 
-Restored consolidated command result:
+Exact 13-file in-scope command, including the unchanged terminal-proof and
+migration tests in the tranche denominator:
+
+```sh
+/Users/marninstobbe/.deno/bin/deno test --allow-all --no-check scripts/test/ses-evidence-stage-checker_test.ts scripts/test/ses-stage-baseline-contract_test.ts supabase/functions/ops-api/makesafe_board_auth_test.ts supabase/functions/ops-api/makesafe_board_read_model_test.ts supabase/functions/ops-api/makesafe_cancel_test.ts supabase/functions/ops-api/makesafe_cycle_evidence_test.ts supabase/functions/ops-api/ses_assembler_input_adapter_test.ts supabase/functions/ops-api/ses_portal_capture_evidence_test.ts supabase/functions/ops-api/ses_portal_capture_writer_test.ts supabase/functions/ops-api/ses_trade_portal_confirmation_test.ts supabase/functions/ops-api/ses_stage_engine_v2_terminal_proof_test.ts supabase/functions/ops-api/ses_portal_capture_bridge_migration_test.ts supabase/functions/ops-api/ses_trade_portal_confirmation_migration_test.ts
+```
+
+Fresh output:
 
 ```text
 ok | 210 passed | 0 failed
