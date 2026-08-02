@@ -1229,6 +1229,41 @@ never assert readiness, and stop at recording approval. The authoritative
 diagnosis, migration scope, execution boundary, and proofs live in
 `data/ses-readiness-gate-drop-v1/report.md`; the regression/control test is
 `supabase/functions/ops-api/ses_readiness_precondition_drop_test.ts`.
+## A Portal-Report Card Never Opens Its Own Attendance Cycle
+
+`record_ses_portal_capture_evidence` requires `attendance_cycle_id`, but a cycle is
+opened in exactly one helper — `ensureMakesafeAttendanceCycle` (`ops-api/index.ts`) —
+reached only from `allocate_job`, `submit_makesafe_report`, `assignment_reassign`,
+`pack_bind` and reattend. An ordinary roof / assessment card reaches NONE of them: its
+trade works in the builder's portal, so we never allocate it and it never submits
+through our endpoint. The U2-S1 backfill in
+`20260727000001_makesafe_attendance_cycles_u2_s1.sql` masked this for every card
+created before 2026-07-27; every card created since arrives with no cycle. Measured
+2026-08-03: 44 cards board-wide have none (22 general make-safe, 16 temp fence, 6
+roof), 40 of them created on or after the backfill date. **This is an open forward
+gap, not closed historical debt** — unlike the `source_content_hash` cutoff above, it
+grows. Never invent a cycle; the sanctioned repair is
+`seed_makesafe_state_authority_scoped_v2`, which opens one with
+`open_reason='state_authority_seed_existing_job'`. Evidence and the per-card proof:
+`data/ses-run-skill-batch5-links-v1/report.md` §5.
+
+## Prime's Expiry Page Is Transient, So `expired` Must Be The Hardest Verdict
+
+A Prime share link can serve *"This link is no longer active or has expired"* on one
+request and a fully rendered live form on the next — observed 2026-08-03 on
+`SWMS-261116`, which read `expired` and then read 21-of-24 answered, live to 31 Aug.
+The failure direction is the dangerous one: it turns a live, nearly finished report
+into "dead link, ask the builder to reissue", which is the class of error the captain
+has already rejected once. Any capture driver must therefore require `expired` to
+survive a longer stable window AND a full reload before it stands — never let it be
+the cheapest branch to reach, which is what the inherited `capture.sh` poll loop did.
+Reference driver: `data/ses-run-skill-batch5-links-v1/evidence/capture-expired.sh`;
+the 37-link re-verification and privacy hash sweep are in that run's report §3-§4.
+
+The canonical builder reference that `record_ses_portal_capture_evidence` demands is
+derivable from SQL alone (the case's `builder_wo_canonical` → `builder_po_canonical` →
+`external_ref_canonical`, then job refs only with a resolved identity revision), so it
+never needs a U4 dry run and must never be guessed — see that report §2.
 
 ## Maintaining this file
 
