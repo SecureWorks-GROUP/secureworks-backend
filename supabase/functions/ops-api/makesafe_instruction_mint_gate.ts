@@ -146,3 +146,32 @@ export async function assertInstructionCardMintAvailable(
   }
   refuseExistingInstructionCard(candidateKeys, rows, documents);
 }
+
+export async function reserveInstructionCardMint(
+  client: any,
+  input: { orgId: string; draftId: string; candidateKeys: readonly string[] },
+): Promise<void> {
+  if (!input.candidateKeys.length) return;
+  const { error } = await client.rpc(
+    "reserve_makesafe_instruction_key_mint",
+    {
+      p_org_id: input.orgId,
+      p_draft_id: input.draftId,
+      p_instruction_keys: [...new Set(input.candidateKeys)].sort(),
+    },
+  );
+  if (error) {
+    throw new InstructionMintConflictError(input.candidateKeys, []);
+  }
+}
+
+export async function releaseInstructionCardMint(
+  client: any,
+  input: { orgId: string; draftId: string },
+): Promise<void> {
+  const { error } = await client.rpc(
+    "release_makesafe_instruction_key_mint",
+    { p_org_id: input.orgId, p_draft_id: input.draftId },
+  );
+  if (error) throw error;
+}

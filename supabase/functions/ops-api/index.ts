@@ -592,6 +592,8 @@ import {
 import { refreshMakesafeIdentityAfterWorkOrderAttach as _refreshMakesafeIdentityAfterWorkOrderAttach } from './makesafe_work_order_identity_refresh.ts'
 import {
   assertInstructionCardMintAvailable as _assertInstructionCardMintAvailable,
+  reserveInstructionCardMint as _reserveInstructionCardMint,
+  releaseInstructionCardMint as _releaseInstructionCardMint,
   InstructionMintConflictError as _InstructionMintConflictError,
 } from './makesafe_instruction_mint_gate.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
@@ -18229,6 +18231,20 @@ async function approveIntakeDraft(client: any, body: any) {
       throw error
     }
   }
+  const canonicalInstructionKeys = _builderInstructionKeysForCard({
+    requestingCompanySlug: approvedFields.requesting_company_slug,
+    metadata: {
+      external_ref: approvedFields.external_ref,
+      builder_claim_ref: extraction?.builder_claim_ref,
+      builder_work_order_number: extraction?.builder_work_order_number,
+      builder_po_number: extraction?.builder_po_number,
+    },
+    detailExternalRef: approvedFields.external_ref,
+    attachmentNames: availableAttachments.map((attachment: any) =>
+      attachment.file_name || attachment.filename || attachment.name ||
+        attachment.pdf_url || attachment.storage_url
+    ),
+  })
 
   // Duplicate guard (Wave 0 H4): warn/block same external ref already live before
   // creating another job. Compare NORMALISED refs (the shared reconciler normaliser)
@@ -18335,7 +18351,16 @@ async function approveIntakeDraft(client: any, body: any) {
   let createdJobId: string | null = null
   const createdJobIds: string[] = []
   let primaryMint: any = null
+  let instructionMintReserved = false
   try {
+    if (!recoveredPrimaryMint && canonicalInstructionKeys.length) {
+      await _reserveInstructionCardMint(client, {
+        orgId: draft.org_id || DEFAULT_ORG_ID,
+        draftId: draft.id,
+        candidateKeys: canonicalInstructionKeys,
+      })
+      instructionMintReserved = true
+    }
     const authority = await intakeMintAuthority(client, draft, extraction, body)
     primaryMint = authority
       ? await reserveIntakeMint(client, {
@@ -18625,6 +18650,14 @@ async function approveIntakeDraft(client: any, body: any) {
     }
   } catch (postClaimErr) {
     if (!createdJobId || primaryMint) {
+      if (instructionMintReserved && !createdJobId) {
+        try {
+          await _releaseInstructionCardMint(client, {
+            orgId: draft.org_id || DEFAULT_ORG_ID,
+            draftId: draft.id,
+          })
+        } catch (_) { /* best-effort; do not mask the original error */ }
+      }
       // Pre-insert failure: no live job exists, so release the claim back to the
       // review queue. This is the only safe path to re-queue a draft.
       try {
