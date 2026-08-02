@@ -1033,6 +1033,47 @@ Pin a contract version literal in ONE place only — the owning module's own sui
 A second suite restating it is what turned the correct `c1-po-ruling-v2` →
 `c1-unlinked-invoice-v3` bump into a red baseline; consumers import the constant.
 
+## The Corrected Stage Engine Is A Shadow, And Stays One
+
+`ses_stage_engine_v2.ts` is the one corrected evidence-derived stage engine that
+will eventually replace BOTH the legacy ladder and `computeMakesafeStatus`. It
+has no authority today. `canonical_stage` is still the legacy ladder plus the
+existing overlay resolver, `projectOpsMakesafeBoard` still buckets on it alone,
+and everything v2 returns is published as advisory `derived_stage_v2*` keys.
+There is deliberately no flag that promotes it; the authority flip is Release 12
+of `data/ses-f10-stage-engine-v2-design-v1/report.md` and has to be written, not
+thrown. Do not add one, and do not let the advisory value into the trade
+allow-list.
+
+Two boundaries are structural, not documented: `SesStageV2Input` OMITS
+`displayedStatus` (the read model builds the evidence input without it and
+appends it only for M1's own call, ending the circular "display determines
+computation" path), and `sesStageV2OverlayCandidate` only SIMULATES the overlay
+resolver with the same three guards. Real overlay binding is untouched — nine of
+the 46 rows would unbind under a corrected derivation and five reverse the
+captain's own archive rulings, which is Release 9's job.
+
+The evidence half of the ladder lives ONCE, in `makesafe_computed_status.ts`'s
+`deriveMakesafeEvidenceStage`, and both engines call it. The terminal half
+deliberately differs: v2 runs one common clock (`sesStageCompletedStage`) on
+every terminal path, rejects a missing trusted completion time instead of
+guessing, and refuses the raw complete/completed/closed shortcut unless an
+issued invoice corroborates it. A raw terminal claim with no supporting evidence
+is `decision_required`, and `sesStageCutoverGate` makes such a card STOP a
+cutover rather than be dropped into a plausible column — `SWMS-261059` is the
+live one and its true column is an open captain question. Never resolve it in
+code.
+
+`scripts/ses-stage-parity-harness.ts` remains the only tool that answers "did
+the divergence move?"; it reads v2's published value rather than recomputing it.
+`scripts/ses-e1-freeze-stage-baseline.ts` + `ses-e1-stage-baseline-v1.json`
+freeze the certified 407-card / 71-dispute manifest with a CONTENT-derived
+generation id, so an independent rerun reproduces it. That freeze is an identity
+manifest, not a pinned count: growth is reported, a vanished certified identity
+or a changed adjudication fails. Never re-snapshot it to make a drifted run
+green. Measured blast per release and the standing numbers:
+`docs/evidence/ses-e1-stage-engine-v2-shadow-2026-08-02.md`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

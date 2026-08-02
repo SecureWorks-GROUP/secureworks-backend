@@ -305,3 +305,144 @@ directly.
 Zero cards reached `decision_required` at this snapshot, so the missing-timestamp
 refusal remains live but unexercised on production data, proven by test rather
 than by a production card. That is unchanged from the original reading.
+
+## Release 3 — corroborate the terminal shortcut
+
+**Behaviour change:** exactly one — the shadow engine's raw
+`complete/completed/closed` shortcut now requires an issued invoice. Zero
+placements move.
+
+**What landed**
+
+- The shortcut runs only when the current invoice is `AUTHORISED`, `SUBMITTED`
+  or `PAID`. `DRAFT` never qualifies; the captain ruled that explicitly.
+- Uncorroborated, the engine records conflict `terminal_without_issued_invoice`
+  and continues through READY pack, report-in, allocation and New. The raw
+  terminal value is a claim, not proof, and it was burying stronger evidence
+  sitting on the card.
+- A mechanical fall-through to New is NOT evidence that the job is new. When
+  the card carries no later-stage evidence at all, the raw terminal claim and
+  the empty evidence contradict each other and the engine returns
+  `decision_required` with `terminal_without_supporting_evidence`. This is a
+  general rule about contradiction, not a card-specific special case.
+- `sesStageCutoverGate` — a card the engine refuses to place STOPS a cutover.
+  It reads the published advisory value, grants nothing, and passing it is not
+  a cutover authorisation. The parity harness now runs the real gate over the
+  real canonical rows and publishes the result.
+
+**Measured (2026-08-02T09:00:05Z)**
+
+| Fact | Design expected | Measured |
+|---|---:|---:|
+| Pure changes from the corroboration guard | 3 | **3** |
+| Resolving to Trade Report In | 2 | **2** |
+| Becoming decision-required | 1 | **1** |
+| Prospective corrected moves | 37 -> 35 | **37 -> 35** |
+| Pure Completed | 5 -> 2 | **5 -> 2** |
+| Pure Trade Report In | 9 -> 11 | **9 -> 11** |
+| Live placements moved | 0 | **0** |
+| Cutover gate | blocked | **blocked, 1 card** |
+
+The three-card cohort reproduces exactly: `SWMS-261024`, `SWMS-261025`,
+`SWMS-261059`, all carrying `terminal_without_issued_invoice`.
+
+**One reported difference from the design's numbers.** The design's C2 lab line
+records pure New moving `66 -> 67`. Measured, New stays at **66** and
+`decision_required` is **1**. That is not a divergence in the data — it is the
+difference between the design's *mechanical* lab patch (which let
+`SWMS-261059` fall through to New) and the design's own *final* ruling in
+section 4, which converts that card to `decision_required` precisely because a
+fall-through is not evidence. This build implements the ruling, so the
+mechanical New count in C2 is the number that does not apply. Every other C2
+number matches.
+
+**Exit condition met.**
+
+- Draft-invoice test: a `DRAFT` invoice does not close a card; it falls through
+  to the proved evidence column and records the conflict.
+- Non-issued test: no invoice at all does not pre-empt a submitted current-cycle
+  report and the photo floor.
+- `SWMS-261059` **stops the cutover gate** — `ok: false`, one blocked card,
+  both conflicts named, and its true column left unresolved. It is not placed in
+  New, Docs Ready, Completed or Archive, and this work takes no position on
+  which it should be; that adjudication is the captain's.
+- The card's rendered column is unchanged (`report_ready`), and
+  `decision_required` never enters an ops column — `unmapped_stage_job_ids`
+  stays empty because nothing buckets on the advisory value.
+
+Targeted validation: 63 tests passed across `ses_stage_engine_v2_test.ts`,
+`makesafe_computed_status_test.ts` and `makesafe_board_read_model_test.ts`;
+`deno check` and lint were clean. The frozen Release 0 baseline re-verifies
+with an identical generation id, so all four releases measured the same 407
+cards and the same certified 71.
+
+## Where this leaves the next task
+
+Releases 4-6 and 8 are the remaining code-only/shadow work and can be picked up
+without re-deriving anything above:
+
+- **Release 4** — replace `classifyMakesafeJobType`'s three-kind guess with the
+  canonical `ses_family` already on the row (7 real families plus unknown). 136
+  diagnostic job-kind corrections expected, 0 column changes.
+- **Release 5** — own-template roof current-cycle submitted-draft reader. 0
+  current cards.
+- **Release 6** — land the portal capture reader. 0 capture rows exist, so 0
+  immediate evidence-driven moves; the rule seam covers 111 roof/assessment
+  cards.
+- **Release 8** — overlay re-anchor metadata and the no-op attestation read
+  path. No ledger rows.
+
+Release 7 (Docs Ready authority) and Release 9 (the nine-row re-anchor apply)
+are both captain-gated and are not code-only.
+
+Standing measurement after Releases 0-3, as read on the ORIGINAL stacked
+branches: 407 cards; live columns 36/30/12/24/2/303 unchanged throughout;
+corrected prospective moves **35**; corrected column candidate New 66 /
+Allocated 64 / Trade Report In 11 / Docs Ready 0 / Completed 2 / Archive 263 /
+decision-required 1; cutover gate **blocked** on `SWMS-261059`; 9 overlay rows
+still due re-anchoring at Release 9. The re-land section below carries the
+current reading against `main`.
+
+### Release 3 re-land — re-measured against `main`
+
+Release 3 was re-landed on its own branch based directly on `main` at `8928c18`
+(the Release 2 squash), opened as its own PR, and re-measured against a FRESH
+read-only snapshot rather than carrying the stacked-branch numbers forward.
+This completes the three-release re-land; all of Releases 1-3 now reach `main`
+one counted behaviour at a time, never stacked.
+
+Snapshot `2026-08-02T09:00:05Z`, population `ses-board-population/active-v1`,
+407 cards, 13 SELECT-only Management API queries, base commit `8928c18`.
+
+| Fact | Expected | Measured |
+|---|---:|---:|
+| Pure stage changes | 3 | 3 |
+| Resolving to Trade Report In | 2 | 2 (`SWMS-261024`, `SWMS-261025`) |
+| Becoming decision-required | 1 | 1 (`SWMS-261059`) |
+| Prospective corrected moves | 37 -> 35 | 37 -> 35 |
+| Live placements moved | 0 | 0 |
+| Cutover gate | blocked on `SWMS-261059` | blocked on `SWMS-261059` |
+| Frozen Release 0 disputed manifest | reproduces | 71 / 71, manifest id identical |
+
+`SWMS-261059` STOPS the gate rather than being placed, which is the point of
+this release. `sesStageCutoverGate` returns `ok: false` over the real canonical
+rows with that single card blocked, carrying both
+`terminal_without_issued_invoice` and `terminal_without_supporting_evidence`.
+Its live column is untouched at `report_ready` on both sides of the A/B. Its
+true column remains an open captain question and is **not** resolved here.
+
+Placement is proved by A/B rather than asserted: the harness was run once at
+`8928c18` and once at this branch's tip. Per card, `legacy_canonical_stage`,
+`legacy_stage`, `m1_published`, `m1_pure`, `post_cutover_stage`,
+`post_cutover_overlay_binds` and the whole `overlay` object are identical on all
+407 cards, and overlays stay 46 total / 42 binding / 9 would-unbind on both
+sides.
+
+One drift from the stacked-branch reading, reported rather than reconciled: the
+corrected column candidate reads New 65 / Allocated 64 / Trade Report In 12 /
+Docs Ready 0 / Completed 2 / Archive 263 / decision-required 1, against the
+New 66 / Trade Report In 11 recorded above, and live columns read
+`35/30/13/24/2/303` against `36/30/12/24/2/303`. Both are the same single card
+ageing `new -> trade_report_in` in live data, first seen during the Release 1
+re-land. It is NOT a code effect: the `8928c18` baseline run in this same
+session reports the identical live columns, and the total stays 407.

@@ -59,6 +59,7 @@ import {
 } from "../supabase/functions/ops-api/makesafe_cycle_evidence.ts";
 import { isPackSentTriageEvent } from "../supabase/functions/ops-api/makesafe_send_pack.ts";
 import { MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION } from "../supabase/functions/ops-api/makesafe_computed_status.ts";
+import { sesStageCutoverGate } from "../supabase/functions/ops-api/ses_stage_engine_v2.ts";
 
 const PROJECT_REF = "kevgrhcjxspbxgovpmfl";
 const MANAGEMENT_QUERY_URL =
@@ -898,7 +899,10 @@ async function run(): Promise<void> {
 
   for (const card of cards) classify(card);
 
-  const summary = summarise(cards);
+  // The real gate function over the real canonical rows — not a re-derivation.
+  // A card the corrected engine refuses to place STOPS a cutover.
+  const cutoverGate = sesStageCutoverGate(runA);
+  const summary = { ...summarise(cards), cutover_gate: cutoverGate };
   await Deno.writeTextFile(
     outPath,
     JSON.stringify(

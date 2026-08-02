@@ -61,7 +61,18 @@ import {
  * Bump on any change to what this engine derives. Published on every row so a
  * past measurement stays attributable to the engine that produced it.
  */
-export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r2-shadow";
+export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r3-shadow";
+
+/**
+ * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
+ * the captain ruled that explicitly, and a draft invoice's online link cannot
+ * take payment at all.
+ */
+export const SES_STAGE_ISSUED_INVOICE_STATUSES = [
+  "AUTHORISED",
+  "SUBMITTED",
+  "PAID",
+] as const;
 
 /** 168 hours. Completed rolls into Archive at exactly seven days, not after. */
 export const SES_STAGE_COMPLETED_WINDOW_MS = 7 * 86_400_000;
@@ -231,16 +242,57 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
     };
   }
   if (["complete", "completed", "closed"].includes(jobStatus)) {
-    const terminal = sesStageCompletedStage(
-      input,
-      "job is already completed or closed",
-    );
+    // R3 — the raw terminal value is a CLAIM, not proof. It is eligible to
+    // close a card only when an issued invoice corroborates it. Uncorroborated,
+    // it pre-empts stronger evidence sitting on the card: two live cards carry
+    // a submitted current-cycle report and the photo floor, and the shortcut
+    // would bury both in Completed.
+    const invoiceStatus = String(input.evidence?.invoiceStatus || "")
+      .toUpperCase();
+    if (
+      (SES_STAGE_ISSUED_INVOICE_STATUSES as readonly string[]).includes(
+        invoiceStatus,
+      )
+    ) {
+      const terminal = sesStageCompletedStage(
+        input,
+        "job is completed or closed and an issued invoice corroborates it",
+      );
+      return {
+        ...base,
+        stage: terminal.stage,
+        reasons: terminal.reasons,
+        missing: [],
+        conflicts: [...conflicts, ...terminal.conflicts],
+      };
+    }
+    conflicts.push("terminal_without_issued_invoice");
+    const evidence = deriveMakesafeEvidenceStage(input as MakesafeStatusInput);
+    // A mechanical fall-through to New is NOT evidence that the job is new. If
+    // the card carries no later-stage evidence at all, the raw terminal claim
+    // and the empty evidence contradict each other and NOTHING is proved. The
+    // engine says so and stops a cutover rather than inventing a column.
+    if (evidence.status === "new") {
+      conflicts.push("terminal_without_supporting_evidence");
+      return {
+        ...base,
+        stage: SES_STAGE_DECISION_REQUIRED,
+        reasons: [
+          "raw job state says completed or closed, no issued invoice corroborates it, and no evidence on the card proves any other column",
+        ],
+        missing: evidence.missing,
+        conflicts,
+      };
+    }
     return {
       ...base,
-      stage: terminal.stage,
-      reasons: terminal.reasons,
-      missing: [],
-      conflicts: [...conflicts, ...terminal.conflicts],
+      stage: evidence.status,
+      reasons: [
+        ...evidence.reasons,
+        "raw completed/closed job state is not corroborated by an issued invoice, so it does not close the card",
+      ],
+      missing: evidence.missing,
+      conflicts,
     };
   }
   if (closeoutSatisfied(input as MakesafeStatusInput)) {
@@ -303,5 +355,81 @@ export function sesStageV2OverlayCandidate(
       ? String(application?.after_status || stage).toLowerCase()
       : stage,
     binds,
+  };
+}
+
+/** The published advisory subset of a canonical board row the gate reads. */
+export interface SesStageGateRow {
+  id?: string | null;
+  job_number?: string | null;
+  canonical_stage?: string | null;
+  derived_stage_v2?: string | null;
+  derived_stage_v2_conflicts?: string[] | null;
+  derived_stage_v2_reasons?: string[] | null;
+}
+
+export interface SesStageCutoverGateBlocker {
+  job_id: string | null;
+  job_ref: string | null;
+  canonical_stage: string | null;
+  conflicts: string[];
+  reasons: string[];
+}
+
+export interface SesStageCutoverGateResult {
+  ok: boolean;
+  checked: number;
+  engine_version: string;
+  blocked: SesStageCutoverGateBlocker[];
+}
+
+/**
+ * The cutover gate.
+ *
+ * A card the corrected engine refuses to place STOPS a cutover. That is the
+ * whole point of `decision_required`: `SWMS-261059` says completed, has no
+ * issued invoice, no current-cycle report and no live assignment, and its true
+ * column is a captain question. Dropping it into New, Docs Ready, Completed or
+ * Archive because the code has to return something is exactly the failure this
+ * refuses.
+ *
+ * This gate reads the published advisory value and grants nothing. It cannot
+ * move a card, and passing it is not a cutover authorisation — Release 12 is,
+ * and it needs its own exact manifest and captain approval on top of this.
+ */
+export function sesStageCutoverGate(
+  rows: SesStageGateRow[],
+): SesStageCutoverGateResult {
+  const blocked: SesStageCutoverGateBlocker[] = [];
+  for (const row of rows || []) {
+    if (
+      typeof row?.derived_stage_v2 !== "string" ||
+      row.derived_stage_v2.trim() === ""
+    ) {
+      blocked.push({
+        job_id: row?.id ?? null,
+        job_ref: row?.job_number ?? null,
+        canonical_stage: row?.canonical_stage ?? null,
+        conflicts: ["advisory_stage_missing"],
+        reasons: [
+          "advisory stage missing - the corrected engine did not place this row, so a cutover cannot be proved",
+        ],
+      });
+      continue;
+    }
+    if (row?.derived_stage_v2 !== SES_STAGE_DECISION_REQUIRED) continue;
+    blocked.push({
+      job_id: row?.id ?? null,
+      job_ref: row?.job_number ?? null,
+      canonical_stage: row?.canonical_stage ?? null,
+      conflicts: row?.derived_stage_v2_conflicts ?? [],
+      reasons: row?.derived_stage_v2_reasons ?? [],
+    });
+  }
+  return {
+    ok: blocked.length === 0,
+    checked: (rows || []).length,
+    engine_version: SES_STAGE_ENGINE_V2_VERSION,
+    blocked,
   };
 }
