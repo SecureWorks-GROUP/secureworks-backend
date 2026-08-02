@@ -243,6 +243,13 @@ Deno.test("attendance-cycle hash matches the production vector", async () => {
     ]),
     "sha256:84c308706bc740b06366f4da38475a9559d0b5ad8ca1d57bda4ff2f434c27dfb",
   );
+  assertEquals(
+    await makesafeAttendanceCycleSetHash([
+      "20828ff2-6699-4f59-a71f-6c47194444aa",
+      "00000000-0000-0000-0000-000000000001",
+    ]),
+    "sha256:1811538a3d382def3eb72ff59e7050ba4d431b4a2db84e511d6de01bebe003c3",
+  );
 });
 
 Deno.test("validated raw proof facts preserve revision-bound proofs", () => {
