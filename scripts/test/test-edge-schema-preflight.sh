@@ -16,6 +16,7 @@ DOCS_READY_MIGRATION="$REPO_ROOT/supabase/migrations/20260728210000_makesafe_ses
 SIBLING_EVIDENCE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728730000_makesafe_sibling_evidence_bundle_u7.sql"
 PORTAL_CAPTURE_MIGRATION="$REPO_ROOT/supabase/migrations/20260728500000_makesafe_portal_capture_bridge_u4.sql"
 SEED_SCOPE_MIGRATION="$REPO_ROOT/supabase/migrations/20260729000000_makesafe_state_seed_scope_accounting.sql"
+RECONCILE_TRUTH_MIGRATION="$REPO_ROOT/supabase/migrations/20260728060000_makesafe_board_reconcile_truth_u2.sql"
 HUGO_NOTIFICATION_MIGRATION="$REPO_ROOT/supabase/migrations/20260729010000_makesafe_hugo_notification_sla_v1.sql"
 CYCLE_UNIQUENESS_MIGRATION="$REPO_ROOT/supabase/migrations/20260730000001_makesafe_report_cycle_uniqueness.sql"
 PDF_EXTRACTION_MIGRATION="$REPO_ROOT/supabase/migrations/20260731000001_makesafe_pdf_extraction_belt.sql"
@@ -82,6 +83,10 @@ seed_scope_migration_sha() {
   shasum -a 256 "$SEED_SCOPE_MIGRATION" | awk '{print $1}'
 }
 
+reconcile_truth_migration_sha() {
+  shasum -a 256 "$RECONCILE_TRUTH_MIGRATION" | awk '{print $1}'
+}
+
 hugo_notification_migration_sha() {
   shasum -a 256 "$HUGO_NOTIFICATION_MIGRATION" | awk '{print $1}'
 }
@@ -133,6 +138,7 @@ write_response() {
   SIBLING_EVIDENCE_EXPECTED_SHA="$(sibling_evidence_migration_sha)" \
   PORTAL_CAPTURE_EXPECTED_SHA="$(portal_capture_migration_sha)" \
   SEED_SCOPE_EXPECTED_SHA="$(seed_scope_migration_sha)" \
+  RECONCILE_TRUTH_EXPECTED_SHA="$(reconcile_truth_migration_sha)" \
   HUGO_NOTIFICATION_EXPECTED_SHA="$(hugo_notification_migration_sha)" \
   CYCLE_UNIQUENESS_EXPECTED_SHA="$(cycle_uniqueness_migration_sha)" \
   PDF_EXTRACTION_EXPECTED_SHA="$(pdf_extraction_migration_sha)" \
@@ -241,6 +247,17 @@ portal_capture_row = {
     "actual_migration_name": "makesafe_portal_capture_bridge_u4",
     "actual_statement_count": 1,
     "actual_statement_sha256": os.environ["PORTAL_CAPTURE_EXPECTED_SHA"],
+    "missing_markers": [],
+}
+reconcile_truth_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260728060000",
+    "expected_migration_name": "makesafe_board_reconcile_truth_u2",
+    "expected_statement_sha256": os.environ["RECONCILE_TRUTH_EXPECTED_SHA"],
+    "actual_migration_version": "20260728060000",
+    "actual_migration_name": "makesafe_board_reconcile_truth_u2",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["RECONCILE_TRUTH_EXPECTED_SHA"],
     "missing_markers": [],
 }
 seed_scope_row = {
@@ -364,6 +381,7 @@ with open(sys.argv[1], "w") as f:
             docs_ready_row,
             sibling_evidence_row,
             portal_capture_row,
+            reconcile_truth_row,
             seed_scope_row,
             hugo_notification_row,
             cycle_uniqueness_row,
