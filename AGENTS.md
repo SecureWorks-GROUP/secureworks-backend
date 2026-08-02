@@ -1222,6 +1222,34 @@ or a changed adjudication fails. Never re-snapshot it to make a drifted run
 green. Measured blast per release and the standing numbers:
 `docs/evidence/ses-e1-stage-engine-v2-shadow-2026-08-02.md`.
 
+## Readiness Is A Phase-1 Shadow With No Producer, And No Longer Gates Money
+
+`makesafe_readiness_current.ready` has never been true for any card. Its only
+setter is `commit_makesafe_readiness`, whose two callers both refused unless it
+was ALREADY true, and its only row creator (`invalidate_makesafe_readiness`)
+writes false. `makesafe_readiness_revisions` is EMPTY in production against 511
+invalidations — the invalidator shipped, the producer belongs to a phase that
+was never built (`COMMENT ON TABLE`: "Phase 1 compare-only; never a v1 stage
+source"). Consequence: zero invoice obligations existed board-wide.
+
+The captain's 2026-08-03 ruling dropped the precondition from
+`commit_ses_invoice_obligation_revision_v1` and `commit_ses_invoice_bound_docket_v1`
+(`20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql`). **Drop, never
+assert** — writing `ready = true` forges evidence authority on the money path.
+Both functions now propagate readiness only when a prior revision is genuinely
+certified, and skip the re-commit otherwise; the uncertified mint is recorded in
+`makesafe_readiness_invalidations.reason` (join on `dependency_identity` = the
+obligation revision id). Restoring the gate is the rollback twin, and needs a
+Phase-2 producer that derives readiness without a caller-supplied `p_ready`.
+
+`record_ses_revision_approval_v1` still carries the SAME unsatisfiable test and
+was deliberately left in force, so APPROVE INVOICE is still blocked pending a
+separate ruling. Contract, measurements and the never-assert proofs:
+`data/ses-readiness-gate-drop-v1/report.md`,
+`ses_readiness_precondition_drop_test.ts` (asserts the EFFECTIVE body — last
+`CREATE OR REPLACE` across migrations in version order — so a re-introduction
+fails it).
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

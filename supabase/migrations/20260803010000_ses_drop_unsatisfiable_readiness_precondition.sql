@@ -1,0 +1,669 @@
+-- SES: drop the unsatisfiable readiness precondition from the invoice-obligation path.
+--
+-- Captain's decision date: 2026-08-03 (option 3 of three; the reservation was put
+-- to him twice, including that this REMOVES a check rather than satisfying it).
+--
+-- WHY
+-- ---
+-- `makesafe_readiness_current.ready` can never become true:
+--
+--   * `ready` defaults false
+--     (20260728000001_makesafe_state_authority_u2.sql, makesafe_readiness_current).
+--   * The only function that can set it true is `commit_makesafe_readiness`
+--     (same migration), and it has exactly two callers repo-wide, both in
+--     20260728020000_makesafe_ses_invoice_release_u5_u6.sql: the two functions
+--     replaced below.
+--   * BOTH callers refuse unless readiness is ALREADY true.
+--   * The only function that creates the row, `invalidate_makesafe_readiness`,
+--     writes it false and nulls the revision pointer.
+--
+-- Nothing bootstraps the first ready readiness revision. Readiness was shipped
+-- deliberately as a Phase 1 compare-only shadow -- see the COMMENT ON TABLE in
+-- ..._u2.sql: "Phase 1 compare-only; never a v1 stage source." Its producer
+-- belongs to a phase that was never built. The defect is that the U5 money path
+-- wired that compare-only shadow in as a HARD PRECONDITION, so no card on this
+-- board has ever minted an invoice obligation. Measured read-only against
+-- production on 2026-08-03: 191 rows in `makesafe_readiness_current`, ZERO with
+-- `ready = true`, ZERO rows in `makesafe_readiness_revisions` at all (so the
+-- INNER JOIN below could never find a row for any job), 511 invalidations, and
+-- ZERO invoice obligations board-wide for the whole life of the system.
+--
+-- WHAT THIS DOES, AND DELIBERATELY DOES NOT DO
+-- --------------------------------------------
+-- It DROPS the precondition. It does NOT assert readiness. Writing `ready = true`
+-- would have an agent forge evidence authority on the money path, which is
+-- exactly what the readiness table exists to prevent, and the ruling explicitly
+-- refuses it.
+--
+-- The shape is: when a certified prior readiness revision EXISTS, behave exactly
+-- as before (propagate it, and only ever weaken it). When it does not, record the
+-- invalidation and SKIP the readiness re-commit. Readiness keeps recording, keeps
+-- invalidating, and keeps telling the truth about what it knows. It simply stops
+-- being a blocker it can never stop being.
+--
+-- Note that deleting the RAISE blocks alone would NOT have worked: `prior_readiness`
+-- is consumed downstream (dependency_envelope / attendance_cycle_set_hash /
+-- family_matrix_revision / blockers). With an all-NULL record, `jsonb_set` and
+-- `makesafe_readiness_revision_v1` are STRICT and return NULL, every guard inside
+-- `commit_makesafe_readiness` compares NULL to NULL and passes, and the INSERT into
+-- `makesafe_readiness_revisions` then fails 23502 on `readiness_revision`. Hence
+-- the explicit branch rather than a deletion.
+--
+-- NOT TOUCHED by this migration, and not authorised by the ruling:
+--   * the money seal (`jobs.ses_money_sealed_at`) and its fence;
+--   * the human APPROVE INVOICE gate in `ses_reporting_actions.ts`
+--     (`operatorAuth.mode == 'jwt'` AND `auth.user`);
+--   * `record_ses_revision_approval_v1`, which carries a THIRD instance of the
+--     same unsatisfiable readiness test and remains in force -- reaching the
+--     approval button is what this migration delivers, not pressing it;
+--   * any other precondition on the obligation path;
+--   * the readiness table, its invalidator, or any of its recording behaviour.
+--
+-- HOW TO RESTORE THE PRECONDITION
+-- -------------------------------
+-- Restore the two `IF NOT FOUND OR NOT prior_readiness.current_ready THEN RAISE`
+-- blocks (see supabase/rollbacks/20260803010000_..._down.sql, which restores the
+-- exact pre-existing bodies). Do that once, and only once, a Phase-2 producer can
+-- legitimately commit a READY readiness revision without a caller asserting it --
+-- concretely: a SECURITY DEFINER derivation that takes no caller-supplied `ready`
+-- flag, so `commit_makesafe_readiness`'s `p_ready boolean` parameter stops being
+-- assertable by any service_role caller. Until such a producer exists,
+-- `makesafe_readiness_revisions` stays empty and restoring the precondition
+-- re-blocks every card on the board.
+--
+-- This migration writes ZERO rows. It replaces two function bodies.
+
+CREATE OR REPLACE FUNCTION public.commit_ses_invoice_obligation_revision_v1(
+  p_obligation jsonb,
+  p_revision jsonb
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions
+AS $$
+DECLARE
+  target_job_id uuid := (p_obligation->>'job_id')::uuid;
+  target_obligation_id uuid := (p_obligation->>'id')::uuid;
+  target_revision_id uuid := (p_revision->>'id')::uuid;
+  target_cycles uuid[];
+  existing_revision public.makesafe_invoice_obligation_revisions%ROWTYPE;
+  active_revision public.makesafe_invoice_obligation_revisions%ROWTYPE;
+  prior_readiness record;
+  readiness_certified boolean;
+  next_generation bigint;
+  next_envelope jsonb;
+  next_readiness_revision text;
+  next_ready boolean;
+  next_blockers jsonb;
+  invalidation_reason text;
+BEGIN
+  IF jsonb_typeof(p_obligation) IS DISTINCT FROM 'object'
+     OR jsonb_typeof(p_revision) IS DISTINCT FROM 'object' THEN
+    RAISE EXCEPTION 'obligation and revision objects are required'
+      USING ERRCODE = '22023';
+  END IF;
+
+  target_cycles := ARRAY(
+    SELECT DISTINCT value::uuid
+    FROM jsonb_array_elements_text(p_revision->'attendance_cycle_ids')
+    ORDER BY value::uuid
+  );
+  IF cardinality(target_cycles) = 0 THEN
+    RAISE EXCEPTION 'at least one attendance cycle is required'
+      USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended('ses-invoice-job:' || target_job_id::text, 0));
+  PERFORM 1 FROM public.jobs WHERE id = target_job_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'job does not exist' USING ERRCODE = '23503';
+  END IF;
+
+  SELECT
+    current_row.dependency_generation,
+    current_row.readiness_revision,
+    current_row.ready AS current_ready,
+    revision.attendance_cycle_set_hash,
+    revision.family_matrix_revision,
+    revision.dependency_envelope,
+    revision.blockers
+  INTO prior_readiness
+  FROM public.makesafe_readiness_current current_row
+  JOIN public.makesafe_readiness_revisions revision
+    ON revision.job_id = current_row.job_id
+   AND revision.readiness_revision = current_row.readiness_revision
+  WHERE current_row.job_id = target_job_id
+  FOR UPDATE OF current_row;
+  -- Captain's ruling 2026-08-03: this read no longer refuses. It still runs, and
+  -- what it finds still decides whether readiness may be carried forward. The
+  -- previous body raised '23514' here ("the job has no current ready evidence
+  -- revision to bind to this invoice proposal"), which no card could ever satisfy.
+  readiness_certified := FOUND AND COALESCE(prior_readiness.current_ready, false);
+
+  SELECT * INTO existing_revision
+  FROM public.makesafe_invoice_obligation_revisions
+  WHERE id = target_revision_id;
+  IF FOUND THEN
+    IF existing_revision.content_hash = p_revision->>'content_hash'
+       AND existing_revision.obligation_id = target_obligation_id THEN
+      RETURN jsonb_build_object(
+        'obligation_id', target_obligation_id,
+        'invoice_obligation_revision_id', target_revision_id,
+        'content_hash', existing_revision.content_hash,
+        'idempotent', true
+      );
+    END IF;
+    RAISE EXCEPTION 'invoice obligation revision id resolves to different content'
+      USING ERRCODE = '23505';
+  END IF;
+
+  INSERT INTO public.makesafe_invoice_obligations (
+    id, org_id, job_id, status, mint_reason, minted_by,
+    supersedes_obligation_id, post_release_disposition
+  ) VALUES (
+    target_obligation_id,
+    (p_obligation->>'org_id')::uuid,
+    target_job_id,
+    COALESCE(NULLIF(p_obligation->>'status', ''), 'open'),
+    p_obligation->>'mint_reason',
+    p_obligation->>'minted_by',
+    NULLIF(p_obligation->>'supersedes_obligation_id', '')::uuid,
+    NULLIF(p_obligation->>'post_release_disposition', '')
+  )
+  ON CONFLICT (id) DO NOTHING;
+
+  SELECT * INTO active_revision
+  FROM public.makesafe_invoice_obligation_revisions
+  WHERE obligation_id = target_obligation_id
+    AND state NOT IN ('superseded', 'void_linked')
+  ORDER BY created_at DESC, id DESC
+  LIMIT 1
+  FOR UPDATE;
+
+  IF FOUND THEN
+    IF active_revision.state IN ('create_executed', 'authorised', 'released') THEN
+      RAISE EXCEPTION
+        'released or Xero-bound work cannot be superseded; create a new obligation after human disposition'
+        USING ERRCODE = '23514';
+    END IF;
+    IF NULLIF(p_revision->>'supersedes_revision_id', '')::uuid
+       IS DISTINCT FROM active_revision.id THEN
+      RAISE EXCEPTION 'new revision must explicitly supersede the current pending revision'
+        USING ERRCODE = '23514';
+    END IF;
+    UPDATE public.makesafe_invoice_obligation_revisions
+    SET state = 'superseded'
+    WHERE id = active_revision.id;
+    UPDATE public.makesafe_invoice_obligation_cycles
+    SET active = false
+    WHERE obligation_revision_id = active_revision.id;
+  END IF;
+
+  INSERT INTO public.makesafe_invoice_obligation_revisions (
+    id,
+    org_id,
+    job_id,
+    obligation_id,
+    content_hash,
+    attendance_cycle_ids,
+    attendance_cycle_set_hash,
+    pricing_disposition,
+    proposal,
+    duplicate_probe,
+    blockers,
+    supersedes_revision_id,
+    state,
+    created_by
+  ) VALUES (
+    target_revision_id,
+    (p_revision->>'org_id')::uuid,
+    target_job_id,
+    target_obligation_id,
+    p_revision->>'content_hash',
+    target_cycles,
+    p_revision->>'attendance_cycle_set_hash',
+    p_revision->>'pricing_disposition',
+    p_revision->'proposal',
+    COALESCE(p_revision->'duplicate_probe', '{}'::jsonb),
+    COALESCE(p_revision->'blockers', '[]'::jsonb),
+    NULLIF(p_revision->>'supersedes_revision_id', '')::uuid,
+    p_revision->>'state',
+    p_revision->>'created_by'
+  );
+
+  INSERT INTO public.makesafe_invoice_obligation_cycles (
+    obligation_revision_id,
+    obligation_id,
+    job_id,
+    attendance_cycle_id
+  )
+  SELECT target_revision_id, target_obligation_id, target_job_id, cycle_id
+  FROM unnest(target_cycles) AS cycle_id;
+
+  -- The append-only invalidation ledger is how an obligation minted WITHOUT a
+  -- certified readiness revision stays visible. `dependency_identity` is the exact
+  -- obligation revision id, so the captain can join the two later:
+  --   SELECT job_id, dependency_identity FROM makesafe_readiness_invalidations
+  --   WHERE dependency_kind = 'makesafe_invoice_obligation_revisions'
+  --     AND reason LIKE '%readiness was NOT certified at mint%';
+  -- The same string lands on makesafe_readiness_current.invalidation_reason, so it
+  -- is legible on the card as well as in the ledger. No schema change was needed.
+  invalidation_reason := CASE
+    WHEN readiness_certified
+      THEN 'The invoice obligation revision changed the reviewed commercial facts.'
+    ELSE 'The invoice obligation revision changed the reviewed commercial facts; '
+      || 'readiness was NOT certified at mint (captain ruling 2026-08-03 dropped '
+      || 'the unsatisfiable readiness precondition; no Phase-2 readiness producer exists).'
+  END;
+  next_generation := public.invalidate_makesafe_readiness(
+    target_job_id,
+    'makesafe_invoice_obligation_revisions',
+    target_revision_id::text,
+    invalidation_reason,
+    p_revision->>'created_by'
+  );
+
+  IF readiness_certified THEN
+    -- Unchanged from the original body. Reached only when a real prior readiness
+    -- revision was certified, so this can carry a true forward but never mint one.
+    next_envelope := jsonb_set(
+      jsonb_set(
+        prior_readiness.dependency_envelope,
+        '{invoice_obligation}',
+        jsonb_build_object(
+          'id', target_obligation_id,
+          'revision', target_revision_id
+        ),
+        true
+      ),
+      '{docket,revision_id}',
+      to_jsonb(p_revision->>'docket_revision_id'),
+      true
+    );
+    next_readiness_revision :=
+      public.makesafe_readiness_revision_v1(next_envelope);
+    next_ready := prior_readiness.current_ready AND
+      p_revision->>'state' <> 'blocked';
+    next_blockers := CASE
+      WHEN next_ready THEN COALESCE(prior_readiness.blockers, '[]'::jsonb)
+      ELSE COALESCE(prior_readiness.blockers, '[]'::jsonb) ||
+        COALESCE(p_revision->'blockers', '[]'::jsonb)
+    END;
+    PERFORM public.commit_makesafe_readiness(
+      target_job_id,
+      next_generation,
+      next_readiness_revision,
+      prior_readiness.attendance_cycle_set_hash,
+      prior_readiness.family_matrix_revision,
+      next_envelope,
+      next_ready,
+      next_blockers,
+      p_revision->>'created_by'
+    );
+  ELSE
+    -- No certified readiness revision to rebase. There is nothing honest to
+    -- re-commit, so nothing is committed: readiness stays exactly as
+    -- `invalidate_makesafe_readiness` left it (revision NULL, ready false,
+    -- invalidation_reason naming this ruling). Synthesising an envelope here would
+    -- be asserting readiness, which the ruling forbids.
+    next_readiness_revision := NULL;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'obligation_id', target_obligation_id,
+    'invoice_obligation_revision_id', target_revision_id,
+    'content_hash', p_revision->>'content_hash',
+    'readiness_revision', next_readiness_revision,
+    'readiness_certified', readiness_certified,
+    'dependency_generation', next_generation,
+    'idempotent', false
+  );
+END;
+$$;
+
+-- The second instance of the same unsatisfiable test. Its message reads like a
+-- freshness check, but it compares nothing against the docket revision it binds
+-- from (a real freshness test here would compare
+-- `current_row.readiness_revision` with `base.readiness_revision`); it is the
+-- readiness-ready precondition again. Because the function above only ever
+-- PROPAGATES an existing true and never bootstraps one, this test stays
+-- unsatisfiable after that fix and would simply move the same deadlock one step
+-- later, which is the case the captain's ruling names.
+--
+-- Changing it is also what keeps the never-assert guarantee: this is the ONE site
+-- that passes a literal `true` to `commit_makesafe_readiness`. Deleting its RAISE
+-- and nothing else would have turned it into a readiness forger. The branch below
+-- makes that `true` reachable only when a real prior certification already exists.
+CREATE OR REPLACE FUNCTION public.commit_ses_invoice_bound_docket_v1(
+  p_binding jsonb,
+  p_pdf_artifact jsonb
+)
+RETURNS public.makesafe_docket_revisions
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions
+AS $$
+DECLARE
+  base public.makesafe_docket_revisions%ROWTYPE;
+  inserted public.makesafe_docket_revisions%ROWTYPE;
+  target_id uuid := (p_binding->>'id')::uuid;
+  target_job_id uuid := (p_binding->>'job_id')::uuid;
+  target_revision_id uuid :=
+    (p_binding->>'invoice_obligation_revision_id')::uuid;
+  target_xero jsonb := p_binding->'xero_binding';
+  target_pdf_hash text := p_pdf_artifact->>'content_hash';
+  prior_effect public.ses_external_effects%ROWTYPE;
+  prior_readiness record;
+  readiness_certified boolean;
+  next_generation bigint;
+  next_envelope jsonb;
+  next_readiness_revision text;
+  invalidation_reason text;
+BEGIN
+  IF jsonb_typeof(p_binding) IS DISTINCT FROM 'object'
+     OR jsonb_typeof(p_pdf_artifact) IS DISTINCT FROM 'object'
+     OR target_xero->>'status' IS DISTINCT FROM 'AUTHORISED'
+     OR target_pdf_hash !~ '^sha256:[0-9a-f]{64}$'
+     OR p_pdf_artifact->>'role' IS DISTINCT FROM 'xero_invoice_pdf' THEN
+    RAISE EXCEPTION 'AUTHORISED Xero binding and real invoice PDF artifact are required'
+      USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(
+    hashtextextended('ses-invoice-docket:' || target_revision_id::text, 0)
+  );
+  SELECT * INTO inserted
+  FROM public.makesafe_docket_revisions
+  WHERE id = target_id;
+  IF FOUND THEN
+    IF inserted.stage = 'invoice_bound'
+       AND inserted.invoice_obligation_revision_id = target_revision_id
+       AND inserted.xero_binding->>'xero_invoice_id' =
+         target_xero->>'xero_invoice_id' THEN
+      RETURN inserted;
+    END IF;
+    RAISE EXCEPTION 'invoice-bound docket id resolves to different content'
+      USING ERRCODE = '23505';
+  END IF;
+
+  SELECT * INTO base
+  FROM public.makesafe_docket_revisions
+  WHERE id = (p_binding->>'based_on_revision_id')::uuid
+    AND job_id = target_job_id
+  FOR SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'the reviewed pre-Xero docket revision no longer exists'
+      USING ERRCODE = 'P0002';
+  END IF;
+  IF base.stage <> 'pre_xero' THEN
+    RAISE EXCEPTION 'invoice PDF must bind from a pre-Xero docket revision'
+      USING ERRCODE = '23514';
+  END IF;
+
+  SELECT * INTO prior_effect
+  FROM public.ses_external_effects
+  WHERE invoice_obligation_revision_id = target_revision_id
+    AND effect_kind = 'invoice_authorise'
+    AND state = 'confirmed'
+    AND external_id = target_xero->>'xero_invoice_id';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'the AUTHORISED Xero invoice is not confirmed by the exact effect ledger'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.makesafe_revision_approvals approvals
+    WHERE approvals.job_id = target_job_id
+      AND approvals.action = 'release'
+      AND approvals.decided_at >= base.committed_at
+  ) THEN
+    RAISE EXCEPTION 'attach the Xero PDF before recording SEND IT approval'
+      USING ERRCODE = '23514';
+  END IF;
+
+  SELECT
+    current_row.ready AS current_ready,
+    revision.attendance_cycle_set_hash,
+    revision.family_matrix_revision,
+    revision.dependency_envelope,
+    revision.blockers
+  INTO prior_readiness
+  FROM public.makesafe_readiness_current current_row
+  JOIN public.makesafe_readiness_revisions revision
+    ON revision.job_id = current_row.job_id
+   AND revision.readiness_revision = current_row.readiness_revision
+  WHERE current_row.job_id = target_job_id
+  FOR UPDATE OF current_row;
+  -- Captain's ruling 2026-08-03: no longer refuses. The previous body raised
+  -- '40001' here ("new evidence landed; review the current docket revision
+  -- again"). Every other guard in this function -- the pre_xero base revision, the
+  -- confirmed AUTHORISED effect-ledger row, and the SEND-IT ordering test above --
+  -- is untouched and still refuses.
+  readiness_certified := FOUND AND COALESCE(prior_readiness.current_ready, false);
+
+  INSERT INTO public.makesafe_docket_revisions (
+    id,
+    org_id,
+    job_id,
+    source_instruction_id,
+    lineage_id,
+    attendance_cycle_ids,
+    current_attendance_cycle_id,
+    readiness_revision,
+    idempotency_key,
+    assembler_version,
+    family_matrix_version,
+    input_content_hash,
+    output_content_hash,
+    state,
+    pre_xero_docs_ready,
+    local_invoice_proposal,
+    envelope,
+    blockers,
+    email_drafts,
+    review_spec,
+    release_payload,
+    superseded_revision_id,
+    retention_class,
+    artifact_count,
+    artifact_size_bytes,
+    accepted_at,
+    committed_at,
+    duration_ms,
+    within_five_minutes,
+    sla_breach,
+    stage_durations_ms,
+    created_by,
+    stage,
+    invoice_obligation_revision_id,
+    xero_binding,
+    based_on_revision_id
+  ) VALUES (
+    target_id,
+    base.org_id,
+    base.job_id,
+    base.source_instruction_id,
+    base.lineage_id,
+    base.attendance_cycle_ids,
+    base.current_attendance_cycle_id,
+    base.readiness_revision,
+    'ses-invoice-bound:' || target_revision_id::text,
+    base.assembler_version,
+    base.family_matrix_version,
+    base.input_content_hash,
+    p_binding->>'output_content_hash',
+    'ready',
+    true,
+    base.local_invoice_proposal,
+    jsonb_set(
+      jsonb_set(base.envelope, '{invoice_create_approved}', 'false'::jsonb, true),
+      '{client_send_approved}',
+      'false'::jsonb,
+      true
+    ),
+    '[]'::jsonb,
+    base.email_drafts,
+    base.review_spec || jsonb_build_object(
+      'xero_binding', target_xero,
+      'invoice_pdf_content_hash', target_pdf_hash
+    ),
+    jsonb_set(
+      jsonb_set(base.release_payload, '{invoice_create_approved}', 'false'::jsonb, true),
+      '{client_send_approved}',
+      'false'::jsonb,
+      true
+    ),
+    base.id,
+    'operations-record',
+    base.artifact_count + 1,
+    base.artifact_size_bytes + (p_pdf_artifact->>'size_bytes')::bigint,
+    base.accepted_at,
+    clock_timestamp(),
+    base.duration_ms,
+    base.within_five_minutes,
+    base.sla_breach,
+    base.stage_durations_ms,
+    COALESCE(NULLIF(p_binding->>'created_by', ''), 'ses-u6-invoice-bind'),
+    'invoice_bound',
+    target_revision_id,
+    target_xero,
+    base.id
+  ) RETURNING * INTO inserted;
+
+  INSERT INTO public.makesafe_docket_artifacts (
+    org_id,
+    revision_id,
+    job_id,
+    role,
+    object_key,
+    media_type,
+    content_hash,
+    size_bytes,
+    metadata,
+    created_by
+  )
+  SELECT
+    artifact.org_id,
+    inserted.id,
+    artifact.job_id,
+    artifact.role,
+    artifact.object_key,
+    artifact.media_type,
+    artifact.content_hash,
+    artifact.size_bytes,
+    artifact.metadata,
+    inserted.created_by
+  FROM public.makesafe_docket_artifacts artifact
+  WHERE artifact.revision_id = base.id;
+
+  INSERT INTO public.makesafe_docket_artifacts (
+    org_id,
+    revision_id,
+    job_id,
+    role,
+    object_key,
+    media_type,
+    content_hash,
+    size_bytes,
+    metadata,
+    created_by
+  ) VALUES (
+    inserted.org_id,
+    inserted.id,
+    inserted.job_id,
+    'xero_invoice_pdf',
+    p_pdf_artifact->>'object_key',
+    'application/pdf',
+    target_pdf_hash,
+    (p_pdf_artifact->>'size_bytes')::bigint,
+    COALESCE(p_pdf_artifact->'metadata', '{}'::jsonb),
+    inserted.created_by
+  );
+
+  UPDATE public.makesafe_invoice_obligation_revisions
+  SET state = 'authorised', xero_binding = target_xero
+  WHERE id = target_revision_id
+    AND state IN ('create_executed', 'create_approved');
+  UPDATE public.makesafe_invoice_obligations obligation
+  SET status = 'xero_bound'
+  WHERE obligation.id = (
+    SELECT revision.obligation_id
+    FROM public.makesafe_invoice_obligation_revisions revision
+    WHERE revision.id = target_revision_id
+  );
+
+  invalidation_reason := CASE
+    WHEN readiness_certified
+      THEN 'The real AUTHORISED Xero PDF created a new exact docket revision.'
+    ELSE 'The real AUTHORISED Xero PDF created a new exact docket revision; '
+      || 'readiness was NOT certified at bind (captain ruling 2026-08-03 dropped '
+      || 'the unsatisfiable readiness precondition; no Phase-2 readiness producer exists).'
+  END;
+  next_generation := public.invalidate_makesafe_readiness(
+    target_job_id,
+    'makesafe_docket_revisions',
+    inserted.id::text,
+    invalidation_reason,
+    inserted.created_by
+  );
+
+  IF readiness_certified THEN
+    -- Unchanged from the original body, including the literal `true`. Reached only
+    -- when a real prior readiness certification already exists, so this re-affirms
+    -- a fact somebody else established; it never originates one.
+    next_envelope := jsonb_set(
+      jsonb_set(
+        prior_readiness.dependency_envelope,
+        '{docket,revision_id}',
+        to_jsonb(inserted.id::text),
+        true
+      ),
+      '{docket,content_hash}',
+      to_jsonb(inserted.output_content_hash),
+      true
+    );
+    next_readiness_revision :=
+      public.makesafe_readiness_revision_v1(next_envelope);
+    PERFORM public.commit_makesafe_readiness(
+      target_job_id,
+      next_generation,
+      next_readiness_revision,
+      prior_readiness.attendance_cycle_set_hash,
+      prior_readiness.family_matrix_revision,
+      next_envelope,
+      true,
+      COALESCE(prior_readiness.blockers, '[]'::jsonb),
+      inserted.created_by
+    );
+  END IF;
+  -- No ELSE. With no certified prior revision there is no envelope to rebase and
+  -- nothing honest to commit, so readiness stays as the invalidation left it.
+
+  RETURN inserted;
+END;
+$$;
+
+-- Grants are unchanged by CREATE OR REPLACE, but restated so a fresh
+-- migration-provisioned database that somehow replays only this file still lands
+-- on the same closed boundary as 20260728020000.
+REVOKE ALL ON FUNCTION public.commit_ses_invoice_obligation_revision_v1(jsonb, jsonb)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.commit_ses_invoice_bound_docket_v1(jsonb, jsonb)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commit_ses_invoice_obligation_revision_v1(jsonb, jsonb)
+  TO service_role;
+GRANT EXECUTE ON FUNCTION public.commit_ses_invoice_bound_docket_v1(jsonb, jsonb)
+  TO service_role;
+
+COMMENT ON FUNCTION public.commit_ses_invoice_obligation_revision_v1(jsonb, jsonb) IS
+  'SES U5 invoice obligation commit. Captain ruling 2026-08-03 removed the '
+  'unsatisfiable makesafe_readiness_current.ready precondition; readiness is '
+  'propagated when certified and never asserted. An obligation minted without a '
+  'certified readiness revision is recorded as such in '
+  'makesafe_readiness_invalidations.reason.';
+COMMENT ON FUNCTION public.commit_ses_invoice_bound_docket_v1(jsonb, jsonb) IS
+  'SES U6 invoice-bound docket commit. Captain ruling 2026-08-03 removed the same '
+  'unsatisfiable readiness precondition. The readiness re-commit (which affirms '
+  'ready = true) now runs only when a certified prior readiness revision exists.';

@@ -1,0 +1,359 @@
+// deno-lint-ignore-file no-import-prefix
+//
+// Captain's ruling 2026-08-03: the unsatisfiable `makesafe_readiness_current.ready`
+// precondition is removed from the invoice-obligation path.
+//
+// These tests read the EFFECTIVE function bodies, not one migration file: every
+// migration is scanned in version order and the LAST `CREATE OR REPLACE FUNCTION`
+// for a given name wins, which is exactly what the database ends up holding. That
+// is what makes this a real regression test -- delete or neuter
+// `20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql` and the
+// effective body reverts to the 20260728020000 one, which still carries both
+// RAISE blocks, and the assertions below fail.
+//
+// The controls at the bottom must pass on BOTH shapes: they pin the gates this
+// ruling does NOT touch.
+
+import {
+  assert,
+  assertEquals,
+  assertStringIncludes,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
+
+const MIGRATIONS_DIR = new URL("../../migrations/", import.meta.url);
+
+async function migrationsInVersionOrder(): Promise<
+  Array<{ name: string; sql: string }>
+> {
+  const names: string[] = [];
+  for await (const entry of Deno.readDir(MIGRATIONS_DIR)) {
+    if (entry.isFile && entry.name.endsWith(".sql")) names.push(entry.name);
+  }
+  names.sort();
+  const out: Array<{ name: string; sql: string }> = [];
+  for (const name of names) {
+    out.push({
+      name,
+      sql: await Deno.readTextFile(new URL(name, MIGRATIONS_DIR)),
+    });
+  }
+  return out;
+}
+
+const MIGRATIONS = await migrationsInVersionOrder();
+
+/**
+ * The body Postgres ends up with for `functionName`: the last
+ * `CREATE OR REPLACE FUNCTION public.<name>(` ... `$$;` block across all
+ * migrations in version order.
+ */
+function effectiveFunction(
+  functionName: string,
+): { migration: string; body: string } {
+  let found: { migration: string; body: string } | null = null;
+  for (const migration of MIGRATIONS) {
+    const marker = `CREATE OR REPLACE FUNCTION public.${functionName}(`;
+    let from = migration.sql.indexOf(marker);
+    while (from !== -1) {
+      const end = migration.sql.indexOf("\n$$;", from);
+      assert(
+        end !== -1,
+        `unterminated body for ${functionName} in ${migration.name}`,
+      );
+      found = {
+        migration: migration.name,
+        body: migration.sql.slice(from, end + 4),
+      };
+      from = migration.sql.indexOf(marker, end);
+    }
+  }
+  assert(found, `no definition found for ${functionName}`);
+  return found;
+}
+
+const OBLIGATION = effectiveFunction(
+  "commit_ses_invoice_obligation_revision_v1",
+);
+const BOUND_DOCKET = effectiveFunction("commit_ses_invoice_bound_docket_v1");
+const APPROVAL = effectiveFunction("record_ses_revision_approval_v1");
+
+Deno.test("the drop migration owns the effective obligation and bind bodies", () => {
+  assertEquals(
+    OBLIGATION.migration,
+    "20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql",
+  );
+  assertEquals(
+    BOUND_DOCKET.migration,
+    "20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql",
+  );
+});
+
+Deno.test("the obligation commit no longer refuses on an uncertified readiness revision", () => {
+  assert(
+    !OBLIGATION.body.includes(
+      "the job has no current ready evidence revision to bind to this invoice proposal",
+    ),
+    "the unsatisfiable readiness refusal is still in the effective obligation body",
+  );
+  assert(
+    !/NOT\s+prior_readiness\.current_ready\s+THEN\s+RAISE/.test(
+      OBLIGATION.body,
+    ),
+    "a RAISE is still guarded on prior_readiness.current_ready being false",
+  );
+});
+
+Deno.test("the invoice-bound docket commit no longer refuses on an uncertified readiness revision", () => {
+  assert(
+    !BOUND_DOCKET.body.includes(
+      "new evidence landed; review the current docket revision again",
+    ),
+    "the unsatisfiable readiness refusal is still in the effective bind body",
+  );
+  assert(
+    !/NOT\s+prior_readiness\.current_ready\s+THEN\s+RAISE/.test(
+      BOUND_DOCKET.body,
+    ),
+    "a RAISE is still guarded on prior_readiness.current_ready being false",
+  );
+});
+
+Deno.test("readiness is dropped as a blocker, never asserted", () => {
+  for (const fn of [OBLIGATION, BOUND_DOCKET]) {
+    // The readiness read still runs and still decides whether readiness may be
+    // carried forward: the precondition is dropped, the question is not.
+    assertStringIncludes(fn.body, "FROM public.makesafe_readiness_current");
+    assertStringIncludes(
+      fn.body,
+      "readiness_certified := FOUND AND COALESCE(prior_readiness.current_ready, false);",
+    );
+    // Every readiness commit sits inside the certified branch, so nothing can
+    // originate a ready readiness revision.
+    const commitAt = fn.body.indexOf("public.commit_makesafe_readiness(");
+    assert(commitAt !== -1, "the readiness commit call vanished");
+    const branchAt = fn.body.indexOf("IF readiness_certified THEN");
+    assert(branchAt !== -1, "the certified branch is missing");
+    assert(
+      branchAt < commitAt,
+      "commit_makesafe_readiness is reachable without a certified prior revision",
+    );
+    assertEquals(
+      (fn.body.match(/public\.commit_makesafe_readiness\(/g) || []).length,
+      1,
+      "exactly one readiness commit call is expected per function",
+    );
+  }
+  // The obligation path can only ever WEAKEN readiness: `true AND x`.
+  assertStringIncludes(
+    OBLIGATION.body,
+    "next_ready := prior_readiness.current_ready AND",
+  );
+  assert(
+    !/next_ready\s*:=\s*true/i.test(OBLIGATION.body),
+    "next_ready must never be assigned a literal true",
+  );
+});
+
+Deno.test("an uncertified mint is recorded, not silently omitted", () => {
+  // No schema change: the append-only invalidation ledger already carries the
+  // exact obligation revision id in `dependency_identity`.
+  assertStringIncludes(
+    OBLIGATION.body,
+    "readiness was NOT certified at mint (captain ruling 2026-08-03",
+  );
+  assertStringIncludes(
+    OBLIGATION.body,
+    "'makesafe_invoice_obligation_revisions',",
+  );
+  assertStringIncludes(
+    OBLIGATION.body,
+    "'readiness_certified', readiness_certified",
+  );
+  assertStringIncludes(
+    BOUND_DOCKET.body,
+    "readiness was NOT certified at bind (captain ruling 2026-08-03",
+  );
+  // The invalidator still runs on every commit, certified or not.
+  for (const fn of [OBLIGATION, BOUND_DOCKET]) {
+    assertStringIncludes(fn.body, "public.invalidate_makesafe_readiness(");
+  }
+});
+
+Deno.test("no other precondition on the obligation path was removed", () => {
+  for (
+    const refusal of [
+      "obligation and revision objects are required",
+      "at least one attendance cycle is required",
+      "job does not exist",
+      "invoice obligation revision id resolves to different content",
+      "released or Xero-bound work cannot be superseded; create a new obligation after human disposition",
+      "new revision must explicitly supersede the current pending revision",
+    ]
+  ) {
+    assertStringIncludes(OBLIGATION.body, refusal);
+  }
+  for (
+    const refusal of [
+      "AUTHORISED Xero binding and real invoice PDF artifact are required",
+      "invoice-bound docket id resolves to different content",
+      "the reviewed pre-Xero docket revision no longer exists",
+      "invoice PDF must bind from a pre-Xero docket revision",
+      "the AUTHORISED Xero invoice is not confirmed by the exact effect ledger",
+      "attach the Xero PDF before recording SEND IT approval",
+    ]
+  ) {
+    assertStringIncludes(BOUND_DOCKET.body, refusal);
+  }
+});
+
+// ── Controls. These must pass on BOTH the old and the new shape. ──
+
+Deno.test("CONTROL: the human APPROVE INVOICE gate is untouched", async () => {
+  const actions = await Deno.readTextFile(
+    new URL("./ses_reporting_actions.ts", import.meta.url),
+  );
+  assertStringIncludes(
+    actions,
+    '!authority.allowed || operatorAuth.mode !== "jwt" || !auth.user',
+  );
+  assertStringIncludes(
+    actions,
+    "This identified operator cannot approve the current invoice revision.",
+  );
+  // A non-human caller never reaches jwt mode.
+  assertStringIncludes(
+    actions,
+    'if (auth.mode === "api_key" || auth.mode === "routine") {\n    return { mode: auth.mode };',
+  );
+});
+
+Deno.test("CONTROL: record_ses_revision_approval_v1 keeps its own readiness recheck", () => {
+  // Deliberately NOT in scope for the 2026-08-03 ruling, which names a closed
+  // list of two functions. This is the third instance of the same test and it
+  // stays in force; see data/ses-readiness-gate-drop-v1/report.md section 6.
+  assertStringIncludes(APPROVAL.body, "NOT current_readiness.ready");
+  assertStringIncludes(APPROVAL.body, "NOT current_readiness.revision_ready");
+  assertStringIncludes(
+    APPROVAL.body,
+    "new evidence landed; review the current docket revision again",
+  );
+  assertStringIncludes(
+    APPROVAL.body,
+    "operator is not on the SES release allowlist",
+  );
+  assertStringIncludes(
+    APPROVAL.body,
+    "this docket is not mechanically clean; Captain approval is required",
+  );
+});
+
+Deno.test("the drop migration destroys nothing and touches no money row", () => {
+  const drop = MIGRATIONS.find((m) =>
+    m.name ===
+      "20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql"
+  );
+  assert(drop, "the drop migration is missing");
+  // Strip `--` comment lines: the migration names the seal and the readiness
+  // tables in prose precisely to record that they are out of scope. No
+  // executable statement may touch them.
+  const executable = drop.sql.split("\n").filter((line) =>
+    !line.trimStart().startsWith("--")
+  ).join("\n");
+  for (
+    const forbidden of [
+      "DROP TABLE",
+      "DROP FUNCTION",
+      "DROP TRIGGER",
+      "UPDATE public.makesafe_readiness_current",
+      "SET ready = true",
+      "ses_money_sealed_at",
+      "xero_invoices",
+    ]
+  ) {
+    assert(
+      !executable.includes(forbidden),
+      `no executable statement in the drop migration may contain "${forbidden}"`,
+    );
+  }
+  // Apply time writes zero rows: strip the `AS $$ ... $$;` function bodies and
+  // nothing that mutates data may remain at migration top level.
+  const topLevel = executable.replace(/AS \$\$[\s\S]*?\n\$\$;/g, "AS <body>;");
+  for (
+    const forbidden of ["INSERT INTO", "DELETE FROM", "UPDATE ", "TRUNCATE"]
+  ) {
+    assert(
+      !topLevel.includes(forbidden),
+      `the drop migration must write zero rows at apply time, found "${forbidden}"`,
+    );
+  }
+});
+
+// ── Controls. These must pass on BOTH the old and the new shape: none of them
+// reads the new migration, so reverting the implementation leaves them green. ──
+
+Deno.test("CONTROL: the readiness table, its invalidator and its recording behaviour survive", () => {
+  const u2 = MIGRATIONS.find((m) =>
+    m.name === "20260728000001_makesafe_state_authority_u2.sql"
+  );
+  assert(u2, "the U2 readiness migration is missing");
+  assertStringIncludes(
+    u2.sql,
+    "CREATE TABLE IF NOT EXISTS public.makesafe_readiness_current",
+  );
+  assertStringIncludes(
+    u2.sql,
+    "CREATE TABLE IF NOT EXISTS public.makesafe_readiness_revisions",
+  );
+  assertStringIncludes(
+    u2.sql,
+    "CREATE OR REPLACE FUNCTION public.invalidate_makesafe_readiness(",
+  );
+  // The invalidator still creates the row and still writes false.
+  assertStringIncludes(
+    u2.sql,
+    "INSERT INTO public.makesafe_readiness_current (job_id, org_id)",
+  );
+  assertStringIncludes(u2.sql, "readiness_revision = NULL,");
+  // Nothing later drops or rewrites the readiness relations.
+  const rewriters = MIGRATIONS.filter((m) =>
+    m.name > "20260728000001_makesafe_state_authority_u2.sql" &&
+    (m.sql.includes("DROP TABLE IF EXISTS public.makesafe_readiness") ||
+      m.sql.includes("DROP TABLE public.makesafe_readiness"))
+  );
+  assertEquals(rewriters.map((m) => m.name), []);
+});
+
+Deno.test("CONTROL: the money seal fence is intact", async () => {
+  const fence = await Deno.readTextFile(
+    new URL("../_shared/sealed_ses_money_fence.ts", import.meta.url),
+  );
+  // The sealed verbs still refuse; the one read exemption stays a closed set.
+  assertStringIncludes(fence, "SEALED_SES_MONEY_READ_EXEMPT_ACTIONS");
+  assertStringIncludes(fence, "get_invoice_pdf");
+});
+
+Deno.test("CONTROL: a genuinely blocked docket still cannot produce an executable obligation", async () => {
+  const actions = await Deno.readTextFile(
+    new URL("./ses_reporting_actions.ts", import.meta.url),
+  );
+  // Pre-RPC docket preconditions, all untouched by this ruling.
+  assertStringIncludes(
+    actions,
+    "No U4 pre-Xero docket exists for this invoice proposal.",
+  );
+  assertStringIncludes(
+    actions,
+    "The current docket is not a pre-Xero proposal that can mint an invoice obligation.",
+  );
+  assertStringIncludes(actions, '"pricing_evidence_missing"');
+  // And a blocked revision still cannot be executed into Xero.
+  const execute = effectiveFunction("begin_ses_invoice_execution_v1");
+  assertStringIncludes(
+    execute.body,
+    "jsonb_array_length(target_revision.blockers) > 0",
+  );
+  assertStringIncludes(
+    execute.body,
+    "the invoice obligation has no executable priced line set",
+  );
+});
