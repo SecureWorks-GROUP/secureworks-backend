@@ -31,6 +31,59 @@ import {
 } from "./ses_stage_engine_v2.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
+
+/** The canonical family of a raw board row, from the one canonical deriver. */
+export function boardRowSesFamily(base: any) {
+  const detail = base?.makesafe_details || {};
+  return canonicalSesFamilyFromCard({
+    makesafe_job_family: base?.metadata?.makesafe_job_family,
+    insurance_job_type: base?.metadata?.insurance_job_type,
+    own_template_requested: base?.metadata?.own_template_requested,
+    strata: base?.metadata?.strata,
+    report_delivery: base?.metadata?.report_delivery || detail?.report_delivery,
+  });
+}
+
+/**
+ * R5 — the job ids on this board that are own-template roofs.
+ *
+ * The loader uses this to decide whether to read the roof-draft table at all.
+ * It is exported so the loader and the row builder ask the SAME question; a
+ * loader that used a looser test would fetch drafts for cards the engine then
+ * refuses to read them for.
+ */
+export function ownTemplateRoofJobIdsForBoard(baseRows: any[]): string[] {
+  const ids: string[] = [];
+  for (const base of baseRows || []) {
+    const id = String(base?.id || "");
+    if (!id) continue;
+    if (boardRowSesFamily(base) === "own_template_roof") ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * The current own-roof draft per job: one row per job by contract, but if a
+ * database ever holds more, take the newest submitted cycle rather than an
+ * arbitrary one. Never merges two drafts into a synthetic record.
+ */
+export function latestOwnRoofDraftByJobId(
+  rows: any[],
+): Record<string, any> {
+  const byJob: Record<string, any> = {};
+  for (const row of rows || []) {
+    const jobId = String(row?.job_id || "");
+    if (!jobId) continue;
+    const current = byJob[jobId];
+    if (
+      !current ||
+      Number(row?.submitted_cycle ?? 1) > Number(current?.submitted_cycle ?? 1)
+    ) {
+      byJob[jobId] = row;
+    }
+  }
+  return byJob;
+}
 export const MAKESAFE_LIVE_BOARD_EXCLUDED_JOB_STATUSES = [
   "cancelled",
   "archived",
@@ -163,6 +216,9 @@ export interface CanonicalMakesafeExtras {
   holdsByJobId?: Record<string, MakesafeStatusHold>;
   statusApplicationsByJobId?: Record<string, any>;
   portalCaptureRowsByJobId?: Record<string, any[]>;
+  /** R5 — current own-template roof draft per job, for that family only. */
+  ownRoofDraftByJobId?: Record<string, any>;
+  ownRoofReportDocumentIdsByJobId?: Record<string, Set<string>>;
   terminalSyntheticLivefireJobIds?: ReadonlySet<string>;
   computedAt?: string;
 }
@@ -683,11 +739,18 @@ export function buildCanonicalMakesafeRows(
         packSent,
         documents: {
           report: base?.has_report_doc === true,
+          ownRoofReportDocumentIds: extras?.ownRoofReportDocumentIdsByJobId?.[
+            String(base?.id || "")
+          ] ?? new Set<string>(),
           invoice: base?.has_invoice_doc === true,
           swms: base?.has_swms_doc === true,
         },
         swmsRequired,
         hold,
+        // R5 — present only for own-template roof cards; undefined otherwise,
+        // so no other family's evidence changes shape.
+        ownRoofDraft: extras?.ownRoofDraftByJobId?.[String(base?.id || "")] ??
+          null,
       },
       // R4 — the canonical family this row already computed, handed to the
       // shadow engine so it reads a real family instead of re-guessing one.

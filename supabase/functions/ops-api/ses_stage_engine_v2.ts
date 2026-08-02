@@ -65,7 +65,7 @@ import {
  * Bump on any change to what this engine derives. Published on every row so a
  * past measurement stays attributable to the engine that produced it.
  */
-export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r4-shadow";
+export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r5-shadow";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -309,6 +309,60 @@ export function resolveSesStageV2Family(
 }
 
 /**
+ * R5 — own-template roof report-in evidence.
+ *
+ * An own-template roof is the family where SecureWorks renders its OWN branded
+ * PDF from a trade-filled template, rather than the trade completing a form on
+ * the builder's Prime portal. There is therefore no Prime form for the portal
+ * reader to observe, and a typed portal capture can never arrive for one of
+ * these cards. Proving it the ordinary-roof way means it can only ever sit at
+ * Allocated — the gap this release closes.
+ *
+ * The design's rule, verbatim: the current-cycle own-roof draft is `submitted`,
+ * its `report_doc_id` is the attached `roof_report` document, and its submitted
+ * cycle matches. All three are required, and all three are facts the running
+ * submit path already persists before it advances the checklist
+ * (`docs/evidence/roof-report-template-flow-2026-07-22.md`).
+ *
+ * `report_doc_id` present is NOT the same as the document being attached. The
+ * draft row can name a document id that never became a `roof_report`
+ * `job_documents` row, so the attachment is checked independently rather than
+ * inferred from the id.
+ */
+export function sesStageOwnRoofReportIn(
+  input: SesStageV2Input,
+): { satisfied: boolean; missing: string[] } {
+  const draft = input.evidence?.ownRoofDraft || null;
+  const missing: string[] = [];
+  if (!draft) {
+    missing.push("a current-cycle own-template roof report draft");
+    return { satisfied: false, missing };
+  }
+  if (String(draft.status || "").toLowerCase() !== "submitted") {
+    missing.push(
+      "the own-template roof report to be submitted, not left in draft",
+    );
+  }
+  const cardCycle = Number(input.detail?.cycle_number ?? 1);
+  const draftCycle = Number(draft.cycle_number ?? 1);
+  if (draftCycle !== cardCycle) {
+    missing.push(
+      `an own-template roof report for the current attendance cycle (report is cycle ${draftCycle}, card is cycle ${cardCycle})`,
+    );
+  }
+  if (!String(draft.report_doc_id || "").trim()) {
+    missing.push("the rendered own-template roof report document");
+  } else if (!input.evidence?.documents?.ownRoofReportDocumentIds?.has(
+    String(draft.report_doc_id),
+  )) {
+    // The draft names a document that is not attached to the card as a
+    // `roof_report`. Evidence that was rendered but never landed is not proof.
+    missing.push("the rendered own-template roof report to be attached");
+  }
+  return { satisfied: missing.length === 0, missing };
+}
+
+/**
  * The pure, corrected stage derivation.
  *
  * Resolution precedence is part of the contract (design section 2.1):
@@ -379,7 +433,7 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
       };
     }
     conflicts.push("terminal_without_issued_invoice");
-    const evidence = deriveMakesafeEvidenceStage(input as MakesafeStatusInput);
+    const evidence = deriveSesStageEvidence(input, family);
     // A mechanical fall-through to New is NOT evidence that the job is new. If
     // the card carries no later-stage evidence at all, the raw terminal claim
     // and the empty evidence contradict each other and NOTHING is proved. The
@@ -440,7 +494,7 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
     };
   }
 
-  const evidence = deriveMakesafeEvidenceStage(input as MakesafeStatusInput);
+  const evidence = deriveSesStageEvidence(input, family);
   return {
     ...base,
     stage: evidence.status,
@@ -448,6 +502,26 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
     missing: evidence.missing,
     conflicts,
   };
+}
+
+/**
+ * The shared evidence ladder, with the own-template roof report-in substitution
+ * applied for that family alone. Every other family goes through the ladder
+ * untouched, so this adds a family-scoped reader rather than a second ladder.
+ */
+function deriveSesStageEvidence(
+  input: SesStageV2Input,
+  family: SesStageV2FamilyResolution,
+) {
+  if (family.family !== "own_template_roof") {
+    return deriveMakesafeEvidenceStage(input as MakesafeStatusInput);
+  }
+  const reportIn = sesStageOwnRoofReportIn(input);
+  return deriveMakesafeEvidenceStage(input as MakesafeStatusInput, {
+    reportIn,
+    reportInReason:
+      "the current-cycle own-template roof report is submitted and its rendered document is attached",
+  });
 }
 
 /** The overlay row shape the resolver reads. */

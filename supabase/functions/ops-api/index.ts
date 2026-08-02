@@ -126,7 +126,9 @@ import {
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
   isSyntheticLivefireJob,
+  latestOwnRoofDraftByJobId,
   makesafeBoardJobStatusExclusionFilter,
+  ownTemplateRoofJobIdsForBoard,
   projectTradeMakesafeBoard,
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
@@ -15397,6 +15399,51 @@ async function loadCanonicalMakesafeBoard(
     }
   }
 
+  // R5 — own-template roof drafts, read ONLY for the cards that are actually
+  // that family. There are zero own-template roof cards on the board today, so
+  // this issues no query at all; it starts costing one chunked read the moment
+  // the first such card exists, and never for the other ~407. The family test
+  // is the same canonical one the read model applies, kept in
+  // `ownTemplateRoofJobIdsForBoard` so the two cannot drift apart.
+  const ownRoofJobIds = ownTemplateRoofJobIdsForBoard(baseRows)
+  let ownRoofDraftByJobId: Record<string, any> = {}
+  let ownRoofReportDocumentIdsByJobId: Record<string, Set<string>> = {}
+  if (ownRoofJobIds.length > 0) {
+    try {
+      const draftRows = await _fetchAllByJobIdChunked(
+        client,
+        'makesafe_roof_report_drafts',
+        'id, job_id, status, submitted_cycle, report_doc_id, pack_kind',
+        ownRoofJobIds,
+        (q) => q.eq('pack_kind', 'roof'),
+      )
+      ownRoofDraftByJobId = latestOwnRoofDraftByJobId(
+        draftRows.map((row: any) => ({
+          ...row,
+          cycle_number: row.submitted_cycle,
+        })),
+      )
+      const roofReportDocuments = await _fetchAllByJobIdChunked(
+        client,
+        'job_documents',
+        'id, job_id, type',
+        ownRoofJobIds,
+        (q) => q.eq('type', 'roof_report'),
+      )
+      for (const document of roofReportDocuments) {
+        const jobId = String(document?.job_id || '')
+        const documentId = String(document?.id || '')
+        if (!jobId || !documentId) continue
+        ;(ownRoofReportDocumentIdsByJobId[jobId] ||= new Set()).add(documentId)
+      }
+    } catch (error) {
+      // Fail closed to no own-roof evidence, exactly as the portal capture read
+      // above does. A card then stays where its other evidence puts it rather
+      // than the board failing.
+      console.error('[ops-api] own-template roof draft read unavailable:', (error as Error).message)
+    }
+  }
+
   return buildCanonicalMakesafeRows(baseRows, {
     notesByJobId,
     photoCountByJobId,
@@ -15405,6 +15452,8 @@ async function loadCanonicalMakesafeBoard(
     holdsByJobId,
     statusApplicationsByJobId,
     portalCaptureRowsByJobId,
+    ownRoofDraftByJobId,
+    ownRoofReportDocumentIdsByJobId,
     terminalSyntheticLivefireJobIds,
   })
 }
