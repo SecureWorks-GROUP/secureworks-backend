@@ -6,7 +6,7 @@
 //  - completeAndInvoice's substatus advance for make-safe jobs.
 //
 // Run: deno test --allow-all --no-check supabase/functions/ops-api/makesafe_lifecycle_test.ts
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _advanceMakesafeSubstatusOnInvoice,
   _deriveMakesafeBoardStage,
@@ -14,6 +14,7 @@ import {
   _isMakesafeMlbCompany,
   _makesafeMissingCloseoutDocs,
   _makesafePipelineForTest,
+  _requiresMakesafeSwms,
   _updateMakesafeSubstatus,
 } from "./index.ts";
 
@@ -169,6 +170,30 @@ Deno.test("close-out gate requires SWMS only for MLB jobs", () => {
   assertEquals(_makesafeMissingCloseoutDocs(docs, true), ["swms"]);
 });
 
+Deno.test("SWMS requirement follows the sealed MLB physical-family rule", () => {
+  const physical = { metadata: { makesafe_job_family: "physical_makesafe" } };
+  const roof = { metadata: { makesafe_job_family: "roof_report" } };
+  const assessment = { metadata: { makesafe_job_family: "assessment_report_quote" } };
+
+  assertEquals(_requiresMakesafeSwms({ requesting_company_slug: "mlb" }, physical), true);
+  assertEquals(_requiresMakesafeSwms({ requesting_company_slug: "mlb" }, roof), false);
+  assertEquals(_requiresMakesafeSwms({ requesting_company_slug: "mlb" }, assessment), false);
+  assertEquals(_requiresMakesafeSwms({ requesting_company_slug: "builderwest" }, physical), false);
+});
+
+Deno.test("send preflight and attachment paths share the SWMS requirement", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const start = source.indexOf("async function makesafeSendPack(");
+  const end = source.indexOf("\nasync function ", start + 1);
+  const sendFunction = source.slice(start, end < 0 ? undefined : end);
+
+  assertStringIncludes(sendFunction, "const requiresSwms = _requiresMakesafeSwms(detail, job)");
+  assertStringIncludes(sendFunction, "_makesafeMissingCloseoutDocs(docFlags, requiresSwms, isReportJob)");
+  assertStringIncludes(sendFunction, "if (requiresSwms) {");
+  assertStringIncludes(sendFunction, ": requiresSwms");
+  assertEquals(sendFunction.includes("shouldAttachSwms"), false);
+});
+
 Deno.test("MLB company detected from slug, name, or builder reference", () => {
   assertEquals(_isMakesafeMlbCompany({ requesting_company_slug: "mlb" }, {}), true);
   assertEquals(_isMakesafeMlbCompany({ requesting_company_name: "Major Loss Builders" }, {}), true);
@@ -176,9 +201,9 @@ Deno.test("MLB company detected from slug, name, or builder reference", () => {
   assertEquals(_isMakesafeMlbCompany({ requesting_company_name: "Acme Restorations" }, {}), false);
 });
 
-Deno.test("MLB job with invoice+report but no SWMS is held in report_ready", () => {
+Deno.test("MLB physical job with invoice+report but no SWMS is held in report_ready", () => {
   const stage = _deriveMakesafeBoardStage(
-    { status: "invoiced", completed_at: NOW },
+    { status: "invoiced", completed_at: NOW, metadata: { makesafe_job_family: "physical_makesafe" } },
     { substatus: "complete", requesting_company_slug: "mlb" },
     [],
     null,
@@ -187,6 +212,31 @@ Deno.test("MLB job with invoice+report but no SWMS is held in report_ready", () 
     { has_invoice_doc: true, has_report_doc: true, has_swms_doc: false },
   );
   assertEquals(stage, "report_ready");
+});
+
+Deno.test("MLB report-only and non-MLB jobs are not held for missing SWMS", () => {
+  const completeDocsWithoutSwms = { has_invoice_doc: true, has_report_doc: true, has_swms_doc: false };
+  const invoice = { status: "AUTHORISED", invoice_date: "2026-06-10" };
+
+  const mlbRoof = _deriveMakesafeBoardStage(
+    { status: "invoiced", completed_at: NOW, metadata: { makesafe_job_family: "roof_report" } },
+    { substatus: "complete", requesting_company_slug: "mlb", report_type: "roof" },
+    [], null, invoice, NOW, completeDocsWithoutSwms,
+  );
+  const mlbAssessment = _deriveMakesafeBoardStage(
+    { status: "invoiced", completed_at: NOW, metadata: { makesafe_job_family: "assessment_report_quote" } },
+    { substatus: "complete", requesting_company_slug: "mlb", report_type: "assessment" },
+    [], null, invoice, NOW, completeDocsWithoutSwms,
+  );
+  const nonMlb = _deriveMakesafeBoardStage(
+    { status: "invoiced", completed_at: NOW, metadata: { makesafe_job_family: "physical_makesafe" } },
+    { substatus: "complete", requesting_company_slug: "builderwest" },
+    [], null, invoice, NOW, completeDocsWithoutSwms,
+  );
+
+  assertEquals(mlbRoof, "completed");
+  assertEquals(mlbAssessment, "completed");
+  assertEquals(nonMlb, "completed");
 });
 
 // ── (c) 7-day completed-vs-archive boundary ─────────────────────────────────
