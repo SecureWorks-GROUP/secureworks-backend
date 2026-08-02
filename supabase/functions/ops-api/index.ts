@@ -412,8 +412,10 @@ import {
   invoiceLinkRequiredRefusal,
   inspectSealedSesJob,
   sealedSesFenceCheckFailedRefusal,
+  sealedSesMoneyReadExemptionApplies,
   sealedSesMoneyRefusal,
   SealedSesMoneyFenceLookupError,
+  type SealedSesMoneyReadCaller,
 } from '../_shared/sealed_ses_money_fence.ts'
 import {
   approveSesInvoiceVoidRevisionAction,
@@ -4951,7 +4953,15 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await getJobFinancialsDetail(client, jobId))
       }
       case 'finance_health_summary': return json(await financeHealthSummary(client, url.searchParams))
-      case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams))
+      // The sealed-SES read exemption (captain, 2026-08-02) needs the resolved
+      // operator identity, not a request parameter: the ops key, or an
+      // admin/owner session. The automation routine cannot reach this action at
+      // all (it is absent from ROUTINE_ALLOWED_ACTIONS), and a non-admin JWT
+      // keeps the sealed refusal it has today.
+      case 'get_invoice_pdf': return json(await getInvoicePdf(client, url.searchParams, {
+        mode: authMode,
+        role: authUser?.role ?? null,
+      }))
       case 'list_quotes': return json(await listQuotes(client, url.searchParams))
       case 'list_pos': return json(await listPOs(client, url.searchParams))
 
@@ -24473,7 +24483,13 @@ async function sendWorkOrder(client: any, body: any) {
 }
 
 // Fetch invoice PDF from Xero API and return as base64
-async function getInvoicePdf(client: any, params: URLSearchParams) {
+async function getInvoicePdf(
+  client: any,
+  params: URLSearchParams,
+  // Server-resolved operator identity. Never request data: `authMode` comes
+  // from the credential the request presented and `role` from the users row.
+  caller: SealedSesMoneyReadCaller,
+) {
   let xeroInvoiceId = params.get('xero_invoice_id')
   const invoiceNumber = params.get('invoice_number')
 
@@ -24487,12 +24503,25 @@ async function getInvoicePdf(client: any, params: URLSearchParams) {
   }
   if (!xeroInvoiceId) throw new ApiError('xero_invoice_id or invoice_number required', 400)
 
-  // PDF bytes are an outbound-capable invoice effect: resolve the invoice's
-  // own mirror link and apply the same sealed-SES wall before touching Xero.
+  // Resolve the invoice's own mirror link and run the same sealed-SES wall
+  // before touching Xero. Every identity refusal still applies here: an invoice
+  // missing from the mirror, an invoice with no authoritative job link, a
+  // synthetic live-fire job, and an unreadable job classification all still
+  // refuse before any Xero call.
+  //
+  // What changed on 2026-08-02 is one thing only. Per the captain's ruling
+  // ("of course you should be able to allow reading"), a SEALED job's invoice
+  // may be READ by an identified operator: fetching bytes that already exist
+  // creates, drafts, amends, voids, re-links, re-numbers, issues, sends and
+  // changes nothing. The exemption is keyed on this action name plus the
+  // operator caller below — see SEALED_SES_MONEY_READ_EXEMPT_ACTIONS. Every
+  // other sealed effect on the same invoice still refuses unchanged.
   await assertLegacySesInvoiceActionAllowed(
     client,
     xeroInvoiceId,
     'get_invoice_pdf',
+    undefined,
+    caller,
   )
 
   const { accessToken, tenantId } = await getToken(client)
@@ -24763,6 +24792,11 @@ async function assertLegacySesMoneyActionAllowedForJob(
   jobId: string,
   action: string,
   internalSes = false,
+  // Captain's ruling 2026-08-02 — the narrow invoice-PDF read exemption. Only
+  // the read call site supplies this; every write call site omits it, so the
+  // exemption below is unreachable for a write. See
+  // SEALED_SES_MONEY_READ_EXEMPT_ACTIONS.
+  readCaller?: SealedSesMoneyReadCaller | null,
 ) {
   let inspection
   try {
@@ -24779,6 +24813,11 @@ async function assertLegacySesMoneyActionAllowedForJob(
     throw error
   }
   if (!inspection.sealed || internalSes) return inspection
+  // The job IS sealed. Reading an existing invoice document is the one effect
+  // the seal now permits: it creates, authorises, changes, links and sends
+  // nothing. The classification above still ran, so an unreadable job still
+  // fails closed with a 503 — only the refusal is lifted, never the check.
+  if (sealedSesMoneyReadExemptionApplies(action, readCaller)) return inspection
   throw new SesActionError(409, sealedSesMoneyRefusal(action, {
     job_id: jobId,
     matched_by: inspection.matched_by,
@@ -24790,6 +24829,10 @@ async function assertLegacySesInvoiceActionAllowed(
   xeroInvoiceId: string,
   action: string,
   targetJobId?: string,
+  // Captain's ruling 2026-08-02 — the narrow invoice-PDF read exemption. Only
+  // getInvoicePdf supplies this; every other caller omits it and keeps the
+  // sealed refusal it has today.
+  readCaller?: SealedSesMoneyReadCaller | null,
 ) {
   const invoice = await client.from('xero_invoices')
     .select('job_id, invoice_type, invoice_obligation_revision_id, ses_external_token')
@@ -24850,8 +24893,11 @@ async function assertLegacySesInvoiceActionAllowed(
   }
   if (invoiceType === 'ACCPAY') return invoice.data
   if (
-    invoice.data?.invoice_obligation_revision_id ||
-    invoice.data?.ses_external_token
+    (invoice.data?.invoice_obligation_revision_id ||
+      invoice.data?.ses_external_token) &&
+    // An SES-bound invoice may be READ under the captain's 2026-08-02 ruling.
+    // Every other effect on it still refuses here, exactly as before.
+    !sealedSesMoneyReadExemptionApplies(action, readCaller)
   ) {
     throw new SesActionError(409, sealedSesMoneyRefusal(action, {
       job_id: invoice.data.job_id || null,
@@ -24870,12 +24916,20 @@ async function assertLegacySesInvoiceActionAllowed(
     targetJobId &&
     invoiceType !== 'ACCPAY'
   ) {
-    await assertLegacySesMoneyActionAllowedForJob(client, targetJobId, action)
+    await assertLegacySesMoneyActionAllowedForJob(
+      client,
+      targetJobId,
+      action,
+      false,
+      readCaller,
+    )
   }
   await assertLegacySesMoneyActionAllowedForJob(
     client,
     invoice.data.job_id,
     action,
+    false,
+    readCaller,
   )
   await assertNoSyntheticLivefireJobs(client, [invoice.data.job_id], action)
   return invoice.data

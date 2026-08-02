@@ -102,6 +102,55 @@ Deno.test("chase workflow actions fence supplied identity before GHL effects", (
   assertStringIncludes(INDEX, "xero_invoice_id,");
 });
 
+// Captain's ruling, 2026-08-02: reading an invoice PDF is exempt from the
+// sealed-SES money wall. The gate still runs first — only its sealed refusal is
+// lifted, and only for an operator caller the SERVER resolved.
+Deno.test("the invoice PDF read exemption is declared in the fence and keyed to server-resolved identity", () => {
+  // The fence module is the single authority on what is exempt, and the set is
+  // exactly one read action.
+  assertStringIncludes(FENCE, "SEALED_SES_MONEY_READ_EXEMPT_ACTIONS");
+  assertStringIncludes(FENCE, "sealedSesMoneyReadExemptionApplies");
+  const setStart = FENCE.indexOf("SEALED_SES_MONEY_READ_EXEMPT_ACTIONS");
+  const setEnd = FENCE.indexOf(");", setStart);
+  assert(setStart >= 0 && setEnd > setStart);
+  const declared = FENCE.slice(setStart, setEnd);
+  assertStringIncludes(declared, '"get_invoice_pdf"');
+  for (
+    const forbidden of [
+      "void_invoice",
+      "send_invoice_email",
+      "update_invoice",
+      "approve_invoice",
+      "create_invoice",
+      "update_invoice_job_link",
+    ]
+  ) {
+    assert(
+      !declared.includes(forbidden),
+      `${forbidden} must never be read-exempt`,
+    );
+  }
+
+  // The route supplies the caller from the resolved auth mode and the profile
+  // role, never from request parameters.
+  const routeStart = INDEX.indexOf("case 'get_invoice_pdf': return json(");
+  assert(routeStart >= 0);
+  const route = INDEX.slice(routeStart, routeStart + 400);
+  assertStringIncludes(route, "mode: authMode");
+  assertStringIncludes(route, "role: authUser?.role");
+
+  // And the automation routine cannot reach the action at all.
+  const routineStart = INDEX.indexOf(
+    "const ROUTINE_ALLOWED_ACTIONS = new Set([",
+  );
+  const routineEnd = INDEX.indexOf("])", routineStart);
+  assert(routineStart >= 0 && routineEnd > routineStart);
+  assert(
+    !INDEX.slice(routineStart, routineEnd).includes("get_invoice_pdf"),
+    "get_invoice_pdf must stay off the routine allow-list",
+  );
+});
+
 Deno.test("invoice PDF and branded delivery bind to the invoice mirror", () => {
   before(
     INDEX,
