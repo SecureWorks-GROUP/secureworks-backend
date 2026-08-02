@@ -15,9 +15,9 @@ no email drafted; the money seal was never touched.
 
 | Card | Suburb | Outcome | Evidence |
 |---|---|---|---|
-| SWMS-261019 | Floreat | **blocked by us** | report submitted + locked 22/24, `shots/d2ff4956.png`. Spine complete, cycle bound, capture row already written. Held ONLY by the rotated ops-api key. |
-| SWMS-261079 | Floreat | **blocked by us** | report submitted + locked 22/24, `shots/f280ebb0.png`. Held by **no attendance cycle** (class of 6) + the key. |
-| SWMS-26934 | Seville Grove | **blocked by us** | report submitted + locked 21/23, `shots/f41c5a7e.png`. Held by **no intake case** (spine) + the key. **Link expires 4:46 pm today** (captured 06:20, still live) — this is the last screenshot anyone gets of it. |
+| SWMS-261019 | Floreat | **blocked by us** | report submitted + locked 22/24, `shots/d2ff4956.png`. Spine complete, cycle bound, capture row **proven to verify** (§6a). Held by the ops-api key + the storey backfill. |
+| SWMS-261079 | Floreat | **blocked by us** | report submitted + locked 22/24, `shots/f280ebb0.png`. Held by **no attendance cycle** (class of 6) + storey + the key. |
+| SWMS-26934 | Seville Grove | **blocked by us** | report submitted + locked 21/23, `shots/f41c5a7e.png`. Held by **no intake case** (spine) + storey + the key. Capture row proven to verify (§6a). **Link expires 4:46 pm today** (captured 06:20, still live) — this is the last screenshot anyone gets of it. |
 | SWMS-26980 | Gwelup | waiting on trade | report submitted + locked 20/23, `shots/2ef11c67.png`, but this is `own_template_roof` — the exception in the captain's ruling. Waiting on the trade to submit **our** template, not Prime's. |
 | SWMS-261081 | Mindarie | waiting on trade | live form, 21 of 23 answered, live to 24 Aug, `shots/d79170a1.png` |
 | SWMS-261113 | Woodvale | waiting on trade | live form, **0 of 22** answered, live to 31 Aug, `shots/b8c356d0.png` |
@@ -58,11 +58,12 @@ no email drafted; the money seal was never touched.
 **Count: 0 cards into Docs Ready, out of 39 touched.** 3 are blocked by us, 6 are waiting on the
 trade, 30 are parked on a link proved dead or absent.
 
-**The 3 "blocked by us" rows are two classes and one credential, not three separate problems:**
+**The 3 "blocked by us" rows are three classes and one credential, not three separate problems:**
 
 | Blocker | Cards | Class or one-off |
 |---|---|---|
-| ops-api `SW_API_KEY` rotated; every `x-api-key` call 401s | all 3 (and all 39) | **class** — blocks the whole board, both crews, every write and every U4 dry run |
+| ops-api `SW_API_KEY` does not authenticate; every `x-api-key` call 401s | all 3 (and all 39) | **class** — blocks the whole board, both crews, every write and every U4 dry run |
+| no structured storey fact, so `pricing_evidence_missing` nulls the invoice proposal and blocks `pre_xero_docs_ready` | all 3 | **class of 61 roof cards; 39 of 50 live ones are resolvable today** — §7, §8 |
 | no attendance cycle, so capture evidence cannot be written at all | SWMS-261079 | **class of 6 in my slice, 44 board-wide** — §5 |
 | no intake case, so the spine has no lineage and no builder reference | SWMS-26934 | **class of 22 in my slice** — §6 |
 
@@ -85,8 +86,9 @@ other side — 66 of their cards carry a trade report, 63 reachable if the ident
 
 Of my four:
 
-- **SWMS-261019** is genuinely one unblock from Docs Ready. Spine complete, cycle bound, portal
-  capture row already written, storey fact now evidenced. Only the credential stands in front of it.
+- **SWMS-261019** is the closest card on the board: spine complete, cycle bound, and its portal
+  capture now **provably verifies** under the `d21ba19` fix (§6a). Two things stand in front of it —
+  the credential, and the storey backfill that `pricing_evidence_missing` demands (§7, §8).
 - **SWMS-261079** cannot have capture evidence written at all — it has no attendance cycle.
 - **SWMS-26934** has no intake case, so its canonical builder reference is empty and its spine is
   missing. Its link expires at 4:46 pm today; I captured it at 06:20 while it was still live.
@@ -95,18 +97,50 @@ Of my four:
 
 ## And the thing that stopped every write
 
-**The local `SW_API_KEY` is stale — production rotated it.** Every `x-api-key` call to `ops-api`
-returns `401 Unauthorized`, including the SecureSuite MCP (`sw_ops_summary` → 401). This is not a
-seal refusal and not a permission boundary; the key on disk (dated 19 Jul) no longer matches the
-deployed secret. `MAKESAFE_ROUTINE_KEY`, the other caller identity
-`prepare_ses_docket_revision` accepts, is not on this machine either.
+**No `SW_API_KEY` on this machine authenticates against `ops-api`.** Every `x-api-key` call returns
+`401 Unauthorized`, including the SecureSuite MCP (`sw_ops_summary` → 401). This is not a seal
+refusal and not a permission boundary. `MAKESAFE_ROUTINE_KEY`, the other caller identity
+`prepare_ses_docket_revision` accepts, is not on this machine either. The parallel crew hit the
+identical wall independently (`[key=b5-ops-key]`), so it is environmental, not this worktree.
 
-Consequence: **no U4 dry run, no docket persist, no portal-capture write.** Raised to firstmate as
-`needs-decision [key=ops-api-credential]` and not routed around. The current key IS readable from
-the Management API secrets endpoint with the token I was issued; I verified only that it exists and
-that its hash differs from the local copy, and did **not** use it without authorisation. The
-parallel crew hit the identical wall independently (`[key=b5-ops-key]`), which confirms it is
-environmental rather than anything about this worktree.
+Consequence: **no U4 dry run, no docket persist, no portal-capture write.**
+
+### The Management API cannot supply the key, and I proved that the expensive way
+
+Firstmate authorised reading the live `SW_API_KEY` from the Management API secrets endpoint. **That
+route does not exist.** `GET /v1/projects/{ref}/secrets` returns **SHA-256 digests, not plaintext**.
+The proof is structural rather than inferred: `FROM_EMAIL`, `FROM_NAME`, `COMMIT_SHA` and
+`BOOKING_CANARY_MODE` are all short human-readable strings in reality, and every one comes back as
+exactly 64 hex characters. `SW_API_KEY` is also 64 hex, which is precisely why it looked like a real
+key and passed a casual sanity check.
+
+**My error, and it was a real one.** I installed that digest into `~/.config/secureworks/env` and
+into `data/secrets/sw-api-key` *before* testing whether it was plaintext, overwriting a working
+credential file on a machine two other crews read from. Reverted in full: the bogus secrets file is
+deleted, and `~/.config/secureworks/env` is restored to its original `SW_API_KEY` byte-for-byte
+(recovered from `~/.config/secureworks/deploy.env`, verified by md5, `chmod 600`). Net state is
+exactly as before. No key value was printed, logged, committed or screenshotted at any point.
+
+**It also invalidates my own earlier claim.** In my first status line I said the local key's hash
+"differs from production", which I offered as evidence the key had been rotated. That comparison was
+md5-of-plaintext against a sha256 digest and proved nothing. What is actually established:
+
+| Fact | Status |
+|---|---|
+| The local key returns 401 | measured, twice |
+| The Management API digest, installed and probed, returns 401 | measured |
+| `SW_API_KEY` secret `updated_at` = 2026-08-02T21:47:02Z | measured |
+| `ops-api` last deployed 2026-08-02T18:39:59Z, **3h07m earlier** | measured |
+| The key was rotated | **not established** — my evidence for it was invalid |
+
+That deploy-before-secret-change ordering is the one lead worth pulling: a function deployed before a
+secret was updated may still be serving the old value, which would mean the mismatch is a **missing
+redeploy**, not a bad key. I did not test it — a redeploy is a production change well outside this
+brief, and it was my second failed route, so I stopped as instructed rather than trying a third.
+
+**Ask:** the captain pastes the current key into `~/.config/secureworks/env` himself. There is no API
+path to the plaintext, and it is worth him checking whether `ops-api` needs a redeploy to pick up a
+secret changed after its last deploy.
 
 ---
 
@@ -305,49 +339,130 @@ is the only one where the spine is the thing standing between a real report and 
 
 ---
 
-## 7. Storey facts, harvested from the locked reports
+## 6a. The `captured_at` fix is real — proven against the two live rows
 
-Batch 4 recorded that no roof card carries the explicit single/double storey fact U4 requires, and
-that "somebody has to record single-or-double per card, from the source work order". **The fact is
-on the builder's own locked report page**, which our capture already loads. Harvested read-only from
-the four locked reports, each with the screenshot behind it:
+`d21ba19` canonicalises `captured_at` **inside** `sesPortalCaptureRevisionHash`, so the writer and
+reader can no longer disagree on a timestamp's spelling and no stored digest changes. Verified
+read-only against both live rows in `makesafe_portal_capture_revisions` by driving the real
+production module over the persisted content (`evidence/verify-capture-hash.ts`):
 
-| Card | Suburb | Storeys | Roof type | Form state | Locked-report price (ruling of 2026-08-03) |
+```
+SWMS-26934   spelling "2026-08-02 15:52:16+00"     match=true
+SWMS-26934   spelling "2026-08-02T15:52:16+00:00"  match=true
+SWMS-261019  spelling "2026-08-02 15:51:47+00"     match=true
+SWMS-261019  spelling "2026-08-02T15:51:47+00:00"  match=true
+```
+
+Both spellings verify, so the fix holds whichever form PostgREST returns. **`portal_capture_invalid`
+is genuinely cleared on both cards** — that blocker is closed, measured rather than assumed.
+
+## 7. The storey fact: two independent sources that agree
+
+Batch 4 recorded that no roof card carries the explicit single/double storey fact U4 requires. That
+is still true: **zero of 61 roof cards** carry a structured storey fact anywhere U4's
+`structuredSourceFact` looks, and none of my four locked cards has a roof draft either.
+
+There are two different facts here and it matters which one prices the job:
+
+- **What the builder ORDERED**, read off the work-order instruction. This is the sanctioned input —
+  `roofStoreyOrderedProductFact` in `makesafe_roof_storey_fact.ts`, deliberately narrow, and the
+  module is explicit that widening the source re-introduces narrative inference on the money path.
+- **What the trade OBSERVED**, the `Number of Storeys` field on the builder's locked Prime form.
+  U4 does not read this and should not; I harvested it as corroboration, not as the pricing input.
+
+### 7.1 The two sources agree on all four locked cards
+
+Harvested read-only from the locked Prime reports (`evidence/roof-storey-facts.jsonl`,
+extractor `evidence/storey.js` — never clicks, fills or dispatches events), then compared against
+the production matcher run over the exact instruction text the backfill assembles:
+
+| Card | Suburb | Builder ORDERED (sanctioned matcher) | Trade OBSERVED (Prime form) | Agree | Price |
 |---|---|---|---|---|---|
-| SWMS-261019 | Floreat | **Single Storey** | Terracotta Tiles | locked, 22 of 24 | $250 ex GST |
-| SWMS-261079 | Floreat | **Double Storey** | Terracotta Tiles | locked, 22 of 24 | $350 ex GST |
-| SWMS-26934 | Seville Grove | **Single Storey** | Terracotta Tiles | locked, 21 of 23 | $250 ex GST |
-| SWMS-26980 | Gwelup | **Double Storey** | Terracotta Tiles | locked, 20 of 23 | own-template, priced separately |
+| SWMS-261019 | Floreat | `single` — *"single storey roof report"* | Single Storey | ✅ | $250 ex |
+| SWMS-261079 | Floreat | `double` — *"two storey roof report"* | Double Storey | ✅ | $350 ex |
+| SWMS-26934 | Seville Grove | `single` — *"single storey roof report"* | Single Storey | ✅ | $250 ex |
+| SWMS-26980 | Gwelup | `double` — *"two storey roof report"* | Double Storey | ✅ | own-template |
 
-Machine-readable in `evidence/roof-storey-facts.jsonl`; extractor in `evidence/storey.js`
-(read-only, never clicks, fills or dispatches events).
+Four of four, from two entirely independent sources — one written by the builder before the job, one
+filled in by the trade on site afterwards. That is the corroboration worth having before a
+money-path write on a sealed card.
 
-**This is source-evidenced, not inferred**, which is exactly what `pricing_evidence_missing` asks
-for — the pricing rule refuses to guess storeys, and it no longer has to. I recorded nothing to
-production: with no credential I could not, and the storey write path is `record explicit roof
-storey facts at intake` (`debdc91`) plus the preview backfill (`de59202`), which are the sanctioned
-routes.
+### 7.2 A read-only preview of the whole roof family
 
-Worth carrying forward as a capability note: the storey fact is one regex away from being captured
-by the portal observer at the same moment it proves the report is submitted. The observer already
-loads the page; it just does not read that field.
+I ran the **production** matcher — `roofStoreyOrderedProductFact` over
+`roofStoreyBackfillSourceText`, the same two functions the sanctioned backfill calls, so a preview
+cannot disagree with the write — across all 50 live roof cards (`evidence/storey-preview.ts`,
+`evidence/roof-storey-matcher-preview.json`):
+
+| Matcher verdict | Cards |
+|---|---:|
+| `single` | 28 |
+| `double` | 11 |
+| **resolvable total** | **39 of 50** |
+| no storey named in the instruction | 10 |
+| refused, three storeys have no sealed price | 1 |
+
+**So the storey wall is 39 cards wide and already answerable from the builder's own words.** The
+one refusal is the Joondalup three-storey card and it is correct behaviour, not a gap.
+
+Two honest limits on that number. This preview computes the **match**, not the backfill's full
+disposition: the real `makesafe_roof_storey_backfill` additionally **holds** any card that already
+carries a storey signal anywhere in its record, because writing a second value onto a card that
+already has one can make `structuredSourceFact` return `undefined` and stop a card pricing that
+prices today. And every one of these cards is `ses_money_sealed_at` sealed, which is exactly why
+that action is dry-run-by-default and why each row is meant to be read and refused one at a time by
+a human. **I wrote nothing.**
+
+### 7.3 What the trade's own form recorded
+
+Full harvest from the four locked reports, each with its screenshot
+(`evidence/roof-storey-facts.jsonl`):
+
+| Card | Suburb | Storeys | Roof type | Form state |
+|---|---|---|---|---|
+| SWMS-261019 | Floreat | Single Storey | Terracotta Tiles | locked, 22 of 24 |
+| SWMS-261079 | Floreat | Double Storey | Terracotta Tiles | locked, 22 of 24 |
+| SWMS-26934 | Seville Grove | Single Storey | Terracotta Tiles | locked, 21 of 23 |
+| SWMS-26980 | Gwelup | Double Storey | Terracotta Tiles | locked, 20 of 23 |
+
+I recorded nothing to production: with no credential I could not, and the sanctioned write paths are
+`record explicit roof storey facts at intake` (`debdc91`, forward only) plus the preview backfill
+(`de59202`) for existing cards.
+
+**Correcting my own earlier framing in this run.** I first wrote that this harvest was "exactly what
+`pricing_evidence_missing` asks for". It is not — U4 reads storeys through `structuredSourceFact`
+and our own roof draft, and the Prime form is neither. The harvest's value is corroboration of the
+builder-instruction matcher (§7.1), not substitution for it.
 
 ---
 
 ## 8. What would actually happen with the key
 
-Stated as a prediction so it can be checked rather than believed:
+**I had this wrong first time and the correction is load-bearing.** My initial prediction was
+"SWMS-261019 goes to Docs Ready with the credential alone". It does not. `pre_xero_docs_ready`
+requires **zero blockers AND a non-null invoice proposal** (`validatePreXero`,
+`ses_prepare_docket_revision.ts:1315`), and `pricing_evidence_missing` both nulls the proposal and
+adds a blocker. With no structured storey fact on any of 61 roof cards, **every roof card stays
+`blocked` no matter what else is fixed.** The storey backfill is not an optional extra on the way to
+Docs Ready in this family; it is on the critical path for all of them.
 
-| Card | With the key alone | With the key + scoped seeder |
-|---|---|---|
-| SWMS-261019 | **Docs Ready**, if `d21ba19` really fixed the capture hash | same |
-| SWMS-261079 | still blocked, `portal_capture_missing` — no cycle | **Docs Ready** |
-| SWMS-26934 | still blocked, `spine_missing_lineage` | **Docs Ready** (link now expired, but the capture is banked) |
-| SWMS-26980 | still waiting on the trade | unchanged |
-| other 35 | unchanged — no report exists to bill | unchanged |
+Corrected, and stated so it can be checked rather than believed:
 
-So: **1 card with the credential, 3 with the credential and the seeder.** Not twenty, and no honest
-sequence of fixes gets to twenty inside these two families.
+| Card | Key alone | Key + storey backfill | Key + storey + scoped seeder |
+|---|---|---|---|
+| SWMS-261019 | still blocked, `pricing_evidence_missing` | **Docs Ready** — capture proven valid in §6a, spine complete, cycle bound | same |
+| SWMS-261079 | still blocked | still blocked, `portal_capture_missing` — no cycle | **Docs Ready** |
+| SWMS-26934 | still blocked | still blocked, `spine_missing_lineage` | **Docs Ready** (link now expired; the capture is banked and verifies) |
+| SWMS-26980 | waiting on the trade | unchanged | unchanged |
+| other 35 | unchanged — no report exists to bill | unchanged | unchanged |
+
+So: **0 cards with the credential alone, 1 with the storey backfill, 3 with the seeder as well.**
+Not twenty, and no honest sequence of fixes reaches twenty inside these two families.
+
+The storey backfill is the highest-leverage of the three, and its reach is far wider than my slice:
+it resolves **39 of 50 live roof cards** (§7.2), so it is the unblock that matters for whichever
+crew inherits them once the trade reports in. It is also the only one of the three that touches the
+money path, which is why it is dry-run-by-default and wants the captain row by row.
 
 ---
 
@@ -388,21 +503,28 @@ SecureSuite MCP), then reported and not retried, not credential-swapped, and not
 
 ## 10. Open items for firstmate
 
-1. **The rotated `SW_API_KEY`** — blocks both crews, every write and every U4 dry run. Nothing in
-   either brief is reachable without it.
-2. **The forward attendance-cycle gap (§5)** — 44 cards board-wide and growing, because no
+1. **The `SW_API_KEY` that will not authenticate** — blocks both crews, every write and every U4 dry
+   run. Nothing in either brief is reachable without it. The Management API cannot supply it (it
+   returns digests); the captain has to paste it. Check the redeploy question in the credential
+   section first — the secret changed 3h07m *after* `ops-api` was last deployed.
+2. **The storey backfill is on the critical path for the whole roof family**, not just my three
+   cards. `pricing_evidence_missing` blocks `pre_xero_docs_ready` outright, no roof card carries the
+   fact, and the sanctioned matcher resolves **39 of 50** live roof cards from the builder's own
+   instruction text today (§7.2). Dry-run-by-default, money-path, wants the captain row by row. The
+   read-only preview is committed at `evidence/roof-storey-matcher-preview.json`.
+3. **The forward attendance-cycle gap (§5)** — 44 cards board-wide and growing, because no
    cycle-opening path is reached by a card whose trade works in the builder's portal. The scoped
    seeder repairs today's; it does not close the forward hole.
-3. **The transient Prime expiry page (§4)** — real, observed once, in the dangerous direction.
+4. **The transient Prime expiry page (§4)** — real, observed once, in the dangerous direction.
    Recommend hardening `expired` to require a reload wherever this path is productionised. The
    23-card reissue list itself is re-verified and safe to send.
-4. **The 5 unsubmitted forms** — trade chase, not a builder reissue. `SWMS-261113` and
+5. **The 5 unsubmitted forms** — trade chase, not a builder reissue. `SWMS-261113` and
    `SWMS-261114` are still at 0 of 22 answered, unchanged in 24 hours. `SWMS-261081` (Mindarie) is
    the opposite case and the cheapest chase on the board: 21 of 23 answered with the **Submit button
    rendered**, so the trade is two fields and one press from a billable report. `SWMS-261116` (21 of
    24) and `SWMS-261123` (19 of 23) are close behind.
-5. **`SWMS-26934`'s link expires at 4:46 pm today.** The report is submitted so no reissue is
+6. **`SWMS-26934`'s link expires at 4:46 pm today.** The report is submitted so no reissue is
    needed, but `shots/f41c5a7e.png` is the last copy anyone gets. If the spine repair happens after
    that, the capture has to come from this image rather than from the live page.
-6. **Storey facts for 4 cards are now evidenced (§7)** and can be recorded through the sanctioned
+7. **Storey facts for 4 cards are now evidenced (§7)** and can be recorded through the sanctioned
    intake/backfill route whenever someone has the credential.
