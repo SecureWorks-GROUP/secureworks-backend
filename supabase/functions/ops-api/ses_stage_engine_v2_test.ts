@@ -1216,6 +1216,7 @@ Deno.test("docs ready: a physical card needs report, SWMS when required, and dra
     completionPhotoCount: 6,
     documents: { report: true, invoice: true, swms: true },
     swmsRequired: true,
+    invoiceStatus: "DRAFT",
   };
   assertEquals(
     deriveSesStageV2(input({ evidence: base })).stage,
@@ -1236,6 +1237,29 @@ Deno.test("docs ready: a physical card needs report, SWMS when required, and dra
     },
   }));
   assertEquals(noSwmsNeeded.stage, "report_ready");
+});
+
+Deno.test("docs ready: a physical card needs a draft invoice status", () => {
+  const base = {
+    packState: "READY",
+    assignments: [{ id: "a1" }],
+    serviceReports: [{ status: "submitted", cycle_number: 1 }],
+    completionPhotoCount: 6,
+    documents: { report: true, invoice: true, swms: false },
+    swmsRequired: false,
+  };
+  assertEquals(
+    deriveSesStageV2(input({ evidence: { ...base, invoiceStatus: "draft" } }))
+      .stage,
+    "report_ready",
+  );
+  for (const invoiceStatus of ["AUTHORISED", "PAID", "SUBMITTED"]) {
+    assert(
+      deriveSesStageV2(input({ evidence: { ...base, invoiceStatus } })).stage !==
+        "report_ready",
+      `${invoiceStatus} invoice must not be Docs Ready`,
+    );
+  }
 });
 
 Deno.test("docs ready: a roof card is never asked for a SecureWorks report", () => {
@@ -1269,6 +1293,7 @@ Deno.test("docs ready: an already-sent pack is not one click from sending", () =
     completionPhotoCount: 6,
     documents: { report: true, invoice: true, swms: false },
     swmsRequired: false,
+    invoiceStatus: "DRAFT",
   };
   const positive = input({
     evidence: { ...baseEvidence, pack: { status: "draft" } },
@@ -1337,6 +1362,7 @@ Deno.test("docs ready: repair and restoration take the standard path", () => {
         completionPhotoCount: 6,
         documents: { report: true, invoice: true, swms: false },
         swmsRequired: false,
+        invoiceStatus: "DRAFT",
       },
     }));
     assertEquals(r.stage, "report_ready");

@@ -707,6 +707,14 @@ cannot be sent by a single button press, it does not belong in Docs Ready.**
 | assessment / quote | all three typed roles proved, plus pack READY and unsent |
 | temporary fencing, repair, restoration | the standard path |
 
+**Invoice-status interpretation (firstmate, 2026-08-02; not a Captain
+ruling).** Firstmate interprets the phrase "draft invoice" in the Captain's
+sentence as requiring both the invoice artifact and an `invoiceStatus` of
+`DRAFT` (case-insensitive). An `AUTHORISED`, `SUBMITTED` or `PAID` invoice has
+already been issued, so it is not one click from sending. This is an
+interpretation by firstmate, not a Captain instruction, and the Captain can
+overturn it independently.
+
 A roof job produces no SecureWorks report, so the five-artifact shorthand is
 deliberately NOT applied board-wide — demanding one would permanently block the
 roof family. A test asserts a roof card is never asked for one.
@@ -751,3 +759,16 @@ satisfaction only; its shortfalls are not pushed into the shared `missing`
 array. Folding them in would alter published `derived_stage_v2_missing` on every
 card that is not Docs Ready — a second, unmeasured output change riding inside
 this release, which the standing rule forbids.
+
+**Named finding — legacy READY-pack invoice status bypass (unmeasured; not
+fixed in Release 7).** In `supabase/functions/ops-api/makesafe_computed_status.ts`,
+`docsReady` returns from the `packState` `READY` / `READY_TO_BUILD` branch at
+approximately lines 325-328, so it never reaches the legacy invoice-status
+check at approximately lines 337-339. Under the existing production rule, a
+READY-pack card carrying an `AUTHORISED`, `SUBMITTED` or `PAID` invoice can
+therefore already count as Docs Ready. The corrected Docs Ready population is
+zero, so the live parity run returns zero moves whether this defect is present
+or absent; how many live cards are affected has not been established. It is
+deliberately filed as its own release under the standing rule that a change
+whose blast cannot be measured must not ride inside a release that cannot see
+it.

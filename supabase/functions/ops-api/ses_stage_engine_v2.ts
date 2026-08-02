@@ -562,6 +562,7 @@ export function sesStageDocsReady(
       missing.push("the SWMS this docket requires");
     }
     if (
+      String(input.evidence?.invoiceStatus || "").toUpperCase() !== "DRAFT" ||
       !(input.evidence?.documents?.invoice === true || pack?.invoice_doc_id)
     ) {
       missing.push("the draft invoice");
