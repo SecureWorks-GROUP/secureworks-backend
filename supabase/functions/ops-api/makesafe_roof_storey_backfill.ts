@@ -388,26 +388,25 @@ export async function runMakesafeRoofStoreyBackfill(
   }
   if (dryRun) return { ...result, expected_count: expectedCount };
 
-  const candidateIds = result.write_candidates.map((row) => row.job_id);
   const { data: currentJobs, error: currentJobsError } = await client
     .from("jobs")
     .select(
       "id, job_number, status, notes, metadata, scope_json, site_suburb, ses_money_sealed_at",
     )
-    .in("id", candidateIds);
+    .in("id", jobIds);
   if (currentJobsError) throw currentJobsError;
   const { data: currentDetails, error: currentDetailsError } = await client
     .from("makesafe_job_details")
     .select("job_id, external_ref, report_type, substatus")
-    .in("job_id", candidateIds);
+    .eq("report_type", "roof_report");
   if (currentDetailsError) throw currentDetailsError;
   const { data: currentDockets, error: currentDocketsError } = await client
-    .from("makesafe_docket_revisions").select("job_id").in("job_id", candidateIds);
+    .from("makesafe_docket_revisions").select("job_id").in("job_id", jobIds);
   if (currentDocketsError) throw currentDocketsError;
   const { data: currentObligations, error: currentObligationsError } = await client
     .from("makesafe_invoice_obligation_revisions").select("job_id").in(
       "job_id",
-      candidateIds,
+      jobIds,
     );
   if (currentObligationsError) throw currentObligationsError;
   const currentDetailByJob = new Map<string, Record<string, unknown>>();
@@ -430,10 +429,9 @@ export async function runMakesafeRoofStoreyBackfill(
   ).sort((left: RoofStoreyBackfillRow, right: RoofStoreyBackfillRow) =>
     String(left.job_number).localeCompare(String(right.job_number))
   );
-  const previewRows = result.write_candidates.map((row) => ({ ...row, written: false }));
-  if (JSON.stringify(currentRows) !== JSON.stringify(previewRows)) {
+  if (JSON.stringify(currentRows) !== JSON.stringify(rows)) {
     const changedJobs = new Set([
-      ...previewRows.map((row) => row.job_number),
+      ...rows.map((row: RoofStoreyBackfillRow) => row.job_number),
       ...currentRows.map((row: RoofStoreyBackfillRow) => row.job_number),
     ]);
     return {
@@ -447,15 +445,41 @@ export async function runMakesafeRoofStoreyBackfill(
   // Only `write` rows are ever written. Held, refused, no-fact and terminal
   // rows are untouched at every setting - there is no flag that makes them
   // write, deliberately.
+  const writtenJobs: string[] = [];
   for (const row of result.write_candidates) {
     const { data: current, error: readError } = await client
       .from("jobs").select("metadata").eq("id", row.job_id).maybeSingle();
-    if (readError) throw readError;
+    if (readError) {
+      return {
+        ...result,
+        ok: false,
+        error: `write read failed for ${row.job_number}; already written: ${writtenJobs.join(", ") || "none"}.`,
+        expected_count: expectedCount,
+      };
+    }
     const metadata = record(current?.metadata);
-    const { error: writeError } = await client.from("jobs")
+    const { data: updated, error: writeError } = await client.from("jobs")
       .update({ metadata: { ...metadata, storeys: row.storeys } })
-      .eq("id", row.job_id);
-    if (writeError) throw writeError;
+      .eq("id", row.job_id)
+      .is("metadata->storeys", null)
+      .select("id");
+    if (writeError) {
+      return {
+        ...result,
+        ok: false,
+        error: `write failed for ${row.job_number}; already written: ${writtenJobs.join(", ") || "none"}.`,
+        expected_count: expectedCount,
+      };
+    }
+    if (!updated?.length) {
+      return {
+        ...result,
+        ok: false,
+        error: `write guard drifted at ${row.job_number}; already written: ${writtenJobs.join(", ") || "none"}.`,
+        expected_count: expectedCount,
+      };
+    }
+    writtenJobs.push(String(row.job_number));
     row.written = true;
   }
   return { ...result, expected_count: expectedCount };
