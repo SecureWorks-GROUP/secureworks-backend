@@ -338,7 +338,7 @@ the owning E1 document, not to this PR.
 
 | Condition | Result |
 |---|---|
-| Zero captain-ruled cards move | **ONE MOVES: SWMS-26754, against its ruling.** See below. SWMS-26782 also moves, and that one HONOURS its certification. The other nine ruled cards are unmoved. |
+| Zero captain-ruled cards move | **ONE MOVES: SWMS-26754, against its ruling.** Authorised resolution is a captain display override; it is NOT yet written because no sanctioned writer can express one, so **the merge is gated on it**. See below. SWMS-26782 also moves, and that one HONOURS its certification. The other nine ruled cards are unmoved. |
 | No card may be archived | **PASS**, measured (Archive 303 -> 302, pre-overlay 264 -> 264) and structurally (narrowing `invoiceDone` can only remove cards from the sole non-`jobs.status` archive path), with an exhaustive sweep test. |
 | Production reads only | **PASS.** Management API `/database/query`, `read_only: true`, SELECT only, through `assertReadOnlySql` + `assertNoPiiColumns`. |
 | No PII anywhere | **PASS.** Job references, builder scope and family only. The only match for an email-shaped pattern in the artifacts is the literal word "email" inside M1's own explanatory sentences ("The work order email contains no roof report link"). |
@@ -403,6 +403,93 @@ The other three cards this change moves out of Docs Ready — SWMS-26709,
 SWMS-26803, SWMS-26848 — land in exactly the destination the screenshot audit
 itself assigned to that group: *"Belongs in Allocated / blocked on builder."*
 The single conflict is the one card where the captain overrode the audit.
+
+#### SWMS-26754 is unprovable from our side, not merely unread
+
+Two independent results, both from 2026-08-02, close off the possibility that
+this is our reader being wrong rather than the evidence being absent:
+
+- The portal classifier defect is **fixed and merged** (wiki `6a27e760`). It now
+  separates expired from unsubmitted across four states plus an explicit refusal,
+  on a CDP capture. The reading is no longer the broken one.
+- A screenshot sweep of **all 46 Prime links** independently confirms
+  SWMS-26754's link is **genuinely dead**.
+
+So the card's roof report is real, was completed roughly 40 days ago, and sits
+behind a link that no longer resolves. There is nothing left for us to read. The
+gap is real and it is not a measurement artefact.
+
+#### The authorised fix, and why the row is not written yet
+
+Firstmate authorised (2026-08-02) a **captain display override** for this one
+card: display-only, reversible, creating/authorising/touching no invoice, money
+seal not involved, card not archived, recorded as an override and **never** as
+derived evidence, a portal capture, or anything an engine could later mistake for
+proof that we hold a report — because we do not hold one, and the record must keep
+saying so. `evidence_ref` names the card-by-card review and carries his words
+verbatim, hedge included:
+
+> "Roof report 40 days ago. Draft invoice attached. Roof link expired. That one
+> probably we should be invoicing."
+
+**The row has NOT been written, because the sanctioned writer cannot express it.**
+`makesafe_status_apply` is not a free-form display override — it is
+"make the display agree with M1". Its `after_status` is
+`token(row.computed_status)` (`makesafe_status_apply.ts:143,203`) and the action
+accepts `job_numbers`, `run_key`, `applied_by`, `evidence_ref` and `dry_run` but
+**no target status** (`index.ts:4050`). M1 derives `allocated` for SWMS-26754, and
+so does this change, so the planner would skip the card as `already_matches`
+(`:188-197`). There is no captain-override capability anywhere in the codebase.
+
+The two ways to produce the row anyway were both refused:
+
+- a raw service-role `INSERT` into `makesafe_board_status_applications` would
+  bypass the idempotency key, the exact-list guard and the dry-run that make the
+  ledger auditable — the append-only trigger checks job identity and terminal job
+  state only, so the database would have accepted it. Loosening an audited path to
+  unblock ourselves is the move this programme does not make;
+- routing it through the M1-agreement path would record a captain override as
+  though an engine had derived it, which is precisely what the conditions forbid.
+
+Adding an explicit override mode — API-key-only, dry-run-by-default, exact-list,
+requiring a decision key plus the verbatim ruling, and marked distinctly so no
+engine can read it as evidence — is a new sanctioned writer and belongs in its own
+change, not inside a predicate fix.
+
+#### Why the captain's morning is nonetheless safe
+
+**Nothing moves at merge-review time; it moves at deploy time, and deploy is
+merge.** `.github/workflows/deploy-edge-functions.yml` deploys ops-api on push to
+`main` for any change under `supabase/functions/**`, which this is. Until then
+production runs the old ladder and **SWMS-26754 is in Docs Ready right now**,
+where he wants it.
+
+So this PR is safe to land and to hold green, and the merge is the gate:
+
+> **DO NOT MERGE until the SWMS-26754 captain display override exists**, or until
+> firstmate accepts the card sitting in Allocated.
+
+An override row written in advance is inert until the deploy and binds the moment
+it lands, because the overlay resolver requires
+`source_status == declared_stage` and `declared_stage` only becomes `allocated`
+once this code is live. That ordering is a property of the resolver, not a
+scheduling trick.
+
+**Reversal**, named as required: the ledger is append-only, so an override is
+reversed by appending a second row for the same card in the opposite direction
+(`report_ready -> allocated`) under a new `run_key`, which supersedes the first in
+`makesafe_board_status_current` (`DISTINCT ON (job_id) ... ORDER BY applied_at
+DESC`). No row is ever updated or deleted. An override also self-reverses without
+any write the moment the card's derived stage stops equalling its `source_status`.
+
+**Stated plainly, as required:** if that row is written, **SWMS-26754 is in
+`report_ready` because the captain put it there and for no other reason.** We hold
+**zero** report evidence for that card — no service report row, no
+`report_received_at`, no report document, no completed portal capture. The
+underlying gap is real: the report exists only behind an expired builder link.
+Recording his reading as genuine evidence, so both engines derive the stage
+instead of being overridden, is the correct long-run answer and is filed by
+firstmate as follow-up work.
 
 ### SWMS-26782 is a captain-ruled card that moves, and the move honours the ruling
 
