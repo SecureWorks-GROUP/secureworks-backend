@@ -160,10 +160,12 @@ const PACK_SENT_STATUSES = [
   "close_failed",
 ];
 
-// << ENRICH >> index.ts:13166
-const hasActiveInvoice = (invoice: any) =>
-  !!invoice &&
-  !["VOIDED", "DELETED"].includes(String(invoice?.status || "").toUpperCase());
+// The ladder's invoice term is `_makesafeInvoiceIsRaised`, which this harness
+// imports from ops-api rather than restating (see `invoiceIsRaised` below) —
+// a local copy would silently keep attributing the OLD branch after the real
+// predicate changed. `hasActiveInvoice` (any non-VOIDED/DELETED row, DRAFT
+// included) is deliberately NOT reproduced here: nothing in the ladder's stage
+// decision reads it any more.
 
 interface ParityCard {
   job_ref: string;
@@ -572,6 +574,11 @@ async function run(): Promise<void> {
   const normalizeSub = opsModule._normalizeMakesafeSubstatus as (
     s: any,
   ) => string | null;
+  // The RAISED-invoice predicate the ladder's `invoiceDone` / `invoiceAuthorised`
+  // terms actually use. Imported, never reimplemented.
+  const invoiceIsRaised = opsModule._makesafeInvoiceIsRaised as (
+    invoice: any,
+  ) => boolean;
 
   const baseRows: any[] = [];
   const holdsByJobId: Record<string, any> = {};
@@ -681,7 +688,7 @@ async function run(): Promise<void> {
     );
 
     // Branch attribution uses the ladder's OWN inputs (index.ts:13452-13456).
-    const ladderInvoiceDone = hasActiveInvoice(invoiceForStage) ||
+    const ladderInvoiceDone = invoiceIsRaised(invoiceForStage) ||
       String(job?.status || "").toLowerCase() === "invoiced" ||
       normalizeSub(detail?.substatus) === "complete";
     const ladderHasSubmittedReport = !!scopedReport ||
@@ -700,7 +707,7 @@ async function run(): Promise<void> {
 
     let missingDocs: string[] = [];
     if (docFlags && scoped.allowCloseoutFromEvidence) {
-      const invoiceDone = hasActiveInvoice(invoice) ||
+      const invoiceDone = invoiceIsRaised(invoice) ||
         String(job?.status || "").toLowerCase() === "invoiced" ||
         normalizeSub(detail?.substatus) === "complete";
       if (invoiceDone) {
@@ -712,10 +719,7 @@ async function run(): Promise<void> {
       }
     }
     const invoiceAuthorised = scoped.allowCloseoutFromEvidence &&
-      hasActiveInvoice(invoice) &&
-      ["AUTHORISED", "SUBMITTED", "PAID"].includes(
-        String(invoice?.status || "").toUpperCase(),
-      );
+      invoiceIsRaised(invoice);
     const verifiedSent = (scopedPackSent === true && invoiceAuthorised &&
       normalizeSub(detail?.substatus) === "complete") || surf.gateSoftenSent;
     // The ladder recomputes the gate from its OWN scoped invoice, so mirror it.
@@ -727,10 +731,8 @@ async function run(): Promise<void> {
       )
       : [];
     const ladderVerifiedSent = (scopedPackSent === true &&
-      hasActiveInvoice(invoiceForStage) &&
-      ["AUTHORISED", "SUBMITTED", "PAID"].includes(
-        String(invoiceForStage?.status || "").toUpperCase(),
-      ) && normalizeSub(detail?.substatus) === "complete") ||
+      invoiceIsRaised(invoiceForStage) &&
+      normalizeSub(detail?.substatus) === "complete") ||
       surf.gateSoftenSent;
     const legacyBranch = legacyBranchOf(
       boardStage,
@@ -763,6 +765,9 @@ async function run(): Promise<void> {
       substatus: normalizeSub(detail?.substatus) || null,
       board_stage: boardStage,
       board_label: null,
+      // << ENRICH >> the ladder-version stamp the read model republishes as
+      // `declared_stage_engine_version`. Imported, never a literal here.
+      board_stage_engine_version: opsModule.MAKESAFE_STAGE_LADDER_VERSION,
       age_hours: Number.isFinite(ageHours) ? ageHours : 0,
       requesting_company_name: detail?.requesting_company_name ||
         detail?.makesafe_companies?.name ||

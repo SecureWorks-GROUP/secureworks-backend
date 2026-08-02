@@ -910,6 +910,12 @@ export function buildCanonicalMakesafeRows(
       job_state: base?.status || null,
       substatus: base?.substatus || null,
       declared_stage: declaredStage,
+      // Which legacy ladder derived `declared_stage`
+      // (`MAKESAFE_STAGE_LADDER_VERSION`, stamped by enrich). Advisory
+      // provenance only — the sibling of `derived_stage_v2_engine_version`, so a
+      // past measurement can name the derivation that produced it. Null for a
+      // caller that built the base row without enrich.
+      declared_stage_engine_version: base?.board_stage_engine_version ?? null,
       canonical_stage: displayStage,
       canonical_stage_label: applicationApplies
         ? OPS_MAKESAFE_STAGE_LABELS[displayStage as OpsMakesafeStage] ||
