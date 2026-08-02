@@ -60,7 +60,13 @@ Unicode NFC, then hash its UTF-8 bytes. Empty/unreachable rendered text therefor
 uses the SHA-256 of the empty byte string. It is not the screenshot hash. The
 screenshot hash is the raw SHA-256 of the decoded PNG bytes. The backend verifies
 the PNG signature and byte hash, then creates a domain-separated aggregate hash
-over every persisted capture field.
+over every persisted capture field. For that aggregate hash, `captured_at` is
+canonicalised inside the shared hash function with `new Date(ms).toISOString()`
+before hashing. This preserves the writer's stored digest across the
+`timestamptz` round-trip from an ISO `...000Z` spelling to PostgREST's
+`...+00:00` spelling; an unparseable value remains verbatim and is not repaired
+or omitted. The domain separator remains `v1`, so existing rows verify without
+a migration or backfill.
 
 The producer must send the exact current `job_id`, `attendance_cycle_id`,
 canonical `builder_reference`, typed role, and canonical source URL presented by
