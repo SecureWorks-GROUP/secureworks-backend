@@ -219,7 +219,9 @@ export async function refreshMakesafeIdentityAfterWorkOrderAttach(
   );
   if (error) {
     throw new Error(
-      `work-order identity correction transaction failed: ${error.message || error}`,
+      `work-order identity correction transaction failed: ${
+        error.message || error
+      }`,
     );
   }
   return decision;
