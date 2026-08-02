@@ -40,6 +40,28 @@ import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
 
+/**
+ * R8 — what an overlay ledger row is permitted to do.
+ *
+ * `display_override` may change the column, subject to the unchanged source
+ * equality and nonterminal guards. `stage_attestation` may NEVER change a
+ * column; it exists so a Captain decision whose corrected source lands on the
+ * same column keeps its provenance instead of vanishing.
+ *
+ * A row with no `decision_kind` is a legacy display override. Every row in the
+ * ledger today is one, which is why this release moves nothing.
+ */
+export type SesOverlayDecisionKind = "display_override" | "stage_attestation";
+
+export function sesOverlayDecisionKind(
+  application: any,
+): SesOverlayDecisionKind {
+  return String(application?.decision_kind || "").toLowerCase() ===
+      "stage_attestation"
+    ? "stage_attestation"
+    : "display_override";
+}
+
 /** The canonical family of a raw board row, from the one canonical deriver. */
 export function boardRowSesFamily(base: any) {
   const detail = base?.makesafe_details || {};
@@ -773,10 +795,28 @@ export function buildCanonicalMakesafeRows(
       (Array.isArray(base?.missing_docs) && base.missing_docs.includes("swms"));
     const declaredStage = String(base?.board_stage || "new").toLowerCase();
     const application = extras.statusApplicationsByJobId?.[base?.id] || null;
-    const applicationApplies = !!application &&
+    // R8 — an overlay row declares what it is allowed to do. A row with no
+    // `decision_kind` is a legacy display override, which is every row in the
+    // ledger today, so this reads as `display_override` and the binding below
+    // is unchanged for all of them.
+    const decisionKind = sesOverlayDecisionKind(application);
+    // R8 — ATTESTATIONS CAN NEVER BIND. The `decisionKind` test is FIRST and
+    // structural: an attestation short-circuits before the display-override
+    // predicate is even evaluated, so no attestation can move a column by any
+    // path, including a future row whose source happens to equal the declared
+    // stage. Release 9 writes the re-anchor rows; this release only teaches the
+    // read model to understand them.
+    const applicationApplies = decisionKind === "display_override" &&
+      !!application &&
       !isMakesafeTerminalDisplayStatus(declaredStage) &&
       !isMakesafeTerminalJobState(base?.status) &&
       String(application.source_status || "").toLowerCase() === declaredStage;
+    // An attestation attaches PROVENANCE only, and only when it genuinely
+    // describes where the card already is. It never changes `displayStage`.
+    const attestationAttaches = decisionKind === "stage_attestation" &&
+      !!application &&
+      String(application.source_status || "").toLowerCase() === declaredStage &&
+      String(application.after_status || "").toLowerCase() === declaredStage;
     const displayStage = applicationApplies
       ? String(application.after_status || declaredStage).toLowerCase()
       : declaredStage;
@@ -885,8 +925,16 @@ export function buildCanonicalMakesafeRows(
         ? OPS_MAKESAFE_STAGE_LABELS[displayStage as OpsMakesafeStage] ||
           displayStage
         : base?.board_label || null,
-      status_application: applicationApplies
+      // R8 — provenance survives even when the visible column is unchanged.
+      // A same-column decision previously nulled this field and erased the
+      // Captain's authority from the card; four of the nine re-anchor rows are
+      // exactly that shape. `effect` and `applies_to_display` say which of the
+      // two kinds a consumer is looking at, so nothing has to infer it.
+      status_application: (applicationApplies || attestationAttaches)
         ? {
+          effect: applicationApplies ? "override" : "attestation",
+          applies_to_display: applicationApplies,
+          decision_kind: decisionKind,
           run_key: application.run_key,
           before_status: application.before_status,
           after_status: application.after_status,

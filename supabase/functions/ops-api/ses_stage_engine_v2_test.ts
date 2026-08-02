@@ -1402,3 +1402,150 @@ Deno.test("docs ready: M1's published output is untouched", () => {
     "report_ready",
   );
 });
+
+// ── R8 — overlay re-anchor metadata and the no-op attestation read path ─────
+
+const CAPTAIN_ARCHIVE = {
+  run_key: "captain-archive-1",
+  source_status: "allocated",
+  before_status: "allocated",
+  after_status: "archive",
+  evidence_ref: "captain-ruling",
+  applied_by: "captain",
+  applied_at: "2026-07-23T00:00:00.000Z",
+};
+
+Deno.test("reanchor: a legacy row with no decision_kind still binds exactly as before", () => {
+  // Every row in the ledger today has no decision_kind. This release must be
+  // a no-op for all of them, which is why the blast is zero.
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: CAPTAIN_ARCHIVE } });
+  assertEquals(rows[0].canonical_stage, "archive");
+  assertEquals(rows[0].status_application?.effect, "override");
+  assertEquals(rows[0].status_application?.applies_to_display, true);
+  assertEquals(rows[0].status_application?.decision_kind, "display_override");
+});
+
+Deno.test("reanchor: a stage attestation NEVER changes a column", () => {
+  // The load-bearing guarantee of this release. Even with a source that
+  // matches the declared stage exactly — the shape that WOULD bind as an
+  // override — an attestation must leave the column alone.
+  const attestation = {
+    ...CAPTAIN_ARCHIVE,
+    decision_kind: "stage_attestation",
+    after_status: "archive",
+  };
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: attestation } });
+  // Column is the legacy declared stage, NOT the attestation's after_status.
+  assertEquals(rows[0].canonical_stage, "allocated");
+  assertEquals(rows[0].declared_stage, "allocated");
+  const ops = projectOpsMakesafeBoard(rows);
+  assertEquals(ops.columns.allocated.length, 1);
+  assertEquals(ops.columns.archive.length, 0);
+});
+
+Deno.test("reanchor: a same-column attestation keeps its provenance instead of vanishing", () => {
+  // Four of the nine re-anchor rows are this shape. Before R8 a same-column
+  // decision nulled status_application and erased the Captain's authority
+  // from the card; the column was right and the history was gone.
+  const attestation = {
+    ...CAPTAIN_ARCHIVE,
+    decision_kind: "stage_attestation",
+    source_status: "archive",
+    before_status: "archive",
+    after_status: "archive",
+  };
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "archive", assignments: [] }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: attestation } });
+  assertEquals(rows[0].canonical_stage, "archive");
+  assert(rows[0].status_application !== null, "provenance must survive");
+  assertEquals(rows[0].status_application?.effect, "attestation");
+  assertEquals(rows[0].status_application?.applies_to_display, false);
+  assertEquals(rows[0].status_application?.applied_by, "captain");
+  assertEquals(rows[0].status_application?.evidence_ref, "captain-ruling");
+});
+
+Deno.test("reanchor: an attestation on a TERMINAL card attaches without moving it", () => {
+  // SWMS-26845's shape: corrected derivation is already Archive, and Archive
+  // is terminal so it can never be a display override. It must be an
+  // attestation, which is exactly why the two kinds exist.
+  const attestation = {
+    ...CAPTAIN_ARCHIVE,
+    decision_kind: "stage_attestation",
+    source_status: "archive",
+    after_status: "archive",
+  };
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({
+      id: "j1",
+      board_stage: "archive",
+      status: "archived",
+      assignments: [],
+    }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: attestation } });
+  assertEquals(rows[0].canonical_stage, "archive");
+  assertEquals(rows[0].status_application?.effect, "attestation");
+});
+
+Deno.test("reanchor: a stale override still does not attach", () => {
+  // The existing guard must not be relaxed by this release. A decision whose
+  // source no longer matches the card's stage is stale and stays detached.
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "trade_report_in", assignments: [] }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: CAPTAIN_ARCHIVE } });
+  assertEquals(rows[0].canonical_stage, "trade_report_in");
+  assertEquals(rows[0].status_application, null);
+});
+
+Deno.test("reanchor: a stale ATTESTATION also does not attach", () => {
+  // An attestation may only describe where the card actually is. One whose
+  // source has moved on says nothing true and must not attach provenance.
+  const stale = {
+    ...CAPTAIN_ARCHIVE,
+    decision_kind: "stage_attestation",
+    source_status: "allocated",
+    after_status: "allocated",
+  };
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "trade_report_in", assignments: [] }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: stale } });
+  assertEquals(rows[0].canonical_stage, "trade_report_in");
+  assertEquals(rows[0].status_application, null);
+});
+
+Deno.test("reanchor: an attestation cannot revive a terminal card", () => {
+  // The regression the design names: a terminal attestation must not move a
+  // card. Even pointing at a live column, it cannot pull the card out.
+  const revive = {
+    ...CAPTAIN_ARCHIVE,
+    decision_kind: "stage_attestation",
+    source_status: "archive",
+    after_status: "allocated",
+  };
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({
+      id: "j1",
+      board_stage: "archive",
+      status: "archived",
+      assignments: [],
+    }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: revive } });
+  assertEquals(rows[0].canonical_stage, "archive");
+  // after_status !== declared_stage, so it does not even attach provenance.
+  assertEquals(rows[0].status_application, null);
+});
+
+Deno.test("reanchor: the advisory overlay candidate is unchanged by decision_kind", () => {
+  // sesStageV2OverlayCandidate still SIMULATES and still binds nothing.
+  const candidate = sesStageV2OverlayCandidate(
+    "new",
+    { ...CAPTAIN_ARCHIVE, decision_kind: "stage_attestation" } as any,
+    "in_progress",
+  );
+  assertEquals(candidate.binds, false);
+  assertEquals(candidate.stage, "new");
+});

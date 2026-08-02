@@ -826,6 +826,11 @@ Deno.test("captain-applied status is a display overlay and never rewrites declar
     "company_contact_required",
   );
   assertEquals(row.status_application, {
+    // R8 — additive provenance keys. The overlay still binds and the card
+    // still lands in the same column; these say WHICH kind of decision it is.
+    effect: "override",
+    applies_to_display: true,
+    decision_kind: "display_override",
     run_key: "makesafe-stage1-20260724",
     before_status: "new",
     after_status: "allocated",
