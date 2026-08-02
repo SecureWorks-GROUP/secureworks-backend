@@ -935,6 +935,13 @@ a stale override still does not attach, and a terminal attestation cannot move
 a card — plus a stale ATTESTATION case, because an attestation that no longer
 describes where the card is says nothing true and must not attach either.
 
+This release also admits the fourth hollow test across the programme: Release
+5's positive own-roof fixture, Release 6's intent scope, Release 7's sent-pack
+containment fixture, and now this advisory-overlay test. The shared shape is a
+test that passes for an unrelated reason and therefore proves nothing while
+reading as coverage. Firstmate's view is recorded plainly: that admission is
+worth more than the fix.
+
 ### DISCREPANCY — the cutover gate still reports `SWMS-261059`
 
 Recorded, not reconciled, and not assumed to be either side's fault.

@@ -1540,12 +1540,64 @@ Deno.test("reanchor: an attestation cannot revive a terminal card", () => {
 });
 
 Deno.test("reanchor: the advisory overlay candidate is unchanged by decision_kind", () => {
-  // sesStageV2OverlayCandidate still SIMULATES and still binds nothing.
-  const candidate = sesStageV2OverlayCandidate(
+  const attestation = sesStageV2OverlayCandidate(
     "new",
-    { ...CAPTAIN_ARCHIVE, decision_kind: "stage_attestation" } as any,
+    {
+      ...CAPTAIN_ARCHIVE,
+      source_status: "new",
+      decision_kind: "stage_attestation",
+    } as any,
     "in_progress",
   );
-  assertEquals(candidate.binds, false);
-  assertEquals(candidate.stage, "new");
+  assertEquals(attestation.binds, false);
+  assertEquals(attestation.stage, "new");
+
+  const displayOverride = sesStageV2OverlayCandidate(
+    "new",
+    {
+      ...CAPTAIN_ARCHIVE,
+      source_status: "new",
+      decision_kind: "display_override",
+    } as any,
+    "in_progress",
+  );
+  assertEquals(displayOverride.binds, true);
+  assertEquals(displayOverride.stage, "archive");
+});
+
+Deno.test("reanchor: decision_kind projections are guarded when Release 9 arrives", async () => {
+  let migrationIntroducesDecisionKind = false;
+  for await (
+    const entry of Deno.readDir(new URL("../../migrations/", import.meta.url))
+  ) {
+    if (!entry.isFile || !entry.name.endsWith(".sql")) continue;
+    const text = await Deno.readTextFile(
+      new URL(`../../migrations/${entry.name}`, import.meta.url),
+    );
+    if (/\bdecision_kind\b/i.test(text)) {
+      migrationIntroducesDecisionKind = true;
+      break;
+    }
+  }
+  if (!migrationIntroducesDecisionKind) {
+    // The display_override default is safe only while no attestation row can exist.
+    return;
+  }
+
+  const indexSource = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  const boardRead = indexSource.match(
+    /from\('makesafe_board_status_current'\)[\s\S]{0,250}?\.select\('([^']+)'\)/,
+  )?.[1] || "";
+  const runRead = indexSource.match(
+    /from\('makesafe_board_status_applications'\)[\s\S]{0,180}?\.select\('([^']+)'\)/,
+  )?.[1] || "";
+  if (
+    !/\bdecision_kind\b/.test(boardRead) || !/\bdecision_kind\b/.test(runRead)
+  ) {
+    throw new Error(
+      "Release 9 added decision_kind, but the projections at index.ts:15356 (makesafe_board_status_current) and index.ts:15608 (makesafe_board_status_applications) do not both select it. A projection that drops the discriminator silently downgrades an attestation to display_override, which can move a column and defeat Release 8.",
+    );
+  }
 });
