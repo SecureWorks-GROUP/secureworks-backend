@@ -161,7 +161,11 @@ export async function reserveInstructionCardMint(
     },
   );
   if (error) {
-    throw new InstructionMintConflictError(input.candidateKeys, []);
+    const message = String(error.message || error);
+    if (error.code === "P0001" && message.startsWith("instruction key already reserved:")) {
+      throw new InstructionMintConflictError(input.candidateKeys, []);
+    }
+    throw new Error(`instruction mint reservation failed: ${message}`);
   }
 }
 
