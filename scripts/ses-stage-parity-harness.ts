@@ -182,6 +182,15 @@ interface ParityCard {
   /** The column this card lands in AFTER a cutover (M1 + re-applied overlay). */
   post_cutover_stage: string;
   post_cutover_overlay_binds: boolean;
+  /**
+   * The CORRECTED shadow engine (`ses_stage_engine_v2.ts`), read straight off
+   * the published advisory fields rather than recomputed here. At Release 1
+   * these equal `m1_pure` / `post_cutover_stage` by construction; each later
+   * correction is measured as the divergence that opens up between them.
+   */
+  stage_v2: string;
+  stage_v2_post_overlay: string;
+  stage_v2_conflicts: string[];
   m1_pure_reasons: string[];
   m1_pure_missing: string[];
   overlay: {
@@ -840,6 +849,9 @@ async function run(): Promise<void> {
           "UNVERIFIED",
       post_cutover_overlay_binds: !!(postCutoverById.get(row.id) as any)
         ?.status_application,
+      stage_v2: row.derived_stage_v2 ?? "UNVERIFIED",
+      stage_v2_post_overlay: row.derived_stage_v2_post_overlay ?? "UNVERIFIED",
+      stage_v2_conflicts: row.derived_stage_v2_conflicts ?? [],
       m1_pure_reasons: pure?.computed_status_reasons ?? [],
       m1_pure_missing: pure?.computed_status_missing ?? [],
       overlay: {
@@ -1016,9 +1028,22 @@ function summarise(cards: ParityCard[]) {
   const causes: Record<string, number> = {};
   const branches: Record<string, number> = {};
   const cutoverMatrix: Record<string, number> = {};
+  const correctedMatrix: Record<string, number> = {};
+  const correctedCounts: Record<string, number> = {};
+  const conflicts: Record<string, string[]> = {};
+  let correctedChanged = 0;
   let cutoverChanged = 0;
   let changed = 0;
   for (const c of cards) {
+    correctedCounts[c.stage_v2] = (correctedCounts[c.stage_v2] || 0) + 1;
+    if (c.legacy_canonical_stage !== c.stage_v2_post_overlay) {
+      const key = `${c.legacy_canonical_stage} -> ${c.stage_v2_post_overlay}`;
+      correctedMatrix[key] = (correctedMatrix[key] || 0) + 1;
+      correctedChanged++;
+    }
+    for (const conflict of c.stage_v2_conflicts || []) {
+      (conflicts[conflict] ||= []).push(c.job_ref);
+    }
     const b = c.legacy_branch.split(" ")[0];
     branches[b] = (branches[b] || 0) + 1;
     legacyCounts[c.legacy_canonical_stage] =
@@ -1058,6 +1083,24 @@ function summarise(cards: ParityCard[]) {
     post_cutover_column_counts: postCutover,
     cards_changing_column_m1_pure_vs_legacy_canonical: changed,
     cards_changing_column_after_cutover_with_overlays_reapplied: cutoverChanged,
+    // The CORRECTED engine's prospective blast. Equal to the uncorrected
+    // number at Release 1; each landed correction moves it.
+    corrected_stage_v2_column_counts: correctedCounts,
+    cards_changing_column_after_corrected_cutover: correctedChanged,
+    corrected_cutover_transition_matrix: Object.fromEntries(
+      Object.entries(correctedMatrix).sort((a, b) => b[1] - a[1]),
+    ),
+    // Cards the corrected engine refuses to place. These STOP a cutover gate.
+    corrected_conflicts: Object.fromEntries(
+      Object.entries(conflicts).sort((a, b) => b[1].length - a[1].length),
+    ),
+    // Release 1 self-check: the shadow engine must reproduce the uncorrected
+    // pure/post-cutover values exactly until a correction is landed.
+    stage_v2_equals_m1_pure:
+      cards.filter((c) => c.stage_v2 === c.m1_pure).length,
+    stage_v2_post_overlay_equals_post_cutover:
+      cards.filter((c) => c.stage_v2_post_overlay === c.post_cutover_stage)
+        .length,
     cutover_transition_matrix: Object.fromEntries(
       Object.entries(cutoverMatrix).sort((a, b) => b[1] - a[1]),
     ),
