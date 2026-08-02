@@ -42,6 +42,16 @@ on:
       # tests/e2e is documented in docs/ses-reporting-proof-harness.md.
       - 'tests/e2e/**'
       - 'docs/ses-reporting-proof-harness.md'
+      # Same reason a fourth time, for evidence and project-memory changes.
+      # An agent run that lands only its report, screenshots and ledgers under
+      # data/ — or only updates AGENTS.md / CLAUDE.md — matched NO path here, so
+      # deno-check never registered and the PR sat at BLOCKED with zero checks,
+      # exactly like the watchdog-only PR above. Measured on PR #509
+      # (68 files, all under data/ plus AGENTS.md): mergeStateStatus BLOCKED,
+      # statusCheckRollup 0. `*` does not match `/`, so '*.md' is the six
+      # tracked ROOT markdown files only and does not pull in docs/**.
+      - 'data/**'
+      - '*.md'
 
 permissions:
   contents: read
