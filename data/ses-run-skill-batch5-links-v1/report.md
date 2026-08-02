@@ -5,9 +5,11 @@
 **Slice:** `ses_family ∈ {ordinary_roof_portal, assessment_quote}` only. No physical make-safe, no
 temporary fencing, no change to the invoice-obligation path.
 **Mode:** production reads via Supabase Management API `read_only: true`, SELECT only, plus headless
-CDP screenshots of builder share links. **No production write was possible — see the credential
-section.** No card archived, completed, cancelled or sent; no invoice created, authorised or sent;
-no email drafted; the money seal was never touched.
+CDP screenshots of builder share links. For most of this run **no production write was possible** —
+see the credential section. After the key was fixed, **exactly one production write was made**: the
+captain-approved roof storey backfill over 38 cards (§9.3). No card archived, completed, cancelled
+or sent; no invoice created, authorised or sent; no email drafted; the money seal was never touched;
+no per-card docket or report work was done.
 
 ---
 
