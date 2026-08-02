@@ -96,6 +96,12 @@ A spectating human may approve a reviewable draft with the review button. That r
 continues to use `approveIntakeDraft`; reviewed fields remain the final authority.
 Reason-coded cancellations, conflicts, unknown builders, identity-floor failures and
 missing job material never bypass review.
+Before minting a new card, approval and in-place re-extraction require exactly one
+work-order PDF with settled extracted text. The existing job-family classifier then
+uses that PDF's declared type together with the builder context; a pending extraction
+refuses with `pdf_extraction_pending`, and an email carrying multiple work orders is
+refused rather than selecting one document implicitly. This is forward-only for newly
+minted cards and does not reclassify existing cards.
 
 ## Read-only diagnostic surface
 
