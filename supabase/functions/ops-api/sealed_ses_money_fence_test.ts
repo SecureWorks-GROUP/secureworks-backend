@@ -6,6 +6,10 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   classifySealedSesJob,
+  SEALED_SES_MONEY_READ_EXEMPT_ACTIONS,
+  type SealedSesMoneyReadCaller,
+  sealedSesMoneyReadExemptionApplies,
+  sealedSesMoneyReadExemptionWriteVerbViolations,
   sealedSesMoneyRefusal,
 } from "../_shared/sealed_ses_money_fence.ts";
 import {
@@ -57,10 +61,19 @@ function lookupClient(options: {
   return {
     from(table: string) {
       if (table === "jobs") {
-        return fluentResponse({
-          data: options.job ?? null,
-          error: options.jobError ? { message: options.jobError } : null,
+        // The seal classifier reads one row via maybeSingle; the synthetic
+        // live-fire guard reads a LIST via `.in('id', …)` and calls `.filter`
+        // on it. Serve each the shape it expects, or a fixture that supplies a
+        // job makes the guard throw a TypeError instead of exercising the gate.
+        const single = options.job ?? null;
+        const error = options.jobError ? { message: options.jobError } : null;
+        const builder: any = fluentResponse({
+          data: single ? [single] : [],
+          error,
         });
+        builder.maybeSingle = async () => ({ data: single, error });
+        builder.single = async () => ({ data: single, error });
+        return builder;
       }
       if (table === "makesafe_job_details") {
         return fluentResponse({
@@ -333,9 +346,13 @@ Deno.test("F8 job-link and legacy invoice effects refuse sealed or SES-bound inv
     "sealed_ses_release_required",
   );
 
+  // The invoice carries a job link so the assertion below lands on the SES-bound
+  // refusal it is about. Without one, the earlier authoritative-job-link guard
+  // (`synthetic_livefire_invoice_unresolved`) refuses first and this sub-case
+  // stops exercising the sealed obligation/token branch at all.
   const bound = lookupClient({
     invoice: {
-      job_id: null,
+      job_id: JOB_ID,
       invoice_type: "ACCREC",
       invoice_obligation_revision_id: OBLIGATION_ID,
       ses_external_token: "SES-bound",
@@ -412,6 +429,13 @@ Deno.test("legacy invoice effects fail closed when the invoice mirror is missing
   assertStringIncludes(error.refusal.fact, "local Xero mirror is missing");
 });
 
+// An unlinked ACCREC invoice is refused by the authoritative-job-link guard,
+// which runs before the sealed classification and raises the 409
+// `synthetic_livefire_invoice_unresolved` ApiError rather than the later
+// `invoice_link_required` SesActionError. The property under test is unchanged
+// — no legacy effect proceeds without an authoritative job link, and the
+// provider is never reached — so this asserts the refusal the code actually
+// raises today.
 Deno.test("every legacy ACCREC effect requires an authoritative invoice job link", async () => {
   const actions = [
     "approve_invoice",
@@ -447,10 +471,14 @@ Deno.test("every legacy ACCREC effect requires an authoritative invoice job link
             `unlinked-${action}`,
             action,
           ),
-        SesActionError,
-      ) as SesActionError;
+        Error,
+      ) as Error & { status?: number };
       assertEquals(error.status, 409);
-      assertEquals((error.refusal as any).code, "invoice_link_required");
+      assertStringIncludes(
+        error.message,
+        "synthetic_livefire_invoice_unresolved",
+      );
+      assertStringIncludes(error.message, action);
     }
     assertEquals(providerCalls, 0);
   } finally {
@@ -473,6 +501,10 @@ Deno.test("invoice and classifier lookup errors refuse before provider effects",
       }),
     ]
   ) {
+    // Either refusal class is acceptable here — the mirror error raises a
+    // SesActionError, the unreadable job authority raises the synthetic
+    // live-fire guard's ApiError — but both must fail closed with a 503 before
+    // any provider effect.
     const error = await assertRejects(
       () =>
         _assertLegacySesInvoiceActionAllowedForTest(
@@ -480,8 +512,8 @@ Deno.test("invoice and classifier lookup errors refuse before provider effects",
           "xero-lookup-error",
           "approve_invoice",
         ),
-      SesActionError,
-    ) as SesActionError;
+      Error,
+    ) as Error & { status?: number };
     assertEquals(error.status, 503);
   }
 });
@@ -874,4 +906,417 @@ Deno.test("sealed refusal text is typed and names the approved release path", ()
   assertEquals(refusal.code, "sealed_ses_release_required");
   assertStringIncludes(refusal.fact, "sealed");
   assertStringIncludes(refusal.recovery_action, "execute_ses_invoice_revision");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Captain's ruling, 2026-08-02: reading an invoice PDF is exempt from the seal
+//
+// Register rows 12 and 75. Before this ruling the seal refused `get_invoice_pdf`
+// on every make-safe card, so View PDF was dead on all 22 invoices swept across
+// 62 cards, and 53 active cards sat on the same refused route — including
+// invoices SecureWorks Group had already sent to a builder.
+//
+// These tests prove BOTH halves. The read now works; nothing else moved.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const OPS_KEY_CALLER: SealedSesMoneyReadCaller = { mode: "api_key" };
+const ADMIN_CALLER: SealedSesMoneyReadCaller = { mode: "jwt", role: "admin" };
+const OWNER_CALLER: SealedSesMoneyReadCaller = { mode: "jwt", role: "owner" };
+
+// Every sealed money verb the seal exists to refuse. The read exemption must
+// leave all of them refusing, even when handed the MOST privileged caller
+// context that exists — this list is what fails if the exemption is ever
+// widened from a read into a write.
+const SEALED_WRITE_ACTIONS = [
+  "create_invoice",
+  "create_deposit_invoice",
+  "update_invoice",
+  "update_invoice_job_link",
+  "approve_invoice",
+  "approve_and_send_invoice",
+  "void_invoice",
+  "send_invoice_email",
+  "send_payment_link",
+  "mark_invoice_paid",
+  "reconcile_payment",
+  "force_reconcile_invoice",
+  "handle_payment_event",
+  "send_quote",
+  "send_work_order",
+  "makesafe_send_pack",
+];
+
+function sealedJob() {
+  return { id: JOB_ID, type: "makesafe", job_number: "SWMS-261028" };
+}
+
+// A make-safe invoice mirror row. `status` is carried so the fixtures can name
+// the DRAFT / AUTHORISED / PAID cases the ruling calls out; the gate itself
+// never selects it, which is exactly the point — invoice status is not, and
+// must not become, a discriminator on the read path.
+function sealedInvoice(
+  status: string,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    job_id: JOB_ID,
+    invoice_type: "ACCREC",
+    invoice_obligation_revision_id: null,
+    ses_external_token: null,
+    status,
+    ...overrides,
+  };
+}
+
+Deno.test("the read exemption is exactly one action and carries no write verb", () => {
+  assertEquals([...SEALED_SES_MONEY_READ_EXEMPT_ACTIONS], ["get_invoice_pdf"]);
+  assertEquals(sealedSesMoneyReadExemptionWriteVerbViolations(), []);
+});
+
+Deno.test("the read exemption needs both an allow-listed action and an operator caller", () => {
+  for (const caller of [OPS_KEY_CALLER, ADMIN_CALLER, OWNER_CALLER]) {
+    assertEquals(
+      sealedSesMoneyReadExemptionApplies("get_invoice_pdf", caller),
+      true,
+    );
+  }
+
+  // Lock 1: the caller must be an identified operator. A trade or unknown
+  // session, the make-safe automation routine, and an absent caller context all
+  // keep the sealed refusal they have today.
+  for (
+    const caller of [
+      { mode: "jwt", role: "trade" } as SealedSesMoneyReadCaller,
+      { mode: "jwt", role: "manager" } as SealedSesMoneyReadCaller,
+      { mode: "jwt", role: "unknown" } as SealedSesMoneyReadCaller,
+      { mode: "jwt", role: null } as SealedSesMoneyReadCaller,
+      { mode: "routine" } as SealedSesMoneyReadCaller,
+      null,
+      undefined,
+    ]
+  ) {
+    assertEquals(
+      sealedSesMoneyReadExemptionApplies("get_invoice_pdf", caller),
+      false,
+    );
+  }
+
+  // Lock 2: the action must be on the closed allow-list. A privileged operator
+  // does NOT unlock a write, and neither does a near-miss action name.
+  for (
+    const action of [
+      ...SEALED_WRITE_ACTIONS,
+      "get_invoice_pdf_and_send",
+      "get_invoice",
+      "",
+    ]
+  ) {
+    for (const caller of [OPS_KEY_CALLER, ADMIN_CALLER, OWNER_CALLER]) {
+      assertEquals(
+        sealedSesMoneyReadExemptionApplies(action, caller),
+        false,
+        `${action} must never be read-exempt`,
+      );
+    }
+  }
+});
+
+Deno.test("an operator may READ a sealed make-safe invoice PDF at draft, authorised and paid", async () => {
+  for (const status of ["DRAFT", "AUTHORISED", "PAID"]) {
+    for (const caller of [OPS_KEY_CALLER, ADMIN_CALLER, OWNER_CALLER]) {
+      const allowed = await _assertLegacySesInvoiceActionAllowedForTest(
+        lookupClient({
+          invoice: sealedInvoice(status),
+          job: sealedJob(),
+        }),
+        `xero-${status.toLowerCase()}`,
+        "get_invoice_pdf",
+        undefined,
+        caller,
+      );
+      assertEquals(allowed.job_id, JOB_ID);
+    }
+  }
+});
+
+Deno.test("the read exemption covers every way a job is sealed, and SES-bound invoices", async () => {
+  const sealShapes = [
+    { id: JOB_ID, type: "makesafe", job_number: "SWMS-261028" },
+    { id: JOB_ID, type: "general", job_number: "SWMS-261124" },
+    {
+      id: JOB_ID,
+      type: "general",
+      job_number: "GEN-100",
+      ses_money_sealed_at: "2026-07-27T00:00:00.000Z",
+      ses_money_seal_source: "job_spine_backfill",
+    },
+  ];
+  for (const job of sealShapes) {
+    const allowed = await _assertLegacySesInvoiceActionAllowedForTest(
+      lookupClient({ invoice: sealedInvoice("AUTHORISED"), job }),
+      "xero-seal-shape",
+      "get_invoice_pdf",
+      undefined,
+      OPS_KEY_CALLER,
+    );
+    assertEquals(allowed.job_id, JOB_ID);
+  }
+
+  // An invoice bound to a sealed SES obligation / external delivery token is
+  // the same story: its bytes may be read, and only read.
+  const bound = await _assertLegacySesInvoiceActionAllowedForTest(
+    lookupClient({
+      invoice: sealedInvoice("AUTHORISED", {
+        invoice_obligation_revision_id: OBLIGATION_ID,
+        ses_external_token: "SES-bound",
+      }),
+      job: sealedJob(),
+    }),
+    "xero-ses-bound",
+    "get_invoice_pdf",
+    undefined,
+    ADMIN_CALLER,
+  );
+  assertEquals(bound.job_id, JOB_ID);
+
+  // And the job-level gate agrees, so a sealed card's own read is not refused
+  // one layer down.
+  const jobLevel = await _assertLegacySesMoneyActionAllowedForJobForTest(
+    lookupClient({ job: sealedJob() }),
+    JOB_ID,
+    "get_invoice_pdf",
+    false,
+    OPS_KEY_CALLER,
+  );
+  assertEquals(jobLevel.sealed, true);
+});
+
+Deno.test("a non-operator caller keeps the sealed refusal on the invoice PDF read", async () => {
+  for (
+    const caller of [
+      { mode: "jwt", role: "trade" } as SealedSesMoneyReadCaller,
+      { mode: "routine" } as SealedSesMoneyReadCaller,
+      null,
+    ]
+  ) {
+    const error = await assertRejects(
+      () =>
+        _assertLegacySesInvoiceActionAllowedForTest(
+          lookupClient({
+            invoice: sealedInvoice("AUTHORISED"),
+            job: sealedJob(),
+          }),
+          "xero-unprivileged",
+          "get_invoice_pdf",
+          undefined,
+          caller,
+        ),
+      SesActionError,
+    ) as SesActionError;
+    assertEquals(error.status, 409);
+    assertEquals(
+      (error.refusal as any).code,
+      "sealed_ses_release_required",
+    );
+  }
+});
+
+// THE WIDENING GUARD. Every sealed money effect is re-run against the same
+// sealed fixture with the most privileged caller context that exists. If
+// someone later adds a write to SEALED_SES_MONEY_READ_EXEMPT_ACTIONS, or
+// loosens the exemption so the caller alone unlocks it, this fails.
+Deno.test("every write, issue, send, void, amend and relink still refuses on a sealed card", async () => {
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  globalThis.fetch = (() => {
+    providerCalls++;
+    return Promise.reject(new Error("provider must not be reached"));
+  }) as typeof fetch;
+  try {
+    for (const action of SEALED_WRITE_ACTIONS) {
+      for (const caller of [OPS_KEY_CALLER, ADMIN_CALLER, OWNER_CALLER]) {
+        const invoiceError = await assertRejects(
+          () =>
+            _assertLegacySesInvoiceActionAllowedForTest(
+              lookupClient({
+                invoice: sealedInvoice("AUTHORISED"),
+                job: sealedJob(),
+              }),
+              `xero-${action}`,
+              action,
+              undefined,
+              caller,
+            ),
+          SesActionError,
+          undefined,
+          `${action} must stay sealed`,
+        ) as SesActionError;
+        assertEquals(invoiceError.status, 409);
+        assertEquals(
+          (invoiceError.refusal as any).code,
+          "sealed_ses_release_required",
+        );
+
+        const jobError = await assertRejects(
+          () =>
+            _assertLegacySesMoneyActionAllowedForJobForTest(
+              lookupClient({ job: sealedJob() }),
+              JOB_ID,
+              action,
+              false,
+              caller,
+            ),
+          SesActionError,
+          undefined,
+          `${action} must stay sealed at the job level`,
+        ) as SesActionError;
+        assertEquals(jobError.status, 409);
+        assertEquals(
+          (jobError.refusal as any).code,
+          "sealed_ses_release_required",
+        );
+      }
+    }
+
+    // An SES-bound invoice keeps its own refusal for every write too.
+    for (const action of SEALED_WRITE_ACTIONS) {
+      const error = await assertRejects(
+        () =>
+          _assertLegacySesInvoiceActionAllowedForTest(
+            lookupClient({
+              invoice: sealedInvoice("AUTHORISED", {
+                invoice_obligation_revision_id: OBLIGATION_ID,
+                ses_external_token: "SES-bound",
+              }),
+              job: sealedJob(),
+            }),
+            `xero-bound-${action}`,
+            action,
+            undefined,
+            OPS_KEY_CALLER,
+          ),
+        SesActionError,
+      ) as SesActionError;
+      assertEquals(
+        (error.refusal as any).code,
+        "sealed_ses_release_required",
+      );
+    }
+    assertEquals(providerCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// The exemption lifts ONE refusal. Every identity and entitlement refusal on
+// the read path is unchanged, and each still fires before any provider call.
+Deno.test("the invoice PDF read still fails closed on identity it cannot prove", async () => {
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  globalThis.fetch = (() => {
+    providerCalls++;
+    return Promise.reject(new Error("provider must not be reached"));
+  }) as typeof fetch;
+  try {
+    // Missing from the local Xero mirror -> cannot be classified at all.
+    const missing = await assertRejects(
+      () =>
+        _assertLegacySesInvoiceActionAllowedForTest(
+          lookupClient({ invoice: null }),
+          "xero-missing",
+          "get_invoice_pdf",
+          undefined,
+          OPS_KEY_CALLER,
+        ),
+      SesActionError,
+    ) as SesActionError;
+    assertEquals(missing.status, 503);
+    assertEquals(
+      (missing.refusal as any).code,
+      "sealed_ses_fence_check_failed",
+    );
+
+    // No authoritative job link -> the caller's entitlement to these bytes
+    // cannot be established.
+    const unlinked = await assertRejects(
+      () =>
+        _assertLegacySesInvoiceActionAllowedForTest(
+          lookupClient({ invoice: sealedInvoice("PAID", { job_id: null }) }),
+          "xero-unlinked-read",
+          "get_invoice_pdf",
+          undefined,
+          OPS_KEY_CALLER,
+        ),
+      Error,
+    ) as Error & { status?: number };
+    assertEquals(unlinked.status, 409);
+    assertStringIncludes(
+      unlinked.message,
+      "synthetic_livefire_invoice_unresolved",
+    );
+
+    // Unreadable job classification -> the seal check itself is unavailable, so
+    // the read refuses rather than assuming the card is safe to open.
+    const unreadable = await assertRejects(
+      () =>
+        _assertLegacySesMoneyActionAllowedForJobForTest(
+          lookupClient({ jobError: "job authority unavailable" }),
+          JOB_ID,
+          "get_invoice_pdf",
+          false,
+          OPS_KEY_CALLER,
+        ),
+      SesActionError,
+    ) as SesActionError;
+    assertEquals(unreadable.status, 503);
+    assertEquals(
+      (unreadable.refusal as any).code,
+      "sealed_ses_fence_check_failed",
+    );
+
+    // A synthetic live-fire job is never readable through the front door.
+    const synthetic = await assertRejects(
+      () =>
+        _assertLegacySesInvoiceActionAllowedForTest(
+          lookupClient({
+            invoice: sealedInvoice("AUTHORISED"),
+            job: {
+              ...sealedJob(),
+              metadata: {
+                synthetic_livefire_marker:
+                  "SWG-SES-LIVEFIRE-TEST-ONLY-1A2B3C4D-5E6F-4A8B-9C0D-1E2F3A4B5C6D",
+              },
+            },
+          }),
+          "xero-synthetic",
+          "get_invoice_pdf",
+          undefined,
+          OPS_KEY_CALLER,
+        ),
+      Error,
+    ) as Error & { status?: number };
+    assertEquals(synthetic.status, 409);
+    assertStringIncludes(
+      synthetic.message,
+      "synthetic_livefire_release_forbidden",
+    );
+
+    assertEquals(providerCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("non-SES invoices read exactly as they did before the ruling", async () => {
+  // An unsealed job never needed the exemption and must not start depending on
+  // it: the read succeeds with no caller context at all.
+  const allowed = await _assertLegacySesInvoiceActionAllowedForTest(
+    lookupClient({
+      invoice: sealedInvoice("AUTHORISED"),
+      job: { id: JOB_ID, type: "fencing", job_number: "FEN-100" },
+    }),
+    "xero-unsealed",
+    "get_invoice_pdf",
+  );
+  assertEquals(allowed.job_id, JOB_ID);
 });

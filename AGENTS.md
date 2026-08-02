@@ -890,6 +890,21 @@ a before/after `ses-c2-measure-board-evidence.ts` run. Evidence, the 51-card
 cohort and the measured board effect are in
 `docs/evidence/ses-c3-invoice-link-seal-conflict-2026-08-01.md`.
 
+The seal permits exactly ONE read: fetching the bytes of an invoice PDF that
+already exists (`get_invoice_pdf`), by the Captain's 2026-08-02 ruling. The
+exemption is declared in `_shared/sealed_ses_money_fence.ts` as the closed
+`SEALED_SES_MONEY_READ_EXEMPT_ACTIONS` set, and it is double-locked: the action
+must be on that set AND the caller must be an identified operator (ops key, or
+admin/owner JWT), which every write call site structurally omits. Do not add a
+name to that set — created/authorised/changed/linked/sent all still refuse, and
+`sealed_ses_money_fence_test.ts` fails on any widening (membership pin,
+write-verb guard, and a 16-action re-refusal sweep run with the most privileged
+caller). The gate itself is unchanged: a missing mirror row, an absent
+authoritative job link, an unreadable classification and a synthetic live-fire
+job each still fail closed before any Xero call. Evidence, the production
+measurement and the front-end answer are in
+`docs/evidence/ses-invoice-pdf-read-exemption-2026-08-02.md`.
+
 The v2 authority bootstrap and full-board two-way reconciliation are owned by
 `20260728060000_makesafe_board_reconcile_truth_u2.sql`,
 `makesafe_state_seed`, and `makesafe_state_reconcile`. Both actions are

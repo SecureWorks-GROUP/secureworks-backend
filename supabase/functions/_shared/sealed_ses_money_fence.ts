@@ -105,6 +105,115 @@ export async function inspectSealedSesJob(
   return classifySealedSesJob(jobResponse.data, !!detailResponse.data);
 }
 
+// ── Captain's ruling, 2026-08-02: reading is not a money effect ──
+//
+// Asked whether reading an invoice PDF should be exempt from this seal, the
+// captain ruled: "Of course you should be able to allow reading."
+//
+// Exactly ONE capability is exempt: fetching the bytes of an invoice document
+// that already exists. A read creates, drafts, amends, voids, re-links,
+// re-numbers, issues, sends and changes nothing, so the refusal it used to
+// raise protected no money record — it only stopped operators opening invoices
+// SecureWorks Group had already sent to a builder.
+//
+// This set is closed and it is NOT a maintenance surface. Adding a name is a
+// captain-level decision, and three things make that visible rather than easy:
+//
+//   1. `sealed_ses_money_fence_test.ts` pins the exact membership, so any new
+//      name fails a test that names this ruling.
+//   2. `sealedSesMoneyReadExemptionWriteVerbViolations()` rejects any name
+//      carrying a write verb, so the set cannot quietly grow a write.
+//   3. The exemption is double-locked: it also needs an operator caller
+//      context, which every write call site structurally omits (see
+//      `sealedSesMoneyReadExemptionApplies`).
+//
+// Everything else the seal refuses — created, authorised, changed, linked,
+// sent — is untouched.
+export const SEALED_SES_MONEY_READ_EXEMPT_ACTIONS: ReadonlySet<string> =
+  new Set(
+    [
+      "get_invoice_pdf",
+    ],
+  );
+
+// The identified operator asking for the bytes. `mode` mirrors the ops-api auth
+// mode; `role` is the authenticated profile role for a JWT session. This is
+// never caller-supplied request data — ops-api resolves both server-side.
+export interface SealedSesMoneyReadCaller {
+  mode: "api_key" | "jwt" | "routine";
+  role?: string | null;
+}
+
+export function isSealedSesMoneyReadExemptAction(action: string): boolean {
+  return SEALED_SES_MONEY_READ_EXEMPT_ACTIONS.has(String(action ?? "").trim());
+}
+
+// Both locks must hold. The action must be on the closed read allow-list AND
+// the caller must be an identified operator: the privileged ops key, or an
+// admin/owner session. The make-safe automation routine is deliberately not an
+// operator, and a write call site passes no caller context at all — so a write
+// can never reach this exemption even if a write verb were mistakenly listed.
+export function sealedSesMoneyReadExemptionApplies(
+  action: string,
+  caller: SealedSesMoneyReadCaller | null | undefined,
+): boolean {
+  if (!isSealedSesMoneyReadExemptAction(action)) return false;
+  if (!caller) return false;
+  if (caller.mode === "api_key") return true;
+  if (caller.mode !== "jwt") return false;
+  const role = String(caller.role ?? "").trim().toLowerCase();
+  return role === "admin" || role === "owner";
+}
+
+// Word-level (never substring) write verbs. `get_invoice_pdf` carries none of
+// them; `void_invoice`, `send_invoice_email` or `update_invoice_job_link` each
+// carry one, so allow-listing any of those trips this guard.
+const SEALED_SES_MONEY_WRITE_VERBS: ReadonlySet<string> = new Set([
+  "amend",
+  "apply",
+  "approve",
+  "authorise",
+  "authorize",
+  "cancel",
+  "change",
+  "create",
+  "delete",
+  "draft",
+  "email",
+  "execute",
+  "issue",
+  "link",
+  "mark",
+  "number",
+  "pay",
+  "post",
+  "reconcile",
+  "release",
+  "relink",
+  "remove",
+  "renumber",
+  "save",
+  "send",
+  "set",
+  "share",
+  "submit",
+  "sync",
+  "update",
+  "void",
+  "write",
+]);
+
+// Returns the allow-listed action names that name a write effect. The test
+// suite asserts this is empty; it is the check that fails if someone later
+// widens the read exemption into a write.
+export function sealedSesMoneyReadExemptionWriteVerbViolations(): string[] {
+  return [...SEALED_SES_MONEY_READ_EXEMPT_ACTIONS].filter((action) =>
+    String(action).toLowerCase().split(/[^a-z]+/).filter(Boolean).some((word) =>
+      SEALED_SES_MONEY_WRITE_VERBS.has(word)
+    )
+  );
+}
+
 export function sealedSesMoneyRefusal(
   action: string,
   evidence?: Record<string, unknown>,
