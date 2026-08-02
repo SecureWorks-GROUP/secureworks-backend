@@ -5,6 +5,10 @@
 // the reporting workflow and returns an explainable status. It does not move a
 // card, mirror substatus, create evidence, or change either board projection.
 
+// Type-only. `ses_family_matrix.ts` imports nothing, so this cannot cycle, and
+// the import is erased at runtime.
+import type { SesFamilyId } from "./ses_family_matrix.ts";
+
 export const MAKESAFE_COMPLETION_PHOTO_FLOOR = 5;
 
 // F4 — the truthful report-only waiting state. A roof / assessment card is
@@ -103,6 +107,10 @@ export interface MakesafeStatusInput {
     report_sent_at?: string | null;
     invoice_ready_at?: string | null;
     external_links?: any[];
+    // R4 — read only when the caller did not supply `ses_family` and the
+    // shadow engine has to derive the family from the card itself. The board
+    // read model already reads this same field off the detail row.
+    report_delivery?: string | null;
     // F4 — read ONLY to recognise MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION.
     // This engine still derives every other stage from durable evidence; it does
     // not mirror the substatus ladder.
@@ -110,6 +118,17 @@ export interface MakesafeStatusInput {
   } | null;
   evidence?: MakesafeStatusEvidence;
   displayedStatus?: string | null;
+  /**
+   * R4 — the canonical SES family from `canonicalSesFamilyFromCard`, supplied
+   * by the caller that already computed it. THIS ENGINE DELIBERATELY IGNORES
+   * IT: `computeMakesafeStatus` keeps classifying with its own three-kind
+   * `classifyMakesafeJobType` guess so its published output stays byte-identical
+   * to what today's certificates grade against. The field exists so the
+   * corrected shadow engine can read a real family instead of re-guessing one,
+   * off the same single input object. Optional on purpose — a caller that omits
+   * it makes the shadow engine derive the family from the card itself.
+   */
+  ses_family?: SesFamilyId | null;
   nowIso?: string;
 }
 

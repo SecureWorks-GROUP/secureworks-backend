@@ -689,6 +689,10 @@ export function buildCanonicalMakesafeRows(
         swmsRequired,
         hold,
       },
+      // R4 — the canonical family this row already computed, handed to the
+      // shadow engine so it reads a real family instead of re-guessing one.
+      // M1 ignores the key; its published output is unchanged.
+      ses_family: sesFamily,
       nowIso: computedAt,
     };
     const computation = computeMakesafeStatus({
@@ -785,6 +789,11 @@ export function buildCanonicalMakesafeRows(
       derived_stage_v2_missing: stageV2.missing,
       derived_stage_v2_conflicts: stageV2.conflicts,
       derived_stage_v2_engine_version: stageV2.engine_version,
+      // R4 — the canonical family the shadow engine actually used, and the
+      // evidence path it delegated to. Diagnostic only, like every key above.
+      derived_stage_v2_family: stageV2.ses_family,
+      derived_stage_v2_family_kind: stageV2.family_kind,
+      derived_stage_v2_family_recipe_state: stageV2.family_recipe_state,
       // U2-S1 additive spine keys (nullable-safe for pre-migration rows).
       attendance_cycle_id: base?.attendance_cycle_id ?? null,
       cycle_number: Number(
