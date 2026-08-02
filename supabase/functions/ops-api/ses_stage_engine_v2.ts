@@ -878,6 +878,7 @@ export function sesStageV2OverlayCandidate(
   const binds = decisionKind === "display_override" &&
     !isMakesafeTerminalDisplayStatus(stage) &&
     !isMakesafeTerminalJobState(rawJobState) &&
+    !!application &&
     String(application.source_status || "").toLowerCase() === stage;
   return {
     stage: binds
