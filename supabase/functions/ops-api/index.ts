@@ -502,6 +502,9 @@ import {
   computeIntakeDraftStatus as _computeIntakeDraftStatus,
   type MakeSafeJobFamilyContext as _MakeSafeJobFamilyContext,
 } from './makesafe_intake_gate.ts'
+// The ordered storey, read once at intake off the same instruction text the
+// family classifier above already reads. See makesafe_roof_storey_fact.ts.
+import { roofStoreyIntakeMetadata as _roofStoreyIntakeMetadata } from './makesafe_roof_storey_fact.ts'
 // B5 SLA: pure email-received -> card-created latency percentiles for the health row
 // + the 24h intake_health rollup. See makesafe_intake_sla.ts.
 import {
@@ -12571,7 +12574,31 @@ async function createMakesafeJob(
   )
   const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
 
+  // A roof report's fee is a fixed function of storeys, and the canon is that
+  // storeys are explicitly classified and never inferred from narrative. The
+  // builder's instruction names the product it ordered ("...conduct a single
+  // storey roof report"), and the classifier immediately above already reads
+  // that exact text to decide this is a roof report - then throws the storey
+  // qualifier away. An ordinary portal roof card is filled in on the builder's
+  // form, so it never has one of our own roof drafts to read a storey from
+  // either, which is why U4 refuses to price 49 of 61 roof cards on a fact the
+  // instruction already states.
+  //
+  // Record it here, ONCE, as a structured fact under the key U4's
+  // `structuredSourceFact` already resolves against `jobs.metadata`. Reading it
+  // at intake is what keeps the pricing path a lookup: nothing regexes narrative
+  // when the invoice is assembled. The match is deliberately narrow (the storey
+  // must qualify the ordered product), and it records NOTHING for an
+  // instruction that names no storey, names three or more (no sealed price -
+  // that is a captain decision, never rounded down to double), or names two
+  // different ones. Those all keep blocking on `pricing_evidence_missing`,
+  // which is the correct outcome for a fact we do not have.
+  const reviewedRoofStoreys = reviewedJobFamily === 'roof_report'
+    ? _roofStoreyIntakeMetadata(description || reviewedMakeSafeType || null)
+    : null
+
   const metadata: any = {
+    ...(reviewedRoofStoreys || {}),
     requesting_company: companyData ? { slug: companyData.slug, name: companyData.name } : reviewedCompanyName ? { slug: requesting_company_slug || null, name: reviewedCompanyName } : null,
     external_ref: external_ref || null,
     builder_claim_ref: builder_claim_ref || null,
