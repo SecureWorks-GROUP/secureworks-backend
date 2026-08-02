@@ -763,7 +763,12 @@ function ownRoofInput(draft: any, over: Record<string, any> = {}) {
     evidence: {
       assignments: [{ id: "a1" }],
       ownRoofDraft: draft,
-      documents: { report: true },
+      documents: {
+        report: false,
+        ownRoofReportDocumentIds: new Set(
+          draft?.report_doc_id ? [String(draft.report_doc_id)] : [],
+        ),
+      },
       ...(over.evidence || {}),
     },
   });
@@ -811,7 +816,10 @@ Deno.test("own roof: every one of the three facts is required", () => {
           cycle_number: 1,
           report_doc_id: "d",
         },
-        documents: { report: false },
+        documents: {
+          report: false,
+          ownRoofReportDocumentIds: new Set(["different-document"]),
+        },
       },
     }],
   ];
