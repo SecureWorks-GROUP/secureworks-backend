@@ -12594,7 +12594,11 @@ async function createMakesafeJob(
   // different ones. Those all keep blocking on `pricing_evidence_missing`,
   // which is the correct outcome for a fact we do not have.
   const reviewedRoofStoreys = reviewedJobFamily === 'roof_report'
-    ? _roofStoreyIntakeMetadata(description || reviewedMakeSafeType || null)
+    ? _roofStoreyIntakeMetadata(
+      [description, reviewedMakeSafeType, builder_email_text_for_trade]
+        .filter(Boolean)
+        .join('\n') || null,
+    )
     : null
 
   const metadata: any = {

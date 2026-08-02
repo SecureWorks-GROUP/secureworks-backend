@@ -170,3 +170,18 @@ Deno.test("the recorded value is one the sealed roof price rule already accepts"
     );
   }
 });
+
+Deno.test("the intake path includes builder instruction text as a separate source line", async () => {
+  const source = await Deno.readTextFile("./index.ts");
+  assertEquals(
+    source.includes(
+      "[description, reviewedMakeSafeType, builder_email_text_for_trade]",
+    ),
+    true,
+  );
+  assertEquals(source.includes(".join('\\n')"), true);
+  assertEquals(
+    roofStoreyIntakeMetadata("Please conduct a single storey roof report"),
+    { storeys: "single" },
+  );
+});
