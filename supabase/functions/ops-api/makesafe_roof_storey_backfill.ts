@@ -303,7 +303,6 @@ export function summariseRoofStoreyBackfill(
  * a captain reading a preview and approving it must stop the write, not widen
  * it.
  */
-// deno-lint-ignore no-explicit-any
 export async function runMakesafeRoofStoreyBackfill(
   // deno-lint-ignore no-explicit-any
   client: any,
@@ -325,7 +324,8 @@ export async function runMakesafeRoofStoreyBackfill(
       ...summariseRoofStoreyBackfill([]),
       dry_run: dryRun,
       ok: false,
-      error: "expected_count must be a finite non-negative integer. Nothing was written.",
+      error:
+        "expected_count must be a finite non-negative integer. Nothing was written.",
       expected_count: expectedCount,
     };
   }
@@ -414,16 +414,22 @@ export async function runMakesafeRoofStoreyBackfill(
     .in("id", currentJobIds);
   if (currentJobsError) throw currentJobsError;
   const { data: currentDockets, error: currentDocketsError } = await client
-    .from("makesafe_docket_revisions").select("job_id").in("job_id", currentJobIds);
-  if (currentDocketsError) throw currentDocketsError;
-  const { data: currentObligations, error: currentObligationsError } = await client
-    .from("makesafe_invoice_obligation_revisions").select("job_id").in(
+    .from("makesafe_docket_revisions").select("job_id").in(
       "job_id",
       currentJobIds,
     );
+  if (currentDocketsError) throw currentDocketsError;
+  const { data: currentObligations, error: currentObligationsError } =
+    await client
+      .from("makesafe_invoice_obligation_revisions").select("job_id").in(
+        "job_id",
+        currentJobIds,
+      );
   if (currentObligationsError) throw currentObligationsError;
   const currentDetailByJob = new Map<string, Record<string, unknown>>();
-  for (const row of (currentDetails || [])) currentDetailByJob.set(row.job_id, row);
+  for (const row of (currentDetails || [])) {
+    currentDetailByJob.set(row.job_id, row);
+  }
   const currentDocketJobs = new Set(
     (currentDockets || []).map((row: { job_id: string }) => row.job_id),
   );
@@ -450,7 +456,9 @@ export async function runMakesafeRoofStoreyBackfill(
     return {
       ...result,
       ok: false,
-      error: `preview drift detected for job numbers ${[...changedJobs].join(", ")}; nothing was written.`,
+      error: `preview drift detected for job numbers ${
+        [...changedJobs].join(", ")
+      }; nothing was written.`,
       expected_count: expectedCount,
     };
   }
@@ -466,7 +474,9 @@ export async function runMakesafeRoofStoreyBackfill(
       return {
         ...result,
         ok: false,
-        error: `write read failed for ${row.job_number}; already written: ${writtenJobs.join(", ") || "none"}.`,
+        error: `write read failed for ${row.job_number}; already written: ${
+          writtenJobs.join(", ") || "none"
+        }.`,
         expected_count: expectedCount,
       };
     }
@@ -480,7 +490,9 @@ export async function runMakesafeRoofStoreyBackfill(
       return {
         ...result,
         ok: false,
-        error: `write failed for ${row.job_number}; already written: ${writtenJobs.join(", ") || "none"}.`,
+        error: `write failed for ${row.job_number}; already written: ${
+          writtenJobs.join(", ") || "none"
+        }.`,
         expected_count: expectedCount,
       };
     }
@@ -488,7 +500,9 @@ export async function runMakesafeRoofStoreyBackfill(
       return {
         ...result,
         ok: false,
-        error: `write guard drifted at ${row.job_number}; already written: ${writtenJobs.join(", ") || "none"}.`,
+        error: `write guard drifted at ${row.job_number}; already written: ${
+          writtenJobs.join(", ") || "none"
+        }.`,
         expected_count: expectedCount,
       };
     }
