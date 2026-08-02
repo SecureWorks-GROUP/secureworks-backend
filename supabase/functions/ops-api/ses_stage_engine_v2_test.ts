@@ -5,6 +5,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildCanonicalMakesafeRows,
+  ownTemplateRoofJobIdsForBoard,
   projectOpsMakesafeBoard,
   projectTradeMakesafeBoard,
 } from "./makesafe_board_read_model.ts";
@@ -18,6 +19,7 @@ import {
   SES_STAGE_ENGINE_V2_VERSION,
   sesStageCutoverGate,
   type SesStageGateRow,
+  sesStageOwnRoofReportIn,
   sesStageV2OverlayCandidate,
 } from "./ses_stage_engine_v2.ts";
 
@@ -739,4 +741,176 @@ Deno.test("family: M1's published output is untouched by the family input", () =
     assertEquals(withFamily.job_type, without.job_type);
     assertEquals(withFamily.job_type, "physical_makesafe");
   }
+});
+
+// ── R5 — own-template roof reads its own submitted draft ────────────────────
+
+const OWN_ROOF = {
+  ses_family: "own_template_roof",
+  job: {
+    status: "in_progress",
+    metadata: {
+      makesafe_job_family: "roof_report",
+      own_template_requested: true,
+    },
+  },
+};
+
+function ownRoofInput(draft: any, over: Record<string, any> = {}) {
+  return input({
+    ...OWN_ROOF,
+    ...over,
+    evidence: {
+      assignments: [{ id: "a1" }],
+      ownRoofDraft: draft,
+      documents: { report: true },
+      ...(over.evidence || {}),
+    },
+  });
+}
+
+Deno.test("own roof: a submitted current-cycle draft with its attached document proves report-in", () => {
+  const r = deriveSesStageV2(ownRoofInput({
+    status: "submitted",
+    cycle_number: 1,
+    report_doc_id: "doc-1",
+  }));
+  assertEquals(r.stage, "trade_report_in");
+  assertEquals(r.ses_family, "own_template_roof");
+  assertEquals(r.missing, []);
+});
+
+Deno.test("own roof: every one of the three facts is required", () => {
+  const cases: Array<[string, any, Record<string, any>]> = [
+    ["no draft at all", null, {}],
+    [
+      "still a draft",
+      { status: "draft", cycle_number: 1, report_doc_id: "d" },
+      {},
+    ],
+    ["a prior cycle", {
+      status: "submitted",
+      cycle_number: 1,
+      report_doc_id: "d",
+    }, { detail: { cycle_number: 2 } }],
+    ["no rendered document", {
+      status: "submitted",
+      cycle_number: 1,
+      report_doc_id: null,
+    }, {}],
+    // The draft names a document that never became an attached roof_report row.
+    ["document never attached", {
+      status: "submitted",
+      cycle_number: 1,
+      report_doc_id: "d",
+    }, {
+      evidence: {
+        assignments: [{ id: "a1" }],
+        ownRoofDraft: {
+          status: "submitted",
+          cycle_number: 1,
+          report_doc_id: "d",
+        },
+        documents: { report: false },
+      },
+    }],
+  ];
+  for (const [label, draft, over] of cases) {
+    const r = deriveSesStageV2(ownRoofInput(draft, over));
+    assertEquals(r.stage, "allocated", `${label} should not prove report-in`);
+    assert(r.missing.length > 0, `${label} should say what is missing`);
+  }
+});
+
+Deno.test("own roof: the reader is why the family is not stuck at Allocated", () => {
+  // An own-template roof renders OUR PDF; there is no Prime form, so a typed
+  // portal capture can never arrive. Before R5 this card could only ever be
+  // Allocated. This asserts the gap is real, not hypothetical.
+  const proved = ownRoofInput({
+    status: "submitted",
+    cycle_number: 1,
+    report_doc_id: "doc-1",
+  });
+  assertEquals(deriveSesStageV2(proved).stage, "trade_report_in");
+  // The same card judged the ordinary-roof way, with zero portal captures.
+  assertEquals(
+    deriveMakesafeEvidenceStage(proved as any).status,
+    "allocated",
+  );
+});
+
+Deno.test("own roof: no other family consults the own-roof draft", () => {
+  // A stray draft on a physical or ordinary-roof card must change nothing.
+  for (
+    const family of [
+      "physical_makesafe",
+      "ordinary_roof_portal",
+      "assessment_quote",
+    ]
+  ) {
+    const withDraft = deriveSesStageV2(input({
+      ses_family: family,
+      evidence: {
+        assignments: [{ id: "a1" }],
+        ownRoofDraft: {
+          status: "submitted",
+          cycle_number: 1,
+          report_doc_id: "d",
+        },
+        documents: { report: true },
+      },
+    }));
+    const without = deriveSesStageV2(input({
+      ses_family: family,
+      evidence: { assignments: [{ id: "a1" }], documents: { report: true } },
+    }));
+    assertEquals(withDraft.stage, without.stage);
+    assertEquals(withDraft.stage, "allocated");
+  }
+});
+
+Deno.test("own roof: M1's published output is untouched by the own-roof draft", () => {
+  // R5 is a shadow-engine change. M1 proves a roof card by portal capture only.
+  const facts = ownRoofInput({
+    status: "submitted",
+    cycle_number: 1,
+    report_doc_id: "doc-1",
+  });
+  const m1 = computeMakesafeStatus({ ...facts, displayedStatus: "allocated" });
+  const bare = computeMakesafeStatus({
+    ...input({
+      ...OWN_ROOF,
+      evidence: { assignments: [{ id: "a1" }], documents: { report: true } },
+    }),
+    displayedStatus: "allocated",
+  });
+  assertEquals(m1.status, bare.status);
+  assertEquals(m1.status, "allocated");
+});
+
+Deno.test("own roof: the loader only asks for drafts when such a card exists", () => {
+  // The read is conditional, which is what makes this release free at 0 cards.
+  const physicalOnly = [baseRow({ id: "j1" }), baseRow({ id: "j2" })];
+  assertEquals(ownTemplateRoofJobIdsForBoard(physicalOnly), []);
+  const withOwnRoof = [
+    baseRow({ id: "j1" }),
+    baseRow({
+      id: "j2",
+      metadata: {
+        makesafe_job_family: "roof_report",
+        own_template_requested: true,
+      },
+    }),
+  ];
+  assertEquals(ownTemplateRoofJobIdsForBoard(withOwnRoof), ["j2"]);
+});
+
+Deno.test("own roof: the reader names what is missing, per fact", () => {
+  const r = sesStageOwnRoofReportIn(
+    ownRoofInput({ status: "draft", cycle_number: 2, report_doc_id: null }, {
+      detail: { cycle_number: 1 },
+    }) as any,
+  );
+  assertEquals(r.satisfied, false);
+  assertEquals(r.missing.length, 3);
 });

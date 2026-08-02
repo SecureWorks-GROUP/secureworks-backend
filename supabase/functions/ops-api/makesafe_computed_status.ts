@@ -91,6 +91,19 @@ export interface MakesafeStatusEvidence {
   };
   swmsRequired?: boolean;
   hold?: MakesafeStatusHold | null;
+  /**
+   * R5 — the current-cycle own-template roof report draft, when the card is an
+   * own-template roof. `computeMakesafeStatus` IGNORES this: M1 proves a roof
+   * card through Prime portal captures only, and its published value must stay
+   * byte-identical. The corrected shadow engine reads it because an
+   * own-template roof produces OUR report, so there is no Prime form to observe
+   * and a portal capture can never arrive for one.
+   */
+  ownRoofDraft?: {
+    status?: string | null;
+    cycle_number?: number | null;
+    report_doc_id?: string | null;
+  } | null;
 }
 
 export interface MakesafeStatusInput {
@@ -397,6 +410,19 @@ export interface MakesafeEvidenceStageResult {
  */
 export function deriveMakesafeEvidenceStage(
   input: MakesafeStatusInput,
+  /**
+   * R5 — an optional replacement for the report-in test ONLY.
+   *
+   * This is the seam that lets the corrected shadow engine prove an
+   * own-template roof card from its submitted draft without either engine
+   * keeping a second copy of the ladder. `computeMakesafeStatus` never passes
+   * it, so M1's output is unchanged by construction; the rest of the ladder
+   * (docs-ready, allocation, new) stays shared and is evaluated exactly once.
+   */
+  overrides?: {
+    reportIn?: { satisfied: boolean; missing: string[] };
+    reportInReason?: string;
+  },
 ): MakesafeEvidenceStageResult {
   const kind = classifyMakesafeJobType(input.detail, input.job);
   const hold = input.evidence?.hold || null;
@@ -408,12 +434,13 @@ export function deriveMakesafeEvidenceStage(
     return { status: "report_ready", reasons, missing };
   }
 
-  const reportIn = reportInEvidence(input);
+  const reportIn = overrides?.reportIn ?? reportInEvidence(input);
   if (reportIn.satisfied) {
     reasons.push(
-      kind === "physical_makesafe"
-        ? "current-cycle submitted service report and completion photo floor are present"
-        : "all required typed portal captures are recorded done",
+      overrides?.reportInReason ??
+        (kind === "physical_makesafe"
+          ? "current-cycle submitted service report and completion photo floor are present"
+          : "all required typed portal captures are recorded done"),
     );
     if (hold) reasons.push(`hold badge: ${hold.reason_code}`);
     return { status: "trade_report_in", reasons, missing };

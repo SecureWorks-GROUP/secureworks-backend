@@ -531,3 +531,65 @@ reaches a test file. The field is now `unknown`, which is what the gate's own
 fail-closed branch already believed — it proves the value is a non-empty string
 before using it. A narrower type was the declaration telling callers something
 the runtime does not.
+
+## Release 5 — the own-template roof reader
+
+**Behaviour change:** exactly one — an own-template roof card proves report-in
+from its own submitted draft instead of a Prime portal capture. Zero placements
+move, and zero shadow values move: there are no own-template roof cards.
+
+**Why the family needed its own reader.** An own-template roof is where
+SecureWorks renders its OWN branded PDF from a trade-filled template. There is
+no Prime form for the portal reader to observe, so a typed portal capture can
+never arrive for one of these cards — judged the ordinary-roof way it could
+only ever sit at Allocated, however complete its paperwork. A test asserts that
+gap directly: the same fully-proved card returns `trade_report_in` from the
+corrected engine and `allocated` from the shared ladder without the override.
+
+**The rule, all three facts required** (design section 1.2): the current-cycle
+own-roof draft is `submitted`, its submitted cycle matches the card's cycle, and
+its `report_doc_id` is attached as the `roof_report` document. `report_doc_id`
+being present is deliberately NOT treated as the document being attached — a
+draft can name a document id that never became a `job_documents` row, and
+evidence that was rendered but never landed is not proof.
+
+**One ladder, not two.** `deriveMakesafeEvidenceStage` gained an optional
+`overrides.reportIn` seam. `computeMakesafeStatus` never passes it, so M1's
+output is unchanged by construction, and docs-ready / allocation / new stay
+shared and are evaluated exactly once. The corrected engine substitutes the
+report-in test for `own_template_roof` alone; a test asserts a stray own-roof
+draft on a physical, ordinary-roof or assessment card changes nothing.
+
+**The loader read is conditional, so this release is free today.**
+`ownTemplateRoofJobIdsForBoard` decides whether to query
+`makesafe_roof_report_drafts` at all. With zero own-template cards the board
+issues NO additional query; it starts costing one chunked read the moment the
+first such card exists, and never for the other 407. The loader and the row
+builder ask the same canonical family question through one exported helper so
+they cannot drift. The read fails closed with a logged error, exactly as the
+portal capture read above does.
+
+**Measured (2026-08-02T09:37:52Z)**, base `bcfa6cd`, 407 cards, 13 SELECT-only
+Management API queries.
+
+| Fact | Design expected | Measured |
+|---|---:|---:|
+| Own-template roof cards | 0 | **0** |
+| Live placements moved | 0 | **0** |
+| Pure `derived_stage_v2` changes | 0 | **0** |
+| Prospective corrected moves | 35 -> 35 | **35 -> 35** |
+| Family corrections | 136 | **136** |
+| Cutover gate | blocked on `SWMS-261059` | **unchanged** |
+
+The A/B is byte-clean: `legacy_canonical_stage`, `legacy_stage`, `m1_published`,
+`m1_pure`, `post_cutover_stage`, `post_cutover_overlay_binds`, `stage_v2`,
+`stage_v2_post_overlay`, `stage_v2_family`, `stage_v2_family_kind` and the whole
+`overlay` object are ALL identical on all 407 cards. This release completes the
+engine rather than changing behaviour, which is what the captain confirmed to
+expect.
+
+Like Release 2's missing-timestamp refusal and Release 4's `family_unknown`,
+this reader is live but unexercised on production data. It is proven by test,
+not by a production card — 8 tests covering the proved case, each of the three
+required facts failing independently, the never-attached document, family
+isolation, M1 isolation, and the loader's conditional read.
