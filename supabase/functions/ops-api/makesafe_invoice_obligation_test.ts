@@ -2,6 +2,8 @@
 import {
   assert,
   assertEquals,
+  assertMatch,
+  assertNotEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { prepareSesInvoiceObligation } from "./makesafe_invoice_obligation.ts";
 import type { SesInvoiceDuplicateResolution } from "./makesafe_invoice_duplicate_resolver.ts";
@@ -165,4 +167,33 @@ Deno.test("unproved price produces concrete refusal and no executable revision",
     "The current evidence does not prove the invoice price.",
   );
   assertEquals(result.revision.blockers, result.blockers);
+});
+
+Deno.test("the production branch mints an id without an injected allocator", async () => {
+  // Regression: `(input.allocate_uuid || crypto.randomUUID)()` detached the native method from its
+  // Crypto receiver and threw "Illegal invocation" in Deno. Every other test in this file injects
+  // `allocate_uuid`, so the branch production actually takes was never exercised and the bug
+  // reached prepare_ses_invoice_obligation live, failing all four cards with HTTP 500.
+  const input = base();
+  delete (input as { allocate_uuid?: unknown }).allocate_uuid;
+  const result = await prepareSesInvoiceObligation(input);
+  assertEquals(result.state, "prepared");
+  const minted = String(result.obligation.id);
+  assertMatch(
+    minted,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    `expected a real UUID, got ${minted}`,
+  );
+  assertEquals(result.proposal.invoice_obligation_id, minted);
+
+  // Two runs without an allocator must mint two distinct obligations, so the fix cannot be a
+  // constant standing in for the native generator.
+  const again = await prepareSesInvoiceObligation(
+    (() => {
+      const other = base();
+      delete (other as { allocate_uuid?: unknown }).allocate_uuid;
+      return other;
+    })(),
+  );
+  assertNotEquals(again.obligation.id, minted);
 });
