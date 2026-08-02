@@ -602,6 +602,30 @@ is privileged-only (api_key / admin-owner jwt), NOT routine-callable; `queue` is
 read (routine-allowed). Report-ready reuses `selectDraftPackDueJobIds` so the queue
 and the reporting run agree on "not yet drafted".
 
+## U4 Generates Its Own SWMS; It Never Reuses An Attached One
+
+`renderSesSwmsPdf` (`ses_swms_render.ts`) is the sealed deterministic renderer,
+bound directly as `renderSwmsArtifact` in
+`createSesAssemblerRuntimeDependencies`. Reusing a staff-attached SWMS PDF was
+rejected in #432 (a stale attachment violates the current-cycle input contract),
+which is why `resolveSwmsArtifact` still exists but is consumed by nothing —
+leave it alone, it backs a pinned defect test, and do not re-enable it.
+
+`buildSesSwmsGenerationPlan` is the fact gate and runs BEFORE the renderer: eight
+real facts (crew included), each provenance-stamped by `sourcedText`, no default
+and no carry-over. Missing any one is `swms_generation_facts_missing` and the
+renderer is never called — that refusal is the safety guarantee, so never
+"recover" it with a placeholder. Requirement scope lives in `swmsDecision` +
+`ses_family_matrix.ts` (`swms_policy: always` for MLB only), not in the renderer;
+wiring or changing the renderer must never widen which cards need a SWMS.
+
+Because the dependency is optional and every preparer test stubs it, an absent
+binding is invisible to the whole suite and surfaces only in production as
+`swms_generation_capability_unavailable`. Tests asserting a runtime capability
+must therefore drive the real factory, not a stub. Evidence, the production
+measurement and the regression/control pair:
+`docs/evidence/ses-swms-renderer-runtime-binding-2026-08-02.md`.
+
 ## Portal Completion Has Two Producers
 
 The trade roof-report confirmation contract, including its producer boundaries,

@@ -21,8 +21,11 @@ import {
   SES_ASSEMBLER_VERSION,
   SES_INPUT_CONTRACT_VERSION,
   sesSha256,
+  sesSha256Bytes,
 } from "./ses_docket_envelope.ts";
 import { SES_FAMILY_MATRIX_VERSION } from "./ses_family_matrix.ts";
+import { buildSesSwmsGenerationPlan } from "./ses_swms_template.ts";
+import { renderSesSwmsPdf, sesSwmsRenderHash } from "./ses_swms_render.ts";
 import {
   prepare_ses_docket_revision,
   SES_ASSESSMENT_RECIPE_VERSION,
@@ -2748,3 +2751,193 @@ Deno.test("live adapter resolves only the exact synthetic-livefire company profi
     "UNKNOWN",
   );
 });
+
+// The ops-api runtime, not a stub, must supply the deterministic SWMS renderer.
+// #432 built `renderSesSwmsPdf` and added its import here, but never bound
+// `renderSwmsArtifact` in `createSesAssemblerRuntimeDependencies`; #433's lint
+// pass then removed the now-unused import. Every preparer test stubs that
+// dependency (see the `dependencies()` helper in the preparer suite), so the
+// whole suite stayed green while production refused every SWMS-required card
+// with `swms_generation_capability_unavailable`. These two tests exercise the
+// real factory instead: the first proves the runtime renders, the second proves
+// a card whose crew is genuinely unrecorded still blocks.
+function mlbPhysicalSwmsSnapshot(
+  options: { crew: "assigned_user" | "none" },
+): SesAssemblerLiveSnapshot {
+  const live = snapshot();
+  live.job.metadata.makesafe_job_family = "general_makesafe";
+  live.detail!.report_type = null;
+  live.detail!.external_links = [];
+  // Seeded authority, exactly as the spine test builds it: without it the
+  // builder reference resolves empty and the card blocks on identity long
+  // before the SWMS branch is reached.
+  live.identity_revision = {
+    authority_kind: "legacy_job_record",
+    source_instruction_id: "legacy-job:5383e3c4-eb32-41cf-8e3c-63a754c16d05",
+    source_version: 1,
+    source_content_hash: `sha256:${"a".repeat(64)}`,
+    lineage_id: "5383e3c4-eb32-41cf-8e3c-63a754c16d05",
+    effective_case_id: null,
+  };
+  live.reports[0].submitted_at = "2026-07-27T01:00:00.000Z";
+  live.reports[0].checklist_json = {
+    works_completed: "Made the storm damaged patio area safe.",
+    attendance_date: "2026-07-27",
+    arrival_time: "08:30",
+    site_contact: "Site representative",
+    labour_hours: 3,
+    trade_count: 1,
+    // Deliberately no crew_name and no crew: these live cards record the
+    // attending trade only as the assigned user, exactly like the board.
+  };
+  live.assignments[0].crew_name = null;
+  live.assignments[0].scheduled_date = "2026-07-27";
+  live.assignments[0].arrived_at = "2026-07-27T08:30:00.000Z";
+  live.assignments[0].users = options.crew === "assigned_user"
+    ? { name: "Field crew" }
+    : null;
+  live.media = [{
+    id: "6a2f1b4c-9d3e-4f10-8b57-000000000001",
+    job_id: live.job.id,
+    type: "photo",
+    phase: "completion",
+    attendance_cycle_id: live.detail!.attendance_cycle_id,
+    cycle_attribution: "bound",
+    label: "Completion photo 1",
+    size: 1024,
+    storage_url: "https://storage.example.test/completion-1.jpg",
+  }];
+  return live;
+}
+
+function swmsPreparationDependencies(live: SesAssemblerLiveSnapshot) {
+  const input = buildSesAssemblerInput(live);
+  // Only the network-bound dependencies are replaced. `renderSwmsArtifact` is
+  // deliberately NOT overridden: whatever the factory supplies is what runs.
+  return {
+    input,
+    overrides: {
+      resolveSourceArtifacts: async () => sourceResolver(input),
+      resolvePhotoArtifacts: async () =>
+        input.cycle_facts.photos.map((photo) => ({
+          photo_id: photo.id,
+          source_pointer: photo.path_or_key,
+          file_name: `${photo.id}.jpg`,
+          media_type: "image/jpeg" as const,
+          bytes: new Uint8Array([255, 216, 255, 224]),
+        })),
+      renderPhysicalReport: async () => ({
+        file_name: "Make Safe Report.pdf",
+        media_type: "application/pdf" as const,
+        bytes: new Uint8Array([37, 80, 68, 70, 1]),
+        render_hash: "physical-render-v1",
+      }),
+      persist: async () => ({ committed_at: "2026-07-27T02:00:00.000Z" }),
+      now: () => new Date("2026-07-27T02:00:00.000Z"),
+    },
+  };
+}
+
+Deno.test(
+  "ops-api runtime dependencies supply the deterministic SWMS renderer",
+  async () => {
+    const live = mlbPhysicalSwmsSnapshot({ crew: "assigned_user" });
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live),
+      { org_id: "org-test", created_by: "u4-swms-runtime" },
+    );
+    // The binding itself. On the pre-fix shape this is `undefined` and the
+    // preparer emits `swms_generation_capability_unavailable`.
+    assert(
+      dependencies.renderSwmsArtifact,
+      "createSesAssemblerRuntimeDependencies must supply renderSwmsArtifact",
+    );
+
+    const { input, overrides } = swmsPreparationDependencies(live);
+    const response = await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: live.job.id },
+        idempotency_key: "u4-swms-runtime-renderer",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: false,
+        force_refresh: true,
+      },
+      { ...dependencies, ...overrides },
+    );
+    const result = response.results[0];
+    assert(
+      !blockerCodes(result).includes("swms_generation_capability_unavailable"),
+      `renderer must be available, got: ${blockerCodes(result).join(", ")}`,
+    );
+
+    const artifact = result.artifacts.find((item) =>
+      item.role === "swms_artifact"
+    );
+    assert(artifact, "a SWMS-required card must bind a generated SWMS");
+    const swmsState = result.envelope.v2.items.swms_artifact;
+    assertEquals(swmsState.state, "ready");
+    if (swmsState.state !== "ready") throw new Error("SWMS must be ready");
+    assertStringIncludes(swmsState.evidence, "generated:ARTIFACTS/SWMS");
+
+    // The docket must bind the renderer's own bytes, hashed by the renderer's
+    // own contract - not a re-render and not a staff-attached PDF.
+    const planned = buildSesSwmsGenerationPlan(input);
+    assert(planned.ok, "fixture must produce a complete generation plan");
+    assertEquals(
+      artifact.metadata.render_hash,
+      await sesSwmsRenderHash(planned.plan),
+    );
+    const rendered = await renderSesSwmsPdf(planned.plan);
+    assertEquals(artifact.bytes, rendered.bytes);
+    assertEquals(artifact.content_hash, await sesSha256Bytes(rendered.bytes));
+
+    // A SWMS is a safety document: it must name the crew actually recorded
+    // against this attendance, sourced from the assignment's own user record.
+    assertEquals(planned.plan.job.crew, "Field crew");
+    assertEquals(
+      planned.plan.provenance.job_fact_sources.crew,
+      "job_assignments.users.name",
+    );
+    const pdfText = new TextDecoder("latin1").decode(rendered.bytes);
+    assertEquals([...pdfText.matchAll(/\/Type\s*\/Page\b/g)].length, 4);
+  },
+);
+
+Deno.test(
+  "CONTROL: a card with genuinely no recorded crew still blocks, renderer or not",
+  async () => {
+    const live = mlbPhysicalSwmsSnapshot({ crew: "none" });
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live),
+      { org_id: "org-test", created_by: "u4-swms-control" },
+    );
+    const { input, overrides } = swmsPreparationDependencies(live);
+
+    // The fact gate refuses before the renderer is ever reached, so this holds
+    // identically on the pre-fix and post-fix shapes. That is the point of a
+    // control: wiring the renderer must not manufacture a crew.
+    const planned = buildSesSwmsGenerationPlan(input);
+    assertEquals(planned.ok, false);
+    if (planned.ok) throw new Error("crewless card must not produce a plan");
+    assertEquals(planned.reason_code, "swms_generation_facts_missing");
+    assert((planned.facts.missing_facts as string[]).includes("crew"));
+
+    const response = await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: live.job.id },
+        idempotency_key: "u4-swms-runtime-control",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: false,
+        force_refresh: true,
+      },
+      { ...dependencies, ...overrides },
+    );
+    const result = response.results[0];
+    assert(blockerCodes(result).includes("swms_generation_facts_missing"));
+    assertEquals(
+      result.artifacts.find((item) => item.role === "swms_artifact"),
+      undefined,
+    );
+    assertEquals(result.envelope.v2.items.swms_artifact.state, "blocked");
+  },
+);
