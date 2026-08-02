@@ -378,19 +378,16 @@ cards and the same certified 71.
 
 ## Where this leaves the next task
 
-Releases 4-6 and 8 are the remaining code-only/shadow work and can be picked up
-without re-deriving anything above:
+After Release 4, Releases 5, 7 and 8 remain as separate follow-up work and can
+be picked up without re-deriving anything above:
 
-- **Release 4** — replace `classifyMakesafeJobType`'s three-kind guess with the
-  canonical `ses_family` already on the row (7 real families plus unknown). 136
-  diagnostic job-kind corrections expected, 0 column changes.
 - **Release 5** — own-template roof current-cycle submitted-draft reader. 0
   current cards.
-- **Release 6** — land the portal capture reader. 0 capture rows exist, so 0
-  immediate evidence-driven moves; the rule seam covers 111 roof/assessment
-  cards.
 - **Release 8** — overlay re-anchor metadata and the no-op attestation read
   path. No ledger rows.
+
+Release 6, the portal capture reader, is explicitly out of scope for this
+release and is owned by another crew.
 
 Release 7 (Docs Ready authority) and Release 9 (the nine-row re-anchor apply)
 are both captain-gated and are not code-only.
