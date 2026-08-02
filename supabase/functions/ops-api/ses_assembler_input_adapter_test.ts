@@ -94,6 +94,12 @@ function changedPaths(
   return [path];
 }
 
+function executableSql(sql: string): string {
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, " "))
+    .replace(/--[^\n]*/g, "");
+}
+
 function sanitizedAssessmentSnapshot(args: {
   jobNumber: string;
   reportType: string | null;
@@ -127,19 +133,19 @@ function sanitizedAssessmentSnapshot(args: {
           kind: "assessment_report",
           label: "Assessment report",
           source: "sanitized",
-          url: `https://portal.example.test/${suffix}/assessment`,
+          url: `https://portal.example.test/share/${suffix}/assessment`,
         },
         {
           kind: args.photoLinkKind,
           label: "Photos",
           source: "sanitized",
-          url: `https://portal.example.test/${suffix}/photos`,
+          url: `https://portal.example.test/share/${suffix}/photos`,
         },
         {
           kind: "quote",
           label: "Quote",
           source: "sanitized",
-          url: `https://portal.example.test/${suffix}/quote`,
+          url: `https://portal.example.test/share/${suffix}/quote`,
         },
       ],
       makesafe_companies: {
@@ -630,7 +636,7 @@ Deno.test(
       delivery_email_post_id: "mail-0835",
       delivery_email_content_sha256:
         "0be5b5d7d6c7d921a3976a5332b326989e83cf36cb2653b6c349ac68ef4bceba",
-      delivery_scope_phrase: "displaced Hardie panels stacked safely",
+      delivery_scope_phrase: "Temporary fencing installed",
       photo_scope_phrase: "displaced Hardie panels stacked safely",
       photo_media_id: "photo-26837",
       photo_content_hash:
@@ -712,6 +718,8 @@ Deno.test(
       },
     });
 
+    const acceptedInvoiceDescription =
+      live.bundle_invoices[0].line_items[0].Description;
     live.bundle_invoices[0].line_items[0].Description =
       "Temporary fencing installed on sibling card only";
     const rejected = buildSesAssemblerInput(live);
@@ -726,6 +734,30 @@ Deno.test(
       rejected.sibling_bundle_evidence.coverage_failures.includes(
         "invoice_line_scope_not_covered",
       ),
+    );
+
+    live.bundle_invoices[0].line_items[0].Description =
+      acceptedInvoiceDescription;
+    const beforeDeliveryDelta = structuredClone(live);
+    live.bundle_emails[0].body_preview =
+      "Photos show displaced Hardie panels stacked safely.";
+    assertEquals(changedPaths(beforeDeliveryDelta, live), [
+      "bundle_emails[0].body_preview",
+    ]);
+    const deliveryRejected = buildSesAssemblerInput(live);
+    assertEquals(
+      deliveryRejected.sibling_bundle_evidence?.status,
+      "scope_evidence_missing",
+    );
+    if (
+      deliveryRejected.sibling_bundle_evidence?.status !==
+        "scope_evidence_missing"
+    ) {
+      throw new Error("expected delivery-scope blocker");
+    }
+    assertEquals(
+      deliveryRejected.sibling_bundle_evidence.coverage_failures,
+      ["delivery_scope_not_covered"],
     );
   },
 );
@@ -821,6 +853,12 @@ Deno.test(
         import.meta.url,
       ),
     );
+    const executable = executableSql(migration);
+    assert(
+      /\bINSERT\s+INTO\s+public\.makesafe_sibling_bundle_binding_revisions\s*\([\s\S]*?\)\s*VALUES\s*\([\s\S]*?'c3afc061-0d4a-43ff-8309-0b8b512e307a'[\s\S]*?'02f614a4-09a7-422e-9381-c89a44aceccd'[\s\S]*?\);/i
+        .test(executable),
+      "the reviewed reciprocal binding must be an executable INSERT, not a comment or prose token",
+    );
     for (
       const required of [
         "makesafe_sibling_bundle_binding_revisions",
@@ -840,8 +878,10 @@ Deno.test(
       assertStringIncludes(migration, required);
     }
     assert(
-      migration.indexOf("IF NOT EXISTS (\n    SELECT 1\n    FROM public.jobs") <
-        migration.indexOf(
+      executable.indexOf(
+        "IF NOT EXISTS (\n    SELECT 1\n    FROM public.jobs",
+      ) <
+        executable.indexOf(
           "INSERT INTO public.makesafe_sibling_bundle_binding_revisions",
         ),
     );
@@ -857,14 +897,14 @@ Deno.test(
       false,
     );
     assert(
-      migration.indexOf(
+      executable.indexOf(
         "INSERT INTO public.makesafe_sibling_bundle_binding_revisions",
       ) <
-        migration.indexOf("IF v_photo_match_count = 0 THEN"),
+        executable.indexOf("IF v_photo_match_count = 0 THEN"),
     );
     assert(
-      migration.indexOf("IF v_photo_match_count = 0 THEN") <
-        migration.indexOf(
+      executable.indexOf("IF v_photo_match_count = 0 THEN") <
+        executable.indexOf(
           "INSERT INTO public.makesafe_sibling_evidence_claims",
         ),
     );
@@ -1102,6 +1142,73 @@ Deno.test(
       persisted.evidence_revision_id,
       live.portal_captures[0].id,
     );
+
+    const captureRequest = {
+      job_id: live.job.id,
+      docket_id: "docket-hash-cycle-controls",
+      builder_reference: input.source.builder_reference,
+      role: "roof_report" as const,
+      url: sourceUrl,
+      idempotency_key: "capture-hash-cycle-controls",
+    };
+    const hashMismatchLive = structuredClone(live);
+    hashMismatchLive.portal_captures[0].makesafe_content_hash = `sha256:${
+      "c".repeat(64)
+    }`;
+    assertEquals(
+      changedPaths(
+        live.portal_captures[0],
+        hashMismatchLive.portal_captures[0],
+      ),
+      ["makesafe_content_hash"],
+    );
+    const hashMismatchDependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(hashMismatchLive, {
+        [storagePath]: screenshotBytes,
+      }),
+      { org_id: live.job.org_id, created_by: "u4-regression" },
+    );
+    assert(hashMismatchDependencies.capturePortal);
+    await hashMismatchDependencies.resolveInput({
+      mode: "job_id",
+      job_id: live.job.id,
+    });
+    const hashMismatch = await hashMismatchDependencies.capturePortal(
+      captureRequest,
+    );
+    assertEquals(hashMismatch.status, "invalid");
+    assertStringIncludes(
+      hashMismatch.signal,
+      "failed its aggregate content-hash check",
+    );
+
+    const staleCycleLive = structuredClone(live);
+    const staleCycleContent: SesPortalCaptureRevisionContent = {
+      ...content,
+      attendance_cycle_id: "stale-cycle",
+    };
+    staleCycleLive.portal_captures[0].attendance_cycle_id =
+      staleCycleContent.attendance_cycle_id;
+    staleCycleLive.portal_captures[0].makesafe_content_hash =
+      await sesPortalCaptureRevisionHash(staleCycleContent);
+    assertEquals(
+      changedPaths(live.portal_captures[0], staleCycleLive.portal_captures[0]),
+      ["attendance_cycle_id", "makesafe_content_hash"],
+    );
+    const staleCycleDependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(staleCycleLive, { [storagePath]: screenshotBytes }),
+      { org_id: live.job.org_id, created_by: "u4-regression" },
+    );
+    assert(staleCycleDependencies.capturePortal);
+    await staleCycleDependencies.resolveInput({
+      mode: "job_id",
+      job_id: live.job.id,
+    });
+    const staleCycle = await staleCycleDependencies.capturePortal(
+      captureRequest,
+    );
+    assertEquals(staleCycle.status, "missing");
+    assertStringIncludes(staleCycle.signal, "attendance_cycle_id=");
   },
 );
 
@@ -1507,6 +1614,34 @@ Deno.test(
     )).results[0];
     assertEquals(roofResult.invoice_proposal?.storeys, "double");
     assertEquals(roofResult.invoice_proposal?.subtotal_ex_gst, 350);
+
+    const cleanPricingBoundary = snapshot();
+    cleanPricingBoundary.job.metadata.makesafe_job_family =
+      "temp_fence_makesafe";
+    cleanPricingBoundary.job.scope_json = {};
+    cleanPricingBoundary.detail!.scope_json = {};
+    cleanPricingBoundary.detail!.report_type = null;
+    cleanPricingBoundary.detail!.external_links = [];
+    cleanPricingBoundary.reports[0].checklist_json = {
+      works_completed: "Installed temporary fencing.",
+    };
+    assertEquals(
+      buildSesAssemblerInput(cleanPricingBoundary).cycle_facts
+        .hours_and_materials,
+      null,
+    );
+    const forbiddenPricing = structuredClone(cleanPricingBoundary);
+    forbiddenPricing.job.pricing_json = {
+      quote: { panel_count: 99 },
+    };
+    assertEquals(changedPaths(cleanPricingBoundary, forbiddenPricing), [
+      "job.pricing_json",
+    ]);
+    assertEquals(
+      buildSesAssemblerInput(forbiddenPricing).cycle_facts.hours_and_materials,
+      null,
+      "unsanctioned pricing_json must not become a structured work-order fact",
+    );
   },
 );
 
@@ -1523,11 +1658,20 @@ Deno.test(
       input.routing_seed.invoice_to,
       "bunbury@mlbuilders.com.au",
     );
+
+    const perth = structuredClone(live);
+    perth.job.site_suburb = "Perth";
+    assertEquals(changedPaths(live, perth), ["job.site_suburb"]);
+    const perthInput = buildSesAssemblerInput(perth);
+    assert(
+      perthInput.routing_seed.invoice_to !== input.routing_seed.invoice_to,
+      "a non-South-West suburb must not inherit the South-West invoice route",
+    );
   },
 );
 
 Deno.test(
-  "physical U4 dry-run blocks instead of rendering without a canonical builder reference",
+  "physical U4 isolates a missing canonical builder reference from an otherwise valid input spine",
   async () => {
     const live = snapshot();
     live.job.metadata.makesafe_job_family = "general_makesafe";
@@ -1549,48 +1693,372 @@ Deno.test(
         cycle_attribution: "bound",
       },
     ];
-    const input = buildSesAssemblerInput(live);
+    live.identity_revision = {
+      authority_kind: "legacy_job_record",
+      source_instruction_id: `legacy-job:${live.job.id}`,
+      source_version: 1,
+      source_content_hash: `sha256:${"a".repeat(64)}`,
+      lineage_id: live.job.id,
+      effective_case_id: null,
+    };
+    const validInput = buildSesAssemblerInput(live);
+    assert(validInput.source.builder_reference);
+    const missingReferenceInput = structuredClone(validInput);
+    missingReferenceInput.source.builder_reference = "";
+    assertEquals(changedPaths(validInput, missingReferenceInput), [
+      "source.builder_reference",
+    ]);
     let renderCalls = 0;
-    const response = await prepare_ses_docket_revision(
-      {
-        selection: { mode: "job_id", job_id: input.identity.job_id },
-        idempotency_key: "physical-missing-reference",
+    const run = async (
+      input: ReturnType<typeof buildSesAssemblerInput>,
+      idempotencyKey: string,
+    ) =>
+      await prepare_ses_docket_revision(
+        {
+          selection: { mode: "job_id", job_id: input.identity.job_id },
+          idempotency_key: idempotencyKey,
+          assembler_version: SES_ASSEMBLER_VERSION,
+          dry_run: true,
+          force_refresh: true,
+        },
+        {
+          resolveInput: async () => input,
+          resolveSourceArtifacts: async () => sourceResolver(input),
+          resolvePhotoProofs: async () => [
+            {
+              photo_id: input.cycle_facts.photos[0].id,
+              source_pointer: input.cycle_facts.photos[0].path_or_key,
+              file_name: "completion.jpg",
+              media_type: "image/jpeg",
+              content_hash:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              size_bytes: 3,
+            },
+          ],
+          renderPhysicalReport: async () => {
+            renderCalls++;
+            throw new Error("dry-run must not render the physical report");
+          },
+          renderSwmsArtifact: async () => ({
+            file_name: "SWMS.pdf",
+            media_type: "application/pdf",
+            bytes: new Uint8Array([37, 80, 68, 70]),
+          }),
+          now: () => new Date("2026-07-27T08:00:00.000Z"),
+        },
+      );
+
+    const valid = await run(validInput, "physical-reference-positive-control");
+    const missing = await run(
+      missingReferenceInput,
+      "physical-missing-reference",
+    );
+    const referenceReason =
+      "Builder reference is absent from the canonical source instruction.";
+    assertEquals(
+      valid.results[0].blockers.some((blocker) =>
+        blocker.reason === referenceReason
+      ),
+      false,
+    );
+    assertEquals(missing.results[0].state, "blocked");
+    assertEquals(renderCalls, 0);
+    assertEquals(
+      missing.results[0].blockers.filter((blocker) =>
+        blocker.reason === referenceReason
+      ).length,
+      1,
+    );
+  },
+);
+
+Deno.test(
+  "artifact fetch failures surface typed source and photo degradation instead of clean absence",
+  async () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.identity_revision = {
+      authority_kind: "legacy_job_record",
+      source_instruction_id: `legacy-job:${live.job.id}`,
+      source_version: 1,
+      source_content_hash: `sha256:${"a".repeat(64)}`,
+      lineage_id: live.job.id,
+      effective_case_id: null,
+    };
+    live.reports[0].checklist_json = {
+      damage_description: "Patio roof damage",
+      work_done: "Removed loose material",
+      labour_hours: 2,
+      trade_count: 2,
+    };
+    live.media = [{
+      id: "degradation-photo-1",
+      job_id: live.job.id,
+      type: "photo",
+      phase: "completion",
+      attendance_cycle_id: live.detail!.attendance_cycle_id,
+      cycle_attribution: "bound",
+      storage_url: "https://storage.example.test/degradation-photo-1.jpg",
+    }];
+    const input = buildSesAssemblerInput(live);
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live),
+      { org_id: live.job.org_id, created_by: "u4-degradation-test" },
+    );
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.reject(new Error("storage unavailable"));
+    try {
+      const response = await prepare_ses_docket_revision(
+        {
+          selection: { mode: "job_id", job_id: input.identity.job_id },
+          idempotency_key: "artifact-fetch-degradation",
+          assembler_version: SES_ASSEMBLER_VERSION,
+          dry_run: true,
+          force_refresh: true,
+        },
+        dependencies,
+      );
+      const result = response.results[0];
+      assertEquals(result.state, "blocked");
+      assert(
+        result.blockers.some((blocker) =>
+          blocker.reason_code === "spine_missing_source" &&
+          blocker.reason.includes(
+            "Canonical source recovery did not return 1 referenced attachment",
+          )
+        ),
+      );
+      assert(
+        result.blockers.some((blocker) =>
+          blocker.reason_code === "trade_evidence_missing" &&
+          blocker.reason.includes(
+            "did not resolve to one safe, non-empty current-cycle proof",
+          )
+        ),
+      );
+      assertEquals(
+        result.artifacts.some((artifact) =>
+          artifact.role === "source_attachment" ||
+          artifact.role === "completion_photo_proof"
+        ),
+        false,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
+Deno.test(
+  "bundled report and photo fetch failures surface their typed unrecoverable blockers",
+  async () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.identity_revision = {
+      authority_kind: "legacy_job_record",
+      source_instruction_id: `legacy-job:${live.job.id}`,
+      source_version: 1,
+      source_content_hash: `sha256:${"a".repeat(64)}`,
+      lineage_id: live.job.id,
+      effective_case_id: null,
+    };
+    const siblingJobId = "sibling-job-degradation";
+    const reportDocumentId = "sibling-report-degradation";
+    const swmsDocumentId = "sibling-swms-degradation";
+    const photoId = "sibling-photo-degradation";
+    const photoHash = `sha256:${"b".repeat(64)}` as const;
+    live.bundle_documents = [{
+      id: reportDocumentId,
+      job_id: siblingJobId,
+      type: "makesafe_report",
+      file_url: "https://storage.example.test/sibling-report.pdf",
+    }, {
+      id: swmsDocumentId,
+      job_id: siblingJobId,
+      type: "swms",
+      file_url: "https://storage.example.test/sibling-swms.pdf",
+    }];
+    live.bundle_media = [{
+      id: photoId,
+      job_id: siblingJobId,
+      type: "photo",
+      label: "Completed temporary fencing",
+      notes: "",
+      makesafe_content_hash: photoHash,
+      storage_url: "https://storage.example.test/sibling-photo.jpg",
+    }];
+    const input = buildSesAssemblerInput(live);
+    input.cycle_facts.trade_report = null;
+    input.cycle_facts.photos = [];
+    input.sibling_bundle_evidence = {
+      status: "accepted",
+      bundle_id: "bundle-degradation",
+      claiming_binding: {
+        revision_id: "binding-forward",
+        recorded_by: "operator",
+        recorded_via: "test",
+        provenance: { source: "test" },
+      },
+      reverse_binding: {
+        revision_id: "binding-reverse",
+        recorded_by: "operator",
+        recorded_via: "test",
+        provenance: { source: "test" },
+      },
+      sibling: {
+        job_id: siblingJobId,
+        job_number: "SWMS-SIBLING",
+      },
+      coverage: {
+        invoice: {
+          invoice_id: "invoice-degradation",
+          invoice_number: "INV-DEGRADATION",
+          line_item_id: "line-degradation",
+          scope_phrase: "temporary fencing",
+        },
+        delivery: {
+          email_post_id: "mail-degradation",
+          content_sha256: "b".repeat(64),
+          scope_phrase: "temporary fencing",
+        },
+        photo: {
+          email_post_id: "mail-degradation",
+          content_sha256: "b".repeat(64),
+          scope_phrase: "temporary fencing",
+          media_id: photoId,
+          content_hash: photoHash,
+        },
+        report_document_id: reportDocumentId,
+        swms_document_id: swmsDocumentId,
+      },
+    };
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live),
+      { org_id: live.job.org_id, created_by: "u4-degradation-test" },
+    );
+    await dependencies.resolveInput({
+      mode: "job_id",
+      job_id: live.job.id,
+    });
+    assert(dependencies.resolveBundledReportArtifact);
+    assert(dependencies.resolveBundledPhotoArtifacts);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.reject(new Error("storage unavailable"));
+    try {
+      assertEquals(
+        await dependencies.resolveBundledReportArtifact(input),
+        null,
+      );
+      assertEquals(
+        await dependencies.resolveBundledPhotoArtifacts(input),
+        [],
+      );
+      const request = {
+        selection: { mode: "job_id" as const, job_id: input.identity.job_id },
         assembler_version: SES_ASSEMBLER_VERSION,
         dry_run: true,
         force_refresh: true,
-      },
-      {
-        resolveInput: async () => input,
-        resolveSourceArtifacts: async () => sourceResolver(input),
-        resolvePhotoProofs: async () => [
-          {
-            photo_id: input.cycle_facts.photos[0].id,
-            source_pointer: input.cycle_facts.photos[0].path_or_key,
-            file_name: "completion.jpg",
-            media_type: "image/jpeg",
-            content_hash:
-              "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            size_bytes: 3,
-          },
-        ],
-        renderPhysicalReport: async () => {
-          renderCalls++;
-          throw new Error(
-            "must not render without a canonical builder reference",
-          );
+      } as const;
+      const reportFailure = await prepare_ses_docket_revision(
+        {
+          ...request,
+          idempotency_key: "bundled-report-fetch-degradation",
         },
-        renderSwmsArtifact: async () => ({
-          file_name: "SWMS.pdf",
-          media_type: "application/pdf",
-          bytes: new Uint8Array([37, 80, 68, 70]),
-        }),
-        now: () => new Date("2026-07-27T08:00:00.000Z"),
-      },
-    );
+        {
+          ...dependencies,
+          resolveInput: async () => input,
+          resolveSourceArtifacts: async () => sourceResolver(input),
+        },
+      );
+      assert(
+        blockerCodes(reportFailure.results[0]).includes(
+          "sibling_evidence_artifact_unrecoverable",
+        ),
+      );
 
-    assertEquals(response.results[0].state, "blocked");
-    assertEquals(renderCalls, 0);
-    assert(blockerCodes(response.results[0]).includes("spine_missing_source"));
+      const photoFailure = await prepare_ses_docket_revision(
+        {
+          ...request,
+          idempotency_key: "bundled-photo-fetch-degradation",
+        },
+        {
+          ...dependencies,
+          resolveInput: async () => input,
+          resolveSourceArtifacts: async () => sourceResolver(input),
+          resolveBundledReportArtifact: async () => ({
+            file_name: "sibling-report.pdf",
+            media_type: "application/pdf",
+            bytes: new Uint8Array([37, 80, 68, 70]),
+          }),
+        },
+      );
+      assert(
+        blockerCodes(photoFailure.results[0]).includes(
+          "sibling_evidence_photo_artifact_unrecoverable",
+        ),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
+Deno.test(
+  "DEFECT DOCUMENTATION: stored-but-unrecoverable SWMS is indistinguishable from absent SWMS",
+  async () => {
+    // This pins a known defect, not correct behavior. resolveSwmsArtifact is
+    // unconsumed by prepare_ses_docket_revision, so neither null result can
+    // become explicit degradation evidence until a product tranche fixes it.
+    const stored = snapshot();
+    stored.documents.push({
+      id: "stored-swms",
+      job_id: stored.job.id,
+      type: "swms",
+      file_url: "https://storage.example.test/stored-swms.pdf",
+    });
+    const storedInput = buildSesAssemblerInput(stored);
+    const storedDependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(stored),
+      { org_id: stored.job.org_id, created_by: "u4-defect-test" },
+    );
+    await storedDependencies.resolveInput({
+      mode: "job_id",
+      job_id: stored.job.id,
+    });
+    assert(storedDependencies.resolveSwmsArtifact);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.reject(new Error("storage unavailable"));
+    let unrecoverable: Awaited<
+      ReturnType<NonNullable<typeof storedDependencies.resolveSwmsArtifact>>
+    >;
+    try {
+      unrecoverable = await storedDependencies.resolveSwmsArtifact(storedInput);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const absent = structuredClone(stored);
+    absent.documents = absent.documents.filter((row) => row.type !== "swms");
+    const absentInput = buildSesAssemblerInput(absent);
+    const absentDependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(absent),
+      { org_id: absent.job.org_id, created_by: "u4-defect-test" },
+    );
+    await absentDependencies.resolveInput({
+      mode: "job_id",
+      job_id: absent.job.id,
+    });
+    assert(absentDependencies.resolveSwmsArtifact);
+    const genuinelyAbsent = await absentDependencies.resolveSwmsArtifact(
+      absentInput,
+    );
+    assertEquals(unrecoverable, null);
+    assertEquals(genuinelyAbsent, null);
+    assertEquals(unrecoverable, genuinelyAbsent);
   },
 );
 

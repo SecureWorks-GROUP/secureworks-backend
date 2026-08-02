@@ -4,6 +4,7 @@ import { _resolveOpsApiAuthIntent } from "./index.ts";
 import {
   authorizeMakesafeTradeProjection,
   buildCanonicalMakesafeRows,
+  MAKESAFE_TRADE_PROJECTION_ROLES,
   type MakesafeBoardViewer,
   type MakesafeTradeProjectionAuthMode,
   projectTradeMakesafeBoard,
@@ -183,16 +184,18 @@ Deno.test("unknown signed-in role fails closed with 403", () => {
   );
 });
 
-Deno.test("every role value currently present in production is explicitly recognized", () => {
+Deno.test("the published trade projection role contract is exact and every listed role is recognized", () => {
   const expected: Record<string, string> = {
     admin: "all_makesafes",
+    owner: "all_makesafes",
+    ops_manager: "all_makesafes",
     crew: "allocated_only",
     estimator: "allocated_only",
     installer: "allocated_only",
     lead_installer: "allocated_only",
-    ops_manager: "all_makesafes",
     sales: "allocated_only",
   };
+  assertEquals([...MAKESAFE_TRADE_PROJECTION_ROLES], Object.keys(expected));
   for (const [role, visibility] of Object.entries(expected)) {
     const access = authorizeMakesafeTradeProjection("jwt", {
       userId: `user-${role}`,

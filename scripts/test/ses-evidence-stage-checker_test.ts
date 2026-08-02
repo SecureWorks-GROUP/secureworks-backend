@@ -91,6 +91,12 @@ Deno.test("read-only transport rejects every mutation method", () => {
 });
 
 Deno.test("allocated claim without an active assignment fails", () => {
+  const assigned = audit({
+    canonicalRow: { assignments: [{ status: "scheduled" }] },
+  });
+  assertEquals(assigned.evidence_stage, "allocated");
+  assertEquals(assigned.findings, []);
+
   const result = audit({});
   assertEquals(result.evidence_stage, "new");
   assertEquals(
@@ -113,6 +119,25 @@ Deno.test("physical current-cycle report plus five photos derives Trade Report I
   });
   assertEquals(result.evidence_stage, "trade_report_in");
   assertEquals(result.findings, []);
+
+  const belowFloor = audit({
+    canonicalRow: {
+      canonical_stage: "trade_report_in",
+      assignments: [{ status: "scheduled" }],
+      computed_status_evidence: {
+        has_submitted_service_report: true,
+        has_current_portal_capture: false,
+      },
+      report: { photo_count: 4 },
+    },
+  });
+  assertEquals(belowFloor.evidence_stage, "allocated");
+  assertEquals(
+    belowFloor.findings.some((finding) =>
+      finding.code === "missing_completion_photos"
+    ),
+    true,
+  );
 });
 
 Deno.test("durably sent authorised closeout stays terminal while missing docs remain visible", () => {
@@ -140,6 +165,27 @@ Deno.test("durably sent authorised closeout stays terminal while missing docs re
     result.findings.map((finding) => finding.code),
     ["terminal_pack_document_gap"],
   );
+
+  const unsent = audit({
+    canonicalRow: {
+      canonical_stage: "archive",
+      pack: { sent: false, state: "not_started", pre_xero_docs_ready: false },
+    },
+    rawJob: {
+      ...RAW_JOB,
+      status: "archived",
+      archived: true,
+      updated_at: "2026-07-01T00:00:00Z",
+    },
+    invoices: [{
+      job_id: "job-1",
+      invoice_type: "ACCREC",
+      status: "AUTHORISED",
+      invoice_date: "2026-07-01",
+    }],
+  });
+  assertEquals(unsent.terminal_proven, false);
+  assertEquals(unsent.evidence_stage, "new");
 });
 
 Deno.test("raw invoiced state without linked invoice is critical", () => {
@@ -184,11 +230,14 @@ Deno.test("canonical audit rows exclude terminal synthetic IDs beyond page one",
   const canonicalRows = Array.from({ length: 1_205 }, (_, index) => ({
     id: `synthetic-${index}`,
     job_number: `SWMS-SYNTHETIC-${index}`,
-  }));
-  assertEquals(
-    filterCanonicalRowsForAudit(canonicalRows, terminalIds),
-    [],
-  );
+  })).concat([{
+    id: "canonical-survivor",
+    job_number: "SWMS-CANONICAL-SURVIVOR",
+  }]);
+  assertEquals(filterCanonicalRowsForAudit(canonicalRows, terminalIds), [{
+    id: "canonical-survivor",
+    job_number: "SWMS-CANONICAL-SURVIVOR",
+  }]);
 });
 
 Deno.test("report renderer rejects client personal data", () => {

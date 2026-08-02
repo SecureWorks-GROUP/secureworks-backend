@@ -45,15 +45,33 @@ Deno.test("R1 first attendance: unbound assignment + no report is legacy-compati
 });
 
 Deno.test("R2 first report in: current-cycle report satisfies has_report_record", () => {
-  const detail = { cycle_number: 1, reattend_count: 0 };
+  const detail = { cycle_number: 2, reattend_count: 1 };
+  const currentReport = {
+    id: "r-current",
+    job_id: "j1",
+    status: "submitted",
+    cycle_number: 2,
+    cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+  };
   const scoped = projectCycleScopedEvidence({
     detail,
-    reports: [{ id: "r1", job_id: "j1", status: "submitted", cycle_number: 1 }],
-    assignments: [{ id: "a1" }],
+    reports: [currentReport],
+    attendanceCycleId: "cycle-2",
+    assignments: [],
     packCycleBound: true,
   });
   assertEquals(scoped.has_report_record, true);
-  assertEquals(scoped.serviceReport?.id, "r1");
+  assertEquals(scoped.serviceReport?.id, "r-current");
+
+  const stale = projectCycleScopedEvidence({
+    detail,
+    reports: [{ ...currentReport, cycle_number: 99 }],
+    attendanceCycleId: "cycle-2",
+    assignments: [],
+    packCycleBound: true,
+  });
+  assertEquals(stale.has_report_record, false);
+  assertEquals(stale.serviceReport, null);
 });
 
 Deno.test("R3 reattend before release: stale assignment + old report fail closed", () => {
@@ -265,13 +283,27 @@ Deno.test("R9b reattend unscoped same-number evidence fails closed", () => {
 
 Deno.test("R9c reattend hold requires bound attribution and identity", () => {
   const detail = { cycle_number: 2, reattend_count: 1 };
+  const validHold = {
+    id: "hold-current",
+    cycle_number: 2,
+    attendance_cycle_id: "cycle-2",
+    cycle_attribution: CYCLE_ATTRIBUTION.BOUND,
+  };
+  assertEquals(
+    projectCycleScopedEvidence({
+      detail,
+      attendanceCycleId: "cycle-2",
+      holds: [validHold],
+    }).hold?.id,
+    "hold-current",
+  );
   assertEquals(
     projectCycleScopedEvidence({
       detail,
       attendanceCycleId: "cycle-2",
       holds: [{
-        cycle_number: 2,
-        cycle_attribution: CYCLE_ATTRIBUTION.LEGACY_UNSCOPED,
+        ...validHold,
+        attendance_cycle_id: null,
       }],
     }).hold,
     null,
@@ -480,7 +512,7 @@ Deno.test("R1 enrich: first attendance with assignment is allocated", () => {
   assertEquals(enriched.assignments.length, 1);
 });
 
-Deno.test("R2 enrich: first attendance submitted report is report_ready or trade_report_in", () => {
+Deno.test("R2 enrich: first attendance submitted report advances to trade_report_in", () => {
   const enriched = _enrichMakesafeBoardJobForTest(
     { id: "j1", status: "accepted", created_at: "2026-07-01T00:00:00Z" },
     {
@@ -501,12 +533,6 @@ Deno.test("R2 enrich: first attendance submitted report is report_ready or trade
     false,
     null,
   );
-  assertEquals(
-    ["trade_report_in", "report_ready", "allocated"].includes(
-      enriched.board_stage,
-    ),
-    true,
-    `unexpected stage ${enriched.board_stage}`,
-  );
+  assertEquals(enriched.board_stage, "trade_report_in");
   assertEquals(enriched.report?.status, "submitted");
 });

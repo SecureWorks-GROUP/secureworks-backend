@@ -76,13 +76,33 @@ Deno.test("generation_id is content-derived, so a rerun over unchanged state rep
   });
   assertEquals(a.generation_id, b.generation_id);
   assert(a.snapshot_at !== b.snapshot_at);
+
+  const changedContent = await buildSesStageBaseline(parity([
+    card({ facts: { assignments: 2, photo_count: 0 } }),
+  ]));
+  assert(
+    a.generation_id !== changedContent.generation_id,
+    "generation_id must move when the hashed card content moves",
+  );
 });
 
 Deno.test("read order cannot change the generation id", async () => {
-  const one = card({ job_id: "job-1", job_ref: "SWMS-1" });
-  const two = card({ job_id: "job-2", job_ref: "SWMS-2" });
+  const one = card({
+    job_id: "job-1",
+    job_ref: "SWMS-1",
+    legacy_canonical_stage: "archive",
+    post_cutover_stage: "completed",
+  });
+  const two = card({
+    job_id: "job-2",
+    job_ref: "SWMS-2",
+    legacy_canonical_stage: "completed",
+    post_cutover_stage: "report_ready",
+  });
   const forward = await buildSesStageBaseline(parity([one, two]));
   const reverse = await buildSesStageBaseline(parity([two, one]));
+  assertEquals(forward.disputed.length, 2);
+  assertEquals(reverse.disputed.length, 2);
   assertEquals(forward.generation_id, reverse.generation_id);
   assertEquals(forward.disputed_manifest_id, reverse.disputed_manifest_id);
 });

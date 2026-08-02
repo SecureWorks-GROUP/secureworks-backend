@@ -36,6 +36,7 @@ import {
   isTrustedSesPortalCaptureProducer,
   rawSesPortalCaptureSha256,
   SES_PORTAL_CAPTURE_PRODUCER,
+  SES_TRADE_PORTAL_CONFIRMATION_PRODUCER,
   SES_TRUSTED_PORTAL_CAPTURE_PRODUCERS,
 } from "./ses_portal_capture_contract.ts";
 import {
@@ -531,6 +532,11 @@ Deno.test("F7 writer: a partial capture the reader would trust is refused at the
     "ops-api:api_key",
   );
   const stored = ledger.rows[0];
+  assertEquals(
+    portalCapturesFromLedger(boardCard(), [stored]).length,
+    1,
+    "positive control: the persisted reader row must reach the projection",
+  );
 
   // Each single missing element independently makes the reader drop the row.
   for (
@@ -538,7 +544,6 @@ Deno.test("F7 writer: a partial capture the reader would trust is refused at the
       { builder_reference: "" },
       { screenshot_object_key: null },
       { source_content_hash: "not-a-hash" },
-      { capture_producer: "some-other-producer/v1" },
       { attendance_cycle_id: "another-cycle" },
       { source_url: "https://primeeco.tech/share/not-this-cards-link" },
     ]
@@ -548,6 +553,31 @@ Deno.test("F7 writer: a partial capture the reader would trust is refused at the
       [],
     );
   }
+
+  // Producer trust needs its own producer-shaped control. Changing the reader
+  // producer alone would also violate the screenshot rule, so begin with a
+  // valid screenshot-less trade attestation and change only its producer.
+  const tradeAttestation = {
+    ...stored,
+    capture_producer: SES_TRADE_PORTAL_CONFIRMATION_PRODUCER,
+    screenshot_object_key: null,
+    screenshot_media_type: null,
+    screenshot_content_hash: null,
+    screenshot_size_bytes: null,
+  };
+  assertEquals(
+    portalCapturesFromLedger(boardCard(), [tradeAttestation]).length,
+    1,
+    "positive control: an approved trade attestation must reach the projection",
+  );
+  assertEquals(
+    portalCapturesFromLedger(boardCard(), [{
+      ...tradeAttestation,
+      capture_producer: "some-other-producer/v1",
+    }]),
+    [],
+    "an otherwise-valid row must be refused solely because its producer is untrusted",
+  );
 });
 
 Deno.test("F7 writer: re-running over unchanged state creates no duplicate", async () => {
@@ -721,11 +751,17 @@ Deno.test("F7 writer: the only reachable write action is the evidence recorder",
   }
 });
 
-Deno.test("F7 writer: producer trust is a single-member seam the captain owns", () => {
+Deno.test("F7 writer: producer trust is the exact two-member seam the captain owns", () => {
   assertEquals([...SES_TRUSTED_PORTAL_CAPTURE_PRODUCERS], [
     SES_PORTAL_CAPTURE_PRODUCER,
+    SES_TRADE_PORTAL_CONFIRMATION_PRODUCER,
   ]);
   assert(isTrustedSesPortalCaptureProducer(SES_PORTAL_CAPTURE_PRODUCER));
+  assert(
+    isTrustedSesPortalCaptureProducer(
+      SES_TRADE_PORTAL_CONFIRMATION_PRODUCER,
+    ),
+  );
   for (
     const candidate of [
       SES_PORTAL_CAPTURE_OBSERVER_AGENT,

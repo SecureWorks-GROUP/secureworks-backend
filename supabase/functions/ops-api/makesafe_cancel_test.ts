@@ -375,8 +375,32 @@ Deno.test("cancel: flips a linked non-cancelled work_orders row to cancelled (be
   const { client, rows } = makeClient(cancellableRows({
     work_orders: [{ id: "wo-1", job_id: "job-1", status: "sent" }],
   }));
-  await _cancelMakesafeForTest(client, { body: CANCEL_BODY, ...MANAGER });
+  const success = await _cancelMakesafeForTest(client, {
+    body: CANCEL_BODY,
+    ...MANAGER,
+  });
+  assertEquals(success.ok, true);
   assertEquals(rows.work_orders[0].status, "cancelled");
+
+  const failedLink = makeClient(
+    cancellableRows({
+      work_orders: [{ id: "wo-2", job_id: "job-1", status: "sent" }],
+    }),
+    { "work_orders.update": "linked work-order fixture failure" },
+  );
+  const parentCancellation = await _cancelMakesafeForTest(failedLink.client, {
+    body: CANCEL_BODY,
+    ...MANAGER,
+  });
+  assertEquals(parentCancellation.ok, true);
+  assertEquals(parentCancellation.cancelled, true);
+  assertEquals(failedLink.rows.jobs[0].status, "cancelled");
+  assertEquals(failedLink.rows.work_orders[0].status, "sent");
+  assert(
+    failedLink.rows.job_events.some((event) =>
+      event.event_type === "makesafe_cancelled"
+    ),
+  );
 });
 
 // ── 5. idempotent re-cancel ───────────────────────────────────────────────────
