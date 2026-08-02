@@ -1588,13 +1588,29 @@ Deno.test("reanchor: decision_kind projections are guarded when Release 9 arrive
     new URL("./index.ts", import.meta.url),
   );
   const boardRead = indexSource.match(
-    /from\('makesafe_board_status_current'\)[\s\S]{0,250}?\.select\('([^']+)'\)/,
+    /_fetchAllByJobIdChunked\(\s*client,\s*['"]makesafe_board_status_current['"],\s*['"]([^'"]+)['"]/,
   )?.[1] || "";
   const runRead = indexSource.match(
     /from\('makesafe_board_status_applications'\)[\s\S]{0,180}?\.select\('([^']+)'\)/,
   )?.[1] || "";
+  if (!boardRead || !runRead) {
+    throw new Error(
+      "Release 9 projection guard could not locate both projections: expected the makesafe_board_status_current argument at index.ts:15356 and the makesafe_board_status_applications select at index.ts:15608.",
+    );
+  }
+  const boardHasDecisionKind = /\bdecision_kind\b/.test(boardRead);
+  const runHasDecisionKind = /\bdecision_kind\b/.test(runRead);
   if (
-    !/\bdecision_kind\b/.test(boardRead) || !/\bdecision_kind\b/.test(runRead)
+    !migrationIntroducesDecisionKind &&
+    (boardHasDecisionKind || runHasDecisionKind)
+  ) {
+    throw new Error(
+      "The current code selects decision_kind before Release 9 introduces its migration; keep both index.ts:15356 and index.ts:15608 projections unchanged until the discriminator exists.",
+    );
+  }
+  if (
+    migrationIntroducesDecisionKind &&
+    (!boardHasDecisionKind || !runHasDecisionKind)
   ) {
     throw new Error(
       "Release 9 added decision_kind, but the projections at index.ts:15356 (makesafe_board_status_current) and index.ts:15608 (makesafe_board_status_applications) do not both select it. A projection that drops the discriminator silently downgrades an attestation to display_override, which can move a column and defeat Release 8.",
