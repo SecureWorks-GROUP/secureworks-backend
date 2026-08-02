@@ -200,14 +200,12 @@ Deno.test("F5 queue: image and tracker URLs dropped even when kind=builder_porta
   const links = extractPortalLinks([
     {
       label: "Builder Portal",
-      url:
-        "https://documents.primeeco.tech/15276239/mlb_new_logo.png",
+      url: "https://documents.primeeco.tech/15276239/mlb_new_logo.png",
       kind: "builder_portal",
     },
     {
       label: "Builder Portal",
-      url:
-        "https://xw2vdtj6.r.ap-southeast-2.awstrack.me/I0/0108019e/1/1",
+      url: "https://xw2vdtj6.r.ap-southeast-2.awstrack.me/I0/0108019e/1/1",
       kind: "builder_portal",
     },
     {
