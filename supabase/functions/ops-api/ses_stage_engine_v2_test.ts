@@ -1255,7 +1255,8 @@ Deno.test("docs ready: a physical card needs a draft invoice status", () => {
   );
   for (const invoiceStatus of ["AUTHORISED", "PAID", "SUBMITTED"]) {
     assert(
-      deriveSesStageV2(input({ evidence: { ...base, invoiceStatus } })).stage !==
+      deriveSesStageV2(input({ evidence: { ...base, invoiceStatus } }))
+        .stage !==
         "report_ready",
       `${invoiceStatus} invoice must not be Docs Ready`,
     );
@@ -1300,12 +1301,14 @@ Deno.test("docs ready: an already-sent pack is not one click from sending", () =
   });
   assertEquals(deriveSesStageV2(positive).stage, "report_ready");
 
-  for (const status of [
-    "sent",
-    "sent_marker_failed",
-    "sent_not_closed",
-    "close_failed",
-  ]) {
+  for (
+    const status of [
+      "sent",
+      "sent_marker_failed",
+      "sent_not_closed",
+      "close_failed",
+    ]
+  ) {
     const sent = input({
       evidence: { ...baseEvidence, pack: { status } },
     });
