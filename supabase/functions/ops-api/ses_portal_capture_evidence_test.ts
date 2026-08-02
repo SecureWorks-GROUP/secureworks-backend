@@ -125,10 +125,12 @@ function clientFor(
   };
 }
 
-async function validBody(live: Record<string, unknown>) {
+async function validBody(
+  live: Record<string, unknown>,
+  screenshotBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+) {
   const job = live.job as Row;
   const detail = live.detail as Row;
-  const screenshotBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
   const screenshotHash = await rawSesPortalCaptureSha256(screenshotBytes);
   let binary = "";
   for (const byte of screenshotBytes) binary += String.fromCharCode(byte);
@@ -171,7 +173,15 @@ Deno.test(
 
     assert(calls.upload);
     assertEquals(calls.upload.bucket, SES_PORTAL_CAPTURE_BUCKET);
-    assert(calls.upload.path.startsWith("portal-captures/"));
+    const screenshotHash = body.screenshot.content_hash;
+    const expectedPath = [
+      "portal-captures",
+      body.job_id,
+      body.attendance_cycle_id,
+      body.role,
+      `${screenshotHash.slice("sha256:".length)}.png`,
+    ].join("/");
+    assertEquals(calls.upload.path, expectedPath);
     assertEquals(
       calls.upload.bytes,
       new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
@@ -185,6 +195,39 @@ Deno.test(
     assertEquals(capture.capture_producer, SES_PORTAL_CAPTURE_PRODUCER);
     assertEquals(capture.created_by, "ops-api:api_key");
     assertEquals(result.id, "a2fc8aa8-02c2-5eb2-be87-0ed88266543b");
+
+    const changedBytes = new Uint8Array([
+      137,
+      80,
+      78,
+      71,
+      13,
+      10,
+      26,
+      10,
+      0,
+    ]);
+    const changedBody = await validBody(live, changedBytes);
+    const changedCalls: {
+      upload?: { bucket: string; path: string; bytes: Uint8Array };
+      rpc?: { name: string; args: Record<string, unknown> };
+    } = {};
+    await recordSesPortalCaptureEvidence(
+      clientFor(live, changedCalls),
+      changedBody,
+      "ops-api:api_key",
+    );
+    assert(changedCalls.upload);
+    assertEquals(
+      changedCalls.upload.path.endsWith(
+        `${changedBody.screenshot.content_hash.slice("sha256:".length)}.png`,
+      ),
+      true,
+    );
+    assert(
+      changedCalls.upload.path !== calls.upload.path,
+      "changing screenshot content must change its storage address",
+    );
   },
 );
 

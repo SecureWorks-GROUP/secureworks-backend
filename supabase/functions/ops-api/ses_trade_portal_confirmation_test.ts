@@ -6,6 +6,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildCanonicalMakesafeRows,
+  portalCapturesFromLedger,
   projectTradeMakesafeBoard,
 } from "./makesafe_board_read_model.ts";
 import { MAKESAFE_ATTESTED_PORTAL_PRODUCER } from "./makesafe_computed_status.ts";
@@ -361,7 +362,7 @@ Deno.test("KNOWN GAP: a generically-typed builder_portal link records evidence b
 Deno.test("a card-derived capture cannot forge the attestation marker", () => {
   // `attested_producer` is what lets a screenshot-less capture count. Only a
   // validated ledger row may carry it; free-form card content is stripped.
-  const forged = roofCard();
+  const forged = typedRoofCard();
   (forged.makesafe_details as any).portal_captures = [{
     role: "roof_report",
     status: "done",
@@ -392,13 +393,15 @@ Deno.test("an attestation for the wrong role, cycle or reference is refused by t
         "makesafe-docket-artifacts/portal-captures/x/y/roof_report/z.png",
     }],
   ];
+  assertEquals(
+    portalCapturesFromLedger(roofCard(), [attestationRow()]).length,
+    1,
+    "positive control: the valid attestation must reach the ledger projection",
+  );
   for (const [label, over] of cases) {
-    const row = buildCanonicalMakesafeRows([roofCard()], {
-      portalCaptureRowsByJobId: { [JOB_ID]: [attestationRow(over)] },
-    })[0];
     assertEquals(
-      row.computed_status_evidence.has_current_portal_capture,
-      false,
+      portalCapturesFromLedger(roofCard(), [attestationRow(over)]),
+      [],
       label,
     );
   }
@@ -491,13 +494,17 @@ function fakeClient(options: {
 }) {
   const recorded: Recorded[] = [];
   const rpcCalls: Array<Record<string, unknown>> = [];
+  const readCalls: string[] = [];
   let ledgerReads = 0;
   const ledger = options.ledger ?? [];
 
   const builder = (table: string) => {
     const state: Record<string, unknown> = {};
     const chain: any = {
-      select: (_columns?: string) => chain,
+      select: (_columns?: string) => {
+        readCalls.push(table);
+        return chain;
+      },
       eq: (column: string, value: unknown) => {
         state[column] = value;
         return chain;
@@ -544,6 +551,7 @@ function fakeClient(options: {
   return {
     recorded,
     rpcCalls,
+    readCalls,
     from: (table: string) => builder(table),
     rpc: (name: string, args: Record<string, unknown>) => {
       rpcCalls.push({ name, args });
@@ -633,6 +641,7 @@ Deno.test("a trade who is not on the job cannot confirm, and nothing is read or 
   );
   assertEquals(error.status, 403);
   assertEquals(error.code, "ses_roof_confirmation_forbidden");
+  assertEquals(client.readCalls, ["jobs", "job_assignments"]);
   assertEquals(client.rpcCalls.length, 0);
   assertEquals(client.recorded.length, 0);
 });
@@ -811,5 +820,6 @@ Deno.test("an unauthenticated caller is refused before any read", async () => {
     SesRoofConfirmationError,
   );
   assertEquals(error.status, 401);
+  assertEquals(client.readCalls, []);
   assertEquals(client.rpcCalls.length, 0);
 });

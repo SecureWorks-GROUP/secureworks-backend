@@ -9,6 +9,7 @@ import {
   _assertNoSyntheticLivefireJobsForTest,
   _assertNoSyntheticLivefireReleaseRevisionForTest,
   _deriveMakesafeBoardStage,
+  _loadCanonicalMakesafeBoardForTest,
 } from "./index.ts";
 import {
   buildCanonicalMakesafeRows,
@@ -24,6 +25,7 @@ import {
   projectTradeMakesafeBoard,
   TRADE_MAKESAFE_COLUMNS,
 } from "./makesafe_board_read_model.ts";
+import { observerPopulationForJobStatus } from "../../../scripts/ses-f7-prime-portal-observer.ts";
 
 const NOW = "2026-07-20T12:00:00Z";
 
@@ -66,6 +68,130 @@ function baseJob(
     sent_to_builder: false,
     age_hours: 20,
     ...over,
+  };
+}
+
+type LoaderQueryCall = {
+  table: string;
+  selected?: string;
+  not?: { column: string; operator: string; value: string };
+};
+
+function makeCanonicalLoaderClient(failTable?: string) {
+  const sourceUrl = "https://www.primeeco.tech/share/loader-fixture";
+  const rowsByTable: Record<string, any[]> = {
+    jobs: [{
+      id: "loader-job",
+      job_number: "SWMS-LOADER-1",
+      type: "makesafe",
+      status: "accepted",
+      metadata: {
+        makesafe_job_family: "roof_report",
+        own_template_requested: true,
+      },
+      created_at: "2026-07-20T10:00:00Z",
+      updated_at: "2026-07-20T10:00:00Z",
+    }],
+    makesafe_job_details: [{
+      job_id: "loader-job",
+      external_ref: "MLB-LOADER-1",
+      report_type: "roof_report",
+      external_links: [{ kind: "roof_report", url: sourceUrl }],
+      cycle_number: 1,
+      attendance_cycle_id: "loader-cycle-1",
+      substatus: "waiting_on_trade_report",
+    }],
+    makesafe_portal_capture_revisions: [{
+      id: "loader-capture-1",
+      job_id: "loader-job",
+      attendance_cycle_id: "loader-cycle-1",
+      role: "roof_report",
+      status: "verified",
+      makesafe_fact_version: 1,
+      capture_result: "done",
+      source_url: sourceUrl,
+      source_content_hash: `sha256:${"a".repeat(64)}`,
+      builder_reference: "MLB-LOADER-1",
+      captured_at: NOW,
+      capture_producer: "capture_portal_evidence.py/v1",
+      signal: "submitted and locked",
+      screenshot_object_key:
+        "makesafe-docket-artifacts/portal-captures/loader/cycle/roof.png",
+      screenshot_media_type: "image/png",
+      screenshot_content_hash: `sha256:${"b".repeat(64)}`,
+      screenshot_size_bytes: 2048,
+    }],
+  };
+  const calls: LoaderQueryCall[] = [];
+
+  function builder(table: string) {
+    const call: LoaderQueryCall = { table };
+    calls.push(call);
+    const predicates: Array<(row: any) => boolean> = [];
+    const query: any = {
+      select: (columns?: string) => {
+        call.selected = columns;
+        return query;
+      },
+      eq: (column: string, value: unknown) => {
+        predicates.push((row) => row?.[column] === value);
+        return query;
+      },
+      neq: (column: string, value: unknown) => {
+        predicates.push((row) => row?.[column] !== value);
+        return query;
+      },
+      not: (column: string, operator: string, value: string) => {
+        call.not = { column, operator, value };
+        if (operator === "in") {
+          const excluded = value.replace(/[()"']/g, "").split(",");
+          predicates.push((row) => !excluded.includes(String(row?.[column])));
+        }
+        return query;
+      },
+      in: (column: string, values: unknown[]) => {
+        predicates.push((row) => values.includes(row?.[column]));
+        return query;
+      },
+      gte: (column: string, value: unknown) => {
+        predicates.push((row) => String(row?.[column] ?? "") >= String(value));
+        return query;
+      },
+      or: () => query,
+      order: () => query,
+      limit: () => query,
+      range: (from: number, to: number) => {
+        if (table === failTable) {
+          return { data: null, error: { message: `${table} fixture failure` } };
+        }
+        return {
+          data: (rowsByTable[table] || []).filter((row) =>
+            predicates.every((predicate) => predicate(row))
+          ).slice(from, to + 1),
+          error: null,
+        };
+      },
+      then: (resolve: (value: any) => any) => {
+        if (table === failTable) {
+          return resolve({
+            data: null,
+            error: { message: `${table} fixture failure` },
+          });
+        }
+        return resolve({
+          data: (rowsByTable[table] || []).filter((row) =>
+            predicates.every((predicate) => predicate(row))
+          ),
+          error: null,
+        });
+      },
+    };
+    return query;
+  }
+
+  return {
+    client: { from: (table: string) => builder(table) },
+    calls,
   };
 }
 
@@ -264,6 +390,7 @@ Deno.test("F7 board capture projection rejects stale cycle, wrong URL, missing r
     screenshot_content_hash: `sha256:${"4".repeat(64)}`,
     screenshot_size_bytes: 4096,
   };
+  assertEquals(portalCapturesFromLedger(source, [validShape]).length, 1);
   assertEquals(
     portalCapturesFromLedger(source, [{
       ...validShape,
@@ -278,8 +405,20 @@ Deno.test("F7 board capture projection rejects stale cycle, wrong URL, missing r
     }]),
     [],
   );
+  const sourceWithoutReference = {
+    ...source,
+    external_ref: "",
+    makesafe_details: {
+      ...source.makesafe_details,
+      external_ref: "",
+    },
+  };
   assertEquals(
-    portalCapturesFromLedger(source, [{
+    portalCapturesFromLedger(sourceWithoutReference, [validShape]).length,
+    1,
+  );
+  assertEquals(
+    portalCapturesFromLedger(sourceWithoutReference, [{
       ...validShape,
       builder_reference: "",
     }]),
@@ -294,12 +433,24 @@ Deno.test("F7 board capture projection rejects stale cycle, wrong URL, missing r
   );
 });
 
-Deno.test("F7 canonical board loader names the existing capture ledger explicitly", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./index.ts", import.meta.url),
+Deno.test("F7 canonical board loader executes the capture-ledger handoff", async () => {
+  const { client, calls } = makeCanonicalLoaderClient();
+  const rows = await _loadCanonicalMakesafeBoardForTest(client);
+
+  assert(
+    calls.some((call) => call.table === "makesafe_portal_capture_revisions"),
   );
-  assert(source.includes("'makesafe_portal_capture_revisions'"));
-  assert(source.includes("portalCaptureRowsByJobId"));
+  assertEquals(rows.length, 1);
+  assertEquals(
+    rows[0].computed_status_evidence.portal_capture_revisions.map((row: any) =>
+      row.id
+    ),
+    ["loader-capture-1"],
+  );
+  assertEquals(
+    rows[0].computed_status_evidence.has_current_portal_capture,
+    true,
+  );
 });
 
 Deno.test("F7 observer and canonical loader share one live-board population predicate", async () => {
@@ -315,23 +466,72 @@ Deno.test("F7 observer and canonical loader share one live-board population pred
   assertEquals(isCanonicalLiveMakesafeBoardJobStatus("archived"), false);
   assertEquals(isCanonicalLiveMakesafeBoardJobStatus("cancelled"), false);
   assertEquals(isCanonicalLiveMakesafeBoardJobStatus("lost"), false);
-
-  const indexSource = await Deno.readTextFile(
-    new URL("./index.ts", import.meta.url),
+  assertEquals(
+    ["allocated", "archived", "cancelled", "lost"].map((status) =>
+      observerPopulationForJobStatus(status)
+    ),
+    [
+      "canonical_live_board",
+      "off_board_observed",
+      "off_board_observed",
+      "off_board_observed",
+    ],
   );
-  const observerSource = await Deno.readTextFile(
-    new URL(
-      "../../../scripts/ses-f7-prime-portal-observer.ts",
-      import.meta.url,
+
+  const { client, calls } = makeCanonicalLoaderClient();
+  await _loadCanonicalMakesafeBoardForTest(client);
+  assert(
+    calls.some((call) =>
+      call.table === "jobs" &&
+      call.not?.column === "status" &&
+      call.not.operator === "in" &&
+      call.not.value === makesafeBoardJobStatusExclusionFilter(true)
     ),
   );
-  assert(
-    indexSource.includes("makesafeBoardJobStatusExclusionFilter(allHistory)"),
-  );
-  assert(observerSource.includes("isCanonicalLiveMakesafeBoardJobStatus"));
-  assert(
-    observerSource.includes("where j.status not in ('cancelled', 'lost')"),
-  );
+});
+
+Deno.test("canonical loader logs explicit degradation evidence for additive evidence read failures", async () => {
+  const failures = [
+    {
+      table: "makesafe_portal_capture_revisions",
+      message: "makesafe board portal capture read unavailable",
+    },
+    {
+      table: "makesafe_board_status_current",
+      message: "makesafe_board status application read unavailable",
+    },
+    {
+      table: "makesafe_roof_report_drafts",
+      message: "own-template roof draft read unavailable",
+    },
+    {
+      table: "makesafe_terminal_proofs_current_v2",
+      message: "makesafe terminal proof read unavailable",
+    },
+  ];
+
+  for (const failure of failures) {
+    const logged: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) =>
+      logged.push(args.map(String).join(" "));
+    try {
+      const { client } = makeCanonicalLoaderClient(failure.table);
+      const rows = await _loadCanonicalMakesafeBoardForTest(client);
+      assertEquals(rows.length, 1, failure.table);
+    } finally {
+      console.error = originalError;
+    }
+    assert(
+      logged.some((line) =>
+        line.includes(failure.message) &&
+        line.includes(`${failure.table} fixture failure`)
+      ),
+      `${failure.table} failure must be distinguishable from clean absence: ${
+        logged.join(" | ")
+      }`,
+    );
+  }
 });
 
 Deno.test("historical divergence: unknown stage never vanishes silently", () => {
@@ -504,6 +704,7 @@ Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers wit
         docket_revision_id: "revision-ready",
         pre_xero_docs_ready: true,
         blockers: [],
+        local_invoice_proposal: { total_inc: 999999 },
       },
     }),
   ]);
@@ -511,6 +712,7 @@ Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers wit
   assertEquals(ready.pack.pre_xero_docs_ready, true);
   assertEquals(ready.pack.drafted, true);
   assertEquals(ready.blockers.real, []);
+  assertEquals("local_invoice_proposal" in ready.pack, false);
 
   const [blocked] = buildCanonicalMakesafeRows([
     baseJob("trade_report_in", "u4-blocked", {
@@ -519,6 +721,7 @@ Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers wit
         review_state: "U4_BLOCKED",
         docket_revision_id: "revision-blocked",
         pre_xero_docs_ready: false,
+        local_invoice_proposal: { total_inc: 999999 },
         blockers: [{
           reason_code: "spine_missing_source",
           reason: "not projected to the board",
