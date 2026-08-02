@@ -1,4 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
+import { isSelfGeneratedMakesafeWorkOrder } from "./makesafe_builder_work_order_identity.ts";
+import { refreshMakesafeIdentityAfterWorkOrderAttach } from "./makesafe_work_order_identity_refresh.ts";
 
 export interface IntakeMint {
   id: string;
@@ -86,13 +88,22 @@ export async function ensureIntakeWorkOrderEvidence(
   jobIds: readonly string[],
   attachments: readonly any[],
   extraction: Record<string, any>,
+  deps: {
+    refreshIdentity?: typeof refreshMakesafeIdentityAfterWorkOrderAttach;
+  } = {},
 ): Promise<void> {
   const uniqueJobIds = Array.from(
     new Set(
       jobIds.map((value) => String(value || "").trim()).filter(Boolean),
     ),
   );
-  if (!uniqueJobIds.length || !attachments.length) {
+  const builderAttachments = attachments.filter((attachment) =>
+    !isSelfGeneratedMakesafeWorkOrder(
+      attachment.file_name || attachment.name || attachment.storage_url ||
+        attachment.pdf_url,
+    )
+  );
+  if (!uniqueJobIds.length || !builderAttachments.length) {
     throw new Error(
       "work-order evidence settlement requires jobs and attachments",
     );
@@ -116,17 +127,19 @@ export async function ensureIntakeWorkOrderEvidence(
     }),
   );
   for (const jobId of uniqueJobIds) {
-    for (const attachment of attachments) {
+    for (const attachment of builderAttachments) {
       const storageUrl = attachment.storage_url || attachment.pdf_url;
       const pdfUrl = attachment.pdf_url || attachment.storage_url;
       if (
         existingKeys.has(`${jobId}:${storageUrl}`) ||
         existingKeys.has(`${jobId}:${pdfUrl}`)
       ) continue;
+      const fileName = attachment.file_name || attachment.name ||
+        "work-order.pdf";
       const { error } = await client.from("job_documents").insert({
         job_id: jobId,
         type: "work_order",
-        file_name: attachment.file_name || attachment.name || "work-order.pdf",
+        file_name: fileName,
         storage_url: storageUrl,
         pdf_url: pdfUrl,
         ...(extraction?.synthetic_livefire_marker
@@ -145,6 +158,11 @@ export async function ensureIntakeWorkOrderEvidence(
       }
       existingKeys.add(`${jobId}:${storageUrl}`);
       existingKeys.add(`${jobId}:${pdfUrl}`);
+      await (deps.refreshIdentity ||
+        refreshMakesafeIdentityAfterWorkOrderAttach)(
+          client,
+          { jobId, documentId: null, fileName },
+        );
     }
   }
 }
@@ -167,6 +185,7 @@ export async function settleApprovedIntakeDraft(
       reason: string;
       auditId: string | null;
     }>;
+    refreshIdentity?: typeof refreshMakesafeIdentityAfterWorkOrderAttach;
   },
 ): Promise<{
   jobIds: string[];
@@ -205,6 +224,7 @@ export async function settleApprovedIntakeDraft(
     evidenceJobIds,
     input.attachments,
     input.extraction,
+    { refreshIdentity: input.refreshIdentity },
   );
 
   let notificationsAccepted = 0;

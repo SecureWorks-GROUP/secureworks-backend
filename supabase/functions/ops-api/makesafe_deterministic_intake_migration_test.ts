@@ -310,21 +310,21 @@ Deno.test("obligation dedupe collapses the full established builder alias set at
   );
 });
 
-Deno.test("cancelled/void/superseded jobs are excluded from the obligation match so a re-issue creates a live job", () => {
-  // The runtime obligation dedupe selects jobs(metadata,status) and must skip dead
-  // jobs; otherwise a fresh claim binds to a cancelled job_id and never goes live.
+Deno.test("terminal jobs remain visible instruction authority and cannot be reminted", () => {
+  // The runtime obligation dedupe selects jobs(metadata,status) and routes a
+  // terminal exact match to a visible binding exception before any mint.
   assertStringIncludes(
     runtime,
-    "isDeadObligationJobStatus(existingJob?.status)",
+    "isDeadObligationJobStatus(job?.status)",
   );
+  assertStringIncludes(runtime, 'bindingException("terminal_job_binding"');
   assertStringIncludes(runtime, '"superseded"');
   assertStringIncludes(runtime, '"cancelled"');
   assertStringIncludes(runtime, '"void"');
-  // The approve-path duplicate guard mirrors the same re-issue exclusion.
-  assert(
-    index.includes(
-      "['cancelled','canceled','void','voided','superseded'].includes(String(existingJob?.status",
-    ),
+  // The approval boundary scans all cards through the exact canonical gate.
+  assertStringIncludes(
+    index,
+    "_assertInstructionCardMintAvailable(client, instructionKeys)",
   );
 });
 

@@ -9,6 +9,8 @@ import {
   settleApprovedIntakeDraft,
 } from "./makesafe_intake_settlement.ts";
 
+const noIdentityRefresh = async () => null;
+
 function client(existing: any[] = [], insertError: any = null) {
   const inserts: any[] = [];
   const query: any = {
@@ -56,6 +58,7 @@ Deno.test("work-order evidence continuation fans every source PDF to every minte
       storage_url: "storage/work-order.pdf",
     }],
     {},
+    { refreshIdentity: noIdentityRefresh as any },
   );
 
   assertEquals(db.inserts, [{
@@ -112,6 +115,7 @@ Deno.test("settlement repairs legacy evidence but only explicit mint authority c
     approvedJobId: "legacy-job",
     attachments: [{ pdf_url: "storage/work-order.pdf" }],
     extraction: { deterministic_intake: true },
+    refreshIdentity: noIdentityRefresh as any,
     notify: async (input) => {
       notifications.push(input.jobId);
       return { accepted: true, reason: "accepted", auditId: "audit-1" };
@@ -263,6 +267,7 @@ Deno.test("a stale failed settlement cannot regress accepted authority", async (
     attachments: [{ pdf_url: "storage/work-order.pdf" }],
     extraction: { deterministic_intake: true },
     requiredMintRoles: ["primary"],
+    refreshIdentity: noIdentityRefresh as any,
     notify: async () => ({
       accepted: false,
       reason: "stale transport failure",

@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 export interface BuilderWorkOrderIdentityInput {
   externalRef?: string | null;
+  requestingCompanySlug?: string | null;
   subject?: string | null;
   bodyText?: string | null;
   attachmentNames?: Array<string | null | undefined>;
@@ -16,9 +17,9 @@ export interface BuilderWorkOrderIdentity {
 // ABJR is a live-mail typo of AJBR (Track A D7): both spellings are read and
 // canonicalClaim collapses them onto the one AJBR identity.
 const BUILDER_REF_WITH_PO_RE =
-  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
+  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
 const BUILDER_REF_RE =
-  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
+  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
 /**
  * The PO label this module can read, as a source pattern. Exported so downstream
  * identity matching derives the SAME grammar instead of keeping a second copy:
@@ -81,10 +82,29 @@ function attachmentNameScanText(name: string): string {
   return name.replace(/_/g, " ");
 }
 
+/**
+ * Files minted by SecureWorks while creating a card are internal cover sheets,
+ * not instructions supplied by a builder. Keep the check filename-scoped and
+ * basename-aware so storage URLs cannot turn an internal document into evidence.
+ */
+export function isSelfGeneratedMakesafeWorkOrder(
+  value: string | null | undefined,
+): boolean {
+  const withoutQuery = String(value || "").split(/[?#]/, 1)[0];
+  let decoded = withoutQuery;
+  try {
+    decoded = decodeURIComponent(withoutQuery);
+  } catch {
+    // A malformed storage path cannot satisfy the exact internal filename shape.
+  }
+  const basename = decoded.split(/[\\/]/).pop() || "";
+  return /^work-order-SWMS-\d+\.pdf$/i.test(basename);
+}
+
 function canonicalClaim(prefix: string, digits: string): string {
-  const canonical = prefix.toUpperCase() === "ABJR"
-    ? "AJBR"
-    : prefix.toUpperCase();
+  const normalisedPrefix = prefix.toUpperCase().replace(/[\s#-]+/g, "-")
+    .replace(/^-|-$/g, "");
+  const canonical = normalisedPrefix === "ABJR" ? "AJBR" : normalisedPrefix;
   return `${canonical}-${digits}`;
 }
 
@@ -177,6 +197,16 @@ export function extractBuilderWorkOrderIdentity(
     evidence_sources: [],
   };
 
+  const bareAjRef = String(input.externalRef || "").trim().match(/^(\d{5,})$/);
+  if (
+    String(input.requestingCompanySlug || "").trim().toLowerCase() === "aj" &&
+    bareAjRef
+  ) {
+    result.builder_claim_ref = `AJBR-${bareAjRef[1]}`;
+    result.builder_work_order_number = `AJBR-${bareAjRef[1]}`;
+    addSource(result.evidence_sources, "external_ref");
+  }
+
   if (input.externalRef) scanText(input.externalRef, "external_ref", result);
 
   // Track A D6 (standing rule + Ruling 5): the subject line never ANCHORS
@@ -185,7 +215,9 @@ export function extractBuilderWorkOrderIdentity(
   // fills a gap but can no longer beat filename/body identity when a reused
   // "NEW WORK ORDER" subject carries a different or partial reference.
   for (const name of input.attachmentNames || []) {
-    if (name) scanText(attachmentNameScanText(name), "attachment_name", result);
+    if (name && !isSelfGeneratedMakesafeWorkOrder(name)) {
+      scanText(attachmentNameScanText(name), "attachment_name", result);
+    }
   }
 
   if (input.bodyText) {
@@ -206,6 +238,68 @@ export function extractBuilderWorkOrderIdentity(
   if (input.subject) scanText(input.subject, "subject", result);
 
   return result;
+}
+
+/**
+ * Canonical one-instruction key. A full builder WO+PO pair is strongest. The
+ * captain-approved company-scoped R2 fallbacks apply only to AJ, WB and KBA;
+ * MLB/BW claims without a PO remain unreadable rather than being invented.
+ */
+export function builderInstructionKey(
+  identity: BuilderWorkOrderIdentity,
+): string | null {
+  if (identity.builder_work_order_number && identity.builder_po_number) {
+    return identity.builder_work_order_number.toUpperCase();
+  }
+
+  const claim = String(
+    identity.builder_claim_ref || identity.builder_work_order_number || "",
+  ).toUpperCase();
+  const match = claim.match(/^(AJBR|ABJR|AJS|WB|KBA)-(\d{3,})$/);
+  if (!match) return null;
+  if (/^(?:AJBR|ABJR|AJS)$/.test(match[1]) && match[2].length < 5) {
+    return null;
+  }
+  const prefix = /^(?:AJBR|ABJR|AJS)$/.test(match[1]) ? "AJ" : match[1];
+  return `${prefix}-${match[2]}`;
+}
+
+/** Read every canonical key already declared by one card, source by source. */
+export function builderInstructionKeysForCard(input: {
+  requestingCompanySlug?: string | null;
+  metadata?: Record<string, any> | null;
+  detailExternalRef?: string | null;
+  attachmentNames?: Array<string | null | undefined>;
+}): string[] {
+  const metadata = input.metadata || {};
+  const structured = [
+    metadata.builder_work_order_number,
+    metadata.builder_claim_ref,
+    metadata.builder_po_number,
+  ].filter(Boolean).join(" ");
+  const sourceValues = [
+    structured,
+    metadata.external_ref,
+    input.detailExternalRef,
+  ].filter(Boolean);
+  const keys = sourceValues.flatMap((externalRef) => {
+    const key = builderInstructionKey(extractBuilderWorkOrderIdentity({
+      externalRef: String(externalRef),
+      requestingCompanySlug: input.requestingCompanySlug,
+    }));
+    return key ? [key] : [];
+  });
+  for (const attachmentName of input.attachmentNames || []) {
+    if (!attachmentName || isSelfGeneratedMakesafeWorkOrder(attachmentName)) {
+      continue;
+    }
+    const key = builderInstructionKey(extractBuilderWorkOrderIdentity({
+      requestingCompanySlug: input.requestingCompanySlug,
+      attachmentNames: [attachmentName],
+    }));
+    if (key) keys.push(key);
+  }
+  return [...new Set(keys)].sort();
 }
 
 export function mergeBuilderWorkOrderIdentity(
