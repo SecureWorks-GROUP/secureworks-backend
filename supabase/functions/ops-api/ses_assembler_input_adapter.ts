@@ -58,6 +58,7 @@ import {
   isTrustedSesPortalCaptureProducer,
   rawSesPortalCaptureSha256,
   SES_PORTAL_CAPTURE_BUCKET,
+  sesPortalCaptureProducerHasScreenshot,
   type SesPersistedPortalCaptureRow,
   type SesPortalCaptureRevisionContent,
   sesPortalCaptureRevisionHash,
@@ -2050,7 +2051,7 @@ async function resolvePersistedPortalCapture(
       // must not shadow a valid reader capture and turn a good docket invalid.
       // Whether an attestation can stand in for the docket screenshot is its
       // own release, not a side effect of this one.
-      row.capture_producer === SES_PORTAL_CAPTURE_PRODUCER &&
+      sesPortalCaptureProducerHasScreenshot(row.capture_producer) &&
       row.job_id === request.job_id &&
       row.attendance_cycle_id === cycleId &&
       canonicalSesPortalCaptureRole(row.role) === request.role &&
