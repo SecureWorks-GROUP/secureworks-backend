@@ -73,6 +73,11 @@ Deno.test("a named tranche has a scoped route to the existing seeder", () => {
   assertStringIncludes(handler, "authMode !== 'api_key'");
   assertStringIncludes(handler, "req.method !== 'POST'");
   assertStringIncludes(handler, "board_complete: false");
+  const responseReturns = [...handler.matchAll(/return json\(\{[\s\S]*?\},?\s*\d*\s*\)/g)];
+  assert(responseReturns.length > 0, "scoped handler must return JSON responses");
+  for (const response of responseReturns) {
+    assertStringIncludes(response[0], "board_complete: false");
+  }
   // Validation runs before any read, so a bad body never reaches production
   // rows; the run-key rule itself is asserted directly further down.
   assertStringIncludes(handler, "normalizeMakesafeStateSeedScopeRequest(body)");
@@ -397,6 +402,19 @@ Deno.test("the RPC must answer for the exact selection it was sent", () => {
       4,
     ).agrees,
     false,
+  );
+  assertEquals(
+    checkMakesafeStateSeedScopeResult(
+      { requested: 4, accounted: 4, seeded: 3, skipped: 1 },
+      4,
+    ),
+    {
+      agrees: false,
+      requested: 4,
+      seeded: 3,
+      skipped: 1,
+      error: "scoped seed skipped 1 selected job",
+    },
   );
   assertEquals(checkMakesafeStateSeedScopeResult(null, 4).agrees, false);
   assertEquals(

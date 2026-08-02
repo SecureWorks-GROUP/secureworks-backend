@@ -3808,15 +3808,18 @@ if (import.meta.main) serve(async (req: Request) => {
         // never claim board completeness — see makesafe_state_seed_scope.ts for
         // why this is a separate action rather than a flag on
         // makesafe_state_seed.
+        // A safety marker whose presence depends on which failure fired is not
+        // a safety marker. Error paths are exactly where callers are most
+        // likely to misread a scoped response as full board coverage.
         if (authMode !== 'api_key') {
-          return json({ error: 'makesafe_state_seed_scoped requires ops privilege' }, 403)
+          return json({ error: 'makesafe_state_seed_scoped requires ops privilege', board_complete: false }, 403)
         }
         if (req.method !== 'POST') {
-          return json({ error: 'makesafe_state_seed_scoped requires POST' }, 405)
+          return json({ error: 'makesafe_state_seed_scoped requires POST', board_complete: false }, 405)
         }
         const normalized = normalizeMakesafeStateSeedScopeRequest(body)
         if (!normalized.ok) {
-          return json({ error: normalized.error }, normalized.status)
+          return json({ error: normalized.error, board_complete: false }, normalized.status)
         }
         const { jobNumbers, runKey, dryRun } = normalized.request
 
@@ -3830,6 +3833,7 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({
             error: 'scoped seed could not read the selected cards',
             detail: scopeJobError.message || String(scopeJobError),
+            board_complete: false,
           }, 503)
         }
         const plan = resolveMakesafeStateSeedScope(jobNumbers, scopeJobRows || [])

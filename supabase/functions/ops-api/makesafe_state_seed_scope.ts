@@ -361,5 +361,14 @@ export function checkMakesafeStateSeedScopeResult(
       error: "scoped seed did not partition every selected job exactly once",
     };
   }
+  if (skipped !== 0) {
+    return {
+      agrees: false,
+      requested,
+      seeded,
+      skipped,
+      error: `scoped seed skipped ${skipped} selected job${skipped === 1 ? "" : "s"}`,
+    };
+  }
   return { agrees: true, requested, seeded, skipped, error: null };
 }
