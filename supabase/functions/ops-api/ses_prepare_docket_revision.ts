@@ -599,7 +599,12 @@ function localInvoiceProposal(
   }
 
   const trades = nonNegativeInteger(facts.trades);
-  const hoursPerTrade = positiveNumber(facts.hours_per_trade);
+  // Two hours in, three hours out (Captain ruling 2026-08-02). The field report's
+  // `hours_per_trade` is what the TRADE bills US - a cost fact. The builder minimum below is
+  // what WE bill the builder - a revenue fact. They are two different commercial facts, and a
+  // short attendance is the case the minimum exists for. So a report recording fewer hours than
+  // the minimum is the NORMAL case, never missing evidence.
+  const reportedHoursPerTrade = positiveNumber(facts.hours_per_trade);
   const canonicalRate = row.invoice_basis === "ajs_labour_materials" ||
       row.invoice_basis === "ajs_temporary_fence_labour_only"
     ? 80
@@ -612,18 +617,22 @@ function localInvoiceProposal(
   if (
     trades === null ||
     trades < 1 ||
-    hoursPerTrade === null ||
-    hoursPerTrade < minimum
+    reportedHoursPerTrade === null
   ) {
     return {
       proposal: null,
       blocker: blocked(
         "pricing_evidence_missing",
-        `Pricing requires a positive trade count and at least ${minimum} evidenced billable hours for each trade.`,
-        "Recover the number of trades and the billable hours for each trade from the field report; do not invent either fact.",
+        "Pricing requires a positive trade count and the attended hours for each trade.",
+        "Recover the number of trades and the attended hours for each trade from the field report; do not invent either fact.",
       ),
     };
   }
+  // Raise the COST hours to the sealed billable floor. This never lowers a longer attendance,
+  // and it never reaches below the floor, so the sealed schedule is enforced, not bypassed: the
+  // proposal that leaves here always declares >= `minimum` billable hours per trade and the
+  // downstream money guard re-checks it independently.
+  const hoursPerTrade = Math.max(reportedHoursPerTrade, minimum);
   const suppliedRate = facts.rate_ex_gst == null
     ? canonicalRate
     : positiveNumber(facts.rate_ex_gst);
@@ -735,6 +744,13 @@ function localInvoiceProposal(
       version: "ses-local-invoice-proposal/v1",
       builder_reference: ref,
       basis: row.invoice_basis,
+      trades,
+      // The trade's submitted cost hours are kept verbatim beside the billable hours so the two
+      // facts stay separately auditable and neither can be mistaken for the other later.
+      reported_hours_per_trade: reportedHoursPerTrade,
+      billable_hours_per_trade: hoursPerTrade,
+      billable_hours_floor: minimum,
+      billable_hours_raised_to_floor: hoursPerTrade > reportedHoursPerTrade,
       line_items: lines,
       subtotal_ex_gst: subtotal,
       gst: Math.round(subtotal * 10) / 100,

@@ -1220,12 +1220,164 @@ Deno.test("labour pricing blocks on missing field-report labour facts without na
   const blocker = result.blockers.find((item) =>
     item.reason_code === "pricing_evidence_missing"
   )!;
-  assertStringIncludes(blocker.reason.toLowerCase(), "billable hours");
+  // The missing fact is the trade's ATTENDED hours (the cost fact). Billable hours are never
+  // recovered from the field report - they come from the sealed schedule - so the blocker must
+  // not ask staff for them.
+  assertStringIncludes(blocker.reason.toLowerCase(), "attended hours");
   assertStringIncludes(blocker.recovery_action.toLowerCase(), "field report");
+  assert(!blocker.reason.toLowerCase().includes("billable hours"));
   assert(!blocker.reason.includes("hours_per_trade"));
   assert(!blocker.recovery_action.includes("hours_per_trade"));
   assert(!blocker.reason.includes("labour_hours"));
   assert(!blocker.recovery_action.includes("labour_hours"));
+});
+
+// Two hours in, three hours out (Captain ruling 2026-08-02). The trade bills us 2, we bill the
+// builder the 3-hour MLB minimum. A short attendance is exactly the case the minimum exists for,
+// so it must price, not block.
+async function labourProposal(
+  builderKey: string,
+  family: string,
+  hoursAndMaterials: Record<string, unknown>,
+) {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === builderKey && candidate.family === family
+  )!;
+  const input = fixtureInput(row);
+  input.cycle_facts.hours_and_materials = hoursAndMaterials;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  return result;
+}
+
+Deno.test("a two-hour MLB trade report prices at the sealed three-hour floor instead of blocking", async () => {
+  const result = await labourProposal("MLB", "physical_makesafe", {
+    trades: 2,
+    hours_per_trade: 2,
+    rate_ex_gst: 85,
+    materials: [],
+  });
+  assertEquals(
+    result.blockers.filter((item) =>
+      item.reason_code === "pricing_evidence_missing"
+    ),
+    [],
+  );
+  const proposal = result.invoice_proposal as Record<string, unknown>;
+  assert(proposal, "expected an invoice proposal for a two-hour MLB report");
+  // The trade's cost fact survives verbatim beside the billable revenue fact.
+  assertEquals(proposal.reported_hours_per_trade, 2);
+  assertEquals(proposal.billable_hours_per_trade, 3);
+  assertEquals(proposal.billable_hours_floor, 3);
+  assertEquals(proposal.billable_hours_raised_to_floor, true);
+  const lines = proposal.line_items as Array<Record<string, unknown>>;
+  // The line the money guard parses must state the BILLABLE hours and quantity: 2 x 3 = 6.
+  assertStringIncludes(String(lines[0].description), "2 trades x 3 hours");
+  assertEquals(lines[0].quantity, 6);
+  assertEquals(lines[0].unit_price_ex_gst ?? lines[0].unit_price, 85);
+  assertEquals(proposal.subtotal_ex_gst, 510);
+});
+
+Deno.test("a longer attendance is never reduced to the floor", async () => {
+  const result = await labourProposal("MLB", "physical_makesafe", {
+    trades: 1,
+    hours_per_trade: 5.5,
+    rate_ex_gst: 85,
+    materials: [],
+  });
+  const proposal = result.invoice_proposal as Record<string, unknown>;
+  assertEquals(proposal.reported_hours_per_trade, 5.5);
+  assertEquals(proposal.billable_hours_per_trade, 5.5);
+  assertEquals(proposal.billable_hours_raised_to_floor, false);
+  const lines = proposal.line_items as Array<Record<string, unknown>>;
+  assertStringIncludes(String(lines[0].description), "1 trade x 5.5 hours");
+  assertEquals(lines[0].quantity, 5.5);
+});
+
+Deno.test("the sealed floor still binds: no proposal can leave below its company minimum", async () => {
+  for (
+    const [builderKey, family, reported, floor] of [
+      ["MLB", "physical_makesafe", 0.25, 3],
+      ["MLB", "physical_makesafe", 2, 3],
+      ["AJS", "physical_makesafe", 1, 2],
+      ["MLB", "temporary_fencing", 1, 4],
+    ] as Array<[string, string, number, number]>
+  ) {
+    const result = await labourProposal(builderKey, family, {
+      trades: 1,
+      hours_per_trade: reported,
+      panel_count: 8,
+      base_count: 8,
+      star_picket_count: 0,
+      materials: [],
+    });
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assert(
+      proposal,
+      `${builderKey}/${family} at ${reported}h produced no proposal`,
+    );
+    assertEquals(
+      proposal.billable_hours_floor,
+      floor,
+      `${builderKey}/${family} floor`,
+    );
+    assertEquals(
+      proposal.billable_hours_per_trade,
+      floor,
+      `${builderKey}/${family} billable hours must sit on the floor`,
+    );
+    assert(
+      (proposal.billable_hours_per_trade as number) >= floor,
+      "a proposal must never leave below the sealed floor",
+    );
+  }
+});
+
+Deno.test("absent attended hours still block: the floor is not a substitute for evidence", async () => {
+  const result = await labourProposal("MLB", "physical_makesafe", {
+    trades: 2,
+    rate_ex_gst: 85,
+    materials: [],
+  });
+  const blocker = result.blockers.find((item) =>
+    item.reason_code === "pricing_evidence_missing"
+  )!;
+  assert(blocker, "missing attended hours must still block");
+  assertEquals(result.invoice_proposal ?? null, null);
+});
+
+Deno.test("a non-positive attended-hours fact blocks rather than silently becoming the floor", async () => {
+  for (const bad of [0, -2, "two", null]) {
+    const result = await labourProposal("MLB", "physical_makesafe", {
+      trades: 1,
+      hours_per_trade: bad,
+      rate_ex_gst: 85,
+      materials: [],
+    });
+    assert(
+      result.blockers.some((item) =>
+        item.reason_code === "pricing_evidence_missing"
+      ),
+      `hours_per_trade=${JSON.stringify(bad)} must block`,
+    );
+    assertEquals(result.invoice_proposal ?? null, null);
+  }
+});
+
+Deno.test("raising cost hours to the floor does not touch the rate check", async () => {
+  const result = await labourProposal("MLB", "physical_makesafe", {
+    trades: 1,
+    hours_per_trade: 2,
+    rate_ex_gst: 70,
+    materials: [],
+  });
+  const blocker = result.blockers.find((item) =>
+    item.reason_code === "pricing_evidence_missing"
+  )!;
+  assert(blocker, "an off-schedule rate must still block");
+  assertStringIncludes(blocker.reason, "85");
 });
 
 Deno.test("hire-card pricing blocks on a missing star-picket fact without naming its storage field", async () => {
