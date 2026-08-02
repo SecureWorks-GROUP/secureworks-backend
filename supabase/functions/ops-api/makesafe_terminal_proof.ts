@@ -11,6 +11,11 @@
 // card as it stands now" — so `makesafe_state_projection.ts` (which already
 // consumed the contract) and `ses_stage_engine_v2.ts` (which now does) cannot
 // drift into two answers. It derives no stage and reads no other evidence.
+// The board loader reads `makesafe_terminal_proofs_current_v2` because it runs
+// as service_role. The parity harness reads the raw table and reproduces the
+// revision join because the view invokes `makesafe_attendance_cycle_set_hash_v1`,
+// whose EXECUTE grant is restricted to postgres and service_role; the harness's
+// Management API read-only role cannot select the view.
 //
 // A proof is bound to a cycle SET, not to a job, on purpose: a re-attendance
 // opens a new cycle, the set changes, and the old proof stops covering the card
@@ -39,6 +44,7 @@ export interface MakesafeTerminalProofFact {
   proven_by?: string | null;
   proven_at?: string | null;
   evidence_refs?: readonly string[] | null;
+  readiness_revision?: string | null;
 }
 
 /**
@@ -85,6 +91,7 @@ export function bindingMakesafeTerminalProof(
       )
     ) continue;
     if (!(proof?.evidence_refs || []).length) continue;
+    if (proof?.readiness_revision != null) continue;
     const provenAt = new Date(String(proof?.proven_at || "")).getTime();
     if (!Number.isFinite(provenAt)) continue;
     if (

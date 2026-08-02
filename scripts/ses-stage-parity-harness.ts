@@ -444,7 +444,18 @@ async function run(): Promise<void> {
         "t.job_id, t.id, t.kind, t.attendance_cycle_ids, t.evidence_refs, t.proven_by, t.proven_at",
         "makesafe_terminal_proofs",
         "t",
-      ) + " order by t.proven_at desc nulls last, t.id asc",
+      ) + `
+        and (
+          t.readiness_revision is null
+          or exists (
+            select 1
+            from makesafe_readiness_revisions r
+            where r.job_id = t.job_id
+              and r.readiness_revision = t.readiness_revision
+              and r.attendance_cycle_set_hash = t.attendance_cycle_set_hash
+          )
+        )
+        order by t.proven_at desc nulls last, t.id asc`,
     ),
     query(
       boardScoped("c.job_id, c.id", "makesafe_attendance_cycles", "c") +

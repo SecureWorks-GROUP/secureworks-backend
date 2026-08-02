@@ -15486,7 +15486,7 @@ async function loadCanonicalMakesafeBoard(
   try {
     const proofRows = await _fetchAllByJobIdChunked(
       client,
-      'makesafe_terminal_proofs',
+      'makesafe_terminal_proofs_current_v2',
       'id, job_id, kind, attendance_cycle_ids, evidence_refs, proven_by, proven_at',
       jobIds,
       (q) => q.order('proven_at', { ascending: false }),

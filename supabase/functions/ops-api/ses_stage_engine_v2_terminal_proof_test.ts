@@ -142,6 +142,9 @@ Deno.test("a malformed proof is ignored rather than downgraded", () => {
     ["no evidence refs", { evidence_refs: [] }],
     ["unrecognised kind", { kind: "captain_said_so" }],
     ["unusable proven_at", { proven_at: "not a date" }],
+    ["revision-bound proof is not accepted without the validated view", {
+      readiness_revision: "sha256:stale",
+    }],
     ["covers a cycle this card does not have", {
       attendance_cycle_ids: [CYCLE_2],
     }],
