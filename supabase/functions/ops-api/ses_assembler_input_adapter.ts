@@ -49,6 +49,7 @@ import {
 } from "./roof_report_render.ts";
 import { buildRoofReportJob } from "./roof_report_template.ts";
 import { isBundledCoverageSendNote } from "./makesafe_send_pack.ts";
+import { renderSesSwmsPdf } from "./ses_swms_render.ts";
 import {
   canonicalSesPortalCaptureResult,
   canonicalSesPortalCaptureRole,
@@ -2427,6 +2428,17 @@ export function createSesAssemblerRuntimeDependencies(
         return [];
       }
     },
+    // U4 generates its own SWMS; it does not reuse a staff-attached PDF. The
+    // preparer has already run `buildSesSwmsGenerationPlan`, which fails closed
+    // with `swms_generation_facts_missing` unless every required real fact -
+    // crew included - is present in the work order, bound field report, job or
+    // assignment. Binding the renderer directly (rather than wrapping it) keeps
+    // the bytes the docket hashes identical to the bytes the renderer produced.
+    renderSwmsArtifact: renderSesSwmsPdf,
+    // Superseded by the line above and deliberately left unconsumed by
+    // `prepare_ses_docket_revision`: reusing a staff-attached SWMS was rejected
+    // in #432 because a stale attachment violates the current-cycle input
+    // contract. See the DEFECT DOCUMENTATION test in the adapter suite.
     resolveSwmsArtifact: async (input) => {
       const snapshot = snapshotFor(input);
       let row = snapshot.documents.find(
