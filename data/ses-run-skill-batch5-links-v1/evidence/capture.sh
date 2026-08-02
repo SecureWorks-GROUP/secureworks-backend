@@ -7,8 +7,13 @@
 # false reading once and leaked a client name once.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
-D="/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/10/secureworks-backend/data/ses-run-skill-batch5-links-v1"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+D="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+SP="$(mktemp -d "${TMPDIR:-/tmp}/ses-capture.XXXXXX")"
+trap 'rm -rf "$SP"' EXIT
 SP="/private/tmp/claude-501/-Users-marninstobbe--treehouse-secureworks-backend-5961a6-10-secureworks-backend/2cb261b3-0992-457c-8d33-197540b407b1/scratchpad/b5"
+SP="$(mktemp -d "${TMPDIR:-/tmp}/ses-capture.XXXXXX")"
+trap 'rm -rf "$SP"' EXIT
 CLS="$(cat "$D/evidence/classify.js")"
 RED="$(cat "$D/evidence/redact.js")"
 MAX_POLL=40
@@ -20,10 +25,12 @@ axi_json() { chrome-devtools-axi eval "$1" 2>/dev/null | sed -n 's/^result: "\(.
 while IFS=$'\t' read -r card slug url; do
   [ -z "${url:-}" ] && continue
   echo ">>> $card $slug"
+  : > "$SP/res.json"
   chrome-devtools-axi open "$url" >/dev/null 2>&1
   prev_len=-1; stable=0
   for i in $(seq 1 $MAX_POLL); do
     chrome-devtools-axi wait 3000 >/dev/null 2>&1
+    : > "$SP/res.json"
     axi_json "$CLS" > "$SP/res.json"
     [ -s "$SP/res.json" ] || continue
     st=$(jq -r '.state // "err"' "$SP/res.json" 2>/dev/null)
@@ -36,6 +43,7 @@ while IFS=$'\t' read -r card slug url; do
        && [ "$stable" -ge 1 ] && [ -n "$jn" ]; then break; fi
   done
   [ -s "$SP/res.json" ] || { echo "{\"card\":\"$card\",\"slug\":\"$slug\",\"state\":\"capture-failed\"}" >> "$OUT"; continue; }
+  : > "$SP/red.json"
   axi_json "$RED" > "$SP/red.json"
   rok=$(jq -r '.ok // false' "$SP/red.json" 2>/dev/null)
   shot_rel="shots/${slug}.png"
