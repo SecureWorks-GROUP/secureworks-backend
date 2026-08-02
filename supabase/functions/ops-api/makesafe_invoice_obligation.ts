@@ -203,8 +203,12 @@ export async function prepareSesInvoiceObligation(
   blockers.push(...validateLines(input.pricing_disposition, input.lines));
 
   const mustMintNew = !input.existing || priorReleased;
+  // `crypto.randomUUID` is a native method that needs its Crypto receiver. Extracting it with
+  // `(input.allocate_uuid || crypto.randomUUID)()` detaches it and throws "Illegal invocation" in
+  // Deno, so the production branch could never mint an obligation id. Every test injects
+  // `allocate_uuid`, which is why the suite never exercised it.
   const obligationId = mustMintNew
-    ? (input.allocate_uuid || crypto.randomUUID)()
+    ? (input.allocate_uuid ? input.allocate_uuid() : crypto.randomUUID())
     : input.existing!.obligation_id;
   const lineSet = input.lines.map((line) => ({
     ...line,
