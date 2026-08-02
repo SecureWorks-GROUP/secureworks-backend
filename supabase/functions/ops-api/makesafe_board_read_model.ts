@@ -22,7 +22,7 @@ import {
 import {
   canonicalSesPortalSourceUrl,
   isSesSha256,
-  SES_PORTAL_CAPTURE_PRODUCER,
+  isTrustedSesPortalCaptureProducer,
 } from "./ses_portal_capture_contract.ts";
 import { extractPortalLinks } from "./makesafe_portal_guard.ts";
 import {
@@ -277,7 +277,7 @@ export function portalCapturesFromLedger(
       String(row?.attendance_cycle_id || "") !== attendanceCycleId ||
       !rowBuilderReference ||
       (builderReference && rowBuilderReference !== builderReference) ||
-      row?.capture_producer !== SES_PORTAL_CAPTURE_PRODUCER ||
+      !isTrustedSesPortalCaptureProducer(row?.capture_producer) ||
       String(row?.status || "").toLowerCase() !== expectedStatus ||
       !isSesSha256(row?.source_content_hash) ||
       !sourceKeys.has(identityKey) ||

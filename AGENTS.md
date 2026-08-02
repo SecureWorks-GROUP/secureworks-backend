@@ -974,6 +974,16 @@ guarded. Mutable residue is deleted; append-only/group evidence is retained only
 after terminal accounting excludes it from live boards, projections, and
 fresh-source health.
 
+## The Portal Observer Writes Evidence Only, And Only When Asked
+
+The observer's dry-run default, single-card opt-in write boundary, append-only
+egress, producer-trust seam, and captain-gated backfill boundary are owned by
+`docs/evidence/ses-f7-portal-capture-writer-2026-08-02.md`. Keep this pointer
+current if the owner document moves; do not duplicate its detailed contract
+here. The implementation is
+`scripts/ses-f7-prime-portal-observer.ts` and its end-to-end proof is
+`supabase/functions/ops-api/ses_portal_capture_writer_test.ts`.
+
 ## Deterministic Intake Notifies After Board Proof
 
 The post-mint Hugo notification and honest five-minute denominator are owned by

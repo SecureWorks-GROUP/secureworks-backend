@@ -17,6 +17,7 @@ import {
   resolveSesStageV2Family,
   SES_STAGE_ENGINE_V2_VERSION,
   sesStageCutoverGate,
+  type SesStageGateRow,
   sesStageV2OverlayCandidate,
 } from "./ses_stage_engine_v2.ts";
 
@@ -570,13 +571,17 @@ Deno.test("gate: a fully proved board passes, and passing is not an authorisatio
 });
 
 Deno.test("gate: a missing advisory stage blocks cutover distinctly", () => {
+  // `42` is deliberately off-type: the gate must block a row whose advisory
+  // stage arrived as a non-string, which is exactly what a drifted upstream
+  // projection would send. The cast keeps that hostile case compiling without
+  // widening `SesStageGateRow` to accept a shape the gate should reject.
   for (const derived_stage_v2 of [null, undefined, "", "   ", 42]) {
     const gate = sesStageCutoverGate([{
       id: "j-missing",
       job_number: "SWMS-MISSING",
       canonical_stage: "allocated",
       derived_stage_v2,
-    }]);
+    } as SesStageGateRow]);
     assertEquals(gate.ok, false);
     assertEquals(gate.checked, 1);
     assertEquals(gate.blocked, [{

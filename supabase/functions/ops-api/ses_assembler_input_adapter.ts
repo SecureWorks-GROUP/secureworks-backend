@@ -55,9 +55,9 @@ import {
   canonicalSesPortalSourceUrl,
   isSesPortalCapturePng,
   isSesSha256,
+  isTrustedSesPortalCaptureProducer,
   rawSesPortalCaptureSha256,
   SES_PORTAL_CAPTURE_BUCKET,
-  SES_PORTAL_CAPTURE_PRODUCER,
   type SesPersistedPortalCaptureRow,
   type SesPortalCaptureRevisionContent,
   sesPortalCaptureRevisionHash,
@@ -2065,7 +2065,7 @@ async function resolvePersistedPortalCapture(
     !isSesSha256(row.source_content_hash) ||
     !isSesSha256(row.makesafe_content_hash) ||
     !row.captured_by?.trim() ||
-    row.capture_producer !== SES_PORTAL_CAPTURE_PRODUCER ||
+    !isTrustedSesPortalCaptureProducer(row.capture_producer) ||
     !row.id?.trim()
   ) {
     return invalidPersistedPortalCapture(
