@@ -171,8 +171,10 @@ re-landed one at a time, each based directly on `main`, and each re-measured
 against a FRESH read-only snapshot rather than trusting the stacked-branch
 numbers above.
 
-Snapshot `2026-08-02T08:35:58Z`, population `ses-board-population/active-v1`,
-407 cards, 13 SELECT-only Management API queries, base commit `cd18ff6`.
+Snapshot `2026-08-02T08:43:19Z`, population `ses-board-population/active-v1`,
+407 cards, 13 SELECT-only Management API queries, base commit `2c471eb`
+(`main` moved under this work; the branch was rebased and every number below
+re-measured against the new base, not carried over).
 
 | Fact | Expected | Measured |
 |---|---:|---:|
@@ -184,7 +186,7 @@ Snapshot `2026-08-02T08:35:58Z`, population `ses-board-population/active-v1`,
 | Frozen Release 0 disputed manifest | reproduces | 71 / 71, manifest id identical |
 
 Placement proof is an A/B over the same tree rather than an assertion: the
-harness was run once at `cd18ff6` and once at this branch's tip. Per card,
+harness was run once at `2c471eb` and once at this branch's tip. Per card,
 `legacy_canonical_stage`, `legacy_stage`, `m1_published`, `m1_pure`,
 `post_cutover_stage`, `post_cutover_overlay_binds` and the whole `overlay`
 object are identical on all 407 cards. Overlays stay 46 total / 42 binding.
@@ -193,9 +195,12 @@ Two drifts from the stacked-branch reading, reported rather than reconciled:
 
 - Current columns read `35/30/13/24/2/303`, not the `36/30/12/24/2/303`
   recorded above. One card aged out of `new` into `trade_report_in` in live
-  data between the two snapshots. It is NOT a code effect — the `cd18ff6`
+  data between the two snapshots. It is NOT a code effect — the `2c471eb`
   baseline run in this same session reports the identical `35/30/13/24/2/303`.
 - `ses-e1-freeze-stage-baseline.ts --mode=verify` passes with zero failures but
-  a different `generation_id`, because `SWMS-261115` changed input facts since
-  the freeze. The disputed manifest id is byte-identical, which is the
-  invariant that matters: no certified disputed card was lost, changed or added.
+  a different `generation_id`, because six cards changed input facts since the
+  freeze (`SWMS-261115`, `SWMS-26393`, `SWMS-26657`, `SWMS-26658`,
+  `SWMS-26659`, `SWMS-26660`). The disputed manifest id is byte-identical,
+  which is the invariant that matters: `disputed_missing`, `disputed_changed`
+  and `disputed_added` are all empty, so no certified disputed card was lost,
+  changed or added.
