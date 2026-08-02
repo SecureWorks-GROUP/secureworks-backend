@@ -602,6 +602,14 @@ is privileged-only (api_key / admin-owner jwt), NOT routine-callable; `queue` is
 read (routine-allowed). Report-ready reuses `selectDraftPackDueJobIds` so the queue
 and the reporting run agree on "not yet drafted".
 
+## Portal Completion Has Two Producers
+
+The trade roof-report confirmation contract, including its producer boundaries,
+authorization, idempotence, and deploy ordering, is owned by
+`docs/evidence/ses-roof-trade-confirmation-2026-08-02.md`. Keep the implementation
+and migration aligned with that document and its regression tests; do not add a
+third portal-capture producer or make the attestation a board stage.
+
 ## A Report Card Waits In `awaiting_portal_completion`, Not `ready_to_invoice`
 
 Intake parks every newly approved report-only (roof / assessment) card in the

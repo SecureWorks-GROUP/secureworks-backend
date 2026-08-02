@@ -23,8 +23,15 @@ import {
   canonicalSesPortalSourceUrl,
   isSesSha256,
   isTrustedSesPortalCaptureProducer,
+  SES_TRADE_PORTAL_CONFIRMATION_PRODUCER,
+  SES_TRADE_PORTAL_CONFIRMATION_QUESTION,
+  sesPortalCaptureProducerHasScreenshot,
 } from "./ses_portal_capture_contract.ts";
 import { extractPortalLinks } from "./makesafe_portal_guard.ts";
+import {
+  sesRoofConfirmationEligibility,
+  type SesRoofConfirmationPayload,
+} from "./ses_trade_portal_confirmation.ts";
 import {
   deriveSesStageV2,
   sesStageV2OverlayCandidate,
@@ -272,6 +279,14 @@ function portalCaptureIdentity(capture: MakesafePortalCapture): string | null {
  * by the U4 record endpoint. When the base card also exposes that reference it
  * must match. The projection does not derive or move the canonical stage; it
  * supplies existing evidence to M1.
+ *
+ * Both approved producers land here (captain, 2026-08-02). They are gated
+ * identically on job, cycle, role, source URL and builder reference; they
+ * differ only in what proves the observation. The deterministic reader must
+ * still carry a valid stored screenshot. A trade attestation carries no image —
+ * its proof is the authenticated `captured_by` — so it is admitted only for the
+ * one role the ruling names (roof) and is stamped `attested_producer`, which is
+ * the ONLY thing that lets a screenshot-less capture count downstream.
  */
 export function portalCapturesFromLedger(
   base: any,
@@ -327,6 +342,13 @@ export function portalCapturesFromLedger(
       : null;
     const rowBuilderReference = String(row?.builder_reference ?? "").trim();
     const identityKey = role && url ? `${role}\n${url}` : "";
+    const producer = row?.capture_producer;
+    const attested = producer === SES_TRADE_PORTAL_CONFIRMATION_PRODUCER;
+    const screenshotOk = sesPortalCaptureProducerHasScreenshot(producer)
+      ? (result === "unreachable" || validLedgerScreenshot(row))
+      // An attestation is roof-only, done-only, and never carries an image.
+      : (role === "roof_report" && result === "done" &&
+        !row?.screenshot_object_key);
     if (
       !role || !url || !expectedStatus || seen.has(identityKey) ||
       String(row?.job_id || "") !== jobId ||
@@ -337,7 +359,8 @@ export function portalCapturesFromLedger(
       String(row?.status || "").toLowerCase() !== expectedStatus ||
       !isSesSha256(row?.source_content_hash) ||
       !sourceKeys.has(identityKey) ||
-      (result !== "unreachable" && !validLedgerScreenshot(row))
+      !screenshotOk ||
+      (attested && !String(row?.captured_by ?? "").trim())
     ) {
       continue;
     }
@@ -353,6 +376,14 @@ export function portalCapturesFromLedger(
       // Additive provenance for the canonical row. M1 ignores these keys.
       revision_id: row?.id || null,
       captured_at: row?.captured_at || null,
+      // Set ONLY here, ONLY from a validated ledger row. Nothing derived from
+      // free-form card content may carry it — see `portalCapturesFromDetail`.
+      ...(attested
+        ? {
+          attested_producer: SES_TRADE_PORTAL_CONFIRMATION_PRODUCER,
+          attested_by: String(row?.captured_by ?? ""),
+        }
+        : {}),
     } as MakesafePortalCapture);
   }
   return captures;
@@ -594,7 +625,16 @@ function portalCapturesFromDetail(base: any): MakesafePortalCapture[] {
     if (!Array.isArray(value)) return;
     for (const item of value) {
       if (item && typeof item === "object") {
-        captures.push(item as MakesafePortalCapture);
+        // `attested_producer` is the marker that lets a screenshot-less capture
+        // count as done. It is issued by `portalCapturesFromLedger` against a
+        // validated ledger row and by nothing else. These entries come from
+        // free-form card content (`portal_evidence`, `portal_captures`, a JSON
+        // `portal_verified_signal`), so strip it rather than trust it.
+        const { attested_producer: _dropped, ...rest } = item as Record<
+          string,
+          unknown
+        >;
+        captures.push(rest as MakesafePortalCapture);
       }
     }
   };
@@ -647,6 +687,32 @@ function portalCapturesFromDetail(base: any): MakesafePortalCapture[] {
   return captures;
 }
 
+/**
+ * The card's portal evidence: validated ledger rows first, then whatever the
+ * card's own detail fields still carry that the ledger has not already claimed.
+ *
+ * Exported so the trade confirmation write path answers "is this already
+ * confirmed?" from the SAME list the board and M1 read. A control that is
+ * offered and a tick that is refused would otherwise be the same bug seen from
+ * two sides.
+ */
+export function projectMakesafePortalCaptures(
+  base: any,
+  ledgerRows: any[],
+): MakesafePortalCapture[] {
+  const ledger = portalCapturesFromLedger(base, ledgerRows || []);
+  const ledgerIdentities = new Set(
+    ledger.map(portalCaptureIdentity).filter(Boolean),
+  );
+  return [
+    ...ledger,
+    ...portalCapturesFromDetail(base).filter((capture) => {
+      const identity = portalCaptureIdentity(capture);
+      return !identity || !ledgerIdentities.has(identity);
+    }),
+  ];
+}
+
 function rawInvoiceStatus(base: any): string | null {
   if (base && "invoice_raw_status" in base) {
     const raw = String(base.invoice_raw_status || "").trim().toUpperCase();
@@ -684,20 +750,9 @@ export function buildCanonicalMakesafeRows(
       report_delivery: base?.metadata?.report_delivery ||
         detail?.report_delivery,
     });
-    const ledgerPortalCaptures = portalCapturesFromLedger(
-      base,
-      extras.portalCaptureRowsByJobId?.[base?.id] || [],
-    );
-    const ledgerCaptureIdentities = new Set(
-      ledgerPortalCaptures.map(portalCaptureIdentity).filter(Boolean),
-    );
-    const portalCaptures = [
-      ...ledgerPortalCaptures,
-      ...portalCapturesFromDetail(base).filter((capture) => {
-        const identity = portalCaptureIdentity(capture);
-        return !identity || !ledgerCaptureIdentities.has(identity);
-      }),
-    ];
+    const ledgerRows = extras.portalCaptureRowsByJobId?.[base?.id] || [];
+    const ledgerPortalCaptures = portalCapturesFromLedger(base, ledgerRows);
+    const portalCaptures = projectMakesafePortalCaptures(base, ledgerRows);
     const hold = extras.holdsByJobId?.[base?.id] || null;
     const rawPhotoCount = Number(extras.photoCountByJobId?.[base?.id] || 0);
     const photoCount = photoCountForCurrentCycle(
@@ -771,6 +826,23 @@ export function buildCanonicalMakesafeRows(
       application,
       base?.status,
     );
+    const roofEligibility = sesRoofConfirmationEligibility(
+      base,
+      portalCaptures,
+    );
+    const roofConfirmation = {
+      producer: SES_TRADE_PORTAL_CONFIRMATION_PRODUCER,
+      applicable: roofEligibility.applicable,
+      confirmed: roofEligibility.confirmed,
+      offered: roofEligibility.offered,
+      reason: roofEligibility.reason,
+      question: roofEligibility.offered
+        ? SES_TRADE_PORTAL_CONFIRMATION_QUESTION
+        : null,
+      source_url: roofEligibility.target?.source_url ?? null,
+      attendance_cycle_id: roofEligibility.target?.attendance_cycle_id ?? null,
+      cycle_number: roofEligibility.target?.cycle_number ?? null,
+    };
     return {
       contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
       id: base?.id,
@@ -866,6 +938,10 @@ export function buildCanonicalMakesafeRows(
         ? base.cycle_attribution_flags
         : [],
       readiness_revision: base?.readiness_revision ?? null,
+      // The trade roof-report tick (captain, 2026-08-02). Advisory metadata
+      // describing whether the one-question control belongs on this card; it
+      // places no card and feeds no stage engine.
+      roof_report_confirmation: roofConfirmation,
       commercial_warning: base?.commercial_warning ?? null,
       makesafe_type: sesFamily === "restoration"
         ? sesFamilyLabel(sesFamily)
@@ -1054,6 +1130,35 @@ function tradeSafe(row: any, viewer: MakesafeBoardViewer, all: boolean) {
     cycle_number: row?.cycle_number ?? null,
     cycle_attribution_flags: row?.cycle_attribution_flags || [],
     readiness_revision: row?.readiness_revision ?? null,
+    // The one-question roof tick. `can_confirm` adds the only thing the
+    // canonical row cannot know: whether THIS viewer is on the job. A manager
+    // who sees every card is not on any of them, so they never get the control.
+    roof_report_confirmation: tradeSafeRoofConfirmation(row, viewer),
+  };
+}
+
+function tradeSafeRoofConfirmation(
+  row: any,
+  viewer: MakesafeBoardViewer,
+): SesRoofConfirmationPayload {
+  const confirmation = row?.roof_report_confirmation || null;
+  const assignedToViewer = (row?.assignments || []).some((assignment: any) =>
+    assignment?.user_id === viewer.userId &&
+    String(assignment?.status || "").toLowerCase() !== "cancelled"
+  );
+  return {
+    producer: SES_TRADE_PORTAL_CONFIRMATION_PRODUCER,
+    applicable: confirmation?.applicable === true,
+    confirmed: confirmation?.confirmed === true,
+    offered: confirmation?.offered === true,
+    can_confirm: confirmation?.offered === true && assignedToViewer,
+    reason: confirmation?.reason ?? "not_a_roof_card",
+    question: confirmation?.offered === true && assignedToViewer
+      ? SES_TRADE_PORTAL_CONFIRMATION_QUESTION
+      : null,
+    source_url: confirmation?.source_url ?? null,
+    attendance_cycle_id: confirmation?.attendance_cycle_id ?? null,
+    cycle_number: confirmation?.cycle_number ?? null,
   };
 }
 

@@ -181,6 +181,10 @@ import {
   recordSesPortalCaptureEvidence,
   SesPortalCaptureEvidenceError,
 } from './ses_portal_capture_evidence.ts'
+import {
+  confirmSesRoofReportDone,
+  SesRoofConfirmationError,
+} from './ses_trade_portal_confirmation_action.ts'
 
 // Cap 1C — stage-gate engine (pure, read-only). Used by the shadow-mode
 // wrapper inside updateJobStatus. Static import so the Supabase deploy
@@ -5152,6 +5156,34 @@ if (import.meta.main) serve(async (req: Request) => {
           callerRole: tradeUser.role,
           managedVerticals: tradeUser.managedVerticals,
         }))
+      }
+      // Roof report completion, confirmed by the trade who did the work
+      // (captain, 2026-08-02). One question, one tick: the body carries a job
+      // id and the server derives role, portal link, builder reference and
+      // attendance cycle from the card. It appends ONE row to the append-only
+      // portal-capture ledger under the trade-attestation producer and writes
+      // no stage, substatus or job status. Deliberately NOT reachable by the
+      // automation routine or the ops key: the ruling names the assigned trade,
+      // and the assignment relationship is what the handler enforces.
+      case 'confirm_roof_report_done': {
+        // authTrade FIRST, method second: an unauthenticated probe must fail
+        // closed at authentication ("Login required"), which is the recognition
+        // contract the action-surface smoke declares for this action.
+        const tradeUser = await authTrade(req, client)
+        if (req.method !== 'POST') {
+          return json({ error: 'confirm_roof_report_done requires POST' }, 405)
+        }
+        try {
+          return json(await confirmSesRoofReportDone(client, {
+            body,
+            callerUserId: tradeUser.id,
+          }))
+        } catch (error) {
+          if (error instanceof SesRoofConfirmationError) {
+            return json({ error: error.message, code: error.code }, error.status)
+          }
+          throw error
+        }
       }
       // Cancel a make-safe (M-F). Retire a card a builder recalled / reallocated /
       // sent in error. TRADE side is genuinely per-user JWT-authed (authTrade →

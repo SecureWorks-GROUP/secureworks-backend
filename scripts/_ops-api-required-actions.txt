@@ -190,6 +190,9 @@ makesafe_send_pack
 allocate_job                  # probe=jwt-fail-closed
 reattend_makesafe             # probe=jwt-fail-closed
 mark_makesafe_portal_report_done
+# Trade roof-report confirmation (captain, 2026-08-02). authTrade runs before
+# the POST check precisely so an API-key probe is refused at authentication.
+confirm_roof_report_done      # probe=jwt-fail-closed
 # W2-C portal-truth honest fallback (this PR):
 makesafe_portal_recheck_queue
 # Bare call stamps a recheck marker on up to 200 makesafe_job_details rows.

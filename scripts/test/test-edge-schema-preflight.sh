@@ -24,6 +24,7 @@ BOARD_V2_PREVIEW_MIGRATION="$REPO_ROOT/supabase/migrations/20260731085928_board_
 VAULT_SYNC_MIGRATION="$REPO_ROOT/supabase/migrations/20260731152254_vault_sync_sw_api_key.sql"
 SES_RECOVERY_MIGRATION="$REPO_ROOT/supabase/migrations/20260801062000_ses_adjudicated_job_recovery.sql"
 PORTAL_COMPLETION_SUBSTATUS_MIGRATION="$REPO_ROOT/supabase/migrations/20260802010000_makesafe_awaiting_portal_completion_substatus.sql"
+TRADE_CONFIRMATION_MIGRATION="$REPO_ROOT/supabase/migrations/20260802030000_makesafe_trade_portal_confirmation.sql"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -113,6 +114,10 @@ portal_completion_substatus_migration_sha() {
   shasum -a 256 "$PORTAL_COMPLETION_SUBSTATUS_MIGRATION" | awk '{print $1}'
 }
 
+trade_confirmation_migration_sha() {
+  shasum -a 256 "$TRADE_CONFIRMATION_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -136,6 +141,7 @@ write_response() {
   VAULT_SYNC_EXPECTED_SHA="$(vault_sync_migration_sha)" \
   SES_RECOVERY_EXPECTED_SHA="$(ses_recovery_migration_sha)" \
   PORTAL_COMPLETION_SUBSTATUS_EXPECTED_SHA="$(portal_completion_substatus_migration_sha)" \
+  TRADE_CONFIRMATION_EXPECTED_SHA="$(trade_confirmation_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -336,6 +342,17 @@ portal_completion_substatus_row = {
     "actual_statement_sha256": os.environ["PORTAL_COMPLETION_SUBSTATUS_EXPECTED_SHA"],
     "missing_markers": [],
 }
+trade_confirmation_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260802030000",
+    "expected_migration_name": "makesafe_trade_portal_confirmation",
+    "expected_statement_sha256": os.environ["TRADE_CONFIRMATION_EXPECTED_SHA"],
+    "actual_migration_version": "20260802030000",
+    "actual_migration_name": "makesafe_trade_portal_confirmation",
+    "actual_statement_count": 1,
+    "actual_statement_sha256": os.environ["TRADE_CONFIRMATION_EXPECTED_SHA"],
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -356,6 +373,7 @@ with open(sys.argv[1], "w") as f:
             vault_sync_row,
             ses_recovery_row,
             portal_completion_substatus_row,
+            trade_confirmation_row,
         ],
         f,
     )
