@@ -15,6 +15,7 @@ import {
 import {
   deriveSesStageV2,
   SES_STAGE_ENGINE_V2_VERSION,
+  sesStageCutoverGate,
   sesStageV2OverlayCandidate,
 } from "./ses_stage_engine_v2.ts";
 
@@ -283,9 +284,12 @@ Deno.test("raw cancelled and archived job state outrank every evidence fact", ()
 
 Deno.test("clock: the raw terminal shortcut is aged, not waved through", () => {
   // The newer engine returns `completed` here with no clock at all, which is
-  // why 34 jobs finished months ago would read as this week's work.
+  // why 34 jobs finished months ago would read as this week's work. The issued
+  // invoice is what makes this a CLOCK case rather than a corroboration one
+  // (Release 3) — the two corrections must stay separately exercised.
   const stale = input({
     job: { status: "complete", completed_at: daysAgo(200) },
+    evidence: { invoiceStatus: "PAID" },
   });
   assertEquals(deriveSesStageV2(stale).stage, "archive");
   assertEquals(computeMakesafeStatus(stale).status, "completed");
@@ -293,9 +297,12 @@ Deno.test("clock: the raw terminal shortcut is aged, not waved through", () => {
 
 Deno.test("clock: the 168-hour boundary is strict on both terminal paths", () => {
   const paths = [
-    // raw terminal shortcut
+    // raw terminal shortcut, corroborated by an issued invoice
     (age: number) =>
-      input({ job: { status: "complete", completed_at: daysAgo(age) } }),
+      input({
+        job: { status: "complete", completed_at: daysAgo(age) },
+        evidence: { invoiceStatus: "AUTHORISED" },
+      }),
     // durable close-out
     (age: number) =>
       input({
@@ -318,8 +325,13 @@ Deno.test("clock: the 168-hour boundary is strict on both terminal paths", () =>
 });
 
 Deno.test("clock: a missing trusted completion time is refused, not guessed", () => {
-  // No pack send, no invoice, no completed_at, no report send.
-  const noTime = input({ job: { status: "closed" } });
+  // Issued invoice, so the terminal claim IS corroborated — but no pack send,
+  // no invoice date, no completed_at and no report send, so there is no time to
+  // age it against.
+  const noTime = input({
+    job: { status: "closed" },
+    evidence: { invoiceStatus: "PAID" },
+  });
   const result = deriveSesStageV2(noTime);
   assertEquals(result.stage, "decision_required");
   assertEquals(result.conflicts, ["completion_timestamp_missing"]);
@@ -333,6 +345,7 @@ Deno.test("clock: generic row-touch and readiness markers are not completion pro
   const weak = input({
     job: { status: "complete", updated_at: daysAgo(1) },
     detail: { cycle_number: 1, invoice_ready_at: daysAgo(1) },
+    evidence: { invoiceStatus: "PAID" },
   });
   assertEquals(deriveSesStageV2(weak).stage, "decision_required");
   assertEquals(
@@ -345,23 +358,33 @@ Deno.test("clock: each trusted source is used, in priority order, and named", ()
   const cases: Array<[string, any, string]> = [
     [
       "pack.sent_at",
-      { evidence: { pack: { sent_at: daysAgo(1) } } },
+      { evidence: { invoiceStatus: "PAID", pack: { sent_at: daysAgo(1) } } },
       "completed",
     ],
     [
       "invoice.invoice_date",
-      { evidence: { invoiceDate: daysAgo(1) } },
+      { evidence: { invoiceStatus: "PAID", invoiceDate: daysAgo(1) } },
       "completed",
     ],
     [
       "invoice.created_at",
-      { evidence: { invoiceCreatedAt: daysAgo(1) } },
+      { evidence: { invoiceStatus: "PAID", invoiceCreatedAt: daysAgo(1) } },
       "completed",
     ],
-    ["jobs.completed_at", { job: { completed_at: daysAgo(1) } }, "completed"],
+    [
+      "jobs.completed_at",
+      {
+        job: { completed_at: daysAgo(1) },
+        evidence: { invoiceStatus: "PAID" },
+      },
+      "completed",
+    ],
     [
       "detail.report_sent_at",
-      { detail: { cycle_number: 1, report_sent_at: daysAgo(1) } },
+      {
+        detail: { cycle_number: 1, report_sent_at: daysAgo(1) },
+        evidence: { invoiceStatus: "PAID" },
+      },
       "completed",
     ],
   ];
@@ -381,7 +404,11 @@ Deno.test("clock: each trusted source is used, in priority order, and named", ()
   // Priority: a durable send wins over a much older invoice date.
   const both = input({
     job: { status: "complete" },
-    evidence: { pack: { sent_at: daysAgo(1) }, invoiceDate: daysAgo(300) },
+    evidence: {
+      invoiceStatus: "PAID",
+      pack: { sent_at: daysAgo(1) },
+      invoiceDate: daysAgo(300),
+    },
   });
   assertEquals(deriveSesStageV2(both).stage, "completed");
 });
@@ -393,6 +420,8 @@ Deno.test("clock: a refused terminal card still places no card and still shows a
       status: "closed",
       board_stage: "archive",
       assignments: [],
+      // Corroborated by an issued invoice, but carrying no trusted timestamp.
+      invoice_raw_status: "PAID",
     }),
   ], { computedAt: NOW });
   assertEquals(rows[0].derived_stage_v2, "decision_required");
@@ -403,4 +432,135 @@ Deno.test("clock: a refused terminal card still places no card and still shows a
   assertEquals(rows[0].canonical_stage, "archive");
   assertEquals(projectOpsMakesafeBoard(rows).columns.archive.length, 1);
   assertEquals(projectOpsMakesafeBoard(rows).unmapped_stage_job_ids.length, 0);
+});
+
+// ── Release 3 — corroborate the terminal shortcut ───────────────────────────
+
+Deno.test("terminal: an issued invoice corroborates the raw terminal claim", () => {
+  for (const status of ["AUTHORISED", "SUBMITTED", "PAID"]) {
+    const facts = input({
+      job: { status: "complete" },
+      evidence: { invoiceStatus: status, invoiceDate: daysAgo(1) },
+    });
+    const result = deriveSesStageV2(facts);
+    assertEquals(result.stage, "completed", status);
+    assertEquals(result.conflicts, [], status);
+  }
+});
+
+Deno.test("terminal: a DRAFT invoice does not corroborate anything", () => {
+  // The captain ruled DRAFT is not terminal evidence, and a draft invoice's
+  // online link cannot take payment at all.
+  const facts = input({
+    job: { status: "complete" },
+    evidence: {
+      invoiceStatus: "DRAFT",
+      invoiceDate: daysAgo(1),
+      assignments: [{ id: "a1" }],
+    },
+  });
+  const result = deriveSesStageV2(facts);
+  assertEquals(result.stage, "allocated");
+  assertEquals(result.conflicts, ["terminal_without_issued_invoice"]);
+  // The newer engine closes this card outright.
+  assertEquals(computeMakesafeStatus(facts).status, "completed");
+});
+
+Deno.test("terminal: no invoice at all does not pre-empt stronger evidence on the card", () => {
+  // The two live cards this resolves (SWMS-261024, SWMS-261025): a submitted
+  // current-cycle report and the photo floor, buried in Completed by the
+  // shortcut. The corrected engine surfaces the report instead.
+  const facts = input({
+    job: { status: "complete" },
+    evidence: {
+      serviceReports: [{ status: "submitted", cycle_number: 1 }],
+      completionPhotoCount: 6,
+    },
+  });
+  const result = deriveSesStageV2(facts);
+  assertEquals(result.stage, "trade_report_in");
+  assertEquals(result.conflicts, ["terminal_without_issued_invoice"]);
+  // The conflict is recorded but the column IS proved, so the gate is clear.
+  assertEquals(
+    sesStageCutoverGate([{ derived_stage_v2: result.stage }]).ok,
+    true,
+  );
+});
+
+Deno.test("terminal: a raw terminal claim with no evidence at all proves NOTHING", () => {
+  // The SWMS-261059 shape: raw state says completed, no issued invoice, no
+  // current-cycle report, no live assignment. A mechanical fall-through returns
+  // New — but that is not evidence the job is new, and its true column is a
+  // captain question. The engine must refuse rather than pick.
+  const facts = input({ job: { status: "complete" } });
+  const result = deriveSesStageV2(facts);
+  assertEquals(result.stage, "decision_required");
+  assertEquals(result.conflicts, [
+    "terminal_without_issued_invoice",
+    "terminal_without_supporting_evidence",
+  ]);
+  // Explicitly NOT any of the four columns it could have been dropped into.
+  for (const wrong of ["new", "report_ready", "completed", "archive"]) {
+    assert(result.stage !== wrong);
+  }
+});
+
+Deno.test("terminal: an unproved card STOPS the cutover gate, and stays where it is", () => {
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({
+      id: "j1",
+      job_number: "SWMS-261059",
+      status: "complete",
+      board_stage: "report_ready",
+      assignments: [],
+    }),
+  ], { computedAt: NOW });
+
+  // Unresolved, and visibly so.
+  assertEquals(rows[0].derived_stage_v2, "decision_required");
+  assertEquals(rows[0].derived_stage_v2_post_overlay, "decision_required");
+
+  // The gate refuses.
+  const gate = sesStageCutoverGate(rows);
+  assertEquals(gate.ok, false);
+  assertEquals(gate.checked, 1);
+  assertEquals(gate.blocked.length, 1);
+  assertEquals(gate.blocked[0].job_ref, "SWMS-261059");
+  assert(
+    gate.blocked[0].conflicts.includes("terminal_without_supporting_evidence"),
+  );
+
+  // ...and the board is unaffected: the card is still rendered where it was.
+  assertEquals(rows[0].canonical_stage, "report_ready");
+  const ops = projectOpsMakesafeBoard(rows);
+  assertEquals(ops.columns.report_ready.length, 1);
+  // `decision_required` is not an ops column and must never become one here.
+  assertEquals(ops.unmapped_stage_job_ids.length, 0);
+});
+
+Deno.test("gate: a fully proved board passes, and passing is not an authorisation", () => {
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1" }),
+    baseRow({ id: "j2", board_stage: "archive", status: "archived" }),
+  ], { computedAt: NOW });
+  const gate = sesStageCutoverGate(rows);
+  assertEquals(gate.ok, true);
+  assertEquals(gate.blocked, []);
+  assertEquals(gate.engine_version, SES_STAGE_ENGINE_V2_VERSION);
+  // Still no authority: both cards sit exactly where the legacy ladder put them.
+  assertEquals(rows[0].canonical_stage, "allocated");
+  assertEquals(rows[1].canonical_stage, "archive");
+});
+
+Deno.test("terminal: raw archived and cancelled never need corroboration", () => {
+  // Only complete/completed/closed is a claim about work finishing. An archived
+  // or cancelled job state is the operational record itself.
+  assertEquals(
+    deriveSesStageV2(input({ job: { status: "archived" } })).stage,
+    "archive",
+  );
+  assertEquals(
+    deriveSesStageV2(input({ job: { status: "cancelled" } })).stage,
+    "cancelled",
+  );
 });
