@@ -76,7 +76,7 @@ Where they differ, the difference is reported below rather than reconciled.
 | Post-overlay cards changing column | 71 | 71 |
 | Pure M1 vs legacy canonical disagreements | 104 | 104 |
 | Overlay rows / binding today / would unbind | 46 / 42 / 9 | 46 / 42 / 9 |
-| Current columns (new/alloc/TRI/ready/comp/arch) | 36/30/12/24/2/303 | 36/30/12/24/2/303 |
+| Current columns (new/alloc/TRI/ready/comp/arch) | 36/30/12/24/2/303 | 36/30/12/24/2/303 (original stacked-branch snapshot) |
 | Uncorrected candidate columns | 40/57/9/0/39/262 | 40/57/9/0/39/262 |
 
 The 71-card manifest is **identical** to the design's section 4 table, card for
