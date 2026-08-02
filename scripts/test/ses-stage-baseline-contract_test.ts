@@ -236,7 +236,9 @@ Deno.test("population prose drift is observed while version drift still fails", 
     population_contract_version: "ses-board-population/active-v2",
   });
   assertEquals(versionResult.ok, false);
-  assert(versionResult.failures.some((failure) => failure.includes("denominator")));
+  assert(
+    versionResult.failures.some((failure) => failure.includes("denominator")),
+  );
 });
 
 // ── The committed Release 0 artifact itself ─────────────────────────────────

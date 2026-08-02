@@ -969,9 +969,12 @@ must consume them rather than hand-writing the equivalent:
 `scripts/ses-stage-parity-harness.ts` runs BOTH stage engines over one set of
 read-only production reads and is the only tool that answers "did the divergence
 move?". It imports the real ladders (`_deriveMakesafeBoardStage` via the read
-model, and `computeMakesafeStatus`) and must never reimplement either. Baseline:
-71 of 407 cards diverge at 2026-08-01 — see
-`docs/evidence/ses-b0-baseline-generation-2026-08-02.md`.
+model, and `computeMakesafeStatus`) and must never reimplement either. The
+current frozen baseline is documented in
+`docs/evidence/ses-e1-stage-engine-v2-shadow-2026-08-02.md`; its committed
+artifact and verification contract are
+`scripts/ses-e1-stage-baseline-v1.json` and
+`scripts/ses-stage-baseline-contract.ts`.
 
 Pin a contract version literal in ONE place only — the owning module's own suite.
 A second suite restating it is what turned the correct `c1-po-ruling-v2` →
