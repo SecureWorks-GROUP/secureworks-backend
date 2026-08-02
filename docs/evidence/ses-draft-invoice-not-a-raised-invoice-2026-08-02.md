@@ -148,8 +148,12 @@ ruling; **SWMS-26754's does not**. Both are treated in full under "Stop
 conditions".
 
 Nothing else in any published field moved. `m1_pure`, `stage_v2` and
-`stage_v2_post_overlay` are byte-identical on all 407 cards — this change touches
-the legacy visible ladder only. `m1_published` changed on SWMS-26782 alone,
+`stage_v2_post_overlay` are unchanged BEFORE VERSUS AFTER on all 407 cards, so
+this change touches the legacy visible ladder only. Within either run, `m1_pure`
+and `stage_v2` agree on 370 of 407 cards and DISAGREE on 37 (`stage_v2_equals_m1_pure: 370` in both parity artifacts). This divergence is the corrected shadow
+engine's whole purpose, not a defect: it is the certified disputed set the frozen
+E1 baseline exists to track, and this change neither widens nor narrows it.
+`m1_published` changed on SWMS-26782 alone,
 because M1's published value takes its `displayedStatus` short-circuit and that
 card's displayed status changed; that circularity is pre-existing and is exactly
 what `SesStageV2Input` omits `displayedStatus` to avoid.
