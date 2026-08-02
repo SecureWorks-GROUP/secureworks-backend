@@ -1,0 +1,60 @@
+{
+  "contract": "ses-261059-captain-signoff/v1",
+  "mode": "dry-run",
+  "observed": {
+    "job_status": "complete",
+    "job_completed_at": "2026-07-31 06:48:39.196+00",
+    "ses_money_sealed_at": "2026-07-27 13:39:58.134051+00",
+    "substatus": "company_contact_required",
+    "attendance_cycles": 1,
+    "document_types": [
+      "invoice",
+      "makesafe_report",
+      "swms",
+      "work_order"
+    ],
+    "linked_invoice_rows": 0,
+    "unlinked_issued_invoices_on_reference": [
+      {
+        "invoice_number": "INV-1084",
+        "status": "AUTHORISED",
+        "invoice_date": "2026-07-31"
+      }
+    ],
+    "terminal_proof_rows_for_this_job": 1,
+    "terminal_proof_rows_in_table": 1,
+    "board_status_applications": [
+      {
+        "id": 10,
+        "source_status": "new",
+        "after_status": "archive",
+        "applied_at": "2026-07-28 07:56:36.576656+00"
+      }
+    ]
+  },
+  "refusals": [
+    {
+      "code": "terminal_proof_already_recorded",
+      "detail": "1 proof row(s) already exist for this job"
+    }
+  ],
+  "plan": {
+    "job_id": "b88809b7-ee6e-497f-a586-25aea586047c",
+    "job_number": "SWMS-261059",
+    "org_id": "00000000-0000-0000-0000-000000000001",
+    "kind": "verified_historical_closeout",
+    "attendance_cycle_ids": [
+      "20828ff2-6699-4f59-a71f-6c47194444aa"
+    ],
+    "proven_at": "2026-07-31 06:48:39.196+00",
+    "proven_by": "captain-signoff:2026-08-02-swms-261059-and-draft-invoice",
+    "evidence_refs": [
+      "job_documents:0f53885d-95fd-47cb-8787-da94c9e576e8",
+      "job_documents:656231de-321f-4f8c-82ab-665a22e2b952",
+      "job_documents:3b355468-7b80-4dc1-986e-005ce11a2c63",
+      "job_documents:f3d947ed-8243-47b0-8ac1-a867625555bc",
+      "xero_invoices:bc532ac9-71d8-4518-96ac-016c337b1a51",
+      "decision:data/decisions/2026-08-02-swms-261059-and-draft-invoice.md"
+    ]
+  }
+}

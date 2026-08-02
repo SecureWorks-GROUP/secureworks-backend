@@ -36,6 +36,7 @@ import {
   deriveSesStageV2,
   sesStageV2OverlayCandidate,
 } from "./ses_stage_engine_v2.ts";
+import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
 
@@ -226,6 +227,14 @@ export interface CanonicalMakesafeExtras {
   /** R5 — current own-template roof draft per job, for that family only. */
   ownRoofDraftByJobId?: Record<string, any>;
   ownRoofReportDocumentIdsByJobId?: Record<string, Set<string>>;
+  /**
+   * R7 — the append-only terminal-proof ledger, and the attendance-cycle sets
+   * a proof is checked against. Both are read only for the jobs that actually
+   * carry a proof; a caller that omits them leaves every card's derivation
+   * exactly where its other evidence puts it.
+   */
+  terminalProofsByJobId?: Record<string, MakesafeTerminalProofFact[]>;
+  attendanceCycleIdsByJobId?: Record<string, string[]>;
   terminalSyntheticLivefireJobIds?: ReadonlySet<string>;
   computedAt?: string;
 }
@@ -806,6 +815,19 @@ export function buildCanonicalMakesafeRows(
         // so no other family's evidence changes shape.
         ownRoofDraft: extras?.ownRoofDraftByJobId?.[String(base?.id || "")] ??
           null,
+        // R7 — recorded terminal-proof evidence. Present only for the cards
+        // that carry a proof; M1 ignores all three keys.
+        terminalProofs:
+          extras?.terminalProofsByJobId?.[String(base?.id || "")] ??
+            null,
+        attendanceCycleIds:
+          extras?.attendanceCycleIdsByJobId?.[String(base?.id || "")] ?? null,
+        // The base row's own cycle-scoped value first: both `enrichMakesafeBoardJob`
+        // and the parity harness stamp it from `projectCycleScopedEvidence`, which
+        // is the cycle boundary every other evidence read on this card already
+        // honours. The raw detail column is the fallback.
+        currentAttendanceCycleId: base?.attendance_cycle_id ??
+          detail?.attendance_cycle_id ?? null,
       },
       // R4 — the canonical family this row already computed, handed to the
       // shadow engine so it reads a real family instead of re-guessing one.

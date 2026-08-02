@@ -3,6 +3,7 @@ import {
   type Sha256Revision,
 } from "./makesafe_readiness_revision.ts";
 import { MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION } from "./makesafe_computed_status.ts";
+import { makesafeTerminalProofCoversCycleSet } from "./makesafe_terminal_proof.ts";
 
 export const MAKESAFE_STATE_CONTRACT_VERSION = "makesafe-state.v2";
 export const MAKESAFE_BOARD_V2_CONTRACT_VERSION = "makesafe-board.v2";
@@ -744,7 +745,15 @@ export function projectMakesafeStateV2(
   const terminalExact = !authorityInputInvalid &&
     input.terminal_proof.state === "valid" &&
     !!currentCycleId &&
-    sameStrings(input.terminal_proof.attendance_cycle_ids, sortedCycleIds);
+    // The cycle-set coverage rule now lives in ONE place so the shadow stage
+    // engine reads the same contract this projection does. `sortedCycleIds` is
+    // already de-duplicated and, on this branch, provably non-empty (it must
+    // contain `currentCycleId` or the input is a hard projection error), so the
+    // helper is exactly the `sameStrings` test it replaced.
+    makesafeTerminalProofCoversCycleSet(
+      input.terminal_proof.attendance_cycle_ids,
+      sortedCycleIds,
+    );
   const terminalProof: TerminalProofDimension = terminalExact
     ? input.terminal_proof
     : input.terminal_proof.state === "absent"

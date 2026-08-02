@@ -63,12 +63,16 @@ import {
   canonicalSesFamilyFromCard,
   type SesFamilyId,
 } from "./ses_family_matrix.ts";
+import {
+  bindingMakesafeTerminalProof,
+  type MakesafeTerminalProofFact,
+} from "./makesafe_terminal_proof.ts";
 
 /**
  * Bump on any change to what this engine derives. Published on every row so a
  * past measurement stays attributable to the engine that produced it.
  */
-export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r6-shadow";
+export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r7-shadow";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -163,12 +167,43 @@ export interface SesStageV2Result {
 const TRUSTED_COMPLETION_SOURCES: ReadonlyArray<
   { source: string; read: (input: SesStageV2Input) => unknown }
 > = [
+  // R7 — a bound terminal proof states when the work was proved finished, and
+  // it outranks the rest because it is the only source recorded FOR that
+  // purpose. Every other entry is a timestamp on some other record that the
+  // engine is willing to read as a completion time. On a card with no proof
+  // this reads null and the list behaves exactly as it did before.
+  {
+    source: "terminal_proof.proven_at",
+    read: (i) => sesStageBindingTerminalProof(i)?.proven_at,
+  },
   { source: "pack.sent_at", read: (i) => i.evidence?.pack?.sent_at },
   { source: "invoice.invoice_date", read: (i) => i.evidence?.invoiceDate },
   { source: "invoice.created_at", read: (i) => i.evidence?.invoiceCreatedAt },
   { source: "jobs.completed_at", read: (i) => i.job?.completed_at },
   { source: "detail.report_sent_at", read: (i) => i.detail?.report_sent_at },
 ];
+
+/**
+ * R7 — the `makesafe_terminal_proofs` row that covers this card, or null.
+ *
+ * The binding rule is NOT restated here; it is the one in
+ * `makesafe_terminal_proof.ts` that `makesafe_state_projection.ts` already
+ * applies, so the two consumers of the contract cannot answer differently.
+ *
+ * This is a READ of recorded evidence, not a second way to assert a stage. The
+ * proof names its own producer (`proven_by`) and the artifacts it was proved
+ * against (`evidence_refs`); this engine consumes that record and adds nothing
+ * to it. A card with no proof is entirely unaffected.
+ */
+export function sesStageBindingTerminalProof(
+  input: SesStageV2Input,
+): MakesafeTerminalProofFact | null {
+  return bindingMakesafeTerminalProof(
+    input.evidence?.terminalProofs,
+    input.evidence?.attendanceCycleIds,
+    input.evidence?.currentAttendanceCycleId,
+  );
+}
 
 export interface SesStageCompletionClock {
   at: number | null;
@@ -527,6 +562,33 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
       conflicts,
     };
   }
+  // R7 — a bound terminal proof closes the card.
+  //
+  // This sits ABOVE the raw complete/closed branch deliberately. That branch
+  // exists because `jobs.status` is a CLAIM about the job that needs
+  // corroborating; a terminal proof is not a claim, it is the recorded evidence
+  // contract for "this card's work is finished", carrying its own producer, its
+  // own timestamp and the artifacts it was proved against. Reaching the invoice
+  // test first would let a card with real recorded proof fail on the absence of
+  // a LOCAL invoice mirror row — which is exactly the shape of card the proof
+  // contract exists to close.
+  //
+  // It sits BELOW cancelled and archived because those are explicit current
+  // states of the job itself, and a proof does not revive a cancelled card.
+  const terminalProof = sesStageBindingTerminalProof(input);
+  if (terminalProof) {
+    const terminal = sesStageCompletedStage(
+      input,
+      `a ${terminalProof.kind} terminal proof covers this card's exact attendance-cycle set`,
+    );
+    return {
+      ...base,
+      stage: terminal.stage,
+      reasons: terminal.reasons,
+      missing: [],
+      conflicts: [...conflicts, ...terminal.conflicts],
+    };
+  }
   if (["complete", "completed", "closed"].includes(jobStatus)) {
     // R3 — the raw terminal value is a CLAIM, not proof. It is eligible to
     // close a card only when an issued invoice corroborates it. Uncorroborated,
@@ -727,11 +789,18 @@ export interface SesStageCutoverGateResult {
  * The cutover gate.
  *
  * A card the corrected engine refuses to place STOPS a cutover. That is the
- * whole point of `decision_required`: `SWMS-261059` says completed, has no
+ * whole point of `decision_required`: `SWMS-261059` said completed, had no
  * issued invoice, no current-cycle report and no live assignment, and its true
- * column is a captain question. Dropping it into New, Docs Ready, Completed or
+ * column was a captain question. Dropping it into New, Docs Ready, Completed or
  * Archive because the code has to return something is exactly the failure this
  * refuses.
+ *
+ * That card is also the worked example of how such a question is ANSWERED: the
+ * captain opened it, read the four artifacts on it and signed it off, and that
+ * decision was recorded as a `makesafe_terminal_proofs` row naming him as the
+ * producer. The engine then derived `completed` from the evidence — nobody
+ * wrote a stage. See
+ * `docs/evidence/ses-261059-captain-signoff-2026-08-02.md`.
  *
  * This gate reads the published advisory value and grants nothing. It cannot
  * move a card, and passing it is not a cutover authorisation — Release 12 is,

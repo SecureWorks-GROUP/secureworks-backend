@@ -1078,9 +1078,21 @@ every terminal path, rejects a missing trusted completion time instead of
 guessing, and refuses the raw complete/completed/closed shortcut unless an
 issued invoice corroborates it. A raw terminal claim with no supporting evidence
 is `decision_required`, and `sesStageCutoverGate` makes such a card STOP a
-cutover rather than be dropped into a plausible column — `SWMS-261059` is the
-live one and its true column is an open captain question. Never resolve it in
-code.
+cutover rather than be dropped into a plausible column. Never resolve such a
+card in code — resolve it by recording the ruling as EVIDENCE and letting the
+engine derive from it.
+
+`SWMS-261059` is the worked example of that, and the gate is clear as of
+2026-08-02. `makesafe_terminal_proofs` is the append-only terminal-evidence
+contract (exact job, exact attendance-cycle SET, non-empty `evidence_refs`,
+free-text `proven_by`), and `makesafe_terminal_proof.ts` holds the ONE binding
+rule that both `makesafe_state_projection.ts` and `ses_stage_engine_v2.ts`
+read, so a proof cannot bind in one and not the other. `kind` is the closed
+evidence-TYPE vocabulary and `proven_by` is the producer — that split is what
+lets a human authority be attributed without a migration. A re-attendance
+changes the cycle set and unbinds a proof with nothing having to revoke it.
+Ruling, the producer analysis and the manual-back-end-completion linkage
+observations: `docs/evidence/ses-261059-captain-signoff-2026-08-02.md`.
 
 `scripts/ses-stage-parity-harness.ts` remains the only tool that answers "did
 the divergence move?"; it reads v2's published value rather than recomputing it.

@@ -8,6 +8,8 @@
 // Type-only. `ses_family_matrix.ts` imports nothing, so this cannot cycle, and
 // the import is erased at runtime.
 import type { SesFamilyId } from "./ses_family_matrix.ts";
+// Type-only, same reason: `makesafe_terminal_proof.ts` imports nothing.
+import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
 
 export const MAKESAFE_COMPLETION_PHOTO_FLOOR = 5;
 
@@ -125,6 +127,18 @@ export interface MakesafeStatusEvidence {
     cycle_number?: number | null;
     report_doc_id?: string | null;
   } | null;
+  /**
+   * The card's `makesafe_terminal_proofs` rows and the attendance-cycle set
+   * they are checked against. `computeMakesafeStatus` IGNORES both: M1's
+   * published value is what today's certificates grade against and must stay
+   * byte-identical. The corrected shadow engine reads them because a terminal
+   * proof is the recorded, producer-attributed evidence that a card's work is
+   * finished, and it is the only such record for a closeout that happened
+   * outside the release flow.
+   */
+  terminalProofs?: MakesafeTerminalProofFact[] | null;
+  attendanceCycleIds?: string[] | null;
+  currentAttendanceCycleId?: string | null;
 }
 
 export interface MakesafeStatusInput {
