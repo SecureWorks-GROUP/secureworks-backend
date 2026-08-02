@@ -12,6 +12,7 @@ import {
   normalizeReportExternalLinks,
   stripEmailHtmlForTrade,
   urlIsBuilderPortalLink,
+  urlLooksLikeAssetOrTracking,
 } from "./makesafe_email_links.ts";
 
 // ── Intake item 4 (nudge-email pattern) — idempotent add-only link merge ──────
@@ -68,8 +69,88 @@ Deno.test("item4: urlIsBuilderPortalLink recognises primeeco + share-path links"
   assert(urlIsBuilderPortalLink("https://primeeco.tech/share/a3c98fd6-b45d"));
   assert(urlIsBuilderPortalLink("https://documents.primeeco.tech/r/abc"));
   assert(urlIsBuilderPortalLink("https://portal.example.com/share/xyz"));
+  // Expired share links are still portals — liveness is never a filter input.
+  assert(
+    urlIsBuilderPortalLink(
+      "https://primeeco.tech/share/expired-token-still-a-portal",
+    ),
+  );
   assertEquals(urlIsBuilderPortalLink("https://www.google.com/maps"), false);
   assertEquals(urlIsBuilderPortalLink("not a url"), false);
+});
+
+// F5 — branding images / trackers must never pass the portal predicate or the
+// merge boundary (ses-links-truth-audit-v1: 59 image rows + 3 SES trackers).
+const F5_LOGO =
+  "https://documents.primeeco.tech/15276239-d244-11ee-8228-0a39957d26b4/mlb_new_logo.png";
+const F5_COMPANY_JPG =
+  "https://s3.ap-southeast-2.amazonaws.com/cdn.primeeco.tech/company/504/brand.jpg";
+const F5_SIG_PNG =
+  "https://documents.primeeco.tech/15276239-d244-11ee-8228-0a39957d26b4/mlb_sig_image_1.png";
+const F5_TRACKER =
+  "https://xw2vdtj6.r.ap-southeast-2.awstrack.me/I0/0108019eabcdef/1/1";
+const F5_SHARE =
+  "https://primeeco.tech/share/7d74ea48-89bc-4e6e-b7b4-8a1e433b7d7c";
+
+Deno.test("F5: urlIsBuilderPortalLink rejects image/CDN asset paths on primeeco hosts", () => {
+  // Host alone used to return true — documents.primeeco.tech/.../logo.png.
+  assertEquals(urlIsBuilderPortalLink(F5_LOGO), false);
+  assertEquals(urlIsBuilderPortalLink(F5_COMPANY_JPG), false);
+  assertEquals(urlIsBuilderPortalLink(F5_SIG_PNG), false);
+  assert(urlLooksLikeAssetOrTracking(F5_LOGO));
+  assert(urlLooksLikeAssetOrTracking(F5_COMPANY_JPG));
+});
+
+Deno.test("F5: urlIsBuilderPortalLink rejects SES open/click trackers", () => {
+  assertEquals(urlIsBuilderPortalLink(F5_TRACKER), false);
+  assert(urlLooksLikeAssetOrTracking(F5_TRACKER));
+});
+
+Deno.test("F5: genuine share link still accepted (including aged/expired tokens)", () => {
+  assert(urlIsBuilderPortalLink(F5_SHARE));
+  assertEquals(urlLooksLikeAssetOrTracking(F5_SHARE), false);
+  // A primeeco host WITHOUT a share path is not a portal.
+  assertEquals(
+    urlIsBuilderPortalLink("https://documents.primeeco.tech/some/uuid/path"),
+    false,
+  );
+  assertEquals(urlIsBuilderPortalLink("https://primeeco.tech/"), false);
+});
+
+Deno.test("F5: mergeDeterministicAndClaudeLinks drops Claude image + tracker URLs", () => {
+  const merged = mergeDeterministicAndClaudeLinks([], {
+    portal_links: [
+      { label: "Builder Portal", url: F5_LOGO, kind: "builder_portal" },
+      { label: "Builder Portal", url: F5_TRACKER, kind: "builder_portal" },
+      { label: "Company", url: F5_COMPANY_JPG, kind: "builder_portal" },
+      { label: "Roof report link", url: F5_SHARE, kind: "roof_report" },
+    ],
+  });
+  assertEquals(merged.map((l) => l.url), [F5_SHARE]);
+  assertEquals(merged[0].kind, "roof_report");
+});
+
+Deno.test("F5: normalizeReportExternalLinks rejects image/tracker portal claims", () => {
+  const links = normalizeReportExternalLinks({
+    portal_links: [
+      { label: "Logo", url: F5_LOGO, kind: "builder_portal" },
+      { label: "Track", url: F5_TRACKER, kind: "builder_portal" },
+    ],
+    portal_link: F5_SIG_PNG,
+  });
+  assertEquals(links.length, 0);
+});
+
+Deno.test("F5: extractBuilderEmailLinks never captures img/CDN/tracker URLs", () => {
+  const body = `
+    Please complete the roof report
+    ${F5_SHARE}
+    <img src="${F5_LOGO}">
+    ${F5_COMPANY_JPG}
+    ${F5_TRACKER}
+  `;
+  const links = extractBuilderEmailLinks(body);
+  assertEquals(links.map((l) => l.url), [F5_SHARE]);
 });
 
 Deno.test("item4: a primeeco share link is captured even on a footer-ish line", () => {
@@ -143,35 +224,35 @@ Deno.test("extractBuilderEmailLinks captures multiple report email-body URLs and
 
 Deno.test("mergeDeterministicAndClaudeLinks keeps deterministic URLs when Claude omits them", () => {
   const deterministic = extractBuilderEmailLinks(`
-    Roof report https://prime.example/roof/123
-    Quote https://prime.example/quote/123
+    Roof report https://primeeco.tech/share/roof-123
+    Quote https://primeeco.tech/share/quote-123
   `);
   const merged = mergeDeterministicAndClaudeLinks(deterministic, {
     portal_links: [{
       label: "Roof report from Prime",
-      url: "https://prime.example/roof/123",
+      url: "https://primeeco.tech/share/roof-123",
       kind: "roof_report",
     }],
   });
 
   assertEquals(merged.length, 2);
   assertEquals(merged[0].label, "Roof report from Prime");
-  assertEquals(merged[1].url, "https://prime.example/quote/123");
+  assertEquals(merged[1].url, "https://primeeco.tech/share/quote-123");
 });
 
 Deno.test("normalizeReportExternalLinks supports new arrays and legacy portal_link", () => {
   const links = normalizeReportExternalLinks({
     portal_links: [{
       label: "Assessment",
-      url: "https://prime.example/assessment/1",
+      url: "https://primeeco.tech/share/assessment-1",
       kind: "assessment_report",
     }],
-    portal_link: "https://prime.example/assessment/1",
+    portal_link: "https://primeeco.tech/share/assessment-1",
   });
 
   assertEquals(links, [{
     label: "Assessment",
-    url: "https://prime.example/assessment/1",
+    url: "https://primeeco.tech/share/assessment-1",
     kind: "assessment_report",
     source: "claude",
   }]);

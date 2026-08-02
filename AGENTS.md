@@ -1,5 +1,17 @@
 # SecureWorks Agent Instructions
 
+## Builder Portal Links Are Share Paths, Not Host Names
+
+`urlIsBuilderPortalLink` in `supabase/functions/ops-api/makesafe_email_links.ts`
+requires a share/report-style path and structurally rejects image/CDN/tracking
+URLs. A `*.primeeco.tech` host alone is never enough —
+`documents.primeeco.tech/.../logo.png` is not a portal. The merge boundary
+(`mergeDeterministicAndClaudeLinks` / `normalizeReportExternalLinks`) is the
+load-bearing filter; ops/trade display mirrors the same predicate so historical
+polluted `external_links` rows stay hidden without a production strip. Do not
+treat link liveness as a stage input (expiry is age, not failure). Tests:
+`makesafe_email_links_test.ts` (F5), `dashboard/scripts/test-f5-portal-link-hygiene.js`.
+
 ## Acceptance Deposit Invoice Invariant
 
 The quote self-accept flow (`send-quote` /accept → `ops-api`

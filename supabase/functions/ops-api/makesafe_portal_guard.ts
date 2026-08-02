@@ -170,7 +170,6 @@ export function extractPortalLinks(externalLinks: unknown): CaptureLink[] {
     let url = "";
     let label = "Builder portal";
     let kind = "builder_portal";
-    let declaredPortalKind = false;
     if (typeof raw === "string") {
       url = raw.trim();
     } else if (raw && typeof raw === "object") {
@@ -179,22 +178,20 @@ export function extractPortalLinks(externalLinks: unknown): CaptureLink[] {
         label = raw.label.trim();
       }
       if (typeof raw.kind === "string" && raw.kind.trim()) {
-        const rawKind = raw.kind.trim();
-        kind = canonicalizeKind(rawKind);
-        declaredPortalKind = kind !== "builder_portal" ||
-          ["builder_portal", "portal"].includes(
-            rawKind.toLowerCase().replace(/[\s-]+/g, "_"),
-          );
+        kind = canonicalizeKind(raw.kind.trim());
       }
     }
     if (!url) continue;
-    const isPortal = declaredPortalKind && REPORT_LINK_KINDS.has(kind) ||
-      urlIsBuilderPortalLink(url);
-    if (!isPortal) continue;
+    // Declared kind alone is NOT enough: historical Claude rows stored logos
+    // as kind=builder_portal. A URL must pass the genuine-portal predicate
+    // (share-style path, not image/CDN/tracking). Liveness is not checked —
+    // an expired share is still a portal link for capture routing.
+    if (!urlIsBuilderPortalLink(url)) continue;
+    const role = REPORT_LINK_KINDS.has(kind) ? kind : "builder_portal";
     const key = url.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ url, label, role: kind });
+    out.push({ url, label, role });
   }
   return out;
 }

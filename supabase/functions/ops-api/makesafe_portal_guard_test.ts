@@ -194,6 +194,36 @@ Deno.test("queue: no portal links -> empty", () => {
   assertEquals(extractPortalLinks(undefined).length, 0);
 });
 
+// F5 — declared kind=builder_portal no longer launders branding/tracker URLs
+// into the capture queue / portal read path.
+Deno.test("F5 queue: image and tracker URLs dropped even when kind=builder_portal", () => {
+  const links = extractPortalLinks([
+    {
+      label: "Builder Portal",
+      url:
+        "https://documents.primeeco.tech/15276239/mlb_new_logo.png",
+      kind: "builder_portal",
+    },
+    {
+      label: "Builder Portal",
+      url:
+        "https://xw2vdtj6.r.ap-southeast-2.awstrack.me/I0/0108019e/1/1",
+      kind: "builder_portal",
+    },
+    {
+      label: "Roof report",
+      url: "https://primeeco.tech/share/expired-but-still-a-portal",
+      kind: "roof_report",
+    },
+  ]);
+  assertEquals(links.length, 1);
+  assertEquals(
+    links[0].url,
+    "https://primeeco.tech/share/expired-but-still-a-portal",
+  );
+  assertEquals(links[0].role, "roof_report");
+});
+
 Deno.test("assessment proof: scope is the quote member and all three headless captures are required", () => {
   const links = [
     {
