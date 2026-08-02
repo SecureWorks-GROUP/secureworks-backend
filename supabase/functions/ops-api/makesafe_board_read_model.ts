@@ -19,8 +19,43 @@ import {
   canonicalSesFamilyFromCard,
   sesFamilyLabel,
 } from "./ses_family_matrix.ts";
+import {
+  canonicalSesPortalSourceUrl,
+  isSesSha256,
+  SES_PORTAL_CAPTURE_PRODUCER,
+} from "./ses_portal_capture_contract.ts";
+import { extractPortalLinks } from "./makesafe_portal_guard.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
+export const MAKESAFE_LIVE_BOARD_EXCLUDED_JOB_STATUSES = [
+  "cancelled",
+  "archived",
+  "lost",
+] as const;
+export const MAKESAFE_ALL_HISTORY_EXCLUDED_JOB_STATUSES = [
+  "cancelled",
+  "lost",
+] as const;
+
+/** Shared by the canonical loader and read-only observers. */
+export function makesafeBoardJobStatusExclusionFilter(
+  allHistory: boolean,
+): string {
+  const statuses = allHistory
+    ? MAKESAFE_ALL_HISTORY_EXCLUDED_JOB_STATUSES
+    : MAKESAFE_LIVE_BOARD_EXCLUDED_JOB_STATUSES;
+  return `("${statuses.join('","')}")`;
+}
+
+/** Membership in the canonical live board, excluding its history-only rows. */
+export function isCanonicalLiveMakesafeBoardJobStatus(value: unknown): boolean {
+  const status = String(value ?? "").trim().toLowerCase();
+  return !!status &&
+    !(MAKESAFE_LIVE_BOARD_EXCLUDED_JOB_STATUSES as readonly string[]).includes(
+      status,
+    );
+}
+
 const SYNTHETIC_LIVEFIRE_MARKER =
   /^SWG-SES-LIVEFIRE-TEST-ONLY-[0-9A-F]{8}-[0-9A-F]{4}-[1-8][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/;
 export const OPS_MAKESAFE_STAGES = [
@@ -123,8 +158,144 @@ export interface CanonicalMakesafeExtras {
   intakeCaseByJobId?: Record<string, any>;
   holdsByJobId?: Record<string, MakesafeStatusHold>;
   statusApplicationsByJobId?: Record<string, any>;
+  portalCaptureRowsByJobId?: Record<string, any[]>;
   terminalSyntheticLivefireJobIds?: ReadonlySet<string>;
   computedAt?: string;
+}
+
+function ledgerRoleToBoardRole(value: unknown): string | null {
+  const role = token(value);
+  if (role === "roofreport") return "roof_report";
+  if (role === "assessment") return "assessment_report";
+  if (role === "photos") return "photos";
+  if (role === "scope") return "quote";
+  return null;
+}
+
+function linkRoleToBoardRole(value: unknown): string | null {
+  const role = token(value);
+  if (role === "roofreport") return "roof_report";
+  if (role === "assessmentreport") return "assessment_report";
+  if (role === "photos") return "photos";
+  if (role === "quote") return "quote";
+  return null;
+}
+
+function validLedgerScreenshot(row: any): boolean {
+  return typeof row?.screenshot_object_key === "string" &&
+    row.screenshot_object_key.startsWith(
+      "makesafe-docket-artifacts/portal-captures/",
+    ) &&
+    row?.screenshot_media_type === "image/png" &&
+    isSesSha256(row?.screenshot_content_hash) &&
+    Number(row?.screenshot_size_bytes) > 0;
+}
+
+function portalCaptureIdentity(capture: MakesafePortalCapture): string | null {
+  const role = token(capture?.role);
+  const canonicalRole = role === "roofreport"
+    ? "roof_report"
+    : ["assessment", "assessmentreport"].includes(role)
+    ? "assessment"
+    : role === "photos"
+    ? "photos"
+    : ["scope", "quote"].includes(role)
+    ? "scope"
+    : null;
+  const url = canonicalSesPortalSourceUrl(capture?.url);
+  return canonicalRole && url ? `${canonicalRole}\n${url}` : null;
+}
+
+/**
+ * Project only exact current-cycle portal revisions that still bind to the
+ * card's typed source URL and carry the non-empty builder reference enforced
+ * by the U4 record endpoint. When the base card also exposes that reference it
+ * must match. The projection does not derive or move the canonical stage; it
+ * supplies existing evidence to M1.
+ */
+export function portalCapturesFromLedger(
+  base: any,
+  rows: any[],
+): MakesafePortalCapture[] {
+  const detail = base?.makesafe_details || {};
+  const jobId = String(base?.id || "");
+  const attendanceCycleId = String(detail?.attendance_cycle_id || "");
+  if (!jobId || !attendanceCycleId) return [];
+
+  const builderReference = String(
+    detail?.external_ref ?? base?.external_ref ?? "",
+  ).trim();
+  const reportType = token(
+    detail?.report_type || base?.metadata?.makesafe_job_family,
+  );
+  const isRoofPortal = [
+    "roofreport",
+    "ordinaryroofportal",
+    "owntemplateroof",
+  ].includes(reportType);
+  const sourceKeys = new Set(
+    extractPortalLinks(detail?.external_links).flatMap((link) => {
+      const role = linkRoleToBoardRole(link.role) ||
+        (token(link.role) === "builderportal" && isRoofPortal
+          ? "roof_report"
+          : null);
+      const url = canonicalSesPortalSourceUrl(link.url);
+      return role && url ? [`${role}\n${url}`] : [];
+    }),
+  );
+  const currentCycleNumber = Number(
+    detail?.cycle_number ?? base?.cycle_number ?? 1,
+  );
+  const captures: MakesafePortalCapture[] = [];
+  const seen = new Set<string>();
+
+  const ordered = [...(rows || [])].sort((a, b) =>
+    Number(b?.makesafe_fact_version || 0) -
+      Number(a?.makesafe_fact_version || 0) ||
+    String(b?.captured_at || "").localeCompare(String(a?.captured_at || ""))
+  );
+  for (const row of ordered) {
+    const role = ledgerRoleToBoardRole(row?.role);
+    const url = canonicalSesPortalSourceUrl(row?.source_url);
+    const result = String(row?.capture_result || "").toLowerCase();
+    const expectedStatus = result === "done"
+      ? "verified"
+      : result === "not_done"
+      ? "captured"
+      : result === "unreachable"
+      ? "rejected"
+      : null;
+    const rowBuilderReference = String(row?.builder_reference ?? "").trim();
+    const identityKey = role && url ? `${role}\n${url}` : "";
+    if (
+      !role || !url || !expectedStatus || seen.has(identityKey) ||
+      String(row?.job_id || "") !== jobId ||
+      String(row?.attendance_cycle_id || "") !== attendanceCycleId ||
+      !rowBuilderReference ||
+      (builderReference && rowBuilderReference !== builderReference) ||
+      row?.capture_producer !== SES_PORTAL_CAPTURE_PRODUCER ||
+      String(row?.status || "").toLowerCase() !== expectedStatus ||
+      !isSesSha256(row?.source_content_hash) ||
+      !sourceKeys.has(identityKey) ||
+      (result !== "unreachable" && !validLedgerScreenshot(row))
+    ) {
+      continue;
+    }
+    seen.add(identityKey);
+    captures.push({
+      status: result,
+      role,
+      url,
+      signal: String(row?.signal || ""),
+      locked: result === "done",
+      screenshot: result === "unreachable" ? null : row.screenshot_object_key,
+      cycle_number: currentCycleNumber,
+      // Additive provenance for the canonical row. M1 ignores these keys.
+      revision_id: row?.id || null,
+      captured_at: row?.captured_at || null,
+    } as MakesafePortalCapture);
+  }
+  return captures;
 }
 
 const txt = (v: unknown): string | null => String(v ?? "").trim() || null;
@@ -453,7 +624,20 @@ export function buildCanonicalMakesafeRows(
       report_delivery: base?.metadata?.report_delivery ||
         detail?.report_delivery,
     });
-    const portalCaptures = portalCapturesFromDetail(base);
+    const ledgerPortalCaptures = portalCapturesFromLedger(
+      base,
+      extras.portalCaptureRowsByJobId?.[base?.id] || [],
+    );
+    const ledgerCaptureIdentities = new Set(
+      ledgerPortalCaptures.map(portalCaptureIdentity).filter(Boolean),
+    );
+    const portalCaptures = [
+      ...ledgerPortalCaptures,
+      ...portalCapturesFromDetail(base).filter((capture) => {
+        const identity = portalCaptureIdentity(capture);
+        return !identity || !ledgerCaptureIdentities.has(identity);
+      }),
+    ];
     const hold = extras.holdsByJobId?.[base?.id] || null;
     const rawPhotoCount = Number(extras.photoCountByJobId?.[base?.id] || 0);
     const photoCount = photoCountForCurrentCycle(
@@ -558,6 +742,14 @@ export function buildCanonicalMakesafeRows(
         has_current_portal_capture:
           computation.job_type !== "physical_makesafe" &&
           reportIn.satisfied,
+        portal_capture_revisions: ledgerPortalCaptures.map((capture: any) => ({
+          id: capture.revision_id || null,
+          role: capture.role || null,
+          status: capture.status || null,
+          signal: capture.signal || null,
+          captured_at: capture.captured_at || null,
+          screenshot_available: !!capture.screenshot,
+        })),
       },
       // U2-S1 additive spine keys (nullable-safe for pre-migration rows).
       attendance_cycle_id: base?.attendance_cycle_id ?? null,

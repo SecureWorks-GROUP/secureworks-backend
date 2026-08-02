@@ -147,6 +147,18 @@ invoice is authoritative close-out proof even when historical typed portal
 captures are absent. Current archived/completed/cancelled display stages and
 terminal job states cannot be revived.
 
+The F7 Prime observer is read-only and may plan evidence revisions, but only
+the existing `record_ses_portal_capture_evidence` contract may append rows to
+`makesafe_portal_capture_revisions`. The board accepts a ledger row only when
+it matches the card's current attendance cycle, typed current-cycle portal
+URL, builder reference, approved producer, source hash, result/status pair,
+and the screenshot requirement for reachable results. Accepted rows replace
+older embedded capture detail for the same role and URL; they provide evidence
+to this engine but never derive or move `canonical_stage`. The observer may
+retain archived and other off-board observations in its wider read-only
+population, but the canonical live-board partition uses the shared status
+predicate and is reported separately.
+
 The raw projection stage is returned as `declared_stage`. A captain-approved
 transition changes `canonical_stage` only through the latest applicable row in
 the append-only `makesafe_board_status_applications` ledger. It never rewrites
