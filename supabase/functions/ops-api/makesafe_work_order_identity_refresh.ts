@@ -205,43 +205,21 @@ export async function refreshMakesafeIdentityAfterWorkOrderAttach(
     builder_work_order_number: decision.identity.builder_work_order_number,
     builder_po_number: decision.identity.builder_po_number,
   };
-  const { error: detailUpdateError } = await client
-    .from("makesafe_job_details")
-    .update({ external_ref: externalRef })
-    .eq("job_id", input.jobId);
-  if (detailUpdateError) {
-    throw new Error(
-      `work-order identity detail correction failed: ${
-        detailUpdateError.message || detailUpdateError
-      }`,
-    );
-  }
-  const { error: jobUpdateError } = await client
-    .from("jobs")
-    .update({ metadata })
-    .eq("id", input.jobId);
-  if (jobUpdateError) {
-    throw new Error(
-      `work-order identity job correction failed: ${
-        jobUpdateError.message || jobUpdateError
-      }`,
-    );
-  }
-  const { error: eventError } = await client.from("job_events").insert({
-    job_id: input.jobId,
-    event_type: "makesafe_work_order_identity_corrected",
-    detail_json: {
-      document_id: input.documentId,
-      prior_instruction_keys: decision.currentKeys,
-      corrected_instruction_key: decision.incomingKey,
-      reason: decision.reason,
+  const { error } = await client.rpc(
+    "apply_makesafe_work_order_identity_correction",
+    {
+      p_job_id: input.jobId,
+      p_external_ref: externalRef,
+      p_metadata: metadata,
+      p_document_id: input.documentId,
+      p_prior_instruction_keys: decision.currentKeys,
+      p_corrected_instruction_key: decision.incomingKey,
+      p_reason: decision.reason,
     },
-  });
-  if (eventError) {
+  );
+  if (error) {
     throw new Error(
-      `work-order identity correction event failed: ${
-        eventError.message || eventError
-      }`,
+      `work-order identity correction transaction failed: ${error.message || error}`,
     );
   }
   return decision;

@@ -16,6 +16,7 @@ function refreshClient(input: {
   };
   const job = { id: "job-1", metadata: structuredClone(input.metadata) };
   const events: any[] = [];
+  const rpcCalls: any[] = [];
   const from = (table: string) => {
     const query: any = {
       select: () => query,
@@ -43,7 +44,32 @@ function refreshClient(input: {
     };
     return query;
   };
-  return { client: { from }, detail, job, events };
+  return {
+    client: {
+      from,
+      rpc: (name: string, args: any) => {
+        rpcCalls.push({ name, args });
+        if (name === "apply_makesafe_work_order_identity_correction") {
+          detail.external_ref = args.p_external_ref;
+          job.metadata = args.p_metadata;
+          events.push({
+            event_type: "makesafe_work_order_identity_corrected",
+            detail_json: {
+              document_id: args.p_document_id,
+              prior_instruction_keys: args.p_prior_instruction_keys,
+              corrected_instruction_key: args.p_corrected_instruction_key,
+              reason: args.p_reason,
+            },
+          });
+        }
+        return Promise.resolve({ data: null, error: null });
+      },
+    },
+    detail,
+    job,
+    events,
+    rpcCalls,
+  };
 }
 
 Deno.test("attach identity refresh fills a missing key from the new builder WO", () => {
@@ -111,8 +137,8 @@ Deno.test("attach identity refresh persists a correction and its visible event",
   assertEquals(db.detail.external_ref, "MLB-RR-26836PO-57514");
   assertEquals(db.job.metadata.external_ref, "MLB-RR-26836PO-57514");
   assertEquals(
-    db.events[0].event_type,
-    "makesafe_work_order_identity_corrected",
+    db.rpcCalls[0].name,
+    "apply_makesafe_work_order_identity_correction",
   );
 });
 
