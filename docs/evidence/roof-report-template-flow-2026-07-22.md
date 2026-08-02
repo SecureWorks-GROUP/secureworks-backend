@@ -46,6 +46,14 @@ Source: `secureworks-makesafe-reporting/references/pricing-and-invoice-rules.md`
 is never priced without the answer. Access/scope beyond a plain double storey is
 scaled manually on the docket at release.
 
+On forward make-safe intake, an ordinary roof-report work-order instruction may
+provide that answer when it directly qualifies the ordered product (for example,
+“single storey roof report”). Intake records that value as the structured
+`jobs.metadata.storeys` fact consumed by pricing; the pricing path does not parse
+narrative. Instructions with no product-qualified storey, conflicting counts, or
+three or more storeys record no fact and remain blocked for a human price. This
+is forward-only and does not backfill existing cards.
+
 ## Field set
 
 Mirrors an MLB / Prime-portal "Roof Report" (generic + A&G/RAC variants),
