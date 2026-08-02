@@ -533,6 +533,13 @@ export function sesStageDocsReady(
     };
   }
 
+  if (input.evidence?.packState !== "READY") {
+    return {
+      satisfied: false,
+      missing: ["a current-cycle READY draft pack"],
+    };
+  }
+
   const missing: string[] = [];
   const pack = input.evidence?.pack;
 

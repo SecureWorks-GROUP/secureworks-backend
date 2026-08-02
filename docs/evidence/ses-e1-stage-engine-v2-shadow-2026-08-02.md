@@ -737,6 +737,16 @@ inputs with a recorded producer, and neither declares a stage. And nothing here
 asks anyone to classify a job — the family arrives from
 `canonicalSesFamilyFromCard`, because the card already knows what it is.
 
+**READY is explicit.** Firstmate ruling, 2026-08-02: `sesStageDocsReady` retains
+the existing `docsReady` containment gate but additionally requires
+`packState === READY`; `READY_TO_BUILD` is refused. The independent
+reporting-skill teardown corroborated the distinction: `READY_TO_BUILD` is the
+create-the-invoice-at-send-time path, not a pack that is one click from sending.
+The live measurement found zero `makesafe_docket_revisions` rows and
+`review_state` NULL on all 68 `makesafe_report_packs` rows, so no live pack
+carried either state. This is a contract-definition tightening, not a measured
+blast change, and the live parity run could not exercise it.
+
 **The minimum negative rule is retained and proved, not just stated.**
 `sesStageDocsReady` calls the existing `docsReady` first and can only subtract
 from it, so no card can reach Docs Ready here that the existing rule refuses. A
