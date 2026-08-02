@@ -276,6 +276,7 @@ import { DETERMINISTIC_INTAKE_VERSION } from './makesafe_deterministic_intake.ts
 import { SYNTHETIC_LIVEFIRE_MARKER_PREFIX } from './makesafe_synthetic_livefire.ts'
 import {
   canonicalSesFamilyFromCard,
+  resolveSesFamilyMatrixRow,
   SES_FAMILY_MATRIX_VERSION,
 } from './ses_family_matrix.ts'
 import {
@@ -13240,7 +13241,7 @@ function makesafeCompletedAt(job: any, detail: any, invoice: any): string | null
 }
 
 // MLB (ML Builders / Major Loss Builders) identity. SWMS is a hard close-out
-// requirement only for MLB-company make-safes, not universally. We detect MLB
+// requirement only for MLB physical make-safes, not universally. We detect MLB
 // defensively from slug, company name, or the builder reference prefix because
 // the canonical company slug is not hard-coded here (see PR notes for review).
 export function _isMakesafeMlbCompany(detail: any, job: any): boolean {
@@ -13258,8 +13259,8 @@ export function _isMakesafeMlbCompany(detail: any, job: any): boolean {
 }
 
 // B4 (Wave 0): Western Building / Builderwest identity. Mirrors _isMakesafeMlbCompany.
-// Western Building and Builderwest are the same operator group for make-safe purposes —
-// they use the MLB-style hire card and require a SWMS like MLB.
+// Western Building and Builderwest are the same operator group for portal routing,
+// but Captain ruling 2026-08-01 explicitly excludes them from the SWMS requirement.
 // Slug slugs: 'builderwest', 'western-building'. Ref prefixes: 'BWCWA', 'WB'.
 export function _isMakesafeWesternCompany(detail: any, job: any): boolean {
   const slug = String(
@@ -13275,8 +13276,37 @@ export function _isMakesafeWesternCompany(detail: any, job: any): boolean {
   return false
 }
 
+// Captain ruling 2026-08-01: SWMS is required only for MLB physical make-safe
+// work. Resolve the persisted family through the sealed matrix so report-only
+// and non-MLB cards cannot acquire a close-out requirement from builder identity
+// alone. Legacy MLB cards that predate the family stamp retain the same physical
+// fallback as the existing send attachment path: report_type means report-only;
+// otherwise they are treated as physical until the canonical family is restored.
+export function _requiresMakesafeSwms(detail: any, job: any): boolean {
+  if (!_isMakesafeMlbCompany(detail, job) || !!detail?.report_type) return false
+
+  const metadata = job?.metadata || {}
+  const family = canonicalSesFamilyFromCard({
+    makesafe_job_family: metadata.makesafe_job_family ?? job?.ses_family,
+    insurance_job_type: metadata.insurance_job_type,
+    own_template_requested: metadata.own_template_requested,
+    strata: metadata.strata,
+    report_delivery: metadata.report_delivery,
+  })
+  if (family === 'unknown') return true
+
+  const matrix = resolveSesFamilyMatrixRow({
+    builder_key: 'MLB',
+    family,
+    strata: metadata.strata === true,
+    own_template_requested: metadata.own_template_requested === true,
+  })
+  return matrix.ok && !matrix.row.report_only && matrix.row.swms_policy === 'always'
+}
+
 // Close-out doc gate. A make-safe may only resolve to completed/archive once its
-// invoice + report PDFs are attached. SWMS is additionally required for MLB jobs.
+// invoice + report PDFs are attached. SWMS is additionally required only when
+// _requiresMakesafeSwms resolves the sealed MLB physical-family rule.
 // Returns the set of docs that are still missing (empty => gate satisfied).
 export function _makesafeMissingCloseoutDocs(
   docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null | undefined,
@@ -13531,8 +13561,7 @@ export function _deriveMakesafeBoardStage(
     //    it in report_ready. (When no docs map is supplied, preserve the prior
     //    ungated behaviour for callers that don't load job_documents.)
     if (!verifiedSent && docs !== undefined && docs !== null) {
-      // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
-      const missing = _makesafeMissingCloseoutDocs(docs, _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job), !!(detail?.report_type))
+      const missing = _makesafeMissingCloseoutDocs(docs, _requiresMakesafeSwms(detail, job), !!(detail?.report_type))
       if (missing.length > 0) return 'report_ready'
     }
     return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
@@ -13885,8 +13914,7 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
       String(j?.status || '').toLowerCase() === 'invoiced' ||
       normalizeMakesafeSubstatus(detail?.substatus) === 'complete'
     if (invoiceDone) {
-      // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
-      missingDocs = _makesafeMissingCloseoutDocs(docFlags, _isMakesafeMlbCompany(detail, j) || _isMakesafeWesternCompany(detail, j), !!(detail?.report_type))
+      missingDocs = _makesafeMissingCloseoutDocs(docFlags, _requiresMakesafeSwms(detail, j), !!(detail?.report_type))
     }
   }
   // Verified-sent reconciles the same way the board stage derives it: the
@@ -33637,15 +33665,14 @@ async function makesafeSendPack(
   if (detailErr || !detail) {
     throw new ApiError('send blocked: billing detail state could not be verified', 500)
   }
-  // B4 (Wave 0): Western Building also requires SWMS (same rule as MLB).
-  const requiresSwms = _isMakesafeMlbCompany(detail, job) || _isMakesafeWesternCompany(detail, job)
+  const requiresSwms = _requiresMakesafeSwms(detail, job)
   // Stage 1 (D3): Western Building / Builderwest are PORTAL builders — they do NOT
   // receive email and have NO report_recipient inbox (Wave 0 resolution). The
   // EXACT-RECIPIENT GATE below is an EMAIL-send gate, so it MUST be skipped for
   // portal builders (otherwise the null report_recipient fails it closed and the
   // portal-prep branch further down is never reached). The portal-prep branch
-  // still runs AFTER both preflights (docs incl. SWMS via requiresSwms, + invoice),
-  // so the same compliance is enforced; only the email-recipient check is bypassed.
+  // still runs AFTER both preflights (close-out docs + invoice), so the same
+  // compliance is enforced; only the email-recipient check is bypassed.
   const isPortalBuilder = _isMakesafeWesternCompany(detail, job)
 
   // ── BLOCKER C — EXACT-RECIPIENT GATE (money/comms, FAIL CLOSED) ──
@@ -33677,7 +33704,7 @@ async function makesafeSendPack(
     }
   }
 
-  // ── PREFLIGHT: typed close-out docs must exist (report + invoice + swms if MLB) ──
+  // ── PREFLIGHT: typed close-out docs must exist (plus SWMS only when the sealed rule requires it) ──
   const { data: docRows } = await client.from('job_documents')
     .select('id, type, file_name, version, created_at').eq('job_id', jobId)
   const selectedDocs = selectMakesafePackDocs(docRows || [], priorPack)
@@ -33930,13 +33957,10 @@ async function makesafeSendPack(
     // Report-type jobs (`report_type` present) are invoice-only regardless of
     // builder, because the report lives on the builder portal; do not require or
     // attach a SecureWorks report/SWMS for those invoice-only sends.
-    // Western Building is a portal-builder (no email), so SWMS is only loaded here
-    // for normal MLB email sends.
-    const isMlbBuilder = _isMakesafeMlbCompany(detail, job)
-    const shouldAttachSwms = isMlbBuilder && !isReportJob
+    // The same sealed rule used by preflight decides whether a SWMS is loaded.
     let swmsPdfB64: string | null = null
     let swmsFileName: string | null = null
-    if (shouldAttachSwms) {
+    if (requiresSwms) {
       const swmsDoc = selectedDocs.swmsDoc
       if (swmsDoc) {
         const { data: freshSwms } = await client.from('job_documents')
@@ -33977,7 +34001,7 @@ async function makesafeSendPack(
     // normal AJS/other email builders use the standard report+invoice gate.
     const gateFailures = isReportJob
       ? checkReportJobClientSendGate(gatePayload)
-      : shouldAttachSwms
+      : requiresSwms
         ? checkClientSendGateWithSwms(gatePayload)
         : checkClientSendGate(gatePayload)
     if (gateFailures.length > 0) {

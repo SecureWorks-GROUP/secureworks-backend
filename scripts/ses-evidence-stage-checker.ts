@@ -1366,11 +1366,9 @@ async function run(): Promise<void> {
     const detail = {
       requesting_company_name: row?.builder?.name || null,
       external_ref: row?.builder?.external_ref || null,
+      report_type: row?.report_type || null,
     };
-    if (
-      opsModule._isMakesafeMlbCompany(detail, row) ||
-      opsModule._isMakesafeWesternCompany(detail, row)
-    ) {
+    if (opsModule._requiresMakesafeSwms(detail, row)) {
       swmsRequiredJobIds.add(jobId);
     }
   }

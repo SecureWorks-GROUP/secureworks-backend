@@ -492,8 +492,7 @@ async function run(): Promise<void> {
   const missingCloseoutDocs = opsModule._makesafeMissingCloseoutDocs as (
     ...args: any[]
   ) => string[];
-  const isMlb = opsModule._isMakesafeMlbCompany as (d: any, j: any) => boolean;
-  const isWestern = opsModule._isMakesafeWesternCompany as (
+  const requiresSwms = opsModule._requiresMakesafeSwms as (
     d: any,
     j: any,
   ) => boolean;
@@ -638,7 +637,7 @@ async function run(): Promise<void> {
       if (invoiceDone) {
         missingDocs = missingCloseoutDocs(
           docFlags,
-          isMlb(detail, job) || isWestern(detail, job),
+          requiresSwms(detail, job),
           !!(detail?.report_type),
         );
       }
@@ -654,7 +653,7 @@ async function run(): Promise<void> {
     const ladderMissingCloseout = ladderInvoiceDone && docFlags
       ? missingCloseoutDocs(
         docFlags,
-        isMlb(detail, job) || isWestern(detail, job),
+        requiresSwms(detail, job),
         !!(detail?.report_type),
       )
       : [];

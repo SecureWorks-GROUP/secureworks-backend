@@ -14,8 +14,8 @@
 //         with confirmation. Pure model of the gate predicate in makesafeSendPack.
 //   B3 — Auth-mode transition guard: routine cannot set ready_to_invoice or complete.
 //         Pure model of the dispatch block guard (index.ts case 'update_makesafe_substatus').
-//   B4 — Western SWMS: _isMakesafeWesternCompany detection + _makesafeMissingCloseoutDocs
-//         requiresSwms=true for Western. Reimplemented-pure mirroring index.ts:8173+.
+//   B4 — Western builder identity detection for portal routing. SWMS policy is
+//         covered against the sealed family matrix in makesafe_lifecycle_test.ts.
 //   B5 — Approver record at send-lock acquire: the .update() payload contains
 //         approver_id + approved_at. Pure model of the lock acquire payload.
 //
@@ -25,7 +25,7 @@
 //        supabase/functions/ops-api/makesafe_wave0_safety_spine_test.ts
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts"
-import { sendPackAllowed, LOCKABLE_STATUSES } from "./makesafe_send_pack.ts"
+import { LOCKABLE_STATUSES } from "./makesafe_send_pack.ts"
 
 // ─────────────────────────────────────────────────────────────────
 // B1 — VERSIONED DOC URLS
@@ -300,26 +300,11 @@ Deno.test("B3: the deny list is EXACTLY ready_to_invoice and complete — no oth
 })
 
 // ─────────────────────────────────────────────────────────────────
-// B4 — WESTERN BUILDING / BUILDERWEST SWMS REQUIREMENT
-// Reimplemented-pure model of _isMakesafeWesternCompany (index.ts:8173) and the
-// updated _makesafeMissingCloseoutDocs call sites.
-// Contract: Western company detected by slug/name/ref; requires SWMS like MLB.
+// B4 — WESTERN BUILDING / BUILDERWEST PORTAL IDENTITY
+// Reimplemented-pure model of _isMakesafeWesternCompany. This identity controls
+// portal routing only; the Captain's current ruling does not require SWMS for
+// Western jobs.
 // ─────────────────────────────────────────────────────────────────
-
-// VERBATIM copy of _isMakesafeMlbCompany from index.ts:8155
-function _isMakesafeMlbCompany(detail: any, job: any): boolean {
-  const slug = String(
-    detail?.requesting_company_slug || detail?.makesafe_companies?.slug || job?.metadata?.requesting_company?.slug || ""
-  ).toLowerCase()
-  const name = String(
-    detail?.requesting_company_name || detail?.makesafe_companies?.name || job?.metadata?.requesting_company?.name || ""
-  ).toLowerCase()
-  const ref = String(detail?.external_ref || job?.metadata?.external_ref || "").toUpperCase()
-  if (slug.includes("mlb") || slug.includes("ml-builders") || slug.includes("major-loss")) return true
-  if (name.includes("ml builders") || name.includes("major loss")) return true
-  if (/\bMLB[-\s]?\d/.test(ref)) return true
-  return false
-}
 
 // VERBATIM copy of _isMakesafeWesternCompany from index.ts:8173 (B4 new function).
 function _isMakesafeWesternCompany(detail: any, job: any): boolean {
@@ -334,19 +319,6 @@ function _isMakesafeWesternCompany(detail: any, job: any): boolean {
   if (name.includes("builderwest") || name.includes("western building")) return true
   if (ref.startsWith("BWCWA") || /\bWB[-\s]?\d/.test(ref)) return true
   return false
-}
-
-// VERBATIM copy of _makesafeMissingCloseoutDocs from index.ts:8190
-function _makesafeMissingCloseoutDocs(
-  docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null | undefined,
-  requiresSwms: boolean,
-): string[] {
-  const d = docs || {}
-  const missing: string[] = []
-  if (!d.has_invoice_doc) missing.push("invoice")
-  if (!d.has_report_doc) missing.push("report")
-  if (requiresSwms && !d.has_swms_doc) missing.push("swms")
-  return missing
 }
 
 Deno.test("B4: _isMakesafeWesternCompany detects slug=builderwest", () => {
@@ -381,51 +353,6 @@ Deno.test("B4: _isMakesafeWesternCompany does NOT match AJS", () => {
 
 Deno.test("B4: _isMakesafeWesternCompany does NOT match MLB", () => {
   assert(!_isMakesafeWesternCompany({ requesting_company_slug: "mlb", requesting_company_name: "ML Builders" }, {}))
-})
-
-Deno.test("B4: Western company job WITHOUT SWMS → swms in missing docs (send gate blocked)", () => {
-  const docs = { has_invoice_doc: true, has_report_doc: true, has_swms_doc: false }
-  const detail = { requesting_company_slug: "builderwest" }
-  const requiresSwms = _isMakesafeMlbCompany(detail, {}) || _isMakesafeWesternCompany(detail, {})
-  const missing = _makesafeMissingCloseoutDocs(docs, requiresSwms)
-  assert(missing.includes("swms"), "Western company without SWMS must appear in missing docs")
-})
-
-Deno.test("B4: Western company job WITH SWMS → no missing docs (gate satisfied)", () => {
-  const docs = { has_invoice_doc: true, has_report_doc: true, has_swms_doc: true }
-  const detail = { requesting_company_slug: "western-building" }
-  const requiresSwms = _isMakesafeMlbCompany(detail, {}) || _isMakesafeWesternCompany(detail, {})
-  assertEquals(
-    _makesafeMissingCloseoutDocs(docs, requiresSwms).length,
-    0,
-    "Western company with SWMS attached must have no missing docs",
-  )
-})
-
-Deno.test("B4: AJS job does NOT require SWMS (no SWMS → still no missing docs)", () => {
-  const docs = { has_invoice_doc: true, has_report_doc: true, has_swms_doc: false }
-  const detail = { requesting_company_slug: "ajs", requesting_company_name: "AJS Build" }
-  const requiresSwms = _isMakesafeMlbCompany(detail, {}) || _isMakesafeWesternCompany(detail, {})
-  const missing = _makesafeMissingCloseoutDocs(docs, requiresSwms)
-  assert(!missing.includes("swms"), "AJS must NOT require SWMS")
-  assertEquals(missing.length, 0)
-})
-
-Deno.test("B4: MLB still requires SWMS (regression guard — existing behaviour unchanged by B4)", () => {
-  const docs = { has_invoice_doc: true, has_report_doc: true, has_swms_doc: false }
-  const detail = { requesting_company_slug: "mlb", requesting_company_name: "ML Builders" }
-  const requiresSwms = _isMakesafeMlbCompany(detail, {}) || _isMakesafeWesternCompany(detail, {})
-  const missing = _makesafeMissingCloseoutDocs(docs, requiresSwms)
-  assert(missing.includes("swms"), "MLB must still require SWMS after B4 change (regression guard)")
-})
-
-Deno.test("B4: BWCWA ref job → detected as Western → requires SWMS (real-world ref format)", () => {
-  const docs = { has_invoice_doc: true, has_report_doc: true, has_swms_doc: false }
-  // Real BWCWA job: ref prefix is BWCWA, company slug may not yet be seeded
-  const detail = { external_ref: "BWCWA-00123", requesting_company_slug: "" }
-  const requiresSwms = _isMakesafeMlbCompany(detail, {}) || _isMakesafeWesternCompany(detail, {})
-  const missing = _makesafeMissingCloseoutDocs(docs, requiresSwms)
-  assert(missing.includes("swms"), "BWCWA-prefixed job must require SWMS via ref detection")
 })
 
 // ─────────────────────────────────────────────────────────────────
