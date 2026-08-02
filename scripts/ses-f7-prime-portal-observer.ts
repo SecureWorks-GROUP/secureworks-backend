@@ -547,32 +547,37 @@ async function openAndReadPrimePage(
   initialWaitMs: number,
   retryWaitMs: number,
 ): Promise<{ read: BrowserPageRead; navigationSucceeded: boolean }> {
+  const failedRead = (): { read: BrowserPageRead; navigationSucceeded: false } => ({
+    navigationSucceeded: false,
+    read: {
+      ready_state: "failed",
+      body_text: "",
+      spinner_visible: false,
+      job_details_panels: 0,
+    },
+  });
   const opened = await command(["open", url], { tolerateFailure: true });
   if (!opened.success) {
-    return {
-      navigationSucceeded: false,
-      read: {
-        ready_state: "failed",
-        body_text: "",
-        spinner_visible: false,
-        job_details_panels: 0,
-      },
-    };
+    return failedRead();
   }
   await new Promise((resolve) => setTimeout(resolve, initialWaitMs));
-  let read = await readPrimePage();
-  if (
-    read.spinner_visible || read.ready_state !== "complete" ||
-    read.body_text.trim().length < 40
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, retryWaitMs));
-    read = await readPrimePage();
+  try {
+    let read = await readPrimePage();
+    if (
+      read.spinner_visible || read.ready_state !== "complete" ||
+      read.body_text.trim().length < 40
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, retryWaitMs));
+      read = await readPrimePage();
+    }
+    return {
+      navigationSucceeded: read.ready_state === "complete" &&
+        read.body_text.trim().length > 0,
+      read,
+    };
+  } catch {
+    return failedRead();
   }
-  return {
-    navigationSucceeded: read.ready_state === "complete" &&
-      read.body_text.trim().length > 0,
-    read,
-  };
 }
 
 async function installSafeCaptureFrame(
