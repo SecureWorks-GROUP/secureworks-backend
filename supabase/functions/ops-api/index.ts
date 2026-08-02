@@ -143,6 +143,15 @@ import {
   summarizeMakesafeStateSeedChunks,
 } from './makesafe_state_reconcile.ts'
 import {
+  checkMakesafeStateSeedScopeResult,
+  deriveSesSpineFacts,
+  MAKESAFE_STATE_SEED_SCOPE_CONTRACT,
+  MAKESAFE_STATE_SEED_SCOPE_MAX_CARDS,
+  normalizeMakesafeStateSeedScopeRequest,
+  resolveMakesafeStateSeedScope,
+  type SesSpineFacts,
+} from './makesafe_state_seed_scope.ts'
+import {
   buildMakesafeDisagreementList,
   checkMakesafeStatusCanary,
   MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
@@ -3796,6 +3805,129 @@ if (import.meta.main) serve(async (req: Request) => {
             passed: acceptancePassed,
           },
         }, acceptancePassed || dryRun ? 200 : 409)
+      }
+      case 'makesafe_state_seed_scoped': {
+        // Scoped route to the SAME U2 identity-spine producer the full-board
+        // action uses. Named tranche, hard-capped, dry-run by default. It can
+        // never claim board completeness — see makesafe_state_seed_scope.ts for
+        // why this is a separate action rather than a flag on
+        // makesafe_state_seed.
+        // A safety marker whose presence depends on which failure fired is not
+        // a safety marker. Error paths are exactly where callers are most
+        // likely to misread a scoped response as full board coverage.
+        if (authMode !== 'api_key') {
+          return json({ error: 'makesafe_state_seed_scoped requires ops privilege', board_complete: false }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'makesafe_state_seed_scoped requires POST', board_complete: false }, 405)
+        }
+        const normalized = normalizeMakesafeStateSeedScopeRequest(body)
+        if (!normalized.ok) {
+          return json({ error: normalized.error, board_complete: false }, normalized.status)
+        }
+        const { jobNumbers, runKey, dryRun } = normalized.request
+
+        const { data: scopeJobRows, error: scopeJobError } = await client
+          .from('jobs')
+          .select('id, job_number, type, metadata')
+          .in('job_number', jobNumbers)
+        if (scopeJobError) {
+          // An explicit projection turns schema drift into a PostgREST 400, and
+          // an unreadable selection must never read as "no cards matched".
+          return json({
+            error: 'scoped seed could not read the selected cards',
+            detail: scopeJobError.message || String(scopeJobError),
+            board_complete: false,
+          }, 503)
+        }
+        const plan = resolveMakesafeStateSeedScope(jobNumbers, scopeJobRows || [])
+        const selectedJobIds = plan.selected.map((item) => item.job_id).sort()
+        const unresolved = plan.unknown_job_numbers.length +
+          plan.out_of_scope.length + plan.ambiguous_job_numbers.length
+        // Every named card must be seedable. A tranche is hand-adjudicated, so a
+        // partial selection is an adjudication error to fix, not a subset to run.
+        if (unresolved > 0 || selectedJobIds.length !== jobNumbers.length) {
+          return json({
+            ok: false,
+            dry_run: dryRun,
+            board_complete: false,
+            error: 'scoped seed selection did not resolve every named card',
+            requested: jobNumbers.length,
+            selected: plan.selected.length,
+            unknown_job_numbers: plan.unknown_job_numbers,
+            ambiguous_job_numbers: plan.ambiguous_job_numbers,
+            out_of_scope: plan.out_of_scope,
+          }, 400)
+        }
+
+        const { hash } = await canonicalJsonAndHash({
+          contract: MAKESAFE_STATE_SEED_SCOPE_CONTRACT,
+          job_ids: selectedJobIds,
+        })
+        const selectionHash = `sha256:${hash}`
+        const spineBefore = await _readSesSpineFacts(client, plan.selected)
+
+        if (dryRun) {
+          return json({
+            ok: true,
+            dry_run: true,
+            board_complete: false,
+            contract: MAKESAFE_STATE_SEED_SCOPE_CONTRACT,
+            selection_hash: selectionHash,
+            max_cards: MAKESAFE_STATE_SEED_SCOPE_MAX_CARDS,
+            requested: jobNumbers.length,
+            selected: plan.selected,
+            seed_result: {
+              requested: selectedJobIds.length,
+              prospective: true,
+              persisted_writes: 0,
+            },
+            spine_before: spineBefore,
+            spine_incomplete_before:
+              spineBefore.filter((item) => !item.spine_complete).length,
+          })
+        }
+
+        const { data: seedData, error: seedError } = await client.rpc(
+          'seed_makesafe_state_authority_scoped_v2',
+          {
+            p_run_key: runKey,
+            p_applied_by: 'makesafe-state.v2-scoped-seeder',
+            p_selection_hash: selectionHash,
+            p_job_ids: selectedJobIds,
+          },
+        )
+        if (seedError) {
+          return json({
+            ok: false,
+            dry_run: false,
+            board_complete: false,
+            selection_hash: selectionHash,
+            requested: selectedJobIds.length,
+            error: seedError.message || String(seedError),
+          }, 409)
+        }
+        const rpcCheck = checkMakesafeStateSeedScopeResult(
+          seedData,
+          selectedJobIds.length,
+        )
+        const spineAfter = await _readSesSpineFacts(client, plan.selected)
+        const stillIncomplete = spineAfter.filter((item) => !item.spine_complete)
+        return json({
+          ok: rpcCheck.agrees && stillIncomplete.length === 0,
+          dry_run: false,
+          board_complete: false,
+          contract: MAKESAFE_STATE_SEED_SCOPE_CONTRACT,
+          selection_hash: selectionHash,
+          run_key: runKey,
+          requested: selectedJobIds.length,
+          selected: plan.selected,
+          seed_result: seedData,
+          accounting: rpcCheck,
+          spine_before: spineBefore,
+          spine_after: spineAfter,
+          spine_incomplete_after: stillIncomplete.map((item) => item.job_number),
+        }, rpcCheck.agrees ? 200 : 503)
       }
       case 'makesafe_state_reconcile': {
         // U2 Captain redirect: server-selected, fact-derived board correction.
@@ -15367,6 +15499,69 @@ export const _loadMakesafeAssignedJobIdsForTest = loadMakesafeAssignedJobIds
 // this loader adds only presentation facts (contacts/actions, report photo count,
 // notes and intake lineage) using cap-safe reads. Ops and trade projections are
 // generated from the returned rows, never from separate queries or client logic.
+/**
+ * Read the three identity terms U4 builds its correlation spine from, for a
+ * named card list. Reporting only: `makesafe_state_seed_scoped` uses it to show
+ * its own before/after. Nothing branches on the result — the authoritative
+ * check stays a U4 `dry_run` prepare.
+ *
+ * A case can be bound to a job either way round (`job_id` or `target_job_id`),
+ * so both are read and merged, exactly as the assembler snapshot does.
+ */
+async function _readSesSpineFacts(
+  client: any,
+  selected: readonly { job_number: string; job_id: string }[],
+): Promise<SesSpineFacts[]> {
+  const jobIds = selected.map((item) => item.job_id)
+  if (jobIds.length === 0) return []
+  const caseColumns = 'id, job_id, target_job_id, state, lineage_id, instruction_key, source_content_hash'
+  const [casesByJob, casesByTarget, revisions] = await Promise.all([
+    _fetchAllByJobIdChunked(client, 'makesafe_intake_cases', caseColumns, jobIds),
+    _fetchAllByJobIdChunked(
+      client,
+      'makesafe_intake_cases',
+      caseColumns,
+      jobIds,
+      undefined,
+      'target_job_id',
+    ),
+    _fetchAllByJobIdChunked(
+      client,
+      'makesafe_state_identity_current_v2',
+      'job_id, authority_kind, lineage_id, source_instruction_id, source_content_hash',
+      jobIds,
+    ),
+  ])
+  const casesFor = new Map<string, Map<string, any>>()
+  for (const [rows, key] of [
+    [casesByJob, 'job_id'],
+    [casesByTarget, 'target_job_id'],
+  ] as const) {
+    for (const row of rows) {
+      const jobId = String(row?.[key] || '')
+      if (!jobId) continue
+      const bucket = casesFor.get(jobId) || new Map<string, any>()
+      // The two reads overlap when a case names the same job both ways; key on
+      // the case id so it is counted once.
+      bucket.set(String(row?.id || ''), row)
+      casesFor.set(jobId, bucket)
+    }
+  }
+  const revisionFor = new Map<string, any>()
+  for (const row of revisions) {
+    const jobId = String(row?.job_id || '')
+    if (jobId) revisionFor.set(jobId, row)
+  }
+  return selected.map((item) =>
+    deriveSesSpineFacts({
+      job_id: item.job_id,
+      job_number: item.job_number,
+      cases: [...(casesFor.get(item.job_id)?.values() || [])],
+      identity_revision: revisionFor.get(item.job_id) || null,
+    })
+  )
+}
+
 async function loadCanonicalMakesafeBoard(
   client: any,
   opts?: { restrictToJobIds?: string[] },

@@ -684,6 +684,51 @@ failure can mean CONVERGENCE (the legacy ladder caught up to the certified
 corrected destination) rather than drift — check each card against its frozen
 `post_cutover` before treating it as a defect, and still never re-snapshot v1.
 
+## `spine_missing_lineage` Is Almost Never About Lineage
+
+The blocker fires on `!lineage_id || !job_id || !source_content_hash`
+(`ses_prepare_docket_revision.ts`). Measured 2026-08-03: **zero** live intake
+cases on the board are missing a lineage id; **103 of 163** are missing
+`source_content_hash`. Read the name, go hunting for lineage, and you will find
+nothing wrong. This corrects the batch-4 reading that "where intake ran the
+spine is perfect" — intake running is NOT sufficient, and about two thirds of
+the cased jobs are blocked too, so the repair population is 377 of 437, not the
+274 caseless.
+
+The hash is DERIVED, not supplied: `stamp_makesafe_intake_case_identity_v1`
+computes it from the case row itself (minus its own identity columns and the
+trigger-maintained timestamps). There is no upstream producer to build. It is
+absent only because the trigger has no backfill and a settled case row is never
+rewritten, so every case created before `20260728060000` is unstamped and every
+one after it is stamped — closed historical debt with a hard cutoff.
+
+Note which canonicaliser the hash uses: `makesafe_canonical_json_v1` RAISES on
+any non-integer number, but production's `makesafe_fact_hash_v1` calls the
+decimal-tolerant `makesafe_fact_canonical_json_v1` (`20260729030000`), which is
+total over jsonb. Do not repoint it. Separately,
+`enforce_makesafe_intake_case_write` still requires `job.type = 'makesafe'` even
+though the seed scope was widened to restoration — so touching an intake case
+bound to a restoration job throws and fails the whole chunk.
+
+The repair is the EXISTING `seed_makesafe_state_authority_scoped_v2`. Two doors,
+one producer, deliberately different operations: `makesafe_state_seed` is the
+full-board sweep whose acceptance gate is board-wide and which refuses to be
+narrowed, and `makesafe_state_seed_scoped` is the named, hand-adjudicated tranche
+(job numbers not ids, every named card must resolve or the request is refused,
+capped at 25, `board_complete:false` always). Never call
+`seed_makesafe_state_authority_v1` directly — the v2 wrapper is what partitions
+and ledgers the run. `deriveSesSpineFacts` is reporting only and is pinned to the
+real adapter by `ses_spine_diagnostic_parity_test.ts`; do not let it become a
+second status engine.
+
+The seeder is NOT identity-only: per job it may create an attendance cycle and
+rebind cycle attribution across six tables, and it writes two GLOBAL rows
+(`makesafe_family_rule_revisions` / `_current`) regardless of selection size —
+inert today only because nothing reads them. As of 2026-08-03 it has never run:
+377 of 437 canonical cards still need it, and a sweep needs the Captain.
+Population, tranche order, the money-seal analysis and the caseless-intake cause
+are in `docs/evidence/ses-spine-seeder-scoped-route-2026-08-03.md`.
+
 ## Make-Safe Computed Status Cutover Is A Display-Only Ledger
 
 M1 remains the pure engine in `makesafe_computed_status.ts`; the captain-approved
