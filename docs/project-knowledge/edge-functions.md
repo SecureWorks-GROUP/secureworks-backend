@@ -111,6 +111,12 @@ All in `supabase/functions/`. Deploy with:
 - **Purpose**: Ops dashboard CRUD — scheduling, POs, WOs, pipeline, job detail, Xero push
 - **Also**: Trade mobile endpoints (my_jobs, upload_photo, service_report)
 - **Also**: AI/automation (morning_brief, scope_to_po, complete_and_invoice)
+- **Roof storey preview**: `preview_makesafe_roof_storey_backfill` is a privileged,
+  preview-by-default action for existing roof cards. It applies the same ordered
+  product matcher as intake and returns row-level evidence and dispositions; it
+  writes only eligible rows when explicitly called with `dry_run: false`, and
+  never writes held, refused, no-fact, or terminal rows. Because storey controls
+  the sealed roof-report fee, captain review and refusal remain the intended gate.
 - **Sealed SES boundary**: legacy invoice/money paths refuse sealed SES or
   SES-bound ACCREC work; use the approved SES release flow. Details live in
   `docs/project-knowledge/sync-layer.md`.
