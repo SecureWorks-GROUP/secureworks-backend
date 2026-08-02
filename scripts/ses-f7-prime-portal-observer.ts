@@ -1016,33 +1016,37 @@ async function run(): Promise<ObserverSummary | null> {
       options.retryWaitMs,
     );
     const normalizedText = normalizePrimeSourceText(opened.read.body_text);
-    const verdict = classifyPrimePortalText(
+    let verdict = classifyPrimePortalText(
       normalizedText,
       opened.navigationSucceeded,
     );
     const sourceContentHash = await sha256Text(normalizedText);
     let screenshot: ScreenshotEvidence | null = null;
     if (verdict.capture_result !== "unreachable") {
-      const html = buildSafeEvidenceFrameHtml({
-        jobNumber: task.card.job_number,
-        builderReference: task.builder_reference,
-        verdict,
-        capturedAt,
-      });
-      const privacy = await installSafeCaptureFrame(html);
-      const fileName = `${
-        safeReference(task.card.job_number).replaceAll("/", "-")
-      }-${task.role || "unbound"}-${task.link_index}-${
-        task.source_url_hash.slice(-12)
-      }.png`;
-      const path = `${options.outputDir}/screenshots/${fileName}`;
-      await captureViewportPng(path);
-      const verified = await verifyPng(path);
-      screenshot = {
-        relative_path: relativeToOutput(options.outputDir, path),
-        ...verified,
-        ...privacy,
-      };
+      try {
+        const html = buildSafeEvidenceFrameHtml({
+          jobNumber: task.card.job_number,
+          builderReference: task.builder_reference,
+          verdict,
+          capturedAt,
+        });
+        const privacy = await installSafeCaptureFrame(html);
+        const fileName = `${
+          safeReference(task.card.job_number).replaceAll("/", "-")
+        }-${task.role || "unbound"}-${task.link_index}-${
+          task.source_url_hash.slice(-12)
+        }.png`;
+        const path = `${options.outputDir}/screenshots/${fileName}`;
+        await captureViewportPng(path);
+        const verified = await verifyPng(path);
+        screenshot = {
+          relative_path: relativeToOutput(options.outputDir, path),
+          ...verified,
+          ...privacy,
+        };
+      } catch {
+        verdict = classifyPrimePortalText("", false);
+      }
     }
 
     const missingCycle = !task.card.attendance_cycle_id;
