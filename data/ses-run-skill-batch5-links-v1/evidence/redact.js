@@ -1,13 +1,16 @@
-() => {
+(() => {
   // PII redaction + VERIFICATION. Additive overlays only: never mutates page
   // text and never touches a form input, so autosave cannot fire.
   //
   // Returns ok:false when the page still shows a client-identifying label that
   // was not covered. The driver refuses to screenshot on ok:false — a leaked
   // screenshot is unrecoverable once written.
-  const PII_LABEL = /^(Customer|Site Address|Client|Address|Contact|Phone|Email|Owner|Insured)$/i;
+  const PII_LABEL =
+    /^(Customer|Site Address|Client|Address|Contact|Phone|Email|Owner|Insured)$/i;
 
-  document.querySelectorAll("[data-audit-redaction]").forEach((n) => n.remove());
+  document.querySelectorAll("[data-audit-redaction]").forEach((n) =>
+    n.remove()
+  );
 
   const boxes = [];
   const covered = [];
@@ -36,7 +39,9 @@
       const d = document.createElement("div");
       d.setAttribute("data-audit-redaction", "1");
       d.style.cssText = `position:absolute;left:${l - 2}px;top:${t - 2}px;` +
-        `width:${w + 4}px;height:${h + 4}px;background:#111;z-index:2147483647;border-radius:3px;`;
+        `width:${w + 4}px;height:${
+          h + 4
+        }px;background:#111;z-index:2147483647;border-radius:3px;`;
       frag.appendChild(d);
     });
     document.body.appendChild(frag);
@@ -48,7 +53,9 @@
   // A rendered FORM page must therefore prove it redacted something.
   const text = document.body.innerText || "";
   const html = document.body.innerHTML || "";
-  const labelsPresent = [...text.matchAll(/^(Customer|Site Address|Client|Contact|Phone|Email)$/gim)]
+  const labelsPresent = [
+    ...text.matchAll(/^(Customer|Site Address|Client|Contact|Phone|Email)$/gim),
+  ]
     .map((m) => m[1]);
   const formRendered = html.length > 20000;
   const deadShell = html.length < 20000 &&
@@ -72,10 +79,11 @@
   }
 
   return {
-    ok, reason,
+    ok,
+    reason,
     covered: covered.length,
     uncovered,
     labelsPresent: labelsPresent.length,
     boxes: boxes.length,
   };
-}
+});
