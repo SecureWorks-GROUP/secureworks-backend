@@ -4,13 +4,15 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  CANONICAL_MAKESAFE_SUBSTATUSES,
+  canonicalizeMakesafeDocumentRole,
   EMPTY_CANCELLATION,
   EMPTY_TERMINAL_PROOF,
-  canonicalizeMakesafeDocumentRole,
   type MakesafeStateInput,
   projectMakesafeStateV2,
   type VersionedCycleFact,
 } from "./makesafe_state_projection.ts";
+import { MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION } from "./makesafe_computed_status.ts";
 
 const SHA_A =
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
@@ -149,6 +151,33 @@ Deno.test("v2 derives all six stages from facts, never from substatus", () => {
   assertEquals(projectMakesafeStateV2(completed).ops_stage, "completed");
   completed.terminal_proof.proven_at = "2026-07-01T04:00:00.000Z";
   assertEquals(projectMakesafeStateV2(completed).ops_stage, "archive");
+});
+
+Deno.test("F4 awaiting_portal_completion is canonical and expects Allocated", () => {
+  // The F4 report-only waiting state MUST be canonical here. An unrecognised
+  // substatus raises a HARD `projection_input_error`, and a live v2 seed is only
+  // acceptable at zero such cards — so a newly minted report card carrying this
+  // value would otherwise block the seed.
+  assert(
+    (CANONICAL_MAKESAFE_SUBSTATUSES as readonly string[]).includes(
+      MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
+    ),
+  );
+  const input = baseInput();
+  input.substatus_raw = MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION;
+  const state = projectMakesafeStateV2(input);
+  assertEquals(
+    state.diagnostics.filter((item) => item.code === "projection_input_error"),
+    [],
+  );
+  // Facts derive `new` for a bare card, so the projection reports the substatus
+  // as being AHEAD of the facts — a warning, and it names `allocated` as the
+  // expected stage, matching the legacy ladder and M1.
+  const ahead = state.diagnostics.filter((item) =>
+    item.code === "substatus_ahead_of_facts"
+  );
+  assertEquals(ahead.length, 1);
+  assert(ahead[0].reason.includes("allocated"), ahead[0].reason);
 });
 
 Deno.test("ready_to_invoice without immutable report/readiness stays out of Docs Ready", () => {

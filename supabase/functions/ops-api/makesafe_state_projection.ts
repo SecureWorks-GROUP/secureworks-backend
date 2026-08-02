@@ -2,6 +2,7 @@ import {
   isSha256Revision,
   type Sha256Revision,
 } from "./makesafe_readiness_revision.ts";
+import { MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION } from "./makesafe_computed_status.ts";
 
 export const MAKESAFE_STATE_CONTRACT_VERSION = "makesafe-state.v2";
 export const MAKESAFE_BOARD_V2_CONTRACT_VERSION = "makesafe-board.v2";
@@ -10,6 +11,10 @@ export const MAKESAFE_COMPLETION_PHOTO_FLOOR_V2 = 5;
 export const CANONICAL_MAKESAFE_SUBSTATUSES = [
   "company_contact_required",
   "company_contact_done",
+  // F4 — the report-only waiting state. It MUST be canonical here: an
+  // unrecognised substatus raises a hard `projection_input_error` diagnostic
+  // below, and a live v2 seed is only acceptable at zero such cards.
+  MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
   "waiting_on_trade_report",
   "admin_to_send_report",
   "ready_to_invoice",
@@ -492,7 +497,10 @@ function expectedStageForSubstatus(
   value: CanonicalMakesafeSubstatus,
 ): MakesafeV2OpsStage {
   if (
-    value === "company_contact_done" || value === "waiting_on_trade_report"
+    value === "company_contact_done" || value === "waiting_on_trade_report" ||
+    // F4 — a report-only card waiting on portal-completion proof is Allocated
+    // here too, matching the legacy ladder and M1.
+    value === MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION
   ) return "allocated";
   if (value === "admin_to_send_report") return "trade_report_in";
   if (value === "ready_to_invoice") return "report_ready";
