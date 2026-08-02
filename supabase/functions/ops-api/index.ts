@@ -140,6 +140,7 @@ import {
 import {
   buildMakesafeDisagreementList,
   checkMakesafeStatusCanary,
+  MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
 } from './makesafe_computed_status.ts'
 import {
   planMakesafeStatusApplications,
@@ -13153,6 +13154,10 @@ const MAKESAFE_BOARD_STAGE_LABELS: Record<string, string> = {
 const MAKESAFE_BOARD_STAGES = Object.keys(MAKESAFE_BOARD_STAGE_LABELS)
 const MAKESAFE_VALID_SUBSTATUSES = [
   'company_contact_required', 'company_contact_done',
+  // F4 — report-only waiting state (see MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION
+  // in makesafe_computed_status.ts). Pre-report, so it is never portal-guarded on
+  // the way IN; the guard still applies to every advance OUT of it.
+  MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
   'waiting_on_trade_report', 'admin_to_send_report',
   'ready_to_invoice', 'complete',
 ]
@@ -13533,7 +13538,17 @@ export function _deriveMakesafeBoardStage(
     return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
   }
   if (hasSubmittedReport || jobStatus === 'complete') return 'report_ready'
-  if (hasAssignments || normalizedSub === 'waiting_on_trade_report' || normalizedSub === 'company_contact_done' || jobStatus === 'scheduled' || jobStatus === 'in_progress') return 'allocated'
+  // F4: `awaiting_portal_completion` is a report-only card that is live but whose
+  // builder-portal report has NOT been proved complete. It sits in Allocated in
+  // BOTH engines (M1: makesafe_computed_status.ts) so a freshly approved roof /
+  // assessment card lands where the captain ruled it belongs. It is deliberately
+  // NOT part of hasSubmittedReport above — it is the absence of that evidence.
+  if (
+    hasAssignments || normalizedSub === 'waiting_on_trade_report' ||
+    normalizedSub === 'company_contact_done' ||
+    normalizedSub === MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION ||
+    jobStatus === 'scheduled' || jobStatus === 'in_progress'
+  ) return 'allocated'
   return 'new'
 }
 
@@ -18299,18 +18314,32 @@ async function approveIntakeDraft(client: any, body: any) {
     if (!createdJobId) throw new Error('guarded approval returned no primary job id')
     if (primaryMint) await completeIntakeMint(client, primaryMint.id, createdJobId)
 
-    // For report-only jobs: set report_type on makesafe_job_details and advance
-    // substatus to ready_to_invoice (bypasses the report-production stage). A combined
-    // split's PRIMARY is a physical make-safe (primaryIsReportOnly=false), so it skips
-    // this and keeps the normal make-safe workflow; the report card is minted below.
+    // For report-only jobs: set report_type on makesafe_job_details and park the
+    // card in the truthful report-only WAITING state. A combined split's PRIMARY is
+    // a physical make-safe (primaryIsReportOnly=false), so it skips this and keeps
+    // the normal make-safe workflow; the report card is minted below.
+    //
+    // F4: this used to write `ready_to_invoice`, which the legacy ladder reads as
+    // submitted-report evidence (index.ts:13460) and derives to Report Ready
+    // (index.ts:13528) — so a card claimed to be report-ready before anyone had
+    // proved the builder-portal report was done. It now writes
+    // `awaiting_portal_completion`, which BOTH stage engines map to Allocated.
+    // Nothing advances it: the only way past Allocated is the explicit
+    // portal-completion evidence event (`mark_makesafe_portal_report_done`), and
+    // every advance out of this state stays behind the portal-verification guard.
+    // This is a board-substatus write only — no invoice, pack or money path
+    // selects on either value.
     if (primaryIsReportOnly && createdJobId) {
       try {
         await client.from('makesafe_job_details').update({
           report_type: effectiveReportType,
-          // Reconciliation of still-owed work starts unsubmitted. The legacy path
-          // retains its current ready_to_invoice behaviour unless the privileged
-          // caller explicitly supplies report_unsubmitted=true.
-          ...(body?.report_unsubmitted === true ? {} : { substatus: 'ready_to_invoice' }),
+          // Reconciliation of still-owed work starts at the createMakesafeJob
+          // default (company_contact_required -> New) when the privileged caller
+          // explicitly supplies report_unsubmitted=true. Everything else waits on
+          // portal completion in Allocated.
+          ...(body?.report_unsubmitted === true
+            ? {}
+            : { substatus: MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION }),
           updated_at: new Date().toISOString(),
         }).eq('job_id', createdJobId)
       } catch (e: any) {

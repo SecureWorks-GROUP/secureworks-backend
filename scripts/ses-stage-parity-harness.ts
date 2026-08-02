@@ -58,6 +58,7 @@ import {
   projectCycleScopedEvidence,
 } from "../supabase/functions/ops-api/makesafe_cycle_evidence.ts";
 import { isPackSentTriageEvent } from "../supabase/functions/ops-api/makesafe_send_pack.ts";
+import { MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION } from "../supabase/functions/ops-api/makesafe_computed_status.ts";
 
 const PROJECT_REF = "kevgrhcjxspbxgovpmfl";
 const MANAGEMENT_QUERY_URL =
@@ -267,7 +268,8 @@ function legacyBranchOf(
   if (hasAssignments) return "13522 allocated: assignment row exists";
   if (
     normalizedSub === "waiting_on_trade_report" ||
-    normalizedSub === "company_contact_done"
+    normalizedSub === "company_contact_done" ||
+    normalizedSub === MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION
   ) {
     return `13522 allocated: substatus=${normalizedSub} (no assignment row)`;
   }

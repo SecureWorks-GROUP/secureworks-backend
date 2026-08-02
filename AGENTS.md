@@ -553,6 +553,28 @@ is privileged-only (api_key / admin-owner jwt), NOT routine-callable; `queue` is
 read (routine-allowed). Report-ready reuses `selectDraftPackDueJobIds` so the queue
 and the reporting run agree on "not yet drafted".
 
+## A Report Card Waits In `awaiting_portal_completion`, Not `ready_to_invoice`
+
+Intake parks every newly approved report-only (roof / assessment) card in the
+`awaiting_portal_completion` substatus. Apply
+`20260802010000_makesafe_awaiting_portal_completion_substatus.sql` before the
+matching `ops-api`; it only widens the `makesafe_job_details.substatus` CHECK and
+writes zero rows. Keep `pending_allocation` in that CHECK — it is live production
+drift (11 rows) that no repo migration declares.
+
+Three engines must agree the state maps to **Allocated**: the legacy ladder
+(`index.ts` `_deriveMakesafeBoardStage`), M1 (`makesafe_computed_status.ts`, which
+owns the one exported constant every consumer imports), and the v2
+`expectedStageForSubstatus` — the last is load-bearing, because an unrecognised
+substatus is a hard `projection_input_error` and a live v2 seed needs zero of
+those. Nothing advances the card automatically: it is deliberately a PRE-report
+substatus, so `PORTAL_GUARDED_ADVANCE_SUBSTATUSES` still gates every forward move,
+and `mark_makesafe_portal_report_done` is the single explicit portal-completion
+event that leaves it. `ready_to_invoice` is a board substatus only — no invoice,
+pack, send or digest path selects on it. Evidence, the money proof, the trade
+open-pool consequence and the before/after parity run:
+`docs/evidence/ses-f4-report-intake-stage-2026-08-02.md`.
+
 ## Make-Safe Computed Status Cutover Is A Display-Only Ledger
 
 M1 remains the pure engine in `makesafe_computed_status.ts`; the captain-approved

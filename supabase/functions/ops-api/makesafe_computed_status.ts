@@ -6,6 +6,26 @@
 // card, mirror substatus, create evidence, or change either board projection.
 
 export const MAKESAFE_COMPLETION_PHOTO_FLOOR = 5;
+
+// F4 — the truthful report-only waiting state. A roof / assessment card is
+// instructed and live, and is waiting on proof that the builder's portal report
+// was completed. Written at intake INSTEAD of the old `ready_to_invoice` (which
+// the legacy ladder read as submitted-report evidence and derived to Report
+// Ready before anybody had done the report).
+//
+// This constant is defined HERE, once, and imported by every consumer:
+// index.ts's legacy ladder, makesafe_state_projection.ts's v2 canonical
+// vocabulary, the intake approval path, and the stage-parity harness. Both
+// stage engines map it to `allocated`.
+//
+// It is a PRE-report substatus: it is deliberately NOT in
+// PORTAL_GUARDED_ADVANCE_SUBSTATUSES, so a card is free to sit here, and every
+// advance OUT of it into a report-complete substatus stays guarded by the
+// existing portal-verification rule. The only sanctioned way past Allocated is
+// the explicit portal-completion evidence event
+// (`mark_makesafe_portal_report_done`, index.ts:14068).
+export const MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION =
+  "awaiting_portal_completion";
 export const MAKESAFE_COMPUTED_STATUSES = [
   "new",
   "allocated",
@@ -83,6 +103,10 @@ export interface MakesafeStatusInput {
     report_sent_at?: string | null;
     invoice_ready_at?: string | null;
     external_links?: any[];
+    // F4 — read ONLY to recognise MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION.
+    // This engine still derives every other stage from durable evidence; it does
+    // not mirror the substatus ladder.
+    substatus?: string | null;
   } | null;
   evidence?: MakesafeStatusEvidence;
   displayedStatus?: string | null;
@@ -443,6 +467,23 @@ export function computeMakesafeStatus(
   const hasAssignment = (input.evidence?.assignments || []).length > 0;
   if (hasAssignment) {
     reasons.push("job assignment exists");
+    return { status: "allocated", job_type: kind, reasons, missing, hold };
+  }
+
+  // F4 — the report-only waiting state places the card in Allocated in this
+  // engine too, so the legacy ladder and M1 agree on where a freshly approved
+  // roof / assessment card lands. This reads a persisted state, not an
+  // assignment and not a completion claim: the card is still short every
+  // required portal capture (already collected in `missing` above), so nothing
+  // here can advance it. Only the explicit portal-completion evidence event
+  // moves the card off this substatus.
+  if (
+    String(input.detail?.substatus || "").trim().toLowerCase() ===
+      MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION
+  ) {
+    reasons.push(
+      "card is awaiting proof the builder-portal report was completed",
+    );
     return { status: "allocated", job_type: kind, reasons, missing, hold };
   }
 
