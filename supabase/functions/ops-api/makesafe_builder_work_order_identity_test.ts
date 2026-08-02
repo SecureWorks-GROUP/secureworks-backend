@@ -12,7 +12,10 @@ import {
   normaliseRef,
 } from "../_shared/makesafe_refs.ts";
 
-Deno.test("builder identity: MLB business-unit infix is part of the canonical instruction", () => {
+// The infix is retained as GROUP provenance and dropped from the identity: the
+// business unit is a routing label inside MLB, so `MLB-RR-26836` and a plain
+// `MLB-26836` carrying the same PO are one job, not two.
+Deno.test("builder identity: MLB business-unit infix is group provenance, not identity", () => {
   for (
     const fileName of [
       "MLB-RR-26836PO-57514.pdf",
@@ -27,10 +30,7 @@ Deno.test("builder identity: MLB business-unit infix is part of the canonical in
     const po = unit === "RR" ? "57514" : "56959";
     assertEquals(identity.builder_claim_ref, `MLB-${unit}-${claim}`);
     assertEquals(identity.builder_po_number, `PO-${po}`);
-    assertEquals(
-      builderInstructionKey(identity),
-      `MLB-${unit}-${claim}PO-${po}`,
-    );
+    assertEquals(builderInstructionKey(identity), `MLB:PO-${po}`);
     assertEquals(
       canonicalExternalObligationRef(`MLB-${unit}-${claim}PO-${po}`),
       `MLB-${unit}-${claim}`,
@@ -49,7 +49,7 @@ Deno.test("builder identity: bare AJ external reference is company-scoped", () =
   });
   assertEquals(aj.builder_claim_ref, "AJBR-70062");
   assertEquals(aj.builder_work_order_number, "AJBR-70062");
-  assertEquals(builderInstructionKey(aj), "AJ-70062");
+  assertEquals(builderInstructionKey(aj), "AJ:JOB-70062");
 
   for (const requestingCompanySlug of ["bw", "wb", "", null]) {
     const other = extractBuilderWorkOrderIdentity({
@@ -58,7 +58,12 @@ Deno.test("builder identity: bare AJ external reference is company-scoped", () =
     });
     assertEquals(other.builder_claim_ref, null);
     assertEquals(other.builder_work_order_number, null);
-    assertEquals(builderInstructionKey(other), null);
+    // No claim, no PO: a bare number under a non-AJ builder is never an
+    // identity, even though the slug alone would supply a scope.
+    assertEquals(
+      builderInstructionKey(other, { requestingCompanySlug }),
+      null,
+    );
   }
 });
 

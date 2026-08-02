@@ -379,7 +379,7 @@ function assignedJobIds(g: any): string[] {
 // deno-lint-ignore no-explicit-any
 function poolJobIds(g: any): string[] {
   const pool = g.makesafePool as Array<{ jobs?: { id?: string } }>;
-  return pool.map((a) => a.jobs?.id);
+  return pool.map((a) => String(a.jobs?.id));
 }
 
 const MARNIN = _resolveManagerVisibility({

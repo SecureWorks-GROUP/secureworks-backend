@@ -27,7 +27,7 @@ export interface ExistingInstructionCardMatch {
 
 export class InstructionMintConflictError extends Error {
   constructor(
-    public readonly candidateKeys: string[],
+    public readonly candidateKeys: readonly string[],
     public readonly matches: ExistingInstructionCardMatch[],
   ) {
     const cards = matches.map((match) => match.jobNumber).join(", ");
@@ -66,6 +66,10 @@ export function matchExistingInstructionCards(
     const instructionKeys = builderInstructionKeysForCard({
       requestingCompanySlug: row.requesting_company_slug ||
         metadata.requesting_company?.slug || null,
+      // Repair keys on the work order rather than a PO, so an existing card's
+      // own family has to travel with it or the gate would read a repair card
+      // under the wrong grain.
+      family: metadata.makesafe_job_family || null,
       metadata,
       detailExternalRef: row.external_ref || null,
       attachmentNames: namesByJob.get(String(row.job_id)) || [],

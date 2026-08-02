@@ -18225,6 +18225,7 @@ async function approveIntakeDraft(client: any, body: any) {
   if (!recoveredPrimaryMint) {
     const instructionKeys = _builderInstructionKeysForCard({
       requestingCompanySlug: approvedFields.requesting_company_slug,
+      family: approvedJobFamily || null,
       metadata: {
         external_ref: approvedFields.external_ref,
         builder_claim_ref: extraction?.builder_claim_ref,
@@ -18257,6 +18258,7 @@ async function approveIntakeDraft(client: any, body: any) {
   }
   const canonicalInstructionKeys = _builderInstructionKeysForCard({
     requestingCompanySlug: approvedFields.requesting_company_slug,
+    family: approvedJobFamily || null,
     metadata: {
       external_ref: approvedFields.external_ref,
       builder_claim_ref: extraction?.builder_claim_ref,

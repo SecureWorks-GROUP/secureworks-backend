@@ -31,7 +31,7 @@ Deno.test("pre-mint instruction gate refuses an exact terminal-card match", () =
   const error = assertThrows(
     () =>
       refuseExistingInstructionCard(
-        ["MLB-RR-26836PO-57514"],
+        ["MLB:PO-57514"],
         [terminalCard],
         documents,
       ),
@@ -42,7 +42,7 @@ Deno.test("pre-mint instruction gate refuses an exact terminal-card match", () =
 
 Deno.test("pre-mint instruction gate ignores own cover sheet as identity", () => {
   const matches = matchExistingInstructionCards(
-    ["AJ-70062"],
+    ["AJ:JOB-70062"],
     [{ ...terminalCard, requesting_company_slug: "aj" }],
     [{
       job_id: "job-terminal",
@@ -55,25 +55,33 @@ Deno.test("pre-mint instruction gate ignores own cover sheet as identity", () =>
 
 Deno.test("atomic reservation maps only the unique-key conflict", async () => {
   await assertRejects(
-    () => reserveInstructionCardMint({
-      rpc: () => Promise.resolve({
-        error: {
-          code: "P0001",
-          message: "instruction key already reserved: MLB-RR-26836PO-57514",
-        },
-      }),
-    }, { orgId: "org", draftId: "draft", candidateKeys: ["key"] }),
+    () =>
+      reserveInstructionCardMint({
+        rpc: () =>
+          Promise.resolve({
+            error: {
+              code: "P0001",
+              message: "instruction key already reserved: MLB:PO-57514",
+            },
+          }),
+      }, { orgId: "org", draftId: "draft", candidateKeys: ["key"] }),
     InstructionMintConflictError,
   );
 });
 
 Deno.test("atomic reservation preserves infrastructure failures", async () => {
   const error = await assertRejects(
-    () => reserveInstructionCardMint({
-      rpc: () => Promise.resolve({
-        error: { code: "42P01", message: "function does not exist" },
-      }),
-    }, { orgId: "org", draftId: "draft", candidateKeys: ["key"] }),
+    () =>
+      reserveInstructionCardMint({
+        rpc: () =>
+          Promise.resolve({
+            error: { code: "42P01", message: "function does not exist" },
+          }),
+      }, { orgId: "org", draftId: "draft", candidateKeys: ["key"] }),
+    Error,
   );
-  assertEquals(error.message, "instruction mint reservation failed: function does not exist");
+  assertEquals(
+    error.message,
+    "instruction mint reservation failed: function does not exist",
+  );
 });

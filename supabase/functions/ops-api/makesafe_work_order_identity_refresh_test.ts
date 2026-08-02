@@ -80,7 +80,7 @@ Deno.test("attach identity refresh fills a missing key from the new builder WO",
     detailExternalRef: "unknown",
   });
   assertEquals(decision.action, "correct");
-  assertEquals(decision.incomingKey, "MLB-RR-26836PO-57514");
+  assertEquals(decision.incomingKey, "MLB:PO-57514");
 });
 
 Deno.test("attach identity refresh never overwrites a good conflicting key", () => {
@@ -97,7 +97,7 @@ Deno.test("attach identity refresh never overwrites a good conflicting key", () 
   });
   assertEquals(decision.action, "conflict");
   assertEquals(decision.reason, "good_key_disagrees");
-  assertEquals(decision.currentKeys, ["MLB-27001PO-57001"]);
+  assertEquals(decision.currentKeys, ["MLB:PO-57001"]);
 });
 
 Deno.test("attach identity refresh resolves only an internal conflict corroborated by the new WO", () => {
@@ -109,7 +109,7 @@ Deno.test("attach identity refresh resolves only an internal conflict corroborat
   });
   assertEquals(decision.action, "correct");
   assertEquals(decision.reason, "internally_conflicting");
-  assertEquals(decision.incomingKey, "AJ-70062");
+  assertEquals(decision.incomingKey, "AJ:JOB-70062");
 });
 
 Deno.test("attach identity refresh ignores the SecureWorks cover sheet", () => {

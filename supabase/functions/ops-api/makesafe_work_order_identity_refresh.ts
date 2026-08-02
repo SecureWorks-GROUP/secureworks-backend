@@ -42,6 +42,7 @@ function identityForRef(
 export function decideAttachedWorkOrderIdentityRefresh(input: {
   fileName: string;
   requestingCompanySlug: string | null;
+  family?: string | null;
   metadata?: Record<string, any> | null;
   detailExternalRef?: string | null;
 }): WorkOrderIdentityRefreshDecision {
@@ -59,8 +60,12 @@ export function decideAttachedWorkOrderIdentityRefresh(input: {
     requestingCompanySlug: input.requestingCompanySlug,
     attachmentNames: [input.fileName],
   });
-  const incomingKey = builderInstructionKey(incomingIdentity);
   const metadata = input.metadata || {};
+  const keyOptions = {
+    requestingCompanySlug: input.requestingCompanySlug,
+    family: input.family ?? metadata.makesafe_job_family ?? null,
+  };
+  const incomingKey = builderInstructionKey(incomingIdentity, keyOptions);
   const structured = [
     metadata.builder_work_order_number,
     metadata.builder_claim_ref,
@@ -73,6 +78,7 @@ export function decideAttachedWorkOrderIdentityRefresh(input: {
         .map((value) =>
           builderInstructionKey(
             identityForRef(value, input.requestingCompanySlug),
+            keyOptions,
           )
         )
         .filter((value): value is string => Boolean(value)),
