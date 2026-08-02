@@ -2043,6 +2043,14 @@ async function resolvePersistedPortalCapture(
   const matches = snapshot.portal_captures
     .map((row) => row as SesPersistedPortalCaptureRow)
     .filter((row) =>
+      // The docket needs the SCREENSHOT the capture produced, so U4 selects
+      // only the screenshot-bearing reader. The trade attestation producer
+      // (captain, 2026-08-02) is deliberately excluded here, and excluded at
+      // the CANDIDATE step rather than the validation step: a newer attestation
+      // must not shadow a valid reader capture and turn a good docket invalid.
+      // Whether an attestation can stand in for the docket screenshot is its
+      // own release, not a side effect of this one.
+      row.capture_producer === SES_PORTAL_CAPTURE_PRODUCER &&
       row.job_id === request.job_id &&
       row.attendance_cycle_id === cycleId &&
       canonicalSesPortalCaptureRole(row.role) === request.role &&

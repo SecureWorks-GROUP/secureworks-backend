@@ -1,0 +1,169 @@
+{
+  "measured_at": "2026-08-02T10:05:06.552Z",
+  "board_population": "ses-board-population/active-v1 [NOT FINAL — pending C.5 (active-only vs all-including-cancelled); this is not \"the whole board\"]",
+  "board_population_contract_version": "ses-board-population/active-v1",
+  "queries": 3,
+  "totals": {
+    "board_cards": 407,
+    "roof_cards": 60,
+    "roof_confirmed_already": 9,
+    "roof_control_offered": 27,
+    "roof_reasons": {
+      "no_portal_roof_link": 6,
+      "eligible": 27,
+      "no_attendance_cycle": 6,
+      "card_not_live": 9,
+      "already_confirmed": 9,
+      "ambiguous_portal_roof_link": 3
+    }
+  },
+  "unverified_looks_done_dead_cards": {
+    "count": 5,
+    "job_numbers": [
+      "SWMS-26846",
+      "SWMS-26861",
+      "SWMS-26865",
+      "SWMS-26933",
+      "SWMS-26964"
+    ]
+  },
+  "unverified_looks_done": {
+    "count": 19,
+    "control_offered": 13,
+    "reasons": {
+      "no_attendance_cycle": 6,
+      "eligible": 13
+    },
+    "cards": [
+      {
+        "job_number": "SWMS-261079",
+        "substatus": "ready_to_invoice",
+        "offered": false,
+        "reason": "no_attendance_cycle"
+      },
+      {
+        "job_number": "SWMS-261081",
+        "substatus": "ready_to_invoice",
+        "offered": false,
+        "reason": "no_attendance_cycle"
+      },
+      {
+        "job_number": "SWMS-261113",
+        "substatus": "ready_to_invoice",
+        "offered": false,
+        "reason": "no_attendance_cycle"
+      },
+      {
+        "job_number": "SWMS-261114",
+        "substatus": "ready_to_invoice",
+        "offered": false,
+        "reason": "no_attendance_cycle"
+      },
+      {
+        "job_number": "SWMS-261116",
+        "substatus": "ready_to_invoice",
+        "offered": false,
+        "reason": "no_attendance_cycle"
+      },
+      {
+        "job_number": "SWMS-261123",
+        "substatus": "ready_to_invoice",
+        "offered": false,
+        "reason": "no_attendance_cycle"
+      },
+      {
+        "job_number": "SWMS-26720",
+        "substatus": "complete",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26721",
+        "substatus": "complete",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26727",
+        "substatus": "complete",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26735",
+        "substatus": "ready_to_invoice",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26736",
+        "substatus": "ready_to_invoice",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26759",
+        "substatus": "ready_to_invoice",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26763",
+        "substatus": "complete",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26793",
+        "substatus": "complete",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26805",
+        "substatus": "complete",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26814",
+        "substatus": "complete",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26844",
+        "substatus": "complete",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26863",
+        "substatus": "admin_to_send_report",
+        "offered": true,
+        "reason": "eligible"
+      },
+      {
+        "job_number": "SWMS-26957",
+        "substatus": "admin_to_send_report",
+        "offered": true,
+        "reason": "eligible"
+      }
+    ]
+  },
+  "ready_to_invoice_unverified": {
+    "count": 9,
+    "control_offered": 3,
+    "job_numbers": [
+      "SWMS-261079",
+      "SWMS-261081",
+      "SWMS-261113",
+      "SWMS-261114",
+      "SWMS-261116",
+      "SWMS-261123",
+      "SWMS-26735",
+      "SWMS-26736",
+      "SWMS-26759"
+    ]
+  }
+}

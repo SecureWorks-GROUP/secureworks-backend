@@ -67,7 +67,25 @@ export interface MakesafePortalCapture {
   cycle_number?: number | null;
   revision_id?: string | null;
   captured_at?: string | null;
+  /**
+   * Set ONLY by `portalCapturesFromLedger` against a validated append-only
+   * revision written by the approved trade-attestation producer (captain,
+   * 2026-08-02). It is what lets a screenshot-less capture count as done: the
+   * trade rendered no page, so the proof is a named authenticated confirmer
+   * rather than an image. Card-derived capture entries are stripped of it.
+   */
+  attested_producer?: string | null;
+  attested_by?: string | null;
 }
+
+/**
+ * The approved trade attestation producer, restated here rather than imported
+ * so the pure status engine keeps its zero-dependency shape. The single
+ * consumer is `donePortalRoles`; the constant it must agree with is
+ * `SES_TRADE_PORTAL_CONFIRMATION_PRODUCER` in `ses_portal_capture_contract.ts`,
+ * and `makesafe_computed_status_test.ts` pins the two together.
+ */
+export const MAKESAFE_ATTESTED_PORTAL_PRODUCER = "trade_portal_confirmation/v1";
 
 export interface MakesafeStatusEvidence {
   assignments?: any[];
@@ -218,10 +236,17 @@ export function donePortalRoles(input: MakesafeStatusInput): Set<string> {
       .filter((capture) => {
         const role = captureRole(capture);
         const captureUrl = String(capture?.url || "").trim().toLowerCase();
+        // Two producers, one fact (captain, 2026-08-02). The deterministic
+        // reader proves what it saw with a stored screenshot; a trade
+        // attestation proves who said so. Either is evidence; neither is
+        // inferred from a substatus.
+        const proven =
+          !!String(capture?.screenshot || capture?.screenshot_path || "")
+            .trim() ||
+          capture?.attested_producer === MAKESAFE_ATTESTED_PORTAL_PRODUCER;
         return (
           String(capture?.status || "").toLowerCase() === "done" &&
-          !!String(capture?.screenshot || capture?.screenshot_path || "")
-            .trim() &&
+          proven &&
           (capture?.cycle_number == null ||
             Number(capture.cycle_number) === cycle) &&
           (!requiresTypedAssessmentIdentity || (

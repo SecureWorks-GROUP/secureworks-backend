@@ -602,6 +602,46 @@ is privileged-only (api_key / admin-owner jwt), NOT routine-callable; `queue` is
 read (routine-allowed). Report-ready reuses `selectDraftPackDueJobIds` so the queue
 and the reporting run agree on "not yet drafted".
 
+## Portal Completion Has Two Producers, And Only One Carries A Screenshot
+
+`makesafe_portal_capture_revisions` is written by the headless Prime reader
+(`capture_portal_evidence.py/v1`) AND, per the captain's 2026-08-02 ruling, by
+any trade assigned to the job answering one question — "Is this roof report
+done?" — through `confirm_roof_report_done`. Both are the same fact; neither
+declares a stage. The reader renders a page so it MUST carry the stored
+screenshot; a trade attestation renders nothing, so its proof is the
+authenticated `captured_by`, it is confined to `role='roof_report'` /
+`capture_result='done'`, and it carries no image. That split is enforced in
+`20260802030000_makesafe_trade_portal_confirmation.sql` (apply BEFORE the
+matching `ops-api`) and mirrored in `ses_portal_capture_contract.ts`.
+
+Consequences that are easy to break:
+
+- A screenshot-less capture counts downstream ONLY via `attested_producer`,
+  which `portalCapturesFromLedger` sets from a validated ledger row and nothing
+  else. `portalCapturesFromDetail` strips the key off card-derived entries so a
+  legacy `portal_verified_signal` blob can never forge it.
+- The U4 docket assembler still selects the reader alone, at the CANDIDATE step
+  rather than at validation — otherwise a newer attestation out-ranks a good
+  reader capture by fact version and turns a valid docket invalid.
+- Visibility of the control is decided by EVIDENCE, never by substatus. A roof
+  card at `ready_to_invoice` with nothing behind it still offers the tick; that
+  is the population this channel exists to unblock (PR 229's inverse bug).
+- The trade is asked ONE question. Role, portal URL, builder reference, cycle
+  and timestamp are all server-derived; the request body is a job id and every
+  other key in it is ignored.
+- Authorisation is a non-cancelled `job_assignments` row on that exact job. Not
+  an admin, not the routine (absent from `ROUTINE_ALLOWED_ACTIONS`).
+
+Predicates live in `ses_trade_portal_confirmation.ts` and are shared by the
+board read model and the write path, so an offered control and a refused tick
+can never disagree. Contract, the read-only production measurement (27 of 60
+roof cards offered; 13 of the named 19 unverified cards, the other 6 blocked by
+a null `attendance_cycle_id`), the zero-movement parity proof and the known M1
+link-typing gap are in
+`docs/evidence/ses-roof-trade-confirmation-2026-08-02.md`. The trade-app button
+itself lives in `securedash` and is a separate delivery.
+
 ## A Report Card Waits In `awaiting_portal_completion`, Not `ready_to_invoice`
 
 Intake parks every newly approved report-only (roof / assessment) card in the

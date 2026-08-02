@@ -90,7 +90,7 @@ if [[ "$action" == "makesafe_deterministic_intake_replay" ]]; then
 fi
 
 case "$action" in
-  trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice | allocate_job | reattend_makesafe)
+  trade_calendar | my_jobs | my_work_orders | submit_work_order_invoice | allocate_job | reattend_makesafe | confirm_roof_report_done)
     printf '%s\n' '{"error":"Login required"}'
     ;;
   *)

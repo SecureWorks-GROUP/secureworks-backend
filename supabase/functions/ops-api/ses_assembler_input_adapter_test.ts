@@ -1106,6 +1106,119 @@ Deno.test(
 );
 
 Deno.test(
+  "a newer trade attestation never shadows the reader capture U4 needs",
+  async () => {
+    // The trade tick (captain, 2026-08-02) is a second producer on the SAME
+    // ledger and carries no screenshot, so it cannot supply the docket's
+    // EVIDENCE artifact. It is excluded at the CANDIDATE step: were it merely
+    // rejected at validation, a newer attestation would out-rank a perfectly
+    // good reader capture by fact version and turn a valid docket invalid.
+    const live = roofPortalSnapshot();
+    const input = buildSesAssemblerInput(live);
+    const sourceUrl = input.source.portal_links[0].url;
+    const screenshotBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const screenshotHash = await rawSesPortalCaptureSha256(screenshotBytes);
+    const storagePath = [
+      "portal-captures",
+      live.job.id,
+      live.detail!.attendance_cycle_id,
+      "roof_report",
+      `${screenshotHash.slice("sha256:".length)}.png`,
+    ].join("/");
+    const readerContent: SesPortalCaptureRevisionContent = {
+      job_id: live.job.id,
+      attendance_cycle_id: live.detail!.attendance_cycle_id,
+      role: "roof_report",
+      capture_result: "done",
+      source_url: sourceUrl,
+      source_content_hash: `sha256:${"b".repeat(64)}`,
+      builder_reference: input.source.builder_reference,
+      captured_at: "2026-07-28T07:55:00.000Z",
+      captured_by: "chrome-agent@secureworks.test",
+      capture_producer: SES_PORTAL_CAPTURE_PRODUCER,
+      capture_idempotency_key: "capture-swms-261019-roof-v1",
+      signal: "submitted-and-locked",
+      screenshot_object_key: `${SES_PORTAL_CAPTURE_BUCKET}/${storagePath}`,
+      screenshot_media_type: "image/png",
+      screenshot_content_hash: screenshotHash,
+      screenshot_size_bytes: screenshotBytes.byteLength,
+    };
+    live.portal_captures = [
+      {
+        id: "b1b1b1b1-0000-4000-8000-000000000002",
+        org_id: live.job.org_id,
+        job_id: live.job.id,
+        attendance_cycle_id: live.detail!.attendance_cycle_id,
+        role: "roof_report",
+        capture_result: "done",
+        source_url: sourceUrl,
+        source_content_hash: `sha256:${"e".repeat(64)}`,
+        builder_reference: input.source.builder_reference,
+        captured_at: "2026-08-02T04:00:00.000Z",
+        captured_by: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        capture_producer: "trade_portal_confirmation/v1",
+        capture_idempotency_key: "trade-portal-confirmation:v1:cycle",
+        signal: "Trade confirmed the builder roof report is complete.",
+        screenshot_object_key: null,
+        screenshot_media_type: null,
+        screenshot_content_hash: null,
+        screenshot_size_bytes: null,
+        status: "verified",
+        // Deliberately NEWER than the reader capture below.
+        makesafe_fact_version: 2,
+        makesafe_content_hash: `sha256:${"f".repeat(64)}`,
+        evidence_refs: [],
+        created_at: "2026-08-02T04:00:01.000Z",
+        created_by: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      },
+      {
+        id: "b1b1b1b1-0000-4000-8000-000000000001",
+        org_id: live.job.org_id,
+        ...readerContent,
+        status: "verified",
+        makesafe_fact_version: 1,
+        makesafe_content_hash: await sesPortalCaptureRevisionHash(
+          readerContent,
+        ),
+        evidence_refs: [],
+        created_at: "2026-07-28T07:56:00.000Z",
+        created_by: "ops-api:api_key",
+      },
+    ];
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live, { [storagePath]: screenshotBytes }),
+      { org_id: live.job.org_id, created_by: "u4-regression" },
+    );
+    const response = await prepare_ses_docket_revision(
+      {
+        selection: { mode: "job_id", job_id: live.job.id },
+        idempotency_key: "swms-261019-attestation-does-not-shadow",
+        assembler_version: SES_ASSEMBLER_VERSION,
+        dry_run: true,
+        force_refresh: true,
+      },
+      {
+        ...dependencies,
+        resolveSourceArtifacts: async () => sourceResolver(input),
+        now: () => new Date("2026-08-02T08:00:00.000Z"),
+      },
+    );
+
+    const result = response.results[0];
+    const codes = blockerCodes(result);
+    assert(!codes.includes("portal_capture_invalid"), codes.join(","));
+    assert(!codes.includes("portal_capture_missing"), codes.join(","));
+    const evidence = result.artifacts.find((artifact) =>
+      artifact.path === "EVIDENCE/portal_roof_report.json"
+    );
+    assert(evidence);
+    const persisted = JSON.parse(new TextDecoder().decode(evidence.bytes));
+    assertEquals(persisted.capture_producer, SES_PORTAL_CAPTURE_PRODUCER);
+    assertEquals(persisted.evidence_revision_id, live.portal_captures[1].id);
+  },
+);
+
+Deno.test(
   "U4 rejects malformed not_done screenshot evidence as portal_capture_invalid",
   async () => {
     const live = roofPortalSnapshot();
