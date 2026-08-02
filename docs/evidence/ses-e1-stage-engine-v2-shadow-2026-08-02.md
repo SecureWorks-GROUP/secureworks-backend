@@ -386,8 +386,8 @@ be picked up without re-deriving anything above:
 - **Release 8** — overlay re-anchor metadata and the no-op attestation read
   path. No ledger rows.
 
-Release 6, the portal capture reader, is explicitly out of scope for this
-release and is owned by another crew.
+Release 6, the portal capture reader, is recorded below. Its roof URL-identity
+asymmetry remains deferred to `ses-r10-roof-url-identity-v1`.
 
 Release 7 (Docs Ready authority) and Release 9 (the nine-row re-anchor apply)
 are both captain-gated and are not code-only.
