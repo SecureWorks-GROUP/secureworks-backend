@@ -304,6 +304,14 @@ export function verifySesStageBaseline(
       `population contract changed: ${frozen.population_contract_version} -> ${fresh.population_contract_version}; the denominator is not comparable`,
     );
   }
+  // The version is the hard identity: population versions are never edited in
+  // place. The prose includes the open C.5 caveat, so rewording it is visible
+  // drift but must not fail an otherwise-clean verification.
+  if (frozen.population_contract !== fresh.population_contract) {
+    observations.push(
+      `population contract description changed: ${frozen.population_contract} -> ${fresh.population_contract}`,
+    );
+  }
 
   const freshById = new Map(fresh.cards.map((c) => [c.job_id, c]));
   const frozenById = new Map(frozen.cards.map((c) => [c.job_id, c]));

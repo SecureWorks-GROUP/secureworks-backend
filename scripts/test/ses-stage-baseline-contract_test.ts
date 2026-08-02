@@ -216,6 +216,29 @@ Deno.test("a different denominator is refused rather than compared", async () =>
   assert(result.failures.some((f) => f.includes("denominator")));
 });
 
+Deno.test("population prose drift is observed while version drift still fails", async () => {
+  const frozen = await buildSesStageBaseline(parity([card()]));
+  const fresh = await buildSesStageBaseline({
+    ...parity([card()]),
+    population_contract: "active-v1 (reworded test)",
+  });
+  const proseResult = verifySesStageBaseline(frozen, fresh);
+  assertEquals(proseResult.ok, true);
+  assert(
+    proseResult.observations.some((observation) =>
+      observation.includes("active-v1 (test)") &&
+      observation.includes("active-v1 (reworded test)")
+    ),
+  );
+
+  const versionResult = verifySesStageBaseline(frozen, {
+    ...fresh,
+    population_contract_version: "ses-board-population/active-v2",
+  });
+  assertEquals(versionResult.ok, false);
+  assert(versionResult.failures.some((failure) => failure.includes("denominator")));
+});
+
 // ── The committed Release 0 artifact itself ─────────────────────────────────
 // These assertions pin the FROZEN file, not a live read, so they run offline
 // and fail loudly if anyone edits the baseline to make a drifted run green.
