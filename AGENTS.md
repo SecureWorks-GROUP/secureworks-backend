@@ -632,6 +632,34 @@ pack, send or digest path selects on it. Evidence, the money proof, the trade
 open-pool consequence and the before/after parity run:
 `docs/evidence/ses-f4-report-intake-stage-2026-08-02.md`.
 
+## A DRAFT Invoice Never Closes A Card, And The Visible Ladder Has A Version
+
+`_makesafeInvoiceIsRaised` (AUTHORISED / SUBMITTED / PAID) is the invoice term of
+`invoiceDone` in BOTH `_deriveMakesafeBoardStage` and `enrichMakesafeBoardJob`;
+a test pins the two copies together at source. `hasActiveMakesafeInvoice` (any
+non-VOIDED/DELETED row, DRAFT included) must never be the closure signal again —
+a DRAFT is unpayable, so reading one as "invoice done" both filled Docs Ready
+with unsendable cards and let an attached draft PDF archive a report card.
+`invoiceIsDraft` / `readyForReview` are the opposite case and stay unchanged:
+the captain's ruling REQUIRES a DRAFT invoice to reach Docs Ready. The two
+non-invoice terms (`jobs.status='invoiced'`, substatus `complete`) are operator
+declarations and are deliberately untouched.
+
+`MAKESAFE_STAGE_LADDER_VERSION` versions the visible ladder (published as
+`declared_stage_engine_version`, advisory, ops payload only) so a measurement
+can name the derivation that produced it. Bump it whenever the ladder's output
+changes; do NOT bump `MAKESAFE_BOARD_CONTRACT_VERSION`, which versions payload
+shape. Contract, the 407-card before/after and the residual `ready_to_invoice`
+mechanism that still holds 11 cards in Docs Ready:
+`docs/evidence/ses-draft-invoice-not-a-raised-invoice-2026-08-02.md`.
+
+Two measurement rules from that release generalise. Pin the parity harness to an
+explicit `--now=` on both sides or the 7-day completed/archive clock moves under
+you. And a `ses-e1-freeze-stage-baseline.ts --mode=verify` "no longer disputed"
+failure can mean CONVERGENCE (the legacy ladder caught up to the certified
+corrected destination) rather than drift — check each card against its frozen
+`post_cutover` before treating it as a defect, and still never re-snapshot v1.
+
 ## Make-Safe Computed Status Cutover Is A Display-Only Ledger
 
 M1 remains the pure engine in `makesafe_computed_status.ts`; the captain-approved
