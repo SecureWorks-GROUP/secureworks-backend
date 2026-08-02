@@ -1,0 +1,53 @@
+{
+  "ok": false,
+  "failures": [
+    "certified disputed card SWMS-261081 (report_ready -> allocated) is no longer disputed",
+    "certified disputed card SWMS-26709 (report_ready -> allocated) is no longer disputed",
+    "certified disputed card SWMS-26754 (report_ready -> allocated) is no longer disputed",
+    "certified disputed card SWMS-26782 (archive -> allocated) is no longer disputed",
+    "certified disputed card SWMS-26803 (report_ready -> allocated) is no longer disputed",
+    "certified disputed card SWMS-26848 (report_ready -> allocated) is no longer disputed"
+  ],
+  "observations": [
+    "16 card(s) changed input facts since the freeze: SWMS-261015, SWMS-261017, SWMS-261020, SWMS-261059, SWMS-261065, SWMS-261080, SWMS-261081, SWMS-261109, SWMS-261115, SWMS-26393, SWMS-26657, SWMS-26658, SWMS-26659, SWMS-26660, SWMS-26731, SWMS-26782",
+    "engine source legacy_ladder changed since the freeze (9c0c2cf127c9 -> e681d43c1c6c)",
+    "engine source m1_computed_status changed since the freeze (d8243bfc5af3 -> 9662d19cddcb)",
+    "engine source board_read_model changed since the freeze (2972f309bbed -> d9431b0b85e8)",
+    "engine source parity_harness changed since the freeze (905862d3f87f -> d47111f766bc)"
+  ],
+  "frozen_generation_id": "90d11faaa617d43cb6abc4501a96c88687059a497cab772f5b0c3d5a5296721b",
+  "fresh_generation_id": "aa9d687366f48235cad1563977f7864c1706f49a79e915a5dc62b1d7d8ad5b7f",
+  "frozen_disputed_manifest_id": "59d16ae3b383655d25cf3371d05cc1df95c04082be205e4eb175426cff230964",
+  "fresh_disputed_manifest_id": "339b01ae1576d392d9b3e55ed9c86dfeb77c6ea4d23e7e78f1ea80f160356e0b",
+  "frozen_disputed": 71,
+  "fresh_disputed": 65,
+  "cards_with_moved_input_hash": [
+    "SWMS-261015",
+    "SWMS-261017",
+    "SWMS-261020",
+    "SWMS-261059",
+    "SWMS-261065",
+    "SWMS-261080",
+    "SWMS-261081",
+    "SWMS-261109",
+    "SWMS-261115",
+    "SWMS-26393",
+    "SWMS-26657",
+    "SWMS-26658",
+    "SWMS-26659",
+    "SWMS-26660",
+    "SWMS-26731",
+    "SWMS-26782"
+  ],
+  "disputed_missing": [
+    "SWMS-261081",
+    "SWMS-26709",
+    "SWMS-26754",
+    "SWMS-26782",
+    "SWMS-26803",
+    "SWMS-26848"
+  ],
+  "disputed_changed": [],
+  "disputed_added": []
+}
+FAIL: 6 certified fact(s) did not reproduce

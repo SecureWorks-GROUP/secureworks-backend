@@ -13243,6 +13243,37 @@ function hasActiveMakesafeInvoice(invoice: any): boolean {
   return !!invoice && !['VOIDED', 'DELETED'].includes(String(invoice.status || '').toUpperCase())
 }
 
+// The ACCREC statuses that mean the invoice was actually RAISED: issued to the
+// builder, payable, and no longer editable without a credit note. DRAFT is
+// deliberately absent.
+//
+// This is the same set as `_MAKESAFE_CANCEL_LIVE_INVOICE_STATUSES` and the
+// `invoiceAuthorised` / `invoiceAuthorisedLive` predicates below, which are now
+// derived from it rather than restating it.
+const MAKESAFE_RAISED_INVOICE_STATUSES = ['AUTHORISED', 'SUBMITTED', 'PAID']
+
+// Is there a raised invoice on this card?
+//
+// TIGHTER than hasActiveMakesafeInvoice, which counts a bare non-VOIDED/DELETED
+// row — INCLUDING a DRAFT — as "active". A DRAFT invoice is not an invoice for
+// any purpose the board's stage ladder cares about:
+//
+//   - its Xero OnlineInvoice link cannot take a card payment, and a bank
+//     transfer against it lands unreconciled (see the "Acceptance Deposit
+//     Invoice Invariant" in CLAUDE.md, and `_acceptanceInvoiceChargeable`);
+//   - the captain's 2026-08-02 Docs Ready ruling
+//     (`data/decisions/2026-08-02-swms-261059-and-draft-invoice.md`) makes a
+//     DRAFT invoice a PRE-condition of Docs Ready — the thing he reviews before
+//     approving — not evidence the card is finished. An AUTHORISED/SUBMITTED/PAID
+//     invoice is what "past sending" looks like.
+//
+// So a DRAFT satisfies `invoiceIsDraft` (a card awaiting review) and must NEVER
+// satisfy `invoiceDone` (a card whose money already went out).
+export function _makesafeInvoiceIsRaised(invoice: any): boolean {
+  return hasActiveMakesafeInvoice(invoice) &&
+    MAKESAFE_RAISED_INVOICE_STATUSES.includes(String(invoice?.status || '').toUpperCase())
+}
+
 function perthYmd(date: Date): { y: number; m: number; d: number } | null {
   if (Number.isNaN(date.getTime())) return null
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -13468,8 +13499,7 @@ export function _deriveMakesafeSurfacing(
   const invoiceStatusUpper = String(invoice?.status || '').toUpperCase()
   const invoiceIsLive = hasActiveMakesafeInvoice(invoice)
   const invoiceIsDraft = invoiceIsLive && invoiceStatusUpper === 'DRAFT'
-  const invoiceAuthorisedLive = invoiceIsLive &&
-    ['AUTHORISED', 'SUBMITTED', 'PAID'].includes(invoiceStatusUpper)
+  const invoiceAuthorisedLive = _makesafeInvoiceIsRaised(invoice)
 
   // gateSoftenSent — the signal trustworthy enough to SOFTEN the hard close-out
   // doc-gate (let a job complete despite a missing doc). This is the UNSAFE
@@ -13534,6 +13564,27 @@ export function _deriveMakesafeSurfacing(
   }
 }
 
+// The version of the VISIBLE stage ladder — `_deriveMakesafeBoardStage`, whose
+// output becomes `declared_stage` and then `canonical_stage`, the column a card
+// is rendered in. The corrected shadow engine has carried
+// `SES_STAGE_ENGINE_V2_VERSION` since it was born; the ladder that actually
+// places every card had no version at all, so a past measurement could not say
+// which derivation produced it.
+//
+//   v1 (implicit, unversioned) — `invoiceDone` counted any non-VOIDED/DELETED
+//      ACCREC row, so a Xero DRAFT closed a card.
+//   v2-raised-invoice — `invoiceDone`'s invoice term is
+//      `_makesafeInvoiceIsRaised`. A DRAFT invoice no longer closes a card and
+//      no longer hands one to the close-out doc gate.
+//
+// It lives HERE rather than in the read model because this module owns the
+// ladder, and because `index.ts` already imports MAKESAFE_BOARD_CONTRACT_VERSION
+// from the read model — importing back the other way would be a cycle. Enrich
+// stamps it onto the base row; the read model publishes it beside
+// `declared_stage`. It is ADVISORY provenance: nothing selects or buckets on it.
+// Pinned once, in makesafe_draft_invoice_stage_test.ts.
+export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v2-raised-invoice'
+
 export function _deriveMakesafeBoardStage(
   job: any,
   detail: any,
@@ -13556,7 +13607,21 @@ export function _deriveMakesafeBoardStage(
   if (jobStatus === 'archived') return 'archive'
   const hasAssignments = assignments.length > 0
   const hasSubmittedReport = !!report || !!detail?.report_received_at || normalizedSub === 'admin_to_send_report' || normalizedSub === 'ready_to_invoice'
-  const invoiceDone = hasActiveMakesafeInvoice(invoice) || jobStatus === 'invoiced' || normalizedSub === 'complete'
+  // invoiceDone — the money side of this card is already out the door.
+  //
+  // The invoice term is `_makesafeInvoiceIsRaised`, NOT hasActiveMakesafeInvoice:
+  // a DRAFT invoice is unsendable and unpayable, so it can never be the thing
+  // that closes a card. Reading it as "invoice done" put 15 cards with no pack,
+  // no report and no payable invoice into the captain's send queue — they
+  // short-circuited past the evidence branches into the close-out doc gate,
+  // which then held them in report_ready for a missing PDF.
+  //
+  // The other two terms stay as they are. They are OPERATOR declarations
+  // (`jobs.status = 'invoiced'`, substatus `complete`), not claims about invoice
+  // status, and neither is reachable by merely creating a Xero draft. Measured
+  // 2026-08-02: of the 19 board cards carrying a DRAFT invoice, ZERO carry
+  // `jobs.status='invoiced'`, so keeping those terms does not weaken this fix.
+  const invoiceDone = _makesafeInvoiceIsRaised(invoice) || jobStatus === 'invoiced' || normalizedSub === 'complete'
 
   const surf = _deriveMakesafeSurfacing(job, detail, report, invoice, docs, packSent, pack)
 
@@ -13566,8 +13631,7 @@ export function _deriveMakesafeBoardStage(
   // hard doc-gate below — and it is a TRIAGE input here, never the sole
   // driver: it only relaxes the gate when the invoice is authorised and the
   // substatus is complete (the pack genuinely went out the door).
-  const invoiceAuthorised = hasActiveMakesafeInvoice(invoice) &&
-    ['AUTHORISED', 'SUBMITTED', 'PAID'].includes(String(invoice?.status || '').toUpperCase())
+  const invoiceAuthorised = _makesafeInvoiceIsRaised(invoice)
   // verifiedSent softens the hard close-out doc-gate. Original signal: pack_sent
   // marker + authorised invoice + substatus complete. Now ALSO satisfied by the
   // TRUSTWORTHY gateSoftenSent signal (a DURABLE pack status sent/sent_not_closed/
@@ -13969,7 +14033,11 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   let missingDocs: string[] = []
   let invoiceDone = false
   if (docFlags && scoped.allowCloseoutFromEvidence) {
-    invoiceDone = hasActiveMakesafeInvoice(invoice) ||
+    // MUST stay term-for-term identical to the ladder's own invoiceDone
+    // (_deriveMakesafeBoardStage) — including the raised-invoice term. If this
+    // copy counted a DRAFT invoice the board would advertise a hard
+    // `docs_missing` hold on a card the ladder is no longer holding for docs.
+    invoiceDone = _makesafeInvoiceIsRaised(invoice) ||
       String(j?.status || '').toLowerCase() === 'invoiced' ||
       normalizeMakesafeSubstatus(detail?.substatus) === 'complete'
     if (invoiceDone) {
@@ -13990,8 +14058,7 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     scopedPack,
   )
   const invoiceAuthorised = scoped.allowCloseoutFromEvidence &&
-    hasActiveMakesafeInvoice(invoice) &&
-    ['AUTHORISED', 'SUBMITTED', 'PAID'].includes(String(invoice?.status || '').toUpperCase())
+    _makesafeInvoiceIsRaised(invoice)
   const verifiedSent = (scopedPackSent === true && invoiceAuthorised &&
     normalizeMakesafeSubstatus(detail?.substatus) === 'complete') || surf.gateSoftenSent
 
@@ -14015,6 +14082,9 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     substatus: normalizeMakesafeSubstatus(detail?.substatus) || null,
     board_stage: boardStage,
     board_label: MAKESAFE_BOARD_STAGE_LABELS[boardStage],
+    // Which ladder produced `board_stage`. Advisory provenance, published by the
+    // read model as `declared_stage_engine_version`.
+    board_stage_engine_version: MAKESAFE_STAGE_LADDER_VERSION,
     intake_at: j.created_at,
     age_hours: age.age_hours,
     age_days: age.age_days,
