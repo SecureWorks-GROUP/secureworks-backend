@@ -18331,7 +18331,7 @@ async function approveIntakeDraft(client: any, body: any) {
     // selects on either value.
     if (primaryIsReportOnly && createdJobId) {
       try {
-        await client.from('makesafe_job_details').update({
+        const { data: updatedDetails, error: detailUpdateError } = await client.from('makesafe_job_details').update({
           report_type: effectiveReportType,
           // Reconciliation of still-owed work starts at the createMakesafeJob
           // default (company_contact_required -> New) when the privileged caller
@@ -18341,9 +18341,19 @@ async function approveIntakeDraft(client: any, body: any) {
             ? {}
             : { substatus: MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION }),
           updated_at: new Date().toISOString(),
-        }).eq('job_id', createdJobId)
+        }).eq('job_id', createdJobId).select('job_id')
+        if (detailUpdateError || !updatedDetails?.length) {
+          console.error('[ops-api] approveIntakeDraft: report_type/substatus update did not establish detail state', {
+            job_id: createdJobId,
+            error: detailUpdateError?.message || null,
+            updated_rows: updatedDetails?.length || 0,
+          })
+        }
       } catch (e: any) {
-        console.log('[ops-api] approveIntakeDraft: report_type/substatus update non-blocking:', e?.message)
+        console.error('[ops-api] approveIntakeDraft: report_type/substatus update failed non-blocking:', {
+          job_id: createdJobId,
+          error: e?.message,
+        })
       }
     }
 
