@@ -13,6 +13,60 @@ no per-card docket or report work was done.
 
 ---
 
+# FOR THE CAPTAIN — three things, read these first
+
+## 1. 38 roof cards are now clear of `pricing_evidence_missing`
+
+28 single storey, 10 double. Written by the sanctioned backfill on your approval, at your confirmed
+prices (single $250 ex / $275 inc, double $350 ex / $385 inc), re-verified against the sealed pricer
+before anything was written. Confirmed by reading production back, not by trusting the response.
+
+**That blocker only.** Those 38 cards may still be held by the spine, the attendance cycle, a dead
+portal link or missing trade evidence. This did not put 38 cards in Docs Ready — it removed one wall
+from in front of them.
+
+Two cards were deliberately not written, and they are still `(none)` in production:
+
+| Card | Suburb | Why |
+|---|---|---|
+| `SWMS-26930` | Joondalup | three storeys — no sealed price, you price it by hand at release |
+| `SWMS-26848` | Dianella | already carries a storey; writing a second value can make the reader return `undefined` and **stop a card that prices today** |
+
+## 2. `SWMS-261019`'s persisted pack will be superseded on its next prepare
+
+You are working the roof cards live, so know this before it surprises you. `SWMS-261019` (Floreat)
+already had a persisted docket revision. Adding its storey fact changes the docket's **input hash**,
+so the next `prepare_ses_docket_revision` on that card supersedes the pack that is on it now.
+
+**This is the card becoming priceable, not a defect** — the old pack was built without a price. The
+action flagged it itself in `state_moves`; I did not touch the card. It is the only one of the 38
+in this position.
+
+## 3. A gap between the guard and the reader — it did not bite here, but it is real
+
+The backfill decides what to hold using `competingStoreySignals`, which inspects `jobs.metadata`,
+`jobs.scope_json` and `makesafe_job_details`. The function that later **reads** the storey,
+`structuredSourceFact`, looks at one more place: **`intakeCase.raw_identity_json`**. The guard does
+not inspect that root.
+
+It matters because `structuredSourceFact` returns `undefined` when it finds two *different* values,
+so a competing value hiding in the intake case would leave a card blocked despite a successful
+write — a silent no-op.
+
+**Why it did not bite on these 38.** I checked instead of assuming. Five of the written cards do
+carry a storey signal in `raw_identity_json` — `SWMS-261079`, `261113`, `261114`, `261116`,
+`261123`, the newest cards, whose deterministic intake stores the builder's instruction text. **None
+of the five is a keyed value.** All five are prose inside that instruction, which is the very text
+the matcher read the storey from. `structuredSourceFact` only collects values under matching keys,
+so prose produces no competing value and every one of the 38 resolves unambiguously.
+
+So this run is safe. But the guard and the reader disagree about where a storey can live, and the
+next tranche — or a builder whose intake writes a keyed storey — could hit it. Worth closing by
+adding `raw_identity_json` to `competingStoreySignals`, which would only ever hold *more* cards for
+a human, never write more.
+
+---
+
 ## The table
 
 | Card | Suburb | Outcome | Evidence |
