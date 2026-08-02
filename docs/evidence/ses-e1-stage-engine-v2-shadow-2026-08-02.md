@@ -162,3 +162,62 @@ was to keep the fault and let Release 2 own it.
 Overlay behaviour is byte-identical: real binding still reads `declared_stage`,
 and `sesStageV2OverlayCandidate` is a simulation with the same three guards that
 binds nothing. The card whose overlay would unbind is reported, not rebound.
+
+## Release 2 — one common clock
+
+**Behaviour change:** exactly one — every terminal path in the shadow engine
+runs through one `sesStageCompletedStage` helper, and a missing trusted
+completion time is refused rather than guessed. Zero placements move.
+
+**What landed**
+
+- `sesStageCompletedStage` — THE common clock, called from both the raw
+  `complete/completed/closed` shortcut and the durable close-out path. The newer
+  engine applies the seven-day window on close-out and skips it entirely on the
+  shortcut, which is why 34 jobs finished months ago would appear in "Completed
+  This Week". Captain precondition 2: the clock applies on every path.
+- `sesStageTrustedCompletionAt` — the named allow-list. Generic
+  `jobs.updated_at` (a row touch, not completion proof) and
+  `makesafe_job_details.invoice_ready_at` (a readiness marker, not an issue or a
+  send) are dropped. What survives is a durable pack send, an issued invoice's
+  date or creation, an explicit `jobs.completed_at`, or a durable report send.
+  M1's own `completedAt` list stays where it is, unchanged, so the two are
+  readable side by side.
+- A missing trusted timestamp returns `decision_required` with conflict
+  `completion_timestamp_missing`. The newer engine treats an unknown completion
+  time as "within the window" and parks the card in Completed forever — a claim
+  about this week that no evidence supports.
+- 6 boundary tests: under seven days, exactly seven days, over seven days, on
+  BOTH terminal paths; missing time; weak sources; per-source priority.
+
+**Measured (2026-08-02T07:0xZ)**
+
+| Fact | Design expected | Measured |
+|---|---:|---:|
+| Pure `completed -> archive` | 34 | **34** |
+| Prospective corrected moves | 71 -> 37 | **71 -> 37** |
+| Live placements moved | 0 | **0** |
+| Raw-terminal missing-time blast | 0 | **0** |
+| Pure Completed | 39 -> 5 | **39 -> 5** |
+| Pure Archive | 229 -> 263 | **229 -> 263** |
+| Any other pure stage changed | 0 | **0** |
+| Overlay rows that would unbind | 9 | **9** |
+
+Every number matches the design's isolated lab measurement. The 34 moved cards
+are **identical** to the frozen manifest's G1 cohort, card for card.
+
+Two findings worth recording, since both could have shown up as extra blast and
+did not:
+
+- Tightening the timestamp allow-list moved nothing on its own. All 34 changes
+  are `completed -> archive` from the shortcut branch; no card lost a timestamp
+  it was previously aged against, and no close-out card changed. That confirms
+  the design's read-only finding that zero live cards depend on generic
+  `updated_at`, and extends it: none depends on `invoice_ready_at` either.
+- Zero cards reached `decision_required` at this snapshot, so the refusal is
+  live but currently unexercised on production data. It is proven by test, not
+  by a production card.
+
+Exit condition met: boundary tests at `<7d` / `=7d` / `>7d` on both paths, a
+fresh harness run, and the frozen Release 0 baseline still verifying with an
+identical generation id. Tests: 2707 passed / 21 failed (same 21 pre-existing).
