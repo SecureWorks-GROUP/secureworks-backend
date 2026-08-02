@@ -5,6 +5,13 @@ Owner of this change: `_makesafeInvoiceIsRaised` +
 Regression suite: `supabase/functions/ops-api/makesafe_draft_invoice_stage_test.ts`.
 Measurement artifacts: `data/ses-draft-invoice-not-done-v1/`.
 
+The captain's rulings this is graded against are NOT in this repository. They live
+in firstmate's home and must be read by absolute path:
+`/Users/marninstobbe/kun-agent-workspace/data/decisions/` (16 files, including
+`2026-08-02-captain-card-by-card-review.md`) and
+`/Users/marninstobbe/kun-agent-workspace/data/ses-docsready-screenshot-audit-v1/report.md`.
+`data/decisions/` in this repo holds one file and is not the set.
+
 ## The defect
 
 `invoiceDone` in `_deriveMakesafeBoardStage` — the ladder that produces
@@ -134,7 +141,11 @@ Artifacts: `data/ses-draft-invoice-not-done-v1/parity-before.json`,
 | SWMS-26754 | ordinary roof portal | Docs Ready | Allocated | same |
 | SWMS-26803 | ordinary roof portal | Docs Ready | Allocated | same |
 | SWMS-26848 | ordinary roof portal | Docs Ready | Allocated | same |
-| SWMS-26782 | physical make-safe | **Archive** | Allocated | same derivation change; its `report_ready -> archive` display overlay stops binding because the overlay resolver requires `source_status == declared_stage` |
+| SWMS-26782 | physical make-safe | **Archive** | Allocated | same derivation change; its `report_ready -> archive` display overlay stops binding because the overlay resolver requires `source_status == declared_stage`. A captain-ruled card — see the two dedicated sections below |
+
+SWMS-26754 and SWMS-26782 are both captain-ruled. SWMS-26782's move honours its
+ruling; **SWMS-26754's does not**. Both are treated in full under "Stop
+conditions".
 
 Nothing else in any published field moved. `m1_pure`, `stage_v2` and
 `stage_v2_post_overlay` are byte-identical on all 407 cards — this change touches
@@ -213,9 +224,59 @@ ladder's `hasSubmittedReport` **in addition** to this change gives:
 - a **second** captain display overlay stops binding: SWMS-26855 goes
   Archive -> New.
 
-That is a separate release with its own blast, its own captain question about
-five cards falling back to New, and its own overlay casualty. It is not in this
-PR.
+That is a separate release with its own blast and its own overlay casualty. It is
+not in this PR.
+
+### What the five no-invoice cards actually are, and where they belong
+
+Firstmate refused the naive version of that second change on the strength of
+those five cards, and was right to: a card carrying a report is not a New card.
+Investigated read-only, all five are one identical shape —
+`SWMS-261079`, `SWMS-261113`, `SWMS-261114`, `SWMS-261116`, `SWMS-261123`:
+
+- family `ordinary_roof_portal`, `jobs.status = 'accepted'`, substatus
+  `ready_to_invoice` (the pre-F4 intake stamp);
+- **work order attached**, and **five builder portal links** on the card;
+- zero assignments, no service report, no `report_received_at`, no report
+  document, no completed portal capture, and **no invoice of any kind**;
+- every link is typed `builder_portal` rather than `roof_report`, so M1 reports
+  "the work order email contains no roof report link — ask the builder to send
+  it".
+
+**They belong in Allocated**, on three independent authorities: the captain ruled
+it directly for SWMS-261114 ("Correct work order attached, which is good. Nothing
+written on the roof report. **Not Docs Ready. Allocated.**"), and both `m1_pure`
+and `stage_v2` already derive `allocated` for all five today.
+
+They dropped to New in the naive experiment for a reason that has nothing to do
+with `ready_to_invoice`: **the legacy ladder has no portal-link branch.** M1 and
+the corrected engine both gained one — a non-physical family with at least one
+external link is Allocated — and the legacy ladder never did. Removing the
+`ready_to_invoice` crutch simply exposed the missing branch, exactly as removing
+the DRAFT-invoice crutch exposed SWMS-26754's missing report evidence.
+
+Measured, read-only, same population and same pinned `--now`:
+
+| | Before | Drop `ready_to_invoice` alone | Drop it **and** add the portal-link branch |
+|---|---|---|---|
+| New | 35 | **43** | **35** |
+| Allocated | 31 | 45 | 53 |
+| Trade Report In | 12 | 12 | 12 |
+| Docs Ready | 24 | 4 | 4 |
+| Completed | 2 | 2 | 2 |
+| Archive | 303 | 301 | 301 |
+| cards landing in New | — | 5 | **none** |
+
+So the follow-up release is not "drop `ready_to_invoice`". It is **"drop
+`ready_to_invoice` and give the legacy ladder the portal-link Allocated branch
+M1 and v2 already have"**, which puts all five where the captain and both other
+engines say they belong and demotes nothing. In that shape the captain-ruled
+movers are SWMS-261114 (Docs Ready -> Allocated, **matching his ruling exactly**)
+and SWMS-26754 (the same conflict as here). Two overlays unbind, SWMS-26782 and
+SWMS-26855.
+
+SWMS-26754 is therefore the single blocker common to both releases, and it is an
+evidence problem rather than a ladder problem.
 
 ## The one overlay this change unbinds: SWMS-26782
 
@@ -246,8 +307,9 @@ Three facts bear on whether that is a captain decision being voided:
    assignments, no service report, no report PDF and an unmet SWMS requirement.
    Nothing is archived and no work disappears.
 
-It is nonetheless a card leaving Archive against a captain-approved overlay, so
-it was escalated rather than decided here. See "Stop conditions" below.
+Firstmate's decision, 2026-08-02: ship it, and name it. The full statement is
+under "Stop conditions" below, kept there so a reader checking the stop
+conditions finds it without having to reach this section.
 
 ## Effect on the frozen E1 baseline
 
@@ -276,27 +338,92 @@ the owning E1 document, not to this PR.
 
 | Condition | Result |
 |---|---|
-| Zero captain-ruled cards move | **Decision-file rulings: PASS.** `data/decisions/` contains one ruling, `2026-08-02-swms-261059-and-draft-invoice.md` on SWMS-261059; that card does not move (Docs Ready -> Docs Ready, unchanged). **Escalated:** SWMS-26782 moves out of Archive by unbinding a captain-approved display overlay (not a decision file). |
+| Zero captain-ruled cards move | **ONE MOVES: SWMS-26754, against its ruling.** See below. SWMS-26782 also moves, and that one HONOURS its certification. The other nine ruled cards are unmoved. |
 | No card may be archived | **PASS**, measured (Archive 303 -> 302, pre-overlay 264 -> 264) and structurally (narrowing `invoiceDone` can only remove cards from the sole non-`jobs.status` archive path), with an exhaustive sweep test. |
 | Production reads only | **PASS.** Management API `/database/query`, `read_only: true`, SELECT only, through `assertReadOnlySql` + `assertNoPiiColumns`. |
 | No PII anywhere | **PASS.** Job references, builder scope and family only. The only match for an email-shaped pattern in the artifacts is the literal word "email" inside M1's own explanatory sentences ("The work order email contains no roof report link"). |
 | Regression test fails on the old shape | **PASS, proved.** See below. |
 | Engine version bumped | **PASS.** `MAKESAFE_STAGE_LADDER_VERSION`, introduced because the visible ladder had no version to bump. |
 
-### Two brief inputs that do not exist in this repository
+### Stop condition 5, run against every card the captain read personally
 
-`data/ses-docsready-screenshot-audit-v1/report.md` and
-`data/decisions/2026-08-02-captain-card-by-card-review.md` are named by the brief
-and are absent from `main`, from every reachable sibling worktree, and from
-`~/Projects/secureworks-wiki`. `data/decisions/` holds exactly one file. (The
-already-merged `docs/evidence/ses-e1-stage-engine-v2-shadow-2026-08-02.md`
-likewise cites a `2026-08-02-docs-ready-repair-restoration.md` that is not
-committed, so the decision directory is known to lag its citations.)
+The rulings live in firstmate's home, not in this repository:
+`/Users/marninstobbe/kun-agent-workspace/data/decisions/` (16 files) and
+`/Users/marninstobbe/kun-agent-workspace/data/ses-docsready-screenshot-audit-v1/report.md`.
+The eleven cards he read with his own eyes on 2026-08-02, checked against this
+change:
 
-The "zero captain-ruled cards may move" condition was therefore enforced against
-every ruling actually readable. It cannot be enforced against the card-by-card
-review, and the five movers are listed above by job reference precisely so that
-check can be completed by someone holding that file.
+| Card | His ruling | Before | After | Verdict |
+|---|---|---|---|---|
+| SWMS-261114 | Not Docs Ready. Allocated. | Docs Ready | Docs Ready | unmoved |
+| SWMS-261025 | Completed. Shaun already sent it. | Trade Report In | Trade Report In | unmoved |
+| SWMS-261021 | Docs Ready once the skill runs | Trade Report In | Trade Report In | unmoved |
+| SWMS-261015 | Run the skill, author the report | Trade Report In | Trade Report In | unmoved |
+| SWMS-26832 | Needs investigation before anything moves | Docs Ready | Docs Ready | unmoved |
+| **SWMS-26754** | **Invoice it. "That one probably we should be invoicing."** | **Docs Ready** | **Allocated** | **VIOLATES** |
+| SWMS-26707 | Waiting on the trade. Follow up. | Allocated | Allocated | unmoved |
+| SWMS-26619 | Waiting on the trade. Follow up. | Allocated | Allocated | unmoved |
+| SWMS-261065 | Run the skill | Trade Report In | Trade Report In | unmoved |
+| SWMS-261109 | Run the skill | Docs Ready | Docs Ready | unmoved |
+| SWMS-261059 | Completed or Archive, both acceptable | Docs Ready | Docs Ready | unmoved |
+
+**SWMS-26754 Karrinyup (MLB-26323) is a genuine stop-condition hit.** He opened
+it, found the roof report done 40 days ago and a DRAFT invoice (INV-0932, $330)
+on it, and ruled: invoice it — "the expired link is not a reason to hold a
+completed roof job". This change moves it to **Allocated**, which is the board's
+"waiting on the trade" state and is precisely the end state his standing
+instruction rejects: *"There should be no way that I come tomorrow and see
+there's a job with a report in it that we don't send to Docs Ready."*
+
+The mechanism is worth stating exactly, because it is not a defect in this
+change:
+
+- Our records hold **no** report evidence for the card — no `job_service_reports`
+  row, no `report_received_at`, no report document, no completed portal capture.
+  The only report that exists is the one the captain saw in the builder's portal.
+- The portal link is expired, and per the audit's own root-cause finding
+  `capture_portal_evidence.py` cannot currently distinguish an expired link from
+  an unsubmitted form, so the deterministic reader cannot recover the fact
+  either.
+- The DRAFT invoice was therefore the *only* thing holding the card in Docs
+  Ready. It was in the right column for the wrong reason, and removing the wrong
+  reason exposes the missing evidence.
+
+So the card's correct destination cannot be DERIVED tonight; it is only KNOWN,
+by the captain. Under the repository's own rule for exactly this situation —
+never resolve such a card in code, resolve it by recording the ruling as evidence
+and letting the engine derive from it — the fix is a record, not a predicate.
+That is a production write, which this task is forbidden from making, so it was
+escalated. Note also that "invoice it" is his own APPROVE INVOICE click: per
+`2026-08-02-sealed-jobs-cannot-be-invoiced-by-an-agent.md` no agent can mint an
+invoice on a sealed card, so honouring the ruling means putting the card in front
+of him, not billing it.
+
+The other three cards this change moves out of Docs Ready — SWMS-26709,
+SWMS-26803, SWMS-26848 — land in exactly the destination the screenshot audit
+itself assigned to that group: *"Belongs in Allocated / blocked on builder."*
+The single conflict is the one card where the captain overrode the audit.
+
+### SWMS-26782 is a captain-ruled card that moves, and the move honours the ruling
+
+Recorded here explicitly so nobody later reads it as a stop condition that was
+walked past.
+
+The card carries a captain-approved display overlay, `report_ready -> archive`
+from run `ses-u7-three-net-close-20260728-0755`. This change derives `allocated`,
+so the overlay stops binding and the card leaves Archive.
+
+That is the ruling being **honoured**, not violated. The frozen E1 baseline
+(`scripts/ses-e1-stage-baseline-v1.json`, snapshot 2026-08-02T06:18:52Z)
+certifies SWMS-26782 with `current: archive`, `newer_pure: allocated`,
+`post_cutover: allocated` and **`post_cutover_overlay_binds: false`** — the
+overlay was already certified as non-binding once the derivation is corrected,
+and Allocated is already its certified destination. The card is going exactly
+where the certification says it should, one release earlier than expected. It is
+one of the nine already-flagged Release 9 unbinds (9 -> 8), and un-archiving
+surfaces work rather than hiding it, which is the safe direction.
+
+Firstmate's decision, 2026-08-02: ship it.
 
 ## Test evidence
 
