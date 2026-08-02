@@ -1,11 +1,27 @@
-#!/usr/bin/env -S deno run --allow-env=SUPABASE_ACCESS_TOKEN --allow-net=api.supabase.com --allow-read --allow-write --allow-run=chrome-devtools-axi,sips
+#!/usr/bin/env -S deno run --allow-env=SUPABASE_ACCESS_TOKEN,SW_API_KEY --allow-net=api.supabase.com,kevgrhcjxspbxgovpmfl.supabase.co --allow-read --allow-write --allow-run=chrome-devtools-axi,sips
 // deno-lint-ignore-file no-explicit-any
 /**
- * F7 - deterministic, view-only Prime portal observer.
+ * F7 - deterministic Prime portal observer, with an opt-in capture writer.
  *
- * Default and only live mode in this tranche is dry-run. Production reads use
- * the Supabase Management API with `read_only: true`; the browser uses only
- * open/eval/screenshot. It never clicks, fills, types, presses, or submits.
+ * DRY RUN IS THE DEFAULT. Reading production is always read-only: database
+ * reads use the Supabase Management API with `read_only: true`, and the browser
+ * uses only open/eval/screenshot - it never clicks, fills, types, presses, or
+ * submits.
+ *
+ * `--commit` is the only way this process writes anything, and it writes
+ * exactly one kind of row: an append-only revision in
+ * `makesafe_portal_capture_revisions`, through the single allow-listed ops-api
+ * action `record_ses_portal_capture_evidence`. It writes NO stage, substatus,
+ * job status or card placement, and `assertCaptureWriteAction` makes that
+ * structural rather than a promise. `--commit` additionally REQUIRES `--job`,
+ * so the writer can only ever be aimed at one named card; there is no sweep.
+ *
+ * What it will not record:
+ * - a partial capture. Missing cycle, role, builder reference or screenshot
+ *   means no row is written and the reason is recorded instead. The reader
+ *   trusts what it accepts, so half a capture is worse than none.
+ * - "not done" for a link it could not read. An expired, unreachable or
+ *   unclassifiable page is `unreachable` (status `rejected`), never `not_done`.
  *
  * Before every reachable-page PNG, the Prime job-details component is blanked
  * and an opaque evidence-only frame covers the viewport. Raw portal text and
@@ -29,7 +45,22 @@ import {
 const PROJECT_REF = "kevgrhcjxspbxgovpmfl";
 const MANAGEMENT_QUERY_URL =
   `https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query`;
-const OBSERVER_VERSION = "ses-prime-portal-observer/2026-08-02.3";
+const FUNCTIONS_BASE = `https://${PROJECT_REF}.supabase.co/functions/v1`;
+const OBSERVER_VERSION = "ses-prime-portal-observer/2026-08-02.4";
+
+/**
+ * The ONE ops-api action this process may call with a write method.
+ *
+ * `record_ses_portal_capture_evidence` appends an evidence revision and
+ * nothing else. Every stage/substatus/status/placement writer is absent from
+ * this allow-list, so "the observer never moves a card" is enforced by
+ * construction at the single egress point rather than asserted in prose.
+ */
+export const SES_PORTAL_CAPTURE_WRITE_ACTION =
+  "record_ses_portal_capture_evidence" as const;
+
+/** The concrete agent recorded in `captured_by` on every revision it writes. */
+export const SES_PORTAL_CAPTURE_OBSERVER_AGENT = OBSERVER_VERSION;
 const DEFAULT_OUTPUT_DIR =
   "docs/evidence/ses-f7-prime-portal-capture-dry-run-2026-08-02";
 const DEFAULT_INITIAL_WAIT_MS = 8_000;
@@ -99,6 +130,172 @@ export type CapturePlanDecision =
   | { action: "idempotent_noop"; reason: "unchanged_capture_exists" }
   | { action: "create_revision"; reason: "new_or_changed_observation" };
 
+export type CaptureWriteOutcome =
+  /** Dry run: the revision was planned and deliberately not written. */
+  | "dry_run"
+  /** One append-only revision was created. */
+  | "written"
+  /** The exact observation is already in the ledger; nothing was written. */
+  | "idempotent_noop"
+  /** A required evidence element was missing; nothing was written. */
+  | "write_refused"
+  /** Recordable, but this run's write cap was already spent. */
+  | "write_skipped_write_cap"
+  /** The write was attempted and the server refused or failed it. */
+  | "write_failed";
+
+export interface CaptureWriteDecision {
+  outcome: CaptureWriteOutcome;
+  reason: string;
+}
+
+/**
+ * Decide what a single observed link does in this run, before any network.
+ *
+ * The commit flag can only ever DOWNGRADE safety: with `commit:false` a
+ * recordable observation is `dry_run`, never a write. Nothing here can turn a
+ * `cannot_record` into a write, which is what keeps a partial capture out of a
+ * ledger the reader trusts.
+ */
+export function decideCaptureWrite(args: {
+  commit: boolean;
+  plannedAction: "create_revision" | "idempotent_noop" | "cannot_record";
+  planReason: string;
+  writesUsed: number;
+  maxWrites: number;
+}): CaptureWriteDecision {
+  if (args.plannedAction === "cannot_record") {
+    return { outcome: "write_refused", reason: args.planReason };
+  }
+  if (args.plannedAction === "idempotent_noop") {
+    return { outcome: "idempotent_noop", reason: "unchanged_capture_exists" };
+  }
+  if (!args.commit) {
+    return { outcome: "dry_run", reason: "commit_not_requested" };
+  }
+  if (args.writesUsed >= args.maxWrites) {
+    return {
+      outcome: "write_skipped_write_cap",
+      reason: `write_cap_reached_at_${args.maxWrites}`,
+    };
+  }
+  return { outcome: "written", reason: "new_or_changed_observation" };
+}
+
+export interface CaptureWriteInput {
+  job_id: string;
+  attendance_cycle_id: string | null;
+  role: SesPortalCaptureRole | null;
+  capture_result: SesPortalCaptureResult;
+  source_url: string;
+  source_content_hash: string;
+  builder_reference: string;
+  captured_at: string;
+  capture_idempotency_key: string | null;
+  signal: string;
+  screenshot: { content_hash: string; bytes_base64: string } | null;
+}
+
+export class CaptureWriteRefusal extends Error {
+  reason: string;
+  constructor(reason: string) {
+    super(`portal capture write refused: ${reason}`);
+    this.name = "CaptureWriteRefusal";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Refuse any ops-api action other than the append-only evidence recorder.
+ *
+ * This is the structural half of "the observer never writes a stage".
+ */
+export function assertCaptureWriteAction(action: string): void {
+  if (action !== SES_PORTAL_CAPTURE_WRITE_ACTION) {
+    throw new CaptureWriteRefusal(
+      `disallowed_ops_api_action_${JSON.stringify(action)}`,
+    );
+  }
+}
+
+/**
+ * Build the exact `record_ses_portal_capture_evidence` body, or refuse.
+ *
+ * Every element the reader gates on is required here, so an incomplete
+ * observation cannot reach the network at all: exact job, exact cycle, typed
+ * role, exact HTTPS URL, source fingerprint, builder reference, idempotency
+ * key, signal, and - for anything other than `unreachable` - the screenshot and
+ * its hash. `unreachable` is the mirror rule: it must carry NO screenshot,
+ * because "we could not look" is not a picture of anything.
+ */
+export function buildCaptureWriteRequest(
+  input: CaptureWriteInput,
+): {
+  action: typeof SES_PORTAL_CAPTURE_WRITE_ACTION;
+  body: Record<string, unknown>;
+} {
+  const required: Array<[string, unknown]> = [
+    ["missing_job_id", input.job_id],
+    ["missing_attendance_cycle", input.attendance_cycle_id],
+    ["unbound_capture_role", input.role],
+    ["missing_builder_reference", input.builder_reference?.trim()],
+    ["missing_capture_idempotency_key", input.capture_idempotency_key],
+    ["missing_signal", input.signal?.trim()],
+    ["missing_captured_at", input.captured_at],
+  ];
+  for (const [reason, value] of required) {
+    if (!value) throw new CaptureWriteRefusal(reason);
+  }
+  if (!canonicalSesPortalSourceUrl(input.source_url)) {
+    throw new CaptureWriteRefusal("missing_or_non_https_source_url");
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(input.source_content_hash || "")) {
+    throw new CaptureWriteRefusal("missing_source_content_hash");
+  }
+  if (input.capture_result === "unreachable") {
+    if (input.screenshot) {
+      throw new CaptureWriteRefusal("unreachable_capture_carries_screenshot");
+    }
+  } else {
+    if (!input.screenshot) {
+      throw new CaptureWriteRefusal("missing_screenshot");
+    }
+    if (!/^sha256:[0-9a-f]{64}$/.test(input.screenshot.content_hash || "")) {
+      throw new CaptureWriteRefusal("missing_screenshot_content_hash");
+    }
+    if (!input.screenshot.bytes_base64) {
+      throw new CaptureWriteRefusal("missing_screenshot_bytes");
+    }
+  }
+
+  const body: Record<string, unknown> = {
+    job_id: input.job_id,
+    attendance_cycle_id: input.attendance_cycle_id,
+    role: input.role,
+    capture_result: input.capture_result,
+    source_url: canonicalSesPortalSourceUrl(input.source_url),
+    source_content_hash: input.source_content_hash,
+    builder_reference: input.builder_reference.trim(),
+    captured_at: input.captured_at,
+    // The concrete agent that did the looking. `capture_producer` below names
+    // the approved producer CONTRACT, whose membership is a captain question
+    // (see SES_TRUSTED_PORTAL_CAPTURE_PRODUCERS); this field is how the ledger
+    // still records exactly which implementation observed the page.
+    captured_by: SES_PORTAL_CAPTURE_OBSERVER_AGENT,
+    capture_producer: SES_PORTAL_CAPTURE_PRODUCER,
+    capture_idempotency_key: input.capture_idempotency_key,
+    signal: input.signal,
+  };
+  if (input.screenshot) {
+    body.screenshot = {
+      media_type: "image/png",
+      content_hash: input.screenshot.content_hash,
+      bytes_base64: input.screenshot.bytes_base64,
+    };
+  }
+  return { action: SES_PORTAL_CAPTURE_WRITE_ACTION, body };
+}
+
 type BoardCard = {
   job_id: string;
   job_number: string;
@@ -162,6 +359,8 @@ type ObserverOptions = {
   limit: number | null;
   initialWaitMs: number;
   retryWaitMs: number;
+  commit: boolean;
+  maxWrites: number;
   help: boolean;
 };
 
@@ -169,6 +368,8 @@ type ObserverSummary = {
   observedTotal: PopulationCountSummary;
   canonicalLiveBoard: PopulationCountSummary;
   outputDir: string;
+  commit: boolean;
+  writes: number;
 };
 
 type PopulationName =
@@ -183,6 +384,8 @@ type PopulationCountSummary = {
   portal_links: number;
   by_outcome: Record<string, number>;
   by_planned_action: Record<string, number>;
+  by_write_outcome: Record<string, number>;
+  revisions_written: number;
   existing_capture_rows: number;
   roof_cards: number;
   roof_would_become_provable: number;
@@ -227,6 +430,9 @@ type SanitizedTaskResult = {
   planned_action: "create_revision" | "idempotent_noop" | "cannot_record";
   plan_reason: string;
   capture_idempotency_key: string | null;
+  write_outcome: CaptureWriteOutcome;
+  write_reason: string;
+  revision_id: string | null;
 };
 
 function requiredEnv(name: string): string {
@@ -265,6 +471,90 @@ async function managementQuery<T>(sql: string): Promise<T[]> {
     );
   }
   return payload as T[];
+}
+
+export interface CaptureWriteTransport {
+  (
+    action: string,
+    body: Record<string, unknown>,
+  ): Promise<{ status: number; payload: any }>;
+}
+
+/**
+ * The real egress. Every call goes through `assertCaptureWriteAction`, so the
+ * allow-list cannot be bypassed by a caller that assembles its own URL.
+ */
+export const opsApiCaptureWriteTransport: CaptureWriteTransport = async (
+  action,
+  body,
+) => {
+  assertCaptureWriteAction(action);
+  const response = await fetch(`${FUNCTIONS_BASE}/ops-api?action=${action}`, {
+    method: "POST",
+    headers: {
+      "x-api-key": requiredEnv("SW_API_KEY"),
+      "Content-Type": "application/json",
+      "User-Agent": "SecureWorks-SES-F7-Prime-Observer/1.0",
+    },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => null);
+  return { status: response.status, payload };
+};
+
+export interface CaptureWriteResult {
+  outcome: "written" | "idempotent_noop" | "write_failed";
+  reason: string;
+  revision_id: string | null;
+}
+
+/**
+ * Append one revision and classify the answer.
+ *
+ * Idempotency is defended twice and this is the SECOND layer. The planner
+ * already skips an unchanged observation before we get here; if a concurrent
+ * run wrote the same key first, the database unique index refuses the insert
+ * and that refusal is a successful no-duplicate outcome, not an error.
+ */
+export async function writeCaptureRevision(
+  request: {
+    action: typeof SES_PORTAL_CAPTURE_WRITE_ACTION;
+    body: Record<string, unknown>;
+  },
+  transport: CaptureWriteTransport,
+): Promise<CaptureWriteResult> {
+  assertCaptureWriteAction(request.action);
+  const { status, payload } = await transport(request.action, request.body);
+  if (status >= 200 && status < 300 && payload?.id) {
+    return {
+      outcome: "written",
+      reason: "revision_appended",
+      revision_id: String(payload.id),
+    };
+  }
+  const code = String(payload?.code || "");
+  const message = String(payload?.error || `http_${status}`);
+  if (
+    code === "ses_portal_capture_commit_failed" &&
+    /idempotency conflict/i.test(message)
+  ) {
+    return {
+      outcome: "idempotent_noop",
+      reason: "database_idempotency_conflict",
+      revision_id: null,
+    };
+  }
+  return {
+    outcome: "write_failed",
+    reason: code || message,
+    revision_id: null,
+  };
+}
+
+export function base64FromBytes(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 export function normalizePrimeSourceText(value: string): string {
@@ -836,6 +1126,9 @@ async function buildTasks(
   return tasks;
 }
 
+/** Switches, not key=value flags. `--commit=false` must not read as "off". */
+const BOOLEAN_FLAGS = new Set(["help", "commit"]);
+
 export function parseOptions(args: string[]): ObserverOptions {
   const known = new Set([
     "help",
@@ -844,6 +1137,8 @@ export function parseOptions(args: string[]): ObserverOptions {
     "limit",
     "initial-wait-ms",
     "retry-wait-ms",
+    "commit",
+    "max-writes",
   ]);
   const values = new Map<string, string>();
   for (const arg of args) {
@@ -857,14 +1152,34 @@ export function parseOptions(args: string[]): ObserverOptions {
       throw new ObserverUsageError(`unknown flag --${key}`);
     }
     const value = rest.join("=");
-    if (key !== "help" && !value) {
+    if (!BOOLEAN_FLAGS.has(key) && !value) {
       throw new ObserverUsageError(`--${key} requires a value after =`);
+    }
+    if (BOOLEAN_FLAGS.has(key) && value) {
+      throw new ObserverUsageError(`--${key} is a switch and takes no value`);
     }
     values.set(key, value || "true");
   }
   const help = values.has("help");
   const outputDir = values.get("out-dir") || DEFAULT_OUTPUT_DIR;
   const job = values.get("job") || null;
+  const commit = values.has("commit");
+  // A writer that can be aimed at the whole board is a backfill waiting to be
+  // typed by accident. Committing REQUIRES one named card.
+  if (commit && !job) {
+    throw new ObserverUsageError(
+      "--commit requires --job=<board reference>; there is no bulk capture mode",
+    );
+  }
+  const maxWrites = positiveInteger(
+    values.get("max-writes") || "1",
+    "--max-writes",
+  );
+  if (values.has("max-writes") && !commit) {
+    throw new ObserverUsageError(
+      "--max-writes is only meaningful with --commit",
+    );
+  }
   const limit = optionalPositiveInteger(values.get("limit"), "--limit");
   const initialWaitMs = positiveInteger(
     values.get("initial-wait-ms") || String(DEFAULT_INITIAL_WAIT_MS),
@@ -880,6 +1195,8 @@ export function parseOptions(args: string[]): ObserverOptions {
     limit,
     initialWaitMs: Math.max(1_000, initialWaitMs),
     retryWaitMs: Math.max(1_000, retryWaitMs),
+    commit,
+    maxWrites,
     help,
   };
 }
@@ -899,21 +1216,31 @@ function optionalPositiveInteger(
   return raw == null ? null : positiveInteger(raw, flag);
 }
 
-function printHelp(): void {
+export function printHelp(): void {
   console.log(`command: ses-f7-prime-portal-observer
-description: Read genuine Prime share links without mutation and emit sanitized dry-run evidence.
-mode: dry-run only
-flags[6]{flag,default,description}:
+description: Read genuine Prime share links without mutation, and optionally append what was observed to the capture ledger.
+mode: dry-run by default; --commit appends evidence revisions only
+flags[8]{flag,default,description}:
   --help,false,Show this reference without reading production
   --out-dir=<path>,${JSON.stringify(DEFAULT_OUTPUT_DIR)},Artifact directory
   --job=<job-reference>,all,Observe one exact board job reference
   --limit=<count>,all,Observe at most this many portal links
   --initial-wait-ms=<milliseconds>,${DEFAULT_INITIAL_WAIT_MS},Wait after opening each link
   --retry-wait-ms=<milliseconds>,${DEFAULT_RETRY_WAIT_MS},Extra wait for an incomplete load
-examples[3]:
+  --commit,false,Append observed captures via ${SES_PORTAL_CAPTURE_WRITE_ACTION}; requires --job and SW_API_KEY
+  --max-writes=<count>,1,Cap revisions appended in one --commit run
+env[2]{name,requirement}:
+  SUPABASE_ACCESS_TOKEN,always (read-only Management API)
+  SW_API_KEY,only with --commit
+examples[4]:
   scripts/ses-f7-prime-portal-observer.ts --help
   scripts/ses-f7-prime-portal-observer.ts --job=SWMS-REFERENCE --out-dir=.omx/f7-sample
-  scripts/ses-f7-prime-portal-observer.ts`);
+  scripts/ses-f7-prime-portal-observer.ts
+  scripts/ses-f7-prime-portal-observer.ts --job=SWMS-REFERENCE --commit
+notes[3]:
+  Nothing is written without --commit; --commit cannot run board-wide.
+  A missing cycle/role/builder-reference/screenshot writes nothing and records the reason.
+  An unreachable or expired link records cannot-observe, never not-done.`);
 }
 
 function toonString(value: string): string {
@@ -924,8 +1251,8 @@ function printSummary(summary: ObserverSummary): void {
   const total = summary.observedTotal;
   const board = summary.canonicalLiveBoard;
   console.log(`result:
-  mode: dry-run
-  production_writes: 0
+  mode: ${summary.commit ? "commit" : "dry-run"}
+  production_writes: ${summary.writes}
   stage_moves: 0
   observed_total_candidate_cards: ${total.candidate_cards} of ${total.candidate_cards} observed-total candidate cards
   observed_total_portal_cards: ${total.portal_cards} of ${total.candidate_cards} observed-total candidate cards
@@ -963,7 +1290,7 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 
 function countBy(
   rows: SanitizedTaskResult[],
-  field: "outcome" | "planned_action",
+  field: "outcome" | "planned_action" | "write_outcome",
 ): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const row of rows) {
@@ -1036,6 +1363,9 @@ function summarizePopulation(
     portal_links: results.length,
     by_outcome: countBy(results, "outcome"),
     by_planned_action: countBy(results, "planned_action"),
+    by_write_outcome: countBy(results, "write_outcome"),
+    revisions_written:
+      results.filter((row) => row.write_outcome === "written").length,
     existing_capture_rows: existingRows.filter((row) => cardIds.has(row.job_id))
       .length,
     roof_cards: roofCards.length,
@@ -1077,7 +1407,7 @@ function reportMarkdown(manifest: any): string {
       row.answered_fields == null
         ? "-"
         : `${row.answered_fields}/${row.total_fields}`
-    } | ${row.planned_action} | ${row.plan_reason} |`
+    } | ${row.planned_action} | ${row.plan_reason} | ${row.write_outcome} | ${row.write_reason} |`
   ).join("\n");
   const reasonRows = [
     ["canonical-live-board", board] as const,
@@ -1089,17 +1419,39 @@ function reportMarkdown(manifest: any): string {
         `| ${label} | ${reason} | ${count} of ${counts.roof_would_remain_unprovable} unprovable roof cards |`,
     )
   ).join("\n");
-  return `# F7 Prime portal observer - production dry run
+  const writeRows = [
+    ["canonical-live-board", board] as const,
+    ["observed-total", total] as const,
+    ["off-board-observed", offBoard] as const,
+  ].map(([label, counts]) => {
+    const outcomes = [
+      "dry_run",
+      "written",
+      "idempotent_noop",
+      "write_refused",
+      "write_skipped_write_cap",
+      "write_failed",
+    ];
+    return `| ${label} | ${
+      outcomes.map((outcome) =>
+        `${
+          counts.by_write_outcome[outcome] || 0
+        } of ${counts.portal_links} links`
+      ).join(" | ")
+    } |`;
+  }).join("\n");
+  return `# F7 Prime portal observer - production ${manifest.mode} run
 
 Generated: ${manifest.generated_at}
 Generation: \`${manifest.generation_id}\`
 Observer: \`${manifest.observer_version}\`
+Mode: \`${manifest.mode}\`
 
 ## Result
 
 The observer retained the wider read-only set and labelled every result with canonical live-board membership. The observed-total population contains ${total.candidate_cards} of ${total.candidate_cards} candidate cards; ${total.portal_cards} of ${total.candidate_cards} carry ${total.portal_links} genuine portal links. The canonical-live-board partition contains ${board.candidate_cards} of ${total.candidate_cards} observed-total candidate cards; ${board.portal_cards} of ${board.candidate_cards} carry ${board.portal_links} genuine portal links. The off-board-observed partition contains ${offBoard.candidate_cards} of ${total.candidate_cards} observed-total candidate cards; ${offBoard.portal_cards} of ${offBoard.candidate_cards} carry ${offBoard.portal_links} genuine portal links.
 
-It performed 0 production writes among ${total.candidate_cards} observed-total candidate cards and 0 stage moves among ${total.candidate_cards} observed-total candidate cards. Every database query used the Management API with \`read_only: true\`.
+It performed ${manifest.production_access.writes} production writes among ${total.candidate_cards} observed-total candidate cards and 0 stage moves among ${total.candidate_cards} observed-total candidate cards. Every write is an append-only \`makesafe_portal_capture_revisions\` row via \`${SES_PORTAL_CAPTURE_WRITE_ACTION}\`; no revision is ever updated or deleted. Every database read used the Management API with \`read_only: true\`.
 
 ## Population-partitioned outcomes
 
@@ -1153,12 +1505,18 @@ ${reasonRows || "| observed-total | none | 0 of 0 unprovable roof cards |"}
 
 The observer blanked Prime's \`prime-object-summary\` job-details component and then covered the viewport with an opaque evidence-only frame before each screenshot. The frame contains only job reference, builder reference, the classified Prime status phrase, field count, observation time, and the redaction notice. Raw page text and share URLs are omitted from this artifact; only SHA-256 fingerprints remain. Screenshot verification covers every screenshot referenced by the ${total.portal_links}-link observed-total manifest.
 
-The dry run planned the existing \`record_ses_portal_capture_evidence\` contract but did not call it. Unchanged observations already present in the ledger are \`idempotent_noop\`; changed or absent observations are \`create_revision\` candidates. Expired, inactive, failed, and unclassifiable pages are always \`cannot_observe\`, never \`not_started\`.
+Unchanged observations already present in the ledger are \`idempotent_noop\`; changed or absent observations are \`create_revision\` candidates. Expired, inactive, failed, and unclassifiable pages are always \`cannot_observe\`, never \`not_started\`.
+
+This run's mode was \`${manifest.mode}\`. It appended ${manifest.production_access.writes} of ${total.portal_links} observed-total links as capture revisions and performed 0 stage moves among ${total.candidate_cards} observed-total candidate cards. The only write action reachable from this process is \`${SES_PORTAL_CAPTURE_WRITE_ACTION}\`; \`assertCaptureWriteAction\` refuses every other ops-api action at the single egress point, so no stage, substatus, job status or card placement can be written from here. A \`--commit\` run requires an exact \`--job\` and is capped at \`--max-writes\` (this run: ${manifest.production_access.write_cap}); links left unwritten by that cap are reported as \`write_skipped_write_cap\` rather than dropped silently.
+
+| Population | Dry run | Written | Idempotent no-op | Write refused | Skipped by cap | Write failed |
+|---|---:|---:|---:|---:|---:|---:|
+${writeRows}
 
 ## Per-link result
 
-| Card | Population | Builder ref | Role | Outcome | Fields | Planned action | Reason |
-|---|---|---|---|---|---:|---|---|
+| Card | Population | Builder ref | Role | Outcome | Fields | Planned action | Reason | Write outcome | Write reason |
+|---|---|---|---|---|---:|---|---|---|---|
 ${rows}
 
 ## Query and code evidence
@@ -1195,8 +1553,13 @@ async function run(): Promise<ObserverSummary | null> {
     })),
   }))).slice(0, "sha256:".length + 20);
 
+  // Fail before touching a browser if a commit run cannot authenticate, rather
+  // than after observing every link.
+  if (options.commit) requiredEnv("SW_API_KEY");
+
   await command(["resize", "1200", "800"]);
   const results: SanitizedTaskResult[] = [];
+  let writesUsed = 0;
   for (const [index, task] of tasks.entries()) {
     const capturedAt = new Date().toISOString();
     const opened = await openAndReadPrimePage(
@@ -1278,6 +1641,64 @@ async function run(): Promise<ObserverSummary | null> {
       );
     }
 
+    let writeDecision = decideCaptureWrite({
+      commit: options.commit,
+      plannedAction: plannedAction,
+      planReason: planReason,
+      writesUsed,
+      maxWrites: options.maxWrites,
+    });
+    let revisionId: string | null = null;
+    if (writeDecision.outcome === "written") {
+      // `decideCaptureWrite` returns "written" as an INTENT; the outcome below
+      // is what actually happened. The cap counts revisions that were really
+      // created, so a refusal, a no-op or a failure leaves it unspent - which
+      // is safe because a commit run is already scoped to one named card.
+      try {
+        const screenshotBytes = screenshot
+          ? await Deno.readFile(
+            `${options.outputDir}/${screenshot.relative_path}`,
+          )
+          : null;
+        const request = buildCaptureWriteRequest({
+          job_id: task.card.job_id,
+          attendance_cycle_id: task.card.attendance_cycle_id,
+          role: task.role,
+          capture_result: verdict.capture_result,
+          source_url: task.url,
+          source_content_hash: sourceContentHash,
+          builder_reference: task.builder_reference,
+          captured_at: capturedAt,
+          capture_idempotency_key: idempotencyKey,
+          signal: verdict.signal,
+          screenshot: screenshotBytes && screenshot
+            ? {
+              content_hash: screenshot.content_hash,
+              bytes_base64: base64FromBytes(screenshotBytes),
+            }
+            : null,
+        });
+        const written = await writeCaptureRevision(
+          request,
+          opsApiCaptureWriteTransport,
+        );
+        writeDecision = { outcome: written.outcome, reason: written.reason };
+        revisionId = written.revision_id;
+        if (written.outcome === "written") writesUsed += 1;
+      } catch (error) {
+        writeDecision = {
+          outcome: error instanceof CaptureWriteRefusal
+            ? "write_refused"
+            : "write_failed",
+          reason: error instanceof CaptureWriteRefusal
+            ? error.reason
+            : error instanceof Error
+            ? error.message
+            : String(error),
+        };
+      }
+    }
+
     const population = observerPopulationForJobStatus(task.card.job_status);
     results.push({
       job_id: task.card.job_id,
@@ -1308,6 +1729,9 @@ async function run(): Promise<ObserverSummary | null> {
       planned_action: plannedAction,
       plan_reason: planReason,
       capture_idempotency_key: idempotencyKey,
+      write_outcome: writeDecision.outcome,
+      write_reason: writeDecision.reason,
+      revision_id: revisionId,
     });
 
     console.error(
@@ -1315,7 +1739,7 @@ async function run(): Promise<ObserverSummary | null> {
         index + 1
       }/${tasks.length}; ${population}] ${task.card.job_number} ${
         task.role || "unbound"
-      } ${verdict.outcome}`,
+      } ${verdict.outcome} ${writeDecision.outcome}`,
     );
   }
 
@@ -1339,15 +1763,19 @@ async function run(): Promise<ObserverSummary | null> {
   );
 
   const manifest = {
-    schema_version: "ses-f7-prime-portal-dry-run/v2",
+    schema_version: "ses-f7-prime-portal-observation/v3",
     observer_version: OBSERVER_VERSION,
+    mode: options.commit ? "commit" : "dry-run",
     capture_producer_contract: SES_PORTAL_CAPTURE_PRODUCER,
+    capture_observer_agent: SES_PORTAL_CAPTURE_OBSERVER_AGENT,
     generated_at: generatedAt,
     generation_id: generationId,
     production_access: {
       database: "management-api read_only:true",
       browser: "chrome-devtools-axi open/eval/screenshot only",
-      writes: 0,
+      write_action: options.commit ? SES_PORTAL_CAPTURE_WRITE_ACTION : null,
+      write_cap: options.commit ? options.maxWrites : 0,
+      writes: observedTotal.revisions_written,
       stage_moves: 0,
     },
     counts: {
@@ -1369,6 +1797,8 @@ async function run(): Promise<ObserverSummary | null> {
     observedTotal,
     canonicalLiveBoard,
     outputDir: options.outputDir,
+    commit: options.commit,
+    writes: observedTotal.revisions_written,
   };
 }
 

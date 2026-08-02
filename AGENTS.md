@@ -974,6 +974,38 @@ guarded. Mutable residue is deleted; append-only/group evidence is retained only
 after terminal accounting excludes it from live boards, projections, and
 fresh-source health.
 
+## The Portal Observer Writes Evidence Only, And Only When Asked
+
+`scripts/ses-f7-prime-portal-observer.ts` reads Prime share links and can append
+what it saw to `makesafe_portal_capture_revisions`. Dry run is the default;
+`--commit` is a switch that additionally REQUIRES `--job`, so the writer can
+never be aimed at the board (`--max-writes` defaults to 1 on top of that). The
+single egress point is `assertCaptureWriteAction`, which allows exactly one
+ops-api action, `record_ses_portal_capture_evidence` — every stage, substatus,
+status and placement writer is structurally unreachable from this process, so a
+capture cannot move a card. `buildCaptureWriteRequest` refuses before any network
+call when job, cycle, typed role, HTTPS URL, source hash, builder reference,
+idempotency key, signal or screenshot is missing, because the reader trusts what
+it accepts and half a capture is worse than none. An expired or unreachable link
+is `unreachable`/`rejected` with no screenshot, NEVER `not_done`. Idempotency is
+defended twice: the planner skips an unchanged observation, and the database
+unique index refuses a duplicate — read that refusal as `idempotent_noop`, not an
+error. Do NOT run a production backfill; that is captain-gated and separate.
+
+**Producer authority is UNSEALED and is not yours to decide.**
+`SES_TRUSTED_PORTAL_CAPTURE_PRODUCERS` in `ses_portal_capture_contract.ts` is the
+one predicate every reader asks (board read model and assembler adapter both),
+and it holds exactly one member. Widening it needs BOTH a migration (the
+`makesafe_portal_capture_bridge_shape` CHECK pins the same literal) and a captain
+ruling — never a code edit to make a write readable. Note the pinned contract
+string names a Python producer that does not exist; the real implementation is
+this TypeScript observer, which records its concrete identity in `captured_by`.
+That mismatch is a live captain question, written up with the proof set,
+the 407-card no-movement result and the backfill boundary in
+`docs/evidence/ses-f7-portal-capture-writer-2026-08-02.md`. Tests:
+`ses_portal_capture_writer_test.ts` (end-to-end through the real recorder and
+real reader), `scripts/test/ses-f7-prime-portal-observer_test.ts`.
+
 ## Deterministic Intake Notifies After Board Proof
 
 The post-mint Hugo notification and honest five-minute denominator are owned by

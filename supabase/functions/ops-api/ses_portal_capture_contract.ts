@@ -2,6 +2,35 @@ import { type SesSha256, sesSha256 } from "./ses_docket_envelope.ts";
 
 export const SES_PORTAL_CAPTURE_PRODUCER =
   "capture_portal_evidence.py/v1" as const;
+
+/**
+ * PRODUCER TRUST IS UNSEALED — this set is the seam, not the ruling.
+ *
+ * Who may assert that a Prime portal report was completed (this observer, the
+ * trade app, a named service account) has NOT been ruled on by the captain.
+ * Every reader that consumes `makesafe_portal_capture_revisions` asks this one
+ * predicate instead of restating a literal, so a future ruling is a one-line
+ * membership change in ONE place rather than a hunt through three modules.
+ *
+ * It holds exactly one member today and behaves identically to the equality
+ * check it replaced. Do NOT add a member to make a write readable — the
+ * database CHECK on `capture_producer` pins the same single value, so widening
+ * trust is a migration plus a captain ruling, never a code edit. The open
+ * question is written up in
+ * `docs/evidence/ses-f7-portal-capture-writer-2026-08-02.md`.
+ *
+ * `capture_producer` names the approved producer CONTRACT. The concrete agent
+ * that did the looking is recorded separately and freely on every revision in
+ * `captured_by`, so attribution never depends on this set being widened.
+ */
+export const SES_TRUSTED_PORTAL_CAPTURE_PRODUCERS: ReadonlySet<string> = Object
+  .freeze(new Set<string>([SES_PORTAL_CAPTURE_PRODUCER]));
+
+export function isTrustedSesPortalCaptureProducer(value: unknown): boolean {
+  return typeof value === "string" &&
+    SES_TRUSTED_PORTAL_CAPTURE_PRODUCERS.has(value);
+}
+
 export const SES_PORTAL_CAPTURE_BUCKET = "makesafe-docket-artifacts";
 export const SES_PORTAL_CAPTURE_MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
 

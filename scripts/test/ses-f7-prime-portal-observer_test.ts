@@ -8,11 +8,14 @@ import {
   assertReadOnlySql,
   buildSafeEvidenceFrameHtml,
   classifyPrimePortalText,
+  decideCaptureWrite,
   observerPopulationForJobStatus,
   ObserverUsageError,
   parseOptions,
   planCaptureRevision,
   type PrimePortalVerdict,
+  printHelp,
+  SES_PORTAL_CAPTURE_WRITE_ACTION,
 } from "../ses-f7-prime-portal-observer.ts";
 
 Deno.test("F7 classifies an observed locked Prime form as done even when fields are incomplete", () => {
@@ -156,4 +159,117 @@ Deno.test("F7 observer CLI rejects unknown flags before doing work", () => {
     "unknown flag --write",
   );
   assertEquals(parseOptions(["--help"]).help, true);
+});
+
+Deno.test("F7 observer does not write unless --commit is asked for explicitly", () => {
+  // Dry run is what you get by default, and by every accidental spelling.
+  for (const args of [[], ["--job=SWMS-1"], ["--limit=3"]]) {
+    assertEquals(parseOptions(args).commit, false);
+  }
+  assertEquals(parseOptions(["--job=SWMS-1", "--commit"]).commit, true);
+
+  // `--commit=false` must not read as "off" - it is a switch, and a caller who
+  // types a value has misunderstood it.
+  assertThrows(
+    () => parseOptions(["--job=SWMS-1", "--commit=false"]),
+    ObserverUsageError,
+    "--commit is a switch and takes no value",
+  );
+});
+
+Deno.test("F7 observer refuses to commit board-wide", () => {
+  assertThrows(
+    () => parseOptions(["--commit"]),
+    ObserverUsageError,
+    "--commit requires --job=",
+  );
+  assertThrows(
+    () => parseOptions(["--limit=50", "--commit"]),
+    ObserverUsageError,
+    "--commit requires --job=",
+  );
+  // The write cap defaults to one and is meaningless without a commit run.
+  assertEquals(parseOptions(["--job=SWMS-1", "--commit"]).maxWrites, 1);
+  assertEquals(
+    parseOptions(["--job=SWMS-1", "--commit", "--max-writes=3"]).maxWrites,
+    3,
+  );
+  assertThrows(
+    () => parseOptions(["--max-writes=3"]),
+    ObserverUsageError,
+    "--max-writes is only meaningful with --commit",
+  );
+  assertThrows(
+    () => parseOptions(["--job=SWMS-1", "--commit", "--max-writes=0"]),
+    ObserverUsageError,
+    "--max-writes must be a positive integer",
+  );
+});
+
+Deno.test("F7 write decision cannot upgrade an unrecordable observation", () => {
+  const base = { writesUsed: 0, maxWrites: 1 };
+  // A missing element is refused in BOTH modes, and keeps its reason.
+  for (const commit of [false, true]) {
+    assertEquals(
+      decideCaptureWrite({
+        ...base,
+        commit,
+        plannedAction: "cannot_record",
+        planReason: "missing_builder_reference",
+      }),
+      { outcome: "write_refused", reason: "missing_builder_reference" },
+    );
+  }
+  // A recordable observation is still only planned without --commit.
+  assertEquals(
+    decideCaptureWrite({
+      ...base,
+      commit: false,
+      plannedAction: "create_revision",
+      planReason: "new_or_changed_observation",
+    }),
+    { outcome: "dry_run", reason: "commit_not_requested" },
+  );
+  assertEquals(
+    decideCaptureWrite({
+      ...base,
+      commit: true,
+      plannedAction: "create_revision",
+      planReason: "new_or_changed_observation",
+    }),
+    { outcome: "written", reason: "new_or_changed_observation" },
+  );
+});
+
+Deno.test("F7 write cap reports what it left behind rather than dropping it", () => {
+  assertEquals(
+    decideCaptureWrite({
+      commit: true,
+      plannedAction: "create_revision",
+      planReason: "new_or_changed_observation",
+      writesUsed: 1,
+      maxWrites: 1,
+    }),
+    { outcome: "write_skipped_write_cap", reason: "write_cap_reached_at_1" },
+  );
+});
+
+Deno.test("F7 observer help documents the write path and its default", () => {
+  const help: string[] = [];
+  const realLog = console.log;
+  console.log = (line: string) => help.push(line);
+  try {
+    parseOptions(["--help"]);
+    printHelp();
+  } finally {
+    console.log = realLog;
+  }
+  const text = help.join("\n");
+  assert(text.includes("dry-run by default"));
+  assert(text.includes("--commit,false"));
+  assert(text.includes("requires --job"));
+  assert(text.includes(SES_PORTAL_CAPTURE_WRITE_ACTION));
+  assert(
+    text.includes("An unreachable or expired link records cannot-observe"),
+  );
 });
