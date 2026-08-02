@@ -313,6 +313,10 @@ import {
   assertFreshMakesafeSourceSettled,
 } from './makesafe_pdf_settlement.ts'
 import {
+  DraftFamilyContextRefusal as _DraftFamilyContextRefusal,
+  resolveDraftFamilyClassifierContext as _resolveDraftFamilyClassifierContext,
+} from './makesafe_draft_family_context.ts'
+import {
   runAdjudicatedExactRescan,
   runAdjudicatedHistoricalBackfill,
   SES_MISSED_JOB_ADJUDICATION_REF,
@@ -483,6 +487,7 @@ import {
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
   makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
   computeIntakeDraftStatus as _computeIntakeDraftStatus,
+  type MakeSafeJobFamilyContext as _MakeSafeJobFamilyContext,
 } from './makesafe_intake_gate.ts'
 // B5 SLA: pure email-received -> card-created latency percentiles for the health row
 // + the 24h intake_health rollup. See makesafe_intake_sla.ts.
@@ -12412,6 +12417,7 @@ async function createMakesafeJob(
   body: any,
   internalOptions: {
     historicalBackfill?: HistoricalMakesafeBackfillMetadata
+    familyClassifierContext?: _MakeSafeJobFamilyContext
   } = {},
 ) {
   const {
@@ -12496,7 +12502,15 @@ async function createMakesafeJob(
   const reviewedMakeSafeType = makesafe_type || job_type_detail || makesafe_type_detail || null
   const reviewedSafety = safety_requirements || companyData?.safety_requirements || null
   const reviewedSpecialInstructions = special_instructions || companyData?.special_instructions || null
-  const reviewedJobFamily = makesafe_job_family || _classifyMakeSafeJobFamily(external_ref || null, description || reviewedMakeSafeType || null, null)
+  const reviewedJobFamily = makesafe_job_family || _classifyMakeSafeJobFamily(
+    external_ref || null,
+    description || reviewedMakeSafeType || null,
+    null,
+    internalOptions.familyClassifierContext || {
+      builder: requesting_company_slug || requesting_company_name || null,
+      pdfDeclaredType: null,
+    },
+  )
   const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
 
   const metadata: any = {
@@ -17717,6 +17731,136 @@ async function settleIntakeApproval(
   })
 }
 
+function draftWorkOrderAttachments(attachments: readonly any[]): any[] {
+  const available = availableIntakeAttachments([...attachments])
+  const designated = available.filter((attachment: any) => attachment?.is_work_order === true)
+  if (designated.length) return designated
+  const named = available.filter((attachment: any) =>
+    attachmentNameLooksLikeWorkOrder(attachment) &&
+    !attachmentNameLooksReportOnly(attachment)
+  )
+  if (named.length) return named
+  return available.length === 1 ? [available[0]] : []
+}
+
+function normaliseDraftAttachmentName(value: unknown): string {
+  return String(value || '').trim().toLowerCase()
+}
+
+function refuseDraftFamilyContext(reason: string): never {
+  throw new ApiError(
+    `Cannot classify intake draft: ${reason}`,
+    409,
+    { reason },
+  )
+}
+
+async function loadDraftFamilyClassifierContext(
+  client: any,
+  draft: any,
+  extraction: Record<string, any>,
+  attachments: readonly any[],
+  builder: string | null,
+): Promise<_MakeSafeJobFamilyContext> {
+  const multipleWorkOrders = emailCarriesMultipleWorkOrders(
+    draft,
+    extraction,
+    [...attachments],
+  )
+  const workOrderAttachments = draftWorkOrderAttachments(attachments)
+  const workOrderCount = multipleWorkOrders
+    ? Math.max(2, workOrderAttachments.length)
+    : workOrderAttachments.length
+  const workOrderNames = new Set(
+    workOrderAttachments
+      .map((attachment: any) => normaliseDraftAttachmentName(
+        attachment?.file_name || attachment?.name || attachment?.label,
+      ))
+      .filter(Boolean),
+  )
+
+  if (multipleWorkOrders) {
+    try {
+      return _resolveDraftFamilyClassifierContext({
+        builder,
+        workOrderCount,
+        pdfDocuments: [],
+      })
+    } catch (error) {
+      if (error instanceof _DraftFamilyContextRefusal) {
+        refuseDraftFamilyContext(error.reason)
+      }
+      throw error
+    }
+  }
+
+  const embeddedDocuments = parseJsonArray(extraction?.work_order_pdf_text)
+    .filter((document: any) => {
+      if (!workOrderNames.size) return true
+      return workOrderNames.has(normaliseDraftAttachmentName(
+        document?.attachment_name || document?.name || document?.file_name,
+      ))
+    })
+    .map((document: any) => ({
+      identity: normaliseDraftAttachmentName(
+        document?.attachment_name || document?.name || document?.file_name,
+      ) || document?.attachment_id || null,
+      status: document?.status || null,
+      text: document?.text || null,
+      reason: document?.reason || null,
+    }))
+
+  const sourcePostIds = Array.from(new Set([
+    ...parseJsonArray(extraction?.intake_source_post_ids),
+    cleanReviewedString(draft?.graph_message_id)?.startsWith('deterministic:')
+      ? null
+      : cleanReviewedString(draft?.graph_message_id),
+  ].map((value) => cleanReviewedString(value)).filter(Boolean))) as string[]
+
+  let currentDocuments: any[] = []
+  if (sourcePostIds.length && workOrderNames.size) {
+    const { data, error } = await client.from('email_attachments')
+      .select('id,email_id,name,sha256,pdf_extraction_status,pdf_extraction_text,pdf_extraction_reason')
+      .in('email_id', sourcePostIds)
+    if (error) {
+      throw new Error(`work-order PDF extraction read failed: ${error.message || error}`)
+    }
+    currentDocuments = (data || [])
+      .filter((document: any) =>
+        workOrderNames.has(normaliseDraftAttachmentName(document?.name))
+      )
+      .map((document: any) => ({
+        identity: normaliseDraftAttachmentName(document?.name) ||
+          document?.sha256 || document?.id || null,
+        status: document?.pdf_extraction_status || null,
+        text: document?.pdf_extraction_text || null,
+        reason: document?.pdf_extraction_reason || null,
+      }))
+  }
+
+  const byIdentity = new Map<string, any>()
+  for (const document of [...currentDocuments, ...embeddedDocuments]) {
+    const identity = String(document?.identity || `${document?.status || ''}:${document?.text || ''}`)
+    const existing = byIdentity.get(identity)
+    if (!existing || (existing.status !== 'extracted' && document?.status === 'extracted')) {
+      byIdentity.set(identity, document)
+    }
+  }
+
+  try {
+    return _resolveDraftFamilyClassifierContext({
+      builder,
+      workOrderCount,
+      pdfDocuments: [...byIdentity.values()],
+    })
+  } catch (error) {
+    if (error instanceof _DraftFamilyContextRefusal) {
+      refuseDraftFamilyContext(error.reason)
+    }
+    throw error
+  }
+}
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
@@ -17748,12 +17892,11 @@ async function approveIntakeDraft(client: any, body: any) {
   // the existing automatic path remains unchanged when no override is supplied.
   const effectiveReportType = reviewedReportType || effectiveIntakeReportType(draft)
   const isReportOnlyDraft = _isReportOnlyType(effectiveReportType)
-  // Item 3b — combined make-safe + report AUTO-SPLIT. When the draft carries an
-  // UNAMBIGUOUS secondary report obligation, approval creates TWO cards: the PRIMARY
-  // is the physical make-safe (WO PDF attached, normal workflow) and a SEPARATE
-  // report-only card is minted below. So the primary is forced non-report-only here
-  // even if the draft's own report_type is roof/assessment — otherwise the WO would
-  // never attach and the physical make-safe would be lost.
+  // Item 3b retains the historical split metadata, but F1 now refuses any draft
+  // carrying multiple work orders before mint. There is no safe document-to-card
+  // binding here, so approval cannot silently choose one PDF header for the primary.
+  // The split machinery below remains for compatibility with existing stored state;
+  // no new multi-WO draft reaches its mint branch.
   const splitObligation = combinedSplitObligation(extraction)
   const requiredMintRoles = extraction?.deterministic_intake === true
     ? ['primary', ...(splitObligation ? ['secondary_report'] : [])]
@@ -17866,6 +18009,16 @@ async function approveIntakeDraft(client: any, body: any) {
     }
   }
 
+  const approvedFamilyContext = await loadDraftFamilyClassifierContext(
+    client,
+    draft,
+    extraction,
+    availableAttachments,
+    approvedFields.requesting_company_slug ||
+      approvedFields.requesting_company_name ||
+      null,
+  )
+
   // On a combined split the primary is a PHYSICAL make-safe: don't inherit the
   // draft's roof/assessment family (that belongs to the secondary report card).
   const approvedJobFamily = reviewedFamily || (splitObligation
@@ -17873,8 +18026,9 @@ async function approveIntakeDraft(client: any, body: any) {
       draft?.subject || approvedFields.external_ref || '',
       [extraction?.builder_email_text_for_trade, approvedFields.description, approvedFields.makesafe_type].filter(Boolean).join('\n'),
       null,
+      approvedFamilyContext,
     )
-    : extraction?.makesafe_job_family || _classifyMakeSafeJobFamily(
+    : _classifyMakeSafeJobFamily(
     draft?.subject || approvedFields.external_ref || '',
     [
       extraction?.builder_email_text_for_trade,
@@ -17882,6 +18036,7 @@ async function approveIntakeDraft(client: any, body: any) {
       approvedFields.makesafe_type,
     ].filter(Boolean).join('\n'),
     effectiveReportType || null,
+    approvedFamilyContext,
   ))
   const approvedJobFamilyKey = _normaliseDedupJobFamily(approvedJobFamily)
 
@@ -18032,6 +18187,7 @@ async function approveIntakeDraft(client: any, body: any) {
           row.external_ref || '',
           [row.report_type, existingJob?.notes].filter(Boolean).join('\n'),
           row.report_type || null,
+          approvedFamilyContext,
         )
         const existingFamilyKey = _normaliseDedupJobFamily(existingFamily)
         return !existingFamilyKey || existingFamilyKey === approvedJobFamilyKey
@@ -18135,7 +18291,7 @@ async function approveIntakeDraft(client: any, body: any) {
       // approval route and therefore cannot abuse this suppression flag.
       suppress_manager_notification: body?.suppress_manager_notification === true ||
         extraction?.deterministic_intake === true,
-      })
+      }, { familyClassifierContext: approvedFamilyContext })
     // Record the live job id the instant it exists so the catch path can tell a
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
     createdJobId = jobResult?.job?.id || null
@@ -18256,7 +18412,7 @@ async function approveIntakeDraft(client: any, body: any) {
             : {}),
           suppress_manager_notification: body?.suppress_manager_notification === true ||
             extraction?.deterministic_intake === true,
-          })
+          }, { familyClassifierContext: approvedFamilyContext })
         secondaryJob = secondaryResult?.job || null
         if (secondaryJob?.id) {
           createdJobIds.push(secondaryJob.id)
@@ -18950,6 +19106,12 @@ async function _reextractExtractFields(
 
   const pdfTexts: string[] = []
   const pdfRawTexts: string[] = [] // item 5 — raw text layer for the client-block reader
+  const pdfDocuments: Array<{
+    attachmentName: string
+    status: string
+    text: string | null
+    reason: string | null
+  }> = []
   let pdfMode: 'text' | 'document' | 'none' = pdfBase64List.length ? 'document' : 'none'
   if (pdfBase64List.length && pdfTextModeEnabled) {
     let allText = true
@@ -18957,10 +19119,33 @@ async function _reextractExtractFields(
       try {
         const bytes = Uint8Array.from(atob(pdf.base64), (c) => c.charCodeAt(0))
         const r = await _extractPdfText(bytes)
-        if (r.mode === 'text') pdfTexts.push(`[${pdf.name}]\n${r.text}`)
-        else allText = false
+        if (r.mode === 'text') {
+          pdfTexts.push(`[${pdf.name}]\n${r.text}`)
+          pdfDocuments.push({
+            attachmentName: pdf.name,
+            status: 'extracted',
+            text: r.text,
+            reason: null,
+          })
+        } else {
+          allText = false
+          pdfDocuments.push({
+            attachmentName: pdf.name,
+            status: 'deferred',
+            text: null,
+            reason: 'pdf_extraction_pending',
+          })
+        }
         if (r.rawText) pdfRawTexts.push(`[${pdf.name}]\n${r.rawText}`)
-      } catch (_) { allText = false }
+      } catch (_) {
+        allText = false
+        pdfDocuments.push({
+          attachmentName: pdf.name,
+          status: 'deferred',
+          text: null,
+          reason: 'pdf_extraction_pending',
+        })
+      }
     }
     const combinedLen = pdfTexts.join('\n').length
     pdfMode = (allText && pdfTexts.length === pdfBase64List.length && combinedLen >= _PDF_TEXT_MIN_CHARS) ? 'text' : 'document'
@@ -19081,6 +19266,7 @@ async function _reextractExtractFields(
     extraction.builder_email_subject = subject || null
     extraction.builder_email_received_at = input.receivedAt || null
   }
+  extraction.intake_source_post_ids = [input.postId]
 
   const availableWoCount = attachments.filter((a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url)).length
 
@@ -19095,7 +19281,56 @@ async function _reextractExtractFields(
   }
   let draftReportType: string | null = null
   if (tagReportType) draftReportType = _resolveCommittedReportType(extraction.report_type, subject, builderEmailTextForTrade || bodyPreview)
-  const draftJobFamily = _classifyMakeSafeJobFamily(subject, [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'), draftReportType)
+  const reextractWorkOrderAttachments = draftWorkOrderAttachments(attachments)
+  const reextractWorkOrderNames = new Set(
+    reextractWorkOrderAttachments
+      .map((attachment: any) => normaliseDraftAttachmentName(
+        attachment?.file_name || attachment?.name || attachment?.label,
+      ))
+      .filter(Boolean),
+  )
+  const reextractMultipleWorkOrders = emailCarriesMultipleWorkOrders(
+    { subject, body_preview: bodyPreview, description: extraction.description },
+    extraction,
+    attachments,
+  )
+  let draftFamilyContext: _MakeSafeJobFamilyContext
+  try {
+    draftFamilyContext = _resolveDraftFamilyClassifierContext({
+      builder: matchedCompany?.slug || matchedCompany?.name || null,
+      workOrderCount: reextractMultipleWorkOrders
+        ? Math.max(2, reextractWorkOrderAttachments.length)
+        : reextractWorkOrderAttachments.length,
+      pdfDocuments: pdfDocuments.filter((document) =>
+        reextractWorkOrderNames.has(
+          normaliseDraftAttachmentName(document.attachmentName),
+        )
+      ),
+    })
+  } catch (error) {
+    if (error instanceof _DraftFamilyContextRefusal) {
+      refuseDraftFamilyContext(error.reason)
+    }
+    throw error
+  }
+  extraction.work_order_pdf_text = pdfDocuments
+    .filter((document) =>
+      reextractWorkOrderNames.has(
+        normaliseDraftAttachmentName(document.attachmentName),
+      )
+    )
+    .map((document) => ({
+      attachment_name: document.attachmentName,
+      status: document.status,
+      text: document.text,
+      reason: document.reason,
+    }))
+  const draftJobFamily = _classifyMakeSafeJobFamily(
+    subject,
+    [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
+    draftReportType,
+    draftFamilyContext,
+  )
   extraction.makesafe_job_family = draftJobFamily
   extraction.makesafe_job_family_label = _makeSafeJobFamilyLabel(draftJobFamily)
   extraction.reextracted_at = new Date().toISOString()
@@ -21387,6 +21622,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
       extraction.builder_email_subject = subject || null
       extraction.builder_email_received_at = msg.receivedDateTime || null
     }
+    extraction.intake_source_post_ids = msg._post_id ? [msg._post_id] : []
     const builderIdentity = _extractBuilderWorkOrderIdentity({
       externalRef: extraction.external_ref || null,
       subject,
