@@ -172,11 +172,44 @@ export async function rawSesPortalCaptureSha256(
   }`;
 }
 
+/**
+ * The ONE canonical spelling of `captured_at` for digest purposes.
+ *
+ * `captured_at` is the only field in the revision content that does not
+ * round-trip through Postgres unchanged. The writer normalises it with
+ * `new Date(ms).toISOString()` ("2026-08-02T15:52:16.000Z"); the column is
+ * `timestamptz`, so a reader loading the row back gets PostgREST's spelling of
+ * the same instant ("2026-08-02T15:52:16+00:00"). Two spellings, one instant,
+ * two different digests — which made `sesPortalCaptureRevisionHash` fail its
+ * own verification on every capture ever written (proven live on
+ * `b5dd46d7-b873-4bd9-a4ce-e5e09a2bbf97` and
+ * `c4595559-8a05-48f3-94f5-a8dbf2ce757e`, both rejected by U4 with
+ * `portal_capture_invalid`).
+ *
+ * Canonicalising inside the hash means the two sides CANNOT diverge again: a
+ * caller does not get to pick a spelling. The chosen form is the writer's
+ * existing `toISOString()`, so no stored digest changes and no row needs a
+ * backfill — the same rows simply start verifying.
+ *
+ * An unparseable value is hashed VERBATIM rather than repaired or skipped. It
+ * therefore still produces a digest, still gets compared, and still fails the
+ * comparison — the check stays closed on junk instead of being talked past.
+ */
+export function canonicalSesPortalCaptureTimestamp(value: string): string {
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds)
+    ? new Date(milliseconds).toISOString()
+    : value;
+}
+
 export async function sesPortalCaptureRevisionHash(
   content: SesPortalCaptureRevisionContent,
 ): Promise<SesSha256> {
   return await sesSha256(
-    content,
+    {
+      ...content,
+      captured_at: canonicalSesPortalCaptureTimestamp(content.captured_at),
+    },
     "SecureWorks:ses-portal-capture-revision:v1\n",
   );
 }
