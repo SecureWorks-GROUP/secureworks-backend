@@ -103,6 +103,17 @@ per-attachment-id counting; the invariant, tests and replay proof are in
 `makesafe_duplicate_transport_dedupe_test.ts` and
 `docs/evidence/track-a-d8-duplicate-transport-2026-07-30.md`.
 
+The forward mint invariant is one canonical builder instruction per card,
+including terminal cards. The shared identity grammar, attach-time correction,
+self-generated WO exclusion and pre-mint refusal live in
+`makesafe_builder_work_order_identity.ts`,
+`makesafe_work_order_identity_refresh.ts` and
+`makesafe_instruction_mint_gate.ts`; the bounded proof and read-only impact
+measurement are in
+`docs/evidence/ses-f9-instruction-identity-forward-2026-08-02.md`. Do not turn
+this into a board re-key/backfill or let `work-order-SWMS-*.pdf` count as a
+builder instruction/evidence floor.
+
 Identity tokens are read out of attachment FILENAMES with underscores
 normalised to spaces, because `_` is a word character and the PO grammar's
 `\b` boundaries otherwise cannot see `PO20877` inside

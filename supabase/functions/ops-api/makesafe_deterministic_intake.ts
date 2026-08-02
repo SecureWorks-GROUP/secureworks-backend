@@ -27,7 +27,10 @@ import {
   classifyCancellation,
 } from "./makesafe_cancellation_classifier.ts";
 import { canonicalCompanyDedupeKey } from "../_shared/makesafe_refs.ts";
-import { extractBuilderWorkOrderIdentity } from "./makesafe_builder_work_order_identity.ts";
+import {
+  extractBuilderWorkOrderIdentity,
+  isSelfGeneratedMakesafeWorkOrder,
+} from "./makesafe_builder_work_order_identity.ts";
 import {
   gapFillFromWorkOrderPdf,
   type PdfGapFillField,
@@ -39,7 +42,7 @@ import {
 } from "./makesafe_pdf_declared_type.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
-  "makesafe-deterministic-intake@2026-08-01.v8";
+  "makesafe-deterministic-intake@2026-08-02.v9";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 export { classifyCancellation };
 export type { CancellationClassification };
@@ -498,7 +501,8 @@ function extractedPdfDocuments(
   item: DeterministicSourceItem,
 ): DeterministicPdfDocument[] {
   return (item.pdfDocuments || []).filter((document) =>
-    document.status === "extracted" && !!document.text
+    document.status === "extracted" && !!document.text &&
+    !isSelfGeneratedMakesafeWorkOrder(document.attachmentName)
   );
 }
 
@@ -843,10 +847,12 @@ function extractRawIdentity(
       ? `AJBR-${jobNo}`
       : null);
   const attachmentWo = item.attachments
+    .filter((attachment) => !isSelfGeneratedMakesafeWorkOrder(attachment.name))
     .map((a) => a.name || "")
     .map((name) => name.match(WO_RE)?.[1] || null)
     .find(Boolean) || null;
   const designatedWorkOrder = item.attachments.some((attachment) =>
+    !isSelfGeneratedMakesafeWorkOrder(attachment.name) &&
     attachment.status === "uploaded" &&
     (/pdf/i.test(attachment.contentType || "") ||
       /\.pdf$/i.test(attachment.name || "")) &&
@@ -871,9 +877,14 @@ function extractRawIdentity(
   // planner regex here previously turned every MLB signature into PO "BOX".
   const sharedIdentity = extractBuilderWorkOrderIdentity({
     externalRef: preliminaryExternalRef,
+    requestingCompanySlug: adapterId === "ajs_ajbr" ? "aj" : adapterId,
     subject: item.subject,
     bodyText: `${item.body || ""}\n${pdfText(item)}`,
-    attachmentNames: item.attachments.map((attachment) => attachment.name),
+    attachmentNames: item.attachments
+      .filter((attachment) =>
+        !isSelfGeneratedMakesafeWorkOrder(attachment.name)
+      )
+      .map((attachment) => attachment.name),
   });
   const externalRef = preliminaryExternalRef ||
     sharedIdentity.builder_claim_ref;
@@ -1311,12 +1322,16 @@ function evidenceFor(
   for (const attachment of item.attachments) {
     const pdf = /pdf/i.test(attachment.contentType || "") ||
       /\.pdf$/i.test(attachment.name || "");
+    const builderWorkOrderPdf = pdf &&
+      !isSelfGeneratedMakesafeWorkOrder(attachment.name);
     out.push({
-      requirement: pdf ? "work_order_attachment" : "source_attachment",
+      requirement: builderWorkOrderPdf
+        ? "work_order_attachment"
+        : "source_attachment",
       sourcePostId: item.postId,
       kind: "attachment",
       locator: `attachment:${attachment.id}`,
-      strength: pdf && attachment.status === "uploaded"
+      strength: builderWorkOrderPdf && attachment.status === "uploaded"
         ? "strong"
         : "supporting",
     });

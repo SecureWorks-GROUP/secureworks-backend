@@ -584,9 +584,16 @@ import {
   attachmentKeyComponent as _attachmentKeyComponent,
 } from './makesafe_wo_selection.ts'
 import {
+  builderInstructionKeysForCard as _builderInstructionKeysForCard,
   extractBuilderWorkOrderIdentity as _extractBuilderWorkOrderIdentity,
+  isSelfGeneratedMakesafeWorkOrder as _isSelfGeneratedMakesafeWorkOrder,
   mergeBuilderWorkOrderIdentity as _mergeBuilderWorkOrderIdentity,
 } from './makesafe_builder_work_order_identity.ts'
+import { refreshMakesafeIdentityAfterWorkOrderAttach as _refreshMakesafeIdentityAfterWorkOrderAttach } from './makesafe_work_order_identity_refresh.ts'
+import {
+  assertInstructionCardMintAvailable as _assertInstructionCardMintAvailable,
+  InstructionMintConflictError as _InstructionMintConflictError,
+} from './makesafe_instruction_mint_gate.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import { renderMakesafeReportPdf } from './makesafe_report_render.ts'
 // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled template ->
@@ -13691,7 +13698,10 @@ function makesafeDocBooleans(docRows: any[] | null | undefined) {
   return {
     // has_wo stays type-only (no legacy filename WO fallback) — never inferred
     // from a filename to avoid a stray 'general' file spoofing a work order.
-    has_wo: rows.some((d: any) => typeOf(d) === 'work_order'),
+    has_wo: rows.some((d: any) =>
+      typeOf(d) === 'work_order' &&
+      !_isSelfGeneratedMakesafeWorkOrder(d?.file_name || d?.storage_url)
+    ),
     has_report_doc: has('makesafe_report', (n) => n.includes('make safe report')),
     has_invoice_doc: has('invoice', (n) => n.includes('invoice')),
     has_swms_doc: has('swms', (n) => swmsInName(n)),
@@ -17118,7 +17128,12 @@ function cleanMissingFieldName(value: any): string {
 }
 
 function availableIntakeAttachments(attachments: any[]): any[] {
-  return (attachments || []).filter((a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url))
+  return (attachments || []).filter((a: any) =>
+    a && !a.pdf_unavailable && (a.pdf_url || a.storage_url) &&
+    !_isSelfGeneratedMakesafeWorkOrder(
+      a.file_name || a.filename || a.name || a.pdf_url || a.storage_url,
+    )
+  )
 }
 
 // ── D-a (Auto-Intake v2 M1): FAIL-LOUD extraction key preflight ──────────────
@@ -17972,9 +17987,7 @@ async function approveIntakeDraft(client: any, body: any) {
   // work_order_pdf requirement, or a make-safe job could be approved with no openable
   // WO document (the attach step below skips entries with no URL). Count only entries
   // with a usable pdf_url/storage_url and not flagged unavailable.
-  const availableAttachments = (attachments || []).filter(
-    (a: any) => a && !a.pdf_unavailable && (a.pdf_url || a.storage_url),
-  )
+  const availableAttachments = availableIntakeAttachments(attachments)
   const missing: string[] = []
   if (!approvedFields.requesting_company_slug && !approvedFields.requesting_company_name) missing.push('requesting_company')
   if (!approvedFields.external_ref) missing.push('external_ref')
@@ -17995,6 +18008,12 @@ async function approveIntakeDraft(client: any, body: any) {
     recoveredPrimaryMint?.job_id ||
     null
   let effectiveDraftStatus = draft.status
+  if (splitObligation && !recoveredPrimaryMint) {
+    throw new ApiError(
+      'Multiple builder instructions require separate reviewed bindings; no primary or secondary card was minted',
+      409,
+    )
+  }
   if (
     effectiveDraftStatus === 'approved' &&
     (
@@ -18170,6 +18189,44 @@ async function approveIntakeDraft(client: any, body: any) {
       job_created: false,
       notification_job_ids: settlement.notificationJobIds,
       hugo_notifications_accepted: settlement.notificationsAccepted,
+    }
+  }
+
+  // F9 captain invariant: one canonical builder instruction has one card. This
+  // exact gate runs before the older fuzzy duplicate guard and before the atomic
+  // draft claim. It deliberately scans terminal cards and work-order filenames;
+  // a match leaves this draft visible/reviewable and never reaches job minting.
+  if (!recoveredPrimaryMint) {
+    const instructionKeys = _builderInstructionKeysForCard({
+      requestingCompanySlug: approvedFields.requesting_company_slug,
+      metadata: {
+        external_ref: approvedFields.external_ref,
+        builder_claim_ref: extraction?.builder_claim_ref,
+        builder_work_order_number: extraction?.builder_work_order_number,
+        builder_po_number: extraction?.builder_po_number,
+      },
+      detailExternalRef: approvedFields.external_ref,
+      attachmentNames: availableAttachments.map((attachment: any) =>
+        attachment.file_name || attachment.filename || attachment.name ||
+          attachment.pdf_url || attachment.storage_url
+      ),
+    })
+    if (instructionKeys.length > 1) {
+      throw new ApiError(
+        `Instruction identity conflict: draft carries multiple canonical keys (${instructionKeys.join(', ')}); review required and no card was minted`,
+        409,
+      )
+    }
+    try {
+      await _assertInstructionCardMintAvailable(client, instructionKeys)
+    } catch (error) {
+      if (error instanceof _InstructionMintConflictError) {
+        throw new ApiError(
+          `${error.message}; attach to the existing card or resolve this visible draft. No second card was minted`,
+          409,
+        )
+      }
+      throw error
     }
   }
 
@@ -21695,6 +21752,7 @@ async function retiredPaidAiIntakeImplementation(client: any) {
     extraction.intake_source_post_ids = msg._post_id ? [msg._post_id] : []
     const builderIdentity = _extractBuilderWorkOrderIdentity({
       externalRef: extraction.external_ref || null,
+      requestingCompanySlug: extraction.requesting_company_slug || null,
       subject,
       bodyText: builderEmailTextForTrade || bodyPreview,
       attachmentNames: attachments.map((a: any) => a?.file_name || a?.name || null),
@@ -30487,6 +30545,14 @@ async function confirmDocumentUpload(client: any, body: any) {
     detail_json: { document_id: doc?.id, type: docType, file_name: fileName, visible_to_trades: isVisible, uploaded_by: uploaded_by || body.operator_email || null },
   })
 
+  if (docType === 'work_order') {
+    await _refreshMakesafeIdentityAfterWorkOrderAttach(client, {
+      jobId: jId,
+      documentId: doc?.id || null,
+      fileName: fileName || path || '',
+    })
+  }
+
   // Dual-write to business_events
   logBusinessEvent(client, {
     event_type: 'document.uploaded',
@@ -30879,6 +30945,14 @@ async function attachMakesafeDocument(client: any, body: any) {
       uploaded_by: body.uploaded_by || body.operator_email || null,
     },
   })
+
+  if (type === 'work_order') {
+    await _refreshMakesafeIdentityAfterWorkOrderAttach(client, {
+      jobId: jId,
+      documentId: docId || null,
+      fileName,
+    })
+  }
 
   // Dual-write to business_events (best-effort, mirrors confirmDocumentUpload).
   logBusinessEvent(client, {

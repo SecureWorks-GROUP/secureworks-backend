@@ -40,7 +40,10 @@ import {
   photoCountForCurrentCycle,
   selectCurrentCycleReport,
 } from "../supabase/functions/ops-api/makesafe_cycle_evidence.ts";
-import { extractBuilderWorkOrderIdentity } from "../supabase/functions/ops-api/makesafe_builder_work_order_identity.ts";
+import {
+  extractBuilderWorkOrderIdentity,
+  isSelfGeneratedMakesafeWorkOrder,
+} from "../supabase/functions/ops-api/makesafe_builder_work_order_identity.ts";
 import {
   deriveSesUnlinkedInvoiceMatches,
   indexSesInvoiceMatches,
@@ -121,6 +124,10 @@ function hasStoredDocument(
 ): boolean {
   return documents.some((row) => {
     if (!text(row.storage_url)) return false;
+    if (
+      kind === "work_order" &&
+      isSelfGeneratedMakesafeWorkOrder(row.file_name || row.storage_url)
+    ) return false;
     const type = text(row.type).toLowerCase();
     if (type === kind) return true;
     if (kind === "work_order" || (type !== "" && type !== "general")) {
@@ -483,6 +490,7 @@ export function buildSesCardEvidenceInventory(
 
   const identity = extractBuilderWorkOrderIdentity({
     externalRef: text(detail?.external_ref) || null,
+    requestingCompanySlug: text(detail?.requesting_company_slug) || null,
   });
 
   const prime = primeLinkFact(family ?? "physical_makesafe", detail);

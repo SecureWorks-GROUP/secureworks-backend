@@ -163,6 +163,19 @@ Deno.test("a work-order row with no stored artifact is distinguished from none a
   assertEquals(itemOf(absent, "builder_wo_doc").signal, "none");
 });
 
+Deno.test("a SecureWorks-generated cover sheet does not satisfy the builder WO floor", () => {
+  const result = buildSesCardEvidenceInventory(card({
+    docFlags: { ...NO_DOCS, has_wo: false },
+    documents: [{
+      type: "work_order",
+      file_name: "work-order-SWMS-26998.pdf",
+      storage_url: "storage/work-order-SWMS-26998.pdf",
+    }],
+    stageOverride: "new",
+  }));
+  assertEquals(itemOf(result, "builder_wo_doc").status, "missing");
+});
+
 Deno.test("a SWMS row with no stored artifact is distinguished from none at all", () => {
   const result = buildSesCardEvidenceInventory(card({
     job: { makesafe_job_family: "general_makesafe" },

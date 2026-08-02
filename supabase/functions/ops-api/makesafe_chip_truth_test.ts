@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _makesafeDocBooleansForTest as docBooleans,
@@ -115,5 +116,9 @@ Deno.test("F6 no-docs: empty / null rows -> all false, no crash (fail-closed)", 
 
 Deno.test("F6 has_wo stays type-only: a 'work order' filename on a general file does NOT count", () => {
   assertEquals(docBooleans([{ type: "work_order", file_name: "PO-55049.pdf" }]).has_wo, true);
+  assertEquals(
+    docBooleans([{ type: "work_order", file_name: "work-order-SWMS-26998.pdf" }]).has_wo,
+    false,
+  );
   assertEquals(docBooleans([{ type: "general", file_name: "work order.pdf" }]).has_wo, false);
 });
