@@ -73,8 +73,13 @@ Deno.test("a named tranche has a scoped route to the existing seeder", () => {
   assertStringIncludes(handler, "authMode !== 'api_key'");
   assertStringIncludes(handler, "req.method !== 'POST'");
   assertStringIncludes(handler, "board_complete: false");
-  const responseReturns = [...handler.matchAll(/return json\(\{[\s\S]*?\},?\s*\d*\s*\)/g)];
-  assert(responseReturns.length > 0, "scoped handler must return JSON responses");
+  const responseReturns = [
+    ...handler.matchAll(/return json\(\{[\s\S]*?\},?\s*\d*\s*\)/g),
+  ];
+  assert(
+    responseReturns.length > 0,
+    "scoped handler must return JSON responses",
+  );
   for (const response of responseReturns) {
     assertStringIncludes(response[0], "board_complete: false");
   }

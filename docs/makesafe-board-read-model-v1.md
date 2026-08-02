@@ -49,6 +49,15 @@ seeded or silently dropped, and an idempotent replay returns the original
 partition. Apply this migration before deploying the matching `ops-api`; the
 edge schema preflight requires it.
 
+The matching `ops-api` also exposes `makesafe_state_seed_scoped` as a separate,
+named-tranche route to the same `_scoped_v2` producer. It accepts job numbers,
+requires every requested card to resolve, caps a request at 25 cards, and always
+returns `board_complete:false`; it is POST-only, API-key-only, and dry-run by
+default. The route is a repair/proof operation, not a narrowed invocation of
+the board-wide `makesafe_state_seed` gate. Its correction measurements, four-card
+proof plan, and unresolved production caveats are owned by
+`docs/evidence/ses-spine-seeder-scoped-route-2026-08-03.md`.
+
 Migration `20260729020000_makesafe_family_pointer_safeupdate_guard.sql` is the
 follow-up required before deploying the matching `ops-api`: it preserves the
 intentionally whole-board family-pointer invalidation while making its scope
@@ -190,6 +199,8 @@ Reconciliation actions:
   API-key/service-role only and rejects terminal or stale cards
 - `?action=makesafe_state_seed` — dark, full-board state-authority bootstrap;
   defaults to dry-run and requires an explicit idempotency run key for writes
+- `?action=makesafe_state_seed_scoped` — named, capped state-authority repair;
+  defaults to dry-run, requires job numbers, and never claims board completeness
 - `?action=makesafe_state_reconcile` — dark, full-board fact-derived
   reconciliation; defaults to dry-run, applies only determinate non-terminal
   corrections, and atomically writes a visible `captain_action` for every

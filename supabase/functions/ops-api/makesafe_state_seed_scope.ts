@@ -367,7 +367,9 @@ export function checkMakesafeStateSeedScopeResult(
       requested,
       seeded,
       skipped,
-      error: `scoped seed skipped ${skipped} selected job${skipped === 1 ? "" : "s"}`,
+      error: `scoped seed skipped ${skipped} selected job${
+        skipped === 1 ? "" : "s"
+      }`,
     };
   }
   return { agrees: true, requested, seeded, skipped, error: null };
