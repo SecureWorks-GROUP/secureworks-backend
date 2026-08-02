@@ -73,7 +73,7 @@ import {
  * Bump on any change to what this engine derives. Published on every row so a
  * past measurement stays attributable to the engine that produced it.
  */
-export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r7-shadow";
+export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r8-shadow";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
