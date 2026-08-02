@@ -758,13 +758,33 @@ single production card. The design anticipated exactly this — "exact future
 delta UNVERIFIED until Captain decision and fresh data". Correctness rests on
 the 7 tests, including the containment proof and per-artifact removal cases.
 
-**What R7 cannot yet see.** The trade confirmation tick is being built by
-another crew and its evidence shape is not on `main`. R7 therefore derives roof
-and assessment report-in from the contract the read model already enforces —
-the deterministic portal reader (Release 6) and the own-template submitted
-draft (Release 5). When the trade tick lands as evidence with a recorded
-producer, it satisfies the same channel with no change to this rule, because
-the rule reads report-in evidence rather than naming its source.
+**The second Docs Ready channel — landed mid-release, and it needed no change
+here.** When Release 7 was written, the trade confirmation tick was being built
+by another crew and was not on `main`, so this rule derived roof and assessment
+report-in only from the deterministic portal reader (Release 6) and the
+own-template submitted draft (Release 5).
+
+It landed while this release was in the pipeline, as `a6af8d2`
+(`feat(ops-api): add trade roof report completion confirmation`, PR 493). The
+Captain's ruling seals two channels for roof completion — a trade tick OR the
+deterministic reader, either satisfying it — and both now work.
+
+The mechanism is worth recording, because it is the design holding:
+`SES_TRUSTED_PORTAL_CAPTURE_PRODUCERS` was a one-member set at this branch's
+base (`9bf5ce4`) and is a two-member set on `main` (`a6af8d2`), gaining
+`SES_TRADE_PORTAL_CONFIRMATION_PRODUCER`. A trade tick writes one row to the
+same `makesafe_portal_capture_revisions` ledger, and it reaches this rule
+through the unchanged path — trusted producer, ledger projection,
+`donePortalRoles`, `sesStagePortalReportIn`. **No change to the Docs Ready rule
+was required**, exactly as predicted, because the rule reads report-in evidence
+rather than naming its source.
+
+**Measurement base caveat.** The numbers above were taken against `9bf5ce4`.
+`main` has since advanced to `a6af8d2`, which touches both
+`makesafe_board_read_model.ts` (+137) and `makesafe_computed_status.ts` (+29) —
+the same two files this release edits. The Release 7 measurement is therefore
+against a base that no longer exists as `main`'s tip, and is re-measured after
+rebase rather than carried forward. Stated rather than quietly reconciled.
 
 **One thing deliberately NOT changed.** The `docsReady` seam decides
 satisfaction only; its shortfalls are not pushed into the shared `missing`
