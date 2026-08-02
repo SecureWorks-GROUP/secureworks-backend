@@ -162,3 +162,40 @@ was to keep the fault and let Release 2 own it.
 Overlay behaviour is byte-identical: real binding still reads `declared_stage`,
 and `sesStageV2OverlayCandidate` is a simulation with the same three guards that
 binds nothing. The card whose overlay would unbind is reported, not rebound.
+
+### Release 1 re-land — re-measured against `main`
+
+Releases 1-3 were originally squash-merged into their own base branches rather
+than into `main`, so none of the three reached production history. They are
+re-landed one at a time, each based directly on `main`, and each re-measured
+against a FRESH read-only snapshot rather than trusting the stacked-branch
+numbers above.
+
+Snapshot `2026-08-02T08:35:58Z`, population `ses-board-population/active-v1`,
+407 cards, 13 SELECT-only Management API queries, base commit `cd18ff6`.
+
+| Fact | Expected | Measured |
+|---|---:|---:|
+| Advisory values differing from published `computed_status` | 74 | 74 |
+| Placements moved | 0 | 0 |
+| `derived_stage_v2` == uncorrected pure M1 | (identity) | 407 / 407 |
+| `derived_stage_v2_post_overlay` == uncorrected candidate | (identity) | 407 / 407 |
+| Prospective corrected moves | 71 | 71 |
+| Frozen Release 0 disputed manifest | reproduces | 71 / 71, manifest id identical |
+
+Placement proof is an A/B over the same tree rather than an assertion: the
+harness was run once at `cd18ff6` and once at this branch's tip. Per card,
+`legacy_canonical_stage`, `legacy_stage`, `m1_published`, `m1_pure`,
+`post_cutover_stage`, `post_cutover_overlay_binds` and the whole `overlay`
+object are identical on all 407 cards. Overlays stay 46 total / 42 binding.
+
+Two drifts from the stacked-branch reading, reported rather than reconciled:
+
+- Current columns read `35/30/13/24/2/303`, not the `36/30/12/24/2/303`
+  recorded above. One card aged out of `new` into `trade_report_in` in live
+  data between the two snapshots. It is NOT a code effect — the `cd18ff6`
+  baseline run in this same session reports the identical `35/30/13/24/2/303`.
+- `ses-e1-freeze-stage-baseline.ts --mode=verify` passes with zero failures but
+  a different `generation_id`, because `SWMS-261115` changed input facts since
+  the freeze. The disputed manifest id is byte-identical, which is the
+  invariant that matters: no certified disputed card was lost, changed or added.
