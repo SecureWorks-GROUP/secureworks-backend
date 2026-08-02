@@ -963,6 +963,31 @@ change explains it.
 
 This is the same shape as the finding recorded under Release 7 — the Captain
 can see artifacts on that card that the derivation cannot — and it should be
-resolved by measurement rather than by either side conceding. **Do not treat
-the gate as clear on the strength of this document, and do not treat the crew's
-report as wrong on the strength of it either.**
+resolved by measurement rather than by either side conceding.
+
+### RESOLVED, by measurement, 2026-08-02T11:22Z
+
+The discrepancy was a base-version artefact and firstmate's report was correct.
+The separate crew's work merged as `c6fe9a9`
+(`feat(ses): derive SWMS-261059 sign-off from terminal proof evidence`, PR 495)
+AFTER the 11:02:27Z snapshot above, which was taken with `main` at `ad91a75`.
+
+Re-measured with `main` at `c6fe9a9`:
+
+| Tree | `SWMS-261059` | Cutover gate |
+|---|---|---|
+| `c6fe9a9` (current `main`) | `completed`, no conflicts | **`ok: true`, 407 checked, nothing blocked** |
+| this branch (base `ad91a75`) | `decision_required`, both conflicts | `ok: false`, blocked on that card |
+
+So the gate genuinely reads clear on `main`, and the only reason this branch
+still reports the block is that it predates `makesafe_terminal_proof.ts`. That
+difference is NOT a Release 8 effect: `legacy_canonical_stage` is identical on
+all 407 cards across the A/B, overlays stay 46 / 42 / 9 on both sides, and the
+`overlay` object is byte-identical everywhere. Nothing Release 8 does moved a
+card. The rebase onto `c6fe9a9` carries the resolution in.
+
+The general lesson is worth keeping: an A/B whose base and tip differ by
+UNRELATED merged work will attribute that work's effect to the release under
+test. The card-level diff said `stage_v2` moved on `SWMS-261059`; only checking
+WHY separated "this release moved a card" from "this branch is behind `main`".
+Those two look identical in the diff and are opposite in meaning.
