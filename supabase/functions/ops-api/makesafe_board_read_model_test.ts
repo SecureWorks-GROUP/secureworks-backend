@@ -17,6 +17,7 @@ import {
   isTerminalSyntheticLivefireJob,
   mapOpsStageToTradeColumn,
   OPS_MAKESAFE_STAGES,
+  portalCapturesFromLedger,
   projectOpsMakesafeBoard,
   projectTradeMakesafeBoard,
   TRADE_MAKESAFE_COLUMNS,
@@ -118,6 +119,185 @@ Deno.test("historical divergence: Docs Ready/report_ready deterministically appe
     column: "Complete",
     mapped: true,
   });
+});
+
+Deno.test("F7 board read model consumes one exact-cycle screenshot-backed ledger revision without moving canonical stage", () => {
+  const sourceUrl = "https://www.primeeco.tech/share/portal-fixture";
+  const source = baseJob("allocated", "portal-ledger", {
+    external_ref: "MLB-PORTAL-1",
+    metadata: { makesafe_job_family: "roof_report" },
+    makesafe_details: {
+      substatus: "waiting_on_trade_report",
+      report_type: "roof_report",
+      external_ref: "MLB-PORTAL-1",
+      external_links: [{ kind: "roof_report", url: sourceUrl }],
+      cycle_number: 2,
+      attendance_cycle_id: "cycle-current",
+    },
+  });
+  const revision = {
+    id: "capture-1",
+    job_id: "portal-ledger",
+    attendance_cycle_id: "cycle-current",
+    role: "roof_report",
+    status: "verified",
+    makesafe_fact_version: 1,
+    capture_result: "done",
+    source_url: sourceUrl,
+    source_content_hash: `sha256:${"1".repeat(64)}`,
+    builder_reference: "MLB-PORTAL-1",
+    captured_at: NOW,
+    capture_producer: "capture_portal_evidence.py/v1",
+    signal: "submitted/locked observed, 21 of 23 fields answered",
+    screenshot_object_key:
+      "makesafe-docket-artifacts/portal-captures/job/cycle/roof/image.png",
+    screenshot_media_type: "image/png",
+    screenshot_content_hash: `sha256:${"2".repeat(64)}`,
+    screenshot_size_bytes: 4096,
+  };
+
+  const [row] = buildCanonicalMakesafeRows([source], {
+    portalCaptureRowsByJobId: { "portal-ledger": [revision] },
+    computedAt: NOW,
+  });
+  assertEquals(row.canonical_stage, "allocated");
+  assertEquals(row.computed_status, "trade_report_in");
+  assertEquals(row.computed_status_evidence.has_current_portal_capture, true);
+  assertEquals(row.computed_status_evidence.portal_capture_revisions, [{
+    id: "capture-1",
+    role: "roof_report",
+    status: "done",
+    signal: "submitted/locked observed, 21 of 23 fields answered",
+    captured_at: NOW,
+    screenshot_available: true,
+  }]);
+});
+
+Deno.test("F7 newest exact ledger truth suppresses an older embedded detail capture", () => {
+  const sourceUrl = "https://www.primeeco.tech/share/portal-precedence";
+  const source = baseJob("allocated", "portal-precedence", {
+    external_ref: "MLB-PORTAL-ORDER",
+    metadata: { makesafe_job_family: "roof_report" },
+    makesafe_details: {
+      report_type: "roof_report",
+      external_ref: "MLB-PORTAL-ORDER",
+      external_links: [{ kind: "roof_report", url: sourceUrl }],
+      portal_captures: [{
+        status: "done",
+        role: "roof_report",
+        url: sourceUrl,
+        locked: true,
+        screenshot: "legacy-detail-capture.png",
+        cycle_number: 1,
+      }],
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-current",
+    },
+  });
+  const [row] = buildCanonicalMakesafeRows([source], {
+    portalCaptureRowsByJobId: {
+      "portal-precedence": [{
+        id: "capture-newer",
+        job_id: "portal-precedence",
+        attendance_cycle_id: "cycle-current",
+        role: "roof_report",
+        status: "captured",
+        makesafe_fact_version: 2,
+        capture_result: "not_done",
+        source_url: sourceUrl,
+        source_content_hash: `sha256:${"5".repeat(64)}`,
+        builder_reference: "MLB-PORTAL-ORDER",
+        captured_at: NOW,
+        capture_producer: "capture_portal_evidence.py/v1",
+        signal: "in progress: 8 of 23 fields answered",
+        screenshot_object_key:
+          "makesafe-docket-artifacts/portal-captures/job/cycle/roof/newer.png",
+        screenshot_media_type: "image/png",
+        screenshot_content_hash: `sha256:${"6".repeat(64)}`,
+        screenshot_size_bytes: 4096,
+      }],
+    },
+    computedAt: NOW,
+  });
+
+  assertEquals(row.canonical_stage, "allocated");
+  assertEquals(row.computed_status, "allocated");
+  assertEquals(row.computed_status_evidence.has_current_portal_capture, false);
+  assertEquals(
+    row.computed_status_evidence.portal_capture_revisions[0].status,
+    "not_done",
+  );
+});
+
+Deno.test("F7 board capture projection rejects stale cycle, wrong URL, missing reference, and missing screenshot", () => {
+  const sourceUrl = "https://www.primeeco.tech/share/portal-fixture";
+  const source = baseJob("allocated", "portal-invalid", {
+    external_ref: "MLB-PORTAL-2",
+    metadata: { makesafe_job_family: "ordinary_roof_portal" },
+    makesafe_details: {
+      report_type: null,
+      external_ref: "MLB-PORTAL-2",
+      external_links: [{ kind: "builder_portal", url: sourceUrl }],
+      cycle_number: 3,
+      attendance_cycle_id: "cycle-current",
+    },
+  });
+  const validShape = {
+    id: "capture-invalid",
+    job_id: "portal-invalid",
+    attendance_cycle_id: "cycle-current",
+    role: "roof_report",
+    status: "verified",
+    makesafe_fact_version: 1,
+    capture_result: "done",
+    source_url: sourceUrl,
+    source_content_hash: `sha256:${"3".repeat(64)}`,
+    builder_reference: "MLB-PORTAL-2",
+    captured_at: NOW,
+    capture_producer: "capture_portal_evidence.py/v1",
+    signal: "submitted/locked observed",
+    screenshot_object_key:
+      "makesafe-docket-artifacts/portal-captures/job/cycle/roof/image.png",
+    screenshot_media_type: "image/png",
+    screenshot_content_hash: `sha256:${"4".repeat(64)}`,
+    screenshot_size_bytes: 4096,
+  };
+  assertEquals(
+    portalCapturesFromLedger(source, [{
+      ...validShape,
+      attendance_cycle_id: "cycle-stale",
+    }]),
+    [],
+  );
+  assertEquals(
+    portalCapturesFromLedger(source, [{
+      ...validShape,
+      source_url: "https://www.primeeco.tech/share/other",
+    }]),
+    [],
+  );
+  assertEquals(
+    portalCapturesFromLedger(source, [{
+      ...validShape,
+      builder_reference: "",
+    }]),
+    [],
+  );
+  assertEquals(
+    portalCapturesFromLedger(source, [{
+      ...validShape,
+      screenshot_object_key: null,
+    }]),
+    [],
+  );
+});
+
+Deno.test("F7 canonical board loader names the existing capture ledger explicitly", async () => {
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  assert(source.includes("'makesafe_portal_capture_revisions'"));
+  assert(source.includes("portalCaptureRowsByJobId"));
 });
 
 Deno.test("historical divergence: unknown stage never vanishes silently", () => {

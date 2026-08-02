@@ -15240,6 +15240,22 @@ async function loadCanonicalMakesafeBoard(
     ),
   ])
 
+  // F7: the append-only capture ledger is the durable Prime truth source. Read
+  // it into the canonical row; do not mutate details, substatus, or stage.
+  let portalCaptureRows: any[] = []
+  try {
+    portalCaptureRows = await _fetchAllByJobIdChunked(
+      client,
+      'makesafe_portal_capture_revisions',
+      'id, job_id, attendance_cycle_id, role, status, makesafe_fact_version, capture_result, source_url, source_content_hash, builder_reference, captured_at, captured_by, capture_producer, signal, screenshot_object_key, screenshot_media_type, screenshot_content_hash, screenshot_size_bytes',
+      jobIds,
+      (q) => q.order('makesafe_fact_version', { ascending: false }),
+    )
+  } catch (error) {
+    // Fail closed to no capture evidence while keeping the legacy board visible.
+    console.error('[ops-api] makesafe board portal capture read unavailable:', (error as Error).message)
+  }
+
   // The status-holds table is an additive shadow overlay that can legitimately lag
   // the edge function in a preview database. Holds only decorate the board with
   // reason-coded badges, so tolerate a missing table and log loudly rather than
@@ -15335,6 +15351,12 @@ async function loadCanonicalMakesafeBoard(
       statusApplicationsByJobId[application.job_id] = application
     }
   }
+  const portalCaptureRowsByJobId: Record<string, any[]> = {}
+  for (const capture of portalCaptureRows) {
+    if (!capture?.job_id) continue
+    if (!portalCaptureRowsByJobId[capture.job_id]) portalCaptureRowsByJobId[capture.job_id] = []
+    portalCaptureRowsByJobId[capture.job_id].push(capture)
+  }
   const holdsByJobId: Record<string, any> = {}
   // Match the computed-status read model's cycle authority (detail-first) so holds
   // recorded on cycle>1 attach as badges even when the base pipeline row carries no
@@ -15359,6 +15381,7 @@ async function loadCanonicalMakesafeBoard(
     intakeCaseByJobId,
     holdsByJobId,
     statusApplicationsByJobId,
+    portalCaptureRowsByJobId,
     terminalSyntheticLivefireJobIds,
   })
 }
