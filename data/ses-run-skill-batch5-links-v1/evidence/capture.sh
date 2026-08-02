@@ -11,9 +11,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 D="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 SP="$(mktemp -d "${TMPDIR:-/tmp}/ses-capture.XXXXXX")"
 trap 'rm -rf "$SP"' EXIT
-SP="/private/tmp/claude-501/-Users-marninstobbe--treehouse-secureworks-backend-5961a6-10-secureworks-backend/2cb261b3-0992-457c-8d33-197540b407b1/scratchpad/b5"
-SP="$(mktemp -d "${TMPDIR:-/tmp}/ses-capture.XXXXXX")"
-trap 'rm -rf "$SP"' EXIT
 CLS="$(cat "$D/evidence/classify.js")"
 RED="$(cat "$D/evidence/redact.js")"
 MAX_POLL=40
@@ -27,7 +24,7 @@ while IFS=$'\t' read -r card slug url; do
   echo ">>> $card $slug"
   : > "$SP/res.json"
   chrome-devtools-axi open "$url" >/dev/null 2>&1
-  prev_len=-1; stable=0
+  prev_len=-1; stable=0; settled=0
   for i in $(seq 1 $MAX_POLL); do
     chrome-devtools-axi wait 3000 >/dev/null 2>&1
     : > "$SP/res.json"
@@ -37,12 +34,12 @@ while IFS=$'\t' read -r card slug url; do
     len=$(jq -r '.innerTextLen // 0' "$SP/res.json" 2>/dev/null)
     if [ "$len" = "$prev_len" ]; then stable=$((stable+1)); else stable=0; fi
     prev_len="$len"
-    if [ "$st" = "expired" ] && [ "$stable" -ge 1 ]; then break; fi
+    if [ "$st" = "expired" ] && [ "$stable" -ge 1 ]; then settled=1; break; fi
     jn=$(jq -r '.jobNo // ""' "$SP/res.json" 2>/dev/null)
     if { [ "$st" = "present-and-locked" ] || [ "$st" = "present-but-not-submitted" ]; } \
-       && [ "$stable" -ge 1 ] && [ -n "$jn" ]; then break; fi
+       && [ "$stable" -ge 1 ] && [ -n "$jn" ]; then settled=1; break; fi
   done
-  [ -s "$SP/res.json" ] || { echo "{\"card\":\"$card\",\"slug\":\"$slug\",\"state\":\"capture-failed\"}" >> "$OUT"; continue; }
+  [ "$settled" -eq 1 ] || { jq -cn --arg card "$card" --arg slug "$slug" '{card:$card,slug:$slug,state:"capture-failed"}' >> "$OUT"; continue; }
   : > "$SP/red.json"
   axi_json "$RED" > "$SP/red.json"
   rok=$(jq -r '.ok // false' "$SP/red.json" 2>/dev/null)

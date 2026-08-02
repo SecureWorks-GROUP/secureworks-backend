@@ -12,9 +12,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 D="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 SP="$(mktemp -d "${TMPDIR:-/tmp}/ses-capture-expired.XXXXXX")"
 trap 'rm -rf "$SP"' EXIT
-D="/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/10/secureworks-backend/data/ses-run-skill-batch5-links-v1"; SP="/private/tmp/claude-501/-Users-marninstobbe--treehouse-secureworks-backend-5961a6-10-secureworks-backend/2cb261b3-0992-457c-8d33-197540b407b1/scratchpad/b5"
-SP="$(mktemp -d "${TMPDIR:-/tmp}/ses-capture-expired.XXXXXX")"
-trap 'rm -rf "$SP"' EXIT
 CLS="$(cat "$D/evidence/classify.js")"
 RED="$(cat "$D/evidence/redact.js")"
 OUT="$D/evidence/portal-captures-expired.jsonl"
@@ -54,10 +51,12 @@ while IFS=$'\t' read -r card slug url; do
   st1=$(jq -r '.state // "err"' "$SP/res.json" 2>/dev/null); cp "$SP/res.json" "$SP/pass1.json"
   verdict="$st1"; note="single pass"
   if [ "$st1" = "expired" ]; then
-    if ! settle "$url"; then verdict="capture-failed"; note="PASS2 classification did not settle"; fi
+    if ! settle "$url"; then
+      jq -cn --arg card "$card" --arg slug "$slug" '{card:$card,slug:$slug,verdict:"capture-failed",note:"second classification did not settle"}' >> "$OUT"
+      continue
+    fi
     st2=$(jq -r '.state // "err"' "$SP/res.json" 2>/dev/null)
-    if [ "$verdict" = "capture-failed" ]; then :
-    elif [ "$st2" = "expired" ]; then verdict="expired"; note="expired on both passes"
+    if [ "$st2" = "expired" ]; then verdict="expired"; note="expired on both passes"
     else verdict="$st2"; note="PASS1 EXPIRED, PASS2 $st2 — transient expiry page"; fi
   fi
   : > "$SP/red.json"
