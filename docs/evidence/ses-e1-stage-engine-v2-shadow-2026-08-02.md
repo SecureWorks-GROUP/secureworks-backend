@@ -330,7 +330,7 @@ placements move.
   a cutover authorisation. The parity harness now runs the real gate over the
   real canonical rows and publishes the result.
 
-**Measured (2026-08-02T07:2xZ)**
+**Measured (2026-08-02T09:00:05Z)**
 
 | Fact | Design expected | Measured |
 |---|---:|---:|
@@ -370,9 +370,11 @@ number matches.
   `decision_required` never enters an ops column — `unmapped_stage_job_ids`
   stays empty because nothing buckets on the advisory value.
 
-Tests: 2714 passed / 21 failed (same 21 pre-existing). The frozen Release 0
-baseline re-verifies with an identical generation id, so all four releases
-measured the same 407 cards and the same certified 71.
+Targeted validation: 63 tests passed across `ses_stage_engine_v2_test.ts`,
+`makesafe_computed_status_test.ts` and `makesafe_board_read_model_test.ts`;
+`deno check` and lint were clean. The frozen Release 0 baseline re-verifies
+with an identical generation id, so all four releases measured the same 407
+cards and the same certified 71.
 
 ## Where this leaves the next task
 
