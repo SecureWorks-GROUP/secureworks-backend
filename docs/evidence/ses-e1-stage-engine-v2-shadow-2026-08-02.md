@@ -386,8 +386,8 @@ be picked up without re-deriving anything above:
 - **Release 8** — overlay re-anchor metadata and the no-op attestation read
   path. No ledger rows.
 
-Release 6, the portal capture reader, is explicitly out of scope for this
-release and is owned by another crew.
+Release 6, the portal capture reader, is recorded below. Its roof URL-identity
+asymmetry remains deferred to `ses-r10-roof-url-identity-v1`.
 
 Release 7 (Docs Ready authority) and Release 9 (the nine-row re-anchor apply)
 are both captain-gated and are not code-only.
@@ -593,3 +593,93 @@ this reader is live but unexercised on production data. It is proven by test,
 not by a production card — 8 tests covering the proved case, each of the three
 required facts failing independently, the never-attached document, family
 isolation, M1 isolation, and the loader's conditional read.
+
+## Release 6 — the deterministic portal capture reader
+
+**Behaviour change:** exactly one — a roof or assessment card proves report-in
+from an accepted portal capture revision, and a capture that could not read the
+portal is treated as no evidence rather than as unfinished work. Zero placements
+move, and zero shadow values move.
+
+**One acceptance path, consumed not rebuilt.** `donePortalRoles` (and its
+`externalPortalRoles` / `captureRole` helpers) are now exported from
+`makesafe_computed_status.ts` and consumed by the shadow engine. That is the
+contract the running product already applies, and the ledger projection
+`portalCapturesFromLedger` enforces the stricter identity — exact job, cycle,
+typed role, URL, builder reference, producer, content hash and screenshot —
+before a revision is ever projected. This release adds no second acceptance
+path and loosens nothing.
+
+**Cannot-observe is not not-done.** The counted behaviour is a four-way
+classification per required role:
+
+| Observation | Meaning |
+|---|---|
+| `proved` | an accepted revision says the form is submitted and locked |
+| `observed_not_done` | we DID see the portal; the form is not submitted |
+| `cannot_observe` | a capture ran and could not read the portal |
+| `no_capture` | nothing attempted yet |
+
+The third is the point. The newer engine funnels an `unreachable` capture into
+the same "still needs a headless capture" sentence as never-attempted, unless an
+expiry phrase happens to appear in its signal — conflating a failed observation
+with an unfinished job. The corrected engine says so explicitly: *"the last
+attempt could not observe it, which is not evidence the work is unfinished"*.
+Satisfaction is unchanged either way; what changes is that a card blocked by a
+reader failure is never reported as a trade that has not done the work.
+
+**Measured (2026-08-02T09:56:40Z)**, base `73a8481`, 407 cards, 13 SELECT-only
+Management API queries. All ten measured fields and the whole overlay object are
+identical across all 407 cards; prospective corrected moves 35 -> 35; family
+corrections 136; gate still blocked on `SWMS-261059` alone.
+
+**The measurement proves no regression, NOT that the reader works.** There are
+zero rows in `makesafe_portal_capture_revisions`, so a live A/B returns zero
+moves whether this reader is correct or entirely inert. That is the Release 5
+trap, and it is stated here rather than left for a reader to infer. Correctness
+rests on the 8 tests: the proved case, each of the four observations, contract
+failures (wrong cycle, wrong role, missing screenshot) rejected, all three
+assessment roles required, physical cards never consulting captures, and M1
+isolation.
+
+### FINDING — roof acceptance does not require URL identity
+
+Recorded, not silently corrected. The design's contract reads "exact
+current-cycle typed capture rows with `done`, a screenshot, and the required
+role/URL identity". The running acceptance applies the URL-identity and
+`locked` checks **only to assessment cards**
+(`requiresTypedAssessmentIdentity`), so a roof card accepts a `done` capture
+with a screenshot pointing at ANY url, locked or not. Assessment refuses the
+identical shape.
+
+Release 6 deliberately does not tighten this:
+
+- it would change acceptance and could move roof cards, and this release
+  measures zero blast only because no capture rows exist — a change whose blast
+  cannot be measured must not ride inside one that cannot see it;
+- the ledger path is unaffected either way, because
+  `portalCapturesFromLedger` already enforces exact role and URL before
+  projecting, so no accepted REVISION can reach the engine without identity.
+  The gap can only be reached by a legacy detail-derived capture.
+
+A test pins both halves of the asymmetry so it stays visible until it is ruled
+on.
+
+**Disposition: DEFERRED WITH A TICKET, not merely known.** The fix is filed as
+its own release, task **`ses-r10-roof-url-identity-v1`** (queued), to be closed
+in a release that measures its own blast across all 407 cards before and after.
+
+**Approved by firstmate under standing routine authority, 2026-08-02. NOT a
+captain ruling — the captain has not seen this finding.** That distinction is
+deliberate and must not be softened later: this document records captain
+rulings elsewhere (repair and restoration in Release 4, the PO and work-order
+floors in the evidence ruler), and a routine approval carries nothing like the
+same weight. Anyone reading this to decide whether the asymmetry has been
+adjudicated should read it as: raised, deferred, ticketed, and still awaiting a
+ruling.
+
+The rule the deferral rests on, adopted by firstmate at the same time and
+worth restating because it generalises beyond this finding:
+
+> A change whose blast cannot be measured must not ride inside a release that
+> cannot see it.

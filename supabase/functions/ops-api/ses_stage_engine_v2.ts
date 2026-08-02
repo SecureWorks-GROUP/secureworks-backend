@@ -44,9 +44,12 @@
 // Evidence: docs/evidence/ses-e1-stage-engine-v2-shadow-2026-08-02.md
 
 import {
+  captureRole,
   classifyMakesafeJobType,
   closeoutSatisfied,
   deriveMakesafeEvidenceStage,
+  donePortalRoles,
+  externalPortalRoles,
   type MakesafeComputedStatus,
   type MakesafeJobKind,
   type MakesafeStatusHold,
@@ -65,7 +68,7 @@ import {
  * Bump on any change to what this engine derives. Published on every row so a
  * past measurement stays attributable to the engine that produced it.
  */
-export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r5-shadow";
+export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r6-shadow";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -352,14 +355,131 @@ export function sesStageOwnRoofReportIn(
   }
   if (!String(draft.report_doc_id || "").trim()) {
     missing.push("the rendered own-template roof report document");
-  } else if (!input.evidence?.documents?.ownRoofReportDocumentIds?.has(
-    String(draft.report_doc_id),
-  )) {
+  } else if (
+    !input.evidence?.documents?.ownRoofReportDocumentIds?.has(
+      String(draft.report_doc_id),
+    )
+  ) {
     // The draft names a document that is not attached to the card as a
     // `roof_report`. Evidence that was rendered but never landed is not proof.
     missing.push("the rendered own-template roof report to be attached");
   }
   return { satisfied: missing.length === 0, missing };
+}
+
+/**
+ * R6 — what the deterministic portal reader has actually established about one
+ * required role.
+ *
+ * The four values are deliberately distinct, and the third is the whole point
+ * of this release:
+ *
+ * - `proved`             — an accepted capture revision says the Prime form is
+ *                          submitted and locked.
+ * - `observed_not_done`  — we DID see the portal and the form is not submitted.
+ *                          That is a real negative fact about the work.
+ * - `cannot_observe`     — a capture ran and could not read the portal. This is
+ *                          the ABSENCE of evidence, never evidence of absence.
+ *                          It says nothing about whether the trade did the work
+ *                          and must never be rendered as though it did.
+ * - `no_capture`         — nothing has been attempted yet.
+ */
+export type SesPortalRoleObservation =
+  | "proved"
+  | "observed_not_done"
+  | "cannot_observe"
+  | "no_capture";
+
+/** The typed roles each portal family must prove. Driven by canonical family. */
+export const SES_PORTAL_REQUIRED_ROLES: Partial<
+  Record<SesFamilyId, readonly string[]>
+> = {
+  ordinary_roof_portal: ["roof_report"],
+  assessment_quote: ["assessment_report", "photos", "quote"],
+};
+
+export function sesStagePortalRoleObservation(
+  input: SesStageV2Input,
+  role: string,
+): SesPortalRoleObservation {
+  // ONE acceptance path. `donePortalRoles` is the read model's contract as the
+  // running product already applies it - exact typed role, exact current-cycle
+  // URL match against the card's own external link, done, locked, screenshot
+  // backed. This engine consumes that decision and never re-decides it, so a
+  // capture this module calls proved is exactly one the board already accepts.
+  if (donePortalRoles(input as MakesafeStatusInput).has(role)) return "proved";
+
+  const cycle = Number(input.detail?.cycle_number ?? 1);
+  const captures = (input.evidence?.portalCaptures || []).filter((item) =>
+    captureRole(item) === role &&
+    (item.cycle_number == null || Number(item.cycle_number) === cycle)
+  );
+  const datedCaptures = captures.filter((item) =>
+    String(item.captured_at || "").trim()
+  );
+  const capture = datedCaptures.length === 0
+    ? captures[0]
+    : datedCaptures.reduce((latest, item) => {
+      const timeOrder = String(item.captured_at || "").localeCompare(
+        String(latest.captured_at || ""),
+      );
+      if (timeOrder !== 0) return timeOrder > 0 ? item : latest;
+      return String(item.revision_id || "").localeCompare(
+          String(latest.revision_id || ""),
+        ) > 0
+        ? item
+        : latest;
+    });
+  const status = String(capture?.status || "").toLowerCase();
+  if (status === "not_done") return "observed_not_done";
+  // `unreachable` is the reader telling us it could not see the portal. The
+  // newer engine funnels it into the same "still needs a capture" sentence as
+  // never-attempted unless an expiry phrase happens to appear in the signal,
+  // which conflates a failed observation with an unfinished job.
+  if (status === "unreachable") return "cannot_observe";
+  return "no_capture";
+}
+
+/**
+ * R6 — portal report-in for the two portal families.
+ *
+ * Satisfaction is unchanged: every required role must be `proved`, decided by
+ * the single shared acceptance path. What this adds is an honest account of WHY
+ * an unproved role is unproved, so a card blocked by a reader failure is never
+ * reported as a trade that has not done the work.
+ */
+export function sesStagePortalReportIn(
+  input: SesStageV2Input,
+  family: SesFamilyId,
+): {
+  satisfied: boolean;
+  missing: string[];
+  observations: Record<string, SesPortalRoleObservation>;
+} {
+  const required = SES_PORTAL_REQUIRED_ROLES[family] ?? [];
+  const links = externalPortalRoles(input as MakesafeStatusInput);
+  const observations: Record<string, SesPortalRoleObservation> = {};
+  const missing: string[] = [];
+  for (const role of required) {
+    const observed = sesStagePortalRoleObservation(input, role);
+    observations[role] = observed;
+    if (observed === "proved") continue;
+    if (!links.has(role)) {
+      missing.push(
+        `the builder's ${role} portal link, which the work order email does not contain`,
+      );
+      continue;
+    }
+    missing.push(
+      observed === "observed_not_done"
+        ? `the builder's ${role} form to be submitted and locked in Prime`
+        : observed === "cannot_observe"
+        // Deliberately about US, not about the trade.
+        ? `a readable capture of the builder's ${role} portal - the last attempt could not observe it, which is not evidence the work is unfinished`
+        : `a capture of the builder's ${role} portal proving the form is submitted and locked`,
+    );
+  }
+  return { satisfied: missing.length === 0, missing, observations };
 }
 
 /**
@@ -513,15 +633,23 @@ function deriveSesStageEvidence(
   input: SesStageV2Input,
   family: SesStageV2FamilyResolution,
 ) {
-  if (family.family !== "own_template_roof") {
-    return deriveMakesafeEvidenceStage(input as MakesafeStatusInput);
+  if (family.family === "own_template_roof") {
+    const reportIn = sesStageOwnRoofReportIn(input);
+    return deriveMakesafeEvidenceStage(input as MakesafeStatusInput, {
+      reportIn,
+      reportInReason:
+        "the current-cycle own-template roof report is submitted and its rendered document is attached",
+    });
   }
-  const reportIn = sesStageOwnRoofReportIn(input);
-  return deriveMakesafeEvidenceStage(input as MakesafeStatusInput, {
-    reportIn,
-    reportInReason:
-      "the current-cycle own-template roof report is submitted and its rendered document is attached",
-  });
+  if (SES_PORTAL_REQUIRED_ROLES[family.family]) {
+    const reportIn = sesStagePortalReportIn(input, family.family);
+    return deriveMakesafeEvidenceStage(input as MakesafeStatusInput, {
+      reportIn: { satisfied: reportIn.satisfied, missing: reportIn.missing },
+      reportInReason:
+        "every required builder portal capture is accepted as submitted and locked",
+    });
+  }
+  return deriveMakesafeEvidenceStage(input as MakesafeStatusInput);
 }
 
 /** The overlay row shape the resolver reads. */

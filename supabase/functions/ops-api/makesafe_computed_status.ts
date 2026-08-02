@@ -65,6 +65,8 @@ export interface MakesafePortalCapture {
   screenshot?: string | null;
   screenshot_path?: string | null;
   cycle_number?: number | null;
+  revision_id?: string | null;
+  captured_at?: string | null;
 }
 
 export interface MakesafeStatusEvidence {
@@ -188,7 +190,7 @@ function submittedPhysicalReport(input: MakesafeStatusInput): boolean {
   );
 }
 
-function captureRole(capture: MakesafePortalCapture): string {
+export function captureRole(capture: MakesafePortalCapture): string {
   const role = normalizedToken(capture.role || capture.kind);
   if (["roof", "roof_report"].includes(role)) return "roof_report";
   if (["assessment", "assessment_report"].includes(role)) {
@@ -203,7 +205,7 @@ function captureRole(capture: MakesafePortalCapture): string {
   return role;
 }
 
-function donePortalRoles(input: MakesafeStatusInput): Set<string> {
+export function donePortalRoles(input: MakesafeStatusInput): Set<string> {
   const cycle = Number(input.detail?.cycle_number ?? 1);
   const requiresTypedAssessmentIdentity =
     classifyMakesafeJobType(input.detail, input.job) ===
@@ -237,7 +239,7 @@ function donePortalRoles(input: MakesafeStatusInput): Set<string> {
   );
 }
 
-function externalPortalRoles(input: MakesafeStatusInput): Set<string> {
+export function externalPortalRoles(input: MakesafeStatusInput): Set<string> {
   return new Set(
     (Array.isArray(input.detail?.external_links)
       ? input.detail.external_links
