@@ -316,6 +316,20 @@ export async function runMakesafeRoofStoreyBackfill(
       ? null
       : Number(body.expected_count);
 
+  if (
+    expectedCount !== null &&
+    (!Number.isFinite(expectedCount) || !Number.isInteger(expectedCount) ||
+      expectedCount < 0)
+  ) {
+    return {
+      ...summariseRoofStoreyBackfill([]),
+      dry_run: dryRun,
+      ok: false,
+      error: "expected_count must be a finite non-negative integer. Nothing was written.",
+      expected_count: expectedCount,
+    };
+  }
+
   const { data: details, error: detailsError } = await client
     .from("makesafe_job_details")
     .select("job_id, external_ref, report_type, substatus")
@@ -335,13 +349,15 @@ export async function runMakesafeRoofStoreyBackfill(
     .in("id", jobIds);
   if (jobsError) throw jobsError;
 
-  const { data: dockets } = await client
+  const { data: dockets, error: docketsError } = await client
     .from("makesafe_docket_revisions").select("job_id").in("job_id", jobIds);
-  const { data: obligations } = await client
+  if (docketsError) throw docketsError;
+  const { data: obligations, error: obligationsError } = await client
     .from("makesafe_invoice_obligation_revisions").select("job_id").in(
       "job_id",
       jobIds,
     );
+  if (obligationsError) throw obligationsError;
   const docketJobs = new Set(
     (dockets || []).map((row: { job_id: string }) => row.job_id),
   );
@@ -372,6 +388,62 @@ export async function runMakesafeRoofStoreyBackfill(
   }
   if (dryRun) return { ...result, expected_count: expectedCount };
 
+  const candidateIds = result.write_candidates.map((row) => row.job_id);
+  const { data: currentJobs, error: currentJobsError } = await client
+    .from("jobs")
+    .select(
+      "id, job_number, status, notes, metadata, scope_json, site_suburb, ses_money_sealed_at",
+    )
+    .in("id", candidateIds);
+  if (currentJobsError) throw currentJobsError;
+  const { data: currentDetails, error: currentDetailsError } = await client
+    .from("makesafe_job_details")
+    .select("job_id, external_ref, report_type, substatus")
+    .in("job_id", candidateIds);
+  if (currentDetailsError) throw currentDetailsError;
+  const { data: currentDockets, error: currentDocketsError } = await client
+    .from("makesafe_docket_revisions").select("job_id").in("job_id", candidateIds);
+  if (currentDocketsError) throw currentDocketsError;
+  const { data: currentObligations, error: currentObligationsError } = await client
+    .from("makesafe_invoice_obligation_revisions").select("job_id").in(
+      "job_id",
+      candidateIds,
+    );
+  if (currentObligationsError) throw currentObligationsError;
+  const currentDetailByJob = new Map<string, Record<string, unknown>>();
+  for (const row of (currentDetails || [])) currentDetailByJob.set(row.job_id, row);
+  const currentDocketJobs = new Set(
+    (currentDockets || []).map((row: { job_id: string }) => row.job_id),
+  );
+  const currentObligationJobs = new Set(
+    (currentObligations || []).map((row: { job_id: string }) => row.job_id),
+  );
+  const currentRows = (currentJobs || []).map((job: Record<string, unknown>) =>
+    buildRoofStoreyBackfillRow(
+      job,
+      currentDetailByJob.get(String(job.id)) || null,
+      {
+        hasPersistedDocket: currentDocketJobs.has(String(job.id)),
+        hasInvoiceObligation: currentObligationJobs.has(String(job.id)),
+      },
+    )
+  ).sort((left: RoofStoreyBackfillRow, right: RoofStoreyBackfillRow) =>
+    String(left.job_number).localeCompare(String(right.job_number))
+  );
+  const previewRows = result.write_candidates.map((row) => ({ ...row, written: false }));
+  if (JSON.stringify(currentRows) !== JSON.stringify(previewRows)) {
+    const changedJobs = new Set([
+      ...previewRows.map((row) => row.job_number),
+      ...currentRows.map((row: RoofStoreyBackfillRow) => row.job_number),
+    ]);
+    return {
+      ...result,
+      ok: false,
+      error: `preview drift detected for job numbers ${[...changedJobs].join(", ")}; nothing was written.`,
+      expected_count: expectedCount,
+    };
+  }
+
   // Only `write` rows are ever written. Held, refused, no-fact and terminal
   // rows are untouched at every setting - there is no flag that makes them
   // write, deliberately.
@@ -380,9 +452,6 @@ export async function runMakesafeRoofStoreyBackfill(
       .from("jobs").select("metadata").eq("id", row.job_id).maybeSingle();
     if (readError) throw readError;
     const metadata = record(current?.metadata);
-    // Re-check at write time: if a storey appeared between preview and write,
-    // leave it alone rather than racing it.
-    if (metadata.storeys !== undefined && metadata.storeys !== null) continue;
     const { error: writeError } = await client.from("jobs")
       .update({ metadata: { ...metadata, storeys: row.storeys } })
       .eq("id", row.job_id);
