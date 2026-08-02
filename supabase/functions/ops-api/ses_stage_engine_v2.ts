@@ -46,7 +46,6 @@
 import {
   classifyMakesafeJobType,
   closeoutSatisfied,
-  completedAt,
   deriveMakesafeEvidenceStage,
   type MakesafeComputedStatus,
   type MakesafeJobKind,
@@ -62,7 +61,7 @@ import {
  * Bump on any change to what this engine derives. Published on every row so a
  * past measurement stays attributable to the engine that produced it.
  */
-export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r1-shadow";
+export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r2-shadow";
 
 /** 168 hours. Completed rolls into Archive at exactly seven days, not after. */
 export const SES_STAGE_COMPLETED_WINDOW_MS = 7 * 86_400_000;
@@ -100,17 +99,97 @@ export interface SesStageV2Result {
   engine_version: string;
 }
 
-function terminalStageForCompletion(
+/**
+ * A completion time this engine is willing to age a card against, in priority
+ * order, with the source named.
+ *
+ * The newer engine's list ends in generic `jobs.updated_at`, which is a row
+ * touch and not completion proof — any unrelated write makes a job finished
+ * months ago look like it closed today. `makesafe_job_details.invoice_ready_at`
+ * is likewise a readiness marker, not an issue or a send. Both are dropped
+ * here. What survives is exactly the design's allow-list: a durable send time,
+ * an issued invoice's date or creation, or an explicit job completion time.
+ *
+ * The newer engine's own list stays where it is, in
+ * `makesafe_computed_status.ts`'s `completedAt`, so the two are readable side
+ * by side rather than one quietly editing the other.
+ */
+const TRUSTED_COMPLETION_SOURCES: ReadonlyArray<
+  { source: string; read: (input: SesStageV2Input) => unknown }
+> = [
+  { source: "pack.sent_at", read: (i) => i.evidence?.pack?.sent_at },
+  { source: "invoice.invoice_date", read: (i) => i.evidence?.invoiceDate },
+  { source: "invoice.created_at", read: (i) => i.evidence?.invoiceCreatedAt },
+  { source: "jobs.completed_at", read: (i) => i.job?.completed_at },
+  { source: "detail.report_sent_at", read: (i) => i.detail?.report_sent_at },
+];
+
+export interface SesStageCompletionClock {
+  at: number | null;
+  source: string | null;
+}
+
+/** The first trusted completion timestamp, or none. Never guesses. */
+export function sesStageTrustedCompletionAt(
   input: SesStageV2Input,
-): "completed" | "archive" {
-  const at = completedAt(input as MakesafeStatusInput);
+): SesStageCompletionClock {
+  for (const candidate of TRUSTED_COMPLETION_SOURCES) {
+    const raw = candidate.read(input);
+    if (!raw) continue;
+    const value = new Date(String(raw)).getTime();
+    if (Number.isFinite(value)) return { at: value, source: candidate.source };
+  }
+  return { at: null, source: null };
+}
+
+export interface SesStageTerminalResult {
+  stage: "completed" | "archive" | typeof SES_STAGE_DECISION_REQUIRED;
+  reasons: string[];
+  conflicts: string[];
+}
+
+/**
+ * THE one common clock. Every terminal path runs through here.
+ *
+ * The newer engine applies the rolling seven-day window on its close-out path
+ * and skips it entirely on the raw complete/completed/closed shortcut, which is
+ * why 34 jobs finished months ago would appear in "Completed This Week". The
+ * captain's ruling names this as precondition 2: the clock applies on EVERY
+ * path, including the shortcut.
+ *
+ * A missing trusted timestamp is refused rather than guessed. The newer engine
+ * treats an unknown completion time as "within the window" and parks the card
+ * in Completed forever; that is a claim about this week that no evidence
+ * supports.
+ *
+ * The boundary is strict and matches the legacy rolling-window helper: under
+ * 168 hours is Completed, exactly 168 hours is Archive.
+ */
+export function sesStageCompletedStage(
+  input: SesStageV2Input,
+  reason: string,
+): SesStageTerminalResult {
+  const { at, source } = sesStageTrustedCompletionAt(input);
+  if (at == null) {
+    return {
+      stage: SES_STAGE_DECISION_REQUIRED,
+      reasons: [reason],
+      conflicts: ["completion_timestamp_missing"],
+    };
+  }
   const now = new Date(input.nowIso || new Date().toISOString()).getTime();
-  // R1 reproduces M1 exactly, including its weakness: an unknown completion
-  // timestamp stays visible in Completed rather than aging out. Release 2 makes
-  // the clock common to every terminal path and refuses to guess a missing one.
-  const withinSevenDays = at == null ||
-    (Number.isFinite(now) && now - at < SES_STAGE_COMPLETED_WINDOW_MS);
-  return withinSevenDays ? "completed" : "archive";
+  const withinSevenDays = Number.isFinite(now) &&
+    now - at < SES_STAGE_COMPLETED_WINDOW_MS;
+  return {
+    stage: withinSevenDays ? "completed" : "archive",
+    reasons: [
+      reason,
+      withinSevenDays
+        ? `completion time from ${source} is under 7 days old`
+        : `completion time from ${source} is at least 7 days old`,
+    ],
+    conflicts: [],
+  };
 }
 
 /**
@@ -152,25 +231,29 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
     };
   }
   if (["complete", "completed", "closed"].includes(jobStatus)) {
-    // R1 reproduces the newer engine as it stands, faults included: this
-    // shortcut skips the seven-day clock entirely, which is why 34 jobs
-    // finished months ago would show as this week's work. Release 2 is the one
-    // counted change that routes this branch through the common clock.
+    const terminal = sesStageCompletedStage(
+      input,
+      "job is already completed or closed",
+    );
     return {
       ...base,
-      stage: "completed",
-      reasons: ["job is already completed or closed"],
+      stage: terminal.stage,
+      reasons: terminal.reasons,
       missing: [],
-      conflicts,
+      conflicts: [...conflicts, ...terminal.conflicts],
     };
   }
   if (closeoutSatisfied(input as MakesafeStatusInput)) {
+    const terminal = sesStageCompletedStage(
+      input,
+      "durable sent-pack evidence and authorised invoice agree",
+    );
     return {
       ...base,
-      stage: terminalStageForCompletion(input),
-      reasons: ["durable sent-pack evidence and authorised invoice agree"],
+      stage: terminal.stage,
+      reasons: terminal.reasons,
       missing: [],
-      conflicts,
+      conflicts: [...conflicts, ...terminal.conflicts],
     };
   }
 

@@ -244,18 +244,10 @@ Deno.test("the evidence half is shared, not copied", () => {
   }
 });
 
-Deno.test("R1 reproduces the newer engine exactly, terminal faults included", () => {
-  // The whole point of Release 1 is zero measured change. A raw terminal job
-  // finished months ago still reads `completed` here — Release 2 is the one
-  // counted change that fixes it, and it must be attributable to that release.
-  const stale = input({
-    job: { status: "complete", completed_at: daysAgo(200) },
-    evidence: { invoiceStatus: "PAID", invoiceDate: daysAgo(200) },
-  });
-  assertEquals(deriveSesStageV2(stale).stage, "completed");
-  assertEquals(computeMakesafeStatus(stale).status, "completed");
-
-  // ...and the closeout path keeps M1's clock, which it already had.
+Deno.test("the close-out path keeps the clock the newer engine already had", () => {
+  // Release 2 makes the clock COMMON; it does not invent one here. This path
+  // aged correctly before and must still agree with M1 afterwards, so the
+  // 34-card blast stays attributable to the shortcut branch alone.
   const closedOut = input({
     evidence: {
       packSent: true,
@@ -285,4 +277,130 @@ Deno.test("raw cancelled and archived job state outrank every evidence fact", ()
       .stage,
     "archive",
   );
+});
+
+// ── Release 2 — one common clock on every terminal path ─────────────────────
+
+Deno.test("clock: the raw terminal shortcut is aged, not waved through", () => {
+  // The newer engine returns `completed` here with no clock at all, which is
+  // why 34 jobs finished months ago would read as this week's work.
+  const stale = input({
+    job: { status: "complete", completed_at: daysAgo(200) },
+  });
+  assertEquals(deriveSesStageV2(stale).stage, "archive");
+  assertEquals(computeMakesafeStatus(stale).status, "completed");
+});
+
+Deno.test("clock: the 168-hour boundary is strict on both terminal paths", () => {
+  const paths = [
+    // raw terminal shortcut
+    (age: number) =>
+      input({ job: { status: "complete", completed_at: daysAgo(age) } }),
+    // durable close-out
+    (age: number) =>
+      input({
+        evidence: {
+          packSent: true,
+          invoiceStatus: "PAID",
+          invoiceDate: daysAgo(age),
+          documents: { report: true, invoice: true },
+        },
+      }),
+  ];
+  for (const build of paths) {
+    // Under seven days.
+    assertEquals(deriveSesStageV2(build(6.5)).stage, "completed");
+    // EXACTLY seven days archives — matching the legacy rolling-window helper.
+    assertEquals(deriveSesStageV2(build(7)).stage, "archive");
+    // Over seven days.
+    assertEquals(deriveSesStageV2(build(7.5)).stage, "archive");
+  }
+});
+
+Deno.test("clock: a missing trusted completion time is refused, not guessed", () => {
+  // No pack send, no invoice, no completed_at, no report send.
+  const noTime = input({ job: { status: "closed" } });
+  const result = deriveSesStageV2(noTime);
+  assertEquals(result.stage, "decision_required");
+  assertEquals(result.conflicts, ["completion_timestamp_missing"]);
+  // The newer engine parks exactly this card in Completed forever.
+  assertEquals(computeMakesafeStatus(noTime).status, "completed");
+});
+
+Deno.test("clock: generic row-touch and readiness markers are not completion proof", () => {
+  // `jobs.updated_at` is any write at all; `invoice_ready_at` is a readiness
+  // marker. The newer engine ages cards against both.
+  const weak = input({
+    job: { status: "complete", updated_at: daysAgo(1) },
+    detail: { cycle_number: 1, invoice_ready_at: daysAgo(1) },
+  });
+  assertEquals(deriveSesStageV2(weak).stage, "decision_required");
+  assertEquals(
+    deriveSesStageV2(weak).conflicts,
+    ["completion_timestamp_missing"],
+  );
+});
+
+Deno.test("clock: each trusted source is used, in priority order, and named", () => {
+  const cases: Array<[string, any, string]> = [
+    [
+      "pack.sent_at",
+      { evidence: { pack: { sent_at: daysAgo(1) } } },
+      "completed",
+    ],
+    [
+      "invoice.invoice_date",
+      { evidence: { invoiceDate: daysAgo(1) } },
+      "completed",
+    ],
+    [
+      "invoice.created_at",
+      { evidence: { invoiceCreatedAt: daysAgo(1) } },
+      "completed",
+    ],
+    ["jobs.completed_at", { job: { completed_at: daysAgo(1) } }, "completed"],
+    [
+      "detail.report_sent_at",
+      { detail: { cycle_number: 1, report_sent_at: daysAgo(1) } },
+      "completed",
+    ],
+  ];
+  for (const [source, over, expected] of cases) {
+    const facts = input({
+      ...over,
+      job: { status: "complete", ...(over.job || {}) },
+    });
+    const result = deriveSesStageV2(facts);
+    assertEquals(result.stage, expected, source);
+    assert(
+      result.reasons.some((r: string) => r.includes(source)),
+      `${source} must be named in the reason, got ${result.reasons.join("; ")}`,
+    );
+  }
+
+  // Priority: a durable send wins over a much older invoice date.
+  const both = input({
+    job: { status: "complete" },
+    evidence: { pack: { sent_at: daysAgo(1) }, invoiceDate: daysAgo(300) },
+  });
+  assertEquals(deriveSesStageV2(both).stage, "completed");
+});
+
+Deno.test("clock: a refused terminal card still places no card and still shows as decision_required", () => {
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({
+      id: "j1",
+      status: "closed",
+      board_stage: "archive",
+      assignments: [],
+    }),
+  ], { computedAt: NOW });
+  assertEquals(rows[0].derived_stage_v2, "decision_required");
+  assertEquals(rows[0].derived_stage_v2_conflicts, [
+    "completion_timestamp_missing",
+  ]);
+  // Still archived on the board. The advisory value places nothing.
+  assertEquals(rows[0].canonical_stage, "archive");
+  assertEquals(projectOpsMakesafeBoard(rows).columns.archive.length, 1);
+  assertEquals(projectOpsMakesafeBoard(rows).unmapped_stage_job_ids.length, 0);
 });

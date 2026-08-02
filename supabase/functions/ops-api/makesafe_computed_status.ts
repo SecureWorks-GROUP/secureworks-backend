@@ -338,7 +338,7 @@ export function closeoutSatisfied(input: MakesafeStatusInput): boolean {
   return kind === "physical_makesafe" || reportInEvidence(input).satisfied;
 }
 
-export function completedAt(input: MakesafeStatusInput): number | null {
+function completedAt(input: MakesafeStatusInput): number | null {
   const raw = input.evidence?.pack?.sent_at ||
     input.evidence?.invoiceDate ||
     input.evidence?.invoiceCreatedAt ||
