@@ -1402,3 +1402,261 @@ Deno.test("docs ready: M1's published output is untouched", () => {
     "report_ready",
   );
 });
+
+// ── R8 — overlay re-anchor metadata and the no-op attestation read path ─────
+
+const CAPTAIN_ARCHIVE = {
+  run_key: "captain-archive-1",
+  source_status: "allocated",
+  before_status: "allocated",
+  after_status: "archive",
+  evidence_ref: "captain-ruling",
+  applied_by: "captain",
+  applied_at: "2026-07-23T00:00:00.000Z",
+};
+
+Deno.test("reanchor: a legacy row with no decision_kind still binds exactly as before", () => {
+  // Every row in the ledger today has no decision_kind. This release must be
+  // a no-op for all of them, which is why the blast is zero.
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: CAPTAIN_ARCHIVE } });
+  assertEquals(rows[0].canonical_stage, "archive");
+  assertEquals(rows[0].status_application?.effect, "override");
+  assertEquals(rows[0].status_application?.applies_to_display, true);
+  assertEquals(rows[0].status_application?.decision_kind, "display_override");
+});
+
+Deno.test("reanchor: a stage attestation NEVER changes a column", () => {
+  // The load-bearing guarantee of this release. Even with a source that
+  // matches the declared stage exactly — the shape that WOULD bind as an
+  // override — an attestation must leave the column alone.
+  const attestation = {
+    ...CAPTAIN_ARCHIVE,
+    decision_kind: "stage_attestation",
+    after_status: "archive",
+  };
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: attestation } });
+  // Column is the legacy declared stage, NOT the attestation's after_status.
+  assertEquals(rows[0].canonical_stage, "allocated");
+  assertEquals(rows[0].declared_stage, "allocated");
+  const ops = projectOpsMakesafeBoard(rows);
+  assertEquals(ops.columns.allocated.length, 1);
+  assertEquals(ops.columns.archive.length, 0);
+});
+
+Deno.test("reanchor: a same-column attestation keeps its provenance instead of vanishing", () => {
+  // Four of the nine re-anchor rows are this shape. Before R8 a same-column
+  // decision nulled status_application and erased the Captain's authority
+  // from the card; the column was right and the history was gone.
+  const attestation = {
+    ...CAPTAIN_ARCHIVE,
+    decision_kind: "stage_attestation",
+    source_status: "archive",
+    before_status: "archive",
+    after_status: "archive",
+  };
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "archive", assignments: [] }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: attestation } });
+  assertEquals(rows[0].canonical_stage, "archive");
+  assert(rows[0].status_application !== null, "provenance must survive");
+  assertEquals(rows[0].status_application?.effect, "attestation");
+  assertEquals(rows[0].status_application?.applies_to_display, false);
+  assertEquals(rows[0].status_application?.applied_by, "captain");
+  assertEquals(rows[0].status_application?.evidence_ref, "captain-ruling");
+});
+
+Deno.test("reanchor: an attestation on a TERMINAL card attaches without moving it", () => {
+  // SWMS-26845's shape: corrected derivation is already Archive, and Archive
+  // is terminal so it can never be a display override. It must be an
+  // attestation, which is exactly why the two kinds exist.
+  const attestation = {
+    ...CAPTAIN_ARCHIVE,
+    decision_kind: "stage_attestation",
+    source_status: "archive",
+    after_status: "archive",
+  };
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({
+      id: "j1",
+      board_stage: "archive",
+      status: "archived",
+      assignments: [],
+    }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: attestation } });
+  assertEquals(rows[0].canonical_stage, "archive");
+  assertEquals(rows[0].status_application?.effect, "attestation");
+});
+
+Deno.test("reanchor: a stale override still does not attach", () => {
+  // The existing guard must not be relaxed by this release. A decision whose
+  // source no longer matches the card's stage is stale and stays detached.
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "trade_report_in", assignments: [] }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: CAPTAIN_ARCHIVE } });
+  assertEquals(rows[0].canonical_stage, "trade_report_in");
+  assertEquals(rows[0].status_application, null);
+});
+
+Deno.test("reanchor: a stale ATTESTATION also does not attach", () => {
+  // An attestation may only describe where the card actually is. One whose
+  // source has moved on says nothing true and must not attach provenance.
+  const stale = {
+    ...CAPTAIN_ARCHIVE,
+    decision_kind: "stage_attestation",
+    source_status: "allocated",
+    after_status: "allocated",
+  };
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "trade_report_in", assignments: [] }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: stale } });
+  assertEquals(rows[0].canonical_stage, "trade_report_in");
+  assertEquals(rows[0].status_application, null);
+});
+
+Deno.test("reanchor: an attestation cannot revive a terminal card", () => {
+  // The regression the design names: a terminal attestation must not move a
+  // card. Even pointing at a live column, it cannot pull the card out.
+  const revive = {
+    ...CAPTAIN_ARCHIVE,
+    decision_kind: "stage_attestation",
+    source_status: "archive",
+    after_status: "allocated",
+  };
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({
+      id: "j1",
+      board_stage: "archive",
+      status: "archived",
+      assignments: [],
+    }),
+  ], { computedAt: NOW, statusApplicationsByJobId: { j1: revive } });
+  assertEquals(rows[0].canonical_stage, "archive");
+  // after_status !== declared_stage, so it does not even attach provenance.
+  assertEquals(rows[0].status_application, null);
+});
+
+Deno.test("reanchor: the advisory overlay candidate is unchanged by decision_kind", () => {
+  const attestation = sesStageV2OverlayCandidate(
+    "new",
+    {
+      ...CAPTAIN_ARCHIVE,
+      source_status: "new",
+      decision_kind: "stage_attestation",
+    } as any,
+    "in_progress",
+  );
+  assertEquals(attestation.binds, false);
+  assertEquals(attestation.stage, "new");
+
+  const displayOverride = sesStageV2OverlayCandidate(
+    "new",
+    {
+      ...CAPTAIN_ARCHIVE,
+      source_status: "new",
+      decision_kind: "display_override",
+    } as any,
+    "in_progress",
+  );
+  assertEquals(displayOverride.binds, true);
+  assertEquals(displayOverride.stage, "archive");
+});
+
+Deno.test("reanchor: unknown decision_kind is non-binding in both resolvers", () => {
+  const legacy = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+  ], {
+    computedAt: NOW,
+    statusApplicationsByJobId: { j1: CAPTAIN_ARCHIVE },
+  });
+  assertEquals(legacy[0].canonical_stage, "archive");
+
+  const unknown = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+  ], {
+    computedAt: NOW,
+    statusApplicationsByJobId: {
+      j1: { ...CAPTAIN_ARCHIVE, decision_kind: "display_override_v2" },
+    },
+  });
+  assertEquals(unknown[0].canonical_stage, "allocated");
+  assertEquals(unknown[0].status_application, null);
+
+  const advisoryLegacy = sesStageV2OverlayCandidate(
+    "new",
+    { ...CAPTAIN_ARCHIVE, source_status: "new" },
+    "in_progress",
+  );
+  assertEquals(advisoryLegacy.binds, true);
+  const advisoryUnknown = sesStageV2OverlayCandidate(
+    "new",
+    { ...CAPTAIN_ARCHIVE, source_status: "new", decision_kind: "garbage" },
+    "in_progress",
+  );
+  assertEquals(advisoryUnknown.binds, false);
+  assertEquals(advisoryUnknown.stage, "new");
+});
+
+Deno.test("reanchor: decision_kind projections are guarded when Release 9 arrives", async () => {
+  const indexSource = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  const boardRead = indexSource.match(
+    /_fetchAllByJobIdChunked\(\s*client,\s*['"]makesafe_board_status_current['"],\s*['"]([^'"]+)['"]/,
+  )?.[1] || "";
+  const runRead = indexSource.match(
+    /from\('makesafe_board_status_applications'\)[\s\S]{0,180}?\.select\('([^']+)'\)/,
+  )?.[1] || "";
+  if (!boardRead || !runRead) {
+    throw new Error(
+      "Release 9 projection guard could not locate both projections: expected the makesafe_board_status_current argument at index.ts:15356 and the makesafe_board_status_applications select at index.ts:15608.",
+    );
+  }
+  const boardHasDecisionKind = /\bdecision_kind\b/.test(boardRead);
+  const runHasDecisionKind = /\bdecision_kind\b/.test(runRead);
+
+  let migrationIntroducesDecisionKind = false;
+  for await (
+    const entry of Deno.readDir(new URL("../../migrations/", import.meta.url))
+  ) {
+    if (!entry.isFile || !entry.name.endsWith(".sql")) continue;
+    const text = await Deno.readTextFile(
+      new URL(`../../migrations/${entry.name}`, import.meta.url),
+    );
+    if (/\bdecision_kind\b/i.test(text)) {
+      migrationIntroducesDecisionKind = true;
+      break;
+    }
+  }
+  if (
+    !migrationIntroducesDecisionKind &&
+    (boardHasDecisionKind || runHasDecisionKind)
+  ) {
+    throw new Error(
+      "The current code selects decision_kind before Release 9 introduces its migration; keep both index.ts:15356 and index.ts:15608 projections unchanged until the discriminator exists.",
+    );
+  }
+  if (!migrationIntroducesDecisionKind) {
+    // The display_override default is safe only while no attestation row can exist.
+    assert(
+      !boardHasDecisionKind,
+      "The board projection must omit decision_kind today.",
+    );
+    assert(
+      !runHasDecisionKind,
+      "The run projection must omit decision_kind today.",
+    );
+    return;
+  }
+  if (
+    migrationIntroducesDecisionKind &&
+    (!boardHasDecisionKind || !runHasDecisionKind)
+  ) {
+    throw new Error(
+      "Release 9 added decision_kind, but the projections at index.ts:15356 (makesafe_board_status_current) and index.ts:15608 (makesafe_board_status_applications) do not both select it. A projection that drops the discriminator silently downgrades an attestation to display_override, which can move a column and defeat Release 8.",
+    );
+  }
+});

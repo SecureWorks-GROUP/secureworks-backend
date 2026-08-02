@@ -73,7 +73,7 @@ import {
  * Bump on any change to what this engine derives. Published on every row so a
  * past measurement stays attributable to the engine that produced it.
  */
-export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r7-shadow";
+export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r8-shadow";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -833,6 +833,24 @@ function deriveSesStageEvidence(
 export interface SesStageOverlayApplication {
   source_status?: string | null;
   after_status?: string | null;
+  decision_kind?: string | null;
+}
+
+export type SesOverlayDecisionKind = "display_override" | "stage_attestation";
+
+export function sesOverlayDecisionKind(
+  application: SesStageOverlayApplication | null | undefined,
+): SesOverlayDecisionKind | null {
+  const raw = application?.decision_kind;
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return "display_override";
+  }
+  const normalized = String(raw).toLowerCase();
+  return normalized === "stage_attestation"
+    ? "stage_attestation"
+    : normalized === "display_override"
+    ? "display_override"
+    : null;
 }
 
 export interface SesStageV2OverlayCandidate {
@@ -856,9 +874,11 @@ export function sesStageV2OverlayCandidate(
   rawJobState: unknown,
 ): SesStageV2OverlayCandidate {
   const stage = String(derivedStage || "").toLowerCase();
-  const binds = !!application &&
+  const decisionKind = sesOverlayDecisionKind(application);
+  const binds = decisionKind === "display_override" &&
     !isMakesafeTerminalDisplayStatus(stage) &&
     !isMakesafeTerminalJobState(rawJobState) &&
+    !!application &&
     String(application.source_status || "").toLowerCase() === stage;
   return {
     stage: binds

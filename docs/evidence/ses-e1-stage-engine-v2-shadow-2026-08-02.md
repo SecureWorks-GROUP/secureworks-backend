@@ -878,3 +878,116 @@ cannot see it.**
 The second is the only one of the three that affects the **live** board rather
 than the shadow engine, so it is the only one that may be misplacing real cards
 today. Exposure is unmeasured.
+
+## Release 8 — overlay re-anchor metadata and the attestation read path
+
+**Behaviour change:** exactly one — the read model learns that an overlay row
+declares a `decision_kind`, and gains a `stage_attestation` kind that can attach
+provenance but can NEVER change a column. No ledger rows are written; Release 9
+writes them. Zero placements move.
+
+**This is the highest-risk release of the set, and it is worth saying why.**
+Releases 5, 6 and 7 could not move a card even if they were wrong, because the
+evidence they read does not exist yet in production. This one touches the
+overlay binding path itself — the code that decides whether a Captain decision
+changes a card's column. Nine overlays unbind when the derivation changes and
+five of those visibly reverse archives the Captain personally ruled on. A
+mistake here is not invisible; it reopens closed work.
+
+**The safety is structural, not procedural.** The `decision_kind` test comes
+FIRST in the binding predicate and short-circuits before the display-override
+guards are evaluated, so an attestation cannot bind by any path — including a
+future row whose `source_status` happens to equal the declared stage. The
+display-override branch itself is byte-identical: same source equality, same
+nonterminal guards, same terminal job-state check. A row with no
+`decision_kind` reads as `display_override`, and every row in the ledger today
+is exactly that, which is why the measured blast is zero.
+
+**What the attestation kind is for.** Four of the nine re-anchor rows land on
+the same column they started on. Before this release such a decision nulled
+`status_application` entirely: the column was right and the Captain's authority
+vanished from the card. `SWMS-26845` is the sharper case — its corrected
+derivation is already Archive, and Archive is terminal, so it can never be a
+display override at all. It has to be representable as a no-op attestation or
+its provenance is simply lost.
+
+`status_application` now carries `effect` (`override` | `attestation`),
+`applies_to_display` and `decision_kind`, so no consumer has to infer which
+kind it is looking at. The three keys are additive; every existing key keeps
+its name, position and value.
+
+**Measured (2026-08-02T11:02:24Z base / 11:02:27Z tip)**, base `ad91a75`, 407
+cards, 13 SELECT-only Management API queries.
+
+| Fact | Design expected | Measured |
+|---|---:|---:|
+| Placement changes | 0 | **0** |
+| Overlays total / binding / would-unbind | 46 / 42 / 9 | **46 / 42 / 9 both sides** |
+| Prospective corrected moves | 35 -> 35 | **35 -> 35** |
+| Cards the Captain ruled on that moved | 0 | **0** |
+
+All nine measured fields and the entire `overlay` object are identical across
+all 407 cards. No overlay bound or unbound. Not one Captain-ruled archive
+moved, which was the stop condition for this release.
+
+Regression coverage is 9 tests, including the two the design names explicitly —
+a stale override still does not attach, and a terminal attestation cannot move
+a card — plus a stale ATTESTATION case, because an attestation that no longer
+describes where the card is says nothing true and must not attach either.
+
+This release also admits the fourth hollow test across the programme: Release
+5's positive own-roof fixture, Release 6's intent scope, Release 7's sent-pack
+containment fixture, and now this advisory-overlay test. The shared shape is a
+test that passes for an unrelated reason and therefore proves nothing while
+reading as coverage. Firstmate's view is recorded plainly: that admission is
+worth more than the fix.
+
+### DISCREPANCY — the cutover gate still reports `SWMS-261059`
+
+Recorded, not reconciled, and not assumed to be either side's fault.
+
+Firstmate reports that a separate crew recorded the Captain's sign-off as
+terminal-proof evidence and that the gate now reads clear, 407 of 407 with
+nothing behind it. **This measurement does not reproduce that.** At
+`2026-08-02T11:02:27Z`, reading production read-only with `origin/main` at
+`ad91a75`, `sesStageCutoverGate` returns `ok: false`, `checked: 407`, blocked on
+`SWMS-261059` alone, carrying both `terminal_without_issued_invoice` and
+`terminal_without_supporting_evidence`. The card reads `job_status: complete`,
+`legacy_canonical_stage: report_ready`, `derived_stage_v2: decision_required`.
+
+Possible explanations, none verified here: the crew's evidence may be a
+production data write that had not landed at this snapshot; it may have landed
+in a form this gate's test does not read; or the two readings may use different
+definitions of "clear". `main` has not advanced past `ad91a75`, so no code
+change explains it.
+
+This is the same shape as the finding recorded under Release 7 — the Captain
+can see artifacts on that card that the derivation cannot — and it should be
+resolved by measurement rather than by either side conceding.
+
+### RESOLVED, by measurement, 2026-08-02T11:22Z
+
+The discrepancy was a base-version artefact and firstmate's report was correct.
+The separate crew's work merged as `c6fe9a9`
+(`feat(ses): derive SWMS-261059 sign-off from terminal proof evidence`, PR 495)
+AFTER the 11:02:27Z snapshot above, which was taken with `main` at `ad91a75`.
+
+Re-measured with `main` at `c6fe9a9`:
+
+| Tree | `SWMS-261059` | Cutover gate |
+|---|---|---|
+| `c6fe9a9` (current `main`) | `completed`, no conflicts | **`ok: true`, 407 checked, nothing blocked** |
+| this branch (base `ad91a75`) | `decision_required`, both conflicts | `ok: false`, blocked on that card |
+
+So the gate genuinely reads clear on `main`, and the only reason this branch
+still reports the block is that it predates `makesafe_terminal_proof.ts`. That
+difference is NOT a Release 8 effect: `legacy_canonical_stage` is identical on
+all 407 cards across the A/B, overlays stay 46 / 42 / 9 on both sides, and the
+`overlay` object is byte-identical everywhere. Nothing Release 8 does moved a
+card. The rebase onto `c6fe9a9` carries the resolution in.
+
+The general lesson is worth keeping: an A/B whose base and tip differ by
+UNRELATED merged work will attribute that work's effect to the release under
+test. The card-level diff said `stage_v2` moved on `SWMS-261059`; only checking
+WHY separated "this release moved a card" from "this branch is behind `main`".
+Those two look identical in the diff and are opposite in meaning.

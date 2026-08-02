@@ -175,7 +175,10 @@ transition changes `canonical_stage` only through the latest applicable row in
 the append-only `makesafe_board_status_applications` ledger. It never rewrites
 `jobs`, `makesafe_job_details.substatus`, assignments, invoices, events, or
 communications. `status_application` carries its run key, before/after,
-evidence reference, attribution, and timestamp.
+evidence reference, attribution, and timestamp. It also carries the additive
+`effect`, `applies_to_display`, and `decision_kind` fields: `display_override`
+rows may affect placement under the existing guards, while
+`stage_attestation` rows attach provenance only and never change a column.
 
 Reconciliation actions:
 
