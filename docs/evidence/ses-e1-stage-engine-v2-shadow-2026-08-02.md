@@ -683,3 +683,71 @@ worth restating because it generalises beyond this finding:
 
 > A change whose blast cannot be measured must not ride inside a release that
 > cannot see it.
+
+## Release 7 — Docs Ready authority
+
+**Behaviour change:** exactly one — Docs Ready becomes the captain's per-family
+"one click from sending" rule in the shadow engine. Zero placements move and
+zero shadow values move.
+
+**The ruling this encodes**
+(`data/decisions/2026-08-02-docs-ready-repair-restoration.md`), verbatim:
+
+> "It means that the skill has already run on it and it's ready for manual
+> review and I should be able to just press one button and that one button
+> literally will send it off."
+
+The acceptance test for the column is therefore: **if a card in Docs Ready
+cannot be sent by a single button press, it does not belong in Docs Ready.**
+
+| Family | What one click needs |
+|---|---|
+| physical make-safe | make-safe report, SWMS where the docket requires it, draft invoice, pack READY and unsent |
+| roof — portal or own-template | report-in proved, plus pack READY and unsent |
+| assessment / quote | all three typed roles proved, plus pack READY and unsent |
+| temporary fencing, repair, restoration | the standard path |
+
+A roof job produces no SecureWorks report, so the five-artifact shorthand is
+deliberately NOT applied board-wide — demanding one would permanently block the
+roof family. A test asserts a roof card is never asked for one.
+
+**Two structural boundaries from the rulings.** Readiness is never asserted by a
+person: the trade tick and the deterministic portal reader are both EVIDENCE
+inputs with a recorded producer, and neither declares a stage. And nothing here
+asks anyone to classify a job — the family arrives from
+`canonicalSesFamilyFromCard`, because the card already knows what it is.
+
+**The minimum negative rule is retained and proved, not just stated.**
+`sesStageDocsReady` calls the existing `docsReady` first and can only subtract
+from it, so no card can reach Docs Ready here that the existing rule refuses. A
+test asserts that containment directly over six fixtures rather than trusting
+the code shape.
+
+**Measured (2026-08-02T10:21:10Z)**, base `9bf5ce4`, 407 cards, 13 SELECT-only
+Management API queries. All nine measured fields plus `stage_v2` itself are
+identical across all 407 cards; corrected columns unchanged at new 65 /
+allocated 64 / trade report in 12 / decision-required 1 / completed 2 /
+archive 263; prospective corrected moves 35 -> 35; gate still blocked on
+`SWMS-261059` alone.
+
+**The tightening is real but currently unexercised, and that is stated rather
+than implied.** The corrected engine already placed ZERO cards in Docs Ready
+before this release, so a stricter Docs Ready rule cannot move anything today.
+The measurement proves no regression; it does NOT exercise the new rule on a
+single production card. The design anticipated exactly this — "exact future
+delta UNVERIFIED until Captain decision and fresh data". Correctness rests on
+the 7 tests, including the containment proof and per-artifact removal cases.
+
+**What R7 cannot yet see.** The trade confirmation tick is being built by
+another crew and its evidence shape is not on `main`. R7 therefore derives roof
+and assessment report-in from the contract the read model already enforces —
+the deterministic portal reader (Release 6) and the own-template submitted
+draft (Release 5). When the trade tick lands as evidence with a recorded
+producer, it satisfies the same channel with no change to this rule, because
+the rule reads report-in evidence rather than naming its source.
+
+**One thing deliberately NOT changed.** The `docsReady` seam decides
+satisfaction only; its shortfalls are not pushed into the shared `missing`
+array. Folding them in would alter published `derived_stage_v2_missing` on every
+card that is not Docs Ready — a second, unmeasured output change riding inside
+this release, which the standing rule forbids.

@@ -48,6 +48,7 @@ import {
   classifyMakesafeJobType,
   closeoutSatisfied,
   deriveMakesafeEvidenceStage,
+  docsReady,
   donePortalRoles,
   externalPortalRoles,
   type MakesafeComputedStatus,
@@ -68,7 +69,7 @@ import {
  * Bump on any change to what this engine derives. Published on every row so a
  * past measurement stays attributable to the engine that produced it.
  */
-export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r6-shadow";
+export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r7-shadow";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -483,6 +484,95 @@ export function sesStagePortalReportIn(
 }
 
 /**
+ * R7 — Docs Ready, per the captain's ruling of 2026-08-02.
+ *
+ * His definition, verbatim: *"It means that the skill has already run on it and
+ * it's ready for manual review and I should be able to just press one button and
+ * that one button literally will send it off."*
+ *
+ * **Docs Ready = ONE CLICK FROM SENDING.** Not "some documents exist", not "a
+ * pack row is present". The acceptance test for the column is: if a card in
+ * Docs Ready cannot be sent by a single button press, it does not belong there.
+ *
+ * And it is PER FAMILY, never one universal list. The ruling rules out applying
+ * the five-artifact shorthand board-wide: a roof job produces no SecureWorks
+ * report, so demanding one would permanently block the roof family.
+ *
+ * | Family | What one click needs |
+ * |---|---|
+ * | physical make-safe | make-safe report, SWMS (where the docket requires it), draft invoice, pack READY and unsent |
+ * | roof (portal or own-template) | report-in proved, plus pack READY and unsent |
+ * | assessment / quote | report-in proved across all three typed roles, plus pack READY and unsent |
+ * | temporary fencing, repair, restoration | the standard path — repair "match[es] the whole existing system"; restoration is "exactly the same as any other job" |
+ *
+ * Two boundaries from the rulings are structural here, not documented:
+ *
+ * 1. **Readiness is not asserted by a person.** It is the state of having
+ *    everything assembled and sendable. The trade tick and the deterministic
+ *    portal reader are both EVIDENCE INPUTS with a recorded producer; neither
+ *    declares a stage. This function reads evidence and derives — it never
+ *    accepts an assertion that a card IS Docs Ready.
+ * 2. **Nothing here asks anyone to classify a job.** The family arrives from
+ *    `canonicalSesFamilyFromCard`; the card already knows what it is.
+ *
+ * The minimum negative rule is retained exactly: no READY pack means no Docs
+ * Ready. This function can only ever be MORE demanding than the existing
+ * `docsReady`, never less — asserted by construction below and by test.
+ */
+export function sesStageDocsReady(
+  input: SesStageV2Input,
+  family: SesStageV2FamilyResolution,
+): { satisfied: boolean; missing: string[] } {
+  // The minimum negative rule, unchanged and first. Everything below can only
+  // subtract from this, never add to it, so no card can reach Docs Ready here
+  // that the existing rule would refuse.
+  if (!docsReady(input as MakesafeStatusInput)) {
+    return {
+      satisfied: false,
+      missing: ["a current-cycle READY draft pack"],
+    };
+  }
+
+  const missing: string[] = [];
+  const pack = input.evidence?.pack;
+
+  // Assembled but already gone is not one click from sending.
+  if (input.evidence?.packSent === true || pack?.sent_at) {
+    missing.push("an unsent pack - this one has already been sent");
+  }
+
+  if (family.kind === "physical_makesafe") {
+    // The captain named four things for a physical make-safe. The email itself
+    // is composed at send time from the pack, so the three durable artifacts
+    // are what a card must carry to be one click away.
+    if (!(input.evidence?.documents?.report === true || pack?.report_doc_id)) {
+      missing.push("the make-safe report");
+    }
+    if (
+      input.evidence?.swmsRequired &&
+      !(input.evidence?.documents?.swms === true || pack?.swms_doc_id)
+    ) {
+      missing.push("the SWMS this docket requires");
+    }
+    if (
+      !(input.evidence?.documents?.invoice === true || pack?.invoice_doc_id)
+    ) {
+      missing.push("the draft invoice");
+    }
+  } else {
+    // Roof and assessment produce no SecureWorks report. What one click needs
+    // is that the builder's report is PROVED complete - by the deterministic
+    // portal reader, by a trade tick, or by a submitted own-template draft.
+    const reportIn = family.family === "own_template_roof"
+      ? sesStageOwnRoofReportIn(input)
+      : sesStagePortalReportIn(input, family.family);
+    if (!reportIn.satisfied) missing.push(...reportIn.missing);
+  }
+
+  return { satisfied: missing.length === 0, missing };
+}
+
+/**
  * The pure, corrected stage derivation.
  *
  * Resolution precedence is part of the contract (design section 2.1):
@@ -633,12 +723,17 @@ function deriveSesStageEvidence(
   input: SesStageV2Input,
   family: SesStageV2FamilyResolution,
 ) {
+  const docsReadyResult = sesStageDocsReady(input, family);
+  const docsReadyReason =
+    "the family pack is assembled, READY and unsent - one click from sending";
   if (family.family === "own_template_roof") {
     const reportIn = sesStageOwnRoofReportIn(input);
     return deriveMakesafeEvidenceStage(input as MakesafeStatusInput, {
       reportIn,
       reportInReason:
         "the current-cycle own-template roof report is submitted and its rendered document is attached",
+      docsReady: docsReadyResult,
+      docsReadyReason,
     });
   }
   if (SES_PORTAL_REQUIRED_ROLES[family.family]) {
@@ -647,9 +742,14 @@ function deriveSesStageEvidence(
       reportIn: { satisfied: reportIn.satisfied, missing: reportIn.missing },
       reportInReason:
         "every required builder portal capture is accepted as submitted and locked",
+      docsReady: docsReadyResult,
+      docsReadyReason,
     });
   }
-  return deriveMakesafeEvidenceStage(input as MakesafeStatusInput);
+  return deriveMakesafeEvidenceStage(input as MakesafeStatusInput, {
+    docsReady: docsReadyResult,
+    docsReadyReason,
+  });
 }
 
 /** The overlay row shape the resolver reads. */
