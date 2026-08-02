@@ -24,6 +24,9 @@ export interface SesSwmsFactContext {
   assignment: {
     id: string | null;
     crew_name: string | null;
+    /** Name on the user record joined to THIS assignment row. Same provenance the board already
+     * shows via `makesafeCrew`. Never inferred, defaulted, or taken from another card. */
+    assigned_user_name: string | null;
     scheduled_date: string | null;
     arrived_at: string | null;
   } | null;

@@ -746,6 +746,14 @@ export function buildSesSwmsGenerationPlan(
       value: assignment?.crew_name,
       source: source("job_assignments.crew_name"),
     },
+    // Fourth place to look, not a fallback that invents an answer. This is the user record joined
+    // to the SAME assignment row above - the exact provenance the board already displays via
+    // `makesafeCrew`. When no source holds a crew this stays empty and the blocker below still
+    // fires, which is the behaviour a job with genuinely no recorded crew must keep.
+    {
+      value: assignment?.assigned_user_name,
+      source: source("job_assignments.users.name"),
+    },
   );
   const siteContact = sourcedText(
     {
