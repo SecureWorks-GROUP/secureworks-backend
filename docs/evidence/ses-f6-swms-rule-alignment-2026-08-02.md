@@ -4,8 +4,7 @@
 
 The close-out gate now requires SWMS only when the card is MLB and the sealed
 family row is physical work with `swms_policy: always`. MLB roof/assessment
-cards and every non-MLB card are exempt. This is the Captain's ruling at
-`/Users/marninstobbe/kun-agent-workspace/data/decisions/2026-08-01-po-wo-invoice-ruling.md:21-26`
+cards and every non-MLB card are exempt. This is the Captain's 2026-08-01 ruling
 and the sealed matrix contract at `supabase/functions/ops-api/ses_family_matrix.ts:225-234`
 and `supabase/functions/ops-api/ses_family_matrix.ts:290-298`.
 
@@ -61,8 +60,8 @@ The M1-pure versus legacy-canonical divergence remained 104 cards, and the
 post-cutover divergence with overlays reapplied remained 71. No card changed
 column in this F6 diff. That is expected: removing SWMS from a missing list does
 not erase other missing close-out documents or a binding historical overlay. The
-prior audit independently recorded the same zero-release caveat at
-`/Users/marninstobbe/kun-agent-workspace/data/ses-evidence-enforcement-audit-v1/report.md:312-316`.
+prior audit independently recorded the same zero-release caveat; this pass does
+not reproduce that audit outside the repository.
 
 ## Cards no longer recorded as missing SWMS
 
