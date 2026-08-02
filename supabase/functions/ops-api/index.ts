@@ -95,7 +95,9 @@
 // ════════════════════════════════════════════════════════════
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+// Pin the CDN dependency so CI import-resolution does not first resolve the
+// moving @2 tag through esm.sh's package metadata endpoint.
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.99.3'
 import { logQueryErrors } from '../_shared/pgrest.ts'
 // CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
 // records the same immutable quote_revisions row shape as send-quote /send.
