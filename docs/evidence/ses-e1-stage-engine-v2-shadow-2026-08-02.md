@@ -393,9 +393,54 @@ without re-deriving anything above:
 Release 7 (Docs Ready authority) and Release 9 (the nine-row re-anchor apply)
 are both captain-gated and are not code-only.
 
-Current standing measurement after Releases 0-3, at 2026-08-02:
-407 cards; live columns 36/30/12/24/2/303 unchanged throughout; corrected
-prospective moves **35**; corrected column candidate New 66 / Allocated 64 /
-Trade Report In 11 / Docs Ready 0 / Completed 2 / Archive 263 /
+Standing measurement after Releases 0-3, as read on the ORIGINAL stacked
+branches: 407 cards; live columns 36/30/12/24/2/303 unchanged throughout;
+corrected prospective moves **35**; corrected column candidate New 66 /
+Allocated 64 / Trade Report In 11 / Docs Ready 0 / Completed 2 / Archive 263 /
 decision-required 1; cutover gate **blocked** on `SWMS-261059`; 9 overlay rows
-still due re-anchoring at Release 9.
+still due re-anchoring at Release 9. The re-land section below carries the
+current reading against `main`.
+
+### Release 3 re-land — re-measured against `main`
+
+Release 3 was re-landed on its own branch based directly on `main` at `8928c18`
+(the Release 2 squash), opened as its own PR, and re-measured against a FRESH
+read-only snapshot rather than carrying the stacked-branch numbers forward.
+This completes the three-release re-land; all of Releases 1-3 now reach `main`
+one counted behaviour at a time, never stacked.
+
+Snapshot `2026-08-02T09:00:05Z`, population `ses-board-population/active-v1`,
+407 cards, 13 SELECT-only Management API queries, base commit `8928c18`.
+
+| Fact | Expected | Measured |
+|---|---:|---:|
+| Pure stage changes | 3 | 3 |
+| Resolving to Trade Report In | 2 | 2 (`SWMS-261024`, `SWMS-261025`) |
+| Becoming decision-required | 1 | 1 (`SWMS-261059`) |
+| Prospective corrected moves | 37 -> 35 | 37 -> 35 |
+| Live placements moved | 0 | 0 |
+| Cutover gate | blocked on `SWMS-261059` | blocked on `SWMS-261059` |
+| Frozen Release 0 disputed manifest | reproduces | 71 / 71, manifest id identical |
+
+`SWMS-261059` STOPS the gate rather than being placed, which is the point of
+this release. `sesStageCutoverGate` returns `ok: false` over the real canonical
+rows with that single card blocked, carrying both
+`terminal_without_issued_invoice` and `terminal_without_supporting_evidence`.
+Its live column is untouched at `report_ready` on both sides of the A/B. Its
+true column remains an open captain question and is **not** resolved here.
+
+Placement is proved by A/B rather than asserted: the harness was run once at
+`8928c18` and once at this branch's tip. Per card, `legacy_canonical_stage`,
+`legacy_stage`, `m1_published`, `m1_pure`, `post_cutover_stage`,
+`post_cutover_overlay_binds` and the whole `overlay` object are identical on all
+407 cards, and overlays stay 46 total / 42 binding / 9 would-unbind on both
+sides.
+
+One drift from the stacked-branch reading, reported rather than reconciled: the
+corrected column candidate reads New 65 / Allocated 64 / Trade Report In 12 /
+Docs Ready 0 / Completed 2 / Archive 263 / decision-required 1, against the
+New 66 / Trade Report In 11 recorded above, and live columns read
+`35/30/13/24/2/303` against `36/30/12/24/2/303`. Both are the same single card
+ageing `new -> trade_report_in` in live data, first seen during the Release 1
+re-land. It is NOT a code effect: the `8928c18` baseline run in this same
+session reports the identical live columns, and the total stays 407.
