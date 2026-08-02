@@ -663,4 +663,23 @@ Release 6 deliberately does not tighten this:
   The gap can only be reached by a legacy detail-derived capture.
 
 A test pins both halves of the asymmetry so it stays visible until it is ruled
-on. Closing it belongs to a release that can measure its own blast.
+on.
+
+**Disposition: DEFERRED WITH A TICKET, not merely known.** The fix is filed as
+its own release, task **`ses-r10-roof-url-identity-v1`** (queued), to be closed
+in a release that measures its own blast across all 407 cards before and after.
+
+**Approved by firstmate under standing routine authority, 2026-08-02. NOT a
+captain ruling — the captain has not seen this finding.** That distinction is
+deliberate and must not be softened later: this document records captain
+rulings elsewhere (repair and restoration in Release 4, the PO and work-order
+floors in the evidence ruler), and a routine approval carries nothing like the
+same weight. Anyone reading this to decide whether the asymmetry has been
+adjudicated should read it as: raised, deferred, ticketed, and still awaiting a
+ruling.
+
+The rule the deferral rests on, adopted by firstmate at the same time and
+worth restating because it generalises beyond this finding:
+
+> A change whose blast cannot be measured must not ride inside a release that
+> cannot see it.
