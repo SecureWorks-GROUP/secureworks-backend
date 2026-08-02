@@ -1049,6 +1049,25 @@ function explicitHoursAndMaterials(
   return Object.keys(facts).length ? facts : null;
 }
 
+/** The name on the user record joined to THIS assignment row.
+ *
+ * The board already resolves crew this way (`makesafeCrew`, index.ts): it prefers
+ * `assignment.crew_name` and falls back to the joined `users.name`. U4 only ever read
+ * `crew_name`, so a job whose crew is recorded solely as an assigned user looked crewless to the
+ * SWMS generator while the board displayed the name. This closes that plumbing gap.
+ *
+ * It reads one field off the row it was handed and nothing else: no lookup by name, no default,
+ * no carry-over from another card, and no inference when the join is absent.
+ */
+function assignedUserName(assignment: LiveRow): string | null {
+  const joined = assignment.users;
+  if (!joined || typeof joined !== "object") return null;
+  // PostgREST returns an object for a to-one embed and an array for a to-many shape.
+  const row = Array.isArray(joined) ? joined[0] : joined;
+  if (!row || typeof row !== "object") return null;
+  return text((row as Record<string, unknown>).name) || null;
+}
+
 function currentAssignment(
   assignments: LiveRow[],
   detail: LiveRow,
@@ -1108,6 +1127,7 @@ function swmsFactContext(
         ? {
           id: text(assignment.id) || null,
           crew_name: text(assignment.crew_name) || null,
+          assigned_user_name: assignedUserName(assignment),
           scheduled_date: text(assignment.scheduled_date) || null,
           arrived_at: text(assignment.arrived_at) || null,
         }
@@ -1151,6 +1171,7 @@ function swmsFactContext(
       ? {
         id: text(assignment.id) || null,
         crew_name: text(assignment.crew_name) || null,
+        assigned_user_name: assignedUserName(assignment),
         scheduled_date: text(assignment.scheduled_date) || null,
         arrived_at: text(assignment.arrived_at) || null,
       }
@@ -1660,7 +1681,9 @@ export async function loadSesAssemblerLiveSnapshot(
     many(
       client
         .from("job_assignments")
-        .select("*")
+        // `users:user_id(name)` mirrors the board's own join (index.ts makesafeCrew), so U4 can
+        // see the crew the board already displays. Name only: no phone, no email.
+        .select("*, users:user_id(name)")
         .eq("job_id", jobId)
         .neq("status", "cancelled"),
       "job_assignments",
@@ -1798,7 +1821,7 @@ export async function loadSesAssemblerLiveSnapshot(
       ? many(
         client.from("job_assignments")
           .select(
-            "id,job_id,status,attendance_cycle_id,cycle_attribution,cycle_number,crew_name,scheduled_date,arrived_at,updated_at,created_at",
+            "id,job_id,status,attendance_cycle_id,cycle_attribution,cycle_number,crew_name,scheduled_date,arrived_at,updated_at,created_at,users:user_id(name)",
           )
           .in("job_id", siblingJobIds)
           .neq("status", "cancelled"),

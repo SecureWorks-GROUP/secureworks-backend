@@ -925,6 +925,7 @@ Deno.test("bidirectional positive-scope bundle evidence clears the card-local ph
     assignment: {
       id: "assignment-26837",
       crew_name: "Sibling field crew",
+      assigned_user_name: null,
       scheduled_date: "2026-07-20",
       arrived_at: "2026-07-20T14:05:00.000Z",
     },
@@ -1429,6 +1430,7 @@ Deno.test("SWMS-required job with work order and trade report generates a proven
     assignment: {
       id: "assignment-70062",
       crew_name: "Field crew",
+      assigned_user_name: null,
       scheduled_date: "2026-07-27",
       arrived_at: "2026-07-27T08:30:00.000Z",
     },
@@ -1488,6 +1490,108 @@ Deno.test("SWMS-required job with work order and trade report generates a proven
     throw new Error("generated SWMS must be ready");
   }
   assertStringIncludes(swmsState.evidence, "generated:ARTIFACTS/SWMS");
+});
+
+// The board resolves crew via assignments[].users.name (index.ts makesafeCrew). U4 read only
+// crew_name, so a job whose crew is recorded solely as an assigned user looked crewless to the
+// SWMS generator while the board displayed the name. These two tests pin both halves: the fourth
+// source resolves, and a job with genuinely no crew anywhere still blocks.
+function mlbPhysicalRow() {
+  return SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe" &&
+    candidate.routing_rule === "mlb-perth-routing"
+  )!;
+}
+
+function inputWithCrewOnlyOnTheAssignedUser(assignedUserName: string | null) {
+  const input = fixtureInput(mlbPhysicalRow());
+  input.cycle_facts.trade_report = {
+    id: "trade-report-crew-source",
+    submitted_at: "2026-07-27T01:00:00.000Z",
+    checklist_json: {
+      works_completed: "Made the storm damaged area safe.",
+      attendance_date: "2026-07-27",
+      arrival_time: "08:30",
+      site_contact: "Site representative",
+      // deliberately NO crew_name and NO crew
+    },
+  };
+  input.cycle_facts.swms_fact_context = {
+    evidence_kind: "current_card",
+    evidence_job_id: input.identity.job_id,
+    evidence_job_number: input.identity.job_number,
+    trade_report: {
+      works_completed: "Made the storm damaged area safe.",
+      attendance_date: "2026-07-27",
+      arrival_time: "08:30",
+      site_contact: "Site representative",
+    },
+    job_client_name: "Site representative",
+    assignment: {
+      id: "assignment-1",
+      crew_name: null,
+      assigned_user_name: assignedUserName,
+      scheduled_date: "2026-07-27",
+      arrived_at: null,
+    },
+  };
+  return input;
+}
+
+Deno.test("crew resolves from the user joined to the assignment when crew_name is absent", async () => {
+  const input = inputWithCrewOnlyOnTheAssignedUser("Recorded Attendee");
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  assertEquals(
+    result.blockers.filter((item) =>
+      item.reason_code === "swms_generation_facts_missing"
+    ),
+    [],
+    "the crew is recorded on the assignment's user record, so SWMS must not block",
+  );
+});
+
+Deno.test("control: a job with no crew in any source still blocks", async () => {
+  // Same shape, but nothing anywhere holds a crew. The fourth source must be a fourth PLACE TO
+  // LOOK, never a fallback that invents an answer.
+  for (const emptyValue of [null, "", "   "]) {
+    const input = inputWithCrewOnlyOnTheAssignedUser(emptyValue as string | null);
+    const result = (await prepareSesDocketRevision(
+      request(input.identity.job_id),
+      dependencies(input),
+    )).results[0];
+    const blocker = result.blockers.find((item) =>
+      item.reason_code === "swms_generation_facts_missing"
+    );
+    assert(
+      blocker,
+      `assigned_user_name=${JSON.stringify(emptyValue)} must still block`,
+    );
+    assertStringIncludes(blocker!.reason.toLowerCase(), "crew");
+    assert(
+      !blocker!.reason.includes("assigned_user_name"),
+      "the blocker must not leak an internal field name",
+    );
+  }
+});
+
+Deno.test("an explicit crew_name still wins over the assigned user", async () => {
+  // The fourth source is last in precedence: it never overrides a crew the trade actually recorded.
+  const input = inputWithCrewOnlyOnTheAssignedUser("Assigned User");
+  input.cycle_facts.swms_fact_context!.assignment!.crew_name = "Recorded Crew";
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  assertEquals(
+    result.blockers.filter((item) =>
+      item.reason_code === "swms_generation_facts_missing"
+    ),
+    [],
+  );
 });
 
 Deno.test("SWMS blocks only on genuinely absent real-world facts and never exposes internal field names", async () => {

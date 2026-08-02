@@ -713,6 +713,7 @@ Deno.test(
       assignment: {
         id: "assignment-26837",
         crew_name: "Sibling field crew",
+        assigned_user_name: null,
         scheduled_date: "2026-07-20",
         arrived_at: "2026-07-20T14:05:00.000Z",
       },
@@ -1455,6 +1456,7 @@ Deno.test(
       assignment: {
         id: live.assignments[0].id,
         crew_name: "Jake and Sam",
+        assigned_user_name: null,
         scheduled_date: "2026-07-20",
         arrived_at: "2026-07-20T14:09:00.000Z",
       },
