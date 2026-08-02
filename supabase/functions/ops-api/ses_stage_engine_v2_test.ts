@@ -1566,24 +1566,6 @@ Deno.test("reanchor: the advisory overlay candidate is unchanged by decision_kin
 });
 
 Deno.test("reanchor: decision_kind projections are guarded when Release 9 arrives", async () => {
-  let migrationIntroducesDecisionKind = false;
-  for await (
-    const entry of Deno.readDir(new URL("../../migrations/", import.meta.url))
-  ) {
-    if (!entry.isFile || !entry.name.endsWith(".sql")) continue;
-    const text = await Deno.readTextFile(
-      new URL(`../../migrations/${entry.name}`, import.meta.url),
-    );
-    if (/\bdecision_kind\b/i.test(text)) {
-      migrationIntroducesDecisionKind = true;
-      break;
-    }
-  }
-  if (!migrationIntroducesDecisionKind) {
-    // The display_override default is safe only while no attestation row can exist.
-    return;
-  }
-
   const indexSource = await Deno.readTextFile(
     new URL("./index.ts", import.meta.url),
   );
@@ -1600,6 +1582,20 @@ Deno.test("reanchor: decision_kind projections are guarded when Release 9 arrive
   }
   const boardHasDecisionKind = /\bdecision_kind\b/.test(boardRead);
   const runHasDecisionKind = /\bdecision_kind\b/.test(runRead);
+
+  let migrationIntroducesDecisionKind = false;
+  for await (
+    const entry of Deno.readDir(new URL("../../migrations/", import.meta.url))
+  ) {
+    if (!entry.isFile || !entry.name.endsWith(".sql")) continue;
+    const text = await Deno.readTextFile(
+      new URL(`../../migrations/${entry.name}`, import.meta.url),
+    );
+    if (/\bdecision_kind\b/i.test(text)) {
+      migrationIntroducesDecisionKind = true;
+      break;
+    }
+  }
   if (
     !migrationIntroducesDecisionKind &&
     (boardHasDecisionKind || runHasDecisionKind)
@@ -1607,6 +1603,18 @@ Deno.test("reanchor: decision_kind projections are guarded when Release 9 arrive
     throw new Error(
       "The current code selects decision_kind before Release 9 introduces its migration; keep both index.ts:15356 and index.ts:15608 projections unchanged until the discriminator exists.",
     );
+  }
+  if (!migrationIntroducesDecisionKind) {
+    // The display_override default is safe only while no attestation row can exist.
+    assert(
+      !boardHasDecisionKind,
+      "The board projection must omit decision_kind today.",
+    );
+    assert(
+      !runHasDecisionKind,
+      "The run projection must omit decision_kind today.",
+    );
+    return;
   }
   if (
     migrationIntroducesDecisionKind &&
