@@ -730,7 +730,7 @@ select
   d.attendance_cycle_id
 from jobs j
 join makesafe_job_details d on d.job_id = j.id
-where j.status not in ('cancelled', 'lost')
+where j.status not in ('cancelled', 'archived', 'lost')
   and (
     j.type = 'makesafe'
     or (j.type = 'insurance' and j.metadata->>'insurance_job_type' = 'restoration')
