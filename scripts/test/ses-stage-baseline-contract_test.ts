@@ -280,7 +280,7 @@ Deno.test("the frozen transition histogram is the design's adjudicated split", a
     "archive -> completed": 34, // G1 — no seven-day clock on the terminal path
     "report_ready -> allocated": 23, // G2 (17) + G3 (6)
     "trade_report_in -> completed": 2, // G4 — terminal shortcut beats evidence
-    "report_ready -> completed": 1, // G4 — SWMS-261059, unadjudicated
+    "report_ready -> completed": 1, // G4 — SWMS-261059, legacy ladder unchanged
     "trade_report_in -> allocated": 2, // G5 — screenshot floor
     "archive -> new": 2, // G6 — captain archive overlay unbinds
     "archive -> allocated": 4, // G6 (3) + G7 (1)

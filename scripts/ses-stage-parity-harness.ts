@@ -483,8 +483,7 @@ async function run(): Promise<void> {
     const currentCycleIds = attendanceCycleIdsByJobId[jobId] || [];
     const currentHash = await makesafeAttendanceCycleSetHash(currentCycleIds);
     for (const proof of proofs) {
-      proof.validatedCycleSetHash =
-        proof.attendance_cycle_set_hash ===
+      proof.validatedCycleSetHash = proof.attendance_cycle_set_hash ===
           await makesafeAttendanceCycleSetHash(proof.attendance_cycle_ids) &&
         proof.attendance_cycle_set_hash === currentHash;
       proof.validatedReadinessRevision = true;

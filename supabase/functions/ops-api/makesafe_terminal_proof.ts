@@ -74,14 +74,17 @@ export async function makesafeAttendanceCycleSetHash(
   const normalized = [...(cycleIds || [])]
     .map((id) => String(id).toLowerCase())
     .sort();
-  const input =
-    `SecureWorks:make-safe-attendance-cycle-set:v1\n${JSON.stringify(normalized)}`;
+  const input = `SecureWorks:make-safe-attendance-cycle-set:v1\n${
+    JSON.stringify(normalized)
+  }`;
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(input),
   );
-  return `sha256:${Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0")).join("")}`;
+  return `sha256:${
+    Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, "0")).join("")
+  }`;
 }
 
 /**

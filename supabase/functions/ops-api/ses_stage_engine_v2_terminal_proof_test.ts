@@ -263,17 +263,25 @@ Deno.test("validated raw proof facts preserve revision-bound proofs", () => {
     proof,
   );
   assertEquals(
-    bindingMakesafeTerminalProof([{
-      ...proof,
-      validatedReadinessRevision: false,
-    }], [CYCLE_1], CYCLE_1),
+    bindingMakesafeTerminalProof(
+      [{
+        ...proof,
+        validatedReadinessRevision: false,
+      }],
+      [CYCLE_1],
+      CYCLE_1,
+    ),
     null,
   );
   assertEquals(
-    bindingMakesafeTerminalProof([{
-      ...proof,
-      validatedCycleSetHash: false,
-    }], [CYCLE_1], CYCLE_1),
+    bindingMakesafeTerminalProof(
+      [{
+        ...proof,
+        validatedCycleSetHash: false,
+      }],
+      [CYCLE_1],
+      CYCLE_1,
+    ),
     null,
   );
 });
