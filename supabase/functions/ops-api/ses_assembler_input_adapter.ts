@@ -1242,16 +1242,26 @@ export function physicalReportRenderJob(
     materials,
     access_issues: accessIssues,
     follow_up_required: followUpRequired,
+    // Hand the renderer the bytes we already hold, never a re-encoding of them.
+    //
+    // This used to build a binary string one character at a time and then
+    // base64 it, for EVERY current-cycle photo. Measured on the proof card's
+    // real volume (50 photos / 20.9 MB) that single map moved peak RSS from
+    // ~61 MB to ~224 MB, and on the board's heaviest card (51 photos /
+    // 33.5 MB) to ~394 MB -- past the edge worker's budget, which is the
+    // HTTP 546 WORKER_RESOURCE_LIMIT the persist path returned. jsPDF takes a
+    // Uint8Array directly and emits a byte-identical image stream, so nothing
+    // about the report changes: every photo is still passed, still hashed,
+    // still uploaded, and the render hash is unmoved.
+    // Regression: makesafe_report_photo_budget_test.ts.
     photos: photoArtifacts.map((photo) => {
       const source = input.cycle_facts.photos.find(
         (item) =>
           item.id === photo.photo_id &&
           item.path_or_key === photo.source_pointer,
       );
-      let binary = "";
-      for (const byte of photo.bytes) binary += String.fromCharCode(byte);
       return {
-        bytesBase64: btoa(binary),
+        bytes: photo.bytes,
         contentType: photo.media_type,
         caption: source?.caption,
       };

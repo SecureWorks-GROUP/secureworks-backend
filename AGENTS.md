@@ -626,6 +626,35 @@ must therefore drive the real factory, not a stub. Evidence, the production
 measurement and the regression/control pair:
 `docs/evidence/ses-swms-renderer-runtime-binding-2026-08-02.md`.
 
+## The Docket Persist Path's Budget Is Spent On Re-Encodings, Not On Photos
+
+Every `WORKER_RESOURCE_LIMIT` (HTTP 546) on `prepare_ses_docket_revision` so far
+has been a **re-encoding** of bytes we already held, never the photo work
+itself. Twice now the plausible hypothesis ("too many photos") was wrong and the
+measurement found a byte-to-string conversion: `sesSha256(Array.from(bytes))` in
+`artifactFromBytes` (~20x, fixed in `7f7cb5f`), then
+`physicalReportRenderJob` building a binary string one `String.fromCharCode` at
+a time and base64-ing it for EVERY current-cycle photo (measured 6-8x heap
+growth, 206-280 MB for a 33.5 MB photo set). Raw byte buffers are external to
+the V8 heap; strings are not, which is why an encoding costs many times what the
+bytes do.
+
+So before touching the artifact set, profile. `deno test --allow-run
+supabase/functions/ops-api/makesafe_report_photo_budget_test.ts` (and
+`ses_artifact_hash_budget_test.ts`) reproduce the limit honestly in a subprocess
+under a hard `--max-old-space-size`; both are SKIPPED/red under
+`deno task test:ops-api`, which grants no `--allow-run`. Board volumes to size
+against, measured read-only from `storage.objects` metadata: heaviest SES card
+51 photos / 33.5 MB, then 69 / 27.9 MB and 50 / 20.9 MB.
+
+jsPDF accepts a `Uint8Array` directly and emits a byte-identical image stream, so
+`MakesafeReportPhoto.bytes` is the form to use; `bytesBase64` and `url` stay
+supported for the legacy pack path. `makesafeReportHashInput` deliberately
+records the BASE64 length whichever form arrives, so moving a caller between them
+cannot re-version rendered reports. The renderer's own
+`MAX_REPORT_PHOTO_LIMIT = 8` bounds what is embedded; it does NOT bound what the
+docket hashes, uploads or lists, and reducing either to save memory is forbidden.
+
 ## Portal Completion Has Two Producers
 
 The trade roof-report confirmation contract, including its producer boundaries,

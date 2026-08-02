@@ -19,9 +19,14 @@
 
 // ── Pure helpers (exported for unit tests; no jsPDF / no network) ──
 
-// Photo input the renderer accepts. Either inline base64 bytes (preferred -- the
-// caller fetches/decodes) or a URL the renderer fetches itself at render time.
+// Photo input the renderer accepts, in preference order:
+//   1. `bytes` -- raw image bytes. jsPDF accepts a Uint8Array directly, so a
+//      caller that already holds the bytes never has to build a binary string
+//      or a base64 copy of them. This is the form the U4 persist path uses.
+//   2. `bytesBase64` -- inline base64, for callers that already have it.
+//   3. `url` -- fetched by the renderer at render time.
 export interface MakesafeReportPhoto {
+  bytes?: Uint8Array;
   bytesBase64?: string;
   contentType?: string;
   url?: string;
@@ -63,12 +68,23 @@ export function makesafeReportFileName(ref: unknown, address: unknown): string {
   return `Make Safe Report - ${slug(ref)} - ${slug(address)}.pdf`;
 }
 
+// Length of the base64 encoding of `n` bytes, computed rather than produced.
+// btoa always pads, so this is exact.
+function base64Length(n: number): number {
+  return n > 0 ? Math.ceil(n / 3) * 4 : 0;
+}
+
 // Stable text serialisation of the render-relevant job fields, used for the
 // render hash. Photos contribute their length/type only (not the raw bytes) so
 // the hash is cheap and stable across base64 re-encodings of identical content.
 export function makesafeReportHashInput(job: MakesafeReportJob): string {
   const photos = (job.photos || []).map((p) => ({
-    len: (p.bytesBase64 || "").length,
+    // `len` stays the BASE64 length whichever input form the caller supplied,
+    // so moving a caller from `bytesBase64` to `bytes` cannot move the render
+    // hash for identical content.
+    len: typeof p.bytesBase64 === "string"
+      ? p.bytesBase64.length
+      : base64Length(p.bytes?.byteLength ?? 0),
     ct: p.contentType || "",
     url: p.url || "",
   }));
@@ -153,9 +169,14 @@ export function aspectFitBox(
   };
 }
 
-// Decode a base64 photo to the data URL jsPDF.addImage accepts. Returns null on
-// any failure (the renderer then skips the photo rather than aborting the pack).
-function photoDataUrl(p: MakesafeReportPhoto): string | null {
+// The image payload jsPDF.getImageProperties/addImage accept. Raw bytes go
+// straight through -- jsPDF handles a Uint8Array natively and produces a
+// byte-identical image stream to the equivalent data URL, without the caller
+// materialising a binary string and a base64 copy of every photo. Returns null
+// on any failure (the renderer then skips the photo rather than aborting the
+// pack).
+function photoImageData(p: MakesafeReportPhoto): Uint8Array | string | null {
+  if (p?.bytes?.byteLength) return p.bytes;
   if (!p?.bytesBase64) return null;
   const ct = p.contentType || "image/jpeg";
   const fmt = ct.toLowerCase().includes("png") ? "PNG" : "JPEG";
@@ -164,22 +185,20 @@ function photoDataUrl(p: MakesafeReportPhoto): string | null {
   };base64,${p.bytesBase64}`;
 }
 
-// Resolve photo bytes: inline base64 wins; otherwise fetch the URL and base64 it.
+// Resolve photo bytes: an already-supplied payload wins; otherwise fetch the
+// URL and keep the raw bytes.
 async function resolvePhotoBytes(
   p: MakesafeReportPhoto,
 ): Promise<MakesafeReportPhoto | null> {
-  if (p?.bytesBase64) return p;
+  if (p?.bytes?.byteLength || p?.bytesBase64) return p;
   if (!p?.url) return null;
   try {
     const resp = await fetch(p.url);
     if (!resp.ok) return null;
-    const buf = new Uint8Array(await resp.arrayBuffer());
-    let bin = "";
-    for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
     return {
-      bytesBase64: btoa(bin),
-      contentType:
-        resp.headers.get("content-type") || p.contentType || "image/jpeg",
+      bytes: new Uint8Array(await resp.arrayBuffer()),
+      contentType: resp.headers.get("content-type") || p.contentType ||
+        "image/jpeg",
     };
   } catch {
     return null;
@@ -385,12 +404,12 @@ export async function renderMakesafeReportPdf(
         const row = slot;
         const cellX = MARGIN;
         const cellY = gridTop + row * (cellH + gap);
-        const dataUrl = photoDataUrl(p);
+        const imageData = photoImageData(p);
         doc.setDrawColor(...RULE);
         doc.setFillColor(255, 255, 255);
         doc.setLineWidth(0.2);
         doc.rect(cellX, cellY, cellW, cellH, "FD");
-        if (dataUrl) {
+        if (imageData) {
           try {
             const fmt = (p.contentType || "").toLowerCase().includes("png")
               ? "PNG"
@@ -399,7 +418,7 @@ export async function renderMakesafeReportPdf(
             const boxY = cellY + 4;
             const boxW = cellW - 6;
             const boxH = cellH - 15;
-            const props = doc.getImageProperties(dataUrl) as {
+            const props = doc.getImageProperties(imageData) as {
               width?: number;
               height?: number;
             };
@@ -412,7 +431,7 @@ export async function renderMakesafeReportPdf(
               boxH,
             );
             doc.addImage(
-              dataUrl,
+              imageData,
               fmt,
               fit.x,
               fit.y,

@@ -1496,9 +1496,12 @@ Deno.test(
         bytes: new Uint8Array([65, 66]),
       },
     ]);
+    // The recovered bytes are handed to the renderer as-is. Re-encoding them to
+    // base64 here was a measured ~6x heap amplification on real photo volumes
+    // (see makesafe_report_photo_budget_test.ts).
     assertEquals(renderJobWithPhoto.photos, [
       {
-        bytesBase64: "QUI=",
+        bytes: new Uint8Array([65, 66]),
         contentType: "image/jpeg",
         caption: undefined,
       },
