@@ -12,12 +12,14 @@ import {
 import {
   computeMakesafeStatus,
   deriveMakesafeEvidenceStage,
+  docsReady,
 } from "./makesafe_computed_status.ts";
 import {
   deriveSesStageV2,
   resolveSesStageV2Family,
   SES_STAGE_ENGINE_V2_VERSION,
   sesStageCutoverGate,
+  sesStageDocsReady,
   type SesStageGateRow,
   sesStageOwnRoofReportIn,
   sesStagePortalReportIn,
@@ -252,7 +254,9 @@ Deno.test("the evidence half is shared, not copied", () => {
           completionPhotoCount: 6,
         },
       }),
-      input({ evidence: { packState: "READY" } }),
+      // NOTE: `packState: READY` alone deliberately no longer agrees — R7
+      // makes Docs Ready per-family and stricter. The divergence is asserted
+      // explicitly in the R7 tests below rather than removed from view here.
       input(),
     ]
   ) {
@@ -1189,4 +1193,212 @@ Deno.test("portal: ROOF acceptance does not require URL identity - a live asymme
     },
   });
   assertEquals(deriveSesStageV2(assessmentStray).stage, "allocated");
+});
+
+// ── R7 — Docs Ready means one click from sending ────────────────────────────
+
+Deno.test("docs ready: a READY pack alone is no longer one click from sending", () => {
+  // The captain's definition is that the skill has run, everything is
+  // assembled, and one button sends it. A pack STATE is the skill asserting it
+  // finished; the artifacts are the state of actually being sendable.
+  const packOnly = input({ evidence: { packState: "READY" } });
+  // M1 keeps its old answer - unchanged, as every certificate grades on it.
+  assertEquals(deriveMakesafeEvidenceStage(packOnly).status, "report_ready");
+  // The corrected engine refuses: no report, no invoice.
+  assertEquals(deriveSesStageV2(packOnly).stage, "new");
+});
+
+Deno.test("docs ready: a physical card needs report, SWMS when required, and draft invoice", () => {
+  const base = {
+    packState: "READY",
+    assignments: [{ id: "a1" }],
+    serviceReports: [{ status: "submitted", cycle_number: 1 }],
+    completionPhotoCount: 6,
+    documents: { report: true, invoice: true, swms: true },
+    swmsRequired: true,
+    invoiceStatus: "DRAFT",
+  };
+  assertEquals(
+    deriveSesStageV2(input({ evidence: base })).stage,
+    "report_ready",
+  );
+  // Remove each required artifact in turn; none may be optional.
+  for (const drop of ["report", "invoice", "swms"]) {
+    const documents = { ...base.documents, [drop]: false };
+    const r = deriveSesStageV2(input({ evidence: { ...base, documents } }));
+    assert(r.stage !== "report_ready", `${drop} must be required`);
+  }
+  // SWMS is required only where the docket requires it.
+  const noSwmsNeeded = deriveSesStageV2(input({
+    evidence: {
+      ...base,
+      swmsRequired: false,
+      documents: { report: true, invoice: true, swms: false },
+    },
+  }));
+  assertEquals(noSwmsNeeded.stage, "report_ready");
+});
+
+Deno.test("docs ready: READY_TO_BUILD is not a sendable pack", () => {
+  const base = {
+    assignments: [{ id: "a1" }],
+    serviceReports: [{ status: "submitted", cycle_number: 1 }],
+    completionPhotoCount: 6,
+    documents: { report: true, invoice: true, swms: false },
+    swmsRequired: false,
+    invoiceStatus: "DRAFT",
+  };
+  assert(
+    deriveSesStageV2(input({
+      evidence: { ...base, packState: "READY_TO_BUILD" },
+    })).stage !== "report_ready",
+  );
+  assertEquals(
+    deriveSesStageV2(input({
+      evidence: { ...base, packState: "READY" },
+    })).stage,
+    "report_ready",
+  );
+});
+
+Deno.test("docs ready: a physical card needs a draft invoice status", () => {
+  const base = {
+    packState: "READY",
+    assignments: [{ id: "a1" }],
+    serviceReports: [{ status: "submitted", cycle_number: 1 }],
+    completionPhotoCount: 6,
+    documents: { report: true, invoice: true, swms: false },
+    swmsRequired: false,
+  };
+  assertEquals(
+    deriveSesStageV2(input({ evidence: { ...base, invoiceStatus: "draft" } }))
+      .stage,
+    "report_ready",
+  );
+  for (const invoiceStatus of ["AUTHORISED", "PAID", "SUBMITTED"]) {
+    assert(
+      deriveSesStageV2(input({ evidence: { ...base, invoiceStatus } }))
+        .stage !==
+        "report_ready",
+      `${invoiceStatus} invoice must not be Docs Ready`,
+    );
+  }
+});
+
+Deno.test("docs ready: a roof card is never asked for a SecureWorks report", () => {
+  // The ruling rules out the five-artifact shorthand board-wide: a roof job
+  // produces no SecureWorks report, so demanding one would permanently block
+  // the family. What one click needs is the builder's report PROVED complete.
+  const proved = portalInput([ACCEPTED], {
+    evidence: {
+      assignments: [{ id: "a1" }],
+      portalCaptures: [ACCEPTED],
+      packState: "READY",
+    },
+  });
+  assertEquals(deriveSesStageV2(proved).stage, "report_ready");
+  // Same card, capture not proved: READY pack alone does not carry it.
+  const unproved = portalInput([], {
+    evidence: {
+      assignments: [{ id: "a1" }],
+      portalCaptures: [],
+      packState: "READY",
+    },
+  });
+  assert(deriveSesStageV2(unproved).stage !== "report_ready");
+});
+
+Deno.test("docs ready: an already-sent pack is not one click from sending", () => {
+  const baseEvidence = {
+    packState: "READY",
+    assignments: [{ id: "a1" }],
+    serviceReports: [{ status: "submitted", cycle_number: 1 }],
+    completionPhotoCount: 6,
+    documents: { report: true, invoice: true, swms: false },
+    swmsRequired: false,
+    invoiceStatus: "DRAFT",
+  };
+  const positive = input({
+    evidence: { ...baseEvidence, pack: { status: "draft" } },
+  });
+  assertEquals(deriveSesStageV2(positive).stage, "report_ready");
+
+  for (
+    const status of [
+      "sent",
+      "sent_marker_failed",
+      "sent_not_closed",
+      "close_failed",
+    ]
+  ) {
+    const sent = input({
+      evidence: { ...baseEvidence, pack: { status } },
+    });
+    assert(
+      deriveSesStageV2(sent).stage !== "report_ready",
+      `${status} pack must not be one click from sending`,
+    );
+  }
+});
+
+Deno.test("docs ready: the corrected rule is never LOOSER than the existing one", () => {
+  // The minimum negative rule is retained: no READY pack means no Docs Ready.
+  // This asserts the containment directly - anything the corrected rule calls
+  // Docs Ready, the existing rule must also call Docs Ready.
+  const fixtures = [
+    input({ evidence: { packState: "READY" } }),
+    input({
+      evidence: {
+        packState: "READY",
+        documents: { report: true, invoice: true },
+      },
+    }),
+    input({ evidence: {} }),
+    input({ evidence: { pack: { status: "sent" }, packState: "READY" } }),
+    portalInput([ACCEPTED], {
+      evidence: {
+        assignments: [{ id: "a1" }],
+        portalCaptures: [ACCEPTED],
+        packState: "READY",
+      },
+    }),
+  ];
+  for (const facts of fixtures) {
+    const family = resolveSesStageV2Family(facts);
+    if (sesStageDocsReady(facts, family).satisfied) {
+      assert(
+        docsReady(facts),
+        "corrected Docs Ready accepted a card the existing rule refuses",
+      );
+    }
+  }
+});
+
+Deno.test("docs ready: repair and restoration take the standard path", () => {
+  // Captain-sealed: repair matches the existing system, restoration behaves
+  // exactly like any other job. Neither gets a bespoke Docs Ready contract.
+  for (const family of ["repair", "restoration", "temporary_fencing"]) {
+    const r = deriveSesStageV2(input({
+      ses_family: family,
+      evidence: {
+        packState: "READY",
+        assignments: [{ id: "a1" }],
+        serviceReports: [{ status: "submitted", cycle_number: 1 }],
+        completionPhotoCount: 6,
+        documents: { report: true, invoice: true, swms: false },
+        swmsRequired: false,
+        invoiceStatus: "DRAFT",
+      },
+    }));
+    assertEquals(r.stage, "report_ready");
+    assertEquals(r.ses_family, family as any);
+  }
+});
+
+Deno.test("docs ready: M1's published output is untouched", () => {
+  const facts = input({ evidence: { packState: "READY" } });
+  assertEquals(
+    computeMakesafeStatus({ ...facts, displayedStatus: "allocated" }).status,
+    "report_ready",
+  );
 });

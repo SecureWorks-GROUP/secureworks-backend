@@ -450,6 +450,12 @@ export function deriveMakesafeEvidenceStage(
   overrides?: {
     reportIn?: { satisfied: boolean; missing: string[] };
     reportInReason?: string;
+    /**
+     * R7 — an optional replacement for the Docs Ready test ONLY, same seam
+     * shape as `reportIn`. `computeMakesafeStatus` never passes it.
+     */
+    docsReady?: { satisfied: boolean; missing: string[] };
+    docsReadyReason?: string;
   },
 ): MakesafeEvidenceStageResult {
   const kind = classifyMakesafeJobType(input.detail, input.job);
@@ -457,10 +463,19 @@ export function deriveMakesafeEvidenceStage(
   const reasons: string[] = [];
   const missing: string[] = [];
 
-  if (docsReady(input)) {
-    reasons.push("validated draft-pack records are READY or READY_TO_BUILD");
+  const docsReadyResult = overrides?.docsReady;
+  if (docsReadyResult ? docsReadyResult.satisfied : docsReady(input)) {
+    reasons.push(
+      overrides?.docsReadyReason ??
+        "validated draft-pack records are READY or READY_TO_BUILD",
+    );
     return { status: "report_ready", reasons, missing };
   }
+  // Deliberately NOT pushed into `missing`. The override decides SATISFACTION
+  // only; `missing` keeps its existing meaning (what report-in evidence the
+  // card is short of). Folding docs-ready shortfalls in here would change the
+  // published `derived_stage_v2_missing` on every card that is not Docs Ready —
+  // a second, unmeasured output change riding inside this release.
 
   const reportIn = overrides?.reportIn ?? reportInEvidence(input);
   if (reportIn.satisfied) {

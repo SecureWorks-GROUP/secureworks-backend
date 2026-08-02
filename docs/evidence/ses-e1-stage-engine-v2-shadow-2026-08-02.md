@@ -683,3 +683,198 @@ worth restating because it generalises beyond this finding:
 
 > A change whose blast cannot be measured must not ride inside a release that
 > cannot see it.
+
+## Release 7 — Docs Ready authority
+
+**Behaviour change:** exactly one — Docs Ready becomes the captain's per-family
+"one click from sending" rule in the shadow engine. Zero placements move and
+zero shadow values move.
+
+**The ruling this encodes**
+(`data/decisions/2026-08-02-docs-ready-repair-restoration.md`), verbatim:
+
+> "It means that the skill has already run on it and it's ready for manual
+> review and I should be able to just press one button and that one button
+> literally will send it off."
+
+The acceptance test for the column is therefore: **if a card in Docs Ready
+cannot be sent by a single button press, it does not belong in Docs Ready.**
+
+| Family | What one click needs |
+|---|---|
+| physical make-safe | make-safe report, SWMS where the docket requires it, draft invoice, pack READY and unsent |
+| roof — portal or own-template | report-in proved, plus pack READY and unsent |
+| assessment / quote | all three typed roles proved, plus pack READY and unsent |
+| temporary fencing, repair, restoration | the standard path |
+
+**Invoice status: CAPTAIN RULING, 2026-08-02**
+(`data/decisions/2026-08-02-swms-261059-and-draft-invoice.md`). In his words:
+
+> "It should be that there's a draft invoice that exists so I can see exactly
+> what the invoice is gonna be like when I approve it."
+
+Docs Ready for a physical make-safe requires an invoice sitting in `DRAFT` —
+visible, reviewable, not yet issued — as well as the invoice artifact itself.
+The point of the column is that he can look at exactly what will go out before
+he approves it. An `AUTHORISED`, `SUBMITTED` or `PAID` invoice does not satisfy
+Docs Ready: that card is not one click from sending, it is past sending.
+
+**This supersedes the earlier record in this document**, which enforced the same
+rule but attributed the reading to firstmate as an interpretation. It is the
+Captain's own definition. The superseded framing is named here rather than
+deleted, because a record that quietly upgrades its own attribution is exactly
+what this document exists to prevent — and the correction ran in both
+directions during this work: the Release 6 asymmetry note above remains a
+firstmate approval and was corrected the other way, from Captain to firstmate.
+
+A roof job produces no SecureWorks report, so the five-artifact shorthand is
+deliberately NOT applied board-wide — demanding one would permanently block the
+roof family. A test asserts a roof card is never asked for one.
+
+**Two structural boundaries from the rulings.** Readiness is never asserted by a
+person: the trade tick and the deterministic portal reader are both EVIDENCE
+inputs with a recorded producer, and neither declares a stage. And nothing here
+asks anyone to classify a job — the family arrives from
+`canonicalSesFamilyFromCard`, because the card already knows what it is.
+
+**READY is explicit.** Firstmate ruling, 2026-08-02: `sesStageDocsReady` retains
+the existing `docsReady` containment gate but additionally requires
+`packState === READY`; `READY_TO_BUILD` is refused. The independent
+reporting-skill teardown corroborated the distinction: `READY_TO_BUILD` is the
+create-the-invoice-at-send-time path, not a pack that is one click from sending.
+The live measurement found zero `makesafe_docket_revisions` rows and
+`review_state` NULL on all 68 `makesafe_report_packs` rows, so no live pack
+carried either state. This is a contract-definition tightening, not a measured
+blast change, and the live parity run could not exercise it.
+
+**The minimum negative rule is retained and proved, not just stated.**
+`sesStageDocsReady` calls the existing `docsReady` first and can only subtract
+from it, so no card can reach Docs Ready here that the existing rule refuses. A
+test asserts that containment directly over six fixtures rather than trusting
+the code shape.
+
+**Measured (2026-08-02T10:21:10Z)**, base `9bf5ce4`, 407 cards, 13 SELECT-only
+Management API queries. All nine measured fields plus `stage_v2` itself are
+identical across all 407 cards; corrected columns unchanged at new 65 /
+allocated 64 / trade report in 12 / decision-required 1 / completed 2 /
+archive 263; prospective corrected moves 35 -> 35; gate still blocked on
+`SWMS-261059` alone.
+
+**The tightening is real but currently unexercised, and that is stated rather
+than implied.** The corrected engine already placed ZERO cards in Docs Ready
+before this release, so a stricter Docs Ready rule cannot move anything today.
+The measurement proves no regression; it does NOT exercise the new rule on a
+single production card. The design anticipated exactly this — "exact future
+delta UNVERIFIED until Captain decision and fresh data". Correctness rests on
+the 7 tests, including the containment proof and per-artifact removal cases.
+
+**The second Docs Ready channel — landed mid-release, and it needed no change
+here.** When Release 7 was written, the trade confirmation tick was being built
+by another crew and was not on `main`, so this rule derived roof and assessment
+report-in only from the deterministic portal reader (Release 6) and the
+own-template submitted draft (Release 5).
+
+It landed while this release was in the pipeline, as `a6af8d2`
+(`feat(ops-api): add trade roof report completion confirmation`, PR 493). The
+Captain's ruling seals two channels for roof completion — a trade tick OR the
+deterministic reader, either satisfying it — and both now work.
+
+The mechanism is worth recording, because it is the design holding:
+`SES_TRUSTED_PORTAL_CAPTURE_PRODUCERS` was a one-member set at this branch's
+base (`9bf5ce4`) and is a two-member set on `main` (`a6af8d2`), gaining
+`SES_TRADE_PORTAL_CONFIRMATION_PRODUCER`. A trade tick writes one row to the
+same `makesafe_portal_capture_revisions` ledger, and it reaches this rule
+through the unchanged path — trusted producer, ledger projection,
+`donePortalRoles`, `sesStagePortalReportIn`. **No change to the Docs Ready rule
+was required**, exactly as predicted, because the rule reads report-in evidence
+rather than naming its source.
+
+**Measurement base caveat.** The numbers above were taken against `9bf5ce4`.
+`main` has since advanced to `a6af8d2`, which touches both
+`makesafe_board_read_model.ts` (+137) and `makesafe_computed_status.ts` (+29) —
+the same two files this release edits. The Release 7 measurement is therefore
+against a base that no longer exists as `main`'s tip, and is re-measured after
+rebase rather than carried forward. Stated rather than quietly reconciled.
+
+**One thing deliberately NOT changed.** The `docsReady` seam decides
+satisfaction only; its shortfalls are not pushed into the shared `missing`
+array. Folding them in would alter published `derived_stage_v2_missing` on every
+card that is not Docs Ready — a second, unmeasured output change riding inside
+this release, which the standing rule forbids.
+
+**Named finding — legacy READY-pack invoice status bypass (unmeasured; not
+fixed in Release 7).** In `supabase/functions/ops-api/makesafe_computed_status.ts`,
+`docsReady` returns from the `packState` `READY` / `READY_TO_BUILD` branch at
+approximately lines 325-328, so it never reaches the legacy invoice-status
+check at approximately lines 337-339. Under the existing production rule, a
+READY-pack card carrying an `AUTHORISED`, `SUBMITTED` or `PAID` invoice can
+therefore already count as Docs Ready. The corrected Docs Ready population is
+zero, so the live parity run returns zero moves whether this defect is present
+or absent; how many live cards are affected has not been established. It is
+deliberately filed as its own release under the standing rule that a change
+whose blast cannot be measured must not ride inside a release that cannot see
+it.
+
+## SWMS-261059 — signed off, and the contradiction underneath it
+
+**CAPTAIN RULING, 2026-08-02**
+(`data/decisions/2026-08-02-swms-261059-and-draft-invoice.md`). He opened the
+card and read what is attached to it:
+
+> "it's already been invoiced ... this was done manually, through the back end,
+> and actually the job's completely done. So you can fully sign that job off to
+> completion or archived. Yeah, really happy with that."
+
+**The job is complete and may go to completed or archived.** This closes the
+single card that had been blocking the corrected engine's cutover gate through
+Releases 3-7.
+
+No release in this programme acts on that sign-off. Moving the card is a board
+move, which every release here forbids, and the sign-off runs through an
+operational path rather than the derivation. Until the card's own state
+changes, `sesStageCutoverGate` continues to report it — correctly, on the
+evidence the derivation can currently read.
+
+### FINDING — the card's evidence and the gate disagree
+
+Recorded, unmeasured, deliberately NOT fixed.
+
+The gate reports `SWMS-261059` as `terminal_without_issued_invoice` and
+`terminal_without_supporting_evidence`. The Captain can see an invoice, a SWMS,
+a make-safe report and a work order on that same card. **Both cannot be true in
+the same sense.** Either:
+
+- the artifacts exist but are **not linked in a form the derivation can read**, or
+- the gate's own test is wrong.
+
+That distinction is unmeasured and must not be guessed at. Nothing in this
+release assumes which side is at fault, and the sign-off does not depend on
+resolving it.
+
+**Why this reaches far past one card.** Two facts the Captain added matter more
+than the sign-off. The work was done manually through the back end, by Shaun,
+not through the normal flow. And the document attached as a trade report is not
+a raw trade report — it carries the completion documents only. If
+manually-completed back-end work is systematically invisible to the derivation,
+then **every card finished by hand looks unproven to the system while being
+genuinely done**, and the corrected engine would refuse a population of
+legitimately complete jobs at cutover.
+
+How many cards are in that shape is unknown. Measure it before concluding
+anything — including before concluding that the engine is right.
+
+## Standing deferrals from this work
+
+Both are recorded rather than fixed, under the rule adopted during Release 6:
+**a change whose blast cannot be measured must not ride inside a release that
+cannot see it.**
+
+| Ticket | Finding | State |
+|---|---|---|
+| `ses-r10-roof-url-identity-v1` | Roof portal acceptance applies neither the URL-identity nor the `locked` check, unlike assessment. Ledger path unaffected; only legacy detail captures reach it. | Deferred, firstmate-approved, unmeasured |
+| `ses-legacy-ready-pack-invoice-status-v1` | `docsReady` returns as soon as `packState` is `READY`/`READY_TO_BUILD` (`makesafe_computed_status.ts`, branch at ~line 325) and never reaches the invoice-status check at line 337, which lives only in the legacy fallback. So on the LIVE board a READY-pack card carrying an `AUTHORISED` or `PAID` invoice already shows as Docs Ready. Against the Captain's draft-invoice ruling that is plainly wrong, not merely inconsistent. | Deferred, unmeasured |
+| (unticketed) | `SWMS-261059` evidence-versus-gate contradiction above, and the back-end-completion population it implies. | Recorded, unmeasured |
+
+The second is the only one of the three that affects the **live** board rather
+than the shadow engine, so it is the only one that may be misplacing real cards
+today. Exposure is unmeasured.
