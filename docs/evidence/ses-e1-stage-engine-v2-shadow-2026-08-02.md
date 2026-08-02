@@ -102,3 +102,63 @@ SUPABASE_ACCESS_TOKEN=... deno run --allow-env --allow-net --allow-read \
 deno run --allow-read scripts/ses-e1-freeze-stage-baseline.ts --mode=verify \
   --parity=.audit/parity.json --baseline=scripts/ses-e1-stage-baseline-v1.json
 ```
+
+## Release 1 — publish the advisory field
+
+**Behaviour change:** exactly one — the canonical board row gains advisory
+`derived_stage_v2*` keys. Zero placements move.
+
+**What landed**
+
+- `supabase/functions/ops-api/ses_stage_engine_v2.ts` — the pure corrected
+  engine. Its input type structurally omits `displayedStatus`, so it cannot
+  take M1's terminal display short-circuit; the read model now builds the
+  evidence input WITHOUT that key and appends it only for M1's own call.
+- `makesafe_computed_status.ts` — pure extraction. `deriveMakesafeEvidenceStage`
+  lifts the evidence half of the ladder (READY pack, report-in, allocation, new)
+  out of `computeMakesafeStatus` verbatim so both engines consume ONE definition
+  of what evidence proves. `docsReady`, `closeoutSatisfied` and `completedAt`
+  became exported for the same reason. No logic moved; M1's output is identical.
+- `makesafe_board_read_model.ts` — publishes `derived_stage_v2`,
+  `derived_stage_v2_post_overlay`, `derived_stage_v2_overlay_binds`,
+  `derived_stage_v2_agrees_with_canonical`, `derived_stage_v2_reasons`,
+  `derived_stage_v2_missing`, `derived_stage_v2_conflicts` and
+  `derived_stage_v2_engine_version`.
+- `scripts/ses-stage-parity-harness.ts` — reads the published advisory value
+  rather than recomputing it, and reports the corrected engine's prospective
+  blast, its conflicts, and a Release 1 self-check.
+- `supabase/functions/ops-api/ses_stage_engine_v2_test.ts` — 11 response-contract
+  and boundary tests.
+
+**Measured (2026-08-02T06:4xZ)**
+
+| Fact | Design | Measured |
+|---|---:|---:|
+| Advisory values differing from today's published `computed_status` | 74 | 74 |
+| Placements moved | 0 | 0 |
+| Current columns (new/alloc/TRI/ready/comp/arch) | 36/30/12/24/2/303 | 36/30/12/24/2/303 |
+| `derived_stage_v2` == uncorrected pure M1 | (identity) | 407 / 407 |
+| `derived_stage_v2_post_overlay` == uncorrected candidate | (identity) | 407 / 407 |
+| Prospective corrected moves | 71 | 71 |
+
+Release 1 is a true no-op shadow: the corrected engine reproduces the newer
+engine card for card, terminal faults included. That is deliberate — Release 2's
+34-card blast has to be attributable to Release 2, not smuggled in here. An
+early draft of this engine routed the raw-terminal branch through the clock and
+the harness caught it immediately as 34 cards diverging at Release 1; the fix
+was to keep the fault and let Release 2 own it.
+
+**Exit condition met.** No consumer renders the advisory field:
+
+- `projectTradeMakesafeBoard` is a strict allow-list and is asserted to carry no
+  `derived_stage_v2*` key;
+- `projectOpsMakesafeBoard` buckets on `canonical_stage` only, proven with a
+  card whose advisory value is `new` while its column is `archive`;
+- `makesafeStatusReviewCards`, the disagreement list, the canary and the status
+  shadow all pick named `computed_status*` fields and are untouched;
+- the frozen Release 0 baseline still verifies with the same `generation_id`,
+  zero failures, zero moved hashes and zero added disputes.
+
+Overlay behaviour is byte-identical: real binding still reads `declared_stage`,
+and `sesStageV2OverlayCandidate` is a simulation with the same three guards that
+binds nothing. The card whose overlay would unbind is reported, not rebound.
