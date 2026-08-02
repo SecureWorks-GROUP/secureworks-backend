@@ -338,7 +338,17 @@ export async function runMakesafeRoofStoreyBackfill(
 
   const jobIds = (details || []).map((row: { job_id: string }) => row.job_id);
   if (!jobIds.length) {
-    return { ...summariseRoofStoreyBackfill([]), dry_run: dryRun };
+    const empty = { ...summariseRoofStoreyBackfill([]), dry_run: dryRun };
+    if (expectedCount !== null && expectedCount !== 0) {
+      return {
+        ...empty,
+        ok: false,
+        error:
+          `expected_count mismatch: expected ${expectedCount} writeable cards, got 0. Nothing was written.`,
+        expected_count: expectedCount,
+      };
+    }
+    return { ...empty, expected_count: expectedCount };
   }
 
   const { data: jobs, error: jobsError } = await client
@@ -388,25 +398,28 @@ export async function runMakesafeRoofStoreyBackfill(
   }
   if (dryRun) return { ...result, expected_count: expectedCount };
 
-  const { data: currentJobs, error: currentJobsError } = await client
-    .from("jobs")
-    .select(
-      "id, job_number, status, notes, metadata, scope_json, site_suburb, ses_money_sealed_at",
-    )
-    .in("id", jobIds);
-  if (currentJobsError) throw currentJobsError;
   const { data: currentDetails, error: currentDetailsError } = await client
     .from("makesafe_job_details")
     .select("job_id, external_ref, report_type, substatus")
     .eq("report_type", "roof_report");
   if (currentDetailsError) throw currentDetailsError;
+  const currentJobIds = (currentDetails || []).map(
+    (row: { job_id: string }) => row.job_id,
+  );
+  const { data: currentJobs, error: currentJobsError } = await client
+    .from("jobs")
+    .select(
+      "id, job_number, status, notes, metadata, scope_json, site_suburb, ses_money_sealed_at",
+    )
+    .in("id", currentJobIds);
+  if (currentJobsError) throw currentJobsError;
   const { data: currentDockets, error: currentDocketsError } = await client
-    .from("makesafe_docket_revisions").select("job_id").in("job_id", jobIds);
+    .from("makesafe_docket_revisions").select("job_id").in("job_id", currentJobIds);
   if (currentDocketsError) throw currentDocketsError;
   const { data: currentObligations, error: currentObligationsError } = await client
     .from("makesafe_invoice_obligation_revisions").select("job_id").in(
       "job_id",
-      jobIds,
+      currentJobIds,
     );
   if (currentObligationsError) throw currentObligationsError;
   const currentDetailByJob = new Map<string, Record<string, unknown>>();
