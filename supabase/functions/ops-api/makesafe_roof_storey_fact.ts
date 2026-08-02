@@ -55,8 +55,20 @@ export type MakesafeRoofStoreyRefusal =
  * `inferMakesafeFamilyForActiveBackfill` (`index.ts`), which already match
  * exactly these phrasings - including the two that spell the storey out.
  */
+/**
+ * Inter-word gap that CANNOT cross a line break. Callers hand this matcher
+ * several instruction fields joined with newlines, and `\s` matches a newline -
+ * so a plain `\s+` lets the end of one field fuse with the start of the next and
+ * form a phrase neither field contains ("...the dwelling is single storey" +
+ * "Roof report required" would read as an ordered single storey roof report).
+ * That is the property-descriptor trap re-opened across a field boundary, so the
+ * gap is deliberately newline-free: an ordered product is a phrase, not a
+ * paragraph.
+ */
+const GAP = String.raw`[^\S\r\n]+`;
+
 const ROOF_PRODUCT = String
-  .raw`roof\s+(?:report|inspection(?:\s+report)?|assessment\s+report)`;
+  .raw`roof${GAP}(?:report|inspection(?:${GAP}report)?|assessment${GAP}report)`;
 
 const STOREY_WORD = String.raw`stor(?:ey|ies|y)`;
 
@@ -75,7 +87,8 @@ const ABOVE_DOUBLE_QUALIFIER = String.raw`three|third|triple|3|four|4|multi`;
  */
 function orderedProductPattern(qualifier: string): RegExp {
   return new RegExp(
-    String.raw`\b(?:${qualifier})[\s-]+${STOREY_WORD}\s+${ROOF_PRODUCT}`,
+    String
+      .raw`\b(?:${qualifier})(?:${GAP}|-)+${STOREY_WORD}${GAP}${ROOF_PRODUCT}`,
     "i",
   );
 }

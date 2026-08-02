@@ -505,6 +505,10 @@ import {
 // The ordered storey, read once at intake off the same instruction text the
 // family classifier above already reads. See makesafe_roof_storey_fact.ts.
 import { roofStoreyIntakeMetadata as _roofStoreyIntakeMetadata } from './makesafe_roof_storey_fact.ts'
+// Same rule as the intake fact above, applied to cards that already exist.
+// Preview-by-default because storeys is a money-path input. See
+// makesafe_roof_storey_backfill.ts.
+import { runMakesafeRoofStoreyBackfill as _runMakesafeRoofStoreyBackfill } from './makesafe_roof_storey_backfill.ts'
 // B5 SLA: pure email-received -> card-created latency percentiles for the health row
 // + the 24h intake_health rollup. See makesafe_intake_sla.ts.
 import {
@@ -4352,6 +4356,18 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'forbidden: convert_makesafe_to_insurance requires the privileged ops key or an admin/owner session' }, 403)
         }
         return json(await convertMakesafeToInsurance(client, body))
+      }
+      // Preview (and, only on an explicit dry_run:false, apply) the ordered roof
+      // storey for cards that already exist. `storeys` is the sole determinant of
+      // a roof report's fee and every candidate is a sealed job, so this defaults
+      // to a preview and never writes a held, refused, no-fact or terminal row.
+      case 'preview_makesafe_roof_storey_backfill': {
+        const storeyBackfillPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!storeyBackfillPrivileged) {
+          return json({ error: 'forbidden: preview_makesafe_roof_storey_backfill requires the privileged ops key or an admin/owner session' }, 403)
+        }
+        return json(await _runMakesafeRoofStoreyBackfill(client, body || {}))
       }
       case 'backfill_makesafe_job_families': {
         const isPrivileged = authMode === 'api_key' ||

@@ -172,7 +172,12 @@ Deno.test("the recorded value is one the sealed roof price rule already accepts"
 });
 
 Deno.test("the intake path includes builder instruction text as a separate source line", async () => {
-  const source = await Deno.readTextFile("./index.ts");
+  // Resolved against THIS file, not the caller's cwd: run from the repo root
+  // (as CI and the full-suite run do) "./index.ts" does not exist and this test
+  // fails for a reason that has nothing to do with what it asserts.
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   assertEquals(
     source.includes(
       "[description, reviewedMakeSafeType, builder_email_text_for_trade]",
@@ -183,5 +188,27 @@ Deno.test("the intake path includes builder instruction text as a separate sourc
   assertEquals(
     roofStoreyIntakeMetadata("Please conduct a single storey roof report"),
     { storeys: "single" },
+  );
+});
+
+// Callers join several instruction fields with newlines before matching, and
+// `\s` matches a newline - so without a newline-free gap the tail of one field
+// fuses with the head of the next and forms a phrase neither field contains.
+// That is the property-descriptor trap re-opened across a field boundary, and
+// it would price a card off two unrelated sentences.
+Deno.test("an ordered product phrase cannot be formed across a line break", () => {
+  assertEquals(
+    storeys("the dwelling is single storey\nRoof report required"),
+    null,
+  );
+  assertEquals(storeys("single storey\nroof report"), null);
+  assertEquals(storeys("two storey\n\nroof inspection report"), null);
+  // ...while a phrase genuinely on one line still reads, including when other
+  // lines surround it.
+  assertEquals(
+    storeys(
+      "Attend site.\nPlease conduct a single storey roof report.\nThanks",
+    ),
+    "single",
   );
 });
