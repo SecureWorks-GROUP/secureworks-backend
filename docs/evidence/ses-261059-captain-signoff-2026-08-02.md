@@ -188,8 +188,10 @@ shape and nobody has measured it.
 The contradiction resolves cleanly once you see which invoice each side is
 looking at. **The captain is reading a PDF; the engine is reading a mirror row.**
 
-- `INV-1084` exists in `xero_invoices`, is `AUTHORISED`, is `ACCREC`, is dated
-  2026-07-31, and carries reference `MLB-25857PO-53193`. Its `job_id` is
+- `INV-1084` exists in `xero_invoices`, is **`AUTHORISED`**, is **`ACCREC`**, is
+  dated 2026-07-31, and carries the **PO-referenced identity**
+  `MLB-25857PO-53193` — builder scope `MLB` plus purchase order `PO-53193`,
+  which is the instruction key this repo already keys cards on. Its `job_id` is
   **NULL**.
 - The card carries `job_documents` type `invoice` — the rendered PDF of that same
   invoice, attached 2026-07-31 06:48:05.
@@ -224,6 +226,25 @@ a terminal `jobs.status`, zero `job_service_reports`, zero linked
 `xero_invoices`, a `job_documents` row of type `invoice`, and an unlinked issued
 ACCREC whose reference matches the card. That is a read-only query and it needs
 no ruling to run.
+
+### Two boundaries this release deliberately does not cross
+
+**The reference matcher is NOT wired into either stage engine here.** Naming the
+gap is not the same as closing it: adding `makesafe_invoice_reference_match.ts`
+to a stage engine's inputs would change what `evidence.invoiceStatus` means for
+every card that has an unlinked issued ACCREC, which is a fate-moving change
+needing its own bracketed measurement and its own ruling. The captain is filing
+it as its own release. Nothing in this branch touches the matcher or its
+declared consumer list.
+
+**No display overlay was applied for this card.** The corrected engine now
+derives `completed` from the recorded proof, but `canonical_stage` is still the
+legacy ladder plus the existing overlay resolver, so the card renders in Report
+Ready today. Whether the signed-off card moves NOW — via an ordinary
+`makesafe_board_status_applications` transition — or waits for the Release 12
+authority flip is the captain's call, and it has not been pre-empted. The stale
+`new` → `archive` overlay already on the card (id 10, 2026-07-28) is untouched
+and still does not bind.
 
 ## 7. Open follow-up
 
