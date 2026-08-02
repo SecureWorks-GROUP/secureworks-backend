@@ -263,3 +263,45 @@ did not:
 Exit condition met: boundary tests at `<7d` / `=7d` / `>7d` on both paths, a
 fresh harness run, and the frozen Release 0 baseline still verifying with an
 identical generation id. Tests: 2707 passed / 21 failed (same 21 pre-existing).
+
+### Release 2 re-land — re-measured against `main`
+
+Release 2 was re-landed on its own branch based directly on `main` at `570115e`
+(the Release 1 squash), opened as its own PR, and re-measured against a FRESH
+read-only snapshot rather than carrying the stacked-branch numbers forward.
+
+Snapshot `2026-08-02T08:51:18Z`, population `ses-board-population/active-v1`,
+407 cards, 13 SELECT-only Management API queries, base commit `570115e`.
+
+| Fact | Expected | Measured |
+|---|---:|---:|
+| Pure `completed -> archive` | 34 | 34 |
+| Prospective corrected moves | 71 -> 37 | 71 -> 37 |
+| Live placements moved | 0 | 0 |
+| Raw-terminal missing-time blast | 0 | 0 |
+| Pure Completed | 39 -> 5 | 39 -> 5 |
+| Pure Archive | 229 -> 263 | 229 -> 263 |
+| Any other pure stage changed | 0 | 0 |
+| Overlay rows that would unbind | 9 | 9 |
+| Frozen Release 0 disputed manifest | reproduces | 71 / 71, manifest id identical |
+
+The 34 moved cards are **exactly** the frozen Release 0 manifest's
+`archive -> completed` cohort — set equality, no card in one and not the other.
+
+Placement is proved by A/B rather than asserted: the harness was run once at
+`570115e` and once at this branch's tip. Per card, `legacy_canonical_stage`,
+`legacy_stage`, `m1_published`, `m1_pure`, `post_cutover_stage`,
+`post_cutover_overlay_binds` and the whole `overlay` object are identical on all
+407 cards, and overlays stay 46 total / 42 binding / 9 would-unbind on both
+sides. The only diff between the two runs is the shadow engine's own value.
+
+One boundary re-confirmed on the new base: `completedAt` in
+`makesafe_computed_status.ts` loses its `export` because the corrected engine
+now owns its own `sesStageTrustedCompletionAt` allow-list rather than borrowing
+M1's. That is a visibility narrowing only — M1's own list and output are
+untouched, which the zero `m1_pure` / `m1_published` diff above measures
+directly.
+
+Zero cards reached `decision_required` at this snapshot, so the missing-timestamp
+refusal remains live but unexercised on production data, proven by test rather
+than by a production card. That is unchanged from the original reading.
