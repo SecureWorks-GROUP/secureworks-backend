@@ -140,6 +140,17 @@ model. The engine stays pure and never changes an operational record.
 - `computed_status_hold`: an active, reason-coded hold surfaced as a badge on the derived column (never moves the card)
 - `computed_status_evidence`: `report_received_at`, `has_submitted_service_report`, `has_current_portal_capture`
 
+Release 1 also publishes the corrected engine as advisory-only shadow fields:
+`derived_stage_v2`, `derived_stage_v2_post_overlay`,
+`derived_stage_v2_overlay_binds`, `derived_stage_v2_agrees_with_canonical`,
+`derived_stage_v2_reasons`, `derived_stage_v2_missing`,
+`derived_stage_v2_conflicts`, and `derived_stage_v2_engine_version`. These
+fields are for comparison and audit only: `canonical_stage` remains the sole
+board placement authority, and no consumer may bucket or render a card from
+the `derived_stage_v2*` values. The advisory engine receives no displayed
+stage, and its post-overlay value simulates existing guards without binding an
+overlay. Promotion requires a separate captain-approved release.
+
 The derivation is a pure engine (`makesafe_computed_status.ts`) fed by typed
 portal evidence (assessment-report/quote cards require the assessment 3-of-3
 predicate). Durable sent-pack evidence plus an AUTHORISED/PAID ACCREC

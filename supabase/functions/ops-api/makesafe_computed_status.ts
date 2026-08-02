@@ -282,7 +282,7 @@ export function reportInEvidence(input: MakesafeStatusInput): {
   return { satisfied: missing.length === 0, missing };
 }
 
-function docsReady(input: MakesafeStatusInput): boolean {
+export function docsReady(input: MakesafeStatusInput): boolean {
   const kind = classifyMakesafeJobType(input.detail, input.job);
   const recorded = String(input.evidence?.packState || "").toUpperCase();
   if (["READY", "READY_TO_BUILD"].includes(recorded)) {
@@ -311,7 +311,7 @@ function docsReady(input: MakesafeStatusInput): boolean {
   return reportInEvidence(input).satisfied;
 }
 
-function closeoutSatisfied(input: MakesafeStatusInput): boolean {
+export function closeoutSatisfied(input: MakesafeStatusInput): boolean {
   const kind = classifyMakesafeJobType(input.detail, input.job);
   const invoiceStatus = String(input.evidence?.invoiceStatus || "")
     .toUpperCase();
@@ -338,7 +338,7 @@ function closeoutSatisfied(input: MakesafeStatusInput): boolean {
   return kind === "physical_makesafe" || reportInEvidence(input).satisfied;
 }
 
-function completedAt(input: MakesafeStatusInput): number | null {
+export function completedAt(input: MakesafeStatusInput): number | null {
   const raw = input.evidence?.pack?.sent_at ||
     input.evidence?.invoiceDate ||
     input.evidence?.invoiceCreatedAt ||
@@ -350,6 +350,92 @@ function completedAt(input: MakesafeStatusInput): number | null {
   if (!raw) return null;
   const value = new Date(raw).getTime();
   return Number.isFinite(value) ? value : null;
+}
+
+/** The non-terminal half of the ladder: READY pack, report-in, allocation, new. */
+export type MakesafeEvidenceStage =
+  | "report_ready"
+  | "trade_report_in"
+  | "allocated"
+  | "new";
+
+export interface MakesafeEvidenceStageResult {
+  status: MakesafeEvidenceStage;
+  reasons: string[];
+  missing: string[];
+}
+
+/**
+ * Derives the evidence-only half of the stage ladder — everything below the
+ * terminal branches.
+ *
+ * Extracted verbatim from `computeMakesafeStatus` so the corrected shadow
+ * engine (`ses_stage_engine_v2.ts`) can reuse ONE definition of "what the
+ * evidence on this card proves" rather than keeping a second copy that can
+ * drift. The terminal branches deliberately stay out: correcting their clock
+ * and their corroboration is exactly what the shadow engine changes, and the
+ * two engines must be free to disagree there while agreeing here.
+ */
+export function deriveMakesafeEvidenceStage(
+  input: MakesafeStatusInput,
+): MakesafeEvidenceStageResult {
+  const kind = classifyMakesafeJobType(input.detail, input.job);
+  const hold = input.evidence?.hold || null;
+  const reasons: string[] = [];
+  const missing: string[] = [];
+
+  if (docsReady(input)) {
+    reasons.push("validated draft-pack records are READY or READY_TO_BUILD");
+    return { status: "report_ready", reasons, missing };
+  }
+
+  const reportIn = reportInEvidence(input);
+  if (reportIn.satisfied) {
+    reasons.push(
+      kind === "physical_makesafe"
+        ? "current-cycle submitted service report and completion photo floor are present"
+        : "all required typed portal captures are recorded done",
+    );
+    if (hold) reasons.push(`hold badge: ${hold.reason_code}`);
+    return { status: "trade_report_in", reasons, missing };
+  }
+  missing.push(...reportIn.missing);
+
+  const hasAssignment = (input.evidence?.assignments || []).length > 0;
+  if (hasAssignment) {
+    reasons.push("job assignment exists");
+    return { status: "allocated", reasons, missing };
+  }
+
+  // F4 — the report-only waiting state places the card in Allocated in this
+  // engine too, so the legacy ladder and M1 agree on where a freshly approved
+  // roof / assessment card lands. This reads a persisted state, not an
+  // assignment and not a completion claim: the card is still short every
+  // required portal capture (already collected in `missing` above), so nothing
+  // here can advance it. Only the explicit portal-completion evidence event
+  // moves the card off this substatus.
+  if (
+    String(input.detail?.substatus || "").trim().toLowerCase() ===
+      MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION
+  ) {
+    reasons.push(
+      "card is awaiting proof the builder-portal report was completed",
+    );
+    return { status: "allocated", reasons, missing };
+  }
+
+  if (kind !== "physical_makesafe") {
+    const hasPortalLink =
+      Array.isArray((input.detail as any)?.external_links) &&
+      (input.detail as any).external_links.length > 0;
+    if (hasPortalLink) {
+      reasons.push("portal link exists and required captures are not all done");
+      return { status: "allocated", reasons, missing };
+    }
+  }
+
+  reasons.push("card exists with no allocation or completed report evidence");
+  return { status: "new", reasons, missing };
 }
 
 export function computeMakesafeStatus(
@@ -441,64 +527,16 @@ export function computeMakesafeStatus(
     };
   }
 
-  if (docsReady(input)) {
-    reasons.push("validated draft-pack records are READY or READY_TO_BUILD");
-    return { status: "report_ready", job_type: kind, reasons, missing, hold };
-  }
-
-  const reportIn = reportInEvidence(input);
-  if (reportIn.satisfied) {
-    reasons.push(
-      kind === "physical_makesafe"
-        ? "current-cycle submitted service report and completion photo floor are present"
-        : "all required typed portal captures are recorded done",
-    );
-    if (hold) reasons.push(`hold badge: ${hold.reason_code}`);
-    return {
-      status: "trade_report_in",
-      job_type: kind,
-      reasons,
-      missing,
-      hold,
-    };
-  }
-  missing.push(...reportIn.missing);
-
-  const hasAssignment = (input.evidence?.assignments || []).length > 0;
-  if (hasAssignment) {
-    reasons.push("job assignment exists");
-    return { status: "allocated", job_type: kind, reasons, missing, hold };
-  }
-
-  // F4 — the report-only waiting state places the card in Allocated in this
-  // engine too, so the legacy ladder and M1 agree on where a freshly approved
-  // roof / assessment card lands. This reads a persisted state, not an
-  // assignment and not a completion claim: the card is still short every
-  // required portal capture (already collected in `missing` above), so nothing
-  // here can advance it. Only the explicit portal-completion evidence event
-  // moves the card off this substatus.
-  if (
-    String(input.detail?.substatus || "").trim().toLowerCase() ===
-      MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION
-  ) {
-    reasons.push(
-      "card is awaiting proof the builder-portal report was completed",
-    );
-    return { status: "allocated", job_type: kind, reasons, missing, hold };
-  }
-
-  if (kind !== "physical_makesafe") {
-    const hasPortalLink =
-      Array.isArray((input.detail as any)?.external_links) &&
-      (input.detail as any).external_links.length > 0;
-    if (hasPortalLink) {
-      reasons.push("portal link exists and required captures are not all done");
-      return { status: "allocated", job_type: kind, reasons, missing, hold };
-    }
-  }
-
-  reasons.push("card exists with no allocation or completed report evidence");
-  return { status: "new", job_type: kind, reasons, missing, hold };
+  const evidenceStage = deriveMakesafeEvidenceStage(input);
+  reasons.push(...evidenceStage.reasons);
+  missing.push(...evidenceStage.missing);
+  return {
+    status: evidenceStage.status,
+    job_type: kind,
+    reasons,
+    missing,
+    hold,
+  };
 }
 
 export interface MakesafeDisagreementCard {

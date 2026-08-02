@@ -966,11 +966,12 @@ must consume them rather than hand-writing the equivalent:
   `SES_EVIDENCE_CONTRACT_VERSION` does not read as board-wide drift. Free-text
   `detail` provenance is deliberately outside the hash.
 
-`scripts/ses-stage-parity-harness.ts` runs BOTH stage engines over one set of
-read-only production reads and is the only tool that answers "did the divergence
-move?". It imports the real ladders (`_deriveMakesafeBoardStage` via the read
-model, and `computeMakesafeStatus`) and must never reimplement either. The
-current frozen baseline is documented in
+`scripts/ses-stage-parity-harness.ts` runs the legacy ladder and M1 over one set
+of read-only production reads, reads the corrected engine from the board row's
+published advisory fields, and is the only tool that answers "did the
+divergence move?". It imports the real legacy ladder (`_deriveMakesafeBoardStage`
+via the read model) and `computeMakesafeStatus`, and must never reimplement
+either. The current frozen baseline is documented in
 `docs/evidence/ses-e1-stage-engine-v2-shadow-2026-08-02.md`; its committed
 artifact and verification contract are
 `scripts/ses-e1-stage-baseline-v1.json` and
