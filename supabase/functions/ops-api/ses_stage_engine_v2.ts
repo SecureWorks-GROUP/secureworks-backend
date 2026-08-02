@@ -833,6 +833,7 @@ function deriveSesStageEvidence(
 export interface SesStageOverlayApplication {
   source_status?: string | null;
   after_status?: string | null;
+  decision_kind?: string | null;
 }
 
 export interface SesStageV2OverlayCandidate {
@@ -857,6 +858,8 @@ export function sesStageV2OverlayCandidate(
 ): SesStageV2OverlayCandidate {
   const stage = String(derivedStage || "").toLowerCase();
   const binds = !!application &&
+    String(application.decision_kind || "display_override").toLowerCase() !==
+      "stage_attestation" &&
     !isMakesafeTerminalDisplayStatus(stage) &&
     !isMakesafeTerminalJobState(rawJobState) &&
     String(application.source_status || "").toLowerCase() === stage;
