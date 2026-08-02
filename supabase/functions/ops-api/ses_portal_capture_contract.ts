@@ -40,10 +40,12 @@ export const SES_TRADE_PORTAL_CONFIRMATION_PRODUCER =
   "trade_portal_confirmation/v1" as const;
 
 export const SES_TRUSTED_PORTAL_CAPTURE_PRODUCERS: ReadonlySet<string> = Object
-  .freeze(new Set<string>([
-  SES_PORTAL_CAPTURE_PRODUCER,
-  SES_TRADE_PORTAL_CONFIRMATION_PRODUCER,
-  ]));
+  .freeze(
+    new Set<string>([
+      SES_PORTAL_CAPTURE_PRODUCER,
+      SES_TRADE_PORTAL_CONFIRMATION_PRODUCER,
+    ]),
+  );
 
 export function isTrustedSesPortalCaptureProducer(value: unknown): boolean {
   return typeof value === "string" &&

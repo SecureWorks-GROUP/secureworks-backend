@@ -58,8 +58,8 @@ import {
   isTrustedSesPortalCaptureProducer,
   rawSesPortalCaptureSha256,
   SES_PORTAL_CAPTURE_BUCKET,
-  sesPortalCaptureProducerHasScreenshot,
   type SesPersistedPortalCaptureRow,
+  sesPortalCaptureProducerHasScreenshot,
   type SesPortalCaptureRevisionContent,
   sesPortalCaptureRevisionHash,
 } from "./ses_portal_capture_contract.ts";
