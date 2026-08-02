@@ -522,13 +522,76 @@ SecureSuite MCP), then reported and not retried, not credential-swapped, and not
 
 ---
 
+## 9.3 The storey backfill, run for real on the captain's approval
+
+Captain approved 2026-08-03 and confirmed the prices himself: single **$250 ex GST**, double
+**$350 ex GST**, matching the schedule locked 2026-07-16. Verified against the sealed pricer before
+writing — `roofReportPrice("single")` → $250 ex / $275 inc, `("double")` → $350 ex / $385 inc.
+
+**Scope control.** `preview_makesafe_roof_storey_backfill` takes **no job list** — it selects every
+`report_type='roof_report'` card itself and writes every `write` row, with only `dry_run` and
+`expected_count` as controls. So "exactly the 39 in the committed preview" could not be enforced by
+parameter. Instead I ran the dry run first and diffed its write set against the committed
+`roof-storey-backfill-dispositions.json`:
+
+```
+live write set: 38     approved set: 38
+in LIVE but NOT approved: []
+in APPROVED but not live: []
+storey value disagreements: []
+SETS IDENTICAL: True
+```
+
+Both captain-named hold-outs were already outside the write set by the action's own rules:
+`SWMS-26930` (three storeys, `refused_no_sealed_price`) and `SWMS-26848` (already carries a storey,
+`hold_competing_storey_signal`). The captain's two exclusions and the code's two exclusions are the
+same two cards, independently derived.
+
+The 39-vs-38 reconciliation: 39 cards resolve to a priceable storey (28 single + 11 double), and
+`SWMS-26848` is the eleventh double — held, not written. So 38.
+
+**Applied** with `expected_count: 38` armed as the refuse-if-drifted guard:
+
+```
+ok: true   dry_run: false   error: null
+counts: total 61, write 38 (28 single, 10 double), hold 1, refused 1, no_fact 11, excluded_terminal 10
+write_candidates marked written: 38 of 38, none skipped
+```
+
+Verified independently in production rather than from the response: `jobs.metadata->>'storeys'` is
+now `single` on 28 and `double` on 10 roof cards, and **both hold-outs are still `(none)`**.
+Ledgers: `evidence/roof-storey-backfill-bf-dry.json`, `evidence/roof-storey-backfill-bf-apply.json`.
+
+### Do all 38 actually clear `pricing_evidence_missing`?
+
+Yes, and the one thing that could have broken it was checked rather than assumed.
+`structuredSourceFact` returns `undefined` when it finds two **different** values across its roots,
+which would leave a card blocked despite the write. Its roots include
+`intakeCase.raw_identity_json`, which `competingStoreySignals` does **not** inspect — a real gap
+between the guard and the reader.
+
+Measured: 5 of the 38 carry a storey signal in `raw_identity_json` (`SWMS-261079`, `261113`,
+`261114`, `261116`, `261123` — the newest cards, whose deterministic intake stores the instruction
+text). **None is a keyed value**; all five are prose in the builder's instruction, which is the very
+text the matcher read. `structuredSourceFact` collects values under matching keys, so prose produces
+no competing value and no card resolves ambiguously.
+
+**38 roof cards clear `pricing_evidence_missing`.** That blocker only — the spine, attendance-cycle,
+portal-link and trade-evidence blockers on those cards are untouched.
+
+One consequence to flag, from the action's own `state_moves`: **`SWMS-261019` has a persisted docket
+revision that will be superseded** on its next prepare, because the storey fact changes the input
+hash. That is expected and is the card becoming priceable, not a defect.
+
+---
+
 ## 10. Open items for firstmate
 
 1. **The `SW_API_KEY` that will not authenticate** — blocks both crews, every write and every U4 dry
    run. Nothing in either brief is reachable without it. The Management API cannot supply it (it
    returns digests); the captain has to paste it. Check the redeploy question in the credential
    section first — the secret changed 3h07m *after* `ops-api` was last deployed.
-2. **The storey backfill is on the critical path for the whole roof family**, not just my three
+2. **DONE — the storey backfill ran** (§9.3): 38 roof cards written, both hold-outs excluded, all 38 clear `pricing_evidence_missing`. Originally flagged as: on the critical path for the whole roof family, not just my three
    cards. `pricing_evidence_missing` blocks `pre_xero_docs_ready` outright, no roof card carries the
    fact, and the sanctioned backfill would write **38 of 50** live roof cards from the builder's own
    instruction text today (§7.2). Dry-run-by-default, money-path, wants the captain row by row. The
