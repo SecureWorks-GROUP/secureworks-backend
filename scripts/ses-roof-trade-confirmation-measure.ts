@@ -45,6 +45,11 @@ import {
 } from "./ses-board-population-contract.ts";
 import { projectMakesafePortalCaptures } from "../supabase/functions/ops-api/makesafe_board_read_model.ts";
 import {
+  isSesConfirmingTradeAssignment,
+  isSesRoofCard,
+  isSesRoofConfirmationDeadCard,
+  resolveSesRoofPortalUrl,
+  sesRoofCompletionRecorded,
   sesRoofConfirmationEligibility,
 } from "../supabase/functions/ops-api/ses_trade_portal_confirmation.ts";
 
@@ -115,6 +120,13 @@ join jobs j on j.id = d.job_id
 where ${sesBoardStatusPredicate()}
 `;
 
+const ASSIGNMENT_SQL = `
+select a.id, a.job_id, a.status
+from job_assignments a
+join jobs j on j.id = a.job_id
+where ${sesBoardStatusPredicate()}
+`;
+
 const LEDGER_SQL = `
 select
   c.id, c.job_id, c.attendance_cycle_id, c.role, c.status,
@@ -131,10 +143,11 @@ async function main() {
   const outPath = Deno.args.find((a) => a.startsWith("--out="))?.slice(6) ??
     "./ses-roof-trade-confirmation-measure.json";
 
-  const [jobs, details, ledger] = await Promise.all([
+  const [jobs, details, ledger, assignments] = await Promise.all([
     query(BOARD_SQL),
     query(DETAIL_SQL),
     query(LEDGER_SQL),
+    query(ASSIGNMENT_SQL),
   ]);
 
   const detailByJobId = new Map(
@@ -146,6 +159,13 @@ async function main() {
     const rows = ledgerByJobId.get(jobId) || [];
     rows.push(row);
     ledgerByJobId.set(jobId, rows);
+  }
+  const assignmentsByJobId = new Map<string, any[]>();
+  for (const row of assignments) {
+    const jobId = String(row.job_id);
+    const rows = assignmentsByJobId.get(jobId) || [];
+    rows.push(row);
+    assignmentsByJobId.set(jobId, rows);
   }
 
   const cards: any[] = [];
@@ -165,6 +185,39 @@ async function main() {
     const captures = projectMakesafePortalCaptures(card, rows);
     const eligibility = sesRoofConfirmationEligibility(card, captures);
     const substatus = String(detail?.substatus || "").toLowerCase();
+
+    // Every blocker, evaluated INDEPENDENTLY. `eligibility.reason` is the first
+    // one hit, which is the right refusal message and the wrong thing to count
+    // by: a card can be blocked several ways at once. Built from the same
+    // exported primitives the shipped predicate uses.
+    const jobAssignments = assignmentsByJobId.get(String(job.id)) || [];
+    const liveAssignments = jobAssignments.filter(
+      isSesConfirmingTradeAssignment,
+    );
+    const roofCard = isSesRoofCard(card);
+    const link = roofCard
+      ? resolveSesRoofPortalUrl(card)
+      : { url: null, ambiguous: false };
+    const blockers: string[] = [];
+    if (!roofCard) blockers.push("not_a_roof_card");
+    if (isSesRoofConfirmationDeadCard(card)) blockers.push("card_not_live");
+    if (!String(detail?.attendance_cycle_id || "").trim()) {
+      blockers.push("no_attendance_cycle");
+    }
+    if (!String(detail?.external_ref || card.external_ref || "").trim()) {
+      blockers.push("no_builder_reference");
+    }
+    if (roofCard && link.ambiguous) blockers.push("ambiguous_portal_roof_link");
+    if (roofCard && !link.ambiguous && !link.url) {
+      blockers.push("no_portal_roof_link");
+    }
+    if (sesRoofCompletionRecorded(card, captures)) {
+      blockers.push("already_confirmed");
+    }
+    // Not part of card eligibility — it is per viewer — but it decides whether
+    // ANY trade can act. A card with no live assignment has nobody to tick it.
+    if (!liveAssignments.length) blockers.push("no_assigned_trade");
+
     cards.push({
       job_number: job.job_number,
       job_status: job.status,
@@ -179,6 +232,12 @@ async function main() {
       // Roof identity is the card's own, exactly as the shipped predicate reads
       // it. A card can be a roof card and still not be offered the control.
       roof_card: eligibility.reason !== "not_a_roof_card",
+      blockers,
+      assignments_total: jobAssignments.length,
+      assignments_live: liveAssignments.length,
+      // The number that actually matters: the control is offered on the card
+      // AND somebody is on the job to tick it.
+      confirmable_by_a_trade: eligibility.offered && liveAssignments.length > 0,
     });
   }
 
@@ -204,6 +263,17 @@ async function main() {
     for (const row of rows) counts[row.reason] = (counts[row.reason] || 0) + 1;
     return counts;
   };
+  // Counts every blocker on every card, so a card blocked three ways is counted
+  // in all three. These totals therefore exceed the card count, on purpose.
+  const tallyBlockers = (rows: any[]) => {
+    const counts: Record<string, number> = {};
+    for (const row of rows) {
+      for (const blocker of row.blockers) {
+        counts[blocker] = (counts[blocker] || 0) + 1;
+      }
+    }
+    return counts;
+  };
 
   const report = {
     measured_at: new Date().toISOString(),
@@ -215,7 +285,10 @@ async function main() {
       roof_cards: roof.length,
       roof_confirmed_already: roof.filter((card) => card.confirmed).length,
       roof_control_offered: roof.filter((card) => card.offered).length,
+      roof_confirmable_by_a_trade:
+        roof.filter((card) => card.confirmable_by_a_trade).length,
       roof_reasons: tally(roof),
+      roof_blockers: tallyBlockers(roof),
     },
     unverified_looks_done_dead_cards: {
       count: unverifiedLooksDoneDead.length,
@@ -225,12 +298,25 @@ async function main() {
       count: unverifiedLooksDone.length,
       control_offered:
         unverifiedLooksDone.filter((card) => card.offered).length,
+      confirmable_by_a_trade:
+        unverifiedLooksDone.filter((card) => card.confirmable_by_a_trade)
+          .length,
       reasons: tally(unverifiedLooksDone),
+      // Independent blocker counts. A card blocked more than one way appears
+      // under each blocker, so these totals exceed the card count on purpose.
+      blockers: tallyBlockers(unverifiedLooksDone),
+      blockers_on_not_offered: tallyBlockers(
+        unverifiedLooksDone.filter((card) => !card.offered),
+      ),
       cards: unverifiedLooksDone.map((card) => ({
         job_number: card.job_number,
         substatus: card.substatus,
         offered: card.offered,
+        confirmable_by_a_trade: card.confirmable_by_a_trade,
         reason: card.reason,
+        blockers: card.blockers,
+        assignments_total: card.assignments_total,
+        assignments_live: card.assignments_live,
       })),
     },
     ready_to_invoice_unverified: {

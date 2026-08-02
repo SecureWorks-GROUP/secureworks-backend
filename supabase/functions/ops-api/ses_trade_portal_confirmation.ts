@@ -113,6 +113,18 @@ export interface SesRoofConfirmationCaptureLike {
   cycle_number?: unknown;
 }
 
+/**
+ * Exported so a measurement can evaluate this blocker INDEPENDENTLY.
+ * `sesRoofConfirmationEligibility` returns the first reason it hits, which is
+ * right for a refusal message and wrong for counting: a card can be blocked
+ * several ways at once, and reporting only the first one rounds the rest off.
+ */
+export function isSesRoofConfirmationDeadCard(
+  card: SesRoofConfirmationCard,
+): boolean {
+  return DEAD_JOB_STATES.has(token(card?.status));
+}
+
 export function isSesRoofCard(card: SesRoofConfirmationCard): boolean {
   const detail = card?.makesafe_details || {};
   return ROOF_CARD_TOKENS.has(

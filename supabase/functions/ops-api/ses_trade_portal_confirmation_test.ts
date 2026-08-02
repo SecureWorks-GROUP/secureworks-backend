@@ -16,7 +16,11 @@ import {
   sesPortalCaptureProducerHasScreenshot,
 } from "./ses_portal_capture_contract.ts";
 import {
+  isSesConfirmingTradeAssignment,
+  isSesRoofCard,
+  isSesRoofConfirmationDeadCard,
   resolveSesRoofPortalUrl,
+  sesRoofCompletionRecorded,
   sesRoofConfirmationEligibility,
 } from "./ses_trade_portal_confirmation.ts";
 import {
@@ -198,6 +202,30 @@ Deno.test("roof identity is settled before liveness, so card_not_live only ever 
     sesRoofConfirmationEligibility(deadRoof, []).reason,
     "card_not_live",
   );
+});
+
+Deno.test("blockers can be evaluated independently, not just as the first reason hit", () => {
+  // `eligibility.reason` short-circuits, which is right for a refusal message
+  // and wrong for counting: the six production cards this control does not
+  // reach are blocked BOTH by a null attendance cycle and by having no assigned
+  // trade, and a measurement that reported only the first would hide the
+  // second. These exported primitives are what let a measurement see both.
+  const card = roofCard({
+    status: "archived",
+    makesafe_details: { attendance_cycle_id: null, external_links: [] },
+  });
+  assertEquals(
+    sesRoofConfirmationEligibility(card, []).reason,
+    "card_not_live",
+  );
+  assertEquals(isSesRoofConfirmationDeadCard(card), true);
+  assertEquals(isSesRoofCard(card), true);
+  assertEquals(resolveSesRoofPortalUrl(card).url, null);
+  assertEquals(sesRoofCompletionRecorded(card, []), false);
+  // "On the job" is a per-viewer fact the card cannot answer, and it is the one
+  // that decides whether ANY trade can act.
+  assertEquals(isSesConfirmingTradeAssignment({ status: "scheduled" }), true);
+  assertEquals(isSesConfirmingTradeAssignment({ status: "cancelled" }), false);
 });
 
 Deno.test("a card with no attendance cycle cannot bind evidence to a visit", () => {

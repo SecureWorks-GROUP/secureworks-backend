@@ -137,26 +137,70 @@ board population `ses-board-population/active-v1`, 407 cards).
 | Roof cards on the active board | 60 |
 | Already carrying current-cycle completion evidence | 9 |
 | **Control offered** | **27** |
+| **Of those, a trade is actually on the job to tick it** | **24** |
 | Not offered: card not live (archived) | 9 |
 | Not offered: no attendance cycle | 6 |
 | Not offered: no portal roof link | 6 |
 | Not offered: two rival roof links | 3 |
 
+`eligibility.reason` is the FIRST blocker hit, which is right for a refusal
+message and wrong for counting — a card can be blocked several ways at once. The
+artifact therefore also carries `blockers`, every blocker evaluated
+independently, so nothing is rounded off. Board-wide, roof cards carry:
+`no_assigned_trade` 16, `already_confirmed` 14, `card_not_live` 9,
+`no_portal_roof_link` 9, `no_attendance_cycle` 6,
+`ambiguous_portal_roof_link` 3. Those overlap, so they exceed 60 on purpose.
+
 ### The named cohort
 
 Live roof cards that look done by substatus with no verification behind them:
-**19** — the same 19 in the brief. **The control now appears on 13 of them.**
+**19** — the same 19 in the brief.
 
-The other **6** are all at `ready_to_invoice` with `attendance_cycle_id IS NULL`
-(SWMS-261079, -261081, -261113, -261114, -261116, -261123, re-verified directly).
-Every capture on this ledger binds to an attendance cycle, so there is nothing to
-bind a confirmation to. The control is correctly absent rather than writing an
-unbound row, and opening a cycle for them would be a state write and a backfill —
-both out of bounds here. Closing that six is a separate, adjudicated change.
+- **The control appears on 13.**
+- **A trade can actually tick 12 of them.** SWMS-26844 is offered the control
+  and has no assignment at all, so nobody is on the job to press it.
+- **6 are not offered.**
+
+### Exactly why each of the 6 is not offered
+
+All six are SWMS-261079, -261081, -261113, -261114, -261116, -261123. Every one
+carries the SAME two independent blockers, and no others:
+
+| Candidate reason | Count across the 6 |
+|---|---|
+| No attendance cycle (`attendance_cycle_id IS NULL`) | **6** |
+| No assigned trade (zero `job_assignments` rows, ever) | **6** |
+| No Prime roof link | 0 — all six carry 5 external links and resolve to one roof link |
+| Two rival roof links | 0 |
+| Completion already recorded | 0 — zero capture rows, `portal_verified_at` null |
+| Card not live | 0 — all six are `jobs.status = 'accepted'` |
+| No builder reference | 0 |
+
+Re-verified directly against production, not inferred from the reason code.
+
+### FINDING FOR THE CAPTAIN
+
+**These 6 cards cannot be confirmed by any trade, and that is not a limitation of
+this control — it is the state of the cards.** All six sit at `ready_to_invoice`
+with:
+
+- **zero `job_assignments` rows** — not cancelled ones, none ever created, so no
+  trade has ever been on the job;
+- **no attendance cycle**, so there is no visit for evidence to bind to;
+- **no portal capture and no legacy verification** — nothing anywhere proves the
+  work happened.
+
+A card claiming ready-to-invoice with no trade, no visit and no verification is a
+data question, not a UI one. Fixing it means someone deciding what actually
+happened on those six jobs: whether a trade attended and the assignment was never
+recorded, whether the work was done by someone else, or whether the card reached
+`ready_to_invoice` in error. Assigning a trade and opening an attendance cycle
+would be state writes and a backfill — both out of bounds here, and both wrong to
+do without that decision. A seventh card, SWMS-26844 (substatus `complete`), has
+the same zero-assignment problem while otherwise being eligible.
 
 Of the 9 cards at `ready_to_invoice` with zero verification named in the brief,
-the control appears on 3; the other 6 are exactly the no-attendance-cycle set
-above.
+the control appears on 3; the other 6 are exactly the set above.
 
 ## No card moves
 

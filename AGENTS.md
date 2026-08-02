@@ -635,9 +635,18 @@ Consequences that are easy to break:
 
 Predicates live in `ses_trade_portal_confirmation.ts` and are shared by the
 board read model and the write path, so an offered control and a refused tick
-can never disagree. Contract, the read-only production measurement (27 of 60
-roof cards offered; 13 of the named 19 unverified cards, the other 6 blocked by
-a null `attendance_cycle_id`), the zero-movement parity proof and the known M1
+can never disagree.
+
+Count blockers INDEPENDENTLY, never by `eligibility.reason` — that returns the
+first blocker hit, which is right for a refusal message and wrong for counting a
+card blocked several ways at once. `scripts/ses-roof-trade-confirmation-measure.ts`
+(read-only, Management API) does this and is the tool to re-run after any change.
+Its 2026-08-02 result: 27 of 60 roof cards offered, 24 with a trade actually on
+the job; 13 of the named 19 unverified cards offered, 12 tickable. The other 6
+are blocked BOTH by a null `attendance_cycle_id` and by having zero
+`job_assignments` rows ever — a card claiming `ready_to_invoice` with no trade,
+no visit and no verification is a data question for the Captain, not a UI one.
+Contract, that finding, the zero-movement parity proof and the known M1
 link-typing gap are in
 `docs/evidence/ses-roof-trade-confirmation-2026-08-02.md`. The trade-app button
 itself lives in `securedash` and is a separate delivery.

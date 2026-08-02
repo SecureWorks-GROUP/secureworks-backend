@@ -1,19 +1,28 @@
 {
-  "measured_at": "2026-08-02T10:05:06.552Z",
+  "measured_at": "2026-08-02T10:15:15.805Z",
   "board_population": "ses-board-population/active-v1 [NOT FINAL — pending C.5 (active-only vs all-including-cancelled); this is not \"the whole board\"]",
   "board_population_contract_version": "ses-board-population/active-v1",
-  "queries": 3,
+  "queries": 4,
   "totals": {
     "board_cards": 407,
     "roof_cards": 60,
     "roof_confirmed_already": 9,
     "roof_control_offered": 27,
+    "roof_confirmable_by_a_trade": 24,
     "roof_reasons": {
       "no_portal_roof_link": 6,
       "eligible": 27,
       "no_attendance_cycle": 6,
       "card_not_live": 9,
       "already_confirmed": 9,
+      "ambiguous_portal_roof_link": 3
+    },
+    "roof_blockers": {
+      "no_portal_roof_link": 9,
+      "no_assigned_trade": 16,
+      "no_attendance_cycle": 6,
+      "card_not_live": 9,
+      "already_confirmed": 14,
       "ambiguous_portal_roof_link": 3
     }
   },
@@ -30,124 +39,229 @@
   "unverified_looks_done": {
     "count": 19,
     "control_offered": 13,
+    "confirmable_by_a_trade": 12,
     "reasons": {
       "no_attendance_cycle": 6,
       "eligible": 13
+    },
+    "blockers": {
+      "no_attendance_cycle": 6,
+      "no_assigned_trade": 7
+    },
+    "blockers_on_not_offered": {
+      "no_attendance_cycle": 6,
+      "no_assigned_trade": 6
     },
     "cards": [
       {
         "job_number": "SWMS-261079",
         "substatus": "ready_to_invoice",
         "offered": false,
-        "reason": "no_attendance_cycle"
+        "confirmable_by_a_trade": false,
+        "reason": "no_attendance_cycle",
+        "blockers": [
+          "no_attendance_cycle",
+          "no_assigned_trade"
+        ],
+        "assignments_total": 0,
+        "assignments_live": 0
       },
       {
         "job_number": "SWMS-261081",
         "substatus": "ready_to_invoice",
         "offered": false,
-        "reason": "no_attendance_cycle"
+        "confirmable_by_a_trade": false,
+        "reason": "no_attendance_cycle",
+        "blockers": [
+          "no_attendance_cycle",
+          "no_assigned_trade"
+        ],
+        "assignments_total": 0,
+        "assignments_live": 0
       },
       {
         "job_number": "SWMS-261113",
         "substatus": "ready_to_invoice",
         "offered": false,
-        "reason": "no_attendance_cycle"
+        "confirmable_by_a_trade": false,
+        "reason": "no_attendance_cycle",
+        "blockers": [
+          "no_attendance_cycle",
+          "no_assigned_trade"
+        ],
+        "assignments_total": 0,
+        "assignments_live": 0
       },
       {
         "job_number": "SWMS-261114",
         "substatus": "ready_to_invoice",
         "offered": false,
-        "reason": "no_attendance_cycle"
+        "confirmable_by_a_trade": false,
+        "reason": "no_attendance_cycle",
+        "blockers": [
+          "no_attendance_cycle",
+          "no_assigned_trade"
+        ],
+        "assignments_total": 0,
+        "assignments_live": 0
       },
       {
         "job_number": "SWMS-261116",
         "substatus": "ready_to_invoice",
         "offered": false,
-        "reason": "no_attendance_cycle"
+        "confirmable_by_a_trade": false,
+        "reason": "no_attendance_cycle",
+        "blockers": [
+          "no_attendance_cycle",
+          "no_assigned_trade"
+        ],
+        "assignments_total": 0,
+        "assignments_live": 0
       },
       {
         "job_number": "SWMS-261123",
         "substatus": "ready_to_invoice",
         "offered": false,
-        "reason": "no_attendance_cycle"
+        "confirmable_by_a_trade": false,
+        "reason": "no_attendance_cycle",
+        "blockers": [
+          "no_attendance_cycle",
+          "no_assigned_trade"
+        ],
+        "assignments_total": 0,
+        "assignments_live": 0
       },
       {
         "job_number": "SWMS-26720",
         "substatus": "complete",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 2,
+        "assignments_live": 2
       },
       {
         "job_number": "SWMS-26721",
         "substatus": "complete",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 2,
+        "assignments_live": 2
       },
       {
         "job_number": "SWMS-26727",
         "substatus": "complete",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 2,
+        "assignments_live": 2
       },
       {
         "job_number": "SWMS-26735",
         "substatus": "ready_to_invoice",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 2,
+        "assignments_live": 2
       },
       {
         "job_number": "SWMS-26736",
         "substatus": "ready_to_invoice",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 4,
+        "assignments_live": 4
       },
       {
         "job_number": "SWMS-26759",
         "substatus": "ready_to_invoice",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 2,
+        "assignments_live": 2
       },
       {
         "job_number": "SWMS-26763",
         "substatus": "complete",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 2,
+        "assignments_live": 2
       },
       {
         "job_number": "SWMS-26793",
         "substatus": "complete",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 2,
+        "assignments_live": 2
       },
       {
         "job_number": "SWMS-26805",
         "substatus": "complete",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 2,
+        "assignments_live": 2
       },
       {
         "job_number": "SWMS-26814",
         "substatus": "complete",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 2,
+        "assignments_live": 2
       },
       {
         "job_number": "SWMS-26844",
         "substatus": "complete",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": false,
+        "reason": "eligible",
+        "blockers": [
+          "no_assigned_trade"
+        ],
+        "assignments_total": 0,
+        "assignments_live": 0
       },
       {
         "job_number": "SWMS-26863",
         "substatus": "admin_to_send_report",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 1,
+        "assignments_live": 1
       },
       {
         "job_number": "SWMS-26957",
         "substatus": "admin_to_send_report",
         "offered": true,
-        "reason": "eligible"
+        "confirmable_by_a_trade": true,
+        "reason": "eligible",
+        "blockers": [],
+        "assignments_total": 1,
+        "assignments_live": 1
       }
     ]
   },
