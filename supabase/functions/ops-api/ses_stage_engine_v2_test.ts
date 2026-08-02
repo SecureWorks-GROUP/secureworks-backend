@@ -1001,6 +1001,59 @@ Deno.test("portal: cannot-observe is not not-done", () => {
   assert(notDone.missing[0] !== unreachable.missing[0]);
 });
 
+Deno.test("portal: role observation uses the latest dated capture", () => {
+  const olderNotDone = {
+    ...ACCEPTED,
+    status: "not_done",
+    locked: false,
+    screenshot: "old.png",
+    captured_at: "2026-08-02T08:00:00.000Z",
+    revision_id: "revision-old",
+  };
+  const newerUnreachable = {
+    ...ACCEPTED,
+    status: "unreachable",
+    locked: false,
+    screenshot: null,
+    captured_at: "2026-08-02T09:00:00.000Z",
+    revision_id: "revision-new",
+  };
+  const newerNotDone = {
+    ...olderNotDone,
+    captured_at: newerUnreachable.captured_at,
+    revision_id: newerUnreachable.revision_id,
+  };
+  const olderUnreachable = {
+    ...newerUnreachable,
+    captured_at: olderNotDone.captured_at,
+    revision_id: olderNotDone.revision_id,
+  };
+
+  const latestUnreachable = deriveSesStageV2(
+    portalInput([olderNotDone, newerUnreachable]),
+  );
+  assertEquals(
+    sesStagePortalRoleObservation(
+      portalInput([olderNotDone, newerUnreachable]),
+      "roof_report",
+    ),
+    "cannot_observe",
+  );
+  assert(latestUnreachable.missing[0].includes("could not observe"));
+
+  const latestNotDone = deriveSesStageV2(
+    portalInput([olderUnreachable, newerNotDone]),
+  );
+  assertEquals(
+    sesStagePortalRoleObservation(
+      portalInput([olderUnreachable, newerNotDone]),
+      "roof_report",
+    ),
+    "observed_not_done",
+  );
+  assert(latestNotDone.missing[0].includes("submitted and locked"));
+});
+
 Deno.test("portal: the four observations are distinguished", () => {
   const cases: Array<[any[], string]> = [
     [[ACCEPTED], "proved"],

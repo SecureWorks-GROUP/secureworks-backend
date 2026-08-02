@@ -65,6 +65,8 @@ export interface MakesafePortalCapture {
   screenshot?: string | null;
   screenshot_path?: string | null;
   cycle_number?: number | null;
+  revision_id?: string | null;
+  captured_at?: string | null;
 }
 
 export interface MakesafeStatusEvidence {

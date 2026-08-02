@@ -410,10 +410,26 @@ export function sesStagePortalRoleObservation(
   if (donePortalRoles(input as MakesafeStatusInput).has(role)) return "proved";
 
   const cycle = Number(input.detail?.cycle_number ?? 1);
-  const capture = (input.evidence?.portalCaptures || []).find((item) =>
+  const captures = (input.evidence?.portalCaptures || []).filter((item) =>
     captureRole(item) === role &&
     (item.cycle_number == null || Number(item.cycle_number) === cycle)
   );
+  const datedCaptures = captures.filter((item) =>
+    String(item.captured_at || "").trim()
+  );
+  const capture = datedCaptures.length === 0
+    ? captures[0]
+    : datedCaptures.reduce((latest, item) => {
+      const timeOrder = String(item.captured_at || "").localeCompare(
+        String(latest.captured_at || ""),
+      );
+      if (timeOrder !== 0) return timeOrder > 0 ? item : latest;
+      return String(item.revision_id || "").localeCompare(
+          String(latest.revision_id || ""),
+        ) > 0
+        ? item
+        : latest;
+    });
   const status = String(capture?.status || "").toLowerCase();
   if (status === "not_done") return "observed_not_done";
   // `unreachable` is the reader telling us it could not see the portal. The
