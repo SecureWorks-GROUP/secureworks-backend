@@ -28,6 +28,7 @@ import {
 import { deriveFromDomain, isOwnDomain } from "./makesafe_compact_reads.ts";
 import { stripEmailHtmlForTrade } from "./makesafe_email_links.ts";
 import { isReportOnlyType } from "./makesafe_intake_gate.ts";
+import { isSelfGeneratedMakesafeWorkOrder } from "./makesafe_builder_work_order_identity.ts";
 import {
   canonicalCompanyDedupeKey,
   canonicalExternalObligationRef,
@@ -2903,12 +2904,19 @@ async function resolveSelectedLineage(
   return { plan: resolvedPlan, missingParents };
 }
 
-// Statuses that mean an existing job is no longer a live obligation. A later
-// genuine re-issue of the same claim/PO must NOT bind to a dead job, so these are
-// excluded from the obligation match (the boundary then creates a live job).
+// Terminal cards remain instruction authority. They are matched by the pre-mint
+// boundary, then surfaced as a binding exception rather than silently revived or
+// replaced by a second card.
 const OBLIGATION_DEAD_STATUSES = new Set([
+  "archive",
+  "archived",
   "cancelled",
   "canceled",
+  "closed",
+  "complete",
+  "completed",
+  "deleted",
+  "lost",
   "void",
   "voided",
   "superseded",
@@ -2954,6 +2962,7 @@ export interface CancellationTargetResolution {
 interface ObligationBindingException {
   kind:
     | "multiple_live_jobs"
+    | "terminal_job_binding"
     | "multiple_corrected_targets"
     | "corrected_target_mismatch";
   candidateJobIds: string[];
@@ -3104,21 +3113,14 @@ async function readObligationMatches(
       (!targetRef && !item.identity.builderWoCanonical &&
         !item.identity.builderPoCanonical)
     ) continue;
-    const targetReportOnly = deterministicPrimaryIsReportOnly(item);
     const matchingRows = (data || []).filter((row: any) => {
       if (!row?.job_id) return false;
       const existingCompany = canonicalCompanyDedupeKey(
         row.requesting_company_slug || row.requesting_company_name,
       );
       if (!existingCompany || existingCompany !== targetCompany) return false;
-      if (isReportOnlyType(row.report_type) !== targetReportOnly) return false;
       const existingJob = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
       if (existingJob?.type && existingJob.type !== "makesafe") return false;
-      // A cancelled/void/superseded job is a dead obligation: a later genuine
-      // re-issue of the same claim/PO must create a live job, not bind here.
-      if (!cancellation && isDeadObligationJobStatus(existingJob?.status)) {
-        return false;
-      }
       const existingRef = canonicalExternalObligationRef(
         row.external_ref,
         prefixes,
@@ -3209,6 +3211,34 @@ async function readObligationMatches(
       });
       continue;
     }
+    const correctedMatch = correctedTargetJobId
+      ? uniqueMatches.find((row) =>
+        String(row.job_id) === correctedTargetJobId
+      ) || null
+      : null;
+    if (correctedMatch) {
+      const correctedJob = Array.isArray(correctedMatch.jobs)
+        ? correctedMatch.jobs[0]
+        : correctedMatch.jobs;
+      if (!isDeadObligationJobStatus(correctedJob?.status)) {
+        existingJobs.set(item.instructionKey, correctedTargetJobId!);
+        continue;
+      }
+    }
+    const terminalMatches = uniqueMatches.filter((row) => {
+      const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+      return isDeadObligationJobStatus(job?.status);
+    });
+    if (terminalMatches.length) {
+      bindingExceptions.set(
+        item.instructionKey,
+        bindingException("terminal_job_binding", [
+          ...uniqueMatches.map((row) => String(row.job_id)),
+          ...(correctedTargetJobId ? [correctedTargetJobId] : []),
+        ]),
+      );
+      continue;
+    }
     if (uniqueMatches.length > 1) {
       // Ambiguity belongs to this instruction, not to the mailbox. Preserve every
       // candidate for human binding and let the per-case loop account the source
@@ -3263,6 +3293,8 @@ function obligationBindingExceptionPlan(
   // non-PII review card without a migration or an automatic binding.
   const conflictField = resolution.kind === "multiple_live_jobs"
     ? "live_job_binding"
+    : resolution.kind === "terminal_job_binding"
+    ? "terminal_job_binding"
     : "corrected_target_job_binding";
   const candidates = resolution.candidateJobNumbers.length
     ? resolution.candidateJobNumbers
@@ -3397,17 +3429,6 @@ function deterministicSplitObligation(
   return isReportOnlyType(so.type) ? { reportType: so.type } : null;
 }
 
-// Mirrors approveIntakeDraft's primaryIsReportOnly for report typing. Every live
-// family still requires the builder WO PDF at the guarded approval boundary; a
-// split obligation additionally keeps the primary card physical.
-function deterministicPrimaryIsReportOnly(
-  plan: DeterministicCasePlan,
-): boolean {
-  if (deterministicSplitObligation(plan)) return false;
-  return plan.identity.jobFamily === "roof_report" ||
-    plan.identity.jobFamily === "assessment_report_quote";
-}
-
 function approvalPrevalidationMissingFields(
   plan: DeterministicCasePlan,
   sourceMap: Map<string, DeterministicSourceItem>,
@@ -3423,6 +3444,7 @@ function approvalPrevalidationMissingFields(
   const hasWorkOrderPdf = plan.sourcePostIds.some((postId) =>
     (sourceMap.get(postId)?.attachments || []).some((attachment) =>
       attachment.status === "uploaded" && Boolean(attachment.storagePath) &&
+      !isSelfGeneratedMakesafeWorkOrder(attachment.name) &&
       (/pdf/i.test(attachment.contentType || "") ||
         /\.pdf$/i.test(attachment.name || ""))
     )

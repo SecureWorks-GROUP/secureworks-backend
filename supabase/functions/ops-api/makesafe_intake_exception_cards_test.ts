@@ -533,6 +533,30 @@ Deno.test("live-job binding ambiguity stays visible and names every candidate jo
   );
 });
 
+Deno.test("terminal instruction binding stays visible and forbids auto-create", () => {
+  const terminal = exceptionCase("terminal-binding", "MLB-27001", {
+    company_id: "company-mlb",
+    company_slug_raw: "mlb",
+    missing_fields: [],
+    reason_code: "conflicting_fields",
+    conflicting_fields: {
+      terminal_job_binding: ["SWMS-260001"],
+    },
+  });
+  const projection = buildIntakeExceptionProjection(projectionInput({
+    cases: [terminal],
+    sources: [source("terminal-binding")],
+    companies: [{ id: "company-mlb", slug: "mlb", name: "MLB" }],
+  }));
+  assertEquals(projection.cards.length, 1);
+  assertEquals(projection.dispositions[0].disposition, "visible_review_card");
+  assertEquals(
+    projection.cards[0].blocker_sentence,
+    "This instruction MLB-27001 already has a terminal card (SWMS-260001) - attach to it or resolve the binding; no second card can be created.",
+  );
+  assertEquals(projection.cards[0].auto_create_job, false);
+});
+
 Deno.test("grouped binding cards aggregate and cap candidates across member rows", () => {
   const primary = exceptionCase("grouped-primary", "MLB-26200", {
     received_at: "2026-07-27T01:00:00.000Z",

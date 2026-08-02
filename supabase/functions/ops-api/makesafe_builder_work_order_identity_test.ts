@@ -1,10 +1,99 @@
 // deno-lint-ignore-file no-import-prefix
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  builderInstructionKey,
   extractBuilderWorkOrderIdentity,
   hasUnparseablePoLabel,
+  isSelfGeneratedMakesafeWorkOrder,
   mergeBuilderWorkOrderIdentity,
 } from "./makesafe_builder_work_order_identity.ts";
+import {
+  canonicalExternalObligationRef,
+  normaliseRef,
+} from "../_shared/makesafe_refs.ts";
+
+// The infix is retained as GROUP provenance and dropped from the identity: the
+// business unit is a routing label inside MLB, so `MLB-RR-26836` and a plain
+// `MLB-26836` carrying the same PO are one job, not two.
+Deno.test("builder identity: MLB business-unit infix is group provenance, not identity", () => {
+  for (
+    const fileName of [
+      "MLB-RR-26836PO-57514.pdf",
+      "work_order_MLB-MW-26956PO-56959.pdf",
+    ]
+  ) {
+    const identity = extractBuilderWorkOrderIdentity({
+      attachmentNames: [fileName],
+    });
+    const unit = fileName.includes("-RR-") ? "RR" : "MW";
+    const claim = unit === "RR" ? "26836" : "26956";
+    const po = unit === "RR" ? "57514" : "56959";
+    assertEquals(identity.builder_claim_ref, `MLB-${unit}-${claim}`);
+    assertEquals(identity.builder_po_number, `PO-${po}`);
+    assertEquals(builderInstructionKey(identity), `MLB:PO-${po}`);
+    assertEquals(
+      canonicalExternalObligationRef(`MLB-${unit}-${claim}PO-${po}`),
+      `MLB-${unit}-${claim}`,
+    );
+    assertEquals(
+      normaliseRef(`MLB-${unit}-${claim}PO-${po}`),
+      `MLB-${unit}-${claim}`,
+    );
+  }
+});
+
+Deno.test("builder identity: bare AJ external reference is company-scoped", () => {
+  const aj = extractBuilderWorkOrderIdentity({
+    externalRef: "70062",
+    requestingCompanySlug: "aj",
+  });
+  assertEquals(aj.builder_claim_ref, "AJBR-70062");
+  assertEquals(aj.builder_work_order_number, "AJBR-70062");
+  assertEquals(builderInstructionKey(aj), "AJ:JOB-70062");
+
+  for (const requestingCompanySlug of ["bw", "wb", "", null]) {
+    const other = extractBuilderWorkOrderIdentity({
+      externalRef: "70062",
+      requestingCompanySlug,
+    });
+    assertEquals(other.builder_claim_ref, null);
+    assertEquals(other.builder_work_order_number, null);
+    // No claim, no PO: a bare number under a non-AJ builder is never an
+    // identity, even though the slug alone would supply a scope.
+    assertEquals(
+      builderInstructionKey(other, { requestingCompanySlug }),
+      null,
+    );
+  }
+});
+
+Deno.test("builder identity: SecureWorks cover sheet is not a builder work order", () => {
+  assertEquals(
+    isSelfGeneratedMakesafeWorkOrder("work-order-SWMS-26998.pdf"),
+    true,
+  );
+  assertEquals(
+    isSelfGeneratedMakesafeWorkOrder(
+      "https://storage.invalid/docs/work-order-SWMS-26998.pdf?token=redacted",
+    ),
+    true,
+  );
+  assertEquals(
+    isSelfGeneratedMakesafeWorkOrder("builder-work-order-SWMS-26998.pdf"),
+    false,
+  );
+  assertEquals(
+    extractBuilderWorkOrderIdentity({
+      attachmentNames: ["work-order-SWMS-26998.pdf"],
+    }),
+    {
+      builder_claim_ref: null,
+      builder_work_order_number: null,
+      builder_po_number: null,
+      evidence_sources: [],
+    },
+  );
+});
 
 Deno.test("builder identity: extracts MLB claim and PO from work-order filename", () => {
   const identity = extractBuilderWorkOrderIdentity({

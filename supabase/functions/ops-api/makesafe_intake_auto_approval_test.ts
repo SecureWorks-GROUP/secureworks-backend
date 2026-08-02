@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix
 import {
   assert,
   assertEquals,
@@ -59,6 +60,23 @@ Deno.test("clean intake auto-approval allows only high-confidence normal WOs wit
     }],
   });
   assert(decision.ok, decision.reason);
+});
+
+Deno.test("SecureWorks cover sheet cannot satisfy the intake WO floor", () => {
+  const decision = _shouldAutoApproveCleanIntakeForTest({
+    confidence: "high",
+    matchedCompany: { slug: "aj" },
+    externalRef: "AJBR-70001",
+    clientName: "present",
+    siteAddress: "present",
+    missingFields: [],
+    attachments: [{
+      file_name: "work-order-SWMS-27001.pdf",
+      pdf_url: "https://example.test/work-order-SWMS-27001.pdf",
+      is_work_order: true,
+    }],
+  });
+  assertEquals(decision, { ok: false, reason: "missing_work_order_pdf" });
 });
 
 Deno.test("clean intake auto-approval allows report-worded rows only when a WO PDF is clear", () => {

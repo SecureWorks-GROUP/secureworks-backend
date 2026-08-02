@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 export interface BuilderWorkOrderIdentityInput {
   externalRef?: string | null;
+  requestingCompanySlug?: string | null;
   subject?: string | null;
   bodyText?: string | null;
   attachmentNames?: Array<string | null | undefined>;
@@ -16,9 +17,9 @@ export interface BuilderWorkOrderIdentity {
 // ABJR is a live-mail typo of AJBR (Track A D7): both spellings are read and
 // canonicalClaim collapses them onto the one AJBR identity.
 const BUILDER_REF_WITH_PO_RE =
-  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
+  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})\s*(?:[-_\s]*)?P\s*O\s*[-_\s#]*(\d{3,})(?![A-Z0-9])/i;
 const BUILDER_REF_RE =
-  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
+  /(?<![A-Z0-9])(AJBR|ABJR|AJS|MLB(?:[-\s]+(?!PO(?:[-\s#]|$))[A-Z]{2})?|BWCWA|BWC|WB|KBA)[-\s#]*(\d{3,})(?![A-Z0-9])/i;
 /**
  * The PO label this module can read, as a source pattern. Exported so downstream
  * identity matching derives the SAME grammar instead of keeping a second copy:
@@ -81,10 +82,29 @@ function attachmentNameScanText(name: string): string {
   return name.replace(/_/g, " ");
 }
 
+/**
+ * Files minted by SecureWorks while creating a card are internal cover sheets,
+ * not instructions supplied by a builder. Keep the check filename-scoped and
+ * basename-aware so storage URLs cannot turn an internal document into evidence.
+ */
+export function isSelfGeneratedMakesafeWorkOrder(
+  value: string | null | undefined,
+): boolean {
+  const withoutQuery = String(value || "").split(/[?#]/, 1)[0];
+  let decoded = withoutQuery;
+  try {
+    decoded = decodeURIComponent(withoutQuery);
+  } catch {
+    // A malformed storage path cannot satisfy the exact internal filename shape.
+  }
+  const basename = decoded.split(/[\\/]/).pop() || "";
+  return /^work-order-SWMS-\d+\.pdf$/i.test(basename);
+}
+
 function canonicalClaim(prefix: string, digits: string): string {
-  const canonical = prefix.toUpperCase() === "ABJR"
-    ? "AJBR"
-    : prefix.toUpperCase();
+  const normalisedPrefix = prefix.toUpperCase().replace(/[\s#-]+/g, "-")
+    .replace(/^-|-$/g, "");
+  const canonical = normalisedPrefix === "ABJR" ? "AJBR" : normalisedPrefix;
   return `${canonical}-${digits}`;
 }
 
@@ -177,6 +197,16 @@ export function extractBuilderWorkOrderIdentity(
     evidence_sources: [],
   };
 
+  const bareAjRef = String(input.externalRef || "").trim().match(/^(\d{5,})$/);
+  if (
+    String(input.requestingCompanySlug || "").trim().toLowerCase() === "aj" &&
+    bareAjRef
+  ) {
+    result.builder_claim_ref = `AJBR-${bareAjRef[1]}`;
+    result.builder_work_order_number = `AJBR-${bareAjRef[1]}`;
+    addSource(result.evidence_sources, "external_ref");
+  }
+
   if (input.externalRef) scanText(input.externalRef, "external_ref", result);
 
   // Track A D6 (standing rule + Ruling 5): the subject line never ANCHORS
@@ -185,7 +215,9 @@ export function extractBuilderWorkOrderIdentity(
   // fills a gap but can no longer beat filename/body identity when a reused
   // "NEW WORK ORDER" subject carries a different or partial reference.
   for (const name of input.attachmentNames || []) {
-    if (name) scanText(attachmentNameScanText(name), "attachment_name", result);
+    if (name && !isSelfGeneratedMakesafeWorkOrder(name)) {
+      scanText(attachmentNameScanText(name), "attachment_name", result);
+    }
   }
 
   if (input.bodyText) {
@@ -206,6 +238,167 @@ export function extractBuilderWorkOrderIdentity(
   if (input.subject) scanText(input.subject, "subject", result);
 
   return result;
+}
+
+/**
+ * Builder (company) scope for an instruction key. The purchase-order number is
+ * the job grain, and a bare PO string is only unique inside one builder, so the
+ * scope is part of the key rather than an assumption around it.
+ */
+export type BuilderInstructionScope = "AJ" | "MLB" | "BWCWA" | "WB" | "KBA";
+
+/**
+ * `makesafe_companies.slug` -> scope. Deliberately a CLOSED map, not a string
+ * cast: an unknown slug must yield no scope and therefore no key, never a scope
+ * invented from whatever the intake happened to store.
+ *
+ * `bw` is Builderwest (BWCWA-/PO-20xxx references) and `wb` is Western Building
+ * (WB<job>-<instruction>). They are two different builders whose prefixes are
+ * near-anagrams — do not collapse them.
+ */
+const COMPANY_SLUG_SCOPES: Record<string, BuilderInstructionScope> = {
+  aj: "AJ",
+  mlb: "MLB",
+  bw: "BWCWA",
+  wb: "WB",
+  kba: "KBA",
+};
+
+/**
+ * Scope from the builder's own reference prefix, which outranks the company
+ * slug. The slug is measurably unreliable — production carries a Western
+ * Building `WB68792` reference on a card slugged `bw`, and another on a card
+ * slugged `kba` — so it is consulted only when the reference carries no prefix
+ * at all (Builderwest's bare `PO20919` shape).
+ */
+export function builderInstructionScope(input: {
+  claimRef?: string | null;
+  workOrderNumber?: string | null;
+  requestingCompanySlug?: string | null;
+}): BuilderInstructionScope | null {
+  const ref = String(input.claimRef || input.workOrderNumber || "")
+    .toUpperCase();
+  const prefix = ref.match(/^([A-Z][A-Z-]*?)-?\d/)?.[1] ||
+    (/^[A-Z]+$/.test(ref) ? ref : "");
+  if (/^A[JB][BJ]R$|^AJS$/.test(prefix)) return "AJ";
+  if (/^BWC(WA)?$/.test(prefix)) return "BWCWA";
+  // MLB routes work through two-letter business units (MLB-RR, MLB-MW). The
+  // unit is a routing label inside one builder, never a separate scope.
+  if (/^MLB(-[A-Z]{2})?$/.test(prefix)) return "MLB";
+  if (prefix === "WB") return "WB";
+  if (prefix === "KBA") return "KBA";
+  const slug = String(input.requestingCompanySlug || "").trim().toLowerCase();
+  return COMPANY_SLUG_SCOPES[slug] || null;
+}
+
+export interface BuilderInstructionKeyOptions {
+  /** Consulted only when the reference itself carries no builder prefix. */
+  requestingCompanySlug?: string | null;
+  /**
+   * `makesafe_job_family`. Only `repair` changes the grain — see rule 3 below.
+   */
+  family?: string | null;
+}
+
+/**
+ * Canonical one-instruction key, under the captain's 2026-08-02 ruling that
+ * **the purchase order is the job** (`data/decisions/2026-08-02-purchase-order-
+ * is-the-job-grain.md`). Three grains, in this order:
+ *
+ * 1. **Builder scope + purchase order** wherever a PO exists. The work order /
+ *    claim reference is the GROUP across a family of jobs, so it is provenance
+ *    and must never enter the key: one PO carried under two spellings of its
+ *    group reference has to produce ONE key, or the twin the gate exists to
+ *    prevent walks straight through it.
+ * 2. **AJ keys on its job number.** AJ issues no purchase order at all — zero
+ *    PO tokens across 130 AJ cards at 2026-08-02 — and only does make-safes, so
+ *    the `AJBR` number is one deliverable. The 5-digit floor is Ruling 13.
+ * 3. **Repair keys on the work order**, because repair carries no
+ *    per-deliverable PO. UNEXERCISED: zero of the 440 board cards carry the
+ *    `repair` family, and the ruling itself flags this reading as provisional,
+ *    so the branch fires only when a caller states the family.
+ *
+ * Everything else yields `null` and the gate stands aside. In particular there
+ * is NO claim-only fallback for MLB, Builderwest, Western Building or KBA: a
+ * bare group reference is not an instruction, and Western Building's references
+ * carry a second per-instruction number (`WB69684-178656`) that a claim-only key
+ * would silently discard.
+ */
+export function builderInstructionKey(
+  identity: BuilderWorkOrderIdentity,
+  options: BuilderInstructionKeyOptions = {},
+): string | null {
+  const scope = builderInstructionScope({
+    claimRef: identity.builder_claim_ref,
+    workOrderNumber: identity.builder_work_order_number,
+    requestingCompanySlug: options.requestingCompanySlug,
+  });
+  if (!scope) return null;
+
+  const poDigits = String(identity.builder_po_number || "").match(/(\d{3,})$/);
+  if (poDigits) return `${scope}:PO-${poDigits[1]}`;
+
+  const claimDigits = String(
+    identity.builder_claim_ref || identity.builder_work_order_number || "",
+  ).match(/(\d{3,})$/);
+  if (!claimDigits) return null;
+
+  if (scope === "AJ") {
+    return claimDigits[1].length >= 5 ? `AJ:JOB-${claimDigits[1]}` : null;
+  }
+  if (String(options.family || "").trim().toLowerCase() === "repair") {
+    return `${scope}:WO-${claimDigits[1]}`;
+  }
+  return null;
+}
+
+/** Read every canonical key already declared by one card, source by source. */
+export function builderInstructionKeysForCard(input: {
+  requestingCompanySlug?: string | null;
+  family?: string | null;
+  metadata?: Record<string, any> | null;
+  detailExternalRef?: string | null;
+  attachmentNames?: Array<string | null | undefined>;
+}): string[] {
+  const metadata = input.metadata || {};
+  const options: BuilderInstructionKeyOptions = {
+    requestingCompanySlug: input.requestingCompanySlug,
+    family: input.family ?? metadata.makesafe_job_family ?? null,
+  };
+  const structured = [
+    metadata.builder_work_order_number,
+    metadata.builder_claim_ref,
+    metadata.builder_po_number,
+  ].filter(Boolean).join(" ");
+  const sourceValues = [
+    structured,
+    metadata.external_ref,
+    input.detailExternalRef,
+  ].filter(Boolean);
+  const keys = sourceValues.flatMap((externalRef) => {
+    const key = builderInstructionKey(
+      extractBuilderWorkOrderIdentity({
+        externalRef: String(externalRef),
+        requestingCompanySlug: input.requestingCompanySlug,
+      }),
+      options,
+    );
+    return key ? [key] : [];
+  });
+  for (const attachmentName of input.attachmentNames || []) {
+    if (!attachmentName || isSelfGeneratedMakesafeWorkOrder(attachmentName)) {
+      continue;
+    }
+    const key = builderInstructionKey(
+      extractBuilderWorkOrderIdentity({
+        requestingCompanySlug: input.requestingCompanySlug,
+        attachmentNames: [attachmentName],
+      }),
+      options,
+    );
+    if (key) keys.push(key);
+  }
+  return [...new Set(keys)].sort();
 }
 
 export function mergeBuilderWorkOrderIdentity(

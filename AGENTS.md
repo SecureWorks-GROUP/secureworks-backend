@@ -103,6 +103,43 @@ per-attachment-id counting; the invariant, tests and replay proof are in
 `makesafe_duplicate_transport_dedupe_test.ts` and
 `docs/evidence/track-a-d8-duplicate-transport-2026-07-30.md`.
 
+The forward mint invariant is one canonical builder instruction per card,
+including terminal cards. The shared identity grammar, attach-time correction,
+self-generated WO exclusion and pre-mint refusal live in
+`makesafe_builder_work_order_identity.ts`,
+`makesafe_work_order_identity_refresh.ts` and
+`makesafe_instruction_mint_gate.ts`; the bounded proof and read-only impact
+measurement are in
+`docs/evidence/ses-f9-instruction-identity-forward-2026-08-02.md`. Do not turn
+this into a board re-key/backfill or let `work-order-SWMS-*.pdf` count as a
+builder instruction/evidence floor.
+
+## The Purchase Order Is The Instruction Key; The Work Order Is The Group
+
+Per the captain's 2026-08-02 ruling, `builderInstructionKey` is **builder scope
+plus purchase order** (`MLB:PO-54000`). The work order and claim reference are
+grouping and provenance and must never re-enter the identity — a composite
+`claim+PO` key gives one purchase order two keys when its group reference
+drifts, which is the twin the gate exists to prevent. `MLB-RR`/`MLB-MW` are one
+scope with `MLB`. AJ keys on its job number (`AJ:JOB-67009`); repair keys on the
+work order and fires only when a caller states the family. There is NO
+claim-only fallback for anyone else: `bw` is Builderwest and `wb` is Western
+Building, whose `WB69684-178656` references carry a second per-instruction
+number a claim-only key would discard. Reference prefix outranks
+`requesting_company_slug` (the slug is measurably wrong on real rows); the
+slug->scope map is closed so an unknown slug yields no key.
+
+Re-prove the grain against production before trusting any count, and after any
+correction tranche: `scripts/ses-identity-grain-measure.ts` (read-only,
+Management API). Always report DECLARED PO coverage (the card's own PO, 62/440)
+separately from OBSERVED (any PO the grammar reads, including work-order
+FILENAMES, 274/440) — MLB attaches every PDF of a claim to every card in that
+family, so an observed token is not ownership. Contract, the measured
+gains/losses, and the five open captain items (including `MLB:PO-54129`, one PO
+that legitimately became two billed jobs) are in
+`docs/evidence/ses-identity-grain-conform-2026-08-02.md`. Hostile probes:
+`makesafe_instruction_key_po_grain_test.ts`.
+
 Identity tokens are read out of attachment FILENAMES with underscores
 normalised to spaces, because `_` is a word character and the PO grammar's
 `\b` boundaries otherwise cannot see `PO20877` inside

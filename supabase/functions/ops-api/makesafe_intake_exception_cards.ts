@@ -440,6 +440,7 @@ export function intakeBlockerSentence(neededInformation: string[]): string {
 
 const JOB_BINDING_CONFLICT_FIELDS = [
   "live_job_binding",
+  "terminal_job_binding",
   "corrected_target_job_binding",
 ] as const;
 
@@ -501,8 +502,14 @@ function groupedJobBindingBlockerSentence(
   const instruction = rows[0].builder_wo_canonical ||
     rows[0].external_ref_canonical || rows[0].external_ref_raw || "unknown";
   const liveCandidates = candidatesByKind.get("live_job_binding") || [];
+  const terminalCandidates = candidatesByKind.get("terminal_job_binding") || [];
   const correctedCandidates =
     candidatesByKind.get("corrected_target_job_binding") || [];
+  if (terminalCandidates.length) {
+    return `This instruction ${instruction} already has a terminal card (${
+      renderCandidates("terminal_job_binding")
+    }) - attach to it or resolve the binding; no second card can be created.`;
+  }
   if (liveCandidates.length && correctedCandidates.length) {
     return `This instruction ${instruction} has mixed binding conflicts: live-job candidates (${
       renderCandidates("live_job_binding")

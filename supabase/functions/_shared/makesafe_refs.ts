@@ -191,6 +191,10 @@ export function normaliseRef(
   if (raw == null) return null;
   const s = canonicaliseRefTypos(String(raw).trim());
   if (!s) return null;
+  const mlbUnit = s.match(
+    /\bMLB\s*[- ]\s*((?!PO(?:\b|\s|[-#]))[A-Z]{2})\s*[- ]\s*(\d+)/i,
+  );
+  if (mlbUnit) return `MLB-${mlbUnit[1].toUpperCase()}-${mlbUnit[2]}`;
   const sorted = cleanPrefixes(prefixes);
   const alt = sorted.map(escapeRegExp).join("|");
   // Normalise "AJBR 67200" / "AJBR-67200" / "MS191190" -> "<PREFIX>-<digits>".
@@ -222,6 +226,10 @@ export function canonicalExternalObligationRef(
   if (raw == null) return null;
   const value = canonicaliseRefTypos(String(raw).trim());
   if (!value) return null;
+  const mlbUnit = value.match(
+    /\bMLB\s*[- ]\s*((?!PO(?:\b|\s|[-#]))[A-Z]{2})\s*[- ]\s*(\d+)/i,
+  );
+  if (mlbUnit) return `MLB-${mlbUnit[1].toUpperCase()}-${mlbUnit[2]}`;
   const alt = cleanPrefixes(prefixes).map(escapeRegExp).join("|");
   // Deliberately no trailing word boundary after the digits. In a composite
   // MLB-26537PO-56922 value, P is also a word character; requiring a boundary

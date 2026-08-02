@@ -889,6 +889,23 @@ Deno.test("case-wide recovery finds a late PDF before declaring it missing", () 
   assertEquals(plan.totals.unaccounted, 0);
 });
 
+Deno.test("SecureWorks cover sheet cannot satisfy deterministic builder WO evidence", () => {
+  const item = source({
+    postId: "self-generated-wo",
+    subject: "NEW WORK ORDER MLB-27040 PO-57040",
+    body: "Please attend and make safe. Work Order: MLB-27040 PO-57040",
+    attachments: [{
+      ...pdf("self-generated-wo"),
+      name: "work-order-SWMS-26998.pdf",
+    }],
+  });
+  const plan = buildDeterministicIntakePlan([item], PROFILES);
+  assertEquals(
+    plan.cases[0].evidenceMap.work_order_attachment.status,
+    "missing",
+  );
+});
+
 Deno.test("a portal link in a sibling source repairs the report manifest case-wide", () => {
   const first = source({
     postId: "report-1",
