@@ -389,6 +389,38 @@ export async function sesSha256(
   return `sha256:${hex}`;
 }
 
+/** Domain separator for artifact CONTENT hashes.
+ *
+ * v2 (2026-08-02) digests the artifact bytes directly. v1 routed them through
+ * `sesSha256(Array.from(bytes))`, which turned every byte into a JS number and then into a
+ * decimal JSON string: a measured ~20x transient allocation that made the persist path exceed
+ * the edge function's resource budget on any docket carrying real photos. The bytes hashed are
+ * the SAME bytes over the SAME artifacts; only the encoding fed to SHA-256 changed, so no
+ * evidence is skipped, reduced or sampled.
+ */
+export const SES_ARTIFACT_BYTES_DOMAIN =
+  "SecureWorks:ses-docket-artifact-bytes:v2\n";
+
+/** SHA-256 over `domain || bytes`, without materialising a number-array/JSON copy.
+ *
+ * Peak transient cost is one framed copy of the input rather than ~20 copies, so a docket's
+ * photo artifacts stay inside the worker budget no matter how many photos the cycle carries.
+ */
+export async function sesSha256Bytes(
+  bytes: Uint8Array,
+  domain = SES_ARTIFACT_BYTES_DOMAIN,
+): Promise<SesSha256> {
+  const prefix = new TextEncoder().encode(domain);
+  const framed = new Uint8Array(prefix.byteLength + bytes.byteLength);
+  framed.set(prefix, 0);
+  framed.set(bytes, prefix.byteLength);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", framed));
+  const hex = Array.from(digest).map((byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+  return `sha256:${hex}`;
+}
+
 export function stableUuidFromSha256(value: SesSha256): string {
   const chars = value.slice("sha256:".length, "sha256:".length + 32).split("");
   chars[12] = "5";
@@ -408,10 +440,7 @@ export async function artifactFromText(args: {
   metadata?: Record<string, unknown>;
 }): Promise<SesArtifact> {
   const bytes = new TextEncoder().encode(args.text);
-  const content_hash = await sesSha256(
-    Array.from(bytes),
-    "SecureWorks:ses-docket-artifact-bytes:v1\n",
-  );
+  const content_hash = await sesSha256Bytes(bytes);
   return {
     role: args.role,
     path: args.path,
@@ -430,10 +459,7 @@ export async function artifactFromBytes(args: {
   bytes: Uint8Array;
   metadata?: Record<string, unknown>;
 }): Promise<SesArtifact> {
-  const content_hash = await sesSha256(
-    Array.from(args.bytes),
-    "SecureWorks:ses-docket-artifact-bytes:v1\n",
-  );
+  const content_hash = await sesSha256Bytes(args.bytes);
   return {
     ...args,
     content_hash,
