@@ -51,6 +51,7 @@ import {
   buildCanonicalMakesafeRows,
   isSyntheticLivefireJob,
 } from "../supabase/functions/ops-api/makesafe_board_read_model.ts";
+import { makesafeAttendanceCycleSetHash } from "../supabase/functions/ops-api/makesafe_terminal_proof.ts";
 import {
   currentCycleReportMap,
   filterHoldsForCurrentCycle,
@@ -232,6 +233,8 @@ interface ParityCard {
     portal_verified_this_cycle: boolean;
     typed_link_roles: string[];
     done_capture_roles: string[];
+    /** Present only on a card carrying a recorded terminal proof. */
+    terminal_proof_kinds?: string[];
   };
   /** Which branch of the legacy ladder actually returned `legacy_stage`. */
   legacy_branch: string;
@@ -320,6 +323,8 @@ async function run(): Promise<void> {
     statusApps,
     photos,
     holds,
+    terminalProofs,
+    attendanceCycles,
   ] = await Promise.all([
     // makesafe_job_details + the company slug/name ops-api joins through
     // requesting_company_id.
@@ -430,14 +435,60 @@ async function run(): Promise<void> {
         "h",
       ) + " order by h.created_at desc nulls first, h.id asc",
     ),
+    // << loadCanonicalMakesafeBoard >> the R7 terminal-proof ledger and the
+    // attendance-cycle sets a proof is checked against. ops-api reads the
+    // cycles only for jobs carrying a proof; reading them for the whole board
+    // here is the same input set, since a job with no proof contributes no
+    // binding either way.
+    query(
+      boardScoped(
+        "t.job_id, t.id, t.kind, t.attendance_cycle_ids, t.attendance_cycle_set_hash, t.evidence_refs, t.proven_by, t.proven_at",
+        "makesafe_terminal_proofs",
+        "t",
+      ) + `
+        and (
+          t.readiness_revision is null
+          or exists (
+            select 1
+            from makesafe_readiness_revisions r
+            where r.job_id = t.job_id
+              and r.readiness_revision = t.readiness_revision
+              and r.attendance_cycle_set_hash = t.attendance_cycle_set_hash
+          )
+        )
+        order by t.proven_at desc nulls last, t.id asc`,
+    ),
+    query(
+      boardScoped("c.job_id, c.id", "makesafe_attendance_cycles", "c") +
+        " order by c.id asc",
+    ),
   ]);
 
   console.error(
     `rows: details=${details.length} reports=${reports.length} invoices=${invoices.length} ` +
       `documents=${documents.length} packs=${packs.length} pack_cycles=${packCycles.length} ` +
       `dockets=${dockets.length} assignments=${assignments.length} note_candidates=${noteCandidates.length} ` +
-      `status_apps=${statusApps.length} photo_rows=${photos.length} holds=${holds.length}`,
+      `status_apps=${statusApps.length} photo_rows=${photos.length} holds=${holds.length} ` +
+      `terminal_proofs=${terminalProofs.length} attendance_cycles=${attendanceCycles.length}`,
   );
+
+  const terminalProofsByJobId = groupBy(terminalProofs as any[]);
+  const attendanceCycleIdsByJobId: Record<string, string[]> = {};
+  for (const cycle of attendanceCycles as any[]) {
+    (attendanceCycleIdsByJobId[String(cycle.job_id)] ||= []).push(
+      String(cycle.id),
+    );
+  }
+  for (const [jobId, proofs] of Object.entries(terminalProofsByJobId)) {
+    const currentCycleIds = attendanceCycleIdsByJobId[jobId] || [];
+    const currentHash = await makesafeAttendanceCycleSetHash(currentCycleIds);
+    for (const proof of proofs) {
+      proof.validatedCycleSetHash = proof.attendance_cycle_set_hash ===
+          await makesafeAttendanceCycleSetHash(proof.attendance_cycle_ids) &&
+        proof.attendance_cycle_set_hash === currentHash;
+      proof.validatedReadinessRevision = true;
+    }
+  }
 
   const detailByJob: Record<string, any> = {};
   for (const row of details as any[]) {
@@ -798,6 +849,8 @@ async function run(): Promise<void> {
     photoCountByJobId,
     holdsByJobId,
     statusApplicationsByJobId,
+    terminalProofsByJobId,
+    attendanceCycleIdsByJobId,
     computedAt,
   });
 
@@ -807,7 +860,13 @@ async function run(): Promise<void> {
   //           byte-identical to RUN A.
   const runB = buildCanonicalMakesafeRows(
     baseRows.map((row) => ({ ...row, board_stage: "new" })),
-    { photoCountByJobId, holdsByJobId, computedAt },
+    {
+      photoCountByJobId,
+      holdsByJobId,
+      terminalProofsByJobId,
+      attendanceCycleIdsByJobId,
+      computedAt,
+    },
   );
   const m1PureById = new Map(runB.map((r: any) => [r.id, r]));
 
@@ -824,6 +883,8 @@ async function run(): Promise<void> {
       photoCountByJobId,
       holdsByJobId,
       statusApplicationsByJobId,
+      terminalProofsByJobId,
+      attendanceCycleIdsByJobId,
       computedAt,
     },
   );
@@ -903,6 +964,17 @@ async function run(): Promise<void> {
           String(l?.role || l?.kind || "")
         ),
         done_capture_roles: doneRoles,
+        // R7 — a recorded terminal proof is a card INPUT fact, so a card that
+        // gains one must register as input drift against a frozen baseline.
+        // The key is spread in only when a proof exists, so the 406 cards
+        // without one keep the input hash they were certified with.
+        ...(terminalProofsByJobId[row.id]?.length
+          ? {
+            terminal_proof_kinds: terminalProofsByJobId[row.id]
+              .map((proof: any) => String(proof?.kind || ""))
+              .sort(),
+          }
+          : {}),
       },
       legacy_branch: base?._legacy_branch ?? "UNVERIFIED",
       divergence_cause: "",

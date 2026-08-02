@@ -1,0 +1,34 @@
+{
+  "contract": "ses-261059-captain-signoff/v1",
+  "mode": "verify",
+  "proof_recorded": true,
+  "proof": {
+    "id": "e235171c-533f-4113-b68e-8aad2b7db034",
+    "kind": "verified_historical_closeout",
+    "proven_by": "captain-signoff:2026-08-02-swms-261059-and-draft-invoice",
+    "proven_at": "2026-07-31 06:48:39.196+00"
+  },
+  "proof_rows_for_this_job": 1,
+  "proof_rows_in_table": 1,
+  "unchanged": {
+    "job_status": "complete",
+    "job_completed_at": "2026-07-31 06:48:39.196+00",
+    "ses_money_sealed_at": "2026-07-27 13:39:58.134051+00",
+    "substatus": "company_contact_required",
+    "linked_invoice_rows": 0,
+    "board_status_applications": [
+      {
+        "id": 10,
+        "source_status": "new",
+        "after_status": "archive",
+        "applied_at": "2026-07-28 07:56:36.576656+00"
+      }
+    ],
+    "document_types": [
+      "invoice",
+      "makesafe_report",
+      "swms",
+      "work_order"
+    ]
+  }
+}

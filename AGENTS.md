@@ -1078,9 +1078,13 @@ every terminal path, rejects a missing trusted completion time instead of
 guessing, and refuses the raw complete/completed/closed shortcut unless an
 issued invoice corroborates it. A raw terminal claim with no supporting evidence
 is `decision_required`, and `sesStageCutoverGate` makes such a card STOP a
-cutover rather than be dropped into a plausible column — `SWMS-261059` is the
-live one and its true column is an open captain question. Never resolve it in
-code.
+cutover rather than be dropped into a plausible column. Never resolve such a
+card in code — resolve it by recording the ruling as EVIDENCE and letting the
+engine derive from it.
+
+The worked ruling and its producer analysis, parity evidence, and
+manual-back-end-completion linkage observations are owned by
+`docs/evidence/ses-261059-captain-signoff-2026-08-02.md`.
 
 `scripts/ses-stage-parity-harness.ts` remains the only tool that answers "did
 the divergence move?"; it reads v2's published value rather than recomputing it.

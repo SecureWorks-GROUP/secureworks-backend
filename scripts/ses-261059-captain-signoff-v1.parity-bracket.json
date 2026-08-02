@@ -1,0 +1,261 @@
+{
+  "contract": "ses-261059-captain-signoff/v1",
+  "what_this_brackets": "the single makesafe_terminal_proofs write for SWMS-261059, measured by scripts/ses-stage-parity-harness.ts over the same production reads at --now=2026-08-02T12:00:00.000Z",
+  "population_contract_version": "ses-board-population/active-v1",
+  "population_contract": "ses-board-population/active-v1 [NOT FINAL \u2014 pending C.5 (active-only vs all-including-cancelled); this is not \"the whole board\"]",
+  "board_cards": {
+    "before": 407,
+    "after": 407
+  },
+  "engine_version": "ses-stage-engine.v2-r7-shadow",
+  "cutover_gate": {
+    "before": {
+      "ok": false,
+      "checked": 407,
+      "engine_version": "ses-stage-engine.v2-r7-shadow",
+      "blocked": [
+        {
+          "job_id": "b88809b7-ee6e-497f-a586-25aea586047c",
+          "job_ref": "SWMS-261059",
+          "canonical_stage": "report_ready",
+          "conflicts": [
+            "terminal_without_issued_invoice",
+            "terminal_without_supporting_evidence"
+          ],
+          "reasons": [
+            "raw job state says completed or closed, no issued invoice corroborates it, and no evidence on the card proves any other column"
+          ]
+        }
+      ]
+    },
+    "after": {
+      "ok": true,
+      "checked": 407,
+      "engine_version": "ses-stage-engine.v2-r7-shadow",
+      "blocked": []
+    }
+  },
+  "column_counts": {
+    "legacy_canonical_column_counts": {
+      "before": {
+        "new": 35,
+        "allocated": 30,
+        "trade_report_in": 13,
+        "report_ready": 24,
+        "completed": 2,
+        "archive": 303,
+        "cancelled": 0
+      },
+      "after": {
+        "new": 35,
+        "allocated": 30,
+        "trade_report_in": 13,
+        "report_ready": 24,
+        "completed": 2,
+        "archive": 303,
+        "cancelled": 0
+      }
+    },
+    "legacy_pre_overlay_counts": {
+      "before": {
+        "new": 63,
+        "allocated": 35,
+        "trade_report_in": 13,
+        "report_ready": 30,
+        "completed": 2,
+        "archive": 264,
+        "cancelled": 0
+      },
+      "after": {
+        "new": 63,
+        "allocated": 35,
+        "trade_report_in": 13,
+        "report_ready": 30,
+        "completed": 2,
+        "archive": 264,
+        "cancelled": 0
+      }
+    },
+    "m1_pure_column_counts": {
+      "before": {
+        "new": 65,
+        "allocated": 64,
+        "trade_report_in": 10,
+        "report_ready": 0,
+        "completed": 39,
+        "archive": 229,
+        "cancelled": 0
+      },
+      "after": {
+        "new": 65,
+        "allocated": 64,
+        "trade_report_in": 10,
+        "report_ready": 0,
+        "completed": 39,
+        "archive": 229,
+        "cancelled": 0
+      }
+    },
+    "m1_published_counts": {
+      "before": {
+        "new": 37,
+        "allocated": 53,
+        "trade_report_in": 9,
+        "report_ready": 0,
+        "completed": 5,
+        "archive": 303,
+        "cancelled": 0
+      },
+      "after": {
+        "new": 37,
+        "allocated": 53,
+        "trade_report_in": 9,
+        "report_ready": 0,
+        "completed": 5,
+        "archive": 303,
+        "cancelled": 0
+      }
+    },
+    "post_cutover_column_counts": {
+      "before": {
+        "new": 39,
+        "allocated": 57,
+        "trade_report_in": 10,
+        "report_ready": 0,
+        "completed": 39,
+        "archive": 262,
+        "cancelled": 0
+      },
+      "after": {
+        "new": 39,
+        "allocated": 57,
+        "trade_report_in": 10,
+        "report_ready": 0,
+        "completed": 39,
+        "archive": 262,
+        "cancelled": 0
+      }
+    },
+    "corrected_stage_v2_column_counts": {
+      "before": {
+        "new": 65,
+        "allocated": 64,
+        "trade_report_in": 12,
+        "decision_required": 1,
+        "completed": 2,
+        "archive": 263
+      },
+      "after": {
+        "new": 65,
+        "allocated": 64,
+        "trade_report_in": 12,
+        "completed": 3,
+        "archive": 263
+      }
+    }
+  },
+  "divergence_totals": {
+    "cards_changing_column_m1_pure_vs_legacy_canonical": {
+      "before": 104,
+      "after": 104
+    },
+    "cards_changing_column_after_cutover_with_overlays_reapplied": {
+      "before": 71,
+      "after": 71
+    }
+  },
+  "cards_with_any_field_change": 1,
+  "per_card_diff": {
+    "SWMS-261059": {
+      "stage_v2_conflicts": {
+        "before": [
+          "terminal_without_issued_invoice",
+          "terminal_without_supporting_evidence"
+        ],
+        "after": []
+      },
+      "stage_v2_post_overlay": {
+        "before": "decision_required",
+        "after": "completed"
+      },
+      "stage_v2": {
+        "before": "decision_required",
+        "after": "completed"
+      },
+      "facts": {
+        "before": {
+          "assignments": 0,
+          "has_current_cycle_report": false,
+          "report_status": null,
+          "photo_count": 0,
+          "invoice_status": null,
+          "pack_status": null,
+          "pack_review_state": null,
+          "pack_sent_marker": false,
+          "has_report_doc": true,
+          "has_invoice_doc": true,
+          "has_swms_doc": true,
+          "has_wo_doc": true,
+          "swms_required": true,
+          "report_sent_at": false,
+          "report_received_at": false,
+          "reattend": false,
+          "portal_verified_this_cycle": false,
+          "typed_link_roles": [],
+          "done_capture_roles": []
+        },
+        "after": {
+          "assignments": 0,
+          "has_current_cycle_report": false,
+          "report_status": null,
+          "photo_count": 0,
+          "invoice_status": null,
+          "pack_status": null,
+          "pack_review_state": null,
+          "pack_sent_marker": false,
+          "has_report_doc": true,
+          "has_invoice_doc": true,
+          "has_swms_doc": true,
+          "has_wo_doc": true,
+          "swms_required": true,
+          "report_sent_at": false,
+          "report_received_at": false,
+          "reattend": false,
+          "portal_verified_this_cycle": false,
+          "typed_link_roles": [],
+          "done_capture_roles": [],
+          "terminal_proof_kinds": [
+            "verified_historical_closeout"
+          ]
+        }
+      }
+    }
+  },
+  "frozen_baseline_verify": {
+    "ok": true,
+    "failures": [],
+    "observations": [
+      "7 card(s) changed input facts since the freeze: SWMS-261059, SWMS-261115, SWMS-26393, SWMS-26657, SWMS-26658, SWMS-26659, SWMS-26660",
+      "engine source legacy_ladder changed since the freeze (9c0c2cf127c9 -> 15af47977516)",
+      "engine source m1_computed_status changed since the freeze (d8243bfc5af3 -> 200b3d84de52)",
+      "engine source board_read_model changed since the freeze (2972f309bbed -> f7199d933dbe)",
+      "engine source parity_harness changed since the freeze (905862d3f87f -> a632564496a1)"
+    ],
+    "frozen_disputed_manifest_id": "59d16ae3b383655d25cf3371d05cc1df95c04082be205e4eb175426cff230964",
+    "fresh_disputed_manifest_id": "59d16ae3b383655d25cf3371d05cc1df95c04082be205e4eb175426cff230964",
+    "frozen_disputed": 71,
+    "fresh_disputed": 71,
+    "cards_with_moved_input_hash": [
+      "SWMS-261059",
+      "SWMS-261115",
+      "SWMS-26393",
+      "SWMS-26657",
+      "SWMS-26658",
+      "SWMS-26659",
+      "SWMS-26660"
+    ],
+    "disputed_missing": [],
+    "disputed_changed": [],
+    "disputed_added": []
+  }
+}

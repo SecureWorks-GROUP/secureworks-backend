@@ -15476,6 +15476,45 @@ async function loadCanonicalMakesafeBoard(
     }
   }
 
+  // R7 — the append-only terminal-proof ledger. Two-step on purpose, mirroring
+  // the own-roof read above: the proofs themselves are one narrow chunked read,
+  // and the attendance-cycle SETS a proof must cover are read ONLY for the jobs
+  // that actually carry one. With no proof on the board that second query never
+  // runs, and the board's cost is unchanged.
+  const terminalProofsByJobId: Record<string, any[]> = {}
+  const attendanceCycleIdsByJobId: Record<string, string[]> = {}
+  try {
+    const proofRows = await _fetchAllByJobIdChunked(
+      client,
+      'makesafe_terminal_proofs_current_v2',
+      'id, job_id, kind, attendance_cycle_ids, evidence_refs, proven_by, proven_at',
+      jobIds,
+      (q) => q.order('proven_at', { ascending: false }),
+    )
+    for (const proof of proofRows) {
+      if (!proof?.job_id) continue
+      ;(terminalProofsByJobId[proof.job_id] ||= []).push(proof)
+    }
+    const provenJobIds = Object.keys(terminalProofsByJobId)
+    if (provenJobIds.length > 0) {
+      const cycleRows = await _fetchAllByJobIdChunked(
+        client,
+        'makesafe_attendance_cycles',
+        'id, job_id',
+        provenJobIds,
+      )
+      for (const cycle of cycleRows) {
+        if (!cycle?.job_id || !cycle?.id) continue
+        ;(attendanceCycleIdsByJobId[cycle.job_id] ||= []).push(String(cycle.id))
+      }
+    }
+  } catch (error) {
+    // Fail closed to no terminal-proof evidence, exactly as the portal-capture
+    // and own-roof reads above do. A card then stays where its other evidence
+    // puts it rather than the whole operator board failing.
+    console.error('[ops-api] makesafe terminal proof read unavailable:', (error as Error).message)
+  }
+
   return buildCanonicalMakesafeRows(baseRows, {
     notesByJobId,
     photoCountByJobId,
@@ -15486,6 +15525,8 @@ async function loadCanonicalMakesafeBoard(
     portalCaptureRowsByJobId,
     ownRoofDraftByJobId,
     ownRoofReportDocumentIdsByJobId,
+    terminalProofsByJobId,
+    attendanceCycleIdsByJobId,
     terminalSyntheticLivefireJobIds,
   })
 }
