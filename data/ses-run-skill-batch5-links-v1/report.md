@@ -63,7 +63,7 @@ trade, 30 are parked on a link proved dead or absent.
 | Blocker | Cards | Class or one-off |
 |---|---|---|
 | ops-api `SW_API_KEY` does not authenticate; every `x-api-key` call 401s | all 3 (and all 39) | **class** — blocks the whole board, both crews, every write and every U4 dry run |
-| no structured storey fact, so `pricing_evidence_missing` nulls the invoice proposal and blocks `pre_xero_docs_ready` | all 3 | **class of 61 roof cards; 39 of 50 live ones are resolvable today** — §7, §8 |
+| no structured storey fact, so `pricing_evidence_missing` nulls the invoice proposal and blocks `pre_xero_docs_ready` | all 3 | **class of 61 roof cards; 38 of 50 live ones are write-eligible today** — §7, §8 |
 | no attendance cycle, so capture evidence cannot be written at all | SWMS-261079 | **class of 6 in my slice, 44 board-wide** — §5 |
 | no intake case, so the spine has no lineage and no builder reference | SWMS-26934 | **class of 22 in my slice** — §6 |
 
@@ -405,13 +405,34 @@ cannot disagree with the write — across all 50 live roof cards (`evidence/stor
 **So the storey wall is 39 cards wide and already answerable from the builder's own words.** The
 one refusal is the Joondalup three-storey card and it is correct behaviour, not a gap.
 
-Two honest limits on that number. This preview computes the **match**, not the backfill's full
-disposition: the real `makesafe_roof_storey_backfill` additionally **holds** any card that already
-carries a storey signal anywhere in its record, because writing a second value onto a card that
-already has one can make `structuredSourceFact` return `undefined` and stop a card pricing that
-prices today. And every one of these cards is `ses_money_sealed_at` sealed, which is exactly why
-that action is dry-run-by-default and why each row is meant to be read and refused one at a time by
-a human. **I wrote nothing.**
+### 7.2b The full disposition, not just the match
+
+The match is not the whole rule, so I also drove the real
+`buildRoofStoreyBackfillRow` — the production function the sanctioned action itself calls — over
+the same 50 cards with their `metadata`, `scope_json` and detail rows
+(`evidence/storey-dispositions.ts`, `evidence/roof-storey-backfill-dispositions.json`):
+
+| Disposition | Cards |
+|---|---:|
+| **`write`** — a priceable storey, eligible | **38** |
+| `no_fact` — the instruction names no storey | 10 |
+| `hold_competing_storey_signal` — a human decides | 1 |
+| `refused_no_sealed_price` — three storeys | 1 |
+
+**38 of 50 live roof cards are eligible to write**, which is the number worth taking to the captain.
+The one hold is `SWMS-26848` (Dianella): it resolves `double` but already carries a storey signal
+elsewhere in its record, and the backfill correctly refuses to write a second value — doing so can
+make `structuredSourceFact` return `undefined` and stop a card that prices today. The one refusal is
+`SWMS-26930` (Joondalup), the three-storey card batch 4 flagged for a captain price decision; the
+two agree, which is a useful independent check on both.
+
+**All four of my locked cards come back `write`** (261019 single, 261079 double, 26934 single, 26980
+double) — matching both the instruction matcher and the trade's own form.
+
+Every one of these cards is `ses_money_sealed_at` sealed, which is exactly why that action is
+dry-run-by-default and why each row is meant to be read and refused one at a time by a human.
+**I wrote nothing, and this preview is a read-only local computation over production reads — it is
+not a substitute for running the action's own dry run once the credential is available.**
 
 ### 7.3 What the trade's own form recorded
 
@@ -460,7 +481,7 @@ So: **0 cards with the credential alone, 1 with the storey backfill, 3 with the 
 Not twenty, and no honest sequence of fixes reaches twenty inside these two families.
 
 The storey backfill is the highest-leverage of the three, and its reach is far wider than my slice:
-it resolves **39 of 50 live roof cards** (§7.2), so it is the unblock that matters for whichever
+it makes **38 of 50 live roof cards** eligible to write (§7.2b), so it is the unblock that matters for whichever
 crew inherits them once the trade reports in. It is also the only one of the three that touches the
 money path, which is why it is dry-run-by-default and wants the captain row by row.
 
@@ -509,7 +530,7 @@ SecureSuite MCP), then reported and not retried, not credential-swapped, and not
    section first — the secret changed 3h07m *after* `ops-api` was last deployed.
 2. **The storey backfill is on the critical path for the whole roof family**, not just my three
    cards. `pricing_evidence_missing` blocks `pre_xero_docs_ready` outright, no roof card carries the
-   fact, and the sanctioned matcher resolves **39 of 50** live roof cards from the builder's own
+   fact, and the sanctioned backfill would write **38 of 50** live roof cards from the builder's own
    instruction text today (§7.2). Dry-run-by-default, money-path, wants the captain row by row. The
    read-only preview is committed at `evidence/roof-storey-matcher-preview.json`.
 3. **The forward attendance-cycle gap (§5)** — 44 cards board-wide and growing, because no
