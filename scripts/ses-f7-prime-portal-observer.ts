@@ -547,7 +547,10 @@ async function openAndReadPrimePage(
   initialWaitMs: number,
   retryWaitMs: number,
 ): Promise<{ read: BrowserPageRead; navigationSucceeded: boolean }> {
-  const failedRead = (): { read: BrowserPageRead; navigationSucceeded: false } => ({
+  const failedRead = (): {
+    read: BrowserPageRead;
+    navigationSucceeded: false;
+  } => ({
     navigationSucceeded: false,
     read: {
       ready_state: "failed",
