@@ -402,6 +402,21 @@ export function sesStageCutoverGate(
 ): SesStageCutoverGateResult {
   const blocked: SesStageCutoverGateBlocker[] = [];
   for (const row of rows || []) {
+    if (
+      typeof row?.derived_stage_v2 !== "string" ||
+      row.derived_stage_v2.trim() === ""
+    ) {
+      blocked.push({
+        job_id: row?.id ?? null,
+        job_ref: row?.job_number ?? null,
+        canonical_stage: row?.canonical_stage ?? null,
+        conflicts: ["advisory_stage_missing"],
+        reasons: [
+          "advisory stage missing - the corrected engine did not place this row, so a cutover cannot be proved",
+        ],
+      });
+      continue;
+    }
     if (row?.derived_stage_v2 !== SES_STAGE_DECISION_REQUIRED) continue;
     blocked.push({
       job_id: row?.id ?? null,

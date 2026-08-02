@@ -552,6 +552,28 @@ Deno.test("gate: a fully proved board passes, and passing is not an authorisatio
   assertEquals(rows[1].canonical_stage, "archive");
 });
 
+Deno.test("gate: a missing advisory stage blocks cutover distinctly", () => {
+  for (const derived_stage_v2 of [null, undefined, "", "   ", 42]) {
+    const gate = sesStageCutoverGate([{
+      id: "j-missing",
+      job_number: "SWMS-MISSING",
+      canonical_stage: "allocated",
+      derived_stage_v2,
+    }]);
+    assertEquals(gate.ok, false);
+    assertEquals(gate.checked, 1);
+    assertEquals(gate.blocked, [{
+      job_id: "j-missing",
+      job_ref: "SWMS-MISSING",
+      canonical_stage: "allocated",
+      conflicts: ["advisory_stage_missing"],
+      reasons: [
+        "advisory stage missing - the corrected engine did not place this row, so a cutover cannot be proved",
+      ],
+    }]);
+  }
+});
+
 Deno.test("terminal: raw archived and cancelled never need corroboration", () => {
   // Only complete/completed/closed is a claim about work finishing. An archived
   // or cancelled job state is the operational record itself.
