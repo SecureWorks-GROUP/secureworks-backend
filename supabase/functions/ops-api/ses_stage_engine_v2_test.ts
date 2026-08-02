@@ -1262,18 +1262,33 @@ Deno.test("docs ready: a roof card is never asked for a SecureWorks report", () 
 });
 
 Deno.test("docs ready: an already-sent pack is not one click from sending", () => {
-  const sent = input({
-    evidence: {
-      packState: "READY",
-      assignments: [{ id: "a1" }],
-      serviceReports: [{ status: "submitted", cycle_number: 1 }],
-      completionPhotoCount: 6,
-      documents: { report: true, invoice: true, swms: true },
-      swmsRequired: false,
-      packSent: true,
-    },
+  const baseEvidence = {
+    packState: "READY",
+    assignments: [{ id: "a1" }],
+    serviceReports: [{ status: "submitted", cycle_number: 1 }],
+    completionPhotoCount: 6,
+    documents: { report: true, invoice: true, swms: false },
+    swmsRequired: false,
+  };
+  const positive = input({
+    evidence: { ...baseEvidence, pack: { status: "draft" } },
   });
-  assert(deriveSesStageV2(sent).stage !== "report_ready");
+  assertEquals(deriveSesStageV2(positive).stage, "report_ready");
+
+  for (const status of [
+    "sent",
+    "sent_marker_failed",
+    "sent_not_closed",
+    "close_failed",
+  ]) {
+    const sent = input({
+      evidence: { ...baseEvidence, pack: { status } },
+    });
+    assert(
+      deriveSesStageV2(sent).stage !== "report_ready",
+      `${status} pack must not be one click from sending`,
+    );
+  }
 });
 
 Deno.test("docs ready: the corrected rule is never LOOSER than the existing one", () => {

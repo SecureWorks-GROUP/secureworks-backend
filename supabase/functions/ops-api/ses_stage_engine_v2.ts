@@ -537,7 +537,14 @@ export function sesStageDocsReady(
   const pack = input.evidence?.pack;
 
   // Assembled but already gone is not one click from sending.
-  if (input.evidence?.packSent === true || pack?.sent_at) {
+  const packStatus = String(pack?.status || "").toLowerCase();
+  if (
+    input.evidence?.packSent === true ||
+    pack?.sent_at ||
+    ["sent", "sent_marker_failed", "sent_not_closed", "close_failed"].includes(
+      packStatus,
+    )
+  ) {
     missing.push("an unsent pack - this one has already been sent");
   }
 
