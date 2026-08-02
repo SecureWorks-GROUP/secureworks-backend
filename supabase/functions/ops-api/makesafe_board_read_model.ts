@@ -19,6 +19,10 @@ import {
   canonicalSesFamilyFromCard,
   sesFamilyLabel,
 } from "./ses_family_matrix.ts";
+import {
+  deriveSesStageV2,
+  sesStageV2OverlayCandidate,
+} from "./ses_stage_engine_v2.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
 const SYNTHETIC_LIVEFIRE_MARKER =
@@ -475,6 +479,10 @@ export function buildCanonicalMakesafeRows(
     // enrich already cycle-scopes pack/invoice closeout inputs on reattend.
     const invoiceStatus = rawInvoiceStatus(base);
     const packSent = base?.pack_sent === true;
+    // Built WITHOUT `displayedStatus`, so the corrected shadow engine below
+    // physically cannot see the stage the board is currently displaying. M1
+    // still gets it (appended one line down) because its published value is
+    // what today's certificates grade against and must not change here.
     const statusInput = {
       job: base,
       detail,
@@ -497,11 +505,21 @@ export function buildCanonicalMakesafeRows(
         swmsRequired,
         hold,
       },
-      displayedStatus: displayStage,
       nowIso: computedAt,
     };
-    const computation = computeMakesafeStatus(statusInput);
+    const computation = computeMakesafeStatus({
+      ...statusInput,
+      displayedStatus: displayStage,
+    });
     const reportIn = reportInEvidence(statusInput);
+    // SHADOW ONLY. Advisory comparison value; it places no card. See the
+    // authority boundary at the top of ses_stage_engine_v2.ts.
+    const stageV2 = deriveSesStageV2(statusInput);
+    const stageV2Overlay = sesStageV2OverlayCandidate(
+      stageV2.stage,
+      application,
+      base?.status,
+    );
     return {
       contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
       id: base?.id,
@@ -559,6 +577,22 @@ export function buildCanonicalMakesafeRows(
           computation.job_type !== "physical_makesafe" &&
           reportIn.satisfied,
       },
+      // ── Corrected stage engine — ADVISORY, SHADOW ONLY ──────────────────
+      // Published for comparison and audit. `canonical_stage` above is, and
+      // stays, the legacy ladder plus the existing overlay resolver; nothing
+      // in this block places a card, and no consumer may bucket on it. The
+      // authority flip is a separate captain-approved release.
+      derived_stage_v2: stageV2.stage,
+      // What the EXISTING overlay resolver would produce if the derivation
+      // changed. A simulation with the same guards — it binds nothing.
+      derived_stage_v2_post_overlay: stageV2Overlay.stage,
+      derived_stage_v2_overlay_binds: stageV2Overlay.binds,
+      derived_stage_v2_agrees_with_canonical:
+        stageV2Overlay.stage === displayStage,
+      derived_stage_v2_reasons: stageV2.reasons,
+      derived_stage_v2_missing: stageV2.missing,
+      derived_stage_v2_conflicts: stageV2.conflicts,
+      derived_stage_v2_engine_version: stageV2.engine_version,
       // U2-S1 additive spine keys (nullable-safe for pre-migration rows).
       attendance_cycle_id: base?.attendance_cycle_id ?? null,
       cycle_number: Number(
