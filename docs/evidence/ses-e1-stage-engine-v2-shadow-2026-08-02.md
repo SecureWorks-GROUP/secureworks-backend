@@ -378,19 +378,16 @@ cards and the same certified 71.
 
 ## Where this leaves the next task
 
-Releases 4-6 and 8 are the remaining code-only/shadow work and can be picked up
-without re-deriving anything above:
+After Release 4, Releases 5, 7 and 8 remain as separate follow-up work and can
+be picked up without re-deriving anything above:
 
-- **Release 4** — replace `classifyMakesafeJobType`'s three-kind guess with the
-  canonical `ses_family` already on the row (7 real families plus unknown). 136
-  diagnostic job-kind corrections expected, 0 column changes.
 - **Release 5** — own-template roof current-cycle submitted-draft reader. 0
   current cards.
-- **Release 6** — land the portal capture reader. 0 capture rows exist, so 0
-  immediate evidence-driven moves; the rule seam covers 111 roof/assessment
-  cards.
 - **Release 8** — overlay re-anchor metadata and the no-op attestation read
   path. No ledger rows.
+
+Release 6, the portal capture reader, is explicitly out of scope for this
+release and is owned by another crew.
 
 Release 7 (Docs Ready authority) and Release 9 (the nine-row re-anchor apply)
 are both captain-gated and are not code-only.
@@ -446,3 +443,91 @@ New 66 / Trade Report In 11 recorded above, and live columns read
 ageing `new -> trade_report_in` in live data, first seen during the Release 1
 re-land. It is NOT a code effect: the `8928c18` baseline run in this same
 session reports the identical live columns, and the total stays 407.
+
+## Release 4 — canonical family as a real engine input
+
+**Behaviour change:** exactly one — the shadow engine reads the canonical SES
+family instead of inferring one of three kinds, and refuses to advance a card
+whose family cannot be identified. Zero placements move.
+
+**What landed**
+
+- `resolveSesStageV2Family` — an EXHAUSTIVE switch over `SesFamilyId`. The
+  `never` check in its default arm is load-bearing: adding a family to
+  `ses_family_matrix.ts` without deciding how it proves a stage is a type error
+  here, not a silent fall-through to physical.
+- `ses_family` on `MakesafeStatusInput`, supplied by the board read model, which
+  already computed it. `computeMakesafeStatus` DELIBERATELY IGNORES the key and
+  keeps its own `classifyMakesafeJobType` guess, so M1's published value stays
+  byte-identical to what today's certificates grade against.
+- An unidentifiable family returns `decision_required` with conflict
+  `family_unknown`, placed AFTER every terminal branch so an explicit raw
+  cancelled / archived / corroborated-complete state still resolves — those are
+  facts about the job that hold whatever the family is.
+- Three advisory keys published: `derived_stage_v2_family`,
+  `derived_stage_v2_family_kind`, `derived_stage_v2_family_recipe_state`.
+- The harness now counts the family distribution and the diagnostic corrections.
+
+**The captain's ruling supersedes the design here.** The F10 design had repair
+and restoration returning unsealed-recipe blockers. The ruling of 2026-08-02
+(`data/decisions/2026-08-02-docs-ready-repair-restoration.md`) closed both
+before this release landed — repair "match[es] the whole existing system",
+restoration is "exactly the same as any other job, so it is a different family
+type" — and named Release 4 as one of the things it unblocks. Both therefore
+take the standard evidence path and keep their own family identity. Encoding a
+blocker would have contradicted the ruling AND moved the one live restoration
+card, which this release must not do. `recipe_state` has no `unsealed` member
+as a result; re-opening a family needs a ruling, not a code edit.
+
+**Measured (2026-08-02T09:24:38Z)**, base `1a33708`, 407 cards, 13 SELECT-only
+Management API queries.
+
+| Fact | Design expected | Measured |
+|---|---:|---:|
+| Diagnostic family-kind corrections | 136 | **136** |
+| Live placements moved | 0 | **0** |
+| Pure `derived_stage_v2` changes | 0 | **0** |
+| Prospective corrected moves | 35 -> 35 | **35 -> 35** |
+| Cutover gate | blocked on `SWMS-261059` | **unchanged** |
+
+The 136 corrections decompose exactly as the design predicted:
+
+| M1 called it | Canonical family | Cards |
+|---|---|---:|
+| `physical_makesafe` | `temporary_fencing` | 116 |
+| `physical_makesafe` | `unknown` | 19 |
+| `physical_makesafe` | `restoration` | 1 |
+
+Full family distribution: physical 160, temporary fencing 116, ordinary roof
+portal 60, assessment/quote 51, unknown 19, restoration 1. Own-template roof
+and repair have 0 cards, as the design said.
+
+Placement is proved by A/B rather than asserted: the harness was run once at
+`1a33708` and once at this tip. Per card, `legacy_canonical_stage`,
+`legacy_stage`, `m1_published`, `m1_pure`, `post_cutover_stage`,
+`post_cutover_overlay_binds`, the whole `overlay` object AND `stage_v2` itself
+are identical on all 407 cards. The corrected column counts are unchanged at
+new 65 / allocated 64 / trade report in 12 / decision-required 1 / completed 2 /
+archive 263.
+
+Two findings worth recording, both reported rather than reconciled:
+
+- **The `family_unknown` refusal is live but unexercised.** All 19
+  unidentifiable cards sit in raw terminal states, so every one of them returns
+  above the refusal and none reaches `decision_required`. That is why the pure
+  stage blast is 0 rather than 19. It is proven by test, not by a production
+  card — the same shape as Release 2's missing-timestamp refusal.
+- **A measurement trap worth naming.** The first version of the harness metric
+  compared the delegated evidence PATH and scored only 19 corrections, because
+  temporary fencing, repair and restoration all delegate to physical and so
+  "matched". The design counts family IDENTITY. Comparing paths would have
+  reported this release as a sixth of the size it is.
+
+**A pre-existing type defect fixed in passing.** `SesStageGateRow.derived_stage_v2`
+was declared `string | null`, but the Release 3 regression test asserts the gate
+handles a non-string (`42`), so `deno test` failed to type-check on `main`. CI
+did not catch it because `deno check supabase/functions/ops-api/index.ts` never
+reaches a test file. The field is now `unknown`, which is what the gate's own
+fail-closed branch already believed — it proves the value is a non-empty string
+before using it. A narrower type was the declaration telling callers something
+the runtime does not.

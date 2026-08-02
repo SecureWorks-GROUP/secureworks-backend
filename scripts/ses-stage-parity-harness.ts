@@ -192,6 +192,14 @@ interface ParityCard {
   stage_v2: string;
   stage_v2_post_overlay: string;
   stage_v2_conflicts: string[];
+  /**
+   * R4 — the canonical family the corrected engine used, and the evidence path
+   * it delegated to. `job_type` beside it is M1's own three-kind guess, so a
+   * row where the two disagree is one of the diagnostic family corrections.
+   */
+  stage_v2_family: string;
+  stage_v2_family_kind: string | null;
+  m1_job_type: string;
   m1_pure_reasons: string[];
   m1_pure_missing: string[];
   overlay: {
@@ -853,6 +861,10 @@ async function run(): Promise<void> {
       stage_v2: row.derived_stage_v2 ?? "UNVERIFIED",
       stage_v2_post_overlay: row.derived_stage_v2_post_overlay ?? "UNVERIFIED",
       stage_v2_conflicts: row.derived_stage_v2_conflicts ?? [],
+      stage_v2_family: row.derived_stage_v2_family ?? "UNVERIFIED",
+      stage_v2_family_kind: row.derived_stage_v2_family_kind ?? null,
+      m1_job_type: (pure?.computed_status_job_type as string) ??
+        (row.computed_status_job_type as string) ?? "UNVERIFIED",
       m1_pure_reasons: pure?.computed_status_reasons ?? [],
       m1_pure_missing: pure?.computed_status_missing ?? [],
       overlay: {
@@ -1006,6 +1018,16 @@ function classify(card: ParityCard): void {
   card.divergence_cause = `unclassified: legacy ${legacy} vs M1 ${m1}`;
 }
 
+/**
+ * The canonical families each of M1's three kinds can legitimately name. Any
+ * other canonical family on a card is a diagnostic mislabel by M1.
+ */
+const M1_KIND_IMPLIES_FAMILY: Record<string, readonly string[]> = {
+  physical_makesafe: ["physical_makesafe"],
+  roof_report: ["ordinary_roof_portal", "own_template_roof"],
+  assessment_report_quote: ["assessment_quote"],
+};
+
 function summarise(cards: ParityCard[]) {
   const stages = [
     "new",
@@ -1035,11 +1057,26 @@ function summarise(cards: ParityCard[]) {
   const correctedMatrix: Record<string, number> = {};
   const correctedCounts: Record<string, number> = {};
   const conflicts: Record<string, string[]> = {};
+  const familyCounts: Record<string, number> = {};
+  const familyKindCorrections: Record<string, number> = {};
+  let familyKindCorrected = 0;
   let correctedChanged = 0;
   let cutoverChanged = 0;
   let changed = 0;
   for (const c of cards) {
     correctedCounts[c.stage_v2] = (correctedCounts[c.stage_v2] || 0) + 1;
+    familyCounts[c.stage_v2_family] = (familyCounts[c.stage_v2_family] || 0) +
+      1;
+    // A diagnostic correction: M1's three-kind guess NAMES a family, and the
+    // canonical family says the card is a different one. This measures the
+    // identity, not the delegated evidence path — temporary fencing, repair
+    // and restoration all prove their stage physically, so comparing paths
+    // would score them correct while their identity was still wrong.
+    if (!M1_KIND_IMPLIES_FAMILY[c.m1_job_type]?.includes(c.stage_v2_family)) {
+      const key = `${c.m1_job_type} -> ${c.stage_v2_family}`;
+      familyKindCorrections[key] = (familyKindCorrections[key] || 0) + 1;
+      familyKindCorrected++;
+    }
     if (c.legacy_canonical_stage !== c.stage_v2_post_overlay) {
       const key = `${c.legacy_canonical_stage} -> ${c.stage_v2_post_overlay}`;
       correctedMatrix[key] = (correctedMatrix[key] || 0) + 1;
@@ -1095,6 +1132,12 @@ function summarise(cards: ParityCard[]) {
       Object.entries(correctedMatrix).sort((a, b) => b[1] - a[1]),
     ),
     // Cards the corrected engine refuses to place. These STOP a cutover gate.
+    // R4 — canonical family distribution and the diagnostic corrections.
+    corrected_family_counts: familyCounts,
+    cards_with_corrected_family_kind: familyKindCorrected,
+    corrected_family_kind_matrix: Object.fromEntries(
+      Object.entries(familyKindCorrections).sort((a, b) => b[1] - a[1]),
+    ),
     corrected_conflicts: Object.fromEntries(
       Object.entries(conflicts).sort((a, b) => b[1].length - a[1].length),
     ),

@@ -56,12 +56,16 @@ import {
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
 } from "./makesafe_status_apply.ts";
+import {
+  canonicalSesFamilyFromCard,
+  type SesFamilyId,
+} from "./ses_family_matrix.ts";
 
 /**
  * Bump on any change to what this engine derives. Published on every row so a
  * past measurement stays attributable to the engine that produced it.
  */
-export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r3-shadow";
+export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r4-shadow";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -94,9 +98,37 @@ export type SesStageV2Stage =
  */
 export type SesStageV2Input = Omit<MakesafeStatusInput, "displayedStatus">;
 
+/**
+ * R4 — how a canonical family resolves for stage purposes.
+ *
+ * `kind` is the evidence path the family delegates to, and it is deliberately
+ * NOT the family: temporary fencing, repair and restoration all prove their
+ * stage the physical way while keeping their own identity. `kind` is null only
+ * when no evidence path is defined, which today means `unknown` alone.
+ */
+export interface SesStageV2FamilyResolution {
+  family: SesFamilyId;
+  kind: MakesafeJobKind | null;
+  /**
+   * `sealed` — the captain has ruled how this family reports.
+   * `unknown` — the family itself could not be identified from the card.
+   *
+   * There is no `unsealed` member any more. The design specified one for repair
+   * and restoration, and the captain's 2026-08-02 ruling closed both before
+   * this release landed; see the switch below. Re-introducing it needs a ruling
+   * that re-opens a family, not a code edit.
+   */
+  recipe_state: "sealed" | "unknown";
+}
+
 export interface SesStageV2Result {
   stage: SesStageV2Stage;
   job_type: MakesafeJobKind;
+  /** The canonical family this card actually is, not the three-kind guess. */
+  ses_family: SesFamilyId;
+  /** The evidence path the family delegates to; null when none is defined. */
+  family_kind: MakesafeJobKind | null;
+  family_recipe_state: "sealed" | "unknown";
   reasons: string[];
   /** Evidence the card is short of, from the shared evidence definition. */
   missing: string[];
@@ -204,6 +236,79 @@ export function sesStageCompletedStage(
 }
 
 /**
+ * R4 — the canonical family, and the evidence path it delegates to.
+ *
+ * The engine previously asked `classifyMakesafeJobType`, which can only ever
+ * answer physical / roof / assessment and falls through to physical for
+ * everything it does not recognise. On the measured snapshot that mislabels 136
+ * cards — 116 temporary fencing, 1 restoration and 19 whose family cannot be
+ * identified at all — as physical make-safes. Their columns happen not to move,
+ * because the delegated evidence path is physical for the first two groups
+ * anyway, but the diagnostic identity on every one of them was wrong.
+ *
+ * The switch is EXHAUSTIVE over `SesFamilyId` and the `never` check below is
+ * load-bearing: adding a family to `ses_family_matrix.ts` without deciding how
+ * it proves a stage is a type error here, not a silent fall-through to physical.
+ *
+ * Repair and restoration are SEALED by the captain's ruling of 2026-08-02
+ * (`data/decisions/2026-08-02-docs-ready-repair-restoration.md`):
+ *
+ *   repair      — "let's just keep it really simple for now and make it just
+ *                  match the whole existing system"
+ *   restoration — "exactly the same as any other job, so it is a different
+ *                  family type"
+ *
+ * So both take the standard evidence path and keep their own family identity.
+ * The design that preceded that ruling had them returning unsealed-recipe
+ * blockers; the ruling explicitly closed both and named Release 4 as one of the
+ * things it unblocks. Encoding a blocker here now would contradict it and would
+ * move the one live restoration card, which must not happen in this release.
+ */
+export function resolveSesStageV2Family(
+  input: SesStageV2Input,
+): SesStageV2FamilyResolution {
+  const family: SesFamilyId = input.ses_family ?? canonicalSesFamilyFromCard({
+    makesafe_job_family: input.job?.metadata?.makesafe_job_family,
+    insurance_job_type: input.job?.metadata?.insurance_job_type,
+    own_template_requested: input.job?.metadata?.own_template_requested,
+    strata: input.job?.metadata?.strata,
+    report_delivery: input.job?.metadata?.report_delivery ??
+      input.detail?.report_delivery,
+  });
+
+  switch (family) {
+    case "physical_makesafe":
+      return { family, kind: "physical_makesafe", recipe_state: "sealed" };
+    case "ordinary_roof_portal":
+      return { family, kind: "roof_report", recipe_state: "sealed" };
+    case "own_template_roof":
+      // The roof evidence path today. Release 5 adds the own-template
+      // submitted-draft reader; there are 0 such cards at this snapshot.
+      return { family, kind: "roof_report", recipe_state: "sealed" };
+    case "assessment_quote":
+      return {
+        family,
+        kind: "assessment_report_quote",
+        recipe_state: "sealed",
+      };
+    case "temporary_fencing":
+      // Delegates its stage evidence to physical, keeps its own identity.
+      return { family, kind: "physical_makesafe", recipe_state: "sealed" };
+    case "repair":
+    case "restoration":
+      // Captain-sealed 2026-08-02: both behave as the standard job does.
+      return { family, kind: "physical_makesafe", recipe_state: "sealed" };
+    case "unknown":
+      // No evidence path. Refused for advancement below; never read as physical.
+      return { family, kind: null, recipe_state: "unknown" };
+    default: {
+      const exhaustive: never = family;
+      throw new Error(`unhandled SES family: ${String(exhaustive)}`);
+    }
+  }
+}
+
+/**
  * The pure, corrected stage derivation.
  *
  * Resolution precedence is part of the contract (design section 2.1):
@@ -214,11 +319,18 @@ export function sesStageCompletedStage(
  */
 export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
   const jobStatus = String(input.job?.status || "").toLowerCase();
-  const kind = classifyMakesafeJobType(input.detail, input.job);
+  const family = resolveSesStageV2Family(input);
+  // The evidence path. For every family with a defined one this equals the
+  // three-kind guess on today's data; `unknown` has none and is refused below
+  // rather than silently read as physical.
+  const kind = family.kind ?? classifyMakesafeJobType(input.detail, input.job);
   const hold = input.evidence?.hold || null;
   const conflicts: string[] = [];
   const base = {
     job_type: kind,
+    ses_family: family.family,
+    family_kind: family.kind,
+    family_recipe_state: family.recipe_state,
     hold,
     engine_version: SES_STAGE_ENGINE_V2_VERSION,
   };
@@ -309,6 +421,25 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
     };
   }
 
+  // R4 — an unidentifiable family has no evidence path, so nothing downstream
+  // can prove what this card needs. Refuse the ADVANCEMENT rather than read it
+  // as a physical make-safe, which is what the three-kind guess did to 19 cards.
+  // This sits after every terminal branch on purpose: an explicit raw
+  // cancelled / archived / corroborated-complete state is a fact about the job
+  // that holds whatever the family is, and those returned above untouched.
+  if (family.recipe_state === "unknown") {
+    conflicts.push("family_unknown");
+    return {
+      ...base,
+      stage: SES_STAGE_DECISION_REQUIRED,
+      reasons: [
+        "the card's SES family cannot be identified, so no evidence recipe defines what would advance it",
+      ],
+      missing: [],
+      conflicts,
+    };
+  }
+
   const evidence = deriveMakesafeEvidenceStage(input as MakesafeStatusInput);
   return {
     ...base,
@@ -363,7 +494,14 @@ export interface SesStageGateRow {
   id?: string | null;
   job_number?: string | null;
   canonical_stage?: string | null;
-  derived_stage_v2?: string | null;
+  /**
+   * Deliberately `unknown`. The gate's whole fail-closed branch exists because
+   * this value may be absent or not a string on a row that never reached the
+   * corrected engine, so a narrower type would be the declaration telling a
+   * caller something the runtime does not believe. `sesStageCutoverGate` proves
+   * it is a non-empty string before using it.
+   */
+  derived_stage_v2?: unknown;
   derived_stage_v2_conflicts?: string[] | null;
   derived_stage_v2_reasons?: string[] | null;
 }

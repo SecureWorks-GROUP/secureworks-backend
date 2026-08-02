@@ -14,6 +14,7 @@ import {
 } from "./makesafe_computed_status.ts";
 import {
   deriveSesStageV2,
+  resolveSesStageV2Family,
   SES_STAGE_ENGINE_V2_VERSION,
   sesStageCutoverGate,
   sesStageV2OverlayCandidate,
@@ -25,7 +26,16 @@ const daysAgo = (days: number) =>
 
 function input(over: Record<string, any> = {}): any {
   return {
-    job: { status: "in_progress", ...(over.job || {}) },
+    // R4 — these fixtures are physical make-safes, and a real one carries its
+    // family on the job. Before R4 the engine guessed physical for anything it
+    // did not recognise, so an undeclared family was invisible here; now an
+    // unidentifiable family is refused, so the fixture has to say what it is.
+    // Overridable: `job.metadata` in `over` replaces this wholesale.
+    job: {
+      status: "in_progress",
+      metadata: { makesafe_job_family: "physical_makesafe" },
+      ...(over.job || {}),
+    },
     detail: { cycle_number: 1, ...(over.detail || {}) },
     evidence: {
       assignments: [],
@@ -33,6 +43,9 @@ function input(over: Record<string, any> = {}): any {
       completionPhotoCount: 0,
       ...(over.evidence || {}),
     },
+    // R4 — present only when a case explicitly supplies it, so the "derive the
+    // family from the card" path stays reachable in these fixtures.
+    ...(over.ses_family === undefined ? {} : { ses_family: over.ses_family }),
     nowIso: over.nowIso ?? NOW,
   };
 }
@@ -44,7 +57,11 @@ function baseRow(over: Record<string, any> = {}): any {
     status: over.status ?? "in_progress",
     type: "makesafe",
     created_at: daysAgo(3),
-    metadata: {},
+    // R4 — see the note in `input()`. A real card declares its family.
+    metadata: {
+      makesafe_job_family: "physical_makesafe",
+      ...(over.metadata || {}),
+    },
     makesafe_details: { cycle_number: 1, ...(over.makesafe_details || {}) },
     board_stage: over.board_stage ?? "allocated",
     assignments: over.assignments ?? [{ id: "a1", user_id: "u1" }],
@@ -585,4 +602,136 @@ Deno.test("terminal: raw archived and cancelled never need corroboration", () =>
     deriveSesStageV2(input({ job: { status: "cancelled" } })).stage,
     "cancelled",
   );
+});
+
+// ── R4 — canonical family is an input, not a three-kind guess ───────────────
+
+Deno.test("family: every canonical family resolves to an explicit evidence path", () => {
+  // Exhaustive over SesFamilyId. `kind` is the evidence path the family
+  // delegates to; it is deliberately NOT the family, because temporary
+  // fencing, repair and restoration all prove their stage the physical way
+  // while keeping their own identity.
+  const expected: Record<string, { kind: string | null; recipe: string }> = {
+    physical_makesafe: { kind: "physical_makesafe", recipe: "sealed" },
+    ordinary_roof_portal: { kind: "roof_report", recipe: "sealed" },
+    own_template_roof: { kind: "roof_report", recipe: "sealed" },
+    assessment_quote: { kind: "assessment_report_quote", recipe: "sealed" },
+    temporary_fencing: { kind: "physical_makesafe", recipe: "sealed" },
+    // Captain-sealed 2026-08-02: both match the existing system.
+    repair: { kind: "physical_makesafe", recipe: "sealed" },
+    restoration: { kind: "physical_makesafe", recipe: "sealed" },
+    unknown: { kind: null, recipe: "unknown" },
+  };
+  for (const [family, want] of Object.entries(expected)) {
+    const got = resolveSesStageV2Family(input({ ses_family: family }) as any);
+    assertEquals(got.family, family);
+    assertEquals(got.kind, want.kind as any);
+    assertEquals(got.recipe_state, want.recipe as any);
+  }
+  assertEquals(Object.keys(expected).length, 8);
+});
+
+Deno.test("family: repair and restoration take the standard path, not a blocker", () => {
+  // The captain's 2026-08-02 ruling closed both. A blocker here would move the
+  // one live restoration card, which Release 4 must not do.
+  for (const family of ["repair", "restoration"]) {
+    const r = deriveSesStageV2(input({
+      ses_family: family,
+      evidence: { assignments: [{ id: "a1" }] },
+    }));
+    assertEquals(r.stage, "allocated");
+    assertEquals(r.ses_family, family as any);
+    assertEquals(r.family_recipe_state, "sealed");
+    assertEquals(r.conflicts, []);
+  }
+});
+
+Deno.test("family: temporary fencing keeps its identity while proving physically", () => {
+  const r = deriveSesStageV2(input({
+    ses_family: "temporary_fencing",
+    evidence: { assignments: [{ id: "a1" }] },
+  }));
+  assertEquals(r.stage, "allocated");
+  assertEquals(r.ses_family, "temporary_fencing");
+  // Identity retained, evidence path delegated.
+  assertEquals(r.job_type, "physical_makesafe");
+  assertEquals(r.family_kind, "physical_makesafe");
+});
+
+Deno.test("family: an unknown family refuses advancement instead of reading as physical", () => {
+  const r = deriveSesStageV2(input({
+    ses_family: "unknown",
+    evidence: { assignments: [{ id: "a1" }] },
+  }));
+  // Before R4 this card had an assignment and would have been called allocated.
+  assertEquals(r.stage, "decision_required");
+  assertEquals(r.conflicts, ["family_unknown"]);
+  assertEquals(r.family_kind, null);
+  assertEquals(r.family_recipe_state, "unknown");
+});
+
+Deno.test("family: unknown never overrides an explicit raw terminal state", () => {
+  // The design is explicit: preserve raw Archive/Cancelled. Those are facts
+  // about the job that hold whatever the family is.
+  for (
+    const [status, stage] of [
+      ["cancelled", "cancelled"],
+      ["archived", "archive"],
+    ]
+  ) {
+    const r = deriveSesStageV2(
+      input({ ses_family: "unknown", job: { status } }),
+    );
+    assertEquals(r.stage, stage);
+    assertEquals(r.conflicts, []);
+  }
+});
+
+Deno.test("family: a supplied family beats re-deriving one from the card", () => {
+  // The read model already computed the canonical family; the engine must use
+  // it rather than re-guessing from metadata.
+  const r = deriveSesStageV2(input({
+    ses_family: "assessment_quote",
+    job: {
+      status: "in_progress",
+      metadata: { makesafe_job_family: "physical_makesafe" },
+    },
+  }));
+  assertEquals(r.ses_family, "assessment_quote");
+  assertEquals(r.family_kind, "assessment_report_quote");
+});
+
+Deno.test("family: with no supplied family the engine derives one from the card", () => {
+  const r = deriveSesStageV2({
+    job: {
+      status: "in_progress",
+      metadata: { makesafe_job_family: "roof_report" },
+    },
+    detail: { cycle_number: 1 },
+    evidence: { assignments: [], serviceReports: [], completionPhotoCount: 0 },
+    nowIso: NOW,
+  } as any);
+  assertEquals(r.ses_family, "ordinary_roof_portal");
+  assertEquals(r.family_kind, "roof_report");
+});
+
+Deno.test("family: M1's published output is untouched by the family input", () => {
+  // R4 changes the SHADOW engine only. M1 keeps its own three-kind guess so
+  // every existing certificate keeps grading against the same value.
+  for (const family of ["temporary_fencing", "restoration", "unknown"]) {
+    const withFamily = computeMakesafeStatus({
+      ...input({
+        ses_family: family,
+        evidence: { assignments: [{ id: "a1" }] },
+      }),
+      displayedStatus: "allocated",
+    });
+    const without = computeMakesafeStatus({
+      ...input({ evidence: { assignments: [{ id: "a1" }] } }),
+      displayedStatus: "allocated",
+    });
+    assertEquals(withFamily.status, without.status);
+    assertEquals(withFamily.job_type, without.job_type);
+    assertEquals(withFamily.job_type, "physical_makesafe");
+  }
 });
