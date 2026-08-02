@@ -20,6 +20,8 @@ import {
   sesStageCutoverGate,
   type SesStageGateRow,
   sesStageOwnRoofReportIn,
+  sesStagePortalReportIn,
+  sesStagePortalRoleObservation,
   sesStageV2OverlayCandidate,
 } from "./ses_stage_engine_v2.ts";
 
@@ -921,4 +923,217 @@ Deno.test("own roof: the reader names what is missing, per fact", () => {
   );
   assertEquals(r.satisfied, false);
   assertEquals(r.missing.length, 3);
+});
+
+// ── R6 — the deterministic portal capture reader ────────────────────────────
+
+const ROOF_LINK = {
+  role: "roof_report",
+  url: "https://portal.primeeco.tech/s/abc",
+};
+
+function portalInput(captures: any[], over: Record<string, any> = {}) {
+  return input({
+    ses_family: "ordinary_roof_portal",
+    job: {
+      status: "in_progress",
+      metadata: { makesafe_job_family: "roof_report" },
+    },
+    detail: {
+      cycle_number: 1,
+      external_links: [ROOF_LINK],
+      ...(over.detail || {}),
+    },
+    evidence: {
+      assignments: [{ id: "a1" }],
+      portalCaptures: captures,
+      ...(over.evidence || {}),
+    },
+  });
+}
+
+const ACCEPTED = {
+  status: "done",
+  role: "roof_report",
+  url: ROOF_LINK.url,
+  locked: true,
+  screenshot: "makesafe-docket-artifacts/portal-captures/x.png",
+  cycle_number: 1,
+};
+
+Deno.test("portal: an accepted capture revision proves roof report-in", () => {
+  const r = deriveSesStageV2(portalInput([ACCEPTED]));
+  assertEquals(r.stage, "trade_report_in");
+  assertEquals(r.missing, []);
+});
+
+Deno.test("portal: cannot-observe is not not-done", () => {
+  // The distinction this release exists for. Neither proves report-in, but the
+  // engine must never say the trade has not done the work when the truth is
+  // that WE could not see the portal.
+  const notDone = deriveSesStageV2(
+    portalInput([{
+      ...ACCEPTED,
+      status: "not_done",
+      locked: false,
+      screenshot: "s.png",
+    }]),
+  );
+  const unreachable = deriveSesStageV2(
+    portalInput([{
+      ...ACCEPTED,
+      status: "unreachable",
+      locked: false,
+      screenshot: null,
+    }]),
+  );
+  assertEquals(notDone.stage, "allocated");
+  assertEquals(unreachable.stage, "allocated");
+  assert(
+    notDone.missing[0].includes("submitted and locked"),
+    `observed-not-done should blame the form: ${notDone.missing[0]}`,
+  );
+  assert(
+    unreachable.missing[0].includes("could not observe"),
+    `cannot-observe should blame the capture: ${unreachable.missing[0]}`,
+  );
+  // And they must not be the same sentence.
+  assert(notDone.missing[0] !== unreachable.missing[0]);
+});
+
+Deno.test("portal: the four observations are distinguished", () => {
+  const cases: Array<[any[], string]> = [
+    [[ACCEPTED], "proved"],
+    [[{ ...ACCEPTED, status: "not_done", locked: false }], "observed_not_done"],
+    [
+      [{ ...ACCEPTED, status: "unreachable", locked: false, screenshot: null }],
+      "cannot_observe",
+    ],
+    [[], "no_capture"],
+  ];
+  for (const [captures, want] of cases) {
+    assertEquals(
+      sesStagePortalRoleObservation(portalInput(captures), "roof_report"),
+      want as any,
+    );
+  }
+});
+
+Deno.test("portal: evidence failing the contract is rejected, not accepted", () => {
+  // The read model is the acceptance authority; this engine consumes its
+  // decision. Anything that would not survive that contract must not prove.
+  const bad: Array<[string, any]> = [
+    ["wrong cycle", { ...ACCEPTED, cycle_number: 2 }],
+    ["wrong role", { ...ACCEPTED, role: "photos" }],
+    ["no screenshot", { ...ACCEPTED, screenshot: null }],
+  ];
+  for (const [label, capture] of bad) {
+    const r = deriveSesStageV2(
+      portalInput([capture], { detail: { cycle_number: 1 } }),
+    );
+    assertEquals(r.stage, "allocated", `${label} must not prove report-in`);
+  }
+});
+
+Deno.test("portal: assessment needs all three typed roles", () => {
+  const links = [
+    { role: "assessment_report", url: "https://portal.primeeco.tech/s/a" },
+    { role: "photos", url: "https://portal.primeeco.tech/s/p" },
+    { role: "quote", url: "https://portal.primeeco.tech/s/q" },
+  ];
+  const cap = (role: string, url: string) => ({ ...ACCEPTED, role, url });
+  const all = input({
+    ses_family: "assessment_quote",
+    job: {
+      status: "in_progress",
+      metadata: { makesafe_job_family: "assessment_report_quote" },
+    },
+    detail: { cycle_number: 1, external_links: links },
+    evidence: {
+      assignments: [{ id: "a1" }],
+      portalCaptures: links.map((l) => cap(l.role, l.url)),
+    },
+  });
+  assertEquals(deriveSesStageV2(all).stage, "trade_report_in");
+  const twoOfThree = input({
+    ses_family: "assessment_quote",
+    job: {
+      status: "in_progress",
+      metadata: { makesafe_job_family: "assessment_report_quote" },
+    },
+    detail: { cycle_number: 1, external_links: links },
+    evidence: {
+      assignments: [{ id: "a1" }],
+      portalCaptures: links.slice(0, 2).map((l) => cap(l.role, l.url)),
+    },
+  });
+  assertEquals(deriveSesStageV2(twoOfThree).stage, "allocated");
+  assertEquals(
+    sesStagePortalReportIn(twoOfThree, "assessment_quote").observations.quote,
+    "no_capture",
+  );
+});
+
+Deno.test("portal: a physical card never consults portal captures", () => {
+  const r = deriveSesStageV2(input({
+    ses_family: "physical_makesafe",
+    evidence: { assignments: [{ id: "a1" }], portalCaptures: [ACCEPTED] },
+  }));
+  assertEquals(r.stage, "allocated");
+});
+
+Deno.test("portal: M1's published output is untouched by the R6 reader", () => {
+  const facts = portalInput([{
+    ...ACCEPTED,
+    status: "unreachable",
+    locked: false,
+    screenshot: null,
+  }]);
+  const m1 = computeMakesafeStatus({ ...facts, displayedStatus: "allocated" });
+  assertEquals(m1.status, "allocated");
+});
+
+Deno.test("portal: ROOF acceptance does not require URL identity - a live asymmetry", () => {
+  // FINDING, recorded rather than silently corrected. The design's contract is
+  // "exact current-cycle typed capture rows with done, a screenshot, and the
+  // required role/URL identity". The running acceptance path applies the URL
+  // identity and locked checks ONLY to assessment cards
+  // (`requiresTypedAssessmentIdentity` in makesafe_computed_status.ts), so a
+  // roof card accepts a done+screenshot capture pointing at ANY url.
+  //
+  // Release 6 deliberately does NOT tighten this. Changing acceptance could
+  // move roof cards, and this release measures zero blast only because there
+  // are no capture rows - a change whose blast cannot be measured must not ride
+  // along inside it. The ledger path is unaffected either way:
+  // `portalCapturesFromLedger` already enforces exact role + URL + screenshot +
+  // hash before projecting, so no ACCEPTED REVISION can reach here without
+  // identity. This test pins the asymmetry so it stays visible until ruled on.
+  const strayUrl = deriveSesStageV2(
+    portalInput([{ ...ACCEPTED, url: "https://portal.primeeco.tech/s/OTHER" }]),
+  );
+  assertEquals(strayUrl.stage, "trade_report_in");
+
+  // Assessment, by contrast, refuses exactly the same shape.
+  const links = [
+    { role: "assessment_report", url: "https://portal.primeeco.tech/s/a" },
+    { role: "photos", url: "https://portal.primeeco.tech/s/p" },
+    { role: "quote", url: "https://portal.primeeco.tech/s/q" },
+  ];
+  const assessmentStray = input({
+    ses_family: "assessment_quote",
+    job: {
+      status: "in_progress",
+      metadata: { makesafe_job_family: "assessment_report_quote" },
+    },
+    detail: { cycle_number: 1, external_links: links },
+    evidence: {
+      assignments: [{ id: "a1" }],
+      portalCaptures: links.map((l) => ({
+        ...ACCEPTED,
+        role: l.role,
+        url: "https://portal.primeeco.tech/s/OTHER",
+      })),
+    },
+  });
+  assertEquals(deriveSesStageV2(assessmentStray).stage, "allocated");
 });
