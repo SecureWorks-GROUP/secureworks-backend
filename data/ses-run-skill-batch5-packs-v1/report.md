@@ -262,3 +262,51 @@ Two things that table shows which a per-card log would have hidden:
 I corrected one mistake of my own here: my first reconciliation joined the queue's `job_id` to a
 board field named `job_id`, which does not exist — board rows key on `id`. That join produced
 "0 of 38 are mine", which was wrong. Rejoined on `id`, it is 35 of 38.
+
+---
+
+## 7. The finding that outlives this run: fencing pricing has a reader and no producer
+
+The 14-card `pricing_evidence_missing` class is not a data-entry backlog. It is a **missing
+producer**, and it will block every temporary-fencing card that ever reaches U4, not just these 14.
+
+`ses_prepare_docket_revision.ts:665-712` prices temporary fencing from three facts —
+`panel_count`, `base_count`, and `star_picket_count` for hire-basis cards. The adapter resolves
+each of them thoroughly, from `pricing.*`, `checklist.*` and six structured-source aliases apiece
+(`ses_assembler_input_adapter.ts:991-1030`).
+
+Then this, run across the whole of `supabase/functions/`:
+
+| Fact | References outside the adapter's reader and U4's blocker |
+|---|---:|
+| `panel_count` | **0** |
+| `base_count` | **0** |
+| `star_picket_count` | **0** |
+| `hours_per_trade` | **0** |
+
+**Nothing in the backend ever writes any of them.** `submit_makesafe_report` does not collect them,
+no migration defaults them, no gap-fill path sets them. The read side is complete and correct; the
+write side does not exist. So no amount of re-running the skill will ever clear this class, and it
+is not a stale blocker to re-test — it is a permanent floor until a producer is built.
+
+This is the same shape as the four walls the earlier batches found (renderer built and unbound,
+crew resolved and dropped, seeder migrated with no route, capture written and rejected on read),
+with the halves reversed: here the **consumer** is the half that exists.
+
+I did not build the producer. It needs a trade-app form change to capture the quantities and a
+captain sign-off on the pricing inputs, which is outside a pack-assembly brief and outside my two
+families' write authority. **Recommend it as the next unit of work: it is worth 14 cards now and
+every fencing card thereafter.**
+
+### The other three classes, ranked by what they cost
+
+| Class | Cards | Owner | Effort |
+|---|---:|---|---|
+| Fencing quantity producer (above) | 14 | needs a build + captain pricing sign-off | the big one |
+| `routing_evidence_missing` | 4 | one `makesafe_companies` row per affected builder | minutes, data only |
+| `swms_generation_facts_missing` | 7 | genuinely no crew recorded anywhere | correctly blocked, may never clear |
+| `swms_generation_template_unavailable` | 2 | captain seals an asbestos template | one decision |
+
+The routing class is the cheapest 4 cards on the board and needs no code at all — but setting a
+builder's outbound report recipient is a business decision about where real mail goes, so I left it
+for the captain rather than guessing an address.
