@@ -16,10 +16,14 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _createMakesafeJob, _markMakesafePortalReportDone } from "./index.ts";
 
+const ROOF_CASE_ID = "00000000-0000-4000-8000-000000000911";
+const ROOF_MINT_ID = "00000000-0000-4000-8000-000000000912";
+
 // ── Minimal chainable Supabase mock ─────────────────────────────────────────
 type Store = {
   details?: Record<string, any>; // makesafe_job_details by job_id
   jobs?: Record<string, any>; // jobs by id (BE-2 persisted-family fallback read)
+  cycles?: any[];
   inserts?: Array<{ table: string; row: any }>;
   updates?: Array<{ table: string; row: any; job_id?: any }>;
 };
@@ -27,19 +31,43 @@ type Store = {
 function makeClient(store: Store) {
   store.inserts = store.inserts || [];
   store.updates = store.updates || [];
+  store.cycles = store.cycles || [];
   function builder(table: string) {
     const filters: Record<string, any> = {};
-    let op: "select" | "insert" | "update" = "select";
+    let op: "select" | "insert" | "update" | "delete" = "select";
     let updateRow: any = null;
     let insertRow: any = null;
     const resolveSingle = () => {
-      if (op === "insert") return { id: "new-job-1", ...insertRow };
+      if (op === "insert") {
+        if (table === "makesafe_attendance_cycles") {
+          return { id: "cycle-new-job-1-1", ...insertRow };
+        }
+        return { id: "new-job-1", ...insertRow };
+      }
       if (op === "update") {
         const existing = store.details?.[filters.job_id] ?? {};
         return { ...existing, ...updateRow };
       }
       if (table === "makesafe_job_details") {
         return store.details?.[filters.job_id] ?? null;
+      }
+      if (table === "makesafe_attendance_cycles") {
+        return (store.cycles || []).find((cycle) =>
+          Object.entries(filters).every(([key, value]) => cycle[key] === value)
+        ) ?? null;
+      }
+      if (table === "makesafe_intake_cases") {
+        return filters.id === ROOF_CASE_ID
+          ? {
+            id: ROOF_CASE_ID,
+            job_id: null,
+            target_job_id: null,
+            instruction_key: "builder:generic/po:roof",
+            builder_wo_canonical: "BUILDER-ROOF",
+            builder_po_canonical: null,
+            external_ref_canonical: "BUILDER-ROOF",
+          }
+          : null;
       }
       if (table === "jobs") return store.jobs?.[filters.id] ?? null;
       return null;
@@ -51,6 +79,13 @@ function makeClient(store: Store) {
         op = "insert";
         insertRow = row;
         store.inserts!.push({ table, row });
+        if (table === "makesafe_job_details" && row?.job_id) {
+          store.details = store.details || {};
+          store.details[row.job_id] = { ...row };
+        }
+        if (table === "makesafe_attendance_cycles") {
+          store.cycles!.push({ id: "cycle-new-job-1-1", ...row });
+        }
         return b;
       },
       update: (row: any) => {
@@ -66,6 +101,11 @@ function makeClient(store: Store) {
         if (updateRec && k === "job_id") updateRec.job_id = v;
         return b;
       },
+      is: () => b,
+      delete: () => {
+        op = "delete";
+        return b;
+      },
       not: () => b,
       ilike: () => b,
       limit: () => b,
@@ -74,14 +114,41 @@ function makeClient(store: Store) {
         Promise.resolve({ data: resolveSingle(), error: null }),
       single: () => Promise.resolve({ data: resolveSingle(), error: null }),
       then: (res: any, rej: any) =>
-        Promise.resolve({ data: null, error: null }).then(res, rej),
+        Promise.resolve({
+          data: op === "update" ? [resolveSingle()] : null,
+          error: null,
+        }).then(res, rej),
       catch: () => Promise.resolve({ data: null, error: null }),
     };
     return b;
   }
   return {
     from: (table: string) => builder(table),
-    rpc: () => Promise.resolve({ data: "SWMS-27001", error: null }),
+    rpc: (name: string) => {
+      if (name === "bind_makesafe_roof_initial_cycle_v1") {
+        const detail = store.details?.["new-job-1"];
+        const cycle = {
+          id: "cycle-new-job-1-1",
+          job_id: "new-job-1",
+          cycle_number: 1,
+        };
+        store.cycles!.push(cycle);
+        if (detail) {
+          detail.attendance_cycle_id = cycle.id;
+          detail.cycle_attribution = "bound";
+        }
+        return Promise.resolve({
+          data: {
+            attendance_cycle_id: cycle.id,
+            cycle_number: 1,
+            cycle_created: true,
+            cycle_bound: true,
+          },
+          error: null,
+        });
+      }
+      return Promise.resolve({ data: "SWMS-27001", error: null });
+    },
   };
 }
 
@@ -562,8 +629,15 @@ Deno.test("BE-2 (c): createMakesafeJob with a roof_report family -> detail row c
     const res = await _createMakesafeJob(makeClient(store), {
       client_name: "Jane Client",
       site_address: "12 Example St",
+      external_ref: "BUILDER-ROOF",
       makesafe_job_family: "roof_report",
+      intake_mint_id: ROOF_MINT_ID,
       suppress_notifications: true,
+    }, {
+      canonicalIntakeAuthority: {
+        case_id: ROOF_CASE_ID,
+        mint_id: ROOF_MINT_ID,
+      },
     });
     await flush();
 

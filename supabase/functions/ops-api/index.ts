@@ -145,6 +145,7 @@ import {
 import {
   checkMakesafeStateSeedScopeResult,
   deriveSesSpineFacts,
+  groupSesSpineFactsForReview,
   MAKESAFE_STATE_SEED_SCOPE_CONTRACT,
   MAKESAFE_STATE_SEED_SCOPE_MAX_CARDS,
   normalizeMakesafeStateSeedScopeRequest,
@@ -343,6 +344,11 @@ import {
   SES_MISSED_JOB_RULING_DATE,
   SesMissedJobRecoveryError,
 } from './ses_missed_job_recovery.ts'
+import {
+  MakesafeAttendanceCycleBindingRecoveryError,
+  type RoofCycleBindingRecoverySnapshot,
+  runRoofCycleBindingRecovery,
+} from './makesafe_attendance_cycle_binding_recovery.ts'
 import {
   completeIntakeMint,
   ensureIntakeWorkOrderEvidence,
@@ -3885,7 +3891,10 @@ if (import.meta.main) serve(async (req: Request) => {
             },
             spine_before: spineBefore,
             spine_incomplete_before:
-              spineBefore.filter((item) => !item.spine_complete).length,
+              spineBefore.filter((item) =>
+                !item.spine_complete || !item.canonical_builder_reference
+              ).length,
+            review_queue: groupSesSpineFactsForReview(spineBefore),
           })
         }
 
@@ -3913,9 +3922,12 @@ if (import.meta.main) serve(async (req: Request) => {
           selectedJobIds.length,
         )
         const spineAfter = await _readSesSpineFacts(client, plan.selected)
-        const stillIncomplete = spineAfter.filter((item) => !item.spine_complete)
+        const stillIncomplete = spineAfter.filter((item) =>
+          !item.spine_complete || !item.canonical_builder_reference
+        )
+        const complete = rpcCheck.agrees && stillIncomplete.length === 0
         return json({
-          ok: rpcCheck.agrees && stillIncomplete.length === 0,
+          ok: complete,
           dry_run: false,
           board_complete: false,
           contract: MAKESAFE_STATE_SEED_SCOPE_CONTRACT,
@@ -3928,7 +3940,8 @@ if (import.meta.main) serve(async (req: Request) => {
           spine_before: spineBefore,
           spine_after: spineAfter,
           spine_incomplete_after: stillIncomplete.map((item) => item.job_number),
-        }, rpcCheck.agrees ? 200 : 503)
+          review_queue: groupSesSpineFactsForReview(spineAfter),
+        }, complete ? 200 : 503)
       }
       case 'makesafe_state_reconcile': {
         // U2 Captain redirect: server-selected, fact-derived board correction.
@@ -4842,6 +4855,20 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'makesafe_deterministic_intake_exact_rescan requires POST' }, 405)
         }
         return json(await adjudicatedExactRescanAction(client, body))
+      }
+      // Exact five-card repair for the post-U2 intake omission that left a
+      // newly minted roof card without its initial immutable cycle identity.
+      // API-key-only, POST-only, dry-run explicit, and absent from the routine
+      // allow-list. It creates no assignment and attributes no historical
+      // evidence; ambiguous or drifted state refuses the whole apply.
+      case 'makesafe_roof_cycle_binding_recovery': {
+        if (authMode !== 'api_key') {
+          return json({ error: 'makesafe_roof_cycle_binding_recovery requires ops privilege' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'makesafe_roof_cycle_binding_recovery requires POST' }, 405)
+        }
+        return json(await roofCycleBindingRecoveryAction(client, body))
       }
       // Captain-approved historical recovery. This path creates one make-safe
       // job without notification callbacks, binds its immutable source lineage,
@@ -12656,12 +12683,18 @@ interface HistoricalMakesafeBackfillMetadata {
   invoice_number: string
 }
 
+interface CanonicalMakesafeIntakeAuthority {
+  case_id: string
+  mint_id: string
+}
+
 async function createMakesafeJob(
   client: any,
   body: any,
   internalOptions: {
     historicalBackfill?: HistoricalMakesafeBackfillMetadata
     familyClassifierContext?: _MakeSafeJobFamilyContext
+    canonicalIntakeAuthority?: CanonicalMakesafeIntakeAuthority
   } = {},
 ) {
   const {
@@ -12756,6 +12789,39 @@ async function createMakesafeJob(
     },
   )
   const reviewedJobFamilyLabel = makesafe_job_family_label || _makeSafeJobFamilyLabel(reviewedJobFamily)
+
+  if (reviewedJobFamily === 'roof_report') {
+    const authority = internalOptions.canonicalIntakeAuthority
+    if (!authority?.case_id || !authority.mint_id || intake_mint_id !== authority.mint_id) {
+      throw new ApiError(
+        'roof-report live creation requires canonical deterministic intake authority',
+        409,
+      )
+    }
+    const { data: intakeCase, error: intakeCaseError } = await client
+      .from('makesafe_intake_cases')
+      .select('id,job_id,target_job_id,instruction_key,builder_wo_canonical,builder_po_canonical,external_ref_canonical')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('id', authority.case_id)
+      .maybeSingle()
+    const detailReference = _makesafeNormRef(external_ref)
+    const canonicalReferences = [
+      intakeCase?.builder_wo_canonical,
+      intakeCase?.builder_po_canonical,
+      intakeCase?.external_ref_canonical,
+    ].map(_makesafeNormRef).filter(Boolean)
+    if (
+      intakeCaseError || intakeCase?.id !== authority.case_id ||
+      intakeCase?.job_id || intakeCase?.target_job_id ||
+      !String(intakeCase?.instruction_key || '').trim() ||
+      !detailReference || !canonicalReferences.includes(detailReference)
+    ) {
+      throw new ApiError(
+        'roof-report live creation canonical source identity is missing or drifted',
+        409,
+      )
+    }
+  }
 
   // A roof report's fee is a fixed function of storeys, and the canon is that
   // storeys are explicitly classified and never inferred from narrative. The
@@ -12856,11 +12922,6 @@ async function createMakesafeJob(
     }
   }
 
-  // Geocode address (fire-and-forget, non-blocking)
-  if (!reviewedSyntheticLivefireMarker && !internalOptions.historicalBackfill) {
-    geocodeAndUpdateJob(client, job.id, site_address, suburb).catch(() => {})
-  }
-
   // Make-safe overlay details: keeps requesting-company refs, substatus,
   // safety notes, report handoff and invoice notes out of patio/fencing scope.
   try {
@@ -12875,6 +12936,7 @@ async function createMakesafeJob(
       special_instructions: reviewedSpecialInstructions,
       external_links: external_links || companyData?.external_links || [],
       billing_rules: companyData?.billing_rules || {},
+      cycle_number: 1,
       // BE-2: report-family jobs persist their report_type token at creation
       // (family 'roof_report' -> 'roof_report', 'assessment_report_quote' ->
       // 'assessment_report'; null for non-report families). Previously only
@@ -12884,7 +12946,33 @@ async function createMakesafeJob(
       report_type: _reportTypeForJobFamily(reviewedJobFamily),
     })
     if (detailsInsertError) throw detailsInsertError
+    if (reviewedJobFamily === 'roof_report') {
+      await bindMakesafeRoofInitialCycle(
+        client,
+        {
+          jobId: job.id,
+          openReason: 'roof_report_intake',
+          expectedCaseId: null,
+          expectedCycleCount: 0,
+          expectedExistingCycleId: null,
+          requireZeroOperationalEvidence: false,
+        },
+      )
+    }
   } catch (e: any) {
+    if (reviewedJobFamily === 'roof_report') {
+      const { error: cleanupError } = await client.from('jobs').delete().eq('id', job.id)
+      if (cleanupError) {
+        throw new ApiError(
+          `roof-report initial attendance cycle failed and job cleanup failed: ${cleanupError.message || cleanupError}`,
+          503,
+        )
+      }
+      throw new ApiError(
+        `roof-report initial attendance cycle failed; live job was removed: ${e?.message || e}`,
+        503,
+      )
+    }
     if (internalOptions.historicalBackfill) {
       throw new ApiError(
         `historical make-safe job card details failed: ${e?.message || e}`,
@@ -12894,6 +12982,12 @@ async function createMakesafeJob(
     // Non-blocking until the migration is deployed everywhere. The base job
     // remains visible and the PR/migration note makes this gap explicit.
     console.log('[ops-api] makesafe_job_details insert skipped:', e?.message)
+  }
+
+  // Geocode address (fire-and-forget, non-blocking) only after the required
+  // roof-report detail/cycle identity is fully established.
+  if (!reviewedSyntheticLivefireMarker && !internalOptions.historicalBackfill) {
+    geocodeAndUpdateJob(client, job.id, site_address, suburb).catch(() => {})
   }
 
   // If PDF provided, upload to storage and create job_documents record
@@ -15538,8 +15632,10 @@ export const _loadMakesafeAssignedJobIdsForTest = loadMakesafeAssignedJobIds
 /**
  * Read the three identity terms U4 builds its correlation spine from, for a
  * named card list. Reporting only: `makesafe_state_seed_scoped` uses it to show
- * its own before/after. Nothing branches on the result — the authoritative
- * check stays a U4 `dry_run` prepare.
+ * its own before/after. It never derives board state; the scoped recovery
+ * response uses it only to refuse a false "complete" result when canonical
+ * source identity is still missing. The authoritative reporting check stays a
+ * U4 `dry_run` prepare.
  *
  * A case can be bound to a job either way round (`job_id` or `target_job_id`),
  * so both are read and merged, exactly as the assembler snapshot does.
@@ -15550,8 +15646,8 @@ async function _readSesSpineFacts(
 ): Promise<SesSpineFacts[]> {
   const jobIds = selected.map((item) => item.job_id)
   if (jobIds.length === 0) return []
-  const caseColumns = 'id, job_id, target_job_id, state, lineage_id, instruction_key, source_content_hash'
-  const [casesByJob, casesByTarget, revisions] = await Promise.all([
+  const caseColumns = 'id, job_id, target_job_id, state, lineage_id, instruction_key, source_content_hash, builder_wo_canonical, builder_po_canonical, external_ref_canonical'
+  const [casesByJob, casesByTarget, revisions, details] = await Promise.all([
     _fetchAllByJobIdChunked(client, 'makesafe_intake_cases', caseColumns, jobIds),
     _fetchAllByJobIdChunked(
       client,
@@ -15565,6 +15661,12 @@ async function _readSesSpineFacts(
       client,
       'makesafe_state_identity_current_v2',
       'job_id, authority_kind, lineage_id, source_instruction_id, source_content_hash',
+      jobIds,
+    ),
+    _fetchAllByJobIdChunked(
+      client,
+      'makesafe_job_details',
+      'job_id, external_ref',
       jobIds,
     ),
   ])
@@ -15588,12 +15690,18 @@ async function _readSesSpineFacts(
     const jobId = String(row?.job_id || '')
     if (jobId) revisionFor.set(jobId, row)
   }
+  const detailFor = new Map<string, any>()
+  for (const row of details) {
+    const jobId = String(row?.job_id || '')
+    if (jobId) detailFor.set(jobId, row)
+  }
   return selected.map((item) =>
     deriveSesSpineFacts({
       job_id: item.job_id,
       job_number: item.job_number,
       cases: [...(casesFor.get(item.job_id)?.values() || [])],
       identity_revision: revisionFor.get(item.job_id) || null,
+      detail_builder_reference: detailFor.get(item.job_id)?.external_ref || null,
     })
   )
 }
@@ -16842,6 +16950,49 @@ async function ensureMakesafeAttendanceCycle(
     throw new ApiError(`attendance cycle bind failed: ${error?.message || 'missing cycle identity'}`, 500)
   }
   return data
+}
+
+async function bindMakesafeRoofInitialCycle(
+  client: any,
+  input: {
+    jobId: string
+    openReason: string
+    expectedCaseId: string | null
+    expectedCycleCount: 0 | 1
+    expectedExistingCycleId: string | null
+    requireZeroOperationalEvidence: boolean
+  },
+): Promise<{
+  attendanceCycleId: string
+  cycleNumber: number
+  cycleCreated: boolean
+  cycleBound: boolean
+}> {
+  const { data, error } = await client.rpc('bind_makesafe_roof_initial_cycle_v1', {
+    p_job_id: input.jobId,
+    p_open_reason: input.openReason,
+    p_expected_case_id: input.expectedCaseId,
+    p_expected_cycle_count: input.expectedCycleCount,
+    p_expected_existing_cycle_id: input.expectedExistingCycleId,
+    p_require_zero_operational_evidence: input.requireZeroOperationalEvidence,
+  })
+  if (error) {
+    throw new ApiError(
+      `roof-report initial attendance cycle bind failed: ${error.message || error}`,
+      503,
+    )
+  }
+  const attendanceCycleId = String(data?.attendance_cycle_id || '')
+  const cycleNumber = Number(data?.cycle_number)
+  const cycleCreated = data?.cycle_created === true
+  const cycleBound = data?.cycle_bound === true
+  if (!attendanceCycleId || cycleNumber !== 1 || !cycleBound) {
+    throw new ApiError(
+      'roof-report initial attendance cycle bind returned an invalid postcondition',
+      503,
+    )
+  }
+  return { attendanceCycleId, cycleNumber, cycleCreated, cycleBound }
 }
 
 type MakesafeMediaCycleBinding = {
@@ -18924,7 +19075,17 @@ async function approveIntakeDraft(client: any, body: any) {
       // approval route and therefore cannot abuse this suppression flag.
       suppress_manager_notification: body?.suppress_manager_notification === true ||
         extraction?.deterministic_intake === true,
-      }, { familyClassifierContext: approvedFamilyContext })
+      }, {
+        familyClassifierContext: approvedFamilyContext,
+        ...(authority && primaryMint
+          ? {
+            canonicalIntakeAuthority: {
+              case_id: authority.caseId,
+              mint_id: primaryMint.id,
+            },
+          }
+          : {}),
+      })
     // Record the live job id the instant it exists so the catch path can tell a
     // pre-insert failure (safe to re-queue) from a post-insert failure (orphan risk).
     createdJobId = jobResult?.job?.id || null
@@ -19069,7 +19230,17 @@ async function approveIntakeDraft(client: any, body: any) {
             : {}),
           suppress_manager_notification: body?.suppress_manager_notification === true ||
             extraction?.deterministic_intake === true,
-          }, { familyClassifierContext: approvedFamilyContext })
+          }, {
+            familyClassifierContext: approvedFamilyContext,
+            ...(authority && secondaryMint
+              ? {
+                canonicalIntakeAuthority: {
+                  case_id: authority.caseId,
+                  mint_id: secondaryMint.id,
+                },
+              }
+              : {}),
+          })
         secondaryJob = secondaryResult?.job || null
         if (secondaryJob?.id) {
           createdJobIds.push(secondaryJob.id)
@@ -20714,12 +20885,20 @@ async function loadAdjudicatedRescanJob(client: any, caseId: string) {
     .maybeSingle()
   if (jobError) throw jobError
   if (!job?.id) return null
-  const { data: details, error: detailsError } = await client
-    .from('makesafe_job_details')
-    .select('report_type')
-    .eq('job_id', job.id)
-    .maybeSingle()
-  if (detailsError) throw detailsError
+  const [detailsResult, cyclesResult] = await Promise.all([
+    client.from('makesafe_job_details')
+      .select('report_type,cycle_number,attendance_cycle_id,cycle_attribution')
+      .eq('job_id', job.id)
+      .maybeSingle(),
+    client.from('makesafe_attendance_cycles')
+      .select('id')
+      .eq('job_id', job.id)
+      .order('cycle_number'),
+  ])
+  if (detailsResult.error || cyclesResult.error) {
+    throw detailsResult.error || cyclesResult.error
+  }
+  const details = detailsResult.data
   const jobFamily = String(job.metadata?.makesafe_job_family || '')
   if (jobFamily === 'roof_report' && details?.report_type !== 'roof_report') {
     throw new SesMissedJobRecoveryError(
@@ -20731,6 +20910,12 @@ async function loadAdjudicatedRescanJob(client: any, caseId: string) {
     id: job.id,
     jobNumber: job.job_number,
     jobFamily,
+    attendance: {
+      currentAttendanceCycleId: details?.attendance_cycle_id || null,
+      immutableAttendanceCycleIds: (cyclesResult.data || []).map((cycle: any) => cycle.id),
+      attribution: details?.cycle_attribution || null,
+      cycleNumber: Number(details?.cycle_number || 0),
+    },
   }
 }
 
@@ -20898,6 +21083,164 @@ async function adjudicatedExactRescanAction(client: any, body: any) {
     })
   } catch (error) {
     sesMissedJobRecoveryApiError(error)
+  }
+}
+
+function emptyRoofCycleBindingSnapshot(): RoofCycleBindingRecoverySnapshot {
+  return {
+    job: null,
+    detail: null,
+    cycles: [],
+    intakeCases: [],
+    evidenceCounts: {
+      assignments: 0,
+      serviceReports: 0,
+      media: 0,
+      packs: 0,
+      portalCaptures: 0,
+      roofReportDrafts: 0,
+      docketRevisions: 0,
+      roofReportDocuments: 0,
+    },
+  }
+}
+
+async function loadRoofCycleBindingRecoverySnapshot(
+  client: any,
+  jobNumber: string,
+): Promise<RoofCycleBindingRecoverySnapshot> {
+  const { data: job, error: jobError } = await client.from('jobs')
+    .select('id,job_number,type,status,metadata')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('job_number', jobNumber)
+    .maybeSingle()
+  if (jobError) throw jobError
+  if (!job?.id) return emptyRoofCycleBindingSnapshot()
+
+  const [
+    detailResult,
+    cyclesResult,
+    directCasesResult,
+    targetCasesResult,
+    assignmentsResult,
+    reportsResult,
+    mediaResult,
+    packsResult,
+    capturesResult,
+    roofDraftsResult,
+    docketRevisionsResult,
+    roofDocumentsResult,
+  ] = await Promise.all([
+    client.from('makesafe_job_details')
+      .select('job_id,external_ref,report_type,cycle_number,attendance_cycle_id,cycle_attribution')
+      .eq('job_id', job.id)
+      .maybeSingle(),
+    client.from('makesafe_attendance_cycles')
+      .select('id,job_id,cycle_number,open_reason')
+      .eq('job_id', job.id)
+      .order('cycle_number'),
+    client.from('makesafe_intake_cases')
+      .select('id,state,job_id,target_job_id,instruction_key,builder_wo_canonical,builder_po_canonical,external_ref_canonical')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('job_id', job.id),
+    client.from('makesafe_intake_cases')
+      .select('id,state,job_id,target_job_id,instruction_key,builder_wo_canonical,builder_po_canonical,external_ref_canonical')
+      .eq('org_id', DEFAULT_ORG_ID)
+      .eq('target_job_id', job.id),
+    client.from('job_assignments').select('id', { count: 'exact', head: true }).eq('job_id', job.id),
+    client.from('job_service_reports').select('id', { count: 'exact', head: true }).eq('job_id', job.id),
+    client.from('job_media').select('id', { count: 'exact', head: true }).eq('job_id', job.id),
+    client.from('makesafe_report_packs').select('id', { count: 'exact', head: true }).eq('job_id', job.id),
+    client.from('makesafe_portal_capture_revisions').select('id', { count: 'exact', head: true }).eq('job_id', job.id),
+    client.from('makesafe_roof_report_drafts').select('id', { count: 'exact', head: true }).eq('job_id', job.id),
+    client.from('makesafe_docket_revisions').select('id', { count: 'exact', head: true }).eq('job_id', job.id),
+    client.from('job_documents').select('id', { count: 'exact', head: true })
+      .eq('job_id', job.id)
+      .eq('type', 'roof_report'),
+  ])
+  const failed = [
+    detailResult,
+    cyclesResult,
+    directCasesResult,
+    targetCasesResult,
+    assignmentsResult,
+    reportsResult,
+    mediaResult,
+    packsResult,
+    capturesResult,
+    roofDraftsResult,
+    docketRevisionsResult,
+    roofDocumentsResult,
+  ].find((result) => result.error)
+  if (failed?.error) throw failed.error
+  const caseMap = new Map<string, any>()
+  for (const intakeCase of [
+    ...(directCasesResult.data || []),
+    ...(targetCasesResult.data || []),
+  ]) {
+    if (intakeCase?.id) caseMap.set(intakeCase.id, intakeCase)
+  }
+  const detail = detailResult.data
+  return {
+    job: {
+      id: job.id,
+      jobNumber: job.job_number,
+      type: job.type,
+      status: job.status,
+      family: String(job.metadata?.makesafe_job_family || ''),
+    },
+    detail: detail?.job_id
+      ? {
+        jobId: detail.job_id,
+        externalRef: String(detail.external_ref || ''),
+        reportType: detail.report_type || null,
+        cycleNumber: Number(detail.cycle_number),
+        attendanceCycleId: detail.attendance_cycle_id || null,
+        cycleAttribution: detail.cycle_attribution || null,
+      }
+      : null,
+    cycles: (cyclesResult.data || []).map((cycle: any) => ({
+      id: cycle.id,
+      jobId: cycle.job_id,
+      cycleNumber: Number(cycle.cycle_number),
+      openReason: cycle.open_reason || null,
+    })),
+    intakeCases: [...caseMap.values()].map((intakeCase: any) => ({
+      id: intakeCase.id,
+      state: intakeCase.state,
+      jobId: intakeCase.job_id || null,
+      targetJobId: intakeCase.target_job_id || null,
+      instructionKey: intakeCase.instruction_key || null,
+      builderWorkOrder: intakeCase.builder_wo_canonical || null,
+      builderPurchaseOrder: intakeCase.builder_po_canonical || null,
+      externalRef: intakeCase.external_ref_canonical || null,
+    })),
+    evidenceCounts: {
+      assignments: Number(assignmentsResult.count || 0),
+      serviceReports: Number(reportsResult.count || 0),
+      media: Number(mediaResult.count || 0),
+      packs: Number(packsResult.count || 0),
+      portalCaptures: Number(capturesResult.count || 0),
+      roofReportDrafts: Number(roofDraftsResult.count || 0),
+      docketRevisions: Number(docketRevisionsResult.count || 0),
+      roofReportDocuments: Number(roofDocumentsResult.count || 0),
+    },
+  }
+}
+
+async function roofCycleBindingRecoveryAction(client: any, body: any) {
+  try {
+    return await runRoofCycleBindingRecovery(body, {
+      loadSnapshot: (jobNumber) =>
+        loadRoofCycleBindingRecoverySnapshot(client, jobNumber),
+      bindInitialCycle: async (input) =>
+        await bindMakesafeRoofInitialCycle(client, input),
+    })
+  } catch (error) {
+    if (error instanceof MakesafeAttendanceCycleBindingRecoveryError) {
+      throw new ApiError(error.message, error.status, error.body)
+    }
+    throw error
   }
 }
 

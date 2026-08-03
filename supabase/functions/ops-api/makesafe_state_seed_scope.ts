@@ -231,6 +231,9 @@ export interface SesSpineCaseRow {
   lineage_id?: unknown;
   instruction_key?: unknown;
   source_content_hash?: unknown;
+  builder_wo_canonical?: unknown;
+  builder_po_canonical?: unknown;
+  external_ref_canonical?: unknown;
 }
 
 export interface SesSpineIdentityRow {
@@ -249,6 +252,54 @@ export interface SesSpineFacts {
   source_instruction_present: boolean;
   source_content_hash_present: boolean;
   spine_complete: boolean;
+  canonical_builder_reference: string | null;
+  candidate_builder_reference: string | null;
+  builder_reference_authority:
+    | "intake_case"
+    | "legacy_job_record"
+    | "ambiguous"
+    | "none";
+  confidence: "high" | "medium" | "low";
+  reason_state:
+    | "spine_complete"
+    | "canonical_case_identity_unstamped"
+    | "caseless_legacy_identity_unapproved"
+    | "source_authority_ambiguous"
+    | "builder_reference_missing";
+  human_decision: {
+    required: boolean;
+    action:
+      | "no_action"
+      | "approve_scoped_seed"
+      | "approve_legacy_job_record_authority"
+      | "resolve_source_authority"
+      | "recover_canonical_builder_reference";
+    prompt: string;
+  };
+}
+
+export const MAKESAFE_SPINE_REVIEW_CONTRACT =
+  "makesafe-spine-recovery-review.v1";
+
+export interface SesSpineReviewQueue {
+  contract: typeof MAKESAFE_SPINE_REVIEW_CONTRACT;
+  groups: Array<{
+    confidence: SesSpineFacts["confidence"];
+    count: number;
+    reasons: Array<{
+      reason_state: SesSpineFacts["reason_state"];
+      count: number;
+      items: SesSpineFacts[];
+    }>;
+  }>;
+}
+
+function firstText(...values: unknown[]): string {
+  for (const value of values) {
+    const cleaned = text(value);
+    if (cleaned) return cleaned;
+  }
+  return "";
 }
 
 /**
@@ -271,6 +322,7 @@ export function deriveSesSpineFacts(input: {
   job_number: string;
   cases: readonly SesSpineCaseRow[];
   identity_revision: SesSpineIdentityRow | null | undefined;
+  detail_builder_reference?: unknown;
 }): SesSpineFacts {
   const liveCases = input.cases.filter((item) =>
     LIVE_CASE_STATES.has(text(item.state))
@@ -289,18 +341,153 @@ export function deriveSesSpineFacts(input: {
   const sourceContentHash = text(sourceCase?.source_content_hash) ||
     text(revision?.source_content_hash);
   const jobId = text(input.job_id);
+  const detailBuilderReference = text(input.detail_builder_reference);
+  const caseBuilderReference = sourceCase
+    ? firstText(
+      sourceCase.builder_wo_canonical,
+      sourceCase.builder_po_canonical,
+      sourceCase.external_ref_canonical,
+    )
+    : "";
+  const authorityKind = text(input.identity_revision?.authority_kind);
+  const builderReferenceAuthority = liveCases.length > 1 && !revision
+    ? "ambiguous" as const
+    : caseBuilderReference
+    ? "intake_case" as const
+    : authorityKind === "legacy_job_record" && detailBuilderReference
+    ? "legacy_job_record" as const
+    : "none" as const;
+  const canonicalBuilderReference = builderReferenceAuthority === "intake_case"
+    ? caseBuilderReference
+    : builderReferenceAuthority === "legacy_job_record"
+    ? detailBuilderReference
+    : null;
+  const spineComplete = Boolean(
+    lineageId && jobId && sourceContentHash && sourceInstruction,
+  );
+  const review = spineComplete && canonicalBuilderReference
+    ? {
+      confidence: "high" as const,
+      reason_state: "spine_complete" as const,
+      human_decision: {
+        required: false,
+        action: "no_action" as const,
+        prompt: "No identity recovery decision is required.",
+      },
+    }
+    : (liveCases.length > 1 && !revision) ||
+        authorityKind === "unresolved_authority"
+    ? {
+      confidence: "low" as const,
+      reason_state: "source_authority_ambiguous" as const,
+      human_decision: {
+        required: true,
+        action: "resolve_source_authority" as const,
+        prompt:
+          "Choose the one canonical source authority before any identity recovery can run.",
+      },
+    }
+    : liveCases.length === 1 && canonicalBuilderReference
+    ? {
+      confidence: "high" as const,
+      reason_state: "canonical_case_identity_unstamped" as const,
+      human_decision: {
+        required: true,
+        action: "approve_scoped_seed" as const,
+        prompt:
+          "Approve stamping the existing canonical case identity for this exact card.",
+      },
+    }
+    : liveCases.length === 0 && !revision && detailBuilderReference
+    ? {
+      confidence: "medium" as const,
+      reason_state: "caseless_legacy_identity_unapproved" as const,
+      human_decision: {
+        required: true,
+        action: "approve_legacy_job_record_authority" as const,
+        prompt:
+          "Approve the reviewed legacy job record as canonical identity for this exact card.",
+      },
+    }
+    : !canonicalBuilderReference
+    ? {
+      confidence: "low" as const,
+      reason_state: "builder_reference_missing" as const,
+      human_decision: {
+        required: true,
+        action: "recover_canonical_builder_reference" as const,
+        prompt:
+          "Recover the canonical builder instruction before identity recovery can run.",
+      },
+    }
+    : {
+      confidence: "high" as const,
+      reason_state: "canonical_case_identity_unstamped" as const,
+      human_decision: {
+        required: true,
+        action: "approve_scoped_seed" as const,
+        prompt:
+          "Approve stamping the existing canonical identity for this exact card.",
+      },
+    };
   return {
     job_number: input.job_number,
     job_id: jobId,
     live_case_count: liveCases.length,
-    identity_authority_kind: text(input.identity_revision?.authority_kind) ||
-      null,
+    identity_authority_kind: authorityKind || null,
     lineage_id_present: Boolean(lineageId),
     source_instruction_present: Boolean(sourceInstruction),
     source_content_hash_present: Boolean(sourceContentHash),
-    spine_complete: Boolean(
-      lineageId && jobId && sourceContentHash && sourceInstruction,
-    ),
+    spine_complete: spineComplete,
+    canonical_builder_reference: canonicalBuilderReference,
+    candidate_builder_reference: canonicalBuilderReference
+      ? null
+      : detailBuilderReference || null,
+    builder_reference_authority: builderReferenceAuthority,
+    ...review,
+  };
+}
+
+/**
+ * The approved review queue groups the same per-job facts by confidence and
+ * reason. It is a projection of `SesSpineFacts`, not another recovery action or
+ * status engine, and it keeps exactly one human decision on each item.
+ */
+export function groupSesSpineFactsForReview(
+  facts: readonly SesSpineFacts[],
+): SesSpineReviewQueue {
+  const confidenceOrder: SesSpineFacts["confidence"][] = [
+    "high",
+    "medium",
+    "low",
+  ];
+  return {
+    contract: MAKESAFE_SPINE_REVIEW_CONTRACT,
+    groups: confidenceOrder.flatMap((confidence) => {
+      const confidenceItems = facts.filter((item) =>
+        item.confidence === confidence
+      );
+      if (!confidenceItems.length) return [];
+      const reasonOrder = [
+        ...new Set(
+          confidenceItems.map((item) => item.reason_state),
+        ),
+      ].sort();
+      return [{
+        confidence,
+        count: confidenceItems.length,
+        reasons: reasonOrder.map((reasonState) => {
+          const items = confidenceItems.filter((item) =>
+            item.reason_state === reasonState
+          );
+          return {
+            reason_state: reasonState,
+            count: items.length,
+            items,
+          };
+        }),
+      }];
+    }),
   };
 }
 

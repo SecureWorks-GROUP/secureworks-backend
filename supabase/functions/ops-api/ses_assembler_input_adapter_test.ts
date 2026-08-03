@@ -404,6 +404,48 @@ Deno.test(
   },
 );
 
+Deno.test("canonical intake case publishes builder reference without borrowing the board row", () => {
+  const live = snapshot();
+  live.detail!.external_ref = "BOARD-ROW-CANDIDATE";
+  live.cases = [{
+    id: "case-canonical-builder-reference",
+    state: "confirmed_live_job",
+    job_id: live.job.id,
+    target_job_id: null,
+    instruction_key: "builder:generic/po:one",
+    lineage_id: "lineage-generic-one",
+    source_content_hash: `sha256:${"f".repeat(64)}`,
+    builder_wo_canonical: "BUILDER-CANONICAL-ONE",
+    builder_po_canonical: "PO-CANONICAL-ONE",
+    external_ref_canonical: "BUILDER-CANONICAL-ONE",
+  }];
+  live.identity_revision = null;
+
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.source.builder_reference, "BUILDER-CANONICAL-ONE");
+  assertEquals(
+    input.source.builder_reference === live.detail!.external_ref,
+    false,
+  );
+});
+
+Deno.test("effective intake authority cannot publish a builder reference from the board row alone", () => {
+  const live = snapshot();
+  live.detail!.external_ref = "BOARD-ROW-ONLY";
+  live.cases = [];
+  live.identity_revision = {
+    authority_kind: "effective_intake_case",
+    source_instruction_id: "instruction-authority-only",
+    source_version: 1,
+    source_content_hash: `sha256:${"e".repeat(64)}`,
+    lineage_id: "lineage-authority-only",
+    effective_case_id: "case-without-canonical-reference",
+  };
+
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.source.builder_reference, "");
+});
+
 Deno.test(
   "SWMS-26980 production-shape dry-run is HTTP-envelope ready, write-free and specifically blocked",
   async () => {
@@ -2422,6 +2464,11 @@ Deno.test("SWMS-26980 seeded authority preserves the identity spine in U4", () =
   );
   assertEquals(input.identity.source_version, "1");
   assertEquals(input.identity.lineage_id, live.identity_revision.lineage_id);
+  assertEquals(
+    input.source.builder_reference,
+    live.detail!.external_ref,
+    "an explicit legacy_job_record revision, not the board row alone, authorizes the historical fallback",
+  );
 });
 
 Deno.test(

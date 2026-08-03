@@ -19,6 +19,7 @@ import {
 import {
   checkMakesafeStateSeedScopeResult,
   deriveSesSpineFacts,
+  groupSesSpineFactsForReview,
   isCanonicalSeedScopeJob,
   MAKESAFE_STATE_SEED_SCOPE_CONTRACT,
   MAKESAFE_STATE_SEED_SCOPE_MAX_CARDS,
@@ -86,6 +87,8 @@ Deno.test("a named tranche has a scoped route to the existing seeder", () => {
   // Validation runs before any read, so a bad body never reaches production
   // rows; the run-key rule itself is asserted directly further down.
   assertStringIncludes(handler, "normalizeMakesafeStateSeedScopeRequest(body)");
+  assertStringIncludes(handler, "groupSesSpineFactsForReview(spineBefore)");
+  assertStringIncludes(handler, "groupSesSpineFactsForReview(spineAfter)");
   // The deploy gate iterates this list; an unlisted action can be dropped by a
   // stale deploy without anything going red.
   assertStringIncludes(requiredActions, "\nmakesafe_state_seed_scoped\n");
@@ -272,13 +275,20 @@ Deno.test("spine_missing_lineage is really a missing source content hash", () =>
       lineage_id: "case-a",
       instruction_key: "fingerprint:abc/deliverable:wo/cycle:1",
       source_content_hash: null,
+      builder_wo_canonical: "BUILDER-ROOF-ONE",
     }],
     identity_revision: null,
+    detail_builder_reference: "BUILDER-ROOF-ONE",
   });
   assertEquals(before.lineage_id_present, true);
   assertEquals(before.source_instruction_present, true);
   assertEquals(before.source_content_hash_present, false);
   assertEquals(before.spine_complete, false);
+  assertEquals(before.canonical_builder_reference, "BUILDER-ROOF-ONE");
+  assertEquals(before.builder_reference_authority, "intake_case");
+  assertEquals(before.confidence, "high");
+  assertEquals(before.reason_state, "canonical_case_identity_unstamped");
+  assertEquals(before.human_decision.action, "approve_scoped_seed");
 
   // After the seed the case row carries its stamped hash; nothing else changed.
   const after = deriveSesSpineFacts({
@@ -289,10 +299,13 @@ Deno.test("spine_missing_lineage is really a missing source content hash", () =>
       lineage_id: "case-a",
       instruction_key: "fingerprint:abc/deliverable:wo/cycle:1",
       source_content_hash: `sha256:${"a".repeat(64)}`,
+      builder_wo_canonical: "BUILDER-ROOF-ONE",
     }],
     identity_revision: null,
+    detail_builder_reference: "BUILDER-ROOF-ONE",
   });
   assertEquals(after.spine_complete, true);
+  assertEquals(after.human_decision.action, "no_action");
 });
 
 Deno.test("a caseless card is completed by a legacy_job_record revision", () => {
@@ -301,9 +314,19 @@ Deno.test("a caseless card is completed by a legacy_job_record revision", () => 
     job_number: "SWMS-261099",
     cases: [],
     identity_revision: null,
+    detail_builder_reference: "BUILDER-LEGACY-ONE",
   });
   assertEquals(before.live_case_count, 0);
   assertEquals(before.spine_complete, false);
+  assertEquals(before.canonical_builder_reference, null);
+  assertEquals(before.candidate_builder_reference, "BUILDER-LEGACY-ONE");
+  assertEquals(before.builder_reference_authority, "none");
+  assertEquals(before.confidence, "medium");
+  assertEquals(before.reason_state, "caseless_legacy_identity_unapproved");
+  assertEquals(
+    before.human_decision.action,
+    "approve_legacy_job_record_authority",
+  );
 
   const after = deriveSesSpineFacts({
     job_id: "job-b",
@@ -315,9 +338,98 @@ Deno.test("a caseless card is completed by a legacy_job_record revision", () => 
       source_instruction_id: "legacy-job:job-b",
       source_content_hash: `sha256:${"b".repeat(64)}`,
     },
+    detail_builder_reference: "BUILDER-LEGACY-ONE",
   });
   assertEquals(after.identity_authority_kind, "legacy_job_record");
   assertEquals(after.spine_complete, true);
+  assertEquals(after.canonical_builder_reference, "BUILDER-LEGACY-ONE");
+  assertEquals(after.builder_reference_authority, "legacy_job_record");
+});
+
+Deno.test("a complete source spine cannot publish the board-row builder reference without authority", () => {
+  const facts = deriveSesSpineFacts({
+    job_id: "job-missing-ref",
+    job_number: "SWMS-261092",
+    cases: [{
+      state: "confirmed_live_job",
+      lineage_id: "case-missing-ref",
+      instruction_key: "instruction-missing-ref",
+      source_content_hash: `sha256:${"f".repeat(64)}`,
+    }],
+    identity_revision: null,
+    detail_builder_reference: "BOARD-ROW-ONLY",
+  });
+  assertEquals(facts.spine_complete, true);
+  assertEquals(facts.canonical_builder_reference, null);
+  assertEquals(facts.candidate_builder_reference, "BOARD-ROW-ONLY");
+  assertEquals(facts.builder_reference_authority, "none");
+  assertEquals(facts.confidence, "low");
+  assertEquals(facts.reason_state, "builder_reference_missing");
+  assertEquals(
+    facts.human_decision.action,
+    "recover_canonical_builder_reference",
+  );
+});
+
+Deno.test("an effective intake revision does not turn the board row into canonical source identity", () => {
+  const facts = deriveSesSpineFacts({
+    job_id: "job-effective-revision",
+    job_number: "SWMS-261093",
+    cases: [],
+    identity_revision: {
+      authority_kind: "effective_intake_case",
+      lineage_id: "lineage-effective-revision",
+      source_instruction_id: "instruction-effective-revision",
+      source_content_hash: `sha256:${"d".repeat(64)}`,
+    },
+    detail_builder_reference: "BOARD-ROW-ONLY",
+  });
+  assertEquals(facts.spine_complete, true);
+  assertEquals(facts.canonical_builder_reference, null);
+  assertEquals(facts.candidate_builder_reference, "BOARD-ROW-ONLY");
+  assertEquals(facts.builder_reference_authority, "none");
+  assertEquals(facts.reason_state, "builder_reference_missing");
+  assertEquals(
+    facts.human_decision.action,
+    "recover_canonical_builder_reference",
+  );
+});
+
+Deno.test("the existing scoped result is grouped by confidence and reason without a third surface", () => {
+  const cased = deriveSesSpineFacts({
+    job_id: "job-cased",
+    job_number: "SWMS-261090",
+    cases: [{
+      state: "confirmed_live_job",
+      lineage_id: "case-cased",
+      instruction_key: "instruction-cased",
+      source_content_hash: null,
+      external_ref_canonical: "BUILDER-CASED",
+    }],
+    identity_revision: null,
+    detail_builder_reference: "BUILDER-CASED",
+  });
+  const caseless = deriveSesSpineFacts({
+    job_id: "job-caseless",
+    job_number: "SWMS-261091",
+    cases: [],
+    identity_revision: null,
+    detail_builder_reference: "BUILDER-CASELESS",
+  });
+  const queue = groupSesSpineFactsForReview([caseless, cased]);
+  assertEquals(queue.contract, "makesafe-spine-recovery-review.v1");
+  assertEquals(queue.groups.map((group) => [group.confidence, group.count]), [
+    ["high", 1],
+    ["medium", 1],
+  ]);
+  assertEquals(
+    queue.groups.flatMap((group) =>
+      group.reasons.flatMap((reason) =>
+        reason.items.map((item) => item.human_decision.action)
+      )
+    ),
+    ["approve_scoped_seed", "approve_legacy_job_record_authority"],
+  );
 });
 
 // CONTROL 2 — the ambiguous card the seeder must refuse to resolve.

@@ -32,6 +32,12 @@ export interface ExactRescanJob {
   id: string;
   jobNumber: string;
   jobFamily: string;
+  attendance?: {
+    currentAttendanceCycleId: string | null;
+    immutableAttendanceCycleIds: string[];
+    attribution: string | null;
+    cycleNumber: number;
+  };
 }
 
 export interface ExactRescanDependencies {
@@ -93,6 +99,34 @@ function assertExpectedFamily(actual: string, expected: string): void {
   }
 }
 
+function assertRoofAttendanceCycle(
+  job: ExactRescanJob,
+  newlyMinted: boolean,
+): void {
+  if (job.jobFamily !== "roof_report") return;
+  const attendance = job.attendance;
+  const current = attendance?.currentAttendanceCycleId || "";
+  const immutable = attendance?.immutableAttendanceCycleIds || [];
+  if (
+    attendance?.attribution !== "bound" || !current ||
+    !immutable.includes(current)
+  ) {
+    throw new SesMissedJobRecoveryError(
+      "exact rescan roof-report postcondition failed: current attendance cycle is not bound inside the immutable cycle set",
+      503,
+    );
+  }
+  if (
+    newlyMinted &&
+    (attendance.cycleNumber !== 1 || immutable.length !== 1)
+  ) {
+    throw new SesMissedJobRecoveryError(
+      "exact rescan roof-report postcondition failed: a new job must have exactly one initial attendance cycle",
+      503,
+    );
+  }
+}
+
 export async function runAdjudicatedExactRescan(
   input: ExactRescanInput,
   deps: ExactRescanDependencies,
@@ -128,6 +162,7 @@ export async function runAdjudicatedExactRescan(
       );
     }
     assertExpectedFamily(existing.jobFamily, expectedFamily);
+    assertRoofAttendanceCycle(existing, false);
     const provenanceArgs = {
       postId,
       caseId: authority.caseId,
@@ -175,6 +210,7 @@ export async function runAdjudicatedExactRescan(
     );
   }
   assertExpectedFamily(job.jobFamily, expectedFamily);
+  assertRoofAttendanceCycle(job, true);
   await deps.appendProvenance({ postId, authority, job });
 
   return {
