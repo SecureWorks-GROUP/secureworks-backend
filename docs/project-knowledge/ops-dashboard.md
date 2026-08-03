@@ -25,6 +25,8 @@
 ## ops-api Actions
 See edge-functions.md for full list. Key ones:
 - `schedule`, `update_assignment`, `delete_assignment` — calendar CRUD
+- `create_assignment` — CP1: rejects `user_id` null for crew work with a 400 (name-only rows are invisible to Trade `my_jobs`, which filters on `user_id`); `meeting`/`reminder` types are exempt. Guard is create-only — existing rows are never rewritten. Accepts optional `duration_days` (positive integer; omitted → DB default 1). The create_assignment confirm paths in BOTH ops-ai and agent-runner satisfy the guard by resolving `user_id` from `crew_name` server-side (exact match against installer/trade/subcontractor users; unknown or ambiguous name → clear 400 naming it, never a guess)
+- CP1 drag-to-reschedule (calendar): `update_assignment` accepts `duration_days`/`durationDays` so a drag/resize round-trips `scheduled_date` + `scheduled_end` + `duration_days` together (coerced to a positive integer, else dropped); the calendar light column list includes `duration_days` as the drag UI's duration source. The reschedule popup's explicit Yes calls `send_client_update` with the `install_rescheduled` trigger (see SPINE_CONTRACT.md for its dedup/wording rules) — nothing sends it automatically
 - `create_po`, `update_po`, `push_po_to_xero` — purchase orders
 - `create_wo`, `update_wo` — work orders
 - `job_detail` — full job data with assignments, POs, WOs, scope, invoices

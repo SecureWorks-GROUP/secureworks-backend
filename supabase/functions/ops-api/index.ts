@@ -9649,7 +9649,8 @@ const CAL_FINANCIAL_COLUMNS = [
 
 const CAL_LIGHT_COLUMNS = [
   'assignment_id', 'job_id', 'user_id', 'job_number', 'client_name', 'site_address', 'site_suburb',
-  'scheduled_date', 'scheduled_end', 'start_time', 'end_time', 'crew_name', 'assigned_to',
+  // CP1: duration_days is the drag/resize duration source in the ops calendar.
+  'scheduled_date', 'scheduled_end', 'duration_days', 'start_time', 'end_time', 'crew_name', 'assigned_to',
   'assignment_type', 'assignment_status', 'confirmation_status', 'job_type', 'job_status',
   'ghl_contact_id', 'org_id',
 ]
@@ -23685,7 +23686,7 @@ export async function allocateJob(client: any, args: {
   return { ok: true, mode: 'create', ...created }
 }
 
-async function createAssignment(client: any, body: any) {
+export async function createAssignment(client: any, body: any) {
   const { jobId, job_id, userId, user_id, scheduledDate, scheduled_date, date,
           scheduledEnd, scheduled_end, startTime, start_time, endTime, end_time,
           assignmentType, assignment_type, crewName, crew_name, role, notes } = body
@@ -23693,6 +23694,18 @@ async function createAssignment(client: any, body: any) {
   const jId = jobId || job_id
   const sDate = scheduledDate || scheduled_date || date
   if (!jId || !sDate) throw new Error('jobId and scheduledDate required')
+
+  // CP1 fold-forward (calendar-overhaul Feature 2): a NEW assignment must carry
+  // a REAL crew member. Trade myJobs filters .eq('user_id', userId), so a
+  // name-only row (user_id null) is invisible to every installer — the job
+  // "exists" on the ops calendar but nobody can ever see it. Meetings/reminders
+  // are planning entries, not crew work, and keep their existing shape until the
+  // meetings rebuild (Feature 3). Existing saved rows are untouched: this guards
+  // CREATE only.
+  const guardType = String(assignmentType || assignment_type || 'install').toLowerCase()
+  if (!(userId || user_id) && guardType !== 'meeting' && guardType !== 'reminder') {
+    throw new ApiError('A real crew member is required (userId): name-only assignments are invisible in the Trade App. Pick a crew member from the list.', 400)
+  }
 
   const confStatus = body.confirmationStatus || body.confirmation_status || 'tentative'
   const validConfStatuses = ['placeholder', 'tentative', 'confirmed']
@@ -23719,6 +23732,11 @@ async function createAssignment(client: any, body: any) {
     user_id: userId || user_id || null,
     scheduled_date: sDate,
     scheduled_end: scheduledEnd || scheduled_end || null,
+    // CP1: working-day span length. Only written when the caller provides a
+    // number that rounds to a positive integer, so legacy callers keep the
+    // column's default of 1.
+    ...(Math.round(Number(body.durationDays || body.duration_days)) > 0
+      ? { duration_days: Math.round(Number(body.durationDays || body.duration_days)) } : {}),
     start_time: startTime || start_time || null,
     end_time: endTime || end_time || null,
     role: role || 'lead_installer',
@@ -23881,7 +23899,7 @@ async function createAssignment(client: any, body: any) {
   return { assignment: data }
 }
 
-async function updateAssignment(client: any, body: any) {
+export async function updateAssignment(client: any, body: any) {
   const id = body.assignmentId || body.assignment_id || body.id
   if (!id) throw new Error('assignmentId required')
 
@@ -23895,6 +23913,8 @@ async function updateAssignment(client: any, body: any) {
   const allowed: Record<string, string> = {
     scheduledDate: 'scheduled_date', scheduled_date: 'scheduled_date', date: 'scheduled_date',
     scheduledEnd: 'scheduled_end', scheduled_end: 'scheduled_end',
+    // CP1: drag/resize round-trips the working-day span length with the dates.
+    durationDays: 'duration_days', duration_days: 'duration_days',
     startTime: 'start_time', start_time: 'start_time',
     endTime: 'end_time', end_time: 'end_time',
     status: 'status', notes: 'notes',
@@ -23918,6 +23938,14 @@ async function updateAssignment(client: any, body: any) {
       update.attendance_cycle_id = cycle.id
       update.cycle_attribution = 'bound'
     }
+  }
+
+  // CP1: same positive-integer coercion as createAssignment — a drag/resize
+  // must never write 0, negative, or non-numeric span lengths.
+  if (update.duration_days !== undefined) {
+    const durationDays = Math.round(Number(update.duration_days))
+    if (durationDays > 0) update.duration_days = durationDays
+    else delete update.duration_days
   }
 
   const { data, error } = await client
@@ -44006,6 +44034,29 @@ async function resolveCallback(client: any, body: any) {
 // SPINE INFRASTRUCTURE — Client Auto-Comms (caller-triggered)
 // ════════════════════════════════════════════════════════════
 
+// ── CP1 (calendar-overhaul): reschedule SMS formatting helpers ──
+// Pure + exported for tests. Shaun's approved wording wants the date as
+// "[day] the [date] of [month]" (e.g. "Thursday the 2nd of July") and the
+// location as the STREET NAME ONLY (no number, no suburb).
+export function formatDayDateMonth(iso: string): string {
+  const d = new Date(iso + 'T00:00:00Z')
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+  const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+                  'August', 'September', 'October', 'November', 'December']
+  const n = d.getUTCDate()
+  const suffix = (n % 100 >= 11 && n % 100 <= 13) ? 'th'
+    : n % 10 === 1 ? 'st' : n % 10 === 2 ? 'nd' : n % 10 === 3 ? 'rd' : 'th'
+  return `${days[d.getUTCDay()]} the ${n}${suffix} of ${months[d.getUTCMonth()]}`
+}
+
+export function streetFromAddress(address: string | null | undefined): string {
+  if (!address) return 'your property'
+  let street = String(address).split(',')[0].trim() // drop the suburb/state/postcode tail
+  street = street.replace(/^(?:unit|u|lot|apt|apartment)\s*\d+[a-z]?\s*[\/,-]?\s*/i, '') // "U2/", "Lot 5 "
+  street = street.replace(/^\d+[a-z]?(?:\s*[\/-]\s*\d+[a-z]?)*\s+/i, '') // "12 ", "12A ", "3/45 "
+  return street.trim() || 'your property'
+}
+
 const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string }> = {
   quote_sent: { channel: 'email', template: 'Hi {name}, your quote for {service} at {address} is ready. View it here: {link}' },
   quote_accepted: { channel: 'sms', template: 'Thanks for choosing SecureWorks! Your deposit invoice is on its way.' },
@@ -44014,6 +44065,15 @@ const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string
   council_submitted: { channel: 'sms', template: "We've submitted your application to {council}. Typical processing: 2-4 weeks." },
   council_approved: { channel: 'sms', template: "Great news! Your {service} has been approved. We'll confirm install dates shortly." },
   crew_scheduled: { channel: 'sms', template: 'Your install is booked for {date}. {installer} and team will arrive between {time_range}.' },
+  // CP1 (calendar-overhaul): drag-to-reschedule client SMS. A NEW trigger key on
+  // purpose — crew_scheduled's per-trigger dedup would swallow the reschedule on
+  // any job that already got its "booked" text. Wording is Shaun's, verbatim
+  // (contract ops-dash-calendar-overhaul-2026-07-14 Feature 1), except {service}
+  // which names the job's own service per Captain ruling cp1-askuser-4 — a
+  // fencing job still renders the approved "fence". No cross-sell footer is
+  // appended to this one. Fired ONLY from the calendar popup's explicit Yes —
+  // never automatically.
+  install_rescheduled: { channel: 'sms', template: "Hi {name},\nHope you're well! Just letting you know we've got your {service} install rescheduled for {reschedule_date} at {street}. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\nLet us know if you have any questions.\nCheers, Shaun" },
   crew_arriving: { channel: 'sms', template: 'Our crew is on their way to {address}. Expected arrival: {time}.' },
   daily_progress: { channel: 'sms', template: 'Day {day} update: {progress_note}' },
   job_complete: { channel: 'email', template: 'Your {service} is complete! Please review and sign off here: {link}' },
@@ -44028,7 +44088,7 @@ const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string
   deposit_reminder_day7: { channel: 'sms', template: "Hi {name}, your deposit for {service} is still outstanding (7 days). Please pay soon to secure your install date: {payment_url}" },
 }
 
-async function sendClientUpdate(client: any, body: any) {
+export async function sendClientUpdate(client: any, body: any) {
   const { job_id, comms_trigger, channel: overrideChannel, custom_message, template_vars, job_contact_id } = body
   if (!job_id || !comms_trigger) throw new Error('job_id and comms_trigger required')
   await assertLegacySesMoneyActionAllowedForJob(
@@ -44040,15 +44100,53 @@ async function sendClientUpdate(client: any, body: any) {
   const tmpl = CLIENT_COMMS_TEMPLATES[comms_trigger]
   if (!tmpl && !custom_message) throw new ApiError(`Unknown comms_trigger: ${comms_trigger}. Valid triggers: ${Object.keys(CLIENT_COMMS_TEMPLATES).join(', ')}`, 400)
 
-  // Check for duplicate: per contact if specified, otherwise per job
-  let dupQuery = client.from('email_events')
-    .select('id', { count: 'exact', head: true })
-    .eq('job_id', job_id)
-    .eq('comms_trigger', comms_trigger)
-  if (job_contact_id) dupQuery = dupQuery.eq('recipient', job_contact_id)
-  const { count: existing } = await dupQuery
-  if ((existing || 0) > 0) {
-    return { sent: false, reason: `${comms_trigger} already sent for this ${job_contact_id ? 'contact' : 'job'}` }
+  // CP1 install_rescheduled: the new start day comes from the calendar drop.
+  // Required so the message can say "Thursday the 2nd of July" server-side.
+  let rescheduleDateIso: string | null = null
+  if (comms_trigger === 'install_rescheduled') {
+    rescheduleDateIso = String(template_vars?.new_date || '').slice(0, 10)
+    // Calendar-invalid dates must be rejected, not rendered: V8 rolls some
+    // out-of-range days over (2026-02-30 parses as March 2) and yields Invalid
+    // Date for others, so require an exact round-trip back to the input.
+    const parsedRescheduleDate = new Date(rescheduleDateIso + 'T00:00:00Z')
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(rescheduleDateIso) ||
+        Number.isNaN(parsedRescheduleDate.getTime()) ||
+        parsedRescheduleDate.toISOString().slice(0, 10) !== rescheduleDateIso) {
+      throw new ApiError('install_rescheduled requires template_vars.new_date (YYYY-MM-DD)', 400)
+    }
+  }
+  // The subject records the NEW date for install_rescheduled: a job can be
+  // legitimately rescheduled many times, so dedup compares that date against
+  // the MOST RECENT successfully-sent reschedule below. Every other trigger
+  // keeps the original once-per-job semantics and a byte-identical subject.
+  const eventSubject = `Client update: ${comms_trigger}${job_contact_id ? ' (contact)' : ''}${rescheduleDateIso ? ' -> ' + rescheduleDateIso : ''}`
+
+  if (rescheduleDateIso) {
+    // install_rescheduled only: a double-tap on the same drop is swallowed, but
+    // a failed send never blocks the operator's retry, and an A→B→A sequence
+    // re-sends for the return to A (the most recent SENT row carries B then).
+    let recentQuery = client.from('email_events')
+      .select('subject')
+      .eq('job_id', job_id)
+      .eq('comms_trigger', comms_trigger)
+      .eq('status', 'sent')
+    if (job_contact_id) recentQuery = recentQuery.eq('recipient', job_contact_id)
+    const { data: recentRows } = await recentQuery.order('sent_at', { ascending: false }).limit(1)
+    const lastSentDate = String(recentRows?.[0]?.subject || '').match(/ -> (\d{4}-\d{2}-\d{2})$/)?.[1] || null
+    if (lastSentDate === rescheduleDateIso) {
+      return { sent: false, reason: `${comms_trigger} already sent for this job and date` }
+    }
+  } else {
+    // Check for duplicate: per contact if specified, otherwise per job
+    let dupQuery = client.from('email_events')
+      .select('id', { count: 'exact', head: true })
+      .eq('job_id', job_id)
+      .eq('comms_trigger', comms_trigger)
+    if (job_contact_id) dupQuery = dupQuery.eq('recipient', job_contact_id)
+    const { count: existing } = await dupQuery
+    if ((existing || 0) > 0) {
+      return { sent: false, reason: `${comms_trigger} already sent for this ${job_contact_id ? 'contact' : 'job'}` }
+    }
   }
 
   // Get job + client details
@@ -44084,15 +44182,23 @@ async function sendClientUpdate(client: any, body: any) {
     job_number: job.job_number || '',
     ...(template_vars || {}),
   }
+  if (rescheduleDateIso) {
+    // Server-derived, never caller-supplied: the approved wording's date form,
+    // street-only location, and service noun (fencing renders "fence").
+    vars.reschedule_date = formatDayDateMonth(rescheduleDateIso)
+    vars.street = streetFromAddress(job.site_address)
+    vars.service = job.type === 'fencing' ? 'fence' : (job.type || 'project')
+  }
 
   let message = custom_message || tmpl.template
   for (const [k, v] of Object.entries(vars)) {
     message = message.replace(new RegExp(`\\{${k}\\}`, 'g'), v)
   }
 
-  // Append cross-sell footer for SMS
+  // Append cross-sell footer for SMS — except install_rescheduled, whose wording
+  // is approved verbatim and ends "Cheers, Shaun".
   const channel = overrideChannel || tmpl?.channel || 'sms'
-  if (channel === 'sms') {
+  if (channel === 'sms' && comms_trigger !== 'install_rescheduled') {
     message += '\n\nSecureWorks Group — Patios | Fencing | Decking | Screening | Makesafe'
   }
 
@@ -44104,12 +44210,21 @@ async function sendClientUpdate(client: any, body: any) {
     }
     try {
       const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-      await fetch(ghlUrl, {
+      const smsRes = await fetch(ghlUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contactId: contactGhlId, message }),
       })
-      sent = true
+      // ghl-proxy reports GHL API failures as HTTP 200 { success:false, error },
+      // so only a body confirming success may record status='sent' — an in-band
+      // failure logged as sent would make the reschedule dedup above swallow the
+      // operator's retry.
+      const smsBody = await smsRes.json().catch(() => null)
+      if (smsRes.ok && smsBody?.success === true) {
+        sent = true
+      } else {
+        console.log('[ops-api] GHL SMS failed:', smsBody?.error || `HTTP ${smsRes.status}`)
+      }
     } catch (e) {
       console.log('[ops-api] GHL SMS failed:', (e as Error).message)
     }
@@ -44161,7 +44276,7 @@ async function sendClientUpdate(client: any, body: any) {
     job_id,
     recipient: job_contact_id || (channel === 'sms' ? contactPhone : contactEmail),
     sender: 'system',
-    subject: `Client update: ${comms_trigger}${job_contact_id ? ' (contact)' : ''}`,
+    subject: eventSubject,
     status: sent ? 'sent' : 'failed',
     comms_trigger,
     comms_channel: channel,
