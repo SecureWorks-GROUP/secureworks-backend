@@ -810,7 +810,7 @@ serve(async (req: Request) => {
             return json({ error: `Crew lookup failed for "${crewName}": ${crewErr.message}` }, 500)
           }
           const wanted = crewName.toLowerCase()
-          const matches = (crewUsers || []).filter((u: any) =>
+          const matches = (crewUsers || []).filter((u: { id: string; name: string | null }) =>
             String(u.name || '').trim().toLowerCase() === wanted)
           if (matches.length === 0) {
             return json({ error: `No crew member named "${crewName}" — pick a real crew member from the list.` }, 400)

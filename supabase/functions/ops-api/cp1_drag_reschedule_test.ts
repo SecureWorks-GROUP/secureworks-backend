@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any
 // CP1 — Ops Dash calendar drag-to-reschedule (ops-dash-calendar-overhaul
 // Feature 1 + the folded-forward real-crew fix from Feature 2).
 // ---------------------------------------------------------------------------
