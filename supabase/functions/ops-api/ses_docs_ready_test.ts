@@ -14,6 +14,7 @@ import {
 import {
   assertSesDocketsSignedOffForSend,
   SesActionError,
+  sesReviewArtifactDisplayLabel,
 } from "./ses_reporting_actions.ts";
 
 const INDEX = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
@@ -265,4 +266,10 @@ Deno.test("ops-api exposes the four dashboard Docs Ready actions", () => {
   }
   assertStringIncludes(ACTIONS, "createSignedUrl");
   assertStringIncludes(ACTIONS, "signed_url_expires_in_seconds: 300");
+  assertEquals(
+    sesReviewArtifactDisplayLabel("source_attachment"),
+    "Works Order",
+  );
+  assertEquals(sesReviewArtifactDisplayLabel("report"), null);
+  assertStringIncludes(ACTIONS, "display_label: sesReviewArtifactDisplayLabel");
 });

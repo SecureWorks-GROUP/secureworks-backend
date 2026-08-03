@@ -132,6 +132,7 @@ import {
   projectTradeMakesafeBoard,
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
+import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
 import {
   attachMakesafeStateV2Comparison,
   attachMakesafeStateV2SeedPreviewComparison,
@@ -627,6 +628,7 @@ import {
   isSelfGeneratedMakesafeWorkOrder as _isSelfGeneratedMakesafeWorkOrder,
   mergeBuilderWorkOrderIdentity as _mergeBuilderWorkOrderIdentity,
 } from './makesafe_builder_work_order_identity.ts'
+import { correlateIntakeApprovalIdentity as _correlateIntakeApprovalIdentity } from './makesafe_intake_approval_identity.ts'
 import { refreshMakesafeIdentityAfterWorkOrderAttach as _refreshMakesafeIdentityAfterWorkOrderAttach } from './makesafe_work_order_identity_refresh.ts'
 import {
   assertInstructionCardMintAvailable as _assertInstructionCardMintAvailable,
@@ -3868,6 +3870,12 @@ if (import.meta.main) serve(async (req: Request) => {
           }, 503)
         }
         const plan = resolveMakesafeStateSeedScope(jobNumbers, scopeJobRows || [])
+        const scopeJobMetadataById = new Map<string, Record<string, unknown>>(
+          (scopeJobRows || []).map((row: any) => [
+            String(row?.id || ''),
+            parseJsonObject(row?.metadata),
+          ]),
+        )
         const selectedJobIds = plan.selected.map((item) => item.job_id).sort()
         const unresolved = plan.unknown_job_numbers.length +
           plan.out_of_scope.length + plan.ambiguous_job_numbers.length
@@ -3892,7 +3900,11 @@ if (import.meta.main) serve(async (req: Request) => {
           job_ids: selectedJobIds,
         })
         const selectionHash = `sha256:${hash}`
-        const spineBefore = await _readSesSpineFacts(client, plan.selected)
+        const spineBefore = await _readSesSpineFacts(
+          client,
+          plan.selected,
+          scopeJobMetadataById,
+        )
 
         if (dryRun) {
           return json({
@@ -3941,7 +3953,11 @@ if (import.meta.main) serve(async (req: Request) => {
           seedData,
           selectedJobIds.length,
         )
-        const spineAfter = await _readSesSpineFacts(client, plan.selected)
+        const spineAfter = await _readSesSpineFacts(
+          client,
+          plan.selected,
+          scopeJobMetadataById,
+        )
         const stillIncomplete = spineAfter.filter((item) =>
           !item.spine_complete || !item.canonical_builder_reference
         )
@@ -10950,6 +10966,15 @@ async function jobDetail(client: any, jobId: string, opts: { slim?: boolean } = 
 
   return {
     job: jobLite,
+    job_identity: _projectMakesafeJobIdentity({
+      builder_claim_ref: job?.metadata?.builder_claim_ref,
+      builder_work_order_number: job?.metadata?.builder_work_order_number,
+      builder_po_number: job?.metadata?.builder_po_number,
+      requesting_company_slug: makesafeDetails?.requesting_company_slug ||
+        job?.metadata?.requesting_company?.slug,
+      family: job?.metadata?.makesafe_job_family,
+      authority: 'typed_job_metadata',
+    }),
     assignments: assignRes.data || [],
     documents: (docsRes.data || []).map((d: any) => ({ id: d.id, name: `${d.type} v${d.version || 1}`, file_name: d.file_name, type: d.type, version: d.version, url: d.pdf_url || d.storage_url, pdf_url: d.pdf_url, storage_url: d.storage_url, thumbnail_url: d.thumbnail_url, label: d.label, visible_to_trades: d.visible_to_trades, sent_to_client: d.sent_to_client, accepted_at: d.accepted_at, share_token: d.share_token, created_at: d.created_at, quote_number: d.quote_number })),
     events: eventsRes.data || [],
@@ -15713,6 +15738,7 @@ export const _loadMakesafeAssignedJobIdsForTest = loadMakesafeAssignedJobIds
 async function _readSesSpineFacts(
   client: any,
   selected: readonly { job_number: string; job_id: string }[],
+  jobMetadataById: ReadonlyMap<string, Record<string, unknown>> = new Map(),
 ): Promise<SesSpineFacts[]> {
   const jobIds = selected.map((item) => item.job_id)
   if (jobIds.length === 0) return []
@@ -15736,7 +15762,7 @@ async function _readSesSpineFacts(
     _fetchAllByJobIdChunked(
       client,
       'makesafe_job_details',
-      'job_id, external_ref',
+      'job_id, external_ref, requesting_company_slug',
       jobIds,
     ),
   ])
@@ -15772,6 +15798,8 @@ async function _readSesSpineFacts(
       cases: [...(casesFor.get(item.job_id)?.values() || [])],
       identity_revision: revisionFor.get(item.job_id) || null,
       detail_builder_reference: detailFor.get(item.job_id)?.external_ref || null,
+      requesting_company_slug: detailFor.get(item.job_id)?.requesting_company_slug || null,
+      job_metadata: jobMetadataById.get(item.job_id) || null,
     })
   )
 }
@@ -19165,6 +19193,25 @@ async function approveIntakeDraft(client: any, body: any) {
     effectiveReportType || null,
     approvedFamilyContext,
   ))
+  const correlatedIdentity = _correlateIntakeApprovalIdentity({
+    extraction,
+    approved_external_ref: approvedFields.external_ref,
+    requesting_company_slug: approvedFields.requesting_company_slug,
+    family: approvedJobFamily || null,
+    attachment_names: availableAttachments.map((attachment: any) =>
+      attachment.file_name || attachment.filename || attachment.name ||
+        attachment.pdf_url || attachment.storage_url
+    ),
+  })
+  if (correlatedIdentity.action === 'refuse') {
+    throw new ApiError(
+      correlatedIdentity.reason === 'multiple_instruction_keys'
+        ? `Instruction identity conflict: draft carries multiple canonical keys (${correlatedIdentity.instruction_keys.join(', ')}); review required and no card was minted`
+        : 'Instruction identity conflict: authoritative source identity could not be persisted as typed job identity; review required and no card was minted',
+      409,
+    )
+  }
+  extraction = correlatedIdentity.extraction
   const approvedJobFamilyKey = _normaliseDedupJobFamily(approvedJobFamily)
 
   // A guarded source correction means the operational job already exists. The
@@ -31471,6 +31518,15 @@ async function tradeJobDetail(
 
   return {
     job: tradeSafeJob,
+    job_identity: _projectMakesafeJobIdentity({
+      builder_claim_ref: _tradeJobMetadata?.builder_claim_ref,
+      builder_work_order_number: _tradeJobMetadata?.builder_work_order_number,
+      builder_po_number: _tradeJobMetadata?.builder_po_number,
+      requesting_company_slug: makesafeDetails?.requesting_company_slug ||
+        _tradeJobMetadata?.requesting_company?.slug,
+      family: _tradeJobMetadata?.makesafe_job_family,
+      authority: 'typed_job_metadata',
+    }),
     documents: visibleDocuments,
     media: currentCycleMedia,
     // Human comms thread only: strip system/audit markers (MAKESAFE_PACK_SENT,
