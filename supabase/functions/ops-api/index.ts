@@ -34164,6 +34164,12 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
     report_render_hash: rawHash,
     report_input_hash: validatedInput.inputHash,
   }
+  const reportScopeNarratives = [
+    validatedInput.job.scope,
+    validatedInput.job.findings,
+    validatedInput.job.works,
+    validatedInput.job.materials,
+  ].filter((value: unknown) => typeof value === 'string' && value.trim())
 
   const existingResponse = await client.from('job_documents')
     .select('id,file_name,data_snapshot_json')
@@ -34188,6 +34194,7 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
           data_snapshot_json: {
             ...facts,
             ...trustedSnapshot,
+            report_scope_narratives: reportScopeNarratives,
             evidence_source: evidenceSource,
             source_document_id: identical.id,
           },
@@ -34229,7 +34236,10 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
     pdf_base64: pdfBase64,
     uploaded_by: body.operator || 'guarded-current-wiki-rerender-sweep',
   }, {
-    data_snapshot_json: trustedSnapshot,
+    data_snapshot_json: {
+      ...trustedSnapshot,
+      report_scope_narratives: reportScopeNarratives,
+    },
     attendance_cycle_id: detailResponse.data.attendance_cycle_id || null,
     cycle_attribution: detailResponse.data.attendance_cycle_id
       ? 'bound'
@@ -34239,6 +34249,7 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
     .update({
       data_snapshot_json: {
         ...trustedSnapshot,
+        report_scope_narratives: reportScopeNarratives,
         evidence_source: evidenceSource,
         source_document_id: result.document_id,
       },

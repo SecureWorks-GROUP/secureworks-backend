@@ -1261,10 +1261,12 @@ from `pricing.*`, `checklist.*` and six structured-source aliases. **Nothing in
 `supabase/functions/` ever WRITES any of them** — nor `hours_per_trade`. Grep
 each name and every hit is the reader or the blocker.
 
-So `pricing_evidence_missing` on a fencing card is a permanent floor, not a
-stale blocker to re-test: no rerun clears it, and it will block every future
-fencing card. Building the producer needs a trade-app capture change plus a
-captain sign-off on the pricing inputs. Measured population and the other three
+So `pricing_evidence_missing` on a temporary-fencing card is a permanent floor,
+not a stale blocker to re-test: no rerun clears it, and it will block every
+future temporary-fencing card. The separate AJS/AJBR existing-fence star-picket
+carve-out is documented below and does not manufacture these temporary-fencing
+inputs. Building the producer needs a trade-app capture change plus a captain
+sign-off on the pricing inputs. Measured population and the other three
 residual classes (`routing_evidence_missing`, `swms_generation_facts_missing`,
 `swms_generation_template_unavailable`) are in
 `data/ses-run-skill-batch5-packs-v1/report.md` §7.
@@ -1272,6 +1274,23 @@ residual classes (`routing_evidence_missing`, `swms_generation_facts_missing`,
 Related: never make one of these classes pass by supplying a plausible quantity
 or a carried-over crew — that puts invented content on a money document and on a
 safety document respectively.
+
+## AJS Existing-Fence Star Pickets Are A Narrow Physical-Make-Safe Material
+
+`makesafe_existing_fence_pickets.ts` is the shared server classifier for the
+captain's existing-fence carve-out. On an AJS/AJBR physical make-safe it may
+derive one money-only star-picket count from the current trade report's explicit
+`materials_used` quantity when the work narrative proves the pickets support an
+existing fence. The assembler prices that line at $13.50 ex each. Bare or
+ambiguous pickets hold, and any evidenced panel, block/base, tie/clip, hire,
+retrieval-material or temporary-fence signal preserves the picket refusal.
+Fixing/consumable lines remain separately refused without erasing an otherwise
+valid picket line. Unquantified checklist template labels are not material-use
+facts and must never become invoice lines. Current curated reports persist their
+exact scope narratives beside the render hash so the invoice decision need not
+promote raw checklist prose. The Bertram acceptance and refusal controls are
+pinned in `ses_assembler_input_adapter_test.ts`,
+`ses_prepare_docket_revision_test.ts`, and `makesafe_invoice_obligation_test.ts`.
 
 ## Docs Ready Is A Queue, Not A Board Column
 

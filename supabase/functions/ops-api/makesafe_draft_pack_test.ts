@@ -63,6 +63,8 @@ Deno.test("user prompt carries selected photo urls and feedback notes", () => {
   assertStringIncludes(prompt, "cement bases/blocks at $28");
   assertStringIncludes(prompt, "Counts alone are not sale evidence");
   assertStringIncludes(prompt, "Never charge AJS cable ties");
+  assertStringIncludes(prompt, "existing fence");
+  assertStringIncludes(prompt, "$13.50 ex each");
 });
 
 Deno.test("user prompt schema does not teach Claude to emit zero-priced invoice lines", () => {
@@ -478,7 +480,7 @@ Deno.test("draft verifier blocks rule violations before Xero/render", () => {
   assertEquals(ajsMaterialVerification.ok, false);
   assertStringIncludes(
     ajsMaterialVerification.blockers.join("; "),
-    "must not charge pickets, cable ties",
+    "must not charge cable ties",
   );
 
   const mlbBadTempFenceHire = normaliseDraftPackOutput({
@@ -822,6 +824,151 @@ Deno.test("AJS temp-fence defaults to labour-only unless sale evidence is explic
   assertStringIncludes(
     revised.change_summary,
     "no explicit SecureWorks sale/supply evidence",
+  );
+});
+
+Deno.test("AJS existing-fence star pickets are retained at the standing sale rate", () => {
+  const output = normaliseDraftPackOutput({
+    report: {
+      ref: "AJBR-70271",
+      address: "Privacy-safe test property",
+      billing_note: "2 trades x 3 hours",
+      works:
+        "Propped up the existing Hardie fence using 20 star pickets to secure it upright until replacement.",
+      materials: "Star pickets x 20.",
+    },
+    invoice: {
+      reference: "AJBR-70271",
+      contact_name: "AJ Building & Restoration",
+      line_items: [{
+        description:
+          "Make-safe labour to install star pickets - 2 trades x 3 hours",
+        quantity: 6,
+        unit_price: 80,
+      }, {
+        description: "Star pickets x 20",
+        quantity: 20,
+        unit_price: 13.5,
+      }, {
+        description: "Fixings supplied",
+        quantity: 1,
+        unit_price: 25,
+      }],
+    },
+    change_summary: "Draft revised.",
+  });
+  const ctx = {
+    detail: {
+      external_ref: "AJBR-70271",
+      requesting_company_name: "AJ Building & Restoration",
+    },
+    service_report: {
+      checklist_json: {
+        work_done:
+          "Propped up hardy fence using 20 star pickets to secure upright until fence replaced.",
+        materials_used: [
+          "Star pickets x 20",
+          "Bases / feet",
+          "Tarps / roof materials",
+          "Fixings / consumables",
+          "Other / none",
+        ],
+      },
+    },
+  };
+
+  const revised = applyDraftPackFeedbackOverrides(output, ctx);
+  const pickets = revised.invoice.line_items.filter((line) =>
+    /star\s+pickets/i.test(line.description) && line.unit_price === 13.5
+  );
+  assertEquals(pickets.length, 1);
+  assertEquals(pickets[0].quantity, 20);
+  assertEquals(pickets[0].unit_price, 13.5);
+  const labour = revised.invoice.line_items.find((line) =>
+    /labou?r/i.test(line.description)
+  );
+  assertEquals(labour?.quantity, 6);
+  assertEquals(labour?.unit_price, 80);
+  assertEquals(
+    revised.invoice.line_items.some((line) =>
+      /fixings?|consumables?/i.test(line.description)
+    ),
+    false,
+  );
+  const verification = verifyDraftPackOutput(revised, ctx);
+  assertEquals(verification.blockers, []);
+
+  const duplicated = structuredClone(revised);
+  duplicated.invoice.line_items.push({ ...pickets[0] });
+  assertStringIncludes(
+    verifyDraftPackOutput(duplicated, ctx).blockers.join("; "),
+    "exactly one canonical",
+  );
+
+  const genericPicket = structuredClone(revised);
+  genericPicket.invoice.line_items.push({
+    description: "Fence pickets supplied",
+    quantity: 20,
+    unit_price: 13.5,
+  });
+  assertStringIncludes(
+    verifyDraftPackOutput(genericPicket, ctx).blockers.join("; "),
+    "must not charge pickets unless",
+  );
+  assertEquals(
+    applyDraftPackFeedbackOverrides(genericPicket, ctx).invoice.line_items.some(
+      (line) => /fence pickets supplied/i.test(line.description),
+    ),
+    false,
+  );
+});
+
+Deno.test("existing-fence wording cannot launder a genuine AJS temporary-fence kit", () => {
+  const output = normaliseDraftPackOutput({
+    report: {
+      ref: "AJBR-70271",
+      billing_note: "2 trades x 3 hours",
+      works: "Used star pickets to support an existing boundary fence.",
+      materials: "Star pickets x 20, temporary fence panels x 4.",
+    },
+    invoice: {
+      reference: "AJBR-70271",
+      contact_name: "AJ Building & Restoration",
+      line_items: [{
+        description: "Make-safe labour - 2 trades x 3 hours",
+        quantity: 6,
+        unit_price: 80,
+      }, {
+        description: "Star pickets supplied to support existing fence",
+        quantity: 20,
+        unit_price: 13.5,
+      }, {
+        description: "Temporary fence panels supplied",
+        quantity: 4,
+        unit_price: 59,
+      }],
+    },
+    change_summary: "Draft revised.",
+  });
+  const verification = verifyDraftPackOutput(output, {
+    detail: {
+      external_ref: "AJBR-70271",
+      requesting_company_name: "AJ Building & Restoration",
+    },
+    service_report: {
+      checklist_json: {
+        work_done: "Used star pickets to support an existing boundary fence.",
+        materials_used: [
+          "Star pickets x 20",
+          "Temporary fence panels x 4",
+        ],
+      },
+    },
+  });
+  assertEquals(verification.ok, false);
+  assertStringIncludes(
+    verification.blockers.join("; "),
+    "temp-fence",
   );
 });
 

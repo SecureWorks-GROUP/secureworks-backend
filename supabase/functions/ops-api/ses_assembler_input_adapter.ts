@@ -48,6 +48,7 @@ import {
   renderRoofReportPdf,
   type RoofReportJob,
 } from "./roof_report_render.ts";
+import { deriveExistingFencePicketDecision } from "./makesafe_existing_fence_pickets.ts";
 import { buildRoofReportJob } from "./roof_report_template.ts";
 import { isBundledCoverageSendNote } from "./makesafe_send_pack.ts";
 import { renderSesSwmsPdf } from "./ses_swms_render.ts";
@@ -909,6 +910,11 @@ function explicitHoursAndMaterials(
   snapshot: SesAssemblerLiveSnapshot,
   currentReport: LiveRow | null,
   intakeCase: LiveRow | null,
+  classification: {
+    builder: SesBuilderKey;
+    family: SesFamilyId;
+    attendanceCycleId: string;
+  },
 ): Record<string, unknown> | null {
   const checklist = record(currentReport?.checklist_json);
   const completion = record(checklist.completion);
@@ -1013,6 +1019,44 @@ function explicitHoursAndMaterials(
     ? array(pricing.materials)
     : array(checklist.materials);
   if (materials.length) facts.materials = materials;
+  if (
+    (classification.builder === "AJS" ||
+      classification.builder === "AJBR") &&
+    classification.family === "physical_makesafe"
+  ) {
+    const panelCount = Number(facts.panel_count);
+    const baseCount = Number(facts.base_count);
+    const structuredKitSignals = [
+      Number.isFinite(panelCount) && panelCount > 0
+        ? `Panels x ${String(facts.panel_count)}`
+        : "",
+      Number.isFinite(baseCount) && baseCount > 0
+        ? `Bases x ${String(facts.base_count)}`
+        : "",
+    ].filter(Boolean);
+    const pickets = deriveExistingFencePicketDecision({
+      support_narratives: [
+        ...currentCuratedReportScopeNarratives(
+          snapshot,
+          classification.attendanceCycleId,
+        ),
+      ],
+      materials_used: checklist.materials_used,
+      charged_line_descriptions: [
+        ...structuredKitSignals,
+        ...materials.map((material) => record(material).description),
+      ],
+    });
+    if (pickets.state === "billable") {
+      facts.existing_fence_star_picket_count = pickets.quantity;
+      facts.existing_fence_star_picket_evidence = {
+        source: "job_service_reports.checklist_json.materials_used",
+        report_id: currentReport?.id ?? null,
+      };
+    } else if (pickets.state === "refused") {
+      facts.existing_fence_star_picket_refusal = pickets.reason;
+    }
+  }
   return Object.keys(facts).length ? facts : null;
 }
 
@@ -1434,6 +1478,7 @@ export function buildSesAssemblerInput(
         snapshot,
         report,
         intakeCase,
+        { builder, family: familyId, attendanceCycleId: cycle.id },
       ),
       swms_fact_context: swmsFactContext(
         snapshot,
@@ -1864,11 +1909,10 @@ function artifactUrl(row: LiveRow): string {
  * clean curated renderer contract. A typed document alone is insufficient:
  * legacy nine-page reports can still contain the retired billing row.
  */
-export function currentCuratedReportDocument(
+function currentCuratedReportDocumentForCycle(
   snapshot: SesAssemblerLiveSnapshot,
-  input: SesAssemblerInputV1,
+  currentCycleId: string,
 ): LiveRow | null {
-  const currentCycleId = text(input.attendance.current_attendance_cycle_id);
   return snapshot.documents
     .filter((row) => text(row.type).toLowerCase() === "makesafe_report")
     .filter((row) => row.visible_to_trades === true)
@@ -1880,7 +1924,10 @@ export function currentCuratedReportDocument(
         !isCurrentCuratedRendererVersion(
           text(provenance.report_renderer_version),
         ) ||
-        !/^[0-9a-f]{64}$/.test(text(provenance.report_render_hash))
+        !/^[0-9a-f]{64}$/.test(text(provenance.report_render_hash)) ||
+        text(provenance.evidence_source) !==
+          "current_cycle_curated_makesafe_report" ||
+        text(provenance.source_document_id) !== text(row.id)
       ) {
         return false;
       }
@@ -1900,6 +1947,26 @@ export function currentCuratedReportDocument(
       text(right.created_at).localeCompare(text(left.created_at)) ||
       text(right.id).localeCompare(text(left.id))
     )[0] || null;
+}
+
+function currentCuratedReportScopeNarratives(
+  snapshot: SesAssemblerLiveSnapshot,
+  currentCycleId: string,
+): string[] {
+  const row = currentCuratedReportDocumentForCycle(snapshot, currentCycleId);
+  return array(
+    record(row?.data_snapshot_json).report_scope_narratives,
+  ).map(text).filter(Boolean);
+}
+
+export function currentCuratedReportDocument(
+  snapshot: SesAssemblerLiveSnapshot,
+  input: SesAssemblerInputV1,
+): LiveRow | null {
+  return currentCuratedReportDocumentForCycle(
+    snapshot,
+    text(input.attendance.current_attendance_cycle_id),
+  );
 }
 
 async function fetchBytes(

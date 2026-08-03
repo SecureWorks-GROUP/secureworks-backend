@@ -1641,6 +1641,159 @@ Deno.test(
 );
 
 Deno.test(
+  "Bertram trade evidence publishes only the existing-fence star-picket money fact",
+  () => {
+    const live = snapshot();
+    live.job.id = "208450c0-7161-4b30-9514-66226b054609";
+    live.job.job_number = "SWMS-261109";
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.job_id = live.job.id;
+    live.detail!.requesting_company_slug = "aj";
+    live.detail!.requesting_company_name = "AJ Building & Restoration";
+    live.detail!.external_ref = "AJBR-70271";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.reports[0].job_id = live.job.id;
+    live.reports[0].checklist_json = {
+      job_type: "Temporary fencing",
+      work_done:
+        "Propped up hardy fence using 20 star pickets to secure upright until fence replaced.",
+      labour_hours: 3,
+      trade_count: 2,
+      materials_used: [
+        "Star pickets x 20",
+        "Bases / feet",
+        "Tarps / roof materials",
+        "Fixings / consumables",
+        "Other / none",
+      ],
+    };
+    live.documents.push({
+      id: "bertram-curated-report",
+      job_id: live.job.id,
+      type: "makesafe_report",
+      visible_to_trades: true,
+      attendance_cycle_id: live.detail!.attendance_cycle_id,
+      cycle_attribution: "bound",
+      version: 1,
+      data_snapshot_json: {
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+        report_render_hash: "e".repeat(64),
+        evidence_source: "current_cycle_curated_makesafe_report",
+        source_document_id: "bertram-curated-report",
+        report_scope_narratives: [
+          "20 star pickets installed to prop and secure the existing fence line. Fence materials left in place on site pending permanent repair.",
+        ],
+      },
+    });
+
+    const input = buildSesAssemblerInput(live);
+    assertEquals(input.classification.builder_key, "AJBR");
+    assertEquals(input.classification.family, "physical_makesafe");
+    assertEquals(input.cycle_facts.hours_and_materials, {
+      trades: 2,
+      hours_per_trade: 3,
+      existing_fence_star_picket_count: 20,
+      existing_fence_star_picket_evidence: {
+        source: "job_service_reports.checklist_json.materials_used",
+        report_id: live.reports[0].id,
+      },
+    });
+    assertEquals(
+      Object.hasOwn(input.cycle_facts.hours_and_materials || {}, "materials"),
+      false,
+    );
+  },
+);
+
+Deno.test(
+  "an evidenced temporary-fence kit cannot launder AJS pickets through the physical family",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.requesting_company_slug = "aj";
+    live.detail!.requesting_company_name = "AJ Building & Restoration";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.reports[0].checklist_json = {
+      work_done:
+        "Used star pickets to support an existing boundary fence pending replacement.",
+      labour_hours: 3,
+      trade_count: 2,
+      materials_used: [
+        "Star pickets x 20",
+        "Temporary fence panels x 4",
+        "Bases x 4",
+      ],
+    };
+
+    const facts = buildSesAssemblerInput(live).cycle_facts.hours_and_materials!;
+    assertEquals(facts.existing_fence_star_picket_count, undefined);
+    assertEquals(
+      facts.existing_fence_star_picket_refusal,
+      "genuine_temporary_fence_signal",
+    );
+  },
+);
+
+Deno.test(
+  "raw checklist fence prose cannot support the existing-fence picket carve-out",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.requesting_company_slug = "aj";
+    live.detail!.requesting_company_name = "AJ Building & Restoration";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.documents = live.documents.filter((row) =>
+      String(row.type || "").toLowerCase() !== "makesafe_report"
+    );
+    live.reports[0].checklist_json = {
+      work_done: "Used 20 star pickets to secure the existing fence line.",
+      materials_used: ["Star pickets x 20"],
+    };
+
+    const facts = buildSesAssemblerInput(live).cycle_facts
+      .hours_and_materials!;
+    assertEquals(facts.existing_fence_star_picket_count, undefined);
+    assertEquals(
+      facts.existing_fence_star_picket_refusal,
+      "existing_fence_scope_missing",
+    );
+  },
+);
+
+Deno.test(
+  "structured panel and base counts defeat the physical-family picket carve-out",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.requesting_company_slug = "aj";
+    live.detail!.requesting_company_name = "AJ Building & Restoration";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.reports[0].checklist_json = {
+      work_done:
+        "Used star pickets to support an existing boundary fence pending replacement.",
+      labour_hours: 3,
+      trade_count: 2,
+      panel_count: 4,
+      base_count: 4,
+      materials_used: ["Star pickets x 20"],
+    };
+
+    const facts = buildSesAssemblerInput(live).cycle_facts
+      .hours_and_materials!;
+    assertEquals(facts.existing_fence_star_picket_count, undefined);
+    assertEquals(
+      facts.existing_fence_star_picket_refusal,
+      "genuine_temporary_fence_signal",
+    );
+  },
+);
+
+Deno.test(
   "current curated report selection rejects legacy typed PDFs without clean provenance",
   () => {
     const live = snapshot();
@@ -1666,8 +1819,10 @@ Deno.test(
       attendance_cycle_id: cycleId,
       cycle_attribution: "bound",
       data_snapshot_json: {
+        evidence_source: "current_cycle_curated_makesafe_report",
+        source_document_id: "curated-report",
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
         report_render_hash: "a".repeat(64),
       },
     });
@@ -1685,6 +1840,8 @@ Deno.test(
       attendance_cycle_id: cycleId,
       cycle_attribution: "bound",
       data_snapshot_json: {
+        evidence_source: "current_cycle_curated_makesafe_report",
+        source_document_id: "authoritative-report",
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
         report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
         report_render_hash: "b".repeat(64),
