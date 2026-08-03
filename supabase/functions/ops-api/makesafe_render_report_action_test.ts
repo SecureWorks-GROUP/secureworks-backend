@@ -102,6 +102,7 @@ function attachClient(
   documentFacts: Record<string, unknown>,
 ) {
   const mutations: string[] = [];
+  const updates: Record<string, unknown>[] = [];
   const rows: Record<string, unknown> = {
     jobs: {
       id: "job-fixture",
@@ -134,6 +135,7 @@ function attachClient(
         },
         update: (values: Record<string, unknown>) => {
           mutations.push(`update:${table}`);
+          updates.push(values);
           if (table === "job_documents") {
             rows.job_documents = (rows.job_documents as Record<string, unknown>[]).map((row) => ({
               ...row,
@@ -146,14 +148,14 @@ function attachClient(
       return query;
     },
   } as any;
-  return { client, mutations };
+  return { client, mutations, updates };
 }
 
 Deno.test("current-wiki attach retries identical bytes without writes", async () => {
   const pdf = new TextEncoder().encode("%PDF-fixture");
   const rawHash = await sha(pdf);
   const reportJob = currentReportJob();
-  const { client, mutations } = attachClient("SWMS-TEST", {
+  const { client, mutations, updates } = attachClient("SWMS-TEST", {
     report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
     report_render_hash: rawHash,
     report_renderer_version:
@@ -179,7 +181,7 @@ Deno.test("identical current-wiki attachment repairs provenance once", async () 
   const pdf = new TextEncoder().encode("%PDF-fixture");
   const rawHash = await sha(pdf);
   const reportJob = currentReportJob();
-  const { client, mutations } = attachClient("SWMS-TEST", {
+  const { client, mutations, updates } = attachClient("SWMS-TEST", {
     report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
     report_render_hash: rawHash,
     report_renderer_version:
@@ -199,6 +201,13 @@ Deno.test("identical current-wiki attachment repairs provenance once", async () 
   assertEquals(first.writes, 1);
   assertEquals(second.writes, 0);
   assertEquals(mutations, ["update:job_documents"]);
+  const snapshot = updates[0].data_snapshot_json as Record<string, unknown>;
+  assertEquals(snapshot.report_contract_version, MAKESAFE_REPORT_CONTRACT_VERSION);
+  assertEquals(snapshot.report_renderer_version,
+    `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`);
+  assertEquals(snapshot.report_render_hash, rawHash);
+  assertEquals(snapshot.evidence_source, "current_cycle_curated_makesafe_report");
+  assertEquals(snapshot.source_document_id, "document-fixture");
 });
 
 Deno.test("captain-corrected report refuses before attachment mutation", async () => {

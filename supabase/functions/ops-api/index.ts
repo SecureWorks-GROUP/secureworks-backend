@@ -34121,6 +34121,7 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
         .update({
           data_snapshot_json: {
             ...facts,
+            ...trustedSnapshot,
             evidence_source: evidenceSource,
             source_document_id: identical.id,
           },
