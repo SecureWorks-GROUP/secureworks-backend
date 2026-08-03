@@ -8,6 +8,39 @@ written to. The invoice-obligation path was not changed.
 
 ---
 
+## READ THIS FIRST — two things before you look at the board
+
+### 1. The board will show you 5, and the real number is 35. Both are correct.
+
+**30 of the 35 ready cards sit in the board's `archive` column**, because `archive` means two
+different things: "this card is dead" *and* "this job finished more than seven days ago". These are
+older `SWMS-266xx` cards whose work was completed long ago and which have been waiting on paperwork
+ever since. Their packs are ready and queued for your signoff — they just do not appear in a column
+you would scan for live work.
+
+> **Counting Docs Ready by eye off the board shows 5, not 35. The number is not wrong.**
+> The honest surface is the signoff queue: `ops-api?action=list_ses_docs_ready_reviews`, which
+> returns 38 dockets at `needs_review` — my 35 plus the three that were already there.
+
+### 2. Five cards to dismiss or re-sign, in one pass
+
+These five had **already been sent to the builder** before this run (`pack.state: "sent"`). My run
+minted a fresh docket revision on them, and a new revision invalidates the previous signoff tick, so
+they have re-entered `needs_review`. That is noise I introduced, not work I completed — nothing was
+re-sent, and no client received anything.
+
+| Card | Suburb | What it needs |
+|---|---|---|
+| `SWMS-26604` | Nedlands | dismiss or re-sign |
+| `SWMS-26630` | Carine | dismiss or re-sign |
+| `SWMS-26654` | Bicton | dismiss or re-sign |
+| `SWMS-26655` | Balcatta | dismiss or re-sign |
+| `SWMS-26663` | Mount Richon | dismiss or re-sign |
+
+Clear those five and the queue is 33: the 30 genuinely new cards plus the original three.
+
+---
+
 ## THE NUMBER
 
 > **35 dockets persisted and sitting in the Docs Ready review queue, out of 62 cards touched.**
