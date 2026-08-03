@@ -91,7 +91,9 @@ async function commandOrFail(args: string[], cwd?: string): Promise<void> {
   );
 }
 
-async function resolvePinnedWikiRepo(): Promise<{ repo: string; cleanup: string[] }> {
+async function resolvePinnedWikiRepo(): Promise<
+  { repo: string; cleanup: string[] }
+> {
   const configured = Deno.env.get("SW_WIKI_REPO");
   if (configured) {
     const repo = reviewedWikiRepoPath(configured);
