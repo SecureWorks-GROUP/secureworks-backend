@@ -1222,6 +1222,14 @@ or a changed adjudication fails. Never re-snapshot it to make a drifted run
 green. Measured blast per release and the standing numbers:
 `docs/evidence/ses-e1-stage-engine-v2-shadow-2026-08-02.md`.
 
+## Readiness gate ruling
+
+The 2026-08-03 captain ruling is: drop the unsatisfiable readiness precondition,
+never assert readiness, and stop at recording approval. The authoritative
+diagnosis, migration scope, execution boundary, and proofs live in
+`data/ses-readiness-gate-drop-v1/report.md`; the regression/control test is
+`supabase/functions/ops-api/ses_readiness_precondition_drop_test.ts`.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
