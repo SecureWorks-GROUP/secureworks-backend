@@ -10,10 +10,12 @@ import {
   type SesArtifact,
   type SesAssemblerInputV1,
   type SesDeliveryRenderRoute,
+  type SesPhysicalReportProof,
   type SesPortalCapture,
   type SesPreparedRevision,
   type SesPrepareRequest,
   type SesSha256,
+  sesSha256Bytes,
   type SesSiblingBundleEvidence,
 } from "./ses_docket_envelope.ts";
 import {
@@ -39,7 +41,10 @@ import {
   type SesPrepareDependencies,
   type SesPrepareResponse,
 } from "./ses_prepare_docket_revision.ts";
-import { createSesDocketPersistenceAdapter } from "./ses_docket_persistence.ts";
+import {
+  createSesDocketPersistenceAdapter,
+  SES_DOCKET_BUCKET,
+} from "./ses_docket_persistence.ts";
 import {
   isCurrentCuratedRendererVersion,
   MAKESAFE_REPORT_CONTRACT_VERSION,
@@ -133,6 +138,8 @@ export interface SesAssemblerLiveSnapshot {
   readiness: LiveRow | null;
   portal_captures: LiveRow[];
   legacy_packs: LiveRow[];
+  docket_revisions?: LiveRow[];
+  docket_artifacts?: LiveRow[];
   events?: LiveRow[];
   bundle_bindings?: LiveRow[];
   bundle_claims?: LiveRow[];
@@ -1590,6 +1597,7 @@ export async function loadSesAssemblerLiveSnapshot(
     events,
     outboundBindings,
     inboundBindings,
+    docketRevisions,
   ] = await Promise.all([
     one(
       client
@@ -1713,7 +1721,32 @@ export async function loadSesAssemblerLiveSnapshot(
         .eq("sibling_job_id", jobId),
       "makesafe_sibling_bundle_binding_revisions.sibling_job_id",
     ),
+    many(
+      client
+        .from("makesafe_docket_revisions")
+        .select(
+          "id,job_id,current_attendance_cycle_id,output_content_hash,committed_at",
+        )
+        .eq("job_id", jobId)
+        .order("committed_at", { ascending: false }),
+      "makesafe_docket_revisions.report_sources",
+    ),
   ]);
+  const docketRevisionIds = docketRevisions.map((row) => text(row.id)).filter(
+    Boolean,
+  );
+  const docketArtifacts = docketRevisionIds.length
+    ? await many(
+      client
+        .from("makesafe_docket_artifacts")
+        .select(
+          "id,revision_id,role,object_key,media_type,content_hash,size_bytes,metadata,created_at",
+        )
+        .in("revision_id", docketRevisionIds)
+        .eq("role", "supporting_report_pdf"),
+      "makesafe_docket_artifacts.report_sources",
+    )
+    : [];
   const caseMap = new Map<string, LiveRow>();
   for (const item of [...casesByJob, ...casesByTarget]) {
     if (text(item.id)) caseMap.set(text(item.id), item);
@@ -1871,6 +1904,8 @@ export async function loadSesAssemblerLiveSnapshot(
     readiness,
     portal_captures: portalCaptures,
     legacy_packs: packs,
+    docket_revisions: docketRevisions,
+    docket_artifacts: docketArtifacts,
     events,
     bundle_bindings: bundleBindings,
     bundle_claims: bundleClaims,
@@ -1904,12 +1939,7 @@ function artifactUrl(row: LiveRow): string {
   );
 }
 
-/**
- * Select only an exact current-cycle report produced under the commercially
- * clean curated renderer contract. A typed document alone is insufficient:
- * legacy nine-page reports can still contain the retired billing row.
- */
-function currentCuratedReportDocumentForCycle(
+function durableCuratedDocumentForCycle(
   snapshot: SesAssemblerLiveSnapshot,
   currentCycleId: string,
 ): LiveRow | null {
@@ -1927,7 +1957,13 @@ function currentCuratedReportDocumentForCycle(
         !/^[0-9a-f]{64}$/.test(text(provenance.report_render_hash)) ||
         text(provenance.evidence_source) !==
           "current_cycle_curated_makesafe_report" ||
-        text(provenance.source_document_id) !== text(row.id)
+        text(provenance.curated_source_kind) !==
+          "durable_curated_revision" ||
+        !text(provenance.curated_source_identity) ||
+        text(provenance.curated_source_identity) === text(row.id) ||
+        !/^sha256:[0-9a-f]{64}$/.test(
+          text(provenance.report_input_hash),
+        )
       ) {
         return false;
       }
@@ -1947,6 +1983,126 @@ function currentCuratedReportDocumentForCycle(
       text(right.created_at).localeCompare(text(left.created_at)) ||
       text(right.id).localeCompare(text(left.id))
     )[0] || null;
+}
+
+interface PhysicalReportSource {
+  proof: SesPhysicalReportProof;
+  document: LiveRow;
+  artifact?: LiveRow;
+}
+
+function rawReportHash(value: unknown): SesSha256 | null {
+  const hash = text(value).toLowerCase().replace(/^sha256:/, "");
+  return /^[0-9a-f]{64}$/.test(hash) ? `sha256:${hash}` : null;
+}
+
+function physicalReportSourceForCycle(
+  snapshot: SesAssemblerLiveSnapshot,
+  currentCycleId: string,
+  reportDocumentId?: string,
+): PhysicalReportSource | null {
+  const revisions = new Map(
+    (snapshot.docket_revisions || []).map((row) => [text(row.id), row]),
+  );
+  const documents = new Map(
+    snapshot.documents.map((row) => [text(row.id), row]),
+  );
+  const candidates: Array<PhysicalReportSource & { committed_at: string }> = [];
+  for (const artifact of snapshot.docket_artifacts || []) {
+    if (
+      text(artifact.role) !== "supporting_report_pdf" ||
+      text(artifact.media_type) !== "application/pdf"
+    ) continue;
+    const revision = revisions.get(text(artifact.revision_id));
+    if (
+      !revision || text(revision.current_attendance_cycle_id) !==
+        currentCycleId ||
+      !text(revision.committed_at)
+    ) continue;
+    const metadata = record(artifact.metadata);
+    const document = documents.get(text(metadata.report_document_id));
+    if (reportDocumentId && text(document?.id) !== reportDocumentId) continue;
+    const provenance = record(document?.data_snapshot_json);
+    const expectedRawSha256 = rawReportHash(
+      metadata.output_sha256 || metadata.render_hash,
+    );
+    const artifactContentHash = text(artifact.content_hash);
+    if (
+      !document || document.visible_to_trades !== true ||
+      text(document.type).toLowerCase() !== "makesafe_report" ||
+      text(document.attendance_cycle_id) !== currentCycleId ||
+      text(document.cycle_attribution).toLowerCase() !== "bound" ||
+      !expectedRawSha256 || !text(artifact.id) ||
+      !text(artifact.object_key) || !isSesSha256(artifactContentHash) ||
+      !Number.isSafeInteger(Number(artifact.size_bytes)) ||
+      Number(artifact.size_bytes) <= 0 ||
+      text(document.uploaded_by) === "guarded-current-wiki-rerender-sweep" ||
+      (text(provenance.source_document_id) === text(document.id) &&
+        text(provenance.evidence_source) ===
+          "current_cycle_curated_makesafe_report")
+    ) continue;
+    const inputHash = text(metadata.report_input_hash) ||
+      text(provenance.report_input_hash);
+    const durable = durableCuratedDocumentForCycle(
+      { ...snapshot, documents: [document] },
+      currentCycleId,
+    );
+    const sourceKind = durable
+      ? "durable_curated_revision" as const
+      : "previously_committed_pdf" as const;
+    candidates.push({
+      document,
+      artifact,
+      committed_at: text(revision.committed_at),
+      proof: {
+        source_kind: sourceKind,
+        source_identity: `docket-revision:${text(revision.id)}/artifact:${
+          text(artifact.id)
+        }`,
+        source_document_id: text(document.id),
+        source_revision_id: text(revision.id),
+        source_artifact_id: text(artifact.id),
+        source_artifact_content_hash: artifactContentHash as SesSha256,
+        expected_raw_sha256: expectedRawSha256,
+        ...(isSesSha256(inputHash)
+          ? { report_input_hash: inputHash as SesSha256 }
+          : {}),
+      },
+    });
+  }
+  return candidates.sort((left, right) =>
+    right.committed_at.localeCompare(left.committed_at) ||
+    right.proof.source_revision_id!.localeCompare(
+      left.proof.source_revision_id!,
+    )
+  )[0] || null;
+}
+
+export function selectPhysicalReportProofForCycle(
+  snapshot: SesAssemblerLiveSnapshot,
+  currentCycleId: string,
+  reportDocumentId?: string,
+): SesPhysicalReportProof | null {
+  return physicalReportSourceForCycle(
+    snapshot,
+    currentCycleId,
+    reportDocumentId,
+  )
+    ?.proof || null;
+}
+
+/**
+ * A document becomes builder-serving authority only through a committed,
+ * immutable same-cycle docket artifact whose exact artifact and raw PDF hashes
+ * are retained. Document provenance alone, including the retired sweep's
+ * self-authored stamp, is never sufficient.
+ */
+function currentCuratedReportDocumentForCycle(
+  snapshot: SesAssemblerLiveSnapshot,
+  currentCycleId: string,
+): LiveRow | null {
+  return physicalReportSourceForCycle(snapshot, currentCycleId)?.document ||
+    null;
 }
 
 function currentCuratedReportScopeNarratives(
@@ -2353,44 +2509,141 @@ export function createSesAssemblerRuntimeDependencies(
         snapshotForJobId(request.job_id),
         request,
       ),
-    renderPhysicalReport: async (input, _photos = []) => {
+    resolvePhysicalReportProof: (input) => {
       const snapshot = snapshotFor(input);
-      const row = currentCuratedReportDocument(snapshot, input);
-      if (!row) {
+      return Promise.resolve(
+        selectPhysicalReportProofForCycle(
+          snapshot,
+          text(input.attendance.current_attendance_cycle_id),
+        ),
+      );
+    },
+    resolveBundledPhysicalReportProof: async (input) => {
+      const bundle = input.sibling_bundle_evidence;
+      if (!bundle || bundle.status !== "accepted") return null;
+      const siblingSnapshot = await loadSesAssemblerLiveSnapshot(client, {
+        mode: "job_id",
+        job_id: bundle.sibling.job_id,
+      });
+      const siblingCycleId = text(siblingSnapshot.detail?.attendance_cycle_id);
+      return selectPhysicalReportProofForCycle(
+        siblingSnapshot,
+        siblingCycleId,
+        bundle.coverage.report_document_id,
+      );
+    },
+    renderBundledPhysicalReport: async (input, proof) => {
+      const bundle = input.sibling_bundle_evidence;
+      if (!bundle || bundle.status !== "accepted") return null;
+      const siblingSnapshot = await loadSesAssemblerLiveSnapshot(client, {
+        mode: "job_id",
+        job_id: bundle.sibling.job_id,
+      });
+      const source = physicalReportSourceForCycle(
+        siblingSnapshot,
+        text(siblingSnapshot.detail?.attendance_cycle_id),
+        bundle.coverage.report_document_id,
+      );
+      if (!source || source.proof.source_identity !== proof.source_identity) {
+        return null;
+      }
+      const objectKey = text(source.artifact?.object_key);
+      const prefix = `${SES_DOCKET_BUCKET}/`;
+      const storagePath = objectKey.startsWith(prefix)
+        ? objectKey.slice(prefix.length)
+        : objectKey;
+      const recovered = await client.storage.from(SES_DOCKET_BUCKET)
+        .download(storagePath);
+      if (recovered.error || !recovered.data) return null;
+      const bytes = new Uint8Array(await recovered.data.arrayBuffer());
+      if (
+        await sesSha256Bytes(bytes) !== proof.source_artifact_content_hash ||
+        await rawReportHash(await rawPhotoSha256(bytes)) !==
+          proof.expected_raw_sha256 ||
+        new TextDecoder().decode(bytes.slice(0, 5)) !== "%PDF-"
+      ) return null;
+      return {
+        file_name: fileName(
+          source.document,
+          `${bundle.sibling.job_number}-report.pdf`,
+        ),
+        media_type: "application/pdf",
+        bytes,
+        render_hash: proof.expected_raw_sha256,
+        provenance: {
+          evidence_source: "explicit_sibling_bundle",
+          report_document_id: proof.source_document_id,
+        },
+      };
+    },
+    renderPhysicalReport: async (input, _photos = [], proof) => {
+      const snapshot = snapshotFor(input);
+      const source = physicalReportSourceForCycle(
+        snapshot,
+        text(input.attendance.current_attendance_cycle_id),
+      );
+      if (
+        !source || !proof ||
+        source.proof.source_kind !== proof.source_kind ||
+        source.proof.source_identity !== proof.source_identity ||
+        source.proof.source_document_id !== proof.source_document_id ||
+        source.proof.source_revision_id !== proof.source_revision_id ||
+        source.proof.source_artifact_id !== proof.source_artifact_id ||
+        source.proof.source_artifact_content_hash !==
+          proof.source_artifact_content_hash ||
+        source.proof.expected_raw_sha256 !== proof.expected_raw_sha256 ||
+        source.proof.report_input_hash !== proof.report_input_hash
+      ) {
         throw new SesAssemblerAdapterError(
           "ses_curated_report_missing",
-          "No exact current-cycle makesafe_report artifact carries the active curated renderer provenance; raw trade-report fields will not be rendered as a substitute.",
+          "No exact independent curated source matches the dry-run proof; raw trade-report fields and known guarded-rerender outputs will not be substituted.",
           409,
         );
       }
-      const url = artifactUrl(row);
-      if (!url) {
+      const objectKey = text(source.artifact?.object_key);
+      const prefix = `${SES_DOCKET_BUCKET}/`;
+      const storagePath = objectKey.startsWith(prefix)
+        ? objectKey.slice(prefix.length)
+        : objectKey;
+      const recovered = await client.storage.from(SES_DOCKET_BUCKET)
+        .download(storagePath);
+      if (recovered.error || !recovered.data) {
         throw new SesAssemblerAdapterError(
           "ses_curated_report_unrecoverable",
-          `Curated report document ${text(row.id)} has no HTTPS recovery URL.`,
+          `Committed docket artifact ${proof.source_artifact_id} could not be recovered.`,
           409,
         );
       }
-      const bytes = await fetchBytes(url, "current-cycle curated report");
+      const bytes = new Uint8Array(await recovered.data.arrayBuffer());
+      if (
+        proof.source_artifact_content_hash &&
+        await sesSha256Bytes(bytes) !== proof.source_artifact_content_hash
+      ) {
+        throw new SesAssemblerAdapterError(
+          "ses_curated_report_unrecoverable",
+          `Curated report source ${proof.source_identity} does not match its committed artifact content hash.`,
+          409,
+        );
+      }
       if (new TextDecoder().decode(bytes.slice(0, 5)) !== "%PDF-") {
         throw new SesAssemblerAdapterError(
           "ses_curated_report_unrecoverable",
-          `Curated report document ${text(row.id)} is not a PDF artifact.`,
+          `Curated report source ${proof.source_identity} is not a PDF artifact.`,
           409,
         );
       }
-      const provenance = record(row.data_snapshot_json);
+      const provenance = record(source.document.data_snapshot_json);
       return {
         file_name: fileName(
-          row,
+          source.document,
           `Make Safe Report - ${input.source.builder_reference}.pdf`,
         ),
         media_type: "application/pdf",
         bytes,
-        render_hash: text(provenance.report_render_hash),
+        render_hash: proof.expected_raw_sha256,
         provenance: {
           evidence_source: "current_cycle_curated_makesafe_report",
-          report_document_id: text(row.id),
+          report_document_id: proof.source_document_id,
           report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
           report_renderer_version: text(provenance.report_renderer_version),
         },
@@ -2582,5 +2835,16 @@ export function normalizeSesPrepareRequest(
     assembler_version: SES_ASSEMBLER_VERSION,
     dry_run: body.dry_run,
     force_refresh: body?.force_refresh === true,
+    ...(body?.require_ready_for_persistence === true
+      ? { require_ready_for_persistence: true }
+      : {}),
+    ...(body.expected_physical_report_proof &&
+        typeof body.expected_physical_report_proof === "object" &&
+        !Array.isArray(body.expected_physical_report_proof)
+      ? {
+        expected_physical_report_proof: body
+          .expected_physical_report_proof as SesPhysicalReportProof,
+      }
+      : {}),
   };
 }

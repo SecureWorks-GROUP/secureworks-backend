@@ -13,12 +13,14 @@ import {
   type SesManifestV2,
   type SesNotApplicableState,
   type SesObligationState,
+  type SesPhysicalReportProof,
   type SesPortalCapture,
   type SesPreparedRevision,
   type SesPrepareRequest,
   type SesReadyState,
   type SesSha256,
   sesSha256,
+  sesSha256Bytes,
   stableUuidFromSha256,
 } from "./ses_docket_envelope.ts";
 import {
@@ -103,7 +105,7 @@ export interface SesPhotoProof {
   size_bytes: number;
 }
 
-async function rawPhotoSha256(bytes: Uint8Array): Promise<SesSha256> {
+async function rawArtifactSha256(bytes: Uint8Array): Promise<SesSha256> {
   const safeBytes = new Uint8Array(bytes.byteLength);
   safeBytes.set(bytes);
   const digest = new Uint8Array(
@@ -114,6 +116,37 @@ async function rawPhotoSha256(bytes: Uint8Array): Promise<SesSha256> {
       "",
     )
   }`;
+}
+
+function validPhysicalReportProof(
+  proof: SesPhysicalReportProof | null | undefined,
+): proof is SesPhysicalReportProof {
+  if (!proof) return false;
+  if (
+    proof.source_kind !== "durable_curated_revision" &&
+    proof.source_kind !== "previously_committed_pdf"
+  ) return false;
+  if (
+    !text(proof.source_identity) ||
+    !text(proof.source_document_id) ||
+    proof.source_identity === proof.source_document_id ||
+    !/^sha256:[0-9a-f]{64}$/.test(proof.expected_raw_sha256) ||
+    (proof.report_input_hash !== undefined &&
+      !/^sha256:[0-9a-f]{64}$/.test(proof.report_input_hash))
+  ) return false;
+  if (
+    !text(proof.source_revision_id) || !text(proof.source_artifact_id) ||
+    !/^sha256:[0-9a-f]{64}$/.test(proof.source_artifact_content_hash)
+  ) return false;
+  return true;
+}
+
+function samePhysicalReportProof(
+  left: SesPhysicalReportProof | null | undefined,
+  right: SesPhysicalReportProof | null | undefined,
+): boolean {
+  return validPhysicalReportProof(left) && validPhysicalReportProof(right) &&
+    canonicalSesJson(left) === canonicalSesJson(right);
 }
 
 export interface SesPortalCaptureRequest {
@@ -151,12 +184,23 @@ export interface SesPrepareDependencies {
   resolvePhotoProofs?: (
     input: SesAssemblerInputV1,
   ) => Promise<SesPhotoProof[]>;
+  resolvePhysicalReportProof?: (
+    input: SesAssemblerInputV1,
+  ) => Promise<SesPhysicalReportProof | null>;
+  resolveBundledPhysicalReportProof?: (
+    input: SesAssemblerInputV1,
+  ) => Promise<SesPhysicalReportProof | null>;
+  renderBundledPhysicalReport?: (
+    input: SesAssemblerInputV1,
+    proof: SesPhysicalReportProof,
+  ) => Promise<SesRenderResult | null>;
   capturePortal?: (
     request: SesPortalCaptureRequest,
   ) => Promise<SesPortalCapture>;
   renderPhysicalReport?: (
     input: SesAssemblerInputV1,
     photos?: SesPhotoArtifact[],
+    proof?: SesPhysicalReportProof,
   ) => Promise<SesRenderResult>;
   renderOwnRoofReport?: (
     input: SesAssemblerInputV1,
@@ -1382,7 +1426,6 @@ function buildEmailDrafts(
   const reportTo = input.source.work_order_sender || "";
   const invoiceTo = row.invoice_to || "";
   const invoiceAttachments = [
-    "ARTIFACTS/invoice_proposal.json",
     ...(reportFile ? [reportFile] : []),
     ...(swmsFile ? [swmsFile] : []),
   ];
@@ -1393,8 +1436,8 @@ function buildEmailDrafts(
         cc: "finance@secureworkswa.com.au",
         subject: `${ref} - assessment report and quote invoice`,
         body:
-          "Draft only. The assessment, photo schedule and quote have been completed and submitted through Prime. Please find our invoice attached. No SWMS, local report or separate photo pack applies to this assessment card.",
-        attachments: ["ARTIFACTS/invoice_proposal.json"],
+          "Draft only. The assessment, photo schedule and quote have been completed and submitted through Prime. No authorised Xero invoice exists yet, so no invoice is attached. No SWMS, local report or separate photo pack applies to this assessment card.",
+        attachments: [],
       }),
     };
   }
@@ -1406,7 +1449,7 @@ function buildEmailDrafts(
     cc: "finance@secureworkswa.com.au",
     subject: `${ref} - invoice proposal`,
     body:
-      "Draft only. This docket contains a local invoice proposal. No Xero object exists and no release is approved.",
+      "Draft only. This docket contains internal pre-Xero pricing state. No Xero invoice exists and no release is approved.",
     attachments: invoiceAttachments,
   });
   const drafts: Record<string, string> = { INVOICE_EMAIL_DRAFT: invoice };
@@ -1686,6 +1729,7 @@ async function prepareOne(
     applySpineBlocker(manifest, inputSpineBlocker);
   }
   const artifacts: SesArtifact[] = [];
+  let persistenceRefused = false;
   const portalEvidence: SesPortalCapture[] = [];
   let reportFile: string | null = null;
   let swmsFile: string | null = null;
@@ -1985,16 +2029,37 @@ async function prepareOne(
             metadata: bundleProof,
           }),
         );
-        const resolved = deps.resolveBundledReportArtifact
-          ? await deps.resolveBundledReportArtifact(input)
+        const bundledProof = deps.resolveBundledPhysicalReportProof
+          ? await deps.resolveBundledPhysicalReportProof(input)
           : null;
-        if (!resolved) {
+        const resolved =
+          bundledProof && validPhysicalReportProof(bundledProof) &&
+            deps.renderBundledPhysicalReport
+            ? await deps.renderBundledPhysicalReport(input, bundledProof)
+            : null;
+        const resolvedRawHash = resolved
+          ? await rawArtifactSha256(resolved.bytes)
+          : null;
+        const resolvedContentHash = resolved
+          ? await sesSha256Bytes(resolved.bytes)
+          : null;
+        if (
+          !resolved ||
+          !bundledProof ||
+          !validPhysicalReportProof(bundledProof) ||
+          resolvedRawHash !== bundledProof.expected_raw_sha256 ||
+          resolvedContentHash !== bundledProof.source_artifact_content_hash ||
+          (text(resolved.render_hash) &&
+            `sha256:${text(resolved.render_hash).replace(/^sha256:/, "")}` !==
+              resolvedRawHash)
+        ) {
+          persistenceRefused = true;
           const itemBlocker = addBlocker(
             blockers,
             blocked(
               "sibling_evidence_artifact_unrecoverable",
-              `Bundle ${acceptedBundle.bundle_id} is valid, but sibling ${acceptedBundle.sibling.job_number}'s claimed report artifact could not be recovered.`,
-              "Restore the exact claimed sibling report document; do not substitute an unclaimed file.",
+              `Bundle ${acceptedBundle.bundle_id} is valid, but sibling ${acceptedBundle.sibling.job_number}'s independently proved report artifact could not be recovered.`,
+              "Restore the exact claimed sibling report document and its durable proof; do not substitute an unclaimed file.",
               [
                 "canonical-input-envelope",
                 "sibling-bundle-binding-ledger",
@@ -2006,6 +2071,8 @@ async function prepareOne(
                 sibling_job_id: acceptedBundle.sibling.job_id,
                 sibling_job_number: acceptedBundle.sibling.job_number,
                 report_document_id: acceptedBundle.coverage.report_document_id,
+                source_revision_id: bundledProof?.source_revision_id || null,
+                source_artifact_id: bundledProof?.source_artifact_id || null,
               },
             ),
           );
@@ -2020,13 +2087,22 @@ async function prepareOne(
               media_type: resolved.media_type,
               bytes: resolved.bytes,
               metadata: {
-                render_hash: resolved.render_hash || null,
+                render_hash: resolvedRawHash,
                 evidence_source: "explicit_sibling_bundle",
                 bundle_id: acceptedBundle.bundle_id,
                 sibling_job_id: acceptedBundle.sibling.job_id,
                 binding_revision_id:
                   acceptedBundle.claiming_binding.revision_id,
                 report_document_id: acceptedBundle.coverage.report_document_id,
+                source_kind: bundledProof.source_kind,
+                source_identity: bundledProof.source_identity,
+                source_revision_id: bundledProof.source_revision_id,
+                source_artifact_id: bundledProof.source_artifact_id,
+                source_artifact_content_hash:
+                  bundledProof.source_artifact_content_hash,
+                expected_raw_sha256: bundledProof.expected_raw_sha256,
+                output_sha256: resolvedRawHash,
+                output_content_hash: resolvedContentHash,
               },
             }),
           );
@@ -2045,6 +2121,7 @@ async function prepareOne(
             !resolvedPhoto ||
             !/^sha256:[0-9a-f]{64}$/.test(expectedPhotoHash)
           ) {
+            persistenceRefused = true;
             const itemBlocker = addBlocker(
               blockers,
               blocked(
@@ -2085,8 +2162,9 @@ async function prepareOne(
               },
             });
             if (
-              await rawPhotoSha256(resolvedPhoto.bytes) !== expectedPhotoHash
+              await rawArtifactSha256(resolvedPhoto.bytes) !== expectedPhotoHash
             ) {
+              persistenceRefused = true;
               const itemBlocker = addBlocker(
                 blockers,
                 blocked(
@@ -2097,7 +2175,7 @@ async function prepareOne(
                   [acceptedBundle.coverage.photo.media_id],
                   {
                     expected_content_hash: expectedPhotoHash,
-                    actual_content_hash: await rawPhotoSha256(
+                    actual_content_hash: await rawArtifactSha256(
                       resolvedPhoto.bytes,
                     ),
                   },
@@ -2140,7 +2218,9 @@ async function prepareOne(
       } else {
         let resolvedPhotos: SesPhotoArtifact[] = [];
         let photosComplete = false;
+        let reportProof: SesPhysicalReportProof | null = null;
         if (!text(input.source.builder_reference)) {
+          persistenceRefused = true;
           const itemBlocker = blockers.find(
             (candidate) =>
               candidate.reason_code === "spine_missing_source" &&
@@ -2157,17 +2237,75 @@ async function prepareOne(
             );
           manifest.items.physical_reporting_evidence = itemBlocker;
           manifest.items.supporting_report_pdf = itemBlocker;
-        } else if (!deps.renderPhysicalReport) {
+        } else if (!deps.resolvePhysicalReportProof) {
+          persistenceRefused = true;
           const itemBlocker = addBlocker(
             blockers,
             blocked(
-              "curated_report_missing",
-              "Current-cycle curated report artifact recovery is unavailable.",
-              "Create a commercially clean curated makesafe_report artifact, bind it to the current cycle, and re-run.",
+              "curated_source_missing",
+              "No independent durable curated report source can be proved.",
+              "Bind an approved durable curation revision or exact previously committed PDF artifact with its expected raw SHA-256, then re-run.",
             ),
           );
           manifest.items.physical_reporting_evidence = itemBlocker;
           manifest.items.supporting_report_pdf = itemBlocker;
+        } else {
+          reportProof = await deps.resolvePhysicalReportProof(input);
+          const expectedProof = request.expected_physical_report_proof;
+          const proofDrifted = expectedProof !== undefined &&
+            !samePhysicalReportProof(reportProof, expectedProof);
+          if (!validPhysicalReportProof(reportProof) || proofDrifted) {
+            persistenceRefused = true;
+            reportProof = null;
+            const refusal = {
+              code: proofDrifted
+                ? "curated_source_drift"
+                : "curated_source_missing",
+              fact: proofDrifted
+                ? "The currently selected committed report source no longer matches the reviewed dry-run proof."
+                : "Raw trade-report fields and self-referential curated labels are not independent semantic authority.",
+              recovery_action:
+                "Bind an approved durable curation revision or exact previously committed PDF artifact with its expected raw SHA-256.",
+              ...(expectedProof
+                ? { expected_physical_report_proof: expectedProof }
+                : {}),
+            };
+            const itemBlocker = addBlocker(
+              blockers,
+              blocked(
+                refusal.code,
+                proofDrifted
+                  ? "The committed curated report source changed after dry-run review."
+                  : "No independent durable curated report source can be proved.",
+                refusal.recovery_action,
+                ["current-cycle-curated-source"],
+                ["job_service_reports", "self-referential-report-document"],
+              ),
+            );
+            artifacts.push(
+              await artifactFromText({
+                role: "curated_source_refusal",
+                path: "PROOF/curated_source_refusal.json",
+                media_type: "application/json",
+                text: canonicalSesJson(refusal),
+                metadata: refusal,
+              }),
+            );
+            manifest.items.physical_reporting_evidence = itemBlocker;
+            manifest.items.supporting_report_pdf = itemBlocker;
+          } else if (!request.dry_run && !deps.renderPhysicalReport) {
+            persistenceRefused = true;
+            const itemBlocker = addBlocker(
+              blockers,
+              blocked(
+                "curated_report_unrecoverable",
+                "The proved curated report bytes cannot be recovered.",
+                "Restore read access to the exact proved PDF artifact and re-run.",
+              ),
+            );
+            manifest.items.physical_reporting_evidence = itemBlocker;
+            manifest.items.supporting_report_pdf = itemBlocker;
+          }
         }
 
         const expectedPhotos = input.cycle_facts.photos
@@ -2367,7 +2505,7 @@ async function prepareOne(
         if (
           request.dry_run &&
           text(input.source.builder_reference) &&
-          deps.renderPhysicalReport &&
+          reportProof &&
           photosComplete
         ) {
           reportFile = `ARTIFACTS/${
@@ -2383,6 +2521,7 @@ async function prepareOne(
             photo_proof_paths: artifacts
               .filter((artifact) => artifact.role === "completion_photo_proof")
               .map((artifact) => artifact.path),
+            selected_source: reportProof,
           };
           artifacts.push(
             await artifactFromText({
@@ -2394,7 +2533,9 @@ async function prepareOne(
             }),
           );
           manifest.items.supporting_report_pdf = ready(
-            `proof:${reportFile}#current-cycle-curated-report`,
+            `proof:PROOF/supporting_report_plan.json#source=${reportProof.source_identity}#sha256=${
+              reportProof.expected_raw_sha256.slice(7)
+            }`,
           );
           manifest.items.physical_reporting_evidence = ready(
             "file:ARTIFACTS/PHOTO_SELECTION.md",
@@ -2403,29 +2544,88 @@ async function prepareOne(
           !request.dry_run &&
           text(input.source.builder_reference) &&
           deps.renderPhysicalReport &&
+          reportProof &&
           photosComplete
         ) {
           const rendered = await deps.renderPhysicalReport(
             input,
             resolvedPhotos,
+            reportProof,
           );
-          reportFile = `ARTIFACTS/${rendered.file_name}`;
-          artifacts.push(
-            await artifactFromBytes({
-              role: "supporting_report_pdf",
-              path: reportFile,
-              media_type: rendered.media_type,
-              bytes: rendered.bytes,
-              metadata: {
-                render_hash: rendered.render_hash || null,
-                ...(rendered.provenance || {}),
-              },
-            }),
+          const outputSha256 = await rawArtifactSha256(rendered.bytes);
+          const outputContentHash = await sesSha256Bytes(rendered.bytes);
+          const claimedRenderHash = text(rendered.render_hash).replace(
+            /^sha256:/,
+            "",
           );
-          manifest.items.supporting_report_pdf = ready(`file:${reportFile}`);
-          manifest.items.physical_reporting_evidence = ready(
-            "file:ARTIFACTS/PHOTO_SELECTION.md",
-          );
+          if (
+            outputSha256 !== reportProof.expected_raw_sha256 ||
+            outputContentHash !== reportProof.source_artifact_content_hash ||
+            (claimedRenderHash &&
+              `sha256:${claimedRenderHash}` !== outputSha256)
+          ) {
+            persistenceRefused = true;
+            const refusal = {
+              code: "curated_report_hash_mismatch",
+              source_identity: reportProof.source_identity,
+              expected_raw_sha256: reportProof.expected_raw_sha256,
+              source_artifact_content_hash:
+                reportProof.source_artifact_content_hash,
+              recovered_raw_sha256: outputSha256,
+              recovered_content_hash: outputContentHash,
+            };
+            const itemBlocker = addBlocker(
+              blockers,
+              blocked(
+                refusal.code,
+                "Recovered curated report bytes do not match the proved raw SHA-256.",
+                "Recover the exact selected committed source bytes or create a new independently approved curation revision.",
+                ["curated-report-byte-recovery"],
+                [reportProof.source_identity],
+                refusal,
+              ),
+            );
+            artifacts.push(
+              await artifactFromText({
+                role: "curated_source_refusal",
+                path: "PROOF/curated_source_refusal.json",
+                media_type: "application/json",
+                text: canonicalSesJson(refusal),
+                metadata: refusal,
+              }),
+            );
+            manifest.items.supporting_report_pdf = itemBlocker;
+            manifest.items.physical_reporting_evidence = itemBlocker;
+          } else {
+            reportFile = `ARTIFACTS/${rendered.file_name}`;
+            artifacts.push(
+              await artifactFromBytes({
+                role: "supporting_report_pdf",
+                path: reportFile,
+                media_type: rendered.media_type,
+                bytes: rendered.bytes,
+                metadata: {
+                  ...(rendered.provenance || {}),
+                  source_kind: reportProof.source_kind,
+                  source_identity: reportProof.source_identity,
+                  source_document_id: reportProof.source_document_id,
+                  source_revision_id: reportProof.source_revision_id,
+                  source_artifact_id: reportProof.source_artifact_id,
+                  source_artifact_content_hash:
+                    reportProof.source_artifact_content_hash,
+                  report_input_hash: reportProof.report_input_hash || null,
+                  expected_raw_sha256: reportProof.expected_raw_sha256,
+                  output_sha256: outputSha256,
+                  output_content_hash: outputContentHash,
+                  render_hash: outputSha256.slice("sha256:".length),
+                },
+              }),
+            );
+            manifest.items.supporting_report_pdf = ready(`file:${reportFile}`);
+            manifest.items.physical_reporting_evidence = ready(
+              "file:ARTIFACTS/PHOTO_SELECTION.md",
+            );
+          }
         }
       }
     } else if (
@@ -2831,11 +3031,11 @@ async function prepareOne(
         physical_renderer: !row
           ? "not_evaluated"
           : request.dry_run && row.job_type === "physical_makesafe"
-          ? deps.renderPhysicalReport
-            ? "deferred_current_cycle_curated_artifact_recovery"
+          ? deps.resolvePhysicalReportProof
+            ? "proved_independent_curated_source"
             : "unavailable"
-          : deps.renderPhysicalReport
-          ? "current_cycle_curated_artifact_recovery"
+          : deps.resolvePhysicalReportProof && deps.renderPhysicalReport
+          ? "independent_curated_artifact_recovery"
           : "unavailable",
         own_roof_renderer: !row
           ? "not_evaluated"
@@ -2875,7 +3075,10 @@ async function prepareOne(
   let persisted = false;
   let committedAt = now().toISOString();
   if (!request.dry_run) {
-    if (deps.persist) {
+    if (
+      deps.persist && !persistenceRefused &&
+      (!request.require_ready_for_persistence || baseRevision.state === "ready")
+    ) {
       const persistedResult = await measure("T11", () =>
         deps.persist!({
           revision: baseRevision,

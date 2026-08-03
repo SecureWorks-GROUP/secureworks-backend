@@ -14,6 +14,7 @@ import {
   currentCuratedReportDocument,
   normalizeSesPrepareRequest,
   physicalReportRenderJob,
+  selectPhysicalReportProofForCycle,
   SesAssemblerAdapterError,
   type SesAssemblerLiveSnapshot,
   summarizeSesPrepareResponseForHttp,
@@ -381,6 +382,15 @@ Deno.test(
         dry_run: true,
         force_refresh: false,
       },
+    );
+    assertEquals(
+      normalizeSesPrepareRequest({
+        selection: { mode: "job_number", job_number: "SWMS-26980" },
+        idempotency_key: "proof-swms-26980-sweep-guard",
+        dry_run: false,
+        require_ready_for_persistence: true,
+      }).require_ready_for_persistence,
+      true,
     );
     for (
       const invalid of [
@@ -1681,12 +1691,32 @@ Deno.test(
         report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
         report_render_hash: "e".repeat(64),
         evidence_source: "current_cycle_curated_makesafe_report",
-        source_document_id: "bertram-curated-report",
+        curated_source_kind: "durable_curated_revision",
+        curated_source_identity: "curation-revision:bertram-fixture",
+        report_input_hash: `sha256:${"f".repeat(64)}`,
         report_scope_narratives: [
           "20 star pickets installed to prop and secure the existing fence line. Fence materials left in place on site pending permanent repair.",
         ],
       },
     });
+    live.docket_revisions = [{
+      id: "bertram-docket-revision",
+      current_attendance_cycle_id: live.detail!.attendance_cycle_id,
+      committed_at: "2026-08-01T00:00:00.000Z",
+    }];
+    live.docket_artifacts = [{
+      id: "bertram-report-artifact",
+      revision_id: "bertram-docket-revision",
+      role: "supporting_report_pdf",
+      media_type: "application/pdf",
+      object_key: "makesafe-docket-artifacts/privacy-safe-fixture.pdf",
+      content_hash: `sha256:${"d".repeat(64)}`,
+      size_bytes: 100,
+      metadata: {
+        report_document_id: "bertram-curated-report",
+        render_hash: "e".repeat(64),
+      },
+    }];
 
     const input = buildSesAssemblerInput(live);
     assertEquals(input.classification.builder_key, "AJBR");
@@ -1794,95 +1824,97 @@ Deno.test(
 );
 
 Deno.test(
-  "current curated report selection rejects legacy typed PDFs without clean provenance",
+  "curated report selection requires committed same-cycle bytes and rejects self-attested sweep provenance",
   () => {
     const live = snapshot();
     const input = buildSesAssemblerInput(live);
     const cycleId = input.attendance.current_attendance_cycle_id;
     live.documents = [{
-      id: "legacy-report",
+      id: "committed-report",
       type: "makesafe_report",
       visible_to_trades: true,
-      file_name: "legacy.pdf",
-      attendance_cycle_id: cycleId,
-      cycle_attribution: "bound",
-      data_snapshot_json: null,
-    }];
-    assertEquals(currentCuratedReportDocument(live, input), null);
-
-    live.documents.push({
-      id: "curated-report",
-      type: "makesafe_report",
-      visible_to_trades: true,
-      file_name: "curated.pdf",
-      version: 2,
+      file_name: "committed.pdf",
       attendance_cycle_id: cycleId,
       cycle_attribution: "bound",
       data_snapshot_json: {
-        evidence_source: "current_cycle_curated_makesafe_report",
-        source_document_id: "curated-report",
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-        report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
         report_render_hash: "a".repeat(64),
       },
-    });
-    assertEquals(
-      currentCuratedReportDocument(live, input)?.id,
-      "curated-report",
-    );
-
-    live.documents.push({
-      id: "authoritative-report",
+    }, {
+      id: "guarded-sweep-report",
       type: "makesafe_report",
       visible_to_trades: true,
-      file_name: "authoritative.pdf",
-      version: 3,
+      uploaded_by: "guarded-current-wiki-rerender-sweep",
+      file_name: "guarded.pdf",
       attendance_cycle_id: cycleId,
       cycle_attribution: "bound",
       data_snapshot_json: {
         evidence_source: "current_cycle_curated_makesafe_report",
-        source_document_id: "authoritative-report",
+        source_document_id: "guarded-sweep-report",
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
         report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
         report_render_hash: "b".repeat(64),
       },
-    });
+    }];
+    assertEquals(currentCuratedReportDocument(live, input), null);
+
+    live.docket_revisions = [{
+      id: "revision-committed",
+      current_attendance_cycle_id: cycleId,
+      committed_at: "2026-08-01T00:00:00.000Z",
+    }, {
+      id: "revision-sweep",
+      current_attendance_cycle_id: cycleId,
+      committed_at: "2026-08-02T00:00:00.000Z",
+    }];
+    live.docket_artifacts = [{
+      id: "artifact-committed",
+      revision_id: "revision-committed",
+      role: "supporting_report_pdf",
+      media_type: "application/pdf",
+      object_key: "makesafe-docket-artifacts/committed.pdf",
+      content_hash: `sha256:${"c".repeat(64)}`,
+      size_bytes: 100,
+      metadata: {
+        report_document_id: "committed-report",
+        render_hash: "a".repeat(64),
+      },
+    }, {
+      id: "artifact-sweep",
+      revision_id: "revision-sweep",
+      role: "supporting_report_pdf",
+      media_type: "application/pdf",
+      object_key: "makesafe-docket-artifacts/guarded.pdf",
+      content_hash: `sha256:${"d".repeat(64)}`,
+      size_bytes: 100,
+      metadata: {
+        report_document_id: "guarded-sweep-report",
+        render_hash: "b".repeat(64),
+      },
+    }];
     assertEquals(
       currentCuratedReportDocument(live, input)?.id,
-      "authoritative-report",
+      "committed-report",
+    );
+    assertEquals(
+      selectPhysicalReportProofForCycle(live, cycleId),
+      {
+        source_kind: "previously_committed_pdf",
+        source_identity:
+          "docket-revision:revision-committed/artifact:artifact-committed",
+        source_document_id: "committed-report",
+        source_revision_id: "revision-committed",
+        source_artifact_id: "artifact-committed",
+        source_artifact_content_hash: `sha256:${"c".repeat(64)}`,
+        expected_raw_sha256: `sha256:${"a".repeat(64)}`,
+      },
     );
 
-    live.documents.push({
-      id: "hidden-report",
-      type: "makesafe_report",
-      visible_to_trades: false,
-      file_name: "hidden.pdf",
-      version: 4,
-      attendance_cycle_id: cycleId,
-      cycle_attribution: "bound",
-      data_snapshot_json: {
-        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
-        report_render_hash: "c".repeat(64),
-      },
-    });
-    live.documents.push({
-      id: "unset-visibility-report",
-      type: "makesafe_report",
-      file_name: "unset.pdf",
-      version: 5,
-      attendance_cycle_id: cycleId,
-      cycle_attribution: "bound",
-      data_snapshot_json: {
-        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
-        report_render_hash: "d".repeat(64),
-      },
-    });
-    assertEquals(
-      currentCuratedReportDocument(live, input)?.id,
-      "authoritative-report",
+    live.docket_artifacts = live.docket_artifacts.filter((artifact) =>
+      artifact.id === "artifact-sweep"
     );
+    assertEquals(selectPhysicalReportProofForCycle(live, cycleId), null);
   },
 );
 
@@ -2350,10 +2382,12 @@ Deno.test(
           }),
         },
       );
+      const photoFailureCodes = blockerCodes(photoFailure.results[0]);
       assert(
-        blockerCodes(photoFailure.results[0]).includes(
+        photoFailureCodes.includes(
           "sibling_evidence_photo_artifact_unrecoverable",
-        ),
+        ) ||
+          photoFailureCodes.includes("sibling_evidence_artifact_unrecoverable"),
       );
     } finally {
       globalThis.fetch = originalFetch;

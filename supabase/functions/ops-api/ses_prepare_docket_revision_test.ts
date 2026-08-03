@@ -6,6 +6,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import type {
   SesAssemblerInputV1,
+  SesPhysicalReportProof,
   SesPortalCapture,
   SesPrepareRequest,
 } from "./ses_docket_envelope.ts";
@@ -38,6 +39,18 @@ const FIXED_HASH =
 const FIXED_CAPTURE_HASH =
   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const;
 const FIXED_TIME = new Date("2026-07-27T01:00:00.000Z");
+const DEFAULT_PHYSICAL_REPORT_PROOF: SesPhysicalReportProof = {
+  source_kind: "previously_committed_pdf",
+  source_identity:
+    "docket-revision:fixture-source-revision/artifact:fixture-source-artifact",
+  source_document_id: "fixture-source-document",
+  source_revision_id: "fixture-source-revision",
+  source_artifact_id: "fixture-source-artifact",
+  expected_raw_sha256:
+    "sha256:a0716166bb20b36120b2c5693fb679dd2a3f18e942eaf3e073753bcbc525daf2",
+  source_artifact_content_hash:
+    "sha256:2bff3da80f0931657b35b9053e25f9e88b93f7dd709ad353a0dba233dc85aaa0",
+};
 
 function fixtureInput(
   row: SesFamilyMatrixRow,
@@ -261,11 +274,12 @@ function dependencies(
       signal: "submitted-and-locked",
       screenshot_bytes: new Uint8Array([1, 2, 3]),
     }),
+    resolvePhysicalReportProof: async () => DEFAULT_PHYSICAL_REPORT_PROOF,
     renderPhysicalReport: async () => ({
       file_name: "Make Safe Report - REF-70062.pdf",
       media_type: "application/pdf",
       bytes: new Uint8Array([37, 80, 68, 70, 1]),
-      render_hash: "physical-render-v1",
+      render_hash: DEFAULT_PHYSICAL_REPORT_PROOF.expected_raw_sha256,
     }),
     renderOwnRoofReport: async () => ({
       file_name: "Roof Report - REF-70062.pdf",
@@ -375,13 +389,25 @@ Deno.test(
     const result = (await prepareSesDocketRevision(
       request(input.identity.job_id, false),
       dependencies(input, {
+        resolvePhysicalReportProof: async () => ({
+          ...DEFAULT_PHYSICAL_REPORT_PROOF,
+          source_identity:
+            "docket-revision:tuart-style-revision/artifact:tuart-style-artifact",
+          source_revision_id: "tuart-style-revision",
+          source_artifact_id: "tuart-style-artifact",
+          expected_raw_sha256:
+            "sha256:b8cf7717bc535242e7f71dc3c058edfc27e59159038530c461472bbe3c36d156",
+          source_artifact_content_hash:
+            "sha256:6fba11403c0440435650d4496d07b905df6c4244ed516e931c6c06c7d32a044b",
+        }),
         renderPhysicalReport: async () => {
           recoveryCalls++;
           return {
             file_name: "Make Safe Report - REF-70062.pdf",
             media_type: "application/pdf",
             bytes: curatedPdf,
-            render_hash: "a".repeat(64),
+            render_hash:
+              "b8cf7717bc535242e7f71dc3c058edfc27e59159038530c461472bbe3c36d156",
             provenance: {
               evidence_source: "current_cycle_curated_makesafe_report",
               report_contract_version:
@@ -405,6 +431,18 @@ Deno.test(
       reportArtifact.metadata.evidence_source,
       "current_cycle_curated_makesafe_report",
     );
+    assertEquals(
+      reportArtifact.metadata.source_identity,
+      "docket-revision:tuart-style-revision/artifact:tuart-style-artifact",
+    );
+    assertEquals(
+      reportArtifact.metadata.expected_raw_sha256,
+      "sha256:b8cf7717bc535242e7f71dc3c058edfc27e59159038530c461472bbe3c36d156",
+    );
+    assertEquals(
+      reportArtifact.metadata.source_artifact_content_hash,
+      "sha256:6fba11403c0440435650d4496d07b905df6c4244ed516e931c6c06c7d32a044b",
+    );
     assertEquals(result.review_spec.version, SES_DOCKET_REVIEW_SPEC_VERSION);
     const reviewTradeEvidence = object(reviewCard(result).trade_report);
     assertEquals(
@@ -422,6 +460,146 @@ Deno.test(
     );
   },
 );
+
+Deno.test("persistent physical preparation refuses a raw PDF SHA-256 mismatch before persistence", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJBR" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  let persistCalls = 0;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false),
+    dependencies(input, {
+      resolvePhysicalReportProof: async () => ({
+        ...DEFAULT_PHYSICAL_REPORT_PROOF,
+        expected_raw_sha256:
+          "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      }),
+      persist: async () => {
+        persistCalls++;
+        return { committed_at: FIXED_TIME.toISOString() };
+      },
+    }),
+  )).results[0];
+
+  assertEquals(
+    blockerCodes(result).includes("curated_report_hash_mismatch"),
+    true,
+  );
+  assertEquals(
+    result.artifacts.some((artifact) =>
+      artifact.role === "supporting_report_pdf"
+    ),
+    false,
+  );
+  assertEquals(persistCalls, 0);
+  assertEquals(result.persisted, false);
+});
+
+Deno.test("persistent physical preparation refuses a missing curated source before persistence", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJBR" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  let persistCalls = 0;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false),
+    dependencies(input, {
+      resolvePhysicalReportProof: async () => null,
+      persist: async () => {
+        persistCalls++;
+        return { committed_at: FIXED_TIME.toISOString() };
+      },
+    }),
+  )).results[0];
+
+  assertEquals(blockerCodes(result).includes("curated_source_missing"), true);
+  assertEquals(
+    result.artifacts.some((artifact) =>
+      artifact.role === "supporting_report_pdf"
+    ),
+    false,
+  );
+  assertEquals(persistCalls, 0);
+  assertEquals(result.persisted, false);
+});
+
+Deno.test("persistent physical preparation refuses an artifact content-hash mismatch before persistence", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJBR" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  let persistCalls = 0;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false),
+    dependencies(input, {
+      resolvePhysicalReportProof: async () => ({
+        ...DEFAULT_PHYSICAL_REPORT_PROOF,
+        source_artifact_content_hash:
+          "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      }),
+      persist: async () => {
+        persistCalls++;
+        return { committed_at: FIXED_TIME.toISOString() };
+      },
+    }),
+  )).results[0];
+
+  assertEquals(
+    blockerCodes(result).includes("curated_report_hash_mismatch"),
+    true,
+  );
+  assertEquals(
+    result.artifacts.some((artifact) =>
+      artifact.role === "supporting_report_pdf"
+    ),
+    false,
+  );
+  assertEquals(persistCalls, 0);
+  assertEquals(result.persisted, false);
+});
+
+Deno.test("sweep-only persistence guard never commits a blocked revision while normal prepare semantics remain unchanged", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJBR" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.cycle_facts.hours_and_materials = null;
+  let guardedPersistCalls = 0;
+  const guarded = (await prepareSesDocketRevision(
+    {
+      ...request(input.identity.job_id, false),
+      require_ready_for_persistence: true,
+    },
+    dependencies(input, {
+      persist: async () => {
+        guardedPersistCalls++;
+        return { committed_at: FIXED_TIME.toISOString() };
+      },
+    }),
+  )).results[0];
+  assertEquals(guarded.state, "blocked");
+  assertEquals(guardedPersistCalls, 0);
+  assertEquals(guarded.persisted, false);
+
+  let normalPersistCalls = 0;
+  const normal = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false),
+    dependencies(input, {
+      persist: async () => {
+        normalPersistCalls++;
+        return { committed_at: FIXED_TIME.toISOString() };
+      },
+    }),
+  )).results[0];
+  assertEquals(normal.state, "blocked");
+  assertEquals(normalPersistCalls, 1);
+  assertEquals(normal.persisted, true);
+});
 
 Deno.test("MLB South-West suburbs select the Bunbury route while Perth stays on the metro route", () => {
   for (const suburb of MLB_SOUTH_WEST_SUBURBS) {
@@ -1053,7 +1231,11 @@ Deno.test("ordinary portal roofs draft the invoice without inventing a report PD
     result.email_drafts.INVOICE_EMAIL_DRAFT.includes(
       "ARTIFACTS/invoice_proposal.json",
     ),
-    true,
+    false,
+  );
+  assertStringIncludes(
+    result.email_drafts.INVOICE_EMAIL_DRAFT,
+    "Attachments: ",
   );
 });
 
@@ -1066,7 +1248,7 @@ Deno.test("blocked non-assessment packs do not expose email drafts", async () =>
     request(input.identity.job_id),
     {
       ...dependencies(input),
-      renderPhysicalReport: undefined,
+      resolvePhysicalReportProof: async () => null,
     },
   );
   const result = response.results[0];
@@ -1219,10 +1401,13 @@ Deno.test("bidirectional positive-scope bundle evidence clears the card-local ph
   const result = (await prepareSesDocketRevision(
     request(input.identity.job_id),
     dependencies(input, {
-      resolveBundledReportArtifact: async () => ({
+      resolveBundledPhysicalReportProof: async () =>
+        DEFAULT_PHYSICAL_REPORT_PROOF,
+      renderBundledPhysicalReport: async () => ({
         file_name: "SWMS-26837 Make Safe Report.pdf",
         media_type: "application/pdf",
-        bytes: new Uint8Array([37, 80, 68, 70, 37]),
+        bytes: new Uint8Array([37, 80, 68, 70, 1]),
+        render_hash: DEFAULT_PHYSICAL_REPORT_PROOF.expected_raw_sha256,
       }),
       resolveBundledPhotoArtifacts: async () => [{
         photo_id: "photo-26837",
@@ -1283,6 +1468,14 @@ Deno.test("assessment triad produces an invoice-only draft at the sealed price",
   assertStringIncludes(
     result.email_drafts.INVOICE_EMAIL_DRAFT,
     "assessment, photo schedule and quote",
+  );
+  assertEquals(
+    result.email_drafts.INVOICE_EMAIL_DRAFT.includes("invoice_proposal.json"),
+    false,
+  );
+  assertStringIncludes(
+    result.email_drafts.INVOICE_EMAIL_DRAFT,
+    "no invoice is attached",
   );
   assertEquals(
     result.envelope.v2.items.draft_invoice_bundle_email.state,
@@ -2339,7 +2532,7 @@ Deno.test("draft-only wall exposes no money/send dependency and emits an inert r
   });
   assertStringIncludes(
     response.results[0].email_drafts.INVOICE_EMAIL_DRAFT,
-    "No Xero object exists",
+    "No Xero invoice exists",
   );
 });
 

@@ -186,6 +186,17 @@ export interface SesAssemblerInputV1 {
   };
 }
 
+export interface SesPhysicalReportProof {
+  source_kind: "durable_curated_revision" | "previously_committed_pdf";
+  source_identity: string;
+  source_document_id: string;
+  source_revision_id: string;
+  source_artifact_id: string;
+  source_artifact_content_hash: SesSha256;
+  expected_raw_sha256: SesSha256;
+  report_input_hash?: SesSha256;
+}
+
 export interface SesPrepareRequest {
   selection: {
     mode: "job_id" | "job_number" | "board_batch";
@@ -197,6 +208,8 @@ export interface SesPrepareRequest {
   assembler_version: "ses-pack-assembler/v1";
   dry_run: boolean;
   force_refresh: boolean;
+  require_ready_for_persistence?: boolean;
+  expected_physical_report_proof?: SesPhysicalReportProof;
 }
 
 export interface SesBlocker {

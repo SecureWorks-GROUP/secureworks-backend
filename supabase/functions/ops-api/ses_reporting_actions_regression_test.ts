@@ -6,6 +6,7 @@ import {
 import {
   _parseSesDraftForTest,
   listSesDocsReadyReviewsAction,
+  resolveDocketRoutes,
   SesActionError,
 } from "./ses_reporting_actions.ts";
 
@@ -47,6 +48,111 @@ Deno.test("non-email Cc is never exposed as a typed review recipient", () => {
   );
   assertEquals(route?.cc, []);
   assertEquals(route?.ready, false);
+});
+
+function invoiceDocket(
+  stage: "pre_xero" | "invoice_bound",
+  attachments: string[],
+  xero: Record<string, unknown> | null = null,
+) {
+  return {
+    id: "docket-fixture",
+    stage,
+    local_invoice_proposal: { builder_reference: "REF-TEST-1" },
+    xero_binding: xero,
+    email_drafts: {
+      INVOICE_EMAIL_DRAFT: [
+        "To: invoices@builder.example",
+        "Cc:",
+        "Subject: Privacy-safe invoice fixture",
+        `Attachments: ${attachments.join(", ")}`,
+        "",
+        "Fixture body.",
+      ].join("\n"),
+    },
+  };
+}
+
+const ROUTE_ARTIFACTS = [{
+  role: "invoice_proposal",
+  object_key: "bucket/docket-fixture/ARTIFACTS/invoice_proposal.json",
+  media_type: "application/json",
+  content_hash: "proposal-hash",
+}, {
+  role: "supporting_report_pdf",
+  object_key: "bucket/docket-fixture/ARTIFACTS/report.pdf",
+  media_type: "application/pdf",
+  content_hash: "report-hash",
+}, {
+  role: "swms_artifact",
+  object_key: "bucket/docket-fixture/ARTIFACTS/swms.pdf",
+  media_type: "application/pdf",
+  content_hash: "swms-hash",
+}, {
+  role: "xero_invoice_pdf",
+  object_key: "bucket/docket-fixture/ARTIFACTS/xero-invoice.pdf",
+  media_type: "application/pdf",
+  content_hash: "xero-hash",
+  metadata: {
+    xero_invoice_id: "xero-invoice-test-1",
+    invoice_number: "INV-TEST-1",
+  },
+}];
+
+Deno.test("assessment and physical pre-Xero invoice routes hide proposal state and remain non-sendable", () => {
+  const assessment = resolveDocketRoutes(
+    invoiceDocket("pre_xero", ["ARTIFACTS/invoice_proposal.json"]),
+    ROUTE_ARTIFACTS,
+    null,
+  )[0];
+  assertEquals(assessment.attachment_hashes, []);
+  assertEquals(assessment.ready, false);
+
+  const physical = resolveDocketRoutes(
+    invoiceDocket("pre_xero", [
+      "ARTIFACTS/invoice_proposal.json",
+      "ARTIFACTS/report.pdf",
+      "ARTIFACTS/swms.pdf",
+    ]),
+    ROUTE_ARTIFACTS,
+    null,
+  )[0];
+  assertEquals(physical.attachment_hashes, ["report-hash", "swms-hash"]);
+  assertEquals(physical.ready, false);
+});
+
+Deno.test("invoice-bound route requires the authorised Xero PDF and keeps approved support", () => {
+  const attachments = [
+    "ARTIFACTS/invoice_proposal.json",
+    "ARTIFACTS/report.pdf",
+    "ARTIFACTS/swms.pdf",
+  ];
+  const authorised = resolveDocketRoutes(
+    invoiceDocket("invoice_bound", attachments, {
+      status: "AUTHORISED",
+      xero_invoice_id: "xero-invoice-test-1",
+      invoice_number: "INV-TEST-1",
+    }),
+    ROUTE_ARTIFACTS,
+    null,
+  )[0];
+  assertEquals(authorised.attachment_hashes, [
+    "xero-hash",
+    "report-hash",
+    "swms-hash",
+  ]);
+  assertEquals(authorised.ready, true);
+
+  const draft = resolveDocketRoutes(
+    invoiceDocket("invoice_bound", attachments, {
+      status: "DRAFT",
+      xero_invoice_id: "xero-invoice-test-1",
+      invoice_number: "INV-TEST-1",
+    }),
+    ROUTE_ARTIFACTS,
+    null,
+  )[0];
+  assertEquals(draft.ready, false);
 });
 
 function listClient(options: { proposalError?: boolean } = {}) {

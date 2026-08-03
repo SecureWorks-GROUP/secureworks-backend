@@ -1,36 +1,21 @@
-#!/usr/bin/env -S deno run --allow-env=SUPABASE_ACCESS_TOKEN,SW_SUPABASE_URL,SW_API_KEY,SW_WIKI_REPO --allow-net --allow-read --allow-write --allow-run=git,python3
+#!/usr/bin/env -S deno run --allow-env=SUPABASE_ACCESS_TOKEN,SW_SUPABASE_URL,SW_API_KEY --allow-net --allow-read --allow-write
 // deno-lint-ignore-file no-explicit-any
 
 import {
   canonicalSesJson,
+  type SesPhysicalReportProof,
 } from "../supabase/functions/ops-api/ses_docket_envelope.ts";
 import {
-  canonicalCurrentWikiReportHashPayload,
-  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-} from "../supabase/functions/ops-api/makesafe_report_render.ts";
-import {
-  MUTATION_EXCLUDED_JOB_NUMBER,
   runGuardedSweep,
   SWEEP_SCHEMA,
   sweepBoundary,
   type SweepEntry,
-  SweepRefusal,
-  type SweepRender,
   type SweepRow,
+  validSweepSourceProof,
 } from "./ses-curated-docket-sweep-v1-core.ts";
 
-const SKILL_ROOT = "harness/ops/skills/secureworks-makesafe-reporting";
 const MANIFEST_DEFAULT = "/tmp/ses-curated-docket-sweep-v1.json";
-const RENDERER_DEPENDENCIES = [
-  "scripts/render_makesafe_report.py",
-  "scripts/photo_labeling.py",
-  "scripts/report_commercial_content.py",
-  "scripts/report_content_contract.py",
-  "assets/secureworks-group-main-cropped.png",
-] as const;
 const READ_TIMEOUT_MS = 20_000;
-export const CURRENT_WIKI_RENDER_ENV = { RL_invariant: "1" } as const;
 
 interface Options {
   mode: "dry_run" | "apply";
@@ -60,20 +45,6 @@ function requiredEnv(name: string): string {
   const value = Deno.env.get(name)?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
-}
-
-export function reviewedWikiRepoPath(value: unknown): string {
-  const path = typeof value === "string" ? value.trim() : "";
-  if (!path || !path.startsWith("/")) {
-    throw new Error(
-      "SW_WIKI_REPO must be an explicit absolute current-wiki checkout path",
-    );
-  }
-  return path;
-}
-
-function wikiRepoPath(): string {
-  return reviewedWikiRepoPath(requiredEnv("SW_WIKI_REPO"));
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {
@@ -173,22 +144,11 @@ select
   jobs.job_number,
   detail.external_ref as builder_reference,
   jobs.site_suburb as suburb,
-  jobs.client_name,
-  jobs.site_address,
   review.docket_revision_id::text,
   artifact.content_hash as docket_artifact_hash,
   artifact.object_key as docket_object_key,
   artifact.metadata as artifact_metadata,
-  revision.envelope #>> '{v2,classification,family}' as family,
-  detail.attendance_cycle_id::text,
-  detail.report_type,
-  report.id::text as report_id,
-  report.submitted_at,
-  report.start_time,
-  report.checklist_json,
-  report.notes,
-  coalesce(media.rows, '[]'::jsonb) as media,
-  coalesce(packs.rows, '[]'::jsonb) as report_packs
+  revision.envelope #>> '{v2,classification,family}' as family
 from ses_docket_review_current review
 join jobs on jobs.id = review.job_id
 join makesafe_job_details detail on detail.job_id = review.job_id
@@ -196,26 +156,6 @@ join makesafe_docket_revisions revision on revision.id = review.docket_revision_
 left join makesafe_docket_artifacts artifact
   on artifact.revision_id = review.docket_revision_id
  and artifact.role = 'supporting_report_pdf'
-left join lateral (
-  select selected.* from job_service_reports selected
-  where selected.job_id = review.job_id
-    and selected.attendance_cycle_id = detail.attendance_cycle_id
-  order by selected.submitted_at desc nulls last, selected.created_at desc, selected.id desc
-  limit 1
-) report on true
-left join lateral (
-  select jsonb_agg(to_jsonb(selected) order by selected.created_at, selected.id) as rows
-  from job_media selected
-  where selected.job_id = review.job_id
-    and selected.attendance_cycle_id = detail.attendance_cycle_id
-) media on true
-left join lateral (
-  select jsonb_agg(jsonb_build_object(
-    'id', selected.id, 'report_doc_id', selected.report_doc_id,
-    'last_render_hash', selected.last_render_hash, 'status', selected.status
-  ) order by selected.updated_at desc) as rows
-  from makesafe_report_packs selected where selected.job_id = review.job_id
-) packs on true
 where review.review_state = 'needs_review'
 order by review.review_state_changed_at, review.job_id;
 `;
@@ -233,173 +173,6 @@ export async function enumerateRows(): Promise<SweepRow[]> {
     family: row.family || null,
     source: row,
   }));
-}
-
-async function recordProtectedServedRawProof(rows: SweepRow[]): Promise<void> {
-  for (const row of rows) {
-    if (row.job_number !== MUTATION_EXCLUDED_JOB_NUMBER) continue;
-    const metadata = { ...(row.artifact_metadata || {}) };
-    try {
-      const pack = await opsAction("get_ses_reviewable_pack", {
-        docket_revision_id: row.docket_revision_id,
-      });
-      const artifact = (pack.artifacts || []).find((item: any) =>
-        item.role === "supporting_report_pdf"
-      );
-      if (!artifact?.signed_url) {
-        throw new Error("served report URL unavailable");
-      }
-      const response = await fetch(artifact.signed_url, {
-        signal: AbortSignal.timeout(READ_TIMEOUT_MS),
-      });
-      if (!response.ok) {
-        throw new Error(`served report read HTTP ${response.status}`);
-      }
-      const servedHash = await sha256(
-        new Uint8Array(await response.arrayBuffer()),
-      );
-      Object.assign(metadata, {
-        protected_served_raw_sha256: servedHash,
-        protected_candidate_raw_sha256: null,
-        protected_raw_bytes_equal: null,
-        protected_equality_decision:
-          "excluded_before_touch_no_identical_candidate_proven",
-      });
-    } catch (error) {
-      Object.assign(metadata, {
-        protected_served_raw_sha256: null,
-        protected_candidate_raw_sha256: null,
-        protected_raw_bytes_equal: null,
-        protected_equality_decision:
-          "excluded_before_touch_raw_proof_unavailable",
-        protected_proof_error: error instanceof Error
-          ? error.message
-          : String(error),
-      });
-    }
-    row.artifact_metadata = metadata;
-  }
-}
-
-async function gitBytesAt(
-  cwd: string,
-  revision: string,
-  path: string,
-): Promise<Uint8Array> {
-  const command = new Deno.Command("git", {
-    cwd,
-    args: ["show", `${revision}:${path}`],
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const result = await command.output();
-  if (!result.success) {
-    throw new Error(`current wiki file unavailable: ${path}`);
-  }
-  return result.stdout;
-}
-
-async function gitBytes(path: string): Promise<Uint8Array> {
-  return await gitBytesAt(
-    wikiRepoPath(),
-    MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-    path,
-  );
-}
-
-export async function assertRendererBoundary(): Promise<void> {
-  const command = new Deno.Command("git", {
-    cwd: wikiRepoPath(),
-    args: ["ls-remote", "origin", "refs/heads/main"],
-    stdout: "piped",
-  });
-  const result = await command.output();
-  const actual = result.success
-    ? parseRemoteMainRevision(new TextDecoder().decode(result.stdout))
-    : "";
-  if (actual !== MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION) {
-    const isolated = await Deno.makeTempDir({ prefix: "wiki-remote-main-" });
-    try {
-      const remoteResult = await new Deno.Command("git", {
-        cwd: wikiRepoPath(),
-        args: ["remote", "get-url", "origin"],
-        stdout: "piped",
-      }).output();
-      const remoteUrl = new TextDecoder().decode(remoteResult.stdout).trim();
-      if (!remoteResult.success || !remoteUrl) {
-        throw new SweepRefusal(
-          "renderer_source_drift",
-          "The current wiki remote URL could not be resolved read-only.",
-        );
-      }
-      const init = await new Deno.Command("git", {
-        cwd: isolated,
-        args: ["init", "--quiet"],
-        stderr: "piped",
-      }).output();
-      const fetched = init.success
-        ? await new Deno.Command("git", {
-          cwd: isolated,
-          args: [
-            "fetch",
-            "--quiet",
-            "--depth=1",
-            remoteUrl,
-            "refs/heads/main",
-          ],
-          stderr: "piped",
-        }).output()
-        : init;
-      if (!fetched.success) {
-        throw new SweepRefusal(
-          "renderer_source_drift",
-          "Remote current-main dependency bytes could not be fetched into the isolated verifier.",
-        );
-      }
-      const reviewed: Record<string, string> = {};
-      const remote: Record<string, string> = {};
-      for (const relative of RENDERER_DEPENDENCIES) {
-        const path = `${SKILL_ROOT}/${relative}`;
-        reviewed[relative] = await sha256(await gitBytes(path));
-        remote[relative] = await sha256(
-          await gitBytesAt(isolated, "FETCH_HEAD", path),
-        );
-      }
-      const changed = changedDependencyPaths(reviewed, remote);
-      if (changed.length) {
-        throw new SweepRefusal(
-          "renderer_source_drift",
-          `Current remote main changed reviewed renderer dependencies: ${
-            changed.join(", ")
-          }.`,
-        );
-      }
-    } finally {
-      await Deno.remove(isolated, { recursive: true });
-    }
-  }
-  const renderer = await gitBytes(
-    `${SKILL_ROOT}/scripts/render_makesafe_report.py`,
-  );
-  if (
-    await sha256(renderer) !== MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256
-  ) {
-    throw new SweepRefusal(
-      "renderer_source_drift",
-      "The reviewed current-wiki renderer raw SHA-256 no longer matches.",
-    );
-  }
-}
-
-async function materializeRenderer(dir: string): Promise<string> {
-  for (const relative of RENDERER_DEPENDENCIES) {
-    const target = `${dir}/${relative}`;
-    await Deno.mkdir(target.slice(0, target.lastIndexOf("/")), {
-      recursive: true,
-    });
-    await Deno.writeFile(target, await gitBytes(`${SKILL_ROOT}/${relative}`));
-  }
-  return `${dir}/scripts/render_makesafe_report.py`;
 }
 
 function text(value: unknown): string {
@@ -473,7 +246,7 @@ async function downloadPhoto(item: any, path: string): Promise<void> {
   await Deno.writeFile(path, new Uint8Array(await response.arrayBuffer()));
 }
 
-export function currentWikiRendererCommand(
+function wikiRenderCommand(
   renderer: string,
   inputPath: string,
   outDir: string,
@@ -542,7 +315,7 @@ async function renderRow(
   const searched = [
     "jobs",
     "makesafe_job_details",
-    "job_service_reports.current_cycle",
+    "current_cycle_report_source",
     "job_media.current_cycle",
     "makesafe_report_packs",
     "current_wiki_renderer_input",
@@ -643,7 +416,7 @@ async function renderRow(
     const outDir = `${dir}/out`;
     await Deno.writeTextFile(inputPath, JSON.stringify(reportJob));
     const process = await commandOutputWithTimeout(
-      currentWikiRendererCommand(renderer, inputPath, outDir),
+      wikiRenderCommand(renderer, inputPath, outDir),
       60_000,
     );
     if (!process.success) {
@@ -710,33 +483,90 @@ export async function opsAction(
   return payload;
 }
 
-async function attach(row: SweepRow, rendered: SweepRender) {
-  const result = await opsAction("attach_current_wiki_curated_report", {
-    job_id: row.job_id,
-    renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-    renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-    pdf_base64: bytesToBase64(rendered.bytes),
-    pdf_sha256: rendered.pdf_sha256,
-    report_input_hash: rendered.report_input_hash,
-    report_job: rendered.report_job,
-    operator: "guarded-current-wiki-rerender-sweep",
-  });
-  return { document_id: result.document_id, skipped: result.skipped === true };
+function selectedSourceFromResult(
+  revision: Record<string, any>,
+): SesPhysicalReportProof | null {
+  const artifacts = Array.isArray(revision.artifacts) ? revision.artifacts : [];
+  const plan = artifacts.find((artifact: any) =>
+    artifact.role === "supporting_report_plan"
+  );
+  const planned = plan?.metadata?.selected_source;
+  if (validSweepSourceProof(planned)) return planned;
+  const report = artifacts.find((artifact: any) =>
+    artifact.role === "supporting_report_pdf"
+  );
+  const metadata = report?.metadata || {};
+  const proof = {
+    source_kind: metadata.source_kind,
+    source_identity: metadata.source_identity,
+    source_document_id: metadata.source_document_id,
+    source_revision_id: metadata.source_revision_id,
+    source_artifact_id: metadata.source_artifact_id,
+    source_artifact_content_hash: metadata.source_artifact_content_hash,
+    expected_raw_sha256: metadata.expected_raw_sha256,
+    ...(metadata.report_input_hash
+      ? { report_input_hash: metadata.report_input_hash }
+      : {}),
+  };
+  return validSweepSourceProof(proof) ? proof : null;
 }
 
-async function prepare(row: SweepRow, rendered: SweepRender) {
-  const idempotency =
-    `curated-rerender:${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}:${row.job_id}:${rendered.pdf_sha256}`;
+export function sweepPrepareOutcome(
+  revision: Record<string, any>,
+  args: { dry_run: boolean },
+) {
+  const source = selectedSourceFromResult(revision);
+  const blockers = Array.isArray(revision.blockers) ? revision.blockers : [];
+  let refusal = blockers.length || revision.state !== "ready"
+    ? {
+      reason_code: blockers[0]?.reason_code || "docket_not_ready",
+      recovery_action: blockers[0]?.recovery_action ||
+        blockers[0]?.reason ||
+        "Resolve every returned blocker and run a new prepare-only dry-run.",
+    }
+    : null;
+  if (!args.dry_run && revision.persisted !== true && !refusal) {
+    refusal = {
+      reason_code: "persistent_prepare_refused",
+      recovery_action:
+        "The source-bound persistent prepare did not commit; inspect its blockers and run a new dry-run.",
+    };
+  }
+  return {
+    revision_id: revision.docket_revision_id || null,
+    source,
+    ...(refusal
+      ? {
+        refusal: {
+          code: refusal.reason_code,
+          remedy: refusal.recovery_action,
+        },
+      }
+      : {}),
+  };
+}
+
+async function prepareRow(
+  row: SweepRow,
+  args: {
+    dry_run: boolean;
+    expected_physical_report_proof?: SesPhysicalReportProof;
+  },
+) {
   const result = await opsAction("prepare_ses_docket_revision", {
     selection: { mode: "job_id", job_id: row.job_id },
-    dry_run: false,
-    idempotency_key: idempotency,
+    dry_run: args.dry_run,
+    force_refresh: true,
+    require_ready_for_persistence: true,
+    idempotency_key: `curated-source:${row.job_id}:${row.docket_revision_id}`,
+    ...(args.expected_physical_report_proof
+      ? {
+        expected_physical_report_proof: args.expected_physical_report_proof,
+      }
+      : {}),
   });
-  const revision = result.results?.[0];
-  if (!revision?.docket_revision_id || revision.state !== "ready") {
-    throw new Error("new docket revision was not persisted ready");
-  }
-  return { revision_id: revision.docket_revision_id };
+  const revision = result.results?.[0] || {};
+  return sweepPrepareOutcome(revision, args);
 }
 
 function markdown(manifest: any): string {
@@ -766,9 +596,7 @@ function markdown(manifest: any): string {
 
 export async function main(args = Deno.args): Promise<void> {
   const options = parseOptions(args);
-  await assertRendererBoundary();
   const rows = await enumerateRows();
-  await recordProtectedServedRawProof(rows);
   let reviewed: SweepEntry[] = [];
   if (options.mode === "apply") {
     const prior = JSON.parse(await Deno.readTextFile(options.manifest));
@@ -784,10 +612,7 @@ export async function main(args = Deno.args): Promise<void> {
   }
   const entries = await runGuardedSweep(
     rows,
-    {
-      render: renderRow,
-      ...(options.mode === "apply" ? { attach, prepare } : {}),
-    },
+    { prepare: prepareRow },
     options.mode,
     reviewed,
   );
@@ -808,10 +633,9 @@ export async function main(args = Deno.args): Promise<void> {
       xero_mutations: 0,
       invoice_authorisations: 0,
       schema_migrations: 0,
-      allowed_writes: [
-        "current curated job_document",
-        "content-addressed docket revision",
-      ],
+      allowed_writes: options.mode === "apply"
+        ? ["content-addressed docket revision from the reviewed source proof"]
+        : [],
     },
     counts,
     entries,

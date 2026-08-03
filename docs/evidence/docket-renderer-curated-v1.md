@@ -34,11 +34,13 @@ served docket PDF.
 
 ## CHANGE
 
-- The docket dependency now recovers an exact current-job/current-cycle typed
-  `makesafe_report`, mirroring the existing bundled-report URL/byte recovery.
-- A type alone is not trusted. The document must be cycle-bound and carry the
-  active curated contract, renderer version and render hash in
-  `data_snapshot_json`. Accepted renderer provenance is mechanically pinned to
+- The docket dependency now recovers an exact current-cycle `makesafe_report`
+  through a committed `makesafe_docket_revisions` /
+  `supporting_report_pdf` artifact pair. A typed document or provenance stamp
+  alone is not trusted: the pair must be cycle-bound, retain the artifact
+  content hash and raw PDF SHA-256, and carry the active curated contract,
+  renderer version and render hash in `data_snapshot_json`. Accepted renderer
+  provenance is mechanically pinned to
   secureworks-wiki main revision
   `915e9b423fc597d656c7cb090671bf206138114b` and the reviewed authoritative
   renderer dependency hash recorded by the current docket sweep.
@@ -46,7 +48,9 @@ served docket PDF.
   `report_document_id` emitted by `ses_prepare_docket_revision`; the legacy
   `source_document_id` is not an accepted fallback.
 - `physicalReportRenderJob` now always raises `ses_curated_report_missing`; it
-  cannot translate raw checklist fields into report prose.
+  cannot translate raw checklist fields into report prose. Previously committed
+  PDFs are eligible only when their immutable docket artifact and recovered raw
+  bytes re-prove the same-cycle source identity and hashes.
 - `makesafe_render_report` is retired for current curated evidence and refuses
   before attachment. The guarded current-wiki rerender path stamps trusted
   contract/hash/cycle provenance while preserving typed `makesafe_report`, the
@@ -70,9 +74,9 @@ attachment bucket, report hash input or submitted trade record was changed.
 The served docket no longer has a data-flow edge from trade checklist prose to
 the PDF renderer. The only production path is now:
 
-`prepare_ses_docket_revision` -> exact current-cycle typed document selection ->
-provenance guard -> HTTPS PDF byte recovery -> `supporting_report_pdf` docket
-artifact.
+`prepare_ses_docket_revision` -> committed same-cycle docket revision and
+supporting artifact proof -> exact PDF byte/hash recovery ->
+`supporting_report_pdf` docket artifact.
 
 The explicit renderer path separately validates structured curated prose before
 creating the typed source artifact. Because its trusted provenance is written
