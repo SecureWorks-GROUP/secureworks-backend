@@ -28,6 +28,7 @@ import {
 import {
   prepare_ses_docket_revision as prepareSesDocketRevision,
   SES_ASSESSMENT_RECIPE_VERSION,
+  SES_DOCKET_REVIEW_SPEC_VERSION,
   type SesPersistPayload,
   type SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
@@ -289,6 +290,21 @@ function blockerCodes(result: {
   return result.blockers.map((item) => item.reason_code);
 }
 
+function object(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function reviewCard(result: {
+  review_spec: Record<string, unknown>;
+}): Record<string, unknown> {
+  const cards = Array.isArray(result.review_spec.cards)
+    ? result.review_spec.cards
+    : [];
+  return object(cards[0]);
+}
+
 Deno.test("family matrix is a closed executable set with the AJS report guard", () => {
   assertEquals(SES_EMERGENCY_SERVICE_FAMILIES, [
     "roof",
@@ -329,7 +345,7 @@ Deno.test("family matrix is a closed executable set with the AJS report guard", 
 });
 
 Deno.test(
-  "persisted physical docket uses the recovered curated PDF bytes, never raw checklist prose",
+  "persisted physical docket serves curated PDF bytes while review spec preserves raw trade evidence",
   async () => {
     const row = SES_FAMILY_MATRIX.find((candidate) =>
       candidate.builder_key === "AJBR" &&
@@ -388,6 +404,21 @@ Deno.test(
     assertEquals(
       reportArtifact.metadata.evidence_source,
       "current_cycle_curated_makesafe_report",
+    );
+    assertEquals(result.review_spec.version, SES_DOCKET_REVIEW_SPEC_VERSION);
+    const reviewTradeEvidence = object(reviewCard(result).trade_report);
+    assertEquals(
+      object(reviewTradeEvidence.asserted_written_narrative).work_done,
+      "RAW WORK DONE MUST NOT LEAK",
+    );
+    assertEquals(
+      object(reviewTradeEvidence.asserted_written_narrative).notes,
+      "RAW TRADE NARRATIVE MUST NOT LEAK",
+    );
+    assertEquals(
+      object(object(reviewTradeEvidence.raw_source_evidence).checklist_json)
+        .materials_used,
+      ["RAW CHECKBOX MATERIAL MUST NOT LEAK"],
     );
   },
 );
@@ -2064,6 +2095,144 @@ Deno.test("unsupported HRCW combination blocks for a sealed-template decision", 
   );
 });
 
+Deno.test("review spec v2 carries provenance-bound written trade context while preserving noisy raw selections", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.identity.job_id = "job-bertram-pattern";
+  input.identity.job_number = "SWMS-261109";
+  input.source.builder_reference = "AJBR-70271";
+  input.source.site_address = null;
+  input.source.site_suburb = "Bertram";
+  input.attendance.attendance_cycle_ids = ["cycle-current"];
+  input.attendance.current_attendance_cycle_id = "cycle-current";
+  input.attendance.cycle_number = 2;
+  const noisySelections = [
+    { key: "tarp", selected: true },
+    { key: "timber", selected: true },
+    { key: "roof_screws", selected: true },
+    { key: "silicone", selected: true },
+  ];
+  input.cycle_facts.trade_report = {
+    id: "report-current",
+    status: "submitted",
+    submitted_at: "2026-08-03T00:30:00.000Z",
+    checklist_json: {
+      works_completed:
+        "Installed temporary weather protection and secured the affected area.",
+      findings: "Temporary protection was required at the affected section.",
+      damage_description: "The exposed section required weather protection.",
+      damage_cause: "Storm impact.",
+      materials: noisySelections,
+      materials_used: "One weatherproof sheet and fixings were installed.",
+    },
+    notes: "Area was left weatherproof and safe for follow-up.",
+  };
+  input.cycle_facts.hours_and_materials = {
+    trades: 1,
+    hours_per_trade: 2,
+    rate_ex_gst: 80,
+    materials: noisySelections,
+  };
+
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  const card = reviewCard(result);
+  const tradeReport = object(card.trade_report);
+  const source = object(tradeReport.source);
+  const narrative = object(tradeReport.asserted_written_narrative);
+  const raw = object(tradeReport.raw_source_evidence);
+  const rawChecklist = object(raw.checklist_json);
+
+  assertEquals(result.review_spec.version, SES_DOCKET_REVIEW_SPEC_VERSION);
+  assertEquals(source, {
+    relation: "job_service_reports",
+    id: "report-current",
+    status: "submitted",
+    submitted_at: "2026-08-03T00:30:00.000Z",
+    job_id: "job-bertram-pattern",
+    attendance_cycle_id: "cycle-current",
+    cycle_number: 2,
+    selection: "current_attendance_cycle",
+  });
+  assertEquals(
+    narrative.works_completed,
+    "Installed temporary weather protection and secured the affected area.",
+  );
+  assertEquals(
+    narrative.materials_used,
+    "One weatherproof sheet and fixings were installed.",
+  );
+  assertEquals(
+    narrative.notes,
+    "Area was left weatherproof and safe for follow-up.",
+  );
+  assertEquals(
+    narrative.materials,
+    null,
+    "structured checklist selections are source evidence, not asserted prose",
+  );
+  assertEquals(rawChecklist.materials, noisySelections);
+  assertEquals(
+    object(raw.checklist_json).materials_used,
+    "One weatherproof sheet and fixings were installed.",
+  );
+  assert(
+    result.blockers.some((item) =>
+      item.reason_code === "pricing_evidence_missing"
+    ),
+    "the existing pricing contradiction remains blocking",
+  );
+  assert(
+    Array.isArray(card.blocker_codes) &&
+      card.blocker_codes.includes("pricing_evidence_missing"),
+    "reviewers still see the genuine blocker beside the added narrative",
+  );
+  assertEquals(result.invoice_proposal, null);
+});
+
+Deno.test("review spec keeps a missing current report null and never borrows sibling narrative", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.cycle_facts.trade_report = null;
+  input.cycle_facts.swms_fact_context = {
+    evidence_kind: "sibling_bundle",
+    evidence_job_id: "job-sibling",
+    evidence_job_number: "SWMS-SIBLING",
+    trade_report: {
+      id: "report-sibling",
+      status: "submitted",
+      submitted_at: "2026-08-02T00:30:00.000Z",
+      checklist_json: {
+        works_completed: "Sibling narrative must not bind to this card.",
+      },
+      notes: null,
+    },
+    job_client_name: null,
+    assignment: null,
+  };
+
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+
+  assertEquals(result.review_spec.version, SES_DOCKET_REVIEW_SPEC_VERSION);
+  assertEquals(reviewCard(result).trade_report, null);
+  assert(
+    result.blockers.some((item) =>
+      item.reason_code === "trade_evidence_missing"
+    ),
+  );
+});
+
 Deno.test("same input and intent produce stable revision and output hashes", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
@@ -2095,6 +2264,40 @@ Deno.test("same input and intent produce stable revision and output hashes", asy
       artifact.path,
       artifact.content_hash,
     ]),
+  );
+});
+
+Deno.test("written trade content deterministically invalidates the review artifact and output hash", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const beforeInput = fixtureInput(row);
+  const afterInput = structuredClone(beforeInput);
+  object(afterInput.cycle_facts.trade_report?.checklist_json).works_completed =
+    "Installed a different temporary weather protection method.";
+
+  const before = (await prepareSesDocketRevision(
+    request(beforeInput.identity.job_id),
+    dependencies(beforeInput),
+  )).results[0];
+  const after = (await prepareSesDocketRevision(
+    request(afterInput.identity.job_id),
+    dependencies(afterInput),
+  )).results[0];
+  const reviewHash = (result: typeof before) =>
+    result.artifacts.find((artifact) => artifact.role === "review_spec")
+      ?.content_hash;
+
+  assert(reviewHash(before));
+  assert(reviewHash(after));
+  assert(
+    reviewHash(before) !== reviewHash(after),
+    "written report changes must change review_spec.json bytes",
+  );
+  assert(
+    before.output_content_hash !== after.output_content_hash,
+    "written report changes must invalidate the assembled output hash",
   );
 });
 
