@@ -103,6 +103,7 @@ Deno.test("dry-run proves every eligible card without invoking writes", async ()
     "dry_run_proven",
     "not_selected",
   ]);
+  assertEquals(entries[0].old_object_key, null);
 });
 
 Deno.test("one refusal continues to the next card", async () => {

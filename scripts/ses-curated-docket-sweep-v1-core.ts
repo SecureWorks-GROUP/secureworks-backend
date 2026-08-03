@@ -108,7 +108,9 @@ export function emptyEntry(row: SweepRow): SweepEntry {
     suburb: row.suburb,
     old_revision_id: row.docket_revision_id,
     old_artifact_hash: row.docket_artifact_hash,
-    old_object_key: row.docket_object_key,
+    // Storage filenames can embed street addresses. Revision + artifact hashes
+    // are the reviewed drift boundary; never copy the object key into manifests.
+    old_object_key: null,
     old_provenance: row.artifact_metadata,
     classification,
     selection,

@@ -11,6 +11,7 @@ import {
   canonicalMakesafeReportJob,
 } from "./index.ts";
 import {
+  canonicalCurrentWikiReportHashPayload,
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
   MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
   MAKESAFE_REPORT_CONTRACT_VERSION,
@@ -94,8 +95,55 @@ function currentReportJob() {
 }
 
 async function inputHash(job: Record<string, unknown>): Promise<string> {
-  return `sha256:${await sha(new TextEncoder().encode(canonicalSesJson(job)))}`;
+  return `sha256:${await sha(new TextEncoder().encode(canonicalSesJson(
+    canonicalCurrentWikiReportHashPayload(job),
+  )))}`;
 }
+
+Deno.test("current-wiki input hash binds photo bytes, not temp paths", async () => {
+  const contentHash = "a".repeat(64);
+  const photoEvidence = {
+    source_revision: "fixture-source-1",
+    completeness_verified: true,
+    source_count: 1,
+    applicable_count: 1,
+    selected_count: 1,
+    applicable_ids: ["photo-1"],
+    selected_ids: ["photo-1"],
+    excluded: [],
+    rejected: [],
+  };
+  const base = {
+    ...currentReportJob(),
+    photo_evidence: photoEvidence,
+  };
+  const reviewed = {
+    ...base,
+    photos: [{
+      evidence_id: "photo-1",
+      caption: "Completion evidence",
+      content_sha256: contentHash,
+      file: "/private/tmp/review/photo-1.jpg",
+    }],
+  };
+  const apply = {
+    ...base,
+    photos: [{
+      evidence_id: "photo-1",
+      caption: "Completion evidence",
+      content_sha256: contentHash,
+      file: "/private/tmp/apply/photo-1.jpg",
+    }],
+  };
+  assertEquals(await inputHash(reviewed), await inputHash(apply));
+  const changedBytes = {
+    ...apply,
+    photos: [{ ...apply.photos[0], content_sha256: "b".repeat(64) }],
+  };
+  if (await inputHash(reviewed) === await inputHash(changedBytes)) {
+    throw new Error("photo content SHA-256 must move the report input hash");
+  }
+});
 
 function attachClient(
   jobNumber: string,

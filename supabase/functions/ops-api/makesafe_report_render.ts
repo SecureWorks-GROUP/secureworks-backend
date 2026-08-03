@@ -52,7 +52,10 @@ export interface MakesafeReportPhoto {
   bytesBase64?: string;
   contentType?: string;
   url?: string;
+  file?: string;
+  evidence_id?: string;
   caption?: string;
+  content_sha256?: string;
 }
 
 export interface MakesafeReportJob {
@@ -71,6 +74,33 @@ export interface MakesafeReportJob {
   follow_up_required?: string;
   photos?: MakesafeReportPhoto[];
   photo_limit?: number;
+}
+
+/**
+ * Stable provenance input for the authoritative current-wiki renderer.
+ *
+ * Local file paths are transport details and differ between the reviewed
+ * dry-run and apply render. Photo identity is instead bound to the ordered
+ * evidence id, client-facing caption, and the exact source bytes.
+ */
+export function canonicalCurrentWikiReportHashPayload(
+  supplied: Record<string, unknown>,
+): Record<string, unknown> {
+  const photos = Array.isArray(supplied.photos) ? supplied.photos : [];
+  return {
+    ...supplied,
+    photos: photos.map((photo: unknown) => {
+      const value = photo && typeof photo === "object"
+        ? photo as Record<string, unknown>
+        : {};
+      return {
+        evidence_id: String(value.evidence_id || "").trim(),
+        caption: String(value.caption || "").trim(),
+        content_sha256: String(value.content_sha256 || "").trim()
+          .toLowerCase(),
+      };
+    }),
+  };
 }
 
 export class CommercialContentError extends Error {

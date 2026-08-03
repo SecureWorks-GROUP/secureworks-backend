@@ -2,6 +2,7 @@
 import {
   assert,
   assertEquals,
+  assertNotEquals,
   assertRejects,
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
@@ -9,11 +10,30 @@ import {
   bytesToBase64,
   changedDependencyPaths,
   commandOutputWithTimeout,
+  CURRENT_WIKI_RENDER_ENV,
+  currentWikiRendererCommand,
   parseOptions,
   parseRemoteMainRevision,
   reviewedWikiRepoPath,
 } from "./ses-curated-docket-sweep-v1.ts";
 import { SweepRefusal } from "./ses-curated-docket-sweep-v1-core.ts";
+import { canonicalSesJson } from "../supabase/functions/ops-api/ses_docket_envelope.ts";
+import { canonicalCurrentWikiReportHashPayload } from "../supabase/functions/ops-api/makesafe_report_render.ts";
+
+async function sha256(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new Uint8Array(bytes).buffer,
+  );
+  return [...new Uint8Array(digest)]
+    .map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function stableInputHash(job: Record<string, unknown>): Promise<string> {
+  return await sha256(new TextEncoder().encode(canonicalSesJson(
+    canonicalCurrentWikiReportHashPayload(job),
+  )));
+}
 
 Deno.test("operator defaults to dry-run and an untracked manifest path", () => {
   const options = parseOptions([]);
@@ -88,4 +108,58 @@ Deno.test("current-wiki subprocess timeout is bounded per card", async () => {
     SweepRefusal,
     "per-card time limit",
   );
+});
+
+Deno.test("two temp-root renders keep identical input and PDF hashes", async () => {
+  assertEquals(CURRENT_WIKI_RENDER_ENV, { RL_invariant: "1" });
+  const first = await Deno.makeTempDir({ prefix: "review-render-" });
+  const second = await Deno.makeTempDir({ prefix: "apply-render-" });
+  try {
+    const renderer = `${first}/renderer.py`;
+    await Deno.writeTextFile(
+      renderer,
+      `import argparse, hashlib, json, os\nfrom pathlib import Path\nfrom reportlab.pdfgen import canvas\nap = argparse.ArgumentParser()\nap.add_argument("job")\nap.add_argument("--out", required=True)\nargs = ap.parse_args()\nassert os.environ.get("RL_invariant") == "1"\njob = json.loads(Path(args.job).read_text())\nphoto = Path(job["photos"][0]["file"])\nphoto_bytes = photo.read_bytes()\nassert hashlib.sha256(photo_bytes).hexdigest() == job["photos"][0]["content_sha256"]\nout = Path(args.out)\nout.mkdir(parents=True, exist_ok=True)\nc = canvas.Canvas(str(out / "report.pdf"))\nc.drawString(72, 720, job["ref"] + " | " + job["photos"][0]["content_sha256"])\nc.save()\n`,
+    );
+    const photoBytes = new TextEncoder().encode("privacy-safe-photo-fixture");
+    const contentHash = await sha256(photoBytes);
+    const jobs = [first, second].map((root) => ({
+      ref: "REF-001",
+      photos: [{
+        evidence_id: "photo-1",
+        caption: "Completion evidence",
+        content_sha256: contentHash,
+        file: `${root}/photo-1.jpg`,
+      }],
+    }));
+    await Promise.all(
+      jobs.map((job) => Deno.writeFile(job.photos[0].file, photoBytes)),
+    );
+    assertEquals(
+      await stableInputHash(jobs[0]),
+      await stableInputHash(jobs[1]),
+    );
+
+    const pdfHashes: string[] = [];
+    for (let index = 0; index < jobs.length; index++) {
+      const root = index === 0 ? first : second;
+      const input = `${root}/job.json`;
+      const out = `${root}/out`;
+      await Deno.writeTextFile(input, JSON.stringify(jobs[index]));
+      const result = await currentWikiRendererCommand(renderer, input, out)
+        .output();
+      assert(result.success, new TextDecoder().decode(result.stderr));
+      pdfHashes.push(await sha256(await Deno.readFile(`${out}/report.pdf`)));
+    }
+    assertEquals(pdfHashes[0], pdfHashes[1]);
+
+    const changed = structuredClone(jobs[1]);
+    changed.photos[0].content_sha256 = "b".repeat(64);
+    assertNotEquals(
+      await stableInputHash(jobs[0]),
+      await stableInputHash(changed),
+    );
+  } finally {
+    await Deno.remove(first, { recursive: true });
+    await Deno.remove(second, { recursive: true });
+  }
 });

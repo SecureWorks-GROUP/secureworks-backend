@@ -48,6 +48,12 @@ served docket PDF.
   before attachment. The guarded current-wiki rerender path stamps trusted
   contract/hash/cycle provenance while preserving typed `makesafe_report`, the
   report-type-job refusal and existing visibility defaults.
+- The reviewed current-wiki sweep manifest is privacy-safe: it records the
+  reviewed revision and artifact hash, but never carries a storage object key.
+  Its rerender input binds each photo in order by `evidence_id`, `caption` and
+  the source-byte SHA-256; the renderer runs with `RL_invariant=1`, and the
+  attach boundary hashes the same canonical descriptor payload. Apply therefore
+  rejects cross-temp-root paths or any other reviewed-input drift.
 - The TypeScript renderer now ports the current curated contract: embedded
   SecureWorks logo, no billing row, trade-count-only Crew, four required prose
   sections, commercial-content refusal and one large ordered photo per page.
@@ -121,6 +127,9 @@ Focused Deno tests prove:
   the repository's existing jsPDF `/ID` normalisation;
 - the persisted docket uses the exact recovered curated PDF bytes and records
   their provenance.
+- The sweep's dry-run/apply contract also verifies the ordered photo descriptors,
+  source-byte hashes and `RL_invariant=1`; object paths remain local transport
+  details and are excluded from the reviewed manifest.
 
 Fresh focused result: 147 passed, 0 failed, 1 permission-gated subprocess test
 ignored. The subprocess was then run with `--allow-run`: 4 passed, 0 failed,
