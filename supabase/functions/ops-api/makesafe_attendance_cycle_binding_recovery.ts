@@ -11,6 +11,56 @@ export const ROOF_CYCLE_BINDING_RECOVERY_JOB_NUMBERS = [
 const AUTHORIZED_JOB_NUMBERS = new Set<string>(
   ROOF_CYCLE_BINDING_RECOVERY_JOB_NUMBERS,
 );
+
+type RoofCycleBindingPortalVerdict = {
+  observedAt: string;
+  submittedAndLocked: boolean;
+  verdict: "submitted_locked" | "unfinished_unlocked";
+  evidenceSha256: `sha256:${string}`;
+};
+
+// Sealed from the 2026-08-03 headless browser receipts reviewed by FirstMate.
+// This one-time recovery never accepts a caller-supplied override: an unfinished
+// form stays unbound until a separately reviewed receipt updates this policy.
+const ROOF_CYCLE_BINDING_PORTAL_VERDICTS: Readonly<
+  Record<string, RoofCycleBindingPortalVerdict>
+> = Object.freeze({
+  "SWMS-261079": Object.freeze({
+    observedAt: "2026-08-03T14:20:01+08:00",
+    submittedAndLocked: true,
+    verdict: "submitted_locked",
+    evidenceSha256:
+      "sha256:878059f52ff1ebb8cca31eaa7729a6815cca8f1f86c5492f4602c44e69c4ac01",
+  }),
+  "SWMS-261113": Object.freeze({
+    observedAt: "2026-08-03T21:19:07+08:00",
+    submittedAndLocked: false,
+    verdict: "unfinished_unlocked",
+    evidenceSha256:
+      "sha256:ad0a1ede89d8a71f351f3cf236a9b4eadfc66397679a08776f3be9ba19ae0aaa",
+  }),
+  "SWMS-261114": Object.freeze({
+    observedAt: "2026-08-03T21:19:17+08:00",
+    submittedAndLocked: true,
+    verdict: "submitted_locked",
+    evidenceSha256:
+      "sha256:ad0a1ede89d8a71f351f3cf236a9b4eadfc66397679a08776f3be9ba19ae0aaa",
+  }),
+  "SWMS-261116": Object.freeze({
+    observedAt: "2026-08-03T21:19:28+08:00",
+    submittedAndLocked: true,
+    verdict: "submitted_locked",
+    evidenceSha256:
+      "sha256:ad0a1ede89d8a71f351f3cf236a9b4eadfc66397679a08776f3be9ba19ae0aaa",
+  }),
+  "SWMS-261123": Object.freeze({
+    observedAt: "2026-08-03T21:19:38+08:00",
+    submittedAndLocked: false,
+    verdict: "unfinished_unlocked",
+    evidenceSha256:
+      "sha256:ad0a1ede89d8a71f351f3cf236a9b4eadfc66397679a08776f3be9ba19ae0aaa",
+  }),
+});
 export class MakesafeAttendanceCycleBindingRecoveryError extends Error {
   readonly status: number;
   readonly body?: unknown;
@@ -97,6 +147,14 @@ export interface RoofCycleBindingRecoveryPlanRow {
     detail_builder_reference: string | null;
     canonical_builder_reference: string | null;
     immutable_attendance_cycle_ids: string[];
+    portal_evidence: {
+      observed_at: string | null;
+      submitted_and_locked: boolean;
+      verdict:
+        | RoofCycleBindingPortalVerdict["verdict"]
+        | "missing_authoritative_verdict";
+      evidence_sha256: string | null;
+    };
     operational_evidence_counts:
       RoofCycleBindingRecoverySnapshot["evidenceCounts"];
   };
@@ -172,6 +230,7 @@ function snapshotFingerprint(
 
 function exactFacts(
   snapshot: RoofCycleBindingRecoverySnapshot,
+  jobNumber: string,
 ): RoofCycleBindingRecoveryPlanRow["exact_facts"] {
   const directCases = snapshot.job
     ? snapshot.intakeCases.filter((intakeCase) =>
@@ -183,6 +242,7 @@ function exactFacts(
     ? directCases[0].builderWorkOrder ||
       directCases[0].builderPurchaseOrder || directCases[0].externalRef || null
     : null;
+  const portalVerdict = ROOF_CYCLE_BINDING_PORTAL_VERDICTS[jobNumber];
   return {
     job_status: snapshot.job?.status || null,
     job_family: snapshot.job?.family || null,
@@ -191,6 +251,19 @@ function exactFacts(
     canonical_builder_reference: canonicalBuilderReference,
     immutable_attendance_cycle_ids: snapshot.cycles.map((cycle) => cycle.id)
       .sort(),
+    portal_evidence: portalVerdict
+      ? {
+        observed_at: portalVerdict.observedAt,
+        submitted_and_locked: portalVerdict.submittedAndLocked,
+        verdict: portalVerdict.verdict,
+        evidence_sha256: portalVerdict.evidenceSha256,
+      }
+      : {
+        observed_at: null,
+        submitted_and_locked: false,
+        verdict: "missing_authoritative_verdict",
+        evidence_sha256: null,
+      },
     operational_evidence_counts: { ...snapshot.evidenceCounts },
   };
 }
@@ -212,7 +285,7 @@ function refused(
     current_attendance_cycle_id: snapshot.detail?.attendanceCycleId || null,
     intake_case_id: null,
     confidence: "low",
-    exact_facts: exactFacts(snapshot),
+    exact_facts: exactFacts(snapshot, jobNumber),
     human_decision: {
       required: true,
       action: "resolve_refusal",
@@ -254,6 +327,23 @@ function planSnapshot(
       snapshot,
       "job_terminal",
       "A terminal job cannot receive a newly materialized attendance identity.",
+    );
+  }
+  const portalVerdict = ROOF_CYCLE_BINDING_PORTAL_VERDICTS[jobNumber];
+  if (!portalVerdict) {
+    return refused(
+      jobNumber,
+      snapshot,
+      "portal_authoritative_verdict_missing",
+      "No sealed authoritative portal verdict exists for this recovery card.",
+    );
+  }
+  if (!portalVerdict.submittedAndLocked) {
+    return refused(
+      jobNumber,
+      snapshot,
+      "portal_not_submitted_locked",
+      "Authoritative portal evidence shows the roof report is unfinished and unlocked; preserve the unbound cycle until the trade submits and locks the form.",
     );
   }
   if (!detail || detail.jobId !== job.id) {
@@ -339,7 +429,7 @@ function planSnapshot(
       current_attendance_cycle_id: detail.attendanceCycleId,
       intake_case_id: intakeCase.id,
       confidence: "high",
-      exact_facts: exactFacts(snapshot),
+      exact_facts: exactFacts(snapshot, jobNumber),
       human_decision: {
         required: false,
         action: "no_action",
@@ -378,7 +468,7 @@ function planSnapshot(
       current_attendance_cycle_id: null,
       intake_case_id: intakeCase.id,
       confidence: "high",
-      exact_facts: exactFacts(snapshot),
+      exact_facts: exactFacts(snapshot, jobNumber),
       human_decision: {
         required: true,
         action: "apply_exact_cycle_binding",
@@ -413,7 +503,7 @@ function planSnapshot(
     current_attendance_cycle_id: null,
     intake_case_id: intakeCase.id,
     confidence: "high",
-    exact_facts: exactFacts(snapshot),
+    exact_facts: exactFacts(snapshot, jobNumber),
     human_decision: {
       required: true,
       action: "apply_exact_cycle_binding",
@@ -454,6 +544,7 @@ async function planToken(
       disposition: row.disposition,
       reason_code: row.reason_code,
       snapshot_fingerprint: row.snapshot_fingerprint,
+      portal_evidence: row.exact_facts.portal_evidence,
     })),
   }));
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));

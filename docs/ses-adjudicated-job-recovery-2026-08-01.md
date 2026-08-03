@@ -37,8 +37,12 @@ approved for the roof attendance-cycle defect. It requires an explicit dry-run
 plan token before a single-card apply. Apply is idempotent and skips on drift;
 it refuses non-null or out-of-set pointers, multiple or mismatched candidates,
 missing or ambiguous canonical intake authority, terminal cards, and
-evidence-bearing missing-cycle state. It never invents a cycle: cycle one may
-be materialized only from the persisted initial counter, canonical mint
+evidence-bearing missing-cycle state. The sealed 2026-08-03 portal receipts are
+also a hard gate: only SWMS-261079, SWMS-261114, and SWMS-261116 are proved
+submitted and locked. SWMS-261113 and SWMS-261123 refuse with
+`portal_not_submitted_locked` and remain unbound pending trade completion. The
+caller cannot override those verdicts. The action never invents a cycle: cycle
+one may be materialized only from the persisted initial counter, canonical mint
 authority, and zero operational evidence. Production recovery remains outside
 this document's execution scope.
 
