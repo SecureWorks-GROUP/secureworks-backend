@@ -1140,26 +1140,10 @@ tenant scoping, and client follow-up, lives in
 `_managerBoardVerticals`, and `_resolveTradeJobFeedLens` in `ops-api/index.ts`
 aligned with that document and their regression tests.
 
-`trade_job_detail` has no per-role field masking and never should: past
-`assertAssignedOrMakesafeAccess` (all-or-nothing) an assigned installer and a
-dispatcher get an identical payload, and the client is service-role so RLS is
-not in play. When a trade "cannot see" something, the cause is the payload shape
-or the data, not the viewer — diagnose it there. Two measured examples, both
-fixed 2026-08-03: the work order came only from the sparse `work_orders` table
-(33 jobs in all of production) capped at `.limit(1)`, and scope was reachable
-only through the raw `scope_json` blob. `documents` is now filtered server-side
-to `visible_to_trades = true`; it previously shipped every row, which put quote
-PDFs (pricing and margin) on installers' phones.
-
-**`job_assignments.role` is not the lead signal and must never become one.** It
-is `default 'lead_installer'`, so production carries 112 of 133 sampled rows
-claiming that role and 19 of 24 jobs claiming two or more. The designated lead
-is `job_assignments.is_lead`, unique per job via `uq_job_assignments_one_lead`,
-deliberately never backfilled (no lead beats a guessed lead). `set_job_lead`
-reuses `assertAssignmentMutationAuthz` — the same authority as assigning — so an
-ordinary installer cannot name a lead, including on their own row. Contract and
-the production measurement behind every number here:
-`docs/evidence/trade-crew-visibility-lead-2026-08-03.md`.
+The 2026-08-03 trade crew/detail payload, named-lead contract, visibility
+narrowing, diagnosis, and deployment caveats are owned by
+`docs/evidence/trade-crew-visibility-lead-2026-08-03.md`; consult it before
+changing `trade_job_detail`, `set_job_lead`, or the lead/schema gate.
 
 ## Every SES Measurement Names Its Denominator And Its Generation
 
