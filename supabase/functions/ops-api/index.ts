@@ -649,6 +649,8 @@ import {
 } from './makesafe_instruction_mint_gate.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import {
+  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
   type MakesafeReportJob,
 } from './makesafe_report_render.ts'
 import { canonicalSesJson } from './ses_docket_envelope.ts'
@@ -34437,6 +34439,7 @@ async function assertBertramProtectedReportRepairCas(
 }
 
 async function attachCurrentWikiCuratedReport(client: any, body: any) {
+  throw new ApiError('current-wiki report attachment is retired', 410)
   const jobId = String(body.job_id || body.jobId || '').trim()
   if (!jobId) throw new ApiError('job_id required', 400)
   if (

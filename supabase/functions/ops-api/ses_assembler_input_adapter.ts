@@ -2083,7 +2083,11 @@ export function selectPhysicalReportProofForCycle(
   currentCycleId: string,
   reportDocumentId?: string,
 ): SesPhysicalReportProof | null {
-  return physicalReportSourceForCycle(snapshot, currentCycleId, reportDocumentId)
+  return physicalReportSourceForCycle(
+    snapshot,
+    currentCycleId,
+    reportDocumentId,
+  )
     ?.proof || null;
 }
 

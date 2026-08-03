@@ -2384,7 +2384,9 @@ Deno.test(
       );
       const photoFailureCodes = blockerCodes(photoFailure.results[0]);
       assert(
-        photoFailureCodes.includes("sibling_evidence_photo_artifact_unrecoverable") ||
+        photoFailureCodes.includes(
+          "sibling_evidence_photo_artifact_unrecoverable",
+        ) ||
           photoFailureCodes.includes("sibling_evidence_artifact_unrecoverable"),
       );
     } finally {

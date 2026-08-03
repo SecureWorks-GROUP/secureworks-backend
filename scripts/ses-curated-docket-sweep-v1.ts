@@ -175,52 +175,6 @@ export async function enumerateRows(): Promise<SweepRow[]> {
   }));
 }
 
-async function recordProtectedServedRawProof(rows: SweepRow[]): Promise<void> {
-  for (const row of rows) {
-    if (row.job_number !== MUTATION_EXCLUDED_JOB_NUMBER) continue;
-    const metadata = { ...(row.artifact_metadata || {}) };
-    try {
-      const pack = await opsAction("get_ses_reviewable_pack", {
-        docket_revision_id: row.docket_revision_id,
-      });
-      const artifact = (pack.artifacts || []).find((item: any) =>
-        item.role === "supporting_report_pdf"
-      );
-      if (!artifact?.signed_url) {
-        throw new Error("served report URL unavailable");
-      }
-      const response = await fetch(artifact.signed_url, {
-        signal: AbortSignal.timeout(READ_TIMEOUT_MS),
-      });
-      if (!response.ok) {
-        throw new Error(`served report read HTTP ${response.status}`);
-      }
-      const servedHash = await sha256(
-        new Uint8Array(await response.arrayBuffer()),
-      );
-      Object.assign(metadata, {
-        protected_served_raw_sha256: servedHash,
-        protected_candidate_raw_sha256: null,
-        protected_raw_bytes_equal: null,
-        protected_equality_decision:
-          "excluded_before_touch_no_identical_candidate_proven",
-      });
-    } catch (error) {
-      Object.assign(metadata, {
-        protected_served_raw_sha256: null,
-        protected_candidate_raw_sha256: null,
-        protected_raw_bytes_equal: null,
-        protected_equality_decision:
-          "excluded_before_touch_raw_proof_unavailable",
-        protected_proof_error: error instanceof Error
-          ? error.message
-          : String(error),
-      });
-    }
-    row.artifact_metadata = metadata;
-  }
-}
-
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }

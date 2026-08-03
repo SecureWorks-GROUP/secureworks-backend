@@ -2032,10 +2032,11 @@ async function prepareOne(
         const bundledProof = deps.resolveBundledPhysicalReportProof
           ? await deps.resolveBundledPhysicalReportProof(input)
           : null;
-        const resolved = bundledProof && validPhysicalReportProof(bundledProof) &&
+        const resolved =
+          bundledProof && validPhysicalReportProof(bundledProof) &&
             deps.renderBundledPhysicalReport
-          ? await deps.renderBundledPhysicalReport(input, bundledProof)
-          : null;
+            ? await deps.renderBundledPhysicalReport(input, bundledProof)
+            : null;
         const resolvedRawHash = resolved
           ? await rawArtifactSha256(resolved.bytes)
           : null;
@@ -2056,9 +2057,9 @@ async function prepareOne(
           const itemBlocker = addBlocker(
             blockers,
             blocked(
-                "sibling_evidence_artifact_unrecoverable",
-                `Bundle ${acceptedBundle.bundle_id} is valid, but sibling ${acceptedBundle.sibling.job_number}'s independently proved report artifact could not be recovered.`,
-                "Restore the exact claimed sibling report document and its durable proof; do not substitute an unclaimed file.",
+              "sibling_evidence_artifact_unrecoverable",
+              `Bundle ${acceptedBundle.bundle_id} is valid, but sibling ${acceptedBundle.sibling.job_number}'s independently proved report artifact could not be recovered.`,
+              "Restore the exact claimed sibling report document and its durable proof; do not substitute an unclaimed file.",
               [
                 "canonical-input-envelope",
                 "sibling-bundle-binding-ledger",
