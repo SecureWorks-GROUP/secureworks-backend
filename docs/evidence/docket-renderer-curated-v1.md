@@ -40,14 +40,14 @@ served docket PDF.
   active curated contract, renderer version and render hash in
   `data_snapshot_json`. Accepted renderer provenance is mechanically pinned to
   secureworks-wiki main revision
-  `b20d9ec3c5ac5c82bb463aef6ff52bfe63fc15ce`, for either its authoritative
-  Python output or the paired TypeScript port.
+  `8348325bee364b2ddeddd7d853eb28d3178cde5e` and the reviewed authoritative
+  renderer dependency hash recorded by the current docket sweep.
 - `physicalReportRenderJob` now always raises `ses_curated_report_missing`; it
   cannot translate raw checklist fields into report prose.
-- `makesafe_render_report` remains the explicit structured curated-input action.
-  Its internal attach stamps the trusted contract/hash/cycle provenance while
-  preserving typed `makesafe_report`, the report-type-job refusal and existing
-  visibility defaults.
+- `makesafe_render_report` is retired for current curated evidence and refuses
+  before attachment. The guarded current-wiki rerender path stamps trusted
+  contract/hash/cycle provenance while preserving typed `makesafe_report`, the
+  report-type-job refusal and existing visibility defaults.
 - The TypeScript renderer now ports the current curated contract: embedded
   SecureWorks logo, no billing row, trade-count-only Crew, four required prose
   sections, commercial-content refusal and one large ordered photo per page.
@@ -144,14 +144,15 @@ surface. No unrelated baseline test was changed for this task.
 The Captain authorised this bounded production correction after the local
 implementation evidence was established. It must run in this order:
 
-1. merge and deploy only the corrected `ops-api` function;
+1. merge and deploy only the corrected `ops-api` function and sweep code;
 2. render AJBR-70271 and the selected Tuart Hill card from current
    secureworks-wiki main using its authoritative Python renderer, each with the
    already curated four-section payload and deliberate eight-photo selection,
    then attach the typed, cycle-bound artifact with the exact pinned source
    revision and hash provenance;
-3. invoke `prepare_ses_docket_revision` once per card with `dry_run:false` to
-   create a new append-only docket revision;
+3. run the reviewed `ses-curated-docket-sweep-v1.ts` manifest in explicit
+   apply mode; the operator invokes `prepare_ses_docket_revision` only for
+   cards selected by the reviewed dry-run manifest;
 4. perform read-only bucket fetch, PDF text/page/hash inspection and live
    review-page reads for both cards.
 

@@ -137,10 +137,11 @@ function attachClient(
           mutations.push(`update:${table}`);
           updates.push(values);
           if (table === "job_documents") {
-            rows.job_documents = (rows.job_documents as Record<string, unknown>[]).map((row) => ({
-              ...row,
-              ...values,
-            }));
+            rows.job_documents =
+              (rows.job_documents as Record<string, unknown>[]).map((row) => ({
+                ...row,
+                ...values,
+              }));
           }
           return query;
         },
@@ -158,8 +159,10 @@ Deno.test("current-wiki attach retries identical bytes without writes", async ()
   const reportInputHash = await inputHash(reportJob);
   const { client, mutations } = attachClient("SWMS-TEST", {
     report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-    report_renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-    report_renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+    report_renderer_source_revision:
+      MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+    report_renderer_script_sha256:
+      MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
     report_render_hash: rawHash,
     report_input_hash: reportInputHash,
     report_renderer_version:
@@ -201,21 +204,36 @@ Deno.test("identical current-wiki attachment repairs provenance once", async () 
     report_job: reportJob,
   };
   const first: any = await _attachCurrentWikiCuratedReportForTest(client, body);
-  const second: any = await _attachCurrentWikiCuratedReportForTest(client, body);
+  const second: any = await _attachCurrentWikiCuratedReportForTest(
+    client,
+    body,
+  );
   assertEquals(first.writes, 1);
   assertEquals(second.writes, 0);
   assertEquals(mutations, ["update:job_documents"]);
   const snapshot = updates[0].data_snapshot_json as Record<string, unknown>;
-  assertEquals(snapshot.report_contract_version, MAKESAFE_REPORT_CONTRACT_VERSION);
-  assertEquals(snapshot.report_renderer_version,
-    `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`);
+  assertEquals(
+    snapshot.report_contract_version,
+    MAKESAFE_REPORT_CONTRACT_VERSION,
+  );
+  assertEquals(
+    snapshot.report_renderer_version,
+    `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`,
+  );
   assertEquals(snapshot.report_render_hash, rawHash);
-  assertEquals(snapshot.report_renderer_source_revision,
-    MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION);
-  assertEquals(snapshot.report_renderer_script_sha256,
-    MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256);
+  assertEquals(
+    snapshot.report_renderer_source_revision,
+    MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+  );
+  assertEquals(
+    snapshot.report_renderer_script_sha256,
+    MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+  );
   assertEquals(snapshot.report_input_hash, await inputHash(reportJob));
-  assertEquals(snapshot.evidence_source, "current_cycle_curated_makesafe_report");
+  assertEquals(
+    snapshot.evidence_source,
+    "current_cycle_curated_makesafe_report",
+  );
   assertEquals(snapshot.source_document_id, "document-fixture");
 });
 
