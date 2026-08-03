@@ -20,10 +20,19 @@ const ROOF_CASE_ID = "00000000-0000-4000-8000-000000000911";
 const ROOF_MINT_ID = "00000000-0000-4000-8000-000000000912";
 
 // ── Minimal chainable Supabase mock ─────────────────────────────────────────
+type AttendanceCycleFixture = {
+  id?: string;
+  job_id?: string;
+  cycle_number?: number;
+  attendance_cycle_id?: string | null;
+  cycle_attribution?: string | null;
+  [key: string]: unknown;
+};
+
 type Store = {
   details?: Record<string, any>; // makesafe_job_details by job_id
   jobs?: Record<string, any>; // jobs by id (BE-2 persisted-family fallback read)
-  cycles?: any[];
+  cycles?: AttendanceCycleFixture[];
   inserts?: Array<{ table: string; row: any }>;
   updates?: Array<{ table: string; row: any; job_id?: any }>;
 };
