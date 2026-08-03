@@ -6,18 +6,37 @@
 // This module renders bytes only. It does NOT upload, send, authorise, or touch
 // any live system -- the ops-api action that calls it owns attachment + state.
 //
-// Layout (mirrors the Python):
+// Layout is a mechanically pinned TypeScript port of the curated Python report
+// contract. Keep changes paired with the authoritative reporting skill/tests.
+//
+// Layout:
 //   - orange top band (#F15A29)
 //   - white header band with 'Make Safe Completion Report' + '<ref> | <address>'
-//   - KV table (Job reference, Property, Site contact, Attendance, Crew,
-//     Billing time noted)
+//   - SecureWorks Group logo
+//   - KV table (Job reference, Property, Site contact, Attendance, trade count)
 //   - four prose sections (Work Order Scope, Site Findings, Works Completed,
 //     Materials and Equipment) with doc.splitTextToSize wrapping
-//   - compact photo evidence grid (default/hard cap 8)
+//   - one large deliberately ordered evidence photo per page
 //
 // Colours: orange #F15A29, dark #293C46, mid #4C6A7C, light #F0F4F7.
 
+import { MAKESAFE_REPORT_LOGO_DATA_URL } from "./makesafe_report_logo.ts";
+
 // ── Pure helpers (exported for unit tests; no jsPDF / no network) ──
+
+export const MAKESAFE_REPORT_CONTRACT_VERSION =
+  "secureworks.makesafe-report/curated-2026-08-03";
+export const MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION =
+  "b20d9ec3c5ac5c82bb463aef6ff52bfe63fc15ce";
+export const MAKESAFE_REPORT_RENDERER_VERSION =
+  `secureworks.ops-api-jspdf/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`;
+export const MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION =
+  `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`;
+
+export function isCurrentCuratedRendererVersion(value: unknown): boolean {
+  return value === MAKESAFE_REPORT_RENDERER_VERSION ||
+    value === MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION;
+}
 
 // Photo input the renderer accepts, in preference order:
 //   1. `bytes` -- raw image bytes. jsPDF accepts a Uint8Array directly, so a
@@ -49,6 +68,78 @@ export interface MakesafeReportJob {
   follow_up_required?: string;
   photos?: MakesafeReportPhoto[];
   photo_limit?: number;
+}
+
+export class CommercialContentError extends Error {
+  fields: string[];
+
+  constructor(fields: string[]) {
+    super(
+      `commercial content is not allowed in client report field(s): ${
+        fields.join(", ")
+      }`,
+    );
+    this.name = "CommercialContentError";
+    this.fields = fields;
+  }
+}
+
+const COMMERCIAL_CONTENT_RE =
+  /(?:\$\s*\d|\b(?:gst|invoice|invoiced|rate|margin|cost|charge|charged|billed|billing)\b)/i;
+const BILLING_HOURS_RE =
+  /\b\d+(?:\.\d+)?\s*(?:trades?|crew|labou?r)\b[\s\S]{0,40}\b\d+(?:\.\d+)?\s*hours?\b|\b\d+(?:\.\d+)?\s*hours?\b[\s\S]{0,40}\b\d+(?:\.\d+)?\s*(?:trades?|crew|labou?r)\b/i;
+
+const CURATED_TEXT_FIELDS = [
+  "ref",
+  "address",
+  "contact",
+  "date",
+  "arrival",
+  "crew",
+  "scope",
+  "findings",
+  "works",
+  "materials",
+] as const;
+
+/** Mechanically pinned port of report_commercial_content.py. */
+export function findCommercialContent(job: MakesafeReportJob): string[] {
+  const failures: string[] = [];
+  for (const field of CURATED_TEXT_FIELDS) {
+    const value = job[field];
+    if (
+      typeof value === "string" &&
+      (COMMERCIAL_CONTENT_RE.test(value) || BILLING_HOURS_RE.test(value))
+    ) {
+      failures.push(field);
+    }
+  }
+  for (const [index, photo] of (job.photos || []).entries()) {
+    const caption = photo?.caption;
+    if (
+      typeof caption === "string" &&
+      (COMMERCIAL_CONTENT_RE.test(caption) || BILLING_HOURS_RE.test(caption))
+    ) {
+      failures.push(`photos[${index}].caption`);
+    }
+  }
+  return failures;
+}
+
+export function assertCuratedReportPayload(job: MakesafeReportJob): void {
+  const missing = (["scope", "findings", "works", "materials"] as const)
+    .filter((field) => !String(job[field] || "").trim());
+  if (missing.length) {
+    throw new Error(
+      `curated make-safe report prose required: ${missing.join(", ")}`,
+    );
+  }
+  const crew = String(job.crew || "").trim();
+  if (crew && !/^\d+(?:\.\d+)?\s+trades?$/i.test(crew)) {
+    throw new Error("curated make-safe report crew must be a trade count only");
+  }
+  const commercial = findCommercialContent(job);
+  if (commercial.length) throw new CommercialContentError(commercial);
 }
 
 // slug() mirrors the Python: collapse any run of non-alphanumerics to '-', trim
@@ -141,7 +232,7 @@ const PAGE_H = 297;
 const MARGIN = 14;
 const CONTENT_W = PAGE_W - 2 * MARGIN;
 const DEFAULT_REPORT_PHOTO_LIMIT = 8;
-const MAX_REPORT_PHOTO_LIMIT = 8;
+const MAX_REPORT_PHOTO_LIMIT = 15;
 
 const REPORT_TITLE = "Make Safe Completion Report";
 
@@ -218,12 +309,14 @@ export async function renderMakesafeReportPdf(
   if (!job?.address) {
     throw new Error("renderMakesafeReportPdf: job.address required");
   }
+  assertCuratedReportPayload(job);
 
   const fileName = makesafeReportFileName(job.ref, job.address);
   const hash = await renderHash(job);
   const subtitle = sanitiseText(`${job.ref} | ${job.address}`).slice(0, 128);
 
   // Lazy import (matches completion-pack/index.ts:604).
+  // deno-lint-ignore no-import-prefix
   const { jsPDF } = await import("https://esm.sh/jspdf@2.5.1");
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
 
@@ -245,6 +338,21 @@ export async function renderMakesafeReportPdf(
     doc.setFont("helvetica", "normal");
     doc.setFontSize(9);
     doc.text(subtitle, MARGIN, 30);
+    try {
+      doc.addImage(
+        MAKESAFE_REPORT_LOGO_DATA_URL,
+        "PNG",
+        PAGE_W - 78,
+        12,
+        64,
+        18,
+        undefined,
+        "FAST",
+      );
+    } catch {
+      // The embedded, pinned asset is validated by tests. Keep text branding in
+      // the footer as the deterministic fallback if jsPDF rejects it.
+    }
     doc.setDrawColor(...RULE);
     doc.setLineWidth(0.3);
     doc.line(MARGIN, 41, PAGE_W - MARGIN, 41);
@@ -284,7 +392,6 @@ export async function renderMakesafeReportPdf(
     ["Site contact", String(job.contact || "")],
     ["Attendance", attendance],
     ["Crew", String(job.crew || "")],
-    ["Billing time noted", String(job.billing_note || "")],
   ];
   for (const [k, v] of rows) {
     const valueLines: string[] = doc.splitTextToSize(
@@ -345,28 +452,24 @@ export async function renderMakesafeReportPdf(
     ["Site Findings", job.findings || ""],
     ["Works Completed", job.works || ""],
     ["Materials and Equipment", job.materials || ""],
-    [
-      "Access and Follow-up",
-      [job.access_issues, job.follow_up_required].filter(Boolean).join("\n"),
-    ],
   ];
   for (const [title, text] of proseSections) {
     y = section(title, 10);
     y = para(text);
   }
 
-  // Photo evidence: two large photos per page. Four-up pages made the review
-  // pack compact, but the photos were too small for builder/report review. The
-  // follow-up photo email still carries every approved JPEG; this report keeps
-  // the chosen evidence readable without returning to one-photo runaway packs.
+  // Photo evidence is intentionally large: one photo per page in the caller's
+  // curated order, matching the authoritative Python renderer.
   const limit = Number.isFinite(job.photo_limit as number)
     ? Math.max(0, Math.floor(job.photo_limit as number))
     : DEFAULT_REPORT_PHOTO_LIMIT;
   const resolved: MakesafeReportPhoto[] = [];
-  for (const p of (job.photos || []).slice(
-    0,
-    Math.min(limit, MAX_REPORT_PHOTO_LIMIT),
-  )) {
+  for (
+    const p of (job.photos || []).slice(
+      0,
+      Math.min(limit, MAX_REPORT_PHOTO_LIMIT),
+    )
+  ) {
     const r = await resolvePhotoBytes(p);
     if (r) resolved.push(r);
   }
@@ -382,89 +485,81 @@ export async function renderMakesafeReportPdf(
     );
     y += 5;
   } else {
-    const cols = 1;
-    const rows = 2;
-    const gap = 5;
     const cellW = CONTENT_W;
-    const cellH = 100;
-    const gridH = rows * cellH + gap;
-    let idx = 0;
-    while (idx < resolved.length) {
-      if (idx === 0) {
-        y = section("Photo Evidence", gridH + 4);
+    const cellH = 190;
+    for (const [zeroIndex, p] of resolved.entries()) {
+      const idx = zeroIndex + 1;
+      if (zeroIndex === 0) {
+        y = section("Photo Evidence", cellH + 4);
       } else {
         y = newPage();
-        y = section("Photo Evidence", gridH + 4);
+        y = section("Photo Evidence", cellH + 4);
       }
-      ensureSpace(gridH + 4);
-      const gridTop = y;
-      for (let slot = 0; slot < cols * rows && idx < resolved.length; slot++) {
-        const p = resolved[idx];
-        idx++;
-        const row = slot;
-        const cellX = MARGIN;
-        const cellY = gridTop + row * (cellH + gap);
-        const imageData = photoImageData(p);
-        doc.setDrawColor(...RULE);
-        doc.setFillColor(255, 255, 255);
-        doc.setLineWidth(0.2);
-        doc.rect(cellX, cellY, cellW, cellH, "FD");
-        if (imageData) {
-          try {
-            const fmt = (p.contentType || "").toLowerCase().includes("png")
-              ? "PNG"
-              : "JPEG";
-            const boxX = cellX + 3;
-            const boxY = cellY + 4;
-            const boxW = cellW - 6;
-            const boxH = cellH - 15;
-            const props = doc.getImageProperties(imageData) as {
-              width?: number;
-              height?: number;
-            };
-            const fit = aspectFitBox(
-              Number(props?.width || 0),
-              Number(props?.height || 0),
-              boxX,
-              boxY,
-              boxW,
-              boxH,
-            );
-            doc.addImage(
-              imageData,
-              fmt,
-              fit.x,
-              fit.y,
-              fit.w,
-              fit.h,
-              undefined,
-              "FAST",
-            );
-          } catch {
-            doc.setTextColor(...MID);
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(8);
-            doc.text(
-              `Photo evidence ${idx} (could not embed)`,
-              cellX + cellW / 2,
-              cellY + cellH / 2,
-              { align: "center" },
-            );
-          }
+      ensureSpace(cellH + 4);
+      const cellX = MARGIN;
+      const cellY = y;
+      const imageData = photoImageData(p);
+      doc.setDrawColor(...RULE);
+      doc.setFillColor(255, 255, 255);
+      doc.setLineWidth(0.2);
+      doc.rect(cellX, cellY, cellW, cellH, "FD");
+      if (imageData) {
+        try {
+          const fmt = (p.contentType || "").toLowerCase().includes("png")
+            ? "PNG"
+            : "JPEG";
+          const boxX = cellX + 3;
+          const boxY = cellY + 4;
+          const boxW = cellW - 6;
+          const boxH = cellH - 15;
+          const props = doc.getImageProperties(imageData) as {
+            width?: number;
+            height?: number;
+          };
+          const fit = aspectFitBox(
+            Number(props?.width || 0),
+            Number(props?.height || 0),
+            boxX,
+            boxY,
+            boxW,
+            boxH,
+          );
+          doc.addImage(
+            imageData,
+            fmt,
+            fit.x,
+            fit.y,
+            fit.w,
+            fit.h,
+            undefined,
+            "FAST",
+          );
+        } catch {
+          doc.setTextColor(...MID);
+          doc.setFont("helvetica", "normal");
+          doc.setFontSize(8);
+          doc.text(
+            `Photo evidence ${idx} (could not embed)`,
+            cellX + cellW / 2,
+            cellY + cellH / 2,
+            { align: "center" },
+          );
         }
-        doc.setTextColor(...MID);
-        doc.setFont("helvetica", "normal");
-        doc.setFontSize(8);
-        doc.text(
-          sanitiseText(p.caption || `Photo evidence ${idx}`),
-          cellX + cellW / 2,
-          cellY + cellH - 4,
-          {
-            align: "center",
-          },
-        );
       }
-      y = gridTop + gridH + 7;
+      doc.setTextColor(...MID);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+      doc.text(
+        sanitiseText(
+          `Photo evidence ${idx}${p.caption ? ` - ${p.caption}` : ""}`,
+        ),
+        cellX + cellW / 2,
+        cellY + cellH - 4,
+        {
+          align: "center",
+        },
+      );
+      y = cellY + cellH + 7;
     }
   }
 

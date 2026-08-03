@@ -629,7 +629,11 @@ import {
   InstructionMintConflictError as _InstructionMintConflictError,
 } from './makesafe_instruction_mint_gate.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
-import { renderMakesafeReportPdf } from './makesafe_report_render.ts'
+import {
+  MAKESAFE_REPORT_CONTRACT_VERSION,
+  MAKESAFE_REPORT_RENDERER_VERSION,
+  renderMakesafeReportPdf,
+} from './makesafe_report_render.ts'
 // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled template ->
 // our-letterhead PDF). Template/pricing/validation helpers are pure; the
 // renderer mirrors makesafe_report_render.ts.
@@ -31986,7 +31990,15 @@ async function attachEmailAttachmentToJob(
 // the `job-documents` bucket. Idempotent on (job_id, type, file_name): an
 // existing row of the same type+file_name is updated (version bumped) instead of
 // inserting a duplicate — mirrors the work-order attach pattern.
-async function attachMakesafeDocument(client: any, body: any) {
+async function attachMakesafeDocument(
+  client: any,
+  body: any,
+  trustedDocumentFacts: {
+    data_snapshot_json?: Record<string, unknown>
+    attendance_cycle_id?: string | null
+    cycle_attribution?: 'bound' | null
+  } = {},
+) {
   const jId = body.job_id || body.jobId
   const type = body.type
   // 'roof_report' is the SecureWorks own-letterhead roof inspection report. Unlike
@@ -32060,7 +32072,7 @@ async function attachMakesafeDocument(client: any, body: any) {
 
   // Idempotency: same job + type + file_name → update (bump version), else insert.
   const { data: existing } = await client.from('job_documents')
-    .select('id, version').eq('job_id', jId).eq('type', type).eq('file_name', fileName).limit(1)
+    .select('id, version, data_snapshot_json').eq('job_id', jId).eq('type', type).eq('file_name', fileName).limit(1)
 
   let docId: string
   if (existing && existing.length > 0) {
@@ -32069,6 +32081,16 @@ async function attachMakesafeDocument(client: any, body: any) {
       storage_url: publicUrl,
       visible_to_trades: isVisible,
       version: nextVersion,
+    }
+    if (trustedDocumentFacts.data_snapshot_json) {
+      updateData.data_snapshot_json = {
+        ...(existing[0].data_snapshot_json || {}),
+        ...trustedDocumentFacts.data_snapshot_json,
+      }
+    }
+    if (trustedDocumentFacts.attendance_cycle_id) {
+      updateData.attendance_cycle_id = trustedDocumentFacts.attendance_cycle_id
+      updateData.cycle_attribution = trustedDocumentFacts.cycle_attribution || 'bound'
     }
     if (isPdf) updateData.pdf_url = publicUrl
     const { error: updErr } = await client.from('job_documents')
@@ -32090,6 +32112,13 @@ async function attachMakesafeDocument(client: any, body: any) {
       // for type uuid". The human-readable operator label is still preserved in
       // the job_events / business_events JSON below for the audit trail.
       uploaded_by: ((v: any) => (typeof v === 'string' && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v) ? v : null))(body.uploaded_by || body.operator_email),
+    }
+    if (trustedDocumentFacts.data_snapshot_json) {
+      insertData.data_snapshot_json = trustedDocumentFacts.data_snapshot_json
+    }
+    if (trustedDocumentFacts.attendance_cycle_id) {
+      insertData.attendance_cycle_id = trustedDocumentFacts.attendance_cycle_id
+      insertData.cycle_attribution = trustedDocumentFacts.cycle_attribution || 'bound'
     }
     if (isPdf) insertData.pdf_url = publicUrl
     const { data: newDoc, error: insErr } = await client.from('job_documents')
@@ -33255,7 +33284,7 @@ async function makesafeRenderReport(client: any, body: any) {
   // Producing and attaching a SecureWorks makesafe_report PDF is a mistake —
   // refuse here rather than silently creating the wrong document.
   const { data: renderDetail } = await client.from('makesafe_job_details')
-    .select('report_type').eq('job_id', jobId).maybeSingle()
+    .select('report_type, attendance_cycle_id').eq('job_id', jobId).maybeSingle()
   if (renderDetail?.report_type) {
     return {
       success: false,
@@ -33281,6 +33310,14 @@ async function makesafeRenderReport(client: any, body: any) {
     file_name: rendered.fileName,
     pdf_base64: pdfBase64,
     uploaded_by: body.operator || 'makesafe reporting autopilot',
+  }, {
+    data_snapshot_json: {
+      report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
+      report_render_hash: rendered.renderHash,
+    },
+    attendance_cycle_id: renderDetail?.attendance_cycle_id || null,
+    cycle_attribution: renderDetail?.attendance_cycle_id ? 'bound' : null,
   })
 
   // Record the render hash onto the pack row (upsert a 'drafted' row if absent).

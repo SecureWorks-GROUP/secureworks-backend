@@ -27,6 +27,7 @@ import {
   currentCycleNumber,
   filterAssignmentsForCurrentCycle,
   filterMediaForCurrentCycle,
+  isEvidenceBoundToCurrentCycle,
   selectCurrentCycleReport,
 } from "./makesafe_cycle_evidence.ts";
 import { extractPortalLinks } from "./makesafe_portal_guard.ts";
@@ -40,8 +41,8 @@ import {
 } from "./ses_prepare_docket_revision.ts";
 import { createSesDocketPersistenceAdapter } from "./ses_docket_persistence.ts";
 import {
-  type MakesafeReportJob,
-  renderMakesafeReportPdf,
+  isCurrentCuratedRendererVersion,
+  MAKESAFE_REPORT_CONTRACT_VERSION,
 } from "./makesafe_report_render.ts";
 import {
   renderRoofReportPdf,
@@ -589,51 +590,6 @@ function structuredSourceFact(
     matches.map((value) => [canonicalFactValue(value), value]),
   );
   return distinct.size === 1 ? [...distinct.values()][0] : undefined;
-}
-
-function reportText(value: unknown): string {
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => {
-        if (typeof item === "string") return item.trim();
-        if (item && typeof item === "object") return JSON.stringify(item);
-        return String(item ?? "").trim();
-      })
-      .filter(Boolean)
-      .join(", ");
-  }
-  if (value && typeof value === "object") return JSON.stringify(value);
-  return text(value);
-}
-
-function tradeCountLabel(value: unknown): string {
-  const count = Number(value);
-  if (!Number.isFinite(count) || count <= 0) return "";
-  return `${count} ${count === 1 ? "trade" : "trades"}`;
-}
-
-function reportedLabourNote(labourHours: unknown, tradeCount: unknown): string {
-  const hours = Number(labourHours);
-  if (!Number.isFinite(hours) || hours <= 0) return "";
-  const trades = Number(tradeCount);
-  const tradeNote = Number.isFinite(trades) && trades > 0
-    ? ` and ${tradeCountLabel(trades)}`
-    : "";
-  return `Trade submission recorded ${hours} labour ${
-    hours === 1 ? "hour" : "hours"
-  }${tradeNote}.`;
-}
-
-function attendanceDate(value: unknown): string {
-  const candidate = text(value);
-  const match = candidate.match(/^(\d{4}-\d{2}-\d{2})/);
-  return match?.[1] || candidate;
-}
-
-function attendanceTime(value: unknown): string {
-  const candidate = text(value);
-  const match = candidate.match(/(?:T|\s)(\d{2}:\d{2})(?::\d{2})?/);
-  return match?.[1] || candidate;
 }
 
 function builderKey(snapshot: SesAssemblerLiveSnapshot): SesBuilderKey {
@@ -1191,92 +1147,15 @@ function swmsFactContext(
 }
 
 export function physicalReportRenderJob(
-  snapshot: SesAssemblerLiveSnapshot,
-  input: SesAssemblerInputV1,
-  photoArtifacts: SesPhotoArtifact[] = [],
-): MakesafeReportJob {
-  const report = record(input.cycle_facts.trade_report);
-  const checklist = record(report.checklist_json);
-  const assignment = snapshot.assignments[0] || {};
-  const attendance = firstText(
-    checklist.attendance_date,
-    checklist.arrival_time,
-    assignment.arrived_at,
-    report.submitted_at,
-    assignment.scheduled_date,
+  _snapshot: SesAssemblerLiveSnapshot,
+  _input: SesAssemblerInputV1,
+  _photoArtifacts: SesPhotoArtifact[] = [],
+): never {
+  throw new SesAssemblerAdapterError(
+    "ses_curated_report_missing",
+    "Raw trade-report fields are immutable evidence, not curated builder-report prose; recover an exact current-cycle curated makesafe_report artifact instead.",
+    409,
   );
-  const materials = firstText(
-    reportText(checklist.materials),
-    reportText(checklist.materials_used),
-  );
-  const accessIssues = Object.hasOwn(checklist, "access_issues")
-    ? reportText(checklist.access_issues) || "No access issues reported."
-    : "Access constraints: not recorded in trade submission.";
-  const followUpRequired = !Object.hasOwn(checklist, "follow_up_required")
-    ? "Follow-up status: not recorded in trade submission."
-    : checklist.follow_up_required === true
-    ? "Follow-up required."
-    : checklist.follow_up_required === false
-    ? "No further works required."
-    : reportText(checklist.follow_up_required) ||
-      "Follow-up status: not recorded in trade submission.";
-  return {
-    ref: input.source.builder_reference,
-    address: input.source.site_address || "Address not recorded",
-    contact: firstText(snapshot.job.client_name),
-    date: attendanceDate(attendance),
-    arrival: attendanceTime(
-      firstText(assignment.arrived_at, checklist.arrival_time),
-    ),
-    crew: firstText(
-      assignment.crew_name,
-      tradeCountLabel(checklist.trade_count),
-    ),
-    billing_note: firstText(
-      checklist.billing_note,
-      checklist.invoice_notes,
-      reportedLabourNote(checklist.labour_hours, checklist.trade_count),
-    ),
-    scope: firstText(
-      checklist.scope,
-      input.source.instruction_text,
-      checklist.damage_description,
-    ),
-    findings: firstText(checklist.findings, checklist.damage_cause),
-    works: firstText(
-      checklist.works_completed,
-      checklist.works,
-      checklist.work_done,
-      report.notes,
-    ),
-    materials,
-    access_issues: accessIssues,
-    follow_up_required: followUpRequired,
-    // Hand the renderer the bytes we already hold, never a re-encoding of them.
-    //
-    // This used to build a binary string one character at a time and then
-    // base64 it, for EVERY current-cycle photo. Measured on the proof card's
-    // real volume (50 photos / 20.9 MB) that single map moved peak RSS from
-    // ~61 MB to ~224 MB, and on the board's heaviest card (51 photos /
-    // 33.5 MB) to ~394 MB -- past the edge worker's budget, which is the
-    // HTTP 546 WORKER_RESOURCE_LIMIT the persist path returned. jsPDF takes a
-    // Uint8Array directly and emits a byte-identical image stream, so nothing
-    // about the report changes: every photo is still passed, still hashed,
-    // still uploaded, and the render hash is unmoved.
-    // Regression: makesafe_report_photo_budget_test.ts.
-    photos: photoArtifacts.map((photo) => {
-      const source = input.cycle_facts.photos.find(
-        (item) =>
-          item.id === photo.photo_id &&
-          item.path_or_key === photo.source_pointer,
-      );
-      return {
-        bytes: photo.bytes,
-        contentType: photo.media_type,
-        caption: source?.caption,
-      };
-    }),
-  };
 }
 
 function currentCycle(snapshot: SesAssemblerLiveSnapshot): {
@@ -1980,6 +1859,48 @@ function artifactUrl(row: LiveRow): string {
   );
 }
 
+/**
+ * Select only an exact current-cycle report produced under the commercially
+ * clean curated renderer contract. A typed document alone is insufficient:
+ * legacy nine-page reports can still contain the retired billing row.
+ */
+export function currentCuratedReportDocument(
+  snapshot: SesAssemblerLiveSnapshot,
+  input: SesAssemblerInputV1,
+): LiveRow | null {
+  const currentCycleId = text(input.attendance.current_attendance_cycle_id);
+  return snapshot.documents
+    .filter((row) => text(row.type).toLowerCase() === "makesafe_report")
+    .filter((row) => {
+      const provenance = record(row.data_snapshot_json);
+      if (
+        text(provenance.report_contract_version) !==
+          MAKESAFE_REPORT_CONTRACT_VERSION ||
+        !isCurrentCuratedRendererVersion(
+          text(provenance.report_renderer_version),
+        ) ||
+        !/^[0-9a-f]{64}$/.test(text(provenance.report_render_hash))
+      ) {
+        return false;
+      }
+      if (currentCycleId) {
+        return text(row.attendance_cycle_id) === currentCycleId &&
+          text(row.cycle_attribution).toLowerCase() === "bound";
+      }
+      return isEvidenceBoundToCurrentCycle(
+        row,
+        snapshot.detail || {},
+        currentCycleId || null,
+      );
+    })
+    .slice()
+    .sort((left, right) =>
+      Number(right.version || 0) - Number(left.version || 0) ||
+      text(right.created_at).localeCompare(text(left.created_at)) ||
+      text(right.id).localeCompare(text(left.id))
+    )[0] || null;
+}
+
 async function fetchBytes(
   url: string,
   label: string,
@@ -2364,16 +2285,47 @@ export function createSesAssemblerRuntimeDependencies(
         snapshotForJobId(request.job_id),
         request,
       ),
-    renderPhysicalReport: async (input, photos = []) => {
+    renderPhysicalReport: async (input, _photos = []) => {
       const snapshot = snapshotFor(input);
-      const rendered = await renderMakesafeReportPdf(
-        physicalReportRenderJob(snapshot, input, photos),
-      );
+      const row = currentCuratedReportDocument(snapshot, input);
+      if (!row) {
+        throw new SesAssemblerAdapterError(
+          "ses_curated_report_missing",
+          "No exact current-cycle makesafe_report artifact carries the active curated renderer provenance; raw trade-report fields will not be rendered as a substitute.",
+          409,
+        );
+      }
+      const url = artifactUrl(row);
+      if (!url) {
+        throw new SesAssemblerAdapterError(
+          "ses_curated_report_unrecoverable",
+          `Curated report document ${text(row.id)} has no HTTPS recovery URL.`,
+          409,
+        );
+      }
+      const bytes = await fetchBytes(url, "current-cycle curated report");
+      if (new TextDecoder().decode(bytes.slice(0, 5)) !== "%PDF-") {
+        throw new SesAssemblerAdapterError(
+          "ses_curated_report_unrecoverable",
+          `Curated report document ${text(row.id)} is not a PDF artifact.`,
+          409,
+        );
+      }
+      const provenance = record(row.data_snapshot_json);
       return {
-        file_name: rendered.fileName,
+        file_name: fileName(
+          row,
+          `Make Safe Report - ${input.source.builder_reference}.pdf`,
+        ),
         media_type: "application/pdf",
-        bytes: rendered.bytes,
-        render_hash: rendered.renderHash,
+        bytes,
+        render_hash: text(provenance.report_render_hash),
+        provenance: {
+          evidence_source: "current_cycle_curated_makesafe_report",
+          report_document_id: text(row.id),
+          report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+          report_renderer_version: text(provenance.report_renderer_version),
+        },
       };
     },
     renderOwnRoofReport: async (input) => {

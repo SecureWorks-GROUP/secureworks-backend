@@ -2031,9 +2031,9 @@ async function prepareOne(
           const itemBlocker = addBlocker(
             blockers,
             blocked(
-              "trade_evidence_missing",
-              "Physical report renderer capability is unavailable.",
-              "Resume on the existing deterministic make-safe report renderer.",
+              "curated_report_missing",
+              "Current-cycle curated report artifact recovery is unavailable.",
+              "Create a commercially clean curated makesafe_report artifact, bind it to the current cycle, and re-run.",
             ),
           );
           manifest.items.physical_reporting_evidence = itemBlocker;
@@ -2247,7 +2247,7 @@ async function prepareOne(
             )
           }`;
           const plan = {
-            mode: "async_pack_build",
+            mode: "curated_report_artifact_recovery",
             intended_path: reportFile,
             photo_count: photoFiles.length,
             photo_proof_paths: artifacts
@@ -2264,7 +2264,7 @@ async function prepareOne(
             }),
           );
           manifest.items.supporting_report_pdf = ready(
-            `planned:${reportFile}#async-pack-build`,
+            `proof:${reportFile}#current-cycle-curated-report`,
           );
           manifest.items.physical_reporting_evidence = ready(
             "file:ARTIFACTS/PHOTO_SELECTION.md",
@@ -2286,7 +2286,10 @@ async function prepareOne(
               path: reportFile,
               media_type: rendered.media_type,
               bytes: rendered.bytes,
-              metadata: { render_hash: rendered.render_hash || null },
+              metadata: {
+                render_hash: rendered.render_hash || null,
+                ...(rendered.provenance || {}),
+              },
             }),
           );
           manifest.items.supporting_report_pdf = ready(`file:${reportFile}`);
@@ -2697,9 +2700,11 @@ async function prepareOne(
         physical_renderer: !row
           ? "not_evaluated"
           : request.dry_run && row.job_type === "physical_makesafe"
-          ? deps.renderPhysicalReport ? "deferred_to_async_pack" : "unavailable"
+          ? deps.renderPhysicalReport
+            ? "deferred_current_cycle_curated_artifact_recovery"
+            : "unavailable"
           : deps.renderPhysicalReport
-          ? "available"
+          ? "current_cycle_curated_artifact_recovery"
           : "unavailable",
         own_roof_renderer: !row
           ? "not_evaluated"
