@@ -16,7 +16,7 @@ Cards: `SWMS-261021`, `SWMS-261015`, `SWMS-261065`, `SWMS-261109`, roof card `SW
 
 | Card | Suburb | Outcome | Evidence |
 |---|---|---|---|
-| `SWMS-261019` (roof) | Floreat | **persisted → Docs Ready** | revision `5f7b2016…` superseded the blocked `1c93be74…`; `pre_xero_docs_ready` false → **true**; queue seq 39 |
+| `SWMS-261019` (roof) | Floreat | **persisted → Docs Ready** | revision `5f7b2016…` replaced the blocked `1c93be74…` as the card's pack revision; `pre_xero_docs_ready` false → **true**; queue seq 39 |
 | `SWMS-261109` | Bertram | **already done — pass, not skip** | revision `31daa258…`, queue seq 1, committed 2026-08-02T15:08Z — one of the original three |
 | `SWMS-261065` | Munster | **already done — pass, not skip** | revision `e4fdae2c…`, queue seq 7, committed 2026-08-02T23:59Z — batch-5 tranche A. **See §6a: it also carries a "job is dead" ops note.** |
 | `SWMS-261021` | Floreat | **WALL — not persisted** | `swms_generation_facts_missing`, `missing_facts: ["crew"]`; `assignments: []` |
@@ -572,4 +572,3 @@ is still missing**, and the note's instruction to staff — do not attach a SWMS
 - I did not fetch anything from the Management API `/secrets` endpoint.
 - The `pre_xero_docs_ready` key is absent from the `prepare_ses_docket_revision` response itself; I
   read it from the board row after the persist, which is where it is derived.
-
