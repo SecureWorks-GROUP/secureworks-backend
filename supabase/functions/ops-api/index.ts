@@ -34090,6 +34090,15 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
     jobResponse.data.client_name,
     body.report_input_hash,
   )
+  const evidenceSource = 'current_cycle_curated_makesafe_report'
+  const trustedSnapshot = {
+    report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+    report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+    report_renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+    report_renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+    report_render_hash: rawHash,
+    report_input_hash: validatedInput.inputHash,
+  }
 
   const existingResponse = await client.from('job_documents')
     .select('id,file_name,data_snapshot_json')
@@ -34104,13 +34113,28 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
         MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION
   })
   if (identical) {
+    const facts = identical.data_snapshot_json || {}
+    const missingProvenance = facts.evidence_source !== evidenceSource ||
+      !facts.source_document_id
+    if (missingProvenance) {
+      const { error: provenanceError } = await client.from('job_documents')
+        .update({
+          data_snapshot_json: {
+            ...facts,
+            evidence_source: evidenceSource,
+            source_document_id: identical.id,
+          },
+        })
+        .eq('id', identical.id)
+      if (provenanceError) throw provenanceError
+    }
     return {
       success: true,
       skipped: true,
       reason: 'identical current-wiki document already attached',
       document_id: identical.id,
       render_hash: rawHash,
-      writes: 0,
+      writes: missingProvenance ? 1 : 0,
     }
   }
   if (
@@ -34131,17 +34155,6 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
   ).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
   const fileName =
     `Make-Safe-Report-${safeRef}-${safeSuburb}-${rawHash.slice(0, 12)}.pdf`
-  const trustedSnapshot = {
-    report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-    report_renderer_version:
-      MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
-    report_renderer_source_revision:
-      MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-    report_renderer_script_sha256:
-      MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-    report_render_hash: rawHash,
-    report_input_hash: validatedInput.inputHash,
-  }
   const result = await attachMakesafeDocument(client, {
     job_id: jobId,
     type: 'makesafe_report',
@@ -34159,7 +34172,7 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
     .update({
       data_snapshot_json: {
         ...trustedSnapshot,
-        evidence_source: 'current_cycle_curated_makesafe_report',
+        evidence_source: evidenceSource,
         source_document_id: result.document_id,
       },
     })

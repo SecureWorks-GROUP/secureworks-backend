@@ -13,6 +13,7 @@ import {
 import {
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
   MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+  MAKESAFE_REPORT_CONTRACT_VERSION,
   renderMakesafeReportPdf,
 } from "./makesafe_report_render.ts";
 import { canonicalSesJson } from "./ses_docket_envelope.ts";
@@ -131,8 +132,14 @@ function attachClient(
           mutations.push(`insert:${table}`);
           return query;
         },
-        update: () => {
+        update: (values: Record<string, unknown>) => {
           mutations.push(`update:${table}`);
+          if (table === "job_documents") {
+            rows.job_documents = (rows.job_documents as Record<string, unknown>[]).map((row) => ({
+              ...row,
+              ...values,
+            }));
+          }
           return query;
         },
       };
@@ -147,9 +154,12 @@ Deno.test("current-wiki attach retries identical bytes without writes", async ()
   const rawHash = await sha(pdf);
   const reportJob = currentReportJob();
   const { client, mutations } = attachClient("SWMS-TEST", {
+    report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
     report_render_hash: rawHash,
     report_renderer_version:
       `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`,
+    evidence_source: "current_cycle_curated_makesafe_report",
+    source_document_id: "document-fixture",
   });
   const result: any = await _attachCurrentWikiCuratedReportForTest(client, {
     job_id: "job-fixture",
@@ -163,6 +173,32 @@ Deno.test("current-wiki attach retries identical bytes without writes", async ()
   assertEquals(result.writes, 0);
   assertEquals(result.skipped, true);
   assertEquals(mutations, []);
+});
+
+Deno.test("identical current-wiki attachment repairs provenance once", async () => {
+  const pdf = new TextEncoder().encode("%PDF-fixture");
+  const rawHash = await sha(pdf);
+  const reportJob = currentReportJob();
+  const { client, mutations } = attachClient("SWMS-TEST", {
+    report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+    report_render_hash: rawHash,
+    report_renderer_version:
+      `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`,
+  });
+  const body = {
+    job_id: "job-fixture",
+    renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+    renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+    pdf_base64: base64(pdf),
+    pdf_sha256: rawHash,
+    report_input_hash: await inputHash(reportJob),
+    report_job: reportJob,
+  };
+  const first: any = await _attachCurrentWikiCuratedReportForTest(client, body);
+  const second: any = await _attachCurrentWikiCuratedReportForTest(client, body);
+  assertEquals(first.writes, 1);
+  assertEquals(second.writes, 0);
+  assertEquals(mutations, ["update:job_documents"]);
 });
 
 Deno.test("captain-corrected report refuses before attachment mutation", async () => {
