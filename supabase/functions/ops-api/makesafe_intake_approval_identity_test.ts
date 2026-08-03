@@ -56,9 +56,90 @@ Deno.test("approval correlation refuses a source PO that conflicts with typed id
   });
   assertEquals(decision, {
     action: "refuse",
+    reason: "typed_identity_not_persistable",
+    instruction_keys: ["MLB:PO-40001", "MLB:PO-40002"],
+  });
+});
+
+Deno.test("approval correlation refuses a stale typed WO group", () => {
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: {
+      builder_claim_ref: "MLB-10000",
+      builder_po_number: "PO-40001",
+    },
+    approved_external_ref: "MLB-10001",
+    requesting_company_slug: "mlb",
+    family: "general_makesafe",
+    attachment_names: ["MLB-10001PO-40001.pdf"],
+  });
+  assertEquals(decision, {
+    action: "refuse",
+    reason: "typed_identity_not_persistable",
+    instruction_keys: ["MLB:PO-40001"],
+  });
+});
+
+Deno.test("approval correlation refuses a stale typed composite WO", () => {
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: {
+      builder_work_order_number: "MLB-10000PO-40001",
+      builder_po_number: "PO-40001",
+    },
+    approved_external_ref: "MLB-10001",
+    requesting_company_slug: "mlb",
+    family: "general_makesafe",
+    attachment_names: ["MLB-10001PO-40001.pdf"],
+  });
+  assertEquals(decision, {
+    action: "refuse",
+    reason: "typed_identity_not_persistable",
+    instruction_keys: ["MLB:PO-40001"],
+  });
+});
+
+Deno.test("approval correlation combines the approved WO with every PO-only attachment before refusing ambiguity", () => {
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: {},
+    approved_external_ref: "MLB-10001",
+    requesting_company_slug: null,
+    family: "general_makesafe",
+    attachment_names: ["PO-40001.pdf", "PO-40002.pdf"],
+  });
+  assertEquals(decision, {
+    action: "refuse",
     reason: "multiple_instruction_keys",
     instruction_keys: ["MLB:PO-40001", "MLB:PO-40002"],
   });
+});
+
+Deno.test("approval correlation refuses PO-only attachment ambiguity with an unknown slug", () => {
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: {},
+    approved_external_ref: "MLB-10001",
+    requesting_company_slug: "unknown",
+    family: "general_makesafe",
+    attachment_names: ["PO-40001.pdf", "PO-40002.pdf"],
+  });
+  assertEquals(decision, {
+    action: "refuse",
+    reason: "multiple_instruction_keys",
+    instruction_keys: ["MLB:PO-40001", "MLB:PO-40002"],
+  });
+});
+
+Deno.test("approval correlation combines one PO-only attachment with the approved WO", () => {
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: {},
+    approved_external_ref: "MLB-10001",
+    requesting_company_slug: null,
+    family: "general_makesafe",
+    attachment_names: ["PO-40001.pdf"],
+  });
+  assertEquals(decision.action, "ready");
+  if (decision.action !== "ready") return;
+  assertEquals(decision.instruction_key, "MLB:PO-40001");
+  assertEquals(decision.extraction.builder_claim_ref, "MLB-10001");
+  assertEquals(decision.extraction.builder_po_number, "PO-40001");
 });
 
 Deno.test("approval correlation is idempotent for already-typed identity", () => {
