@@ -36,6 +36,7 @@ import {
 } from "./ses_swms_template.ts";
 
 export const SES_FIVE_MINUTES_MS = 300_000;
+export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
 export { SES_ASSESSMENT_RECIPE_VERSION };
 
 const MANIFEST_ITEMS = [
@@ -222,6 +223,51 @@ function notApplicable(rule: string): SesNotApplicableState {
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function object(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function reviewTradeReport(
+  input: SesAssemblerInputV1,
+): Record<string, unknown> | null {
+  if (!input.cycle_facts.trade_report) return null;
+
+  const report = object(input.cycle_facts.trade_report);
+  const checklist = object(report.checklist_json);
+  return {
+    source: {
+      relation: "job_service_reports",
+      id: text(report.id) || null,
+      status: text(report.status) || null,
+      submitted_at: text(report.submitted_at) || null,
+      job_id: input.identity.job_id,
+      attendance_cycle_id: input.attendance.current_attendance_cycle_id,
+      cycle_number: input.attendance.cycle_number,
+      selection: "current_attendance_cycle",
+    },
+    asserted_written_narrative: {
+      scope: text(checklist.scope) || null,
+      damage_description: text(checklist.damage_description) || null,
+      findings: text(checklist.findings) || null,
+      damage_cause: text(checklist.damage_cause) || null,
+      works_completed: text(checklist.works_completed) || null,
+      works: text(checklist.works) || null,
+      work_done: text(checklist.work_done) || null,
+      // Structured selections remain source evidence below. Only prose the
+      // trade explicitly wrote may appear in the asserted narrative surface.
+      materials: text(checklist.materials) || null,
+      materials_used: text(checklist.materials_used) || null,
+      notes: text(report.notes) || null,
+    },
+    raw_source_evidence: {
+      checklist_json: report.checklist_json ?? {},
+      notes: report.notes ?? null,
+    },
+  };
 }
 
 function finiteNumber(value: unknown): number | null {
@@ -2590,7 +2636,7 @@ async function prepareOne(
   }
 
   const reviewSpec: Record<string, unknown> = {
-    version: "ses-docket-review/v1",
+    version: SES_DOCKET_REVIEW_SPEC_VERSION,
     property_id: input.identity.property_id,
     address: [input.source.site_address, input.source.site_suburb]
       .filter(Boolean)
@@ -2600,6 +2646,7 @@ async function prepareOne(
         job_id: input.identity.job_id,
         family: row?.family || input.classification.family,
         builder_reference: input.source.builder_reference,
+        trade_report: reviewTradeReport(input),
         portal_proof: portalEvidence,
         artifact_paths: artifacts.map((artifact) => artifact.path).sort(),
         blocker_codes: blockers.map((item) => item.reason_code),
