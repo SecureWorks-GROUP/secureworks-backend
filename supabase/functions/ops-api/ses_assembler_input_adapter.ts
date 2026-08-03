@@ -1924,7 +1924,10 @@ function currentCuratedReportDocumentForCycle(
         !isCurrentCuratedRendererVersion(
           text(provenance.report_renderer_version),
         ) ||
-        !/^[0-9a-f]{64}$/.test(text(provenance.report_render_hash))
+        !/^[0-9a-f]{64}$/.test(text(provenance.report_render_hash)) ||
+        text(provenance.evidence_source) !==
+          "current_cycle_curated_makesafe_report" ||
+        text(provenance.source_document_id) !== text(row.id)
       ) {
         return false;
       }

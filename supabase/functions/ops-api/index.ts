@@ -34155,6 +34155,12 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
     report_render_hash: rawHash,
     report_input_hash: validatedInput.inputHash,
   }
+  const reportScopeNarratives = [
+    validatedInput.job.scope,
+    validatedInput.job.findings,
+    validatedInput.job.works,
+    validatedInput.job.materials,
+  ].filter((value: unknown) => typeof value === 'string' && value.trim())
 
   const existingResponse = await client.from('job_documents')
     .select('id,file_name,data_snapshot_json')
@@ -34179,6 +34185,7 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
           data_snapshot_json: {
             ...facts,
             ...trustedSnapshot,
+            report_scope_narratives: reportScopeNarratives,
             evidence_source: evidenceSource,
             source_document_id: identical.id,
           },
@@ -34213,12 +34220,6 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
   ).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
   const fileName =
     `Make-Safe-Report-${safeRef}-${safeSuburb}-${rawHash.slice(0, 12)}.pdf`
-  const reportScopeNarratives = [
-    validatedInput.job.scope,
-    validatedInput.job.findings,
-    validatedInput.job.works,
-    validatedInput.job.materials,
-  ].filter((value: unknown) => typeof value === 'string' && value.trim())
   const result = await attachMakesafeDocument(client, {
     job_id: jobId,
     type: 'makesafe_report',

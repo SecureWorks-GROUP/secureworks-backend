@@ -1678,8 +1678,10 @@ Deno.test(
       version: 1,
       data_snapshot_json: {
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
         report_render_hash: "e".repeat(64),
+        evidence_source: "current_cycle_curated_makesafe_report",
+        source_document_id: "bertram-curated-report",
         report_scope_narratives: [
           "20 star pickets installed to prop and secure the existing fence line. Fence materials left in place on site pending permanent repair.",
         ],
