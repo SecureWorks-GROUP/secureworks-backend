@@ -631,6 +631,10 @@ import {
 import { correlateIntakeApprovalIdentity as _correlateIntakeApprovalIdentity } from './makesafe_intake_approval_identity.ts'
 import { refreshMakesafeIdentityAfterWorkOrderAttach as _refreshMakesafeIdentityAfterWorkOrderAttach } from './makesafe_work_order_identity_refresh.ts'
 import {
+  makesafeJobIdentityRecoverExactAction as _makesafeJobIdentityRecoverExactAction,
+  MakesafeJobIdentityRecoveryError as _MakesafeJobIdentityRecoveryError,
+} from './makesafe_job_identity_recover_exact.ts'
+import {
   assertInstructionCardMintAvailable as _assertInstructionCardMintAvailable,
   reserveInstructionCardMint as _reserveInstructionCardMint,
   releaseInstructionCardMint as _releaseInstructionCardMint,
@@ -3978,6 +3982,29 @@ if (import.meta.main) serve(async (req: Request) => {
           spine_incomplete_after: stillIncomplete.map((item) => item.job_number),
           review_queue: groupSesSpineFactsForReview(spineAfter),
         }, complete ? 200 : 503)
+      }
+      case 'makesafe_job_identity_recover_exact': {
+        if (authMode !== 'api_key') {
+          return json({ error: 'makesafe_job_identity_recover_exact requires ops privilege', board_complete: false }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'makesafe_job_identity_recover_exact requires POST', board_complete: false }, 405)
+        }
+        try {
+          return json(await _makesafeJobIdentityRecoverExactAction(
+            client,
+            DEFAULT_ORG_ID,
+            body,
+          ))
+        } catch (error) {
+          if (error instanceof _MakesafeJobIdentityRecoveryError) {
+            return json(
+              error.body || { error: error.message },
+              error.status,
+            )
+          }
+          throw error
+        }
       }
       case 'makesafe_state_reconcile': {
         // U2 Captain redirect: server-selected, fact-derived board correction.
