@@ -47,20 +47,6 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-export function reviewedWikiRepoPath(value: unknown): string {
-  const path = typeof value === "string" ? value.trim() : "";
-  if (!path || !path.startsWith("/")) {
-    throw new Error(
-      "SW_WIKI_REPO must be an explicit absolute current-wiki checkout path",
-    );
-  }
-  return path;
-}
-
-function wikiRepoPath(): string {
-  return reviewedWikiRepoPath(requiredEnv("SW_WIKI_REPO"));
-}
-
 export function bytesToBase64(bytes: Uint8Array): string {
   const chunks: string[] = [];
   const chunkSize = 0x8000;
@@ -235,127 +221,6 @@ async function recordProtectedServedRawProof(rows: SweepRow[]): Promise<void> {
   }
 }
 
-async function gitBytesAt(
-  cwd: string,
-  revision: string,
-  path: string,
-): Promise<Uint8Array> {
-  const command = new Deno.Command("git", {
-    cwd,
-    args: ["show", `${revision}:${path}`],
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const result = await command.output();
-  if (!result.success) {
-    throw new Error(`current wiki file unavailable: ${path}`);
-  }
-  return result.stdout;
-}
-
-async function gitBytes(path: string): Promise<Uint8Array> {
-  return await gitBytesAt(
-    wikiRepoPath(),
-    MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-    path,
-  );
-}
-
-export async function assertRendererBoundary(): Promise<void> {
-  const command = new Deno.Command("git", {
-    cwd: wikiRepoPath(),
-    args: ["ls-remote", "origin", "refs/heads/main"],
-    stdout: "piped",
-  });
-  const result = await command.output();
-  const actual = result.success
-    ? parseRemoteMainRevision(new TextDecoder().decode(result.stdout))
-    : "";
-  if (actual !== MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION) {
-    const isolated = await Deno.makeTempDir({ prefix: "wiki-remote-main-" });
-    try {
-      const remoteResult = await new Deno.Command("git", {
-        cwd: wikiRepoPath(),
-        args: ["remote", "get-url", "origin"],
-        stdout: "piped",
-      }).output();
-      const remoteUrl = new TextDecoder().decode(remoteResult.stdout).trim();
-      if (!remoteResult.success || !remoteUrl) {
-        throw new SweepRefusal(
-          "renderer_source_drift",
-          "The current wiki remote URL could not be resolved read-only.",
-        );
-      }
-      const init = await new Deno.Command("git", {
-        cwd: isolated,
-        args: ["init", "--quiet"],
-        stderr: "piped",
-      }).output();
-      const fetched = init.success
-        ? await new Deno.Command("git", {
-          cwd: isolated,
-          args: [
-            "fetch",
-            "--quiet",
-            "--depth=1",
-            remoteUrl,
-            "refs/heads/main",
-          ],
-          stderr: "piped",
-        }).output()
-        : init;
-      if (!fetched.success) {
-        throw new SweepRefusal(
-          "renderer_source_drift",
-          "Remote current-main dependency bytes could not be fetched into the isolated verifier.",
-        );
-      }
-      const reviewed: Record<string, string> = {};
-      const remote: Record<string, string> = {};
-      for (const relative of RENDERER_DEPENDENCIES) {
-        const path = `${SKILL_ROOT}/${relative}`;
-        reviewed[relative] = await sha256(await gitBytes(path));
-        remote[relative] = await sha256(
-          await gitBytesAt(isolated, "FETCH_HEAD", path),
-        );
-      }
-      const changed = changedDependencyPaths(reviewed, remote);
-      if (changed.length) {
-        throw new SweepRefusal(
-          "renderer_source_drift",
-          `Current remote main changed reviewed renderer dependencies: ${
-            changed.join(", ")
-          }.`,
-        );
-      }
-    } finally {
-      await Deno.remove(isolated, { recursive: true });
-    }
-  }
-  const renderer = await gitBytes(
-    `${SKILL_ROOT}/scripts/render_makesafe_report.py`,
-  );
-  if (
-    await sha256(renderer) !== MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256
-  ) {
-    throw new SweepRefusal(
-      "renderer_source_drift",
-      "The reviewed current-wiki renderer raw SHA-256 no longer matches.",
-    );
-  }
-}
-
-async function materializeRenderer(dir: string): Promise<string> {
-  for (const relative of RENDERER_DEPENDENCIES) {
-    const target = `${dir}/${relative}`;
-    await Deno.mkdir(target.slice(0, target.lastIndexOf("/")), {
-      recursive: true,
-    });
-    await Deno.writeFile(target, await gitBytes(`${SKILL_ROOT}/${relative}`));
-  }
-  return `${dir}/scripts/render_makesafe_report.py`;
-}
-
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -427,7 +292,7 @@ async function downloadPhoto(item: any, path: string): Promise<void> {
   await Deno.writeFile(path, new Uint8Array(await response.arrayBuffer()));
 }
 
-export function currentWikiRendererCommand(
+function wikiRenderCommand(
   renderer: string,
   inputPath: string,
   outDir: string,
@@ -496,7 +361,7 @@ async function renderRow(
   const searched = [
     "jobs",
     "makesafe_job_details",
-    "job_service_reports.current_cycle",
+    "current_cycle_report_source",
     "job_media.current_cycle",
     "makesafe_report_packs",
     "current_wiki_renderer_input",
@@ -597,7 +462,7 @@ async function renderRow(
     const outDir = `${dir}/out`;
     await Deno.writeTextFile(inputPath, JSON.stringify(reportJob));
     const process = await commandOutputWithTimeout(
-      currentWikiRendererCommand(renderer, inputPath, outDir),
+      wikiRenderCommand(renderer, inputPath, outDir),
       60_000,
     );
     if (!process.success) {
