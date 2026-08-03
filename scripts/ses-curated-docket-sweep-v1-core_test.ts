@@ -39,6 +39,24 @@ function rendered(size = 12): SweepRender {
   };
 }
 
+function assemblerArtifactMetadata(
+  reportDocumentId: string | null = "document-1",
+): Record<string, unknown> {
+  const renderedReport = {
+    render_hash: "c".repeat(64),
+    provenance: {
+      evidence_source: "current_cycle_curated_makesafe_report",
+      report_document_id: reportDocumentId,
+      report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+    },
+  };
+  return {
+    render_hash: renderedReport.render_hash,
+    ...renderedReport.provenance,
+  };
+}
+
 Deno.test("classification separates legacy, contact-stale, current, protected and no-report", () => {
   assertEquals(classifySweepRow(row()), "stale_legacy");
   assertEquals(
@@ -52,13 +70,7 @@ Deno.test("classification separates legacy, contact-stale, current, protected an
   );
   assertEquals(
     classifySweepRow(row({
-      artifact_metadata: {
-        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-        report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
-        evidence_source: "current_cycle_curated_makesafe_report",
-        render_hash: "c".repeat(64),
-        source_document_id: "document-1",
-      },
+      artifact_metadata: assemblerArtifactMetadata(),
     })),
     "already_current",
   );
@@ -72,19 +84,34 @@ Deno.test("classification separates legacy, contact-stale, current, protected an
   );
 });
 
+Deno.test("assembler artifact metadata round-trips through sweep classification", () => {
+  assertEquals(
+    classifySweepRow(row({
+      artifact_metadata: assemblerArtifactMetadata("document-current"),
+    })),
+    "already_current",
+  );
+  assertEquals(
+    classifySweepRow(row({
+      artifact_metadata: assemblerArtifactMetadata(null),
+    })),
+    "contact_contract_stale",
+  );
+  assertEquals(
+    classifySweepRow(row({
+      artifact_metadata: assemblerArtifactMetadata("   "),
+    })),
+    "contact_contract_stale",
+  );
+});
+
 Deno.test("dry-run proves every eligible card without invoking writes", async () => {
   let renders = 0;
   const entries = await runGuardedSweep([
     row(),
     row({
       job_id: "job-current",
-      artifact_metadata: {
-        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-        report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
-        evidence_source: "current_cycle_curated_makesafe_report",
-        render_hash: "c".repeat(64),
-        source_document_id: "doc-current",
-      },
+      artifact_metadata: assemblerArtifactMetadata("doc-current"),
     }),
   ], {
     render: () => {

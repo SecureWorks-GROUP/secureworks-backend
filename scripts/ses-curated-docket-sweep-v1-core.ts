@@ -73,10 +73,13 @@ export function classifySweepRow(row: SweepRow): SweepClassification {
   const renderer = metadata.report_renderer_version;
   const source = metadata.evidence_source;
   const hash = String(metadata.render_hash || "").replace(/^sha256:/, "");
+  const reportDocumentId = typeof metadata.report_document_id === "string"
+    ? metadata.report_document_id.trim()
+    : "";
   const trusted = contract === MAKESAFE_REPORT_CONTRACT_VERSION &&
     renderer === MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION &&
     source === "current_cycle_curated_makesafe_report" &&
-    /^[a-f0-9]{64}$/.test(hash) && !!metadata.source_document_id;
+    /^[a-f0-9]{64}$/.test(hash) && reportDocumentId.length > 0;
   if (trusted) return "already_current";
   if (contract === MAKESAFE_REPORT_CONTRACT_VERSION && renderer) {
     return "contact_contract_stale";
