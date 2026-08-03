@@ -150,7 +150,7 @@ Deno.test("approval correlation includes unavailable attachment identity in ambi
       storage_url: "typed-source-one",
     },
     {
-      file_name: "MLB-10001PO-40002.pdf",
+      pdf_url: "https://docs.test/MLB-10001PO-40002.pdf",
       pdf_unavailable: true,
     },
   ]);
@@ -163,8 +163,27 @@ Deno.test("approval correlation includes unavailable attachment identity in ambi
   });
   assertEquals(decision, {
     action: "refuse",
-    reason: "multiple_instruction_keys",
-    instruction_keys: ["MLB:PO-40001", "MLB:PO-40002"],
+    reason: "typed_identity_not_persistable",
+    instruction_keys: ["MLB:PO-40001"],
+  });
+});
+
+Deno.test("approval identity never treats a URL PO token as an attachment name", () => {
+  const attachmentNames = intakeIdentityAttachmentNames([{
+    pdf_url: "https://docs.test/MLB-10001PO-40001.pdf",
+    storage_url: "makesafe/MLB-10001PO-40001.pdf",
+  }]);
+  assertEquals(attachmentNames, [null]);
+  assertEquals(correlateIntakeApprovalIdentity({
+    extraction: {},
+    approved_external_ref: "MLB-10001",
+    requesting_company_slug: "mlb",
+    family: "general_makesafe",
+    attachment_names: attachmentNames,
+  }), {
+    action: "refuse",
+    reason: "typed_identity_not_persistable",
+    instruction_keys: [],
   });
 });
 

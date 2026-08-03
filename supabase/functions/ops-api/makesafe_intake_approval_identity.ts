@@ -46,8 +46,7 @@ export function intakeIdentityAttachmentNames(
     if (typeof attachment === "string") return attachment;
     if (!attachment || typeof attachment !== "object") return null;
     const item = attachment as Record<string, unknown>;
-    return text(item.file_name) || text(item.filename) || text(item.name) ||
-      text(item.pdf_url) || text(item.storage_url) || null;
+    return text(item.file_name) || text(item.filename) || text(item.name) || null;
   });
 }
 
@@ -173,6 +172,14 @@ export function correlateIntakeApprovalIdentity(input: {
     }
   }
   const sortedInstructionKeys = [...instructionKeys].sort();
+  if (input.attachment_names.length > 0 &&
+    input.attachment_names.some((name) => !text(name))) {
+    return {
+      action: "refuse",
+      reason: "typed_identity_not_persistable",
+      instruction_keys: sortedInstructionKeys,
+    };
+  }
   if (source.unparseablePoPresent) {
     return {
       action: "refuse",
