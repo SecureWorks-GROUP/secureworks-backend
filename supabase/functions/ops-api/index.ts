@@ -5281,6 +5281,21 @@ if (import.meta.main) serve(async (req: Request) => {
         })
         return json(await deleteAssignment(client, body))
       }
+      // Name (or clear) the lead installer on a job's crew.
+      //
+      // Authority is deliberately the SAME gate as creating the assignment —
+      // assertAssignmentMutationAuthz — and not one invented for this action.
+      // Designating a lead IS an assignment mutation, and the narrow reading of
+      // "who is allowed to set the lead" is "whoever assigns the job": the
+      // dashboard/service key, a dispatcher, or a manager of that job's vertical.
+      // An ordinary assigned installer is refused, including on their own row.
+      case 'set_job_lead': {
+        await assertAssignmentMutationAuthz(client, authMode, authUser, {
+          assignmentId: body.assignmentId || body.assignment_id,
+          jobId: body.jobId || body.job_id,
+        })
+        return json(await setJobLead(client, body))
+      }
       // Trade-side manager allocation (Manager View). JWT-authed via authTrade;
       // caller must be a dispatcher or a manager of the job's vertical. Wraps
       // createAssignment / updateAssignment (reassignment) with idempotency +
@@ -24097,6 +24112,104 @@ async function deleteAssignment(client: any, body: any) {
   return { success: true }
 }
 
+// ── Named lead installer ───────────────────────────────────────────────────
+// Designate exactly one of a job's crew as the lead installer, or clear the
+// designation. Authorisation happens at the dispatch case via the shared
+// assertAssignmentMutationAuthz gate (same authority as creating the assignment).
+//
+// The lead is stored on job_assignments.is_lead, extending the crew model that
+// already exists rather than adding a second one. job_assignments.role is NOT
+// used for this: it defaults to 'lead_installer' on every insert, so it cannot
+// distinguish a designated lead from an undesignated default (measured in
+// production 2026-08-03: 112 of 133 non-cancelled sampled rows carried it).
+//
+// Clear-then-set, in that order, because uq_job_assignments_one_lead makes two
+// simultaneous leads impossible — setting first would hit the index. If the set
+// fails after the clear, the job is left with NO lead, which is the safe
+// direction: no lead is the honest pre-feature state, a wrong lead is not.
+export function _resolveLeadTarget(
+  body: any,
+  assignments: any[],
+): { clear: boolean; assignmentId?: string } {
+  const clear = body?.clear === true || body?.is_lead === false
+  if (clear) return { clear: true }
+  const wantedAssignment = body?.assignmentId || body?.assignment_id || null
+  const wantedUser = body?.userId || body?.user_id || null
+  if (!wantedAssignment && !wantedUser) {
+    throw new ApiError('assignmentId or userId required (or clear:true)', 400)
+  }
+  const live = (assignments || []).filter((a: any) => a?.status !== 'cancelled')
+  const match = wantedAssignment
+    ? live.find((a: any) => String(a?.id) === String(wantedAssignment))
+    : live.find((a: any) => String(a?.user_id) === String(wantedUser))
+  if (!match) {
+    // Covers three refusals with one message on purpose: an assignment on
+    // another job, a cancelled assignment, and a user who is not crew here. All
+    // three mean the same thing — that person is not live crew on this job.
+    throw new ApiError('That person is not an active crew member on this job', 409)
+  }
+  return { clear: false, assignmentId: String(match.id) }
+}
+
+async function setJobLead(client: any, body: any) {
+  const jobId = body.jobId || body.job_id
+  if (!jobId) throw new ApiError('jobId required', 400)
+
+  const { data: assignments, error: readErr } = await client
+    .from('job_assignments')
+    .select('id, job_id, user_id, status, is_lead, crew_name')
+    .eq('job_id', jobId)
+  if (readErr) throw readErr
+
+  const target = _resolveLeadTarget(body, assignments || [])
+
+  // Always clear first — the partial unique index permits only one true row.
+  const { error: clearErr } = await client
+    .from('job_assignments')
+    .update({ is_lead: false })
+    .eq('job_id', jobId)
+    .eq('is_lead', true)
+  if (clearErr) throw clearErr
+
+  let lead: any = null
+  if (!target.clear) {
+    const { data, error } = await client
+      .from('job_assignments')
+      .update({ is_lead: true })
+      .eq('id', target.assignmentId)
+      .eq('job_id', jobId)
+      .neq('status', 'cancelled')
+      .select('id, user_id, crew_name')
+      .single()
+    if (error && error.code !== 'PGRST116') {
+      throw error
+    }
+    if (error?.code === 'PGRST116' || (!error && !data)) {
+      throw new ApiError('That person is not an active crew member on this job', 409)
+    }
+    lead = data
+  }
+
+  await client.from('job_events').insert({
+    job_id: jobId,
+    event_type: 'lead_installer_set',
+    detail_json: {
+      assignment_id: lead?.id || null,
+      user_id: lead?.user_id || null,
+      cleared: target.clear,
+      operator: body.operator_email || body.user_email || null,
+    },
+  })
+
+  return {
+    success: true,
+    job_id: jobId,
+    lead: lead
+      ? { assignment_id: lead.id, user_id: lead.user_id, name: lead.crew_name || null }
+      : null,
+  }
+}
+
 async function updateJobStatus(client: any, body: any) {
   const jId = body.jobId || body.job_id
   const status = body.status
@@ -30180,6 +30293,70 @@ function tradeMakesafeCompletionHandoff(
 export const _tradeMakesafeCompletionHandoffForTest =
   tradeMakesafeCompletionHandoff
 
+// ── Trade job-detail projections (pure; exported for tests) ─────────────────
+//
+// `job_documents.visible_to_trades` is the declared answer to "may a trade see
+// this document" — set on insert by document type (see the two defaultVisible
+// lists) and toggled by the ops-only set_document_visibility action. Until now
+// the trade payload SELECTED that flag and shipped every row anyway, leaving the
+// decision to the client. A read-only production sample on 2026-08-03 (24 jobs
+// carrying assignments) found 108 documents reaching the trade payload of which
+// 55 were flagged false — including 38 QUOTE PDFs, which carry pricing and
+// margin. The flag is never null in production: every row is explicitly true or
+// false, so honouring it exactly is both the narrow reading and the whole
+// reading. Ops keeping 8 quotes flagged true is ops's decision, not ours to
+// second-guess; this enforces the flag, it does not invent a policy.
+export function _tradeVisibleDocuments(docs: any[]): any[] {
+  return (docs || []).filter((d: any) => d?.visible_to_trades === true)
+}
+
+// The scope summary a trade sees is derived from jobs.scope_json by the SAME
+// helper ops already uses for invoice descriptions — no second scope grammar.
+//
+// buildScopeSummaryLine falls back to pricing_json.job_description when the
+// scope blob yields nothing. That fallback must never fire on a trade payload:
+// it is a quote field. tradeJobDetail does not select pricing_json today, so the
+// fallback is already inert, but this strips it explicitly so a later maintainer
+// adding pricing_json to the trade select cannot silently start leaking a quote
+// description into an installer's phone.
+export function _tradeScopeSummary(job: any): string {
+  if (!job) return ''
+  const { pricing_json: _pricing, ...scopeOnly } = job
+  return buildScopeSummaryLine(scopeOnly) || ''
+}
+
+// One crew roster per job, carrying the lead designation.
+//
+// This extends the crew model that already exists (job_assignments, one row per
+// crew member per job) rather than adding a parallel one. `role` is deliberately
+// passed through untouched and is NOT read as the lead signal: it defaults to
+// 'lead_installer' on every insert, so in production almost every crew member
+// already claims that role (measured 2026-08-03: 112 of 133 non-cancelled rows,
+// with 19 of 24 sampled jobs carrying two or more). is_lead is the explicit,
+// database-unique designation; absent designation stays absent.
+export function _tradeCrewRoster(assignments: any[]): any[] {
+  return (assignments || []).map((a: any) => ({
+    ...a,
+    is_lead: a?.is_lead === true,
+    name: a?.users?.name || a?.crew_name || null,
+  }))
+}
+
+// The designated lead, or null when nobody has been designated. Never guesses:
+// a job with no is_lead row has no lead, which is the truthful answer for every
+// job that existed before the designation feature shipped.
+// Keep worker phone numbers on crew rows only; the narrower privacy reading
+// avoids duplicating them on leadInstaller without removing existing access.
+export function _tradeLeadInstaller(crew: any[]): any | null {
+  const lead = (crew || []).find((c: any) => c?.is_lead === true)
+  if (!lead) return null
+  return {
+    assignment_id: lead.id || null,
+    user_id: lead.user_id || null,
+    name: lead.name || null,
+  }
+}
+
 async function tradeJobDetail(
   client: any,
   params: URLSearchParams,
@@ -30212,13 +30389,19 @@ async function tradeJobDetail(
       .eq('job_id', jobId).eq('event_type', 'note').order('created_at', { ascending: false }).limit(50),
     client.from('job_service_reports')
       .select('*').eq('job_id', jobId).order('created_at', { ascending: false }).limit(20),
-    // Work order data (scope items, instructions)
+    // Work order data (scope items, instructions).
+    //
+    // NOT limit(1). The admin path (jobDetail) returns every non-cancelled work
+    // order as an array; capping the trade at the newest one meant an installer
+    // sent to a job's second work order read the wrong scope. A 2026-08-03
+    // read-only production sample found jobs carrying more than one live work
+    // order, so this is a real mismatch, not a theoretical one.
     client.from('work_orders')
       .select('id, wo_number, scope_items, special_instructions, scheduled_date, status')
-      .eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }).limit(1),
+      .eq('job_id', jobId).neq('status', 'cancelled').order('created_at', { ascending: false }),
     // All crew assignments for this job (not filtered by date — user explicitly opened this job)
     client.from('job_assignments')
-      .select('id, user_id, scheduled_date, start_time, role, crew_name, status, started_at, completed_at, acknowledged_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, hours_worked, users:user_id(name, phone)')
+      .select('id, user_id, scheduled_date, start_time, role, is_lead, crew_name, status, started_at, completed_at, acknowledged_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase, hours_worked, users:user_id(name, phone)')
       .eq('job_id', jobId).neq('status', 'cancelled')
       .order('scheduled_date', { ascending: true }),
     // Purchase orders — materials for this job (trade-safe fields only)
@@ -30335,9 +30518,26 @@ async function tradeJobDetail(
     )
     : mediaRes.data || []
 
+  // A wrong/absent column comes back from PostgREST as a 400 with data:null,
+  // which `|| []` would turn into a silently empty crew list — the exact failure
+  // mode AGENTS.md warns about, and the one that would make "who am I on the job
+  // with" quietly blank. The deploy schema gate is the real protection (is_lead
+  // is declared in scripts/edge-function-schema-requirements.txt), so this is
+  // here to make a gate bypass diagnosable rather than invisible.
+  if (crewRes.error) {
+    console.error('[ops-api] trade crew read failed — crew will be empty:', crewRes.error.message)
+  }
+  if (woRes.error) {
+    console.error('[ops-api] trade work-order read failed:', woRes.error.message)
+  }
+
+  const tradeCrew = _tradeCrewRoster(crewRes.data || [])
+  const visibleDocuments = _tradeVisibleDocuments(docsRes.data || [])
+  const workOrders = woRes.data || []
+
   return {
     job: tradeSafeJob,
-    documents: docsRes.data || [],
+    documents: visibleDocuments,
     media: currentCycleMedia,
     // Human comms thread only: strip system/audit markers (MAKESAFE_PACK_SENT,
     // MAKESAFE_AGENT_REPLY) so the trade never sees internal breadcrumbs in the
@@ -30352,12 +30552,39 @@ async function tradeJobDetail(
     currentCyclePhotoCount: currentCycleMedia.filter((m: any) =>
       !m?.type || m.type === 'photo'
     ).length,
-    workOrder: (woRes.data || [])[0] || null,
-    crew: crewRes.data || [],
+    // Unchanged key, unchanged meaning: the newest live work order. Kept so the
+    // existing trade client keeps rendering exactly what it renders today.
+    workOrder: workOrders[0] || null,
+    // Additive: EVERY live work order, matching what the admin job_detail path
+    // has always returned. A job with two live work orders showed the trade only
+    // one of them before this.
+    workOrders,
+    // Additive: the work-order PDFs ops has flagged for trades, lifted out of the
+    // undifferentiated documents array so the app has a work-order surface to
+    // render instead of having to sort types itself. Already visibility-filtered.
+    workOrderDocuments: visibleDocuments.filter((d: any) =>
+      d?.type === 'work_order' || d?.type === 'supplier_work_order'
+    ),
+    // Additive: the scope line derived from jobs.scope_json by the same helper
+    // ops uses for invoice descriptions. Before this the ONLY route to scope on
+    // the trade payload was the raw scope_json blob (measured up to 1.6 MB on a
+    // live job, mostly base64 site-plan media), which is not something a phone
+    // should be reverse-engineering.
+    scopeSummary: _tradeScopeSummary(jobRes.data),
+    crew: tradeCrew,
+    // Additive: who leads this job, or null when nobody has been designated.
+    leadInstaller: _tradeLeadInstaller(tradeCrew),
     purchaseOrders: safePOs,
     makesafe_details: makesafeDetails,
   }
 }
+
+// Exported so the trade-visibility regression suite can assert on the REAL
+// payload rather than on the pure helpers alone. A helpers-only test would still
+// pass if the helpers were correct but never wired into the response, which is
+// precisely the failure this suite exists to catch.
+export const _tradeJobDetailForTest = tradeJobDetail
+export const _setJobLeadForTest = setJobLead
 
 async function addNote(client: any, body: any, isAdmin = false) {
   const { jobId, job_id, userId, user_id, text, sync_to_ghl, visibility, from_ops } = body

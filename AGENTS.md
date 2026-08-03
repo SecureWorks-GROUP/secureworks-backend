@@ -1150,6 +1150,11 @@ tenant scoping, and client follow-up, lives in
 `_managerBoardVerticals`, and `_resolveTradeJobFeedLens` in `ops-api/index.ts`
 aligned with that document and their regression tests.
 
+The 2026-08-03 trade crew/detail payload, named-lead contract, visibility
+narrowing, diagnosis, and deployment caveats are owned by
+`docs/evidence/trade-crew-visibility-lead-2026-08-03.md`; consult it before
+changing `trade_job_detail`, `set_job_lead`, or the lead/schema gate.
+
 ## Every SES Measurement Names Its Denominator And Its Generation
 
 Two small modules carry plan v2's write-safety rule D.0/3, and every SES harness
