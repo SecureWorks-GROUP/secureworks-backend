@@ -541,6 +541,45 @@ Deno.test("allocateJob: a detail-changing job/user/date conflict returns a preci
   );
 });
 
+Deno.test("allocateJob: repeating the source date preserves membership-only dedupe", async () => {
+  const store: Store = {
+    assignments: {
+      "a-source": {
+        id: "a-source",
+        job_id: "job-fen",
+        user_id: "inst-source",
+        scheduled_date: "2026-08-04",
+        status: "scheduled",
+      },
+      "a-existing-target": {
+        id: "a-existing-target",
+        job_id: "job-fen",
+        user_id: "inst-target",
+        scheduled_date: "2026-08-04",
+        status: "scheduled",
+      },
+    },
+    jobs: { "job-fen": FENCING_JOB },
+    users: { "inst-target": { id: "inst-target" } },
+  };
+
+  const result = await allocateJob(makeClient(store), {
+    body: {
+      assignmentId: "a-source",
+      userId: "inst-target",
+      scheduledDate: "2026-08-04",
+    },
+    callerRole: "lead_installer",
+    managedVerticals: ["fencing"],
+  });
+
+  assertEquals(result.ok, true);
+  assertEquals(result.mode, "reassign");
+  assertEquals(result.deduped, true);
+  assertEquals(result.assignment.id, "a-existing-target");
+  assertEquals(store.updates?.filter((entry) => entry.table === "job_assignments").length ?? 0, 0);
+});
+
 Deno.test("allocateJob: reassign moves the assignment to a new installer via updateAssignment", async () => {
   const store: Store = {
     assignments: { "a1": { id: "a1", job_id: "job-fen", user_id: "inst-1", status: "scheduled" } },

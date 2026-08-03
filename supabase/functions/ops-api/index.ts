@@ -24442,7 +24442,8 @@ export async function allocateJob(client: any, args: {
     const sDateR = body.scheduledDate || body.scheduled_date || body.date
     const targetDate = sDateR || sourceAssignment.scheduled_date || null
     const changesAssignmentDetails = Boolean(
-      sDateR || body.startTime || body.start_time || body.endTime || body.end_time ||
+      (sDateR && sDateR !== sourceAssignment.scheduled_date) ||
+        body.startTime || body.start_time || body.endTime || body.end_time ||
         body.crewName || body.crew_name || body.notes !== undefined,
     )
     const canDeduplicateCrewMembership = !changesAssignmentDetails
