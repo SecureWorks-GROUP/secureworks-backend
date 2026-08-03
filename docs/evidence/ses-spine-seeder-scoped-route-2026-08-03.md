@@ -250,13 +250,13 @@ The money seal is untouched. The seeder writes no `xero_invoices` row, sets no
 terminal proof. `trg_makesafe_intake_cases_seal_jobs` fires only on `UPDATE OF
 job_id, target_job_id`, which the seeder does not touch.
 
-## 7. What is NOT proven here
+## 7. Historical pre-run caveat
 
-**The four-card live run has not happened.** Two things block it and neither is
-a code problem:
+The following was true before batch 5 and is retained as the original pre-run
+acceptance boundary. It is no longer the current production state:
 
-1. `makesafe_state_seed_scoped` is not deployed. It deploys on merge to main.
-2. The ops API key available to this lane
+1. `makesafe_state_seed_scoped` was not deployed. It deploys on merge to main.
+2. The ops API key available to that lane
    (`kun-agent-workspace/data/secrets/sw-api-key`) is rejected by production
    with `Unauthorized` on every action, so neither the live seed nor the
    bracketing U4 `dry_run` prepare could be executed.
@@ -268,7 +268,10 @@ working; it was not worked around.
 
 Everything in sections 1–6 is measured against production read-only. Section 5
 is derived from those measurements plus the seeder's own SQL. The
-before/after bracket belongs to whoever runs the tranche.
+The before/after bracket was subsequently completed by batch 5. The run report
+records four ledgered tranches (4/25/25/6), 60 seeded, 0 skipped, accounting
+agreeing on every tranche, and no identity overwrite. The run did not authorize
+a board-wide sweep.
 
 ## 7b. The four-card proof, ready to run
 

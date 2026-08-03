@@ -753,8 +753,10 @@ second status engine.
 The seeder is NOT identity-only: per job it may create an attendance cycle and
 rebind cycle attribution across six tables, and it writes two GLOBAL rows
 (`makesafe_family_rule_revisions` / `_current`) regardless of selection size —
-inert today only because nothing reads them. As of 2026-08-03 it has never run:
-377 of 437 canonical cards still need it, and a sweep needs the Captain.
+inert today only because nothing reads them. The 2026-08-03 batch-5 run
+completed four ledgered tranches (4/25/25/6), seeding 60 named cards with 0
+skips and no identity overwrite; this is a completed scoped proof, not
+permission for an unreviewed board-wide sweep.
 Population, tranche order, the money-seal analysis and the caseless-intake cause
 are in `docs/evidence/ses-spine-seeder-scoped-route-2026-08-03.md`.
 
