@@ -13,11 +13,11 @@ const JOB_NUMBER = "SWMS-261079";
 const JOB_ID = "00000000-0000-4000-8000-000000261079";
 const BUILDER_REFERENCE = "MLB-TEST-ROOF";
 
-function snapshot(): RoofCycleBindingRecoverySnapshot {
+function snapshot(jobNumber = JOB_NUMBER): RoofCycleBindingRecoverySnapshot {
   return {
     job: {
       id: JOB_ID,
-      jobNumber: JOB_NUMBER,
+      jobNumber,
       type: "makesafe",
       status: "accepted",
       family: "roof_report",
@@ -177,6 +177,92 @@ Deno.test("five-card recovery is dry-run first and materializes only from exact 
       items: result.plans as any,
     }],
   }]);
+});
+
+Deno.test("five-card recovery hard-gates binding on the sealed submitted-and-locked portal verdict", async () => {
+  const cases = [
+    [
+      "SWMS-261079",
+      true,
+      "2026-08-03T14:20:01+08:00",
+      "sha256:878059f52ff1ebb8cca31eaa7729a6815cca8f1f86c5492f4602c44e69c4ac01",
+    ],
+    [
+      "SWMS-261113",
+      false,
+      "2026-08-03T21:19:07+08:00",
+      "sha256:ad0a1ede89d8a71f351f3cf236a9b4eadfc66397679a08776f3be9ba19ae0aaa",
+    ],
+    [
+      "SWMS-261114",
+      true,
+      "2026-08-03T21:19:17+08:00",
+      "sha256:ad0a1ede89d8a71f351f3cf236a9b4eadfc66397679a08776f3be9ba19ae0aaa",
+    ],
+    [
+      "SWMS-261116",
+      true,
+      "2026-08-03T21:19:28+08:00",
+      "sha256:ad0a1ede89d8a71f351f3cf236a9b4eadfc66397679a08776f3be9ba19ae0aaa",
+    ],
+    [
+      "SWMS-261123",
+      false,
+      "2026-08-03T21:19:38+08:00",
+      "sha256:ad0a1ede89d8a71f351f3cf236a9b4eadfc66397679a08776f3be9ba19ae0aaa",
+    ],
+  ] as const;
+
+  for (
+    const [jobNumber, submittedAndLocked, observedAt, evidenceSha256] of cases
+  ) {
+    const test = harness(snapshot(jobNumber));
+    const result = await runRoofCycleBindingRecovery({
+      job_numbers: [jobNumber],
+      dry_run: true,
+      plan_token: null,
+    }, test.deps);
+    const plan = (result.plans as any[])[0];
+
+    assertEquals(test.writes, [], jobNumber);
+    assertEquals(
+      plan.exact_facts.portal_evidence,
+      {
+        observed_at: observedAt,
+        submitted_and_locked: submittedAndLocked,
+        verdict: submittedAndLocked
+          ? "submitted_locked"
+          : "unfinished_unlocked",
+        evidence_sha256: evidenceSha256,
+      },
+      jobNumber,
+    );
+
+    if (submittedAndLocked) {
+      assertEquals(result.ok, true, jobNumber);
+      assertEquals(plan.disposition, "materialize_and_bind", jobNumber);
+      continue;
+    }
+
+    assertEquals(result.ok, false, jobNumber);
+    assertEquals(plan.disposition, "refused", jobNumber);
+    assertEquals(
+      plan.reason_code,
+      "portal_not_submitted_locked",
+      jobNumber,
+    );
+    await assertRejects(
+      () =>
+        runRoofCycleBindingRecovery({
+          job_numbers: [jobNumber],
+          dry_run: false,
+          plan_token: result.plan_token as string,
+        }, test.deps),
+      MakesafeAttendanceCycleBindingRecoveryError,
+      "at least one exact job is ineligible",
+    );
+    assertEquals(test.writes, [], jobNumber);
+  }
 });
 
 Deno.test("exact apply binds one cycle, stays unassigned, and is idempotent", async () => {
