@@ -1,5 +1,8 @@
 // deno-lint-ignore-file no-explicit-any no-import-prefix
-import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assertEquals,
+  assertRejects,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _resolveAllocationAuthz,
   allocateJob,
@@ -34,19 +37,30 @@ function makeClient(store: Store) {
     let insertRow: any = null;
     let updateRow: any = null;
     const assignmentConflict = () => {
-      if (table !== "job_assignments" || (op !== "insert" && op !== "update")) return null;
+      if (table !== "job_assignments" || (op !== "insert" && op !== "update")) {
+        return null;
+      }
       const source = op === "update" ? store.assignments?.[filters.id] : null;
       if (op === "update" && !source) return null;
-      const racedAssignment = op === "update" ? store.raceOnUpdate : store.raceOnInsert;
+      const racedAssignment = op === "update"
+        ? store.raceOnUpdate
+        : store.raceOnInsert;
       if (racedAssignment) {
-        store.assignments = { ...(store.assignments || {}), [racedAssignment.id]: racedAssignment };
+        store.assignments = {
+          ...(store.assignments || {}),
+          [racedAssignment.id]: racedAssignment,
+        };
         if (op === "update") store.raceOnUpdate = undefined;
         else store.raceOnInsert = undefined;
       }
       const nextJobId = insertRow?.job_id ?? source?.job_id;
-      const nextUserId = insertRow?.user_id ?? updateRow?.user_id ?? source?.user_id;
-      const nextDate = insertRow?.scheduled_date ?? updateRow?.scheduled_date ?? source?.scheduled_date;
-      const duplicate = Object.values(store.assignments || {}).find((row: any) =>
+      const nextUserId = insertRow?.user_id ?? updateRow?.user_id ??
+        source?.user_id;
+      const nextDate = insertRow?.scheduled_date ?? updateRow?.scheduled_date ??
+        source?.scheduled_date;
+      const duplicate = Object.values(store.assignments || {}).find((
+        row: any,
+      ) =>
         row.id !== source?.id &&
         row.job_id === nextJobId &&
         row.user_id === nextUserId &&
@@ -55,18 +69,26 @@ function makeClient(store: Store) {
       if (!duplicate) return null;
       return {
         code: "23505",
-        message: 'duplicate key value violates unique constraint "job_assignments_job_user_date_key"',
-        details: `Key (job_id, user_id, scheduled_date)=(${nextJobId}, ${nextUserId}, ${nextDate}) already exists.`,
+        message:
+          'duplicate key value violates unique constraint "job_assignments_job_user_date_key"',
+        details:
+          `Key (job_id, user_id, scheduled_date)=(${nextJobId}, ${nextUserId}, ${nextDate}) already exists.`,
       };
     };
     const resolveSingle = () => {
       if (op === "insert") return { id: "new-assignment", ...insertRow };
       if (op === "update") {
-        return { id: filters.id, job_id: store.assignments?.[filters.id]?.job_id, ...updateRow };
+        return {
+          id: filters.id,
+          job_id: store.assignments?.[filters.id]?.job_id,
+          ...updateRow,
+        };
       }
       if (table === "jobs") return store.jobs?.[filters.id] ?? null;
       if (table === "users") return store.users?.[filters.id] ?? null;
-      if (table === "job_assignments") return store.assignments?.[filters.id] ?? null;
+      if (table === "job_assignments") {
+        return store.assignments?.[filters.id] ?? null;
+      }
       return null;
     };
     const resolveArray = () => {
@@ -85,11 +107,30 @@ function makeClient(store: Store) {
     };
     const b: any = {
       select: () => b,
-      insert: (row: any) => { op = "insert"; insertRow = row; store.inserts!.push({ table, row }); return b; },
-      update: (row: any) => { op = "update"; updateRow = row; store.updates!.push({ table, row }); return b; },
-      delete: () => { op = "delete"; return b; },
-      eq: (k: string, v: any) => { filters[k] = v; return b; },
-      neq: (k: string, v: any) => { excluded[k] = v; return b; },
+      insert: (row: any) => {
+        op = "insert";
+        insertRow = row;
+        store.inserts!.push({ table, row });
+        return b;
+      },
+      update: (row: any) => {
+        op = "update";
+        updateRow = row;
+        store.updates!.push({ table, row });
+        return b;
+      },
+      delete: () => {
+        op = "delete";
+        return b;
+      },
+      eq: (k: string, v: any) => {
+        filters[k] = v;
+        return b;
+      },
+      neq: (k: string, v: any) => {
+        excluded[k] = v;
+        return b;
+      },
       not: () => b,
       in: () => b,
       or: () => b,
@@ -106,12 +147,25 @@ function makeClient(store: Store) {
     return b;
   }
   return {
-    from(table: string) { store.calls!.push(table); return builder(table); },
+    from(table: string) {
+      store.calls!.push(table);
+      return builder(table);
+    },
   };
 }
 
-const FENCING_JOB = { id: "job-fen", type: "fencing", job_number: "SWF-1", status: "accepted" };
-const ARCHIVED_JOB = { id: "job-arch", type: "fencing", job_number: "SWF-2", status: "archived" };
+const FENCING_JOB = {
+  id: "job-fen",
+  type: "fencing",
+  job_number: "SWF-1",
+  status: "accepted",
+};
+const ARCHIVED_JOB = {
+  id: "job-arch",
+  type: "fencing",
+  job_number: "SWF-2",
+  status: "archived",
+};
 
 // ── _resolveAllocationAuthz matrix ─────────────────────────────────────────
 Deno.test("authz: api_key (dashboard/service) may allocate anything", () => {
@@ -120,32 +174,48 @@ Deno.test("authz: api_key (dashboard/service) may allocate anything", () => {
 });
 
 Deno.test("authz: routine may NEVER mutate assignments", () => {
-  const d = _resolveAllocationAuthz({ authMode: "routine", jobVertical: "makesafe" });
+  const d = _resolveAllocationAuthz({
+    authMode: "routine",
+    jobVertical: "makesafe",
+  });
   assertEquals(d, { allowed: false, reason: "routine_forbidden" });
 });
 
 Deno.test("authz: dispatcher roles (admin/owner/ops_manager) allocate any vertical", () => {
   for (const role of ["admin", "owner", "ops_manager"]) {
-    const d = _resolveAllocationAuthz({ authMode: "jwt", callerRole: role, jobVertical: "fencing" });
+    const d = _resolveAllocationAuthz({
+      authMode: "jwt",
+      callerRole: role,
+      jobVertical: "fencing",
+    });
     assertEquals(d, { allowed: true, reason: "dispatcher" }, `role ${role}`);
   }
 });
 
 Deno.test("authz: vertical manager — right vertical allowed, wrong vertical denied", () => {
   const right = _resolveAllocationAuthz({
-    authMode: "jwt", callerRole: "lead_installer", managedVerticals: ["fencing"], jobVertical: "fencing",
+    authMode: "jwt",
+    callerRole: "lead_installer",
+    managedVerticals: ["fencing"],
+    jobVertical: "fencing",
   });
   assertEquals(right, { allowed: true, reason: "vertical_manager" });
 
   const wrong = _resolveAllocationAuthz({
-    authMode: "jwt", callerRole: "sales", managedVerticals: ["patio"], jobVertical: "fencing",
+    authMode: "jwt",
+    callerRole: "sales",
+    managedVerticals: ["patio"],
+    jobVertical: "fencing",
   });
   assertEquals(wrong, { allowed: false, reason: "not_authorized" });
 });
 
 Deno.test("authz: plain installer (no managed verticals) is denied", () => {
   const d = _resolveAllocationAuthz({
-    authMode: "jwt", callerRole: "lead_installer", managedVerticals: [], jobVertical: "fencing",
+    authMode: "jwt",
+    callerRole: "lead_installer",
+    managedVerticals: [],
+    jobVertical: "fencing",
   });
   assertEquals(d, { allowed: false, reason: "not_authorized" });
 });
@@ -154,14 +224,19 @@ Deno.test("authz: plain installer (no managed verticals) is denied", () => {
 Deno.test("gate: api_key ops path passes with ZERO DB reads (ops.html unaffected)", async () => {
   const store: Store = {};
   const client = makeClient(store);
-  await assertAssignmentMutationAuthz(client, "api_key", null, { jobId: "job-fen" });
+  await assertAssignmentMutationAuthz(client, "api_key", null, {
+    jobId: "job-fen",
+  });
   assertEquals(store.calls, []); // no lookups for the privileged dashboard path
 });
 
 Deno.test("gate: routine caller is refused (403)", async () => {
   const client = makeClient({});
   await assertRejects(
-    () => assertAssignmentMutationAuthz(client, "routine", null, { jobId: "job-fen" }),
+    () =>
+      assertAssignmentMutationAuthz(client, "routine", null, {
+        jobId: "job-fen",
+      }),
     Error,
     "routine",
   );
@@ -170,7 +245,10 @@ Deno.test("gate: routine caller is refused (403)", async () => {
 Deno.test("gate: dispatcher JWT passes with no job/user lookup", async () => {
   const store: Store = {};
   const client = makeClient(store);
-  await assertAssignmentMutationAuthz(client, "jwt", { id: "u1", role: "ops_manager" }, { jobId: "job-fen" });
+  await assertAssignmentMutationAuthz(client, "jwt", {
+    id: "u1",
+    role: "ops_manager",
+  }, { jobId: "job-fen" });
   assertEquals(store.calls, []);
 });
 
@@ -187,7 +265,11 @@ Deno.test("gate: vertical manager passes only for a job in their vertical", asyn
     { id: "u-henry", role: "lead_installer", managedVerticals: ["fencing"] },
     { jobId: "job-fen" },
   );
-  assertEquals(store.calls!.includes("users"), false, "the authed context already carries managed_verticals");
+  assertEquals(
+    store.calls!.includes("users"),
+    false,
+    "the authed context already carries managed_verticals",
+  );
 
   // Wrong vertical → 403.
   await assertRejects(
@@ -268,11 +350,16 @@ Deno.test("gate: update/delete resolve the job via the assignment id", async () 
 Deno.test("allocateJob: refuses an archived job (409)", async () => {
   const client = makeClient({ jobs: { "job-arch": ARCHIVED_JOB } });
   await assertRejects(
-    () => allocateJob(client, {
-      body: { jobId: "job-arch", userId: "inst-1", scheduledDate: "2026-07-06" },
-      callerRole: "lead_installer",
-      managedVerticals: ["fencing"],
-    }),
+    () =>
+      allocateJob(client, {
+        body: {
+          jobId: "job-arch",
+          userId: "inst-1",
+          scheduledDate: "2026-07-06",
+        },
+        callerRole: "lead_installer",
+        managedVerticals: ["fencing"],
+      }),
     Error,
     "archived",
   );
@@ -281,11 +368,16 @@ Deno.test("allocateJob: refuses an archived job (409)", async () => {
 Deno.test("allocateJob: refuses a manager of the wrong vertical (403)", async () => {
   const client = makeClient({ jobs: { "job-fen": FENCING_JOB } });
   await assertRejects(
-    () => allocateJob(client, {
-      body: { jobId: "job-fen", userId: "inst-1", scheduledDate: "2026-07-06" },
-      callerRole: "sales",
-      managedVerticals: ["patio"],
-    }),
+    () =>
+      allocateJob(client, {
+        body: {
+          jobId: "job-fen",
+          userId: "inst-1",
+          scheduledDate: "2026-07-06",
+        },
+        callerRole: "sales",
+        managedVerticals: ["patio"],
+      }),
     Error,
     "Not authorized",
   );
@@ -294,10 +386,11 @@ Deno.test("allocateJob: refuses a manager of the wrong vertical (403)", async ()
 Deno.test("allocateJob: missing target installer → 400", async () => {
   const client = makeClient({ jobs: { "job-fen": FENCING_JOB } });
   await assertRejects(
-    () => allocateJob(client, {
-      body: { jobId: "job-fen", scheduledDate: "2026-07-06" },
-      callerRole: "admin",
-    }),
+    () =>
+      allocateJob(client, {
+        body: { jobId: "job-fen", scheduledDate: "2026-07-06" },
+        callerRole: "admin",
+      }),
     Error,
     "target installer",
   );
@@ -307,7 +400,13 @@ Deno.test("allocateJob: idempotent double-tap returns the existing assignment, n
   const store: Store = {
     jobs: { "job-fen": FENCING_JOB },
     users: { "inst-1": { id: "inst-1" } },
-    dup: [{ id: "existing-a", job_id: "job-fen", user_id: "inst-1", scheduled_date: "2026-07-06", status: "scheduled" }],
+    dup: [{
+      id: "existing-a",
+      job_id: "job-fen",
+      user_id: "inst-1",
+      scheduled_date: "2026-07-06",
+      status: "scheduled",
+    }],
   };
   const client = makeClient(store);
   const res = await allocateJob(client, {
@@ -320,7 +419,10 @@ Deno.test("allocateJob: idempotent double-tap returns the existing assignment, n
   assertEquals(res.deduped, true);
   assertEquals(res.assignment.id, "existing-a");
   // No new job_assignments row was inserted.
-  assertEquals(store.inserts!.filter((i) => i.table === "job_assignments").length, 0);
+  assertEquals(
+    store.inserts!.filter((i) => i.table === "job_assignments").length,
+    0,
+  );
 });
 
 Deno.test("allocateJob: new allocation returns the canonical saved date and times", async () => {
@@ -359,7 +461,14 @@ Deno.test("allocateJob: new allocation returns the canonical saved date and time
 
 Deno.test("allocateJob: reassign to the SAME installer is a no-op (deduped)", async () => {
   const store: Store = {
-    assignments: { "a1": { id: "a1", job_id: "job-fen", user_id: "inst-1", status: "scheduled" } },
+    assignments: {
+      "a1": {
+        id: "a1",
+        job_id: "job-fen",
+        user_id: "inst-1",
+        status: "scheduled",
+      },
+    },
     jobs: { "job-fen": FENCING_JOB },
     users: { "inst-1": { id: "inst-1" } },
   };
@@ -423,8 +532,14 @@ Deno.test("allocateJob: multi-person allocation preserves an already-selected ta
   assertEquals(second.ok, true);
   assertEquals(second.deduped, true);
   assertEquals(second.assignment.id, "a-alyx");
-  assertEquals(store.updates!.filter((entry) => entry.table === "job_assignments").length, 0);
-  assertEquals(store.inserts!.filter((entry) => entry.table === "job_assignments").length, 0);
+  assertEquals(
+    store.updates!.filter((entry) => entry.table === "job_assignments").length,
+    0,
+  );
+  assertEquals(
+    store.inserts!.filter((entry) => entry.table === "job_assignments").length,
+    0,
+  );
 });
 
 Deno.test("allocateJob: a concurrent target reassignment becomes a deduped success", async () => {
@@ -459,7 +574,10 @@ Deno.test("allocateJob: a concurrent target reassignment becomes a deduped succe
   assertEquals(result.mode, "reassign");
   assertEquals(result.deduped, true);
   assertEquals(result.assignment.id, "a-raced-target");
-  assertEquals(store.updates!.filter((entry) => entry.table === "job_assignments").length, 1);
+  assertEquals(
+    store.updates!.filter((entry) => entry.table === "job_assignments").length,
+    1,
+  );
 });
 
 Deno.test("allocateJob: a concurrent target insert becomes a deduped success", async () => {
@@ -490,7 +608,10 @@ Deno.test("allocateJob: a concurrent target insert becomes a deduped success", a
   assertEquals(result.mode, "idempotent");
   assertEquals(result.deduped, true);
   assertEquals(result.assignment.id, "a-raced-target");
-  assertEquals(store.inserts!.filter((entry) => entry.table === "job_assignments").length, 1);
+  assertEquals(
+    store.inserts!.filter((entry) => entry.table === "job_assignments").length,
+    1,
+  );
 });
 
 Deno.test("allocateJob: a detail-changing job/user/date conflict returns a precise 409", async () => {
@@ -577,7 +698,11 @@ Deno.test("allocateJob: repeating the source date preserves membership-only dedu
   assertEquals(result.mode, "reassign");
   assertEquals(result.deduped, true);
   assertEquals(result.assignment.id, "a-existing-target");
-  assertEquals(store.updates?.filter((entry) => entry.table === "job_assignments").length ?? 0, 0);
+  assertEquals(
+    store.updates?.filter((entry) => entry.table === "job_assignments")
+      .length ?? 0,
+    0,
+  );
 });
 
 Deno.test("allocateJob: an empty crew name remains a detail conflict", async () => {
@@ -619,7 +744,14 @@ Deno.test("allocateJob: an empty crew name remains a detail conflict", async () 
 
 Deno.test("allocateJob: reassign moves the assignment to a new installer via updateAssignment", async () => {
   const store: Store = {
-    assignments: { "a1": { id: "a1", job_id: "job-fen", user_id: "inst-1", status: "scheduled" } },
+    assignments: {
+      "a1": {
+        id: "a1",
+        job_id: "job-fen",
+        user_id: "inst-1",
+        status: "scheduled",
+      },
+    },
     jobs: { "job-fen": FENCING_JOB },
     users: { "inst-2": { id: "inst-2" } },
   };
