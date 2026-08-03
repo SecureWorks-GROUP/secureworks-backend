@@ -1230,6 +1230,33 @@ diagnosis, migration scope, execution boundary, and proofs live in
 `data/ses-readiness-gate-drop-v1/report.md`; the regression/control test is
 `supabase/functions/ops-api/ses_readiness_precondition_drop_test.ts`.
 
+## `ops-api` Dispatches On The Query String, And U4 Is The Pack Assembler
+
+Two calling facts that each cost a wasted round trip to rediscover; both are
+proved in `data/ses-packet-persist-five-v1/report.md`.
+
+`ops-api` reads `action` from the **URL query string**. A POST carrying
+`{"action": ...}` in the JSON body alone returns `{"error":"Unknown action"}`,
+which reads exactly like a missing action and is not — put the action in the
+URL and the arguments in the body.
+
+`prepare_ses_docket_revision` takes **one card per call**, mode-tagged:
+`{mode:"job_number", job_number:"SWMS-…"}` (or `job_id`, or `board_batch` with
+limit 1-50). The `{job_numbers:[…]}` array shape in the wiki skill doc
+`references/docs-ready-persist.md` is rejected with `ses_selection_invalid`;
+the contract is `ses_assembler_input_adapter.ts` `parse…Request`.
+
+`dry_run:true` is genuinely write-free (the whole persist block is gated at
+`ses_prepare_docket_revision.ts`), and it returns artifact paths and hashes but
+**no bytes** — artifacts upload only on persist. So the skill's
+`validate_review_pack.py --pre-xero` cannot run before a persist, and does not
+pass a U4 pack afterwards either: the assembler emits its own vocabulary
+(`files:` not `file:`, `case-story/assembler-spine-v1` not `case-story/v1`,
+`line_items` not `lines`, `recovery-not-run` not
+`pre-xero-captain-invoice-approval`). The gate that actually governs the persist
+is the backend twin `validatePreXero` in the same file. Check a validator's exit
+status without a pipe — `| head` reports `head`'s 0 and hides the failure.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
