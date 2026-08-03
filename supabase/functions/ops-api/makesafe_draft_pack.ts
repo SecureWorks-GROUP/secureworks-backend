@@ -620,7 +620,7 @@ function addRemovalTerms(out: string[], chunk: string): void {
     .trim();
   const parts = trimmed.split(/\s*(?:,|\/|&|\band\b|\bor\b)\s*/i);
   for (const rawPart of parts) {
-    let term = rawPart
+    const term = rawPart
       .replace(
         /\b(all|the|any|mentions?|references?|reference|from|report|there|should|be|no|mention|of|to)\b/gi,
         " ",

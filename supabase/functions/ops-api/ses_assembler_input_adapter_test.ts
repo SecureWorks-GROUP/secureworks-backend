@@ -1750,8 +1750,7 @@ Deno.test(
       String(row.type || "").toLowerCase() !== "makesafe_report"
     );
     live.reports[0].checklist_json = {
-      work_done:
-        "Used 20 star pickets to secure the existing fence line.",
+      work_done: "Used 20 star pickets to secure the existing fence line.",
       materials_used: ["Star pickets x 20"],
     };
 

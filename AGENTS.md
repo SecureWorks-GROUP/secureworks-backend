@@ -1261,10 +1261,12 @@ from `pricing.*`, `checklist.*` and six structured-source aliases. **Nothing in
 `supabase/functions/` ever WRITES any of them** — nor `hours_per_trade`. Grep
 each name and every hit is the reader or the blocker.
 
-So `pricing_evidence_missing` on a fencing card is a permanent floor, not a
-stale blocker to re-test: no rerun clears it, and it will block every future
-fencing card. Building the producer needs a trade-app capture change plus a
-captain sign-off on the pricing inputs. Measured population and the other three
+So `pricing_evidence_missing` on a temporary-fencing card is a permanent floor,
+not a stale blocker to re-test: no rerun clears it, and it will block every
+future temporary-fencing card. The separate AJS/AJBR existing-fence star-picket
+carve-out is documented below and does not manufacture these temporary-fencing
+inputs. Building the producer needs a trade-app capture change plus a captain
+sign-off on the pricing inputs. Measured population and the other three
 residual classes (`routing_evidence_missing`, `swms_generation_facts_missing`,
 `swms_generation_template_unavailable`) are in
 `data/ses-run-skill-batch5-packs-v1/report.md` §7.
