@@ -78,6 +78,60 @@ async function materializeRealRenderer(
   return `${root}/scripts/render_makesafe_report.py`;
 }
 
+async function commandOrFail(args: string[], cwd?: string): Promise<void> {
+  const result = await new Deno.Command("git", {
+    cwd,
+    args,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assert(
+    result.success,
+    `git ${args.join(" ")} failed: ${new TextDecoder().decode(result.stderr)}`,
+  );
+}
+
+async function resolvePinnedWikiRepo(): Promise<{ repo: string; cleanup: string[] }> {
+  const configured = Deno.env.get("SW_WIKI_REPO");
+  if (configured) {
+    const repo = reviewedWikiRepoPath(configured);
+    await commandOrFail([
+      "cat-file",
+      "-e",
+      `${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}^{commit}`,
+    ], repo);
+    return { repo, cleanup: [] };
+  }
+
+  const checkout = await Deno.makeTempDir({ prefix: "current-wiki-" });
+  try {
+    await commandOrFail(["init", "--quiet"], checkout);
+    await commandOrFail([
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/SecureWorks-GROUP/secureworks-wiki.git",
+    ], checkout);
+    await commandOrFail([
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--depth=1",
+      "origin",
+      MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+    ], checkout);
+    await commandOrFail([
+      "cat-file",
+      "-e",
+      `${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}^{commit}`,
+    ], checkout);
+    return { repo: checkout, cleanup: [checkout] };
+  } catch (error) {
+    await Deno.remove(checkout, { recursive: true });
+    throw error;
+  }
+}
+
 Deno.test("operator defaults to dry-run and an untracked manifest path", () => {
   const options = parseOptions([]);
   assertEquals(options.mode, "dry_run");
@@ -156,16 +210,18 @@ Deno.test("current-wiki subprocess timeout is bounded per card", async () => {
 Deno.test({
   name:
     "current pinned wiki renderer produces identical PDF bytes across temp roots",
-  ignore: !Deno.env.get("SW_WIKI_REPO"),
   fn: async () => {
     assertEquals(CURRENT_WIKI_RENDER_ENV, { RL_invariant: "1" });
-    const wikiRepo = reviewedWikiRepoPath(Deno.env.get("SW_WIKI_REPO"));
-    const first = await Deno.makeTempDir({ prefix: "review-render-" });
-    const second = await Deno.makeTempDir({ prefix: "apply-render-" });
+    const pinned = await resolvePinnedWikiRepo();
+    let first: string | undefined;
+    let second: string | undefined;
     try {
-      const roots = [first, second];
+      first = await Deno.makeTempDir({ prefix: "review-render-" });
+      second = await Deno.makeTempDir({ prefix: "apply-render-" });
+      assert(first && second);
+      const roots: [string, string] = [first, second];
       const renderers = await Promise.all(
-        roots.map((root) => materializeRealRenderer(wikiRepo, root)),
+        roots.map((root) => materializeRealRenderer(pinned.repo, root)),
       );
       assertEquals(
         await sha256(await Deno.readFile(renderers[0])),
@@ -236,8 +292,11 @@ Deno.test({
         await stableInputHash(changed),
       );
     } finally {
-      await Deno.remove(first, { recursive: true });
-      await Deno.remove(second, { recursive: true });
+      if (first) await Deno.remove(first, { recursive: true });
+      if (second) await Deno.remove(second, { recursive: true });
+      for (const path of pinned.cleanup) {
+        await Deno.remove(path, { recursive: true });
+      }
     }
   },
 });
