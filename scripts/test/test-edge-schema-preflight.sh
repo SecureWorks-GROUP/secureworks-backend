@@ -27,7 +27,7 @@ SES_RECOVERY_MIGRATION="$REPO_ROOT/supabase/migrations/20260801062000_ses_adjudi
 PORTAL_COMPLETION_SUBSTATUS_MIGRATION="$REPO_ROOT/supabase/migrations/20260802010000_makesafe_awaiting_portal_completion_substatus.sql"
 TRADE_CONFIRMATION_MIGRATION="$REPO_ROOT/supabase/migrations/20260802030000_makesafe_trade_portal_confirmation.sql"
 LEAD_INSTALLER_MIGRATION="$REPO_ROOT/supabase/migrations/20260803070000_job_assignment_lead_installer.sql"
-ROOF_INITIAL_CYCLE_MIGRATION="$REPO_ROOT/supabase/migrations/20260803070000_makesafe_roof_initial_cycle_binding.sql"
+ROOF_INITIAL_CYCLE_MIGRATION="$REPO_ROOT/supabase/migrations/20260803080000_makesafe_roof_initial_cycle_binding.sql"
  
 
 PASS_COUNT=0
@@ -396,10 +396,10 @@ lead_installer_row = {
 }
 roof_initial_cycle_row = {
     "function_name": "ops-api",
-    "migration_version": "20260803070000",
+    "migration_version": "20260803080000",
     "expected_migration_name": "makesafe_roof_initial_cycle_binding",
     "expected_statement_sha256": os.environ["ROOF_INITIAL_CYCLE_EXPECTED_SHA"],
-    "actual_migration_version": "20260803070000",
+    "actual_migration_version": "20260803080000",
     "actual_migration_name": "makesafe_roof_initial_cycle_binding",
     "actual_statement_count": 4,
     "actual_statement_sha256": None,
@@ -455,7 +455,7 @@ test_incident_dependency_is_declared() {
   local board_v2_preview_expected='ops-api|supabase/migrations/20260731085928_board_v2_seed_preview.sql|function|preview_makesafe_state_authority_v2'
   local vault_sync_expected='ops-api|supabase/migrations/20260731152254_vault_sync_sw_api_key.sql|function|vault_upsert_sw_api_key'
   local ses_recovery_expected='ops-api|supabase/migrations/20260801062000_ses_adjudicated_job_recovery.sql|function|bind_adjudicated_ses_existing_job'
-  local roof_initial_cycle_expected='ops-api|supabase/migrations/20260803070000_makesafe_roof_initial_cycle_binding.sql|function|bind_makesafe_roof_initial_cycle_v1'
+  local roof_initial_cycle_expected='ops-api|supabase/migrations/20260803080000_makesafe_roof_initial_cycle_binding.sql|function|bind_makesafe_roof_initial_cycle_v1'
   if grep -Fxq "$report_expected" "$MANIFEST" && \
     grep -Fxq "$media_expected" "$MANIFEST" && \
     grep -Fxq "$fresh_health_expected" "$MANIFEST" && \

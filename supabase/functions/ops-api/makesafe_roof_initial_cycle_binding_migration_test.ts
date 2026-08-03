@@ -6,13 +6,13 @@ import {
 
 const migration = await Deno.readTextFile(
   new URL(
-    "../../migrations/20260803070000_makesafe_roof_initial_cycle_binding.sql",
+    "../../migrations/20260803080000_makesafe_roof_initial_cycle_binding.sql",
     import.meta.url,
   ),
 );
 const rollback = await Deno.readTextFile(
   new URL(
-    "../../rollbacks/20260803070000_makesafe_roof_initial_cycle_binding_down.sql",
+    "../../rollbacks/20260803080000_makesafe_roof_initial_cycle_binding_down.sql",
     import.meta.url,
   ),
 );
@@ -77,7 +77,7 @@ Deno.test("ops-api calls the schema-gated atomic function and rollback removes o
   );
   assertStringIncludes(
     manifest,
-    "20260803070000_makesafe_roof_initial_cycle_binding.sql|function|bind_makesafe_roof_initial_cycle_v1",
+    "20260803080000_makesafe_roof_initial_cycle_binding.sql|function|bind_makesafe_roof_initial_cycle_v1",
   );
   assertStringIncludes(
     rollback,
