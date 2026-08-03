@@ -2052,6 +2052,7 @@ async function prepareOne(
             `sha256:${text(resolved.render_hash).replace(/^sha256:/, "")}` !==
               resolvedRawHash)
         ) {
+          persistenceRefused = true;
           const itemBlocker = addBlocker(
             blockers,
             blocked(
@@ -2119,6 +2120,7 @@ async function prepareOne(
             !resolvedPhoto ||
             !/^sha256:[0-9a-f]{64}$/.test(expectedPhotoHash)
           ) {
+            persistenceRefused = true;
             const itemBlocker = addBlocker(
               blockers,
               blocked(
@@ -2161,6 +2163,7 @@ async function prepareOne(
             if (
               await rawArtifactSha256(resolvedPhoto.bytes) !== expectedPhotoHash
             ) {
+              persistenceRefused = true;
               const itemBlocker = addBlocker(
                 blockers,
                 blocked(
