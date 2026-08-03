@@ -1754,13 +1754,15 @@ export async function loadIntakeExceptionProjection(
 // falls back to the overlay-blind `makesafe_pipeline`, and every captain
 // display-ledger transition silently disappears from the live board (the
 // 2026-08-01 `intake source issue uniqueness violated` outage; see
-// `docs/evidence/ses-261124-archive-display-diagnosis-2026-08-01.md`).
+// `docs/evidence/ses-261124-archive-display-diagnosis-2026-08-01.md`). The
+// dedicated read now aggregates the live reason-coded source grain, while
+// board callers still degrade explicitly if any other projection read fails.
 //
 // The empty projection this returns is NOT "no exceptions": every consumer must
 // read `degraded` first, which is why the field is populated rather than the
 // counts being quietly zeroed. Board callers degrade; the dedicated
-// `makesafe_intake_exception_read` action still throws, because serving
-// exception cards is its whole purpose.
+// `makesafe_intake_exception_read` action surfaces projection failures because
+// serving exception cards is its whole purpose.
 export function degradedIntakeExceptionProjection(
   options: { orgId?: string; generatedAt: string; error: unknown },
 ): IntakeExceptionProjection {

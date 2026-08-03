@@ -144,8 +144,9 @@ fix.
 It goes through `_loadIntakeExceptionProjectionForBoard`, which catches, logs
 `[ops-api] ALARM makesafe_board intake exception projection degraded (board
 still served)` with the guard's own message verbatim, and returns
-`degradedIntakeExceptionProjection(...)`. The uniqueness guard is untouched and
-now serves as the alarm rather than a board-wide outage.
+`degradedIntakeExceptionProjection(...)`. The historical uniqueness assertion
+was later replaced by aggregation at the live reason-coded source grain; the
+board still alarms and degrades explicitly on projection failures.
 
 Two properties hold the change up, both covered by
 `makesafe_board_intake_exception_degrade_test.ts`:
@@ -155,8 +156,11 @@ Two properties hold the change up, both covered by
   healthy projection states `degraded: null` rather than omitting the field. Zero
   exception cards is never readable as a clean intake — this repo's
   "a wrong column name reads as no data" failure mode, avoided by construction.
-- **Only the board degrades.** `makesafe_intake_exception_read` still throws on
-  the same failure, because serving those cards is its entire purpose.
+- **Only the board degraded in the incident.** At the time of the incident,
+  `makesafe_intake_exception_read` still threw on the same failure because
+  serving those cards was its entire purpose. The current dedicated read
+  aggregates distinct source issues at the live reason-coded uniqueness grain;
+  projection failures remain explicit rather than becoming an empty desk.
 
 The end-to-end regression test drives `makesafeBoardAction` against a fixture
 carrying the exact two-issue-rows-on-one-post shape plus a ledger overlay, and
