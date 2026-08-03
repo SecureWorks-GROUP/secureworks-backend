@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any no-import-prefix
 import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _resolveAllocationAuthz,
@@ -18,6 +19,8 @@ type Store = {
   calls?: string[];
   inserts?: Array<{ table: string; row: any }>;
   updates?: Array<{ table: string; row: any }>;
+  raceOnInsert?: any;
+  raceOnUpdate?: any;
 };
 
 function makeClient(store: Store) {
@@ -26,9 +29,36 @@ function makeClient(store: Store) {
   store.updates = store.updates || [];
   function builder(table: string) {
     const filters: Record<string, any> = {};
+    const excluded: Record<string, any> = {};
     let op: "select" | "insert" | "update" | "delete" = "select";
     let insertRow: any = null;
     let updateRow: any = null;
+    const assignmentConflict = () => {
+      if (table !== "job_assignments" || (op !== "insert" && op !== "update")) return null;
+      const source = op === "update" ? store.assignments?.[filters.id] : null;
+      if (op === "update" && !source) return null;
+      const racedAssignment = op === "update" ? store.raceOnUpdate : store.raceOnInsert;
+      if (racedAssignment) {
+        store.assignments = { ...(store.assignments || {}), [racedAssignment.id]: racedAssignment };
+        if (op === "update") store.raceOnUpdate = undefined;
+        else store.raceOnInsert = undefined;
+      }
+      const nextJobId = insertRow?.job_id ?? source?.job_id;
+      const nextUserId = insertRow?.user_id ?? updateRow?.user_id ?? source?.user_id;
+      const nextDate = insertRow?.scheduled_date ?? updateRow?.scheduled_date ?? source?.scheduled_date;
+      const duplicate = Object.values(store.assignments || {}).find((row: any) =>
+        row.id !== source?.id &&
+        row.job_id === nextJobId &&
+        row.user_id === nextUserId &&
+        row.scheduled_date === nextDate
+      );
+      if (!duplicate) return null;
+      return {
+        code: "23505",
+        message: 'duplicate key value violates unique constraint "job_assignments_job_user_date_key"',
+        details: `Key (job_id, user_id, scheduled_date)=(${nextJobId}, ${nextUserId}, ${nextDate}) already exists.`,
+      };
+    };
     const resolveSingle = () => {
       if (op === "insert") return { id: "new-assignment", ...insertRow };
       if (op === "update") {
@@ -40,8 +70,18 @@ function makeClient(store: Store) {
       return null;
     };
     const resolveArray = () => {
-      if (table === "job_assignments") return store.dup ?? [];
+      if (table === "job_assignments") {
+        if (store.dup !== undefined) return store.dup;
+        return Object.values(store.assignments || {}).filter((row: any) =>
+          Object.entries(filters).every(([key, value]) => row[key] === value) &&
+          Object.entries(excluded).every(([key, value]) => row[key] !== value)
+        );
+      }
       return [];
+    };
+    const resolveSingleResponse = () => {
+      const error = assignmentConflict();
+      return { data: error ? null : resolveSingle(), error };
     };
     const b: any = {
       select: () => b,
@@ -49,7 +89,7 @@ function makeClient(store: Store) {
       update: (row: any) => { op = "update"; updateRow = row; store.updates!.push({ table, row }); return b; },
       delete: () => { op = "delete"; return b; },
       eq: (k: string, v: any) => { filters[k] = v; return b; },
-      neq: () => b,
+      neq: (k: string, v: any) => { excluded[k] = v; return b; },
       not: () => b,
       in: () => b,
       or: () => b,
@@ -58,8 +98,8 @@ function makeClient(store: Store) {
       ilike: () => b,
       order: () => b,
       limit: () => b,
-      maybeSingle: () => Promise.resolve({ data: resolveSingle(), error: null }),
-      single: () => Promise.resolve({ data: resolveSingle(), error: null }),
+      maybeSingle: () => Promise.resolve(resolveSingleResponse()),
+      single: () => Promise.resolve(resolveSingleResponse()),
       then: (resolve: any) =>
         Promise.resolve({ data: resolveArray(), error: null }).then(resolve),
     };
@@ -331,6 +371,174 @@ Deno.test("allocateJob: reassign to the SAME installer is a no-op (deduped)", as
   assertEquals(res.mode, "reassign");
   assertEquals(res.deduped, true);
   assertEquals(store.updates!.length, 0); // no update issued
+});
+
+Deno.test("allocateJob: multi-person allocation preserves an already-selected target crew row", async () => {
+  const store: Store = {
+    assignments: {
+      "a-alyx": {
+        id: "a-alyx",
+        job_id: "job-fen",
+        user_id: "inst-alyx",
+        scheduled_date: "2026-08-04",
+        status: "scheduled",
+      },
+      "a-henry": {
+        id: "a-henry",
+        job_id: "job-fen",
+        user_id: "inst-henry",
+        scheduled_date: "2026-08-04",
+        status: "scheduled",
+      },
+    },
+    jobs: { "job-fen": FENCING_JOB },
+    users: {
+      "inst-alyx": { id: "inst-alyx" },
+      "inst-henry": { id: "inst-henry" },
+    },
+  };
+  const client = makeClient(store);
+
+  // The Trade app sends the first selected person as a reassignment of the
+  // representative row, then creates/dedupes each additional selected person.
+  const first = await allocateJob(client, {
+    body: { assignmentId: "a-alyx", userId: "inst-henry" },
+    callerRole: "lead_installer",
+    managedVerticals: ["fencing"],
+  });
+  const second = await allocateJob(client, {
+    body: {
+      jobId: "job-fen",
+      userId: "inst-alyx",
+      scheduledDate: "2026-08-04",
+    },
+    callerRole: "lead_installer",
+    managedVerticals: ["fencing"],
+  });
+
+  assertEquals(first.ok, true);
+  assertEquals(first.mode, "reassign");
+  assertEquals(first.deduped, true);
+  assertEquals(first.assignment.id, "a-henry");
+  assertEquals(second.ok, true);
+  assertEquals(second.deduped, true);
+  assertEquals(second.assignment.id, "a-alyx");
+  assertEquals(store.updates!.filter((entry) => entry.table === "job_assignments").length, 0);
+  assertEquals(store.inserts!.filter((entry) => entry.table === "job_assignments").length, 0);
+});
+
+Deno.test("allocateJob: a concurrent target reassignment becomes a deduped success", async () => {
+  const store: Store = {
+    assignments: {
+      "a-source": {
+        id: "a-source",
+        job_id: "job-fen",
+        user_id: "inst-source",
+        scheduled_date: "2026-08-04",
+        status: "scheduled",
+      },
+    },
+    raceOnUpdate: {
+      id: "a-raced-target",
+      job_id: "job-fen",
+      user_id: "inst-target",
+      scheduled_date: "2026-08-04",
+      status: "scheduled",
+    },
+    jobs: { "job-fen": FENCING_JOB },
+    users: { "inst-target": { id: "inst-target" } },
+  };
+
+  const result = await allocateJob(makeClient(store), {
+    body: { assignmentId: "a-source", userId: "inst-target" },
+    callerRole: "lead_installer",
+    managedVerticals: ["fencing"],
+  });
+
+  assertEquals(result.ok, true);
+  assertEquals(result.mode, "reassign");
+  assertEquals(result.deduped, true);
+  assertEquals(result.assignment.id, "a-raced-target");
+  assertEquals(store.updates!.filter((entry) => entry.table === "job_assignments").length, 1);
+});
+
+Deno.test("allocateJob: a concurrent target insert becomes a deduped success", async () => {
+  const store: Store = {
+    assignments: {},
+    raceOnInsert: {
+      id: "a-raced-target",
+      job_id: "job-fen",
+      user_id: "inst-target",
+      scheduled_date: "2026-08-04",
+      status: "scheduled",
+    },
+    jobs: { "job-fen": FENCING_JOB },
+    users: { "inst-target": { id: "inst-target" } },
+  };
+
+  const result = await allocateJob(makeClient(store), {
+    body: {
+      jobId: "job-fen",
+      userId: "inst-target",
+      scheduledDate: "2026-08-04",
+    },
+    callerRole: "lead_installer",
+    managedVerticals: ["fencing"],
+  });
+
+  assertEquals(result.ok, true);
+  assertEquals(result.mode, "idempotent");
+  assertEquals(result.deduped, true);
+  assertEquals(result.assignment.id, "a-raced-target");
+  assertEquals(store.inserts!.filter((entry) => entry.table === "job_assignments").length, 1);
+});
+
+Deno.test("allocateJob: a detail-changing job/user/date conflict returns a precise 409", async () => {
+  const store: Store = {
+    assignments: {
+      "a-source": {
+        id: "a-source",
+        job_id: "job-fen",
+        user_id: "inst-source",
+        scheduled_date: "2026-08-04",
+        status: "scheduled",
+      },
+      "a-existing-target": {
+        id: "a-existing-target",
+        job_id: "job-fen",
+        user_id: "inst-target",
+        scheduled_date: "2026-08-04",
+        status: "scheduled",
+      },
+    },
+    jobs: { "job-fen": FENCING_JOB },
+    users: { "inst-target": { id: "inst-target" } },
+  };
+
+  let caught: any = null;
+  try {
+    await allocateJob(makeClient(store), {
+      body: {
+        assignmentId: "a-source",
+        userId: "inst-target",
+        notes: "Do not silently discard this requested change",
+      },
+      callerRole: "lead_installer",
+      managedVerticals: ["fencing"],
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  assertEquals(caught?.status, 409);
+  assertEquals(caught?.body?.code, "assignment_user_date_conflict");
+  assertEquals(caught?.body?.constraint, "job_assignments_job_user_date_key");
+  assertEquals(caught?.body?.user_id, "inst-target");
+  assertEquals(caught?.body?.scheduled_date, "2026-08-04");
+  assertEquals(
+    caught?.body?.error,
+    "An existing assignment record prevents allocating that crew member to this job on 2026-08-04",
+  );
 });
 
 Deno.test("allocateJob: reassign moves the assignment to a new installer via updateAssignment", async () => {
