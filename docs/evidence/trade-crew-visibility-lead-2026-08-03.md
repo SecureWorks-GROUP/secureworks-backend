@@ -228,28 +228,115 @@ bypass is diagnosable instead of invisible.
 
 Rollback twin: `supabase/rollbacks/20260803010000_..._down.sql`.
 
-The migration version could **not** be checked against the live
-`supabase_migrations.schema_migrations` ledger: both available Supabase
-Management API tokens returned 401 (see the open item below). `20260803010000`
-is ahead of every migration in this repo, but the AGENTS.md rule is to check the
-live ledger, and that check is outstanding. `bash
-scripts/apply-pending-migrations.sh --dry-run` with a working
-`SUPABASE_ACCESS_TOKEN` reproduces it read-only.
+### UNVERIFIED: the live migration-ledger version check
 
-## Open items
+**This check was not performed. Treat the migration version as unconfirmed
+until it is.**
+
+AGENTS.md requires a new migration's version to be checked against the LIVE
+`supabase_migrations.schema_migrations` ledger, not just against
+`supabase/migrations/`, because production carries migrations applied through
+other lanes that are not in this repo.
+
+**What the check would have confirmed:** that version `20260803010000` does not
+already exist in the production ledger under a different filename. A repository
+file whose version matches a ledger row of a different name is a `ledger
+version/name collision`, and it fails the entire deploy run — every migration
+and every function — before anything ships. The fix for a collision is to
+renumber this file (plus its `supabase/rollbacks/` twin and every reference to
+it), never to add an exclusion or an alias.
+
+**Why it was not done:** both available Supabase Management API tokens return
+HTTP 401. Per the captain, those credentials are dead and are being handled
+separately; they were not chased. All production measurement in this document
+was taken read-only through the ops-api front door instead, which cannot read
+the ledger.
+
+**How to close it:** `bash scripts/apply-pending-migrations.sh --dry-run` with a
+working `SUPABASE_ACCESS_TOKEN` reproduces the whole gate read-only. It is the
+cheap pre-merge check.
+
+What is known without the ledger: `20260803010000` is ahead of every migration
+present in this repo (newest is `20260802030000`). That is necessary but not
+sufficient.
+
+### Ordering: the migration MUST land before ops-api
+
+For whoever merges this. The two halves of this change are not
+order-independent:
+
+`tradeJobDetail`'s crew select names `is_lead`. If `ops-api` ships while the
+column is absent, PostgREST returns a 400 and the call site's `|| []` turns that
+into an **empty crew list** — not an error. The trade app would show every
+assigned installer that nobody is on the job with them, silently, which is worse
+than the bug this change fixes.
+
+`scripts/edge-function-schema-requirements.txt` declares the column and the
+index, so the production lane refuses to deploy `ops-api` until both exist, and
+the standard workflow applies pending reviewed migrations before deploying
+function code. The ordering is therefore enforced rather than trusted — but it
+is enforced by that manifest entry, so do not drop it, and do not deploy
+`ops-api` from a path that bypasses the lane.
+
+## Client follow-up (`secureworks-ux`, separate task)
+
+`dashboard/trade.html` lives in `secureworks-ux` and was deliberately not
+touched from this worktree. **The server now returns everything below; the app
+still has to render it.** None of it is speculative — every key is asserted by
+`trade_crew_visibility_lead_test.ts`.
+
+All five items read from the existing `trade_job_detail` response. No new call,
+no new parameter, no auth change.
+
+1. **Crew section — "who am I on the job with".** `crew[]` now carries a
+   resolved `name` (from the joined user, falling back to `crew_name`) and
+   `is_lead`. The existing section header in the trade-app doc says "who else is
+   assigned today"; the payload is deliberately NOT date-filtered (the user
+   explicitly opened this job), so render the whole roster.
+2. **Lead badge.** `leadInstaller` is `{assignment_id, user_id, name, phone}` or
+   **`null`**. Null is the normal case today and for every historical job — it
+   means nobody has been designated, and it must render as absent, not as a
+   placeholder or a guess. Do not derive a lead from `crew[].role`; see the
+   role-default measurement above for why that column says almost everyone is a
+   lead.
+3. **Scope.** `scopeSummary` is a plain one-line string, e.g.
+   `6m x 4m, Gable, SolarSpan 75mm, Monument, 4 x 100x100 SHS posts`. It is
+   `""` when the scope blob yields nothing — render nothing, not an empty
+   heading. This is what the app should show instead of reaching into
+   `job.scope_json`, which is the multi-hundred-kB scoping-tool blob.
+4. **Work order.** `workOrders[]` is every live work order; `workOrder` is
+   unchanged and still the newest one, so **the existing rendering keeps
+   working untouched** — this is purely an opportunity to show all of them on
+   the jobs that have more than one.
+5. **Work-order PDF.** `workOrderDocuments[]` is the work-order documents ops
+   has flagged for trades, already visibility-filtered.
+
+**One behaviour change to be aware of on the client side:** `documents[]` is now
+filtered server-side to `visible_to_trades = true`. If `trade.html` currently
+does its own `visible_to_trades` filter, it becomes a no-op and nothing changes.
+If it does NOT filter, the document list will get shorter — that is the point,
+it was showing quote PDFs. Either way the client needs no change for
+correctness; check it only so the shorter list is not mistaken for a defect.
+
+Setting a lead (`set_job_lead`) is an **ops** action, not a trade one: an
+ordinary installer is refused by the server. If a lead picker is wanted in the
+trade app it belongs on the manager/dispatcher allocation screen, alongside the
+existing allocate flow, and it will only work for a dispatcher or a manager of
+that job's vertical.
+
+## Other open items
 
 - **Management API access is broken from this workspace.** Both the
   `SUPABASE_ACCESS_TOKEN` in the environment and the one configured on the
-  `supabase` MCP server return HTTP 401 on `GET /v1/projects`. All production
-  measurement in this document was taken read-only through the ops-api front
-  door instead. The live-ledger version check above is blocked on this.
+  `supabase` MCP server return HTTP 401 on `GET /v1/projects`. Per the captain
+  these credentials are dead and are being handled separately; they were not
+  chased. Consequence for this change is the unverified ledger check above.
 - **`job_assignments.visible_to_trades` is written but never read.**
   `createAssignment` sets it true for make-safe allocations with a comment
   saying allocated make-safes are otherwise invisible to the trade, but no query
   in `ops-api` filters on it. Either the comment is stale or a filter was lost;
   worth resolving separately rather than guessing here.
-- **Client rendering is a separate repo.** `dashboard/trade.html` lives in
-  `secureworks-ux`. The server now returns a crew roster with names, a lead, a
-  scope line, every live work order and a work-order document surface; rendering
-  them is a follow-up PR there, in the same shape as the client follow-up
-  section of `docs/trade-all-means-all-v1.md`.
+- **`job_assignments.role` carries an undeclared value in production.** Live
+  data contains `observer`, which is not in the repo's `job_assignments_role_check`
+  constraint (`lead_installer, helper, estimator, crew, lead`). Nothing in this
+  change depends on that constraint, but it is live schema drift.
