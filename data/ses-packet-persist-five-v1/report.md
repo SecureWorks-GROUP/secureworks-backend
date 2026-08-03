@@ -24,13 +24,129 @@ Cards: `SWMS-261021`, `SWMS-261015`, `SWMS-261065`, `SWMS-261109`, roof card `SW
 
 **Count line: 1 card into Docs Ready, 2 already there and untouched, 2 walled. Queue 38 → 39.**
 
-Two findings outrank the count, and both are in the body: the packet's persist payload shape is
-wrong in the wiki skill doc (§2c), and **the packet's step-2 validator gate cannot pass for any
-U4-assembled pack on any card** (§4).
-
 **No card was archived, completed, cancelled or sent. No email was drafted to any recipient. No
 Xero invoice was created, authorised or sent. The money seal was never approached — no money path
 was called, so there was no 403 and no 409 on it.**
+
+---
+
+# READ THIS FIRST — two contract findings that outrank the count
+
+Both are defects in the **documented run path**, not in any card. Both will hit the next runner on
+the first card they touch. Full working in §2c, §2d and §4.
+
+## FINDING 1 — the skill's step-2 validator gate cannot pass for ANY assembler-built pack, on any card
+
+The run contract's step 13 and the packet's step 2 both make this a hard gate:
+
+> `scripts/validate_review_pack.py <pack> --pre-xero` must exit 0.
+
+**It cannot, today, for any card.** Two independent reasons, and the second is the fatal one.
+
+**a. Before the persist there is nothing to validate.** On the U4 persist path the assembler is
+**server-side**. A `dry_run: true` returns the docket envelope, item states, priced proposal and an
+artifact table of paths and `sha256` hashes — but **no bytes**. The artifacts are written only on
+`dry_run: false` (`ses_prepare_docket_revision.ts:2676` gates the whole persist block, upload
+included). `validate_docket_manifest` requires every `ready` artifact item to resolve to an existing
+in-pack file (`docket_manifest.py:608-612`). So at the moment the gate is supposed to run, the pack
+does not exist. The ordering in the doc is inherited from the pre-Lavish era when the runner
+assembled the pack on disk.
+
+**b. After the persist it still fails — 25 times — because the two sides are different contracts.**
+I fetched all 13 artifacts of the real persisted revision through `get_ses_reviewable_pack`'s signed
+URLs, wrote them at their in-pack paths (every one matched its recorded `size_bytes`), and ran the
+gate:
+
+```
+$ validate_review_pack.py pack-261019 --pre-xero
+PASS: 0 jobs review-ready
+FAIL: 25 validation issues
+exit 1
+```
+
+**20 of the 25 come from the server's own `docket_manifest.json` and `case_story.json`, which I
+copied byte-for-byte and did not author.** It is a vocabulary mismatch, not a near-miss:
+
+| The assembler emits | The Python gate requires |
+|---|---|
+| `files:SOURCE/work_order_….pdf` | `file:<path>` — one character apart, and the file **is** in the pack |
+| `case-story/assembler-spine-v1` (522 bytes) | `case-story/v1` with `timeline`, `attempts`, `evidence_map`, `artifact_ledger`, `recovery_cursor`, `correlation` + the full rule corpus — **12 of the 20 failures are this one artifact** |
+| `line_items` in `invoice_proposal.json` | `lines` |
+| `draft_builder_report_email` n/a rule `portal-is-the-report` | only `cancelled-before-builder-report` allowed |
+| `hrcw_assessment` evidence `file:case_story.json#hrcw` | `rule:no-hrcw-found#<source>` |
+| `supporting_invoice_pdf` reason_code `recovery-not-run` | `pre-xero-captain-invoice-approval` |
+
+**On the substantive points the backend is the one that is right.** Four of the five remaining
+failures are places the Python contract has no shape for a portal roof card: it demands a
+`makesafe_report` document and a `REPORT_EMAIL_DRAFT.txt`, while the assembler correctly marks both
+`not_applicable` because for MLB's sealed portal route *the portal is the report*.
+
+**This does not mean the persist is ungated.** The backend carries the gate's twin —
+`validatePreXero` (`ses_prepare_docket_revision.ts:1309-1326`): zero blockers, priced proposal
+bound, `invoice_proposal` artifact present, no required item blocked except the deliberately
+deferred `supporting_invoice_pdf`. `docket_manifest.py:26-30` documents the mirroring in its own
+comment. That is the gate that ran, on the real pack, and it is why the card persisted.
+
+**Consequence for the record:** this was equally true for the 35 dockets the batch-5 run persisted.
+That report never mentions running the validator, which now reads as the same discovery made
+silently. **Either the Python gate is retired from the persist path and `validatePreXero` named as
+the gate, or the two vocabularies are reconciled.** Not a runner's call — flagging it.
+
+*I did not translate the six vocabulary items and hand-write a `case-story/v1` to force a green.
+That would have certified my transcription, not the card.*
+
+## FINDING 2 — the persist payload documented in the wiki skill is wrong and is rejected by production
+
+`harness/ops/skills/secureworks-makesafe-reporting/references/docs-ready-persist.md` (and the
+packet, which copies it) documents:
+
+```
+selection: {job_numbers: ["SWMS-......", ...]}
+```
+
+Production answers **HTTP 400**:
+
+```
+{"error":"selection must be exactly one job_id, job_number, or board_batch limit from 1 to 50.",
+ "code":"ses_selection_invalid"}
+```
+
+The real contract (`ses_assembler_input_adapter.ts:2514-2545`) is **one card per call**, mode-tagged:
+
+```
+selection: {mode: "job_number", job_number: "SWMS-261019"}
+```
+
+The other two modes are `{mode:"job_id", job_id:…}` and `{mode:"board_batch", limit: 1..50}`. A
+`job_numbers` array is not a shape the adapter has — note the doc also implies you can batch several
+cards into one call, and you cannot. **The wiki doc needs correcting; it is what the next runner
+will copy from.**
+
+### Bonus, same class, costs one round trip
+
+`ops-api` dispatches on the **query-string** `action`. A POST carrying `{"action": …}` in the JSON
+body alone returns `{"error":"Unknown action"}`, which reads exactly like a missing or undeployed
+action and is not. Action in the URL, arguments in the body.
+
+And: check a validator's exit status **without a pipe**. `… | head` reports `head`'s 0 and hides a
+failing gate — that is how a red gate reads as green.
+
+---
+
+# ALSO NEEDS A RULING — `SWMS-261065` (Munster) is in the review queue saying it is dead
+
+It has been in the Docs Ready queue since the batch-5 run (revision `e4fdae2c…`, queue seq 7),
+`pre_xero_docs_ready: true`, awaiting signoff, with a completed assignment recorded against it.
+
+Its standing ops note says the opposite:
+
+> FIRSTMATE TRIAGE 2026-07-28: DEAD, CLOSURE PROVEN: Quote-only request; Khairo quoted 07-22; MLB
+> 07-23 "please disregard job". Ops must leave this cancelled or handed-back card archived; no
+> attendance, report, invoice, or outbound send is owed.
+
+**Those two records disagree, and the disagreement is sitting in the captain's review queue looking
+like work.** Either the note is stale, or the docket should be withdrawn from the queue. I did not
+touch the card and I am not deciding which. It needs a ruling.
 
 ---
 
@@ -418,17 +534,12 @@ transcription rather than the card.
 
 ## 6. Two card-level findings the captain should see
 
-**a. `SWMS-261065` is in the Docs Ready queue carrying a "job is dead" ops note.** It has been in
-the review queue since the batch-5 run, and its standing note reads:
-
-> FIRSTMATE TRIAGE 2026-07-28: DEAD, CLOSURE PROVEN: Quote-only request; Khairo quoted 07-22; MLB
-> 07-23 "please disregard job". Ops must leave this cancelled or handed-back card archived; no
-> attendance, report, invoice, or outbound send is owed.
-
-Its docket is nonetheless `pre_xero_docs_ready: true` and awaiting signoff, with a completed
-assignment recorded against it. **Those two records disagree**, and the disagreement is sitting in
-the captain's review queue as if it were work. I did not touch the card. It needs a ruling: either
-the note is stale, or the docket should be withdrawn from the queue. Flagging, not deciding.
+**a. `SWMS-261065` (Munster) is in the Docs Ready queue carrying a "job is dead" ops note.**
+Stated in full at the front of this report under **ALSO NEEDS A RULING** — it is the one item here
+that needs the captain rather than an engineer. Supporting detail: docket `e4fdae2c…`, queue seq 7,
+committed 2026-08-02T23:59Z by the batch-5 run, `pre_xero_docs_ready: true`, one assignment
+recorded `status: complete` with `completed_at: 2026-07-30T02:24:17Z`, and a submitted report with
+9 photos on cycle 1 — all of which is why it reads as finished work rather than as a dead card.
 
 **b. The standing note on `SWMS-261015` is now half stale.** It says U4 "loses the source reference
 and deliverables and raises known-false SWMS fact inputs". As of today
