@@ -220,45 +220,63 @@ supabase/functions/ops-api/index.ts` is clean.
 **Migration first**, and the gate enforces it. The trade crew select names
 `is_lead`; per AGENTS.md a missing column returns a PostgREST 400 that degrades
 to an **empty crew list** rather than an error, which would blank the very
-feature this ships. `20260803010000_job_assignment_lead_installer.sql` is
+feature this ships. `20260803070000_job_assignment_lead_installer.sql` is
 therefore declared in `scripts/edge-function-schema-requirements.txt` so the
 production lane refuses to deploy `ops-api` until the column and the unique
 index exist. `tradeJobDetail` additionally logs `crewRes.error` loudly so a gate
 bypass is diagnosable instead of invisible.
 
-Rollback twin: `supabase/rollbacks/20260803010000_..._down.sql`.
+Rollback twin: `supabase/rollbacks/20260803070000_..._down.sql`.
 
-### UNVERIFIED: the live migration-ledger version check
+### VERIFIED: live collision and free replacement version
 
-**This check was not performed. Treat the migration version as unconfirmed
-until it is.**
+On 2026-08-03, a read-only Supabase Management API query confirmed the deploy
+failure. Production already records `20260803010000` as
+`ses_drop_unsatisfiable_readiness_precondition`; the unapplied
+`job_assignment_lead_installer` file had incorrectly reused that live version.
+Production also records the repository migrations at `20260803020000` through
+`20260803060000`, so the originally proposed `20260803040000` replacement is
+not free. The lead-installer migration and rollback twin were therefore
+renumbered to `20260803070000`, the first version absent from both the live
+ledger and `supabase/migrations/`.
 
-AGENTS.md requires a new migration's version to be checked against the LIVE
-`supabase_migrations.schema_migrations` ledger, not just against
-`supabase/migrations/`, because production carries migrations applied through
-other lanes that are not in this repo.
+The same read-only query was captured before and after the repository rename:
 
-**What the check would have confirmed:** that version `20260803010000` does not
-already exist in the production ledger under a different filename. A repository
-file whose version matches a ledger row of a different name is a `ledger
-version/name collision`, and it fails the entire deploy run — every migration
-and every function — before anything ships. The fix for a collision is to
-renumber this file (plus its `supabase/rollbacks/` twin and every reference to
-it), never to add an exclusion or an alias.
+```sql
+SELECT version, name
+FROM supabase_migrations.schema_migrations
+WHERE version IN (
+  '20260803010000', '20260803020000', '20260803030000',
+  '20260803040000', '20260803050000', '20260803060000',
+  '20260803070000'
+)
+ORDER BY version;
+```
 
-**Why it was not done:** both available Supabase Management API tokens return
-HTTP 401. Per the captain, those credentials are dead and are being handled
-separately; they were not chased. All production measurement in this document
-was taken read-only through the ops-api front door instead, which cannot read
-the ledger.
+Before rename:
 
-**How to close it:** `bash scripts/apply-pending-migrations.sh --dry-run` with a
-working `SUPABASE_ACCESS_TOKEN` reproduces the whole gate read-only. It is the
-cheap pre-merge check.
+```json
+[{"version":"20260803010000","name":"ses_drop_unsatisfiable_readiness_precondition"},{"version":"20260803020000","name":"ses_drop_approval_readiness_precondition"},{"version":"20260803030000","name":"ses_drop_release_execution_readiness_precondition"},{"version":"20260803040000","name":"ses_approval_visibility_decoupled_from_readiness"},{"version":"20260803050000","name":"ses_docket_review_retire"},{"version":"20260803060000","name":"job_documents_roof_report_type"}]
+```
 
-What is known without the ledger: `20260803010000` is ahead of every migration
-present in this repo (newest is `20260802030000`). That is necessary but not
-sufficient.
+After rename: the response was byte-identical. In both captures there is no
+`20260803070000` ledger row, so the target version is genuinely free. A separate
+read-only catalog query returned `{"is_lead_exists":false}`, confirming the
+lead-installer migration remains unapplied. No migration was applied by these
+checks.
+
+The repository's production-locked dry-run then completed without the collision
+and planned exactly this one migration:
+
+```text
+pending_migrations: 1
+PENDING 1 20260803070000_job_assignment_lead_installer sha256=2aa49d885f02c42ba9e121bcea83d967e5fee653424ddf87398f71516eaebe99
+PASS migration auto-apply dry-run: no production changes were made
+```
+
+The standard read-only reproduction remains `bash
+scripts/apply-pending-migrations.sh --dry-run` with a working
+`SUPABASE_ACCESS_TOKEN`.
 
 ### Ordering: the migration MUST land before ops-api
 
