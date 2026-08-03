@@ -34114,8 +34114,9 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
   })
   if (identical) {
     const facts = identical.data_snapshot_json || {}
-    const missingProvenance = facts.evidence_source !== evidenceSource ||
-      !facts.source_document_id
+    const missingProvenance = Object.entries(trustedSnapshot).some(
+      ([key, value]) => facts[key] !== value,
+    ) || facts.evidence_source !== evidenceSource || !facts.source_document_id
     if (missingProvenance) {
       const { error: provenanceError } = await client.from('job_documents')
         .update({

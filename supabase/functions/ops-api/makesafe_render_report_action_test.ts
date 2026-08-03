@@ -155,9 +155,13 @@ Deno.test("current-wiki attach retries identical bytes without writes", async ()
   const pdf = new TextEncoder().encode("%PDF-fixture");
   const rawHash = await sha(pdf);
   const reportJob = currentReportJob();
-  const { client, mutations, updates } = attachClient("SWMS-TEST", {
+  const reportInputHash = await inputHash(reportJob);
+  const { client, mutations } = attachClient("SWMS-TEST", {
     report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+    report_renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+    report_renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
     report_render_hash: rawHash,
+    report_input_hash: reportInputHash,
     report_renderer_version:
       `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`,
     evidence_source: "current_cycle_curated_makesafe_report",
@@ -169,7 +173,7 @@ Deno.test("current-wiki attach retries identical bytes without writes", async ()
     renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
     pdf_base64: base64(pdf),
     pdf_sha256: rawHash,
-    report_input_hash: await inputHash(reportJob),
+    report_input_hash: reportInputHash,
     report_job: reportJob,
   });
   assertEquals(result.writes, 0);
@@ -206,6 +210,11 @@ Deno.test("identical current-wiki attachment repairs provenance once", async () 
   assertEquals(snapshot.report_renderer_version,
     `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`);
   assertEquals(snapshot.report_render_hash, rawHash);
+  assertEquals(snapshot.report_renderer_source_revision,
+    MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION);
+  assertEquals(snapshot.report_renderer_script_sha256,
+    MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256);
+  assertEquals(snapshot.report_input_hash, await inputHash(reportJob));
   assertEquals(snapshot.evidence_source, "current_cycle_curated_makesafe_report");
   assertEquals(snapshot.source_document_id, "document-fixture");
 });
