@@ -97,6 +97,21 @@ Deno.test("approval correlation refuses a stale typed composite WO", () => {
   });
 });
 
+Deno.test("approval correlation refuses two source WO groups even when the PO agrees", () => {
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: {},
+    approved_external_ref: "MLB-10001",
+    requesting_company_slug: "mlb",
+    family: "general_makesafe",
+    attachment_names: ["MLB-10002PO-40001.pdf"],
+  });
+  assertEquals(decision, {
+    action: "refuse",
+    reason: "source_identity_conflict",
+    instruction_keys: ["MLB:PO-40001"],
+  });
+});
+
 Deno.test("approval correlation combines the approved WO with every PO-only attachment before refusing ambiguity", () => {
   const decision = correlateIntakeApprovalIdentity({
     extraction: {},
