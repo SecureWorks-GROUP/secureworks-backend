@@ -184,16 +184,16 @@ const RECOVERED_EXCEPTION = {
     org_id: "00000000-0000-0000-0000-000000000001",
     company_id: null,
     company_slug_raw: "mlb",
-    external_ref_raw: "MLB-RR-59036",
+    external_ref_raw: "MLB-RR-26836",
     external_ref_canonical: null,
     builder_wo_canonical: null,
     builder_po_canonical: null,
     wo_po_identity_key: null,
     raw_identity_json: {
       builder_slug: "mlb",
-      external_ref: "MLB-RR-59036",
-      builder_wo: "MLB-RR-59036",
-      builder_po: "PO-59002",
+      external_ref: "MLB-RR-26836",
+      builder_wo: "MLB-RR-26836",
+      builder_po: "PO-57602",
     },
     story_json: [],
     evidence_map: {},
@@ -276,7 +276,7 @@ const RECOVERED_EXCEPTION = {
   ]),
   emails: [{
     post_id: "transport-a",
-    subject: "MLB-RR-59036 PO-59002",
+    subject: "MLB-RR-26836 PO-57602",
     from_email: null,
     from_name: null,
     received_at: "2026-08-03T04:07:07.000Z",
@@ -309,8 +309,8 @@ Deno.test("dedicated exception list renders one multi-source fallback card with 
   assertEquals(response.status, 200);
   const body = await response.json();
   assertEquals(body.cards.length, 1);
-  assertEquals(body.cards[0].external_ref, "MLB-RR-59036");
-  assertEquals(body.cards[0].builder_purchase_order, "PO-59002");
+  assertEquals(body.cards[0].external_ref, "MLB-RR-26836");
+  assertEquals(body.cards[0].builder_purchase_order, "PO-57602");
   assertEquals(body.cards[0].evidence_sources.length, 2);
   assertEquals(
     body.cards[0].evidence_sources.filter((source: any) =>
