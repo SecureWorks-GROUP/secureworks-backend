@@ -259,11 +259,31 @@ Before rename:
 [{"version":"20260803010000","name":"ses_drop_unsatisfiable_readiness_precondition"},{"version":"20260803020000","name":"ses_drop_approval_readiness_precondition"},{"version":"20260803030000","name":"ses_drop_release_execution_readiness_precondition"},{"version":"20260803040000","name":"ses_approval_visibility_decoupled_from_readiness"},{"version":"20260803050000","name":"ses_docket_review_retire"},{"version":"20260803060000","name":"job_documents_roof_report_type"}]
 ```
 
-After rename: the response was byte-identical. In both captures there is no
-`20260803070000` ledger row, so the target version is genuinely free. A separate
-read-only catalog query returned `{"is_lead_exists":false}`, confirming the
-lead-installer migration remains unapplied. No migration was applied by these
-checks.
+After rename (full live response):
+
+```json
+[{"version":"20260803010000","name":"ses_drop_unsatisfiable_readiness_precondition"},{"version":"20260803020000","name":"ses_drop_approval_readiness_precondition"},{"version":"20260803030000","name":"ses_drop_release_execution_readiness_precondition"},{"version":"20260803040000","name":"ses_approval_visibility_decoupled_from_readiness"},{"version":"20260803050000","name":"ses_docket_review_retire"},{"version":"20260803060000","name":"job_documents_roof_report_type"}]
+```
+
+The post-rename response is byte-identical to the before-rename response and
+contains no `20260803070000` ledger row, so the target version is genuinely
+free. The post-rename capture was made with the following read-only curl after
+loading `~/.config/secureworks/env`; the credential-bearing header is redacted:
+
+```text
+source ~/.config/secureworks/env
+curl -sS --fail-with-body --max-time 300 -X POST \
+  -H 'Authorization: Bearer [REDACTED]' \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"SELECT version, name FROM supabase_migrations.schema_migrations WHERE version IN (...) ORDER BY version;"}' \
+  'https://api.supabase.com/v1/projects/[production-project]/database/query'
+CURL_ENV_VERIFICATION=PASS
+AUTH_HEADER=REDACTED
+```
+
+A separate read-only catalog query returned `{"is_lead_exists":false}`,
+confirming the lead-installer migration remains unapplied. No migration was
+applied by these checks.
 
 The repository's production-locked dry-run then completed without the collision
 and planned exactly this one migration:
