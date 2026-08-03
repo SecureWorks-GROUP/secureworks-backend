@@ -26,16 +26,19 @@ import { MAKESAFE_REPORT_LOGO_DATA_URL } from "./makesafe_report_logo.ts";
 
 export const MAKESAFE_REPORT_CONTRACT_VERSION =
   "secureworks.makesafe-report/curated-2026-08-03";
-export const MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION =
+export const MAKESAFE_REPORT_TS_SOURCE_REVISION =
   "b20d9ec3c5ac5c82bb463aef6ff52bfe63fc15ce";
+export const MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION =
+  "8348325bee364b2ddeddd7d853eb28d3178cde5e";
+export const MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256 =
+  "b4fb6350fce8a89eef726e3d87628a32cd5dc5fa612936974e133e56b13dbf6f";
 export const MAKESAFE_REPORT_RENDERER_VERSION =
-  `secureworks.ops-api-jspdf/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`;
+  `secureworks.ops-api-jspdf/${MAKESAFE_REPORT_TS_SOURCE_REVISION}`;
 export const MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION =
   `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`;
 
 export function isCurrentCuratedRendererVersion(value: unknown): boolean {
-  return value === MAKESAFE_REPORT_RENDERER_VERSION ||
-    value === MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION;
+  return value === MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION;
 }
 
 // Photo input the renderer accepts, in preference order:

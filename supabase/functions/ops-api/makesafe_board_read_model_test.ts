@@ -13,6 +13,7 @@ import {
 } from "./index.ts";
 import {
   buildCanonicalMakesafeRows,
+  buildMakesafeContact,
   checkMakesafeBoardParity,
   isCanonicalLiveMakesafeBoardJobStatus,
   isSyntheticLivefireJob,
@@ -625,6 +626,15 @@ Deno.test("contact actions are always live-linked or explicitly unavailable", ()
   assertEquals(missing.contact.actions.call.href, null);
   assertEquals(missing.contact.actions.navigate.available, false);
   assert(missing.contact.actions.call.unavailable_reason.length > 0);
+});
+
+Deno.test("client-facing contact name never falls back past jobs.client_name", () => {
+  const contact = buildMakesafeContact({ client_name: null }, [{
+    status: "active",
+    is_primary: true,
+    client_name: "Auxiliary contact must not become the site contact",
+  }]);
+  assertEquals(contact.client_name, null);
 });
 
 Deno.test("canonical row carries report/photos, pack/send, notes, age and separates stale substatus", () => {

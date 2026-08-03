@@ -454,7 +454,10 @@ export function buildMakesafeContact(job: any, contacts: any[] = []) {
   );
   const fallback = active.find((c) => c?.is_primary === true) || active[0] ||
     {};
-  const clientName = txt(job?.client_name) || txt(fallback?.client_name);
+  // `jobs.client_name` is the canonical client-facing site-contact source.
+  // Do not let a stale auxiliary contact make the cockpit disagree with the
+  // completion report assembled from the job row.
+  const clientName = txt(job?.client_name);
   const phone = txt(job?.client_phone) || txt(fallback?.client_phone);
   const address = addressOf(job);
   const hrefPhone = phoneHref(phone);
