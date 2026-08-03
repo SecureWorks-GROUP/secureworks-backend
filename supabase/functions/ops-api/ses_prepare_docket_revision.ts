@@ -2022,16 +2022,35 @@ async function prepareOne(
             metadata: bundleProof,
           }),
         );
-        const resolved = deps.resolveBundledReportArtifact
-          ? await deps.resolveBundledReportArtifact(input)
+        const bundledProof = deps.resolvePhysicalReportProof
+          ? await deps.resolvePhysicalReportProof(input)
           : null;
-        if (!resolved) {
+        const resolved = bundledProof && validPhysicalReportProof(bundledProof) &&
+            deps.renderPhysicalReport
+          ? await deps.renderPhysicalReport(input, undefined, bundledProof)
+          : null;
+        const resolvedRawHash = resolved
+          ? await rawArtifactSha256(resolved.bytes)
+          : null;
+        const resolvedContentHash = resolved
+          ? await sesSha256Bytes(resolved.bytes)
+          : null;
+        if (
+          !resolved ||
+          !bundledProof ||
+          !validPhysicalReportProof(bundledProof) ||
+          resolvedRawHash !== bundledProof.expected_raw_sha256 ||
+          resolvedContentHash !== bundledProof.source_artifact_content_hash ||
+          (text(resolved.render_hash) &&
+            `sha256:${text(resolved.render_hash).replace(/^sha256:/, "")}` !==
+              resolvedRawHash)
+        ) {
           const itemBlocker = addBlocker(
             blockers,
             blocked(
-              "sibling_evidence_artifact_unrecoverable",
-              `Bundle ${acceptedBundle.bundle_id} is valid, but sibling ${acceptedBundle.sibling.job_number}'s claimed report artifact could not be recovered.`,
-              "Restore the exact claimed sibling report document; do not substitute an unclaimed file.",
+                "sibling_evidence_artifact_unrecoverable",
+                `Bundle ${acceptedBundle.bundle_id} is valid, but sibling ${acceptedBundle.sibling.job_number}'s independently proved report artifact could not be recovered.`,
+                "Restore the exact claimed sibling report document and its durable proof; do not substitute an unclaimed file.",
               [
                 "canonical-input-envelope",
                 "sibling-bundle-binding-ledger",
@@ -2043,6 +2062,8 @@ async function prepareOne(
                 sibling_job_id: acceptedBundle.sibling.job_id,
                 sibling_job_number: acceptedBundle.sibling.job_number,
                 report_document_id: acceptedBundle.coverage.report_document_id,
+                source_revision_id: bundledProof?.source_revision_id || null,
+                source_artifact_id: bundledProof?.source_artifact_id || null,
               },
             ),
           );
@@ -2057,13 +2078,22 @@ async function prepareOne(
               media_type: resolved.media_type,
               bytes: resolved.bytes,
               metadata: {
-                render_hash: resolved.render_hash || null,
+                render_hash: resolvedRawHash,
                 evidence_source: "explicit_sibling_bundle",
                 bundle_id: acceptedBundle.bundle_id,
                 sibling_job_id: acceptedBundle.sibling.job_id,
                 binding_revision_id:
                   acceptedBundle.claiming_binding.revision_id,
                 report_document_id: acceptedBundle.coverage.report_document_id,
+                source_kind: bundledProof.source_kind,
+                source_identity: bundledProof.source_identity,
+                source_revision_id: bundledProof.source_revision_id,
+                source_artifact_id: bundledProof.source_artifact_id,
+                source_artifact_content_hash:
+                  bundledProof.source_artifact_content_hash,
+                expected_raw_sha256: bundledProof.expected_raw_sha256,
+                output_sha256: resolvedRawHash,
+                output_content_hash: resolvedContentHash,
               },
             }),
           );

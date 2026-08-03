@@ -195,10 +195,18 @@ export function resolveDocketRoutes(
       : key.split("/").slice(-2).join("/");
     byPath.set(path, artifact);
   }
-  const invoicePdf = artifacts.find((artifact) =>
+  const xero = object(docket.xero_binding);
+  const boundInvoiceId = String(xero.xero_invoice_id || "");
+  const boundInvoiceNumber = String(xero.invoice_number || "");
+  const invoicePdfs = artifacts.filter((artifact) =>
     artifact.role === "xero_invoice_pdf" &&
     artifact.media_type === "application/pdf"
   );
+  const invoicePdf = invoicePdfs.length === 1 &&
+      object(invoicePdfs[0].metadata).xero_invoice_id === boundInvoiceId &&
+      object(invoicePdfs[0].metadata).invoice_number === boundInvoiceNumber
+    ? invoicePdfs[0]
+    : null;
   const noAdditionalCharge =
     obligation?.pricing_disposition === "no_additional_charge";
   return draftRoutes(docket).map((route) => {
@@ -254,7 +262,6 @@ export function resolveDocketRoutes(
         ready: false,
       };
     }
-    const xero = object(docket.xero_binding);
     const invoiceAttachments = [...supportHashes];
     if (invoicePdf?.content_hash) {
       invoiceAttachments.unshift(String(invoicePdf.content_hash));

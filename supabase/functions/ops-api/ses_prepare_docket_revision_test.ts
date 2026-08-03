@@ -1401,11 +1401,6 @@ Deno.test("bidirectional positive-scope bundle evidence clears the card-local ph
   const result = (await prepareSesDocketRevision(
     request(input.identity.job_id),
     dependencies(input, {
-      resolveBundledReportArtifact: async () => ({
-        file_name: "SWMS-26837 Make Safe Report.pdf",
-        media_type: "application/pdf",
-        bytes: new Uint8Array([37, 80, 68, 70, 37]),
-      }),
       resolveBundledPhotoArtifacts: async () => [{
         photo_id: "photo-26837",
         source_pointer: "job_media:photo-26837",

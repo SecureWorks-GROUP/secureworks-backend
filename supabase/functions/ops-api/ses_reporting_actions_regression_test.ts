@@ -93,6 +93,10 @@ const ROUTE_ARTIFACTS = [{
   object_key: "bucket/docket-fixture/ARTIFACTS/xero-invoice.pdf",
   media_type: "application/pdf",
   content_hash: "xero-hash",
+  metadata: {
+    xero_invoice_id: "xero-invoice-test-1",
+    invoice_number: "INV-TEST-1",
+  },
 }];
 
 Deno.test("assessment and physical pre-Xero invoice routes hide proposal state and remain non-sendable", () => {
@@ -126,6 +130,7 @@ Deno.test("invoice-bound route requires the authorised Xero PDF and keeps approv
   const authorised = resolveDocketRoutes(
     invoiceDocket("invoice_bound", attachments, {
       status: "AUTHORISED",
+      xero_invoice_id: "xero-invoice-test-1",
       invoice_number: "INV-TEST-1",
     }),
     ROUTE_ARTIFACTS,
@@ -141,6 +146,7 @@ Deno.test("invoice-bound route requires the authorised Xero PDF and keeps approv
   const draft = resolveDocketRoutes(
     invoiceDocket("invoice_bound", attachments, {
       status: "DRAFT",
+      xero_invoice_id: "xero-invoice-test-1",
       invoice_number: "INV-TEST-1",
     }),
     ROUTE_ARTIFACTS,
