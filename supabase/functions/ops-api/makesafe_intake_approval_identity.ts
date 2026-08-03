@@ -9,7 +9,7 @@ import {
   builderInstructionKeysForCard,
   type BuilderWorkOrderIdentity,
   extractBuilderWorkOrderIdentity,
-  hasUnparseablePoLabel,
+  hasUnparseablePoRemainder,
   isSelfGeneratedMakesafeWorkOrder,
   mergeBuilderWorkOrderIdentity,
 } from "./makesafe_builder_work_order_identity.ts";
@@ -127,7 +127,7 @@ function sourceIdentity(input: {
     workOrders,
     purchaseOrders,
     unparseablePoPresent:
-      hasUnparseablePoLabel(String(input.approved_external_ref || "")) ||
+      hasUnparseablePoRemainder(String(input.approved_external_ref || "")) ||
       attachmentNames.some(attachmentNameHasUnparseablePoLabel),
   };
 }

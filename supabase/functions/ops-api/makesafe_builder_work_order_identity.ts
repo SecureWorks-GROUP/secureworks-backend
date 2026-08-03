@@ -64,6 +64,18 @@ export function hasUnparseablePoLabel(text: string): boolean {
 }
 
 /**
+ * Approval-grade ambiguity check: remove every canonical PO-bearing match, then
+ * reject any loose PO label left behind. Unlike `hasUnparseablePoLabel`, one
+ * valid token cannot mask a second unknown token in the same source string.
+ */
+export function hasUnparseablePoRemainder(text: string): boolean {
+  const withoutCanonical = String(text || "")
+    .replace(new RegExp(BUILDER_REF_WITH_PO_RE.source, "gi"), " ")
+    .replace(new RegExp(PO_RE.source, "gi"), " ");
+  return LOOSE_PO_RE.test(withoutCanonical);
+}
+
+/**
  * True when the text names a PO at all, in any spelling either grammar recognises.
  * Callers reading text that may quote another instruction use this to know a PO is
  * being discussed without adopting its number as their own identity.
@@ -127,7 +139,9 @@ export function builderIdentityTokensInAttachmentName(
 export function attachmentNameHasUnparseablePoLabel(
   value: string | null | undefined,
 ): boolean {
-  return hasUnparseablePoLabel(attachmentNameScanText(String(value || "")));
+  return hasUnparseablePoRemainder(
+    attachmentNameScanText(String(value || "")),
+  );
 }
 
 /**

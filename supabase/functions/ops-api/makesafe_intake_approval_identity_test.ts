@@ -213,6 +213,21 @@ Deno.test("approval correlation refuses an unparseable PO-shaped source name", (
   });
 });
 
+Deno.test("approval correlation refuses an unparseable PO remainder beside a valid PO", () => {
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: {},
+    approved_external_ref: "MLB-10001",
+    requesting_company_slug: "mlb",
+    family: "general_makesafe",
+    attachment_names: ["MLB-10001_PO-40001_P.O.40002.pdf"],
+  });
+  assertEquals(decision, {
+    action: "refuse",
+    reason: "source_identity_conflict",
+    instruction_keys: ["MLB:PO-40001"],
+  });
+});
+
 Deno.test("approval correlation combines one PO-only attachment with the approved WO", () => {
   const decision = correlateIntakeApprovalIdentity({
     extraction: {},
