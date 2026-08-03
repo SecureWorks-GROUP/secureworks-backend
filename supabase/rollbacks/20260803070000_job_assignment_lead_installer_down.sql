@@ -1,4 +1,4 @@
--- Rollback twin for 20260803010000_job_assignment_lead_installer.sql.
+-- Rollback twin for 20260803070000_job_assignment_lead_installer.sql.
 --
 -- Dropping the column discards every lead designation made while it existed.
 -- That is acceptable precisely because the forward migration never backfilled:
