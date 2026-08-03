@@ -1273,6 +1273,23 @@ Related: never make one of these classes pass by supplying a plausible quantity
 or a carried-over crew — that puts invented content on a money document and on a
 safety document respectively.
 
+## AJS Existing-Fence Star Pickets Are A Narrow Physical-Make-Safe Material
+
+`makesafe_existing_fence_pickets.ts` is the shared server classifier for the
+captain's existing-fence carve-out. On an AJS/AJBR physical make-safe it may
+derive one money-only star-picket count from the current trade report's explicit
+`materials_used` quantity when the work narrative proves the pickets support an
+existing fence. The assembler prices that line at $13.50 ex each. Bare or
+ambiguous pickets hold, and any evidenced panel, block/base, tie/clip, hire,
+retrieval-material or temporary-fence signal preserves the picket refusal.
+Fixing/consumable lines remain separately refused without erasing an otherwise
+valid picket line. Unquantified checklist template labels are not material-use
+facts and must never become invoice lines. Current curated reports persist their
+exact scope narratives beside the render hash so the invoice decision need not
+promote raw checklist prose. The Bertram acceptance and refusal controls are
+pinned in `ses_assembler_input_adapter_test.ts`,
+`ses_prepare_docket_revision_test.ts`, and `makesafe_invoice_obligation_test.ts`.
+
 ## Docs Ready Is A Queue, Not A Board Column
 
 Count Docs Ready from `ops-api?action=list_ses_docs_ready_reviews`, not by eye

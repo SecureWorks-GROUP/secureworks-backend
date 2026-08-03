@@ -1491,6 +1491,109 @@ Deno.test("a two-hour MLB trade report prices at the sealed three-hour floor ins
   assertEquals(proposal.subtotal_ex_gst, 510);
 });
 
+Deno.test("Bertram AJS existing-fence pickets price through the sealed docket proposal", async () => {
+  const result = await labourProposal("AJS", "physical_makesafe", {
+    trades: 2,
+    hours_per_trade: 3,
+    existing_fence_star_picket_count: 20,
+    existing_fence_star_picket_evidence: {
+      source: "job_service_reports.checklist_json.materials_used",
+      report_id: "bertram-trade-report",
+    },
+  });
+  assertEquals(
+    result.blockers.filter((item) =>
+      item.reason_code === "pricing_evidence_missing"
+    ),
+    [],
+  );
+  const proposal = result.invoice_proposal as Record<string, unknown>;
+  const lines = proposal.line_items as Array<Record<string, unknown>>;
+  assertEquals(lines.length, 2);
+  assertEquals(lines[0].quantity, 6);
+  assertEquals(lines[0].unit_price_ex_gst, 80);
+  assertStringIncludes(String(lines[1].description), "existing fence");
+  assertStringIncludes(String(lines[1].description), "Star pickets");
+  assertEquals(lines[1].quantity, 20);
+  assertEquals(lines[1].unit_price_ex_gst, 13.5);
+  assertEquals(proposal.subtotal_ex_gst, 750);
+  assertEquals(proposal.gst, 75);
+  assertEquals(proposal.total_inc_gst, 825);
+});
+
+Deno.test("a genuine AJS temporary-fence kit stays hard-refused", async () => {
+  const result = await labourProposal("AJS", "physical_makesafe", {
+    trades: 2,
+    hours_per_trade: 3,
+    existing_fence_star_picket_refusal: "genuine_temporary_fence_signal",
+  });
+  assertEquals(result.invoice_proposal, null);
+  const blocker = result.blockers.find((item) =>
+    item.reason_code === "pricing_evidence_missing"
+  )!;
+  assertStringIncludes(blocker.reason, "temporary-fence kit");
+});
+
+Deno.test("generic material facts cannot bypass the AJS picket evidence gate", async () => {
+  const unsupported = await labourProposal("AJS", "physical_makesafe", {
+    trades: 2,
+    hours_per_trade: 3,
+    materials: [{
+      description: "Star pickets",
+      quantity: 20,
+      unit_price_ex_gst: 13.5,
+    }],
+  });
+  assertEquals(unsupported.invoice_proposal, null);
+  assertStringIncludes(
+    unsupported.blockers.find((item) =>
+      item.reason_code === "pricing_evidence_missing"
+    )!.reason,
+    "cannot bypass",
+  );
+
+  const canonical = await labourProposal("AJS", "physical_makesafe", {
+    trades: 2,
+    hours_per_trade: 3,
+    existing_fence_star_picket_count: 20,
+    materials: [{
+      description: "Star pickets",
+      quantity: 20,
+      unit_price_ex_gst: 13.5,
+    }],
+  });
+  const proposal = canonical.invoice_proposal as Record<string, unknown>;
+  assertEquals(
+    (proposal.line_items as Array<Record<string, unknown>>).length,
+    2,
+  );
+  assertEquals(proposal.subtotal_ex_gst, 750);
+});
+
+Deno.test("the old AJS consumables refusal cannot pass through typed materials", async () => {
+  for (
+    const description of [
+      "Cable ties",
+      "Fence clips",
+      "Fixings",
+      "Small consumables",
+    ]
+  ) {
+    const result = await labourProposal("AJBR", "physical_makesafe", {
+      trades: 2,
+      hours_per_trade: 3,
+      materials: [{ description, quantity: 1, unit_price_ex_gst: 25 }],
+    });
+    assertEquals(result.invoice_proposal, null, description);
+    assertStringIncludes(
+      result.blockers.find((item) =>
+        item.reason_code === "pricing_evidence_missing"
+      )!.reason,
+      "remain non-billable",
+    );
+  }
+});
+
 Deno.test("a longer attendance is never reduced to the floor", async () => {
   const result = await labourProposal("MLB", "physical_makesafe", {
     trades: 1,

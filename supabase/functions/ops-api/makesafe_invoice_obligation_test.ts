@@ -7,6 +7,10 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { prepareSesInvoiceObligation } from "./makesafe_invoice_obligation.ts";
 import type { SesInvoiceDuplicateResolution } from "./makesafe_invoice_duplicate_resolver.ts";
+import {
+  prepareSesInvoiceObligationAction,
+  type SesSupabaseClient,
+} from "./ses_reporting_actions.ts";
 
 const ORG = "00000000-0000-4000-8000-000000000001";
 const JOB = "10000000-0000-4000-8000-000000000001";
@@ -55,6 +59,98 @@ Deno.test("first proposal mints opaque stable obligation and content revision", 
   assertEquals(result.proposal.invoice_obligation_id, OBLIGATION);
   assertEquals(result.proposal.xero, null);
   assertEquals(result.proposal.totals, { ex: 320, inc: 352 });
+});
+
+Deno.test("Bertram persisted docket reaches prepare_ses_invoice_obligation at $750 ex and $825 inc", async () => {
+  const docket = {
+    id: "40000000-0000-4000-8000-000000007502",
+    job_id: "208450c0-7161-4b30-9514-66226b054609",
+    stage: "pre_xero",
+    attendance_cycle_ids: [CYCLE_1],
+    current_attendance_cycle_id: CYCLE_1,
+    envelope: {
+      v2: { routing: { builder: "AJS/AJBR" } },
+    },
+    local_invoice_proposal: {
+      builder_reference: "AJBR-70271",
+      line_items: [{
+        description: "AJBR-70271 - make-safe attendance - 2 trades x 3 hours",
+        quantity: 6,
+        unit_price_ex_gst: 80,
+      }, {
+        description:
+          "AJBR-70271 - Star pickets supplied to prop and secure existing fence",
+        quantity: 20,
+        unit_price_ex_gst: 13.5,
+      }],
+      subtotal_ex_gst: 750,
+      gst: 75,
+      total_inc_gst: 825,
+    },
+  };
+  const rows: Record<string, unknown> = {
+    makesafe_docket_revisions: docket,
+    makesafe_invoice_obligation_revisions_current: null,
+    xero_invoices: [],
+  };
+  const client = {
+    from(table: string) {
+      const response = () => ({ data: rows[table] ?? null, error: null });
+      const query = {
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        in() {
+          return query;
+        },
+        not() {
+          return query;
+        },
+        or() {
+          return query;
+        },
+        order() {
+          return query;
+        },
+        limit() {
+          return query;
+        },
+        maybeSingle() {
+          return Promise.resolve(response());
+        },
+        then(resolve: (value: ReturnType<typeof response>) => unknown) {
+          return Promise.resolve(response()).then(resolve);
+        },
+      };
+      return query;
+    },
+    rpc() {
+      return Promise.resolve({
+        data: { state: "proposed", committed: true },
+        error: null,
+      });
+    },
+    storage: { from: () => ({}) },
+  } as unknown as SesSupabaseClient;
+
+  const result = await prepareSesInvoiceObligationAction(
+    client,
+    { mode: "routine", user: null },
+    {
+      org_id: ORG,
+      job_id: docket.job_id,
+      docket_revision_id: docket.id,
+      created_by: "bertram-regression",
+    },
+  );
+  assertEquals(result.state, "prepared");
+  assertEquals(result.blockers, []);
+  assertEquals(result.proposal.totals, { ex: 750, inc: 825 });
+  assertEquals(result.proposal.lines.length, 2);
+  assertEquals(result.external_mutations, { xero: 0, email: 0 });
 });
 
 Deno.test("pre-release cycle change keeps obligation but supersedes revision", async () => {

@@ -34220,7 +34220,17 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
     pdf_base64: pdfBase64,
     uploaded_by: body.operator || 'guarded-current-wiki-rerender-sweep',
   }, {
-    data_snapshot_json: trustedSnapshot,
+    data_snapshot_json: {
+      ...trustedSnapshot,
+      // Keep only server-owned curated report prose available to the invoice
+      // assembler; raw checklist text must not become builder-report truth.
+      report_scope_narratives: [
+        validatedInput.job.scope,
+        validatedInput.job.findings,
+        validatedInput.job.works,
+        validatedInput.job.materials,
+      ].filter((value: unknown) => typeof value === 'string' && value.trim()),
+    },
     attendance_cycle_id: detailResponse.data.attendance_cycle_id || null,
     cycle_attribution: detailResponse.data.attendance_cycle_id
       ? 'bound'

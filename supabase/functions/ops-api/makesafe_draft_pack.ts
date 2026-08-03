@@ -1,3 +1,9 @@
+import {
+  AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST,
+  deriveExistingFencePicketDecision,
+  type ExistingFencePicketDecision,
+} from "./makesafe_existing_fence_pickets.ts";
+
 // MakeSafe Review & Send -- draft-only Claude pack generator helpers.
 //
 // These helpers are PURE: no Supabase, no Xero, no email, no storage. The Edge
@@ -161,7 +167,7 @@ export function buildDraftPackUserPrompt(ctx: DraftPackContext): string {
       "If Ops feedback says there should be no mention of a topic, no report field may contain that topic after revision. If you cannot satisfy a feedback instruction, say so in change_summary and do not pretend it was done.",
       "For MLB / Major Loss Builders temporary-fence hire, use the SecureWorks hire card when the evidence gives quantities: labour $85 ex/hr weekday with 3-hour minimum (4 hours for solo temp-fence), retrieval allowance 2 hours x $90, panel hire $5 per panel per week for 12 weeks minimum, star pickets $13.50 each, cable ties/small consumables $25 flat. Do not price MLB panels as a sale.",
       "For AJS / AJ Building & Restoration / AJBR, normal labour is $80 ex/hr per trade unless the source evidence explicitly says public-holiday/after-hours/special rate. Do not use the generic $85 builder rate for AJBR/AJS.",
-      "For AJS/AJBR temporary fencing, default to labour/travel only because AJS normally supplies/uses its own panels/blocks. Sell panels to AJS at $59 ex GST each and cement bases/blocks at $28 ex GST each only when source evidence explicitly says SecureWorks supplied/sold those materials to AJS. Counts alone are not sale evidence. Never charge AJS cable ties/clips/small consumables.",
+      "For AJS/AJBR temporary fencing, default to labour/travel only because AJS normally supplies/uses its own panels/blocks. Sell panels to AJS at $59 ex GST each and cement bases/blocks at $28 ex GST each only when source evidence explicitly says SecureWorks supplied/sold those materials to AJS. Counts alone are not sale evidence. Never charge AJS cable ties/clips/fixings/small consumables. The only picket carve-out is star pickets at $13.50 ex each when the trade materials_used gives one positive quantity and the scope/works narrative says they prop/support/brace/stabilise/secure an existing fence; any panel, block/base, tie/clip, fixing/consumable, hire, retrieval-material or temporary-fence signal keeps the refusal.",
       "Only use selected_photo_urls as the approved photo set for this draft refresh.",
       "Never include MAKESAFE_PACK_SENT or any wording that says the pack was sent/authorised/closed.",
     ],
@@ -505,8 +511,11 @@ function buildExactLabourDescription(
 function isLabourLine(line: DraftPackLineItem): boolean {
   const desc = String(line?.description || "").toLowerCase();
   return /labou?r|attendance|make[- ]safe|make safe|crew|trade/.test(desc) &&
-    !/materials?|consumables?|panel|base|feet|fixings?|pickets?|tarp|retrieval|hire/
-      .test(desc);
+    !/materials?|consumables?|panel|base|feet|fixings?|tarp|retrieval|hire/
+      .test(
+        desc,
+      ) &&
+    !isPicketLine(line);
 }
 
 function replaceOrPrependLabourLine(
@@ -917,17 +926,70 @@ function isBaseLine(line: DraftPackLineItem): boolean {
     /(?:temp(?:orary)?\s+)?fenc(?:e|ing)|panel|make[- ]safe|cement/.test(desc);
 }
 
-function isPicketLine(line: DraftPackLineItem): boolean {
-  return /star\s+pickets?|pickets?/.test(lineDescription(line)) &&
-    /(?:temp(?:orary)?\s+)?fenc(?:e|ing)|make[- ]safe/.test(
-      lineDescription(line),
+function isPicketMaterialLine(
+  line: DraftPackLineItem,
+  picketPattern: RegExp,
+): boolean {
+  const desc = lineDescription(line);
+  if (!picketPattern.test(desc)) return false;
+  const attendanceWorded =
+    /labou?r|attendance|trades?\s*(?:x|×)?\s*\d|trade[- ]hour|travel/.test(
+      desc,
     );
+  const materialChargeWorded =
+    /\bhire\b|\bsuppl(?:y|ied|ies)\b|\bsale\b|\bsold\b|\bper\s*(?:panel|picket|unit|week|day)\b|\beach\b|\bmaterials?\s*(?:charge|cost|supplied)\b/
+      .test(desc);
+  return !attendanceWorded || materialChargeWorded;
+}
+
+function isPicketLine(line: DraftPackLineItem): boolean {
+  return isPicketMaterialLine(line, /\bpickets?\b/);
+}
+
+function isStarPicketLine(line: DraftPackLineItem): boolean {
+  return isPicketMaterialLine(line, /\bstar(?:[\W_]+)?pickets?\b/);
 }
 
 function isConsumableLine(line: DraftPackLineItem): boolean {
   return /cable\s*ties?|clips?|small\s+consumables|consumables?|fixings?/.test(
     lineDescription(line),
   );
+}
+
+function ajsExistingFencePicketDecision(
+  output: DraftPackOutput,
+  ctx: DraftPackContext,
+): ExistingFencePicketDecision {
+  const report = asRecord(ctx.service_report);
+  const checklist = asRecord(report.checklist_json);
+  const detail = asRecord(ctx.detail);
+  const job = asRecord(ctx.job);
+  const metadata = asRecord(job.metadata);
+  const canonicalFamily = String(
+    metadata.makesafe_job_family || detail.makesafe_job_family || "",
+  );
+  return deriveExistingFencePicketDecision({
+    support_narratives: [
+      output.report.scope,
+      output.report.findings,
+      output.report.works,
+      output.report.materials,
+      checklist.work_done,
+      checklist.works_completed,
+      checklist.scope,
+      checklist.scope_notes,
+      report.notes,
+    ],
+    materials_used: Array.isArray(checklist.materials_used)
+      ? checklist.materials_used
+      : report.materials_used,
+    charged_line_descriptions: output.invoice.line_items.map((line) =>
+      line.description
+    ),
+    declared_temporary_fence: /temp(?:orary)?[\s_-]*fenc/i.test(
+      canonicalFamily,
+    ),
+  });
 }
 
 function near(value: number, expected: number, tolerance = 0.005): boolean {
@@ -942,22 +1004,64 @@ function verifyAjsTempFenceInvoiceLines(
   applied: Set<string>,
 ): void {
   const lines = output.invoice.line_items || [];
-  const tempFenceContext = hasTempFenceContext(
-    contextSearchText(output, ctx, feedbackText),
-  );
   const materialLines = lines.filter((line) =>
     isPanelLine(line) || isBaseLine(line) || isPicketLine(line) ||
-    (tempFenceContext && isConsumableLine(line))
+    isConsumableLine(line)
   );
-  if (!materialLines.length) return;
+  const existingFencePickets = ajsExistingFencePicketDecision(output, ctx);
+  const picketLines = materialLines.filter(isStarPicketLine);
+  if (
+    existingFencePickets.state === "billable" && picketLines.length > 1
+  ) {
+    applied.add("AJS_EXISTING_FENCE_PICKETS_13_50");
+    blockers.push(
+      "AJS/AJBR existing-fence evidence permits exactly one canonical star-picket sale line",
+    );
+  }
+  if (!materialLines.length) {
+    if (existingFencePickets.state === "billable") {
+      applied.add("AJS_EXISTING_FENCE_PICKETS_13_50");
+      blockers.push(
+        `AJS/AJBR existing-fence evidence requires ${
+          formatQty(existingFencePickets.quantity)
+        } star pickets at $13.50 ex each`,
+      );
+    }
+    return;
+  }
   applied.add("AJS_TEMP_FENCE_MATERIAL_GUARD");
   const hasSaleEvidence = hasExplicitAjsTempFenceSaleEvidence(
     ajsSaleEvidenceText(ctx, feedbackText),
   );
   for (const line of materialLines) {
-    if (isPicketLine(line) || isConsumableLine(line)) {
+    if (isPicketLine(line)) {
+      if (
+        isStarPicketLine(line) && existingFencePickets.state === "billable"
+      ) {
+        applied.add("AJS_EXISTING_FENCE_PICKETS_13_50");
+        if (
+          Number(line.quantity) !== existingFencePickets.quantity ||
+          !near(
+            Number(line.unit_price),
+            AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST,
+          )
+        ) {
+          blockers.push(
+            `AJS/AJBR existing-fence star pickets must use the trade-evidenced quantity ${
+              formatQty(existingFencePickets.quantity)
+            } at $13.50 ex each`,
+          );
+        }
+        continue;
+      }
       blockers.push(
-        "AJS/AJBR temp-fence drafts must not charge pickets, cable ties, clips, fixings, or small consumables",
+        "AJS/AJBR temp-fence drafts must not charge pickets unless the trade evidence proves the existing-fence carve-out",
+      );
+      continue;
+    }
+    if (isConsumableLine(line)) {
+      blockers.push(
+        "AJS/AJBR temp-fence drafts must not charge cable ties, clips, fixings, or small consumables",
       );
       continue;
     }
@@ -1214,6 +1318,14 @@ function applyAjsPricingFeedbackOverrides(
   );
   const contextPanels = extractPanelCount(searchable);
   const contextBases = extractBaseCount(searchable);
+  const exactLabourOnly = !!parseExactLabourOnlyFeedback(
+    humanFeedbackBodies(ctx),
+  );
+  const existingFencePickets = ajsExistingFencePicketDecision(output, ctx);
+  const existingFencePicketQty = !exactLabourOnly &&
+      existingFencePickets.state === "billable"
+    ? existingFencePickets.quantity
+    : null;
   const accountCode =
     output.invoice.line_items.find((line) => line.account_code)?.account_code ||
     "210";
@@ -1227,6 +1339,7 @@ function applyAjsPricingFeedbackOverrides(
   let removedPlaceholderLine = false;
   let removedAjsTempFenceMaterials = false;
   let removedAjsConsumables = false;
+  let appliedExistingFencePickets = false;
 
   const retained: DraftPackLineItem[] = [];
   for (const line of output.invoice.line_items) {
@@ -1245,10 +1358,11 @@ function applyAjsPricingFeedbackOverrides(
       /(?:temp(?:orary)?\s+)?fenc(?:e|ing)|panels?|bases?|blocks?|feet|fixings?|consumables?|materials?/
         .test(desc);
     const isAjsConsumableLine =
-      /cable\s*ties?|clips?|small\s+consumables|temp(?:orary)?\s+fenc(?:e|ing)[\s\S]{0,60}fixings?/
-        .test(desc);
-    const isAjsPicketLine = /star\s+pickets?|pickets?/.test(desc) &&
-      /(?:temp(?:orary)?\s+)?fenc(?:e|ing)|make[- ]safe/.test(desc);
+      /cable\s*ties?|clips?|fixings?|small\s+consumables|consumables?/.test(
+        desc,
+      );
+    const isAjsPicketLine = isPicketLine(line);
+    const isAjsStarPicketLine = isStarPicketLine(line);
     const isAjsTempFenceMaterialLine = isPanelLine || isBaseLine ||
       isGenericTempFencePlaceholder || isAjsPicketLine;
 
@@ -1256,6 +1370,12 @@ function applyAjsPricingFeedbackOverrides(
       retained.push({ ...line, unit_price: 80 });
       changed = true;
       labourRateChanged = true;
+      continue;
+    }
+
+    if (isAjsStarPicketLine && existingFencePicketQty) {
+      appliedExistingFencePickets = true;
+      changed = true;
       continue;
     }
 
@@ -1324,6 +1444,17 @@ function applyAjsPricingFeedbackOverrides(
   }
 
   const additions: DraftPackLineItem[] = [];
+  if (existingFencePicketQty) {
+    additions.push({
+      description: `${
+        prefix ? prefix + " - " : ""
+      }Star pickets supplied to prop and secure existing fence`,
+      quantity: existingFencePicketQty,
+      unit_price: AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST,
+      account_code: accountCode,
+    });
+    appliedExistingFencePickets = true;
+  }
   if (pendingPanelQty && !hasPanelLine) {
     additions.push({
       description: `${
@@ -1378,6 +1509,13 @@ function applyAjsPricingFeedbackOverrides(
   }
   if (removedAjsConsumables) {
     summaryParts.push("removed AJS pickets/cable ties/consumables charge");
+  }
+  if (appliedExistingFencePickets && existingFencePicketQty) {
+    summaryParts.push(
+      `trade-evidenced existing-fence star pickets ${
+        formatQty(existingFencePicketQty)
+      } x $13.50`,
+    );
   }
   if (removedPlaceholderLine && additions.length === 0) {
     summaryParts.push("removed unresolved AJS/AJBR material line");

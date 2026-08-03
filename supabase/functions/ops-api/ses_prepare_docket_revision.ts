@@ -27,6 +27,7 @@ import {
   SES_FAMILY_MATRIX_VERSION,
   type SesFamilyMatrixRow,
 } from "./ses_family_matrix.ts";
+import { AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST } from "./makesafe_existing_fence_pickets.ts";
 import { makesafeReportFileName } from "./makesafe_report_render.ts";
 import { roofReportPrice } from "./roof_report_template.ts";
 import {
@@ -662,6 +663,53 @@ function localInvoiceProposal(
       canonicalRate,
     ),
   ];
+  let existingFencePickets: number | null = null;
+  if (
+    row.invoice_basis === "ajs_labour_materials" &&
+    text(facts.existing_fence_star_picket_refusal)
+  ) {
+    const refusal = text(facts.existing_fence_star_picket_refusal);
+    const genuineKit = refusal === "genuine_temporary_fence_signal";
+    return {
+      proposal: null,
+      blocker: blocked(
+        "pricing_evidence_missing",
+        genuineKit
+          ? "The trade evidence describes a genuine temporary-fence kit, so AJS/AJBR pickets and the other kit materials remain non-billable."
+          : "The star-picket material entry does not carry unambiguous existing-fence support and quantity evidence.",
+        genuineKit
+          ? "Bill evidenced labour and defensible travel only; do not turn panels, bases, ties, clips, fixings, consumables, hire or retrieval materials into invoice lines."
+          : "Record one explicit existing-fence prop/support narrative and one positive star-picket quantity from the trade report before pricing the material.",
+      ),
+    };
+  }
+  if (row.invoice_basis === "ajs_labour_materials") {
+    existingFencePickets = nonNegativeInteger(
+      facts.existing_fence_star_picket_count,
+    );
+    if (
+      Object.hasOwn(facts, "existing_fence_star_picket_count") &&
+      (existingFencePickets === null || existingFencePickets < 1)
+    ) {
+      return {
+        proposal: null,
+        blocker: blocked(
+          "pricing_evidence_missing",
+          "The existing-fence star-picket quantity is not a positive whole number.",
+          "Recover one positive star-picket quantity from the trade's materials-used evidence before pricing the material.",
+        ),
+      };
+    }
+    if (existingFencePickets && existingFencePickets > 0) {
+      lines.push(
+        lineItem(
+          `${ref} - Star pickets supplied to prop and secure existing fence`,
+          existingFencePickets,
+          AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST,
+        ),
+      );
+    }
+  }
   if (row.family === "temporary_fencing") {
     const panelCount = nonNegativeInteger(facts.panel_count);
     const baseCount = nonNegativeInteger(facts.base_count);
@@ -731,6 +779,40 @@ function localInvoiceProposal(
             "Record material facts from source/trade evidence or remove the unsupported line.",
           ),
         };
+      }
+      if (row.invoice_basis === "ajs_labour_materials") {
+        if (
+          /\bcable ties?\b|\bclips?\b|\bfixings?\b|\bsmall consumables?\b/i
+            .test(description)
+        ) {
+          return {
+            proposal: null,
+            blocker: blocked(
+              "pricing_evidence_missing",
+              "AJS/AJBR cable ties, clips, fixings and small consumables remain non-billable.",
+              "Remove the refused material line and bill only evidenced labour, defensible travel and materials allowed by the sealed AJS/AJBR rule.",
+            ),
+          };
+        }
+        if (/\bstar(?:[\W_]+)?pickets?\b/i.test(description)) {
+          if (
+            existingFencePickets === null ||
+            quantity !== existingFencePickets ||
+            unitPrice !== AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST
+          ) {
+            return {
+              proposal: null,
+              blocker: blocked(
+                "pricing_evidence_missing",
+                "An AJS/AJBR star-picket material line cannot bypass the trade-evidenced existing-fence quantity and sealed $13.50 ex-GST rate.",
+                "Derive the line from the trade report's materials-used evidence and the existing-fence support narrative.",
+              ),
+            };
+          }
+          // The canonical line above owns the wording and rate. A matching
+          // typed material fact is corroboration, not a second invoice line.
+          continue;
+        }
       }
       lines.push(lineItem(`${ref} - ${description}`, quantity, unitPrice));
     }
