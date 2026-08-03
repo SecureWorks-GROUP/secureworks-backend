@@ -17,7 +17,9 @@ export type PdfGapFillValues = Partial<Record<PdfGapFillField, string>>;
 export interface PdfFieldProvenance {
   method: "deterministic";
   source: "work_order_pdf_text";
-  rule: "work_order_pdf_gap_fill@v1";
+  rule:
+    | "work_order_pdf_gap_fill@v1"
+    | "derived_from_site_address:work_order_pdf_gap_fill@v1";
   extractor: string;
   sourcePostId: string;
   attachmentId: string;
@@ -109,12 +111,25 @@ function extractDescription(text: string): {
   return { value: null };
 }
 
-function suburbFromAddress(address: string | null): string | null {
-  if (!address) return null;
-  const match = address.match(
-    /,\s*([A-Za-z][A-Za-z .'-]{1,60}?)(?:,\s*|\s+)(?:WA|Western Australia)\s+\d{4}\b/i,
+const TRAILING_COUNTRY_RE = /\s*,?\s*AUSTRALIA\s*$/i;
+
+function titleCaseSuburb(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[A-Za-z]+/g, (word) => word[0].toUpperCase() + word.slice(1))
+    .replace(/\s+/g, " ");
+}
+
+export function deriveSuburbFromAddress(address: string | null): string | null {
+  const withoutCountry = clean(address)?.replace(TRAILING_COUNTRY_RE, "") ||
+    null;
+  if (!withoutCountry) return null;
+  const match = withoutCountry.match(
+    /,\s*([A-Za-z][A-Za-z .'-]{1,60}?)\s*,?\s*(?:WA|W\.A\.|Western Australia)\s+\d{4}\s*$/i,
   );
-  return clean(match?.[1]);
+  const suburb = clean(match?.[1]);
+  return suburb ? titleCaseSuburb(suburb) : null;
 }
 
 export function gapFillFromWorkOrderPdf(
@@ -148,7 +163,7 @@ export function gapFillFromWorkOrderPdf(
       description: description.value || undefined,
     };
     extracted.site_suburb = !nonEmpty(input.current.site_address)
-      ? suburbFromAddress(clean(extracted.site_address)) || undefined
+      ? deriveSuburbFromAddress(clean(extracted.site_address)) || undefined
       : undefined;
 
     for (
@@ -161,7 +176,9 @@ export function gapFillFromWorkOrderPdf(
       result.provenance[field] = {
         method: "deterministic",
         source: "work_order_pdf_text",
-        rule: "work_order_pdf_gap_fill@v1",
+        rule: field === "site_suburb"
+          ? "derived_from_site_address:work_order_pdf_gap_fill@v1"
+          : "work_order_pdf_gap_fill@v1",
         extractor: input.extractor,
         sourcePostId: input.sourcePostId,
         attachmentId: input.attachmentId,
