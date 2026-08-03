@@ -921,6 +921,7 @@ function sourceCase(cases: LiveRow[]): LiveRow | null {
 function portalRole(
   familyId: SesFamilyId,
   rawRole: string,
+  hasTypedRoofReport: boolean,
 ):
   | "roof_report"
   | "assessment"
@@ -929,13 +930,22 @@ function portalRole(
   | "builder_portal"
   | "other" {
   const role = rawRole.toLowerCase();
-  if (familyId === "ordinary_roof_portal") return "roof_report";
-  if (role.includes("photo")) return "photos";
-  if (role.includes("scope") || role.includes("quote")) return "scope";
-  if (role.includes("assessment") || role.includes("report")) {
-    return "assessment";
+  // Persisted explicit role is candidate evidence. Never erase an assessment
+  // triad merely because the current card is a roof card: that was the earliest
+  // divergence that turned one typed roof URL into four apparent roof rivals.
+  if (role === "roof_report") return "roof_report";
+  if (role === "assessment_report") return "assessment";
+  if (role === "photos") return "photos";
+  if (role === "scope" || role === "quote") return "scope";
+  if (role === "builder_portal") {
+    // Legacy roof cards often have one genuinely generic share link. Preserve
+    // that fallback only when no explicit roof_report candidate exists; typed
+    // evidence always outranks generic inventory and ties remain fail-closed.
+    if (familyId === "ordinary_roof_portal" && !hasTypedRoofReport) {
+      return "roof_report";
+    }
+    return "builder_portal";
   }
-  if (role.includes("portal")) return "builder_portal";
   return "other";
 }
 
@@ -1371,8 +1381,12 @@ export function buildSesAssemblerInput(
     identityRevision ? detail.external_ref : null,
     identityRevision ? metadata.external_ref : null,
   );
-  const portalLinks = extractPortalLinks(detail.external_links).map((link) => ({
-    role: portalRole(familyId, link.role),
+  const extractedPortalLinks = extractPortalLinks(detail.external_links);
+  const hasTypedRoofReport = extractedPortalLinks.some((link) =>
+    link.role === "roof_report"
+  );
+  const portalLinks = extractedPortalLinks.map((link) => ({
+    role: portalRole(familyId, link.role, hasTypedRoofReport),
     url: link.url,
     source: "job_detail" as const,
   }));

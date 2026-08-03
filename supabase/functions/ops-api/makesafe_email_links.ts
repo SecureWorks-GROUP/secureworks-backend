@@ -29,6 +29,12 @@ const PORTAL_PATH_RE = /\/(share|report|reports|portal|s|r)\//i;
 const ASSET_EXT_RE =
   /\.(?:png|jpe?g|gif|webp|svg|ico|bmp|css|js|map|woff2?|ttf|eot)(?:\?|#|$)/i;
 
+// Redirect hosts used for open/click telemetry can carry an otherwise convincing
+// `/share/<token>` tail. Match whole host labels only: `click.example` is a
+// tracker, while an unrelated hostname containing those letters is not.
+const TRACKING_HOST_LABEL_RE =
+  /(^|[.-])(?:click|open|track|tracking)(?=[.-]|$)/i;
+
 /**
  * Email open/click trackers, image/logo/signature assets, and CDN object URLs.
  * Structural only — never a filename denylist. Used at the merge boundary and
@@ -41,6 +47,7 @@ export function urlLooksLikeAssetOrTracking(url: string): boolean {
     const host = u.hostname.toLowerCase();
     // AWS SES open/click trackers (any subdomain of awstrack.me).
     if (host === "awstrack.me" || host.endsWith(".awstrack.me")) return true;
+    if (TRACKING_HOST_LABEL_RE.test(host)) return true;
     // Path ends in a static asset extension (…/mlb_new_logo.png, …/company.jpg).
     if (ASSET_EXT_RE.test(u.pathname)) return true;
     return false;

@@ -842,6 +842,44 @@ function spineFactsComplete(input: SesAssemblerInputV1): boolean {
   );
 }
 
+function portalSiblingCorrelationFacts(input: SesAssemblerInputV1): {
+  job: boolean;
+  source_instruction: boolean;
+  lineage: boolean;
+  source_content: boolean;
+  attendance_cycle: boolean;
+  typed_deliverables: boolean;
+  source_attachments: boolean;
+  reference_or_work_order: boolean;
+} {
+  const cycles = sortedUnique(input.attendance.attendance_cycle_ids || []);
+  return {
+    job: !!text(input.identity.job_id),
+    source_instruction: !!text(input.identity.source_instruction_id),
+    lineage: !!text(input.identity.lineage_id),
+    source_content: /^sha256:[0-9a-f]{64}$/.test(
+      text(input.identity.source_content_hash),
+    ),
+    attendance_cycle: input.attendance.attribution === "bound" &&
+      !!text(input.attendance.current_attendance_cycle_id) &&
+      cycles.includes(input.attendance.current_attendance_cycle_id),
+    typed_deliverables: input.source.deliverables.length > 0 &&
+      input.source.deliverables.every((deliverable) => !!text(deliverable.id)),
+    source_attachments: input.source.attachment_pointers.length > 0,
+    // The live adapter recovers this in the domain order supported by current
+    // durable data: builder WO/reference, then PO, then external reference.
+    // Address/client are not candidate-bound in the v1 link contract, so they
+    // are never invented as tie-breakers.
+    reference_or_work_order: !!text(input.source.builder_reference),
+  };
+}
+
+function portalSiblingCorrelationComplete(
+  facts: ReturnType<typeof portalSiblingCorrelationFacts>,
+): boolean {
+  return Object.values(facts).every(Boolean);
+}
+
 function markSpineEvidenceReady(
   manifest: SesManifestV2,
   input: SesAssemblerInputV1,
@@ -1614,9 +1652,18 @@ async function prepareOne(
     for (const role of row.required_portal_roles) {
       const matches = input.source.portal_links.filter(
         (link) => inputPortalRole(link.role) === role,
-      );
+      ).sort((left, right) => left.url.localeCompare(right.url));
       const [linkItem, captureItem] = portalRoleItems(role);
-      if (matches.length !== 1) {
+      const siblingInventory = row.family === "ordinary_roof_portal" &&
+        input.source.portal_links.length > 1;
+      const correlationFacts = portalSiblingCorrelationFacts(input);
+      const correlationComplete = portalSiblingCorrelationComplete(
+        correlationFacts,
+      );
+      if (
+        matches.length !== 1 ||
+        (siblingInventory && !correlationComplete)
+      ) {
         const code = matches.length
           ? "portal_wrong_reference"
           : "portal_link_absent";
@@ -1625,7 +1672,9 @@ async function prepareOne(
           blocked(
             code,
             matches.length
-              ? `Portal role ${role} has ${matches.length} candidates; exactly one is required.`
+              ? matches.length === 1
+                ? `Portal role ${role} has one typed candidate among ${input.source.portal_links.length} genuine links, but its current job, source instruction, attendance cycle and reference correlation spine is incomplete.`
+                : `Portal role ${role} has ${matches.length} equally credible candidates; exactly one is required.`
               : `The work order email contains no ${
                 portalRoleCardLabel(
                   role,
@@ -1636,8 +1685,24 @@ async function prepareOne(
                 role,
               )
             } link from the source instruction.`,
-            ["canonical-input-envelope", `portal-role:${role}`],
-            matches.map((link) => link.url),
+            [
+              "canonical-input-envelope",
+              `portal-role:${role}`,
+              ...(matches.length === 1
+                ? [
+                  "correlation:job",
+                  "correlation:source-instruction",
+                  "correlation:attendance-cycle",
+                  "correlation:reference-or-work-order",
+                ]
+                : []),
+            ],
+            (matches.length === 1 ? input.source.portal_links : matches).map((
+              link,
+            ) => link.url).sort(),
+            matches.length === 1
+              ? { correlation: correlationFacts }
+              : { candidate_count: matches.length, role },
           ),
         );
         manifest.items[linkItem] = itemBlocker;

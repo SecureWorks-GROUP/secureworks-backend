@@ -87,8 +87,12 @@ const F5_COMPANY_JPG =
   "https://s3.ap-southeast-2.amazonaws.com/cdn.primeeco.tech/company/504/brand.jpg";
 const F5_SIG_PNG =
   "https://documents.primeeco.tech/15276239-d244-11ee-8228-0a39957d26b4/mlb_sig_image_1.png";
+const F5_SIG_PNG_2 =
+  "https://documents.primeeco.tech/15276239-d244-11ee-8228-0a39957d26b4/mlb_sig_image_2.png";
 const F5_TRACKER =
   "https://xw2vdtj6.r.ap-southeast-2.awstrack.me/I0/0108019eabcdef/1/1";
+const F5_GENERIC_SHARE_TRACKER =
+  "https://click.mailer.example.test/share/redirect-token";
 const F5_SHARE =
   "https://primeeco.tech/share/7d74ea48-89bc-4e6e-b7b4-8a1e433b7d7c";
 
@@ -104,6 +108,8 @@ Deno.test("F5: urlIsBuilderPortalLink rejects image/CDN asset paths on primeeco 
 Deno.test("F5: urlIsBuilderPortalLink rejects SES open/click trackers", () => {
   assertEquals(urlIsBuilderPortalLink(F5_TRACKER), false);
   assert(urlLooksLikeAssetOrTracking(F5_TRACKER));
+  assertEquals(urlIsBuilderPortalLink(F5_GENERIC_SHARE_TRACKER), false);
+  assert(urlLooksLikeAssetOrTracking(F5_GENERIC_SHARE_TRACKER));
 });
 
 Deno.test("F5: genuine share link still accepted (including aged/expired tokens)", () => {
@@ -122,7 +128,14 @@ Deno.test("F5: mergeDeterministicAndClaudeLinks drops Claude image + tracker URL
     portal_links: [
       { label: "Builder Portal", url: F5_LOGO, kind: "builder_portal" },
       { label: "Builder Portal", url: F5_TRACKER, kind: "builder_portal" },
+      {
+        label: "Builder Portal",
+        url: F5_GENERIC_SHARE_TRACKER,
+        kind: "builder_portal",
+      },
       { label: "Company", url: F5_COMPANY_JPG, kind: "builder_portal" },
+      { label: "Signature", url: F5_SIG_PNG, kind: "builder_portal" },
+      { label: "Signature", url: F5_SIG_PNG_2, kind: "builder_portal" },
       { label: "Roof report link", url: F5_SHARE, kind: "roof_report" },
     ],
   });
@@ -135,8 +148,13 @@ Deno.test("F5: normalizeReportExternalLinks rejects image/tracker portal claims"
     portal_links: [
       { label: "Logo", url: F5_LOGO, kind: "builder_portal" },
       { label: "Track", url: F5_TRACKER, kind: "builder_portal" },
+      {
+        label: "Track",
+        url: F5_GENERIC_SHARE_TRACKER,
+        kind: "builder_portal",
+      },
     ],
-    portal_link: F5_SIG_PNG,
+    portal_link: F5_SIG_PNG_2,
   });
   assertEquals(links.length, 0);
 });
@@ -148,6 +166,7 @@ Deno.test("F5: extractBuilderEmailLinks never captures img/CDN/tracker URLs", ()
     <img src="${F5_LOGO}">
     ${F5_COMPANY_JPG}
     ${F5_TRACKER}
+    ${F5_GENERIC_SHARE_TRACKER}
   `;
   const links = extractBuilderEmailLinks(body);
   assertEquals(links.map((l) => l.url), [F5_SHARE]);

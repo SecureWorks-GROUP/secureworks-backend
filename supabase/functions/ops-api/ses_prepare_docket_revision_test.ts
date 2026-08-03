@@ -753,6 +753,152 @@ Deno.test("portal state is read through the capture adapter and fails closed", a
   }
 });
 
+Deno.test("typed roof sibling selection is stable and remains write-free", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.family === "ordinary_roof_portal"
+  )!;
+  const candidates = [
+    {
+      role: "assessment" as const,
+      url: "https://primeeco.tech/share/assessment-candidate",
+      source: "job_detail" as const,
+    },
+    {
+      role: "photos" as const,
+      url: "https://primeeco.tech/share/photos-candidate",
+      source: "job_detail" as const,
+    },
+    {
+      role: "scope" as const,
+      url: "https://primeeco.tech/share/scope-candidate",
+      source: "job_detail" as const,
+    },
+    {
+      role: "roof_report" as const,
+      url: "https://primeeco.tech/share/roof-candidate",
+      source: "job_detail" as const,
+    },
+  ];
+  for (const links of [candidates, candidates.slice().reverse()]) {
+    const input = fixtureInput(row);
+    input.source.portal_links = links;
+    const captured: string[] = [];
+    const base = dependencies(input);
+    const result = (await prepareSesDocketRevision(
+      request(input.identity.job_id),
+      {
+        ...base,
+        capturePortal: async (captureRequest) => {
+          captured.push(captureRequest.url);
+          return await base.capturePortal!(captureRequest);
+        },
+      },
+    )).results[0];
+    assertEquals(captured, ["https://primeeco.tech/share/roof-candidate"]);
+    assertEquals(
+      blockerCodes(result).includes("portal_wrong_reference"),
+      false,
+    );
+    assertEquals(result.persisted, false);
+  }
+});
+
+Deno.test("incomplete sibling correlation stays blocked before portal capture", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.family === "ordinary_roof_portal"
+  )!;
+  const input = fixtureInput(row);
+  input.identity.source_instruction_id = "";
+  input.identity.lineage_id = "";
+  input.source.builder_reference = "";
+  input.source.portal_links = [
+    {
+      role: "assessment",
+      url: "https://primeeco.tech/share/assessment-candidate",
+      source: "job_detail",
+    },
+    {
+      role: "photos",
+      url: "https://primeeco.tech/share/photos-candidate",
+      source: "job_detail",
+    },
+    {
+      role: "scope",
+      url: "https://primeeco.tech/share/scope-candidate",
+      source: "job_detail",
+    },
+    {
+      role: "roof_report",
+      url: "https://primeeco.tech/share/roof-candidate",
+      source: "job_detail",
+    },
+  ];
+  let captureCalls = 0;
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input, {
+      capturePortal: async () => {
+        captureCalls++;
+        throw new Error("incomplete correlation must not choose a candidate");
+      },
+    }),
+  )).results[0];
+  const blocker = result.blockers.find((item) =>
+    item.reason_code === "portal_wrong_reference"
+  );
+  assert(blocker);
+  assertStringIncludes(blocker.reason, "correlation spine is incomplete");
+  assertEquals(captureCalls, 0);
+  assertEquals(result.portal_evidence, []);
+  assertEquals(result.persisted, false);
+});
+
+Deno.test("equally credible roof siblings stay blocked with order-stable detail", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.family === "ordinary_roof_portal"
+  )!;
+  const candidates = [
+    {
+      role: "roof_report" as const,
+      url: "https://primeeco.tech/share/roof-candidate-b",
+      source: "job_detail" as const,
+    },
+    {
+      role: "roof_report" as const,
+      url: "https://primeeco.tech/share/roof-candidate-a",
+      source: "job_detail" as const,
+    },
+  ];
+  const rejectionSets: string[][] = [];
+  for (const links of [candidates, candidates.slice().reverse()]) {
+    const input = fixtureInput(row);
+    input.source.portal_links = links;
+    let captureCalls = 0;
+    const result = (await prepareSesDocketRevision(
+      request(input.identity.job_id),
+      dependencies(input, {
+        capturePortal: async () => {
+          captureCalls++;
+          throw new Error("tied candidates must not be captured");
+        },
+      }),
+    )).results[0];
+    const blocker = result.blockers.find((item) =>
+      item.reason_code === "portal_wrong_reference"
+    );
+    assert(blocker);
+    rejectionSets.push(blocker.rejected_candidates);
+    assertEquals(captureCalls, 0);
+    assertEquals(result.portal_evidence, []);
+    assertEquals(result.persisted, false);
+  }
+  assertEquals(rejectionSets[0], [
+    "https://primeeco.tech/share/roof-candidate-a",
+    "https://primeeco.tech/share/roof-candidate-b",
+  ]);
+  assertEquals(rejectionSets[1], rejectionSets[0]);
+});
+
 Deno.test("portal done requires a valid content fingerprint", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.family === "ordinary_roof_portal"
@@ -1558,7 +1704,9 @@ Deno.test("control: a job with no crew in any source still blocks", async () => 
   // Same shape, but nothing anywhere holds a crew. The fourth source must be a fourth PLACE TO
   // LOOK, never a fallback that invents an answer.
   for (const emptyValue of [null, "", "   "]) {
-    const input = inputWithCrewOnlyOnTheAssignedUser(emptyValue as string | null);
+    const input = inputWithCrewOnlyOnTheAssignedUser(
+      emptyValue as string | null,
+    );
     const result = (await prepareSesDocketRevision(
       request(input.identity.job_id),
       dependencies(input),
