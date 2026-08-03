@@ -1092,6 +1092,120 @@ export async function revokeSesDocketSignoffAction(
   };
 }
 
+export const SES_DOCKET_RETIRE_REASON_CODES = [
+  "already_reported",
+  "wrong_family",
+  "superseded",
+  "captain_ruling",
+] as const;
+export type SesDocketRetireReasonCode =
+  typeof SES_DOCKET_RETIRE_REASON_CODES[number];
+
+async function requireSesDocketRetireAuthority(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+) {
+  if (auth.mode === "api_key") return;
+  const operator = await loadOperatorAuth(client, auth);
+  if (
+    !canManageSesDocsReadySignoff({
+      mode: operator.mode,
+      role: operator.mode === "jwt" ? operator.role : null,
+      operator_class: operator.mode === "jwt" ? operator.operator_class : null,
+    })
+  ) {
+    throw new SesActionError(403, {
+      state: "refused",
+      fact:
+        "Retiring a Docs Ready docket is restricted to the Captain, an admin-owner, or the privileged ops key; the automation routine can never evict a docket from the review queue.",
+    });
+  }
+}
+
+export async function retireSesDocketRevisionAction(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+  args: {
+    docket_revision_id: string;
+    reason_code: string;
+    reason_text?: string;
+    actor?: string;
+  },
+) {
+  await requireSesDocketRetireAuthority(client, auth);
+  const docketRevisionId = String(args.docket_revision_id || "").trim();
+  const reasonCode = String(args.reason_code || "").trim();
+  if (
+    !docketRevisionId ||
+    !(SES_DOCKET_RETIRE_REASON_CODES as readonly string[]).includes(reasonCode)
+  ) {
+    throw new SesActionError(400, {
+      state: "refused",
+      fact:
+        "docket_revision_id and a reason_code of already_reported, wrong_family, superseded or captain_ruling are required.",
+    });
+  }
+  const reasonText = String(args.reason_text || "").trim();
+  const docket = requireValue(
+    await client.from("makesafe_docket_revisions").select("id")
+      .eq("id", docketRevisionId).maybeSingle(),
+    "The requested docket revision no longer exists.",
+  );
+  const current = await client.from("makesafe_docket_revisions_current")
+    .select("id").eq("id", docketRevisionId).maybeSingle();
+  if (current.error || !current.data) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        "The requested docket is no longer the current exact revision for its job; only the current revision can be retired from the review queue.",
+    });
+  }
+  const latest = await client.from("ses_docket_review_events").select(
+    "id,review_state,event_kind",
+  ).eq("docket_revision_id", docketRevisionId)
+    .order("event_sequence", { ascending: false }).limit(1).maybeSingle();
+  if (latest.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The review audit trail could not be read (${
+        latest.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  if (!latest.data) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        "The requested docket is not waiting in the Docs Ready review queue.",
+    });
+  }
+  if (latest.data.review_state === "retired") {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        "The requested docket is already retired; no second retire event was recorded.",
+    });
+  }
+  nextSesDocsReadyState(latest.data.review_state, "retired");
+  const recorded = await client.rpc("retire_ses_docket_revision_v1", {
+    p_event: {
+      docket_revision_id: docket.id,
+      retire_reason_code: reasonCode,
+      reason: reasonText || null,
+      actor_user_id: auth.mode === "jwt" && auth.user ? auth.user.id : null,
+      actor_identity: auth.mode === "jwt" && auth.user
+        ? auth.user.email || auth.user.id
+        : String(args.actor || "").trim() || "ops-api-key",
+    },
+  });
+  return {
+    review: requireValue(
+      recorded,
+      "The exact docket retire could not be recorded.",
+    ),
+  };
+}
+
 export async function approveSesInvoiceRevisionAction(
   client: SesSupabaseClient,
   auth: SesActionAuth,
