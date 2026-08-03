@@ -34131,29 +34131,41 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
   ).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
   const fileName =
     `Make-Safe-Report-${safeRef}-${safeSuburb}-${rawHash.slice(0, 12)}.pdf`
-  return await attachMakesafeDocument(client, {
+  const trustedSnapshot = {
+    report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+    report_renderer_version:
+      MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+    report_renderer_source_revision:
+      MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+    report_renderer_script_sha256:
+      MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+    report_render_hash: rawHash,
+    report_input_hash: validatedInput.inputHash,
+  }
+  const result = await attachMakesafeDocument(client, {
     job_id: jobId,
     type: 'makesafe_report',
     file_name: fileName,
     pdf_base64: pdfBase64,
     uploaded_by: body.operator || 'guarded-current-wiki-rerender-sweep',
   }, {
-    data_snapshot_json: {
-      report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-      report_renderer_version:
-        MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
-      report_renderer_source_revision:
-        MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-      report_renderer_script_sha256:
-        MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-      report_render_hash: rawHash,
-      report_input_hash: validatedInput.inputHash,
-    },
+    data_snapshot_json: trustedSnapshot,
     attendance_cycle_id: detailResponse.data.attendance_cycle_id || null,
     cycle_attribution: detailResponse.data.attendance_cycle_id
       ? 'bound'
       : null,
   })
+  const { error: provenanceError } = await client.from('job_documents')
+    .update({
+      data_snapshot_json: {
+        ...trustedSnapshot,
+        evidence_source: 'current_cycle_curated_makesafe_report',
+        source_document_id: result.document_id,
+      },
+    })
+    .eq('id', result.document_id)
+  if (provenanceError) throw provenanceError
+  return result
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
