@@ -2602,6 +2602,53 @@ function casePayload(
   };
 }
 
+function sourcePersistenceFailureCasePayload(
+  plan: DeterministicCasePlan,
+  parent: { id: string; lineage_id: string; cycle: number } | null,
+): Record<string, any> {
+  const payload = casePayload(plan, null, parent);
+  return {
+    ...payload,
+    // A rejected authoritative payload must still produce one visible case.
+    // Strip fields governed by identity/target/cutover constraints so the
+    // fallback cannot claim authority, bind a job, or mint work. Raw builder
+    // references and the operator-facing facts remain available for review.
+    company_id: null,
+    company_key: null,
+    external_ref_canonical: null,
+    builder_wo_canonical: null,
+    builder_po_canonical: null,
+    deliverable_ref_canonical: null,
+    wo_po_identity_key: null,
+    field_provenance: {},
+    state: "exception",
+    // Reuse the live-accepted deterministic failure bucket. The exact write
+    // boundary remains in last_decision_reason and the typed source issue.
+    reason_code: "adapter_parse_failure",
+    blocked_reasons: [],
+    job_id: null,
+    target_relation: null,
+    target_job_id: null,
+    is_authoritative: false,
+    side_effects_suppressed: true,
+    last_decision_reason: "deterministic source_persist_failed case_insert",
+    adapter_id: null,
+    adapter_version: null,
+    manifest_version: null,
+    source_fingerprint: null,
+    story_json: [],
+    evidence_map: {},
+    recovery_cursor: {},
+    raw_identity_json: {
+      builder_slug: plan.identity.builderSlug,
+      external_ref: plan.identity.externalRefRaw,
+      builder_wo: plan.identity.builderWoRaw,
+      builder_po: plan.identity.builderPoRaw,
+      deliverable: plan.identity.deliverableRefRaw,
+    },
+  };
+}
+
 type PersistedOutcome = "artifact" | "draft";
 
 async function stageAttachments(
@@ -3324,7 +3371,7 @@ async function readPersistedCases(
   for (const keys of chunk(cases.map((c) => c.instructionKey))) {
     const { data, error } = await client.from("makesafe_intake_cases")
       .select(
-        "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id,last_decision_provenance,normaliser_version",
+        "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id,last_decision_provenance,last_decision_reason,normaliser_version",
       )
       .eq("org_id", DEFAULT_ORG_ID)
       .in("instruction_key", keys);
@@ -3695,6 +3742,7 @@ async function insertCaseAndSources(
     caseRow: any;
     caseCreated: boolean;
     caseUpgraded: boolean;
+    caseInsertRecovered: boolean;
     sourceCreated: number;
     resumed: boolean;
   }
@@ -3704,6 +3752,7 @@ async function insertCaseAndSources(
     : await findCase(client, plan.instructionKey);
   let caseCreated = false;
   let caseUpgraded = false;
+  let caseInsertRecovered = false;
   if (!existing) {
     const parent = plan.parentInstructionKey
       ? await findCase(client, plan.parentInstructionKey)
@@ -3720,9 +3769,26 @@ async function insertCaseAndSources(
     if (error) {
       existing = await findCase(client, plan.instructionKey);
       if (!existing) {
-        throw new Error(
-          `deterministic case insert failed: ${error.message || error}`,
-        );
+        const { data: fallbackData, error: fallbackError } = await client.from(
+          "makesafe_intake_cases",
+        )
+          .insert(sourcePersistenceFailureCasePayload(plan, parent))
+          .select(
+            "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id",
+          )
+          .single();
+        if (fallbackError) {
+          existing = await findCase(client, plan.instructionKey);
+          if (!existing) {
+            throw new Error(
+              `deterministic case insert failed: ${error.message || error}`,
+            );
+          }
+        } else {
+          existing = fallbackData;
+          caseCreated = true;
+          caseInsertRecovered = true;
+        }
       }
     } else {
       existing = data;
@@ -3844,6 +3910,7 @@ async function insertCaseAndSources(
     caseRow: existing,
     caseCreated,
     caseUpgraded,
+    caseInsertRecovered,
     sourceCreated,
     resumed: !caseCreated,
   };
@@ -4651,6 +4718,16 @@ export async function runDeterministicIntake(
     ) {
       return "fresh";
     }
+    // The stripped fallback is visible and source-accounted but deliberately
+    // non-authoritative. Exact/manual replay must not turn the same unresolved
+    // persistence failure into a job mint; a reviewed correction must clear or
+    // replace this decision before the obligation can advance.
+    if (
+      row.last_decision_reason ===
+        "deterministic source_persist_failed case_insert"
+    ) {
+      return "stuck";
+    }
     // The BOX reconciliation migration creates corrected authorities solely to
     // replace a false shared PO identity. They are deliberately non-operational:
     // an ordinary catch-up sweep must not turn reconciled history into hundreds
@@ -4791,6 +4868,27 @@ export async function runDeterministicIntake(
       let resumedCase = saved.resumed;
       if (saved.caseCreated) report.totals.case_rows_created++;
       report.totals.source_rows_created += saved.sourceCreated;
+      if (saved.caseInsertRecovered) {
+        report.write_failure_reasons.case_insert =
+          (report.write_failure_reasons.case_insert || 0) + 1;
+        report.totals.write_failures++;
+        report.totals.cases_failed++;
+        const sources = effectivePlan.sourcePostIds.flatMap((postId) => {
+          const source = sourceMap.get(postId);
+          return source ? [source] : [];
+        });
+        await persistIssueForSources(
+          client,
+          sources,
+          "source_persist_failed",
+          {
+            instructionKey: effectivePlan.instructionKey,
+            caseId: saved.caseRow.id,
+          },
+        );
+        committed++;
+        continue;
+      }
       let notificationSettlementComplete = true;
       const wantsJob = !jobId && !lifecycleReopen &&
         (effectivePlan.state === "confirmed_live_job" ||
