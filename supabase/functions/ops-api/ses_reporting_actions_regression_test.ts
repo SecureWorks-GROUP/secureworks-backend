@@ -2,6 +2,7 @@
 import {
   assertEquals,
   assertRejects,
+  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _parseSesDraftForTest,
@@ -11,6 +12,7 @@ import {
   querySesReviewCockpitAction,
   resolveDocketRoutes,
   SesActionError,
+  signOffSesDocketAction,
 } from "./ses_reporting_actions.ts";
 import { MAKESAFE_REPORT_CONTRACT_VERSION } from "./makesafe_report_render.ts";
 import { sesSha256Bytes } from "./ses_docket_envelope.ts";
@@ -28,9 +30,10 @@ function reviewPackClient(
   bytes: Uint8Array,
 ) {
   const signedPaths: string[] = [];
+  const rpcCalls: string[] = [];
   const review = {
     docket_revision_id: "docket-fixture",
-    docket_output_content_hash: "sha256:output-fixture",
+    docket_output_content_hash: `sha256:${"e".repeat(64)}`,
     assembler_version: "ses-pack-assembler/v1",
     family_matrix_version: "family-matrix-fixture",
   };
@@ -61,6 +64,10 @@ function reviewPackClient(
     ses_docket_review_events: [],
   };
   const client = {
+    rpc(name: string) {
+      rpcCalls.push(name);
+      return Promise.resolve({ data: {}, error: null });
+    },
     storage: {
       from() {
         return {
@@ -100,7 +107,7 @@ function reviewPackClient(
       return query;
     },
   } as any;
-  return { client, signedPaths };
+  return { client, signedPaths, rpcCalls, review };
 }
 
 Deno.test("retired commercial and self-consistent raw provenance remain untrusted without job-specific code", () => {
@@ -179,6 +186,50 @@ Deno.test("review pack suppresses unproved report bytes and exposes curated_sour
   assertEquals(signedPaths, []);
 });
 
+Deno.test("Captain signoff refuses a report suppressed by the same read contract", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nlegacy fixture");
+  const artifact = {
+    role: "supporting_report_pdf",
+    object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+    media_type: "application/pdf",
+    content_hash: await sesSha256Bytes(bytes),
+    size_bytes: bytes.byteLength,
+    metadata: {
+      evidence_source: "current_cycle_curated_makesafe_report",
+      report_renderer_version: "secureworks.ops-api-jspdf/retired",
+      render_hash: await rawSha256(bytes),
+    },
+  };
+  const { client, rpcCalls, review } = reviewPackClient(artifact, bytes);
+  const error = await assertRejects(
+    () =>
+      signOffSesDocketAction(
+        client,
+        {
+          mode: "jwt",
+          user: {
+            id: "captain-fixture",
+            email: "",
+            role: "owner",
+          },
+        },
+        {
+          docket_revision_id: "docket-fixture",
+          expected_output_content_hash: review.docket_output_content_hash,
+        },
+      ),
+    SesActionError,
+    "lacks an independently byte-bound",
+  );
+  assertEquals((error as SesActionError).status, 409);
+  const refusal = (error as SesActionError).refusal as Record<string, unknown>;
+  assertStringIncludes(
+    String(refusal.recovery_action || ""),
+    "bind_current_cycle_curated_makesafe_report",
+  );
+  assertEquals(rpcCalls, []);
+});
+
 Deno.test("review pack keeps a byte-verified previously committed report visible", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\ntrusted fixture");
   const contentHash = await sesSha256Bytes(bytes);
@@ -202,6 +253,46 @@ Deno.test("review pack keeps a byte-verified previously committed report visible
       render_hash: rawHash,
       evidence_source: "current_cycle_curated_makesafe_report",
       report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+    },
+  };
+  const { client, signedPaths } = reviewPackClient(artifact, bytes);
+  const pack = await getSesReviewablePackAction(
+    client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(pack.artifacts.length, 1);
+  assertEquals(pack.suppressed_artifacts, []);
+  assertEquals(pack.blockers, []);
+  assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
+});
+
+Deno.test("review pack keeps an independently proved sibling bundle report visible", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\ntrusted sibling fixture");
+  const contentHash = await sesSha256Bytes(bytes);
+  const rawHash = await rawSha256(bytes);
+  const artifact = {
+    role: "supporting_report_pdf",
+    object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+    media_type: "application/pdf",
+    content_hash: contentHash,
+    size_bytes: bytes.byteLength,
+    metadata: {
+      source_kind: "previously_committed_pdf",
+      source_identity:
+        "docket-revision:source-revision/artifact:source-artifact",
+      source_document_id: "source-document",
+      source_revision_id: "source-revision",
+      source_artifact_id: "source-artifact",
+      source_artifact_content_hash: contentHash,
+      expected_raw_sha256: `sha256:${rawHash}`,
+      output_sha256: `sha256:${rawHash}`,
+      render_hash: rawHash,
+      evidence_source: "explicit_sibling_bundle",
+      report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      bundle_id: "bundle-fixture",
+      sibling_job_id: "sibling-job-fixture",
+      binding_revision_id: "binding-revision-fixture",
     },
   };
   const { client, signedPaths } = reviewPackClient(artifact, bytes);

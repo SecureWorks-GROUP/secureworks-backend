@@ -116,6 +116,7 @@ function bindClient(
     documentJobId?: string;
     documentType?: string;
     visibleToTrades?: boolean;
+    eventInsertError?: Record<string, unknown>;
   } = {},
 ) {
   const mutations: Array<{ table: string; values: Record<string, unknown> }> =
@@ -152,6 +153,7 @@ function bindClient(
   const client = {
     from(table: string) {
       let mutation: Record<string, unknown> | null = null;
+      let responseError: Record<string, unknown> | null = null;
       const query: any = {
         select: () => query,
         eq: () => query,
@@ -160,6 +162,9 @@ function bindClient(
         insert: (values: Record<string, unknown>) => {
           mutation = values;
           mutations.push({ table, values });
+          if (table === "job_events" && options.eventInsertError) {
+            responseError = options.eventInsertError;
+          }
           return query;
         },
         update: (values: Record<string, unknown>) => {
@@ -170,6 +175,7 @@ function bindClient(
               string,
               unknown
             >;
+            document.version = Number(values.version);
           }
           return query;
         },
@@ -177,7 +183,7 @@ function bindClient(
           const data = table === "job_documents" && !mutation
             ? [document, ...(options.otherDocuments || [])]
             : null;
-          return Promise.resolve({ data, error: null }).then(resolve);
+          return Promise.resolve({ data, error: responseError }).then(resolve);
         },
       };
       return query;
@@ -245,6 +251,7 @@ Deno.test("byte-bound current-cycle curated report bind writes stable independen
     document.data_snapshot_json.curated_source_identity,
     result.source_identity,
   );
+  assertEquals(document.version, 2);
 
   const replay = await withStoredPdf(
     bytes,
@@ -408,6 +415,28 @@ Deno.test("same curation identity with different bytes is replay drift, not a se
   );
   assertEquals((error as ApiError).status, 409);
   assertEquals(mutations.length, 2);
+});
+
+Deno.test("cycle reservation collision refuses before a concurrent trusted marker write", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nprivacy-safe fixture");
+  const { client, mutations } = bindClient(bytes, {
+    eventInsertError: { code: "23505", message: "duplicate reservation" },
+  });
+  const body = await bindBody(bytes);
+  const error = await assertRejects(
+    () =>
+      withStoredPdf(
+        bytes,
+        () => _bindCurrentCycleCuratedMakesafeReportForTest(client, body),
+      ),
+    ApiError,
+    "bind in progress or completed",
+  );
+  assertEquals((error as ApiError).status, 409);
+  assertEquals(
+    mutations.some((mutation) => mutation.table === "job_documents"),
+    false,
+  );
 });
 
 Deno.test("current-wiki input hash binds photo bytes, not temp paths", async () => {

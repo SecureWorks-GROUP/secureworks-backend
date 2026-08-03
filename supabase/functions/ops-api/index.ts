@@ -657,7 +657,12 @@ import {
   canonicalCurrentWikiReportHashPayload,
   type MakesafeReportJob,
 } from './makesafe_report_render.ts'
-import { canonicalSesJson, sesSha256Bytes } from './ses_docket_envelope.ts'
+import {
+  canonicalSesJson,
+  sesSha256,
+  sesSha256Bytes,
+  stableUuidFromSha256,
+} from './ses_docket_envelope.ts'
 // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled template ->
 // our-letterhead PDF). Template/pricing/validation helpers are pure; the
 // renderer mirrors makesafe_report_render.ts.
@@ -34655,7 +34660,13 @@ async function bindCurrentCycleCuratedMakesafeReport(client: any, body: any) {
     throw new ApiError('document already has a conflicting curated source bind', 409)
   }
 
+  const eventId = stableUuidFromSha256(await sesSha256({
+    domain: 'ses-curated-report-source-bind-cycle/v1',
+    job_id: jobId,
+    attendance_cycle_id: attendanceCycleId,
+  }))
   const event = await client.from('job_events').insert({
+    id: eventId,
     job_id: jobId,
     event_type: 'ses_curated_report_source_bind_validated',
     detail_json: {
@@ -34669,11 +34680,26 @@ async function bindCurrentCycleCuratedMakesafeReport(client: any, body: any) {
       report_input_hash: validatedInput.inputHash,
     },
   })
-  if (event.error) throw new ApiError('curated source audit event could not be written', 503)
+  if (event.error) {
+    if (event.error.code === '23505') {
+      throw new ApiError('current attendance cycle already has a bind in progress or completed', 409)
+    }
+    throw new ApiError('curated source audit event could not be written', 503)
+  }
+  const currentVersion = Number(document.version)
+  if (!Number.isSafeInteger(currentVersion) || currentVersion < 1) {
+    await client.from('job_events').delete().eq('id', eventId)
+    throw new ApiError('curated source document has no stable version for compare-and-swap', 409)
+  }
   const update = await client.from('job_documents').update({
     data_snapshot_json: { ...prior, ...exactSnapshot },
-  }).eq('id', documentId).eq('version', document.version).select('id').maybeSingle()
+    version: currentVersion + 1,
+  }).eq('id', documentId).eq('version', currentVersion).select('id').maybeSingle()
   if (update.error || !update.data) {
+    const cleanup = await client.from('job_events').delete().eq('id', eventId)
+    if (cleanup.error) {
+      console.error('[ops-api] curated bind reservation cleanup failed', cleanup.error)
+    }
     throw new ApiError('curated source provenance drifted before it could be written', 409)
   }
   return {

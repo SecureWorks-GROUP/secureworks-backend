@@ -59,6 +59,7 @@ import { deriveExistingFencePicketDecision } from "./makesafe_existing_fence_pic
 import { buildRoofReportJob } from "./roof_report_template.ts";
 import { isBundledCoverageSendNote } from "./makesafe_send_pack.ts";
 import { renderSesSwmsPdf } from "./ses_swms_render.ts";
+import { inspectSesSupportingReportProof } from "./ses_supporting_report_trust.ts";
 import {
   canonicalSesPortalCaptureResult,
   canonicalSesPortalCaptureRole,
@@ -2079,6 +2080,7 @@ function physicalReportSourceForCycle(
     );
     const artifactContentHash = text(artifact.content_hash);
     if (
+      !inspectSesSupportingReportProof(artifact).trusted ||
       !document || document.visible_to_trades !== true ||
       text(document.type).toLowerCase() !== "makesafe_report" ||
       text(document.attendance_cycle_id) !== currentCycleId ||
@@ -2087,26 +2089,16 @@ function physicalReportSourceForCycle(
       !text(artifact.object_key) || !isSesSha256(artifactContentHash) ||
       !Number.isSafeInteger(Number(artifact.size_bytes)) ||
       Number(artifact.size_bytes) <= 0 ||
-      text(document.uploaded_by) === "guarded-current-wiki-rerender-sweep" ||
-      (text(provenance.source_document_id) === text(document.id) &&
-        text(provenance.evidence_source) ===
-          "current_cycle_curated_makesafe_report")
+      text(document.uploaded_by) === "guarded-current-wiki-rerender-sweep"
     ) continue;
     const inputHash = text(metadata.report_input_hash) ||
       text(provenance.report_input_hash);
-    const durable = durableCuratedDocumentForCycle(
-      { ...snapshot, documents: [document] },
-      currentCycleId,
-    );
-    const sourceKind = durable
-      ? "durable_curated_revision" as const
-      : "previously_committed_pdf" as const;
     candidates.push({
       document,
       artifact,
       committed_at: text(revision.committed_at),
       proof: {
-        source_kind: sourceKind,
+        source_kind: "previously_committed_pdf",
         source_identity: `docket-revision:${text(revision.id)}/artifact:${
           text(artifact.id)
         }`,
@@ -2597,21 +2589,45 @@ export function createSesAssemblerRuntimeDependencies(
         text(siblingSnapshot.detail?.attendance_cycle_id),
         bundle.coverage.report_document_id,
       );
-      if (!source || source.proof.source_identity !== proof.source_identity) {
+      if (
+        !source || source.proof.source_kind !== proof.source_kind ||
+        source.proof.source_identity !== proof.source_identity ||
+        source.proof.source_document_id !== proof.source_document_id ||
+        source.proof.source_revision_id !== proof.source_revision_id ||
+        source.proof.source_artifact_id !== proof.source_artifact_id ||
+        source.proof.source_artifact_content_hash !==
+          proof.source_artifact_content_hash ||
+        source.proof.expected_raw_sha256 !== proof.expected_raw_sha256 ||
+        source.proof.report_input_hash !== proof.report_input_hash
+      ) {
         return null;
       }
-      const objectKey = text(source.artifact?.object_key);
-      const prefix = `${SES_DOCKET_BUCKET}/`;
-      const storagePath = objectKey.startsWith(prefix)
-        ? objectKey.slice(prefix.length)
-        : objectKey;
-      const recovered = await client.storage.from(SES_DOCKET_BUCKET)
-        .download(storagePath);
-      if (recovered.error || !recovered.data) return null;
-      const bytes = new Uint8Array(await recovered.data.arrayBuffer());
+      let bytes: Uint8Array;
+      if (source.artifact) {
+        const objectKey = text(source.artifact.object_key);
+        const prefix = `${SES_DOCKET_BUCKET}/`;
+        const storagePath = objectKey.startsWith(prefix)
+          ? objectKey.slice(prefix.length)
+          : objectKey;
+        const recovered = await client.storage.from(SES_DOCKET_BUCKET)
+          .download(storagePath);
+        if (recovered.error || !recovered.data) return null;
+        bytes = new Uint8Array(await recovered.data.arrayBuffer());
+      } else {
+        const url = artifactUrl(source.document);
+        if (!url.startsWith("https://")) return null;
+        const recovered = await fetch(url, {
+          signal: AbortSignal.timeout(20_000),
+        });
+        if (!recovered.ok) return null;
+        bytes = new Uint8Array(await recovered.arrayBuffer());
+      }
       if (
+        bytes.byteLength === 0 || bytes.byteLength > 8 * 1024 * 1024 ||
         await sesSha256Bytes(bytes) !== proof.source_artifact_content_hash ||
-        await rawReportHash(await rawPhotoSha256(bytes)) !==
+        await rawReportHash(
+            await rawPhotoSha256(bytes as Uint8Array<ArrayBuffer>),
+          ) !==
           proof.expected_raw_sha256 ||
         new TextDecoder().decode(bytes.slice(0, 5)) !== "%PDF-"
       ) return null;
@@ -2626,6 +2642,18 @@ export function createSesAssemblerRuntimeDependencies(
         provenance: {
           evidence_source: "explicit_sibling_bundle",
           report_document_id: proof.source_document_id,
+          report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+          report_renderer_version: text(
+            record(source.document.data_snapshot_json).report_renderer_version,
+          ),
+          report_renderer_source_revision: text(
+            record(source.document.data_snapshot_json)
+              .report_renderer_source_revision,
+          ),
+          report_renderer_script_sha256: text(
+            record(source.document.data_snapshot_json)
+              .report_renderer_script_sha256,
+          ),
         },
       };
     },

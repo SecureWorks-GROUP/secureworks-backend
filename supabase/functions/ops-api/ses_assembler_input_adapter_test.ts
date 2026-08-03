@@ -1692,10 +1692,19 @@ Deno.test(
       data_snapshot_json: {
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
         report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+        report_renderer_source_revision:
+          MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+        report_renderer_script_sha256:
+          MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
         report_render_hash: "e".repeat(64),
         evidence_source: "current_cycle_curated_makesafe_report",
         curated_source_kind: "durable_curated_revision",
-        curated_source_identity: "curation-revision:bertram-fixture",
+        curated_source_identity:
+          "curation-revision:curation-fixture/artifact:artifact-fixture",
+        curated_source_revision_id: "curation-fixture",
+        curated_source_artifact_id: "artifact-fixture",
+        curated_source_artifact_content_hash: `sha256:${"d".repeat(64)}`,
+        curated_source_expected_raw_sha256: `sha256:${"e".repeat(64)}`,
         report_input_hash: `sha256:${"f".repeat(64)}`,
         report_scope_narratives: [
           "20 star pickets installed to prop and secure the existing fence line. Fence materials left in place on site pending permanent repair.",
@@ -1858,6 +1867,9 @@ Deno.test(
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
         report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
         report_render_hash: "b".repeat(64),
+        report_scope_narratives: [
+          "Temporary fence panels were installed as a privacy-safe false-claim fixture.",
+        ],
       },
     }];
     assertEquals(currentCuratedReportDocument(live, input), null);
@@ -1881,7 +1893,18 @@ Deno.test(
       size_bytes: 100,
       metadata: {
         report_document_id: "committed-report",
+        source_kind: "previously_committed_pdf",
+        source_identity:
+          "docket-revision:trusted-source-revision/artifact:trusted-source-artifact",
+        source_document_id: "committed-report",
+        source_revision_id: "trusted-source-revision",
+        source_artifact_id: "trusted-source-artifact",
+        source_artifact_content_hash: `sha256:${"c".repeat(64)}`,
+        expected_raw_sha256: `sha256:${"a".repeat(64)}`,
+        output_sha256: `sha256:${"a".repeat(64)}`,
         render_hash: "a".repeat(64),
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
       },
     }, {
       id: "artifact-sweep",
@@ -1893,7 +1916,17 @@ Deno.test(
       size_bytes: 100,
       metadata: {
         report_document_id: "guarded-sweep-report",
+        source_kind: "durable_curated_revision",
+        source_identity: "guarded-sweep-report",
+        source_document_id: "guarded-sweep-report",
+        source_revision_id: "raw-source-revision",
+        source_artifact_id: "raw-source-artifact",
+        source_artifact_content_hash: `sha256:${"d".repeat(64)}`,
+        expected_raw_sha256: `sha256:${"b".repeat(64)}`,
+        output_sha256: `sha256:${"b".repeat(64)}`,
         render_hash: "b".repeat(64),
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
       },
     }];
     assertEquals(
@@ -2036,6 +2069,126 @@ Deno.test(
       assertStringIncludes(
         new TextDecoder("latin1").decode(report.bytes),
         "Canonical site contact",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
+Deno.test(
+  "a durable-bound sibling report recovers from its document without an empty artifact path",
+  async () => {
+    const live = mlbPhysicalSwmsSnapshot({ crew: "assigned_user" });
+    const bytes = new TextEncoder().encode("%PDF-1.7\ntrusted sibling fixture");
+    const digest = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new Uint8Array(bytes).buffer),
+    );
+    const rawHash = Array.from(digest).map((byte) =>
+      byte.toString(16).padStart(2, "0")
+    ).join("");
+    const contentHash = await sesSha256Bytes(bytes);
+    const reportDocumentId = "sibling-durable-report";
+    live.documents = [{
+      id: reportDocumentId,
+      job_id: "sibling-job-fixture",
+      type: "makesafe_report",
+      file_name: "trusted-sibling.pdf",
+      pdf_url: "https://storage.example.test/trusted-sibling.pdf",
+      visible_to_trades: true,
+      attendance_cycle_id: live.detail!.attendance_cycle_id,
+      cycle_attribution: "bound",
+      version: 1,
+      data_snapshot_json: {
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+        report_renderer_source_revision:
+          MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+        report_renderer_script_sha256:
+          MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+        report_render_hash: rawHash,
+        report_input_hash: `sha256:${"1".repeat(64)}`,
+        curated_source_kind: "durable_curated_revision",
+        curated_source_identity:
+          "curation-revision:sibling-curation-revision/artifact:sibling-curation-artifact",
+        curated_source_revision_id: "sibling-curation-revision",
+        curated_source_artifact_id: "sibling-curation-artifact",
+        curated_source_artifact_content_hash: contentHash,
+        curated_source_expected_raw_sha256: `sha256:${rawHash}`,
+      },
+    }];
+    live.docket_revisions = [];
+    live.docket_artifacts = [];
+    const input = buildSesAssemblerInput(live);
+    input.sibling_bundle_evidence = {
+      status: "accepted",
+      bundle_id: "bundle-fixture",
+      claiming_binding: {
+        revision_id: "binding-forward",
+        recorded_by: "operator-fixture",
+        recorded_via: "test",
+        provenance: { source: "test" },
+      },
+      reverse_binding: {
+        revision_id: "binding-reverse",
+        recorded_by: "operator-fixture",
+        recorded_via: "test",
+        provenance: { source: "test" },
+      },
+      sibling: {
+        job_id: "sibling-job-fixture",
+        job_number: "SWMS-SIBLING",
+      },
+      coverage: {
+        invoice: {
+          invoice_id: "invoice-fixture",
+          invoice_number: "INV-FIXTURE",
+          line_item_id: "line-fixture",
+          scope_phrase: "secured building element",
+        },
+        delivery: {
+          email_post_id: "delivery-fixture",
+          content_sha256: "2".repeat(64),
+          scope_phrase: "secured building element",
+        },
+        photo: {
+          email_post_id: "delivery-fixture",
+          content_sha256: "2".repeat(64),
+          scope_phrase: "secured building element",
+          media_id: "photo-fixture",
+          content_hash: `sha256:${"3".repeat(64)}`,
+        },
+        report_document_id: reportDocumentId,
+        swms_document_id: "swms-fixture",
+      },
+    };
+    const dependencies = createSesAssemblerRuntimeDependencies(
+      liveSnapshotClient(live),
+      { org_id: live.job.org_id, created_by: "sibling-bind-regression" },
+    );
+    await dependencies.resolveInput({
+      mode: "job_id",
+      job_id: live.job.id,
+    });
+    assert(dependencies.resolveBundledPhysicalReportProof);
+    assert(dependencies.renderBundledPhysicalReport);
+    const proof = await dependencies.resolveBundledPhysicalReportProof(input);
+    assert(proof);
+    assertEquals(proof.source_kind, "durable_curated_revision");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = () =>
+      Promise.resolve(new Response(new Uint8Array(bytes).buffer));
+    try {
+      const recovered = await dependencies.renderBundledPhysicalReport(
+        input,
+        proof,
+      );
+      assert(recovered);
+      assertEquals(recovered.bytes, bytes);
+      assertEquals(
+        recovered.provenance?.evidence_source,
+        "explicit_sibling_bundle",
       );
     } finally {
       globalThis.fetch = originalFetch;
