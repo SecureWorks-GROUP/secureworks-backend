@@ -2,6 +2,7 @@
 import {
   assert,
   assertEquals,
+  assertRejects,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
@@ -269,5 +270,31 @@ Deno.test("release identity changes when route content or order changes", async 
   assertEquals(
     first.routes.map((route) => route.route_kind),
     ["report", "photo", "invoice"],
+  );
+});
+
+Deno.test("release construction rejects subject prose in Cc", async () => {
+  const routes = cleanInput().routes.map((route) =>
+    route.route_kind === "report"
+      ? { ...route, cc: ["Generic report subject"] }
+      : route
+  );
+  await assertRejects(
+    () =>
+      buildSesReleaseRevision({
+        org_id: "org-1",
+        members: [{
+          job_id: "job-1",
+          docket_revision_id: "docket-1",
+          invoice_obligation_revision_id: "obligation-1",
+          attendance_cycle_ids: ["cycle-1"],
+          readiness_revision: `sha256:${"a".repeat(64)}`,
+          dependency_generation: 1,
+        }],
+        routes,
+        created_by: "operator",
+      }),
+    TypeError,
+    "non-email recipient",
   );
 });

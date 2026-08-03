@@ -636,10 +636,13 @@ import {
 } from './makesafe_instruction_mint_gate.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import {
+  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
   MAKESAFE_REPORT_CONTRACT_VERSION,
-  MAKESAFE_REPORT_RENDERER_VERSION,
-  renderMakesafeReportPdf,
+  type MakesafeReportJob,
 } from './makesafe_report_render.ts'
+import { canonicalSesJson } from './ses_docket_envelope.ts'
 // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled template ->
 // our-letterhead PDF). Template/pricing/validation helpers are pure; the
 // renderer mirrors makesafe_report_render.ts.
@@ -1129,7 +1132,7 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
 }
 
-class ApiError extends Error {
+export class ApiError extends Error {
   status: number
   body?: unknown
   constructor(message: string, status: number, body?: unknown) {
@@ -3558,7 +3561,8 @@ if (import.meta.main) serve(async (req: Request) => {
       // 'render_makesafe_report'; the live action is 'makesafe_render_report').
       // Draft / render / read ONLY; the AUTHORISE + SEND stays in makesafe_send_pack,
       // which is DELIBERATELY NOT in this allow-list and so is denied by default-deny.
-      'makesafe_render_report', // renders the report PDF artifact (no send)
+      'makesafe_render_report', // retired: clear 410, no artifact write
+      'attach_current_wiki_curated_report', // exact current-wiki bytes; no send/invoice/status
       'render_roof_report', // Wave 3: renders OUR letterhead roof report PDF + attaches (no send)
       'makesafe_report_drafts', // READ-only report-draft cockpit feed (no writes)
       // Sealed SES U5/U6 draft/read surface. These actions can only append local
@@ -6370,6 +6374,8 @@ if (import.meta.main) serve(async (req: Request) => {
         }, 410)
       case 'makesafe_render_report':
         return json(await makesafeRenderReport(client, body))
+      case 'attach_current_wiki_curated_report':
+        return json(await attachCurrentWikiCuratedReport(client, body))
       // Wave 3 -- SecureWorks own-letterhead roof report. render_roof_report is
       // routine-safe (renders OUR PDF + attaches it; no send, no authorise). The
       // roof_report_template read + save_roof_report/submit_roof_report writes are
@@ -33861,6 +33867,16 @@ export const _createMakesafeDraftInvoiceForTest = createMakesafeDraftInvoice
 
 // (3b) makesafe_render_report — render the report PDF (server jsPDF) and attach it
 // via attachMakesafeDocument as type 'makesafe_report'. Routine-safe (no send).
+export function canonicalMakesafeReportJob(
+  supplied: Record<string, unknown>,
+  clientName: unknown,
+): MakesafeReportJob {
+  return {
+    ...supplied,
+    contact: typeof clientName === "string" ? clientName.trim() : "",
+  } as MakesafeReportJob
+}
+
 async function makesafeRenderReport(client: any, body: any) {
   const jobId = body.job_id || body.jobId
   if (!jobId) throw new ApiError('job_id required', 400)
@@ -33882,51 +33898,289 @@ async function makesafeRenderReport(client: any, body: any) {
     }
   }
 
-  const job = body.job || body.report_job
-  if (!job || typeof job !== 'object') throw new ApiError('job (render payload) required', 400)
+  // The paired jsPDF renderer remains a truthful b20 compatibility port. The
+  // current authoritative wiki contract now requires explicit material/photo
+  // accounting and may render more than the old eight-photo ceiling. Attaching
+  // this older output as successful current evidence would create an orphan
+  // document that the assembler immediately rejects.
+  throw new ApiError(
+    'makesafe_render_report is retired for current curated evidence; use the guarded current-wiki rerender operator',
+    410,
+  )
 
-  const rendered = await renderMakesafeReportPdf(job)
-  // base64 the bytes for attachMakesafeDocument's pdf_base64 path.
-  let bin = ''
-  for (let i = 0; i < rendered.bytes.length; i++) bin += String.fromCharCode(rendered.bytes[i])
-  const pdfBase64 = btoa(bin)
+}
 
-  const attached = await attachMakesafeDocument(client, {
+const CURRENT_WIKI_REPORT_MAX_BYTES = 8 * 1024 * 1024
+const CURRENT_WIKI_REPORT_MUTATION_EXCLUDED_JOB_NUMBER = 'SWMS-261109'
+
+async function sha256BytesHex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new Uint8Array(bytes).buffer,
+  )
+  return [...new Uint8Array(digest)]
+    .map((value) => value.toString(16).padStart(2, '0')).join('')
+}
+
+async function assertCurrentWikiReportInput(
+  supplied: Record<string, unknown>,
+  canonicalClientName: unknown,
+  claimedInputHash: unknown,
+): Promise<{ job: MakesafeReportJob; inputHash: string }> {
+  const job = canonicalMakesafeReportJob(supplied, canonicalClientName) as any
+  if (!String((supplied as any).ref || '').trim() ||
+      !String((supplied as any).address || '').trim()) {
+    throw new ApiError('current wiki report ref and address are required', 409)
+  }
+  if (String((supplied as any).contact || '').trim() !== job.contact) {
+    throw new ApiError('report_job.contact must equal canonical jobs.client_name', 409)
+  }
+  const materials = (supplied as any).materials_evidence
+  const photos = (supplied as any).photo_evidence
+  if (!materials ||
+      !['recorded_used', 'none_recorded'].includes(String(materials.state)) ||
+      !Array.isArray(materials.items)) {
+    throw new ApiError('current wiki materials_evidence contract required', 409)
+  }
+  if (materials.items.some((item: unknown) =>
+    typeof item !== 'string' || !item.trim()
+  )) {
+    throw new ApiError('materials_evidence.items must be explicit non-empty text', 409)
+  }
+  if (
+    (materials.state === 'recorded_used' && materials.items.length === 0) ||
+    (materials.state === 'none_recorded' && materials.items.length !== 0)
+  ) {
+    throw new ApiError('materials_evidence state and items contradict', 409)
+  }
+  const suppliedPhotos = (supplied as any).photos
+  if (!photos || photos.completeness_verified !== true ||
+      !Array.isArray(photos.applicable_ids) ||
+      !Array.isArray(photos.selected_ids) ||
+      !Array.isArray(photos.excluded) ||
+      !Array.isArray(photos.rejected) ||
+      !Array.isArray(suppliedPhotos) ||
+      !String(photos.source_revision || '').trim()) {
+    throw new ApiError('current wiki photo_evidence contract required', 409)
+  }
+  const integerCounts = [
+    photos.source_count,
+    photos.applicable_count,
+    photos.selected_count,
+  ]
+  if (integerCounts.some((value) =>
+    !Number.isInteger(value) || value < 0
+  )) {
+    throw new ApiError('photo_evidence counts must be non-negative integers', 409)
+  }
+  const ids = (value: unknown[]): string[] => value.map((item) =>
+    typeof item === 'string' ? item.trim() : ''
+  )
+  const applicableIds = ids(photos.applicable_ids)
+  const selectedIds = ids(photos.selected_ids)
+  if (
+    applicableIds.some((value) => !value) ||
+    selectedIds.some((value) => !value) ||
+    new Set(applicableIds).size !== applicableIds.length ||
+    new Set(selectedIds).size !== selectedIds.length ||
+    canonicalSesJson(applicableIds) !== canonicalSesJson(selectedIds)
+  ) {
+    throw new ApiError(
+      'photo_evidence applicable and selected IDs must be identical unique ordered IDs',
+      409,
+    )
+  }
+  const excludedIds: string[] = []
+  for (const excluded of photos.excluded) {
+    const id = String(excluded?.evidence_id || '').trim()
+    const reason = String(excluded?.reason || '').trim()
+    if (!id || !reason) {
+      throw new ApiError('photo_evidence exclusions require identity and reason', 409)
+    }
+    excludedIds.push(id)
+  }
+  if (new Set(excludedIds).size !== excludedIds.length ||
+      excludedIds.some((id) => applicableIds.includes(id)) ||
+      photos.rejected.length !== 0) {
+    throw new ApiError('photo_evidence exclusion/rejection accounting is unresolved', 409)
+  }
+  if (
+    photos.source_count !== photos.applicable_count + excludedIds.length ||
+    photos.applicable_count !== applicableIds.length ||
+    photos.selected_count !== selectedIds.length ||
+    photos.selected_count !== suppliedPhotos.length
+  ) {
+    throw new ApiError('photo_evidence counts do not account for the source set', 409)
+  }
+  const photoIds = suppliedPhotos.map((photo: any) =>
+    String(photo?.evidence_id || '').trim()
+  )
+  if (canonicalSesJson(photoIds) !== canonicalSesJson(selectedIds)) {
+    throw new ApiError('photos evidence IDs do not match selected IDs in order', 409)
+  }
+  const inputHash = `sha256:${
+    await sha256BytesHex(new TextEncoder().encode(canonicalSesJson(supplied)))
+  }`
+  if (String(claimedInputHash || '') !== inputHash) {
+    throw new ApiError('current wiki report input hash mismatch', 409)
+  }
+  return { job, inputHash }
+}
+
+async function attachCurrentWikiCuratedReport(client: any, body: any) {
+  const jobId = String(body.job_id || body.jobId || '').trim()
+  if (!jobId) throw new ApiError('job_id required', 400)
+  if (
+    body.renderer_source_revision !==
+      MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION ||
+    body.renderer_script_sha256 !==
+      MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256
+  ) {
+    throw new ApiError(
+      'renderer provenance is not the deployed current-wiki boundary',
+      409,
+    )
+  }
+  const pdfBase64 = String(body.pdf_base64 || '').trim()
+  if (!pdfBase64) throw new ApiError('pdf_base64 required', 400)
+  let pdfBytes: Uint8Array
+  try {
+    pdfBytes = Uint8Array.from(
+      atob(pdfBase64),
+      (value) => value.charCodeAt(0),
+    )
+  } catch {
+    throw new ApiError('pdf_base64 is invalid', 400)
+  }
+  if (pdfBytes.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES) {
+    throw new ApiError(
+      'current wiki report exceeds the 8 MiB attachment limit',
+      413,
+    )
+  }
+  if (new TextDecoder().decode(pdfBytes.slice(0, 5)) !== '%PDF-') {
+    throw new ApiError('current wiki report is not a PDF', 400)
+  }
+  const rawHash = await sha256BytesHex(pdfBytes)
+  if (rawHash !== String(body.pdf_sha256 || '').toLowerCase()) {
+    throw new ApiError('current wiki report raw SHA-256 mismatch', 409)
+  }
+
+  const [jobResponse, detailResponse] = await Promise.all([
+    client.from('jobs').select('id,job_number,client_name,site_suburb')
+      .eq('id', jobId).maybeSingle(),
+    client.from('makesafe_job_details')
+      .select('report_type,attendance_cycle_id,external_ref')
+      .eq('job_id', jobId).maybeSingle(),
+  ])
+  if (
+    jobResponse.error || !jobResponse.data ||
+    detailResponse.error || !detailResponse.data
+  ) {
+    throw new ApiError('canonical current-cycle job facts could not be read', 409)
+  }
+  if (detailResponse.data.report_type != null) {
+    throw new ApiError(
+      'report-type jobs use the builder portal and cannot attach a make-safe report',
+      409,
+    )
+  }
+  const validatedInput = await assertCurrentWikiReportInput(
+    body.report_job || {},
+    jobResponse.data.client_name,
+    body.report_input_hash,
+  )
+  const evidenceSource = 'current_cycle_curated_makesafe_report'
+  const trustedSnapshot = {
+    report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+    report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+    report_renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+    report_renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+    report_render_hash: rawHash,
+    report_input_hash: validatedInput.inputHash,
+  }
+
+  const existingResponse = await client.from('job_documents')
+    .select('id,file_name,data_snapshot_json')
+    .eq('job_id', jobId).eq('type', 'makesafe_report')
+  if (existingResponse.error) {
+    throw new ApiError('existing curated documents could not be read', 503)
+  }
+  const identical = (existingResponse.data || []).find((row: any) => {
+    const facts = row.data_snapshot_json || {}
+    return facts.report_render_hash === rawHash &&
+      facts.report_renderer_version ===
+        MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION
+  })
+  if (identical) {
+    const facts = identical.data_snapshot_json || {}
+    const missingProvenance = Object.entries(trustedSnapshot).some(
+      ([key, value]) => facts[key] !== value,
+    ) || facts.evidence_source !== evidenceSource || !facts.source_document_id
+    if (missingProvenance) {
+      const { error: provenanceError } = await client.from('job_documents')
+        .update({
+          data_snapshot_json: {
+            ...facts,
+            ...trustedSnapshot,
+            evidence_source: evidenceSource,
+            source_document_id: identical.id,
+          },
+        })
+        .eq('id', identical.id)
+      if (provenanceError) throw provenanceError
+    }
+    return {
+      success: true,
+      skipped: true,
+      reason: 'identical current-wiki document already attached',
+      document_id: identical.id,
+      render_hash: rawHash,
+      writes: missingProvenance ? 1 : 0,
+    }
+  }
+  if (
+    jobResponse.data.job_number ===
+      CURRENT_WIKI_REPORT_MUTATION_EXCLUDED_JOB_NUMBER
+  ) {
+    throw new ApiError(
+      'captain-corrected artifact is mutation-excluded unless candidate bytes already match',
+      409,
+    )
+  }
+
+  const safeRef = String(
+    detailResponse.data.external_ref || jobResponse.data.job_number || jobId,
+  ).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
+  const safeSuburb = String(
+    jobResponse.data.site_suburb || 'suburb-not-recorded',
+  ).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
+  const fileName =
+    `Make-Safe-Report-${safeRef}-${safeSuburb}-${rawHash.slice(0, 12)}.pdf`
+  const result = await attachMakesafeDocument(client, {
     job_id: jobId,
     type: 'makesafe_report',
-    file_name: rendered.fileName,
+    file_name: fileName,
     pdf_base64: pdfBase64,
-    uploaded_by: body.operator || 'makesafe reporting autopilot',
+    uploaded_by: body.operator || 'guarded-current-wiki-rerender-sweep',
   }, {
-    data_snapshot_json: {
-      report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-      report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
-      report_render_hash: rendered.renderHash,
-    },
-    attendance_cycle_id: renderDetail?.attendance_cycle_id || null,
-    cycle_attribution: renderDetail?.attendance_cycle_id ? 'bound' : null,
+    data_snapshot_json: trustedSnapshot,
+    attendance_cycle_id: detailResponse.data.attendance_cycle_id || null,
+    cycle_attribution: detailResponse.data.attendance_cycle_id
+      ? 'bound'
+      : null,
   })
-
-  // Record the render hash onto the pack row (upsert a 'drafted' row if absent).
-  try {
-    await client.from('makesafe_report_packs').upsert({
-      org_id: DEFAULT_ORG_ID,
-      job_id: jobId,
-      pack_kind: body.pack_kind || 'main',
-      report_doc_id: attached.document_id || null,
-      last_render_hash: rendered.renderHash,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'job_id,pack_kind' })
-  } catch (e) {
-    console.log('[makesafe_render_report] pack upsert non-blocking:', (e as Error).message)
-  }
-
-  return {
-    success: true,
-    document_id: attached.document_id,
-    file_name: rendered.fileName,
-    render_hash: rendered.renderHash,
-  }
+  const { error: provenanceError } = await client.from('job_documents')
+    .update({
+      data_snapshot_json: {
+        ...trustedSnapshot,
+        evidence_source: evidenceSource,
+        source_document_id: result.document_id,
+      },
+    })
+    .eq('id', result.document_id)
+  if (provenanceError) throw provenanceError
+  return result
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -47041,4 +47295,6 @@ export const _assertGhlContactMatchesResolvedJobForTest =
 export const _assertSealedSesInvoiceCreateIsUniqueForTest =
   assertSealedSesInvoiceCreateIsUnique
 export const _makesafeRenderReportForTest = makesafeRenderReport
+export const _attachCurrentWikiCuratedReportForTest =
+  attachCurrentWikiCuratedReport
 export const _updateInvoiceForTest = updateInvoice

@@ -18,6 +18,7 @@ import {
   type SesExternalEffectStore,
 } from "./ses_external_effects.ts";
 import {
+  assertSesRouteRecipients,
   buildSesCockpitView,
   buildSesReleaseRevision,
   canRecordSesApproval,
@@ -109,10 +110,13 @@ function parseDraft(
 ): SesReviewRoute | null {
   const text = String(value || "").trim();
   if (!text) return null;
-  const header = (name: string): string => {
-    const match = text.match(new RegExp(`^${name}:\\s*(.*)$`, "mi"));
-    return match?.[1]?.trim() || "";
-  };
+  const headerLines = new Map<string, string>();
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(/^([^:]+):[ \t]*(.*)$/);
+    if (match) headerLines.set(match[1].trim().toLowerCase(), match[2].trim());
+  }
+  const header = (name: string): string =>
+    headerLines.get(name.toLowerCase()) || "";
   const recipients = splitEmails(header("To"));
   const cc = splitEmails(header("Cc"));
   const subject = header("Subject");
@@ -121,7 +125,7 @@ function parseDraft(
   ).filter(Boolean);
   const body = text.replace(/^(?:To|Cc|Subject|Attachments):.*$/gmi, "")
     .trim();
-  return {
+  const route = {
     route_kind: routeKind,
     recipients,
     cc,
@@ -130,7 +134,17 @@ function parseDraft(
     attachment_hashes: attachments,
     ready: !!subject && !!body && recipients.length > 0,
   };
+  try {
+    assertSesRouteRecipients(route);
+  } catch {
+    route.recipients = [];
+    route.cc = [];
+    route.ready = false;
+  }
+  return route;
 }
+
+export const _parseSesDraftForTest = parseDraft;
 
 function refusalFromStored(value: unknown): SesRefusal {
   const row = object(value);
@@ -424,8 +438,10 @@ export async function loadSesCockpitDocket(
     invoice_obligation_revision_id: obligation?.id || null,
     attendance_cycle_ids: docket.attendance_cycle_ids || [],
     xero_binding: docket.xero_binding || obligation?.xero_binding || null,
-    local_invoice_proposal: obligation?.proposal ||
-      docket.local_invoice_proposal || null,
+    // The cockpit/list contract consumes the docket proposal shape
+    // (`subtotal_ex_gst` / `total_inc_gst`). The obligation proposal is a
+    // separately typed canonical-pricing record and must not mask it.
+    local_invoice_proposal: docket.local_invoice_proposal || null,
     work_order: object(manifest.items).source_work_order_attachment || null,
     family_evidence: object(manifest.items),
     swms: object(manifest.items).swms_current_cycle || {},
@@ -865,9 +881,35 @@ export async function listSesDocsReadyReviewsAction(
       }).`,
     });
   }
+  const dockets = response.data || [];
+  if (dockets.length === 0) {
+    return { state: "needs_review", dockets: [] };
+  }
+  const revisionIds = dockets.map((row: any) => row.docket_revision_id);
+  const proposalResponse = await client.from("makesafe_docket_revisions")
+    .select("id,local_invoice_proposal")
+    .in("id", revisionIds);
+  if (proposalResponse.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The Docs Ready invoice proposal summaries could not be read (${
+        proposalResponse.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  const proposalByRevision = new Map(
+    (proposalResponse.data || []).map((row: any) => [
+      String(row.id),
+      row.local_invoice_proposal ?? null,
+    ]),
+  );
   return {
     state: "needs_review",
-    dockets: response.data || [],
+    dockets: dockets.map((row: any) => ({
+      ...row,
+      local_invoice_proposal:
+        proposalByRevision.get(String(row.docket_revision_id)) ?? null,
+    })),
   };
 }
 
@@ -1997,6 +2039,22 @@ export async function executeSesReleaseRevisionAction(
       fact:
         "The approved release does not contain the exact member set and all three required routes.",
     });
+  }
+  for (const route of routes) {
+    try {
+      assertSesRouteRecipients({
+        recipients: Array.isArray(route.recipients) ? route.recipients : [],
+        cc: Array.isArray(route.cc) ? route.cc : [],
+      });
+    } catch {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "route_recipient_invalid",
+          "Prepare and approve a new release revision with actual email recipients only.",
+        ),
+      );
+    }
   }
   await assertSesDocketsSignedOffForSend(
     client,

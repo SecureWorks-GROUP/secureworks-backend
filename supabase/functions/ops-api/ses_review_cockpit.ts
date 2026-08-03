@@ -28,6 +28,25 @@ export interface SesReviewRoute {
   ready: boolean;
 }
 
+const SES_EMAIL_ADDRESS_RE = /^[^\s@<>,;:]+@[^\s@<>,;:]+$/;
+
+export function invalidSesRouteRecipients(
+  route: Pick<SesReviewRoute, "recipients" | "cc">,
+): string[] {
+  return [...(route.recipients || []), ...(route.cc || [])].filter((value) =>
+    !SES_EMAIL_ADDRESS_RE.test(String(value || "").trim())
+  );
+}
+
+export function assertSesRouteRecipients(
+  route: Pick<SesReviewRoute, "recipients" | "cc">,
+): void {
+  const invalid = invalidSesRouteRecipients(route);
+  if (invalid.length > 0) {
+    throw new TypeError("release route contains a non-email recipient");
+  }
+}
+
 export interface SesCleanInput {
   pre_xero_docs_ready: boolean;
   readiness_ready: boolean;
@@ -445,6 +464,7 @@ export async function buildSesReleaseRevision(args: {
   const routes: Array<Record<string, unknown>> = [];
   for (let ordinal = 0; ordinal < orderedRoutes.length; ordinal++) {
     const route = orderedRoutes[ordinal]!;
+    assertSesRouteRecipients(route);
     const bodyHash = await sesSha256(
       route.body,
       "SecureWorks:ses-release-route-body:v1\n",
