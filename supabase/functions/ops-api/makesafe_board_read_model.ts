@@ -785,6 +785,8 @@ export function buildCanonicalMakesafeRows(
       (Array.isArray(base?.missing_docs) && base.missing_docs.includes("swms"));
     const declaredStage = String(base?.board_stage || "new").toLowerCase();
     const application = extras.statusApplicationsByJobId?.[base?.id] || null;
+    const invoiceQualifiesAsCurrentDraft =
+      base?.invoice_qualifies_as_current_draft === true;
     // R8 — an overlay row declares what it is allowed to do. A row with no
     // `decision_kind` is a legacy display override, which is every row in the
     // ledger today, so this reads as `display_override` and the binding below
@@ -800,7 +802,13 @@ export function buildCanonicalMakesafeRows(
       !!application &&
       !isMakesafeTerminalDisplayStatus(declaredStage) &&
       !isMakesafeTerminalJobState(base?.status) &&
-      String(application.source_status || "").toLowerCase() === declaredStage;
+      String(application.source_status || "").toLowerCase() === declaredStage &&
+      // A legacy display override is not a parallel escape hatch around the
+      // deterministic Docs Ready gate. Other destinations keep their existing
+      // overlay semantics; only report_ready consumes the shared prerequisite.
+      (String(application.after_status || "").toLowerCase() !==
+          "report_ready" ||
+        invoiceQualifiesAsCurrentDraft);
     // An attestation attaches PROVENANCE only, and only when it genuinely
     // describes where the card already is. It never changes `displayStage`.
     const attestationAttaches = decisionKind === "stage_attestation" &&
@@ -828,6 +836,7 @@ export function buildCanonicalMakesafeRows(
         packState: pack?.review_state || null,
         pack,
         invoiceStatus,
+        invoiceQualifiesAsCurrentDraft,
         invoiceDate: base?.invoice_date || null,
         invoiceCreatedAt: base?.invoice_created_at || null,
         packSent,
@@ -1004,6 +1013,9 @@ export function buildCanonicalMakesafeRows(
         ? base.cycle_attribution_flags
         : [],
       readiness_revision: base?.readiness_revision ?? null,
+      invoice_qualifies_as_current_draft: invoiceQualifiesAsCurrentDraft,
+      invoice_draft_qualification_reason:
+        base?.invoice_draft_qualification_reason ?? "missing_invoice",
       // The trade roof-report tick (captain, 2026-08-02). Advisory metadata
       // describing whether the one-question control belongs on this card; it
       // places no card and feeds no stage engine.

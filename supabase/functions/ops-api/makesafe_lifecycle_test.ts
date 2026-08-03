@@ -1,12 +1,15 @@
 // Tests for the MakeSafe lifecycle gate:
 //  - makesafePipeline surfaces per-job close-out doc booleans (has_*),
-//  - an invoiced job WITHOUT invoice+report docs is held pre-complete
-//    (report_ready, docs_missing) rather than silently marked completed,
+//  - an issued job without a current DRAFT stays below Docs Ready rather than
+//    silently completing or claiming pre-Xero readiness,
 //  - the 7-day completed-vs-archive boundary,
 //  - completeAndInvoice's substatus advance for make-safe jobs.
 //
 // Run: deno test --allow-all --no-check supabase/functions/ops-api/makesafe_lifecycle_test.ts
-import { assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assertEquals,
+  assertStringIncludes,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _advanceMakesafeSubstatusOnInvoice,
   _deriveMakesafeBoardStage,
@@ -40,7 +43,10 @@ function makeQueryClient(resultsByTable: Record<string, any[]>) {
       // _fetchAllByJobIdChunked / the paginated jobs query). The seeded set is
       // small (<1000) so we return it all on the first page and [] thereafter so
       // the bounded pagination loop terminates.
-      range: async (from: number, _to: number) => ({ data: from === 0 ? rows : [], error: null }),
+      range: async (from: number, _to: number) => ({
+        data: from === 0 ? rows : [],
+        error: null,
+      }),
       // Thenable so `await client.from(t)...` resolves to { data, error }.
       then: (resolve: (v: any) => any) => resolve(result),
     };
@@ -80,18 +86,46 @@ function jobRow(over: Record<string, any> = {}) {
 Deno.test("makesafePipeline surfaces per-job close-out doc booleans", async () => {
   const client = makeQueryClient({
     jobs: [jobRow({ id: "job-1" })],
-    makesafe_job_details: [{ job_id: "job-1", substatus: "complete", requesting_company_name: "Acme Restorations" }],
-    job_service_reports: [{ job_id: "job-1", status: "submitted", submitted_at: "2026-06-09T00:00:00Z" }],
-    xero_invoices: [{ job_id: "job-1", status: "AUTHORISED", invoice_type: "ACCREC", invoice_date: "2026-06-09" }],
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "complete",
+      requesting_company_name: "Acme Restorations",
+    }],
+    job_service_reports: [{
+      job_id: "job-1",
+      status: "submitted",
+      submitted_at: "2026-06-09T00:00:00Z",
+    }],
+    xero_invoices: [{
+      job_id: "job-1",
+      status: "AUTHORISED",
+      invoice_type: "ACCREC",
+      invoice_date: "2026-06-09",
+    }],
     job_documents: [
-      { job_id: "job-1", type: "work_order", file_name: "Work Order SWMS-26001.pdf" },
-      { job_id: "job-1", type: "general", file_name: "Make Safe Report SWMS-26001.pdf" },
-      { job_id: "job-1", type: "general", file_name: "Tax Invoice INV-1234.pdf" },
+      {
+        job_id: "job-1",
+        type: "work_order",
+        file_name: "Work Order SWMS-26001.pdf",
+      },
+      {
+        job_id: "job-1",
+        type: "general",
+        file_name: "Make Safe Report SWMS-26001.pdf",
+      },
+      {
+        job_id: "job-1",
+        type: "general",
+        file_name: "Tax Invoice INV-1234.pdf",
+      },
     ],
     job_assignments: [],
   });
 
-  const res: any = await _makesafePipelineForTest(client, new URLSearchParams());
+  const res: any = await _makesafePipelineForTest(
+    client,
+    new URLSearchParams(),
+  );
   const all = Object.values(res.columns).flat() as any[];
   const job = all.find((j: any) => j.id === "job-1");
   assertEquals(job.has_wo, true);
@@ -104,40 +138,77 @@ Deno.test("makesafePipeline surfaces per-job close-out doc booleans", async () =
 Deno.test("makesafeDocBooleans: a real SWMS doc is detected, the job-number prefix is not", async () => {
   const client = makeQueryClient({
     jobs: [jobRow({ id: "job-swms" })],
-    makesafe_job_details: [{ job_id: "job-swms", substatus: "complete", requesting_company_name: "Acme" }],
+    makesafe_job_details: [{
+      job_id: "job-swms",
+      substatus: "complete",
+      requesting_company_name: "Acme",
+    }],
     job_service_reports: [],
-    xero_invoices: [{ job_id: "job-swms", status: "AUTHORISED", invoice_type: "ACCREC", invoice_date: "2026-06-09" }],
+    xero_invoices: [{
+      job_id: "job-swms",
+      status: "AUTHORISED",
+      invoice_type: "ACCREC",
+      invoice_date: "2026-06-09",
+    }],
     job_documents: [
-      { job_id: "job-swms", type: "general", file_name: "SWMS Roof Make Safe SWMS-26010.pdf" },
+      {
+        job_id: "job-swms",
+        type: "general",
+        file_name: "SWMS Roof Make Safe SWMS-26010.pdf",
+      },
     ],
     job_assignments: [],
   });
-  const res: any = await _makesafePipelineForTest(client, new URLSearchParams());
-  const job = (Object.values(res.columns).flat() as any[]).find((j: any) => j.id === "job-swms");
+  const res: any = await _makesafePipelineForTest(
+    client,
+    new URLSearchParams(),
+  );
+  const job = (Object.values(res.columns).flat() as any[]).find((j: any) =>
+    j.id === "job-swms"
+  );
   assertEquals(job.has_swms_doc, true);
 });
 
-// ── (b) invoiced job WITHOUT invoice+report docs is held pre-complete ───────
-Deno.test("makesafePipeline holds an invoiced job with missing docs in report_ready", async () => {
+// ── (b) issued job WITHOUT a current DRAFT stays below Docs Ready ──────────
+Deno.test("makesafePipeline keeps an AUTHORISED report job in trade_report_in", async () => {
   const client = makeQueryClient({
     jobs: [jobRow({ id: "job-2" })],
-    makesafe_job_details: [{ job_id: "job-2", substatus: "complete", requesting_company_name: "Acme Restorations" }],
-    job_service_reports: [{ job_id: "job-2", status: "submitted", submitted_at: "2026-06-09T00:00:00Z" }],
-    xero_invoices: [{ job_id: "job-2", status: "AUTHORISED", invoice_type: "ACCREC", invoice_date: "2026-06-09" }],
+    makesafe_job_details: [{
+      job_id: "job-2",
+      substatus: "complete",
+      requesting_company_name: "Acme Restorations",
+    }],
+    job_service_reports: [{
+      job_id: "job-2",
+      status: "submitted",
+      submitted_at: "2026-06-09T00:00:00Z",
+    }],
+    xero_invoices: [{
+      job_id: "job-2",
+      status: "AUTHORISED",
+      invoice_type: "ACCREC",
+      invoice_date: "2026-06-09",
+    }],
     // No invoice/report PDFs attached.
-    job_documents: [{ job_id: "job-2", type: "work_order", file_name: "Work Order SWMS-26002.pdf" }],
+    job_documents: [{
+      job_id: "job-2",
+      type: "work_order",
+      file_name: "Work Order SWMS-26002.pdf",
+    }],
     job_assignments: [],
   });
 
-  const res: any = await _makesafePipelineForTest(client, new URLSearchParams());
+  const res: any = await _makesafePipelineForTest(
+    client,
+    new URLSearchParams(),
+  );
   // Must NOT land in completed/archive.
   assertEquals(res.columns.completed.length, 0);
   assertEquals(res.columns.archive.length, 0);
-  const job = res.columns.report_ready.find((j: any) => j.id === "job-2");
+  const job = res.columns.trade_report_in.find((j: any) => j.id === "job-2");
   assertEquals(!!job, true);
-  assertEquals(job.board_stage, "report_ready");
+  assertEquals(job.board_stage, "trade_report_in");
   assertEquals(job.docs_missing, true);
-  // Both invoice and report PDFs are missing here.
   assertEquals((job.missing_docs || []).includes("invoice"), true);
   assertEquals((job.missing_docs || []).includes("report"), true);
 });
@@ -145,17 +216,37 @@ Deno.test("makesafePipeline holds an invoiced job with missing docs in report_re
 Deno.test("makesafePipeline lets an invoiced job with both docs reach completed", async () => {
   const client = makeQueryClient({
     jobs: [jobRow({ id: "job-3", completed_at: RECENT_ISO })],
-    makesafe_job_details: [{ job_id: "job-3", substatus: "complete", requesting_company_name: "Acme Restorations" }],
-    job_service_reports: [{ job_id: "job-3", status: "submitted", submitted_at: RECENT_ISO }],
-    xero_invoices: [{ job_id: "job-3", status: "AUTHORISED", invoice_type: "ACCREC", invoice_date: RECENT_DATE }],
+    makesafe_job_details: [{
+      job_id: "job-3",
+      substatus: "complete",
+      requesting_company_name: "Acme Restorations",
+    }],
+    job_service_reports: [{
+      job_id: "job-3",
+      status: "submitted",
+      submitted_at: RECENT_ISO,
+    }],
+    xero_invoices: [{
+      job_id: "job-3",
+      status: "AUTHORISED",
+      invoice_type: "ACCREC",
+      invoice_date: RECENT_DATE,
+    }],
     job_documents: [
-      { job_id: "job-3", type: "general", file_name: "Make Safe Report SWMS-26003.pdf" },
+      {
+        job_id: "job-3",
+        type: "general",
+        file_name: "Make Safe Report SWMS-26003.pdf",
+      },
       { job_id: "job-3", type: "general", file_name: "Tax Invoice INV-3.pdf" },
     ],
     job_assignments: [],
   });
 
-  const res: any = await _makesafePipelineForTest(client, new URLSearchParams());
+  const res: any = await _makesafePipelineForTest(
+    client,
+    new URLSearchParams(),
+  );
   const job = res.columns.completed.find((j: any) => j.id === "job-3");
   assertEquals(!!job, true);
   assertEquals(job.docs_missing, false);
@@ -163,7 +254,11 @@ Deno.test("makesafePipeline lets an invoiced job with both docs reach completed"
 
 // ── Gate unit coverage: MLB requires SWMS, non-MLB does not ─────────────────
 Deno.test("close-out gate requires SWMS only for MLB jobs", () => {
-  const docs = { has_invoice_doc: true, has_report_doc: true, has_swms_doc: false };
+  const docs = {
+    has_invoice_doc: true,
+    has_report_doc: true,
+    has_swms_doc: false,
+  };
   // Non-MLB: invoice + report is enough.
   assertEquals(_makesafeMissingCloseoutDocs(docs, false), []);
   // MLB: SWMS additionally required.
@@ -173,37 +268,75 @@ Deno.test("close-out gate requires SWMS only for MLB jobs", () => {
 Deno.test("SWMS requirement follows the sealed MLB physical-family rule", () => {
   const physical = { metadata: { makesafe_job_family: "physical_makesafe" } };
   const roof = { metadata: { makesafe_job_family: "roof_report" } };
-  const assessment = { metadata: { makesafe_job_family: "assessment_report_quote" } };
+  const assessment = {
+    metadata: { makesafe_job_family: "assessment_report_quote" },
+  };
 
-  assertEquals(_requiresMakesafeSwms({ requesting_company_slug: "mlb" }, physical), true);
-  assertEquals(_requiresMakesafeSwms({ requesting_company_slug: "mlb" }, roof), false);
-  assertEquals(_requiresMakesafeSwms({ requesting_company_slug: "mlb" }, assessment), false);
-  assertEquals(_requiresMakesafeSwms({ requesting_company_slug: "builderwest" }, physical), false);
+  assertEquals(
+    _requiresMakesafeSwms({ requesting_company_slug: "mlb" }, physical),
+    true,
+  );
+  assertEquals(
+    _requiresMakesafeSwms({ requesting_company_slug: "mlb" }, roof),
+    false,
+  );
+  assertEquals(
+    _requiresMakesafeSwms({ requesting_company_slug: "mlb" }, assessment),
+    false,
+  );
+  assertEquals(
+    _requiresMakesafeSwms({ requesting_company_slug: "builderwest" }, physical),
+    false,
+  );
 });
 
 Deno.test("send preflight and attachment paths share the SWMS requirement", async () => {
-  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
   const start = source.indexOf("async function makesafeSendPack(");
   const end = source.indexOf("\nasync function ", start + 1);
   const sendFunction = source.slice(start, end < 0 ? undefined : end);
 
-  assertStringIncludes(sendFunction, "const requiresSwms = _requiresMakesafeSwms(detail, job)");
-  assertStringIncludes(sendFunction, "_makesafeMissingCloseoutDocs(docFlags, requiresSwms, isReportJob)");
+  assertStringIncludes(
+    sendFunction,
+    "const requiresSwms = _requiresMakesafeSwms(detail, job)",
+  );
+  assertStringIncludes(
+    sendFunction,
+    "_makesafeMissingCloseoutDocs(docFlags, requiresSwms, isReportJob)",
+  );
   assertStringIncludes(sendFunction, "if (requiresSwms) {");
   assertStringIncludes(sendFunction, ": requiresSwms");
   assertEquals(sendFunction.includes("shouldAttachSwms"), false);
 });
 
 Deno.test("MLB company detected from slug, name, or builder reference", () => {
-  assertEquals(_isMakesafeMlbCompany({ requesting_company_slug: "mlb" }, {}), true);
-  assertEquals(_isMakesafeMlbCompany({ requesting_company_name: "Major Loss Builders" }, {}), true);
+  assertEquals(
+    _isMakesafeMlbCompany({ requesting_company_slug: "mlb" }, {}),
+    true,
+  );
+  assertEquals(
+    _isMakesafeMlbCompany(
+      { requesting_company_name: "Major Loss Builders" },
+      {},
+    ),
+    true,
+  );
   assertEquals(_isMakesafeMlbCompany({ external_ref: "MLB-25250" }, {}), true);
-  assertEquals(_isMakesafeMlbCompany({ requesting_company_name: "Acme Restorations" }, {}), false);
+  assertEquals(
+    _isMakesafeMlbCompany({ requesting_company_name: "Acme Restorations" }, {}),
+    false,
+  );
 });
 
-Deno.test("MLB physical job with invoice+report but no SWMS is held in report_ready", () => {
+Deno.test("MLB physical job with AUTHORISED invoice but no DRAFT stays allocated", () => {
   const stage = _deriveMakesafeBoardStage(
-    { status: "invoiced", completed_at: NOW, metadata: { makesafe_job_family: "physical_makesafe" } },
+    {
+      status: "invoiced",
+      completed_at: NOW,
+      metadata: { makesafe_job_family: "physical_makesafe" },
+    },
     { substatus: "complete", requesting_company_slug: "mlb" },
     [],
     null,
@@ -211,27 +344,63 @@ Deno.test("MLB physical job with invoice+report but no SWMS is held in report_re
     NOW,
     { has_invoice_doc: true, has_report_doc: true, has_swms_doc: false },
   );
-  assertEquals(stage, "report_ready");
+  assertEquals(stage, "allocated");
 });
 
 Deno.test("MLB report-only and non-MLB jobs are not held for missing SWMS", () => {
-  const completeDocsWithoutSwms = { has_invoice_doc: true, has_report_doc: true, has_swms_doc: false };
+  const completeDocsWithoutSwms = {
+    has_invoice_doc: true,
+    has_report_doc: true,
+    has_swms_doc: false,
+  };
   const invoice = { status: "AUTHORISED", invoice_date: "2026-06-10" };
 
   const mlbRoof = _deriveMakesafeBoardStage(
-    { status: "invoiced", completed_at: NOW, metadata: { makesafe_job_family: "roof_report" } },
-    { substatus: "complete", requesting_company_slug: "mlb", report_type: "roof" },
-    [], null, invoice, NOW, completeDocsWithoutSwms,
+    {
+      status: "invoiced",
+      completed_at: NOW,
+      metadata: { makesafe_job_family: "roof_report" },
+    },
+    {
+      substatus: "complete",
+      requesting_company_slug: "mlb",
+      report_type: "roof",
+    },
+    [],
+    null,
+    invoice,
+    NOW,
+    completeDocsWithoutSwms,
   );
   const mlbAssessment = _deriveMakesafeBoardStage(
-    { status: "invoiced", completed_at: NOW, metadata: { makesafe_job_family: "assessment_report_quote" } },
-    { substatus: "complete", requesting_company_slug: "mlb", report_type: "assessment" },
-    [], null, invoice, NOW, completeDocsWithoutSwms,
+    {
+      status: "invoiced",
+      completed_at: NOW,
+      metadata: { makesafe_job_family: "assessment_report_quote" },
+    },
+    {
+      substatus: "complete",
+      requesting_company_slug: "mlb",
+      report_type: "assessment",
+    },
+    [],
+    null,
+    invoice,
+    NOW,
+    completeDocsWithoutSwms,
   );
   const nonMlb = _deriveMakesafeBoardStage(
-    { status: "invoiced", completed_at: NOW, metadata: { makesafe_job_family: "physical_makesafe" } },
+    {
+      status: "invoiced",
+      completed_at: NOW,
+      metadata: { makesafe_job_family: "physical_makesafe" },
+    },
     { substatus: "complete", requesting_company_slug: "builderwest" },
-    [], null, invoice, NOW, completeDocsWithoutSwms,
+    [],
+    null,
+    invoice,
+    NOW,
+    completeDocsWithoutSwms,
   );
 
   assertEquals(mlbRoof, "completed");
@@ -242,18 +411,31 @@ Deno.test("MLB report-only and non-MLB jobs are not held for missing SWMS", () =
 // ── (c) 7-day completed-vs-archive boundary ─────────────────────────────────
 Deno.test("MakeSafe completed-vs-archive uses a 7-day window", () => {
   // 6 days ago -> within window.
-  assertEquals(_isMakesafeCompletedWithin7Days("2026-06-04T03:00:01Z", NOW), true);
+  assertEquals(
+    _isMakesafeCompletedWithin7Days("2026-06-04T03:00:01Z", NOW),
+    true,
+  );
   // Exactly 7 days ago -> outside (>= 7 days archives).
-  assertEquals(_isMakesafeCompletedWithin7Days("2026-06-03T03:00:00Z", NOW), false);
+  assertEquals(
+    _isMakesafeCompletedWithin7Days("2026-06-03T03:00:00Z", NOW),
+    false,
+  );
   // 10 days ago -> outside.
-  assertEquals(_isMakesafeCompletedWithin7Days("2026-05-31T03:00:00Z", NOW), false);
+  assertEquals(
+    _isMakesafeCompletedWithin7Days("2026-05-31T03:00:00Z", NOW),
+    false,
+  );
   // Unknown date -> stays in completed (fallback preserved).
   assertEquals(_isMakesafeCompletedWithin7Days(null, NOW), true);
   assertEquals(_isMakesafeCompletedWithin7Days("not-a-date", NOW), true);
 });
 
 Deno.test("board stage archives an invoiced+docs job older than 7 days", () => {
-  const docs = { has_invoice_doc: true, has_report_doc: true, has_swms_doc: true };
+  const docs = {
+    has_invoice_doc: true,
+    has_report_doc: true,
+    has_swms_doc: true,
+  };
   // Completed 8 days before NOW (uses invoice_date as the completion ts).
   const archived = _deriveMakesafeBoardStage(
     { status: "invoiced" },
@@ -315,16 +497,22 @@ function makeUpdateClient() {
 
 Deno.test("completeAndInvoice advances makesafe substatus to complete", async () => {
   const { client, updates } = makeUpdateClient();
-  const advanced = await _advanceMakesafeSubstatusOnInvoice(client, { type: "makesafe" }, "job-x");
+  const advanced = await _advanceMakesafeSubstatusOnInvoice(client, {
+    type: "makesafe",
+  }, "job-x");
   assertEquals(advanced, true);
-  const subUpdate = updates.find((u: any) => u.table === "makesafe_job_details");
+  const subUpdate = updates.find((u: any) =>
+    u.table === "makesafe_job_details"
+  );
   assertEquals(!!subUpdate, true);
   assertEquals(subUpdate.row.substatus, "complete");
 });
 
 Deno.test("completeAndInvoice does not advance substatus for non-makesafe jobs", async () => {
   const { client, updates } = makeUpdateClient();
-  const advanced = await _advanceMakesafeSubstatusOnInvoice(client, { type: "patio" }, "job-y");
+  const advanced = await _advanceMakesafeSubstatusOnInvoice(client, {
+    type: "patio",
+  }, "job-y");
   assertEquals(advanced, false);
   assertEquals(updates.length, 0);
 });
@@ -355,7 +543,9 @@ Deno.test("makesafe substatus advance never throws when the update fails", async
       };
     },
   };
-  const advanced = await _advanceMakesafeSubstatusOnInvoice(client, { type: "makesafe" }, "job-z");
+  const advanced = await _advanceMakesafeSubstatusOnInvoice(client, {
+    type: "makesafe",
+  }, "job-z");
   assertEquals(advanced, false);
 });
 
@@ -399,7 +589,10 @@ Deno.test("updateMakesafeSubstatus tolerates a PostgREST insert builder that lac
       };
     },
   };
-  const res = await _updateMakesafeSubstatus(client, { job_id: "job-a", substatus: "complete" });
+  const res = await _updateMakesafeSubstatus(client, {
+    job_id: "job-a",
+    substatus: "complete",
+  });
   assertEquals(res.ok, true);
   assertEquals(eventInserted, true);
 });

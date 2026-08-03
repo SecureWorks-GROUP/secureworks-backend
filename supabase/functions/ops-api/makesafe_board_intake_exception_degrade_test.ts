@@ -107,8 +107,8 @@ function fixtureClient(rowsByTable: Record<string, any[]>) {
   };
 }
 
-// A card shaped like SWMS-261124: derived stage report_ready (an AUTHORISED
-// invoice with no close-out docs), ruled to ARCHIVE on the display ledger.
+// A card shaped for the display-ledger regression: the legacy ladder derives
+// report_ready from a qualifying DRAFT and the ruled overlay moves it to ARCHIVE.
 const JOB_ID = "job-261124-fixture";
 const ARCHIVED_BY_LEDGER = {
   jobs: [{
@@ -123,16 +123,19 @@ const ARCHIVED_BY_LEDGER = {
   }],
   makesafe_job_details: [{
     job_id: JOB_ID,
-    substatus: "company_contact_required",
+    substatus: "ready_to_invoice",
     requesting_company_slug: "bw",
     requesting_company_name: "Builderwest Pty Ltd",
     external_ref: "BWCWA-6648",
   }],
   xero_invoices: [{
+    id: "invoice-261124-fixture",
     job_id: JOB_ID,
     invoice_number: "INV-0754",
-    status: "AUTHORISED",
+    reference: "BWCWA-6648",
+    status: "DRAFT",
     invoice_type: "ACCREC",
+    invoice_date: "2026-08-01",
   }],
   makesafe_board_status_current: [{
     id: 48,

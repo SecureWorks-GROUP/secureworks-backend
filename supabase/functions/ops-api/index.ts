@@ -179,6 +179,12 @@ import {
   selectCurrentCycleReport,
 } from './makesafe_cycle_evidence.ts'
 import {
+  currentMakesafeReceivableInvoicesByJobId,
+  makesafeHasQualifyingCurrentDraftInvoice,
+  qualifyMakesafeCurrentDraftInvoice,
+  selectCurrentMakesafeReceivableInvoice,
+} from './makesafe_docs_ready_invoice.ts'
+import {
   createSesAssemblerRuntimeDependencies,
   normalizeSesPrepareRequest,
   SesAssemblerAdapterError,
@@ -13825,9 +13831,14 @@ export function _deriveMakesafeSurfacing(
   // report_doc_id onto the pack, or job_documents already carry a report PDF.
   const hasReportDoc = !!(pack && pack.report_doc_id) || docs?.has_report_doc === true
 
-  const invoiceStatusUpper = String(invoice?.status || '').toUpperCase()
-  const invoiceIsLive = hasActiveMakesafeInvoice(invoice)
-  const invoiceIsDraft = invoiceIsLive && invoiceStatusUpper === 'DRAFT'
+  // One shared, fail-closed prerequisite: exact job linkage, ACCREC, DRAFT,
+  // and a card-compatible reference. The caller supplies the selected current
+  // candidate; sibling/reference-only rows can never satisfy this term.
+  const invoiceIsDraft = makesafeHasQualifyingCurrentDraftInvoice(
+    job,
+    detail,
+    invoice,
+  )
   const invoiceAuthorisedLive = _makesafeInvoiceIsRaised(invoice)
 
   // gateSoftenSent — the signal trustworthy enough to SOFTEN the hard close-out
@@ -13853,20 +13864,22 @@ export function _deriveMakesafeSurfacing(
     !!detail?.report_sent_at ||
     MAKESAFE_PACK_SENT_STATUSES.includes(packStatus)
 
-  // readyForReview — either the legacy report+Xero-DRAFT pair or U4's explicit
-  // pre-Xero Docs Ready decision. U4 is intentionally earlier than Xero: its
-  // revision is append-only, draft-only and carries both invoice/send approvals
-  // false, so the Captain can review the assembled docket before any invoice is
-  // created. A blocked U4 revision never satisfies this predicate.
+  // readyForReview — the current DRAFT prerequisite is mandatory for BOTH the
+  // legacy artifact path and U4's assembler result. U4 remains an evidence
+  // input, not the sole authority; the held P6 ruling is unchanged. A blocked
+  // U4 revision never satisfies this predicate, and a READY U4 revision cannot
+  // bypass the independently required current DRAFT.
   const u4DocsReady = pack?.pre_xero_docs_ready === true
   const readyForReview = !sentClosed &&
     normalizedSub === 'admin_to_send_report' &&
     hasSubmittedReport &&
-    (u4DocsReady || (hasReportDoc && invoiceIsDraft))
+    invoiceIsDraft &&
+    (u4DocsReady || hasReportDoc)
 
   // resumeNotSent — the irreversible authorise happened but the send did not.
   // Resume re-sends; it must NEVER re-authorise and must NEVER read as a fresh
-  // ready-for-review draft. Surfaces in report_ready as a resume.
+  // ready-for-review draft. The resume cockpit still exposes its finish action,
+  // while the board keeps it below pre-Xero Docs Ready.
   const resumeNotSent = !sentClosed &&
     packStatus === 'authorised_not_sent' &&
     invoiceAuthorisedLive
@@ -13905,6 +13918,9 @@ export function _deriveMakesafeSurfacing(
 //   v2-raised-invoice — `invoiceDone`'s invoice term is
 //      `_makesafeInvoiceIsRaised`. A DRAFT invoice no longer closes a card and
 //      no longer hands one to the close-out doc gate.
+//   v3-current-draft-required — every pre-Xero `report_ready` positive requires
+//      the shared exact-job ACCREC/DRAFT/reference qualifier. Failed positives
+//      continue through the same evidence ladder to an existing lower stage.
 //
 // It lives HERE rather than in the read model because this module owns the
 // ladder, and because `index.ts` already imports MAKESAFE_BOARD_CONTRACT_VERSION
@@ -13912,7 +13928,7 @@ export function _deriveMakesafeSurfacing(
 // stamps it onto the base row; the read model publishes it beside
 // `declared_stage`. It is ADVISORY provenance: nothing selects or buckets on it.
 // Pinned once, in makesafe_draft_invoice_stage_test.ts.
-export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v2-raised-invoice'
+export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v3-current-draft-required'
 
 export function _deriveMakesafeBoardStage(
   job: any,
@@ -13936,6 +13952,8 @@ export function _deriveMakesafeBoardStage(
   if (jobStatus === 'archived') return 'archive'
   const hasAssignments = assignments.length > 0
   const hasSubmittedReport = !!report || !!detail?.report_received_at || normalizedSub === 'admin_to_send_report' || normalizedSub === 'ready_to_invoice'
+  const hasActualReportEvidence = !!report || !!detail?.report_received_at ||
+    normalizedSub === 'admin_to_send_report'
   // invoiceDone — the money side of this card is already out the door.
   //
   // The invoice term is `_makesafeInvoiceIsRaised`, NOT hasActiveMakesafeInvoice:
@@ -13977,8 +13995,8 @@ export function _deriveMakesafeBoardStage(
   // Intake drafts live outside this board until approved.
   // New -> Allocated -> Trade Report In -> Report Ready -> Completed (<=7 days)
   //   -> Archive (>7 days).
-  // `ready_to_invoice` is a legacy/admin substatus and now stays actionable in
-  // Report Ready unless an invoice/complete signal proves the MakeSafe is done.
+  // `ready_to_invoice` is a legacy/admin substatus. It remains actionable but
+  // cannot claim Report Ready until the current-DRAFT prerequisite is true.
   //
   // DRAFTED-NOT-SENT / RESUME WIN over the invoiceDone short-circuit, but ONLY
   // when the pack has NOT been sent+closed. This fixes Ferndale: an invoiced
@@ -13989,14 +14007,16 @@ export function _deriveMakesafeBoardStage(
   // (surf.sentClosed) falls through to the close-out doc gate below exactly as
   // before — we never re-surface a sent pack.
   if (!surf.sentClosed) {
-    // resume an authorised-but-not-sent pack — surfaces as report_ready (a
-    // resume), never re-sends, never re-authorises.
-    if (surf.resumeNotSent) return 'report_ready'
+    // An authorised-but-not-sent pack remains actionable, but AUTHORISED is not
+    // the required pre-Xero DRAFT. Keep it below Docs Ready; the resume cockpit
+    // still owns the finish-send action without re-authorising.
+    if (surf.resumeNotSent) return 'trade_report_in'
     // a drafted-not-sent pack (rendered report + DRAFT invoice) awaiting send.
     if (surf.readyForReview) return 'report_ready'
     // report received but NOT yet drafted -> the new Trade Report In column.
     if (surf.tradeReportIn) return 'trade_report_in'
   }
+  let closeoutBlockedByDocs = false
   if (invoiceDone) {
     // Close-out doc gate. Two regimes:
     //  - VERIFIED-SENT job (pack_sent marker + authorised invoice + substatus
@@ -14006,23 +14026,37 @@ export function _deriveMakesafeBoardStage(
     //    Tapping/Bassendean/Stirling/Marangaroo class where the pack was sent but
     //    the PDF was never re-attached to the job.
     //  - NOT-verified-sent job: the HARD doc-gate stays. An un-sent job is never
-    //    completed without its invoice + report (+ SWMS for MLB) attached — hold
-    //    it in report_ready. (When no docs map is supplied, preserve the prior
-    //    ungated behaviour for callers that don't load job_documents.)
+    //    completed without its invoice + report (+ SWMS for MLB) attached. A
+    //    missing-doc hold can no longer claim pre-Xero Docs Ready without the
+    //    qualifying DRAFT, so it continues through the existing evidence ladder
+    //    to Trade Report In / Allocated instead. (When no docs map is supplied,
+    //    preserve the prior ungated behaviour for callers that don't load docs.)
     if (!verifiedSent && docs !== undefined && docs !== null) {
       const missing = _makesafeMissingCloseoutDocs(docs, _requiresMakesafeSwms(detail, job), !!(detail?.report_type))
-      if (missing.length > 0) return 'report_ready'
+      closeoutBlockedByDocs = missing.length > 0
     }
+    if (!closeoutBlockedByDocs) {
+      return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
+    }
+  }
+  // The only remaining legacy Docs Ready positive is the historic
+  // `ready_to_invoice`/report fallback. It now consumes the same qualifier as
+  // U4 and the artifact path. A DRAFT satisfies only this invoice prerequisite;
+  // every pre-existing report/substatus condition remains independently true.
+  if (hasSubmittedReport && surf.invoiceIsDraft) return 'report_ready'
+  if (hasActualReportEvidence) return 'trade_report_in'
+  if (jobStatus === 'complete' && !closeoutBlockedByDocs) {
     return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
   }
-  if (hasSubmittedReport || jobStatus === 'complete') return 'report_ready'
   // F4: `awaiting_portal_completion` is a report-only card that is live but whose
   // builder-portal report has NOT been proved complete. It sits in Allocated in
   // BOTH engines (M1: makesafe_computed_status.ts) so a freshly approved roof /
   // assessment card lands where the captain ruled it belongs. It is deliberately
   // NOT part of hasSubmittedReport above — it is the absence of that evidence.
   if (
-    hasAssignments || normalizedSub === 'waiting_on_trade_report' ||
+    hasAssignments || closeoutBlockedByDocs ||
+    normalizedSub === 'ready_to_invoice' ||
+    normalizedSub === 'waiting_on_trade_report' ||
     normalizedSub === 'company_contact_done' ||
     normalizedSub === MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION ||
     jobStatus === 'scheduled' || jobStatus === 'in_progress'
@@ -14320,6 +14354,12 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   // U2-S1: one shared cycle boundary for assignments/pack/sent/docs before stage
   // derivation. On reattend, unscoped prior-cycle evidence fails closed; invoice
   // remains visible but cannot close the current attendance.
+  const draftQualification = qualifyMakesafeCurrentDraftInvoice(
+    j,
+    detail,
+    invoice,
+  )
+  const invoiceQualifiesForCurrentAttendance = draftQualification.qualifies
   const scoped = projectCycleScopedEvidence({
     detail,
     reports: report ? [report] : [],
@@ -14332,6 +14372,8 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     // legacy packCycleBound=true so existing sent behaviour is preserved.
     packCycleBound: !hasReattendBoundary(detail) || pack?.cycle_attribution === 'bound',
     attendanceCycleId: detail?.attendance_cycle_id ?? null,
+    invoice,
+    invoiceQualifiesAsCurrentDraft: invoiceQualifiesForCurrentAttendance,
   })
   const scopedAssignments = scoped.assignments
   const scopedReport = scoped.serviceReport
@@ -14453,6 +14495,12 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     invoice_raw_status: scoped.allowCloseoutFromEvidence ? (invoice?.status || null) : null,
     invoice_date: scoped.allowCloseoutFromEvidence ? (invoice?.invoice_date || null) : null,
     invoice_created_at: scoped.allowCloseoutFromEvidence ? (invoice?.created_at || null) : null,
+    // Independent deterministic prerequisite consumed by the canonical overlay,
+    // M1 and stage-v2. The reason distinguishes a bad invoice from prior-cycle
+    // commercial evidence that cannot close the current attendance.
+    invoice_qualifies_as_current_draft:
+      invoiceQualifiesForCurrentAttendance,
+    invoice_draft_qualification_reason: draftQualification.reason,
     // sent_to_builder (audit F5): the honest SENT-chip signal. TRUE only with a
     // real send record (pack-sent marker OR durable pack sent-status) — NEVER a
     // bare completed/archive column proxy. Completed cards with no send record
@@ -15291,10 +15339,9 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       _fetchAllByJobIdChunked(
         client,
         'xero_invoices',
-        'job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date, created_at',
+        'id, xero_invoice_id, job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date, created_at',
         jobIds,
         (q) => q.eq('invoice_type', 'ACCREC')
-          .not('status', 'in', '("VOIDED","DELETED")')
           .order('invoice_date', { ascending: false }),
       ),
       _fetchAllByJobIdChunked(
@@ -15325,7 +15372,10 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
     const cycleIdByJobId: Record<string, string | null> = {}
     for (const d of details || []) cycleIdByJobId[d.job_id] = d.attendance_cycle_id ?? null
     reportMap = currentCycleReportMap(reports || [], detailsMap, cycleIdByJobId)
-    invoiceMap = firstByJobId(invoices || [])
+    // Select current before lifecycle qualification. Keeping VOIDED/DELETED in
+    // the candidate set prevents a retired newest row from exposing an older
+    // DRAFT and manufacturing Docs Ready.
+    invoiceMap = currentMakesafeReceivableInvoicesByJobId(invoices || [])
     for (const doc of (docs || [])) {
       if (!doc?.job_id) continue
       if (!docsMap[doc.job_id]) docsMap[doc.job_id] = []
@@ -32741,8 +32791,9 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       .select('id, job_number, client_name, client_email, client_phone, site_address, site_suburb, status, type, created_at')
       .in('id', jobIds),
     client.from('xero_invoices')
-      .select('xero_invoice_id, invoice_number, status, reference, sub_total, total, total_tax, line_items, job_id, invoice_date')
+      .select('id, xero_invoice_id, invoice_number, invoice_type, status, reference, sub_total, total, total_tax, line_items, job_id, invoice_date, created_at')
       .in('job_id', jobIds)
+      .eq('invoice_type', 'ACCREC')
       .order('invoice_date', { ascending: false }),
     client.from('job_documents')
       .select('id, job_id, type, file_name, storage_url, pdf_url, version, created_at')
@@ -32842,9 +32893,9 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
     const job = jobsById[d.job_id] || {}
     const company = d.makesafe_companies || {}
     const jobInvoices = invoicesByJob[d.job_id] || []
-    // The live (non-void) invoice — same posture as makesafe_send_pack preflight.
-    const liveInvoice = jobInvoices.find((inv: any) =>
-      !['VOIDED', 'DELETED'].includes(String(inv?.status || '').toUpperCase())) || jobInvoices[0] || null
+    // The selected current ACCREC candidate — lifecycle statuses stay in the
+    // candidate set so a retired newest row cannot expose an older DRAFT.
+    const liveInvoice = selectCurrentMakesafeReceivableInvoice(jobInvoices)
     // N-1 (money-safety) — surface AMBIGUITY (>1 non-void invoice maps to the job)
     // rather than display a wrong amount. The cockpit shows the ambiguity card;
     // makesafe_send_pack fails closed (412) on the same condition.
@@ -32897,7 +32948,7 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       has_swms_doc: !!swmsDoc,
     }
     const markerPresent = packSentMap[d.job_id] === true
-    const surf = _deriveMakesafeSurfacing(d, d, true /* report received via substatus */, liveInvoice, feedDocFlags, markerPresent, pack)
+    const surf = _deriveMakesafeSurfacing(job, d, true /* report received via substatus */, liveInvoice, feedDocFlags, markerPresent, pack)
 
     // RESUME-AWARE action mapping (TASK A). Reuse the deployed surfacing predicates
     // (NEVER relax sentClosed) and the marker map (#193). deriveResumeAction is the

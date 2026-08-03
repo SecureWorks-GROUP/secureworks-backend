@@ -199,6 +199,7 @@ Deno.test("computed status: Docs Ready reads durable draft-pack records", () => 
     serviceReports: [{ status: "submitted", cycle_number: 1 }],
     completionPhotoCount: 8,
     invoiceStatus: "DRAFT",
+    invoiceQualifiesAsCurrentDraft: true,
     swmsRequired: true,
     pack: {
       status: "drafted",

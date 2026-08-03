@@ -295,18 +295,15 @@ Deno.test("F4: approveIntakeDraft parks report-only cards in the waiting state, 
   );
 });
 
-// ── 4. Forward-only: existing-card semantics are untouched ────────────────────
+// ── 4. Existing cards consume the stricter deterministic gate ─────────────────
 
-Deno.test("F4: legacy ready_to_invoice still derives report_ready (existing cards do not move)", () => {
-  // This change is forward-only. Every card already carrying `ready_to_invoice`
-  // must derive exactly as it did before; existing-card cleanup is a separate,
-  // captain-gated tranche.
+Deno.test("F4: legacy ready_to_invoice without a current DRAFT derives allocated", () => {
   assertEquals(
     _deriveMakesafeBoardStage({ status: "accepted" }, {
       substatus: "ready_to_invoice",
       report_type: "roof_report",
     }),
-    "report_ready",
+    "allocated",
   );
   // …and the other pre-existing mappings are unchanged.
   assertEquals(

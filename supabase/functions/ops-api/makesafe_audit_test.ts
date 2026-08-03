@@ -369,7 +369,7 @@ Deno.test("2.3 sent+invoiced+complete+missing-SWMS (MLB) → completed (soft war
   assertEquals(stage, "completed");
 });
 
-Deno.test("2.3 NOT-sent+missing-report → still HELD in report_ready (hard gate stays)", () => {
+Deno.test("2.3 NOT-sent AUTHORISED+missing-report stays below Docs Ready", () => {
   const stage = _deriveMakesafeBoardStage(
     jobRow({ completed_at: NOW }),
     { substatus: "complete" },
@@ -380,26 +380,30 @@ Deno.test("2.3 NOT-sent+missing-report → still HELD in report_ready (hard gate
     { has_invoice_doc: true, has_report_doc: false, has_swms_doc: false },
     false, // NOT sent
   );
-  assertEquals(stage, "report_ready");
+  assertEquals(stage, "allocated");
 });
 
 Deno.test("2.3 pack_sent alone (DRAFT invoice, not authorised) does NOT soften the gate", () => {
   // Guardrail: pack_sent must coincide with an AUTHORISED invoice + substatus
-  // complete to relax the gate. A draft-only invoice keeps the hard hold.
+  // complete to relax the gate. A draft-only invoice does not invent report
+  // evidence and therefore remains below Docs Ready.
   const stage = _deriveMakesafeBoardStage(
     jobRow({ status: "complete", completed_at: NOW }),
     { substatus: "complete" },
     [],
     null,
-    { status: "DRAFT", invoice_date: "2026-06-10" }, // not authorised
+    {
+      job_id: "job-1",
+      status: "DRAFT",
+      invoice_type: "ACCREC",
+      reference: "SWMS-26001",
+      invoice_date: "2026-06-10",
+    }, // current qualifying DRAFT, not authorised
     NOW,
     { has_invoice_doc: false, has_report_doc: false, has_swms_doc: false },
     true, // pack_sent true but invoice is only DRAFT
   );
-  // No active invoice (DRAFT is not "active" for hasActiveMakesafeInvoice? it is
-  // non-void, so invoiceDone is true) — but verifiedSent is false (not AUTHORISED),
-  // so the hard gate holds it.
-  assertEquals(stage, "report_ready");
+  assertEquals(stage, "allocated");
 });
 
 // ─────────────────────────────────────────────────────────────────
@@ -449,7 +453,7 @@ Deno.test("2.2 makesafePipeline surfaces pack_sent and a verified-sent job compl
   assert((job.warning_docs || []).includes("report"));
 });
 
-Deno.test("2.2 an un-sent invoiced job with missing docs stays a HARD hold (docs_missing), pack_sent false", async () => {
+Deno.test("2.2 an un-sent AUTHORISED job with a report stays below Docs Ready", async () => {
   const client = makeQueryClient({
     jobs: [jobRow({ id: "job-held" })],
     makesafe_job_details: [{
@@ -480,8 +484,8 @@ Deno.test("2.2 an un-sent invoiced job with missing docs stays a HARD hold (docs
     client,
     new URLSearchParams(),
   );
-  const job = res.columns.report_ready.find((j: any) => j.id === "job-held");
-  assert(job, "held in report_ready");
+  const job = res.columns.trade_report_in.find((j: any) => j.id === "job-held");
+  assert(job, "kept in trade_report_in");
   assertEquals(job.pack_sent, false);
   assertEquals(job.docs_missing, true);
   assertEquals(job.docs_warning, false);

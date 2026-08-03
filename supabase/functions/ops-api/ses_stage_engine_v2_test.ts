@@ -1202,8 +1202,9 @@ Deno.test("docs ready: a READY pack alone is no longer one click from sending", 
   // assembled, and one button sends it. A pack STATE is the skill asserting it
   // finished; the artifacts are the state of actually being sendable.
   const packOnly = input({ evidence: { packState: "READY" } });
-  // M1 keeps its old answer - unchanged, as every certificate grades on it.
-  assertEquals(deriveMakesafeEvidenceStage(packOnly).status, "report_ready");
+  // M1 consumes the same prerequisite: an asserted READY pack alone cannot
+  // manufacture Docs Ready without the selected qualifying DRAFT fact.
+  assertEquals(deriveMakesafeEvidenceStage(packOnly).status, "new");
   // The corrected engine refuses: no report, no invoice.
   assertEquals(deriveSesStageV2(packOnly).stage, "new");
 });
@@ -1217,6 +1218,7 @@ Deno.test("docs ready: a physical card needs report, SWMS when required, and dra
     documents: { report: true, invoice: true, swms: true },
     swmsRequired: true,
     invoiceStatus: "DRAFT",
+    invoiceQualifiesAsCurrentDraft: true,
   };
   assertEquals(
     deriveSesStageV2(input({ evidence: base })).stage,
@@ -1247,6 +1249,7 @@ Deno.test("docs ready: READY_TO_BUILD is not a sendable pack", () => {
     documents: { report: true, invoice: true, swms: false },
     swmsRequired: false,
     invoiceStatus: "DRAFT",
+    invoiceQualifiesAsCurrentDraft: true,
   };
   assert(
     deriveSesStageV2(input({
@@ -1271,13 +1274,25 @@ Deno.test("docs ready: a physical card needs a draft invoice status", () => {
     swmsRequired: false,
   };
   assertEquals(
-    deriveSesStageV2(input({ evidence: { ...base, invoiceStatus: "draft" } }))
+    deriveSesStageV2(input({
+      evidence: {
+        ...base,
+        invoiceStatus: "draft",
+        invoiceQualifiesAsCurrentDraft: true,
+      },
+    }))
       .stage,
     "report_ready",
   );
   for (const invoiceStatus of ["AUTHORISED", "PAID", "SUBMITTED"]) {
     assert(
-      deriveSesStageV2(input({ evidence: { ...base, invoiceStatus } }))
+      deriveSesStageV2(input({
+        evidence: {
+          ...base,
+          invoiceStatus,
+          invoiceQualifiesAsCurrentDraft: true,
+        },
+      }))
         .stage !==
         "report_ready",
       `${invoiceStatus} invoice must not be Docs Ready`,
@@ -1294,6 +1309,8 @@ Deno.test("docs ready: a roof card is never asked for a SecureWorks report", () 
       assignments: [{ id: "a1" }],
       portalCaptures: [ACCEPTED],
       packState: "READY",
+      invoiceStatus: "DRAFT",
+      invoiceQualifiesAsCurrentDraft: true,
     },
   });
   assertEquals(deriveSesStageV2(proved).stage, "report_ready");
@@ -1303,6 +1320,8 @@ Deno.test("docs ready: a roof card is never asked for a SecureWorks report", () 
       assignments: [{ id: "a1" }],
       portalCaptures: [],
       packState: "READY",
+      invoiceStatus: "DRAFT",
+      invoiceQualifiesAsCurrentDraft: true,
     },
   });
   assert(deriveSesStageV2(unproved).stage !== "report_ready");
@@ -1317,6 +1336,7 @@ Deno.test("docs ready: an already-sent pack is not one click from sending", () =
     documents: { report: true, invoice: true, swms: false },
     swmsRequired: false,
     invoiceStatus: "DRAFT",
+    invoiceQualifiesAsCurrentDraft: true,
   };
   const positive = input({
     evidence: { ...baseEvidence, pack: { status: "draft" } },
@@ -1388,6 +1408,7 @@ Deno.test("docs ready: repair and restoration take the standard path", () => {
         documents: { report: true, invoice: true, swms: false },
         swmsRequired: false,
         invoiceStatus: "DRAFT",
+        invoiceQualifiesAsCurrentDraft: true,
       },
     }));
     assertEquals(r.stage, "report_ready");
@@ -1395,10 +1416,22 @@ Deno.test("docs ready: repair and restoration take the standard path", () => {
   }
 });
 
-Deno.test("docs ready: M1's published output is untouched", () => {
+Deno.test("docs ready: M1 consumes the shared DRAFT prerequisite without becoming authority", () => {
   const facts = input({ evidence: { packState: "READY" } });
   assertEquals(
     computeMakesafeStatus({ ...facts, displayedStatus: "allocated" }).status,
+    "new",
+  );
+  assertEquals(
+    computeMakesafeStatus({
+      ...input({
+        evidence: {
+          packState: "READY",
+          invoiceQualifiesAsCurrentDraft: true,
+        },
+      }),
+      displayedStatus: "allocated",
+    }).status,
     "report_ready",
   );
 });
