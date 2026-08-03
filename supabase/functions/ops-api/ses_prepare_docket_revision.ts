@@ -187,6 +187,13 @@ export interface SesPrepareDependencies {
   resolvePhysicalReportProof?: (
     input: SesAssemblerInputV1,
   ) => Promise<SesPhysicalReportProof | null>;
+  resolveBundledPhysicalReportProof?: (
+    input: SesAssemblerInputV1,
+  ) => Promise<SesPhysicalReportProof | null>;
+  renderBundledPhysicalReport?: (
+    input: SesAssemblerInputV1,
+    proof: SesPhysicalReportProof,
+  ) => Promise<SesRenderResult | null>;
   capturePortal?: (
     request: SesPortalCaptureRequest,
   ) => Promise<SesPortalCapture>;
@@ -2022,12 +2029,12 @@ async function prepareOne(
             metadata: bundleProof,
           }),
         );
-        const bundledProof = deps.resolvePhysicalReportProof
-          ? await deps.resolvePhysicalReportProof(input)
+        const bundledProof = deps.resolveBundledPhysicalReportProof
+          ? await deps.resolveBundledPhysicalReportProof(input)
           : null;
         const resolved = bundledProof && validPhysicalReportProof(bundledProof) &&
-            deps.renderPhysicalReport
-          ? await deps.renderPhysicalReport(input, undefined, bundledProof)
+            deps.renderBundledPhysicalReport
+          ? await deps.renderBundledPhysicalReport(input, bundledProof)
           : null;
         const resolvedRawHash = resolved
           ? await rawArtifactSha256(resolved.bytes)

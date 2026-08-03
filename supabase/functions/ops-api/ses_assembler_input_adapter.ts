@@ -2510,6 +2510,62 @@ export function createSesAssemblerRuntimeDependencies(
         ),
       );
     },
+    resolveBundledPhysicalReportProof: async (input) => {
+      const bundle = input.sibling_bundle_evidence;
+      if (!bundle || bundle.status !== "accepted") return null;
+      const siblingSnapshot = await loadSesAssemblerLiveSnapshot(client, {
+        mode: "job_id",
+        job_id: bundle.sibling.job_id,
+      });
+      const siblingCycleId = text(siblingSnapshot.detail?.attendance_cycle_id);
+      return selectPhysicalReportProofForCycle(
+        siblingSnapshot,
+        siblingCycleId,
+      );
+    },
+    renderBundledPhysicalReport: async (input, proof) => {
+      const bundle = input.sibling_bundle_evidence;
+      if (!bundle || bundle.status !== "accepted") return null;
+      const siblingSnapshot = await loadSesAssemblerLiveSnapshot(client, {
+        mode: "job_id",
+        job_id: bundle.sibling.job_id,
+      });
+      const source = physicalReportSourceForCycle(
+        siblingSnapshot,
+        text(siblingSnapshot.detail?.attendance_cycle_id),
+      );
+      if (!source || source.proof.source_identity !== proof.source_identity) {
+        return null;
+      }
+      const objectKey = text(source.artifact?.object_key);
+      const prefix = `${SES_DOCKET_BUCKET}/`;
+      const storagePath = objectKey.startsWith(prefix)
+        ? objectKey.slice(prefix.length)
+        : objectKey;
+      const recovered = await client.storage.from(SES_DOCKET_BUCKET)
+        .download(storagePath);
+      if (recovered.error || !recovered.data) return null;
+      const bytes = new Uint8Array(await recovered.data.arrayBuffer());
+      if (
+        await sesSha256Bytes(bytes) !== proof.source_artifact_content_hash ||
+        await rawReportHash(await rawPhotoSha256(bytes)) !==
+          proof.expected_raw_sha256 ||
+        new TextDecoder().decode(bytes.slice(0, 5)) !== "%PDF-"
+      ) return null;
+      return {
+        file_name: fileName(
+          source.document,
+          `${bundle.sibling.job_number}-report.pdf`,
+        ),
+        media_type: "application/pdf",
+        bytes,
+        render_hash: proof.expected_raw_sha256,
+        provenance: {
+          evidence_source: "explicit_sibling_bundle",
+          report_document_id: proof.source_document_id,
+        },
+      };
+    },
     renderPhysicalReport: async (input, _photos = [], proof) => {
       const snapshot = snapshotFor(input);
       const source = physicalReportSourceForCycle(

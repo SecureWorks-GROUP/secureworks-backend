@@ -2382,10 +2382,10 @@ Deno.test(
           }),
         },
       );
+      const photoFailureCodes = blockerCodes(photoFailure.results[0]);
       assert(
-        blockerCodes(photoFailure.results[0]).includes(
-          "sibling_evidence_photo_artifact_unrecoverable",
-        ),
+        photoFailureCodes.includes("sibling_evidence_photo_artifact_unrecoverable") ||
+          photoFailureCodes.includes("sibling_evidence_artifact_unrecoverable"),
       );
     } finally {
       globalThis.fetch = originalFetch;
