@@ -140,6 +140,20 @@ Deno.test("(a) attach type 'swms' keeps the type + defaults trade-visible", asyn
   assertEquals(db.job_documents[0].visible_to_trades, true);
 });
 
+Deno.test("(a) attach type 'roof_report' keeps the type + defaults trade-visible", async () => {
+  const db: DB = { job_documents: [], job_events: [], business_events: [] };
+  const client = makeDocClient(db);
+  const res = await _attachMakesafeDocumentForTest(client, {
+    job_id: "job-1",
+    type: "roof_report",
+    url: STORED_URL,
+    file_name: "roof-report.pdf",
+  });
+  assertEquals(res.type, "roof_report");
+  assertEquals(db.job_documents[0].type, "roof_report");
+  assertEquals(db.job_documents[0].visible_to_trades, true);
+});
+
 Deno.test("(b) idempotent: same type+file attached twice → one row, version bumped", async () => {
   const db: DB = { job_documents: [], job_events: [], business_events: [] };
   const client = makeDocClient(db);
@@ -281,4 +295,27 @@ Deno.test("FIX 4 — attaching 'work_order' to a report-type job is still ALLOWE
   });
   assertEquals(res.success, true);
   assertEquals(db.job_documents.length, 1);
+});
+
+// ── G1 (2026-08-03): roof_report is DELIBERATELY exempt from the report-type
+// gate — generating our own letterhead report is the whole point of the
+// roof-report flow. The edge function has always allowed it; the database
+// constraint had not (fixed by migration
+// 20260803060000_job_documents_roof_report_type.sql). Pin the exemption at
+// the edge-function layer: a roof_report attach on a report-type job must
+// NOT be refused the way makesafe_report is.
+
+Deno.test("G1 — attaching 'roof_report' to a report-type job is ALLOWED (deliberate exemption)", async () => {
+  const db: DB = { job_documents: [], job_events: [], business_events: [] };
+  // report_type='roof_report': the exact own-letterhead roof-report card shape.
+  const client = makeDocClient(db, { reportType: "roof_report" });
+  const res = await _attachMakesafeDocumentForTest(client, {
+    job_id: "job-roof-1",
+    type: "roof_report",
+    url: STORED_URL,
+    file_name: "roof-report.pdf",
+  });
+  assertEquals(res.success, true);
+  assertEquals(db.job_documents.length, 1);
+  assertEquals(db.job_documents[0].type, "roof_report");
 });
