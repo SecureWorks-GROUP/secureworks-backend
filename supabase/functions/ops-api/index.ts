@@ -628,7 +628,10 @@ import {
   isSelfGeneratedMakesafeWorkOrder as _isSelfGeneratedMakesafeWorkOrder,
   mergeBuilderWorkOrderIdentity as _mergeBuilderWorkOrderIdentity,
 } from './makesafe_builder_work_order_identity.ts'
-import { correlateIntakeApprovalIdentity as _correlateIntakeApprovalIdentity } from './makesafe_intake_approval_identity.ts'
+import {
+  correlateIntakeApprovalIdentity as _correlateIntakeApprovalIdentity,
+  intakeIdentityAttachmentNames as _intakeIdentityAttachmentNames,
+} from './makesafe_intake_approval_identity.ts'
 import { refreshMakesafeIdentityAfterWorkOrderAttach as _refreshMakesafeIdentityAfterWorkOrderAttach } from './makesafe_work_order_identity_refresh.ts'
 import {
   assertInstructionCardMintAvailable as _assertInstructionCardMintAvailable,
@@ -19204,10 +19207,7 @@ async function approveIntakeDraft(client: any, body: any) {
     approved_external_ref: approvedFields.external_ref,
     requesting_company_slug: approvedFields.requesting_company_slug,
     family: approvedJobFamily || null,
-    attachment_names: availableAttachments.map((attachment: any) =>
-      attachment.file_name || attachment.filename || attachment.name ||
-        attachment.pdf_url || attachment.storage_url
-    ),
+    attachment_names: _intakeIdentityAttachmentNames(attachments),
   })
   if (correlatedIdentity.action === 'refuse') {
     throw new ApiError(

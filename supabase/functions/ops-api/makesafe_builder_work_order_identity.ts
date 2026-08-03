@@ -82,6 +82,54 @@ function attachmentNameScanText(name: string): string {
   return name.replace(/_/g, " ");
 }
 
+export interface BuilderAttachmentIdentityTokens {
+  builder_claim_refs: string[];
+  builder_po_numbers: string[];
+}
+
+/**
+ * Enumerate every canonical WO/PO token in one attachment name. The ordinary
+ * extractor intentionally returns one identity; intake approval uses this
+ * stricter cardinality view to refuse a name that contains multiple candidates.
+ */
+export function builderIdentityTokensInAttachmentName(
+  value: string | null | undefined,
+): BuilderAttachmentIdentityTokens {
+  const scan = attachmentNameScanText(String(value || ""));
+  const claimRefs = new Set<string>();
+  const purchaseOrders = new Set<string>();
+  for (
+    const match of scan.matchAll(
+      new RegExp(BUILDER_REF_WITH_PO_RE.source, "gi"),
+    )
+  ) {
+    if (isJunkBuilderRef(match[1], match[2])) continue;
+    claimRefs.add(canonicalClaim(match[1], match[2]));
+    purchaseOrders.add(canonicalPo(match[3]));
+  }
+  for (
+    const match of scan.matchAll(new RegExp(BUILDER_REF_RE.source, "gi"))
+  ) {
+    if (!isJunkBuilderRef(match[1], match[2])) {
+      claimRefs.add(canonicalClaim(match[1], match[2]));
+    }
+  }
+  for (const match of scan.matchAll(new RegExp(PO_RE.source, "gi"))) {
+    purchaseOrders.add(canonicalPo(match[1]));
+  }
+  return {
+    builder_claim_refs: [...claimRefs].sort(),
+    builder_po_numbers: [...purchaseOrders].sort(),
+  };
+}
+
+/** Filename-scoped unparseable-PO check with the canonical underscore rule. */
+export function attachmentNameHasUnparseablePoLabel(
+  value: string | null | undefined,
+): boolean {
+  return hasUnparseablePoLabel(attachmentNameScanText(String(value || "")));
+}
+
 /**
  * Files minted by SecureWorks while creating a card are internal cover sheets,
  * not instructions supplied by a builder. Keep the check filename-scoped and

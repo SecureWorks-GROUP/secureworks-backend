@@ -2,6 +2,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   correlateIntakeApprovalIdentity,
+  intakeIdentityAttachmentNames,
 } from "./makesafe_intake_approval_identity.ts";
 
 Deno.test("approval correlation persists a source-proven PO before mint", () => {
@@ -139,6 +140,76 @@ Deno.test("approval correlation refuses PO-only attachment ambiguity with an unk
     action: "refuse",
     reason: "multiple_instruction_keys",
     instruction_keys: ["MLB:PO-40001", "MLB:PO-40002"],
+  });
+});
+
+Deno.test("approval correlation includes unavailable attachment identity in ambiguity proof", () => {
+  const attachmentNames = intakeIdentityAttachmentNames([
+    {
+      file_name: "MLB-10001PO-40001.pdf",
+      storage_url: "typed-source-one",
+    },
+    {
+      file_name: "MLB-10001PO-40002.pdf",
+      pdf_unavailable: true,
+    },
+  ]);
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: {},
+    approved_external_ref: "MLB-10001",
+    requesting_company_slug: "mlb",
+    family: "general_makesafe",
+    attachment_names: attachmentNames,
+  });
+  assertEquals(decision, {
+    action: "refuse",
+    reason: "multiple_instruction_keys",
+    instruction_keys: ["MLB:PO-40001", "MLB:PO-40002"],
+  });
+});
+
+Deno.test("approval correlation refuses two PO tokens in one attachment name", () => {
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: {},
+    approved_external_ref: "MLB-10001",
+    requesting_company_slug: null,
+    family: "general_makesafe",
+    attachment_names: ["MLB-10001_PO-40001_PO-40002.pdf"],
+  });
+  assertEquals(decision, {
+    action: "refuse",
+    reason: "multiple_instruction_keys",
+    instruction_keys: ["MLB:PO-40001", "MLB:PO-40002"],
+  });
+});
+
+Deno.test("approval correlation refuses a parsed PO without a resolvable builder scope", () => {
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: {},
+    approved_external_ref: "27037",
+    requesting_company_slug: null,
+    family: "general_makesafe",
+    attachment_names: ["PO-40001.pdf"],
+  });
+  assertEquals(decision, {
+    action: "refuse",
+    reason: "typed_identity_not_persistable",
+    instruction_keys: [],
+  });
+});
+
+Deno.test("approval correlation refuses an unparseable PO-shaped source name", () => {
+  const decision = correlateIntakeApprovalIdentity({
+    extraction: {},
+    approved_external_ref: "MLB-10001",
+    requesting_company_slug: "mlb",
+    family: "general_makesafe",
+    attachment_names: ["MLB-10001_P.O.40001.pdf"],
+  });
+  assertEquals(decision, {
+    action: "refuse",
+    reason: "source_identity_conflict",
+    instruction_keys: [],
   });
 });
 

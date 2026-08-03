@@ -3,10 +3,13 @@
 // result and must never recover a purchase order from a filename themselves.
 
 import {
+  attachmentNameHasUnparseablePoLabel,
+  builderIdentityTokensInAttachmentName,
   builderInstructionKey,
   builderInstructionKeysForCard,
   type BuilderWorkOrderIdentity,
   extractBuilderWorkOrderIdentity,
+  hasUnparseablePoLabel,
   isSelfGeneratedMakesafeWorkOrder,
   mergeBuilderWorkOrderIdentity,
 } from "./makesafe_builder_work_order_identity.ts";
@@ -35,6 +38,19 @@ function unique(values: Array<string | null | undefined>): string[] {
   return [...new Set(values.map(text).filter(Boolean))].sort();
 }
 
+/** Identity sees every declared attachment; PDF servability is a later gate. */
+export function intakeIdentityAttachmentNames(
+  attachments: readonly unknown[],
+): Array<string | null | undefined> {
+  return (attachments || []).map((attachment) => {
+    if (typeof attachment === "string") return attachment;
+    if (!attachment || typeof attachment !== "object") return null;
+    const item = attachment as Record<string, unknown>;
+    return text(item.file_name) || text(item.filename) || text(item.name) ||
+      text(item.pdf_url) || text(item.storage_url) || null;
+  });
+}
+
 function typedIdentity(extraction: Record<string, unknown>): {
   workOrders: string[];
   purchaseOrders: string[];
@@ -61,26 +77,37 @@ function sourceIdentity(input: {
   identity: BuilderWorkOrderIdentity;
   workOrders: string[];
   purchaseOrders: string[];
+  unparseablePoPresent: boolean;
 } {
+  const attachmentNames = input.attachment_names.filter((name) =>
+    name && !isSelfGeneratedMakesafeWorkOrder(name)
+  );
   const identities = [
     extractBuilderWorkOrderIdentity({
       externalRef: input.approved_external_ref,
       requestingCompanySlug: input.requesting_company_slug,
     }),
-    ...input.attachment_names
-      .filter((name) => name && !isSelfGeneratedMakesafeWorkOrder(name))
-      .map((name) =>
-        extractBuilderWorkOrderIdentity({
-          requestingCompanySlug: input.requesting_company_slug,
-          attachmentNames: [name],
-        })
-      ),
+    ...attachmentNames.map((name) =>
+      extractBuilderWorkOrderIdentity({
+        requestingCompanySlug: input.requesting_company_slug,
+        attachmentNames: [name],
+      })
+    ),
   ];
+  const attachmentTokens = attachmentNames.map((name) =>
+    builderIdentityTokensInAttachmentName(name)
+  );
   const workOrders = unique(
-    identities.map((item) => item.builder_claim_ref),
+    [
+      ...identities.map((item) => item.builder_claim_ref),
+      ...attachmentTokens.flatMap((item) => item.builder_claim_refs),
+    ],
   );
   const purchaseOrders = unique(
-    identities.map((item) => item.builder_po_number),
+    [
+      ...identities.map((item) => item.builder_po_number),
+      ...attachmentTokens.flatMap((item) => item.builder_po_numbers),
+    ],
   );
   const workOrderNumber =
     identities.find((item) =>
@@ -99,6 +126,9 @@ function sourceIdentity(input: {
     },
     workOrders,
     purchaseOrders,
+    unparseablePoPresent:
+      hasUnparseablePoLabel(String(input.approved_external_ref || "")) ||
+      attachmentNames.some(attachmentNameHasUnparseablePoLabel),
   };
 }
 
@@ -143,6 +173,13 @@ export function correlateIntakeApprovalIdentity(input: {
     }
   }
   const sortedInstructionKeys = [...instructionKeys].sort();
+  if (source.unparseablePoPresent) {
+    return {
+      action: "refuse",
+      reason: "source_identity_conflict",
+      instruction_keys: sortedInstructionKeys,
+    };
+  }
   if (source.workOrders.length > 1 || source.purchaseOrders.length > 1) {
     return {
       action: "refuse",
@@ -184,7 +221,11 @@ export function correlateIntakeApprovalIdentity(input: {
     evidence_sources: [],
   }, options);
   const instructionKey = sortedInstructionKeys[0] || persistedKey;
-  if (instructionKey && persistedKey !== instructionKey) {
+  if (
+    ((source.purchaseOrders.length > 0 || typed.purchaseOrders.length > 0) &&
+      !persistedKey) ||
+    (instructionKey && persistedKey !== instructionKey)
+  ) {
     return {
       action: "refuse",
       reason: "typed_identity_not_persistable",
