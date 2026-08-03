@@ -28,6 +28,8 @@ const FACTS = {
     "This exact release route already has a send operation; a second send is refused.",
   stale_review:
     "New evidence landed after this review, so the displayed approval is stale.",
+  curated_source_missing:
+    "The completion report lacks an independently byte-bound current-cycle curated source, so it is hidden from the trusted pack.",
   xero_not_authorised:
     "The current Xero invoice is not AUTHORISED, so its real invoice PDF cannot be released.",
   route_draft_missing:

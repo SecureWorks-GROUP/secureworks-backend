@@ -650,10 +650,19 @@ import {
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import {
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
   MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+  MAKESAFE_REPORT_CONTRACT_VERSION,
+  assertCuratedReportPayload,
+  canonicalCurrentWikiReportHashPayload,
   type MakesafeReportJob,
 } from './makesafe_report_render.ts'
-import { canonicalSesJson } from './ses_docket_envelope.ts'
+import {
+  canonicalSesJson,
+  sesSha256,
+  sesSha256Bytes,
+  stableUuidFromSha256,
+} from './ses_docket_envelope.ts'
 // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled template ->
 // our-letterhead PDF). Template/pricing/validation helpers are pure; the
 // renderer mirrors makesafe_report_render.ts.
@@ -3556,6 +3565,7 @@ if (import.meta.main) serve(async (req: Request) => {
       // docket revision/artifact ledger when dry_run=false; it cannot create,
       // authorise or send an invoice and cannot mutate job/board state.
       'prepare_ses_docket_revision',
+      'bind_current_cycle_curated_makesafe_report',
       'create_intake_draft',
       // create_makesafe_job is allow-listed for the routine ONLY so it can reach its
       // own case, where a routine caller is REDIRECTED to a needs_review draft (it can
@@ -5134,6 +5144,20 @@ if (import.meta.main) serve(async (req: Request) => {
           }
           throw error
         }
+      }
+      case 'bind_current_cycle_curated_makesafe_report': {
+        const bindIsPrivileged = authMode === 'api_key' ||
+          authMode === 'routine' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!bindIsPrivileged) {
+          return json({
+            error: 'forbidden: bind_current_cycle_curated_makesafe_report requires the privileged ops key, the make-safe reporting routine, or an admin/owner session',
+          }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'bind_current_cycle_curated_makesafe_report requires POST' }, 405)
+        }
+        return json(await bindCurrentCycleCuratedMakesafeReport(client, body))
       }
       case 'record_ses_portal_capture_evidence': {
         const captureIsPrivileged = authMode === 'api_key' ||
@@ -34257,6 +34281,11 @@ async function assertCurrentWikiReportInput(
   if (String((supplied as any).contact || '').trim() !== job.contact) {
     throw new ApiError('report_job.contact must equal canonical jobs.client_name', 409)
   }
+  try {
+    assertCuratedReportPayload(job)
+  } catch (error) {
+    throw new ApiError((error as Error).message, 409)
+  }
   const materials = (supplied as any).materials_evidence
   const photos = (supplied as any).photo_evidence
   if (!materials ||
@@ -34438,6 +34467,256 @@ async function assertBertramProtectedReportRepairCas(
   }
 }
 
+/**
+ * POST ops-api?action=bind_current_cycle_curated_makesafe_report
+ *
+ * Exact body:
+ * {
+ *   job_id, document_id, attendance_cycle_id,
+ *   pdf_base64, pdf_sha256,
+ *   report_job, report_input_hash,
+ *   renderer_source_revision, renderer_script_sha256,
+ *   curation_revision_id, curation_artifact_id,
+ *   curation_artifact_content_hash
+ * }
+ *
+ * This binds an already-attached, trade-visible makesafe_report. It never
+ * uploads, renders, sends, approves, invoices, or changes job/board state.
+ */
+async function bindCurrentCycleCuratedMakesafeReport(client: any, body: any) {
+  const jobId = String(body.job_id || '').trim()
+  const documentId = String(body.document_id || '').trim()
+  const attendanceCycleId = String(body.attendance_cycle_id || '').trim()
+  const curationRevisionId = String(body.curation_revision_id || '').trim()
+  const curationArtifactId = String(body.curation_artifact_id || '').trim()
+  const opaqueIdentity = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/
+  if (!jobId || !documentId || !attendanceCycleId) {
+    throw new ApiError('job_id, document_id and attendance_cycle_id are required', 400)
+  }
+  if (!opaqueIdentity.test(curationRevisionId) ||
+      !opaqueIdentity.test(curationArtifactId)) {
+    throw new ApiError('curation revision and artifact IDs must be stable opaque identities', 400)
+  }
+  if (new Set([documentId, curationRevisionId, curationArtifactId]).size !== 3) {
+    throw new ApiError('curation revision/artifact identity cannot self-reference the document', 409)
+  }
+  if (body.renderer_source_revision !==
+      MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION ||
+      body.renderer_script_sha256 !==
+      MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256) {
+    throw new ApiError('curated report renderer provenance is inactive or retired', 409)
+  }
+
+  const suppliedBase64 = String(body.pdf_base64 || '').trim()
+  if (!suppliedBase64) throw new ApiError('pdf_base64 is required', 400)
+  let suppliedBytes: Uint8Array
+  try {
+    suppliedBytes = Uint8Array.from(atob(suppliedBase64), (value) => value.charCodeAt(0))
+  } catch {
+    throw new ApiError('pdf_base64 is invalid', 400)
+  }
+  if (!suppliedBytes.byteLength ||
+      suppliedBytes.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES) {
+    throw new ApiError('curated report exceeds the configured 8 MiB byte budget', 413)
+  }
+  if (new TextDecoder().decode(suppliedBytes.slice(0, 5)) !== '%PDF-') {
+    throw new ApiError('curated report is not a PDF', 400)
+  }
+  const suppliedRawHash = await sha256BytesHex(suppliedBytes)
+  if (String(body.pdf_sha256 || '').toLowerCase() !== suppliedRawHash) {
+    throw new ApiError('curated report raw SHA-256 mismatch', 409)
+  }
+  const suppliedArtifactHash = String(body.curation_artifact_content_hash || '')
+  if (suppliedArtifactHash !== await sesSha256Bytes(suppliedBytes)) {
+    throw new ApiError('curation artifact content hash mismatch', 409)
+  }
+
+  const [jobResponse, detailResponse, documentResponse, boundResponse] =
+    await Promise.all([
+      client.from('jobs')
+        .select('id,job_number,type,client_name,metadata')
+        .eq('id', jobId).maybeSingle(),
+      client.from('makesafe_job_details')
+        .select('report_type,attendance_cycle_id,external_ref')
+        .eq('job_id', jobId).maybeSingle(),
+      client.from('job_documents')
+        .select('id,job_id,type,file_name,pdf_url,storage_url,visible_to_trades,attendance_cycle_id,cycle_attribution,uploaded_by,data_snapshot_json,version')
+        .eq('id', documentId).maybeSingle(),
+      client.from('job_documents')
+        .select('id,data_snapshot_json')
+        .eq('job_id', jobId).eq('type', 'makesafe_report')
+        .eq('attendance_cycle_id', attendanceCycleId),
+    ])
+  if (jobResponse.error || !jobResponse.data ||
+      detailResponse.error || !detailResponse.data ||
+      documentResponse.error || !documentResponse.data || boundResponse.error) {
+    throw new ApiError('current-cycle curated report authority rows could not be read', 409)
+  }
+  const metadata = parseJsonObject(jobResponse.data.metadata)
+  const family = canonicalSesFamilyFromCard({
+    makesafe_job_family: metadata.makesafe_job_family,
+    insurance_job_type: metadata.insurance_job_type,
+    own_template_requested: metadata.own_template_requested,
+    strata: metadata.strata,
+    report_delivery: metadata.report_delivery,
+  })
+  if (jobResponse.data.type !== 'makesafe' ||
+      !['physical_makesafe', 'temporary_fencing'].includes(family) ||
+      detailResponse.data.report_type != null) {
+    throw new ApiError('only a physical make-safe job may bind a makesafe_report source', 409)
+  }
+  if (detailResponse.data.attendance_cycle_id !== attendanceCycleId) {
+    throw new ApiError('attendance_cycle_id is not the job current cycle', 409)
+  }
+  const document = documentResponse.data
+  if (document.job_id !== jobId || document.type !== 'makesafe_report' ||
+      document.visible_to_trades !== true ||
+      document.attendance_cycle_id !== attendanceCycleId ||
+      document.cycle_attribution !== 'bound') {
+    throw new ApiError('document is not a visible current-cycle makesafe_report', 409)
+  }
+  const sourceUrl = String(document.pdf_url || document.storage_url || '')
+  if (!sourceUrl.startsWith('https://')) {
+    throw new ApiError('existing makesafe_report bytes are not recoverable', 409)
+  }
+  const sourceResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(20_000) })
+  if (!sourceResponse.ok) {
+    throw new ApiError('existing makesafe_report byte recovery failed', 409)
+  }
+  const storedBytes = new Uint8Array(await sourceResponse.arrayBuffer())
+  if (!storedBytes.byteLength || storedBytes.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES ||
+      new TextDecoder().decode(storedBytes.slice(0, 5)) !== '%PDF-' ||
+      storedBytes.byteLength !== suppliedBytes.byteLength ||
+      await sha256BytesHex(storedBytes) !== suppliedRawHash ||
+      await sesSha256Bytes(storedBytes) !== suppliedArtifactHash) {
+    throw new ApiError('existing makesafe_report bytes drift from the curated artifact', 409)
+  }
+
+  const validatedInput = await assertCurrentWikiReportInput(
+    body.report_job || {},
+    jobResponse.data.client_name,
+    body.report_input_hash,
+  )
+  const sourceIdentity =
+    `curation-revision:${curationRevisionId}/artifact:${curationArtifactId}`
+  const exactSnapshot = {
+    report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+    report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+    report_renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+    report_renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+    report_render_hash: suppliedRawHash,
+    report_input_hash: validatedInput.inputHash,
+    evidence_source: 'current_cycle_curated_makesafe_report',
+    curated_source_kind: 'durable_curated_revision',
+    curated_source_identity: sourceIdentity,
+    curated_source_revision_id: curationRevisionId,
+    curated_source_artifact_id: curationArtifactId,
+    curated_source_artifact_content_hash: suppliedArtifactHash,
+    curated_source_expected_raw_sha256: `sha256:${suppliedRawHash}`,
+    report_scope_narratives: [
+      validatedInput.job.scope,
+      validatedInput.job.findings,
+      validatedInput.job.works,
+      validatedInput.job.materials,
+    ].filter((value: unknown) => typeof value === 'string' && value.trim()),
+  }
+  const prior = parseJsonObject(document.data_snapshot_json)
+  if (prior.source_document_id === documentId ||
+      prior.curated_source_identity === documentId ||
+      (prior.report_renderer_version &&
+        prior.report_renderer_version !== MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION) ||
+      ['raw_trade_report_fields', 'guarded_current_wiki_rerender_sweep']
+        .includes(String(prior.evidence_source || document.uploaded_by || ''))) {
+    throw new ApiError('raw, retired, or self-stamped report provenance cannot be bound', 409)
+  }
+  const conflict = (boundResponse.data || []).find((row: any) => {
+    if (row.id === documentId) return false
+    const facts = parseJsonObject(row.data_snapshot_json)
+    return facts.curated_source_kind === 'durable_curated_revision'
+  })
+  if (conflict) {
+    throw new ApiError('current attendance cycle already has a conflicting curated source bind', 409)
+  }
+  const sameBind = Object.entries(exactSnapshot).every(([key, value]) =>
+    canonicalSesJson(prior[key] ?? null) === canonicalSesJson(value)
+  )
+  if (sameBind) {
+    return {
+      success: true,
+      skipped: true,
+      document_id: documentId,
+      source_kind: 'durable_curated_revision',
+      source_identity: sourceIdentity,
+      source_revision_id: curationRevisionId,
+      source_artifact_id: curationArtifactId,
+      source_artifact_content_hash: suppliedArtifactHash,
+      expected_raw_sha256: `sha256:${suppliedRawHash}`,
+      report_input_hash: validatedInput.inputHash,
+      writes: 0,
+    }
+  }
+  if (prior.curated_source_identity || prior.curated_source_revision_id ||
+      prior.curated_source_artifact_id) {
+    throw new ApiError('document already has a conflicting curated source bind', 409)
+  }
+
+  const eventId = stableUuidFromSha256(await sesSha256({
+    domain: 'ses-curated-report-source-bind-cycle/v1',
+    job_id: jobId,
+    attendance_cycle_id: attendanceCycleId,
+  }))
+  const event = await client.from('job_events').insert({
+    id: eventId,
+    job_id: jobId,
+    event_type: 'ses_curated_report_source_bind_validated',
+    detail_json: {
+      document_id: documentId,
+      attendance_cycle_id: attendanceCycleId,
+      source_identity: sourceIdentity,
+      source_revision_id: curationRevisionId,
+      source_artifact_id: curationArtifactId,
+      source_artifact_content_hash: suppliedArtifactHash,
+      expected_raw_sha256: `sha256:${suppliedRawHash}`,
+      report_input_hash: validatedInput.inputHash,
+    },
+  })
+  if (event.error) {
+    if (event.error.code === '23505') {
+      throw new ApiError('current attendance cycle already has a bind in progress or completed', 409)
+    }
+    throw new ApiError('curated source audit event could not be written', 503)
+  }
+  const currentVersion = Number(document.version)
+  if (!Number.isSafeInteger(currentVersion) || currentVersion < 1) {
+    await client.from('job_events').delete().eq('id', eventId)
+    throw new ApiError('curated source document has no stable version for compare-and-swap', 409)
+  }
+  const update = await client.from('job_documents').update({
+    data_snapshot_json: { ...prior, ...exactSnapshot },
+    version: currentVersion + 1,
+  }).eq('id', documentId).eq('version', currentVersion).select('id').maybeSingle()
+  if (update.error || !update.data) {
+    const cleanup = await client.from('job_events').delete().eq('id', eventId)
+    if (cleanup.error) {
+      console.error('[ops-api] curated bind reservation cleanup failed', cleanup.error)
+    }
+    throw new ApiError('curated source provenance drifted before it could be written', 409)
+  }
+  return {
+    success: true,
+    skipped: false,
+    document_id: documentId,
+    source_kind: 'durable_curated_revision',
+    source_identity: sourceIdentity,
+    source_revision_id: curationRevisionId,
+    source_artifact_id: curationArtifactId,
+    source_artifact_content_hash: suppliedArtifactHash,
+    expected_raw_sha256: `sha256:${suppliedRawHash}`,
+    report_input_hash: validatedInput.inputHash,
+    writes: 2,
+  }
+}
+
 async function attachCurrentWikiCuratedReport(client: any, body: any) {
   throw new ApiError('current-wiki report attachment is retired', 410)
   const jobId = String(body.job_id || body.jobId || '').trim()
@@ -34580,7 +34859,7 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
   if (protectedRepairPlan) {
     await assertBertramProtectedReportRepairCas(
       client,
-      protectedRepairPlan,
+      protectedRepairPlan as typeof BERTRAM_PROTECTED_REPORT_REPAIR,
       existingResponse.data || [],
     )
   }
@@ -47739,4 +48018,6 @@ export const _assertSealedSesInvoiceCreateIsUniqueForTest =
 export const _makesafeRenderReportForTest = makesafeRenderReport
 export const _attachCurrentWikiCuratedReportForTest =
   attachCurrentWikiCuratedReport
+export const _bindCurrentCycleCuratedMakesafeReportForTest =
+  bindCurrentCycleCuratedMakesafeReport
 export const _updateInvoiceForTest = updateInvoice

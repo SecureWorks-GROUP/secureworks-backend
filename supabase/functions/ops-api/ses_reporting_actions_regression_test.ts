@@ -2,13 +2,416 @@
 import {
   assertEquals,
   assertRejects,
+  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _parseSesDraftForTest,
+  getSesReviewablePackAction,
+  inspectSesSupportingReportProof,
   listSesDocsReadyReviewsAction,
+  querySesReviewCockpitAction,
   resolveDocketRoutes,
   SesActionError,
+  signOffSesDocketAction,
 } from "./ses_reporting_actions.ts";
+import { MAKESAFE_REPORT_CONTRACT_VERSION } from "./makesafe_report_render.ts";
+import { sesSha256Bytes } from "./ses_docket_envelope.ts";
+
+async function rawSha256(bytes: Uint8Array): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new Uint8Array(bytes).buffer),
+  );
+  return Array.from(digest).map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function reviewPackClient(
+  artifact: Record<string, unknown>,
+  bytes: Uint8Array,
+) {
+  const signedPaths: string[] = [];
+  const rpcCalls: string[] = [];
+  const review = {
+    docket_revision_id: "docket-fixture",
+    docket_output_content_hash: `sha256:${"e".repeat(64)}`,
+    assembler_version: "ses-pack-assembler/v1",
+    family_matrix_version: "family-matrix-fixture",
+  };
+  const docket = {
+    id: "docket-fixture",
+    org_id: "org-fixture",
+    job_id: "job-fixture",
+    output_content_hash: review.docket_output_content_hash,
+    assembler_version: review.assembler_version,
+    family_matrix_version: review.family_matrix_version,
+    stage: "pre_xero",
+    committed_at: "2026-08-04T00:00:00.000Z",
+    envelope: {
+      v2: { classification: { family: "physical_makesafe" } },
+    },
+    blockers: [],
+    email_drafts: {},
+    review_spec: {},
+    local_invoice_proposal: null,
+    xero_binding: null,
+    artifact_count: 1,
+    artifact_size_bytes: bytes.byteLength,
+  };
+  const rows: Record<string, unknown> = {
+    ses_docket_review_current: review,
+    makesafe_docket_revisions: docket,
+    makesafe_docket_artifacts: [artifact],
+    ses_docket_review_events: [],
+  };
+  const client = {
+    rpc(name: string) {
+      rpcCalls.push(name);
+      return Promise.resolve({ data: {}, error: null });
+    },
+    storage: {
+      from() {
+        return {
+          download: () =>
+            Promise.resolve({
+              data: new Blob([new Uint8Array(bytes).buffer]),
+              error: null,
+            }),
+          createSignedUrl: (path: string) => {
+            signedPaths.push(path);
+            return Promise.resolve({
+              data: { signedUrl: `https://signed.example.test/${path}` },
+              error: null,
+            });
+          },
+        };
+      },
+    },
+    from(table: string) {
+      let single = false;
+      const query: any = {
+        select: () => query,
+        eq: () => query,
+        order: () => query,
+        maybeSingle: () => {
+          single = true;
+          return query;
+        },
+        then: (resolve: (value: unknown) => unknown) => {
+          const value = rows[table];
+          return Promise.resolve({
+            data: single && Array.isArray(value) ? value[0] || null : value,
+            error: null,
+          }).then(resolve);
+        },
+      };
+      return query;
+    },
+  } as any;
+  return { client, signedPaths, rpcCalls, review };
+}
+
+Deno.test("retired commercial and self-consistent raw provenance remain untrusted without job-specific code", () => {
+  const retiredCommercial = inspectSesSupportingReportProof({
+    role: "supporting_report_pdf",
+    media_type: "application/pdf",
+    content_hash: `sha256:${"a".repeat(64)}`,
+    size_bytes: 100,
+    metadata: {
+      evidence_source: "current_cycle_curated_makesafe_report",
+      report_renderer_version: "secureworks.ops-api-jspdf/retired",
+      render_hash: "b".repeat(64),
+    },
+  });
+  assertEquals(retiredCommercial, {
+    trusted: false,
+    reason: "independent_source_kind_missing",
+  });
+
+  const selfConsistentRaw = inspectSesSupportingReportProof({
+    role: "supporting_report_pdf",
+    media_type: "application/pdf",
+    content_hash: `sha256:${"c".repeat(64)}`,
+    size_bytes: 100,
+    metadata: {
+      source_kind: "durable_curated_revision",
+      source_identity: "document-raw-fixture",
+      source_document_id: "document-raw-fixture",
+      source_revision_id: "revision-raw-fixture",
+      source_artifact_id: "artifact-raw-fixture",
+      source_artifact_content_hash: `sha256:${"c".repeat(64)}`,
+      expected_raw_sha256: `sha256:${"d".repeat(64)}`,
+      output_sha256: `sha256:${"d".repeat(64)}`,
+      render_hash: "d".repeat(64),
+      evidence_source: "current_cycle_curated_makesafe_report",
+      report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+    },
+  });
+  assertEquals(selfConsistentRaw, {
+    trusted: false,
+    reason: "source_identity_self_reference",
+  });
+});
+
+Deno.test("review pack suppresses unproved report bytes and exposes curated_source_missing", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nlegacy fixture");
+  const artifact = {
+    role: "supporting_report_pdf",
+    object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+    media_type: "application/pdf",
+    content_hash: await sesSha256Bytes(bytes),
+    size_bytes: bytes.byteLength,
+    metadata: {
+      evidence_source: "current_cycle_curated_makesafe_report",
+      report_renderer_version: "secureworks.ops-api-jspdf/retired",
+      render_hash: await rawSha256(bytes),
+    },
+  };
+  const { client, signedPaths } = reviewPackClient(artifact, bytes);
+  const pack = await getSesReviewablePackAction(
+    client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(pack.artifacts, []);
+  assertEquals(pack.suppressed_artifacts[0].signed_url, null);
+  assertEquals(
+    pack.suppressed_artifacts[0].blocker_code,
+    "curated_source_missing",
+  );
+  assertEquals(pack.blockers[0].code, "curated_source_missing");
+  assertEquals(
+    (pack.blockers[0] as any).evidence.suppression_reason,
+    "independent_source_kind_missing",
+  );
+  assertEquals(signedPaths, []);
+});
+
+Deno.test("Captain signoff refuses a report suppressed by the same read contract", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nlegacy fixture");
+  const artifact = {
+    role: "supporting_report_pdf",
+    object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+    media_type: "application/pdf",
+    content_hash: await sesSha256Bytes(bytes),
+    size_bytes: bytes.byteLength,
+    metadata: {
+      evidence_source: "current_cycle_curated_makesafe_report",
+      report_renderer_version: "secureworks.ops-api-jspdf/retired",
+      render_hash: await rawSha256(bytes),
+    },
+  };
+  const { client, rpcCalls, review } = reviewPackClient(artifact, bytes);
+  const error = await assertRejects(
+    () =>
+      signOffSesDocketAction(
+        client,
+        {
+          mode: "jwt",
+          user: {
+            id: "captain-fixture",
+            email: "",
+            role: "owner",
+          },
+        },
+        {
+          docket_revision_id: "docket-fixture",
+          expected_output_content_hash: review.docket_output_content_hash,
+        },
+      ),
+    SesActionError,
+    "lacks an independently byte-bound",
+  );
+  assertEquals((error as SesActionError).status, 409);
+  const refusal = (error as SesActionError).refusal as Record<string, unknown>;
+  assertStringIncludes(
+    String(refusal.recovery_action || ""),
+    "bind_current_cycle_curated_makesafe_report",
+  );
+  assertEquals(rpcCalls, []);
+});
+
+Deno.test("review pack keeps a byte-verified previously committed report visible", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\ntrusted fixture");
+  const contentHash = await sesSha256Bytes(bytes);
+  const rawHash = await rawSha256(bytes);
+  const artifact = {
+    role: "supporting_report_pdf",
+    object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+    media_type: "application/pdf",
+    content_hash: contentHash,
+    size_bytes: bytes.byteLength,
+    metadata: {
+      source_kind: "previously_committed_pdf",
+      source_identity:
+        "docket-revision:source-revision/artifact:source-artifact",
+      source_document_id: "source-document",
+      source_revision_id: "source-revision",
+      source_artifact_id: "source-artifact",
+      source_artifact_content_hash: contentHash,
+      expected_raw_sha256: `sha256:${rawHash}`,
+      output_sha256: `sha256:${rawHash}`,
+      render_hash: rawHash,
+      evidence_source: "current_cycle_curated_makesafe_report",
+      report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+    },
+  };
+  const { client, signedPaths } = reviewPackClient(artifact, bytes);
+  const pack = await getSesReviewablePackAction(
+    client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(pack.artifacts.length, 1);
+  assertEquals(pack.suppressed_artifacts, []);
+  assertEquals(pack.blockers, []);
+  assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
+});
+
+Deno.test("review pack keeps an independently proved sibling bundle report visible", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\ntrusted sibling fixture");
+  const contentHash = await sesSha256Bytes(bytes);
+  const rawHash = await rawSha256(bytes);
+  const artifact = {
+    role: "supporting_report_pdf",
+    object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+    media_type: "application/pdf",
+    content_hash: contentHash,
+    size_bytes: bytes.byteLength,
+    metadata: {
+      source_kind: "previously_committed_pdf",
+      source_identity:
+        "docket-revision:source-revision/artifact:source-artifact",
+      source_document_id: "source-document",
+      source_revision_id: "source-revision",
+      source_artifact_id: "source-artifact",
+      source_artifact_content_hash: contentHash,
+      expected_raw_sha256: `sha256:${rawHash}`,
+      output_sha256: `sha256:${rawHash}`,
+      render_hash: rawHash,
+      evidence_source: "explicit_sibling_bundle",
+      report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      bundle_id: "bundle-fixture",
+      sibling_job_id: "sibling-job-fixture",
+      binding_revision_id: "binding-revision-fixture",
+    },
+  };
+  const { client, signedPaths } = reviewPackClient(artifact, bytes);
+  const pack = await getSesReviewablePackAction(
+    client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(pack.artifacts.length, 1);
+  assertEquals(pack.suppressed_artifacts, []);
+  assertEquals(pack.blockers, []);
+  assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
+});
+
+Deno.test("cockpit response converts missing independent report proof into a visible HOLD", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nlegacy fixture");
+  const reportHash = await sesSha256Bytes(bytes);
+  const rows: Record<string, unknown> = {
+    makesafe_docket_revisions_current: {
+      id: "docket-fixture",
+      job_id: "job-fixture",
+      family_matrix_version: "family-matrix-fixture",
+      invoice_obligation_revision_id: null,
+      attendance_cycle_ids: ["cycle-fixture"],
+      stage: "pre_xero",
+      pre_xero_docs_ready: true,
+      envelope: {
+        v2: {
+          classification: {
+            family: "physical_makesafe",
+            job_number: "SWMS-TEST",
+          },
+          items: {
+            physical_reporting_evidence: { state: "ready" },
+            supporting_report_pdf: { state: "ready" },
+            swms_current_cycle: { state: "ready" },
+          },
+        },
+      },
+      blockers: [],
+      review_spec: { cards: [{ family: "physical_makesafe" }] },
+      email_drafts: {
+        REPORT_EMAIL_DRAFT:
+          `To: reports@builder.example\nSubject: Report\nAttachments: ${reportHash}\n\nBody`,
+      },
+    },
+    makesafe_readiness_current_v2: {
+      readiness_revision: "readiness-fixture",
+      dependency_generation: 1,
+      ready: true,
+      blockers: [],
+    },
+    makesafe_invoice_obligation_revisions_current: {
+      id: "obligation-fixture",
+      pricing_disposition: "no_additional_charge",
+      blockers: [],
+      duplicate_probe: { allows_create: true, ambiguity: "none" },
+    },
+    makesafe_docket_artifacts: [{
+      role: "supporting_report_pdf",
+      object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+      media_type: "application/pdf",
+      content_hash: reportHash,
+      size_bytes: bytes.byteLength,
+      metadata: {
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_renderer_version: "secureworks.ops-api-jspdf/retired",
+        render_hash: await rawSha256(bytes),
+      },
+    }],
+    job_assignments: [],
+    job_service_reports: [],
+  };
+  const client = {
+    storage: {
+      from() {
+        return {
+          download: () =>
+            Promise.resolve({
+              data: new Blob([new Uint8Array(bytes).buffer]),
+              error: null,
+            }),
+        };
+      },
+    },
+    from(table: string) {
+      let single = false;
+      const query: any = {
+        select: () => query,
+        eq: () => query,
+        order: () => query,
+        limit: () => query,
+        maybeSingle: () => {
+          single = true;
+          return query;
+        },
+        then: (resolve: (value: unknown) => unknown) => {
+          const value = rows[table];
+          return Promise.resolve({
+            data: single && Array.isArray(value) ? value[0] || null : value,
+            error: null,
+          }).then(resolve);
+        },
+      };
+      return query;
+    },
+  } as any;
+  const cockpit = await querySesReviewCockpitAction(client, "job-fixture");
+  assertEquals(cockpit.status, "HOLD");
+  assertEquals(cockpit.controls.send_it.enabled, false);
+  const blocker = cockpit.verdict.blockers.find((item) =>
+    item.code === "curated_source_missing"
+  );
+  assertEquals(blocker?.code, "curated_source_missing");
+  assertEquals(
+    (blocker as any).evidence.suppression_reason,
+    "independent_source_kind_missing",
+  );
+});
 
 Deno.test("blank Cc cannot consume the following Subject header", () => {
   const report = _parseSesDraftForTest(

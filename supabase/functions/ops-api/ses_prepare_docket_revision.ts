@@ -30,7 +30,10 @@ import {
   type SesFamilyMatrixRow,
 } from "./ses_family_matrix.ts";
 import { AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST } from "./makesafe_existing_fence_pickets.ts";
-import { makesafeReportFileName } from "./makesafe_report_render.ts";
+import {
+  MAKESAFE_REPORT_CONTRACT_VERSION,
+  makesafeReportFileName,
+} from "./makesafe_report_render.ts";
 import { roofReportPrice } from "./roof_report_template.ts";
 import {
   buildSesSwmsGenerationPlan,
@@ -2087,8 +2090,10 @@ async function prepareOne(
               media_type: resolved.media_type,
               bytes: resolved.bytes,
               metadata: {
+                ...(resolved.provenance || {}),
                 render_hash: resolvedRawHash,
                 evidence_source: "explicit_sibling_bundle",
+                report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
                 bundle_id: acceptedBundle.bundle_id,
                 sibling_job_id: acceptedBundle.sibling.job_id,
                 binding_revision_id:
@@ -2100,6 +2105,7 @@ async function prepareOne(
                 source_artifact_id: bundledProof.source_artifact_id,
                 source_artifact_content_hash:
                   bundledProof.source_artifact_content_hash,
+                report_input_hash: bundledProof.report_input_hash || null,
                 expected_raw_sha256: bundledProof.expected_raw_sha256,
                 output_sha256: resolvedRawHash,
                 output_content_hash: resolvedContentHash,

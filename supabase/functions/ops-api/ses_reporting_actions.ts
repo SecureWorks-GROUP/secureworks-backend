@@ -29,7 +29,17 @@ import {
   type SesCockpitDocket,
   type SesReviewRoute,
 } from "./ses_review_cockpit.ts";
-import { sesSha256, stableUuidFromSha256 } from "./ses_docket_envelope.ts";
+import {
+  sesSha256,
+  sesSha256Bytes,
+  stableUuidFromSha256,
+} from "./ses_docket_envelope.ts";
+import {
+  inspectSesSupportingReportProof,
+  rawSesSupportingReportSha,
+  type SesSupportingReportTrust,
+} from "./ses_supporting_report_trust.ts";
+export { inspectSesSupportingReportProof } from "./ses_supporting_report_trust.ts";
 import {
   canManageSesDocsReadySignoff,
   nextSesDocsReadyState,
@@ -63,6 +73,7 @@ export interface SesSupabaseClient {
         path: string,
         expiresIn: number,
       ): Promise<SupabaseResponse<{ signedUrl: string }>>;
+      download(path: string): Promise<SupabaseResponse<Blob>>;
     };
   };
 }
@@ -107,6 +118,55 @@ function requireValue(
 
 function object(value: unknown): Record<string, any> {
   return value && typeof value === "object" ? value as Record<string, any> : {};
+}
+
+export const SES_CURATED_SOURCE_RECOVERY_ACTION =
+  "POST ops-api?action=bind_current_cycle_curated_makesafe_report with job_id, document_id, attendance_cycle_id, pdf_base64, pdf_sha256, report_job, report_input_hash, renderer_source_revision, renderer_script_sha256, curation_revision_id, curation_artifact_id, and curation_artifact_content_hash; then prepare a new docket revision.";
+
+async function verifyStoredSupportingReport(
+  client: SesSupabaseClient,
+  artifact: Record<string, any>,
+): Promise<SesSupportingReportTrust> {
+  const inspected = inspectSesSupportingReportProof(artifact);
+  if (!inspected.trusted) return inspected;
+  const prefix = `${SES_DOCKET_BUCKET}/`;
+  const objectKey = String(artifact.object_key || "");
+  if (!objectKey.startsWith(prefix)) {
+    return { trusted: false, reason: "source_object_outside_private_bucket" };
+  }
+  const recovered = await client.storage.from(SES_DOCKET_BUCKET)
+    .download(objectKey.slice(prefix.length));
+  if (recovered.error || !recovered.data) {
+    return { trusted: false, reason: "source_bytes_unrecoverable" };
+  }
+  const bytes = new Uint8Array(await recovered.data.arrayBuffer());
+  if (
+    bytes.byteLength !== Number(artifact.size_bytes) ||
+    bytes.byteLength > 8 * 1024 * 1024 ||
+    new TextDecoder().decode(bytes.slice(0, 5)) !== "%PDF-" ||
+    await sesSha256Bytes(bytes) !== artifact.content_hash
+  ) {
+    return { trusted: false, reason: "served_pdf_content_hash_mismatch" };
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const raw = Array.from(digest).map((value) =>
+    value.toString(16).padStart(2, "0")
+  ).join("");
+  if (
+    raw !==
+      rawSesSupportingReportSha(object(artifact.metadata).expected_raw_sha256)
+  ) {
+    return { trusted: false, reason: "served_pdf_raw_sha256_mismatch" };
+  }
+  return { trusted: true };
+}
+
+function curatedSourceMissingRefusal(reason: string): SesRefusal {
+  return sesRefusal(
+    "curated_source_missing",
+    SES_CURATED_SOURCE_RECOVERY_ACTION,
+    { evidence: { suppression_reason: reason } },
+  );
 }
 
 function parseDraft(
@@ -422,6 +482,31 @@ export async function loadSesCockpitDocket(
       }).`,
     });
   }
+  const manifest = object(object(docket.envelope).v2);
+  const family = String(object(manifest.classification).family || "");
+  const physical = family === "physical_makesafe" ||
+    family === "temporary_fencing";
+  let cockpitArtifacts = artifactsResponse.data || [];
+  let sourceRefusal: SesRefusal | null = null;
+  if (physical) {
+    const reportArtifacts = cockpitArtifacts.filter((artifact: any) =>
+      artifact.role === "supporting_report_pdf"
+    );
+    const trust = reportArtifacts.length === 1
+      ? await verifyStoredSupportingReport(client, reportArtifacts[0])
+      : {
+        trusted: false as const,
+        reason: reportArtifacts.length === 0
+          ? "supporting_report_pdf_missing"
+          : "multiple_supporting_report_pdfs",
+      };
+    if (!trust.trusted) {
+      sourceRefusal = curatedSourceMissingRefusal(trust.reason);
+      cockpitArtifacts = cockpitArtifacts.filter((artifact: any) =>
+        artifact.role !== "supporting_report_pdf"
+      );
+    }
+  }
   const [assignmentsResponse, reportsResponse] = await Promise.all([
     client.from("job_assignments")
       .select(
@@ -448,7 +533,7 @@ export async function loadSesCockpitDocket(
   }
   const routes = resolveDocketRoutes(
     docket,
-    artifactsResponse.data || [],
+    cockpitArtifacts,
     obligation,
   );
   const cleanInput = cleanInputFromRows({
@@ -457,7 +542,10 @@ export async function loadSesCockpitDocket(
     obligation,
     routes,
   });
-  const manifest = object(object(docket.envelope).v2);
+  if (sourceRefusal) {
+    cleanInput.readiness_blockers.push(sourceRefusal);
+    cleanInput.money_blocker_codes.push(sourceRefusal.code);
+  }
   return {
     job_id: jobId,
     job_number: object(manifest.classification).job_number || null,
@@ -978,6 +1066,12 @@ export async function getSesReviewablePackAction(
       ),
     );
   }
+  const reviewManifest = object(object(docket.envelope).v2);
+  const reviewFamily = String(
+    object(reviewManifest.classification).family || "",
+  );
+  const physicalReview = reviewFamily === "physical_makesafe" ||
+    reviewFamily === "temporary_fencing";
   const artifactsResponse = await client.from("makesafe_docket_artifacts")
     .select("role,object_key,media_type,content_hash,size_bytes,metadata")
     .eq("revision_id", docketRevisionId)
@@ -990,8 +1084,26 @@ export async function getSesReviewablePackAction(
       }).`,
     });
   }
-  const artifacts = await Promise.all(
+  const projectedArtifacts = await Promise.all(
     (artifactsResponse.data || []).map(async (artifact: any) => {
+      if (physicalReview && artifact.role === "supporting_report_pdf") {
+        const trust = await verifyStoredSupportingReport(client, artifact);
+        if (!trust.trusted) {
+          return {
+            suppressed: true as const,
+            artifact: {
+              role: artifact.role,
+              media_type: artifact.media_type,
+              content_hash: artifact.content_hash,
+              size_bytes: artifact.size_bytes,
+              signed_url: null,
+              trust_state: "blocked",
+              blocker_code: "curated_source_missing",
+              suppression_reason: trust.reason,
+            },
+          };
+        }
+      }
       const prefix = `${SES_DOCKET_BUCKET}/`;
       const objectKey = String(artifact.object_key || "");
       if (!objectKey.startsWith(prefix)) {
@@ -1012,13 +1124,37 @@ export async function getSesReviewablePackAction(
         });
       }
       return {
-        ...artifact,
-        display_label: sesReviewArtifactDisplayLabel(artifact.role),
-        signed_url: signed.data.signedUrl,
-        signed_url_expires_in_seconds: 300,
+        suppressed: false as const,
+        artifact: {
+          ...artifact,
+          display_label: sesReviewArtifactDisplayLabel(artifact.role),
+          signed_url: signed.data.signedUrl,
+          signed_url_expires_in_seconds: 300,
+        },
       };
     }),
   );
+  const artifacts = projectedArtifacts.filter((entry) => !entry.suppressed)
+    .map((entry) => entry.artifact);
+  const suppressedArtifacts = projectedArtifacts.filter((entry) =>
+    entry.suppressed
+  ).map((entry) => entry.artifact);
+  let sourceRefusal: SesRefusal | null = null;
+  if (physicalReview) {
+    const trustedReports = artifacts.filter((artifact: any) =>
+      artifact.role === "supporting_report_pdf"
+    );
+    if (trustedReports.length !== 1) {
+      sourceRefusal = curatedSourceMissingRefusal(
+        String(
+          suppressedArtifacts[0]?.suppression_reason ||
+            (trustedReports.length === 0
+              ? "supporting_report_pdf_missing"
+              : "multiple_supporting_report_pdfs"),
+        ),
+      );
+    }
+  }
   const historyResponse = await client.from("ses_docket_review_events").select(
     "id,event_sequence,review_state,event_kind,actor_user_id,actor_identity,reason,signed_off_at,created_at,docket_output_content_hash,assembler_version,family_matrix_version,invalidated_signoff_event_id",
   ).eq("docket_revision_id", docketRevisionId)
@@ -1033,8 +1169,18 @@ export async function getSesReviewablePackAction(
   }
   return {
     review,
-    docket,
+    docket: sourceRefusal
+      ? {
+        ...docket,
+        blockers: [
+          ...(Array.isArray(docket.blockers) ? docket.blockers : []),
+          sourceRefusal,
+        ],
+      }
+      : docket,
     artifacts,
+    suppressed_artifacts: suppressedArtifacts,
+    blockers: sourceRefusal ? [sourceRefusal] : [],
     audit_trail: historyResponse.data || [],
   };
 }
@@ -1077,6 +1223,17 @@ export async function signOffSesDocketAction(
         "Reload the current review pack and tick its exact displayed hash.",
       ),
     );
+  }
+  const displayedPack = await getSesReviewablePackAction(
+    client,
+    auth,
+    args.docket_revision_id,
+  );
+  const sourceRefusal = displayedPack.blockers.find((blocker) =>
+    blocker.code === "curated_source_missing"
+  );
+  if (sourceRefusal) {
+    throw new SesActionError(409, sourceRefusal);
   }
   if (current.review_state !== "signed_off") {
     nextSesDocsReadyState(current.review_state, "signed_off");
