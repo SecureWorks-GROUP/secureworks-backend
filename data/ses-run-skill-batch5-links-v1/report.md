@@ -641,6 +641,55 @@ hash. That is expected and is the card becoming priceable, not a defect.
 
 ---
 
+## 9.4 A repo defect this run surfaced, and one open question it leaves behind
+
+Landing this evidence exposed a defect that has nothing to do with SES: **an evidence-only or
+docs-only PR is unmergeable in this repository.** `deno-check` is the only required status on `main`
+(`required_status_checks.contexts = ['deno-check']`), and `.github/workflows/pr-check.yml` matched
+neither `data/**` nor the root markdown files — so such a PR triggers no workflow at all, the
+required status never registers, and the PR sits at `BLOCKED` with zero checks forever.
+
+Measured on this run's own PR #509 (68 files, all under `data/` plus `AGENTS.md`): `gh pr checks`
+reported *no checks reported*, `statusCheckRollup` 0, `mergeStateStatus` BLOCKED.
+
+Fixed in a **separate** PR (#510, CI green) rather than bolted onto this one, so it is judged on the
+repo defect and not on getting this PR through: `data/**` and `*.md` added to the path list, paths
+only, no job logic. It is the fourth instance of a bug that file already documents twice in its own
+comments, for migrations/scripts and for the watchdog.
+
+### The open question, recorded so it is not lost
+
+Adding these paths means the required status now **registers** — and the `deno-check` job runs
+**seven unconditional steps** that are not gated on `has_changes`:
+
+```
+Shell syntax check on deploy scripts
+Test ops-api action-surface smoke contract
+Test bundled ops-api deploy metadata
+Test Edge Function schema preflight
+Test migration auto-apply
+Check migration extension schema contract
+Test edge deploy workflow classification
+```
+
+Only the deno check and deno cache steps are guarded. **So a data-only PR can now go red if `main`
+is red.** This does not turn BLOCKED into guaranteed GREEN; it turns blocked-forever into
+coupled-to-main's-health.
+
+That was accepted deliberately, on precedent: migrations-only, scripts-only and watchdog-only PRs
+already carry exactly this coupling and the repo has accepted it three times, and those seven steps
+test repo invariants a data-only change cannot move, so they are green whenever `main` is green.
+
+**Open: should those seven steps be gated on relevant changes?** It is a real question and it was
+deliberately NOT answered in #510, because it changes shared CI behaviour for every contributor and
+does not belong attached to a paths fix. It needs its own change and its own decision.
+
+*(This corrects an earlier claim of mine in the #510 commit message that both jobs "already no-op to
+pass". They do not — only two of twelve steps are guarded. The review caught it and the commit
+message was rewritten before it landed.)*
+
+---
+
 ## 10. Open items for firstmate
 
 1. **The `SW_API_KEY` that will not authenticate** — blocks both crews, every write and every U4 dry
