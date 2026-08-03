@@ -13,10 +13,10 @@ written to. The invoice-obligation path was not changed.
 ### 1. The board will show you 5, and the real number is 35. Both are correct.
 
 **30 of the 35 ready cards sit in the board's `archive` column**, because `archive` means two
-different things: "this card is dead" *and* "this job finished more than seven days ago". These are
-older `SWMS-266xx` cards whose work was completed long ago and which have been waiting on paperwork
-ever since. Their packs are ready and queued for your signoff — they just do not appear in a column
-you would scan for live work.
+different things: "this card is dead" *and* "this job finished more than seven days ago". These
+cards derive `canonical_stage: archive` because their work completed more than seven days ago, not
+because of their job number; the set spans `SWMS-261xx` through `SWMS-269xx`. Their packs are ready
+and queued for your signoff — they just do not appear in a column you would scan for live work.
 
 > **Counting Docs Ready by eye off the board shows 5, not 35. The number is not wrong.**
 > The honest surface is the signoff queue: `ops-api?action=list_ses_docs_ready_reviews`, which
@@ -282,11 +282,11 @@ reconciled them against my 35.
 Two things that table shows which a per-card log would have hidden:
 
 - **30 of my 35 sit in the board's `archive` column.** That is not a card being dead. `archive` is
-  overloaded — it is also "this job finished more than seven days ago" — and these are older
-  `SWMS-266xx` cards whose work completed long ago and which have been waiting on paperwork ever
-  since. Their packs are ready and they are in the signoff queue; they just will not appear in a
-  column the captain scans for live work. **If he is counting Docs Ready by eye off the board, he
-  will see 5, not 35.** The queue is the honest surface.
+  overloaded — it is also "this job finished more than seven days ago" — and these cards derive
+  `canonical_stage: archive` from completion age, not their job number. The set spans `SWMS-261xx`
+  through `SWMS-269xx`. Their packs are ready and they are in the signoff queue; they just will not
+  appear in a column the captain scans for live work. **If he is counting Docs Ready by eye off the
+  board, he will see 5, not 35.** The queue is the honest surface.
 - **The 5 already-sent cards are exactly the 5 whose board `pack.pre_xero_docs_ready` reads
   `false`** while their fresh docket reads `true`. The board is showing the historical sent pack
   (`docket_revision_id: null`), the queue is showing my new revision. That disagreement is the
