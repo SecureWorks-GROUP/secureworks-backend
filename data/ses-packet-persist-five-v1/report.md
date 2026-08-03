@@ -97,8 +97,16 @@ That would have certified my transcription, not the card.*
 
 ## FINDING 2 — the persist payload documented in the wiki skill is wrong and is rejected by production
 
-`harness/ops/skills/secureworks-makesafe-reporting/references/docs-ready-persist.md` (and the
-packet, which copies it) documents:
+**The file to fix, exactly**, so nobody has to rediscover it:
+
+| | |
+|---|---|
+| repo | `secureworks-wiki` (**not** this repo — nothing on this branch can correct it) |
+| branch | `droid/ses-skill-docs-ready-persist-2026-08-03` (wiki PR #252), or `main` once merged |
+| file | `harness/ops/skills/secureworks-makesafe-reporting/references/docs-ready-persist.md` |
+| line | **21**, in "The sequence" step 3 — verified by grep to be the **only** occurrence of `job_numbers` anywhere in the skill; `run-contract.md` step 14 defers to this file rather than restating the shape, so this one line is the whole fix |
+
+That file (and the packet, which copies it) documents:
 
 ```
 selection: {job_numbers: ["SWMS-......", ...]}
