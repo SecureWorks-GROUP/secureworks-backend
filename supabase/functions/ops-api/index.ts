@@ -649,11 +649,6 @@ import {
 } from './makesafe_instruction_mint_gate.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import {
-  canonicalCurrentWikiReportHashPayload,
-  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
-  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-  MAKESAFE_REPORT_CONTRACT_VERSION,
   type MakesafeReportJob,
 } from './makesafe_report_render.ts'
 import { canonicalSesJson } from './ses_docket_envelope.ts'
@@ -3577,7 +3572,7 @@ if (import.meta.main) serve(async (req: Request) => {
       // Draft / render / read ONLY; the AUTHORISE + SEND stays in makesafe_send_pack,
       // which is DELIBERATELY NOT in this allow-list and so is denied by default-deny.
       'makesafe_render_report', // retired: clear 410, no artifact write
-      'attach_current_wiki_curated_report', // exact current-wiki bytes; no send/invoice/status
+      'attach_current_wiki_curated_report', // retired stop-ship endpoint; always 410
       'render_roof_report', // Wave 3: renders OUR letterhead roof report PDF + attaches (no send)
       'makesafe_report_drafts', // READ-only report-draft cockpit feed (no writes)
       // Sealed SES U5/U6 draft/read surface. These actions can only append local

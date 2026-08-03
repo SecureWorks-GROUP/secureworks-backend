@@ -13,9 +13,6 @@ import {
 } from "./index.ts";
 import {
   canonicalCurrentWikiReportHashPayload,
-  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-  MAKESAFE_REPORT_CONTRACT_VERSION,
   renderMakesafeReportPdf,
 } from "./makesafe_report_render.ts";
 import { canonicalSesJson } from "./ses_docket_envelope.ts";
@@ -68,10 +65,6 @@ async function sha(bytes: Uint8Array): Promise<string> {
   );
   return [...new Uint8Array(digest)]
     .map((value) => value.toString(16).padStart(2, "0")).join("");
-}
-
-function base64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
 }
 
 function currentReportJob() {
@@ -201,112 +194,17 @@ function attachClient(
   return { client, mutations, updates };
 }
 
-Deno.test("current-wiki attach retries identical bytes without writes", async () => {
-  const pdf = new TextEncoder().encode("%PDF-fixture");
-  const rawHash = await sha(pdf);
-  const reportJob = currentReportJob();
-  const reportInputHash = await inputHash(reportJob);
-  const { client, mutations } = attachClient("SWMS-TEST", {
-    report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-    report_renderer_source_revision:
-      MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-    report_renderer_script_sha256:
-      MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-    report_render_hash: rawHash,
-    report_input_hash: reportInputHash,
-    report_renderer_version:
-      `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`,
-    evidence_source: "current_cycle_curated_makesafe_report",
-    source_document_id: "document-fixture",
-  });
-  const result: any = await _attachCurrentWikiCuratedReportForTest(client, {
-    job_id: "job-fixture",
-    renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-    renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-    pdf_base64: base64(pdf),
-    pdf_sha256: rawHash,
-    report_input_hash: reportInputHash,
-    report_job: reportJob,
-  });
-  assertEquals(result.writes, 0);
-  assertEquals(result.skipped, true);
-  assertEquals(mutations, []);
-});
-
-Deno.test("identical current-wiki attachment repairs provenance once", async () => {
-  const pdf = new TextEncoder().encode("%PDF-fixture");
-  const rawHash = await sha(pdf);
-  const reportJob = currentReportJob();
-  const { client, mutations, updates } = attachClient("SWMS-TEST", {
-    report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-    report_render_hash: rawHash,
-    report_renderer_version:
-      `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`,
-  });
-  const body = {
-    job_id: "job-fixture",
-    renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-    renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-    pdf_base64: base64(pdf),
-    pdf_sha256: rawHash,
-    report_input_hash: await inputHash(reportJob),
-    report_job: reportJob,
-  };
-  const first: any = await _attachCurrentWikiCuratedReportForTest(client, body);
-  const second: any = await _attachCurrentWikiCuratedReportForTest(
-    client,
-    body,
-  );
-  assertEquals(first.writes, 1);
-  assertEquals(second.writes, 0);
-  assertEquals(mutations, ["update:job_documents"]);
-  const snapshot = updates[0].data_snapshot_json as Record<string, unknown>;
-  assertEquals(
-    snapshot.report_contract_version,
-    MAKESAFE_REPORT_CONTRACT_VERSION,
-  );
-  assertEquals(
-    snapshot.report_renderer_version,
-    `secureworks.wiki-python/${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}`,
-  );
-  assertEquals(snapshot.report_render_hash, rawHash);
-  assertEquals(
-    snapshot.report_renderer_source_revision,
-    MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-  );
-  assertEquals(
-    snapshot.report_renderer_script_sha256,
-    MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-  );
-  assertEquals(snapshot.report_input_hash, await inputHash(reportJob));
-  assertEquals(
-    snapshot.evidence_source,
-    "current_cycle_curated_makesafe_report",
-  );
-  assertEquals(snapshot.source_document_id, "document-fixture");
-});
-
-Deno.test("captain-corrected report refuses before attachment mutation", async () => {
-  const pdf = new TextEncoder().encode("%PDF-different-fixture");
-  const rawHash = await sha(pdf);
-  const reportJob = currentReportJob();
-  const reportInputHash = await inputHash(reportJob);
-  const { client, mutations } = attachClient("SWMS-261109", {});
+Deno.test("current-wiki attachment is retired before every mutation", async () => {
+  const { client, mutations } = attachClient("SWMS-TEST", {});
   const error = await assertRejects(
     () =>
       _attachCurrentWikiCuratedReportForTest(client, {
         job_id: "job-fixture",
-        renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-        renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-        pdf_base64: base64(pdf),
-        pdf_sha256: rawHash,
-        report_input_hash: reportInputHash,
-        report_job: reportJob,
       }),
     ApiError,
-    "mutation-excluded",
+    "is retired",
   );
-  assertEquals((error as ApiError).status, 409);
+  assertEquals((error as ApiError).status, 410);
   assertEquals(mutations, []);
 });
 

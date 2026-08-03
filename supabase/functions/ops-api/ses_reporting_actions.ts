@@ -181,7 +181,7 @@ function draftRoutes(docket: Record<string, any>): SesReviewRoute[] {
   ): value is SesReviewRoute => !!value);
 }
 
-function resolveDocketRoutes(
+export function resolveDocketRoutes(
   docket: Record<string, any>,
   artifacts: Array<Record<string, any>>,
   obligation: Record<string, any> | null,
@@ -196,21 +196,43 @@ function resolveDocketRoutes(
     byPath.set(path, artifact);
   }
   const invoicePdf = artifacts.find((artifact) =>
-    artifact.role === "xero_invoice_pdf"
+    artifact.role === "xero_invoice_pdf" &&
+    artifact.media_type === "application/pdf"
   );
   const noAdditionalCharge =
     obligation?.pricing_disposition === "no_additional_charge";
   return draftRoutes(docket).map((route) => {
-    const resolved = route.attachment_hashes.map((path) => byPath.get(path))
+    const referenced = route.attachment_hashes.map((path) => byPath.get(path));
+    const resolved = referenced
       .filter((artifact): artifact is Record<string, any> => !!artifact)
       .map((artifact) => String(artifact.content_hash));
-    if (route.route_kind === "invoice" && noAdditionalCharge) {
-      const proposalArtifact = artifacts.find((artifact) =>
-        artifact.role === "invoice_proposal"
-      );
-      const nonInvoiceProposalAttachments = resolved.filter((hash) =>
-        hash !== proposalArtifact?.content_hash
-      );
+    if (route.route_kind !== "invoice") {
+      return {
+        ...route,
+        attachment_hashes: resolved,
+        ready: route.ready &&
+          resolved.length === route.attachment_hashes.length,
+      };
+    }
+
+    // Builder-facing invoice routes may carry only approved PDF support.
+    // The local invoice proposal remains an internal pre-Xero artifact and
+    // legacy draft references to it are deliberately ignored.
+    const approvedSupport = referenced.filter((artifact) =>
+      artifact &&
+      (artifact.role === "supporting_report_pdf" ||
+        artifact.role === "swms_artifact") &&
+      artifact.media_type === "application/pdf"
+    ) as Array<Record<string, any>>;
+    const unsupportedReference = referenced.some((artifact) =>
+      !artifact || (artifact.role !== "invoice_proposal" &&
+        !approvedSupport.includes(artifact))
+    );
+    const supportHashes = approvedSupport.map((artifact) =>
+      String(artifact.content_hash)
+    );
+
+    if (noAdditionalCharge) {
       const reference = String(
         object(docket.local_invoice_proposal).builder_reference || "",
       );
@@ -219,26 +241,21 @@ function resolveDocketRoutes(
         subject: `${reference || "Make-safe"} - no additional charge`,
         body:
           "This later attendance is recorded as document only with no additional charge. The current report and photo evidence are supplied through the accompanying approved routes.",
-        attachment_hashes: nonInvoiceProposalAttachments,
-        ready: route.ready &&
-          resolved.length === route.attachment_hashes.length,
+        attachment_hashes: [...new Set(supportHashes)],
+        ready: route.ready && !unsupportedReference,
       };
     }
-    if (route.route_kind !== "invoice" || docket.stage !== "invoice_bound") {
+    if (docket.stage !== "invoice_bound") {
       return {
         ...route,
-        attachment_hashes: resolved,
-        ready: route.ready &&
-          resolved.length === route.attachment_hashes.length,
+        attachment_hashes: [...new Set(supportHashes)],
+        // Support PDFs are not an invoice. Until an authorised Xero PDF is
+        // bound, the builder-facing invoice route must remain non-sendable.
+        ready: false,
       };
     }
     const xero = object(docket.xero_binding);
-    const proposalArtifact = artifacts.find((artifact) =>
-      artifact.role === "invoice_proposal"
-    );
-    const invoiceAttachments = resolved.filter((hash) =>
-      hash !== proposalArtifact?.content_hash
-    );
+    const invoiceAttachments = [...supportHashes];
     if (invoicePdf?.content_hash) {
       invoiceAttachments.unshift(String(invoicePdf.content_hash));
     }
@@ -254,7 +271,7 @@ function resolveDocketRoutes(
         "Please find the authorised SecureWorks Xero invoice and the supporting current-cycle documents attached.",
       attachment_hashes: [...new Set(invoiceAttachments)],
       ready: route.ready && !!invoicePdf?.content_hash &&
-        xero.status === "AUTHORISED",
+        xero.status === "AUTHORISED" && !unsupportedReference,
     };
   });
 }

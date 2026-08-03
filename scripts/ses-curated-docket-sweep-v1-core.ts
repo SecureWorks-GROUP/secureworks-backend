@@ -3,6 +3,10 @@ import {
   MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
   MAKESAFE_REPORT_CONTRACT_VERSION,
 } from "../supabase/functions/ops-api/makesafe_report_render.ts";
+import {
+  canonicalSesJson,
+  type SesPhysicalReportProof,
+} from "../supabase/functions/ops-api/ses_docket_envelope.ts";
 
 export const SWEEP_SCHEMA = "secureworks.ses-curated-docket-sweep/v1";
 export const TRUSTED_PR_525_BOUNDARY =
@@ -31,15 +35,6 @@ export interface SweepRow {
   source: Record<string, unknown>;
 }
 
-export interface SweepRender {
-  bytes: Uint8Array;
-  pdf_sha256: string;
-  report_input_hash: string;
-  report_job: Record<string, unknown>;
-  searched_sources: string[];
-  rejected_candidates: Array<{ source: string; code: string }>;
-}
-
 export interface SweepEntry {
   job_id: string;
   job_number: string;
@@ -53,6 +48,7 @@ export interface SweepEntry {
   selection: "selected" | "already_current" | "excluded" | "not_applicable";
   searched_sources: string[];
   rejected_candidates: Array<{ source: string; code: string }>;
+  selected_source: SesPhysicalReportProof | null;
   render_hash: string | null;
   report_input_hash: string | null;
   render_size_bytes: number | null;
@@ -73,13 +69,41 @@ export function classifySweepRow(row: SweepRow): SweepClassification {
   const renderer = metadata.report_renderer_version;
   const source = metadata.evidence_source;
   const hash = String(metadata.render_hash || "").replace(/^sha256:/, "");
+  const outputHash = String(metadata.output_sha256 || "").replace(
+    /^sha256:/,
+    "",
+  );
+  const expectedHash = String(metadata.expected_raw_sha256 || "").replace(
+    /^sha256:/,
+    "",
+  );
   const reportDocumentId = typeof metadata.report_document_id === "string"
     ? metadata.report_document_id.trim()
     : "";
+  const sourceIdentity = typeof metadata.source_identity === "string"
+    ? metadata.source_identity.trim()
+    : "";
+  const sourceKind = metadata.source_kind;
+  const sourceRevisionId = typeof metadata.source_revision_id === "string"
+    ? metadata.source_revision_id.trim()
+    : "";
+  const sourceArtifactId = typeof metadata.source_artifact_id === "string"
+    ? metadata.source_artifact_id.trim()
+    : "";
+  const sourceArtifactContentHash = String(
+    metadata.source_artifact_content_hash || "",
+  );
   const trusted = contract === MAKESAFE_REPORT_CONTRACT_VERSION &&
-    renderer === MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION &&
     source === "current_cycle_curated_makesafe_report" &&
-    /^[a-f0-9]{64}$/.test(hash) && reportDocumentId.length > 0;
+    (sourceKind === "durable_curated_revision" ||
+      sourceKind === "previously_committed_pdf") &&
+    sourceIdentity.length > 0 && sourceIdentity !== reportDocumentId &&
+    /^[a-f0-9]{64}$/.test(hash) && hash === outputHash &&
+    outputHash === expectedHash && reportDocumentId.length > 0 &&
+    sourceRevisionId.length > 0 && sourceArtifactId.length > 0 &&
+    sourceIdentity.includes(sourceRevisionId) &&
+    sourceIdentity.includes(sourceArtifactId) &&
+    /^sha256:[a-f0-9]{64}$/.test(sourceArtifactContentHash);
   if (trusted) return "already_current";
   if (contract === MAKESAFE_REPORT_CONTRACT_VERSION && renderer) {
     return "contact_contract_stale";
@@ -93,6 +117,29 @@ export function classifySweepRow(row: SweepRow): SweepClassification {
 export function selectedClassification(value: SweepClassification): boolean {
   return ["stale_legacy", "contact_contract_stale", "stale_provenance"]
     .includes(value);
+}
+
+export function validSweepSourceProof(
+  value: unknown,
+): value is SesPhysicalReportProof {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proof = value as Record<string, unknown>;
+  const sourceKind = proof.source_kind;
+  const sourceIdentity = String(proof.source_identity || "");
+  const sourceRevisionId = String(proof.source_revision_id || "");
+  const sourceArtifactId = String(proof.source_artifact_id || "");
+  return (sourceKind === "durable_curated_revision" ||
+    sourceKind === "previously_committed_pdf") &&
+    String(proof.source_document_id || "").length > 0 &&
+    sourceRevisionId.length > 0 && sourceArtifactId.length > 0 &&
+    sourceIdentity.includes(sourceRevisionId) &&
+    sourceIdentity.includes(sourceArtifactId) &&
+    /^sha256:[a-f0-9]{64}$/.test(
+      String(proof.source_artifact_content_hash || ""),
+    ) &&
+    /^sha256:[a-f0-9]{64}$/.test(String(proof.expected_raw_sha256 || "")) &&
+    (proof.report_input_hash === undefined ||
+      /^sha256:[a-f0-9]{64}$/.test(String(proof.report_input_hash)));
 }
 
 export function emptyEntry(row: SweepRow): SweepEntry {
@@ -119,6 +166,7 @@ export function emptyEntry(row: SweepRow): SweepEntry {
     selection,
     searched_sources: [],
     rejected_candidates: [],
+    selected_source: null,
     render_hash: null,
     report_input_hash: null,
     render_size_bytes: null,
@@ -139,13 +187,13 @@ export function emptyEntry(row: SweepRow): SweepEntry {
 }
 
 export interface SweepDependencies {
-  render(row: SweepRow): Promise<SweepRender>;
-  attach?(row: SweepRow, rendered: SweepRender): Promise<{
-    document_id: string;
-    skipped: boolean;
-  }>;
-  prepare?(row: SweepRow, rendered: SweepRender): Promise<{
-    revision_id: string;
+  prepare(row: SweepRow, args: {
+    dry_run: boolean;
+    expected_physical_report_proof?: SesPhysicalReportProof;
+  }): Promise<{
+    revision_id: string | null;
+    source: SesPhysicalReportProof | null;
+    refusal?: { code: string; remedy: string };
   }>;
 }
 
@@ -165,72 +213,87 @@ export async function runGuardedSweep(
       output.push(entry);
       continue;
     }
-    if (mode === "apply") {
-      const prior = reviewed.get(row.job_id);
-      if (
-        !prior || prior.selection !== "selected" ||
-        prior.old_revision_id !== row.docket_revision_id ||
-        prior.old_artifact_hash !== row.docket_artifact_hash
-      ) {
-        entry.refusal = {
-          code: "reviewed_target_drift",
-          remedy: "Run and review a new production dry-run manifest.",
-        };
-        output.push(entry);
-        continue;
-      }
-    }
+    entry.searched_sources = [
+      "makesafe_docket_revisions.current_cycle",
+      "makesafe_docket_artifacts.supporting_report_pdf",
+      "job_documents.provenance",
+    ];
+    entry.rejected_candidates = [{
+      source: "raw_trade_report_fields",
+      code: "raw_trade_fields_not_curated_authority",
+    }];
     try {
-      const rendered = await deps.render(row);
-      entry.searched_sources = rendered.searched_sources;
-      entry.rejected_candidates = rendered.rejected_candidates;
-      entry.render_hash = rendered.pdf_sha256;
-      entry.report_input_hash = rendered.report_input_hash;
-      entry.render_size_bytes = rendered.bytes.byteLength;
-      if (rendered.bytes.byteLength > REPORT_MAX_BYTES) {
+      let expected: SesPhysicalReportProof | undefined;
+      if (mode === "apply") {
+        const prior = reviewed.get(row.job_id);
+        if (
+          !prior || prior.verification_state !== "dry_run_proven" ||
+          prior.old_revision_id !== row.docket_revision_id ||
+          prior.old_artifact_hash !== row.docket_artifact_hash ||
+          !prior.selected_source
+        ) {
+          entry.refusal = {
+            code: "reviewed_target_drift",
+            remedy: "Run and review a new prepare-only dry-run manifest.",
+          };
+          output.push(entry);
+          continue;
+        }
+        expected = prior.selected_source;
+      }
+      const prepared = await deps.prepare(row, {
+        dry_run: mode === "dry_run",
+        ...(expected ? { expected_physical_report_proof: expected } : {}),
+      });
+      if (prepared.refusal) {
+        entry.refusal = prepared.refusal;
+        output.push(entry);
+        continue;
+      }
+      if (!validSweepSourceProof(prepared.source)) {
         entry.refusal = {
-          code: "current_wiki_report_oversize",
+          code: "curated_source_missing",
           remedy:
-            "Resolve source-image size while retaining every applicable photo, then rerun dry-run.",
+            "Bind an independently curated revision or exact previously committed PDF artifact with both its artifact content hash and raw PDF SHA-256.",
         };
         output.push(entry);
         continue;
       }
-      if (mode === "dry_run") {
-        entry.verification_state = "dry_run_proven";
-        entry.refusal = null;
+      if (mode === "apply" && !prepared.revision_id) {
+        entry.refusal = {
+          code: "persistent_prepare_refused",
+          remedy:
+            "The source-bound persistent prepare did not commit a revision; inspect its blockers and run a new dry-run.",
+        };
         output.push(entry);
         continue;
       }
-      const prior = reviewed.get(row.job_id)!;
       if (
-        prior.render_hash !== rendered.pdf_sha256 ||
-        prior.report_input_hash !== rendered.report_input_hash
+        expected &&
+        canonicalSesJson(expected) !== canonicalSesJson(prepared.source)
       ) {
         entry.refusal = {
           code: "reviewed_candidate_drift",
-          remedy: "Run and review a new production dry-run manifest.",
+          remedy: "Run and review a new prepare-only dry-run manifest.",
         };
         output.push(entry);
         continue;
       }
-      if (!deps.attach || !deps.prepare) {
-        throw new Error("apply dependencies unavailable");
-      }
-      const attached = await deps.attach(row, rendered);
-      const prepared = await deps.prepare(row, rendered);
-      entry.new_document_id = attached.document_id;
-      entry.new_revision_id = prepared.revision_id;
-      entry.verification_state = "applied";
+      entry.selected_source = prepared.source;
+      entry.render_hash = prepared.source.expected_raw_sha256.slice(7);
+      entry.report_input_hash = prepared.source.report_input_hash || null;
+      entry.verification_state = mode === "dry_run"
+        ? "dry_run_proven"
+        : "applied";
+      entry.new_revision_id = mode === "apply" ? prepared.revision_id : null;
       entry.refusal = null;
     } catch (error) {
       entry.refusal = {
         code: error instanceof SweepRefusal
           ? error.code
-          : "candidate_reconstruction_failed",
+          : "prepare_only_orchestration_failed",
         remedy: error instanceof Error ? error.message : String(error),
       };
-      entry.verification_state = "refused";
     }
     output.push(entry);
   }
@@ -249,5 +312,6 @@ export function sweepBoundary() {
     report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
     renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
     renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+    orchestration: "prepare-only-curated-source/v2",
   };
 }
