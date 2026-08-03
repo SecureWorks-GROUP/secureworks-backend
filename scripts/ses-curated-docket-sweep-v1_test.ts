@@ -118,7 +118,7 @@ Deno.test("two temp-root renders keep identical input and PDF hashes", async () 
     const renderer = `${first}/renderer.py`;
     await Deno.writeTextFile(
       renderer,
-      `import argparse, json, os\nfrom pathlib import Path\nfrom reportlab.pdfgen import canvas\nap = argparse.ArgumentParser()\nap.add_argument("job")\nap.add_argument("--out", required=True)\nargs = ap.parse_args()\nassert os.environ.get("RL_invariant") == "1"\njob = json.loads(Path(args.job).read_text())\nout = Path(args.out)\nout.mkdir(parents=True, exist_ok=True)\nc = canvas.Canvas(str(out / "report.pdf"))\nc.drawString(72, 720, job["ref"] + " | " + job["photos"][0]["content_sha256"])\nc.save()\n`,
+      `import argparse, hashlib, json, os\nfrom pathlib import Path\nfrom reportlab.pdfgen import canvas\nap = argparse.ArgumentParser()\nap.add_argument("job")\nap.add_argument("--out", required=True)\nargs = ap.parse_args()\nassert os.environ.get("RL_invariant") == "1"\njob = json.loads(Path(args.job).read_text())\nphoto = Path(job["photos"][0]["file"])\nphoto_bytes = photo.read_bytes()\nassert hashlib.sha256(photo_bytes).hexdigest() == job["photos"][0]["content_sha256"]\nout = Path(args.out)\nout.mkdir(parents=True, exist_ok=True)\nc = canvas.Canvas(str(out / "report.pdf"))\nc.drawString(72, 720, job["ref"] + " | " + job["photos"][0]["content_sha256"])\nc.save()\n`,
     );
     const photoBytes = new TextEncoder().encode("privacy-safe-photo-fixture");
     const contentHash = await sha256(photoBytes);
@@ -131,6 +131,9 @@ Deno.test("two temp-root renders keep identical input and PDF hashes", async () 
         file: `${root}/photo-1.jpg`,
       }],
     }));
+    await Promise.all(jobs.map((job) =>
+      Deno.writeFile(job.photos[0].file, photoBytes)
+    ));
     assertEquals(
       await stableInputHash(jobs[0]),
       await stableInputHash(jobs[1]),

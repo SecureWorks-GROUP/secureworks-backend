@@ -534,12 +534,11 @@ async function renderRow(row: SweepRow): Promise<SweepRender> {
     const photos = [];
     for (let index = 0; index < applicable.length; index++) {
       const item = applicable[index];
-      const file = `photo-${index + 1}.jpg`;
-      const absoluteFile = `${dir}/${file}`;
+      const absoluteFile = `${dir}/photo-${index + 1}.jpg`;
       await downloadPhoto(item, absoluteFile);
       photos.push({
         evidence_id: text(item.id),
-        file,
+        file: absoluteFile,
         caption: text(item.label || item.caption) ||
           `Completion evidence ${index + 1}`,
         content_sha256: await sha256(await Deno.readFile(absoluteFile)),
