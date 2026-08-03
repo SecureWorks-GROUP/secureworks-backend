@@ -1230,6 +1230,39 @@ diagnosis, migration scope, execution boundary, and proofs live in
 `data/ses-readiness-gate-drop-v1/report.md`; the regression/control test is
 `supabase/functions/ops-api/ses_readiness_precondition_drop_test.ts`.
 
+## Temporary-Fencing Pricing Has A Reader And No Producer
+
+`ses_prepare_docket_revision.ts` prices `temporary_fencing` from `panel_count`,
+`base_count` and (hire basis) `star_picket_count`, and the adapter resolves each
+from `pricing.*`, `checklist.*` and six structured-source aliases. **Nothing in
+`supabase/functions/` ever WRITES any of them** — nor `hours_per_trade`. Grep
+each name and every hit is the reader or the blocker.
+
+So `pricing_evidence_missing` on a fencing card is a permanent floor, not a
+stale blocker to re-test: no rerun clears it, and it will block every future
+fencing card. Building the producer needs a trade-app capture change plus a
+captain sign-off on the pricing inputs. Measured population and the other three
+residual classes (`routing_evidence_missing`, `swms_generation_facts_missing`,
+`swms_generation_template_unavailable`) are in
+`data/ses-run-skill-batch5-packs-v1/report.md` §7.
+
+Related: never make one of these classes pass by supplying a plausible quantity
+or a carried-over crew — that puts invented content on a money document and on a
+safety document respectively.
+
+## Docs Ready Is A Queue, Not A Board Column
+
+Count Docs Ready from `ops-api?action=list_ses_docs_ready_reviews`, not by eye
+off the board. A card whose job finished more than seven days ago derives
+`canonical_stage: archive`, so a ready pack on an older card is invisible in the
+board's live columns — in the 2026-08-03 batch-5 run, 30 of 35 ready cards sat
+in `archive`. Also note board rows key on `id`, while the review queue keys on
+`job_id`; joining them on the wrong field silently reports zero overlap.
+
+Persisting a new docket revision on a card whose `pack.state` is already `sent`
+re-opens it as `needs_review` and invalidates the previous signoff tick. Check
+`pack.state` before treating such a card as reachable work.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
