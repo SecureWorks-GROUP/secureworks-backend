@@ -1,40 +1,24 @@
 // deno-lint-ignore-file no-import-prefix
-/** Regression: building the make-safe report's renderer input must not re-encode the photo set.
+/** Regression coverage for the photo contract after docket assembly moved to trusted artifacts.
  *
- * `prepare_ses_docket_revision` returned HTTP 546 WORKER_RESOURCE_LIMIT on the persist of the
- * board's heaviest cards while the identical dry run finished in seconds. The artifact-hash fix
- * that preceded this one moved the cliff but did not remove it: the remaining amplifier was
- * `physicalReportRenderJob`, which built a binary string one character at a time and then base64'd
- * it, for EVERY current-cycle photo.
- *
- * Measured end to end through `prepare_ses_docket_revision` at the real board volumes (photo
- * counts and byte totals read read-only from production storage metadata), peak RSS, max of
- * three runs:
- *
- *   | photos / bytes                    | before | after |
- *   |-----------------------------------|--------|-------|
- *   |  35 / 15.1 MB (persisted OK)      | 238 MB | 143 MB|
- *   |  50 / 20.9 MB (returned 546)      | 246 MB | 157 MB|
- *   |  51 / 33.5 MB (heaviest on board) | 431 MB | 199 MB|
- *   | 150 / 62.7 MB (3x the board)      | 367 MB | 226 MB|
- *
- * and, for the renderer-input build alone at the heaviest volume, a heap growth of 206-280 MB
- * for 33.5 MB of photos (6-8x) before, versus 0.03 MB (0.001x) after.
- *
- * jsPDF accepts a Uint8Array directly and emits a byte-identical image stream, so the fix trades
- * nothing away: every photo is still passed, still hashed, still uploaded, the report embeds the
- * same evidence, and the render hash is unmoved. The tests below pin all four of those.
- *
- * These tests fail on the old shape and pass on the direct-bytes one.
+ * Raw trade-report evidence must remain fail-closed even when its current cycle has a large photo
+ * set. The curated renderer still consumes Uint8Array images directly, preserves the established
+ * render-hash normalization, and renders the contract's eight selected photos within a constrained
+ * worker heap. The tests below pin those independent guarantees without implying that the docket
+ * assembler may render raw checklist fields.
  */
 import {
   assert,
   assertEquals,
+  assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import type {
   SesAssemblerLiveSnapshot,
 } from "./ses_assembler_input_adapter.ts";
-import { physicalReportRenderJob } from "./ses_assembler_input_adapter.ts";
+import {
+  physicalReportRenderJob,
+  SesAssemblerAdapterError,
+} from "./ses_assembler_input_adapter.ts";
 import type { SesAssemblerInputV1 } from "./ses_docket_envelope.ts";
 import type { SesPhotoArtifact } from "./ses_prepare_docket_revision.ts";
 import {
@@ -125,54 +109,14 @@ function fixtures(count: number) {
   return { input, snapshot };
 }
 
-Deno.test("renderer input allocates a bounded fraction of the photo bytes, not a multiple of them", () => {
-  // heapUsed is read WITHOUT forcing a collection on purpose: the old shape's cost was mostly
-  // transient cons-string garbage, and that garbage is exactly what the worker's memory limit
-  // counts. Measured at this volume: 206 MB (6.1x) on the old shape, 0.03 MB (0.001x) on this one.
+Deno.test("the raw trade-report adapter stays fail-closed even when photo bytes are present", () => {
   const artifacts = photoArtifacts(WORST_CASE_PHOTOS, WORST_CASE_MB);
-  const rawBytes = artifacts.reduce(
-    (total, a) => total + a.bytes.byteLength,
-    0,
-  );
   const { input, snapshot } = fixtures(WORST_CASE_PHOTOS);
-
-  const before = Deno.memoryUsage().heapUsed;
-  const job = physicalReportRenderJob(snapshot, input, artifacts);
-  const grew = Deno.memoryUsage().heapUsed - before;
-
-  assertEquals(job.photos?.length, WORST_CASE_PHOTOS);
-  const budget = rawBytes / 4;
-  assert(
-    grew < budget,
-    `building the renderer input for ${WORST_CASE_PHOTOS} photos / ` +
-      `${(rawBytes / 1048576).toFixed(1)} MB grew the heap by ` +
-      `${(grew / 1048576).toFixed(1)} MB (${
-        (grew / rawBytes).toFixed(2)
-      }x the photo bytes); ` +
-      `budget is ${
-        (budget / 1048576).toFixed(1)
-      } MB. This is the allocation that made the ` +
-      `persist path return WORKER_RESOURCE_LIMIT.`,
+  assertThrows(
+    () => physicalReportRenderJob(snapshot, input, artifacts),
+    SesAssemblerAdapterError,
+    "Raw trade-report fields are immutable evidence",
   );
-});
-
-Deno.test("every current-cycle photo still reaches the renderer, in order, with its exact bytes", () => {
-  // The budget must never have been bought by sampling, truncating or dropping evidence.
-  const artifacts = photoArtifacts(WORST_CASE_PHOTOS, 1);
-  const { input, snapshot } = fixtures(WORST_CASE_PHOTOS);
-  const job = physicalReportRenderJob(snapshot, input, artifacts);
-
-  assertEquals(job.photos?.length, artifacts.length);
-  for (const [index, photo] of (job.photos || []).entries()) {
-    const source = artifacts[index];
-    assertEquals(photo.caption, `Evidence ${index + 1}`);
-    assertEquals(photo.contentType, source.media_type);
-    // Identity, not a copy: the renderer reads the same buffer the docket uploads and hashes.
-    assert(
-      photo.bytes === source.bytes,
-      `photo ${index + 1} did not reach the renderer as the recovered bytes`,
-    );
-  }
 });
 
 Deno.test("the render hash is unmoved by which input form the caller supplies", async () => {
@@ -231,6 +175,9 @@ Deno.test("the rendered report embeds an identical image stream from either inpu
     ref: "REF-70062",
     address: "Address not recorded",
     scope: "Fixture instruction",
+    findings: "Fixture finding",
+    works: "Work completed safely.",
+    materials: "Star pickets x 20.",
   };
   const fromBytes = await renderMakesafeReportPdf({
     ...job,
@@ -255,8 +202,7 @@ Deno.test("the rendered report embeds an identical image stream from either inpu
 });
 
 Deno.test({
-  name:
-    "the persist render path fits a constrained worker heap at the board's heaviest volume",
+  name: "the eight-photo curated render fits a constrained worker heap",
   // A subprocess with a hard old-space cap is the honest reproduction of the worker limit. The
   // repo's `test:ops-api` task does not grant --allow-run, so this case is skipped there and runs
   // under `deno test --allow-run ...` (the same condition as ses_artifact_hash_budget_test.ts).
@@ -265,17 +211,14 @@ Deno.test({
     command: Deno.execPath(),
   })).state !== "granted",
   fn: async () => {
-    const adapter = new URL("./ses_assembler_input_adapter.ts", import.meta.url)
-      .href;
     const renderer = new URL("./makesafe_report_render.ts", import.meta.url)
       .href;
     const self = new URL(import.meta.url).href;
     const script = `
-      import { physicalReportRenderJob } from "${adapter}";
       import { renderMakesafeReportPdf } from "${renderer}";
       import { syntheticJpeg } from "${self}";
-      const count = ${WORST_CASE_PHOTOS};
-      const per = Math.floor((${WORST_CASE_MB} * 1024 * 1024) / count);
+      const count = 8;
+      const per = Math.floor((8 * 1024 * 1024) / count);
       const photos = Array.from({ length: count }, (_u, i) => ({
         id: "photo-" + (i + 1),
         path_or_key: "job_media:media-" + (i + 1),
@@ -289,22 +232,20 @@ Deno.test({
         media_type: "image/jpeg",
         bytes: syntheticJpeg(per, i + 1),
       }));
-      const input = {
-        identity: { job_number: "SWMS-000000" },
-        source: {
-          builder_reference: "REF-70062",
-          site_address: "Address not recorded",
-          instruction_text: "Fixture instruction",
-        },
-        cycle_facts: {
-          trade_report: { checklist_json: { works_completed: "Work completed safely." } },
-          photos,
-        },
-      };
-      const snapshot = { job: { client_name: null }, assignments: [{ crew_name: "Field crew" }] };
-      const job = physicalReportRenderJob(snapshot, input, artifacts);
-      if (job.photos.length !== count) throw new Error("photo set was reduced");
-      const rendered = await renderMakesafeReportPdf(job);
+      const rendered = await renderMakesafeReportPdf({
+        ref: "REF-70062",
+        address: "Address not recorded",
+        crew: "1 trade",
+        scope: "Fixture instruction",
+        findings: "Fixture finding",
+        works: "Work completed safely.",
+        materials: "Star pickets x 20.",
+        photos: artifacts.map((artifact, index) => ({
+          bytes: artifact.bytes,
+          contentType: artifact.media_type,
+          caption: photos[index].caption,
+        })),
+      });
       if (!rendered.bytes.byteLength) throw new Error("empty report");
       console.log("OK");
     `;
@@ -330,9 +271,8 @@ Deno.test({
     const stderr = new TextDecoder().decode(output.stderr);
     assert(
       output.success,
-      `rendering ${WORST_CASE_PHOTOS} photos / ${WORST_CASE_MB} MB aborted under a ` +
-        `${HEAP_CAP_MB} MB heap cap, which is the WORKER_RESOURCE_LIMIT the persist path ` +
-        `returned in production:\n${stderr}`,
+      `rendering eight curated photos aborted under a ` +
+        `${HEAP_CAP_MB} MB heap cap:\n${stderr}`,
     );
     assert(stdout.includes("OK"), stdout + stderr);
   },

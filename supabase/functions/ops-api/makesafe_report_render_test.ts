@@ -1,17 +1,21 @@
+// deno-lint-ignore-file no-import-prefix
 // Wave 2 — make-safe report renderer pure-helper tests.
 //
-// Tests ONLY the pure helpers (slug, filename builder, render hash). The PDF
-// drawing path imports jsPDF from esm.sh and is exercised live in deploy QA, not
-// here — these tests stay network-free.
+// Covers pure helpers plus the curated PDF contract. The drawing tests use only
+// inline privacy-safe images; no live job or client data is involved.
 //
 // Run: deno test --no-check --allow-env --allow-net=127.0.0.1 \
 //        supabase/functions/ops-api/makesafe_report_render_test.ts
 import {
   assert,
   assertEquals,
+  assertRejects,
+  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   aspectFitBox,
+  CommercialContentError,
+  findCommercialContent,
   makesafeReportFileName,
   makesafeReportHashInput,
   renderHash,
@@ -85,25 +89,27 @@ function countPdfPages(bytes: Uint8Array): number {
   return (text.match(/\/Type\s*\/Page\b/g) || []).length;
 }
 
+const CURATED_JOB = {
+  ref: "REF-70062",
+  address: "Privacy-safe test property",
+  contact: "Site representative",
+  date: "2026-08-03",
+  arrival: "08:30",
+  crew: "2 trades",
+  scope: "Stabilise the damaged boundary pending permanent repair.",
+  findings: "The boundary fence was unstable after severe weather.",
+  works:
+    "Propped the damaged fence upright and secured the affected span pending replacement.",
+  materials: "Star pickets x 20.",
+};
+
 Deno.test("render PDF: top-down layout keeps normal no-photo reports to sane page count", async () => {
   const rendered = await renderMakesafeReportPdf({
-    ref: "SWMS-26651 / MLB-26003 / PO-53480",
-    address: "U1 / 25 Kimbara Street, Nollamara WA",
-    contact:
-      "The Owners of 25 Kimbara Street Nollamara Strata Plan 26544 | 0439 631 353 | Requesting builder: Major Loss Builders",
-    date: "2026-06-18",
-    arrival: "to confirm",
-    crew: "2 trades",
-    billing_note:
-      "2 trades x 2 hours plus materials, final pricing to be confirmed",
-    scope:
-      "Make-safe attendance following storm/wind event. Inspect and make safe detached cornice in garage, clear debris, install temporary fencing as required.",
-    findings:
-      "Garage cornice had detached and debris was present. Ceiling/cornice area required make-safe inspection and temporary controls before builder review.",
-    works:
-      "Attended site, inspected affected ceiling/cornice area, cleared loose debris, checked immediate safety risks, and documented site condition for builder review.",
-    materials:
-      "Temporary fencing panels, bases/feet, tarps/roof materials, fixings and consumables where required.",
+    ...CURATED_JOB,
+    // Legacy commercial inputs remain accepted but are deliberately ignored.
+    billing_note: "2 trades x 3 hours, $480 ex GST",
+    access_issues: "Internal invoice follow-up required.",
+    follow_up_required: "Charge on the next invoice.",
     photos: [],
   });
 
@@ -114,6 +120,21 @@ Deno.test("render PDF: top-down layout keeps normal no-photo reports to sane pag
     `no-photo make-safe report should not inflate to ${pages} pages`,
   );
   assert(rendered.fileName.toLowerCase().includes("make safe report"));
+  const pdf = new TextDecoder("latin1").decode(rendered.bytes);
+  assert(!/billing time|invoice|\$480|gst|access and follow-up/i.test(pdf));
+  for (
+    const heading of [
+      "Work Order Scope",
+      "Site Findings",
+      "Works Completed",
+      "Materials and Equipment",
+    ]
+  ) {
+    assertStringIncludes(pdf, heading);
+  }
+  assertStringIncludes(pdf, "Star pickets x 20");
+  assertStringIncludes(pdf, "Propped the damaged fence upright");
+  assertStringIncludes(pdf, "/Subtype /Image");
 });
 
 Deno.test("aspectFitBox: preserves image aspect inside a target rectangle", () => {
@@ -124,33 +145,94 @@ Deno.test("aspectFitBox: preserves image aspect inside a target rectangle", () =
   assertEquals(Math.round(fit.y), 45);
 });
 
-Deno.test("render PDF: many photos use compact grid instead of one runaway page per photo", async () => {
+Deno.test("render PDF: eight curated photos use one large evidence page each", async () => {
   const onePixelPng =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
   const rendered = await renderMakesafeReportPdf({
-    ref: "SWMS-26652 / AJBR 67996",
-    address: "23 James Cook Avenue, Quinns Rocks WA",
-    contact: "Luke Edwards | 0490 032 177",
-    date: "2026-06-17",
-    arrival: "08:00",
-    crew: "2 trades",
-    billing_note: "2 trades x 2 hours, draft pricing to be confirmed",
-    scope: "Temporary fencing make-safe after Hardifence fell down.",
-    findings: "Hardifence had fallen on the side boundary fence.",
-    works:
-      "Stacked fallen Hardifence neatly, installed temporary fencing and made dog-proof.",
-    materials:
-      "Temporary fence panels x 7, bases/feet x 6, fixings/consumables x 11.",
-    photo_limit: 12,
-    photos: Array.from({ length: 12 }, () => ({
+    ...CURATED_JOB,
+    photo_limit: 8,
+    photos: Array.from({ length: 8 }, (_unused, index) => ({
       bytesBase64: onePixelPng,
       contentType: "image/png",
+      caption: `Deliberate evidence ${index + 1}`,
     })),
   });
 
   const pages = countPdfPages(rendered.bytes);
-  assert(
-    pages <= 5,
-    `12-photo make-safe report should be compact, got ${pages} pages`,
+  assertEquals(pages, 9);
+  const pdf = new TextDecoder("latin1").decode(rendered.bytes);
+  for (let index = 1; index <= 8; index++) {
+    assertStringIncludes(pdf, `Deliberate evidence ${index}`);
+  }
+});
+
+Deno.test("commercial guard is pinned to rendered fields and ignores legacy billing_note", () => {
+  assertEquals(
+    findCommercialContent({
+      ...CURATED_JOB,
+      billing_note: "Invoice total $480 plus GST",
+    }),
+    [],
   );
+  assertEquals(
+    findCommercialContent({
+      ...CURATED_JOB,
+      works: "2 trades completed 3 hours billed at $480",
+    }),
+    ["works"],
+  );
+  for (
+    const text of [
+      "3 hours of work",
+      "AUD 480 approved",
+      "20 units supplied",
+      "subtotal pending",
+      "total due",
+      "quantity confirmed",
+      "hourly labour rate",
+      "invoice description",
+    ]
+  ) {
+    assertEquals(
+      findCommercialContent({ ...CURATED_JOB, works: text }),
+      ["works"],
+      text,
+    );
+  }
+  assertEquals(
+    findCommercialContent({
+      ...CURATED_JOB,
+      works: "Installed 20 star pickets and secured the boundary.",
+    }),
+    [],
+  );
+});
+
+Deno.test("renderer fails closed on commercial prose and crew names", async () => {
+  await assertRejects(
+    () =>
+      renderMakesafeReportPdf({
+        ...CURATED_JOB,
+        works: "2 trades completed 3 hours billed at $480",
+      }),
+    CommercialContentError,
+    "works",
+  );
+  await assertRejects(
+    () => renderMakesafeReportPdf({ ...CURATED_JOB, crew: "Field Person" }),
+    Error,
+    "trade count only",
+  );
+});
+
+Deno.test("repeat curated renders are stable under the existing PDF ID normalisation contract", async () => {
+  const first = await renderMakesafeReportPdf(CURATED_JOB);
+  const second = await renderMakesafeReportPdf({ ...CURATED_JOB });
+  const normalise = (pdf: Uint8Array) =>
+    new TextDecoder("latin1").decode(pdf).replace(
+      /\/ID \[ <[0-9A-F]+> <[0-9A-F]+> \]/,
+      "/ID [ <ID> <ID> ]",
+    );
+  assertEquals(first.renderHash, second.renderHash);
+  assertEquals(normalise(first.bytes), normalise(second.bytes));
 });

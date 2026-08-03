@@ -328,6 +328,70 @@ Deno.test("family matrix is a closed executable set with the AJS report guard", 
   }
 });
 
+Deno.test(
+  "persisted physical docket uses the recovered curated PDF bytes, never raw checklist prose",
+  async () => {
+    const row = SES_FAMILY_MATRIX.find((candidate) =>
+      candidate.builder_key === "AJBR" &&
+      candidate.family === "physical_makesafe"
+    )!;
+    const input = fixtureInput(row);
+    input.source.site_address = "Privacy-safe test property";
+    input.source.site_suburb = "Test suburb";
+    input.cycle_facts.trade_report = {
+      id: "immutable-trade-report",
+      submitted_at: "2026-08-03T01:00:00.000Z",
+      notes: "RAW TRADE NARRATIVE MUST NOT LEAK",
+      checklist_json: {
+        damage_description: "RAW DAMAGE DESCRIPTION MUST NOT LEAK",
+        damage_cause: "RAW DAMAGE CAUSE MUST NOT LEAK",
+        work_done: "RAW WORK DONE MUST NOT LEAK",
+        materials_used: ["RAW CHECKBOX MATERIAL MUST NOT LEAK"],
+        invoice_notes: "RAW INVOICE NOTE MUST NOT LEAK",
+        labour_hours: 3,
+        trade_count: 2,
+      },
+    };
+    const curatedPdf = new TextEncoder().encode(
+      "%PDF-1.4\nCURATED WORKS NARRATIVE\nStar pickets x 20\n%%EOF",
+    );
+    let recoveryCalls = 0;
+    const result = (await prepareSesDocketRevision(
+      request(input.identity.job_id, false),
+      dependencies(input, {
+        renderPhysicalReport: async () => {
+          recoveryCalls++;
+          return {
+            file_name: "Make Safe Report - REF-70062.pdf",
+            media_type: "application/pdf",
+            bytes: curatedPdf,
+            render_hash: "a".repeat(64),
+            provenance: {
+              evidence_source: "current_cycle_curated_makesafe_report",
+              report_contract_version:
+                "secureworks.makesafe-report/curated-2026-08-03",
+            },
+          };
+        },
+      }),
+    )).results[0];
+
+    assertEquals(recoveryCalls, 1);
+    const reportArtifact = result.artifacts.find((artifact) =>
+      artifact.role === "supporting_report_pdf"
+    )!;
+    assertEquals(reportArtifact.bytes, curatedPdf);
+    const servedText = new TextDecoder().decode(reportArtifact.bytes);
+    assertStringIncludes(servedText, "CURATED WORKS NARRATIVE");
+    assertStringIncludes(servedText, "Star pickets x 20");
+    assert(!servedText.includes("RAW "));
+    assertEquals(
+      reportArtifact.metadata.evidence_source,
+      "current_cycle_curated_makesafe_report",
+    );
+  },
+);
+
 Deno.test("MLB South-West suburbs select the Bunbury route while Perth stays on the metro route", () => {
   for (const suburb of MLB_SOUTH_WEST_SUBURBS) {
     const resolved = resolveSesFamilyMatrixRow({

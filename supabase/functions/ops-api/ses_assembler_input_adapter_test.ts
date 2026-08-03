@@ -11,6 +11,7 @@ import fixture from "./fixtures/ses_u4_swms_26980_live_snapshot.json" with {
 import {
   buildSesAssemblerInput,
   createSesAssemblerRuntimeDependencies,
+  currentCuratedReportDocument,
   normalizeSesPrepareRequest,
   physicalReportRenderJob,
   SesAssemblerAdapterError,
@@ -24,6 +25,11 @@ import {
   sesSha256Bytes,
 } from "./ses_docket_envelope.ts";
 import { SES_FAMILY_MATRIX_VERSION } from "./ses_family_matrix.ts";
+import {
+  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+  MAKESAFE_REPORT_CONTRACT_VERSION,
+  MAKESAFE_REPORT_RENDERER_VERSION,
+} from "./makesafe_report_render.ts";
 import { buildSesSwmsGenerationPlan } from "./ses_swms_template.ts";
 import { renderSesSwmsPdf, sesSwmsRenderHash } from "./ses_swms_render.ts";
 import {
@@ -1575,34 +1581,32 @@ Deno.test(
 );
 
 Deno.test(
-  "live adapter consumes the trade checklist keys written by submit_makesafe_report",
+  "raw trade checklist fields cannot become a served report payload",
   () => {
     const live = snapshot();
-    live.job.client_name = "The Owners of Tranby Villas";
-    live.job.site_address = "U24/28 Peninsula Road";
-    live.job.site_suburb = "Maylands";
+    live.job.client_name = "Privacy-safe client";
+    live.job.site_address = "Privacy-safe test property";
+    live.job.site_suburb = "Test suburb";
     live.job.metadata.makesafe_job_family = "general_makesafe";
     live.detail!.report_type = null;
     live.detail!.external_links = [];
     live.reports[0].submitted_at = "2026-07-22T04:00:00.000Z";
-    live.reports[0].notes = "Trade completion note";
-    live.assignments[0].crew_name = "Jake and Sam";
+    live.reports[0].notes = "Raw submitted narrative";
+    live.assignments[0].crew_name = "Named field crew";
     live.assignments[0].scheduled_date = "2026-07-20";
     live.assignments[0].arrived_at = "2026-07-20T14:09:00.000Z";
     live.reports[0].checklist_json = {
       arrival_time: "2026-07-20 14:09",
-      damage_description:
-        "Unsecured bricks on the patio roof and broken plastic sheeting.",
-      damage_cause: "Storm / wind",
-      work_done:
-        "Removed unsecured broken sheeting and screws, then moved the bricks to ground.",
+      damage_description: "RAW DAMAGE DESCRIPTION MUST NOT LEAK",
+      damage_cause: "RAW DAMAGE CAUSE MUST NOT LEAK",
+      work_done: "RAW WORK DONE MUST NOT LEAK",
       materials: [],
-      materials_used: ["Tarps / roof materials", "Fixings / consumables"],
+      materials_used: ["RAW CHECKBOX MATERIAL MUST NOT LEAK"],
       labour_hours: 2,
       trade_count: 2,
-      access_issues: "Gate code did not work on arrival.",
+      access_issues: "RAW ACCESS NOTE MUST NOT LEAK",
       follow_up_required: true,
-      invoice_notes: "Two trades attended for two hours each.",
+      invoice_notes: "RAW INVOICE NOTE MUST NOT LEAK",
     };
 
     const input = buildSesAssemblerInput(live);
@@ -1615,87 +1619,112 @@ Deno.test(
       evidence_job_id: live.job.id,
       evidence_job_number: live.job.job_number,
       trade_report: null,
-      job_client_name: "The Owners of Tranby Villas",
+      job_client_name: "Privacy-safe client",
       assignment: {
         id: live.assignments[0].id,
-        crew_name: "Jake and Sam",
+        crew_name: "Named field crew",
         assigned_user_name: null,
         scheduled_date: "2026-07-20",
         arrived_at: "2026-07-20T14:09:00.000Z",
       },
     });
-    const renderJob = physicalReportRenderJob(live, input);
-    assertEquals(renderJob, {
-      ref: "",
-      address: "U24/28 Peninsula Road",
-      contact: "The Owners of Tranby Villas",
-      date: "2026-07-20",
-      arrival: "14:09",
-      crew: "Jake and Sam",
-      billing_note: "Two trades attended for two hours each.",
-      scope: "Unsecured bricks on the patio roof and broken plastic sheeting.",
-      findings: "Storm / wind",
-      works:
-        "Removed unsecured broken sheeting and screws, then moved the bricks to ground.",
-      materials: "Tarps / roof materials, Fixings / consumables",
-      access_issues: "Gate code did not work on arrival.",
-      follow_up_required: "Follow-up required.",
-      photos: [],
-    });
+    assertThrows(
+      () => physicalReportRenderJob(live, input),
+      SesAssemblerAdapterError,
+      "Raw trade-report fields are immutable evidence",
+    );
     assertEquals(
       Object.hasOwn(input.cycle_facts.hours_and_materials || {}, "materials"),
       false,
     );
-    const renderJobWithPhoto = physicalReportRenderJob(live, input, [
-      {
-        photo_id: input.cycle_facts.photos[0]?.id || "photo-1",
-        source_pointer: input.cycle_facts.photos[0]?.path_or_key ||
-          "job_media:photo-1",
-        file_name: "completion.jpg",
-        media_type: "image/jpeg",
-        bytes: new Uint8Array([65, 66]),
-      },
-    ]);
-    // The recovered bytes are handed to the renderer as-is. Re-encoding them to
-    // base64 here was a measured ~6x heap amplification on real photo volumes
-    // (see makesafe_report_photo_budget_test.ts).
-    assertEquals(renderJobWithPhoto.photos, [
-      {
-        bytes: new Uint8Array([65, 66]),
-        contentType: "image/jpeg",
-        caption: undefined,
-      },
-    ]);
+  },
+);
 
-    live.reports[0].checklist_json.invoice_notes = "";
+Deno.test(
+  "current curated report selection rejects legacy typed PDFs without clean provenance",
+  () => {
+    const live = snapshot();
+    const input = buildSesAssemblerInput(live);
+    const cycleId = input.attendance.current_attendance_cycle_id;
+    live.documents = [{
+      id: "legacy-report",
+      type: "makesafe_report",
+      visible_to_trades: true,
+      file_name: "legacy.pdf",
+      attendance_cycle_id: cycleId,
+      cycle_attribution: "bound",
+      data_snapshot_json: null,
+    }];
+    assertEquals(currentCuratedReportDocument(live, input), null);
+
+    live.documents.push({
+      id: "curated-report",
+      type: "makesafe_report",
+      visible_to_trades: true,
+      file_name: "curated.pdf",
+      version: 2,
+      attendance_cycle_id: cycleId,
+      cycle_attribution: "bound",
+      data_snapshot_json: {
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
+        report_render_hash: "a".repeat(64),
+      },
+    });
     assertEquals(
-      physicalReportRenderJob(live, buildSesAssemblerInput(live)).billing_note,
-      "Trade submission recorded 2 labour hours and 2 trades.",
+      currentCuratedReportDocument(live, input)?.id,
+      "curated-report",
     );
-    live.reports[0].checklist_json.access_issues = "";
-    live.reports[0].checklist_json.follow_up_required = false;
-    const negativeFacts = physicalReportRenderJob(
-      live,
-      buildSesAssemblerInput(live),
-    );
-    assertEquals(negativeFacts.access_issues, "No access issues reported.");
+
+    live.documents.push({
+      id: "authoritative-report",
+      type: "makesafe_report",
+      visible_to_trades: true,
+      file_name: "authoritative.pdf",
+      version: 3,
+      attendance_cycle_id: cycleId,
+      cycle_attribution: "bound",
+      data_snapshot_json: {
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+        report_render_hash: "b".repeat(64),
+      },
+    });
     assertEquals(
-      negativeFacts.follow_up_required,
-      "No further works required.",
+      currentCuratedReportDocument(live, input)?.id,
+      "authoritative-report",
     );
-    delete live.reports[0].checklist_json.access_issues;
-    delete live.reports[0].checklist_json.follow_up_required;
-    const unknownFacts = physicalReportRenderJob(
-      live,
-      buildSesAssemblerInput(live),
-    );
+
+    live.documents.push({
+      id: "hidden-report",
+      type: "makesafe_report",
+      visible_to_trades: false,
+      file_name: "hidden.pdf",
+      version: 4,
+      attendance_cycle_id: cycleId,
+      cycle_attribution: "bound",
+      data_snapshot_json: {
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
+        report_render_hash: "c".repeat(64),
+      },
+    });
+    live.documents.push({
+      id: "unset-visibility-report",
+      type: "makesafe_report",
+      file_name: "unset.pdf",
+      version: 5,
+      attendance_cycle_id: cycleId,
+      cycle_attribution: "bound",
+      data_snapshot_json: {
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
+        report_render_hash: "d".repeat(64),
+      },
+    });
     assertEquals(
-      unknownFacts.access_issues,
-      "Access constraints: not recorded in trade submission.",
-    );
-    assertEquals(
-      unknownFacts.follow_up_required,
-      "Follow-up status: not recorded in trade submission.",
+      currentCuratedReportDocument(live, input)?.id,
+      "authoritative-report",
     );
   },
 );
