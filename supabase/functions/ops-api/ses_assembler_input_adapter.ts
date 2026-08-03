@@ -1871,6 +1871,7 @@ export function currentCuratedReportDocument(
   const currentCycleId = text(input.attendance.current_attendance_cycle_id);
   return snapshot.documents
     .filter((row) => text(row.type).toLowerCase() === "makesafe_report")
+    .filter((row) => row.visible_to_trades === true)
     .filter((row) => {
       const provenance = record(row.data_snapshot_json);
       if (

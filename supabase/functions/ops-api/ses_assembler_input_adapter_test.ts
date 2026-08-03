@@ -1649,6 +1649,7 @@ Deno.test(
     live.documents = [{
       id: "legacy-report",
       type: "makesafe_report",
+      visible_to_trades: true,
       file_name: "legacy.pdf",
       attendance_cycle_id: cycleId,
       cycle_attribution: "bound",
@@ -1659,6 +1660,7 @@ Deno.test(
     live.documents.push({
       id: "curated-report",
       type: "makesafe_report",
+      visible_to_trades: true,
       file_name: "curated.pdf",
       version: 2,
       attendance_cycle_id: cycleId,
@@ -1677,6 +1679,7 @@ Deno.test(
     live.documents.push({
       id: "authoritative-report",
       type: "makesafe_report",
+      visible_to_trades: true,
       file_name: "authoritative.pdf",
       version: 3,
       attendance_cycle_id: cycleId,
@@ -1685,6 +1688,38 @@ Deno.test(
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
         report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
         report_render_hash: "b".repeat(64),
+      },
+    });
+    assertEquals(
+      currentCuratedReportDocument(live, input)?.id,
+      "authoritative-report",
+    );
+
+    live.documents.push({
+      id: "hidden-report",
+      type: "makesafe_report",
+      visible_to_trades: false,
+      file_name: "hidden.pdf",
+      version: 4,
+      attendance_cycle_id: cycleId,
+      cycle_attribution: "bound",
+      data_snapshot_json: {
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
+        report_render_hash: "c".repeat(64),
+      },
+    });
+    live.documents.push({
+      id: "unset-visibility-report",
+      type: "makesafe_report",
+      file_name: "unset.pdf",
+      version: 5,
+      attendance_cycle_id: cycleId,
+      cycle_attribution: "bound",
+      data_snapshot_json: {
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
+        report_render_hash: "d".repeat(64),
       },
     });
     assertEquals(
