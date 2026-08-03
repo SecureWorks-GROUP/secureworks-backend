@@ -23,7 +23,24 @@ corrected target-job binding. The action delegates to the existing exact
 deterministic intake, guarded approval, settlement, source lineage, and Hugo
 notification path. It requires one created job and one recorded and accepted
 Hugo notification before appending captain provenance. Standing intake and PDF
-drain behavior are unchanged.
+drain behavior are unchanged. For a `roof_report`, the created job must also
+have exactly one current attendance cycle, and that cycle must be inside the
+immutable cycle set with `cycle_attribution = 'bound'`; a newly minted job must
+have cycle number 1. The action refuses the result if this postcondition is not
+met.
+
+## Exact five-card roof cycle binding recovery
+
+`ops-api?action=makesafe_roof_cycle_binding_recovery` is a separate,
+operator-invoked, API-key `POST`-only repair for the exact five-card scope
+approved for the roof attendance-cycle defect. It requires an explicit dry-run
+plan token before a single-card apply. Apply is idempotent and skips on drift;
+it refuses non-null or out-of-set pointers, multiple or mismatched candidates,
+missing or ambiguous canonical intake authority, terminal cards, and
+evidence-bearing missing-cycle state. It never invents a cycle: cycle one may
+be materialized only from the persisted initial counter, canonical mint
+authority, and zero operational evidence. Production recovery remains outside
+this document's execution scope.
 
 ## Historical Builderwest backfill
 

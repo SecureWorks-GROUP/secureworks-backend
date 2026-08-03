@@ -51,6 +51,46 @@ Deno.test("historical backfill route is privileged POST-only and has no communic
   assert(!route.includes("sendSms"));
 });
 
+Deno.test("five-card roof cycle recovery is API-key POST-only, source-gated, and cannot send or assign", async () => {
+  const routeStart = source.indexOf(
+    "case 'makesafe_roof_cycle_binding_recovery'",
+  );
+  const routeEnd = source.indexOf(
+    "case 'makesafe_adjudicated_historical_backfill'",
+    routeStart,
+  );
+  assert(routeStart > 0 && routeEnd > routeStart);
+  const route = source.slice(routeStart, routeEnd);
+  assertStringIncludes(route, "authMode !== 'api_key'");
+  assertStringIncludes(route, "req.method !== 'POST'");
+  assertStringIncludes(route, "roofCycleBindingRecoveryAction(client, body)");
+  for (
+    const forbidden of [
+      "notifyVerticalManagersSms",
+      "sendEmail",
+      "sendSms",
+      "job_assignments",
+    ]
+  ) {
+    assert(!route.includes(forbidden));
+  }
+
+  const allowlistStart = source.indexOf(
+    "const ROUTINE_ALLOWED_ACTIONS = new Set",
+  );
+  const allowlistEnd = source.indexOf("])\n", allowlistStart);
+  const allowlist = source.slice(allowlistStart, allowlistEnd);
+  assert(!allowlist.includes("makesafe_roof_cycle_binding_recovery"));
+
+  const requiredActions = await Deno.readTextFile(
+    new URL("../../../scripts/_ops-api-required-actions.txt", import.meta.url),
+  );
+  assertStringIncludes(
+    requiredActions,
+    "makesafe_roof_cycle_binding_recovery # probe=source-only",
+  );
+});
+
 Deno.test("historical create metadata is internal-only and suppresses geocoding plus manager notification", () => {
   const createStart = source.indexOf("async function createMakesafeJob(");
   const createEnd = source.indexOf(

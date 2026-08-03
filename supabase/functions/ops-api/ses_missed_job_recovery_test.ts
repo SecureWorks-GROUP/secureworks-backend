@@ -13,6 +13,21 @@ import {
   SesMissedJobRecoveryError,
 } from "./ses_missed_job_recovery.ts";
 
+function boundRoofJob(id = "job-mlb") {
+  const cycleId = `${id}:attendance:1`;
+  return {
+    id,
+    jobNumber: "SWMS-27309",
+    jobFamily: "roof_report",
+    attendance: {
+      currentAttendanceCycleId: cycleId,
+      immutableAttendanceCycleIds: [cycleId],
+      attribution: "bound",
+      cycleNumber: 1,
+    },
+  };
+}
+
 Deno.test("adjudicated exact rescan reuses the exact scanner and records fixed provenance", async () => {
   const calls: string[] = [];
   const result = await runAdjudicatedExactRescan({
@@ -29,11 +44,7 @@ Deno.test("adjudicated exact rescan reuses the exact scanner and records fixed p
       calls.push(`scan:${postId}`);
       return { totals: { jobs_created: 1 } };
     },
-    loadJob: async () => ({
-      id: "job-mlb",
-      jobNumber: "SWMS-27309",
-      jobFamily: "roof_report",
-    }),
+    loadJob: async () => boundRoofJob(),
     appendProvenance: async ({ postId, job }) => {
       calls.push(`provenance:${postId}:${job.id}`);
     },
@@ -124,11 +135,7 @@ Deno.test("adjudicated exact rescan repairs partial provenance only after settle
       scans++;
       return {};
     },
-    loadJob: async () => ({
-      id: "job-mlb",
-      jobNumber: "SWMS-27309",
-      jobFamily: "roof_report",
-    }),
+    loadJob: async () => boundRoofJob(),
     appendProvenance: async () => {
       complete = true;
     },
@@ -138,6 +145,42 @@ Deno.test("adjudicated exact rescan repairs partial provenance only after settle
   assertEquals(scans, 0);
   assertEquals(complete, true);
   assertEquals(result.outcome, "already_completed");
+});
+
+Deno.test("adjudicated exact rescan refuses an unbound roof result before provenance", async () => {
+  let provenanceWrites = 0;
+  await assertRejects(
+    () =>
+      runAdjudicatedExactRescan({
+        post_id: MLB_27309_SOURCE_POST_ID,
+        expected_job_family: "roof_report",
+      }, {
+        loadAuthority: async () => ({
+          caseId: "case-mlb",
+          state: "exception",
+          jobId: null,
+          targetJobId: null,
+        }),
+        scan: async () => ({ totals: { jobs_created: 1 } }),
+        loadJob: async () => ({
+          ...boundRoofJob(),
+          attendance: {
+            currentAttendanceCycleId: null,
+            immutableAttendanceCycleIds: [],
+            attribution: null,
+            cycleNumber: 1,
+          },
+        }),
+        appendProvenance: async () => {
+          provenanceWrites++;
+        },
+        hasProvenance: async () => false,
+        canRepairProvenance: async () => false,
+      }),
+    SesMissedJobRecoveryError,
+    "current attendance cycle is not bound inside the immutable cycle set",
+  );
+  assertEquals(provenanceWrites, 0);
 });
 
 Deno.test("captain ruling cannot be reused for an unrelated exact source", async () => {

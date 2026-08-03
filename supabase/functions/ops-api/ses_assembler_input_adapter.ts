@@ -1368,8 +1368,12 @@ export function buildSesAssemblerInput(
     intakeCase?.builder_wo_canonical,
     intakeCase?.builder_po_canonical,
     intakeCase?.external_ref_canonical,
-    identityRevision ? detail.external_ref : null,
-    identityRevision ? metadata.external_ref : null,
+    identityRevision?.authority_kind === "legacy_job_record"
+      ? detail.external_ref
+      : null,
+    identityRevision?.authority_kind === "legacy_job_record"
+      ? metadata.external_ref
+      : null,
   );
   const portalLinks = extractPortalLinks(detail.external_links).map((link) => ({
     role: portalRole(familyId, link.role),
