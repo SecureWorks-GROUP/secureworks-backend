@@ -319,6 +319,9 @@ export async function renderMakesafeReportPdf(
   // deno-lint-ignore no-import-prefix
   const { jsPDF } = await import("https://esm.sh/jspdf@2.5.1");
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  // jsPDF otherwise stamps the wall-clock time into /CreationDate, making
+  // identical curated inputs produce different served bytes.
+  doc.setCreationDate(new Date("2020-01-01T00:00:00.000Z"));
 
   // Header band: orange top strip + white header + title + subtitle + rule.
   // Returns the y cursor (mm from top, top-origin) where body content starts.
