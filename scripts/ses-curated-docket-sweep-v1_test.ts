@@ -156,6 +156,7 @@ Deno.test("current-wiki subprocess timeout is bounded per card", async () => {
 Deno.test({
   name:
     "current pinned wiki renderer produces identical PDF bytes across temp roots",
+  ignore: !Deno.env.get("SW_WIKI_REPO"),
   fn: async () => {
     assertEquals(CURRENT_WIKI_RENDER_ENV, { RL_invariant: "1" });
     const wikiRepo = reviewedWikiRepoPath(Deno.env.get("SW_WIKI_REPO"));
