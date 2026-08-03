@@ -42,6 +42,9 @@ served docket PDF.
   secureworks-wiki main revision
   `915e9b423fc597d656c7cb090671bf206138114b` and the reviewed authoritative
   renderer dependency hash recorded by the current docket sweep.
+- Sweep classification also requires the non-empty canonical
+  `report_document_id` emitted by `ses_prepare_docket_revision`; the legacy
+  `source_document_id` is not an accepted fallback.
 - `physicalReportRenderJob` now always raises `ses_curated_report_missing`; it
   cannot translate raw checklist fields into report prose.
 - `makesafe_render_report` is retired for current curated evidence and refuses
