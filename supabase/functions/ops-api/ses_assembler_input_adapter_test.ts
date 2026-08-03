@@ -347,7 +347,7 @@ Deno.test(
     assertEquals(input.source.deliverables, []);
     assertEquals(input.source.portal_links, [
       {
-        role: "assessment",
+        role: "roof_report",
         url: "https://primeeco.tech/share/2ef11c67-8f63-48cb-9ff4-61bf71848f17",
         source: "job_detail",
       },
@@ -1063,10 +1063,37 @@ Deno.test("sibling evidence seed guard executes empty, binding-only, claimed, am
 });
 
 Deno.test(
-  "SWMS-261019 U4 dry-run binds persisted capture resolution and names the exact missing capture",
+  "one genuine roof share plus four historical image assets binds only the share and leaves capture missing",
   async () => {
     const live = roofPortalSnapshot();
+    live.detail!.external_links.push(
+      {
+        kind: "builder_portal",
+        label: "Builder portal",
+        url: "https://documents.primeeco.tech/assets/builder-logo.png",
+      },
+      {
+        kind: "builder_portal",
+        label: "Builder portal",
+        url: "https://cdn.example.test/assets/company-brand.jpg",
+      },
+      {
+        kind: "builder_portal",
+        label: "Builder portal",
+        url: "https://documents.primeeco.tech/assets/signature-one.png",
+      },
+      {
+        kind: "builder_portal",
+        label: "Builder portal",
+        url: "https://documents.primeeco.tech/assets/signature-two.png",
+      },
+    );
     const input = buildSesAssemblerInput(live);
+    assertEquals(input.source.portal_links, [{
+      role: "roof_report",
+      url: "https://primeeco.tech/share/d2ff4956-1302-4ef8-a49e-c9d29061ef4b",
+      source: "job_detail",
+    }]);
     const dependencies = createSesAssemblerRuntimeDependencies(
       liveSnapshotClient(live),
       { org_id: live.job.org_id, created_by: "u4-regression" },
@@ -1105,6 +1132,97 @@ Deno.test(
       blocker.reason.includes(
         "source_url=https://primeeco.tech/share/d2ff4956-1302-4ef8-a49e-c9d29061ef4b",
       ),
+    );
+  },
+);
+
+Deno.test(
+  "ordinary roof candidates preserve explicit roles independent of array order",
+  () => {
+    const rawLinks = [
+      {
+        kind: "assessment_report",
+        label: "Assessment report",
+        url: "https://primeeco.tech/share/assessment-candidate",
+      },
+      {
+        kind: "photos",
+        label: "Photos",
+        url: "https://primeeco.tech/share/photos-candidate",
+      },
+      {
+        kind: "quote",
+        label: "Quote",
+        url: "https://primeeco.tech/share/quote-candidate",
+      },
+      {
+        kind: "roof_report",
+        label: "Roof report",
+        url: "https://primeeco.tech/share/roof-candidate",
+      },
+    ];
+    for (const links of [rawLinks, rawLinks.slice().reverse()]) {
+      const live = roofPortalSnapshot();
+      live.detail!.external_links = links;
+      const input = buildSesAssemblerInput(live);
+      assertEquals(
+        input.source.portal_links.map((link) => [link.role, link.url]).sort(),
+        [
+          [
+            "assessment",
+            "https://primeeco.tech/share/assessment-candidate",
+          ],
+          ["photos", "https://primeeco.tech/share/photos-candidate"],
+          ["roof_report", "https://primeeco.tech/share/roof-candidate"],
+          ["scope", "https://primeeco.tech/share/quote-candidate"],
+        ],
+      );
+      assertEquals(
+        input.source.portal_links.filter((link) => link.role === "roof_report")
+          .length,
+        1,
+      );
+    }
+  },
+);
+
+Deno.test(
+  "ordinary roof generic portal fallback remains available only without an explicit roof role",
+  () => {
+    const live = roofPortalSnapshot();
+    live.detail!.external_links = [
+      {
+        kind: "builder_portal",
+        label: "Builder portal",
+        url: "https://primeeco.tech/share/generic-roof-candidate",
+      },
+      {
+        kind: "photos",
+        label: "Photos",
+        url: "https://primeeco.tech/share/photos-candidate",
+      },
+    ];
+    assertEquals(buildSesAssemblerInput(live).source.portal_links, [
+      {
+        role: "roof_report",
+        url: "https://primeeco.tech/share/generic-roof-candidate",
+        source: "job_detail",
+      },
+      {
+        role: "photos",
+        url: "https://primeeco.tech/share/photos-candidate",
+        source: "job_detail",
+      },
+    ]);
+
+    live.detail!.external_links.push({
+      kind: "roof_report",
+      label: "Roof report",
+      url: "https://primeeco.tech/share/typed-roof-candidate",
+    });
+    assertEquals(
+      buildSesAssemblerInput(live).source.portal_links.map((link) => link.role),
+      ["builder_portal", "photos", "roof_report"],
     );
   },
 );
