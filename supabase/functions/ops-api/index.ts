@@ -641,6 +641,7 @@ import {
 } from './makesafe_instruction_mint_gate.ts'
 // Wave 2 -- make-safe reporting autopilot (send-pack state machine + renderer).
 import {
+  canonicalCurrentWikiReportHashPayload,
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
   MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
@@ -34074,8 +34075,16 @@ async function assertCurrentWikiReportInput(
   if (canonicalSesJson(photoIds) !== canonicalSesJson(selectedIds)) {
     throw new ApiError('photos evidence IDs do not match selected IDs in order', 409)
   }
+  const photoContentHashes = suppliedPhotos.map((photo: any) =>
+    String(photo?.content_sha256 || '').trim().toLowerCase()
+  )
+  if (photoContentHashes.some((hash: string) => !/^[a-f0-9]{64}$/.test(hash))) {
+    throw new ApiError('photos require exact content SHA-256 values', 409)
+  }
   const inputHash = `sha256:${
-    await sha256BytesHex(new TextEncoder().encode(canonicalSesJson(supplied)))
+    await sha256BytesHex(new TextEncoder().encode(canonicalSesJson(
+      canonicalCurrentWikiReportHashPayload(supplied),
+    )))
   }`
   if (String(claimedInputHash || '') !== inputHash) {
     throw new ApiError('current wiki report input hash mismatch', 409)

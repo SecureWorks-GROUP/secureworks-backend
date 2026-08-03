@@ -5,6 +5,7 @@ import {
   canonicalSesJson,
 } from "../supabase/functions/ops-api/ses_docket_envelope.ts";
 import {
+  canonicalCurrentWikiReportHashPayload,
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
   MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
 } from "../supabase/functions/ops-api/makesafe_report_render.ts";
@@ -29,6 +30,7 @@ const RENDERER_DEPENDENCIES = [
   "assets/secureworks-group-main-cropped.png",
 ] as const;
 const READ_TIMEOUT_MS = 20_000;
+export const CURRENT_WIKI_RENDER_ENV = { RL_invariant: "1" } as const;
 
 interface Options {
   mode: "dry_run" | "apply";
@@ -471,6 +473,19 @@ async function downloadPhoto(item: any, path: string): Promise<void> {
   await Deno.writeFile(path, new Uint8Array(await response.arrayBuffer()));
 }
 
+export function currentWikiRendererCommand(
+  renderer: string,
+  inputPath: string,
+  outDir: string,
+): Deno.Command {
+  return new Deno.Command("python3", {
+    args: [renderer, inputPath, "--out", outDir],
+    env: CURRENT_WIKI_RENDER_ENV,
+    stdout: "piped",
+    stderr: "piped",
+  });
+}
+
 async function renderRow(row: SweepRow): Promise<SweepRender> {
   console.error(JSON.stringify({
     progress: "render_candidate",
@@ -519,13 +534,15 @@ async function renderRow(row: SweepRow): Promise<SweepRender> {
     const photos = [];
     for (let index = 0; index < applicable.length; index++) {
       const item = applicable[index];
-      const file = `${dir}/photo-${index + 1}.jpg`;
-      await downloadPhoto(item, file);
+      const file = `photo-${index + 1}.jpg`;
+      const absoluteFile = `${dir}/${file}`;
+      await downloadPhoto(item, absoluteFile);
       photos.push({
         evidence_id: text(item.id),
         file,
         caption: text(item.label || item.caption) ||
           `Completion evidence ${index + 1}`,
+        content_sha256: await sha256(await Deno.readFile(absoluteFile)),
       });
     }
     const ids = photos.map((photo) => photo.evidence_id);
@@ -553,17 +570,15 @@ async function renderRow(row: SweepRow): Promise<SweepRender> {
       },
     };
     const inputHash = `sha256:${await sha256(
-      new TextEncoder().encode(canonicalSesJson(reportJob)),
+      new TextEncoder().encode(canonicalSesJson(
+        canonicalCurrentWikiReportHashPayload(reportJob),
+      )),
     )}`;
     const inputPath = `${dir}/job.json`;
     const outDir = `${dir}/out`;
     await Deno.writeTextFile(inputPath, JSON.stringify(reportJob));
     const process = await commandOutputWithTimeout(
-      new Deno.Command("python3", {
-        args: [renderer, inputPath, "--out", outDir],
-        stdout: "piped",
-        stderr: "piped",
-      }),
+      currentWikiRendererCommand(renderer, inputPath, outDir),
       60_000,
     );
     if (!process.success) {
