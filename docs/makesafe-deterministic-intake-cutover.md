@@ -62,6 +62,10 @@ concurrency guards. Both the environment brake
 - A cancelled, rejected or thrown run retains its prior completion cursor.
 - A poisoned lineage component is written to `isolated_failures`; unrelated safe
   components commit and the run reports `completion_status=completed_degraded`.
+- If an authoritative case insert is rejected, the source is still recorded on
+  one non-authoritative `exception` case with `reason_code=adapter_parse_failure`
+  and `last_decision_reason=deterministic source_persist_failed case_insert`;
+  the source is reason-coded for retry and no draft or job mint is attempted.
 - Retries reuse deterministic keys and append-only authority/artifact ledgers.
 - Email-derived values win; PDF-derived fields carry per-field provenance.
 - Gaps remain review work. No deterministic shortfall may call a paid AI endpoint or
