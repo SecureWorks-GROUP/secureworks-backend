@@ -2,6 +2,9 @@
 import { isSelfGeneratedMakesafeWorkOrder } from "./makesafe_builder_work_order_identity.ts";
 import { refreshMakesafeIdentityAfterWorkOrderAttach } from "./makesafe_work_order_identity_refresh.ts";
 
+export const SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION =
+  "captain_authorized_exact_source_persist_recovery";
+
 export interface IntakeMint {
   id: string;
   draft_id: string;
@@ -185,6 +188,14 @@ export async function settleApprovedIntakeDraft(
       reason: string;
       auditId: string | null;
     }>;
+    notificationSuppressionReason?:
+      | typeof SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION
+      | null;
+    verifyNotificationSuppression?: (input: {
+      caseId: string;
+      sourcePostIds: readonly string[];
+      jobId: string;
+    }) => Promise<boolean>;
     refreshIdentity?: typeof refreshMakesafeIdentityAfterWorkOrderAttach;
   },
 ): Promise<{
@@ -253,6 +264,45 @@ export async function settleApprovedIntakeDraft(
       throw new Error(
         `intake mint ${mint.id} lacks canonical source authority`,
       );
+    }
+    if (input.notificationSuppressionReason) {
+      if (
+        !input.verifyNotificationSuppression ||
+        !await input.verifyNotificationSuppression({
+          caseId: mint.case_id,
+          sourcePostIds: mint.source_post_ids,
+          jobId: String(mint.job_id),
+        })
+      ) {
+        throw new Error(
+          "intake no-send settlement requires canonical board proof",
+        );
+      }
+      const settledAt = new Date().toISOString();
+      const { data, error } = await client
+        .from("makesafe_intake_job_mints")
+        .update({
+          state: "settled",
+          evidence_attached_at: mint.evidence_attached_at || settledAt,
+          board_observed_at: mint.board_observed_at || settledAt,
+          last_error:
+            `notification_suppressed:${input.notificationSuppressionReason}`,
+          updated_at: settledAt,
+        })
+        .eq("id", mint.id)
+        .neq("state", "settled")
+        .is("notification_accepted_at", null)
+        .select("id")
+        .maybeSingle();
+      if (error || !data?.id) {
+        throw new Error(
+          `intake no-send settlement fence failed: ${
+            error?.message || error || "mint no longer eligible"
+          }`,
+        );
+      }
+      notificationJobIds.push(String(mint.job_id));
+      continue;
     }
     const notification = await input.notify({
       caseId: mint.case_id,

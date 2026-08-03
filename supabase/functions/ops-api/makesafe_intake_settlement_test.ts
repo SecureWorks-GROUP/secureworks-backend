@@ -7,6 +7,7 @@ import {
 import {
   ensureIntakeWorkOrderEvidence,
   settleApprovedIntakeDraft,
+  SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION,
 } from "./makesafe_intake_settlement.ts";
 
 const noIdentityRefresh = async () => null;
@@ -126,6 +127,141 @@ Deno.test("settlement repairs legacy evidence but only explicit mint authority c
   assertEquals(result.notificationJobIds, []);
   assertEquals(notifications, []);
   assertEquals(db.inserts[0].job_id, "legacy-job");
+});
+
+Deno.test("an explicit no-send settlement records suppression without calling the notifier", async () => {
+  const mint = {
+    id: "mint-no-send",
+    draft_id: "draft-no-send",
+    mint_role: "primary",
+    case_id: "case-no-send",
+    source_post_ids: ["source-no-send"],
+    job_id: "job-no-send",
+    state: "minted",
+    evidence_attached_at: "2026-08-04T00:00:00.000Z",
+    board_observed_at: "2026-08-04T00:00:00.000Z",
+    notification_accepted_at: null,
+    last_error: null,
+  };
+  let notifications = 0;
+  let boardProofs = 0;
+  const settlementClient: any = {
+    from(table: string) {
+      if (table === "job_documents") {
+        const query: any = {
+          select() {
+            return query;
+          },
+          in() {
+            return query;
+          },
+          eq() {
+            return Promise.resolve({
+              data: [{
+                job_id: "job-no-send",
+                storage_url: "fixture-object",
+                pdf_url: null,
+              }],
+              error: null,
+            });
+          },
+        };
+        return query;
+      }
+      if (table !== "makesafe_intake_job_mints") {
+        throw new Error(`unexpected table ${table}`);
+      }
+      const query: any = {
+        payload: null as any,
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        neq() {
+          return query;
+        },
+        is() {
+          return query;
+        },
+        order() {
+          return Promise.resolve({ data: [mint], error: null });
+        },
+        update(payload: any) {
+          query.payload = payload;
+          return query;
+        },
+        maybeSingle() {
+          Object.assign(mint, query.payload);
+          return Promise.resolve({ data: { id: mint.id }, error: null });
+        },
+      };
+      return query;
+    },
+  };
+
+  const result = await settleApprovedIntakeDraft(settlementClient, {
+    draftId: "draft-no-send",
+    approvedJobId: "job-no-send",
+    attachments: [{
+      file_name: "work-order.pdf",
+      storage_url: "fixture-object",
+    }],
+    extraction: { deterministic_intake: true },
+    notificationSuppressionReason:
+      SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION,
+    verifyNotificationSuppression: async () => {
+      boardProofs++;
+      return true;
+    },
+    notify: async () => {
+      notifications++;
+      return { accepted: true, reason: "accepted", auditId: "must-not-exist" };
+    },
+  });
+
+  assertEquals(notifications, 0);
+  assertEquals(boardProofs, 1);
+  assertEquals(result.notificationJobIds, ["job-no-send"]);
+  assertEquals(result.notificationsAccepted, 0);
+  assertEquals(mint.state, "settled");
+  assertEquals(mint.notification_accepted_at, null);
+  assertEquals(
+    mint.last_error,
+    `notification_suppressed:${SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION}`,
+  );
+
+  Object.assign(mint, {
+    state: "minted",
+    notification_accepted_at: null,
+    last_error: null,
+  });
+  await assertRejects(
+    () =>
+      settleApprovedIntakeDraft(settlementClient, {
+        draftId: "draft-no-send",
+        approvedJobId: "job-no-send",
+        attachments: [{
+          file_name: "work-order.pdf",
+          storage_url: "fixture-object",
+        }],
+        extraction: { deterministic_intake: true },
+        notificationSuppressionReason:
+          SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION,
+        notify: async () => {
+          notifications++;
+          return {
+            accepted: true,
+            reason: "accepted",
+            auditId: "must-not-exist",
+          };
+        },
+      }),
+    Error,
+    "requires canonical board proof",
+  );
+  assertEquals(notifications, 0);
 });
 
 Deno.test("settlement refuses missing or unbound required mint roles", async () => {

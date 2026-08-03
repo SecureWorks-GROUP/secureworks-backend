@@ -29,6 +29,21 @@ immutable cycle set with `cycle_attribution = 'bound'`; a newly minted job must
 have cycle number 1. The action refuses the result if this postcondition is not
 met.
 
+## Exact source-persistence recovery
+
+`ops-api?action=makesafe_source_persist_recovery` is the bounded, no-send
+recovery for the single adjudicated obligation `MLB-RR-26836` / `PO-57602`.
+It is API-key-only and `POST`-only, and the server rejects every other
+external-reference or purchase-order pair. Before recovery it requires the
+single canonical `adapter_parse_failure` exception with the recorded
+`deterministic source_persist_failed case_insert` reason, no authoritative case
+or job, and at least one source row. The recovery must create exactly one
+unassigned authoritative job, suppress and record no Hugo notification, and
+leave invoices, assignments, communications, and outbound queue rows at zero.
+It also fingerprints the unrelated exception queue before and after the write;
+any drift fails the action. The action is source-only for deploy recognition
+and must never be exercised by a deploy smoke probe.
+
 ## Exact five-card roof cycle binding recovery
 
 `ops-api?action=makesafe_roof_cycle_binding_recovery` is a separate,

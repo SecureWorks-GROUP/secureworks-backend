@@ -352,6 +352,13 @@ import {
   SesMissedJobRecoveryError,
 } from './ses_missed_job_recovery.ts'
 import {
+  runSourcePersistRecovery,
+  SourcePersistRecoveryError,
+  type SourcePersistRecoveryAuthority,
+  type SourcePersistRecoveryQueueSnapshot,
+  type SourcePersistRecoveryTarget,
+} from './makesafe_source_persist_recovery.ts'
+import {
   MakesafeAttendanceCycleBindingRecoveryError,
   type RoofCycleBindingRecoverySnapshot,
   runRoofCycleBindingRecovery,
@@ -361,6 +368,7 @@ import {
   ensureIntakeWorkOrderEvidence,
   loadIntakeMints,
   reserveIntakeMint,
+  SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION,
   settleApprovedIntakeDraft,
 } from './makesafe_intake_settlement.ts'
 // Intake item 5 — deterministic WO-PDF client-block reader. Fills client_name /
@@ -4884,6 +4892,19 @@ if (import.meta.main) serve(async (req: Request) => {
           includeSanitizedCases: true,
           requireAllAllowlistMatches: true,
         }))
+      }
+      // Exact business-identity recovery for the one approved source-persistence
+      // fallback. API-key and POST only; the typed command hard-codes the named
+      // obligation, proves the other exception cards unchanged, and suppresses
+      // both the settlement and runtime notification seams.
+      case 'makesafe_source_persist_recovery': {
+        if (authMode !== 'api_key') {
+          return json({ error: 'makesafe_source_persist_recovery requires ops privilege' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'makesafe_source_persist_recovery requires POST' }, 405)
+        }
+        return json(await sourcePersistRecoveryAction(client, body))
       }
       // Captain ruling 2026-08-01: a privileged, single-source live counterpart
       // to dark-observe for sources whose deterministic fate produced no job.
@@ -12757,6 +12778,7 @@ async function createMakesafeJob(
     historicalBackfill?: HistoricalMakesafeBackfillMetadata
     familyClassifierContext?: _MakeSafeJobFamilyContext
     canonicalIntakeAuthority?: CanonicalMakesafeIntakeAuthority
+    suppressGeocoding?: boolean
   } = {},
 ) {
   const {
@@ -13048,7 +13070,10 @@ async function createMakesafeJob(
 
   // Geocode address (fire-and-forget, non-blocking) only after the required
   // roof-report detail/cycle identity is fully established.
-  if (!reviewedSyntheticLivefireMarker && !internalOptions.historicalBackfill) {
+  if (
+    !reviewedSyntheticLivefireMarker && !internalOptions.historicalBackfill &&
+    !internalOptions.suppressGeocoding
+  ) {
     geocodeAndUpdateJob(client, job.id, site_address, suburb).catch(() => {})
   }
 
@@ -18882,6 +18907,9 @@ async function settleIntakeApproval(
   attachments: readonly any[],
   extraction: Record<string, any>,
   requiredMintRoles: readonly string[] = [],
+  notificationSuppressionReason:
+    | typeof SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION
+    | null = null,
 ) {
   return await settleApprovedIntakeDraft(client, {
     draftId: draft.id,
@@ -18889,6 +18917,17 @@ async function settleIntakeApproval(
     attachments,
     extraction,
     requiredMintRoles,
+    notificationSuppressionReason,
+    ...(notificationSuppressionReason
+      ? {
+        verifyNotificationSuppression: async (input: { jobId: string }) => {
+          const rows = await loadCanonicalMakesafeBoard(client, {
+            restrictToJobIds: [input.jobId],
+          })
+          return rows.some((row: any) => row?.id === input.jobId)
+        },
+      }
+      : {}),
     notify: (input) => notifyMintedDeterministicPhysicalJob(client, input),
   })
 }
@@ -19023,9 +19062,18 @@ async function loadDraftFamilyClassifierContext(
   }
 }
 
+const SOURCE_PERSIST_NO_SEND_RECOVERY = Symbol(
+  'sourcePersistNoSendRecovery',
+)
+
 async function approveIntakeDraft(client: any, body: any) {
   const { draft_id, approved_by } = body
   if (!draft_id) throw new Error('draft_id required')
+  const notificationSuppressionReason =
+    body?.[SOURCE_PERSIST_NO_SEND_RECOVERY] ===
+        SOURCE_PERSIST_NO_SEND_RECOVERY
+      ? SOURCE_PERSIST_RECOVERY_NOTIFICATION_SUPPRESSION
+      : null
 
   // Load the draft for its field data (extraction/reviewed values below need draft.*).
   const { data: loadedDraft, error: dErr } = await client.from('makesafe_intake_drafts')
@@ -19145,6 +19193,7 @@ async function approveIntakeDraft(client: any, body: any) {
       availableAttachments,
       extraction,
       requiredMintRoles,
+      notificationSuppressionReason,
     )
     const settledExtraction = {
       ...extraction,
@@ -19291,6 +19340,7 @@ async function approveIntakeDraft(client: any, body: any) {
       availableAttachments,
       extraction,
       [],
+      notificationSuppressionReason,
     )
 
     return {
@@ -19538,6 +19588,7 @@ async function approveIntakeDraft(client: any, body: any) {
         extraction?.deterministic_intake === true,
       }, {
         familyClassifierContext: approvedFamilyContext,
+        suppressGeocoding: notificationSuppressionReason !== null,
         ...(authority && primaryMint
           ? {
             canonicalIntakeAuthority: {
@@ -19693,6 +19744,7 @@ async function approveIntakeDraft(client: any, body: any) {
             extraction?.deterministic_intake === true,
           }, {
             familyClassifierContext: approvedFamilyContext,
+            suppressGeocoding: notificationSuppressionReason !== null,
             ...(authority && secondaryMint
               ? {
                 canonicalIntakeAuthority: {
@@ -19758,6 +19810,7 @@ async function approveIntakeDraft(client: any, body: any) {
       availableAttachments,
       extraction,
       requiredMintRoles,
+      notificationSuppressionReason,
     )
     const { error: settlementError } = await client
       .from('makesafe_intake_drafts')
@@ -21508,6 +21561,194 @@ async function canRepairExactRescanProvenance(
   }
   return (mintResult.data || []).length === 1 &&
     (notificationResult.data || []).length === 1
+}
+
+async function sourcePersistRecoveryFingerprint(value: unknown) {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(JSON.stringify(value)),
+  )
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+async function loadSourcePersistRecoveryQueueSnapshot(
+  client: any,
+  target: SourcePersistRecoveryTarget,
+  generatedAt: string,
+): Promise<SourcePersistRecoveryQueueSnapshot> {
+  const projection = await _loadIntakeExceptionProjection(client, {
+    generatedAt,
+  })
+  const isTarget = (card: any) =>
+    card?.external_ref === target.externalRef &&
+    card?.builder_purchase_order === target.builderPurchaseOrder
+  const targetCards = projection.cards.filter(isTarget)
+  const unrelatedCards = projection.cards
+    .filter((card) => !isTarget(card))
+    .sort((left, right) => String(left.id).localeCompare(String(right.id)))
+  return {
+    targetCards: targetCards.length,
+    unrelatedCards: unrelatedCards.length,
+    unrelatedFingerprint: await sourcePersistRecoveryFingerprint(
+      unrelatedCards,
+    ),
+  }
+}
+
+async function loadSourcePersistRecoveryAuthority(
+  client: any,
+  target: SourcePersistRecoveryTarget,
+): Promise<SourcePersistRecoveryAuthority | null> {
+  const { data: cases, error } = await client.from('makesafe_intake_cases')
+    .select('id,instruction_key,state,reason_code,last_decision_reason,is_authoritative,job_id')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('external_ref_raw', target.externalRef)
+    .eq('builder_po_raw', target.builderPurchaseOrder)
+    .limit(2)
+  if (error) throw error
+  if ((cases || []).length !== 1) return null
+  const row = cases[0]
+  const { data: sources, error: sourceError } = await client
+    .from('makesafe_intake_case_sources')
+    .select('post_id')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('case_id', row.id)
+  if (sourceError) throw sourceError
+  return {
+    caseId: String(row.id),
+    instructionKey: String(row.instruction_key || ''),
+    state: String(row.state || ''),
+    reasonCode: row.reason_code || null,
+    lastDecisionReason: row.last_decision_reason || null,
+    isAuthoritative: row.is_authoritative === true,
+    jobId: row.job_id || null,
+    sourceCount: (sources || []).length,
+  }
+}
+
+async function loadSourcePersistRecoveryOutcome(
+  client: any,
+  target: SourcePersistRecoveryTarget,
+  authority: SourcePersistRecoveryAuthority,
+) {
+  const { data: intakeCase, error: caseError } = await client
+    .from('makesafe_intake_cases')
+    .select('id,state,reason_code,is_authoritative,job_id')
+    .eq('org_id', DEFAULT_ORG_ID)
+    .eq('id', authority.caseId)
+    .eq('instruction_key', authority.instructionKey)
+    .maybeSingle()
+  if (caseError || !intakeCase?.job_id) {
+    throw caseError || new Error('recovered intake case has no job')
+  }
+  const jobId = String(intakeCase.job_id)
+  const boardRows = await loadCanonicalMakesafeBoard(client, {
+    restrictToJobIds: [jobId],
+  })
+  const boardVisible = boardRows.some((row: any) => row?.id === jobId)
+  const [jobResult, logicalJobsResult, assignmentsResult, invoicesResult,
+    communicationsResult, notificationsResult, outboundResult] =
+    await Promise.all([
+      client.from('jobs')
+        .select('id,type,status,metadata')
+        .eq('org_id', DEFAULT_ORG_ID)
+        .eq('id', jobId)
+        .maybeSingle(),
+      client.from('jobs')
+        .select('id')
+        .eq('org_id', DEFAULT_ORG_ID)
+        .eq('type', 'makesafe')
+        .contains('metadata', {
+          builder_po_number: target.builderPurchaseOrder,
+        }),
+      client.from('job_assignments').select('id').eq('job_id', jobId),
+      client.from('xero_invoices').select('id').eq('job_id', jobId),
+      client.from('po_communications').select('id').eq('job_id', jobId),
+      client.from('makesafe_intake_hugo_notifications')
+        .select('id')
+        .eq('case_id', authority.caseId)
+        .eq('job_id', jobId),
+      client.from('outbound_message_queue')
+        .select('id')
+        .contains('metadata', { job_id: jobId }),
+    ])
+  const failed = [
+    jobResult,
+    logicalJobsResult,
+    assignmentsResult,
+    invoicesResult,
+    communicationsResult,
+    notificationsResult,
+    outboundResult,
+  ].find((result) => result.error)
+  if (failed?.error) throw failed.error
+  const job = jobResult.data
+  return {
+    caseAuthoritative: intakeCase.is_authoritative === true,
+    caseState: String(intakeCase.state || ''),
+    caseReasonCode: intakeCase.reason_code || null,
+    jobExists: boardVisible && job?.id === jobId && job?.type === 'makesafe' &&
+      job?.status === 'accepted' &&
+      job?.metadata?.builder_po_number === target.builderPurchaseOrder,
+    jobUnassigned: (assignmentsResult.data || []).length === 0,
+    logicalJobs: (logicalJobsResult.data || []).length,
+    assignments: (assignmentsResult.data || []).length,
+    invoices: (invoicesResult.data || []).length,
+    communications: (communicationsResult.data || []).length,
+    notifications: (notificationsResult.data || []).length,
+    outboundQueueRows: (outboundResult.data || []).length,
+  }
+}
+
+async function sourcePersistRecoveryAction(client: any, body: any) {
+  try {
+    return await runSourcePersistRecovery(body, {
+      loadQueueSnapshot: (target, generatedAt) =>
+        loadSourcePersistRecoveryQueueSnapshot(
+          client,
+          target,
+          generatedAt,
+        ),
+      loadAuthority: (target) =>
+        loadSourcePersistRecoveryAuthority(client, target),
+      recover: (target, authority) =>
+        _runDeterministicIntake(client, {
+          dryRun: false,
+          selectionMode: 'exact',
+          days: 60,
+          onlyUnscanned: false,
+          maxSources: 4,
+          maxCases: 1,
+          allowSourcePostIds: [],
+          allowInstructionKeys: [authority.instructionKey],
+          requireAllAllowlistMatches: true,
+          advanceDrafts: true,
+          approveDraft: (approvalClient: any, approvalBody: any) =>
+            approveIntakeDraft(approvalClient, {
+              ...approvalBody,
+              [SOURCE_PERSIST_NO_SEND_RECOVERY]:
+                SOURCE_PERSIST_NO_SEND_RECOVERY,
+              suppress_manager_notification: true,
+              review_notes:
+                'Captain-authorized exact source-persistence recovery through the ordinary deterministic intake gate; every notification path is suppressed.',
+            }),
+          recoverSourcePersistenceFailure: {
+            externalRef: target.externalRef,
+            builderPurchaseOrder: target.builderPurchaseOrder,
+          },
+          suppressPhysicalJobNotifications: true,
+        }),
+      loadOutcome: (target, authority) =>
+        loadSourcePersistRecoveryOutcome(client, target, authority),
+    })
+  } catch (error) {
+    if (error instanceof SourcePersistRecoveryError) {
+      throw new ApiError(error.message, error.status)
+    }
+    throw error
+  }
 }
 
 async function adjudicatedExactRescanAction(client: any, body: any) {
