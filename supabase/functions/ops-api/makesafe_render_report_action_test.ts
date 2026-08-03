@@ -75,6 +75,11 @@ function currentReportJob() {
     ref: "REF-001",
     address: "Privacy-safe test property",
     contact: "Canonical site contact",
+    crew: "1 trade",
+    scope: "Stabilise the affected building element.",
+    findings: "The affected element required immediate stabilisation.",
+    works: "The affected element was secured pending permanent repair.",
+    materials: "No materials recorded.",
     materials_evidence: { state: "none_recorded", items: [] },
     photos: [],
     photo_evidence: {
@@ -269,6 +274,17 @@ Deno.test("curated bind rejects wrong contact, hash, renderer, cycle, self-refer
         },
       },
       message: "canonical jobs.client_name",
+    },
+    {
+      label: "commercial report input",
+      body: {
+        ...baseline,
+        report_job: {
+          ...baseline.report_job,
+          works: "Two trades completed three hours billed at a fixture rate.",
+        },
+      },
+      message: "commercial content is not allowed",
     },
     {
       label: "bad raw hash",

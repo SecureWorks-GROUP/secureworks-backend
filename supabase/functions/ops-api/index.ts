@@ -653,6 +653,7 @@ import {
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
   MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
   MAKESAFE_REPORT_CONTRACT_VERSION,
+  assertCuratedReportPayload,
   canonicalCurrentWikiReportHashPayload,
   type MakesafeReportJob,
 } from './makesafe_report_render.ts'
@@ -34274,6 +34275,11 @@ async function assertCurrentWikiReportInput(
   }
   if (String((supplied as any).contact || '').trim() !== job.contact) {
     throw new ApiError('report_job.contact must equal canonical jobs.client_name', 409)
+  }
+  try {
+    assertCuratedReportPayload(job)
+  } catch (error) {
+    throw new ApiError((error as Error).message, 409)
   }
   const materials = (supplied as any).materials_evidence
   const photos = (supplied as any).photo_evidence
