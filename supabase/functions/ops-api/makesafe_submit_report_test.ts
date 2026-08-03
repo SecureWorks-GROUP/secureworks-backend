@@ -14,12 +14,24 @@ import {
   _resolveMakesafeReportActor,
   _resolveOpsApiAuthIntent,
   _submitMakesafeReportForTest,
+  _submitServiceReportForTest,
   _tradeMakesafeCompletionHandoffForTest,
+  allocateJob,
+  createAssignment,
+  updateAssignment,
 } from "./index.ts";
 
 type TableRows = Record<string, any[]>;
+type FailureSpec = string | {
+  message?: string;
+  code?: string;
+  concurrentRow?: any;
+};
 
-function makeSubmitClient(seed: TableRows, fail: Record<string, string> = {}) {
+function makeSubmitClient(
+  seed: TableRows,
+  fail: Record<string, FailureSpec> = {},
+) {
   const rows: TableRows = {};
   for (const [table, tableRows] of Object.entries(seed)) {
     rows[table] = tableRows.map((r) => ({ ...r }));
@@ -33,6 +45,7 @@ function makeSubmitClient(seed: TableRows, fail: Record<string, string> = {}) {
     let insertRow: any = null;
     let upsertRow: any = null;
     let updateRow: any = null;
+    let deleteRows = false;
     let maxRows: number | null = null;
 
     const matchingRows = () => {
@@ -40,10 +53,24 @@ function makeSubmitClient(seed: TableRows, fail: Record<string, string> = {}) {
       return maxRows === null ? matched : matched.slice(0, maxRows);
     };
     const failKey = (op: string) => `${table}.${op}`;
-    const failure = (op: string) =>
-      fail[failKey(op)]
-        ? { data: null, error: { message: fail[failKey(op)] } }
-        : null;
+    const failure = (op: string) => {
+      const spec = fail[failKey(op)];
+      if (!spec) return null;
+      if (typeof spec === "string") {
+        return { data: null, error: { message: spec } };
+      }
+      if (
+        spec.concurrentRow &&
+        !rows[table].some((row) => row.id === spec.concurrentRow.id)
+      ) {
+        rows[table].push({ ...spec.concurrentRow });
+      }
+      if (!spec.message) return null;
+      return {
+        data: null,
+        error: { message: spec.message, code: spec.code },
+      };
+    };
     const applyInsert = () => {
       const failed = failure("insert");
       if (failed) return failed;
@@ -73,10 +100,19 @@ function makeSubmitClient(seed: TableRows, fail: Record<string, string> = {}) {
       rows[table].push(row);
       return { data: row, error: null };
     };
+    const applyDelete = () => {
+      const failed = failure("delete");
+      if (failed) return failed;
+      const matched = matchingRows();
+      const ids = new Set(matched.map((row) => row.id));
+      rows[table] = rows[table].filter((row) => !ids.has(row.id));
+      return { data: matched, error: null };
+    };
     const terminal = (single = false) => {
       if (insertRow) return applyInsert();
       if (upsertRow) return applyUpsert();
       if (updateRow) return applyUpdate();
+      if (deleteRows) return applyDelete();
       const data = matchingRows();
       return { data: single ? data[0] || null : data, error: null };
     };
@@ -122,9 +158,16 @@ function makeSubmitClient(seed: TableRows, fail: Record<string, string> = {}) {
         updateRow = row;
         return b;
       },
+      delete: () => {
+        deleteRows = true;
+        return b;
+      },
       maybeSingle: async () => terminal(true),
       single: async () => terminal(true),
-      then: (resolve: (v: any) => any) => resolve(terminal()),
+      then: (
+        resolve: (v: any) => any,
+        reject?: (reason: unknown) => any,
+      ) => Promise.resolve(terminal()).then(resolve, reject),
     };
     return b;
   }
@@ -136,6 +179,7 @@ function baseRows(overrides: TableRows = {}): TableRows {
   return {
     jobs: [{
       id: "job-1",
+      org_id: "org-test",
       job_number: "SWMS-26001",
       type: "makesafe",
       status: "scheduled",
@@ -237,6 +281,55 @@ Deno.test("submit_makesafe_report ignores a body-spoofed actor for an authentica
     ),
     "privileged-supplied-actor",
   );
+});
+
+Deno.test("submit_makesafe_report JWT authority is tenant-scoped before report or assignment writes", async () => {
+  const { client, rows } = makeSubmitClient(baseRows());
+  await assertRejects(
+    () =>
+      _dispatchMakesafeReportForTest(
+        client,
+        validBody(),
+        "jwt",
+        {
+          id: "trade-1",
+          email: "trade@example.test",
+          orgId: "different-org",
+          role: "installer",
+          managedVerticals: [],
+        },
+      ),
+    Error,
+    "not authorized",
+  );
+  assertEquals(rows.job_service_reports.length, 0);
+  assertEquals(rows.job_assignments.length, 0);
+});
+
+Deno.test("submit_makesafe_report routine callers may save drafts but cannot finalize a trade report", async () => {
+  const { client, rows } = makeSubmitClient(baseRows());
+  await assertRejects(
+    () =>
+      _dispatchMakesafeReportForTest(
+        client,
+        validBody({ userId: "trade-1" }),
+        "routine",
+        null,
+      ),
+    Error,
+    "requires an authenticated Trade session or privileged operator",
+  );
+  assertEquals(rows.job_service_reports.length, 0);
+  assertEquals(rows.job_assignments.length, 0);
+
+  const draft: any = await _dispatchMakesafeReportForTest(
+    client,
+    validBody({ status: "draft", userId: "trade-1" }),
+    "routine",
+    null,
+  );
+  assertEquals(draft.report.status, "draft");
+  assertEquals(rows.job_assignments.length, 0);
 });
 
 Deno.test("ops attach job photo normalises recovered completion photo input", () => {
@@ -421,7 +514,7 @@ Deno.test("trade completion handoff uses persisted roof mode and fails closed wh
   );
 });
 
-Deno.test("submit_makesafe_report auto-assigns an unassigned submitter, records attribution, and leaves declared board behavior unchanged", async () => {
+Deno.test("submit_makesafe_report binds an unassigned submitter as non-lead reporting provenance and leaves declared board behavior unchanged", async () => {
   const { client, rows } = makeSubmitClient(baseRows());
 
   const res: any = await _submitMakesafeReportForTest(client, validBody());
@@ -444,16 +537,29 @@ Deno.test("submit_makesafe_report auto-assigns an unassigned submitter, records 
   assertEquals(rows.job_assignments.length, 1);
   assertEquals(rows.job_assignments[0].user_id, "trade-1");
   assertEquals(rows.job_assignments[0].status, "complete");
+  assertEquals(rows.job_assignments[0].role, "crew");
+  assertEquals(rows.job_assignments[0].is_lead, false);
+  assertEquals(
+    rows.job_assignments[0].attendance_cycle_id,
+    rows.makesafe_job_details[0].attendance_cycle_id,
+  );
+  assertEquals(rows.job_assignments[0].cycle_attribution, "bound");
   assertStringIncludes(
     rows.job_assignments[0].notes,
-    "Auto-assigned from final MakeSafe report submission",
+    "Bound from final MakeSafe report submission",
   );
+  assertStringIncludes(
+    rows.job_assignments[0].notes,
+    "not an intake allocation",
+  );
+  assertEquals(rows.job_assignments[0].id, rows.job_service_reports[0].id);
   assertEquals(res.board_sync.auto_assignment.user_id, "trade-1");
   assertEquals(
     res.board_sync.auto_assignment.attribution,
     "final_makesafe_report_submitter",
   );
   assertEquals(rows.job_events.length, 1);
+  assertEquals(rows.job_events[0].id, rows.job_service_reports[0].id);
   assertEquals(rows.job_events[0].event_type, "makesafe_report_submitted");
   assertEquals(rows.job_events[0].detail_json.auto_assigned_submitter, true);
 
@@ -477,7 +583,7 @@ Deno.test("submit_makesafe_report auto-assigns an unassigned submitter, records 
   );
 });
 
-Deno.test("submit_makesafe_report preserves an existing assignment instead of duplicating it", async () => {
+Deno.test("submit_makesafe_report does not let an unbound assignment suppress the current-cycle submitter binding", async () => {
   const { client, rows } = makeSubmitClient(baseRows({
     job_assignments: [{
       id: "assignment-existing",
@@ -485,6 +591,92 @@ Deno.test("submit_makesafe_report preserves an existing assignment instead of du
       user_id: "trade-existing",
       status: "scheduled",
       role: "lead_installer",
+    }],
+  }));
+
+  const res: any = await _submitMakesafeReportForTest(client, validBody());
+  assertEquals(rows.job_assignments.length, 2);
+  assertEquals(rows.job_assignments[0].id, "assignment-existing");
+  assertEquals(rows.job_assignments[0].status, "complete");
+  assertEquals(rows.job_assignments[1].user_id, "trade-1");
+  assertEquals(
+    rows.job_assignments[1].attendance_cycle_id,
+    rows.makesafe_job_details[0].attendance_cycle_id,
+  );
+  assertEquals(rows.job_assignments[1].cycle_attribution, "bound");
+  assertEquals(res.board_sync.auto_assignment.user_id, "trade-1");
+  assertEquals(rows.job_events[0].detail_json.auto_assigned_submitter, true);
+});
+
+Deno.test("observer ghost declined and open-pool rows cannot satisfy final report attribution", async () => {
+  const hostileRows = [
+    { id: "declined", status: "declined", role: "lead_installer" },
+    { id: "observer", status: "complete", role: "observer" },
+    {
+      id: "ghost",
+      status: "complete",
+      role: "lead_installer",
+      assignment_type: "ghost",
+    },
+    { id: "open-pool", status: "complete", role: "makesafe_open" },
+  ].map((row) => ({
+    ...row,
+    job_id: "job-1",
+    user_id: "trade-1",
+    attendance_cycle_id: "cycle-1",
+    cycle_attribution: "bound",
+  }));
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
+    }],
+    job_assignments: hostileRows,
+  }));
+
+  const result: any = await _submitMakesafeReportForTest(client, validBody());
+  assertEquals(result.report.status, "submitted");
+  assertEquals(rows.job_assignments.length, 5);
+  const canonical = rows.job_assignments.find((row) => row.id === "cycle-1");
+  assert(canonical);
+  assertEquals(canonical.user_id, "trade-1");
+  assertEquals(canonical.role, "crew");
+  assertEquals(canonical.is_lead, false);
+  assertEquals(result.board_sync.auto_assignment.id, "cycle-1");
+});
+
+Deno.test("submit_makesafe_report preserves one same-actor current-cycle assignment on retry", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
+    }],
+    job_assignments: [{
+      id: "assignment-existing",
+      job_id: "job-1",
+      user_id: "trade-1",
+      status: "scheduled",
+      role: "lead_installer",
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
     }],
   }));
 
@@ -503,6 +695,524 @@ Deno.test("submit_makesafe_report requires an attributed actor before writing a 
     Error,
     "user_id required",
   );
+  assertEquals(rows.job_service_reports.length, 0);
+  assertEquals(rows.job_assignments.length, 0);
+});
+
+Deno.test("submit_makesafe_report refuses approved as an unsupported Trade submission transition", async () => {
+  const { client, rows } = makeSubmitClient(baseRows());
+  await assertRejects(
+    () =>
+      _submitMakesafeReportForTest(
+        client,
+        validBody({ status: "approved" }),
+      ),
+    Error,
+    "status must be draft or submitted",
+  );
+  assertEquals(rows.job_service_reports.length, 0);
+  assertEquals(rows.job_assignments.length, 0);
+});
+
+Deno.test("submit_makesafe_report leaves only a bound draft when current-cycle actor binding fails", async () => {
+  const { client, rows } = makeSubmitClient(baseRows(), {
+    "job_assignments.insert": "permission denied for job_assignments",
+  });
+
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, validBody()),
+    Error,
+    "submitter assignment failed",
+  );
+  assertEquals(rows.job_assignments.length, 0);
+  assertEquals(rows.job_service_reports.length, 1);
+  assertEquals(rows.job_service_reports[0].status, "draft");
+  assertEquals(rows.job_service_reports[0].submitted_by, "trade-1");
+  assertEquals(rows.job_service_reports[0].cycle_attribution, "bound");
+  assertEquals(rows.job_events.length, 0);
+});
+
+Deno.test("submit_service_report rejects malformed MakeSafe signature data before report or assignment persistence", async () => {
+  const { client, rows } = makeSubmitClient(baseRows());
+  await assertRejects(
+    () =>
+      _submitServiceReportForTest(client, {
+        job_id: "job-1",
+        userId: "trade-1",
+        checklist: [],
+        signatureData: "data:image/png;base64,%%%",
+        status: "submitted",
+      }),
+    Error,
+  );
+  assertEquals(rows.job_service_reports.length, 0);
+  assertEquals(rows.job_assignments.length, 0);
+  assertEquals(rows.job_events.length, 0);
+});
+
+Deno.test("submit_makesafe_report leaves no assignment when final draft staging fails", async () => {
+  const { client, rows } = makeSubmitClient(baseRows(), {
+    "job_service_reports.insert": "report table unavailable",
+  });
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, validBody()),
+    Error,
+    "report table unavailable",
+  );
+  assertEquals(rows.job_service_reports.length, 0);
+  assertEquals(rows.job_assignments.length, 0);
+  assertEquals(rows.job_events.length, 0);
+});
+
+Deno.test("submit_makesafe_report keeps a recoverable bound draft if final promotion fails", async () => {
+  const { client, rows } = makeSubmitClient(baseRows(), {
+    "job_service_reports.update": "final promotion unavailable",
+  });
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, validBody()),
+    Error,
+    "final promotion unavailable",
+  );
+  assertEquals(rows.job_service_reports.length, 1);
+  assertEquals(rows.job_service_reports[0].status, "draft");
+  assertEquals(rows.job_service_reports[0].submitted_by, "trade-1");
+  assertEquals(rows.job_service_reports[0].cycle_attribution, "bound");
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(
+    rows.job_assignments[0].id,
+    rows.job_service_reports[0].id,
+  );
+  assertEquals(rows.job_events.length, 0);
+});
+
+Deno.test("submit_makesafe_report converges concurrent assignment and event conflicts on the canonical report UUID", async () => {
+  const cycleRows = baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
+    }],
+  });
+  const { client, rows } = makeSubmitClient(cycleRows, {
+    "job_assignments.insert": {
+      message: "duplicate key",
+      code: "23505",
+      concurrentRow: {
+        id: "cycle-1",
+        job_id: "job-1",
+        user_id: "trade-1",
+        attendance_cycle_id: "cycle-1",
+        cycle_attribution: "bound",
+        role: "crew",
+        is_lead: false,
+        status: "complete",
+      },
+    },
+    "job_events.insert": {
+      message: "duplicate key",
+      code: "23505",
+      concurrentRow: {
+        id: "cycle-1",
+        job_id: "job-1",
+        user_id: "trade-1",
+        event_type: "makesafe_report_submitted",
+        detail_json: {
+          report_id: "cycle-1",
+          attendance_cycle_id: "cycle-1",
+          cycle_number: 1,
+        },
+      },
+    },
+  });
+
+  const result: any = await _submitMakesafeReportForTest(client, validBody());
+  assertEquals(result.report.id, "cycle-1");
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_assignments[0].id, "cycle-1");
+  assertEquals(rows.job_events.length, 1);
+  assertEquals(rows.job_events[0].id, "cycle-1");
+  assertEquals(result.event_sync, {
+    ok: true,
+    skipped: "concurrent_already_logged",
+  });
+});
+
+Deno.test("submit_makesafe_report prefers a concurrent explicit allocation over its canonical provenance row", async () => {
+  const { client, rows } = makeSubmitClient(
+    baseRows({
+      makesafe_job_details: [{
+        job_id: "job-1",
+        substatus: "waiting_on_trade_report",
+        report_received_at: null,
+        cycle_number: 1,
+        attendance_cycle_id: "cycle-1",
+        cycle_attribution: "bound",
+      }],
+      makesafe_attendance_cycles: [{
+        id: "cycle-1",
+        job_id: "job-1",
+        cycle_number: 1,
+      }],
+    }),
+    {
+      "job_assignments.insert": {
+        concurrentRow: {
+          id: "explicit-allocation",
+          job_id: "job-1",
+          user_id: "trade-1",
+          attendance_cycle_id: "cycle-1",
+          cycle_attribution: "bound",
+          scheduled_date: "2026-08-03",
+          role: "lead_installer",
+          is_lead: true,
+          status: "scheduled",
+        },
+      },
+    },
+  );
+
+  const result: any = await _submitMakesafeReportForTest(client, validBody());
+  assertEquals(result.report.status, "submitted");
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_assignments[0].id, "explicit-allocation");
+  assertEquals(rows.job_assignments[0].role, "lead_installer");
+  assertEquals(result.board_sync.auto_assignment, null);
+});
+
+Deno.test("createAssignment removes an earlier canonical report binding when explicit allocation commits second", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
+    }],
+    job_service_reports: [{
+      id: "legacy-report-uuid",
+      job_id: "job-1",
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+      status: "draft",
+      submitted_by: "trade-1",
+    }],
+    job_assignments: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      user_id: "trade-1",
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+      role: "crew",
+      is_lead: false,
+      status: "complete",
+      notes:
+        "Bound from final MakeSafe report submission (cycle 1); not an intake allocation",
+    }],
+    users: [],
+  }));
+
+  const result: any = await createAssignment(client, {
+    jobId: "job-1",
+    userId: "trade-1",
+    scheduledDate: "2026-08-03",
+    confirmationStatus: "placeholder",
+  });
+
+  assertEquals(result.assignment.user_id, "trade-1");
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_assignments[0].id, result.assignment.id);
+  assertEquals(rows.job_assignments[0].scheduled_date, "2026-08-03");
+  assertEquals(rows.job_assignments[0].role, "lead_installer");
+});
+
+Deno.test("a direct create_assignment cleanup failure preserves side effects and its retry reconciles", async () => {
+  const failures: Record<string, FailureSpec> = {
+    "job_assignments.delete": "cleanup temporarily unavailable",
+  };
+  const { client, rows } = makeSubmitClient(
+    baseRows({
+      makesafe_job_details: [{
+        job_id: "job-1",
+        substatus: "waiting_on_trade_report",
+        report_received_at: null,
+        cycle_number: 1,
+        attendance_cycle_id: "cycle-1",
+        cycle_attribution: "bound",
+      }],
+      makesafe_attendance_cycles: [{
+        id: "cycle-1",
+        job_id: "job-1",
+        cycle_number: 1,
+      }],
+      job_service_reports: [{
+        id: "legacy-report-uuid",
+        job_id: "job-1",
+        cycle_number: 1,
+        attendance_cycle_id: "cycle-1",
+        cycle_attribution: "bound",
+        status: "draft",
+        submitted_by: "trade-1",
+      }],
+      job_assignments: [{
+        id: "cycle-1",
+        job_id: "job-1",
+        user_id: "trade-1",
+        attendance_cycle_id: "cycle-1",
+        cycle_attribution: "bound",
+        role: "crew",
+        is_lead: false,
+        status: "complete",
+        notes:
+          "Bound from final MakeSafe report submission (cycle 1); not an intake allocation",
+      }],
+      users: [{ id: "trade-1", phone: null }],
+    }),
+    failures,
+  );
+
+  await assertRejects(
+    () =>
+      createAssignment(client, {
+        jobId: "job-1",
+        userId: "trade-1",
+        scheduledDate: "2026-08-03",
+        confirmationStatus: "placeholder",
+      }),
+    Error,
+    "duplicate reporting assignment reconciliation failed",
+  );
+  assertEquals(rows.job_assignments.length, 2);
+  assertEquals(
+    rows.job_events.filter((event) => event.event_type === "assignment_created")
+      .length,
+    1,
+  );
+
+  delete failures["job_assignments.delete"];
+  const retry: any = await createAssignment(client, {
+    jobId: "job-1",
+    userId: "trade-1",
+    scheduledDate: "2026-08-03",
+    confirmationStatus: "placeholder",
+  });
+  assertEquals(retry.deduped, true);
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_assignments[0].scheduled_date, "2026-08-03");
+  assertEquals(
+    rows.job_events.filter((event) => event.event_type === "assignment_created")
+      .length,
+    1,
+  );
+});
+
+Deno.test("reassigning an explicit allocation to the report actor removes the canonical duplicate", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
+    }],
+    job_service_reports: [{
+      id: "legacy-report-uuid",
+      job_id: "job-1",
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+      status: "submitted",
+      submitted_by: "trade-2",
+    }],
+    job_assignments: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      user_id: "trade-2",
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+      role: "crew",
+      is_lead: false,
+      status: "complete",
+      notes:
+        "Bound from final MakeSafe report submission (cycle 1); not an intake allocation",
+    }, {
+      id: "explicit-allocation",
+      job_id: "job-1",
+      user_id: "trade-1",
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+      scheduled_date: "2026-08-03",
+      role: "lead_installer",
+      is_lead: true,
+      status: "scheduled",
+    }],
+    users: [{ id: "trade-2", phone: null }],
+  }));
+
+  const result: any = await allocateJob(client, {
+    body: {
+      assignmentId: "explicit-allocation",
+      userId: "trade-2",
+    },
+    callerRole: "ops_manager",
+  });
+  assertEquals(result.mode, "reassign");
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_assignments[0].id, "explicit-allocation");
+  assertEquals(rows.job_assignments[0].user_id, "trade-2");
+  assertEquals(rows.job_assignments[0].scheduled_date, "2026-08-03");
+});
+
+Deno.test("a reassignment cleanup failure is reconciled by its same-user retry", async () => {
+  const failures: Record<string, FailureSpec> = {
+    "job_assignments.delete": "cleanup temporarily unavailable",
+  };
+  const { client, rows } = makeSubmitClient(
+    baseRows({
+      makesafe_job_details: [{
+        job_id: "job-1",
+        substatus: "waiting_on_trade_report",
+        report_received_at: null,
+        cycle_number: 1,
+        attendance_cycle_id: "cycle-1",
+        cycle_attribution: "bound",
+      }],
+      makesafe_attendance_cycles: [{
+        id: "cycle-1",
+        job_id: "job-1",
+        cycle_number: 1,
+      }],
+      job_assignments: [{
+        id: "cycle-1",
+        job_id: "job-1",
+        user_id: "trade-2",
+        attendance_cycle_id: "cycle-1",
+        cycle_attribution: "bound",
+        role: "crew",
+        is_lead: false,
+        status: "complete",
+        notes:
+          "Bound from final MakeSafe report submission (cycle 1); not an intake allocation",
+      }, {
+        id: "explicit-allocation",
+        job_id: "job-1",
+        user_id: "trade-1",
+        attendance_cycle_id: "cycle-1",
+        cycle_attribution: "bound",
+        scheduled_date: "2026-08-03",
+        role: "lead_installer",
+        status: "scheduled",
+      }],
+      users: [{ id: "trade-2", phone: null }],
+    }),
+    failures,
+  );
+
+  await assertRejects(
+    () =>
+      allocateJob(client, {
+        body: {
+          assignmentId: "explicit-allocation",
+          userId: "trade-2",
+        },
+        callerRole: "ops_manager",
+      }),
+    Error,
+    "duplicate reporting assignment reconciliation failed",
+  );
+  assertEquals(rows.job_assignments.length, 2);
+  assertEquals(
+    rows.job_assignments.find((row) => row.id === "explicit-allocation")
+      ?.user_id,
+    "trade-2",
+  );
+
+  delete failures["job_assignments.delete"];
+  const retry: any = await allocateJob(client, {
+    body: {
+      assignmentId: "explicit-allocation",
+      userId: "trade-2",
+    },
+    callerRole: "ops_manager",
+  });
+  assertEquals(retry.deduped, true);
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_assignments[0].id, "explicit-allocation");
+});
+
+Deno.test("editing a prior-cycle assignment preserves its historical attendance identity", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 2,
+      attendance_cycle_id: "cycle-2",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
+    }, {
+      id: "cycle-2",
+      job_id: "job-1",
+      cycle_number: 2,
+    }],
+    job_assignments: [{
+      id: "prior-explicit",
+      job_id: "job-1",
+      user_id: "trade-1",
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+      scheduled_date: "2026-08-01",
+      role: "lead_installer",
+      status: "complete",
+    }],
+  }));
+
+  await updateAssignment(client, {
+    assignmentId: "prior-explicit",
+    scheduledDate: "2026-08-02",
+  });
+  assertEquals(rows.job_assignments[0].scheduled_date, "2026-08-02");
+  assertEquals(rows.job_assignments[0].attendance_cycle_id, "cycle-1");
+  assertEquals(rows.job_assignments[0].cycle_attribution, "bound");
+});
+
+Deno.test("submit_makesafe_report refuses a cancelled card before cycle, report, or assignment writes", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    jobs: [{
+      ...baseRows().jobs[0],
+      status: "cancelled",
+    }],
+  }));
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, validBody()),
+    Error,
+    "cannot submit a final MakeSafe report for a cancelled job",
+  );
+  assertEquals(rows.makesafe_attendance_cycles.length, 0);
   assertEquals(rows.job_service_reports.length, 0);
   assertEquals(rows.job_assignments.length, 0);
 });
@@ -544,11 +1254,21 @@ Deno.test("submit_makesafe_report resumes a submitted report stuck before board 
       job_id: "job-1",
       substatus: "waiting_on_trade_report",
       report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
     }],
     job_service_reports: [{
       id: "report-existing",
       job_id: "job-1",
       cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
       status: "submitted",
       submitted_at: "2026-06-16T01:00:00Z",
       submitted_by: "trade-1",
@@ -561,6 +1281,7 @@ Deno.test("submit_makesafe_report resumes a submitted report stuck before board 
   // Board advanced and the submitter was auto-assigned by the resumed sync.
   assertEquals(rows.makesafe_job_details[0].substatus, "admin_to_send_report");
   assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_assignments[0].id, "cycle-1");
   assertEquals(rows.job_events.length, 1);
   // The original submission attribution/timestamp is preserved (not overwritten).
   assertEquals(rows.job_service_reports.length, 1);
@@ -568,6 +1289,262 @@ Deno.test("submit_makesafe_report resumes a submitted report stuck before board 
     rows.job_service_reports[0].submitted_at,
     "2026-06-16T01:00:00Z",
   );
+  assertEquals(
+    rows.job_service_reports[0].attendance_cycle_id,
+    rows.makesafe_job_details[0].attendance_cycle_id,
+  );
+  assertEquals(rows.job_service_reports[0].cycle_attribution, "bound");
+});
+
+Deno.test("submit_makesafe_report refuses to infer a historical submitter from an authenticated retry", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
+    }],
+    job_service_reports: [{
+      id: "report-existing",
+      job_id: "job-1",
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+      status: "submitted",
+      submitted_at: "2026-06-16T01:00:00Z",
+      submitted_by: null,
+      checklist_json: {},
+    }],
+  }));
+
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, validBody()),
+    Error,
+    "persisted submission has no immutable actor evidence",
+  );
+  assertEquals(rows.job_service_reports.length, 1);
+  assertEquals(rows.job_service_reports[0].submitted_by, null);
+  assertEquals(
+    rows.job_service_reports[0].submitted_at,
+    "2026-06-16T01:00:00Z",
+  );
+  assertEquals(rows.job_assignments.length, 0);
+});
+
+Deno.test("submit_makesafe_report never lets a routine draft downgrade or anonymize a submitted row", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
+    }],
+    job_service_reports: [{
+      id: "report-existing",
+      job_id: "job-1",
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+      status: "submitted",
+      submitted_at: "2026-06-16T01:00:00Z",
+      submitted_by: "trade-original",
+      checklist_json: {},
+    }],
+  }));
+
+  await assertRejects(
+    () =>
+      _dispatchMakesafeReportForTest(
+        client,
+        { job_id: "job-1", status: "draft" },
+        "routine",
+        null,
+      ),
+    Error,
+    "cannot be downgraded to draft",
+  );
+  assertEquals(rows.job_service_reports[0].status, "submitted");
+  assertEquals(rows.job_service_reports[0].submitted_by, "trade-original");
+  assertEquals(
+    rows.job_service_reports[0].submitted_at,
+    "2026-06-16T01:00:00Z",
+  );
+  assertEquals(rows.job_assignments.length, 0);
+});
+
+Deno.test("submit_makesafe_report refuses an ambiguous retry by a different actor", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
+    }],
+    job_service_reports: [{
+      id: "report-existing",
+      job_id: "job-1",
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+      status: "submitted",
+      submitted_at: "2026-06-16T01:00:00Z",
+      submitted_by: "trade-original",
+      checklist_json: {},
+    }],
+  }));
+
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, validBody()),
+    Error,
+    "retry actor does not match the persisted submitter",
+  );
+  assertEquals(rows.job_service_reports[0].submitted_by, "trade-original");
+  assertEquals(rows.job_assignments.length, 0);
+});
+
+Deno.test("submit_makesafe_report refuses a retry whose persisted report points outside the authoritative cycle", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-current",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-current",
+      job_id: "job-1",
+      cycle_number: 1,
+    }],
+    job_service_reports: [{
+      id: "report-existing",
+      job_id: "job-1",
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-other",
+      cycle_attribution: "bound",
+      status: "submitted",
+      submitted_at: "2026-06-16T01:00:00Z",
+      submitted_by: "trade-1",
+      checklist_json: {},
+    }],
+  }));
+
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, validBody()),
+    Error,
+    "lacks authoritative current-cycle evidence",
+  );
+  assertEquals(rows.job_service_reports[0].attendance_cycle_id, "cycle-other");
+  assertEquals(rows.job_assignments.length, 0);
+});
+
+Deno.test("submit_service_report delegates a live generic MakeSafe final into actor and current-cycle authority", async () => {
+  const { client, rows } = makeSubmitClient(baseRows());
+  const result: any = await _submitServiceReportForTest(client, {
+    job_id: "job-1",
+    userId: "trade-1",
+    checklist: [{ item: "live generic MakeSafe path" }],
+    notes: "generic payload preserved",
+    signatureData: "https://example.test/signature.png",
+    signatureName: "Trade User",
+    status: "submitted",
+  });
+
+  assertEquals(result.ok, true);
+  assertEquals(result.report, rows.job_service_reports[0]);
+  assertEquals(result.report.checklist_json, [{
+    item: "live generic MakeSafe path",
+  }]);
+  assertEquals(result.report.notes, "generic payload preserved");
+  assertEquals(
+    result.report.signature_data,
+    "https://example.test/signature.png",
+  );
+  assertEquals(result.report.submitted_by, "trade-1");
+  assertEquals(result.report.cycle_attribution, "bound");
+  assertEquals(
+    result.report.attendance_cycle_id,
+    rows.makesafe_job_details[0].attendance_cycle_id,
+  );
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_assignments[0].role, "crew");
+  assertEquals(rows.job_assignments[0].is_lead, false);
+  assertEquals(rows.job_events.length, 1);
+  assertEquals(rows.job_events[0].event_type, "makesafe_report_submitted");
+  assertEquals(
+    rows.job_events.some((event: any) =>
+      event.event_type === "service_report_submitted"
+    ),
+    false,
+  );
+});
+
+Deno.test("submit_service_report delegates MakeSafe drafts without assignment or final side effects", async () => {
+  const { client, rows } = makeSubmitClient(baseRows());
+  const result: any = await _submitServiceReportForTest(client, {
+    job_id: "job-1",
+    userId: "trade-1",
+    checklist: [{ item: "draft through generic caller" }],
+    notes: "draft",
+    status: "draft",
+  });
+
+  assertEquals(result.report.status, "draft");
+  assertEquals(result.report.cycle_attribution, "bound");
+  assertEquals(rows.job_assignments.length, 0);
+  assertEquals(rows.job_events.length, 0);
+});
+
+Deno.test("submit_service_report preserves ordinary assigned non-MakeSafe reports", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    jobs: [{
+      ...baseRows().jobs[0],
+      type: "fencing",
+      job_number: "FENCE-TEST-1",
+    }],
+    makesafe_job_details: [],
+    job_assignments: [{
+      id: "assignment-1",
+      job_id: "job-1",
+      user_id: "trade-1",
+      status: "scheduled",
+    }],
+  }));
+
+  const result: any = await _submitServiceReportForTest(client, {
+    job_id: "job-1",
+    userId: "trade-1",
+    checklist: [{ item: "ordinary service report" }],
+    notes: "ordinary report",
+    status: "submitted",
+  });
+  assertEquals(result.report.submitted_by, "trade-1");
+  assertEquals(rows.job_service_reports.length, 1);
+  assertEquals(rows.job_events.length, 1);
+  assertEquals(rows.job_events[0].event_type, "service_report_submitted");
+  assertEquals(rows.job_assignments.length, 1);
 });
 
 Deno.test("submit_makesafe_report fails visibly when the report-ready board sync fails", async () => {

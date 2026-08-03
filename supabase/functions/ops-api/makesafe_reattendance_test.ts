@@ -384,6 +384,17 @@ Deno.test("second report after re-attend is additive (both reports kept) and car
   assertEquals(photosByCycle.get("cycle-1"), 5);
   assertEquals(photosByCycle.get(reattend.attendance_cycle_id), 5);
 
+  // The prior unbound visit assignment cannot suppress the authoritative
+  // current-cycle submitter binding created by the final report.
+  assertEquals(rows.job_assignments.length, 2);
+  const currentCycleAssignment = rows.job_assignments.find((a: any) =>
+    a.attendance_cycle_id === reattend.attendance_cycle_id
+  );
+  assert(currentCycleAssignment, "visit two has a current-cycle assignment");
+  assertEquals(currentCycleAssignment.user_id, "trade-1");
+  assertEquals(currentCycleAssignment.cycle_attribution, "bound");
+  assertEquals(currentCycleAssignment.status, "complete");
+
   // Detail flips back to report-in, keeping the re-attend marker.
   const detail = rows.makesafe_job_details[0];
   assertEquals(detail.substatus, "admin_to_send_report");
@@ -463,6 +474,8 @@ Deno.test("a concurrent cycle conflict reuses the existing report", async () => 
           attendance_cycle_id: "cycle-2",
           cycle_attribution: "bound",
           status: "submitted",
+          submitted_by: "trade-1",
+          submitted_at: "2026-07-28T02:00:00Z",
         },
       ],
       job_media: Array.from({ length: 5 }, (_, i) => ({

@@ -3095,10 +3095,20 @@ async function dispatchMakesafeReport(
   authMode: 'api_key' | 'jwt' | 'routine',
   authUser: TradeAuthContext | null,
 ) {
+  const reportStatus = normalizeMakesafeReportStatus(body?.status)
+  if (authMode === 'routine' && reportStatus !== 'draft') {
+    throw new ApiError(
+      'final MakeSafe report submission requires an authenticated Trade session or privileged operator with an explicit actor',
+      403,
+    )
+  }
   return submitMakesafeReport(client, {
     ...body,
+    status: reportStatus,
     userId: _resolveMakesafeReportActor(authMode, authUser, body),
-  })
+  }, authUser
+    ? { orgId: authUser.orgId, managedVerticals: authUser.managedVerticals }
+    : undefined)
 }
 
 // Trade Board route: always the production canonical loader. There is no
@@ -6985,7 +6995,12 @@ if (import.meta.main) serve(async (req: Request) => {
           case 'upload_photo': return json(await uploadPhoto(client, { ...body, userId: tradeUser.id }))
           case 'get_upload_url': return json(await getUploadUrl(client, body, tradeUser.id, isAdmin))
           case 'confirm_upload': return json(await confirmUpload(client, body, tradeUser.id, isAdmin))
-          case 'submit_service_report': return json(await submitServiceReport(client, { ...body, userId: tradeUser.id }))
+          case 'submit_service_report':
+            return json(await submitServiceReport(
+              client,
+              { ...body, userId: tradeUser.id },
+              { orgId: tradeUser.orgId, managedVerticals: tradeUser.managedVerticals },
+            ))
           case 'get_service_report': return json(await getServiceReport(client, url.searchParams, tradeUser.id))
           // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled).
           case 'roof_report_template':
@@ -8880,7 +8895,8 @@ if (import.meta.main) serve(async (req: Request) => {
             return json({ success: true, assignment: updated, event_id: null, net_hours: updateFields.hours_worked || null })
           }
 
-          case 'submit_makesafe_report': return json(await submitMakesafeReport(client, { ...body, userId: tradeUser.id }))
+          case 'submit_makesafe_report':
+            return json(await dispatchMakesafeReport(client, body, 'jwt', tradeUser))
         }
       }
 
@@ -17068,20 +17084,241 @@ export const _bindMakesafeMediaToCurrentCycleForTest =
   bindMakesafeMediaToCurrentCycle
 
 // ── Slice 5: make-safe completion report ──
-async function submitMakesafeReport(client: any, body: any) {
+async function persistServiceReportSignature(
+  client: any,
+  jobId: string,
+  signatureData: unknown,
+  deterministicObjectId?: string,
+): Promise<string | null> {
+  if (typeof signatureData !== 'string' || !signatureData) return null
+  if (!signatureData.startsWith('data:')) return signatureData
+
+  const base64 = signatureData.split(',')[1]
+  if (!base64) return null
+  const bytes = Uint8Array.from(atob(base64), (c: string) => c.charCodeAt(0))
+  const objectId = deterministicObjectId || crypto.randomUUID()
+  const path = `${DEFAULT_ORG_ID}/${jobId}/signatures/${objectId}.png`
+
+  try {
+    await client.storage.createBucket('job-photos', { public: true })
+  } catch {
+    // The shared public bucket normally already exists.
+  }
+  const { error: uploadErr } = await client.storage
+    .from('job-photos')
+    .upload(path, bytes, {
+      contentType: 'image/png',
+      upsert: !!deterministicObjectId,
+    })
+  if (uploadErr) return null
+  const { data: urlData } = client.storage.from('job-photos').getPublicUrl(path)
+  return urlData.publicUrl
+}
+
+const MAKESAFE_REPORT_BINDING_NOTE = 'Bound from final MakeSafe report submission'
+
+async function reconcileMakesafeReportBindingWithAllocation(
+  client: any,
+  input: {
+    jobId: string
+    userId: string
+    attendanceCycleId: string
+    canonicalAssignmentId: string
+    canonicalCreated: boolean
+    preferredAssignmentId?: string
+  },
+): Promise<{ assignment: any; created: boolean }> {
+  const { data: exactRows, error: readErr } = await client
+    .from('job_assignments')
+    .select('id, job_id, user_id, status, role, is_lead, notes, scheduled_date, assignment_type, attendance_cycle_id, cycle_attribution')
+    .eq('job_id', input.jobId)
+    .eq('user_id', input.userId)
+    .eq('attendance_cycle_id', input.attendanceCycleId)
+    .eq('cycle_attribution', 'bound')
+    .neq('status', 'cancelled')
+  if (readErr) {
+    throw new ApiError(
+      `MakeSafe submitter assignment reconciliation failed: ${readErr.message || readErr}`,
+      500,
+    )
+  }
+
+  // Only a genuine trade relationship may satisfy report attribution. Observer,
+  // ghost, declined and open-pool placeholders are retained for their own audit
+  // purpose but cannot suppress or replace the canonical reporting binding.
+  const rows = (exactRows || []).filter((row: any) => isGenuineTradeAssignment(row))
+  const canonical = rows.find((row: any) =>
+    String(row.id) === input.canonicalAssignmentId &&
+    row.role === 'crew' &&
+    row.is_lead !== true &&
+    String(row.notes || '').startsWith(MAKESAFE_REPORT_BINDING_NOTE)
+  )
+  const preferred = rows.find((row: any) =>
+    input.preferredAssignmentId &&
+    String(row.id) === input.preferredAssignmentId &&
+    String(row.id) !== input.canonicalAssignmentId
+  )
+  const allocated = preferred || rows.find((row: any) =>
+    String(row.id) !== input.canonicalAssignmentId
+  )
+
+  // Explicit allocation owns the assignment ledger. If it races the non-lead
+  // report-provenance row, retain the real scheduled allocation and remove only
+  // the exact canonical row this seam is allowed to create. Both writers call
+  // this after their committed insert, so whichever commits second observes and
+  // resolves the pair without a new database constraint.
+  if (canonical && allocated) {
+    const { error: deleteErr } = await client
+      .from('job_assignments')
+      .delete()
+      .eq('id', canonical.id)
+    if (deleteErr) {
+      throw new ApiError(
+        `MakeSafe duplicate reporting assignment reconciliation failed: ${deleteErr.message || deleteErr}`,
+        500,
+      )
+    }
+    return { assignment: allocated, created: false }
+  }
+
+  const survivor = allocated || canonical || rows[0] || null
+  if (!survivor) {
+    throw new ApiError('MakeSafe submitter assignment reconciliation found no binding', 500)
+  }
+  return {
+    assignment: survivor,
+    created: input.canonicalCreated && String(survivor.id) === input.canonicalAssignmentId,
+  }
+}
+
+async function ensureMakesafeReportSubmitterAssignment(
+  client: any,
+  input: {
+    canonicalAssignmentId: string
+    jobId: string
+    userId: string
+    attendanceCycleId: string
+    cycleNumber: number
+    completedAt: string
+  },
+): Promise<{ assignment: any; created: boolean }> {
+  const readExactBinding = async () => await client
+    .from('job_assignments')
+    .select('id, job_id, user_id, status, role, is_lead, notes, scheduled_date, assignment_type, attendance_cycle_id, cycle_attribution')
+    .eq('job_id', input.jobId)
+    .eq('user_id', input.userId)
+    .eq('attendance_cycle_id', input.attendanceCycleId)
+    .eq('cycle_attribution', 'bound')
+    .neq('status', 'cancelled')
+
+  const existing = await readExactBinding()
+  if (existing.error) {
+    throw new ApiError(
+      `MakeSafe submitter assignment check failed: ${existing.error.message || existing.error}`,
+      500,
+    )
+  }
+  if ((existing.data || []).some((row: any) => isGenuineTradeAssignment(row))) {
+    return reconcileMakesafeReportBindingWithAllocation(client, {
+      jobId: input.jobId,
+      userId: input.userId,
+      attendanceCycleId: input.attendanceCycleId,
+      canonicalAssignmentId: input.canonicalAssignmentId,
+      canonicalCreated: false,
+    })
+  }
+
+  // The authoritative attendance-cycle UUID is also the auto-binding UUID.
+  // Existing report UUIDs predate this invariant and are not guaranteed to
+  // equal the cycle UUID, while every allocation writer already knows the
+  // cycle. This shared key makes report/allocation races converge on one row.
+  const { data: inserted, error: insertErr } = await client
+    .from('job_assignments')
+    .insert({
+      id: input.canonicalAssignmentId,
+      job_id: input.jobId,
+      user_id: input.userId,
+      attendance_cycle_id: input.attendanceCycleId,
+      cycle_attribution: 'bound',
+      role: 'crew',
+      is_lead: false,
+      status: 'complete',
+      completed_at: input.completedAt,
+      notes: `${MAKESAFE_REPORT_BINDING_NOTE} (cycle ${input.cycleNumber}); not an intake allocation`,
+    })
+    .select('id, job_id, user_id, status, attendance_cycle_id, cycle_attribution')
+    .single()
+
+  if (!insertErr) {
+    return reconcileMakesafeReportBindingWithAllocation(client, {
+      jobId: input.jobId,
+      userId: input.userId,
+      attendanceCycleId: input.attendanceCycleId,
+      canonicalAssignmentId: input.canonicalAssignmentId,
+      canonicalCreated: true,
+    })
+  }
+  if (insertErr.code !== '23505') {
+    throw new ApiError(
+      `MakeSafe submitter assignment failed: ${insertErr.message || insertErr}`,
+      500,
+    )
+  }
+
+  const { data: raced, error: racedErr } = await client
+    .from('job_assignments')
+    .select('id, job_id, user_id, status, attendance_cycle_id, cycle_attribution')
+    .eq('id', input.canonicalAssignmentId)
+    .maybeSingle()
+  const racedMatches = raced &&
+    String(raced.job_id) === input.jobId &&
+    String(raced.user_id) === input.userId &&
+    String(raced.attendance_cycle_id) === input.attendanceCycleId &&
+    String(raced.cycle_attribution || '') === 'bound' &&
+    isGenuineTradeAssignment(raced)
+  if (racedErr || !racedMatches) {
+    throw new ApiError(
+      'MakeSafe submitter assignment conflict did not resolve to the authoritative report binding',
+      409,
+    )
+  }
+  return reconcileMakesafeReportBindingWithAllocation(client, {
+    jobId: input.jobId,
+    userId: input.userId,
+    attendanceCycleId: input.attendanceCycleId,
+    canonicalAssignmentId: input.canonicalAssignmentId,
+    canonicalCreated: false,
+  })
+}
+
+function normalizeMakesafeReportStatus(status: unknown): 'draft' | 'submitted' {
+  const normalized = String(status || 'submitted').trim().toLowerCase()
+  if (normalized === 'draft' || normalized === 'submitted') {
+    return normalized
+  }
+  throw new ApiError('MakeSafe report status must be draft or submitted', 400)
+}
+
+async function submitMakesafeReport(
+  client: any,
+  body: any,
+  access?: TradeJobAccessContext,
+) {
   const {
     job_id, jobId, userId, user_id,
     arrival_time, damage_description, damage_cause,
     work_done, materials_used, labour_hours, trade_count,
     access_issues, follow_up_required, invoice_notes,
     job_type, job_type_detail, makesafe_type_detail,
+    checklist, notes: serviceReportNotes, signatureData, signatureName,
+    weather, start_time, end_time, variations,
     status: reportStatus,
   } = body
   const jId = job_id || jobId
   const uId = userId || user_id || null
   if (!jId) throw new Error('job_id required')
-  await assertMakesafeJob(client, jId)
-  const submittingFinal = (reportStatus || 'submitted') === 'submitted'
+  const normalizedReportStatus = normalizeMakesafeReportStatus(reportStatus)
+  const submittingFinal = normalizedReportStatus !== 'draft'
   // Captain D1: a final report is always attributable. Trade JWT dispatch
   // supplies this server-side; privileged callers must supply an actor too.
   // Refuse before attendance-cycle creation or any other write.
@@ -17089,6 +17326,18 @@ async function submitMakesafeReport(client: any, body: any) {
     throw new ApiError(
       'user_id required for final MakeSafe report attribution',
       400,
+    )
+  }
+  const reportJob = await assertMakesafeJob(client, jId, access)
+  if (
+    submittingFinal &&
+    (_MAKESAFE_POOL_EXCLUDED_STATUSES as readonly string[]).includes(
+      String(reportJob.status || '').toLowerCase(),
+    )
+  ) {
+    throw new ApiError(
+      `cannot submit a final MakeSafe report for a ${String(reportJob.status || '').toLowerCase()} job`,
+      409,
     )
   }
 
@@ -17115,12 +17364,13 @@ async function submitMakesafeReport(client: any, body: any) {
   const currentCycle = (cycleDetail as { cycle_number?: number } | null)?.cycle_number ?? 1
   const detailSubstatus = (cycleDetail as { substatus?: string } | null)?.substatus || null
   const attendanceCycle = await ensureMakesafeAttendanceCycle(client, jId, currentCycle, 'submit_makesafe_report')
+  const syncAt = new Date().toISOString()
 
   const reportFields: Record<string, any> = {
     cycle_number: currentCycle,
     attendance_cycle_id: attendanceCycle.id,
     cycle_attribution: 'bound',
-    checklist_json: {
+    checklist_json: checklist !== undefined ? checklist : {
       arrival_time: arrival_time || '',
       damage_description: damage_description || '',
       job_type: job_type || '',
@@ -17135,16 +17385,22 @@ async function submitMakesafeReport(client: any, body: any) {
       follow_up_required: follow_up_required || false,
       invoice_notes: invoice_notes || '',
     },
-    notes: work_done || null,
-    status: reportStatus || 'submitted',
+    notes: serviceReportNotes !== undefined ? serviceReportNotes || null : work_done || null,
+    status: normalizedReportStatus,
     submitted_by: uId,
-    submitted_at: (reportStatus || 'submitted') === 'submitted' ? new Date().toISOString() : null,
+    submitted_at: submittingFinal ? syncAt : null,
+    ...(signatureName !== undefined ? { signature_name: signatureName || null } : {}),
+    ...(weather !== undefined ? { weather: weather || null } : {}),
+    ...(start_time !== undefined ? { start_time: start_time || null } : {}),
+    ...(end_time !== undefined ? { end_time: end_time || null } : {}),
+    ...(variations !== undefined ? { variations: variations || null } : {}),
   }
 
   // Check for an existing report FOR THIS CYCLE only (cycle-scoped so a prior
   // visit's submitted/approved report is never treated as a duplicate here).
   let { data: existing } = await client.from('job_service_reports')
-    .select('id, status').eq('job_id', jId).eq('cycle_number', currentCycle).limit(1).maybeSingle()
+    .select('id, status, submitted_by, submitted_at, attendance_cycle_id, cycle_attribution')
+    .eq('job_id', jId).eq('cycle_number', currentCycle).limit(1).maybeSingle()
 
   // A report already persisted as 'submitted' whose board sync completed (detail
   // already advanced to the finished substatus) is a genuine duplicate submit and
@@ -17163,6 +17419,36 @@ async function submitMakesafeReport(client: any, body: any) {
   const boardSyncComplete = FINISHED_SUBSTATUSES.includes(detailSubstatus || '')
   let resumingSubmitted = submittingFinal &&
     existing?.status === 'submitted' && !boardSyncComplete
+  const assertResumableSubmissionAuthority = (row: any) => {
+    // A retry is not evidence of who made the original submission. Resume only
+    // a row whose immutable submission-time actor and authoritative cycle were
+    // already persisted; legacy anonymous/unbound rows need explicit recovery.
+    if (!row?.submitted_by) {
+      throw new ApiError(
+        'MakeSafe report retry refused: persisted submission has no immutable actor evidence',
+        409,
+      )
+    }
+    if (String(row.submitted_by) !== String(uId)) {
+      throw new ApiError('MakeSafe report retry actor does not match the persisted submitter', 409)
+    }
+    if (
+      !row.attendance_cycle_id ||
+      String(row.attendance_cycle_id) !== String(attendanceCycle.id) ||
+      String(row.cycle_attribution || '') !== 'bound'
+    ) {
+      throw new ApiError(
+        'MakeSafe report retry refused: persisted submission lacks authoritative current-cycle evidence',
+        409,
+      )
+    }
+  }
+
+  if (existing?.status === 'approved') throw new Error('Report already approved')
+  if (!submittingFinal && existing?.status === 'submitted') {
+    throw new ApiError('A submitted MakeSafe report cannot be downgraded to draft', 409)
+  }
+  if (resumingSubmitted) assertResumableSubmissionAuthority(existing)
   if (submittingFinal) {
     if (existing?.status === 'submitted' && boardSyncComplete) throw new Error('Report already submitted')
     const { data: mediaRows, error: mediaErr } = await client.from('job_media')
@@ -17188,31 +17474,102 @@ async function submitMakesafeReport(client: any, body: any) {
     }
   }
 
+  const canonicalReportId = String(existing?.id || attendanceCycle.id)
+  if (!resumingSubmitted && signatureData !== undefined) {
+    reportFields.signature_data = await persistServiceReportSignature(
+      client,
+      jId,
+      signatureData,
+      canonicalReportId,
+    )
+  }
+
   let report
-  if (!existing) {
+  // Stage a new final report as a cycle-bound draft before creating its actor
+  // binding. Invalid payloads fail above with no business row; assignment
+  // failures leave a visible, recoverable draft rather than a forbidden final
+  // report or an assignment that has no report identity.
+  if (submittingFinal && !existing) {
     const { data, error } = await client.from('job_service_reports')
-      .insert({ job_id: jId, ...reportFields }).select().single()
+      .insert({
+        id: canonicalReportId,
+        job_id: jId,
+        ...reportFields,
+        status: 'draft',
+        submitted_at: null,
+      })
+      .select()
+      .single()
     if (!error) {
       report = data
+      existing = data
     } else if (error.code === '23505') {
       const { data: concurrentExisting, error: concurrentReadErr } = await client
         .from('job_service_reports')
-        .select('id, status')
+        .select('id, status, submitted_by, submitted_at, attendance_cycle_id, cycle_attribution')
         .eq('attendance_cycle_id', attendanceCycle.id)
         .maybeSingle()
       if (concurrentReadErr || !concurrentExisting) throw error
       existing = concurrentExisting
       resumingSubmitted = submittingFinal &&
         existing.status === 'submitted' && !boardSyncComplete
+      if (existing.status === 'approved') throw new Error('Report already approved')
+      if (existing.status === 'submitted' && boardSyncComplete) {
+        throw new Error('Report already submitted')
+      }
+      if (resumingSubmitted) assertResumableSubmissionAuthority(existing)
     } else {
-      throw error
+      throw new ApiError(
+        `MakeSafe final report draft staging failed: ${error.message || error}`,
+        500,
+      )
+    }
+  }
+
+  let assignmentBinding: { assignment: any; created: boolean } | null = null
+  if (submittingFinal) {
+    assignmentBinding = await ensureMakesafeReportSubmitterAssignment(client, {
+      canonicalAssignmentId: attendanceCycle.id,
+      jobId: jId,
+      userId: String(uId),
+      attendanceCycleId: attendanceCycle.id,
+      cycleNumber: currentCycle,
+      completedAt: syncAt,
+    })
+  }
+
+  // Draft saves have no assignment step and insert directly. Final submissions
+  // already have an existing staged/current-cycle report at this point.
+  if (!submittingFinal && !existing) {
+    const { data, error } = await client.from('job_service_reports')
+      .insert({ id: canonicalReportId, job_id: jId, ...reportFields })
+      .select()
+      .single()
+    if (!error) {
+      report = data
+    } else if (error.code === '23505') {
+      const { data: concurrentExisting, error: concurrentReadErr } = await client
+        .from('job_service_reports')
+        .select('id, status, submitted_by, submitted_at, attendance_cycle_id, cycle_attribution')
+        .eq('attendance_cycle_id', attendanceCycle.id)
+        .maybeSingle()
+      if (concurrentReadErr || !concurrentExisting) throw error
+      existing = concurrentExisting
+      if (existing.status === 'approved') throw new Error('Report already approved')
+      if (existing.status === 'submitted') {
+        throw new ApiError('A submitted MakeSafe report cannot be downgraded to draft', 409)
+      }
+    } else {
+      throw new ApiError(
+        `MakeSafe draft persistence failed: ${error.message || error}`,
+        500,
+      )
     }
   }
   if (existing) {
     if (existing.status === 'approved') throw new Error('Report already approved')
     if (resumingSubmitted) {
-      // Preserve the original submission (submitted_by/submitted_at) on a resume
-      // and just re-read the row; the sync steps below are what still need to run.
+      assertResumableSubmissionAuthority(existing)
       const { data, error } = await client.from('job_service_reports')
         .select().eq('id', existing.id).single()
       if (error) throw error
@@ -17220,7 +17577,12 @@ async function submitMakesafeReport(client: any, body: any) {
     } else {
       const { data, error } = await client.from('job_service_reports')
         .update(reportFields).eq('id', existing.id).select().single()
-      if (error) throw error
+      if (error) {
+        throw new ApiError(
+          `${submittingFinal ? 'MakeSafe final report promotion' : 'MakeSafe draft update'} failed: ${error.message || error}`,
+          500,
+        )
+      }
       report = data
     }
   }
@@ -17230,41 +17592,9 @@ async function submitMakesafeReport(client: any, body: any) {
   let eventSync: any = null
   const warnings: string[] = []
   if (submittingFinal) {
-    const syncAt = new Date().toISOString()
-
-    // Captain D1: allocation never gates report-in. When a genuine final report
-    // arrives on a card with no assignment row at all, record the submitter as
-    // the completed lead so the crew ledger tells the same operational story.
-    // Existing assignments are never replaced or duplicated.
-    const { data: assignmentRows, error: assignmentReadErr } = await client
-      .from('job_assignments')
-      .select('id')
-      .eq('job_id', jId)
-      .limit(1)
-    if (assignmentReadErr) {
-      throw new ApiError(`MakeSafe report saved but submitter assignment check failed: ${assignmentReadErr.message || assignmentReadErr}`, 500)
-    }
-    let autoAssignment: any = null
-    if ((assignmentRows || []).length === 0) {
-      const { data: insertedAssignment, error: assignmentInsertErr } = await client
-        .from('job_assignments')
-        .insert({
-          job_id: jId,
-          user_id: uId,
-          attendance_cycle_id: attendanceCycle.id,
-          cycle_attribution: 'bound',
-          role: 'lead_installer',
-          status: 'complete',
-          completed_at: syncAt,
-          notes: `Auto-assigned from final MakeSafe report submission (cycle ${currentCycle})`,
-        })
-        .select('id, user_id, status')
-        .single()
-      if (assignmentInsertErr) {
-        throw new ApiError(`MakeSafe report saved but submitter auto-assignment failed: ${assignmentInsertErr.message || assignmentInsertErr}`, 500)
-      }
-      autoAssignment = insertedAssignment
-    }
+    const autoAssignment = assignmentBinding?.created
+      ? assignmentBinding.assignment
+      : null
 
     const { data: detailSync, error: detailSyncErr } = await client.from('makesafe_job_details')
       .update({
@@ -17319,7 +17649,8 @@ async function submitMakesafeReport(client: any, body: any) {
       if (priorEvent) {
         eventSync = { ok: true, skipped: 'already_logged' }
       } else {
-        const { error: eventErr } = await client.from('job_events').insert({
+        const eventRow = {
+          id: report.id,
           job_id: jId,
           user_id: uId,
           event_type: 'makesafe_report_submitted',
@@ -17334,10 +17665,31 @@ async function submitMakesafeReport(client: any, body: any) {
             cycle_number: currentCycle,
             attendance_cycle_id: attendanceCycle.id,
           },
-        })
+        }
+        const { error: eventErr } = await client.from('job_events').insert(eventRow)
         if (eventErr) {
-          eventSync = { ok: false, error: eventErr.message || String(eventErr) }
-          warnings.push('event_sync_failed')
+          if (eventErr.code === '23505') {
+            const { data: racedEvent, error: racedEventErr } = await client
+              .from('job_events')
+              .select('id, job_id, user_id, event_type, detail_json')
+              .eq('id', report.id)
+              .maybeSingle()
+            const racedEventMatches = racedEvent &&
+              String(racedEvent.job_id) === jId &&
+              String(racedEvent.user_id) === String(uId) &&
+              racedEvent.event_type === 'makesafe_report_submitted' &&
+              String(racedEvent.detail_json?.report_id) === String(report.id) &&
+              String(racedEvent.detail_json?.attendance_cycle_id) === attendanceCycle.id
+            if (!racedEventErr && racedEventMatches) {
+              eventSync = { ok: true, skipped: 'concurrent_already_logged' }
+            } else {
+              eventSync = { ok: false, error: 'event conflict did not resolve to this report' }
+              warnings.push('event_sync_failed')
+            }
+          } else {
+            eventSync = { ok: false, error: eventErr.message || String(eventErr) }
+            warnings.push('event_sync_failed')
+          }
         } else {
           eventSync = { ok: true }
         }
@@ -23998,7 +24350,7 @@ export async function allocateJob(client: any, args: {
   let sourceAssignment: any = null
   if (reassignId) {
     const { data: a } = await client.from('job_assignments')
-      .select('id, job_id, user_id, scheduled_date, scheduled_end, start_time, end_time, assignment_type, crew_name, role, status')
+      .select('id, job_id, user_id, scheduled_date, scheduled_end, start_time, end_time, assignment_type, crew_name, role, status, attendance_cycle_id, cycle_attribution')
       .eq('id', reassignId).maybeSingle()
     if (!a) throw new ApiError('assignment not found', 404)
     sourceAssignment = a
@@ -24035,6 +24387,20 @@ export async function allocateJob(client: any, args: {
   // same row so scheduled_date / times / history are preserved unless overridden.
   if (reassignId) {
     if (sourceAssignment.user_id === targetUserId) {
+      if (
+        sourceAssignment.attendance_cycle_id &&
+        sourceAssignment.cycle_attribution === 'bound' &&
+        isGenuineTradeAssignment(sourceAssignment)
+      ) {
+        await reconcileMakesafeReportBindingWithAllocation(client, {
+          jobId,
+          userId: String(targetUserId),
+          attendanceCycleId: String(sourceAssignment.attendance_cycle_id),
+          canonicalAssignmentId: String(sourceAssignment.attendance_cycle_id),
+          canonicalCreated: false,
+          preferredAssignmentId: String(sourceAssignment.id),
+        })
+      }
       return { ok: true, mode: 'reassign', deduped: true, assignment: sourceAssignment } // already on this installer
     }
     const updateBody: any = { assignmentId: reassignId, userId: targetUserId }
@@ -24055,10 +24421,20 @@ export async function allocateJob(client: any, args: {
   // Idempotency against double-taps: an existing non-cancelled assignment for the
   // same job + installer + date returns instead of inserting a duplicate.
   const { data: dup } = await client.from('job_assignments')
-    .select('id, scheduled_date, user_id, status, assignment_type')
+    .select('id, scheduled_date, user_id, status, assignment_type, attendance_cycle_id, cycle_attribution')
     .eq('job_id', jobId).eq('user_id', targetUserId).eq('scheduled_date', sDate)
     .neq('status', 'cancelled').limit(1)
   if (dup && dup.length > 0) {
+    if (dup[0].attendance_cycle_id && dup[0].cycle_attribution === 'bound') {
+      await reconcileMakesafeReportBindingWithAllocation(client, {
+        jobId,
+        userId: String(targetUserId),
+        attendanceCycleId: String(dup[0].attendance_cycle_id),
+        canonicalAssignmentId: String(dup[0].attendance_cycle_id),
+        canonicalCreated: false,
+        preferredAssignmentId: String(dup[0].id),
+      })
+    }
     return { ok: true, mode: 'idempotent', deduped: true, assignment: dup[0] }
   }
 
@@ -24137,6 +24513,42 @@ export async function createAssignment(client: any, body: any) {
       const cycle = await ensureMakesafeAttendanceCycle(client, jId, Number(makesafeDetail.cycle_number || 1), 'allocate_job')
       insertRow.attendance_cycle_id = cycle.id
       insertRow.cycle_attribution = 'bound'
+    }
+  }
+
+  // The ops dashboard may call create_assignment directly rather than through
+  // allocateJob. Give that live MakeSafe caller the same exact-date/current-
+  // cycle idempotency so a retry after reconciliation failure cannot insert or
+  // notify a second explicit allocation.
+  if (isMakesafe && insertRow.attendance_cycle_id && insertRow.user_id) {
+    const { data: exactDateRows, error: exactDateErr } = await client
+      .from('job_assignments')
+      .select('id, job_id, user_id, status, role, assignment_type, scheduled_date, attendance_cycle_id, cycle_attribution')
+      .eq('job_id', jId)
+      .eq('user_id', insertRow.user_id)
+      .eq('scheduled_date', sDate)
+      .eq('attendance_cycle_id', insertRow.attendance_cycle_id)
+      .eq('cycle_attribution', 'bound')
+      .neq('status', 'cancelled')
+    if (exactDateErr) {
+      throw new ApiError(
+        `MakeSafe assignment idempotency check failed: ${exactDateErr.message || exactDateErr}`,
+        500,
+      )
+    }
+    const exactDuplicate = (exactDateRows || []).find((row: any) =>
+      isGenuineTradeAssignment(row)
+    )
+    if (exactDuplicate) {
+      await reconcileMakesafeReportBindingWithAllocation(client, {
+        jobId: jId,
+        userId: String(insertRow.user_id),
+        attendanceCycleId: String(insertRow.attendance_cycle_id),
+        canonicalAssignmentId: String(insertRow.attendance_cycle_id),
+        canonicalCreated: false,
+        preferredAssignmentId: String(exactDuplicate.id),
+      })
+      return { assignment: exactDuplicate, deduped: true }
     }
   }
 
@@ -24278,6 +24690,21 @@ export async function createAssignment(client: any, body: any) {
     headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
   }).catch(() => {})
 
+  // Reconcile only after the existing allocation status, event and notification
+  // contract has run. If cleanup fails, the caller gets a visible/retryable
+  // error, but a committed allocation never permanently skips those side
+  // effects. allocateJob's idempotent retry performs the same reconciliation.
+  if (isMakesafe && insertRow.attendance_cycle_id && insertRow.user_id && data?.id) {
+    await reconcileMakesafeReportBindingWithAllocation(client, {
+      jobId: jId,
+      userId: String(insertRow.user_id),
+      attendanceCycleId: String(insertRow.attendance_cycle_id),
+      canonicalAssignmentId: String(insertRow.attendance_cycle_id),
+      canonicalCreated: false,
+      preferredAssignmentId: String(data.id),
+    })
+  }
+
   return { assignment: data }
 }
 
@@ -24288,7 +24715,7 @@ export async function updateAssignment(client: any, body: any) {
   // Capture old state for dual-write
   const { data: oldAssignment } = await client
     .from('job_assignments')
-    .select('confirmation_status, scheduled_date, crew_name, job_id')
+    .select('confirmation_status, scheduled_date, crew_name, job_id, user_id, status, role, assignment_type, attendance_cycle_id, cycle_attribution')
     .eq('id', id)
     .single()
 
@@ -24315,7 +24742,12 @@ export async function updateAssignment(client: any, body: any) {
     const { data: makesafeDetail, error: makesafeDetailErr } = await client.from('makesafe_job_details')
       .select('cycle_number').eq('job_id', oldAssignment.job_id).maybeSingle()
     if (makesafeDetailErr) throw makesafeDetailErr
-    if (makesafeDetail) {
+    // Existing bound assignments are immutable attendance history. Only bind a
+    // legacy/unbound row on update; never rewrite an earlier cycle onto the
+    // current reattendance cycle merely because its date or assignee changed.
+    const alreadyCycleBound = oldAssignment.attendance_cycle_id &&
+      oldAssignment.cycle_attribution === 'bound'
+    if (makesafeDetail && !alreadyCycleBound) {
       const cycle = await ensureMakesafeAttendanceCycle(client, oldAssignment.job_id, Number(makesafeDetail.cycle_number || 1), 'assignment_reassign')
       update.attendance_cycle_id = cycle.id
       update.cycle_attribution = 'bound'
@@ -24415,6 +24847,24 @@ export async function updateAssignment(client: any, body: any) {
     } catch (e) {
       console.log('[ops-api] GHL reschedule push failed (non-blocking):', e)
     }
+  }
+
+  // Reassignment can move an existing current-cycle allocation onto the actor
+  // who already owns the report-provenance row. Converge that path after the
+  // existing update side effects just like createAssignment does, retaining the
+  // explicit scheduled row and removing only the canonical non-lead binding.
+  if (
+    data?.job_id && data?.user_id && data?.attendance_cycle_id &&
+    data?.cycle_attribution === 'bound' && isGenuineTradeAssignment(data)
+  ) {
+    await reconcileMakesafeReportBindingWithAllocation(client, {
+      jobId: String(data.job_id),
+      userId: String(data.user_id),
+      attendanceCycleId: String(data.attendance_cycle_id),
+      canonicalAssignmentId: String(data.attendance_cycle_id),
+      canonicalCreated: false,
+      preferredAssignmentId: String(data.id),
+    })
   }
 
   return { assignment: data, all_complete: allComplete, suggest_status: suggestStatus, job_id: data?.job_id }
@@ -29029,9 +29479,17 @@ async function assertAssignedOrMakesafeAccess(
 }
 export const _assertAssignedOrMakesafeAccessForTest = assertAssignedOrMakesafeAccess
 
-async function assertMakesafeJob(client: any, jobId: string) {
+async function assertMakesafeJob(
+  client: any,
+  jobId: string,
+  access?: TradeJobAccessContext,
+) {
   const job = await getTradeJobForAccess(client, jobId)
+  if (access?.orgId && String(job.org_id || '') !== access.orgId) {
+    throw new Error('You are not authorized to access this job')
+  }
   if (!(await isMakesafeAccessJobForClient(client, job))) throw new Error('MakeSafe job required')
+  return job
 }
 
 export function _isMakesafeAccessJobForTest(job: any): boolean {
@@ -31358,7 +31816,11 @@ async function opsAttachJobPhoto(client: any, body: any) {
 
 export const _normaliseOpsAttachJobPhotoInputForTest = normaliseOpsAttachJobPhotoInput
 
-async function submitServiceReport(client: any, body: any) {
+async function submitServiceReport(
+  client: any,
+  body: any,
+  access?: TradeJobAccessContext,
+) {
   const { jobId, job_id, userId, user_id, checklist, notes, signatureData, signatureName, status, weather, start_time, end_time, variations } = body
   const jId = jobId || job_id
   if (!jId) throw new Error('jobId required')
@@ -31366,31 +31828,25 @@ async function submitServiceReport(client: any, body: any) {
   const reportStatus = status || 'submitted'
   const uId = userId || user_id || null
 
+  // The deployed Trade UI still has a generic service-report caller. Route every
+  // MakeSafe status through the dedicated authority seam so that caller remains
+  // compatible without retaining a job-global/cycleless write path. Ordinary
+  // service reports continue below unchanged.
+  const reportJob = await getTradeJobForAccess(client, jId)
+  if (await isMakesafeAccessJobForClient(client, reportJob)) {
+    return submitMakesafeReport(client, {
+      ...body,
+      job_id: jId,
+      userId: uId,
+      status: reportStatus,
+    }, access)
+  }
+
   // Verify user is assigned, or this is a MakeSafe/SWMS field-report job.
-  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId)
+  if (uId) await assertAssignedOrMakesafeAccess(client, jId, uId, false, access)
 
   // Upload signature to storage if provided (instead of storing base64 in DB)
-  let signatureUrl: string | null = null
-  if (signatureData && signatureData.startsWith('data:')) {
-    const base64 = signatureData.split(',')[1]
-    const bytes = Uint8Array.from(atob(base64), (c: string) => c.charCodeAt(0))
-    const sigId = crypto.randomUUID()
-    const path = `${DEFAULT_ORG_ID}/${jId}/signatures/${sigId}.png`
-
-    try { await client.storage.createBucket('job-photos', { public: true }) } catch { /* exists */ }
-
-    const { error: uploadErr } = await client.storage
-      .from('job-photos')
-      .upload(path, bytes, { contentType: 'image/png', upsert: false })
-
-    if (!uploadErr) {
-      const { data: urlData } = client.storage.from('job-photos').getPublicUrl(path)
-      signatureUrl = urlData.publicUrl
-    }
-  } else if (signatureData) {
-    // Already a URL (re-submission of existing report)
-    signatureUrl = signatureData
-  }
+  const signatureUrl = await persistServiceReportSignature(client, jId, signatureData)
 
   // Prevent overwriting an approved report
   const { data: existing } = await client
@@ -31471,6 +31927,7 @@ async function submitServiceReport(client: any, body: any) {
 
   return { report }
 }
+export const _submitServiceReportForTest = submitServiceReport
 
 async function getServiceReport(client: any, params: URLSearchParams, userId: string) {
   const jobId = params.get('jobId')
