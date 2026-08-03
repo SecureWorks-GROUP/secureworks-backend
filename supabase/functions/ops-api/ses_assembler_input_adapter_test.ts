@@ -1820,8 +1820,10 @@ Deno.test(
       attendance_cycle_id: cycleId,
       cycle_attribution: "bound",
       data_snapshot_json: {
+        evidence_source: "current_cycle_curated_makesafe_report",
+        source_document_id: "curated-report",
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
         report_render_hash: "a".repeat(64),
       },
     });
@@ -1839,6 +1841,8 @@ Deno.test(
       attendance_cycle_id: cycleId,
       cycle_attribution: "bound",
       data_snapshot_json: {
+        evidence_source: "current_cycle_curated_makesafe_report",
+        source_document_id: "authoritative-report",
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
         report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
         report_render_hash: "b".repeat(64),
