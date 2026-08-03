@@ -19,6 +19,7 @@ import {
   buildDeterministicIntakePlan,
   DETERMINISTIC_INTAKE_VERSION,
 } from "./makesafe_deterministic_intake.ts";
+import { MAKESAFE_REASON_CODES } from "../_shared/makesafe_intake_case_model.ts";
 import {
   signSyntheticLivefireMarker,
   SYNTHETIC_LIVEFIRE_MARKER_PREFIX,
@@ -3850,6 +3851,125 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
     store.emails.find((e) => e.post_id === "good-1")?.makesafe_scanned_at,
     NOW,
   );
+});
+
+Deno.test("a rejected primary case insert falls back to a visible reason-coded case", async () => {
+  const store = baseStore();
+  store.emails.push(
+    email({
+      post_id: "case-insert-failure",
+      received_at: "2026-08-03T04:07:07.000Z",
+      subject: "NEW WORK ORDER MLB-59304 Work Order: MLB-RR-59304 PO: PO-59304",
+      body_content:
+        "Client: Persistence Boundary\nAddress: 4 Visible Way, Perth\nPlease attend and make safe the property.",
+    }),
+  );
+  store.email_attachments.push({
+    id: "att-case-insert-failure",
+    email_id: "case-insert-failure",
+    name: "work-order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/case-insert-failure.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+
+  let primaryInsertRejected = false;
+  let approvalCalls = 0;
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    () =>
+      digitalWorkOrderPdf([
+        "Work Order Number MLB-RR-59304 PO-59304",
+        "Policyholders Name Persistence Boundary",
+        "Site Address 4 Visible Way Perth WA",
+        "Scope of Works Attend and make the property safe",
+      ]),
+    (table, operation, payload) => {
+      if (
+        table === "makesafe_intake_cases" && operation === "insert" &&
+        !primaryInsertRejected &&
+        payload.last_decision_reason !==
+          "deterministic source_persist_failed case_insert"
+      ) {
+        primaryInsertRejected = true;
+        return {
+          code: "23514",
+          message: "primary deterministic case shape rejected",
+        };
+      }
+      return null;
+    },
+  );
+
+  const report = await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["case-insert-failure"],
+    maxCases: 1,
+    nowIso: NOW,
+    approveDraft: () => {
+      approvalCalls++;
+      return Promise.resolve({ job: { id: "must-not-mint" } });
+    },
+  });
+
+  assertEquals(primaryInsertRejected, true);
+  assertEquals(report.write_failure_reasons.case_insert, 1);
+  assertEquals(report.totals.write_failures, 1);
+  assertEquals(report.totals.cases_failed, 1);
+  assertEquals(report.totals.case_rows_created, 1);
+  assertEquals(report.totals.source_rows_created, 1);
+  assertEquals(report.totals.jobs_created, 0);
+  assertEquals(approvalCalls, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_cases[0].state, "exception");
+  assertEquals(
+    store.makesafe_intake_cases[0].reason_code,
+    "adapter_parse_failure",
+  );
+  assertEquals(
+    MAKESAFE_REASON_CODES.includes(store.makesafe_intake_cases[0].reason_code),
+    true,
+  );
+  assertEquals(
+    store.makesafe_intake_cases[0].last_decision_reason,
+    "deterministic source_persist_failed case_insert",
+  );
+  assertEquals(store.makesafe_intake_cases[0].job_id, null);
+  assertEquals(store.makesafe_intake_case_sources.length, 1);
+  assertEquals(
+    store.makesafe_intake_case_sources[0].post_id,
+    "case-insert-failure",
+  );
+  const issue = store.email_events_raw.find((row) =>
+    row.change_type === "intake_exception_source_persist_failed"
+  );
+  assertEquals(issue?.page_meta?.case_id, store.makesafe_intake_cases[0].id);
+  assertEquals(
+    store.emails.find((row) => row.post_id === "case-insert-failure")
+      ?.makesafe_scanned_at,
+    null,
+  );
+
+  const rerun = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["case-insert-failure"],
+    maxCases: 1,
+    nowIso: NOW,
+    approveDraft: () => {
+      approvalCalls++;
+      return Promise.resolve({ job: { id: "must-not-mint-on-replay" } });
+    },
+  });
+  assertEquals(rerun.totals.cases_attempted, 0);
+  assertEquals(rerun.totals.jobs_created, 0);
+  assertEquals(approvalCalls, 0);
+  assertEquals(store.makesafe_intake_cases.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 1);
 });
 
 Deno.test("repeat failures are deprioritised on the next run", async () => {
