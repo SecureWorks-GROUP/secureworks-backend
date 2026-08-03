@@ -1999,6 +1999,7 @@ function rawReportHash(value: unknown): SesSha256 | null {
 function physicalReportSourceForCycle(
   snapshot: SesAssemblerLiveSnapshot,
   currentCycleId: string,
+  reportDocumentId?: string,
 ): PhysicalReportSource | null {
   const revisions = new Map(
     (snapshot.docket_revisions || []).map((row) => [text(row.id), row]),
@@ -2020,6 +2021,7 @@ function physicalReportSourceForCycle(
     ) continue;
     const metadata = record(artifact.metadata);
     const document = documents.get(text(metadata.report_document_id));
+    if (reportDocumentId && text(document?.id) !== reportDocumentId) continue;
     const provenance = record(document?.data_snapshot_json);
     const expectedRawSha256 = rawReportHash(
       metadata.output_sha256 || metadata.render_hash,
@@ -2079,8 +2081,10 @@ function physicalReportSourceForCycle(
 export function selectPhysicalReportProofForCycle(
   snapshot: SesAssemblerLiveSnapshot,
   currentCycleId: string,
+  reportDocumentId?: string,
 ): SesPhysicalReportProof | null {
-  return physicalReportSourceForCycle(snapshot, currentCycleId)?.proof || null;
+  return physicalReportSourceForCycle(snapshot, currentCycleId, reportDocumentId)
+    ?.proof || null;
 }
 
 /**
@@ -2521,6 +2525,7 @@ export function createSesAssemblerRuntimeDependencies(
       return selectPhysicalReportProofForCycle(
         siblingSnapshot,
         siblingCycleId,
+        bundle.coverage.report_document_id,
       );
     },
     renderBundledPhysicalReport: async (input, proof) => {
@@ -2533,6 +2538,7 @@ export function createSesAssemblerRuntimeDependencies(
       const source = physicalReportSourceForCycle(
         siblingSnapshot,
         text(siblingSnapshot.detail?.attendance_cycle_id),
+        bundle.coverage.report_document_id,
       );
       if (!source || source.proof.source_identity !== proof.source_identity) {
         return null;
