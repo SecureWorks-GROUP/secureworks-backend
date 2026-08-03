@@ -2,7 +2,8 @@
 
 **Branch:** `fm/ses-readiness-gate-drop-v1`
 **Captain's ruling:** `data/decisions/2026-08-03-captain-drops-the-readiness-precondition.md` (firstmate home) — option 3, drop the precondition, never assert readiness. Extended the same day, via FirstMate, to the third instance on the approval path.
-**Status:** implementation complete. **Three** unsatisfiable readiness gates dropped, none asserted. Live mint on SWMS-261109 deliberately deferred to post-merge (section 9.1).
+**Status:** implementation complete, **PR #511 open with CI green**. Three unsatisfiable readiness gates dropped, none asserted. Live mint on SWMS-261109 deliberately deferred to post-merge (section 9.1).
+**PR:** https://github.com/SecureWorks-GROUP/secureworks-backend/pull/511 — pipeline run `01KZ2FFG1WBVYBH8HNYY2R3W4P`, **zero findings at every step** (intent, rebase, review, test, document, lint, push, pr, ci). The one pipeline commit, `8ada542`, condensed the `AGENTS.md` entry to a pointer at this report, per that file's own "point to the authoritative file" bar.
 
 **The three things worth reading first**
 
