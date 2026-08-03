@@ -22,6 +22,11 @@
 // the reference printed on the board, and a job number that does not resolve is
 // refused loudly instead of a mistyped uuid silently selecting another card.
 
+import {
+  type MakesafeJobIdentityReadModel,
+  projectMakesafeJobIdentity,
+} from "./makesafe_job_identity_read_model.ts";
+
 /** Selection contract published in the response and hashed into the run. */
 export const MAKESAFE_STATE_SEED_SCOPE_CONTRACT =
   "makesafe-state-authority-seed-scoped.v1";
@@ -252,6 +257,7 @@ export interface SesSpineFacts {
   source_instruction_present: boolean;
   source_content_hash_present: boolean;
   spine_complete: boolean;
+  job_identity: MakesafeJobIdentityReadModel;
   canonical_builder_reference: string | null;
   candidate_builder_reference: string | null;
   builder_reference_authority:
@@ -290,6 +296,11 @@ export interface SesSpineReviewQueue {
       reason_state: SesSpineFacts["reason_state"];
       count: number;
       items: SesSpineFacts[];
+      work_order_groups: Array<{
+        work_order_number: string | null;
+        count: number;
+        items: SesSpineFacts[];
+      }>;
     }>;
   }>;
 }
@@ -323,6 +334,8 @@ export function deriveSesSpineFacts(input: {
   cases: readonly SesSpineCaseRow[];
   identity_revision: SesSpineIdentityRow | null | undefined;
   detail_builder_reference?: unknown;
+  requesting_company_slug?: unknown;
+  job_metadata?: Record<string, unknown> | null;
 }): SesSpineFacts {
   const liveCases = input.cases.filter((item) =>
     LIVE_CASE_STATES.has(text(item.state))
@@ -362,6 +375,26 @@ export function deriveSesSpineFacts(input: {
     : builderReferenceAuthority === "legacy_job_record"
     ? detailBuilderReference
     : null;
+  const jobMetadata = input.job_metadata || {};
+  const jobIdentity = sourceCase
+    ? projectMakesafeJobIdentity({
+      builder_claim_ref: sourceCase.external_ref_canonical,
+      builder_work_order_number: sourceCase.builder_wo_canonical,
+      builder_po_number: sourceCase.builder_po_canonical,
+      requesting_company_slug: input.requesting_company_slug,
+      family: jobMetadata.makesafe_job_family,
+      authority: "intake_case",
+    })
+    : builderReferenceAuthority === "legacy_job_record"
+    ? projectMakesafeJobIdentity({
+      builder_claim_ref: jobMetadata.builder_claim_ref,
+      builder_work_order_number: jobMetadata.builder_work_order_number,
+      builder_po_number: jobMetadata.builder_po_number,
+      requesting_company_slug: input.requesting_company_slug,
+      family: jobMetadata.makesafe_job_family,
+      authority: "typed_job_metadata",
+    })
+    : projectMakesafeJobIdentity({ authority: "none" });
   const spineComplete = Boolean(
     lineageId && jobId && sourceContentHash && sourceInstruction,
   );
@@ -439,6 +472,7 @@ export function deriveSesSpineFacts(input: {
     source_instruction_present: Boolean(sourceInstruction),
     source_content_hash_present: Boolean(sourceContentHash),
     spine_complete: spineComplete,
+    job_identity: jobIdentity,
     canonical_builder_reference: canonicalBuilderReference,
     candidate_builder_reference: canonicalBuilderReference
       ? null
@@ -484,6 +518,22 @@ export function groupSesSpineFactsForReview(
             reason_state: reasonState,
             count: items.length,
             items,
+            work_order_groups: [
+              ...new Set(
+                items.map((item) => item.job_identity.work_order_number),
+              ),
+            ].sort((left, right) =>
+              String(left || "").localeCompare(String(right || ""))
+            ).map((workOrderNumber) => {
+              const groupedItems = items.filter((item) =>
+                item.job_identity.work_order_number === workOrderNumber
+              );
+              return {
+                work_order_number: workOrderNumber,
+                count: groupedItems.length,
+                items: groupedItems,
+              };
+            }),
           };
         }),
       }];

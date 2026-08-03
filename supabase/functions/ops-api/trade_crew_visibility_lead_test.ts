@@ -320,6 +320,32 @@ Deno.test("assigned installer gets a readable scope summary", async () => {
   );
 });
 
+Deno.test("trade per-job contract exposes typed WO grouping and PO grain without metadata", async () => {
+  const tables = seed();
+  tables.jobs[0].type = "makesafe";
+  tables.jobs[0].job_number = "SWMS-900001";
+  tables.jobs[0].metadata = {
+    builder_claim_ref: "MLB-10001",
+    builder_work_order_number: "MLB-10001PO-40001",
+    builder_po_number: "PO-40001",
+    makesafe_job_family: "general_makesafe",
+  };
+  tables.makesafe_job_details = [{
+    job_id: JOB_ID,
+    requesting_company_slug: "mlb",
+  }];
+  const detail: any = await detailFor(tables);
+  assertEquals(detail.job.metadata, undefined);
+  assertEquals(detail.job_identity, {
+    contract: "makesafe-job-identity.v1",
+    work_order_number: "MLB-10001",
+    purchase_order_number: "PO-40001",
+    job_grain_key: "MLB:PO-40001",
+    complete: true,
+    authority: "typed_job_metadata",
+  });
+});
+
 Deno.test("assigned installer gets EVERY live work order, not just the newest", async () => {
   const d: any = await detailFor(seed());
   assertEquals(d.workOrders.length, 2);

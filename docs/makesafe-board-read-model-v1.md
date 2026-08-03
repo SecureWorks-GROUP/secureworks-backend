@@ -95,6 +95,10 @@ Every card originates as one canonical job row with:
 - `report`: state, submitted date, current cycle and completion photo count
 - `pack`: draft/send state and close-out document presence
 - `notes[]`: the two-way human note thread, without internal system markers
+- `job_identity`: versioned, persisted typed identity with `work_order_number`
+  as the related-job group, `purchase_order_number` as the job grain, and the
+  canonical `job_grain_key`; this projection never parses attachment names or
+  legacy composite references at render time
 - `lineage`: same-property claim key, intake lineage, one-card-per-PO identity and sibling links
 - `age`: current age, target, hard maximum and overdue state
 - `blockers.real[]` and `blockers.stale_artifacts[]` as separate facts

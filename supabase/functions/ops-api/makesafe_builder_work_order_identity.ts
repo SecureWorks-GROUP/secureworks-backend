@@ -64,6 +64,18 @@ export function hasUnparseablePoLabel(text: string): boolean {
 }
 
 /**
+ * Approval-grade ambiguity check: remove every canonical PO-bearing match, then
+ * reject any loose PO label left behind. Unlike `hasUnparseablePoLabel`, one
+ * valid token cannot mask a second unknown token in the same source string.
+ */
+export function hasUnparseablePoRemainder(text: string): boolean {
+  const withoutCanonical = String(text || "")
+    .replace(new RegExp(BUILDER_REF_WITH_PO_RE.source, "gi"), " ")
+    .replace(new RegExp(PO_RE.source, "gi"), " ");
+  return LOOSE_PO_RE.test(withoutCanonical);
+}
+
+/**
  * True when the text names a PO at all, in any spelling either grammar recognises.
  * Callers reading text that may quote another instruction use this to know a PO is
  * being discussed without adopting its number as their own identity.
@@ -80,6 +92,56 @@ export function hasAnyPoLabel(text: string): boolean {
  */
 function attachmentNameScanText(name: string): string {
   return name.replace(/_/g, " ");
+}
+
+export interface BuilderAttachmentIdentityTokens {
+  builder_claim_refs: string[];
+  builder_po_numbers: string[];
+}
+
+/**
+ * Enumerate every canonical WO/PO token in one attachment name. The ordinary
+ * extractor intentionally returns one identity; intake approval uses this
+ * stricter cardinality view to refuse a name that contains multiple candidates.
+ */
+export function builderIdentityTokensInAttachmentName(
+  value: string | null | undefined,
+): BuilderAttachmentIdentityTokens {
+  const scan = attachmentNameScanText(String(value || ""));
+  const claimRefs = new Set<string>();
+  const purchaseOrders = new Set<string>();
+  for (
+    const match of scan.matchAll(
+      new RegExp(BUILDER_REF_WITH_PO_RE.source, "gi"),
+    )
+  ) {
+    if (isJunkBuilderRef(match[1], match[2])) continue;
+    claimRefs.add(canonicalClaim(match[1], match[2]));
+    purchaseOrders.add(canonicalPo(match[3]));
+  }
+  for (
+    const match of scan.matchAll(new RegExp(BUILDER_REF_RE.source, "gi"))
+  ) {
+    if (!isJunkBuilderRef(match[1], match[2])) {
+      claimRefs.add(canonicalClaim(match[1], match[2]));
+    }
+  }
+  for (const match of scan.matchAll(new RegExp(PO_RE.source, "gi"))) {
+    purchaseOrders.add(canonicalPo(match[1]));
+  }
+  return {
+    builder_claim_refs: [...claimRefs].sort(),
+    builder_po_numbers: [...purchaseOrders].sort(),
+  };
+}
+
+/** Filename-scoped unparseable-PO check with the canonical underscore rule. */
+export function attachmentNameHasUnparseablePoLabel(
+  value: string | null | undefined,
+): boolean {
+  return hasUnparseablePoRemainder(
+    attachmentNameScanText(String(value || "")),
+  );
 }
 
 /**
