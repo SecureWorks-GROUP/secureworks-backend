@@ -345,7 +345,7 @@ Deno.test("family matrix is a closed executable set with the AJS report guard", 
 });
 
 Deno.test(
-  "persisted physical docket uses the recovered curated PDF bytes, never raw checklist prose",
+  "persisted physical docket serves curated PDF bytes while review spec preserves raw trade evidence",
   async () => {
     const row = SES_FAMILY_MATRIX.find((candidate) =>
       candidate.builder_key === "AJBR" &&
@@ -404,6 +404,21 @@ Deno.test(
     assertEquals(
       reportArtifact.metadata.evidence_source,
       "current_cycle_curated_makesafe_report",
+    );
+    assertEquals(result.review_spec.version, SES_DOCKET_REVIEW_SPEC_VERSION);
+    const reviewTradeEvidence = object(reviewCard(result).trade_report);
+    assertEquals(
+      object(reviewTradeEvidence.asserted_written_narrative).work_done,
+      "RAW WORK DONE MUST NOT LEAK",
+    );
+    assertEquals(
+      object(reviewTradeEvidence.asserted_written_narrative).notes,
+      "RAW TRADE NARRATIVE MUST NOT LEAK",
+    );
+    assertEquals(
+      object(object(reviewTradeEvidence.raw_source_evidence).checklist_json)
+        .materials_used,
+      ["RAW CHECKBOX MATERIAL MUST NOT LEAK"],
     );
   },
 );

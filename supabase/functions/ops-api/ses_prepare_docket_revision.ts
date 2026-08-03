@@ -236,6 +236,8 @@ function reviewTradeReport(
 ): Record<string, unknown> | null {
   if (!input.cycle_facts.trade_report) return null;
 
+  // This is reviewer evidence, not builder-facing report copy. The served PDF
+  // remains exclusively bound to the curated artifact recovery path below.
   const report = object(input.cycle_facts.trade_report);
   const checklist = object(report.checklist_json);
   return {
