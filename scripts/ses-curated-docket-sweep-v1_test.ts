@@ -131,9 +131,9 @@ Deno.test("two temp-root renders keep identical input and PDF hashes", async () 
         file: `${root}/photo-1.jpg`,
       }],
     }));
-    await Promise.all(jobs.map((job) =>
-      Deno.writeFile(job.photos[0].file, photoBytes)
-    ));
+    await Promise.all(
+      jobs.map((job) => Deno.writeFile(job.photos[0].file, photoBytes)),
+    );
     assertEquals(
       await stableInputHash(jobs[0]),
       await stableInputHash(jobs[1]),
