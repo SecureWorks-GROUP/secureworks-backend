@@ -1222,50 +1222,13 @@ or a changed adjudication fails. Never re-snapshot it to make a drifted run
 green. Measured blast per release and the standing numbers:
 `docs/evidence/ses-e1-stage-engine-v2-shadow-2026-08-02.md`.
 
-## Readiness Is A Phase-1 Shadow With No Producer, And No Longer Gates Money
+## Readiness gate ruling
 
-`makesafe_readiness_current.ready` has never been true for any card. Its only
-setter is `commit_makesafe_readiness`, whose two callers both refused unless it
-was ALREADY true, and its only row creator (`invalidate_makesafe_readiness`)
-writes false. `makesafe_readiness_revisions` is EMPTY in production against 511
-invalidations — the invalidator shipped, the producer belongs to a phase that
-was never built (`COMMENT ON TABLE`: "Phase 1 compare-only; never a v1 stage
-source"). Consequence: zero invoice obligations existed board-wide.
-
-The captain's 2026-08-03 ruling dropped the precondition from
-`commit_ses_invoice_obligation_revision_v1` and `commit_ses_invoice_bound_docket_v1`
-(`20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql`). **Drop, never
-assert** — writing `ready = true` forges evidence authority on the money path.
-Both functions now propagate readiness only when a prior revision is genuinely
-certified, and skip the re-commit otherwise; the uncertified mint is recorded in
-`makesafe_readiness_invalidations.reason` (join on `dependency_identity` = the
-obligation revision id). Restoring the gate is the rollback twin, and needs a
-Phase-2 producer that derives readiness without a caller-supplied `p_ready`.
-
-The captain extended the same ruling to the third instance,
-`record_ses_revision_approval_v1`
-(`20260803020000_ses_drop_approval_readiness_precondition.sql`). That one is not
-a copy: its single `IF` bundled the unsatisfiable readiness test with a GENUINE
-optimistic-concurrency check on `readiness_revision` / `dependency_generation`,
-which is what its "new evidence landed" message actually describes. The
-readiness half is dropped (INNER JOIN → LEFT JOIN, `ready` tests moved inside a
-certified branch); the freshness half is kept verbatim and is reachable for the
-first time. Dropping the RAISE alone was again insufficient —
-`makesafe_revision_approvals.readiness_revision` was `NOT NULL CHECK (~ sha256)`
-so the INSERT 23502'd; it is relaxed to allow NULL, matching its own neighbour
-`approval_content_hash`, and NULL is now the record of "approved without
-certified readiness".
-
-The ruling stops at RECORDING the approval. The Xero execution gates —
-`makesafe_revision_approvals_current_v2` (`WHERE readiness.ready = true`, plus a
-NULL-unsafe join) and `begin_ses_invoice_execution_v1` /
-`begin_ses_release_execution_v1` — carry the same unsatisfiable test and are
-deliberately untouched, so creating the invoice still refuses pending a separate
-ruling. Contract, measurements and the never-assert proofs:
-`data/ses-readiness-gate-drop-v1/report.md`,
-`ses_readiness_precondition_drop_test.ts` (asserts the EFFECTIVE body — last
-`CREATE OR REPLACE` across migrations in version order — so a re-introduction
-fails it).
+The 2026-08-03 captain ruling is: drop the unsatisfiable readiness precondition,
+never assert readiness, and stop at recording approval. The authoritative
+diagnosis, migration scope, execution boundary, and proofs live in
+`data/ses-readiness-gate-drop-v1/report.md`; the regression/control test is
+`supabase/functions/ops-api/ses_readiness_precondition_drop_test.ts`.
 
 ## Maintaining this file
 
