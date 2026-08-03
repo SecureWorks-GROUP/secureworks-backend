@@ -40,7 +40,7 @@ served docket PDF.
   active curated contract, renderer version and render hash in
   `data_snapshot_json`. Accepted renderer provenance is mechanically pinned to
   secureworks-wiki main revision
-  `8348325bee364b2ddeddd7d853eb28d3178cde5e` and the reviewed authoritative
+  `915e9b423fc597d656c7cb090671bf206138114b` and the reviewed authoritative
   renderer dependency hash recorded by the current docket sweep.
 - `physicalReportRenderJob` now always raises `ses_curated_report_missing`; it
   cannot translate raw checklist fields into report prose.
@@ -54,11 +54,10 @@ served docket PDF.
   the source-byte SHA-256; the renderer runs with `RL_invariant=1`, and the
   attach boundary hashes the same canonical descriptor payload. Apply therefore
   rejects cross-temp-root paths or any other reviewed-input drift.
-- The TypeScript renderer now ports the current curated contract: embedded
-  SecureWorks logo, no billing row, trade-count-only Crew, four required prose
-  sections, commercial-content refusal and one large ordered photo per page.
-  Legacy billing/access/follow-up inputs remain hash-compatible but are ignored
-  by the builder-facing PDF.
+- The TypeScript renderer remains ineligible for current curated evidence. The
+  guarded sweep materializes and runs the pinned current-wiki Python renderer;
+  the TS/jsPDF renderer is retained only as a legacy implementation and must
+  not be treated as authoritative provenance.
 
 No review page/spec, trade-document visibility filter, quote protection,
 attachment bucket, report hash input or submitted trade record was changed.

@@ -18,7 +18,21 @@ import {
 } from "./ses-curated-docket-sweep-v1.ts";
 import { SweepRefusal } from "./ses-curated-docket-sweep-v1-core.ts";
 import { canonicalSesJson } from "../supabase/functions/ops-api/ses_docket_envelope.ts";
-import { canonicalCurrentWikiReportHashPayload } from "../supabase/functions/ops-api/makesafe_report_render.ts";
+import {
+  canonicalCurrentWikiReportHashPayload,
+  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+} from "../supabase/functions/ops-api/makesafe_report_render.ts";
+
+const REAL_RENDERER_DEPENDENCIES = [
+  "scripts/render_makesafe_report.py",
+  "scripts/photo_labeling.py",
+  "scripts/report_commercial_content.py",
+  "scripts/report_content_contract.py",
+  "assets/secureworks-group-main-cropped.png",
+] as const;
+const REAL_RENDERER_SKILL_ROOT =
+  "harness/ops/skills/secureworks-makesafe-reporting";
 
 async function sha256(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest(
@@ -33,6 +47,91 @@ async function stableInputHash(job: Record<string, unknown>): Promise<string> {
   return await sha256(new TextEncoder().encode(canonicalSesJson(
     canonicalCurrentWikiReportHashPayload(job),
   )));
+}
+
+async function materializeRealRenderer(
+  wikiRepo: string,
+  root: string,
+): Promise<string> {
+  for (const relative of REAL_RENDERER_DEPENDENCIES) {
+    const result = await new Deno.Command("git", {
+      cwd: wikiRepo,
+      args: [
+        "show",
+        `${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}:${REAL_RENDERER_SKILL_ROOT}/${relative}`,
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assert(
+      result.success,
+      `current wiki dependency unavailable: ${relative}: ${
+        new TextDecoder().decode(result.stderr)
+      }`,
+    );
+    const target = `${root}/${relative}`;
+    await Deno.mkdir(target.slice(0, target.lastIndexOf("/")), {
+      recursive: true,
+    });
+    await Deno.writeFile(target, result.stdout);
+  }
+  return `${root}/scripts/render_makesafe_report.py`;
+}
+
+async function commandOrFail(args: string[], cwd?: string): Promise<void> {
+  const result = await new Deno.Command("git", {
+    cwd,
+    args,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assert(
+    result.success,
+    `git ${args.join(" ")} failed: ${new TextDecoder().decode(result.stderr)}`,
+  );
+}
+
+async function resolvePinnedWikiRepo(): Promise<
+  { repo: string; cleanup: string[] }
+> {
+  const configured = Deno.env.get("SW_WIKI_REPO");
+  if (configured) {
+    const repo = reviewedWikiRepoPath(configured);
+    await commandOrFail([
+      "cat-file",
+      "-e",
+      `${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}^{commit}`,
+    ], repo);
+    return { repo, cleanup: [] };
+  }
+
+  const checkout = await Deno.makeTempDir({ prefix: "current-wiki-" });
+  try {
+    await commandOrFail(["init", "--quiet"], checkout);
+    await commandOrFail([
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/SecureWorks-GROUP/secureworks-wiki.git",
+    ], checkout);
+    await commandOrFail([
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--depth=1",
+      "origin",
+      MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+    ], checkout);
+    await commandOrFail([
+      "cat-file",
+      "-e",
+      `${MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION}^{commit}`,
+    ], checkout);
+    return { repo: checkout, cleanup: [checkout] };
+  } catch (error) {
+    await Deno.remove(checkout, { recursive: true });
+    throw error;
+  }
 }
 
 Deno.test("operator defaults to dry-run and an untracked manifest path", () => {
@@ -110,56 +209,96 @@ Deno.test("current-wiki subprocess timeout is bounded per card", async () => {
   );
 });
 
-Deno.test("two temp-root renders keep identical input and PDF hashes", async () => {
-  assertEquals(CURRENT_WIKI_RENDER_ENV, { RL_invariant: "1" });
-  const first = await Deno.makeTempDir({ prefix: "review-render-" });
-  const second = await Deno.makeTempDir({ prefix: "apply-render-" });
-  try {
-    const renderer = `${first}/renderer.py`;
-    await Deno.writeTextFile(
-      renderer,
-      `import argparse, hashlib, json, os\nfrom pathlib import Path\nfrom reportlab.pdfgen import canvas\nap = argparse.ArgumentParser()\nap.add_argument("job")\nap.add_argument("--out", required=True)\nargs = ap.parse_args()\nassert os.environ.get("RL_invariant") == "1"\njob = json.loads(Path(args.job).read_text())\nphoto = Path(job["photos"][0]["file"])\nphoto_bytes = photo.read_bytes()\nassert hashlib.sha256(photo_bytes).hexdigest() == job["photos"][0]["content_sha256"]\nout = Path(args.out)\nout.mkdir(parents=True, exist_ok=True)\nc = canvas.Canvas(str(out / "report.pdf"))\nc.drawString(72, 720, job["ref"] + " | " + job["photos"][0]["content_sha256"])\nc.save()\n`,
-    );
-    const photoBytes = new TextEncoder().encode("privacy-safe-photo-fixture");
-    const contentHash = await sha256(photoBytes);
-    const jobs = [first, second].map((root) => ({
-      ref: "REF-001",
-      photos: [{
-        evidence_id: "photo-1",
-        caption: "Completion evidence",
-        content_sha256: contentHash,
-        file: `${root}/photo-1.jpg`,
-      }],
-    }));
-    await Promise.all(
-      jobs.map((job) => Deno.writeFile(job.photos[0].file, photoBytes)),
-    );
-    assertEquals(
-      await stableInputHash(jobs[0]),
-      await stableInputHash(jobs[1]),
-    );
+Deno.test({
+  name:
+    "current pinned wiki renderer produces identical PDF bytes across temp roots",
+  fn: async () => {
+    assertEquals(CURRENT_WIKI_RENDER_ENV, { RL_invariant: "1" });
+    const pinned = await resolvePinnedWikiRepo();
+    let first: string | undefined;
+    let second: string | undefined;
+    try {
+      first = await Deno.makeTempDir({ prefix: "review-render-" });
+      second = await Deno.makeTempDir({ prefix: "apply-render-" });
+      assert(first && second);
+      const roots: [string, string] = [first, second];
+      const renderers = await Promise.all(
+        roots.map((root) => materializeRealRenderer(pinned.repo, root)),
+      );
+      assertEquals(
+        await sha256(await Deno.readFile(renderers[0])),
+        MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+      );
+      assertEquals(
+        await Deno.readFile(renderers[0]),
+        await Deno.readFile(renderers[1]),
+      );
+      const photoBytes = await Deno.readFile(
+        `${first}/assets/secureworks-group-main-cropped.png`,
+      );
+      const contentHash = await sha256(photoBytes);
+      const jobs = roots.map((root) => ({
+        ref: "REF-001",
+        address: "Example Suburb",
+        contact: "Generic Site Contact",
+        date: "2026-08-03",
+        arrival: "09:00",
+        scope: "Secure the affected opening.",
+        findings: "The opening was exposed.",
+        works: "The opening was secured.",
+        materials_evidence: { state: "none_recorded", items: [] },
+        photos: [{
+          evidence_id: "photo-1",
+          caption: "Completion evidence",
+          content_sha256: contentHash,
+          file: `${root}/assets/secureworks-group-main-cropped.png`,
+        }],
+        photo_evidence: {
+          source_revision: "privacy-safe-fixture-v1",
+          completeness_verified: true,
+          source_count: 1,
+          applicable_count: 1,
+          selected_count: 1,
+          applicable_ids: ["photo-1"],
+          selected_ids: ["photo-1"],
+          excluded: [],
+          rejected: [],
+        },
+        output_name: "report.pdf",
+      }));
+      assertEquals(
+        await stableInputHash(jobs[0]),
+        await stableInputHash(jobs[1]),
+      );
 
-    const pdfHashes: string[] = [];
-    for (let index = 0; index < jobs.length; index++) {
-      const root = index === 0 ? first : second;
-      const input = `${root}/job.json`;
-      const out = `${root}/out`;
-      await Deno.writeTextFile(input, JSON.stringify(jobs[index]));
-      const result = await currentWikiRendererCommand(renderer, input, out)
-        .output();
-      assert(result.success, new TextDecoder().decode(result.stderr));
-      pdfHashes.push(await sha256(await Deno.readFile(`${out}/report.pdf`)));
+      const pdfBytes: Uint8Array[] = [];
+      for (let index = 0; index < jobs.length; index++) {
+        const input = `${roots[index]}/job.json`;
+        const out = `${roots[index]}/out`;
+        await Deno.writeTextFile(input, JSON.stringify(jobs[index]));
+        const result = await currentWikiRendererCommand(
+          renderers[index],
+          input,
+          out,
+        ).output();
+        assert(result.success, new TextDecoder().decode(result.stderr));
+        pdfBytes.push(await Deno.readFile(`${out}/report.pdf`));
+      }
+      assertEquals(pdfBytes[0], pdfBytes[1]);
+      assertEquals(await sha256(pdfBytes[0]), await sha256(pdfBytes[1]));
+
+      const changed = structuredClone(jobs[1]);
+      changed.photos[0].content_sha256 = "b".repeat(64);
+      assertNotEquals(
+        await stableInputHash(jobs[0]),
+        await stableInputHash(changed),
+      );
+    } finally {
+      if (first) await Deno.remove(first, { recursive: true });
+      if (second) await Deno.remove(second, { recursive: true });
+      for (const path of pinned.cleanup) {
+        await Deno.remove(path, { recursive: true });
+      }
     }
-    assertEquals(pdfHashes[0], pdfHashes[1]);
-
-    const changed = structuredClone(jobs[1]);
-    changed.photos[0].content_sha256 = "b".repeat(64);
-    assertNotEquals(
-      await stableInputHash(jobs[0]),
-      await stableInputHash(changed),
-    );
-  } finally {
-    await Deno.remove(first, { recursive: true });
-    await Deno.remove(second, { recursive: true });
-  }
+  },
 });
