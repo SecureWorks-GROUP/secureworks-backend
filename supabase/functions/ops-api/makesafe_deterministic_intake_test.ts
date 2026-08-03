@@ -740,6 +740,364 @@ Deno.test("AJ Job No subjects resolve to one isolated AJBR obligation", () => {
   ]);
 });
 
+Deno.test("AJ production address rule derives a missing High Wycombe suburb without a model", () => {
+  const postId = "ajbr-70488-high-wycombe";
+  const attachmentId = "ajbr-70488-work-order";
+  const testSite = "000 TEST SITE TOKEN, High Wycombe WA 6057";
+  const ajProfile: DeterministicCompanyProfile = {
+    ...PROFILES[1],
+    parsingRules: {
+      version: 2,
+      template_first: false,
+      fields: {
+        site_address: {
+          regex:
+            "(?:site\\s*address|risk\\s*address|property\\s*address|address|property|site)\\s*[:\\-]\\s*([0-9][^\\n\\r]{4,80})",
+          source: "all",
+          group: 1,
+          transform: "collapse_ws",
+        },
+      },
+    },
+  };
+  const adapted = adaptDeterministicSource(
+    source({
+      postId,
+      fromEmail: "ajs.test",
+      subject: "Make Safe - High Wycombe - Job No 70488",
+      body: `Site Address: ${testSite}\nPlease attend and make safe.`,
+      attachments: [pdf(postId, attachmentId)],
+      pdfDocuments: [{
+        sourcePostId: postId,
+        attachmentId,
+        attachmentName: "AJBR-70488-work-order.pdf",
+        status: "extracted",
+        text:
+          `Work Order\nJob No 70488\nSite Address\n${testSite}\nMake Safe\nSecure the property.`,
+        charCount: 116,
+        pageCount: 1,
+        extractor: "fixture",
+        truncated: false,
+        reason: null,
+      }],
+    }),
+    [ajProfile],
+  );
+
+  assertEquals(adapted.adapterId, "ajs_ajbr");
+  assertEquals(adapted.identity.siteAddress, testSite);
+  assertEquals(adapted.identity.siteSuburb, "High Wycombe");
+  assertEquals(
+    adapted.fieldProvenance.site_address?.rule,
+    "company_template:2:site_address",
+  );
+  assertEquals(
+    adapted.fieldProvenance.site_suburb?.rule,
+    "derived_from_site_address:company_template:2:site_address",
+  );
+  assertEquals(adapted.pdfFieldProvenance.site_suburb, undefined);
+});
+
+Deno.test("builder-specific address fallback derives suburb after final per-source selection", () => {
+  const adapted = adaptDeterministicSource(
+    source({
+      postId: "builderwest-high-wycombe",
+      fromEmail: "builderwest.test",
+      subject: "70111 - BWCWA70111 - TEST - TEST SITE, HIGH WYCOMBE WA 6057",
+      body: "Please attend and make safe the property.",
+      attachments: [pdf("builderwest-high-wycombe")],
+    }),
+    PROFILES,
+  );
+
+  assertEquals(
+    adapted.identity.siteAddress,
+    "TEST SITE, HIGH WYCOMBE WA 6057",
+  );
+  assertEquals(adapted.identity.siteSuburb, "High Wycombe");
+  assertEquals(
+    adapted.fieldProvenance.site_suburb?.rule,
+    "derived_from_site_address:builderwest_subject:site_address",
+  );
+});
+
+Deno.test("case merge derives suburb from the selected authoritative address", () => {
+  const olderPdf = source({
+    postId: "mlb-suburb-pdf-older",
+    receivedAt: "2026-08-03T00:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-27112 Work Order: 27112",
+    body: "The work order is attached. Please make safe.",
+    attachments: [pdf("mlb-suburb-pdf-older", "mlb-suburb-pdf")],
+    pdfDocuments: [{
+      sourcePostId: "mlb-suburb-pdf-older",
+      attachmentId: "mlb-suburb-pdf",
+      attachmentName: "MLB-27112-work-order.pdf",
+      status: "extracted",
+      text: `Work Order Number
+MLB-27112
+Policyholders Name
+TEST
+Site Address
+TEST SITE A, Other Suburb, WA 6000
+Scope of Works
+Please make safe the property.`,
+      charCount: 180,
+      pageCount: 1,
+      extractor: "fixture",
+      truncated: false,
+      reason: null,
+    }],
+  });
+  const authoritativeEmail = source({
+    postId: "mlb-suburb-email-newer",
+    receivedAt: "2026-08-03T00:01:00.000Z",
+    subject: "NEW WORK ORDER MLB-27112 Work Order: 27112",
+    body:
+      "Site Address: TEST SITE B, HIGH WYCOMBE WA 6057\nPlease make safe the property.",
+    attachments: [pdf("mlb-suburb-email-newer")],
+  });
+
+  const intakeCase = buildDeterministicIntakePlan(
+    [olderPdf, authoritativeEmail],
+    PROFILES,
+  ).cases[0];
+  assertEquals(
+    intakeCase.identity.siteAddress,
+    "TEST SITE B, HIGH WYCOMBE WA 6057",
+  );
+  assertEquals(intakeCase.identity.siteSuburb, "High Wycombe");
+  assertEquals(intakeCase.fieldProvenance.site_address?.source, "email_text");
+  assertEquals(
+    intakeCase.fieldProvenance.site_suburb?.rule,
+    "derived_from_site_address:labelled_email:site_address",
+  );
+  assertEquals(intakeCase.pdfFieldProvenance.site_suburb, undefined);
+});
+
+Deno.test("explicit suburb outranks an older derived suburb as one address pair", () => {
+  const explicitSuburbProfile: DeterministicCompanyProfile = {
+    ...PROFILES[0],
+    parsingRules: {
+      version: 1,
+      template_first: false,
+      fields: {
+        site_suburb: {
+          regex: "Suburb\\s*:\\s*([A-Za-z][A-Za-z ]+)",
+          source: "subject",
+          group: 1,
+          transform: "collapse_ws",
+        },
+      },
+    },
+  };
+  const profiles = [explicitSuburbProfile, ...PROFILES.slice(1)];
+  const olderDerived = source({
+    postId: "mlb-derived-suburb-older",
+    receivedAt: "2026-08-03T00:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-27113 Work Order: 27113",
+    body:
+      "Site Address: TEST SITE A, Other Suburb WA 6000\nPlease make safe the property.",
+    attachments: [pdf("mlb-derived-suburb-older")],
+  });
+  const newerExplicit = source({
+    postId: "mlb-explicit-suburb-newer",
+    receivedAt: "2026-08-03T00:01:00.000Z",
+    subject: "NEW WORK ORDER MLB-27113 Work Order: 27113 Suburb: High Wycombe",
+    body:
+      "Site Address: TEST SITE B, High Wycombe, WA 6057\nPlease make safe the property.",
+    attachments: [pdf("mlb-explicit-suburb-newer")],
+  });
+
+  const intakeCase = buildDeterministicIntakePlan(
+    [olderDerived, newerExplicit],
+    profiles,
+  ).cases[0];
+  assertEquals(
+    intakeCase.identity.siteAddress,
+    "TEST SITE B, High Wycombe, WA 6057",
+  );
+  assertEquals(intakeCase.identity.siteSuburb, "High Wycombe");
+  assertEquals(
+    intakeCase.fieldProvenance.site_address?.sourcePostId,
+    "mlb-explicit-suburb-newer",
+  );
+  assertEquals(
+    intakeCase.fieldProvenance.site_suburb?.rule,
+    "company_template:1:site_suburb",
+  );
+});
+
+Deno.test("unpaired explicit suburb conflict fails closed", () => {
+  const explicitSuburbProfile: DeterministicCompanyProfile = {
+    ...PROFILES[0],
+    parsingRules: {
+      version: 1,
+      template_first: false,
+      fields: {
+        site_suburb: {
+          regex: "Suburb\\s*:\\s*([A-Za-z][A-Za-z ]+)",
+          source: "subject",
+          group: 1,
+          transform: "collapse_ws",
+        },
+      },
+    },
+  };
+  const profiles = [explicitSuburbProfile, ...PROFILES.slice(1)];
+  const addressSource = source({
+    postId: "mlb-address-only-older",
+    receivedAt: "2026-08-03T00:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-27115 Work Order: 27115",
+    body:
+      "Site Address: TEST SITE A, Other Suburb WA 6000\nPlease make safe the property.",
+    attachments: [pdf("mlb-address-only-older")],
+  });
+  const suburbOnlySource = source({
+    postId: "mlb-suburb-only-newer",
+    receivedAt: "2026-08-03T00:01:00.000Z",
+    subject: "NEW WORK ORDER MLB-27115 Work Order: 27115 Suburb: High Wycombe",
+    body: "Please make safe the property.",
+    attachments: [pdf("mlb-suburb-only-newer")],
+  });
+
+  const intakeCase = buildDeterministicIntakePlan(
+    [addressSource, suburbOnlySource],
+    profiles,
+  ).cases[0];
+  assertEquals(
+    intakeCase.identity.siteAddress,
+    "TEST SITE A, Other Suburb WA 6000",
+  );
+  assertEquals(intakeCase.identity.siteSuburb, null);
+  assertEquals(intakeCase.conflictingFields.site_suburb, [
+    "High Wycombe",
+    "Other Suburb",
+  ]);
+  assertEquals(intakeCase.reasonCode, "conflicting_fields");
+});
+
+Deno.test("unpaired explicit suburb fails closed when the address cannot prove it", () => {
+  const explicitSuburbProfile: DeterministicCompanyProfile = {
+    ...PROFILES[0],
+    parsingRules: {
+      version: 1,
+      template_first: false,
+      fields: {
+        site_suburb: {
+          regex: "Suburb\\s*:\\s*([A-Za-z][A-Za-z ]+)",
+          source: "subject",
+          group: 1,
+          transform: "collapse_ws",
+        },
+      },
+    },
+  };
+  const profiles = [explicitSuburbProfile, ...PROFILES.slice(1)];
+  const addressSource = source({
+    postId: "mlb-unverifiable-address-older",
+    receivedAt: "2026-08-03T00:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-27116 Work Order: 27116",
+    body:
+      "Site Address: TEST SITE A, Other Suburb\nPlease make safe the property.",
+    attachments: [pdf("mlb-unverifiable-address-older")],
+  });
+  const suburbOnlySource = source({
+    postId: "mlb-unpaired-suburb-newer",
+    receivedAt: "2026-08-03T00:01:00.000Z",
+    subject: "NEW WORK ORDER MLB-27116 Work Order: 27116 Suburb: High Wycombe",
+    body: "Please make safe the property.",
+    attachments: [pdf("mlb-unpaired-suburb-newer")],
+  });
+
+  const intakeCase = buildDeterministicIntakePlan(
+    [addressSource, suburbOnlySource],
+    profiles,
+  ).cases[0];
+  assertEquals(intakeCase.identity.siteAddress, "TEST SITE A, Other Suburb");
+  assertEquals(intakeCase.identity.siteSuburb, null);
+  assertEquals(intakeCase.conflictingFields.site_suburb, ["High Wycombe"]);
+  assertEquals(intakeCase.reasonCode, "conflicting_fields");
+});
+
+Deno.test("PDF-explicit suburb keeps its paired address provenance", () => {
+  const pdfExplicitProfile: DeterministicCompanyProfile = {
+    ...PROFILES[0],
+    parsingRules: {
+      version: 2,
+      template_first: false,
+      fields: {
+        site_address: {
+          regex: "PDF Site\\s*:\\s*([^\\n\\r]+)",
+          source: "pdf",
+          group: 1,
+          transform: "collapse_ws",
+        },
+        site_suburb: {
+          regex: "PDF Suburb\\s*:\\s*([A-Za-z][A-Za-z ]+)",
+          source: "pdf",
+          group: 1,
+          transform: "collapse_ws",
+        },
+      },
+    },
+  };
+  const profiles = [pdfExplicitProfile, ...PROFILES.slice(1)];
+  const emailAddress = source({
+    postId: "mlb-email-address-candidate",
+    receivedAt: "2026-08-03T00:00:00.000Z",
+    subject: "NEW WORK ORDER MLB-27114 Work Order: 27114",
+    body:
+      "Site Address: TEST SITE EMAIL, Other Suburb WA 6000\nPlease make safe the property.",
+    attachments: [pdf("mlb-email-address-candidate")],
+  });
+  const pdfExplicit = source({
+    postId: "mlb-pdf-explicit-suburb",
+    receivedAt: "2026-08-03T00:01:00.000Z",
+    subject: "NEW WORK ORDER MLB-27114 Work Order: 27114",
+    body: "The work order is attached. Please make safe.",
+    attachments: [pdf("mlb-pdf-explicit-suburb", "mlb-pdf-explicit")],
+    pdfDocuments: [{
+      sourcePostId: "mlb-pdf-explicit-suburb",
+      attachmentId: "mlb-pdf-explicit",
+      attachmentName: "MLB-27114-work-order.pdf",
+      status: "extracted",
+      text:
+        "PDF Site: TEST SITE PDF, High Wycombe, WA 6057\nPDF Suburb: High Wycombe",
+      charCount: 74,
+      pageCount: 1,
+      extractor: "fixture",
+      truncated: false,
+      reason: null,
+    }],
+  });
+
+  const intakeCase = buildDeterministicIntakePlan(
+    [emailAddress, pdfExplicit],
+    profiles,
+  ).cases[0];
+  assertEquals(
+    intakeCase.identity.siteAddress,
+    "TEST SITE PDF, High Wycombe, WA 6057",
+  );
+  assertEquals(intakeCase.identity.siteSuburb, "High Wycombe");
+  assertEquals(
+    intakeCase.fieldProvenance.site_address?.sourcePostId,
+    "mlb-pdf-explicit-suburb",
+  );
+  assertEquals(
+    intakeCase.fieldProvenance.site_suburb?.sourcePostId,
+    "mlb-pdf-explicit-suburb",
+  );
+  assertEquals(
+    intakeCase.pdfFieldProvenance.site_address?.attachmentId,
+    "mlb-pdf-explicit",
+  );
+  assertEquals(
+    intakeCase.pdfFieldProvenance.site_suburb?.attachmentId,
+    "mlb-pdf-explicit",
+  );
+});
+
 Deno.test("Prime wrapper adapter deterministically captures portal report work", () => {
   const item = source({
     postId: "prime-1",

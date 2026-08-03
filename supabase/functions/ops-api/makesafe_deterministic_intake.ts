@@ -32,6 +32,7 @@ import {
   isSelfGeneratedMakesafeWorkOrder,
 } from "./makesafe_builder_work_order_identity.ts";
 import {
+  deriveSuburbFromAddress,
   gapFillFromWorkOrderPdf,
   type PdfGapFillField,
   type PdfGapFillValues,
@@ -42,7 +43,7 @@ import {
 } from "./makesafe_pdf_declared_type.ts";
 
 export const DETERMINISTIC_INTAKE_VERSION =
-  "makesafe-deterministic-intake@2026-08-02.v9";
+  "makesafe-deterministic-intake@2026-08-03.v10";
 export const DETERMINISTIC_MANIFEST_VERSION = "makesafe-manifest@2026-07-20.v1";
 export { classifyCancellation };
 export type { CancellationClassification };
@@ -982,6 +983,38 @@ const PROVENANCE_FIELDS = new Set<DeterministicIntakeField>([
   "description",
 ]);
 
+const DERIVED_SUBURB_RULE_PREFIX = "derived_from_site_address:";
+
+function isDerivedSuburbProvenance(
+  provenance: DeterministicFieldProvenance | undefined,
+): boolean {
+  return provenance?.rule.startsWith(DERIVED_SUBURB_RULE_PREFIX) === true;
+}
+
+function deriveMissingSiteSuburb(
+  fields: Record<string, string>,
+  provenance: Partial<
+    Record<DeterministicIntakeField, DeterministicFieldProvenance>
+  >,
+  pdfProvenance: Partial<
+    Record<PdfGapFillField, DeterministicFieldProvenance>
+  >,
+): void {
+  if (clean(fields.site_suburb)) return;
+  const suburb = deriveSuburbFromAddress(clean(fields.site_address));
+  const addressSource = provenance.site_address;
+  if (!suburb || !addressSource) return;
+  fields.site_suburb = suburb;
+  const suburbSource: DeterministicFieldProvenance = {
+    ...addressSource,
+    rule: `${DERIVED_SUBURB_RULE_PREFIX}${addressSource.rule}`,
+  };
+  provenance.site_suburb = suburbSource;
+  if (suburbSource.source === "work_order_pdf_text") {
+    pdfProvenance.site_suburb = suburbSource;
+  }
+}
+
 function isProvenanceField(value: string): value is DeterministicIntakeField {
   return PROVENANCE_FIELDS.has(value as DeterministicIntakeField);
 }
@@ -1426,6 +1459,11 @@ function buildKnown(
       }
     }
   }
+  deriveMissingSiteSuburb(
+    fields,
+    parsed.provenance,
+    parsed.pdfProvenance,
+  );
   const familyDecision = jobFamilyDecision(item, adapterId);
   const deliverable = inferDeliverable(item, adapterId);
   const canonical = normaliseMakesafeIdentity({
@@ -1866,17 +1904,57 @@ function bestIdentity(
   const client = preferredMerge("clientName", "client_name");
   const phone = preferredMerge("clientPhone", "client_phone");
   const email = preferredMerge("clientEmail", "client_email");
-  const address = preferredMerge("siteAddress", "site_address");
+  const mergedAddress = preferredMerge("siteAddress", "site_address");
+  const explicitSuburbCandidates = ordered.filter((item) =>
+    clean(item.identity.siteSuburb) !== null &&
+    !isDerivedSuburbProvenance(item.fieldProvenance.site_suburb)
+  );
+  const emailExplicitSuburbCandidates = explicitSuburbCandidates.filter(
+    (item) =>
+      item.fieldProvenance.site_suburb?.source !== "work_order_pdf_text",
+  );
+  const explicitSuburbItem =
+    (emailExplicitSuburbCandidates.length
+      ? emailExplicitSuburbCandidates
+      : explicitSuburbCandidates)[0] || null;
+  const explicitSuburb = clean(explicitSuburbItem?.identity.siteSuburb);
+  const explicitAddress = clean(explicitSuburbItem?.identity.siteAddress);
+  const mergedAddressSuburb = deriveSuburbFromAddress(mergedAddress.value);
+  const unpairedExplicitConflict = Boolean(
+    explicitSuburb && !explicitAddress &&
+      (!mergedAddressSuburb ||
+        explicitSuburb.toLowerCase() !== mergedAddressSuburb.toLowerCase()),
+  );
+  const address = explicitAddress
+    ? { ...mergedAddress, value: explicitAddress }
+    : mergedAddress;
+  const selectedAddressItem = explicitAddress
+    ? explicitSuburbItem
+    : address.preferred.find((item) =>
+      clean(item.identity.siteAddress) === clean(address.value) &&
+      !!item.fieldProvenance.site_address
+    ) || null;
   if (client.conflicts.length) conflicts.client_name = client.conflicts;
   if (phone.conflicts.length) conflicts.client_phone = phone.conflicts;
   if (email.conflicts.length) conflicts.client_email = email.conflicts;
   if (address.conflicts.length) conflicts.site_address = address.conflicts;
+  if (unpairedExplicitConflict) {
+    conflicts.site_suburb = [
+      ...new Set([
+        ...(mergedAddressSuburb ? [mergedAddressSuburb] : []),
+        explicitSuburb!,
+      ]),
+    ].sort();
+  }
   const strong = (field: keyof ExtractedIdentity) => {
     const candidates = ordered.map((i) => i.identity[field]).filter((
       v,
     ): v is string => typeof v === "string" && !!v);
     return candidates[0] || null;
   };
+  const derivedMergedSuburb = explicitSuburb
+    ? null
+    : deriveSuburbFromAddress(address.value);
   const identity: ExtractedIdentity = {
     ...base.identity,
     companyId: strong("companyId"),
@@ -1897,7 +1975,9 @@ function bestIdentity(
     clientPhone: phone.value,
     clientEmail: email.value,
     siteAddress: address.value,
-    siteSuburb: preferredStrong("siteSuburb", "site_suburb"),
+    siteSuburb: unpairedExplicitConflict
+      ? null
+      : explicitSuburb || derivedMergedSuburb,
     description: preferredStrong("description", "description"),
     jobFamily: strong("jobFamily") || "general_makesafe",
   };
@@ -1921,10 +2001,14 @@ function bestIdentity(
   for (const [provenanceField, identityField, selectedValue] of fieldMap) {
     if (!selectedValue) continue;
     const preferred = preferredItems(identityField, provenanceField);
-    const selected = preferred.find((item) =>
-      clean(item.identity[identityField]) === clean(selectedValue) &&
-      !!item.fieldProvenance[provenanceField]
-    );
+    const selected = provenanceField === "site_address" && selectedAddressItem
+      ? selectedAddressItem
+      : provenanceField === "site_suburb" && explicitSuburbItem
+      ? explicitSuburbItem
+      : preferred.find((item) =>
+        clean(item.identity[identityField]) === clean(selectedValue) &&
+        !!item.fieldProvenance[provenanceField]
+      );
     const selectedProvenance = selected?.fieldProvenance[provenanceField];
     if (selectedProvenance) {
       fieldProvenance[provenanceField] = selectedProvenance;
@@ -1933,6 +2017,21 @@ function bestIdentity(
         selectedProvenance.source === "work_order_pdf_text"
       ) {
         pdfFieldProvenance[provenanceField] = selectedProvenance;
+      }
+    }
+  }
+  if (!explicitSuburbItem && identity.siteSuburb) {
+    const addressSource = selectedAddressItem?.fieldProvenance.site_address;
+    if (addressSource) {
+      const suburbSource: DeterministicFieldProvenance = {
+        ...addressSource,
+        rule: `${DERIVED_SUBURB_RULE_PREFIX}${addressSource.rule}`,
+      };
+      fieldProvenance.site_suburb = suburbSource;
+      if (suburbSource.source === "work_order_pdf_text") {
+        pdfFieldProvenance.site_suburb = suburbSource;
+      } else {
+        delete pdfFieldProvenance.site_suburb;
       }
     }
   }

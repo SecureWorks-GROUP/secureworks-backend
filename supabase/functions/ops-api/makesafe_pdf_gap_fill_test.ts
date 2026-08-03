@@ -3,7 +3,10 @@ import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { gapFillFromWorkOrderPdf } from "./makesafe_pdf_gap_fill.ts";
+import {
+  deriveSuburbFromAddress,
+  gapFillFromWorkOrderPdf,
+} from "./makesafe_pdf_gap_fill.ts";
 
 const WO_TEXT = `Work Order
 Work Order Number
@@ -56,6 +59,29 @@ Deno.test("work-order PDF fills missing intake fields with per-field provenance"
     assertEquals(provenance.extractor, "unpdf@1.6.2");
     assertEquals(provenance.attachmentId, "attachment-1");
   }
+  assertEquals(
+    result.provenance.site_suburb?.rule,
+    "derived_from_site_address:work_order_pdf_gap_fill@v1",
+  );
+});
+
+Deno.test("suburb derivation normalises verified WA address-tail variants", () => {
+  assertEquals(
+    deriveSuburbFromAddress("TEST SITE, HIGH WYCOMBE WA 6057"),
+    "High Wycombe",
+  );
+  assertEquals(
+    deriveSuburbFromAddress(
+      "TEST SITE, HIGH WYCOMBE, W.A. 6057, Australia",
+    ),
+    "High Wycombe",
+  );
+  assertEquals(
+    deriveSuburbFromAddress(
+      "TEST SITE, HIGH WYCOMBE Western Australia 6057",
+    ),
+    "High Wycombe",
+  );
 });
 
 Deno.test("email-derived values win and receive no PDF provenance", () => {
