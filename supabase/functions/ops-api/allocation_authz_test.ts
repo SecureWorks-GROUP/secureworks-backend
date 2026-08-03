@@ -580,6 +580,43 @@ Deno.test("allocateJob: repeating the source date preserves membership-only dedu
   assertEquals(store.updates?.filter((entry) => entry.table === "job_assignments").length ?? 0, 0);
 });
 
+Deno.test("allocateJob: an empty crew name remains a detail conflict", async () => {
+  const store: Store = {
+    assignments: {
+      "a-source": {
+        id: "a-source",
+        job_id: "job-fen",
+        user_id: "inst-source",
+        scheduled_date: "2026-08-04",
+        status: "scheduled",
+      },
+      "a-existing-target": {
+        id: "a-existing-target",
+        job_id: "job-fen",
+        user_id: "inst-target",
+        scheduled_date: "2026-08-04",
+        status: "scheduled",
+      },
+    },
+    jobs: { "job-fen": FENCING_JOB },
+    users: { "inst-target": { id: "inst-target" } },
+  };
+
+  let caught: any = null;
+  try {
+    await allocateJob(makeClient(store), {
+      body: { assignmentId: "a-source", userId: "inst-target", crewName: "" },
+      callerRole: "lead_installer",
+      managedVerticals: ["fencing"],
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  assertEquals(caught?.status, 409);
+  assertEquals(caught?.body?.code, "assignment_user_date_conflict");
+});
+
 Deno.test("allocateJob: reassign moves the assignment to a new installer via updateAssignment", async () => {
   const store: Store = {
     assignments: { "a1": { id: "a1", job_id: "job-fen", user_id: "inst-1", status: "scheduled" } },

@@ -24443,14 +24443,16 @@ export async function allocateJob(client: any, args: {
     const targetDate = sDateR || sourceAssignment.scheduled_date || null
     const changesAssignmentDetails = Boolean(
       (sDateR && sDateR !== sourceAssignment.scheduled_date) ||
-        body.startTime || body.start_time || body.endTime || body.end_time ||
-        body.crewName || body.crew_name || body.notes !== undefined,
+        body.startTime !== undefined || body.start_time !== undefined ||
+        body.endTime !== undefined || body.end_time !== undefined ||
+        body.crewName !== undefined || body.crew_name !== undefined ||
+        body.notes !== undefined,
     )
     const canDeduplicateCrewMembership = !changesAssignmentDetails
     if (sDateR) updateBody.scheduledDate = sDateR
-    if (body.startTime || body.start_time) updateBody.startTime = body.startTime || body.start_time
-    if (body.endTime || body.end_time) updateBody.endTime = body.endTime || body.end_time
-    if (body.crewName || body.crew_name) updateBody.crewName = body.crewName || body.crew_name
+    if (body.startTime !== undefined || body.start_time !== undefined) updateBody.startTime = body.startTime ?? body.start_time
+    if (body.endTime !== undefined || body.end_time !== undefined) updateBody.endTime = body.endTime ?? body.end_time
+    if (body.crewName !== undefined || body.crew_name !== undefined) updateBody.crewName = body.crewName ?? body.crew_name
     if (body.notes !== undefined) updateBody.notes = body.notes
 
     // The Trade multi-select sheet uses one representative assignment for the
