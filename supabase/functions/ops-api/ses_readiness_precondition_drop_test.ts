@@ -1,22 +1,29 @@
 // deno-lint-ignore-file no-import-prefix
 //
 // Captain's ruling 2026-08-03: the unsatisfiable `makesafe_readiness_current.ready`
-// precondition is removed from the invoice-obligation path, and (same day, same
-// ruling extended) from the APPROVAL path.
+// precondition is removed from the invoice-obligation path, (same day, same
+// ruling extended) from the APPROVAL path, (same day again, "Extend #511
+// ruling to send path") from the SEND path's release-execution reservation,
+// and (same day, same ruling line) from approval VISIBILITY itself: the
+// `makesafe_revision_approvals_current_v2` view no longer filters on
+// readiness, because approval visibility must never depend on it.
 //
-// These tests read the EFFECTIVE function bodies, not one migration file: every
-// migration is scanned in version order and the LAST `CREATE OR REPLACE FUNCTION`
-// for a given name wins, which is exactly what the database ends up holding. That
-// is what makes this a real regression test -- delete or neuter
-// `20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql` or
-// `20260803020000_ses_drop_approval_readiness_precondition.sql` and the effective
-// bodies revert to the 20260728020000 ones, which still carry all three RAISE
-// blocks, and the assertions below fail.
+// These tests read the EFFECTIVE definitions, not one migration file: every
+// migration is scanned in version order and the LAST `CREATE OR REPLACE` for a
+// given function or view wins, which is exactly what the database ends up
+// holding. That is what makes this a real regression test -- delete or neuter
+// `20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql`,
+// `20260803020000_ses_drop_approval_readiness_precondition.sql`,
+// `20260803030000_ses_drop_release_execution_readiness_precondition.sql` or
+// `20260803040000_ses_approval_visibility_decoupled_from_readiness.sql` and
+// the effective definitions revert to the gated 20260728020000 ones, and the
+// assertions below fail.
 //
-// The controls must pass on BOTH shapes: they pin the gates this ruling does NOT
-// touch -- the money seal, the human APPROVE INVOICE login requirement, the SES
-// release allowlist, the mechanically-clean test, the genuine freshness check,
-// and the Xero execution gates.
+// The controls must pass on BOTH shapes: they pin the gates these rulings do
+// NOT touch -- the money seal, the human APPROVE INVOICE / SEND IT login
+// requirements, the SES release allowlist, the mechanically-clean test, and
+// the genuine freshness checks -- plus the immutable historical definitions
+// the rollback twins restore.
 
 import {
   assert,
@@ -75,11 +82,39 @@ function effectiveFunction(
   return found;
 }
 
+/**
+ * The view Postgres ends up with for `viewName`: the last
+ * `CREATE OR REPLACE VIEW public.<name>` ... `;` statement across all
+ * migrations in version order.
+ */
+function effectiveView(
+  viewName: string,
+): { migration: string; body: string } {
+  let found: { migration: string; body: string } | null = null;
+  for (const migration of MIGRATIONS) {
+    const marker = `CREATE OR REPLACE VIEW public.${viewName}`;
+    let from = migration.sql.indexOf(marker);
+    while (from !== -1) {
+      const end = migration.sql.indexOf(";", from);
+      assert(end !== -1, `unterminated view ${viewName} in ${migration.name}`);
+      found = {
+        migration: migration.name,
+        body: migration.sql.slice(from, end + 1),
+      };
+      from = migration.sql.indexOf(marker, end);
+    }
+  }
+  assert(found, `no definition found for ${viewName}`);
+  return found;
+}
+
 const OBLIGATION = effectiveFunction(
   "commit_ses_invoice_obligation_revision_v1",
 );
 const BOUND_DOCKET = effectiveFunction("commit_ses_invoice_bound_docket_v1");
 const APPROVAL = effectiveFunction("record_ses_revision_approval_v1");
+const RELEASE_EXECUTE = effectiveFunction("begin_ses_release_execution_v1");
+const APPROVALS_VIEW = effectiveView("makesafe_revision_approvals_current_v2");
 
 Deno.test("the drop migration owns the effective obligation and bind bodies", () => {
   assertEquals(
@@ -414,10 +449,286 @@ Deno.test("CONTROL: the approval authority tests are untouched", () => {
   );
 });
 
-Deno.test("CONTROL: the Xero execution gates still test readiness and are untouched", () => {
-  // The ruling stops at recording the approval. Creating the Xero invoice still
-  // goes through the approvals view (`readiness.ready = true`) and the two
-  // execution functions. Passes on BOTH shapes.
+// ── The fourth gate: begin_ses_release_execution_v1, authorised 2026-08-03 as
+// "Extend #511 ruling to send path". See
+// 20260803030000_ses_drop_release_execution_readiness_precondition.sql. ──
+
+Deno.test("the release-execution drop migration owns the effective release execute body", () => {
+  assertEquals(
+    RELEASE_EXECUTE.migration,
+    "20260803030000_ses_drop_release_execution_readiness_precondition.sql",
+  );
+});
+
+Deno.test("the release execute no longer refuses on an uncertified readiness", () => {
+  // A missing readiness row is still its own refusal, split out of the old
+  // bundled IF rather than dropped.
+  assertStringIncludes(RELEASE_EXECUTE.body, "IF NOT FOUND THEN");
+  // `ready` may only be tested inside the certified branch.
+  const certifiedAt = RELEASE_EXECUTE.body.indexOf(
+    "readiness_certified := current_readiness.readiness_revision IS NOT NULL;",
+  );
+  assert(certifiedAt !== -1, "the certified branch guard is missing");
+  const probe = "NOT current_readiness.ready";
+  const at = RELEASE_EXECUTE.body.indexOf(probe);
+  assert(at !== -1, "the certified-branch readiness test vanished");
+  assert(
+    at > certifiedAt,
+    "the readiness test is still reachable without a certified readiness revision",
+  );
+  assertEquals(
+    (RELEASE_EXECUTE.body.match(
+      new RegExp(probe.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
+    ) || []).length,
+    1,
+    `"${probe}" must appear exactly once, inside the certified branch`,
+  );
+});
+
+Deno.test("readiness is never asserted on the send path", () => {
+  // This function has no business originating readiness, and never did.
+  assert(
+    !RELEASE_EXECUTE.body.includes("commit_makesafe_readiness"),
+    "the send path must never commit a readiness revision",
+  );
+  assert(
+    !/(?:^|[^_])ready\s*(?::)?=\s*true/i.test(RELEASE_EXECUTE.body),
+    "the send path must never assign readiness true",
+  );
+  // And it must not fabricate a readiness identity to satisfy the freshness check.
+  assert(
+    !/'sha256:[0-9a-f]/.test(RELEASE_EXECUTE.body),
+    "the send path must never synthesise a readiness revision literal",
+  );
+});
+
+Deno.test("CONTROL: the release execute keeps its genuine freshness check", () => {
+  // This is the half of the old bundled IF that the message actually described,
+  // and it is satisfiable: dependency_generation is a real, moving, non-null
+  // value, and a NULL readiness revision in a binding compares equal to a NULL
+  // current under IS DISTINCT FROM. Unchanged by the ruling, so this passes on
+  // BOTH shapes.
+  assertStringIncludes(
+    RELEASE_EXECUTE.body,
+    "current_readiness.readiness_revision IS DISTINCT FROM",
+  );
+  assertStringIncludes(
+    RELEASE_EXECUTE.body,
+    "current_readiness.dependency_generation IS DISTINCT FROM",
+  );
+  assertStringIncludes(
+    RELEASE_EXECUTE.body,
+    "new evidence landed; review the current release revision again",
+  );
+});
+
+Deno.test("CONTROL: the release execute keeps every other gate", () => {
+  // Passes on BOTH shapes. Every refusal the ruling did not name survives.
+  for (
+    const refusal of [
+      "the approved release revision no longer exists",
+      "the displayed release content no longer matches the stored revision",
+      "human SEND IT approval is missing for this release revision",
+      "the release member set does not match its readiness bindings",
+      "human SEND IT approval is missing for a release member",
+      "human SEND IT approval does not cover the exact release member set",
+    ]
+  ) {
+    assertStringIncludes(RELEASE_EXECUTE.body, refusal);
+  }
+  // The per-member human SEND IT approval visibility check still consults the
+  // approvals view, and the only write is still the release's own state move.
+  assertStringIncludes(
+    RELEASE_EXECUTE.body,
+    "FROM public.makesafe_revision_approvals_current_v2",
+  );
+  assertStringIncludes(RELEASE_EXECUTE.body, "SET state = 'dispatching'");
+});
+
+Deno.test("the release-execution drop migration destroys nothing and touches no money row", () => {
+  const drop = MIGRATIONS.find((m) =>
+    m.name ===
+      "20260803030000_ses_drop_release_execution_readiness_precondition.sql"
+  );
+  assert(drop, "the release-execution drop migration is missing");
+  // Strip `--` comment lines: the migration names the seal, the view and the
+  // readiness tables in prose precisely to record that they are out of scope.
+  // No executable statement may touch them.
+  const executable = drop.sql.split("\n").filter((line) =>
+    !line.trimStart().startsWith("--")
+  ).join("\n");
+  for (
+    const forbidden of [
+      "DROP TABLE",
+      "DROP FUNCTION",
+      "DROP TRIGGER",
+      "UPDATE public.makesafe_readiness_current",
+      "SET ready = true",
+      "ses_money_sealed_at",
+      "xero_invoices",
+    ]
+  ) {
+    assert(
+      !executable.includes(forbidden),
+      `no executable statement in the release-execution drop migration may contain "${forbidden}"`,
+    );
+  }
+  // Apply time writes zero rows: strip the `AS $$ ... $$;` function body and
+  // nothing that mutates data may remain at migration top level.
+  const topLevel = executable.replace(/AS \$\$[\s\S]*?\n\$\$;/g, "AS <body>;");
+  for (
+    const forbidden of ["INSERT INTO", "DELETE FROM", "UPDATE ", "TRUNCATE"]
+  ) {
+    assert(
+      !topLevel.includes(forbidden),
+      `the release-execution drop migration must write zero rows at apply time, found "${forbidden}"`,
+    );
+  }
+});
+
+// ── Approval visibility decoupled from readiness, authorised 2026-08-03 as
+// the #511 ruling line extended: "approval visibility must not depend on
+// readiness; readiness stays visible as information, never a gate." See
+// 20260803040000_ses_approval_visibility_decoupled_from_readiness.sql. ──
+
+Deno.test("the visibility migration owns the effective approvals view", () => {
+  assertEquals(
+    APPROVALS_VIEW.migration,
+    "20260803040000_ses_approval_visibility_decoupled_from_readiness.sql",
+  );
+});
+
+Deno.test("the approvals view no longer gates on readiness", () => {
+  // The two readiness filters are gone from the EFFECTIVE definition...
+  assert(
+    !/readiness\.ready\s*=\s*true/.test(APPROVALS_VIEW.body),
+    "the approvals view still filters on readiness.ready",
+  );
+  assert(
+    !APPROVALS_VIEW.body.includes("JOIN public.makesafe_readiness_current_v2"),
+    "the approvals view still INNER JOINs the readiness identity",
+  );
+  assert(
+    !APPROVALS_VIEW.body.includes(
+      "readiness.readiness_revision = approval.readiness_revision",
+    ),
+    "the approvals view still joins on readiness_revision (NULL-unsafe)",
+  );
+  // ...and what remains is exactly the approved decisions, all base columns.
+  assertStringIncludes(APPROVALS_VIEW.body, "SELECT approval.*");
+  assertStringIncludes(
+    APPROVALS_VIEW.body,
+    "FROM public.makesafe_revision_approvals approval",
+  );
+  assertStringIncludes(
+    APPROVALS_VIEW.body,
+    "WHERE approval.decision = 'approved'",
+  );
+  // No informational readiness columns either: begin_ses_invoice_execution_v1
+  // does SELECT * INTO a makesafe_revision_approvals%ROWTYPE record, so the
+  // view must return exactly the base table's columns.
+  assert(
+    !APPROVALS_VIEW.body.includes("LEFT JOIN"),
+    "the approvals view must not carry readiness columns, even informational ones",
+  );
+});
+
+Deno.test("both execution paths read the corrected view with unchanged bodies", () => {
+  // The visibility fix redefines the VIEW under the consumers; no execution
+  // function body changes, so ownership stays where the earlier rulings put it.
+  assertEquals(
+    RELEASE_EXECUTE.migration,
+    "20260803030000_ses_drop_release_execution_readiness_precondition.sql",
+  );
+  assertStringIncludes(
+    RELEASE_EXECUTE.body,
+    "FROM public.makesafe_revision_approvals_current_v2",
+  );
+  const invoiceExecute = effectiveFunction("begin_ses_invoice_execution_v1");
+  assertEquals(
+    invoiceExecute.migration,
+    "20260728020000_makesafe_ses_invoice_release_u5_u6.sql",
+  );
+  assertStringIncludes(
+    invoiceExecute.body,
+    "FROM public.makesafe_revision_approvals_current_v2",
+  );
+});
+
+Deno.test("CONTROL: the execution freshness checks stay byte-present", () => {
+  // The view no longer carries freshness; these are the checks that do, and
+  // the ruling keeps them verbatim. Passes on BOTH shapes.
+  const invoiceExecute = effectiveFunction("begin_ses_invoice_execution_v1");
+  assertStringIncludes(
+    invoiceExecute.body,
+    "current_approval.readiness_revision IS DISTINCT FROM",
+  );
+  assertStringIncludes(
+    invoiceExecute.body,
+    "current_approval.dependency_generation IS DISTINCT FROM",
+  );
+  assertStringIncludes(
+    RELEASE_EXECUTE.body,
+    "current_readiness.readiness_revision IS DISTINCT FROM",
+  );
+  assertStringIncludes(
+    RELEASE_EXECUTE.body,
+    "current_readiness.dependency_generation IS DISTINCT FROM",
+  );
+});
+
+Deno.test("the visibility migration destroys nothing and touches no money row", () => {
+  const drop = MIGRATIONS.find((m) =>
+    m.name ===
+      "20260803040000_ses_approval_visibility_decoupled_from_readiness.sql"
+  );
+  assert(drop, "the visibility migration is missing");
+  // Strip `--` comment lines: the migration names the seal, the readiness
+  // relations and the execution functions in prose precisely to record that
+  // they are out of scope. No executable statement may touch them.
+  const executable = drop.sql.split("\n").filter((line) =>
+    !line.trimStart().startsWith("--")
+  ).join("\n");
+  for (
+    const forbidden of [
+      "DROP TABLE",
+      "DROP FUNCTION",
+      "DROP TRIGGER",
+      "DROP VIEW",
+      "UPDATE public.makesafe_readiness_current",
+      "SET ready = true",
+      "ses_money_sealed_at",
+      "xero_invoices",
+    ]
+  ) {
+    assert(
+      !executable.includes(forbidden),
+      `no executable statement in the visibility migration may contain "${forbidden}"`,
+    );
+  }
+  // Apply time writes zero rows: a view definition, grants and a comment only.
+  for (
+    const forbidden of ["INSERT INTO", "DELETE FROM", "UPDATE ", "TRUNCATE"]
+  ) {
+    assert(
+      !executable.includes(forbidden),
+      `the visibility migration must write zero rows at apply time, found "${forbidden}"`,
+    );
+  }
+  // It redefines exactly one relation: the approvals view.
+  assertStringIncludes(
+    executable,
+    "CREATE OR REPLACE VIEW public.makesafe_revision_approvals_current_v2",
+  );
+  assert(
+    !executable.includes("makesafe_readiness_current_v2 readiness"),
+    "the visibility migration must not re-join the readiness view",
+  );
+});
+
+Deno.test("CONTROL: the historical gated view definition is preserved in U5/U6", () => {
+  // The original migration file is immutable history, and the rollback twin
+  // restores exactly this body. Passes on BOTH shapes.
   const u5 = MIGRATIONS.find((m) =>
     m.name === "20260728020000_makesafe_ses_invoice_release_u5_u6.sql"
   );
@@ -427,9 +738,14 @@ Deno.test("CONTROL: the Xero execution gates still test readiness and are untouc
     "CREATE OR REPLACE VIEW public.makesafe_revision_approvals_current_v2",
   );
   assertStringIncludes(u5.sql, "AND readiness.ready = true;");
-  const releaseExecute = effectiveFunction("begin_ses_release_execution_v1");
-  assertStringIncludes(releaseExecute.body, "NOT current_readiness.ready");
-  // Neither drop migration rewrites the view or the execution functions.
+});
+
+Deno.test("CONTROL: the earlier drop migrations did not rewrite the approvals view", () => {
+  // The two #511 drop migrations neither mention the view in executable
+  // statements nor rewrite an execution function; the send-path migration's
+  // function body CONSULTS the view but never rewrites it. Comment lines are
+  // stripped: all three migrations NAME the view in prose precisely to record
+  // scope. Passes on BOTH shapes.
   for (
     const name of [
       "20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql",
@@ -438,8 +754,6 @@ Deno.test("CONTROL: the Xero execution gates still test readiness and are untouc
   ) {
     const migration = MIGRATIONS.find((m) => m.name === name);
     if (!migration) continue;
-    // Comment lines are stripped: both migrations NAME these sites in prose,
-    // precisely to record that they are out of scope.
     const executable = migration.sql.split("\n").filter((line) =>
       !line.trimStart().startsWith("--")
     ).join("\n");
@@ -452,6 +766,27 @@ Deno.test("CONTROL: the Xero execution gates still test readiness and are untouc
         "CREATE OR REPLACE FUNCTION public.begin_ses_",
       ),
       `${name} must not rewrite an execution function`,
+    );
+  }
+  const sendDrop = MIGRATIONS.find((m) =>
+    m.name ===
+      "20260803030000_ses_drop_release_execution_readiness_precondition.sql"
+  );
+  assert(sendDrop, "the release-execution drop migration is missing");
+  const sendExecutable = sendDrop.sql.split("\n").filter((line) =>
+    !line.trimStart().startsWith("--")
+  ).join("\n");
+  for (
+    const rewrite of [
+      "CREATE OR REPLACE VIEW public.makesafe_revision_approvals_current_v2",
+      "CREATE VIEW public.makesafe_revision_approvals_current_v2",
+      "ALTER VIEW public.makesafe_revision_approvals_current_v2",
+      "DROP VIEW public.makesafe_revision_approvals_current_v2",
+    ]
+  ) {
+    assert(
+      !sendExecutable.includes(rewrite),
+      `the release-execution drop migration must not rewrite the approvals view ("${rewrite}")`,
     );
   }
 });
