@@ -792,6 +792,36 @@ serve(async (req: Request) => {
     // ── Handle confirmed actions ──
     if (confirm_action) {
       const { action, params } = confirm_action
+      if (action === 'create_assignment') {
+        // ops-api's real-crew guard 400s a crew-work create without a user_id,
+        // and the create_assignment tool only collects crew_name — resolve it
+        // here by exact match against real crew users, never a guess.
+        const assignType = String(params.assignment_type || 'install').toLowerCase()
+        if (!params.user_id && assignType !== 'meeting' && assignType !== 'reminder') {
+          const crewName = String(params.crew_name || '').trim()
+          if (!crewName) {
+            return json({ error: 'A real crew member is required: supply crew_name (or user_id) for crew work.' }, 400)
+          }
+          const sb = sbClient()
+          const { data: crewUsers, error: crewErr } = await sb.from('users')
+            .select('id, name')
+            .in('role', ['installer', 'trade', 'subcontractor'])
+          if (crewErr) {
+            return json({ error: `Crew lookup failed for "${crewName}": ${crewErr.message}` }, 500)
+          }
+          const wanted = crewName.toLowerCase()
+          const matches = (crewUsers || []).filter((u: any) =>
+            String(u.name || '').trim().toLowerCase() === wanted)
+          if (matches.length === 0) {
+            return json({ error: `No crew member named "${crewName}" — pick a real crew member from the list.` }, 400)
+          }
+          if (matches.length > 1) {
+            return json({ error: `Crew name "${crewName}" is ambiguous (${matches.length} crew users share it) — pick one explicitly.` }, 400)
+          }
+          params.user_id = matches[0].id
+          params.crew_name = matches[0].name
+        }
+      }
       const result = await executeConfirmedAction(action, params)
 
       // Log approval
