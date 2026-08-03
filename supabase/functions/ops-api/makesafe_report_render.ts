@@ -85,9 +85,9 @@ export class CommercialContentError extends Error {
 }
 
 const COMMERCIAL_CONTENT_RE =
-  /(?:\$\s*\d|\b(?:gst|invoice|invoiced|rate|margin|cost|charge|charged|billed|billing)\b)/i;
+  /(?:\$\s*\d|\b(?:aud|usd|nzd|gst|invoice|invoiced|rate|margin|cost|charge|charged|billed|billing|subtotal|total|quantity|quantities)\b|\b\d+(?:\.\d+)?\s*(?:dollars?|units?)\b)/i;
 const BILLING_HOURS_RE =
-  /\b\d+(?:\.\d+)?\s*(?:trades?|crew|labou?r)\b[\s\S]{0,40}\b\d+(?:\.\d+)?\s*hours?\b|\b\d+(?:\.\d+)?\s*hours?\b[\s\S]{0,40}\b\d+(?:\.\d+)?\s*(?:trades?|crew|labou?r)\b/i;
+  /\b\d+(?:\.\d+)?\s*hours?\b|\b(?:hourly\s+)?(?:labou?r|crew|trade)\s+(?:hours?|rate)\b|\b\d+(?:\.\d+)?\s*(?:trades?|crew|labou?r)\b[\s\S]{0,40}\b\d+(?:\.\d+)?\s*hours?\b/i;
 
 const CURATED_TEXT_FIELDS = [
   "ref",

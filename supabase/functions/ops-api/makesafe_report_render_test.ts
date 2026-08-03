@@ -181,6 +181,29 @@ Deno.test("commercial guard is pinned to rendered fields and ignores legacy bill
     }),
     ["works"],
   );
+  for (const text of [
+    "3 hours of work",
+    "AUD 480 approved",
+    "20 units supplied",
+    "subtotal pending",
+    "total due",
+    "quantity confirmed",
+    "hourly labour rate",
+    "invoice description",
+  ]) {
+    assertEquals(
+      findCommercialContent({ ...CURATED_JOB, works: text }),
+      ["works"],
+      text,
+    );
+  }
+  assertEquals(
+    findCommercialContent({
+      ...CURATED_JOB,
+      works: "Installed 20 star pickets and secured the boundary.",
+    }),
+    [],
+  );
 });
 
 Deno.test("renderer fails closed on commercial prose and crew names", async () => {
