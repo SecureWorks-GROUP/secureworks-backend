@@ -957,6 +957,14 @@ Deno.test("same property claim keeps one card per PO and links siblings", () => 
   assertEquals(rows[0].lineage.one_card_per_po, true);
   assertEquals(rows[0].lineage.siblings[0].job_id, "po-b");
   assertEquals(rows[0].lineage.siblings[0].builder_po_number, "PO-2");
+  assertEquals(rows[0].job_identity, {
+    contract: "makesafe-job-identity.v1",
+    work_order_number: "MLB-900",
+    purchase_order_number: "PO-1",
+    job_grain_key: null,
+    complete: false,
+    authority: "typed_job_metadata",
+  });
 });
 
 Deno.test("trade payload is an allow-list with no pricing or invoice data", () => {

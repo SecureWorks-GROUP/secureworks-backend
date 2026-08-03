@@ -85,6 +85,11 @@ export class SesActionError extends Error {
   }
 }
 
+/** Human label for a typed docket artifact role; storage object keys are not UI. */
+export function sesReviewArtifactDisplayLabel(role: unknown): string | null {
+  return String(role || "") === "source_attachment" ? "Works Order" : null;
+}
+
 function requireValue(
   response: SupabaseResponse<any>,
   fact: string,
@@ -984,6 +989,7 @@ export async function getSesReviewablePackAction(
       }
       return {
         ...artifact,
+        display_label: sesReviewArtifactDisplayLabel(artifact.role),
         signed_url: signed.data.signedUrl,
         signed_url_expires_in_seconds: 300,
       };

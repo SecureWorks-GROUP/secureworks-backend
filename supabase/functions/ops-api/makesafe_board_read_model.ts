@@ -38,6 +38,7 @@ import {
   sesStageV2OverlayCandidate,
 } from "./ses_stage_engine_v2.ts";
 import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
+import { projectMakesafeJobIdentity } from "./makesafe_job_identity_read_model.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
 
@@ -617,6 +618,14 @@ function claimKey(base: any): string | null {
 
 function lineageFacts(base: any, intakeCase: any) {
   const combined = base?.metadata?.combined_sibling;
+  const jobIdentity = projectMakesafeJobIdentity({
+    builder_claim_ref: base?.metadata?.builder_claim_ref,
+    builder_work_order_number: base?.metadata?.builder_work_order_number,
+    builder_po_number: base?.metadata?.builder_po_number,
+    requesting_company_slug: base?.requesting_company_slug,
+    family: base?.metadata?.makesafe_job_family,
+    authority: "typed_job_metadata",
+  });
   return {
     property_claim_key: claimKey(base),
     one_card_per_po: true,
@@ -625,6 +634,8 @@ function lineageFacts(base: any, intakeCase: any) {
     builder_work_order_number: base?.metadata?.builder_work_order_number ||
       null,
     builder_po_number: base?.metadata?.builder_po_number || null,
+    builder_work_order_group: jobIdentity.work_order_number,
+    builder_instruction_key: jobIdentity.job_grain_key,
     intake_case_id: intakeCase?.id || null,
     lineage_id: intakeCase?.lineage_id || null,
     parent_case_id: intakeCase?.parent_case_id || null,
@@ -1034,6 +1045,14 @@ export function buildCanonicalMakesafeRows(
         name: base?.requesting_company_name || base?.requesting_company || null,
         external_ref: base?.external_ref || null,
       },
+      job_identity: projectMakesafeJobIdentity({
+        builder_claim_ref: base?.metadata?.builder_claim_ref,
+        builder_work_order_number: base?.metadata?.builder_work_order_number,
+        builder_po_number: base?.metadata?.builder_po_number,
+        requesting_company_slug: base?.requesting_company_slug,
+        family: base?.metadata?.makesafe_job_family,
+        authority: "typed_job_metadata",
+      }),
       contact: buildMakesafeContact(
         base,
         extras.contactsByJobId?.[base?.id] || [],
@@ -1099,6 +1118,8 @@ export function buildCanonicalMakesafeRows(
           relationship: "same_property_claim",
           builder_po_number: sibling.lineage.builder_po_number,
           builder_work_order_number: sibling.lineage.builder_work_order_number,
+          builder_work_order_group: sibling.lineage.builder_work_order_group,
+          builder_instruction_key: sibling.lineage.builder_instruction_key,
         });
       }
     }
@@ -1192,6 +1213,7 @@ function tradeSafe(row: any, viewer: MakesafeBoardViewer, all: boolean) {
     job_state: row?.job_state,
     substatus: row?.substatus,
     builder: row?.builder,
+    job_identity: row?.job_identity,
     contact: row?.contact,
     assignments: all
       ? row?.assignments || []

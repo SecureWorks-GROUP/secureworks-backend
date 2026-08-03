@@ -432,6 +432,46 @@ Deno.test("the existing scoped result is grouped by confidence and reason withou
   );
 });
 
+Deno.test("confidence queue groups related cards by typed WO and keeps PO job grains distinct", () => {
+  const facts = ["PO-40001", "PO-40002", "PO-40003"].map((po, index) =>
+    deriveSesSpineFacts({
+      job_id: `job-${index + 1}`,
+      job_number: `SWMS-26000${index + 1}`,
+      cases: [{
+        state: "confirmed_live_job",
+        lineage_id: `lineage-${index + 1}`,
+        instruction_key: `instruction-${index + 1}`,
+        source_content_hash: `sha256:${String(index + 1).repeat(64)}`,
+        external_ref_canonical: "MLB-10001",
+        builder_wo_canonical: `MLB-10001${po}`,
+        builder_po_canonical: po,
+      }],
+      identity_revision: null,
+      detail_builder_reference: "MLB-10001",
+      requesting_company_slug: "mlb",
+      job_metadata: { makesafe_job_family: "general_makesafe" },
+    })
+  );
+  assertEquals(facts.map((fact) => fact.job_identity.work_order_number), [
+    "MLB-10001",
+    "MLB-10001",
+    "MLB-10001",
+  ]);
+  assertEquals(facts.map((fact) => fact.job_identity.purchase_order_number), [
+    "PO-40001",
+    "PO-40002",
+    "PO-40003",
+  ]);
+  const queue = groupSesSpineFactsForReview(facts);
+  assertEquals(queue.groups.length, 1);
+  assertEquals(queue.groups[0].reasons[0].work_order_groups.length, 1);
+  assertEquals(
+    queue.groups[0].reasons[0].work_order_groups[0].work_order_number,
+    "MLB-10001",
+  );
+  assertEquals(queue.groups[0].reasons[0].work_order_groups[0].count, 3);
+});
+
 // CONTROL 2 — the ambiguous card the seeder must refuse to resolve.
 //
 // The producer mints `unresolved_authority` when a job has more than one live
