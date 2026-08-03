@@ -30297,6 +30297,8 @@ export function _tradeCrewRoster(assignments: any[]): any[] {
 // The designated lead, or null when nobody has been designated. Never guesses:
 // a job with no is_lead row has no lead, which is the truthful answer for every
 // job that existed before the designation feature shipped.
+// Keep worker phone numbers on crew rows only; the narrower privacy reading
+// avoids duplicating them on leadInstaller without removing existing access.
 export function _tradeLeadInstaller(crew: any[]): any | null {
   const lead = (crew || []).find((c: any) => c?.is_lead === true)
   if (!lead) return null
@@ -30304,7 +30306,6 @@ export function _tradeLeadInstaller(crew: any[]): any | null {
     assignment_id: lead.id || null,
     user_id: lead.user_id || null,
     name: lead.name || null,
-    phone: lead.users?.phone || null,
   }
 }
 

@@ -293,8 +293,9 @@ no new parameter, no auth change.
    `is_lead`. The existing section header in the trade-app doc says "who else is
    assigned today"; the payload is deliberately NOT date-filtered (the user
    explicitly opened this job), so render the whole roster.
-2. **Lead badge.** `leadInstaller` is `{assignment_id, user_id, name, phone}` or
-   **`null`**. Null is the normal case today and for every historical job — it
+2. **Lead badge.** `leadInstaller` is `{assignment_id, user_id, name}` or
+   **`null`**. The lead's phone is read from the matching `crew[]` row rather
+   than duplicated onto `leadInstaller`. Null is the normal case today and for every historical job — it
    means nobody has been designated, and it must render as absent, not as a
    placeholder or a guess. Do not derive a lead from `crew[].role`; see the
    role-default measurement above for why that column says almost everyone is a
