@@ -1736,6 +1736,34 @@ Deno.test(
 );
 
 Deno.test(
+  "raw checklist fence prose cannot support the existing-fence picket carve-out",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.requesting_company_slug = "aj";
+    live.detail!.requesting_company_name = "AJ Building & Restoration";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.documents = live.documents.filter((row) =>
+      String(row.type || "").toLowerCase() !== "makesafe_report"
+    );
+    live.reports[0].checklist_json = {
+      work_done:
+        "Used 20 star pickets to secure the existing fence line.",
+      materials_used: ["Star pickets x 20"],
+    };
+
+    const facts = buildSesAssemblerInput(live).cycle_facts
+      .hours_and_materials!;
+    assertEquals(facts.existing_fence_star_picket_count, undefined);
+    assertEquals(
+      facts.existing_fence_star_picket_refusal,
+      "existing_fence_scope_missing",
+    );
+  },
+);
+
+Deno.test(
   "structured panel and base counts defeat the physical-family picket carve-out",
   () => {
     const live = snapshot();

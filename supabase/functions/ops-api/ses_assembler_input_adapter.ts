@@ -1040,13 +1040,6 @@ function explicitHoursAndMaterials(
           snapshot,
           classification.attendanceCycleId,
         ),
-        checklist.work_done,
-        checklist.works_completed,
-        checklist.scope,
-        checklist.scope_notes,
-        currentReport?.notes,
-        intakeCase?.raw_identity_json?.instruction_text,
-        intakeCase?.raw_identity_json?.scope,
       ],
       materials_used: checklist.materials_used,
       charged_line_descriptions: [

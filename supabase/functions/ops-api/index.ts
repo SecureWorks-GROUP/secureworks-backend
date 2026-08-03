@@ -34213,6 +34213,12 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
   ).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
   const fileName =
     `Make-Safe-Report-${safeRef}-${safeSuburb}-${rawHash.slice(0, 12)}.pdf`
+  const reportScopeNarratives = [
+    validatedInput.job.scope,
+    validatedInput.job.findings,
+    validatedInput.job.works,
+    validatedInput.job.materials,
+  ].filter((value: unknown) => typeof value === 'string' && value.trim())
   const result = await attachMakesafeDocument(client, {
     job_id: jobId,
     type: 'makesafe_report',
@@ -34222,14 +34228,7 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
   }, {
     data_snapshot_json: {
       ...trustedSnapshot,
-      // Keep only server-owned curated report prose available to the invoice
-      // assembler; raw checklist text must not become builder-report truth.
-      report_scope_narratives: [
-        validatedInput.job.scope,
-        validatedInput.job.findings,
-        validatedInput.job.works,
-        validatedInput.job.materials,
-      ].filter((value: unknown) => typeof value === 'string' && value.trim()),
+      report_scope_narratives: reportScopeNarratives,
     },
     attendance_cycle_id: detailResponse.data.attendance_cycle_id || null,
     cycle_attribution: detailResponse.data.attendance_cycle_id
@@ -34240,6 +34239,7 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
     .update({
       data_snapshot_json: {
         ...trustedSnapshot,
+        report_scope_narratives: reportScopeNarratives,
         evidence_source: evidenceSource,
         source_document_id: result.document_id,
       },
