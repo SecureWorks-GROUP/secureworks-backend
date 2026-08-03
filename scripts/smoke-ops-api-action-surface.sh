@@ -85,7 +85,45 @@ assert_contains() {
 echo "== SecureWorks ops-api action-surface smoke =="
 echo "Project: ${PROJECT_REF}"
 
-ops_version="$(json_get "${BASE}/ops-api?action=ops_api_version")"
+# A deploy does not propagate to every isolate at once: for tens of seconds to
+# minutes after `supabase functions deploy`, the version endpoint can still
+# answer from a pre-deploy isolate, and every probe below would then grade the
+# OLD revision. (2026-08-03: the lane failed 12 checks on the previous build's
+# missing metadata and pre-fix auth behaviour ~30s after a good deploy, twice.)
+# When the lane tells us what it just deployed, wait for that exact revision to
+# answer twice in a row before grading anything. Outside the deploy lane (no
+# expectation set) probe once, as before.
+ops_version=""
+if [[ -n "${EXPECTED_COMMIT_SHA:-}" ]]; then
+  CONVERGE_TIMEOUT_SECONDS="${CONVERGE_TIMEOUT_SECONDS:-420}"
+  CONVERGE_INTERVAL_SECONDS="${CONVERGE_INTERVAL_SECONDS:-15}"
+  deadline=$(( $(date +%s) + CONVERGE_TIMEOUT_SECONDS ))
+  converged=0
+  attempt=0
+  while :; do
+    attempt=$((attempt + 1))
+    ops_version="$(json_get "${BASE}/ops-api?action=ops_api_version")"
+    if printf '%s' "$ops_version" | grep -q "\"commit_sha\":\"${EXPECTED_COMMIT_SHA}\""; then
+      converged=$((converged + 1))
+      if (( converged >= 2 )); then
+        echo "Deployed revision ${EXPECTED_COMMIT_SHA} answering on ${converged} consecutive probes (attempt ${attempt}); grading that revision."
+        break
+      fi
+      echo "Deployed revision seen once; confirming convergence..."
+    else
+      converged=0
+      echo "Waiting for deployed revision ${EXPECTED_COMMIT_SHA} to propagate (attempt ${attempt})..."
+    fi
+    if (( $(date +%s) >= deadline )); then
+      record_fail "ops-api never converged to deployed revision ${EXPECTED_COMMIT_SHA} within ${CONVERGE_TIMEOUT_SECONDS}s (last answer: $(printf '%s' "$ops_version" | head -c 200))"
+      echo "== Results: ${PASS} passed, ${FAIL} failed =="
+      exit "$FAIL"
+    fi
+    sleep "${CONVERGE_INTERVAL_SECONDS}"
+  done
+else
+  ops_version="$(json_get "${BASE}/ops-api?action=ops_api_version")"
+fi
 assert_not_unknown "ops-api ops_api_version recognised" "$ops_version"
 assert_contains "ops-api canonical source" "$ops_version" '"source_repo":"secureworks-site"'
 assert_contains "ops-api version includes build label" "$ops_version" '"build_label":'
