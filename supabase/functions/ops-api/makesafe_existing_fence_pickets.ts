@@ -29,8 +29,12 @@ const EXISTING_FENCE_SUPPORT_RE = new RegExp(
 // Exact mirror of the wiki's global anti-laundering signals. Fixings and
 // consumables remain separately refused server lines, but do not erase a valid
 // picket carve-out merely because a raw checklist separately mentions them.
-const GENUINE_TEMP_FENCE_SIGNAL_RE =
-  /\bpanels?\b|\bblocks?\b|\bbases?\b|\bties?\b|\bclips?\b|\bhire\b|\bretrieval[\s_-]*materials?\b|\b(?:temporary|temp|storm)[\s_-]*fenc/i;
+// A classified physical make-safe also outranks a trade's free-text temp-fence
+// label; concrete kit evidence and a classified temporary-fencing family still
+// refuse independently.
+const GENUINE_TEMP_FENCE_KIT_SIGNAL_RE =
+  /\bpanels?\b|\bblocks?\b|\bbases?\b|\bties?\b|\bclips?\b|\bhire\b|\bretrieval[\s_-]*materials?\b/i;
+const TEMPORARY_FENCE_TEXT_SIGNAL_RE = /\b(?:temporary|temp|storm)[\s_-]*fenc/i;
 const PICKET_LINE_OTHER_RULED_MATERIAL_RE =
   /\bpanels?\b|\bblocks?\b|\bbases?\b|\bties?\b|\bclips?\b|\bfixings?\b|\bconsumables?\b|\bhire\b|\bretrieval[\s_-]*materials?\b/i;
 
@@ -70,6 +74,7 @@ export function deriveExistingFencePicketDecision(input: {
   materials_used: unknown;
   charged_line_descriptions?: unknown[];
   declared_temporary_fence?: boolean;
+  classified_family?: "physical_makesafe" | "temporary_fencing";
 }): ExistingFencePicketDecision {
   const supportNarratives = input.support_narratives.map(text).filter(Boolean);
   const chargedLines = (input.charged_line_descriptions || []).map(text).filter(
@@ -98,13 +103,18 @@ export function deriveExistingFencePicketDecision(input: {
     ...chargedLines,
   ];
   if (
+    input.classified_family === "temporary_fencing" ||
     input.declared_temporary_fence ||
     picketMaterials.some((narrative) =>
       PICKET_LINE_OTHER_RULED_MATERIAL_RE.test(narrative)
     ) ||
     semanticNarratives.some((narrative) =>
-      GENUINE_TEMP_FENCE_SIGNAL_RE.test(narrative)
-    )
+      GENUINE_TEMP_FENCE_KIT_SIGNAL_RE.test(narrative)
+    ) ||
+    (input.classified_family !== "physical_makesafe" &&
+      semanticNarratives.some((narrative) =>
+        TEMPORARY_FENCE_TEXT_SIGNAL_RE.test(narrative)
+      ))
   ) {
     return { state: "refused", reason: "genuine_temporary_fence_signal" };
   }

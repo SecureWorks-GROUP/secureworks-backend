@@ -967,7 +967,13 @@ function ajsExistingFencePicketDecision(
   const metadata = asRecord(job.metadata);
   const canonicalFamily = String(
     metadata.makesafe_job_family || detail.makesafe_job_family || "",
-  );
+  ).toLowerCase();
+  const classifiedFamily = canonicalFamily === "general_makesafe" ||
+      canonicalFamily === "physical_makesafe"
+    ? "physical_makesafe"
+    : /temp(?:orary)?[\s_-]*fenc/i.test(canonicalFamily)
+    ? "temporary_fencing"
+    : undefined;
   return deriveExistingFencePicketDecision({
     support_narratives: [
       output.report.scope,
@@ -989,6 +995,7 @@ function ajsExistingFencePicketDecision(
     declared_temporary_fence: /temp(?:orary)?[\s_-]*fenc/i.test(
       canonicalFamily,
     ),
+    classified_family: classifiedFamily,
   });
 }
 

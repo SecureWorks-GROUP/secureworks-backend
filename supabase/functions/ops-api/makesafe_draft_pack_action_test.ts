@@ -22,6 +22,7 @@ import {
   _draftMakesafeReportPackForTest as draftMakesafeReportPack,
   _evaluateMakesafeDraftInvoicePricingForTest
     as evaluateMakesafeDraftInvoicePricing,
+  _loadDraftPackContextForTest as loadDraftPackContext,
   _makesafeDraftInvoicePayloadLinesForXeroUpdateForTest
     as makesafeDraftInvoicePayloadLinesForXeroUpdate,
 } from "./index.ts";
@@ -49,6 +50,55 @@ function claudeJson(summary = "Draft pack refreshed for human review.") {
     change_summary: summary,
   });
 }
+
+Deno.test("loadDraftPackContext carries the canonical job-family classification", async () => {
+  const selects: Record<string, string> = {};
+  const rows: Record<string, unknown> = {
+    jobs: {
+      id: "208450c0-7161-4b30-9514-66226b054609",
+      metadata: { makesafe_job_family: "general_makesafe" },
+    },
+    makesafe_job_details: {
+      job_id: "208450c0-7161-4b30-9514-66226b054609",
+    },
+    job_service_reports: null,
+    job_documents: [],
+    job_media: [],
+  };
+  const client = {
+    from(table: string) {
+      const response = () => ({ data: rows[table] ?? [], error: null });
+      const query = {
+        select(columns: string) {
+          selects[table] = columns;
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        order() {
+          return query;
+        },
+        limit() {
+          return query;
+        },
+        maybeSingle() {
+          return Promise.resolve(response());
+        },
+        then(resolve: (value: ReturnType<typeof response>) => unknown) {
+          return Promise.resolve(response()).then(resolve);
+        },
+      };
+      return query;
+    },
+  };
+
+  const context = await loadDraftPackContext(client, {
+    job_id: "208450c0-7161-4b30-9514-66226b054609",
+  });
+  assertStringIncludes(selects.jobs, "metadata");
+  assertEquals(context.job, rows.jobs);
+});
 
 Deno.test("draftMakesafeReportPack: drafts report + DRAFT invoice + invoice PDF only", async () => {
   const calls: Record<string, any[]> = {

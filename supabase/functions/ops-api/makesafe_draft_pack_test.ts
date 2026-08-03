@@ -833,6 +833,7 @@ Deno.test("AJS existing-fence star pickets are retained at the standing sale rat
       ref: "AJBR-70271",
       address: "Privacy-safe test property",
       billing_note: "2 trades x 3 hours",
+      findings: "Make-safe type: Temporary fencing",
       works:
         "Propped up the existing Hardie fence using 20 star pickets to secure it upright until replacement.",
       materials: "Star pickets x 20.",
@@ -858,12 +859,18 @@ Deno.test("AJS existing-fence star pickets are retained at the standing sale rat
     change_summary: "Draft revised.",
   });
   const ctx = {
+    job: {
+      id: "208450c0-7161-4b30-9514-66226b054609",
+      metadata: { makesafe_job_family: "general_makesafe" },
+    },
     detail: {
       external_ref: "AJBR-70271",
       requesting_company_name: "AJ Building & Restoration",
     },
     service_report: {
       checklist_json: {
+        job_type: "Temporary fencing",
+        damage_description: "Make-safe type: Temporary fencing",
         work_done:
           "Propped up hardy fence using 20 star pickets to secure upright until fence replaced.",
         materials_used: [
@@ -889,6 +896,12 @@ Deno.test("AJS existing-fence star pickets are retained at the standing sale rat
   );
   assertEquals(labour?.quantity, 6);
   assertEquals(labour?.unit_price, 80);
+  const subtotalEx = revised.invoice.line_items.reduce(
+    (sum, line) => sum + Number(line.quantity) * Number(line.unit_price),
+    0,
+  );
+  assertEquals(subtotalEx, 750);
+  assertEquals(Math.round(subtotalEx * 1.1 * 100) / 100, 825);
   assertEquals(
     revised.invoice.line_items.some((line) =>
       /fixings?|consumables?/i.test(line.description)
@@ -920,6 +933,18 @@ Deno.test("AJS existing-fence star pickets are retained at the standing sale rat
       (line) => /fence pickets supplied/i.test(line.description),
     ),
     false,
+  );
+
+  const classifiedTempFence = structuredClone(ctx);
+  classifiedTempFence.job.metadata.makesafe_job_family = "temp_fence_makesafe";
+  const tempFenceVerification = verifyDraftPackOutput(
+    revised,
+    classifiedTempFence,
+  );
+  assertEquals(tempFenceVerification.ok, false);
+  assertStringIncludes(
+    tempFenceVerification.blockers.join("; "),
+    "temp-fence",
   );
 });
 
