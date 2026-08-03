@@ -79,6 +79,10 @@ function makeClient(tables: Tables, opts: { errorOn?: string } = {}) {
             preds.push((r) => String(r?.[c] ?? "") === String(v));
             return upd;
           },
+          neq: (c: string, v: any) => {
+            preds.push((r) => String(r?.[c] ?? "") !== String(v));
+            return upd;
+          },
           select: () => upd,
           single: () => {
             const rows = (tables[table] || []).filter((r) =>
