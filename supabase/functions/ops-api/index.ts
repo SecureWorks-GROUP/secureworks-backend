@@ -24382,6 +24382,41 @@ export async function assertAssignmentMutationAuthz(
 // installer allocation SMS (DA-M3-8), job_events,
 // business_events, GHL push, and visible_to_trades all fire identically.
 // Idempotent against double-taps and refuses archived / cancelled jobs.
+function isAssignmentUserDateConflict(error: any): boolean {
+  if (String(error?.code || '') !== '23505') return false
+  const detail = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`
+  return detail.includes('job_assignments_job_user_date_key') ||
+    detail.includes('(job_id, user_id, scheduled_date)')
+}
+
+async function findActiveAssignmentForUserDate(
+  client: any,
+  jobId: string,
+  userId: string,
+  scheduledDate: string,
+): Promise<any | null> {
+  const { data, error } = await client.from('job_assignments')
+    .select('id, scheduled_date, user_id, status, assignment_type')
+    .eq('job_id', jobId).eq('user_id', userId).eq('scheduled_date', scheduledDate)
+    .neq('status', 'cancelled').limit(1)
+  if (error) throw error
+  return data?.[0] || null
+}
+
+function assignmentUserDateConflict(
+  targetUserId: string,
+  scheduledDate: string,
+): ApiError {
+  const message = `An existing assignment record prevents allocating that crew member to this job on ${scheduledDate}`
+  return new ApiError(message, 409, {
+    error: message,
+    code: 'assignment_user_date_conflict',
+    constraint: 'job_assignments_job_user_date_key',
+    user_id: targetUserId,
+    scheduled_date: scheduledDate,
+  })
+}
+
 export async function allocateJob(client: any, args: {
   body: any
   callerRole?: string | null
@@ -24455,13 +24490,48 @@ export async function allocateJob(client: any, args: {
     }
     const updateBody: any = { assignmentId: reassignId, userId: targetUserId }
     const sDateR = body.scheduledDate || body.scheduled_date || body.date
+    const targetDate = sDateR || sourceAssignment.scheduled_date || null
+    const changesAssignmentDetails = Boolean(
+      (sDateR && sDateR !== sourceAssignment.scheduled_date) ||
+        body.startTime !== undefined || body.start_time !== undefined ||
+        body.endTime !== undefined || body.end_time !== undefined ||
+        body.crewName !== undefined || body.crew_name !== undefined ||
+        body.notes !== undefined,
+    )
+    const canDeduplicateCrewMembership = !changesAssignmentDetails
     if (sDateR) updateBody.scheduledDate = sDateR
-    if (body.startTime || body.start_time) updateBody.startTime = body.startTime || body.start_time
-    if (body.endTime || body.end_time) updateBody.endTime = body.endTime || body.end_time
-    if (body.crewName || body.crew_name) updateBody.crewName = body.crewName || body.crew_name
+    if (body.startTime !== undefined || body.start_time !== undefined) updateBody.startTime = body.startTime ?? body.start_time
+    if (body.endTime !== undefined || body.end_time !== undefined) updateBody.endTime = body.endTime ?? body.end_time
+    if (body.crewName !== undefined || body.crew_name !== undefined) updateBody.crewName = body.crewName ?? body.crew_name
     if (body.notes !== undefined) updateBody.notes = body.notes
-    const res = await updateAssignment(client, updateBody)
-    return { ok: true, mode: 'reassign', ...res }
+
+    // The Trade multi-select sheet uses one representative assignment for the
+    // first selected person. If that person is already another member of the
+    // same job/date crew, the desired state is already true: preserve both rows
+    // instead of collapsing the representative row into a duplicate tuple.
+    if (targetDate && canDeduplicateCrewMembership) {
+      const existingTarget = await findActiveAssignmentForUserDate(client, jobId, targetUserId, targetDate)
+      if (existingTarget) {
+        return { ok: true, mode: 'reassign', deduped: true, assignment: existingTarget }
+      }
+    }
+
+    try {
+      const res = await updateAssignment(client, updateBody)
+      return { ok: true, mode: 'reassign', ...res }
+    } catch (error) {
+      if (!targetDate || !isAssignmentUserDateConflict(error)) throw error
+
+      // Close the pre-read/write race: if another request created the exact
+      // target crew row, the allocation is complete and is safe to dedupe.
+      if (canDeduplicateCrewMembership) {
+        const racedTarget = await findActiveAssignmentForUserDate(client, jobId, targetUserId, targetDate)
+        if (racedTarget) {
+          return { ok: true, mode: 'reassign', deduped: true, assignment: racedTarget }
+        }
+      }
+      throw assignmentUserDateConflict(targetUserId, targetDate)
+    }
   }
 
   // ── New allocation ──
@@ -24490,8 +24560,17 @@ export async function allocateJob(client: any, args: {
 
   // M3b U2c: overwrite any body-supplied value with the SERVER-derived actor
   // (or null when unknown, e.g. tests calling allocateJob directly).
-  const created = await createAssignment(client, { ...body, jobId, userId: targetUserId, scheduledDate: sDate, allocated_by_user_id: actorUserId || null })
-  return { ok: true, mode: 'create', ...created }
+  try {
+    const created = await createAssignment(client, { ...body, jobId, userId: targetUserId, scheduledDate: sDate, allocated_by_user_id: actorUserId || null })
+    return { ok: true, mode: 'create', ...created }
+  } catch (error) {
+    if (!isAssignmentUserDateConflict(error)) throw error
+    const racedTarget = await findActiveAssignmentForUserDate(client, jobId, targetUserId, sDate)
+    if (racedTarget) {
+      return { ok: true, mode: 'idempotent', deduped: true, assignment: racedTarget }
+    }
+    throw assignmentUserDateConflict(targetUserId, sDate)
+  }
 }
 
 export async function createAssignment(client: any, body: any) {

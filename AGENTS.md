@@ -1157,6 +1157,12 @@ narrowing, diagnosis, and deployment caveats are owned by
 `docs/evidence/trade-crew-visibility-lead-2026-08-03.md`; consult it before
 changing `trade_job_detail`, `set_job_lead`, or the lead/schema gate.
 
+Trade multi-person allocation must preserve one assignment row per crew member:
+when the representative row is reassigned to a person already on that job/date,
+return the existing target row idempotently rather than collapsing the crew or
+surfacing a raw uniqueness error. Diagnosis and the response contract live in
+`docs/evidence/trade-allocation-collision-2026-08-03.md`.
+
 ## Every SES Measurement Names Its Denominator And Its Generation
 
 Two small modules carry plan v2's write-safety rule D.0/3, and every SES harness
