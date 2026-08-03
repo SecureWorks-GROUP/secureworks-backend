@@ -135,7 +135,7 @@ export async function commandOutputWithTimeout(
   }
 }
 
-async function sha256(bytes: Uint8Array): Promise<string> {
+export async function sha256(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new Uint8Array(bytes).buffer,
@@ -144,7 +144,7 @@ async function sha256(bytes: Uint8Array): Promise<string> {
     .map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-async function managementSql(query: string): Promise<any[]> {
+export async function managementSql(query: string): Promise<any[]> {
   const host = new URL(requiredEnv("SW_SUPABASE_URL")).hostname;
   const projectRef = host.split(".")[0];
   const response = await fetch(
@@ -220,7 +220,7 @@ where review.review_state = 'needs_review'
 order by review.review_state_changed_at, review.job_id;
 `;
 
-async function enumerateRows(): Promise<SweepRow[]> {
+export async function enumerateRows(): Promise<SweepRow[]> {
   return (await managementSql(ENUMERATION_SQL)).map((row) => ({
     job_id: row.job_id,
     job_number: row.job_number,
@@ -307,7 +307,7 @@ async function gitBytes(path: string): Promise<Uint8Array> {
   );
 }
 
-async function assertRendererBoundary(): Promise<void> {
+export async function assertRendererBoundary(): Promise<void> {
   const command = new Deno.Command("git", {
     cwd: wikiRepoPath(),
     args: ["ls-remote", "origin", "refs/heads/main"],
@@ -486,7 +486,52 @@ export function currentWikiRendererCommand(
   });
 }
 
-async function renderRow(row: SweepRow): Promise<SweepRender> {
+const BERTRAM_PROTECTED_REPORT = {
+  job_id: "208450c0-7161-4b30-9514-66226b054609",
+  job_number: "SWMS-261109",
+  builder_reference: "AJBR-70271",
+  report_id: "ca2952c5-5777-4d26-ab73-2112fa35d9f9",
+  attendance_cycle_id: "2a696c19-05b6-4186-9e00-380dc7202962",
+  photo_count: 35,
+  crew: "2 trades",
+  arrival: "09:19",
+  scope:
+    "Attend the property to make safe the boundary fences to the back, front and sides, which have cracked and are leaning. The fencing is supersix and is losing its capping. Prop up the fence to prevent it falling.",
+  findings:
+    "Storm and wind have cracked the asbestos cement (supersix) boundary fencing to the back, front and side boundaries. The fence is leaning out of plumb and is losing its capping along the top edge. In its damaged state the fence presented a collapse risk to the property and to anyone passing the boundary, so it required immediate temporary support before any permanent repair could be scheduled.",
+  works:
+    "We propped up the asbestos cement (supersix) fence using 20 star pickets, driven in along the damaged runs and fixed to the fence to hold it upright and plumb. The fence is now secure and stable and will remain supported until the fence is replaced. The existing fence sheeting and capping were left undisturbed in place on site pending permanent repair, and the site was left clear and safe on departure.",
+  materials:
+    "20 star pickets installed to prop and secure the existing fence line.",
+} as const;
+
+function assertProtectedBertramSource(row: SweepRow, applicable: any[]): void {
+  const source: any = row.source;
+  const checklist = source.checklist_json || {};
+  const materials = Array.isArray(checklist.materials_used)
+    ? checklist.materials_used.map(text)
+    : [];
+  if (
+    row.job_id !== BERTRAM_PROTECTED_REPORT.job_id ||
+    row.job_number !== BERTRAM_PROTECTED_REPORT.job_number ||
+    row.builder_reference !== BERTRAM_PROTECTED_REPORT.builder_reference ||
+    source.report_id !== BERTRAM_PROTECTED_REPORT.report_id ||
+    source.attendance_cycle_id !==
+      BERTRAM_PROTECTED_REPORT.attendance_cycle_id ||
+    applicable.length !== BERTRAM_PROTECTED_REPORT.photo_count ||
+    !materials.includes("Star pickets x 20")
+  ) {
+    throw new SweepRefusal(
+      "protected_bertram_source_drift",
+      "Bertram current-cycle source facts moved since the reviewed repair plan.",
+    );
+  }
+}
+
+async function renderRow(
+  row: SweepRow,
+  options: { protectedBertramRepair?: boolean } = {},
+): Promise<SweepRender> {
   console.error(JSON.stringify({
     progress: "render_candidate",
     job_number: row.job_number,
@@ -518,9 +563,16 @@ async function renderRow(row: SweepRow): Promise<SweepRender> {
     source.checklist_json && typeof source.checklist_json === "object"
       ? source.checklist_json as Record<string, unknown>
       : {};
-  const scope = text(checklist.damage_description);
-  const findings = text(checklist.damage_cause);
-  const works = text(checklist.work_done) || text(source.notes);
+  const protectedBertram = options.protectedBertramRepair === true;
+  const scope = protectedBertram
+    ? BERTRAM_PROTECTED_REPORT.scope
+    : text(checklist.damage_description);
+  const findings = protectedBertram
+    ? BERTRAM_PROTECTED_REPORT.findings
+    : text(checklist.damage_cause);
+  const works = protectedBertram
+    ? BERTRAM_PROTECTED_REPORT.works
+    : text(checklist.work_done) || text(source.notes);
   if (!scope || !findings || !works) {
     throw new SweepRefusal(
       "curated_story_missing",
@@ -531,6 +583,7 @@ async function renderRow(row: SweepRow): Promise<SweepRender> {
   try {
     const renderer = await materializeRenderer(dir);
     const { applicable, excluded } = currentMedia(source);
+    if (protectedBertram) assertProtectedBertramSource(row, applicable);
     const photos = [];
     for (let index = 0; index < applicable.length; index++) {
       const item = applicable[index];
@@ -539,8 +592,10 @@ async function renderRow(row: SweepRow): Promise<SweepRender> {
       photos.push({
         evidence_id: text(item.id),
         file: absoluteFile,
-        caption: text(item.label || item.caption) ||
-          `Completion evidence ${index + 1}`,
+        caption: protectedBertram
+          ? `Site photo ${index + 1}`
+          : text(item.label || item.caption) ||
+            `Completion evidence ${index + 1}`,
         content_sha256: await sha256(await Deno.readFile(absoluteFile)),
       });
     }
@@ -550,11 +605,22 @@ async function renderRow(row: SweepRow): Promise<SweepRender> {
       address: text(source.site_address) || text(source.suburb),
       contact: text(source.client_name),
       date: text(source.submitted_at).slice(0, 10),
-      arrival: text(source.start_time),
+      arrival: protectedBertram
+        ? BERTRAM_PROTECTED_REPORT.arrival
+        : text(source.start_time),
+      ...(protectedBertram ? { crew: BERTRAM_PROTECTED_REPORT.crew } : {}),
       scope,
       findings,
       works,
-      materials_evidence: explicitMaterials(checklist),
+      ...(protectedBertram
+        ? { materials: BERTRAM_PROTECTED_REPORT.materials }
+        : {}),
+      materials_evidence: protectedBertram
+        ? {
+          state: "recorded_used",
+          items: [BERTRAM_PROTECTED_REPORT.materials],
+        }
+        : explicitMaterials(checklist),
       photos,
       photo_evidence: {
         source_revision: `job_service_report:${source.report_id}`,
@@ -610,7 +676,17 @@ async function renderRow(row: SweepRow): Promise<SweepRender> {
   }
 }
 
-async function opsAction(action: string, body: Record<string, unknown>) {
+export async function renderProtectedBertramReport(
+  row: SweepRow,
+): Promise<SweepRender> {
+  return await renderRow(row, { protectedBertramRepair: true });
+}
+
+export async function opsAction(
+  action: string,
+  body: Record<string, unknown>,
+  timeoutMs = READ_TIMEOUT_MS,
+) {
   const response = await fetch(
     `${requiredEnv("SW_SUPABASE_URL")}/functions/v1/ops-api?action=${action}`,
     {
@@ -620,7 +696,7 @@ async function opsAction(action: string, body: Record<string, unknown>) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     },
   );
   const payload = await response.json().catch(() => ({}));

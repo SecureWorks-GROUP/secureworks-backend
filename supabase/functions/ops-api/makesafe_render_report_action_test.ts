@@ -8,6 +8,7 @@ import {
   _attachCurrentWikiCuratedReportForTest,
   _makesafeRenderReportForTest,
   ApiError,
+  bertramProtectedReportRepairPlan,
   canonicalMakesafeReportJob,
 } from "./index.ts";
 import {
@@ -307,6 +308,34 @@ Deno.test("captain-corrected report refuses before attachment mutation", async (
   );
   assertEquals((error as ApiError).status, 409);
   assertEquals(mutations, []);
+});
+
+Deno.test("Bertram repair authority admits only the exact reviewed candidate and source", () => {
+  const accepted = bertramProtectedReportRepairPlan({
+    job_id: "208450c0-7161-4b30-9514-66226b054609",
+    job_number: "SWMS-261109",
+    candidate_raw_sha256:
+      "5c0dfc02488907f9e4ac1196a1dee6d390ba61a38afd0fb3b20e37139c6f13f8",
+    authority: "bertram-provenance-repair-v1",
+  });
+  assertEquals(
+    accepted?.source_document_id,
+    "1378390d-4d88-4ab8-99ea-b8d937782c76",
+  );
+  assertEquals(accepted?.source_document_version, 3);
+  assertEquals(
+    accepted?.source_raw_sha256,
+    "3e2ee3b9ac47fc2d21fd58144ce7152a97b01c46eedc10485c0e5bda3d5d97ad",
+  );
+  assertEquals(
+    bertramProtectedReportRepairPlan({
+      job_id: "208450c0-7161-4b30-9514-66226b054609",
+      job_number: "SWMS-261109",
+      candidate_raw_sha256: "0".repeat(64),
+      authority: "bertram-provenance-repair-v1",
+    }),
+    null,
+  );
 });
 
 Deno.test("canonical report adapter owns jobs.client_name -> contact", async () => {
