@@ -174,17 +174,20 @@ Deno.test("approval identity never treats a URL PO token as an attachment name",
     storage_url: "makesafe/MLB-10001PO-40001.pdf",
   }]);
   assertEquals(attachmentNames, [null]);
-  assertEquals(correlateIntakeApprovalIdentity({
-    extraction: {},
-    approved_external_ref: "MLB-10001",
-    requesting_company_slug: "mlb",
-    family: "general_makesafe",
-    attachment_names: attachmentNames,
-  }), {
-    action: "refuse",
-    reason: "typed_identity_not_persistable",
-    instruction_keys: [],
-  });
+  assertEquals(
+    correlateIntakeApprovalIdentity({
+      extraction: {},
+      approved_external_ref: "MLB-10001",
+      requesting_company_slug: "mlb",
+      family: "general_makesafe",
+      attachment_names: attachmentNames,
+    }),
+    {
+      action: "refuse",
+      reason: "typed_identity_not_persistable",
+      instruction_keys: [],
+    },
+  );
 });
 
 Deno.test("approval correlation refuses two PO tokens in one attachment name", () => {
