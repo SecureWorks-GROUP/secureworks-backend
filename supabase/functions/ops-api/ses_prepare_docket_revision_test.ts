@@ -1507,6 +1507,13 @@ Deno.test("Bertram AJS existing-fence pickets price through the sealed docket pr
     ),
     [],
   );
+  assertEquals(result.state, "ready");
+  assertEquals(result.blockers.map((item) => item.reason_code), []);
+  assertEquals(Object.keys(result.email_drafts).sort(), [
+    "INVOICE_EMAIL_DRAFT",
+    "PHOTO_EMAIL_DRAFT",
+    "REPORT_EMAIL_DRAFT",
+  ]);
   const proposal = result.invoice_proposal as Record<string, unknown>;
   const lines = proposal.line_items as Array<Record<string, unknown>>;
   assertEquals(lines.length, 2);

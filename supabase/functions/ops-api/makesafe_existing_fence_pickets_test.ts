@@ -107,6 +107,41 @@ Deno.test("every genuine temporary-fence signal defeats the carve-out", () => {
   );
 });
 
+Deno.test("physical classification outranks only the trade's temporary-fence label", () => {
+  const base = {
+    support_narratives: [
+      "Make-safe type: Temporary fencing.",
+      "Star pickets support an existing boundary fence.",
+    ],
+    materials_used: ["Star pickets x 20"],
+  };
+  assertEquals(
+    deriveExistingFencePicketDecision({
+      ...base,
+      classified_family: "physical_makesafe",
+    }).state,
+    "billable",
+  );
+  assertEquals(
+    deriveExistingFencePicketDecision({
+      ...base,
+      classified_family: "temporary_fencing",
+    }),
+    { state: "refused", reason: "genuine_temporary_fence_signal" },
+  );
+  assertEquals(
+    deriveExistingFencePicketDecision({
+      ...base,
+      support_narratives: [
+        ...base.support_narratives,
+        "Temporary fence panels x 4",
+      ],
+      classified_family: "physical_makesafe",
+    }),
+    { state: "refused", reason: "genuine_temporary_fence_signal" },
+  );
+});
+
 Deno.test("separate fixings and consumables do not erase a valid picket line", () => {
   assertEquals(
     deriveExistingFencePicketDecision({

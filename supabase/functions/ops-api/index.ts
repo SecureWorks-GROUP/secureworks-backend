@@ -35072,7 +35072,7 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
   const draftKind = body.draft_kind || body.draftKind || 'makesafe_report'
   const [jobRes, detailRes, reportRes, docsRes, mediaRes, notesRes] = await Promise.all([
     client.from('jobs')
-      .select('id, job_number, type, status, client_name, client_phone, site_address, site_suburb, created_at, updated_at')
+      .select('id, job_number, type, status, client_name, client_phone, site_address, site_suburb, metadata, created_at, updated_at')
       .eq('id', jobId).maybeSingle(),
     client.from('makesafe_job_details')
       .select('job_id, requesting_company_id, requesting_company_slug, requesting_company_name, external_ref, substatus, report_received_at, invoice_notes, report_type, makesafe_companies(slug, name, invoice_email, report_recipient)')
@@ -35117,6 +35117,8 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
     ],
   }
 }
+
+export const _loadDraftPackContextForTest = loadDraftPackContext
 
 function normaliseStringArray(v: any): string[] {
   if (!Array.isArray(v)) return []
