@@ -289,6 +289,9 @@ export interface CycleScopedEvidenceInput {
   familyMatrixVersion?: string;
   pricingRevision?: string | null;
   packRevision?: string | null;
+  /** Selected current ACCREC candidate. Read-side fingerprint input only. */
+  invoice?: any | null;
+  invoiceQualifiesAsCurrentDraft?: boolean;
 }
 
 export interface CycleScopedEvidence {
@@ -413,6 +416,14 @@ export function projectCycleScopedEvidence(
     pricingRevision: input.pricingRevision || null,
     packRevision: input.packRevision || pack?.last_render_hash || null,
     reattendCount: Number(detail?.reattend_count || 0),
+    invoiceId: input.invoice?.id || input.invoice?.xero_invoice_id ||
+      input.invoice?.invoice_number || null,
+    invoiceJobId: input.invoice?.job_id || null,
+    invoiceType: input.invoice?.invoice_type || null,
+    invoiceStatus: input.invoice?.status || null,
+    invoiceReference: input.invoice?.reference || null,
+    invoiceQualifiesAsCurrentDraft:
+      input.invoiceQualifiesAsCurrentDraft === true,
   });
 
   return {
@@ -449,9 +460,15 @@ export function readinessRevisionPayload(parts: {
   pricingRevision: string | null;
   packRevision: string | null;
   reattendCount: number;
+  invoiceId?: string | null;
+  invoiceJobId?: string | null;
+  invoiceType?: string | null;
+  invoiceStatus?: string | null;
+  invoiceReference?: string | null;
+  invoiceQualifiesAsCurrentDraft?: boolean;
 }): string {
   return JSON.stringify({
-    v: 1,
+    v: 2,
     attendance_cycle_id: parts.attendanceCycleId,
     cycle_number: parts.cycleNumber,
     reattend_count: parts.reattendCount,
@@ -465,18 +482,24 @@ export function readinessRevisionPayload(parts: {
     family_matrix_version: parts.familyMatrixVersion,
     pricing_revision: parts.pricingRevision,
     pack_revision: parts.packRevision,
+    invoice_id: parts.invoiceId ?? null,
+    invoice_job_id: parts.invoiceJobId ?? null,
+    invoice_type: parts.invoiceType ?? null,
+    invoice_status: parts.invoiceStatus ?? null,
+    invoice_reference: parts.invoiceReference ?? null,
+    invoice_qualifies_as_current_draft:
+      parts.invoiceQualifiesAsCurrentDraft === true,
   });
 }
 
-/** Sync SHA-256 hex via Web Crypto is async; provide a deterministic FNV-1a
- *  fallback label only for pure unit tests. Production uses computeReadinessRevision.
- *  S1 exposes this as readiness_revision without claiming approval invalidation. */
+/** The visible board's deterministic FNV-1a read-side fingerprint. It is not
+ *  the U2 SHA-256 approval authority and claims no approval invalidation. */
 export function computeReadinessRevisionSync(
   parts: Parameters<typeof readinessRevisionPayload>[0],
 ): string {
   const payload = readinessRevisionPayload(parts);
   // FNV-1a 64-bit hex — stable, pure, no async. Documented as readiness_revision
-  // v1 fingerprint; U4 may upgrade to full SHA-256 in the docket envelope.
+  // v2 read-side fingerprint; the separate docket envelope owns SHA-256.
   let h = 0xcbf29ce484222325n;
   const prime = 0x100000001b3n;
   for (let i = 0; i < payload.length; i++) {

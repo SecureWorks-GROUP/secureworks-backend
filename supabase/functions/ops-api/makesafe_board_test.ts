@@ -35,7 +35,7 @@ Deno.test("MakeSafe board: admin_to_send_report with NO draft artifacts -> trade
   );
 });
 
-Deno.test("MakeSafe board: legacy ready_to_invoice with no draft artifacts -> trade_report_in (report received, not drafted)", () => {
+Deno.test("MakeSafe board: legacy ready_to_invoice with report evidence but no DRAFT -> trade_report_in", () => {
   // ready_to_invoice counts as a submitted report; with report_sent_at set this
   // job is sentClosed -> it falls through to the close-out path. Here report_sent_at
   // means the pack went out, so it must NOT re-surface as a fresh draft.
@@ -46,9 +46,9 @@ Deno.test("MakeSafe board: legacy ready_to_invoice with no draft artifacts -> tr
     report_sent_at: "2026-06-07T02:00:00Z",
   };
   // sentClosed (report_sent_at) -> NOT trade_report_in / report_ready as a fresh
-  // surface. With no invoice + no docs supplied it falls to the legacy
-  // report_ready completion fallback (hasSubmittedReport && jobStatus complete).
-  assertEquals(_deriveMakesafeBoardStage(job, detail), "report_ready");
+  // surface. The shared invoice gate now forbids report_ready; the existing
+  // report-in stage remains the honest actionable destination.
+  assertEquals(_deriveMakesafeBoardStage(job, detail), "trade_report_in");
 });
 
 Deno.test("MakeSafe board uses New, Allocated, Report Ready, Completed This Week, Archive", () => {
@@ -133,13 +133,25 @@ Deno.test("T2(a) Ferndale: invoiced + admin_to_send_report + DRAFT invoice + rep
   // status=invoiced and a DRAFT invoice would short-circuit to completed/archive
   // pre-V2 (DRAFT counts as an active invoice). It must instead surface for the
   // human to send.
-  const job = { status: "invoiced", completed_at: NOW };
+  const job = {
+    id: "job-ferndale",
+    job_number: "SWMS-TEST-FERNDALE",
+    status: "invoiced",
+    completed_at: NOW,
+  };
   const detail = {
     substatus: "admin_to_send_report",
+    external_ref: "MLB-TEST-1",
     report_received_at: "2026-06-16T01:00:00Z",
   };
   const report = { status: "submitted" };
-  const invoice = { status: "DRAFT", invoice_date: "2026-06-16" };
+  const invoice = {
+    job_id: "job-ferndale",
+    invoice_type: "ACCREC",
+    status: "DRAFT",
+    reference: "MLB-TEST-1",
+    invoice_date: "2026-06-16",
+  };
   const pack = { status: "drafted", report_doc_id: "doc-report-1" };
   assertEquals(
     _deriveMakesafeBoardStage(
@@ -256,13 +268,24 @@ Deno.test("T2(d) report received, admin_to_send_report, NO pack row + NO draft i
 });
 
 Deno.test("T2(e) drafted job: pack row + DRAFT invoice + admin_to_send_report + not sent -> report_ready", () => {
-  const job = { status: "scheduled" };
+  const job = {
+    id: "job-drafted",
+    job_number: "SWMS-TEST-DRAFTED",
+    status: "scheduled",
+  };
   const detail = {
     substatus: "admin_to_send_report",
+    external_ref: "MLB-TEST-2",
     report_received_at: "2026-06-16T01:00:00Z",
   };
   const report = { status: "submitted" };
-  const invoice = { status: "DRAFT", invoice_date: "2026-06-16" };
+  const invoice = {
+    job_id: "job-drafted",
+    invoice_type: "ACCREC",
+    status: "DRAFT",
+    reference: "MLB-TEST-2",
+    invoice_date: "2026-06-16",
+  };
   const pack = { status: "drafted", report_doc_id: "doc-report-1" };
   assertEquals(
     _deriveMakesafeBoardStage(
@@ -280,7 +303,7 @@ Deno.test("T2(e) drafted job: pack row + DRAFT invoice + admin_to_send_report + 
   );
 });
 
-Deno.test("T2 resumeNotSent: authorised_not_sent pack + AUTHORISED invoice -> report_ready (a resume, never re-send)", () => {
+Deno.test("T2 resumeNotSent: AUTHORISED resume stays actionable below Docs Ready", () => {
   const job = { status: "invoiced", completed_at: NOW };
   const detail = { substatus: "admin_to_send_report" };
   const report = { status: "submitted" };
@@ -298,7 +321,7 @@ Deno.test("T2 resumeNotSent: authorised_not_sent pack + AUTHORISED invoice -> re
       false,
       pack,
     ),
-    "report_ready",
+    "trade_report_in",
   );
 });
 
@@ -309,10 +332,19 @@ Deno.test("_deriveMakesafeSurfacing: Ferndale shape is readyForReview, not sentC
     report_received_at: "2026-06-16T01:00:00Z",
   };
   const surf = _deriveMakesafeSurfacing(
-    { status: "invoiced" },
-    detail,
+    {
+      id: "job-ferndale",
+      job_number: "SWMS-TEST-FERNDALE",
+      status: "invoiced",
+    },
+    { ...detail, external_ref: "MLB-TEST-1" },
     { status: "submitted" },
-    { status: "DRAFT" },
+    {
+      job_id: "job-ferndale",
+      invoice_type: "ACCREC",
+      status: "DRAFT",
+      reference: "MLB-TEST-1",
+    },
     DOCS_REPORT_PRESENT,
     false,
     { status: "drafted", report_doc_id: "d1" },
@@ -357,7 +389,7 @@ Deno.test("_deriveMakesafeSurfacing: report in, nothing drafted -> tradeReportIn
   assertEquals(surf.sentClosed, false);
 });
 
-Deno.test("_deriveMakesafeSurfacing: U4 pre-Xero docket is Docs Ready without an invoice", () => {
+Deno.test("_deriveMakesafeSurfacing: U4 pre-Xero docket still requires a current DRAFT", () => {
   const detail = {
     substatus: "admin_to_send_report",
     report_received_at: "2026-07-27T01:00:00Z",
@@ -375,8 +407,8 @@ Deno.test("_deriveMakesafeSurfacing: U4 pre-Xero docket is Docs Ready without an
       pre_xero_docs_ready: true,
     },
   );
-  assertEquals(surf.readyForReview, true);
-  assertEquals(surf.tradeReportIn, false);
+  assertEquals(surf.readyForReview, false);
+  assertEquals(surf.tradeReportIn, true);
   assertEquals(surf.invoiceIsDraft, false);
   assertEquals(surf.sentClosed, false);
 });

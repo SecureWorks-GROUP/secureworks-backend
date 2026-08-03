@@ -103,6 +103,8 @@ export interface MakesafeStatusEvidence {
     sent_at?: string | null;
   } | null;
   invoiceStatus?: string | null;
+  /** Shared exact-job/type/status/reference prerequisite from the board loader. */
+  invoiceQualifiesAsCurrentDraft?: boolean;
   invoiceDate?: string | null;
   invoiceCreatedAt?: string | null;
   packSent?: boolean;
@@ -357,6 +359,10 @@ export function reportInEvidence(input: MakesafeStatusInput): {
 }
 
 export function docsReady(input: MakesafeStatusInput): boolean {
+  // Necessary for every positive path, including recorded READY packs. The
+  // scalar invoiceStatus below remains an independent legacy condition; this
+  // shared fact additionally proves direct linkage, ACCREC type and reference.
+  if (input.evidence?.invoiceQualifiesAsCurrentDraft !== true) return false;
   const kind = classifyMakesafeJobType(input.detail, input.job);
   const recorded = String(input.evidence?.packState || "").toUpperCase();
   if (["READY", "READY_TO_BUILD"].includes(recorded)) {

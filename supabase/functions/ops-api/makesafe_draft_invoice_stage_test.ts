@@ -62,8 +62,10 @@ const DOCS_WITHOUT_INVOICE = {
 
 const invoice = (status: string, date = RECENT) => ({
   id: "inv-1",
+  job_id: "job-1",
   status,
   invoice_type: "ACCREC",
+  reference: "MLB-TEST-1",
   invoice_date: date,
 });
 
@@ -76,11 +78,14 @@ const invoice = (status: string, date = RECENT) => ({
 function roofCard() {
   return {
     job: {
+      id: "job-1",
+      job_number: "SWMS-TEST-1",
       status: "processing",
       metadata: { makesafe_job_family: "roof_report" },
     },
     detail: {
       substatus: "waiting_on_trade_report",
+      external_ref: "MLB-TEST-1",
       report_type: "roof_report",
       cycle_number: 1,
       external_links: [{
@@ -204,12 +209,12 @@ Deno.test("a DRAFT invoice no longer parks an unsendable card in Docs Ready", ()
   );
 });
 
-Deno.test("a RAISED invoice with no PDF is still held by the close-out doc gate", () => {
+Deno.test("a RAISED invoice with no PDF is held below Docs Ready", () => {
   const card = roofCard();
   assertEquals(
     stage(card, invoice("AUTHORISED"), DOCS_WITHOUT_INVOICE),
-    "report_ready",
-    "the hard doc gate is unchanged for a card whose money actually went out",
+    "allocated",
+    "the hard doc gate remains, but AUTHORISED cannot claim pre-Xero Docs Ready",
   );
 });
 
@@ -221,11 +226,14 @@ Deno.test("a drafted-not-sent pack with a DRAFT invoice still surfaces in Docs R
   // `invoiceIsDraft`, which this change deliberately leaves alone.
   const card = {
     job: {
+      id: "job-1",
+      job_number: "SWMS-TEST-1",
       status: "processing",
       metadata: { makesafe_job_family: "physical_makesafe" },
     },
     detail: {
       substatus: "admin_to_send_report",
+      external_ref: "MLB-TEST-1",
       cycle_number: 1,
       report_received_at: RECENT,
     },
@@ -257,7 +265,7 @@ Deno.test("a drafted-not-sent pack with a DRAFT invoice still surfaces in Docs R
 
 // ── 4. The two terms deliberately NOT changed ──────────────────────────────
 
-Deno.test("operator closure claims are untouched by this change", () => {
+Deno.test("operator closure claims still close only with complete docs", () => {
   // `jobs.status = 'invoiced'` and substatus `complete` are OPERATOR
   // declarations, not claims about Xero invoice status, and neither is reachable
   // by merely creating a draft. Measured 2026-08-02: of the 19 board cards
@@ -274,8 +282,8 @@ Deno.test("operator closure claims are untouched by this change", () => {
     },
   };
   assertEquals(stage(invoicedJob, null, DOCS_WITH_INVOICE), "completed");
-  // ...and it still holds behind the doc gate when the PDF is absent.
-  assertEquals(stage(invoicedJob, null, DOCS_WITHOUT_INVOICE), "report_ready");
+  // ...and a missing PDF remains blocked, but below pre-Xero Docs Ready.
+  assertEquals(stage(invoicedJob, null, DOCS_WITHOUT_INVOICE), "allocated");
 
   const completeSub = {
     job: {
@@ -393,7 +401,7 @@ Deno.test("the visible ladder's version is pinned and published", () => {
   // derivation that produced it, exactly as `SES_STAGE_ENGINE_V2_VERSION` does.
   assertEquals(
     MAKESAFE_STAGE_LADDER_VERSION,
-    "makesafe-stage-ladder.v2-raised-invoice",
+    "makesafe-stage-ladder.v3-current-draft-required",
   );
   // The read model republishes whatever enrich stamped, and null when a caller
   // built the base row without it — never a silent default that would attribute

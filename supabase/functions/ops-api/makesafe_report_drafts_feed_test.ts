@@ -132,8 +132,10 @@ function ferndaleSeed(): any {
       created_at: "2026-06-15T23:55:00Z",
     }],
     xero_invoices: [{
+      id: "invoice-row-1",
       xero_invoice_id: "xi-1",
       invoice_number: "INV-1234",
+      invoice_type: "ACCREC",
       status: "DRAFT",
       reference: "MLB-25248",
       sub_total: 1000,
@@ -142,6 +144,7 @@ function ferndaleSeed(): any {
       line_items: [],
       job_id: "job-ferndale",
       invoice_date: "2026-06-16",
+      created_at: "2026-06-16T02:00:00Z",
     }],
     job_documents: [
       {
@@ -466,6 +469,7 @@ Deno.test("T3 feed: legacy ML Builders label is surfaced as Major Loss Builders"
   seed.makesafe_job_details[0].requesting_company_name = "ML Builders";
   seed.makesafe_job_details[0].makesafe_companies.name = "ML Builders";
   seed.makesafe_job_details[0].external_ref = "MLB-26003";
+  seed.xero_invoices[0].reference = "MLB-26003";
   const client = makeFeedClient(seed);
   const res: any = await _makesafeReportDraftsForTest(client, params());
   assertEquals(res.count, 1);
@@ -552,6 +556,7 @@ Deno.test("C feed: report_recipient null -> recipient_email null (warning), NOT 
   seed.makesafe_job_details[0].requesting_company_slug = "aj";
   seed.makesafe_job_details[0].requesting_company_name = "AJS";
   seed.makesafe_job_details[0].external_ref = "AJS-123";
+  seed.xero_invoices[0].reference = "AJS-123";
   // Only a billing contact configured, no work-orders inbox.
   seed.makesafe_job_details[0].makesafe_companies = {
     slug: "aj",
@@ -581,6 +586,7 @@ Deno.test("C feed: legacy MLB rows use the vetted MLB report-recipient backstop"
   seed.makesafe_job_details[0].requesting_company_slug = "mlb";
   seed.makesafe_job_details[0].requesting_company_name = "ML Builders";
   seed.makesafe_job_details[0].external_ref = "MLB-24732";
+  seed.xero_invoices[0].reference = "MLB-24732";
   seed.makesafe_job_details[0].makesafe_companies = {
     slug: "mlb",
     name: "ML Builders",
@@ -600,8 +606,10 @@ Deno.test("T3 feed: invoice_ambiguous is still returned (UX gates on it)", async
   // qualifies as a draft to review.
   seed.xero_invoices = [
     {
+      id: "invoice-row-1",
       xero_invoice_id: "xi-1",
       invoice_number: "INV-1",
+      invoice_type: "ACCREC",
       status: "DRAFT",
       reference: "MLB-25248",
       sub_total: 1000,
@@ -611,8 +619,10 @@ Deno.test("T3 feed: invoice_ambiguous is still returned (UX gates on it)", async
       invoice_date: "2026-06-16",
     },
     {
+      id: "invoice-row-2",
       xero_invoice_id: "xi-2",
       invoice_number: "INV-2",
+      invoice_type: "ACCREC",
       status: "DRAFT",
       reference: "MLB-25248",
       sub_total: 900,

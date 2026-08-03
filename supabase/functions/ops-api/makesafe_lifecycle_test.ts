@@ -1,7 +1,7 @@
 // Tests for the MakeSafe lifecycle gate:
 //  - makesafePipeline surfaces per-job close-out doc booleans (has_*),
-//  - an invoiced job WITHOUT invoice+report docs is held pre-complete
-//    (report_ready, docs_missing) rather than silently marked completed,
+//  - an issued job without a current DRAFT stays below Docs Ready rather than
+//    silently completing or claiming pre-Xero readiness,
 //  - the 7-day completed-vs-archive boundary,
 //  - completeAndInvoice's substatus advance for make-safe jobs.
 //
@@ -117,8 +117,8 @@ Deno.test("makesafeDocBooleans: a real SWMS doc is detected, the job-number pref
   assertEquals(job.has_swms_doc, true);
 });
 
-// ── (b) invoiced job WITHOUT invoice+report docs is held pre-complete ───────
-Deno.test("makesafePipeline holds an invoiced job with missing docs in report_ready", async () => {
+// ── (b) issued job WITHOUT a current DRAFT stays below Docs Ready ──────────
+Deno.test("makesafePipeline keeps an AUTHORISED report job in trade_report_in", async () => {
   const client = makeQueryClient({
     jobs: [jobRow({ id: "job-2" })],
     makesafe_job_details: [{ job_id: "job-2", substatus: "complete", requesting_company_name: "Acme Restorations" }],
@@ -133,11 +133,10 @@ Deno.test("makesafePipeline holds an invoiced job with missing docs in report_re
   // Must NOT land in completed/archive.
   assertEquals(res.columns.completed.length, 0);
   assertEquals(res.columns.archive.length, 0);
-  const job = res.columns.report_ready.find((j: any) => j.id === "job-2");
+  const job = res.columns.trade_report_in.find((j: any) => j.id === "job-2");
   assertEquals(!!job, true);
-  assertEquals(job.board_stage, "report_ready");
+  assertEquals(job.board_stage, "trade_report_in");
   assertEquals(job.docs_missing, true);
-  // Both invoice and report PDFs are missing here.
   assertEquals((job.missing_docs || []).includes("invoice"), true);
   assertEquals((job.missing_docs || []).includes("report"), true);
 });
@@ -201,7 +200,7 @@ Deno.test("MLB company detected from slug, name, or builder reference", () => {
   assertEquals(_isMakesafeMlbCompany({ requesting_company_name: "Acme Restorations" }, {}), false);
 });
 
-Deno.test("MLB physical job with invoice+report but no SWMS is held in report_ready", () => {
+Deno.test("MLB physical job with AUTHORISED invoice but no DRAFT stays allocated", () => {
   const stage = _deriveMakesafeBoardStage(
     { status: "invoiced", completed_at: NOW, metadata: { makesafe_job_family: "physical_makesafe" } },
     { substatus: "complete", requesting_company_slug: "mlb" },
@@ -211,7 +210,7 @@ Deno.test("MLB physical job with invoice+report but no SWMS is held in report_re
     NOW,
     { has_invoice_doc: true, has_report_doc: true, has_swms_doc: false },
   );
-  assertEquals(stage, "report_ready");
+  assertEquals(stage, "allocated");
 });
 
 Deno.test("MLB report-only and non-MLB jobs are not held for missing SWMS", () => {
