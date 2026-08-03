@@ -11,6 +11,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _ensureDraftAndJobForTest,
+  _readExistingObligationJobsForTest,
   _readInputsForTest,
   enrichSourcesWithPdfText,
   runDeterministicIntake,
@@ -28,6 +29,68 @@ import {
 const NOW = "2026-07-20T12:00:00.000Z";
 const ORG = "00000000-0000-0000-0000-000000000001";
 const ENCODER = new TextEncoder();
+
+Deno.test("the matcher excludes the case-owned no-PO counterfactual and preserves exact PO-57602 reuse", async () => {
+  const store = baseStore();
+  const candidateJobId = "case-owned-candidate";
+  store.makesafe_job_details.push({
+    job_id: candidateJobId,
+    external_ref: "26836",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "MLB",
+    report_type: null,
+    jobs: {
+      status: "accepted",
+      metadata: {},
+      site_address: "shared-scope-token",
+      type: "makesafe",
+    },
+  });
+  store.makesafe_intake_cases.push({
+    id: "candidate-owner-case",
+    org_id: ORG,
+    instruction_key: "candidate-owner/cycle:1",
+    lineage_id: "candidate-owner-case",
+    cycle: 1,
+    state: "confirmed_live_job",
+    reason_code: null,
+    job_id: candidateJobId,
+  });
+  const targetPlan = {
+    instructionKey: "po-57602/cycle:1",
+    targetRelation: null,
+    state: "confirmed_live_job",
+    sourcePostIds: ["target-counterfactual"],
+    identity: {
+      externalRefCanonical: "MLB-RR-26836",
+      builderWoCanonical: "MLB-RR-26836",
+      builderPoCanonical: "PO-57602",
+      builderSlug: "mlb",
+      siteAddress: "shared-scope-token",
+    },
+  } as any;
+  const client = fakeClient(store);
+
+  const noPo = await _readExistingObligationJobsForTest(
+    client,
+    [targetPlan],
+    new Map(),
+  );
+  assertEquals(noPo.existingJobs.size, 0);
+
+  store.makesafe_job_details[0].jobs.metadata = {
+    builder_po_number: "PO-57602",
+  };
+  const samePo = await _readExistingObligationJobsForTest(
+    client,
+    [targetPlan],
+    new Map(),
+  );
+  assertEquals(
+    samePo.existingJobs.get(targetPlan.instructionKey),
+    candidateJobId,
+  );
+});
 
 function digitalWorkOrderPdf(
   lines: readonly string[] = [
@@ -3853,26 +3916,42 @@ Deno.test("repeatedly failing cases do not consume the commit budget", async () 
   );
 });
 
-Deno.test("a rejected primary case insert falls back to a visible reason-coded case", async () => {
+Deno.test("the exact PO-57602 fallback remains stuck ordinarily and has one bounded no-send recovery", async () => {
   const store = baseStore();
+  store.job_assignments = [];
+  store.xero_invoices = [];
+  store.po_communications = [];
+  store.makesafe_intake_hugo_notifications = [];
+  store.outbound_message_queue = [];
   store.emails.push(
     email({
-      post_id: "case-insert-failure",
+      post_id: "target-transport-a",
+      conversation_id: "target-conversation",
       received_at: "2026-08-03T04:07:07.000Z",
-      subject: "NEW WORK ORDER MLB-59304 Work Order: MLB-RR-59304 PO: PO-59304",
+      subject: "NEW WORK ORDER MLB-RR-26836 PO: PO-57602",
       body_content:
-        "Client: Persistence Boundary\nAddress: 4 Visible Way, Perth\nPlease attend and make safe the property.",
+        "Client: scope-holder\nAddress: scope-location\nPlease attend and make safe the property.",
+    }),
+    email({
+      post_id: "target-transport-b",
+      conversation_id: "target-conversation",
+      received_at: "2026-08-03T04:07:08.000Z",
+      subject: "NEW WORK ORDER MLB-RR-26836 PO: PO-57602",
+      body_content:
+        "Client: scope-holder\nAddress: scope-location\nPlease attend and make safe the property.",
     }),
   );
-  store.email_attachments.push({
-    id: "att-case-insert-failure",
-    email_id: "case-insert-failure",
-    name: "work-order.pdf",
-    content_type: "application/pdf",
-    storage_path: "raw/case-insert-failure.pdf",
-    status: "uploaded",
-    size_bytes: 1024,
-  });
+  for (const transport of ["target-transport-a", "target-transport-b"]) {
+    store.email_attachments.push({
+      id: `attachment-${transport}`,
+      email_id: transport,
+      name: "work-order.pdf",
+      content_type: "application/pdf",
+      storage_path: `fixture-${transport}`,
+      status: "uploaded",
+      size_bytes: 1024,
+    });
+  }
 
   let primaryInsertRejected = false;
   let approvalCalls = 0;
@@ -3882,9 +3961,9 @@ Deno.test("a rejected primary case insert falls back to a visible reason-coded c
     undefined,
     () =>
       digitalWorkOrderPdf([
-        "Work Order Number MLB-RR-59304 PO-59304",
-        "Policyholders Name Persistence Boundary",
-        "Site Address 4 Visible Way Perth WA",
+        "Work Order Number MLB-RR-26836 PO-57602",
+        "Policyholders Name scope-holder",
+        "Site Address scope-location",
         "Scope of Works Attend and make the property safe",
       ]),
     (table, operation, payload) => {
@@ -3907,7 +3986,7 @@ Deno.test("a rejected primary case insert falls back to a visible reason-coded c
   const report = await runDeterministicIntake(client, {
     dryRun: false,
     selectionMode: "exact",
-    allowSourcePostIds: ["case-insert-failure"],
+    allowSourcePostIds: ["target-transport-a"],
     maxCases: 1,
     nowIso: NOW,
     approveDraft: () => {
@@ -3921,7 +4000,7 @@ Deno.test("a rejected primary case insert falls back to a visible reason-coded c
   assertEquals(report.totals.write_failures, 1);
   assertEquals(report.totals.cases_failed, 1);
   assertEquals(report.totals.case_rows_created, 1);
-  assertEquals(report.totals.source_rows_created, 1);
+  assertEquals(report.totals.source_rows_created, 2);
   assertEquals(report.totals.jobs_created, 0);
   assertEquals(approvalCalls, 0);
   assertEquals(store.makesafe_intake_cases.length, 1);
@@ -3939,17 +4018,13 @@ Deno.test("a rejected primary case insert falls back to a visible reason-coded c
     "deterministic source_persist_failed case_insert",
   );
   assertEquals(store.makesafe_intake_cases[0].job_id, null);
-  assertEquals(store.makesafe_intake_case_sources.length, 1);
-  assertEquals(
-    store.makesafe_intake_case_sources[0].post_id,
-    "case-insert-failure",
-  );
+  assertEquals(store.makesafe_intake_case_sources.length, 2);
   const issue = store.email_events_raw.find((row) =>
     row.change_type === "intake_exception_source_persist_failed"
   );
   assertEquals(issue?.page_meta?.case_id, store.makesafe_intake_cases[0].id);
   assertEquals(
-    store.emails.find((row) => row.post_id === "case-insert-failure")
+    store.emails.find((row) => row.post_id === "target-transport-a")
       ?.makesafe_scanned_at,
     null,
   );
@@ -3957,7 +4032,7 @@ Deno.test("a rejected primary case insert falls back to a visible reason-coded c
   const rerun = await runDeterministicIntake(fakeClient(store), {
     dryRun: false,
     selectionMode: "exact",
-    allowSourcePostIds: ["case-insert-failure"],
+    allowSourcePostIds: ["target-transport-a"],
     maxCases: 1,
     nowIso: NOW,
     approveDraft: () => {
@@ -3969,7 +4044,97 @@ Deno.test("a rejected primary case insert falls back to a visible reason-coded c
   assertEquals(rerun.totals.jobs_created, 0);
   assertEquals(approvalCalls, 0);
   assertEquals(store.makesafe_intake_cases.length, 1);
-  assertEquals(store.makesafe_intake_case_sources.length, 1);
+  assertEquals(store.makesafe_intake_case_sources.length, 2);
+
+  const targetCase = store.makesafe_intake_cases[0];
+  store.makesafe_intake_cases.push({
+    id: "unrelated-case",
+    org_id: ORG,
+    instruction_key: "unrelated/cycle:1",
+    lineage_id: "unrelated-case",
+    cycle: 1,
+    state: "exception",
+    reason_code: "conflicting_fields",
+    job_id: null,
+    is_authoritative: true,
+    last_decision_reason: "unrelated-decision",
+  });
+  store.makesafe_intake_case_sources.push({
+    id: "unrelated-case-source",
+    org_id: ORG,
+    case_id: "unrelated-case",
+    post_id: "unrelated-transport",
+  });
+  const unrelatedBefore = JSON.stringify({
+    case: store.makesafe_intake_cases[1],
+    source: store.makesafe_intake_case_sources[2],
+  });
+  const forbiddenCounts = () => ({
+    assignments: store.job_assignments.length,
+    invoices: store.xero_invoices.length,
+    communications: store.po_communications.length,
+    notifications: store.makesafe_intake_hugo_notifications.length,
+    outbound: store.outbound_message_queue.length,
+  });
+  const sideEffectsBefore = forbiddenCounts();
+
+  const recovery = await runDeterministicIntake(fakeClient(store), {
+    dryRun: false,
+    selectionMode: "exact",
+    allowInstructionKeys: [targetCase.instruction_key],
+    maxSources: 2,
+    maxCases: 1,
+    advanceDrafts: true,
+    recoverSourcePersistenceFailure: {
+      externalRef: "MLB-RR-26836",
+      builderPurchaseOrder: "PO-57602",
+    },
+    suppressPhysicalJobNotifications: true,
+    approveDraft: (_client, body) => {
+      approvalCalls++;
+      const draft = store.makesafe_intake_drafts.find((row) =>
+        row.id === body.draft_id
+      );
+      Object.assign(draft, {
+        status: "approved",
+        approved_job_id: "ordinary-unassigned-job",
+      });
+      store.jobs.push({
+        id: "ordinary-unassigned-job",
+        org_id: ORG,
+        type: "makesafe",
+        status: "accepted",
+      });
+      return Promise.resolve({
+        job: { id: "ordinary-unassigned-job" },
+        job_created: true,
+        notification_job_ids: ["ordinary-unassigned-job"],
+      });
+    },
+  });
+
+  assertEquals(recovery.totals.cases_attempted, 1);
+  assertEquals(recovery.totals.jobs_created, 1);
+  assertEquals(recovery.totals.hugo_notifications_required, 1);
+  assertEquals(recovery.totals.hugo_notifications_suppressed, 1);
+  assertEquals(recovery.totals.hugo_notifications_recorded, 0);
+  assertEquals(recovery.totals.hugo_notifications_accepted, 0);
+  assertEquals(recovery.totals.hugo_notifications_failed, 0);
+  assertEquals(approvalCalls, 1);
+  assertEquals(targetCase.is_authoritative, true);
+  assertEquals(targetCase.builder_po_canonical, "PO-57602");
+  assertEquals(targetCase.job_id, "ordinary-unassigned-job");
+  assertEquals(targetCase.state, "blocked_live_job");
+  assertEquals(targetCase.reason_code, null);
+  assertEquals(store.jobs.length, 1);
+  assertEquals(forbiddenCounts(), sideEffectsBefore);
+  assertEquals(
+    JSON.stringify({
+      case: store.makesafe_intake_cases[1],
+      source: store.makesafe_intake_case_sources[2],
+    }),
+    unrelatedBefore,
+  );
 });
 
 Deno.test("repeat failures are deprioritised on the next run", async () => {

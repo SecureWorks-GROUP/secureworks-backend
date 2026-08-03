@@ -134,6 +134,7 @@ makesafe_deterministic_intake_dark_observe
 # Captain-authorized 2026-08-01 recovery actions. Both are identity-pinned,
 # privileged POST writes and must never be exercised by a deploy smoke probe.
 makesafe_deterministic_intake_exact_rescan # probe=source-only
+makesafe_source_persist_recovery # probe=source-only
 # Exact five-card cycle identity recovery. A live POST can materialize and bind
 # an attendance cycle, so deploy recognition must remain source-only.
 makesafe_roof_cycle_binding_recovery # probe=source-only

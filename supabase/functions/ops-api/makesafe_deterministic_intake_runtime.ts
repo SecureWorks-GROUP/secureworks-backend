@@ -85,6 +85,11 @@ export interface DeterministicRuntimeOptions {
     reason: string;
     auditId: string | null;
   }>;
+  recoverSourcePersistenceFailure?: {
+    externalRef: string;
+    builderPurchaseOrder: string;
+  };
+  suppressPhysicalJobNotifications?: boolean;
 }
 
 export interface BuilderCancellationCommand {
@@ -185,6 +190,7 @@ export interface DeterministicRuntimeReport {
     hugo_notifications_required: number;
     hugo_notifications_recorded: number;
     hugo_notifications_accepted: number;
+    hugo_notifications_suppressed: number;
     hugo_notifications_failed: number;
   };
   // True when the run spent its attempt ceiling without committing a single case.
@@ -2998,6 +3004,16 @@ function obligationAddressesMatch(left: unknown, right: unknown): boolean {
     (a.includes(b) || b.includes(a)));
 }
 
+function obligationCandidatePoMatches(
+  targetPo: string | null,
+  existingPo: string | null,
+): boolean {
+  // A proved incoming PO is the instruction grain. A legacy job with no PO is
+  // not evidence that it owns that instruction, even when a weaker reference or
+  // location fallback matches. Only the same proved PO may be reused.
+  return !targetPo || existingPo === targetPo;
+}
+
 export interface CancellationTargetResolution {
   kind: "not_found" | "ambiguous" | "matched";
   targetJobId: string | null;
@@ -3209,8 +3225,9 @@ async function readObligationMatches(
         canonicalObligationPoCore(metadata.builder_work_order_number, true) ||
         canonicalObligationPoCore(row.external_ref, true);
       // One claim can carry distinct PO-backed instructions. Canonical claim
-      // matching dedupes storage variants, never two explicitly different POs.
-      return !(targetPo && existingPo && targetPo !== existingPo);
+      // matching dedupes storage variants only when the incoming PO is either
+      // absent or explicitly equal; a no-PO legacy job cannot absorb a proved PO.
+      return obligationCandidatePoMatches(targetPo, existingPo);
     });
     const uniqueMatches = [
       ...new Map(
@@ -3331,6 +3348,8 @@ async function readExistingObligationJobs(
   return await readObligationMatches(client, cases, targetJobByPostId);
 }
 
+export const _readExistingObligationJobsForTest = readExistingObligationJobs;
+
 function obligationBindingExceptionPlan(
   plan: DeterministicCasePlan,
   resolution: ObligationBindingException,
@@ -3371,7 +3390,7 @@ async function readPersistedCases(
   for (const keys of chunk(cases.map((c) => c.instructionKey))) {
     const { data, error } = await client.from("makesafe_intake_cases")
       .select(
-        "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id,last_decision_provenance,last_decision_reason,normaliser_version",
+        "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id,is_authoritative,field_provenance,last_decision_provenance,last_decision_reason,normaliser_version",
       )
       .eq("org_id", DEFAULT_ORG_ID)
       .in("instruction_key", keys);
@@ -3737,6 +3756,7 @@ async function insertCaseAndSources(
   sourceMap: Map<string, DeterministicSourceItem>,
   knownExisting?: any | null,
   skipSources = false,
+  recoverSourcePersistenceFailure = false,
 ): Promise<
   {
     caseRow: any;
@@ -3763,7 +3783,7 @@ async function insertCaseAndSources(
     const { data, error } = await client.from("makesafe_intake_cases")
       .insert(casePayload(plan, jobId, parent))
       .select(
-        "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id",
+        "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id,is_authoritative,field_provenance,last_decision_reason",
       )
       .single();
     if (error) {
@@ -3774,7 +3794,7 @@ async function insertCaseAndSources(
         )
           .insert(sourcePersistenceFailureCasePayload(plan, parent))
           .select(
-            "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id",
+            "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id,is_authoritative,field_provenance,last_decision_reason",
           )
           .single();
         if (fallbackError) {
@@ -3794,6 +3814,71 @@ async function insertCaseAndSources(
       existing = data;
       caseCreated = true;
     }
+  } else if (
+    recoverSourcePersistenceFailure &&
+    existing.last_decision_reason ===
+      "deterministic source_persist_failed case_insert" &&
+    existing.is_authoritative === false && !existing.job_id
+  ) {
+    const desired = casePayload(plan, null, null);
+    const { data, error } = await client.from("makesafe_intake_cases")
+      .update({
+        company_id: desired.company_id,
+        company_key: desired.company_key,
+        external_ref_canonical: desired.external_ref_canonical,
+        builder_wo_canonical: desired.builder_wo_canonical,
+        builder_po_canonical: desired.builder_po_canonical,
+        deliverable_ref_canonical: desired.deliverable_ref_canonical,
+        wo_po_identity_key: desired.wo_po_identity_key,
+        normaliser_version: desired.normaliser_version,
+        field_provenance: desired.field_provenance,
+        client_name: desired.client_name,
+        client_phone: desired.client_phone,
+        client_email: desired.client_email,
+        site_address: desired.site_address,
+        site_suburb: desired.site_suburb,
+        missing_fields: desired.missing_fields,
+        conflicting_fields: desired.conflicting_fields,
+        state: desired.state,
+        reason_code: desired.reason_code,
+        blocked_reasons: desired.blocked_reasons,
+        target_relation: desired.target_relation,
+        target_job_id: desired.target_job_id,
+        is_authoritative: true,
+        side_effects_suppressed: true,
+        last_decision_provenance: "deterministic",
+        last_decision_actor: DETERMINISTIC_INTAKE_VERSION,
+        last_decision_reason:
+          "deterministic source_persist_recovered awaiting_job_creation",
+        adapter_id: desired.adapter_id,
+        adapter_version: desired.adapter_version,
+        manifest_version: desired.manifest_version,
+        story_json: desired.story_json,
+        evidence_map: desired.evidence_map,
+        recovery_cursor: desired.recovery_cursor,
+        source_fingerprint: desired.source_fingerprint,
+      })
+      .eq("org_id", DEFAULT_ORG_ID)
+      .eq("instruction_key", plan.instructionKey)
+      .eq(
+        "last_decision_reason",
+        "deterministic source_persist_failed case_insert",
+      )
+      .eq("is_authoritative", false)
+      .is("job_id", null)
+      .select(
+        "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id,is_authoritative,field_provenance,last_decision_reason",
+      )
+      .maybeSingle();
+    if (error || !data?.id) {
+      throw new Error(
+        `source-persistence recovery fence failed: ${
+          error?.message || error || "fallback no longer eligible"
+        }`,
+      );
+    }
+    existing = data;
+    caseUpgraded = true;
   } else {
     // A resumed case is re-decided against the current plan. Late evidence (a work
     // order PDF that landed after the instruction email) must be able to promote a
@@ -3841,7 +3926,7 @@ async function insertCaseAndSources(
         .eq("org_id", DEFAULT_ORG_ID)
         .eq("instruction_key", plan.instructionKey)
         .select(
-          "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id",
+          "id,instruction_key,lineage_id,cycle,state,state_version,reason_code,job_id,target_relation,target_job_id,is_authoritative,field_provenance,last_decision_reason",
         )
         .single();
       if (error) {
@@ -4277,6 +4362,24 @@ export async function runDeterministicIntake(
       `deterministic source read cap must be an integer between 1 and ${MAX_SOURCES_PER_RUN}`,
     );
   }
+  const recoveryTarget = options.recoverSourcePersistenceFailure;
+  if (
+    recoveryTarget &&
+    (
+      dryRun || selectionMode !== "exact" || allowSourcePostIds.length !== 0 ||
+      allowInstructionKeys.length !== 1 || options.maxCases !== 1 ||
+      maxSources > 4 || options.advanceDrafts !== true ||
+      !options.approveDraft ||
+      options.suppressPhysicalJobNotifications !== true ||
+      options.notifyPhysicalJob !== undefined ||
+      !String(recoveryTarget.externalRef || "").trim() ||
+      !String(recoveryTarget.builderPurchaseOrder || "").trim()
+    )
+  ) {
+    throw new Error(
+      "source-persistence recovery requires one exact instruction, maxCases=1, maxSources<=4, guarded approval, and both notification paths suppressed",
+    );
+  }
   const instructionSeeds = await resolveInstructionKeySeeds(
     client,
     allowInstructionKeys,
@@ -4383,6 +4486,21 @@ export async function runDeterministicIntake(
   const actionableCases = plan.cases.filter((intakeCase) =>
     !intakeCase.sourcePostIds.some((postId) => beltPendingPostIds.has(postId))
   );
+  if (recoveryTarget) {
+    const selectedCase = actionableCases[0];
+    if (
+      plan.cases.length !== 1 || actionableCases.length !== 1 ||
+      selectedCase.instructionKey !== allowInstructionKeys[0] ||
+      String(selectedCase.identity.externalRefCanonical || "") !==
+        recoveryTarget.externalRef ||
+      String(selectedCase.identity.builderPoCanonical || "") !==
+        recoveryTarget.builderPurchaseOrder
+    ) {
+      throw new Error(
+        "source-persistence recovery target did not resolve to one extracted exact obligation",
+      );
+    }
+  }
   const matchedCaseSources = new Set(
     [
       ...plan.cases.flatMap((intakeCase) => intakeCase.sourcePostIds),
@@ -4483,6 +4601,7 @@ export async function runDeterministicIntake(
       hugo_notifications_required: 0,
       hugo_notifications_recorded: 0,
       hugo_notifications_accepted: 0,
+      hugo_notifications_suppressed: 0,
       hugo_notifications_failed: 0,
     },
     attempt_cap_reached_without_commit: false,
@@ -4726,7 +4845,7 @@ export async function runDeterministicIntake(
       row.last_decision_reason ===
         "deterministic source_persist_failed case_insert"
     ) {
-      return "stuck";
+      return recoveryTarget ? "fresh" : "stuck";
     }
     // The BOX reconciliation migration creates corrected authorities solely to
     // replace a false shared PO identity. They are deliberately non-operational:
@@ -4864,6 +4983,8 @@ export async function runDeterministicIntake(
         jobId,
         sourceMap,
         existing,
+        false,
+        Boolean(recoveryTarget),
       );
       let resumedCase = saved.resumed;
       if (saved.caseCreated) report.totals.case_rows_created++;
@@ -4945,6 +5066,10 @@ export async function runDeterministicIntake(
             : live.notificationJobIds
         ) {
           report.totals.hugo_notifications_required++;
+          if (options.suppressPhysicalJobNotifications === true) {
+            report.totals.hugo_notifications_suppressed++;
+            continue;
+          }
           if (!options.notifyPhysicalJob) {
             notificationSettlementComplete = false;
             report.totals.hugo_notifications_failed++;
