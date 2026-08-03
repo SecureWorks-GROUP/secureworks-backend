@@ -1242,9 +1242,26 @@ certified, and skip the re-commit otherwise; the uncertified mint is recorded in
 obligation revision id). Restoring the gate is the rollback twin, and needs a
 Phase-2 producer that derives readiness without a caller-supplied `p_ready`.
 
-`record_ses_revision_approval_v1` still carries the SAME unsatisfiable test and
-was deliberately left in force, so APPROVE INVOICE is still blocked pending a
-separate ruling. Contract, measurements and the never-assert proofs:
+The captain extended the same ruling to the third instance,
+`record_ses_revision_approval_v1`
+(`20260803020000_ses_drop_approval_readiness_precondition.sql`). That one is not
+a copy: its single `IF` bundled the unsatisfiable readiness test with a GENUINE
+optimistic-concurrency check on `readiness_revision` / `dependency_generation`,
+which is what its "new evidence landed" message actually describes. The
+readiness half is dropped (INNER JOIN → LEFT JOIN, `ready` tests moved inside a
+certified branch); the freshness half is kept verbatim and is reachable for the
+first time. Dropping the RAISE alone was again insufficient —
+`makesafe_revision_approvals.readiness_revision` was `NOT NULL CHECK (~ sha256)`
+so the INSERT 23502'd; it is relaxed to allow NULL, matching its own neighbour
+`approval_content_hash`, and NULL is now the record of "approved without
+certified readiness".
+
+The ruling stops at RECORDING the approval. The Xero execution gates —
+`makesafe_revision_approvals_current_v2` (`WHERE readiness.ready = true`, plus a
+NULL-unsafe join) and `begin_ses_invoice_execution_v1` /
+`begin_ses_release_execution_v1` — carry the same unsatisfiable test and are
+deliberately untouched, so creating the invoice still refuses pending a separate
+ruling. Contract, measurements and the never-assert proofs:
 `data/ses-readiness-gate-drop-v1/report.md`,
 `ses_readiness_precondition_drop_test.ts` (asserts the EFFECTIVE body — last
 `CREATE OR REPLACE` across migrations in version order — so a re-introduction

@@ -54,8 +54,11 @@
 --   * the human APPROVE INVOICE gate in `ses_reporting_actions.ts`
 --     (`operatorAuth.mode == 'jwt'` AND `auth.user`);
 --   * `record_ses_revision_approval_v1`, which carries a THIRD instance of the
---     same unsatisfiable readiness test and remains in force -- reaching the
---     approval button is what this migration delivers, not pressing it;
+--     same unsatisfiable readiness test -- reaching the approval button is what
+--     THIS migration delivers, not pressing it. The captain extended the same
+--     ruling to that third instance later on 2026-08-03; it is handled by
+--     20260803020000_ses_drop_approval_readiness_precondition.sql, which is a
+--     separate file because it also relaxes a table constraint;
 --   * any other precondition on the obligation path;
 --   * the readiness table, its invalidator, or any of its recording behaviour.
 --

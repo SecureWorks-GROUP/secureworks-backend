@@ -1,18 +1,22 @@
 // deno-lint-ignore-file no-import-prefix
 //
 // Captain's ruling 2026-08-03: the unsatisfiable `makesafe_readiness_current.ready`
-// precondition is removed from the invoice-obligation path.
+// precondition is removed from the invoice-obligation path, and (same day, same
+// ruling extended) from the APPROVAL path.
 //
 // These tests read the EFFECTIVE function bodies, not one migration file: every
 // migration is scanned in version order and the LAST `CREATE OR REPLACE FUNCTION`
 // for a given name wins, which is exactly what the database ends up holding. That
 // is what makes this a real regression test -- delete or neuter
-// `20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql` and the
-// effective body reverts to the 20260728020000 one, which still carries both
-// RAISE blocks, and the assertions below fail.
+// `20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql` or
+// `20260803020000_ses_drop_approval_readiness_precondition.sql` and the effective
+// bodies revert to the 20260728020000 ones, which still carry all three RAISE
+// blocks, and the assertions below fail.
 //
-// The controls at the bottom must pass on BOTH shapes: they pin the gates this
-// ruling does NOT touch.
+// The controls must pass on BOTH shapes: they pin the gates this ruling does NOT
+// touch -- the money seal, the human APPROVE INVOICE login requirement, the SES
+// release allowlist, the mechanically-clean test, the genuine freshness check,
+// and the Xero execution gates.
 
 import {
   assert,
@@ -227,24 +231,229 @@ Deno.test("CONTROL: the human APPROVE INVOICE gate is untouched", async () => {
   );
 });
 
-Deno.test("CONTROL: record_ses_revision_approval_v1 keeps its own readiness recheck", () => {
-  // Deliberately NOT in scope for the 2026-08-03 ruling, which names a closed
-  // list of two functions. This is the third instance of the same test and it
-  // stays in force; see data/ses-readiness-gate-drop-v1/report.md section 6.
-  assertStringIncludes(APPROVAL.body, "NOT current_readiness.ready");
-  assertStringIncludes(APPROVAL.body, "NOT current_readiness.revision_ready");
+// ── The third gate: record_ses_revision_approval_v1, authorised 2026-08-03 as
+// the same ruling extended. See data/ses-readiness-gate-drop-v1/report.md §6. ──
+
+Deno.test("the approval drop migration owns the effective approval body", () => {
+  assertEquals(
+    APPROVAL.migration,
+    "20260803020000_ses_drop_approval_readiness_precondition.sql",
+  );
+});
+
+Deno.test("the approval commit no longer refuses on an uncertified readiness revision", () => {
+  // The INNER JOIN was the whole defect: makesafe_readiness_revisions is empty,
+  // so NOT FOUND fired for every job on the board.
+  assert(
+    !APPROVAL.body.includes("\n  JOIN public.makesafe_readiness_revisions"),
+    "the approval read still INNER JOINs the empty readiness revisions table",
+  );
+  assertStringIncludes(
+    APPROVAL.body,
+    "LEFT JOIN public.makesafe_readiness_revisions revision",
+  );
+  // A missing readiness row is still its own refusal, split out of the old
+  // combined IF rather than dropped.
+  assertStringIncludes(APPROVAL.body, "IF NOT FOUND THEN");
+  // `ready` / `revision_ready` may only be tested inside the certified branch.
+  const certifiedAt = APPROVAL.body.indexOf(
+    "readiness_certified := current_readiness.readiness_revision IS NOT NULL;",
+  );
+  assert(certifiedAt !== -1, "the certified branch guard is missing");
+  for (
+    const probe of ["NOT current_readiness.ready", "revision_ready, false"]
+  ) {
+    const at = APPROVAL.body.indexOf(probe);
+    assert(at !== -1, `the certified-branch test "${probe}" vanished`);
+    assert(
+      at > certifiedAt,
+      `"${probe}" is still reachable without a certified readiness revision`,
+    );
+    assertEquals(
+      (APPROVAL.body.match(
+        new RegExp(probe.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
+      ) || []).length,
+      1,
+      `"${probe}" must appear exactly once, inside the certified branch`,
+    );
+  }
+});
+
+Deno.test("readiness is never asserted on the approval path", () => {
+  // This function has no business originating readiness, and never did.
+  assert(
+    !APPROVAL.body.includes("commit_makesafe_readiness"),
+    "the approval path must never commit a readiness revision",
+  );
+  assert(
+    !/(?:^|[^_])ready\s*(?::)?=\s*true/i.test(APPROVAL.body),
+    "the approval path must never assign readiness true",
+  );
+  // And it must not fabricate a readiness identity to satisfy the column.
+  assert(
+    !/'sha256:[0-9a-f]/.test(APPROVAL.body),
+    "the approval path must never synthesise a readiness revision literal",
+  );
+  // The column is written from what the caller was shown, nothing else.
+  assertStringIncludes(
+    APPROVAL.body,
+    "p_approval->>'readiness_revision',",
+  );
+});
+
+Deno.test("an uncertified approval can actually be recorded", () => {
+  // Dropping the RAISE alone leaves a 23502 four statements later: the audit
+  // column was NOT NULL with a strict sha256 CHECK, and production readiness
+  // revisions are NULL on every row.
+  const drop = MIGRATIONS.find((m) =>
+    m.name === "20260803020000_ses_drop_approval_readiness_precondition.sql"
+  );
+  assert(drop, "the approval drop migration is missing");
+  assertStringIncludes(
+    drop.sql,
+    "ALTER COLUMN readiness_revision DROP NOT NULL;",
+  );
+  assertStringIncludes(
+    drop.sql,
+    "readiness_revision IS NULL\n    OR readiness_revision ~ '^sha256:[0-9a-f]{64}$'",
+  );
+  // Nothing later puts NOT NULL back.
+  const restorers = MIGRATIONS.filter((m) =>
+    m.name > "20260803020000_ses_drop_approval_readiness_precondition.sql" &&
+    /makesafe_revision_approvals[\s\S]*ALTER COLUMN readiness_revision SET NOT NULL/
+      .test(m.sql)
+  );
+  assertEquals(restorers.map((m) => m.name), []);
+  // NULL is the record that readiness was not certified, and it is documented
+  // on the column itself rather than left to be rediscovered.
+  assertStringIncludes(
+    drop.sql,
+    "COMMENT ON COLUMN public.makesafe_revision_approvals.readiness_revision IS",
+  );
+  assertStringIncludes(drop.sql, 'the predicate for "approved without ');
+});
+
+Deno.test("the approval drop migration destroys nothing and touches no money row", () => {
+  const drop = MIGRATIONS.find((m) =>
+    m.name === "20260803020000_ses_drop_approval_readiness_precondition.sql"
+  );
+  assert(drop, "the approval drop migration is missing");
+  const executable = drop.sql.split("\n").filter((line) =>
+    !line.trimStart().startsWith("--")
+  ).join("\n");
+  for (
+    const forbidden of [
+      "DROP TABLE",
+      "DROP FUNCTION",
+      "DROP TRIGGER",
+      "UPDATE public.makesafe_readiness_current",
+      "SET ready = true",
+      "ses_money_sealed_at",
+      "xero_invoices",
+    ]
+  ) {
+    assert(
+      !executable.includes(forbidden),
+      `no executable statement in the approval drop migration may contain "${forbidden}"`,
+    );
+  }
+  // Apply time writes zero rows. `DROP CONSTRAINT` is DDL on a zero-row audit
+  // table, not a data write, and only the readiness CHECK is in its sights.
+  const topLevel = executable.replace(/AS \$\$[\s\S]*?\n\$\$;/g, "AS <body>;");
+  for (
+    const forbidden of ["INSERT INTO", "DELETE FROM", "UPDATE ", "TRUNCATE"]
+  ) {
+    assert(
+      !topLevel.includes(forbidden),
+      `the approval drop migration must write zero rows at apply time, found "${forbidden}"`,
+    );
+  }
+  // The append-only guard on the approvals table is untouched.
+  assert(
+    !executable.includes("trg_makesafe_revision_approvals_append_only"),
+    "the append-only trigger on the approvals table must not be touched",
+  );
+});
+
+Deno.test("CONTROL: the approval path keeps its genuine freshness check", () => {
+  // This is the half of the old IF that the message actually described, and it
+  // is satisfiable: dependency_generation is a real, moving, non-null value.
+  // Unchanged by the ruling, so this passes on BOTH shapes.
+  assertStringIncludes(
+    APPROVAL.body,
+    "current_readiness.readiness_revision IS DISTINCT FROM",
+  );
+  assertStringIncludes(
+    APPROVAL.body,
+    "current_readiness.dependency_generation IS DISTINCT FROM",
+  );
   assertStringIncludes(
     APPROVAL.body,
     "new evidence landed; review the current docket revision again",
   );
+});
+
+Deno.test("CONTROL: the approval authority tests are untouched", () => {
+  // Passes on BOTH shapes. A routine or api-key caller never reaches this RPC
+  // (see the human APPROVE INVOICE gate control above); these are the in-database
+  // authority tests, and the ruling removes none of them.
+  for (
+    const refusal of [
+      "SES approval action must be invoice or release",
+      "operator is not on the SES release allowlist",
+      "this docket is not mechanically clean; Captain approval is required",
+      "Captain override requires Captain or admin-owner authority",
+    ]
+  ) {
+    assertStringIncludes(APPROVAL.body, refusal);
+  }
+  // The approval is still recorded against a real operator identity.
   assertStringIncludes(
     APPROVAL.body,
-    "operator is not on the SES release allowlist",
+    "target_operator,\n    p_approval->>'decided_by',",
   );
+});
+
+Deno.test("CONTROL: the Xero execution gates still test readiness and are untouched", () => {
+  // The ruling stops at recording the approval. Creating the Xero invoice still
+  // goes through the approvals view (`readiness.ready = true`) and the two
+  // execution functions. Passes on BOTH shapes.
+  const u5 = MIGRATIONS.find((m) =>
+    m.name === "20260728020000_makesafe_ses_invoice_release_u5_u6.sql"
+  );
+  assert(u5, "the U5/U6 migration is missing");
   assertStringIncludes(
-    APPROVAL.body,
-    "this docket is not mechanically clean; Captain approval is required",
+    u5.sql,
+    "CREATE OR REPLACE VIEW public.makesafe_revision_approvals_current_v2",
   );
+  assertStringIncludes(u5.sql, "AND readiness.ready = true;");
+  const releaseExecute = effectiveFunction("begin_ses_release_execution_v1");
+  assertStringIncludes(releaseExecute.body, "NOT current_readiness.ready");
+  // Neither drop migration rewrites the view or the execution functions.
+  for (
+    const name of [
+      "20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql",
+      "20260803020000_ses_drop_approval_readiness_precondition.sql",
+    ]
+  ) {
+    const migration = MIGRATIONS.find((m) => m.name === name);
+    if (!migration) continue;
+    // Comment lines are stripped: both migrations NAME these sites in prose,
+    // precisely to record that they are out of scope.
+    const executable = migration.sql.split("\n").filter((line) =>
+      !line.trimStart().startsWith("--")
+    ).join("\n");
+    assert(
+      !executable.includes("makesafe_revision_approvals_current_v2"),
+      `${name} must not rewrite the approvals view`,
+    );
+    assert(
+      !executable.includes(
+        "CREATE OR REPLACE FUNCTION public.begin_ses_",
+      ),
+      `${name} must not rewrite an execution function`,
+    );
+  }
 });
 
 Deno.test("the drop migration destroys nothing and touches no money row", () => {

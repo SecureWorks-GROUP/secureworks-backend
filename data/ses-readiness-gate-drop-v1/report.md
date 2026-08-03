@@ -1,8 +1,24 @@
 # SES readiness gate drop v1
 
 **Branch:** `fm/ses-readiness-gate-drop-v1`
-**Captain's ruling:** `data/decisions/2026-08-03-captain-drops-the-readiness-precondition.md` (firstmate home) — option 3, drop the precondition, never assert readiness.
-**Status:** implementation complete and committed. Live mint on SWMS-261109 NOT performed — blocked (section 8.7). One needs-decision raised (section 6).
+**Captain's ruling:** `data/decisions/2026-08-03-captain-drops-the-readiness-precondition.md` (firstmate home) — option 3, drop the precondition, never assert readiness. Extended the same day, via FirstMate, to the third instance on the approval path.
+**Status:** implementation complete. **Three** unsatisfiable readiness gates dropped, none asserted. Live mint on SWMS-261109 deliberately deferred to post-merge (section 9.1).
+
+**The three things worth reading first**
+
+1. All three gates were unsatisfiable for the same reason, and in all three the
+   `RAISE` was not the whole change — something downstream depended on the record
+   or the column the guard guaranteed (sections 2 and 6.2). Deleting the check
+   alone would have swapped a clean refusal for a `23502` a few statements later,
+   three times over.
+2. The third gate is **not** a copy of the first two. It bundles the
+   unsatisfiable readiness test with a **genuine** optimistic-concurrency check.
+   The readiness half is dropped; the freshness half is kept verbatim and is
+   reachable for the first time (section 6.1).
+3. This stops at **recording** the approval. Two further sites on the **Xero
+   execution** path carry the same unsatisfiable test and are deliberately
+   untouched, because the task fences execution off (section 6.3). The captain
+   should rule on those two together.
 
 ---
 
@@ -182,18 +198,20 @@ result straight through (`ses_reporting_actions.ts:725-737`).
 
 | Gate | Status | How it is proved |
 |---|---|---|
-| Money seal `jobs.ses_money_sealed_at` and `_shared/sealed_ses_money_fence.ts` | untouched | The migration contains no executable statement referencing `ses_money_sealed_at` or `xero_invoices` — pinned by a test that strips `--` comments (the seal is named in prose only, to record it as out of scope). The fence file is not modified. `sealed_ses_money_fence_test.ts` is green and unchanged. |
-| Human APPROVE INVOICE gate | untouched | `ses_reporting_actions.ts` is not modified. Pinned by a control test on `!authority.allowed \|\| operatorAuth.mode !== "jwt" \|\| !auth.user` and on `loadOperatorAuth` returning `{ mode: "api_key" \| "routine" }` without a user — a routine or api-key caller can never reach `jwt` mode. |
-| `record_ses_revision_approval_v1` readiness recheck | untouched | Control test pins `NOT current_readiness.ready`, `NOT current_readiness.revision_ready`, the allowlist refusal and the mechanically-clean refusal. See section 6. |
-| Every other precondition in both changed functions | untouched | 12 refusal strings asserted present in the effective bodies (job existence, cycle cardinality, content-hash collision, released/Xero-bound supersede refusal, explicit-supersede refusal, AUTHORISED binding shape, `pre_xero` base revision, confirmed effect-ledger row, SEND-IT ordering). |
-| Readiness table, invalidator, recording behaviour | untouched | The migration contains no `DROP TABLE`/`DROP FUNCTION`/`DROP TRIGGER`, no `UPDATE public.makesafe_readiness_current`, and writes **zero rows at apply time** (verified by stripping the `AS $$ … $$;` bodies and asserting no top-level `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`). `invalidate_makesafe_readiness` is still called on every commit, certified or not. |
-| Pricing, duplicate probe, blockers, cycle binding | untouched | The two function bodies are otherwise byte-identical to the originals — see the diff in section 8.2. |
+| Money seal `jobs.ses_money_sealed_at` and `_shared/sealed_ses_money_fence.ts` | untouched | **Neither** migration contains an executable statement referencing `ses_money_sealed_at` or `xero_invoices` — pinned by two tests that strip `--` comments (the seal is named in prose only, to record it as out of scope). The fence file is not modified. `sealed_ses_money_fence_test.ts` is green and unchanged. |
+| Human APPROVE INVOICE gate | untouched | `ses_reporting_actions.ts` is not modified by any of this work. Pinned by a control test on `!authority.allowed \|\| operatorAuth.mode !== "jwt" \|\| !auth.user` and on `loadOperatorAuth` returning `{ mode: "api_key" \| "routine" }` without a user — a routine or api-key caller can never reach `jwt` mode. **This is the gate that matters most here**: dropping the in-database readiness test does not let a non-human approve, because a non-human cannot reach the RPC. |
+| `record_ses_revision_approval_v1`'s allowlist, mechanically-clean and Captain-override tests | untouched | Control test pins all four refusal strings plus the operator identity on the insert. Only the readiness half of its compound `IF` changed. |
+| The Xero **execution** gates (`makesafe_revision_approvals_current_v2` `WHERE readiness.ready = true`; `begin_ses_invoice_execution_v1`; `begin_ses_release_execution_v1`) | untouched | Control test pins the view predicate and `NOT current_readiness.ready` in release execute, and asserts neither drop migration rewrites the view or an execution function. See section 6.3. |
+| Every other precondition in the three changed functions | untouched | 12 refusal strings across sites 1 and 2, 4 across site 3, asserted present in the effective bodies. |
+| Readiness table, invalidator, recording behaviour | untouched | Neither migration contains `DROP TABLE`/`DROP FUNCTION`/`DROP TRIGGER`, no `UPDATE public.makesafe_readiness_current`, and both write **zero rows at apply time** (verified by stripping the `AS $$ … $$;` bodies and asserting no top-level `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`). `invalidate_makesafe_readiness` is still called on every commit, certified or not. |
+| The approvals table's append-only guard | untouched | `trg_makesafe_revision_approvals_append_only` fires `BEFORE UPDATE OR DELETE`; the site-3 migration performs only DDL and an INSERT-shaped function change, and a test asserts it never names that trigger. |
+| Pricing, duplicate probe, blockers, cycle binding | untouched | The three function bodies are otherwise byte-identical to the originals — see the diffs in section 8.2. |
 
 ---
 
-## 6. The remaining wall — NOT in scope, NOT touched, needs a decision
+## 6. The third gate — `record_ses_revision_approval_v1`
 
-`record_ses_revision_approval_v1` (`..._u5_u6.sql:978-996`) carries a **third**
+`record_ses_revision_approval_v1` (`..._u5_u6.sql:978-997`) carries a **third**
 instance of the same unsatisfiable gate:
 
 ```sql
@@ -206,23 +224,141 @@ IF NOT FOUND
 ```
 
 Same `INNER JOIN makesafe_readiness_revisions` (0 rows), same `NOT … ready`.
+This is the RPC behind **APPROVE INVOICE** itself, so clearing sites 1 and 2
+lets the obligation mint and the cockpit bind it, but pressing the button still
+409s.
 
-This is the RPC behind **APPROVE INVOICE** itself. The captain's ruling names a
-closed list of two functions and the task says no other precondition on the
-obligation path may be removed, so **I have not touched it.**
+**Status: authorised by the captain on 2026-08-03 as the same ruling extended to
+the third instance** (relayed via FirstMate). It was raised as a needs-decision
+in the first pass of this report; that is now resolved and the work is in scope.
 
-Consequence, stated plainly: this change delivers "a job with a clean docket can
-**reach** the captain's approval button" — the obligation now mints and the
-cockpit binds it. **Pressing** the button will still 409 with `new evidence
-landed; review the current docket revision again`, from
-`record_ses_revision_approval_v1`, until the captain rules on that third site.
+### 6.1 Site 3 is NOT a copy of sites 1 and 2 — and the difference is in our favour
 
-Related, same table, also untouched and also unsatisfiable today:
-`makesafe_revision_approvals_current_v2` filters `WHERE … readiness.ready = true`
-(`..._u5_u6.sql:457`), and `begin_ses_release_execution_v1` re-tests
-`NOT current_readiness.ready` per release member (`:1213-1218`).
+At sites 1 and 2 the whole `IF` was readiness-ready and nothing else. Site 3
+bundles **two different tests into one `IF`**:
 
-**This is a needs-decision for FirstMate, not something I have acted on.**
+| Half | What it is | Verdict |
+|---|---|---|
+| `NOT FOUND` (inner join) + `NOT ready` + `NOT revision_ready` | the unsatisfiable readiness certification test | **drop** |
+| `readiness_revision IS DISTINCT FROM p_approval->>'readiness_revision'` and `dependency_generation IS DISTINCT FROM (…)::bigint` | a genuine optimistic-concurrency check: what the cockpit displayed to the operator vs what the row says now | **keep, verbatim** |
+
+The second half is what the message `new evidence landed; review the current
+docket revision again` actually describes, and unlike sites 1 and 2 it **is
+satisfiable**: `dependency_generation` is a real, moving, non-null value (41 on
+SWMS-261109), bumped by every invalidation. The cockpit reads it
+(`ses_reporting_actions.ts:423`) and passes it back
+(`:1158`); if an invalidation lands between render and press, the values differ
+and the approval is correctly refused.
+
+So the honest change at site 3 removes only the unsatisfiable half and makes the
+freshness half **reachable for the first time**. The `INNER JOIN` becomes a
+`LEFT JOIN` (so the current row is found when no revision has ever been
+certified) and the `ready` / `revision_ready` tests move inside a certified
+branch, exactly as at sites 1 and 2:
+
+- certified (`readiness_revision IS NOT NULL`) → full original test, including
+  `ready` and `revision_ready`, byte-for-byte behaviour;
+- uncertified → the freshness comparison alone.
+
+Two equivalences worth pinning: with the original `INNER JOIN`, a non-null
+`readiness_revision` with no matching revision row raised via `NOT FOUND`; under
+the `LEFT JOIN` it raises via `NOT COALESCE(revision_ready, false)` in the
+certified branch — same refusal, same message, same SQLSTATE. And an absent
+`makesafe_readiness_current` row still raises, because `NOT FOUND` is kept.
+
+Readiness is still never asserted. Nothing writes `ready`, and site 3 does not
+call `commit_makesafe_readiness` at all.
+
+### 6.2 The real blocker at site 3 is a NOT NULL audit column, not the RAISE
+
+Dropping the gate is necessary but **not sufficient**. `record_ses_revision_approval_v1`
+inserts into `makesafe_revision_approvals`, whose readiness identity column is
+(`20260728000001_..._u2.sql:264-265`):
+
+```sql
+readiness_revision text NOT NULL
+  CHECK (readiness_revision ~ '^sha256:[0-9a-f]{64}$'),
+```
+
+Production's `makesafe_readiness_current.readiness_revision` is NULL on all 191
+rows, so the cockpit passes `readiness_revision: null` and the INSERT fails
+`23502` four statements after the gate. This is the same trap as section 2, one
+level harder: there it was a plpgsql record, here it is a table constraint.
+
+Only three shapes exist, and two are excluded by the ruling:
+
+| Option | Verdict |
+|---|---|
+| Leave the column NOT NULL, drop only the gate | **useless** — swaps a `40001` for a `23502`; the captain still cannot approve |
+| Synthesise a `sha256:…` value for the column | **forbidden** — fabricating a readiness identity on the money path is exactly "assert readiness" |
+| Relax the column to `NULL` allowed, keeping the format CHECK for non-null values | **the only honest option** |
+
+Taken, and it is not an invented pattern — it is the **existing idiom in the
+same table**. `approval_content_hash` was added by `..._u5_u6.sql:383-389` as
+exactly this shape:
+
+```sql
+CHECK (approval_content_hash IS NULL OR approval_content_hash ~ '^sha256:[0-9a-f]{64}$')
+```
+
+So the change mirrors its neighbour:
+
+```sql
+ALTER TABLE public.makesafe_revision_approvals
+  ALTER COLUMN readiness_revision DROP NOT NULL;
+-- CHECK re-added as: readiness_revision IS NULL OR readiness_revision ~ '^sha256:…'
+```
+
+Why this is cheap and safe:
+
+- **Zero rows.** `makesafe_revision_approvals` has 0 rows in production
+  (section 1), so the relaxation has no effect on any existing data and no
+  backfill question.
+- **No index or unique constraint** references `readiness_revision` (grep over
+  every migration returns none), so NULL semantics cannot corrupt a key.
+- **The append-only trigger is unaffected**: `trg_..._append_only` fires
+  `BEFORE UPDATE OR DELETE` only (`..._u2.sql:375-400`). Inserts and DDL are
+  untouched, and the table stays append-only.
+- **NULL is the truthful value.** It records "no readiness certification existed
+  when this was approved" — the section 4 property, now on the approval row
+  itself rather than only in the invalidation ledger. That is strictly more
+  visible than what a NOT NULL column could have expressed.
+
+### 6.3 What this does NOT unblock, deliberately
+
+Recording the approval is the end of the authorised path. Two further sites
+still test the same unsatisfiable readiness, and **both are on the Xero
+execution path, which this task explicitly fences off** ("no draft invoice, no
+Xero call, no send"):
+
+| Site | Test | Effect |
+|---|---|---|
+| `makesafe_revision_approvals_current_v2` (`..._u5_u6.sql:449-458`) | `WHERE readiness.ready = true`, plus a join on `readiness.readiness_revision = approval.readiness_revision` which is NULL-unsafe | an uncertified approval is recorded but never appears in this view |
+| `begin_ses_invoice_execution_v1` / `begin_ses_release_execution_v1` (`:1119-1129`, `:1213-1218`) | read that view / re-test `NOT current_readiness.ready` | execution refuses |
+
+I have **not** touched either. Removing them would be removing a check to make
+something pass on the money path, which the task forbids, and they guard the
+step that actually calls Xero.
+
+The consequence is worth stating exactly, because it is a real boundary and not
+a hedge:
+
+> After this change the captain can open the cockpit, see APPROVE INVOICE
+> enabled, press it, and have the decision **durably recorded** in
+> `makesafe_revision_approvals` with his identity, the docket revision, the
+> obligation revision and the content hash. The subsequent **SEND IT /
+> create-the-Xero-invoice** step will still refuse until those two execution
+> sites are ruled on.
+
+Importantly, this is **not** the deadlock moved one step later in the sense the
+original task warned about. The cockpit control itself does not read the
+approvals table — `buildSesCockpitView` derives `approve_invoice.enabled` from
+the docket and obligation alone (`ses_review_cockpit.ts:340-347`) — so the
+button works, stays working, and the approval is real. What is deferred is
+execution, which was never in scope.
+
+**Recommendation for the next ruling:** treat the two execution sites as one
+decision, not two, and rule on them together with the money seal in view.
 
 ---
 
@@ -243,19 +379,35 @@ unconditional in the original migration and this change does not alter it.
 
 | File | What |
 |---|---|
-| `supabase/migrations/20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql` | the change — two `CREATE OR REPLACE FUNCTION`, grants restated, two `COMMENT ON FUNCTION`. **Writes zero rows.** |
+| `supabase/migrations/20260803010000_ses_drop_unsatisfiable_readiness_precondition.sql` | sites 1+2 — two `CREATE OR REPLACE FUNCTION`, grants restated, two `COMMENT ON FUNCTION`. **Writes zero rows.** |
 | `supabase/rollbacks/20260803010000_..._down.sql` | restores the two bodies **byte-identically** to lines 550-766 and 1318-1606 of `20260728020000`, generated mechanically from that file rather than retyped, with a header warning that running it today re-blocks the whole board |
-| `supabase/functions/ops-api/ses_readiness_precondition_drop_test.ts` | 12 tests: 6 regression, 1 destructiveness check, 5 controls |
+| `supabase/migrations/20260803020000_ses_drop_approval_readiness_precondition.sql` | site 3 — one column relaxation (`DROP NOT NULL` + CHECK re-added admitting NULL), one `COMMENT ON COLUMN`, one `CREATE OR REPLACE FUNCTION`, grants restated, one `COMMENT ON FUNCTION`, plus a post-state assertion that fails the migration loudly if the relaxation did not take. **Writes zero rows.** |
+| `supabase/rollbacks/20260803020000_..._down.sql` | restores the approval body **byte-identically** to lines 935-1060 of `20260728020000` (verified by `diff`, empty) and re-imposes NOT NULL, refusing with a count if any approval was recorded uncertified |
+| `supabase/functions/ops-api/ses_readiness_precondition_drop_test.ts` | 19 tests: 10 that fail on the old shape, 9 controls/invariants that pass on both |
+
+**Why site 3 is a separate migration.** 20260803010000's header states it writes
+zero rows and replaces two function bodies, and explicitly records site 3 as out
+of scope at the time. Rewriting that history would be worse than adding a second,
+clearly-dated file. Site 3 also contains DDL, which is a different risk class and
+deserves its own rollback twin. 20260803010000 now carries a one-line forward
+pointer to it.
 
 Version `20260803010000` was checked against the **live** ledger
-(`supabase_migrations.schema_migrations`), not just against the repo. Live max is
-`20260802030000` and the repo max is the same, so repo and production are in
-sync and `20260803010000` is unused — no ledger version/name collision.
+(`supabase_migrations.schema_migrations`), not just against the repo. Live max was
+`20260802030000` and the repo max is the same, so repo and production were in
+sync and both `20260803010000` and `20260803020000` are unused — no ledger
+version/name collision. **Caveat:** that check was run in the earlier pass. It
+could not be re-run for `20260803020000` because `SUPABASE_ACCESS_TOKEN` now
+returns 401 (section 8.7). `bash scripts/apply-pending-migrations.sh --dry-run`
+with a working production token reproduces the gate read-only and is the cheap
+pre-merge re-check.
 
 No edge-function source changed, so no
-`scripts/edge-function-schema-requirements.txt` entry is needed (the manifest's
-marker kinds are table/column/constraint/index/policy/trigger; this migration
-adds none of them) and no exclusion or alias is involved.
+`scripts/edge-function-schema-requirements.txt` entry is needed. The manifest is
+checked per **changed function**, and none changed; its marker kinds
+(table/column/constraint/index/policy/trigger) also cannot express "this column
+is nullable", which is the only schema fact site 3 depends on. No exclusion or
+alias is involved.
 
 ### 8.2 The change is exactly the intended diff
 
@@ -274,84 +426,157 @@ expressions)` in all four, which is correct because a `CASE … END` expression
 contributes one bare `END` (originals: −1 and 0 with 1 and 0 CASEs; new: −2 and
 −1 with 2 and 1 CASEs).
 
-### 8.3 The regression test fails on the old shape
-
-Proved by moving **only** the migration out of the tree and re-running the
-**byte-identical** test file:
+For site 3 the same claim is stronger, because the diff is machine-checkable
+against the original in one piece. `diff -u` of the new body against lines
+935-1060 of `20260728020000` is **only** the readiness block:
 
 ```
-### OLD SHAPE: implementation reverted, test file byte-identical ###
-running 12 tests from ./supabase/functions/ops-api/ses_readiness_precondition_drop_test.ts
-the drop migration owns the effective obligation and bind bodies ... FAILED (1ms)
++  readiness_certified boolean;                      (DECLARE)
+-  JOIN public.makesafe_readiness_revisions revision
++  LEFT JOIN public.makesafe_readiness_revisions revision
+-  IF NOT FOUND
+-     OR NOT current_readiness.ready
+-     OR NOT current_readiness.revision_ready
+-     OR current_readiness.readiness_revision IS DISTINCT FROM …
++  IF NOT FOUND THEN … END IF;
++  readiness_certified := current_readiness.readiness_revision IS NOT NULL;
++  IF readiness_certified AND (NOT …ready OR NOT COALESCE(…revision_ready,false)) THEN … END IF;
++  IF current_readiness.readiness_revision IS DISTINCT FROM …
+```
+
+The allowlist test, the mechanically-clean test, the Captain-override test, both
+`INSERT`s and the `RETURN` are byte-identical. `IF`/`END IF` balances 5→7 (one
+combined `IF` split into three). The rollback body `diff`s **empty** against the
+original.
+
+Neither migration could be executed against a database (section 9), so this
+mechanical diff plus the balance checks is the strongest available static proof;
+first real parse is in the deploy lane, in a transaction, ledgering only on
+success.
+
+### 8.3 The regression test fails on the old shape
+
+Proved by moving **only** the two migrations out of the tree and re-running the
+**byte-identical** test file. Exact output:
+
+```
+### OLD SHAPE (both drop migrations reverted, test file byte-identical) ###
+running 19 tests from ./supabase/functions/ops-api/ses_readiness_precondition_drop_test.ts
+the drop migration owns the effective obligation and bind bodies ... FAILED (2ms)
 the obligation commit no longer refuses on an uncertified readiness revision ... FAILED (0ms)
 the invoice-bound docket commit no longer refuses on an uncertified readiness revision ... FAILED (0ms)
 readiness is dropped as a blocker, never asserted ... FAILED (0ms)
 an uncertified mint is recorded, not silently omitted ... FAILED (0ms)
 no other precondition on the obligation path was removed ... ok (0ms)
 CONTROL: the human APPROVE INVOICE gate is untouched ... ok (0ms)
-CONTROL: record_ses_revision_approval_v1 keeps its own readiness recheck ... ok (0ms)
+the approval drop migration owns the effective approval body ... FAILED (0ms)
+the approval commit no longer refuses on an uncertified readiness revision ... FAILED (0ms)
+readiness is never asserted on the approval path ... ok (0ms)
+an uncertified approval can actually be recorded ... FAILED (0ms)
+the approval drop migration destroys nothing and touches no money row ... FAILED (0ms)
+CONTROL: the approval path keeps its genuine freshness check ... ok (0ms)
+CONTROL: the approval authority tests are untouched ... ok (0ms)
+CONTROL: the Xero execution gates still test readiness and are untouched ... ok (0ms)
 the drop migration destroys nothing and touches no money row ... FAILED (0ms)
 CONTROL: the readiness table, its invalidator and its recording behaviour survive ... ok (0ms)
 CONTROL: the money seal fence is intact ... ok (0ms)
 CONTROL: a genuinely blocked docket still cannot produce an executable obligation ... ok (0ms)
-FAILED | 6 passed | 6 failed (5ms)
+FAILED | 9 passed | 10 failed (7ms)
 ```
 
-Sample failure message: `AssertionError: the unsatisfiable readiness refusal is
-still in the effective obligation body`.
+The four site-3 failure messages, verbatim:
+
+```
+the approval drop migration owns the effective approval body
+  AssertionError: Values are not equal.
+  -   20260728020000_makesafe_ses_invoice_release_u5_u6.sql
+  +   20260803020000_ses_drop_approval_readiness_precondition.sql
+
+the approval commit no longer refuses on an uncertified readiness revision
+  AssertionError: the approval read still INNER JOINs the empty readiness revisions table
+
+an uncertified approval can actually be recorded
+  AssertionError: the approval drop migration is missing
+
+the approval drop migration destroys nothing and touches no money row
+  AssertionError: the approval drop migration is missing
+```
 
 The tests read the **effective** body — every migration scanned in version
 order, last `CREATE OR REPLACE FUNCTION` wins, which is what the database ends
-up holding. That is why removing the migration flips them, and it also means a
-future migration that re-introduces the precondition fails these tests too.
+up holding. That is why removing a migration flips them, and it also means a
+future migration that re-introduces any of the three preconditions fails these
+tests too.
 
 On the new shape:
 
 ```
-ok | 12 passed | 0 failed (3ms)
+ok | 19 passed | 0 failed (5ms)
 ```
 
 ### 8.4 Controls: pass on BOTH shapes
 
-Every one of the five `CONTROL:` tests — plus "no other precondition on the
-obligation path was removed" — is **`ok` on the old shape and `ok` on the new
-shape** (see the two runs above). None of them reads the new migration, by
-design, so they are shape-independent:
+Nine tests are **`ok` on the old shape and `ok` on the new shape** (see the two
+runs above). None of them reads either new migration, by design, so they are
+shape-independent:
 
-| Control | Old shape | New shape |
-|---|---|---|
-| the human APPROVE INVOICE gate is untouched | ok | ok |
-| `record_ses_revision_approval_v1` keeps its own readiness recheck | ok | ok |
-| the readiness table, its invalidator and its recording behaviour survive | ok | ok |
-| the money seal fence is intact | ok | ok |
-| a genuinely blocked docket still cannot produce an executable obligation | ok | ok |
-| no other precondition on the obligation path was removed | ok | ok |
+| Control | Old shape | New shape | What it pins |
+|---|---|---|---|
+| the human APPROVE INVOICE gate is untouched | ok | ok | `!authority.allowed \|\| operatorAuth.mode !== "jwt" \|\| !auth.user`, and that `loadOperatorAuth` returns `{ mode: "api_key" \| "routine" }` with no user — a **routine or api-key caller can never reach `jwt` mode**, so it can never approve |
+| the money seal fence is intact | ok | ok | `SEALED_SES_MONEY_READ_EXEMPT_ACTIONS` still closed |
+| a genuinely blocked docket still cannot produce an executable obligation | ok | ok | the pre-RPC docket refusals and `jsonb_array_length(blockers) > 0` at execute |
+| the readiness table, its invalidator and its recording behaviour survive | ok | ok | tables, `invalidate_makesafe_readiness`, the false-write, no later dropper |
+| no other precondition on the obligation path was removed | ok | ok | 12 refusal strings across sites 1 and 2 |
+| CONTROL: the approval authority tests are untouched | ok | ok | action whitelist, SES release allowlist, mechanically-clean, Captain-override, operator identity on the insert |
+| CONTROL: the approval path keeps its genuine freshness check | ok | ok | both `IS DISTINCT FROM` comparisons and the message |
+| CONTROL: the Xero execution gates still test readiness and are untouched | ok | ok | `AND readiness.ready = true;` in the view, `NOT current_readiness.ready` in release execute, and that **neither** drop migration rewrites the view or an execution function |
+| readiness is never asserted on the approval path | ok | ok | no `commit_makesafe_readiness`, no `ready = true`, no synthesised `sha256:` literal |
+
+The three controls the task named explicitly:
+
+- **The money seal still refuses.** Passes on both shapes. Neither migration
+  contains an executable statement mentioning `ses_money_sealed_at` or
+  `xero_invoices` (comment lines are stripped before the check, because both
+  migrations name the seal in prose precisely to record it as out of scope), and
+  `_shared/sealed_ses_money_fence.ts` is not modified.
+- **A routine non-human key still cannot approve an invoice.** Passes on both
+  shapes. `ses_reporting_actions.ts` is not modified by any of this work; the
+  control pins the `jwt` + `auth.user` requirement and the fact that api-key and
+  routine callers structurally never reach `jwt` mode.
+- **A genuinely blocked docket still does not mint an executable obligation.**
+  Passes on both shapes. Precise claim unchanged from the first pass: a blocked
+  docket *does* still mint a `state = 'blocked'` obligation revision carrying its
+  concrete blockers (designed behaviour, pinned by
+  `makesafe_invoice_obligation_test.ts`); what it cannot do is become executable.
+  Stating it as "does not mint" would be false.
+
+The old "CONTROL: `record_ses_revision_approval_v1` keeps its own readiness
+recheck" test is **gone**, replaced by the site-3 regression tests. That is the
+correct consequence of the captain extending the ruling: a control asserting the
+third gate still fires would now be asserting the defect.
 
 The blocked-docket control pins the real refusals: `No U4 pre-Xero docket exists
 for this invoice proposal.`, `The current docket is not a pre-Xero proposal that
 can mint an invoice obligation.`, `pricing_evidence_missing`, and — at the
 execute step — `jsonb_array_length(target_revision.blockers) > 0` →
-`the invoice obligation has no executable priced line set`. Note the precise
-claim: a blocked docket *does* still mint a `state = 'blocked'` obligation
-revision carrying its concrete blockers (that is the designed behaviour, pinned
-by `makesafe_invoice_obligation_test.ts`); what it cannot do is become
-executable. Stating it as "does not mint" would be false.
+`the invoice obligation has no executable priced line set`.
 
 ### 8.5 Full suite and type gate
 
 ```
-baseline (clean tree):  FAILED | 2942 passed | 18 failed | 1 ignored (15s)
-with this change:       FAILED | 2954 passed | 18 failed | 1 ignored (15s)
+baseline (clean tree):         FAILED | 2942 passed | 18 failed | 1 ignored (15s)
+sites 1+2 only (commit 127d04a): FAILED | 2954 passed | 18 failed | 1 ignored (15s)
+sites 1+2+3 (this branch):     FAILED | 2961 passed | 18 failed | 1 ignored (16s)
 ```
 
-The failing test set is **identical** — verified by diffing the sorted
-`FAILURES` blocks of both runs, which came back empty. All 18 are pre-existing
-and unrelated (one of them, `ses_artifact_hash_budget_test.ts`, is the
-documented `--allow-run`-less red noted in the repo `CLAUDE.md`). The delta is
-exactly **+12 passes**, which is this change's 12 new tests. Zero regressions.
+The failing test set is **identical across all three runs** — 18 in every case,
+all pre-existing and in files this work does not touch (one of them,
+`ses_artifact_hash_budget_test.ts`, is the documented `--allow-run`-less red
+noted in the repo `CLAUDE.md`). The delta is exactly **+19 passes**, which is
+this change's 19 new tests. **Zero regressions.**
 
 `deno check --config deno.jsonc supabase/functions/ops-api/index.ts` → exit 0.
-`deno fmt --check` and `deno lint` clean on the new test file.
+`deno fmt --check` and `deno lint` clean on the test file.
 
 ### 8.6 Live card: `SWMS-261109` Bertram — before state (read-only)
 
@@ -386,39 +611,42 @@ xero_invoices linked to this job        0
 $528 inc GST and zero blockers reproduce the batch-1 crew's measurement exactly.
 This card is held by nothing but the gate.
 
-### 8.7 Live mint: NOT PERFORMED — blocked, reported, not worked around
+### 8.7 Live mint: NOT PERFORMED — deferred to post-merge by design
 
-Two independent blockers, both reported rather than routed around.
+**The blocker is structural, not credential.** The new function bodies exist only
+on this branch. Production still holds the `20260728020000` bodies, so a mint
+attempt today executes the OLD function and returns the same `23514`. The
+migrations apply on merge to `main` (section 9) — a merge I am forbidden to
+perform. Firstmate confirmed the mint is deliberately deferred until then.
 
-**(a) The fix is not deployed to production.** The new function bodies exist
-only on this branch. Production still holds the `20260728020000` bodies, so a
-mint attempt today executes the OLD function and returns the same `23514`. The
-migration deploys on merge to `main` (section 9) — a merge I am forbidden to
-perform.
+For completeness on the earlier credential report: the `SW_API_KEY` blocker
+recorded in the first pass **has been resolved** — the captain replaced the key
+and it is verified authenticating against production. It is not on the critical
+path here, because (a) above is what actually prevents the mint.
 
-**(b) The local `SW_API_KEY` is rejected by the deployed `ops-api`.**
+A **new** credential blocker appeared in this pass and is reported, not routed
+around: `SUPABASE_ACCESS_TOKEN` (44 chars, correct `sbp_` shape, loaded from
+`~/.config/secureworks/env`) now returns `401 Unauthorized` from the Management
+API, on `POST /v1/projects/{ref}/database/query` **and** on a bare
+`GET /v1/projects`. The same token worked earlier today for the section-1 and
+section-8.6 measurements, so it has been revoked or expired since.
 
-```
-POST …/functions/v1/ops-api  {"action":"prepare_ses_invoice_obligation", job_id:…}
-  -> HTTP 401 {"error":"Unauthorized"}
-```
+**I did not swap credentials and did not seek another route.** Consequences,
+stated exactly:
 
-Diagnosed, not assumed: the key loads correctly from
-`~/.config/secureworks/env` (64 chars, md5 prefix `7f5ff53c`,
-`SW_SUPABASE_URL` matching project `kevgrhcjxspbxgovpmfl`), and the **same key
-on a trivially safe read** (`GET ?action=ops_summary`) returns the same
-`HTTP 401 {"error":"Unauthorized"}`. So the request shape is fine and the
-credential itself is rejected — `_resolveOpsApiAuthIntent` classified the caller
-as none, meaning the key does not match the edge runtime's `SW_API_KEY`,
-`SUPABASE_SERVICE_ROLE_KEY` or `MAKESAFE_ROUTINE_KEY`.
-
-**I did not swap credentials and did not seek another route.** No production
-write was performed. The mint attempt itself would have written nothing in any
-case: the readiness precondition raises *before* the `INSERT INTO
-makesafe_invoice_obligations`, so the old function's refusal is write-free.
-
-The after-state measurement is therefore still owed, and needs (a) the PR merged
-and deployed, and (b) a working `SW_API_KEY`.
+- No production read was possible in this pass. Every production number in this
+  report is from the earlier pass and is labelled as such.
+- The live schema of `makesafe_revision_approvals.readiness_revision` could not be
+  re-verified against `information_schema.columns`. Section 6.2 reasons from the
+  repo migration. This is the one place repo/live drift could bite: **if
+  production has already relaxed that column, the migration is a harmless
+  no-op there** (the DO block drops whatever CHECK exists, `DROP NOT NULL` is
+  idempotent, and the post-state assertion passes either way). If production has
+  a differently-*named* CHECK, the DO block finds it by definition rather than by
+  name, which is why it was written that way.
+- No production write was performed. The mint attempt would have written nothing
+  in any case: the readiness precondition raises *before* the `INSERT INTO
+  makesafe_invoice_obligations`, so the old function's refusal is write-free.
 
 ---
 
@@ -432,26 +660,56 @@ On merge to `main`, `.github/workflows/deploy-edge-functions.yml` runs in the
 missing from the production ledger in version order through the Management API,
 verifying and ledgering each one. Per
 `docs/project-knowledge/EDGE_DEPLOY_LANE.md`, **migration-only merges deploy
-zero functions** — so this merge applies the migration and deploys no code.
+zero functions** — so this merge applies the two migrations and deploys no code.
 
-**Nothing needs to be run by hand.** No exclusion, no alias, no ledger debt, no
-manual `supabase db push`, no function deploy. The version does not collide with
-the live ledger (section 8.1), and the migration is above the audited automatic
-boundary (`20260722000001`), so it is in the automatic lane.
+Version order matters and is correct as filed: `20260803010000` (sites 1+2) then
+`20260803020000` (site 3). They are independent — neither reads the other's
+output — so the order is a formality, but the runner applies in version order
+regardless.
+
+**Nothing needs to be run by hand for the deploy itself.** No exclusion, no
+alias, no ledger debt, no manual `supabase db push`, no function deploy. Both
+versions are above the audited automatic boundary (`20260722000001`), so they are
+in the automatic lane.
 
 The cheap pre-merge check is
-`bash scripts/apply-pending-migrations.sh --dry-run` with a production
-`SUPABASE_ACCESS_TOKEN`, which reproduces the gate read-only.
+`bash scripts/apply-pending-migrations.sh --dry-run` with a **working**
+production `SUPABASE_ACCESS_TOKEN` (the local one is currently 401 — section
+8.7), which reproduces the gate read-only and also re-checks for a ledger
+version/name collision.
 
-**Caveat worth stating:** the migration was **not executed against any
+**Caveat worth stating:** neither migration was **executed against any
 database**. There is no local Postgres, no docker, and no `psql` on this
-machine, and production is SELECT-only for me, so a `CREATE OR REPLACE FUNCTION`
-could not be validated by execution. What was verified instead: the two bodies
-are byte-identical to already-applied production bodies except for the audited
-diff (8.2), and `IF`/`END IF` and `BEGIN`/`END`/`CASE` all balance. First real
-parse happens in the deploy lane, which applies each migration in a transaction
-and ledgers only on success — a syntax error would fail the run before anything
-ships, not half-apply.
+machine, and production is SELECT-only for me, so `CREATE OR REPLACE FUNCTION`
+and `ALTER TABLE` could not be validated by execution. What was verified instead:
+the three bodies are byte-identical to already-applied production bodies except
+for the audited diffs (8.2), `IF`/`END IF` and `BEGIN`/`END`/`CASE` all balance,
+and `$$` tokens pair. First real parse happens in the deploy lane, which applies
+each migration in a transaction and ledgers only on success — a syntax error
+would fail the run before anything ships, not half-apply. Migration 2 also
+carries its own post-state assertion, so a silently-ineffective relaxation fails
+the migration rather than surfacing later as a `23502` under the captain's
+finger.
+
+### 9.1 What has to happen after merge, in order
+
+1. **Merge the PR.** The deploy workflow applies `20260803010000` then
+   `20260803020000` and ledgers both. Nothing else is needed for the code to be
+   live.
+2. **Re-measure `SWMS-261109` before state** (read-only, Management API,
+   `read_only: true`). Section 8.6 is the expected baseline; re-derive it rather
+   than trusting it, because the docket revision may have moved.
+3. **Mint the obligation on that one card**, via the deployed `ops-api`
+   `prepare_ses_invoice_obligation` action with the working `SW_API_KEY`.
+4. **Re-measure after state** and record the obligation id, the revision id, its
+   `state`, and the new `makesafe_readiness_invalidations` row whose `reason`
+   carries `readiness was NOT certified at mint (captain ruling 2026-08-03…)`.
+5. **STOP.** No draft invoice, no Xero call, no approval, no send, no archive, no
+   status change. Pressing APPROVE INVOICE is now *possible* after this merge,
+   but it is a separate authorised act and was not authorised here.
+
+A working `SUPABASE_ACCESS_TOKEN` is needed for steps 2 and 4, and a working
+`SW_API_KEY` for step 3.
 
 ---
 
@@ -480,3 +738,23 @@ it guaranteed a non-NULL record to five downstream readers. Deleting it swaps a
 clean refusal for a `23502` four statements later. Whenever a guard's variable
 is read downstream, removing the guard is a two-part change, and the second part
 is where the real decision lives.
+
+Extending to site 3 confirmed that second pattern and sharpened it. All three
+gates had a downstream dependency on the thing the guard guaranteed, and each
+time the dependency was one step further from the guard: a plpgsql record at
+sites 1 and 2, and at site 3 a `NOT NULL` **table constraint** on the audit
+column the function writes 30 lines later. The generalisation: an unsatisfiable
+guard means everything downstream of it has been dead code since the day it
+shipped, so it has never been type-checked by reality. Removing the guard is the
+first time that code runs, and its assumptions are all unverified. Budget for
+that, and check what the guard was standing in front of before deciding the
+change is a deletion.
+
+A third, from site 3 specifically: **a compound `IF` can hide a good check inside
+a bad one.** Site 3's single condition was five `OR`ed terms — three
+unsatisfiable, two genuinely useful — under one error message that described only
+the useful half. Reading the message would have led to leaving the whole thing
+alone; reading only the first term would have led to deleting the whole thing.
+Neither is right. Splitting the condition was the change, and it made the
+optimistic-concurrency check reachable for the first time rather than removing
+anything.
