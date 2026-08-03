@@ -34212,6 +34212,32 @@ async function makesafeRenderReport(client: any, body: any) {
 const CURRENT_WIKI_REPORT_MAX_BYTES = 8 * 1024 * 1024
 const CURRENT_WIKI_REPORT_MUTATION_EXCLUDED_JOB_NUMBER = 'SWMS-261109'
 
+const BERTRAM_PROTECTED_REPORT_REPAIR = {
+  authority: 'bertram-provenance-repair-v1',
+  job_id: '208450c0-7161-4b30-9514-66226b054609',
+  job_number: CURRENT_WIKI_REPORT_MUTATION_EXCLUDED_JOB_NUMBER,
+  source_document_id: '1378390d-4d88-4ab8-99ea-b8d937782c76',
+  source_document_version: 3,
+  source_raw_sha256: '3e2ee3b9ac47fc2d21fd58144ce7152a97b01c46eedc10485c0e5bda3d5d97ad',
+  source_docket_revision_id: 'c38ac9e4-8729-586d-8c15-7466311964d2',
+  candidate_raw_sha256: '5c0dfc02488907f9e4ac1196a1dee6d390ba61a38afd0fb3b20e37139c6f13f8',
+} as const
+
+export function bertramProtectedReportRepairPlan(input: {
+  job_id: unknown
+  job_number: unknown
+  candidate_raw_sha256: unknown
+  authority: unknown
+}) {
+  return String(input.job_id || '') === BERTRAM_PROTECTED_REPORT_REPAIR.job_id &&
+      String(input.job_number || '') === BERTRAM_PROTECTED_REPORT_REPAIR.job_number &&
+      String(input.candidate_raw_sha256 || '').toLowerCase() ===
+        BERTRAM_PROTECTED_REPORT_REPAIR.candidate_raw_sha256 &&
+      String(input.authority || '') === BERTRAM_PROTECTED_REPORT_REPAIR.authority
+    ? BERTRAM_PROTECTED_REPORT_REPAIR
+    : null
+}
+
 async function sha256BytesHex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest(
     'SHA-256',
@@ -34334,6 +34360,87 @@ async function assertCurrentWikiReportInput(
   return { job, inputHash }
 }
 
+async function assertBertramProtectedReportRepairCas(
+  client: any,
+  plan: typeof BERTRAM_PROTECTED_REPORT_REPAIR,
+  existingDocuments: any[],
+) {
+  const source = existingDocuments.find((row: any) =>
+    row.id === plan.source_document_id
+  )
+  if (
+    !source || Number(source.version) !== plan.source_document_version ||
+    source?.data_snapshot_json?.report_render_hash !== plan.source_raw_sha256
+  ) {
+    throw new ApiError(
+      'protected Bertram source document moved since the reviewed repair plan',
+      409,
+    )
+  }
+  const sourceUrl = String(source.pdf_url || source.storage_url || '')
+  if (!sourceUrl.startsWith('https://')) {
+    throw new ApiError('protected Bertram source document is not recoverable', 409)
+  }
+  const sourceResponse = await fetch(sourceUrl, {
+    signal: AbortSignal.timeout(20_000),
+  })
+  if (!sourceResponse.ok) {
+    throw new ApiError('protected Bertram source document read failed', 409)
+  }
+  const sourceBytes = new Uint8Array(await sourceResponse.arrayBuffer())
+  if (await sha256BytesHex(sourceBytes) !== plan.source_raw_sha256) {
+    throw new ApiError(
+      'protected Bertram source document bytes moved since review',
+      409,
+    )
+  }
+
+  const currentReview = await client.from('ses_docket_review_current')
+    .select('docket_revision_id').eq('job_id', plan.job_id).maybeSingle()
+  if (
+    currentReview.error ||
+    currentReview.data?.docket_revision_id !== plan.source_docket_revision_id
+  ) {
+    throw new ApiError(
+      'protected Bertram review revision moved since the reviewed repair plan',
+      409,
+    )
+  }
+  const reviewArtifact = await client.from('makesafe_docket_artifacts')
+    .select('object_key,metadata').eq(
+      'revision_id',
+      plan.source_docket_revision_id,
+    ).eq('role', 'supporting_report_pdf').maybeSingle()
+  const metadata = reviewArtifact.data?.metadata || {}
+  if (
+    reviewArtifact.error || !reviewArtifact.data ||
+    metadata.render_hash !== plan.source_raw_sha256 ||
+    metadata.report_document_id !== plan.source_document_id
+  ) {
+    throw new ApiError(
+      'protected Bertram review artifact moved since the reviewed repair plan',
+      409,
+    )
+  }
+  const prefix = 'makesafe-docket-artifacts/'
+  const objectKey = String(reviewArtifact.data.object_key || '')
+  if (!objectKey.startsWith(prefix)) {
+    throw new ApiError('protected Bertram review artifact is not recoverable', 409)
+  }
+  const reviewDownload = await client.storage.from('makesafe-docket-artifacts')
+    .download(objectKey.slice(prefix.length))
+  if (reviewDownload.error || !reviewDownload.data) {
+    throw new ApiError('protected Bertram review artifact read failed', 409)
+  }
+  const reviewBytes = new Uint8Array(await reviewDownload.data.arrayBuffer())
+  if (await sha256BytesHex(reviewBytes) !== plan.source_raw_sha256) {
+    throw new ApiError(
+      'protected Bertram review bytes moved since the reviewed repair plan',
+      409,
+    )
+  }
+}
+
 async function attachCurrentWikiCuratedReport(client: any, body: any) {
   const jobId = String(body.job_id || body.jobId || '').trim()
   if (!jobId) throw new ApiError('job_id required', 400)
@@ -34414,10 +34521,29 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
   ].filter((value: unknown) => typeof value === 'string' && value.trim())
 
   const existingResponse = await client.from('job_documents')
-    .select('id,file_name,data_snapshot_json')
+    .select('id,file_name,version,pdf_url,storage_url,data_snapshot_json')
     .eq('job_id', jobId).eq('type', 'makesafe_report')
   if (existingResponse.error) {
     throw new ApiError('existing curated documents could not be read', 503)
+  }
+  const protectedRepairPlan = jobResponse.data.job_number ===
+      CURRENT_WIKI_REPORT_MUTATION_EXCLUDED_JOB_NUMBER
+    ? bertramProtectedReportRepairPlan({
+      job_id: jobId,
+      job_number: jobResponse.data.job_number,
+      candidate_raw_sha256: rawHash,
+      authority: body.protected_repair_authority,
+    })
+    : null
+  if (
+    jobResponse.data.job_number ===
+      CURRENT_WIKI_REPORT_MUTATION_EXCLUDED_JOB_NUMBER &&
+    !protectedRepairPlan
+  ) {
+    throw new ApiError(
+      'captain-corrected artifact is mutation-excluded unless the exact reviewed Bertram repair is supplied',
+      409,
+    )
   }
   const identical = (existingResponse.data || []).find((row: any) => {
     const facts = row.data_snapshot_json || {}
@@ -34453,13 +34579,11 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
       writes: missingProvenance ? 1 : 0,
     }
   }
-  if (
-    jobResponse.data.job_number ===
-      CURRENT_WIKI_REPORT_MUTATION_EXCLUDED_JOB_NUMBER
-  ) {
-    throw new ApiError(
-      'captain-corrected artifact is mutation-excluded unless candidate bytes already match',
-      409,
+  if (protectedRepairPlan) {
+    await assertBertramProtectedReportRepairCas(
+      client,
+      protectedRepairPlan,
+      existingResponse.data || [],
     )
   }
 
