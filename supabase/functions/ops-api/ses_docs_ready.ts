@@ -2,12 +2,13 @@ import type { SesBlocker, SesPreparedRevision } from "./ses_docket_envelope.ts";
 
 export const SES_DOCS_READY_STATE_VERSION = "ses.docs-ready/v1";
 
-export type SesDocsReadyState = "needs_review" | "signed_off";
+export type SesDocsReadyState = "needs_review" | "signed_off" | "retired";
 export type SesDocsReadyEventKind =
   | "prepared"
   | "content_changed"
   | "signed_off"
-  | "revoked";
+  | "revoked"
+  | "retired";
 
 export type SesDocsReadyGate =
   | {
@@ -67,7 +68,8 @@ export function nextSesDocsReadyState(
 ): SesDocsReadyState {
   if (
     (event === "prepared" || event === "content_changed") &&
-    current !== "signed_off"
+    current !== "signed_off" &&
+    current !== "retired"
   ) {
     return "needs_review";
   }
@@ -79,6 +81,16 @@ export function nextSesDocsReadyState(
   }
   if (event === "revoked" && current === "signed_off") {
     return "needs_review";
+  }
+  // Retire (captain ruling R4, 2026-08-03) is the terminal queue eviction: a
+  // polluted docket can be retired while it waits for review and while it is
+  // ticked (a signed-off pack can still be discovered polluted before send).
+  // Nothing transitions OUT of retired.
+  if (
+    event === "retired" &&
+    (current === "needs_review" || current === "signed_off")
+  ) {
+    return "retired";
   }
   throw new TypeError(
     `invalid Docs Ready transition: ${current || "none"} -> ${event}`,

@@ -411,8 +411,9 @@ import {
   querySesProofLedgerAction,
   querySesReviewCockpitAction,
   recordSesReviewFeedbackAction,
-  revokeSesDocketSignoffAction,
   resolveSesInvoiceDuplicatesAction,
+  retireSesDocketRevisionAction,
+  revokeSesDocketSignoffAction,
   SesActionError,
   sesActionErrorResponse,
   signOffSesDocketAction,
@@ -6398,6 +6399,24 @@ if (import.meta.main) serve(async (req: Request) => {
             docket_revision_id: body.docket_revision_id,
             expected_output_content_hash: body.expected_output_content_hash,
             reason: body.reason,
+          },
+        ))
+      // Captain ruling R4 (2026-08-03): audited, captain-gated eviction of a
+      // polluted Docs Ready docket from the review queue. Captain/admin-owner
+      // JWT or the privileged ops key; the routine key is refused by the
+      // dispatch default-deny above and again inside the action.
+      case 'retire_ses_docket_revision':
+        if (req.method !== 'POST') {
+          return json({ error: 'retire_ses_docket_revision requires POST' }, 405)
+        }
+        return json(await retireSesDocketRevisionAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            docket_revision_id: body.docket_revision_id,
+            reason_code: body.reason_code,
+            reason_text: body.reason_text,
+            actor: authUser?.email || body.actor,
           },
         ))
       case 'approve_ses_invoice_revision':
