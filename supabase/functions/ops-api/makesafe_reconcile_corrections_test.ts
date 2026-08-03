@@ -141,6 +141,38 @@ Deno.test("reviewed family correction preserves metadata and does not move subst
   assertEquals(store.events[0].event_type, "makesafe_job_family_corrected");
 });
 
+Deno.test("reviewed family correction accepts the repair family and clears report_type", async () => {
+  const store = fixture();
+  store.detail.report_type = "roof_report";
+  const result = await _updateMakesafeJobFamily(clientFor(store), {
+    job_id: "job-1",
+    expected_before_family: "general_makesafe",
+    makesafe_job_family: "repair",
+    reason: "captain ruling R2: reclass SWMS-261029 to repair",
+  });
+
+  assertEquals(result.ok, true);
+  assertEquals(result.before, {
+    makesafe_job_family: "general_makesafe",
+    report_type: "roof_report",
+    substatus: "waiting_on_trade_report",
+  });
+  assertEquals(result.after, {
+    makesafe_job_family: "repair",
+    report_type: null,
+    substatus: "waiting_on_trade_report",
+  });
+  assertEquals(store.job.metadata.preserve_me, "yes");
+  assertEquals(store.job.metadata.makesafe_job_family, "repair");
+  assertEquals(store.job.metadata.makesafe_job_family_label, "Repair");
+  assertEquals(store.detail.report_type, null);
+  assertEquals(store.detail.substatus, "waiting_on_trade_report");
+  assertEquals(store.events.length, 1);
+  assertEquals(store.events[0].event_type, "makesafe_job_family_corrected");
+  assertEquals(store.events[0].detail_json.after_family, "repair");
+  assertEquals(store.events[0].detail_json.after_report_type, null);
+});
+
 Deno.test("captain conversion preserves the live job and classifies insurance ownership", async () => {
   const store = fixture();
   store.job.status = "processing";

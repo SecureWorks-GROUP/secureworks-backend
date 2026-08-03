@@ -13000,6 +13000,7 @@ const RECONCILE_MAKESAFE_FAMILIES = new Set([
   'temp_fence_makesafe',
   'general_makesafe',
   'restoration',
+  'repair',
 ])
 
 // Privileged exact correction for a reviewed live card. Unlike the additive
