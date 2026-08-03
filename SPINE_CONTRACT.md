@@ -168,8 +168,8 @@
 
 **`install_rescheduled` (CP1 calendar drag-to-reschedule) is special-cased:**
 - Requires `template_vars.new_date` (`YYYY-MM-DD`, must be a real calendar date) — 400 otherwise.
-- `{reschedule_date}` ("Thursday the 2nd of July") and `{street}` (street name only, no number/suburb) are server-derived from `new_date` and the job's site address, never caller-supplied.
-- Dedup is per **(job, new date)** against the most recent successfully-sent reschedule, not once-per-job: a double-tap on the same drop is swallowed, a later reschedule to a different date still sends, and a failed send never blocks a retry. Every other trigger keeps once-per-job (or per-contact) dedup.
+- `{reschedule_date}` ("Thursday the 2nd of July"), `{street}` (street name only, no number/suburb) and `{service}` (the job's own service; fencing renders "fence") are server-derived from `new_date` and the job row, never caller-supplied.
+- Dedup is per **(job, new date)** against the most recent successfully-sent reschedule, not once-per-job: a double-tap on the same drop is swallowed, a later reschedule to a different date still sends, and a failed send never blocks a retry. A ghl-proxy in-band failure (HTTP 200 `success:false`) records `status='failed'`, not sent, so it can be retried too. Every other trigger keeps once-per-job (or per-contact) dedup.
 - The only SMS trigger WITHOUT the cross-sell footer — the approved wording ends "Cheers, Shaun".
 - Fired only from the ops calendar reschedule popup's explicit Yes; nothing sends it automatically.
 
@@ -216,7 +216,7 @@ Uses source_ref deduplication to prevent duplicate annotations.
 | council_submitted | sms | We've submitted your application to {council}... |
 | council_approved | sms | Great news! Your {service} has been approved... |
 | crew_scheduled | sms | Your install is booked for {date}. {installer} and team will arrive... |
-| install_rescheduled | sms | Hi {name}, ... we've got your fence install rescheduled for {reschedule_date} at {street}... Cheers, Shaun |
+| install_rescheduled | sms | Hi {name}, ... we've got your {service} install rescheduled for {reschedule_date} at {street}... Cheers, Shaun |
 | crew_arriving | sms | Our crew is on their way to {address}... |
 | daily_progress | sms | Day {day} update: {progress_note} |
 | job_complete | email | Your {service} is complete! Please review and sign off... |

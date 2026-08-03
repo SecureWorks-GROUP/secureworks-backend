@@ -149,7 +149,7 @@ function makeClient(store: Store) {
 }
 
 type FetchCall = { url: string; init?: any };
-function stubFetch(opts: { failSms?: boolean } = {}) {
+function stubFetch(opts: { failSms?: boolean; inbandFailSms?: boolean } = {}) {
   const calls: FetchCall[] = [];
   const original = globalThis.fetch;
   globalThis.fetch = ((input: any, init?: any) => {
@@ -157,6 +157,15 @@ function stubFetch(opts: { failSms?: boolean } = {}) {
     calls.push({ url, init });
     if (opts.failSms && url.includes("send_sms")) {
       return Promise.reject(new Error("GHL unreachable"));
+    }
+    if (opts.inbandFailSms && url.includes("send_sms")) {
+      // ghl-proxy's send_sms failure shape: HTTP 200 with success:false.
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ success: false, error: "GHL API error" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
     }
     return Promise.resolve(
       new Response(JSON.stringify({ success: true }), {
@@ -533,6 +542,77 @@ Deno.test("install_rescheduled: a failed send never blocks the operator's retry"
     assertEquals(dup.sent, false);
   } finally {
     stub.restore();
+  }
+});
+
+Deno.test("install_rescheduled: an in-band GHL failure (HTTP 200 success:false) records failed and never blocks the retry", async () => {
+  const stub = stubFetch({ inbandFailSms: true });
+  try {
+    const store = baseStore();
+    const client = makeClient(store);
+    const failed = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
+    assertEquals(failed.sent, false);
+    assertEquals(
+      store.emailEvents!.filter((r) =>
+        r.comms_trigger === "install_rescheduled" && r.status === "failed"
+      ).length,
+      1,
+    );
+    stub.opts.inbandFailSms = false;
+    const retry = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
+    assertEquals(retry.sent, true);
+    const dup = await sendClientUpdate(client, {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
+    assertEquals(dup.sent, false);
+  } finally {
+    stub.restore();
+  }
+});
+
+Deno.test("install_rescheduled: a non-fencing job names its own service — never 'fence'", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    const store = baseStore();
+    store.jobs!["job-1"].type = "patio";
+    const res = await sendClientUpdate(makeClient(store), {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02" },
+    });
+    assertEquals(res.sent, true);
+    const body = JSON.parse(smsCalls(calls)[0].init.body);
+    assertStringIncludes(body.message, "your patio install rescheduled");
+    assert(!body.message.includes("fence"), "patio SMS must not say fence");
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("install_rescheduled: caller-supplied template_vars.service cannot override the job's own service", async () => {
+  const { calls, restore } = stubFetch();
+  try {
+    const store = baseStore();
+    const res = await sendClientUpdate(makeClient(store), {
+      job_id: "job-1",
+      comms_trigger: "install_rescheduled",
+      template_vars: { new_date: "2026-07-02", service: "SPOOFED" },
+    });
+    assertEquals(res.sent, true);
+    const body = JSON.parse(smsCalls(calls)[0].init.body);
+    assertEquals(body.message, EXPECTED_SMS);
+  } finally {
+    restore();
   }
 });
 

@@ -44068,10 +44068,12 @@ const CLIENT_COMMS_TEMPLATES: Record<string, { channel: string; template: string
   // CP1 (calendar-overhaul): drag-to-reschedule client SMS. A NEW trigger key on
   // purpose — crew_scheduled's per-trigger dedup would swallow the reschedule on
   // any job that already got its "booked" text. Wording is Shaun's, verbatim
-  // (contract ops-dash-calendar-overhaul-2026-07-14 Feature 1); no cross-sell
-  // footer is appended to this one. Fired ONLY from the calendar popup's
-  // explicit Yes — never automatically.
-  install_rescheduled: { channel: 'sms', template: "Hi {name},\nHope you're well! Just letting you know we've got your fence install rescheduled for {reschedule_date} at {street}. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\nLet us know if you have any questions.\nCheers, Shaun" },
+  // (contract ops-dash-calendar-overhaul-2026-07-14 Feature 1), except {service}
+  // which names the job's own service per Captain ruling cp1-askuser-4 — a
+  // fencing job still renders the approved "fence". No cross-sell footer is
+  // appended to this one. Fired ONLY from the calendar popup's explicit Yes —
+  // never automatically.
+  install_rescheduled: { channel: 'sms', template: "Hi {name},\nHope you're well! Just letting you know we've got your {service} install rescheduled for {reschedule_date} at {street}. Our crew will be out between 7-10am to get it done. They'll be in contact with you closer to the day.\nLet us know if you have any questions.\nCheers, Shaun" },
   crew_arriving: { channel: 'sms', template: 'Our crew is on their way to {address}. Expected arrival: {time}.' },
   daily_progress: { channel: 'sms', template: 'Day {day} update: {progress_note}' },
   job_complete: { channel: 'email', template: 'Your {service} is complete! Please review and sign off here: {link}' },
@@ -44181,10 +44183,11 @@ export async function sendClientUpdate(client: any, body: any) {
     ...(template_vars || {}),
   }
   if (rescheduleDateIso) {
-    // Server-derived, never caller-supplied: the approved wording's date form
-    // and street-only location.
+    // Server-derived, never caller-supplied: the approved wording's date form,
+    // street-only location, and service noun (fencing renders "fence").
     vars.reschedule_date = formatDayDateMonth(rescheduleDateIso)
     vars.street = streetFromAddress(job.site_address)
+    vars.service = job.type === 'fencing' ? 'fence' : (job.type || 'project')
   }
 
   let message = custom_message || tmpl.template
@@ -44207,12 +44210,21 @@ export async function sendClientUpdate(client: any, body: any) {
     }
     try {
       const ghlUrl = `${SUPABASE_URL}/functions/v1/ghl-proxy?action=send_sms`
-      await fetch(ghlUrl, {
+      const smsRes = await fetch(ghlUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contactId: contactGhlId, message }),
       })
-      sent = true
+      // ghl-proxy reports GHL API failures as HTTP 200 { success:false, error },
+      // so only a body confirming success may record status='sent' — an in-band
+      // failure logged as sent would make the reschedule dedup above swallow the
+      // operator's retry.
+      const smsBody = await smsRes.json().catch(() => null)
+      if (smsRes.ok && smsBody?.success === true) {
+        sent = true
+      } else {
+        console.log('[ops-api] GHL SMS failed:', smsBody?.error || `HTTP ${smsRes.status}`)
+      }
     } catch (e) {
       console.log('[ops-api] GHL SMS failed:', (e as Error).message)
     }
