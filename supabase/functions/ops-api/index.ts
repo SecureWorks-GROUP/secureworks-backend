@@ -24133,7 +24133,10 @@ async function setJobLead(client: any, body: any) {
       .neq('status', 'cancelled')
       .select('id, user_id, crew_name')
       .single()
-    if (error || !data) {
+    if (error && error.code !== 'PGRST116') {
+      throw error
+    }
+    if (error?.code === 'PGRST116' || (!error && !data)) {
       throw new ApiError('That person is not an active crew member on this job', 409)
     }
     lead = data
