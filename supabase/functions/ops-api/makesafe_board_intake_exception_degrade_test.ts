@@ -4,8 +4,8 @@
 // may not.
 //
 // Regression under proof: on 2026-08-01 a single post carrying two
-// issue-bearing `email_events_raw` rows made `loadIntakeOperationalFacts` throw
-// `intake source issue uniqueness violated`. That read shared the board's
+// issue-bearing `email_events_raw` rows made `loadIntakeOperationalFacts` throw.
+// That read shared the board's
 // `Promise.all`, so `ops-api?action=makesafe_board` answered HTTP 500, ops.html
 // fell back to the overlay-blind `makesafe_pipeline`, and every captain
 // display-ledger transition — SWMS-261124's ruled ARCHIVE among them —
@@ -15,12 +15,11 @@
 import {
   assert,
   assertEquals,
-  assertRejects,
-  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _loadIntakeExceptionProjectionForBoardForTest,
   _makesafeBoardActionForTest,
+  _makesafeIntakeExceptionReadActionForTest,
 } from "./index.ts";
 import {
   buildIntakeExceptionProjection,
@@ -29,8 +28,8 @@ import {
 } from "./makesafe_intake_exception_cards.ts";
 
 const GENERATED_AT = "2026-08-01T04:00:00.000Z";
-const UNIQUENESS_ERROR =
-  "intake source issue uniqueness violated for post post-double-issue";
+const RECOVERY_GENERATED_AT = "2026-08-03T16:00:00.000Z";
+const PROJECTION_ERROR = "intake source events page read failed: fixture";
 
 /**
  * Compact PostgREST fixture: enough of the builder surface for the canonical
@@ -74,6 +73,10 @@ function fixtureClient(rowsByTable: Record<string, any[]>) {
       },
       lte: (column: string, value: any) => {
         predicates.push((row) => String(row?.[column] || "") <= String(value));
+        return query;
+      },
+      lt: (column: string, value: any) => {
+        predicates.push((row) => String(row?.[column] || "") < String(value));
         return query;
       },
       in: (column: string, values: any[]) => {
@@ -175,12 +178,203 @@ const ARCHIVED_BY_LEDGER = {
   ],
 };
 
+const RECOVERED_EXCEPTION = {
+  makesafe_intake_cases: [{
+    id: "case-recovered",
+    org_id: "00000000-0000-0000-0000-000000000001",
+    company_id: null,
+    company_slug_raw: "mlb",
+    external_ref_raw: "MLB-RR-26836",
+    external_ref_canonical: null,
+    builder_wo_canonical: null,
+    builder_po_canonical: null,
+    wo_po_identity_key: null,
+    raw_identity_json: {
+      builder_slug: "mlb",
+      external_ref: "MLB-RR-26836",
+      builder_wo: "MLB-RR-26836",
+      builder_po: "PO-57602",
+    },
+    story_json: [],
+    evidence_map: {},
+    state: "exception",
+    reason_code: "adapter_parse_failure",
+    missing_fields: [],
+    conflicting_fields: {},
+    parent_case_id: null,
+    parent_relation: null,
+    target_relation: null,
+    job_id: null,
+    target_job_id: null,
+    client_name: null,
+    client_phone: null,
+    client_email: null,
+    site_address: null,
+    site_suburb: "Perth",
+    is_authoritative: false,
+    last_decision_reason: "deterministic source_persist_failed case_insert",
+    instruction_key: "mlb:po-59002",
+    lineage_id: "lineage-recovered",
+    blocked_reasons: [],
+    field_provenance: {},
+    received_at: "2026-08-03T04:07:07.000Z",
+  }],
+  makesafe_intake_case_sources: [
+    {
+      id: "binding-a",
+      org_id: "00000000-0000-0000-0000-000000000001",
+      case_id: "case-recovered",
+      post_id: "transport-a",
+      role: "primary",
+      received_at: "2026-08-03T04:07:07.000Z",
+      attachment_refs: [],
+    },
+    {
+      id: "binding-b",
+      org_id: "00000000-0000-0000-0000-000000000001",
+      case_id: "case-recovered",
+      post_id: "transport-b",
+      role: "twin",
+      received_at: "2026-08-03T04:07:07.000Z",
+      attachment_refs: [],
+    },
+  ],
+  email_events_raw: ["transport-a", "transport-b"].flatMap((postId) => [
+    {
+      id: `${postId}-pdf`,
+      org_id: "00000000-0000-0000-0000-000000000001",
+      mailbox: "ses@secureworkswa.com.au",
+      post_id: postId,
+      change_type: "intake_deferred_pdf_extraction_pending",
+      exclusion_reason: "pdf_extraction_pending",
+      received_at: "2026-08-03T04:07:07.000Z",
+      observed_at: "2026-08-03T04:09:01.000Z",
+      page_meta: null,
+    },
+    {
+      id: `${postId}-cap`,
+      org_id: "00000000-0000-0000-0000-000000000001",
+      mailbox: "ses@secureworkswa.com.au",
+      post_id: postId,
+      change_type: "intake_deferred_scan_run_cap_deferred",
+      exclusion_reason: "run_cap_deferred",
+      received_at: "2026-08-03T04:07:07.000Z",
+      observed_at: "2026-08-03T04:09:02.000Z",
+      page_meta: null,
+    },
+    {
+      id: `${postId}-persist`,
+      org_id: "00000000-0000-0000-0000-000000000001",
+      mailbox: "ses@secureworkswa.com.au",
+      post_id: postId,
+      change_type: "intake_exception_source_persist_failed",
+      exclusion_reason: "source_persist_failed",
+      received_at: "2026-08-03T04:07:07.000Z",
+      observed_at: "2026-08-03T04:09:03.000Z",
+      page_meta: null,
+    },
+  ]),
+  emails: [{
+    post_id: "transport-a",
+    subject: "MLB-RR-26836 PO-57602",
+    from_email: null,
+    from_name: null,
+    received_at: "2026-08-03T04:07:07.000Z",
+  }],
+  email_attachments: [],
+  makesafe_companies: [],
+  makesafe_job_details: [],
+  jobs: [],
+  makesafe_intake_drafts: [],
+  makesafe_intake_hugo_notifications: [],
+  po_communications: [],
+  business_events: [],
+};
+
+function recoveredReadFixture() {
+  const store = structuredClone(RECOVERED_EXCEPTION);
+  return { store, client: fixtureClient(store) as any };
+}
+
+Deno.test("dedicated exception list renders one multi-source fallback card with every issue reason", async () => {
+  const fixture = recoveredReadFixture();
+  const response = await _makesafeIntakeExceptionReadActionForTest(
+    fixture.client,
+    "api_key",
+    null,
+    null,
+    RECOVERY_GENERATED_AT,
+  );
+
+  assertEquals(response.status, 200);
+  const body = await response.json();
+  assertEquals(body.cards.length, 1);
+  assertEquals(body.cards[0].external_ref, "MLB-RR-26836");
+  assertEquals(body.cards[0].builder_purchase_order, "PO-57602");
+  assertEquals(body.cards[0].evidence_sources.length, 2);
+  assertEquals(
+    body.cards[0].evidence_sources.filter((source: any) =>
+      source.subject === null
+    ).length,
+    1,
+  );
+  assertEquals(body.cards[0].source_issue_reasons, [
+    {
+      reason_code: "source_persist_failed",
+      severity: "critical",
+      source_count: 2,
+    },
+    { reason_code: "run_cap_deferred", severity: "warning", source_count: 2 },
+    {
+      reason_code: "pdf_extraction_pending",
+      severity: "warning",
+      source_count: 2,
+    },
+  ]);
+  assertEquals({
+    jobs: fixture.store.jobs,
+    drafts: fixture.store.makesafe_intake_drafts,
+    notifications: fixture.store.makesafe_intake_hugo_notifications,
+    communications: fixture.store.po_communications,
+    sends: fixture.store.business_events,
+  }, {
+    jobs: [],
+    drafts: [],
+    notifications: [],
+    communications: [],
+    sends: [],
+  });
+});
+
+Deno.test("dedicated exception detail finds the same multi-source fallback card exactly once", async () => {
+  const fixture = recoveredReadFixture();
+  const response = await _makesafeIntakeExceptionReadActionForTest(
+    fixture.client,
+    "api_key",
+    null,
+    { caseId: "case-recovered" },
+    RECOVERY_GENERATED_AT,
+  );
+
+  assertEquals(response.status, 200);
+  const body = await response.json();
+  assertEquals(body.card.case_ids, ["case-recovered"]);
+  assertEquals(body.card.evidence_sources.length, 2);
+  assertEquals(body.card.display_reason_code, "source_persist_failed");
+  assertEquals(
+    body.card.blocker_sentence,
+    "The authoritative case could not be stored; review the source-persistence failure before any job can be created.",
+  );
+  assertEquals(body.card.auto_create_job, false);
+  assertEquals(body.card.auto_create_draft, false);
+});
+
 Deno.test("board intake-exception read degrades to an empty projection carrying the alarm", async () => {
   const projection = await _loadIntakeExceptionProjectionForBoardForTest(
     {} as any,
     GENERATED_AT,
     async () => {
-      throw new Error(UNIQUENESS_ERROR);
+      throw new Error(PROJECTION_ERROR);
     },
   );
   assertEquals(projection.cards.length, 0);
@@ -188,9 +382,7 @@ Deno.test("board intake-exception read degrades to an empty projection carrying 
   assertEquals(projection.summary.visible_actionable_cards, 0);
   assertEquals(projection.degraded?.reason, "projection_read_failed");
   assertEquals(projection.degraded?.failed_at, GENERATED_AT);
-  // The original guard message is preserved verbatim: the uniqueness guard is
-  // kept and becomes the alarm, it is not softened or swallowed.
-  assertEquals(projection.degraded?.error, UNIQUENESS_ERROR);
+  assertEquals(projection.degraded?.error, PROJECTION_ERROR);
 });
 
 Deno.test("a healthy board intake-exception read passes through with degraded null", async () => {
@@ -226,7 +418,7 @@ Deno.test("a healthy board intake-exception read passes through with degraded nu
 Deno.test("degraded projection is zeroed, not fabricated", () => {
   const degraded = degradedIntakeExceptionProjection({
     generatedAt: GENERATED_AT,
-    error: new Error(UNIQUENESS_ERROR),
+    error: new Error(PROJECTION_ERROR),
   });
   assertEquals(degraded.cards, []);
   assertEquals(degraded.dispositions, []);
@@ -234,28 +426,35 @@ Deno.test("degraded projection is zeroed, not fabricated", () => {
   assertEquals(degraded.totals.cards, 0);
   assertEquals(degraded.totals.actionable_case_rows, 0);
   assertEquals(degraded.generated_at, GENERATED_AT);
-  assertEquals(degraded.degraded?.error, UNIQUENESS_ERROR);
+  assertEquals(degraded.degraded?.error, PROJECTION_ERROR);
 });
 
-Deno.test("the dedicated intake-exception read still throws on the same failure", async () => {
-  // Degrading is a BOARD concession. `makesafe_intake_exception_read` exists to
-  // serve these cards, so an unreadable projection there must stay loud.
-  await assertRejects(
-    () =>
-      loadIntakeExceptionProjection(
-        fixtureClient(ARCHIVED_BY_LEDGER) as any,
-        {
-          orgId: "00000000-0000-0000-0000-000000000001",
-          mailbox: "ses@secureworkswa.com.au",
-          generatedAt: GENERATED_AT,
-        },
-      ),
-    Error,
-    "intake source issue uniqueness violated",
+Deno.test("the dedicated intake-exception read treats distinct reasons on one source as healthy", async () => {
+  const projection = await loadIntakeExceptionProjection(
+    fixtureClient(ARCHIVED_BY_LEDGER) as any,
+    {
+      orgId: "00000000-0000-0000-0000-000000000001",
+      mailbox: "ses@secureworkswa.com.au",
+      generatedAt: GENERATED_AT,
+    },
   );
+  assertEquals(projection.degraded, null);
+  assertEquals(projection.source_alarms.length, 1);
+  assertEquals(projection.source_alarms[0].source_issue_reasons, [
+    {
+      reason_code: "lineage_quarantine",
+      severity: "critical",
+      source_count: 1,
+    },
+    {
+      reason_code: "pdf_extraction_pending",
+      severity: "warning",
+      source_count: 1,
+    },
+  ]);
 });
 
-Deno.test("makesafe_board serves the captain display ledger even when intake exceptions are unreadable", async () => {
+Deno.test("makesafe_board serves the captain display ledger with a healthy multi-issue intake projection", async () => {
   const response = await _makesafeBoardActionForTest(
     fixtureClient(ARCHIVED_BY_LEDGER) as any,
     "api_key",
@@ -263,8 +462,6 @@ Deno.test("makesafe_board serves the captain display ledger even when intake exc
     "ops",
     { generatedAt: GENERATED_AT },
   );
-  // Before this change the same fixture threw out of the action's Promise.all
-  // and the serve handler answered 500.
   assertEquals(response.status, 200);
   const body = await response.json();
 
@@ -279,14 +476,7 @@ Deno.test("makesafe_board serves the captain display ledger even when intake exc
   assertEquals(body.columns.archive.length, 1);
   assertEquals(body.columns.report_ready.length, 0);
 
-  // The panel is empty AND says why, so zero cards is never read as a clean intake.
   assertEquals(body.intake_exceptions.cards, []);
-  assertEquals(
-    body.intake_exceptions.degraded.reason,
-    "projection_read_failed",
-  );
-  assertStringIncludes(
-    body.intake_exceptions.degraded.error,
-    "intake source issue uniqueness violated",
-  );
+  assertEquals(body.intake_exceptions.source_alarms.length, 1);
+  assertEquals(body.intake_exceptions.degraded, null);
 });

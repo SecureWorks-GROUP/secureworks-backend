@@ -82,6 +82,8 @@ function exceptionCase(
     client_email: null,
     site_address: null,
     site_suburb: null,
+    is_authoritative: true,
+    last_decision_reason: null,
     received_at: "2026-07-20T00:00:00.000Z",
     ...overrides,
   };
@@ -120,6 +122,11 @@ function sourceIssueFact(
     cancellation_job_status: null,
     provenance_complete: false,
     attachment_issue_codes: ["pdf_attachment_limit"],
+    source_issues: [{
+      reason_code: "pdf_attachment_limit",
+      next_action_code: "review_attachment_selection",
+      severity: "warning",
+    }],
     next_action_code: "retry_bounded_pdf_extraction",
     severity: "warning",
     ...overrides,

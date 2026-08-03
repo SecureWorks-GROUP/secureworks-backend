@@ -3178,13 +3178,14 @@ export const _makesafeBoardTradeRouteForTest = makesafeBoardTradeRoute
 // row rejected the entire `makesafe_board` response; ops.html then retried once,
 // fell back to the overlay-blind `makesafe_pipeline`, and EVERY captain
 // display-ledger transition vanished from the live board while looking healthy.
-// The uniqueness guard that threw is kept exactly as-is and becomes the alarm
-// signal here instead of a board-wide outage. Root cause and blast radius:
+// The board path now treats the intake-exception panel as a degradable read;
+// its dedicated route still reports projection failures explicitly. Root cause
+// and blast radius:
 // `docs/evidence/ses-261124-archive-display-diagnosis-2026-08-01.md`.
 //
 // The degraded payload carries `degraded` so an empty card list is never read as
 // a clean intake. Only the board takes this path — `makesafe_intake_exception_read`
-// still throws, because serving those cards is its entire job.
+// surfaces projection failures, because serving those cards is its entire job.
 async function _loadIntakeExceptionProjectionForBoard(
   client: any,
   generatedAt: string,
