@@ -1,9 +1,6 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 
-import {
-  assertEquals,
-  assertRejects,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { loadIntakeOperationalFacts } from "./makesafe_intake_operational_facts.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -163,7 +160,7 @@ Deno.test("operational fact loader pages every row and keeps pre-job and open is
   );
 });
 
-Deno.test("operational fact loader fails loudly on duplicate open source issues", async () => {
+Deno.test("operational fact loader aggregates distinct source issues in stable priority order", async () => {
   const issue = {
     org_id: ORG,
     mailbox: "ses@secureworkswa.com.au",
@@ -192,13 +189,87 @@ Deno.test("operational fact loader fails loudly on duplicate open source issues"
     jobs: [],
   };
 
-  await assertRejects(
-    () =>
-      loadIntakeOperationalFacts(fixtureClient(store), {
-        orgId: ORG,
-        pageSize: 1,
-      }),
-    Error,
-    "uniqueness violated",
-  );
+  const facts = await loadIntakeOperationalFacts(fixtureClient(store), {
+    orgId: ORG,
+    pageSize: 1,
+  });
+
+  assertEquals(facts.length, 1);
+  assertEquals(facts[0].item_id, "source:post-open");
+  assertEquals(facts[0].reason_code, "run_cap_deferred");
+  assertEquals(facts[0].source_issues, [{
+    reason_code: "run_cap_deferred",
+    next_action_code: "retry_exact_source",
+    severity: "warning",
+  }]);
+});
+
+Deno.test("operational fact loader preserves every distinct reason for one source", async () => {
+  const store: Record<string, any[]> = {
+    makesafe_intake_cases: [],
+    makesafe_intake_case_sources: [],
+    email_events_raw: [
+      {
+        id: "event-pdf",
+        org_id: ORG,
+        mailbox: "ses@secureworkswa.com.au",
+        post_id: "transport-a",
+        change_type: "intake_deferred_pdf_extraction_pending",
+        exclusion_reason: "pdf_extraction_pending",
+        received_at: "2026-07-27T00:01:00.000Z",
+        observed_at: "2026-07-27T00:01:01.000Z",
+        page_meta: null,
+      },
+      {
+        id: "event-persist",
+        org_id: ORG,
+        mailbox: "ses@secureworkswa.com.au",
+        post_id: "transport-a",
+        change_type: "intake_exception_source_persist_failed",
+        exclusion_reason: "source_persist_failed",
+        received_at: "2026-07-27T00:01:00.000Z",
+        observed_at: "2026-07-27T00:01:02.000Z",
+        page_meta: { instruction_key: "instruction-a" },
+      },
+      {
+        id: "event-cap",
+        org_id: ORG,
+        mailbox: "ses@secureworkswa.com.au",
+        post_id: "transport-a",
+        change_type: "intake_deferred_scan_run_cap_deferred",
+        exclusion_reason: "run_cap_deferred",
+        received_at: "2026-07-27T00:01:00.000Z",
+        observed_at: "2026-07-27T00:01:03.000Z",
+        page_meta: { instruction_key: "instruction-b" },
+      },
+    ],
+    email_classifier_exclusions: [],
+    jobs: [],
+  };
+
+  const facts = await loadIntakeOperationalFacts(fixtureClient(store), {
+    orgId: ORG,
+    pageSize: 1,
+  });
+
+  assertEquals(facts.length, 1);
+  assertEquals(facts[0].instruction_key, null);
+  assertEquals(facts[0].reason_code, "source_persist_failed");
+  assertEquals(facts[0].source_issues, [
+    {
+      reason_code: "source_persist_failed",
+      next_action_code: "investigate_source_persistence",
+      severity: "critical",
+    },
+    {
+      reason_code: "run_cap_deferred",
+      next_action_code: "retry_exact_source",
+      severity: "warning",
+    },
+    {
+      reason_code: "pdf_extraction_pending",
+      next_action_code: "wait_for_pdf_belt_then_retry_exact_source",
+      severity: "warning",
+    },
+  ]);
 });

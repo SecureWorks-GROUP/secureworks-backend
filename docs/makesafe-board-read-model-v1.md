@@ -260,6 +260,14 @@ The detail route also accepts `case_id`. These routes are available to routine
 callers and privileged Ops access. They are SELECT-only and do not widen the
 Trade projection.
 
+Distinct source-issue rows are aggregated per physical source under the live
+`(org_id, post_id, change_type)` uniqueness grain. Multi-reason cards retain
+every reason in stable severity/reason order instead of failing or selecting one
+arbitrarily. An exact non-authoritative `source_persist_failed case_insert`
+fallback may expose its validated raw work-order and purchase-order references
+for display only; it remains human-review-only with job and draft auto-creation
+disabled.
+
 ## Trade projection
 
 The only column names are:

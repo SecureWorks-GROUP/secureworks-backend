@@ -2,8 +2,16 @@
 
 import {
   INTAKE_SOURCE_ISSUE_NEXT_ACTION,
+  INTAKE_SOURCE_ISSUE_REASONS,
+  type IntakeSourceIssueReason,
   parseIntakeSourceIssueReason,
 } from "./makesafe_intake_source_issues.ts";
+
+export interface IntakeOperationalSourceIssue {
+  reason_code: IntakeSourceIssueReason;
+  next_action_code: string;
+  severity: "warning" | "critical";
+}
 
 export interface IntakeOperationalFact {
   item_id: `case:${string}` | `source:${string}`;
@@ -36,6 +44,7 @@ export interface IntakeOperationalFact {
   cancellation_job_status: string | null;
   provenance_complete: boolean;
   attachment_issue_codes: string[];
+  source_issues: IntakeOperationalSourceIssue[];
   next_action_code: string | null;
   severity: "info" | "warning" | "critical";
 }
@@ -106,6 +115,48 @@ function issueReasonFromRow(
     parseIntakeSourceIssueReason(
       row.exclusion_reason ? `intake_exception_${row.exclusion_reason}` : null,
     );
+}
+
+function sourceIssueSeverity(
+  row: IntakeSourceIssueOperationalRow,
+): IntakeOperationalSourceIssue["severity"] {
+  return row.change_type.startsWith("intake_deferred_") ||
+      row.change_type === "scan_run_cap_deferred"
+    ? "warning"
+    : "critical";
+}
+
+function sourceIssuePriority(issue: IntakeOperationalSourceIssue): number {
+  const severity = issue.severity === "critical" ? 0 : 1;
+  const reason = INTAKE_SOURCE_ISSUE_REASONS.indexOf(issue.reason_code);
+  return severity * INTAKE_SOURCE_ISSUE_REASONS.length +
+    (reason < 0 ? INTAKE_SOURCE_ISSUE_REASONS.length : reason);
+}
+
+function aggregateSourceIssues(
+  rows: readonly IntakeSourceIssueOperationalRow[],
+): IntakeOperationalSourceIssue[] {
+  const byReason = new Map<
+    IntakeSourceIssueReason,
+    IntakeOperationalSourceIssue
+  >();
+  for (const row of rows) {
+    const reason = issueReasonFromRow(row);
+    if (!reason) continue;
+    const candidate: IntakeOperationalSourceIssue = {
+      reason_code: reason,
+      next_action_code: INTAKE_SOURCE_ISSUE_NEXT_ACTION[reason],
+      severity: sourceIssueSeverity(row),
+    };
+    const current = byReason.get(reason);
+    if (!current || candidate.severity === "critical") {
+      byReason.set(reason, candidate);
+    }
+  }
+  return [...byReason.values()].sort((left, right) =>
+    sourceIssuePriority(left) - sourceIssuePriority(right) ||
+    left.reason_code.localeCompare(right.reason_code)
+  );
 }
 
 /**
@@ -202,14 +253,6 @@ export async function loadIntakeOperationalFacts(
     current.push(event);
     issueRowsByPost.set(postId, current);
   }
-  for (const [postId, rows] of issueRowsByPost) {
-    if (rows.length > 1) {
-      throw new Error(
-        `intake source issue uniqueness violated for post ${postId}`,
-      );
-    }
-  }
-
   const attachmentIssuesByCase = new Map<string, string[]>();
   for (const [caseId, postIds] of sourceIdsByCase) {
     const reasons = postIds.flatMap((postId) =>
@@ -261,11 +304,11 @@ export async function loadIntakeOperationalFacts(
   );
   const excludedPosts = new Set(exclusionPostIds);
   for (
-    const issue of issueRows.filter((row) =>
-      !excludedPosts.has(String(row.post_id))
-    )
+    const [postId, rows] of issueRowsByPost
   ) {
-    facts.push(buildSourceIssueOperationalFact(issue, nowIso));
+    if (!excludedPosts.has(postId)) {
+      facts.push(buildSourceIssueOperationalFact(rows, nowIso));
+    }
   }
   return facts.sort((a, b) =>
     a.source_received_at.localeCompare(b.source_received_at) ||
@@ -346,6 +389,7 @@ export function buildCaseOperationalFact(
     provenance_complete: (row.source_count ?? 0) > 0 &&
       row.field_provenance !== null,
     attachment_issue_codes: [...(row.attachment_issue_codes ?? [])],
+    source_issues: [],
     next_action_code: nextAction,
     severity: nextAction
       ? row.state === "blocked_live_job" ? "warning" : "critical"
@@ -354,20 +398,38 @@ export function buildCaseOperationalFact(
 }
 
 export function buildSourceIssueOperationalFact(
-  row: IntakeSourceIssueOperationalRow,
+  rows: readonly IntakeSourceIssueOperationalRow[],
   nowIso: string,
 ): IntakeOperationalFact {
-  const reason = issueReasonFromRow(row);
-  if (!reason) {
-    throw new Error(`unsupported intake source issue ${row.change_type}`);
+  const orderedRows = [...rows].sort((left, right) => {
+    const leftAt = left.received_at || left.observed_at;
+    const rightAt = right.received_at || right.observed_at;
+    return leftAt.localeCompare(rightAt) ||
+      left.change_type.localeCompare(right.change_type);
+  });
+  const first = orderedRows[0];
+  const sourceIssues = aggregateSourceIssues(orderedRows);
+  const primary = sourceIssues[0];
+  if (!first || !primary) {
+    throw new Error("unsupported empty intake source issue group");
   }
-  const at = row.received_at || row.observed_at;
-  const instructionKey = typeof row.page_meta?.instruction_key === "string"
-    ? row.page_meta.instruction_key
+  const at = first.received_at || first.observed_at;
+  const instructionKeys = [
+    ...new Set(
+      orderedRows.flatMap((row) =>
+        typeof row.page_meta?.instruction_key === "string" &&
+          row.page_meta.instruction_key.trim()
+          ? [row.page_meta.instruction_key.trim()]
+          : []
+      ),
+    ),
+  ].sort();
+  const instructionKey = instructionKeys.length === 1
+    ? instructionKeys[0]
     : null;
   return {
-    item_id: `source:${row.post_id}`,
-    source_instruction_id: row.post_id,
+    item_id: `source:${first.post_id}`,
+    source_instruction_id: first.post_id,
     source_received_at: at,
     age_seconds: ageSeconds(at, nowIso),
     case_id: null,
@@ -379,17 +441,17 @@ export function buildSourceIssueOperationalFact(
     target_relation: null,
     target_job_id: null,
     fate: "open_source_issue",
-    reason_code: reason,
+    reason_code: primary.reason_code,
     blocked_reasons: [],
     cancellation_job_status: null,
     provenance_complete: false,
-    attachment_issue_codes: reason.startsWith("pdf_") ||
-        reason === "attachment_recovery_failed"
-      ? [reason]
-      : [],
-    next_action_code: INTAKE_SOURCE_ISSUE_NEXT_ACTION[reason],
-    severity: row.change_type.startsWith("intake_deferred_")
-      ? "warning"
-      : "critical",
+    attachment_issue_codes: sourceIssues
+      .map((issue) => issue.reason_code)
+      .filter((reason) =>
+        reason.startsWith("pdf_") || reason === "attachment_recovery_failed"
+      ),
+    source_issues: sourceIssues,
+    next_action_code: primary.next_action_code,
+    severity: primary.severity,
   };
 }

@@ -19,6 +19,7 @@ import {
   type IntakeOperationalFact,
   loadIntakeOperationalFacts,
 } from "./makesafe_intake_operational_facts.ts";
+import { INTAKE_SOURCE_ISSUE_REASONS } from "./makesafe_intake_source_issues.ts";
 import { GAP_FILL_ALLOWED_FIELDS } from "./makesafe_gap_fill.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
@@ -94,6 +95,9 @@ export interface IntakeExceptionCard {
     name: string | null;
   };
   external_ref: string;
+  builder_purchase_order?: string;
+  display_reason_code?: string;
+  source_issue_reasons?: IntakeExceptionSourceIssueReason[];
   received_at: string;
   source_email_subject: string | null;
   blocker_sentence: string;
@@ -120,6 +124,12 @@ export interface IntakeExceptionCard {
   auto_create_draft: false;
 }
 
+export interface IntakeExceptionSourceIssueReason {
+  reason_code: string;
+  severity: "warning" | "critical";
+  source_count: number;
+}
+
 export interface IntakeSourceAlarm {
   id: string;
   kind: "intake_source_alarm";
@@ -128,6 +138,7 @@ export interface IntakeSourceAlarm {
   blocker_sentence: string;
   next_action: string;
   severity: IntakeOperationalFact["severity"];
+  source_issue_reasons?: IntakeExceptionSourceIssueReason[];
   subject: string | null;
   attachments: IntakeExceptionEvidenceSource["attachments"];
 }
@@ -199,6 +210,8 @@ export interface IntakeExceptionCaseRow {
   client_email: string | null;
   site_address: string | null;
   site_suburb: string | null;
+  is_authoritative: boolean | null;
+  last_decision_reason: string | null;
   received_at: string;
 }
 
@@ -602,6 +615,127 @@ export function honestIntakeReason(
   return row.reason_code || "source_needs_review";
 }
 
+interface SourcePersistenceFallbackIdentity {
+  builderKey: string;
+  builderWorkOrder: string;
+  builderPurchaseOrder: string;
+}
+
+function firstNonEmpty(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function sourcePersistenceFallbackIdentity(
+  row: IntakeExceptionCaseRow,
+  refPrefixes: readonly string[],
+): SourcePersistenceFallbackIdentity | null {
+  if (
+    row.state !== "exception" ||
+    row.reason_code !== "adapter_parse_failure" ||
+    row.is_authoritative !== false ||
+    row.last_decision_reason !==
+      "deterministic source_persist_failed case_insert" ||
+    row.company_id !== null ||
+    row.builder_wo_canonical !== null ||
+    row.builder_po_canonical !== null ||
+    row.wo_po_identity_key !== null ||
+    row.job_id !== null ||
+    row.target_job_id !== null ||
+    row.target_relation !== null
+  ) return null;
+
+  const raw = row.raw_identity_json || {};
+  const builderKey = canonicalCompanyDedupeKey(
+    firstNonEmpty(
+      raw.builder_slug,
+      raw.builderSlug,
+      row.company_slug_raw,
+    ),
+  );
+  const builderWorkOrder = canonicalExternalObligationRef(
+    firstNonEmpty(
+      raw.builder_wo,
+      raw.builderWo,
+      raw.external_ref,
+      raw.externalRef,
+      row.external_ref_raw,
+    ),
+    refPrefixes,
+  );
+  const poCore = canonicalObligationPoCore(
+    firstNonEmpty(raw.builder_po, raw.builderPo),
+  );
+  if (!builderKey || !builderWorkOrder || !poCore) return null;
+  return {
+    builderKey,
+    builderWorkOrder,
+    builderPurchaseOrder: `PO-${poCore}`,
+  };
+}
+
+function sourceIssueReasonPriority(reason: {
+  reason_code: string;
+  severity: "warning" | "critical";
+}): number {
+  const severity = reason.severity === "critical" ? 0 : 1;
+  const code = INTAKE_SOURCE_ISSUE_REASONS.indexOf(
+    reason.reason_code as typeof INTAKE_SOURCE_ISSUE_REASONS[number],
+  );
+  return severity * INTAKE_SOURCE_ISSUE_REASONS.length +
+    (code < 0 ? INTAKE_SOURCE_ISSUE_REASONS.length : code);
+}
+
+function sourceIssueReasonGroups(
+  sources: readonly IntakeExceptionSourceRow[],
+  facts: readonly IntakeOperationalFact[],
+): IntakeExceptionSourceIssueReason[] {
+  const sourceIds = new Set(sources.map((source) => source.post_id));
+  const byReason = new Map<
+    string,
+    {
+      severity: "warning" | "critical";
+      sourceIds: Set<string>;
+    }
+  >();
+  for (const fact of facts) {
+    if (
+      fact.fate !== "open_source_issue" ||
+      !sourceIds.has(fact.source_instruction_id)
+    ) continue;
+    const issues: Array<{
+      reason_code: string;
+      severity: "warning" | "critical";
+    }> = fact.source_issues.length ? fact.source_issues : fact.reason_code
+      ? [{
+        reason_code: fact.reason_code,
+        severity: fact.severity === "warning" ? "warning" : "critical",
+      }]
+      : [];
+    for (const issue of issues) {
+      const current = byReason.get(issue.reason_code) || {
+        severity: issue.severity,
+        sourceIds: new Set<string>(),
+      };
+      if (issue.severity === "critical") current.severity = "critical";
+      current.sourceIds.add(fact.source_instruction_id);
+      byReason.set(issue.reason_code, current);
+    }
+  }
+  return [...byReason.entries()]
+    .map(([reason_code, value]) => ({
+      reason_code,
+      severity: value.severity,
+      source_count: value.sourceIds.size,
+    }))
+    .sort((left, right) =>
+      sourceIssueReasonPriority(left) - sourceIssueReasonPriority(right) ||
+      left.reason_code.localeCompare(right.reason_code)
+    );
+}
+
 function jobRecord(row: IntakeExceptionJobRow) {
   return Array.isArray(row.jobs) ? row.jobs[0] || null : row.jobs;
 }
@@ -891,12 +1025,21 @@ function emptyDispositionCounts(): Record<IntakeExceptionDisposition, number> {
 function cardGroupKey(
   row: IntakeExceptionCaseRow,
   company: { slug: string | null; name: string | null } | null,
+  refPrefixes: readonly string[],
 ): string {
+  const persistenceFallback = sourcePersistenceFallbackIdentity(
+    row,
+    refPrefixes,
+  );
   const companyKey = canonicalCompanyDedupeKey(
-    company?.slug || row.company_slug_raw || company?.name,
+    company?.slug || row.company_slug_raw || company?.name ||
+      persistenceFallback?.builderKey,
   );
   const obligation = row.wo_po_identity_key || row.builder_wo_canonical ||
-    row.external_ref_canonical || row.id;
+    row.external_ref_canonical ||
+    (persistenceFallback
+      ? `po:${persistenceFallback.builderPurchaseOrder}`
+      : row.id);
   // One builder obligation is one review card even when stale parser attempts
   // disagreed about deliverable. This is what coalesces AJBR-68554's three
   // exception attempts without merging distinct WO/PO identities.
@@ -1024,14 +1167,20 @@ export function buildIntakeExceptionProjection(
         const deterministicNonWork = DETERMINISTIC_NON_WORK_REASONS.has(
           String(row.reason_code || ""),
         );
+        const visiblePersistenceFallback =
+          !!sourcePersistenceFallbackIdentity(row, input.refPrefixes) &&
+          effective.length > 0;
         // A canonical builder WO is the deterministic "this is real work"
         // floor. External ref alone is intentionally insufficient: weak or
-        // ambiguous material remains accounted for the reporting skill.
+        // ambiguous material remains accounted for the reporting skill. The
+        // sealed source-persistence fallback is the sole display-only exception:
+        // its exact non-authoritative marker, raw WO+PO and source binding make
+        // the failed intake obligation reviewable without promoting authority.
         const strongRealWork = !!row.company_id &&
           !!row.builder_wo_canonical;
         disposition = deterministicNonWork
           ? "deterministic_non_work"
-          : strongRealWork
+          : strongRealWork || visiblePersistenceFallback
           ? "visible_review_card"
           : row.parent_relation || row.target_relation
           ? "lineage_update"
@@ -1055,7 +1204,7 @@ export function buildIntakeExceptionProjection(
     const company = row.company_id
       ? companyById.get(row.company_id) || null
       : null;
-    const key = cardGroupKey(row, company);
+    const key = cardGroupKey(row, company, input.refPrefixes);
     grouped.set(key, [...(grouped.get(key) || []), row]);
   }
   const emailByPost = new Map(
@@ -1078,6 +1227,10 @@ export function buildIntakeExceptionProjection(
       a.received_at.localeCompare(b.received_at) || a.id.localeCompare(b.id)
     );
     const primary = rows[0];
+    const persistenceFallback = sourcePersistenceFallbackIdentity(
+      primary,
+      input.refPrefixes,
+    );
     const caseIds = rows.map((row) => row.id);
     const company = primary.company_id
       ? companyById.get(primary.company_id) || null
@@ -1149,6 +1302,7 @@ export function buildIntakeExceptionProjection(
     ].sort();
     const neededInformation = neededFieldCodes.map(plainIntakeField);
     const actions = actionsFor(caseIds, neededFieldCodes);
+    const sourceIssueReasons = sourceIssueReasonGroups(sourceRows, input.facts);
     const id = `intake-exception:${primary.id}`;
     const card: IntakeExceptionCard = {
       id,
@@ -1162,12 +1316,24 @@ export function buildIntakeExceptionProjection(
         slug: company?.slug || primary.company_slug_raw || null,
         name: company?.name || null,
       },
-      external_ref: primary.builder_wo_canonical ||
-        primary.external_ref_canonical || primary.external_ref_raw!,
+      external_ref: persistenceFallback?.builderWorkOrder ||
+        primary.builder_wo_canonical || primary.external_ref_canonical ||
+        primary.external_ref_raw!,
+      ...(persistenceFallback
+        ? {
+          builder_purchase_order: persistenceFallback.builderPurchaseOrder,
+          display_reason_code: "source_persist_failed",
+          source_issue_reasons: sourceIssueReasons,
+        }
+        : sourceIssueReasons.length > 1
+        ? { source_issue_reasons: sourceIssueReasons }
+        : {}),
       received_at: primary.received_at,
       source_email_subject: evidence[0]?.subject || null,
       blocker_sentence: groupedJobBindingBlockerSentence(rows) ||
-        intakeBlockerSentence(neededInformation),
+        (persistenceFallback
+          ? "The authoritative case could not be stored; review the source-persistence failure before any job can be created."
+          : intakeBlockerSentence(neededInformation)),
       needed_information: neededInformation,
       case_gaps: caseGapDetails.map((detail) => ({
         case_id: detail.row.id,
@@ -1226,6 +1392,20 @@ export function buildIntakeExceptionProjection(
         blocker_sentence: sourceAlarmBlockerSentence(fact),
         next_action: sourceAlarmNextAction(fact),
         severity: fact.severity,
+        ...(fact.source_issues.length > 1
+          ? {
+            source_issue_reasons: sourceIssueReasonGroups(
+              [{
+                case_id: "",
+                post_id: fact.source_instruction_id,
+                role: null,
+                received_at: fact.source_received_at,
+                attachment_refs: [],
+              }],
+              [fact],
+            ),
+          }
+          : {}),
         subject: email?.subject || null,
         attachments: sourceEvidence?.attachments || [],
       };
@@ -1432,7 +1612,7 @@ export async function loadIntakeExceptionProjection(
       (from, to) => {
         const query = client.from("makesafe_intake_cases")
           .select(
-            "id,company_id,company_slug_raw,external_ref_raw,external_ref_canonical,builder_wo_canonical,builder_po_canonical,wo_po_identity_key,raw_identity_json,story_json,evidence_map,state,reason_code,missing_fields,conflicting_fields,parent_case_id,parent_relation,target_relation,job_id,target_job_id,client_name,client_phone,client_email,site_address,site_suburb,received_at",
+            "id,company_id,company_slug_raw,external_ref_raw,external_ref_canonical,builder_wo_canonical,builder_po_canonical,wo_po_identity_key,raw_identity_json,story_json,evidence_map,state,reason_code,missing_fields,conflicting_fields,parent_case_id,parent_relation,target_relation,job_id,target_job_id,client_name,client_phone,client_email,site_address,site_suburb,is_authoritative,last_decision_reason,received_at",
           )
           .eq("org_id", orgId)
           .gte("received_at", windowFrom)
