@@ -47,6 +47,8 @@ import {
 } from "./ses_docket_persistence.ts";
 import {
   isCurrentCuratedRendererVersion,
+  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
   MAKESAFE_REPORT_CONTRACT_VERSION,
 } from "./makesafe_report_render.ts";
 import {
@@ -1961,6 +1963,14 @@ function durableCuratedDocumentForCycle(
           "durable_curated_revision" ||
         !text(provenance.curated_source_identity) ||
         text(provenance.curated_source_identity) === text(row.id) ||
+        !text(provenance.curated_source_revision_id) ||
+        !text(provenance.curated_source_artifact_id) ||
+        !isSesSha256(text(provenance.curated_source_artifact_content_hash)) ||
+        !isSesSha256(text(provenance.curated_source_expected_raw_sha256)) ||
+        text(provenance.report_renderer_source_revision) !==
+          MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION ||
+        text(provenance.report_renderer_script_sha256) !==
+          MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256 ||
         !/^sha256:[0-9a-f]{64}$/.test(
           text(provenance.report_input_hash),
         )
@@ -2008,6 +2018,47 @@ function physicalReportSourceForCycle(
     snapshot.documents.map((row) => [text(row.id), row]),
   );
   const candidates: Array<PhysicalReportSource & { committed_at: string }> = [];
+  for (const document of snapshot.documents) {
+    const durable = durableCuratedDocumentForCycle(
+      { ...snapshot, documents: [document] },
+      currentCycleId,
+    );
+    if (
+      !durable || (reportDocumentId && text(durable.id) !== reportDocumentId)
+    ) {
+      continue;
+    }
+    const provenance = record(durable.data_snapshot_json);
+    const sourceRevisionId = text(provenance.curated_source_revision_id);
+    const sourceArtifactId = text(provenance.curated_source_artifact_id);
+    const sourceIdentity = text(provenance.curated_source_identity);
+    const sourceArtifactContentHash = text(
+      provenance.curated_source_artifact_content_hash,
+    );
+    const expectedRawSha256 = rawReportHash(
+      provenance.curated_source_expected_raw_sha256 ||
+        provenance.report_render_hash,
+    );
+    if (
+      sourceIdentity !==
+        `curation-revision:${sourceRevisionId}/artifact:${sourceArtifactId}` ||
+      !isSesSha256(sourceArtifactContentHash) || !expectedRawSha256
+    ) continue;
+    candidates.push({
+      document: durable,
+      committed_at: text(durable.created_at),
+      proof: {
+        source_kind: "durable_curated_revision",
+        source_identity: sourceIdentity,
+        source_document_id: text(durable.id),
+        source_revision_id: sourceRevisionId,
+        source_artifact_id: sourceArtifactId,
+        source_artifact_content_hash: sourceArtifactContentHash as SesSha256,
+        expected_raw_sha256: expectedRawSha256,
+        report_input_hash: text(provenance.report_input_hash) as SesSha256,
+      },
+    });
+  }
   for (const artifact of snapshot.docket_artifacts || []) {
     if (
       text(artifact.role) !== "supporting_report_pdf" ||
@@ -2071,6 +2122,8 @@ function physicalReportSourceForCycle(
     });
   }
   return candidates.sort((left, right) =>
+    Number(right.proof.source_kind === "durable_curated_revision") -
+      Number(left.proof.source_kind === "durable_curated_revision") ||
     right.committed_at.localeCompare(left.committed_at) ||
     right.proof.source_revision_id!.localeCompare(
       left.proof.source_revision_id!,
@@ -2600,24 +2653,49 @@ export function createSesAssemblerRuntimeDependencies(
           409,
         );
       }
-      const objectKey = text(source.artifact?.object_key);
-      const prefix = `${SES_DOCKET_BUCKET}/`;
-      const storagePath = objectKey.startsWith(prefix)
-        ? objectKey.slice(prefix.length)
-        : objectKey;
-      const recovered = await client.storage.from(SES_DOCKET_BUCKET)
-        .download(storagePath);
-      if (recovered.error || !recovered.data) {
-        throw new SesAssemblerAdapterError(
-          "ses_curated_report_unrecoverable",
-          `Committed docket artifact ${proof.source_artifact_id} could not be recovered.`,
-          409,
-        );
+      let bytes: Uint8Array;
+      if (source.artifact) {
+        const objectKey = text(source.artifact.object_key);
+        const prefix = `${SES_DOCKET_BUCKET}/`;
+        const storagePath = objectKey.startsWith(prefix)
+          ? objectKey.slice(prefix.length)
+          : objectKey;
+        const recovered = await client.storage.from(SES_DOCKET_BUCKET)
+          .download(storagePath);
+        if (recovered.error || !recovered.data) {
+          throw new SesAssemblerAdapterError(
+            "ses_curated_report_unrecoverable",
+            `Committed docket artifact ${proof.source_artifact_id} could not be recovered.`,
+            409,
+          );
+        }
+        bytes = new Uint8Array(await recovered.data.arrayBuffer());
+      } else {
+        const url = artifactUrl(source.document);
+        if (!url.startsWith("https://")) {
+          throw new SesAssemblerAdapterError(
+            "ses_curated_report_unrecoverable",
+            `Durable curated source ${proof.source_identity} is not recoverable.`,
+            409,
+          );
+        }
+        const recovered = await fetch(url, {
+          signal: AbortSignal.timeout(20_000),
+        });
+        if (!recovered.ok) {
+          throw new SesAssemblerAdapterError(
+            "ses_curated_report_unrecoverable",
+            `Durable curated source ${proof.source_identity} returned HTTP ${recovered.status}.`,
+            409,
+          );
+        }
+        bytes = new Uint8Array(await recovered.arrayBuffer());
       }
-      const bytes = new Uint8Array(await recovered.data.arrayBuffer());
       if (
-        proof.source_artifact_content_hash &&
-        await sesSha256Bytes(bytes) !== proof.source_artifact_content_hash
+        bytes.byteLength === 0 || bytes.byteLength > 8 * 1024 * 1024 ||
+        await sesSha256Bytes(bytes) !== proof.source_artifact_content_hash ||
+        await rawPhotoSha256(bytes as Uint8Array<ArrayBuffer>) !==
+          proof.expected_raw_sha256
       ) {
         throw new SesAssemblerAdapterError(
           "ses_curated_report_unrecoverable",
@@ -2646,6 +2724,12 @@ export function createSesAssemblerRuntimeDependencies(
           report_document_id: proof.source_document_id,
           report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
           report_renderer_version: text(provenance.report_renderer_version),
+          report_renderer_source_revision: text(
+            provenance.report_renderer_source_revision,
+          ),
+          report_renderer_script_sha256: text(
+            provenance.report_renderer_script_sha256,
+          ),
         },
       };
     },

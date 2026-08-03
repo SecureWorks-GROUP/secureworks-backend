@@ -24,6 +24,9 @@ const REPORTING = await Deno.readTextFile(
 const XERO_SYNC = await Deno.readTextFile(
   new URL("../xero-sync/index.ts", import.meta.url),
 );
+const REQUIRED_ACTIONS = await Deno.readTextFile(
+  new URL("../../../scripts/_ops-api-required-actions.txt", import.meta.url),
+);
 
 Deno.test("legacy free invoice and combined-send actions are retired", () => {
   for (
@@ -278,7 +281,7 @@ Deno.test("annotation relinking fences before resolving or linking", () => {
       resolve > sourceFence && link > resolve,
   );
   assertStringIncludes(INDEX, "synthetic_livefire_invoice_unresolved");
-  assertStringIncludes(FENCE, "code: \"invoice_link_required\"");
+  assertStringIncludes(FENCE, 'code: "invoice_link_required"');
   assertStringIncludes(
     FENCE,
     "execute_ses_release_revision",
@@ -286,7 +289,7 @@ Deno.test("annotation relinking fences before resolving or linking", () => {
   assertStringIncludes(INDEX, "execute_ses_release_revision");
 });
 
-Deno.test("routine allowlist exposes only SES prepare and read actions", () => {
+Deno.test("routine allowlist exposes SES preparation, reads and the byte-bound curation bind only", () => {
   const start = INDEX.indexOf("const ROUTINE_ALLOWED_ACTIONS");
   const end = INDEX.indexOf("if (authMode === 'routine'", start);
   const allowlist = INDEX.slice(start, end);
@@ -298,6 +301,7 @@ Deno.test("routine allowlist exposes only SES prepare and read actions", () => {
       "prepare_ses_release_revision",
       "query_ses_review_cockpit",
       "query_ses_proof_ledger",
+      "bind_current_cycle_curated_makesafe_report",
     ]
   ) {
     assertStringIncludes(allowlist, `'${safe}'`);
@@ -314,6 +318,43 @@ Deno.test("routine allowlist exposes only SES prepare and read actions", () => {
     assert(
       !allowlist.includes(`'${humanOrEffect}'`),
       `${humanOrEffect} must remain routine-forbidden`,
+    );
+  }
+});
+
+Deno.test("curated bind is routed, source-surface declared and has no effect authority", () => {
+  assertStringIncludes(
+    INDEX,
+    "case 'bind_current_cycle_curated_makesafe_report'",
+  );
+  assertStringIncludes(
+    REQUIRED_ACTIONS,
+    "bind_current_cycle_curated_makesafe_report # probe=source-only",
+  );
+  const start = INDEX.indexOf(
+    "async function bindCurrentCycleCuratedMakesafeReport(",
+  );
+  const end = INDEX.indexOf(
+    "async function attachCurrentWikiCuratedReport(",
+    start,
+  );
+  const implementation = INDEX.slice(start, end);
+  assert(start >= 0 && end > start);
+  assertStringIncludes(implementation, ".from('job_events').insert({");
+  assertStringIncludes(implementation, ".from('job_documents').update({");
+  for (
+    const forbidden of [
+      "xeroPost(",
+      "createInvoice(",
+      ".upload(",
+      "executeSes",
+      "sendMail",
+      "createSignedUrl",
+    ]
+  ) {
+    assert(
+      !implementation.includes(forbidden),
+      `bind action must not gain ${forbidden} authority`,
     );
   }
 });
