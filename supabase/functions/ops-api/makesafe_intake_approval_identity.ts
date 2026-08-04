@@ -3,15 +3,17 @@
 // result and must never recover a purchase order from a filename themselves.
 
 import {
+  applyParsedWorkOrderReferenceToExtraction,
   attachmentNameHasUnparseablePoLabel,
   builderIdentityTokensInAttachmentName,
+  builderIdentityTokensInLabelledBody,
   builderInstructionKey,
   builderInstructionKeysForCard,
   type BuilderWorkOrderIdentity,
   extractBuilderWorkOrderIdentity,
   hasUnparseablePoRemainder,
   isSelfGeneratedMakesafeWorkOrder,
-  mergeBuilderWorkOrderIdentity,
+  parseWorkOrderReferenceFromEvidence,
 } from "./makesafe_builder_work_order_identity.ts";
 
 export type IntakeApprovalIdentityDecision =
@@ -73,6 +75,7 @@ function sourceIdentity(input: {
   approved_external_ref: string | null;
   requesting_company_slug: string | null;
   attachment_names: Array<string | null | undefined>;
+  document_texts?: Array<string | null | undefined>;
 }): {
   identity: BuilderWorkOrderIdentity;
   workOrders: string[];
@@ -82,64 +85,75 @@ function sourceIdentity(input: {
   const attachmentNames = input.attachment_names.filter((name) =>
     name && !isSelfGeneratedMakesafeWorkOrder(name)
   );
-  const identities = [
-    extractBuilderWorkOrderIdentity({
-      externalRef: input.approved_external_ref,
-      requestingCompanySlug: input.requesting_company_slug,
-    }),
-    ...attachmentNames.map((name) =>
-      extractBuilderWorkOrderIdentity({
-        requestingCompanySlug: input.requesting_company_slug,
-        attachmentNames: [name],
-      })
-    ),
-  ];
+  const documentTexts = (input.document_texts || []).filter((text) =>
+    String(text || "").trim()
+  );
+  // Conservative multi-source parse: attachment names + labelled WO PDF/body
+  // text + approved external_ref. First-match extraction is not used here —
+  // a multi-candidate set or source disagreement writes nothing.
+  const parsed = parseWorkOrderReferenceFromEvidence({
+    attachmentNames,
+    documentTexts,
+    externalRef: input.approved_external_ref,
+    requestingCompanySlug: input.requesting_company_slug,
+  });
   const attachmentTokens = attachmentNames.map((name) =>
     builderIdentityTokensInAttachmentName(name)
   );
+  const documentTokens = documentTexts.map((text) =>
+    builderIdentityTokensInLabelledBody(text)
+  );
   const workOrders = unique(
     [
-      ...identities.map((item) => item.builder_claim_ref),
+      ...(parsed.action === "filled" && parsed.identity.builder_claim_ref
+        ? [parsed.identity.builder_claim_ref]
+        : []),
       ...attachmentTokens.flatMap((item) => item.builder_claim_refs),
+      ...documentTokens.flatMap((item) => item.builder_claim_refs),
+      ...builderIdentityTokensInAttachmentName(
+        input.approved_external_ref,
+      ).builder_claim_refs,
     ],
   );
   const purchaseOrders = unique(
     [
-      ...identities.map((item) => item.builder_po_number),
+      ...(parsed.action === "filled" && parsed.identity.builder_po_number
+        ? [parsed.identity.builder_po_number]
+        : []),
       ...attachmentTokens.flatMap((item) => item.builder_po_numbers),
+      ...documentTokens.flatMap((item) => item.builder_po_numbers),
+      ...builderIdentityTokensInAttachmentName(
+        input.approved_external_ref,
+      ).builder_po_numbers,
     ],
   );
-  const workOrderNumber =
-    identities.find((item) =>
-      item.builder_work_order_number &&
-      (!workOrders[0] || item.builder_claim_ref === workOrders[0]) &&
-      (!purchaseOrders[0] || item.builder_po_number === purchaseOrders[0])
-    )?.builder_work_order_number || null;
+  // When the conservative parse refused, surface the multi-candidate sets so
+  // the approval gate can 409 rather than mint with empty typed identity.
   return {
-    identity: {
-      builder_claim_ref: workOrders[0] || null,
-      builder_work_order_number: workOrderNumber,
-      builder_po_number: purchaseOrders[0] || null,
-      evidence_sources: unique(
-        identities.flatMap((item) => item.evidence_sources),
-      ),
+    identity: parsed.action === "filled" ? parsed.identity : {
+      builder_claim_ref: null,
+      builder_work_order_number: null,
+      builder_po_number: null,
+      evidence_sources: [],
     },
     workOrders,
     purchaseOrders,
-    unparseablePoPresent:
+    unparseablePoPresent: parsed.action === "empty" &&
+        parsed.reason === "unparseable_po" ||
       hasUnparseablePoRemainder(String(input.approved_external_ref || "")) ||
       attachmentNames.some(attachmentNameHasUnparseablePoLabel),
   };
 }
 
 /**
- * Correlate authoritative attachment identity into the typed draft extraction
- * before the approval gate and job mint consume it. The same merged object is
- * therefore used to reserve the PO-grain key and to persist jobs.metadata.
+ * Correlate authoritative attachment + work-order PDF identity into the typed
+ * draft extraction before the approval gate and job mint consume it. The same
+ * merged object is therefore used to reserve the PO-grain key and to persist
+ * jobs.metadata via createMakesafeJob — never via update_job_field.
  *
  * Multiple source keys are a refusal. A single source key must be reproducible
  * from the merged typed fields; otherwise approval refuses instead of minting a
- * card whose only PO authority remains hidden in an attachment name.
+ * card whose only PO authority remains hidden in an attachment name or PDF body.
  */
 export function correlateIntakeApprovalIdentity(input: {
   extraction: Record<string, unknown>;
@@ -147,6 +161,8 @@ export function correlateIntakeApprovalIdentity(input: {
   requesting_company_slug: string | null;
   family: string | null;
   attachment_names: Array<string | null | undefined>;
+  /** Labelled WO PDF / body text already extracted for this draft. */
+  document_texts?: Array<string | null | undefined>;
 }): IntakeApprovalIdentityDecision {
   const options = {
     requestingCompanySlug: input.requesting_company_slug,
@@ -219,9 +235,17 @@ export function correlateIntakeApprovalIdentity(input: {
       instruction_keys: sortedInstructionKeys,
     };
   }
-  const extraction = mergeBuilderWorkOrderIdentity(
-    input.extraction,
-    source.identity,
+  // Conservative parse only: empty-on-ambiguity, fill empty typed slots only.
+  // Never overwrites a human/prior value; never first-match guesses.
+  const parse = parseWorkOrderReferenceFromEvidence({
+    attachmentNames: input.attachment_names,
+    documentTexts: input.document_texts,
+    externalRef: input.approved_external_ref,
+    requestingCompanySlug: input.requesting_company_slug,
+  });
+  const extraction = applyParsedWorkOrderReferenceToExtraction(
+    input.extraction as Record<string, any>,
+    parse,
   );
   const persistedKey = builderInstructionKey({
     builder_claim_ref: text(extraction.builder_claim_ref) || null,
