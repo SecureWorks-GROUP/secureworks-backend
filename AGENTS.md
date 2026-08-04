@@ -702,8 +702,11 @@ jsPDF accepts a `Uint8Array` directly and emits a byte-identical image stream, s
 supported for the legacy pack path. `makesafeReportHashInput` deliberately
 records the BASE64 length whichever form arrives, so moving a caller between them
 cannot re-version rendered reports. The renderer's own
-`MAX_REPORT_PHOTO_LIMIT = 8` bounds what is embedded; it does NOT bound what the
-docket hashes, uploads or lists, and reducing either to save memory is forbidden.
+`DEFAULT_REPORT_PHOTO_LIMIT = 8` / `MAX_REPORT_PHOTO_LIMIT = 40` bound what is
+embedded in a single report PDF (bind still accounts every current-cycle
+`job_media` id; the 8 MiB report budget is the size gate). Those caps do NOT
+bound what the docket hashes, uploads or lists, and reducing either to save
+memory is forbidden.
 
 ## Portal Completion Has Two Producers
 
