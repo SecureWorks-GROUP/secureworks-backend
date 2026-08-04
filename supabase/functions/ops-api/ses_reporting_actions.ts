@@ -876,6 +876,27 @@ export async function prepareSesInvoiceObligationAction(
   };
 }
 
+async function requireSesInvoiceMintAuthority(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+) {
+  if (auth.mode === "api_key" || auth.mode === "routine") return;
+  const operator = await loadOperatorAuth(client, auth);
+  if (
+    !canManageSesDocsReadySignoff({
+      mode: operator.mode,
+      role: operator.mode === "jwt" ? operator.role : null,
+      operator_class: operator.mode === "jwt" ? operator.operator_class : null,
+    })
+  ) {
+    throw new SesActionError(403, {
+      state: "refused",
+      fact:
+        "Minting a Xero DRAFT is restricted to the Captain, an admin-owner, the privileged ops key, or the make-safe automation routine.",
+    });
+  }
+}
+
 /**
  * Option B (Captain 2026-08-04): mint a real Xero DRAFT without a prior human
  * APPROVE INVOICE click. Approval still gates authorise/release.
@@ -900,8 +921,9 @@ export async function createSesInvoiceDraftAction(
     ) => Promise<any[]>;
   } = {},
 ) {
-  // Mint is agent/api_key/routine-safe. Authorise remains JWT-gated on execute.
-  void auth;
+  // Mint is agent/api_key/routine-safe; a browser session must still be an
+  // identified Captain or admin-owner. Authorise remains JWT-gated on execute.
+  await requireSesInvoiceMintAuthority(client, auth);
   const revisionQuery = client.from("makesafe_invoice_obligation_revisions")
     .select("*")
     .eq("job_id", args.job_id);
@@ -943,6 +965,15 @@ export async function createSesInvoiceDraftAction(
         },
       );
     throw new SesActionError(409, blocker);
+  }
+  if (
+    ["superseded", "void_linked"].includes(String(revision.state || ""))
+  ) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        "This invoice obligation revision is no longer current (superseded or void-linked); prepare a fresh revision before minting a Xero DRAFT.",
+    });
   }
   if (
     ["authorised", "released"].includes(String(revision.state || ""))
@@ -988,16 +1019,42 @@ export async function createSesInvoiceDraftAction(
     const binding = object(revision.xero_binding);
     const boundId = String(binding.xero_invoice_id || "");
     const hitId = String(existingHit.xero_invoice_id || "");
+    const hitIsDraft = String(existingHit.status || "").toUpperCase() ===
+      "DRAFT";
     const sameBoundDraft = !!boundId && !!hitId && boundId === hitId &&
-      String(existingHit.status || "").toUpperCase() === "DRAFT";
+      hitIsDraft;
     // Idempotent re-mint: the live hit is already this obligation's SES-bound DRAFT.
     const hitRow = (accrecRows || []).find((row) =>
       String(row?.xero_invoice_id || "") === hitId
     );
-    const sameObligation = !!hitRow &&
+    const sameObligation = hitIsDraft && !!hitRow &&
       String(hitRow.invoice_obligation_revision_id || "") ===
         String(revision.id);
     if (sameBoundDraft || sameObligation) {
+      // Repair, never assume: a first mint whose Xero create landed but whose
+      // binding write did not would otherwise be stranded unapprovable here.
+      const repairEffect = await buildSesEffect({
+        org_id: args.org_id,
+        job_id: args.job_id,
+        effect_kind: "invoice_create",
+        invoice_obligation_revision_id: revision.id,
+        payload: proposal,
+      });
+      await bindSesDraftInvoiceToRevision(client, {
+        org_id: args.org_id,
+        job_id: args.job_id,
+        invoice_obligation_revision_id: revision.id,
+        external_token: String(
+          hitRow?.ses_external_token || repairEffect.external_token,
+        ),
+        invoice: {
+          xero_invoice_id: String(existingHit.xero_invoice_id || ""),
+          invoice_number: String(existingHit.invoice_number || ""),
+          status: String(existingHit.status || ""),
+          reference: String(hitRow?.reference || externalRef),
+          total: Number(existingHit.total ?? 0),
+        },
+      });
       return {
         state: "xero_draft_created",
         skipped: true,
@@ -1117,37 +1174,18 @@ export async function createSesInvoiceDraftAction(
   if (String(createdInvoice.status || "").toUpperCase() !== "DRAFT") {
     throw new SesActionError(409, {
       state: "refused",
-      fact:
-        `SES draft mint requires Xero status DRAFT; got ${createdInvoice.status || "unknown"}.`,
+      fact: `SES draft mint requires Xero status DRAFT; got ${
+        createdInvoice.status || "unknown"
+      }.`,
     });
   }
-  await persistSesInvoiceMirror(client, {
+  await bindSesDraftInvoiceToRevision(client, {
     org_id: args.org_id,
     job_id: args.job_id,
     invoice_obligation_revision_id: revision.id,
     external_token: createEffect.external_token,
     invoice: createdInvoice,
   });
-  const bindingUpdate = await client.from(
-    "makesafe_invoice_obligation_revisions",
-  ).update({
-    state: "create_executed",
-    xero_binding: {
-      xero_invoice_id: createdInvoice.xero_invoice_id,
-      invoice_number: createdInvoice.invoice_number,
-      status: createdInvoice.status,
-      bound_at: new Date().toISOString(),
-    },
-  }).eq("id", revision.id).in("state", [
-    "proposed",
-    "pending_approval",
-    "create_approved",
-    "create_executed",
-  ]).select("id").maybeSingle();
-  requireValue(
-    bindingUpdate,
-    "The exact Xero draft exists under its SES token, but its invoice obligation binding could not be stored; reconcile that draft before resuming.",
-  );
 
   return {
     state: "xero_draft_created",
@@ -1884,6 +1922,49 @@ async function persistSesInvoiceMirror(
   requireValue(
     result,
     "The exact Xero invoice exists, but its job, obligation revision, and SES token mirror could not be stored; reconcile that invoice before resuming.",
+  );
+}
+
+const SES_DRAFT_BINDABLE_REVISION_STATES = [
+  "proposed",
+  "pending_approval",
+  "create_approved",
+  "create_executed",
+];
+
+/**
+ * Idempotent draft binding: the local money mirror plus the revision's
+ * xero_binding are written together so a re-mint that finds its own DRAFT can
+ * repair a half-written first attempt instead of stranding the card.
+ */
+async function bindSesDraftInvoiceToRevision(
+  client: SesSupabaseClient,
+  args: {
+    org_id: string;
+    job_id: string;
+    invoice_obligation_revision_id: string;
+    external_token: string;
+    invoice: SesXeroInvoiceResult;
+  },
+) {
+  await persistSesInvoiceMirror(client, args);
+  const bindingUpdate = await client.from(
+    "makesafe_invoice_obligation_revisions",
+  ).update({
+    state: "create_executed",
+    xero_binding: {
+      xero_invoice_id: args.invoice.xero_invoice_id,
+      invoice_number: args.invoice.invoice_number,
+      status: args.invoice.status,
+      bound_at: new Date().toISOString(),
+    },
+  }).eq("id", args.invoice_obligation_revision_id).in(
+    "state",
+    SES_DRAFT_BINDABLE_REVISION_STATES,
+  ).select("id").maybeSingle();
+  requireValue(
+    bindingUpdate,
+    "The exact Xero draft exists under its SES token, but its invoice obligation binding could not be stored; reconcile that draft before resuming.",
   );
 }
 

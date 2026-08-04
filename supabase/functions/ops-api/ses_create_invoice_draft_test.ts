@@ -152,13 +152,15 @@ function mintClient(opts: {
   };
 }
 
-function draftGateway(created?: Partial<{
-  xero_invoice_id: string;
-  invoice_number: string;
-  status: string;
-  reference: string;
-  total: number;
-}>): SesXeroGateway & { createCalls: number; authoriseCalls: number } {
+function draftGateway(
+  created?: Partial<{
+    xero_invoice_id: string;
+    invoice_number: string;
+    status: string;
+    reference: string;
+    total: number;
+  }>,
+): SesXeroGateway & { createCalls: number; authoriseCalls: number } {
   let createCalls = 0;
   let authoriseCalls = 0;
   const invoice = {
@@ -222,6 +224,152 @@ Deno.test("A: create_ses_invoice_draft mints DRAFT with api_key and no approval"
   assertEquals(result.invoice.status, "DRAFT");
   assertEquals(gateway.createCalls, 1);
   assertEquals(gateway.authoriseCalls, 0);
+});
+
+Deno.test("A2: a plain user JWT can never mint a Xero DRAFT", async () => {
+  const gateway = draftGateway();
+  let fetchCalled = false;
+  const err = await assertRejects(
+    () =>
+      createSesInvoiceDraftAction(
+        mintClient() as any,
+        {
+          mode: "jwt",
+          user: { id: "user-1", email: "installer@test", role: "trade" },
+        },
+        {
+          org_id: ORG_ID,
+          job_id: JOB_ID,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "installer@test",
+        },
+        gateway,
+        {
+          fetchAllAccrecInvoices: async () => {
+            fetchCalled = true;
+            return [];
+          },
+        },
+      ),
+    SesActionError,
+  );
+  assertEquals(err.status, 403);
+  assertEquals(gateway.createCalls, 0);
+  assertEquals(fetchCalled, false);
+});
+
+Deno.test("A3: an admin-owner JWT may mint", async () => {
+  const gateway = draftGateway();
+  const result = await createSesInvoiceDraftAction(
+    mintClient() as any,
+    {
+      mode: "jwt",
+      user: { id: "user-2", email: "captain@test", role: "admin" },
+    },
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "captain@test",
+    },
+    gateway,
+    { fetchAllAccrecInvoices: async () => [] },
+  );
+  assertEquals(result.state, "xero_draft_created");
+  assertEquals(gateway.createCalls, 1);
+});
+
+Deno.test("A4: a superseded or void-linked revision never mints a draft", async () => {
+  for (const state of ["superseded", "void_linked"]) {
+    const gateway = draftGateway();
+    const err = await assertRejects(
+      () =>
+        createSesInvoiceDraftAction(
+          mintClient({ revision: revisionRow({ state }) }) as any,
+          apiKeyAuth,
+          {
+            org_id: ORG_ID,
+            job_id: JOB_ID,
+            invoice_obligation_revision_id: OBLIGATION_ID,
+            actor: "skill@test",
+          },
+          gateway,
+          { fetchAllAccrecInvoices: async () => [] },
+        ),
+      SesActionError,
+    );
+    assertEquals(err.status, 409);
+    assertStringIncludes(err.message, "no longer current");
+    assertEquals(gateway.createCalls, 0);
+  }
+});
+
+Deno.test("A5: re-mint over this obligation's own DRAFT repairs a missing binding", async () => {
+  const revision = revisionRow({ xero_binding: null });
+  const client = mintClient({ revision });
+  const gateway = draftGateway();
+  const mirrored = {
+    xero_invoice_id: "xero-draft-1",
+    invoice_number: "INV-9001",
+    status: "DRAFT",
+    reference: "MLB-24732",
+    job_id: JOB_ID,
+    invoice_type: "ACCREC",
+    invoice_obligation_revision_id: OBLIGATION_ID,
+    ses_external_token: "SES-existing-token",
+  };
+  const result = await createSesInvoiceDraftAction(
+    client as any,
+    apiKeyAuth,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "skill@test",
+    },
+    gateway,
+    { fetchAllAccrecInvoices: async () => [mirrored] },
+  );
+  assertEquals(result.skipped, true);
+  assertEquals(gateway.createCalls, 0);
+  assertEquals(revision.state, "create_executed");
+  assertEquals(
+    (revision.xero_binding as any)?.xero_invoice_id,
+    "xero-draft-1",
+  );
+});
+
+Deno.test("A6: an AUTHORISED invoice on this obligation refuses instead of skipping", async () => {
+  const gateway = draftGateway();
+  const authorised = {
+    xero_invoice_id: "xero-auth-1",
+    invoice_number: "INV-AUTH",
+    status: "AUTHORISED",
+    reference: "MLB-24732",
+    job_id: JOB_ID,
+    invoice_type: "ACCREC",
+    invoice_obligation_revision_id: OBLIGATION_ID,
+  };
+  const err = await assertRejects(
+    () =>
+      createSesInvoiceDraftAction(
+        mintClient() as any,
+        apiKeyAuth,
+        {
+          org_id: ORG_ID,
+          job_id: JOB_ID,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "skill@test",
+        },
+        gateway,
+        { fetchAllAccrecInvoices: async () => [authorised] },
+      ),
+    SesActionError,
+  );
+  assertEquals(err.status, 409);
+  assertStringIncludes(err.message, "INV-AUTH");
+  assertStringIncludes(err.message, "AUTHORISED");
+  assertEquals(gateway.createCalls, 0);
 });
 
 Deno.test("F1: live ACCREC on same job_id refuses second mint without createDraft", async () => {
