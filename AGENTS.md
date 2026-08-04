@@ -1085,6 +1085,18 @@ build-stamped version truth are owned by
 `docs/project-knowledge/OPS_API_SOURCE_OF_TRUTH.md`. The shared runtime
 boundary is `_shared/sealed_ses_money_fence.ts`.
 
+`create_ses_invoice_draft` always runs the full live-ACCREC duplicate guard
+(`fetchAllAccrecInvoices` + `resolveExistingInvoice` in `makesafe_send_pack.ts`)
+before any Xero create — never skip it, never substitute the indexed
+`resolve_ses_invoice_duplicates` probe (`scanned_full_estate: false`). The
+guard's reference tiers are PO-scoped only when **both** the obligation
+`proposal.reference` and the live invoice reference carry distinguishable PO
+tokens. If the local proposal emits a claim-only builder ref (e.g. `MLB-27037`
+for two cards that are really `…PO-56397` and `…PO-56459`), the second mint
+correctly refuses as `invoice_duplicate_live` / `reference_substring`. That is
+fail-closed money safety, not a reason to weaken the guard — fix the proposal
+reference grain so multi-PO siblings can mint separately.
+
 The seal is not a Xero-API fence — it fences the LOCAL money mirror, and
 `linked` is one of the sealed verbs alongside created/authorised/changed/sent.
 So "set `xero_invoices.job_id` on an SES card" is a sealed write even though it
