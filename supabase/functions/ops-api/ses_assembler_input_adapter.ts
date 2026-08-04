@@ -62,6 +62,7 @@ import { renderSesSwmsPdf } from "./ses_swms_render.ts";
 import {
   inspectSesSupportingReportProof,
   SES_SUPPORTING_REPORT_MAX_BYTES,
+  sesSupportingReportDocumentBinding,
 } from "./ses_supporting_report_trust.ts";
 import {
   canonicalSesPortalCaptureResult,
@@ -2083,21 +2084,15 @@ function physicalReportSourceForCycle(
     );
     const artifactContentHash = text(artifact.content_hash);
     const artifactInputHash = text(metadata.report_input_hash);
-    // A report_input_hash is a completeness coordinate for the bytes the
-    // DOCUMENT carries, whichever side stamped it. When the document's own raw
-    // hash names different bytes than this artifact, the artifact is a stale or
-    // thinner render and no coordinate — metadata or document — describes it.
-    const documentRawSha256 = rawReportHash(
-      provenance.curated_source_expected_raw_sha256 ||
-        provenance.report_render_hash,
+    const documentBinding = sesSupportingReportDocumentBinding(
+      expectedRawSha256,
+      provenance,
     );
-    const documentBytesMatch = Boolean(expectedRawSha256) &&
-      documentRawSha256 === expectedRawSha256;
-    const documentBytesDiverge = Boolean(documentRawSha256) &&
-      !documentBytesMatch;
     const inputHash = isSesSha256(artifactInputHash)
       ? artifactInputHash
-      : (documentBytesMatch ? text(provenance.report_input_hash) : "");
+      : (documentBinding === "matched"
+        ? text(provenance.report_input_hash)
+        : "");
     const trust = inspectSesSupportingReportProof(artifact);
     // Restorable docket lineage without an independent completeness coordinate
     // (report_input_hash from curated bind accounting) is not a source. Allow
@@ -2120,7 +2115,7 @@ function physicalReportSourceForCycle(
       Number(artifact.size_bytes) <= 0 ||
       Number(artifact.size_bytes) > SES_SUPPORTING_REPORT_MAX_BYTES ||
       text(document.uploaded_by) === "guarded-current-wiki-rerender-sweep" ||
-      documentBytesDiverge || !isSesSha256(inputHash)
+      documentBinding === "diverged" || !isSesSha256(inputHash)
     ) continue;
     candidates.push({
       document,

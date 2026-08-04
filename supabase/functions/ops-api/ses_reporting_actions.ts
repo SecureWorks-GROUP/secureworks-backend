@@ -43,6 +43,7 @@ import {
   inspectSesSupportingReportProof,
   rawSesSupportingReportSha,
   SES_SUPPORTING_REPORT_MAX_BYTES,
+  sesSupportingReportDocumentBinding,
   type SesSupportingReportTrust,
 } from "./ses_supporting_report_trust.ts";
 export { inspectSesSupportingReportProof } from "./ses_supporting_report_trust.ts";
@@ -135,6 +136,28 @@ async function verifyStoredSupportingReport(
 ): Promise<SesSupportingReportTrust> {
   const inspected = inspectSesSupportingReportProof(artifact);
   if (!inspected.trusted) return inspected;
+  const metadata = object(artifact.metadata);
+  const documentId = String(
+    metadata.report_document_id || metadata.source_document_id || "",
+  );
+  const documentResponse = await client.from("job_documents")
+    .select("id,data_snapshot_json")
+    .eq("id", documentId)
+    .maybeSingle();
+  if (documentResponse.error) {
+    return { trusted: false, reason: "source_document_unreadable" };
+  }
+  if (!documentResponse.data) {
+    return { trusted: false, reason: "source_document_missing" };
+  }
+  if (
+    sesSupportingReportDocumentBinding(
+      metadata.expected_raw_sha256,
+      documentResponse.data.data_snapshot_json,
+    ) === "diverged"
+  ) {
+    return { trusted: false, reason: "source_document_bytes_diverged" };
+  }
   const prefix = `${SES_DOCKET_BUCKET}/`;
   const objectKey = String(artifact.object_key || "");
   if (!objectKey.startsWith(prefix)) {

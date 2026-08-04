@@ -26,6 +26,30 @@ function rawSha(value: unknown): string {
   return /^[0-9a-f]{64}$/.test(normalized) ? normalized : "";
 }
 
+export type SesSupportingReportDocumentBinding =
+  | "matched"
+  | "diverged"
+  | "absent";
+
+// A report_input_hash is a completeness coordinate for the bytes the DOCUMENT
+// carries, whichever side stamped it. When the document's own raw hash names
+// different bytes than the artifact, the artifact is a stale or thinner render
+// and no coordinate describes it. Selection and the served-pack read must
+// answer this the same way, so the rule lives here once.
+export function sesSupportingReportDocumentBinding(
+  artifactRawSha256: unknown,
+  documentProvenance: unknown,
+): SesSupportingReportDocumentBinding {
+  const provenance = object(documentProvenance);
+  const documentRaw = rawSha(
+    provenance.curated_source_expected_raw_sha256 ||
+      provenance.report_render_hash,
+  );
+  if (!documentRaw) return "absent";
+  const artifactRaw = rawSha(artifactRawSha256);
+  return artifactRaw && artifactRaw === documentRaw ? "matched" : "diverged";
+}
+
 export function inspectSesSupportingReportProof(
   artifact: Record<string, unknown>,
 ): SesSupportingReportTrust {
