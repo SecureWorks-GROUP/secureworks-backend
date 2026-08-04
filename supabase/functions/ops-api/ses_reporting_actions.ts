@@ -443,6 +443,8 @@ function cleanInputFromRows(args: {
   const envelope = object(args.docket.envelope);
   const manifest = object(envelope.v2);
   const classification = object(manifest.classification);
+  const routing = object(manifest.routing);
+  const routingDeclared = Object.keys(routing).length > 0;
   const review = object(args.docket.review_spec);
   const cards = Array.isArray(review.cards) ? review.cards : [];
   const card = object(cards[0]);
@@ -515,6 +517,12 @@ function cleanInputFromRows(args: {
       object(items.physical_reporting_evidence).state === "ready",
     obligation_revision_count: args.obligation ? 1 : 0,
     routes: args.routes,
+    // The matrix stamps routing.photo_to at prepare time: empty means
+    // `photo_route: "not_applicable"` and no PHOTO_EMAIL_DRAFT is produced.
+    // A legacy envelope that declares no routing block at all keeps the old
+    // behaviour (photo required) rather than silently dropping the route.
+    photo_route_applicable: !routingDeclared ||
+      String(routing.photo_to || "").trim().length > 0,
     type_check_hold: storedBlockers.some((blocker) =>
       blocker.code === "type_check"
     ),
@@ -2626,8 +2634,18 @@ function invoiceIdentityMatchesBinding(
 
 /**
  * Load an existing invoice_bound docket for this job/obligation/INV identity.
- * When basedOnRevisionId is set, prefer that base (true replay); otherwise the
- * newest matching AUTHORISED bind (legacy key collision adopt).
+ *
+ * `adoptable` is returned ONLY for a bind whose `based_on_revision_id` is the
+ * exact pre_xero base under review. A bind carrying the same AUTHORISED invoice
+ * but a DIFFERENT base is reported separately in `same_invoice_other_base` and
+ * is never adopted: its pack bytes are a superseded assembly, so returning it
+ * would bind the Captain's money approval to a document he never reviewed (and,
+ * on a card whose report was corrected, would re-serve the superseded report).
+ * The caller refuses loudly and names the differing base instead.
+ *
+ * This is deliberately stricter than the SQL commit function's own adopt: the
+ * SQL falls through and mints a NEW current bind on the current base, which is
+ * the real repair. TypeScript never substitutes an older row for that.
  */
 export async function findExistingAuthorisedInvoiceBoundDocket(
   client: SesSupabaseClient,
@@ -2638,9 +2656,11 @@ export async function findExistingAuthorisedInvoiceBoundDocket(
     based_on_revision_id?: string | null;
   },
 ): Promise<{
-  docket: Record<string, any>;
-  pdf_content_hash: string | null;
-} | null> {
+  adoptable:
+    | { docket: Record<string, any>; pdf_content_hash: string | null }
+    | null;
+  same_invoice_other_base: Record<string, any>[];
+}> {
   const response = await client.from("makesafe_docket_revisions")
     .select("*")
     .eq("job_id", args.job_id)
@@ -2660,16 +2680,15 @@ export async function findExistingAuthorisedInvoiceBoundDocket(
   const candidates = rows.filter((row: any) =>
     invoiceIdentityMatchesBinding(args.invoice, object(row.xero_binding))
   );
-  const preferred = basedOn
-    ? candidates.find((row: any) =>
-      String(row.based_on_revision_id || "") === basedOn
-    ) || null
-    : candidates[0] || null;
-  // When based_on was requested but no exact base match, still adopt the newest
-  // same-INV bind (the unique-key collision path) so recovery never fails closed
-  // on a real INV-1102 that already exists.
-  const chosen = preferred || candidates[0] || null;
-  if (!chosen) return null;
+  const sameBase = (row: any) =>
+    String(row.based_on_revision_id || "").trim() === basedOn;
+  // No base to compare against means nothing is provably the reviewed pack, so
+  // nothing is adoptable. Never fall back to "newest same-INV bind".
+  const chosen = basedOn ? candidates.find(sameBase) || null : null;
+  const sameInvoiceOtherBase = candidates.filter((row: any) => !sameBase(row));
+  if (!chosen) {
+    return { adoptable: null, same_invoice_other_base: sameInvoiceOtherBase };
+  }
 
   const artifactsResponse = await client.from("makesafe_docket_artifacts")
     .select("role,content_hash,metadata")
@@ -2692,12 +2711,15 @@ export async function findExistingAuthorisedInvoiceBoundDocket(
     object(artifact.metadata).invoice_number === args.invoice.invoice_number
   ) || pdfs[0] || null;
   return {
-    docket: chosen,
-    pdf_content_hash: matchingPdf?.content_hash
-      ? String(matchingPdf.content_hash)
-      : (object(chosen.xero_binding).pdf_content_hash
-        ? String(object(chosen.xero_binding).pdf_content_hash)
-        : null),
+    adoptable: {
+      docket: chosen,
+      pdf_content_hash: matchingPdf?.content_hash
+        ? String(matchingPdf.content_hash)
+        : (object(chosen.xero_binding).pdf_content_hash
+          ? String(object(chosen.xero_binding).pdf_content_hash)
+          : null),
+    },
+    same_invoice_other_base: sameInvoiceOtherBase,
   };
 }
 
@@ -2744,17 +2766,12 @@ export async function bindAuthorisedInvoicePdfToDocket(
     invoice: args.invoice,
     based_on_revision_id: args.based_on_revision_id,
   });
-  if (
-    preExisting &&
-    String(preExisting.docket.based_on_revision_id || "") ===
-      args.based_on_revision_id &&
-    preExisting.pdf_content_hash
-  ) {
+  if (preExisting.adoptable?.pdf_content_hash) {
     return {
       state: "authorised_invoice_already_bound",
       invoice: args.invoice,
-      docket_revision: preExisting.docket,
-      pdf_content_hash: preExisting.pdf_content_hash,
+      docket_revision: preExisting.adoptable.docket,
+      pdf_content_hash: preExisting.adoptable.pdf_content_hash,
       recovery: false,
       adopted_existing: true,
     };
@@ -2822,33 +2839,35 @@ export async function bindAuthorisedInvoicePdfToDocket(
     },
   });
   if (bound.error && isSesInvoiceBoundDocketDuplicateKeyError(bound.error)) {
-    // Never fail closed when the same INV bind already exists.
+    // A true replay of THIS base is adoptable; nothing else is.
     const adopted = await findExistingAuthorisedInvoiceBoundDocket(client, {
       job_id: args.job_id,
       invoice_obligation_revision_id: args.invoice_obligation_revision_id,
       invoice: args.invoice,
       based_on_revision_id: args.based_on_revision_id,
     });
-    if (adopted && adopted.pdf_content_hash) {
+    if (adopted.adoptable?.pdf_content_hash) {
       return {
         state: "authorised_invoice_already_bound",
         invoice: args.invoice,
-        docket_revision: adopted.docket,
-        pdf_content_hash: adopted.pdf_content_hash,
+        docket_revision: adopted.adoptable.docket,
+        pdf_content_hash: adopted.adoptable.pdf_content_hash,
         recovery: false,
         adopted_existing: true,
       };
     }
-    // Same INV without a readable PDF hash still adopts the docket row.
-    if (adopted) {
-      return {
-        state: "authorised_invoice_already_bound",
-        invoice: args.invoice,
-        docket_revision: adopted.docket,
-        pdf_content_hash: pdfHash,
-        recovery: false,
-        adopted_existing: true,
-      };
+    // Same AUTHORISED invoice, different pre_xero base. Adopting it would
+    // report success while the current pack stays unbound, and would attach
+    // this money decision to superseded pack bytes. Refuse and name the base.
+    if (adopted.same_invoice_other_base.length > 0) {
+      const bases = adopted.same_invoice_other_base
+        .map((row: any) => String(row.based_on_revision_id || "unknown"))
+        .join(", ");
+      throw new SesActionError(409, {
+        state: "refused",
+        fact:
+          `The AUTHORISED Xero PDF for ${args.invoice.invoice_number} is already bound to a docket built on a different pre-Xero base (${bases}); the reviewed base is ${args.based_on_revision_id}. Apply the based_on-scoped invoice-bound idempotency migration so the same invoice can bind to the current pack; do not adopt the superseded bind.`,
+      });
     }
   }
   const boundDocket = requireValue(
