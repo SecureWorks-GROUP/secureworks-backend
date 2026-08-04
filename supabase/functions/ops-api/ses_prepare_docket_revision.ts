@@ -1686,25 +1686,6 @@ async function prepareOne(
         matrix.failure.reason,
         matrix.failure.recovery_action,
         ["canonical-input-envelope", "sealed-family-matrix"],
-        [],
-        matrix.failure.code === "restoration_recipe_unsealed"
-          ? {
-            job_id: input.identity.job_id,
-            job_number: input.identity.job_number,
-            card_id: input.identity.card_id,
-            builder_reference: input.source.builder_reference,
-            site_address: input.source.site_address,
-            site_suburb: input.source.site_suburb,
-            builder_key: input.classification.builder_key,
-            family: input.classification.family,
-            subtype: input.classification.subtype,
-            workflow: input.classification.workflow,
-            source_instruction_id: input.identity.source_instruction_id,
-            current_attendance_cycle_id:
-              input.attendance.current_attendance_cycle_id,
-            cycle_number: input.attendance.cycle_number,
-          }
-          : undefined,
       ),
     );
   }
@@ -2835,14 +2816,26 @@ async function prepareOne(
       "file:DRAFTS/REPORT_EMAIL_DRAFT.txt",
     );
   }
+  // AJS/AJBR (Captain 2026-08-04) emit a combined REPORT_EMAIL_DRAFT that is
+  // the report+invoice route — there is no separate INVOICE_EMAIL_DRAFT key.
+  // Mark the invoice-bundle obligation from that combined draft so pre-Xero
+  // readiness does not invent a third email the route deliberately dropped.
   if (drafts.INVOICE_EMAIL_DRAFT) {
-    if (drafts.PHOTO_EMAIL_DRAFT) {
-      manifest.items.draft_photo_evidence_email = ready(
-        "file:DRAFTS/PHOTO_EMAIL_DRAFT.txt",
-      );
-    }
     manifest.items.draft_invoice_bundle_email = ready(
       "file:DRAFTS/INVOICE_EMAIL_DRAFT.txt",
+    );
+  } else if (
+    row &&
+    (row.builder_key === "AJS" || row.builder_key === "AJBR") &&
+    drafts.REPORT_EMAIL_DRAFT
+  ) {
+    manifest.items.draft_invoice_bundle_email = ready(
+      "file:DRAFTS/REPORT_EMAIL_DRAFT.txt",
+    );
+  }
+  if (drafts.PHOTO_EMAIL_DRAFT) {
+    manifest.items.draft_photo_evidence_email = ready(
+      "file:DRAFTS/PHOTO_EMAIL_DRAFT.txt",
     );
   }
   if (Object.keys(drafts).length) {

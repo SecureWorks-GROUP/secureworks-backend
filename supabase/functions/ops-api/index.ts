@@ -17007,11 +17007,8 @@ async function makesafeAudit(client: any, params: URLSearchParams) {
       job_number: j.job_number,
       job_type: j.type,
       ses_family: sesFamily,
-      ses_recipe_state: sesFamily === 'restoration' || sesFamily === 'repair'
-        ? 'unsealed'
-        : sesFamily === 'unknown'
-        ? 'unknown'
-        : 'sealed',
+      // Captain 2026-08-02 sealed repair + restoration on the physical pack path.
+      ses_recipe_state: sesFamily === 'unknown' ? 'unknown' : 'sealed',
       external_ref: externalRef,
       company,
       job_status: j.status,

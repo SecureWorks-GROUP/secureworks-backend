@@ -3257,7 +3257,7 @@ Deno.test("SWMS-26980 seeded authority preserves the identity spine in U4", () =
 });
 
 Deno.test(
-  "real restoration card shape dry-runs to the typed unsealed-recipe blocker",
+  "real restoration card shape selects the sealed physical recipe then evidence-blocks",
   async () => {
     const live = snapshot();
     live.job.id = "7dea664a-e0d7-4263-ab0c-bacea9e1d65d";
@@ -3315,20 +3315,25 @@ Deno.test(
     );
     const result = response.results[0];
     const codes = blockerCodes(result);
-    assertEquals(result.state, "blocked");
-    assert(codes.includes("restoration_recipe_unsealed"));
-    assert(!codes.includes("family_unknown"));
     assertEquals(result.envelope.v2.classification.family, "restoration");
-    assertEquals(result.envelope.v2.classification.job_type, "restoration");
-    assertEquals(result.envelope.v2.classification.recipe_selected, false);
-    assertEquals(
-      result.blockers.find((blocker) =>
-        blocker.reason_code === "restoration_recipe_unsealed"
-      )?.facts?.job_number,
-      "SWMS-26936",
+    assertEquals(result.envelope.v2.classification.job_type, "physical_makesafe");
+    assertEquals(result.envelope.v2.classification.recipe_selected, true);
+    assert(!codes.includes("restoration_recipe_unsealed"));
+    assert(!codes.includes("family_unknown"));
+    // No trade report / photos on this fixture — physical evidence path blocks.
+    assertEquals(result.state, "blocked");
+    assert(
+      codes.some((code) =>
+        code === "trade_evidence_missing" ||
+        code === "curated_source_missing" ||
+        code === "photo_evidence_missing" ||
+        code === "spine_missing_source" ||
+        code === "spine_missing_lineage" ||
+        code === "spine_missing_deliverables" ||
+        code === "pricing_evidence_missing"
+      ),
+      `expected physical-path evidence blocker, got ${codes.join(",")}`,
     );
-    assertEquals(result.invoice_proposal, null);
-    assertEquals(result.email_drafts, {});
   },
 );
 
@@ -3517,7 +3522,7 @@ Deno.test(
   async () => {
     assertEquals(
       SES_FAMILY_MATRIX_VERSION,
-      "ses-builder-family-matrix/2026-07-30.6",
+      "ses-builder-family-matrix/2026-08-04.1",
     );
     const shapes = [
       ["SWMS-26732", null, "photos"],

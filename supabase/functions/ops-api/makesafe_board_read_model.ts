@@ -1279,11 +1279,9 @@ export function buildCanonicalMakesafeRows(
       type: base?.type || "makesafe",
       ses_family: sesFamily,
       ses_family_label: sesFamilyLabel(sesFamily),
-      ses_recipe_state: sesFamily === "restoration" || sesFamily === "repair"
-        ? "unsealed"
-        : sesFamily === "unknown"
-        ? "unknown"
-        : "sealed",
+      // Captain 2026-08-02 sealed repair + restoration on the physical pack path;
+      // only `unknown` has no recipe.
+      ses_recipe_state: sesFamily === "unknown" ? "unknown" : "sealed",
       job_state: base?.status || null,
       substatus: base?.substatus || null,
       declared_stage: declaredStage,

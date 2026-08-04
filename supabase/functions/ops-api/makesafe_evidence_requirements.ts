@@ -64,7 +64,7 @@ import {
 } from "./ses_family_matrix.ts";
 
 export const SES_EVIDENCE_CONTRACT_VERSION =
-  "ses-evidence-requirements/c1-wo-floor-po-optional-v4";
+  "ses-evidence-requirements/c1-repair-restoration-sealed-v5";
 
 /**
  * The draft contract's source document. Recorded so a measurement run can prove
@@ -341,6 +341,12 @@ export const Q_OWN_DOCUMENT_ROOF_REPORT_IN: SesCaptainQuestion = {
  * recipe is not a sealed family, and the work-order ruling promoted only the
  * cells the draft left open under `terminal_evidence`.
  */
+/**
+ * RESOLVED 2026-08-02 by the Docs Ready / family-recipe ruling. Repair matches
+ * the physical labour/materials evidence path while keeping family identity.
+ * The pack matrix row is the executable seal; this ruler entry records the
+ * per-stage evidence table that goes with it.
+ */
 export const Q_REPAIR_RECIPE: SesCaptainQuestion = {
   id: "repair_recipe",
   title: "Repair recipe",
@@ -349,8 +355,25 @@ export const Q_REPAIR_RECIPE: SesCaptainQuestion = {
     "photo, SWMS, invoice and PO recipe. Until then all repair cells remain " +
     "QUESTION.",
   basis: ["E3", "W2"],
+  resolution: {
+    ruled_on: "2026-08-02",
+    ruling:
+      "let's just keep it really simple for now and make it just match the " +
+      "whole existing system",
+    effect:
+      "Repair takes the physical-shaped evidence table (`physicalShapedFamily`): " +
+      "WO required at every non-cancelled stage; portal N-A; trade report and " +
+      "photos required from trade_report_in; SWMS/invoice follow the same " +
+      "question/required pattern as physical make-safe; PO remains OPTIONAL. " +
+      "The pack recipe is the sealed physical labour/materials row in " +
+      "`ses_family_matrix.ts` (family=repair, job_type=physical_makesafe).",
+  },
 };
 
+/**
+ * RESOLVED 2026-08-02 by the Docs Ready / family-recipe ruling. Restoration is
+ * a different family identity that proves stage and pack the physical way.
+ */
 export const Q_RESTORATION_RECIPE: SesCaptainQuestion = {
   id: "restoration_recipe",
   title: "Restoration recipe",
@@ -358,6 +381,17 @@ export const Q_RESTORATION_RECIPE: SesCaptainQuestion = {
     "Seal the intake authority and complete per-stage evidence/pack recipe. " +
     "Until then all restoration cells remain QUESTION.",
   basis: ["E3", "W2"],
+  resolution: {
+    ruled_on: "2026-08-02",
+    ruling:
+      "exactly the same as any other job, so it is a different family type",
+    effect:
+      "Restoration takes the physical-shaped evidence table " +
+      "(`physicalShapedFamily`) with its own family identity. Same WO / " +
+      "report / photo / SWMS / invoice floors as physical make-safe; pack " +
+      "recipe is the sealed physical labour/materials row in " +
+      "`ses_family_matrix.ts` (family=restoration, job_type=physical_makesafe).",
+  },
 };
 
 export const Q_CANCELLED_FLOOR: SesCaptainQuestion = {
@@ -377,10 +411,23 @@ export const Q_CANCELLED_FLOOR: SesCaptainQuestion = {
  */
 export const SES_RESOLVED_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
   Q_PO_FLOOR,
+  Q_REPAIR_RECIPE,
+  Q_RESTORATION_RECIPE,
 ];
 
-/** The eight still-open Captain questions, in draft §6 order. */
+/** The still-open Captain questions, in draft §6 order. */
 export const SES_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
+  Q_GHL_EQUIVALENCE,
+  Q_REPORT_READY_AUTHORITY,
+  Q_TERMINAL_EVIDENCE,
+  Q_REPORT_ONLY_SWMS,
+  Q_OWN_DOCUMENT_ROOF_REPORT_IN,
+  Q_CANCELLED_FLOOR,
+];
+
+/** Every question the draft raised, open or ruled, in draft §6 order. */
+export const SES_ALL_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
+  Q_PO_FLOOR,
   Q_GHL_EQUIVALENCE,
   Q_REPORT_READY_AUTHORITY,
   Q_TERMINAL_EVIDENCE,
@@ -389,12 +436,6 @@ export const SES_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
   Q_REPAIR_RECIPE,
   Q_RESTORATION_RECIPE,
   Q_CANCELLED_FLOOR,
-];
-
-/** Every question the draft raised, open or ruled, in draft §6 order. */
-export const SES_ALL_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
-  Q_PO_FLOOR,
-  ...SES_CAPTAIN_QUESTIONS,
 ];
 
 const QUESTIONS_BY_ID = new Map<SesCaptainQuestionId, SesCaptainQuestion>(
@@ -485,43 +526,12 @@ function stageRow(row: StageRow): Record<
 }
 
 /**
- * A family whose reporting recipe the Captain has not sealed. Every cell is open
- * under that family's recipe question EXCEPT `po`: the 2026-08-01 `po_floor`
- * ruling is family-independent ("not required"), so an unsealed recipe is
- * settled on that one column — as OPTIONAL, not as a floor.
- *
- * `builder_wo_doc` deliberately stays open here. The work-order ruling promotes
- * the cells the draft left open under `terminal_evidence`; an unsealed recipe is
- * a different kind of open, and sealing a recipe by code change is exactly what
- * rule 1 at the top of this file forbids.
- */
-function unsealedFamily(
-  recipe: SesCaptainQuestionId,
-): Record<SesEvidenceStage, Record<SesEvidenceItem, SesEvidenceRequirement>> {
-  const row = stageRow([
-    q(recipe),
-    q(recipe),
-    q(recipe),
-    q(recipe),
-    q(recipe),
-    q(recipe),
-    OPT,
-  ]);
-  return {
-    new: row,
-    allocated: row,
-    trade_report_in: row,
-    report_ready: row,
-    completed: row,
-    archive: row,
-    cancelled: row,
-  };
-}
-
-/**
- * Physical make-safe (draft §4.1) and temporary fencing (draft §4.2) share the
- * same seven-column shape: temporary fencing inherits the physical row and SWMS
- * policy, and its family-specific fence/hire facts sit outside these columns.
+ * Physical make-safe (draft §4.1), temporary fencing (draft §4.2), and the
+ * Captain-sealed repair / restoration recipes share the same seven-column
+ * shape. Temporary fencing inherits the physical row and SWMS policy, and its
+ * family-specific fence/hire facts sit outside these columns. Repair and
+ * restoration keep family identity while proving evidence the physical way
+ * (Captain 2026-08-02 Docs Ready ruling).
  */
 function physicalShapedFamily(): Record<
   SesEvidenceStage,
@@ -756,12 +766,13 @@ export const SES_EVIDENCE_REQUIREMENTS: Record<
     ]),
   },
 
-  // §4.6 Repair: family exists, recipe unsealed. No cell may be promoted by a
-  // code change; only `po` is settled (OPTIONAL, by the 2026-08-01 re-ruling).
-  repair: unsealedFamily("repair_recipe"),
+  // §4.6 Repair: Captain 2026-08-02 — match the physical system; family identity
+  // retained. Pack recipe sealed in `ses_family_matrix.ts`.
+  repair: physicalShapedFamily(),
 
-  // §4.7 Restoration: typed first-class family, recipe unsealed.
-  restoration: unsealedFamily("restoration_recipe"),
+  // §4.7 Restoration: Captain 2026-08-02 — same as any other job as a different
+  // family type. Pack recipe sealed in `ses_family_matrix.ts`.
+  restoration: physicalShapedFamily(),
 };
 
 export function sesEvidenceRequirement(

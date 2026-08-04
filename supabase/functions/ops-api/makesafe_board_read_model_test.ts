@@ -967,7 +967,7 @@ Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers wit
   assertEquals("local_invoice_proposal" in blocked.pack, false);
 });
 
-Deno.test("restoration stays explicitly typed through ops and trade board projections", () => {
+Deno.test("restoration stays explicitly typed and sealed through ops and trade board projections", () => {
   const [canonical] = buildCanonicalMakesafeRows([
     baseJob("new", "restoration-card", {
       type: "insurance",
@@ -983,8 +983,8 @@ Deno.test("restoration stays explicitly typed through ops and trade board projec
         docket_revision_id: "restoration-revision",
         pre_xero_docs_ready: false,
         blockers: [{
-          reason_code: "restoration_recipe_unsealed",
-          reason: "recipe not sealed",
+          reason_code: "curated_source_missing",
+          reason: "no curated report yet",
         }],
       },
     }),
@@ -992,10 +992,10 @@ Deno.test("restoration stays explicitly typed through ops and trade board projec
   assertEquals(canonical.type, "insurance");
   assertEquals(canonical.ses_family, "restoration");
   assertEquals(canonical.ses_family_label, "Restoration");
-  assertEquals(canonical.ses_recipe_state, "unsealed");
+  assertEquals(canonical.ses_recipe_state, "sealed");
   assertEquals(canonical.makesafe_type, "Restoration");
   assertEquals(canonical.blockers.real, [{
-    code: "restoration_recipe_unsealed",
+    code: "curated_source_missing",
     category: "ses_docket",
     docket_revision_id: "restoration-revision",
   }]);
@@ -1008,11 +1008,11 @@ Deno.test("restoration stays explicitly typed through ops and trade board projec
   });
   assertEquals(trade.rows[0].ses_family, "restoration");
   assertEquals(trade.rows[0].ses_family_label, "Restoration");
-  assertEquals(trade.rows[0].ses_recipe_state, "unsealed");
+  assertEquals(trade.rows[0].ses_recipe_state, "sealed");
   assertEquals(trade.rows[0].makesafe_type, "Restoration");
 });
 
-Deno.test("repair stays explicitly typed and unsealed through board projection", () => {
+Deno.test("repair stays explicitly typed and sealed through board projection", () => {
   const [canonical] = buildCanonicalMakesafeRows([
     baseJob("new", "repair-card", {
       metadata: { makesafe_job_family: "repair" },
@@ -1020,7 +1020,7 @@ Deno.test("repair stays explicitly typed and unsealed through board projection",
   ]);
   assertEquals(canonical.ses_family, "repair");
   assertEquals(canonical.ses_family_label, "Repair");
-  assertEquals(canonical.ses_recipe_state, "unsealed");
+  assertEquals(canonical.ses_recipe_state, "sealed");
 });
 
 Deno.test("captain-applied status is a display overlay and never rewrites declared or raw state", () => {

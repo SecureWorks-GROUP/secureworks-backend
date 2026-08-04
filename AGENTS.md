@@ -544,21 +544,22 @@ fence-only work. It never requires a SWMS, local report PDF, or separate photo
 pack. The current contract lives in `ses_family_matrix.ts` and
 `ses_prepare_docket_revision.ts`.
 
-## Repair And Restoration Are Typed SES Families With Unsealed Recipes
+## Repair And Restoration Are Typed SES Families With Sealed Physical Pack Recipes
 
 Repair is a first-class non-urgent family alongside roof, assessment,
-make-safe, and restoration. Its reporting recipe is not sealed, so repair
-cards must remain visible and typed but cannot select a report, pack, portal,
-SWMS, pricing, invoice proposal, or outbound-draft recipe; the matrix returns
-`repair_recipe_unsealed`.
-
-Restoration is a typed emergency-service family. Converted restoration cards use `jobs.type = 'insurance'` with
+make-safe, and restoration. Restoration is a typed emergency-service family:
+converted restoration cards use `jobs.type = 'insurance'` with
 `metadata.insurance_job_type = 'restoration'`; that authority outranks any stale
 `metadata.makesafe_job_family` value. The board, audit, trade scope and U4
-adapter must keep those cards visible and typed as restoration. Until the
-Captain seals a restoration reporting recipe, U4 must return
-`restoration_recipe_unsealed` with the card facts and must not select a report,
-pack, portal, SWMS, pricing, invoice-proposal or outbound-draft recipe.
+adapter must keep those cards visible and typed.
+
+Captain 2026-08-02 (`data/decisions/2026-08-02-docs-ready-repair-restoration.md`):
+repair "match[es] the whole existing system"; restoration is "exactly the same
+as any other job, so it is a different family type". Both keep family identity
+and assemble on the physical labour/materials pack path — matrix rows in
+`ses_family_matrix.ts` with `family` repair/restoration and
+`job_type: physical_makesafe` (same pattern as temporary_fencing). Evidence
+ruler: `physicalShapedFamily()` for both. Do not invent a weaker pack shape.
 
 ## Roof Report Runs In ops-api, Not The Wiki Python
 

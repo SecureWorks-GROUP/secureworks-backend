@@ -39,15 +39,15 @@ import {
 // (data/decisions/2026-08-01-po-wo-invoice-ruling.md):
 //
 //   - `po_floor`, re-ruled: a purchase order is NOT required. The PO column is O
-//     in all 49 rows — every family, every stage, including the two unsealed
-//     recipes. The draft's Q and the intervening R (the superseded "every card
-//     needs a po" answer) are both gone from the table; both stay recorded on
-//     `Q_PO_FLOOR`.
+//     in all 49 rows — every family, every stage. The draft's Q and the
+//     intervening R (the superseded "every card needs a po" answer) are both
+//     gone from the table; both stay recorded on `Q_PO_FLOOR`.
 //   - the work-order floor: a work order is required on EVERY card, no
 //     exceptions. `builder_wo_doc` moves Q -> R at `completed` and `archive` for
-//     the five SEALED families. It stays Q at `cancelled` (under the still-open
-//     `cancelled_floor`) and throughout the two unsealed recipes, neither of
-//     which this ruling reaches.
+//     every sealed family. It stays Q at `cancelled` (under the still-open
+//     `cancelled_floor`).
+//   - 2026-08-02 Docs Ready ruling: repair and restoration take the physical
+//     evidence path while keeping family identity (sealed pack recipes).
 // ---------------------------------------------------------------------------
 
 const DRAFT_TABLE: Record<SesEvidenceFamily, Record<SesEvidenceStage, string>> =
@@ -102,25 +102,25 @@ const DRAFT_TABLE: Record<SesEvidenceFamily, Record<SesEvidenceStage, string>> =
       archive: "R Q N Q Q R O",
       cancelled: "Q Q N Q Q Q O",
     },
-    // §4.6 Repair, recipe unsealed
+    // §4.6 Repair — Captain 2026-08-02: match physical system
     repair: {
-      new: "Q Q Q Q Q Q O",
-      allocated: "Q Q Q Q Q Q O",
-      trade_report_in: "Q Q Q Q Q Q O",
-      report_ready: "Q Q Q Q Q Q O",
-      completed: "Q Q Q Q Q Q O",
-      archive: "Q Q Q Q Q Q O",
-      cancelled: "Q Q Q Q Q Q O",
+      new: "R N O O O O O",
+      allocated: "R N O O O O O",
+      trade_report_in: "R N R R O O O",
+      report_ready: "R N Q Q Q Q O",
+      completed: "R N Q Q Q R O",
+      archive: "R N Q Q Q R O",
+      cancelled: "Q N Q Q Q Q O",
     },
-    // §4.7 Restoration, recipe unsealed
+    // §4.7 Restoration — Captain 2026-08-02: same as any other job
     restoration: {
-      new: "Q Q Q Q Q Q O",
-      allocated: "Q Q Q Q Q Q O",
-      trade_report_in: "Q Q Q Q Q Q O",
-      report_ready: "Q Q Q Q Q Q O",
-      completed: "Q Q Q Q Q Q O",
-      archive: "Q Q Q Q Q Q O",
-      cancelled: "Q Q Q Q Q Q O",
+      new: "R N O O O O O",
+      allocated: "R N O O O O O",
+      trade_report_in: "R N R R O O O",
+      report_ready: "R N Q Q Q Q O",
+      completed: "R N Q Q Q R O",
+      archive: "R N Q Q Q R O",
+      cancelled: "Q N Q Q Q Q O",
     },
   };
 
@@ -226,8 +226,8 @@ Deno.test("a question cell names Captain questions and a settled cell names none
   }
 });
 
-Deno.test("the eight open Captain questions are complete, unique and all reachable", () => {
-  assertEquals(SES_CAPTAIN_QUESTIONS.length, 8);
+Deno.test("the open Captain questions are complete, unique and all reachable", () => {
+  assertEquals(SES_CAPTAIN_QUESTIONS.length, 6);
   assertEquals(
     SES_CAPTAIN_QUESTIONS.map((question) => question.id),
     [
@@ -236,8 +236,6 @@ Deno.test("the eight open Captain questions are complete, unique and all reachab
       "terminal_evidence",
       "report_only_swms",
       "own_document_roof_report_in",
-      "repair_recipe",
-      "restoration_recipe",
       "cancelled_floor",
     ],
   );
@@ -246,13 +244,29 @@ Deno.test("the eight open Captain questions are complete, unique and all reachab
     assert(question.basis.length > 0);
     assertEquals(question.resolution, undefined, question.id);
   }
-  // The draft raised nine; the ruled one is retained for provenance only.
+  // The draft raised nine; ruled ones are retained for provenance only.
   assertEquals(SES_ALL_CAPTAIN_QUESTIONS.length, 9);
+  assertEquals(SES_RESOLVED_CAPTAIN_QUESTIONS.map((q) => q.id), [
+    "po_floor",
+    "repair_recipe",
+    "restoration_recipe",
+  ]);
   assertEquals(
     SES_ALL_CAPTAIN_QUESTIONS[0].id,
     "po_floor",
     "draft §6 order is preserved across the open/resolved split",
   );
+  assertEquals(SES_ALL_CAPTAIN_QUESTIONS.map((q) => q.id), [
+    "po_floor",
+    "ghl_equivalence",
+    "report_ready_authority",
+    "terminal_evidence",
+    "report_only_swms",
+    "own_document_roof_report_in",
+    "repair_recipe",
+    "restoration_recipe",
+    "cancelled_floor",
+  ]);
 
   const reachable = new Set<SesCaptainQuestionId>();
   for (const family of SES_EVIDENCE_FAMILIES) {
@@ -274,9 +288,12 @@ Deno.test("the eight open Captain questions are complete, unique and all reachab
     ["ghl_equivalence"],
   );
   reachable.add("ghl_equivalence");
-  // The ruled question is unreachable from every cell — that is the point.
+  // Ruled questions are unreachable from every cell — that is the point.
   assert(!reachable.has("po_floor"));
-  assertEquals(reachable.size, 8);
+  assert(!reachable.has("repair_recipe"));
+  assert(!reachable.has("restoration_recipe"));
+  // Six open questions: five cell-reachable + ghl standing (added above).
+  assertEquals(reachable.size, 6);
   assertThrows(() =>
     sesCaptainQuestion("not_a_question" as SesCaptainQuestionId)
   );
@@ -285,6 +302,8 @@ Deno.test("the eight open Captain questions are complete, unique and all reachab
 Deno.test("the po_floor ruling is recorded, and a ruled question cannot gate a cell", () => {
   assertEquals(SES_RESOLVED_CAPTAIN_QUESTIONS.map((row) => row.id), [
     "po_floor",
+    "repair_recipe",
+    "restoration_recipe",
   ]);
   // The constant survives the ruling so the 49 settled cells keep their origin.
   const ruled = sesCaptainQuestion("po_floor");
@@ -327,11 +346,9 @@ Deno.test("the work-order floor reaches every stage of every sealed family", () 
   // "WORK ORDER: required on EVERY card, no exceptions" (2026-08-01). Terminal
   // stages included: a finished or archived job still has to show the document
   // its invoice was raised against.
-  const sealed = SES_EVIDENCE_FAMILIES.filter(
-    (family) => family !== "repair" && family !== "restoration",
-  );
-  assertEquals(sealed.length, 5);
-  for (const family of sealed) {
+  // All seven families are sealed; WO is required at every non-cancelled stage.
+  assertEquals(SES_EVIDENCE_FAMILIES.length, 7);
+  for (const family of SES_EVIDENCE_FAMILIES) {
     for (const stage of SES_EVIDENCE_STAGES) {
       const cell = sesEvidenceRequirement(family, stage, "builder_wo_doc");
       if (stage === "cancelled") {
@@ -347,17 +364,6 @@ Deno.test("the work-order floor reaches every stage of every sealed family", () 
       }
       assertEquals(cell.level, "required", `${family}/${stage}`);
       assertEquals(cell.questions, [], `${family}/${stage}`);
-    }
-  }
-  // The unsealed recipes are untouched: sealing one by code change is exactly
-  // what rule 1 of the ruler forbids.
-  for (const family of ["repair", "restoration"] as const) {
-    for (const stage of SES_EVIDENCE_STAGES) {
-      assertEquals(
-        sesEvidenceRequirement(family, stage, "builder_wo_doc").level,
-        "question",
-        `${family}/${stage}`,
-      );
     }
   }
 });
@@ -473,23 +479,35 @@ Deno.test("question attribution follows the draft's stated conflicts", () => {
     ).questions.includes("own_document_roof_report_in"),
   );
 
-  // Unsealed recipes (questions 7 and 8) cover every cell of their family
-  // except `po`, which the 2026-08-01 ruling settled for every family.
-  for (
-    const [family, id] of [
-      ["repair", "repair_recipe"],
-      ["restoration", "restoration_recipe"],
-    ] as const
-  ) {
+  // Repair and restoration are sealed on the physical path — resolved questions
+  // must not reappear on any cell.
+  for (const family of ["repair", "restoration"] as const) {
     for (const stage of SES_EVIDENCE_STAGES) {
       for (const item of SES_EVIDENCE_ITEMS) {
-        assertEquals(
-          sesEvidenceRequirement(family, stage, item).questions,
-          item === "po" ? [] : [id],
+        const cell = sesEvidenceRequirement(family, stage, item);
+        assert(
+          !cell.questions.includes("repair_recipe"),
+          `${family}/${stage}/${item}`,
+        );
+        assert(
+          !cell.questions.includes("restoration_recipe"),
           `${family}/${stage}/${item}`,
         );
       }
     }
+    // Physical shape: portal N-A, WO required outside cancelled.
+    assertEquals(
+      sesEvidenceRequirement(family, "trade_report_in", "prime_link").level,
+      "not_applicable",
+    );
+    assertEquals(
+      sesEvidenceRequirement(family, "trade_report_in", "trade_report").level,
+      "required",
+    );
+    assertEquals(
+      sesEvidenceRequirement(family, "trade_report_in", "photos_media").level,
+      "required",
+    );
   }
 
   // Cancelled cards have no evidence floor (question 9) — and `po` is settled
@@ -506,7 +524,6 @@ Deno.test("question attribution follows the draft's stated conflicts", () => {
         assertEquals(cell.level, "not_applicable", `${family}/${item}`);
         continue;
       }
-      if (family === "repair" || family === "restoration") continue;
       assert(
         cell.questions.includes("cancelled_floor"),
         `${family}/cancelled/${item}`,
@@ -696,30 +713,42 @@ Deno.test("a card short only on question cells is undetermined, never failing", 
   }
 });
 
-Deno.test("repair and restoration can never do better than undetermined", () => {
+Deno.test("repair and restoration grade like physical make-safe once sealed", () => {
   for (const family of ["repair", "restoration"] as const) {
     for (const stage of SES_EVIDENCE_STAGES) {
-      // Every cell but `po` is open under the family's unsealed recipe, so a
-      // fully evidenced card is still undetermined...
+      // Fully evidenced card matches physical_makesafe: pass when no open
+      // questions remain on that stage, otherwise undetermined.
       const full = readSesCardEvidence({
         family,
         stage,
         inventory: fullInventory(),
       });
-      assertEquals(full.verdict, "undetermined", `${family}/${stage}`);
-      assertEquals(full.unresolved.length, SES_EVIDENCE_ITEMS.length - 1);
-      assertEquals(full.missing, [], `${family}/${stage}`);
+      const physical = readSesCardEvidence({
+        family: "physical_makesafe",
+        stage,
+        inventory: fullInventory(),
+      });
+      assertEquals(full.verdict, physical.verdict, `${family}/${stage}`);
+      assertEquals(full.missing, physical.missing, `${family}/${stage}`);
+      assertEquals(
+        [...full.unresolved].sort(),
+        [...physical.unresolved].sort(),
+        `${family}/${stage}`,
+      );
 
-      // ...and an empty one cannot FAIL either, because the one settled cell is
-      // optional. An unsealed recipe is measured as unresolved, never as a
-      // shortfall the ruler invented.
+      // Empty card: WO is required outside cancelled, so it fails like physical.
       const empty = readSesCardEvidence({
         family,
         stage,
         inventory: emptySesCardEvidenceInventory(),
       });
-      assertEquals(empty.verdict, "undetermined", `${family}/${stage}`);
-      assertEquals(empty.missing, [], `${family}/${stage}`);
+      const emptyPhysical = readSesCardEvidence({
+        family: "physical_makesafe",
+        stage,
+        inventory: emptySesCardEvidenceInventory(),
+      });
+      assertEquals(empty.verdict, emptyPhysical.verdict, `${family}/${stage}`);
+      assertEquals(empty.missing, emptyPhysical.missing, `${family}/${stage}`);
     }
   }
 });
@@ -856,7 +885,7 @@ Deno.test("readings carry the contract version and deduped open questions", () =
   });
   assertEquals(
     reading.contract_version,
-    "ses-evidence-requirements/c1-wo-floor-po-optional-v4",
+    "ses-evidence-requirements/c1-repair-restoration-sealed-v5",
   );
   const ids = reading.open_questions.map((question) => question.id);
   assertEquals(new Set(ids).size, ids.length);

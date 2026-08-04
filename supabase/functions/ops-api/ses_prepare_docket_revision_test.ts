@@ -326,7 +326,9 @@ Deno.test("family matrix is a closed executable set with the AJS report guard", 
     "makesafe",
     "restoration",
   ]);
-  assertEquals(SES_FAMILY_MATRIX.length, 20);
+  // 20 historical rows + 10 repair/restoration (MLB×2, AJS, AJBR, WESTERN each)
+  // + 2 synthetic repair/restoration.
+  assertEquals(SES_FAMILY_MATRIX.length, 32);
   for (const row of SES_FAMILY_MATRIX) {
     const resolved = resolveSesFamilyMatrixRow({
       builder_key: row.builder_key,
@@ -622,91 +624,59 @@ Deno.test("MLB South-West suburbs select the Bunbury route while Perth stays on 
   assertEquals(perth.row.invoice_to, "makesafes@mlbuilders.com.au");
 });
 
-Deno.test("restoration is typed but hard-stops before any unsealed recipe work", async () => {
-  const physicalRow = SES_FAMILY_MATRIX.find((candidate) =>
-    candidate.builder_key === "MLB" &&
-    candidate.family === "physical_makesafe"
-  )!;
-  const input = fixtureInput(physicalRow);
-  input.identity.job_id = "7dea664a-e0d7-4263-ab0c-bacea9e1d65d";
-  input.identity.job_number = "SWMS-26936";
-  input.identity.card_id = "7dea664a-e0d7-4263-ab0c-bacea9e1d65d";
-  input.identity.source_instruction_id = "legacy-job:SWMS-26936";
-  input.classification.family = "restoration";
-  input.classification.subtype = null;
-  input.classification.report_only = false;
-  input.classification.report_delivery = null;
-  input.source.builder_reference = "MLB-MW-26873";
-  input.source.site_address = "Real restoration card address";
-  input.source.site_suburb = "Perth";
-  input.source.deliverables = [];
-  input.cycle_facts.trade_report = null;
-  input.cycle_facts.photos = [];
-  input.cycle_facts.hours_and_materials = null;
+Deno.test("restoration and repair select the sealed physical labour/materials recipe", async () => {
+  for (const family of ["restoration", "repair"] as const) {
+    const row = SES_FAMILY_MATRIX.find((candidate) =>
+      candidate.builder_key === "MLB" &&
+      candidate.family === family &&
+      candidate.routing_rule === "mlb-perth-routing"
+    )!;
+    assertEquals(row.job_type, "physical_makesafe");
+    assertEquals(row.report_only, false);
+    assertEquals(row.photo_route, "work_order_sender");
+    assertEquals(row.required_portal_roles, []);
+    assertEquals(row.invoice_basis, "standard_labour_materials");
 
-  let sourceRecoveryCalls = 0;
-  let portalCaptureCalls = 0;
-  let physicalRenderCalls = 0;
-  let roofRenderCalls = 0;
-  let swmsCalls = 0;
-  const result = (await prepareSesDocketRevision(
-    request(input.identity.job_id),
-    dependencies(input, {
-      resolveSourceArtifacts: async () => {
-        sourceRecoveryCalls++;
-        return [];
-      },
-      capturePortal: async () => {
-        portalCaptureCalls++;
-        throw new Error("restoration portal recipe must not run");
-      },
-      renderPhysicalReport: async () => {
-        physicalRenderCalls++;
-        throw new Error("physical recipe must not run");
-      },
-      renderOwnRoofReport: async () => {
-        roofRenderCalls++;
-        throw new Error("roof recipe must not run");
-      },
-      renderSwmsArtifact: async () => {
-        swmsCalls++;
-        return null;
-      },
-    }),
-  )).results[0];
+    // Full fixture evidence → ready pack (recipe is no longer a hard-stop).
+    const readyInput = fixtureInput(row);
+    readyInput.identity.job_number = family === "restoration"
+      ? "SWMS-261134"
+      : "SWMS-261029";
+    let portalCaptureCalls = 0;
+    const ready = (await prepareSesDocketRevision(
+      request(readyInput.identity.job_id),
+      dependencies(readyInput, {
+        capturePortal: async () => {
+          portalCaptureCalls++;
+          throw new Error(`${family} must not run a portal recipe`);
+        },
+      }),
+    )).results[0];
+    assertEquals(ready.state, "ready", family);
+    assertEquals(ready.envelope.v2.classification.family, family);
+    assertEquals(
+      ready.envelope.v2.classification.job_type,
+      "physical_makesafe",
+    );
+    assertEquals(ready.envelope.v2.classification.recipe_selected, true);
+    assertEquals(portalCaptureCalls, 0, family);
+    assert(!blockerCodes(ready).includes("restoration_recipe_unsealed"), family);
+    assert(!blockerCodes(ready).includes("repair_recipe_unsealed"), family);
 
-  const codes = blockerCodes(result);
-  assertEquals(result.state, "blocked");
-  assert(codes.includes("restoration_recipe_unsealed"));
-  assert(!codes.includes("family_unknown"));
-  assertEquals(result.envelope.v2.classification.family, "restoration");
-  assertEquals(result.envelope.v2.classification.job_type, "restoration");
-  assertEquals(result.envelope.v2.classification.recipe_selected, false);
-  const restorationBlocker = result.blockers.find((blocker) =>
-    blocker.reason_code === "restoration_recipe_unsealed"
-  )!;
-  assertEquals(restorationBlocker.facts, {
-    job_id: "7dea664a-e0d7-4263-ab0c-bacea9e1d65d",
-    job_number: "SWMS-26936",
-    card_id: "7dea664a-e0d7-4263-ab0c-bacea9e1d65d",
-    builder_reference: "MLB-MW-26873",
-    site_address: "Real restoration card address",
-    site_suburb: "Perth",
-    builder_key: "MLB",
-    family: "restoration",
-    subtype: null,
-    workflow: "active",
-    source_instruction_id: "legacy-job:SWMS-26936",
-    current_attendance_cycle_id: "cycle-70062",
-    cycle_number: 1,
-  });
-  assertEquals(result.invoice_proposal, null);
-  assertEquals(result.email_drafts, {});
-  assertEquals(sourceRecoveryCalls, 0);
-  assertEquals(portalCaptureCalls, 0);
-  assertEquals(physicalRenderCalls, 0);
-  assertEquals(roofRenderCalls, 0);
-  assertEquals(swmsCalls, 0);
+    // Missing trade report/photos → physical evidence blockers, not unsealed.
+    const thinInput = fixtureInput(row);
+    thinInput.cycle_facts.trade_report = null;
+    thinInput.cycle_facts.photos = [];
+    thinInput.cycle_facts.hours_and_materials = null;
+    const thin = (await prepareSesDocketRevision(
+      request(thinInput.identity.job_id),
+      dependencies(thinInput),
+    )).results[0];
+    assertEquals(thin.state, "blocked", family);
+    assertEquals(thin.envelope.v2.classification.recipe_selected, true, family);
+    assert(!blockerCodes(thin).includes("restoration_recipe_unsealed"), family);
+    assert(!blockerCodes(thin).includes("repair_recipe_unsealed"), family);
+  }
 });
 
 Deno.test("every shippable matrix row has a ready golden and an intentional negative golden", async () => {
@@ -751,6 +721,8 @@ Deno.test("synthetic matrix rows are internal-only and always release-blocked af
     [
       "physical_makesafe",
       "temporary_fencing",
+      "repair",
+      "restoration",
       "ordinary_roof_portal",
       "assessment_quote",
     ],
@@ -857,8 +829,8 @@ Deno.test("AJS 70062 roof wording assembles the physical make-safe pack", async 
     result.envelope.v2.items.supporting_portal_links.state,
     "not_applicable",
   );
+  // Captain 2026-08-04: AJS/AJBR emit combined report+invoice, then photos.
   assertEquals(Object.keys(result.email_drafts).sort(), [
-    "INVOICE_EMAIL_DRAFT",
     "PHOTO_EMAIL_DRAFT",
     "REPORT_EMAIL_DRAFT",
   ]);
@@ -1733,8 +1705,8 @@ Deno.test("Bertram AJS existing-fence pickets price through the sealed docket pr
   );
   assertEquals(result.state, "ready");
   assertEquals(result.blockers.map((item) => item.reason_code), []);
+  // AJBR uses the combined report+invoice draft (Captain 2026-08-04).
   assertEquals(Object.keys(result.email_drafts).sort(), [
-    "INVOICE_EMAIL_DRAFT",
     "PHOTO_EMAIL_DRAFT",
     "REPORT_EMAIL_DRAFT",
   ]);
@@ -2530,9 +2502,14 @@ Deno.test("draft-only wall exposes no money/send dependency and emits an inert r
     close_job: false,
     portal_evidence: [],
   });
+  // AJS combined report+invoice draft carries the no-Xero-invoice language.
   assertStringIncludes(
+    response.results[0].email_drafts.REPORT_EMAIL_DRAFT,
+    "The real Xero invoice PDF attaches when authorised",
+  );
+  assertEquals(
     response.results[0].email_drafts.INVOICE_EMAIL_DRAFT,
-    "No Xero invoice exists",
+    undefined,
   );
 });
 
@@ -2804,3 +2781,7 @@ Deno.test("five-minute clock stops at committed ready/blocked and reports max/P9
     ),
   );
 });
+
+
+
+
