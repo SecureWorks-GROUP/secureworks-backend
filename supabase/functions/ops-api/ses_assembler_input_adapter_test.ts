@@ -1903,6 +1903,7 @@ Deno.test(
         expected_raw_sha256: `sha256:${"a".repeat(64)}`,
         output_sha256: `sha256:${"a".repeat(64)}`,
         render_hash: "a".repeat(64),
+        report_input_hash: `sha256:${"a".repeat(64)}`,
         evidence_source: "current_cycle_curated_makesafe_report",
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
       },
@@ -1944,12 +1945,61 @@ Deno.test(
         source_artifact_id: "artifact-committed",
         source_artifact_content_hash: `sha256:${"c".repeat(64)}`,
         expected_raw_sha256: `sha256:${"a".repeat(64)}`,
+        report_input_hash: `sha256:${"a".repeat(64)}`,
       },
     );
 
-    live.docket_artifacts = live.docket_artifacts.filter((artifact) =>
-      artifact.id === "artifact-sweep"
-    );
+    // Tuart-style: previously_committed shape without independent completeness
+    // proof must not select. Being restorable is not being complete.
+    live.docket_artifacts = [{
+      id: "artifact-tuart-incomplete",
+      revision_id: "revision-committed",
+      role: "supporting_report_pdf",
+      media_type: "application/pdf",
+      object_key: "makesafe-docket-artifacts/tuart.pdf",
+      content_hash: `sha256:${"c".repeat(64)}`,
+      size_bytes: 100,
+      metadata: {
+        report_document_id: "committed-report",
+        source_kind: "previously_committed_pdf",
+        source_identity:
+          "docket-revision:trusted-source-revision/artifact:trusted-source-artifact",
+        source_document_id: "committed-report",
+        source_revision_id: "trusted-source-revision",
+        source_artifact_id: "trusted-source-artifact",
+        source_artifact_content_hash: `sha256:${"c".repeat(64)}`,
+        expected_raw_sha256: `sha256:${"a".repeat(64)}`,
+        output_sha256: `sha256:${"a".repeat(64)}`,
+        render_hash: "a".repeat(64),
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      },
+    }];
+    assertEquals(selectPhysicalReportProofForCycle(live, cycleId), null);
+
+    live.docket_artifacts = [{
+      id: "artifact-sweep",
+      revision_id: "revision-sweep",
+      role: "supporting_report_pdf",
+      media_type: "application/pdf",
+      object_key: "makesafe-docket-artifacts/guarded.pdf",
+      content_hash: `sha256:${"d".repeat(64)}`,
+      size_bytes: 100,
+      metadata: {
+        report_document_id: "guarded-sweep-report",
+        source_kind: "durable_curated_revision",
+        source_identity: "guarded-sweep-report",
+        source_document_id: "guarded-sweep-report",
+        source_revision_id: "raw-source-revision",
+        source_artifact_id: "raw-source-artifact",
+        source_artifact_content_hash: `sha256:${"d".repeat(64)}`,
+        expected_raw_sha256: `sha256:${"b".repeat(64)}`,
+        output_sha256: `sha256:${"b".repeat(64)}`,
+        render_hash: "b".repeat(64),
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      },
+    }];
     assertEquals(selectPhysicalReportProofForCycle(live, cycleId), null);
   },
 );
