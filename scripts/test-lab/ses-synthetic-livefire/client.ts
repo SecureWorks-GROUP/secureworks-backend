@@ -63,10 +63,17 @@ export class LivefireClient {
   async action<T>(
     slug: string,
     action: string,
-    options: { method?: "GET" | "POST"; body?: unknown } = {},
+    options: {
+      method?: "GET" | "POST";
+      body?: unknown;
+      query?: Record<string, string>;
+    } = {},
   ): Promise<T> {
     const url = new URL(`/functions/v1/${slug}`, this.config.supabaseUrl);
     url.searchParams.set("action", action);
+    for (const [key, value] of Object.entries(options.query || {})) {
+      url.searchParams.set(key, value);
+    }
     const method = options.method ||
       (options.body === undefined ? "GET" : "POST");
     const response = await fetch(url, {

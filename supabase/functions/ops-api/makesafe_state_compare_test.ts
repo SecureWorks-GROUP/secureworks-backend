@@ -174,7 +174,11 @@ Deno.test("default makesafe-board v1 includes the additive intake exception desk
     JSON.stringify({
       contract_version: "makesafe-board.v1",
       projection: "ops",
+      // Default ops board is card-shaped (#553) and active-columns-only.
+      fields: "card",
+      column_scope: "active",
       generated_at: GENERATED_AT,
+      shape: "card",
       columns: {
         new: [],
         allocated: [],
@@ -184,8 +188,32 @@ Deno.test("default makesafe-board v1 includes the additive intake exception desk
         archive: [],
         cancelled: [],
       },
-      rows: [],
       unmapped_stage_job_ids: [],
+      row_count: 0,
+      column_counts: {
+        new: 0,
+        allocated: 0,
+        trade_report_in: 0,
+        report_ready: 0,
+        completed: 0,
+        archive: 0,
+        cancelled: 0,
+      },
+      archive: {
+        included: false,
+        scope: "active",
+        total: 0,
+        returned: 0,
+        offset: 0,
+        limit: null,
+        fetch: {
+          active_default: "projection=ops",
+          include_archive: "projection=ops&include_archive=1",
+          archive_only: "projection=ops&columns=archive",
+          archive_page: "projection=ops&columns=archive&limit=50&offset=0",
+          full_diagnostics: "projection=ops&fields=full",
+        },
+      },
       intake_exceptions: {
         contract_version: "makesafe-intake-exception-cards.v1",
         generated_at: GENERATED_AT,
@@ -221,8 +249,8 @@ Deno.test("default makesafe-board v1 includes the additive intake exception desk
       parity: {
         ok: true,
         checked: 0,
+        mode: "card_placement",
         errors: [],
-        unmapped_stage_job_ids: [],
       },
     }),
   );
@@ -231,6 +259,46 @@ Deno.test("default makesafe-board v1 includes the additive intake exception desk
     false,
     "default v1 must not touch Phase-1 schema",
   );
+});
+
+Deno.test("archive paging is validated, never coerced into a surprise page", async () => {
+  const board = (options: Record<string, unknown>) =>
+    _makesafeBoardActionForTest(
+      emptyCanonicalBoardClient(),
+      "api_key",
+      null,
+      "ops",
+      { generatedAt: GENERATED_AT, columns: "archive", ...options },
+    );
+
+  for (const limit of ["abc", "0", "-5", "1.5", "501"]) {
+    const response = await board({ limit });
+    assertEquals(response.status, 400, `limit=${limit} must be refused`);
+    assertEquals(
+      (await response.json()).error,
+      "limit must be an integer between 1 and 500",
+    );
+  }
+  for (const offset of ["abc", "-1", "2.5"]) {
+    const response = await board({ offset });
+    assertEquals(response.status, 400, `offset=${offset} must be refused`);
+    assertEquals(
+      (await response.json()).error,
+      "offset must be an integer of 0 or more",
+    );
+  }
+
+  const ok = await board({ limit: "50", offset: "0" });
+  assertEquals(ok.status, 200);
+  const body = await ok.json();
+  assertEquals(body.column_scope, "archive");
+  assertEquals(body.archive.limit, 50);
+  assertEquals(body.archive.offset, 0);
+
+  // Absent paging is unpaged, not a clamped page of one.
+  const unpaged = await board({});
+  assertEquals(unpaged.status, 200);
+  assertEquals((await unpaged.json()).archive.limit, null);
 });
 
 Deno.test("explicit v1 flag is byte-identical to the absent flag", async () => {

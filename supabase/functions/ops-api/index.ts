@@ -126,6 +126,7 @@ import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import {
   MAKESAFE_BOARD_CONTRACT_VERSION,
+  MAKESAFE_BOARD_MAX_ARCHIVE_PAGE,
   OPS_MAKESAFE_STAGES,
   archiveOnDemandMeta,
   authorizeMakesafeTradeProjection,
@@ -133,6 +134,7 @@ import {
   checkMakesafeBoardParity,
   countOpsCanonicalStages,
   filterCanonicalRowsByColumnScope,
+  isExcludedTerminalSyntheticBoardRow,
   isSyntheticLivefireJob,
   latestOwnRoofDraftByJobId,
   makesafeBoardJobStatusExclusionFilter,
@@ -3269,14 +3271,27 @@ async function makesafeBoardAction(
   const columnScope: MakesafeBoardColumnScope = projection === 'ops'
     ? parseMakesafeBoardColumnScope(options.columns, options.includeArchive, fields)
     : 'all'
-  const archiveLimit = options.limit != null && String(options.limit).trim() !== ''
-    ? Number(options.limit)
-    : null
-  const archiveOffset = options.offset != null && String(options.offset).trim() !== ''
-    ? Number(options.offset)
-    : 0
+  // Paging is validated, never coerced: a malformed limit must not silently
+  // become "one archive card" and then be published as honest meta.
+  const rawArchiveLimit = options.limit == null ? '' : String(options.limit).trim()
+  const rawArchiveOffset = options.offset == null ? '' : String(options.offset).trim()
+  const archiveLimit = rawArchiveLimit === '' ? null : Number(rawArchiveLimit)
+  const archiveOffset = rawArchiveOffset === '' ? 0 : Number(rawArchiveOffset)
   if (!['ops', 'trade'].includes(projection)) {
     return json({ error: "projection must be 'ops' or 'trade'" }, 400)
+  }
+  if (
+    archiveLimit !== null &&
+    (!Number.isInteger(archiveLimit) || archiveLimit < 1 ||
+      archiveLimit > MAKESAFE_BOARD_MAX_ARCHIVE_PAGE)
+  ) {
+    return json(
+      { error: `limit must be an integer between 1 and ${MAKESAFE_BOARD_MAX_ARCHIVE_PAGE}` },
+      400,
+    )
+  }
+  if (!Number.isInteger(archiveOffset) || archiveOffset < 0) {
+    return json({ error: 'offset must be an integer of 0 or more' }, 400)
   }
   if (!['v1', 'v2'].includes(contractVersion)) {
     return json({ error: "contract_version must be 'v1' or 'v2'" }, 400)
@@ -16054,13 +16069,39 @@ async function loadCanonicalMakesafeBoard(
       baseRows.push(row)
     }
   }
+  // Read before the archive partition: buildCanonicalMakesafeRows drops terminal
+  // synthetic live-fire rows, so the census add-back below must drop the same
+  // ones or the default board's archive count over-states history against the
+  // include_archive=1 census built from the same set.
+  const terminalSyntheticLivefireJobIds = new Set<string>()
+  if (baseRows.length > 0) {
+    try {
+      const { data: terminalRuns, error } = await client
+        .from('ses_synthetic_livefire_runs')
+        .select('job_ids')
+        .eq('state', 'terminal')
+      if (error) throw error
+      for (const run of terminalRuns || []) {
+        for (const jobId of Array.isArray(run?.job_ids) ? run.job_ids : []) {
+          const normalized = String(jobId || '').trim()
+          if (normalized) terminalSyntheticLivefireJobIds.add(normalized)
+        }
+      }
+    } catch (error) {
+      console.error('[ops-api] makesafe_board terminal synthetic ledger read unavailable:', (error as Error).message)
+    }
+  }
+  const isTerminalSyntheticRow = (row: any) =>
+    isExcludedTerminalSyntheticBoardRow(row, terminalSyntheticLivefireJobIds)
+
   // Archive is a terminal display stage: overlays cannot move a card OUT of it.
   // They can only move a non-archive declared stage INTO archive. So for the
   // default active board we still build every non-archive base row (to apply
   // overlays and keep placement identical) and skip the heavy follow-on work for
   // cards the pipeline already parked in archive.
   const declaredArchiveBase = baseRows.filter((row) =>
-    String(row?.board_stage || '').toLowerCase() === 'archive'
+    String(row?.board_stage || '').toLowerCase() === 'archive' &&
+    !isTerminalSyntheticRow(row)
   )
   const nonArchiveBase = baseRows.filter((row) =>
     String(row?.board_stage || '').toLowerCase() !== 'archive'
@@ -16184,23 +16225,6 @@ async function loadCanonicalMakesafeBoard(
     )
   } catch (error) {
     console.error('[ops-api] makesafe_board status application read unavailable:', (error as Error).message)
-  }
-
-  let terminalSyntheticLivefireJobIds = new Set<string>()
-  try {
-    const { data: terminalRuns, error } = await client
-      .from('ses_synthetic_livefire_runs')
-      .select('job_ids')
-      .eq('state', 'terminal')
-    if (error) throw error
-    for (const run of terminalRuns || []) {
-      for (const jobId of Array.isArray(run?.job_ids) ? run.job_ids : []) {
-        const normalized = String(jobId || '').trim()
-        if (normalized) terminalSyntheticLivefireJobIds.add(normalized)
-      }
-    }
-  } catch (error) {
-    console.error('[ops-api] makesafe_board terminal synthetic ledger read unavailable:', (error as Error).message)
   }
 
   const notesByJobId: Record<string, any[]> = {}

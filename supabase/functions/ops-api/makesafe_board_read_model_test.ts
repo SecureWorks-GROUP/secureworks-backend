@@ -19,6 +19,7 @@ import {
   countOpsCanonicalStages,
   filterCanonicalRowsByColumnScope,
   isCanonicalLiveMakesafeBoardJobStatus,
+  isExcludedTerminalSyntheticBoardRow,
   isSyntheticLivefireJob,
   isTerminalSyntheticLivefireJob,
   makesafeBoardJobStatusExclusionFilter,
@@ -574,9 +575,15 @@ Deno.test("parseMakesafeBoardFields defaults to card; diagnostics opt in to full
 
 Deno.test("parseMakesafeBoardColumnScope defaults to active; full/include_archive widen", () => {
   assertEquals(parseMakesafeBoardColumnScope(null, null, "card"), "active");
-  assertEquals(parseMakesafeBoardColumnScope(undefined, undefined, "card"), "active");
+  assertEquals(
+    parseMakesafeBoardColumnScope(undefined, undefined, "card"),
+    "active",
+  );
   assertEquals(parseMakesafeBoardColumnScope("active", null, "card"), "active");
-  assertEquals(parseMakesafeBoardColumnScope("archive", null, "card"), "archive");
+  assertEquals(
+    parseMakesafeBoardColumnScope("archive", null, "card"),
+    "archive",
+  );
   assertEquals(parseMakesafeBoardColumnScope("all", null, "card"), "all");
   assertEquals(parseMakesafeBoardColumnScope(null, "1", "card"), "all");
   assertEquals(parseMakesafeBoardColumnScope(null, "true", "card"), "all");
@@ -584,7 +591,10 @@ Deno.test("parseMakesafeBoardColumnScope defaults to active; full/include_archiv
   assertEquals(parseMakesafeBoardColumnScope(null, null, "full"), "all");
   assertEquals(parseMakesafeBoardColumnScope("active", null, "full"), "all");
   // Unknown stays on the fast active path.
-  assertEquals(parseMakesafeBoardColumnScope("mystery", null, "card"), "active");
+  assertEquals(
+    parseMakesafeBoardColumnScope("mystery", null, "card"),
+    "active",
+  );
 });
 
 Deno.test("active column scope drops archive without moving other cards", () => {
@@ -614,8 +624,14 @@ Deno.test("active column scope drops archive without moving other cards", () => 
     },
   }, "card");
 
-  assertEquals(full.find((r) => r.id === "job-ready")?.canonical_stage, "archive");
-  assertEquals(full.find((r) => r.id === "job-arch")?.canonical_stage, "archive");
+  assertEquals(
+    full.find((r) => r.id === "job-ready")?.canonical_stage,
+    "archive",
+  );
+  assertEquals(
+    full.find((r) => r.id === "job-arch")?.canonical_stage,
+    "archive",
+  );
 
   const census = countOpsCanonicalStages(full);
   assertEquals(census.new, 1);
@@ -625,11 +641,21 @@ Deno.test("active column scope drops archive without moving other cards", () => 
   assertEquals(census.cancelled, 1);
 
   const active = filterCanonicalRowsByColumnScope(full, "active");
-  assertEquals(active.map((r) => r.id).sort(), ["job-alloc", "job-cancel", "job-new"]);
+  assertEquals(active.map((r) => r.id).sort(), [
+    "job-alloc",
+    "job-cancel",
+    "job-new",
+  ]);
   // Placement of the remaining active cards is unchanged.
   assertEquals(active.find((r) => r.id === "job-new")?.canonical_stage, "new");
-  assertEquals(active.find((r) => r.id === "job-alloc")?.canonical_stage, "allocated");
-  assertEquals(active.find((r) => r.id === "job-cancel")?.canonical_stage, "cancelled");
+  assertEquals(
+    active.find((r) => r.id === "job-alloc")?.canonical_stage,
+    "allocated",
+  );
+  assertEquals(
+    active.find((r) => r.id === "job-cancel")?.canonical_stage,
+    "cancelled",
+  );
 
   const opsActive = projectOpsMakesafeBoard(active, { fields: "card" });
   assertEquals(opsActive.columns.archive.length, 0);
@@ -1209,6 +1235,57 @@ Deno.test("terminally accounted synthetic live-fire jobs disappear from both boa
   });
   assertEquals(isSyntheticLivefireJob(prefixLookalike), false);
   assertEquals(isTerminalSyntheticLivefireJob(prefixLookalike), false);
+});
+
+Deno.test("the archive census excludes exactly what the canonical build excludes", () => {
+  const marker =
+    "SWG-SES-LIVEFIRE-TEST-ONLY-018F7F2C-4DB4-7C61-92C7-2B2B97E0A111";
+  const syntheticArchive = baseJob("archive", "synthetic-archived", {
+    metadata: { synthetic_livefire_marker: marker },
+  });
+  const realArchive = baseJob("archive", "real-archived");
+  const active = baseJob("allocated", "job-alloc");
+  const terminalIds = new Set([syntheticArchive.id]);
+
+  assertEquals(
+    isExcludedTerminalSyntheticBoardRow(syntheticArchive, terminalIds),
+    true,
+  );
+  assertEquals(
+    isExcludedTerminalSyntheticBoardRow(realArchive, terminalIds),
+    false,
+  );
+  // A synthetic job whose run has not been terminally accounted stays on board.
+  assertEquals(
+    isExcludedTerminalSyntheticBoardRow(syntheticArchive, new Set()),
+    false,
+  );
+
+  const baseRows = [active, realArchive, syntheticArchive];
+  // include_archive=1 census: one canonical build over every base row.
+  const allScope = countOpsCanonicalStages(
+    buildCanonicalMakesafeRows(baseRows, {
+      terminalSyntheticLivefireJobIds: terminalIds,
+    }, "card"),
+  );
+  assertEquals(allScope.archive, 1);
+  assertEquals(allScope.allocated, 1);
+
+  // Default active census: declared-archive rows are added back outside the
+  // build, so they must drop the same terminal synthetic rows.
+  const activeScope = countOpsCanonicalStages(
+    buildCanonicalMakesafeRows(
+      baseRows.filter((row) => row.board_stage !== "archive"),
+      { terminalSyntheticLivefireJobIds: terminalIds },
+      "card",
+    ),
+  );
+  activeScope.archive +=
+    baseRows.filter((row) =>
+      row.board_stage === "archive" &&
+      !isExcludedTerminalSyntheticBoardRow(row, terminalIds)
+    ).length;
+  assertEquals(activeScope, allScope);
 });
 
 Deno.test("synthetic live-fire jobs are refused before any release operation", async () => {

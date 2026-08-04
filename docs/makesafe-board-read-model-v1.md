@@ -46,7 +46,7 @@ remaining board load win after card shape.
 | --- | --- |
 | `projection=ops` (default) | Active columns only: new, allocated, trade_report_in, report_ready, completed, cancelled. `columns.archive` is `[]`. |
 | `include_archive=1` or `columns=all` | Every column, including Archive. |
-| `columns=archive` | Archive only (lazy open). Optional `limit` / `offset` for paging (max 500). |
+| `columns=archive` | Archive only (lazy open). Optional `limit` / `offset` for paging (max 500). A non-integer, non-positive or over-max `limit`, or a negative `offset`, is a `400` — never silently clamped to a page nobody asked for. |
 | `fields=full` | Full diagnostic fields **and** every column (diagnostics never silently drop history). |
 
 The response always publishes an honest census so Archive never looks deleted:

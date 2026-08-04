@@ -85,15 +85,8 @@ export type MakesafeBoardColumnScope =
 export const MAKESAFE_BOARD_DEFAULT_COLUMN_SCOPE: MakesafeBoardColumnScope =
   "active";
 
-/** Ops stages the default active board returns as card lists. */
-export const OPS_MAKESAFE_ACTIVE_STAGES = [
-  "new",
-  "allocated",
-  "trade_report_in",
-  "report_ready",
-  "completed",
-  "cancelled",
-] as const;
+/** Largest archive page a caller may request (`columns=archive&limit=`). */
+export const MAKESAFE_BOARD_MAX_ARCHIVE_PAGE = 500;
 
 export function parseMakesafeBoardFields(
   fieldsRaw: string | null | undefined,
@@ -435,20 +428,6 @@ export function emptyOpsColumnCounts(): Record<OpsMakesafeStage, number> {
   ) as Record<OpsMakesafeStage, number>;
 }
 
-/** Count cards per ops stage from pipeline base rows (declared stage). */
-export function countOpsPipelineStages(
-  baseRows: readonly any[],
-): Record<OpsMakesafeStage, number> {
-  const counts = emptyOpsColumnCounts();
-  for (const row of baseRows || []) {
-    const stage = String(row?.board_stage || "").toLowerCase();
-    if ((OPS_MAKESAFE_STAGES as readonly string[]).includes(stage)) {
-      counts[stage as OpsMakesafeStage] += 1;
-    }
-  }
-  return counts;
-}
-
 /**
  * After overlay, recompute honest column counts from canonical rows.
  * Prefer this over pipeline declared counts when overlays can move cards
@@ -496,9 +475,13 @@ export function filterCanonicalRowsByColumnScope(
   if (scope === "archive") {
     const offset = Math.max(0, Math.floor(Number(pagination.offset) || 0));
     const rawLimit = pagination.limit;
-    const limit = rawLimit == null || rawLimit === undefined
-      ? null
-      : Math.max(1, Math.min(500, Math.floor(Number(rawLimit) || 0)));
+    const limit = rawLimit == null ? null : Math.max(
+      1,
+      Math.min(
+        MAKESAFE_BOARD_MAX_ARCHIVE_PAGE,
+        Math.floor(Number(rawLimit) || 0),
+      ),
+    );
     if (limit != null) {
       return filtered.slice(offset, offset + limit);
     }
@@ -529,7 +512,13 @@ export function archiveOnDemandMeta(args: {
       ? Math.max(0, Math.floor(Number(args.offset) || 0))
       : 0,
     limit: args.scope === "archive" && args.limit != null
-      ? Math.max(1, Math.min(500, Math.floor(Number(args.limit) || 0)))
+      ? Math.max(
+        1,
+        Math.min(
+          MAKESAFE_BOARD_MAX_ARCHIVE_PAGE,
+          Math.floor(Number(args.limit) || 0),
+        ),
+      )
       : null,
     // How the client fetches history without guessing.
     fetch: {
@@ -789,6 +778,21 @@ export function isSyntheticLivefireJob(job: any): boolean {
   return SYNTHETIC_LIVEFIRE_MARKER.test(
     String(metadata.synthetic_livefire_marker || ""),
   );
+}
+
+/**
+ * The one board-population exclusion for synthetic live-fire traffic whose run
+ * has been terminally accounted. `buildCanonicalMakesafeRows` drops these rows,
+ * so any census that adds cards back outside the build (the active board's
+ * declared-archive count) must drop exactly the same ones or the two published
+ * censuses disagree.
+ */
+export function isExcludedTerminalSyntheticBoardRow(
+  row: any,
+  terminalSyntheticJobIds?: ReadonlySet<string> | null,
+): boolean {
+  return isSyntheticLivefireJob(row) &&
+    Boolean(terminalSyntheticJobIds?.has(String(row?.id)));
 }
 
 export function isTerminalSyntheticLivefireJob(job: any): boolean {
@@ -1136,8 +1140,7 @@ export function buildCanonicalMakesafeRows(
   const computedAt = extras.computedAt || new Date().toISOString();
   const terminalSyntheticJobIds = extras.terminalSyntheticLivefireJobIds;
   const rows = (baseRows || []).filter((base) =>
-    !(isSyntheticLivefireJob(base) &&
-      terminalSyntheticJobIds?.has(String(base?.id)))
+    !isExcludedTerminalSyntheticBoardRow(base, terminalSyntheticJobIds)
   ).map((base) => {
     // enrichMakesafeBoardJob already cycle-scopes assignments/report/pack on the
     // base row; re-apply photo fail-closed for reattend here (photos are not

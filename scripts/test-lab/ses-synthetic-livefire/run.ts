@@ -1176,7 +1176,12 @@ async function cleanup(
   );
 
   await waitFor("board projection exclusion", 90_000, async () => {
-    const board = await client.action<JsonRecord>("ops-api", "makesafe_board");
+    // include_archive=1: the default board is active-columns-only, and a purged
+    // synthetic job parked in archive would be absent from it either way. Only
+    // the full-column board proves terminal accounting did the excluding.
+    const board = await client.action<JsonRecord>("ops-api", "makesafe_board", {
+      query: { include_archive: "1" },
+    });
     return !containsMarker(board, run.marker) &&
       strings(found.jobs, "id").every((id) =>
         !JSON.stringify(board).includes(id)
@@ -1185,15 +1190,18 @@ async function cleanup(
 
   const projectionProof: Record<string, boolean> = {};
   for (
-    const action of [
-      "makesafe_board",
-      "makesafe_audit",
-      "makesafe_pipeline",
-      "intake_health",
-      "ops_summary",
+    const probe of [
+      { action: "makesafe_board", query: { include_archive: "1" } },
+      { action: "makesafe_audit" },
+      { action: "makesafe_pipeline" },
+      { action: "intake_health" },
+      { action: "ops_summary" },
     ]
   ) {
-    const response = await client.action<JsonRecord>("ops-api", action);
+    const action = probe.action;
+    const response = await client.action<JsonRecord>("ops-api", action, {
+      query: probe.query,
+    });
     projectionProof[action] = !containsMarker(response, run.marker) &&
       strings(found.jobs, "id").every((id) =>
         !JSON.stringify(response).includes(id)
