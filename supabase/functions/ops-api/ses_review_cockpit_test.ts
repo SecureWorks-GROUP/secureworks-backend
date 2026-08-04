@@ -14,7 +14,7 @@ import {
   evaluateSesMechanicalClean,
   SES_REVIEW_SECTION_ORDER,
   sendItDisabledReason,
-  sesFailedCheckIds,
+  sesFailedChecks,
   sesRouteKindsOnPack,
   type SesCleanInput,
   type SesCockpitDocket,
@@ -589,38 +589,51 @@ Deno.test("SEND IT carries a disabled_reason whenever it is locked, and none whe
     "a locked SEND IT must say why",
   );
   assertStringIncludes(locked.controls.send_it.disabled_reason!, "photo email");
-  assertEquals(locked.controls.send_it.failed_check_ids, ["C11"]);
+  assertEquals(locked.controls.send_it.failed_checks.map((c) => c.id), ["C11"]);
 });
 
-Deno.test("a not-clean verdict with NO blockers names the failed checks, never blockers", () => {
+Deno.test("a not-clean verdict with NO blockers asserts nothing and passes the facts through", () => {
   // A card with no invoice obligation row: C3 and C10 fail and push nothing,
   // so the blocker list is legitimately empty. Citing blockers here would be
-  // the exact inversion of the false hold this surface exists to remove.
+  // the exact inversion of the false hold this surface exists to remove, and
+  // inventing a negative money sentence would be an unproven money claim.
   const verdict = evaluateSesMechanicalClean(cleanInput({
     pricing_disposition: "money_review_required",
     obligation_revision_count: 0,
   }));
   assertEquals(verdict.clean, false);
   assertEquals(verdict.blockers.length, 0);
-  assertEquals(sesFailedCheckIds(verdict), ["C3", "C10"]);
 
   const reason = sendItDisabledReason(verdict, {
     stale: false,
     xeroAuthorised: true,
     noAdditionalCharge: false,
   });
+  assertEquals(reason, "This pack is not ready to send yet.");
   assert(
     !reason.toLowerCase().includes("blocker"),
     `must not claim blockers that do not exist: ${reason}`,
   );
-  assertStringIncludes(reason, "pricing is not settled");
-  assertStringIncludes(reason, "obligation revision");
-  // The affirmative check facts must never be quoted as though they were the
-  // problem, and no copy may say APPROVE mints a draft.
-  assert(!reason.includes("Exactly one non-ambiguous obligation revision owns"));
   assert(!/\bmint/i.test(reason));
 
-  // With neither a blocker nor a nameable check, nothing is invented.
+  // The cause rides as structured data carrying the EXISTING affirmative facts,
+  // byte for byte as evaluateSesMechanicalClean wrote them — never re-worded
+  // into a negative on the way out.
+  const failed = sesFailedChecks(verdict);
+  assertEquals(failed.map((item) => item.id), ["C3", "C10"]);
+  for (const item of failed) {
+    assertEquals(
+      item.fact,
+      verdict.checks.find((check) => check.id === item.id)?.fact,
+    );
+  }
+  assertEquals(failed[1].fact, "Exactly one non-ambiguous obligation revision owns this work.");
+
+  // Nothing failed, nothing named: the consumer still shows the honest generic.
+  assertEquals(
+    sesFailedChecks(evaluateSesMechanicalClean(cleanInput())),
+    [],
+  );
   assertEquals(
     sendItDisabledReason(
       { clean: false, checks: [], blockers: [], approval_band: "captain_only" },

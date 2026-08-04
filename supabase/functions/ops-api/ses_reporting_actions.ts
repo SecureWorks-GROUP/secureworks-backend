@@ -27,7 +27,6 @@ import {
   buildSesCockpitView,
   buildSesReleaseRevision,
   canRecordSesApproval,
-  describeSesFailedChecks,
   evaluateSesMechanicalClean,
   SES_ROUTE_ORDER,
   type SesApprovalAuth,
@@ -3566,23 +3565,12 @@ export async function approveSesReleaseRevisionAction(
       !authority.allowed || (!cockpit.controls.send_it.enabled &&
         !authority.captain_override)
     ) {
-      // With no blocker to quote, the catalogue default would assert an
-      // unauthorised invoice even when the real hold is a failed check that
-      // pushed no blocker. Name the failed checks instead; claim nothing when
-      // there are none. Gating is unchanged — this is the refusal's wording.
-      const failedChecks = describeSesFailedChecks(verdict);
       throw new SesActionError(
         409,
         verdict.blockers[0] ||
           sesRefusal(
             "xero_not_authorised",
             "Bind the real AUTHORISED Xero PDF to the current docket before SEND IT.",
-            failedChecks
-              ? {
-                fact:
-                  `This pack is not ready to send yet: ${failedChecks}.`,
-              }
-              : {},
           ),
       );
     }

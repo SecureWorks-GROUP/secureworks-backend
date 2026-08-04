@@ -193,76 +193,21 @@ export function approveInvoiceDisabledReason(
 }
 
 /**
- * The negative of each mechanical check, for the case where a check fails and
- * pushes NO blocker (C1, C3, C5, C9, C10 and C12 all can). The `fact` on a
- * check is phrased affirmatively — it states the condition that holds when the
- * check PASSES — so it can never be quoted as the problem; these are its
- * inversions, and a check with no entry here is named by nothing at all rather
- * than by a guess.
+ * The checks that did not pass, carrying their own facts verbatim.
+ *
+ * A check's `fact` is phrased AFFIRMATIVELY — it states the condition that
+ * holds when the check passes — so it is never a sentence about what is wrong
+ * and must never be re-worded into one on the way out. This is a pass-through:
+ * the backend owns the fact, the consumer owns the sentence it builds from it.
+ * An empty array means nothing here can be named, and the consumer falls back
+ * to the honest generic rather than to a guess.
  */
-const SES_CLEAN_CHECK_FAILURE_TERMS: Record<string, string> = {
-  C1: "the current family docket is not commercially ready",
-  C2: "named readiness blockers remain on the current revision",
-  C3: "pricing is not settled by canon or by an audited override",
-  C4: "the duplicate probe does not agree with the requested money action",
-  C5: "a money hold is unresolved",
-  C6: "a post-release billing disposition is outstanding",
-  C7: "the family matrix or the required assessment recipe is not versioned",
-  C8: "required portal truth is not captured",
-  C9: "physical work is short of its media floor or completed-work proof",
-  C10: "this work is not owned by exactly one non-ambiguous obligation revision",
-  C11: "a route this family requires has no usable draft or no canonical recipient",
-  C12: "a type-check or unverified-story hold remains",
-};
-
-/** The ids of the checks that did not pass, in check order. */
-export function sesFailedCheckIds(
+export function sesFailedChecks(
   verdict: SesMechanicalCleanResult,
-): string[] {
-  return (verdict.checks || []).filter((item) => !item.passed).map((item) =>
-    String(item.id)
-  );
-}
-
-/**
- * The failed checks in plain English, or null when nothing can be named from
- * the payload. Null is the honest answer and callers must fall back to a
- * sentence that asserts nothing — never to "unresolved blockers", which is
- * false whenever the blocker list is empty.
- */
-export function describeSesFailedChecks(
-  verdict: SesMechanicalCleanResult,
-): string | null {
-  const terms = (verdict.checks || [])
+): Array<{ id: string; fact: string }> {
+  return (verdict.checks || [])
     .filter((item) => !item.passed)
-    .map((item) => SES_CLEAN_CHECK_FAILURE_TERMS[String(item.id)])
-    .filter((term): term is string => !!term);
-  if (terms.length === 0) return null;
-  if (terms.length === 1) return terms[0];
-  return `${terms.slice(0, -1).join(", ")} and ${terms[terms.length - 1]}`;
-}
-
-/**
- * Why a not-clean verdict is holding SEND, derived from the payload alone.
- * Shared so the cockpit's disabled_reason and the SEND IT approval refusal say
- * the same true thing. A blocker's own fact is quoted verbatim when one exists;
- * otherwise the failed checks are named; otherwise nothing is claimed.
- */
-export function sesSendHoldFact(verdict: SesMechanicalCleanResult): string {
-  const blockers = verdict.blockers || [];
-  const first = blockers[0];
-  if (first?.fact) {
-    const others = blockers.length - 1;
-    return others > 0
-      ? `${first.fact} ${others} other blocker${
-        others === 1 ? "" : "s"
-      } must clear too.`
-      : first.fact;
-  }
-  const failed = describeSesFailedChecks(verdict);
-  return failed
-    ? `This pack is not ready to send yet: ${failed}.`
-    : "This pack is not ready to send yet.";
+    .map((item) => ({ id: String(item.id), fact: item.fact }));
 }
 
 /**
@@ -273,6 +218,11 @@ export function sesSendHoldFact(verdict: SesMechanicalCleanResult): string {
  * can say. Name the real cause, and when the cause is a blocker, quote that
  * blocker's own fact rather than paraphrasing it — the fact is the trustworthy
  * string, and it now names the exact email and defect.
+ *
+ * With no blocker to quote, this asserts NOTHING specific. The failed checks
+ * ride alongside as structured data instead; inventing a negative sentence
+ * about pricing, money or obligation ownership here would put an unproven
+ * money claim on the screen the Captain uses to decide whether to send.
  */
 export function sendItDisabledReason(
   verdict: SesMechanicalCleanResult,
@@ -287,7 +237,17 @@ export function sendItDisabledReason(
     return "This view is showing an older docket revision. Reload the card before sending anything.";
   }
   if (!verdict.clean) {
-    return sesSendHoldFact(verdict);
+    const blockers = verdict.blockers || [];
+    const first = blockers[0];
+    if (first?.fact) {
+      const others = blockers.length - 1;
+      return others > 0
+        ? `${first.fact} ${others} other blocker${
+          others === 1 ? "" : "s"
+        } must clear too.`
+        : first.fact;
+    }
+    return "This pack is not ready to send yet.";
   }
   if (!state.xeroAuthorised && !state.noAdditionalCharge) {
     const status = String(state.xeroStatus || "").toUpperCase();
@@ -652,11 +612,12 @@ export interface SesCockpitView {
       /** Why the control is unavailable; null when it is enabled. */
       disabled_reason: string | null;
       /**
-       * The mechanical checks that did not pass, as ids. Structured so a
-       * consumer can name them itself instead of the backend inventing copy;
-       * empty when every check passed.
+       * The mechanical checks that did not pass, each with its own affirmative
+       * fact verbatim. Structured so the consumer names the cause itself
+       * instead of the backend inventing copy; empty when every check passed,
+       * in which case the consumer shows the honest generic.
        */
-      failed_check_ids: string[];
+      failed_checks: Array<{ id: string; fact: string }>;
       /** The route kinds actually drafted on this pack, in send order. */
       route_kinds: string[];
       /** How many emails SEND IT will really send. */
@@ -780,7 +741,7 @@ export function buildSesCockpitView(
           noAdditionalCharge,
           xeroStatus: docket.xero_binding?.status ?? null,
         }),
-        failed_check_ids: sesFailedCheckIds(verdict),
+        failed_checks: sesFailedChecks(verdict),
         route_kinds: sesRouteKindsOnPack(docket.routes),
         route_count: sesRouteKindsOnPack(docket.routes).length,
       },
