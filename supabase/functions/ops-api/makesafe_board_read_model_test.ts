@@ -21,8 +21,10 @@ import {
   makesafeBoardJobStatusExclusionFilter,
   mapOpsStageToTradeColumn,
   OPS_MAKESAFE_STAGES,
+  parseMakesafeBoardFields,
   portalCapturesFromLedger,
   projectOpsMakesafeBoard,
+  projectOpsMakesafeCardRow,
   projectTradeMakesafeBoard,
   TRADE_MAKESAFE_COLUMNS,
 } from "./makesafe_board_read_model.ts";
@@ -551,6 +553,105 @@ Deno.test("historical divergence: unknown stage never vanishes silently", () => 
   assertEquals(checkMakesafeBoardParity(rows).unmapped_stage_job_ids, [
     "job-mystery",
   ]);
+});
+
+Deno.test("parseMakesafeBoardFields defaults to card; diagnostics opt in to full", () => {
+  assertEquals(parseMakesafeBoardFields(null), "card");
+  assertEquals(parseMakesafeBoardFields(undefined), "card");
+  assertEquals(parseMakesafeBoardFields("card"), "card");
+  assertEquals(parseMakesafeBoardFields("slim"), "card");
+  assertEquals(parseMakesafeBoardFields("full"), "full");
+  assertEquals(parseMakesafeBoardFields("all"), "full");
+  assertEquals(parseMakesafeBoardFields(null, "1"), "full");
+  assertEquals(parseMakesafeBoardFields("card", "true"), "full");
+  // Unknown values stay on the fast path rather than dumping diagnostics.
+  assertEquals(parseMakesafeBoardFields("mystery"), "card");
+});
+
+Deno.test("card shape preserves placement and drops diagnostic / detail payloads", () => {
+  const full = buildCanonicalMakesafeRows([
+    baseJob("report_ready", "job-card", {
+      has_wo: true,
+      has_report_doc: true,
+      invoice_status: "draft",
+      site_suburb: "Bertram",
+      requesting_company_slug: "mlb",
+    }),
+  ], {
+    notesByJobId: {
+      "job-card": [{
+        id: "n1",
+        detail_json: { text: "ops note", from_ops: true },
+        users: { name: "Hugo" },
+        created_at: NOW,
+      }],
+    },
+    statusApplicationsByJobId: {
+      "job-card": {
+        run_key: "cap-1",
+        source_status: "report_ready",
+        before_status: "report_ready",
+        after_status: "archive",
+        evidence_ref: "captain",
+        applied_by: "captain",
+        applied_at: NOW,
+      },
+    },
+  }, "full");
+  const card = buildCanonicalMakesafeRows([
+    baseJob("report_ready", "job-card", {
+      has_wo: true,
+      has_report_doc: true,
+      invoice_status: "draft",
+      site_suburb: "Bertram",
+      requesting_company_slug: "mlb",
+    }),
+  ], {
+    statusApplicationsByJobId: {
+      "job-card": {
+        run_key: "cap-1",
+        source_status: "report_ready",
+        before_status: "report_ready",
+        after_status: "archive",
+        evidence_ref: "captain",
+        applied_by: "captain",
+        applied_at: NOW,
+      },
+    },
+  }, "card");
+
+  // Placement is identical: the captain display overlay still archives the card.
+  assertEquals(full[0].canonical_stage, "archive");
+  assertEquals(card[0].canonical_stage, "archive");
+  assertEquals(full[0].declared_stage, card[0].declared_stage);
+
+  // Diagnostics and detail-view blobs are gone from card.
+  assertEquals(card[0].notes, undefined);
+  assertEquals(card[0].computed_status_evidence, undefined);
+  assertEquals(card[0].derived_stage_v2, undefined);
+  assertEquals(card[0].derived_stage_v2_reasons, undefined);
+  assertEquals(card[0].roof_report_confirmation, undefined);
+  assertEquals(card[0].job_identity, undefined);
+  assertEquals(card[0].declared_stage_engine_version, undefined);
+
+  // Presentation keys the card paints without the pipeline dual-fetch.
+  assertEquals(card[0].has_wo, true);
+  assertEquals(card[0].site_suburb, "Bertram");
+  assertEquals(card[0].requesting_company_slug, "mlb");
+  assertEquals(card[0].invoice_status, "draft");
+
+  const opsCard = projectOpsMakesafeBoard(card, { fields: "card" });
+  assertEquals(opsCard.shape, "card");
+  assertEquals(opsCard.rows, undefined);
+  assertEquals(opsCard.columns.archive.length, 1);
+  assertEquals(opsCard.columns.archive[0].id, "job-card");
+  assertEquals(opsCard.row_count, 1);
+
+  // Stripping a full row through projectOpsMakesafeCardRow never moves stage.
+  const stripped = projectOpsMakesafeCardRow(full[0]);
+  assertEquals(stripped.canonical_stage, full[0].canonical_stage);
+  assertEquals(stripped.computed_status_evidence, undefined);
+  assertEquals(stripped.notes, undefined);
 });
 
 Deno.test("trade visibility is server-shaped: ordinary allocated-only, Hugo all, Khairo make-safe allocated-only", () => {

@@ -126,6 +126,7 @@ import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import {
   MAKESAFE_BOARD_CONTRACT_VERSION,
+  OPS_MAKESAFE_STAGES,
   authorizeMakesafeTradeProjection,
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
@@ -133,7 +134,10 @@ import {
   latestOwnRoofDraftByJobId,
   makesafeBoardJobStatusExclusionFilter,
   ownTemplateRoofJobIdsForBoard,
+  parseMakesafeBoardFields,
+  projectOpsMakesafeBoard,
   projectTradeMakesafeBoard,
+  type MakesafeBoardFields,
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
 import { projectMakesafeJobIdentity as _projectMakesafeJobIdentity } from './makesafe_job_identity_read_model.ts'
@@ -3240,10 +3244,17 @@ async function makesafeBoardAction(
   options: {
     generatedAt?: string
     contractVersion?: string | null
+    fields?: string | null
+    includeDiagnostics?: string | null
   } = {},
 ) {
   const projection = String(projectionRaw || 'ops').toLowerCase()
   const contractVersion = String(options.contractVersion || 'v1').toLowerCase()
+  // Ops board default is card-shaped (fast). Trade is unaffected. Diagnostics
+  // and detail-view payloads opt in via fields=full or include_diagnostics=1.
+  const fields: MakesafeBoardFields = projection === 'ops'
+    ? parseMakesafeBoardFields(options.fields, options.includeDiagnostics)
+    : 'full'
   if (!['ops', 'trade'].includes(projection)) {
     return json({ error: "projection must be 'ops' or 'trade'" }, 400)
   }
@@ -3274,7 +3285,8 @@ async function makesafeBoardAction(
   }
 
   if (contractVersion === 'v2') {
-    const canonicalRows = await loadCanonicalMakesafeBoard(client)
+    // v2 comparison always needs the full diagnostic row shape.
+    const canonicalRows = await loadCanonicalMakesafeBoard(client, { fields: 'full' })
     const generatedAt = options.generatedAt || new Date().toISOString()
     return json(await buildPrivilegedMakesafeV2BoardComparison(
       client,
@@ -3284,14 +3296,47 @@ async function makesafeBoardAction(
   }
   const generatedAt = options.generatedAt || new Date().toISOString()
   const [canonicalRows, intakeExceptions] = await Promise.all([
-    loadCanonicalMakesafeBoard(client),
+    loadCanonicalMakesafeBoard(client, { fields }),
     _loadIntakeExceptionProjectionForBoard(client, generatedAt),
   ])
+  if (fields === 'card') {
+    // Placement-only check: every card must land in exactly one ops column.
+    // Full trade parity needs diagnostic fields and is reserved for fields=full.
+    const ops = projectOpsMakesafeBoard(canonicalRows, { fields: 'card' })
+    const stageErrors: string[] = []
+    for (const row of canonicalRows) {
+      if (!row?.id) {
+        stageErrors.push('canonical row missing id')
+        continue
+      }
+      const stage = String(row.canonical_stage || '').toLowerCase()
+      if (!(OPS_MAKESAFE_STAGES as readonly string[]).includes(stage as any)) {
+        // projectOpsMakesafeBoard already parks unknown stages in `new` with a
+        // warning; count them but do not fail the board.
+        continue
+      }
+    }
+    return json({
+      contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
+      projection: 'ops',
+      fields: 'card',
+      generated_at: generatedAt,
+      ...ops,
+      intake_exceptions: _intakeExceptionBoardPayload(intakeExceptions),
+      parity: {
+        ok: stageErrors.length === 0,
+        checked: canonicalRows.length,
+        mode: 'card_placement',
+        errors: stageErrors,
+      },
+    })
+  }
   const { ops, ...parity } = checkMakesafeBoardParity(canonicalRows)
   if (!parity.ok) throw new Error('make-safe board parity failed: ' + parity.errors.join('; '))
   return json({
     contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
     projection: 'ops',
+    fields: 'full',
     generated_at: generatedAt,
     ...ops,
     intake_exceptions: _intakeExceptionBoardPayload(intakeExceptions),
@@ -3669,7 +3714,11 @@ if (import.meta.main) serve(async (req: Request) => {
           authMode,
           authUser,
           url.searchParams.get('projection'),
-          { contractVersion: url.searchParams.get('contract_version') },
+          {
+            contractVersion: url.searchParams.get('contract_version'),
+            fields: url.searchParams.get('fields'),
+            includeDiagnostics: url.searchParams.get('include_diagnostics'),
+          },
         )
       }
       case 'makesafe_status_shadow_refresh': {
@@ -15901,9 +15950,13 @@ async function _readSesSpineFacts(
 
 async function loadCanonicalMakesafeBoard(
   client: any,
-  opts?: { restrictToJobIds?: string[] },
+  opts?: { restrictToJobIds?: string[]; fields?: MakesafeBoardFields },
 ): Promise<any[]> {
   const restrictToJobIds = opts?.restrictToJobIds
+  // Card is the ops board paint path: placement + card fields only. Full keeps
+  // every diagnostic/detail read for measurement, trade parity, and v2 compare.
+  const fields: MakesafeBoardFields = opts?.fields || 'full'
+  const cardMode = fields === 'card'
   // Allocated-only callers pass an explicit, already-authorised id set. An empty
   // set means "no visible make-safes" — return without loading any history.
   if (restrictToJobIds && restrictToJobIds.length === 0) return []
@@ -15920,84 +15973,97 @@ async function loadCanonicalMakesafeBoard(
   const jobIds = baseRows.map((row) => row.id)
   if (jobIds.length === 0) return []
 
-  // These reads are business-meaningful. _fetchAllByJobIdChunked checks every
-  // PostgREST error and paginates every 1000 rows, so empty means genuinely empty.
-  const [notes, photos, contacts] = await Promise.all([
-    _fetchAllByJobIdChunked(
-      client,
-      'job_events',
-      'id, job_id, user_id, event_type, detail_json, created_at, users:user_id(name)',
-      jobIds,
-      (q) => q.eq('event_type', 'note'),
-    ),
-    _fetchAllByJobIdChunked(
-      client,
-      'job_media',
-      'id, job_id, type, phase',
-      jobIds,
-      (q) => q.eq('type', 'photo').eq('phase', 'completion'),
-    ),
-    _fetchAllByJobIdChunked(
-      client,
-      'job_contacts',
-      'job_id, client_name, client_phone, is_primary, contact_label, status',
-      jobIds,
-      (q) => q.eq('status', 'active'),
-    ),
-  ])
-
-  // F7: the append-only capture ledger is the durable Prime truth source. Read
-  // it into the canonical row; do not mutate details, substatus, or stage.
+  // Card mode: only the display-ledger overlay is load-bearing for placement
+  // beyond the pipeline base. Notes, contacts, photos, portal captures, holds,
+  // intake cases, own-roof drafts and terminal proofs are detail/diagnostic and
+  // are skipped so the Captain board is not waiting on them.
+  let notes: any[] = []
+  let photos: any[] = []
+  let contacts: any[] = []
   let portalCaptureRows: any[] = []
-  try {
-    portalCaptureRows = await _fetchAllByJobIdChunked(
-      client,
-      'makesafe_portal_capture_revisions',
-      'id, job_id, attendance_cycle_id, role, status, makesafe_fact_version, capture_result, source_url, source_content_hash, builder_reference, captured_at, captured_by, capture_producer, signal, screenshot_object_key, screenshot_media_type, screenshot_content_hash, screenshot_size_bytes',
-      jobIds,
-      (q) => q.order('makesafe_fact_version', { ascending: false }),
-    )
-  } catch (error) {
-    // Fail closed to no capture evidence while keeping the legacy board visible.
-    console.error('[ops-api] makesafe board portal capture read unavailable:', (error as Error).message)
-  }
-
-  // The status-holds table is an additive shadow overlay that can legitimately lag
-  // the edge function in a preview database. Holds only decorate the board with
-  // reason-coded badges, so tolerate a missing table and log loudly rather than
-  // failing the entire operator-facing make-safe board on that overlay.
   let holds: any[] = []
-  try {
-    holds = await _fetchAllByJobIdChunked(
-      client,
-      'makesafe_status_holds',
-      'id, job_id, cycle_number, reason_code, note, held_by, created_at, lifted_at, attendance_cycle_id, cycle_attribution',
-      jobIds,
-      (q) => q.order('created_at', { ascending: false }),
-    )
-  } catch (error) {
-    console.error('[ops-api] makesafe_board status holds read unavailable:', (error as Error).message)
-  }
-
-  // The intake-case migration is shadow-first and can legitimately lag an edge
-  // function in a preview database. Claim/ref grouping below remains canonical;
-  // log loudly rather than failing the entire operational board on that additive
-  // lineage overlay.
   let intakeCases: any[] = []
-  try {
-    intakeCases = await _fetchAllByJobIdChunked(
-      client,
-      'makesafe_intake_cases',
-      'id, job_id, lineage_id, parent_case_id, parent_relation, cycle, updated_at',
-      jobIds,
-      (q) => q.order('cycle', { ascending: false }),
-    )
-  } catch (error) {
-    console.error('[ops-api] makesafe_board intake lineage read unavailable:', (error as Error).message)
+
+  if (!cardMode) {
+    // These reads are business-meaningful. _fetchAllByJobIdChunked checks every
+    // PostgREST error and paginates every 1000 rows, so empty means genuinely empty.
+    ;[notes, photos, contacts] = await Promise.all([
+      _fetchAllByJobIdChunked(
+        client,
+        'job_events',
+        'id, job_id, user_id, event_type, detail_json, created_at, users:user_id(name)',
+        jobIds,
+        (q) => q.eq('event_type', 'note'),
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'job_media',
+        'id, job_id, type, phase',
+        jobIds,
+        (q) => q.eq('type', 'photo').eq('phase', 'completion'),
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'job_contacts',
+        'job_id, client_name, client_phone, is_primary, contact_label, status',
+        jobIds,
+        (q) => q.eq('status', 'active'),
+      ),
+    ])
+
+    // F7: the append-only capture ledger is the durable Prime truth source. Read
+    // it into the canonical row; do not mutate details, substatus, or stage.
+    try {
+      portalCaptureRows = await _fetchAllByJobIdChunked(
+        client,
+        'makesafe_portal_capture_revisions',
+        'id, job_id, attendance_cycle_id, role, status, makesafe_fact_version, capture_result, source_url, source_content_hash, builder_reference, captured_at, captured_by, capture_producer, signal, screenshot_object_key, screenshot_media_type, screenshot_content_hash, screenshot_size_bytes',
+        jobIds,
+        (q) => q.order('makesafe_fact_version', { ascending: false }),
+      )
+    } catch (error) {
+      // Fail closed to no capture evidence while keeping the legacy board visible.
+      console.error('[ops-api] makesafe board portal capture read unavailable:', (error as Error).message)
+    }
+
+    // The status-holds table is an additive shadow overlay that can legitimately lag
+    // the edge function in a preview database. Holds only decorate the board with
+    // reason-coded badges, so tolerate a missing table and log loudly rather than
+    // failing the entire operator-facing make-safe board on that overlay.
+    try {
+      holds = await _fetchAllByJobIdChunked(
+        client,
+        'makesafe_status_holds',
+        'id, job_id, cycle_number, reason_code, note, held_by, created_at, lifted_at, attendance_cycle_id, cycle_attribution',
+        jobIds,
+        (q) => q.order('created_at', { ascending: false }),
+      )
+    } catch (error) {
+      console.error('[ops-api] makesafe_board status holds read unavailable:', (error as Error).message)
+    }
+
+    // The intake-case migration is shadow-first and can legitimately lag an edge
+    // function in a preview database. Claim/ref grouping below remains canonical;
+    // log loudly rather than failing the entire operational board on that additive
+    // lineage overlay.
+    try {
+      intakeCases = await _fetchAllByJobIdChunked(
+        client,
+        'makesafe_intake_cases',
+        'id, job_id, lineage_id, parent_case_id, parent_relation, cycle, updated_at',
+        jobIds,
+        (q) => q.order('cycle', { ascending: false }),
+      )
+    } catch (error) {
+      console.error('[ops-api] makesafe_board intake lineage read unavailable:', (error as Error).message)
+    }
   }
 
   // The cutover ledger is append-only and display-only. Migration-first deploy
   // remains required, but a missing preview table must not take down the board.
+  // ALWAYS loaded: it is the only thing that can move a card's visible column
+  // after the pipeline's declared stage. Do NOT select decision_kind here until
+  // the Release 9 migration lands (pinned by ses_stage_engine_v2_test).
   let statusApplications: any[] = []
   try {
     statusApplications = await _fetchAllByJobIdChunked(
@@ -16086,7 +16152,8 @@ async function loadCanonicalMakesafeBoard(
   // the first such card exists, and never for the other ~407. The family test
   // is the same canonical one the read model applies, kept in
   // `ownTemplateRoofJobIdsForBoard` so the two cannot drift apart.
-  const ownRoofJobIds = ownTemplateRoofJobIdsForBoard(baseRows)
+  // Card mode skips: own-roof drafts only feed M1/v2 diagnostics, never placement.
+  const ownRoofJobIds = cardMode ? [] : ownTemplateRoofJobIdsForBoard(baseRows)
   let ownRoofDraftByJobId: Record<string, any> = {}
   let ownRoofReportDocumentIdsByJobId: Record<string, Set<string>> = {}
   if (ownRoofJobIds.length > 0) {
@@ -16130,38 +16197,41 @@ async function loadCanonicalMakesafeBoard(
   // and the attendance-cycle SETS a proof must cover are read ONLY for the jobs
   // that actually carry one. With no proof on the board that second query never
   // runs, and the board's cost is unchanged.
+  // Card mode skips: terminal proofs feed M1/v2 only.
   const terminalProofsByJobId: Record<string, any[]> = {}
   const attendanceCycleIdsByJobId: Record<string, string[]> = {}
-  try {
-    const proofRows = await _fetchAllByJobIdChunked(
-      client,
-      'makesafe_terminal_proofs_current_v2',
-      'id, job_id, kind, attendance_cycle_ids, evidence_refs, proven_by, proven_at',
-      jobIds,
-      (q) => q.order('proven_at', { ascending: false }),
-    )
-    for (const proof of proofRows) {
-      if (!proof?.job_id) continue
-      ;(terminalProofsByJobId[proof.job_id] ||= []).push(proof)
-    }
-    const provenJobIds = Object.keys(terminalProofsByJobId)
-    if (provenJobIds.length > 0) {
-      const cycleRows = await _fetchAllByJobIdChunked(
+  if (!cardMode) {
+    try {
+      const proofRows = await _fetchAllByJobIdChunked(
         client,
-        'makesafe_attendance_cycles',
-        'id, job_id',
-        provenJobIds,
+        'makesafe_terminal_proofs_current_v2',
+        'id, job_id, kind, attendance_cycle_ids, evidence_refs, proven_by, proven_at',
+        jobIds,
+        (q) => q.order('proven_at', { ascending: false }),
       )
-      for (const cycle of cycleRows) {
-        if (!cycle?.job_id || !cycle?.id) continue
-        ;(attendanceCycleIdsByJobId[cycle.job_id] ||= []).push(String(cycle.id))
+      for (const proof of proofRows) {
+        if (!proof?.job_id) continue
+        ;(terminalProofsByJobId[proof.job_id] ||= []).push(proof)
       }
+      const provenJobIds = Object.keys(terminalProofsByJobId)
+      if (provenJobIds.length > 0) {
+        const cycleRows = await _fetchAllByJobIdChunked(
+          client,
+          'makesafe_attendance_cycles',
+          'id, job_id',
+          provenJobIds,
+        )
+        for (const cycle of cycleRows) {
+          if (!cycle?.job_id || !cycle?.id) continue
+          ;(attendanceCycleIdsByJobId[cycle.job_id] ||= []).push(String(cycle.id))
+        }
+      }
+    } catch (error) {
+      // Fail closed to no terminal-proof evidence, exactly as the portal-capture
+      // and own-roof reads above do. A card then stays where its other evidence
+      // puts it rather than the whole operator board failing.
+      console.error('[ops-api] makesafe terminal proof read unavailable:', (error as Error).message)
     }
-  } catch (error) {
-    // Fail closed to no terminal-proof evidence, exactly as the portal-capture
-    // and own-roof reads above do. A card then stays where its other evidence
-    // puts it rather than the whole operator board failing.
-    console.error('[ops-api] makesafe terminal proof read unavailable:', (error as Error).message)
   }
 
   return buildCanonicalMakesafeRows(baseRows, {
@@ -16177,7 +16247,7 @@ async function loadCanonicalMakesafeBoard(
     terminalProofsByJobId,
     attendanceCycleIdsByJobId,
     terminalSyntheticLivefireJobIds,
-  })
+  }, fields)
 }
 
 function makesafeStatusReviewCards(rows: any[]) {
