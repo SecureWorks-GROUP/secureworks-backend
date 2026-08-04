@@ -224,7 +224,7 @@ export function sealedSesMoneyRefusal(
     fact:
       `This SES make-safe job is sealed. Legacy ${action} is refused because its invoice may only be created, authorised, changed, linked, or sent through the approved SES release flow.`,
     recovery_action:
-      "Prepare and approve the exact SES invoice revision, use execute_ses_invoice_revision, then approve and execute_ses_release_revision for the exact invoice and delivery route.",
+      "Use the SES-native sequence: prepare_ses_invoice_obligation, then create_ses_invoice_draft to mint the Xero DRAFT, then Captain APPROVE INVOICE (approve_ses_invoice_revision), then execute_ses_invoice_revision to authorise the approved revision, then approve and execute_ses_release_revision for the exact invoice and delivery route.",
     ...(evidence ? { evidence } : {}),
   };
 }
