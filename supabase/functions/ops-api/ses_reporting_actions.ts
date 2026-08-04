@@ -331,19 +331,57 @@ function docketBuilderKey(docket: Record<string, any>): string {
   ).trim();
 }
 
+/**
+ * Map a stored docket artifact `object_key` to the pack-relative path used in
+ * email draft Attachments headers (e.g. `ARTIFACTS/photos/001-….jpg`).
+ *
+ * Invoice-bound dockets copy parent pre_xero artifacts and keep the parent's
+ * revision id in the object key (`…/{based_on}/ARTIFACTS/photos/…`). Matching
+ * only `/${docket.id}/` then falling back to the last two path segments breaks
+ * nested photo paths while flat `ARTIFACTS/report.pdf` still matches — which is
+ * exactly the live Bertram HOLD (`photo` drafted, `attachment_count: 0` despite
+ * 35 `completion_photo` rows). Prefer the current id, then `based_on`, then a
+ * durable `ARTIFACTS|SOURCE|DRAFTS` root cut.
+ */
+export function docketArtifactPackRelativePath(
+  objectKey: string,
+  docketRevisionId: string,
+  basedOnRevisionId?: string | null,
+): string {
+  const key = String(objectKey || "");
+  if (!key) return "";
+  const markers: string[] = [];
+  const current = String(docketRevisionId || "").trim();
+  if (current) markers.push(`/${current}/`);
+  const basedOn = String(basedOnRevisionId || "").trim();
+  if (basedOn && basedOn !== current) markers.push(`/${basedOn}/`);
+  for (const marker of markers) {
+    const idx = key.indexOf(marker);
+    if (idx >= 0) return key.slice(idx + marker.length);
+  }
+  for (const root of ["ARTIFACTS/", "SOURCE/", "DRAFTS/"]) {
+    const withSlash = `/${root}`;
+    const idx = key.indexOf(withSlash);
+    if (idx >= 0) return key.slice(idx + 1);
+    if (key.startsWith(root)) return key;
+  }
+  return key.split("/").filter(Boolean).slice(-2).join("/");
+}
+
 export function resolveDocketRoutes(
   docket: Record<string, any>,
   artifacts: Array<Record<string, any>>,
   obligation: Record<string, any> | null,
 ): SesReviewRoute[] {
   const byPath = new Map<string, Record<string, any>>();
+  const basedOnRevisionId = String(docket.based_on_revision_id || "").trim();
   for (const artifact of artifacts) {
-    const key = String(artifact.object_key || "");
-    const marker = `/${docket.id}/`;
-    const path = key.includes(marker)
-      ? key.slice(key.indexOf(marker) + marker.length)
-      : key.split("/").slice(-2).join("/");
-    byPath.set(path, artifact);
+    const path = docketArtifactPackRelativePath(
+      String(artifact.object_key || ""),
+      String(docket.id || ""),
+      basedOnRevisionId,
+    );
+    if (path) byPath.set(path, artifact);
   }
   const xero = resolveSesRouteXeroBinding(docket, obligation);
   const boundInvoiceId = String(xero.xero_invoice_id || "");

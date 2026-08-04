@@ -6,6 +6,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _parseSesDraftForTest,
+  docketArtifactPackRelativePath,
   getSesReviewablePackAction,
   inspectSesSupportingReportProof,
   listSesDocsReadyReviewsAction,
@@ -677,6 +678,39 @@ const ROUTE_ARTIFACTS = [{
     invoice_number: "INV-TEST-1",
   },
 }];
+
+Deno.test("docketArtifactPackRelativePath keeps nested ARTIFACTS/photos under parent revision keys", () => {
+  const bound = "ecfcbd8e-81d5-55d8-a9d4-9d5ad89f8916";
+  const parent = "6a55da20-1624-5096-ae29-5549c7f9dc66";
+  const nested =
+    `makesafe-docket-artifacts/job/${parent}/ARTIFACTS/photos/001-abc.jpg`;
+  const flatReport =
+    `makesafe-docket-artifacts/job/${parent}/ARTIFACTS/report.pdf`;
+  const boundInvoice =
+    `makesafe-docket-artifacts/job/${bound}/ARTIFACTS/Xero Invoice - INV-1102.pdf`;
+  // Old last-two-segments fallback would yield photos/001-abc.jpg and miss the draft path.
+  assertEquals(
+    docketArtifactPackRelativePath(nested, bound, parent),
+    "ARTIFACTS/photos/001-abc.jpg",
+  );
+  assertEquals(
+    docketArtifactPackRelativePath(flatReport, bound, parent),
+    "ARTIFACTS/report.pdf",
+  );
+  assertEquals(
+    docketArtifactPackRelativePath(boundInvoice, bound, parent),
+    "ARTIFACTS/Xero Invoice - INV-1102.pdf",
+  );
+  // Current-id marker still wins when present.
+  assertEquals(
+    docketArtifactPackRelativePath(
+      `makesafe-docket-artifacts/job/${bound}/ARTIFACTS/photos/002.jpg`,
+      bound,
+      parent,
+    ),
+    "ARTIFACTS/photos/002.jpg",
+  );
+});
 
 Deno.test("assessment and physical pre-Xero invoice routes hide proposal state and remain non-sendable", () => {
   const assessment = resolveDocketRoutes(
