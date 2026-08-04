@@ -4,7 +4,7 @@ Date: 2026-08-04
 
 Concise in-repo caller contract for the operable PR 543 bind recovery.
 The durable full diagnosis, acceptance ledger and terminal status live in the
-Firstmate home at `kun-agent-workspace/data/curated-bind-ops-deadend-v1/report.md`
+secondmate home at `/Users/marninstobbe/.treehouse/kun-agent-workspace-8bf1b0/5/kun-agent-workspace/data/curated-bind-ops-deadend-v1/report.md`
 (not in this repository).
 
 ## Summary
