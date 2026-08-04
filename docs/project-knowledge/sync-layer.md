@@ -82,6 +82,13 @@ Enhanced response includes: jobNumber, xeroContact, monetaryValue
 - Legacy invoice creation, linking, update, approval, void, payment,
   reconciliation, chase, and send actions apply the sealed SES money boundary
   above. Sealed SES work must use the approved release actions instead.
+- The sanctioned SES-native way to mint a Xero DRAFT on a sealed card is
+  `create_ses_invoice_draft` (Captain Option B ruling, 2026-08-04): api_key /
+  routine / Captain-or-admin-owner JWT, internal SES context through the fence,
+  and a mandatory full paginated live-ACCREC duplicate guard before any create.
+  It never authorises, emails, sends, or voids, and it does not reopen the
+  retired free create paths. Contract and shipped deltas:
+  `data/ses-draft-invoice-create-409-v1/report.md`.
 - The sanctioned SES-native invoice void path is the privileged,
   human-authorised `prepare_ses_invoice_void_revision`,
   `approve_ses_invoice_void_revision`, then

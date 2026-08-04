@@ -321,7 +321,7 @@ Additional create-path blockers that must be separated (same theme):
 | --- | --- | --- |
 | **Python module (canonical semantics)** | `projects/secureworks-wiki/harness/ops/skills/secureworks-makesafe-reporting/scripts/invoice_utils.py` | `fetch_all_invoices`, `resolve_existing_invoice`, `split_ref_po`, `_same_work_ref`, `VOID_STATUSES` — **one module** so skill create and close-out backfill cannot drift. Header contract also restated in sibling `create_makesafe_draft_invoice.py` lines **9–20**. |
 | **TS port already in ops-api (must reuse, not fork)** | `supabase/functions/ops-api/makesafe_send_pack.ts`: `resolveExistingInvoice`, `sameWorkRef`, `splitRefPo`, `normRef`, `isVoidStatus` | Existing port of `invoice_utils.py`. Edge mint **imports this**; it does **not** invent a third private resolver in `ses_reporting_actions.ts`. |
-| **Full ACCREC fetch (TS)** | `ops-api/index.ts` `_fetchAllAccrecInvoices` (≈33654–33671) | Paginated live mirror scan (page 500 until short page) — port of `fetch_all_invoices`. **Not** a ~50-row recent window. |
+| **Full ACCREC fetch (TS)** | `makesafe_send_pack.ts` `fetchAllAccrecInvoices` (exported, beside `resolveExistingInvoice`) | Paginated live mirror scan (page 500 until short page) — port of `fetch_all_invoices`. **Not** a ~50-row recent window. `ops-api/index.ts` `_fetchAllAccrecInvoices` is now a thin delegate, so the free `createMakesafeDraftInvoice` guard and SES mint cannot drift apart. |
 
 Skill/Python continues to call **`invoice_utils.py`**. Server mint continues the same algorithm via the **existing TS port** of that module. **Reimplementing the 3-tier / PO logic a third time is forbidden.**
 
@@ -347,7 +347,7 @@ Skill/Python continues to call **`invoice_utils.py`**. Server mint continues the
 create_ses_invoice_draft handler
   1. load prepared obligation + job_id + external_ref (proposal reference)
   2. *** MANDATORY DUP GUARD (unskippable) ***
-       rows = _fetchAllAccrecInvoices(client)          // full paginated live ACCREC
+       rows = fetchAllAccrecInvoices(client)           // full paginated live ACCREC
        hit  = resolveExistingInvoice(rows, job_id, external_ref)  // invoice_utils parity
        if hit:
          // if hit is already THIS obligation's SES-bound DRAFT → idempotent return existing (no twin)
@@ -520,7 +520,7 @@ execute_ses_release_revision       # send routes only
 **Canonical write-up is §0 above** (front of the design so it cannot be missed when skimming create/approve/accept). This section is a pointer only.
 
 - Semantic authority: **`invoice_utils.py`** (skill scripts).  
-- Server mint reuses the existing TS port: **`resolveExistingInvoice` + `_fetchAllAccrecInvoices`** — **no third reimplementation**.  
+- Server mint reuses the existing TS port: **`resolveExistingInvoice` + `fetchAllAccrecInvoices`**, both exported from `makesafe_send_pack.ts` — **no third reimplementation**.  
 - Call site: **`create_ses_invoice_draft` before any `createDraft`**.  
 - Acceptance: **case F** in §3.
 
@@ -533,15 +533,49 @@ execute_ses_release_revision       # send routes only
 3. **`execute_ses_invoice_revision`** must become create-reconcile + authorise-if-approved, not “create only after approve.”  
 4. **Auth matrix:** mint = api_key (+ routine if skill shares prepare’s standing key); approve/authorise/send = JWT human only.  
 5. If any smallest path appears to require fence weakening → **stop and escalate** (Captain rule constraint 2).  
-6. **Dup guard (§0 / case F):** mint must call full `_fetchAllAccrecInvoices` + `resolveExistingInvoice` (**`invoice_utils.py` semantics**) **before** createDraft; must not rely on `resolveSesInvoiceDuplicates` alone; must not reimplement a private third resolver.
+6. **Dup guard (§0 / case F):** mint must call the shared `fetchAllAccrecInvoices` + `resolveExistingInvoice` (**`invoice_utils.py` semantics**) **before** createDraft; must not rely on `resolveSesInvoiceDuplicates` alone; must not reimplement a private third resolver.
 
 ---
+
+## PHASE 2 AS SHIPPED — deltas from the Phase 1 design
+
+`createSesInvoiceDraftAction` (`ses_reporting_actions.ts`), wired at
+`ops-api/index.ts` `case 'create_ses_invoice_draft'` behind
+`assertNoSyntheticLivefireJobs`, on the routine allow-list and on
+`scripts/_ops-api-required-actions.txt` as `probe=source-only`. The design above
+holds; these are the additions the implementation made.
+
+**Auth is narrower than "agent OK".** `requireSesInvoiceMintAuthority` admits
+`api_key` and `routine` outright, but a browser session must be an identified
+Captain / admin-owner (`canManageSesDocsReadySignoff`); any other JWT gets 403.
+Approve/authorise/send remain JWT-only exactly as before.
+
+**Dead or unpriced revisions refuse before the guard runs** (409 each):
+`no_additional_charge` disposition; `state: blocked` or a disposition outside
+`priced_from_canon` / `priced_with_line_override` (returns the stored blocker,
+else `pricing_evidence_missing`); `superseded` / `void_linked`; already
+`authorised` / `released`; and an obligation with no builder reference, since
+the dup guard cannot run without one.
+
+**A failed ACCREC scan is 503, never a silent mint** — the guard is fail-closed.
+
+**Idempotent re-mint repairs a half-written first attempt.** When the live hit
+is this obligation's own DRAFT (bound id match, or the mirror row carries this
+`invoice_obligation_revision_id`), `bindSesDraftInvoiceToRevision` rewrites the
+mirror plus `state: create_executed` + `xero_binding` and returns
+`skipped: true, reason: existing_ses_bound_draft` — so a mint whose Xero create
+landed but whose binding write did not is recoverable instead of stranded. The
+binding update is scoped to `SES_DRAFT_BINDABLE_REVISION_STATES`. A hit that is
+not DRAFT (e.g. AUTHORISED) still refuses with `invoice_duplicate_live`.
+
+**`resolveSesInvoiceDuplicates` runs after, as a supplement only** — the
+obligation-index probe never substitutes for the full-set guard.
 
 ## Status
 
 - Classification history: **(C)** was correct for the pre-decision system.  
 - Product decision: **Option B create-before-approve** (Captain rule B, 2026-08-04).  
 - Phase 1 design: **complete** — create/approve/accept A–E **plus blocking §0 dup guard + acceptance F**.  
-- Phase 2 implementation: **in progress / shipped on branch** — `create_ses_invoice_draft` with full ACCREC dup guard before gateway mint; cockpit APPROVE on DRAFT binding; fence untouched.  
-- Tests: `ses_create_invoice_draft_test.ts` (A/B/F), cockpit + wave0 allow-list updates.  
+- Phase 2 implementation: **shipped on branch** — `create_ses_invoice_draft` with full ACCREC dup guard before gateway mint; cockpit APPROVE on DRAFT binding; fence untouched.  
+- Tests: `ses_create_invoice_draft_test.ts` (A/A2–A6 auth + dead-revision + repair, B, F1–F4, plus a shared-`resolveExistingInvoice` pin), `ses_review_cockpit_test.ts`, `makesafe_wave0_hardening_test.ts` allow-list.  
 - Report: firstmate `data/ses-draft-invoice-create-409-v1/report.md`  

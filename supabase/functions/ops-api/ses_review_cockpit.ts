@@ -359,8 +359,9 @@ export function buildSesCockpitView(
   const hardDecisionBlock = verdict.approval_band === "decision_blocked";
   // Option B: APPROVE INVOICE is permission to make an existing DRAFT real
   // (authorise/release), not permission to mint. Mint is create_ses_invoice_draft.
-  const xeroIsDraft = String(docket.xero_binding?.status || "").toUpperCase() ===
-    "DRAFT";
+  const xeroIsDraft =
+    String(docket.xero_binding?.status || "").toUpperCase() ===
+      "DRAFT";
   const approveInvoice = !stale && !hardDecisionBlock &&
     !noAdditionalCharge &&
     verdict.checks.filter((item) => item.id !== "C11").every((item) =>
