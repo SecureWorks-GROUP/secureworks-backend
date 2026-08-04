@@ -1335,7 +1335,8 @@ When you build that evidence shape, do NOT read `report_pack` off the published
 board — the key is absent from EVERY `makesafe_board` row (0 of 447 on
 2026-08-04), so a parse returns "missing", not the server's value. It is an
 internal seam: `makesafePipeline` synthesises `packForBoard` from the CURRENT
-docket revision (`index.ts:15555-15566`) and sets `review_state: 'READY'`
+docket revision (`index.ts:15579-15593`, the `packForBoard` initialiser) and
+sets `review_state: 'READY'`
 whenever `pre_xero_docs_ready` is true, with no `makesafe_report_packs` row
 required. A card with ZERO rows in that table therefore still has
 `packState: READY`. Treating the absent key as null makes `docsReady()` fall to
@@ -1346,18 +1347,21 @@ happened on SWMS-261109 before it was caught.
 
 `prepare_ses_invoice_obligation` takes only `job_id`, `docket_revision_id`,
 `post_release_disposition` and `created_by`. It copies lines VERBATIM from
-`docket.local_invoice_proposal.line_items` (`ses_reporting_actions.ts:803-815`);
+`docket.local_invoice_proposal.line_items` (the `const lines` map in
+`prepareSesInvoiceObligationAction`, `ses_reporting_actions.ts:809-821`);
 there is no price, quantity or hours parameter. Upstream,
 `hoursPerTrade = Math.max(reportedHoursPerTrade, minimum)`
-(`ses_prepare_docket_revision.ts:730`) raises short attendances to the sealed
+(`ses_prepare_docket_revision.ts:731`) raises short attendances to the sealed
 floor and **never lowers a longer one**. The `rate_override_approved` fields
-(`makesafe_invoice_obligation.ts:145-152`) guard the `priced_with_line_override`
+(the override-audit guard, `makesafe_invoice_obligation.ts:144-150`) guard the
+`priced_with_line_override`
 disposition, which that action never sets, and they govern the RATE, not hours.
 
 There is no separate commercial seam to write instead. `hours_per_trade` resolves
 from `pricing.hours_per_trade` → `completion.hours_per_trade` →
 `checklist.hours_per_trade` → `checklist.labour_hours`
-(`ses_assembler_input_adapter.ts:963-969`), and all four are nested keys inside
+(the `copy("hours_per_trade", …)` call, `ses_assembler_input_adapter.ts:964-970`),
+and all four are nested keys inside
 ONE row: `checklist = record(currentReport.checklist_json)`, with `pricing` and
 `completion` read off that same checklist (`:929-931`). **Setting any of them is
 a write to `job_service_reports.checklist_json`** — the trade's own report.
@@ -1369,7 +1373,7 @@ an agent one. Equally, never quietly prepare at the derived figure instead:
 writing the number nobody chose is a silent substitution. Report the blocker.
 
 Charge-in and charge-out are legitimately different numbers, and the code says so
-at `ses_prepare_docket_revision.ts:699-702` — the field report's hours are what
+at `ses_prepare_docket_revision.ts:698-702` — the field report's hours are what
 the TRADE bills US, the billed hours are what WE bill the builder. A gap between
 the report and the invoice is a commercial decision to document, not a
 discrepancy to reconcile.
@@ -1377,10 +1381,12 @@ discrepancy to reconcile.
 The `priced_with_line_override` instrument is mostly built (DB constraint,
 disposition union, per-line `rate_override_approved`/`_by`/`_at`, the audit
 guard, `line_overrides_audited`, release and cockpit support) but is
-**unreachable**: nothing ever selects that disposition
-(`ses_reporting_actions.ts:824-832`) and lines are built without the override
-fields. Review feedback is not a route either — it only appends a row
-(`ses_reporting_actions.ts:2473-2516`) and the pricing path never reads it.
+**unreachable**: nothing ever selects that disposition (the
+`pricing_disposition` ternary, `ses_reporting_actions.ts:829-840`) and lines are
+built without the override fields. Review feedback is not a route either — it
+only appends a row (`recordSesReviewFeedbackAction`'s
+`record_ses_review_feedback_v1` insert, `ses_reporting_actions.ts:2845-2888`) and
+the pricing path never reads it.
 
 **Do not wire it up without settling rate-versus-quantity first.** Those fields
 override the RATE, not the QUANTITY. Reaching a reduced total while holding the
@@ -1394,7 +1400,10 @@ neither exists today. Treat it as an open design decision for the owner.
 Worked example: SWMS-261109 / AJBR-70271, trade reported 2 x 3 hours ($750 ex /
 $825 inc) against an owner-chosen 2 x 2.5 hours ($670 / $737); six candidate
 paths checked, all closed, obligation left unwritten and trade evidence
-unaltered. Evidence: `data/bertram-live-bind-v1/report.md` in the firstmate home.
+unaltered. Evidence lives OUTSIDE this repository, deliberately — task reports
+never enter the shared project repo — at
+**`<firstmate-home>/data/bertram-live-bind-v1/report.md`**. Do not look for it
+under this repo's `data/`; its absence here is intended, not a missing artifact.
 
 ## Maintaining this file
 
