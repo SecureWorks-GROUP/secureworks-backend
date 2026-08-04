@@ -196,6 +196,8 @@ Deno.test("cockpit uses fixed Stage D order and split invoice/send controls", ()
       invoice_number: "INV-DRAFT-1",
       status: "DRAFT",
       total: 737,
+      pdf_content_hash: null,
+      pdf_available: false,
     },
   );
 
