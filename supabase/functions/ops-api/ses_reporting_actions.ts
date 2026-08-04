@@ -699,7 +699,8 @@ export async function loadSesCockpitDocket(
         cockpitArtifacts,
         rawBinding,
       );
-      xeroInvoicePdfAvailable = !!String(boundArtifact?.object_key || "").trim();
+      xeroInvoicePdfAvailable = !!String(boundArtifact?.object_key || "")
+        .trim();
     }
   }
   return {
@@ -1215,7 +1216,8 @@ export async function createSesInvoiceDraftAction(
         ? {
           pdf_object_key: existingPdfKey,
           pdf_content_hash: existingPdfHash,
-          pdf_size_bytes: Number(object(revision.xero_binding).pdf_size_bytes) ||
+          pdf_size_bytes:
+            Number(object(revision.xero_binding).pdf_size_bytes) ||
             0,
           pdf_stored_at: String(
             object(revision.xero_binding).pdf_stored_at || "",

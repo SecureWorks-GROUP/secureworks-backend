@@ -87,8 +87,11 @@ Enhanced response includes: jobNumber, xeroContact, monetaryValue
   routine / Captain-or-admin-owner JWT, internal SES context through the fence,
   and a mandatory full paginated live-ACCREC duplicate guard before any create.
   It never authorises, emails, sends, or voids, and it does not reopen the
-  retired free create paths. Contract and shipped deltas:
-  `data/ses-draft-invoice-create-409-v1/report.md`.
+  retired free create paths. On success it also stores the real Xero-rendered
+  DRAFT PDF (best effort) so the cockpit Invoice tab can show that document
+  before APPROVE; a card whose PDF cannot be fetched is reported unavailable and
+  never backfilled with a locally rendered stand-in. Contract and shipped
+  deltas: `data/ses-draft-invoice-create-409-v1/report.md`.
 - The sanctioned SES-native invoice void path is the privileged,
   human-authorised `prepare_ses_invoice_void_revision`,
   `approve_ses_invoice_void_revision`, then
