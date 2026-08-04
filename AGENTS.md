@@ -1007,8 +1007,9 @@ assert that NO board card moved.
 
 ## The SES Money And Outbound Seal Is Write-Once
 
-The write-once SES money/outbound seal and its approved invoice-void release
-path are owned by `docs/project-knowledge/sync-layer.md`; deploy ordering and
+The write-once SES money/outbound seal and its sanctioned SES-native paths (the
+`create_ses_invoice_draft` DRAFT mint and the invoice-void release sequence) are
+owned by `docs/project-knowledge/sync-layer.md`; deploy ordering and
 build-stamped version truth are owned by
 `docs/project-knowledge/EDGE_DEPLOY_LANE.md` and
 `docs/project-knowledge/OPS_API_SOURCE_OF_TRUTH.md`. The shared runtime

@@ -357,13 +357,19 @@ export function buildSesCockpitView(
   const noAdditionalCharge =
     docket.clean_input.pricing_disposition === "no_additional_charge";
   const hardDecisionBlock = verdict.approval_band === "decision_blocked";
+  // Option B: APPROVE INVOICE is permission to make an existing DRAFT real
+  // (authorise/release), not permission to mint. Mint is create_ses_invoice_draft.
+  const xeroIsDraft =
+    String(docket.xero_binding?.status || "").toUpperCase() ===
+      "DRAFT";
   const approveInvoice = !stale && !hardDecisionBlock &&
     !noAdditionalCharge &&
     verdict.checks.filter((item) => item.id !== "C11").every((item) =>
       item.passed
     ) &&
     !!docket.invoice_obligation_revision_id &&
-    !docket.xero_binding;
+    !!docket.xero_binding &&
+    xeroIsDraft;
   const sendIt = !stale && verdict.clean &&
     (xeroAuthorised || noAdditionalCharge);
   const status: SesCockpitView["status"] = stale || verdict.blockers.length > 0
@@ -410,7 +416,7 @@ export function buildSesCockpitView(
         enabled: approveInvoice,
         label: "APPROVE INVOICE",
         plan:
-          "Create one Xero DRAFT for this exact obligation revision; authorise only if this approval explicitly includes authorise; then attach the real Xero PDF as a new docket revision.",
+          "Approve the existing Xero DRAFT for this exact obligation revision; authorise only if this approval explicitly includes authorise; then attach the real Xero PDF as a new docket revision.",
       },
       send_it: {
         enabled: sendIt,

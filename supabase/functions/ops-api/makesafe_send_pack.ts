@@ -209,6 +209,37 @@ export interface ExistingInvoiceHit {
   match_method: "job_id" | "reference" | "reference_substring";
 }
 
+/**
+ * Full live ACCREC set for the mandatory duplicate-invoice guard.
+ * Paginated to completion (page 500) — never a recent ~50-row window.
+ * Semantic twin of invoice_utils.fetch_all_invoices (skill scripts).
+ */
+export async function fetchAllAccrecInvoices(client: {
+  from: (table: string) => any;
+}): Promise<any[]> {
+  const rows: any[] = [];
+  const page = 500;
+  let offset = 0;
+  // Bounded loop — never spin forever even if the table is huge.
+  for (let guard = 0; guard < 40; guard++) {
+    const { data, error } = await client.from("xero_invoices")
+      .select(
+        "xero_invoice_id, invoice_number, reference, status, job_id, invoice_type, invoice_date, sub_total, total, total_tax, line_items, invoice_obligation_revision_id, ses_external_token",
+      )
+      .eq("invoice_type", "ACCREC")
+      .order("invoice_date", { ascending: false })
+      .range(offset, offset + page - 1);
+    if (error) {
+      throw new Error("dup-guard: xero_invoices scan failed: " + error.message);
+    }
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < page) break;
+    offset += page;
+  }
+  return rows;
+}
+
 export function resolveExistingInvoice(
   rows: any[] | null | undefined,
   jobId: string | null | undefined,

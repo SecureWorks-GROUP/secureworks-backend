@@ -486,7 +486,19 @@ Deno.test("dispatch and reconciliation both persist the exact Xero mirror", () =
     "The exact Xero invoice exists, but its job, obligation revision, and SES token mirror could not be stored",
   );
   assertEquals(
-    (ACTIONS.match(/await persistSesInvoiceMirror\(client,/g) || []).length,
+    (ACTIONS.match(/await persistSesInvoiceMirror\(client, \{/g) || []).length,
     2,
+    "the execute path persists the mirror on dispatch and on reconciliation",
+  );
+  assertStringIncludes(
+    ACTIONS,
+    "async function bindSesDraftInvoiceToRevision",
+  );
+  assertStringIncludes(ACTIONS, "await persistSesInvoiceMirror(client, args);");
+  assertEquals(
+    (ACTIONS.match(/await bindSesDraftInvoiceToRevision\(client, \{/g) || [])
+      .length,
+    2,
+    "draft mint and its idempotent repair both bind mirror and revision together",
   );
 });
