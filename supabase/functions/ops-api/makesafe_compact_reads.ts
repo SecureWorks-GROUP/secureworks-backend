@@ -165,6 +165,11 @@ export function chunkByUrlBudget(ids: string[]): string[][] {
 // `fetchAllRows` after any caller-supplied ordering — same total-order law as the
 // unchunked reader.
 //
+// Chunks run concurrently. Each chunk still paginates internally with a stable
+// uniqueKey order; cross-chunk row order is not load-bearing (callers group by
+// job_id / re-sort). Parallel chunks cut the make-safe board's sequential
+// PostgREST round-trips: ~450 UUIDs → 3 chunks that used to wait on each other.
+//
 // Exported: `ops-api/index.ts` reuses this same reader for its make-safe job-id
 // joins (`_fetchAllByJobIdChunked`).
 export async function fetchAllRowsInChunks<T = any>(
@@ -179,16 +184,19 @@ export async function fetchAllRowsInChunks<T = any>(
   // DB row twice (double-counting downstream). Dedup also shrinks the request.
   const uniqueIds = Array.from(new Set(ids));
   if (!uniqueIds.length) return [];
+  const chunks = chunkByUrlBudget(uniqueIds);
+  const pages = await Promise.all(
+    chunks.map((ch) =>
+      fetchAllRows<T>(
+        () => buildQueryForChunk(ch),
+        label,
+        uniqueKey,
+        uniqueAscending,
+      )
+    ),
+  );
   const all: T[] = [];
-  for (const ch of chunkByUrlBudget(uniqueIds)) {
-    const rows = await fetchAllRows<T>(
-      () => buildQueryForChunk(ch),
-      label,
-      uniqueKey,
-      uniqueAscending,
-    );
-    all.push(...rows);
-  }
+  for (const rows of pages) all.push(...rows);
   return all;
 }
 

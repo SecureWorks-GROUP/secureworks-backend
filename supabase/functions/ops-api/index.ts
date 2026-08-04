@@ -15480,11 +15480,28 @@ async function makesafePortalRecheckEnqueue(client: any, body: any) {
 export const _makesafePortalRecheckEnqueue = makesafePortalRecheckEnqueue
 
 // ── Slice 3: dedicated make-safe pipeline ──
-async function makesafePipeline(client: any, params: URLSearchParams, restrictJobIds?: string[]) {
+async function makesafePipeline(
+  client: any,
+  params: URLSearchParams,
+  restrictJobIds?: string[],
+  opts?: {
+    /**
+     * Active ops board path: cards with jobs.status='archived' early-return
+     * stage `archive` and never leave that column. Skip their stage-dependent
+     * joins (reports/invoices/docs/packs/assignments/pack-sent notes) so the
+     * default board does not pay PostgREST cost for ~30% of the history set
+     * that only contributes to the archive census. When false/omitted (pipeline
+     * endpoint, include_archive, trade, seed), every job still gets full joins
+     * so archive card chips stay complete.
+     */
+    skipArchivedStatusDependents?: boolean
+  },
+) {
   // The canonical board endpoint requests history=all so archived/cancelled
   // cards remain searchable. The legacy makesafe_pipeline response preserves its
   // existing active + 90-day-cancelled window until its consumer migrates.
   const allHistory = params.get('history') === 'all'
+  const skipArchivedStatusDependents = opts?.skipArchivedStatusDependents === true
   // Optional server-authorised scope: when present, BOTH the active and cancelled
   // job queries are constrained to this id set so an allocated-only caller never
   // loads make-safes it can't see. A caller passing an empty set gets nothing.
@@ -15494,22 +15511,33 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   // partial board for a highly-allocated trade.
   const restrict = Array.isArray(restrictJobIds) ? restrictJobIds : null
   if (restrict && restrict.length === 0) {
-    return { columns: { new: [], allocated: [], trade_report_in: [], report_ready: [], completed: [], archive: [], cancelled: [] }, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: 0 }
+    return {
+      columns: { new: [], allocated: [], trade_report_in: [], report_ready: [], completed: [], archive: [], cancelled: [] },
+      stage_labels: MAKESAFE_BOARD_STAGE_LABELS,
+      total: 0,
+      terminal_synthetic_job_ids: [] as string[],
+    }
   }
   // makesafe_job_details is itself durable MakeSafe authority. Historical jobs
   // can carry that row while their generic jobs.type and job_number markers are
   // missing or non-canonical. Read the compact authority index first, then union
   // those jobs into both active and cancelled populations below. This mirrors
   // the trade-feed backstop and keeps the two board audiences on one population.
-  const detailAuthorityRows = await readPagedRows(
-    (offset, limit) =>
-      client
-        .from('makesafe_job_details')
-        .select('job_id')
-        .order('job_id', { ascending: true })
-        .range(offset, offset + limit - 1),
-    'make-safe board detail authority index',
-  )
+  // Detail-authority index + terminal synthetic ledger are independent — load
+  // them together so the board path does not pay two serial PostgREST RTTs
+  // before any job page starts.
+  const [detailAuthorityRows, terminalSyntheticIds] = await Promise.all([
+    readPagedRows(
+      (offset, limit) =>
+        client
+          .from('makesafe_job_details')
+          .select('job_id')
+          .order('job_id', { ascending: true })
+          .range(offset, offset + limit - 1),
+      'make-safe board detail authority index',
+    ),
+    terminalSyntheticLivefireJobIds(client),
+  ])
   const restrictSet = restrict ? new Set(restrict) : null
   const detailAuthorityJobIds = Array.from(new Set<string>(
     (detailAuthorityRows || [])
@@ -15522,44 +15550,53 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   // money-safe even as the job set (and its events/docs) grows past the cap.
   // When restrict is set, walk budgeted id chunks and merge; re-sort after merge
   // so Board order stays created_at desc, id desc across chunks.
+  //
+  // Typed sources + detail-authority id chunks run concurrently. Each lane still
+  // paginates its own range; only the merge/dedupe/sort is sequential.
   const jobsRaw: any[] = []
   {
     const idChunks: Array<string[] | null> = restrict
       ? _chunkByUrlBudget(restrict)
       : [null]
     const sources = [
-      { type: 'makesafe', insurance_job_type: null },
-      { type: 'insurance', insurance_job_type: 'restoration' },
+      { type: 'makesafe', insurance_job_type: null as string | null },
+      { type: 'insurance', insurance_job_type: 'restoration' as string | null },
     ]
-    for (const source of sources) {
-      for (const idChunk of idChunks) {
-        let offset = 0
-        for (let guard = 0; guard < 1000; guard++) {
-          let activeQuery = client.from('jobs')
-            .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
-            .eq('type', source.type)
-            .not('status', 'in', makesafeBoardJobStatusExclusionFilter(allHistory))
-          if (source.insurance_job_type) {
-            activeQuery = activeQuery.eq('metadata->>insurance_job_type', source.insurance_job_type)
-          }
-          if (idChunk) activeQuery = activeQuery.in('id', idChunk)
-          const { data, error } = await activeQuery
-            .order('created_at', { ascending: false })
-            .order('id', { ascending: false })
-            .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
-          if (error) throw error
-          const batch = data || []
-          jobsRaw.push(...batch)
-          if (batch.length < MAKESAFE_PAGE_SIZE) break
-          offset += MAKESAFE_PAGE_SIZE
+    const jobSelect =
+      'id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at'
+    const pageTypedLane = async (
+      source: { type: string; insurance_job_type: string | null },
+      idChunk: string[] | null,
+    ): Promise<any[]> => {
+      const out: any[] = []
+      let offset = 0
+      for (let guard = 0; guard < 1000; guard++) {
+        let activeQuery = client.from('jobs')
+          .select(jobSelect)
+          .eq('type', source.type)
+          .not('status', 'in', makesafeBoardJobStatusExclusionFilter(allHistory))
+        if (source.insurance_job_type) {
+          activeQuery = activeQuery.eq('metadata->>insurance_job_type', source.insurance_job_type)
         }
+        if (idChunk) activeQuery = activeQuery.in('id', idChunk)
+        const { data, error } = await activeQuery
+          .order('created_at', { ascending: false })
+          .order('id', { ascending: false })
+          .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+        if (error) throw error
+        const batch = data || []
+        out.push(...batch)
+        if (batch.length < MAKESAFE_PAGE_SIZE) break
+        offset += MAKESAFE_PAGE_SIZE
       }
+      return out
     }
-    for (const detailChunk of _chunkByUrlBudget(detailAuthorityJobIds)) {
+    const pageDetailAuthorityLane = async (detailChunk: string[]): Promise<any[]> => {
+      const out: any[] = []
       let offset = 0
       for (let guard = 0; guard < 1000; guard++) {
         const { data, error } = await client.from('jobs')
-          .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
+          .select(jobSelect)
           .in('id', detailChunk)
           .not('status', 'in', makesafeBoardJobStatusExclusionFilter(allHistory))
           .order('created_at', { ascending: false })
@@ -15567,11 +15604,20 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
           .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
         if (error) throw error
         const batch = data || []
-        jobsRaw.push(...batch)
+        out.push(...batch)
         if (batch.length < MAKESAFE_PAGE_SIZE) break
         offset += MAKESAFE_PAGE_SIZE
       }
+      return out
     }
+    const typedLanes = sources.flatMap((source) =>
+      idChunks.map((idChunk) => pageTypedLane(source, idChunk))
+    )
+    const detailLanes = _chunkByUrlBudget(detailAuthorityJobIds).map((detailChunk) =>
+      pageDetailAuthorityLane(detailChunk)
+    )
+    const laneResults = await Promise.all([...typedLanes, ...detailLanes])
+    for (const batch of laneResults) jobsRaw.push(...batch)
     const uniqueJobs = Array.from(
       new Map(jobsRaw.map((job: any) => [String(job?.id || ''), job])).values(),
     )
@@ -15583,12 +15629,22 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       return String(b?.id || '').localeCompare(String(a?.id || ''))
     })
   }
-  const terminalSyntheticIds = await terminalSyntheticLivefireJobIds(client)
   const jobs = jobsRaw.filter((job) =>
     !(isSyntheticLivefireJob(job) && terminalSyntheticIds.has(String(job.id))))
 
   // Fetch all makesafe_job_details for these jobs
   const jobIds = (jobs || []).map((j: any) => j.id)
+  // jobs.status === 'archived' always derives board_stage archive (early return
+  // in _deriveMakesafeBoardStage). On the active ops paint path those cards are
+  // census-only, so stage-dependent joins can skip them without moving placement.
+  const archivedStatusJobIds = new Set(
+    (jobs || [])
+      .filter((j: any) => String(j?.status || '').toLowerCase() === 'archived')
+      .map((j: any) => j.id),
+  )
+  const stageDependentJobIds = skipArchivedStatusDependents
+    ? jobIds.filter((id: string) => !archivedStatusJobIds.has(id))
+    : jobIds
   let detailsMap: Record<string, any> = {}
   let reportMap: Record<string, any> = {}
   let invoiceMap: Record<string, any> = {}
@@ -15600,65 +15656,129 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   let docketMap: Record<string, any> = {}
   let packCyclesByPackId: Record<string, any[]> = {}
   const captainActionMap: Record<string, any> = {}
+  // assignMap / packSentMap: filled in the same dependent wave as details.
+  let assignMap: Record<string, any[]> = {}
+  // packSentMap: which jobs carry a verified MAKESAFE_PACK_SENT | main marker.
+  let packSentMap: Record<string, boolean> = {}
   if (jobIds.length > 0) {
-    // T1 — id-chunked (details list is one-per-job so row count ~= job count,
-    // but chunk the .in() anyway so a multi-thousand-job set can't exceed the
-    // PostgREST id-list/row caps).
-    const details = await _fetchAllByJobIdChunked(
-      client,
-      'makesafe_job_details',
-      '*, makesafe_companies:requesting_company_id(slug, name)',
-      jobIds,
-    )
+    // One concurrent wave for every job-id join the stage ladder needs.
+    // Previously details, then 6 tables, then attention, then assignments, then
+    // pack-sent notes were serial waves — each wave 1–3 PostgREST RTTs on the
+    // ~450-job board. Membership and predicates are unchanged; only scheduling.
+    // Details + captain attention still cover the full job set (company label and
+    // display marks). Stage-dependent tables use stageDependentJobIds.
+    const loadCaptainAttention = async (): Promise<any[]> => {
+      try {
+        return await _fetchAllByJobIdChunked(
+          client,
+          'makesafe_board_attention_current',
+          'job_id, code, message, evidence_refs, computed_at, marked_at',
+          jobIds,
+        )
+      } catch (error) {
+        // U2 truth reconciliation: a nullable display-only Captain action. The
+        // migration can legitimately lag this edge code in preview environments, so
+        // preserve the board and log loudly if the additive view is unavailable.
+        console.error('[ops-api] makesafe board Captain actions unavailable:', (error as Error).message)
+        return []
+      }
+    }
+    const emptyRows = Promise.resolve([] as any[])
+    const emptyPackSent = Promise.resolve({} as Record<string, boolean>)
+    const hasStageDependents = stageDependentJobIds.length > 0
+    const [
+      details,
+      reports,
+      invoices,
+      docs,
+      packs,
+      packCycles,
+      dockets,
+      attention,
+      assigns,
+      packSent,
+    ] = await Promise.all([
+      // T1 — id-chunked (details list is one-per-job so row count ~= job count,
+      // but chunk the .in() anyway so a multi-thousand-job set can't exceed the
+      // PostgREST id-list/row caps). Always full jobIds — archive shells need
+      // company/substatus for census and include_archive paint.
+      _fetchAllByJobIdChunked(
+        client,
+        'makesafe_job_details',
+        '*, makesafe_companies:requesting_company_id(slug, name)',
+        jobIds,
+      ),
+      // T1 — job_service_reports + xero_invoices + job_documents + report_packs.
+      // job_documents ROW count can exceed 1000 across full history, so it MUST be
+      // row-paginated (not just id-chunked). The chunked helper does both. We keep
+      // the original predicate/order via applyFilters.
+      hasStageDependents
+        ? _fetchAllByJobIdChunked(
+          client,
+          'job_service_reports',
+          'job_id, status, submitted_at, created_at, cycle_number, attendance_cycle_id, cycle_attribution',
+          stageDependentJobIds,
+          (q) => q.neq('status', 'draft').order('submitted_at', { ascending: false }),
+        )
+        : emptyRows,
+      hasStageDependents
+        ? _fetchAllByJobIdChunked(
+          client,
+          'xero_invoices',
+          'id, xero_invoice_id, job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date, created_at',
+          stageDependentJobIds,
+          (q) => q.eq('invoice_type', 'ACCREC')
+            .order('invoice_date', { ascending: false }),
+        )
+        : emptyRows,
+      hasStageDependents
+        ? _fetchAllByJobIdChunked(
+          client,
+          'job_documents',
+          'job_id, type, file_name',
+          stageDependentJobIds,
+        )
+        : emptyRows,
+      hasStageDependents
+        ? _fetchAllByJobIdChunked(
+          client,
+          'makesafe_report_packs',
+          'id, job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at',
+          stageDependentJobIds,
+        )
+        : emptyRows,
+      hasStageDependents
+        ? _fetchAllByJobIdChunked(
+          client,
+          'makesafe_report_pack_cycles',
+          'pack_id, job_id, attendance_cycle_id, cycle_attribution',
+          stageDependentJobIds,
+        )
+        : emptyRows,
+      hasStageDependents
+        ? _fetchAllByJobIdChunked(
+          client,
+          'makesafe_docket_revisions_current',
+          'id, job_id, state, pre_xero_docs_ready, blockers, current_attendance_cycle_id, committed_at',
+          stageDependentJobIds,
+        )
+        : emptyRows,
+      loadCaptainAttention(),
+      // T1 — assignments can be multiple per job; id-chunk + row-paginate.
+      hasStageDependents
+        ? _fetchAllByJobIdChunked(
+          client,
+          'job_assignments',
+          'id, job_id, user_id, scheduled_date, start_time, status, role, crew_name, travel_started_at, arrived_at, started_at, clocked_on_at, completed_at, attendance_cycle_id, cycle_attribution, users:user_id(id, name, phone)',
+          stageDependentJobIds,
+          (q) => q.neq('status', 'cancelled').order('scheduled_date', { ascending: true }),
+        )
+        : emptyRows,
+      hasStageDependents ? buildPackSentMap(client, stageDependentJobIds) : emptyPackSent,
+    ])
     for (const d of (details || [])) {
       detailsMap[d.job_id] = d
     }
-
-    // T1 — job_service_reports + xero_invoices + job_documents + report_packs.
-    // job_documents ROW count can exceed 1000 across full history, so it MUST be
-    // row-paginated (not just id-chunked). The chunked helper does both. We keep
-    // the original predicate/order via applyFilters.
-    const [reports, invoices, docs, packs, packCycles, dockets] = await Promise.all([
-      _fetchAllByJobIdChunked(
-        client,
-        'job_service_reports',
-        'job_id, status, submitted_at, created_at, cycle_number, attendance_cycle_id, cycle_attribution',
-        jobIds,
-        (q) => q.neq('status', 'draft').order('submitted_at', { ascending: false }),
-      ),
-      _fetchAllByJobIdChunked(
-        client,
-        'xero_invoices',
-        'id, xero_invoice_id, job_id, status, invoice_type, invoice_number, reference, amount_due, total, invoice_date, created_at',
-        jobIds,
-        (q) => q.eq('invoice_type', 'ACCREC')
-          .order('invoice_date', { ascending: false }),
-      ),
-      _fetchAllByJobIdChunked(
-        client,
-        'job_documents',
-        'job_id, type, file_name',
-        jobIds,
-      ),
-      _fetchAllByJobIdChunked(
-        client,
-        'makesafe_report_packs',
-        'id, job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at',
-        jobIds,
-      ),
-      _fetchAllByJobIdChunked(
-        client,
-        'makesafe_report_pack_cycles',
-        'pack_id, job_id, attendance_cycle_id, cycle_attribution',
-        jobIds,
-      ),
-      _fetchAllByJobIdChunked(
-        client,
-        'makesafe_docket_revisions_current',
-        'id, job_id, state, pre_xero_docs_ready, blockers, current_attendance_cycle_id, committed_at',
-        jobIds,
-      ),
-    ])
     const cycleIdByJobId: Record<string, string | null> = {}
     for (const d of details || []) cycleIdByJobId[d.job_id] = d.attendance_cycle_id ?? null
     reportMap = currentCycleReportMap(reports || [], detailsMap, cycleIdByJobId)
@@ -15683,42 +15803,14 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
       }
     }
     docketMap = firstByJobId(dockets || [])
-    // U2 truth reconciliation: a nullable display-only Captain action. The
-    // migration can legitimately lag this edge code in preview environments, so
-    // preserve the board and log loudly if the additive view is unavailable.
-    try {
-      const attention = await _fetchAllByJobIdChunked(
-        client,
-        'makesafe_board_attention_current',
-        'job_id, code, message, evidence_refs, computed_at, marked_at',
-        jobIds,
-      )
-      for (const mark of (attention || [])) {
-        if (mark?.job_id) captainActionMap[mark.job_id] = mark
-      }
-    } catch (error) {
-      console.error('[ops-api] makesafe board Captain actions unavailable:', (error as Error).message)
+    for (const mark of (attention || [])) {
+      if (mark?.job_id) captainActionMap[mark.job_id] = mark
     }
-  }
-
-  // Fetch assignments for these jobs
-  let assignMap: Record<string, any[]> = {}
-  // packSentMap: which jobs carry a verified MAKESAFE_PACK_SENT | main marker.
-  let packSentMap: Record<string, boolean> = {}
-  if (jobIds.length > 0) {
-    // T1 — assignments can be multiple per job; id-chunk + row-paginate.
-    const assigns = await _fetchAllByJobIdChunked(
-      client,
-      'job_assignments',
-      'id, job_id, user_id, scheduled_date, start_time, status, role, crew_name, travel_started_at, arrived_at, started_at, clocked_on_at, completed_at, attendance_cycle_id, cycle_attribution, users:user_id(id, name, phone)',
-      jobIds,
-      (q) => q.neq('status', 'cancelled').order('scheduled_date', { ascending: true }),
-    )
     for (const a of (assigns || [])) {
       if (!assignMap[a.job_id]) assignMap[a.job_id] = []
       assignMap[a.job_id].push(a)
     }
-    packSentMap = await buildPackSentMap(client, jobIds)
+    packSentMap = packSent || {}
   }
 
   const columns: Record<string, any[]> = {
@@ -15795,44 +15887,52 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   const cancelledSinceIso = new Date(Date.now() - CANCELLED_WINDOW_DAYS * 86_400_000).toISOString()
   const cancelledRaw: any[] = []
   {
-    // Same URL-budget chunking as the active restrict path (F7).
+    // Same URL-budget chunking as the active restrict path (F7). Typed sources
+    // and detail-authority chunks run concurrently (same shape as the active
+    // job load above).
     const idChunks: Array<string[] | null> = restrict
       ? _chunkByUrlBudget(restrict)
       : [null]
     const sources = [
-      { type: 'makesafe', insurance_job_type: null },
-      { type: 'insurance', insurance_job_type: 'restoration' },
+      { type: 'makesafe', insurance_job_type: null as string | null },
+      { type: 'insurance', insurance_job_type: 'restoration' as string | null },
     ]
-    for (const source of sources) {
-      for (const idChunk of idChunks) {
-        let offset = 0
-        for (let guard = 0; guard < 100; guard++) {
-          let cancelledQuery = client.from('jobs')
-            .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
-            .eq('type', source.type)
-            .eq('status', 'cancelled')
-          if (source.insurance_job_type) {
-            cancelledQuery = cancelledQuery.eq('metadata->>insurance_job_type', source.insurance_job_type)
-          }
-          if (idChunk) cancelledQuery = cancelledQuery.in('id', idChunk)
-          if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
-          const { data, error } = await cancelledQuery
-            .order('updated_at', { ascending: false })
-            .order('id', { ascending: false })
-            .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
-          if (error) throw error
-          const batch = data || []
-          cancelledRaw.push(...batch)
-          if (batch.length < MAKESAFE_PAGE_SIZE) break
-          offset += MAKESAFE_PAGE_SIZE
-        }
-      }
-    }
-    for (const detailChunk of _chunkByUrlBudget(detailAuthorityJobIds)) {
+    const jobSelect =
+      'id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at'
+    const pageCancelledTypedLane = async (
+      source: { type: string; insurance_job_type: string | null },
+      idChunk: string[] | null,
+    ): Promise<any[]> => {
+      const out: any[] = []
       let offset = 0
       for (let guard = 0; guard < 100; guard++) {
         let cancelledQuery = client.from('jobs')
-          .select('id, job_number, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, metadata, created_at, updated_at, completed_at')
+          .select(jobSelect)
+          .eq('type', source.type)
+          .eq('status', 'cancelled')
+        if (source.insurance_job_type) {
+          cancelledQuery = cancelledQuery.eq('metadata->>insurance_job_type', source.insurance_job_type)
+        }
+        if (idChunk) cancelledQuery = cancelledQuery.in('id', idChunk)
+        if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
+        const { data, error } = await cancelledQuery
+          .order('updated_at', { ascending: false })
+          .order('id', { ascending: false })
+          .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
+        if (error) throw error
+        const batch = data || []
+        out.push(...batch)
+        if (batch.length < MAKESAFE_PAGE_SIZE) break
+        offset += MAKESAFE_PAGE_SIZE
+      }
+      return out
+    }
+    const pageCancelledDetailLane = async (detailChunk: string[]): Promise<any[]> => {
+      const out: any[] = []
+      let offset = 0
+      for (let guard = 0; guard < 100; guard++) {
+        let cancelledQuery = client.from('jobs')
+          .select(jobSelect)
           .in('id', detailChunk)
           .eq('status', 'cancelled')
         if (!allHistory) cancelledQuery = cancelledQuery.gte('updated_at', cancelledSinceIso)
@@ -15842,11 +15942,20 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
           .range(offset, offset + MAKESAFE_PAGE_SIZE - 1)
         if (error) throw error
         const batch = data || []
-        cancelledRaw.push(...batch)
+        out.push(...batch)
         if (batch.length < MAKESAFE_PAGE_SIZE) break
         offset += MAKESAFE_PAGE_SIZE
       }
+      return out
     }
+    const typedLanes = sources.flatMap((source) =>
+      idChunks.map((idChunk) => pageCancelledTypedLane(source, idChunk))
+    )
+    const detailLanes = _chunkByUrlBudget(detailAuthorityJobIds).map((detailChunk) =>
+      pageCancelledDetailLane(detailChunk)
+    )
+    const laneResults = await Promise.all([...typedLanes, ...detailLanes])
+    for (const batch of laneResults) cancelledRaw.push(...batch)
     const uniqueCancelled = Array.from(
       new Map(cancelledRaw.map((job: any) => [String(job?.id || ''), job])).values(),
     )
@@ -15863,13 +15972,6 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   if (visibleCancelledRows.length > 0) {
     const cancelledIds = visibleCancelledRows.map((j: any) => j.id)
     const cancelledDetailsMap: Record<string, any> = {}
-    const cds = await _fetchAllByJobIdChunked(
-      client,
-      'makesafe_job_details',
-      '*, makesafe_companies:requesting_company_id(slug, name)',
-      cancelledIds,
-    )
-    for (const d of (cds || [])) cancelledDetailsMap[d.job_id] = d
     // Retain assignment ownership on cancelled cards so the trade projection can
     // keep an allocated-only trade's OWN worked-then-cancelled make-safes in their
     // Archive. Cancelling a make-safe closes its open assignments to 'cancelled',
@@ -15877,30 +15979,43 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
     // tradeSafe still filters the per-card payload to the viewer's own assignment,
     // so another trade's allocation is never exposed.
     const cancelledAssignMap: Record<string, any[]> = {}
-    const cancelledAssigns = await _fetchAllByJobIdChunked(
-      client,
-      'job_assignments',
-      'id, job_id, user_id, scheduled_date, start_time, status, role, crew_name, travel_started_at, arrived_at, started_at, clocked_on_at, completed_at, users:user_id(id, name, phone)',
-      cancelledIds,
-      (q) => q.order('scheduled_date', { ascending: true }),
-    )
+    const loadCancelledCaptainAttention = async (): Promise<any[]> => {
+      try {
+        return await _fetchAllByJobIdChunked(
+          client,
+          'makesafe_board_attention_current',
+          'job_id, code, message, evidence_refs, computed_at, marked_at',
+          cancelledIds,
+        )
+      } catch (error) {
+        console.error('[ops-api] cancelled make-safe Captain actions unavailable:', (error as Error).message)
+        return []
+      }
+    }
+    const [cds, cancelledAssigns, cancelledAttention] = await Promise.all([
+      _fetchAllByJobIdChunked(
+        client,
+        'makesafe_job_details',
+        '*, makesafe_companies:requesting_company_id(slug, name)',
+        cancelledIds,
+      ),
+      _fetchAllByJobIdChunked(
+        client,
+        'job_assignments',
+        'id, job_id, user_id, scheduled_date, start_time, status, role, crew_name, travel_started_at, arrived_at, started_at, clocked_on_at, completed_at, users:user_id(id, name, phone)',
+        cancelledIds,
+        (q) => q.order('scheduled_date', { ascending: true }),
+      ),
+      loadCancelledCaptainAttention(),
+    ])
+    for (const d of (cds || [])) cancelledDetailsMap[d.job_id] = d
     for (const a of (cancelledAssigns || [])) {
       if (!a?.job_id) continue
       if (!cancelledAssignMap[a.job_id]) cancelledAssignMap[a.job_id] = []
       cancelledAssignMap[a.job_id].push(a)
     }
-    try {
-      const attention = await _fetchAllByJobIdChunked(
-        client,
-        'makesafe_board_attention_current',
-        'job_id, code, message, evidence_refs, computed_at, marked_at',
-        cancelledIds,
-      )
-      for (const mark of (attention || [])) {
-        if (mark?.job_id) captainActionMap[mark.job_id] = mark
-      }
-    } catch (error) {
-      console.error('[ops-api] cancelled make-safe Captain actions unavailable:', (error as Error).message)
+    for (const mark of (cancelledAttention || [])) {
+      if (mark?.job_id) captainActionMap[mark.job_id] = mark
     }
     const cancelledCards = visibleCancelledRows.map((j: any) =>
       {
@@ -15934,7 +16049,14 @@ async function makesafePipeline(client: any, params: URLSearchParams, restrictJo
   }
 
   // `total` reflects the ACTIVE board only (cancelled fed separately, above).
-  return { columns, stage_labels: MAKESAFE_BOARD_STAGE_LABELS, total: (jobs || []).length }
+  // terminal_synthetic_job_ids lets loadCanonicalMakesafeBoard reuse the ledger
+  // read already paid for above instead of a second identical PostgREST call.
+  return {
+    columns,
+    stage_labels: MAKESAFE_BOARD_STAGE_LABELS,
+    total: (jobs || []).length,
+    terminal_synthetic_job_ids: Array.from(terminalSyntheticIds),
+  }
 }
 
 // Server-owned scope for allocated-only trades: the make-safe job ids they are
@@ -16111,7 +16233,16 @@ async function loadCanonicalMakesafeBoard(
   if (restrictToJobIds && restrictToJobIds.length === 0) {
     return finish([], countOpsCanonicalStages([]), 0)
   }
-  const pipeline = await makesafePipeline(client, new URLSearchParams('history=all'), restrictToJobIds)
+  // Active ops paint only needs full stage-dependent joins for non-archived-
+  // status cards. Archive-on-demand / trade / seed keep full joins (default).
+  const pipeline = await makesafePipeline(
+    client,
+    new URLSearchParams('history=all'),
+    restrictToJobIds,
+    {
+      skipArchivedStatusDependents: columnScope === 'active',
+    },
+  )
   const baseRows: any[] = []
   const seen = new Set<string>()
   for (const stage of MAKESAFE_BOARD_STAGES) {
@@ -16121,13 +16252,14 @@ async function loadCanonicalMakesafeBoard(
       baseRows.push(row)
     }
   }
-  // Read before the archive partition: buildCanonicalMakesafeRows drops terminal
-  // synthetic live-fire rows, so the census add-back below must drop the same
-  // ones or the default board's archive count over-states history against the
-  // include_archive=1 census built from the same set.
-  const terminalSyntheticIds = baseRows.length > 0
-    ? await terminalSyntheticLivefireJobIds(client)
-    : new Set<string>()
+  // Reuse the terminal-synthetic ledger the pipeline already loaded. A second
+  // identical read was pure RTT on every board paint. Empty pipeline list is a
+  // real answer (no terminal synthetic runs), not a missing field.
+  const terminalSyntheticIds = new Set<string>(
+    Array.isArray(pipeline?.terminal_synthetic_job_ids)
+      ? pipeline.terminal_synthetic_job_ids.map((id: unknown) => String(id || '')).filter(Boolean)
+      : [],
+  )
   const isTerminalSyntheticRow = (row: any) =>
     isExcludedTerminalSyntheticBoardRow(row, terminalSyntheticIds)
 
