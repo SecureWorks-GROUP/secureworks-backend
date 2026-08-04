@@ -12,13 +12,13 @@ import {
   canRecordSesApproval,
   describeSesSendItPlan,
   evaluateSesMechanicalClean,
-  SES_REVIEW_SECTION_ORDER,
   sendItDisabledReason,
-  sesFailedChecks,
-  sesRouteKindsOnPack,
+  SES_REVIEW_SECTION_ORDER,
   type SesCleanInput,
   type SesCockpitDocket,
+  sesFailedChecks,
   type SesReviewRoute,
+  sesRouteKindsOnPack,
 } from "./ses_review_cockpit.ts";
 
 function cleanInput(
@@ -494,7 +494,10 @@ Deno.test("a family whose matrix routes no photo email is not held for one", () 
   });
   // Matrix says photo_route: work_order_sender → still required.
   assert(
-    evaluateSesMechanicalClean({ ...withoutPhoto, photo_route_applicable: true })
+    evaluateSesMechanicalClean({
+      ...withoutPhoto,
+      photo_route_applicable: true,
+    })
       .blockers.some((item) => item.code === "route_draft_missing"),
   );
   // Matrix says photo_route: not_applicable → demanding one is unsatisfiable.
@@ -511,7 +514,6 @@ Deno.test("a family whose matrix routes no photo email is not held for one", () 
     ),
   );
 });
-
 
 Deno.test("SEND IT states the real cause, quoting the blocker's own fact", () => {
   // The live Bertram case: report and invoice fine, photo drafted with zero
@@ -627,7 +629,10 @@ Deno.test("a not-clean verdict with NO blockers asserts nothing and passes the f
       verdict.checks.find((check) => check.id === item.id)?.fact,
     );
   }
-  assertEquals(failed[1].fact, "Exactly one non-ambiguous obligation revision owns this work.");
+  assertEquals(
+    failed[1].fact,
+    "Exactly one non-ambiguous obligation revision owns this work.",
+  );
 
   // Nothing failed, nothing named: the consumer still shows the honest generic.
   assertEquals(

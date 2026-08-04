@@ -318,9 +318,10 @@ function routeDraftFact(
 
 /**
  * The remedy sentence beside a `route_draft_missing` blocker. The FACT is
- * rendered verbatim from the refusal catalogue and is trustworthy; this text is
- * the "clear path" the Captain reads next, so it must name the exact email and
- * the exact reason rather than inventing a generic instruction.
+ * `routeDraftFact` above (it overrides the catalogue default) and is
+ * trustworthy; this text is the "clear path" the Captain reads next, so it must
+ * name the exact email and the exact reason rather than inventing a generic
+ * instruction.
  */
 function routeDraftRemedy(
   kind: SesRouteKind,
