@@ -42,6 +42,14 @@
 //     where the draft left it open under `terminal_evidence`. That question
 //     stays OPEN for the other five columns — the ruling names work orders, not
 //     reports, photos, SWMS or the terminal invoice.
+//   - 2026-08-02, `repair_recipe` and `restoration_recipe` — SEALED. Repair
+//     "match[es] the whole existing system"; restoration is "exactly the same as
+//     any other job, so it is a different family type". Both families therefore
+//     take `physicalShapedFamily()` while keeping their own family identity, and
+//     the matching pack recipe is the sealed physical labour/materials row in
+//     `ses_family_matrix.ts`. Recorded verbatim on `Q_REPAIR_RECIPE.resolution`
+//     and `Q_RESTORATION_RECIPE.resolution`, and in
+//     `data/decisions/2026-08-02-docs-ready-repair-restoration.md`.
 //
 // Deliberately NOT encoded here (2026-08-01 SWMS ruling, "SWMS required only for
 // MLB make-safes"): the ruler's cells are family x stage and carry no builder
@@ -223,6 +231,11 @@ export interface SesCaptainQuestion {
  * RESOLVED 2026-08-01, then RE-RULED the same day. Kept exported so the 49
  * OPTIONAL PO cells have a named, readable origin — and so the REQUIRED floor
  * that governed before it stays on the record rather than vanishing.
+ *
+ * The `effect` text below is the ruling as recorded on 2026-08-01 and is not
+ * rewritten: it calls repair and restoration unsealed because they were, until
+ * the 2026-08-02 ruling sealed both. The PO cell it settles is unaffected —
+ * OPTIONAL in all 49 rows then and now.
  */
 export const Q_PO_FLOOR: SesCaptainQuestion = {
   id: "po_floor",

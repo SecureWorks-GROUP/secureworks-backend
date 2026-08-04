@@ -125,11 +125,17 @@ production shapes and their hash diagnosis are recorded in
 | AJBR | ready golden | ready golden | rejected by rule | rejected by rule | rejected by rule |
 | Western | ready golden | ready golden | closed/unsealed class | closed/unsealed class | closed/unsealed class |
 
-Restoration is now a first-class SES family, but it is intentionally outside the
-builder recipe rows until the Captain seals its reporting recipe. A canonical
-restoration card is retained as typed input and returns the reason-coded
-`restoration_recipe_unsealed` blocker with its real card facts; it does not select
-a report, pack, portal, SWMS, pricing, invoice proposal or outbound draft.
+Restoration was a first-class SES family held outside the builder recipe rows at
+this build: a canonical restoration card was retained as typed input and returned
+the reason-coded `restoration_recipe_unsealed` blocker instead of selecting a
+report, pack, portal, SWMS, pricing, invoice proposal or outbound draft.
+
+**Superseded.** The Captain's 2026-08-02 ruling
+(`data/decisions/2026-08-02-docs-ready-repair-restoration.md`) sealed repair and
+restoration onto the physical labour/materials pack path, so both now have real
+matrix rows per builder and the two unsealed-recipe failure codes no longer
+exist. Current contract: the "Repair And Restoration Are Typed SES Families With
+Sealed Physical Pack Recipes" entry in `AGENTS.md` and `ses_family_matrix.ts`.
 
 The original assessment fixture blocked report/photo/invoice draft sets with
 `assessment_recipe_unapproved`. That historical negative is superseded by the

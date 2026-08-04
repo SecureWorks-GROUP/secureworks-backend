@@ -44,8 +44,11 @@ export interface PdfDeclaredTypeResult {
   fenceSubtype: boolean;
   /**
    * True when a standalone "Restoration" label rides next to the type line.
-   * Ruling 9: it corroborates only and never moves the family; Ruling 15 keeps
-   * the restoration recipe unsealed, so a restoration label ALONE yields null.
+   * Ruling 9: it corroborates only and never moves the family; Ruling 15 parks
+   * text-only restoration in the deterministic decision, so a restoration label
+   * ALONE yields null. Sealing the restoration PACK recipe (Captain 2026-08-02)
+   * changed what a typed restoration card assembles, not what a label may
+   * classify.
    */
   restorationLabel: boolean;
   /** The verbatim header line the type was read from (evidence trail). */

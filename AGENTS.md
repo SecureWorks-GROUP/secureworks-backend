@@ -1402,14 +1402,19 @@ Related: never make one of these classes pass by supplying a plausible quantity
 or a carried-over crew — that puts invented content on a money document and on a
 safety document respectively.
 
-## AJS Existing-Fence Star Pickets Are A Narrow Physical-Make-Safe Material
+## AJS Existing-Fence Star Pickets Are A Narrow Physical-Shaped-Family Material
 
 `makesafe_existing_fence_pickets.ts` is the shared server classifier for the
-captain's existing-fence carve-out. On an AJS/AJBR physical make-safe it may
-derive one money-only star-picket count from the current trade report's explicit
-`materials_used` quantity when the work narrative proves the pickets support an
-existing fence. The assembler prices that line at $13.50 ex each. Bare or
-ambiguous pickets hold, and any evidenced panel, block/base, tie/clip, hire,
+captain's existing-fence carve-out. On an AJS/AJBR card of a physical-shaped
+family it may derive one money-only star-picket count from the current trade
+report's explicit `materials_used` quantity when the work narrative proves the
+pickets support an existing fence. `isSesPhysicalShapedFamily()`
+(`ses_family_matrix.ts`) is the ONE predicate for that set — physical make-safe
+plus the sealed repair and restoration recipes, deliberately not temporary
+fencing — and it must never be narrower than the pricing side it feeds
+(`invoice_basis === "ajs_labour_materials"`), or the builder is under-billed
+with no line and no blocker. The assembler prices that line at $13.50 ex each.
+Bare or ambiguous pickets hold, and any evidenced panel, block/base, tie/clip, hire,
 retrieval-material or temporary-fence signal preserves the picket refusal.
 Fixing/consumable lines remain separately refused without erasing an otherwise
 valid picket line. Unquantified checklist template labels are not material-use
