@@ -246,6 +246,26 @@ function draftRoutes(docket: Record<string, any>): SesReviewRoute[] {
   ): value is SesReviewRoute => !!value);
 }
 
+/**
+ * Effective Xero binding for route readiness: docket stage `invoice_bound`
+ * carries the AUTHORISED binding, while Option B mint binds a DRAFT only on
+ * the obligation revision and leaves the docket at `pre_xero`. Prefer the
+ * docket binding when it names an invoice; otherwise fall through to the
+ * obligation so cockpit C11 cannot claim "no Xero invoice" after a live mint.
+ */
+export function resolveSesRouteXeroBinding(
+  docket: Record<string, any>,
+  obligation: Record<string, any> | null,
+): Record<string, unknown> {
+  const docketXero = object(docket.xero_binding);
+  if (String(docketXero.xero_invoice_id || "").trim()) return docketXero;
+  const obligationXero = object(obligation?.xero_binding);
+  if (String(obligationXero.xero_invoice_id || "").trim()) {
+    return obligationXero;
+  }
+  return {};
+}
+
 export function resolveDocketRoutes(
   docket: Record<string, any>,
   artifacts: Array<Record<string, any>>,
@@ -260,9 +280,10 @@ export function resolveDocketRoutes(
       : key.split("/").slice(-2).join("/");
     byPath.set(path, artifact);
   }
-  const xero = object(docket.xero_binding);
+  const xero = resolveSesRouteXeroBinding(docket, obligation);
   const boundInvoiceId = String(xero.xero_invoice_id || "");
   const boundInvoiceNumber = String(xero.invoice_number || "");
+  const xeroStatus = String(xero.status || "").toUpperCase();
   const invoicePdfs = artifacts.filter((artifact) =>
     artifact.role === "xero_invoice_pdf" &&
     artifact.media_type === "application/pdf"
@@ -304,11 +325,11 @@ export function resolveDocketRoutes(
     const supportHashes = approvedSupport.map((artifact) =>
       String(artifact.content_hash)
     );
+    const reference = String(
+      object(docket.local_invoice_proposal).builder_reference || "",
+    );
 
     if (noAdditionalCharge) {
-      const reference = String(
-        object(docket.local_invoice_proposal).builder_reference || "",
-      );
       return {
         ...route,
         subject: `${reference || "Make-safe"} - no additional charge`,
@@ -318,12 +339,31 @@ export function resolveDocketRoutes(
         ready: route.ready && !unsupportedReference,
       };
     }
-    if (docket.stage !== "invoice_bound") {
+
+    // Live Xero DRAFT bound to the current obligation (Option B mint). The
+    // docket may still be pre_xero and the authorised PDF attaches later at
+    // approve time — readiness must not claim the draft is missing, and the
+    // email body must not say "No Xero invoice exists".
+    if (boundInvoiceId && xeroStatus === "DRAFT") {
+      const invoiceNumber = boundInvoiceNumber || "pending-number";
+      return {
+        ...route,
+        subject:
+          `${reference || "Make-safe"} - Xero draft ${invoiceNumber}`.trim(),
+        body:
+          `Xero DRAFT invoice ${invoiceNumber} is bound to this obligation revision. The builder-facing Xero PDF attaches when the draft is authorised. No release is approved yet.`,
+        attachment_hashes: [...new Set(supportHashes)],
+        ready: route.ready && !unsupportedReference,
+      };
+    }
+
+    if (docket.stage !== "invoice_bound" || xeroStatus !== "AUTHORISED") {
       return {
         ...route,
         attachment_hashes: [...new Set(supportHashes)],
-        // Support PDFs are not an invoice. Until an authorised Xero PDF is
-        // bound, the builder-facing invoice route must remain non-sendable.
+        // Support PDFs are not an invoice. Until a live Xero draft is bound
+        // (above) or an authorised Xero PDF is bound (below), the
+        // builder-facing invoice route must remain non-sendable.
         ready: false,
       };
     }
@@ -331,10 +371,7 @@ export function resolveDocketRoutes(
     if (invoicePdf?.content_hash) {
       invoiceAttachments.unshift(String(invoicePdf.content_hash));
     }
-    const reference = String(
-      object(docket.local_invoice_proposal).builder_reference || "",
-    );
-    const invoiceNumber = String(xero.invoice_number || "");
+    const invoiceNumber = boundInvoiceNumber;
     return {
       ...route,
       subject: `${reference || "Make-safe"} - Xero invoice ${invoiceNumber}`
@@ -343,7 +380,7 @@ export function resolveDocketRoutes(
         "Please find the authorised SecureWorks Xero invoice and the supporting current-cycle documents attached.",
       attachment_hashes: [...new Set(invoiceAttachments)],
       ready: route.ready && !!invoicePdf?.content_hash &&
-        xero.status === "AUTHORISED" && !unsupportedReference,
+        xeroStatus === "AUTHORISED" && !unsupportedReference,
     };
   });
 }
@@ -551,6 +588,55 @@ export async function loadSesCockpitDocket(
     cleanInput.readiness_blockers.push(sourceRefusal);
     cleanInput.money_blocker_codes.push(sourceRefusal.code);
   }
+  const rawBinding = resolveSesRouteXeroBinding(docket, obligation);
+  type CockpitXeroBinding = {
+    xero_invoice_id: string;
+    invoice_number: string;
+    status: string;
+    total?: number | null;
+    pdf_content_hash?: string;
+  };
+  let xeroBinding: CockpitXeroBinding | null = null;
+  if (String(rawBinding.xero_invoice_id || "").trim()) {
+    xeroBinding = {
+      xero_invoice_id: String(rawBinding.xero_invoice_id || ""),
+      invoice_number: String(rawBinding.invoice_number || ""),
+      status: String(rawBinding.status || ""),
+      ...(rawBinding.pdf_content_hash
+        ? { pdf_content_hash: String(rawBinding.pdf_content_hash) }
+        : {}),
+      ...(rawBinding.total !== undefined && rawBinding.total !== null
+        ? { total: Number(rawBinding.total) }
+        : {}),
+    };
+    if (xeroBinding.total === undefined || !Number.isFinite(xeroBinding.total)) {
+      // Enrich total for the Invoice tab when older DRAFT binds omitted it.
+      // Prefer the local Xero mirror (authoritative issued total), then the
+      // obligation proposal totals (pre-authorise DRAFT identity display).
+      const boundId = xeroBinding.xero_invoice_id;
+      const mirror = boundId
+        ? await client.from("xero_invoices")
+          .select("total,invoice_number,status")
+          .eq("xero_invoice_id", boundId)
+          .maybeSingle()
+        : { data: null, error: null };
+      const mirrorTotal = Number(object(mirror.data).total);
+      if (Number.isFinite(mirrorTotal)) {
+        xeroBinding = { ...xeroBinding, total: mirrorTotal };
+      } else {
+        const proposal = object(obligation?.proposal);
+        const totals = object(proposal.totals);
+        const proposalTotal = Number(
+          totals.inc ?? totals.total_inc_gst ?? totals.total,
+        );
+        if (Number.isFinite(proposalTotal)) {
+          xeroBinding = { ...xeroBinding, total: proposalTotal };
+        } else {
+          xeroBinding = { ...xeroBinding, total: null };
+        }
+      }
+    }
+  }
   return {
     job_id: jobId,
     job_number: object(manifest.classification).job_number || null,
@@ -559,7 +645,7 @@ export async function loadSesCockpitDocket(
     dependency_generation: Number(readiness.dependency_generation),
     invoice_obligation_revision_id: obligation?.id || null,
     attendance_cycle_ids: docket.attendance_cycle_ids || [],
-    xero_binding: docket.xero_binding || obligation?.xero_binding || null,
+    xero_binding: xeroBinding,
     // The cockpit/list contract consumes the docket proposal shape
     // (`subtotal_ex_gst` / `total_inc_gst`). The obligation proposal is a
     // separately typed canonical-pricing record and must not mask it.
@@ -1956,6 +2042,9 @@ async function bindSesDraftInvoiceToRevision(
       xero_invoice_id: args.invoice.xero_invoice_id,
       invoice_number: args.invoice.invoice_number,
       status: args.invoice.status,
+      total: Number.isFinite(Number(args.invoice.total))
+        ? Number(args.invoice.total)
+        : null,
       bound_at: new Date().toISOString(),
     },
   }).eq("id", args.invoice_obligation_revision_id).in(
@@ -2150,6 +2239,9 @@ export async function executeSesInvoiceRevisionAction(
         xero_invoice_id: createdInvoice.xero_invoice_id,
         invoice_number: createdInvoice.invoice_number,
         status: createdInvoice.status,
+        total: Number.isFinite(Number(createdInvoice.total))
+          ? Number(createdInvoice.total)
+          : null,
         bound_at: new Date().toISOString(),
       },
     }).eq("id", revision.id).in("state", [
@@ -2271,6 +2363,9 @@ export async function executeSesInvoiceRevisionAction(
         xero_invoice_id: authorisedInvoice.xero_invoice_id,
         invoice_number: authorisedInvoice.invoice_number,
         status: authorisedInvoice.status,
+        total: Number.isFinite(Number(authorisedInvoice.total))
+          ? Number(authorisedInvoice.total)
+          : null,
         bound_at: new Date().toISOString(),
       },
       created_by: args.actor,
