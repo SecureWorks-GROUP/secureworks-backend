@@ -42,6 +42,7 @@ import {
 import {
   inspectSesSupportingReportProof,
   rawSesSupportingReportSha,
+  SES_SUPPORTING_REPORT_MAX_BYTES,
   type SesSupportingReportTrust,
 } from "./ses_supporting_report_trust.ts";
 export { inspectSesSupportingReportProof } from "./ses_supporting_report_trust.ts";
@@ -147,7 +148,7 @@ async function verifyStoredSupportingReport(
   const bytes = new Uint8Array(await recovered.data.arrayBuffer());
   if (
     bytes.byteLength !== Number(artifact.size_bytes) ||
-    bytes.byteLength > 8 * 1024 * 1024 ||
+    bytes.byteLength > SES_SUPPORTING_REPORT_MAX_BYTES ||
     new TextDecoder().decode(bytes.slice(0, 5)) !== "%PDF-" ||
     await sesSha256Bytes(bytes) !== artifact.content_hash
   ) {
