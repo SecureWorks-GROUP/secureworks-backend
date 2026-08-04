@@ -34586,9 +34586,22 @@ async function assertCurrentWikiSourceEvidence(
   // Verified against the served Munster artifact — its nine rendered photo
   // pages match the current-cycle media in created_at order exactly, and NOT
   // in id order.
-  const mediaOrder = (left: any, right: any) =>
-    String(left?.created_at || '').localeCompare(String(right?.created_at || '')) ||
-    String(left?.id || '').localeCompare(String(right?.id || ''))
+  //
+  // Compare parsed instants, never the raw strings: Postgres omits the
+  // fractional part when microseconds are exactly zero, and ICU collation
+  // weights '.' below '+'/'Z', so a string compare inverts
+  // `…:01+00:00` against `…:01.123+00:00`. A missing or unparseable timestamp
+  // sorts LAST, matching PostgREST's nulls-last ordering.
+  const mediaInstant = (value: unknown) => {
+    const parsed = Date.parse(String(value ?? '').trim())
+    return Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed
+  }
+  const mediaOrder = (left: any, right: any) => {
+    const leftInstant = mediaInstant(left?.created_at)
+    const rightInstant = mediaInstant(right?.created_at)
+    if (leftInstant !== rightInstant) return leftInstant < rightInstant ? -1 : 1
+    return String(left?.id || '').localeCompare(String(right?.id || ''))
+  }
   const applicable = currentMedia.filter(photoIsApplicable).slice().sort(mediaOrder)
   const excluded = currentMedia.filter((item: any) => !photoIsApplicable(item))
     .slice().sort(mediaOrder)

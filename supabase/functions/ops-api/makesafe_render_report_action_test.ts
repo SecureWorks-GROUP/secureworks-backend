@@ -1012,14 +1012,29 @@ Deno.test("curated bind photo accounting orders by created_at, then id", async (
   const bytes = new TextEncoder().encode("%PDF-1.7\nordered photo fixture");
   // Deliberately adversarial: id order and created_at order fully disagree, and
   // two rows share a timestamp so the id tiebreak is exercised as well.
-  //   created_at: zzz, bbb, mmm, aaa      id: aaa, bbb, mmm, zzz
+  //   created_at: zzz, bbb, mmm, ppp, fff, aaa, nnn   id: aaa, bbb, fff, mmm, nnn, ppp, zzz
+  //
+  // ppp/fff differ ONLY by a fractional-seconds component, which Postgres omits
+  // when microseconds are exactly zero. A string comparator orders them the
+  // wrong way round (ICU weights '.' below 'Z'), so they pin chronological
+  // comparison. nnn carries a null created_at and must sort LAST, as PostgREST
+  // returns nulls last rather than first.
   const media = [
     { id: "aaa", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:07Z", storage_url: "https://storage.example.test/a.jpg" },
     { id: "zzz", type: "photo", phase: "completion", created_at: "2026-07-30T02:23:53Z", storage_url: "https://storage.example.test/z.jpg" },
     { id: "mmm", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:01Z", storage_url: "https://storage.example.test/m.jpg" },
     { id: "bbb", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:01Z", storage_url: "https://storage.example.test/b.jpg" },
+    { id: "fff", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:03.500Z", storage_url: "https://storage.example.test/f.jpg" },
+    { id: "ppp", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:03Z", storage_url: "https://storage.example.test/p.jpg" },
+    { id: "nnn", type: "photo", phase: "completion", created_at: null, storage_url: "https://storage.example.test/n.jpg" },
   ];
-  const expected = ["zzz", "bbb", "mmm", "aaa"];
+  // Guard the fixture itself: a string comparator genuinely disagrees with
+  // chronology on this pair, so the assertions below cannot pass by accident.
+  assertEquals(
+    String(media[5].created_at).localeCompare(String(media[4].created_at)) > 0,
+    true,
+  );
+  const expected = ["zzz", "bbb", "mmm", "ppp", "fff", "aaa", "nnn"];
   const photoBytes = new TextEncoder().encode("photo-bytes");
   const contentHash = `sha256:${await sha(photoBytes)}`;
   const { client } = bindClient(bytes, {
@@ -1043,9 +1058,9 @@ Deno.test("curated bind photo accounting orders by created_at, then id", async (
     photo_evidence: {
       source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
       completeness_verified: true,
-      source_count: 4,
-      applicable_count: 4,
-      selected_count: 4,
+      source_count: media.length,
+      applicable_count: media.length,
+      selected_count: media.length,
       applicable_ids: expected,
       selected_ids: expected,
       excluded: [],
@@ -1075,10 +1090,10 @@ Deno.test("curated bind photo accounting orders by created_at, then id", async (
     globalThis.fetch = originalFetch;
   }
 
-  // The id-only comparator this replaced would have demanded aaa, bbb, mmm,
-  // zzz. That payload is internally self-consistent, so only the source-order
-  // comparison can catch it — it must now be refused.
-  const idOrdered = ["aaa", "bbb", "mmm", "zzz"];
+  // The id-only comparator this replaced would have demanded id order. That
+  // payload is internally self-consistent, so only the source-order comparison
+  // can catch it — it must now be refused.
+  const idOrdered = ["aaa", "bbb", "fff", "mmm", "nnn", "ppp", "zzz"];
   assertEquals(canonicalSesJson(idOrdered) === canonicalSesJson(expected), false);
   const { client: second } = bindClient(bytes, {
     media,
