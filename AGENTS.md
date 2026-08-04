@@ -1331,6 +1331,71 @@ the money fence working, not a defect. Prove such a claim by running the real
 `docsReady()` against the live evidence shape and flipping only the invoice
 term, rather than reading the ladder by eye.
 
+When you build that evidence shape, do NOT read `report_pack` off the published
+board — the key is absent from EVERY `makesafe_board` row (0 of 447 on
+2026-08-04), so a parse returns "missing", not the server's value. It is an
+internal seam: `makesafePipeline` synthesises `packForBoard` from the CURRENT
+docket revision (`index.ts:15555-15566`) and sets `review_state: 'READY'`
+whenever `pre_xero_docs_ready` is true, with no `makesafe_report_packs` row
+required. A card with ZERO rows in that table therefore still has
+`packState: READY`. Treating the absent key as null makes `docsReady()` fall to
+its legacy `!pack` branch and invents a second, non-existent blocker — which
+happened on SWMS-261109 before it was caught.
+
+## An SES Labour Line Is A Floor, Not A Price You Can Set
+
+`prepare_ses_invoice_obligation` takes only `job_id`, `docket_revision_id`,
+`post_release_disposition` and `created_by`. It copies lines VERBATIM from
+`docket.local_invoice_proposal.line_items` (`ses_reporting_actions.ts:803-815`);
+there is no price, quantity or hours parameter. Upstream,
+`hoursPerTrade = Math.max(reportedHoursPerTrade, minimum)`
+(`ses_prepare_docket_revision.ts:730`) raises short attendances to the sealed
+floor and **never lowers a longer one**. The `rate_override_approved` fields
+(`makesafe_invoice_obligation.ts:145-152`) guard the `priced_with_line_override`
+disposition, which that action never sets, and they govern the RATE, not hours.
+
+There is no separate commercial seam to write instead. `hours_per_trade` resolves
+from `pricing.hours_per_trade` → `completion.hours_per_trade` →
+`checklist.hours_per_trade` → `checklist.labour_hours`
+(`ses_assembler_input_adapter.ts:963-969`), and all four are nested keys inside
+ONE row: `checklist = record(currentReport.checklist_json)`, with `pricing` and
+`completion` read off that same checklist (`:929-931`). **Setting any of them is
+a write to `job_service_reports.checklist_json`** — the trade's own report.
+
+Consequence: billing FEWER hours than the trade recorded is currently
+unreachable. **Never edit recorded trade hours to make a price come out** — that
+is altering evidence to fit a commercial answer, and it is an owner decision, not
+an agent one. Equally, never quietly prepare at the derived figure instead:
+writing the number nobody chose is a silent substitution. Report the blocker.
+
+Charge-in and charge-out are legitimately different numbers, and the code says so
+at `ses_prepare_docket_revision.ts:699-702` — the field report's hours are what
+the TRADE bills US, the billed hours are what WE bill the builder. A gap between
+the report and the invoice is a commercial decision to document, not a
+discrepancy to reconcile.
+
+The `priced_with_line_override` instrument is mostly built (DB constraint,
+disposition union, per-line `rate_override_approved`/`_by`/`_at`, the audit
+guard, `line_overrides_audited`, release and cockpit support) but is
+**unreachable**: nothing ever selects that disposition
+(`ses_reporting_actions.ts:824-832`) and lines are built without the override
+fields. Review feedback is not a route either — it only appends a row
+(`ses_reporting_actions.ts:2473-2516`) and the pricing path never reads it.
+
+**Do not wire it up without settling rate-versus-quantity first.** Those fields
+override the RATE, not the QUANTITY. Reaching a reduced total while holding the
+evidence-derived unit count yields a non-schedule rate — on the worked example,
+$400 across 6 units is $66.67/hour against a sealed $80 schedule. That writes a
+FALSE RATE into the billing record to reach a TRUE TOTAL, which is the same
+class of dishonesty as editing the trade's hours, just relocated. An honest
+reduction needs a quantity-level override or a visible discount/credit line, and
+neither exists today. Treat it as an open design decision for the owner.
+
+Worked example: SWMS-261109 / AJBR-70271, trade reported 2 x 3 hours ($750 ex /
+$825 inc) against an owner-chosen 2 x 2.5 hours ($670 / $737); six candidate
+paths checked, all closed, obligation left unwritten and trade evidence
+unaltered. Evidence: `data/bertram-live-bind-v1/report.md` in the firstmate home.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
