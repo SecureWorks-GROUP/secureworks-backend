@@ -816,6 +816,126 @@ Deno.test("materials evidence trims whitespace before source compare", async () 
   assertEquals(mutations.length > 0, true);
 });
 
+Deno.test(
+  "materials subset binds when report strips boilerplate ticks and records exclusions",
+  async () => {
+    const bytes = new TextEncoder().encode(
+      "%PDF-1.7\nmaterials subset boilerplate fixture",
+    );
+    const serviceMaterials = [
+      "Star pickets x 4",
+      "Tarps / roof materials",
+      "Fixings / consumables",
+      "Other / none",
+    ];
+    const reportMaterials = ["Star pickets x 4"];
+    const { client, document, mutations } = bindClient(bytes, {
+      serviceReport: {
+        id: SERVICE_REPORT_ID,
+        status: "submitted",
+        checklist_json: { materials_used: serviceMaterials },
+        attendance_cycle_id: "cycle-fixture",
+        cycle_attribution: "bound",
+        cycle_number: 1,
+      },
+    });
+    const body: Record<string, unknown> = await bindBody(bytes);
+    body.report_job = {
+      ...(body.report_job as Record<string, unknown>),
+      materials: "Star pickets x 4",
+      materials_evidence: {
+        state: "recorded_used",
+        items: reportMaterials,
+      },
+    };
+    const result = await withStoredPdf(
+      bytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          body,
+          FIXTURE_ACTOR,
+        ),
+    );
+    assertEquals(result.success, true);
+    assertEquals(result.skipped, false);
+
+    const expectedAccounting = {
+      service_report_items: serviceMaterials,
+      report_items: reportMaterials,
+      excluded: [
+        {
+          item: "Tarps / roof materials",
+          reason: "omitted_from_report_materials_evidence",
+        },
+        {
+          item: "Fixings / consumables",
+          reason: "omitted_from_report_materials_evidence",
+        },
+        {
+          item: "Other / none",
+          reason: "omitted_from_report_materials_evidence",
+        },
+      ],
+    };
+    assertEquals(
+      document.data_snapshot_json.materials_source_accounting,
+      expectedAccounting,
+    );
+    const event = mutations.find((item) => item.table === "job_events");
+    assertEquals(
+      (event?.values.detail_json as any)?.materials_source_accounting,
+      expectedAccounting,
+    );
+  },
+);
+
+Deno.test(
+  "materials super-set still refuses when report invents a material the trade never recorded",
+  async () => {
+    const bytes = new TextEncoder().encode(
+      "%PDF-1.7\nmaterials superset refuse fixture",
+    );
+    const { client, mutations } = bindClient(bytes, {
+      serviceReport: {
+        id: SERVICE_REPORT_ID,
+        status: "submitted",
+        checklist_json: {
+          materials_used: ["Star pickets x 4", "Tarps / roof materials"],
+        },
+        attendance_cycle_id: "cycle-fixture",
+        cycle_attribution: "bound",
+        cycle_number: 1,
+      },
+    });
+    const body: Record<string, unknown> = await bindBody(bytes);
+    body.report_job = {
+      ...(body.report_job as Record<string, unknown>),
+      materials: "Star pickets x 4; Temporary fence panels x 2",
+      materials_evidence: {
+        state: "recorded_used",
+        items: ["Star pickets x 4", "Temporary fence panels x 2"],
+      },
+    };
+    const error = await assertRejects(
+      () =>
+        withStoredPdf(
+          bytes,
+          () =>
+            _bindCurrentCycleCuratedMakesafeReportForTest(
+              client,
+              body,
+              FIXTURE_ACTOR,
+            ),
+        ),
+      ApiError,
+      "absent from the selected current-cycle service report",
+    );
+    assertEquals((error as ApiError).status, 409);
+    assertEquals(mutations, []);
+  },
+);
+
 Deno.test("curated bind rejects wrong contact, hash, cycle, self-reference and conflicts before trust", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nprivacy-safe fixture");
   const baseline = await bindBody(bytes);

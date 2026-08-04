@@ -34885,13 +34885,31 @@ async function assertCurrentWikiReportInput(
 export const CURATED_BIND_JOB_MEDIA_COLUMNS =
   'id,storage_url,type,phase,attendance_cycle_id,cycle_attribution,created_at'
 
+/**
+ * Materials bind accounting returned by {@link assertCurrentWikiSourceEvidence}.
+ *
+ * Report materials must be a multiset SUBSET of the service report's
+ * materials_used. Super-set (report invents a material the trade never
+ * recorded) still refuses. Omissions are allowed so the renderer can strip
+ * boilerplate ticks, but every omitted service-report item is recorded with
+ * a reason so under-billing is inspectable rather than silent.
+ */
+type CuratedBindMaterialsSourceAccounting = {
+  service_report_items: string[]
+  report_items: string[]
+  excluded: Array<{ item: string; reason: string }>
+}
+
+const CURATED_BIND_MATERIALS_OMISSION_REASON =
+  'omitted_from_report_materials_evidence'
+
 async function assertCurrentWikiSourceEvidence(
   client: any,
   jobId: string,
   detail: any,
   attendanceCycleId: string,
   validated: CurrentWikiValidatedInput,
-): Promise<void> {
+): Promise<{ materials_source_accounting: CuratedBindMaterialsSourceAccounting }> {
   const [reportsResponse, mediaResponse] = await Promise.all([
     client.from('job_service_reports')
       .select('id,status,checklist_json,attendance_cycle_id,cycle_attribution,cycle_number')
@@ -34944,20 +34962,36 @@ async function assertCurrentWikiSourceEvidence(
       'current-cycle service report does not prove explicit materials accounting',
     )
   }
+  // Subset gate (not verbatim equality): every report materials_evidence item
+  // must appear in the service report materials_used. The reverse is permitted
+  // so honestly rendered reports may drop boilerplate ticks the trade checked
+  // without attesting false materials on the builder-facing PDF. Multiset:
+  // each service-report occurrence can cover at most one report occurrence.
   const expectedMaterialItems = checklist.materials_used.map((item: string) =>
     item.trim()
   )
   const suppliedMaterials = (validated.supplied as any).materials_evidence
-  const expectedMaterialState = expectedMaterialItems.length
-    ? 'recorded_used'
-    : 'none_recorded'
-  if (suppliedMaterials.state !== expectedMaterialState ||
-      canonicalSesJson(suppliedMaterials.items) !==
-        canonicalSesJson(expectedMaterialItems)) {
-    throw curatedBindError(
-      'curated_bind_materials_source_mismatch',
-      'materials_evidence does not match the selected current-cycle service report',
-    )
+  const suppliedMaterialItems: string[] = Array.isArray(suppliedMaterials?.items)
+    ? suppliedMaterials.items.map((item: string) => String(item).trim())
+    : []
+  const remainingServiceItems = expectedMaterialItems.slice()
+  for (const item of suppliedMaterialItems) {
+    const matchIndex = remainingServiceItems.indexOf(item)
+    if (matchIndex < 0) {
+      throw curatedBindError(
+        'curated_bind_materials_source_mismatch',
+        'materials_evidence contains item(s) absent from the selected current-cycle service report',
+      )
+    }
+    remainingServiceItems.splice(matchIndex, 1)
+  }
+  const materialsSourceAccounting: CuratedBindMaterialsSourceAccounting = {
+    service_report_items: expectedMaterialItems,
+    report_items: suppliedMaterialItems,
+    excluded: remainingServiceItems.map((item) => ({
+      item,
+      reason: CURATED_BIND_MATERIALS_OMISSION_REASON,
+    })),
   }
 
   const currentMedia = filterMediaForCurrentCycle(
@@ -35090,6 +35124,7 @@ async function assertCurrentWikiSourceEvidence(
       )
     }
   }
+  return { materials_source_accounting: materialsSourceAccounting }
 }
 
 async function assertBertramProtectedReportRepairCas(
@@ -35422,7 +35457,7 @@ async function bindCurrentCycleCuratedMakesafeReport(
     enrichedReportJob,
     jobResponse.data.client_name,
   )
-  await assertCurrentWikiSourceEvidence(
+  const sourceEvidence = await assertCurrentWikiSourceEvidence(
     client,
     jobId,
     detailResponse.data,
@@ -35446,6 +35481,10 @@ async function bindCurrentCycleCuratedMakesafeReport(
     curated_source_artifact_content_hash: suppliedArtifactHash,
     curated_source_expected_raw_sha256: suppliedRawHash,
     curated_source_authority: 'privileged_ops_curated_bind',
+    // Inspectable materials subset accounting: report items ⊆ service report.
+    // Omitted service-report ticks (boilerplate strip or genuine drop) land
+    // here so under-billing is never silent. Super-set still refused above.
+    materials_source_accounting: sourceEvidence.materials_source_accounting,
     report_scope_narratives: [
       validatedInput.job.scope,
       validatedInput.job.findings,
@@ -35621,6 +35660,10 @@ async function bindCurrentCycleCuratedMakesafeReport(
       prior_attendance_cycle_id: document.attendance_cycle_id || null,
       prior_cycle_attribution: document.cycle_attribution || null,
       prior_data_snapshot_json: prior,
+      // Mirror of snapshot materials_source_accounting so the bind audit
+      // answers "what did the trade record that the report did not carry?"
+      // without reading job_documents.
+      materials_source_accounting: sourceEvidence.materials_source_accounting,
       ...(isTrustedContentSupersession
         ? {
           supersedes_prior_bind: true,
