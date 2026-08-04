@@ -37,10 +37,24 @@ function reviewPackClient(
   options: {
     jobEvents?: Array<Record<string, unknown>>;
     jobEventsError?: Record<string, unknown>;
+    boundDocument?: Record<string, unknown> | null;
   } = {},
 ) {
   const signedPaths: string[] = [];
   const rpcCalls: string[] = [];
+  const artifactMetadata = (artifact.metadata || {}) as Record<string, any>;
+  const document = options.boundDocument === undefined
+    ? {
+      id: String(
+        artifactMetadata.report_document_id ||
+          artifactMetadata.source_document_id || "source-document",
+      ),
+      data_snapshot_json: {
+        report_render_hash: String(artifactMetadata.expected_raw_sha256 || "")
+          .replace(/^sha256:/, ""),
+      },
+    }
+    : options.boundDocument;
   const review = {
     docket_revision_id: "docket-fixture",
     docket_output_content_hash: `sha256:${"e".repeat(64)}`,
@@ -73,6 +87,7 @@ function reviewPackClient(
     makesafe_docket_artifacts: [artifact],
     ses_docket_review_events: [],
     job_events: options.jobEvents || [],
+    job_documents: document ? [document] : [],
   };
   const client = {
     rpc(name: string) {
@@ -575,6 +590,59 @@ Deno.test(
     assertEquals(pack.suppressed_artifacts, []);
     assertEquals(pack.blockers, []);
     assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
+  },
+);
+
+Deno.test(
+  "review pack suppresses a thin artifact whose document names different report bytes",
+  async () => {
+    // Maylands shape: a legacy revision carrying a borrowed report_input_hash
+    // over bytes the bound document does not describe must not be signed off.
+    const bytes = new TextEncoder().encode("%PDF-1.7\nthin borrowed fixture");
+    const contentHash = await sesSha256Bytes(bytes);
+    const rawHash = await rawSha256(bytes);
+    const artifact = {
+      id: "artifact-thin",
+      role: "supporting_report_pdf",
+      object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+      media_type: "application/pdf",
+      content_hash: contentHash,
+      size_bytes: bytes.byteLength,
+      metadata: {
+        source_kind: "previously_committed_pdf",
+        source_identity:
+          "docket-revision:source-revision/artifact:source-artifact",
+        source_document_id: "source-document",
+        report_document_id: "source-document",
+        source_revision_id: "source-revision",
+        source_artifact_id: "source-artifact",
+        source_artifact_content_hash: contentHash,
+        expected_raw_sha256: `sha256:${rawHash}`,
+        output_sha256: `sha256:${rawHash}`,
+        render_hash: rawHash,
+        report_input_hash: `sha256:${"a".repeat(64)}`,
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      },
+    };
+    const { client, signedPaths } = reviewPackClient(artifact, bytes, {
+      boundDocument: {
+        id: "source-document",
+        data_snapshot_json: { report_render_hash: "b".repeat(64) },
+      },
+    });
+    const pack = await getSesReviewablePackAction(
+      client,
+      { mode: "api_key", user: null },
+      "docket-fixture",
+    );
+    assertEquals(pack.artifacts, []);
+    assertEquals(
+      pack.suppressed_artifacts[0].suppression_reason,
+      "source_document_bytes_diverged",
+    );
+    assertEquals(pack.blockers[0].code, "curated_source_missing");
+    assertEquals(signedPaths, []);
   },
 );
 

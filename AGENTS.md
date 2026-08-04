@@ -1454,9 +1454,15 @@ whichever side stamped it, so when the document's own
 `curated_source_expected_raw_sha256` / `report_render_hash` names different
 bytes than the artifact, the candidate is refused regardless of hash source —
 otherwise a re-bind's coordinate certifies stale, thinner bytes (Maylands
-`SWMS-261017`, ~32 kB artifact against a ~2.38 MB document report). The trust
-guard is only live where the read selects `id`; keep `id` on every
-`makesafe_docket_artifacts` select that feeds
+`SWMS-261017`, ~32 kB artifact against a ~2.38 MB document report). That rule is
+`sesSupportingReportDocumentBinding`, the ONE implementation, and it binds both
+sides: selection refuses `diverged`, and `verifyStoredSupportingReport` re-reads
+the bound `job_documents` row so the served pack, the cockpit and Captain signoff
+refuse the same shape (`source_document_bytes_diverged`) instead of handing out a
+signed URL. An unreadable or absent bound document is likewise a refusal, not a
+pass. Persist-side refusal alone is not enough — legacy rows already carry
+unbound coordinates. The trust guard is only live where the read selects `id`;
+keep `id` on every `makesafe_docket_artifacts` select that feeds
 `inspectSesSupportingReportProof`. Do not relax this to bulk-pass incomplete
 packs.
 

@@ -55,6 +55,7 @@ import {
   SES_SUPPORTING_REPORT_MAX_BYTES,
   type SesCuratedSourceSupersession,
   sesCuratedSourceSupersessionsFromEvents,
+  sesSupportingReportDocumentBinding,
   sesSupportingReportIsSuperseded,
   type SesSupportingReportTrust,
 } from "./ses_supporting_report_trust.ts";
@@ -176,6 +177,28 @@ async function verifyStoredSupportingReport(
   }
   if (sesSupportingReportIsSuperseded(artifact, supersessions)) {
     return { trusted: false, reason: SES_CURATED_SOURCE_SUPERSEDED_REASON };
+  }
+  const metadata = object(artifact.metadata);
+  const documentId = String(
+    metadata.report_document_id || metadata.source_document_id || "",
+  );
+  const documentResponse = await client.from("job_documents")
+    .select("id,data_snapshot_json")
+    .eq("id", documentId)
+    .maybeSingle();
+  if (documentResponse.error) {
+    return { trusted: false, reason: "source_document_unreadable" };
+  }
+  if (!documentResponse.data) {
+    return { trusted: false, reason: "source_document_missing" };
+  }
+  if (
+    sesSupportingReportDocumentBinding(
+      metadata.expected_raw_sha256,
+      documentResponse.data.data_snapshot_json,
+    ) === "diverged"
+  ) {
+    return { trusted: false, reason: "source_document_bytes_diverged" };
   }
   const prefix = `${SES_DOCKET_BUCKET}/`;
   const objectKey = String(artifact.object_key || "");
