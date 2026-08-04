@@ -12,15 +12,19 @@ import {
   _loadCanonicalMakesafeBoardForTest,
 } from "./index.ts";
 import {
+  archiveOnDemandMeta,
   buildCanonicalMakesafeRows,
   buildMakesafeContact,
   checkMakesafeBoardParity,
+  countOpsCanonicalStages,
+  filterCanonicalRowsByColumnScope,
   isCanonicalLiveMakesafeBoardJobStatus,
   isSyntheticLivefireJob,
   isTerminalSyntheticLivefireJob,
   makesafeBoardJobStatusExclusionFilter,
   mapOpsStageToTradeColumn,
   OPS_MAKESAFE_STAGES,
+  parseMakesafeBoardColumnScope,
   parseMakesafeBoardFields,
   portalCapturesFromLedger,
   projectOpsMakesafeBoard,
@@ -566,6 +570,94 @@ Deno.test("parseMakesafeBoardFields defaults to card; diagnostics opt in to full
   assertEquals(parseMakesafeBoardFields("card", "true"), "full");
   // Unknown values stay on the fast path rather than dumping diagnostics.
   assertEquals(parseMakesafeBoardFields("mystery"), "card");
+});
+
+Deno.test("parseMakesafeBoardColumnScope defaults to active; full/include_archive widen", () => {
+  assertEquals(parseMakesafeBoardColumnScope(null, null, "card"), "active");
+  assertEquals(parseMakesafeBoardColumnScope(undefined, undefined, "card"), "active");
+  assertEquals(parseMakesafeBoardColumnScope("active", null, "card"), "active");
+  assertEquals(parseMakesafeBoardColumnScope("archive", null, "card"), "archive");
+  assertEquals(parseMakesafeBoardColumnScope("all", null, "card"), "all");
+  assertEquals(parseMakesafeBoardColumnScope(null, "1", "card"), "all");
+  assertEquals(parseMakesafeBoardColumnScope(null, "true", "card"), "all");
+  // fields=full always hauls every column so diagnostics never silently drop history.
+  assertEquals(parseMakesafeBoardColumnScope(null, null, "full"), "all");
+  assertEquals(parseMakesafeBoardColumnScope("active", null, "full"), "all");
+  // Unknown stays on the fast active path.
+  assertEquals(parseMakesafeBoardColumnScope("mystery", null, "card"), "active");
+});
+
+Deno.test("active column scope drops archive without moving other cards", () => {
+  const full = buildCanonicalMakesafeRows([
+    baseJob("new", "job-new"),
+    baseJob("allocated", "job-alloc"),
+    baseJob("report_ready", "job-ready", {
+      has_wo: true,
+      has_report_doc: true,
+      invoice_status: "draft",
+    }),
+    baseJob("archive", "job-arch"),
+    baseJob("cancelled", "job-cancel", { status: "cancelled" }),
+  ], {
+    statusApplicationsByJobId: {
+      // Overlay parks a Docs Ready card into archive — active scope must drop it,
+      // and the census must still count it under archive.
+      "job-ready": {
+        run_key: "cap-arch",
+        source_status: "report_ready",
+        before_status: "report_ready",
+        after_status: "archive",
+        evidence_ref: "captain",
+        applied_by: "captain",
+        applied_at: NOW,
+      },
+    },
+  }, "card");
+
+  assertEquals(full.find((r) => r.id === "job-ready")?.canonical_stage, "archive");
+  assertEquals(full.find((r) => r.id === "job-arch")?.canonical_stage, "archive");
+
+  const census = countOpsCanonicalStages(full);
+  assertEquals(census.new, 1);
+  assertEquals(census.allocated, 1);
+  assertEquals(census.report_ready, 0);
+  assertEquals(census.archive, 2);
+  assertEquals(census.cancelled, 1);
+
+  const active = filterCanonicalRowsByColumnScope(full, "active");
+  assertEquals(active.map((r) => r.id).sort(), ["job-alloc", "job-cancel", "job-new"]);
+  // Placement of the remaining active cards is unchanged.
+  assertEquals(active.find((r) => r.id === "job-new")?.canonical_stage, "new");
+  assertEquals(active.find((r) => r.id === "job-alloc")?.canonical_stage, "allocated");
+  assertEquals(active.find((r) => r.id === "job-cancel")?.canonical_stage, "cancelled");
+
+  const opsActive = projectOpsMakesafeBoard(active, { fields: "card" });
+  assertEquals(opsActive.columns.archive.length, 0);
+  assertEquals(opsActive.columns.new.length, 1);
+  assertEquals(opsActive.columns.allocated.length, 1);
+  assertEquals(opsActive.columns.cancelled.length, 1);
+  assertEquals(opsActive.row_count, 3);
+
+  const archiveOnly = filterCanonicalRowsByColumnScope(full, "archive");
+  assertEquals(archiveOnly.map((r) => r.id).sort(), ["job-arch", "job-ready"]);
+
+  const paged = filterCanonicalRowsByColumnScope(full, "archive", {
+    limit: 1,
+    offset: 0,
+  });
+  assertEquals(paged.length, 1);
+
+  const meta = archiveOnDemandMeta({
+    scope: "active",
+    columnCounts: census,
+    archiveReturned: 0,
+  });
+  assertEquals(meta.included, false);
+  assertEquals(meta.total, 2);
+  assertEquals(meta.returned, 0);
+  assert(meta.fetch.include_archive.includes("include_archive=1"));
+  assert(meta.fetch.archive_only.includes("columns=archive"));
+  assert(meta.fetch.full_diagnostics.includes("fields=full"));
 });
 
 Deno.test("card shape preserves placement and drops diagnostic / detail payloads", () => {

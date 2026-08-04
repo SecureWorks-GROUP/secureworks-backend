@@ -57,6 +57,12 @@ reintroduce a board-path dual-fetch of `makesafe_pipeline?history=all`; card
 shape stamps `has_wo` / `invoice_status` / `site_suburb` / company slug so the
 board is self-sufficient. Contract: `docs/makesafe-board-read-model-v1.md`.
 
+Default ops board also defaults to **active columns only**
+(`column_scope: "active"`): Archive is not hauled. On demand via
+`include_archive=1`, `columns=archive` (optional `limit`/`offset`),
+`columns=all`, or `fields=full`. Always publish `column_counts` and `archive`
+meta so history never looks deleted. Placement for returned cards is unchanged.
+
 U2-S1 cycle-scoped evidence lives in `makesafe_cycle_evidence.ts` and is shared by
 board enrich and `makesafe_audit`. Apply
 `20260727000001_makesafe_attendance_cycles_u2_s1.sql` **before** the matching

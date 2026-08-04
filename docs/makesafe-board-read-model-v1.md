@@ -36,6 +36,31 @@ Opt into the full diagnostic dump with `fields=full` or
 `include_diagnostics=1`. Placement is identical in both shapes — card mode never
 re-derives a column. Trade projection is unchanged and always full.
 
+### Archive on demand (`column_scope=active` default)
+
+The default ops board does **not** haul the Archive column. Two thirds of the
+live board is history the captain never works from; excluding it is the largest
+remaining board load win after card shape.
+
+| Request | What returns |
+| --- | --- |
+| `projection=ops` (default) | Active columns only: new, allocated, trade_report_in, report_ready, completed, cancelled. `columns.archive` is `[]`. |
+| `include_archive=1` or `columns=all` | Every column, including Archive. |
+| `columns=archive` | Archive only (lazy open). Optional `limit` / `offset` for paging (max 500). |
+| `fields=full` | Full diagnostic fields **and** every column (diagnostics never silently drop history). |
+
+The response always publishes an honest census so Archive never looks deleted:
+
+- `column_scope`: `active` \| `archive` \| `all`
+- `column_counts`: per-stage totals for the **full** board (including archive)
+- `archive`: `{ included, total, returned, offset, limit, fetch }` with the
+  exact query strings to load history on demand
+
+Placement for every **returned** card is unchanged: declared ladder +
+display-ledger overlay. Scope only decides which cards are present. Overlays
+that move a card into archive still remove it from the active payload and
+increment `column_counts.archive`.
+
 ### Privileged Phase 1 comparison mode
 
 The same endpoint accepts `contract_version=v2` only for the `ops` projection

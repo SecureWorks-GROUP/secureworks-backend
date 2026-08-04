@@ -60,6 +60,41 @@ export const MAKESAFE_BOARD_FIELDS = ["card", "full"] as const;
 export type MakesafeBoardFields = (typeof MAKESAFE_BOARD_FIELDS)[number];
 export const MAKESAFE_BOARD_DEFAULT_FIELDS: MakesafeBoardFields = "card";
 
+/**
+ * Which ops board columns ship card rows.
+ *
+ * - `active` (default for projection=ops card shape): every column EXCEPT
+ *   `archive`. Archive is two thirds of the live board and the largest remaining
+ *   load cost after card-shape; the Captain ruled it loads on demand only.
+ * - `archive`: only the Archive column (lazy/paged open of that column).
+ * - `all`: every column, including Archive. Diagnostics (`fields=full`) and
+ *   explicit `include_archive=1` / `columns=all` use this so nothing is
+ *   unreachable.
+ *
+ * Placement for every returned card is unchanged: declared ladder +
+ * display-ledger overlay. Scope only decides which cards are present, never
+ * which column an included card lands in.
+ */
+export const MAKESAFE_BOARD_COLUMN_SCOPES = [
+  "active",
+  "archive",
+  "all",
+] as const;
+export type MakesafeBoardColumnScope =
+  (typeof MAKESAFE_BOARD_COLUMN_SCOPES)[number];
+export const MAKESAFE_BOARD_DEFAULT_COLUMN_SCOPE: MakesafeBoardColumnScope =
+  "active";
+
+/** Ops stages the default active board returns as card lists. */
+export const OPS_MAKESAFE_ACTIVE_STAGES = [
+  "new",
+  "allocated",
+  "trade_report_in",
+  "report_ready",
+  "completed",
+  "cancelled",
+] as const;
+
 export function parseMakesafeBoardFields(
   fieldsRaw: string | null | undefined,
   includeDiagnosticsRaw?: string | null,
@@ -80,6 +115,35 @@ export function parseMakesafeBoardFields(
   // Unknown value: stay on the fast board path rather than silently shipping
   // a multi-megabyte diagnostic dump.
   return MAKESAFE_BOARD_DEFAULT_FIELDS;
+}
+
+/**
+ * Resolve the ops column scope. `fields=full` always widens to `all` so a
+ * diagnostic dump cannot silently drop history. Explicit include_archive /
+ * columns=all also widen. Default is active-only (no Archive card haul).
+ */
+export function parseMakesafeBoardColumnScope(
+  columnsRaw?: string | null,
+  includeArchiveRaw?: string | null,
+  fields: MakesafeBoardFields = MAKESAFE_BOARD_DEFAULT_FIELDS,
+): MakesafeBoardColumnScope {
+  // Full diagnostic shape is the complete set by contract.
+  if (fields === "full") return "all";
+  const includeArchive = ["1", "true", "yes", "all"].includes(
+    String(includeArchiveRaw || "").trim().toLowerCase(),
+  );
+  if (includeArchive) return "all";
+  const columns = String(columnsRaw || "").trim().toLowerCase();
+  if (!columns || columns === "active" || columns === "live") return "active";
+  if (columns === "archive" || columns === "archived") return "archive";
+  if (
+    columns === "all" || columns === "full" || columns === "history" ||
+    columns === "complete"
+  ) {
+    return "all";
+  }
+  // Unknown value: stay on the fast active path rather than hauling history.
+  return MAKESAFE_BOARD_DEFAULT_COLUMN_SCOPE;
 }
 
 /**
@@ -364,6 +428,119 @@ export const OPS_MAKESAFE_STAGE_LABELS: Record<OpsMakesafeStage, string> = {
   archive: "Archive",
   cancelled: "Cancelled",
 };
+
+export function emptyOpsColumnCounts(): Record<OpsMakesafeStage, number> {
+  return Object.fromEntries(
+    OPS_MAKESAFE_STAGES.map((stage) => [stage, 0]),
+  ) as Record<OpsMakesafeStage, number>;
+}
+
+/** Count cards per ops stage from pipeline base rows (declared stage). */
+export function countOpsPipelineStages(
+  baseRows: readonly any[],
+): Record<OpsMakesafeStage, number> {
+  const counts = emptyOpsColumnCounts();
+  for (const row of baseRows || []) {
+    const stage = String(row?.board_stage || "").toLowerCase();
+    if ((OPS_MAKESAFE_STAGES as readonly string[]).includes(stage)) {
+      counts[stage as OpsMakesafeStage] += 1;
+    }
+  }
+  return counts;
+}
+
+/**
+ * After overlay, recompute honest column counts from canonical rows.
+ * Prefer this over pipeline declared counts when overlays can move cards
+ * (e.g. report_ready → archive).
+ */
+export function countOpsCanonicalStages(
+  rows: readonly any[],
+): Record<OpsMakesafeStage, number> {
+  const counts = emptyOpsColumnCounts();
+  for (const row of rows || []) {
+    const stage = String(row?.canonical_stage || "").toLowerCase();
+    if ((OPS_MAKESAFE_STAGES as readonly string[]).includes(stage)) {
+      counts[stage as OpsMakesafeStage] += 1;
+    } else {
+      // projectOps parks unknowns in `new`; census follows that placement.
+      counts.new += 1;
+    }
+  }
+  return counts;
+}
+
+/**
+ * Keep only the rows the column scope should return. Pure and placement-
+ * preserving: never rewrites `canonical_stage`.
+ */
+export function filterCanonicalRowsByColumnScope(
+  rows: readonly any[],
+  scope: MakesafeBoardColumnScope,
+  pagination: { limit?: number | null; offset?: number | null } = {},
+): any[] {
+  const list = Array.isArray(rows) ? [...rows] : [];
+  let filtered: any[];
+  if (scope === "all") {
+    filtered = list;
+  } else if (scope === "archive") {
+    filtered = list.filter((row) =>
+      String(row?.canonical_stage || "").toLowerCase() === "archive"
+    );
+  } else {
+    // active: everything except archive
+    filtered = list.filter((row) =>
+      String(row?.canonical_stage || "").toLowerCase() !== "archive"
+    );
+  }
+  if (scope === "archive") {
+    const offset = Math.max(0, Math.floor(Number(pagination.offset) || 0));
+    const rawLimit = pagination.limit;
+    const limit = rawLimit == null || rawLimit === undefined
+      ? null
+      : Math.max(1, Math.min(500, Math.floor(Number(rawLimit) || 0)));
+    if (limit != null) {
+      return filtered.slice(offset, offset + limit);
+    }
+    if (offset > 0) return filtered.slice(offset);
+  }
+  return filtered;
+}
+
+/**
+ * Honest archive metadata so an excluded Archive never looks like those cards
+ * ceased to exist. Always publish the total even when columns.archive is [].
+ */
+export function archiveOnDemandMeta(args: {
+  scope: MakesafeBoardColumnScope;
+  columnCounts: Record<string, number>;
+  archiveReturned: number;
+  offset?: number | null;
+  limit?: number | null;
+}) {
+  const total = Number(args.columnCounts?.archive || 0);
+  const included = args.scope === "all" || args.scope === "archive";
+  return {
+    included,
+    scope: args.scope,
+    total,
+    returned: included ? args.archiveReturned : 0,
+    offset: args.scope === "archive"
+      ? Math.max(0, Math.floor(Number(args.offset) || 0))
+      : 0,
+    limit: args.scope === "archive" && args.limit != null
+      ? Math.max(1, Math.min(500, Math.floor(Number(args.limit) || 0)))
+      : null,
+    // How the client fetches history without guessing.
+    fetch: {
+      active_default: "projection=ops",
+      include_archive: "projection=ops&include_archive=1",
+      archive_only: "projection=ops&columns=archive",
+      archive_page: "projection=ops&columns=archive&limit=50&offset=0",
+      full_diagnostics: "projection=ops&fields=full",
+    },
+  };
+}
 
 export interface MakesafeBoardViewer {
   userId: string;
