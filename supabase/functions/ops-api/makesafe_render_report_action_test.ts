@@ -11,6 +11,7 @@ import {
   ApiError,
   bertramProtectedReportRepairPlan,
   canonicalMakesafeReportJob,
+  CURATED_BIND_JOB_MEDIA_COLUMNS,
 } from "./index.ts";
 import {
   canonicalCurrentWikiReportHashPayload,
@@ -901,4 +902,383 @@ Deno.test("canonical report adapter owns jobs.client_name -> contact", async () 
     null,
   );
   assertEquals(absent.contact, "");
+});
+
+// ── job_media schema/order regressions ──────────────────────────────────────
+// A mocked client answers any select, so the suite could not see that the bind
+// asked job_media for `cycle_number`, `sort_order` and `order_index` — none of
+// which exist on that table. PostgREST answered 42703 and every production bind
+// refused `curated_bind_source_evidence_read_failed`. These three tests pin the
+// column set, prove a schema-faithful client still binds, and pin the order.
+
+/**
+ * The LIVE public.job_media columns, read from information_schema on
+ * 2026-08-04. Deliberately duplicated here so the test fails when the bind
+ * asks for a column the database does not have.
+ */
+const LIVE_JOB_MEDIA_COLUMNS = [
+  "attendance_cycle_id",
+  "created_at",
+  "cycle_attribution",
+  "id",
+  "job_id",
+  "label",
+  "lat",
+  "lng",
+  "makesafe_content_hash",
+  "makesafe_fact_version",
+  "notes",
+  "phase",
+  "po_id",
+  "storage_url",
+  "taken_at",
+  "thumbnail_url",
+  "type",
+  "uploaded_by",
+];
+
+Deno.test("curated bind job_media select names only real columns", () => {
+  const selected = CURATED_BIND_JOB_MEDIA_COLUMNS.split(",").map((name) =>
+    name.trim()
+  );
+  assertEquals(selected.length > 0, true);
+  const phantom = selected.filter((name) =>
+    !LIVE_JOB_MEDIA_COLUMNS.includes(name)
+  );
+  assertEquals(
+    phantom,
+    [],
+    `job_media select names columns that do not exist: ${phantom.join(", ")}`,
+  );
+  // The exact three that took production down — named so a reviewer sees why.
+  for (const absent of ["cycle_number", "sort_order", "order_index"]) {
+    assertEquals(
+      selected.includes(absent),
+      false,
+      `job_media has no ${absent}; selecting it is a PostgREST 42703`,
+    );
+  }
+});
+
+Deno.test("curated bind survives a client that rejects unknown job_media columns", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nschema faithful fixture");
+  const { client } = bindClient(bytes);
+  // Wrap the stub so job_media behaves like PostgREST: an unknown column is a
+  // 42703 error, not a silently answered row.
+  const inner = client.from.bind(client);
+  const rejected: string[] = [];
+  client.from = (table: string) => {
+    const query = inner(table);
+    if (table !== "job_media") return query;
+    const select = query.select.bind(query);
+    query.select = (columns?: string) => {
+      for (const name of String(columns || "").split(",")) {
+        const column = name.trim();
+        if (
+          column && column !== "*" && !LIVE_JOB_MEDIA_COLUMNS.includes(column)
+        ) {
+          rejected.push(column);
+        }
+      }
+      return select(columns);
+    };
+    const then = query.then.bind(query);
+    query.then = (resolve: (value: unknown) => unknown) =>
+      rejected.length
+        ? Promise.resolve({
+          data: null,
+          error: {
+            code: "42703",
+            message: `column job_media.${rejected[0]} does not exist`,
+          },
+        }).then(resolve)
+        : then(resolve);
+    return query;
+  };
+  const body = await bindBody(bytes);
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+  assertEquals(rejected, []);
+  assertEquals(result.success, true);
+  assertEquals(result.cycle_attribution, "bound");
+});
+
+Deno.test("curated bind photo accounting orders by created_at, then id", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nordered photo fixture");
+  // Deliberately adversarial: id order and created_at order fully disagree, and
+  // two rows share a timestamp so the id tiebreak is exercised as well.
+  //   created_at: zzz, bbb, mmm, ppp, fff, aaa, nnn   id: aaa, bbb, fff, mmm, nnn, ppp, zzz
+  //
+  // ppp/fff differ ONLY by a fractional-seconds component, which Postgres omits
+  // when microseconds are exactly zero. A string comparator orders them the
+  // wrong way round (ICU weights '.' below 'Z'), so they pin chronological
+  // comparison. nnn carries a null created_at and must sort LAST, as PostgREST
+  // returns nulls last rather than first.
+  const media = [
+    {
+      id: "aaa",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:07Z",
+      storage_url: "https://storage.example.test/a.jpg",
+    },
+    {
+      id: "zzz",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:23:53Z",
+      storage_url: "https://storage.example.test/z.jpg",
+    },
+    {
+      id: "mmm",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:01Z",
+      storage_url: "https://storage.example.test/m.jpg",
+    },
+    {
+      id: "bbb",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:01Z",
+      storage_url: "https://storage.example.test/b.jpg",
+    },
+    {
+      id: "fff",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:03.500Z",
+      storage_url: "https://storage.example.test/f.jpg",
+    },
+    {
+      id: "ppp",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:03Z",
+      storage_url: "https://storage.example.test/p.jpg",
+    },
+    {
+      id: "nnn",
+      type: "photo",
+      phase: "completion",
+      created_at: null,
+      storage_url: "https://storage.example.test/n.jpg",
+    },
+  ];
+  // Guard the fixture itself: a string comparator genuinely disagrees with
+  // chronology on this pair, so the assertions below cannot pass by accident.
+  assertEquals(
+    String(media[5].created_at).localeCompare(String(media[4].created_at)) > 0,
+    true,
+  );
+  const expected = ["zzz", "bbb", "mmm", "ppp", "fff", "aaa", "nnn"];
+  const photoBytes = new TextEncoder().encode("photo-bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const { client } = bindClient(bytes, {
+    media,
+    serviceReport: {
+      id: SERVICE_REPORT_ID,
+      status: "submitted",
+      checklist_json: { materials_used: [] },
+      attendance_cycle_id: "cycle-fixture",
+      cycle_attribution: "bound",
+      cycle_number: 1,
+    },
+  });
+  const job = {
+    ...currentReportJob(),
+    photos: expected.map((id) => ({
+      evidence_id: id,
+      caption: `Site photo ${id}`,
+      content_sha256: contentHash,
+    })),
+    photo_evidence: {
+      source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
+      completeness_verified: true,
+      source_count: media.length,
+      applicable_count: media.length,
+      selected_count: media.length,
+      applicable_ids: expected,
+      selected_ids: expected,
+      excluded: [],
+      rejected: [],
+    },
+  };
+  const body = {
+    ...(await bindBody(bytes)),
+    report_job: job,
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (input: any) =>
+    Promise.resolve(
+      new Response(
+        String(input).endsWith(".pdf") ? bytes : photoBytes,
+        { status: 200 },
+      ),
+    ) as any;
+  try {
+    const result = await _bindCurrentCycleCuratedMakesafeReportForTest(
+      client,
+      body,
+      FIXTURE_ACTOR,
+    );
+    assertEquals(result.success, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  // The id-only comparator this replaced would have demanded id order. That
+  // payload is internally self-consistent, so only the source-order comparison
+  // can catch it — it must now be refused.
+  const idOrdered = ["aaa", "bbb", "fff", "mmm", "nnn", "ppp", "zzz"];
+  assertEquals(
+    canonicalSesJson(idOrdered) === canonicalSesJson(expected),
+    false,
+  );
+  const { client: second } = bindClient(bytes, {
+    media,
+    serviceReport: {
+      id: SERVICE_REPORT_ID,
+      status: "submitted",
+      checklist_json: { materials_used: [] },
+      attendance_cycle_id: "cycle-fixture",
+      cycle_attribution: "bound",
+      cycle_number: 1,
+    },
+  });
+  globalThis.fetch = (input: any) =>
+    Promise.resolve(
+      new Response(
+        String(input).endsWith(".pdf") ? bytes : photoBytes,
+        { status: 200 },
+      ),
+    ) as any;
+  try {
+    const error = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(second, {
+          ...body,
+          report_job: {
+            ...job,
+            photos: idOrdered.map((id) => ({
+              evidence_id: id,
+              caption: `Site photo ${id}`,
+              content_sha256: contentHash,
+            })),
+            photo_evidence: {
+              ...job.photo_evidence,
+              applicable_ids: idOrdered,
+              selected_ids: idOrdered,
+            },
+          },
+        }, FIXTURE_ACTOR),
+      ApiError,
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "photo_evidence does not completely account",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("curated bind photo accounting keeps sub-millisecond created_at order", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nmicrosecond photo fixture");
+  // Both rows land inside the same millisecond, so `Date.parse` alone reports
+  // them as simultaneous and the id tiebreak inverts them. Postgres orders by
+  // true chronology, so the comparator has to as well.
+  const media = [
+    {
+      id: "aaa",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:01.123999+00:00",
+      storage_url: "https://storage.example.test/a.jpg",
+    },
+    {
+      id: "bbb",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:01.123456+00:00",
+      storage_url: "https://storage.example.test/b.jpg",
+    },
+  ];
+  assertEquals(
+    Date.parse(String(media[0].created_at)) ===
+      Date.parse(String(media[1].created_at)),
+    true,
+  );
+  const chronological = ["bbb", "aaa"];
+  const idOrdered = ["aaa", "bbb"];
+  const photoBytes = new TextEncoder().encode("photo-bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const photoEvidence = (ids: string[]) => ({
+    source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
+    completeness_verified: true,
+    source_count: media.length,
+    applicable_count: media.length,
+    selected_count: media.length,
+    applicable_ids: ids,
+    selected_ids: ids,
+    excluded: [],
+    rejected: [],
+  });
+  const reportJob = (ids: string[]) => ({
+    ...currentReportJob(),
+    photos: ids.map((id) => ({
+      evidence_id: id,
+      caption: `Site photo ${id}`,
+      content_sha256: contentHash,
+    })),
+    photo_evidence: photoEvidence(ids),
+  });
+  const base = await bindBody(bytes);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (input: any) =>
+    Promise.resolve(
+      new Response(
+        String(input).endsWith(".pdf") ? bytes : photoBytes,
+        { status: 200 },
+      ),
+    ) as any;
+  try {
+    const { client } = bindClient(bytes, { media });
+    const result = await _bindCurrentCycleCuratedMakesafeReportForTest(
+      client,
+      { ...base, report_job: reportJob(chronological) },
+      FIXTURE_ACTOR,
+    );
+    assertEquals(result.success, true);
+
+    // The same IDs in id order are complete but out of sequence, and the
+    // refusal must say so rather than pointing at completeness.
+    const { client: second } = bindClient(bytes, { media });
+    const error = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          second,
+          { ...base, report_job: reportJob(idOrdered) },
+          FIXTURE_ACTOR,
+        ),
+      ApiError,
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "applicable_ids carries the current-cycle IDs in the wrong sequence",
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "created_at ascending, then id",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

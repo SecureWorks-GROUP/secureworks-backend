@@ -34,6 +34,15 @@ Auth: privileged ops key, make-safe reporting routine, or admin/owner JWT.
 - `report_job` (including materials/photo evidence accounting)
 - `curation_revision_id`, `curation_artifact_id`
 
+Photo evidence ID sequences (`photo_evidence.applicable_ids`, `.selected_ids`,
+`excluded[].evidence_id`) must be `job_media.created_at` ascending with `id` as
+the tiebreak; any other sequence is refused `curated_bind_photo_source_mismatch`,
+and the refusal names which comparison disagreed. `report_job.photos[]` is
+matched positionally against that same applicable sequence, so its SHA-256 hashes
+must be in the same order. Why that is the order, and the phantom `job_media`
+columns that used to break this read, are in
+`curated-bind-job-media-columns-2026-08-04.md`.
+
 ### Server derives
 
 - current attendance cycle

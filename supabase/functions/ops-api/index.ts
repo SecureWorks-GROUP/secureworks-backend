@@ -34479,6 +34479,17 @@ async function assertCurrentWikiReportInput(
   return { job, inputHash, supplied: normalizedSupplied }
 }
 
+/**
+ * The exact job_media columns the curated bind's photo-source accounting reads.
+ *
+ * Pinned as a constant so a regression can assert the set rather than trusting
+ * a mocked fixture. Every name must exist on the LIVE job_media table — an
+ * enumerated select naming a phantom column is a PostgREST 42703, not an empty
+ * result, and it takes the whole bind down (see the call site).
+ */
+export const CURATED_BIND_JOB_MEDIA_COLUMNS =
+  'id,storage_url,type,phase,attendance_cycle_id,cycle_attribution,created_at'
+
 async function assertCurrentWikiSourceEvidence(
   client: any,
   jobId: string,
@@ -34491,8 +34502,18 @@ async function assertCurrentWikiSourceEvidence(
       .select('id,status,checklist_json,attendance_cycle_id,cycle_attribution,cycle_number')
       .eq('job_id', jobId)
       .order('created_at', { ascending: false }),
+    // Every column here EXISTS on job_media — verified against the live
+    // schema, and pinned by `curated bind job_media select names only real
+    // columns` in makesafe_render_report_action_test.ts.
+    //
+    // This select previously also named `cycle_number`, `sort_order` and
+    // `order_index`. None of the three exist on job_media in ANY environment
+    // (no migration declares them), so PostgREST answered 42703, the client
+    // set `error`, and EVERY curated bind that reached the photo step refused
+    // `curated_bind_source_evidence_read_failed`. The mocked suite could not
+    // see it: fixtures happily supplied columns production does not have.
     client.from('job_media')
-      .select('id,storage_url,type,phase,attendance_cycle_id,cycle_attribution,cycle_number,created_at,sort_order,order_index')
+      .select(CURATED_BIND_JOB_MEDIA_COLUMNS)
       .eq('job_id', jobId)
       .order('created_at'),
   ])
@@ -34555,11 +34576,44 @@ async function assertCurrentWikiSourceEvidence(
     return type.includes('photo') || type.includes('image') ||
       phase.includes('completion') || phase.includes('after')
   }
-  // Match assembler ordering (sort_order/order_index then id), not created_at.
-  const mediaOrder = (left: any, right: any) =>
-    Number(left?.sort_order ?? left?.order_index ?? 0) -
-      Number(right?.sort_order ?? right?.order_index ?? 0) ||
-    String(left?.id || '').localeCompare(String(right?.id || ''))
+  // Photo evidence order is `created_at` ascending, with `id` only as a stable
+  // tiebreak for equal timestamps — the same order the media read above already
+  // asks PostgREST for.
+  //
+  // The previous comparator claimed to "match assembler ordering
+  // (sort_order/order_index then id)". It did not: neither column exists on
+  // job_media, so every row scored 0 and the sequence collapsed to id order.
+  // Verified against the served Munster artifact — its nine rendered photo
+  // pages match the current-cycle media in created_at order exactly, and NOT
+  // in id order.
+  //
+  // Compare parsed instants, never the raw strings: Postgres omits the
+  // fractional part when microseconds are exactly zero, and ICU collation
+  // weights '.' below '+'/'Z', so a string compare inverts
+  // `…:01+00:00` against `…:01.123+00:00`. A missing or unparseable timestamp
+  // sorts LAST, matching PostgREST's nulls-last ordering.
+  //
+  // `Date.parse` resolves to whole milliseconds and floors anything finer, so
+  // two rows written microseconds apart inside one millisecond would compare
+  // equal and fall to the id tiebreak while Postgres orders them by true
+  // chronology. Carry the sub-millisecond digits as a second key so the
+  // comparator keeps the ordering the database read already applied.
+  const mediaInstant = (value: unknown): [number, number] => {
+    const raw = String(value ?? '').trim()
+    const parsed = Date.parse(raw)
+    if (Number.isNaN(parsed)) {
+      return [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY]
+    }
+    const fraction = /\.(\d+)/.exec(raw)?.[1] || ''
+    return [parsed, Number(`${fraction}000000`.slice(3, 6))]
+  }
+  const mediaOrder = (left: any, right: any) => {
+    const [leftInstant, leftSub] = mediaInstant(left?.created_at)
+    const [rightInstant, rightSub] = mediaInstant(right?.created_at)
+    if (leftInstant !== rightInstant) return leftInstant < rightInstant ? -1 : 1
+    if (leftSub !== rightSub) return leftSub < rightSub ? -1 : 1
+    return String(left?.id || '').localeCompare(String(right?.id || ''))
+  }
   const applicable = currentMedia.filter(photoIsApplicable).slice().sort(mediaOrder)
   const excluded = currentMedia.filter((item: any) => !photoIsApplicable(item))
     .slice().sort(mediaOrder)
@@ -34569,13 +34623,37 @@ async function assertCurrentWikiSourceEvidence(
   const suppliedExcludedIds = photoEvidence.excluded.map((item: any) =>
     String(item?.evidence_id || '').trim()
   )
-  if (photoEvidence.source_count !== currentMedia.length ||
-      canonicalSesJson(photoEvidence.applicable_ids) !== canonicalSesJson(applicableIds) ||
-      canonicalSesJson(photoEvidence.selected_ids) !== canonicalSesJson(applicableIds) ||
-      canonicalSesJson(suppliedExcludedIds) !== canonicalSesJson(excludedIds)) {
+  // Four independent comparisons share one refusal code, and an order-only
+  // disagreement on an otherwise complete ID set is now the likeliest failure.
+  // Name the comparison that failed, and say which sequence is expected.
+  const describeIdMismatch = (
+    label: string,
+    supplied: unknown,
+    expected: string[],
+  ): string | null => {
+    if (canonicalSesJson(supplied) === canonicalSesJson(expected)) return null
+    const sameMembers = Array.isArray(supplied) &&
+      supplied.length === expected.length &&
+      canonicalSesJson(supplied.map((item) => canonicalSesJson(item)).sort()) ===
+        canonicalSesJson(expected.map((item) => canonicalSesJson(item)).sort())
+    return sameMembers
+      ? `${label} carries the current-cycle IDs in the wrong sequence (expected created_at ascending, then id)`
+      : `${label} does not match the current-cycle set`
+  }
+  const photoMismatches = [
+    photoEvidence.source_count !== currentMedia.length
+      ? `source_count ${photoEvidence.source_count} does not equal the current-cycle job_media count ${currentMedia.length}`
+      : null,
+    describeIdMismatch('applicable_ids', photoEvidence.applicable_ids, applicableIds),
+    describeIdMismatch('selected_ids', photoEvidence.selected_ids, applicableIds),
+    describeIdMismatch('excluded evidence_ids', suppliedExcludedIds, excludedIds),
+  ].filter((entry): entry is string => Boolean(entry))
+  if (photoMismatches.length) {
     throw curatedBindError(
       'curated_bind_photo_source_mismatch',
-      'photo_evidence does not completely account for current-cycle job_media',
+      `photo_evidence does not completely account for current-cycle job_media: ${
+        photoMismatches.join('; ')
+      }`,
     )
   }
   const suppliedPhotos = (validated.supplied as any).photos as any[]
