@@ -460,10 +460,14 @@ Deno.test("makesafe_board serves the captain display ledger with a healthy multi
     "api_key",
     null,
     "ops",
-    { generatedAt: GENERATED_AT },
+    // The ruled card lands in archive, which the default board no longer hauls.
+    // The overlay regression is about placement, so ask for the scope that
+    // contains archive rather than weakening the assertions.
+    { generatedAt: GENERATED_AT, includeArchive: "1" },
   );
   assertEquals(response.status, 200);
   const body = await response.json();
+  assertEquals(body.column_scope, "all");
 
   const card = Object.values(body.columns as Record<string, any[]>)
     .flat()
@@ -475,6 +479,12 @@ Deno.test("makesafe_board serves the captain display ledger with a healthy multi
   assertEquals(card.canonical_stage, "archive");
   assertEquals(body.columns.archive.length, 1);
   assertEquals(body.columns.report_ready.length, 0);
+  // The census must agree with the placement, in every scope.
+  assertEquals(body.column_counts.archive, 1);
+  assertEquals(body.column_counts.report_ready, 0);
+  assertEquals(body.archive.included, true);
+  assertEquals(body.archive.total, 1);
+  assertEquals(body.archive.returned, 1);
 
   assertEquals(body.intake_exceptions.cards, []);
   assertEquals(body.intake_exceptions.source_alarms.length, 1);

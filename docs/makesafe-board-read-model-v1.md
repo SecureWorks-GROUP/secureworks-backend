@@ -36,6 +36,31 @@ Opt into the full diagnostic dump with `fields=full` or
 `include_diagnostics=1`. Placement is identical in both shapes — card mode never
 re-derives a column. Trade projection is unchanged and always full.
 
+### Archive on demand (`column_scope=active` default)
+
+The default ops board does **not** haul the Archive column. Two thirds of the
+live board is history the captain never works from; excluding it is the largest
+remaining board load win after card shape.
+
+| Request | What returns |
+| --- | --- |
+| `projection=ops` (default) | Active columns only: new, allocated, trade_report_in, report_ready, completed, cancelled. `columns.archive` is `[]`. |
+| `include_archive=1` or `columns=all` | Every column, including Archive. |
+| `columns=archive` | Archive only (lazy open). Optional `limit` / `offset` for paging (max 500). A non-integer, non-positive or over-max `limit`, or a negative `offset`, is a `400` — never silently clamped to a page nobody asked for. |
+| `fields=full` | Full diagnostic fields **and** every column (diagnostics never silently drop history). |
+
+The response always publishes an honest census so Archive never looks deleted:
+
+- `column_scope`: `active` \| `archive` \| `all`
+- `column_counts`: per-stage totals for the **full** board (including archive)
+- `archive`: `{ included, scope, total, returned, offset, limit, fetch }` with
+  the exact query strings to load history on demand
+
+Placement for every **returned** card is unchanged: declared ladder +
+display-ledger overlay. Scope only decides which cards are present. Overlays
+that move a card into archive still remove it from the active payload and
+increment `column_counts.archive`.
+
 ### Privileged Phase 1 comparison mode
 
 The same endpoint accepts `contract_version=v2` only for the `ops` projection
@@ -252,6 +277,10 @@ Ops retains the full stages:
 `new`, `allocated`, `trade_report_in`, `report_ready`, `completed`, `archive`, `cancelled`.
 
 Each row appears exactly once. An unknown stage is retained in `new`, carries `projection_warning`, and is listed in `unmapped_stage_job_ids`. It never disappears.
+
+Every stage key is always present on the response, but by default `archive`
+carries no cards — see [Archive on demand](#archive-on-demand-column_scopeactive-default)
+for how history is counted and fetched.
 
 ### Recent deterministic intake exception desk
 

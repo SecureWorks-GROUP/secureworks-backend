@@ -126,17 +126,24 @@ import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import {
   MAKESAFE_BOARD_CONTRACT_VERSION,
+  MAKESAFE_BOARD_MAX_ARCHIVE_PAGE,
   OPS_MAKESAFE_STAGES,
+  archiveOnDemandMeta,
   authorizeMakesafeTradeProjection,
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
+  countOpsCanonicalStages,
+  filterCanonicalRowsByColumnScope,
+  isExcludedTerminalSyntheticBoardRow,
   isSyntheticLivefireJob,
   latestOwnRoofDraftByJobId,
   makesafeBoardJobStatusExclusionFilter,
   ownTemplateRoofJobIdsForBoard,
+  parseMakesafeBoardColumnScope,
   parseMakesafeBoardFields,
   projectOpsMakesafeBoard,
   projectTradeMakesafeBoard,
+  type MakesafeBoardColumnScope,
   type MakesafeBoardFields,
   type MakesafeTradeProjectionAuthMode,
 } from './makesafe_board_read_model.ts'
@@ -3249,6 +3256,10 @@ async function makesafeBoardAction(
     contractVersion?: string | null
     fields?: string | null
     includeDiagnostics?: string | null
+    columns?: string | null
+    includeArchive?: string | null
+    limit?: string | null
+    offset?: string | null
   } = {},
 ) {
   const projection = String(projectionRaw || 'ops').toLowerCase()
@@ -3258,8 +3269,36 @@ async function makesafeBoardAction(
   const fields: MakesafeBoardFields = projection === 'ops'
     ? parseMakesafeBoardFields(options.fields, options.includeDiagnostics)
     : 'full'
+  // Captain decision A: default ops board hauls active columns only. Archive is
+  // on demand (include_archive=1 / columns=archive|all / fields=full).
+  const columnScope: MakesafeBoardColumnScope = projection === 'ops'
+    ? parseMakesafeBoardColumnScope(options.columns, options.includeArchive, fields)
+    : 'all'
+  // Paging is validated, never coerced: a malformed limit must not silently
+  // become "one archive card" and then be published as honest meta.
+  const rawArchiveLimit = options.limit == null ? '' : String(options.limit).trim()
+  const rawArchiveOffset = options.offset == null ? '' : String(options.offset).trim()
+  const archiveLimit = rawArchiveLimit === '' ? null : Number(rawArchiveLimit)
+  const archiveOffset = rawArchiveOffset === '' ? 0 : Number(rawArchiveOffset)
   if (!['ops', 'trade'].includes(projection)) {
     return json({ error: "projection must be 'ops' or 'trade'" }, 400)
+  }
+  // Only the archive page consumes paging; every other scope has always ignored
+  // a stray limit/offset and keeps doing so rather than gaining a new refusal.
+  if (columnScope === 'archive') {
+    if (
+      archiveLimit !== null &&
+      (!Number.isInteger(archiveLimit) || archiveLimit < 1 ||
+        archiveLimit > MAKESAFE_BOARD_MAX_ARCHIVE_PAGE)
+    ) {
+      return json(
+        { error: `limit must be an integer between 1 and ${MAKESAFE_BOARD_MAX_ARCHIVE_PAGE}` },
+        400,
+      )
+    }
+    if (!Number.isInteger(archiveOffset) || archiveOffset < 0) {
+      return json({ error: 'offset must be an integer of 0 or more' }, 400)
+    }
   }
   if (!['v1', 'v2'].includes(contractVersion)) {
     return json({ error: "contract_version must be 'v1' or 'v2'" }, 400)
@@ -3288,8 +3327,11 @@ async function makesafeBoardAction(
   }
 
   if (contractVersion === 'v2') {
-    // v2 comparison always needs the full diagnostic row shape.
-    const canonicalRows = await loadCanonicalMakesafeBoard(client, { fields: 'full' })
+    // v2 comparison always needs the full diagnostic row shape and every column.
+    const canonicalRows = await loadCanonicalMakesafeBoard(client, {
+      fields: 'full',
+      columnScope: 'all',
+    })
     const generatedAt = options.generatedAt || new Date().toISOString()
     return json(await buildPrivilegedMakesafeV2BoardComparison(
       client,
@@ -3298,10 +3340,30 @@ async function makesafeBoardAction(
     ))
   }
   const generatedAt = options.generatedAt || new Date().toISOString()
+  const censusOut: { value?: MakesafeBoardLoadCensus } = {}
   const [canonicalRows, intakeExceptions] = await Promise.all([
-    loadCanonicalMakesafeBoard(client, { fields }),
+    loadCanonicalMakesafeBoard(client, {
+      fields,
+      columnScope,
+      archiveLimit: columnScope === 'archive' ? archiveLimit : null,
+      archiveOffset: columnScope === 'archive' ? archiveOffset : 0,
+      censusOut,
+    }),
     _loadIntakeExceptionProjectionForBoard(client, generatedAt),
   ])
+  const columnCounts = censusOut.value?.column_counts ||
+    countOpsCanonicalStages(canonicalRows)
+  const archiveReturned = censusOut.value?.archive_returned ??
+    canonicalRows.filter((r: any) =>
+      String(r?.canonical_stage || '').toLowerCase() === 'archive'
+    ).length
+  const archiveMeta = archiveOnDemandMeta({
+    scope: columnScope,
+    columnCounts,
+    archiveReturned,
+    offset: columnScope === 'archive' ? archiveOffset : 0,
+    limit: columnScope === 'archive' ? archiveLimit : null,
+  })
   if (fields === 'card') {
     // Placement-only check: every card must land in exactly one ops column.
     // Full trade parity needs diagnostic fields and is reserved for fields=full.
@@ -3323,8 +3385,12 @@ async function makesafeBoardAction(
       contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
       projection: 'ops',
       fields: 'card',
+      column_scope: columnScope,
       generated_at: generatedAt,
       ...ops,
+      // Honest full-board census so Archive never silently disappears.
+      column_counts: columnCounts,
+      archive: archiveMeta,
       intake_exceptions: _intakeExceptionBoardPayload(intakeExceptions),
       parity: {
         ok: stageErrors.length === 0,
@@ -3340,8 +3406,11 @@ async function makesafeBoardAction(
     contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
     projection: 'ops',
     fields: 'full',
+    column_scope: columnScope,
     generated_at: generatedAt,
     ...ops,
+    column_counts: columnCounts,
+    archive: archiveMeta,
     intake_exceptions: _intakeExceptionBoardPayload(intakeExceptions),
     parity,
   })
@@ -3721,6 +3790,10 @@ if (import.meta.main) serve(async (req: Request) => {
             contractVersion: url.searchParams.get('contract_version'),
             fields: url.searchParams.get('fields'),
             includeDiagnostics: url.searchParams.get('include_diagnostics'),
+            columns: url.searchParams.get('columns'),
+            includeArchive: url.searchParams.get('include_archive'),
+            limit: url.searchParams.get('limit'),
+            offset: url.searchParams.get('offset'),
           },
         )
       }
@@ -15959,18 +16032,48 @@ async function _readSesSpineFacts(
   )
 }
 
+export type MakesafeBoardLoadCensus = {
+  column_counts: Record<string, number>
+  column_scope: MakesafeBoardColumnScope
+  archive_returned: number
+}
+
 async function loadCanonicalMakesafeBoard(
   client: any,
-  opts?: { restrictToJobIds?: string[]; fields?: MakesafeBoardFields },
+  opts?: {
+    restrictToJobIds?: string[]
+    fields?: MakesafeBoardFields
+    /** Ops board only. Internal callers leave this unset (defaults to all). */
+    columnScope?: MakesafeBoardColumnScope
+    archiveLimit?: number | null
+    archiveOffset?: number | null
+    /**
+     * Optional out-bag for the honest full-board census. Always filled when
+     * provided so the ops paint path can publish column_counts / archive meta
+     * without changing the any[] return type every internal caller depends on.
+     */
+    censusOut?: { value?: MakesafeBoardLoadCensus }
+  },
 ): Promise<any[]> {
   const restrictToJobIds = opts?.restrictToJobIds
   // Card is the ops board paint path: placement + card fields only. Full keeps
   // every diagnostic/detail read for measurement, trade parity, and v2 compare.
   const fields: MakesafeBoardFields = opts?.fields || 'full'
   const cardMode = fields === 'card'
+  // Internal callers (seed, reconcile, shadow, trade) need every column.
+  // Ops paint defaults to active via makesafeBoardAction.
+  const columnScope: MakesafeBoardColumnScope = opts?.columnScope || 'all'
+  const finish = (rows: any[], column_counts: Record<string, number>, archive_returned: number) => {
+    if (opts?.censusOut) {
+      opts.censusOut.value = { column_counts, column_scope: columnScope, archive_returned }
+    }
+    return rows
+  }
   // Allocated-only callers pass an explicit, already-authorised id set. An empty
   // set means "no visible make-safes" — return without loading any history.
-  if (restrictToJobIds && restrictToJobIds.length === 0) return []
+  if (restrictToJobIds && restrictToJobIds.length === 0) {
+    return finish([], countOpsCanonicalStages([]), 0)
+  }
   const pipeline = await makesafePipeline(client, new URLSearchParams('history=all'), restrictToJobIds)
   const baseRows: any[] = []
   const seen = new Set<string>()
@@ -15981,8 +16084,44 @@ async function loadCanonicalMakesafeBoard(
       baseRows.push(row)
     }
   }
-  const jobIds = baseRows.map((row) => row.id)
-  if (jobIds.length === 0) return []
+  // Read before the archive partition: buildCanonicalMakesafeRows drops terminal
+  // synthetic live-fire rows, so the census add-back below must drop the same
+  // ones or the default board's archive count over-states history against the
+  // include_archive=1 census built from the same set.
+  const terminalSyntheticIds = baseRows.length > 0
+    ? await terminalSyntheticLivefireJobIds(client)
+    : new Set<string>()
+  const isTerminalSyntheticRow = (row: any) =>
+    isExcludedTerminalSyntheticBoardRow(row, terminalSyntheticIds)
+
+  // Archive is a terminal display stage: overlays cannot move a card OUT of it.
+  // They can only move a non-archive declared stage INTO archive. So for the
+  // default active board we still build every non-archive base row (to apply
+  // overlays and keep placement identical) and skip the heavy follow-on work for
+  // cards the pipeline already parked in archive.
+  const declaredArchiveBase = baseRows.filter((row) =>
+    String(row?.board_stage || '').toLowerCase() === 'archive' &&
+    !isTerminalSyntheticRow(row)
+  )
+  const nonArchiveBase = baseRows.filter((row) =>
+    String(row?.board_stage || '').toLowerCase() !== 'archive'
+  )
+  // Which base rows enter the expensive extras + buildCanonical path.
+  const buildBase = columnScope === 'all'
+    ? baseRows
+    : columnScope === 'archive'
+    // Archive page needs declared archive cards + any non-archive that overlay in.
+    ? baseRows
+    // active: skip declared-archive base rows (terminal → stay archive).
+    : nonArchiveBase
+  const jobIds = buildBase.map((row) => row.id)
+  // Active scope with only declared-archive cards: nothing to build, but still
+  // report the honest archive census so the column never looks deleted.
+  if (jobIds.length === 0) {
+    const column_counts = countOpsCanonicalStages([])
+    column_counts.archive = declaredArchiveBase.length
+    return finish([], column_counts, 0)
+  }
 
   // Card mode: only the display-ledger overlay is load-bearing for placement
   // beyond the pipeline base. Notes, contacts, photos, portal captures, holds,
@@ -16088,23 +16227,6 @@ async function loadCanonicalMakesafeBoard(
     console.error('[ops-api] makesafe_board status application read unavailable:', (error as Error).message)
   }
 
-  let terminalSyntheticLivefireJobIds = new Set<string>()
-  try {
-    const { data: terminalRuns, error } = await client
-      .from('ses_synthetic_livefire_runs')
-      .select('job_ids')
-      .eq('state', 'terminal')
-    if (error) throw error
-    for (const run of terminalRuns || []) {
-      for (const jobId of Array.isArray(run?.job_ids) ? run.job_ids : []) {
-        const normalized = String(jobId || '').trim()
-        if (normalized) terminalSyntheticLivefireJobIds.add(normalized)
-      }
-    }
-  } catch (error) {
-    console.error('[ops-api] makesafe_board terminal synthetic ledger read unavailable:', (error as Error).message)
-  }
-
   const notesByJobId: Record<string, any[]> = {}
   for (const note of notes) {
     const body = note?.detail_json?.text ?? note?.detail_json?.note ?? ''
@@ -16144,13 +16266,13 @@ async function loadCanonicalMakesafeBoard(
   // Match the computed-status read model's cycle authority (detail-first) so holds
   // recorded on cycle>1 attach as badges even when the base pipeline row carries no
   // top-level cycle_number: read_model uses detail?.cycle_number ?? base?.cycle_number.
-  const cycleByJobId = new Map(baseRows.map((row) => [
+  const cycleByJobId = new Map(buildBase.map((row) => [
     row.id,
     Number(row?.makesafe_details?.cycle_number ?? row?.cycle_number ?? 1),
   ]))
   for (const hold of holds) {
     if (hold?.lifted_at) continue
-    const row = baseRows.find((candidate) => candidate.id === hold?.job_id)
+    const row = buildBase.find((candidate) => candidate.id === hold?.job_id)
     const detail = row?.makesafe_details || { cycle_number: cycleByJobId.get(hold?.job_id) || 1, reattend_count: row?.reattend_count || 0 }
     if (hold?.job_id && filterHoldsForCurrentCycle([hold], detail, detail.attendance_cycle_id) && !holdsByJobId[hold.job_id]) {
       holdsByJobId[hold.job_id] = hold
@@ -16164,7 +16286,7 @@ async function loadCanonicalMakesafeBoard(
   // is the same canonical one the read model applies, kept in
   // `ownTemplateRoofJobIdsForBoard` so the two cannot drift apart.
   // Card mode skips: own-roof drafts only feed M1/v2 diagnostics, never placement.
-  const ownRoofJobIds = cardMode ? [] : ownTemplateRoofJobIdsForBoard(baseRows)
+  const ownRoofJobIds = cardMode ? [] : ownTemplateRoofJobIdsForBoard(buildBase)
   let ownRoofDraftByJobId: Record<string, any> = {}
   let ownRoofReportDocumentIdsByJobId: Record<string, Set<string>> = {}
   if (ownRoofJobIds.length > 0) {
@@ -16245,7 +16367,7 @@ async function loadCanonicalMakesafeBoard(
     }
   }
 
-  return buildCanonicalMakesafeRows(baseRows, {
+  const built = buildCanonicalMakesafeRows(buildBase, {
     notesByJobId,
     photoCountByJobId,
     contactsByJobId,
@@ -16257,8 +16379,28 @@ async function loadCanonicalMakesafeBoard(
     ownRoofReportDocumentIdsByJobId,
     terminalProofsByJobId,
     attendanceCycleIdsByJobId,
-    terminalSyntheticLivefireJobIds,
+    terminalSyntheticLivefireJobIds: terminalSyntheticIds,
   }, fields)
+
+  // Honest full-board census. Active scope never builds declared-archive base
+  // rows (terminal display — overlays cannot leave archive), so add that count
+  // back onto the archive total after counting overlay→archive moves among the
+  // non-archive base set.
+  const column_counts = countOpsCanonicalStages(built)
+  if (columnScope === 'active') {
+    column_counts.archive =
+      Number(column_counts.archive || 0) + declaredArchiveBase.length
+  }
+
+  const rows = filterCanonicalRowsByColumnScope(built, columnScope, {
+    limit: opts?.archiveLimit,
+    offset: opts?.archiveOffset,
+  })
+  const archive_returned = rows.filter((row) =>
+    String(row?.canonical_stage || '').toLowerCase() === 'archive'
+  ).length
+
+  return finish(rows, column_counts, archive_returned)
 }
 
 function makesafeStatusReviewCards(rows: any[]) {

@@ -933,11 +933,20 @@ async function verifyStages(
   }
   evidence.stages.push({ stage: "intake_fates", result: "PASS", rows: fates });
 
+  // fields=full is what emits the flat `rows` list and the computed-status
+  // diagnostics recorded below; it also widens the scope to every column, so a
+  // synthetic job parked in archive is still proved present here.
   const board = await client.action<JsonRecord>(
     "ops-api",
     "makesafe_board",
+    { query: { fields: "full" } },
   );
   const boardRows = Array.isArray(board.rows) ? board.rows as JsonRecord[] : [];
+  if (boardRows.length === 0) {
+    throw new Error(
+      "canonical board returned no rows: the membership probe cannot prove anything",
+    );
+  }
   const projected: JsonRecord[] = [];
   for (const job of found.jobs) {
     const matches = boardRows.filter((row) => row.id === job.id);
@@ -1176,7 +1185,12 @@ async function cleanup(
   );
 
   await waitFor("board projection exclusion", 90_000, async () => {
-    const board = await client.action<JsonRecord>("ops-api", "makesafe_board");
+    // include_archive=1: the default board is active-columns-only, and a purged
+    // synthetic job parked in archive would be absent from it either way. Only
+    // the full-column board proves terminal accounting did the excluding.
+    const board = await client.action<JsonRecord>("ops-api", "makesafe_board", {
+      query: { include_archive: "1" },
+    });
     return !containsMarker(board, run.marker) &&
       strings(found.jobs, "id").every((id) =>
         !JSON.stringify(board).includes(id)
@@ -1185,15 +1199,18 @@ async function cleanup(
 
   const projectionProof: Record<string, boolean> = {};
   for (
-    const action of [
-      "makesafe_board",
-      "makesafe_audit",
-      "makesafe_pipeline",
-      "intake_health",
-      "ops_summary",
+    const probe of [
+      { action: "makesafe_board", query: { include_archive: "1" } },
+      { action: "makesafe_audit" },
+      { action: "makesafe_pipeline" },
+      { action: "intake_health" },
+      { action: "ops_summary" },
     ]
   ) {
-    const response = await client.action<JsonRecord>("ops-api", action);
+    const action = probe.action;
+    const response = await client.action<JsonRecord>("ops-api", action, {
+      query: probe.query,
+    });
     projectionProof[action] = !containsMarker(response, run.marker) &&
       strings(found.jobs, "id").every((id) =>
         !JSON.stringify(response).includes(id)
