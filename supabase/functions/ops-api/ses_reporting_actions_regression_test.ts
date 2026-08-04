@@ -546,17 +546,63 @@ Deno.test("invoice-bound route requires the authorised Xero PDF and keeps approv
   ]);
   assertEquals(authorised.ready, true);
 
-  const draft = resolveDocketRoutes(
+  // AUTHORISED without a matching PDF remains non-ready (send gate).
+  const authorisedNoPdf = resolveDocketRoutes(
     invoiceDocket("invoice_bound", attachments, {
-      status: "DRAFT",
-      xero_invoice_id: "xero-invoice-test-1",
-      invoice_number: "INV-TEST-1",
+      status: "AUTHORISED",
+      xero_invoice_id: "xero-invoice-missing-pdf",
+      invoice_number: "INV-MISSING",
     }),
     ROUTE_ARTIFACTS,
     null,
   )[0];
-  assertEquals(draft.ready, false);
+  assertEquals(authorisedNoPdf.ready, false);
 });
+
+Deno.test(
+  "bound Xero DRAFT makes invoice route ready without PDF and stops claiming no invoice",
+  () => {
+    const attachments = [
+      "ARTIFACTS/invoice_proposal.json",
+      "ARTIFACTS/report.pdf",
+      "ARTIFACTS/swms.pdf",
+    ];
+    // Option B mint binds the DRAFT on the obligation while the docket stays
+    // pre_xero with a stored draft that still says "No Xero invoice exists".
+    const draft = resolveDocketRoutes(
+      invoiceDocket("pre_xero", attachments, null),
+      ROUTE_ARTIFACTS,
+      {
+        pricing_disposition: "priced_from_canon",
+        xero_binding: {
+          status: "DRAFT",
+          xero_invoice_id: "xero-invoice-test-1",
+          invoice_number: "INV-TEST-1",
+          total: 737,
+        },
+      },
+    )[0];
+    assertEquals(draft.ready, true);
+    assertStringIncludes(draft.subject, "INV-TEST-1");
+    assertStringIncludes(draft.body, "DRAFT");
+    assertStringIncludes(draft.body, "INV-TEST-1");
+    assertEquals(draft.body.includes("No Xero invoice exists"), false);
+    assertEquals(draft.attachment_hashes, ["report-hash", "swms-hash"]);
+
+    // Same truth when the DRAFT is already on the docket binding.
+    const onDocket = resolveDocketRoutes(
+      invoiceDocket("invoice_bound", attachments, {
+        status: "DRAFT",
+        xero_invoice_id: "xero-invoice-test-1",
+        invoice_number: "INV-TEST-1",
+      }),
+      ROUTE_ARTIFACTS,
+      null,
+    )[0];
+    assertEquals(onDocket.ready, true);
+    assertEquals(onDocket.body.includes("No Xero invoice exists"), false);
+  },
+);
 
 function listClient(options: { proposalError?: boolean } = {}) {
   const calls: string[] = [];

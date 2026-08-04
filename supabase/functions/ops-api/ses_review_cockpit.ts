@@ -158,10 +158,16 @@ export function evaluateSesMechanicalClean(
       input.pre_xero_docs_ready || input.invoice_already_bound,
       "The current family docket is commercially ready.",
     ),
+    // C2 names missing facts, not the historical readiness.ready flag.
+    // That flag stays false with empty blockers after the 2026-08-03 drop of
+    // the unsatisfiable readiness precondition (approval/obligation/release
+    // no longer assert it). Requiring the flag here recreated a false hold:
+    // Docs Ready / APPROVE stayed dark even when every named readiness
+    // blocker was gone and a live Xero DRAFT was already bound.
     check(
       "C2",
-      input.readiness_ready && input.readiness_blockers.length === 0,
-      "Current readiness is green with no blockers.",
+      input.readiness_blockers.length === 0,
+      "No named readiness blockers remain on the current revision.",
     ),
     check(
       "C3",
@@ -305,6 +311,7 @@ export interface SesCockpitDocket {
     xero_invoice_id: string;
     invoice_number: string;
     status: string;
+    total?: number | null;
     pdf_content_hash?: string;
   } | null;
   local_invoice_proposal: Record<string, unknown> | null;
@@ -401,8 +408,19 @@ export function buildSesCockpitView(
       family_evidence: docket.family_evidence,
       swms: docket.swms,
       money: {
-        local_invoice_proposal: docket.local_invoice_proposal,
+        // When a live Xero draft/invoice is bound, surface that identity as the
+        // bill. The local proposal stays available as internal pre-Xero state
+        // but must not be presented alone as though it were the invoice.
+        bound_invoice: docket.xero_binding
+          ? {
+            xero_invoice_id: docket.xero_binding.xero_invoice_id,
+            invoice_number: docket.xero_binding.invoice_number,
+            status: docket.xero_binding.status,
+            total: docket.xero_binding.total ?? null,
+          }
+          : null,
         xero: docket.xero_binding,
+        local_invoice_proposal: docket.local_invoice_proposal,
       },
       email_drafts: docket.routes,
       crew_and_trade_visits: docket.crew_and_trade_visits,

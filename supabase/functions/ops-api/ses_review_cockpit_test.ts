@@ -86,6 +86,19 @@ Deno.test("mechanical clean is exactly C1-C12 and grants Shaun clean band", () =
   );
 });
 
+Deno.test(
+  "C2 ignores the unsatisfiable readiness.ready flag when blockers are empty",
+  () => {
+    const result = evaluateSesMechanicalClean(cleanInput({
+      readiness_ready: false,
+      readiness_blockers: [],
+    }));
+    const c2 = result.checks.find((item) => item.id === "C2");
+    assertEquals(c2?.passed, true);
+    assert(result.clean);
+  },
+);
+
 Deno.test("API and routine keys cannot record human approvals", () => {
   const clean = evaluateSesMechanicalClean(cleanInput());
   for (const mode of ["api_key", "routine"] as const) {
@@ -162,6 +175,7 @@ Deno.test("cockpit uses fixed Stage D order and split invoice/send controls", ()
       xero_invoice_id: "xero-draft-1",
       invoice_number: "INV-DRAFT-1",
       status: "DRAFT",
+      total: 737,
     },
     local_invoice_proposal: { total: 352 },
     work_order: { state: "ready" },
@@ -173,6 +187,17 @@ Deno.test("cockpit uses fixed Stage D order and split invoice/send controls", ()
   });
   assert(draftReady.controls.approve_invoice.enabled);
   assertEquals(draftReady.controls.send_it.enabled, false);
+  assertEquals(draftReady.status, "INVOICE_CREATE_READY");
+  assertEquals(
+    (draftReady.sections.money as { bound_invoice: Record<string, unknown> })
+      .bound_invoice,
+    {
+      xero_invoice_id: "xero-draft-1",
+      invoice_number: "INV-DRAFT-1",
+      status: "DRAFT",
+      total: 737,
+    },
+  );
 
   const sendReady = buildSesCockpitView({
     job_id: "job-1",
