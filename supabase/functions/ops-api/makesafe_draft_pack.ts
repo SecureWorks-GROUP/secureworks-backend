@@ -55,6 +55,8 @@ export interface DraftPackContext {
   job?: Record<string, unknown> | null;
   detail?: Record<string, unknown> | null;
   service_report?: Record<string, unknown> | null;
+  /** Current-cycle job_assignments used only to derive the trade-count Crew line. */
+  assignments?: Array<Record<string, unknown>> | null;
   feedback_notes?: Array<Record<string, unknown>>;
   selected_photo_urls?: string[];
   source_docs?: Array<Record<string, unknown>>;
