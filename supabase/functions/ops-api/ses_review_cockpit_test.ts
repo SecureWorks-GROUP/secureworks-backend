@@ -12,10 +12,13 @@ import {
   canRecordSesApproval,
   describeSesSendItPlan,
   evaluateSesMechanicalClean,
+  sendItDisabledReason,
   SES_REVIEW_SECTION_ORDER,
-  sesRouteKindsOnPack,
   type SesCleanInput,
   type SesCockpitDocket,
+  sesFailedChecks,
+  type SesReviewRoute,
+  sesRouteKindsOnPack,
 } from "./ses_review_cockpit.ts";
 
 function cleanInput(
@@ -474,6 +477,11 @@ Deno.test("a missing photo draft names the PHOTO email and the real cause", () =
     (item) => item.code === "route_draft_missing",
   );
   assert(blocker, "expected a route_draft_missing blocker");
+  // The FACT itself must name the photo email and what is wrong with it, so it
+  // stands alone in a consumer that renders nothing but the fact.
+  assertStringIncludes(blocker!.fact, "photo email");
+  assertStringIncludes(blocker!.fact, "no attachments");
+  assert(!blocker!.fact.includes("A required builder email draft is missing"));
   assertStringIncludes(blocker!.recovery_action, "photo email");
   assertStringIncludes(blocker!.recovery_action, "no attachments");
   assert(!blocker!.recovery_action.includes("builder email draft"));
@@ -486,7 +494,10 @@ Deno.test("a family whose matrix routes no photo email is not held for one", () 
   });
   // Matrix says photo_route: work_order_sender → still required.
   assert(
-    evaluateSesMechanicalClean({ ...withoutPhoto, photo_route_applicable: true })
+    evaluateSesMechanicalClean({
+      ...withoutPhoto,
+      photo_route_applicable: true,
+    })
       .blockers.some((item) => item.code === "route_draft_missing"),
   );
   // Matrix says photo_route: not_applicable → demanding one is unsatisfiable.
@@ -502,4 +513,167 @@ Deno.test("a family whose matrix routes no photo email is not held for one", () 
       item.code === "route_draft_missing"
     ),
   );
+});
+
+Deno.test("SEND IT states the real cause, quoting the blocker's own fact", () => {
+  // The live Bertram case: report and invoice fine, photo drafted with zero
+  // attachments. SEND must say THAT, not "locked by the hold above".
+  const noAttachments = cleanInput({
+    routes: cleanInput().routes.map((route) =>
+      route.route_kind === "photo"
+        ? { ...route, attachment_hashes: [], ready: false }
+        : route
+    ),
+  });
+  const verdict = evaluateSesMechanicalClean(noAttachments);
+  const reason = sendItDisabledReason(verdict, {
+    stale: false,
+    xeroAuthorised: true,
+    noAdditionalCharge: false,
+  });
+  assertStringIncludes(reason, "photo email");
+  assertStringIncludes(reason, "no attachments");
+  assert(!reason.includes("locked by the hold"));
+
+  // Money not yet authorised names the actual Xero status.
+  assertStringIncludes(
+    sendItDisabledReason(evaluateSesMechanicalClean(cleanInput()), {
+      stale: false,
+      xeroAuthorised: false,
+      noAdditionalCharge: false,
+      xeroStatus: "DRAFT",
+    }),
+    "is DRAFT, not AUTHORISED",
+  );
+
+  // A stale view is named as stale rather than blamed on the pack.
+  assertStringIncludes(
+    sendItDisabledReason(evaluateSesMechanicalClean(cleanInput()), {
+      stale: true,
+      xeroAuthorised: true,
+      noAdditionalCharge: false,
+    }),
+    "older docket revision",
+  );
+});
+
+Deno.test("SEND IT carries a disabled_reason whenever it is locked, and none when enabled", () => {
+  const input = cleanInput({
+    routes: cleanInput().routes.filter((r) => r.route_kind !== "photo"),
+  });
+  const locked = buildSesCockpitView({
+    job_id: "job-1",
+    job_number: "SWMS-1",
+    docket_revision_id: "docket-1",
+    readiness_revision:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    dependency_generation: 3,
+    invoice_obligation_revision_id: "obligation-revision-1",
+    attendance_cycle_ids: ["cycle-1"],
+    xero_binding: {
+      xero_invoice_id: "xero-inv-1102",
+      invoice_number: "INV-1102",
+      status: "AUTHORISED",
+      total: 825,
+    },
+    local_invoice_proposal: { total: 825 },
+    work_order: { state: "ready" },
+    family_evidence: {},
+    swms: {},
+    routes: input.routes,
+    crew_and_trade_visits: [],
+    clean_input: input,
+  });
+  assertEquals(locked.controls.send_it.enabled, false);
+  assert(
+    typeof locked.controls.send_it.disabled_reason === "string" &&
+      locked.controls.send_it.disabled_reason.length > 0,
+    "a locked SEND IT must say why",
+  );
+  assertStringIncludes(locked.controls.send_it.disabled_reason!, "photo email");
+  assertEquals(locked.controls.send_it.failed_checks.map((c) => c.id), ["C11"]);
+});
+
+Deno.test("a not-clean verdict with NO blockers asserts nothing and passes the facts through", () => {
+  // A card with no invoice obligation row: C3 and C10 fail and push nothing,
+  // so the blocker list is legitimately empty. Citing blockers here would be
+  // the exact inversion of the false hold this surface exists to remove, and
+  // inventing a negative money sentence would be an unproven money claim.
+  const verdict = evaluateSesMechanicalClean(cleanInput({
+    pricing_disposition: "money_review_required",
+    obligation_revision_count: 0,
+  }));
+  assertEquals(verdict.clean, false);
+  assertEquals(verdict.blockers.length, 0);
+
+  const reason = sendItDisabledReason(verdict, {
+    stale: false,
+    xeroAuthorised: true,
+    noAdditionalCharge: false,
+  });
+  assertEquals(reason, "This pack is not ready to send yet.");
+  assert(
+    !reason.toLowerCase().includes("blocker"),
+    `must not claim blockers that do not exist: ${reason}`,
+  );
+  assert(!/\bmint/i.test(reason));
+
+  // The cause rides as structured data carrying the EXISTING affirmative facts,
+  // byte for byte as evaluateSesMechanicalClean wrote them — never re-worded
+  // into a negative on the way out.
+  const failed = sesFailedChecks(verdict);
+  assertEquals(failed.map((item) => item.id), ["C3", "C10"]);
+  for (const item of failed) {
+    assertEquals(
+      item.fact,
+      verdict.checks.find((check) => check.id === item.id)?.fact,
+    );
+  }
+  assertEquals(
+    failed[1].fact,
+    "Exactly one non-ambiguous obligation revision owns this work.",
+  );
+
+  // Nothing failed, nothing named: the consumer still shows the honest generic.
+  assertEquals(
+    sesFailedChecks(evaluateSesMechanicalClean(cleanInput())),
+    [],
+  );
+  assertEquals(
+    sendItDisabledReason(
+      { clean: false, checks: [], blockers: [], approval_band: "captain_only" },
+      { stale: false, xeroAuthorised: true, noAdditionalCharge: false },
+    ),
+    "This pack is not ready to send yet.",
+  );
+});
+
+Deno.test("the route fact and remedy classify one defect, never two", () => {
+  // One classifier, two sentences: the fact states what IS, the remedy states
+  // what clears it, and they must always be about the SAME defect.
+  const cases: Array<[Partial<SesReviewRoute> | null, string, string]> = [
+    [null, "has no draft", "carries no photo email draft at all"],
+    [
+      { attachment_hashes: [], ready: false },
+      "carries no attachments",
+      "no attachments",
+    ],
+    [{ subject: "  " }, "has no subject", "missing its subject"],
+    [{ body: "  " }, "has no body", "missing its body"],
+    [{ ready: false }, "not marked ready", "not marked ready"],
+  ];
+  for (const [override, factMarker, remedyMarker] of cases) {
+    const routes = cleanInput().routes.flatMap((route) => {
+      if (route.route_kind !== "photo") return [route];
+      return override === null ? [] : [{ ...route, ...override }];
+    });
+    const verdict = evaluateSesMechanicalClean(cleanInput({ routes }));
+    const blocker = verdict.blockers.find((item) =>
+      item.code === "route_draft_missing"
+    );
+    assert(blocker, `expected a route_draft_missing blocker for ${factMarker}`);
+    assertStringIncludes(blocker!.fact, "photo email");
+    assertStringIncludes(blocker!.fact, factMarker);
+    assertStringIncludes(blocker!.recovery_action, remedyMarker);
+  }
 });

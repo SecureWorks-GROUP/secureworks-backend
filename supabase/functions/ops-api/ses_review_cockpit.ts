@@ -192,34 +192,154 @@ export function approveInvoiceDisabledReason(
   return "One or more checks on this card have not passed yet — see the blockers listed above.";
 }
 
+/**
+ * The checks that did not pass, carrying their own facts verbatim.
+ *
+ * A check's `fact` is phrased AFFIRMATIVELY — it states the condition that
+ * holds when the check passes — so it is never a sentence about what is wrong
+ * and must never be re-worded into one on the way out. This is a pass-through:
+ * the backend owns the fact, the consumer owns the sentence it builds from it.
+ * An empty array means nothing here can be named, and the consumer falls back
+ * to the honest generic rather than to a guess.
+ */
+export function sesFailedChecks(
+  verdict: SesMechanicalCleanResult,
+): Array<{ id: string; fact: string }> {
+  return (verdict.checks || [])
+    .filter((item) => !item.passed)
+    .map((item) => ({ id: String(item.id), fact: item.fact }));
+}
+
+/**
+ * Why SEND IT is unavailable, in the operator's terms.
+ *
+ * SEND is the control the Captain is most likely to be waiting on, so a
+ * generic "locked by the hold above" is the least useful thing this payload
+ * can say. Name the real cause, and when the cause is a blocker, quote that
+ * blocker's own fact rather than paraphrasing it — the fact is the trustworthy
+ * string, and it now names the exact email and defect.
+ *
+ * With no blocker to quote, this asserts NOTHING specific. The failed checks
+ * ride alongside as structured data instead; inventing a negative sentence
+ * about pricing, money or obligation ownership here would put an unproven
+ * money claim on the screen the Captain uses to decide whether to send.
+ */
+export function sendItDisabledReason(
+  verdict: SesMechanicalCleanResult,
+  state: {
+    stale: boolean;
+    xeroAuthorised: boolean;
+    noAdditionalCharge: boolean;
+    xeroStatus?: string | null;
+  },
+): string {
+  if (state.stale) {
+    return "This view is showing an older docket revision. Reload the card before sending anything.";
+  }
+  if (!verdict.clean) {
+    const blockers = verdict.blockers || [];
+    const first = blockers[0];
+    if (first?.fact) {
+      const others = blockers.length - 1;
+      return others > 0
+        ? `${first.fact} ${others} other blocker${
+          others === 1 ? "" : "s"
+        } must clear too.`
+        : first.fact;
+    }
+    return "This pack is not ready to send yet.";
+  }
+  if (!state.xeroAuthorised && !state.noAdditionalCharge) {
+    const status = String(state.xeroStatus || "").toUpperCase();
+    return status
+      ? `The bound Xero invoice is ${status}, not AUTHORISED. The invoice email cannot go out against an unauthorised invoice.`
+      : "No authorised Xero invoice is bound to this card yet, and the invoice email cannot go out without one.";
+  }
+  return "The system has not unlocked sending for this pack yet.";
+}
+
 /** Human label for a route kind — "photo email", never "builder email draft". */
 function routeEmailLabel(kind: SesRouteKind): string {
   return `${String(kind).replaceAll("_", " ")} email`;
 }
 
+type SesRouteDraftDefect =
+  | "absent"
+  | "no_attachments"
+  | "no_subject"
+  | "no_body"
+  | "not_ready";
+
+/**
+ * The ONE classification of what is wrong with a required route's draft. The
+ * fact and the remedy below are two sentences about the same defect and must
+ * never disagree, and the fact is now quoted verbatim into
+ * `send_it.disabled_reason` — so a second copy of this ladder would surface its
+ * drift twice. Classify once here; both sentences switch on the result.
+ */
+function classifySesRouteDraftDefect(
+  route: SesReviewRoute | undefined,
+): SesRouteDraftDefect {
+  if (!route) return "absent";
+  if ((route.attachment_hashes?.length ?? 0) === 0) return "no_attachments";
+  if (!route.subject.trim()) return "no_subject";
+  if (!route.body.trim()) return "no_body";
+  return "not_ready";
+}
+
+/**
+ * The FACT for a `route_draft_missing` blocker. The catalogue default says only
+ * "A required builder email draft is missing", which reads as random on a card
+ * where the operator can see report and invoice are fine. Name the email and
+ * what is actually wrong with it, so the fact stands on its own even in a
+ * consumer that renders nothing else.
+ *
+ * This states only what IS — it is still a fact, not a remedy; the recovery
+ * action below remains the separate "what clears it" sentence.
+ */
+function routeDraftFact(
+  kind: SesRouteKind,
+  route: SesReviewRoute | undefined,
+): string {
+  const label = routeEmailLabel(kind);
+  switch (classifySesRouteDraftDefect(route)) {
+    case "absent":
+      return `The ${label} has no draft on the current docket revision.`;
+    case "no_attachments":
+      return `The ${label} is drafted but carries no attachments on the current docket revision.`;
+    case "no_subject":
+      return `The ${label} has no subject on the current docket revision.`;
+    case "no_body":
+      return `The ${label} has no body on the current docket revision.`;
+    case "not_ready":
+      return `The ${label} is not marked ready on the current docket revision.`;
+  }
+}
+
 /**
  * The remedy sentence beside a `route_draft_missing` blocker. The FACT is
- * rendered verbatim from the refusal catalogue and is trustworthy; this text is
- * the "clear path" the Captain reads next, so it must name the exact email and
- * the exact reason rather than inventing a generic instruction.
+ * `routeDraftFact` above (it overrides the catalogue default) and is
+ * trustworthy; this text is the "clear path" the Captain reads next, so it must
+ * name the exact email and the exact reason rather than inventing a generic
+ * instruction.
  */
 function routeDraftRemedy(
   kind: SesRouteKind,
   route: SesReviewRoute | undefined,
 ): string {
   const label = routeEmailLabel(kind);
-  if (!route) {
-    return `This docket revision carries no ${label} draft at all. Prepare a new docket revision (prepare_ses_docket_revision) so the ${label} is assembled, then re-check this card.`;
+  switch (classifySesRouteDraftDefect(route)) {
+    case "absent":
+      return `This docket revision carries no ${label} draft at all. Prepare a new docket revision (prepare_ses_docket_revision) so the ${label} is assembled, then re-check this card.`;
+    case "no_attachments":
+      return `The ${label} is drafted but has no attachments bound to this docket revision, so there is nothing to send on it. Prepare a new docket revision so the current attendance cycle's files are attached; if the pack was already invoice_bound, re-run the AUTHORISED invoice PDF bind afterwards so the new revision keeps the invoice.`;
+    case "no_subject":
+      return `The ${label} is missing its subject on this docket revision. Prepare a new docket revision so the draft is rebuilt.`;
+    case "no_body":
+      return `The ${label} is missing its body on this docket revision. Prepare a new docket revision so the draft is rebuilt.`;
+    case "not_ready":
+      return `The ${label} is not marked ready on this docket revision. Prepare a new docket revision and re-check this card.`;
   }
-  if ((route.attachment_hashes?.length ?? 0) === 0) {
-    return `The ${label} is drafted but has no attachments bound to this docket revision, so there is nothing to send on it. Prepare a new docket revision so the current attendance cycle's files are attached; if the pack was already invoice_bound, re-run the AUTHORISED invoice PDF bind afterwards so the new revision keeps the invoice.`;
-  }
-  if (!route.subject.trim() || !route.body.trim()) {
-    return `The ${label} is missing its ${
-      !route.subject.trim() ? "subject" : "body"
-    } on this docket revision. Prepare a new docket revision so the draft is rebuilt.`;
-  }
-  return `The ${label} is not marked ready on this docket revision. Prepare a new docket revision and re-check this card.`;
 }
 
 function missingRouteRefusals(
@@ -238,6 +358,7 @@ function missingRouteRefusals(
           "route_draft_missing",
           routeDraftRemedy(kind, route),
           {
+            fact: routeDraftFact(kind, route),
             evidence: {
               route_kind: kind,
               route_present: !!route,
@@ -489,6 +610,15 @@ export interface SesCockpitView {
       enabled: boolean;
       label: "SEND IT";
       plan: string;
+      /** Why the control is unavailable; null when it is enabled. */
+      disabled_reason: string | null;
+      /**
+       * The mechanical checks that did not pass, each with its own affirmative
+       * fact verbatim. Structured so the consumer names the cause itself
+       * instead of the backend inventing copy; empty when every check passed,
+       * in which case the consumer shows the honest generic.
+       */
+      failed_checks: Array<{ id: string; fact: string }>;
       /** The route kinds actually drafted on this pack, in send order. */
       route_kinds: string[];
       /** How many emails SEND IT will really send. */
@@ -606,6 +736,13 @@ export function buildSesCockpitView(
         enabled: sendIt,
         label: "SEND IT",
         plan: describeSesSendItPlan(docket.routes),
+        disabled_reason: sendIt ? null : sendItDisabledReason(verdict, {
+          stale,
+          xeroAuthorised,
+          noAdditionalCharge,
+          xeroStatus: docket.xero_binding?.status ?? null,
+        }),
+        failed_checks: sesFailedChecks(verdict),
         route_kinds: sesRouteKindsOnPack(docket.routes),
         route_count: sesRouteKindsOnPack(docket.routes).length,
       },
