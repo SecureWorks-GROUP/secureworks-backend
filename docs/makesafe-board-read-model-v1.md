@@ -53,8 +53,8 @@ The response always publishes an honest census so Archive never looks deleted:
 
 - `column_scope`: `active` \| `archive` \| `all`
 - `column_counts`: per-stage totals for the **full** board (including archive)
-- `archive`: `{ included, total, returned, offset, limit, fetch }` with the
-  exact query strings to load history on demand
+- `archive`: `{ included, scope, total, returned, offset, limit, fetch }` with
+  the exact query strings to load history on demand
 
 Placement for every **returned** card is unchanged: declared ladder +
 display-ledger overlay. Scope only decides which cards are present. Overlays
@@ -277,6 +277,10 @@ Ops retains the full stages:
 `new`, `allocated`, `trade_report_in`, `report_ready`, `completed`, `archive`, `cancelled`.
 
 Each row appears exactly once. An unknown stage is retained in `new`, carries `projection_warning`, and is listed in `unmapped_stage_job_ids`. It never disappears.
+
+Every stage key is always present on the response, but by default `archive`
+carries no cards — see [Archive on demand](#archive-on-demand-column_scopeactive-default)
+for how history is counted and fetched.
 
 ### Recent deterministic intake exception desk
 

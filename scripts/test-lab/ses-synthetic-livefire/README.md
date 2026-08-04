@@ -105,7 +105,9 @@ pre-existing exact own-mail chatter shape required by the Captain's unblock.
 
 After cleanup, the runner requires the marker/job IDs to be absent from:
 
-- `makesafe_board`
+- `makesafe_board` (probed with `include_archive=1`: the default board is
+  active-columns-only, so absence from it would not prove terminal accounting
+  excluded the card)
 - `makesafe_audit`
 - `makesafe_pipeline`
 - `intake_health`
