@@ -186,7 +186,13 @@ import {
   selectCurrentMakesafeReceivableInvoice,
 } from './makesafe_docs_ready_invoice.ts'
 import {
+  builderReferenceDigits,
+  deriveSesUnlinkedInvoiceMatches,
+} from './makesafe_invoice_reference_match.ts'
+import {
+  buildSesAssemblerInput,
   createSesAssemblerRuntimeDependencies,
+  loadSesAssemblerLiveSnapshot,
   normalizeSesPrepareRequest,
   SesAssemblerAdapterError,
   summarizeSesPrepareResponseForHttp,
@@ -356,6 +362,12 @@ import {
   type RoofCycleBindingRecoverySnapshot,
   runRoofCycleBindingRecovery,
 } from './makesafe_attendance_cycle_binding_recovery.ts'
+import {
+  MakesafeRoofStoreyCorrectionRecoveryError,
+  ROOF_STOREY_CORRECTION_EVIDENCE_REFS_DOMAIN,
+  type RoofStoreyCorrectionSnapshot,
+  runRoofStoreyCorrectionRecovery,
+} from './makesafe_roof_storey_correction_recovery.ts'
 import {
   completeIntakeMint,
   ensureIntakeWorkOrderEvidence,
@@ -648,7 +660,7 @@ import {
   MAKESAFE_REPORT_CONTRACT_VERSION,
   type MakesafeReportJob,
 } from './makesafe_report_render.ts'
-import { canonicalSesJson } from './ses_docket_envelope.ts'
+import { canonicalSesJson, sesSha256 } from './ses_docket_envelope.ts'
 // Wave 3 -- SecureWorks own-letterhead roof report (trade-filled template ->
 // our-letterhead PDF). Template/pricing/validation helpers are pure; the
 // renderer mirrors makesafe_report_render.ts.
@@ -4914,6 +4926,19 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'makesafe_roof_cycle_binding_recovery requires POST' }, 405)
         }
         return json(await roofCycleBindingRecoveryAction(client, body))
+      }
+      // Captain-authorized SWMS-261114 current-cycle storey correction.
+      // API-key-only, POST-only, exact-card and plan-token bound. The typed
+      // action performs one compare-and-set metadata write and cannot persist a
+      // docket, obligation, invoice, assignment, status, notification or send.
+      case 'makesafe_roof_storey_correction_recovery': {
+        if (authMode !== 'api_key') {
+          return json({ error: 'makesafe_roof_storey_correction_recovery requires ops privilege' }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'makesafe_roof_storey_correction_recovery requires POST' }, 405)
+        }
+        return json(await roofStoreyCorrectionRecoveryAction(client, body))
       }
       // Captain-approved historical recovery. This path creates one make-safe
       // job without notification callbacks, binds its immutable source lineage,
@@ -21544,6 +21569,415 @@ async function adjudicatedExactRescanAction(client: any, body: any) {
     })
   } catch (error) {
     sesMissedJobRecoveryApiError(error)
+  }
+}
+
+function roofStoreyCorrectionRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function roofStoreyCorrectionUnitPrices(proposal: unknown): number[] {
+  const lines = roofStoreyCorrectionRecord(proposal).lines
+  if (!Array.isArray(lines)) return []
+  return lines.flatMap((line) => {
+    const price = Number(roofStoreyCorrectionRecord(line).unit_price)
+    return Number.isFinite(price) ? [price] : []
+  })
+}
+
+function roofStoreyCorrectionDocketRevisionIds(proposal: unknown): string[] {
+  const lines = roofStoreyCorrectionRecord(proposal).lines
+  if (!Array.isArray(lines) || lines.length === 0) return []
+  const ids = lines.map((line) =>
+    String(
+      roofStoreyCorrectionRecord(
+        roofStoreyCorrectionRecord(line).evidence,
+      ).docket_revision_id || '',
+    )
+  )
+  if (ids.some((id) => !id)) return []
+  return [...new Set(ids)].sort()
+}
+
+function roofStoreyCorrectionLineAttendanceCycleIds(proposal: unknown): string[][] {
+  const lines = roofStoreyCorrectionRecord(proposal).lines
+  if (!Array.isArray(lines)) return []
+  return lines.map((line) => {
+    const cycleIds = roofStoreyCorrectionRecord(
+      roofStoreyCorrectionRecord(line).evidence,
+    ).attendance_cycle_ids
+    return Array.isArray(cycleIds)
+      ? cycleIds.map((cycleId) => String(cycleId || '')).filter(Boolean).sort()
+      : []
+  })
+}
+
+function roofStoreyCorrectionLineQuantities(proposal: unknown): number[] {
+  const lines = roofStoreyCorrectionRecord(proposal).lines
+  if (!Array.isArray(lines)) return []
+  return lines.flatMap((line) => {
+    const quantity = Number(roofStoreyCorrectionRecord(line).quantity)
+    return Number.isFinite(quantity) ? [quantity] : []
+  })
+}
+
+async function loadRoofStoreyCorrectionSnapshot(
+  client: any,
+): Promise<RoofStoreyCorrectionSnapshot> {
+  const live = await loadSesAssemblerLiveSnapshot(client, {
+    mode: 'job_number',
+    job_number: 'SWMS-261114',
+  })
+  const assemblerInput = buildSesAssemblerInput(live)
+  const jobId = String(live.job.id || '')
+  const referenceDigits = builderReferenceDigits(live.detail?.external_ref)
+  if (referenceDigits.length !== 1) {
+    throw new Error('roof storey correction builder reference no longer has one canonical invoice identity')
+  }
+  const referencePattern = `%${referenceDigits[0]}%`
+  const [invoiceOwnerDetailsResult, xeroReferenceCandidatesResult] = await Promise.all([
+    client.from('makesafe_job_details')
+      .select('job_id,external_ref')
+      .ilike('external_ref', referencePattern),
+    client.from('xero_invoices')
+      .select('id,invoice_number,reference,status,invoice_type,job_id')
+      .eq('org_id', String(live.job.org_id || ''))
+      .ilike('reference', referencePattern),
+  ])
+  if (invoiceOwnerDetailsResult.error) throw invoiceOwnerDetailsResult.error
+  if (xeroReferenceCandidatesResult.error) throw xeroReferenceCandidatesResult.error
+  const invoiceOwnerJobIds = [...new Set(
+    (invoiceOwnerDetailsResult.data || []).map((row: any) => String(row.job_id || '')).filter(Boolean),
+  )]
+  const invoiceOwnerJobsResult = invoiceOwnerJobIds.length
+    ? await client.from('jobs').select('id,job_number').in('id', invoiceOwnerJobIds)
+    : { data: [], error: null }
+  if (invoiceOwnerJobsResult.error) throw invoiceOwnerJobsResult.error
+  const invoiceOwnerJobsById = new Map(
+    (invoiceOwnerJobsResult.data || []).map((row: any) => [String(row.id || ''), row]),
+  )
+  const invoiceIdentityJobs = (invoiceOwnerDetailsResult.data || []).map((detailRow: any) => {
+    const owner = invoiceOwnerJobsById.get(String(detailRow.job_id || '')) as any
+    return {
+      id: String(detailRow.job_id || ''),
+      job_number: owner?.job_number ? String(owner.job_number) : null,
+      external_ref: detailRow.external_ref ? String(detailRow.external_ref) : null,
+      on_board: String(detailRow.job_id || '') === jobId,
+    }
+  })
+  const canonicalUnlinkedInvoiceMatches = deriveSesUnlinkedInvoiceMatches(
+    invoiceIdentityJobs,
+    xeroReferenceCandidatesResult.data || [],
+  ).matches.filter((match) => match.job_id === jobId).length
+  const xeroReferenceCandidatesFingerprint = await sesSha256(
+    xeroReferenceCandidatesResult.data || [],
+    'SecureWorks:roof-storey-correction-xero-reference-candidates:v1\n',
+  )
+  const [
+    docketsResult,
+    currentDocketResult,
+    obligationsResult,
+    currentObligationsResult,
+    invoiceObligationsResult,
+    obligationCyclesResult,
+  ] = await Promise.all([
+    client.from('makesafe_docket_revisions')
+      .select('id,committed_at,state,stage,pre_xero_docs_ready,local_invoice_proposal')
+      .eq('job_id', jobId)
+      .order('committed_at', { ascending: true }),
+    client.from('makesafe_docket_revisions_current')
+      .select('id')
+      .eq('job_id', jobId)
+      .maybeSingle(),
+    client.from('makesafe_invoice_obligation_revisions')
+      .select('id,obligation_id,attendance_cycle_ids,state,pricing_disposition,proposal')
+      .eq('job_id', jobId),
+    client.from('makesafe_invoice_obligation_revisions_current')
+      .select('id')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }),
+    client.from('makesafe_invoice_obligations')
+      .select('id,status')
+      .eq('job_id', jobId),
+    client.from('makesafe_invoice_obligation_cycles')
+      .select('obligation_revision_id,obligation_id,attendance_cycle_id,active,commercially_closed')
+      .eq('job_id', jobId),
+  ])
+  const initialFailure = [
+    docketsResult,
+    currentDocketResult,
+    obligationsResult,
+    currentObligationsResult,
+    invoiceObligationsResult,
+    obligationCyclesResult,
+  ].find((result) => result.error)
+  if (initialFailure?.error) throw initialFailure.error
+
+  const docketIds = (docketsResult.data || []).map((row: any) => row.id)
+  const exactCount = (table: string, filter: (query: any) => any) =>
+    filter(client.from(table).select('id', { count: 'exact', head: true }))
+  const countQueries: Array<[string, PromiseLike<{ count: number | null; error: any }>]> = [
+    ['assignments', exactCount('job_assignments', (query) => query.eq('job_id', jobId))],
+    ['board_status_applications', exactCount('makesafe_board_status_applications', (query) => query.eq('job_id', jobId))],
+    ['communications', exactCount('po_communications', (query) => query.eq('job_id', jobId))],
+    ['external_effects', exactCount('ses_external_effects', (query) => query.eq('job_id', jobId))],
+    ['hugo_notifications', exactCount('makesafe_intake_hugo_notifications', (query) => query.eq('job_id', jobId))],
+    ['arrival_notifications', exactCount('makesafe_notify_log', (query) => query.eq('org_id', String(live.job.org_id || '')).eq('dedup_key', 'ref:rr26836'))],
+    ['arrival_notifications_global', exactCount('makesafe_notify_log', (query) => query)],
+    ['invoice_approvals', exactCount('makesafe_revision_approvals', (query) => query.eq('job_id', jobId).eq('action', 'invoice'))],
+    ['job_documents', exactCount('job_documents', (query) => query.eq('job_id', jobId))],
+    ['job_events', exactCount('job_events', (query) => query.eq('job_id', jobId))],
+    ['job_media', exactCount('job_media', (query) => query.eq('job_id', jobId))],
+    ['outbound_messages', exactCount('outbound_message_queue', (query) => query.eq('metadata->>job_id', jobId))],
+    ['outbound_messages_global', exactCount('outbound_message_queue', (query) => query)],
+    ['portal_captures', exactCount('makesafe_portal_capture_revisions', (query) => query.eq('job_id', jobId))],
+    ['report_packs', exactCount('makesafe_report_packs', (query) => query.eq('job_id', jobId))],
+    ['review_events', exactCount('ses_docket_review_events', (query) => query.eq('job_id', jobId))],
+    ['roof_report_drafts', exactCount('makesafe_roof_report_drafts', (query) => query.eq('job_id', jobId))],
+    ['service_reports', exactCount('job_service_reports', (query) => query.eq('job_id', jobId))],
+    ['xero_invoices', exactCount('xero_invoices', (query) => query.eq('job_id', jobId))],
+    ['xero_invoices_global', exactCount('xero_invoices', (query) => query.eq('org_id', String(live.job.org_id || '')))],
+  ]
+  if (docketIds.length) {
+    countQueries.push([
+      'release_memberships',
+      exactCount('makesafe_release_revision_members', (query) =>
+        query.in('docket_revision_id', docketIds)),
+    ])
+  }
+  const countResults = await Promise.all(countQueries.map(([, query]) => query))
+  const failedCount = countResults.find((result) => result.error)
+  if (failedCount?.error) throw failedCount.error
+  const protectedCounts = Object.fromEntries(
+    countQueries.map(([label], index) => [
+      label,
+      Number(countResults[index].count || 0),
+    ]),
+  )
+  protectedCounts.docket_revisions = (docketsResult.data || []).length
+  protectedCounts.invoice_obligation_revisions =
+    (obligationsResult.data || []).length
+  protectedCounts.invoice_obligations =
+    (invoiceObligationsResult.data || []).length
+  protectedCounts.invoice_obligation_cycles =
+    (obligationCyclesResult.data || []).length
+  protectedCounts.canonical_unlinked_xero_invoices =
+    canonicalUnlinkedInvoiceMatches
+  protectedCounts.reference_xero_invoice_candidates =
+    (xeroReferenceCandidatesResult.data || []).length
+  protectedCounts.release_memberships ??= 0
+
+  const metadata = roofStoreyCorrectionRecord(live.job.metadata)
+  const detail = live.detail
+  const hoursAndMaterials = roofStoreyCorrectionRecord(
+    assemblerInput.cycle_facts.hours_and_materials,
+  )
+  const portalCaptures = await Promise.all(live.portal_captures.map(async (row) => ({
+    id: String(row.id || ''),
+    jobId: String(row.job_id || ''),
+    attendanceCycleId: String(row.attendance_cycle_id || ''),
+    role: String(row.role || ''),
+    status: String(row.status || ''),
+    captureResult: String(row.capture_result || ''),
+    makesafeFactVersion: Number(row.makesafe_fact_version),
+    makesafeContentHash: String(row.makesafe_content_hash || ''),
+    sourceContentHash: String(row.source_content_hash || ''),
+    screenshotContentHash: row.screenshot_content_hash
+      ? String(row.screenshot_content_hash)
+      : null,
+    screenshotMediaType: row.screenshot_media_type
+      ? String(row.screenshot_media_type)
+      : null,
+    screenshotSizeBytes: row.screenshot_size_bytes == null
+      ? null
+      : Number(row.screenshot_size_bytes),
+    captureProducer: String(row.capture_producer || ''),
+    builderReference: String(row.builder_reference || ''),
+    evidenceRefCount: Array.isArray(row.evidence_refs)
+      ? row.evidence_refs.length
+      : 0,
+    evidenceRefsFingerprint: await sesSha256(
+      row.evidence_refs,
+      ROOF_STOREY_CORRECTION_EVIDENCE_REFS_DOMAIN,
+    ),
+  })))
+  return {
+    job: {
+      id: jobId,
+      jobNumber: String(live.job.job_number || ''),
+      type: String(live.job.type || ''),
+      status: String(live.job.status || ''),
+      suburb: String(live.job.site_suburb || ''),
+      updatedAt: String(live.job.updated_at || ''),
+      metadata,
+      scopeJson: live.job.scope_json,
+    },
+    detail: detail
+      ? {
+        jobId: String(detail.job_id || ''),
+        builderReference: String(detail.external_ref || ''),
+        reportType: detail.report_type ? String(detail.report_type) : null,
+        cycleNumber: Number(detail.cycle_number),
+        attendanceCycleId: detail.attendance_cycle_id
+          ? String(detail.attendance_cycle_id)
+          : null,
+        cycleAttribution: detail.cycle_attribution
+          ? String(detail.cycle_attribution)
+          : null,
+        scopeJson: detail.scope_json,
+      }
+      : null,
+    cycles: live.cycles.map((row) => ({
+      id: String(row.id || ''),
+      jobId: String(row.job_id || ''),
+      cycleNumber: Number(row.cycle_number),
+    })),
+    intakeCases: live.cases.map((row) => ({
+      id: String(row.id || ''),
+      state: String(row.state || ''),
+      jobId: row.job_id ? String(row.job_id) : null,
+      targetJobId: row.target_job_id ? String(row.target_job_id) : null,
+      builderReference: String(
+        row.builder_wo_canonical || row.builder_po_canonical ||
+          row.external_ref_canonical || '',
+      ) || null,
+      rawIdentityJson: row.raw_identity_json,
+    })),
+    portalCaptures,
+    reports: live.reports.map((row) => ({
+      checklistJson: row.checklist_json,
+    })),
+    documents: live.documents.map((row) => ({
+      type: String(row.type || ''),
+      attendanceCycleId: row.attendance_cycle_id
+        ? String(row.attendance_cycle_id)
+        : null,
+      cycleAttribution: row.cycle_attribution
+        ? String(row.cycle_attribution)
+        : null,
+      makesafeFactVersion: row.makesafe_fact_version == null
+        ? null
+        : Number(row.makesafe_fact_version),
+      makesafeContentHash: row.makesafe_content_hash
+        ? String(row.makesafe_content_hash)
+        : null,
+      contentPointer: row.pdf_url ? String(row.pdf_url) : null,
+      metadata: row.metadata ?? row.metadata_json ?? {},
+      dataSnapshotJson: row.data_snapshot_json ?? {},
+    })),
+    roofDraft: live.roof_draft
+      ? {
+        storey: live.roof_draft.storey,
+        fieldsJson: live.roof_draft.fields_json,
+      }
+      : null,
+    pricingInputStoreys: hoursAndMaterials.storeys,
+    docketRevisions: (docketsResult.data || []).map((row: any) => {
+      const proposal = roofStoreyCorrectionRecord(row.local_invoice_proposal)
+      return {
+        id: String(row.id || ''),
+        committedAt: String(row.committed_at || ''),
+        state: String(row.state || ''),
+        stage: String(row.stage || ''),
+        preXeroDocsReady: row.pre_xero_docs_ready === true,
+        storeys: proposal.storeys,
+        subtotalExGst: proposal.subtotal_ex_gst == null
+          ? null
+          : Number(proposal.subtotal_ex_gst),
+        totalIncGst: proposal.total_inc_gst == null
+          ? null
+          : Number(proposal.total_inc_gst),
+        localInvoiceProposal: row.local_invoice_proposal,
+      }
+    }),
+    currentDocketId: currentDocketResult.data?.id
+      ? String(currentDocketResult.data.id)
+      : null,
+    obligationRevisions: (obligationsResult.data || []).map((row: any) => ({
+      ...(() => {
+        const proposal = roofStoreyCorrectionRecord(row.proposal)
+        const totals = roofStoreyCorrectionRecord(proposal.totals)
+        return {
+          proposalSchema: String(proposal.schema || ''),
+          proposalPricingDisposition: String(proposal.pricing_disposition || ''),
+          pricingCanonVersion: String(proposal.pricing_canon_version || ''),
+          reference: String(proposal.reference || ''),
+          currency: String(proposal.currency || ''),
+          lineQuantities: roofStoreyCorrectionLineQuantities(row.proposal),
+          totalEx: totals.ex == null ? null : Number(totals.ex),
+          totalInc: totals.inc == null ? null : Number(totals.inc),
+        }
+      })(),
+      id: String(row.id || ''),
+      obligationId: String(row.obligation_id || ''),
+      docketRevisionIds: roofStoreyCorrectionDocketRevisionIds(row.proposal),
+      attendanceCycleIds: Array.isArray(row.attendance_cycle_ids)
+        ? row.attendance_cycle_ids.map((cycleId: any) => String(cycleId || '')).filter(Boolean).sort()
+        : [],
+      lineAttendanceCycleIds: roofStoreyCorrectionLineAttendanceCycleIds(row.proposal),
+      state: String(row.state || ''),
+      pricingDisposition: String(row.pricing_disposition || ''),
+      proposal: row.proposal,
+      unitPrices: roofStoreyCorrectionUnitPrices(row.proposal),
+    })),
+    invoiceObligations: (invoiceObligationsResult.data || []).map((row: any) => ({
+      id: String(row.id || ''),
+      status: String(row.status || ''),
+    })),
+    obligationCycles: (obligationCyclesResult.data || []).map((row: any) => ({
+      obligationRevisionId: String(row.obligation_revision_id || ''),
+      obligationId: String(row.obligation_id || ''),
+      attendanceCycleId: String(row.attendance_cycle_id || ''),
+      active: row.active === true,
+      commerciallyClosed: row.commercially_closed === true,
+    })),
+    currentObligationIds: (currentObligationsResult.data || []).map((row: any) =>
+      String(row.id || '')
+    ).filter(Boolean),
+    xeroReferenceCandidatesFingerprint,
+    protectedCounts,
+  }
+}
+
+async function compareAndSetRoofStoreys(
+  client: any,
+  input: {
+    jobId: string
+    expectedJobNumber: string
+    expectedUpdatedAt: string
+    expectedMetadata: Record<string, unknown>
+    replacementMetadata: Record<string, unknown>
+  },
+) {
+  const updated = await client.from('jobs').update({
+    metadata: input.replacementMetadata,
+    updated_at: new Date().toISOString(),
+  })
+    .eq('id', input.jobId)
+    .eq('job_number', input.expectedJobNumber)
+    .eq('updated_at', input.expectedUpdatedAt)
+    .filter('metadata', 'eq', JSON.stringify(input.expectedMetadata))
+    .eq('metadata->>storeys', 'double')
+    .select('id')
+    .maybeSingle()
+  if (updated.error) throw updated.error
+  return Boolean(updated.data?.id)
+}
+
+async function roofStoreyCorrectionRecoveryAction(client: any, body: any) {
+  try {
+    return await runRoofStoreyCorrectionRecovery(body, {
+      loadSnapshot: () => loadRoofStoreyCorrectionSnapshot(client),
+      compareAndSetStoreys: (input) =>
+        compareAndSetRoofStoreys(client, input),
+    })
+  } catch (error) {
+    if (error instanceof MakesafeRoofStoreyCorrectionRecoveryError) {
+      throw new ApiError(error.message, error.status, error.body)
+    }
+    throw error
   }
 }
 

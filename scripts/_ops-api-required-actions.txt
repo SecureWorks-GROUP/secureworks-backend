@@ -137,6 +137,9 @@ makesafe_deterministic_intake_exact_rescan # probe=source-only
 # Exact five-card cycle identity recovery. A live POST can materialize and bind
 # an attendance cycle, so deploy recognition must remain source-only.
 makesafe_roof_cycle_binding_recovery # probe=source-only
+# Exact SWMS-261114 storey CAS. A valid apply changes a sealed pricing input,
+# so deploy recognition must never exercise it.
+makesafe_roof_storey_correction_recovery # probe=source-only
 makesafe_adjudicated_historical_backfill # probe=source-only
 # SES reporting skill coupling: one bounded deterministic scan followed by the
 # existing guarded clean-draft advancement sweep. A bare privileged call runs
