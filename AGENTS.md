@@ -1087,6 +1087,25 @@ authoritative API and gate code is in `ses_docs_ready.ts`,
 `ses_docket_persistence.ts`, and `ses_reporting_actions.ts`; do not add a
 client-only send bypass or a second family-completeness rule.
 
+## Sealed Release Graph Send Is The Only Builder Transport
+
+Approved SEND IT is `prepare_ses_release_revision` →
+`approve_ses_release_revision` → `execute_ses_release_revision`. The Graph
+gateway is `ses_graph_mail_gateway.ts` (wired from `makeSesGraphMailGateway` in
+`ops-api/index.ts`): draft on `admin@`, HTML body + Maverick signature, prove
+Sent Items by matching the SES operation token **client-side** (never OData
+`contains(subject,…)`). `send-outlook-email` refuses sealed SES jobs by design
+— do not re-open it as a bypass, and do not add Mail.app. Exact-once
+`graph_outcome_unknown` still means reconcile by token, not redispatch; refusal
+facts must carry the underlying Graph error when one was recorded.
+
+AJS/AJBR only (Captain 2026-08-04): two routes — `report` (report PDF + real
+Xero invoice PDF) then `photo`; TO `workorders@ajs.build` + participants; CC
+`ses@secureworkswa.com.au`. Client-send gate kinds:
+`ajs_report_invoice` / `ajs_photo` in `makesafe_send_pack.ts`. MLB and every
+other builder keep the three-route `report` / `photo` / `invoice` shape. Route
+order lives in `ses_release_route_shape.ts`.
+
 ## The Repository Root Stays npm-Package-Free
 
 This repo is Deno-rooted (`deno.jsonc` at the root). Deno 2 auto-discovers a root
