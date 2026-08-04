@@ -63,6 +63,15 @@ Default ops board also defaults to **active columns only**
 `columns=all`, or `fields=full`. Always publish `column_counts` and `archive`
 meta so history never looks deleted. Placement for returned cards is unchanged.
 
+Board **TTFB** after card shape + archive-on-demand is dominated by **serial
+PostgREST round-trips inside `makesafePipeline`**, not payload bytes (active
+and `include_archive=1` share the same TTFB class live). Keep
+`fetchAllRowsInChunks` concurrent across URL-budget chunks, one dependent-read
+wave in the pipeline, and active-scope skip of stage-dependent joins for
+`jobs.status='archived'` (early-return archive; census only). Do not re-cut
+card bytes and call it a TTFB win. Remeasure wall time on production after
+every board-path change.
+
 U2-S1 cycle-scoped evidence lives in `makesafe_cycle_evidence.ts` and is shared by
 board enrich and `makesafe_audit`. Apply
 `20260727000001_makesafe_attendance_cycles_u2_s1.sql` **before** the matching
