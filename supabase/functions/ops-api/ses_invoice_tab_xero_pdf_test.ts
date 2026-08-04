@@ -9,6 +9,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   getSesReviewablePackAction,
+  resetSesDraftPdfFetchBackoff,
   resolveSesBoundDraftInvoicePdfArtifact,
   storeSesXeroInvoicePdfBytes,
 } from "./ses_reporting_actions.ts";
@@ -26,6 +27,8 @@ function packClient(opts: {
   binding?: Record<string, unknown>;
   artifacts?: Array<Record<string, unknown>>;
   storedPath?: string;
+  obligationState?: string;
+  obligationReadError?: boolean;
 } = {}) {
   const binding = {
     xero_invoice_id: XERO_ID,
@@ -69,7 +72,7 @@ function packClient(opts: {
     id: OBLIGATION_ID,
     xero_binding: binding,
     pricing_disposition: "priced_from_canon",
-    state: "create_executed",
+    state: opts.obligationState || "create_executed",
   };
   const rows: Record<string, unknown> = {
     ses_docket_review_current: review,
@@ -81,6 +84,11 @@ function packClient(opts: {
   };
   const uploads: Array<{ path: string; size: number }> = [];
   const signedPaths: string[] = [];
+  const updates: Array<{
+    table: string;
+    payload: any;
+    filters: Array<{ op: string; column: string; value: unknown }>;
+  }> = [];
   const client = {
     storage: {
       from() {
@@ -107,9 +115,17 @@ function packClient(opts: {
     from(table: string) {
       let mode = "select";
       let updatePayload: any = null;
+      const filters: Array<{ op: string; column: string; value: unknown }> = [];
       const query: any = {
         select: () => query,
-        eq: () => query,
+        eq: (column: string, value: unknown) => {
+          filters.push({ op: "eq", column, value });
+          return query;
+        },
+        in: (column: string, value: unknown) => {
+          filters.push({ op: "in", column, value });
+          return query;
+        },
         order: () => query,
         limit: () => query,
         update: (payload: any) => {
@@ -119,11 +135,18 @@ function packClient(opts: {
         },
         maybeSingle: () => {
           if (mode === "update") {
+            updates.push({ table, payload: updatePayload, filters });
             if (table.includes("obligation")) {
               Object.assign(obligation, updatePayload || {});
               Object.assign(obligation.xero_binding || {}, updatePayload?.xero_binding || {});
             }
             return Promise.resolve({ data: { id: OBLIGATION_ID }, error: null });
+          }
+          if (opts.obligationReadError && table.includes("obligation")) {
+            return Promise.resolve({
+              data: null,
+              error: { message: "obligation read exploded" },
+            });
           }
           const value = rows[table];
           return Promise.resolve({
@@ -142,7 +165,7 @@ function packClient(opts: {
       return query;
     },
   } as any;
-  return { client, uploads, signedPaths, binding, obligation };
+  return { client, uploads, signedPaths, updates, binding, obligation };
 }
 
 Deno.test("storeSesXeroInvoicePdfBytes refuses non-PDF concoctions", async () => {
@@ -207,7 +230,8 @@ Deno.test("bound DRAFT with stored binding PDF projects a signed xero_invoice_pd
 });
 
 Deno.test("bound DRAFT without stored PDF live-fetches Xero bytes and never invents HTML", async () => {
-  const { client, uploads } = packClient();
+  resetSesDraftPdfFetchBackoff();
+  const { client, uploads, updates } = packClient();
   let fetchCalls = 0;
   const resolved = await resolveSesBoundDraftInvoicePdfArtifact(client, {
     job_id: JOB_ID,
@@ -241,9 +265,90 @@ Deno.test("bound DRAFT without stored PDF live-fetches Xero bytes and never inve
   assertStringIncludes(String(resolved.artifact.signed_url), "signed.example.test");
   assertEquals(uploads.length >= 1, true);
   assertStringIncludes(uploads[0].path, "xero-invoice-pdfs/");
+  // The read-path stamp must carry the same guards as the mint-time binding.
+  const stamp = updates.find((entry) => entry.table.includes("obligation"));
+  assertEquals(!!stamp, true);
+  assertEquals(
+    stamp!.filters.some((f) =>
+      f.op === "in" && f.column === "state" &&
+      (f.value as string[]).includes("create_executed")
+    ),
+    true,
+  );
+  assertEquals(
+    stamp!.filters.some((f) =>
+      f.op === "eq" && f.column === "xero_binding->>xero_invoice_id" &&
+      f.value === XERO_ID
+    ),
+    true,
+  );
+});
+
+Deno.test("read-path stamp never overwrites an authorised obligation binding", async () => {
+  resetSesDraftPdfFetchBackoff();
+  const { client, updates } = packClient({
+    obligationState: "authorised",
+    binding: { status: "AUTHORISED" },
+  });
+  const resolved = await resolveSesBoundDraftInvoicePdfArtifact(client, {
+    job_id: JOB_ID,
+    docket: { id: DOCKET_ID, stage: "pre_xero", xero_binding: null },
+    obligation: {
+      id: OBLIGATION_ID,
+      xero_binding: {
+        xero_invoice_id: XERO_ID,
+        invoice_number: "INV-1102",
+        status: "DRAFT",
+      },
+    },
+    artifacts: [],
+    fetchInvoicePdfBytes: () => Promise.resolve(pdfBytes()),
+  });
+  assertEquals(resolved.source, "live_fetch");
+  assertEquals(
+    updates.filter((entry) => entry.table.includes("obligation")).length,
+    0,
+  );
+});
+
+Deno.test("a failed live fetch is not retried on the next poll within the backoff window", async () => {
+  resetSesDraftPdfFetchBackoff();
+  const { client } = packClient();
+  let fetchCalls = 0;
+  const request = () =>
+    resolveSesBoundDraftInvoicePdfArtifact(client, {
+      job_id: JOB_ID,
+      docket: { id: DOCKET_ID, stage: "pre_xero", xero_binding: null },
+      obligation: {
+        id: OBLIGATION_ID,
+        xero_binding: {
+          xero_invoice_id: XERO_ID,
+          invoice_number: "INV-1102",
+          status: "DRAFT",
+        },
+      },
+      artifacts: [],
+      fetchInvoicePdfBytes: () => {
+        fetchCalls++;
+        throw new Error("Xero PDF temporarily unavailable");
+      },
+    });
+  const first = await request();
+  const second = await request();
+  assertEquals(fetchCalls, 1);
+  assertEquals(first.source, "unavailable");
+  assertEquals(second.source, "unavailable");
+  assertEquals(second.artifact.pdf_unavailable, true);
+  assertEquals(second.artifact.signed_url, null);
+  assertEquals(
+    objectMeta(second.artifact).reason,
+    "xero_draft_pdf_fetch_cooling_down",
+  );
+  resetSesDraftPdfFetchBackoff();
 });
 
 Deno.test("bound DRAFT with unfetchable PDF reports unavailable — no fake artifact URL", async () => {
+  resetSesDraftPdfFetchBackoff();
   const { client } = packClient();
   const resolved = await resolveSesBoundDraftInvoicePdfArtifact(client, {
     job_id: JOB_ID,
@@ -268,6 +373,7 @@ Deno.test("bound DRAFT with unfetchable PDF reports unavailable — no fake arti
 });
 
 Deno.test("get_ses_reviewable_pack injects bound DRAFT Xero PDF and drops non-matching invoice pdf roles", async () => {
+  resetSesDraftPdfFetchBackoff();
   const stored = await storeSesXeroInvoicePdfBytes(packClient().client, {
     job_id: JOB_ID,
     invoice: {
@@ -319,6 +425,38 @@ Deno.test("get_ses_reviewable_pack injects bound DRAFT Xero PDF and drops non-ma
   assertEquals(pack.invoice_pdf?.pdf_unavailable, false);
   assertEquals(pack.invoice_pdf?.xero_invoice_id, XERO_ID);
   assertEquals(pack.invoice_pdf?.invoice_number, "INV-1102");
+  // The displaced concoction is accounted for, never silently dropped.
+  const displaced = (pack.suppressed_artifacts || []).filter((a: any) =>
+    a.role === "xero_invoice_pdf"
+  );
+  assertEquals(displaced.length, 1);
+  assertEquals(
+    displaced[0].suppression_reason,
+    "xero_invoice_pdf_not_bound_draft",
+  );
+  assertEquals(displaced[0].signed_url, null);
+  assertStringIncludes(
+    String(displaced[0].object_key),
+    "2-Invoice-concoction",
+  );
+});
+
+Deno.test("an unreadable obligation refuses the pack instead of degrading to the local proposal", async () => {
+  resetSesDraftPdfFetchBackoff();
+  const { client } = packClient({ obligationReadError: true });
+  let status = 0;
+  try {
+    await getSesReviewablePackAction(
+      client,
+      { mode: "api_key", user: null },
+      DOCKET_ID,
+      { fetchInvoicePdfBytes: () => Promise.resolve(pdfBytes()) },
+    );
+  } catch (error) {
+    status = Number((error as any).status);
+    assertStringIncludes(String((error as Error).message), "obligation");
+  }
+  assertEquals(status, 503);
 });
 
 function objectMeta(artifact: Record<string, any>): Record<string, any> {
