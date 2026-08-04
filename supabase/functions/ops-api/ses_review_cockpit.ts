@@ -193,6 +193,79 @@ export function approveInvoiceDisabledReason(
 }
 
 /**
+ * The negative of each mechanical check, for the case where a check fails and
+ * pushes NO blocker (C1, C3, C5, C9, C10 and C12 all can). The `fact` on a
+ * check is phrased affirmatively — it states the condition that holds when the
+ * check PASSES — so it can never be quoted as the problem; these are its
+ * inversions, and a check with no entry here is named by nothing at all rather
+ * than by a guess.
+ */
+const SES_CLEAN_CHECK_FAILURE_TERMS: Record<string, string> = {
+  C1: "the current family docket is not commercially ready",
+  C2: "named readiness blockers remain on the current revision",
+  C3: "pricing is not settled by canon or by an audited override",
+  C4: "the duplicate probe does not agree with the requested money action",
+  C5: "a money hold is unresolved",
+  C6: "a post-release billing disposition is outstanding",
+  C7: "the family matrix or the required assessment recipe is not versioned",
+  C8: "required portal truth is not captured",
+  C9: "physical work is short of its media floor or completed-work proof",
+  C10: "this work is not owned by exactly one non-ambiguous obligation revision",
+  C11: "a route this family requires has no usable draft or no canonical recipient",
+  C12: "a type-check or unverified-story hold remains",
+};
+
+/** The ids of the checks that did not pass, in check order. */
+export function sesFailedCheckIds(
+  verdict: SesMechanicalCleanResult,
+): string[] {
+  return (verdict.checks || []).filter((item) => !item.passed).map((item) =>
+    String(item.id)
+  );
+}
+
+/**
+ * The failed checks in plain English, or null when nothing can be named from
+ * the payload. Null is the honest answer and callers must fall back to a
+ * sentence that asserts nothing — never to "unresolved blockers", which is
+ * false whenever the blocker list is empty.
+ */
+export function describeSesFailedChecks(
+  verdict: SesMechanicalCleanResult,
+): string | null {
+  const terms = (verdict.checks || [])
+    .filter((item) => !item.passed)
+    .map((item) => SES_CLEAN_CHECK_FAILURE_TERMS[String(item.id)])
+    .filter((term): term is string => !!term);
+  if (terms.length === 0) return null;
+  if (terms.length === 1) return terms[0];
+  return `${terms.slice(0, -1).join(", ")} and ${terms[terms.length - 1]}`;
+}
+
+/**
+ * Why a not-clean verdict is holding SEND, derived from the payload alone.
+ * Shared so the cockpit's disabled_reason and the SEND IT approval refusal say
+ * the same true thing. A blocker's own fact is quoted verbatim when one exists;
+ * otherwise the failed checks are named; otherwise nothing is claimed.
+ */
+export function sesSendHoldFact(verdict: SesMechanicalCleanResult): string {
+  const blockers = verdict.blockers || [];
+  const first = blockers[0];
+  if (first?.fact) {
+    const others = blockers.length - 1;
+    return others > 0
+      ? `${first.fact} ${others} other blocker${
+        others === 1 ? "" : "s"
+      } must clear too.`
+      : first.fact;
+  }
+  const failed = describeSesFailedChecks(verdict);
+  return failed
+    ? `This pack is not ready to send yet: ${failed}.`
+    : "This pack is not ready to send yet.";
+}
+
+/**
  * Why SEND IT is unavailable, in the operator's terms.
  *
  * SEND is the control the Captain is most likely to be waiting on, so a
@@ -214,17 +287,7 @@ export function sendItDisabledReason(
     return "This view is showing an older docket revision. Reload the card before sending anything.";
   }
   if (!verdict.clean) {
-    const blockers = verdict.blockers || [];
-    const first = blockers[0];
-    if (first?.fact) {
-      const more = blockers.length > 1
-        ? ` ${blockers.length - 1} other blocker${
-          blockers.length - 1 === 1 ? "" : "s"
-        } must clear too.`
-        : "";
-      return `${first.fact}${more}`;
-    }
-    return "This pack still has unresolved blockers, so nothing can be sent yet.";
+    return sesSendHoldFact(verdict);
   }
   if (!state.xeroAuthorised && !state.noAdditionalCharge) {
     const status = String(state.xeroStatus || "").toUpperCase();
@@ -238,6 +301,30 @@ export function sendItDisabledReason(
 /** Human label for a route kind — "photo email", never "builder email draft". */
 function routeEmailLabel(kind: SesRouteKind): string {
   return `${String(kind).replaceAll("_", " ")} email`;
+}
+
+type SesRouteDraftDefect =
+  | "absent"
+  | "no_attachments"
+  | "no_subject"
+  | "no_body"
+  | "not_ready";
+
+/**
+ * The ONE classification of what is wrong with a required route's draft. The
+ * fact and the remedy below are two sentences about the same defect and must
+ * never disagree, and the fact is now quoted verbatim into
+ * `send_it.disabled_reason` — so a second copy of this ladder would surface its
+ * drift twice. Classify once here; both sentences switch on the result.
+ */
+function classifySesRouteDraftDefect(
+  route: SesReviewRoute | undefined,
+): SesRouteDraftDefect {
+  if (!route) return "absent";
+  if ((route.attachment_hashes?.length ?? 0) === 0) return "no_attachments";
+  if (!route.subject.trim()) return "no_subject";
+  if (!route.body.trim()) return "no_body";
+  return "not_ready";
 }
 
 /**
@@ -255,18 +342,18 @@ function routeDraftFact(
   route: SesReviewRoute | undefined,
 ): string {
   const label = routeEmailLabel(kind);
-  if (!route) {
-    return `The ${label} has no draft on the current docket revision.`;
+  switch (classifySesRouteDraftDefect(route)) {
+    case "absent":
+      return `The ${label} has no draft on the current docket revision.`;
+    case "no_attachments":
+      return `The ${label} is drafted but carries no attachments on the current docket revision.`;
+    case "no_subject":
+      return `The ${label} has no subject on the current docket revision.`;
+    case "no_body":
+      return `The ${label} has no body on the current docket revision.`;
+    case "not_ready":
+      return `The ${label} is not marked ready on the current docket revision.`;
   }
-  if ((route.attachment_hashes?.length ?? 0) === 0) {
-    return `The ${label} is drafted but carries no attachments on the current docket revision.`;
-  }
-  if (!route.subject.trim() || !route.body.trim()) {
-    return `The ${label} has no ${
-      !route.subject.trim() ? "subject" : "body"
-    } on the current docket revision.`;
-  }
-  return `The ${label} is not marked ready on the current docket revision.`;
 }
 
 /**
@@ -280,18 +367,18 @@ function routeDraftRemedy(
   route: SesReviewRoute | undefined,
 ): string {
   const label = routeEmailLabel(kind);
-  if (!route) {
-    return `This docket revision carries no ${label} draft at all. Prepare a new docket revision (prepare_ses_docket_revision) so the ${label} is assembled, then re-check this card.`;
+  switch (classifySesRouteDraftDefect(route)) {
+    case "absent":
+      return `This docket revision carries no ${label} draft at all. Prepare a new docket revision (prepare_ses_docket_revision) so the ${label} is assembled, then re-check this card.`;
+    case "no_attachments":
+      return `The ${label} is drafted but has no attachments bound to this docket revision, so there is nothing to send on it. Prepare a new docket revision so the current attendance cycle's files are attached; if the pack was already invoice_bound, re-run the AUTHORISED invoice PDF bind afterwards so the new revision keeps the invoice.`;
+    case "no_subject":
+      return `The ${label} is missing its subject on this docket revision. Prepare a new docket revision so the draft is rebuilt.`;
+    case "no_body":
+      return `The ${label} is missing its body on this docket revision. Prepare a new docket revision so the draft is rebuilt.`;
+    case "not_ready":
+      return `The ${label} is not marked ready on this docket revision. Prepare a new docket revision and re-check this card.`;
   }
-  if ((route.attachment_hashes?.length ?? 0) === 0) {
-    return `The ${label} is drafted but has no attachments bound to this docket revision, so there is nothing to send on it. Prepare a new docket revision so the current attendance cycle's files are attached; if the pack was already invoice_bound, re-run the AUTHORISED invoice PDF bind afterwards so the new revision keeps the invoice.`;
-  }
-  if (!route.subject.trim() || !route.body.trim()) {
-    return `The ${label} is missing its ${
-      !route.subject.trim() ? "subject" : "body"
-    } on this docket revision. Prepare a new docket revision so the draft is rebuilt.`;
-  }
-  return `The ${label} is not marked ready on this docket revision. Prepare a new docket revision and re-check this card.`;
 }
 
 function missingRouteRefusals(
@@ -564,6 +651,12 @@ export interface SesCockpitView {
       plan: string;
       /** Why the control is unavailable; null when it is enabled. */
       disabled_reason: string | null;
+      /**
+       * The mechanical checks that did not pass, as ids. Structured so a
+       * consumer can name them itself instead of the backend inventing copy;
+       * empty when every check passed.
+       */
+      failed_check_ids: string[];
       /** The route kinds actually drafted on this pack, in send order. */
       route_kinds: string[];
       /** How many emails SEND IT will really send. */
@@ -687,6 +780,7 @@ export function buildSesCockpitView(
           noAdditionalCharge,
           xeroStatus: docket.xero_binding?.status ?? null,
         }),
+        failed_check_ids: sesFailedCheckIds(verdict),
         route_kinds: sesRouteKindsOnPack(docket.routes),
         route_count: sesRouteKindsOnPack(docket.routes).length,
       },

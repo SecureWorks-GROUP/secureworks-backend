@@ -14,9 +14,11 @@ import {
   evaluateSesMechanicalClean,
   SES_REVIEW_SECTION_ORDER,
   sendItDisabledReason,
+  sesFailedCheckIds,
   sesRouteKindsOnPack,
   type SesCleanInput,
   type SesCockpitDocket,
+  type SesReviewRoute,
 } from "./ses_review_cockpit.ts";
 
 function cleanInput(
@@ -587,4 +589,73 @@ Deno.test("SEND IT carries a disabled_reason whenever it is locked, and none whe
     "a locked SEND IT must say why",
   );
   assertStringIncludes(locked.controls.send_it.disabled_reason!, "photo email");
+  assertEquals(locked.controls.send_it.failed_check_ids, ["C11"]);
+});
+
+Deno.test("a not-clean verdict with NO blockers names the failed checks, never blockers", () => {
+  // A card with no invoice obligation row: C3 and C10 fail and push nothing,
+  // so the blocker list is legitimately empty. Citing blockers here would be
+  // the exact inversion of the false hold this surface exists to remove.
+  const verdict = evaluateSesMechanicalClean(cleanInput({
+    pricing_disposition: "money_review_required",
+    obligation_revision_count: 0,
+  }));
+  assertEquals(verdict.clean, false);
+  assertEquals(verdict.blockers.length, 0);
+  assertEquals(sesFailedCheckIds(verdict), ["C3", "C10"]);
+
+  const reason = sendItDisabledReason(verdict, {
+    stale: false,
+    xeroAuthorised: true,
+    noAdditionalCharge: false,
+  });
+  assert(
+    !reason.toLowerCase().includes("blocker"),
+    `must not claim blockers that do not exist: ${reason}`,
+  );
+  assertStringIncludes(reason, "pricing is not settled");
+  assertStringIncludes(reason, "obligation revision");
+  // The affirmative check facts must never be quoted as though they were the
+  // problem, and no copy may say APPROVE mints a draft.
+  assert(!reason.includes("Exactly one non-ambiguous obligation revision owns"));
+  assert(!/\bmint/i.test(reason));
+
+  // With neither a blocker nor a nameable check, nothing is invented.
+  assertEquals(
+    sendItDisabledReason(
+      { clean: false, checks: [], blockers: [], approval_band: "captain_only" },
+      { stale: false, xeroAuthorised: true, noAdditionalCharge: false },
+    ),
+    "This pack is not ready to send yet.",
+  );
+});
+
+Deno.test("the route fact and remedy classify one defect, never two", () => {
+  // One classifier, two sentences: the fact states what IS, the remedy states
+  // what clears it, and they must always be about the SAME defect.
+  const cases: Array<[Partial<SesReviewRoute> | null, string, string]> = [
+    [null, "has no draft", "carries no photo email draft at all"],
+    [
+      { attachment_hashes: [], ready: false },
+      "carries no attachments",
+      "no attachments",
+    ],
+    [{ subject: "  " }, "has no subject", "missing its subject"],
+    [{ body: "  " }, "has no body", "missing its body"],
+    [{ ready: false }, "not marked ready", "not marked ready"],
+  ];
+  for (const [override, factMarker, remedyMarker] of cases) {
+    const routes = cleanInput().routes.flatMap((route) => {
+      if (route.route_kind !== "photo") return [route];
+      return override === null ? [] : [{ ...route, ...override }];
+    });
+    const verdict = evaluateSesMechanicalClean(cleanInput({ routes }));
+    const blocker = verdict.blockers.find((item) =>
+      item.code === "route_draft_missing"
+    );
+    assert(blocker, `expected a route_draft_missing blocker for ${factMarker}`);
+    assertStringIncludes(blocker!.fact, "photo email");
+    assertStringIncludes(blocker!.fact, factMarker);
+    assertStringIncludes(blocker!.recovery_action, remedyMarker);
+  }
 });
