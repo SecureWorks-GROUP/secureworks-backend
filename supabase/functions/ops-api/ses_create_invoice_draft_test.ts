@@ -193,7 +193,9 @@ function draftGateway(
       return [];
     },
     async fetchAuthorisedPdf() {
-      throw new Error("draft mint must not fetch authorised PDF");
+      // Preferred mint shape: store the real Xero DRAFT PDF for the Invoice tab.
+      // Minimal valid PDF magic so storeSesXeroInvoicePdfBytes accepts it.
+      return new TextEncoder().encode("%PDF-1.4 draft fixture");
     },
   } as any;
 }
@@ -224,6 +226,14 @@ Deno.test("A: create_ses_invoice_draft mints DRAFT with api_key and no approval"
   assertEquals(result.invoice.status, "DRAFT");
   assertEquals(gateway.createCalls, 1);
   assertEquals(gateway.authoriseCalls, 0);
+  // Invoice tab preferred shape: real Xero DRAFT PDF stored at mint.
+  assertEquals(typeof result.draft_pdf?.content_hash, "string");
+  assertStringIncludes(String(result.draft_pdf?.content_hash || ""), "sha256:");
+  assertEquals(typeof result.draft_pdf?.object_key, "string");
+  assertStringIncludes(
+    String(result.draft_pdf?.object_key || ""),
+    "xero-invoice-pdfs/",
+  );
 });
 
 Deno.test("A2: a plain user JWT can never mint a Xero DRAFT", async () => {

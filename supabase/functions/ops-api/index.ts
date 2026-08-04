@@ -1314,6 +1314,9 @@ function makeSesXeroGateway(
           invoice.status === 'AUTHORISED'
         )
     },
+    // Real Xero-rendered PDF for DRAFT or AUTHORISED. Named for the original
+    // authorise path; Option B draft mint and the Invoice-tab pack read reuse
+    // the same fetch so the Captain never sees a local HTML invention.
     async fetchAuthorisedPdf(invoiceId) {
       const { accessToken, tenantId } = await getToken(client)
       return await _fetchXeroInvoicePdfBytes(accessToken, tenantId, invoiceId)
@@ -6588,10 +6591,18 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'get_ses_reviewable_pack': {
         const docketRevisionId = url.searchParams.get('docket_revision_id') ||
           body.docket_revision_id
+        // Bound DRAFT Invoice tab: recover the real Xero PDF when mint stored
+        // it, or live-fetch once via the same path as get_invoice_pdf. Never
+        // invent a local tax-invoice HTML stand-in.
+        const packGateway = makeSesXeroGateway(client)
         return json(await getSesReviewablePackAction(
           client,
           sesActionAuth(authMode, authUser),
           docketRevisionId,
+          {
+            fetchInvoicePdfBytes: (invoiceId) =>
+              packGateway.fetchAuthorisedPdf(invoiceId),
+          },
         ))
       }
       case 'sign_off_ses_docket':
@@ -36642,8 +36653,9 @@ function _bytesToBase64(bytes: Uint8Array): string {
   return btoa(bin)
 }
 
-// Fetch the AUTHORISED invoice PDF from Xero (Accept: application/pdf). Used to
-// attach the REAL authorised invoice, not the draft.
+// Fetch the Xero-rendered invoice PDF (Accept: application/pdf). Works for
+// DRAFT and AUTHORISED — proved live for Option B draft mint and the Invoice
+// tab. Never substitute a local HTML/proposal invention for these bytes.
 async function _fetchXeroInvoicePdfBytes(
   accessToken: string, tenantId: string, xeroInvoiceId: string,
 ): Promise<Uint8Array> {
@@ -36654,7 +36666,7 @@ async function _fetchXeroInvoicePdfBytes(
       'Accept': 'application/pdf',
     },
   })
-  if (!resp.ok) throw new ApiError(`Failed to fetch authorised invoice PDF from Xero: ${resp.status}`, 502)
+  if (!resp.ok) throw new ApiError(`Failed to fetch invoice PDF from Xero: ${resp.status}`, 502)
   return new Uint8Array(await resp.arrayBuffer())
 }
 

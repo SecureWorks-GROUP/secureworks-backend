@@ -313,6 +313,8 @@ export interface SesCockpitDocket {
     status: string;
     total?: number | null;
     pdf_content_hash?: string;
+    pdf_object_key?: string;
+    pdf_size_bytes?: number;
   } | null;
   local_invoice_proposal: Record<string, unknown> | null;
   work_order: Record<string, unknown> | null;
@@ -411,12 +413,16 @@ export function buildSesCockpitView(
         // When a live Xero draft/invoice is bound, surface that identity as the
         // bill. The local proposal stays available as internal pre-Xero state
         // but must not be presented alone as though it were the invoice.
+        // pdf_content_hash is the stored real Xero PDF pointer (mint-time);
+        // the pack read signs it. Never treat the proposal table as the bill.
         bound_invoice: docket.xero_binding
           ? {
             xero_invoice_id: docket.xero_binding.xero_invoice_id,
             invoice_number: docket.xero_binding.invoice_number,
             status: docket.xero_binding.status,
             total: docket.xero_binding.total ?? null,
+            pdf_content_hash: docket.xero_binding.pdf_content_hash ?? null,
+            pdf_available: !!docket.xero_binding.pdf_content_hash,
           }
           : null,
         xero: docket.xero_binding,
