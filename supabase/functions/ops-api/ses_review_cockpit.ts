@@ -192,6 +192,49 @@ export function approveInvoiceDisabledReason(
   return "One or more checks on this card have not passed yet — see the blockers listed above.";
 }
 
+/**
+ * Why SEND IT is unavailable, in the operator's terms.
+ *
+ * SEND is the control the Captain is most likely to be waiting on, so a
+ * generic "locked by the hold above" is the least useful thing this payload
+ * can say. Name the real cause, and when the cause is a blocker, quote that
+ * blocker's own fact rather than paraphrasing it — the fact is the trustworthy
+ * string, and it now names the exact email and defect.
+ */
+export function sendItDisabledReason(
+  verdict: SesMechanicalCleanResult,
+  state: {
+    stale: boolean;
+    xeroAuthorised: boolean;
+    noAdditionalCharge: boolean;
+    xeroStatus?: string | null;
+  },
+): string {
+  if (state.stale) {
+    return "This view is showing an older docket revision. Reload the card before sending anything.";
+  }
+  if (!verdict.clean) {
+    const blockers = verdict.blockers || [];
+    const first = blockers[0];
+    if (first?.fact) {
+      const more = blockers.length > 1
+        ? ` ${blockers.length - 1} other blocker${
+          blockers.length - 1 === 1 ? "" : "s"
+        } must clear too.`
+        : "";
+      return `${first.fact}${more}`;
+    }
+    return "This pack still has unresolved blockers, so nothing can be sent yet.";
+  }
+  if (!state.xeroAuthorised && !state.noAdditionalCharge) {
+    const status = String(state.xeroStatus || "").toUpperCase();
+    return status
+      ? `The bound Xero invoice is ${status}, not AUTHORISED. The invoice email cannot go out against an unauthorised invoice.`
+      : "No authorised Xero invoice is bound to this card yet, and the invoice email cannot go out without one.";
+  }
+  return "The system has not unlocked sending for this pack yet.";
+}
+
 /** Human label for a route kind — "photo email", never "builder email draft". */
 function routeEmailLabel(kind: SesRouteKind): string {
   return `${String(kind).replaceAll("_", " ")} email`;
@@ -519,6 +562,8 @@ export interface SesCockpitView {
       enabled: boolean;
       label: "SEND IT";
       plan: string;
+      /** Why the control is unavailable; null when it is enabled. */
+      disabled_reason: string | null;
       /** The route kinds actually drafted on this pack, in send order. */
       route_kinds: string[];
       /** How many emails SEND IT will really send. */
@@ -636,6 +681,12 @@ export function buildSesCockpitView(
         enabled: sendIt,
         label: "SEND IT",
         plan: describeSesSendItPlan(docket.routes),
+        disabled_reason: sendIt ? null : sendItDisabledReason(verdict, {
+          stale,
+          xeroAuthorised,
+          noAdditionalCharge,
+          xeroStatus: docket.xero_binding?.status ?? null,
+        }),
         route_kinds: sesRouteKindsOnPack(docket.routes),
         route_count: sesRouteKindsOnPack(docket.routes).length,
       },
