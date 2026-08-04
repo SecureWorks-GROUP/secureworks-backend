@@ -11,6 +11,9 @@ BEGIN
   ) OR EXISTS (
     SELECT 1 FROM public.ses_external_effects
     WHERE route_kind = 'report_invoice'
+  ) OR EXISTS (
+    SELECT 1 FROM public.ses_release_route_proofs
+    WHERE route_kind = 'report_invoice'
   ) THEN
     RAISE EXCEPTION
       'cannot rollback ses report_invoice route kind while live rows use it';
@@ -31,19 +34,11 @@ ALTER TABLE public.ses_external_effects
     route_kind IS NULL OR route_kind IN ('report', 'photo', 'invoice')
   );
 
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM information_schema.tables
-    WHERE table_schema = 'public' AND table_name = 'makesafe_release_route_proofs'
-  ) THEN
-    ALTER TABLE public.makesafe_release_route_proofs
-      DROP CONSTRAINT IF EXISTS makesafe_release_route_proofs_route_kind_check;
-    ALTER TABLE public.makesafe_release_route_proofs
-      ADD CONSTRAINT makesafe_release_route_proofs_route_kind_check
-      CHECK (route_kind IN ('report', 'photo', 'invoice'));
-  END IF;
-END $$;
+ALTER TABLE public.ses_release_route_proofs
+  DROP CONSTRAINT IF EXISTS ses_release_route_proofs_route_kind_check;
+ALTER TABLE public.ses_release_route_proofs
+  ADD CONSTRAINT ses_release_route_proofs_route_kind_check
+  CHECK (route_kind IN ('report', 'photo', 'invoice'));
 
 -- Restore original three-route-only commit body from 20260728020000.
 CREATE OR REPLACE FUNCTION public.commit_ses_release_revision_v1(

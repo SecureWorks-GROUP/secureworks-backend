@@ -25,7 +25,7 @@ BEGIN
       AND rel.relname IN (
         'makesafe_release_revision_routes',
         'ses_external_effects',
-        'makesafe_release_route_proofs'
+        'ses_release_route_proofs'
       )
       AND pg_get_constraintdef(c.oid) ILIKE '%route_kind%'
       AND pg_get_constraintdef(c.oid) ILIKE '%report%'
@@ -49,17 +49,9 @@ ALTER TABLE public.ses_external_effects
     route_kind IN ('report', 'photo', 'invoice', 'report_invoice')
   );
 
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM information_schema.tables
-    WHERE table_schema = 'public' AND table_name = 'makesafe_release_route_proofs'
-  ) THEN
-    ALTER TABLE public.makesafe_release_route_proofs
-      ADD CONSTRAINT makesafe_release_route_proofs_route_kind_check
-      CHECK (route_kind IN ('report', 'photo', 'invoice', 'report_invoice'));
-  END IF;
-END $$;
+ALTER TABLE public.ses_release_route_proofs
+  ADD CONSTRAINT ses_release_route_proofs_route_kind_check
+  CHECK (route_kind IN ('report', 'photo', 'invoice', 'report_invoice'));
 
 -- Accept either universal three-route or AJS two-route ordered sets.
 CREATE OR REPLACE FUNCTION public.commit_ses_release_revision_v1(

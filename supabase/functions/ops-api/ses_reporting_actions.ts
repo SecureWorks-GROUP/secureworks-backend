@@ -2944,7 +2944,7 @@ export async function executeSesReleaseRevisionAction(
         );
       }
       if (
-        kind === "report" &&
+        (kind === "report_invoice" || kind === "report") &&
         (!Array.isArray(route.attachment_hashes) ||
           route.attachment_hashes.length < 1)
       ) {
