@@ -1,6 +1,10 @@
 // deno-lint-ignore-file no-explicit-any no-import-prefix require-await
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _makesafePipelineForTest } from "./index.ts";
+import { CHUNK_FETCH_CONCURRENCY } from "./makesafe_compact_reads.ts";
 
 function makeQueryClient(resultsByTable: Record<string, any[]>) {
   function builder(table: string) {
@@ -185,10 +189,11 @@ Deno.test("skipArchivedStatusDependents keeps archive census without stage-depen
         order: () => query,
         limit: () => query,
         range: async (from: number, to: number) => ({
-          data: rows.filter((row) => predicates.every((test) => test(row))).slice(
-            from,
-            to + 1,
-          ),
+          data: rows.filter((row) => predicates.every((test) => test(row)))
+            .slice(
+              from,
+              to + 1,
+            ),
           error: null,
         }),
         then: (resolve: (value: any) => any) =>
@@ -238,4 +243,112 @@ Deno.test("skipArchivedStatusDependents keeps archive census without stage-depen
   assertEquals(invoiceIds.includes("job-live"), true);
   // Pipeline still publishes the synthetic-ledger reuse field for the board loader.
   assertEquals(Array.isArray(slim.terminal_synthetic_job_ids), true);
+});
+
+/**
+ * The job-source lanes are one raw paginated `jobs` read per URL-budget id
+ * chunk per typed source, so their width grows with the board. They must draw
+ * from the SAME bound as the chunked joins, or a large board opens more
+ * simultaneous PostgREST connections than the pool allows — which surfaces as a
+ * board-truth outage, not a slow board (ops.html falls back to the
+ * overlay-blind makesafe_pipeline on any non-200).
+ */
+Deno.test("makesafePipeline job-source lanes never exceed the shared fan-out bound", async () => {
+  const restrict = Array.from({ length: 2000 }, (_, i) => `rjob-${i}`);
+  // 10 id chunks x 2 typed sources = 20 lanes, plus the detail-authority lane.
+  const tables: Record<string, any[]> = {
+    jobs: [{
+      id: "rjob-1",
+      job_number: "SWMS-LANE",
+      type: "makesafe",
+      status: "accepted",
+      metadata: {},
+      created_at: "2026-07-20T00:00:00Z",
+      updated_at: "2026-07-20T00:00:00Z",
+    }],
+    makesafe_job_details: [{
+      job_id: "rjob-1",
+      substatus: "company_contact_required",
+      requesting_company_name: "Builder",
+    }],
+    job_service_reports: [],
+    xero_invoices: [],
+    job_documents: [],
+    makesafe_report_packs: [],
+    makesafe_report_pack_cycles: [],
+    makesafe_docket_revisions_current: [],
+    makesafe_board_attention_current: [],
+    job_assignments: [],
+    job_events: [],
+    ses_synthetic_livefire_runs: [],
+  };
+
+  let jobLaneInFlight = 0;
+  let jobLanePeak = 0;
+  let jobLaneReads = 0;
+  function builder(table: string) {
+    const rows = (tables[table] || []).slice();
+    const predicates: Array<(row: any) => boolean> = [];
+    const query: any = {
+      select: () => query,
+      eq: (column: string, value: any) => {
+        predicates.push((row) => row?.[column] === value);
+        return query;
+      },
+      neq: (column: string, value: any) => {
+        predicates.push((row) => row?.[column] !== value);
+        return query;
+      },
+      not: () => query,
+      in: (column: string, values: any[]) => {
+        predicates.push((row) => values.includes(row?.[column]));
+        return query;
+      },
+      gte: () => query,
+      order: () => query,
+      limit: () => query,
+      range: async (from: number, to: number) => {
+        const laneRead = table === "jobs";
+        if (laneRead) {
+          jobLaneReads++;
+          jobLaneInFlight++;
+          jobLanePeak = Math.max(jobLanePeak, jobLaneInFlight);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 3));
+        if (laneRead) jobLaneInFlight--;
+        return {
+          data: rows.filter((row) => predicates.every((test) => test(row)))
+            .slice(from, to + 1),
+          error: null,
+        };
+      },
+      then: (resolve: (value: any) => any) =>
+        resolve({
+          data: rows.filter((row) => predicates.every((test) => test(row))),
+          error: null,
+        }),
+    };
+    return query;
+  }
+
+  const result: any = await _makesafePipelineForTest(
+    { from: (table: string) => builder(table) },
+    new URLSearchParams("history=all"),
+    restrict,
+  );
+
+  // Every lane still ran (no chunk silently dropped by the bound).
+  assert(
+    jobLaneReads >= 20,
+    `expected the full lane fan-out, saw ${jobLaneReads} jobs reads`,
+  );
+  assert(
+    jobLanePeak <= CHUNK_FETCH_CONCURRENCY,
+    `peak lane concurrency ${jobLanePeak} exceeded ${CHUNK_FETCH_CONCURRENCY}`,
+  );
+  // Bounded, not re-serialised.
+  assertEquals(jobLanePeak, CHUNK_FETCH_CONCURRENCY);
+  // Placement is unchanged: the one real restricted job is still on the board.
+  const cards = Object.values(result.columns).flat() as any[];
+  assertEquals(cards.filter((row) => row.id === "rjob-1").length, 1);
 });

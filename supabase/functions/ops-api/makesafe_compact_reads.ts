@@ -159,16 +159,73 @@ export function chunkByUrlBudget(ids: string[]): string[][] {
   return out;
 }
 
+// ── Bounded PostgREST fan-out ─────────────────────────────────────────────────
+// Chunk reads run CONCURRENTLY (that is the round-trip win) but never all at
+// once. The cap is MODULE-WIDE, not per call: the make-safe board issues ~10
+// chunked job-id joins in one dependent wave, so a per-call bound would still
+// let one board request open ~30 simultaneous PostgREST connections and would
+// grow linearly with the board. Saturating the Supabase pool does not read as a
+// slow board — `ops.html` falls back to `makesafe_pipeline` on any non-200 from
+// `makesafe_board`, which is overlay-blind, so exhaustion surfaces as a
+// board-truth outage. 8 is the captain's standing cap (2026-08-04): enough
+// in-flight reads to keep the parallel-chunk TTFB win over the old serial
+// reader, bounded against board growth and concurrent board loads. Lower it
+// only on measured evidence.
+//
+// `withBoundedFetchSlot` is exported because the bound must cover EVERY
+// board-path fan-out whose width grows with the board, not just the chunked
+// reader: `makesafePipeline`'s typed + detail-authority job-source lanes (active
+// and cancelled) build one raw paginated lane per URL-budget id chunk, so they
+// acquire a slot from this same pool. Any new growth-dependent fan-out on that
+// path must do the same.
+export const CHUNK_FETCH_CONCURRENCY = 8;
+
+let inFlightChunkFetches = 0;
+const chunkFetchWaiters: Array<() => void> = [];
+
+// Slots are TRANSFERRED on release rather than decremented-then-re-acquired, so
+// a waiter resuming on a later microtask can never be overtaken by a fresh
+// caller and push the in-flight count past the cap.
+async function acquireChunkFetchSlot(): Promise<void> {
+  if (inFlightChunkFetches < CHUNK_FETCH_CONCURRENCY) {
+    inFlightChunkFetches++;
+    return;
+  }
+  await new Promise<void>((resolve) => chunkFetchWaiters.push(resolve));
+}
+
+function releaseChunkFetchSlot(): void {
+  const next = chunkFetchWaiters.shift();
+  if (next) {
+    next();
+    return;
+  }
+  inFlightChunkFetches--;
+}
+
+export async function withBoundedFetchSlot<T>(
+  run: () => Promise<T>,
+): Promise<T> {
+  await acquireChunkFetchSlot();
+  try {
+    return await run();
+  } finally {
+    releaseChunkFetchSlot();
+  }
+}
+
 // Run a paginated read for each budgeted chunk of `ids` and merge all rows. The
 // factory receives one chunk and must return a fresh query builder (including the
 // `.in(col, chunk)` filter). `uniqueKey` is required and is appended inside
 // `fetchAllRows` after any caller-supplied ordering — same total-order law as the
 // unchunked reader.
 //
-// Chunks run concurrently. Each chunk still paginates internally with a stable
-// uniqueKey order; cross-chunk row order is not load-bearing (callers group by
-// job_id / re-sort). Parallel chunks cut the make-safe board's sequential
-// PostgREST round-trips: ~450 UUIDs → 3 chunks that used to wait on each other.
+// Chunks run concurrently under the shared CHUNK_FETCH_CONCURRENCY bound above.
+// Each chunk still paginates internally with a stable uniqueKey order (holding
+// its slot for the whole chunk); cross-chunk row order is not load-bearing
+// (callers group by job_id / re-sort). Parallel chunks cut the make-safe board's
+// sequential PostgREST round-trips: ~450 UUIDs → 3 chunks that used to wait on
+// each other.
 //
 // Exported: `ops-api/index.ts` reuses this same reader for its make-safe job-id
 // joins (`_fetchAllByJobIdChunked`).
@@ -187,11 +244,13 @@ export async function fetchAllRowsInChunks<T = any>(
   const chunks = chunkByUrlBudget(uniqueIds);
   const pages = await Promise.all(
     chunks.map((ch) =>
-      fetchAllRows<T>(
-        () => buildQueryForChunk(ch),
-        label,
-        uniqueKey,
-        uniqueAscending,
+      withBoundedFetchSlot(() =>
+        fetchAllRows<T>(
+          () => buildQueryForChunk(ch),
+          label,
+          uniqueKey,
+          uniqueAscending,
+        )
       )
     ),
   );
