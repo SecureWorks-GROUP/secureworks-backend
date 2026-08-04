@@ -189,10 +189,11 @@ Deno.test("skipArchivedStatusDependents keeps archive census without stage-depen
         order: () => query,
         limit: () => query,
         range: async (from: number, to: number) => ({
-          data: rows.filter((row) => predicates.every((test) => test(row))).slice(
-            from,
-            to + 1,
-          ),
+          data: rows.filter((row) => predicates.every((test) => test(row)))
+            .slice(
+              from,
+              to + 1,
+            ),
           error: null,
         }),
         then: (resolve: (value: any) => any) =>

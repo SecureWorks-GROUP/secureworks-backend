@@ -203,7 +203,9 @@ function releaseChunkFetchSlot(): void {
   inFlightChunkFetches--;
 }
 
-export async function withBoundedFetchSlot<T>(run: () => Promise<T>): Promise<T> {
+export async function withBoundedFetchSlot<T>(
+  run: () => Promise<T>,
+): Promise<T> {
   await acquireChunkFetchSlot();
   try {
     return await run();

@@ -40,7 +40,11 @@ re-derives a column. Trade projection is unchanged and always full.
 
 The default ops board does **not** haul the Archive column. Two thirds of the
 live board is history the captain never works from; excluding it is the largest
-remaining board load win after card shape.
+remaining PAYLOAD win after card shape. It is not a TTFB win — measured live,
+`include_archive=1` and the default active scope share the same server
+time-to-first-byte class, because the cost is PostgREST round-trips over full
+history rather than bytes. AGENTS.md ("Make-Safe Boards Share One Server Read
+Model") owns that analysis and the bounded fan-out rules that follow from it.
 
 | Request | What returns |
 | --- | --- |

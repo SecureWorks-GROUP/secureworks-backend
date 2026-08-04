@@ -73,17 +73,15 @@ card bytes and call it a TTFB win. Remeasure wall time on production after
 every board-path change.
 
 That concurrency is BOUNDED, and the bound is module-wide, not per call:
-`CHUNK_FETCH_CONCURRENCY` (8, captain's cap 2026-08-04) limits total in-flight
-reads across every caller of `fetchAllRowsInChunks` AND every other board
-fan-out whose width grows with the board — today that means
-`makesafePipeline`'s typed + detail-authority job-source lanes, active and
-cancelled, which build one raw paginated `jobs` read per URL-budget id chunk
-and so acquire a slot via the exported `withBoundedFetchSlot`. Any new
-growth-dependent fan-out on the board path must do the same. The dependent wave
-issues ~10 chunked joins at once, so a per-call bound would still open ~30
-PostgREST connections per board request and grow with the board. Pool
-exhaustion is not a slow board: `ops.html` falls back to the overlay-blind
-`makesafe_pipeline` on any non-200, so it reads as a board-truth outage. Do not
+`CHUNK_FETCH_CONCURRENCY` in `makesafe_compact_reads.ts` (8, captain's cap
+2026-08-04) limits total in-flight reads across every caller of
+`fetchAllRowsInChunks` AND every other board fan-out whose width grows with the
+board — today that means `makesafePipeline`'s typed + detail-authority
+job-source lanes, active and cancelled, which build one raw paginated `jobs`
+read per URL-budget id chunk and so acquire a slot via the exported
+`withBoundedFetchSlot`. Any new growth-dependent fan-out on the board path must
+do the same; why a per-call bound is not enough, and why pool exhaustion reads
+as a board-truth outage rather than a slow board, is on that constant. Do not
 re-serialise the dependent `Promise.all` and do not raise or drop the cap
 without a measurement (`makesafe_compact_reads_test.ts` pins it in-call, across
 a 10-wide wave, and after a failed chunk;
