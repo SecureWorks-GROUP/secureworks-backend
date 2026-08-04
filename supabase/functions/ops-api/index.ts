@@ -99,6 +99,10 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 // moving @2 tag through esm.sh's package metadata endpoint.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.99.3'
 import { logQueryErrors } from '../_shared/pgrest.ts'
+import {
+  xeroAccrecReferenceContainsWhere,
+  xeroContactNameContainsWhere,
+} from './xero_where_clause.ts'
 // CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
 // records the same immutable quote_revisions row shape as send-quote /send.
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
@@ -1230,7 +1234,10 @@ async function readSesXeroInvoicesByToken(
   const { accessToken, tenantId } = await getToken(client)
   const safeToken = externalToken.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
   const response = await xeroGet('/Invoices', accessToken, tenantId, {
-    where: `Reference.Contains("${safeToken}") AND Type=="ACCREC"`,
+    // Reference is optional on Xero Invoice — guard before .Contains or Xero
+    // raises QueryParseException ("Operations on optional fields must be
+    // preceded by a null guard"). Used by SES mint reconcileCreate.
+    where: xeroAccrecReferenceContainsWhere(safeToken),
     Statuses: 'DRAFT,SUBMITTED,AUTHORISED,PAID',
   })
   return (response?.Invoices || [])
@@ -27591,7 +27598,8 @@ async function syncJobInvoices(client: any, body: any) {
     const safeToken = token.replace(/"/g, '')
     try {
       const result = await xeroGet('/Invoices', accessToken, tenantId, {
-        where: `Reference.Contains("${safeToken}") AND Type=="ACCREC"`,
+        // Same optional-Reference null guard as readSesXeroInvoicesByToken.
+        where: xeroAccrecReferenceContainsWhere(safeToken),
         Statuses: 'DRAFT,SUBMITTED,AUTHORISED,PAID',
       })
       const invoices = result?.Invoices || []
@@ -28129,7 +28137,8 @@ async function searchXeroContacts(client: any, params: URLSearchParams) {
   if (!q || q.length < 2) return { contacts: [] }
   const { accessToken, tenantId } = await getToken(client)
   const data = await xeroGet('/Contacts', accessToken, tenantId, {
-    where: `Name.Contains("${q.replace(/"/g, '')}")`,
+    // Name is optional on Xero Contact — same null-guard rule as Reference.
+    where: xeroContactNameContainsWhere(q.replace(/"/g, '')),
   })
   const contacts = (data.Contacts || []).map((c: any) => ({
     id: c.ContactID, name: c.Name, email: c.EmailAddress || '', phone: c.Phones?.[0]?.PhoneNumber || '',

@@ -1331,6 +1331,21 @@ the money fence working, not a defect. Prove such a claim by running the real
 `docsReady()` against the live evidence shape and flipping only the invoice
 term, rather than reading the ladder by eye.
 
+## Xero Optional-Field `.Contains` Needs A Null Guard
+
+Xero refuses `Field.Contains(...)` on optional fields without a preceding null
+guard (`QueryParseException: Operations on optional fields must be preceded by
+a null guard`). Builders live in
+`supabase/functions/ops-api/xero_where_clause.ts` — use
+`xeroAccrecReferenceContainsWhere` / `xeroContactNameContainsWhere` (or
+`xeroOptionalContains`) and never re-inline unguarded `Reference.Contains` /
+`Name.Contains` in a `where:`. Equality comparisons (`Type=="ACCREC"`,
+`Name=="..."`) do not need the guard; do not widen them. The mint path
+(`readSesXeroInvoicesByToken` → SES `reconcileCreate`) is load-bearing. Ops-api
+tests mock external services, so assert the generated where-clause string
+(`xero_where_clause_test.ts`); a green pipeline alone does not prove Xero
+accepts the query.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
