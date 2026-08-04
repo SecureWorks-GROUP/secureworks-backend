@@ -2284,8 +2284,6 @@ export async function resolveSesBoundDraftInvoicePdfArtifact(
           xero_invoice_id: boundId,
           invoice_number: boundNumber || boundId,
           status: "DRAFT",
-          reference: String(binding.reference || ""),
-          total: Number(binding.total) || 0,
         },
         pdf,
       });

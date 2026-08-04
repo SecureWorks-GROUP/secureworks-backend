@@ -98,7 +98,7 @@ function packClient(opts: {
           },
           download: () =>
             Promise.resolve({
-              data: new Blob([pdfBytes().buffer]),
+              data: new Blob([new Uint8Array(pdfBytes())]),
               error: null,
             }),
         };
@@ -155,8 +155,6 @@ Deno.test("storeSesXeroInvoicePdfBytes refuses non-PDF concoctions", async () =>
         xero_invoice_id: XERO_ID,
         invoice_number: "INV-1102",
         status: "DRAFT",
-        reference: "AJBR-70271",
-        total: 737,
       },
       pdf: new TextEncoder().encode("<html>fake tax invoice</html>"),
     });
@@ -174,8 +172,6 @@ Deno.test("bound DRAFT with stored binding PDF projects a signed xero_invoice_pd
       xero_invoice_id: XERO_ID,
       invoice_number: "INV-1102",
       status: "DRAFT",
-      reference: "AJBR-70271",
-      total: 737,
     },
     pdf: pdfBytes(),
   });
@@ -278,8 +274,6 @@ Deno.test("get_ses_reviewable_pack injects bound DRAFT Xero PDF and drops non-ma
       xero_invoice_id: XERO_ID,
       invoice_number: "INV-1102",
       status: "DRAFT",
-      reference: "AJBR-70271",
-      total: 737,
     },
     pdf: pdfBytes(),
   });
