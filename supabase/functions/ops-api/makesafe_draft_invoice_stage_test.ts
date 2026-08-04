@@ -401,7 +401,7 @@ Deno.test("the visible ladder's version is pinned and published", () => {
   // derivation that produced it, exactly as `SES_STAGE_ENGINE_V2_VERSION` does.
   assertEquals(
     MAKESAFE_STAGE_LADDER_VERSION,
-    "makesafe-stage-ladder.v3-current-draft-required",
+    "makesafe-stage-ladder.v4-authorised-awaiting-send",
   );
   // The read model republishes whatever enrich stamped, and null when a caller
   // built the base row without it — never a silent default that would attribute

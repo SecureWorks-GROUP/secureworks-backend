@@ -739,6 +739,21 @@ failure can mean CONVERGENCE (the legacy ladder caught up to the certified
 corrected destination) rather than drift — check each card against its frozen
 `post_cutover` before treating it as a defect, and still never re-snapshot v1.
 
+## Authorised Invoice PDF Bind Is Recoverable Without Re-Approval
+
+When an obligation is already `authorised` (or its `xero_binding.status` is
+AUTHORISED) but a later docket re-prepare left the current pre_xero pack without
+the Xero PDF, `execute_ses_invoice_revision` routes into
+`recoverAuthorisedInvoicePdfBind` (`ses_reporting_actions.ts`): reconcile the
+exact stored Xero identity, `fetchAuthorisedPdf`, and
+`commit_ses_invoice_bound_docket_v1` against the **current** docket. Never mint,
+re-authorise, void, or send. Identity mismatch (invoice number / Xero id /
+total) refuses. Idempotent on replay. Do **not** generalise this into a
+`stale_review` bypass for unauthorised revisions. A card with a raised invoice
+and report evidence that is not yet sent must stay in Docs Ready
+(`authorisedAwaitingSend` / ladder v4) — never regress to `trade_report_in`
+after money is committed.
+
 ## `spine_missing_lineage` Is Almost Never About Lineage
 
 The blocker fires on `!lineage_id || !job_id || !source_content_hash`
