@@ -1429,6 +1429,19 @@ SWMS-261065, 2026-08-04: after the new revision the pack went from one blocker
 and a suppressed `supporting_report_pdf` to zero blockers, and its signed URL
 served the bound raw SHA-256 exactly.
 
+## Previously Committed PDF Is Restorable, Not Complete
+
+`inspectSesSupportingReportProof` (`ses_supporting_report_trust.ts`) is check 8
+for the served supporting report: independent provenance / no self-vouching.
+Same-cycle `previously_committed_pdf` (`evidence_source:
+current_cycle_curated_makesafe_report`) requires a bind-time
+`report_input_hash` — without it the refusal is
+`independent_completeness_proof_missing`. Content-hash self-match and docket
+lineage alone must never establish completeness; restorable bytes (Tuart Hill
+`SWMS-261015` / raw `933d83bd…`) are not a complete pack. Sibling-bundle
+evidence is a different independence model and is not gated on that hash.
+Do not relax this to bulk-pass incomplete packs.
+
 The same run pins the Docs Ready gate empirically. `docsReady()` returns on
 `invoiceQualifiesAsCurrentDraft` before any other term, and preparing the
 obligation does not supply it — `prepare_ses_invoice_obligation` yields a local

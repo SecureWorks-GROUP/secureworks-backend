@@ -43,9 +43,14 @@ export function inspectSesSupportingReportProof(
   );
   const sourceRevisionId = String(metadata.source_revision_id || "");
   const sourceArtifactId = String(metadata.source_artifact_id || "");
+  const artifactId = String(artifact.id || "");
+  // Check 8: independent provenance / no self-vouching. A pack artifact must
+  // not certify itself by pointing its "independent" source at its own id, nor
+  // by equating source identity with the document being certified.
   if (
     !sourceIdentity || !sourceDocumentId ||
-    sourceIdentity === sourceDocumentId
+    sourceIdentity === sourceDocumentId ||
+    (artifactId && sourceArtifactId === artifactId)
   ) {
     return { trusted: false, reason: "source_identity_self_reference" };
   }
@@ -98,6 +103,21 @@ export function inspectSesSupportingReportProof(
         MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256)
   ) {
     return { trusted: false, reason: "active_renderer_input_binding_missing" };
+  }
+  // Restorable is not complete. A previously-committed same-cycle PDF whose
+  // only proof is its own docket metadata (content-hash self-match, no bind-time
+  // report_input_hash) can self-certify an incomplete pack — Tuart Hill
+  // SWMS-261015 is the concrete instance (thin 8-of-23, no input hash). The
+  // report_input_hash is the independent completeness coordinate produced by
+  // the curated bind's photo/contact/materials accounting; without it this path
+  // is decorative. Sibling-bundle evidence is a different independence model
+  // and is not gated here.
+  if (
+    sourceKind === "previously_committed_pdf" &&
+    evidenceSource === "current_cycle_curated_makesafe_report" &&
+    !sha256Shape(metadata.report_input_hash)
+  ) {
+    return { trusted: false, reason: "independent_completeness_proof_missing" };
   }
   const size = Number(artifact.size_bytes);
   if (!Number.isSafeInteger(size) || size <= 0 || size > 8 * 1024 * 1024) {

@@ -329,6 +329,68 @@ Deno.test("retired commercial and self-consistent raw provenance remain untruste
   });
 });
 
+Deno.test(
+  "Tuart-style previously_committed pack cannot self-certify completeness without report_input_hash",
+  () => {
+    // Concrete instance: SWMS-261015 restored bytes 933d83bd... with
+    // previously_committed_pdf provenance but no bind-time report_input_hash.
+    // Being restorable must not equal being complete (check 8).
+    const tuartStyle = inspectSesSupportingReportProof({
+      id: "artifact-current-tuart-style",
+      role: "supporting_report_pdf",
+      media_type: "application/pdf",
+      content_hash: `sha256:${"e".repeat(64)}`,
+      size_bytes: 100,
+      metadata: {
+        source_kind: "previously_committed_pdf",
+        source_identity:
+          "docket-revision:541cc3e5-acd7-5d1b-8e39-f359016f5cf7/artifact:2b6bb5a0-faa3-4d94-810e-41fa65f1ba26",
+        source_document_id: "f41f9f35-f7ab-469b-9511-e656bd8a21aa",
+        source_revision_id: "541cc3e5-acd7-5d1b-8e39-f359016f5cf7",
+        source_artifact_id: "2b6bb5a0-faa3-4d94-810e-41fa65f1ba26",
+        source_artifact_content_hash: `sha256:${"e".repeat(64)}`,
+        expected_raw_sha256: `sha256:${"f".repeat(64)}`,
+        output_sha256: `sha256:${"f".repeat(64)}`,
+        render_hash: "f".repeat(64),
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        // deliberately no report_input_hash — the incompleteness self-vouch
+      },
+    });
+    assertEquals(tuartStyle, {
+      trusted: false,
+      reason: "independent_completeness_proof_missing",
+    });
+
+    const selfPointingArtifact = inspectSesSupportingReportProof({
+      id: "artifact-self",
+      role: "supporting_report_pdf",
+      media_type: "application/pdf",
+      content_hash: `sha256:${"e".repeat(64)}`,
+      size_bytes: 100,
+      metadata: {
+        source_kind: "previously_committed_pdf",
+        source_identity:
+          "docket-revision:revision-self/artifact:artifact-self",
+        source_document_id: "document-other",
+        source_revision_id: "revision-self",
+        source_artifact_id: "artifact-self",
+        source_artifact_content_hash: `sha256:${"e".repeat(64)}`,
+        expected_raw_sha256: `sha256:${"f".repeat(64)}`,
+        output_sha256: `sha256:${"f".repeat(64)}`,
+        render_hash: "f".repeat(64),
+        report_input_hash: `sha256:${"a".repeat(64)}`,
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      },
+    });
+    assertEquals(selfPointingArtifact, {
+      trusted: false,
+      reason: "source_identity_self_reference",
+    });
+  },
+);
+
 Deno.test("review pack suppresses unproved report bytes and exposes curated_source_missing", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nlegacy fixture");
   const artifact = {
@@ -407,42 +469,96 @@ Deno.test("Captain signoff refuses a report suppressed by the same read contract
   assertEquals(rpcCalls, []);
 });
 
-Deno.test("review pack keeps a byte-verified previously committed report visible", async () => {
-  const bytes = new TextEncoder().encode("%PDF-1.7\ntrusted fixture");
-  const contentHash = await sesSha256Bytes(bytes);
-  const rawHash = await rawSha256(bytes);
-  const artifact = {
-    role: "supporting_report_pdf",
-    object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
-    media_type: "application/pdf",
-    content_hash: contentHash,
-    size_bytes: bytes.byteLength,
-    metadata: {
-      source_kind: "previously_committed_pdf",
-      source_identity:
-        "docket-revision:source-revision/artifact:source-artifact",
-      source_document_id: "source-document",
-      source_revision_id: "source-revision",
-      source_artifact_id: "source-artifact",
-      source_artifact_content_hash: contentHash,
-      expected_raw_sha256: `sha256:${rawHash}`,
-      output_sha256: `sha256:${rawHash}`,
-      render_hash: rawHash,
-      evidence_source: "current_cycle_curated_makesafe_report",
-      report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-    },
-  };
-  const { client, signedPaths } = reviewPackClient(artifact, bytes);
-  const pack = await getSesReviewablePackAction(
-    client,
-    { mode: "api_key", user: null },
-    "docket-fixture",
-  );
-  assertEquals(pack.artifacts.length, 1);
-  assertEquals(pack.suppressed_artifacts, []);
-  assertEquals(pack.blockers, []);
-  assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
-});
+Deno.test(
+  "review pack suppresses Tuart-style previously_committed report that lacks completeness proof",
+  async () => {
+    // Old code trusted this shape (byte-verified previously_committed without
+    // report_input_hash). That is the self-vouch gate this task closes.
+    const bytes = new TextEncoder().encode("%PDF-1.7\ntuart incomplete fixture");
+    const contentHash = await sesSha256Bytes(bytes);
+    const rawHash = await rawSha256(bytes);
+    const artifact = {
+      role: "supporting_report_pdf",
+      object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+      media_type: "application/pdf",
+      content_hash: contentHash,
+      size_bytes: bytes.byteLength,
+      metadata: {
+        source_kind: "previously_committed_pdf",
+        source_identity:
+          "docket-revision:source-revision/artifact:source-artifact",
+        source_document_id: "source-document",
+        source_revision_id: "source-revision",
+        source_artifact_id: "source-artifact",
+        source_artifact_content_hash: contentHash,
+        expected_raw_sha256: `sha256:${rawHash}`,
+        output_sha256: `sha256:${rawHash}`,
+        render_hash: rawHash,
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      },
+    };
+    const { client, signedPaths } = reviewPackClient(artifact, bytes);
+    const pack = await getSesReviewablePackAction(
+      client,
+      { mode: "api_key", user: null },
+      "docket-fixture",
+    );
+    assertEquals(pack.artifacts, []);
+    assertEquals(pack.suppressed_artifacts[0].signed_url, null);
+    assertEquals(
+      pack.suppressed_artifacts[0].blocker_code,
+      "curated_source_missing",
+    );
+    assertEquals(pack.blockers[0].code, "curated_source_missing");
+    assertEquals(
+      (pack.blockers[0] as any).evidence.suppression_reason,
+      "independent_completeness_proof_missing",
+    );
+    assertEquals(signedPaths, []);
+  },
+);
+
+Deno.test(
+  "review pack keeps a previously committed report only when completeness proof is bound",
+  async () => {
+    const bytes = new TextEncoder().encode("%PDF-1.7\ntrusted complete fixture");
+    const contentHash = await sesSha256Bytes(bytes);
+    const rawHash = await rawSha256(bytes);
+    const artifact = {
+      role: "supporting_report_pdf",
+      object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+      media_type: "application/pdf",
+      content_hash: contentHash,
+      size_bytes: bytes.byteLength,
+      metadata: {
+        source_kind: "previously_committed_pdf",
+        source_identity:
+          "docket-revision:source-revision/artifact:source-artifact",
+        source_document_id: "source-document",
+        source_revision_id: "source-revision",
+        source_artifact_id: "source-artifact",
+        source_artifact_content_hash: contentHash,
+        expected_raw_sha256: `sha256:${rawHash}`,
+        output_sha256: `sha256:${rawHash}`,
+        render_hash: rawHash,
+        report_input_hash: `sha256:${"a".repeat(64)}`,
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      },
+    };
+    const { client, signedPaths } = reviewPackClient(artifact, bytes);
+    const pack = await getSesReviewablePackAction(
+      client,
+      { mode: "api_key", user: null },
+      "docket-fixture",
+    );
+    assertEquals(pack.artifacts.length, 1);
+    assertEquals(pack.suppressed_artifacts, []);
+    assertEquals(pack.blockers, []);
+    assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
+  },
+);
 
 Deno.test("review pack keeps an independently proved sibling bundle report visible", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\ntrusted sibling fixture");

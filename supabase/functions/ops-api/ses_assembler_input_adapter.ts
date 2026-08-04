@@ -2079,8 +2079,18 @@ function physicalReportSourceForCycle(
       metadata.output_sha256 || metadata.render_hash,
     );
     const artifactContentHash = text(artifact.content_hash);
+    const inputHash = text(metadata.report_input_hash) ||
+      text(provenance.report_input_hash);
+    const trust = inspectSesSupportingReportProof(artifact);
+    // Restorable docket lineage without an independent completeness coordinate
+    // (report_input_hash from curated bind accounting) is not a source. Allow
+    // selection only when the document still carries that hash so prepare can
+    // re-stamp the artifact; pure self-vouching metadata remains refused.
+    const completenessRecoverable = !trust.trusted &&
+      trust.reason === "independent_completeness_proof_missing" &&
+      isSesSha256(inputHash);
     if (
-      !inspectSesSupportingReportProof(artifact).trusted ||
+      (!trust.trusted && !completenessRecoverable) ||
       !document || document.visible_to_trades !== true ||
       text(document.type).toLowerCase() !== "makesafe_report" ||
       text(document.attendance_cycle_id) !== currentCycleId ||
@@ -2089,10 +2099,9 @@ function physicalReportSourceForCycle(
       !text(artifact.object_key) || !isSesSha256(artifactContentHash) ||
       !Number.isSafeInteger(Number(artifact.size_bytes)) ||
       Number(artifact.size_bytes) <= 0 ||
-      text(document.uploaded_by) === "guarded-current-wiki-rerender-sweep"
+      text(document.uploaded_by) === "guarded-current-wiki-rerender-sweep" ||
+      !isSesSha256(inputHash)
     ) continue;
-    const inputHash = text(metadata.report_input_hash) ||
-      text(provenance.report_input_hash);
     candidates.push({
       document,
       artifact,
@@ -2107,9 +2116,7 @@ function physicalReportSourceForCycle(
         source_artifact_id: text(artifact.id),
         source_artifact_content_hash: artifactContentHash as SesSha256,
         expected_raw_sha256: expectedRawSha256,
-        ...(isSesSha256(inputHash)
-          ? { report_input_hash: inputHash as SesSha256 }
-          : {}),
+        report_input_hash: inputHash as SesSha256,
       },
     });
   }
