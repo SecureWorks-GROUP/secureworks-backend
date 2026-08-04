@@ -1305,6 +1305,31 @@ Persisting a new docket revision on a card whose `pack.state` is already `sent`
 re-opens it as `needs_review` and invalidates the previous signoff tick. Check
 `pack.state` before treating such a card as reachable work.
 
+## A Curated Bind Does Not Retroactively Trust An Existing Docket Revision
+
+`bind_current_cycle_curated_makesafe_report` writes provenance onto the
+`job_documents` row, never onto an already-persisted docket. The pack read
+boundary validates the PERSISTED ARTIFACT's own stamp, so a revision assembled
+before the bind keeps refusing `curated_source_missing` /
+`independent_source_kind_missing` (`source_kind: null`) even after the bind
+returns 200 — and its stored bytes may be a different render from the bound
+ones. That refusal is correct; do not widen the read to consult the document's
+current provenance. Clear it the sanctioned way: `prepare_ses_docket_revision`
+(`dry_run` first to confirm `supporting_report_plan.metadata.mode ==
+curated_report_artifact_recovery`, then `dry_run: false`). Proved live on
+SWMS-261065, 2026-08-04: after the new revision the pack went from one blocker
+and a suppressed `supporting_report_pdf` to zero blockers, and its signed URL
+served the bound raw SHA-256 exactly.
+
+The same run pins the Docs Ready gate empirically. `docsReady()` returns on
+`invoiceQualifiesAsCurrentDraft` before any other term, and no agent-reachable
+route creates the linked Xero DRAFT ACCREC it needs — `prepare_ses_invoice_obligation`
+yields a local proposal with `xero_identity: null`. So a card can hold a fully
+trusted pack, zero docket blockers and still sit in `trade_report_in`; that is
+the money fence working, not a defect. Prove such a claim by running the real
+`docsReady()` against the live evidence shape and flipping only the invoice
+term, rather than reading the ladder by eye.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
