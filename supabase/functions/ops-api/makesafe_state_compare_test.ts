@@ -299,6 +299,21 @@ Deno.test("archive paging is validated, never coerced into a surprise page", asy
   const unpaged = await board({});
   assertEquals(unpaged.status, 200);
   assertEquals((await unpaged.json()).archive.limit, null);
+
+  // Scopes that never consume paging keep ignoring a stray parameter rather
+  // than gaining a refusal the old endpoint did not have.
+  const activeWithStrayLimit = await _makesafeBoardActionForTest(
+    emptyCanonicalBoardClient(),
+    "api_key",
+    null,
+    "ops",
+    { generatedAt: GENERATED_AT, limit: "abc", offset: "-1" },
+  );
+  assertEquals(activeWithStrayLimit.status, 200);
+  const activeBody = await activeWithStrayLimit.json();
+  assertEquals(activeBody.column_scope, "active");
+  assertEquals(activeBody.archive.limit, null);
+  assertEquals(activeBody.archive.offset, 0);
 });
 
 Deno.test("explicit v1 flag is byte-identical to the absent flag", async () => {

@@ -933,11 +933,20 @@ async function verifyStages(
   }
   evidence.stages.push({ stage: "intake_fates", result: "PASS", rows: fates });
 
+  // fields=full is what emits the flat `rows` list and the computed-status
+  // diagnostics recorded below; it also widens the scope to every column, so a
+  // synthetic job parked in archive is still proved present here.
   const board = await client.action<JsonRecord>(
     "ops-api",
     "makesafe_board",
+    { query: { fields: "full" } },
   );
   const boardRows = Array.isArray(board.rows) ? board.rows as JsonRecord[] : [];
+  if (boardRows.length === 0) {
+    throw new Error(
+      "canonical board returned no rows: the membership probe cannot prove anything",
+    );
+  }
   const projected: JsonRecord[] = [];
   for (const job of found.jobs) {
     const matches = boardRows.filter((row) => row.id === job.id);
