@@ -26,6 +26,7 @@ import {
   type SesBuilderKey,
   type SesFamilyId,
 } from "./ses_family_matrix.ts";
+import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
 import {
   currentCycleNumber,
   filterAssignmentsForCurrentCycle,
@@ -1035,8 +1036,7 @@ function explicitHoursAndMaterials(
     : array(checklist.materials);
   if (materials.length) facts.materials = materials;
   if (
-    (classification.builder === "AJS" ||
-      classification.builder === "AJBR") &&
+    isAjsBuilderKey(classification.builder) &&
     isSesPhysicalShapedFamily(classification.family)
   ) {
     const panelCount = Number(facts.panel_count);
