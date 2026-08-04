@@ -32,6 +32,46 @@ const TOTAL = 825;
 
 const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]); // %PDF-1.4
 
+const ASSEMBLER_VERSION = "ses-assembler-v1";
+const FAMILY_MATRIX_VERSION = "ses-family-matrix-v1";
+/** Live truncated constraint name, exactly as Postgres reported it on Bertram. */
+const DOCKET_IDEMPOTENCY_CONSTRAINT =
+  "makesafe_docket_revisions_job_id_idempotency_key_assembler__key";
+
+/**
+ * Mirrors the shipped migration
+ * `20260804010000_ses_invoice_bound_docket_idempotent_adopt.sql`, which scopes
+ * the invoice-bound key to the pre_xero base so a re-prepare can bind the same
+ * AUTHORISED invoice onto the new current pack. Passing an empty base models a
+ * legacy (pre-migration) row written under the obligation-only key.
+ *
+ * This is a TEST-SIDE RESTATEMENT of SQL logic, not the SQL itself — see the
+ * honesty note at the head of the unique-index tests below.
+ */
+function sesInvoiceBoundIdempotencyKey(
+  obligationRevisionId: string,
+  basedOnRevisionId: string,
+): string {
+  return basedOnRevisionId
+    ? `ses-invoice-bound:${obligationRevisionId}:${basedOnRevisionId}`
+    : `ses-invoice-bound:${obligationRevisionId}`;
+}
+
+/** UNIQUE (job_id, idempotency_key, assembler_version, family_matrix_version). */
+function docketUniqueKey(row: {
+  job_id: string;
+  idempotency_key: string;
+  assembler_version: string;
+  family_matrix_version: string;
+}): string {
+  return [
+    row.job_id,
+    row.idempotency_key,
+    row.assembler_version,
+    row.family_matrix_version,
+  ].join("\u0000");
+}
+
 function authorisedInvoice(overrides: Record<string, unknown> = {}) {
   return {
     xero_invoice_id: XERO_ID,
@@ -66,6 +106,28 @@ function recoveryClient(opts: {
   let committedDocket = opts.commitReturns ?? null;
   const existingBound = opts.existingBoundDockets || [];
   let lastArtifactRevisionId: string | null = null;
+  // Seed the unique index from any pre-existing invoice_bound rows, using each
+  // row's own stored idempotency_key so a legacy obligation-only occupant and a
+  // migration-era based_on-scoped occupant are both modelled faithfully.
+  const uniqueIndex = new Map<string, string>();
+  for (const row of existingBound) {
+    if (!row?.id) continue;
+    uniqueIndex.set(
+      docketUniqueKey({
+        job_id: String(row.job_id || JOB_ID),
+        idempotency_key: String(
+          row.idempotency_key ??
+            sesInvoiceBoundIdempotencyKey(
+              String(row.invoice_obligation_revision_id || ""),
+              String(row.based_on_revision_id || ""),
+            ),
+        ),
+        assembler_version: ASSEMBLER_VERSION,
+        family_matrix_version: FAMILY_MATRIX_VERSION,
+      }),
+      String(row.id),
+    );
+  }
 
   function rowFor(table: string) {
     if (table === "makesafe_invoice_obligation_revisions") {
@@ -201,6 +263,8 @@ function recoveryClient(opts: {
     async rpc(name: string, args: Record<string, any>) {
       if (name === "commit_ses_invoice_bound_docket_v1") {
         track.commits += 1;
+        const binding = args.p_binding || {};
+        const pdf = args.p_pdf_artifact || {};
         if (opts.commitDuplicateKey) {
           return {
             data: null,
@@ -210,8 +274,32 @@ function recoveryClient(opts: {
             },
           };
         }
-        const binding = args.p_binding || {};
-        const pdf = args.p_pdf_artifact || {};
+        // In-process stand-in for the migration's
+        // UNIQUE (job_id, idempotency_key, assembler_version,
+        // family_matrix_version). The collision therefore emerges from the KEY
+        // SHAPE rather than from a test flag, which is the gap that let the
+        // first recovery deploy pass its suite and then die on the live index.
+        const occupantId = uniqueIndex.get(
+          docketUniqueKey({
+            job_id: String(binding.job_id || ""),
+            idempotency_key: sesInvoiceBoundIdempotencyKey(
+              String(binding.invoice_obligation_revision_id || ""),
+              String(binding.based_on_revision_id || ""),
+            ),
+            assembler_version: ASSEMBLER_VERSION,
+            family_matrix_version: FAMILY_MATRIX_VERSION,
+          }),
+        );
+        if (occupantId && occupantId !== binding.id) {
+          return {
+            data: null,
+            error: {
+              code: "23505",
+              message:
+                `duplicate key value violates unique constraint "${DOCKET_IDEMPOTENCY_CONSTRAINT}"`,
+            },
+          };
+        }
         // Idempotent SQL path: same id returns existing row.
         if (
           committedDocket &&
@@ -233,6 +321,18 @@ function recoveryClient(opts: {
           email_drafts: {},
           attendance_cycle_ids: opts.currentDocket.attendance_cycle_ids || [],
         };
+        uniqueIndex.set(
+          docketUniqueKey({
+            job_id: String(binding.job_id || JOB_ID),
+            idempotency_key: sesInvoiceBoundIdempotencyKey(
+              String(binding.invoice_obligation_revision_id || ""),
+              String(binding.based_on_revision_id || ""),
+            ),
+            assembler_version: ASSEMBLER_VERSION,
+            family_matrix_version: FAMILY_MATRIX_VERSION,
+          }),
+          String(binding.id),
+        );
         // After first commit, current docket becomes invoice_bound.
         opts.currentDocket = committedDocket;
         artifacts.splice(0, artifacts.length, {
@@ -618,15 +718,15 @@ Deno.test("isSesInvoiceBoundDocketDuplicateKeyError recognises live constraint n
   );
 });
 
-Deno.test("bind adopts existing same-INV docket on unique-key collision (no second mint)", async () => {
+Deno.test("bind adopts an existing same-INV, same-base docket (true replay, no second mint)", async () => {
   const EXISTING_BOUND_ID = "aaaaaaaa-0000-4000-8000-000000000099";
-  const OLD_BASE_ID = "bbbbbbbb-0000-4000-8000-000000000088";
   const existingBound = {
     id: EXISTING_BOUND_ID,
     job_id: JOB_ID,
     stage: "invoice_bound",
     invoice_obligation_revision_id: OBLIGATION_ID,
-    based_on_revision_id: OLD_BASE_ID,
+    // Bound from the exact pre_xero base under review: the reviewed pack bytes.
+    based_on_revision_id: PRE_XERO_DOCKET_ID,
     idempotency_key: `ses-invoice-bound:${OBLIGATION_ID}`,
     xero_binding: {
       xero_invoice_id: XERO_ID,
@@ -691,20 +791,102 @@ Deno.test("bind adopts existing same-INV docket on unique-key collision (no seco
   assertEquals(result.invoice.invoice_number, INVOICE_NUMBER);
   assertEquals(result.invoice.xero_invoice_id, XERO_ID);
   assertEquals(result.invoice.total, TOTAL);
-  assertEquals(track.commits, 1); // attempted once, then adopted
+  // The reviewed base is already bound, so nothing is re-committed and the Xero
+  // PDF is not even re-fetched.
+  assertEquals(track.commits, 0);
+  assertEquals(gTrack.pdfFetches, 0);
   assertEquals(gTrack.creates, 0);
   assertEquals(gTrack.authorises, 0);
 });
 
-Deno.test("recovery adopts existing INV-1102 bind on duplicate key instead of 409", async () => {
-  const EXISTING_BOUND_ID = "cccccccc-0000-4000-8000-000000000077";
-  const OLD_BASE_ID = "dddddddd-0000-4000-8000-000000000066";
+Deno.test("bind refuses a same-INV bind built on a DIFFERENT pre_xero base — never adopts superseded pack bytes", async () => {
+  const EXISTING_BOUND_ID = "aaaaaaaa-0000-4000-8000-00000000009a";
+  const OLD_BASE_ID = "bbbbbbbb-0000-4000-8000-000000000088";
   const existingBound = {
     id: EXISTING_BOUND_ID,
     job_id: JOB_ID,
     stage: "invoice_bound",
     invoice_obligation_revision_id: OBLIGATION_ID,
     based_on_revision_id: OLD_BASE_ID,
+    idempotency_key: `ses-invoice-bound:${OBLIGATION_ID}`,
+    xero_binding: {
+      xero_invoice_id: XERO_ID,
+      invoice_number: INVOICE_NUMBER,
+      status: "AUTHORISED",
+      total: TOTAL,
+      pdf_content_hash:
+        "sha256:supersededpdf00000000000000000000000000000000000000000000000000",
+    },
+  };
+  const track = { commits: 0, uploads: 0, authorises: 0, creates: 0 };
+  const gTrack = { authorises: 0, creates: 0, pdfFetches: 0 };
+  const client = recoveryClient({
+    revision: {
+      id: OBLIGATION_ID,
+      job_id: JOB_ID,
+      state: "authorised",
+      xero_binding: {
+        xero_invoice_id: XERO_ID,
+        invoice_number: INVOICE_NUMBER,
+        status: "AUTHORISED",
+        total: TOTAL,
+      },
+    },
+    currentDocket: {
+      id: PRE_XERO_DOCKET_ID,
+      job_id: JOB_ID,
+      stage: "pre_xero",
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      envelope: { v2: { classification: {}, items: {} } },
+      email_drafts: {},
+    },
+    existingBoundDockets: [existingBound],
+    artifactsByRevision: {
+      [EXISTING_BOUND_ID]: [{
+        role: "xero_invoice_pdf",
+        content_hash:
+          "sha256:supersededpdf00000000000000000000000000000000000000000000000000",
+        metadata: {
+          xero_invoice_id: XERO_ID,
+          invoice_number: INVOICE_NUMBER,
+        },
+      }],
+    },
+    commitDuplicateKey: true,
+    track,
+  });
+  const error = await assertRejects(
+    () =>
+      bindAuthorisedInvoicePdfToDocket(
+        client as any,
+        {
+          org_id: ORG_ID,
+          job_id: JOB_ID,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          based_on_revision_id: PRE_XERO_DOCKET_ID,
+          actor: "api-key-recovery",
+          invoice: authorisedInvoice(),
+        },
+        gateway({ track: gTrack }),
+      ),
+    SesActionError,
+  );
+  assertEquals(error.status, 409);
+  // The refusal must name what differs, not just say "duplicate key".
+  assert(String(error.message).includes(OLD_BASE_ID));
+  assert(String(error.message).includes(PRE_XERO_DOCKET_ID));
+  assertEquals(gTrack.creates, 0);
+  assertEquals(gTrack.authorises, 0);
+});
+
+Deno.test("recovery adopts the existing INV-1102 bind when it is the current pack's own bind", async () => {
+  const EXISTING_BOUND_ID = "cccccccc-0000-4000-8000-000000000077";
+  const existingBound = {
+    id: EXISTING_BOUND_ID,
+    job_id: JOB_ID,
+    stage: "invoice_bound",
+    invoice_obligation_revision_id: OBLIGATION_ID,
+    based_on_revision_id: PRE_XERO_DOCKET_ID,
     idempotency_key: `ses-invoice-bound:${OBLIGATION_ID}`,
     xero_binding: {
       xero_invoice_id: XERO_ID,
@@ -770,7 +952,7 @@ Deno.test("recovery adopts existing INV-1102 bind on duplicate key instead of 40
   assertEquals(result.send_dispatched, false);
   assertEquals(result.invoice_create_dispatched, false);
   assertEquals(result.invoice_authorise_dispatched, false);
-  assertEquals(track.commits, 1);
+  assertEquals(track.commits, 0);
 });
 
 Deno.test("bind refuses to adopt a different invoice number on duplicate key", async () => {
@@ -833,3 +1015,183 @@ Deno.test("bind refuses to adopt a different invoice number on duplicate key", a
 function assert(condition: unknown, message = "assert failed"): asserts condition {
   if (!condition) throw new Error(message);
 }
+
+/*
+ * ---------------------------------------------------------------------------
+ * Real-constraint cases.
+ *
+ * The tests above that use `commitDuplicateKey` assert behaviour given a
+ * collision. These two instead make the collision EMERGE from the composite key
+ * shape, via an in-process stand-in for
+ * UNIQUE (job_id, idempotency_key, assembler_version, family_matrix_version).
+ * That is the axis that burned us: the first recovery deploy passed 84 tests
+ * whose "idempotency" short-circuited on the content-addressed docket id, so
+ * nothing in the suite could see the live index at all.
+ *
+ * HONESTY NOTE — what these still do NOT prove: the live PostgREST error
+ * envelope, the real `commit_ses_invoice_bound_docket_v1` body (the key
+ * derivation here is a test-side restatement of the migration's SQL, and could
+ * drift from it), and concurrent advisory-lock behaviour. They narrow the mock
+ * gap; they do not close it. A live readback on the named card is still
+ * required after any deploy that touches this seam.
+ * ---------------------------------------------------------------------------
+ */
+
+Deno.test("unique index: replaying the SAME base collides on the live key and adopts", async () => {
+  const EXISTING_BOUND_ID = "f0000000-0000-4000-8000-0000000000a1";
+  const existingBound = {
+    id: EXISTING_BOUND_ID,
+    job_id: JOB_ID,
+    stage: "invoice_bound",
+    invoice_obligation_revision_id: OBLIGATION_ID,
+    based_on_revision_id: PRE_XERO_DOCKET_ID,
+    // Written by the migration-era commit: key scoped to the base.
+    idempotency_key: sesInvoiceBoundIdempotencyKey(
+      OBLIGATION_ID,
+      PRE_XERO_DOCKET_ID,
+    ),
+    xero_binding: {
+      xero_invoice_id: XERO_ID,
+      invoice_number: INVOICE_NUMBER,
+      status: "AUTHORISED",
+      total: TOTAL,
+      pdf_content_hash:
+        "sha256:samebasepdf0000000000000000000000000000000000000000000000000000",
+    },
+  };
+  const track = { commits: 0, uploads: 0, authorises: 0, creates: 0 };
+  const gTrack = { authorises: 0, creates: 0, pdfFetches: 0 };
+  const client = recoveryClient({
+    revision: {
+      id: OBLIGATION_ID,
+      job_id: JOB_ID,
+      state: "authorised",
+      xero_binding: {
+        xero_invoice_id: XERO_ID,
+        invoice_number: INVOICE_NUMBER,
+        status: "AUTHORISED",
+        total: TOTAL,
+      },
+    },
+    currentDocket: {
+      id: PRE_XERO_DOCKET_ID,
+      job_id: JOB_ID,
+      stage: "pre_xero",
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      envelope: { v2: { classification: {}, items: {} } },
+      email_drafts: {},
+    },
+    existingBoundDockets: [existingBound],
+    artifactsByRevision: {
+      [EXISTING_BOUND_ID]: [{
+        role: "xero_invoice_pdf",
+        content_hash:
+          "sha256:samebasepdf0000000000000000000000000000000000000000000000000000",
+        metadata: {
+          xero_invoice_id: XERO_ID,
+          invoice_number: INVOICE_NUMBER,
+        },
+      }],
+    },
+    track,
+  });
+  const result = await bindAuthorisedInvoicePdfToDocket(
+    client as any,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      based_on_revision_id: PRE_XERO_DOCKET_ID,
+      actor: "api-key-recovery",
+      invoice: authorisedInvoice(),
+    },
+    gateway({ track: gTrack }),
+  );
+  assertEquals(result.state, "authorised_invoice_already_bound");
+  assertEquals(result.docket_revision.id, EXISTING_BOUND_ID);
+  assertEquals(gTrack.creates, 0);
+  assertEquals(gTrack.authorises, 0);
+});
+
+Deno.test("unique index: the Bertram shape (legacy key, superseded base) no longer collides — it mints a bind on the CURRENT pack", async () => {
+  const LEGACY_BOUND_ID = "f0000000-0000-4000-8000-0000000000b2";
+  const SUPERSEDED_BASE_ID = "f0000000-0000-4000-8000-0000000000b3";
+  // Exactly the live Bertram row: bound before the migration, so its key is the
+  // obligation-only form, and its base is the pre_xero docket that a later
+  // re-prepare superseded.
+  const legacyBound = {
+    id: LEGACY_BOUND_ID,
+    job_id: JOB_ID,
+    stage: "invoice_bound",
+    invoice_obligation_revision_id: OBLIGATION_ID,
+    based_on_revision_id: SUPERSEDED_BASE_ID,
+    idempotency_key: sesInvoiceBoundIdempotencyKey(OBLIGATION_ID, ""),
+    xero_binding: {
+      xero_invoice_id: XERO_ID,
+      invoice_number: INVOICE_NUMBER,
+      status: "AUTHORISED",
+      total: TOTAL,
+      pdf_content_hash:
+        "sha256:legacybasepdf00000000000000000000000000000000000000000000000000",
+    },
+  };
+  const track = { commits: 0, uploads: 0, authorises: 0, creates: 0 };
+  const gTrack = { authorises: 0, creates: 0, pdfFetches: 0 };
+  const client = recoveryClient({
+    revision: {
+      id: OBLIGATION_ID,
+      job_id: JOB_ID,
+      state: "authorised",
+      xero_binding: {
+        xero_invoice_id: XERO_ID,
+        invoice_number: INVOICE_NUMBER,
+        status: "AUTHORISED",
+        total: TOTAL,
+      },
+    },
+    currentDocket: {
+      id: PRE_XERO_DOCKET_ID,
+      job_id: JOB_ID,
+      stage: "pre_xero",
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      envelope: { v2: { classification: {}, items: {} } },
+      email_drafts: {},
+    },
+    existingBoundDockets: [legacyBound],
+    artifactsByRevision: {
+      [LEGACY_BOUND_ID]: [{
+        role: "xero_invoice_pdf",
+        content_hash:
+          "sha256:legacybasepdf00000000000000000000000000000000000000000000000000",
+        metadata: {
+          xero_invoice_id: XERO_ID,
+          invoice_number: INVOICE_NUMBER,
+        },
+      }],
+    },
+    track,
+  });
+  const result = await recoverAuthorisedInvoicePdfBind(
+    client as any,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "api-key-recovery",
+    },
+    gateway({ track: gTrack }),
+  );
+  // The based_on-scoped key does not collide with the legacy row, so the same
+  // AUTHORISED invoice binds to the CURRENT pack. Adopting the legacy row
+  // instead would have reported success while the current pack stayed unbound.
+  assertEquals(result.state, "authorised_invoice_bound");
+  assertEquals(result.docket_revision.based_on_revision_id, PRE_XERO_DOCKET_ID);
+  assert(result.docket_revision.id !== LEGACY_BOUND_ID);
+  assertEquals(track.commits, 1);
+  // Money is untouched: no second mint, no re-authorise, no send.
+  assertEquals(gTrack.creates, 0);
+  assertEquals(gTrack.authorises, 0);
+  assertEquals(result.invoice_create_dispatched, false);
+  assertEquals(result.invoice_authorise_dispatched, false);
+  assertEquals(result.send_dispatched, false);
+});

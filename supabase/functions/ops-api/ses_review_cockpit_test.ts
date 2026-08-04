@@ -6,11 +6,14 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  approveInvoiceDisabledReason,
   buildSesCockpitView,
   buildSesReleaseRevision,
   canRecordSesApproval,
+  describeSesSendItPlan,
   evaluateSesMechanicalClean,
   SES_REVIEW_SECTION_ORDER,
+  sesRouteKindsOnPack,
   type SesCleanInput,
   type SesCockpitDocket,
 } from "./ses_review_cockpit.ts";
@@ -385,5 +388,118 @@ Deno.test("release construction rejects subject prose in Cc", async () => {
       }),
     TypeError,
     "non-email recipient",
+  );
+});
+
+/*
+ * Cockpit honesty (mission S5). The Captain reads three things off this payload
+ * and each was lying in a different way: the SEND IT copy always narrated three
+ * emails, a disabled APPROVE INVOICE gave no reason, and a missing photo draft
+ * produced a generic "builder email draft" remedy.
+ */
+
+Deno.test("SEND IT copy is generated from the real route list, not hardcoded to three", () => {
+  assertStringIncludes(
+    describeSesSendItPlan(cleanInput().routes),
+    "report, photo and invoice routes (3)",
+  );
+  // The AJS two-email shape must narrate two, the moment the pack carries two.
+  const twoRoutes = cleanInput().routes.filter((route) =>
+    route.route_kind !== "photo"
+  );
+  const twoPlan = describeSesSendItPlan(twoRoutes);
+  assertStringIncludes(twoPlan, "report and invoice routes (2)");
+  assert(!twoPlan.includes("photo"));
+  // One route reads as a route, not "1 routes".
+  assertStringIncludes(
+    describeSesSendItPlan(twoRoutes.slice(0, 1)),
+    "report route (1)",
+  );
+  assertStringIncludes(describeSesSendItPlan([]), "nothing to send");
+});
+
+Deno.test("a route kind the send order does not know is still narrated, never dropped", () => {
+  const routes = [
+    {
+      route_kind: "report_invoice" as unknown as "report",
+      recipients: ["workorders@ajs.build"],
+      subject: "s",
+      body: "b",
+      attachment_hashes: ["sha256:aa"],
+      ready: true,
+    },
+    ...cleanInput().routes.filter((route) => route.route_kind === "photo"),
+  ];
+  assertEquals(sesRouteKindsOnPack(routes), ["photo", "report_invoice"]);
+  assertStringIncludes(
+    describeSesSendItPlan(routes),
+    "photo and report invoice routes (2)",
+  );
+});
+
+Deno.test("APPROVE INVOICE states why it is unavailable once money is committed", () => {
+  const reason = approveInvoiceDisabledReason(
+    { xero_binding: { status: "AUTHORISED", invoice_number: "INV-1102" } },
+    { stale: false, xeroAuthorised: true, noAdditionalCharge: false },
+  );
+  assertStringIncludes(reason, "already authorised");
+  assertStringIncludes(reason, "INV-1102");
+  assertStringIncludes(reason, "SEND IT");
+  // Not merely grey: the other closed doors each name themselves too.
+  assertStringIncludes(
+    approveInvoiceDisabledReason(
+      { xero_binding: {} },
+      { stale: false, xeroAuthorised: false, noAdditionalCharge: false },
+    ),
+    "No Xero DRAFT invoice is bound",
+  );
+  assertStringIncludes(
+    approveInvoiceDisabledReason(
+      { xero_binding: { status: "DRAFT" } },
+      { stale: true, xeroAuthorised: false, noAdditionalCharge: false },
+    ),
+    "older docket revision",
+  );
+});
+
+Deno.test("a missing photo draft names the PHOTO email and the real cause", () => {
+  const noAttachments = cleanInput({
+    routes: cleanInput().routes.map((route) =>
+      route.route_kind === "photo"
+        ? { ...route, attachment_hashes: [], ready: false }
+        : route
+    ),
+  });
+  const blocker = evaluateSesMechanicalClean(noAttachments).blockers.find(
+    (item) => item.code === "route_draft_missing",
+  );
+  assert(blocker, "expected a route_draft_missing blocker");
+  assertStringIncludes(blocker!.recovery_action, "photo email");
+  assertStringIncludes(blocker!.recovery_action, "no attachments");
+  assert(!blocker!.recovery_action.includes("builder email draft"));
+  assertEquals(blocker!.evidence?.attachment_count, 0);
+});
+
+Deno.test("a family whose matrix routes no photo email is not held for one", () => {
+  const withoutPhoto = cleanInput({
+    routes: cleanInput().routes.filter((route) => route.route_kind !== "photo"),
+  });
+  // Matrix says photo_route: work_order_sender → still required.
+  assert(
+    evaluateSesMechanicalClean({ ...withoutPhoto, photo_route_applicable: true })
+      .blockers.some((item) => item.code === "route_draft_missing"),
+  );
+  // Matrix says photo_route: not_applicable → demanding one is unsatisfiable.
+  assert(
+    !evaluateSesMechanicalClean({
+      ...withoutPhoto,
+      photo_route_applicable: false,
+    }).blockers.some((item) => item.code === "route_draft_missing"),
+  );
+  // An absent field can only ever be stricter, never looser.
+  assert(
+    evaluateSesMechanicalClean(withoutPhoto).blockers.some((item) =>
+      item.code === "route_draft_missing"
+    ),
   );
 });
