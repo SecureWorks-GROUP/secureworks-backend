@@ -652,10 +652,12 @@ import {
   attachmentKeyComponent as _attachmentKeyComponent,
 } from './makesafe_wo_selection.ts'
 import {
+  applyParsedWorkOrderReferenceToExtraction as _applyParsedWorkOrderReferenceToExtraction,
   builderInstructionKeysForCard as _builderInstructionKeysForCard,
   extractBuilderWorkOrderIdentity as _extractBuilderWorkOrderIdentity,
   isSelfGeneratedMakesafeWorkOrder as _isSelfGeneratedMakesafeWorkOrder,
   mergeBuilderWorkOrderIdentity as _mergeBuilderWorkOrderIdentity,
+  parseWorkOrderReferenceFromEvidence as _parseWorkOrderReferenceFromEvidence,
 } from './makesafe_builder_work_order_identity.ts'
 import {
   correlateIntakeApprovalIdentity as _correlateIntakeApprovalIdentity,
@@ -19634,12 +19636,27 @@ async function approveIntakeDraft(client: any, body: any) {
     effectiveReportType || null,
     approvedFamilyContext,
   ))
+  const approvalDocumentTexts = parseJsonArray(extraction?.work_order_pdf_text)
+    .map((document: any) =>
+      typeof document?.text === 'string' && document.text.trim()
+        ? document.text
+        : null
+    )
+    .filter(Boolean)
+  if (
+    !approvalDocumentTexts.length &&
+    typeof extraction?.builder_email_text_for_trade === 'string' &&
+    extraction.builder_email_text_for_trade.trim()
+  ) {
+    approvalDocumentTexts.push(extraction.builder_email_text_for_trade)
+  }
   const correlatedIdentity = _correlateIntakeApprovalIdentity({
     extraction,
     approved_external_ref: approvedFields.external_ref,
     requesting_company_slug: approvedFields.requesting_company_slug,
     family: approvedJobFamily || null,
     attachment_names: _intakeIdentityAttachmentNames(attachments),
+    document_texts: approvalDocumentTexts,
   })
   if (correlatedIdentity.action === 'refuse') {
     throw new ApiError(
@@ -21057,6 +21074,28 @@ async function _reextractExtractFields(
       text: document.text,
       reason: document.reason,
     }))
+  // Intake-only typed reference fill (same conservative path as the scanner /
+  // approve gate). Never widens update_job_field; only extraction_json fields
+  // that createMakesafeJob later copies into jobs.metadata.
+  {
+    const reextractAttachmentNames = attachments.map((a: any) =>
+      a?.file_name || a?.name || null
+    )
+    const reextractDocumentTexts = [
+      builderEmailTextForTrade || bodyPreview || null,
+      combinedPdfText || pdfRawTexts.join('\n') || null,
+    ].filter((value) => String(value || '').trim())
+    extraction = _applyParsedWorkOrderReferenceToExtraction(
+      extraction,
+      _parseWorkOrderReferenceFromEvidence({
+        attachmentNames: reextractAttachmentNames,
+        documentTexts: reextractDocumentTexts,
+        externalRef: extraction.external_ref || null,
+        requestingCompanySlug: matchedCompany?.slug ||
+          extraction.requesting_company_slug || null,
+      }),
+    )
+  }
   const draftJobFamily = _classifyMakeSafeJobFamily(
     subject,
     [builderEmailTextForTrade, bodyPreview, extraction.description].filter(Boolean).join('\n'),
@@ -23715,14 +23754,33 @@ async function retiredPaidAiIntakeImplementation(client: any) {
       extraction.builder_email_received_at = msg.receivedDateTime || null
     }
     extraction.intake_source_post_ids = msg._post_id ? [msg._post_id] : []
+    // First-match extractor stays for presence/evidence checks only. Typed
+    // builder_claim_ref / builder_po_number fill is conservative: filename +
+    // labelled WO PDF/body must agree or we write nothing (never guess).
+    const attachmentNamesForIdentity = attachments.map((a: any) =>
+      a?.file_name || a?.name || null
+    )
+    const documentTextsForIdentity = [
+      builderEmailTextForTrade || bodyPreview || null,
+      combinedPdfText || pdfRawTexts.join('\n') || null,
+    ].filter((value) => String(value || '').trim())
     const builderIdentity = _extractBuilderWorkOrderIdentity({
       externalRef: extraction.external_ref || null,
       requestingCompanySlug: extraction.requesting_company_slug || null,
       subject,
-      bodyText: builderEmailTextForTrade || bodyPreview,
-      attachmentNames: attachments.map((a: any) => a?.file_name || a?.name || null),
+      bodyText: documentTextsForIdentity.join('\n'),
+      attachmentNames: attachmentNamesForIdentity,
     })
-    extraction = _mergeBuilderWorkOrderIdentity(extraction, builderIdentity)
+    const typedReferenceParse = _parseWorkOrderReferenceFromEvidence({
+      attachmentNames: attachmentNamesForIdentity,
+      documentTexts: documentTextsForIdentity,
+      externalRef: extraction.external_ref || null,
+      requestingCompanySlug: extraction.requesting_company_slug || null,
+    })
+    extraction = _applyParsedWorkOrderReferenceToExtraction(
+      extraction,
+      typedReferenceParse,
+    )
     if (extraction.external_ref) {
       missingFields = missingFields.filter((f: string) => {
         const clean = String(f || '').trim().toLowerCase().replace(/[\s-]+/g, '_')

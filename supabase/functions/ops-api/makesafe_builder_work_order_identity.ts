@@ -100,14 +100,16 @@ export interface BuilderAttachmentIdentityTokens {
 }
 
 /**
- * Enumerate every canonical WO/PO token in one attachment name. The ordinary
- * extractor intentionally returns one identity; intake approval uses this
- * stricter cardinality view to refuse a name that contains multiple candidates.
+ * Enumerate every canonical WO/PO token in one free-text scan string. Used by
+ * both the attachment-name path (after underscore normalisation) and the
+ * labelled body/PDF path. The ordinary first-match extractor is separate:
+ * intake typed-field fill uses this cardinality view so two candidates never
+ * silently collapse to one.
  */
-export function builderIdentityTokensInAttachmentName(
+export function builderIdentityTokensInScanText(
   value: string | null | undefined,
 ): BuilderAttachmentIdentityTokens {
-  const scan = attachmentNameScanText(String(value || ""));
+  const scan = String(value || "");
   const claimRefs = new Set<string>();
   const purchaseOrders = new Set<string>();
   for (
@@ -133,6 +135,45 @@ export function builderIdentityTokensInAttachmentName(
     builder_claim_refs: [...claimRefs].sort(),
     builder_po_numbers: [...purchaseOrders].sort(),
   };
+}
+
+/**
+ * Enumerate every canonical WO/PO token in one attachment name. The ordinary
+ * extractor intentionally returns one identity; intake approval uses this
+ * stricter cardinality view to refuse a name that contains multiple candidates.
+ */
+export function builderIdentityTokensInAttachmentName(
+  value: string | null | undefined,
+): BuilderAttachmentIdentityTokens {
+  return builderIdentityTokensInScanText(
+    attachmentNameScanText(String(value || "")),
+  );
+}
+
+/**
+ * Label-bounded text for identity scans of email/PDF bodies. Same filter the
+ * first-match extractor uses so terms-and-conditions prose cannot seed tokens.
+ */
+export function labelledIdentityScanText(
+  value: string | null | undefined,
+): string {
+  const bodyLines = String(value || "").split(/\r?\n/);
+  return bodyLines.flatMap((line, index) => {
+    if (
+      !/work\s*order|works?\s*order|purchase\s+order|\bP\s*O\b|claim|builder\s+ref|our\s+ref|job\s+number/i
+        .test(line)
+    ) return [];
+    // Generated builder PDFs commonly render a label and its value as two text
+    // rows. Carry the immediately following row into the same bounded identity
+    // scan; the strict builder/PO grammars still decide whether it is evidence.
+    return [line, bodyLines[index + 1] || ""];
+  }).join("\n");
+}
+
+export function builderIdentityTokensInLabelledBody(
+  value: string | null | undefined,
+): BuilderAttachmentIdentityTokens {
+  return builderIdentityTokensInScanText(labelledIdentityScanText(value));
 }
 
 /** Filename-scoped unparseable-PO check with the canonical underscore rule. */
@@ -283,23 +324,267 @@ export function extractBuilderWorkOrderIdentity(
   }
 
   if (input.bodyText) {
-    const bodyLines = String(input.bodyText).split(/\r?\n/);
-    const labelledLines = bodyLines.flatMap((line, index) => {
-      if (
-        !/work\s*order|works?\s*order|purchase\s+order|\bP\s*O\b|claim|builder\s+ref|our\s+ref|job\s+number/i
-          .test(line)
-      ) return [];
-      // Generated builder PDFs commonly render a label and its value as two text
-      // rows. Carry the immediately following row into the same bounded identity
-      // scan; the strict builder/PO grammars still decide whether it is evidence.
-      return [line, bodyLines[index + 1] || ""];
-    }).join("\n");
+    const labelledLines = labelledIdentityScanText(input.bodyText);
     if (labelledLines) scanText(labelledLines, "body_text", result);
   }
 
   if (input.subject) scanText(input.subject, "subject", result);
 
   return result;
+}
+
+export type WorkOrderReferenceParseReason =
+  | "no_tokens"
+  | "ambiguous_claim"
+  | "ambiguous_po"
+  | "source_disagreement"
+  | "unparseable_po";
+
+export interface WorkOrderReferenceEvidenceInput {
+  /** Attachment basenames only — never storage URLs. */
+  attachmentNames?: Array<string | null | undefined>;
+  /**
+   * Extracted work-order PDF text (and optionally email body). Only labelled
+   * rows are scanned, matching the first-match extractor's body boundary.
+   */
+  documentTexts?: Array<string | null | undefined>;
+  /** Already-reviewed or draft external_ref; never wins over a conflict. */
+  externalRef?: string | null;
+  requestingCompanySlug?: string | null;
+}
+
+export type WorkOrderReferenceParseResult =
+  | {
+    action: "filled";
+    identity: BuilderWorkOrderIdentity;
+    reason: null;
+  }
+  | {
+    action: "empty";
+    identity: BuilderWorkOrderIdentity;
+    reason: WorkOrderReferenceParseReason;
+    claim_candidates: string[];
+    po_candidates: string[];
+  };
+
+const EMPTY_IDENTITY = (): BuilderWorkOrderIdentity => ({
+  builder_claim_ref: null,
+  builder_work_order_number: null,
+  builder_po_number: null,
+  evidence_sources: [],
+});
+
+/**
+ * Conservative multi-source parse for intake typed fields.
+ *
+ * A wrong reference is worse than a missing one. This path therefore:
+ * - uses only the sealed builder/PO grammars (same shapes as the extractor)
+ * - refuses any multi-candidate claim or PO set (within or across sources)
+ * - refuses when labelled document text disagrees with an attachment name
+ * - writes nothing on ambiguity rather than first-match guessing
+ *
+ * The first-match extractor remains for classification/ranking; typed-field
+ * fill and approval correlation must prefer this cardinality-safe path.
+ */
+export function parseWorkOrderReferenceFromEvidence(
+  input: WorkOrderReferenceEvidenceInput,
+): WorkOrderReferenceParseResult {
+  type SourceTokens = BuilderAttachmentIdentityTokens & { source: string };
+  const sources: SourceTokens[] = [];
+
+  for (const name of input.attachmentNames || []) {
+    if (!name || isSelfGeneratedMakesafeWorkOrder(name)) continue;
+    const tokens = builderIdentityTokensInAttachmentName(name);
+    if (
+      tokens.builder_claim_refs.length || tokens.builder_po_numbers.length
+    ) {
+      sources.push({ ...tokens, source: "attachment_name" });
+    }
+    if (attachmentNameHasUnparseablePoLabel(name)) {
+      return {
+        action: "empty",
+        identity: EMPTY_IDENTITY(),
+        reason: "unparseable_po",
+        claim_candidates: tokens.builder_claim_refs,
+        po_candidates: tokens.builder_po_numbers,
+      };
+    }
+  }
+
+  for (const text of input.documentTexts || []) {
+    if (!text) continue;
+    const labelled = labelledIdentityScanText(text);
+    if (!labelled) continue;
+    if (hasUnparseablePoRemainder(labelled)) {
+      const tokens = builderIdentityTokensInScanText(labelled);
+      return {
+        action: "empty",
+        identity: EMPTY_IDENTITY(),
+        reason: "unparseable_po",
+        claim_candidates: tokens.builder_claim_refs,
+        po_candidates: tokens.builder_po_numbers,
+      };
+    }
+    const tokens = builderIdentityTokensInScanText(labelled);
+    if (
+      tokens.builder_claim_refs.length || tokens.builder_po_numbers.length
+    ) {
+      sources.push({ ...tokens, source: "work_order_pdf_text" });
+    }
+  }
+
+  if (input.externalRef) {
+    if (hasUnparseablePoRemainder(String(input.externalRef))) {
+      return {
+        action: "empty",
+        identity: EMPTY_IDENTITY(),
+        reason: "unparseable_po",
+        claim_candidates: [],
+        po_candidates: [],
+      };
+    }
+    const tokens = builderIdentityTokensInScanText(String(input.externalRef));
+    // Bare AJ job numbers only when the reviewed company is AJ.
+    if (
+      !tokens.builder_claim_refs.length &&
+      String(input.requestingCompanySlug || "").trim().toLowerCase() === "aj"
+    ) {
+      const bare = String(input.externalRef).trim().match(/^(\d{5,})$/);
+      if (bare) {
+        tokens.builder_claim_refs.push(`AJBR-${bare[1]}`);
+      }
+    }
+    if (
+      tokens.builder_claim_refs.length || tokens.builder_po_numbers.length
+    ) {
+      sources.push({ ...tokens, source: "external_ref" });
+    }
+  }
+
+  if (!sources.length) {
+    return {
+      action: "empty",
+      identity: EMPTY_IDENTITY(),
+      reason: "no_tokens",
+      claim_candidates: [],
+      po_candidates: [],
+    };
+  }
+
+  for (const source of sources) {
+    if (source.builder_claim_refs.length > 1) {
+      return {
+        action: "empty",
+        identity: EMPTY_IDENTITY(),
+        reason: "ambiguous_claim",
+        claim_candidates: source.builder_claim_refs,
+        po_candidates: source.builder_po_numbers,
+      };
+    }
+    if (source.builder_po_numbers.length > 1) {
+      return {
+        action: "empty",
+        identity: EMPTY_IDENTITY(),
+        reason: "ambiguous_po",
+        claim_candidates: source.builder_claim_refs,
+        po_candidates: source.builder_po_numbers,
+      };
+    }
+  }
+
+  const claimSet = new Set(
+    sources.flatMap((source) => source.builder_claim_refs),
+  );
+  const poSet = new Set(
+    sources.flatMap((source) => source.builder_po_numbers),
+  );
+  const claims = [...claimSet].sort();
+  const pos = [...poSet].sort();
+
+  if (claims.length > 1 || pos.length > 1) {
+    return {
+      action: "empty",
+      identity: EMPTY_IDENTITY(),
+      reason: "source_disagreement",
+      claim_candidates: claims,
+      po_candidates: pos,
+    };
+  }
+
+  const claim = claims[0] || null;
+  const po = pos[0] || null;
+  if (!claim && !po) {
+    return {
+      action: "empty",
+      identity: EMPTY_IDENTITY(),
+      reason: "no_tokens",
+      claim_candidates: [],
+      po_candidates: [],
+    };
+  }
+
+  const evidenceSources = [
+    ...new Set(
+      sources
+        .filter((source) =>
+          (claim && source.builder_claim_refs.includes(claim)) ||
+          (po && source.builder_po_numbers.includes(po))
+        )
+        .map((source) => source.source),
+    ),
+  ];
+
+  const identity: BuilderWorkOrderIdentity = {
+    builder_claim_ref: claim,
+    builder_po_number: po,
+    builder_work_order_number: claim && po
+      ? `${claim}${po}`
+      : claim,
+    evidence_sources: evidenceSources,
+  };
+  return { action: "filled", identity, reason: null };
+}
+
+/**
+ * Fill only currently-empty typed builder identity fields from a conservative
+ * parse. Already-set values (human-entered or previously parsed) always win.
+ * Provenance records that the fill was parsed, and from which source kinds.
+ */
+export function applyParsedWorkOrderReferenceToExtraction(
+  extraction: Record<string, any>,
+  parse: WorkOrderReferenceParseResult,
+): Record<string, any> {
+  if (parse.action !== "filled") {
+    const refused = { ...(extraction || {}) };
+    if (!refused.builder_work_order_identity_parse_reason) {
+      refused.builder_work_order_identity_parse_reason = parse.reason;
+    }
+    return refused;
+  }
+  const merged = mergeBuilderWorkOrderIdentity(extraction, parse.identity);
+  if (
+    parse.identity.builder_claim_ref &&
+    !extraction?.builder_claim_ref &&
+    merged.builder_claim_ref === parse.identity.builder_claim_ref
+  ) {
+    merged.builder_claim_ref_source = "parsed_work_order_evidence";
+  }
+  if (
+    parse.identity.builder_po_number &&
+    !extraction?.builder_po_number &&
+    merged.builder_po_number === parse.identity.builder_po_number
+  ) {
+    merged.builder_po_number_source = "parsed_work_order_evidence";
+  }
+  if (
+    parse.identity.builder_work_order_number &&
+    !extraction?.builder_work_order_number &&
+    merged.builder_work_order_number === parse.identity.builder_work_order_number
+  ) {
+    merged.builder_work_order_number_source = "parsed_work_order_evidence";
+  }
+  merged.builder_work_order_identity_parse_reason = null;
+  return merged;
 }
 
 /**
