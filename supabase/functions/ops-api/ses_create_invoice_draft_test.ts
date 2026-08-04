@@ -236,6 +236,39 @@ Deno.test("A: create_ses_invoice_draft mints DRAFT with api_key and no approval"
   );
 });
 
+Deno.test("A7: an unfetchable Xero PDF never fails the mint or invents one", async () => {
+  const gateway = draftGateway();
+  gateway.fetchAuthorisedPdf = () => {
+    throw new Error("Xero PDF endpoint returned 503");
+  };
+  const client = mintClient();
+  const revision = await client.from("makesafe_invoice_obligation_revisions")
+    .select("*").eq("id", OBLIGATION_ID).maybeSingle();
+  const result = await createSesInvoiceDraftAction(
+    client as any,
+    apiKeyAuth,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "skill@test",
+    },
+    gateway,
+    { fetchAllAccrecInvoices: async () => [] },
+  );
+  // The DRAFT is still minted and bound; only the PDF pointer is absent, which
+  // the Invoice tab reports as "not available yet" rather than substituting a
+  // local tax-invoice render.
+  assertEquals(result.state, "xero_draft_created");
+  assertEquals(result.draft_pdf, null);
+  assertEquals(gateway.authoriseCalls, 0);
+  const binding = (revision.data as any).xero_binding || {};
+  assertEquals(binding.xero_invoice_id, "xero-draft-1");
+  assertEquals(binding.status, "DRAFT");
+  assertEquals("pdf_object_key" in binding, false);
+  assertEquals("pdf_content_hash" in binding, false);
+});
+
 Deno.test("A2: a plain user JWT can never mint a Xero DRAFT", async () => {
   const gateway = draftGateway();
   let fetchCalled = false;
