@@ -1259,8 +1259,11 @@ diagnosis, migration scope, execution boundary, and proofs live in
 `ses_prepare_docket_revision.ts` prices `temporary_fencing` from `panel_count`,
 `base_count` and (hire basis) `star_picket_count`, and the adapter resolves each
 from `pricing.*`, `checklist.*` and six structured-source aliases. **Nothing in
-`supabase/functions/` ever WRITES any of them** — nor `hours_per_trade`. Grep
-each name and every hit is the reader or the blocker.
+`supabase/functions/` ever WRITES any of them.** Grep each name and every hit is
+the reader or the blocker. `hours_per_trade` is NOT in that set: no key of that
+name is written either, but the trade submit path writes its fourth alias
+`checklist_json.labour_hours`, so the hours fact does have a producer — see "An
+SES Labour Line Is A Floor, Not A Price You Can Set".
 
 So `pricing_evidence_missing` on a temporary-fencing card is a permanent floor,
 not a stale blocker to re-test: no rerun clears it, and it will block every
@@ -1323,13 +1326,15 @@ and a suppressed `supporting_report_pdf` to zero blockers, and its signed URL
 served the bound raw SHA-256 exactly.
 
 The same run pins the Docs Ready gate empirically. `docsReady()` returns on
-`invoiceQualifiesAsCurrentDraft` before any other term, and no agent-reachable
-route creates the linked Xero DRAFT ACCREC it needs — `prepare_ses_invoice_obligation`
-yields a local proposal with `xero_identity: null`. So a card can hold a fully
-trusted pack, zero docket blockers and still sit in `trade_report_in`; that is
-the money fence working, not a defect. Prove such a claim by running the real
-`docsReady()` against the live evidence shape and flipping only the invoice
-term, rather than reading the ladder by eye.
+`invoiceQualifiesAsCurrentDraft` before any other term, and preparing the
+obligation does not supply it — `prepare_ses_invoice_obligation` yields a local
+proposal with `xero_identity: null`. Minting the linked Xero DRAFT ACCREC is the
+separate `create_ses_invoice_draft` step, the sanctioned SES-native mint owned by
+`docs/project-knowledge/sync-layer.md`. So a card can hold a fully trusted pack,
+zero docket blockers and still sit in `trade_report_in` until that mint runs;
+that is the money fence working, not a defect. Prove such a claim by running
+the real `docsReady()` against the live evidence shape and flipping only the
+invoice term, rather than reading the ladder by eye.
 
 When you build that evidence shape, do NOT read `report_pack` off the published
 board — the key is absent from EVERY `makesafe_board` row (0 of 447 on
