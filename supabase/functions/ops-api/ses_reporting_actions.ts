@@ -348,8 +348,8 @@ export function resolveDocketRoutes(
       const invoiceNumber = boundInvoiceNumber || "pending-number";
       return {
         ...route,
-        subject:
-          `${reference || "Make-safe"} - Xero draft ${invoiceNumber}`.trim(),
+        subject: `${reference || "Make-safe"} - Xero draft ${invoiceNumber}`
+          .trim(),
         body:
           `Xero DRAFT invoice ${invoiceNumber} is bound to this obligation revision. The builder-facing Xero PDF attaches when the draft is authorised. No release is approved yet.`,
         attachment_hashes: [...new Set(supportHashes)],
@@ -513,7 +513,7 @@ export async function loadSesCockpitDocket(
   }
   const obligation = obligationResponse.data || null;
   const artifactsResponse = await client.from("makesafe_docket_artifacts")
-    .select("role,object_key,media_type,content_hash,size_bytes,metadata")
+    .select("id,role,object_key,media_type,content_hash,size_bytes,metadata")
     .eq("revision_id", docket.id)
     .order("object_key");
   if (artifactsResponse.error) {
@@ -609,7 +609,9 @@ export async function loadSesCockpitDocket(
         ? { total: Number(rawBinding.total) }
         : {}),
     };
-    if (xeroBinding.total === undefined || !Number.isFinite(xeroBinding.total)) {
+    if (
+      xeroBinding.total === undefined || !Number.isFinite(xeroBinding.total)
+    ) {
       // Enrich total for the Invoice tab when older DRAFT binds omitted it.
       // Prefer the local Xero mirror (authoritative issued total), then the
       // obligation proposal totals (pre-authorise DRAFT identity display).
@@ -1488,7 +1490,7 @@ export async function getSesReviewablePackAction(
   const physicalReview = reviewFamily === "physical_makesafe" ||
     reviewFamily === "temporary_fencing";
   const artifactsResponse = await client.from("makesafe_docket_artifacts")
-    .select("role,object_key,media_type,content_hash,size_bytes,metadata")
+    .select("id,role,object_key,media_type,content_hash,size_bytes,metadata")
     .eq("revision_id", docketRevisionId)
     .order("object_key");
   if (artifactsResponse.error) {

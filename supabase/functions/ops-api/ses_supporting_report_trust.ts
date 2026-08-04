@@ -9,6 +9,8 @@ export type SesSupportingReportTrust =
   | { trusted: true }
   | { trusted: false; reason: string };
 
+export const SES_SUPPORTING_REPORT_MAX_BYTES = 8 * 1024 * 1024;
+
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === "object"
     ? value as Record<string, unknown>
@@ -120,7 +122,10 @@ export function inspectSesSupportingReportProof(
     return { trusted: false, reason: "independent_completeness_proof_missing" };
   }
   const size = Number(artifact.size_bytes);
-  if (!Number.isSafeInteger(size) || size <= 0 || size > 8 * 1024 * 1024) {
+  if (
+    !Number.isSafeInteger(size) || size <= 0 ||
+    size > SES_SUPPORTING_REPORT_MAX_BYTES
+  ) {
     return { trusted: false, reason: "pdf_size_budget_invalid" };
   }
   return { trusted: true };

@@ -1345,8 +1345,20 @@ current_cycle_curated_makesafe_report`) requires a bind-time
 `independent_completeness_proof_missing`. Content-hash self-match and docket
 lineage alone must never establish completeness; restorable bytes (Tuart Hill
 `SWMS-261015` / raw `933d83bd…`) are not a complete pack. Sibling-bundle
-evidence is a different independence model and is not gated on that hash.
-Do not relax this to bulk-pass incomplete packs.
+evidence is a different independence model and is not gated on that hash, at
+the trust function OR at selection: a sibling bundle is evidence from another
+job, outside the pack being certified, so it cannot self-vouch. Check 8 fails
+on a pack certifying its OWN completeness, never on cross-job evidence.
+`physicalReportSourceForCycle` mirrors that scoping and bounds the 8 MB budget
+itself (`SES_SUPPORTING_REPORT_MAX_BYTES`), because the completeness refusal is
+raised before the size check. A `report_input_hash` recovered from the DOCUMENT
+rather than artifact metadata only counts when the artifact's own raw SHA-256
+equals the document's `curated_source_expected_raw_sha256` /
+`report_render_hash` — otherwise a re-bind's coordinate stamps stale, thinner
+bytes (Maylands `SWMS-261017`). The trust guard is only live where the read
+selects `id`; keep `id` on every `makesafe_docket_artifacts` select that feeds
+`inspectSesSupportingReportProof`. Do not relax this to bulk-pass incomplete
+packs.
 
 The same run pins the Docs Ready gate empirically. `docsReady()` returns on
 `invoiceQualifiesAsCurrentDraft` before any other term, and preparing the
