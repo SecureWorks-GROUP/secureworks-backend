@@ -92,6 +92,7 @@ function reviewPackClient(
         select: () => query,
         eq: () => query,
         order: () => query,
+        limit: () => query,
         maybeSingle: () => {
           single = true;
           return query;

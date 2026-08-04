@@ -316,6 +316,12 @@ export interface SesCockpitDocket {
     pdf_object_key?: string;
     pdf_size_bytes?: number;
   } | null;
+  /**
+   * Proof that the REAL Xero PDF can be shown right now: an AUTHORISED docket
+   * artifact, or a successful live DRAFT re-fetch. Absent means "not proved",
+   * which reads as unavailable — never claim a document from a stored hash.
+   */
+  xero_invoice_pdf_available?: boolean;
   local_invoice_proposal: Record<string, unknown> | null;
   work_order: Record<string, unknown> | null;
   family_evidence: Record<string, unknown>;
@@ -413,8 +419,10 @@ export function buildSesCockpitView(
         // When a live Xero draft/invoice is bound, surface that identity as the
         // bill. The local proposal stays available as internal pre-Xero state
         // but must not be presented alone as though it were the invoice.
-        // pdf_content_hash is the stored real Xero PDF pointer (mint-time);
-        // the pack read signs it. Never treat the proposal table as the bill.
+        // pdf_content_hash is the stored real Xero PDF pointer (mint-time), and
+        // a pointer is not a document: availability comes from the same
+        // artifact/live-fetch projection the pack read uses, so this tab and
+        // the pack agree. Never treat the proposal table as the bill.
         bound_invoice: docket.xero_binding
           ? {
             xero_invoice_id: docket.xero_binding.xero_invoice_id,
@@ -422,7 +430,7 @@ export function buildSesCockpitView(
             status: docket.xero_binding.status,
             total: docket.xero_binding.total ?? null,
             pdf_content_hash: docket.xero_binding.pdf_content_hash ?? null,
-            pdf_available: !!docket.xero_binding.pdf_content_hash,
+            pdf_available: docket.xero_invoice_pdf_available === true,
           }
           : null,
         xero: docket.xero_binding,

@@ -304,7 +304,11 @@ Audit-grade, family-complete non-dry revisions enter the append-only
   the exact docket metadata, private artifact URLs valid for 300 seconds, and
   the complete append-only audit trail. The URL is rejected if the artifact is
   outside the private SES docket bucket or the review metadata no longer
-  matches the docket revision.
+  matches the docket revision. On a card with a bound Xero DRAFT the
+  `xero_invoice_pdf` artifact is replaced by the re-fetched real Xero document
+  (or reported unavailable) and the response carries an `invoice_pdf`
+  projection — that contract is owned by
+  `data/ses-draft-invoice-create-409-v1/report.md`.
 - `POST ops-api?action=sign_off_ses_docket` with
   `{"docket_revision_id":"<uuid>","expected_output_content_hash":"sha256:<64 lowercase hex>"}`
   records `signed_off` only for the displayed current hash. Only an identified
