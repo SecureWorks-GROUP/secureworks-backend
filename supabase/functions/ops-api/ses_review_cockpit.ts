@@ -2,6 +2,10 @@ import { sesSha256, stableUuidFromSha256 } from "./ses_docket_envelope.ts";
 import type { SesPricingDisposition } from "./makesafe_invoice_obligation.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
 import { SES_ASSESSMENT_RECIPE_VERSION } from "./ses_family_matrix.ts";
+import {
+  isAjsBuilderKey,
+  sesReleaseRouteOrder,
+} from "./ses_release_route_shape.ts";
 
 export const SES_REVIEW_SECTION_ORDER = [
   "job_story",
@@ -15,7 +19,8 @@ export const SES_REVIEW_SECTION_ORDER = [
   "decision_controls",
 ] as const;
 
-export type SesRouteKind = "report" | "photo" | "invoice";
+export type SesRouteKind = "report" | "photo" | "invoice" | "report_invoice";
+/** Universal three-route order (MLB and non-AJS builders). */
 export const SES_ROUTE_ORDER: SesRouteKind[] = ["report", "photo", "invoice"];
 
 export interface SesReviewRoute {
@@ -85,6 +90,8 @@ export interface SesCleanInput {
   roof_report_required: boolean;
   roof_report_filled: boolean;
   report_only: boolean;
+  /** Builder key from the family matrix / docket classification (AJS, AJBR, MLB, …). */
+  builder_key?: string | null;
 }
 
 export interface SesCleanCheck {
@@ -109,17 +116,30 @@ function check(
 }
 
 /**
+ * Known sealed route kinds in a stable display/send order. Universal three-route
+ * cards use report/photo/invoice; AJS/AJBR use report_invoice then photo. The
+ * universal `SES_ROUTE_ORDER` stays three-wide so requirement checks do not
+ * demand the AJS combined route on every builder.
+ */
+const SES_ROUTE_DISPLAY_ORDER: string[] = [
+  "report",
+  "report_invoice",
+  "photo",
+  "invoice",
+];
+
+/**
  * The route kinds actually drafted on this pack, in send order. Unknown kinds
  * (a newly sealed route shape) are appended rather than dropped, so a route the
  * Captain would really send can never be invisible in the copy below.
  */
 export function sesRouteKindsOnPack(routes: SesReviewRoute[]): string[] {
   const present = routes.map((route) => String(route.route_kind));
-  const ordered = (SES_ROUTE_ORDER as string[]).filter((kind) =>
+  const ordered = SES_ROUTE_DISPLAY_ORDER.filter((kind) =>
     present.includes(kind)
   );
   const extra = present.filter((kind) =>
-    !(SES_ROUTE_ORDER as string[]).includes(kind)
+    !SES_ROUTE_DISPLAY_ORDER.includes(kind)
   );
   return [...ordered, ...new Set(extra)];
 }
@@ -149,9 +169,13 @@ export function describeSesSendItPlan(routes: SesReviewRoute[]): string {
 export function requiredSesRouteKinds(
   family: string,
   photoRouteApplicable: boolean,
+  builderKey?: string | null,
 ): SesRouteKind[] {
   if (family === "assessment_quote") return ["invoice"];
-  return SES_ROUTE_ORDER.filter((kind) =>
+  // AJS/AJBR: report_invoice then photo. Everyone else: report/photo/invoice.
+  // photo_route_applicable still drops the photo email on report-only families
+  // so the cockpit does not invent an unsatisfiable HOLD (PR 563 honesty).
+  return sesReleaseRouteOrder(builderKey).filter((kind) =>
     kind !== "photo" || photoRouteApplicable
   );
 }
@@ -346,10 +370,18 @@ function missingRouteRefusals(
   routes: SesReviewRoute[],
   family: string,
   photoRouteApplicable: boolean,
+  builderKey?: string | null,
 ): SesRefusal[] {
   const byKind = new Map(routes.map((route) => [route.route_kind, route]));
   const refusals: SesRefusal[] = [];
-  const requiredRoutes = requiredSesRouteKinds(family, photoRouteApplicable);
+  // Assessment stays invoice-only. AJS/AJBR use the two-email shape
+  // (report+invoice combined, photo). Everyone else keeps three routes.
+  // photoRouteApplicable keeps report-only families from demanding a photo.
+  const requiredRoutes = requiredSesRouteKinds(
+    family,
+    photoRouteApplicable,
+    builderKey,
+  );
   for (const kind of requiredRoutes) {
     const route = byKind.get(kind);
     if (!route || !route.ready || !route.subject.trim() || !route.body.trim()) {
@@ -407,6 +439,7 @@ export function evaluateSesMechanicalClean(
     input.routes,
     input.family,
     input.photo_route_applicable !== false,
+    input.builder_key,
   );
   const checks: SesCleanCheck[] = [
     check(
@@ -735,6 +768,8 @@ export function buildSesCockpitView(
       send_it: {
         enabled: sendIt,
         label: "SEND IT",
+        // Narrate the real pack (563 honesty). AJS report_invoice + photo packs
+        // read as two routes; MLB three-route packs still read as three.
         plan: describeSesSendItPlan(docket.routes),
         disabled_reason: sendIt ? null : sendItDisabledReason(verdict, {
           stale,
@@ -771,6 +806,8 @@ export async function buildSesReleaseRevision(args: {
   members: SesReleaseMember[];
   routes: SesReviewRoute[];
   created_by: string;
+  /** When set, selects AJS two-route vs universal three-route order. */
+  builder_key?: string | null;
 }): Promise<SesReleaseRevisionPlan> {
   if (args.members.length === 0) {
     throw new TypeError("release members required");
@@ -778,9 +815,14 @@ export async function buildSesReleaseRevision(args: {
   const routeByKind = new Map(
     args.routes.map((route) => [route.route_kind, route]),
   );
-  const orderedRoutes = SES_ROUTE_ORDER.map((kind) => routeByKind.get(kind));
+  const requiredOrder = sesReleaseRouteOrder(args.builder_key);
+  const orderedRoutes = requiredOrder.map((kind) => routeByKind.get(kind));
   if (orderedRoutes.some((route) => !route)) {
-    throw new TypeError("report, photo, and invoice routes are all required");
+    throw new TypeError(
+      isAjsBuilderKey(args.builder_key)
+        ? "AJS report_invoice and photo routes are both required"
+        : "report, photo, and invoice routes are all required",
+    );
   }
   const members = args.members.map((member, ordinal) => ({
     ordinal,

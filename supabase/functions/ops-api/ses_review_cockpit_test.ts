@@ -421,10 +421,10 @@ Deno.test("SEND IT copy is generated from the real route list, not hardcoded to 
   assertStringIncludes(describeSesSendItPlan([]), "nothing to send");
 });
 
-Deno.test("a route kind the send order does not know is still narrated, never dropped", () => {
+Deno.test("AJS report_invoice + photo pack narrates two routes in send order", () => {
   const routes = [
     {
-      route_kind: "report_invoice" as unknown as "report",
+      route_kind: "report_invoice" as const,
       recipients: ["workorders@ajs.build"],
       subject: "s",
       body: "b",
@@ -433,10 +433,29 @@ Deno.test("a route kind the send order does not know is still narrated, never dr
     },
     ...cleanInput().routes.filter((route) => route.route_kind === "photo"),
   ];
-  assertEquals(sesRouteKindsOnPack(routes), ["photo", "report_invoice"]);
+  assertEquals(sesRouteKindsOnPack(routes), ["report_invoice", "photo"]);
   assertStringIncludes(
     describeSesSendItPlan(routes),
-    "photo and report invoice routes (2)",
+    "report invoice and photo routes (2)",
+  );
+});
+
+Deno.test("a route kind the send order does not know is still narrated, never dropped", () => {
+  const routes = [
+    {
+      route_kind: "future_route" as unknown as "report",
+      recipients: ["ops@example.com"],
+      subject: "s",
+      body: "b",
+      attachment_hashes: ["sha256:aa"],
+      ready: true,
+    },
+    ...cleanInput().routes.filter((route) => route.route_kind === "photo"),
+  ];
+  assertEquals(sesRouteKindsOnPack(routes), ["photo", "future_route"]);
+  assertStringIncludes(
+    describeSesSendItPlan(routes),
+    "photo and future route routes (2)",
   );
 });
 

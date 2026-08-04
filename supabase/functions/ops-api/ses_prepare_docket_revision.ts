@@ -1447,6 +1447,37 @@ function buildEmailDrafts(
   if (row.family !== "ordinary_roof_portal" && !reportFile) {
     return {};
   }
+
+  // AJS/AJBR two-email shape (Captain 2026-08-04): combined report+invoice, then photos.
+  // MLB and other builders keep the three-email split below.
+  const ajs = row.builder_key === "AJS" || row.builder_key === "AJBR";
+  if (ajs) {
+    const drafts: Record<string, string> = {};
+    if (reportFile) {
+      drafts.REPORT_EMAIL_DRAFT = draftEmail({
+        to: [invoiceTo || "workorders@ajs.build", reportTo].filter(Boolean).join(", "),
+        cc: "ses@secureworkswa.com.au",
+        subject: `${ref} - report and invoice`,
+        body:
+          `Draft only. Please find the prepared ${
+            row.family.replaceAll("_", " ")
+          } report and invoice for ${address || "the instructed property"}. The real Xero invoice PDF attaches when authorised.`,
+        attachments: [reportFile, ...invoiceAttachments.filter((name) => name !== reportFile)],
+      });
+    }
+    if (row.photo_route === "work_order_sender" && photoFiles.length > 0) {
+      drafts.PHOTO_EMAIL_DRAFT = draftEmail({
+        to: [invoiceTo || "workorders@ajs.build", reportTo].filter(Boolean).join(", "),
+        cc: "ses@secureworkswa.com.au",
+        subject: `Photo Evidence - ${ref}`,
+        body:
+          "Draft only. The complete, ordered original photo set is listed on the docket.",
+        attachments: photoFiles,
+      });
+    }
+    return drafts;
+  }
+
   const invoice = draftEmail({
     to: invoiceTo,
     cc: "finance@secureworkswa.com.au",
