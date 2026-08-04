@@ -6444,7 +6444,7 @@ if (import.meta.main) serve(async (req: Request) => {
             state: 'refused',
             code: 'legacy_free_invoice_path_retired',
             fact: 'This legacy action can create a Xero DRAFT without the current U6 invoice approval.',
-            recovery_action: 'Prepare the U4 docket, prepare_ses_invoice_obligation, then use APPROVE INVOICE and execute_ses_invoice_revision.',
+            recovery_action: 'Prepare the U4 docket, then use the SES-native sequence: prepare_ses_invoice_obligation, create_ses_invoice_draft to mint the Xero DRAFT, Captain APPROVE INVOICE (approve_ses_invoice_revision), execute_ses_invoice_revision to authorise the approved revision, then the release path.',
           },
         }, 410)
       case 'makesafe_render_report':
