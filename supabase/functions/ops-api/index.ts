@@ -34479,6 +34479,17 @@ async function assertCurrentWikiReportInput(
   return { job, inputHash, supplied: normalizedSupplied }
 }
 
+/**
+ * The exact job_media columns the curated bind's photo-source accounting reads.
+ *
+ * Pinned as a constant so a regression can assert the set rather than trusting
+ * a mocked fixture. Every name must exist on the LIVE job_media table — an
+ * enumerated select naming a phantom column is a PostgREST 42703, not an empty
+ * result, and it takes the whole bind down (see the call site).
+ */
+export const CURATED_BIND_JOB_MEDIA_COLUMNS =
+  'id,storage_url,type,phase,attendance_cycle_id,cycle_attribution,created_at'
+
 async function assertCurrentWikiSourceEvidence(
   client: any,
   jobId: string,
@@ -34491,8 +34502,18 @@ async function assertCurrentWikiSourceEvidence(
       .select('id,status,checklist_json,attendance_cycle_id,cycle_attribution,cycle_number')
       .eq('job_id', jobId)
       .order('created_at', { ascending: false }),
+    // Every column here EXISTS on job_media — verified against the live
+    // schema, and pinned by `curated bind job_media select names only real
+    // columns` in makesafe_render_report_action_test.ts.
+    //
+    // This select previously also named `cycle_number`, `sort_order` and
+    // `order_index`. None of the three exist on job_media in ANY environment
+    // (no migration declares them), so PostgREST answered 42703, the client
+    // set `error`, and EVERY curated bind that reached the photo step refused
+    // `curated_bind_source_evidence_read_failed`. The mocked suite could not
+    // see it: fixtures happily supplied columns production does not have.
     client.from('job_media')
-      .select('id,storage_url,type,phase,attendance_cycle_id,cycle_attribution,cycle_number,created_at,sort_order,order_index')
+      .select(CURATED_BIND_JOB_MEDIA_COLUMNS)
       .eq('job_id', jobId)
       .order('created_at'),
   ])
@@ -34555,10 +34576,18 @@ async function assertCurrentWikiSourceEvidence(
     return type.includes('photo') || type.includes('image') ||
       phase.includes('completion') || phase.includes('after')
   }
-  // Match assembler ordering (sort_order/order_index then id), not created_at.
+  // Photo evidence order is `created_at` ascending, with `id` only as a stable
+  // tiebreak for equal timestamps — the same order the media read above already
+  // asks PostgREST for.
+  //
+  // The previous comparator claimed to "match assembler ordering
+  // (sort_order/order_index then id)". It did not: neither column exists on
+  // job_media, so every row scored 0 and the sequence collapsed to id order.
+  // Verified against the served Munster artifact — its nine rendered photo
+  // pages match the current-cycle media in created_at order exactly, and NOT
+  // in id order.
   const mediaOrder = (left: any, right: any) =>
-    Number(left?.sort_order ?? left?.order_index ?? 0) -
-      Number(right?.sort_order ?? right?.order_index ?? 0) ||
+    String(left?.created_at || '').localeCompare(String(right?.created_at || '')) ||
     String(left?.id || '').localeCompare(String(right?.id || ''))
   const applicable = currentMedia.filter(photoIsApplicable).slice().sort(mediaOrder)
   const excluded = currentMedia.filter((item: any) => !photoIsApplicable(item))

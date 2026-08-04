@@ -11,6 +11,7 @@ import {
   ApiError,
   bertramProtectedReportRepairPlan,
   canonicalMakesafeReportJob,
+  CURATED_BIND_JOB_MEDIA_COLUMNS,
 } from "./index.ts";
 import {
   canonicalCurrentWikiReportHashPayload,
@@ -901,4 +902,228 @@ Deno.test("canonical report adapter owns jobs.client_name -> contact", async () 
     null,
   );
   assertEquals(absent.contact, "");
+});
+
+// ── job_media schema/order regressions ──────────────────────────────────────
+// A mocked client answers any select, so the suite could not see that the bind
+// asked job_media for `cycle_number`, `sort_order` and `order_index` — none of
+// which exist on that table. PostgREST answered 42703 and every production bind
+// refused `curated_bind_source_evidence_read_failed`. These three tests pin the
+// column set, prove a schema-faithful client still binds, and pin the order.
+
+/**
+ * The LIVE public.job_media columns, read from information_schema on
+ * 2026-08-04. Deliberately duplicated here so the test fails when the bind
+ * asks for a column the database does not have.
+ */
+const LIVE_JOB_MEDIA_COLUMNS = [
+  "attendance_cycle_id",
+  "created_at",
+  "cycle_attribution",
+  "id",
+  "job_id",
+  "label",
+  "lat",
+  "lng",
+  "makesafe_content_hash",
+  "makesafe_fact_version",
+  "notes",
+  "phase",
+  "po_id",
+  "storage_url",
+  "taken_at",
+  "thumbnail_url",
+  "type",
+  "uploaded_by",
+];
+
+Deno.test("curated bind job_media select names only real columns", () => {
+  const selected = CURATED_BIND_JOB_MEDIA_COLUMNS.split(",").map((name) =>
+    name.trim()
+  );
+  assertEquals(selected.length > 0, true);
+  const phantom = selected.filter((name) =>
+    !LIVE_JOB_MEDIA_COLUMNS.includes(name)
+  );
+  assertEquals(
+    phantom,
+    [],
+    `job_media select names columns that do not exist: ${phantom.join(", ")}`,
+  );
+  // The exact three that took production down — named so a reviewer sees why.
+  for (const absent of ["cycle_number", "sort_order", "order_index"]) {
+    assertEquals(
+      selected.includes(absent),
+      false,
+      `job_media has no ${absent}; selecting it is a PostgREST 42703`,
+    );
+  }
+});
+
+Deno.test("curated bind survives a client that rejects unknown job_media columns", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nschema faithful fixture");
+  const { client } = bindClient(bytes);
+  // Wrap the stub so job_media behaves like PostgREST: an unknown column is a
+  // 42703 error, not a silently answered row.
+  const inner = client.from.bind(client);
+  const rejected: string[] = [];
+  client.from = (table: string) => {
+    const query = inner(table);
+    if (table !== "job_media") return query;
+    const select = query.select.bind(query);
+    query.select = (columns?: string) => {
+      for (const name of String(columns || "").split(",")) {
+        const column = name.trim();
+        if (column && column !== "*" && !LIVE_JOB_MEDIA_COLUMNS.includes(column)) {
+          rejected.push(column);
+        }
+      }
+      return select(columns);
+    };
+    const then = query.then.bind(query);
+    query.then = (resolve: (value: unknown) => unknown) =>
+      rejected.length
+        ? Promise.resolve({
+          data: null,
+          error: {
+            code: "42703",
+            message: `column job_media.${rejected[0]} does not exist`,
+          },
+        }).then(resolve)
+        : then(resolve);
+    return query;
+  };
+  const body = await bindBody(bytes);
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+  assertEquals(rejected, []);
+  assertEquals(result.success, true);
+  assertEquals(result.cycle_attribution, "bound");
+});
+
+Deno.test("curated bind photo accounting orders by created_at, then id", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nordered photo fixture");
+  // Deliberately adversarial: id order and created_at order fully disagree, and
+  // two rows share a timestamp so the id tiebreak is exercised as well.
+  //   created_at: zzz, bbb, mmm, aaa      id: aaa, bbb, mmm, zzz
+  const media = [
+    { id: "aaa", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:07Z", storage_url: "https://storage.example.test/a.jpg" },
+    { id: "zzz", type: "photo", phase: "completion", created_at: "2026-07-30T02:23:53Z", storage_url: "https://storage.example.test/z.jpg" },
+    { id: "mmm", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:01Z", storage_url: "https://storage.example.test/m.jpg" },
+    { id: "bbb", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:01Z", storage_url: "https://storage.example.test/b.jpg" },
+  ];
+  const expected = ["zzz", "bbb", "mmm", "aaa"];
+  const photoBytes = new TextEncoder().encode("photo-bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const { client } = bindClient(bytes, {
+    media,
+    serviceReport: {
+      id: SERVICE_REPORT_ID,
+      status: "submitted",
+      checklist_json: { materials_used: [] },
+      attendance_cycle_id: "cycle-fixture",
+      cycle_attribution: "bound",
+      cycle_number: 1,
+    },
+  });
+  const job = {
+    ...currentReportJob(),
+    photos: expected.map((id) => ({
+      evidence_id: id,
+      caption: `Site photo ${id}`,
+      content_sha256: contentHash,
+    })),
+    photo_evidence: {
+      source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
+      completeness_verified: true,
+      source_count: 4,
+      applicable_count: 4,
+      selected_count: 4,
+      applicable_ids: expected,
+      selected_ids: expected,
+      excluded: [],
+      rejected: [],
+    },
+  };
+  const body = {
+    ...(await bindBody(bytes)),
+    report_job: job,
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (input: any) =>
+    Promise.resolve(
+      new Response(
+        String(input).endsWith(".pdf") ? bytes : photoBytes,
+        { status: 200 },
+      ),
+    ) as any;
+  try {
+    const result = await _bindCurrentCycleCuratedMakesafeReportForTest(
+      client,
+      body,
+      FIXTURE_ACTOR,
+    );
+    assertEquals(result.success, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  // The id-only comparator this replaced would have demanded aaa, bbb, mmm,
+  // zzz. That payload is internally self-consistent, so only the source-order
+  // comparison can catch it — it must now be refused.
+  const idOrdered = ["aaa", "bbb", "mmm", "zzz"];
+  assertEquals(canonicalSesJson(idOrdered) === canonicalSesJson(expected), false);
+  const { client: second } = bindClient(bytes, {
+    media,
+    serviceReport: {
+      id: SERVICE_REPORT_ID,
+      status: "submitted",
+      checklist_json: { materials_used: [] },
+      attendance_cycle_id: "cycle-fixture",
+      cycle_attribution: "bound",
+      cycle_number: 1,
+    },
+  });
+  globalThis.fetch = (input: any) =>
+    Promise.resolve(
+      new Response(
+        String(input).endsWith(".pdf") ? bytes : photoBytes,
+        { status: 200 },
+      ),
+    ) as any;
+  try {
+    const error = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(second, {
+          ...body,
+          report_job: {
+            ...job,
+            photos: idOrdered.map((id) => ({
+              evidence_id: id,
+              caption: `Site photo ${id}`,
+              content_sha256: contentHash,
+            })),
+            photo_evidence: {
+              ...job.photo_evidence,
+              applicable_ids: idOrdered,
+              selected_ids: idOrdered,
+            },
+          },
+        }, FIXTURE_ACTOR),
+      ApiError,
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "photo_evidence does not completely account",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
