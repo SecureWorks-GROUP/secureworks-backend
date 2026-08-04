@@ -48,6 +48,8 @@ const FACTS = {
     "No current Captain Docs Ready signoff exists for the exact docket bytes.",
   invoice_approval_missing:
     "No current human APPROVE INVOICE decision exists for this exact invoice revision.",
+  invoice_approval_unreadable:
+    "The invoice approval and Xero binding records could not be read, so the invoice decision cannot be proven either way.",
   graph_outcome_unknown:
     "Microsoft Graph accepted or may have accepted the message, but its exact sent outcome is not yet proven.",
   xero_outcome_unknown:

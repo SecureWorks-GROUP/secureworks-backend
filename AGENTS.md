@@ -786,7 +786,11 @@ docket is `stage=invoice_bound` **and** the bound obligation's
 `xero_binding.status` is AUTHORISED (case-insensitive) — AUTHORISED is
 downstream proof that `execute_ses_invoice_revision` already ran under the
 approval gate. Non-AUTHORISED still refuses. Docs Ready signoff, recipients,
-readiness, and the money fence are untouched. Tests:
+readiness, and the money fence are untouched. Neither read may degrade into that
+business refusal: `sesReleaseInvoiceApprovalReadRefusal` turns a PostgREST fault
+on the approval read, or a fault/absent row on the obligation read, into the
+distinct `invoice_approval_unreadable`, so a read fault never tells an operator
+to re-approve money that is already AUTHORISED. Tests:
 `ses_release_invoice_approval_gate_test.ts`.
 
 ## `spine_missing_lineage` Is Almost Never About Lineage

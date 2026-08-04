@@ -4,8 +4,14 @@
  * AUTHORISED obligation binding is downstream proof of human APPROVE INVOICE;
  * non-AUTHORISED still requires the approval row.
  */
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { sesReleaseInvoiceApprovalSatisfied } from "./ses_reporting_actions.ts";
+import {
+  assertEquals,
+  assertStringIncludes,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  sesReleaseInvoiceApprovalReadRefusal,
+  sesReleaseInvoiceApprovalSatisfied,
+} from "./ses_reporting_actions.ts";
 
 Deno.test(
   "invoice_bound + AUTHORISED obligation satisfies SEND IT without approval row",
@@ -65,6 +71,54 @@ Deno.test(
         hasInvoiceApprovalRow: false,
       }),
       false,
+    );
+  },
+);
+
+Deno.test(
+  "a failed approval read refuses as unreadable, never as approval missing",
+  () => {
+    const refusal = sesReleaseInvoiceApprovalReadRefusal("approval", {
+      data: null,
+      error: { message: "column does not exist" },
+    });
+    assertEquals(refusal?.code, "invoice_approval_unreadable");
+    assertStringIncludes(refusal?.fact || "", "APPROVE INVOICE record");
+    assertStringIncludes(refusal?.fact || "", "column does not exist");
+    // An approval read that cleanly returned no row is the bookkeeping gap this
+    // gate exists for, not a fault.
+    assertEquals(
+      sesReleaseInvoiceApprovalReadRefusal("approval", {
+        data: null,
+        error: null,
+      }),
+      null,
+    );
+  },
+);
+
+Deno.test(
+  "the AUTHORISED pass is only granted on an obligation read that returned",
+  () => {
+    for (
+      const response of [
+        { data: null, error: { message: "timeout" } },
+        { data: null, error: null },
+      ]
+    ) {
+      const refusal = sesReleaseInvoiceApprovalReadRefusal(
+        "obligation",
+        response,
+      );
+      assertEquals(refusal?.code, "invoice_approval_unreadable");
+      assertStringIncludes(refusal?.fact || "", "Xero binding");
+    }
+    assertEquals(
+      sesReleaseInvoiceApprovalReadRefusal("obligation", {
+        data: { xero_binding: { status: "AUTHORISED" } },
+        error: null,
+      }),
+      null,
     );
   },
 );
