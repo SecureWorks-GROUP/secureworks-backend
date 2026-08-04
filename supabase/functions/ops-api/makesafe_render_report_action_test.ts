@@ -459,6 +459,119 @@ Deno.test("bind establishes current-cycle attribution on a newly attached visibl
   ]);
 });
 
+Deno.test(
+  "trusted content supersession rebinds when all gates pass and snapshot differs",
+  async () => {
+    // First bind seals a durable curated identity on the document.
+    const priorBytes = new TextEncoder().encode(
+      "%PDF-1.7\nprior asbestos misstatement fixture",
+    );
+    const first = bindClient(priorBytes);
+    const sealedBody = {
+      ...(await bindBody(priorBytes)),
+      curation_revision_id: "ses-curated-report:fixture:prior",
+      curation_artifact_id: "ses-curated-report-artifact:prior",
+    };
+    await withStoredPdf(
+      priorBytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          first.client,
+          sealedBody,
+          FIXTURE_ACTOR,
+        ),
+    );
+    const trustedPrior = {
+      ...(first.document.data_snapshot_json as Record<string, unknown>),
+    };
+    assertEquals(
+      trustedPrior.curated_source_kind,
+      "durable_curated_revision",
+    );
+
+    // Corrected artifact on the same document: all gates still pass; snapshot
+    // differs (material correction). Prior durable identity is archived on the
+    // audit event, not merged forward.
+    const correctedBytes = new TextEncoder().encode(
+      "%PDF-1.7\ncorrected hardie fibre cement fixture",
+    );
+    const correctedJob = currentReportJob({
+      findings:
+        "Storm and wind cracked the Hardie fibre cement (non-asbestos) boundary fencing.",
+      works:
+        "We propped up the Hardie fibre cement fence using star pickets pending replacement.",
+    });
+    const { client, document, mutations } = bindClient(correctedBytes, {
+      prior: trustedPrior,
+      documentCycleId: "cycle-fixture",
+      documentCycleAttribution: "bound",
+    });
+    document.version = 2;
+    const correctedBody = {
+      job_id: "job-fixture",
+      document_id: "document-fixture",
+      pdf_base64: pdfBase64(correctedBytes),
+      pdf_sha256: `sha256:${await sha(correctedBytes)}`,
+      report_job: correctedJob,
+      curation_revision_id: "ses-curated-report:fixture:hardie-correction",
+      curation_artifact_id: "ses-curated-report-artifact:hardie-correction",
+    };
+    const result = await withStoredPdf(
+      correctedBytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          correctedBody,
+          FIXTURE_ACTOR,
+        ),
+    );
+    assertEquals(result.success, true);
+    assertEquals(result.skipped, false);
+    assertEquals(result.writes, 2);
+    assertEquals((result as any).supersedes_prior_bind, true);
+    assertEquals(
+      document.data_snapshot_json.curated_source_kind,
+      "durable_curated_revision",
+    );
+    assertEquals(
+      document.data_snapshot_json.curated_source_revision_id,
+      "ses-curated-report:fixture:hardie-correction",
+    );
+    assertEquals(
+      document.data_snapshot_json.report_render_hash,
+      await sha(correctedBytes),
+    );
+    assertStringIncludes(
+      String(
+        (document.data_snapshot_json.report_scope_narratives as string[])[1] ||
+          "",
+      ),
+      "Hardie fibre cement",
+    );
+    const event = mutations.find((item) => item.table === "job_events");
+    assertEquals(
+      (event?.values.detail_json as any)?.supersedes_prior_bind,
+      true,
+    );
+    assertEquals(
+      (event?.values.detail_json as any)?.prior_data_snapshot_json,
+      trustedPrior,
+    );
+    // Idempotent replay of the same corrected snapshot skips.
+    const replay = await withStoredPdf(
+      correctedBytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          correctedBody,
+          FIXTURE_ACTOR,
+        ),
+    );
+    assertEquals(replay.skipped, true);
+    assertEquals(replay.writes, 0);
+  },
+);
+
 Deno.test("exact trusted snapshot with drifted cycle columns repairs cycle only", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\ncycle repair fixture");
   const body = await bindBody(bytes);

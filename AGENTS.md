@@ -1358,6 +1358,21 @@ required. A card with ZERO rows in that table therefore still has
 its legacy `!pack` branch and invents a second, non-existent blocker — which
 happened on SWMS-261109 before it was caught.
 
+## Curated Report Content Supersession Is Gate-Full Re-Bind, Not A Patch
+
+An already-bound current-cycle `makesafe_report` with a durable curated identity
+may be re-bound when the **same document** is still cycle-bound, the new trusted
+snapshot **differs**, and **all eight** curated evidence gates pass again
+(materials, photos, contact, photo SHA-256, exact served-byte match, input hash,
+authoritative renderer constants, independent curation identity). The prior
+snapshot is archived on the audit event (`prior_data_snapshot_json`,
+`supersedes_prior_bind`); PDF bytes are never rewritten by the bind itself —
+overwrite storage first via `attach_makesafe_document` on the same
+`file_name`/document id, then re-bind. Supersession audit ids are content-scoped
+so they do not collide with the cycle-scoped first-bind reservation. Do not clear
+curated markers by hand or weaken a gate to force a material correction. Tests:
+`makesafe_render_report_action_test.ts` (`trusted content supersession…`).
+
 ## An SES Labour Line Is A Floor, Not A Price You Can Set
 
 `prepare_ses_invoice_obligation` takes only `job_id`, `docket_revision_id`,
