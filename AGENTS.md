@@ -1514,6 +1514,22 @@ required. A card with ZERO rows in that table therefore still has
 its legacy `!pack` branch and invents a second, non-existent blocker — which
 happened on SWMS-261109 before it was caught.
 
+## Curated Bind Materials Are A Subset Of The Service Report, Never A Super-Set
+
+`assertCurrentWikiSourceEvidence` (ops-api curated bind) accepts report
+`materials_evidence.items` as a multiset **subset** of the current-cycle
+service report's `materials_used`. Verbatim equality was wrong: the renderer
+strips blank/default ticks, and forcing them onto the PDF is the Munster-class
+false-materials defect. The reverse stays absolute — a report item absent from
+the service report still refuses `curated_bind_materials_source_mismatch`.
+
+Omissions are not silent: every service-report item missing from the report is
+recorded on both `job_documents.data_snapshot_json.materials_source_accounting`
+and the `ses_curated_report_source_bind_validated` audit event
+(`excluded[].reason = omitted_from_report_materials_evidence`). Do not loosen
+the renderer to print raw ticks, and do not bind verbatim defaults. Tests:
+`makesafe_render_report_action_test.ts` (materials subset / super-set).
+
 ## Curated Report Content Supersession Is Gate-Full Re-Bind, Not A Patch
 
 An already-bound current-cycle `makesafe_report` with a durable curated identity
