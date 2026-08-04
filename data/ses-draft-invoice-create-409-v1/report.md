@@ -542,5 +542,6 @@ execute_ses_release_revision       # send routes only
 - Classification history: **(C)** was correct for the pre-decision system.  
 - Product decision: **Option B create-before-approve** (Captain rule B, 2026-08-04).  
 - Phase 1 design: **complete** — create/approve/accept A–E **plus blocking §0 dup guard + acceptance F**.  
-- Phase 2 implementation: **not started** — awaiting Firstmate clear after this gap-close.  
+- Phase 2 implementation: **in progress / shipped on branch** — `create_ses_invoice_draft` with full ACCREC dup guard before gateway mint; cockpit APPROVE on DRAFT binding; fence untouched.  
+- Tests: `ses_create_invoice_draft_test.ts` (A/B/F), cockpit + wave0 allow-list updates.  
 - Report: firstmate `data/ses-draft-invoice-create-409-v1/report.md`  

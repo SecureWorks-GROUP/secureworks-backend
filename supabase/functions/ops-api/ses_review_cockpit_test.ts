@@ -145,8 +145,34 @@ Deno.test("cockpit uses fixed Stage D order and split invoice/send controls", ()
     clean_input: input,
   });
   assertEquals(preXero.section_order, SES_REVIEW_SECTION_ORDER);
-  assert(preXero.controls.approve_invoice.enabled);
+  // Option B: no Xero DRAFT yet → APPROVE INVOICE disabled (mint is separate).
+  assertEquals(preXero.controls.approve_invoice.enabled, false);
   assertEquals(preXero.controls.send_it.enabled, false);
+
+  const draftReady = buildSesCockpitView({
+    job_id: "job-1",
+    job_number: "SWMS-1",
+    docket_revision_id: "docket-1b",
+    readiness_revision:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    dependency_generation: 3,
+    invoice_obligation_revision_id: "obligation-revision-1",
+    attendance_cycle_ids: ["cycle-1"],
+    xero_binding: {
+      xero_invoice_id: "xero-draft-1",
+      invoice_number: "INV-DRAFT-1",
+      status: "DRAFT",
+    },
+    local_invoice_proposal: { total: 352 },
+    work_order: { state: "ready" },
+    family_evidence: {},
+    swms: {},
+    routes: input.routes,
+    crew_and_trade_visits: [],
+    clean_input: input,
+  });
+  assert(draftReady.controls.approve_invoice.enabled);
+  assertEquals(draftReady.controls.send_it.enabled, false);
 
   const sendReady = buildSesCockpitView({
     job_id: "job-1",

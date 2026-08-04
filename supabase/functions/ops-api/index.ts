@@ -423,6 +423,7 @@ import { getGraphToken as _getGraphToken, graphFetch as _graphFetch } from '../_
 import {
   approveSesInvoiceRevisionAction,
   approveSesReleaseRevisionAction,
+  createSesInvoiceDraftAction,
   executeSesInvoiceRevisionAction,
   executeSesReleaseRevisionAction,
   getSesReviewablePackAction,
@@ -699,6 +700,7 @@ import {
 import {
   sendPackAllowed,
   resolveExistingInvoice,
+  fetchAllAccrecInvoices as _fetchAllAccrecInvoicesShared,
   checkClientSendGate,
   checkExactRecipientGate,
   buildPackSentMarkerText,
@@ -3587,9 +3589,11 @@ if (import.meta.main) serve(async (req: Request) => {
       'attach_current_wiki_curated_report', // retired stop-ship endpoint; always 410
       'render_roof_report', // Wave 3: renders OUR letterhead roof report PDF + attaches (no send)
       'makesafe_report_drafts', // READ-only report-draft cockpit feed (no writes)
-      // Sealed SES U5/U6 draft/read surface. These actions can only append local
-      // content-addressed proposal/review facts. They cannot call Xero or Graph.
+      // Sealed SES U5/U6 draft/read surface. Local proposal/review facts, plus
+      // create_ses_invoice_draft which mints a Xero DRAFT only (full ACCREC dup
+      // guard first; never authorise/send — those stay JWT-gated).
       'prepare_ses_invoice_obligation',
+      'create_ses_invoice_draft',
       'resolve_ses_invoice_duplicates',
       'query_ses_invoice_obligation',
       'prepare_ses_release_revision',
@@ -6470,6 +6474,25 @@ if (import.meta.main) serve(async (req: Request) => {
             post_release_disposition: body.post_release_disposition || null,
             created_by: authUser?.email || body.created_by || 'ses-standing-preparer',
           },
+        ))
+      // Option B (Captain 2026-08-04): mint Xero DRAFT without prior APPROVE INVOICE.
+      // Full live-ACCREC dup guard runs first inside the action; never authorise/send.
+      case 'create_ses_invoice_draft':
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id ? [body.job_id] : [],
+          'create_ses_invoice_draft',
+        )
+        return json(await createSesInvoiceDraftAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            job_id: body.job_id,
+            invoice_obligation_revision_id: body.invoice_obligation_revision_id,
+            actor: authUser?.email || body.actor || body.created_by || 'ses-draft-minter',
+          },
+          makeSesXeroGateway(client),
         ))
       case 'resolve_ses_invoice_duplicates':
         return json(await resolveSesInvoiceDuplicatesAction(
@@ -33651,24 +33674,10 @@ export const _makesafeReportDraftsForTest = makesafeReportDrafts
 // dup-guard scans every invoice (not a recent window). Mirrors the python
 // fetch_all_invoices but reads the xero_invoices projection directly (the same
 // table list_invoices serves) with PostgREST .range() chunking under the 1000 cap.
+// Shared full-ACCREC pager lives next to resolveExistingInvoice so the free
+// createMakesafeDraftInvoice path and SES create_ses_invoice_draft cannot drift.
 async function _fetchAllAccrecInvoices(client: any): Promise<any[]> {
-  const rows: any[] = []
-  const page = 500
-  let offset = 0
-  // Bounded loop — never spin forever even if the table is huge.
-  for (let guard = 0; guard < 40; guard++) {
-    const { data, error } = await client.from('xero_invoices')
-      .select('xero_invoice_id, invoice_number, reference, status, job_id, invoice_type, invoice_date, sub_total, total, total_tax, line_items')
-      .eq('invoice_type', 'ACCREC')
-      .order('invoice_date', { ascending: false })
-      .range(offset, offset + page - 1)
-    if (error) throw new Error('dup-guard: xero_invoices scan failed: ' + error.message)
-    const batch = data || []
-    rows.push(...batch)
-    if (batch.length < page) break
-    offset += page
-  }
-  return rows
+  return _fetchAllAccrecInvoicesShared(client)
 }
 
 // D2 — deterministic make-safe DRAFT idempotency key. STABLE per (job, reference)

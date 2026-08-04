@@ -121,6 +121,7 @@ const ROUTINE_ALLOWED_ACTIONS = new Set([
   "makesafe_render_report",
   "makesafe_report_drafts",
   "prepare_ses_invoice_obligation",
+  "create_ses_invoice_draft",
   "resolve_ses_invoice_duplicates",
   "query_ses_invoice_obligation",
   "prepare_ses_release_revision",
@@ -231,6 +232,7 @@ Deno.test("ScopedKey: routine IS ALLOWED on the safe draft/read/render/attach fe
       "makesafe_render_report",
       "makesafe_report_drafts",
       "prepare_ses_invoice_obligation",
+      "create_ses_invoice_draft",
       "resolve_ses_invoice_duplicates",
       "query_ses_invoice_obligation",
       "prepare_ses_release_revision",
@@ -251,6 +253,7 @@ Deno.test("ScopedKey (sealed SES): local prepare/read actions are allow-listed b
   assert(!routineDenied("routine", "makesafe_render_report"));
   assert(!routineDenied("routine", "makesafe_report_drafts"));
   assert(!routineDenied("routine", "prepare_ses_invoice_obligation"));
+  assert(!routineDenied("routine", "create_ses_invoice_draft"));
   assert(!routineDenied("routine", "prepare_ses_release_revision"));
   assert(!routineDenied("routine", "query_ses_review_cockpit"));
   assert(!routineDenied("routine", "rerun_draft_report"));
