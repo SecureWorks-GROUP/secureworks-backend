@@ -13,7 +13,9 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  bindAuthorisedInvoicePdfToDocket,
   executeSesInvoiceRevisionAction,
+  isSesInvoiceBoundDocketDuplicateKeyError,
   recoverAuthorisedInvoicePdfBind,
   SesActionError,
   type SesXeroGateway,
@@ -44,8 +46,13 @@ function authorisedInvoice(overrides: Record<string, unknown> = {}) {
 function recoveryClient(opts: {
   revision: Record<string, any>;
   currentDocket: Record<string, any>;
+  /** Historical invoice_bound rows (e.g. prior base) for adopt-on-duplicate. */
+  existingBoundDockets?: Array<Record<string, any>>;
+  artifactsByRevision?: Record<string, Array<Record<string, any>>>;
   artifacts?: Array<Record<string, any>>;
   commitReturns?: Record<string, any> | null;
+  /** Simulate live 23505 unique key collision on commit. */
+  commitDuplicateKey?: boolean;
   track?: { commits: number; uploads: number; authorises: number; creates: number };
 }) {
   const track = opts.track || {
@@ -55,19 +62,35 @@ function recoveryClient(opts: {
     creates: 0,
   };
   const artifacts = opts.artifacts || [];
+  const artifactsByRevision = opts.artifactsByRevision || {};
   let committedDocket = opts.commitReturns ?? null;
+  const existingBound = opts.existingBoundDockets || [];
+  let lastArtifactRevisionId: string | null = null;
 
   function rowFor(table: string) {
     if (table === "makesafe_invoice_obligation_revisions") {
       return opts.revision;
     }
-    if (
-      table === "makesafe_docket_revisions_current" ||
-      table === "makesafe_docket_revisions"
-    ) {
-      return committedDocket && table === "makesafe_docket_revisions_current"
+    if (table === "makesafe_docket_revisions_current") {
+      return committedDocket && committedDocket.stage === "invoice_bound"
         ? committedDocket
         : opts.currentDocket;
+    }
+    if (table === "makesafe_docket_revisions") {
+      const list = [
+        ...(committedDocket ? [committedDocket] : []),
+        ...existingBound,
+        opts.currentDocket,
+      ];
+      // Dedup by id, newest-first for order().
+      const seen = new Set<string>();
+      const deduped: any[] = [];
+      for (const row of list) {
+        if (!row?.id || seen.has(row.id)) continue;
+        seen.add(row.id);
+        deduped.push(row);
+      }
+      return deduped;
     }
     if (table === "makesafe_readiness_current_v2") {
       return {
@@ -77,6 +100,9 @@ function recoveryClient(opts: {
       };
     }
     if (table === "makesafe_docket_artifacts") {
+      if (lastArtifactRevisionId && artifactsByRevision[lastArtifactRevisionId]) {
+        return artifactsByRevision[lastArtifactRevisionId];
+      }
       if (
         committedDocket?.stage === "invoice_bound" &&
         artifacts.length === 0
@@ -105,9 +131,16 @@ function recoveryClient(opts: {
   return {
     track,
     from(table: string) {
+      const filters: Record<string, string> = {};
       const builder: any = {
         select: () => builder,
-        eq: () => builder,
+        eq: (col: string, val: string) => {
+          filters[col] = val;
+          if (table === "makesafe_docket_artifacts" && col === "revision_id") {
+            lastArtifactRevisionId = val;
+          }
+          return builder;
+        },
         in: () => builder,
         not: () => builder,
         or: () => builder,
@@ -118,7 +151,21 @@ function recoveryClient(opts: {
         maybeSingle: async () => {
           const data = rowFor(table);
           if (Array.isArray(data)) {
-            return { data: data[0] ?? null, error: null };
+            // Filter invoice_bound list if eq filters present.
+            let rows = data;
+            if (table === "makesafe_docket_revisions" && filters.stage) {
+              rows = rows.filter((r) => r.stage === filters.stage);
+            }
+            if (
+              table === "makesafe_docket_revisions" &&
+              filters.invoice_obligation_revision_id
+            ) {
+              rows = rows.filter((r) =>
+                r.invoice_obligation_revision_id ===
+                  filters.invoice_obligation_revision_id
+              );
+            }
+            return { data: rows[0] ?? null, error: null };
           }
           return { data, error: null };
         },
@@ -127,9 +174,24 @@ function recoveryClient(opts: {
           return { data: Array.isArray(data) ? data[0] : data, error: null };
         },
         then: (resolve: any, reject: any) => {
-          const data = rowFor(table);
+          const raw = rowFor(table);
+          let rows: any[] = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+          if (table === "makesafe_docket_revisions") {
+            if (filters.stage) {
+              rows = rows.filter((r: any) => r.stage === filters.stage);
+            }
+            if (filters.invoice_obligation_revision_id) {
+              rows = rows.filter((r: any) =>
+                r.invoice_obligation_revision_id ===
+                  filters.invoice_obligation_revision_id
+              );
+            }
+            if (filters.job_id) {
+              rows = rows.filter((r: any) => r.job_id === filters.job_id);
+            }
+          }
           return Promise.resolve({
-            data: Array.isArray(data) ? data : (data ? [data] : []),
+            data: rows,
             error: null,
           }).then(resolve, reject);
         },
@@ -139,6 +201,15 @@ function recoveryClient(opts: {
     async rpc(name: string, args: Record<string, any>) {
       if (name === "commit_ses_invoice_bound_docket_v1") {
         track.commits += 1;
+        if (opts.commitDuplicateKey) {
+          return {
+            data: null,
+            error: {
+              message:
+                'duplicate key value violates unique constraint "makesafe_docket_revisions_job_id_idempotency_key_assembler__key"',
+            },
+          };
+        }
         const binding = args.p_binding || {};
         const pdf = args.p_pdf_artifact || {};
         // Idempotent SQL path: same id returns existing row.
@@ -531,6 +602,232 @@ Deno.test("recovery docket id is content-addressed (same inputs → same bind id
   const first = stableUuidFromSha256(docketHash);
   const second = stableUuidFromSha256(docketHash);
   assertEquals(first, second);
+});
+
+Deno.test("isSesInvoiceBoundDocketDuplicateKeyError recognises live constraint name", () => {
+  assert(
+    isSesInvoiceBoundDocketDuplicateKeyError({
+      message:
+        'duplicate key value violates unique constraint "makesafe_docket_revisions_job_id_idempotency_key_assembler__key"',
+    }),
+  );
+  assert(
+    !isSesInvoiceBoundDocketDuplicateKeyError({
+      message: "the AUTHORISED Xero invoice is not confirmed by the exact effect ledger",
+    }),
+  );
+});
+
+Deno.test("bind adopts existing same-INV docket on unique-key collision (no second mint)", async () => {
+  const EXISTING_BOUND_ID = "aaaaaaaa-0000-4000-8000-000000000099";
+  const OLD_BASE_ID = "bbbbbbbb-0000-4000-8000-000000000088";
+  const existingBound = {
+    id: EXISTING_BOUND_ID,
+    job_id: JOB_ID,
+    stage: "invoice_bound",
+    invoice_obligation_revision_id: OBLIGATION_ID,
+    based_on_revision_id: OLD_BASE_ID,
+    idempotency_key: `ses-invoice-bound:${OBLIGATION_ID}`,
+    xero_binding: {
+      xero_invoice_id: XERO_ID,
+      invoice_number: INVOICE_NUMBER,
+      status: "AUTHORISED",
+      total: TOTAL,
+      pdf_content_hash: "sha256:existingpdfhash000000000000000000000000000000000000000000000000",
+    },
+  };
+  const track = { commits: 0, uploads: 0, authorises: 0, creates: 0 };
+  const gTrack = { authorises: 0, creates: 0, pdfFetches: 0 };
+  const client = recoveryClient({
+    revision: {
+      id: OBLIGATION_ID,
+      job_id: JOB_ID,
+      state: "authorised",
+      xero_binding: {
+        xero_invoice_id: XERO_ID,
+        invoice_number: INVOICE_NUMBER,
+        status: "AUTHORISED",
+        total: TOTAL,
+      },
+    },
+    currentDocket: {
+      id: PRE_XERO_DOCKET_ID,
+      job_id: JOB_ID,
+      stage: "pre_xero",
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      envelope: { v2: { classification: {}, items: {} } },
+      email_drafts: {},
+    },
+    existingBoundDockets: [existingBound],
+    artifactsByRevision: {
+      [EXISTING_BOUND_ID]: [{
+        role: "xero_invoice_pdf",
+        content_hash:
+          "sha256:existingpdfhash000000000000000000000000000000000000000000000000",
+        metadata: {
+          xero_invoice_id: XERO_ID,
+          invoice_number: INVOICE_NUMBER,
+        },
+      }],
+    },
+    commitDuplicateKey: true,
+    track,
+  });
+  const result = await bindAuthorisedInvoicePdfToDocket(
+    client as any,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      based_on_revision_id: PRE_XERO_DOCKET_ID,
+      actor: "api-key-recovery",
+      invoice: authorisedInvoice(),
+    },
+    gateway({ track: gTrack }),
+  );
+  assertEquals(result.state, "authorised_invoice_already_bound");
+  assertEquals(result.adopted_existing, true);
+  assertEquals(result.docket_revision.id, EXISTING_BOUND_ID);
+  assertEquals(result.invoice.invoice_number, INVOICE_NUMBER);
+  assertEquals(result.invoice.xero_invoice_id, XERO_ID);
+  assertEquals(result.invoice.total, TOTAL);
+  assertEquals(track.commits, 1); // attempted once, then adopted
+  assertEquals(gTrack.creates, 0);
+  assertEquals(gTrack.authorises, 0);
+});
+
+Deno.test("recovery adopts existing INV-1102 bind on duplicate key instead of 409", async () => {
+  const EXISTING_BOUND_ID = "cccccccc-0000-4000-8000-000000000077";
+  const OLD_BASE_ID = "dddddddd-0000-4000-8000-000000000066";
+  const existingBound = {
+    id: EXISTING_BOUND_ID,
+    job_id: JOB_ID,
+    stage: "invoice_bound",
+    invoice_obligation_revision_id: OBLIGATION_ID,
+    based_on_revision_id: OLD_BASE_ID,
+    idempotency_key: `ses-invoice-bound:${OBLIGATION_ID}`,
+    xero_binding: {
+      xero_invoice_id: XERO_ID,
+      invoice_number: INVOICE_NUMBER,
+      status: "AUTHORISED",
+      total: TOTAL,
+      pdf_content_hash: "sha256:adoptedpdf0000000000000000000000000000000000000000000000000000",
+    },
+  };
+  const track = { commits: 0, uploads: 0, authorises: 0, creates: 0 };
+  const client = recoveryClient({
+    revision: {
+      id: OBLIGATION_ID,
+      job_id: JOB_ID,
+      state: "authorised",
+      pricing_disposition: "priced_from_canon",
+      xero_binding: {
+        xero_invoice_id: XERO_ID,
+        invoice_number: INVOICE_NUMBER,
+        status: "AUTHORISED",
+        total: TOTAL,
+      },
+    },
+    currentDocket: {
+      id: PRE_XERO_DOCKET_ID,
+      job_id: JOB_ID,
+      stage: "pre_xero",
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      attendance_cycle_ids: ["cycle-1"],
+      envelope: { v2: { classification: {}, items: {} } },
+      email_drafts: {},
+    },
+    existingBoundDockets: [existingBound],
+    artifactsByRevision: {
+      [EXISTING_BOUND_ID]: [{
+        role: "xero_invoice_pdf",
+        content_hash:
+          "sha256:adoptedpdf0000000000000000000000000000000000000000000000000000",
+        metadata: {
+          xero_invoice_id: XERO_ID,
+          invoice_number: INVOICE_NUMBER,
+        },
+      }],
+    },
+    commitDuplicateKey: true,
+    track,
+  });
+  const result = await recoverAuthorisedInvoicePdfBind(
+    client as any,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "api-key-recovery",
+    },
+    gateway({}),
+  );
+  assertEquals(result.state, "authorised_invoice_already_bound");
+  assertEquals(result.recovery, true);
+  assertEquals(result.docket_revision.id, EXISTING_BOUND_ID);
+  assertEquals(result.invoice.invoice_number, "INV-1102");
+  assertEquals(result.invoice.total, 825);
+  assertEquals(result.send_dispatched, false);
+  assertEquals(result.invoice_create_dispatched, false);
+  assertEquals(result.invoice_authorise_dispatched, false);
+  assertEquals(track.commits, 1);
+});
+
+Deno.test("bind refuses to adopt a different invoice number on duplicate key", async () => {
+  const existingBound = {
+    id: "eeeeeeee-0000-4000-8000-000000000055",
+    job_id: JOB_ID,
+    stage: "invoice_bound",
+    invoice_obligation_revision_id: OBLIGATION_ID,
+    based_on_revision_id: PRE_XERO_DOCKET_ID,
+    xero_binding: {
+      xero_invoice_id: "other-xero",
+      invoice_number: "INV-9999",
+      status: "AUTHORISED",
+      total: 999,
+    },
+  };
+  const client = recoveryClient({
+    revision: {
+      id: OBLIGATION_ID,
+      job_id: JOB_ID,
+      state: "authorised",
+      xero_binding: {
+        xero_invoice_id: XERO_ID,
+        invoice_number: INVOICE_NUMBER,
+        status: "AUTHORISED",
+        total: TOTAL,
+      },
+    },
+    currentDocket: {
+      id: PRE_XERO_DOCKET_ID,
+      job_id: JOB_ID,
+      stage: "pre_xero",
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      envelope: { v2: { classification: {}, items: {} } },
+      email_drafts: {},
+    },
+    existingBoundDockets: [existingBound],
+    commitDuplicateKey: true,
+  });
+  const err = await assertRejects(
+    () =>
+      bindAuthorisedInvoicePdfToDocket(
+        client as any,
+        {
+          org_id: ORG_ID,
+          job_id: JOB_ID,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          based_on_revision_id: PRE_XERO_DOCKET_ID,
+          actor: "api-key-recovery",
+          invoice: authorisedInvoice(),
+        },
+        gateway({}),
+      ),
+    SesActionError,
+  );
+  assertEquals(err.status, 409);
+  assertStringIncludes(err.message, "could not be bound");
 });
 
 function assert(condition: unknown, message = "assert failed"): asserts condition {

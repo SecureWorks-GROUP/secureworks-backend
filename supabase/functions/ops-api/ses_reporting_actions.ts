@@ -2591,11 +2591,122 @@ function moneyTotalsMatch(a: unknown, b: unknown): boolean {
   return Math.round(left * 100) === Math.round(right * 100);
 }
 
+/** True when PostgREST/Postgres reports the invoice-bound docket unique key hit. */
+export function isSesInvoiceBoundDocketDuplicateKeyError(
+  error: { message?: string } | null | undefined,
+): boolean {
+  const msg = String(error?.message || "").toLowerCase();
+  return msg.includes("duplicate key") &&
+    (msg.includes("makesafe_docket_revisions_job_id_idempotency") ||
+      msg.includes("ses-invoice-bound"));
+}
+
+function invoiceIdentityMatchesBinding(
+  invoice: SesXeroInvoiceResult,
+  binding: Record<string, unknown>,
+): boolean {
+  if (String(binding.xero_invoice_id || "").trim() !==
+    String(invoice.xero_invoice_id || "").trim()) {
+    return false;
+  }
+  if (String(binding.invoice_number || "").trim() !==
+    String(invoice.invoice_number || "").trim()) {
+    return false;
+  }
+  if (String(binding.status || "").toUpperCase() !== "AUTHORISED") return false;
+  const storedTotal = Number(binding.total);
+  if (
+    Number.isFinite(storedTotal) && Number.isFinite(Number(invoice.total)) &&
+    !moneyTotalsMatch(storedTotal, invoice.total)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Load an existing invoice_bound docket for this job/obligation/INV identity.
+ * When basedOnRevisionId is set, prefer that base (true replay); otherwise the
+ * newest matching AUTHORISED bind (legacy key collision adopt).
+ */
+export async function findExistingAuthorisedInvoiceBoundDocket(
+  client: SesSupabaseClient,
+  args: {
+    job_id: string;
+    invoice_obligation_revision_id: string;
+    invoice: SesXeroInvoiceResult;
+    based_on_revision_id?: string | null;
+  },
+): Promise<{
+  docket: Record<string, any>;
+  pdf_content_hash: string | null;
+} | null> {
+  const response = await client.from("makesafe_docket_revisions")
+    .select("*")
+    .eq("job_id", args.job_id)
+    .eq("stage", "invoice_bound")
+    .eq("invoice_obligation_revision_id", args.invoice_obligation_revision_id)
+    .order("committed_at", { ascending: false });
+  if (response.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `Existing invoice-bound dockets could not be read (${
+        response.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  const rows = Array.isArray(response.data) ? response.data : [];
+  const basedOn = String(args.based_on_revision_id || "").trim();
+  const candidates = rows.filter((row: any) =>
+    invoiceIdentityMatchesBinding(args.invoice, object(row.xero_binding))
+  );
+  const preferred = basedOn
+    ? candidates.find((row: any) =>
+      String(row.based_on_revision_id || "") === basedOn
+    ) || null
+    : candidates[0] || null;
+  // When based_on was requested but no exact base match, still adopt the newest
+  // same-INV bind (the unique-key collision path) so recovery never fails closed
+  // on a real INV-1102 that already exists.
+  const chosen = preferred || candidates[0] || null;
+  if (!chosen) return null;
+
+  const artifactsResponse = await client.from("makesafe_docket_artifacts")
+    .select("role,content_hash,metadata")
+    .eq("revision_id", chosen.id)
+    .eq("role", "xero_invoice_pdf");
+  if (artifactsResponse.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The invoice-bound PDF artifact could not be read (${
+        artifactsResponse.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  const pdfs = Array.isArray(artifactsResponse.data)
+    ? artifactsResponse.data
+    : [];
+  const matchingPdf = pdfs.find((artifact: any) =>
+    object(artifact.metadata).xero_invoice_id ===
+      args.invoice.xero_invoice_id &&
+    object(artifact.metadata).invoice_number === args.invoice.invoice_number
+  ) || pdfs[0] || null;
+  return {
+    docket: chosen,
+    pdf_content_hash: matchingPdf?.content_hash
+      ? String(matchingPdf.content_hash)
+      : (object(chosen.xero_binding).pdf_content_hash
+        ? String(object(chosen.xero_binding).pdf_content_hash)
+        : null),
+  };
+}
+
 /**
  * Shared AUTHORISED PDF bind: fetch the real Xero PDF, store it once, and
  * commit an invoice_bound docket from the reviewed pre_xero base. Idempotent
  * via content-addressed docket id + storage "already exists" tolerance + the
- * SQL commit function's same-id return path.
+ * SQL commit function's same-id / same-key adopt path. On unique-key collision
+ * for the same INV identity, adopt the existing bound docket rather than fail.
  */
 export async function bindAuthorisedInvoicePdfToDocket(
   client: SesSupabaseClient,
@@ -2609,11 +2720,12 @@ export async function bindAuthorisedInvoicePdfToDocket(
   },
   gateway: Pick<SesXeroGateway, "fetchAuthorisedPdf">,
 ): Promise<{
-  state: "authorised_invoice_bound";
+  state: "authorised_invoice_bound" | "authorised_invoice_already_bound";
   invoice: SesXeroInvoiceResult;
   docket_revision: Record<string, any>;
   pdf_content_hash: string;
   recovery: boolean;
+  adopted_existing: boolean;
 }> {
   if (String(args.invoice.status || "").toUpperCase() !== "AUTHORISED") {
     throw new SesActionError(
@@ -2624,6 +2736,30 @@ export async function bindAuthorisedInvoicePdfToDocket(
       ),
     );
   }
+
+  // Pre-adopt: same base already bound for this INV — no second commit.
+  const preExisting = await findExistingAuthorisedInvoiceBoundDocket(client, {
+    job_id: args.job_id,
+    invoice_obligation_revision_id: args.invoice_obligation_revision_id,
+    invoice: args.invoice,
+    based_on_revision_id: args.based_on_revision_id,
+  });
+  if (
+    preExisting &&
+    String(preExisting.docket.based_on_revision_id || "") ===
+      args.based_on_revision_id &&
+    preExisting.pdf_content_hash
+  ) {
+    return {
+      state: "authorised_invoice_already_bound",
+      invoice: args.invoice,
+      docket_revision: preExisting.docket,
+      pdf_content_hash: preExisting.pdf_content_hash,
+      recovery: false,
+      adopted_existing: true,
+    };
+  }
+
   const pdf = await gateway.fetchAuthorisedPdf(args.invoice.xero_invoice_id);
   const pdfHash = await sesSha256(
     Array.from(pdf),
@@ -2685,6 +2821,36 @@ export async function bindAuthorisedInvoicePdfToDocket(
       },
     },
   });
+  if (bound.error && isSesInvoiceBoundDocketDuplicateKeyError(bound.error)) {
+    // Never fail closed when the same INV bind already exists.
+    const adopted = await findExistingAuthorisedInvoiceBoundDocket(client, {
+      job_id: args.job_id,
+      invoice_obligation_revision_id: args.invoice_obligation_revision_id,
+      invoice: args.invoice,
+      based_on_revision_id: args.based_on_revision_id,
+    });
+    if (adopted && adopted.pdf_content_hash) {
+      return {
+        state: "authorised_invoice_already_bound",
+        invoice: args.invoice,
+        docket_revision: adopted.docket,
+        pdf_content_hash: adopted.pdf_content_hash,
+        recovery: false,
+        adopted_existing: true,
+      };
+    }
+    // Same INV without a readable PDF hash still adopts the docket row.
+    if (adopted) {
+      return {
+        state: "authorised_invoice_already_bound",
+        invoice: args.invoice,
+        docket_revision: adopted.docket,
+        pdf_content_hash: pdfHash,
+        recovery: false,
+        adopted_existing: true,
+      };
+    }
+  }
   const boundDocket = requireValue(
     bound,
     "The real AUTHORISED Xero PDF could not be bound to a new docket revision.",
@@ -2709,6 +2875,7 @@ export async function bindAuthorisedInvoicePdfToDocket(
     docket_revision: boundDocket,
     pdf_content_hash: pdfHash,
     recovery: false,
+    adopted_existing: false,
   };
 }
 
