@@ -39,6 +39,7 @@ import {
   _preferPipelineSentStatus,
   attachmentUrlGuard,
   buildAttachmentSummaries,
+  CHUNK_FETCH_CONCURRENCY,
   deriveFromDomain,
   emptyAttachmentSummary,
   IN_MAX_COUNT,
@@ -1554,6 +1555,150 @@ Deno.test("fetchAllRowsInChunks: many short ids split by the count cap into mult
   );
   assertEquals(rows.length, N);
   assertEquals(new Set(rows.map((r) => r.widget_id)).size, N);
+});
+
+// ── Bounded chunk fan-out ─────────────────────────────────────────────────────
+// The parallel-chunk reader is shared by the board's ~10 job-id joins, the
+// intake/compare readers and the state comparison. An unbounded fan-out opens
+// one PostgREST connection per chunk per caller, and pool exhaustion reads as a
+// board-truth outage (ops.html silently falls back to makesafe_pipeline). These
+// two tests pin the cap: never more than CHUNK_FETCH_CONCURRENCY in flight,
+// within ONE call and ACROSS concurrent calls, while still running in parallel.
+
+// A stub whose `.range()` terminal is genuinely async, so overlapping reads are
+// observable. Each chunk is one short page (< PAGE_SIZE), so one range() call
+// per chunk. `track` records the concurrent in-flight peak.
+function makeConcurrencyProbeClient() {
+  let inFlight = 0;
+  let peak = 0;
+  let calls = 0;
+  const buildQueryForChunk = (chunkIds: string[]) => {
+    const builder: any = {
+      order: () => builder,
+      range: async (from: number, to: number) => {
+        calls++;
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight--;
+        return {
+          data: chunkIds.map((id) => ({ widget_id: id })).slice(from, to + 1),
+          error: null,
+        };
+      },
+    };
+    return builder;
+  };
+  return {
+    buildQueryForChunk,
+    stats: () => ({ peak, calls }),
+  };
+}
+
+Deno.test("fetchAllRowsInChunks: many chunks in ONE call never exceed the concurrency cap", async () => {
+  // 20 cap-sized chunks — well past CHUNK_FETCH_CONCURRENCY.
+  const chunkCount = 20;
+  const ids = Array.from(
+    { length: IN_MAX_COUNT * chunkCount },
+    (_, i) => `id-${i}`,
+  );
+  assertEquals(_chunkByUrlBudget(ids).length, chunkCount);
+
+  const probe = makeConcurrencyProbeClient();
+  const rows = await _fetchAllRowsInChunks<{ widget_id: string }>(
+    ids,
+    probe.buildQueryForChunk,
+    "widgets read",
+    "widget_id",
+  );
+
+  const { peak, calls } = probe.stats();
+  assertEquals(calls, chunkCount, "every chunk must still be read");
+  assert(
+    peak <= CHUNK_FETCH_CONCURRENCY,
+    `peak in-flight ${peak} exceeded cap ${CHUNK_FETCH_CONCURRENCY}`,
+  );
+  // The cap bounds the burst; it must NOT re-serialise the reader.
+  assertEquals(
+    peak,
+    CHUNK_FETCH_CONCURRENCY,
+    "chunks must still run in parallel up to the cap",
+  );
+  // Every row returned exactly once.
+  assertEquals(rows.length, ids.length);
+  assertEquals(new Set(rows.map((r) => r.widget_id)).size, ids.length);
+});
+
+Deno.test("fetchAllRowsInChunks: the cap is module-wide, so a 10-wide dependent wave cannot burst past it", async () => {
+  // Mirrors makesafePipeline's dependent wave: 10 chunked job-id joins issued
+  // in one Promise.all, each splitting into 3 chunks. A per-call bound would
+  // still allow 30 simultaneous PostgREST reads.
+  const probe = makeConcurrencyProbeClient();
+  const perCallIds = Array.from(
+    { length: IN_MAX_COUNT * 3 },
+    (_, i) => `id-${i}`,
+  );
+  const waveWidth = 10;
+
+  const results = await Promise.all(
+    Array.from(
+      { length: waveWidth },
+      () =>
+        _fetchAllRowsInChunks<{ widget_id: string }>(
+          perCallIds,
+          probe.buildQueryForChunk,
+          "widgets read",
+          "widget_id",
+        ),
+    ),
+  );
+
+  const { peak, calls } = probe.stats();
+  assertEquals(calls, waveWidth * 3, "every chunk of every call must be read");
+  assert(
+    peak <= CHUNK_FETCH_CONCURRENCY,
+    `peak in-flight ${peak} exceeded cap ${CHUNK_FETCH_CONCURRENCY}`,
+  );
+  for (const rows of results) {
+    assertEquals(rows.length, perCallIds.length);
+  }
+});
+
+Deno.test("fetchAllRowsInChunks: a failing chunk releases its slot (cap does not leak)", async () => {
+  // A thrown chunk read must not permanently consume a slot, or the next board
+  // request degrades to a smaller (eventually zero) fan-out.
+  const failing = (_chunkIds: string[]) => {
+    const builder: any = {
+      order: () => builder,
+      range: async () => ({ data: null, error: { message: "boom" } }),
+    };
+    return builder;
+  };
+  const ids = Array.from({ length: IN_MAX_COUNT * 12 }, (_, i) => `id-${i}`);
+  let threw = false;
+  try {
+    await _fetchAllRowsInChunks(ids, failing, "widgets read", "widget_id");
+  } catch {
+    threw = true;
+  }
+  assert(threw, "a failed chunk read must still throw");
+  // Promise.all rejects on the FIRST failure; let the siblings settle.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const probe = makeConcurrencyProbeClient();
+  const rows = await _fetchAllRowsInChunks<{ widget_id: string }>(
+    ids,
+    probe.buildQueryForChunk,
+    "widgets read",
+    "widget_id",
+  );
+  const { peak } = probe.stats();
+  assertEquals(rows.length, ids.length);
+  assertEquals(
+    peak,
+    CHUNK_FETCH_CONCURRENCY,
+    "slots released by the failed run must be available again",
+  );
 });
 
 // ════════════════════════════════════════════════════════════

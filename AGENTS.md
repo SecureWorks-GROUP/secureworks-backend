@@ -72,6 +72,17 @@ wave in the pipeline, and active-scope skip of stage-dependent joins for
 card bytes and call it a TTFB win. Remeasure wall time on production after
 every board-path change.
 
+That concurrency is BOUNDED, and the bound is module-wide, not per call:
+`CHUNK_FETCH_CONCURRENCY` (8, captain's cap 2026-08-04) limits total in-flight
+chunk reads across every caller of `fetchAllRowsInChunks`. The dependent wave
+issues ~10 chunked joins at once, so a per-call bound would still open ~30
+PostgREST connections per board request and grow with the board. Pool
+exhaustion is not a slow board: `ops.html` falls back to the overlay-blind
+`makesafe_pipeline` on any non-200, so it reads as a board-truth outage. Do not
+re-serialise the dependent `Promise.all` and do not raise or drop the cap
+without a measurement (`makesafe_compact_reads_test.ts` pins it in-call, across
+a 10-wide wave, and after a failed chunk).
+
 U2-S1 cycle-scoped evidence lives in `makesafe_cycle_evidence.ts` and is shared by
 board enrich and `makesafe_audit`. Apply
 `20260727000001_makesafe_attendance_cycles_u2_s1.sql` **before** the matching
