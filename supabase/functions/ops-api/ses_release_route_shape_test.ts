@@ -335,6 +335,12 @@ const AJS_ARTIFACTS = [
     media_type: "application/json",
     content_hash: "proposal-hash",
   },
+  {
+    role: "completion_photo",
+    object_key: "bucket/docket-ajs/ARTIFACTS/photo1.jpg",
+    media_type: "image/jpeg",
+    content_hash: "photo-hash-1",
+  },
 ];
 
 Deno.test("AJS resolveDocketRoutes emits report_invoice + photo with Xero PDF on route 1", () => {
@@ -356,4 +362,94 @@ Deno.test("AJS resolveDocketRoutes emits report_invoice + photo with Xero PDF on
   assertEquals(pack.ready, true);
   assertEquals(routes[1].route_kind, "photo");
   assertEquals(routes[1].cc, [MAKESAFE_CC]);
+  assertEquals(routes[1].attachment_hashes, ["photo-hash-1"]);
+  assertEquals(routes[1].ready, true);
 });
+
+/**
+ * Live Bertram shape (SWMS-261109 / INV-1102 bind): the invoice_bound docket
+ * copies pre_xero completion photos and keeps the PARENT revision id in
+ * object_key (`…/{based_on}/ARTIFACTS/photos/001-….jpg`). Draft Attachments
+ * still say `ARTIFACTS/photos/…`. The old `/${docket.id}/` + last-two-segments
+ * fallback resolved that to `photos/001-….jpg` and dropped every attachment.
+ */
+Deno.test(
+  "invoice_bound docket resolves nested photo paths when object_key still names based_on revision",
+  () => {
+    const boundId = "ecfcbd8e-81d5-55d8-a9d4-9d5ad89f8916";
+    const parentId = "6a55da20-1624-5096-ae29-5549c7f9dc66";
+    const jobId = "208450c0-7161-4b30-9514-66226b054609";
+    const photoName = "001-049f6631-0e74-45f8-aa18-845760ffae1a.jpg";
+    const docket = {
+      ...ajsDocket("invoice_bound", {
+        status: "AUTHORISED",
+        xero_invoice_id: "xero-1",
+        invoice_number: "INV-1102",
+      }),
+      id: boundId,
+      based_on_revision_id: parentId,
+      email_drafts: {
+        REPORT_EMAIL_DRAFT: [
+          "To: workorders@ajs.build",
+          "Cc:",
+          "Subject: AJBR-70271 - physical makesafe",
+          "Attachments: ARTIFACTS/Make-Safe-Report.pdf",
+          "",
+          "Report body",
+        ].join("\n"),
+        PHOTO_EMAIL_DRAFT: [
+          "To: workorders@ajs.build",
+          "Cc:",
+          "Subject: Photo Evidence - AJBR-70271",
+          `Attachments: ARTIFACTS/photos/${photoName}`,
+          "",
+          "Photos body",
+        ].join("\n"),
+        INVOICE_EMAIL_DRAFT: [
+          "To: workorders@ajs.build",
+          "Cc: finance@secureworkswa.com.au",
+          "Subject: AJBR-70271 - invoice",
+          "Attachments: ARTIFACTS/invoice_proposal.json, ARTIFACTS/Make-Safe-Report.pdf",
+          "",
+          "Invoice body",
+        ].join("\n"),
+      },
+    };
+    const artifacts = [
+      {
+        role: "supporting_report_pdf",
+        object_key:
+          `makesafe-docket-artifacts/${jobId}/${parentId}/ARTIFACTS/Make-Safe-Report.pdf`,
+        media_type: "application/pdf",
+        content_hash: "report-hash",
+      },
+      {
+        role: "completion_photo",
+        object_key:
+          `makesafe-docket-artifacts/${jobId}/${parentId}/ARTIFACTS/photos/${photoName}`,
+        media_type: "image/jpeg",
+        content_hash: "photo-hash-bertram",
+      },
+      {
+        role: "xero_invoice_pdf",
+        object_key:
+          `makesafe-docket-artifacts/${jobId}/${boundId}/ARTIFACTS/Xero Invoice - INV-1102.pdf`,
+        media_type: "application/pdf",
+        content_hash: "xero-hash",
+        metadata: {
+          xero_invoice_id: "xero-1",
+          invoice_number: "INV-1102",
+        },
+      },
+    ];
+    const routes = resolveDocketRoutes(docket, artifacts, null);
+    assertEquals(routes.map((r) => r.route_kind), ["report_invoice", "photo"]);
+    const photo = routes.find((r) => r.route_kind === "photo");
+    assertEquals(photo?.attachment_hashes, ["photo-hash-bertram"]);
+    assertEquals(photo?.ready, true);
+    const pack = routes.find((r) => r.route_kind === "report_invoice");
+    assertEquals(pack?.ready, true);
+    assertEquals(pack?.attachment_hashes.includes("xero-hash"), true);
+    assertEquals(pack?.attachment_hashes.includes("report-hash"), true);
+  },
+);
