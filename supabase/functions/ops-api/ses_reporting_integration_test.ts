@@ -342,6 +342,27 @@ Deno.test("curated bind is routed, source-surface declared and has no effect aut
   assert(start >= 0 && end > start);
   assertStringIncludes(implementation, ".from('job_events').insert({");
   assertStringIncludes(implementation, ".from('job_documents').update({");
+  // Server owns cycle, renderer and input hash; caller does not guess them.
+  assertStringIncludes(
+    implementation,
+    "detailResponse.data.attendance_cycle_id",
+  );
+  assertStringIncludes(
+    implementation,
+    "MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION",
+  );
+  assertStringIncludes(implementation, "cycle_attribution: 'bound'");
+  assertStringIncludes(implementation, "prior_data_snapshot_json: prior");
+  assertStringIncludes(implementation, "requireCuratedBindSha256");
+  assertStringIncludes(INDEX, "CURATED_BIND_SHA256_RE");
+  // Prior poisoned provenance is preserved in the audit event, not deleted
+  // as a permanent gate on exact verified replacement bytes.
+  assert(
+    !implementation.includes(
+      "raw, retired, or self-stamped report provenance cannot be bound",
+    ),
+    "poisoned prior provenance must no longer permanently refuse an exact bind",
+  );
   for (
     const forbidden of [
       "xeroPost(",

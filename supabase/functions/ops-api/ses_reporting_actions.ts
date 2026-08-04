@@ -121,7 +121,7 @@ function object(value: unknown): Record<string, any> {
 }
 
 export const SES_CURATED_SOURCE_RECOVERY_ACTION =
-  "POST ops-api?action=bind_current_cycle_curated_makesafe_report with job_id, document_id, attendance_cycle_id, pdf_base64, pdf_sha256, report_job, report_input_hash, renderer_source_revision, renderer_script_sha256, curation_revision_id, curation_artifact_id, and curation_artifact_content_hash; then prepare a new docket revision.";
+  "POST ops-api?action=bind_current_cycle_curated_makesafe_report with job_id, document_id, pdf_base64, pdf_sha256 (sha256:<64 lowercase hex>), report_job (photo content_sha256 same format), curation_revision_id, and curation_artifact_id; server derives current attendance cycle, renderer provenance, artifact content hash and report_input_hash, then establishes cycle attribution. Then prepare_ses_docket_revision (dry_run or draft only).";
 
 async function verifyStoredSupportingReport(
   client: SesSupabaseClient,

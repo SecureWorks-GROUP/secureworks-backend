@@ -16,9 +16,13 @@ import {
   canonicalCurrentWikiReportHashPayload,
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
   MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
   renderMakesafeReportPdf,
 } from "./makesafe_report_render.ts";
 import { canonicalSesJson, sesSha256Bytes } from "./ses_docket_envelope.ts";
+
+const FIXTURE_ACTOR = { id: "ops-test", auth_mode: "api_key" as const };
+const SERVICE_REPORT_ID = "service-report-fixture";
 
 function makeClientStub() {
   return {
@@ -70,7 +74,7 @@ async function sha(bytes: Uint8Array): Promise<string> {
     .map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-function currentReportJob() {
+function currentReportJob(overrides: Record<string, unknown> = {}) {
   return {
     ref: "REF-001",
     address: "Privacy-safe test property",
@@ -83,7 +87,7 @@ function currentReportJob() {
     materials_evidence: { state: "none_recorded", items: [] },
     photos: [],
     photo_evidence: {
-      source_revision: "fixture-source-1",
+      source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
       completeness_verified: true,
       source_count: 0,
       applicable_count: 0,
@@ -93,6 +97,7 @@ function currentReportJob() {
       excluded: [],
       rejected: [],
     },
+    ...overrides,
   };
 }
 
@@ -109,13 +114,17 @@ function pdfBase64(bytes: Uint8Array): string {
 function bindClient(
   bytes: Uint8Array,
   options: {
-    cycleId?: string;
+    cycleId?: string | null;
     prior?: Record<string, unknown>;
     otherDocuments?: Array<Record<string, unknown>>;
     jobType?: string;
     documentJobId?: string;
     documentType?: string;
     visibleToTrades?: boolean;
+    documentCycleId?: string | null;
+    documentCycleAttribution?: string | null;
+    serviceReport?: Record<string, unknown> | null;
+    media?: Array<Record<string, unknown>>;
     eventInsertError?: Record<string, unknown>;
   } = {},
 ) {
@@ -129,12 +138,32 @@ function bindClient(
     pdf_url: "https://storage.example.test/privacy-safe-report.pdf",
     storage_url: null,
     visible_to_trades: options.visibleToTrades ?? true,
-    attendance_cycle_id: "cycle-fixture",
-    cycle_attribution: "bound",
+    attendance_cycle_id: options.documentCycleId === undefined
+      ? "cycle-fixture"
+      : options.documentCycleId,
+    cycle_attribution: options.documentCycleAttribution === undefined
+      ? "bound"
+      : options.documentCycleAttribution,
     uploaded_by: "reporting-workflow",
     data_snapshot_json: options.prior || {},
     version: 1,
   };
+  const serviceReport = options.serviceReport === null
+    ? null
+    : options.serviceReport || {
+      id: SERVICE_REPORT_ID,
+      status: "submitted",
+      checklist_json: { materials_used: [] },
+      attendance_cycle_id: options.cycleId === undefined
+        ? "cycle-fixture"
+        : options.cycleId,
+      cycle_attribution: "bound",
+      cycle_number: 1,
+    };
+  const media = options.media || [];
+  const detailCycle = options.cycleId === undefined
+    ? "cycle-fixture"
+    : options.cycleId;
   const rows: Record<string, unknown> = {
     jobs: {
       id: "job-fixture",
@@ -145,7 +174,9 @@ function bindClient(
     },
     makesafe_job_details: {
       report_type: null,
-      attendance_cycle_id: options.cycleId || "cycle-fixture",
+      attendance_cycle_id: detailCycle,
+      cycle_number: 1,
+      reattend_count: 0,
       external_ref: "REF-001",
     },
     job_documents: document,
@@ -154,11 +185,23 @@ function bindClient(
     from(table: string) {
       let mutation: Record<string, unknown> | null = null;
       let responseError: Record<string, unknown> | null = null;
+      let filters: Record<string, unknown> = {};
       const query: any = {
         select: () => query,
-        eq: () => query,
-        maybeSingle: () =>
-          Promise.resolve({ data: rows[table] || null, error: null }),
+        eq: (column: string, value: unknown) => {
+          filters[column] = value;
+          return query;
+        },
+        order: () => query,
+        maybeSingle: () => {
+          if (table === "job_documents" && filters.id) {
+            return Promise.resolve({
+              data: document.id === filters.id ? document : null,
+              error: null,
+            });
+          }
+          return Promise.resolve({ data: rows[table] || null, error: null });
+        },
         insert: (values: Record<string, unknown>) => {
           mutation = values;
           mutations.push({ table, values });
@@ -171,19 +214,66 @@ function bindClient(
           mutation = values;
           mutations.push({ table, values });
           if (table === "job_documents") {
-            document.data_snapshot_json = values.data_snapshot_json as Record<
-              string,
-              unknown
-            >;
-            document.version = Number(values.version);
+            if ("data_snapshot_json" in values) {
+              document.data_snapshot_json = values.data_snapshot_json as Record<
+                string,
+                unknown
+              >;
+            }
+            if ("version" in values) {
+              document.version = Number(values.version);
+            }
+            if ("attendance_cycle_id" in values) {
+              document.attendance_cycle_id = values.attendance_cycle_id as
+                | string
+                | null;
+            }
+            if ("cycle_attribution" in values) {
+              document.cycle_attribution = values.cycle_attribution as
+                | string
+                | null;
+            }
           }
           return query;
         },
+        delete: () => {
+          mutations.push({ table, values: { deleted: true } });
+          return query;
+        },
         then: (resolve: (value: unknown) => unknown) => {
-          const data = table === "job_documents" && !mutation
-            ? [document, ...(options.otherDocuments || [])]
-            : null;
-          return Promise.resolve({ data, error: responseError }).then(resolve);
+          if (table === "job_documents" && !mutation) {
+            const list = [document, ...(options.otherDocuments || [])]
+              .filter((row) => {
+                if (filters.type && row.type && row.type !== filters.type) {
+                  return false;
+                }
+                if (
+                  filters.attendance_cycle_id &&
+                  String(row.attendance_cycle_id || "") !==
+                    String(filters.attendance_cycle_id)
+                ) {
+                  return false;
+                }
+                return true;
+              });
+            return Promise.resolve({ data: list, error: responseError }).then(
+              resolve,
+            );
+          }
+          if (table === "job_service_reports") {
+            return Promise.resolve({
+              data: serviceReport ? [serviceReport] : [],
+              error: responseError,
+            }).then(resolve);
+          }
+          if (table === "job_media") {
+            return Promise.resolve({ data: media, error: responseError }).then(
+              resolve,
+            );
+          }
+          return Promise.resolve({ data: null, error: responseError }).then(
+            resolve,
+          );
         },
       };
       return query;
@@ -197,16 +287,11 @@ async function bindBody(bytes: Uint8Array) {
   return {
     job_id: "job-fixture",
     document_id: "document-fixture",
-    attendance_cycle_id: "cycle-fixture",
     pdf_base64: pdfBase64(bytes),
-    pdf_sha256: await sha(bytes),
+    pdf_sha256: `sha256:${await sha(bytes)}`,
     report_job: job,
-    report_input_hash: await inputHash(job),
-    renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-    renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
     curation_revision_id: "curation-revision-fixture",
     curation_artifact_id: "curation-artifact-fixture",
-    curation_artifact_content_hash: await sesSha256Bytes(bytes),
   };
 }
 
@@ -221,18 +306,18 @@ async function withStoredPdf<T>(bytes: Uint8Array, run: () => Promise<T>) {
   }
 }
 
-Deno.test("byte-bound current-cycle curated report bind writes stable independent source proof", async () => {
-  const bytes = new TextEncoder().encode("%PDF-1.7\nprivacy-safe fixture");
-  const { client, document, mutations } = bindClient(bytes);
-  const body = await bindBody(bytes);
-  const result = await withStoredPdf(
-    bytes,
-    () => _bindCurrentCycleCuratedMakesafeReportForTest(client, body),
-  );
-  assertEquals(result, {
+async function expectedSuccessShape(
+  bytes: Uint8Array,
+  reportJob: Record<string, unknown>,
+  opts: { skipped: boolean; writes: number; documentVersion: number },
+) {
+  return {
     success: true,
-    skipped: false,
+    skipped: opts.skipped,
     document_id: "document-fixture",
+    document_version: opts.documentVersion,
+    attendance_cycle_id: "cycle-fixture",
+    cycle_attribution: "bound",
     source_kind: "durable_curated_revision",
     source_identity:
       "curation-revision:curation-revision-fixture/artifact:curation-artifact-fixture",
@@ -240,9 +325,36 @@ Deno.test("byte-bound current-cycle curated report bind writes stable independen
     source_artifact_id: "curation-artifact-fixture",
     source_artifact_content_hash: await sesSha256Bytes(bytes),
     expected_raw_sha256: `sha256:${await sha(bytes)}`,
-    report_input_hash: body.report_input_hash,
-    writes: 2,
-  });
+    report_input_hash: await inputHash(reportJob),
+    renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+    renderer_script_sha256:
+      `sha256:${MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256}`,
+    renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+    writes: opts.writes,
+  };
+}
+
+Deno.test("byte-bound current-cycle curated report bind writes stable independent source proof", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nprivacy-safe fixture");
+  const { client, document, mutations } = bindClient(bytes);
+  const body = await bindBody(bytes);
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+  assertEquals(
+    result,
+    await expectedSuccessShape(bytes, body.report_job as Record<string, unknown>, {
+      skipped: false,
+      writes: 2,
+      documentVersion: 2,
+    }),
+  );
   assertEquals(mutations.map((item) => item.table), [
     "job_events",
     "job_documents",
@@ -252,17 +364,172 @@ Deno.test("byte-bound current-cycle curated report bind writes stable independen
     result.source_identity,
   );
   assertEquals(document.version, 2);
+  assertEquals(document.attendance_cycle_id, "cycle-fixture");
+  assertEquals(document.cycle_attribution, "bound");
+  assertEquals(
+    document.data_snapshot_json.curated_source_authority,
+    "privileged_ops_curated_bind",
+  );
 
   const replay = await withStoredPdf(
     bytes,
-    () => _bindCurrentCycleCuratedMakesafeReportForTest(client, body),
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
   );
   assertEquals(replay.skipped, true);
   assertEquals(replay.writes, 0);
   assertEquals(mutations.length, 2);
 });
 
-Deno.test("curated bind rejects wrong contact, hash, renderer, cycle, self-reference and raw provenance before trust", async () => {
+Deno.test("poisoned stopped-sweep snapshot is superseded after full evidence gates pass", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\ncurated munster fixture");
+  const poisonedPrior = {
+    evidence_source: "raw_trade_report_fields",
+    source_document_id: "document-fixture",
+    report_renderer_version: "retired-renderer",
+    uploaded_by: "guarded_current_wiki_rerender_sweep",
+  };
+  const { client, document, mutations } = bindClient(bytes, {
+    prior: poisonedPrior,
+  });
+  const body = await bindBody(bytes);
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+  assertEquals(result.success, true);
+  assertEquals(result.skipped, false);
+  assertEquals(result.writes, 2);
+  assertEquals(
+    document.data_snapshot_json.evidence_source,
+    "current_cycle_curated_makesafe_report",
+  );
+  assertEquals(
+    document.data_snapshot_json.curated_source_kind,
+    "durable_curated_revision",
+  );
+  // Prior poison is not merged forward; it is retained only on the audit event.
+  assertEquals(document.data_snapshot_json.source_document_id, undefined);
+  const event = mutations.find((item) => item.table === "job_events");
+  assertEquals(
+    (event?.values.detail_json as any)?.prior_data_snapshot_json,
+    poisonedPrior,
+  );
+});
+
+Deno.test("bind establishes current-cycle attribution on a newly attached visible report", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nfresh attach fixture");
+  const { client, document, mutations } = bindClient(bytes, {
+    documentCycleId: null,
+    documentCycleAttribution: null,
+    prior: {},
+  });
+  const body = await bindBody(bytes);
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+  assertEquals(result.success, true);
+  assertEquals(result.attendance_cycle_id, "cycle-fixture");
+  assertEquals(result.cycle_attribution, "bound");
+  assertEquals(document.attendance_cycle_id, "cycle-fixture");
+  assertEquals(document.cycle_attribution, "bound");
+  assertEquals(mutations.map((item) => item.table), [
+    "job_events",
+    "job_documents",
+  ]);
+});
+
+Deno.test("exact trusted snapshot with drifted cycle columns repairs cycle only", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\ncycle repair fixture");
+  const body = await bindBody(bytes);
+  const first = bindClient(bytes);
+  await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        first.client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+  const trusted = first.document.data_snapshot_json as Record<string, unknown>;
+  const { client, document, mutations } = bindClient(bytes, {
+    prior: trusted,
+    documentCycleId: null,
+    documentCycleAttribution: null,
+  });
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+  assertEquals(result.success, true);
+  assertEquals(result.skipped, false);
+  assertEquals(result.writes, 1);
+  assertEquals((result as any).cycle_repair, true);
+  assertEquals(document.attendance_cycle_id, "cycle-fixture");
+  assertEquals(document.cycle_attribution, "bound");
+  assertEquals(document.data_snapshot_json, trusted);
+  assertEquals(
+    mutations.every((item) => item.table === "job_documents"),
+    true,
+  );
+});
+
+Deno.test("materials evidence trims whitespace before source compare", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nmaterials trim fixture");
+  const { client, mutations } = bindClient(bytes, {
+    serviceReport: {
+      id: SERVICE_REPORT_ID,
+      status: "submitted",
+      checklist_json: { materials_used: ["star picket x 4  "] },
+      attendance_cycle_id: "cycle-fixture",
+      cycle_attribution: "bound",
+      cycle_number: 1,
+    },
+  });
+  const body: Record<string, unknown> = await bindBody(bytes);
+  body.report_job = {
+    ...(body.report_job as Record<string, unknown>),
+    materials: "star picket x 4",
+    materials_evidence: {
+      state: "recorded_used",
+      items: ["  star picket x 4"] as string[],
+    },
+  };
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+  assertEquals(result.success, true);
+  assertEquals(mutations.length > 0, true);
+});
+
+Deno.test("curated bind rejects wrong contact, hash, cycle, self-reference and conflicts before trust", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nprivacy-safe fixture");
   const baseline = await bindBody(bytes);
   const cases: Array<{
@@ -276,7 +543,7 @@ Deno.test("curated bind rejects wrong contact, hash, renderer, cycle, self-refer
       body: {
         ...baseline,
         report_job: {
-          ...baseline.report_job,
+          ...baseline.report_job as Record<string, unknown>,
           contact: "Caller supplied contact must not win",
         },
       },
@@ -287,27 +554,37 @@ Deno.test("curated bind rejects wrong contact, hash, renderer, cycle, self-refer
       body: {
         ...baseline,
         report_job: {
-          ...baseline.report_job,
+          ...baseline.report_job as Record<string, unknown>,
           works: "Two trades completed three hours billed at a fixture rate.",
         },
       },
       message: "commercial content is not allowed",
     },
     {
-      label: "bad raw hash",
+      label: "sha256 format invalid",
       body: { ...baseline, pdf_sha256: "0".repeat(64) },
+      message: "must use sha256:<64 lowercase hex>",
+    },
+    {
+      label: "bad raw hash",
+      body: { ...baseline, pdf_sha256: `sha256:${"0".repeat(64)}` },
       message: "raw SHA-256 mismatch",
     },
     {
-      label: "retired renderer",
-      body: { ...baseline, renderer_source_revision: "retired-revision" },
-      message: "inactive or retired",
-    },
-    {
-      label: "wrong cycle",
+      label: "document on other cycle",
       body: baseline,
       clientOptions: { cycleId: "other-cycle" },
-      message: "not the job current cycle",
+      message: "another or inconsistent attendance cycle",
+    },
+    {
+      label: "missing current cycle",
+      body: baseline,
+      clientOptions: {
+        cycleId: null,
+        documentCycleId: null,
+        documentCycleAttribution: null,
+      },
+      message: "no verified current attendance cycle",
     },
     {
       label: "self reference",
@@ -327,30 +604,19 @@ Deno.test("curated bind rejects wrong contact, hash, renderer, cycle, self-refer
       label: "wrong document job",
       body: baseline,
       clientOptions: { documentJobId: "other-job" },
-      message: "not a visible current-cycle",
+      message: "not a visible same-job",
     },
     {
       label: "wrong document type",
       body: baseline,
       clientOptions: { documentType: "work_order" },
-      message: "not a visible current-cycle",
+      message: "not a visible same-job",
     },
     {
       label: "invisible report",
       body: baseline,
       clientOptions: { visibleToTrades: false },
-      message: "not a visible current-cycle",
-    },
-    {
-      label: "raw self-stamp",
-      body: baseline,
-      clientOptions: {
-        prior: {
-          evidence_source: "raw_trade_report_fields",
-          source_document_id: "document-fixture",
-        },
-      },
-      message: "raw, retired, or self-stamped",
+      message: "not a visible same-job",
     },
     {
       label: "second conflicting bind",
@@ -358,12 +624,28 @@ Deno.test("curated bind rejects wrong contact, hash, renderer, cycle, self-refer
       clientOptions: {
         otherDocuments: [{
           id: "other-document",
+          type: "makesafe_report",
+          attendance_cycle_id: "cycle-fixture",
           data_snapshot_json: {
             curated_source_kind: "durable_curated_revision",
           },
         }],
       },
       message: "already has a conflicting curated source bind",
+    },
+    {
+      label: "source report mismatch",
+      body: {
+        ...baseline,
+        report_job: {
+          ...baseline.report_job as Record<string, unknown>,
+          photo_evidence: {
+            ...(baseline.report_job as any).photo_evidence,
+            source_revision: "job_service_report:wrong-report",
+          },
+        },
+      },
+      message: "selected current-cycle service report",
     },
   ];
   for (const testCase of cases) {
@@ -376,6 +658,7 @@ Deno.test("curated bind rejects wrong contact, hash, renderer, cycle, self-refer
             _bindCurrentCycleCuratedMakesafeReportForTest(
               client,
               testCase.body,
+              FIXTURE_ACTOR,
             ),
         ),
       ApiError,
@@ -386,7 +669,7 @@ Deno.test("curated bind rejects wrong contact, hash, renderer, cycle, self-refer
   }
 });
 
-Deno.test("same curation identity with different bytes is replay drift, not a second bind", async () => {
+Deno.test("same curation identity with different bytes is served-byte drift, not a second bind", async () => {
   const firstBytes = new TextEncoder().encode("%PDF-1.7\nfirst fixture");
   const changedBytes = new TextEncoder().encode("%PDF-1.7\nchanged fixture");
   const { client, mutations } = bindClient(firstBytes);
@@ -397,21 +680,24 @@ Deno.test("same curation identity with different bytes is replay drift, not a se
       _bindCurrentCycleCuratedMakesafeReportForTest(
         client,
         firstBody,
+        FIXTURE_ACTOR,
       ),
   );
   const changedBody = await bindBody(changedBytes);
   const error = await assertRejects(
     () =>
       withStoredPdf(
-        changedBytes,
+        // served bytes remain the original; caller-supplied PDF diverges
+        firstBytes,
         () =>
           _bindCurrentCycleCuratedMakesafeReportForTest(
             client,
             changedBody,
+            FIXTURE_ACTOR,
           ),
       ),
     ApiError,
-    "conflicting curated source bind",
+    "bytes drift from the curated artifact",
   );
   assertEquals((error as ApiError).status, 409);
   assertEquals(mutations.length, 2);
@@ -427,7 +713,12 @@ Deno.test("cycle reservation collision refuses before a concurrent trusted marke
     () =>
       withStoredPdf(
         bytes,
-        () => _bindCurrentCycleCuratedMakesafeReportForTest(client, body),
+        () =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          ),
       ),
     ApiError,
     "bind in progress or completed",
@@ -440,7 +731,7 @@ Deno.test("cycle reservation collision refuses before a concurrent trusted marke
 });
 
 Deno.test("current-wiki input hash binds photo bytes, not temp paths", async () => {
-  const contentHash = "a".repeat(64);
+  const contentHash = `sha256:${"a".repeat(64)}`;
   const photoEvidence = {
     source_revision: "fixture-source-1",
     completeness_verified: true,
@@ -477,7 +768,10 @@ Deno.test("current-wiki input hash binds photo bytes, not temp paths", async () 
   assertEquals(await inputHash(reviewed), await inputHash(apply));
   const changedBytes = {
     ...apply,
-    photos: [{ ...apply.photos[0], content_sha256: "b".repeat(64) }],
+    photos: [{
+      ...apply.photos[0],
+      content_sha256: `sha256:${"b".repeat(64)}`,
+    }],
   };
   if (await inputHash(reviewed) === await inputHash(changedBytes)) {
     throw new Error("photo content SHA-256 must move the report input hash");
