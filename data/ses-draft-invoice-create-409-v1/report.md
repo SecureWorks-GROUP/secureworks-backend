@@ -271,10 +271,187 @@ Until then: agents call **`prepare_ses_invoice_obligation`** after a U4 pre-Xero
 
 ---
 
+## CAPTAIN DECISION (resolved product) — Option B create-before-approve
+
+**Received:** 2026-08-04 via Firstmate / Rayleigh.  
+**Binding rule:** `data/captain-rule-draft-invoice-b-2026-08-04.md` (supersedes earlier draft-invoice rule).  
+**Prior classification (C)** stands as engineering fact; product now **authorises a deliberate money-control change for DRAFT mint only**.
+
+Phase 1 below is **design only**. No implementation in this pass.
+
+---
+
+## PHASE 1 DESIGN — Option B (create before approve)
+
+### Verified facts (not re-derived)
+
+| Fact | Location | Implication |
+| --- | --- | --- |
+| Internal gateway already mints DRAFT, `send_email: false`, full SES stamps | `ops-api/index.ts:1244–1262` `makeSesXeroGateway.createDraft` | **Reuse this.** Do not invent a second Xero create path. |
+| Fence already admits internal SES context | `ops-api/index.ts:26661` `if (!inspection.sealed \|\| internalSes) return inspection` | **Do not weaken the fence.** If a patch seems to require it → stop and escalate. |
+| Free / retired create stays shut | `ops-api/index.ts:6434–6445` `legacy_free_invoice_path_retired` | Do not reopen. |
+| Public `create_invoice` stays sealed | fence + no `internal.ses` on public route | Unchanged. |
+| Docs Ready already wants linked ACCREC DRAFT | `makesafe_docs_ready_invoice.ts:79`, `makesafe_computed_status.ts:361–365` | Once mint works, readiness rule need not relax. |
+
+### The three `invoice_approval_missing` sites — which guard what
+
+| Site | Function | Guards | Under Option B |
+| --- | --- | --- | --- |
+| `ses_reporting_actions.ts:1474` | `approveSesInvoiceRevisionAction` | Cockpit hold / approve control disabled when obligation not executable | **Not the create gate.** Keep as approve-side hygiene. Cockpit *enablement* of APPROVE changes (see below). |
+| `ses_reporting_actions.ts:1560` | `currentInvoiceApproval` → used by `executeSesInvoiceRevisionAction` **before** Xero create | **This is the create blocker.** | **Remove from the draft-mint path only.** Keep (or re-target) for authorise execution. |
+| `ses_reporting_actions.ts:2095` | release / SEND IT approval | Requires prior invoice approval with `includes_authorise: true` before send | **Keep.** Authorise/send stay human-gated. |
+
+Additional create-path blockers that must be separated (same theme):
+
+| Site | What it does | Option B |
+| --- | --- | --- |
+| `executeSesInvoiceRevisionAction` ≈1610–1616 | Refuses `auth.mode === "routine"` entirely | Draft **mint** must not live behind this “approved execute” wall. Authorise execute may stay non-routine. |
+| `begin_ses_invoice_execution_v1` (migration U5/U6) | Requires matching approval hash before flipping to `create_approved` | **Do not call for draft mint.** Authorise path may keep an approval-bound begin, or a dedicated authorise begin later. |
+| Cockpit `approve_invoice` enablement `ses_review_cockpit.ts:360–367` | Enabled when obligation exists and **`!docket.xero_binding`** (i.e. create-permission UI) | **Must flip:** enable when a **linked DRAFT** binding exists (approve existing draft), not when binding is absent. |
+
+---
+
+### 1. Which action creates the draft
+
+**Public action name (proposed):** `create_ses_invoice_draft`
+
+**Not** `create_invoice`, **not** retired `create_makesafe_draft_invoice` / draft pack, **not** “prepare alone” (prepare stays local-only).
+
+**Sequence:**
+
+1. U4 docket with pre-Xero local invoice proposal (existing).  
+2. `prepare_ses_invoice_obligation` — commits local obligation revision (`xero: null`). Unchanged; agent/routine/api_key.  
+3. **`create_ses_invoice_draft`** — **new** action; skill / MCP / **api_key** (and, if the skill uses the same standing key as prepare, **routine** allow-list for mint only — **never** approve/authorise/send).  
+4. Internally reuses **only**:
+   - the prepared obligation proposal,
+   - `buildSesEffect` + `executeSesExternalEffect` for idempotent `invoice_create`,
+   - **`makeSesXeroGateway(client).createDraft`** (`index.ts:1244–1262`),
+   - `persistSesInvoiceMirror` + obligation `state → create_executed` + `xero_binding`.  
+5. Hard invariants on this action:
+   - **No** call to `currentInvoiceApproval` (L1560 path).  
+   - **No** call to `begin_ses_invoice_execution_v1` (approval-bound).  
+   - **No** call to `gateway.authorise`.  
+   - **No** email / release / void.  
+   - Returns only when mirror shows `status: DRAFT` with `invoice_obligation_revision_id` + `ses_external_token` set.  
+   - Replay-safe: second call reconciles by SES token / obligation binding, does not mint a twin.
+
+**Where the approval precondition is removed:** only on this draft-mint path — specifically the pair  
+`currentInvoiceApproval` (≈1560) + `begin_ses_invoice_execution_v1` approval requirement — **for create**.  
+They remain required for the post-draft money steps below.
+
+**Fence:** no change. Gateway already passes `internal.ses`, so L26661 admits the write.
+
+**Why not fold mint into `execute_ses_invoice_revision`?**  
+Today that action means “run the approved money plan” (create and optionally authorise under one approval). Collapsing “mint without click” into it blurs authorities and keeps the routine ban on “execute approved invoice.” A dedicated create action keeps approve/authorise semantics clean.
+
+**Why not fold mint into `prepare_ses_invoice_obligation`?**  
+Prepare is explicitly zero external mutations (`external_mutations.xero: 0`). Keeping prepare local preserves that contract and lets mint fail/retry independently of proposal commit.
+
+---
+
+### 2. Which action cockpit APPROVE INVOICE maps to
+
+**Still:** `approve_ses_invoice_revision` (JWT human only — api_key/routine must remain unable to record the approval as a Captain substitute; today it requires `auth.mode === "jwt"` + identified user).
+
+**Semantic change (product + cockpit, not a new action name):**
+
+| Before (U5) | After (Option B) |
+| --- | --- |
+| APPROVE INVOICE = permission to **mint** the draft (and optionally authorise) | APPROVE INVOICE = approval of an **existing** Xero DRAFT — “make it real” |
+| Cockpit enables when obligation present and **no** `xero_binding` | Enable when obligation present and `xero_binding.status === "DRAFT"` (and clean/non-stale rules still hold) |
+| Control plan text: “Create one Xero DRAFT…” (`ses_review_cockpit.ts:412–413`) | Plan text: approve existing draft for authorise / later release — **no create** |
+
+**After approve:**
+
+- `includes_authorise: false` — approval recorded; draft remains DRAFT; no authorise (Captain may only be signing off commercial lines for Docs Ready visibility, if product keeps that band).  
+- `includes_authorise: true` — unlocks **authorise** via existing `execute_ses_invoice_revision` (approval-gated; create half becomes no-op / reconcile-only when binding already exists).  
+- **SEND IT** stays `approve_ses_release_revision` + `execute_ses_release_revision`, still requiring invoice approval with authorise where L2095 applies.
+
+So the click maps to **`approve_ses_invoice_revision`**, not to create, and the next money effect on that approval is **authorise (and later release)**, never mint.
+
+---
+
+### 3. Acceptance test (design contract)
+
+Prove three things: **mint without human click**, **ledger identity**, **authorise/send still blocked**.
+
+**A. Positive — skill mints DRAFT with no human click**
+
+1. Fixture: sealed SES job, U4 pre-Xero docket, priced `prepare_ses_invoice_obligation` → state `proposed`, no approval rows, no `xero_binding`.  
+2. Call `create_ses_invoice_draft` with **api_key** (or standing skill key) only — **no** JWT Captain session, **no** prior `approve_ses_invoice_revision`.  
+3. Assert:
+   - HTTP success, `state: xero_draft_created` (or equivalent).  
+   - `xero_invoices` row: `status = DRAFT`, `invoice_type = ACCREC`, `job_id` linked.  
+   - `invoice_obligation_revision_id` set to the prepared revision.  
+   - `ses_external_token` set; reference carries SES token stamp (`ref | token`).  
+   - Obligation revision `state = create_executed` with matching `xero_binding`.  
+   - `ses_external_effects` has confirmed `invoice_create` for that obligation.  
+   - **Zero** rows in `makesafe_revision_approvals` for `action = invoice` on that revision.  
+   - Gateway path used: createDraft / internal ses context only (no authorise effect).  
+4. Replay same call → idempotent (same `xero_invoice_id`, no second live DRAFT).
+
+**B. Negative — authorise still blocked without Captain**
+
+1. After A, call `execute_ses_invoice_revision` without approval → still **`invoice_approval_missing`** (L1560 family) or equivalent authorise gate.  
+2. Call gateway authorise / legacy `approve_invoice` / `approve_and_send_invoice` on the sealed job → still refused.  
+3. Invoice status remains **DRAFT**, never AUTHORISED.
+
+**C. Negative — send / release still blocked**
+
+1. `approve_ses_release_revision` / `execute_ses_release_revision` without prior Captain invoice approval (`includes_authorise`) → still refused (L2095 family).  
+2. No Graph/email side effects; `send_dispatched` stays false.
+
+**D. Negative — free and public create stay shut**
+
+1. Public `create_invoice` on sealed job → **409** `sealed_ses_release_required`.  
+2. `create_makesafe_draft_invoice` / `draft_makesafe_report_pack` → **410** `legacy_free_invoice_path_retired`.  
+3. Fence allow-list / read exemption membership unchanged (tests that pin `get_invoice_pdf` only still pass).
+
+**E. Docs Ready (optional in unit suite; required in integration)**
+
+1. With pack artifacts + qualifying linked DRAFT from A, `docsReady` / Docs Ready qualifier true **without** changing the DRAFT prerequisite rule.
+
+---
+
+### Target post-B sequence (skill + Captain)
+
+```
+prepare_ses_invoice_obligation     # local proposal; agent OK
+create_ses_invoice_draft           # Xero DRAFT via makeSesXeroGateway.createDraft; agent/api_key OK; NO human click
+        → Docs Ready can light (pack + linked DRAFT)
+approve_ses_invoice_revision       # Captain JWT UI click; approves EXISTING draft
+execute_ses_invoice_revision       # authorise only when includes_authorise (approval required)
+approve_ses_release_revision       # Captain SEND IT
+execute_ses_release_revision       # send routes only
+```
+
+---
+
+### Explicit non-goals (Phase 1 + implementation)
+
+- No fence membership or classification change.  
+- No reopening retired free create (`6434–6445`).  
+- No agent authority to approve, authorise, email, send, or void.  
+- No second Xero create implementation beside `makeSesXeroGateway.createDraft`.  
+- No Docs Ready rule relaxation if mint works.  
+- No Door 1 / curated-bind / `job_media` edits.
+
+---
+
+### Implementation risk notes (for Phase 2, not decided here)
+
+1. **Cockpit enablement** (`!xero_binding` → require DRAFT binding) is load-bearing UI; tests in `ses_review_cockpit_test.ts` must flip with it.  
+2. **`begin_ses_invoice_execution_v1`** today conflates “approved to create” with execution reserve — draft mint needs a path that does not use that approval predicate (effect claim alone may suffice for create idempotency).  
+3. **`execute_ses_invoice_revision`** must become create-reconcile + authorise-if-approved, not “create only after approve.”  
+4. **Auth matrix:** mint = api_key (+ routine if skill shares prepare’s standing key); approve/authorise/send = JWT human only.  
+5. If any smallest path appears to require fence weakening → **stop and escalate** (Captain rule constraint 2).
+
+---
+
 ## Status
 
-- Classification: **(C)**  
-- Report location (firstmate home): `data/ses-draft-invoice-create-409-v1/report.md`  
-- 19-draft path: **legacy free `createInvoice` (no SES context), pre-approval, pre-U5; path retired**  
-- Code fix: **none**  
-- Idle awaiting Captain decision on options 1–3  
+- Classification history: **(C)** was correct for the pre-decision system.  
+- Product decision: **Option B create-before-approve** (Captain rule B, 2026-08-04).  
+- Phase 1 design: **complete** in this report.  
+- Phase 2 implementation: **not started** — awaiting Firstmate confirm on this design.  
+- Report: firstmate `data/ses-draft-invoice-create-409-v1/report.md`  
