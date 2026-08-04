@@ -43,6 +43,196 @@ import { projectMakesafeJobIdentity } from "./makesafe_job_identity_read_model.t
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
 
 /**
+ * Ops board field shape.
+ *
+ * - `card` (default for projection=ops): only what the kanban card paints, plus
+ *   the small presentation keys that previously required a second
+ *   `makesafe_pipeline?history=all` join. Diagnostics and detail-view payloads
+ *   are omitted so the board stays under a few hundred KB / a couple of seconds.
+ * - `full`: every diagnostic and detail field (lineage siblings, notes,
+ *   computed_status_evidence, derived_stage_v2_*, roof tick, job_identity, …).
+ *   Opt in with `fields=full` or `include_diagnostics=1`.
+ *
+ * Placement (`canonical_stage`) is identical in both shapes: declared ladder +
+ * display-ledger overlay. Card mode never re-derives a column.
+ */
+export const MAKESAFE_BOARD_FIELDS = ["card", "full"] as const;
+export type MakesafeBoardFields = (typeof MAKESAFE_BOARD_FIELDS)[number];
+export const MAKESAFE_BOARD_DEFAULT_FIELDS: MakesafeBoardFields = "card";
+
+export function parseMakesafeBoardFields(
+  fieldsRaw: string | null | undefined,
+  includeDiagnosticsRaw?: string | null,
+): MakesafeBoardFields {
+  const includeDiagnostics = ["1", "true", "yes", "full"].includes(
+    String(includeDiagnosticsRaw || "").trim().toLowerCase(),
+  );
+  if (includeDiagnostics) return "full";
+  const fields = String(fieldsRaw || MAKESAFE_BOARD_DEFAULT_FIELDS)
+    .trim()
+    .toLowerCase();
+  if (fields === "full" || fields === "all" || fields === "diagnostic") {
+    return "full";
+  }
+  if (fields === "card" || fields === "slim" || fields === "board") {
+    return "card";
+  }
+  // Unknown value: stay on the fast board path rather than silently shipping
+  // a multi-megabyte diagnostic dump.
+  return MAKESAFE_BOARD_DEFAULT_FIELDS;
+}
+
+/**
+ * Presentation keys the ops card renderer reads that used to come only from
+ * the overlay-blind `makesafe_pipeline` dual-fetch. Stamped from the pipeline
+ * base row so `fields=card` is self-sufficient for board paint.
+ */
+export function boardPresentationFields(base: any) {
+  return {
+    site_suburb: base?.site_suburb || null,
+    site_address: base?.site_address || null,
+    client_name: base?.client_name || null,
+    client_email: base?.client_email || null,
+    client_phone: base?.client_phone || null,
+    has_wo: base?.has_wo === true,
+    docs_missing: base?.docs_missing === true,
+    docs_warning: base?.docs_warning === true,
+    invoice_status: base?.invoice_status || null,
+    invoice_raw_status: base?.invoice_raw_status ?? rawInvoiceStatus(base),
+    invoice_date: base?.invoice_date || null,
+    invoice_created_at: base?.invoice_created_at || null,
+    requesting_company_slug: base?.requesting_company_slug || null,
+    requesting_company_name: base?.requesting_company_name ||
+      base?.requesting_company || null,
+    requesting_company: base?.requesting_company || null,
+    builder_company: base?.builder_company ||
+      base?.requesting_company_name ||
+      base?.requesting_company || null,
+    intake_at: base?.intake_at || base?.created_at || null,
+    created_at: base?.created_at || null,
+    updated_at: base?.updated_at || null,
+    completed_at: base?.completed_at || null,
+    reattend_count: base?.reattend_count ?? null,
+    is_reattend: base?.is_reattend === true,
+    last_reattend_at: base?.last_reattend_at || null,
+    resume_action: base?.resume_action || null,
+    pack_status: base?.pack_status || base?.report_pack?.status || null,
+    needs_money_review: base?.needs_money_review === true,
+    cancel_reason: base?.cancel_reason || null,
+    cancel_note: base?.cancel_note || null,
+    cancelled_by: base?.cancelled_by || null,
+    cancelled_at: base?.cancelled_at || null,
+  };
+}
+
+function slimContactForCard(contact: any) {
+  return {
+    client_name: contact?.client_name || null,
+    phone: contact?.phone || null,
+    address: contact?.address || null,
+  };
+}
+
+function slimAssignmentsForCard(assignments: any[]) {
+  return (assignments || []).map((a) => ({
+    assignment_id: a?.assignment_id || null,
+    user_id: a?.user_id || null,
+    name: a?.name || null,
+    status: a?.status || null,
+    scheduled_date: a?.scheduled_date || null,
+    role: a?.role || null,
+  }));
+}
+
+function slimLineageForCard(lineage: any) {
+  return {
+    builder_claim_ref: lineage?.builder_claim_ref || null,
+    builder_work_order_number: lineage?.builder_work_order_number || null,
+    builder_po_number: lineage?.builder_po_number || null,
+    builder_instruction_key: lineage?.builder_instruction_key || null,
+    property_claim_key: lineage?.property_claim_key || null,
+    // siblings omitted — diagnostic, fat, and unused by card paint
+    siblings: [],
+  };
+}
+
+/**
+ * Project one full canonical row onto the card-shaped ops payload. Pure and
+ * placement-preserving: never renames or rewrites `canonical_stage`.
+ */
+export function projectOpsMakesafeCardRow(row: any) {
+  const presentation = row?.presentation && typeof row.presentation === "object"
+    ? row.presentation
+    : {};
+  return {
+    contract_version: row?.contract_version || MAKESAFE_BOARD_CONTRACT_VERSION,
+    id: row?.id,
+    job_number: row?.job_number || null,
+    type: row?.type || "makesafe",
+    ses_family: row?.ses_family || null,
+    ses_family_label: row?.ses_family_label || null,
+    ses_recipe_state: row?.ses_recipe_state || null,
+    job_state: row?.job_state || null,
+    substatus: row?.substatus || null,
+    declared_stage: row?.declared_stage || null,
+    canonical_stage: row?.canonical_stage || null,
+    canonical_stage_label: row?.canonical_stage_label || null,
+    status_application: row?.status_application || null,
+    duplicate_of_job_id: row?.duplicate_of_job_id || null,
+    duplicate_of_job_number: row?.duplicate_of_job_number || null,
+    captain_action: row?.captain_action || null,
+    projection_warning: row?.projection_warning || null,
+    makesafe_type: row?.makesafe_type || null,
+    builder: row?.builder || null,
+    contact: slimContactForCard(row?.contact),
+    assignments: slimAssignmentsForCard(row?.assignments || []),
+    report: row?.report || null,
+    pack: row?.pack
+      ? {
+        state: row.pack.state || null,
+        sent: row.pack.sent === true,
+        sent_at: row.pack.sent_at || null,
+        drafted: row.pack.drafted === true,
+        docket_revision_id: row.pack.docket_revision_id || null,
+        pre_xero_docs_ready: row.pack.pre_xero_docs_ready === true,
+        closeout_documents: row.pack.closeout_documents || {
+          report: false,
+          invoice: false,
+          swms: false,
+        },
+      }
+      : null,
+    age: row?.age || null,
+    blockers: row?.blockers || null,
+    cancelled: row?.cancelled || null,
+    attendance_cycle_id: row?.attendance_cycle_id ?? null,
+    cycle_number: row?.cycle_number ?? null,
+    cycle_attribution_flags: row?.cycle_attribution_flags || [],
+    readiness_revision: row?.readiness_revision ?? null,
+    commercial_warning: row?.commercial_warning ?? null,
+    invoice_qualifies_as_current_draft:
+      row?.invoice_qualifies_as_current_draft === true,
+    invoice_draft_qualification_reason:
+      row?.invoice_draft_qualification_reason ?? null,
+    // Slim lineage for external_ref fallback only — no sibling fan-out.
+    lineage: slimLineageForCard(row?.lineage || {}),
+    // Presentation keys at top level so mapCanonicalMakesafeRow / card paint
+    // can read them without the pipeline dual-fetch.
+    ...presentation,
+    // Explicit top-level fallbacks when presentation was not stamped (older
+    // callers of projectOpsMakesafeCardRow on a full row).
+    site_suburb: presentation.site_suburb ?? row?.site_suburb ?? null,
+    site_address: presentation.site_address ?? row?.site_address ?? null,
+    client_name: presentation.client_name ?? row?.contact?.client_name ??
+      row?.client_name ?? null,
+    has_wo: presentation.has_wo === true || row?.has_wo === true,
+    invoice_status: presentation.invoice_status ?? row?.invoice_status ?? null,
+    requesting_company_slug: presentation.requesting_company_slug ??
+      row?.requesting_company_slug ?? null,
+  };
+}
+
+/**
  * R8 — what an overlay ledger row is permitted to do.
  *
  * `display_override` may change the column, subject to the unchanged source
@@ -763,7 +953,9 @@ function rawInvoiceStatus(base: any): string | null {
 export function buildCanonicalMakesafeRows(
   baseRows: any[],
   extras: CanonicalMakesafeExtras = {},
+  mode: MakesafeBoardFields = "full",
 ): any[] {
+  const cardMode = mode === "card";
   const computedAt = extras.computedAt || new Date().toISOString();
   const terminalSyntheticJobIds = extras.terminalSyntheticLivefireJobIds;
   const rows = (baseRows || []).filter((base) =>
@@ -785,11 +977,20 @@ export function buildCanonicalMakesafeRows(
       report_delivery: base?.metadata?.report_delivery ||
         detail?.report_delivery,
     });
-    const ledgerRows = extras.portalCaptureRowsByJobId?.[base?.id] || [];
-    const ledgerPortalCaptures = portalCapturesFromLedger(base, ledgerRows);
-    const portalCaptures = projectMakesafePortalCaptures(base, ledgerRows);
-    const hold = extras.holdsByJobId?.[base?.id] || null;
-    const rawPhotoCount = Number(extras.photoCountByJobId?.[base?.id] || 0);
+    // Card mode never loads portal/hold extras; skip the pure projections too.
+    const ledgerRows = cardMode
+      ? []
+      : (extras.portalCaptureRowsByJobId?.[base?.id] || []);
+    const ledgerPortalCaptures = cardMode
+      ? []
+      : portalCapturesFromLedger(base, ledgerRows);
+    const portalCaptures = cardMode
+      ? []
+      : projectMakesafePortalCaptures(base, ledgerRows);
+    const hold = cardMode ? null : (extras.holdsByJobId?.[base?.id] || null);
+    const rawPhotoCount = cardMode
+      ? 0
+      : Number(extras.photoCountByJobId?.[base?.id] || 0);
     const photoCount = photoCountForCurrentCycle(
       rawPhotoCount,
       detail,
@@ -829,12 +1030,146 @@ export function buildCanonicalMakesafeRows(
       !!application &&
       String(application.source_status || "").toLowerCase() === declaredStage &&
       String(application.after_status || "").toLowerCase() === declaredStage;
+    // Placement authority: declared ladder + display-ledger overlay. Identical
+    // in card and full mode — card mode must never re-derive a column.
     const displayStage = applicationApplies
       ? String(application.after_status || declaredStage).toLowerCase()
       : declaredStage;
     // enrich already cycle-scopes pack/invoice closeout inputs on reattend.
     const invoiceStatus = rawInvoiceStatus(base);
     const packSent = base?.pack_sent === true;
+    const presentation = boardPresentationFields(base);
+    const contact = buildMakesafeContact(
+      base,
+      cardMode ? [] : (extras.contactsByJobId?.[base?.id] || []),
+    );
+    const lineage = lineageFacts(
+      base,
+      cardMode ? null : extras.intakeCaseByJobId?.[base?.id],
+    );
+    const packPayload = {
+      state: pack?.status || (base?.sent_to_builder ? "sent" : "not_started"),
+      sent: packSent,
+      sent_at: packSent
+        ? (pack?.sent_at || base?.makesafe_details?.report_sent_at || null)
+        : null,
+      drafted: !!pack?.report_doc_id ||
+        pack?.pre_xero_docs_ready === true ||
+        ["drafted", "authorised_not_sent"].includes(
+          String(pack?.status || ""),
+        ),
+      docket_revision_id: pack?.docket_revision_id || null,
+      pre_xero_docs_ready: pack?.pre_xero_docs_ready === true,
+      closeout_documents: {
+        report: base?.has_report_doc === true,
+        invoice: base?.has_invoice_doc === true,
+        swms: base?.has_swms_doc === true,
+      },
+    };
+    const reportPayload = {
+      state: report?.status || base?.report_status ||
+        "waiting_on_trade_report",
+      submitted_at: report?.submitted_at || report?.created_at ||
+        base?.makesafe_details?.report_received_at || null,
+      photo_count: photoCount,
+      cycle_number: Number(report?.cycle_number || base?.cycle_number || 1),
+    };
+    const statusApplication = (applicationApplies || attestationAttaches)
+      ? {
+        effect: applicationApplies ? "override" : "attestation",
+        applies_to_display: applicationApplies,
+        decision_kind: decisionKind,
+        run_key: application.run_key,
+        before_status: application.before_status,
+        after_status: application.after_status,
+        evidence_ref: application.evidence_ref,
+        applied_by: application.applied_by,
+        applied_at: application.applied_at,
+        // Duplicate-survivor archives carry a pointer to the card that
+        // survived, so an archived duplicate never reads as lost work.
+        duplicate_of_job_id: application.duplicate_of_job_id ?? null,
+        duplicate_of_job_number: application.duplicate_of_job_number ?? null,
+        duplicate_rule: application.duplicate_rule ?? null,
+      }
+      : null;
+    const spine = {
+      contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
+      id: base?.id,
+      job_number: base?.job_number || null,
+      type: base?.type || "makesafe",
+      ses_family: sesFamily,
+      ses_family_label: sesFamilyLabel(sesFamily),
+      ses_recipe_state: sesFamily === "restoration" || sesFamily === "repair"
+        ? "unsealed"
+        : sesFamily === "unknown"
+        ? "unknown"
+        : "sealed",
+      job_state: base?.status || null,
+      substatus: base?.substatus || null,
+      declared_stage: declaredStage,
+      // Placement authority — identical in card and full mode.
+      canonical_stage: displayStage,
+      canonical_stage_label: applicationApplies
+        ? OPS_MAKESAFE_STAGE_LABELS[displayStage as OpsMakesafeStage] ||
+          displayStage
+        : base?.board_label || null,
+      status_application: statusApplication,
+      // Present regardless of whether the overlay currently applies, so the
+      // planner can refuse to re-archive a card it already archived.
+      duplicate_of_job_id: application?.duplicate_of_job_id ?? null,
+      duplicate_of_job_number: application?.duplicate_of_job_number ?? null,
+      captain_action: base?.captain_action ?? null,
+      attendance_cycle_id: base?.attendance_cycle_id ?? null,
+      cycle_number: Number(
+        base?.cycle_number || detail?.cycle_number || report?.cycle_number || 1,
+      ),
+      cycle_attribution_flags: Array.isArray(base?.cycle_attribution_flags)
+        ? base.cycle_attribution_flags
+        : [],
+      readiness_revision: base?.readiness_revision ?? null,
+      invoice_qualifies_as_current_draft: invoiceQualifiesAsCurrentDraft,
+      invoice_draft_qualification_reason:
+        base?.invoice_draft_qualification_reason ?? "missing_invoice",
+      commercial_warning: base?.commercial_warning ?? null,
+      makesafe_type: sesFamily === "restoration"
+        ? sesFamilyLabel(sesFamily)
+        : base?.metadata?.makesafe_job_family_label ||
+          base?.metadata?.makesafe_job_family ||
+          base?.makesafe_details?.report_type ||
+          "Make-safe",
+      builder: {
+        name: base?.requesting_company_name || base?.requesting_company || null,
+        external_ref: base?.external_ref || null,
+      },
+      report: reportPayload,
+      pack: packPayload,
+      age: ageFacts(base),
+      blockers: blockerFacts(base, assignments),
+      cancelled: base?.board_stage === "cancelled"
+        ? {
+          reason: base?.cancel_reason || null,
+          note: base?.cancel_note || null,
+          by: base?.cancelled_by || null,
+          at: base?.cancelled_at || null,
+        }
+        : null,
+      // Stamped so fields=card is self-sufficient for board paint without the
+      // makesafe_pipeline dual-fetch. Full mode keeps them too (additive).
+      presentation,
+      ...presentation,
+    };
+
+    // Card mode: placement + paint only. Skip M1, stage-v2 shadow, roof tick,
+    // notes, fat lineage siblings, and diagnostic evidence blobs.
+    if (cardMode) {
+      return {
+        ...spine,
+        contact: slimContactForCard(contact),
+        assignments: slimAssignmentsForCard(assignments),
+        lineage: slimLineageForCard(lineage),
+      };
+    }
+
     // Built WITHOUT `displayedStatus`, so the corrected shadow engine below
     // physically cannot see the stage the board is currently displaying. M1
     // still gets it (appended one line down) because its published value is
@@ -919,59 +1254,13 @@ export function buildCanonicalMakesafeRows(
       cycle_number: roofEligibility.target?.cycle_number ?? null,
     };
     return {
-      contract_version: MAKESAFE_BOARD_CONTRACT_VERSION,
-      id: base?.id,
-      job_number: base?.job_number || null,
-      type: base?.type || "makesafe",
-      ses_family: sesFamily,
-      ses_family_label: sesFamilyLabel(sesFamily),
-      ses_recipe_state: sesFamily === "restoration" || sesFamily === "repair"
-        ? "unsealed"
-        : sesFamily === "unknown"
-        ? "unknown"
-        : "sealed",
-      job_state: base?.status || null,
-      substatus: base?.substatus || null,
-      declared_stage: declaredStage,
+      ...spine,
       // Which legacy ladder derived `declared_stage`
       // (`MAKESAFE_STAGE_LADDER_VERSION`, stamped by enrich). Advisory
       // provenance only — the sibling of `derived_stage_v2_engine_version`, so a
       // past measurement can name the derivation that produced it. Null for a
       // caller that built the base row without enrich.
       declared_stage_engine_version: base?.board_stage_engine_version ?? null,
-      canonical_stage: displayStage,
-      canonical_stage_label: applicationApplies
-        ? OPS_MAKESAFE_STAGE_LABELS[displayStage as OpsMakesafeStage] ||
-          displayStage
-        : base?.board_label || null,
-      // R8 — provenance survives even when the visible column is unchanged.
-      // A same-column decision previously nulled this field and erased the
-      // Captain's authority from the card; four of the nine re-anchor rows are
-      // exactly that shape. `effect` and `applies_to_display` say which of the
-      // two kinds a consumer is looking at, so nothing has to infer it.
-      status_application: (applicationApplies || attestationAttaches)
-        ? {
-          effect: applicationApplies ? "override" : "attestation",
-          applies_to_display: applicationApplies,
-          decision_kind: decisionKind,
-          run_key: application.run_key,
-          before_status: application.before_status,
-          after_status: application.after_status,
-          evidence_ref: application.evidence_ref,
-          applied_by: application.applied_by,
-          applied_at: application.applied_at,
-          // Duplicate-survivor archives carry a pointer to the card that
-          // survived, so an archived duplicate never reads as lost work.
-          duplicate_of_job_id: application.duplicate_of_job_id ?? null,
-          duplicate_of_job_number: application.duplicate_of_job_number ?? null,
-          duplicate_rule: application.duplicate_rule ?? null,
-        }
-        : null,
-      // Present regardless of whether the overlay currently applies, so the
-      // planner can refuse to re-archive a card it already archived.
-      duplicate_of_job_id: application?.duplicate_of_job_id ?? null,
-      duplicate_of_job_number: application?.duplicate_of_job_number ?? null,
-      captain_action: base?.captain_action ?? null,
       computed_status: computation.status,
       computed_status_reasons: computation.reasons,
       computed_status_missing: computation.missing,
@@ -1018,33 +1307,10 @@ export function buildCanonicalMakesafeRows(
       derived_stage_v2_family: stageV2.ses_family,
       derived_stage_v2_family_kind: stageV2.family_kind,
       derived_stage_v2_family_recipe_state: stageV2.family_recipe_state,
-      // U2-S1 additive spine keys (nullable-safe for pre-migration rows).
-      attendance_cycle_id: base?.attendance_cycle_id ?? null,
-      cycle_number: Number(
-        base?.cycle_number || detail?.cycle_number || report?.cycle_number || 1,
-      ),
-      cycle_attribution_flags: Array.isArray(base?.cycle_attribution_flags)
-        ? base.cycle_attribution_flags
-        : [],
-      readiness_revision: base?.readiness_revision ?? null,
-      invoice_qualifies_as_current_draft: invoiceQualifiesAsCurrentDraft,
-      invoice_draft_qualification_reason:
-        base?.invoice_draft_qualification_reason ?? "missing_invoice",
       // The trade roof-report tick (captain, 2026-08-02). Advisory metadata
       // describing whether the one-question control belongs on this card; it
       // places no card and feeds no stage engine.
       roof_report_confirmation: roofConfirmation,
-      commercial_warning: base?.commercial_warning ?? null,
-      makesafe_type: sesFamily === "restoration"
-        ? sesFamilyLabel(sesFamily)
-        : base?.metadata?.makesafe_job_family_label ||
-          base?.metadata?.makesafe_job_family ||
-          base?.makesafe_details?.report_type ||
-          "Make-safe",
-      builder: {
-        name: base?.requesting_company_name || base?.requesting_company || null,
-        external_ref: base?.external_ref || null,
-      },
       job_identity: projectMakesafeJobIdentity({
         builder_claim_ref: base?.metadata?.builder_claim_ref,
         builder_work_order_number: base?.metadata?.builder_work_order_number,
@@ -1053,52 +1319,16 @@ export function buildCanonicalMakesafeRows(
         family: base?.metadata?.makesafe_job_family,
         authority: "typed_job_metadata",
       }),
-      contact: buildMakesafeContact(
-        base,
-        extras.contactsByJobId?.[base?.id] || [],
-      ),
+      contact,
       assignments,
-      report: {
-        state: report?.status || base?.report_status ||
-          "waiting_on_trade_report",
-        submitted_at: report?.submitted_at || report?.created_at ||
-          base?.makesafe_details?.report_received_at || null,
-        photo_count: photoCount,
-        cycle_number: Number(report?.cycle_number || base?.cycle_number || 1),
-      },
-      pack: {
-        state: pack?.status || (base?.sent_to_builder ? "sent" : "not_started"),
-        sent: packSent,
-        sent_at: packSent
-          ? (pack?.sent_at || base?.makesafe_details?.report_sent_at || null)
-          : null,
-        drafted: !!pack?.report_doc_id ||
-          pack?.pre_xero_docs_ready === true ||
-          ["drafted", "authorised_not_sent"].includes(
-            String(pack?.status || ""),
-          ),
-        docket_revision_id: pack?.docket_revision_id || null,
-        pre_xero_docs_ready: pack?.pre_xero_docs_ready === true,
-        closeout_documents: {
-          report: base?.has_report_doc === true,
-          invoice: base?.has_invoice_doc === true,
-          swms: base?.has_swms_doc === true,
-        },
-      },
       notes: noteFacts(extras.notesByJobId?.[base?.id] || []),
-      lineage: lineageFacts(base, extras.intakeCaseByJobId?.[base?.id]),
-      age: ageFacts(base),
-      blockers: blockerFacts(base, assignments),
-      cancelled: base?.board_stage === "cancelled"
-        ? {
-          reason: base?.cancel_reason || null,
-          note: base?.cancel_note || null,
-          by: base?.cancelled_by || null,
-          at: base?.cancelled_at || null,
-        }
-        : null,
+      lineage,
     };
   });
+
+  // Sibling fan-out is diagnostic (lineage.siblings) and fat. Card mode never
+  // spends the O(N²) property-claim grouping pass.
+  if (cardMode) return rows;
 
   const grouped = new Map<string, any[]>();
   for (const row of rows) {
@@ -1137,24 +1367,53 @@ export function mapOpsStageToTradeColumn(stage: unknown): {
     : { column: "New", mapped: false };
 }
 
-export function projectOpsMakesafeBoard(rows: any[]) {
+export function projectOpsMakesafeBoard(
+  rows: any[],
+  options: { fields?: MakesafeBoardFields } = {},
+) {
+  const fields = options.fields || "full";
   const columns: Record<string, any[]> = Object.fromEntries(
     OPS_MAKESAFE_STAGES.map((stage) => [stage, []]),
   );
   const unmapped: string[] = [];
   for (const row of rows || []) {
-    const stage = String(row?.canonical_stage || "").toLowerCase();
+    // Card-shaped rows are already slim; full rows are projected through the
+    // stripper only when the caller asked for card on a full build.
+    const projected = fields === "card" && row &&
+        (row.computed_status_evidence !== undefined ||
+          row.derived_stage_v2 !== undefined ||
+          row.notes !== undefined ||
+          row.roof_report_confirmation !== undefined ||
+          row.job_identity !== undefined)
+      ? projectOpsMakesafeCardRow(row)
+      : row;
+    const stage = String(projected?.canonical_stage || "").toLowerCase();
     if ((OPS_MAKESAFE_STAGES as readonly string[]).includes(stage)) {
-      columns[stage].push(row);
+      columns[stage].push(projected);
     } else {
       columns.new.push({
-        ...row,
+        ...projected,
         projection_warning: `Unknown canonical stage: ${stage || "(blank)"}`,
       });
-      if (row?.id) unmapped.push(row.id);
+      if (projected?.id) unmapped.push(projected.id);
     }
   }
+  // Card shape: do NOT duplicate every card under `rows`. Columns alone is how
+  // the ops board paints; the flat list was ~half the wire weight for no gain.
+  // Full shape keeps `rows` for existing diagnostic consumers and trade parity.
+  if (fields === "card") {
+    return {
+      shape: "card" as const,
+      columns,
+      unmapped_stage_job_ids: unmapped,
+      row_count: Object.values(columns).reduce(
+        (n, list) => n + (Array.isArray(list) ? list.length : 0),
+        0,
+      ),
+    };
+  }
   return {
+    shape: "full" as const,
     columns,
     rows: Object.values(columns).flat(),
     unmapped_stage_job_ids: unmapped,
@@ -1307,7 +1566,9 @@ export function checkMakesafeBoardParity(rows: any[]) {
   });
   // Index the projections once so the per-row checks below are O(N), not O(N^2).
   const opsCountById = new Map<string, number>();
-  for (const r of ops.rows) {
+  // Full projection always emits `rows`; card omits it. Parity only runs full.
+  const opsFlat = ops.rows ?? Object.values(ops.columns || {}).flat();
+  for (const r of opsFlat) {
     if (r?.id) opsCountById.set(r.id, (opsCountById.get(r.id) || 0) + 1);
   }
   const tradeCountById = new Map<string, number>();

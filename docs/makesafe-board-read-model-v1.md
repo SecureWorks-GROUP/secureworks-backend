@@ -14,6 +14,28 @@ Contract version: `makesafe-board.v1`.
 - Clients must not query Supabase tables directly and must not derive a column from `job_assignments.status`.
 - Reads paginate with PostgREST `.range()` and chunk job IDs. The feed is not capped at 1,000 dependent rows.
 
+### Ops field shapes (`fields=card` default)
+
+Ops projection defaults to a **card-shaped** payload (`fields=card`, response
+`shape: "card"`). Card shape is what the kanban paints: placement keys
+(`canonical_stage` from the declared ladder + display-ledger overlay), crew,
+pack/report chips, age, blockers, and the small presentation keys
+(`has_wo`, `invoice_status`, `site_suburb`, `requesting_company_slug`, …) that
+previously required a second `makesafe_pipeline?history=all` dual-fetch.
+
+Card shape deliberately omits:
+
+- diagnostics: `lineage` siblings, `computed_status_evidence`, all
+  `derived_stage_v2_*`, `declared_stage_engine_version`, `job_identity`,
+  `roof_report_confirmation`
+- detail-view blobs: `notes`, full contact `actions`, fat assignment clocks
+- the flat `rows` array (columns alone is the board authority; rows was a
+  byte-for-byte duplicate of every card)
+
+Opt into the full diagnostic dump with `fields=full` or
+`include_diagnostics=1`. Placement is identical in both shapes — card mode never
+re-derives a column. Trade projection is unchanged and always full.
+
 ### Privileged Phase 1 comparison mode
 
 The same endpoint accepts `contract_version=v2` only for the `ops` projection
