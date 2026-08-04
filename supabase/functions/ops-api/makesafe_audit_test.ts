@@ -806,7 +806,7 @@ Deno.test("2.1 makesafeAudit includes insurance-owned restoration as a typed SES
   assertEquals(audit.jobs[0].job_id, seed.jobs[0].id);
   assertEquals(audit.jobs[0].job_type, "insurance");
   assertEquals(audit.jobs[0].ses_family, "restoration");
-  assertEquals(audit.jobs[0].ses_recipe_state, "unsealed");
+  assertEquals(audit.jobs[0].ses_recipe_state, "sealed");
 
   const pipeline: any = await _makesafePipelineForTest(
     makeQueryClient(seed),

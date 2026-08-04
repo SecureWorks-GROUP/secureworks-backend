@@ -53,10 +53,12 @@ against a guess.
 Verdict precedence: `fail` if any item is `missing`; else `undetermined` if any
 item is `unresolved_question`; else `pass`.
 
-## 4. The nine open Captain questions
+## 4. The nine Captain questions
 
 Named constants in the module, each carrying the question text and the draft's
-evidence anchors:
+evidence anchors. Three have since been ruled (struck through below) and carry a
+`resolution`; the other six remain open. The code derives both views from
+`SES_ALL_CAPTAIN_QUESTIONS`, so that module is the count of record:
 
 | Id | Blocks |
 | --- | --- |
@@ -66,8 +68,8 @@ evidence anchors:
 | `terminal_evidence` | what `completed`/`archive` must retain, and the legacy-orphan exception |
 | `report_only_swms` | assessment at every stage; roof from `report_ready` onward |
 | `own_document_roof_report_in` | the own-document roof `trade_report_in` proof |
-| `repair_recipe` | every repair cell |
-| `restoration_recipe` | every restoration cell |
+| `repair_recipe` | ~~every repair cell~~ — RULED 2026-08-02, repair takes the physical-shaped table |
+| `restoration_recipe` | ~~every restoration cell~~ — RULED 2026-08-02, restoration takes the physical-shaped table |
 | `cancelled_floor` | every non-N-A `cancelled` cell |
 
 `ghl_equivalence` is the one question that is not a cell verdict. It qualifies

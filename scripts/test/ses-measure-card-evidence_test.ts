@@ -403,7 +403,7 @@ Deno.test("a PO token is recovered from the persisted external ref", () => {
 });
 
 Deno.test("restoration authority outranks a stale family token", () => {
-  const result = buildSesCardEvidenceInventory(card({
+  const restorationCard = {
     job: {
       id: "66666666-6666-4666-8666-666666666666",
       job_number: "SWMS-260006",
@@ -411,11 +411,25 @@ Deno.test("restoration authority outranks a stale family token", () => {
       makesafe_job_family: "general_makesafe",
       insurance_job_type: "restoration",
     },
-    stageOverride: "allocated",
+    stageOverride: "allocated" as const,
+  };
+  // The Captain's 2026-08-02 ruling sealed restoration onto the physical
+  // evidence table, so its cells are no longer all QUESTION: the work-order
+  // floor bites at `allocated` exactly as it does for a physical make-safe.
+  // A sealed family measures FAIL when its floor is unmet — never undetermined.
+  const withoutWorkOrder = buildSesCardEvidenceInventory(card(restorationCard));
+  assertEquals(withoutWorkOrder.family, "restoration");
+  assertEquals(withoutWorkOrder.reading?.verdict, "fail");
+  assertEquals(withoutWorkOrder.reading?.missing, ["builder_wo_doc"]);
+  assertEquals(withoutWorkOrder.reading?.unresolved, []);
+
+  const withWorkOrder = buildSesCardEvidenceInventory(card({
+    ...restorationCard,
+    docFlags: { ...NO_DOCS, has_wo: true },
   }));
-  assertEquals(result.family, "restoration");
-  assertEquals(result.reading?.verdict, "undetermined");
-  assertEquals(result.reading?.missing, []);
+  assertEquals(withWorkOrder.family, "restoration");
+  assertEquals(withWorkOrder.reading?.verdict, "pass");
+  assertEquals(withWorkOrder.reading?.missing, []);
 });
 
 Deno.test("an unknown family is refused rather than measured against a guess", () => {

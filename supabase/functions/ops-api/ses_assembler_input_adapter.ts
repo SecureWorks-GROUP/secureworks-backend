@@ -20,11 +20,13 @@ import {
 } from "./ses_docket_envelope.ts";
 import {
   canonicalSesFamilyFromCard,
+  isSesPhysicalShapedFamily,
   resolveSesFamilyMatrixRow,
   SES_FAMILY_MATRIX_VERSION,
   type SesBuilderKey,
   type SesFamilyId,
 } from "./ses_family_matrix.ts";
+import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
 import {
   currentCycleNumber,
   filterAssignmentsForCurrentCycle,
@@ -1034,9 +1036,8 @@ function explicitHoursAndMaterials(
     : array(checklist.materials);
   if (materials.length) facts.materials = materials;
   if (
-    (classification.builder === "AJS" ||
-      classification.builder === "AJBR") &&
-    classification.family === "physical_makesafe"
+    isAjsBuilderKey(classification.builder) &&
+    isSesPhysicalShapedFamily(classification.family)
   ) {
     const panelCount = Number(facts.panel_count);
     const baseCount = Number(facts.base_count);

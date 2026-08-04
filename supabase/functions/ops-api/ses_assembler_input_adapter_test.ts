@@ -1749,6 +1749,116 @@ Deno.test(
   },
 );
 
+// Repair and restoration assemble on the same AJS labour/materials pack path, so
+// the picket carve-out must reach them. A family-narrow evidence gate would drop
+// the material line with no blocker, which is silent under-billing.
+Deno.test(
+  "AJS repair and restoration publish the existing-fence picket fact like any physical card",
+  () => {
+    for (const family of ["repair", "restoration"] as const) {
+      const live = snapshot();
+      live.job.metadata.makesafe_job_family = family;
+      live.detail!.requesting_company_slug = "aj";
+      live.detail!.requesting_company_name = "AJ Building & Restoration";
+      live.detail!.report_type = null;
+      live.detail!.external_links = [];
+      live.reports[0].checklist_json = {
+        work_done:
+          "Propped up the existing hardy fence until it can be replaced.",
+        labour_hours: 3,
+        trade_count: 2,
+        materials_used: ["Star pickets x 20"],
+      };
+      live.documents.push({
+        id: `${family}-curated-report`,
+        job_id: live.job.id,
+        type: "makesafe_report",
+        visible_to_trades: true,
+        attendance_cycle_id: live.detail!.attendance_cycle_id,
+        cycle_attribution: "bound",
+        version: 1,
+        data_snapshot_json: {
+          report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+          report_renderer_version:
+            MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+          report_renderer_source_revision:
+            MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+          report_renderer_script_sha256:
+            MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+          report_render_hash: "e".repeat(64),
+          evidence_source: "current_cycle_curated_makesafe_report",
+          curated_source_kind: "durable_curated_revision",
+          curated_source_identity:
+            "curation-revision:curation-fixture/artifact:artifact-fixture",
+          curated_source_revision_id: "curation-fixture",
+          curated_source_artifact_id: "artifact-fixture",
+          curated_source_artifact_content_hash: `sha256:${"d".repeat(64)}`,
+          curated_source_expected_raw_sha256: `sha256:${"e".repeat(64)}`,
+          report_input_hash: `sha256:${"f".repeat(64)}`,
+          report_scope_narratives: [
+            "20 star pickets installed to prop and secure the existing fence line pending permanent repair.",
+          ],
+        },
+      });
+      live.docket_revisions = [{
+        id: `${family}-docket-revision`,
+        current_attendance_cycle_id: live.detail!.attendance_cycle_id,
+        committed_at: "2026-08-01T00:00:00.000Z",
+      }];
+      live.docket_artifacts = [{
+        id: `${family}-report-artifact`,
+        revision_id: `${family}-docket-revision`,
+        role: "supporting_report_pdf",
+        media_type: "application/pdf",
+        object_key: "makesafe-docket-artifacts/privacy-safe-fixture.pdf",
+        content_hash: `sha256:${"d".repeat(64)}`,
+        size_bytes: 100,
+        metadata: {
+          report_document_id: `${family}-curated-report`,
+          render_hash: "e".repeat(64),
+        },
+      }];
+
+      const input = buildSesAssemblerInput(live);
+      assertEquals(input.classification.family, family);
+      assertEquals(input.classification.builder_key, "AJS");
+      const facts = input.cycle_facts.hours_and_materials!;
+      assertEquals(facts.existing_fence_star_picket_count, 20, family);
+      assertEquals(facts.existing_fence_star_picket_refusal, undefined, family);
+    }
+  },
+);
+
+Deno.test(
+  "AJS repair keeps the temporary-fence-kit picket refusal",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "repair";
+    live.detail!.requesting_company_slug = "aj";
+    live.detail!.requesting_company_name = "AJ Building & Restoration";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.reports[0].checklist_json = {
+      work_done:
+        "Used star pickets to support an existing boundary fence pending replacement.",
+      labour_hours: 3,
+      trade_count: 2,
+      materials_used: [
+        "Star pickets x 20",
+        "Temporary fence panels x 4",
+        "Bases x 4",
+      ],
+    };
+
+    const facts = buildSesAssemblerInput(live).cycle_facts.hours_and_materials!;
+    assertEquals(facts.existing_fence_star_picket_count, undefined);
+    assertEquals(
+      facts.existing_fence_star_picket_refusal,
+      "genuine_temporary_fence_signal",
+    );
+  },
+);
+
 Deno.test(
   "an evidenced temporary-fence kit cannot launder AJS pickets through the physical family",
   () => {
@@ -3257,7 +3367,7 @@ Deno.test("SWMS-26980 seeded authority preserves the identity spine in U4", () =
 });
 
 Deno.test(
-  "real restoration card shape dry-runs to the typed unsealed-recipe blocker",
+  "real restoration card shape selects the sealed physical recipe then evidence-blocks",
   async () => {
     const live = snapshot();
     live.job.id = "7dea664a-e0d7-4263-ab0c-bacea9e1d65d";
@@ -3315,20 +3425,28 @@ Deno.test(
     );
     const result = response.results[0];
     const codes = blockerCodes(result);
-    assertEquals(result.state, "blocked");
-    assert(codes.includes("restoration_recipe_unsealed"));
-    assert(!codes.includes("family_unknown"));
     assertEquals(result.envelope.v2.classification.family, "restoration");
-    assertEquals(result.envelope.v2.classification.job_type, "restoration");
-    assertEquals(result.envelope.v2.classification.recipe_selected, false);
     assertEquals(
-      result.blockers.find((blocker) =>
-        blocker.reason_code === "restoration_recipe_unsealed"
-      )?.facts?.job_number,
-      "SWMS-26936",
+      result.envelope.v2.classification.job_type,
+      "physical_makesafe",
     );
-    assertEquals(result.invoice_proposal, null);
-    assertEquals(result.email_drafts, {});
+    assertEquals(result.envelope.v2.classification.recipe_selected, true);
+    assert(!codes.includes("restoration_recipe_unsealed"));
+    assert(!codes.includes("family_unknown"));
+    // No trade report / photos on this fixture — physical evidence path blocks.
+    assertEquals(result.state, "blocked");
+    assert(
+      codes.some((code) =>
+        code === "trade_evidence_missing" ||
+        code === "curated_source_missing" ||
+        code === "photo_evidence_missing" ||
+        code === "spine_missing_source" ||
+        code === "spine_missing_lineage" ||
+        code === "spine_missing_deliverables" ||
+        code === "pricing_evidence_missing"
+      ),
+      `expected physical-path evidence blocker, got ${codes.join(",")}`,
+    );
   },
 );
 
@@ -3517,7 +3635,7 @@ Deno.test(
   async () => {
     assertEquals(
       SES_FAMILY_MATRIX_VERSION,
-      "ses-builder-family-matrix/2026-07-30.6",
+      "ses-builder-family-matrix/2026-08-04.1",
     );
     const shapes = [
       ["SWMS-26732", null, "photos"],

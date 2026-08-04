@@ -27,8 +27,11 @@ import {
   resolveSesFamilyMatrixRow,
   SES_ASSESSMENT_RECIPE_VERSION,
   SES_FAMILY_MATRIX_VERSION,
+  SES_PHYSICAL_FAMILY_RECIPE_VERSION,
+  type SesFamilyId,
   type SesFamilyMatrixRow,
 } from "./ses_family_matrix.ts";
+import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
 import { AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST } from "./makesafe_existing_fence_pickets.ts";
 import {
   MAKESAFE_REPORT_CONTRACT_VERSION,
@@ -42,7 +45,7 @@ import {
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
-export { SES_ASSESSMENT_RECIPE_VERSION };
+export { SES_ASSESSMENT_RECIPE_VERSION, SES_PHYSICAL_FAMILY_RECIPE_VERSION };
 
 const MANIFEST_ITEMS = [
   "source_work_order_retrieval",
@@ -602,6 +605,25 @@ function lineItem(
   };
 }
 
+/**
+ * What the builder reads on the labour line of a real Xero DRAFT.
+ * `prepare_ses_invoice_obligation` copies these lines verbatim, so the
+ * description must name the family that was actually attended — a sealed
+ * repair or restoration card is not a make-safe.
+ */
+function attendanceLineSubject(family: SesFamilyId): string {
+  switch (family) {
+    case "temporary_fencing":
+      return "temporary fencing make-safe";
+    case "repair":
+      return "repair attendance";
+    case "restoration":
+      return "restoration attendance";
+    default:
+      return "make-safe attendance";
+  }
+}
+
 function localInvoiceProposal(
   input: SesAssemblerInputV1,
   row: SesFamilyMatrixRow,
@@ -749,11 +771,9 @@ function localInvoiceProposal(
 
   const lines: Array<Record<string, unknown>> = [
     lineItem(
-      `${ref} - ${
-        row.family === "temporary_fencing"
-          ? "temporary fencing make-safe"
-          : "make-safe attendance"
-      } - ${trades} trade${trades === 1 ? "" : "s"} x ${hoursPerTrade} hours`,
+      `${ref} - ${attendanceLineSubject(row.family)} - ${trades} trade${
+        trades === 1 ? "" : "s"
+      } x ${hoursPerTrade} hours`,
       trades * hoursPerTrade,
       canonicalRate,
     ),
@@ -1251,6 +1271,11 @@ function manifestBase(
           assessment_outbound_recipe_version: SES_ASSESSMENT_RECIPE_VERSION,
         }
         : {}),
+      ...(row.family === "repair" || row.family === "restoration"
+        ? {
+          physical_family_recipe_version: SES_PHYSICAL_FAMILY_RECIPE_VERSION,
+        }
+        : {}),
       builder_reference: input.source.builder_reference,
       report_only: row.report_only,
       lineage: input.classification.lineage_kind,
@@ -1450,24 +1475,30 @@ function buildEmailDrafts(
 
   // AJS/AJBR two-email shape (Captain 2026-08-04): combined report+invoice, then photos.
   // MLB and other builders keep the three-email split below.
-  const ajs = row.builder_key === "AJS" || row.builder_key === "AJBR";
+  const ajs = isAjsBuilderKey(row.builder_key);
   if (ajs) {
     const drafts: Record<string, string> = {};
     if (reportFile) {
       drafts.REPORT_EMAIL_DRAFT = draftEmail({
-        to: [invoiceTo || "workorders@ajs.build", reportTo].filter(Boolean).join(", "),
+        to: [invoiceTo || "workorders@ajs.build", reportTo].filter(Boolean)
+          .join(", "),
         cc: "ses@secureworkswa.com.au",
         subject: `${ref} - report and invoice`,
-        body:
-          `Draft only. Please find the prepared ${
-            row.family.replaceAll("_", " ")
-          } report and invoice for ${address || "the instructed property"}. The real Xero invoice PDF attaches when authorised.`,
-        attachments: [reportFile, ...invoiceAttachments.filter((name) => name !== reportFile)],
+        body: `Draft only. Please find the prepared ${
+          row.family.replaceAll("_", " ")
+        } report and invoice for ${
+          address || "the instructed property"
+        }. The real Xero invoice PDF attaches when authorised.`,
+        attachments: [
+          reportFile,
+          ...invoiceAttachments.filter((name) => name !== reportFile),
+        ],
       });
     }
     if (row.photo_route === "work_order_sender" && photoFiles.length > 0) {
       drafts.PHOTO_EMAIL_DRAFT = draftEmail({
-        to: [invoiceTo || "workorders@ajs.build", reportTo].filter(Boolean).join(", "),
+        to: [invoiceTo || "workorders@ajs.build", reportTo].filter(Boolean)
+          .join(", "),
         cc: "ses@secureworkswa.com.au",
         subject: `Photo Evidence - ${ref}`,
         body:
@@ -1686,25 +1717,6 @@ async function prepareOne(
         matrix.failure.reason,
         matrix.failure.recovery_action,
         ["canonical-input-envelope", "sealed-family-matrix"],
-        [],
-        matrix.failure.code === "restoration_recipe_unsealed"
-          ? {
-            job_id: input.identity.job_id,
-            job_number: input.identity.job_number,
-            card_id: input.identity.card_id,
-            builder_reference: input.source.builder_reference,
-            site_address: input.source.site_address,
-            site_suburb: input.source.site_suburb,
-            builder_key: input.classification.builder_key,
-            family: input.classification.family,
-            subtype: input.classification.subtype,
-            workflow: input.classification.workflow,
-            source_instruction_id: input.identity.source_instruction_id,
-            current_attendance_cycle_id:
-              input.attendance.current_attendance_cycle_id,
-            cycle_number: input.attendance.cycle_number,
-          }
-          : undefined,
       ),
     );
   }
@@ -2835,14 +2847,26 @@ async function prepareOne(
       "file:DRAFTS/REPORT_EMAIL_DRAFT.txt",
     );
   }
+  // AJS/AJBR (Captain 2026-08-04) emit a combined REPORT_EMAIL_DRAFT that is
+  // the report+invoice route — there is no separate INVOICE_EMAIL_DRAFT key.
+  // Mark the invoice-bundle obligation from that combined draft so pre-Xero
+  // readiness does not invent a third email the route deliberately dropped.
   if (drafts.INVOICE_EMAIL_DRAFT) {
-    if (drafts.PHOTO_EMAIL_DRAFT) {
-      manifest.items.draft_photo_evidence_email = ready(
-        "file:DRAFTS/PHOTO_EMAIL_DRAFT.txt",
-      );
-    }
     manifest.items.draft_invoice_bundle_email = ready(
       "file:DRAFTS/INVOICE_EMAIL_DRAFT.txt",
+    );
+  } else if (
+    row &&
+    isAjsBuilderKey(row.builder_key) &&
+    drafts.REPORT_EMAIL_DRAFT
+  ) {
+    manifest.items.draft_invoice_bundle_email = ready(
+      "file:DRAFTS/REPORT_EMAIL_DRAFT.txt",
+    );
+  }
+  if (drafts.PHOTO_EMAIL_DRAFT) {
+    manifest.items.draft_photo_evidence_email = ready(
+      "file:DRAFTS/PHOTO_EMAIL_DRAFT.txt",
     );
   }
   if (Object.keys(drafts).length) {

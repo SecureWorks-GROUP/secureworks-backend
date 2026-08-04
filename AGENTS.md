@@ -544,21 +544,22 @@ fence-only work. It never requires a SWMS, local report PDF, or separate photo
 pack. The current contract lives in `ses_family_matrix.ts` and
 `ses_prepare_docket_revision.ts`.
 
-## Repair And Restoration Are Typed SES Families With Unsealed Recipes
+## Repair And Restoration Are Typed SES Families With Sealed Physical Pack Recipes
 
 Repair is a first-class non-urgent family alongside roof, assessment,
-make-safe, and restoration. Its reporting recipe is not sealed, so repair
-cards must remain visible and typed but cannot select a report, pack, portal,
-SWMS, pricing, invoice proposal, or outbound-draft recipe; the matrix returns
-`repair_recipe_unsealed`.
-
-Restoration is a typed emergency-service family. Converted restoration cards use `jobs.type = 'insurance'` with
+make-safe, and restoration. Restoration is a typed emergency-service family:
+converted restoration cards use `jobs.type = 'insurance'` with
 `metadata.insurance_job_type = 'restoration'`; that authority outranks any stale
 `metadata.makesafe_job_family` value. The board, audit, trade scope and U4
-adapter must keep those cards visible and typed as restoration. Until the
-Captain seals a restoration reporting recipe, U4 must return
-`restoration_recipe_unsealed` with the card facts and must not select a report,
-pack, portal, SWMS, pricing, invoice-proposal or outbound-draft recipe.
+adapter must keep those cards visible and typed.
+
+Captain 2026-08-02 (`data/decisions/2026-08-02-docs-ready-repair-restoration.md`):
+repair "match[es] the whole existing system"; restoration is "exactly the same
+as any other job, so it is a different family type". Both keep family identity
+and assemble on the physical labour/materials pack path — matrix rows in
+`ses_family_matrix.ts` with `family` repair/restoration and
+`job_type: physical_makesafe` (same pattern as temporary_fencing). Evidence
+ruler: `physicalShapedFamily()` for both. Do not invent a weaker pack shape.
 
 ## Roof Report Runs In ops-api, Not The Wiki Python
 
@@ -984,11 +985,14 @@ The current floors, both from the 2026-08-01 rulings
   `observed_present` and the measured detail, so the PO is visible on the card
   without ever being a gate. (The superseded "of course every card needs a po"
   answer, which made it REQUIRED, was about work orders.)
-- `builder_wo_doc` is REQUIRED at every stage of the five SEALED families,
-  `completed` and `archive` included — nothing to invoice against without a
-  work order. It stays a question only at `cancelled` (under the open
-  `cancelled_floor`) and throughout the two unsealed recipes, which this ruling
-  does not reach; sealing a recipe by code change is what rule 1 forbids.
+- `builder_wo_doc` is REQUIRED at every non-cancelled stage of all SEVEN
+  families, `completed` and `archive` included — nothing to invoice against
+  without a work order. It stays a question only at `cancelled` (under the open
+  `cancelled_floor`). Repair and restoration were the two unsealed recipes this
+  ruling did not reach; the Captain's own 2026-08-02 ruling sealed them onto the
+  physical-shaped table (`Q_REPAIR_RECIPE` / `Q_RESTORATION_RECIPE` now carry a
+  `resolution`), which is how a recipe is sealed — by a recorded ruling, never
+  by a code edit alone.
 - SWMS is deliberately NOT encoded here. "Required only for MLB make-safes"
   turns on builder identity, which a family x stage table never sees; the
   builder-aware rule is sealed in `ses_family_matrix.ts` (MLB `always`, AJS
@@ -1398,14 +1402,19 @@ Related: never make one of these classes pass by supplying a plausible quantity
 or a carried-over crew — that puts invented content on a money document and on a
 safety document respectively.
 
-## AJS Existing-Fence Star Pickets Are A Narrow Physical-Make-Safe Material
+## AJS Existing-Fence Star Pickets Are A Narrow Physical-Shaped-Family Material
 
 `makesafe_existing_fence_pickets.ts` is the shared server classifier for the
-captain's existing-fence carve-out. On an AJS/AJBR physical make-safe it may
-derive one money-only star-picket count from the current trade report's explicit
-`materials_used` quantity when the work narrative proves the pickets support an
-existing fence. The assembler prices that line at $13.50 ex each. Bare or
-ambiguous pickets hold, and any evidenced panel, block/base, tie/clip, hire,
+captain's existing-fence carve-out. On an AJS/AJBR card of a physical-shaped
+family it may derive one money-only star-picket count from the current trade
+report's explicit `materials_used` quantity when the work narrative proves the
+pickets support an existing fence. `isSesPhysicalShapedFamily()`
+(`ses_family_matrix.ts`) is the ONE predicate for that set — physical make-safe
+plus the sealed repair and restoration recipes, deliberately not temporary
+fencing — and it must never be narrower than the pricing side it feeds
+(`invoice_basis === "ajs_labour_materials"`), or the builder is under-billed
+with no line and no blocker. The assembler prices that line at $13.50 ex each.
+Bare or ambiguous pickets hold, and any evidenced panel, block/base, tie/clip, hire,
 retrieval-material or temporary-fence signal preserves the picket refusal.
 Fixing/consumable lines remain separately refused without erasing an otherwise
 valid picket line. Unquantified checklist template labels are not material-use

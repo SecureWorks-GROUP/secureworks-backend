@@ -1,7 +1,10 @@
 export const SES_FAMILY_MATRIX_VERSION =
-  "ses-builder-family-matrix/2026-07-30.6";
+  "ses-builder-family-matrix/2026-08-04.1";
 export const SES_ASSESSMENT_RECIPE_VERSION =
   "assessment-triad-invoice-only/2026-07-27";
+/** Captain 2026-08-02: repair and restoration match the physical pack path. */
+export const SES_PHYSICAL_FAMILY_RECIPE_VERSION =
+  "physical-labour-materials-pack/2026-08-04";
 
 export const SES_EMERGENCY_SERVICE_FAMILIES = [
   "roof",
@@ -29,6 +32,36 @@ export type SesFamilyId =
   | "temporary_fencing"
   | "repair"
   | "restoration";
+
+/**
+ * The families that assemble on the physical labour/materials pack path: every
+ * family whose AJS/AJBR row prices on `ajs_labour_materials`.
+ * `isSesPhysicalShapedFamily` is the ONE predicate every consumer uses, so the
+ * evidence side of a carve-out (the AJS existing-fence star pickets, derived in
+ * `ses_assembler_input_adapter.ts`) can never be narrower than the pricing side
+ * that consumes it — a narrower evidence gate under-bills the builder silently,
+ * with no line and no blocker.
+ * `temporary_fencing` is deliberately NOT here: it is a physical family with
+ * its own hire/fence-labour basis, and the picket carve-out exists precisely to
+ * separate a propped EXISTING fence from a temporary-fence kit.
+ * `job_type` is not the discriminator — temporary fencing shares
+ * `job_type: "physical_makesafe"` with this set.
+ */
+export const SES_PHYSICAL_SHAPED_FAMILIES = [
+  "physical_makesafe",
+  "repair",
+  "restoration",
+] as const;
+export type SesPhysicalShapedFamily =
+  (typeof SES_PHYSICAL_SHAPED_FAMILIES)[number];
+
+export function isSesPhysicalShapedFamily(
+  family: unknown,
+): family is SesPhysicalShapedFamily {
+  return (SES_PHYSICAL_SHAPED_FAMILIES as readonly string[]).includes(
+    typeof family === "string" ? family : "",
+  );
+}
 
 export type SesManifestJobType =
   | "physical_makesafe"
@@ -80,9 +113,7 @@ export interface SesFamilyMatrixFailure {
   code:
     | "ajs_misclassified_as_roof_report"
     | "builder_open_class"
-    | "family_unknown"
-    | "repair_recipe_unsealed"
-    | "restoration_recipe_unsealed";
+    | "family_unknown";
   reason: string;
   recovery_action: string;
 }
@@ -167,9 +198,9 @@ export function canonicalSesFamilyFromCard(args: {
     case "insurance_restoration":
       return "restoration";
     case "repair":
-      // Charter v1.1 (Ruling 15): repair is its own non-urgent family. Its
-      // reporting recipe is unsealed, so the matrix resolver refuses dockets
-      // for it the same way it refuses restoration.
+      // Charter v1.1 (Ruling 15): repair is its own non-urgent family.
+      // Pack recipe sealed 2026-08-04 on the Captain's 2026-08-02 ruling:
+      // match the physical labour/materials system while keeping family id.
       return "repair";
     case "general_makesafe":
     case "physical_makesafe":
@@ -277,6 +308,40 @@ function temporaryFenceRow(
   };
 }
 
+/**
+ * Repair and restoration pack recipes.
+ *
+ * Captain ruling 2026-08-02 (`data/decisions/2026-08-02-docs-ready-repair-restoration.md`):
+ *   repair      — "match the whole existing system"
+ *   restoration — "exactly the same as any other job, so it is a different family type"
+ *
+ * Same shape as temporary_fencing: keep family identity, assemble on the
+ * physical labour/materials path (`job_type: physical_makesafe`), same SWMS
+ * policy, same photo+report routes, no portal deliverable. Invoice basis is
+ * labour/materials (not fence hire). The prepare path keys physical render /
+ * photo / invoice work off `job_type === "physical_makesafe"`, so this is the
+ * load-bearing choice that lets a sealed row produce a pack.
+ */
+function physicalShapedFamilyRow(
+  family: "repair" | "restoration",
+  builder_key: "MLB" | "AJS" | "AJBR" | "WESTERN",
+  southWest = false,
+): SesFamilyMatrixRow {
+  const base = physicalRow(builder_key, southWest);
+  return {
+    ...base,
+    family,
+    named_na_rules: [
+      "physical-work-has-no-portal-deliverable",
+      "not-a-roof-report",
+      "not-an-assessment-report",
+      family === "repair"
+        ? "repair-matches-physical-labour-materials-pack"
+        : "restoration-matches-physical-labour-materials-pack",
+    ],
+  };
+}
+
 function mlbReportRow(
   family: "ordinary_roof_portal" | "own_template_roof" | "assessment_quote",
   southWest = false,
@@ -335,7 +400,9 @@ function syntheticRow(
     | "physical_makesafe"
     | "temporary_fencing"
     | "ordinary_roof_portal"
-    | "assessment_quote",
+    | "assessment_quote"
+    | "repair"
+    | "restoration",
 ): SesFamilyMatrixRow {
   const assessment = family === "assessment_quote";
   const roof = family === "ordinary_roof_portal";
@@ -390,6 +457,11 @@ function syntheticRow(
         "physical-work-has-no-portal-deliverable",
         "not-a-roof-report",
         "not-an-assessment-report",
+        ...(family === "repair"
+          ? ["repair-matches-physical-labour-materials-pack"]
+          : family === "restoration"
+          ? ["restoration-matches-physical-labour-materials-pack"]
+          : []),
         "synthetic-livefire-release-forbidden",
       ],
   };
@@ -400,6 +472,10 @@ export const SES_FAMILY_MATRIX: readonly SesFamilyMatrixRow[] = Object.freeze([
   physicalRow("MLB", true),
   temporaryFenceRow("MLB"),
   temporaryFenceRow("MLB", true),
+  physicalShapedFamilyRow("repair", "MLB"),
+  physicalShapedFamilyRow("repair", "MLB", true),
+  physicalShapedFamilyRow("restoration", "MLB"),
+  physicalShapedFamilyRow("restoration", "MLB", true),
   mlbReportRow("ordinary_roof_portal"),
   mlbReportRow("ordinary_roof_portal", true),
   mlbReportRow("own_template_roof"),
@@ -408,12 +484,20 @@ export const SES_FAMILY_MATRIX: readonly SesFamilyMatrixRow[] = Object.freeze([
   mlbReportRow("assessment_quote", true),
   physicalRow("AJS"),
   temporaryFenceRow("AJS"),
+  physicalShapedFamilyRow("repair", "AJS"),
+  physicalShapedFamilyRow("restoration", "AJS"),
   physicalRow("AJBR"),
   temporaryFenceRow("AJBR"),
+  physicalShapedFamilyRow("repair", "AJBR"),
+  physicalShapedFamilyRow("restoration", "AJBR"),
   physicalRow("WESTERN"),
   temporaryFenceRow("WESTERN"),
+  physicalShapedFamilyRow("repair", "WESTERN"),
+  physicalShapedFamilyRow("restoration", "WESTERN"),
   syntheticRow("physical_makesafe"),
   syntheticRow("temporary_fencing"),
+  syntheticRow("repair"),
+  syntheticRow("restoration"),
   syntheticRow("ordinary_roof_portal"),
   syntheticRow("assessment_quote"),
 ]);
@@ -440,30 +524,6 @@ export function resolveSesFamilyMatrixRow(args: {
         reason: "Card has no sealed SES family classification.",
         recovery_action:
           "Recover the family from canonical source authority before preparing the docket.",
-      },
-    };
-  }
-  if (args.family === "repair") {
-    return {
-      ok: false,
-      failure: {
-        code: "repair_recipe_unsealed",
-        reason:
-          "Repair is a first-class family (charter v1.1), but no repair reporting recipe is sealed.",
-        recovery_action:
-          "Seal the repair report/pack recipe before preparing any repair deliverable, pricing, invoice proposal, or outbound draft.",
-      },
-    };
-  }
-  if (args.family === "restoration") {
-    return {
-      ok: false,
-      failure: {
-        code: "restoration_recipe_unsealed",
-        reason:
-          "Restoration is a first-class SES family, but the Captain has not sealed its reporting recipe.",
-        recovery_action:
-          "Seal the restoration report/pack recipe before preparing any restoration deliverable, pricing, invoice proposal, or outbound draft.",
       },
     };
   }
