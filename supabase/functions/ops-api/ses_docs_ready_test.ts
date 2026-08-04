@@ -253,6 +253,77 @@ Deno.test("shared SES release path refuses every unsigned exact member", async (
   );
 });
 
+Deno.test("a recorded signoff cannot release superseded curated report bytes", async () => {
+  const supersededRaw = `sha256:${"1".repeat(64)}`;
+  const supersededIdentity = "curation-revision:superseded/artifact:superseded";
+  const rows: Record<string, unknown> = {
+    makesafe_docket_revisions: { id: "docket-fixture", job_id: "job-fixture" },
+    makesafe_docket_artifacts: [{
+      role: "supporting_report_pdf",
+      metadata: {
+        source_kind: "durable_curated_revision",
+        source_document_id: "source-document",
+        source_identity: supersededIdentity,
+        expected_raw_sha256: supersededRaw,
+        report_input_hash: `sha256:${"3".repeat(64)}`,
+      },
+    }],
+    job_events: [{
+      created_at: "2026-08-04T01:00:00.000Z",
+      detail_json: {
+        document_id: "source-document",
+        supersedes_prior_bind: true,
+        source_identity: "curation-revision:corrected/artifact:corrected",
+        expected_raw_sha256: `sha256:${"2".repeat(64)}`,
+        report_input_hash: `sha256:${"4".repeat(64)}`,
+        prior_source_identity: supersededIdentity,
+        prior_expected_raw_sha256: supersededRaw,
+        prior_report_input_hash: `sha256:${"3".repeat(64)}`,
+      },
+    }],
+  };
+  const client = {
+    rpc: () => Promise.resolve({ data: { signed_off: true }, error: null }),
+    from(table: string) {
+      let single = false;
+      const query: any = {
+        select: () => query,
+        eq: () => query,
+        order: () => query,
+        maybeSingle: () => {
+          single = true;
+          return query;
+        },
+        then: (resolve: (value: unknown) => unknown) => {
+          const value = rows[table];
+          return Promise.resolve({
+            data: single && Array.isArray(value) ? value[0] || null : value,
+            error: null,
+          }).then(resolve);
+        },
+      };
+      return query;
+    },
+  } as any;
+  const error = await assertRejects(
+    () => assertSesDocketsSignedOffForSend(client, ["docket-fixture"]),
+    SesActionError,
+    "superseded by a corrected curated bind",
+  );
+  assertEquals(error.status, 409);
+  assert("code" in error.refusal);
+  assertEquals(error.refusal.code, "curated_source_missing");
+
+  // Control: the same wall passes once the pack carries the corrected content.
+  (rows.makesafe_docket_artifacts as any)[0].metadata.source_identity =
+    "curation-revision:corrected/artifact:corrected";
+  (rows.makesafe_docket_artifacts as any)[0].metadata.expected_raw_sha256 =
+    `sha256:${"2".repeat(64)}`;
+  (rows.makesafe_docket_artifacts as any)[0].metadata.report_input_hash =
+    `sha256:${"4".repeat(64)}`;
+  await assertSesDocketsSignedOffForSend(client, ["docket-fixture"]);
+});
+
 Deno.test("ops-api exposes the four dashboard Docs Ready actions", () => {
   for (
     const action of [

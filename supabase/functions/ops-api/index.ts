@@ -35192,6 +35192,12 @@ async function bindCurrentCycleCuratedMakesafeReport(
   // (e.g. asbestos misstatement) without weakening any of the eight checks.
   // A mismatched identity on an unbound document, or a second document on the
   // cycle, still refuses as a conflict.
+  // The audit event below is also the supersession ledger the read boundary
+  // consumes (`sesCuratedSourceSupersessionsFromEvents`), so any docket
+  // revision still built from the superseded snapshot is suppressed as
+  // `curated_source_superseded` on the pack, the cockpit and the send-time
+  // signoff wall. This bind never re-prepares: the operator's next step is
+  // prepare_ses_docket_revision (dry_run, then dry_run false).
   const priorHasCuratedIdentity = Boolean(
     prior.curated_source_identity ||
       prior.curated_source_revision_id ||
@@ -35216,7 +35222,11 @@ async function bindCurrentCycleCuratedMakesafeReport(
   // First bind on a cycle is reserved once (cycle-scoped id). A content
   // supersession that has already passed every gate uses a content-scoped id so
   // it cannot collide with the prior cycle reservation, and each corrected
-  // artifact remains independently auditable.
+  // artifact remains independently auditable. The id spans the whole trusted
+  // snapshot identity (bytes, curation identity and canonical input hash),
+  // because any one of those differing is what makes this a distinct
+  // supersession — keying on bytes alone would refuse a re-curation of the same
+  // PDF forever as a reservation conflict.
   const eventId = stableUuidFromSha256(await sesSha256(
     isTrustedContentSupersession
       ? {
@@ -35225,6 +35235,11 @@ async function bindCurrentCycleCuratedMakesafeReport(
         attendance_cycle_id: attendanceCycleId,
         document_id: documentId,
         expected_raw_sha256: suppliedRawHash,
+        source_identity: sourceIdentity,
+        source_revision_id: curationRevisionId,
+        source_artifact_id: curationArtifactId,
+        source_artifact_content_hash: suppliedArtifactHash,
+        report_input_hash: validatedInput.inputHash,
       }
       : {
         domain: 'ses-curated-report-source-bind-cycle/v1',
