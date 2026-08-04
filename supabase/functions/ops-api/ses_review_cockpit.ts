@@ -2,6 +2,10 @@ import { sesSha256, stableUuidFromSha256 } from "./ses_docket_envelope.ts";
 import type { SesPricingDisposition } from "./makesafe_invoice_obligation.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
 import { SES_ASSESSMENT_RECIPE_VERSION } from "./ses_family_matrix.ts";
+import {
+  isAjsBuilderKey,
+  sesReleaseRouteOrder,
+} from "./ses_release_route_shape.ts";
 
 export const SES_REVIEW_SECTION_ORDER = [
   "job_story",
@@ -16,6 +20,7 @@ export const SES_REVIEW_SECTION_ORDER = [
 ] as const;
 
 export type SesRouteKind = "report" | "photo" | "invoice";
+/** Universal three-route order (MLB and non-AJS builders). */
 export const SES_ROUTE_ORDER: SesRouteKind[] = ["report", "photo", "invoice"];
 
 export interface SesReviewRoute {
@@ -74,6 +79,8 @@ export interface SesCleanInput {
   roof_report_required: boolean;
   roof_report_filled: boolean;
   report_only: boolean;
+  /** Builder key from the family matrix / docket classification (AJS, AJBR, MLB, …). */
+  builder_key?: string | null;
 }
 
 export interface SesCleanCheck {
@@ -100,12 +107,15 @@ function check(
 function missingRouteRefusals(
   routes: SesReviewRoute[],
   family: string,
+  builderKey?: string | null,
 ): SesRefusal[] {
   const byKind = new Map(routes.map((route) => [route.route_kind, route]));
   const refusals: SesRefusal[] = [];
+  // Assessment stays invoice-only. AJS/AJBR use the two-email shape
+  // (report+invoice combined, photo). Everyone else keeps three routes.
   const requiredRoutes = family === "assessment_quote"
     ? (["invoice"] as SesRouteKind[])
-    : SES_ROUTE_ORDER;
+    : sesReleaseRouteOrder(builderKey);
   for (const kind of requiredRoutes) {
     const route = byKind.get(kind);
     if (!route || !route.ready || !route.subject.trim() || !route.body.trim()) {
@@ -151,7 +161,11 @@ export function evaluateSesMechanicalClean(
     input.portal_capture_status === "done";
   const physical = input.family === "physical_makesafe" ||
     input.family === "temporary_fencing";
-  const routeRefusals = missingRouteRefusals(input.routes, input.family);
+  const routeRefusals = missingRouteRefusals(
+    input.routes,
+    input.family,
+    input.builder_key,
+  );
   const checks: SesCleanCheck[] = [
     check(
       "C1",
@@ -439,8 +453,9 @@ export function buildSesCockpitView(
       send_it: {
         enabled: sendIt,
         label: "SEND IT",
-        plan:
-          "Send the approved report, photo, and invoice routes for this exact release revision, then write route proofs and closeout.",
+        plan: isAjsBuilderKey(docket.clean_input.builder_key)
+          ? "Send the approved AJS routes (report+invoice combined, then photos) for this exact release revision, then write route proofs and closeout."
+          : "Send the approved report, photo, and invoice routes for this exact release revision, then write route proofs and closeout.",
       },
       captain_only: !verdict.clean,
     },
@@ -467,6 +482,8 @@ export async function buildSesReleaseRevision(args: {
   members: SesReleaseMember[];
   routes: SesReviewRoute[];
   created_by: string;
+  /** When set, selects AJS two-route vs universal three-route order. */
+  builder_key?: string | null;
 }): Promise<SesReleaseRevisionPlan> {
   if (args.members.length === 0) {
     throw new TypeError("release members required");
@@ -474,9 +491,14 @@ export async function buildSesReleaseRevision(args: {
   const routeByKind = new Map(
     args.routes.map((route) => [route.route_kind, route]),
   );
-  const orderedRoutes = SES_ROUTE_ORDER.map((kind) => routeByKind.get(kind));
+  const requiredOrder = sesReleaseRouteOrder(args.builder_key);
+  const orderedRoutes = requiredOrder.map((kind) => routeByKind.get(kind));
   if (orderedRoutes.some((route) => !route)) {
-    throw new TypeError("report, photo, and invoice routes are all required");
+    throw new TypeError(
+      isAjsBuilderKey(args.builder_key)
+        ? "AJS report and photo routes are both required"
+        : "report, photo, and invoice routes are all required",
+    );
   }
   const members = args.members.map((member, ordinal) => ({
     ordinal,

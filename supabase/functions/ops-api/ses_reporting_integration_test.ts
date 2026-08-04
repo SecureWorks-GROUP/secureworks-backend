@@ -396,17 +396,25 @@ Deno.test("Xero create is DRAFT-only and suppresses legacy side effects", () => 
 });
 
 Deno.test("Graph sends the checkpointed draft by id and never uses sendMail", () => {
-  assertStringIncludes(
-    INDEX,
-    "/messages/${encodeURIComponent(message.id)}/send",
+  // Gateway implementation lives in ses_graph_mail_gateway.ts; index.ts only
+  // wires createSesGraphMailGateway with storage/checkpoint deps.
+  const GATEWAY = Deno.readTextFileSync(
+    new URL("./ses_graph_mail_gateway.ts", import.meta.url),
   );
+  assertStringIncludes(GATEWAY, "/send");
+  assertStringIncludes(GATEWAY, "createSesGraphMailGateway");
+  assertStringIncludes(INDEX, "createSesGraphMailGateway");
   assertStringIncludes(INDEX, "phase: 'draft_created'");
+  assert(
+    !GATEWAY.includes("/sendMail"),
+    "sealed SES route adapter must not use bare sendMail",
+  );
   assert(
     !INDEX.slice(
       INDEX.indexOf("function makeSesGraphMailGateway"),
       INDEX.indexOf("function opsApiVersion"),
     ).includes("/sendMail"),
-    "sealed SES route adapter must not use bare sendMail",
+    "index wiring must not use bare sendMail",
   );
 });
 
@@ -470,7 +478,7 @@ Deno.test("one cockpit query returns the exact composite release being approved"
   );
   assertStringIncludes(
     ACTIONS,
-    "The displayed composite release does not contain this job and all three exact email routes.",
+    "The displayed composite release does not contain this job and the exact email routes.",
   );
 });
 

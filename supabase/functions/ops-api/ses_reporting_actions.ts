@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 import {
   fetchAllAccrecInvoices,
+  MAKESAFE_CC,
   normRef,
   resolveExistingInvoice,
   splitEmails,
@@ -34,6 +35,12 @@ import {
   type SesCockpitDocket,
   type SesReviewRoute,
 } from "./ses_review_cockpit.ts";
+import {
+  ajsPackCc,
+  ajsPackRecipients,
+  isAjsBuilderKey,
+  sesReleaseRouteOrder,
+} from "./ses_release_route_shape.ts";
 import {
   sesSha256,
   sesSha256Bytes,
@@ -266,6 +273,15 @@ export function resolveSesRouteXeroBinding(
   return {};
 }
 
+function docketBuilderKey(docket: Record<string, any>): string {
+  const classification = object(object(docket.envelope).v2).classification;
+  return String(
+    object(classification).builder_key ||
+      object(docket.review_spec).builder_key ||
+      "",
+  ).trim();
+}
+
 export function resolveDocketRoutes(
   docket: Record<string, any>,
   artifacts: Array<Record<string, any>>,
@@ -295,7 +311,14 @@ export function resolveDocketRoutes(
     : null;
   const noAdditionalCharge =
     obligation?.pricing_disposition === "no_additional_charge";
-  return draftRoutes(docket).map((route) => {
+  const builderKey = docketBuilderKey(docket);
+  const ajs = isAjsBuilderKey(builderKey);
+  const routing = object(object(object(docket.envelope).v2).routing);
+  const workOrderSender = String(
+    routing.report_to || routing.photo_to || "",
+  ).trim();
+
+  const resolvedRoutes = draftRoutes(docket).map((route) => {
     const referenced = route.attachment_hashes.map((path) => byPath.get(path));
     const resolved = referenced
       .filter((artifact): artifact is Record<string, any> => !!artifact)
@@ -383,6 +406,78 @@ export function resolveDocketRoutes(
         xeroStatus === "AUTHORISED" && !unsupportedReference,
     };
   });
+
+  if (!ajs) return resolvedRoutes;
+
+  // AJS/AJBR two-email shape (Captain 2026-08-04):
+  //   (A) report route carries report PDF + real Xero invoice PDF
+  //   (B) photo route is the follow-up
+  // Separate invoice route is dropped so SEND IT only releases two emails.
+  const byKind = new Map(
+    resolvedRoutes.map((route) => [route.route_kind, route]),
+  );
+  const report = byKind.get("report");
+  const photo = byKind.get("photo");
+  const invoice = byKind.get("invoice");
+  const recipients = ajsPackRecipients({ workOrderSender });
+  const cc = ajsPackCc();
+  const out: SesReviewRoute[] = [];
+
+  if (report || invoice) {
+    const reportHashes = report?.attachment_hashes || [];
+    const invoiceHashes = (invoice?.attachment_hashes || []).filter((hash) => {
+      // Prefer the authorised Xero PDF hash when present on the invoice route.
+      return !!hash;
+    });
+    const combinedHashes = [...new Set([
+      ...reportHashes,
+      // Real Xero PDF is first so the combined gate sees both roles.
+      ...(invoicePdf?.content_hash ? [String(invoicePdf.content_hash)] : []),
+      ...invoiceHashes,
+    ])];
+    const reference = String(
+      object(docket.local_invoice_proposal).builder_reference || "",
+    );
+    const invoiceNumber = boundInvoiceNumber;
+    const authorised = xeroStatus === "AUTHORISED" && !!invoicePdf?.content_hash;
+    const combined: SesReviewRoute = {
+      route_kind: "report",
+      recipients,
+      cc,
+      subject: authorised
+        ? `${reference || "Make-safe"} - report and Xero invoice ${invoiceNumber}`
+          .trim()
+        : (report?.subject ||
+          `${reference || "Make-safe"} - report and invoice`).trim(),
+      body: authorised
+        ? "Please find the SecureWorks make-safe report and the authorised Xero invoice attached."
+        : (report?.body ||
+          "Draft only. The combined report and invoice pack is not yet fully bound."),
+      attachment_hashes: combinedHashes,
+      ready: !!report?.ready && authorised && recipients.length > 0,
+    };
+    // No-charge later attendances still release documents without an invoice PDF.
+    if (noAdditionalCharge && report) {
+      combined.subject = `${reference || "Make-safe"} - report (no additional charge)`;
+      combined.body =
+        "This later attendance is recorded as document only with no additional charge. Please find the current report attached.";
+      combined.attachment_hashes = [...new Set(reportHashes)];
+      combined.ready = report.ready && recipients.length > 0;
+    }
+    out.push(combined);
+  }
+
+  if (photo) {
+    out.push({
+      ...photo,
+      recipients: recipients.length ? recipients : photo.recipients,
+      cc,
+      ready: photo.ready &&
+        (recipients.length > 0 || photo.recipients.length > 0),
+    });
+  }
+
+  return out;
 }
 
 function cleanInputFromRows(args: {
@@ -478,6 +573,7 @@ function cleanInputFromRows(args: {
     roof_report_filled: family !== "own_template_roof" ||
       object(items.supporting_report_pdf).state === "ready",
     report_only: classification.report_only === true,
+    builder_key: String(classification.builder_key || "").trim() || null,
   };
 }
 
@@ -693,12 +789,12 @@ export async function querySesReviewCockpitAction(
   if (
     membersResponse.error || routesResponse.error ||
     !members.some((member: any) => member.job_id === jobId) ||
-    routes.length !== 3
+    (routes.length !== 3 && routes.length !== 2)
   ) {
     throw new SesActionError(409, {
       state: "refused",
       fact:
-        "The displayed composite release does not contain this job and all three exact email routes.",
+        "The displayed composite release does not contain this job and the exact email routes.",
     });
   }
   return {
@@ -2423,6 +2519,15 @@ export async function prepareSesReleaseRevisionAction(
   );
   const routes = args.routes ||
     (dockets.length === 1 ? dockets[0].routes : []);
+  // Composite multi-job releases keep the universal three-route order unless
+  // every member is AJS/AJBR (Captain carve-out is AJS/AJBR only).
+  const builderKeys = dockets.map((docket) =>
+    String(docket.clean_input.builder_key || "")
+  );
+  const builderKey = builderKeys.length > 0 &&
+      builderKeys.every((key) => isAjsBuilderKey(key))
+    ? builderKeys[0]
+    : (builderKeys.length === 1 ? builderKeys[0] : null);
   const plan = await buildSesReleaseRevision({
     org_id: args.org_id,
     members: dockets.map((docket) => ({
@@ -2435,6 +2540,7 @@ export async function prepareSesReleaseRevisionAction(
     })),
     routes,
     created_by: args.created_by,
+    builder_key: builderKey,
   });
   const committed = await client.rpc("commit_ses_release_revision_v1", {
     p_release: plan.release,
@@ -2684,14 +2790,30 @@ export async function executeSesReleaseRevisionAction(
     .order("ordinal");
   const members = membersResponse.data || [];
   const routes = routesResponse.data || [];
-  if (
-    membersResponse.error || routesResponse.error ||
-    members.length === 0 || routes.length !== 3
-  ) {
+  if (membersResponse.error || routesResponse.error || members.length === 0) {
     throw new SesActionError(409, {
       state: "refused",
       fact:
-        "The approved release does not contain the exact member set and all three required routes.",
+        "The approved release does not contain the exact member set and required routes.",
+    });
+  }
+  // Infer builder from the release's own route set: AJS has report+photo only;
+  // universal has report+photo+invoice. Do not re-derive from live job state so
+  // an already-approved release keeps the shape it was prepared with.
+  const routeKinds = routes.map((route: any) => String(route.route_kind || ""));
+  const isAjsRelease = routeKinds.length === 2 &&
+    routeKinds.includes("report") &&
+    routeKinds.includes("photo") &&
+    !routeKinds.includes("invoice");
+  const requiredOrder = isAjsRelease
+    ? sesReleaseRouteOrder("AJS")
+    : SES_ROUTE_ORDER;
+  if (routes.length !== requiredOrder.length) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact: isAjsRelease
+        ? "The approved AJS release does not contain the exact report and photo routes."
+        : "The approved release does not contain the exact member set and all three required routes.",
     });
   }
   for (const route of routes) {
@@ -2783,7 +2905,7 @@ export async function executeSesReleaseRevisionAction(
   const exactDocketRevisionIds = members.map((member: any) =>
     String(member.docket_revision_id || "")
   );
-  for (const kind of SES_ROUTE_ORDER) {
+  for (const kind of requiredOrder) {
     const route = routes.find((candidate: any) =>
       candidate.route_kind === kind
     );
@@ -2800,6 +2922,39 @@ export async function executeSesReleaseRevisionAction(
       client,
       exactDocketRevisionIds,
     );
+    // Envelope check for AJS two-email shape: cc must include ses@, TO present.
+    // Filename-level client-send gates (report+invoice PDFs / photo images) are
+    // applied when operators build the payload; at execute we only have content
+    // hashes, so we enforce the sealed envelope facts that survive hashing.
+    if (isAjsRelease) {
+      const ccList = (Array.isArray(route.cc) ? route.cc : []).map((v: string) =>
+        String(v || "").trim().toLowerCase()
+      );
+      if (!ccList.includes(MAKESAFE_CC)) {
+        throw new SesActionError(
+          409,
+          sesRefusal(
+            "route_recipient_invalid",
+            `AJS pack routes must CC ${MAKESAFE_CC}; prepare a new release revision.`,
+            { evidence: { route_kind: kind, cc: ccList } },
+          ),
+        );
+      }
+      if (
+        kind === "report" &&
+        (!Array.isArray(route.attachment_hashes) ||
+          route.attachment_hashes.length < 1)
+      ) {
+        throw new SesActionError(
+          409,
+          sesRefusal(
+            "route_draft_missing",
+            "AJS report+invoice route has no attachments; prepare a new release with the report and authorised Xero invoice.",
+            { evidence: { route_kind: kind } },
+          ),
+        );
+      }
+    }
     const effect = await buildSesEffect({
       org_id: args.org_id,
       effect_kind: "route_send",
@@ -2836,7 +2991,39 @@ export async function executeSesReleaseRevisionAction(
       actor: args.actor,
     });
     if (sent.state !== "confirmed") {
-      throw new SesActionError(409, sent.refusal!);
+      // Surface the underlying Graph/transport failure when the effect ledger
+      // recorded one — graph_outcome_unknown alone was swallowing 4xx/5xx text
+      // and leaving operators with a permanent "unknown" dead end.
+      const refusal = sent.refusal!;
+      const failureDetail = object(
+        object(sent.effect as any).failure ||
+          object((sent.effect as any).provider_digest).failure,
+      );
+      const failureMessage = String(
+        failureDetail.message || (sent.effect as any)?.failure?.message || "",
+      ).trim();
+      if (failureMessage && refusal.code === "graph_outcome_unknown") {
+        throw new SesActionError(409, {
+          ...refusal,
+          fact: `${refusal.fact} Underlying error: ${failureMessage.slice(0, 400)}`,
+          evidence: {
+            ...(refusal.evidence || {}),
+            underlying_error: failureMessage.slice(0, 500),
+            effect_state: sent.effect.state,
+            route_kind: kind,
+            external_token: effect.external_token,
+          },
+        });
+      }
+      throw new SesActionError(409, {
+        ...refusal,
+        evidence: {
+          ...(refusal.evidence || {}),
+          effect_state: sent.effect.state,
+          route_kind: kind,
+          external_token: effect.external_token,
+        },
+      });
     }
     const result = sent.result ||
       await mailGateway.reconcileSent(effect.external_token).then((rows) =>
@@ -2848,6 +3035,13 @@ export async function executeSesReleaseRevisionAction(
         sesRefusal(
           "graph_outcome_unknown",
           "Reconcile Sent Items by the exact SES operation token; never send this route again.",
+          {
+            evidence: {
+              route_kind: kind,
+              external_token: effect.external_token,
+              effect_state: sent.effect.state,
+            },
+          },
         ),
       );
     }
@@ -2906,8 +3100,9 @@ export async function executeSesReleaseRevisionAction(
   ) {
     throw new SesActionError(503, {
       state: "refused",
-      fact:
-        "All three routes are sent, but the independent closeout read-back does not prove the exact route-proof set; do not send again.",
+      fact: isAjsRelease
+        ? "Both AJS routes are sent, but the independent closeout read-back does not prove the exact route-proof set; do not send again."
+        : "All three routes are sent, but the independent closeout read-back does not prove the exact route-proof set; do not send again.",
     });
   }
   return {

@@ -454,6 +454,7 @@ import {
   type SesXeroGateway,
   type SesXeroInvoiceResult,
 } from './ses_reporting_actions.ts'
+import { createSesGraphMailGateway } from './ses_graph_mail_gateway.ts'
 import {
   invoiceLinkRequiredRefusal,
   inspectSealedSesJob,
@@ -1436,23 +1437,6 @@ async function loadSesRouteAttachments(
   return result
 }
 
-async function findSesGraphMessages(
-  mailbox: string,
-  folder: 'drafts' | 'sentitems',
-  externalToken: string,
-): Promise<any[]> {
-  const params = new URLSearchParams({
-    '$select': 'id,internetMessageId,subject,isDraft',
-    '$filter': `contains(subject,'${externalToken}')`,
-    '$top': '10',
-  })
-  const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/mailFolders/${folder}/messages?${params}`
-  const response = await sesGraphJson(url, { method: 'GET' }, [200])
-  return (response?.value || []).filter((message: any) =>
-    String(message?.subject || '').includes(externalToken)
-  )
-}
-
 async function uploadSesGraphAttachment(
   mailbox: string,
   messageId: string,
@@ -1503,86 +1487,23 @@ async function uploadSesGraphAttachment(
 }
 
 function makeSesGraphMailGateway(client: any): SesMailGateway {
-  const mailbox = 'admin@secureworkswa.com.au'
-  const reconcileSentOnly = async (externalToken: string): Promise<SesRouteSendResult[]> => {
-    const sent = await findSesGraphMessages(mailbox, 'sentitems', externalToken)
-    return sent.map((message: any) => ({
-      message_id: String(message.id),
-      internet_message_id: message.internetMessageId || undefined,
-      state: 'sent' as const,
-      operation_token: externalToken,
-    }))
-  }
-  const waitForSent = async (externalToken: string): Promise<SesRouteSendResult[]> => {
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const sent = await reconcileSentOnly(externalToken)
-      if (sent.length) return sent
-      await new Promise(resolve => setTimeout(resolve, 250))
-    }
-    return []
-  }
-  return {
-    async createDraftAndSend(route, context) {
-      const attachments = await loadSesRouteAttachments(
-        client,
-        Array.isArray(route.attachment_hashes) ? route.attachment_hashes : [],
-      )
-      const message = await sesGraphJson(
-        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            subject: `${String(route.subject || '')} [${context.external_token}]`,
-            body: { contentType: 'Text', content: String(route.body || '') },
-            toRecipients: (route.recipients || []).map((address: string) => ({
-              emailAddress: { address },
-            })),
-            ccRecipients: (route.cc || []).map((address: string) => ({
-              emailAddress: { address },
-            })),
-            internetMessageHeaders: [{
-              name: 'x-secureworks-ses-operation',
-              value: context.external_token,
-            }],
-          }),
-        },
-        [201],
-      )
-      if (!message?.id) throw new Error('Microsoft Graph did not return the created draft id')
+  // Controlled sealed-release transport. Do not fall back to send-outlook-email
+  // (that path fences sealed SES jobs) or Mail.app.
+  return createSesGraphMailGateway({
+    graphJson: sesGraphJson,
+    loadAttachments: (hashes) => loadSesRouteAttachments(client, hashes),
+    async checkpointDraft(operationKey, draftId) {
       const { error: checkpointError } = await client.from('ses_external_effects').update({
-        external_id: message.id,
-        provider_digest: { phase: 'draft_created', mailbox },
+        external_id: draftId,
+        provider_digest: { phase: 'draft_created', mailbox: 'admin@secureworkswa.com.au' },
         updated_at: new Date().toISOString(),
-      }).eq('operation_key', context.operation_key).eq('state', 'dispatching')
+      }).eq('operation_key', operationKey).eq('state', 'dispatching')
       if (checkpointError) {
         throw new Error(`The Graph draft exists but its exact draft id was not checkpointed (${checkpointError.message})`)
       }
-      for (const attachment of attachments) {
-        await uploadSesGraphAttachment(mailbox, message.id, attachment)
-      }
-      await sesGraphJson(
-        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(message.id)}/send`,
-        { method: 'POST' },
-        [202],
-      )
-      const [sent] = await waitForSent(context.external_token)
-      if (!sent) throw new Error('Graph accepted send-by-id but the message is not yet proven in Sent Items')
-      return sent
     },
-    async reconcileSent(externalToken) {
-      const existingSent = await reconcileSentOnly(externalToken)
-      if (existingSent.length) return existingSent
-      const drafts = await findSesGraphMessages(mailbox, 'drafts', externalToken)
-      if (drafts.length !== 1) return []
-      await sesGraphJson(
-        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(drafts[0].id)}/send`,
-        { method: 'POST' },
-        [202],
-      )
-      return await waitForSent(externalToken)
-    },
-  }
+    uploadAttachment: uploadSesGraphAttachment,
+  })
 }
 
 function opsApiVersion() {

@@ -597,6 +597,163 @@ export function checkReportJobClientSendGate(
   return failures;
 }
 
+// ── AJS/AJBR two-email client-send gate kinds (Captain 2026-08-04) ───────────
+//
+// Email 1: combined report + real Xero invoice PDF (no separate invoice email).
+// Email 2: photo follow-up (image attachments, not a PDF pack).
+// Shared envelope: from admin@, cc must include ses@, subject free of review markers.
+//
+// These gates are the sealed-release path's structural checks for AJS only.
+// MLB keeps checkClientSendGate / checkClientSendGateWithSwms / the three-route
+// shape. Do not generalise these kinds across builders.
+
+export type SesReleaseClientSendGateKind =
+  | "ajs_report_invoice"
+  | "ajs_photo"
+  | "universal_pack" // report + xero invoice (legacy non-MLB-SWMS pack)
+  | "universal_pack_with_swms"
+  | "report_job_invoice_only";
+
+function baseEnvelopeFailures(payload: ClientSendPayload): string[] {
+  const failures: string[] = [];
+  const fromEmail = String(payload.from || payload.from_email || "").trim()
+    .toLowerCase();
+  if (fromEmail !== MAKESAFE_ADMIN_FROM) {
+    failures.push(
+      `sender must be ${MAKESAFE_ADMIN_FROM}; got ${fromEmail || "<missing>"}`,
+    );
+  }
+  if (splitEmails(payload.to).length === 0) {
+    failures.push("to recipient is missing");
+  }
+  const cc = splitEmails(payload.cc);
+  if (!cc.includes(MAKESAFE_CC)) {
+    failures.push(`cc must include ${MAKESAFE_CC}`);
+  }
+  const subject = String(payload.subject || "").trim();
+  if (!subject) {
+    failures.push("subject is missing");
+  } else {
+    const marker = hasReviewMarker(subject);
+    if (marker) {
+      failures.push(
+        `client subject contains review/test marker '${marker}': ${subject}`,
+      );
+    }
+  }
+  const html = String(payload.htmlBody || payload.html_body || "");
+  if (!html.trim()) failures.push("html body is missing");
+  return failures;
+}
+
+/**
+ * AJS email 1: exactly one make-safe report PDF + exactly one real Xero invoice
+ * PDF. SWMS is not required for AJS (builder waiver unless HRCW).
+ */
+export function checkAjsReportInvoiceClientSendGate(
+  payload: ClientSendPayload,
+): string[] {
+  const failures = baseEnvelopeFailures(payload);
+  const names = attachmentNames(payload.attachments);
+  if (names.length < 2) {
+    failures.push(
+      "AJS report+invoice send requires at least two PDF attachments: make-safe report and Xero invoice",
+    );
+  }
+  const reportNames = names.filter((n) => isReportPdf(n));
+  const invoiceNames = names.filter((n) => isXeroInvoicePdf(n));
+  if (reportNames.length !== 1) {
+    failures.push(
+      `AJS report+invoice send expected exactly one make-safe report PDF; got ${reportNames.length}`,
+    );
+  }
+  if (invoiceNames.length !== 1) {
+    failures.push(
+      `AJS report+invoice send expected exactly one real Xero invoice PDF; got ${invoiceNames.length}`,
+    );
+  }
+  for (const name of names) {
+    if (!name.toLowerCase().endsWith(".pdf")) {
+      failures.push(`AJS report+invoice attachment must be a PDF: ${name}`);
+    }
+    const marker = hasReviewMarker(name);
+    if (marker) {
+      failures.push(
+        `client attachment filename contains review/test marker '${marker}': ${name}`,
+      );
+    }
+  }
+  return failures;
+}
+
+export function isPhotoAttachmentName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return /\.(jpe?g|png|heic|webp)$/i.test(lower);
+}
+
+/**
+ * AJS email 2: photo follow-up. At least one image attachment; no review markers.
+ * PDF attachments are refused so the photo route cannot smuggle the pack.
+ */
+export function checkAjsPhotoClientSendGate(
+  payload: ClientSendPayload,
+): string[] {
+  const failures = baseEnvelopeFailures(payload);
+  const names = attachmentNames(payload.attachments);
+  if (names.length === 0) {
+    failures.push("AJS photo follow-up requires at least one photo attachment");
+  }
+  const photos = names.filter((n) => isPhotoAttachmentName(n));
+  if (photos.length === 0) {
+    failures.push(
+      "AJS photo follow-up expected at least one image attachment (jpeg/png/heic/webp)",
+    );
+  }
+  for (const name of names) {
+    if (!isPhotoAttachmentName(name) && !name.toLowerCase().endsWith(".pdf")) {
+      // Allow only images on the photo route; PDFs are a hard refuse below.
+    }
+    if (name.toLowerCase().endsWith(".pdf")) {
+      failures.push(
+        `AJS photo follow-up must not carry PDF pack attachments: ${name}`,
+      );
+    }
+    const marker = hasReviewMarker(name);
+    if (marker) {
+      failures.push(
+        `client attachment filename contains review/test marker '${marker}': ${name}`,
+      );
+    }
+  }
+  return failures;
+}
+
+/**
+ * Dispatch a sealed-release route payload through the named client-send gate kind.
+ * Empty result == PASS.
+ */
+export function checkSesReleaseClientSendGate(
+  kind: SesReleaseClientSendGateKind,
+  payload: ClientSendPayload,
+): string[] {
+  switch (kind) {
+    case "ajs_report_invoice":
+      return checkAjsReportInvoiceClientSendGate(payload);
+    case "ajs_photo":
+      return checkAjsPhotoClientSendGate(payload);
+    case "universal_pack":
+      return checkClientSendGate(payload);
+    case "universal_pack_with_swms":
+      return checkClientSendGateWithSwms(payload);
+    case "report_job_invoice_only":
+      return checkReportJobClientSendGate(payload);
+    default: {
+      const _exhaustive: never = kind;
+      return [`unknown client-send gate kind: ${String(_exhaustive)}`];
+    }
+  }
+}
+
 // ── Atomic send-lock model (pure reference implementation) ──
 //
 // The live action takes the lock with a single conditional UPDATE:
