@@ -481,6 +481,34 @@ function cleanInputFromRows(args: {
   };
 }
 
+/**
+ * One rule for "which obligation revision backs this docket": the docket's own
+ * pointer when it names one, otherwise the newest current revision for the job.
+ * The raw response is returned so each caller applies its own refusal for a
+ * read failure — a database error must never be read as "no obligation".
+ */
+async function readSesObligationForDocket(
+  client: SesSupabaseClient,
+  args: {
+    job_id: string;
+    invoice_obligation_revision_id?: string | null;
+    columns: string;
+  },
+): Promise<SupabaseResponse<any>> {
+  if (args.invoice_obligation_revision_id) {
+    return await client.from("makesafe_invoice_obligation_revisions")
+      .select(args.columns)
+      .eq("id", args.invoice_obligation_revision_id)
+      .maybeSingle();
+  }
+  return await client.from("makesafe_invoice_obligation_revisions_current")
+    .select(args.columns)
+    .eq("job_id", args.job_id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+}
+
 export async function loadSesCockpitDocket(
   client: SesSupabaseClient,
   jobId: string,
@@ -497,12 +525,11 @@ export async function loadSesCockpitDocket(
     readinessResponse,
     "No current readiness revision exists for this job.",
   );
-  const obligationResponse = docket.invoice_obligation_revision_id
-    ? await client.from("makesafe_invoice_obligation_revisions")
-      .select("*").eq("id", docket.invoice_obligation_revision_id).maybeSingle()
-    : await client.from("makesafe_invoice_obligation_revisions_current")
-      .select("*").eq("job_id", jobId).order("created_at", { ascending: false })
-      .limit(1).maybeSingle();
+  const obligationResponse = await readSesObligationForDocket(client, {
+    job_id: jobId,
+    invoice_obligation_revision_id: docket.invoice_obligation_revision_id,
+    columns: "*",
+  });
   if (obligationResponse.error) {
     throw new SesActionError(409, {
       state: "refused",
@@ -1609,9 +1636,8 @@ export async function getSesReviewablePackAction(
   );
   let artifacts = projectedArtifacts.filter((entry) => !entry.suppressed)
     .map((entry) => entry.artifact);
-  const suppressedArtifacts = projectedArtifacts.filter((entry) =>
-    entry.suppressed
-  ).map((entry) => entry.artifact);
+  const suppressedArtifacts: Array<Record<string, any>> = projectedArtifacts
+    .filter((entry) => entry.suppressed).map((entry) => entry.artifact);
   let sourceRefusal: SesRefusal | null = null;
   if (physicalReview) {
     const trustedReports = artifacts.filter((artifact: any) =>
@@ -1633,20 +1659,22 @@ export async function getSesReviewablePackAction(
   // mint stores it on the obligation binding; AUTHORISED binds live on the
   // docket. Never leave the cockpit inventing a local tax-invoice HTML page
   // when a genuine DRAFT document exists (or must be reported unavailable).
-  const obligationForPack = docket.invoice_obligation_revision_id
-    ? await client.from("makesafe_invoice_obligation_revisions")
-      .select("id,xero_binding,pricing_disposition,state")
-      .eq("id", docket.invoice_obligation_revision_id)
-      .maybeSingle()
-    : await client.from("makesafe_invoice_obligation_revisions_current")
-      .select("id,xero_binding,pricing_disposition,state")
-      .eq("job_id", docket.job_id)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-  const packObligation = obligationForPack.error
-    ? null
-    : (obligationForPack.data || null);
+  const obligationForPack = await readSesObligationForDocket(client, {
+    job_id: docket.job_id,
+    invoice_obligation_revision_id: docket.invoice_obligation_revision_id,
+    columns: "id,xero_binding,pricing_disposition,state",
+  });
+  if (obligationForPack.error) {
+    // Fail closed: an unreadable obligation hides a bound DRAFT, and degrading
+    // to null would silently hand the Invoice tab back to the local proposal.
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The invoice obligation behind this pack could not be read (${
+        obligationForPack.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  const packObligation = obligationForPack.data || null;
   const routeBinding = resolveSesRouteXeroBinding(docket, packObligation);
   const boundDraftStatus = String(routeBinding.status || "").toUpperCase();
   let invoicePdfProjection: {
@@ -1667,7 +1695,24 @@ export async function getSesReviewablePackAction(
       fetchInvoicePdfBytes: deps.fetchInvoicePdfBytes,
     });
     // Drop any non-matching xero_invoice_pdf so a stale local concoction cannot
-    // occupy the Invoice tab ahead of the bound DRAFT document.
+    // occupy the Invoice tab ahead of the bound DRAFT document. Every dropped
+    // row is recorded so the Captain who ticks this pack can see what left it.
+    const resolvedObjectKey = String(resolved.artifact.object_key || "");
+    for (const artifact of artifacts) {
+      if (artifact.role !== "xero_invoice_pdf") continue;
+      if (
+        resolvedObjectKey &&
+        String(artifact.object_key || "") === resolvedObjectKey
+      ) {
+        continue;
+      }
+      suppressedArtifacts.push({
+        ...artifact,
+        signed_url: null,
+        trust_state: "suppressed",
+        suppression_reason: "xero_invoice_pdf_not_bound_draft",
+      });
+    }
     artifacts = artifacts.filter((artifact) =>
       artifact.role !== "xero_invoice_pdf"
     );
@@ -2185,6 +2230,75 @@ function matchingXeroInvoicePdfArtifact(
 }
 
 /**
+ * Stamp the recovered DRAFT PDF pointer onto the obligation binding from a READ
+ * path. The row may have been authorised while the PDF was in flight, so the
+ * write is state-guarded exactly like `bindSesDraftInvoiceToRevision` and is
+ * additionally pinned to the same bound Xero invoice, and it merges onto the
+ * row's CURRENT binding rather than replaying the stale read snapshot.
+ */
+async function stampSesObligationDraftPdfPointer(
+  client: SesSupabaseClient,
+  args: {
+    obligation_id: string;
+    bound_invoice_id: string;
+    pdf: SesDraftInvoicePdfBinding;
+  },
+): Promise<void> {
+  const currentResponse = await client.from(
+    "makesafe_invoice_obligation_revisions",
+  ).select("id,state,xero_binding").eq("id", args.obligation_id).maybeSingle();
+  if (currentResponse.error || !currentResponse.data) return;
+  const current = currentResponse.data;
+  const currentBinding = object(current.xero_binding);
+  if (
+    !SES_DRAFT_BINDABLE_REVISION_STATES.includes(String(current.state || "")) ||
+    String(currentBinding.xero_invoice_id || "").trim() !==
+      args.bound_invoice_id ||
+    String(currentBinding.status || "").toUpperCase() !== "DRAFT"
+  ) {
+    return;
+  }
+  await client.from("makesafe_invoice_obligation_revisions").update({
+    xero_binding: { ...currentBinding, ...args.pdf },
+  })
+    .eq("id", args.obligation_id)
+    .eq("xero_binding->>xero_invoice_id", args.bound_invoice_id)
+    .in("state", SES_DRAFT_BINDABLE_REVISION_STATES)
+    .select("id").maybeSingle();
+}
+
+/**
+ * Once-per-interval brake on live Xero PDF fetches. The cockpit polls the pack
+ * read, and a persistently unfetchable DRAFT would otherwise burn the shared
+ * Xero rate budget that mint and authorise depend on.
+ */
+const SES_DRAFT_PDF_FETCH_RETRY_MS = 5 * 60_000;
+const sesDraftPdfFetchFailures = new Map<string, number>();
+
+function sesDraftPdfFetchIsCoolingDown(invoiceId: string): boolean {
+  const failedAt = sesDraftPdfFetchFailures.get(invoiceId);
+  if (failedAt === undefined) return false;
+  if (Date.now() - failedAt < SES_DRAFT_PDF_FETCH_RETRY_MS) return true;
+  sesDraftPdfFetchFailures.delete(invoiceId);
+  return false;
+}
+
+/** Test seam: clear the process-local live-fetch backoff between cases. */
+export function resetSesDraftPdfFetchBackoff(): void {
+  sesDraftPdfFetchFailures.clear();
+}
+
+function recordSesDraftPdfFetchFailure(invoiceId: string): void {
+  const now = Date.now();
+  for (const [key, failedAt] of sesDraftPdfFetchFailures) {
+    if (now - failedAt >= SES_DRAFT_PDF_FETCH_RETRY_MS) {
+      sesDraftPdfFetchFailures.delete(key);
+    }
+  }
+  sesDraftPdfFetchFailures.set(invoiceId, now);
+}
+
+/**
  * Ensure a bound Xero DRAFT has a stored real PDF and return a reviewable pack
  * artifact for the Invoice tab. Never invents a local proposal PDF. When the
  * real PDF cannot be recovered, returns an explicit unavailable marker so the
@@ -2225,28 +2339,6 @@ export async function resolveSesBoundDraftInvoicePdfArtifact(
 
   const existing = matchingXeroInvoicePdfArtifact(args.artifacts, binding);
   if (existing?.signed_url || existing?.object_key) {
-    if (!existing.signed_url && existing.object_key) {
-      const signedUrl = await signSesDocketObjectUrl(
-        client,
-        String(existing.object_key),
-      );
-      return {
-        artifact: {
-          ...existing,
-          display_label: sesReviewArtifactDisplayLabel(existing.role),
-          signed_url: signedUrl,
-          signed_url_expires_in_seconds: 300,
-          pdf_unavailable: !signedUrl,
-          metadata: {
-            ...object(existing.metadata),
-            xero_invoice_id: boundId,
-            invoice_number: boundNumber,
-            status: "DRAFT",
-          },
-        },
-        source: "docket_artifact",
-      };
-    }
     return {
       artifact: {
         ...existing,
@@ -2275,33 +2367,39 @@ export async function resolveSesBoundDraftInvoicePdfArtifact(
     };
   }
 
+  let fetchCoolingDown = false;
   if (!stored && args.fetchInvoicePdfBytes) {
-    try {
-      const pdf = await args.fetchInvoicePdfBytes(boundId);
-      stored = await storeSesXeroInvoicePdfBytes(client, {
-        job_id: args.job_id,
-        invoice: {
-          xero_invoice_id: boundId,
-          invoice_number: boundNumber || boundId,
-          status: "DRAFT",
-        },
-        pdf,
-      });
-      // Best-effort: stamp the obligation binding so later reads do not re-fetch.
-      if (args.obligation?.id) {
-        await client.from("makesafe_invoice_obligation_revisions").update({
-          xero_binding: {
-            ...binding,
-            ...stored,
+    if (sesDraftPdfFetchIsCoolingDown(boundId)) {
+      fetchCoolingDown = true;
+    } else {
+      try {
+        const pdf = await args.fetchInvoicePdfBytes(boundId);
+        stored = await storeSesXeroInvoicePdfBytes(client, {
+          job_id: args.job_id,
+          invoice: {
+            xero_invoice_id: boundId,
+            invoice_number: boundNumber || boundId,
+            status: "DRAFT",
           },
-        }).eq("id", args.obligation.id).select("id").maybeSingle();
+          pdf,
+        });
+        sesDraftPdfFetchFailures.delete(boundId);
+        // Best-effort: stamp the obligation binding so later reads do not re-fetch.
+        if (args.obligation?.id) {
+          await stampSesObligationDraftPdfPointer(client, {
+            obligation_id: String(args.obligation.id),
+            bound_invoice_id: boundId,
+            pdf: stored,
+          });
+        }
+      } catch (error) {
+        recordSesDraftPdfFetchFailure(boundId);
+        console.error(
+          "[ses] bound DRAFT Xero PDF could not be recovered for Invoice tab:",
+          (error as Error)?.message || error,
+        );
+        stored = null;
       }
-    } catch (error) {
-      console.error(
-        "[ses] bound DRAFT Xero PDF could not be recovered for Invoice tab:",
-        (error as Error)?.message || error,
-      );
-      stored = null;
     }
   }
 
@@ -2347,7 +2445,9 @@ export async function resolveSesBoundDraftInvoicePdfArtifact(
         xero_invoice_id: boundId,
         invoice_number: boundNumber,
         status: "DRAFT",
-        reason: "xero_draft_pdf_unavailable",
+        reason: fetchCoolingDown
+          ? "xero_draft_pdf_fetch_cooling_down"
+          : "xero_draft_pdf_unavailable",
       },
     },
     source: "unavailable",
