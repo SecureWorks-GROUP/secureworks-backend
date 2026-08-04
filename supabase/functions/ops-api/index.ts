@@ -5157,7 +5157,15 @@ if (import.meta.main) serve(async (req: Request) => {
         if (req.method !== 'POST') {
           return json({ error: 'bind_current_cycle_curated_makesafe_report requires POST' }, 405)
         }
-        return json(await bindCurrentCycleCuratedMakesafeReport(client, body))
+        const bindActor = {
+          id: String(authUser?.email || authUser?.id || `ops-api:${authMode}`),
+          auth_mode: (authMode === 'jwt'
+            ? 'jwt'
+            : authMode === 'routine'
+            ? 'routine'
+            : 'api_key') as 'api_key' | 'jwt' | 'routine',
+        }
+        return json(await bindCurrentCycleCuratedMakesafeReport(client, body, bindActor))
       }
       case 'record_ses_portal_capture_evidence': {
         const captureIsPrivileged = authMode === 'api_key' ||
@@ -34268,51 +34276,130 @@ async function sha256BytesHex(bytes: Uint8Array): Promise<string> {
     .map((value) => value.toString(16).padStart(2, '0')).join('')
 }
 
+const CURATED_BIND_SHA256_RE = /^sha256:[0-9a-f]{64}$/
+
+function curatedBindError(
+  code: string,
+  message: string,
+  status = 409,
+): ApiError {
+  return new ApiError(message, status, {
+    success: false,
+    code,
+    error: message,
+  })
+}
+
+function requireCuratedBindSha256(
+  value: unknown,
+  field: string,
+): string {
+  const hash = String(value || '').trim()
+  if (!CURATED_BIND_SHA256_RE.test(hash)) {
+    throw curatedBindError(
+      'curated_bind_sha256_format_invalid',
+      `${field} must use sha256:<64 lowercase hex>`,
+      400,
+    )
+  }
+  return hash
+}
+
+type CurrentWikiValidatedInput = {
+  job: MakesafeReportJob
+  inputHash: string
+  supplied: Record<string, unknown>
+}
+
 async function assertCurrentWikiReportInput(
   supplied: Record<string, unknown>,
   canonicalClientName: unknown,
-  claimedInputHash: unknown,
-): Promise<{ job: MakesafeReportJob; inputHash: string }> {
-  const job = canonicalMakesafeReportJob(supplied, canonicalClientName) as any
-  if (!String((supplied as any).ref || '').trim() ||
-      !String((supplied as any).address || '').trim()) {
-    throw new ApiError('current wiki report ref and address are required', 409)
+): Promise<CurrentWikiValidatedInput> {
+  const suppliedPhotos = Array.isArray((supplied as any).photos)
+    ? (supplied as any).photos
+    : []
+  const normalizedPhotos = suppliedPhotos.map((photo: any, index: number) => ({
+    ...photo,
+    content_sha256: requireCuratedBindSha256(
+      photo?.content_sha256,
+      `report_job.photos[${index}].content_sha256`,
+    ),
+  }))
+  const normalizedSupplied: Record<string, unknown> = {
+    ...supplied,
+    photos: normalizedPhotos,
   }
-  if (String((supplied as any).contact || '').trim() !== job.contact) {
-    throw new ApiError('report_job.contact must equal canonical jobs.client_name', 409)
+  const job = canonicalMakesafeReportJob(
+    normalizedSupplied,
+    canonicalClientName,
+  ) as any
+  if (!String((normalizedSupplied as any).ref || '').trim() ||
+      !String((normalizedSupplied as any).address || '').trim()) {
+    throw curatedBindError(
+      'curated_bind_report_identity_missing',
+      'current wiki report ref and address are required',
+    )
+  }
+  if (String((normalizedSupplied as any).contact || '').trim() !== job.contact) {
+    throw curatedBindError(
+      'curated_bind_contact_mismatch',
+      'report_job.contact must equal canonical jobs.client_name',
+    )
   }
   try {
     assertCuratedReportPayload(job)
   } catch (error) {
-    throw new ApiError((error as Error).message, 409)
+    throw curatedBindError(
+      'curated_bind_report_semantics_invalid',
+      (error as Error).message,
+    )
   }
-  const materials = (supplied as any).materials_evidence
-  const photos = (supplied as any).photo_evidence
-  if (!materials ||
-      !['recorded_used', 'none_recorded'].includes(String(materials.state)) ||
-      !Array.isArray(materials.items)) {
-    throw new ApiError('current wiki materials_evidence contract required', 409)
+  const materialsRaw = (normalizedSupplied as any).materials_evidence
+  const photos = (normalizedSupplied as any).photo_evidence
+  if (!materialsRaw ||
+      !['recorded_used', 'none_recorded'].includes(String(materialsRaw.state)) ||
+      !Array.isArray(materialsRaw.items)) {
+    throw curatedBindError(
+      'curated_bind_materials_accounting_invalid',
+      'current wiki materials_evidence contract required',
+    )
   }
-  if (materials.items.some((item: unknown) =>
+  if (materialsRaw.items.some((item: unknown) =>
     typeof item !== 'string' || !item.trim()
   )) {
-    throw new ApiError('materials_evidence.items must be explicit non-empty text', 409)
+    throw curatedBindError(
+      'curated_bind_materials_accounting_invalid',
+      'materials_evidence.items must be explicit non-empty text',
+    )
   }
+  // Trim both sides of materials accounting so source compare and input hash
+  // share one canonical item form.
+  const materials = {
+    ...materialsRaw,
+    state: String(materialsRaw.state),
+    items: materialsRaw.items.map((item: string) => item.trim()),
+  }
+  normalizedSupplied.materials_evidence = materials
   if (
     (materials.state === 'recorded_used' && materials.items.length === 0) ||
     (materials.state === 'none_recorded' && materials.items.length !== 0)
   ) {
-    throw new ApiError('materials_evidence state and items contradict', 409)
+    throw curatedBindError(
+      'curated_bind_materials_accounting_invalid',
+      'materials_evidence state and items contradict',
+    )
   }
-  const suppliedPhotos = (supplied as any).photos
   if (!photos || photos.completeness_verified !== true ||
       !Array.isArray(photos.applicable_ids) ||
       !Array.isArray(photos.selected_ids) ||
       !Array.isArray(photos.excluded) ||
       !Array.isArray(photos.rejected) ||
-      !Array.isArray(suppliedPhotos) ||
+      !Array.isArray(normalizedPhotos) ||
       !String(photos.source_revision || '').trim()) {
-    throw new ApiError('current wiki photo_evidence contract required', 409)
+    throw curatedBindError(
+      'curated_bind_photo_accounting_invalid',
+      'current wiki photo_evidence contract required',
+    )
   }
   const integerCounts = [
     photos.source_count,
@@ -34322,7 +34409,10 @@ async function assertCurrentWikiReportInput(
   if (integerCounts.some((value) =>
     !Number.isInteger(value) || value < 0
   )) {
-    throw new ApiError('photo_evidence counts must be non-negative integers', 409)
+    throw curatedBindError(
+      'curated_bind_photo_accounting_invalid',
+      'photo_evidence counts must be non-negative integers',
+    )
   }
   const ids = (value: unknown[]): string[] => value.map((item) =>
     typeof item === 'string' ? item.trim() : ''
@@ -34336,9 +34426,9 @@ async function assertCurrentWikiReportInput(
     new Set(selectedIds).size !== selectedIds.length ||
     canonicalSesJson(applicableIds) !== canonicalSesJson(selectedIds)
   ) {
-    throw new ApiError(
+    throw curatedBindError(
+      'curated_bind_photo_accounting_invalid',
       'photo_evidence applicable and selected IDs must be identical unique ordered IDs',
-      409,
     )
   }
   const excludedIds: string[] = []
@@ -34346,44 +34436,187 @@ async function assertCurrentWikiReportInput(
     const id = String(excluded?.evidence_id || '').trim()
     const reason = String(excluded?.reason || '').trim()
     if (!id || !reason) {
-      throw new ApiError('photo_evidence exclusions require identity and reason', 409)
+      throw curatedBindError(
+        'curated_bind_photo_accounting_invalid',
+        'photo_evidence exclusions require identity and reason',
+      )
     }
     excludedIds.push(id)
   }
   if (new Set(excludedIds).size !== excludedIds.length ||
       excludedIds.some((id) => applicableIds.includes(id)) ||
       photos.rejected.length !== 0) {
-    throw new ApiError('photo_evidence exclusion/rejection accounting is unresolved', 409)
+    throw curatedBindError(
+      'curated_bind_photo_accounting_invalid',
+      'photo_evidence exclusion/rejection accounting is unresolved',
+    )
   }
   if (
     photos.source_count !== photos.applicable_count + excludedIds.length ||
     photos.applicable_count !== applicableIds.length ||
     photos.selected_count !== selectedIds.length ||
-    photos.selected_count !== suppliedPhotos.length
+    photos.selected_count !== normalizedPhotos.length
   ) {
-    throw new ApiError('photo_evidence counts do not account for the source set', 409)
+    throw curatedBindError(
+      'curated_bind_photo_accounting_invalid',
+      'photo_evidence counts do not account for the source set',
+    )
   }
-  const photoIds = suppliedPhotos.map((photo: any) =>
+  const photoIds = normalizedPhotos.map((photo: any) =>
     String(photo?.evidence_id || '').trim()
   )
   if (canonicalSesJson(photoIds) !== canonicalSesJson(selectedIds)) {
-    throw new ApiError('photos evidence IDs do not match selected IDs in order', 409)
-  }
-  const photoContentHashes = suppliedPhotos.map((photo: any) =>
-    String(photo?.content_sha256 || '').trim().toLowerCase()
-  )
-  if (photoContentHashes.some((hash: string) => !/^[a-f0-9]{64}$/.test(hash))) {
-    throw new ApiError('photos require exact content SHA-256 values', 409)
+    throw curatedBindError(
+      'curated_bind_photo_accounting_invalid',
+      'photos evidence IDs do not match selected IDs in order',
+    )
   }
   const inputHash = `sha256:${
     await sha256BytesHex(new TextEncoder().encode(canonicalSesJson(
-      canonicalCurrentWikiReportHashPayload(supplied),
+      canonicalCurrentWikiReportHashPayload(normalizedSupplied),
     )))
   }`
-  if (String(claimedInputHash || '') !== inputHash) {
-    throw new ApiError('current wiki report input hash mismatch', 409)
+  return { job, inputHash, supplied: normalizedSupplied }
+}
+
+async function assertCurrentWikiSourceEvidence(
+  client: any,
+  jobId: string,
+  detail: any,
+  attendanceCycleId: string,
+  validated: CurrentWikiValidatedInput,
+): Promise<void> {
+  const [reportsResponse, mediaResponse] = await Promise.all([
+    client.from('job_service_reports')
+      .select('id,status,checklist_json,attendance_cycle_id,cycle_attribution,cycle_number')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }),
+    client.from('job_media')
+      .select('id,storage_url,type,phase,attendance_cycle_id,cycle_attribution,cycle_number,created_at,sort_order,order_index')
+      .eq('job_id', jobId)
+      .order('created_at'),
+  ])
+  if (reportsResponse.error || mediaResponse.error) {
+    throw curatedBindError(
+      'curated_bind_source_evidence_read_failed',
+      'current-cycle report/photo source evidence could not be read',
+      503,
+    )
   }
-  return { job, inputHash }
+  const selectedReport = selectCurrentCycleReport(
+    reportsResponse.data || [],
+    detail,
+    attendanceCycleId,
+  )
+  const sourceRevision = String(
+    (validated.supplied as any).photo_evidence?.source_revision || '',
+  ).trim()
+  if (!selectedReport || sourceRevision !== `job_service_report:${selectedReport.id}`) {
+    throw curatedBindError(
+      'curated_bind_source_report_mismatch',
+      'photo_evidence.source_revision is not the selected current-cycle service report',
+    )
+  }
+  const checklist = parseJsonObject(selectedReport.checklist_json)
+  if (!Object.hasOwn(checklist, 'materials_used') ||
+      !Array.isArray(checklist.materials_used) ||
+      checklist.materials_used.some((item: unknown) =>
+        typeof item !== 'string' || !item.trim()
+      )) {
+    throw curatedBindError(
+      'curated_bind_materials_source_unproved',
+      'current-cycle service report does not prove explicit materials accounting',
+    )
+  }
+  const expectedMaterialItems = checklist.materials_used.map((item: string) =>
+    item.trim()
+  )
+  const suppliedMaterials = (validated.supplied as any).materials_evidence
+  const expectedMaterialState = expectedMaterialItems.length
+    ? 'recorded_used'
+    : 'none_recorded'
+  if (suppliedMaterials.state !== expectedMaterialState ||
+      canonicalSesJson(suppliedMaterials.items) !==
+        canonicalSesJson(expectedMaterialItems)) {
+    throw curatedBindError(
+      'curated_bind_materials_source_mismatch',
+      'materials_evidence does not match the selected current-cycle service report',
+    )
+  }
+
+  const currentMedia = filterMediaForCurrentCycle(
+    mediaResponse.data || [],
+    detail,
+    attendanceCycleId,
+  )
+  const photoIsApplicable = (item: any) => {
+    const type = String(item?.type || '').trim().toLowerCase()
+    const phase = String(item?.phase || '').trim().toLowerCase()
+    return type.includes('photo') || type.includes('image') ||
+      phase.includes('completion') || phase.includes('after')
+  }
+  // Match assembler ordering (sort_order/order_index then id), not created_at.
+  const mediaOrder = (left: any, right: any) =>
+    Number(left?.sort_order ?? left?.order_index ?? 0) -
+      Number(right?.sort_order ?? right?.order_index ?? 0) ||
+    String(left?.id || '').localeCompare(String(right?.id || ''))
+  const applicable = currentMedia.filter(photoIsApplicable).slice().sort(mediaOrder)
+  const excluded = currentMedia.filter((item: any) => !photoIsApplicable(item))
+    .slice().sort(mediaOrder)
+  const applicableIds = applicable.map((item: any) => String(item.id || '').trim())
+  const excludedIds = excluded.map((item: any) => String(item.id || '').trim())
+  const photoEvidence = (validated.supplied as any).photo_evidence
+  const suppliedExcludedIds = photoEvidence.excluded.map((item: any) =>
+    String(item?.evidence_id || '').trim()
+  )
+  if (photoEvidence.source_count !== currentMedia.length ||
+      canonicalSesJson(photoEvidence.applicable_ids) !== canonicalSesJson(applicableIds) ||
+      canonicalSesJson(photoEvidence.selected_ids) !== canonicalSesJson(applicableIds) ||
+      canonicalSesJson(suppliedExcludedIds) !== canonicalSesJson(excludedIds)) {
+    throw curatedBindError(
+      'curated_bind_photo_source_mismatch',
+      'photo_evidence does not completely account for current-cycle job_media',
+    )
+  }
+  const suppliedPhotos = (validated.supplied as any).photos as any[]
+  for (let index = 0; index < applicable.length; index++) {
+    const source = applicable[index]
+    // Full object only — never hash a thumbnail derivative into report trust.
+    const sourceUrl = String(source.storage_url || '').trim()
+    if (!sourceUrl.startsWith('https://')) {
+      throw curatedBindError(
+        'curated_bind_photo_bytes_unrecoverable',
+        `current-cycle photo ${String(source.id || '')} has no recoverable full-image HTTPS source`,
+      )
+    }
+    let response: Response
+    try {
+      response = await fetch(sourceUrl, { signal: AbortSignal.timeout(20_000) })
+    } catch {
+      throw curatedBindError(
+        'curated_bind_photo_bytes_read_failed',
+        `current-cycle photo ${String(source.id || '')} byte recovery failed`,
+      )
+    }
+    if (!response.ok) {
+      throw curatedBindError(
+        'curated_bind_photo_bytes_read_failed',
+        `current-cycle photo ${String(source.id || '')} byte recovery failed`,
+      )
+    }
+    const sourceBytes = new Uint8Array(await response.arrayBuffer())
+    const expectedHash = requireCuratedBindSha256(
+      suppliedPhotos[index]?.content_sha256,
+      `report_job.photos[${index}].content_sha256`,
+    )
+    const actualHash = `sha256:${await sha256BytesHex(sourceBytes)}`
+    if (actualHash !== expectedHash) {
+      throw curatedBindError(
+        'curated_bind_photo_sha256_mismatch',
+        `current-cycle photo ${String(source.id || '')} SHA-256 mismatch`,
+      )
+    }
+  }
 }
 
 async function assertBertramProtectedReportRepairCas(
@@ -34472,85 +34705,113 @@ async function assertBertramProtectedReportRepairCas(
  *
  * Exact body:
  * {
- *   job_id, document_id, attendance_cycle_id,
+ *   job_id, document_id,
  *   pdf_base64, pdf_sha256,
- *   report_job, report_input_hash,
- *   renderer_source_revision, renderer_script_sha256,
- *   curation_revision_id, curation_artifact_id,
- *   curation_artifact_content_hash
+ *   report_job,
+ *   curation_revision_id, curation_artifact_id
  * }
  *
- * This binds an already-attached, trade-visible makesafe_report. It never
- * uploads, renders, sends, approves, invoices, or changes job/board state.
+ * pdf_sha256 and every report_job photo content_sha256 use the single canonical
+ * sha256:<64 lowercase hex> representation. Current cycle, renderer provenance,
+ * artifact content hash and canonical input hash are server-derived. This binds
+ * an already-attached, trade-visible makesafe_report and establishes its verified
+ * current-cycle attribution. It never uploads, renders, sends, approves,
+ * invoices, or changes job/board state.
  */
-async function bindCurrentCycleCuratedMakesafeReport(client: any, body: any) {
+async function bindCurrentCycleCuratedMakesafeReport(
+  client: any,
+  body: any,
+  actor: { id: string; auth_mode: 'api_key' | 'jwt' | 'routine' },
+) {
   const jobId = String(body.job_id || '').trim()
   const documentId = String(body.document_id || '').trim()
-  const attendanceCycleId = String(body.attendance_cycle_id || '').trim()
   const curationRevisionId = String(body.curation_revision_id || '').trim()
   const curationArtifactId = String(body.curation_artifact_id || '').trim()
   const opaqueIdentity = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/
-  if (!jobId || !documentId || !attendanceCycleId) {
-    throw new ApiError('job_id, document_id and attendance_cycle_id are required', 400)
+  if (!jobId || !documentId) {
+    throw curatedBindError(
+      'curated_bind_required_fields_missing',
+      'job_id and document_id are required',
+      400,
+    )
   }
   if (!opaqueIdentity.test(curationRevisionId) ||
       !opaqueIdentity.test(curationArtifactId)) {
-    throw new ApiError('curation revision and artifact IDs must be stable opaque identities', 400)
+    throw curatedBindError(
+      'curated_bind_curation_identity_invalid',
+      'curation revision and artifact IDs must be stable opaque identities',
+      400,
+    )
   }
   if (new Set([documentId, curationRevisionId, curationArtifactId]).size !== 3) {
-    throw new ApiError('curation revision/artifact identity cannot self-reference the document', 409)
-  }
-  if (body.renderer_source_revision !==
-      MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION ||
-      body.renderer_script_sha256 !==
-      MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256) {
-    throw new ApiError('curated report renderer provenance is inactive or retired', 409)
+    throw curatedBindError(
+      'curated_bind_curation_self_reference',
+      'curation revision/artifact identity cannot self-reference the document',
+    )
   }
 
   const suppliedBase64 = String(body.pdf_base64 || '').trim()
-  if (!suppliedBase64) throw new ApiError('pdf_base64 is required', 400)
+  if (!suppliedBase64) {
+    throw curatedBindError(
+      'curated_bind_pdf_required',
+      'pdf_base64 is required',
+      400,
+    )
+  }
   let suppliedBytes: Uint8Array
   try {
     suppliedBytes = Uint8Array.from(atob(suppliedBase64), (value) => value.charCodeAt(0))
   } catch {
-    throw new ApiError('pdf_base64 is invalid', 400)
+    throw curatedBindError(
+      'curated_bind_pdf_base64_invalid',
+      'pdf_base64 is invalid',
+      400,
+    )
   }
   if (!suppliedBytes.byteLength ||
       suppliedBytes.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES) {
-    throw new ApiError('curated report exceeds the configured 8 MiB byte budget', 413)
+    throw curatedBindError(
+      'curated_bind_pdf_size_invalid',
+      'curated report exceeds the configured 8 MiB byte budget',
+      413,
+    )
   }
   if (new TextDecoder().decode(suppliedBytes.slice(0, 5)) !== '%PDF-') {
-    throw new ApiError('curated report is not a PDF', 400)
+    throw curatedBindError(
+      'curated_bind_pdf_type_invalid',
+      'curated report is not a PDF',
+      400,
+    )
   }
-  const suppliedRawHash = await sha256BytesHex(suppliedBytes)
-  if (String(body.pdf_sha256 || '').toLowerCase() !== suppliedRawHash) {
-    throw new ApiError('curated report raw SHA-256 mismatch', 409)
+  const suppliedRawHash = `sha256:${await sha256BytesHex(suppliedBytes)}`
+  if (requireCuratedBindSha256(body.pdf_sha256, 'pdf_sha256') !== suppliedRawHash) {
+    throw curatedBindError(
+      'curated_bind_pdf_sha256_mismatch',
+      'curated report raw SHA-256 mismatch',
+    )
   }
-  const suppliedArtifactHash = String(body.curation_artifact_content_hash || '')
-  if (suppliedArtifactHash !== await sesSha256Bytes(suppliedBytes)) {
-    throw new ApiError('curation artifact content hash mismatch', 409)
-  }
+  const suppliedArtifactHash = await sesSha256Bytes(suppliedBytes)
 
-  const [jobResponse, detailResponse, documentResponse, boundResponse] =
-    await Promise.all([
-      client.from('jobs')
-        .select('id,job_number,type,client_name,metadata')
-        .eq('id', jobId).maybeSingle(),
-      client.from('makesafe_job_details')
-        .select('report_type,attendance_cycle_id,external_ref')
-        .eq('job_id', jobId).maybeSingle(),
-      client.from('job_documents')
-        .select('id,job_id,type,file_name,pdf_url,storage_url,visible_to_trades,attendance_cycle_id,cycle_attribution,uploaded_by,data_snapshot_json,version')
-        .eq('id', documentId).maybeSingle(),
-      client.from('job_documents')
-        .select('id,data_snapshot_json')
-        .eq('job_id', jobId).eq('type', 'makesafe_report')
-        .eq('attendance_cycle_id', attendanceCycleId),
-    ])
+  // Authority rows first: current attendance cycle is server-derived and must
+  // exist before the cycle-scoped conflict scan can run.
+  const [jobResponse, detailResponse, documentResponse] = await Promise.all([
+    client.from('jobs')
+      .select('id,job_number,type,client_name,metadata')
+      .eq('id', jobId).maybeSingle(),
+    client.from('makesafe_job_details')
+      .select('report_type,attendance_cycle_id,cycle_number,reattend_count,external_ref')
+      .eq('job_id', jobId).maybeSingle(),
+    client.from('job_documents')
+      .select('id,job_id,type,file_name,pdf_url,storage_url,visible_to_trades,attendance_cycle_id,cycle_attribution,uploaded_by,data_snapshot_json,version')
+      .eq('id', documentId).maybeSingle(),
+  ])
   if (jobResponse.error || !jobResponse.data ||
       detailResponse.error || !detailResponse.data ||
-      documentResponse.error || !documentResponse.data || boundResponse.error) {
-    throw new ApiError('current-cycle curated report authority rows could not be read', 409)
+      documentResponse.error || !documentResponse.data) {
+    throw curatedBindError(
+      'curated_bind_authority_read_failed',
+      'current-cycle curated report authority rows could not be read',
+    )
   }
   const metadata = parseJsonObject(jobResponse.data.metadata)
   const family = canonicalSesFamilyFromCard({
@@ -34563,39 +34824,92 @@ async function bindCurrentCycleCuratedMakesafeReport(client: any, body: any) {
   if (jobResponse.data.type !== 'makesafe' ||
       !['physical_makesafe', 'temporary_fencing'].includes(family) ||
       detailResponse.data.report_type != null) {
-    throw new ApiError('only a physical make-safe job may bind a makesafe_report source', 409)
+    throw curatedBindError(
+      'curated_bind_family_not_eligible',
+      'only a physical make-safe job may bind a makesafe_report source',
+    )
   }
-  if (detailResponse.data.attendance_cycle_id !== attendanceCycleId) {
-    throw new ApiError('attendance_cycle_id is not the job current cycle', 409)
+  const attendanceCycleId = String(
+    detailResponse.data.attendance_cycle_id || '',
+  ).trim()
+  if (!attendanceCycleId) {
+    throw curatedBindError(
+      'curated_bind_current_cycle_missing',
+      'job has no verified current attendance cycle',
+    )
+  }
+  const boundResponse = await client.from('job_documents')
+    .select('id,data_snapshot_json')
+    .eq('job_id', jobId).eq('type', 'makesafe_report')
+    .eq('attendance_cycle_id', attendanceCycleId)
+  if (boundResponse.error) {
+    throw curatedBindError(
+      'curated_bind_authority_read_failed',
+      'current-cycle curated report authority rows could not be read',
+    )
   }
   const document = documentResponse.data
   if (document.job_id !== jobId || document.type !== 'makesafe_report' ||
-      document.visible_to_trades !== true ||
-      document.attendance_cycle_id !== attendanceCycleId ||
-      document.cycle_attribution !== 'bound') {
-    throw new ApiError('document is not a visible current-cycle makesafe_report', 409)
+      document.visible_to_trades !== true) {
+    throw curatedBindError(
+      'curated_bind_document_not_visible_report',
+      'document is not a visible same-job makesafe_report',
+    )
+  }
+  // Refuse only true cycle identity conflicts. Null attribution or a non-bound
+  // attribution on the current (or unset) cycle is repairable by this bind.
+  if ((document.attendance_cycle_id &&
+        String(document.attendance_cycle_id) !== attendanceCycleId) ||
+      (!document.attendance_cycle_id && document.cycle_attribution === 'bound')) {
+    throw curatedBindError(
+      'curated_bind_document_cycle_conflict',
+      'document is registered to another or inconsistent attendance cycle',
+    )
   }
   const sourceUrl = String(document.pdf_url || document.storage_url || '')
   if (!sourceUrl.startsWith('https://')) {
-    throw new ApiError('existing makesafe_report bytes are not recoverable', 409)
+    throw curatedBindError(
+      'curated_bind_document_bytes_unrecoverable',
+      'existing makesafe_report bytes are not recoverable',
+    )
   }
-  const sourceResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(20_000) })
+  let sourceResponse: Response
+  try {
+    sourceResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(20_000) })
+  } catch {
+    throw curatedBindError(
+      'curated_bind_document_bytes_read_failed',
+      'existing makesafe_report byte recovery failed',
+    )
+  }
   if (!sourceResponse.ok) {
-    throw new ApiError('existing makesafe_report byte recovery failed', 409)
+    throw curatedBindError(
+      'curated_bind_document_bytes_read_failed',
+      'existing makesafe_report byte recovery failed',
+    )
   }
   const storedBytes = new Uint8Array(await sourceResponse.arrayBuffer())
   if (!storedBytes.byteLength || storedBytes.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES ||
       new TextDecoder().decode(storedBytes.slice(0, 5)) !== '%PDF-' ||
       storedBytes.byteLength !== suppliedBytes.byteLength ||
-      await sha256BytesHex(storedBytes) !== suppliedRawHash ||
+      `sha256:${await sha256BytesHex(storedBytes)}` !== suppliedRawHash ||
       await sesSha256Bytes(storedBytes) !== suppliedArtifactHash) {
-    throw new ApiError('existing makesafe_report bytes drift from the curated artifact', 409)
+    throw curatedBindError(
+      'curated_bind_document_bytes_mismatch',
+      'existing makesafe_report bytes drift from the curated artifact',
+    )
   }
 
   const validatedInput = await assertCurrentWikiReportInput(
     body.report_job || {},
     jobResponse.data.client_name,
-    body.report_input_hash,
+  )
+  await assertCurrentWikiSourceEvidence(
+    client,
+    jobId,
+    detailResponse.data,
+    attendanceCycleId,
+    validatedInput,
   )
   const sourceIdentity =
     `curation-revision:${curationRevisionId}/artifact:${curationArtifactId}`
@@ -34604,7 +34918,7 @@ async function bindCurrentCycleCuratedMakesafeReport(client: any, body: any) {
     report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
     report_renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
     report_renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-    report_render_hash: suppliedRawHash,
+    report_render_hash: suppliedRawHash.slice('sha256:'.length),
     report_input_hash: validatedInput.inputHash,
     evidence_source: 'current_cycle_curated_makesafe_report',
     curated_source_kind: 'durable_curated_revision',
@@ -34612,7 +34926,8 @@ async function bindCurrentCycleCuratedMakesafeReport(client: any, body: any) {
     curated_source_revision_id: curationRevisionId,
     curated_source_artifact_id: curationArtifactId,
     curated_source_artifact_content_hash: suppliedArtifactHash,
-    curated_source_expected_raw_sha256: `sha256:${suppliedRawHash}`,
+    curated_source_expected_raw_sha256: suppliedRawHash,
+    curated_source_authority: 'privileged_ops_curated_bind',
     report_scope_narratives: [
       validatedInput.job.scope,
       validatedInput.job.findings,
@@ -34621,43 +34936,101 @@ async function bindCurrentCycleCuratedMakesafeReport(client: any, body: any) {
     ].filter((value: unknown) => typeof value === 'string' && value.trim()),
   }
   const prior = parseJsonObject(document.data_snapshot_json)
-  if (prior.source_document_id === documentId ||
-      prior.curated_source_identity === documentId ||
-      (prior.report_renderer_version &&
-        prior.report_renderer_version !== MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION) ||
-      ['raw_trade_report_fields', 'guarded_current_wiki_rerender_sweep']
-        .includes(String(prior.evidence_source || document.uploaded_by || ''))) {
-    throw new ApiError('raw, retired, or self-stamped report provenance cannot be bound', 409)
-  }
   const conflict = (boundResponse.data || []).find((row: any) => {
     if (row.id === documentId) return false
     const facts = parseJsonObject(row.data_snapshot_json)
     return facts.curated_source_kind === 'durable_curated_revision'
   })
   if (conflict) {
-    throw new ApiError('current attendance cycle already has a conflicting curated source bind', 409)
+    throw curatedBindError(
+      'curated_bind_cycle_conflict',
+      'current attendance cycle already has a conflicting curated source bind',
+    )
   }
-  const sameBind = Object.entries(exactSnapshot).every(([key, value]) =>
+  const sameSnapshot = Object.entries(exactSnapshot).every(([key, value]) =>
     canonicalSesJson(prior[key] ?? null) === canonicalSesJson(value)
   )
-  if (sameBind) {
+  const cycleAlreadyBound =
+    String(document.attendance_cycle_id || '') === attendanceCycleId &&
+    document.cycle_attribution === 'bound'
+  const currentVersion = Number(document.version)
+  if (sameSnapshot && cycleAlreadyBound) {
     return {
       success: true,
       skipped: true,
       document_id: documentId,
+      document_version: currentVersion,
+      attendance_cycle_id: attendanceCycleId,
+      cycle_attribution: 'bound',
       source_kind: 'durable_curated_revision',
       source_identity: sourceIdentity,
       source_revision_id: curationRevisionId,
       source_artifact_id: curationArtifactId,
       source_artifact_content_hash: suppliedArtifactHash,
-      expected_raw_sha256: `sha256:${suppliedRawHash}`,
+      expected_raw_sha256: suppliedRawHash,
       report_input_hash: validatedInput.inputHash,
+      renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+      renderer_script_sha256:
+        `sha256:${MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256}`,
+      renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
       writes: 0,
+    }
+  }
+  // Trusted snapshot already exact, but cycle columns drifted: allow a
+  // cycle-only CAS repair instead of permanent document_conflict.
+  if (sameSnapshot && !cycleAlreadyBound) {
+    if (!Number.isSafeInteger(currentVersion) || currentVersion < 1) {
+      throw curatedBindError(
+        'curated_bind_document_version_invalid',
+        'curated source document has no stable version for compare-and-swap',
+      )
+    }
+    const repair = await client.from('job_documents').update({
+      attendance_cycle_id: attendanceCycleId,
+      cycle_attribution: 'bound',
+      version: currentVersion + 1,
+    }).eq('id', documentId).eq('version', currentVersion).select('id').maybeSingle()
+    if (repair.error || !repair.data) {
+      throw curatedBindError(
+        'curated_bind_compare_and_swap_drift',
+        'curated source provenance drifted before it could be written',
+      )
+    }
+    return {
+      success: true,
+      skipped: false,
+      document_id: documentId,
+      document_version: currentVersion + 1,
+      attendance_cycle_id: attendanceCycleId,
+      cycle_attribution: 'bound',
+      source_kind: 'durable_curated_revision',
+      source_identity: sourceIdentity,
+      source_revision_id: curationRevisionId,
+      source_artifact_id: curationArtifactId,
+      source_artifact_content_hash: suppliedArtifactHash,
+      expected_raw_sha256: suppliedRawHash,
+      report_input_hash: validatedInput.inputHash,
+      renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+      renderer_script_sha256:
+        `sha256:${MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256}`,
+      renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+      writes: 1,
+      cycle_repair: true,
     }
   }
   if (prior.curated_source_identity || prior.curated_source_revision_id ||
       prior.curated_source_artifact_id) {
-    throw new ApiError('document already has a conflicting curated source bind', 409)
+    throw curatedBindError(
+      'curated_bind_document_conflict',
+      'document already has a conflicting curated source bind',
+    )
+  }
+
+  if (!Number.isSafeInteger(currentVersion) || currentVersion < 1) {
+    throw curatedBindError(
+      'curated_bind_document_version_invalid',
+      'curated source document has no stable version for compare-and-swap',
+    )
   }
 
   const eventId = stableUuidFromSha256(await sesSha256({
@@ -34676,23 +35049,40 @@ async function bindCurrentCycleCuratedMakesafeReport(client: any, body: any) {
       source_revision_id: curationRevisionId,
       source_artifact_id: curationArtifactId,
       source_artifact_content_hash: suppliedArtifactHash,
-      expected_raw_sha256: `sha256:${suppliedRawHash}`,
+      expected_raw_sha256: suppliedRawHash,
       report_input_hash: validatedInput.inputHash,
+      renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+      renderer_script_sha256:
+        `sha256:${MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256}`,
+      actor_id: actor.id,
+      auth_mode: actor.auth_mode,
+      prior_document_version: currentVersion,
+      prior_attendance_cycle_id: document.attendance_cycle_id || null,
+      prior_cycle_attribution: document.cycle_attribution || null,
+      prior_data_snapshot_json: prior,
+      // Residual product boundary: this is privileged attestation that the
+      // served PDF is the curated artifact for verified current-cycle
+      // materials/photos — not a re-render proof of those bytes.
+      attestation: 'privileged_ops_curated_bind_served_bytes',
     },
   })
   if (event.error) {
     if (event.error.code === '23505') {
-      throw new ApiError('current attendance cycle already has a bind in progress or completed', 409)
+      throw curatedBindError(
+        'curated_bind_reservation_conflict',
+        'current attendance cycle already has a bind in progress or completed',
+      )
     }
-    throw new ApiError('curated source audit event could not be written', 503)
-  }
-  const currentVersion = Number(document.version)
-  if (!Number.isSafeInteger(currentVersion) || currentVersion < 1) {
-    await client.from('job_events').delete().eq('id', eventId)
-    throw new ApiError('curated source document has no stable version for compare-and-swap', 409)
+    throw curatedBindError(
+      'curated_bind_audit_write_failed',
+      'curated source audit event could not be written',
+      503,
+    )
   }
   const update = await client.from('job_documents').update({
-    data_snapshot_json: { ...prior, ...exactSnapshot },
+    data_snapshot_json: exactSnapshot,
+    attendance_cycle_id: attendanceCycleId,
+    cycle_attribution: 'bound',
     version: currentVersion + 1,
   }).eq('id', documentId).eq('version', currentVersion).select('id').maybeSingle()
   if (update.error || !update.data) {
@@ -34700,19 +35090,29 @@ async function bindCurrentCycleCuratedMakesafeReport(client: any, body: any) {
     if (cleanup.error) {
       console.error('[ops-api] curated bind reservation cleanup failed', cleanup.error)
     }
-    throw new ApiError('curated source provenance drifted before it could be written', 409)
+    throw curatedBindError(
+      'curated_bind_compare_and_swap_drift',
+      'curated source provenance drifted before it could be written',
+    )
   }
   return {
     success: true,
     skipped: false,
     document_id: documentId,
+    document_version: currentVersion + 1,
+    attendance_cycle_id: attendanceCycleId,
+    cycle_attribution: 'bound',
     source_kind: 'durable_curated_revision',
     source_identity: sourceIdentity,
     source_revision_id: curationRevisionId,
     source_artifact_id: curationArtifactId,
     source_artifact_content_hash: suppliedArtifactHash,
-    expected_raw_sha256: `sha256:${suppliedRawHash}`,
+    expected_raw_sha256: suppliedRawHash,
     report_input_hash: validatedInput.inputHash,
+    renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+    renderer_script_sha256:
+      `sha256:${MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256}`,
+    renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
     writes: 2,
   }
 }
@@ -34779,7 +35179,6 @@ async function attachCurrentWikiCuratedReport(client: any, body: any) {
   const validatedInput = await assertCurrentWikiReportInput(
     body.report_job || {},
     jobResponse.data.client_name,
-    body.report_input_hash,
   )
   const evidenceSource = 'current_cycle_curated_makesafe_report'
   const trustedSnapshot = {
