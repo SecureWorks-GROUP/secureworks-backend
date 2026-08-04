@@ -24,7 +24,7 @@ export interface SesExternalEffect {
   invoice_obligation_revision_id?: string | null;
   release_revision_id?: string | null;
   docket_revision_id?: string | null;
-  route_kind?: "report" | "photo" | "invoice" | null;
+  route_kind?: "report" | "photo" | "invoice" | "report_invoice" | null;
   artifact_hash?: string | null;
   payload_hash: string;
   external_token: string;
@@ -81,7 +81,7 @@ export async function buildSesEffect(args: {
   invoice_obligation_revision_id?: string | null;
   release_revision_id?: string | null;
   docket_revision_id?: string | null;
-  route_kind?: "report" | "photo" | "invoice" | null;
+  route_kind?: "report" | "photo" | "invoice" | "report_invoice" | null;
   artifact_hash?: string | null;
   payload: unknown;
 }): Promise<Omit<SesExternalEffect, "state">> {
@@ -118,21 +118,39 @@ export async function buildSesEffect(args: {
   };
 }
 
-function unknownRefusal(kind: SesEffectKind): SesRefusal {
-  return kind === "route_send"
-    ? sesRefusal(
+function unknownRefusal(
+  kind: SesEffectKind,
+  underlyingError?: string,
+): SesRefusal {
+  const detail = String(underlyingError || "").trim().slice(0, 400);
+  const evidence = detail ? { underlying_error: detail } : undefined;
+  if (kind === "route_send") {
+    return sesRefusal(
       "graph_outcome_unknown",
       "Reconcile Drafts and Sent Items by the exact SES operation token; do not press SEND IT again.",
-    )
-    : kind === "invoice_void"
-    ? sesRefusal(
+      {
+        ...(evidence ? { evidence } : {}),
+        ...(detail
+          ? {
+            fact:
+              `Microsoft Graph accepted or may have accepted the message, but its exact sent outcome is not yet proven. Underlying error: ${detail}`,
+          }
+          : {}),
+      },
+    );
+  }
+  if (kind === "invoice_void") {
+    return sesRefusal(
       "xero_outcome_unknown",
       "Reconcile the exact invoice status in Xero; never issue the void a second time.",
-    )
-    : sesRefusal(
-      "xero_outcome_unknown",
-      "Reconcile Xero directly by the exact SES external token; do not create another invoice.",
+      evidence ? { evidence } : {},
     );
+  }
+  return sesRefusal(
+    "xero_outcome_unknown",
+    "Reconcile Xero directly by the exact SES external token; do not create another invoice.",
+    evidence ? { evidence } : {},
+  );
 }
 
 /**
@@ -238,22 +256,21 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
       operation_key: dispatching.operation_key,
     });
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     const unknown = await args.store.transition(
       dispatching.operation_key,
       "dispatching",
       "unknown",
       "dispatch_outcome_unknown",
       {
-        failure: {
-          message: error instanceof Error ? error.message : String(error),
-        },
+        failure: { message },
       },
       args.actor,
     );
     return {
       state: "refused",
-      effect: unknown,
-      refusal: unknownRefusal(unknown.effect_kind),
+      effect: { ...unknown, failure: { message } } as SesExternalEffect,
+      refusal: unknownRefusal(unknown.effect_kind, message),
       dispatched: true,
     };
   }
@@ -274,7 +291,10 @@ export async function executeSesExternalEffect<TPayload, TResult>(args: {
     return {
       state: "refused",
       effect: unknown,
-      refusal: unknownRefusal(unknown.effect_kind),
+      refusal: unknownRefusal(
+        unknown.effect_kind,
+        `post_dispatch_reconcile match_count=${matches.length}`,
+      ),
       dispatched: true,
     };
   }
