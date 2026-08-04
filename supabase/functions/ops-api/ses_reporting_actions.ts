@@ -3668,6 +3668,26 @@ export async function prepareSesReleaseRevisionAction(
   };
 }
 
+/**
+ * SEND IT invoice-approval gate for a priced invoice_bound member.
+ *
+ * A human APPROVE INVOICE (includes_authorise) row against the pre-Xero base is
+ * normally required. When that row is missing after a re-prepare/re-bind, an
+ * obligation whose xero_binding.status is already AUTHORISED is downstream
+ * proof that execute_ses_invoice_revision (itself approval-gated) already ran —
+ * a records gap, not a missing decision. Non-AUTHORISED bindings still refuse.
+ * Does not touch Docs Ready signoff, recipients, readiness, or the money fence.
+ */
+export function sesReleaseInvoiceApprovalSatisfied(args: {
+  hasInvoiceApprovalRow: boolean;
+  /** Bound obligation `xero_binding.status` (invoice_bound path only). */
+  obligationXeroBindingStatus?: string | null;
+}): boolean {
+  if (args.hasInvoiceApprovalRow) return true;
+  return String(args.obligationXeroBindingStatus || "").toUpperCase() ===
+    "AUTHORISED";
+}
+
 export async function approveSesReleaseRevisionAction(
   client: SesSupabaseClient,
   auth: SesActionAuth,
@@ -3772,7 +3792,28 @@ export async function approveSesReleaseRevisionAction(
         .order("decided_at", { ascending: false })
         .limit(1)
         .maybeSingle();
-      if (invoiceApproval.error || !invoiceApproval.data) {
+      const hasInvoiceApprovalRow = !invoiceApproval.error &&
+        !!invoiceApproval.data;
+      let obligationXeroBindingStatus: string | null = null;
+      // Only consult the money binding when the approval row is absent: an
+      // AUTHORISED obligation proves the approval already ran (and re-prepare
+      // orphaned the pointer). Non-AUTHORISED still refuses without the row.
+      if (!hasInvoiceApprovalRow) {
+        const obligation = await client
+          .from("makesafe_invoice_obligation_revisions")
+          .select("xero_binding")
+          .eq("id", boundDocket.invoice_obligation_revision_id)
+          .maybeSingle();
+        obligationXeroBindingStatus = String(
+          object(obligation.data?.xero_binding).status || "",
+        ) || null;
+      }
+      if (
+        !sesReleaseInvoiceApprovalSatisfied({
+          hasInvoiceApprovalRow,
+          obligationXeroBindingStatus,
+        })
+      ) {
         throw new SesActionError(
           409,
           sesRefusal(
