@@ -1142,3 +1142,84 @@ Deno.test("curated bind photo accounting orders by created_at, then id", async (
     globalThis.fetch = originalFetch;
   }
 });
+
+Deno.test("curated bind photo accounting keeps sub-millisecond created_at order", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nmicrosecond photo fixture");
+  // Both rows land inside the same millisecond, so `Date.parse` alone reports
+  // them as simultaneous and the id tiebreak inverts them. Postgres orders by
+  // true chronology, so the comparator has to as well.
+  const media = [
+    { id: "aaa", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:01.123999+00:00", storage_url: "https://storage.example.test/a.jpg" },
+    { id: "bbb", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:01.123456+00:00", storage_url: "https://storage.example.test/b.jpg" },
+  ];
+  assertEquals(
+    Date.parse(String(media[0].created_at)) ===
+      Date.parse(String(media[1].created_at)),
+    true,
+  );
+  const chronological = ["bbb", "aaa"];
+  const idOrdered = ["aaa", "bbb"];
+  const photoBytes = new TextEncoder().encode("photo-bytes");
+  const contentHash = `sha256:${await sha(photoBytes)}`;
+  const photoEvidence = (ids: string[]) => ({
+    source_revision: `job_service_report:${SERVICE_REPORT_ID}`,
+    completeness_verified: true,
+    source_count: media.length,
+    applicable_count: media.length,
+    selected_count: media.length,
+    applicable_ids: ids,
+    selected_ids: ids,
+    excluded: [],
+    rejected: [],
+  });
+  const reportJob = (ids: string[]) => ({
+    ...currentReportJob(),
+    photos: ids.map((id) => ({
+      evidence_id: id,
+      caption: `Site photo ${id}`,
+      content_sha256: contentHash,
+    })),
+    photo_evidence: photoEvidence(ids),
+  });
+  const base = await bindBody(bytes);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (input: any) =>
+    Promise.resolve(
+      new Response(
+        String(input).endsWith(".pdf") ? bytes : photoBytes,
+        { status: 200 },
+      ),
+    ) as any;
+  try {
+    const { client } = bindClient(bytes, { media });
+    const result = await _bindCurrentCycleCuratedMakesafeReportForTest(
+      client,
+      { ...base, report_job: reportJob(chronological) },
+      FIXTURE_ACTOR,
+    );
+    assertEquals(result.success, true);
+
+    // The same IDs in id order are complete but out of sequence, and the
+    // refusal must say so rather than pointing at completeness.
+    const { client: second } = bindClient(bytes, { media });
+    const error = await assertRejects(
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          second,
+          { ...base, report_job: reportJob(idOrdered) },
+          FIXTURE_ACTOR,
+        ),
+      ApiError,
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "applicable_ids carries the current-cycle IDs in the wrong sequence",
+    );
+    assertStringIncludes(
+      String((error as ApiError).message),
+      "created_at ascending, then id",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

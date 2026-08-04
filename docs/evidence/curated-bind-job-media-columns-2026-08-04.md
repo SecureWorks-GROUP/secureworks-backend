@@ -49,6 +49,10 @@ ascending and does **not** equal id ascending.
 
 Photo order is therefore `created_at` ascending with `id` as a stable tiebreak
 for equal timestamps — the same order the media read already asks PostgREST for.
+Timestamps are compared as instants plus their sub-millisecond digits, because
+`Date.parse` floors to whole milliseconds: two rows written microseconds apart
+inside one millisecond would otherwise compare equal and be inverted by the id
+tiebreak against the database's own chronology.
 
 Note the separate, untouched inconsistency: the assembler's own photo list
 (`ses_assembler_input_adapter.ts`) still applies the same
@@ -62,7 +66,10 @@ No schema migration — the missing columns are **not** added to the database. N
 evidence gate is weakened: photo-source accounting and photo-byte SHA-256
 verification stay exactly as strict, and a payload whose photo sequence
 disagrees with the source order is still refused
-`curated_bind_photo_source_mismatch`.
+`curated_bind_photo_source_mismatch`. That refusal now names which of the four
+comparisons failed (`source_count`, `applicable_ids`, `selected_ids`, excluded
+`evidence_id`s) and distinguishes a wrong-sequence payload from an incomplete
+one; the code and every pass/fail decision are unchanged.
 
 ## Regressions
 
@@ -77,5 +84,8 @@ disagrees with the source order is still refused
 - `curated bind photo accounting orders by created_at, then id` — id order and
   `created_at` order deliberately disagree, with a shared timestamp to exercise
   the tiebreak; the id-ordered payload must be refused.
+- `curated bind photo accounting keeps sub-millisecond created_at order` — two
+  rows inside one millisecond whose chronology is the reverse of their id
+  order, plus the wrong-sequence refusal wording.
 
-All three fail against the previous code and pass against this one.
+All four fail against the previous code and pass against this one.

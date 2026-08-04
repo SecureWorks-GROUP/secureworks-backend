@@ -34592,14 +34592,26 @@ async function assertCurrentWikiSourceEvidence(
   // weights '.' below '+'/'Z', so a string compare inverts
   // `…:01+00:00` against `…:01.123+00:00`. A missing or unparseable timestamp
   // sorts LAST, matching PostgREST's nulls-last ordering.
-  const mediaInstant = (value: unknown) => {
-    const parsed = Date.parse(String(value ?? '').trim())
-    return Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed
+  //
+  // `Date.parse` resolves to whole milliseconds and floors anything finer, so
+  // two rows written microseconds apart inside one millisecond would compare
+  // equal and fall to the id tiebreak while Postgres orders them by true
+  // chronology. Carry the sub-millisecond digits as a second key so the
+  // comparator keeps the ordering the database read already applied.
+  const mediaInstant = (value: unknown): [number, number] => {
+    const raw = String(value ?? '').trim()
+    const parsed = Date.parse(raw)
+    if (Number.isNaN(parsed)) {
+      return [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY]
+    }
+    const fraction = /\.(\d+)/.exec(raw)?.[1] || ''
+    return [parsed, Number(`${fraction}000000`.slice(3, 6))]
   }
   const mediaOrder = (left: any, right: any) => {
-    const leftInstant = mediaInstant(left?.created_at)
-    const rightInstant = mediaInstant(right?.created_at)
+    const [leftInstant, leftSub] = mediaInstant(left?.created_at)
+    const [rightInstant, rightSub] = mediaInstant(right?.created_at)
     if (leftInstant !== rightInstant) return leftInstant < rightInstant ? -1 : 1
+    if (leftSub !== rightSub) return leftSub < rightSub ? -1 : 1
     return String(left?.id || '').localeCompare(String(right?.id || ''))
   }
   const applicable = currentMedia.filter(photoIsApplicable).slice().sort(mediaOrder)
@@ -34611,13 +34623,37 @@ async function assertCurrentWikiSourceEvidence(
   const suppliedExcludedIds = photoEvidence.excluded.map((item: any) =>
     String(item?.evidence_id || '').trim()
   )
-  if (photoEvidence.source_count !== currentMedia.length ||
-      canonicalSesJson(photoEvidence.applicable_ids) !== canonicalSesJson(applicableIds) ||
-      canonicalSesJson(photoEvidence.selected_ids) !== canonicalSesJson(applicableIds) ||
-      canonicalSesJson(suppliedExcludedIds) !== canonicalSesJson(excludedIds)) {
+  // Four independent comparisons share one refusal code, and an order-only
+  // disagreement on an otherwise complete ID set is now the likeliest failure.
+  // Name the comparison that failed, and say which sequence is expected.
+  const describeIdMismatch = (
+    label: string,
+    supplied: unknown,
+    expected: string[],
+  ): string | null => {
+    if (canonicalSesJson(supplied) === canonicalSesJson(expected)) return null
+    const sameMembers = Array.isArray(supplied) &&
+      supplied.length === expected.length &&
+      canonicalSesJson(supplied.map((item) => canonicalSesJson(item)).sort()) ===
+        canonicalSesJson(expected.map((item) => canonicalSesJson(item)).sort())
+    return sameMembers
+      ? `${label} carries the current-cycle IDs in the wrong sequence (expected created_at ascending, then id)`
+      : `${label} does not match the current-cycle set`
+  }
+  const photoMismatches = [
+    photoEvidence.source_count !== currentMedia.length
+      ? `source_count ${photoEvidence.source_count} does not equal the current-cycle job_media count ${currentMedia.length}`
+      : null,
+    describeIdMismatch('applicable_ids', photoEvidence.applicable_ids, applicableIds),
+    describeIdMismatch('selected_ids', photoEvidence.selected_ids, applicableIds),
+    describeIdMismatch('excluded evidence_ids', suppliedExcludedIds, excludedIds),
+  ].filter((entry): entry is string => Boolean(entry))
+  if (photoMismatches.length) {
     throw curatedBindError(
       'curated_bind_photo_source_mismatch',
-      'photo_evidence does not completely account for current-cycle job_media',
+      `photo_evidence does not completely account for current-cycle job_media: ${
+        photoMismatches.join('; ')
+      }`,
     )
   }
   const suppliedPhotos = (validated.supplied as any).photos as any[]
