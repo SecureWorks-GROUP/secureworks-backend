@@ -6646,11 +6646,19 @@ if (import.meta.main) serve(async (req: Request) => {
       case 'query_ses_review_cockpit': {
         const cockpitJobId = url.searchParams.get('job_id') || body.job_id
         if (!cockpitJobId) throw new ApiError('job_id required', 400)
+        // A bound DRAFT proves its PDF only by a live re-fetch, so the Invoice
+        // tab's pdf_available is projected through the same gateway the pack
+        // read uses. Without it the tab could claim a document it cannot show.
+        const cockpitGateway = makeSesXeroGateway(client)
         return json(await querySesReviewCockpitAction(
           client,
           cockpitJobId,
           body.displayed_binding,
           url.searchParams.get('release_revision_id') || body.release_revision_id,
+          {
+            fetchInvoicePdfBytes: (invoiceId: string) =>
+              cockpitGateway.fetchAuthorisedPdf(invoiceId),
+          },
         ))
       }
       case 'list_ses_docs_ready_reviews': {

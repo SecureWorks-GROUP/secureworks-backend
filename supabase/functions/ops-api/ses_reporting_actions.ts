@@ -512,6 +512,9 @@ async function readSesObligationForDocket(
 export async function loadSesCockpitDocket(
   client: SesSupabaseClient,
   jobId: string,
+  deps: {
+    fetchInvoicePdfBytes?: (invoiceId: string) => Promise<Uint8Array>;
+  } = {},
 ): Promise<SesCockpitDocket> {
   const docketResponse = await client.from("makesafe_docket_revisions_current")
     .select("*").eq("job_id", jobId).maybeSingle();
@@ -672,6 +675,33 @@ export async function loadSesCockpitDocket(
       }
     }
   }
+  // The Invoice tab may only claim a PDF it can actually show. An AUTHORISED
+  // bind carries the real rendered document as a docket artifact; a DRAFT
+  // proves itself only by a successful live re-fetch, because a stamped
+  // pdf_content_hash is a pointer to yesterday's bytes, not a current document.
+  // This is the same projection the pack read performs, so the cockpit's
+  // money.bound_invoice and the pack's invoice_pdf cannot disagree.
+  let xeroInvoicePdfAvailable = false;
+  if (xeroBinding) {
+    if (String(xeroBinding.status || "").toUpperCase() === "DRAFT") {
+      if (deps.fetchInvoicePdfBytes) {
+        const projected = await resolveSesBoundDraftInvoicePdfArtifact(client, {
+          job_id: jobId,
+          docket,
+          obligation,
+          fetchInvoicePdfBytes: deps.fetchInvoicePdfBytes,
+        });
+        xeroInvoicePdfAvailable = projected.source === "live_fetch" &&
+          !!projected.artifact.signed_url;
+      }
+    } else {
+      const boundArtifact = matchingXeroInvoicePdfArtifact(
+        cockpitArtifacts,
+        rawBinding,
+      );
+      xeroInvoicePdfAvailable = !!String(boundArtifact?.object_key || "").trim();
+    }
+  }
   return {
     job_id: jobId,
     job_number: object(manifest.classification).job_number || null,
@@ -681,6 +711,7 @@ export async function loadSesCockpitDocket(
     invoice_obligation_revision_id: obligation?.id || null,
     attendance_cycle_ids: docket.attendance_cycle_ids || [],
     xero_binding: xeroBinding,
+    xero_invoice_pdf_available: xeroInvoicePdfAvailable,
     // The cockpit/list contract consumes the docket proposal shape
     // (`subtotal_ex_gst` / `total_inc_gst`). The obligation proposal is a
     // separately typed canonical-pricing record and must not mask it.
@@ -705,9 +736,12 @@ export async function querySesReviewCockpitAction(
     dependency_generation: number;
   },
   releaseRevisionId?: string,
+  deps: {
+    fetchInvoicePdfBytes?: (invoiceId: string) => Promise<Uint8Array>;
+  } = {},
 ) {
   const cockpit = buildSesCockpitView(
-    await loadSesCockpitDocket(client, jobId),
+    await loadSesCockpitDocket(client, jobId, deps),
     displayedBinding,
   );
   if (!releaseRevisionId) return cockpit;
@@ -1691,7 +1725,6 @@ export async function getSesReviewablePackAction(
       job_id: String(docket.job_id),
       docket,
       obligation: packObligation,
-      artifacts,
       fetchInvoicePdfBytes: deps.fetchInvoicePdfBytes,
     });
     // Drop any non-matching xero_invoice_pdf so a stale local concoction cannot
@@ -2299,10 +2332,15 @@ function recordSesDraftPdfFetchFailure(invoiceId: string): void {
 }
 
 /**
- * Ensure a bound Xero DRAFT has a stored real PDF and return a reviewable pack
- * artifact for the Invoice tab. Never invents a local proposal PDF. When the
- * real PDF cannot be recovered, returns an explicit unavailable marker so the
- * cockpit can say so instead of rendering a fake tax-invoice table.
+ * Ensure a bound Xero DRAFT is presented as the REAL Xero PDF on the Invoice
+ * tab. A DRAFT stays editable in Xero right up to authorisation, so neither a
+ * stored docket artifact nor a stamped `pdf_object_key` proves the bytes a
+ * Captain is about to tick are the ones Xero would render now. The 2026-08-04
+ * ruling is therefore to ALWAYS re-fetch through the same path as
+ * `get_invoice_pdf`, and to report the document unavailable when that fetch
+ * fails rather than serve stale stored bytes as live. Storing after a
+ * successful fetch exists only so the pack can hand out a signed URL; the next
+ * read re-fetches again. Never invents a local proposal PDF.
  */
 export async function resolveSesBoundDraftInvoicePdfArtifact(
   client: SesSupabaseClient,
@@ -2310,13 +2348,12 @@ export async function resolveSesBoundDraftInvoicePdfArtifact(
     job_id: string;
     docket: Record<string, any>;
     obligation: Record<string, any> | null;
-    artifacts: Array<Record<string, any>>;
     fetchInvoicePdfBytes?: (invoiceId: string) => Promise<Uint8Array>;
   },
 ): Promise<{
   artifact: Record<string, any>;
   binding_pdf?: SesDraftInvoicePdfBinding | null;
-  source: "docket_artifact" | "stored_binding" | "live_fetch" | "unavailable";
+  source: "live_fetch" | "unavailable";
 }> {
   const binding = resolveSesRouteXeroBinding(args.docket, args.obligation);
   const boundId = String(binding.xero_invoice_id || "").trim();
@@ -2337,38 +2374,9 @@ export async function resolveSesBoundDraftInvoicePdfArtifact(
     };
   }
 
-  const existing = matchingXeroInvoicePdfArtifact(args.artifacts, binding);
-  if (existing?.signed_url || existing?.object_key) {
-    return {
-      artifact: {
-        ...existing,
-        display_label: sesReviewArtifactDisplayLabel(existing.role),
-        pdf_unavailable: !existing.signed_url,
-        metadata: {
-          ...object(existing.metadata),
-          xero_invoice_id: boundId,
-          invoice_number: boundNumber,
-          status: "DRAFT",
-        },
-      },
-      source: "docket_artifact",
-    };
-  }
-
   let stored: SesDraftInvoicePdfBinding | null = null;
-  const boundPdfKey = String(binding.pdf_object_key || "").trim();
-  const boundPdfHash = String(binding.pdf_content_hash || "").trim();
-  if (boundPdfKey && boundPdfHash) {
-    stored = {
-      pdf_object_key: boundPdfKey,
-      pdf_content_hash: boundPdfHash,
-      pdf_size_bytes: Number(binding.pdf_size_bytes) || 0,
-      pdf_stored_at: String(binding.pdf_stored_at || ""),
-    };
-  }
-
   let fetchCoolingDown = false;
-  if (!stored && args.fetchInvoicePdfBytes) {
+  if (args.fetchInvoicePdfBytes) {
     if (sesDraftPdfFetchIsCoolingDown(boundId)) {
       fetchCoolingDown = true;
     } else {
@@ -2423,11 +2431,11 @@ export async function resolveSesBoundDraftInvoicePdfArtifact(
           xero_invoice_id: boundId,
           invoice_number: boundNumber,
           status: "DRAFT",
-          source: boundPdfKey ? "stored_binding" : "live_fetch",
+          source: "live_fetch",
         },
       },
       binding_pdf: stored,
-      source: boundPdfKey ? "stored_binding" : "live_fetch",
+      source: "live_fetch",
     };
   }
 

@@ -9,6 +9,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   getSesReviewablePackAction,
+  querySesReviewCockpitAction,
   resetSesDraftPdfFetchBackoff,
   resolveSesBoundDraftInvoicePdfArtifact,
   storeSesXeroInvoicePdfBytes,
@@ -77,10 +78,19 @@ function packClient(opts: {
   const rows: Record<string, unknown> = {
     ses_docket_review_current: review,
     makesafe_docket_revisions: docket,
+    makesafe_docket_revisions_current: docket,
+    makesafe_readiness_current_v2: {
+      readiness_revision: "readiness-fixture",
+      dependency_generation: 1,
+      ready: true,
+      blockers: [],
+    },
     makesafe_docket_artifacts: opts.artifacts || [],
     makesafe_invoice_obligation_revisions: obligation,
     makesafe_invoice_obligation_revisions_current: obligation,
     ses_docket_review_events: [],
+    job_assignments: [],
+    job_service_reports: [],
   };
   const uploads: Array<{ path: string; size: number }> = [];
   const signedPaths: string[] = [];
@@ -188,7 +198,9 @@ Deno.test("storeSesXeroInvoicePdfBytes refuses non-PDF concoctions", async () =>
   assertEquals(failed, true);
 });
 
-Deno.test("bound DRAFT with stored binding PDF projects a signed xero_invoice_pdf", async () => {
+Deno.test("a stored binding PDF is re-fetched, never served as current", async () => {
+  resetSesDraftPdfFetchBackoff();
+  const staleBytes = new TextEncoder().encode("%PDF-1.4 yesterday's draft");
   const stored = await storeSesXeroInvoicePdfBytes(packClient().client, {
     job_id: JOB_ID,
     invoice: {
@@ -196,16 +208,10 @@ Deno.test("bound DRAFT with stored binding PDF projects a signed xero_invoice_pd
       invoice_number: "INV-1102",
       status: "DRAFT",
     },
-    pdf: pdfBytes(),
+    pdf: staleBytes,
   });
-  const { client, signedPaths } = packClient({
-    binding: {
-      pdf_object_key: stored.pdf_object_key,
-      pdf_content_hash: stored.pdf_content_hash,
-      pdf_size_bytes: stored.pdf_size_bytes,
-      pdf_stored_at: stored.pdf_stored_at,
-    },
-  });
+  const { client, signedPaths, uploads } = packClient({ binding: stored });
+  let fetchCalls = 0;
   const resolved = await resolveSesBoundDraftInvoicePdfArtifact(client, {
     job_id: JOB_ID,
     docket: { id: DOCKET_ID, stage: "pre_xero", xero_binding: null },
@@ -218,15 +224,63 @@ Deno.test("bound DRAFT with stored binding PDF projects a signed xero_invoice_pd
         ...stored,
       },
     },
-    artifacts: [],
+    fetchInvoicePdfBytes: () => {
+      fetchCalls++;
+      return Promise.resolve(pdfBytes());
+    },
   });
-  assertEquals(resolved.source, "stored_binding");
+  // A DRAFT is editable in Xero until it is authorised, so the stored pointer
+  // is re-proved against Xero on every read rather than trusted as current.
+  assertEquals(fetchCalls, 1);
+  assertEquals(resolved.source, "live_fetch");
   assertEquals(resolved.artifact.role, "xero_invoice_pdf");
   assertEquals(resolved.artifact.pdf_unavailable, false);
-  assertStringIncludes(String(resolved.artifact.signed_url), "signed.example.test");
+  assertEquals(resolved.artifact.content_hash !== stored.pdf_content_hash, true);
+  assertEquals(uploads.length, 1);
+  assertStringIncludes(
+    String(resolved.artifact.signed_url),
+    "signed.example.test",
+  );
   assertEquals(objectMeta(resolved.artifact).xero_invoice_id, XERO_ID);
   assertEquals(objectMeta(resolved.artifact).invoice_number, "INV-1102");
   assertEquals(signedPaths.length >= 1, true);
+});
+
+Deno.test("a stored binding PDF is withheld when the live re-fetch fails", async () => {
+  resetSesDraftPdfFetchBackoff();
+  const stored = await storeSesXeroInvoicePdfBytes(packClient().client, {
+    job_id: JOB_ID,
+    invoice: {
+      xero_invoice_id: XERO_ID,
+      invoice_number: "INV-1102",
+      status: "DRAFT",
+    },
+    pdf: pdfBytes(),
+  });
+  const { client, signedPaths } = packClient({ binding: stored });
+  const resolved = await resolveSesBoundDraftInvoicePdfArtifact(client, {
+    job_id: JOB_ID,
+    docket: { id: DOCKET_ID, stage: "pre_xero", xero_binding: null },
+    obligation: {
+      id: OBLIGATION_ID,
+      xero_binding: {
+        xero_invoice_id: XERO_ID,
+        invoice_number: "INV-1102",
+        status: "DRAFT",
+        ...stored,
+      },
+    },
+    fetchInvoicePdfBytes: () => {
+      throw new Error("Xero PDF temporarily unavailable");
+    },
+  });
+  // Honest unavailable beats serving stored bytes as though they were live.
+  assertEquals(resolved.source, "unavailable");
+  assertEquals(resolved.artifact.pdf_unavailable, true);
+  assertEquals(resolved.artifact.signed_url, null);
+  assertEquals(resolved.artifact.object_key, undefined);
+  assertEquals(signedPaths.length, 0);
+  resetSesDraftPdfFetchBackoff();
 });
 
 Deno.test("bound DRAFT without stored PDF live-fetches Xero bytes and never invents HTML", async () => {
@@ -244,15 +298,6 @@ Deno.test("bound DRAFT without stored PDF live-fetches Xero bytes and never inve
         status: "DRAFT",
       },
     },
-    artifacts: [
-      // Stale local-looking role must not win over the bound DRAFT identity.
-      {
-        role: "invoice_proposal",
-        object_key: "makesafe-docket-artifacts/job/2-Invoice-fake.pdf",
-        media_type: "application/pdf",
-        signed_url: "https://fake.example/2-Invoice-fake.pdf",
-      },
-    ],
     fetchInvoicePdfBytes: async () => {
       fetchCalls++;
       return pdfBytes();
@@ -301,7 +346,6 @@ Deno.test("read-path stamp never overwrites an authorised obligation binding", a
         status: "DRAFT",
       },
     },
-    artifacts: [],
     fetchInvoicePdfBytes: () => Promise.resolve(pdfBytes()),
   });
   assertEquals(resolved.source, "live_fetch");
@@ -327,7 +371,6 @@ Deno.test("a failed live fetch is not retried on the next poll within the backof
           status: "DRAFT",
         },
       },
-      artifacts: [],
       fetchInvoicePdfBytes: () => {
         fetchCalls++;
         throw new Error("Xero PDF temporarily unavailable");
@@ -361,7 +404,6 @@ Deno.test("bound DRAFT with unfetchable PDF reports unavailable — no fake arti
         status: "DRAFT",
       },
     },
-    artifacts: [],
     fetchInvoicePdfBytes: async () => {
       throw new Error("Xero PDF temporarily unavailable");
     },
@@ -439,6 +481,60 @@ Deno.test("get_ses_reviewable_pack injects bound DRAFT Xero PDF and drops non-ma
     String(displaced[0].object_key),
     "2-Invoice-concoction",
   );
+});
+
+Deno.test("cockpit pdf_available agrees with the pack projection, not with a stored hash", async () => {
+  // A DRAFT bound before mint-time storage existed carries no pointer at all,
+  // so pdf_content_hash cannot be the availability signal either way.
+  resetSesDraftPdfFetchBackoff();
+  const reachable = packClient();
+  const shown = await querySesReviewCockpitAction(
+    reachable.client,
+    JOB_ID,
+    undefined,
+    undefined,
+    { fetchInvoicePdfBytes: () => Promise.resolve(pdfBytes()) },
+  );
+  const shownBound = (shown.sections.money as any).bound_invoice;
+  assertEquals(shownBound.xero_invoice_id, XERO_ID);
+  assertEquals(shownBound.pdf_content_hash, null);
+  assertEquals(shownBound.pdf_available, true);
+  const shownPack = await getSesReviewablePackAction(
+    reachable.client,
+    { mode: "api_key", user: null },
+    DOCKET_ID,
+    { fetchInvoicePdfBytes: () => Promise.resolve(pdfBytes()) },
+  );
+  assertEquals(shownPack.invoice_pdf?.pdf_unavailable, false);
+
+  resetSesDraftPdfFetchBackoff();
+  const unreachable = packClient();
+  const withheld = await querySesReviewCockpitAction(
+    unreachable.client,
+    JOB_ID,
+    undefined,
+    undefined,
+    {
+      fetchInvoicePdfBytes: () => {
+        throw new Error("Xero PDF temporarily unavailable");
+      },
+    },
+  );
+  const withheldBound = (withheld.sections.money as any).bound_invoice;
+  assertEquals(withheldBound.xero_invoice_id, XERO_ID);
+  assertEquals(withheldBound.pdf_available, false);
+  const withheldPack = await getSesReviewablePackAction(
+    unreachable.client,
+    { mode: "api_key", user: null },
+    DOCKET_ID,
+    {
+      fetchInvoicePdfBytes: () => {
+        throw new Error("Xero PDF temporarily unavailable");
+      },
+    },
+  );
+  assertEquals(withheldPack.invoice_pdf?.pdf_unavailable, true);
+  resetSesDraftPdfFetchBackoff();
 });
 
 Deno.test("an unreadable obligation refuses the pack instead of degrading to the local proposal", async () => {

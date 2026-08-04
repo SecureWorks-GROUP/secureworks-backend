@@ -12,6 +12,7 @@ import {
   evaluateSesMechanicalClean,
   SES_REVIEW_SECTION_ORDER,
   type SesCleanInput,
+  type SesCockpitDocket,
 } from "./ses_review_cockpit.ts";
 
 function cleanInput(
@@ -162,7 +163,7 @@ Deno.test("cockpit uses fixed Stage D order and split invoice/send controls", ()
   assertEquals(preXero.controls.approve_invoice.enabled, false);
   assertEquals(preXero.controls.send_it.enabled, false);
 
-  const draftReady = buildSesCockpitView({
+  const draftReadyDocket: SesCockpitDocket = {
     job_id: "job-1",
     job_number: "SWMS-1",
     docket_revision_id: "docket-1b",
@@ -184,7 +185,8 @@ Deno.test("cockpit uses fixed Stage D order and split invoice/send controls", ()
     routes: input.routes,
     crew_and_trade_visits: [],
     clean_input: input,
-  });
+  };
+  const draftReady = buildSesCockpitView(draftReadyDocket);
   assert(draftReady.controls.approve_invoice.enabled);
   assertEquals(draftReady.controls.send_it.enabled, false);
   assertEquals(draftReady.status, "INVOICE_CREATE_READY");
@@ -198,6 +200,40 @@ Deno.test("cockpit uses fixed Stage D order and split invoice/send controls", ()
       total: 737,
       pdf_content_hash: null,
       pdf_available: false,
+    },
+  );
+
+  // A stored pointer is not a document: availability is the artifact/live-fetch
+  // projection, so a stamped hash alone must not claim a showable PDF, and a
+  // proved projection must claim one even when no hash was ever stamped.
+  const hashWithoutDocument = buildSesCockpitView({
+    ...draftReadyDocket,
+    xero_binding: {
+      ...draftReadyDocket.xero_binding!,
+      pdf_content_hash: `sha256:${"c".repeat(64)}`,
+    },
+  });
+  assertEquals(
+    (hashWithoutDocument.sections.money as {
+      bound_invoice: Record<string, unknown>;
+    }).bound_invoice.pdf_available,
+    false,
+  );
+  const provedProjection = buildSesCockpitView({
+    ...draftReadyDocket,
+    xero_invoice_pdf_available: true,
+  });
+  assertEquals(
+    (provedProjection.sections.money as {
+      bound_invoice: Record<string, unknown>;
+    }).bound_invoice,
+    {
+      xero_invoice_id: "xero-draft-1",
+      invoice_number: "INV-DRAFT-1",
+      status: "DRAFT",
+      total: 737,
+      pdf_content_hash: null,
+      pdf_available: true,
     },
   );
 
