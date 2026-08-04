@@ -24,7 +24,7 @@ export interface SesExternalEffect {
   invoice_obligation_revision_id?: string | null;
   release_revision_id?: string | null;
   docket_revision_id?: string | null;
-  route_kind?: "report" | "photo" | "invoice" | null;
+  route_kind?: "report" | "photo" | "invoice" | "report_invoice" | null;
   artifact_hash?: string | null;
   payload_hash: string;
   external_token: string;
@@ -81,7 +81,7 @@ export async function buildSesEffect(args: {
   invoice_obligation_revision_id?: string | null;
   release_revision_id?: string | null;
   docket_revision_id?: string | null;
-  route_kind?: "report" | "photo" | "invoice" | null;
+  route_kind?: "report" | "photo" | "invoice" | "report_invoice" | null;
   artifact_hash?: string | null;
   payload: unknown;
 }): Promise<Omit<SesExternalEffect, "state">> {

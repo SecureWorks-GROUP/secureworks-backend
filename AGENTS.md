@@ -1099,12 +1099,15 @@ Sent Items by matching the SES operation token **client-side** (never OData
 `graph_outcome_unknown` still means reconcile by token, not redispatch; refusal
 facts must carry the underlying Graph error when one was recorded.
 
-AJS/AJBR only (Captain 2026-08-04): two routes — `report` (report PDF + real
-Xero invoice PDF) then `photo`; TO `workorders@ajs.build` + participants; CC
-`ses@secureworkswa.com.au`. Client-send gate kinds:
-`ajs_report_invoice` / `ajs_photo` in `makesafe_send_pack.ts`. MLB and every
-other builder keep the three-route `report` / `photo` / `invoice` shape. Route
-order lives in `ses_release_route_shape.ts`.
+AJS/AJBR only (Captain 2026-08-04 / skill backend release contract): two routes
+— `report_invoice` (report PDF + real Xero invoice PDF) then `photo`; TO
+`workorders@ajs.build` + participants; CC `ses@secureworkswa.com.au`. Client-send
+gate kinds match the skill table exactly: `report_invoice`, `report`, `photo`,
+`invoice` in `makesafe_send_pack.ts` (`checkSesClientSendRouteGate`). MLB: report
+and photo refuse any CC; invoice requires `finance@` and refuses `ses@`. Route
+order lives in `ses_release_route_shape.ts`. Apply
+`20260804090000_ses_release_report_invoice_route_kind.sql` before the matching
+`ops-api` (widens `route_kind` and allows two-route `commit_ses_release_revision_v1`).
 
 ## The Repository Root Stays npm-Package-Free
 

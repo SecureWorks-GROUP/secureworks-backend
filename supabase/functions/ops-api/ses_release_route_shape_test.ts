@@ -12,21 +12,30 @@ import {
   sesReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import {
-  checkAjsPhotoClientSendGate,
-  checkAjsReportInvoiceClientSendGate,
+  AJS_INVOICE_TO,
+  checkMlbInvoiceClientSendGate,
+  checkMlbReportClientSendGate,
+  checkPhotoRouteClientSendGate,
+  checkReportInvoiceClientSendGate,
+  checkSesClientSendRouteGate,
   checkSesReleaseClientSendGate,
+  isRawPhotoDumpName,
   MAKESAFE_ADMIN_FROM,
   MAKESAFE_CC,
+  MAKESAFE_FINANCE_CC,
 } from "./makesafe_send_pack.ts";
 import { resolveDocketRoutes } from "./ses_reporting_actions.ts";
 
-Deno.test("AJS builder keys select the two-route order only", () => {
+const MAVERICK_HTML =
+  '<p>Body</p><div data-secureworks-signature="maverick">Maverick</div>';
+
+Deno.test("AJS builder keys select report_invoice + photo only", () => {
   assertEquals(isAjsBuilderKey("AJS"), true);
   assertEquals(isAjsBuilderKey("ajbr"), true);
   assertEquals(isAjsBuilderKey("MLB"), false);
   assertEquals(sesReleaseRouteOrder("AJS"), SES_AJS_ROUTE_ORDER);
   assertEquals(sesReleaseRouteOrder("MLB"), SES_UNIVERSAL_ROUTE_ORDER);
-  assertEquals(sesReleaseRouteOrder("AJS"), ["report", "photo"]);
+  assertEquals(sesReleaseRouteOrder("AJS"), ["report_invoice", "photo"]);
 });
 
 Deno.test("AJS pack recipients always include workorders@ and ses@ cc", () => {
@@ -44,79 +53,218 @@ Deno.test("AJS pack recipients always include workorders@ and ses@ cc", () => {
   assertEquals(ajsPackCc(), [MAKESAFE_CC]);
 });
 
-Deno.test("client-send gate kinds map AJS report to combined report+invoice", () => {
+Deno.test("gate kinds match skill contract names exactly", () => {
   assertEquals(
-    clientSendGateKindForRoute({ routeKind: "report", builderKey: "AJS" }),
-    "ajs_report_invoice",
+    clientSendGateKindForRoute({
+      routeKind: "report_invoice",
+      builderKey: "AJS",
+    }),
+    "report_invoice",
   );
   assertEquals(
     clientSendGateKindForRoute({ routeKind: "photo", builderKey: "AJBR" }),
-    "ajs_photo",
+    "photo",
+  );
+  assertEquals(
+    clientSendGateKindForRoute({ routeKind: "report", builderKey: "MLB" }),
+    "report",
   );
   assertEquals(
     clientSendGateKindForRoute({ routeKind: "invoice", builderKey: "MLB" }),
-    "universal_invoice",
+    "invoice",
+  );
+  // Legacy AJS stored as report still maps to report_invoice gate.
+  assertEquals(
+    clientSendGateKindForRoute({ routeKind: "report", builderKey: "AJS" }),
+    "report_invoice",
   );
 });
 
 const AJS_COMBINED_PAYLOAD = {
   from: MAKESAFE_ADMIN_FROM,
-  to: AJS_WORK_ORDERS_MAILBOX,
+  to: AJS_INVOICE_TO,
   cc: MAKESAFE_CC,
   subject: "AJBR-70000 - report and invoice",
-  htmlBody: "<p>Pack</p>",
+  htmlBody: MAVERICK_HTML,
   attachments: [
     { name: "Make Safe Report - SWMS-261000.pdf" },
     { name: "Xero Invoice INV-100.pdf" },
   ],
 };
 
-Deno.test("AJS report+invoice client-send gate passes the combined shape", () => {
-  assertEquals(checkAjsReportInvoiceClientSendGate(AJS_COMBINED_PAYLOAD), []);
+Deno.test("report_invoice gate passes AJS combined shape", () => {
+  assertEquals(
+    checkReportInvoiceClientSendGate(AJS_COMBINED_PAYLOAD, {
+      configuredInvoiceTo: AJS_INVOICE_TO,
+    }),
+    [],
+  );
+  assertEquals(
+    checkSesClientSendRouteGate(AJS_COMBINED_PAYLOAD, {
+      kind: "report_invoice",
+      configuredInvoiceTo: AJS_INVOICE_TO,
+    }),
+    [],
+  );
+  // Alias still works.
   assertEquals(
     checkSesReleaseClientSendGate("ajs_report_invoice", AJS_COMBINED_PAYLOAD),
     [],
   );
 });
 
-Deno.test("AJS report+invoice gate refuses missing Xero invoice PDF", () => {
-  const failures = checkAjsReportInvoiceClientSendGate({
-    ...AJS_COMBINED_PAYLOAD,
-    attachments: [{ name: "Make Safe Report - SWMS-261000.pdf" }],
-  });
+Deno.test("report_invoice refuses missing invoice_to, summary PDF, photo bleed, no ses@", () => {
   assertEquals(
-    failures.some((f) => f.toLowerCase().includes("xero invoice")),
+    checkReportInvoiceClientSendGate(
+      { ...AJS_COMBINED_PAYLOAD, to: "someone@elsewhere.com" },
+      { configuredInvoiceTo: AJS_INVOICE_TO },
+    ).some((f) => f.includes("invoice_to")),
+    true,
+  );
+  assertEquals(
+    checkReportInvoiceClientSendGate(
+      { ...AJS_COMBINED_PAYLOAD, cc: "" },
+      { configuredInvoiceTo: AJS_INVOICE_TO },
+    ).some((f) => f.includes(MAKESAFE_CC)),
+    true,
+  );
+  assertEquals(
+    checkReportInvoiceClientSendGate({
+      ...AJS_COMBINED_PAYLOAD,
+      attachments: [
+        { name: "Make Safe Report - SWMS-261000.pdf" },
+        { name: "Invoice Line Review.pdf" }, // summary, not Xero
+      ],
+    }, { configuredInvoiceTo: AJS_INVOICE_TO }).some((f) =>
+      f.toLowerCase().includes("xero")
+    ),
+    true,
+  );
+  assertEquals(
+    checkReportInvoiceClientSendGate({
+      ...AJS_COMBINED_PAYLOAD,
+      attachments: [
+        ...AJS_COMBINED_PAYLOAD.attachments,
+        { name: "site.jpg" },
+      ],
+    }, { configuredInvoiceTo: AJS_INVOICE_TO }).some((f) =>
+      f.includes("photo")
+    ),
     true,
   );
 });
 
-Deno.test("AJS photo gate accepts images and refuses PDF pack smuggling", () => {
+Deno.test("MLB report gate refuses any cc and invoice/photo bleed", () => {
+  const ok = {
+    from: MAKESAFE_ADMIN_FROM,
+    to: "builder@mlb.example",
+    cc: "",
+    subject: "MLB report",
+    htmlBody: MAVERICK_HTML,
+    attachments: [{ name: "Make Safe Report - SWMS-1.pdf" }],
+  };
+  assertEquals(checkMlbReportClientSendGate(ok), []);
   assertEquals(
-    checkAjsPhotoClientSendGate({
-      from: MAKESAFE_ADMIN_FROM,
-      to: AJS_WORK_ORDERS_MAILBOX,
-      cc: MAKESAFE_CC,
-      subject: "Photo Evidence - AJBR-70000",
-      htmlBody: "<p>Photos</p>",
+    checkMlbReportClientSendGate({ ...ok, cc: MAKESAFE_CC }).some((f) =>
+      f.includes("no cc")
+    ),
+    true,
+  );
+  assertEquals(
+    checkMlbReportClientSendGate({
+      ...ok,
       attachments: [
-        { name: "site-1.jpg" },
-        { name: "site-2.PNG" },
+        { name: "Make Safe Report - SWMS-1.pdf" },
+        { name: "Xero Invoice INV-1.pdf" },
       ],
+    }).some((f) => f.includes("invoice")),
+    true,
+  );
+});
+
+Deno.test("photo gate: AJS requires ses@; MLB forbids cc; raw photoNN refused", () => {
+  assertEquals(isRawPhotoDumpName("photo12.jpg"), true);
+  assertEquals(isRawPhotoDumpName("Front elevation.jpg"), false);
+
+  const base = {
+    from: MAKESAFE_ADMIN_FROM,
+    to: "workorders@ajs.build",
+    subject: "Photo Evidence",
+    htmlBody: MAVERICK_HTML,
+    attachments: [{ name: "Front elevation.jpg" }],
+  };
+  assertEquals(
+    checkPhotoRouteClientSendGate({ ...base, cc: MAKESAFE_CC }, {
+      builderKey: "AJS",
     }),
     [],
   );
-  const smuggled = checkAjsPhotoClientSendGate({
+  assertEquals(
+    checkPhotoRouteClientSendGate({ ...base, cc: "" }, { builderKey: "AJS" })
+      .some((f) => f.includes(MAKESAFE_CC)),
+    true,
+  );
+  assertEquals(
+    checkPhotoRouteClientSendGate({ ...base, cc: "" }, { builderKey: "MLB" }),
+    [],
+  );
+  assertEquals(
+    checkPhotoRouteClientSendGate({ ...base, cc: MAKESAFE_CC }, {
+      builderKey: "MLB",
+    }).some((f) => f.includes("no cc")),
+    true,
+  );
+  assertEquals(
+    checkPhotoRouteClientSendGate({
+      ...base,
+      cc: MAKESAFE_CC,
+      attachments: [{ name: "photo3.jpg" }],
+    }, { builderKey: "AJS" }).some((f) => f.includes("raw dump")),
+    true,
+  );
+  assertEquals(
+    checkPhotoRouteClientSendGate({
+      ...base,
+      cc: MAKESAFE_CC,
+      attachments: [
+        { name: "Front.jpg" },
+        { name: "Xero Invoice INV-1.pdf" },
+      ],
+    }, { builderKey: "AJS" }).some((f) => f.includes("PDF")),
+    true,
+  );
+});
+
+Deno.test("MLB invoice gate requires finance@, forbids ses@, needs explicit invoice_to", () => {
+  const ok = {
     from: MAKESAFE_ADMIN_FROM,
-    to: AJS_WORK_ORDERS_MAILBOX,
-    cc: MAKESAFE_CC,
-    subject: "Photo Evidence - AJBR-70000",
-    htmlBody: "<p>Photos</p>",
-    attachments: [
-      { name: "site-1.jpg" },
-      { name: "Xero Invoice INV-100.pdf" },
-    ],
-  });
-  assertEquals(smuggled.some((f) => f.includes("PDF")), true);
+    to: "makesafes@mlb.example",
+    cc: MAKESAFE_FINANCE_CC,
+    subject: "Invoice",
+    htmlBody: MAVERICK_HTML,
+    attachments: [{ name: "Xero Invoice INV-9.pdf" }],
+  };
+  assertEquals(
+    checkMlbInvoiceClientSendGate(ok, {
+      configuredInvoiceTo: "makesafes@mlb.example",
+    }),
+    [],
+  );
+  assertEquals(
+    checkMlbInvoiceClientSendGate(ok, { configuredInvoiceTo: "" }).some((f) =>
+      f.includes("invoice_to")
+    ),
+    true,
+  );
+  assertEquals(
+    checkMlbInvoiceClientSendGate({
+      ...ok,
+      cc: `${MAKESAFE_FINANCE_CC},${MAKESAFE_CC}`,
+    }, { configuredInvoiceTo: "makesafes@mlb.example" }).some((f) =>
+      f.includes(MAKESAFE_CC)
+    ),
+    true,
+  );
 });
 
 function ajsDocket(stage: string, xero: Record<string, unknown> | null) {
@@ -189,7 +337,7 @@ const AJS_ARTIFACTS = [
   },
 ];
 
-Deno.test("AJS resolveDocketRoutes collapses to report+photo with invoice PDF on report", () => {
+Deno.test("AJS resolveDocketRoutes emits report_invoice + photo with Xero PDF on route 1", () => {
   const routes = resolveDocketRoutes(
     ajsDocket("invoice_bound", {
       status: "AUTHORISED",
@@ -199,12 +347,13 @@ Deno.test("AJS resolveDocketRoutes collapses to report+photo with invoice PDF on
     AJS_ARTIFACTS,
     null,
   );
-  assertEquals(routes.map((r) => r.route_kind), ["report", "photo"]);
-  const report = routes[0];
-  assertEquals(report.recipients[0], AJS_WORK_ORDERS_MAILBOX);
-  assertEquals(report.cc, [MAKESAFE_CC]);
-  assertEquals(report.attachment_hashes.includes("xero-hash"), true);
-  assertEquals(report.attachment_hashes.includes("report-hash"), true);
-  assertEquals(report.ready, true);
+  assertEquals(routes.map((r) => r.route_kind), ["report_invoice", "photo"]);
+  const pack = routes[0];
+  assertEquals(pack.recipients[0], AJS_WORK_ORDERS_MAILBOX);
+  assertEquals(pack.cc, [MAKESAFE_CC]);
+  assertEquals(pack.attachment_hashes.includes("xero-hash"), true);
+  assertEquals(pack.attachment_hashes.includes("report-hash"), true);
+  assertEquals(pack.ready, true);
+  assertEquals(routes[1].route_kind, "photo");
   assertEquals(routes[1].cc, [MAKESAFE_CC]);
 });

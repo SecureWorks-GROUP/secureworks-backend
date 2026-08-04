@@ -21,8 +21,14 @@ export const SES_UNIVERSAL_ROUTE_ORDER: SesRouteKind[] = [
   "invoice",
 ];
 
-/** AJS/AJBR: report route carries the real Xero invoice PDF; no separate invoice email. */
-export const SES_AJS_ROUTE_ORDER: SesRouteKind[] = ["report", "photo"];
+/**
+ * AJS/AJBR two-email shape (skill backend release contract / Captain 2026-08-04):
+ * `report_invoice` then `photo` — not the universal three-email split.
+ */
+export const SES_AJS_ROUTE_ORDER: SesRouteKind[] = [
+  "report_invoice",
+  "photo",
+];
 
 export function isAjsBuilderKey(builderKey: unknown): boolean {
   const key = String(builderKey || "").trim().toUpperCase();
@@ -68,27 +74,29 @@ export function ajsPackCc(): string[] {
   return [SES_RELEASE_CC];
 }
 
+/**
+ * Skill contract gate kinds — exact names from the backend release contract table.
+ */
 export type SesClientSendGateKind =
-  | "universal_report"
-  | "universal_photo"
-  | "universal_invoice"
-  | "ajs_report_invoice"
-  | "ajs_photo";
+  | "report_invoice"
+  | "report"
+  | "photo"
+  | "invoice";
 
 /**
- * Map a release route_kind + builder to the client-send gate kind the payload
- * must satisfy. AJS report is the combined report+invoice gate; AJS has no
- * separate invoice route.
+ * Map a release route_kind (+ builder) to the client-send gate kind.
+ * AJS `report_invoice` route → gate `report_invoice`; never silent-map to `report`.
  */
 export function clientSendGateKindForRoute(args: {
   routeKind: SesRouteKind;
   builderKey?: unknown;
 }): SesClientSendGateKind {
-  if (isAjsBuilderKey(args.builderKey)) {
-    if (args.routeKind === "report") return "ajs_report_invoice";
-    if (args.routeKind === "photo") return "ajs_photo";
+  if (args.routeKind === "report_invoice") return "report_invoice";
+  // Legacy half-match: AJS stored as route_kind report still means combined.
+  if (args.routeKind === "report" && isAjsBuilderKey(args.builderKey)) {
+    return "report_invoice";
   }
-  if (args.routeKind === "report") return "universal_report";
-  if (args.routeKind === "photo") return "universal_photo";
-  return "universal_invoice";
+  if (args.routeKind === "report") return "report";
+  if (args.routeKind === "photo") return "photo";
+  return "invoice";
 }

@@ -182,7 +182,7 @@ function curatedSourceMissingRefusal(reason: string): SesRefusal {
 }
 
 function parseDraft(
-  routeKind: "report" | "photo" | "invoice",
+  routeKind: "report" | "photo" | "invoice" | "report_invoice",
   value: unknown,
 ): SesReviewRoute | null {
   const text = String(value || "").trim();
@@ -409,9 +409,9 @@ export function resolveDocketRoutes(
 
   if (!ajs) return resolvedRoutes;
 
-  // AJS/AJBR two-email shape (Captain 2026-08-04):
-  //   (A) report route carries report PDF + real Xero invoice PDF
-  //   (B) photo route is the follow-up
+  // AJS/AJBR two-email shape (skill backend release contract / Captain 2026-08-04):
+  //   route_kind report_invoice = report PDF + real Xero invoice PDF
+  //   route_kind photo = labelled images follow-up
   // Separate invoice route is dropped so SEND IT only releases two emails.
   const byKind = new Map(
     resolvedRoutes.map((route) => [route.route_kind, route]),
@@ -419,6 +419,8 @@ export function resolveDocketRoutes(
   const report = byKind.get("report");
   const photo = byKind.get("photo");
   const invoice = byKind.get("invoice");
+  // Explicit invoice_to bind: workorders@ajs.build first — never silent inherit
+  // of work-order sender alone without the processing mailbox.
   const recipients = ajsPackRecipients({ workOrderSender });
   const cc = ajsPackCc();
   const out: SesReviewRoute[] = [];
@@ -426,13 +428,11 @@ export function resolveDocketRoutes(
   if (report || invoice) {
     const reportHashes = report?.attachment_hashes || [];
     const invoiceHashes = (invoice?.attachment_hashes || []).filter((hash) => {
-      // Prefer the authorised Xero PDF hash when present on the invoice route.
       return !!hash;
     });
     const combinedHashes = [...new Set([
-      ...reportHashes,
-      // Real Xero PDF is first so the combined gate sees both roles.
       ...(invoicePdf?.content_hash ? [String(invoicePdf.content_hash)] : []),
+      ...reportHashes,
       ...invoiceHashes,
     ])];
     const reference = String(
@@ -441,7 +441,7 @@ export function resolveDocketRoutes(
     const invoiceNumber = boundInvoiceNumber;
     const authorised = xeroStatus === "AUTHORISED" && !!invoicePdf?.content_hash;
     const combined: SesReviewRoute = {
-      route_kind: "report",
+      route_kind: "report_invoice",
       recipients,
       cc,
       subject: authorised
@@ -456,9 +456,9 @@ export function resolveDocketRoutes(
       attachment_hashes: combinedHashes,
       ready: !!report?.ready && authorised && recipients.length > 0,
     };
-    // No-charge later attendances still release documents without an invoice PDF.
     if (noAdditionalCharge && report) {
-      combined.subject = `${reference || "Make-safe"} - report (no additional charge)`;
+      combined.subject =
+        `${reference || "Make-safe"} - report (no additional charge)`;
       combined.body =
         "This later attendance is recorded as document only with no additional charge. Please find the current report attached.";
       combined.attachment_hashes = [...new Set(reportHashes)];
@@ -470,6 +470,7 @@ export function resolveDocketRoutes(
   if (photo) {
     out.push({
       ...photo,
+      route_kind: "photo",
       recipients: recipients.length ? recipients : photo.recipients,
       cc,
       ready: photo.ready &&
@@ -2797,22 +2798,24 @@ export async function executeSesReleaseRevisionAction(
         "The approved release does not contain the exact member set and required routes.",
     });
   }
-  // Infer builder from the release's own route set: AJS has report+photo only;
-  // universal has report+photo+invoice. Do not re-derive from live job state so
-  // an already-approved release keeps the shape it was prepared with.
+  // Infer shape from the release's own route set (not live job state):
+  //   AJS: report_invoice + photo (or legacy report+photo half-match)
+  //   universal: report + photo + invoice
   const routeKinds = routes.map((route: any) => String(route.route_kind || ""));
   const isAjsRelease = routeKinds.length === 2 &&
-    routeKinds.includes("report") &&
     routeKinds.includes("photo") &&
-    !routeKinds.includes("invoice");
+    !routeKinds.includes("invoice") &&
+    (routeKinds.includes("report_invoice") || routeKinds.includes("report"));
   const requiredOrder = isAjsRelease
-    ? sesReleaseRouteOrder("AJS")
+    ? (routeKinds.includes("report_invoice")
+      ? sesReleaseRouteOrder("AJS")
+      : (["report", "photo"] as typeof SES_ROUTE_ORDER))
     : SES_ROUTE_ORDER;
   if (routes.length !== requiredOrder.length) {
     throw new SesActionError(409, {
       state: "refused",
       fact: isAjsRelease
-        ? "The approved AJS release does not contain the exact report and photo routes."
+        ? "The approved AJS release does not contain the exact report_invoice and photo routes."
         : "The approved release does not contain the exact member set and all three required routes.",
     });
   }

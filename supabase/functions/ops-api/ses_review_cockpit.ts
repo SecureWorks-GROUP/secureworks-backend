@@ -19,7 +19,7 @@ export const SES_REVIEW_SECTION_ORDER = [
   "decision_controls",
 ] as const;
 
-export type SesRouteKind = "report" | "photo" | "invoice";
+export type SesRouteKind = "report" | "photo" | "invoice" | "report_invoice";
 /** Universal three-route order (MLB and non-AJS builders). */
 export const SES_ROUTE_ORDER: SesRouteKind[] = ["report", "photo", "invoice"];
 
@@ -454,7 +454,7 @@ export function buildSesCockpitView(
         enabled: sendIt,
         label: "SEND IT",
         plan: isAjsBuilderKey(docket.clean_input.builder_key)
-          ? "Send the approved AJS routes (report+invoice combined, then photos) for this exact release revision, then write route proofs and closeout."
+          ? "Send the approved AJS routes (report_invoice then photo) for this exact release revision, then write route proofs and closeout."
           : "Send the approved report, photo, and invoice routes for this exact release revision, then write route proofs and closeout.",
       },
       captain_only: !verdict.clean,
@@ -496,7 +496,7 @@ export async function buildSesReleaseRevision(args: {
   if (orderedRoutes.some((route) => !route)) {
     throw new TypeError(
       isAjsBuilderKey(args.builder_key)
-        ? "AJS report and photo routes are both required"
+        ? "AJS report_invoice and photo routes are both required"
         : "report, photo, and invoice routes are all required",
     );
   }

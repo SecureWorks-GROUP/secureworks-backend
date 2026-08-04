@@ -597,24 +597,63 @@ export function checkReportJobClientSendGate(
   return failures;
 }
 
-// ── AJS/AJBR two-email client-send gate kinds (Captain 2026-08-04) ───────────
+// ── Sealed-release client-send gate kinds ────────────────────────────────────
 //
-// Email 1: combined report + real Xero invoice PDF (no separate invoice email).
-// Email 2: photo follow-up (image attachments, not a PDF pack).
-// Shared envelope: from admin@, cc must include ses@, subject free of review markers.
-//
-// These gates are the sealed-release path's structural checks for AJS only.
-// MLB keeps checkClientSendGate / checkClientSendGateWithSwms / the three-route
-// shape. Do not generalise these kinds across builders.
+// Skill / Captain backend release contract (2026-08-04):
+//   AJS/AJBR: report_invoice + photo (ses@ on both)
+//   MLB/others: report + photo + invoice (report/photo no cc; invoice finance@ only)
+// Kind names match the skill table exactly — do not invent parallel aliases.
 
+export const MAKESAFE_FINANCE_CC = "finance@secureworkswa.com.au";
+export const AJS_INVOICE_TO = "workorders@ajs.build";
+
+/** Route kinds from the skill backend release contract. */
+export type SesClientSendRouteKind =
+  | "report_invoice"
+  | "report"
+  | "photo"
+  | "invoice";
+
+/** @deprecated Use SesClientSendRouteKind — kept for one release of callers. */
 export type SesReleaseClientSendGateKind =
-  | "ajs_report_invoice"
-  | "ajs_photo"
-  | "universal_pack" // report + xero invoice (legacy non-MLB-SWMS pack)
+  | SesClientSendRouteKind
+  | "ajs_report_invoice" // alias → report_invoice
+  | "ajs_photo" // alias → photo (AJS builder)
+  | "universal_pack"
   | "universal_pack_with_swms"
   | "report_job_invoice_only";
 
-function baseEnvelopeFailures(payload: ClientSendPayload): string[] {
+export interface SesClientSendRouteContext {
+  kind: SesClientSendRouteKind;
+  /** AJS | AJBR | MLB | … — required for photo (cc rules differ). */
+  builderKey?: string | null;
+  /**
+   * Explicit processing mailbox for report_invoice / invoice.
+   * Missing → refuse (never silent inherit of a top-level to).
+   */
+  configuredInvoiceTo?: string | null;
+  /** Bound work-order / photo participant mailbox when known. */
+  configuredReportTo?: string | null;
+  configuredPhotoTo?: string | null;
+}
+
+export function isPhotoAttachmentName(name: string): boolean {
+  return /\.(jpe?g|png|heic|webp)$/i.test(name);
+}
+
+/** Raw camera dump names the skill refuses on the photo route (photo1, photo12…). */
+export function isRawPhotoDumpName(name: string): boolean {
+  const base = name.split(/[\\/]/).pop() || name;
+  const stem = base.replace(/\.[^.]+$/, "");
+  return /^photo\d+$/i.test(stem) || /^img[_\s-]?\d+$/i.test(stem);
+}
+
+function isAjsBuilder(builderKey: unknown): boolean {
+  const key = String(builderKey || "").trim().toUpperCase();
+  return key === "AJS" || key === "AJBR";
+}
+
+function sharedEnvelopeFailures(payload: ClientSendPayload): string[] {
   const failures: string[] = [];
   const fromEmail = String(payload.from || payload.from_email || "").trim()
     .toLowerCase();
@@ -625,10 +664,6 @@ function baseEnvelopeFailures(payload: ClientSendPayload): string[] {
   }
   if (splitEmails(payload.to).length === 0) {
     failures.push("to recipient is missing");
-  }
-  const cc = splitEmails(payload.cc);
-  if (!cc.includes(MAKESAFE_CC)) {
-    failures.push(`cc must include ${MAKESAFE_CC}`);
   }
   const subject = String(payload.subject || "").trim();
   if (!subject) {
@@ -642,116 +677,307 @@ function baseEnvelopeFailures(payload: ClientSendPayload): string[] {
     }
   }
   const html = String(payload.htmlBody || payload.html_body || "");
-  if (!html.trim()) failures.push("html body is missing");
+  if (!html.trim()) {
+    failures.push("html body is missing");
+  } else {
+    // Maverick / admin signature (or explicit suppression marker for tests).
+    const hasSignature = /maverick/i.test(html) ||
+      /data-secureworks-signature\s*=\s*["']maverick["']/i.test(html) ||
+      /secureworks-signature-maverick/i.test(html);
+    if (!hasSignature) {
+      failures.push(
+        "html body must include the Maverick HTML signature (or explicit suppression marker)",
+      );
+    }
+  }
+  const textBlob = `${subject}\n${html}`;
+  if (/\bminimum\b/i.test(textBlob)) {
+    failures.push(
+      'client-facing copy must not contain the word "minimum"',
+    );
+  }
   return failures;
 }
 
+function attachmentMarkerFailures(names: string[]): string[] {
+  const failures: string[] = [];
+  for (const name of names) {
+    const marker = hasReviewMarker(name);
+    if (marker) {
+      failures.push(
+        `client attachment filename contains review/test marker '${marker}': ${name}`,
+      );
+    }
+  }
+  return failures;
+}
+
+function toIncludesConfigured(
+  to: unknown,
+  configured: string,
+): boolean {
+  const want = configured.trim().toLowerCase();
+  if (!want) return false;
+  return splitEmails(to).includes(want);
+}
+
 /**
- * AJS email 1: exactly one make-safe report PDF + exactly one real Xero invoice
- * PDF. SWMS is not required for AJS (builder waiver unless HRCW).
+ * AJS/AJBR `report_invoice`: combined final report + real Xero invoice PDF.
+ * TO must include explicit invoice_to (workorders@ajs.build); CC must include ses@.
  */
-export function checkAjsReportInvoiceClientSendGate(
+export function checkReportInvoiceClientSendGate(
   payload: ClientSendPayload,
+  ctx: Pick<SesClientSendRouteContext, "configuredInvoiceTo"> = {},
 ): string[] {
-  const failures = baseEnvelopeFailures(payload);
-  const names = attachmentNames(payload.attachments);
-  if (names.length < 2) {
+  const failures = sharedEnvelopeFailures(payload);
+  const configured = String(ctx.configuredInvoiceTo || AJS_INVOICE_TO).trim()
+    .toLowerCase();
+  if (!configured) {
     failures.push(
-      "AJS report+invoice send requires at least two PDF attachments: make-safe report and Xero invoice",
+      "missing explicit invoice_to for report_invoice; cannot silent-inherit top-level to",
+    );
+  } else if (!toIncludesConfigured(payload.to, configured)) {
+    failures.push(
+      `report_invoice TO must include explicit invoice_to '${configured}'; got ${
+        splitEmails(payload.to).join(", ") || "<missing>"
+      }`,
     );
   }
+  const cc = splitEmails(payload.cc);
+  if (!cc.includes(MAKESAFE_CC)) {
+    failures.push(`report_invoice cc must include ${MAKESAFE_CC}`);
+  }
+  const names = attachmentNames(payload.attachments);
   const reportNames = names.filter((n) => isReportPdf(n));
   const invoiceNames = names.filter((n) => isXeroInvoicePdf(n));
+  const photoBleed = names.filter((n) => isPhotoAttachmentName(n));
   if (reportNames.length !== 1) {
     failures.push(
-      `AJS report+invoice send expected exactly one make-safe report PDF; got ${reportNames.length}`,
+      `report_invoice expected exactly one make-safe report PDF; got ${reportNames.length}`,
     );
   }
   if (invoiceNames.length !== 1) {
     failures.push(
-      `AJS report+invoice send expected exactly one real Xero invoice PDF; got ${invoiceNames.length}`,
+      `report_invoice expected exactly one real Xero invoice PDF (not a summary); got ${invoiceNames.length}`,
+    );
+  }
+  if (photoBleed.length > 0) {
+    failures.push(
+      `report_invoice must not attach photo images: ${photoBleed.join(", ")}`,
     );
   }
   for (const name of names) {
-    if (!name.toLowerCase().endsWith(".pdf")) {
-      failures.push(`AJS report+invoice attachment must be a PDF: ${name}`);
-    }
-    const marker = hasReviewMarker(name);
-    if (marker) {
-      failures.push(
-        `client attachment filename contains review/test marker '${marker}': ${name}`,
-      );
+    if (
+      !name.toLowerCase().endsWith(".pdf") && !isPhotoAttachmentName(name)
+    ) {
+      failures.push(`report_invoice unexpected attachment type: ${name}`);
     }
   }
+  failures.push(...attachmentMarkerFailures(names));
   return failures;
 }
 
-export function isPhotoAttachmentName(name: string): boolean {
-  const lower = name.toLowerCase();
-  return /\.(jpe?g|png|heic|webp)$/i.test(lower);
+/** @deprecated alias */
+export const checkAjsReportInvoiceClientSendGate =
+  checkReportInvoiceClientSendGate;
+
+/**
+ * MLB/universal `report`: work-order sender TO, **no CC**, report PDF only.
+ */
+export function checkMlbReportClientSendGate(
+  payload: ClientSendPayload,
+): string[] {
+  const failures = sharedEnvelopeFailures(payload);
+  const cc = splitEmails(payload.cc);
+  if (cc.length > 0) {
+    failures.push(
+      `report route must have no cc; got ${cc.join(", ")}`,
+    );
+  }
+  const names = attachmentNames(payload.attachments);
+  const reportNames = names.filter((n) => isReportPdf(n));
+  const invoiceNames = names.filter((n) => isXeroInvoicePdf(n));
+  const photoBleed = names.filter((n) => isPhotoAttachmentName(n));
+  if (reportNames.length !== 1) {
+    failures.push(
+      `report route expected exactly one make-safe report PDF; got ${reportNames.length}`,
+    );
+  }
+  if (invoiceNames.length > 0) {
+    failures.push("report route must not attach invoice PDFs");
+  }
+  if (photoBleed.length > 0) {
+    failures.push("report route must not attach photo images");
+  }
+  failures.push(...attachmentMarkerFailures(names));
+  return failures;
 }
 
 /**
- * AJS email 2: photo follow-up. At least one image attachment; no review markers.
- * PDF attachments are refused so the photo route cannot smuggle the pack.
+ * `photo` route — builder-aware CC:
+ *   AJS/AJBR: must include ses@
+ *   MLB/others: must have no cc
+ * Attachments: labelled images only; refuse PDF pack bleed and raw photoNN names.
  */
-export function checkAjsPhotoClientSendGate(
+export function checkPhotoRouteClientSendGate(
   payload: ClientSendPayload,
+  ctx: Pick<SesClientSendRouteContext, "builderKey" | "configuredPhotoTo"> = {},
 ): string[] {
-  const failures = baseEnvelopeFailures(payload);
+  const failures = sharedEnvelopeFailures(payload);
+  const ajs = isAjsBuilder(ctx.builderKey);
+  const cc = splitEmails(payload.cc);
+  if (ajs) {
+    if (!cc.includes(MAKESAFE_CC)) {
+      failures.push(`AJS photo route cc must include ${MAKESAFE_CC}`);
+    }
+  } else if (cc.length > 0) {
+    failures.push(
+      `photo route must have no cc for non-AJS builders; got ${cc.join(", ")}`,
+    );
+  }
+  const configuredPhoto = String(ctx.configuredPhotoTo || "").trim()
+    .toLowerCase();
+  if (configuredPhoto && !toIncludesConfigured(payload.to, configuredPhoto)) {
+    failures.push(
+      `photo TO must include bound photo_to '${configuredPhoto}'`,
+    );
+  }
   const names = attachmentNames(payload.attachments);
   if (names.length === 0) {
-    failures.push("AJS photo follow-up requires at least one photo attachment");
+    failures.push("photo route requires at least one photo attachment");
   }
   const photos = names.filter((n) => isPhotoAttachmentName(n));
   if (photos.length === 0) {
     failures.push(
-      "AJS photo follow-up expected at least one image attachment (jpeg/png/heic/webp)",
+      "photo route expected at least one image attachment (jpeg/png/heic/webp)",
     );
   }
   for (const name of names) {
-    if (!isPhotoAttachmentName(name) && !name.toLowerCase().endsWith(".pdf")) {
-      // Allow only images on the photo route; PDFs are a hard refuse below.
-    }
-    if (name.toLowerCase().endsWith(".pdf")) {
+    if (name.toLowerCase().endsWith(".pdf") || isReportPdf(name) ||
+      isXeroInvoicePdf(name)
+    ) {
       failures.push(
-        `AJS photo follow-up must not carry PDF pack attachments: ${name}`,
+        `photo route must not carry report/invoice PDF pack attachments: ${name}`,
       );
     }
-    const marker = hasReviewMarker(name);
-    if (marker) {
+    if (isRawPhotoDumpName(name)) {
       failures.push(
-        `client attachment filename contains review/test marker '${marker}': ${name}`,
+        `photo route refuses raw dump filename '${name}'; use labelled full-res names`,
       );
     }
   }
+  failures.push(...attachmentMarkerFailures(names));
+  return failures;
+}
+
+/** @deprecated alias for AJS photo (ses@ required via builderKey) */
+export function checkAjsPhotoClientSendGate(
+  payload: ClientSendPayload,
+): string[] {
+  return checkPhotoRouteClientSendGate(payload, { builderKey: "AJS" });
+}
+
+/**
+ * MLB/universal `invoice`: explicit invoice_to, finance@ required, ses@ forbidden.
+ */
+export function checkMlbInvoiceClientSendGate(
+  payload: ClientSendPayload,
+  ctx: Pick<SesClientSendRouteContext, "configuredInvoiceTo"> = {},
+): string[] {
+  const failures = sharedEnvelopeFailures(payload);
+  const configured = String(ctx.configuredInvoiceTo || "").trim().toLowerCase();
+  if (!configured) {
+    failures.push(
+      "missing explicit invoice_to for invoice route; cannot silent-inherit top-level to",
+    );
+  } else if (!toIncludesConfigured(payload.to, configured)) {
+    failures.push(
+      `invoice TO must equal/include explicit invoice_to '${configured}'; got ${
+        splitEmails(payload.to).join(", ") || "<missing>"
+      }`,
+    );
+  }
+  const cc = splitEmails(payload.cc);
+  if (!cc.includes(MAKESAFE_FINANCE_CC)) {
+    failures.push(`invoice cc must include ${MAKESAFE_FINANCE_CC}`);
+  }
+  if (cc.includes(MAKESAFE_CC)) {
+    failures.push(
+      `invoice route must not cc ${MAKESAFE_CC} (finance-only for MLB)`,
+    );
+  }
+  const names = attachmentNames(payload.attachments);
+  const invoiceNames = names.filter((n) => isXeroInvoicePdf(n));
+  const photoBleed = names.filter((n) => isPhotoAttachmentName(n));
+  if (invoiceNames.length !== 1) {
+    failures.push(
+      `invoice route expected exactly one real Xero invoice PDF; got ${invoiceNames.length}`,
+    );
+  }
+  if (photoBleed.length > 0) {
+    failures.push("invoice route must not attach photo images");
+  }
+  failures.push(...attachmentMarkerFailures(names));
   return failures;
 }
 
 /**
- * Dispatch a sealed-release route payload through the named client-send gate kind.
+ * Dispatch a sealed-release route payload through the named contract gate kind.
  * Empty result == PASS.
+ */
+export function checkSesClientSendRouteGate(
+  payload: ClientSendPayload,
+  ctx: SesClientSendRouteContext,
+): string[] {
+  switch (ctx.kind) {
+    case "report_invoice":
+      return checkReportInvoiceClientSendGate(payload, ctx);
+    case "report":
+      return checkMlbReportClientSendGate(payload);
+    case "photo":
+      return checkPhotoRouteClientSendGate(payload, ctx);
+    case "invoice":
+      return checkMlbInvoiceClientSendGate(payload, ctx);
+    default: {
+      const _exhaustive: never = ctx.kind;
+      return [`unknown client-send route kind: ${String(_exhaustive)}`];
+    }
+  }
+}
+
+/**
+ * Back-compat dispatcher including legacy pack kinds.
  */
 export function checkSesReleaseClientSendGate(
   kind: SesReleaseClientSendGateKind,
   payload: ClientSendPayload,
+  ctx: Omit<SesClientSendRouteContext, "kind"> = {},
 ): string[] {
-  switch (kind) {
-    case "ajs_report_invoice":
-      return checkAjsReportInvoiceClientSendGate(payload);
-    case "ajs_photo":
-      return checkAjsPhotoClientSendGate(payload);
-    case "universal_pack":
-      return checkClientSendGate(payload);
-    case "universal_pack_with_swms":
-      return checkClientSendGateWithSwms(payload);
-    case "report_job_invoice_only":
-      return checkReportJobClientSendGate(payload);
-    default: {
-      const _exhaustive: never = kind;
-      return [`unknown client-send gate kind: ${String(_exhaustive)}`];
-    }
+  if (kind === "ajs_report_invoice" || kind === "report_invoice") {
+    return checkSesClientSendRouteGate(payload, {
+      ...ctx,
+      kind: "report_invoice",
+      builderKey: ctx.builderKey || "AJS",
+    });
   }
+  if (kind === "ajs_photo") {
+    return checkSesClientSendRouteGate(payload, {
+      ...ctx,
+      kind: "photo",
+      builderKey: ctx.builderKey || "AJS",
+    });
+  }
+  if (kind === "report" || kind === "photo" || kind === "invoice") {
+    return checkSesClientSendRouteGate(payload, { ...ctx, kind });
+  }
+  if (kind === "universal_pack") return checkClientSendGate(payload);
+  if (kind === "universal_pack_with_swms") {
+    return checkClientSendGateWithSwms(payload);
+  }
+  if (kind === "report_job_invoice_only") {
+    return checkReportJobClientSendGate(payload);
+  }
+  return [`unknown client-send gate kind: ${String(kind)}`];
 }
 
 // ── Atomic send-lock model (pure reference implementation) ──
