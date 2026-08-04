@@ -459,6 +459,288 @@ Deno.test("bind establishes current-cycle attribution on a newly attached visibl
   ]);
 });
 
+Deno.test(
+  "trusted content supersession rebinds when all gates pass and snapshot differs",
+  async () => {
+    // First bind seals a durable curated identity on the document.
+    const priorBytes = new TextEncoder().encode(
+      "%PDF-1.7\nprior asbestos misstatement fixture",
+    );
+    const first = bindClient(priorBytes);
+    const sealedBody = {
+      ...(await bindBody(priorBytes)),
+      curation_revision_id: "ses-curated-report:fixture:prior",
+      curation_artifact_id: "ses-curated-report-artifact:prior",
+    };
+    await withStoredPdf(
+      priorBytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          first.client,
+          sealedBody,
+          FIXTURE_ACTOR,
+        ),
+    );
+    const trustedPrior = {
+      ...(first.document.data_snapshot_json as Record<string, unknown>),
+    };
+    assertEquals(
+      trustedPrior.curated_source_kind,
+      "durable_curated_revision",
+    );
+
+    // Corrected artifact on the same document: all gates still pass; snapshot
+    // differs (material correction). Prior durable identity is archived on the
+    // audit event, not merged forward.
+    const correctedBytes = new TextEncoder().encode(
+      "%PDF-1.7\ncorrected hardie fibre cement fixture",
+    );
+    const correctedJob = currentReportJob({
+      findings:
+        "Storm and wind cracked the Hardie fibre cement (non-asbestos) boundary fencing.",
+      works:
+        "We propped up the Hardie fibre cement fence using star pickets pending replacement.",
+    });
+    const { client, document, mutations } = bindClient(correctedBytes, {
+      prior: trustedPrior,
+      documentCycleId: "cycle-fixture",
+      documentCycleAttribution: "bound",
+    });
+    document.version = 2;
+    const correctedBody = {
+      job_id: "job-fixture",
+      document_id: "document-fixture",
+      pdf_base64: pdfBase64(correctedBytes),
+      pdf_sha256: `sha256:${await sha(correctedBytes)}`,
+      report_job: correctedJob,
+      curation_revision_id: "ses-curated-report:fixture:hardie-correction",
+      curation_artifact_id: "ses-curated-report-artifact:hardie-correction",
+    };
+    const result = await withStoredPdf(
+      correctedBytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          correctedBody,
+          FIXTURE_ACTOR,
+        ),
+    );
+    assertEquals(result.success, true);
+    assertEquals(result.skipped, false);
+    assertEquals(result.writes, 2);
+    assertEquals((result as any).supersedes_prior_bind, true);
+    assertEquals(
+      document.data_snapshot_json.curated_source_kind,
+      "durable_curated_revision",
+    );
+    assertEquals(
+      document.data_snapshot_json.curated_source_revision_id,
+      "ses-curated-report:fixture:hardie-correction",
+    );
+    assertEquals(
+      document.data_snapshot_json.report_render_hash,
+      await sha(correctedBytes),
+    );
+    assertStringIncludes(
+      String(
+        (document.data_snapshot_json.report_scope_narratives as string[])[1] ||
+          "",
+      ),
+      "Hardie fibre cement",
+    );
+    const event = mutations.find((item) => item.table === "job_events");
+    assertEquals(
+      (event?.values.detail_json as any)?.supersedes_prior_bind,
+      true,
+    );
+    assertEquals(
+      (event?.values.detail_json as any)?.prior_data_snapshot_json,
+      trustedPrior,
+    );
+    // Idempotent replay of the same corrected snapshot skips.
+    const replay = await withStoredPdf(
+      correctedBytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          correctedBody,
+          FIXTURE_ACTOR,
+        ),
+    );
+    assertEquals(replay.skipped, true);
+    assertEquals(replay.writes, 0);
+  },
+);
+
+Deno.test(
+  "two supersessions of the same bytes reserve distinct audit ids",
+  async () => {
+    const priorBytes = new TextEncoder().encode(
+      "%PDF-1.7\nsupersession reservation fixture prior",
+    );
+    const first = bindClient(priorBytes);
+    const sealedBody = {
+      ...(await bindBody(priorBytes)),
+      curation_revision_id: "ses-curated-report:fixture:reservation-a",
+      curation_artifact_id: "ses-curated-report-artifact:reservation-a",
+    };
+    await withStoredPdf(
+      priorBytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          first.client,
+          sealedBody,
+          FIXTURE_ACTOR,
+        ),
+    );
+    const trustedPrior = {
+      ...(first.document.data_snapshot_json as Record<string, unknown>),
+    };
+
+    const correctedBytes = new TextEncoder().encode(
+      "%PDF-1.7\nsupersession reservation fixture corrected",
+    );
+    const { client, document, mutations } = bindClient(correctedBytes, {
+      prior: trustedPrior,
+      documentCycleId: "cycle-fixture",
+      documentCycleAttribution: "bound",
+    });
+    document.version = 2;
+    const correctedBody = {
+      job_id: "job-fixture",
+      document_id: "document-fixture",
+      pdf_base64: pdfBase64(correctedBytes),
+      pdf_sha256: `sha256:${await sha(correctedBytes)}`,
+      report_job: currentReportJob(),
+      curation_revision_id: "ses-curated-report:fixture:reservation-b",
+      curation_artifact_id: "ses-curated-report-artifact:reservation-b",
+    };
+    await withStoredPdf(
+      correctedBytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          correctedBody,
+          FIXTURE_ACTOR,
+        ),
+    );
+    // Same corrected PDF bytes, re-curated under a new curation identity: a
+    // genuinely distinct supersession that a bytes-only reservation key would
+    // refuse forever as a duplicate.
+    const recuratedBody = {
+      ...correctedBody,
+      curation_revision_id: "ses-curated-report:fixture:reservation-c",
+      curation_artifact_id: "ses-curated-report-artifact:reservation-c",
+    };
+    const recurated = await withStoredPdf(
+      correctedBytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          recuratedBody,
+          FIXTURE_ACTOR,
+        ),
+    );
+    assertEquals(recurated.success, true);
+    assertEquals((recurated as any).supersedes_prior_bind, true);
+    assertEquals(
+      document.data_snapshot_json.curated_source_revision_id,
+      "ses-curated-report:fixture:reservation-c",
+    );
+    const eventIds = mutations.filter((item) => item.table === "job_events")
+      .map((item) => String(item.values.id));
+    assertEquals(eventIds.length, 2);
+    assertEquals(new Set(eventIds).size, 2);
+
+    // Same bytes and same curation identity, differing canonical input hash:
+    // still a distinct reservation, so the key cannot be bytes-scoped either.
+    const restatedBody = {
+      ...recuratedBody,
+      report_job: currentReportJob({
+        findings:
+          "The affected element was restated after the Captain's correction.",
+      }),
+    };
+    await withStoredPdf(
+      correctedBytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          client,
+          restatedBody,
+          FIXTURE_ACTOR,
+        ),
+    );
+    const allEventIds = mutations.filter((item) => item.table === "job_events")
+      .map((item) => String(item.values.id));
+    assertEquals(allEventIds.length, 3);
+    assertEquals(new Set(allEventIds).size, 3);
+  },
+);
+
+Deno.test(
+  "a genuinely duplicate content supersession refuses as its own reservation",
+  async () => {
+    const priorBytes = new TextEncoder().encode(
+      "%PDF-1.7\nsupersession duplicate fixture prior",
+    );
+    const first = bindClient(priorBytes);
+    const sealedBody = {
+      ...(await bindBody(priorBytes)),
+      curation_revision_id: "ses-curated-report:fixture:duplicate-prior",
+      curation_artifact_id: "ses-curated-report-artifact:duplicate-prior",
+    };
+    await withStoredPdf(
+      priorBytes,
+      () =>
+        _bindCurrentCycleCuratedMakesafeReportForTest(
+          first.client,
+          sealedBody,
+          FIXTURE_ACTOR,
+        ),
+    );
+    const correctedBytes = new TextEncoder().encode(
+      "%PDF-1.7\nsupersession duplicate fixture corrected",
+    );
+    const { client, document, mutations } = bindClient(correctedBytes, {
+      prior: {
+        ...(first.document.data_snapshot_json as Record<string, unknown>),
+      },
+      documentCycleId: "cycle-fixture",
+      documentCycleAttribution: "bound",
+      eventInsertError: { code: "23505", message: "duplicate reservation" },
+    });
+    document.version = 2;
+    const correctedBody = {
+      job_id: "job-fixture",
+      document_id: "document-fixture",
+      pdf_base64: pdfBase64(correctedBytes),
+      pdf_sha256: `sha256:${await sha(correctedBytes)}`,
+      report_job: currentReportJob(),
+      curation_revision_id: "ses-curated-report:fixture:duplicate-corrected",
+      curation_artifact_id: "ses-curated-report-artifact:duplicate-corrected",
+    };
+    const error = await assertRejects(
+      () =>
+        withStoredPdf(
+          correctedBytes,
+          () =>
+            _bindCurrentCycleCuratedMakesafeReportForTest(
+              client,
+              correctedBody,
+              FIXTURE_ACTOR,
+            ),
+        ),
+      ApiError,
+      "this content supersession is already reserved or completed",
+    );
+    assertEquals((error as ApiError).status, 409);
+    assertEquals(
+      mutations.some((mutation) => mutation.table === "job_documents"),
+      false,
+    );
+  },
+);
+
 Deno.test("exact trusted snapshot with drifted cycle columns repairs cycle only", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\ncycle repair fixture");
   const body = await bindBody(bytes);

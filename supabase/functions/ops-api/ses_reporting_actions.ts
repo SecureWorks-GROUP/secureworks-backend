@@ -42,6 +42,12 @@ import {
 import {
   inspectSesSupportingReportProof,
   rawSesSupportingReportSha,
+  SES_CURATED_SOURCE_BIND_EVENT_TYPE,
+  SES_CURATED_SOURCE_SUPERSEDED_REASON,
+  SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
+  type SesCuratedSourceSupersession,
+  sesCuratedSourceSupersessionsFromEvents,
+  sesSupportingReportIsSuperseded,
   type SesSupportingReportTrust,
 } from "./ses_supporting_report_trust.ts";
 export { inspectSesSupportingReportProof } from "./ses_supporting_report_trust.ts";
@@ -128,12 +134,41 @@ function object(value: unknown): Record<string, any> {
 export const SES_CURATED_SOURCE_RECOVERY_ACTION =
   "POST ops-api?action=bind_current_cycle_curated_makesafe_report with job_id, document_id, pdf_base64, pdf_sha256 (sha256:<64 lowercase hex>), report_job (photo content_sha256 same format), curation_revision_id, and curation_artifact_id; server derives current attendance cycle, renderer provenance, artifact content hash and report_input_hash, then establishes cycle attribution. Then prepare_ses_docket_revision (dry_run or draft only).";
 
+/**
+ * Curated-bind supersessions recorded on ONE job. `null` means the audit trail
+ * could not be read, which every caller must treat as untrusted rather than as
+ * "no supersession" - a superseded report is the one thing that must never
+ * reach a builder.
+ */
+async function loadSesCuratedSourceSupersessions(
+  client: SesSupabaseClient,
+  jobId: string,
+): Promise<SesCuratedSourceSupersession[] | null> {
+  if (!String(jobId || "").trim()) return null;
+  const response = await client.from("job_events")
+    .select("detail_json,created_at")
+    .eq("job_id", jobId)
+    .eq("event_type", SES_CURATED_SOURCE_BIND_EVENT_TYPE);
+  if (response.error) return null;
+  return sesCuratedSourceSupersessionsFromEvents(response.data || []);
+}
+
 async function verifyStoredSupportingReport(
   client: SesSupabaseClient,
   artifact: Record<string, any>,
+  supersessions: SesCuratedSourceSupersession[] | null,
 ): Promise<SesSupportingReportTrust> {
   const inspected = inspectSesSupportingReportProof(artifact);
   if (!inspected.trusted) return inspected;
+  if (!supersessions) {
+    return {
+      trusted: false,
+      reason: SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
+    };
+  }
+  if (sesSupportingReportIsSuperseded(artifact, supersessions)) {
+    return { trusted: false, reason: SES_CURATED_SOURCE_SUPERSEDED_REASON };
+  }
   const prefix = `${SES_DOCKET_BUCKET}/`;
   const objectKey = String(artifact.object_key || "");
   if (!objectKey.startsWith(prefix)) {
@@ -166,11 +201,25 @@ async function verifyStoredSupportingReport(
   return { trusted: true };
 }
 
+export const SES_SUPERSEDED_SOURCE_RECOVERY_ACTION =
+  "A corrected curated bind superseded the report this pack was built from, so the pack still carries the superseded bytes. Run POST ops-api?action=prepare_ses_docket_revision with dry_run true, then dry_run false, to rebuild it from the currently bound curated report, and record a fresh Docs Ready signoff. The superseded revision stays in the audit trail and is never served again.";
+
 function curatedSourceMissingRefusal(reason: string): SesRefusal {
+  const superseded = reason === SES_CURATED_SOURCE_SUPERSEDED_REASON;
   return sesRefusal(
     "curated_source_missing",
-    SES_CURATED_SOURCE_RECOVERY_ACTION,
-    { evidence: { suppression_reason: reason } },
+    superseded
+      ? SES_SUPERSEDED_SOURCE_RECOVERY_ACTION
+      : SES_CURATED_SOURCE_RECOVERY_ACTION,
+    {
+      ...(superseded
+        ? {
+          fact:
+            "The completion report in this pack was superseded by a corrected curated bind, so the pack must be re-prepared before it can be reviewed or released.",
+        }
+        : {}),
+      evidence: { suppression_reason: reason },
+    },
   );
 }
 
@@ -565,7 +614,11 @@ export async function loadSesCockpitDocket(
       artifact.role === "supporting_report_pdf"
     );
     const trust = reportArtifacts.length === 1
-      ? await verifyStoredSupportingReport(client, reportArtifacts[0])
+      ? await verifyStoredSupportingReport(
+        client,
+        reportArtifacts[0],
+        await loadSesCuratedSourceSupersessions(client, jobId),
+      )
       : {
         trusted: false as const,
         reason: reportArtifacts.length === 0
@@ -1620,10 +1673,17 @@ export async function getSesReviewablePackAction(
       }).`,
     });
   }
+  const supersessions = physicalReview
+    ? await loadSesCuratedSourceSupersessions(client, String(docket.job_id))
+    : [];
   const projectedArtifacts = await Promise.all(
     (artifactsResponse.data || []).map(async (artifact: any) => {
       if (physicalReview && artifact.role === "supporting_report_pdf") {
-        const trust = await verifyStoredSupportingReport(client, artifact);
+        const trust = await verifyStoredSupportingReport(
+          client,
+          artifact,
+          supersessions,
+        );
         if (!trust.trusted) {
           return {
             suppressed: true as const,
@@ -3173,6 +3233,48 @@ export interface SesReleaseXeroReader {
   readAuthorised(invoiceId: string): Promise<boolean>;
 }
 
+/**
+ * A signoff records approval of exact pack bytes, and a curated content
+ * supersession is the one event that can invalidate those bytes after the tick
+ * was recorded. The recorded signoff is left alone as history; this wall is
+ * what stops it from still authorising superseded content at send time.
+ */
+async function assertSesReleasedSourcesNotSuperseded(
+  client: SesSupabaseClient,
+  docketRevisionIds: string[],
+): Promise<void> {
+  for (const revisionId of docketRevisionIds) {
+    const revision = await client.from("makesafe_docket_revisions")
+      .select("id,job_id").eq("id", revisionId).maybeSingle();
+    const jobId = String(object(revision.data).job_id || "").trim();
+    const artifacts = jobId
+      ? await client.from("makesafe_docket_artifacts")
+        .select("role,metadata").eq("revision_id", revisionId)
+      : { data: null, error: { message: "job identity missing" } };
+    const supersessions = jobId
+      ? await loadSesCuratedSourceSupersessions(client, jobId)
+      : null;
+    if (revision.error || !jobId || artifacts.error || !supersessions) {
+      throw new SesActionError(
+        409,
+        curatedSourceMissingRefusal(
+          SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
+        ),
+      );
+    }
+    const superseded = (artifacts.data || []).some((artifact: any) =>
+      artifact.role === "supporting_report_pdf" &&
+      sesSupportingReportIsSuperseded(artifact, supersessions)
+    );
+    if (superseded) {
+      throw new SesActionError(
+        409,
+        curatedSourceMissingRefusal(SES_CURATED_SOURCE_SUPERSEDED_REASON),
+      );
+    }
+  }
+}
+
 export async function assertSesDocketsSignedOffForSend(
   client: SesSupabaseClient,
   docketRevisionIds: string[],
@@ -3195,6 +3297,7 @@ export async function assertSesDocketsSignedOffForSend(
       ),
     );
   }
+  await assertSesReleasedSourcesNotSuperseded(client, exactIds);
 }
 
 export async function executeSesReleaseRevisionAction(

@@ -109,3 +109,135 @@ export function inspectSesSupportingReportProof(
 export function rawSesSupportingReportSha(value: unknown): string {
   return rawSha(value);
 }
+
+/** Audit event type written by every curated source bind, first or superseding. */
+export const SES_CURATED_SOURCE_BIND_EVENT_TYPE =
+  "ses_curated_report_source_bind_validated";
+
+/**
+ * A docket revision keeps its own consistent copy of the bytes it was built
+ * from, so a trusted content supersession on the source document cannot be
+ * seen by artifact self-verification alone. These two reasons are how a
+ * revision built from superseded content stops being served.
+ */
+export const SES_CURATED_SOURCE_SUPERSEDED_REASON = "curated_source_superseded";
+export const SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON =
+  "curated_source_supersession_unreadable";
+
+interface SesCuratedSourceStamp {
+  raw_sha256: string;
+  source_identity: string;
+  report_input_hash: string;
+}
+
+export interface SesCuratedSourceSupersession {
+  document_id: string;
+  superseded: SesCuratedSourceStamp;
+  current: SesCuratedSourceStamp;
+}
+
+function curatedStamp(
+  raw: unknown,
+  identity: unknown,
+  inputHash: unknown,
+): SesCuratedSourceStamp {
+  return {
+    raw_sha256: rawSha(raw),
+    source_identity: String(identity || "").trim(),
+    report_input_hash: rawSha(inputHash),
+  };
+}
+
+function sameCuratedStamp(
+  left: SesCuratedSourceStamp,
+  right: SesCuratedSourceStamp,
+): boolean {
+  return left.raw_sha256 === right.raw_sha256 &&
+    left.source_identity === right.source_identity &&
+    left.report_input_hash === right.report_input_hash;
+}
+
+/**
+ * Reads the curated-bind audit trail of ONE job into the supersession pairs it
+ * records. Rows must be the job's own `job_events` rows for
+ * `SES_CURATED_SOURCE_BIND_EVENT_TYPE`; they are ordered oldest first here, so
+ * the last entry for a document carries its currently bound stamp.
+ *
+ * A supersession whose superseded and current stamps are identical (a re-bind
+ * that changed only renderer constants, say) records nothing: it moved no
+ * builder-visible content, so nothing it produced is stale.
+ */
+export function sesCuratedSourceSupersessionsFromEvents(
+  rows: Array<Record<string, unknown>>,
+): SesCuratedSourceSupersession[] {
+  const ordered = rows.slice().sort((left, right) =>
+    String(left.created_at || "").localeCompare(String(right.created_at || ""))
+  );
+  const supersessions: SesCuratedSourceSupersession[] = [];
+  for (const row of ordered) {
+    const detail = object(row.detail_json);
+    if (detail.supersedes_prior_bind !== true) continue;
+    const documentId = String(detail.document_id || "").trim();
+    const priorSnapshot = object(detail.prior_data_snapshot_json);
+    const superseded = curatedStamp(
+      detail.prior_expected_raw_sha256 ??
+        priorSnapshot.curated_source_expected_raw_sha256,
+      detail.prior_source_identity ?? priorSnapshot.curated_source_identity,
+      detail.prior_report_input_hash ?? priorSnapshot.report_input_hash,
+    );
+    const current = curatedStamp(
+      detail.expected_raw_sha256,
+      detail.source_identity,
+      detail.report_input_hash,
+    );
+    if (
+      !documentId || !superseded.raw_sha256 || !superseded.source_identity ||
+      !current.raw_sha256 || sameCuratedStamp(superseded, current)
+    ) continue;
+    supersessions.push({ document_id: documentId, superseded, current });
+  }
+  return supersessions;
+}
+
+/**
+ * True when this stored docket artifact was built from content that a later
+ * curated bind superseded. Scoped to the artifact's OWN source document and to
+ * the exact superseded stamp: an artifact carrying the currently bound content
+ * is never marked, and no other card, cycle or document is reached.
+ *
+ * The prior revision is untouched audit history. Clearing this state is a
+ * separate gated write: `prepare_ses_docket_revision` (dry_run, then live).
+ */
+export function sesSupportingReportIsSuperseded(
+  artifact: Record<string, unknown>,
+  supersessions: SesCuratedSourceSupersession[],
+): boolean {
+  const metadata = object(artifact.metadata);
+  const sourceKind = String(metadata.source_kind || "");
+  const documentId = String(
+    metadata.source_document_id || metadata.report_document_id || "",
+  ).trim();
+  if (!documentId) return false;
+  const scoped = supersessions.filter((row) => row.document_id === documentId);
+  if (scoped.length === 0) return false;
+  const bound = scoped[scoped.length - 1].current;
+  const stamp = curatedStamp(
+    metadata.expected_raw_sha256,
+    metadata.source_identity,
+    metadata.report_input_hash,
+  );
+  if (sourceKind === "durable_curated_revision") {
+    if (sameCuratedStamp(stamp, bound)) return false;
+    return scoped.some((row) => sameCuratedStamp(stamp, row.superseded));
+  }
+  // A previously committed PDF names its docket revision rather than the
+  // curation identity, so only the raw bytes of the source document can be
+  // compared. Superseded bytes stay superseded whichever artifact serves them.
+  if (sourceKind === "previously_committed_pdf") {
+    if (!stamp.raw_sha256 || stamp.raw_sha256 === bound.raw_sha256) {
+      return false;
+    }
+    return scoped.some((row) => row.superseded.raw_sha256 === stamp.raw_sha256);
+  }
+  return false;
+}

@@ -14,7 +14,12 @@ import {
   SesActionError,
   signOffSesDocketAction,
 } from "./ses_reporting_actions.ts";
-import { MAKESAFE_REPORT_CONTRACT_VERSION } from "./makesafe_report_render.ts";
+import {
+  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+  MAKESAFE_REPORT_CONTRACT_VERSION,
+} from "./makesafe_report_render.ts";
 import { sesSha256Bytes } from "./ses_docket_envelope.ts";
 
 async function rawSha256(bytes: Uint8Array): Promise<string> {
@@ -28,6 +33,10 @@ async function rawSha256(bytes: Uint8Array): Promise<string> {
 function reviewPackClient(
   artifact: Record<string, unknown>,
   bytes: Uint8Array,
+  options: {
+    jobEvents?: Array<Record<string, unknown>>;
+    jobEventsError?: Record<string, unknown>;
+  } = {},
 ) {
   const signedPaths: string[] = [];
   const rpcCalls: string[] = [];
@@ -62,6 +71,7 @@ function reviewPackClient(
     makesafe_docket_revisions: docket,
     makesafe_docket_artifacts: [artifact],
     ses_docket_review_events: [],
+    job_events: options.jobEvents || [],
   };
   const client = {
     rpc(name: string) {
@@ -99,6 +109,12 @@ function reviewPackClient(
         },
         then: (resolve: (value: unknown) => unknown) => {
           const value = rows[table];
+          if (table === "job_events" && options.jobEventsError) {
+            return Promise.resolve({
+              data: null,
+              error: options.jobEventsError,
+            }).then(resolve);
+          }
           return Promise.resolve({
             data: single && Array.isArray(value) ? value[0] || null : value,
             error: null,
@@ -110,6 +126,165 @@ function reviewPackClient(
   } as any;
   return { client, signedPaths, rpcCalls, review };
 }
+
+const SUPERSEDED_RAW = `sha256:${"1".repeat(64)}`;
+const CORRECTED_RAW = `sha256:${"2".repeat(64)}`;
+const SUPERSEDED_INPUT = `sha256:${"3".repeat(64)}`;
+const CORRECTED_INPUT = `sha256:${"4".repeat(64)}`;
+const SUPERSEDED_IDENTITY =
+  "curation-revision:asbestos-misstatement/artifact:asbestos-misstatement";
+const CORRECTED_IDENTITY =
+  "curation-revision:hardie-correction/artifact:hardie-correction";
+
+function supersessionEvent() {
+  return {
+    created_at: "2026-08-04T01:00:00.000Z",
+    detail_json: {
+      document_id: "source-document",
+      supersedes_prior_bind: true,
+      source_identity: CORRECTED_IDENTITY,
+      expected_raw_sha256: CORRECTED_RAW,
+      report_input_hash: CORRECTED_INPUT,
+      prior_source_identity: SUPERSEDED_IDENTITY,
+      prior_expected_raw_sha256: SUPERSEDED_RAW,
+      prior_report_input_hash: SUPERSEDED_INPUT,
+    },
+  };
+}
+
+async function curatedReportArtifact(
+  bytes: Uint8Array,
+  stamp: {
+    source_identity: string;
+    expected_raw_sha256: string;
+    report_input_hash: string;
+  },
+) {
+  const contentHash = await sesSha256Bytes(bytes);
+  const rawHash = await rawSha256(bytes);
+  const [revisionId, artifactId] = stamp.source_identity
+    .replace("curation-revision:", "").split("/artifact:");
+  return {
+    role: "supporting_report_pdf",
+    object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+    media_type: "application/pdf",
+    content_hash: contentHash,
+    size_bytes: bytes.byteLength,
+    metadata: {
+      source_kind: "durable_curated_revision",
+      source_identity: stamp.source_identity,
+      source_document_id: "source-document",
+      source_revision_id: revisionId,
+      source_artifact_id: artifactId,
+      source_artifact_content_hash: contentHash,
+      expected_raw_sha256: `sha256:${rawHash}`,
+      output_sha256: `sha256:${rawHash}`,
+      render_hash: rawHash,
+      evidence_source: "current_cycle_curated_makesafe_report",
+      report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      report_input_hash: stamp.report_input_hash,
+      report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+      report_renderer_source_revision:
+        MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
+      report_renderer_script_sha256:
+        MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
+    },
+  };
+}
+
+Deno.test("a docket revision built from superseded curated content stops being served", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nsuperseded fixture");
+  const artifact = await curatedReportArtifact(bytes, {
+    source_identity: SUPERSEDED_IDENTITY,
+    expected_raw_sha256: SUPERSEDED_RAW,
+    report_input_hash: SUPERSEDED_INPUT,
+  });
+  // The artifact self-verifies against its own stored copy: only the curated
+  // bind ledger knows these bytes were superseded.
+  const event = supersessionEvent();
+  event.detail_json.prior_expected_raw_sha256 = String(
+    artifact.metadata.expected_raw_sha256,
+  );
+  const { client, signedPaths, rpcCalls, review } = reviewPackClient(
+    artifact,
+    bytes,
+    { jobEvents: [event] },
+  );
+  const pack = await getSesReviewablePackAction(
+    client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(pack.artifacts, []);
+  assertEquals(pack.suppressed_artifacts[0].signed_url, null);
+  assertEquals(
+    pack.suppressed_artifacts[0].suppression_reason,
+    "curated_source_superseded",
+  );
+  assertEquals(pack.blockers[0].code, "curated_source_missing");
+  assertStringIncludes(
+    String(pack.blockers[0].recovery_action || ""),
+    "prepare_ses_docket_revision",
+  );
+  assertEquals(signedPaths, []);
+
+  const error = await assertRejects(
+    () =>
+      signOffSesDocketAction(
+        client,
+        {
+          mode: "jwt",
+          user: { id: "captain-fixture", email: "", role: "owner" },
+        },
+        {
+          docket_revision_id: "docket-fixture",
+          expected_output_content_hash: review.docket_output_content_hash,
+        },
+      ),
+    SesActionError,
+    "superseded by a corrected curated bind",
+  );
+  assertEquals((error as SesActionError).status, 409);
+  assertEquals(rpcCalls, []);
+});
+
+Deno.test("the corrected curated content stays served, and an unreadable bind ledger does not", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\ncorrected fixture");
+  const artifact = await curatedReportArtifact(bytes, {
+    source_identity: CORRECTED_IDENTITY,
+    expected_raw_sha256: CORRECTED_RAW,
+    report_input_hash: CORRECTED_INPUT,
+  });
+  const event = supersessionEvent();
+  event.detail_json.expected_raw_sha256 = String(
+    artifact.metadata.expected_raw_sha256,
+  );
+  const current = reviewPackClient(artifact, bytes, { jobEvents: [event] });
+  const pack = await getSesReviewablePackAction(
+    current.client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(pack.artifacts.length, 1);
+  assertEquals(pack.suppressed_artifacts, []);
+  assertEquals(pack.blockers, []);
+  assertEquals(current.signedPaths, ["docket-fixture/report.pdf"]);
+
+  const unreadable = reviewPackClient(artifact, bytes, {
+    jobEventsError: { message: "curated bind ledger unavailable" },
+  });
+  const degraded = await getSesReviewablePackAction(
+    unreadable.client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(degraded.artifacts, []);
+  assertEquals(
+    degraded.suppressed_artifacts[0].suppression_reason,
+    "curated_source_supersession_unreadable",
+  );
+  assertEquals(unreadable.signedPaths, []);
+});
 
 Deno.test("retired commercial and self-consistent raw provenance remain untrusted without job-specific code", () => {
   const retiredCommercial = inspectSesSupportingReportProof({

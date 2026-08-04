@@ -1377,6 +1377,41 @@ required. A card with ZERO rows in that table therefore still has
 its legacy `!pack` branch and invents a second, non-existent blocker — which
 happened on SWMS-261109 before it was caught.
 
+## Curated Report Content Supersession Is Gate-Full Re-Bind, Not A Patch
+
+An already-bound current-cycle `makesafe_report` with a durable curated identity
+may be re-bound when the **same document** is still cycle-bound, the new trusted
+snapshot **differs**, and **all eight** curated evidence gates pass again
+(materials, photos, contact, photo SHA-256, exact served-byte match, input hash,
+authoritative renderer constants, independent curation identity). The prior
+snapshot is archived on the audit event (`prior_data_snapshot_json`,
+`supersedes_prior_bind`); PDF bytes are never rewritten by the bind itself —
+overwrite storage first via `attach_makesafe_document` on the same
+`file_name`/document id, then re-bind. Supersession audit ids are content-scoped
+over the WHOLE trusted identity (bytes, curation identity, input hash), not the
+bytes alone, so a re-curation of the same PDF is not refused forever as a
+reservation conflict. Do not clear curated markers by hand or weaken a gate to
+force a material correction. Tests:
+`makesafe_render_report_action_test.ts` (`trusted content supersession…`).
+
+That audit event is also the supersession LEDGER. A docket revision keeps its
+own consistent copy of the bytes it was assembled from, so artifact
+self-verification alone cannot see the correction and a signed-off pack would
+keep serving the superseded (e.g. asbestos) report. `verifyStoredSupportingReport`
+therefore reads the job's `ses_curated_report_source_bind_validated` events and
+refuses any supporting report whose stamped source document + superseded stamp
+matches, as `curated_source_superseded` — visible on the pack (suppressed
+artifact + blocker), the cockpit HOLD, the Docs Ready signoff, and the send-time
+signoff wall (`assertSesDocketsSignedOffForSend`). An unreadable ledger is
+untrusted, never "no supersession". Scoping is exact: only the artifact's own
+source document and only the superseded stamp, never the currently bound one,
+so no other card, cycle or document is reached, and a re-bind that changed only
+renderer constants marks nothing. The prior revision and its signoff are
+retained as audit history and nothing auto-re-prepares — the operator's next
+step is `prepare_ses_docket_revision` (`dry_run`, then `dry_run: false`) plus a
+fresh signoff. Pure logic and both regression directions:
+`ses_supporting_report_trust.ts`, `ses_reporting_actions_regression_test.ts`.
+
 ## An SES Labour Line Is A Floor, Not A Price You Can Set
 
 `prepare_ses_invoice_obligation` takes only `job_id`, `docket_revision_id`,
