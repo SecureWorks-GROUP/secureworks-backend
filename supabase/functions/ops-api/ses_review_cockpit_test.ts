@@ -474,6 +474,11 @@ Deno.test("a missing photo draft names the PHOTO email and the real cause", () =
     (item) => item.code === "route_draft_missing",
   );
   assert(blocker, "expected a route_draft_missing blocker");
+  // The FACT itself must name the photo email and what is wrong with it, so it
+  // stands alone in a consumer that renders nothing but the fact.
+  assertStringIncludes(blocker!.fact, "photo email");
+  assertStringIncludes(blocker!.fact, "no attachments");
+  assert(!blocker!.fact.includes("A required builder email draft is missing"));
   assertStringIncludes(blocker!.recovery_action, "photo email");
   assertStringIncludes(blocker!.recovery_action, "no attachments");
   assert(!blocker!.recovery_action.includes("builder email draft"));

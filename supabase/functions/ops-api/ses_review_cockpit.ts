@@ -198,6 +198,35 @@ function routeEmailLabel(kind: SesRouteKind): string {
 }
 
 /**
+ * The FACT for a `route_draft_missing` blocker. The catalogue default says only
+ * "A required builder email draft is missing", which reads as random on a card
+ * where the operator can see report and invoice are fine. Name the email and
+ * what is actually wrong with it, so the fact stands on its own even in a
+ * consumer that renders nothing else.
+ *
+ * This states only what IS — it is still a fact, not a remedy; the recovery
+ * action below remains the separate "what clears it" sentence.
+ */
+function routeDraftFact(
+  kind: SesRouteKind,
+  route: SesReviewRoute | undefined,
+): string {
+  const label = routeEmailLabel(kind);
+  if (!route) {
+    return `The ${label} has no draft on the current docket revision.`;
+  }
+  if ((route.attachment_hashes?.length ?? 0) === 0) {
+    return `The ${label} is drafted but carries no attachments on the current docket revision.`;
+  }
+  if (!route.subject.trim() || !route.body.trim()) {
+    return `The ${label} has no ${
+      !route.subject.trim() ? "subject" : "body"
+    } on the current docket revision.`;
+  }
+  return `The ${label} is not marked ready on the current docket revision.`;
+}
+
+/**
  * The remedy sentence beside a `route_draft_missing` blocker. The FACT is
  * rendered verbatim from the refusal catalogue and is trustworthy; this text is
  * the "clear path" the Captain reads next, so it must name the exact email and
@@ -238,6 +267,7 @@ function missingRouteRefusals(
           "route_draft_missing",
           routeDraftRemedy(kind, route),
           {
+            fact: routeDraftFact(kind, route),
             evidence: {
               route_kind: kind,
               route_present: !!route,
