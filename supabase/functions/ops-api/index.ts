@@ -679,6 +679,11 @@ import {
   type MakesafeReportJob,
 } from './makesafe_report_render.ts'
 import {
+  deriveMakesafeReportArrival,
+  deriveMakesafeReportCrewLabel,
+  enrichMakesafeReportJobKvFacts,
+} from './makesafe_report_kv_facts.ts'
+import {
   canonicalSesJson,
   sesSha256,
   sesSha256Bytes,
@@ -35313,8 +35318,53 @@ async function bindCurrentCycleCuratedMakesafeReport(
     )
   }
 
+  // Recover blank Crew / Attendance from recorded evidence before the curated
+  // input hash is computed. Same plumbing class as contact ownership via
+  // jobs.client_name: the producer left the field empty even though trade_count
+  // / job_assignments / arrival_time already exist. Never invents a name.
+  const [kvReportRes, kvAssignmentRes] = await Promise.all([
+    client.from('job_service_reports')
+      .select('id,status,checklist_json,attendance_cycle_id,cycle_attribution,cycle_number,submitted_at,created_at')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }),
+    client.from('job_assignments')
+      .select(
+        'id,status,role,crew_name,user_id,attendance_cycle_id,cycle_attribution,arrived_at,users:user_id(name)',
+      )
+      .eq('job_id', jobId),
+  ])
+  if (kvReportRes.error || kvAssignmentRes.error) {
+    throw curatedBindError(
+      'curated_bind_source_evidence_read_failed',
+      'current-cycle report/assignment source evidence could not be read',
+      503,
+    )
+  }
+  const kvReport = selectCurrentCycleReport(
+    kvReportRes.data || [],
+    detailResponse.data,
+    attendanceCycleId,
+  )
+  const kvChecklist = parseJsonObject(kvReport?.checklist_json)
+  const kvAssignments = (kvAssignmentRes.data || []).filter((row: any) => {
+    const cycleId = String(row?.attendance_cycle_id || '').trim()
+    return !cycleId || cycleId === attendanceCycleId
+  })
+  const enrichedReportJob = enrichMakesafeReportJobKvFacts(
+    body.report_job && typeof body.report_job === 'object'
+      ? body.report_job as Record<string, unknown>
+      : {},
+    {
+      tradeCount: kvChecklist.trade_count,
+      checklistArrival: kvChecklist.arrival_time,
+      assignmentArrivedAt: kvAssignments
+        .map((row: any) => row?.arrived_at)
+        .find((value: unknown) => String(value || '').trim()),
+      assignments: kvAssignments,
+    },
+  )
   const validatedInput = await assertCurrentWikiReportInput(
-    body.report_job || {},
+    enrichedReportJob,
     jobResponse.data.client_name,
   )
   await assertCurrentWikiSourceEvidence(
@@ -36580,7 +36630,7 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
   const selectedPhotoUrls = normaliseStringArray(body.selected_photo_urls || body.selectedPhotoUrls)
 
   const draftKind = body.draft_kind || body.draftKind || 'makesafe_report'
-  const [jobRes, detailRes, reportRes, docsRes, mediaRes, notesRes] = await Promise.all([
+  const [jobRes, detailRes, reportRes, docsRes, mediaRes, notesRes, assignmentsRes] = await Promise.all([
     client.from('jobs')
       .select('id, job_number, type, status, client_name, client_phone, site_address, site_suburb, metadata, created_at, updated_at')
       .eq('id', jobId).maybeSingle(),
@@ -36602,6 +36652,11 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
       .eq('type', 'photo')
       .order('created_at', { ascending: true }),
     loadDraftNotesThread(client, jobId, draftKind),
+    // Name only — used solely to count person-bearing assignments for the
+    // trade-count Crew line. Never lands on the client report as a name.
+    client.from('job_assignments')
+      .select('id,status,role,crew_name,user_id,users:user_id(name)')
+      .eq('job_id', jobId),
   ])
 
   const media = mediaRes.data || []
@@ -36615,6 +36670,7 @@ async function loadDraftPackContext(client: any, body: any): Promise<DraftPackCo
     job: jobRes.data || null,
     detail: detailRes.data || null,
     service_report: reportRes.data || null,
+    assignments: Array.isArray(assignmentsRes?.data) ? assignmentsRes.data : [],
     feedback_notes: Array.isArray(body.feedback_notes) ? body.feedback_notes : (notesRes.notes || []),
     selected_photo_urls: selected,
     source_docs: [
@@ -36687,13 +36743,28 @@ function draftPackReportPayload(parsed: any, ctx: DraftPackContext, selectedPhot
   const ref = parsed.report.ref || parsed.invoice.reference || detail.external_ref || job.job_number || job.id
   const address = parsed.report.address || job.site_address || job.site_suburb || 'Address TBC'
   const compactBillingNote = compactDraftPackBillingNote(parsed, ctx)
+  // Crew is a trade count only. Prefer a valid supplied form, else recover from
+  // the current-cycle service report trade_count, else from person-bearing
+  // job_assignments. Never invent a name and never default to "1 trade".
+  // Break that left the Queens Park (SWMS-26845) crew line blank while two
+  // complete assignments and trade_count=2 were already recorded:
+  //   crew: parsed.report.crew || ''
+  const crew = deriveMakesafeReportCrewLabel({
+    supplied: parsed.report.crew,
+    tradeCount: checklist.trade_count,
+    assignments: ctx.assignments || [],
+  })
+  const arrival = deriveMakesafeReportArrival({
+    supplied: parsed.report.arrival,
+    checklistArrival: checklist.arrival_time,
+  })
   return {
     ref,
     address,
     contact: parsed.report.contact || job.client_name || '',
     date: parsed.report.date || (ctx.service_report as any)?.submitted_at || job.updated_at || '',
-    arrival: parsed.report.arrival || checklist.arrival_time || '',
-    crew: parsed.report.crew || '',
+    arrival,
+    crew,
     billing_note: compactBillingNote || parsed.report.billing_note || detail.invoice_notes || '',
     scope: parsed.report.scope || checklist.damage_description || '',
     findings: parsed.report.findings || checklist.damage_cause || '',
