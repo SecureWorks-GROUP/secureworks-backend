@@ -59,7 +59,11 @@ import { deriveExistingFencePicketDecision } from "./makesafe_existing_fence_pic
 import { buildRoofReportJob } from "./roof_report_template.ts";
 import { isBundledCoverageSendNote } from "./makesafe_send_pack.ts";
 import { renderSesSwmsPdf } from "./ses_swms_render.ts";
-import { inspectSesSupportingReportProof } from "./ses_supporting_report_trust.ts";
+import {
+  inspectSesSupportingReportProof,
+  SES_SUPPORTING_REPORT_MAX_BYTES,
+  sesSupportingReportDocumentBinding,
+} from "./ses_supporting_report_trust.ts";
 import {
   canonicalSesPortalCaptureResult,
   canonicalSesPortalCaptureRole,
@@ -2079,8 +2083,28 @@ function physicalReportSourceForCycle(
       metadata.output_sha256 || metadata.render_hash,
     );
     const artifactContentHash = text(artifact.content_hash);
+    const artifactInputHash = text(metadata.report_input_hash);
+    const documentBinding = sesSupportingReportDocumentBinding(
+      expectedRawSha256,
+      provenance,
+    );
+    const inputHash = isSesSha256(artifactInputHash)
+      ? artifactInputHash
+      : (documentBinding === "matched"
+        ? text(provenance.report_input_hash)
+        : "");
+    const trust = inspectSesSupportingReportProof(artifact);
+    // Restorable docket lineage without an independent completeness coordinate
+    // (report_input_hash from curated bind accounting) is not a source. Allow
+    // selection only when the document still carries a hash bound to these
+    // bytes so prepare can re-stamp the artifact; pure self-vouching metadata
+    // remains refused. The refusal reason is raised before the size budget, so
+    // bound the size here too rather than inherit an unchecked artifact.
+    const completenessRecoverable = !trust.trusted &&
+      trust.reason === "independent_completeness_proof_missing" &&
+      isSesSha256(inputHash);
     if (
-      !inspectSesSupportingReportProof(artifact).trusted ||
+      (!trust.trusted && !completenessRecoverable) ||
       !document || document.visible_to_trades !== true ||
       text(document.type).toLowerCase() !== "makesafe_report" ||
       text(document.attendance_cycle_id) !== currentCycleId ||
@@ -2089,10 +2113,10 @@ function physicalReportSourceForCycle(
       !text(artifact.object_key) || !isSesSha256(artifactContentHash) ||
       !Number.isSafeInteger(Number(artifact.size_bytes)) ||
       Number(artifact.size_bytes) <= 0 ||
-      text(document.uploaded_by) === "guarded-current-wiki-rerender-sweep"
+      Number(artifact.size_bytes) > SES_SUPPORTING_REPORT_MAX_BYTES ||
+      text(document.uploaded_by) === "guarded-current-wiki-rerender-sweep" ||
+      documentBinding === "diverged" || !isSesSha256(inputHash)
     ) continue;
-    const inputHash = text(metadata.report_input_hash) ||
-      text(provenance.report_input_hash);
     candidates.push({
       document,
       artifact,
@@ -2107,9 +2131,7 @@ function physicalReportSourceForCycle(
         source_artifact_id: text(artifact.id),
         source_artifact_content_hash: artifactContentHash as SesSha256,
         expected_raw_sha256: expectedRawSha256,
-        ...(isSesSha256(inputHash)
-          ? { report_input_hash: inputHash as SesSha256 }
-          : {}),
+        report_input_hash: inputHash as SesSha256,
       },
     });
   }
@@ -2623,7 +2645,8 @@ export function createSesAssemblerRuntimeDependencies(
         bytes = new Uint8Array(await recovered.arrayBuffer());
       }
       if (
-        bytes.byteLength === 0 || bytes.byteLength > 8 * 1024 * 1024 ||
+        bytes.byteLength === 0 ||
+        bytes.byteLength > SES_SUPPORTING_REPORT_MAX_BYTES ||
         await sesSha256Bytes(bytes) !== proof.source_artifact_content_hash ||
         await rawReportHash(
             await rawPhotoSha256(bytes as Uint8Array<ArrayBuffer>),
@@ -2720,7 +2743,8 @@ export function createSesAssemblerRuntimeDependencies(
         bytes = new Uint8Array(await recovered.arrayBuffer());
       }
       if (
-        bytes.byteLength === 0 || bytes.byteLength > 8 * 1024 * 1024 ||
+        bytes.byteLength === 0 ||
+        bytes.byteLength > SES_SUPPORTING_REPORT_MAX_BYTES ||
         await sesSha256Bytes(bytes) !== proof.source_artifact_content_hash ||
         await rawPhotoSha256(bytes as Uint8Array<ArrayBuffer>) !==
           proof.expected_raw_sha256

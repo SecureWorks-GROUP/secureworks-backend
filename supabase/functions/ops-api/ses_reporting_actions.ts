@@ -52,8 +52,10 @@ import {
   SES_CURATED_SOURCE_BIND_EVENT_TYPE,
   SES_CURATED_SOURCE_SUPERSEDED_REASON,
   SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
+  SES_SUPPORTING_REPORT_MAX_BYTES,
   type SesCuratedSourceSupersession,
   sesCuratedSourceSupersessionsFromEvents,
+  sesSupportingReportDocumentBinding,
   sesSupportingReportIsSuperseded,
   type SesSupportingReportTrust,
 } from "./ses_supporting_report_trust.ts";
@@ -176,6 +178,28 @@ async function verifyStoredSupportingReport(
   if (sesSupportingReportIsSuperseded(artifact, supersessions)) {
     return { trusted: false, reason: SES_CURATED_SOURCE_SUPERSEDED_REASON };
   }
+  const metadata = object(artifact.metadata);
+  const documentId = String(
+    metadata.report_document_id || metadata.source_document_id || "",
+  );
+  const documentResponse = await client.from("job_documents")
+    .select("id,data_snapshot_json")
+    .eq("id", documentId)
+    .maybeSingle();
+  if (documentResponse.error) {
+    return { trusted: false, reason: "source_document_unreadable" };
+  }
+  if (!documentResponse.data) {
+    return { trusted: false, reason: "source_document_missing" };
+  }
+  if (
+    sesSupportingReportDocumentBinding(
+      metadata.expected_raw_sha256,
+      documentResponse.data.data_snapshot_json,
+    ) === "diverged"
+  ) {
+    return { trusted: false, reason: "source_document_bytes_diverged" };
+  }
   const prefix = `${SES_DOCKET_BUCKET}/`;
   const objectKey = String(artifact.object_key || "");
   if (!objectKey.startsWith(prefix)) {
@@ -189,7 +213,7 @@ async function verifyStoredSupportingReport(
   const bytes = new Uint8Array(await recovered.data.arrayBuffer());
   if (
     bytes.byteLength !== Number(artifact.size_bytes) ||
-    bytes.byteLength > 8 * 1024 * 1024 ||
+    bytes.byteLength > SES_SUPPORTING_REPORT_MAX_BYTES ||
     new TextDecoder().decode(bytes.slice(0, 5)) !== "%PDF-" ||
     await sesSha256Bytes(bytes) !== artifact.content_hash
   ) {
@@ -458,8 +482,8 @@ export function resolveDocketRoutes(
       const invoiceNumber = boundInvoiceNumber || "pending-number";
       return {
         ...route,
-        subject:
-          `${reference || "Make-safe"} - Xero draft ${invoiceNumber}`.trim(),
+        subject: `${reference || "Make-safe"} - Xero draft ${invoiceNumber}`
+          .trim(),
         body:
           `Xero DRAFT invoice ${invoiceNumber} is bound to this obligation revision. The builder-facing Xero PDF attaches when the draft is authorised. No release is approved yet.`,
         attachment_hashes: [...new Set(supportHashes)],
@@ -735,7 +759,7 @@ export async function loadSesCockpitDocket(
   }
   const obligation = obligationResponse.data || null;
   const artifactsResponse = await client.from("makesafe_docket_artifacts")
-    .select("role,object_key,media_type,content_hash,size_bytes,metadata")
+    .select("id,role,object_key,media_type,content_hash,size_bytes,metadata")
     .eq("revision_id", docket.id)
     .order("object_key");
   if (artifactsResponse.error) {
@@ -843,7 +867,9 @@ export async function loadSesCockpitDocket(
         ? { total: Number(rawBinding.total) }
         : {}),
     };
-    if (xeroBinding.total === undefined || !Number.isFinite(xeroBinding.total)) {
+    if (
+      xeroBinding.total === undefined || !Number.isFinite(xeroBinding.total)
+    ) {
       // Enrich total for the Invoice tab when older DRAFT binds omitted it.
       // Prefer the local Xero mirror (authoritative issued total), then the
       // obligation proposal totals (pre-authorise DRAFT identity display).
@@ -1805,7 +1831,7 @@ export async function getSesReviewablePackAction(
   const physicalReview = reviewFamily === "physical_makesafe" ||
     reviewFamily === "temporary_fencing";
   const artifactsResponse = await client.from("makesafe_docket_artifacts")
-    .select("role,object_key,media_type,content_hash,size_bytes,metadata")
+    .select("id,role,object_key,media_type,content_hash,size_bytes,metadata")
     .eq("revision_id", docketRevisionId)
     .order("object_key");
   if (artifactsResponse.error) {

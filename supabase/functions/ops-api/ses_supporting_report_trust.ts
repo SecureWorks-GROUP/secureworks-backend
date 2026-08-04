@@ -9,6 +9,8 @@ export type SesSupportingReportTrust =
   | { trusted: true }
   | { trusted: false; reason: string };
 
+export const SES_SUPPORTING_REPORT_MAX_BYTES = 8 * 1024 * 1024;
+
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === "object"
     ? value as Record<string, unknown>
@@ -22,6 +24,30 @@ function sha256Shape(value: unknown): boolean {
 function rawSha(value: unknown): string {
   const normalized = String(value || "").toLowerCase().replace(/^sha256:/, "");
   return /^[0-9a-f]{64}$/.test(normalized) ? normalized : "";
+}
+
+export type SesSupportingReportDocumentBinding =
+  | "matched"
+  | "diverged"
+  | "absent";
+
+// A report_input_hash is a completeness coordinate for the bytes the DOCUMENT
+// carries, whichever side stamped it. When the document's own raw hash names
+// different bytes than the artifact, the artifact is a stale or thinner render
+// and no coordinate describes it. Selection and the served-pack read must
+// answer this the same way, so the rule lives here once.
+export function sesSupportingReportDocumentBinding(
+  artifactRawSha256: unknown,
+  documentProvenance: unknown,
+): SesSupportingReportDocumentBinding {
+  const provenance = object(documentProvenance);
+  const documentRaw = rawSha(
+    provenance.curated_source_expected_raw_sha256 ||
+      provenance.report_render_hash,
+  );
+  if (!documentRaw) return "absent";
+  const artifactRaw = rawSha(artifactRawSha256);
+  return artifactRaw && artifactRaw === documentRaw ? "matched" : "diverged";
 }
 
 export function inspectSesSupportingReportProof(
@@ -43,9 +69,14 @@ export function inspectSesSupportingReportProof(
   );
   const sourceRevisionId = String(metadata.source_revision_id || "");
   const sourceArtifactId = String(metadata.source_artifact_id || "");
+  const artifactId = String(artifact.id || "");
+  // Check 8: independent provenance / no self-vouching. A pack artifact must
+  // not certify itself by pointing its "independent" source at its own id, nor
+  // by equating source identity with the document being certified.
   if (
     !sourceIdentity || !sourceDocumentId ||
-    sourceIdentity === sourceDocumentId
+    sourceIdentity === sourceDocumentId ||
+    (artifactId && sourceArtifactId === artifactId)
   ) {
     return { trusted: false, reason: "source_identity_self_reference" };
   }
@@ -99,8 +130,26 @@ export function inspectSesSupportingReportProof(
   ) {
     return { trusted: false, reason: "active_renderer_input_binding_missing" };
   }
+  // Restorable is not complete. A previously-committed same-cycle PDF whose
+  // only proof is its own docket metadata (content-hash self-match, no bind-time
+  // report_input_hash) can self-certify an incomplete pack — Tuart Hill
+  // SWMS-261015 is the concrete instance (thin 8-of-23, no input hash). The
+  // report_input_hash is the independent completeness coordinate produced by
+  // the curated bind's photo/contact/materials accounting; without it this path
+  // is decorative. Sibling-bundle evidence is a different independence model
+  // and is not gated here.
+  if (
+    sourceKind === "previously_committed_pdf" &&
+    evidenceSource === "current_cycle_curated_makesafe_report" &&
+    !sha256Shape(metadata.report_input_hash)
+  ) {
+    return { trusted: false, reason: "independent_completeness_proof_missing" };
+  }
   const size = Number(artifact.size_bytes);
-  if (!Number.isSafeInteger(size) || size <= 0 || size > 8 * 1024 * 1024) {
+  if (
+    !Number.isSafeInteger(size) || size <= 0 ||
+    size > SES_SUPPORTING_REPORT_MAX_BYTES
+  ) {
     return { trusted: false, reason: "pdf_size_budget_invalid" };
   }
   return { trusted: true };

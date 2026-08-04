@@ -1903,6 +1903,7 @@ Deno.test(
         expected_raw_sha256: `sha256:${"a".repeat(64)}`,
         output_sha256: `sha256:${"a".repeat(64)}`,
         render_hash: "a".repeat(64),
+        report_input_hash: `sha256:${"a".repeat(64)}`,
         evidence_source: "current_cycle_curated_makesafe_report",
         report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
       },
@@ -1944,12 +1945,180 @@ Deno.test(
         source_artifact_id: "artifact-committed",
         source_artifact_content_hash: `sha256:${"c".repeat(64)}`,
         expected_raw_sha256: `sha256:${"a".repeat(64)}`,
+        report_input_hash: `sha256:${"a".repeat(64)}`,
       },
     );
 
-    live.docket_artifacts = live.docket_artifacts.filter((artifact) =>
-      artifact.id === "artifact-sweep"
+    // Tuart-style: previously_committed shape without independent completeness
+    // proof must not select. Being restorable is not being complete.
+    live.docket_artifacts = [{
+      id: "artifact-tuart-incomplete",
+      revision_id: "revision-committed",
+      role: "supporting_report_pdf",
+      media_type: "application/pdf",
+      object_key: "makesafe-docket-artifacts/tuart.pdf",
+      content_hash: `sha256:${"c".repeat(64)}`,
+      size_bytes: 100,
+      metadata: {
+        report_document_id: "committed-report",
+        source_kind: "previously_committed_pdf",
+        source_identity:
+          "docket-revision:trusted-source-revision/artifact:trusted-source-artifact",
+        source_document_id: "committed-report",
+        source_revision_id: "trusted-source-revision",
+        source_artifact_id: "trusted-source-artifact",
+        source_artifact_content_hash: `sha256:${"c".repeat(64)}`,
+        expected_raw_sha256: `sha256:${"a".repeat(64)}`,
+        output_sha256: `sha256:${"a".repeat(64)}`,
+        render_hash: "a".repeat(64),
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      },
+    }];
+    assertEquals(selectPhysicalReportProofForCycle(live, cycleId), null);
+
+    live.docket_artifacts = [{
+      id: "artifact-sweep",
+      revision_id: "revision-sweep",
+      role: "supporting_report_pdf",
+      media_type: "application/pdf",
+      object_key: "makesafe-docket-artifacts/guarded.pdf",
+      content_hash: `sha256:${"d".repeat(64)}`,
+      size_bytes: 100,
+      metadata: {
+        report_document_id: "guarded-sweep-report",
+        source_kind: "durable_curated_revision",
+        source_identity: "guarded-sweep-report",
+        source_document_id: "guarded-sweep-report",
+        source_revision_id: "raw-source-revision",
+        source_artifact_id: "raw-source-artifact",
+        source_artifact_content_hash: `sha256:${"d".repeat(64)}`,
+        expected_raw_sha256: `sha256:${"b".repeat(64)}`,
+        output_sha256: `sha256:${"b".repeat(64)}`,
+        render_hash: "b".repeat(64),
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      },
+    }];
+    assertEquals(selectPhysicalReportProofForCycle(live, cycleId), null);
+  },
+);
+
+Deno.test(
+  "completeness coordinate is refused unless the document's own raw hash names these artifact bytes",
+  () => {
+    const live = snapshot();
+    const input = buildSesAssemblerInput(live);
+    const cycleId = input.attendance.current_attendance_cycle_id;
+    live.documents = [{
+      id: "committed-report",
+      type: "makesafe_report",
+      visible_to_trades: true,
+      file_name: "committed.pdf",
+      attendance_cycle_id: cycleId,
+      cycle_attribution: "bound",
+      data_snapshot_json: {
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
+        report_render_hash: "a".repeat(64),
+        report_input_hash: `sha256:${"e".repeat(64)}`,
+      },
+    }];
+    live.docket_revisions = [{
+      id: "revision-committed",
+      current_attendance_cycle_id: cycleId,
+      committed_at: "2026-08-01T00:00:00.000Z",
+    }];
+    const committedArtifact = (
+      id: string,
+      rawHash: string,
+      metadata: Record<string, unknown>,
+      overrides: Record<string, unknown> = {},
+    ) => ({
+      id,
+      revision_id: "revision-committed",
+      role: "supporting_report_pdf",
+      media_type: "application/pdf",
+      object_key: `makesafe-docket-artifacts/${id}.pdf`,
+      content_hash: `sha256:${"c".repeat(64)}`,
+      size_bytes: 100,
+      ...overrides,
+      metadata: {
+        source_kind: "previously_committed_pdf",
+        source_identity:
+          "docket-revision:trusted-source-revision/artifact:trusted-source-artifact",
+        source_revision_id: "trusted-source-revision",
+        source_artifact_id: "trusted-source-artifact",
+        source_artifact_content_hash: `sha256:${"c".repeat(64)}`,
+        expected_raw_sha256: `sha256:${rawHash}`,
+        output_sha256: `sha256:${rawHash}`,
+        render_hash: rawHash,
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        ...metadata,
+      },
+    });
+
+    // Document-sourced completeness recovery: the document hash may only vouch
+    // for bytes it actually describes.
+    const curatedMetadata = {
+      report_document_id: "committed-report",
+      source_document_id: "committed-report",
+      evidence_source: "current_cycle_curated_makesafe_report",
+    };
+    live.docket_artifacts = [
+      committedArtifact("artifact-doc-bound", "a".repeat(64), curatedMetadata),
+    ];
+    assertEquals(selectPhysicalReportProofForCycle(live, cycleId), {
+      source_kind: "previously_committed_pdf",
+      source_identity:
+        "docket-revision:revision-committed/artifact:artifact-doc-bound",
+      source_document_id: "committed-report",
+      source_revision_id: "revision-committed",
+      source_artifact_id: "artifact-doc-bound",
+      source_artifact_content_hash: `sha256:${"c".repeat(64)}`,
+      expected_raw_sha256: `sha256:${"a".repeat(64)}`,
+      report_input_hash: `sha256:${"e".repeat(64)}`,
+    });
+
+    // Maylands-style: a thin artifact whose raw bytes are not the document's
+    // rendered report cannot borrow that document's completeness coordinate.
+    live.docket_artifacts = [
+      committedArtifact(
+        "artifact-doc-unbound",
+        "b".repeat(64),
+        curatedMetadata,
+      ),
+    ];
+    assertEquals(selectPhysicalReportProofForCycle(live, cycleId), null);
+
+    // A coordinate already stamped into artifact metadata is the same claim
+    // about the same bytes, so it is refused on the same divergence.
+    live.docket_artifacts = [
+      committedArtifact("artifact-metadata-unbound", "b".repeat(64), {
+        ...curatedMetadata,
+        report_input_hash: `sha256:${"e".repeat(64)}`,
+      }),
+    ];
+    assertEquals(selectPhysicalReportProofForCycle(live, cycleId), null);
+
+    live.docket_artifacts = [
+      committedArtifact("artifact-metadata-bound", "a".repeat(64), {
+        ...curatedMetadata,
+        report_input_hash: `sha256:${"e".repeat(64)}`,
+      }),
+    ];
+    assertEquals(
+      selectPhysicalReportProofForCycle(live, cycleId)?.source_artifact_id,
+      "artifact-metadata-bound",
     );
+
+    // The completeness refusal is raised before the size budget, so selection
+    // bounds the size itself instead of inheriting an unchecked artifact.
+    live.docket_artifacts = [
+      committedArtifact("artifact-oversize", "a".repeat(64), curatedMetadata, {
+        size_bytes: 8 * 1024 * 1024 + 1,
+      }),
+    ];
     assertEquals(selectPhysicalReportProofForCycle(live, cycleId), null);
   },
 );
