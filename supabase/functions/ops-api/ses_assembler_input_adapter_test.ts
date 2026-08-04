@@ -2005,7 +2005,7 @@ Deno.test(
 );
 
 Deno.test(
-  "completeness gate covers same-pack self-vouching only and binds a document-sourced hash to the artifact bytes",
+  "completeness coordinate is refused unless the document's own raw hash names these artifact bytes",
   () => {
     const live = snapshot();
     const input = buildSesAssemblerInput(live);
@@ -2022,18 +2022,6 @@ Deno.test(
         report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
         report_render_hash: "a".repeat(64),
         report_input_hash: `sha256:${"e".repeat(64)}`,
-      },
-    }, {
-      id: "sibling-report",
-      type: "makesafe_report",
-      visible_to_trades: true,
-      file_name: "sibling.pdf",
-      attendance_cycle_id: cycleId,
-      cycle_attribution: "bound",
-      data_snapshot_json: {
-        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-        report_renderer_version: MAKESAFE_REPORT_RENDERER_VERSION,
-        report_render_hash: "f".repeat(64),
       },
     }];
     live.docket_revisions = [{
@@ -2070,30 +2058,6 @@ Deno.test(
       },
     });
 
-    // A sibling bundle is evidence from a different job, outside the pack being
-    // certified, so it never self-vouches and stays selectable without a
-    // completeness coordinate.
-    live.docket_artifacts = [
-      committedArtifact("artifact-sibling", "f".repeat(64), {
-        report_document_id: "sibling-report",
-        source_document_id: "sibling-report",
-        evidence_source: "explicit_sibling_bundle",
-        bundle_id: "bundle-1",
-        sibling_job_id: "sibling-job",
-        binding_revision_id: "binding-revision",
-      }),
-    ];
-    assertEquals(selectPhysicalReportProofForCycle(live, cycleId), {
-      source_kind: "previously_committed_pdf",
-      source_identity:
-        "docket-revision:revision-committed/artifact:artifact-sibling",
-      source_document_id: "sibling-report",
-      source_revision_id: "revision-committed",
-      source_artifact_id: "artifact-sibling",
-      source_artifact_content_hash: `sha256:${"c".repeat(64)}`,
-      expected_raw_sha256: `sha256:${"f".repeat(64)}`,
-    });
-
     // Document-sourced completeness recovery: the document hash may only vouch
     // for bytes it actually describes.
     const curatedMetadata = {
@@ -2126,6 +2090,27 @@ Deno.test(
       ),
     ];
     assertEquals(selectPhysicalReportProofForCycle(live, cycleId), null);
+
+    // A coordinate already stamped into artifact metadata is the same claim
+    // about the same bytes, so it is refused on the same divergence.
+    live.docket_artifacts = [
+      committedArtifact("artifact-metadata-unbound", "b".repeat(64), {
+        ...curatedMetadata,
+        report_input_hash: `sha256:${"e".repeat(64)}`,
+      }),
+    ];
+    assertEquals(selectPhysicalReportProofForCycle(live, cycleId), null);
+
+    live.docket_artifacts = [
+      committedArtifact("artifact-metadata-bound", "a".repeat(64), {
+        ...curatedMetadata,
+        report_input_hash: `sha256:${"e".repeat(64)}`,
+      }),
+    ];
+    assertEquals(
+      selectPhysicalReportProofForCycle(live, cycleId)?.source_artifact_id,
+      "artifact-metadata-bound",
+    );
 
     // The completeness refusal is raised before the size budget, so selection
     // bounds the size itself instead of inheriting an unchecked artifact.

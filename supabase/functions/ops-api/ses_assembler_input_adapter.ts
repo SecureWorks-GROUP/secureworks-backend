@@ -2083,21 +2083,21 @@ function physicalReportSourceForCycle(
     );
     const artifactContentHash = text(artifact.content_hash);
     const artifactInputHash = text(metadata.report_input_hash);
-    // A document-level report_input_hash describes the bytes the DOCUMENT
-    // carries, so it may only vouch for this artifact when the artifact's own
-    // raw hash is those same bytes. Otherwise a re-bind's completeness
-    // coordinate would stamp a stale, thinner artifact.
+    // A report_input_hash is a completeness coordinate for the bytes the
+    // DOCUMENT carries, whichever side stamped it. When the document's own raw
+    // hash names different bytes than this artifact, the artifact is a stale or
+    // thinner render and no coordinate — metadata or document — describes it.
     const documentRawSha256 = rawReportHash(
       provenance.curated_source_expected_raw_sha256 ||
         provenance.report_render_hash,
     );
-    const documentInputHash = expectedRawSha256 &&
-        documentRawSha256 === expectedRawSha256
-      ? text(provenance.report_input_hash)
-      : "";
+    const documentBytesMatch = Boolean(expectedRawSha256) &&
+      documentRawSha256 === expectedRawSha256;
+    const documentBytesDiverge = Boolean(documentRawSha256) &&
+      !documentBytesMatch;
     const inputHash = isSesSha256(artifactInputHash)
       ? artifactInputHash
-      : documentInputHash;
+      : (documentBytesMatch ? text(provenance.report_input_hash) : "");
     const trust = inspectSesSupportingReportProof(artifact);
     // Restorable docket lineage without an independent completeness coordinate
     // (report_input_hash from curated bind accounting) is not a source. Allow
@@ -2108,11 +2108,6 @@ function physicalReportSourceForCycle(
     const completenessRecoverable = !trust.trusted &&
       trust.reason === "independent_completeness_proof_missing" &&
       isSesSha256(inputHash);
-    // A sibling bundle is evidence from a DIFFERENT job, outside the pack being
-    // certified, so it cannot self-vouch and is not gated on this hash — the
-    // defect being closed is a pack certifying its own completeness.
-    const completenessRequired = text(metadata.evidence_source) ===
-      "current_cycle_curated_makesafe_report";
     if (
       (!trust.trusted && !completenessRecoverable) ||
       !document || document.visible_to_trades !== true ||
@@ -2125,7 +2120,7 @@ function physicalReportSourceForCycle(
       Number(artifact.size_bytes) <= 0 ||
       Number(artifact.size_bytes) > SES_SUPPORTING_REPORT_MAX_BYTES ||
       text(document.uploaded_by) === "guarded-current-wiki-rerender-sweep" ||
-      (completenessRequired && !isSesSha256(inputHash))
+      documentBytesDiverge || !isSesSha256(inputHash)
     ) continue;
     candidates.push({
       document,
@@ -2141,9 +2136,7 @@ function physicalReportSourceForCycle(
         source_artifact_id: text(artifact.id),
         source_artifact_content_hash: artifactContentHash as SesSha256,
         expected_raw_sha256: expectedRawSha256,
-        ...(isSesSha256(inputHash)
-          ? { report_input_hash: inputHash as SesSha256 }
-          : {}),
+        report_input_hash: inputHash as SesSha256,
       },
     });
   }
@@ -2657,7 +2650,8 @@ export function createSesAssemblerRuntimeDependencies(
         bytes = new Uint8Array(await recovered.arrayBuffer());
       }
       if (
-        bytes.byteLength === 0 || bytes.byteLength > 8 * 1024 * 1024 ||
+        bytes.byteLength === 0 ||
+        bytes.byteLength > SES_SUPPORTING_REPORT_MAX_BYTES ||
         await sesSha256Bytes(bytes) !== proof.source_artifact_content_hash ||
         await rawReportHash(
             await rawPhotoSha256(bytes as Uint8Array<ArrayBuffer>),
@@ -2754,7 +2748,8 @@ export function createSesAssemblerRuntimeDependencies(
         bytes = new Uint8Array(await recovered.arrayBuffer());
       }
       if (
-        bytes.byteLength === 0 || bytes.byteLength > 8 * 1024 * 1024 ||
+        bytes.byteLength === 0 ||
+        bytes.byteLength > SES_SUPPORTING_REPORT_MAX_BYTES ||
         await sesSha256Bytes(bytes) !== proof.source_artifact_content_hash ||
         await rawPhotoSha256(bytes as Uint8Array<ArrayBuffer>) !==
           proof.expected_raw_sha256

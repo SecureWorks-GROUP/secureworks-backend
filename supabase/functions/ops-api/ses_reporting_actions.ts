@@ -52,6 +52,7 @@ import {
   SES_CURATED_SOURCE_BIND_EVENT_TYPE,
   SES_CURATED_SOURCE_SUPERSEDED_REASON,
   SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
+  SES_SUPPORTING_REPORT_MAX_BYTES,
   type SesCuratedSourceSupersession,
   sesCuratedSourceSupersessionsFromEvents,
   sesSupportingReportIsSuperseded,
@@ -189,7 +190,7 @@ async function verifyStoredSupportingReport(
   const bytes = new Uint8Array(await recovered.data.arrayBuffer());
   if (
     bytes.byteLength !== Number(artifact.size_bytes) ||
-    bytes.byteLength > 8 * 1024 * 1024 ||
+    bytes.byteLength > SES_SUPPORTING_REPORT_MAX_BYTES ||
     new TextDecoder().decode(bytes.slice(0, 5)) !== "%PDF-" ||
     await sesSha256Bytes(bytes) !== artifact.content_hash
   ) {
