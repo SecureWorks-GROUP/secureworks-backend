@@ -68,6 +68,17 @@ export interface SesCleanInput {
   completed_work_photo_proven: boolean;
   obligation_revision_count: number;
   routes: SesReviewRoute[];
+  /**
+   * Whether this card's family matrix routes a photo email at all
+   * (`photo_route: "work_order_sender"`). Report-only families declare
+   * `photo_route: "not_applicable"`, and the assembler correctly emits no
+   * PHOTO_EMAIL_DRAFT for them — so demanding one is an unsatisfiable HOLD.
+   * Requirement scope belongs to `ses_family_matrix.ts`, not to this consumer.
+   *
+   * Optional: an absent value means "required", so a producer that has not been
+   * taught this field can only ever be stricter, never accidentally looser.
+   */
+  photo_route_applicable?: boolean;
   type_check_hold: boolean;
   story_unverified: boolean;
   trade_report_submitted: boolean;
@@ -97,23 +108,143 @@ function check(
   return { id, passed, fact };
 }
 
+/**
+ * The route kinds actually drafted on this pack, in send order. Unknown kinds
+ * (a newly sealed route shape) are appended rather than dropped, so a route the
+ * Captain would really send can never be invisible in the copy below.
+ */
+export function sesRouteKindsOnPack(routes: SesReviewRoute[]): string[] {
+  const present = routes.map((route) => String(route.route_kind));
+  const ordered = (SES_ROUTE_ORDER as string[]).filter((kind) =>
+    present.includes(kind)
+  );
+  const extra = present.filter((kind) =>
+    !(SES_ROUTE_ORDER as string[]).includes(kind)
+  );
+  return [...ordered, ...new Set(extra)];
+}
+
+function joinRouteKinds(kinds: string[]): string {
+  const labels = kinds.map((kind) => kind.replaceAll("_", " "));
+  if (labels.length <= 1) return labels[0] || "";
+  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+}
+
+/**
+ * SEND IT copy generated from the real route list. The cockpit used to narrate
+ * "report, photo, and invoice" on every card regardless of what was drafted,
+ * which told the Captain he was sending three emails when the pack held two.
+ */
+export function describeSesSendItPlan(routes: SesReviewRoute[]): string {
+  const kinds = sesRouteKindsOnPack(routes);
+  if (kinds.length === 0) {
+    return "No email route is drafted on this release revision yet, so there is nothing to send.";
+  }
+  const noun = kinds.length === 1 ? "route" : "routes";
+  return `Send the approved ${
+    joinRouteKinds(kinds)
+  } ${noun} (${kinds.length}) for this exact release revision, then write route proofs and closeout.`;
+}
+
+export function requiredSesRouteKinds(
+  family: string,
+  photoRouteApplicable: boolean,
+): SesRouteKind[] {
+  if (family === "assessment_quote") return ["invoice"];
+  return SES_ROUTE_ORDER.filter((kind) =>
+    kind !== "photo" || photoRouteApplicable
+  );
+}
+
+/**
+ * Why APPROVE INVOICE is unavailable, in the operator's terms. The commonest
+ * case by far is the healthy one: the invoice is already authorised, so there is
+ * nothing left to approve and a second approve would commit the money twice.
+ */
+export function approveInvoiceDisabledReason(
+  docket: { xero_binding?: Record<string, any> | null },
+  state: {
+    stale: boolean;
+    xeroAuthorised: boolean;
+    noAdditionalCharge: boolean;
+  },
+): string {
+  const binding = docket.xero_binding || {};
+  const number = String(binding.invoice_number || "").trim();
+  if (state.xeroAuthorised) {
+    return `Invoice already authorised${
+      number ? ` (${number})` : ""
+    }. The money is committed, so there is nothing left to approve — the next step is SEND IT when you say so.`;
+  }
+  if (state.noAdditionalCharge) {
+    return "This card is priced as no additional charge, so no invoice is approved for it.";
+  }
+  if (state.stale) {
+    return "This view is showing an older docket revision. Reload the card, then approve against the current pack.";
+  }
+  if (!binding || !String(binding.status || "").trim()) {
+    return "No Xero DRAFT invoice is bound to this card yet. Mint the draft first, then approve it.";
+  }
+  const status = String(binding.status || "").toUpperCase();
+  if (status !== "DRAFT") {
+    return `The bound Xero invoice is ${status}, not DRAFT, so it is not awaiting approval.`;
+  }
+  return "One or more checks on this card have not passed yet — see the blockers listed above.";
+}
+
+/** Human label for a route kind — "photo email", never "builder email draft". */
+function routeEmailLabel(kind: SesRouteKind): string {
+  return `${String(kind).replaceAll("_", " ")} email`;
+}
+
+/**
+ * The remedy sentence beside a `route_draft_missing` blocker. The FACT is
+ * rendered verbatim from the refusal catalogue and is trustworthy; this text is
+ * the "clear path" the Captain reads next, so it must name the exact email and
+ * the exact reason rather than inventing a generic instruction.
+ */
+function routeDraftRemedy(
+  kind: SesRouteKind,
+  route: SesReviewRoute | undefined,
+): string {
+  const label = routeEmailLabel(kind);
+  if (!route) {
+    return `This docket revision carries no ${label} draft at all. Prepare a new docket revision (prepare_ses_docket_revision) so the ${label} is assembled, then re-check this card.`;
+  }
+  if ((route.attachment_hashes?.length ?? 0) === 0) {
+    return `The ${label} is drafted but has no attachments bound to this docket revision, so there is nothing to send on it. Prepare a new docket revision so the current attendance cycle's files are attached; if the pack was already invoice_bound, re-run the AUTHORISED invoice PDF bind afterwards so the new revision keeps the invoice.`;
+  }
+  if (!route.subject.trim() || !route.body.trim()) {
+    return `The ${label} is missing its ${
+      !route.subject.trim() ? "subject" : "body"
+    } on this docket revision. Prepare a new docket revision so the draft is rebuilt.`;
+  }
+  return `The ${label} is not marked ready on this docket revision. Prepare a new docket revision and re-check this card.`;
+}
+
 function missingRouteRefusals(
   routes: SesReviewRoute[],
   family: string,
+  photoRouteApplicable: boolean,
 ): SesRefusal[] {
   const byKind = new Map(routes.map((route) => [route.route_kind, route]));
   const refusals: SesRefusal[] = [];
-  const requiredRoutes = family === "assessment_quote"
-    ? (["invoice"] as SesRouteKind[])
-    : SES_ROUTE_ORDER;
+  const requiredRoutes = requiredSesRouteKinds(family, photoRouteApplicable);
   for (const kind of requiredRoutes) {
     const route = byKind.get(kind);
     if (!route || !route.ready || !route.subject.trim() || !route.body.trim()) {
       refusals.push(
         sesRefusal(
           "route_draft_missing",
-          `Prepare the current ${kind} email draft and bind it to this docket revision.`,
-          { evidence: { route_kind: kind } },
+          routeDraftRemedy(kind, route),
+          {
+            evidence: {
+              route_kind: kind,
+              route_present: !!route,
+              route_ready: route?.ready === true,
+              attachment_count: route?.attachment_hashes?.length ?? 0,
+            },
+          },
         ),
       );
       continue;
@@ -151,7 +282,11 @@ export function evaluateSesMechanicalClean(
     input.portal_capture_status === "done";
   const physical = input.family === "physical_makesafe" ||
     input.family === "temporary_fencing";
-  const routeRefusals = missingRouteRefusals(input.routes, input.family);
+  const routeRefusals = missingRouteRefusals(
+    input.routes,
+    input.family,
+    input.photo_route_applicable !== false,
+  );
   const checks: SesCleanCheck[] = [
     check(
       "C1",
@@ -347,11 +482,17 @@ export interface SesCockpitView {
       enabled: boolean;
       label: "APPROVE INVOICE";
       plan: string;
+      /** Why the control is unavailable; null when it is enabled. */
+      disabled_reason: string | null;
     };
     send_it: {
       enabled: boolean;
       label: "SEND IT";
       plan: string;
+      /** The route kinds actually drafted on this pack, in send order. */
+      route_kinds: string[];
+      /** How many emails SEND IT will really send. */
+      route_count: number;
     };
     captain_only: boolean;
   };
@@ -449,12 +590,24 @@ export function buildSesCockpitView(
         label: "APPROVE INVOICE",
         plan:
           "Approve the existing Xero DRAFT for this exact obligation revision; authorise only if this approval explicitly includes authorise; then attach the real Xero PDF as a new docket revision.",
+        // A disabled control with no stated reason teaches the operator to
+        // distrust every disabled control. Once the money is committed this
+        // button is CORRECTLY dead — a second approve would be a double charge —
+        // so say that, rather than only greying out.
+        disabled_reason: approveInvoice
+          ? null
+          : approveInvoiceDisabledReason(docket, {
+            stale,
+            xeroAuthorised,
+            noAdditionalCharge,
+          }),
       },
       send_it: {
         enabled: sendIt,
         label: "SEND IT",
-        plan:
-          "Send the approved report, photo, and invoice routes for this exact release revision, then write route proofs and closeout.",
+        plan: describeSesSendItPlan(docket.routes),
+        route_kinds: sesRouteKindsOnPack(docket.routes),
+        route_count: sesRouteKindsOnPack(docket.routes).length,
       },
       captain_only: !verdict.clean,
     },
