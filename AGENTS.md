@@ -778,6 +778,21 @@ and report evidence that is not yet sent must stay in Docs Ready
 (`authorisedAwaitingSend` / ladder v4) — never regress to `trade_report_in`
 after money is committed.
 
+The same shape applies at SEND IT: `approveSesReleaseRevisionAction` looks for a
+human APPROVE INVOICE row against `boundDocket.based_on_revision_id`. After a
+re-prepare that row can be orphaned even though money already authorised.
+`sesReleaseInvoiceApprovalSatisfied` accepts a missing row only when the member
+docket is `stage=invoice_bound` **and** the bound obligation's
+`xero_binding.status` is AUTHORISED (case-insensitive) — AUTHORISED is
+downstream proof that `execute_ses_invoice_revision` already ran under the
+approval gate. Non-AUTHORISED still refuses. Docs Ready signoff, recipients,
+readiness, and the money fence are untouched. Neither read may degrade into that
+business refusal: `sesReleaseInvoiceApprovalReadRefusal` turns a PostgREST fault
+on the approval read, or a fault/absent row on the obligation read, into the
+distinct `invoice_approval_unreadable`, so a read fault never tells an operator
+to re-approve money that is already AUTHORISED. Tests:
+`ses_release_invoice_approval_gate_test.ts`.
+
 ## `spine_missing_lineage` Is Almost Never About Lineage
 
 The blocker fires on `!lineage_id || !job_id || !source_content_hash`

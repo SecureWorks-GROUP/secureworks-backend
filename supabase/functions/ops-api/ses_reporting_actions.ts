@@ -3668,6 +3668,56 @@ export async function prepareSesReleaseRevisionAction(
   };
 }
 
+/**
+ * SEND IT invoice-approval gate for a priced invoice_bound member.
+ *
+ * A human APPROVE INVOICE (includes_authorise) row against the pre-Xero base is
+ * normally required. When that row is missing after a re-prepare/re-bind, an
+ * obligation whose xero_binding.status is already AUTHORISED is downstream
+ * proof that execute_ses_invoice_revision (itself approval-gated) already ran —
+ * a records gap, not a missing decision. Non-AUTHORISED bindings still refuse.
+ * Does not touch Docs Ready signoff, recipients, readiness, or the money fence.
+ */
+export function sesReleaseInvoiceApprovalSatisfied(args: {
+  hasInvoiceApprovalRow: boolean;
+  /** Bound obligation `xero_binding.status` (invoice_bound path only). */
+  obligationXeroBindingStatus?: string | null;
+}): boolean {
+  if (args.hasInvoiceApprovalRow) return true;
+  return String(args.obligationXeroBindingStatus || "").toUpperCase() ===
+    "AUTHORISED";
+}
+
+/**
+ * Both SEND IT invoice-approval reads are business-meaningful, so a PostgREST
+ * fault must never be reported as a missing human decision: an operator told to
+ * press APPROVE INVOICE on an already-AUTHORISED card is being sent to
+ * re-approve money. An approval response with no row is a trustworthy answer
+ * (the bookkeeping gap this gate exists for); an obligation response with no row
+ * is not, because the AUTHORISED pass may only be granted on a read that
+ * actually returned the binding.
+ */
+export function sesReleaseInvoiceApprovalReadRefusal(
+  source: "approval" | "obligation",
+  response: SupabaseResponse<any>,
+): SesRefusal | null {
+  const unreadable = !!response.error ||
+    (source === "obligation" && !response.data);
+  if (!unreadable) return null;
+  const subject = source === "approval"
+    ? "The human APPROVE INVOICE record"
+    : "The bound invoice obligation Xero binding";
+  const detail = response.error?.message ? ` (${response.error.message})` : "";
+  return sesRefusal(
+    "invoice_approval_unreadable",
+    "Retry SEND IT once the invoice approval and obligation records read cleanly. Do not press APPROVE INVOICE again for an invoice that is already AUTHORISED in Xero.",
+    {
+      fact:
+        `${subject} could not be read, so the invoice decision cannot be proven either way.${detail}`,
+    },
+  );
+}
+
 export async function approveSesReleaseRevisionAction(
   client: SesSupabaseClient,
   auth: SesActionAuth,
@@ -3772,7 +3822,41 @@ export async function approveSesReleaseRevisionAction(
         .order("decided_at", { ascending: false })
         .limit(1)
         .maybeSingle();
-      if (invoiceApproval.error || !invoiceApproval.data) {
+      const approvalReadRefusal = sesReleaseInvoiceApprovalReadRefusal(
+        "approval",
+        invoiceApproval,
+      );
+      if (approvalReadRefusal) {
+        throw new SesActionError(409, approvalReadRefusal);
+      }
+      const hasInvoiceApprovalRow = !!invoiceApproval.data;
+      let obligationXeroBindingStatus: string | null = null;
+      // Only consult the money binding when the approval row is absent: an
+      // AUTHORISED obligation proves the approval already ran (and re-prepare
+      // orphaned the pointer). Non-AUTHORISED still refuses without the row.
+      if (!hasInvoiceApprovalRow) {
+        const obligation = await client
+          .from("makesafe_invoice_obligation_revisions")
+          .select("xero_binding")
+          .eq("id", boundDocket.invoice_obligation_revision_id)
+          .maybeSingle();
+        const obligationReadRefusal = sesReleaseInvoiceApprovalReadRefusal(
+          "obligation",
+          obligation,
+        );
+        if (obligationReadRefusal) {
+          throw new SesActionError(409, obligationReadRefusal);
+        }
+        obligationXeroBindingStatus = String(
+          object(obligation.data?.xero_binding).status || "",
+        ) || null;
+      }
+      if (
+        !sesReleaseInvoiceApprovalSatisfied({
+          hasInvoiceApprovalRow,
+          obligationXeroBindingStatus,
+        })
+      ) {
         throw new SesActionError(
           409,
           sesRefusal(
