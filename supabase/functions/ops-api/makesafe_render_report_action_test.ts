@@ -15,8 +15,8 @@ import {
 import {
   canonicalCurrentWikiReportHashPayload,
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
   MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
+  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
   renderMakesafeReportPdf,
 } from "./makesafe_report_render.ts";
 import { canonicalSesJson, sesSha256Bytes } from "./ses_docket_envelope.ts";
@@ -185,7 +185,7 @@ function bindClient(
     from(table: string) {
       let mutation: Record<string, unknown> | null = null;
       let responseError: Record<string, unknown> | null = null;
-      let filters: Record<string, unknown> = {};
+      const filters: Record<string, unknown> = {};
       const query: any = {
         select: () => query,
         eq: (column: string, value: unknown) => {
@@ -349,11 +349,15 @@ Deno.test("byte-bound current-cycle curated report bind writes stable independen
   );
   assertEquals(
     result,
-    await expectedSuccessShape(bytes, body.report_job as Record<string, unknown>, {
-      skipped: false,
-      writes: 2,
-      documentVersion: 2,
-    }),
+    await expectedSuccessShape(
+      bytes,
+      body.report_job as Record<string, unknown>,
+      {
+        skipped: false,
+        writes: 2,
+        documentVersion: 2,
+      },
+    ),
   );
   assertEquals(mutations.map((item) => item.table), [
     "job_events",
