@@ -33,6 +33,36 @@ export type SesFamilyId =
   | "repair"
   | "restoration";
 
+/**
+ * The families that assemble on the physical labour/materials pack path: every
+ * family whose AJS/AJBR row prices on `ajs_labour_materials`.
+ * `isSesPhysicalShapedFamily` is the ONE predicate every consumer uses, so the
+ * evidence side of a carve-out (the AJS existing-fence star pickets, derived in
+ * `ses_assembler_input_adapter.ts`) can never be narrower than the pricing side
+ * that consumes it — a narrower evidence gate under-bills the builder silently,
+ * with no line and no blocker.
+ * `temporary_fencing` is deliberately NOT here: it is a physical family with
+ * its own hire/fence-labour basis, and the picket carve-out exists precisely to
+ * separate a propped EXISTING fence from a temporary-fence kit.
+ * `job_type` is not the discriminator — temporary fencing shares
+ * `job_type: "physical_makesafe"` with this set.
+ */
+export const SES_PHYSICAL_SHAPED_FAMILIES = [
+  "physical_makesafe",
+  "repair",
+  "restoration",
+] as const;
+export type SesPhysicalShapedFamily =
+  (typeof SES_PHYSICAL_SHAPED_FAMILIES)[number];
+
+export function isSesPhysicalShapedFamily(
+  family: unknown,
+): family is SesPhysicalShapedFamily {
+  return (SES_PHYSICAL_SHAPED_FAMILIES as readonly string[]).includes(
+    typeof family === "string" ? family : "",
+  );
+}
+
 export type SesManifestJobType =
   | "physical_makesafe"
   | "roof_report"

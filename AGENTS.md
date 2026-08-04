@@ -985,11 +985,14 @@ The current floors, both from the 2026-08-01 rulings
   `observed_present` and the measured detail, so the PO is visible on the card
   without ever being a gate. (The superseded "of course every card needs a po"
   answer, which made it REQUIRED, was about work orders.)
-- `builder_wo_doc` is REQUIRED at every stage of the five SEALED families,
-  `completed` and `archive` included — nothing to invoice against without a
-  work order. It stays a question only at `cancelled` (under the open
-  `cancelled_floor`) and throughout the two unsealed recipes, which this ruling
-  does not reach; sealing a recipe by code change is what rule 1 forbids.
+- `builder_wo_doc` is REQUIRED at every non-cancelled stage of all SEVEN
+  families, `completed` and `archive` included — nothing to invoice against
+  without a work order. It stays a question only at `cancelled` (under the open
+  `cancelled_floor`). Repair and restoration were the two unsealed recipes this
+  ruling did not reach; the Captain's own 2026-08-02 ruling sealed them onto the
+  physical-shaped table (`Q_REPAIR_RECIPE` / `Q_RESTORATION_RECIPE` now carry a
+  `resolution`), which is how a recipe is sealed — by a recorded ruling, never
+  by a code edit alone.
 - SWMS is deliberately NOT encoded here. "Required only for MLB make-safes"
   turns on builder identity, which a family x stage table never sees; the
   builder-aware rule is sealed in `ses_family_matrix.ts` (MLB `always`, AJS

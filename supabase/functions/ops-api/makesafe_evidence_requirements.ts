@@ -334,18 +334,15 @@ export const Q_OWN_DOCUMENT_ROOF_REPORT_IN: SesCaptainQuestion = {
 };
 
 /**
- * The draft text still names PO because it predates the 2026-08-01 rulings; it
- * is kept verbatim. The PO column is no longer part of what this question seals
- * — `po_floor` settled it for every family, as OPTIONAL — so this question now
- * covers the other six columns only, `builder_wo_doc` included: an unsealed
- * recipe is not a sealed family, and the work-order ruling promoted only the
- * cells the draft left open under `terminal_evidence`.
- */
-/**
  * RESOLVED 2026-08-02 by the Docs Ready / family-recipe ruling. Repair matches
  * the physical labour/materials evidence path while keeping family identity.
  * The pack matrix row is the executable seal; this ruler entry records the
  * per-stage evidence table that goes with it.
+ *
+ * The draft question text still names PO because it predates the 2026-08-01
+ * rulings; it is kept verbatim. The PO column was already settled independently
+ * of this seal — `po_floor` made it OPTIONAL for every family — so the seal
+ * below governs the other six columns.
  */
 export const Q_REPAIR_RECIPE: SesCaptainQuestion = {
   id: "repair_recipe",
@@ -385,8 +382,7 @@ export const Q_RESTORATION_RECIPE: SesCaptainQuestion = {
     ruled_on: "2026-08-02",
     ruling:
       "exactly the same as any other job, so it is a different family type",
-    effect:
-      "Restoration takes the physical-shaped evidence table " +
+    effect: "Restoration takes the physical-shaped evidence table " +
       "(`physicalShapedFamily`) with its own family identity. Same WO / " +
       "report / photo / SWMS / invoice floors as physical make-safe; pack " +
       "recipe is the sealed physical labour/materials row in " +
@@ -405,27 +401,11 @@ export const Q_CANCELLED_FLOOR: SesCaptainQuestion = {
 };
 
 /**
- * The Captain questions the ruler has answers for. Provenance only — a resolved
- * question is unreachable from every cell (see `q()`), so it can never reappear
- * in a reading's `open_questions`.
+ * Every question the draft raised, open or ruled, in draft §6 order. This is
+ * the ONE list: a question self-declares its state through `resolution`, so the
+ * open and resolved views below are derived rather than restated. A question
+ * named here is always resolvable by `sesCaptainQuestion`.
  */
-export const SES_RESOLVED_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
-  Q_PO_FLOOR,
-  Q_REPAIR_RECIPE,
-  Q_RESTORATION_RECIPE,
-];
-
-/** The still-open Captain questions, in draft §6 order. */
-export const SES_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
-  Q_GHL_EQUIVALENCE,
-  Q_REPORT_READY_AUTHORITY,
-  Q_TERMINAL_EVIDENCE,
-  Q_REPORT_ONLY_SWMS,
-  Q_OWN_DOCUMENT_ROOF_REPORT_IN,
-  Q_CANCELLED_FLOOR,
-];
-
-/** Every question the draft raised, open or ruled, in draft §6 order. */
 export const SES_ALL_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
   Q_PO_FLOOR,
   Q_GHL_EQUIVALENCE,
@@ -437,6 +417,18 @@ export const SES_ALL_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] = [
   Q_RESTORATION_RECIPE,
   Q_CANCELLED_FLOOR,
 ];
+
+/**
+ * The Captain questions the ruler has answers for. Provenance only — a resolved
+ * question is unreachable from every cell (see `q()`), so it can never reappear
+ * in a reading's `open_questions`.
+ */
+export const SES_RESOLVED_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] =
+  SES_ALL_CAPTAIN_QUESTIONS.filter((question) => question.resolution);
+
+/** The still-open Captain questions, in draft §6 order. */
+export const SES_CAPTAIN_QUESTIONS: readonly SesCaptainQuestion[] =
+  SES_ALL_CAPTAIN_QUESTIONS.filter((question) => !question.resolution);
 
 const QUESTIONS_BY_ID = new Map<SesCaptainQuestionId, SesCaptainQuestion>(
   SES_ALL_CAPTAIN_QUESTIONS.map((question) => [question.id, question]),

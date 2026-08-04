@@ -15,11 +15,13 @@ import {
   SES_INPUT_CONTRACT_VERSION,
 } from "./ses_docket_envelope.ts";
 import {
+  isSesPhysicalShapedFamily,
   MLB_SOUTH_WEST_SUBURBS,
   resolveSesFamilyMatrixRow,
   SES_EMERGENCY_SERVICE_FAMILIES,
   SES_FAMILY_MATRIX,
   SES_FAMILY_MATRIX_VERSION,
+  SES_PHYSICAL_SHAPED_FAMILIES,
   type SesFamilyMatrixRow,
 } from "./ses_family_matrix.ts";
 import {
@@ -30,6 +32,7 @@ import {
   prepare_ses_docket_revision as prepareSesDocketRevision,
   SES_ASSESSMENT_RECIPE_VERSION,
   SES_DOCKET_REVIEW_SPEC_VERSION,
+  SES_PHYSICAL_FAMILY_RECIPE_VERSION,
   type SesPersistPayload,
   type SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
@@ -660,7 +663,10 @@ Deno.test("restoration and repair select the sealed physical labour/materials re
     );
     assertEquals(ready.envelope.v2.classification.recipe_selected, true);
     assertEquals(portalCaptureCalls, 0, family);
-    assert(!blockerCodes(ready).includes("restoration_recipe_unsealed"), family);
+    assert(
+      !blockerCodes(ready).includes("restoration_recipe_unsealed"),
+      family,
+    );
     assert(!blockerCodes(ready).includes("repair_recipe_unsealed"), family);
 
     // Missing trade report/photos → physical evidence blockers, not unsealed.
@@ -676,6 +682,51 @@ Deno.test("restoration and repair select the sealed physical labour/materials re
     assertEquals(thin.envelope.v2.classification.recipe_selected, true, family);
     assert(!blockerCodes(thin).includes("restoration_recipe_unsealed"), family);
     assert(!blockerCodes(thin).includes("repair_recipe_unsealed"), family);
+
+    // A sealed physical-shaped docket carries the recipe version that produced
+    // it, the same way an assessment docket carries its own.
+    assertEquals(
+      ready.envelope.v2.classification.physical_family_recipe_version,
+      SES_PHYSICAL_FAMILY_RECIPE_VERSION,
+      family,
+    );
+    assertEquals(
+      ready.envelope.v2.classification.assessment_outbound_recipe_version,
+      undefined,
+      family,
+    );
+  }
+});
+
+// One predicate owns "assembles on the physical labour/materials pack path", so
+// the picket EVIDENCE gate in the adapter can never be narrower than the PRICING
+// gate here. Pin it against the matrix rows the pricing branch actually reads.
+Deno.test("the physical-shaped family set is exactly the AJS labour/materials matrix rows", () => {
+  const fromMatrix = new Set(
+    SES_FAMILY_MATRIX
+      .filter((row) =>
+        (row.builder_key === "AJS" || row.builder_key === "AJBR") &&
+        row.invoice_basis === "ajs_labour_materials"
+      )
+      .map((row) => row.family),
+  );
+  assertEquals(
+    [...fromMatrix].sort(),
+    [...SES_PHYSICAL_SHAPED_FAMILIES].sort(),
+  );
+  for (const family of SES_PHYSICAL_SHAPED_FAMILIES) {
+    assert(isSesPhysicalShapedFamily(family), family);
+  }
+  for (
+    const family of [
+      "temporary_fencing",
+      "ordinary_roof_portal",
+      "own_template_roof",
+      "assessment_quote",
+      "unknown",
+    ] as const
+  ) {
+    assert(!isSesPhysicalShapedFamily(family), family);
   }
 });
 
@@ -834,6 +885,70 @@ Deno.test("AJS 70062 roof wording assembles the physical make-safe pack", async 
     "PHOTO_EMAIL_DRAFT",
     "REPORT_EMAIL_DRAFT",
   ]);
+});
+
+// The two-email route drops INVOICE_EMAIL_DRAFT entirely, so the invoice-bundle
+// obligation has to be satisfied from the COMBINED report draft. Without that,
+// `draft_invoice_bundle_email` stays blocked at its `recovery-not-run` default
+// and every AJS/AJBR card is permanently un-Docs-Ready.
+Deno.test("the AJS/AJBR two-email shape reaches pre-Xero Docs Ready without a third draft", async () => {
+  for (const builderKey of ["AJS", "AJBR"] as const) {
+    const row = SES_FAMILY_MATRIX.find((candidate) =>
+      candidate.builder_key === builderKey &&
+      candidate.family === "physical_makesafe"
+    )!;
+    const input = fixtureInput(row);
+    const result = (await prepareSesDocketRevision(
+      request(input.identity.job_id),
+      dependencies(input),
+    )).results[0];
+
+    assertEquals(result.state, "ready", builderKey);
+    assertEquals(result.envelope.pre_xero_docs_ready, true, builderKey);
+    assertEquals(
+      result.blockers.map((item) => item.reason_code),
+      [],
+      builderKey,
+    );
+    assertEquals(Object.keys(result.email_drafts).sort(), [
+      "PHOTO_EMAIL_DRAFT",
+      "REPORT_EMAIL_DRAFT",
+    ], builderKey);
+    assertEquals(
+      result.email_drafts.INVOICE_EMAIL_DRAFT,
+      undefined,
+      builderKey,
+    );
+    const items = result.envelope.v2.items;
+    assertEquals(items.draft_builder_report_email.state, "ready", builderKey);
+    assertEquals(items.draft_photo_evidence_email.state, "ready", builderKey);
+    assertEquals(items.draft_invoice_bundle_email.state, "ready", builderKey);
+    // The invoice-bundle obligation must point at the combined draft it was
+    // actually satisfied from, never at a file the route never wrote.
+    assertEquals(
+      object(items.draft_invoice_bundle_email).evidence,
+      "file:DRAFTS/REPORT_EMAIL_DRAFT.txt",
+      builderKey,
+    );
+  }
+});
+
+Deno.test("MLB keeps the three-email split and its own invoice-bundle draft", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe" &&
+    candidate.routing_rule === "mlb-perth-routing"
+  )!;
+  const result = (await prepareSesDocketRevision(
+    request(fixtureInput(row).identity.job_id),
+    dependencies(fixtureInput(row)),
+  )).results[0];
+  assertEquals(result.state, "ready");
+  assert(result.email_drafts.INVOICE_EMAIL_DRAFT);
+  assertEquals(
+    object(result.envelope.v2.items.draft_invoice_bundle_email).evidence,
+    "file:DRAFTS/INVOICE_EMAIL_DRAFT.txt",
+  );
 });
 
 Deno.test("AJS report-only input is rejected instead of silently rerouted", async () => {
@@ -1722,6 +1837,80 @@ Deno.test("Bertram AJS existing-fence pickets price through the sealed docket pr
   assertEquals(proposal.subtotal_ex_gst, 750);
   assertEquals(proposal.gst, 75);
   assertEquals(proposal.total_inc_gst, 825);
+});
+
+// The invoice lines are copied VERBATIM into the Xero DRAFT, so a sealed repair
+// or restoration card must not tell the builder it was billed for a make-safe.
+Deno.test("sealed repair and restoration invoice lines name their own family", async () => {
+  for (
+    const [family, expected] of [
+      ["repair", "repair attendance"],
+      ["restoration", "restoration attendance"],
+    ] as const
+  ) {
+    const result = await labourProposal("MLB", family, {
+      trades: 2,
+      hours_per_trade: 3,
+      rate_ex_gst: 85,
+      materials: [],
+    });
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assert(proposal, `expected a ${family} invoice proposal`);
+    const description = String(
+      (proposal.line_items as Array<Record<string, unknown>>)[0].description,
+    );
+    assertStringIncludes(description, expected);
+    assert(
+      !description.toLowerCase().includes("make-safe"),
+      `${family} invoice line must not describe the work as a make-safe: ${description}`,
+    );
+  }
+});
+
+// The AJS existing-fence carve-out follows the PACK PATH, not one family name.
+// Repair and restoration assemble on the same physical labour/materials row, so
+// omitting the picket line for them would silently under-bill the builder.
+Deno.test("AJS/AJBR repair and restoration price the existing-fence pickets like any physical card", async () => {
+  for (const builderKey of ["AJS", "AJBR"] as const) {
+    for (const family of ["repair", "restoration"] as const) {
+      const label = `${builderKey}/${family}`;
+      const result = await labourProposal(builderKey, family, {
+        trades: 2,
+        hours_per_trade: 3,
+        existing_fence_star_picket_count: 20,
+        existing_fence_star_picket_evidence: {
+          source: "job_service_reports.checklist_json.materials_used",
+          report_id: "fixture-trade-report",
+        },
+      });
+      assertEquals(
+        result.blockers.map((item) => item.reason_code),
+        [],
+        label,
+      );
+      const proposal = result.invoice_proposal as Record<string, unknown>;
+      const lines = proposal.line_items as Array<Record<string, unknown>>;
+      assertEquals(lines.length, 2, label);
+      assertStringIncludes(String(lines[1].description), "Star pickets");
+      assertEquals(lines[1].quantity, 20, label);
+      assertEquals(lines[1].unit_price_ex_gst, 13.5, label);
+      assertEquals(proposal.subtotal_ex_gst, 750, label);
+
+      // The refusal side of the carve-out must reach them too.
+      const refused = await labourProposal(builderKey, family, {
+        trades: 2,
+        hours_per_trade: 3,
+        existing_fence_star_picket_refusal: "genuine_temporary_fence_signal",
+      });
+      assertEquals(refused.invoice_proposal, null, label);
+      assertStringIncludes(
+        refused.blockers.find((item) =>
+          item.reason_code === "pricing_evidence_missing"
+        )!.reason,
+        "temporary-fence kit",
+      );
+    }
+  }
 });
 
 Deno.test("a genuine AJS temporary-fence kit stays hard-refused", async () => {
@@ -2781,7 +2970,3 @@ Deno.test("five-minute clock stops at committed ready/blocked and reports max/P9
     ),
   );
 });
-
-
-
-

@@ -20,6 +20,7 @@ import {
 } from "./ses_docket_envelope.ts";
 import {
   canonicalSesFamilyFromCard,
+  isSesPhysicalShapedFamily,
   resolveSesFamilyMatrixRow,
   SES_FAMILY_MATRIX_VERSION,
   type SesBuilderKey,
@@ -1036,7 +1037,7 @@ function explicitHoursAndMaterials(
   if (
     (classification.builder === "AJS" ||
       classification.builder === "AJBR") &&
-    classification.family === "physical_makesafe"
+    isSesPhysicalShapedFamily(classification.family)
   ) {
     const panelCount = Number(facts.panel_count);
     const baseCount = Number(facts.base_count);
