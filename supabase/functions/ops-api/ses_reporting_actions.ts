@@ -2018,6 +2018,343 @@ const SES_DRAFT_BINDABLE_REVISION_STATES = [
   "create_executed",
 ];
 
+const SES_AUTHORISED_OBLIGATION_STATES = ["authorised", "released"] as const;
+
+function moneyTotalsMatch(a: unknown, b: unknown): boolean {
+  const left = Number(a);
+  const right = Number(b);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+  return Math.round(left * 100) === Math.round(right * 100);
+}
+
+/**
+ * Shared AUTHORISED PDF bind: fetch the real Xero PDF, store it once, and
+ * commit an invoice_bound docket from the reviewed pre_xero base. Idempotent
+ * via content-addressed docket id + storage "already exists" tolerance + the
+ * SQL commit function's same-id return path.
+ */
+export async function bindAuthorisedInvoicePdfToDocket(
+  client: SesSupabaseClient,
+  args: {
+    org_id: string;
+    job_id: string;
+    invoice_obligation_revision_id: string;
+    based_on_revision_id: string;
+    actor: string;
+    invoice: SesXeroInvoiceResult;
+  },
+  gateway: Pick<SesXeroGateway, "fetchAuthorisedPdf">,
+): Promise<{
+  state: "authorised_invoice_bound";
+  invoice: SesXeroInvoiceResult;
+  docket_revision: Record<string, any>;
+  pdf_content_hash: string;
+  recovery: boolean;
+}> {
+  if (String(args.invoice.status || "").toUpperCase() !== "AUTHORISED") {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "xero_not_authorised",
+        "Authorise the exact bound invoice under the approved money action, then resume.",
+      ),
+    );
+  }
+  const pdf = await gateway.fetchAuthorisedPdf(args.invoice.xero_invoice_id);
+  const pdfHash = await sesSha256(
+    Array.from(pdf),
+    "SecureWorks:ses-docket-artifact-bytes:v1\n",
+  );
+  const docketHash = await sesSha256({
+    based_on_revision_id: args.based_on_revision_id,
+    invoice_obligation_revision_id: args.invoice_obligation_revision_id,
+    xero_invoice_id: args.invoice.xero_invoice_id,
+    pdf_content_hash: pdfHash,
+  }, "SecureWorks:ses-invoice-bound-docket:v1\n");
+  const boundDocketId = stableUuidFromSha256(docketHash);
+  const storagePath =
+    `${args.job_id}/${boundDocketId}/ARTIFACTS/Xero Invoice - ${args.invoice.invoice_number}.pdf`;
+  const upload = await client.storage.from("makesafe-docket-artifacts").upload(
+    storagePath,
+    pdf,
+    { contentType: "application/pdf", upsert: false },
+  );
+  if (
+    upload.error && !String(upload.error.message || "").toLowerCase().includes(
+      "already",
+    )
+  ) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The real AUTHORISED Xero PDF could not be stored (${
+        upload.error.message || "unknown storage error"
+      }).`,
+    });
+  }
+  const bound = await client.rpc("commit_ses_invoice_bound_docket_v1", {
+    p_binding: {
+      id: boundDocketId,
+      job_id: args.job_id,
+      based_on_revision_id: args.based_on_revision_id,
+      invoice_obligation_revision_id: args.invoice_obligation_revision_id,
+      output_content_hash: docketHash,
+      xero_binding: {
+        xero_invoice_id: args.invoice.xero_invoice_id,
+        invoice_number: args.invoice.invoice_number,
+        status: args.invoice.status,
+        total: Number.isFinite(Number(args.invoice.total))
+          ? Number(args.invoice.total)
+          : null,
+        bound_at: new Date().toISOString(),
+        pdf_content_hash: pdfHash,
+      },
+      created_by: args.actor,
+    },
+    p_pdf_artifact: {
+      role: "xero_invoice_pdf",
+      object_key: `makesafe-docket-artifacts/${storagePath}`,
+      content_hash: pdfHash,
+      size_bytes: pdf.byteLength,
+      metadata: {
+        invoice_number: args.invoice.invoice_number,
+        xero_invoice_id: args.invoice.xero_invoice_id,
+      },
+    },
+  });
+  const boundDocket = requireValue(
+    bound,
+    "The real AUTHORISED Xero PDF could not be bound to a new docket revision.",
+  );
+  requireValue(
+    await client.rpc("record_ses_docket_review_state_v1", {
+      p_event: {
+        docket_revision_id: boundDocket.id,
+        event_kind: "prepared",
+        expected_output_content_hash: boundDocket.output_content_hash ||
+          docketHash,
+        actor_identity: args.actor,
+        reason:
+          "The AUTHORISED Xero PDF changed the exact pack bytes and requires a fresh Captain tick.",
+      },
+    }),
+    "The invoice-bound pack could not be queued for a fresh Docs Ready review.",
+  );
+  return {
+    state: "authorised_invoice_bound",
+    invoice: args.invoice,
+    docket_revision: boundDocket,
+    pdf_content_hash: pdfHash,
+    recovery: false,
+  };
+}
+
+/**
+ * Narrow recovery: the human already authorised money, but a later docket
+ * re-prepare (or a half-finished execute) left the current pre_xero docket
+ * without the Xero PDF bind. Re-bind the exact same AUTHORISED invoice to the
+ * current docket without demanding a second APPROVE INVOICE.
+ *
+ * Scoped only to already-authorised obligation revisions (or an obligation
+ * whose stored xero_binding is already AUTHORISED). Never mints, never
+ * re-authorises, never voids, never sends.
+ */
+export async function recoverAuthorisedInvoicePdfBind(
+  client: SesSupabaseClient,
+  args: {
+    org_id: string;
+    job_id: string;
+    invoice_obligation_revision_id: string;
+    actor: string;
+  },
+  gateway: Pick<SesXeroGateway, "fetchAuthorisedPdf" | "reconcileAuthorise">,
+): Promise<{
+  state: "authorised_invoice_bound" | "authorised_invoice_already_bound";
+  invoice: SesXeroInvoiceResult;
+  docket_revision: Record<string, any>;
+  pdf_content_hash: string | null;
+  recovery: true;
+  invoice_create_dispatched: false;
+  invoice_authorise_dispatched: false;
+  send_dispatched: false;
+}> {
+  const revision = requireValue(
+    await client.from("makesafe_invoice_obligation_revisions").select("*")
+      .eq("id", args.invoice_obligation_revision_id)
+      .eq("job_id", args.job_id).maybeSingle(),
+    "The authorised invoice obligation revision no longer exists.",
+  );
+  const binding = object(revision.xero_binding);
+  const boundInvoiceId = String(binding.xero_invoice_id || "").trim();
+  const boundInvoiceNumber = String(binding.invoice_number || "").trim();
+  const boundStatus = String(binding.status || "").toUpperCase();
+  const obligationAlreadyAuthorised =
+    (SES_AUTHORISED_OBLIGATION_STATES as readonly string[]).includes(
+      String(revision.state || ""),
+    ) || boundStatus === "AUTHORISED";
+  if (!obligationAlreadyAuthorised) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "stale_review",
+        "Review the newest docket revision and record a fresh APPROVE INVOICE decision.",
+        {
+          fact:
+            "Authorised-PDF recovery only applies when the obligation is already authorised; this revision is not.",
+        },
+      ),
+    );
+  }
+  if (!boundInvoiceId || !boundInvoiceNumber) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        "The authorised obligation has no exact Xero invoice identity to re-bind; refuse rather than guess.",
+    });
+  }
+
+  const liveRows = await gateway.reconcileAuthorise(boundInvoiceId);
+  if (liveRows.length !== 1) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "xero_outcome_unknown",
+        "Reconcile the exact bound invoice in Xero before recovering its PDF bind.",
+        {
+          fact:
+            "Authorised-PDF recovery could not prove a single live Xero invoice for the stored identity.",
+        },
+      ),
+    );
+  }
+  const live = liveRows[0];
+  const liveStatus = String(live.status || "").toUpperCase();
+  const liveNumber = String(live.invoice_number || "").trim();
+  const liveId = String(live.xero_invoice_id || "").trim();
+  if (
+    liveStatus !== "AUTHORISED" ||
+    liveId !== boundInvoiceId ||
+    liveNumber !== boundInvoiceNumber
+  ) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        `Authorised-PDF recovery refused: stored binding ${boundInvoiceNumber}/${boundInvoiceId} does not match live Xero ${liveNumber}/${liveId} (${liveStatus}). Do not mint or re-authorise.`,
+    });
+  }
+  const boundTotal = Number(binding.total);
+  if (Number.isFinite(boundTotal) && !moneyTotalsMatch(boundTotal, live.total)) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        `Authorised-PDF recovery refused: stored total ${boundTotal} does not match live Xero total ${live.total} for ${boundInvoiceNumber}. Do not mint or re-authorise.`,
+    });
+  }
+
+  const authorisedInvoice: SesXeroInvoiceResult = {
+    xero_invoice_id: liveId,
+    invoice_number: liveNumber,
+    status: "AUTHORISED",
+    reference: String(live.reference || ""),
+    total: Number.isFinite(Number(live.total))
+      ? Number(live.total)
+      : (Number.isFinite(boundTotal) ? boundTotal : 0),
+  };
+
+  const cockpit = await loadSesCockpitDocket(client, args.job_id);
+  if (cockpit.invoice_obligation_revision_id &&
+    cockpit.invoice_obligation_revision_id !== revision.id
+  ) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        "The current docket is bound to a different invoice obligation revision; refuse rather than re-bind the wrong money.",
+    });
+  }
+
+  // Current docket already carries this AUTHORISED PDF — pure idempotent hit.
+  const currentDocketResponse = await client.from(
+    "makesafe_docket_revisions_current",
+  ).select("*").eq("job_id", args.job_id).maybeSingle();
+  const currentDocket = requireValue(
+    currentDocketResponse,
+    "No current SES docket revision exists for this job.",
+  );
+  const currentXero = object(currentDocket.xero_binding);
+  if (
+    currentDocket.stage === "invoice_bound" &&
+    String(currentXero.xero_invoice_id || "") === authorisedInvoice.xero_invoice_id &&
+    String(currentXero.invoice_number || "") === authorisedInvoice.invoice_number &&
+    String(currentXero.status || "").toUpperCase() === "AUTHORISED"
+  ) {
+    const artifactsResponse = await client.from("makesafe_docket_artifacts")
+      .select("role,content_hash,metadata")
+      .eq("revision_id", currentDocket.id)
+      .eq("role", "xero_invoice_pdf");
+    if (artifactsResponse.error) {
+      throw new SesActionError(503, {
+        state: "refused",
+        fact: `The current docket invoice PDF could not be read (${
+          artifactsResponse.error.message || "unknown database error"
+        }).`,
+      });
+    }
+    const pdfs = artifactsResponse.data || [];
+    const matchingPdf = pdfs.find((artifact: any) =>
+      object(artifact.metadata).xero_invoice_id ===
+        authorisedInvoice.xero_invoice_id &&
+      object(artifact.metadata).invoice_number ===
+        authorisedInvoice.invoice_number
+    );
+    if (matchingPdf) {
+      return {
+        state: "authorised_invoice_already_bound",
+        invoice: authorisedInvoice,
+        docket_revision: currentDocket,
+        pdf_content_hash: matchingPdf.content_hash
+          ? String(matchingPdf.content_hash)
+          : null,
+        recovery: true,
+        invoice_create_dispatched: false,
+        invoice_authorise_dispatched: false,
+        send_dispatched: false,
+      };
+    }
+  }
+
+  if (currentDocket.stage !== "pre_xero") {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        `Authorised-PDF recovery needs a pre_xero current docket to bind from; current stage is ${
+          currentDocket.stage || "unknown"
+        }.`,
+    });
+  }
+
+  // Do not invent a SES external token or re-mint money state. The original
+  // authorise path already wrote the Xero mirror; recovery only rebinds PDF.
+
+  const bound = await bindAuthorisedInvoicePdfToDocket(
+    client,
+    {
+      org_id: args.org_id,
+      job_id: args.job_id,
+      invoice_obligation_revision_id: revision.id,
+      based_on_revision_id: currentDocket.id,
+      actor: args.actor,
+      invoice: authorisedInvoice,
+    },
+    gateway,
+  );
+  return {
+    ...bound,
+    recovery: true,
+    invoice_create_dispatched: false,
+    invoice_authorise_dispatched: false,
+    send_dispatched: false,
+  };
+}
+
 /**
  * Idempotent draft binding: the local money mirror plus the revision's
  * xero_binding are written together so a re-mint that finds its own DRAFT can
@@ -2081,6 +2418,19 @@ export async function executeSesInvoiceRevisionAction(
       .eq("job_id", args.job_id).maybeSingle(),
     "The approved invoice obligation revision no longer exists.",
   );
+  // Already-authorised recovery: the human decision happened; only the docket
+  // PDF pointer was lost (typically a re-prepare after approve). Bind the same
+  // AUTHORISED invoice PDF to the current docket without re-approval. Never
+  // mint, re-authorise, void, or send from this branch.
+  const recoveryBinding = object(revision.xero_binding);
+  const recoveryEligible =
+    (SES_AUTHORISED_OBLIGATION_STATES as readonly string[]).includes(
+      String(revision.state || ""),
+    ) ||
+    String(recoveryBinding.status || "").toUpperCase() === "AUTHORISED";
+  if (recoveryEligible && String(recoveryBinding.xero_invoice_id || "").trim()) {
+    return await recoverAuthorisedInvoicePdfBind(client, args, gateway);
+  }
   if (revision.pricing_disposition === "no_additional_charge") {
     throw new SesActionError(409, {
       state: "refused",
@@ -2319,90 +2669,22 @@ export async function executeSesInvoiceRevisionAction(
     external_token: createEffect.external_token,
     invoice: authorisedInvoice,
   });
-  const pdf = await gateway.fetchAuthorisedPdf(
-    authorisedInvoice.xero_invoice_id,
-  );
-  const pdfHash = await sesSha256(
-    Array.from(pdf),
-    "SecureWorks:ses-docket-artifact-bytes:v1\n",
-  );
-  const docketHash = await sesSha256({
-    based_on_revision_id: cockpit.docket_revision_id,
-    invoice_obligation_revision_id: revision.id,
-    xero_invoice_id: authorisedInvoice.xero_invoice_id,
-    pdf_content_hash: pdfHash,
-  }, "SecureWorks:ses-invoice-bound-docket:v1\n");
-  const boundDocketId = stableUuidFromSha256(docketHash);
-  const storagePath =
-    `${args.job_id}/${boundDocketId}/ARTIFACTS/Xero Invoice - ${authorisedInvoice.invoice_number}.pdf`;
-  const upload = await client.storage.from("makesafe-docket-artifacts").upload(
-    storagePath,
-    pdf,
-    { contentType: "application/pdf", upsert: false },
-  );
-  if (
-    upload.error && !String(upload.error.message || "").toLowerCase().includes(
-      "already",
-    )
-  ) {
-    throw new SesActionError(503, {
-      state: "refused",
-      fact: `The real AUTHORISED Xero PDF could not be stored (${
-        upload.error.message || "unknown storage error"
-      }).`,
-    });
-  }
-  const bound = await client.rpc("commit_ses_invoice_bound_docket_v1", {
-    p_binding: {
-      id: boundDocketId,
+  const bound = await bindAuthorisedInvoicePdfToDocket(
+    client,
+    {
+      org_id: args.org_id,
       job_id: args.job_id,
-      based_on_revision_id: cockpit.docket_revision_id,
       invoice_obligation_revision_id: revision.id,
-      output_content_hash: docketHash,
-      xero_binding: {
-        xero_invoice_id: authorisedInvoice.xero_invoice_id,
-        invoice_number: authorisedInvoice.invoice_number,
-        status: authorisedInvoice.status,
-        total: Number.isFinite(Number(authorisedInvoice.total))
-          ? Number(authorisedInvoice.total)
-          : null,
-        bound_at: new Date().toISOString(),
-      },
-      created_by: args.actor,
+      based_on_revision_id: cockpit.docket_revision_id,
+      actor: args.actor,
+      invoice: authorisedInvoice,
     },
-    p_pdf_artifact: {
-      role: "xero_invoice_pdf",
-      object_key: `makesafe-docket-artifacts/${storagePath}`,
-      content_hash: pdfHash,
-      size_bytes: pdf.byteLength,
-      metadata: {
-        invoice_number: authorisedInvoice.invoice_number,
-        xero_invoice_id: authorisedInvoice.xero_invoice_id,
-      },
-    },
-  });
-  const boundDocket = requireValue(
-    bound,
-    "The real AUTHORISED Xero PDF could not be bound to a new docket revision.",
-  );
-  requireValue(
-    await client.rpc("record_ses_docket_review_state_v1", {
-      p_event: {
-        docket_revision_id: boundDocket.id,
-        event_kind: "prepared",
-        expected_output_content_hash: boundDocket.output_content_hash ||
-          docketHash,
-        actor_identity: args.actor,
-        reason:
-          "The AUTHORISED Xero PDF changed the exact pack bytes and requires a fresh Captain tick.",
-      },
-    }),
-    "The invoice-bound pack could not be queued for a fresh Docs Ready review.",
+    gateway,
   );
   return {
     state: "authorised_invoice_bound",
     invoice: authorisedInvoice,
-    docket_revision: boundDocket,
+    docket_revision: bound.docket_revision,
     invoice_create_dispatched: created.dispatched,
     invoice_authorise_dispatched: authorised.dispatched,
     send_dispatched: false,

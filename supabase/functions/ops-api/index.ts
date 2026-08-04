@@ -13958,6 +13958,13 @@ export interface MakesafeSurfacing {
   gateSoftenSent: boolean
   readyForReview: boolean
   resumeNotSent: boolean
+  /**
+   * Money is already AUTHORISED/SUBMITTED/PAID and the pack is not yet sent.
+   * The board must stay at Docs Ready (report_ready) — never regress to
+   * trade_report_in after the Captain commits money. Distinct from
+   * readyForReview (which still requires a DRAFT for pre-authorise review).
+   */
+  authorisedAwaitingSend: boolean
   tradeReportIn: boolean
 }
 
@@ -14045,21 +14052,31 @@ export function _deriveMakesafeSurfacing(
     invoiceIsDraft &&
     (u4DocsReady || hasReportDoc)
 
-  // resumeNotSent — the irreversible authorise happened but the send did not.
-  // Resume re-sends; it must NEVER re-authorise and must NEVER read as a fresh
-  // ready-for-review draft. The resume cockpit still exposes its finish action,
-  // while the board keeps it below pre-Xero Docs Ready.
+  // resumeNotSent — the irreversible authorise happened but the send did not
+  // (durable pack status authorised_not_sent). Resume re-sends; it must NEVER
+  // re-authorise and must NEVER read as a fresh pre-authorise DRAFT review.
   const resumeNotSent = !sentClosed &&
     packStatus === 'authorised_not_sent' &&
     invoiceAuthorisedLive
+
+  // authorisedAwaitingSend — money is raised and the pack is not yet sent, and
+  // the card would otherwise look like trade_report_in (report in, not a DRAFT
+  // readyForReview). Keep these in Docs Ready so approve/authorise never moves
+  // the board backwards. Does not steal the invoiceDone→completed path.
+  const authorisedAwaitingSend = !sentClosed &&
+    invoiceAuthorisedLive &&
+    hasSubmittedReport &&
+    !readyForReview
 
   // tradeReportIn — the trade report has come in (substatus admin_to_send_report)
   // but the close-out pack is NOT yet drafted (no rendered report doc / no draft
   // invoice) and it is not already sent. Scoped to the admin_to_send_report
   // substatus so it can NEVER hijack a job already in the invoiced/complete
   // close-out regime (those keep the existing invoiceDone + hard doc-gate path).
+  // Must not claim a card whose money is already raised — that is Docs Ready.
   const tradeReportIn = normalizedSub === 'admin_to_send_report' &&
-    hasSubmittedReport && !readyForReview && !resumeNotSent && !sentClosed
+    hasSubmittedReport && !readyForReview && !authorisedAwaitingSend &&
+    !sentClosed
 
   return {
     normalizedSub,
@@ -14071,6 +14088,7 @@ export function _deriveMakesafeSurfacing(
     gateSoftenSent,
     readyForReview,
     resumeNotSent,
+    authorisedAwaitingSend,
     tradeReportIn,
   }
 }
@@ -14097,7 +14115,7 @@ export function _deriveMakesafeSurfacing(
 // stamps it onto the base row; the read model publishes it beside
 // `declared_stage`. It is ADVISORY provenance: nothing selects or buckets on it.
 // Pinned once, in makesafe_draft_invoice_stage_test.ts.
-export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v3-current-draft-required'
+export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v4-authorised-awaiting-send'
 
 export function _deriveMakesafeBoardStage(
   job: any,
@@ -14176,13 +14194,12 @@ export function _deriveMakesafeBoardStage(
   // (surf.sentClosed) falls through to the close-out doc gate below exactly as
   // before — we never re-surface a sent pack.
   if (!surf.sentClosed) {
-    // An authorised-but-not-sent pack remains actionable, but AUTHORISED is not
-    // the required pre-Xero DRAFT. Keep it below Docs Ready; the resume cockpit
-    // still owns the finish-send action without re-authorising.
-    if (surf.resumeNotSent) return 'trade_report_in'
     // a drafted-not-sent pack (rendered report + DRAFT invoice) awaiting send.
     if (surf.readyForReview) return 'report_ready'
-    // report received but NOT yet drafted -> the new Trade Report In column.
+    // Money raised, pack not sent: stay Docs Ready for finish-send. Previously
+    // resumeNotSent returned trade_report_in (a backwards move after authorise).
+    if (surf.resumeNotSent || surf.authorisedAwaitingSend) return 'report_ready'
+    // report received but NOT yet drafted -> Trade Report In.
     if (surf.tradeReportIn) return 'trade_report_in'
   }
   let closeoutBlockedByDocs = false
@@ -14198,8 +14215,9 @@ export function _deriveMakesafeBoardStage(
     //    completed without its invoice + report (+ SWMS for MLB) attached. A
     //    missing-doc hold can no longer claim pre-Xero Docs Ready without the
     //    qualifying DRAFT, so it continues through the existing evidence ladder
-    //    to Trade Report In / Allocated instead. (When no docs map is supplied,
-    //    preserve the prior ungated behaviour for callers that don't load docs.)
+    //    — but after approve/authorise it stays Docs Ready, never Trade Report In.
+    //    (When no docs map is supplied, preserve the prior ungated behaviour for
+    //    callers that don't load docs.)
     if (!verifiedSent && docs !== undefined && docs !== null) {
       const missing = _makesafeMissingCloseoutDocs(docs, _requiresMakesafeSwms(detail, job), !!(detail?.report_type))
       closeoutBlockedByDocs = missing.length > 0
@@ -14207,12 +14225,23 @@ export function _deriveMakesafeBoardStage(
     if (!closeoutBlockedByDocs) {
       return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
     }
+    // Money is raised, report evidence exists, close-out docs incomplete, pack
+    // not sent: hold in Docs Ready so the board does not regress after authorise.
+    // A bare raised invoice with no report evidence still falls to Allocated.
+    if (
+      !surf.sentClosed && surf.invoiceAuthorisedLive &&
+      (surf.hasSubmittedReport || surf.resumeNotSent)
+    ) return 'report_ready'
   }
   // The only remaining legacy Docs Ready positive is the historic
   // `ready_to_invoice`/report fallback. It now consumes the same qualifier as
   // U4 and the artifact path. A DRAFT satisfies only this invoice prerequisite;
   // every pre-existing report/substatus condition remains independently true.
   if (hasSubmittedReport && surf.invoiceIsDraft) return 'report_ready'
+  // Raised-not-sent with report evidence: Docs Ready, never Trade Report In.
+  if (hasActualReportEvidence && surf.invoiceAuthorisedLive && !surf.sentClosed) {
+    return 'report_ready'
+  }
   if (hasActualReportEvidence) return 'trade_report_in'
   if (jobStatus === 'complete' && !closeoutBlockedByDocs) {
     return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'

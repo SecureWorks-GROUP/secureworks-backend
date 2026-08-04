@@ -359,10 +359,27 @@ export function reportInEvidence(input: MakesafeStatusInput): {
 }
 
 export function docsReady(input: MakesafeStatusInput): boolean {
-  // Necessary for every positive path, including recorded READY packs. The
-  // scalar invoiceStatus below remains an independent legacy condition; this
-  // shared fact additionally proves direct linkage, ACCREC type and reference.
-  if (input.evidence?.invoiceQualifiesAsCurrentDraft !== true) return false;
+  // Pre-authorise Docs Ready still requires a qualifying current DRAFT. After
+  // the money is raised (AUTHORISED/SUBMITTED/PAID) and the pack is not sent,
+  // the card must remain Docs Ready rather than regressing to Trade Report In.
+  const invoiceStatus = String(input.evidence?.invoiceStatus || "")
+    .toUpperCase();
+  const pack = input.evidence?.pack;
+  const packStatus = String(pack?.status || "").toLowerCase();
+  const packSentStatuses = [
+    "sent",
+    "sent_marker_failed",
+    "sent_not_closed",
+    "close_failed",
+  ];
+  const authorisedAwaitingSend =
+    ["AUTHORISED", "SUBMITTED", "PAID"].includes(invoiceStatus) &&
+    input.evidence?.packSent !== true &&
+    !packSentStatuses.includes(packStatus);
+
+  const qualifiesDraft = input.evidence?.invoiceQualifiesAsCurrentDraft === true;
+  if (!qualifiesDraft && !authorisedAwaitingSend) return false;
+
   const kind = classifyMakesafeJobType(input.detail, input.job);
   const recorded = String(input.evidence?.packState || "").toUpperCase();
   if (["READY", "READY_TO_BUILD"].includes(recorded)) {
@@ -372,17 +389,16 @@ export function docsReady(input: MakesafeStatusInput): boolean {
 
   // Legacy durable pack rows predate a persisted pack_state value. Read their
   // already-produced artifacts rather than re-running the reporting skill:
-  // first draft pack + DRAFT invoice + SWMS artifact when the docket requires it.
-  const pack = input.evidence?.pack;
-  const packStatus = String(pack?.status || "").toLowerCase();
+  // first draft pack + (DRAFT or already-raised-not-sent) invoice + SWMS when
+  // the docket requires it.
+  if (!pack || packSentStatuses.includes(packStatus)) return false;
   if (
-    !pack || ["sent", "sent_marker_failed", "sent_not_closed", "close_failed"]
-      .includes(packStatus)
-  ) return false;
-  if (String(input.evidence?.invoiceStatus || "").toUpperCase() !== "DRAFT") {
+    !authorisedAwaitingSend &&
+    String(input.evidence?.invoiceStatus || "").toUpperCase() !== "DRAFT"
+  ) {
     return false;
   }
-  if (!pack.invoice_doc_id) return false;
+  if (!pack.invoice_doc_id && !authorisedAwaitingSend) return false;
   if (kind === "physical_makesafe" && !pack.report_doc_id) return false;
   if (input.evidence?.swmsRequired && !pack.swms_doc_id) return false;
   // A legacy pack row is accepted only when the underlying report evidence also
