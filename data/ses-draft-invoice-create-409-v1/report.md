@@ -571,6 +571,68 @@ not DRAFT (e.g. AUTHORISED) still refuses with `invoice_duplicate_live`.
 **`resolveSesInvoiceDuplicates` runs after, as a supplement only** — the
 obligation-index probe never substitutes for the full-set guard.
 
+---
+
+## PHASE 3 AS SHIPPED — the Invoice tab shows the REAL Xero DRAFT PDF
+
+A bound DRAFT used to be displayed as a locally rendered tax-invoice table built
+from the pricing proposal, which reads as if it were INV-n. It never was. The
+rule now is: present the Xero-rendered document, or say it is unavailable.
+
+**Mint stores the real PDF.** `createSesInvoiceDraftAction` calls
+`tryStoreSesDraftInvoicePdf` after a successful create (and on the idempotent
+re-mint repair path, unless the live binding already carries a pointer), storing
+the bytes at
+`makesafe-docket-artifacts/<job_id>/xero-invoice-pdfs/<xero_invoice_id>/<invoice_number>.pdf`
+and stamping `pdf_object_key` / `pdf_content_hash` / `pdf_size_bytes` /
+`pdf_stored_at` onto the obligation `xero_binding`. The response gains
+`draft_pdf: { content_hash, size_bytes, object_key } | null`. Storing is
+**best effort**: a Xero PDF outage must not fail a mint that already created the
+invoice, and `storeSesXeroInvoicePdfBytes` refuses anything without the `%PDF`
+magic so a non-PDF concoction cannot occupy the invoice role.
+
+**A stored pointer is not a current document.** A Xero DRAFT stays editable up
+to authorisation, so `resolveSesBoundDraftInvoicePdfArtifact` **always
+re-fetches** the bound DRAFT through the same `_fetchXeroInvoicePdfBytes` path
+as `get_invoice_pdf` and stores the result only so the pack can hand out a
+300-second signed URL. Stored bytes are never served as live. A failed fetch
+returns `pdf_unavailable: true` with reason `xero_draft_pdf_unavailable`, and a
+process-local 5-minute per-invoice backoff answers
+`xero_draft_pdf_fetch_cooling_down` so cockpit polling cannot burn the shared
+Xero rate budget that mint and authorise depend on.
+
+**`get_ses_reviewable_pack`** now reads the docket's obligation
+(`readSesObligationForDocket`, one rule shared with the cockpit load) and, for a
+bound DRAFT, replaces every `xero_invoice_pdf` artifact with the re-fetched one.
+Displaced rows move to `suppressed_artifacts` with
+`suppression_reason: xero_invoice_pdf_not_bound_draft`, so the Captain can see
+what left the pack. The response gains
+`invoice_pdf: { source, pdf_unavailable, xero_invoice_id, invoice_number } | null`.
+An unreadable obligation is a **503 refusal**, not a null — degrading would hand
+the tab silently back to the local proposal.
+
+**Cockpit `money.bound_invoice`** gains `pdf_content_hash` (the stored pointer)
+and `pdf_available`, which is derived from the same projection the pack uses: a
+DRAFT only by a successful live re-fetch, an AUTHORISED bind by a docket
+artifact whose metadata matches the bound invoice. Absent proof reads as
+unavailable.
+
+**Boundaries held.** No approve, authorise, send or void; the fence is untouched
+(these are SES-native reads through `makeSesXeroGateway`, not a widening of
+`SEALED_SES_MONEY_READ_EXEMPT_ACTIONS`); `send_it` stays disabled on a DRAFT;
+curated-bind evidence checks, send gating and board column semantics are
+unchanged. The read-path stamp of a recovered pointer is state-guarded exactly
+like `bindSesDraftInvoiceToRevision` and additionally pinned to the same bound
+Xero invoice, and it merges onto the row's current binding rather than replaying
+a stale read snapshot.
+
+Tests: `ses_invoice_tab_xero_pdf_test.ts` (re-fetch, unavailable, suppression,
+cockpit/pack agreement, AUTHORISED artifact proof),
+`ses_create_invoice_draft_test.ts` (mint-time store + `draft_pdf`),
+`ses_review_cockpit_test.ts`. Live readback target: Bertram
+`xero_invoice_id d01b0ef1-c6e8-4cc3-9396-e43a9ee671d2` / INV-1102 DRAFT. Paired
+display-honesty UX change: `SecureWorks-GROUP/secureworks-ux#241`.
+
 ## Status
 
 - Classification history: **(C)** was correct for the pre-decision system.  

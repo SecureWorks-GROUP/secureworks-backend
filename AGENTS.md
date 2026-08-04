@@ -1062,6 +1062,18 @@ job each still fail closed before any Xero call. Evidence, the production
 measurement and the front-end answer are in
 `docs/evidence/ses-invoice-pdf-read-exemption-2026-08-02.md`.
 
+The SES-native cockpit and pack reads show a bound Xero DRAFT by re-fetching the
+Xero-rendered bytes through `makeSesXeroGateway().fetchAuthorisedPdf` (which
+serves DRAFT as well as AUTHORISED, despite the name), never by adding an action
+to that exempt set and never by rendering a local proposal table as though it
+were INV-n. A DRAFT stays editable in Xero, so a stored `pdf_object_key` /
+`pdf_content_hash` is a pointer to yesterday's bytes: it may back a signed URL
+but must never be served as current, and a failed fetch is reported unavailable
+rather than substituted. An AUTHORISED bind is proved instead by a docket
+artifact whose metadata matches the bound invoice — no Xero call.
+Contract: `data/ses-draft-invoice-create-409-v1/report.md` (Phase 3); tests:
+`ses_invoice_tab_xero_pdf_test.ts`.
+
 The v2 authority bootstrap and full-board two-way reconciliation are owned by
 `20260728060000_makesafe_board_reconcile_truth_u2.sql`,
 `makesafe_state_seed`, and `makesafe_state_reconcile`. Both actions are
@@ -1350,7 +1362,8 @@ When you build that evidence shape, do NOT read `report_pack` off the published
 board — the key is absent from EVERY `makesafe_board` row (0 of 447 on
 2026-08-04), so a parse returns "missing", not the server's value. It is an
 internal seam: `makesafePipeline` synthesises `packForBoard` from the CURRENT
-docket revision (`index.ts:15579-15593`, the `packForBoard` initialiser) and
+docket revision (grep the `packForBoard` initialiser in `index.ts`; the line
+number drifts every release) and
 sets `review_state: 'READY'`
 whenever `pre_xero_docs_ready` is true, with no `makesafe_report_packs` row
 required. A card with ZERO rows in that table therefore still has
@@ -1363,7 +1376,8 @@ happened on SWMS-261109 before it was caught.
 `prepare_ses_invoice_obligation` takes only `job_id`, `docket_revision_id`,
 `post_release_disposition` and `created_by`. It copies lines VERBATIM from
 `docket.local_invoice_proposal.line_items` (the `const lines` map in
-`prepareSesInvoiceObligationAction`, `ses_reporting_actions.ts:809-821`);
+`prepareSesInvoiceObligationAction`, `ses_reporting_actions.ts` — grep the
+symbol, the file moves too often for a line pin);
 there is no price, quantity or hours parameter. Upstream,
 `hoursPerTrade = Math.max(reportedHoursPerTrade, minimum)`
 (`ses_prepare_docket_revision.ts:731`) raises short attendances to the sealed
@@ -1397,11 +1411,10 @@ The `priced_with_line_override` instrument is mostly built (DB constraint,
 disposition union, per-line `rate_override_approved`/`_by`/`_at`, the audit
 guard, `line_overrides_audited`, release and cockpit support) but is
 **unreachable**: nothing ever selects that disposition (the
-`pricing_disposition` ternary, `ses_reporting_actions.ts:829-840`) and lines are
-built without the override fields. Review feedback is not a route either — it
-only appends a row (`recordSesReviewFeedbackAction`'s
-`record_ses_review_feedback_v1` insert, `ses_reporting_actions.ts:2845-2888`) and
-the pricing path never reads it.
+`pricing_disposition` ternary in `prepareSesInvoiceObligationAction`) and lines
+are built without the override fields. Review feedback is not a route either —
+it only appends a row (`recordSesReviewFeedbackAction`'s
+`record_ses_review_feedback_v1` insert) and the pricing path never reads it.
 
 **Do not wire it up without settling rate-versus-quantity first.** Those fields
 override the RATE, not the QUANTITY. Reaching a reduced total while holding the
