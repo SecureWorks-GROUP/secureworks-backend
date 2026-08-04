@@ -523,6 +523,10 @@ import {
   fetchAllRows as _fetchAllRows,
   fetchAllRowsInChunks as _fetchAllRowsInChunks,
   chunkByUrlBudget as _chunkByUrlBudget,
+  // Shared PostgREST fan-out bound (CHUNK_FETCH_CONCURRENCY). The board's raw
+  // job-source page lanes are one-per-id-chunk, so they grow with the board and
+  // must draw from the same pool as the chunked joins.
+  withBoundedFetchSlot as _withBoundedFetchSlot,
   deriveFromDomain as _deriveFromDomain,
   isOwnDomain as _isOwnDomain,
 } from './makesafe_compact_reads.ts'
@@ -15532,10 +15536,10 @@ async function makesafePipeline(
       return out
     }
     const typedLanes = sources.flatMap((source) =>
-      idChunks.map((idChunk) => pageTypedLane(source, idChunk))
+      idChunks.map((idChunk) => _withBoundedFetchSlot(() => pageTypedLane(source, idChunk)))
     )
     const detailLanes = _chunkByUrlBudget(detailAuthorityJobIds).map((detailChunk) =>
-      pageDetailAuthorityLane(detailChunk)
+      _withBoundedFetchSlot(() => pageDetailAuthorityLane(detailChunk))
     )
     const laneResults = await Promise.all([...typedLanes, ...detailLanes])
     for (const batch of laneResults) jobsRaw.push(...batch)
@@ -15870,10 +15874,10 @@ async function makesafePipeline(
       return out
     }
     const typedLanes = sources.flatMap((source) =>
-      idChunks.map((idChunk) => pageCancelledTypedLane(source, idChunk))
+      idChunks.map((idChunk) => _withBoundedFetchSlot(() => pageCancelledTypedLane(source, idChunk)))
     )
     const detailLanes = _chunkByUrlBudget(detailAuthorityJobIds).map((detailChunk) =>
-      pageCancelledDetailLane(detailChunk)
+      _withBoundedFetchSlot(() => pageCancelledDetailLane(detailChunk))
     )
     const laneResults = await Promise.all([...typedLanes, ...detailLanes])
     for (const batch of laneResults) cancelledRaw.push(...batch)

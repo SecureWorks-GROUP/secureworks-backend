@@ -159,7 +159,7 @@ export function chunkByUrlBudget(ids: string[]): string[][] {
   return out;
 }
 
-// ── Bounded chunk fan-out ─────────────────────────────────────────────────────
+// ── Bounded PostgREST fan-out ─────────────────────────────────────────────────
 // Chunk reads run CONCURRENTLY (that is the round-trip win) but never all at
 // once. The cap is MODULE-WIDE, not per call: the make-safe board issues ~10
 // chunked job-id joins in one dependent wave, so a per-call bound would still
@@ -171,6 +171,13 @@ export function chunkByUrlBudget(ids: string[]): string[][] {
 // in-flight reads to keep the parallel-chunk TTFB win over the old serial
 // reader, bounded against board growth and concurrent board loads. Lower it
 // only on measured evidence.
+//
+// `withBoundedFetchSlot` is exported because the bound must cover EVERY
+// board-path fan-out whose width grows with the board, not just the chunked
+// reader: `makesafePipeline`'s typed + detail-authority job-source lanes (active
+// and cancelled) build one raw paginated lane per URL-budget id chunk, so they
+// acquire a slot from this same pool. Any new growth-dependent fan-out on that
+// path must do the same.
 export const CHUNK_FETCH_CONCURRENCY = 8;
 
 let inFlightChunkFetches = 0;
@@ -196,7 +203,7 @@ function releaseChunkFetchSlot(): void {
   inFlightChunkFetches--;
 }
 
-async function withChunkFetchSlot<T>(run: () => Promise<T>): Promise<T> {
+export async function withBoundedFetchSlot<T>(run: () => Promise<T>): Promise<T> {
   await acquireChunkFetchSlot();
   try {
     return await run();
@@ -235,7 +242,7 @@ export async function fetchAllRowsInChunks<T = any>(
   const chunks = chunkByUrlBudget(uniqueIds);
   const pages = await Promise.all(
     chunks.map((ch) =>
-      withChunkFetchSlot(() =>
+      withBoundedFetchSlot(() =>
         fetchAllRows<T>(
           () => buildQueryForChunk(ch),
           label,
