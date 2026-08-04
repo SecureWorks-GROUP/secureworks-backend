@@ -265,7 +265,12 @@ const PAGE_H = 297;
 const MARGIN = 14;
 const CONTENT_W = PAGE_W - 2 * MARGIN;
 const DEFAULT_REPORT_PHOTO_LIMIT = 8;
-const MAX_REPORT_PHOTO_LIMIT = 15;
+// Board cards routinely carry 20–35 current-cycle completion photos (Tuart
+// SWMS-261015 = 23). The previous hard 15-photo cap made a complete curated
+// rebuild unreachable for those cards while bind still requires every
+// applicable job_media id in photo_evidence. Raise the ceiling; the 8 MiB
+// report budget remains the real size gate.
+const MAX_REPORT_PHOTO_LIMIT = 40;
 
 const REPORT_TITLE = "Make Safe Completion Report";
 
