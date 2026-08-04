@@ -748,11 +748,22 @@ the Xero PDF, `execute_ses_invoice_revision` routes into
 exact stored Xero identity, `fetchAuthorisedPdf`, and
 `commit_ses_invoice_bound_docket_v1` against the **current** docket. Never mint,
 re-authorise, void, or send. Identity mismatch (invoice number / Xero id /
-total) refuses. Idempotent on replay. Do **not** generalise this into a
+total) refuses. Do **not** generalise this into a
 `stale_review` bypass for unauthorised revisions. A card with a raised invoice
 and report evidence that is not yet sent must stay in Docs Ready
 (`authorisedAwaitingSend` / ladder v4) — never regress to `trade_report_in`
 after money is committed.
+
+Idempotency is obligation-keyed (`ses-invoice-bound:{obligation}`), not only
+content-addressed id: a re-prepare changes `based_on` (and the content id) but
+keeps the same unique key, so a second insert hits
+`makesafe_docket_revisions_job_id_idempotency_key_assembler__key`. Recovery
+**adopts** the existing `invoice_bound` row when job, assembler, family key,
+invoice number, Xero id and total match, and refuses loudly with field diffs
+otherwise. `loadSesCockpitDocket` re-surfaces that bound pack when the view's
+current row is a later pre_xero orphan. Tests:
+`ses_authorised_invoice_recovery_test.ts` (in-process unique index, not live
+Postgres).
 
 ## `spine_missing_lineage` Is Almost Never About Lineage
 

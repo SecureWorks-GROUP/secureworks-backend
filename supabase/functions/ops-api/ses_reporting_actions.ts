@@ -64,7 +64,7 @@ import {
 
 interface SupabaseResponse<T> {
   data: T | null;
-  error: { message?: string } | null;
+  error: { message?: string; code?: string; details?: string } | null;
 }
 
 export interface SesSupabaseClient {
@@ -567,7 +567,7 @@ export async function loadSesCockpitDocket(
 ): Promise<SesCockpitDocket> {
   const docketResponse = await client.from("makesafe_docket_revisions_current")
     .select("*").eq("job_id", jobId).maybeSingle();
-  const docket = requireValue(
+  let docket = requireValue(
     docketResponse,
     "No current SES docket revision exists for this job.",
   );
@@ -577,7 +577,11 @@ export async function loadSesCockpitDocket(
     readinessResponse,
     "No current readiness revision exists for this job.",
   );
-  const obligationResponse = await readSesObligationForDocket(client, {
+  // When a later pre_xero re-prepare outranks an invoice_bound row in the
+  // committed_at view, the AUTHORISED PDF is still on that bound pack. Prefer
+  // the obligation-keyed bound revision for cockpit money/pack presentation so
+  // recovery's adopt path is visible without minting a second bind.
+  let obligationResponse = await readSesObligationForDocket(client, {
     job_id: jobId,
     invoice_obligation_revision_id: docket.invoice_obligation_revision_id,
     columns: "*",
@@ -590,7 +594,68 @@ export async function loadSesCockpitDocket(
       }).`,
     });
   }
-  const obligation = obligationResponse.data || null;
+  let obligation = obligationResponse.data || null;
+  if (String(docket.stage || "") === "pre_xero" && obligation) {
+    const binding = object(obligation.xero_binding);
+    const obligationState = String(obligation.state || "");
+    const obligationAuthorised = obligationState === "authorised" ||
+      obligationState === "released" ||
+      String(binding.status || "").toUpperCase() === "AUTHORISED";
+    const boundInvoiceId = String(binding.xero_invoice_id || "").trim();
+    const boundInvoiceNumber = String(binding.invoice_number || "").trim();
+    const assemblerVersion = String(docket.assembler_version || "").trim();
+    const familyMatrixVersion = String(docket.family_matrix_version || "")
+      .trim();
+    if (
+      obligationAuthorised && boundInvoiceId && boundInvoiceNumber &&
+      assemblerVersion && familyMatrixVersion
+    ) {
+      try {
+        const adopted = await adoptExistingInvoiceBoundDocket(client, {
+          job_id: jobId,
+          invoice_obligation_revision_id: String(obligation.id),
+          invoice: {
+            xero_invoice_id: boundInvoiceId,
+            invoice_number: boundInvoiceNumber,
+            status: "AUTHORISED",
+            reference: String(binding.reference || ""),
+            total: Number.isFinite(Number(binding.total))
+              ? Number(binding.total)
+              : 0,
+          },
+          assembler_version: assemblerVersion,
+          family_matrix_version: familyMatrixVersion,
+        });
+        if (adopted) {
+          docket = adopted.docket_revision;
+          // Bound pack carries its own obligation pointer; re-read for safety.
+          obligationResponse = await readSesObligationForDocket(client, {
+            job_id: jobId,
+            invoice_obligation_revision_id:
+              docket.invoice_obligation_revision_id,
+            columns: "*",
+          });
+          if (!obligationResponse.error && obligationResponse.data) {
+            obligation = obligationResponse.data;
+          }
+        }
+      } catch (error) {
+        // Conflicting identity on the shared key must surface. Missing PDF or
+        // soft adopt refusals leave the pre_xero cockpit readable.
+        if (error instanceof SesActionError && error.status === 409) {
+          const fact = String(error.refusal?.fact || error.message || "");
+          if (
+            fact.includes("identity differs") ||
+            fact.includes("does not match")
+          ) {
+            throw error;
+          }
+        } else if (!(error instanceof SesActionError)) {
+          throw error;
+        }
+      }
+    }
+  }
   const artifactsResponse = await client.from("makesafe_docket_artifacts")
     .select("role,object_key,media_type,content_hash,size_bytes,metadata")
     .eq("revision_id", docket.id)
@@ -754,6 +819,9 @@ export async function loadSesCockpitDocket(
       );
       xeroInvoicePdfAvailable = !!String(boundArtifact?.object_key || "")
         .trim();
+      // AUTHORISED availability is the artifact, not xero_binding.pdf_content_hash
+      // (that column can be null on a valid bound pack — proved live on Bertram).
+      // Do not invent a hash pointer on the binding for the cockpit money tab.
     }
   }
   return {
@@ -2584,6 +2652,16 @@ const SES_DRAFT_BINDABLE_REVISION_STATES = [
 
 const SES_AUTHORISED_OBLIGATION_STATES = ["authorised", "released"] as const;
 
+/** Live Postgres unique name on makesafe_docket_revisions (truncated by PG). */
+export const MAKESAFE_DOCKET_REVISION_IDEMPOTENCY_CONSTRAINT =
+  "makesafe_docket_revisions_job_id_idempotency_key_assembler__key";
+
+export function sesInvoiceBoundIdempotencyKey(
+  invoiceObligationRevisionId: string,
+): string {
+  return `ses-invoice-bound:${String(invoiceObligationRevisionId || "").trim()}`;
+}
+
 function moneyTotalsMatch(a: unknown, b: unknown): boolean {
   const left = Number(a);
   const right = Number(b);
@@ -2592,10 +2670,277 @@ function moneyTotalsMatch(a: unknown, b: unknown): boolean {
 }
 
 /**
+ * True when a PostgREST/Postgres error is the docket revision unique index
+ * (job_id, idempotency_key, assembler_version, family_matrix_version).
+ * Matches live code 23505 and the truncated constraint name seen on Bertram.
+ */
+export function isMakesafeDocketRevisionUniqueConstraintError(
+  error: unknown,
+): boolean {
+  if (!error || typeof error !== "object") return false;
+  const row = error as { code?: unknown; message?: unknown; details?: unknown };
+  const code = String(row.code || "").trim();
+  const message = `${row.message || ""} ${row.details || ""}`.toLowerCase();
+  if (code === "23505") {
+    return message.includes("makesafe_docket_revisions") ||
+      message.includes("idempotency_key") ||
+      message.includes("job_id_idempotency");
+  }
+  return message.includes("duplicate key") &&
+    (
+      message.includes("makesafe_docket_revisions_job_id_idempotency") ||
+      message.includes(MAKESAFE_DOCKET_REVISION_IDEMPOTENCY_CONSTRAINT)
+    );
+}
+
+export type SesBoundInvoiceIdentity = {
+  job_id: string;
+  assembler_version: string;
+  family_matrix_version: string;
+  idempotency_key: string;
+  xero_invoice_id: string;
+  invoice_number: string;
+  /** Cent-equal money total when known; null skips the total comparison. */
+  total: number | null;
+};
+
+/**
+ * Pure identity diffs for adopt-or-refuse. Empty array means adoptable.
+ * Callers must refuse loudly when any field differs — adopting a row that
+ * merely shares the idempotency key would bind the Captain's approval to
+ * something he never saw.
+ */
+export function boundInvoiceIdentityDiffs(
+  expected: SesBoundInvoiceIdentity,
+  actual: {
+    job_id?: unknown;
+    assembler_version?: unknown;
+    family_matrix_version?: unknown;
+    idempotency_key?: unknown;
+    stage?: unknown;
+    xero_binding?: unknown;
+  },
+): string[] {
+  const diffs: string[] = [];
+  const xero = object(actual.xero_binding);
+  if (String(actual.stage || "") !== "invoice_bound") {
+    diffs.push(
+      `stage: expected invoice_bound, got ${String(actual.stage || "empty")}`,
+    );
+  }
+  if (String(actual.job_id || "") !== expected.job_id) {
+    diffs.push(
+      `job_id: expected ${expected.job_id}, got ${String(actual.job_id || "empty")}`,
+    );
+  }
+  if (String(actual.assembler_version || "") !== expected.assembler_version) {
+    diffs.push(
+      `assembler_version: expected ${expected.assembler_version}, got ${
+        String(actual.assembler_version || "empty")
+      }`,
+    );
+  }
+  if (
+    String(actual.family_matrix_version || "") !== expected.family_matrix_version
+  ) {
+    diffs.push(
+      `family_matrix_version: expected ${expected.family_matrix_version}, got ${
+        String(actual.family_matrix_version || "empty")
+      }`,
+    );
+  }
+  if (String(actual.idempotency_key || "") !== expected.idempotency_key) {
+    diffs.push(
+      `idempotency_key: expected ${expected.idempotency_key}, got ${
+        String(actual.idempotency_key || "empty")
+      }`,
+    );
+  }
+  if (String(xero.xero_invoice_id || "") !== expected.xero_invoice_id) {
+    diffs.push(
+      `xero_invoice_id: expected ${expected.xero_invoice_id}, got ${
+        String(xero.xero_invoice_id || "empty")
+      }`,
+    );
+  }
+  if (String(xero.invoice_number || "") !== expected.invoice_number) {
+    diffs.push(
+      `invoice_number: expected ${expected.invoice_number}, got ${
+        String(xero.invoice_number || "empty")
+      }`,
+    );
+  }
+  if (
+    expected.total !== null &&
+    Number.isFinite(expected.total) &&
+    !moneyTotalsMatch(expected.total, xero.total)
+  ) {
+    diffs.push(
+      `total: expected ${expected.total}, got ${
+        xero.total === undefined || xero.total === null
+          ? "empty"
+          : String(xero.total)
+      }`,
+    );
+  }
+  return diffs;
+}
+
+async function loadInvoiceBoundDocketByIdempotencyKey(
+  client: SesSupabaseClient,
+  args: {
+    job_id: string;
+    invoice_obligation_revision_id: string;
+    assembler_version?: string | null;
+    family_matrix_version?: string | null;
+  },
+): Promise<Record<string, any> | null> {
+  const key = sesInvoiceBoundIdempotencyKey(args.invoice_obligation_revision_id);
+  let query = client.from("makesafe_docket_revisions")
+    .select("*")
+    .eq("job_id", args.job_id)
+    .eq("idempotency_key", key)
+    .eq("stage", "invoice_bound");
+  if (args.assembler_version) {
+    query = query.eq("assembler_version", args.assembler_version);
+  }
+  if (args.family_matrix_version) {
+    query = query.eq("family_matrix_version", args.family_matrix_version);
+  }
+  const response = await query
+    .order("committed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (response.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The existing invoice-bound docket could not be read (${
+        response.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  return response.data || null;
+}
+
+async function matchingXeroInvoicePdfOnRevision(
+  client: SesSupabaseClient,
+  revisionId: string,
+  invoice: Pick<SesXeroInvoiceResult, "xero_invoice_id" | "invoice_number">,
+): Promise<{ content_hash: string } | null> {
+  const artifactsResponse = await client.from("makesafe_docket_artifacts")
+    .select("role,content_hash,metadata")
+    .eq("revision_id", revisionId)
+    .eq("role", "xero_invoice_pdf");
+  if (artifactsResponse.error) {
+    throw new SesActionError(503, {
+      state: "refused",
+      fact: `The existing invoice-bound PDF artifact could not be read (${
+        artifactsResponse.error.message || "unknown database error"
+      }).`,
+    });
+  }
+  const matching = (artifactsResponse.data || []).find((artifact: any) =>
+    object(artifact.metadata).xero_invoice_id === invoice.xero_invoice_id &&
+    object(artifact.metadata).invoice_number === invoice.invoice_number &&
+    String(artifact.content_hash || "").startsWith("sha256:")
+  );
+  return matching
+    ? { content_hash: String(matching.content_hash) }
+    : null;
+}
+
+/**
+ * Adopt an existing invoice_bound revision at the obligation idempotency key
+ * only when identity is exact. Refuses loudly with the differing fields.
+ */
+export async function adoptExistingInvoiceBoundDocket(
+  client: SesSupabaseClient,
+  args: {
+    job_id: string;
+    invoice_obligation_revision_id: string;
+    invoice: SesXeroInvoiceResult;
+    assembler_version: string;
+    family_matrix_version: string;
+    existing?: Record<string, any> | null;
+  },
+): Promise<{
+  docket_revision: Record<string, any>;
+  pdf_content_hash: string;
+} | null> {
+  const existing = args.existing === undefined
+    ? await loadInvoiceBoundDocketByIdempotencyKey(client, {
+      job_id: args.job_id,
+      invoice_obligation_revision_id: args.invoice_obligation_revision_id,
+      assembler_version: args.assembler_version,
+      family_matrix_version: args.family_matrix_version,
+    })
+    : args.existing;
+  // No row, or a non-bound row slipped past a loose mock/filter: nothing to adopt.
+  if (!existing || String(existing.stage || "") !== "invoice_bound") {
+    return null;
+  }
+
+  const expected: SesBoundInvoiceIdentity = {
+    job_id: args.job_id,
+    assembler_version: args.assembler_version,
+    family_matrix_version: args.family_matrix_version,
+    idempotency_key: sesInvoiceBoundIdempotencyKey(
+      args.invoice_obligation_revision_id,
+    ),
+    xero_invoice_id: args.invoice.xero_invoice_id,
+    invoice_number: args.invoice.invoice_number,
+    total: Number.isFinite(Number(args.invoice.total))
+      ? Number(args.invoice.total)
+      : null,
+  };
+  const diffs = boundInvoiceIdentityDiffs(expected, existing);
+  if (diffs.length > 0) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        `Authorised-PDF recovery refused to adopt an existing docket at the same idempotency key because identity differs: ${
+          diffs.join("; ")
+        }. Do not mint or re-authorise.`,
+    });
+  }
+  if (
+    String(existing.invoice_obligation_revision_id || "") !==
+      args.invoice_obligation_revision_id
+  ) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        `Authorised-PDF recovery refused: existing bound docket obligation ${
+          existing.invoice_obligation_revision_id || "empty"
+        } does not match ${args.invoice_obligation_revision_id}.`,
+    });
+  }
+  const pdf = await matchingXeroInvoicePdfOnRevision(
+    client,
+    String(existing.id),
+    args.invoice,
+  );
+  if (!pdf) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        `Authorised-PDF recovery found an invoice_bound docket at ${
+          expected.idempotency_key
+        } for ${args.invoice.invoice_number} but it has no matching xero_invoice_pdf artifact; refuse rather than invent money documents.`,
+    });
+  }
+  return {
+    docket_revision: existing,
+    pdf_content_hash: pdf.content_hash,
+  };
+}
+
+/**
  * Shared AUTHORISED PDF bind: fetch the real Xero PDF, store it once, and
  * commit an invoice_bound docket from the reviewed pre_xero base. Idempotent
  * via content-addressed docket id + storage "already exists" tolerance + the
- * SQL commit function's same-id return path.
+ * SQL commit function's same-id return path + adopt-on-unique-constraint when
+ * an earlier bind already occupies ses-invoice-bound:{obligation}.
  */
 export async function bindAuthorisedInvoicePdfToDocket(
   client: SesSupabaseClient,
@@ -2609,7 +2954,7 @@ export async function bindAuthorisedInvoicePdfToDocket(
   },
   gateway: Pick<SesXeroGateway, "fetchAuthorisedPdf">,
 ): Promise<{
-  state: "authorised_invoice_bound";
+  state: "authorised_invoice_bound" | "authorised_invoice_already_bound";
   invoice: SesXeroInvoiceResult;
   docket_revision: Record<string, any>;
   pdf_content_hash: string;
@@ -2624,6 +2969,54 @@ export async function bindAuthorisedInvoicePdfToDocket(
       ),
     );
   }
+
+  const baseResponse = await client.from("makesafe_docket_revisions")
+    .select("id,job_id,stage,assembler_version,family_matrix_version")
+    .eq("id", args.based_on_revision_id)
+    .eq("job_id", args.job_id)
+    .maybeSingle();
+  const base = requireValue(
+    baseResponse,
+    "The reviewed pre-Xero docket revision no longer exists.",
+  );
+  if (String(base.stage || "") !== "pre_xero") {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        `Invoice PDF must bind from a pre-Xero docket revision; base stage is ${
+          base.stage || "unknown"
+        }.`,
+    });
+  }
+  const assemblerVersion = String(base.assembler_version || "").trim();
+  const familyMatrixVersion = String(base.family_matrix_version || "").trim();
+  if (!assemblerVersion || !familyMatrixVersion) {
+    throw new SesActionError(409, {
+      state: "refused",
+      fact:
+        "The reviewed pre-Xero docket is missing assembler or family matrix version; refuse rather than invent pack identity.",
+    });
+  }
+
+  // Pre-commit adopt: an earlier partial/full bind already wrote the obligation
+  // key (different content-addressed id when based_on drifted after re-prepare).
+  const preAdopt = await adoptExistingInvoiceBoundDocket(client, {
+    job_id: args.job_id,
+    invoice_obligation_revision_id: args.invoice_obligation_revision_id,
+    invoice: args.invoice,
+    assembler_version: assemblerVersion,
+    family_matrix_version: familyMatrixVersion,
+  });
+  if (preAdopt) {
+    return {
+      state: "authorised_invoice_already_bound",
+      invoice: args.invoice,
+      docket_revision: preAdopt.docket_revision,
+      pdf_content_hash: preAdopt.pdf_content_hash,
+      recovery: false,
+    };
+  }
+
   const pdf = await gateway.fetchAuthorisedPdf(args.invoice.xero_invoice_id);
   const pdfHash = await sesSha256(
     Array.from(pdf),
@@ -2685,10 +3078,34 @@ export async function bindAuthorisedInvoicePdfToDocket(
       },
     },
   });
-  const boundDocket = requireValue(
-    bound,
-    "The real AUTHORISED Xero PDF could not be bound to a new docket revision.",
-  );
+  if (bound.error || !bound.data) {
+    // Race / prior partial: unique on (job, ses-invoice-bound:obligation, assembler, family).
+    if (isMakesafeDocketRevisionUniqueConstraintError(bound.error)) {
+      const adopted = await adoptExistingInvoiceBoundDocket(client, {
+        job_id: args.job_id,
+        invoice_obligation_revision_id: args.invoice_obligation_revision_id,
+        invoice: args.invoice,
+        assembler_version: assemblerVersion,
+        family_matrix_version: familyMatrixVersion,
+      });
+      if (adopted) {
+        return {
+          state: "authorised_invoice_already_bound",
+          invoice: args.invoice,
+          docket_revision: adopted.docket_revision,
+          pdf_content_hash: adopted.pdf_content_hash,
+          recovery: false,
+        };
+      }
+    }
+    throw new SesActionError(409, {
+      state: "refused",
+      fact: `The real AUTHORISED Xero PDF could not be bound to a new docket revision. ${
+        bound.error?.message ? `(${bound.error.message})` : ""
+      }`.trim(),
+    });
+  }
+  const boundDocket = bound.data;
   requireValue(
     await client.rpc("record_ses_docket_review_state_v1", {
       p_event: {
@@ -2835,7 +3252,6 @@ export async function recoverAuthorisedInvoicePdfBind(
     });
   }
 
-  // Current docket already carries this AUTHORISED PDF — pure idempotent hit.
   const currentDocketResponse = await client.from(
     "makesafe_docket_revisions_current",
   ).select("*").eq("job_id", args.job_id).maybeSingle();
@@ -2843,6 +3259,44 @@ export async function recoverAuthorisedInvoicePdfBind(
     currentDocketResponse,
     "No current SES docket revision exists for this job.",
   );
+
+  // Prefer adopting the obligation-keyed invoice_bound row when it already
+  // exists (including when a later pre_xero re-prepare became "current" and
+  // made a fresh content-addressed insert collide on the unique key).
+  const assemblerForAdopt = String(
+    currentDocket.stage === "pre_xero"
+      ? currentDocket.assembler_version
+      : currentDocket.assembler_version || "",
+  ).trim();
+  const familyForAdopt = String(
+    currentDocket.stage === "pre_xero"
+      ? currentDocket.family_matrix_version
+      : currentDocket.family_matrix_version || "",
+  ).trim();
+  if (assemblerForAdopt && familyForAdopt) {
+    const adopted = await adoptExistingInvoiceBoundDocket(client, {
+      job_id: args.job_id,
+      invoice_obligation_revision_id: revision.id,
+      invoice: authorisedInvoice,
+      assembler_version: assemblerForAdopt,
+      family_matrix_version: familyForAdopt,
+    });
+    if (adopted) {
+      return {
+        state: "authorised_invoice_already_bound",
+        invoice: authorisedInvoice,
+        docket_revision: adopted.docket_revision,
+        pdf_content_hash: adopted.pdf_content_hash,
+        recovery: true,
+        invoice_create_dispatched: false,
+        invoice_authorise_dispatched: false,
+        send_dispatched: false,
+      };
+    }
+  }
+
+  // Current docket already carries this AUTHORISED PDF — pure idempotent hit
+  // when the key lookup above could not run (missing assembler versions).
   const currentXero = object(currentDocket.xero_binding);
   if (
     currentDocket.stage === "invoice_bound" &&
@@ -2850,33 +3304,17 @@ export async function recoverAuthorisedInvoicePdfBind(
     String(currentXero.invoice_number || "") === authorisedInvoice.invoice_number &&
     String(currentXero.status || "").toUpperCase() === "AUTHORISED"
   ) {
-    const artifactsResponse = await client.from("makesafe_docket_artifacts")
-      .select("role,content_hash,metadata")
-      .eq("revision_id", currentDocket.id)
-      .eq("role", "xero_invoice_pdf");
-    if (artifactsResponse.error) {
-      throw new SesActionError(503, {
-        state: "refused",
-        fact: `The current docket invoice PDF could not be read (${
-          artifactsResponse.error.message || "unknown database error"
-        }).`,
-      });
-    }
-    const pdfs = artifactsResponse.data || [];
-    const matchingPdf = pdfs.find((artifact: any) =>
-      object(artifact.metadata).xero_invoice_id ===
-        authorisedInvoice.xero_invoice_id &&
-      object(artifact.metadata).invoice_number ===
-        authorisedInvoice.invoice_number
+    const matchingPdf = await matchingXeroInvoicePdfOnRevision(
+      client,
+      String(currentDocket.id),
+      authorisedInvoice,
     );
     if (matchingPdf) {
       return {
         state: "authorised_invoice_already_bound",
         invoice: authorisedInvoice,
         docket_revision: currentDocket,
-        pdf_content_hash: matchingPdf.content_hash
-          ? String(matchingPdf.content_hash)
-          : null,
+        pdf_content_hash: matchingPdf.content_hash,
         recovery: true,
         invoice_create_dispatched: false,
         invoice_authorise_dispatched: false,
@@ -2889,7 +3327,7 @@ export async function recoverAuthorisedInvoicePdfBind(
     throw new SesActionError(409, {
       state: "refused",
       fact:
-        `Authorised-PDF recovery needs a pre_xero current docket to bind from; current stage is ${
+        `Authorised-PDF recovery needs a pre_xero current docket to bind from when no matching invoice_bound row exists; current stage is ${
           currentDocket.stage || "unknown"
         }.`,
     });
