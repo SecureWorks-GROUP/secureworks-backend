@@ -99,8 +99,23 @@ function reviewPackClient(
     },
     from(table: string) {
       let single = false;
+      let columns = "";
+      const project = (value: unknown) => {
+        // The artifact read is column-projected in production, so a column the
+        // caller forgets to select is genuinely absent here too.
+        if (table !== "makesafe_docket_artifacts" || !columns) return value;
+        const keys = columns.split(",").map((key) => key.trim());
+        return (value as Array<Record<string, unknown>>).map((row) =>
+          Object.fromEntries(
+            keys.filter((key) => key in row).map((key) => [key, row[key]]),
+          )
+        );
+      };
       const query: any = {
-        select: () => query,
+        select: (cols?: string) => {
+          columns = String(cols || "");
+          return query;
+        },
         eq: () => query,
         order: () => query,
         limit: () => query,
@@ -109,13 +124,13 @@ function reviewPackClient(
           return query;
         },
         then: (resolve: (value: unknown) => unknown) => {
-          const value = rows[table];
           if (table === "job_events" && options.jobEventsError) {
             return Promise.resolve({
               data: null,
               error: options.jobEventsError,
             }).then(resolve);
           }
+          const value = project(rows[table]);
           return Promise.resolve({
             data: single && Array.isArray(value) ? value[0] || null : value,
             error: null,
@@ -370,8 +385,7 @@ Deno.test(
       size_bytes: 100,
       metadata: {
         source_kind: "previously_committed_pdf",
-        source_identity:
-          "docket-revision:revision-self/artifact:artifact-self",
+        source_identity: "docket-revision:revision-self/artifact:artifact-self",
         source_document_id: "document-other",
         source_revision_id: "revision-self",
         source_artifact_id: "artifact-self",
@@ -474,7 +488,9 @@ Deno.test(
   async () => {
     // Old code trusted this shape (byte-verified previously_committed without
     // report_input_hash). That is the self-vouch gate this task closes.
-    const bytes = new TextEncoder().encode("%PDF-1.7\ntuart incomplete fixture");
+    const bytes = new TextEncoder().encode(
+      "%PDF-1.7\ntuart incomplete fixture",
+    );
     const contentHash = await sesSha256Bytes(bytes);
     const rawHash = await rawSha256(bytes);
     const artifact = {
@@ -522,7 +538,9 @@ Deno.test(
 Deno.test(
   "review pack keeps a previously committed report only when completeness proof is bound",
   async () => {
-    const bytes = new TextEncoder().encode("%PDF-1.7\ntrusted complete fixture");
+    const bytes = new TextEncoder().encode(
+      "%PDF-1.7\ntrusted complete fixture",
+    );
     const contentHash = await sesSha256Bytes(bytes);
     const rawHash = await rawSha256(bytes);
     const artifact = {
@@ -557,6 +575,51 @@ Deno.test(
     assertEquals(pack.suppressed_artifacts, []);
     assertEquals(pack.blockers, []);
     assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
+  },
+);
+
+Deno.test(
+  "review pack reads the artifact id so a self-pointing source is suppressed where bytes are served",
+  async () => {
+    const bytes = new TextEncoder().encode("%PDF-1.7\nself pointing fixture");
+    const contentHash = await sesSha256Bytes(bytes);
+    const rawHash = await rawSha256(bytes);
+    const artifact = {
+      id: "artifact-self",
+      role: "supporting_report_pdf",
+      object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+      media_type: "application/pdf",
+      content_hash: contentHash,
+      size_bytes: bytes.byteLength,
+      metadata: {
+        source_kind: "previously_committed_pdf",
+        source_identity:
+          "docket-revision:source-revision/artifact:artifact-self",
+        source_document_id: "source-document",
+        source_revision_id: "source-revision",
+        source_artifact_id: "artifact-self",
+        source_artifact_content_hash: contentHash,
+        expected_raw_sha256: `sha256:${rawHash}`,
+        output_sha256: `sha256:${rawHash}`,
+        render_hash: rawHash,
+        report_input_hash: `sha256:${"a".repeat(64)}`,
+        evidence_source: "current_cycle_curated_makesafe_report",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      },
+    };
+    const { client, signedPaths } = reviewPackClient(artifact, bytes);
+    const pack = await getSesReviewablePackAction(
+      client,
+      { mode: "api_key", user: null },
+      "docket-fixture",
+    );
+    assertEquals(pack.artifacts, []);
+    assertEquals(
+      pack.suppressed_artifacts[0].suppression_reason,
+      "source_identity_self_reference",
+    );
+    assertEquals(pack.blockers[0].code, "curated_source_missing");
+    assertEquals(signedPaths, []);
   },
 );
 

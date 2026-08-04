@@ -59,7 +59,10 @@ import { deriveExistingFencePicketDecision } from "./makesafe_existing_fence_pic
 import { buildRoofReportJob } from "./roof_report_template.ts";
 import { isBundledCoverageSendNote } from "./makesafe_send_pack.ts";
 import { renderSesSwmsPdf } from "./ses_swms_render.ts";
-import { inspectSesSupportingReportProof } from "./ses_supporting_report_trust.ts";
+import {
+  inspectSesSupportingReportProof,
+  SES_SUPPORTING_REPORT_MAX_BYTES,
+} from "./ses_supporting_report_trust.ts";
 import {
   canonicalSesPortalCaptureResult,
   canonicalSesPortalCaptureRole,
@@ -2079,16 +2082,37 @@ function physicalReportSourceForCycle(
       metadata.output_sha256 || metadata.render_hash,
     );
     const artifactContentHash = text(artifact.content_hash);
-    const inputHash = text(metadata.report_input_hash) ||
-      text(provenance.report_input_hash);
+    const artifactInputHash = text(metadata.report_input_hash);
+    // A document-level report_input_hash describes the bytes the DOCUMENT
+    // carries, so it may only vouch for this artifact when the artifact's own
+    // raw hash is those same bytes. Otherwise a re-bind's completeness
+    // coordinate would stamp a stale, thinner artifact.
+    const documentRawSha256 = rawReportHash(
+      provenance.curated_source_expected_raw_sha256 ||
+        provenance.report_render_hash,
+    );
+    const documentInputHash = expectedRawSha256 &&
+        documentRawSha256 === expectedRawSha256
+      ? text(provenance.report_input_hash)
+      : "";
+    const inputHash = isSesSha256(artifactInputHash)
+      ? artifactInputHash
+      : documentInputHash;
     const trust = inspectSesSupportingReportProof(artifact);
     // Restorable docket lineage without an independent completeness coordinate
     // (report_input_hash from curated bind accounting) is not a source. Allow
-    // selection only when the document still carries that hash so prepare can
-    // re-stamp the artifact; pure self-vouching metadata remains refused.
+    // selection only when the document still carries a hash bound to these
+    // bytes so prepare can re-stamp the artifact; pure self-vouching metadata
+    // remains refused. The refusal reason is raised before the size budget, so
+    // bound the size here too rather than inherit an unchecked artifact.
     const completenessRecoverable = !trust.trusted &&
       trust.reason === "independent_completeness_proof_missing" &&
       isSesSha256(inputHash);
+    // A sibling bundle is evidence from a DIFFERENT job, outside the pack being
+    // certified, so it cannot self-vouch and is not gated on this hash — the
+    // defect being closed is a pack certifying its own completeness.
+    const completenessRequired = text(metadata.evidence_source) ===
+      "current_cycle_curated_makesafe_report";
     if (
       (!trust.trusted && !completenessRecoverable) ||
       !document || document.visible_to_trades !== true ||
@@ -2099,8 +2123,9 @@ function physicalReportSourceForCycle(
       !text(artifact.object_key) || !isSesSha256(artifactContentHash) ||
       !Number.isSafeInteger(Number(artifact.size_bytes)) ||
       Number(artifact.size_bytes) <= 0 ||
+      Number(artifact.size_bytes) > SES_SUPPORTING_REPORT_MAX_BYTES ||
       text(document.uploaded_by) === "guarded-current-wiki-rerender-sweep" ||
-      !isSesSha256(inputHash)
+      (completenessRequired && !isSesSha256(inputHash))
     ) continue;
     candidates.push({
       document,
@@ -2116,7 +2141,9 @@ function physicalReportSourceForCycle(
         source_artifact_id: text(artifact.id),
         source_artifact_content_hash: artifactContentHash as SesSha256,
         expected_raw_sha256: expectedRawSha256,
-        report_input_hash: inputHash as SesSha256,
+        ...(isSesSha256(inputHash)
+          ? { report_input_hash: inputHash as SesSha256 }
+          : {}),
       },
     });
   }
