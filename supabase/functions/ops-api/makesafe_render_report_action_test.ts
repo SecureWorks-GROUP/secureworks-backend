@@ -974,7 +974,9 @@ Deno.test("curated bind survives a client that rejects unknown job_media columns
     query.select = (columns?: string) => {
       for (const name of String(columns || "").split(",")) {
         const column = name.trim();
-        if (column && column !== "*" && !LIVE_JOB_MEDIA_COLUMNS.includes(column)) {
+        if (
+          column && column !== "*" && !LIVE_JOB_MEDIA_COLUMNS.includes(column)
+        ) {
           rejected.push(column);
         }
       }
@@ -1020,13 +1022,55 @@ Deno.test("curated bind photo accounting orders by created_at, then id", async (
   // comparison. nnn carries a null created_at and must sort LAST, as PostgREST
   // returns nulls last rather than first.
   const media = [
-    { id: "aaa", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:07Z", storage_url: "https://storage.example.test/a.jpg" },
-    { id: "zzz", type: "photo", phase: "completion", created_at: "2026-07-30T02:23:53Z", storage_url: "https://storage.example.test/z.jpg" },
-    { id: "mmm", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:01Z", storage_url: "https://storage.example.test/m.jpg" },
-    { id: "bbb", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:01Z", storage_url: "https://storage.example.test/b.jpg" },
-    { id: "fff", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:03.500Z", storage_url: "https://storage.example.test/f.jpg" },
-    { id: "ppp", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:03Z", storage_url: "https://storage.example.test/p.jpg" },
-    { id: "nnn", type: "photo", phase: "completion", created_at: null, storage_url: "https://storage.example.test/n.jpg" },
+    {
+      id: "aaa",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:07Z",
+      storage_url: "https://storage.example.test/a.jpg",
+    },
+    {
+      id: "zzz",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:23:53Z",
+      storage_url: "https://storage.example.test/z.jpg",
+    },
+    {
+      id: "mmm",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:01Z",
+      storage_url: "https://storage.example.test/m.jpg",
+    },
+    {
+      id: "bbb",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:01Z",
+      storage_url: "https://storage.example.test/b.jpg",
+    },
+    {
+      id: "fff",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:03.500Z",
+      storage_url: "https://storage.example.test/f.jpg",
+    },
+    {
+      id: "ppp",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:03Z",
+      storage_url: "https://storage.example.test/p.jpg",
+    },
+    {
+      id: "nnn",
+      type: "photo",
+      phase: "completion",
+      created_at: null,
+      storage_url: "https://storage.example.test/n.jpg",
+    },
   ];
   // Guard the fixture itself: a string comparator genuinely disagrees with
   // chronology on this pair, so the assertions below cannot pass by accident.
@@ -1094,7 +1138,10 @@ Deno.test("curated bind photo accounting orders by created_at, then id", async (
   // payload is internally self-consistent, so only the source-order comparison
   // can catch it — it must now be refused.
   const idOrdered = ["aaa", "bbb", "fff", "mmm", "nnn", "ppp", "zzz"];
-  assertEquals(canonicalSesJson(idOrdered) === canonicalSesJson(expected), false);
+  assertEquals(
+    canonicalSesJson(idOrdered) === canonicalSesJson(expected),
+    false,
+  );
   const { client: second } = bindClient(bytes, {
     media,
     serviceReport: {
@@ -1149,8 +1196,20 @@ Deno.test("curated bind photo accounting keeps sub-millisecond created_at order"
   // them as simultaneous and the id tiebreak inverts them. Postgres orders by
   // true chronology, so the comparator has to as well.
   const media = [
-    { id: "aaa", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:01.123999+00:00", storage_url: "https://storage.example.test/a.jpg" },
-    { id: "bbb", type: "photo", phase: "completion", created_at: "2026-07-30T02:24:01.123456+00:00", storage_url: "https://storage.example.test/b.jpg" },
+    {
+      id: "aaa",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:01.123999+00:00",
+      storage_url: "https://storage.example.test/a.jpg",
+    },
+    {
+      id: "bbb",
+      type: "photo",
+      phase: "completion",
+      created_at: "2026-07-30T02:24:01.123456+00:00",
+      storage_url: "https://storage.example.test/b.jpg",
+    },
   ];
   assertEquals(
     Date.parse(String(media[0].created_at)) ===
