@@ -1297,7 +1297,11 @@ function manifestBase(
         : "",
       invoice_to: row.invoice_to || "",
       // Intake-thread coordinates for MLB physical report/photo reply.
-      // Sourced from makesafe_intake_case_sources.thread_id (not internet_message_id).
+      // Two-tier authority (never internet_message_id): makesafe_intake_case_sources
+      // .thread_id first and always when any source row exists; only a card with
+      // ZERO source rows recovers from its approved makesafe_intake_draft via
+      // emails(post_id = graph_message_id), selected by corroboration then intake
+      // case story match, refusing when still ambiguous. See ses_mlb_thread_reply.
       intake_thread_id: input.source.intake_thread_id || "",
       intake_post_id: input.source.intake_post_id || "",
       intake_conversation_id: input.source.intake_conversation_id || "",

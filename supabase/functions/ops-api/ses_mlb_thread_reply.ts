@@ -5,10 +5,22 @@
 //   2. Report-only → reply on the mailer / work-order intake thread
 //   3. Photos-only → reply on the same thread
 //
-// Identifier: intake `thread_id` (Graph conversationThreadId). Every
-// makesafe_intake_case_sources row carries one. internet_message_id alone is
-// insufficient across the group-sync path (see makesafe_intake_dedup.ts).
-// A missing thread_id is a hard refuse for report/photo — never a quiet new thread.
+// Identifier: intake `thread_id` (Graph conversationThreadId).
+//
+// Authority order for the coordinate:
+//   1. makesafe_intake_case_sources for the job's cases — always wins when any
+//      source row exists (even if those rows lack thread_id → refuse).
+//   2. Only when case_sources is EMPTY: recover from the job's approved
+//      makesafe_intake_draft via emails(post_id = graph_message_id).thread_id.
+//      Provenance is job-bound: draft.status=approved AND
+//      draft.approved_job_id === job.id AND the email join is exact.
+//      Selection is corroboration, never recency (Captain 2026-08-05, option C):
+//      one proven thread_id wins; several are narrowed by the primary intake
+//      case story's sourcePostId; anything still ambiguous REFUSES.
+//      No guess, no partial match, no outranking of real case_sources rows.
+// internet_message_id alone is insufficient across the group-sync path
+// (see makesafe_intake_dedup.ts). A missing thread_id is a hard refuse for
+// report/photo — never a quiet new thread.
 //
 // AJS/AJBR is untouched (report_invoice + photo, ses@).
 
@@ -25,6 +37,22 @@ export interface IntakeThreadSourceRow {
   received_at?: string | null;
 }
 
+/**
+ * Candidate for the empty-case_sources draft→emails recovery path.
+ * Callers load approved drafts for the job and join emails on graph_message_id.
+ */
+export interface ApprovedDraftThreadCandidate {
+  draft_id?: string | null;
+  status?: string | null;
+  approved_job_id?: string | null;
+  graph_message_id?: string | null;
+  approved_at?: string | null;
+  email_post_id?: string | null;
+  email_thread_id?: string | null;
+  email_conversation_id?: string | null;
+  email_received_at?: string | null;
+}
+
 export interface IntakeThreadCoordinates {
   /** Graph Groups conversationThreadId — required for group-thread reply. */
   thread_id: string;
@@ -32,6 +60,11 @@ export interface IntakeThreadCoordinates {
   post_id: string | null;
   conversation_id: string | null;
   case_id: string | null;
+  /**
+   * Where the coordinate came from. `case_sources` is authoritative;
+   * `approved_draft_emails` only applies when case_sources had zero rows.
+   */
+  recovery_source?: "case_sources" | "approved_draft_emails";
 }
 
 export function isMlbBuilderKey(builderKey: unknown): boolean {
@@ -57,6 +90,7 @@ export function isMlbPhysicalReleaseShape(args: {
 /**
  * Prefer the primary case's earliest source that carries a non-empty thread_id.
  * Falls back to any source with a thread_id. Empty set → null (caller refuses).
+ * Does NOT consult drafts — use resolveIntakeThreadCoordinates for that.
  */
 export function pickIntakeThreadCoordinates(
   sources: IntakeThreadSourceRow[] | null | undefined,
@@ -95,7 +129,142 @@ export function pickIntakeThreadCoordinates(
     post_id: chosen.post_id,
     conversation_id: chosen.conversation_id,
     case_id: chosen.case_id,
+    recovery_source: "case_sources",
   };
+}
+
+function storySourcePostIdSet(
+  value: string | readonly string[] | null | undefined,
+): Set<string> {
+  const raw = typeof value === "string" ? [value] : (value || []);
+  return new Set(
+    raw.map((item) => String(item || "").trim()).filter(Boolean),
+  );
+}
+
+/**
+ * Job-bound draft→emails recovery. Every candidate must prove:
+ *   - draft status is approved
+ *   - draft.approved_job_id equals the job being prepared (exact)
+ *   - emails.post_id equals draft.graph_message_id (exact join)
+ *   - email.thread_id is non-empty
+ * Anything weaker returns null — a guessed thread is worse than no fallback.
+ *
+ * Selection among proven candidates (Captain 2026-08-05, option C):
+ *   1. one distinct thread_id → corroborated single answer, use it. Differing
+ *      post ids on that one thread are not ambiguity — the Graph group reply
+ *      needs only thread_id.
+ *   2. several distinct thread_ids → keep only threads carrying a post id from
+ *      the primary intake case story (`story_json[].sourcePostId`); one
+ *      surviving thread → use it;
+ *   3. still zero or several threads → refuse. Recency is not evidence, and a
+ *      wrong thread is a silent builder-visible failure.
+ * The audit anchors (post_id / conversation_id) are stamped only when the
+ * winning thread proves ONE value, or when the story names exactly one of them.
+ */
+export function pickIntakeThreadFromApprovedDraft(
+  jobId: string,
+  candidates: ApprovedDraftThreadCandidate[] | null | undefined,
+  preferredStorySourcePostId?: string | readonly string[] | null,
+): IntakeThreadCoordinates | null {
+  const job = String(jobId || "").trim();
+  if (!job) return null;
+
+  const proven = (candidates || [])
+    .map((row) => ({
+      draft_id: String(row.draft_id || "").trim() || null,
+      status: String(row.status || "").trim().toLowerCase(),
+      approved_job_id: String(row.approved_job_id || "").trim() || null,
+      graph_message_id: String(row.graph_message_id || "").trim() || null,
+      approved_at: String(row.approved_at || "").trim() || null,
+      email_post_id: String(row.email_post_id || "").trim() || null,
+      email_thread_id: String(row.email_thread_id || "").trim() || null,
+      email_conversation_id: String(row.email_conversation_id || "").trim() ||
+        null,
+      email_received_at: String(row.email_received_at || "").trim() || null,
+    }))
+    .filter((row) => {
+      if (row.status !== "approved") return false;
+      if (!row.approved_job_id || row.approved_job_id !== job) return false;
+      if (!row.graph_message_id) return false;
+      if (!row.email_post_id || row.email_post_id !== row.graph_message_id) {
+        return false;
+      }
+      if (!row.email_thread_id) return false;
+      return true;
+    });
+
+  if (proven.length === 0) return null;
+
+  const byThread = new Map<string, typeof proven>();
+  for (const row of proven) {
+    const bucket = byThread.get(row.email_thread_id!);
+    if (bucket) bucket.push(row);
+    else byThread.set(row.email_thread_id!, [row]);
+  }
+
+  const story = storySourcePostIdSet(preferredStorySourcePostId);
+  let threadIds = [...byThread.keys()];
+  if (threadIds.length > 1) {
+    threadIds = story.size
+      ? threadIds.filter((threadId) =>
+        (byThread.get(threadId) || []).some((row) =>
+          story.has(String(row.email_post_id || ""))
+        )
+      )
+      : [];
+  }
+  if (threadIds.length !== 1) return null;
+
+  const threadId = threadIds[0]!;
+  const rows = byThread.get(threadId) || [];
+  const anchor = (
+    values: Array<string | null>,
+    storyScoped: boolean,
+  ): string | null => {
+    const distinct = [...new Set(values.filter(Boolean).map(String))];
+    if (distinct.length === 1) return distinct[0]!;
+    if (!storyScoped || !story.size) return null;
+    const named = distinct.filter((value) => story.has(value));
+    return named.length === 1 ? named[0]! : null;
+  };
+
+  return {
+    thread_id: threadId,
+    post_id: anchor(rows.map((row) => row.email_post_id), true),
+    conversation_id: anchor(
+      rows.map((row) => row.email_conversation_id),
+      false,
+    ),
+    case_id: null,
+    recovery_source: "approved_draft_emails",
+  };
+}
+
+/**
+ * Full coordinate resolution for prepare/assembler.
+ *
+ * - case_sources with any row → case_sources only (may return null).
+ * - case_sources empty → optional approved-draft emails recovery, disambiguated
+ *   by the primary intake case story rather than by recency.
+ * Never stamps ready without a real thread_id; never outranks real sources.
+ */
+export function resolveIntakeThreadCoordinates(args: {
+  caseSources: IntakeThreadSourceRow[] | null | undefined;
+  preferredCaseId?: string | null;
+  jobId: string;
+  approvedDraftCandidates?: ApprovedDraftThreadCandidate[] | null;
+  preferredStorySourcePostId?: string | readonly string[] | null;
+}): IntakeThreadCoordinates | null {
+  const sources = args.caseSources || [];
+  if (sources.length > 0) {
+    return pickIntakeThreadCoordinates(sources, args.preferredCaseId);
+  }
+  return pickIntakeThreadFromApprovedDraft(
+    args.jobId,
+    args.approvedDraftCandidates,
+    args.preferredStorySourcePostId,
+  );
 }
 
 /** True when a route must reply on the intake thread (MLB physical report/photo). */

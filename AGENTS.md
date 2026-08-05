@@ -1209,12 +1209,22 @@ order lives in `ses_release_route_shape.ts`. Apply
 
 MLB physical (Captain 2026-08-05 / Maylands): three routes, two destinations —
 `report` and `photo` as **replies on the ses@ group intake thread** (thread_id
-from `makesafe_intake_case_sources`, plumbed onto docket
-`envelope.v2.routing.intake_thread_id` via `ses_mlb_thread_reply.ts`);
-`invoice` is the billing pack to `makesafes@` carrying report + AUTHORISED
-invoice + SWMS (finance@ cc, no ses@). Missing thread_id refuses report/photo
-(`intake_thread_reply_unavailable`) rather than opening a new thread. AJS shape
-is untouched. Report-only MLB families keep the legacy non-threaded split.
+plumbed onto docket `envelope.v2.routing.intake_thread_id` via
+`ses_mlb_thread_reply.ts`); `invoice` is the billing pack to `makesafes@`
+carrying report + AUTHORISED invoice + SWMS (finance@ cc, no ses@). Thread
+coordinate authority: (1) `makesafe_intake_case_sources` whenever any source
+row exists for the job's cases — never outranked; (2) only when case_sources
+is **empty**, recover from the job's approved `makesafe_intake_drafts` row via
+`emails` on `post_id = graph_message_id`, and only when
+`approved_job_id === job.id` and the email join carries a real `thread_id`
+(`resolveIntakeThreadCoordinates` / Captain B, Maylands sourceless case).
+Selection inside tier 2 is corroboration, never recency (Captain option C): one
+distinct proven thread_id wins; several are narrowed to the primary intake
+case story's `story_json[].sourcePostId`; anything still ambiguous refuses. Do
+not repoint append-only case_sources. Missing thread_id still refuses
+report/photo (`intake_thread_reply_unavailable`) rather than opening a new
+thread. AJS shape is untouched. Report-only MLB families keep the legacy
+non-threaded split.
 
 Closeout proof hashes are a **set**, not a route-kind-ordered array: apply
 `20260805010000_ses_closeout_proof_hash_set_compare.sql` before the matching

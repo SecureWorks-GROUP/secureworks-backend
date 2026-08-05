@@ -1684,6 +1684,11 @@ Deno.test("builder routing uses only company/matrix evidence and blocks when the
     report_to: "",
     photo_to: "",
     invoice_to: "accounts@westernbuild.com.au",
+    // WESTERN is not an MLB physical card: the intake-thread coordinates are
+    // always emitted and must stay empty here (no thread reply, no recovery).
+    intake_thread_id: "",
+    intake_post_id: "",
+    intake_conversation_id: "",
   });
   assertEquals(result.email_drafts, {});
 });

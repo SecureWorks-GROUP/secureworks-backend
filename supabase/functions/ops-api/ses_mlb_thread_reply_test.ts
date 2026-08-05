@@ -1,25 +1,22 @@
-import {
-  assertEquals,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   applyMlbThreadReplyToRoute,
   isMlbBuilderKey,
   isMlbPhysicalReleaseShape,
   mlbRouteRequiresIntakeThreadReply,
   pickIntakeThreadCoordinates,
+  pickIntakeThreadFromApprovedDraft,
+  resolveIntakeThreadCoordinates,
   routingIntakeThread,
 } from "./ses_mlb_thread_reply.ts";
 import {
   isAjsBuilderKey,
-  sesReleaseRouteOrder,
   SES_AJS_ROUTE_ORDER,
   SES_UNIVERSAL_ROUTE_ORDER,
+  sesReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import { resolveDocketRoutes } from "./ses_reporting_actions.ts";
-import {
-  MAKESAFE_CC,
-  MAKESAFE_FINANCE_CC,
-} from "./makesafe_send_pack.ts";
+import { MAKESAFE_CC, MAKESAFE_FINANCE_CC } from "./makesafe_send_pack.ts";
 
 Deno.test("MLB physical shape detection leaves AJS alone", () => {
   assertEquals(isMlbBuilderKey("MLB"), true);
@@ -100,6 +97,280 @@ Deno.test("pickIntakeThreadCoordinates returns null when no thread_id exists", (
   );
 });
 
+const MAYLANDS_JOB = "1e05db49-cc42-477b-9689-cbdceed649da";
+const MAYLANDS_POST =
+  "AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAApJdqPAAA=";
+const MAYLANDS_THREAD =
+  "AAQkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOAMkABAADnAYXK0wJkmwUunYT4ZGvBAAKOYU_og240GZQy_7BGb1kA==";
+
+function maylandsDraftCandidate(overrides: Record<string, unknown> = {}) {
+  return {
+    draft_id: "6960c405-50b5-4008-9513-e05c0a25c0b3",
+    status: "approved",
+    approved_job_id: MAYLANDS_JOB,
+    graph_message_id: MAYLANDS_POST,
+    approved_at: "2026-07-20T07:00:00Z",
+    email_post_id: MAYLANDS_POST,
+    email_thread_id: MAYLANDS_THREAD,
+    email_conversation_id: null,
+    email_received_at: "2026-07-20T06:45:07Z",
+    ...overrides,
+  };
+}
+
+Deno.test("pickIntakeThreadFromApprovedDraft recovers Maylands-shaped coordinates", () => {
+  const coords = pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+    maylandsDraftCandidate(),
+  ]);
+  assertEquals(coords?.thread_id, MAYLANDS_THREAD);
+  assertEquals(coords?.post_id, MAYLANDS_POST);
+  assertEquals(coords?.recovery_source, "approved_draft_emails");
+  assertEquals(coords?.case_id, null);
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft refuses wrong job (no guess)", () => {
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft("other-job-id", [
+      maylandsDraftCandidate(),
+    ]),
+    null,
+  );
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      maylandsDraftCandidate({ approved_job_id: "stranger-job" }),
+    ]),
+    null,
+  );
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft refuses unproven joins", () => {
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      maylandsDraftCandidate({ status: "pending" }),
+    ]),
+    null,
+  );
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      maylandsDraftCandidate({ email_post_id: "different-post" }),
+    ]),
+    null,
+  );
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      maylandsDraftCandidate({ email_thread_id: null }),
+    ]),
+    null,
+  );
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      maylandsDraftCandidate({
+        graph_message_id: null,
+        email_post_id: null,
+      }),
+    ]),
+    null,
+  );
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, []),
+    null,
+  );
+});
+
+const OLDER_DRAFT = maylandsDraftCandidate({
+  draft_id: "older",
+  approved_at: "2026-07-16T00:00:00Z",
+  graph_message_id: "post-old",
+  email_post_id: "post-old",
+  email_thread_id: "thread-old",
+  email_received_at: "2026-07-16T00:00:00Z",
+});
+
+const NEWER_DRAFT = maylandsDraftCandidate({
+  draft_id: "newer",
+  approved_at: "2026-07-20T07:00:00Z",
+  graph_message_id: MAYLANDS_POST,
+  email_post_id: MAYLANDS_POST,
+  email_thread_id: MAYLANDS_THREAD,
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft refuses ambiguity instead of guessing recency", () => {
+  // Neither newest nor earliest is evidence: two proven drafts with no story
+  // corroboration must refuse rather than target a builder-visible thread.
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      OLDER_DRAFT,
+      NEWER_DRAFT,
+    ]),
+    null,
+  );
+  // A story that names both candidates is still ambiguous.
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(
+      MAYLANDS_JOB,
+      [OLDER_DRAFT, NEWER_DRAFT],
+      ["post-old", MAYLANDS_POST],
+    ),
+    null,
+  );
+  // A story that names neither candidate is likewise a refuse.
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(
+      MAYLANDS_JOB,
+      [OLDER_DRAFT, NEWER_DRAFT],
+      ["post-unrelated"],
+    ),
+    null,
+  );
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft: story sourcePostId breaks a multi-draft tie", () => {
+  const newerByStory = pickIntakeThreadFromApprovedDraft(
+    MAYLANDS_JOB,
+    [OLDER_DRAFT, NEWER_DRAFT],
+    [MAYLANDS_POST],
+  );
+  assertEquals(newerByStory?.thread_id, MAYLANDS_THREAD);
+  assertEquals(newerByStory?.post_id, MAYLANDS_POST);
+
+  // Story authority is not recency: the older post wins when the story names it.
+  const olderByStory = pickIntakeThreadFromApprovedDraft(
+    MAYLANDS_JOB,
+    [OLDER_DRAFT, NEWER_DRAFT],
+    "post-old",
+  );
+  assertEquals(olderByStory?.thread_id, "thread-old");
+  assertEquals(olderByStory?.post_id, "post-old");
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft: one thread with two posts is corroborated, not ambiguous", () => {
+  // A builder follow-up posted into the SAME intake conversation and approved
+  // onto the same job. Graph reply needs only thread_id, and it is unanimous.
+  const followUp = maylandsDraftCandidate({
+    draft_id: "follow-up",
+    approved_at: "2026-07-24T02:00:00Z",
+    graph_message_id: "post-follow-up",
+    email_post_id: "post-follow-up",
+    email_thread_id: MAYLANDS_THREAD,
+  });
+  const coords = pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+    NEWER_DRAFT,
+    followUp,
+  ]);
+  assertEquals(coords?.thread_id, MAYLANDS_THREAD);
+  // Two posts on that one thread prove no single audit anchor.
+  assertEquals(coords?.post_id, null);
+
+  // The story naming exactly one of them restores the anchor.
+  const anchored = pickIntakeThreadFromApprovedDraft(
+    MAYLANDS_JOB,
+    [NEWER_DRAFT, followUp],
+    [MAYLANDS_POST],
+  );
+  assertEquals(anchored?.thread_id, MAYLANDS_THREAD);
+  assertEquals(anchored?.post_id, MAYLANDS_POST);
+
+  // A second DISTINCT thread is still ambiguity, and still refuses.
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      NEWER_DRAFT,
+      followUp,
+      OLDER_DRAFT,
+    ]),
+    null,
+  );
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft: duplicate rows of one coordinate are one answer", () => {
+  const coords = pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+    maylandsDraftCandidate({ draft_id: "a" }),
+    maylandsDraftCandidate({
+      draft_id: "b",
+      approved_at: "2026-07-21T00:00:00Z",
+    }),
+  ]);
+  assertEquals(coords?.thread_id, MAYLANDS_THREAD);
+  assertEquals(coords?.post_id, MAYLANDS_POST);
+});
+
+Deno.test("resolveIntakeThreadCoordinates: case_sources outrank draft fallback", () => {
+  const fromSources = resolveIntakeThreadCoordinates({
+    caseSources: [
+      {
+        case_id: "case-live",
+        post_id: "post-source",
+        thread_id: "thread-from-sources",
+        received_at: "2026-07-01T00:00:00Z",
+      },
+    ],
+    preferredCaseId: "case-live",
+    jobId: MAYLANDS_JOB,
+    approvedDraftCandidates: [maylandsDraftCandidate()],
+  });
+  assertEquals(fromSources?.thread_id, "thread-from-sources");
+  assertEquals(fromSources?.recovery_source, "case_sources");
+});
+
+Deno.test("resolveIntakeThreadCoordinates: non-empty sources without thread do NOT fall through", () => {
+  // Real case_sources rows stay authoritative: missing thread is a refuse,
+  // not a silent draft override.
+  assertEquals(
+    resolveIntakeThreadCoordinates({
+      caseSources: [
+        {
+          case_id: "case-live",
+          post_id: "post-no-thread",
+          thread_id: null,
+        },
+      ],
+      preferredCaseId: "case-live",
+      jobId: MAYLANDS_JOB,
+      approvedDraftCandidates: [maylandsDraftCandidate()],
+    }),
+    null,
+  );
+});
+
+Deno.test("resolveIntakeThreadCoordinates: empty sources use approved draft", () => {
+  const coords = resolveIntakeThreadCoordinates({
+    caseSources: [],
+    preferredCaseId: "ad6b6a2e-206f-49af-9d8f-e41ea2504081",
+    jobId: MAYLANDS_JOB,
+    approvedDraftCandidates: [maylandsDraftCandidate()],
+  });
+  assertEquals(coords?.thread_id, MAYLANDS_THREAD);
+  assertEquals(coords?.post_id, MAYLANDS_POST);
+  assertEquals(coords?.recovery_source, "approved_draft_emails");
+});
+
+Deno.test("resolveIntakeThreadCoordinates: story post ids reach the draft tier", () => {
+  const args = {
+    caseSources: [],
+    preferredCaseId: "ad6b6a2e-206f-49af-9d8f-e41ea2504081",
+    jobId: MAYLANDS_JOB,
+    approvedDraftCandidates: [OLDER_DRAFT, NEWER_DRAFT],
+  };
+  assertEquals(resolveIntakeThreadCoordinates(args), null);
+  assertEquals(
+    resolveIntakeThreadCoordinates({
+      ...args,
+      preferredStorySourcePostId: [MAYLANDS_POST],
+    })?.thread_id,
+    MAYLANDS_THREAD,
+  );
+});
+
+Deno.test("resolveIntakeThreadCoordinates: empty sources and no draft still refuse", () => {
+  assertEquals(
+    resolveIntakeThreadCoordinates({
+      caseSources: [],
+      jobId: MAYLANDS_JOB,
+      approvedDraftCandidates: [],
+    }),
+    null,
+  );
+});
+
 Deno.test("applyMlbThreadReplyToRoute refuses ready without thread", () => {
   const report = applyMlbThreadReplyToRoute(
     {
@@ -127,7 +398,12 @@ Deno.test("applyMlbThreadReplyToRoute refuses ready without thread", () => {
       attachment_hashes: ["h2"],
     } as any,
     { builder_key: "MLB", family: "physical_makesafe" },
-    { thread_id: "thread-1", post_id: "post-1", conversation_id: null, case_id: "c1" },
+    {
+      thread_id: "thread-1",
+      post_id: "post-1",
+      conversation_id: null,
+      case_id: "c1",
+    },
   );
   assertEquals(stamped.ready, true);
   assertEquals(stamped.reply_to_thread_id, "thread-1");
