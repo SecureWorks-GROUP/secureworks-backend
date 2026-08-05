@@ -1231,10 +1231,14 @@ export async function sendMailerOpsVisibilityAction(
   const dryRun = args.dry_run !== false; // default true
   const actor = text(args.actor) || auth.user?.email || "mailer-ops-operator";
 
-  // Load job + company
+  // Load job. Live `jobs` has no company columns — company identity and the
+  // builder external_ref live on makesafe_job_details (verified against the
+  // production OpenAPI catalog: jobs lacks requesting_company_slug /
+  // requesting_company_id / external_ref; detail has all three). Selecting a
+  // phantom jobs column 400s the whole route.
   const jobRes = await client.from("jobs")
     .select(
-      "id,org_id,type,job_number,status,metadata,requesting_company_slug,external_ref,site_suburb,ses_money_sealed_at",
+      "id,org_id,type,job_number,status,metadata,site_suburb,ses_money_sealed_at",
     )
     .eq("id", jobId)
     .maybeSingle();
@@ -1249,30 +1253,12 @@ export async function sendMailerOpsVisibilityAction(
   }
   const job = jobRes.data;
   const metadata = object(job.metadata);
-  const slug = text(job.requesting_company_slug) ||
-    text(metadata.requesting_company_slug) ||
-    text(metadata.company_slug);
 
-  const companyRes = slug
-    ? await client.from("makesafe_companies")
-      .select("slug,name,sender_patterns,report_recipient")
-      .eq("slug", slug)
-      .maybeSingle()
-    : { data: null, error: null };
-  if (companyRes.error) {
-    throw new SesActionError(
-      503,
-      mailerRefusal(
-        "mailer_ops_company_lookup_failed",
-        `Company lookup failed (${companyRes.error.message}).`,
-      ),
-    );
-  }
-  // Make-safe detail carries the attendance-cycle facts (and the fallback
-  // company slug). Read it once for both.
+  // Make-safe detail carries company identity + attendance-cycle facts.
+  // Read it once for both.
   const detailRes = await client.from("makesafe_job_details")
     .select(
-      "job_id,requesting_company_slug,requesting_company_name,attendance_cycle_id,cycle_number,reattend_count",
+      "job_id,requesting_company_id,requesting_company_slug,requesting_company_name,external_ref,attendance_cycle_id,cycle_number,reattend_count",
     )
     .eq("job_id", jobId)
     .maybeSingle();
@@ -1286,17 +1272,52 @@ export async function sendMailerOpsVisibilityAction(
     );
   }
   const cycle = mailerOpsCycleContext(detailRes.data);
+  const companyId = text(detailRes.data?.requesting_company_id);
+  const detailSlug = text(detailRes.data?.requesting_company_slug);
+  const metadataSlug = text(metadata.requesting_company_slug) ||
+    text(metadata.company_slug);
+  const slug = detailSlug || metadataSlug;
 
-  let company = companyRes.data || null;
-  if (!company?.sender_patterns) {
-    const detailSlug = text(detailRes.data?.requesting_company_slug);
-    if (detailSlug && detailSlug !== slug) {
-      const co2 = await client.from("makesafe_companies")
-        .select("slug,name,sender_patterns,report_recipient")
-        .eq("slug", detailSlug)
-        .maybeSingle();
-      if (co2.data) company = co2.data;
+  // Prefer the FK on detail (authoritative), then slug. Never read company
+  // columns from jobs — they do not exist in production.
+  let company: {
+    id?: string | null;
+    slug?: string | null;
+    name?: string | null;
+    sender_patterns?: unknown;
+    report_recipient?: string | null;
+  } | null = null;
+  if (companyId) {
+    const byId = await client.from("makesafe_companies")
+      .select("id,slug,name,sender_patterns,report_recipient")
+      .eq("id", companyId)
+      .maybeSingle();
+    if (byId.error) {
+      throw new SesActionError(
+        503,
+        mailerRefusal(
+          "mailer_ops_company_lookup_failed",
+          `Company lookup by id failed (${byId.error.message}).`,
+        ),
+      );
     }
+    company = byId.data || null;
+  }
+  if (!company?.sender_patterns && slug) {
+    const bySlug = await client.from("makesafe_companies")
+      .select("id,slug,name,sender_patterns,report_recipient")
+      .eq("slug", slug)
+      .maybeSingle();
+    if (bySlug.error) {
+      throw new SesActionError(
+        503,
+        mailerRefusal(
+          "mailer_ops_company_lookup_failed",
+          `Company lookup by slug failed (${bySlug.error.message}).`,
+        ),
+      );
+    }
+    if (bySlug.data) company = bySlug.data;
   }
   const senderPatterns = company?.sender_patterns;
 
@@ -1338,7 +1359,7 @@ export async function sendMailerOpsVisibilityAction(
     draftSubjects: subjectInputs.draftSubjects,
     jobMetadataSubject: subjectInputs.jobMetadataSubject,
     builderReference: subjectInputs.builderReference ||
-      text(job.external_ref) || null,
+      text(detailRes.data?.external_ref) || null,
     jobNumber: text(job.job_number) || null,
   });
 

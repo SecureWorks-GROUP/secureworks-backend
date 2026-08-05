@@ -347,9 +347,15 @@ Two rules follow:
   `.fully_paid_on` (not `date` / `type` / `fully_paid_on_date`),
   `business_events.occurred_at` (not `created_at`), `jobs.site_address` /
   `.site_suburb` / `.type`, `trade_invoices.week_end` / `.subtotal_ex` /
-  `.total_inc` / `.xero_bill_id`. Rename in the select with a PostgREST alias
-  (`date:invoice_date`) so the response shape callers expect stays intact — but
-  remember filters and `.order()` must use the REAL column name.
+  `.total_inc` / `.xero_bill_id`. Company identity is **not** on `jobs`: live
+  `jobs` has no `requesting_company_slug`, `requesting_company_id`, or
+  `external_ref` — those live on `makesafe_job_details` (and company rows on
+  `makesafe_companies` via `requesting_company_id`). Selecting any of them from
+  `jobs` is a production 400 (`column jobs.requesting_company_slug does not
+  exist`); the mailer ops route shipped once on that phantom. Rename in the
+  select with a PostgREST alias (`date:invoice_date`) so the response shape
+  callers expect stays intact — but remember filters and `.order()` must use
+  the REAL column name.
 - On any batched read whose emptiness is business-meaningful, check `error`.
   `_shared/pgrest.ts` exports `logQueryErrors()` for labelling a
   `Promise.all` batch; single reads that must not silently skip work should
@@ -1219,6 +1225,13 @@ this need by weakening `send-outlook-email` fences or by exempting addresses on
 the sealed money fence. Tests: `ses_mailer_ops_send_test.ts` (wiring only; zero
 Graph — green suite does not prove delivery). Evidence:
 `data/mailer-ops-send-action-v1/report.md`.
+
+Company resolution on this route must use live columns only: prefer
+`makesafe_job_details.requesting_company_id` → `makesafe_companies.id`, then
+detail `requesting_company_slug`, then job `metadata` fallbacks. Never select
+company or `external_ref` from `jobs` (phantoms; see wrong-column section).
+Builder `external_ref` for subject fallback is detail-side. Re-verify every
+selected column against live schema before another mailer deploy.
 
 Three boundaries on that route are load-bearing. `body.to` is REQUIRED and only
 confirmed against an allowlist (this card's own intake `emails.from_email` plus

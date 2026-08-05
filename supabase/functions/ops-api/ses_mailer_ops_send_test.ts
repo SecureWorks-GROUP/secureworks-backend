@@ -408,6 +408,7 @@ function makeClient(opts: {
   jobEventsError?: { message: string };
   onJobEventInsert?: (row: any) => void;
 }): any {
+  // jobs has no company columns in production — company lives on detail.
   const job = opts.job || {
     id: "job-1",
     org_id: "00000000-0000-4000-8000-000000000001",
@@ -419,12 +420,11 @@ function makeClient(opts: {
         "NEW WORK ORDER - MLB-26267 U24/ 28 Peninsula Road, Maylands, WA 6051",
       builder_reference: "MLB-26267",
     },
-    requesting_company_slug: "mlb",
-    external_ref: "MLB-26267",
     site_suburb: "Maylands",
     ses_money_sealed_at: "2026-08-01T00:00:00Z",
   };
   const company = opts.company === null ? null : opts.company || {
+    id: "company-mlb-1",
     slug: "mlb",
     name: "ML Builders",
     sender_patterns: ["mlb.mailer@primeeco.tech"],
@@ -455,7 +455,17 @@ function makeClient(opts: {
       `https://example.supabase.co/storage/v1/object/public/job-photos/job-1/p${i}.jpg`,
     created_at: `2026-08-01T00:00:${String(i).padStart(2, "0")}Z`,
   }));
-  const detail = opts.detail === null ? null : opts.detail || null;
+  // Default detail mirrors live makesafe_job_details company + cycle columns.
+  const detail = opts.detail === null ? null : opts.detail || {
+    job_id: "job-1",
+    requesting_company_id: "company-mlb-1",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    external_ref: "MLB-26267",
+    attendance_cycle_id: null,
+    cycle_number: null,
+    reattend_count: 0,
+  };
   const cases = opts.cases || [{
     id: "case-1",
     job_id: "job-1",
@@ -1307,6 +1317,86 @@ Deno.test("mailer ops: source pins — no invoice string in attachment role unio
   assert(
     !source.includes('MailerOpsRouteKind = "report" | "photo" | "invoice"'),
   );
+});
+
+Deno.test("mailer ops: jobs select never names production-phantom company columns", async () => {
+  // Live failure that shipped once: column jobs.requesting_company_slug does
+  // not exist. Company identity is on makesafe_job_details; external_ref too.
+  const source = await Deno.readTextFile(
+    new URL("./ses_mailer_ops_send.ts", import.meta.url),
+  );
+  // The jobs select is the single line that caused the live 400. Pin the real
+  // projection and refuse the three phantoms on that table.
+  assertStringIncludes(
+    source,
+    '"id,org_id,type,job_number,status,metadata,site_suburb,ses_money_sealed_at"',
+  );
+  assert(
+    !source.includes(
+      "metadata,requesting_company_slug,external_ref,site_suburb",
+    ),
+    "must not re-select phantom jobs.requesting_company_slug / jobs.external_ref",
+  );
+  assertStringIncludes(
+    source,
+    '"job_id,requesting_company_id,requesting_company_slug,requesting_company_name,external_ref,attendance_cycle_id,cycle_number,reattend_count"',
+  );
+  // Company resolution prefers the FK on detail.
+  assertStringIncludes(source, '.eq("id", companyId)');
+  assertStringIncludes(source, "detailRes.data?.requesting_company_id");
+  assertStringIncludes(source, "detailRes.data?.external_ref");
+});
+
+Deno.test("mailer ops action: resolves company from detail FK, not jobs columns", async () => {
+  // Job row deliberately has no company fields (matching live jobs). Detail
+  // carries requesting_company_id; company is found by that id.
+  const result = await sendMailerOpsVisibilityAction(
+    makeClient({
+      job: {
+        id: "job-1",
+        org_id: "00000000-0000-4000-8000-000000000001",
+        type: "makesafe",
+        job_number: "SWMS-261017",
+        status: "active",
+        metadata: {},
+        site_suburb: "Maylands",
+        ses_money_sealed_at: "2026-08-01T00:00:00Z",
+      },
+      detail: {
+        job_id: "job-1",
+        requesting_company_id: "company-mlb-1",
+        requesting_company_slug: "mlb",
+        requesting_company_name: "ML Builders",
+        external_ref: "MLB-26267",
+        attendance_cycle_id: null,
+        cycle_number: null,
+        reattend_count: 0,
+      },
+      drafts: [{
+        id: "draft-1",
+        subject: "NEW WORK ORDER - MLB-26267 Maylands",
+        status: "approved",
+        approved_job_id: "job-1",
+      }],
+    }),
+    { mode: "api_key", user: null },
+    {
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "job-1",
+      kind: "report",
+      to: "mlb.mailer@primeeco.tech",
+      dry_run: true,
+    },
+    {
+      makeMailGateway: () => {
+        throw new Error("no gateway");
+      },
+      effectStore: new MemoryEffectStore(),
+    },
+  );
+  assertEquals(result.success, true);
+  assertEquals(result.dry_run, true);
+  assertEquals(result.to, ["mlb.mailer@primeeco.tech"]);
 });
 
 Deno.test("mailer ops: index wires send_mailer_ops_visibility and dedicated gateway", async () => {
