@@ -1,6 +1,6 @@
 # Mailer ops-visibility send v1
 
-**Status:** STOPPED before any external send — transport path unavailable under standing fences.  
+**Status:** STOPPED before any external send — transport path unavailable under standing fences. Block confirmed correct; temporary fence exemption **deliberately refused**. Sanctioned route owned by another worker.  
 **Checkpoint:** card one (Maylands) prepared; zero of eight emails sent.  
 **Authorised scope (Captain YES):** eight ordinary `admin@` → `mlb.mailer@primeeco.tech` sends (report PDF + capped photos), no invoice, no `makesafes@` packs, no `execute_ses_release_revision`.
 
@@ -126,16 +126,27 @@ Not started. Checkpoint rule: prove card one Sent Items first. Card one has no S
 
 ---
 
-## Decision needed (firstmate / Captain)
+## Three transport options offered — all rejected
 
-Pick one transport that keeps the money fence intact and still matches the YES:
+After the block, the crewmate offered three ways to unblock the eight sends. **None of these is the standing path.** Firstmate recorded that the block was correct, the fences exist for good reason, and a **sanctioned route is being built by another worker**. The Captain / firstmate disposition of each option is permanent ledger so nobody re-proposes them as if they were new.
 
-1. **Temporary sealed-SES ordinary-mail exemption** for this path only: `send-outlook-email` may send when  
-   `from=admin@` AND `to` is exactly `mlb.mailer@primeeco.tech` AND attachments contain no invoice PDF AND optional `job_document_id` is `makesafe_report` only — then crewmate re-runs card one.
-2. **New ops-api action** (e.g. `send_mailer_ops_visibility`) wired to `createSesGraphMailGateway` / ordinary Mail.Send with operation-token Sent Items proof, hard-coded recipient and no-invoice allow-list — deploy from release `main` only.
-3. **Provide a one-shot Graph app credential channel** to the crewmate (or run the eight sends from a host that already has `MICROSOFT_*` plaintext) without going through release execute.
+### Option 1 — Temporary `send-outlook-email` sealed-SES exemption — **REFUSED**
 
-Until one of those lands, remaining three cards must not be attempted.
+**What was offered:** A narrow, temporary exemption so `send-outlook-email` may deliver when `from=admin@`, `to` is exactly `mlb.mailer@primeeco.tech`, attachments contain no invoice PDF, and any `job_document_id` is `makesafe_report` only — enough for this crewmate to re-run card one without a new action.
+
+**Why refused (do not re-propose):** Firstmate explicitly refused this exemption option. The sealed-SES refusal on legacy Outlook send and the PDF provenance gate exist for good reason; punching a temporary hole in them for mailer ops visibility would teach future agents that a one-off exemption is an acceptable substitute for a real transport. A future reader who sees only the original offer without this refusal will re-pitch it as novel — **it is not novel; it was considered and deliberately rejected.**
+
+### Option 2 — One-shot Graph app credentials (or host with plaintext `MICROSOFT_*`) to the crewmate — **not the chosen path**
+
+**What was offered:** Hand the crewmate (or a host that already has) plaintext Graph app credentials so it can call ordinary Mail.Send and Sent Items proof outside edge deploy / release execute.
+
+**Why not used:** App secrets are digest-only in the crewmate environment by design; scattering Graph credentials into disposable task worktrees is the wrong long-term boundary. The sanctioned path is a purpose-built route owned by another worker, not ad-hoc credential export into this agent.
+
+### Option 3 — New ops-api ordinary-mail action (sanctioned route) — **accepted direction; built elsewhere**
+
+**What was offered:** A real action (e.g. `send_mailer_ops_visibility`) wired to ordinary admin@ Mail.Send with operation-token Sent Items proof, hard-coded recipient, no-invoice allow-list, deployed only from release `main`.
+
+**Disposition:** This is the shape of the sanctioned route. **This crewmate does not build or deploy it** — another worker owns that work. This ledger only records the block, the readiness of card one, and that we must not ship by weakening fences or by credential smuggling while that route lands.
 
 ---
 
@@ -146,4 +157,5 @@ Until one of those lands, remaining three cards must not be attempted.
 
 **Emails sent:** 0 / 8  
 **Sent Items proofs:** none  
-**Next:** resume only after transport decision; restart at card one report + photo sends, then stop again for proof before card two.
+**This crewmate's outcome:** blocked at transport, ledger committed, docs PR for the record.  
+**Sends:** resume only on the sanctioned route once it exists; still card one first, Sent Items proof, then stop before card two.
