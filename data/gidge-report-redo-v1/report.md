@@ -26,7 +26,7 @@ Storm / wind. The hot water system on the roof is not engineered for the load. T
 
 The work order as received asked SecureWorks to prop a patio post in the veranda. That was a custom and unclear scope for the site.
 
-First attendance was after hours. No builder staff were on site to clarify the intended work, and both the attending trade and the homeowner were unclear what SecureWorks was required to do. The crew inspected the roof space and left when the work could not be confirmed against a clear instruction.
+First attendance was after hours. No builder staff were on site to clarify the intended work, and both the attending trade and the homeowner were unclear what SecureWorks was required to do. The attending trade looked in the manhole and on the roof to assess what was necessary. The work could not proceed that visit.
 
 The job manager was contacted after the first visit and clarified the actual problem: the roof structure under the roof-mounted hot water system, where timber had dipped under the load.
 
@@ -51,7 +51,8 @@ Property on the PDF is `jobs.site_address` only: `11 Crest Side Cl`. Contact red
 | First attendance was after hours | **Captain** (consistent with cycle-1 `arrival_time` 2026-07-10 17:26) |
 | No builder staff on site to clarify | **Captain** |
 | Trade and homeowner both unclear what was required | **Captain** |
-| Crew inspected roof space and left when work could not be confirmed | **Captain** sequence + **trade** cycle-1 `work_done` (assessed roof/manhole, left, after-hours line) |
+| Attending trade looked in the manhole and on the roof to assess what was necessary | **Trade** cycle-1 `work_done`: "Looked in man hole/on their roof and assed what was necessary…" |
+| The work could not proceed that visit | **Captain** consequence of unclear scope / no staff for clarity (not a claimed activity) |
 | Job manager contacted after first visit; clarified real problem | **Captain** |
 | Real problem = roof structure under roof-mounted HWS; timber dipped under load | **Captain** clarification kept consistent with **trade** cycle-2 `damage_description` / elevated findings |
 | Reattendance with one trade completed timber and bugle work | **Captain** + **trade** cycle-2 `trade_count: 1` and `work_done` |
@@ -59,6 +60,14 @@ Property on the PDF is `jobs.site_address` only: `11 Crest Side Cl`. Contact red
 | Materials Timber x 1m / Bugle screws x 5 | **Trade** cycle-2 `materials_used` (quantified only; template ticks omitted) |
 | Scope / findings HWS load / dipped timber / storm-wind | **Trade** damage fields (prior elevated wording retained) |
 | Crew 2 then 1 | **Trade** service-report `trade_count` |
+
+### Sentence check (Captain challenge)
+
+**Removed (invented):** "The crew inspected the roof space and left when the work could not be confirmed against a clear instruction."
+
+- Captain never said that leave-reason or "roof space" phrasing.
+- Cycle-1 trade **does** record looking in the manhole and on the roof and assessing what was necessary; that activity is kept in trade wording.
+- The invented bridge ("could not be confirmed against a clear instruction") is gone. Closing fact: "The work could not proceed that visit."
 
 **Not written:** builder blame, sarcasm, incompetence language, commercial hours (3h / 5h stay on INV-1135 only), invented measurements, hazard classifications, or quantities beyond trade materials. No em dashes.
 
@@ -73,13 +82,13 @@ Property on the PDF is `jobs.site_address` only: `11 Crest Side Cl`. Contact red
 
 | Field | Value |
 | --- | --- |
-| Document | `883a4b6e-…` version **6** |
+| Document | `883a4b6e-…` version **8** |
 | Cycle | `5c0c8a6b-…` **bound** |
 | `source_kind` | `durable_curated_revision` |
 | `supersedes_prior_bind` | **true** |
-| Curation revision | `ses-curated-report:SWMS-26953:2026-08-05-two-visit-justify-v1` |
+| Curation revision | `ses-curated-report:SWMS-26953:2026-08-05-two-visit-justify-v2` |
 | Renderer | `secureworks.wiki-python/915e9b42…` |
-| Local / served / bound raw SHA | `sha256:bb148368ac6f0968999137c2b036673bf68404901cca3f396d8b4c4e1d68d3dc` |
+| Local / served / bound raw SHA | `sha256:8b7a689a912e2aa734ae56fb9763f0f3f098137c0e98261a156d0b453384c3be` |
 | Three-way hash match | **Pass** (`report-hash-proof.json`) |
 | Photos | **9/9** current-cycle (reattendance), no cull |
 
@@ -97,7 +106,7 @@ Property on the PDF is `jobs.site_address` only: `11 Crest Side Cl`. Contact red
 
 | Field | Value |
 | --- | --- |
-| Docket revision | `49e9a649-6286-5135-9e4d-8ea6a7002f70` |
+| Docket revision | `d1e39c05-7a86-5b73-8738-bba73003efe8` |
 | State | **ready** |
 | Blockers | `[]` |
 | Persisted | true |

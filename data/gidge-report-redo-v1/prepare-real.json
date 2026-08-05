@@ -3,56 +3,10 @@
   "dry_run": false,
   "state": "ready",
   "blockers": [],
-  "docket_revision_id": "49e9a649-6286-5135-9e4d-8ea6a7002f70",
+  "docket_revision_id": "d1e39c05-7a86-5b73-8738-bba73003efe8",
   "persisted": true,
-  "input_content_hash": "sha256:11f5ae52b58ea624ec4e1f77970500ab14786e2979e493c947a679abeb96819d",
-  "output_content_hash": "sha256:a51ac245f1c86376f525516afca4842b2ef532dfce54a68102cf536ef969859f",
-  "invoice_proposal": {
-    "version": "ses-local-invoice-proposal/v1",
-    "builder_reference": "MLB-25971PO-55855",
-    "basis": "standard_labour_materials",
-    "trades": 1,
-    "reported_hours_per_trade": 3,
-    "billable_hours_per_trade": 3,
-    "billable_hours_floor": 3,
-    "billable_hours_raised_to_floor": false,
-    "line_items": [
-      {
-        "description": "MLB-25971PO-55855 - make-safe attendance - 1 trade x 3 hours",
-        "quantity": 3,
-        "unit_price_ex_gst": 85,
-        "amount_ex_gst": 255
-      },
-      {
-        "description": "MLB-25971PO-55855 - Materials used: Timber x 1m; Bugle screws x 5; Tarps / roof materials; Fixings / consumables",
-        "quantity": 1,
-        "unit_price_ex_gst": 45,
-        "amount_ex_gst": 45
-      }
-    ],
-    "subtotal_ex_gst": 300,
-    "gst": 30,
-    "total_inc_gst": 330,
-    "xero_identity": null,
-    "materials_charge": {
-      "schema": "secureworks.makesafe.materials-charge-figure/v1",
-      "decision": "charge",
-      "materials_charge_ex_gst": 45,
-      "materials_used": [
-        "Timber x 1m",
-        "Bugle screws x 5",
-        "Tarps / roof materials",
-        "Fixings / consumables"
-      ],
-      "source": "operator_materials_charge_figure",
-      "authorised_by": "Captain Marnin Stobbe",
-      "authorised_at": "2026-08-05T12:30:00.000Z",
-      "decision_key": "gidge-report-redo-v1-materials-45",
-      "reason": "Match existing locked INV-1135 materials line of $45 ex GST; invoice untouched",
-      "estimate": false,
-      "note": "Operator commercial materials figure. Trade attendance evidence was not written; the sealed labour rate and logged hours are unchanged."
-    }
-  },
+  "input_content_hash": "sha256:fd0fe1dcef853226a238afde8c06cfb27cb4c9653c6eaee399ea5a2904d86296",
+  "output_content_hash": "sha256:708b2894b715d67d94be8e8f9f5f626a285e025d79f78454dcfdad2e79750cd7",
   "artifact_roles": {
     "source_attachment": 1,
     "completion_photo": 9,

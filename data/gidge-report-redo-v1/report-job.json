@@ -7,7 +7,7 @@
   "crew": "2 trades first visit; 1 trade reattendance",
   "scope": "Make safe the roof structure under the roof-mounted hot water system.",
   "findings": "Storm / wind. The hot water system on the roof is not engineered for the load. Timber beams have dipped under the weight.",
-  "works": "The work order as received asked SecureWorks to prop a patio post in the veranda. That was a custom and unclear scope for the site.\n\nFirst attendance was after hours. No builder staff were on site to clarify the intended work, and both the attending trade and the homeowner were unclear what SecureWorks was required to do. The crew inspected the roof space and left when the work could not be confirmed against a clear instruction.\n\nThe job manager was contacted after the first visit and clarified the actual problem: the roof structure under the roof-mounted hot water system, where timber had dipped under the load.\n\nOn reattendance, one trade completed the make-safe. Two structural timber pieces were fitted with bugle screws from the base plate to the underpurlin, giving the roof extra support under the hot water system.",
+  "works": "The work order as received asked SecureWorks to prop a patio post in the veranda. That was a custom and unclear scope for the site.\n\nFirst attendance was after hours. No builder staff were on site to clarify the intended work, and both the attending trade and the homeowner were unclear what SecureWorks was required to do. The attending trade looked in the manhole and on the roof to assess what was necessary. The work could not proceed that visit.\n\nThe job manager was contacted after the first visit and clarified the actual problem: the roof structure under the roof-mounted hot water system, where timber had dipped under the load.\n\nOn reattendance, one trade completed the make-safe. Two structural timber pieces were fitted with bugle screws from the base plate to the underpurlin, giving the roof extra support under the hot water system.",
   "materials": "Timber x 1m. Bugle screws x 5.",
   "materials_evidence": {
     "state": "recorded_used",
@@ -109,22 +109,31 @@
       "first attendance after hours",
       "no builder staff on site for clarification",
       "trade and homeowner both unclear what was required",
+      "work could not proceed that visit (consequence of unclear scope / no clarification available)",
       "job manager contacted after first visit with proper explanation",
       "reattendance with one trade completed timber and bugle-screw work"
     ],
     "trade_evidence": [
-      "clarified problem = roof structure under roof-mounted HWS / timber dipped under load (cycle 2 damage_description + elevated findings)",
-      "crew inspected roof space and left without completing make-safe (cycle 1 work_done)",
+      "looked in the manhole and on the roof to assess what was necessary (cycle-1 work_done verbatim substance)",
+      "clarified problem = roof structure under roof-mounted HWS / timber dipped under load (cycle 2 damage_description + findings)",
       "fitted two structural timber pieces with bugle screws base plate to underpurlin under HWS (cycle 2 work_done)",
       "materials Timber x 1m / Bugle screws x 5 (cycle 2 materials_used, quantified only)",
       "crew 2 then 1 from service report trade_count",
       "findings storm/wind + HWS load (damage_cause / damage_description)"
     ],
     "not_written": [
+      "no invented 'inspected the roof space and left when work could not be confirmed against a clear instruction' bridge",
       "no builder blame or incompetence language",
       "no commercial hours (3h/5h invoice only)",
       "no invented measurements/hazards/quantities",
       "property is jobs.site_address only"
-    ]
+    ],
+    "sentence_fix": {
+      "challenged_sentence_removed": "The crew inspected the roof space and left when the work could not be confirmed against a clear instruction.",
+      "cycle1_work_done": "Looked in man hole/on their roof and assed what was necessary to do, did not find any necessary work and left. Called after hours phone line and was told to leave when given the situation.",
+      "replacement": "The attending trade looked in the manhole and on the roof to assess what was necessary. The work could not proceed that visit.",
+      "why_kept_inspection": "cycle-1 trade work_done records looking in manhole/on roof and assessing; kept that activity in trade wording",
+      "why_cut_leave_reason": "Captain never said clear-instruction leave-reason; trade leave reason not restated as that bridge"
+    }
   }
 }
