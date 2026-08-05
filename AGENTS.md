@@ -1198,6 +1198,24 @@ design — do not re-open it as a bypass, and do not add Mail.app. Exact-once
 `graph_outcome_unknown` still means reconcile by token, not redispatch; refusal
 facts must carry the underlying Graph error when one was recorded.
 
+## Mailer Ops Visibility Send Is A Separate Audited Route
+
+Captain-authorised ops mail to the builder **work-order mailer** (not
+`makesafes@` / `report_recipient` billing packs) is
+`ops-api?action=send_mailer_ops_visibility` in `ses_mailer_ops_send.ts`. It is
+itself the audited route: `effect_kind=mailer_ops_send` (migration
+`20260805020000_ses_mailer_ops_send_effect.sql`), report PDF provenance, capped
+photos (module-local `MAILER_OPS_PHOTO_CAP` only — never import into pack/docket),
+ordinary Graph Mail.Send from `admin@`, mandatory CC **`ses@secureworkswa.com.au`**
+(intake mailbox = second proof surface), Sent Items proof with operation header.
+`kind` is `report`|`photo` only — invoice is structurally impossible (types +
+DB CHECK + no money attachment path). One `job_id` + kind per call so card one
+can hard-stop before later cards. `dry_run` defaults true. Do **not** satisfy
+this need by weakening `send-outlook-email` fences or by exempting addresses on
+the sealed money fence. Tests: `ses_mailer_ops_send_test.ts` (wiring only; zero
+Graph — green suite does not prove delivery). Evidence:
+`data/mailer-ops-send-action-v1/report.md`.
+
 AJS/AJBR only (Captain 2026-08-04 / skill backend release contract): two routes
 — `report_invoice` (report PDF + real Xero invoice PDF) then `photo`; TO
 `workorders@ajs.build` + participants; CC `ses@secureworkswa.com.au`. Client-send

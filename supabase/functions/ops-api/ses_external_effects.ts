@@ -6,7 +6,9 @@ export type SesEffectKind =
   | "invoice_authorise"
   | "invoice_void"
   | "route_send"
-  | "document_store";
+  | "document_store"
+  /** Ops-visibility ordinary mail to the work-order mailer (report|photo only). */
+  | "mailer_ops_send";
 export type SesEffectState =
   | "reserved"
   | "dispatching"
@@ -85,14 +87,28 @@ export async function buildSesEffect(args: {
   artifact_hash?: string | null;
   payload: unknown;
 }): Promise<Omit<SesExternalEffect, "state">> {
-  const identity = {
-    effect_kind: args.effect_kind,
-    invoice_obligation_revision_id: args.invoice_obligation_revision_id || null,
-    release_revision_id: args.release_revision_id || null,
-    docket_revision_id: args.docket_revision_id || null,
-    route_kind: args.route_kind || null,
-    artifact_hash: args.artifact_hash || null,
-  };
+  // mailer_ops_send is keyed by job + report|photo (no release revision). Include
+  // job_id in the identity ONLY for that kind so existing operation keys for
+  // invoice/release effects stay bit-stable.
+  const identity = args.effect_kind === "mailer_ops_send"
+    ? {
+      effect_kind: args.effect_kind,
+      job_id: args.job_id || null,
+      invoice_obligation_revision_id: null,
+      release_revision_id: null,
+      docket_revision_id: null,
+      route_kind: args.route_kind || null,
+      artifact_hash: null,
+    }
+    : {
+      effect_kind: args.effect_kind,
+      invoice_obligation_revision_id: args.invoice_obligation_revision_id ||
+        null,
+      release_revision_id: args.release_revision_id || null,
+      docket_revision_id: args.docket_revision_id || null,
+      route_kind: args.route_kind || null,
+      artifact_hash: args.artifact_hash || null,
+    };
   const identityHash = await sesSha256(
     identity,
     "SecureWorks:ses-external-effect-identity:v1\n",
@@ -124,10 +140,12 @@ function unknownRefusal(
 ): SesRefusal {
   const detail = String(underlyingError || "").trim().slice(0, 400);
   const evidence = detail ? { underlying_error: detail } : undefined;
-  if (kind === "route_send") {
+  if (kind === "route_send" || kind === "mailer_ops_send") {
     return sesRefusal(
       "graph_outcome_unknown",
-      "Reconcile Drafts and Sent Items by the exact SES operation token; do not press SEND IT again.",
+      kind === "mailer_ops_send"
+        ? "Reconcile admin@ Sent Items by the exact SES operation token; do not redispatch this mailer ops send."
+        : "Reconcile Drafts and Sent Items by the exact SES operation token; do not press SEND IT again.",
       {
         ...(evidence ? { evidence } : {}),
         ...(detail
