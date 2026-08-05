@@ -32,6 +32,11 @@ import {
   type SesFamilyMatrixRow,
 } from "./ses_family_matrix.ts";
 import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
+import {
+  evaluateSesPhotoMailVolume,
+  resolveSesMailTransportForPrepare,
+  sesPhotoMailVolumeBlocker,
+} from "./ses_photo_mail_volume_guard.ts";
 import { AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST } from "./makesafe_existing_fence_pickets.ts";
 import {
   MAKESAFE_REPORT_CONTRACT_VERSION,
@@ -2856,6 +2861,30 @@ async function prepareOne(
   }
 
   stagesMs.T7 = 0;
+  // Photo-mail volume guard: refuse a pack that cannot fit one Graph message
+  // BEFORE the card claims docs-ready. Never cull/downscale/re-encode photos.
+  if (row && photoFiles.length > 0) {
+    const photoArtifacts = artifacts.filter(
+      (artifact) => artifact.role === "completion_photo",
+    );
+    if (photoArtifacts.length > 0) {
+      const transport = resolveSesMailTransportForPrepare({
+        builder_key: row.builder_key,
+        family: row.family,
+        route_kind: "photo",
+      });
+      const volumeVerdict = evaluateSesPhotoMailVolume(
+        photoArtifacts.map((artifact) => ({
+          name: artifact.path.split("/").pop() || artifact.path,
+          size_bytes: artifact.size_bytes,
+        })),
+        transport,
+      );
+      if (!volumeVerdict.ok) {
+        addBlocker(blockers, sesPhotoMailVolumeBlocker(volumeVerdict));
+      }
+    }
+  }
   const drafts = row
     ? blockers.length === 0
       ? buildEmailDrafts(

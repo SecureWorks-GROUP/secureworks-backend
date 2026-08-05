@@ -1229,6 +1229,19 @@ thread-reply once a supported auth model exists. A stuck `unknown` route_send
 effect is exact-once (reconcile only, never redispatch); a new release revision
 gets a new operation_key. Do not soften `graph_outcome_unknown`.
 
+Photo (and any multi-attachment) volume is guarded **before the first Graph
+call** by `ses_photo_mail_volume_guard.ts` — named
+`photo_mail_volume_exceeds_graph_limit`. Documented ceilings: Exchange Online
+default **35 MB** message size; group-post / direct attach **under 3 MB** per
+file; user-mailbox upload session **3–150 MB** per file (group thread replies
+have no upload session and inline base64). AJS photo uses the sequential
+per-file `uploadAttachment` loop in `ses_graph_mail_gateway.ts`; MLB photo is
+one group-thread reply. **Never cull, downscale, or re-encode photos to fit** —
+a pack over the ceiling is an honest blocker/refusal, not a shortened pack.
+Multi-email split is a Captain recommendation only, not implemented here.
+Evidence + measure script: `docs/evidence/ses-photo-mail-volume-guard-2026-08-05.md`,
+`scripts/ses-photo-mail-volume-measure.ts`.
+
 Closeout proof hashes are a **set**, not a route-kind-ordered array: apply
 `20260805010000_ses_closeout_proof_hash_set_compare.sql` before the matching
 `ops-api` so `commit_ses_release_closeout_v1` compares ledger and payload with
