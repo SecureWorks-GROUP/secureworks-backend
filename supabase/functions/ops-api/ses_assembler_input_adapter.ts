@@ -29,6 +29,7 @@ import {
 import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
 import {
   type ApprovedDraftThreadCandidate,
+  pickIntakeWorkOrderEmailSubject,
   resolveIntakeThreadCoordinates,
 } from "./ses_mlb_thread_reply.ts";
 import {
@@ -149,6 +150,16 @@ export interface SesAssemblerLiveSnapshot {
    * Populated only when case_sources is empty; never outranks real source rows.
    */
   approved_draft_thread_candidates?: ApprovedDraftThreadCandidate[];
+  /**
+   * Verbatim emails.subject by post_id for intake subject recovery (MLB
+   * ordinary-mail inbox grouping). Prefer over reconstructed subjects.
+   */
+  intake_email_subjects_by_post_id?: Record<string, string>;
+  /**
+   * Verbatim makesafe_intake_drafts.subject for approved drafts on this job
+   * (fallback when emails.subject is missing/purged).
+   */
+  approved_draft_subjects?: string[];
   cycles: LiveRow[];
   reports: LiveRow[];
   assignments: LiveRow[];
@@ -1424,6 +1435,32 @@ export function buildSesAssemblerInput(
     preferredStorySourcePostId: intakeCaseStorySourcePostIds(intakeCase),
   });
 
+  // Original WO subject lives primarily on emails.subject (Graph projection of
+  // the intake post). Fallbacks: approved intake draft.subject, then job
+  // metadata builder_email_subject. Verbatim only — never reconstructed.
+  const subjectByPost = snapshot.intake_email_subjects_by_post_id || {};
+  const postIdForSubject = text(intakeThread?.post_id);
+  const emailsSubject = postIdForSubject
+    ? text(subjectByPost[postIdForSubject])
+    : "";
+  // When thread recovery came from an approved draft, that candidate may also
+  // carry emails.subject / draft.subject even if the post map is empty.
+  const draftCandidates = snapshot.approved_draft_thread_candidates || [];
+  const matchingDraft = postIdForSubject
+    ? draftCandidates.find((row) =>
+      text(row.email_post_id) === postIdForSubject ||
+      text(row.graph_message_id) === postIdForSubject
+    )
+    : draftCandidates[0];
+  const intakeSubjectPick = pickIntakeWorkOrderEmailSubject({
+    emailsSubject: emailsSubject || text(matchingDraft?.email_subject) || null,
+    draftSubject: firstText(
+      matchingDraft?.draft_subject,
+      ...(snapshot.approved_draft_subjects || []),
+    ) || null,
+    jobMetadataSubject: firstText(metadata.builder_email_subject) || null,
+  });
+
   return {
     contract_version: SES_INPUT_CONTRACT_VERSION,
     identity: {
@@ -1508,6 +1545,9 @@ export function buildSesAssemblerInput(
       intake_thread_id: intakeThread?.thread_id || null,
       intake_post_id: intakeThread?.post_id || null,
       intake_conversation_id: intakeThread?.conversation_id || null,
+      // Verbatim original WO subject for MLB ordinary-mail inbox grouping only.
+      intake_email_subject: intakeSubjectPick.subject,
+      intake_email_subject_source: intakeSubjectPick.subject_source,
     },
     cycle_facts: {
       trade_report: reportOnly ? null : report
@@ -1954,59 +1994,100 @@ export async function loadSesAssemblerLiveSnapshot(
   // row lacks thread_id — that remains a refuse, not a silent draft override).
   // Row order here is not authority: selection is corroboration then story match
   // then refuse (see pickIntakeThreadFromApprovedDraft).
+  //
+  // Subject recovery is separate and always loads approved-draft subjects +
+  // emails.subject for case-source post_ids so ordinary Mail.Send can group
+  // by the exact original WO subject (inbox grouping, not real threading).
   let approvedDraftThreadCandidates: ApprovedDraftThreadCandidate[] = [];
-  if (caseSources.length === 0) {
-    const approvedDrafts = await many(
+  const intakeEmailSubjectsByPostId: Record<string, string> = {};
+  let approvedDraftSubjects: string[] = [];
+
+  const caseSourcePostIds = [
+    ...new Set(
+      caseSources.map((row) => text(row.post_id)).filter(Boolean),
+    ),
+  ];
+
+  // Always load approved drafts for subject fallback (and for thread recovery
+  // when case_sources is empty). Subject is additive; thread authority is not.
+  const approvedDrafts = await many(
+    client
+      .from("makesafe_intake_drafts")
+      .select(
+        "id,status,approved_job_id,graph_message_id,approved_at,subject",
+      )
+      .eq("approved_job_id", jobId)
+      .eq("status", "approved")
+      .order("approved_at", { ascending: false }),
+    "makesafe_intake_drafts.approved_job_thread_and_subject",
+  );
+  approvedDraftSubjects = approvedDrafts
+    .map((row) => text(row.subject))
+    .filter(Boolean);
+
+  const draftGraphIds = [
+    ...new Set(
+      approvedDrafts
+        .map((row) => text(row.graph_message_id))
+        .filter(Boolean),
+    ),
+  ];
+  const subjectPostIds = [
+    ...new Set([...caseSourcePostIds, ...draftGraphIds]),
+  ];
+  if (subjectPostIds.length) {
+    const emailRows = await many(
       client
-        .from("makesafe_intake_drafts")
+        .from("emails")
         .select(
-          "id,status,approved_job_id,graph_message_id,approved_at",
+          "post_id,thread_id,conversation_id,received_at,subject",
         )
-        .eq("approved_job_id", jobId)
-        .eq("status", "approved")
-        .order("approved_at", { ascending: false }),
-      "makesafe_intake_drafts.approved_job_thread_recovery",
+        .in("post_id", subjectPostIds),
+      "emails.intake_subject_and_thread_recovery",
     );
-    const graphIds = [
-      ...new Set(
-        approvedDrafts
-          .map((row) => text(row.graph_message_id))
-          .filter(Boolean),
-      ),
-    ];
     const emailByPost = new Map<string, LiveRow>();
-    if (graphIds.length) {
-      const emailRows = await many(
-        client
-          .from("emails")
-          .select(
-            "post_id,thread_id,conversation_id,received_at",
-          )
-          .in("post_id", graphIds),
-        "emails.approved_draft_thread_recovery",
-      );
-      for (const row of emailRows) {
-        const postId = text(row.post_id);
-        if (postId) emailByPost.set(postId, row);
-      }
+    for (const row of emailRows) {
+      const postId = text(row.post_id);
+      if (!postId) continue;
+      emailByPost.set(postId, row);
+      const subject = text(row.subject);
+      if (subject) intakeEmailSubjectsByPostId[postId] = subject;
     }
-    approvedDraftThreadCandidates = approvedDrafts.map((draft) => {
-      const graphId = text(draft.graph_message_id);
-      const email = graphId ? emailByPost.get(graphId) : undefined;
-      return {
-        draft_id: text(draft.id) || null,
-        status: text(draft.status) || null,
-        approved_job_id: text(draft.approved_job_id) || null,
-        graph_message_id: graphId || null,
-        approved_at: text(draft.approved_at) || null,
-        email_post_id: email ? text(email.post_id) || null : null,
-        email_thread_id: email ? text(email.thread_id) || null : null,
-        email_conversation_id: email
-          ? text(email.conversation_id) || null
-          : null,
-        email_received_at: email ? text(email.received_at) || null : null,
-      };
-    });
+    if (caseSources.length === 0) {
+      approvedDraftThreadCandidates = approvedDrafts.map((draft) => {
+        const graphId = text(draft.graph_message_id);
+        const email = graphId ? emailByPost.get(graphId) : undefined;
+        return {
+          draft_id: text(draft.id) || null,
+          status: text(draft.status) || null,
+          approved_job_id: text(draft.approved_job_id) || null,
+          graph_message_id: graphId || null,
+          approved_at: text(draft.approved_at) || null,
+          email_post_id: email ? text(email.post_id) || null : null,
+          email_thread_id: email ? text(email.thread_id) || null : null,
+          email_conversation_id: email
+            ? text(email.conversation_id) || null
+            : null,
+          email_received_at: email ? text(email.received_at) || null : null,
+          email_subject: email ? text(email.subject) || null : null,
+          draft_subject: text(draft.subject) || null,
+        };
+      });
+    }
+  } else if (caseSources.length === 0) {
+    approvedDraftThreadCandidates = approvedDrafts.map((draft) => ({
+      draft_id: text(draft.id) || null,
+      status: text(draft.status) || null,
+      approved_job_id: text(draft.approved_job_id) || null,
+      graph_message_id: text(draft.graph_message_id) || null,
+      approved_at: text(draft.approved_at) || null,
+      email_post_id: null,
+      email_thread_id: null,
+      email_conversation_id: null,
+      email_received_at: null,
+      email_subject: null,
+      draft_subject: text(draft.subject) || null,
+    }));
   }
 
   return {
@@ -2016,6 +2097,8 @@ export async function loadSesAssemblerLiveSnapshot(
     cases,
     case_sources: caseSources,
     approved_draft_thread_candidates: approvedDraftThreadCandidates,
+    intake_email_subjects_by_post_id: intakeEmailSubjectsByPostId,
+    approved_draft_subjects: approvedDraftSubjects,
     cycles,
     reports,
     assignments,

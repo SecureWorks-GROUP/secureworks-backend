@@ -113,6 +113,10 @@ export interface ApprovedDraftThreadCandidate {
   email_thread_id?: string | null;
   email_conversation_id?: string | null;
   email_received_at?: string | null;
+  /** Verbatim emails.subject for the draft's graph_message_id when known. */
+  email_subject?: string | null;
+  /** Verbatim makesafe_intake_drafts.subject when known (intake-time copy). */
+  draft_subject?: string | null;
 }
 
 export interface IntakeThreadCoordinates {
@@ -133,6 +137,151 @@ export interface IntakeThreadCoordinates {
    * `approved_draft_emails` only applies when case_sources had zero rows.
    */
   recovery_source?: "case_sources" | "approved_draft_emails";
+}
+
+/**
+ * Where the original work-order subject was recovered for ordinary Mail.Send
+ * inbox grouping. Never invents a subject — only names a real stored source.
+ */
+export type MlbIntakeEmailSubjectSource =
+  | "emails_subject"
+  | "intake_draft_subject"
+  | "job_metadata_builder_email_subject";
+
+/**
+ * Recover the original work-order email subject VERBATIM.
+ *
+ * Authority (first non-empty wins):
+ *   1. `emails.subject` for the intake post_id (Graph projection — preferred)
+ *   2. `makesafe_intake_drafts.subject` (captured at intake from the same mail)
+ *   3. `jobs.metadata.builder_email_subject` (mint-time stamp)
+ *
+ * Do not reconstruct or template. Empty → null (caller falls back to the
+ * generated pack subject and still sends).
+ */
+export function pickIntakeWorkOrderEmailSubject(args: {
+  /** Verbatim emails.subject for the chosen intake post_id. */
+  emailsSubject?: string | null;
+  /** Verbatim makesafe_intake_drafts.subject. */
+  draftSubject?: string | null;
+  /** Verbatim jobs.metadata.builder_email_subject. */
+  jobMetadataSubject?: string | null;
+}): {
+  subject: string | null;
+  subject_source: MlbIntakeEmailSubjectSource | null;
+} {
+  const emails = String(args.emailsSubject || "").trim();
+  if (emails) {
+    return { subject: emails, subject_source: "emails_subject" };
+  }
+  const draft = String(args.draftSubject || "").trim();
+  if (draft) {
+    return { subject: draft, subject_source: "intake_draft_subject" };
+  }
+  const meta = String(args.jobMetadataSubject || "").trim();
+  if (meta) {
+    return {
+      subject: meta,
+      subject_source: "job_metadata_builder_email_subject",
+    };
+  }
+  return { subject: null, subject_source: null };
+}
+
+/**
+ * Subject for MLB physical report/photo under ordinary Mail.Send.
+ *
+ * THIS IS INBOX GROUPING ONLY — NOT REAL MAIL THREADING.
+ * The messages will not be true replies on the work-order conversationThread;
+ * mail clients that group by subject merely park them next to the original WO
+ * when the string matches. Do not read a matching subject as restored threading.
+ *
+ * Re: decision: use the stored original VERBATIM. Do not add a leading `Re:`,
+ * and do not strip one if the stored WO subject already carries it. Captain
+ * ordered the exact original WO subject; nearly-right rebuilt subjects group
+ * nothing. Clients that strip `Re:` for grouping still match the base string
+ * against the original post when we keep the original exactly as stored.
+ *
+ * Missing original never blocks send: fall back to the generated pack subject
+ * and stamp `subject_source: generated_fallback` so the fallback is visible.
+ */
+export function mlbOrdinaryMailSubject(
+  originalSubject: string | null | undefined,
+  generatedSubject: string,
+  originalSubjectSource?: MlbIntakeEmailSubjectSource | null,
+): {
+  subject: string;
+  subject_source: MlbIntakeEmailSubjectSource | "generated_fallback";
+  /**
+   * When recovered, same string as subject. Null on generated fallback.
+   */
+  original_subject: string | null;
+} {
+  const original = String(originalSubject || "").trim();
+  if (original) {
+    // Verbatim — no Re: add/strip (see applyMlbOrdinaryMailSubjectToRoute).
+    return {
+      subject: original,
+      subject_source: originalSubjectSource || "emails_subject",
+      original_subject: original,
+    };
+  }
+  return {
+    subject: String(generatedSubject || "").trim(),
+    subject_source: "generated_fallback",
+    original_subject: null,
+  };
+}
+
+/**
+ * Apply the ordinary-mail subject decision when the route is an MLB physical
+ * report/photo under the Captain exception. Leaves subject untouched for
+ * invoice, non-MLB, locked group-thread shape, and when no override is asked.
+ *
+ * `subjectSource` is the finer pickIntake source when original was recovered;
+ * otherwise `generated_fallback` is stamped so a missing original is never silent.
+ */
+export function applyMlbOrdinaryMailSubjectToRoute<
+  T extends {
+    route_kind: string;
+    subject?: string;
+    subject_source?: string | null;
+    original_work_order_subject?: string | null;
+  },
+>(
+  route: T,
+  args: {
+    ordinaryMailSend: boolean;
+    requiresMlbReportPhotoSubject: boolean;
+    originalSubject: string | null | undefined;
+    /** Finer source from pickIntakeWorkOrderEmailSubject when original present. */
+    originalSubjectSource?: MlbIntakeEmailSubjectSource | null;
+  },
+): T {
+  if (!args.ordinaryMailSend || !args.requiresMlbReportPhotoSubject) {
+    return route;
+  }
+  const kind = String(route.route_kind || "").trim();
+  if (kind !== "report" && kind !== "photo") return route;
+
+  const original = String(args.originalSubject || "").trim();
+  if (original) {
+    const source = args.originalSubjectSource || "emails_subject";
+    return {
+      ...route,
+      // Exact stored WO subject — inbox grouping only, not real threading.
+      subject: original,
+      subject_source: source,
+      original_work_order_subject: original,
+    };
+  }
+  return {
+    ...route,
+    // Generated pack subject remains; fallback is visible on the route.
+    subject: String(route.subject || "").trim(),
+    subject_source: "generated_fallback",
+    original_work_order_subject: null,
+  };
 }
 
 export function isMlbBuilderKey(builderKey: unknown): boolean {
@@ -391,6 +540,7 @@ export function applyMlbThreadReplyToRoute<
   T extends {
     route_kind: string;
     ready: boolean;
+    subject?: string;
     reply_to_thread_id?: string | null;
     reply_to_graph_message_id?: string | null;
     requires_thread_reply?: boolean;
@@ -398,12 +548,23 @@ export function applyMlbThreadReplyToRoute<
     intended_intake_thread_id?: string | null;
     intended_intake_post_id?: string | null;
     mlb_transport?: string | null;
+    subject_source?: string | null;
+    original_work_order_subject?: string | null;
   },
 >(
   route: T,
   shape: { builder_key?: unknown; family?: unknown },
   thread: IntakeThreadCoordinates | null,
   useOrdinaryMailSendFallback: boolean = mlbPhysicalUsesOrdinaryMailSendFallback(),
+  /**
+   * Optional original WO subject for ordinary-mail inbox grouping (report/photo).
+   * When omitted, callers may still apply subject later via
+   * applyMlbOrdinaryMailSubjectToRoute. Never blocks send when missing.
+   */
+  ordinaryMailSubject?: {
+    originalSubject?: string | null;
+    originalSubjectSource?: MlbIntakeEmailSubjectSource | null;
+  } | null,
 ): T {
   const requires = mlbRouteRequiresIntakeThreadReply(route.route_kind, shape);
   if (!requires) {
@@ -420,7 +581,7 @@ export function applyMlbThreadReplyToRoute<
 
   // Temporary Captain exception — ordinary Mail.Send (not the locked default).
   if (useOrdinaryMailSendFallback) {
-    return {
+    const base = {
       ...route,
       // Must stay false so the gateway does not POST /groups/.../threads/.../reply.
       requires_thread_reply: false,
@@ -436,6 +597,13 @@ export function applyMlbThreadReplyToRoute<
       mlb_transport: MLB_ORDINARY_MAIL_SEND_TRANSPORT,
       ready: route.ready,
     };
+    // Inbox grouping only (not real threading): exact WO subject when known.
+    return applyMlbOrdinaryMailSubjectToRoute(base, {
+      ordinaryMailSend: true,
+      requiresMlbReportPhotoSubject: true,
+      originalSubject: ordinaryMailSubject?.originalSubject,
+      originalSubjectSource: ordinaryMailSubject?.originalSubjectSource,
+    });
   }
 
   // Locked intended shape (restore when group-thread reply is app-supported).

@@ -1,15 +1,18 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  applyMlbOrdinaryMailSubjectToRoute,
   applyMlbThreadReplyToRoute,
   isMlbBuilderKey,
   isMlbPhysicalReleaseShape,
   MLB_ORDINARY_MAIL_SEND_TRANSPORT,
   MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1,
   mlbOrdinaryMailSendEffectPayloadFields,
+  mlbOrdinaryMailSubject,
   mlbPhysicalUsesOrdinaryMailSendFallback,
   mlbRouteRequiresIntakeThreadReply,
   pickIntakeThreadCoordinates,
   pickIntakeThreadFromApprovedDraft,
+  pickIntakeWorkOrderEmailSubject,
   resolveIntakeThreadCoordinates,
   routingIntakeThread,
 } from "./ses_mlb_thread_reply.ts";
@@ -566,7 +569,13 @@ Deno.test("invoice and AJS routes do not require intake-thread reply", () => {
   assertEquals(invoice.ready, true);
 });
 
-function mlbPhysicalDocket(threadId: string | null) {
+function mlbPhysicalDocket(
+  threadId: string | null,
+  opts?: {
+    intake_email_subject?: string;
+    intake_email_subject_source?: string;
+  },
+) {
   return {
     id: "docket-mlb",
     stage: "invoice_bound",
@@ -582,6 +591,8 @@ function mlbPhysicalDocket(threadId: string | null) {
           invoice_to: "makesafes@mlbuilders.com.au",
           intake_thread_id: threadId || "",
           intake_post_id: threadId ? "post-root" : "",
+          intake_email_subject: opts?.intake_email_subject || "",
+          intake_email_subject_source: opts?.intake_email_subject_source || "",
         },
       },
     },
@@ -619,6 +630,136 @@ function mlbPhysicalDocket(threadId: string | null) {
     },
   };
 }
+
+// Maylands live coordinate from data/maylands-graph-403-reconcile-v1/report.md
+const MAYLANDS_WO_SUBJECT =
+  "NEW WORK ORDER - MLB-26267 U24/ 28 Peninsula Road, Maylands, WA 6051";
+
+Deno.test(
+  "pickIntakeWorkOrderEmailSubject prefers emails.subject verbatim, then draft, then metadata",
+  () => {
+    assertEquals(
+      pickIntakeWorkOrderEmailSubject({
+        emailsSubject: MAYLANDS_WO_SUBJECT,
+        draftSubject: "draft copy",
+        jobMetadataSubject: "meta copy",
+      }),
+      {
+        subject: MAYLANDS_WO_SUBJECT,
+        subject_source: "emails_subject",
+      },
+    );
+    assertEquals(
+      pickIntakeWorkOrderEmailSubject({
+        emailsSubject: "  ",
+        draftSubject: "  Draft Subject From Intake  ",
+        jobMetadataSubject: "meta",
+      }),
+      {
+        subject: "Draft Subject From Intake",
+        subject_source: "intake_draft_subject",
+      },
+    );
+    assertEquals(
+      pickIntakeWorkOrderEmailSubject({
+        jobMetadataSubject: "Builder meta subject",
+      }),
+      {
+        subject: "Builder meta subject",
+        subject_source: "job_metadata_builder_email_subject",
+      },
+    );
+    assertEquals(
+      pickIntakeWorkOrderEmailSubject({}),
+      { subject: null, subject_source: null },
+    );
+  },
+);
+
+Deno.test(
+  "mlbOrdinaryMailSubject is exact match; never adds or strips Re:; missing falls back visibly",
+  () => {
+    // Exact — including when the stored WO already had Re: (do not strip).
+    const withRe = mlbOrdinaryMailSubject(
+      "Re: NEW WORK ORDER - MLB-1",
+      "MLB-1 - physical makesafe",
+      "emails_subject",
+    );
+    assertEquals(withRe.subject, "Re: NEW WORK ORDER - MLB-1");
+    assertEquals(withRe.subject_source, "emails_subject");
+    assertEquals(withRe.original_subject, "Re: NEW WORK ORDER - MLB-1");
+
+    // Exact — do not ADD Re: either (Captain: exact original WO subject).
+    const bare = mlbOrdinaryMailSubject(
+      MAYLANDS_WO_SUBJECT,
+      "MLB-26267 - physical makesafe",
+      "emails_subject",
+    );
+    assertEquals(bare.subject, MAYLANDS_WO_SUBJECT);
+    assertEquals(bare.subject.startsWith("Re:"), false);
+
+    // Visible fallback — never blocks; generated subject kept.
+    const fallback = mlbOrdinaryMailSubject(
+      null,
+      "MLB-26267 - physical makesafe",
+    );
+    assertEquals(fallback.subject, "MLB-26267 - physical makesafe");
+    assertEquals(fallback.subject_source, "generated_fallback");
+    assertEquals(fallback.original_subject, null);
+  },
+);
+
+Deno.test(
+  "applyMlbOrdinaryMailSubjectToRoute only rewrites MLB report/photo under ordinary mail",
+  () => {
+    const report = applyMlbOrdinaryMailSubjectToRoute(
+      {
+        route_kind: "report",
+        subject: "MLB-PO-54000 - physical makesafe",
+      },
+      {
+        ordinaryMailSend: true,
+        requiresMlbReportPhotoSubject: true,
+        originalSubject: MAYLANDS_WO_SUBJECT,
+        originalSubjectSource: "emails_subject",
+      },
+    );
+    assertEquals(report.subject, MAYLANDS_WO_SUBJECT);
+    assertEquals((report as any).subject_source, "emails_subject");
+    assertEquals((report as any).original_work_order_subject, MAYLANDS_WO_SUBJECT);
+
+    const invoice = applyMlbOrdinaryMailSubjectToRoute(
+      {
+        route_kind: "invoice",
+        subject: "MLB-PO-54000 - Xero invoice INV-1",
+      },
+      {
+        ordinaryMailSend: true,
+        requiresMlbReportPhotoSubject: true,
+        originalSubject: MAYLANDS_WO_SUBJECT,
+        originalSubjectSource: "emails_subject",
+      },
+    );
+    // Invoice billing pack keeps its own subject.
+    assertEquals(invoice.subject, "MLB-PO-54000 - Xero invoice INV-1");
+    assertEquals((invoice as any).subject_source, undefined);
+
+    const missing = applyMlbOrdinaryMailSubjectToRoute(
+      {
+        route_kind: "photo",
+        subject: "Photo Evidence - MLB-PO-54000",
+      },
+      {
+        ordinaryMailSend: true,
+        requiresMlbReportPhotoSubject: true,
+        originalSubject: null,
+      },
+    );
+    assertEquals(missing.subject, "Photo Evidence - MLB-PO-54000");
+    assertEquals((missing as any).subject_source, "generated_fallback");
+    assertEquals((missing as any).original_work_order_subject, null);
+  },
+);
 
 const MLB_ARTIFACTS = [
   {
@@ -673,6 +814,9 @@ Deno.test(
     assertEquals(report.reply_to_graph_message_id, null);
     assertEquals((report as any).intended_intake_thread_id, "thread-intake-1");
     assertEquals((report as any).mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
+    // No original subject on routing → visible generated fallback; still ready.
+    assertEquals((report as any).subject_source, "generated_fallback");
+    assertEquals(report.subject, "MLB-PO-54000 - physical makesafe");
     assertEquals(report.attachment_hashes, ["report-hash"]);
     assertEquals(report.cc || [], []);
 
@@ -681,6 +825,7 @@ Deno.test(
     assertEquals(photo.requires_thread_reply, false);
     assertEquals(photo.reply_to_thread_id, null);
     assertEquals((photo as any).mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
+    assertEquals((photo as any).subject_source, "generated_fallback");
     assertEquals(photo.attachment_hashes, ["photo-hash-1"]);
 
     const invoice = routes.find((r) => r.route_kind === "invoice")!;
@@ -692,6 +837,51 @@ Deno.test(
     assertEquals(invoice.attachment_hashes.includes("xero-hash"), true);
     assertEquals(invoice.attachment_hashes.includes("report-hash"), true);
     assertEquals(invoice.attachment_hashes.includes("swms-hash"), true);
+    // Invoice subject is never the WO subject.
+    assertEquals(
+      String(invoice.subject).includes("NEW WORK ORDER"),
+      false,
+    );
+  },
+);
+
+Deno.test(
+  "MLB ordinary-mail report/photo use exact original WO subject from routing (inbox grouping only)",
+  () => {
+    // In-process wiring proof only — zero Graph calls. A green suite proves
+    // the subject is stamped onto routes, not that any mailbox groups them.
+    const routes = resolveDocketRoutes(
+      mlbPhysicalDocket("thread-intake-1", {
+        intake_email_subject: MAYLANDS_WO_SUBJECT,
+        intake_email_subject_source: "emails_subject",
+      }),
+      MLB_ARTIFACTS,
+      null,
+    );
+    const report = routes.find((r) => r.route_kind === "report")!;
+    const photo = routes.find((r) => r.route_kind === "photo")!;
+    const invoice = routes.find((r) => r.route_kind === "invoice")!;
+
+    assertEquals(report.subject, MAYLANDS_WO_SUBJECT);
+    assertEquals(photo.subject, MAYLANDS_WO_SUBJECT);
+    assertEquals((report as any).subject_source, "emails_subject");
+    assertEquals((photo as any).subject_source, "emails_subject");
+    assertEquals(
+      (report as any).original_work_order_subject,
+      MAYLANDS_WO_SUBJECT,
+    );
+    // Not a reconstructed/templated near-match.
+    assertEquals(report.subject.includes("physical makesafe"), false);
+    assertEquals(photo.subject.startsWith("Photo Evidence"), false);
+    // Invoice stays on its own billing subject.
+    assertEquals(invoice.subject.includes("INV-9001"), true);
+    assertEquals(invoice.subject, "MLB-PO-54000 - Xero invoice INV-9001");
+    // Still ordinary mail, still ready, still no group-thread path.
+    assertEquals((report as any).mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
+    assertEquals(report.requires_thread_reply, false);
+    assertEquals(report.reply_to_thread_id, null);
+    assertEquals(report.ready, true);
+    assertEquals(photo.ready, true);
   },
 );
 

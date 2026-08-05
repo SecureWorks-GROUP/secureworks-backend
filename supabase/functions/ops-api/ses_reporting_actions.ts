@@ -546,6 +546,12 @@ export function resolveDocketRoutes(
     // and photo also use ordinary Mail.Send because conversationThread:reply
     // is Application: Not supported. applyMlbThreadReplyToRoute stamps the
     // exception transport visibly; restore by flipping that flag.
+    //
+    // Under ordinary Mail.Send, report/photo subjects use the EXACT original
+    // work-order email subject from routing.intake_email_subject when present
+    // (emails.subject preferred at prepare). That is inbox grouping only —
+    // not real threading. Missing subject falls back to the generated draft
+    // subject and still sends (subject_source: generated_fallback).
     const classification = object(object(object(docket.envelope).v2).classification);
     const family = String(
       classification.family || object(docket.review_spec).family || "",
@@ -555,8 +561,33 @@ export function resolveDocketRoutes(
     const thread = routingIntakeThread(routing);
     const ordinaryMailSend = options?.mlbOrdinaryMailSendFallback ??
       mlbPhysicalUsesOrdinaryMailSendFallback();
+    const originalSubject = String(
+      (routing as any).intake_email_subject || "",
+    ).trim() || null;
+    const originalSubjectSourceRaw = String(
+      (routing as any).intake_email_subject_source || "",
+    ).trim();
+    const originalSubjectSource =
+      originalSubjectSourceRaw === "emails_subject" ||
+        originalSubjectSourceRaw === "intake_draft_subject" ||
+        originalSubjectSourceRaw === "job_metadata_builder_email_subject"
+        ? originalSubjectSourceRaw
+        : originalSubject
+        ? "emails_subject" as const
+        : null;
     return resolvedRoutes.map((route) =>
-      applyMlbThreadReplyToRoute(route, shape, thread, ordinaryMailSend)
+      applyMlbThreadReplyToRoute(
+        route,
+        shape,
+        thread,
+        ordinaryMailSend,
+        ordinaryMailSend
+          ? {
+            originalSubject,
+            originalSubjectSource,
+          }
+          : null,
+      )
     );
   }
 

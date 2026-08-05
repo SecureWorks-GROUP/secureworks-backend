@@ -1251,6 +1251,21 @@ Multi-email split is a Captain recommendation only, not implemented here.
 Evidence + measure script: `docs/evidence/ses-photo-mail-volume-guard-2026-08-05.md`,
 `scripts/ses-photo-mail-volume-measure.ts`.
 
+**Ordinary-mail subject = exact original WO subject (inbox grouping only):** Under
+the exception, report/photo subjects are the **verbatim** original work-order
+email subject — never reconstructed. Preferred store is `emails.subject` for the
+intake `post_id` (Graph projection); fallbacks are
+`makesafe_intake_drafts.subject` then `jobs.metadata.builder_email_subject`.
+Plumbed as `routing.intake_email_subject` / `subject_source` on the route. Do
+**not** add or strip a leading `Re:` — exact match is the point. Missing original
+never blocks send: keep the generated pack subject and stamp
+`subject_source: generated_fallback`. This is **not** real mail threading (messages
+will not appear as replies on the WO conversationThread); mail clients only group
+by subject. Invoice route is unchanged. Helpers:
+`pickIntakeWorkOrderEmailSubject` / `mlbOrdinaryMailSubject` in
+`ses_mlb_thread_reply.ts`. In-process tests prove wiring only — zero Graph calls;
+a green suite does not prove any mailbox groups the result.
+
 Closeout proof hashes are a **set**, not a route-kind-ordered array: apply
 `20260805010000_ses_closeout_proof_hash_set_compare.sql` before the matching
 `ops-api` so `commit_ses_release_closeout_v1` compares ledger and payload with
