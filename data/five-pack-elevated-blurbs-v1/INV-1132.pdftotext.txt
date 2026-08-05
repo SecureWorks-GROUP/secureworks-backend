@@ -1,0 +1,17 @@
+DRAFT INVOICE extract (structured from mint + xero_invoices row; binary PDF not stored in repo)
+Invoice Number: INV-1132
+Status: DRAFT
+Reference: MLB-25876
+Xero id: 42abf372-4084-4298-ae4f-c3b5fe156e65
+
+Description                                             Quantity    Unit Price    Amount AUD
+MLB-25876 - make-safe attendance - 1 trade x 3 hours       3.00      85.00       255.00
+
+                                                                 Subtotal             255.00
+                                                                 TOTAL GST 10%         25.50
+                                                                 TOTAL AUD             280.50
+
+commercial_quantity_override: false
+materials_line: none
+scanned_accrec: 1157
+extract_source: structured_fallback

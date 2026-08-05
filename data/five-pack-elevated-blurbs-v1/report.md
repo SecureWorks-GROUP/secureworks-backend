@@ -6,6 +6,21 @@
 **ops-api:** commit `19072b17…`, deployed `2026-08-05T09:02:03Z`  
 **Privacy:** suburb + job reference only. No client names, phones, emails, or street addresses.
 
+
+## Money status (read this before treating invoices as final)
+
+The four MLB DRAFTs (**INV-1129 … INV-1132**) minted at the **sealed labour floor only**  
+(1 trade × 3 hours @ $85 = **$255.00 ex / $280.50 inc**).  
+**No `commercial_quantity_override` was applied.** Trade materials appear on the bound elevated reports and **do not** appear on those invoices.
+
+**The Captain is deciding whether to remint those four with materials lines.**  
+This ledger records floor mints for review; it does **not** settle the materials money question.
+
+Attadale **INV-1133** is AJS labour only (1 × 2.5h @ $80 = $200 ex / $220 inc), also without a materials line this run.
+
+Ledger evidence is **pdftotext + proof JSON only** (no binary PDFs in repo).
+
+
 ---
 
 ## CAPTAIN — WA delivery list (act on these)
