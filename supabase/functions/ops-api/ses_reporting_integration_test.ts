@@ -418,6 +418,28 @@ Deno.test("Graph sends the checkpointed draft by id and never uses sendMail", ()
   );
 });
 
+Deno.test("SES operation token stays off builder-facing subject/body/reference", () => {
+  const GATEWAY = Deno.readTextFileSync(
+    new URL("./ses_graph_mail_gateway.ts", import.meta.url),
+  );
+  // Non-visible Graph header is the mail proof carrier.
+  assertStringIncludes(GATEWAY, 'SES_OPERATION_HEADER = "x-secureworks-ses-operation"');
+  assertStringIncludes(GATEWAY, "internetMessageHeaders");
+  // Subject must not re-inject `[${token}]`.
+  assert(
+    !GATEWAY.includes("return `${base} [${token}]`"),
+    "builder-facing subject must not stamp the SES operation token",
+  );
+  // Invoice Reference no longer appends `| ${token}`.
+  assert(
+    !INDEX.includes("| ${sesContext.externalToken}"),
+    "builder-facing Xero Reference must not stamp the SES operation token",
+  );
+  // Reconcile carriers for invoice mint after the strip.
+  assertStringIncludes(INDEX, "phase: 'xero_draft_created'");
+  assertStringIncludes(INDEX, ".eq('ses_external_token', token)");
+});
+
 Deno.test("external effects reconcile the exact provider token before dispatch", () => {
   const transition = EFFECTS.indexOf('"dispatching",');
   const reconcile = EFFECTS.indexOf("preDispatchMatches", transition);

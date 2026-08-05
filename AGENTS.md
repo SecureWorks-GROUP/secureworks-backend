@@ -1183,10 +1183,18 @@ client-only send bypass or a second family-completeness rule.
 Approved SEND IT is `prepare_ses_release_revision` →
 `approve_ses_release_revision` → `execute_ses_release_revision`. The Graph
 gateway is `ses_graph_mail_gateway.ts` (wired from `makeSesGraphMailGateway` in
-`ops-api/index.ts`): draft on `admin@`, HTML body + Maverick signature, prove
-Sent Items by matching the SES operation token **client-side** (never OData
-`contains(subject,…)`). `send-outlook-email` refuses sealed SES jobs by design
-— do not re-open it as a bypass, and do not add Mail.app. Exact-once
+`ops-api/index.ts`): draft on `admin@`, HTML body + Maverick signature, stamp
+the SES operation token on the non-visible header
+`x-secureworks-ses-operation`, and prove Sent Items by matching that header
+**client-side** (list newest → filter; hydrate single-message headers when the
+folder list omits them; never OData `contains(subject,…)`). Builder-facing
+subject, body and Xero invoice Reference must never carry `[SES-…]` / the
+operation token — a legacy subject-token match remains only so already-stamped
+in-flight messages stay reconcilable across deploy. Invoice mint reconcile
+uses the local `xero_invoices.ses_external_token` mirror and the effect
+`external_id` checkpoint, with legacy `Reference.Contains` only for historical
+rows that still have the stamp. `send-outlook-email` refuses sealed SES jobs by
+design — do not re-open it as a bypass, and do not add Mail.app. Exact-once
 `graph_outcome_unknown` still means reconcile by token, not redispatch; refusal
 facts must carry the underlying Graph error when one was recorded.
 

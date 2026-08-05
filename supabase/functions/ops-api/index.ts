@@ -1254,8 +1254,67 @@ async function readSesXeroInvoicesByToken(
   client: any,
   externalToken: string,
 ): Promise<SesXeroInvoiceResult[]> {
+  const token = String(externalToken || '').trim()
+  if (!token) return []
+
+  // 1) Local mirror — non-visible carrier written at create time (and the
+  // primary path after builder-facing Reference stopped carrying the SES token).
+  try {
+    const { data: localRows } = await client
+      .from('xero_invoices')
+      .select(
+        'xero_invoice_id,invoice_number,status,reference,total',
+      )
+      .eq('ses_external_token', token)
+      .limit(5)
+    const localHits = (localRows || [])
+      .map(toSesXeroInvoiceResult)
+      .filter((invoice: SesXeroInvoiceResult) => !!invoice.xero_invoice_id)
+    if (localHits.length === 1) return localHits
+    if (localHits.length > 1) return localHits
+  } catch (err) {
+    console.error(
+      '[ops-api] SES invoice reconcile local mirror read failed:',
+      (err as Error).message,
+    )
+  }
+
+  // 2) Effect checkpoint — createInvoice stamps external_id as soon as Xero
+  // returns an InvoiceID so a crash before the mirror upsert stays recoverable
+  // without a builder-visible Reference token.
+  try {
+    const { data: effectRow } = await client
+      .from('ses_external_effects')
+      .select('external_id')
+      .eq('external_token', token)
+      .not('external_id', 'is', null)
+      .limit(1)
+      .maybeSingle()
+    const checkpointId = String(effectRow?.external_id || '').trim()
+    if (checkpointId) {
+      const { accessToken, tenantId } = await getToken(client)
+      const byId = await xeroGet(
+        `/Invoices/${encodeURIComponent(checkpointId)}`,
+        accessToken,
+        tenantId,
+      )
+      const hit = toSesXeroInvoiceResult(
+        byId?.Invoices?.[0] || byId,
+      )
+      if (hit.xero_invoice_id) return [hit]
+    }
+  } catch (err) {
+    console.error(
+      '[ops-api] SES invoice reconcile effect-checkpoint read failed:',
+      (err as Error).message,
+    )
+  }
+
+  // 3) Legacy live Xero search — historical invoices may still carry the SES
+  // token in Reference from before the builder-view strip. Keep this so those
+  // drafts remain reconcilable; new mints do not stamp the token on Reference.
   const { accessToken, tenantId } = await getToken(client)
-  const safeToken = externalToken.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  const safeToken = token.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
   const response = await xeroGet('/Invoices', accessToken, tenantId, {
     // Reference is optional on Xero Invoice — guard before .Contains or Xero
     // raises QueryParseException ("Operations on optional fields must be
@@ -1266,7 +1325,7 @@ async function readSesXeroInvoicesByToken(
   return (response?.Invoices || [])
     .map(toSesXeroInvoiceResult)
     .filter((invoice: SesXeroInvoiceResult) =>
-      invoice.xero_invoice_id && invoice.reference.includes(externalToken)
+      invoice.xero_invoice_id && invoice.reference.includes(token)
     )
 }
 
@@ -27701,9 +27760,23 @@ async function createInvoice(
     }
   }
 
-  const ref = sesContext
-    ? `${String(reference || '').trim()} | ${sesContext.externalToken}`
-    : (reference || '')
+  // Builder-facing Xero Reference must never carry the SES operation token.
+  // Crash-safe reconcile uses (1) xero_invoices.ses_external_token, (2) the
+  // effect external_id checkpoint below, then (3) legacy Reference.Contains
+  // only for historical invoices that still have the stamp.
+  let ref = String(reference || '').trim()
+  if (sesContext?.externalToken) {
+    const token = String(sesContext.externalToken).trim()
+    if (token) {
+      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      ref = ref
+        .replace(new RegExp(`\\s*\\|\\s*${escaped}`, 'gi'), '')
+        .replace(new RegExp(`\\s*\\[${escaped}\\]`, 'gi'), '')
+        .replace(new RegExp(`\\s*${escaped}`, 'gi'), '')
+        .replace(/\s{2,}/g, ' ')
+        .trim()
+    }
+  }
   // Validate tracking category exists in Xero before including it
   let tracking: any[] = []
   try {
@@ -27774,6 +27847,30 @@ async function createInvoice(
   const xeroInvId = xeroInv?.InvoiceID
   const invNumber = xeroInv?.InvoiceNumber
 
+  // SES crash-safe carrier: stamp the Xero InvoiceID onto the effect row as soon
+  // as Xero accepts create, before the local mirror upsert. Reconcile can then
+  // recover without a builder-visible Reference token if the process dies next.
+  if (sesContext?.operationKey && xeroInvId) {
+    const { error: checkpointError } = await client
+      .from('ses_external_effects')
+      .update({
+        external_id: xeroInvId,
+        provider_digest: {
+          phase: 'xero_draft_created',
+          invoice_number: invNumber || null,
+          reference: ref || null,
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq('operation_key', sesContext.operationKey)
+      .eq('state', 'dispatching')
+    if (checkpointError) {
+      throw new Error(
+        `Xero accepted the SES draft but its exact invoice id was not checkpointed (${checkpointError.message})`,
+      )
+    }
+  }
+
   // If approve & send, email the invoice to the client via Xero
   if (!sesContext && send_email && xeroInvId) {
     try {
@@ -27791,48 +27888,60 @@ async function createInvoice(
   const invTotal = xeroInv?.Total ?? items.reduce((s: number, li: any) => s + ((li.quantity || 1) * (li.unit_price || li.unitPrice || 0)), 0) * 1.1
   const invSubTotal = xeroInv?.SubTotal ?? items.reduce((s: number, li: any) => s + ((li.quantity || 1) * (li.unit_price || li.unitPrice || 0)), 0)
   if (xeroInvId) {
+    // Loop 1B-a-apply: stamp the eleven traceability columns added by
+    // migration 20260506101511_loop_1b_a_traceability. Eight columns come
+    // from the strategy doc's W2 traceability set; two close H1's silent
+    // drop (job_contact_id, reference_suffix); one surfaces the Xero
+    // Project manual-fill queue per the 2026-04-09 ADR.
+    // SES path: mirror upsert is load-bearing for token-free Reference
+    // reconcile — fail closed rather than non-blocking swallow.
+    const referenceSuffix = computeReferenceSuffix(traceCtx?.job_number || '', ref)
+    const mirrorRow = {
+      org_id: DEFAULT_ORG_ID,
+      xero_invoice_id: xeroInvId,
+      xero_contact_id: xero_contact_id || xeroInv?.Contact?.ContactID || null,
+      contact_name: contact || xeroInv?.Contact?.Name || null,
+      invoice_number: invNumber,
+      invoice_type: 'ACCREC',
+      status: xeroInv?.Status || invoiceStatus,
+      reference: ref,
+      sub_total: invSubTotal,
+      total_tax: (xeroInv?.TotalTax ?? invTotal - invSubTotal),
+      total: invTotal,
+      amount_due: invTotal,
+      amount_paid: 0,
+      invoice_date: new Date().toISOString().slice(0, 10),
+      due_date: xeroDueDate,
+      job_id: jId || null,
+      run_label: body.run_label || null,
+      // Loop 1B-a-apply traceability columns (NULL when no job context).
+      job_number:                 traceCtx?.job_number || null,
+      customer_name:              traceCtx?.customer_name || contact || null,
+      suburb:                     traceCtx?.suburb || null,
+      division:                   traceCtx?.division || null,
+      account_code:               traceCtx?.account_code || null,
+      tracking_option:            traceCtx?.tracking_option || null,
+      xero_project_manual_status: traceCtx?.xero_project_manual_status || 'needs_manual_fill',
+      quote_revision_id:          traceCtx?.quote_revision_id || null,
+      scope_revision_id:          traceCtx?.scope_revision_id || null,
+      job_contact_id:             job_contact_id || null,
+      reference_suffix:           referenceSuffix,
+      invoice_obligation_revision_id: sesContext?.obligationRevisionId || null,
+      ses_external_token: sesContext?.externalToken || null,
+      synced_at: new Date().toISOString(),
+    }
     try {
-      // Loop 1B-a-apply: stamp the eleven traceability columns added by
-      // migration 20260506101511_loop_1b_a_traceability. Eight columns come
-      // from the strategy doc's W2 traceability set; two close H1's silent
-      // drop (job_contact_id, reference_suffix); one surfaces the Xero
-      // Project manual-fill queue per the 2026-04-09 ADR.
-      const referenceSuffix = computeReferenceSuffix(traceCtx?.job_number || '', ref)
-      await client.from('xero_invoices').upsert({
-        org_id: DEFAULT_ORG_ID,
-        xero_invoice_id: xeroInvId,
-        xero_contact_id: xero_contact_id || xeroInv?.Contact?.ContactID || null,
-        contact_name: contact || xeroInv?.Contact?.Name || null,
-        invoice_number: invNumber,
-        invoice_type: 'ACCREC',
-        status: xeroInv?.Status || invoiceStatus,
-        reference: ref,
-        sub_total: invSubTotal,
-        total_tax: (xeroInv?.TotalTax ?? invTotal - invSubTotal),
-        total: invTotal,
-        amount_due: invTotal,
-        amount_paid: 0,
-        invoice_date: new Date().toISOString().slice(0, 10),
-        due_date: xeroDueDate,
-        job_id: jId || null,
-        run_label: body.run_label || null,
-        // Loop 1B-a-apply traceability columns (NULL when no job context).
-        job_number:                 traceCtx?.job_number || null,
-        customer_name:              traceCtx?.customer_name || contact || null,
-        suburb:                     traceCtx?.suburb || null,
-        division:                   traceCtx?.division || null,
-        account_code:               traceCtx?.account_code || null,
-        tracking_option:            traceCtx?.tracking_option || null,
-        xero_project_manual_status: traceCtx?.xero_project_manual_status || 'needs_manual_fill',
-        quote_revision_id:          traceCtx?.quote_revision_id || null,
-        scope_revision_id:          traceCtx?.scope_revision_id || null,
-        job_contact_id:             job_contact_id || null,
-        reference_suffix:           referenceSuffix,
-        invoice_obligation_revision_id: sesContext?.obligationRevisionId || null,
-        ses_external_token: sesContext?.externalToken || null,
-        synced_at: new Date().toISOString(),
-      }, { onConflict: 'org_id,xero_invoice_id' })
+      const { error: mirrorError } = await client.from('xero_invoices').upsert(
+        mirrorRow,
+        { onConflict: 'org_id,xero_invoice_id' },
+      )
+      if (mirrorError) throw new Error(mirrorError.message)
     } catch (upsertErr: any) {
+      if (sesContext) {
+        throw new Error(
+          `Xero accepted the SES draft and its invoice id was checkpointed, but the local mirror write failed (${upsertErr.message}). Reconcile by the SES external token / checkpointed Xero id; do not mint again.`,
+        )
+      }
       console.error('Non-blocking: failed to cache invoice locally:', upsertErr.message)
     }
   }
