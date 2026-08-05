@@ -167,6 +167,12 @@ create_ses_invoice_draft # probe=source-only
 prepare_ses_invoice_void_revision # probe=source-only
 approve_ses_invoice_void_revision # probe=source-only
 execute_ses_invoice_void_revision # probe=source-only
+# Captain-authorised ops-visibility mail to the builder work-order mailer. A
+# privileged POST that can dispatch builder-facing Graph mail (dry_run defaults
+# true, but recognition must never be proven by firing this at production), so
+# the source gate is the only honest probe. Contract:
+# data/mailer-ops-send-action-v1/report.md
+send_mailer_ops_visibility # probe=source-only
 
 # ── Make-safe compact READ endpoints (Mission makesafe-live-truth-2026-06-14, M2)
 #    GAP-1..6: let the make-safe skills read the email-sync Supabase projection

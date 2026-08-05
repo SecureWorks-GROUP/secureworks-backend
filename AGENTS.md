@@ -1178,7 +1178,11 @@ authoritative API and gate code is in `ses_docs_ready.ts`,
 `ses_docket_persistence.ts`, and `ses_reporting_actions.ts`; do not add a
 client-only send bypass or a second family-completeness rule.
 
-## Sealed Release Graph Send Is The Only Builder Transport
+## Sealed Release Graph Send Is The Only Builder Pack Transport
+
+Every builder-facing report / photo / invoice PACK ships here. The one other
+builder-facing route is ops-visibility mail (next section), which is separately
+audited and can never carry an invoice.
 
 Approved SEND IT is `prepare_ses_release_revision` →
 `approve_ses_release_revision` → `execute_ses_release_revision`. The Graph
@@ -1197,6 +1201,47 @@ rows that still have the stamp. `send-outlook-email` refuses sealed SES jobs by
 design — do not re-open it as a bypass, and do not add Mail.app. Exact-once
 `graph_outcome_unknown` still means reconcile by token, not redispatch; refusal
 facts must carry the underlying Graph error when one was recorded.
+
+## Mailer Ops Visibility Send Is A Separate Audited Route
+
+Captain-authorised ops mail to the builder **work-order mailer** (not
+`makesafes@` / `report_recipient` billing packs) is
+`ops-api?action=send_mailer_ops_visibility` in `ses_mailer_ops_send.ts`. It is
+itself the audited route: `effect_kind=mailer_ops_send` (migration
+`20260805020000_ses_mailer_ops_send_effect.sql`), report PDF provenance, capped
+photos (module-local `MAILER_OPS_PHOTO_CAP` only — never import into pack/docket),
+ordinary Graph Mail.Send from `admin@`, mandatory CC **`ses@secureworkswa.com.au`**
+(intake mailbox = second proof surface), Sent Items proof with operation header.
+`kind` is `report`|`photo` only — invoice is structurally impossible (types +
+DB CHECK + no money attachment path). One `job_id` + kind per call so card one
+can hard-stop before later cards. `dry_run` defaults true. Do **not** satisfy
+this need by weakening `send-outlook-email` fences or by exempting addresses on
+the sealed money fence. Tests: `ses_mailer_ops_send_test.ts` (wiring only; zero
+Graph — green suite does not prove delivery). Evidence:
+`data/mailer-ops-send-action-v1/report.md`.
+
+Three boundaries on that route are load-bearing. `body.to` is REQUIRED and only
+confirmed against an allowlist (this card's own intake `emails.from_email` plus
+the company's full-address entries) — `sender_patterns` is an INBOUND trust list
+and must never auto-select a destination. The effect identity carries an
+`artifact_hash` retry coordinate — kind, recipients and the operator's
+`attempt_key`, and deliberately NOT the subject, attachment hashes or photo
+selection — which is what `release_revision_id` is for `route_send`. Keep
+re-resolved content out of it: a newly uploaded photo re-picks the spread and a
+transient `emails` read error changes the recovered subject, so content in the
+identity would mint a second operation_key and mail the builder twice. Content
+lives in `payload_hash`, where drift reconciles the ORIGINAL effect. Exact-once
+holds per attempt, and a stuck `unknown` token is still never redispatched — the
+operator retries under a new `attempt_key`. Any call that did not itself
+dispatch (`dispatched === false`: an already-confirmed replay OR a reconcile of
+an earlier attempt's message) returns the STORED ledger proof and audits as
+`mailer_ops_visibility_reconciled`; it must never recompose a proof, and the
+effect `provider_digest` only carries subject/attachment claims when that same
+call composed the message. Photo attachments are named from
+the trade's `label` (ordinal-prefixed, `site-photo-NN.ext` when unlabelled);
+never ship the storage UUID as the builder-facing file name. Evidence is current-attendance-cycle scoped through
+the shared `makesafe_cycle_evidence.ts` boundary and excludes `phase:'receipt'`
+media (receipts are cost evidence, not builder-facing site photos).
 
 AJS/AJBR only (Captain 2026-08-04 / skill backend release contract): two routes
 — `report_invoice` (report PDF + real Xero invoice PDF) then `photo`; TO

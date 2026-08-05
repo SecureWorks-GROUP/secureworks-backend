@@ -146,7 +146,7 @@ sequential attach loops.
 - **Never** drops, downscales, re-encodes, or truncates photos.
 - Multi-email split is a **recommendation string only** — not implemented.
 
-### Wiring (three layers, all refuse before Graph when sizes known)
+### Wiring (four layers, all refuse before Graph when sizes known)
 
 1. **Prepare (docket):** after `completion_photo` artifacts exist, before
    email drafts claim ready — adds `SesBlocker`
@@ -157,6 +157,11 @@ sequential attach loops.
    `sesPhotoMailVolumeRefusal`. (`ses_reporting_actions.ts`)
 3. **Gateway:** after `loadAttachments`, before any Graph URL —
    `assertSesPhotoMailVolumeFits`. (`ses_graph_mail_gateway.ts`)
+4. **Mailer ops visibility:** `resolveMailerOpsPhotoAttachments` evaluates the
+   already-capped set (`MAILER_OPS_PHOTO_CAP`) and refuses an oversize pack
+   rather than trimming further; that route rides the user-mailbox transport.
+   (`ses_mailer_ops_send.ts`; route contract in
+   `data/mailer-ops-send-action-v1/report.md`)
 
 ## 5. What tests prove vs residual unknown
 

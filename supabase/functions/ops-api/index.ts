@@ -440,6 +440,7 @@ import {
   approveSesInvoiceRevisionAction,
   approveSesReleaseRevisionAction,
   createSesInvoiceDraftAction,
+  createSupabaseSesEffectStore,
   executeSesInvoiceRevisionAction,
   executeSesReleaseRevisionAction,
   getSesReviewablePackAction,
@@ -463,6 +464,11 @@ import {
   type SesXeroInvoiceResult,
 } from './ses_reporting_actions.ts'
 import { createSesGraphMailGateway } from './ses_graph_mail_gateway.ts'
+import {
+  sendMailerOpsVisibilityAction,
+  isMailerOpsRouteKind,
+  type MailerOpsRouteKind,
+} from './ses_mailer_ops_send.ts'
 import {
   invoiceLinkRequiredRefusal,
   inspectSealedSesJob,
@@ -1582,6 +1588,41 @@ function makeSesGraphMailGateway(client: any): SesMailGateway {
       }).eq('operation_key', operationKey).eq('state', 'dispatching')
       if (checkpointError) {
         throw new Error(`The Graph draft exists but its exact draft id was not checkpointed (${checkpointError.message})`)
+      }
+    },
+    uploadAttachment: uploadSesGraphAttachment,
+  })
+}
+
+/**
+ * Mailer ops-visibility transport. Same Graph ordinary Mail.Send + Sent Items
+ * proof as release, but loadAttachments is caller-supplied (prepared report PDF
+ * / capped photos only). Never uses docket release hashes or invoice artifacts.
+ * Do not route billing packs through this factory.
+ */
+function makeMailerOpsGraphMailGateway(
+  client: any,
+  loadAttachments: (
+    hashes: string[],
+  ) => Promise<Array<{ name: string; contentType: string; bytes: Uint8Array }>>,
+): SesMailGateway {
+  return createSesGraphMailGateway({
+    graphJson: sesGraphJson,
+    loadAttachments,
+    async checkpointDraft(operationKey, draftId) {
+      const { error: checkpointError } = await client.from('ses_external_effects').update({
+        external_id: draftId,
+        provider_digest: {
+          phase: 'draft_created',
+          mailbox: 'admin@secureworkswa.com.au',
+          path: 'mailer_ops_visibility',
+        },
+        updated_at: new Date().toISOString(),
+      }).eq('operation_key', operationKey).eq('state', 'dispatching')
+      if (checkpointError) {
+        throw new Error(
+          `The Graph draft exists but its exact draft id was not checkpointed (${checkpointError.message})`,
+        )
       }
     },
     uploadAttachment: uploadSesGraphAttachment,
@@ -6842,6 +6883,65 @@ if (import.meta.main) serve(async (req: Request) => {
           makeSesGraphMailGateway(client),
           makeSesReleaseXeroReader(client),
         ))
+      // Ops-visibility ordinary Mail.Send to the work-order mailer (Captain
+      // 2026-08-05). One job_id + kind (report|photo) per call so card one can
+      // hard-stop before cards 2–4. Defaults dry_run:true — live send only with
+      // dry_run:false under supervision. Not on ROUTINE_ALLOWED_ACTIONS.
+      // Structural: CC always ses@secureworkswa.com.au; invoice impossible;
+      // does not weaken send-outlook-email or the money fence. `to` is required
+      // and allowlisted (never auto-selected); `attempt_key` is the deliberate
+      // retry coordinate after a Graph failure.
+      case 'send_mailer_ops_visibility': {
+        if (authMode === 'routine') {
+          return json({
+            error:
+              'forbidden: send_mailer_ops_visibility requires the privileged ops key or an admin/owner session',
+          }, 403)
+        }
+        if (authMode === 'jwt') {
+          const role = String(authUser?.role || '').toLowerCase()
+          if (role !== 'admin' && role !== 'owner') {
+            return json({
+              error:
+                'forbidden: send_mailer_ops_visibility requires an admin/owner session',
+            }, 403)
+          }
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'send_mailer_ops_visibility requires POST' }, 405)
+        }
+        if (!isMailerOpsRouteKind(body.kind)) {
+          return json({
+            error:
+              "kind must be 'report' or 'photo'; invoice is structurally forbidden on this route",
+          }, 400)
+        }
+        const mailerKind = body.kind as MailerOpsRouteKind
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id ? [body.job_id] : [],
+          'send_mailer_ops_visibility',
+        )
+        return json(await sendMailerOpsVisibilityAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: body.org_id || DEFAULT_ORG_ID,
+            job_id: body.job_id,
+            kind: mailerKind,
+            to: body.to,
+            job_document_id: body.job_document_id,
+            attempt_key: body.attempt_key,
+            dry_run: body.dry_run,
+            actor: authUser?.email || body.actor || 'mailer-ops-operator',
+          },
+          {
+            makeMailGateway: (loadAttachments) =>
+              makeMailerOpsGraphMailGateway(client, loadAttachments),
+            effectStore: createSupabaseSesEffectStore(client),
+          },
+        ))
+      }
       case 'query_ses_proof_ledger': {
         const releaseRevisionId = url.searchParams.get('release_revision_id') ||
           body.release_revision_id

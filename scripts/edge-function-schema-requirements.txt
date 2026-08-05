@@ -196,6 +196,11 @@ ops-api|supabase/migrations/20260804090000_ses_release_report_invoice_route_kind
 ops-api|supabase/migrations/20260804090000_ses_release_report_invoice_route_kind.sql|constraint|makesafe_release_revision_routes_route_kind_check
 ops-api|supabase/migrations/20260804090000_ses_release_report_invoice_route_kind.sql|constraint|ses_external_effects_route_kind_check
 ops-api|supabase/migrations/20260804090000_ses_release_report_invoice_route_kind.sql|constraint|ses_release_route_proofs_route_kind_check
+# 20260805020000 widens ses_external_effects to effect_kind 'mailer_ops_send'.
+# Both constraint names it rewrites already exist, so only the new partial index
+# proves the migration actually applied before send_mailer_ops_visibility can
+# claim a ledger row.
+ops-api|supabase/migrations/20260805020000_ses_mailer_ops_send_effect.sql|index|uq_ses_external_mailer_ops_send
 # 20260805010000_ses_closeout_proof_hash_set_compare.sql deliberately NOT gated
 # here: it replaces commit_ses_release_closeout_v1 and needs Captain approval
 # before apply. The ops-api honesty path (SEND_READY / board ladder) works
