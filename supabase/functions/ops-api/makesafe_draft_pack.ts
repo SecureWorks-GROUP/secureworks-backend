@@ -3,6 +3,7 @@ import {
   deriveExistingFencePicketDecision,
   type ExistingFencePicketDecision,
 } from "./makesafe_existing_fence_pickets.ts";
+import { MAKESAFE_REPORT_PROSE_STYLE_RULES } from "./makesafe_report_prose.ts";
 
 // MakeSafe Review & Send -- draft-only Claude pack generator helpers.
 //
@@ -111,7 +112,8 @@ export function buildDraftPackSystemPrompt(): string {
     "Return JSON only. Do not use markdown.",
     "You may draft report wording and DRAFT invoice line items.",
     "You must not claim that anything has been sent, authorised, paid, closed, or approved.",
-    "Use concise trade-business language. No em dashes.",
+    "Report wording is short explanatory paragraphs of complete sentences in plain trade English, not bullet fragments or form blurbs. No em dashes.",
+    ...MAKESAFE_REPORT_PROSE_STYLE_RULES,
   ].join("\n");
 }
 
@@ -172,6 +174,8 @@ export function buildDraftPackUserPrompt(ctx: DraftPackContext): string {
       "For AJS/AJBR temporary fencing, default to labour/travel only because AJS normally supplies/uses its own panels/blocks. Sell panels to AJS at $59 ex GST each and cement bases/blocks at $28 ex GST each only when source evidence explicitly says SecureWorks supplied/sold those materials to AJS. Counts alone are not sale evidence. Never charge AJS cable ties/clips/fixings/small consumables. The only picket carve-out is star pickets at $13.50 ex each when the trade materials_used gives one positive quantity and the scope/works narrative says they prop/support/brace/stabilise/secure an existing fence; any panel, block/base, tie/clip, fixing/consumable, hire, retrieval-material or temporary-fence signal keeps the refusal.",
       "Only use selected_photo_urls as the approved photo set for this draft refresh.",
       "Never include MAKESAFE_PACK_SENT or any wording that says the pack was sent/authorised/closed.",
+      // Report prose paragraphs (Captain 2026-08-05): future packs, not bullet blurbs.
+      ...MAKESAFE_REPORT_PROSE_STYLE_RULES,
     ],
     context: ctx,
   });

@@ -686,6 +686,7 @@ import {
   deriveMakesafeReportCrewLabel,
   enrichMakesafeReportJobKvFacts,
 } from './makesafe_report_kv_facts.ts'
+import { resolveMakesafeReportProseSections } from './makesafe_report_prose.ts'
 import {
   canonicalSesJson,
   sesSha256,
@@ -37051,6 +37052,18 @@ function draftPackReportPayload(parsed: any, ctx: DraftPackContext, selectedPhot
     supplied: parsed.report.arrival,
     checklistArrival: checklist.arrival_time,
   })
+  // Builder-facing prose: prefer a good Claude draft; otherwise compose short
+  // explanatory paragraphs from the trade checklist. Never ship raw form dumps
+  // (Damage:/Work: fragments or tick-box materials lists) as the report body.
+  const prose = resolveMakesafeReportProseSections(
+    {
+      scope: parsed.report.scope,
+      findings: parsed.report.findings,
+      works: parsed.report.works || (ctx.service_report as any)?.notes,
+      materials: parsed.report.materials,
+    },
+    checklist,
+  )
   return {
     ref,
     address,
@@ -37059,10 +37072,10 @@ function draftPackReportPayload(parsed: any, ctx: DraftPackContext, selectedPhot
     arrival,
     crew,
     billing_note: compactBillingNote || parsed.report.billing_note || detail.invoice_notes || '',
-    scope: parsed.report.scope || checklist.damage_description || '',
-    findings: parsed.report.findings || checklist.damage_cause || '',
-    works: parsed.report.works || checklist.work_done || (ctx.service_report as any)?.notes || '',
-    materials: parsed.report.materials || (Array.isArray(checklist.materials_used) ? checklist.materials_used.join(', ') : (checklist.materials_used || '')),
+    scope: prose.scope,
+    findings: prose.findings,
+    works: prose.works,
+    materials: prose.materials,
     photos: selectedPhotoUrls.map((url) => ({ url })),
     photo_limit: parsed.report.photo_limit || 8,
   }
