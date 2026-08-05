@@ -1532,37 +1532,49 @@ and the proposal would have zero materials charge lines, refuse with
 `materials_charge_figure_required` naming the materials and asking for **one**
 ex-GST figure. Never raise labour hours or the sealed rate to cover materials.
 
-The operator answers on the OPERATOR surface, never by rewriting trade
-evidence: the `materials_charge` body field of `prepare_ses_docket_revision`
-(`{schema: secureworks.makesafe.materials-charge-figure/v1, amount_ex_gst,
-authorised_by, authorised_at, decision_key, reason}`), single-card selections
-only, folded into the docket input hash so two different figures can never
-collide on one revision id. Typed priced `materials[]` lines remain a valid
-answer.
+The card carries a standing materials-charge DECISION with three states, and
+the operator moves between them on the OPERATOR surface, never by rewriting
+trade evidence: the `materials_charge` body field of
+`prepare_ses_docket_revision`, single-card selections only.
 
-The Captain answers ONCE. A prepare that OMITS the body key inherits the figure
-this card's latest docket revision already carries for the same attendance
-cycle (`resolvePriorMaterialsCharge` → `carriedMaterialsChargeAuthorisation`),
-rebuilt byte-identically so the inheriting revision reproduces the same input
-hash — and, for the same `idempotency_key`, the same revision id and output
-hash, since `revisionIdentityHash` folds that key in. Inheritance is bounded by
-the materials the figure names and by the basis: a re-attendance whose
-`materials_used` differs was never authorised, and a card reclassified off
-`standard_labour_materials` inherits nothing, so neither can bill or block on a
-stale figure. That read is docket-side only — trade attendance evidence is
-never read for the figure and never written.
+- **UNSET** — nobody answered. Materials recorded → the blocker above.
+- **SET** — `{schema: secureworks.makesafe.materials-charge-figure/v1,
+  amount_ex_gst, authorised_by, authorised_at, decision_key, reason}` → one
+  charge line naming the materials.
+- **NONE** — body `null`, or `amount_ex_gst: 0` with the same authority fields
+  (which records who decided it) → labour only, decision recorded on the
+  proposal. That is an explicit answer, not the silent omission this guard
+  exists to prevent.
 
-Omitting the key and clearing the figure are DIFFERENT answers, and the
-presence of the `materials_charge` key is what separates them. A present `null`
-(or `amount_ex_gst: 0` with the same authority fields, which records who
-withdrew it) suppresses inheritance and returns the card to the honest
-question; a withdrawn figure never comes back on its own. Every refusal a
-standing figure causes names that clear path, so the instruction is always one
-the operator can follow. A supplied figure is never discarded either: nothing
-recorded, materials already priced, or a basis with no charge line each refuse
-with `materials_charge_figure_unsupported`. The invoice line the builder reads
-is `<ref> - Materials used: <labels>` — trade wording only, and label
-normalisation replaces underscores but keeps hyphens.
+Typed priced `materials[]` lines remain a valid answer. Both decided states are
+folded into the docket input hash, so two different decisions can never collide
+on one revision id; UNSET wraps nothing and churns no existing hash.
+
+The Captain answers ONCE, in both directions. SET and NONE are both stamped as
+the `materials_charge` marker on the revision the prepare commits — on the
+proposal when one is produced, on the refusing blocker's `facts` when one is
+not (`materialsChargeDecisionMarker`) — so a decision taken while the card was
+blocked for an unrelated pricing reason is just as durable. A prepare that
+OMITS the body key inherits the NEWEST marker of either kind
+(`resolvePriorMaterialsCharge` → `materialsChargeDecisionFromRevision` →
+`carriedMaterialsChargeDecision`) and changes nothing; a withdrawal can
+therefore never be overtaken by the figure it withdrew. Only an explicit body
+value moves the decision. An inherited SET is rebuilt byte-identically, so the
+inheriting revision reproduces the same input hash — and, for the same
+`idempotency_key`, the same revision id and output hash, since
+`revisionIdentityHash` folds that key in.
+
+Inheritance is bounded by the materials the decision names and by the basis: a
+re-attendance whose `materials_used` differs was never decided on, and a card
+reclassified off `standard_labour_materials` inherits nothing, so neither can
+bill nor block on a stale decision. That read is docket-side only — trade
+attendance evidence is never read for the decision and never written. A
+supplied figure is never discarded either: nothing recorded, materials already
+priced, or a basis with no charge line each refuse with
+`materials_charge_figure_unsupported`, and every such refusal names the
+no-charge path so the instruction is always one the operator can follow. The
+invoice line the builder reads is `<ref> - Materials used: <labels>` — trade
+wording only, and label normalisation replaces underscores but keeps hyphens.
 
 **Families changed:** `standard_labour_materials` only (non-AJS builder x
 physical-shaped family). That is also the exact scope of the adapter's

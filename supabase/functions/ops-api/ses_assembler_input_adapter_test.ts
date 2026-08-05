@@ -385,8 +385,30 @@ Deno.test(
       ...base,
       materials_charge: null,
     });
-    assertEquals(cleared.materials_charge_cleared, true);
+    assertEquals(cleared.materials_charge_cleared, {
+      cleared_by: null,
+      cleared_at: null,
+      decision_key: null,
+      reason: null,
+    });
     assertEquals(Object.hasOwn(cleared, "materials_charge"), false);
+
+    // An attributed zero is the same NONE decision, carrying who decided it.
+    const attributedClear = normalizeSesPrepareRequest({
+      ...base,
+      materials_charge: {
+        schema: "secureworks.makesafe.materials-charge-figure/v1",
+        amount_ex_gst: 0,
+        authorised_by: "captain@secureworksgroup.app",
+        authorised_at: "2026-08-05T03:00:00.000Z",
+        decision_key: "materials-none-2026-08-05",
+        reason: "No materials charge on this card.",
+      },
+    });
+    assertEquals(
+      attributedClear.materials_charge_cleared?.cleared_by,
+      "captain@secureworksgroup.app",
+    );
 
     const charged = normalizeSesPrepareRequest({
       ...base,

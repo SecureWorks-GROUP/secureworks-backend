@@ -52,11 +52,13 @@ import {
   type SesSwmsGenerationPlan,
 } from "./ses_swms_template.ts";
 import {
-  carriedMaterialsChargeAuthorisation,
+  carriedMaterialsChargeDecision,
   decideStandardLabourMaterialsCharge,
+  MATERIALS_CHARGE_DECISION_FACT,
   MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
+  materialsChargeDecisionMarker,
   recordedMaterialsUsed,
-  type SesMaterialsChargeAuthorisation,
+  type SesMaterialsChargeStandingDecision,
 } from "./ses_materials_charge_guard.ts";
 
 export const SES_FIVE_MINUTES_MS = 300_000;
@@ -664,7 +666,7 @@ function recordedMaterialsFact(input: SesAssemblerInputV1): unknown {
 function localInvoiceProposal(
   input: SesAssemblerInputV1,
   row: SesFamilyMatrixRow,
-  operatorMaterialsCharge: SesMaterialsChargeAuthorisation | null = null,
+  materialsChargeDecision: SesMaterialsChargeStandingDecision | null = null,
 ): {
   proposal: Record<string, unknown> | null;
   blocker: SesBlocker | null;
@@ -681,25 +683,36 @@ function localInvoiceProposal(
       ),
     };
   }
-  // An authorised money figure is never silently dropped. Only the
-  // standard_labour_materials basis can host it; every other basis refuses
-  // loudly rather than pricing as if the figure had not been sent.
+  // A materials-charge decision is never silently dropped. Only the
+  // standard_labour_materials basis can host one; every other basis refuses
+  // loudly rather than pricing as if the operator had said nothing.
+  // Inheritance is already basis-gated, so only a body-supplied decision
+  // reaches this.
   if (
-    operatorMaterialsCharge &&
+    materialsChargeDecision &&
     row.invoice_basis !== "standard_labour_materials"
   ) {
+    const charged = materialsChargeDecision.decision === "charge";
     return {
       proposal: null,
       blocker: blocked(
         MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
-        `A materials charge of $${operatorMaterialsCharge.amount_ex_gst} ex GST was authorised, but this card prices on ${row.invoice_basis}, which has no operator materials charge line.`,
-        "Remove materials_charge and re-run. The one-figure materials answer exists only for the standard_labour_materials basis (non-AJS physical, repair and restoration cards).",
+        `${
+          charged
+            ? `A materials charge of $${materialsChargeDecision.authorisation.amount_ex_gst} ex GST was authorised`
+            : "A no-materials-charge decision was recorded"
+        }, but this card prices on ${row.invoice_basis}, which has no operator materials charge line.`,
+        "Drop the materials_charge body key and re-run. The materials-charge decision exists only for the standard_labour_materials basis (non-AJS physical, repair and restoration cards).",
         ["canonical-input-envelope", "sealed-family-matrix"],
         [],
         {
           invoice_basis: row.invoice_basis,
-          materials_charge_ex_gst: operatorMaterialsCharge.amount_ex_gst,
-          decision_key: operatorMaterialsCharge.decision_key,
+          materials_charge_ex_gst: charged
+            ? materialsChargeDecision.authorisation.amount_ex_gst
+            : 0,
+          decision_key: charged
+            ? materialsChargeDecision.authorisation.decision_key
+            : materialsChargeDecision.clearance.decision_key,
         },
       ),
     };
@@ -1002,13 +1015,14 @@ function localInvoiceProposal(
   // MLB / standard_labour_materials: never emit a silent labour-only proposal
   // when the trade recorded materials_used. No general materials unit-price
   // list exists — do not invent one. Either accept a priced materials line /
-  // operator one-figure charge, or refuse with a named ask-one-figure blocker.
+  // operator one-figure charge / recorded no-charge decision, or refuse with a
+  // named ask-one-figure blocker.
   // AJS/AJBR (ajs_labour_materials) keep their picket carve-out unchanged.
   let materialsChargeMeta: Record<string, unknown> | null = null;
   if (row.invoice_basis === "standard_labour_materials") {
     const materialsDecision = decideStandardLabourMaterialsCharge({
       materials_used: recordedMaterialsFact(input),
-      operator_charge: operatorMaterialsCharge,
+      standing_decision: materialsChargeDecision,
       priced_materials_line_count: pricedMaterialsLineCount,
     });
     if (materialsDecision.action === "refuse") {
@@ -1036,6 +1050,9 @@ function localInvoiceProposal(
           materialsDecision.amount_ex_gst,
         ),
       );
+      materialsChargeMeta = materialsDecision.provenance;
+    }
+    if (materialsDecision.action === "no_charge_recorded") {
       materialsChargeMeta = materialsDecision.provenance;
     }
   }
@@ -1879,28 +1896,31 @@ async function prepareOne(
     own_template_requested: input.classification.own_template_requested,
     site_suburb: input.source.site_suburb,
   });
-  // An operator materials figure changes what the invoice says, so it belongs
-  // inside the revision identity. Wrapping only when one is supplied keeps the
-  // ordinary hash byte-identical, so no existing Docs Ready signoff is churned.
+  // The card carries a standing materials-charge decision — UNSET, SET or
+  // NONE — and it changes what the invoice says, so the decided states belong
+  // inside the revision identity. UNSET wraps nothing, which keeps the ordinary
+  // hash byte-identical and churns no existing Docs Ready signoff.
   //
-  // A prepare that OMITS the body figure inherits the one this card's latest
-  // revision already carries for the same attendance cycle and the same
-  // recorded materials. The Captain answers once; a routine re-prepare must
-  // never quietly return the card to a labour-only proposal. An EXPLICIT clear
-  // is the opposite answer and must never be swallowed by that inheritance.
-  // Inheritance is bounded to the basis whose pricing has a charge line at all,
-  // so a card reclassified onto another basis cannot carry a stale figure into
-  // a refusal the operator did not ask for.
-  let operatorMaterialsCharge = request.materials_charge || null;
+  // An OMITTED body key inherits whatever this card's newest revision decided
+  // for the same attendance cycle and the same recorded materials, in either
+  // direction: a figure keeps billing and a withdrawal keeps not billing. Only
+  // an explicit body value moves the decision. Inheritance is bounded to the
+  // basis whose pricing has a charge line at all, so a card reclassified onto
+  // another basis cannot carry a stale decision into a refusal nobody asked for.
+  let materialsChargeDecision: SesMaterialsChargeStandingDecision | null =
+    request.materials_charge
+      ? { decision: "charge", authorisation: request.materials_charge }
+      : request.materials_charge_cleared
+      ? { decision: "none", clearance: request.materials_charge_cleared }
+      : null;
   if (
-    !operatorMaterialsCharge &&
-    !request.materials_charge_cleared &&
+    !materialsChargeDecision &&
     matrix.ok &&
     matrix.row.invoice_basis === "standard_labour_materials" &&
     deps.resolvePriorMaterialsCharge &&
     recordedMaterialsUsed(recordedMaterialsFact(input)).length > 0
   ) {
-    operatorMaterialsCharge = carriedMaterialsChargeAuthorisation({
+    materialsChargeDecision = carriedMaterialsChargeDecision({
       prior_materials_charge: await deps.resolvePriorMaterialsCharge({
         job_id: input.identity.job_id,
         attendance_cycle_id: input.attendance.current_attendance_cycle_id,
@@ -1909,8 +1929,13 @@ async function prepareOne(
     });
   }
   const inputContentHash = await sesSha256(
-    operatorMaterialsCharge
-      ? { input, operator_materials_charge: operatorMaterialsCharge }
+    materialsChargeDecision?.decision === "charge"
+      ? {
+        input,
+        operator_materials_charge: materialsChargeDecision.authorisation,
+      }
+      : materialsChargeDecision?.decision === "none"
+      ? { input, materials_charge_cleared: materialsChargeDecision.clearance }
       : input,
   );
   if (!request.force_refresh && deps.findCurrentRevision) {
@@ -3029,12 +3054,27 @@ async function prepareOne(
       "T6",
       () =>
         Promise.resolve(
-          localInvoiceProposal(input, row, operatorMaterialsCharge),
+          localInvoiceProposal(input, row, materialsChargeDecision),
         ),
     )
     : { proposal: null, blocker: null };
   if (!row) stagesMs.T6 = 0;
-  if (priced.blocker) addBlocker(blockers, priced.blocker);
+  if (priced.blocker) {
+    // A decision made while the card is blocked for some OTHER pricing reason
+    // has no proposal to ride on. Stamping it here is what keeps the standing
+    // decision durable on every revision, so the next prepare inherits this
+    // answer rather than an older one.
+    if (materialsChargeDecision && !priced.proposal) {
+      priced.blocker.facts = {
+        ...(priced.blocker.facts || {}),
+        [MATERIALS_CHARGE_DECISION_FACT]: materialsChargeDecisionMarker(
+          materialsChargeDecision,
+          recordedMaterialsUsed(recordedMaterialsFact(input)),
+        ),
+      };
+    }
+    addBlocker(blockers, priced.blocker);
+  }
   if (priced.proposal) {
     artifacts.push(
       await artifactFromText({

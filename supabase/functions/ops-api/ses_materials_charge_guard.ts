@@ -8,12 +8,22 @@
  * different, narrow carve-out). Without a real price source we must never
  * invent unit prices on a builder invoice.
  *
- * Path (Captain 2026-08-05): when materials_used is present and no materials
- * charge line can be produced, refuse with a named blocker that lists the
- * materials and asks for one materials figure (ex GST). The operator answers on
+ * Path (Captain 2026-08-05): the card carries a standing materials-charge
+ * DECISION with exactly three states, and the operator moves between them on
  * the OPERATOR surface — the `materials_charge` body field of
  * `prepare_ses_docket_revision` — which never writes trade attendance evidence.
- * Typed priced `materials[]` lines remain valid.
+ *
+ *   UNSET  nobody has answered           -> ask (`materials_charge_figure_required`)
+ *   SET    an authorised ex-GST figure   -> one charge line naming the materials
+ *   NONE   an explicit "no materials charge" -> labour-only, decision recorded
+ *
+ * All three are DURABLE, because SET and NONE are both stamped as the
+ * `materials_charge` marker on the revision the prepare commits (on the
+ * proposal when one is produced, and on the refusing blocker's facts when one
+ * is not). Inheritance reads the NEWEST marker of either kind, so a withdrawal
+ * is never overtaken by the charge it withdrew. Omitting the body key inherits
+ * the standing decision and changes nothing; only an explicit body value moves
+ * it. Typed priced `materials[]` lines remain valid.
  *
  * A supplied figure is never silently dropped either: if there is nothing to
  * charge for, or the proposal already prices materials, the run refuses with
@@ -52,13 +62,14 @@ export interface SesMaterialsChargeAuthorisation {
 }
 
 /**
- * An operator withdrawing a figure they previously authorised.
+ * The operator's explicit "no materials charge on this card".
  *
- * A cleared card is exactly a card that was never answered: it inherits
- * nothing and returns to the honest `materials_charge_figure_required`
- * question. "Not supplied" and "explicitly cleared" are different states and
- * must never collapse into each other — treating a deliberate clear as absent
- * would put a withdrawn figure back onto a builder invoice.
+ * This is the NONE state, not the UNSET one: the question has been answered,
+ * the card prices labour only, and the answer is recorded on the revision so a
+ * later prepare inherits it. "Not supplied" and "explicitly cleared" are
+ * different states and must never collapse into each other — treating a
+ * deliberate withdrawal as absent would put a figure the operator removed back
+ * onto a builder invoice.
  */
 export interface SesMaterialsChargeClearance {
   cleared_by: string | null;
@@ -70,6 +81,11 @@ export interface SesMaterialsChargeClearance {
 export type SesMaterialsChargeDirective =
   | { kind: "charge"; authorisation: SesMaterialsChargeAuthorisation }
   | { kind: "cleared"; clearance: SesMaterialsChargeClearance };
+
+/** The standing decision a card carries: SET, or NONE. UNSET is `null`. */
+export type SesMaterialsChargeStandingDecision =
+  | { decision: "charge"; authorisation: SesMaterialsChargeAuthorisation }
+  | { decision: "none"; clearance: SesMaterialsChargeClearance };
 
 /** Validation error for materials-charge payloads (mapped to HTTP by callers). */
 export class SesMaterialsChargeAuthorisationError extends Error {
@@ -143,6 +159,11 @@ export function positiveMaterialsChargeExGst(value: unknown): number | null {
 
 function requiredText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function optionalText(value: unknown): string | null {
+  const text = requiredText(value);
+  return text || null;
 }
 
 /**
@@ -256,35 +277,134 @@ function sameMaterialSet(left: string[], right: string[]): boolean {
 }
 
 /**
- * Rebuild the authorisation a previous docket revision already carries, so one
- * Captain answer keeps answering. The figure is inherited ONLY while it still
- * describes the same recorded materials: a re-attendance that consumed
- * different materials was never authorised, so it asks again rather than
- * billing yesterday's figure for today's work.
- *
- * The rebuilt authorisation is byte-identical to the one the operator sent, so
- * an inheriting prepare reproduces the same input hash and revision identity
- * instead of re-keying the card's signoff.
+ * The durable form of a standing decision. This single object is what a
+ * revision commits — on the proposal when one is produced, on the refusing
+ * blocker's facts when one is not — and what a later prepare reads back, so
+ * SET and NONE persist through exactly the same surface and neither can
+ * outlive the other.
  */
-export function carriedMaterialsChargeAuthorisation(input: {
+export function materialsChargeDecisionMarker(
+  decision: SesMaterialsChargeStandingDecision,
+  materials: string[],
+): Record<string, unknown> {
+  if (decision.decision === "none") {
+    return {
+      schema: SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
+      decision: "none",
+      materials_charge_ex_gst: 0,
+      materials_used: materials,
+      source: "operator_materials_charge_withdrawn",
+      cleared_by: decision.clearance.cleared_by,
+      cleared_at: decision.clearance.cleared_at,
+      decision_key: decision.clearance.decision_key,
+      reason: decision.clearance.reason,
+      estimate: false,
+      note:
+        "Operator decided this card carries no materials charge. Recorded so a later prepare inherits the decision instead of re-asking or re-billing. Trade attendance evidence was not written.",
+    };
+  }
+  const charge = decision.authorisation;
+  return {
+    schema: charge.schema,
+    decision: "charge",
+    materials_charge_ex_gst: charge.amount_ex_gst,
+    materials_used: materials,
+    source: "operator_materials_charge_figure",
+    authorised_by: charge.authorised_by,
+    authorised_at: charge.authorised_at,
+    decision_key: charge.decision_key,
+    reason: charge.reason,
+    estimate: false,
+    note:
+      "Operator commercial materials figure. Trade attendance evidence was not written; the sealed labour rate and logged hours are unchanged.",
+  };
+}
+
+/**
+ * The key the refusing half of a revision stamps its decision under, so a
+ * decision made while the card was blocked for an unrelated pricing reason is
+ * just as durable as one made on a priced revision.
+ */
+export const MATERIALS_CHARGE_DECISION_FACT = "materials_charge_decision";
+
+/**
+ * How far back a decision is looked for. Every revision that prices or refuses
+ * re-stamps the standing decision, so the newest revision carries it and this
+ * bound is headroom, not a window the answer can fall out of.
+ */
+export const SES_MATERIALS_CHARGE_DECISION_SCAN_LIMIT = 25;
+
+/** The decision marker a committed revision carries, from either surface. */
+export function materialsChargeDecisionFromRevision(row: {
+  local_invoice_proposal: unknown;
+  blockers: unknown;
+}): unknown {
+  const proposal = row.local_invoice_proposal;
+  if (proposal && typeof proposal === "object" && !Array.isArray(proposal)) {
+    const marker = (proposal as Record<string, unknown>).materials_charge;
+    if (marker != null) return marker;
+  }
+  if (Array.isArray(row.blockers)) {
+    for (const blocker of row.blockers) {
+      if (!blocker || typeof blocker !== "object" || Array.isArray(blocker)) {
+        continue;
+      }
+      const facts = (blocker as Record<string, unknown>).facts;
+      if (!facts || typeof facts !== "object" || Array.isArray(facts)) continue;
+      const marker = (facts as Record<string, unknown>)[
+        MATERIALS_CHARGE_DECISION_FACT
+      ];
+      if (marker != null) return marker;
+    }
+  }
+  return null;
+}
+
+/**
+ * Read back the standing decision a previous revision committed, so one
+ * operator answer keeps answering in BOTH directions: a figure keeps billing
+ * and a withdrawal keeps not billing.
+ *
+ * A decision is inherited ONLY while it still describes the same recorded
+ * materials: a re-attendance that consumed different materials was never
+ * decided on, so the card asks again rather than reusing yesterday's answer.
+ *
+ * A rebuilt charge is byte-identical to the one the operator sent, so an
+ * inheriting prepare reproduces the same input hash.
+ */
+export function carriedMaterialsChargeDecision(input: {
   prior_materials_charge: unknown;
   materials_used: unknown;
-}): SesMaterialsChargeAuthorisation | null {
+}): SesMaterialsChargeStandingDecision | null {
   const prior = input.prior_materials_charge;
   if (!prior || typeof prior !== "object" || Array.isArray(prior)) return null;
-  const provenance = prior as Record<string, unknown>;
+  const marker = prior as Record<string, unknown>;
   const current = recordedMaterialsUsed(input.materials_used);
   if (!current.length) return null;
-  const authorisedFor = recordedMaterialsUsed(provenance.materials_used);
-  if (!authorisedFor.length || !sameMaterialSet(authorisedFor, current)) {
-    return null;
+  const decidedFor = recordedMaterialsUsed(marker.materials_used);
+  if (!decidedFor.length || !sameMaterialSet(decidedFor, current)) return null;
+  const amount = Number(
+    marker.amount_ex_gst ?? marker.materials_charge_ex_gst,
+  );
+  if (marker.decision === "none" || (Number.isFinite(amount) && amount === 0)) {
+    return {
+      decision: "none",
+      clearance: {
+        cleared_by: optionalText(marker.cleared_by),
+        cleared_at: optionalText(marker.cleared_at),
+        decision_key: optionalText(marker.decision_key),
+        reason: optionalText(marker.reason),
+      },
+    };
   }
   try {
-    return parseSesMaterialsChargeAuthorisation({
-      ...provenance,
-      amount_ex_gst: provenance.amount_ex_gst ??
-        provenance.materials_charge_ex_gst,
-    });
+    return {
+      decision: "charge",
+      authorisation: parseSesMaterialsChargeAuthorisation({
+        ...marker,
+        amount_ex_gst: marker.amount_ex_gst ?? marker.materials_charge_ex_gst,
+      }),
+    };
   } catch {
     return null;
   }
@@ -298,6 +418,12 @@ export type MaterialsChargeDecision =
     amount_ex_gst: number;
     /** Builder-facing line text. No internal jargon reaches the invoice. */
     description: string;
+    provenance: Record<string, unknown>;
+  }
+  | {
+    /** NONE: no charge line, but the decision is recorded on the revision. */
+    action: "no_charge_recorded";
+    materials: string[];
     provenance: Record<string, unknown>;
   }
   | {
@@ -315,12 +441,12 @@ export const MATERIALS_CHARGE_OPERATOR_PATH =
   `Re-run prepare_ses_docket_revision for this one card (selection.mode job_id or job_number) with body materials_charge = { schema: "${SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA}", amount_ex_gst, authorised_by, authorised_at, decision_key, reason }. That is an operator commercial figure and writes no trade evidence.`;
 
 /**
- * How an operator withdraws a figure a previous revision carries. Named on
- * every refusal that a still-standing figure causes, so the instruction is
- * always one the operator can actually follow.
+ * How an operator records "no materials charge on this card". Named on every
+ * refusal that a standing figure causes, so the instruction is always one the
+ * operator can actually follow.
  */
 export const MATERIALS_CHARGE_CLEAR_PATH =
-  "Withdraw the standing figure by re-running prepare_ses_docket_revision for this one card with body materials_charge = null (or amount_ex_gst 0 with authorised_by, authorised_at, decision_key and reason to record who withdrew it). Omitting the field inherits the standing figure; only an explicit clear removes it.";
+  "Record an explicit no-materials-charge decision by re-running prepare_ses_docket_revision for this one card with body materials_charge = null (or amount_ex_gst 0 with authorised_by, authorised_at, decision_key and reason to record who decided it). That decision is stored on the card and inherited from then on: the card prices labour only and stops asking. Omitting the field inherits whatever decision already stands and changes nothing.";
 
 /**
  * Decide whether a standard_labour_materials proposal needs a materials charge
@@ -333,13 +459,24 @@ export const MATERIALS_CHARGE_CLEAR_PATH =
  */
 export function decideStandardLabourMaterialsCharge(input: {
   materials_used: unknown;
-  operator_charge: SesMaterialsChargeAuthorisation | null;
+  standing_decision: SesMaterialsChargeStandingDecision | null;
   priced_materials_line_count: number;
 }): MaterialsChargeDecision {
   const materials = recordedMaterialsUsed(input.materials_used);
-  const charge = input.operator_charge;
+  const standing = input.standing_decision;
+  const charge = standing?.decision === "charge"
+    ? standing.authorisation
+    : null;
   const alreadyPriced = Number.isFinite(input.priced_materials_line_count) &&
     input.priced_materials_line_count > 0;
+
+  if (standing?.decision === "none") {
+    return {
+      action: "no_charge_recorded",
+      materials,
+      provenance: materialsChargeDecisionMarker(standing, materials),
+    };
+  }
 
   if (charge) {
     if (!materials.length) {
@@ -370,20 +507,10 @@ export function decideStandardLabourMaterialsCharge(input: {
       materials,
       amount_ex_gst: charge.amount_ex_gst,
       description: `Materials used: ${joined}`,
-      provenance: {
-        schema: charge.schema,
-        materials_charge_ex_gst: charge.amount_ex_gst,
-        materials_used: materials,
-        source: "operator_materials_charge_figure",
-        authorised_by: charge.authorised_by,
-        authorised_at: charge.authorised_at,
-        decision_key: charge.decision_key,
-        reason: charge.reason,
-        // Not an auto-estimate — figure was authorised, materials list is trade evidence.
-        estimate: false,
-        note:
-          "Operator commercial materials figure. Trade attendance evidence was not written; the sealed labour rate and logged hours are unchanged.",
-      },
+      provenance: materialsChargeDecisionMarker(
+        { decision: "charge", authorisation: charge },
+        materials,
+      ),
     };
   }
 

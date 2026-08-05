@@ -30,6 +30,7 @@ import {
 } from "./ses_docket_persistence.ts";
 import { mlbPhysicalUsesOrdinaryMailSendFallback } from "./ses_mlb_thread_reply.ts";
 import {
+  materialsChargeDecisionFromRevision,
   SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
   type SesMaterialsChargeAuthorisation,
 } from "./ses_materials_charge_guard.ts";
@@ -1857,7 +1858,14 @@ async function labourProposal(
     {
       ...request(input.identity.job_id),
       ...(materialsCharge === "cleared"
-        ? { materials_charge_cleared: true as const }
+        ? {
+          materials_charge_cleared: {
+            cleared_by: "captain@secureworksgroup.app",
+            cleared_at: "2026-08-05T03:00:00.000Z",
+            decision_key: "materials-none-2026-08-05-fixture",
+            reason: "No materials charge on this card.",
+          },
+        }
         : materialsCharge
         ? { materials_charge: materialsCharge }
         : {}),
@@ -2125,8 +2133,11 @@ Deno.test(
   },
 );
 
+// The three-state decision, driven through the SAME surface production reads:
+// each prepare's committed revision is pushed onto the store, and inheritance
+// resolves the newest marker out of it exactly as the live lookup does.
 Deno.test(
-  "an explicitly withdrawn figure is not inherited back",
+  "the standing materials decision survives in both directions",
   async () => {
     const materials = {
       trades: 2,
@@ -2135,50 +2146,116 @@ Deno.test(
       materials: [],
       materials_used: ["Polycarb disposal / tipping"],
     };
-    const answered = await labourProposal(
-      "MLB",
-      "physical_makesafe",
-      materials,
-      materialsChargeAuthorisation(65),
-    );
-    const priorCharge =
-      (answered.invoice_proposal as Record<string, unknown>).materials_charge;
-    let inheritanceConsulted = false;
-    const standingFigure = async () => {
-      inheritanceConsulted = true;
-      return priorCharge;
+    const committed: Array<{
+      local_invoice_proposal: unknown;
+      blockers: unknown;
+    }> = [];
+    let consulted = 0;
+    const standingDecision = async () => {
+      consulted += 1;
+      for (const revision of committed) {
+        const marker = materialsChargeDecisionFromRevision(revision);
+        if (marker != null) return marker;
+      }
+      return null;
     };
+    const commit = (result: {
+      invoice_proposal: unknown;
+      blockers: unknown;
+    }) => {
+      committed.unshift({
+        local_invoice_proposal: result.invoice_proposal,
+        blockers: result.blockers,
+      });
+    };
+    const prepare = (
+      charge?: SesMaterialsChargeAuthorisation | "cleared",
+      hoursAndMaterials: Record<string, unknown> = materials,
+    ) =>
+      labourProposal("MLB", "physical_makesafe", hoursAndMaterials, charge, {
+        resolvePriorMaterialsCharge: standingDecision,
+      });
 
-    // Omitting the key inherits, so the withdrawal has something to withdraw.
-    const inherited = await labourProposal(
-      "MLB",
-      "physical_makesafe",
-      materials,
-      undefined,
-      { resolvePriorMaterialsCharge: standingFigure },
-    );
-    assert(inherited.invoice_proposal, "expected the inherited figure");
-
-    // An explicit clear is the opposite answer and must never be swallowed by
-    // that inheritance: the card returns to the honest question.
-    const cleared = await labourProposal(
-      "MLB",
-      "physical_makesafe",
-      materials,
-      "cleared",
-      { resolvePriorMaterialsCharge: standingFigure },
-    );
-    assertEquals(cleared.invoice_proposal, null);
+    // UNSET: nobody has answered, so the card asks.
+    const unset = await prepare();
+    assertEquals(unset.invoice_proposal, null);
     assertEquals(
-      cleared.blockers.some((item) =>
+      unset.blockers.some((item) =>
         item.reason_code === "materials_charge_figure_required"
       ),
       true,
     );
+    commit(unset);
 
-    // A card on another pricing basis inherits nothing, so a stale figure can
+    // SET: the figure bills, and keeps billing on an omitting prepare.
+    const set = await prepare(materialsChargeAuthorisation(65));
+    assertEquals(set.blockers.map((item) => item.reason_code), []);
+    assertEquals(
+      (set.invoice_proposal as Record<string, unknown>).subtotal_ex_gst,
+      575,
+    );
+    commit(set);
+    const inheritedSet = await prepare();
+    assertEquals(
+      (inheritedSet.invoice_proposal as Record<string, unknown>)
+        .subtotal_ex_gst,
+      575,
+    );
+    commit(inheritedSet);
+
+    // NONE: the operator records no materials charge. It prices labour only,
+    // says so on the proposal, and is not the silent omission this guard exists
+    // to prevent.
+    const none = await prepare("cleared");
+    assertEquals(none.blockers.map((item) => item.reason_code), []);
+    const nonePlan = none.invoice_proposal as Record<string, unknown>;
+    assertEquals(nonePlan.subtotal_ex_gst, 510);
+    assertEquals(
+      (nonePlan.line_items as Array<Record<string, unknown>>).length,
+      1,
+    );
+    const noneMarker = nonePlan.materials_charge as Record<string, unknown>;
+    assertEquals(noneMarker.decision, "none");
+    assertEquals(noneMarker.materials_charge_ex_gst, 0);
+    assertEquals(noneMarker.cleared_by, "captain@secureworksgroup.app");
+    assertEquals(noneMarker.materials_used, ["Polycarb disposal / tipping"]);
+    commit(none);
+
+    // THE REGRESSION: the next routine prepare omits the key. The withdrawal
+    // must stand — the $65 the operator removed can never come back on its own.
+    const afterWithdrawal = await prepare();
+    assertEquals(afterWithdrawal.blockers.map((item) => item.reason_code), []);
+    const standing = afterWithdrawal.invoice_proposal as Record<
+      string,
+      unknown
+    >;
+    assertEquals(standing.subtotal_ex_gst, 510);
+    assertEquals(
+      (standing.materials_charge as Record<string, unknown>).decision,
+      "none",
+    );
+    assertEquals(
+      JSON.stringify(standing.line_items).includes("Materials used"),
+      false,
+      "a withdrawn materials charge must not reappear on the invoice",
+    );
+
+    // Re-settable by the same person: a new figure moves the decision back.
+    const reset = await prepare(materialsChargeAuthorisation(80));
+    assertEquals(
+      (reset.invoice_proposal as Record<string, unknown>).subtotal_ex_gst,
+      590,
+    );
+    commit(reset);
+    assertEquals(
+      ((await prepare()).invoice_proposal as Record<string, unknown>)
+        .subtotal_ex_gst,
+      590,
+    );
+
+    // A card on another pricing basis inherits nothing, so a stale decision can
     // never block a shape that has no materials charge line at all.
-    inheritanceConsulted = false;
+    consulted = 0;
     const otherBasis = await labourProposal(
       "MLB",
       "temporary_fencing",
@@ -2193,9 +2270,9 @@ Deno.test(
         materials_used: ["Polycarb disposal / tipping"],
       },
       undefined,
-      { resolvePriorMaterialsCharge: standingFigure },
+      { resolvePriorMaterialsCharge: standingDecision },
     );
-    assertEquals(inheritanceConsulted, false);
+    assertEquals(consulted, 0);
     assertEquals(
       otherBasis.blockers.some((item) =>
         item.reason_code.startsWith("materials_charge_figure")
@@ -2203,6 +2280,79 @@ Deno.test(
       false,
     );
     assert(otherBasis.invoice_proposal, "temporary fencing still prices");
+  },
+);
+
+Deno.test(
+  "a decision made while the card is otherwise blocked still stands",
+  async () => {
+    // The clear lands on a card blocked for an unrelated pricing reason, so
+    // there is no proposal to carry it. It must still be the standing decision
+    // on the next prepare rather than falling through to the older figure.
+    const materials = ["Polycarb disposal / tipping"];
+    const charged = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 2,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: materials,
+      },
+      materialsChargeAuthorisation(65),
+    );
+    const blockedClear = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      { trades: 2, rate_ex_gst: 85, materials: [], materials_used: materials },
+      "cleared",
+    );
+    assertEquals(blockedClear.invoice_proposal, null);
+    assertEquals(
+      blockedClear.blockers.some((item) =>
+        item.reason_code === "pricing_evidence_missing"
+      ),
+      true,
+    );
+
+    const committed = [
+      {
+        local_invoice_proposal: blockedClear.invoice_proposal,
+        blockers: blockedClear.blockers,
+      },
+      {
+        local_invoice_proposal: charged.invoice_proposal,
+        blockers: charged.blockers,
+      },
+    ];
+    const resolved = committed
+      .map((revision) => materialsChargeDecisionFromRevision(revision))
+      .find((marker) => marker != null);
+    assertEquals(
+      (resolved as Record<string, unknown>).decision,
+      "none",
+      "the newest decision wins even when its revision could not price",
+    );
+
+    const afterHoursRecovered = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 2,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: materials,
+      },
+      undefined,
+      { resolvePriorMaterialsCharge: async () => resolved },
+    );
+    assertEquals(
+      (afterHoursRecovered.invoice_proposal as Record<string, unknown>)
+        .subtotal_ex_gst,
+      510,
+    );
   },
 );
 

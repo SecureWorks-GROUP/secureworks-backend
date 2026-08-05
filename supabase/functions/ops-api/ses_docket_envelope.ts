@@ -1,5 +1,8 @@
 import type { SesBuilderKey, SesFamilyId } from "./ses_family_matrix.ts";
-import type { SesMaterialsChargeAuthorisation } from "./ses_materials_charge_guard.ts";
+import type {
+  SesMaterialsChargeAuthorisation,
+  SesMaterialsChargeClearance,
+} from "./ses_materials_charge_guard.ts";
 
 export const SES_ASSEMBLER_VERSION = "ses-pack-assembler/v1";
 export const SES_INPUT_CONTRACT_VERSION = "ses.assembler-input/v1";
@@ -239,11 +242,12 @@ export interface SesPrepareRequest {
    */
   materials_charge?: SesMaterialsChargeAuthorisation;
   /**
-   * The operator explicitly withdrew the figure this card was carrying. This
-   * is NOT the same state as omitting `materials_charge`, which inherits the
-   * standing figure — a withdrawn figure must never come back by inheritance.
+   * The operator explicitly decided this card carries NO materials charge.
+   * This is NOT the same state as omitting `materials_charge`, which inherits
+   * whatever decision already stands — a withdrawn figure must never come back
+   * by inheritance. Present means cleared; the value carries who decided it.
    */
-  materials_charge_cleared?: true;
+  materials_charge_cleared?: SesMaterialsChargeClearance;
 }
 
 export interface SesBlocker {
