@@ -411,14 +411,16 @@ Deno.test(
           ),
           true,
         );
-        // Best-effort In-Reply-To when provided.
+        // Captain: In-Reply-To must never be stamped on draft create (Graph
+        // rejects non-x- headers and would 400 the whole send). Message-ID
+        // present or missing must not block ordinary Mail.Send.
         assertEquals(
-          parsedBody.internetMessageHeaders.some(
+          (parsedBody.internetMessageHeaders || []).some(
             (h: any) =>
-              h.name === "In-Reply-To" &&
-              h.value === "<mid@mlb.example>",
+              String(h.name || "").toLowerCase() === "in-reply-to" ||
+              String(h.name || "").toLowerCase() === "references",
           ),
-          true,
+          false,
         );
         return { id: "draft-ordinary-1" };
       }
@@ -486,7 +488,7 @@ Deno.test(
   },
 );
 
-Deno.test("sesOptionalThreadingHeaders is best-effort and normalizes angle brackets", () => {
+Deno.test("sesOptionalThreadingHeaders normalizes angle brackets but is not used on draft create", () => {
   assertEquals(sesOptionalThreadingHeaders(null), []);
   assertEquals(sesOptionalThreadingHeaders(""), []);
   assertEquals(sesOptionalThreadingHeaders("mid@ex"), [
@@ -498,3 +500,71 @@ Deno.test("sesOptionalThreadingHeaders is best-effort and normalizes angle brack
     { name: "References", value: "<mid@ex>" },
   ]);
 });
+
+Deno.test(
+  "ordinary Mail.Send never blocks when Message-ID is missing (no threading headers required)",
+  async () => {
+    const token = "SES-no-mid";
+    let draftSent = false;
+    const graphJson = async (
+      url: string,
+      init: RequestInit,
+      expected: number[],
+    ) => {
+      const method = String(init.method || "GET").toUpperCase();
+      const parsedBody = init.body ? JSON.parse(String(init.body)) : undefined;
+      if (
+        method === "POST" && url.endsWith("/messages") && !url.includes("/send")
+      ) {
+        assert(expected.includes(201));
+        // Only the SES operation header — no In-Reply-To required or present.
+        assertEquals(parsedBody.internetMessageHeaders, [{
+          name: SES_OPERATION_HEADER,
+          value: token,
+        }]);
+        return { id: "draft-no-mid" };
+      }
+      if (method === "POST" && url.endsWith("/send")) {
+        draftSent = true;
+        return null;
+      }
+      if (method === "GET" && url.includes("mailFolders/sentitems")) {
+        if (!draftSent) return { value: [] };
+        return {
+          value: [{
+            id: "sent-no-mid",
+            subject: "Report",
+            internetMessageHeaders: [{
+              name: SES_OPERATION_HEADER,
+              value: token,
+            }],
+          }],
+        };
+      }
+      if (method === "GET" && url.includes("mailFolders/drafts")) {
+        return { value: [] };
+      }
+      throw new Error(`unexpected ${method} ${url}`);
+    };
+    const gateway = createSesGraphMailGateway({
+      graphJson: graphJson as any,
+      loadAttachments: async () => [],
+      checkpointDraft: async () => {},
+      uploadAttachment: async () => {},
+      sentPollAttempts: 3,
+      sentPollDelayMs: 1,
+    });
+    const sent = await gateway.createDraftAndSend(
+      {
+        subject: "Report",
+        body: "Body",
+        recipients: ["makesafes@mlbuilders.com.au"],
+        attachment_hashes: [],
+        // No Message-ID — must still send.
+        in_reply_to_internet_message_id: null,
+      },
+      { external_token: token, operation_key: "op-no-mid" },
+    );
+    assertEquals(sent.message_id, "sent-no-mid");
+  },
+);

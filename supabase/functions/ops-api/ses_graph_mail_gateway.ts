@@ -279,22 +279,36 @@ async function listFolderMessagesForReconcile(
 }
 
 /**
- * Best-effort RFC In-Reply-To / References when an internetMessageId is known.
- * Never required for send; absence must not block ordinary Mail.Send.
- * Graph draft create accepts these as internetMessageHeaders (same carrier as
- * the SES operation token). This does not prove a client will thread the mail.
+ * RFC In-Reply-To / References shape (angle-bracket form).
+ *
+ * IMPORTANT — not used on Graph draft create. Microsoft Graph only accepts
+ * custom internetMessageHeaders with an `x-` prefix on message create; putting
+ * `In-Reply-To` / `References` on the draft body 400s and would abort the whole
+ * send. Captain 2026-08-05: prefer completing send over perfect WO-thread —
+ * so ordinary Mail.Send stamps ONLY `x-secureworks-ses-operation`. Missing
+ * Message-ID must never block; a present Message-ID must also never block.
+ * This helper remains for pure normalize/tests and any future supported path.
  */
 export function sesOptionalThreadingHeaders(
   inReplyToInternetMessageId: unknown,
 ): Array<{ name: string; value: string }> {
   const mid = String(inReplyToInternetMessageId || "").trim();
   if (!mid) return [];
-  // Normalize to angle-bracket form when callers pass a bare id.
   const value = mid.startsWith("<") ? mid : `<${mid}>`;
   return [
     { name: "In-Reply-To", value },
     { name: "References", value },
   ];
+}
+
+/**
+ * Headers that Graph draft create will accept. Operation token only —
+ * never In-Reply-To / References (non-x- names reject the create).
+ */
+export function sesDraftCreateInternetMessageHeaders(
+  externalToken: string,
+): Array<{ name: string; value: string }> {
+  return sesOperationInternetMessageHeaders(externalToken);
 }
 
 function draftMessagePayload(
@@ -303,13 +317,12 @@ function draftMessagePayload(
   html: string,
   externalToken: string,
 ): Record<string, unknown> {
-  const headers = [
-    ...sesOperationInternetMessageHeaders(externalToken),
-    ...sesOptionalThreadingHeaders(
-      route.in_reply_to_internet_message_id ||
-        route.threading_internet_message_id,
-    ),
-  ];
+  // Intentionally ignore route.in_reply_to_internet_message_id here.
+  // Threading headers are not attachable on app-only draft create without a
+  // 400 risk; send must complete with only the SES operation proof header.
+  void route.in_reply_to_internet_message_id;
+  void route.threading_internet_message_id;
+  const headers = sesDraftCreateInternetMessageHeaders(externalToken);
   return {
     subject,
     body: { contentType: "HTML", content: html },
@@ -543,7 +556,9 @@ export function createSesGraphMailGateway(
       // Ordinary draft→send path (AJS packs, MLB invoice, MLB report/photo under
       // the temporary ordinary-mail Captain exception). Stamps
       // x-secureworks-ses-operation and proves via admin@ Sent Items.
-      // Optional In-Reply-To is best-effort only — never required to send.
+      // In-Reply-To / References are NOT set on draft create (Graph rejects
+      // non-x- custom headers → would 400 and block send). Missing Message-ID
+      // never blocks; a present one also never blocks. Captain: complete send.
       // Do NOT createReply with a group post id; only a known user-mailbox
       // Graph message id may use createReply (explicit flag).
       const replyToId = String(
