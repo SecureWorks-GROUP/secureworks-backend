@@ -85,6 +85,11 @@ import {
   type SesRefusal,
   sesRefusal,
 } from "./ses_reporting_refusals.ts";
+import {
+  evaluateSesPhotoMailVolume,
+  resolveSesMailTransport,
+  sesPhotoMailVolumeRefusal,
+} from "./ses_photo_mail_volume_guard.ts";
 
 interface SupabaseResponse<T> {
   data: T | null;
@@ -4619,6 +4624,66 @@ export async function executeSesReleaseRevisionAction(
           },
         ),
       );
+    }
+    // Pre-Graph volume guard from stored size_bytes (no byte download). Loud
+    // refusal if the pack cannot fit one message; never cull photos.
+    {
+      const attachmentHashes: unknown[] = Array.isArray(route.attachment_hashes)
+        ? route.attachment_hashes
+        : [];
+      const hashes: string[] = [...new Set<string>(
+        attachmentHashes
+          .map((h: unknown) => String(h || "").trim())
+          .filter((h): h is string => typeof h === "string" && h.length > 0),
+      )];
+      if (hashes.length > 0) {
+        const sizeRows = await client.from("makesafe_docket_artifacts").select(
+          "content_hash,size_bytes,object_key,media_type",
+        ).in("content_hash", hashes);
+        if (sizeRows.error) {
+          throw new SesActionError(503, {
+            state: "refused",
+            fact:
+              `Attachment sizes could not be read before Graph send (${sizeRows.error.message})`,
+          });
+        }
+        const byHash = new Map<string, any>();
+        for (const row of sizeRows.data || []) {
+          if (!byHash.has(row.content_hash)) byHash.set(row.content_hash, row);
+        }
+        const missing = hashes.filter((hash) => !byHash.has(hash));
+        if (missing.length) {
+          throw new SesActionError(
+            409,
+            sesRefusal(
+              "route_draft_missing",
+              "Release attachments are missing size metadata; re-prepare the docket before SEND IT.",
+              { evidence: { missing_content_hashes: missing, route_kind: kind } },
+            ),
+          );
+        }
+        const transport = resolveSesMailTransport(sendRoute);
+        const volumeVerdict = evaluateSesPhotoMailVolume(
+          hashes.map((hash) => {
+            const row = byHash.get(hash)!;
+            const objectKey = String(row.object_key || "");
+            const name = decodeURIComponent(
+              objectKey.split("/").pop() || hash.slice(0, 12),
+            );
+            return {
+              name,
+              size_bytes: Number(row.size_bytes) || 0,
+            };
+          }),
+          transport,
+        );
+        if (!volumeVerdict.ok) {
+          throw new SesActionError(
+            409,
+            sesPhotoMailVolumeRefusal(volumeVerdict),
+          );
+        }
+      }
     }
     const mlbExceptionRouteFields = mlbOrdinaryMailSendEffectPayloadFields(
       sendRoute as any,

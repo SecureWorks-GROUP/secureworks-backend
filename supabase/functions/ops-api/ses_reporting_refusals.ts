@@ -62,6 +62,8 @@ const FACTS = {
     "The SES-native void workflow applies only to sales invoices.",
   ses_invoice_void_requires_sealed_job:
     "The invoice is not bound to an authoritatively sealed SES job.",
+  photo_mail_volume_exceeds_graph_limit:
+    "The photo pack exceeds the documented Microsoft Graph / Exchange mail size ceiling for a single message, so the builder photo email is refused before any Graph call. Photos are never culled or downscaled to fit.",
 } as const;
 
 export type SesRefusalCode = keyof typeof FACTS;
