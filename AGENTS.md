@@ -1202,11 +1202,19 @@ AJS/AJBR only (Captain 2026-08-04 / skill backend release contract): two routes
 — `report_invoice` (report PDF + real Xero invoice PDF) then `photo`; TO
 `workorders@ajs.build` + participants; CC `ses@secureworkswa.com.au`. Client-send
 gate kinds match the skill table exactly: `report_invoice`, `report`, `photo`,
-`invoice` in `makesafe_send_pack.ts` (`checkSesClientSendRouteGate`). MLB: report
-and photo refuse any CC; invoice requires `finance@` and refuses `ses@`. Route
+`invoice` in `makesafe_send_pack.ts` (`checkSesClientSendRouteGate`). Route
 order lives in `ses_release_route_shape.ts`. Apply
 `20260804090000_ses_release_report_invoice_route_kind.sql` before the matching
 `ops-api` (widens `route_kind` and allows two-route `commit_ses_release_revision_v1`).
+
+MLB physical (Captain 2026-08-05 / Maylands): three routes, two destinations —
+`report` and `photo` as **replies on the ses@ group intake thread** (thread_id
+from `makesafe_intake_case_sources`, plumbed onto docket
+`envelope.v2.routing.intake_thread_id` via `ses_mlb_thread_reply.ts`);
+`invoice` is the billing pack to `makesafes@` carrying report + AUTHORISED
+invoice + SWMS (finance@ cc, no ses@). Missing thread_id refuses report/photo
+(`intake_thread_reply_unavailable`) rather than opening a new thread. AJS shape
+is untouched. Report-only MLB families keep the legacy non-threaded split.
 
 Closeout proof hashes are a **set**, not a route-kind-ordered array: apply
 `20260805010000_ses_closeout_proof_hash_set_compare.sql` before the matching

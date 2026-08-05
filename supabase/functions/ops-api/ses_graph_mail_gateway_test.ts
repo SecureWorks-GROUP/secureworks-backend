@@ -266,3 +266,116 @@ Deno.test("reconcileSent still finds legacy subject-stamped messages", async () 
   assertEquals(rows.length, 1);
   assertEquals(rows[0].message_id, "sent-legacy");
 });
+
+Deno.test("group thread reply posts on intake thread and never opens a new message", async () => {
+  const token = "SES-thread-token";
+  const calls: Array<{ url: string; method: string; body?: any }> = [];
+  let replied = false;
+  const htmlProbe = sesReleaseHtmlBody("Report on thread");
+  const graphJson = async (
+    url: string,
+    init: RequestInit,
+    expected: number[],
+  ) => {
+    const method = String(init.method || "GET").toUpperCase();
+    const parsedBody = init.body ? JSON.parse(String(init.body)) : undefined;
+    calls.push({ url, method, body: parsedBody });
+    if (method === "POST" && url.includes("/threads/thread-1/reply")) {
+      assert(expected.includes(202));
+      assertEquals(parsedBody.post.body.contentType, "HTML");
+      assertStringIncludes(parsedBody.post.body.content, "Maverick");
+      assertEquals(
+        String(parsedBody.post.body.content).includes(token),
+        false,
+      );
+      replied = true;
+      return null;
+    }
+    if (method === "GET" && url.includes("/threads/thread-1/posts")) {
+      if (!replied) return { value: [] };
+      return {
+        value: [{
+          id: "post-reply-1",
+          body: { contentType: "HTML", content: htmlProbe },
+          createdDateTime: "2026-08-05T00:00:00Z",
+        }],
+      };
+    }
+    throw new Error(`unexpected graph call ${method} ${url}`);
+  };
+
+  const gateway = createSesGraphMailGateway({
+    graphJson,
+    loadAttachments: async () => [{
+      name: "report.pdf",
+      contentType: "application/pdf",
+      bytes: new Uint8Array([1, 2, 3]),
+    }],
+    checkpointDraft: async () => {},
+    uploadAttachment: async () => {
+      throw new Error("uploadAttachment must not run for group thread reply");
+    },
+    resolveIntakeGroupId: async () => "group-1",
+    sentPollAttempts: 3,
+    sentPollDelayMs: 1,
+  });
+
+  const sent = await gateway.createDraftAndSend(
+    {
+      subject: "Report",
+      body: "Report on thread",
+      recipients: ["site@mlb.example"],
+      cc: [],
+      attachment_hashes: ["h1"],
+      reply_to_thread_id: "thread-1",
+      requires_thread_reply: true,
+    },
+    { external_token: token, operation_key: "op-thread-1" },
+  );
+  assertEquals(sent.message_id, "post-reply-1");
+  assertEquals(sent.operation_token, token);
+  assert(
+    calls.some((c) =>
+      c.method === "POST" && c.url.includes("/threads/thread-1/reply")
+    ),
+  );
+  assertEquals(
+    calls.some((c) =>
+      c.method === "POST" &&
+      c.url.endsWith("/messages") &&
+      !c.url.includes("createReply")
+    ),
+    false,
+  );
+});
+
+Deno.test("requires_thread_reply without thread id refuses rather than new thread", async () => {
+  let called = false;
+  const gateway = createSesGraphMailGateway({
+    graphJson: async () => {
+      called = true;
+      throw new Error("graph must not be called");
+    },
+    loadAttachments: async () => [],
+    checkpointDraft: async () => {},
+    uploadAttachment: async () => {},
+  });
+  let failed = false;
+  try {
+    await gateway.createDraftAndSend(
+      {
+        subject: "Report",
+        body: "Body",
+        recipients: ["site@mlb.example"],
+        attachment_hashes: [],
+        requires_thread_reply: true,
+      },
+      { external_token: "SES-x", operation_key: "op-x" },
+    );
+  } catch (err) {
+    failed = true;
+    assertStringIncludes(String((err as Error).message), "refusing to open a new thread");
+  }
+  assertEquals(failed, true);
+  assertEquals(called, false);
+});

@@ -1296,6 +1296,11 @@ function manifestBase(
         ? input.source.work_order_sender || ""
         : "",
       invoice_to: row.invoice_to || "",
+      // Intake-thread coordinates for MLB physical report/photo reply.
+      // Sourced from makesafe_intake_case_sources.thread_id (not internet_message_id).
+      intake_thread_id: input.source.intake_thread_id || "",
+      intake_post_id: input.source.intake_post_id || "",
+      intake_conversation_id: input.source.intake_conversation_id || "",
     },
     items,
     deliverables: input.source.deliverables.map((deliverable) => ({
@@ -1474,7 +1479,9 @@ function buildEmailDrafts(
   }
 
   // AJS/AJBR two-email shape (Captain 2026-08-04): combined report+invoice, then photos.
-  // MLB and other builders keep the three-email split below.
+  // MLB physical three-email shape (Captain 2026-08-05): report + photo as intake
+  // thread replies; invoice is the billing pack (report + SWMS + AUTHORISED invoice)
+  // to makesafes@. Other builders keep the universal three-email split.
   const ajs = isAjsBuilderKey(row.builder_key);
   if (ajs) {
     const drafts: Record<string, string> = {};
@@ -1509,12 +1516,22 @@ function buildEmailDrafts(
     return drafts;
   }
 
+  const mlbPhysical = row.builder_key === "MLB" && (
+    row.family === "physical_makesafe" ||
+    row.family === "temporary_fencing" ||
+    row.family === "repair" ||
+    row.family === "restoration"
+  );
+
   const invoice = draftEmail({
     to: invoiceTo,
     cc: "finance@secureworkswa.com.au",
-    subject: `${ref} - invoice proposal`,
-    body:
-      "Draft only. This docket contains internal pre-Xero pricing state. No Xero invoice exists and no release is approved.",
+    subject: mlbPhysical
+      ? `${ref} - billing pack (report, SWMS, invoice)`
+      : `${ref} - invoice proposal`,
+    body: mlbPhysical
+      ? "Draft only. Billing pack for makesafes@: make-safe report, SWMS, and the authorised Xero invoice. No release is approved until the invoice is AUTHORISED."
+      : "Draft only. This docket contains internal pre-Xero pricing state. No Xero invoice exists and no release is approved.",
     attachments: invoiceAttachments,
   });
   const drafts: Record<string, string> = { INVOICE_EMAIL_DRAFT: invoice };
@@ -1522,12 +1539,16 @@ function buildEmailDrafts(
     drafts.REPORT_EMAIL_DRAFT = draftEmail({
       to: reportTo,
       subject: `${ref} - ${row.family.replaceAll("_", " ")}`,
-      body: `Draft only. Please find the prepared ${
-        row.family.replaceAll(
-          "_",
-          " ",
-        )
-      } evidence for ${address || "the instructed property"}.`,
+      body: mlbPhysical
+        ? `Draft only. Report-only reply on the work-order intake thread for ${
+          address || "the instructed property"
+        }. Photos and the billing pack travel on separate routes.`
+        : `Draft only. Please find the prepared ${
+          row.family.replaceAll(
+            "_",
+            " ",
+          )
+        } evidence for ${address || "the instructed property"}.`,
       attachments: [reportFile],
     });
   }
@@ -1535,8 +1556,9 @@ function buildEmailDrafts(
     drafts.PHOTO_EMAIL_DRAFT = draftEmail({
       to: reportTo,
       subject: `Photo Evidence - ${ref}`,
-      body:
-        "Draft only. The complete, ordered original photo set is listed on the docket.",
+      body: mlbPhysical
+        ? "Draft only. Photos-only reply on the work-order intake thread. The complete, ordered original photo set is listed on the docket."
+        : "Draft only. The complete, ordered original photo set is listed on the docket.",
       attachments: photoFiles,
     });
   }

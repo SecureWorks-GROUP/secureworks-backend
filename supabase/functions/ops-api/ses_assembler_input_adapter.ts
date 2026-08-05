@@ -27,6 +27,7 @@ import {
   type SesFamilyId,
 } from "./ses_family_matrix.ts";
 import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
+import { pickIntakeThreadCoordinates } from "./ses_mlb_thread_reply.ts";
 import {
   currentCycleNumber,
   filterAssignmentsForCurrentCycle,
@@ -138,6 +139,8 @@ export interface SesAssemblerLiveSnapshot {
   detail: LiveRow | null;
   identity_revision?: LiveRow | null;
   cases: LiveRow[];
+  /** Intake case sources (thread_id / post_id) for MLB thread-reply plumbing. */
+  case_sources?: LiveRow[];
   cycles: LiveRow[];
   reports: LiveRow[];
   assignments: LiveRow[];
@@ -1393,6 +1396,10 @@ export function buildSesAssemblerInput(
     (item) => text(item.status).toLowerCase() === "sent",
   );
   const siblingBundleEvidence = resolveSiblingBundleEvidence(snapshot);
+  const intakeThread = pickIntakeThreadCoordinates(
+    snapshot.case_sources,
+    text(intakeCase?.id) || null,
+  );
 
   return {
     contract_version: SES_INPUT_CONTRACT_VERSION,
@@ -1473,6 +1480,11 @@ export function buildSesAssemblerInput(
         .filter((item) => !item.endsWith(":"))
         .sort(),
       portal_links: portalLinks,
+      // Graph Groups conversationThreadId from case sources — required for
+      // MLB physical report/photo reply on the intake thread.
+      intake_thread_id: intakeThread?.thread_id || null,
+      intake_post_id: intakeThread?.post_id || null,
+      intake_conversation_id: intakeThread?.conversation_id || null,
     },
     cycle_facts: {
       trade_report: reportOnly ? null : report
@@ -1898,11 +1910,28 @@ export async function loadSesAssemblerLiveSnapshot(
         )
         : Promise.resolve([]),
     ]);
+  const cases = [...caseMap.values()];
+  const caseIds = [
+    ...new Set(cases.map((row) => text(row.id)).filter(Boolean)),
+  ];
+  const caseSources = caseIds.length
+    ? await many(
+      client
+        .from("makesafe_intake_case_sources")
+        .select(
+          "case_id,post_id,thread_id,conversation_id,received_at",
+        )
+        .in("case_id", caseIds),
+      "makesafe_intake_case_sources",
+    )
+    : [];
+
   return {
     job,
     detail,
     identity_revision: identityRevision,
-    cases: [...caseMap.values()],
+    cases,
+    case_sources: caseSources,
     cycles,
     reports,
     assignments,
