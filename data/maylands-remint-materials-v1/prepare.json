@@ -1,0 +1,304 @@
+{
+  "state": "prepared",
+  "obligation": {
+    "id": "4755597f-9f35-4098-951c-6d6f90d45808",
+    "org_id": "00000000-0000-0000-0000-000000000001",
+    "job_id": "1e05db49-cc42-477b-9689-cbdceed649da",
+    "status": "open",
+    "mint_reason": "first_u4_commercial_proposal",
+    "minted_by": "fm/maylands-remint-materials-v1",
+    "supersedes_obligation_id": null,
+    "post_release_disposition": null
+  },
+  "revision": {
+    "id": "f6b98b23-73dd-526a-9a5a-88ebf3e89fee",
+    "org_id": "00000000-0000-0000-0000-000000000001",
+    "job_id": "1e05db49-cc42-477b-9689-cbdceed649da",
+    "obligation_id": "4755597f-9f35-4098-951c-6d6f90d45808",
+    "content_hash": "sha256:f6b98b2373dd126a5a5a88ebf3e89fee9d1cc7e2cf5308241053cc448417214a",
+    "attendance_cycle_ids": [
+      "afcb8f5a-e55e-4335-af18-2b6b0cf28d30"
+    ],
+    "attendance_cycle_set_hash": "sha256:959733e33dec43dafc8de19656353b86095773e34e4691a7d7f40de270d1ecab",
+    "pricing_disposition": "priced_with_line_override",
+    "proposal": {
+      "schema": "secureworks.makesafe.invoice-proposal/v1",
+      "invoice_obligation_id": "4755597f-9f35-4098-951c-6d6f90d45808",
+      "invoice_obligation_revision_id": "f6b98b23-73dd-526a-9a5a-88ebf3e89fee",
+      "job_id": "1e05db49-cc42-477b-9689-cbdceed649da",
+      "attendance_cycle_ids": [
+        "afcb8f5a-e55e-4335-af18-2b6b0cf28d30"
+      ],
+      "pricing_disposition": "priced_with_line_override",
+      "pricing_canon_version": "pricing-and-invoice-rules@sha256:7a116693ed57ab19a0076238fd860f572bb054868465e27415e7f85e983fe42b",
+      "company": "ML Builders",
+      "reference": "MLB-26267",
+      "contact_name": "ML Builders",
+      "currency": "AUD",
+      "lines": [
+        {
+          "description": "MLB-26267 - make-safe attendance - 2 trades x 3 hours",
+          "quantity": 6,
+          "unit_price": 85,
+          "account_code": "210",
+          "rate_override_approved": true,
+          "rate_override_by": "Captain Marnin Stobbe",
+          "rate_override_at": "2026-08-05T00:00:00.000Z",
+          "evidence": {
+            "source": "secureworks.makesafe.commercial-quantity-override/v1",
+            "override_kind": "commercial_quantity_not_rate",
+            "line_kind": "labour",
+            "authorised_by": "Captain Marnin Stobbe",
+            "authorised_at": "2026-08-05T00:00:00.000Z",
+            "decision_key": "maylands-remint-materials-v1",
+            "reason": "Captain-authorised commercial remint: keep 2 trades x 3h labour at sealed MLB $85; add separate materials line polycarb disposal / tipping $65 ex. Trade attendance evidence unchanged.",
+            "trade_reported_hours_per_trade": 2,
+            "sealed_billable_hours_floor": 3,
+            "sealed_labour_unit_price_ex_gst": 85,
+            "docket_revision_id": "996c52e3-8a81-5854-b344-59ccbcd3e416",
+            "attendance_cycle_ids": [
+              "afcb8f5a-e55e-4335-af18-2b6b0cf28d30"
+            ],
+            "builder_reference": "MLB-26267",
+            "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+          }
+        },
+        {
+          "description": "MLB-26267 - Materials: polycarb disposal / tipping",
+          "quantity": 1,
+          "unit_price": 65,
+          "account_code": "210",
+          "rate_override_approved": true,
+          "rate_override_by": "Captain Marnin Stobbe",
+          "rate_override_at": "2026-08-05T00:00:00.000Z",
+          "evidence": {
+            "source": "secureworks.makesafe.commercial-quantity-override/v1",
+            "override_kind": "commercial_quantity_not_rate",
+            "line_kind": "materials",
+            "authorised_by": "Captain Marnin Stobbe",
+            "authorised_at": "2026-08-05T00:00:00.000Z",
+            "decision_key": "maylands-remint-materials-v1",
+            "reason": "Captain-authorised commercial remint: keep 2 trades x 3h labour at sealed MLB $85; add separate materials line polycarb disposal / tipping $65 ex. Trade attendance evidence unchanged.",
+            "trade_reported_hours_per_trade": 2,
+            "sealed_billable_hours_floor": 3,
+            "sealed_labour_unit_price_ex_gst": 85,
+            "docket_revision_id": "996c52e3-8a81-5854-b344-59ccbcd3e416",
+            "attendance_cycle_ids": [
+              "afcb8f5a-e55e-4335-af18-2b6b0cf28d30"
+            ],
+            "builder_reference": "MLB-26267",
+            "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+          }
+        }
+      ],
+      "totals": {
+        "ex": 575,
+        "inc": 632.5
+      },
+      "guard_result": {
+        "hard_failures": [],
+        "warnings": [
+          "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged"
+        ]
+      },
+      "duplicate_probe": {
+        "allows_create": true,
+        "match_tier": null,
+        "ambiguity": "void_only"
+      },
+      "xero": null,
+      "commercial_quantity_override": {
+        "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+        "authorised_by": "Captain Marnin Stobbe",
+        "authorised_at": "2026-08-05T00:00:00.000Z",
+        "decision_key": "maylands-remint-materials-v1",
+        "reason": "Captain-authorised commercial remint: keep 2 trades x 3h labour at sealed MLB $85; add separate materials line polycarb disposal / tipping $65 ex. Trade attendance evidence unchanged.",
+        "trade_reported_hours_per_trade": 2,
+        "sealed_billable_hours_floor": 3,
+        "lines": [
+          {
+            "line_kind": "labour",
+            "description": "MLB-26267 - make-safe attendance - 2 trades x 3 hours",
+            "quantity": 6,
+            "unit_price_ex_gst": 85
+          },
+          {
+            "line_kind": "materials",
+            "description": "MLB-26267 - Materials: polycarb disposal / tipping",
+            "quantity": 1,
+            "unit_price_ex_gst": 65
+          }
+        ],
+        "applied_at": "2026-08-05T03:25:37.534Z",
+        "docket_revision_id": "996c52e3-8a81-5854-b344-59ccbcd3e416",
+        "sealed_labour_unit_price_ex_gst": 85,
+        "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+      }
+    },
+    "duplicate_probe": {
+      "allows_create": true,
+      "match_tier": null,
+      "ambiguity": "void_only"
+    },
+    "blockers": [],
+    "supersedes_revision_id": null,
+    "state": "proposed",
+    "created_by": "fm/maylands-remint-materials-v1",
+    "docket_revision_id": "996c52e3-8a81-5854-b344-59ccbcd3e416"
+  },
+  "proposal": {
+    "schema": "secureworks.makesafe.invoice-proposal/v1",
+    "invoice_obligation_id": "4755597f-9f35-4098-951c-6d6f90d45808",
+    "invoice_obligation_revision_id": "f6b98b23-73dd-526a-9a5a-88ebf3e89fee",
+    "job_id": "1e05db49-cc42-477b-9689-cbdceed649da",
+    "attendance_cycle_ids": [
+      "afcb8f5a-e55e-4335-af18-2b6b0cf28d30"
+    ],
+    "pricing_disposition": "priced_with_line_override",
+    "pricing_canon_version": "pricing-and-invoice-rules@sha256:7a116693ed57ab19a0076238fd860f572bb054868465e27415e7f85e983fe42b",
+    "company": "ML Builders",
+    "reference": "MLB-26267",
+    "contact_name": "ML Builders",
+    "currency": "AUD",
+    "lines": [
+      {
+        "description": "MLB-26267 - make-safe attendance - 2 trades x 3 hours",
+        "quantity": 6,
+        "unit_price": 85,
+        "account_code": "210",
+        "rate_override_approved": true,
+        "rate_override_by": "Captain Marnin Stobbe",
+        "rate_override_at": "2026-08-05T00:00:00.000Z",
+        "evidence": {
+          "source": "secureworks.makesafe.commercial-quantity-override/v1",
+          "override_kind": "commercial_quantity_not_rate",
+          "line_kind": "labour",
+          "authorised_by": "Captain Marnin Stobbe",
+          "authorised_at": "2026-08-05T00:00:00.000Z",
+          "decision_key": "maylands-remint-materials-v1",
+          "reason": "Captain-authorised commercial remint: keep 2 trades x 3h labour at sealed MLB $85; add separate materials line polycarb disposal / tipping $65 ex. Trade attendance evidence unchanged.",
+          "trade_reported_hours_per_trade": 2,
+          "sealed_billable_hours_floor": 3,
+          "sealed_labour_unit_price_ex_gst": 85,
+          "docket_revision_id": "996c52e3-8a81-5854-b344-59ccbcd3e416",
+          "attendance_cycle_ids": [
+            "afcb8f5a-e55e-4335-af18-2b6b0cf28d30"
+          ],
+          "builder_reference": "MLB-26267",
+          "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+        }
+      },
+      {
+        "description": "MLB-26267 - Materials: polycarb disposal / tipping",
+        "quantity": 1,
+        "unit_price": 65,
+        "account_code": "210",
+        "rate_override_approved": true,
+        "rate_override_by": "Captain Marnin Stobbe",
+        "rate_override_at": "2026-08-05T00:00:00.000Z",
+        "evidence": {
+          "source": "secureworks.makesafe.commercial-quantity-override/v1",
+          "override_kind": "commercial_quantity_not_rate",
+          "line_kind": "materials",
+          "authorised_by": "Captain Marnin Stobbe",
+          "authorised_at": "2026-08-05T00:00:00.000Z",
+          "decision_key": "maylands-remint-materials-v1",
+          "reason": "Captain-authorised commercial remint: keep 2 trades x 3h labour at sealed MLB $85; add separate materials line polycarb disposal / tipping $65 ex. Trade attendance evidence unchanged.",
+          "trade_reported_hours_per_trade": 2,
+          "sealed_billable_hours_floor": 3,
+          "sealed_labour_unit_price_ex_gst": 85,
+          "docket_revision_id": "996c52e3-8a81-5854-b344-59ccbcd3e416",
+          "attendance_cycle_ids": [
+            "afcb8f5a-e55e-4335-af18-2b6b0cf28d30"
+          ],
+          "builder_reference": "MLB-26267",
+          "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+        }
+      }
+    ],
+    "totals": {
+      "ex": 575,
+      "inc": 632.5
+    },
+    "guard_result": {
+      "hard_failures": [],
+      "warnings": [
+        "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged"
+      ]
+    },
+    "duplicate_probe": {
+      "allows_create": true,
+      "match_tier": null,
+      "ambiguity": "void_only"
+    },
+    "xero": null,
+    "commercial_quantity_override": {
+      "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+      "authorised_by": "Captain Marnin Stobbe",
+      "authorised_at": "2026-08-05T00:00:00.000Z",
+      "decision_key": "maylands-remint-materials-v1",
+      "reason": "Captain-authorised commercial remint: keep 2 trades x 3h labour at sealed MLB $85; add separate materials line polycarb disposal / tipping $65 ex. Trade attendance evidence unchanged.",
+      "trade_reported_hours_per_trade": 2,
+      "sealed_billable_hours_floor": 3,
+      "lines": [
+        {
+          "line_kind": "labour",
+          "description": "MLB-26267 - make-safe attendance - 2 trades x 3 hours",
+          "quantity": 6,
+          "unit_price_ex_gst": 85
+        },
+        {
+          "line_kind": "materials",
+          "description": "MLB-26267 - Materials: polycarb disposal / tipping",
+          "quantity": 1,
+          "unit_price_ex_gst": 65
+        }
+      ],
+      "applied_at": "2026-08-05T03:25:37.534Z",
+      "docket_revision_id": "996c52e3-8a81-5854-b344-59ccbcd3e416",
+      "sealed_labour_unit_price_ex_gst": 85,
+      "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+    }
+  },
+  "blockers": [],
+  "commercial_quantity_override": {
+    "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+    "authorised_by": "Captain Marnin Stobbe",
+    "authorised_at": "2026-08-05T00:00:00.000Z",
+    "decision_key": "maylands-remint-materials-v1",
+    "reason": "Captain-authorised commercial remint: keep 2 trades x 3h labour at sealed MLB $85; add separate materials line polycarb disposal / tipping $65 ex. Trade attendance evidence unchanged.",
+    "trade_reported_hours_per_trade": 2,
+    "sealed_billable_hours_floor": 3,
+    "lines": [
+      {
+        "line_kind": "labour",
+        "description": "MLB-26267 - make-safe attendance - 2 trades x 3 hours",
+        "quantity": 6,
+        "unit_price_ex_gst": 85
+      },
+      {
+        "line_kind": "materials",
+        "description": "MLB-26267 - Materials: polycarb disposal / tipping",
+        "quantity": 1,
+        "unit_price_ex_gst": 65
+      }
+    ],
+    "applied_at": "2026-08-05T03:25:37.534Z",
+    "docket_revision_id": "996c52e3-8a81-5854-b344-59ccbcd3e416",
+    "sealed_labour_unit_price_ex_gst": 85,
+    "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+  },
+  "commit": {
+    "idempotent": false,
+    "content_hash": "sha256:f6b98b2373dd126a5a5a88ebf3e89fee9d1cc7e2cf5308241053cc448417214a",
+    "obligation_id": "4755597f-9f35-4098-951c-6d6f90d45808",
+    "readiness_revision": null,
+    "readiness_certified": false,
+    "dependency_generation": 25,
+    "invoice_obligation_revision_id": "f6b98b23-73dd-526a-9a5a-88ebf3e89fee"
+  },
+  "external_mutations": {
+    "xero": 0,
+    "email": 0
+  }
+}
