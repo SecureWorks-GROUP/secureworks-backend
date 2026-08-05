@@ -52,8 +52,10 @@ import {
   type SesSwmsGenerationPlan,
 } from "./ses_swms_template.ts";
 import {
+  carriedMaterialsChargeAuthorisation,
   decideStandardLabourMaterialsCharge,
   MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
+  recordedMaterialsUsed,
   type SesMaterialsChargeAuthorisation,
 } from "./ses_materials_charge_guard.ts";
 
@@ -241,6 +243,15 @@ export interface SesPrepareDependencies {
     jobId: string,
     inputContentHash: SesSha256,
   ) => Promise<SesPreparedRevision | null>;
+  /**
+   * The `materials_charge` provenance already committed on this card's most
+   * recent docket revision for this attendance cycle, so a prepare that omits
+   * the body figure inherits the Captain's answer instead of re-asking.
+   */
+  resolvePriorMaterialsCharge?: (args: {
+    job_id: string;
+    attendance_cycle_id: string;
+  }) => Promise<unknown>;
   persist?: (payload: SesPersistPayload) => Promise<{ committed_at: string }>;
   now?: () => Date;
 }
@@ -638,6 +649,18 @@ function attendanceLineSubject(family: SesFamilyId): string {
   }
 }
 
+/**
+ * The card's recorded materials-used fact, in one place. The envelope surfaces
+ * it only for the families the materials-charge guard governs, so the trade
+ * report's own checklist stays the fallback.
+ */
+function recordedMaterialsFact(input: SesAssemblerInputV1): unknown {
+  const facts = input.cycle_facts.hours_and_materials || {};
+  if (Object.hasOwn(facts, "materials_used")) return facts.materials_used;
+  return object(object(input.cycle_facts.trade_report).checklist_json)
+    .materials_used;
+}
+
 function localInvoiceProposal(
   input: SesAssemblerInputV1,
   row: SesFamilyMatrixRow,
@@ -983,12 +1006,8 @@ function localInvoiceProposal(
   // AJS/AJBR (ajs_labour_materials) keep their picket carve-out unchanged.
   let materialsChargeMeta: Record<string, unknown> | null = null;
   if (row.invoice_basis === "standard_labour_materials") {
-    const materialsUsed = Object.hasOwn(facts, "materials_used")
-      ? facts.materials_used
-      : object(object(input.cycle_facts.trade_report).checklist_json)
-        .materials_used;
     const materialsDecision = decideStandardLabourMaterialsCharge({
-      materials_used: materialsUsed,
+      materials_used: recordedMaterialsFact(input),
       operator_charge: operatorMaterialsCharge,
       priced_materials_line_count: pricedMaterialsLineCount,
     });
@@ -1855,7 +1874,25 @@ async function prepareOne(
   // An operator materials figure changes what the invoice says, so it belongs
   // inside the revision identity. Wrapping only when one is supplied keeps the
   // ordinary hash byte-identical, so no existing Docs Ready signoff is churned.
-  const operatorMaterialsCharge = request.materials_charge || null;
+  //
+  // A prepare that omits the body figure inherits the one this card's latest
+  // revision already carries for the same attendance cycle and the same
+  // recorded materials. The Captain answers once; a routine re-prepare must
+  // never quietly return the card to a labour-only proposal.
+  let operatorMaterialsCharge = request.materials_charge || null;
+  if (
+    !operatorMaterialsCharge &&
+    deps.resolvePriorMaterialsCharge &&
+    recordedMaterialsUsed(recordedMaterialsFact(input)).length > 0
+  ) {
+    operatorMaterialsCharge = carriedMaterialsChargeAuthorisation({
+      prior_materials_charge: await deps.resolvePriorMaterialsCharge({
+        job_id: input.identity.job_id,
+        attendance_cycle_id: input.attendance.current_attendance_cycle_id,
+      }),
+      materials_used: recordedMaterialsFact(input),
+    });
+  }
   const inputContentHash = await sesSha256(
     operatorMaterialsCharge
       ? { input, operator_materials_charge: operatorMaterialsCharge }

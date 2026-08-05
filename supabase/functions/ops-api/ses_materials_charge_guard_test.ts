@@ -4,6 +4,7 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  carriedMaterialsChargeAuthorisation,
   decideStandardLabourMaterialsCharge,
   MATERIALS_CHARGE_FIGURE_REQUIRED,
   MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
@@ -11,10 +12,11 @@ import {
   positiveMaterialsChargeExGst,
   recordedMaterialsUsed,
   SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
+  type SesMaterialsChargeAuthorisation,
   SesMaterialsChargeAuthorisationError,
 } from "./ses_materials_charge_guard.ts";
 
-function authorisation(amount: number) {
+function authorisation(amount: number): SesMaterialsChargeAuthorisation {
   return {
     schema: SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
     amount_ex_gst: amount,
@@ -22,7 +24,7 @@ function authorisation(amount: number) {
     authorised_at: "2026-08-05T02:00:00.000Z",
     decision_key: "materials-figure-2026-08-05-swms-261065",
     reason: "Operator commercial materials figure for the tipping and fixings.",
-  } as const;
+  };
 }
 
 Deno.test("recordedMaterialsUsed drops none/placeholder ticks and keeps real materials", () => {
@@ -176,6 +178,52 @@ Deno.test("empty materials_used allows labour-only proposals", () => {
       priced_materials_line_count: 0,
     }),
     { action: "none" },
+  );
+});
+
+Deno.test("a committed figure is inherited only for the materials it names", () => {
+  const decision = decideStandardLabourMaterialsCharge({
+    materials_used: ["Tarps", "Screws x 20"],
+    operator_charge: authorisation(65),
+    priced_materials_line_count: 0,
+  });
+  if (decision.action !== "charge_line") throw new Error("expected a charge");
+  const committed = decision.provenance;
+
+  assertEquals(
+    carriedMaterialsChargeAuthorisation({
+      prior_materials_charge: committed,
+      materials_used: ["Screws x 20", "Tarps"],
+    }),
+    authorisation(65),
+  );
+  assertEquals(
+    carriedMaterialsChargeAuthorisation({
+      prior_materials_charge: committed,
+      materials_used: ["Tarps", "Screws x 20", "Structural propping timber"],
+    }),
+    null,
+  );
+  assertEquals(
+    carriedMaterialsChargeAuthorisation({
+      prior_materials_charge: committed,
+      materials_used: ["Other / none"],
+    }),
+    null,
+  );
+  assertEquals(
+    carriedMaterialsChargeAuthorisation({
+      prior_materials_charge: null,
+      materials_used: ["Tarps", "Screws x 20"],
+    }),
+    null,
+  );
+  assertEquals(
+    carriedMaterialsChargeAuthorisation({
+      prior_materials_charge: { ...committed, authorised_by: "" },
+      materials_used: ["Tarps", "Screws x 20"],
+    }),
+    null,
   );
 });
 

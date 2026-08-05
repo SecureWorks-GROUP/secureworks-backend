@@ -1846,6 +1846,7 @@ async function labourProposal(
   family: string,
   hoursAndMaterials: Record<string, unknown>,
   materialsCharge?: SesMaterialsChargeAuthorisation,
+  dependencyOverrides: Partial<SesPrepareDependencies> = {},
 ) {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === builderKey && candidate.family === family
@@ -1857,7 +1858,7 @@ async function labourProposal(
       ...request(input.identity.job_id),
       ...(materialsCharge ? { materials_charge: materialsCharge } : {}),
     },
-    dependencies(input),
+    dependencies(input, dependencyOverrides),
   )).results[0];
   return result;
 }
@@ -2060,6 +2061,103 @@ Deno.test(
     assertEquals(
       wrongBasis.blockers.some((item) =>
         item.reason_code === "materials_charge_figure_unsupported"
+      ),
+      true,
+    );
+  },
+);
+
+Deno.test(
+  "one authorised materials figure keeps answering later prepares",
+  async () => {
+    const materials = {
+      trades: 2,
+      hours_per_trade: 2,
+      rate_ex_gst: 85,
+      materials: [],
+      materials_used: ["Polycarb disposal / tipping", "Screws and fixings"],
+    };
+    const answered = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      materials,
+      materialsChargeAuthorisation(65),
+    );
+    const answeredProposal = answered.invoice_proposal as Record<
+      string,
+      unknown
+    >;
+    assert(answeredProposal, "expected the answered proposal");
+
+    // The SES reporting skill re-prepares this card as a matter of course and
+    // sends no figure. It must inherit the Captain's answer, not re-ask and
+    // silently drop the materials back off the invoice.
+    const reprepared = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      materials,
+      undefined,
+      {
+        resolvePriorMaterialsCharge: async () =>
+          answeredProposal.materials_charge,
+      },
+    );
+    assertEquals(reprepared.blockers.map((item) => item.reason_code), []);
+    const inherited = reprepared.invoice_proposal as Record<string, unknown>;
+    assert(inherited, "expected the inherited proposal");
+    assertEquals(inherited.line_items, answeredProposal.line_items);
+    assertEquals(inherited.subtotal_ex_gst, 575);
+    assertEquals(inherited.materials_charge, answeredProposal.materials_charge);
+    // Inheriting reproduces the same revision identity, so the card's Docs
+    // Ready signoff is not re-keyed by a routine re-prepare.
+    assertEquals(
+      reprepared.docket_revision_id,
+      answered.docket_revision_id,
+    );
+    assertEquals(
+      reprepared.output_content_hash,
+      answered.output_content_hash,
+    );
+  },
+);
+
+Deno.test(
+  "a figure authorised for other materials is never inherited",
+  async () => {
+    const answered = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 2,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: ["Polycarb disposal / tipping"],
+      },
+      materialsChargeAuthorisation(65),
+    );
+    const priorCharge =
+      (answered.invoice_proposal as Record<string, unknown>).materials_charge;
+
+    // The trade re-attended and consumed different materials. Yesterday's
+    // figure was never authorised for them, so the card asks again.
+    const changed = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 2,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: ["Structural propping timber", "Tarps"],
+      },
+      undefined,
+      { resolvePriorMaterialsCharge: async () => priorCharge },
+    );
+    assertEquals(changed.invoice_proposal, null);
+    assertEquals(
+      changed.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_required"
       ),
       true,
     );

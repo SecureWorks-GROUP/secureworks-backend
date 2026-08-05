@@ -3226,6 +3226,28 @@ export function createSesAssemblerRuntimeDependencies(
         return null;
       }
     },
+    // Read-only recovery of the operator materials figure this card already
+    // answered, from the docket revisions themselves. No trade row is read or
+    // written, and a fault refuses the prepare rather than quietly forgetting
+    // an authorised figure.
+    resolvePriorMaterialsCharge: async ({ job_id, attendance_cycle_id }) => {
+      if (!text(job_id) || !text(attendance_cycle_id)) return null;
+      const rows = await many(
+        client
+          .from("makesafe_docket_revisions")
+          .select("id,local_invoice_proposal,committed_at")
+          .eq("job_id", job_id)
+          .eq("current_attendance_cycle_id", attendance_cycle_id)
+          .order("committed_at", { ascending: false })
+          .limit(10),
+        "makesafe_docket_revisions.materials_charge",
+      );
+      for (const row of rows) {
+        const charge = record(row.local_invoice_proposal).materials_charge;
+        if (charge != null) return charge;
+      }
+      return null;
+    },
     persist: createSesDocketPersistenceAdapter({
       client,
       org_id: options.org_id,

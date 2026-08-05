@@ -172,6 +172,48 @@ export function parseSesMaterialsChargeAuthorisation(
   };
 }
 
+function sameMaterialSet(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const a = left.map((item) => item.toLowerCase()).sort();
+  const b = right.map((item) => item.toLowerCase()).sort();
+  return a.every((item, index) => item === b[index]);
+}
+
+/**
+ * Rebuild the authorisation a previous docket revision already carries, so one
+ * Captain answer keeps answering. The figure is inherited ONLY while it still
+ * describes the same recorded materials: a re-attendance that consumed
+ * different materials was never authorised, so it asks again rather than
+ * billing yesterday's figure for today's work.
+ *
+ * The rebuilt authorisation is byte-identical to the one the operator sent, so
+ * an inheriting prepare reproduces the same input hash and revision identity
+ * instead of re-keying the card's signoff.
+ */
+export function carriedMaterialsChargeAuthorisation(input: {
+  prior_materials_charge: unknown;
+  materials_used: unknown;
+}): SesMaterialsChargeAuthorisation | null {
+  const prior = input.prior_materials_charge;
+  if (!prior || typeof prior !== "object" || Array.isArray(prior)) return null;
+  const provenance = prior as Record<string, unknown>;
+  const current = recordedMaterialsUsed(input.materials_used);
+  if (!current.length) return null;
+  const authorisedFor = recordedMaterialsUsed(provenance.materials_used);
+  if (!authorisedFor.length || !sameMaterialSet(authorisedFor, current)) {
+    return null;
+  }
+  try {
+    return parseSesMaterialsChargeAuthorisation({
+      ...provenance,
+      amount_ex_gst: provenance.amount_ex_gst ??
+        provenance.materials_charge_ex_gst,
+    });
+  } catch {
+    return null;
+  }
+}
+
 export type MaterialsChargeDecision =
   | { action: "none" }
   | {

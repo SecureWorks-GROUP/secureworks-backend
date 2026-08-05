@@ -1538,7 +1538,18 @@ evidence: the `materials_charge` body field of `prepare_ses_docket_revision`
 authorised_by, authorised_at, decision_key, reason}`), single-card selections
 only, folded into the docket input hash so two different figures can never
 collide on one revision id. Typed priced `materials[]` lines remain a valid
-answer. A supplied figure is never discarded: nothing recorded, materials
+answer.
+
+The Captain answers ONCE. A prepare that omits the body figure inherits the one
+this card's latest docket revision already carries for the same attendance
+cycle (`resolvePriorMaterialsCharge` →
+`carriedMaterialsChargeAuthorisation`), rebuilt byte-identically so the
+inheriting revision reproduces the same input hash, revision id and output hash
+and never re-keys the card's Docs Ready signoff. Inheritance is bounded by the
+materials the figure names: a re-attendance whose `materials_used` differs was
+never authorised, so it asks again rather than billing yesterday's figure. That
+read is docket-side only — trade attendance evidence is never read for the
+figure and never written. A supplied figure is never discarded: nothing recorded, materials
 already priced, or a basis with no charge line each refuse with
 `materials_charge_figure_unsupported`. The invoice line the builder reads is
 `<ref> - Materials used: <labels>` — trade wording only, and label
