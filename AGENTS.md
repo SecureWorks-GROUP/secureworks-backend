@@ -1239,7 +1239,12 @@ the 35 MB message ceiling compares the **base64-encoded** total on BOTH
 transports, because mail travels MIME-encoded — comparing raw there passed the
 measured 51-photo / 33.5 MB pack (~42.6 MiB encoded) that Exchange would reject.
 AJS photo uses the sequential per-file `uploadAttachment` loop in
-`ses_graph_mail_gateway.ts`; MLB photo is one group-thread reply.
+`ses_graph_mail_gateway.ts`; MLB photo is one group-thread reply in the locked
+shape, and rides the same user-mailbox loop while the ordinary-mail Captain
+exception above is on. Transport is resolved from the route that will actually
+send (`resolveSesMailTransport` on the post-`applyMlbThreadReplyToRoute` route,
+`resolveSesMailTransportForPrepare` at prepare), so prepare and SEND IT can
+never disagree about the per-file ceiling.
 **Never cull, downscale, or re-encode photos to fit** —
 a pack over the ceiling is an honest blocker/refusal, not a shortened pack.
 Multi-email split is a Captain recommendation only, not implemented here.

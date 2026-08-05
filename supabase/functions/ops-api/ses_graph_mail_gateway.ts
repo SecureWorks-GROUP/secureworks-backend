@@ -120,7 +120,9 @@ export function messageHasOperationToken(
   externalToken: string,
 ): boolean {
   if (!message) return false;
-  if (headersHaveOperationToken(message.internetMessageHeaders, externalToken)) {
+  if (
+    headersHaveOperationToken(message.internetMessageHeaders, externalToken)
+  ) {
     return true;
   }
   return subjectHasOperationToken(message.subject, externalToken);
@@ -230,8 +232,9 @@ async function listFolderMessages(
       : "createdDateTime desc",
     "$top": String(top),
   });
-  const url =
-    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/mailFolders/${folder}/messages?${params}`;
+  const url = `https://graph.microsoft.com/v1.0/users/${
+    encodeURIComponent(mailbox)
+  }/mailFolders/${folder}/messages?${params}`;
   const response = await graphJson(url, { method: "GET" }, [200]);
   return Array.isArray(response?.value) ? response.value : [];
 }
@@ -253,7 +256,11 @@ async function hydrateOperationHeaders(
     if (!id) return;
     try {
       const full = await graphJson(
-        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(id)}?$select=id,internetMessageId,subject,internetMessageHeaders,isDraft`,
+        `https://graph.microsoft.com/v1.0/users/${
+          encodeURIComponent(mailbox)
+        }/messages/${
+          encodeURIComponent(id)
+        }?$select=id,internetMessageId,subject,internetMessageHeaders,isDraft`,
         { method: "GET" },
         [200],
       );
@@ -474,9 +481,7 @@ export function createSesGraphMailGateway(
         body: JSON.stringify({
           post: {
             body: { contentType: "HTML", content: html },
-            ...(postAttachments.length
-              ? { attachments: postAttachments }
-              : {}),
+            ...(postAttachments.length ? { attachments: postAttachments } : {}),
           },
         }),
       },

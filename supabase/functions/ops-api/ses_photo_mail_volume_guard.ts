@@ -35,7 +35,10 @@
  */
 
 import type { SesBlocker } from "./ses_docket_envelope.ts";
-import { mlbRouteRequiresIntakeThreadReply } from "./ses_mlb_thread_reply.ts";
+import {
+  mlbPhysicalUsesOrdinaryMailSendFallback,
+  mlbRouteRequiresIntakeThreadReply,
+} from "./ses_mlb_thread_reply.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
 
 /** 3 MiB — Graph direct fileAttachment POST (message, event, group post). */
@@ -156,7 +159,11 @@ export function resolveSesMailTransport(
  * Prepare-time transport from family matrix builder/family (before a release
  * route exists). Delegates to the execute-path authority
  * (`mlbRouteRequiresIntakeThreadReply`) so prepare and SEND IT can never
- * resolve different per-file ceilings for the same card.
+ * resolve different per-file ceilings for the same card. While the temporary
+ * Captain ordinary-mail exception is live, those MLB routes actually ride the
+ * admin@ user mailbox (`applyMlbThreadReplyToRoute` clears the thread id), so
+ * prepare must follow the same exception or it would apply the 3 MiB group-post
+ * ceiling to a pack that sends by upload session.
  */
 export function resolveSesMailTransportForPrepare(args: {
   builder_key: string;
@@ -164,6 +171,7 @@ export function resolveSesMailTransportForPrepare(args: {
   route_kind: "photo" | "report" | "invoice" | "report_invoice";
 }): SesMailTransportKind {
   if (
+    !mlbPhysicalUsesOrdinaryMailSendFallback() &&
     mlbRouteRequiresIntakeThreadReply(args.route_kind, {
       builder_key: args.builder_key,
       family: args.family,

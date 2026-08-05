@@ -92,6 +92,15 @@ in one POST. Per-file hard-capped at 3 MB; total base64 wire size must also fit
 the message ceiling. A single 4 MB photo that would be fine on AJS **refuses on
 MLB**.
 
+> **Rebase note (this PR, onto `MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1`):**
+> that group-thread description is the **locked** MLB shape. While the temporary
+> Captain ordinary-mail exception is on, `applyMlbThreadReplyToRoute` clears the
+> thread id and MLB report/photo ride the admin@ user mailbox, so the guard
+> applies the **user-mailbox** ceilings (upload session per file, base64 total vs
+> 35 MiB) to those routes — at prepare, at SEND IT and at the gateway alike. The
+> 4 MB-photo contrast above holds again the moment the flag is flipped back to
+> false. Nothing about the no-cull rule changes.
+
 ## 3. Sequential-call path (file + line)
 
 ### AJS / user-mailbox path (explains ~70 calls)

@@ -28,6 +28,7 @@ import {
   createSesDocketPersistenceAdapter,
   type SesDocketPersistenceClient,
 } from "./ses_docket_persistence.ts";
+import { mlbPhysicalUsesOrdinaryMailSendFallback } from "./ses_mlb_thread_reply.ts";
 import {
   prepare_ses_docket_revision as prepareSesDocketRevision,
   SES_ASSESSMENT_RECIPE_VERSION,
@@ -3098,7 +3099,7 @@ Deno.test("prepare allows the same AJS pack once it fits, proving the guard is s
   ]);
 });
 
-Deno.test("prepare blocks an MLB group-thread photo over the 3 MiB per-file post limit", async () => {
+Deno.test("prepare prices an MLB photo against the transport it will actually send on", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "MLB" &&
     candidate.family === "physical_makesafe" &&
@@ -3116,19 +3117,32 @@ Deno.test("prepare blocks an MLB group-thread photo over the 3 MiB per-file post
 
   const blocker = result.blockers.find((item) =>
     item.reason_code === "photo_mail_volume_exceeds_graph_limit"
-  )!;
-  assert(blocker, "expected the named photo-mail volume blocker");
-  assertEquals(object(blocker.facts).transport, "group_thread_reply");
-  assertEquals(object(blocker.facts).exceeded, "group_post_no_upload_session");
-  assertEquals(
-    object(blocker.facts).per_attachment_limit_bytes,
-    3 * 1024 * 1024,
   );
-  assertStringIncludes(blocker.reason, "4.00 MiB");
-  assertStringIncludes(blocker.reason, "group-post");
-  assertEquals(result.state, "blocked");
-  assertEquals(Object.keys(result.email_drafts).length, 0);
-  // The single 4 MiB photo is retained in full, never downscaled to fit.
+  if (mlbPhysicalUsesOrdinaryMailSendFallback()) {
+    // Temporary Captain exception: MLB report/photo ride admin@ Mail.Send, so
+    // the 3 MiB group-post ceiling must NOT be applied — a 4 MiB photo goes by
+    // upload session. Blocking here would be a blocker the send path disagrees
+    // with. The group-post ceiling itself stays pinned in the guard's own
+    // suite (ses_photo_mail_volume_guard_test.ts).
+    assertEquals(blocker, undefined);
+    assertEquals(result.envelope.pre_xero_docs_ready, true);
+  } else {
+    assert(blocker, "expected the named photo-mail volume blocker");
+    assertEquals(object(blocker.facts).transport, "group_thread_reply");
+    assertEquals(
+      object(blocker.facts).exceeded,
+      "group_post_no_upload_session",
+    );
+    assertEquals(
+      object(blocker.facts).per_attachment_limit_bytes,
+      3 * 1024 * 1024,
+    );
+    assertStringIncludes(blocker.reason, "4.00 MiB");
+    assertStringIncludes(blocker.reason, "group-post");
+    assertEquals(result.state, "blocked");
+    assertEquals(Object.keys(result.email_drafts).length, 0);
+  }
+  // Either way the single 4 MiB photo is retained in full, never downscaled.
   assertEquals(
     result.artifacts
       .filter((artifact) => artifact.role === "completion_photo")

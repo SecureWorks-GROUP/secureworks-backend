@@ -19,7 +19,10 @@ import {
   sesPhotoMailVolumeBlocker,
   sesPhotoMailVolumeRefusal,
 } from "./ses_photo_mail_volume_guard.ts";
-import { mlbRouteRequiresIntakeThreadReply } from "./ses_mlb_thread_reply.ts";
+import {
+  applyMlbThreadReplyToRoute,
+  mlbPhysicalUsesOrdinaryMailSendFallback,
+} from "./ses_mlb_thread_reply.ts";
 import { createSesGraphMailGateway } from "./ses_graph_mail_gateway.ts";
 
 function nBytes(
@@ -56,14 +59,18 @@ Deno.test("resolveSesMailTransport: thread reply vs user mailbox", () => {
   assertEquals(resolveSesMailTransport({}), "user_mailbox");
 });
 
-Deno.test("resolveSesMailTransportForPrepare: MLB physical photo is group thread", () => {
+Deno.test("resolveSesMailTransportForPrepare: MLB physical photo follows the live transport", () => {
   assertEquals(
     resolveSesMailTransportForPrepare({
       builder_key: "MLB",
       family: "physical_makesafe",
       route_kind: "photo",
     }),
-    "group_thread_reply",
+    // Locked shape is the group-thread reply; while the temporary Captain
+    // ordinary-mail exception is on, the same route rides the user mailbox.
+    mlbPhysicalUsesOrdinaryMailSendFallback()
+      ? "user_mailbox"
+      : "group_thread_reply",
   );
   assertEquals(
     resolveSesMailTransportForPrepare({
@@ -101,10 +108,20 @@ Deno.test("resolveSesMailTransportForPrepare agrees with the execute-path author
   for (const builder_key of ["MLB", "AJ", "AJS", "BW"]) {
     for (const family of families) {
       for (const route_kind of routeKinds) {
-        const expected =
-          mlbRouteRequiresIntakeThreadReply(route_kind, { builder_key, family })
-            ? "group_thread_reply"
-            : "user_mailbox";
+        // Execute resolves transport from the route AFTER
+        // applyMlbThreadReplyToRoute, so compare against that exact shape —
+        // the ordinary-mail exception clears the thread id there.
+        const sendRoute = applyMlbThreadReplyToRoute(
+          { route_kind, ready: true, reply_to_thread_id: null },
+          { builder_key, family },
+          {
+            thread_id: "thread-1",
+            post_id: "post-1",
+            conversation_id: null,
+            case_id: null,
+          },
+        );
+        const expected = resolveSesMailTransport(sendRoute);
         assertEquals(
           resolveSesMailTransportForPrepare({
             builder_key,
