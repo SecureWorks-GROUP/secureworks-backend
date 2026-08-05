@@ -1280,44 +1280,53 @@ export async function sendMailerOpsVisibilityAction(
 
   // Prefer the FK on detail (authoritative), then slug. Never read company
   // columns from jobs — they do not exist in production.
-  let company: {
+  type MailerOpsCompanyRow = {
     id?: string | null;
     slug?: string | null;
     name?: string | null;
     sender_patterns?: unknown;
     report_recipient?: string | null;
-  } | null = null;
+  };
+  const readCompanyBy = async (
+    column: "id" | "slug",
+    value: string,
+  ): Promise<MailerOpsCompanyRow | null> => {
+    const res = await client.from("makesafe_companies")
+      .select("id,slug,name,sender_patterns,report_recipient")
+      .eq(column, value)
+      .maybeSingle();
+    if (res.error) {
+      throw new SesActionError(
+        503,
+        mailerRefusal(
+          "mailer_ops_company_lookup_failed",
+          `Company lookup by ${column} failed (${res.error.message}).`,
+        ),
+      );
+    }
+    return res.data || null;
+  };
+  const usableMailerAddressCount = (row: MailerOpsCompanyRow | null) =>
+    extractMailerAddressesFromSenderPatterns(row?.sender_patterns).length;
+
+  let company: MailerOpsCompanyRow | null = null;
+  const companiesConsulted: MailerOpsCompanyRow[] = [];
   if (companyId) {
-    const byId = await client.from("makesafe_companies")
-      .select("id,slug,name,sender_patterns,report_recipient")
-      .eq("id", companyId)
-      .maybeSingle();
-    if (byId.error) {
-      throw new SesActionError(
-        503,
-        mailerRefusal(
-          "mailer_ops_company_lookup_failed",
-          `Company lookup by id failed (${byId.error.message}).`,
-        ),
-      );
-    }
-    company = byId.data || null;
+    company = await readCompanyBy("id", companyId);
+    if (company) companiesConsulted.push(company);
   }
-  if (!company?.sender_patterns && slug) {
-    const bySlug = await client.from("makesafe_companies")
-      .select("id,slug,name,sender_patterns,report_recipient")
-      .eq("slug", slug)
-      .maybeSingle();
-    if (bySlug.error) {
-      throw new SesActionError(
-        503,
-        mailerRefusal(
-          "mailer_ops_company_lookup_failed",
-          `Company lookup by slug failed (${bySlug.error.message}).`,
-        ),
-      );
+  // sender_patterns is `text[] NOT NULL DEFAULT '{}'`, so a found row ALWAYS
+  // carries an array — often empty or domain-only. Fall through on USABLE
+  // addresses, never on column presence, or the slug tier is dead code.
+  if (
+    usableMailerAddressCount(company) === 0 && slug &&
+    slug !== text(company?.slug)
+  ) {
+    const bySlug = await readCompanyBy("slug", slug);
+    if (bySlug) {
+      companiesConsulted.push(bySlug);
+      if (!company || usableMailerAddressCount(bySlug) > 0) company = bySlug;
     }
-    if (bySlug.data) company = bySlug.data;
   }
   const senderPatterns = company?.sender_patterns;
 
@@ -1334,8 +1343,14 @@ export async function sendMailerOpsVisibilityAction(
   });
 
   // Structural: never use report_recipient (makesafes@) as To on this path.
-  const reportRecipient = text(company?.report_recipient).toLowerCase();
-  if (reportRecipient && recipient.to === reportRecipient) {
+  // Every company row consulted counts — the winning row is chosen for its
+  // usable sender_patterns, not for its billing address.
+  const billingRecipients = new Set(
+    companiesConsulted
+      .map((row) => text(row.report_recipient).toLowerCase())
+      .filter((value) => value.length > 0),
+  );
+  if (billingRecipients.has(recipient.to)) {
     throw new SesActionError(
       409,
       mailerRefusal(
@@ -1346,7 +1361,8 @@ export async function sendMailerOpsVisibilityAction(
             "Configure sender_patterns with the work-order mailer full address and pass that as To.",
           evidence: {
             refused_to: recipient.to,
-            report_recipient: reportRecipient,
+            report_recipient: recipient.to,
+            billing_recipients: [...billingRecipients],
           },
         },
       ),
