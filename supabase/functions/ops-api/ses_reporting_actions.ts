@@ -24,7 +24,9 @@ import {
 import {
   buildSesEffect,
   executeSesExternalEffect,
+  type SesEffectClaim,
   type SesExternalAdapter,
+  type SesExternalEffect,
   type SesExternalEffectStore,
 } from "./ses_external_effects.ts";
 import {
@@ -1824,17 +1826,98 @@ export async function createSesInvoiceDraftAction(
   };
 }
 
+const SES_EFFECT_CONTENT_DRIFT_SQLSTATE = "23505";
+
+const SES_EFFECT_CLAIM_COLUMNS = [
+  "id",
+  "operation_key",
+  "org_id",
+  "job_id",
+  "effect_kind",
+  "invoice_obligation_revision_id",
+  "release_revision_id",
+  "docket_revision_id",
+  "route_kind",
+  "artifact_hash",
+  "payload_hash",
+  "external_token",
+  "state",
+  "external_id",
+  "provider_digest",
+].join(",");
+
+/**
+ * `claim_ses_external_effect_v1` raises SQLSTATE 23505 when an existing
+ * operation_key's stored content no longer matches the caller's. That guard is
+ * correct, but on its own it strands an already-dispatched effect: the
+ * temporary MLB ordinary Mail.Send exception changes the route_send payload
+ * (transport stamp, cleared reply_to_thread_id), so re-running `execute` on a
+ * release whose route already reached `unknown` recomputes a different
+ * payload_hash for the SAME operation_key and can never reach reconcile.
+ *
+ * Resolution is reconcile-only and never redispatch: re-read the stored row and
+ * return the ORIGINAL effect (original external_token, payload_hash and state),
+ * which is exactly the claim the SQL would have returned had the payload not
+ * drifted. Dispatch stays structurally unreachable here — only a freshly
+ * INSERTED reservation ever claims `dispatch`, and a new release_revision_id
+ * mints a new operation_key rather than reusing this one.
+ *
+ * Identity drift must still refuse. effect_kind and external_token are derived
+ * from the same identity hash as operation_key, so a stored row disagreeing on
+ * either is a real collision, not payload drift: return null and let the
+ * original refusal stand. Returns null on any unreadable row for the same
+ * reason — an unproven effect must never be reported as reconcilable.
+ */
+async function reconcileSesEffectAfterContentDrift(
+  client: SesSupabaseClient,
+  effect: Omit<SesExternalEffect, "state">,
+  error: { message?: string; code?: string } | null,
+): Promise<SesEffectClaim | null> {
+  if (
+    String(error?.code || "").trim() !== SES_EFFECT_CONTENT_DRIFT_SQLSTATE
+  ) {
+    return null;
+  }
+  const existing = await client.from("ses_external_effects")
+    .select(SES_EFFECT_CLAIM_COLUMNS)
+    .eq("operation_key", effect.operation_key)
+    .maybeSingle();
+  if (existing.error || !existing.data) return null;
+  const stored = existing.data as SesExternalEffect;
+  if (
+    String(stored.operation_key || "") !== effect.operation_key ||
+    String(stored.effect_kind || "") !== effect.effect_kind ||
+    String(stored.external_token || "") !== effect.external_token
+  ) {
+    return null;
+  }
+  return {
+    effect: stored,
+    claim_mode: stored.state === "confirmed" ? "confirmed" : "reconcile",
+    duplicate_refused: true,
+  };
+}
+
 export function createSupabaseSesEffectStore(
   client: SesSupabaseClient,
 ): SesExternalEffectStore {
   return {
     async claim(effect, leaseOwner) {
+      const claimed = await client.rpc("claim_ses_external_effect_v1", {
+        p_effect: effect,
+        p_lease_owner: leaseOwner,
+        p_lease_seconds: 120,
+      });
+      if (claimed.error) {
+        const reconciled = await reconcileSesEffectAfterContentDrift(
+          client,
+          effect,
+          claimed.error,
+        );
+        if (reconciled) return reconciled;
+      }
       return requireValue(
-        await client.rpc("claim_ses_external_effect_v1", {
-          p_effect: effect,
-          p_lease_owner: leaseOwner,
-          p_lease_seconds: 120,
-        }),
+        claimed,
         "The exact external-effect reservation could not be claimed.",
       );
     },
