@@ -1,0 +1,14 @@
+{
+  "status": 200,
+  "body": {
+    "state": "confirmed",
+    "revision": {
+      "state": "confirmed",
+      "final_status": "DELETED",
+      "void_revision_id": "b82f3c0e-5ab5-5a11-90c2-8b9a4b1eb1fa"
+    },
+    "xero_invoice_id": "3a5b24c9-a5ff-4995-a33a-cb2088c55988",
+    "status": "DELETED",
+    "dispatched": true
+  }
+}

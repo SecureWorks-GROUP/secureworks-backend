@@ -1,0 +1,307 @@
+{
+  "status": 200,
+  "body": {
+    "state": "prepared",
+    "obligation": {
+      "id": "402c0655-a872-4c34-83f0-3b1a0832d0fb",
+      "org_id": "00000000-0000-0000-0000-000000000001",
+      "job_id": "db3f2242-d10c-42f0-80b9-7d684e62c6fe",
+      "status": "open",
+      "mint_reason": "first_u4_commercial_proposal",
+      "minted_by": "ses-standing-preparer",
+      "supersedes_obligation_id": null,
+      "post_release_disposition": null
+    },
+    "revision": {
+      "id": "f06e0d85-f66a-5576-af4a-e9a056959a3c",
+      "org_id": "00000000-0000-0000-0000-000000000001",
+      "job_id": "db3f2242-d10c-42f0-80b9-7d684e62c6fe",
+      "obligation_id": "402c0655-a872-4c34-83f0-3b1a0832d0fb",
+      "content_hash": "sha256:f06e0d85f66a3576af4ae9a056959a3c41634b119458fa31d7c6b1617cf8b8ba",
+      "attendance_cycle_ids": [
+        "3c4a0d08-e0a0-4149-8ce9-2a4fa65be0c3"
+      ],
+      "attendance_cycle_set_hash": "sha256:3d985ad735ca85a7e05e1618baca76c2e70baff467e168b77d5e3b50f2940ad3",
+      "pricing_disposition": "priced_with_line_override",
+      "proposal": {
+        "schema": "secureworks.makesafe.invoice-proposal/v1",
+        "invoice_obligation_id": "402c0655-a872-4c34-83f0-3b1a0832d0fb",
+        "invoice_obligation_revision_id": "f06e0d85-f66a-5576-af4a-e9a056959a3c",
+        "job_id": "db3f2242-d10c-42f0-80b9-7d684e62c6fe",
+        "attendance_cycle_ids": [
+          "3c4a0d08-e0a0-4149-8ce9-2a4fa65be0c3"
+        ],
+        "pricing_disposition": "priced_with_line_override",
+        "pricing_canon_version": "pricing-and-invoice-rules@sha256:7a116693ed57ab19a0076238fd860f572bb054868465e27415e7f85e983fe42b",
+        "company": "ML Builders",
+        "reference": "MLB-27037",
+        "contact_name": "ML Builders",
+        "currency": "AUD",
+        "lines": [
+          {
+            "description": "MLB-27037 - make-safe attendance - 1 trade x 3 hours",
+            "quantity": 3,
+            "unit_price": 85,
+            "account_code": "210",
+            "rate_override_approved": true,
+            "rate_override_by": "Captain Marnin Stobbe",
+            "rate_override_at": "2026-08-05T00:00:00.000Z",
+            "evidence": {
+              "source": "secureworks.makesafe.commercial-quantity-override/v1",
+              "override_kind": "commercial_quantity_not_rate",
+              "line_kind": "labour",
+              "authorised_by": "Captain Marnin Stobbe",
+              "authorised_at": "2026-08-05T00:00:00.000Z",
+              "decision_key": "commercial-remint-three-cards-v1-B-MLB-27037",
+              "reason": "Captain commercial remint: MLB 3h sealed labour floor plus $85 materials (timber and bugle screws). Trade attendance left at 2h.",
+              "trade_reported_hours_per_trade": 2,
+              "sealed_billable_hours_floor": 3,
+              "sealed_labour_unit_price_ex_gst": 85,
+              "docket_revision_id": "a5b76949-660d-5561-8ba9-c4b4956d5de0",
+              "attendance_cycle_ids": [
+                "3c4a0d08-e0a0-4149-8ce9-2a4fa65be0c3"
+              ],
+              "builder_reference": "MLB-27037",
+              "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+            }
+          },
+          {
+            "description": "MLB-27037 - Materials: timber and bugle screws",
+            "quantity": 1,
+            "unit_price": 85,
+            "account_code": "210",
+            "rate_override_approved": true,
+            "rate_override_by": "Captain Marnin Stobbe",
+            "rate_override_at": "2026-08-05T00:00:00.000Z",
+            "evidence": {
+              "source": "secureworks.makesafe.commercial-quantity-override/v1",
+              "override_kind": "commercial_quantity_not_rate",
+              "line_kind": "materials",
+              "authorised_by": "Captain Marnin Stobbe",
+              "authorised_at": "2026-08-05T00:00:00.000Z",
+              "decision_key": "commercial-remint-three-cards-v1-B-MLB-27037",
+              "reason": "Captain commercial remint: MLB 3h sealed labour floor plus $85 materials (timber and bugle screws). Trade attendance left at 2h.",
+              "trade_reported_hours_per_trade": 2,
+              "sealed_billable_hours_floor": 3,
+              "sealed_labour_unit_price_ex_gst": 85,
+              "docket_revision_id": "a5b76949-660d-5561-8ba9-c4b4956d5de0",
+              "attendance_cycle_ids": [
+                "3c4a0d08-e0a0-4149-8ce9-2a4fa65be0c3"
+              ],
+              "builder_reference": "MLB-27037",
+              "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+            }
+          }
+        ],
+        "totals": {
+          "ex": 340,
+          "inc": 374
+        },
+        "guard_result": {
+          "hard_failures": [],
+          "warnings": [
+            "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged"
+          ]
+        },
+        "duplicate_probe": {
+          "allows_create": true,
+          "match_tier": null,
+          "ambiguity": "sibling_po"
+        },
+        "xero": null,
+        "commercial_quantity_override": {
+          "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+          "authorised_by": "Captain Marnin Stobbe",
+          "authorised_at": "2026-08-05T00:00:00.000Z",
+          "decision_key": "commercial-remint-three-cards-v1-B-MLB-27037",
+          "reason": "Captain commercial remint: MLB 3h sealed labour floor plus $85 materials (timber and bugle screws). Trade attendance left at 2h.",
+          "trade_reported_hours_per_trade": 2,
+          "sealed_billable_hours_floor": 3,
+          "lines": [
+            {
+              "line_kind": "labour",
+              "description": "MLB-27037 - make-safe attendance - 1 trade x 3 hours",
+              "quantity": 3,
+              "unit_price_ex_gst": 85
+            },
+            {
+              "line_kind": "materials",
+              "description": "MLB-27037 - Materials: timber and bugle screws",
+              "quantity": 1,
+              "unit_price_ex_gst": 85
+            }
+          ],
+          "applied_at": "2026-08-05T08:22:28.464Z",
+          "docket_revision_id": "a5b76949-660d-5561-8ba9-c4b4956d5de0",
+          "sealed_labour_unit_price_ex_gst": 85,
+          "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+        }
+      },
+      "duplicate_probe": {
+        "allows_create": true,
+        "match_tier": null,
+        "ambiguity": "sibling_po"
+      },
+      "blockers": [],
+      "supersedes_revision_id": null,
+      "state": "proposed",
+      "created_by": "ses-standing-preparer",
+      "docket_revision_id": "a5b76949-660d-5561-8ba9-c4b4956d5de0"
+    },
+    "proposal": {
+      "schema": "secureworks.makesafe.invoice-proposal/v1",
+      "invoice_obligation_id": "402c0655-a872-4c34-83f0-3b1a0832d0fb",
+      "invoice_obligation_revision_id": "f06e0d85-f66a-5576-af4a-e9a056959a3c",
+      "job_id": "db3f2242-d10c-42f0-80b9-7d684e62c6fe",
+      "attendance_cycle_ids": [
+        "3c4a0d08-e0a0-4149-8ce9-2a4fa65be0c3"
+      ],
+      "pricing_disposition": "priced_with_line_override",
+      "pricing_canon_version": "pricing-and-invoice-rules@sha256:7a116693ed57ab19a0076238fd860f572bb054868465e27415e7f85e983fe42b",
+      "company": "ML Builders",
+      "reference": "MLB-27037",
+      "contact_name": "ML Builders",
+      "currency": "AUD",
+      "lines": [
+        {
+          "description": "MLB-27037 - make-safe attendance - 1 trade x 3 hours",
+          "quantity": 3,
+          "unit_price": 85,
+          "account_code": "210",
+          "rate_override_approved": true,
+          "rate_override_by": "Captain Marnin Stobbe",
+          "rate_override_at": "2026-08-05T00:00:00.000Z",
+          "evidence": {
+            "source": "secureworks.makesafe.commercial-quantity-override/v1",
+            "override_kind": "commercial_quantity_not_rate",
+            "line_kind": "labour",
+            "authorised_by": "Captain Marnin Stobbe",
+            "authorised_at": "2026-08-05T00:00:00.000Z",
+            "decision_key": "commercial-remint-three-cards-v1-B-MLB-27037",
+            "reason": "Captain commercial remint: MLB 3h sealed labour floor plus $85 materials (timber and bugle screws). Trade attendance left at 2h.",
+            "trade_reported_hours_per_trade": 2,
+            "sealed_billable_hours_floor": 3,
+            "sealed_labour_unit_price_ex_gst": 85,
+            "docket_revision_id": "a5b76949-660d-5561-8ba9-c4b4956d5de0",
+            "attendance_cycle_ids": [
+              "3c4a0d08-e0a0-4149-8ce9-2a4fa65be0c3"
+            ],
+            "builder_reference": "MLB-27037",
+            "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+          }
+        },
+        {
+          "description": "MLB-27037 - Materials: timber and bugle screws",
+          "quantity": 1,
+          "unit_price": 85,
+          "account_code": "210",
+          "rate_override_approved": true,
+          "rate_override_by": "Captain Marnin Stobbe",
+          "rate_override_at": "2026-08-05T00:00:00.000Z",
+          "evidence": {
+            "source": "secureworks.makesafe.commercial-quantity-override/v1",
+            "override_kind": "commercial_quantity_not_rate",
+            "line_kind": "materials",
+            "authorised_by": "Captain Marnin Stobbe",
+            "authorised_at": "2026-08-05T00:00:00.000Z",
+            "decision_key": "commercial-remint-three-cards-v1-B-MLB-27037",
+            "reason": "Captain commercial remint: MLB 3h sealed labour floor plus $85 materials (timber and bugle screws). Trade attendance left at 2h.",
+            "trade_reported_hours_per_trade": 2,
+            "sealed_billable_hours_floor": 3,
+            "sealed_labour_unit_price_ex_gst": 85,
+            "docket_revision_id": "a5b76949-660d-5561-8ba9-c4b4956d5de0",
+            "attendance_cycle_ids": [
+              "3c4a0d08-e0a0-4149-8ce9-2a4fa65be0c3"
+            ],
+            "builder_reference": "MLB-27037",
+            "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+          }
+        }
+      ],
+      "totals": {
+        "ex": 340,
+        "inc": 374
+      },
+      "guard_result": {
+        "hard_failures": [],
+        "warnings": [
+          "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged"
+        ]
+      },
+      "duplicate_probe": {
+        "allows_create": true,
+        "match_tier": null,
+        "ambiguity": "sibling_po"
+      },
+      "xero": null,
+      "commercial_quantity_override": {
+        "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+        "authorised_by": "Captain Marnin Stobbe",
+        "authorised_at": "2026-08-05T00:00:00.000Z",
+        "decision_key": "commercial-remint-three-cards-v1-B-MLB-27037",
+        "reason": "Captain commercial remint: MLB 3h sealed labour floor plus $85 materials (timber and bugle screws). Trade attendance left at 2h.",
+        "trade_reported_hours_per_trade": 2,
+        "sealed_billable_hours_floor": 3,
+        "lines": [
+          {
+            "line_kind": "labour",
+            "description": "MLB-27037 - make-safe attendance - 1 trade x 3 hours",
+            "quantity": 3,
+            "unit_price_ex_gst": 85
+          },
+          {
+            "line_kind": "materials",
+            "description": "MLB-27037 - Materials: timber and bugle screws",
+            "quantity": 1,
+            "unit_price_ex_gst": 85
+          }
+        ],
+        "applied_at": "2026-08-05T08:22:28.464Z",
+        "docket_revision_id": "a5b76949-660d-5561-8ba9-c4b4956d5de0",
+        "sealed_labour_unit_price_ex_gst": 85,
+        "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+      }
+    },
+    "blockers": [],
+    "commercial_quantity_override": {
+      "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+      "authorised_by": "Captain Marnin Stobbe",
+      "authorised_at": "2026-08-05T00:00:00.000Z",
+      "decision_key": "commercial-remint-three-cards-v1-B-MLB-27037",
+      "reason": "Captain commercial remint: MLB 3h sealed labour floor plus $85 materials (timber and bugle screws). Trade attendance left at 2h.",
+      "trade_reported_hours_per_trade": 2,
+      "sealed_billable_hours_floor": 3,
+      "lines": [
+        {
+          "line_kind": "labour",
+          "description": "MLB-27037 - make-safe attendance - 1 trade x 3 hours",
+          "quantity": 3,
+          "unit_price_ex_gst": 85
+        },
+        {
+          "line_kind": "materials",
+          "description": "MLB-27037 - Materials: timber and bugle screws",
+          "quantity": 1,
+          "unit_price_ex_gst": 85
+        }
+      ],
+      "applied_at": "2026-08-05T08:22:28.464Z",
+      "docket_revision_id": "a5b76949-660d-5561-8ba9-c4b4956d5de0",
+      "sealed_labour_unit_price_ex_gst": 85,
+      "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+    },
+    "commit": {
+      "idempotent": false,
+      "content_hash": "sha256:f06e0d85f66a3576af4ae9a056959a3c41634b119458fa31d7c6b1617cf8b8ba",
+      "obligation_id": "402c0655-a872-4c34-83f0-3b1a0832d0fb",
+      "readiness_revision": null,
+      "readiness_certified": false,
+      "dependency_generation": 41,
+      "invoice_obligation_revision_id": "f06e0d85-f66a-5576-af4a-e9a056959a3c"
+    },
+    "external_mutations": {
+      "xero": 0,
+      "email": 0
+    }
+  }
+}

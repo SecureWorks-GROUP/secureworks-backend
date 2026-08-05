@@ -1,0 +1,48 @@
+                                                                  Invoice Date                SecureWorks Group Pty
+DRAFT INVOICE                                                     5 Aug 2026                  Ltd
+                                                                  Invoice Number              swwa@secureworkswa.co
+                ML Builders                                       INV-1127                    m.au
+                                                                  Reference                   15 Utah Gr
+                                                                  MLB-27037                   JOONDALUP WA 6027
+                                                                                              AUSTRALIA
+                                                                  ABN
+                                                                  64 689 223 416
+
+
+
+
+Description                                            Quantity           Unit Price           GST        Amount AUD
+
+MLB-27037 - make-safe attendance - 1 trade x 3 hours       3.00                  85.00         10%               255.00
+
+MLB-27037 - Materials: timber and bugle screws             1.00                  85.00         10%                 85.00
+
+                                                                                            Subtotal             340.00
+
+                                                                                 TOTAL GST 10%                     34.00
+
+                                                                                         TOTAL AUD               374.00
+
+
+
+
+Due Date: 19 Aug 2026
+Secureworks Group Pty Ltd
+BSB: 036226
+Acc Nr: 725236
+
+
+
+
+                                                             Customer                ML Builders
+PAYMENT ADVICE                                               Invoice Number          INV-1127
+                                                             Amount Due              374.00
+                                                             Due Date                19 Aug 2026
+                                                             Amount Enclosed
+       To:      SecureWorks Group Pty Ltd
+                                                                                     Enter the amount you are paying above
+                swwa@secureworkswa.com.au
+                15 Utah Gr
+                JOONDALUP WA 6027
+                AUSTRALIA
+

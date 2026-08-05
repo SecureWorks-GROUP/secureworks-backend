@@ -1,0 +1,307 @@
+{
+  "status": 200,
+  "body": {
+    "state": "prepared",
+    "obligation": {
+      "id": "b8a15396-ad9c-4f25-94c5-02e3d890dca1",
+      "org_id": "00000000-0000-0000-0000-000000000001",
+      "job_id": "d97067be-62e7-48e2-acff-344bb7473dd5",
+      "status": "open",
+      "mint_reason": "first_u4_commercial_proposal",
+      "minted_by": "ses-standing-preparer",
+      "supersedes_obligation_id": null,
+      "post_release_disposition": null
+    },
+    "revision": {
+      "id": "3a22662f-487a-5252-8a57-26ae5799add3",
+      "org_id": "00000000-0000-0000-0000-000000000001",
+      "job_id": "d97067be-62e7-48e2-acff-344bb7473dd5",
+      "obligation_id": "b8a15396-ad9c-4f25-94c5-02e3d890dca1",
+      "content_hash": "sha256:3a22662f487af2520a5726ae5799add321b7c01be9183a9e170e8bdf7e20d745",
+      "attendance_cycle_ids": [
+        "6f085d56-1df3-4364-9c87-d261524b4ebf"
+      ],
+      "attendance_cycle_set_hash": "sha256:9d228512d759a984ff5968f468b1e56226307fe648a25fb5540eabd48a0ec8a4",
+      "pricing_disposition": "priced_with_line_override",
+      "proposal": {
+        "schema": "secureworks.makesafe.invoice-proposal/v1",
+        "invoice_obligation_id": "b8a15396-ad9c-4f25-94c5-02e3d890dca1",
+        "invoice_obligation_revision_id": "3a22662f-487a-5252-8a57-26ae5799add3",
+        "job_id": "d97067be-62e7-48e2-acff-344bb7473dd5",
+        "attendance_cycle_ids": [
+          "6f085d56-1df3-4364-9c87-d261524b4ebf"
+        ],
+        "pricing_disposition": "priced_with_line_override",
+        "pricing_canon_version": "pricing-and-invoice-rules@sha256:7a116693ed57ab19a0076238fd860f572bb054868465e27415e7f85e983fe42b",
+        "company": "mlb",
+        "reference": "MLB-27387",
+        "contact_name": "mlb",
+        "currency": "AUD",
+        "lines": [
+          {
+            "description": "MLB-27387 - make-safe attendance - 1 trade x 4.5 hours",
+            "quantity": 4.5,
+            "unit_price": 85,
+            "account_code": "210",
+            "rate_override_approved": true,
+            "rate_override_by": "Captain Marnin Stobbe",
+            "rate_override_at": "2026-08-05T00:00:00.000Z",
+            "evidence": {
+              "source": "secureworks.makesafe.commercial-quantity-override/v1",
+              "override_kind": "commercial_quantity_not_rate",
+              "line_kind": "labour",
+              "authorised_by": "Captain Marnin Stobbe",
+              "authorised_at": "2026-08-05T00:00:00.000Z",
+              "decision_key": "commercial-remint-three-cards-v1-C-MLB-27387",
+              "reason": "Captain commercial remint: bill 4.5 hours at sealed MLB $85 plus $95 materials for roof+ceiling makesafe. Trade attendance left at 2h.",
+              "trade_reported_hours_per_trade": 2,
+              "sealed_billable_hours_floor": 3,
+              "sealed_labour_unit_price_ex_gst": 85,
+              "docket_revision_id": "6b8d798d-6441-5844-a9df-809bbf395735",
+              "attendance_cycle_ids": [
+                "6f085d56-1df3-4364-9c87-d261524b4ebf"
+              ],
+              "builder_reference": "MLB-27387",
+              "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+            }
+          },
+          {
+            "description": "MLB-27387 - Materials: bugle screws, timber, silicone and flashing",
+            "quantity": 1,
+            "unit_price": 95,
+            "account_code": "210",
+            "rate_override_approved": true,
+            "rate_override_by": "Captain Marnin Stobbe",
+            "rate_override_at": "2026-08-05T00:00:00.000Z",
+            "evidence": {
+              "source": "secureworks.makesafe.commercial-quantity-override/v1",
+              "override_kind": "commercial_quantity_not_rate",
+              "line_kind": "materials",
+              "authorised_by": "Captain Marnin Stobbe",
+              "authorised_at": "2026-08-05T00:00:00.000Z",
+              "decision_key": "commercial-remint-three-cards-v1-C-MLB-27387",
+              "reason": "Captain commercial remint: bill 4.5 hours at sealed MLB $85 plus $95 materials for roof+ceiling makesafe. Trade attendance left at 2h.",
+              "trade_reported_hours_per_trade": 2,
+              "sealed_billable_hours_floor": 3,
+              "sealed_labour_unit_price_ex_gst": 85,
+              "docket_revision_id": "6b8d798d-6441-5844-a9df-809bbf395735",
+              "attendance_cycle_ids": [
+                "6f085d56-1df3-4364-9c87-d261524b4ebf"
+              ],
+              "builder_reference": "MLB-27387",
+              "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+            }
+          }
+        ],
+        "totals": {
+          "ex": 477.5,
+          "inc": 525.25
+        },
+        "guard_result": {
+          "hard_failures": [],
+          "warnings": [
+            "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged"
+          ]
+        },
+        "duplicate_probe": {
+          "allows_create": true,
+          "match_tier": null,
+          "ambiguity": "void_only"
+        },
+        "xero": null,
+        "commercial_quantity_override": {
+          "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+          "authorised_by": "Captain Marnin Stobbe",
+          "authorised_at": "2026-08-05T00:00:00.000Z",
+          "decision_key": "commercial-remint-three-cards-v1-C-MLB-27387",
+          "reason": "Captain commercial remint: bill 4.5 hours at sealed MLB $85 plus $95 materials for roof+ceiling makesafe. Trade attendance left at 2h.",
+          "trade_reported_hours_per_trade": 2,
+          "sealed_billable_hours_floor": 3,
+          "lines": [
+            {
+              "line_kind": "labour",
+              "description": "MLB-27387 - make-safe attendance - 1 trade x 4.5 hours",
+              "quantity": 4.5,
+              "unit_price_ex_gst": 85
+            },
+            {
+              "line_kind": "materials",
+              "description": "MLB-27387 - Materials: bugle screws, timber, silicone and flashing",
+              "quantity": 1,
+              "unit_price_ex_gst": 95
+            }
+          ],
+          "applied_at": "2026-08-05T08:24:20.969Z",
+          "docket_revision_id": "6b8d798d-6441-5844-a9df-809bbf395735",
+          "sealed_labour_unit_price_ex_gst": 85,
+          "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+        }
+      },
+      "duplicate_probe": {
+        "allows_create": true,
+        "match_tier": null,
+        "ambiguity": "void_only"
+      },
+      "blockers": [],
+      "supersedes_revision_id": null,
+      "state": "proposed",
+      "created_by": "ses-standing-preparer",
+      "docket_revision_id": "6b8d798d-6441-5844-a9df-809bbf395735"
+    },
+    "proposal": {
+      "schema": "secureworks.makesafe.invoice-proposal/v1",
+      "invoice_obligation_id": "b8a15396-ad9c-4f25-94c5-02e3d890dca1",
+      "invoice_obligation_revision_id": "3a22662f-487a-5252-8a57-26ae5799add3",
+      "job_id": "d97067be-62e7-48e2-acff-344bb7473dd5",
+      "attendance_cycle_ids": [
+        "6f085d56-1df3-4364-9c87-d261524b4ebf"
+      ],
+      "pricing_disposition": "priced_with_line_override",
+      "pricing_canon_version": "pricing-and-invoice-rules@sha256:7a116693ed57ab19a0076238fd860f572bb054868465e27415e7f85e983fe42b",
+      "company": "mlb",
+      "reference": "MLB-27387",
+      "contact_name": "mlb",
+      "currency": "AUD",
+      "lines": [
+        {
+          "description": "MLB-27387 - make-safe attendance - 1 trade x 4.5 hours",
+          "quantity": 4.5,
+          "unit_price": 85,
+          "account_code": "210",
+          "rate_override_approved": true,
+          "rate_override_by": "Captain Marnin Stobbe",
+          "rate_override_at": "2026-08-05T00:00:00.000Z",
+          "evidence": {
+            "source": "secureworks.makesafe.commercial-quantity-override/v1",
+            "override_kind": "commercial_quantity_not_rate",
+            "line_kind": "labour",
+            "authorised_by": "Captain Marnin Stobbe",
+            "authorised_at": "2026-08-05T00:00:00.000Z",
+            "decision_key": "commercial-remint-three-cards-v1-C-MLB-27387",
+            "reason": "Captain commercial remint: bill 4.5 hours at sealed MLB $85 plus $95 materials for roof+ceiling makesafe. Trade attendance left at 2h.",
+            "trade_reported_hours_per_trade": 2,
+            "sealed_billable_hours_floor": 3,
+            "sealed_labour_unit_price_ex_gst": 85,
+            "docket_revision_id": "6b8d798d-6441-5844-a9df-809bbf395735",
+            "attendance_cycle_ids": [
+              "6f085d56-1df3-4364-9c87-d261524b4ebf"
+            ],
+            "builder_reference": "MLB-27387",
+            "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+          }
+        },
+        {
+          "description": "MLB-27387 - Materials: bugle screws, timber, silicone and flashing",
+          "quantity": 1,
+          "unit_price": 95,
+          "account_code": "210",
+          "rate_override_approved": true,
+          "rate_override_by": "Captain Marnin Stobbe",
+          "rate_override_at": "2026-08-05T00:00:00.000Z",
+          "evidence": {
+            "source": "secureworks.makesafe.commercial-quantity-override/v1",
+            "override_kind": "commercial_quantity_not_rate",
+            "line_kind": "materials",
+            "authorised_by": "Captain Marnin Stobbe",
+            "authorised_at": "2026-08-05T00:00:00.000Z",
+            "decision_key": "commercial-remint-three-cards-v1-C-MLB-27387",
+            "reason": "Captain commercial remint: bill 4.5 hours at sealed MLB $85 plus $95 materials for roof+ceiling makesafe. Trade attendance left at 2h.",
+            "trade_reported_hours_per_trade": 2,
+            "sealed_billable_hours_floor": 3,
+            "sealed_labour_unit_price_ex_gst": 85,
+            "docket_revision_id": "6b8d798d-6441-5844-a9df-809bbf395735",
+            "attendance_cycle_ids": [
+              "6f085d56-1df3-4364-9c87-d261524b4ebf"
+            ],
+            "builder_reference": "MLB-27387",
+            "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+          }
+        }
+      ],
+      "totals": {
+        "ex": 477.5,
+        "inc": 525.25
+      },
+      "guard_result": {
+        "hard_failures": [],
+        "warnings": [
+          "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged"
+        ]
+      },
+      "duplicate_probe": {
+        "allows_create": true,
+        "match_tier": null,
+        "ambiguity": "void_only"
+      },
+      "xero": null,
+      "commercial_quantity_override": {
+        "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+        "authorised_by": "Captain Marnin Stobbe",
+        "authorised_at": "2026-08-05T00:00:00.000Z",
+        "decision_key": "commercial-remint-three-cards-v1-C-MLB-27387",
+        "reason": "Captain commercial remint: bill 4.5 hours at sealed MLB $85 plus $95 materials for roof+ceiling makesafe. Trade attendance left at 2h.",
+        "trade_reported_hours_per_trade": 2,
+        "sealed_billable_hours_floor": 3,
+        "lines": [
+          {
+            "line_kind": "labour",
+            "description": "MLB-27387 - make-safe attendance - 1 trade x 4.5 hours",
+            "quantity": 4.5,
+            "unit_price_ex_gst": 85
+          },
+          {
+            "line_kind": "materials",
+            "description": "MLB-27387 - Materials: bugle screws, timber, silicone and flashing",
+            "quantity": 1,
+            "unit_price_ex_gst": 95
+          }
+        ],
+        "applied_at": "2026-08-05T08:24:20.969Z",
+        "docket_revision_id": "6b8d798d-6441-5844-a9df-809bbf395735",
+        "sealed_labour_unit_price_ex_gst": 85,
+        "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+      }
+    },
+    "blockers": [],
+    "commercial_quantity_override": {
+      "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+      "authorised_by": "Captain Marnin Stobbe",
+      "authorised_at": "2026-08-05T00:00:00.000Z",
+      "decision_key": "commercial-remint-three-cards-v1-C-MLB-27387",
+      "reason": "Captain commercial remint: bill 4.5 hours at sealed MLB $85 plus $95 materials for roof+ceiling makesafe. Trade attendance left at 2h.",
+      "trade_reported_hours_per_trade": 2,
+      "sealed_billable_hours_floor": 3,
+      "lines": [
+        {
+          "line_kind": "labour",
+          "description": "MLB-27387 - make-safe attendance - 1 trade x 4.5 hours",
+          "quantity": 4.5,
+          "unit_price_ex_gst": 85
+        },
+        {
+          "line_kind": "materials",
+          "description": "MLB-27387 - Materials: bugle screws, timber, silicone and flashing",
+          "quantity": 1,
+          "unit_price_ex_gst": 95
+        }
+      ],
+      "applied_at": "2026-08-05T08:24:20.969Z",
+      "docket_revision_id": "6b8d798d-6441-5844-a9df-809bbf395735",
+      "sealed_labour_unit_price_ex_gst": 85,
+      "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+    },
+    "commit": {
+      "idempotent": false,
+      "content_hash": "sha256:3a22662f487af2520a5726ae5799add321b7c01be9183a9e170e8bdf7e20d745",
+      "obligation_id": "b8a15396-ad9c-4f25-94c5-02e3d890dca1",
+      "readiness_revision": null,
+      "readiness_certified": false,
+      "dependency_generation": 68,
+      "invoice_obligation_revision_id": "3a22662f-487a-5252-8a57-26ae5799add3"
+    },
+    "external_mutations": {
+      "xero": 0,
+      "email": 0
+    }
+  }
+}

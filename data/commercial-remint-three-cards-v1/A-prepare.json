@@ -1,0 +1,307 @@
+{
+  "status": 200,
+  "body": {
+    "state": "prepared",
+    "obligation": {
+      "id": "ce458d2a-8646-4c4d-bacb-a9621b46269b",
+      "org_id": "00000000-0000-0000-0000-000000000001",
+      "job_id": "f8c19311-611d-4c8f-87b6-bb2005c47bda",
+      "status": "open",
+      "mint_reason": "first_u4_commercial_proposal",
+      "minted_by": "ses-standing-preparer",
+      "supersedes_obligation_id": null,
+      "post_release_disposition": null
+    },
+    "revision": {
+      "id": "ca0e2b38-bf2b-5bb4-ad14-56d14199d271",
+      "org_id": "00000000-0000-0000-0000-000000000001",
+      "job_id": "f8c19311-611d-4c8f-87b6-bb2005c47bda",
+      "obligation_id": "ce458d2a-8646-4c4d-bacb-a9621b46269b",
+      "content_hash": "sha256:ca0e2b38bf2bdbb46d1456d14199d2712d85d1ea061ff0f283a7d0ffe342d79b",
+      "attendance_cycle_ids": [
+        "4987e94a-4660-4b7a-a492-01a91e83c733"
+      ],
+      "attendance_cycle_set_hash": "sha256:3a913ab974e9914ae416e7507da226a9cda07aac0b689dfb6976efa622f1dc23",
+      "pricing_disposition": "priced_with_line_override",
+      "proposal": {
+        "schema": "secureworks.makesafe.invoice-proposal/v1",
+        "invoice_obligation_id": "ce458d2a-8646-4c4d-bacb-a9621b46269b",
+        "invoice_obligation_revision_id": "ca0e2b38-bf2b-5bb4-ad14-56d14199d271",
+        "job_id": "f8c19311-611d-4c8f-87b6-bb2005c47bda",
+        "attendance_cycle_ids": [
+          "4987e94a-4660-4b7a-a492-01a91e83c733"
+        ],
+        "pricing_disposition": "priced_with_line_override",
+        "pricing_canon_version": "pricing-and-invoice-rules@sha256:7a116693ed57ab19a0076238fd860f572bb054868465e27415e7f85e983fe42b",
+        "company": "mlb",
+        "reference": "MLB-27148",
+        "contact_name": "mlb",
+        "currency": "AUD",
+        "lines": [
+          {
+            "description": "MLB-27148 - make-safe attendance - 1 trade x 3 hours",
+            "quantity": 3,
+            "unit_price": 85,
+            "account_code": "210",
+            "rate_override_approved": true,
+            "rate_override_by": "Captain Marnin Stobbe",
+            "rate_override_at": "2026-08-05T00:00:00.000Z",
+            "evidence": {
+              "source": "secureworks.makesafe.commercial-quantity-override/v1",
+              "override_kind": "commercial_quantity_not_rate",
+              "line_kind": "labour",
+              "authorised_by": "Captain Marnin Stobbe",
+              "authorised_at": "2026-08-05T00:00:00.000Z",
+              "decision_key": "commercial-remint-three-cards-v1-A-MLB-27148",
+              "reason": "Captain commercial remint: keep MLB 3h sealed labour floor and add $45 materials (Sikaflex and flashing tape). Trade attendance left at 2h.",
+              "trade_reported_hours_per_trade": 2,
+              "sealed_billable_hours_floor": 3,
+              "sealed_labour_unit_price_ex_gst": 85,
+              "docket_revision_id": "4beeddbc-bcab-534f-8dcf-16a222896076",
+              "attendance_cycle_ids": [
+                "4987e94a-4660-4b7a-a492-01a91e83c733"
+              ],
+              "builder_reference": "MLB-27148",
+              "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+            }
+          },
+          {
+            "description": "MLB-27148 - Materials: Sikaflex and flashing tape",
+            "quantity": 1,
+            "unit_price": 45,
+            "account_code": "210",
+            "rate_override_approved": true,
+            "rate_override_by": "Captain Marnin Stobbe",
+            "rate_override_at": "2026-08-05T00:00:00.000Z",
+            "evidence": {
+              "source": "secureworks.makesafe.commercial-quantity-override/v1",
+              "override_kind": "commercial_quantity_not_rate",
+              "line_kind": "materials",
+              "authorised_by": "Captain Marnin Stobbe",
+              "authorised_at": "2026-08-05T00:00:00.000Z",
+              "decision_key": "commercial-remint-three-cards-v1-A-MLB-27148",
+              "reason": "Captain commercial remint: keep MLB 3h sealed labour floor and add $45 materials (Sikaflex and flashing tape). Trade attendance left at 2h.",
+              "trade_reported_hours_per_trade": 2,
+              "sealed_billable_hours_floor": 3,
+              "sealed_labour_unit_price_ex_gst": 85,
+              "docket_revision_id": "4beeddbc-bcab-534f-8dcf-16a222896076",
+              "attendance_cycle_ids": [
+                "4987e94a-4660-4b7a-a492-01a91e83c733"
+              ],
+              "builder_reference": "MLB-27148",
+              "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+            }
+          }
+        ],
+        "totals": {
+          "ex": 300,
+          "inc": 330
+        },
+        "guard_result": {
+          "hard_failures": [],
+          "warnings": [
+            "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged"
+          ]
+        },
+        "duplicate_probe": {
+          "allows_create": true,
+          "match_tier": null,
+          "ambiguity": "void_only"
+        },
+        "xero": null,
+        "commercial_quantity_override": {
+          "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+          "authorised_by": "Captain Marnin Stobbe",
+          "authorised_at": "2026-08-05T00:00:00.000Z",
+          "decision_key": "commercial-remint-three-cards-v1-A-MLB-27148",
+          "reason": "Captain commercial remint: keep MLB 3h sealed labour floor and add $45 materials (Sikaflex and flashing tape). Trade attendance left at 2h.",
+          "trade_reported_hours_per_trade": 2,
+          "sealed_billable_hours_floor": 3,
+          "lines": [
+            {
+              "line_kind": "labour",
+              "description": "MLB-27148 - make-safe attendance - 1 trade x 3 hours",
+              "quantity": 3,
+              "unit_price_ex_gst": 85
+            },
+            {
+              "line_kind": "materials",
+              "description": "MLB-27148 - Materials: Sikaflex and flashing tape",
+              "quantity": 1,
+              "unit_price_ex_gst": 45
+            }
+          ],
+          "applied_at": "2026-08-05T08:18:00.540Z",
+          "docket_revision_id": "4beeddbc-bcab-534f-8dcf-16a222896076",
+          "sealed_labour_unit_price_ex_gst": 85,
+          "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+        }
+      },
+      "duplicate_probe": {
+        "allows_create": true,
+        "match_tier": null,
+        "ambiguity": "void_only"
+      },
+      "blockers": [],
+      "supersedes_revision_id": null,
+      "state": "proposed",
+      "created_by": "ses-standing-preparer",
+      "docket_revision_id": "4beeddbc-bcab-534f-8dcf-16a222896076"
+    },
+    "proposal": {
+      "schema": "secureworks.makesafe.invoice-proposal/v1",
+      "invoice_obligation_id": "ce458d2a-8646-4c4d-bacb-a9621b46269b",
+      "invoice_obligation_revision_id": "ca0e2b38-bf2b-5bb4-ad14-56d14199d271",
+      "job_id": "f8c19311-611d-4c8f-87b6-bb2005c47bda",
+      "attendance_cycle_ids": [
+        "4987e94a-4660-4b7a-a492-01a91e83c733"
+      ],
+      "pricing_disposition": "priced_with_line_override",
+      "pricing_canon_version": "pricing-and-invoice-rules@sha256:7a116693ed57ab19a0076238fd860f572bb054868465e27415e7f85e983fe42b",
+      "company": "mlb",
+      "reference": "MLB-27148",
+      "contact_name": "mlb",
+      "currency": "AUD",
+      "lines": [
+        {
+          "description": "MLB-27148 - make-safe attendance - 1 trade x 3 hours",
+          "quantity": 3,
+          "unit_price": 85,
+          "account_code": "210",
+          "rate_override_approved": true,
+          "rate_override_by": "Captain Marnin Stobbe",
+          "rate_override_at": "2026-08-05T00:00:00.000Z",
+          "evidence": {
+            "source": "secureworks.makesafe.commercial-quantity-override/v1",
+            "override_kind": "commercial_quantity_not_rate",
+            "line_kind": "labour",
+            "authorised_by": "Captain Marnin Stobbe",
+            "authorised_at": "2026-08-05T00:00:00.000Z",
+            "decision_key": "commercial-remint-three-cards-v1-A-MLB-27148",
+            "reason": "Captain commercial remint: keep MLB 3h sealed labour floor and add $45 materials (Sikaflex and flashing tape). Trade attendance left at 2h.",
+            "trade_reported_hours_per_trade": 2,
+            "sealed_billable_hours_floor": 3,
+            "sealed_labour_unit_price_ex_gst": 85,
+            "docket_revision_id": "4beeddbc-bcab-534f-8dcf-16a222896076",
+            "attendance_cycle_ids": [
+              "4987e94a-4660-4b7a-a492-01a91e83c733"
+            ],
+            "builder_reference": "MLB-27148",
+            "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+          }
+        },
+        {
+          "description": "MLB-27148 - Materials: Sikaflex and flashing tape",
+          "quantity": 1,
+          "unit_price": 45,
+          "account_code": "210",
+          "rate_override_approved": true,
+          "rate_override_by": "Captain Marnin Stobbe",
+          "rate_override_at": "2026-08-05T00:00:00.000Z",
+          "evidence": {
+            "source": "secureworks.makesafe.commercial-quantity-override/v1",
+            "override_kind": "commercial_quantity_not_rate",
+            "line_kind": "materials",
+            "authorised_by": "Captain Marnin Stobbe",
+            "authorised_at": "2026-08-05T00:00:00.000Z",
+            "decision_key": "commercial-remint-three-cards-v1-A-MLB-27148",
+            "reason": "Captain commercial remint: keep MLB 3h sealed labour floor and add $45 materials (Sikaflex and flashing tape). Trade attendance left at 2h.",
+            "trade_reported_hours_per_trade": 2,
+            "sealed_billable_hours_floor": 3,
+            "sealed_labour_unit_price_ex_gst": 85,
+            "docket_revision_id": "4beeddbc-bcab-534f-8dcf-16a222896076",
+            "attendance_cycle_ids": [
+              "4987e94a-4660-4b7a-a492-01a91e83c733"
+            ],
+            "builder_reference": "MLB-27148",
+            "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+          }
+        }
+      ],
+      "totals": {
+        "ex": 300,
+        "inc": 330
+      },
+      "guard_result": {
+        "hard_failures": [],
+        "warnings": [
+          "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged"
+        ]
+      },
+      "duplicate_probe": {
+        "allows_create": true,
+        "match_tier": null,
+        "ambiguity": "void_only"
+      },
+      "xero": null,
+      "commercial_quantity_override": {
+        "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+        "authorised_by": "Captain Marnin Stobbe",
+        "authorised_at": "2026-08-05T00:00:00.000Z",
+        "decision_key": "commercial-remint-three-cards-v1-A-MLB-27148",
+        "reason": "Captain commercial remint: keep MLB 3h sealed labour floor and add $45 materials (Sikaflex and flashing tape). Trade attendance left at 2h.",
+        "trade_reported_hours_per_trade": 2,
+        "sealed_billable_hours_floor": 3,
+        "lines": [
+          {
+            "line_kind": "labour",
+            "description": "MLB-27148 - make-safe attendance - 1 trade x 3 hours",
+            "quantity": 3,
+            "unit_price_ex_gst": 85
+          },
+          {
+            "line_kind": "materials",
+            "description": "MLB-27148 - Materials: Sikaflex and flashing tape",
+            "quantity": 1,
+            "unit_price_ex_gst": 45
+          }
+        ],
+        "applied_at": "2026-08-05T08:18:00.540Z",
+        "docket_revision_id": "4beeddbc-bcab-534f-8dcf-16a222896076",
+        "sealed_labour_unit_price_ex_gst": 85,
+        "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+      }
+    },
+    "blockers": [],
+    "commercial_quantity_override": {
+      "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+      "authorised_by": "Captain Marnin Stobbe",
+      "authorised_at": "2026-08-05T00:00:00.000Z",
+      "decision_key": "commercial-remint-three-cards-v1-A-MLB-27148",
+      "reason": "Captain commercial remint: keep MLB 3h sealed labour floor and add $45 materials (Sikaflex and flashing tape). Trade attendance left at 2h.",
+      "trade_reported_hours_per_trade": 2,
+      "sealed_billable_hours_floor": 3,
+      "lines": [
+        {
+          "line_kind": "labour",
+          "description": "MLB-27148 - make-safe attendance - 1 trade x 3 hours",
+          "quantity": 3,
+          "unit_price_ex_gst": 85
+        },
+        {
+          "line_kind": "materials",
+          "description": "MLB-27148 - Materials: Sikaflex and flashing tape",
+          "quantity": 1,
+          "unit_price_ex_gst": 45
+        }
+      ],
+      "applied_at": "2026-08-05T08:18:00.540Z",
+      "docket_revision_id": "4beeddbc-bcab-534f-8dcf-16a222896076",
+      "sealed_labour_unit_price_ex_gst": 85,
+      "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+    },
+    "commit": {
+      "idempotent": false,
+      "content_hash": "sha256:ca0e2b38bf2bdbb46d1456d14199d2712d85d1ea061ff0f283a7d0ffe342d79b",
+      "obligation_id": "ce458d2a-8646-4c4d-bacb-a9621b46269b",
+      "readiness_revision": null,
+      "readiness_certified": false,
+      "dependency_generation": 57,
+      "invoice_obligation_revision_id": "ca0e2b38-bf2b-5bb4-ad14-56d14199d271"
+    },
+    "external_mutations": {
+      "xero": 0,
+      "email": 0
+    }
+  }
+}
