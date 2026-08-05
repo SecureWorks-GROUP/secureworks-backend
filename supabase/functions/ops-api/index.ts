@@ -320,6 +320,7 @@ import {
   resolveSesFamilyMatrixRow,
   SES_FAMILY_MATRIX_VERSION,
 } from './ses_family_matrix.ts'
+import { presentSesPackHonesty } from './ses_pack_presentation.ts'
 import {
   assertReportingIntakeAccounting as _assertReportingIntakeAccounting,
 } from './makesafe_reporting_accounting.ts'
@@ -14025,6 +14026,14 @@ export interface MakesafeReportPackLike {
   docket_revision_id?: string | null
   pre_xero_docs_ready?: boolean
   blockers?: Array<Record<string, unknown>> | null
+  /** Honest presentation kind: ready | refused | incomplete | sent | none */
+  presentation_kind?: string | null
+  /** Operator-facing reason for refused/incomplete; null when ready/sent/none */
+  presentation_reason?: string | null
+  /** Raw legacy pack status; not presentation authority when a docket exists */
+  legacy_pack_status?: string | null
+  failed_step?: string | null
+  error_detail?: unknown
 }
 export interface MakesafeSurfacing {
   normalizedSub: string | null
@@ -14821,6 +14830,9 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
       docket_revision_id: scopedPack.docket_revision_id || null,
       pre_xero_docs_ready: scopedPack.pre_xero_docs_ready === true,
       blockers: scopedPack.blockers || [],
+      presentation_kind: scopedPack.presentation_kind || null,
+      presentation_reason: scopedPack.presentation_reason || null,
+      legacy_pack_status: scopedPack.legacy_pack_status || null,
     } : null,
     ...(scopedDocFlags || {}),
     // pack_sent is only meaningful (defined) when the caller loaded the marker.
@@ -15749,7 +15761,7 @@ async function makesafePipeline(
         ? _fetchAllByJobIdChunked(
           client,
           'makesafe_report_packs',
-          'id, job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at',
+          'id, job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at, failed_step, error_detail',
           stageDependentJobIds,
         )
         : emptyRows,
@@ -15851,21 +15863,65 @@ async function makesafePipeline(
     const legacyStatus = String(rowPack?.status || '').toLowerCase()
     const legacySent = MAKESAFE_PACK_SENT_STATUSES.includes(legacyStatus) ||
       legacyStatus === 'authorised_not_sent'
-    const packForBoard: MakesafeReportPackLike | null = docket && !legacySent
-      ? {
-        ...(rowPack || {}),
-        status: rowPack?.status || 'drafted',
-        review_state: docket.pre_xero_docs_ready
-          ? 'READY'
-          : 'U4_BLOCKED',
-        docket_revision_id: docket.id,
-        pre_xero_docs_ready: docket.pre_xero_docs_ready === true,
-        blockers: Array.isArray(docket.blockers) ? docket.blockers : [],
-        cycle_attribution: docketIsCurrent ? 'bound' : null,
-      }
-      : rowPack
-      ? { ...rowPack, cycle_attribution: packIsCurrent ? 'bound' : null }
-      : null
+    // Pack presentation honesty: a ready U4 docket never publishes stale legacy
+    // `failed`, and a refused docket names its reason instead of green-ticking.
+    // Does not change board column placement — only what the card says.
+    const hasReportDoc = Array.isArray(docsMap[j.id]) &&
+      (docsMap[j.id] as any[]).some((doc) =>
+        String(doc?.type || '').toLowerCase() === 'makesafe_report' ||
+        String(doc?.type || '').toLowerCase() === 'report'
+      )
+    const packPresentation = presentSesPackHonesty({
+      docket: docket && !legacySent
+        ? {
+          id: docket.id,
+          state: docket.state,
+          pre_xero_docs_ready: docket.pre_xero_docs_ready === true,
+          blockers: docket.blockers,
+        }
+        : null,
+      legacy_pack: rowPack
+        ? {
+          status: rowPack.status,
+          failed_step: rowPack.failed_step,
+          error_detail: rowPack.error_detail,
+        }
+        : null,
+      pack_sent: packSentMap[j.id] === true || legacySent,
+      has_report_doc: hasReportDoc,
+      has_trade_report: !!reportMap[j.id],
+    })
+    // Always publish a pack block when we have an honest presentation to show
+    // (including incomplete/refused with no legacy row) so the card can name why.
+    const packForBoard: MakesafeReportPackLike | null =
+      (docket && !legacySent) || rowPack ||
+          packPresentation.kind === 'incomplete' ||
+          packPresentation.kind === 'refused'
+        ? {
+          ...(rowPack || {}),
+          status: packPresentation.state,
+          review_state: packPresentation.review_state,
+          docket_revision_id: packPresentation.docket_revision_id ||
+            rowPack?.docket_revision_id || null,
+          pre_xero_docs_ready: packPresentation.pre_xero_docs_ready,
+          blockers: packPresentation.blockers.map((blocker) => ({
+            reason_code: blocker.code,
+            code: blocker.code,
+            fact: blocker.fact,
+            recovery_action: blocker.recovery_action,
+            category: blocker.category,
+            ...(packPresentation.kind === 'refused'
+              ? { state: 'refused' as const }
+              : {}),
+          })),
+          presentation_kind: packPresentation.kind,
+          presentation_reason: packPresentation.reason,
+          legacy_pack_status: packPresentation.legacy_pack_status,
+          cycle_attribution: docket && !legacySent
+            ? (docketIsCurrent ? 'bound' : null)
+            : (packIsCurrent ? 'bound' : null),
+        }
+        : null
     const enriched = enrichMakesafeBoardJob(j, detail, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, packForBoard)
     const captainMark = captainActionMap[j.id]
     enriched.captain_action = captainMark

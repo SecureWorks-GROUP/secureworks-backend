@@ -40,6 +40,7 @@ import {
   type SesCockpitDocket,
   type SesReviewRoute,
 } from "./ses_review_cockpit.ts";
+import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 import {
   ajsPackCc,
   ajsPackRecipients,
@@ -2192,20 +2193,55 @@ export async function getSesReviewablePackAction(
       }).`,
     });
   }
+  const storedBlockers = Array.isArray(docket.blockers) ? docket.blockers : [];
+  const reviewBlockers = sourceRefusal
+    ? [...storedBlockers, sourceRefusal]
+    : storedBlockers;
+  const envelope = object(docket.envelope);
+  // Presentation honesty for the review surface: a green READY tick over a
+  // trust refusal is the defect this field removes. Kind is refused / ready /
+  // incomplete — never collapsed into a single warning.
+  const presentation = presentSesPackHonesty({
+    docket: {
+      id: docket.id,
+      state: docket.state ?? null,
+      pre_xero_docs_ready: envelope.pre_xero_docs_ready === true ||
+        docket.pre_xero_docs_ready === true,
+      blockers: storedBlockers,
+    },
+    review_blockers: sourceRefusal ? [sourceRefusal] : [],
+  });
   return {
     review,
     docket: sourceRefusal
       ? {
         ...docket,
-        blockers: [
-          ...(Array.isArray(docket.blockers) ? docket.blockers : []),
-          sourceRefusal,
-        ],
+        blockers: reviewBlockers,
       }
       : docket,
     artifacts,
     suppressed_artifacts: suppressedArtifacts,
-    blockers: sourceRefusal ? [sourceRefusal] : [],
+    // All named refusals (stored + read-time trust), not only sourceRefusal.
+    blockers: presentation.blockers.length
+      ? presentation.blockers.map((blocker) => ({
+        state: "refused" as const,
+        code: blocker.code,
+        fact: blocker.fact ||
+          `Pack refused: ${blocker.code}.`,
+        recovery_action: blocker.recovery_action ||
+          "Resolve the named refusal and re-prepare the pack.",
+        category: blocker.category,
+      }))
+      : (sourceRefusal ? [sourceRefusal] : []),
+    // Operator-facing honesty: ready vs refused vs incomplete, with reason.
+    presentation: {
+      kind: presentation.kind,
+      state: presentation.state,
+      reason: presentation.reason,
+      pre_xero_docs_ready: presentation.pre_xero_docs_ready,
+      review_state: presentation.review_state,
+      docket_revision_id: presentation.docket_revision_id,
+    },
     audit_trail: historyResponse.data || [],
     // Explicit Invoice-tab projection for bound DRAFTs: the UI must prefer the
     // real Xero PDF (or honest unavailable) over any local proposal invention.

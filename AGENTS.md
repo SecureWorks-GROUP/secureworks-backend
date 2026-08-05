@@ -1542,14 +1542,14 @@ When you build that evidence shape, do NOT read `report_pack` off the published
 board — the key is absent from EVERY `makesafe_board` row (0 of 447 on
 2026-08-04), so a parse returns "missing", not the server's value. It is an
 internal seam: `makesafePipeline` synthesises `packForBoard` from the CURRENT
-docket revision (grep the `packForBoard` initialiser in `index.ts`; the line
-number drifts every release) and
-sets `review_state: 'READY'`
-whenever `pre_xero_docs_ready` is true, with no `makesafe_report_packs` row
-required. A card with ZERO rows in that table therefore still has
-`packState: READY`. Treating the absent key as null makes `docsReady()` fall to
-its legacy `!pack` branch and invents a second, non-existent blocker — which
-happened on SWMS-261109 before it was caught.
+docket revision via `presentSesPackHonesty` (`ses_pack_presentation.ts`). Pack
+presentation kinds are **ready / refused / incomplete / sent / none** — never
+collapse them. A ready U4 docket never publishes a stale legacy
+`makesafe_report_packs.status='failed'`; a refusal names its fact (honest stop,
+not a green tick and not a send-pipeline failure). `get_ses_reviewable_pack`
+returns the same honesty as `presentation`. Treating the absent board key as
+null makes `docsReady()` fall to its legacy `!pack` branch and invents a
+blocker — which happened on SWMS-261109 before it was caught.
 
 ## Curated Bind Materials Are A Subset Of The Service Report, Never A Super-Set
 

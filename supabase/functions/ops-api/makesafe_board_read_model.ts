@@ -38,6 +38,10 @@ import {
   sesStageV2OverlayCandidate,
 } from "./ses_stage_engine_v2.ts";
 import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
+import {
+  packStatusForBoard,
+  presentSesPackHonesty,
+} from "./ses_pack_presentation.ts";
 import { projectMakesafeJobIdentity } from "./makesafe_job_identity_read_model.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
@@ -173,7 +177,25 @@ export function boardPresentationFields(base: any) {
     is_reattend: base?.is_reattend === true,
     last_reattend_at: base?.last_reattend_at || null,
     resume_action: base?.resume_action || null,
-    pack_status: base?.pack_status || base?.report_pack?.status || null,
+    // Prefer the honest pack_status object when present; never fall back to a
+    // raw legacy `failed` string over a ready docket (see pack presentation).
+    pack_status: base?.pack_status ||
+      (base?.report_pack
+        ? packStatusForBoard(presentSesPackHonesty({
+          docket: base.report_pack.docket_revision_id
+            ? {
+              id: base.report_pack.docket_revision_id,
+              pre_xero_docs_ready: base.report_pack.pre_xero_docs_ready === true,
+              blockers: base.report_pack.blockers,
+            }
+            : null,
+          legacy_pack: {
+            status: base.report_pack.legacy_pack_status ||
+              base.report_pack.status,
+          },
+          pack_sent: base.pack_sent === true || base.report_pack.sent === true,
+        }))
+        : null),
     needs_money_review: base?.needs_money_review === true,
     cancel_reason: base?.cancel_reason || null,
     cancel_note: base?.cancel_note || null,
@@ -252,6 +274,9 @@ export function projectOpsMakesafeCardRow(row: any) {
         drafted: row.pack.drafted === true,
         docket_revision_id: row.pack.docket_revision_id || null,
         pre_xero_docs_ready: row.pack.pre_xero_docs_ready === true,
+        presentation_kind: row.pack.presentation_kind || null,
+        presentation_reason: row.pack.presentation_reason || null,
+        legacy_pack_status: row.pack.legacy_pack_status || null,
         closeout_documents: row.pack.closeout_documents || {
           report: false,
           invoice: false,
@@ -942,12 +967,34 @@ function blockerFacts(base: any, assignments: any[]) {
       ? base.report_pack.blockers
       : []
   ) {
-    const code = txt(blocker?.reason_code);
+    const code = txt(blocker?.reason_code || blocker?.code);
     if (!code) continue;
+    const fact = txt(blocker?.fact || blocker?.reason || blocker?.message) ||
+      null;
     real.push({
       code,
+      category: blocker?.category || "ses_docket",
+      docket_revision_id: base?.report_pack?.docket_revision_id || null,
+      // Name why — a code alone is not enough for the operator-facing surface.
+      ...(fact ? { fact } : {}),
+      ...(txt(blocker?.recovery_action)
+        ? { recovery_action: txt(blocker.recovery_action) }
+        : {}),
+    });
+  }
+  // Surface a presentation-level refusal reason even when the blocker list is
+  // empty (legacy failed without structured codes).
+  if (
+    real.length === 0 &&
+    String(base?.report_pack?.presentation_kind || "").toLowerCase() ===
+      "refused" &&
+    txt(base?.report_pack?.presentation_reason)
+  ) {
+    real.push({
+      code: "pack_refused",
       category: "ses_docket",
       docket_revision_id: base?.report_pack?.docket_revision_id || null,
+      fact: txt(base.report_pack.presentation_reason),
     });
   }
   return {
@@ -1227,19 +1274,65 @@ export function buildCanonicalMakesafeRows(
       base,
       cardMode ? null : extras.intakeCaseByJobId?.[base?.id],
     );
+    // Prefer honesty fields already stamped on report_pack by the pipeline;
+    // re-derive only when absent so tests that inject report_pack directly still
+    // get a consistent presentation.
+    const packHonesty = pack?.presentation_kind
+      ? {
+        kind: String(pack.presentation_kind),
+        state: String(pack.status || "not_started"),
+        reason: pack.presentation_reason ?? null,
+        pre_xero_docs_ready: pack.pre_xero_docs_ready === true,
+        drafted: !!pack?.report_doc_id ||
+          pack?.pre_xero_docs_ready === true ||
+          ["drafted", "authorised_not_sent", "refused", "ready"].includes(
+            String(pack?.status || "").toLowerCase(),
+          ),
+        legacy_pack_status: pack.legacy_pack_status ?? null,
+      }
+      : (() => {
+        const derived = presentSesPackHonesty({
+          docket: pack?.docket_revision_id
+            ? {
+              id: pack.docket_revision_id,
+              pre_xero_docs_ready: pack.pre_xero_docs_ready === true,
+              blockers: pack.blockers,
+            }
+            : null,
+          legacy_pack: pack
+            ? {
+              status: pack.status,
+              failed_step: pack.failed_step,
+              error_detail: pack.error_detail,
+            }
+            : null,
+          pack_sent: packSent || base?.sent_to_builder === true,
+          has_report_doc: base?.has_report_doc === true,
+        });
+        return {
+          kind: derived.kind,
+          state: derived.state,
+          reason: derived.reason,
+          pre_xero_docs_ready: derived.pre_xero_docs_ready,
+          drafted: derived.drafted || !!pack?.report_doc_id,
+          legacy_pack_status: derived.legacy_pack_status,
+        };
+      })();
     const packPayload = {
-      state: pack?.status || (base?.sent_to_builder ? "sent" : "not_started"),
+      // Honest state: never a stale legacy `failed` over a ready docket.
+      state: packHonesty.state ||
+        (base?.sent_to_builder ? "sent" : "not_started"),
       sent: packSent,
       sent_at: packSent
         ? (pack?.sent_at || base?.makesafe_details?.report_sent_at || null)
         : null,
-      drafted: !!pack?.report_doc_id ||
-        pack?.pre_xero_docs_ready === true ||
-        ["drafted", "authorised_not_sent"].includes(
-          String(pack?.status || ""),
-        ),
+      drafted: packHonesty.drafted === true,
       docket_revision_id: pack?.docket_revision_id || null,
-      pre_xero_docs_ready: pack?.pre_xero_docs_ready === true,
+      pre_xero_docs_ready: packHonesty.pre_xero_docs_ready === true,
+      // Refusal / incomplete / ready distinction for the operator surface.
+      presentation_kind: packHonesty.kind,
+      presentation_reason: packHonesty.reason,
+      legacy_pack_status: packHonesty.legacy_pack_status,
       closeout_documents: {
         report: base?.has_report_doc === true,
         invoice: base?.has_invoice_doc === true,
