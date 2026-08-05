@@ -1,6 +1,4 @@
-import {
-  assertEquals,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   applyMlbThreadReplyToRoute,
   isMlbBuilderKey,
@@ -13,15 +11,12 @@ import {
 } from "./ses_mlb_thread_reply.ts";
 import {
   isAjsBuilderKey,
-  sesReleaseRouteOrder,
   SES_AJS_ROUTE_ORDER,
   SES_UNIVERSAL_ROUTE_ORDER,
+  sesReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import { resolveDocketRoutes } from "./ses_reporting_actions.ts";
-import {
-  MAKESAFE_CC,
-  MAKESAFE_FINANCE_CC,
-} from "./makesafe_send_pack.ts";
+import { MAKESAFE_CC, MAKESAFE_FINANCE_CC } from "./makesafe_send_pack.ts";
 
 Deno.test("MLB physical shape detection leaves AJS alone", () => {
   assertEquals(isMlbBuilderKey("MLB"), true);
@@ -289,7 +284,10 @@ Deno.test("pickIntakeThreadFromApprovedDraft: one thread with two posts is corro
 Deno.test("pickIntakeThreadFromApprovedDraft: duplicate rows of one coordinate are one answer", () => {
   const coords = pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
     maylandsDraftCandidate({ draft_id: "a" }),
-    maylandsDraftCandidate({ draft_id: "b", approved_at: "2026-07-21T00:00:00Z" }),
+    maylandsDraftCandidate({
+      draft_id: "b",
+      approved_at: "2026-07-21T00:00:00Z",
+    }),
   ]);
   assertEquals(coords?.thread_id, MAYLANDS_THREAD);
   assertEquals(coords?.post_id, MAYLANDS_POST);
@@ -400,7 +398,12 @@ Deno.test("applyMlbThreadReplyToRoute refuses ready without thread", () => {
       attachment_hashes: ["h2"],
     } as any,
     { builder_key: "MLB", family: "physical_makesafe" },
-    { thread_id: "thread-1", post_id: "post-1", conversation_id: null, case_id: "c1" },
+    {
+      thread_id: "thread-1",
+      post_id: "post-1",
+      conversation_id: null,
+      case_id: "c1",
+    },
   );
   assertEquals(stamped.ready, true);
   assertEquals(stamped.reply_to_thread_id, "thread-1");

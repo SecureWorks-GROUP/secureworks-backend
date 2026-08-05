@@ -28,8 +28,8 @@ import {
 } from "./ses_family_matrix.ts";
 import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
 import {
-  resolveIntakeThreadCoordinates,
   type ApprovedDraftThreadCandidate,
+  resolveIntakeThreadCoordinates,
 } from "./ses_mlb_thread_reply.ts";
 import {
   currentCycleNumber,

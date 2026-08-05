@@ -179,8 +179,8 @@ export function pickIntakeThreadFromApprovedDraft(
       approved_at: String(row.approved_at || "").trim() || null,
       email_post_id: String(row.email_post_id || "").trim() || null,
       email_thread_id: String(row.email_thread_id || "").trim() || null,
-      email_conversation_id:
-        String(row.email_conversation_id || "").trim() || null,
+      email_conversation_id: String(row.email_conversation_id || "").trim() ||
+        null,
       email_received_at: String(row.email_received_at || "").trim() || null,
     }))
     .filter((row) => {
