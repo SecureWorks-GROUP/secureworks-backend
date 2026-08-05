@@ -1262,7 +1262,9 @@ candidates refuses, and recency is never a tiebreak, because a wrong WO subject
 groups builder mail into the WRONG conversation while an ungrouped email is
 merely plain. Provenance is likewise never invented: an unrecognised stored
 source stamps `subject_source: null`, not `emails_subject`.
-Plumbed as `routing.intake_email_subject` / `subject_source` on the route. Do
+Plumbed on the manifest as `routing.intake_email_subject` /
+`routing.intake_email_subject_source`, and stamped on the route as
+`subject_source` / `original_work_order_subject`. Do
 **not** add or strip a leading `Re:` — exact match is the point. Missing,
 ambiguous or unreadable original never blocks prepare or send: keep the
 generated pack subject and stamp `subject_source: generated_fallback`. The

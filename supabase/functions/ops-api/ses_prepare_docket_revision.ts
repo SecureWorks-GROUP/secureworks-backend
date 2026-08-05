@@ -1317,8 +1317,8 @@ function manifestBase(
       // Verbatim original WO subject (emails.subject preferred). Used only for
       // MLB ordinary-mail report/photo inbox grouping — not real threading.
       intake_email_subject: input.source.intake_email_subject || "",
-      intake_email_subject_source:
-        input.source.intake_email_subject_source || "",
+      intake_email_subject_source: input.source.intake_email_subject_source ||
+        "",
     },
     items,
     deliverables: input.source.deliverables.map((deliverable) => ({
@@ -1549,7 +1549,8 @@ function buildEmailDrafts(
   const ordinaryMailSubjectMatch = mlbPhysical &&
     mlbPhysicalUsesOrdinaryMailSendFallback();
   const originalWoSubject = text(input.source.intake_email_subject);
-  const originalSubjectSource = input.source.intake_email_subject_source || null;
+  const originalSubjectSource = input.source.intake_email_subject_source ||
+    null;
   const reportGenerated = `${ref} - ${row.family.replaceAll("_", " ")}`;
   const photoGenerated = `Photo Evidence - ${ref}`;
   const reportSubject = ordinaryMailSubjectMatch

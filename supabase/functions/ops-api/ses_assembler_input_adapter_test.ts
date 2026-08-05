@@ -3894,3 +3894,136 @@ Deno.test(
     assertEquals(result.envelope.v2.items.swms_artifact.state, "blocked");
   },
 );
+
+// --- Original work-order email subject recovery (MLB ordinary-mail inbox
+// grouping only, never real threading). The pick helper is unit-tested in
+// ses_mlb_thread_reply_test.ts; these pin the adapter side: WHICH stored post
+// ids may supply emails.subject, and that a lower tier only speaks when the
+// tier above it is genuinely empty.
+
+const WO_EMAIL_SUBJECT =
+  "NEW WORK ORDER - MLB-26267 U24/ 28 Peninsula Road, Maylands, WA 6051";
+
+function intakeSubjectSnapshot(args: {
+  emailSubjectsByPostId?: Record<string, string>;
+  draftSubjects?: string[];
+  metadataSubject?: string;
+  storyPostIds?: string[];
+  caseSourcesHaveThread?: boolean;
+}): SesAssemblerLiveSnapshot {
+  const live = snapshot();
+  live.cases = [{
+    id: "case-subject",
+    state: "confirmed_live_job",
+    story_json: (args.storyPostIds || []).map((sourcePostId) => ({
+      sourcePostId,
+    })),
+  }];
+  live.case_sources = [
+    {
+      case_id: "case-subject",
+      post_id: "post-work-order",
+      thread_id: args.caseSourcesHaveThread === false ? "" : "thread-intake",
+      conversation_id: "conversation-intake",
+      received_at: "2026-08-01T01:00:00.000Z",
+    },
+    {
+      case_id: "case-subject",
+      post_id: "post-later-chatter",
+      thread_id: args.caseSourcesHaveThread === false ? "" : "thread-intake",
+      conversation_id: "conversation-intake",
+      received_at: "2026-08-02T01:00:00.000Z",
+    },
+  ];
+  live.intake_email_subjects_by_post_id = args.emailSubjectsByPostId || {};
+  live.approved_draft_subjects = args.draftSubjects || [];
+  live.job = {
+    ...live.job,
+    metadata: {
+      ...record(live.job.metadata),
+      ...(args.metadataSubject === undefined
+        ? {}
+        : { builder_email_subject: args.metadataSubject }),
+    },
+  };
+  return live;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+Deno.test(
+  "intake subject recovery reads emails.subject only for the proven intake post id",
+  () => {
+    // The resolved thread anchor is post-work-order. A later chatter post on
+    // the same thread is NOT the work order, so its subject must never be a
+    // candidate — grouping builder mail under the wrong string is worse than
+    // not grouping it.
+    const input = buildSesAssemblerInput(intakeSubjectSnapshot({
+      emailSubjectsByPostId: {
+        "post-work-order": WO_EMAIL_SUBJECT,
+        "post-later-chatter": "RE: unrelated site chatter",
+      },
+      draftSubjects: ["draft copy that must not win"],
+      metadataSubject: "metadata copy that must not win",
+    }));
+    assertEquals(input.source.intake_post_id, "post-work-order");
+    assertEquals(input.source.intake_email_subject, WO_EMAIL_SUBJECT);
+    assertEquals(input.source.intake_email_subject_source, "emails_subject");
+  },
+);
+
+Deno.test(
+  "intake subject falls back draft -> metadata, and ambiguity yields no subject",
+  () => {
+    const draftFallback = buildSesAssemblerInput(intakeSubjectSnapshot({
+      emailSubjectsByPostId: {},
+      draftSubjects: ["  NEW WORK ORDER - MLB-26267 stored on the draft  "],
+      metadataSubject: "metadata copy that must not win",
+    }));
+    assertEquals(
+      draftFallback.source.intake_email_subject,
+      "NEW WORK ORDER - MLB-26267 stored on the draft",
+    );
+    assertEquals(
+      draftFallback.source.intake_email_subject_source,
+      "intake_draft_subject",
+    );
+
+    const metadataFallback = buildSesAssemblerInput(intakeSubjectSnapshot({
+      metadataSubject: "NEW WORK ORDER - MLB-26267 stamped at mint",
+    }));
+    assertEquals(
+      metadataFallback.source.intake_email_subject,
+      "NEW WORK ORDER - MLB-26267 stamped at mint",
+    );
+    assertEquals(
+      metadataFallback.source.intake_email_subject_source,
+      "job_metadata_builder_email_subject",
+    );
+
+    // Two distinct story-source posts each carrying a different stored subject
+    // is ambiguity, not a race to the newest: refuse, and let the route ride
+    // the generated pack subject rather than guess a work order.
+    const ambiguous = buildSesAssemblerInput(intakeSubjectSnapshot({
+      caseSourcesHaveThread: false,
+      storyPostIds: ["post-work-order", "post-later-chatter"],
+      emailSubjectsByPostId: {
+        "post-work-order": WO_EMAIL_SUBJECT,
+        "post-later-chatter": "NEW WORK ORDER - MLB-26999 12 Other Street",
+      },
+      draftSubjects: ["draft copy that must not rescue an ambiguous tier"],
+    }));
+    assertEquals(ambiguous.source.intake_post_id, null);
+    assertEquals(ambiguous.source.intake_email_subject, null);
+    assertEquals(ambiguous.source.intake_email_subject_source, null);
+
+    // No stored subject anywhere: null, never a reconstructed string.
+    const none = buildSesAssemblerInput(intakeSubjectSnapshot({}));
+    assertEquals(none.source.intake_email_subject, null);
+    assertEquals(none.source.intake_email_subject_source, null);
+  },
+);
