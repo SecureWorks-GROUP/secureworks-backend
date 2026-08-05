@@ -1,0 +1,30 @@
+[
+  {
+    "id": "82465e2d-cb8d-4729-8de4-f546543a8bc3",
+    "attendance_cycle_id": "3c4a0d08-e0a0-4149-8ce9-2a4fa65be0c3",
+    "submitted_at": "2026-07-22 11:22:17.828+00",
+    "status": "submitted",
+    "checklist_json": {
+      "job_type": "Ceiling / water ingress",
+      "work_done": "Bugle screwed structural timber into joists securing and lifting ceiling up.",
+      "trade_count": 1,
+      "arrival_time": "2026-07-16 18:19",
+      "damage_cause": "Storm / wind",
+      "labour_hours": 2,
+      "access_issues": "",
+      "invoice_notes": "",
+      "materials_used": [
+        "Timber x 3",
+        "Bugle screws x 9",
+        "Tarps / roof materials",
+        "Fixings / consumables",
+        "Other / none"
+      ],
+      "job_type_detail": "",
+      "damage_description": "Make-safe type: Ceiling / water ingress\nDamage: Sagging ceiling in living room",
+      "follow_up_required": false,
+      "makesafe_type_detail": ""
+    },
+    "notes": "Bugle screwed structural timber into joists securing and lifting ceiling up."
+  }
+]

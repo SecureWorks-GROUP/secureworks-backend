@@ -1,0 +1,34 @@
+{
+  "revision": {
+    "id": "b82f3c0e-5ab5-5a11-90c2-8b9a4b1eb1fa",
+    "state": "proposed",
+    "job_id": "db3f2242-d10c-42f0-80b9-7d684e62c6fe",
+    "org_id": "00000000-0000-0000-0000-000000000001",
+    "reason": "Captain commercial remint INV-1107 add $85 timber and bugle materials (commercial_remint_three_cards_v1)",
+    "created_at": "2026-08-05T08:21:40.975449+00:00",
+    "created_by": "ses-void-preparer",
+    "updated_at": "2026-08-05T08:21:40.975449+00:00",
+    "confirmed_at": null,
+    "content_hash": "sha256:b82f3c0e5ab5ca1150c28b9a4b1eb1fa74d1bd264ccc1b40b0318a55b8bc077c",
+    "target_status": "DELETED",
+    "observed_status": "DRAFT",
+    "provider_digest": {},
+    "xero_invoice_id": "3a5b24c9-a5ff-4995-a33a-cb2088c55988",
+    "invoice_obligation_revision_id": "d35f30f3-56f2-542d-b4dc-5c7b608aa85f"
+  },
+  "content": {
+    "schema": "secureworks.makesafe.invoice-void/v1",
+    "org_id": "00000000-0000-0000-0000-000000000001",
+    "job_id": "db3f2242-d10c-42f0-80b9-7d684e62c6fe",
+    "xero_invoice_id": "3a5b24c9-a5ff-4995-a33a-cb2088c55988",
+    "invoice_number": "INV-1107",
+    "invoice_obligation_revision_id": "d35f30f3-56f2-542d-b4dc-5c7b608aa85f",
+    "observed_status": "DRAFT",
+    "target_status": "DELETED",
+    "reason": "Captain commercial remint INV-1107 add $85 timber and bugle materials (commercial_remint_three_cards_v1)"
+  },
+  "external_mutations": {
+    "xero": 0,
+    "email": 0
+  }
+}

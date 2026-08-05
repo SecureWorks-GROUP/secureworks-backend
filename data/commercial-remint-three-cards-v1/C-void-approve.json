@@ -1,0 +1,30 @@
+[
+  {
+    "result": {
+      "approval": {
+        "id": "43d14469-2d9f-4357-8ad6-0f1ec9775837",
+        "decided_at": "2026-08-05T08:23:51.665034+00:00",
+        "decided_by": "Captain brief commercial-remint-three-cards-v1 (void DRAFT INV-1106 authorised)",
+        "void_revision_id": "8cbd8a27-a2ef-5323-a9b2-27e490ed31b7",
+        "approval_content_hash": "sha256:8cbd8a27a2ef432369b227e490ed31b71b15f1e3445cfd66325e3fa6d7074537"
+      },
+      "revision": {
+        "id": "8cbd8a27-a2ef-5323-a9b2-27e490ed31b7",
+        "state": "approved",
+        "job_id": "d97067be-62e7-48e2-acff-344bb7473dd5",
+        "org_id": "00000000-0000-0000-0000-000000000001",
+        "reason": "Captain commercial remint INV-1106 bill 4.5h@$85 plus $95 materials roof+ceiling (commercial_remint_three_cards_v1)",
+        "created_at": "2026-08-05T08:23:50.685558+00:00",
+        "created_by": "ses-void-preparer",
+        "updated_at": "2026-08-05T08:23:51.666053+00:00",
+        "confirmed_at": null,
+        "content_hash": "sha256:8cbd8a27a2ef432369b227e490ed31b71b15f1e3445cfd66325e3fa6d7074537",
+        "target_status": "DELETED",
+        "observed_status": "DRAFT",
+        "provider_digest": {},
+        "xero_invoice_id": "14f6305a-d083-4073-bd40-20a865043ea9",
+        "invoice_obligation_revision_id": "1f94c444-09d9-5122-8f2f-31d827a0dacc"
+      }
+    }
+  }
+]
