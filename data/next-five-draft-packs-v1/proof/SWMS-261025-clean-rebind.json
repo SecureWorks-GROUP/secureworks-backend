@@ -1,0 +1,16 @@
+{
+  "pdf_sha256": "sha256:159c081567f567dcc5f9b546591d12ae02c30b421a3332d29ccd34c4546c9ab0",
+  "document_id": "55ae5c93-0b3f-4ce6-a1c0-acd4557d1954",
+  "file_name": "Make-Safe-Report-SWMS-261025-Koondoola-537ef17af3ae.pdf",
+  "bind": {
+    "success": true,
+    "supersedes_prior_bind": true,
+    "expected_raw_sha256": "sha256:159c081567f567dcc5f9b546591d12ae02c30b421a3332d29ccd34c4546c9ab0",
+    "report_input_hash": "sha256:a292f58804293438ef6b07a22a0486fd463380e3fbdbfd82b092ce27f24cdf83"
+  },
+  "prepare_state": "ready",
+  "blockers": [],
+  "cockpit": "INVOICE_CREATE_READY",
+  "photos": 50,
+  "ticks": false
+}
