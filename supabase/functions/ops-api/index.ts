@@ -6887,7 +6887,9 @@ if (import.meta.main) serve(async (req: Request) => {
       // hard-stop before cards 2–4. Defaults dry_run:true — live send only with
       // dry_run:false under supervision. Not on ROUTINE_ALLOWED_ACTIONS.
       // Structural: CC always ses@secureworkswa.com.au; invoice impossible;
-      // does not weaken send-outlook-email or the money fence.
+      // does not weaken send-outlook-email or the money fence. `to` is required
+      // and allowlisted (never auto-selected); `attempt_key` is the deliberate
+      // retry coordinate after a Graph failure.
       case 'send_mailer_ops_visibility': {
         if (authMode === 'routine') {
           return json({
@@ -6928,6 +6930,7 @@ if (import.meta.main) serve(async (req: Request) => {
             kind: mailerKind,
             to: body.to,
             job_document_id: body.job_document_id,
+            attempt_key: body.attempt_key,
             dry_run: body.dry_run,
             actor: authUser?.email || body.actor || 'mailer-ops-operator',
           },

@@ -1,4 +1,4 @@
--- Rollback: remove mailer_ops_send effect kind.
+-- Rollback: remove mailer_ops_send effect kind (and its attempt-hash index).
 -- Refuses if any mailer_ops_send rows exist (preserve ledger integrity).
 
 DO $$

@@ -21,6 +21,11 @@
  *   - photo cap lives ONLY in this module (billing pack never imports it)
  *   - dry_run defaults true; live Graph requires dry_run:false
  *   - one job_id per call (cards are independently driveable; hard stop after card one)
+ *   - To is never auto-selected: the operator names it and it must be on the
+ *     card-bound / configured destination allowlist
+ *   - the effect identity carries a content-addressed attempt hash, so a stuck
+ *     `unknown` token is never redispatched and a deliberate retry can still run
+ *   - evidence is current-attendance-cycle scoped and never carries receipts
  */
 
 import {
@@ -33,6 +38,11 @@ import {
   sesSha256,
   sesSha256Bytes,
 } from "./ses_docket_envelope.ts";
+import {
+  filterMediaForCurrentCycle,
+  hasReattendBoundary,
+  isEvidenceBoundToCurrentCycle,
+} from "./makesafe_cycle_evidence.ts";
 import {
   SES_OPERATION_HEADER,
   SES_RELEASE_CC,
@@ -136,6 +146,8 @@ export function selectRepresentativePhotoIndices(
   const k = Math.max(0, Math.floor(cap));
   if (n === 0 || k === 0) return [];
   if (n <= k) return Array.from({ length: n }, (_, i) => i);
+  // k === 1 would divide by zero in the spread below; one slot is the head.
+  if (k === 1) return [0];
   const picked = new Set<number>();
   for (let i = 0; i < k; i++) {
     picked.add(Math.round((i * (n - 1)) / (k - 1)));
@@ -178,62 +190,99 @@ export function extractMailerAddressesFromSenderPatterns(
   return out;
 }
 
+/** Normalise a candidate destination list (full addresses, lowercased, unique). */
+function normaliseAddressList(
+  values: readonly (string | null | undefined)[] | undefined,
+): string[] {
+  return extractMailerAddressesFromSenderPatterns([...(values || [])]);
+}
+
+export type MailerOpsRecipientSource =
+  /** The address that actually sent this card's own work order (card-bound). */
+  | "card_intake_work_order_sender"
+  /** Configured on the company row. Inbound trust list, so confirmation-only. */
+  | "company_sender_patterns";
+
+/**
+ * Destination resolution. `sender_patterns` is an INBOUND trust list (who we
+ * accept work orders FROM), so it may only CONFIRM an address the operator
+ * named — it can never auto-select one. The stronger coordinate is card-bound:
+ * the From address of this card's own intake work-order email.
+ */
 export function resolveMailerOpsRecipient(args: {
   senderPatterns: unknown;
+  cardIntakeSenders?: readonly (string | null | undefined)[];
   requestedTo?: string | null;
-}): { to: string; source: "sender_patterns" | "requested_allowlisted" } {
-  const candidates = extractMailerAddressesFromSenderPatterns(
+}): {
+  to: string;
+  source: MailerOpsRecipientSource;
+  card_bound: boolean;
+  card_intake_senders: string[];
+  configured_senders: string[];
+} {
+  const configured = extractMailerAddressesFromSenderPatterns(
     args.senderPatterns,
   );
-  if (candidates.length === 0) {
+  const cardBound = normaliseAddressList(args.cardIntakeSenders);
+  const allowlisted = [...new Set([...cardBound, ...configured])];
+  if (allowlisted.length === 0) {
     throw new SesActionError(
       409,
       mailerRefusal(
         "mailer_recipient_unresolved",
-        "No full-email work-order mailer address is configured on the company sender_patterns; cannot send mailer ops visibility.",
+        "No work-order mailer address is known for this card: the company has no full-email sender_patterns entry and this card's intake sources carry no sender address.",
         {
           recovery_action:
-            "Add the builder work-order mailer (full address, e.g. mlb.mailer@primeeco.tech) to makesafe_companies.sender_patterns.",
+            "Add the builder work-order mailer (full address, e.g. mlb.mailer@primeeco.tech) to makesafe_companies.sender_patterns, then retry with that address as body.to.",
         },
       ),
     );
   }
   const requested = String(args.requestedTo || "").trim().toLowerCase();
-  if (requested) {
-    if (!candidates.includes(requested)) {
-      throw new SesActionError(
-        409,
-        mailerRefusal(
-          "mailer_recipient_not_allowlisted",
-          "The requested To address is not one of this company's work-order mailer addresses.",
-          {
-            recovery_action:
-              "Pass a To that matches a full-email sender_patterns entry for the company.",
-            evidence: {
-              requested,
-              allowlisted: candidates,
-            },
-          },
-        ),
-      );
-    }
-    return { to: requested, source: "requested_allowlisted" };
-  }
-  if (candidates.length > 1) {
+  if (!requested) {
     throw new SesActionError(
       409,
       mailerRefusal(
-        "mailer_recipient_ambiguous",
-        "Multiple work-order mailer addresses are configured; pass an explicit To from the allowlist.",
+        "mailer_recipient_confirmation_required",
+        "The mailer ops To address must be named explicitly; sender_patterns is an inbound trust list and is never auto-selected as a destination.",
         {
           recovery_action:
-            "Retry with body.to set to exactly one of the company sender_patterns full-email addresses.",
-          evidence: { allowlisted: candidates },
+            "Retry with body.to set to exactly one of the allowlisted addresses below (prefer the card-bound work-order sender).",
+          evidence: {
+            card_intake_senders: cardBound,
+            configured_senders: configured,
+          },
         },
       ),
     );
   }
-  return { to: candidates[0]!, source: "sender_patterns" };
+  if (!allowlisted.includes(requested)) {
+    throw new SesActionError(
+      409,
+      mailerRefusal(
+        "mailer_recipient_not_allowlisted",
+        "The requested To address is neither this card's own work-order sender nor a configured company mailer address.",
+        {
+          recovery_action:
+            "Pass a To that matches this card's intake sender or a full-email sender_patterns entry for the company.",
+          evidence: {
+            requested,
+            card_intake_senders: cardBound,
+            configured_senders: configured,
+          },
+        },
+      ),
+    );
+  }
+  return {
+    to: requested,
+    source: cardBound.includes(requested)
+      ? "card_intake_work_order_sender"
+      : "company_sender_patterns",
+    card_bound: cardBound.includes(requested),
+    card_intake_senders: cardBound,
+    configured_senders: configured,
+  };
 }
 
 /**
@@ -372,6 +421,8 @@ export interface MailerOpsReportProvenance {
   curated_source_kind: string | null;
   curated_source_identity: string | null;
   provenance_satisfied: "curated_bind" | "job_document_bound";
+  attendance_cycle_id: string | null;
+  cycle_scoped: boolean;
   content_hash: string;
   size_bytes: number;
   bytes: Uint8Array;
@@ -392,10 +443,56 @@ function rawSha(value: unknown): string {
   return /^[0-9a-f]{64}$/.test(normalized) ? normalized : "";
 }
 
+/** A stalled object URL must become a refusal, not a burnt edge invocation. */
+const MAILER_OPS_FETCH_TIMEOUT_MS = 20_000;
+
+const IMAGE_CONTENT_TYPE_BY_EXTENSION: Record<string, string> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+  heic: "image/heic",
+  heif: "image/heif",
+  bmp: "image/bmp",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+};
+
+/**
+ * Real media type for a photo attachment. Storage reports the stored
+ * content-type; the file extension is the fallback. Never assume JPEG — a PNG
+ * or HEIC handed to Graph mislabelled renders wrong in the builder's client.
+ */
+export function resolvePhotoContentType(
+  storedContentType: string | null | undefined,
+  ...names: (string | null | undefined)[]
+): string {
+  const stored = String(storedContentType || "").trim().toLowerCase().split(
+    ";",
+  )[0];
+  if (stored.startsWith("image/") || stored.startsWith("video/")) return stored;
+  for (const name of names) {
+    const match = String(name || "").trim().toLowerCase().match(
+      /\.([a-z0-9]+)(?:\?|$)/,
+    );
+    const ext = match?.[1];
+    if (ext && IMAGE_CONTENT_TYPE_BY_EXTENSION[ext]) {
+      return IMAGE_CONTENT_TYPE_BY_EXTENSION[ext];
+    }
+  }
+  return "application/octet-stream";
+}
+
+interface DownloadedAttachment {
+  bytes: Uint8Array;
+  content_type: string | null;
+}
+
 async function downloadStorageBytes(
   client: any,
   storageUrl: string,
-): Promise<Uint8Array> {
+): Promise<DownloadedAttachment> {
   const parsed = parsePublicStorageUrl(storageUrl);
   if (parsed) {
     const downloaded = await client.storage.from(parsed.bucket).download(
@@ -413,15 +510,24 @@ async function downloadStorageBytes(
         ),
       );
     }
-    return new Uint8Array(await downloaded.data.arrayBuffer());
+    return {
+      bytes: new Uint8Array(await downloaded.data.arrayBuffer()),
+      content_type: text(downloaded.data.type) || null,
+    };
   }
   // Fallback: HTTP fetch of the public URL (no Graph).
   try {
-    const response = await fetch(storageUrl);
+    const response = await fetch(storageUrl, {
+      signal: AbortSignal.timeout(MAILER_OPS_FETCH_TIMEOUT_MS),
+    });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
-    return new Uint8Array(await response.arrayBuffer());
+    const contentType = response.headers.get("content-type");
+    return {
+      bytes: new Uint8Array(await response.arrayBuffer()),
+      content_type: text(contentType) || null,
+    };
   } catch (err) {
     throw new SesActionError(
       503,
@@ -437,6 +543,39 @@ async function downloadStorageBytes(
 }
 
 /**
+ * Attendance-cycle facts for this card. A reattended card must never carry a
+ * previous visit's photos or report to the builder paying for the current one,
+ * so both resolvers scope through the ONE shared boundary in
+ * `makesafe_cycle_evidence.ts` — never a private copy of the rule.
+ */
+export interface MailerOpsCycleContext {
+  detail: Record<string, unknown> | null;
+  attendance_cycle_id: string | null;
+  cycle_number: number | null;
+  cycle_scoped: boolean;
+}
+
+export function mailerOpsCycleContext(detail: unknown): MailerOpsCycleContext {
+  const row = detail && typeof detail === "object"
+    ? detail as Record<string, unknown>
+    : null;
+  const cycleNumber = Number(row?.cycle_number ?? NaN);
+  return {
+    detail: row,
+    attendance_cycle_id: text(row?.attendance_cycle_id) || null,
+    cycle_number: Number.isFinite(cycleNumber) ? cycleNumber : null,
+    cycle_scoped: hasReattendBoundary(row),
+  };
+}
+
+const UNSCOPED_CYCLE: MailerOpsCycleContext = {
+  detail: null,
+  attendance_cycle_id: null,
+  cycle_number: null,
+  cycle_scoped: false,
+};
+
+/**
  * Resolve the make-safe report PDF and prove provenance.
  * Satisfies pdf_provenance_required: document is a job_documents row of type
  * makesafe_report owned by this job_id; curated bind stamps preferred.
@@ -445,6 +584,7 @@ export async function resolveMailerOpsReportAttachment(
   client: any,
   jobId: string,
   preferredDocumentId?: string | null,
+  cycle: MailerOpsCycleContext = UNSCOPED_CYCLE,
 ): Promise<MailerOpsReportProvenance> {
   const docs = await client.from("job_documents")
     .select(
@@ -462,17 +602,32 @@ export async function resolveMailerOpsReportAttachment(
       ),
     );
   }
-  const rows: any[] = Array.isArray(docs.data) ? docs.data : [];
+  const allRows: any[] = Array.isArray(docs.data) ? docs.data : [];
+  // Current-attendance-cycle scope through the shared evidence boundary.
+  const rows = cycle.cycle_scoped
+    ? allRows.filter((row) =>
+      isEvidenceBoundToCurrentCycle(row, cycle.detail, cycle.attendance_cycle_id)
+    )
+    : allRows;
   if (rows.length === 0) {
     throw new SesActionError(
       409,
       mailerRefusal(
         "mailer_ops_report_missing",
-        "No makesafe_report job_document is bound to this job; cannot satisfy pdf provenance for mailer ops send.",
+        cycle.cycle_scoped && allRows.length > 0
+          ? "No makesafe_report job_document is bound to this card's CURRENT attendance cycle; a previous visit's report must never be mailed as this visit's evidence."
+          : "No makesafe_report job_document is bound to this job; cannot satisfy pdf provenance for mailer ops send.",
         {
           recovery_action:
-            "Bind a curated make-safe report (bind_current_cycle_curated_makesafe_report) before mailer ops send.",
-          evidence: { job_id: jobId },
+            "Bind a curated make-safe report (bind_current_cycle_curated_makesafe_report) for the current attendance cycle before mailer ops send.",
+          evidence: {
+            job_id: jobId,
+            cycle_scoped: cycle.cycle_scoped,
+            attendance_cycle_id: cycle.attendance_cycle_id,
+            cycle_number: cycle.cycle_number,
+            documents_on_job: allRows.length,
+            documents_in_current_cycle: 0,
+          },
         },
       ),
     );
@@ -489,12 +644,14 @@ export async function resolveMailerOpsReportAttachment(
           state: "refused",
           code: "pdf_provenance_required",
           fact:
-            "The PDF job_document_id does not belong to the supplied job_id or is not a makesafe_report.",
+            "The PDF job_document_id does not belong to the supplied job_id, is not a makesafe_report, or is not bound to the current attendance cycle.",
           recovery_action:
-            "Use the makesafe_report document and job identities stored together.",
+            "Use the makesafe_report document and job identities stored together for the current attendance cycle.",
           evidence: {
             job_document_id: preferred,
             job_id: jobId,
+            cycle_scoped: cycle.cycle_scoped,
+            attendance_cycle_id: cycle.attendance_cycle_id,
           },
         } as SesRefusal,
       );
@@ -555,7 +712,7 @@ export async function resolveMailerOpsReportAttachment(
     );
   }
 
-  const bytes = await downloadStorageBytes(client, storageUrl);
+  const { bytes } = await downloadStorageBytes(client, storageUrl);
   if (bytes.byteLength < 5 ||
     String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]) !==
       "%PDF-") {
@@ -633,6 +790,8 @@ export async function resolveMailerOpsReportAttachment(
     curated_source_kind: text(snap.curated_source_kind) || null,
     curated_source_identity: text(snap.curated_source_identity) || null,
     provenance_satisfied: provenanceSatisfied,
+    attendance_cycle_id: text(chosen.attendance_cycle_id) || null,
+    cycle_scoped: cycle.cycle_scoped,
     content_hash: contentHash,
     size_bytes: bytes.byteLength,
     bytes,
@@ -645,25 +804,38 @@ export interface MailerOpsPhotoSelection {
   available_count: number;
   selected_count: number;
   cap: number;
+  excluded_receipt_count: number;
+  excluded_other_cycle_count: number;
+  cycle_scoped: boolean;
+  attendance_cycle_id: string | null;
   photos: Array<{
     media_id: string;
     file_name: string;
     storage_url: string;
     size_bytes: number;
     content_hash: string;
+    content_type: string;
     bytes: Uint8Array;
     role: "site_photo";
   }>;
 }
 
+/** Storage object path is the fallback name when a row has only a label. */
+function photoFileName(row: any, storageUrl: string): string {
+  const fromPath = storageUrl.split("?")[0].split("/").pop() || "";
+  return text(row.file_name) || text(fromPath) || text(row.label) ||
+    `photo-${text(row.id).slice(0, 8)}.jpg`;
+}
+
 export async function resolveMailerOpsPhotoAttachments(
   client: any,
   jobId: string,
+  cycle: MailerOpsCycleContext = UNSCOPED_CYCLE,
   cap: number = MAILER_OPS_PHOTO_CAP,
 ): Promise<MailerOpsPhotoSelection> {
   const media = await client.from("job_media")
     .select(
-      "id,job_id,type,storage_url,url,file_name,label,created_at,size_bytes,makesafe_content_hash",
+      "id,job_id,type,phase,storage_url,label,created_at,attendance_cycle_id,cycle_attribution,makesafe_content_hash",
     )
     .eq("job_id", jobId)
     .order("created_at", { ascending: true });
@@ -676,19 +848,41 @@ export async function resolveMailerOpsPhotoAttachments(
       ),
     );
   }
-  const all: any[] = (Array.isArray(media.data) ? media.data : []).filter(
-    (row: any) => {
-      const t = text(row.type).toLowerCase();
-      return !t || t === "photo";
-    },
+  const rows: any[] = Array.isArray(media.data) ? media.data : [];
+  // Receipts are our cost evidence, never builder-facing site photos. They are
+  // stored as type 'photo' with phase 'receipt', so type alone does not exclude
+  // them (same rule as the site-photo build in index.ts).
+  const siteRows = rows.filter((row: any) => {
+    const t = text(row.type).toLowerCase();
+    if (t && t !== "photo") return false;
+    return text(row.phase).toLowerCase() !== "receipt";
+  });
+  const excludedReceiptCount = rows.length - siteRows.length;
+  // Current attendance cycle only — one shared boundary, no private copy.
+  const all = filterMediaForCurrentCycle(
+    siteRows,
+    cycle.detail,
+    cycle.attendance_cycle_id,
   );
+  const excludedOtherCycleCount = siteRows.length - all.length;
   if (all.length === 0) {
     throw new SesActionError(
       409,
       mailerRefusal(
         "mailer_ops_photos_missing",
-        "No site photos are available on this job for mailer ops visibility.",
-        { evidence: { job_id: jobId } },
+        cycle.cycle_scoped && siteRows.length > 0
+          ? "No site photos are bound to this card's CURRENT attendance cycle; a previous visit's photos must never be mailed as this visit's evidence."
+          : "No site photos are available on this job for mailer ops visibility.",
+        {
+          evidence: {
+            job_id: jobId,
+            media_rows: rows.length,
+            excluded_receipt_count: excludedReceiptCount,
+            excluded_other_cycle_count: excludedOtherCycleCount,
+            cycle_scoped: cycle.cycle_scoped,
+            attendance_cycle_id: cycle.attendance_cycle_id,
+          },
+        },
       ),
     );
   }
@@ -698,7 +892,7 @@ export async function resolveMailerOpsPhotoAttachments(
   const photos: MailerOpsPhotoSelection["photos"] = [];
 
   for (const row of selectedRows) {
-    const storageUrl = text(row.storage_url) || text(row.url);
+    const storageUrl = text(row.storage_url);
     if (!storageUrl) {
       throw new SesActionError(
         409,
@@ -709,19 +903,24 @@ export async function resolveMailerOpsPhotoAttachments(
         ),
       );
     }
-    const bytes = await downloadStorageBytes(client, storageUrl);
+    const downloaded = await downloadStorageBytes(client, storageUrl);
+    const bytes = downloaded.bytes;
     const contentHash = text(row.makesafe_content_hash) &&
         /^sha256:[0-9a-f]{64}$/i.test(text(row.makesafe_content_hash))
       ? text(row.makesafe_content_hash).toLowerCase()
       : await sesSha256Bytes(bytes);
-    const name = text(row.file_name) || text(row.label) ||
-      `photo-${text(row.id).slice(0, 8)}.jpg`;
+    const name = photoFileName(row, storageUrl);
     photos.push({
       media_id: text(row.id),
       file_name: name,
       storage_url: storageUrl,
       size_bytes: bytes.byteLength,
       content_hash: contentHash,
+      content_type: resolvePhotoContentType(
+        downloaded.content_type,
+        name,
+        storageUrl,
+      ),
       bytes,
       role: "site_photo",
     });
@@ -740,6 +939,10 @@ export async function resolveMailerOpsPhotoAttachments(
     available_count: all.length,
     selected_count: photos.length,
     cap,
+    excluded_receipt_count: excludedReceiptCount,
+    excluded_other_cycle_count: excludedOtherCycleCount,
+    cycle_scoped: cycle.cycle_scoped,
+    attendance_cycle_id: cycle.attendance_cycle_id,
     photos,
   };
 }
@@ -755,6 +958,8 @@ async function loadMailerOpsSubjectInputs(
   draftSubjects: string[];
   jobMetadataSubject: string | null;
   builderReference: string | null;
+  /** From addresses of THIS card's own intake work-order emails. */
+  intakeSenders: string[];
 }> {
   const cases = await client.from("makesafe_intake_cases")
     .select(
@@ -794,12 +999,13 @@ async function loadMailerOpsSubjectInputs(
   }
 
   const emailsSubjects: string[] = [];
+  const intakeSenders: string[] = [];
   if (sourcePostIds.length) {
     // Chunk by URL budget.
     for (let i = 0; i < sourcePostIds.length; i += 25) {
       const chunk = sourcePostIds.slice(i, i + 25);
       const emails = await client.from("emails")
-        .select("post_id,subject")
+        .select("post_id,subject,from_email")
         .in("post_id", chunk);
       if (emails.error) {
         // Degrade: missing emails table/rows is not fatal; drafts/metadata may recover.
@@ -812,6 +1018,8 @@ async function loadMailerOpsSubjectInputs(
       for (const row of emails.data || []) {
         const s = text(row.subject);
         if (s) emailsSubjects.push(s);
+        const from = text(row.from_email);
+        if (from) intakeSenders.push(from);
       }
     }
   }
@@ -838,6 +1046,7 @@ async function loadMailerOpsSubjectInputs(
     draftSubjects,
     jobMetadataSubject: text(jobMetadata.builder_email_subject) || null,
     builderReference,
+    intakeSenders: [...new Set(intakeSenders)],
   };
 }
 
@@ -848,16 +1057,52 @@ export interface SendMailerOpsVisibilityArgs {
   job_id: string;
   /** One card, one kind per call — cards are independently driveable. */
   kind: MailerOpsRouteKind;
-  /** Optional explicit To; must match company sender_patterns full-email. */
+  /**
+   * REQUIRED destination. Named by the operator and allowlisted against this
+   * card's own intake sender / the company's configured addresses — never
+   * auto-selected from the inbound sender_patterns trust list.
+   */
   to?: string | null;
   /** Optional preferred makesafe_report document id. */
   job_document_id?: string | null;
+  /**
+   * Deliberate retry coordinate. The effect identity is content-addressed over
+   * the exact send (kind, to, cc, subject, attachment hashes) plus this key, so
+   * a Graph failure that parks the ledger row on `unknown` never strands the
+   * card: the operator retries under a new attempt key, which mints a new
+   * operation_key. A stuck token itself is still never redispatched.
+   */
+  attempt_key?: string | null;
   /**
    * Live Graph send requires dry_run:false. Default true so a deploy cannot
    * accidentally mail builders; the Captain supervises the live send.
    */
   dry_run?: boolean;
   actor?: string;
+}
+
+/**
+ * Content-addressed identity of the exact email this call would send. Two calls
+ * that would send the same email under the same attempt key are one effect
+ * (exact-once); a deliberately different attempt is a different effect.
+ */
+export async function mailerOpsAttemptHash(input: {
+  kind: MailerOpsRouteKind;
+  to: string;
+  cc: readonly string[];
+  subject: string;
+  attachment_hashes: readonly string[];
+  attempt_key?: string | null;
+}): Promise<string> {
+  return await sesSha256({
+    contract_version: MAILER_OPS_SEND_CONTRACT_VERSION,
+    kind: input.kind,
+    to: input.to,
+    cc: [...input.cc],
+    subject: input.subject,
+    attachment_hashes: [...input.attachment_hashes],
+    attempt_key: text(input.attempt_key) || null,
+  }, "SecureWorks:mailer-ops-send-attempt:v1\n");
 }
 
 export interface MailerOpsSendProof {
@@ -972,30 +1217,52 @@ export async function sendMailerOpsVisibilityAction(
       ),
     );
   }
-  // Also try detail requesting company when slug missing.
-  let senderPatterns = companyRes.data?.sender_patterns;
-  if (!senderPatterns) {
-    const detail = await client.from("makesafe_job_details")
-      .select("job_id,requesting_company_slug,requesting_company_name")
-      .eq("job_id", jobId)
-      .maybeSingle();
-    const detailSlug = text(detail.data?.requesting_company_slug);
-    if (detailSlug) {
+  // Make-safe detail carries the attendance-cycle facts (and the fallback
+  // company slug). Read it once for both.
+  const detailRes = await client.from("makesafe_job_details")
+    .select(
+      "job_id,requesting_company_slug,requesting_company_name,attendance_cycle_id,cycle_number,reattend_count",
+    )
+    .eq("job_id", jobId)
+    .maybeSingle();
+  if (detailRes.error) {
+    throw new SesActionError(
+      503,
+      mailerRefusal(
+        "mailer_ops_detail_lookup_failed",
+        `Make-safe job detail could not be read (${detailRes.error.message}); attendance-cycle scope is unprovable.`,
+      ),
+    );
+  }
+  const cycle = mailerOpsCycleContext(detailRes.data);
+
+  let company = companyRes.data || null;
+  if (!company?.sender_patterns) {
+    const detailSlug = text(detailRes.data?.requesting_company_slug);
+    if (detailSlug && detailSlug !== slug) {
       const co2 = await client.from("makesafe_companies")
         .select("slug,name,sender_patterns,report_recipient")
         .eq("slug", detailSlug)
         .maybeSingle();
-      senderPatterns = co2.data?.sender_patterns;
+      if (co2.data) company = co2.data;
     }
   }
+  const senderPatterns = company?.sender_patterns;
+
+  const subjectInputs = await loadMailerOpsSubjectInputs(
+    client,
+    jobId,
+    metadata,
+  );
 
   const recipient = resolveMailerOpsRecipient({
     senderPatterns,
+    cardIntakeSenders: subjectInputs.intakeSenders,
     requestedTo: args.to,
   });
 
   // Structural: never use report_recipient (makesafes@) as To on this path.
-  const reportRecipient = text(companyRes.data?.report_recipient).toLowerCase();
+  const reportRecipient = text(company?.report_recipient).toLowerCase();
   if (reportRecipient && recipient.to === reportRecipient) {
     throw new SesActionError(
       409,
@@ -1014,11 +1281,6 @@ export async function sendMailerOpsVisibilityAction(
     );
   }
 
-  const subjectInputs = await loadMailerOpsSubjectInputs(
-    client,
-    jobId,
-    metadata,
-  );
   const subjectDecision = resolveMailerOpsSubject({
     kind,
     emailsSubjects: subjectInputs.emailsSubjects,
@@ -1039,7 +1301,12 @@ export async function sendMailerOpsVisibilityAction(
     available_count: number;
     selected_count: number;
     cap: number;
+    excluded_receipt_count: number;
+    excluded_other_cycle_count: number;
+    cycle_scoped: boolean;
+    attendance_cycle_id: string | null;
     media_ids: string[];
+    content_types: string[];
   } | null = null;
 
   if (kind === "report") {
@@ -1047,6 +1314,7 @@ export async function sendMailerOpsVisibilityAction(
       client,
       jobId,
       args.job_document_id,
+      cycle,
     );
     attachmentByHash.set(report.content_hash, {
       name: report.file_name,
@@ -1059,11 +1327,15 @@ export async function sendMailerOpsVisibilityAction(
     const { bytes: _b, ...rest } = report;
     reportProvenance = rest;
   } else {
-    const photos = await resolveMailerOpsPhotoAttachments(client, jobId);
+    const photos = await resolveMailerOpsPhotoAttachments(
+      client,
+      jobId,
+      cycle,
+    );
     for (const photo of photos.photos) {
       attachmentByHash.set(photo.content_hash, {
         name: photo.file_name,
-        contentType: "image/jpeg",
+        contentType: photo.content_type,
         bytes: photo.bytes,
       });
       attachmentHashes.push(photo.content_hash);
@@ -1074,7 +1346,12 @@ export async function sendMailerOpsVisibilityAction(
       available_count: photos.available_count,
       selected_count: photos.selected_count,
       cap: photos.cap,
+      excluded_receipt_count: photos.excluded_receipt_count,
+      excluded_other_cycle_count: photos.excluded_other_cycle_count,
+      cycle_scoped: photos.cycle_scoped,
+      attendance_cycle_id: photos.attendance_cycle_id,
       media_ids: photos.photos.map((p) => p.media_id),
+      content_types: photos.photos.map((p) => p.content_type),
     };
   }
 
@@ -1118,6 +1395,16 @@ export async function sendMailerOpsVisibilityAction(
     throw new SesActionError(409, sesPhotoMailVolumeRefusal(volume));
   }
 
+  const attemptKey = text(args.attempt_key) || null;
+  const attemptHash = await mailerOpsAttemptHash({
+    kind,
+    to: recipient.to,
+    cc,
+    subject: subjectDecision.subject,
+    attachment_hashes: attachmentHashes,
+    attempt_key: attemptKey,
+  });
+
   const effectPayload = {
     contract_version: MAILER_OPS_SEND_CONTRACT_VERSION,
     job_id: jobId,
@@ -1125,6 +1412,7 @@ export async function sendMailerOpsVisibilityAction(
     kind,
     from: MAILER_OPS_FROM,
     to: [recipient.to],
+    to_source: recipient.source,
     cc: [...cc],
     subject: subjectDecision.subject,
     subject_source: subjectDecision.subject_source,
@@ -1132,6 +1420,8 @@ export async function sendMailerOpsVisibilityAction(
     attachment_hashes: attachmentHashes,
     attachment_names: attachmentNames,
     attachment_roles: attachmentRoles,
+    attempt_key: attemptKey,
+    attempt_hash: attemptHash,
     report_provenance: reportProvenance,
     photo_selection: photoSelectionMeta,
     // Explicit: no invoice identity on this effect.
@@ -1145,6 +1435,8 @@ export async function sendMailerOpsVisibilityAction(
     job_id: jobId,
     effect_kind: "mailer_ops_send",
     route_kind: kind,
+    // Retry coordinate: content address of the exact send plus attempt key.
+    artifact_hash: attemptHash,
     payload: effectPayload,
   });
 
@@ -1159,6 +1451,11 @@ export async function sendMailerOpsVisibilityAction(
       from: MAILER_OPS_FROM,
       to: [recipient.to],
       to_source: recipient.source,
+      to_card_bound: recipient.card_bound,
+      to_allowlist: {
+        card_intake_senders: recipient.card_intake_senders,
+        configured_senders: recipient.configured_senders,
+      },
       cc: [...cc],
       subject: subjectDecision.subject,
       subject_source: subjectDecision.subject_source,
@@ -1169,12 +1466,19 @@ export async function sendMailerOpsVisibilityAction(
       attachment_hashes: attachmentHashes,
       report_provenance: reportProvenance,
       photo_selection: photoSelectionMeta,
+      attendance_cycle: {
+        cycle_scoped: cycle.cycle_scoped,
+        attendance_cycle_id: cycle.attendance_cycle_id,
+        cycle_number: cycle.cycle_number,
+      },
       effect_preview: {
         operation_key: effect.operation_key,
         external_token: effect.external_token,
         payload_hash: effect.payload_hash,
         effect_kind: effect.effect_kind,
         route_kind: effect.route_kind,
+        attempt_key: attemptKey,
+        attempt_hash: attemptHash,
       },
       // Structural evidence for reviewers:
       fences: {
@@ -1257,12 +1561,53 @@ export async function sendMailerOpsVisibilityAction(
         route_kind: kind,
         external_token: effect.external_token,
         job_id: jobId,
+        attempt_key: attemptKey,
+        attempt_hash: attemptHash,
+        // This token is never redispatched. A deliberate retry of the same
+        // content is a NEW attempt: pass a fresh attempt_key.
+        retry_instruction:
+          "Reconcile this token first. To retry deliberately, call again with a new attempt_key; never redispatch this token.",
       },
     });
   }
 
-  const result = sent.result ||
-    (await mailGateway.reconcileSent(effect.external_token))[0];
+  // Already-confirmed replay: executeSesExternalEffect returns no result, so
+  // there is nothing new to prove. Report the ORIGINAL ledger proof rather than
+  // recomposing one from this call's freshly resolved subject/attachments —
+  // those bytes were never sent under this message id.
+  if (!sent.result) {
+    const storedDigest = object(sent.effect.provider_digest);
+    return {
+      success: true,
+      dry_run: false,
+      already_sent: true,
+      contract_version: MAILER_OPS_SEND_CONTRACT_VERSION,
+      job_id: jobId,
+      job_number: text(job.job_number) || null,
+      kind,
+      proof_source: "ses_external_effects_ledger",
+      recorded_proof: {
+        message_id: text(sent.effect.external_id) || null,
+        operation_token: effect.external_token,
+        operation_header: SES_OPERATION_HEADER,
+        provider_digest: storedDigest,
+        proof_surfaces: ["admin_sent_items", "ses_intake_cc"],
+      },
+      effect: {
+        operation_key: effect.operation_key,
+        external_token: effect.external_token,
+        state: sent.effect.state,
+        effect_kind: "mailer_ops_send",
+        route_kind: kind,
+        attempt_key: attemptKey,
+        attempt_hash: attemptHash,
+      },
+      note:
+        "This exact send is already confirmed; no email was sent and no new proof exists. The fields above are the ORIGINAL recorded proof. A deliberately different send needs a new attempt_key.",
+    };
+  }
+
+  const result = sent.result;
   if (!result?.message_id) {
     throw new SesActionError(
       409,
@@ -1294,9 +1639,11 @@ export async function sendMailerOpsVisibilityAction(
     proof_surfaces: ["admin_sent_items", "ses_intake_cc"],
   };
 
-  // Append-only human-readable audit (best-effort; effect ledger is authoritative).
+  // Append-only human-readable audit (best-effort; effect ledger is
+  // authoritative). supabase-js reports database failures on `error` rather
+  // than throwing, so check both.
   try {
-    await client.from("job_events").insert({
+    const audit = await client.from("job_events").insert({
       job_id: jobId,
       event_type: "mailer_ops_visibility_sent",
       detail_json: {
@@ -1305,11 +1652,19 @@ export async function sendMailerOpsVisibilityAction(
         proof,
         effect_operation_key: effect.operation_key,
         effect_id: sent.effect.id || null,
+        attempt_key: attemptKey,
+        attempt_hash: attemptHash,
         report_provenance: reportProvenance,
         photo_selection: photoSelectionMeta,
         actor,
       },
     });
+    if (audit?.error) {
+      console.warn(
+        "[mailer-ops] job_events insert failed:",
+        audit.error.message,
+      );
+    }
   } catch (err) {
     console.warn(
       "[mailer-ops] job_events insert failed:",
@@ -1331,11 +1686,20 @@ export async function sendMailerOpsVisibilityAction(
       state: sent.effect.state,
       effect_kind: "mailer_ops_send",
       route_kind: kind,
+      attempt_key: attemptKey,
+      attempt_hash: attemptHash,
     },
+    to_source: recipient.source,
+    to_card_bound: recipient.card_bound,
     subject_source: subjectDecision.subject_source,
     original_subject: subjectDecision.original_subject,
     report_provenance: reportProvenance,
     photo_selection: photoSelectionMeta,
+    attendance_cycle: {
+      cycle_scoped: cycle.cycle_scoped,
+      attendance_cycle_id: cycle.attendance_cycle_id,
+      cycle_number: cycle.cycle_number,
+    },
     fences: {
       pdf_provenance: kind === "report"
         ? {

@@ -1216,6 +1216,19 @@ the sealed money fence. Tests: `ses_mailer_ops_send_test.ts` (wiring only; zero
 Graph — green suite does not prove delivery). Evidence:
 `data/mailer-ops-send-action-v1/report.md`.
 
+Three boundaries on that route are load-bearing. `body.to` is REQUIRED and only
+confirmed against an allowlist (this card's own intake `emails.from_email` plus
+the company's full-address entries) — `sender_patterns` is an INBOUND trust list
+and must never auto-select a destination. The effect identity carries an
+`artifact_hash` retry coordinate (content address of kind/to/cc/subject/
+attachment hashes plus the operator's `attempt_key`), which is what
+`release_revision_id` is for `route_send`: exact-once still holds per attempt,
+a confirmed replay returns the STORED ledger proof rather than a recomposed one,
+and a stuck `unknown` token is still never redispatched — the operator retries
+under a new `attempt_key`. Evidence is current-attendance-cycle scoped through
+the shared `makesafe_cycle_evidence.ts` boundary and excludes `phase:'receipt'`
+media (receipts are cost evidence, not builder-facing site photos).
+
 AJS/AJBR only (Captain 2026-08-04 / skill backend release contract): two routes
 — `report_invoice` (report PDF + real Xero invoice PDF) then `photo`; TO
 `workorders@ajs.build` + participants; CC `ses@secureworkswa.com.au`. Client-send

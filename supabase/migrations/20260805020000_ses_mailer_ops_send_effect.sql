@@ -15,7 +15,12 @@
 --   - job_id required
 --   - route_kind is report|photo only (invoice is structurally impossible)
 --   - release / invoice-obligation / docket ids must be null
---   - unique (job_id, route_kind) so one confirmed mailer send per kind per card
+--   - artifact_hash required: it is the retry coordinate (a content address of
+--     the exact send plus the operator's attempt key) that route_send gets from
+--     release_revision_id. Without it one Graph failure would park a card on a
+--     stuck `unknown` row forever, since a token is never redispatched.
+--   - unique (job_id, route_kind, artifact_hash) so one exact send attempt is
+--     one ledger row per kind per card, while a deliberate new attempt can run
 --
 -- Writes zero operational rows. Does not send, mint, authorise, void, or
 -- release. Rollback twin:
@@ -64,9 +69,9 @@ ALTER TABLE public.ses_external_effects
       AND release_revision_id IS NULL
       AND invoice_obligation_revision_id IS NULL
       AND docket_revision_id IS NULL
-      AND artifact_hash IS NULL)
+      AND artifact_hash IS NOT NULL)
   );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_ses_external_mailer_ops_send
-  ON public.ses_external_effects (job_id, route_kind)
+  ON public.ses_external_effects (job_id, route_kind, artifact_hash)
   WHERE effect_kind = 'mailer_ops_send';

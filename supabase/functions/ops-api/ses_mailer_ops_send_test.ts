@@ -30,10 +30,12 @@ import {
   MAILER_OPS_FROM,
   MAILER_OPS_PHOTO_CAP,
   MAILER_OPS_SEND_CONTRACT_VERSION,
+  mailerOpsAttemptHash,
   mailerOpsRouteKindAllowsInvoice,
   parsePublicStorageUrl,
   resolveMailerOpsRecipient,
   resolveMailerOpsSubject,
+  resolvePhotoContentType,
   selectRepresentativePhotoIndices,
   sendMailerOpsVisibilityAction,
 } from "./ses_mailer_ops_send.ts";
@@ -107,6 +109,24 @@ Deno.test("mailer ops: photo indices are a representative spread, not first N", 
   assertEquals(selectRepresentativePhotoIndices(5, 12), [0, 1, 2, 3, 4]);
   // Cap is local constant
   assertEquals(MAILER_OPS_PHOTO_CAP, 12);
+  // cap 1 must not divide by zero (0/0 → NaN → all[NaN] TypeError)
+  assertEquals(selectRepresentativePhotoIndices(9, 1), [0]);
+  assertEquals(selectRepresentativePhotoIndices(1, 1), [0]);
+});
+
+Deno.test("mailer ops: photo content type is real, never assumed jpeg", () => {
+  assertEquals(resolvePhotoContentType("image/png", "a.jpg"), "image/png");
+  assertEquals(resolvePhotoContentType("", "site-photo.PNG"), "image/png");
+  assertEquals(
+    resolvePhotoContentType(null, null, "https://x/storage/v1/object/public/b/p.heic?token=1"),
+    "image/heic",
+  );
+  // Storage sometimes reports a generic type; the extension then decides.
+  assertEquals(
+    resolvePhotoContentType("application/octet-stream", "p.jpeg"),
+    "image/jpeg",
+  );
+  assertEquals(resolvePhotoContentType(null, "noextension"), "application/octet-stream");
 });
 
 Deno.test("mailer ops: sender_patterns extracts full emails only", () => {
@@ -121,20 +141,35 @@ Deno.test("mailer ops: sender_patterns extracts full emails only", () => {
   );
 });
 
-Deno.test("mailer ops: recipient allowlist + ambiguity", () => {
-  const one = resolveMailerOpsRecipient({
-    senderPatterns: ["mlb.mailer@primeeco.tech"],
-  });
-  assertEquals(one.to, "mlb.mailer@primeeco.tech");
+Deno.test("mailer ops: destination is never auto-selected from inbound sender_patterns", () => {
+  // A single configured full address is still not a confirmed destination:
+  // sender_patterns says who we accept work orders FROM, not where we send.
+  try {
+    resolveMailerOpsRecipient({
+      senderPatterns: ["mlb.mailer@primeeco.tech"],
+    });
+    throw new Error("expected confirmation refusal");
+  } catch (err) {
+    assert(err instanceof SesActionError);
+    assertEquals(
+      (err.refusal as any).code,
+      "mailer_recipient_confirmation_required",
+    );
+    assertEquals(
+      (err.refusal as any).evidence.configured_senders,
+      ["mlb.mailer@primeeco.tech"],
+    );
+  }
 
   try {
     resolveMailerOpsRecipient({
       senderPatterns: ["a@x.com", "b@x.com"],
+      requestedTo: "someone.else@x.com",
     });
-    throw new Error("expected ambiguity");
+    throw new Error("expected allowlist refusal");
   } catch (err) {
     assert(err instanceof SesActionError);
-    assertEquals((err.refusal as any).code, "mailer_recipient_ambiguous");
+    assertEquals((err.refusal as any).code, "mailer_recipient_not_allowlisted");
   }
 
   const picked = resolveMailerOpsRecipient({
@@ -142,7 +177,46 @@ Deno.test("mailer ops: recipient allowlist + ambiguity", () => {
     requestedTo: "b@x.com",
   });
   assertEquals(picked.to, "b@x.com");
-  assertEquals(picked.source, "requested_allowlisted");
+  assertEquals(picked.source, "company_sender_patterns");
+  assertEquals(picked.card_bound, false);
+
+  // The card's own work-order sender is the stronger, card-bound coordinate.
+  const cardBound = resolveMailerOpsRecipient({
+    senderPatterns: [],
+    cardIntakeSenders: ["MLB.Mailer@primeeco.tech", null],
+    requestedTo: "mlb.mailer@primeeco.tech",
+  });
+  assertEquals(cardBound.source, "card_intake_work_order_sender");
+  assertEquals(cardBound.card_bound, true);
+
+  try {
+    resolveMailerOpsRecipient({ senderPatterns: [], requestedTo: "x@y.com" });
+    throw new Error("expected unresolved refusal");
+  } catch (err) {
+    assert(err instanceof SesActionError);
+    assertEquals((err.refusal as any).code, "mailer_recipient_unresolved");
+  }
+});
+
+Deno.test("mailer ops: attempt hash is the retry coordinate, content-addressed", async () => {
+  const base = {
+    kind: "report" as const,
+    to: "mlb.mailer@primeeco.tech",
+    cc: [MAILER_OPS_CC],
+    subject: "NEW WORK ORDER - MLB-26267",
+    attachment_hashes: ["sha256:" + "ab".repeat(32)],
+  };
+  const first = await mailerOpsAttemptHash(base);
+  const replay = await mailerOpsAttemptHash({ ...base });
+  const retry = await mailerOpsAttemptHash({ ...base, attempt_key: "retry-2" });
+  const otherContent = await mailerOpsAttemptHash({
+    ...base,
+    subject: "Photo Evidence - MLB-26267",
+  });
+  assertEquals(first, replay);
+  assert(first !== retry);
+  assert(first !== otherContent);
+  assert(/^sha256:[0-9a-f]{64}$/.test(first));
 });
 
 Deno.test("mailer ops: subject uses exact original; photo fallback Photo Evidence - REF", () => {
@@ -177,12 +251,14 @@ Deno.test("mailer ops: parse public storage URL", () => {
   assertEquals(parsed?.path, "1e05/report.pdf");
 });
 
-Deno.test("mailer ops: buildSesEffect identity includes job for mailer_ops_send", async () => {
+Deno.test("mailer ops: buildSesEffect identity includes job and attempt hash", async () => {
+  const attempt = "sha256:" + "cd".repeat(32);
   const a = await buildSesEffect({
     org_id: "00000000-0000-4000-8000-000000000001",
     job_id: "10000000-0000-4000-8000-000000000001",
     effect_kind: "mailer_ops_send",
     route_kind: "report",
+    artifact_hash: attempt,
     payload: { k: 1 },
   });
   const b = await buildSesEffect({
@@ -190,9 +266,31 @@ Deno.test("mailer ops: buildSesEffect identity includes job for mailer_ops_send"
     job_id: "20000000-0000-4000-8000-000000000002",
     effect_kind: "mailer_ops_send",
     route_kind: "report",
+    artifact_hash: attempt,
+    payload: { k: 1 },
+  });
+  // Same card + kind, deliberate new attempt → new operation key, so one Graph
+  // failure cannot strand the card behind a stuck `unknown` token forever.
+  const retry = await buildSesEffect({
+    org_id: "00000000-0000-4000-8000-000000000001",
+    job_id: "10000000-0000-4000-8000-000000000001",
+    effect_kind: "mailer_ops_send",
+    route_kind: "report",
+    artifact_hash: "sha256:" + "ef".repeat(32),
+    payload: { k: 1 },
+  });
+  const replay = await buildSesEffect({
+    org_id: "00000000-0000-4000-8000-000000000001",
+    job_id: "10000000-0000-4000-8000-000000000001",
+    effect_kind: "mailer_ops_send",
+    route_kind: "report",
+    artifact_hash: attempt,
     payload: { k: 1 },
   });
   assert(a.operation_key !== b.operation_key);
+  assert(a.operation_key !== retry.operation_key);
+  assertEquals(a.operation_key, replay.operation_key);
+  assertEquals(a.artifact_hash, attempt);
   assertEquals(a.effect_kind, "mailer_ops_send");
   assertEquals(a.route_kind, "report");
   assertStringIncludes(a.external_token, "SES-");
@@ -260,12 +358,15 @@ function minimalPdfBytes(): Uint8Array {
 function makeClient(opts: {
   job?: Record<string, unknown>;
   company?: Record<string, unknown> | null;
+  detail?: Record<string, unknown> | null;
   documents?: any[];
   media?: any[];
   cases?: any[];
   sources?: any[];
   drafts?: any[];
   emails?: any[];
+  jobEventsError?: { message: string };
+  onJobEventInsert?: (row: any) => void;
 }): any {
   const job = opts.job || {
     id: "job-1",
@@ -309,11 +410,12 @@ function makeClient(opts: {
     id: `media-${i}`,
     job_id: "job-1",
     type: "photo",
+    phase: "completion",
     storage_url:
       `https://example.supabase.co/storage/v1/object/public/job-photos/job-1/p${i}.jpg`,
-    file_name: `p${i}.jpg`,
     created_at: `2026-08-01T00:00:${String(i).padStart(2, "0")}Z`,
   }));
+  const detail = opts.detail === null ? null : opts.detail || null;
   const cases = opts.cases || [{
     id: "case-1",
     job_id: "job-1",
@@ -358,7 +460,7 @@ function makeClient(opts: {
             return { data: company, error: null };
           }
           if (table === "makesafe_job_details") {
-            return { data: null, error: null };
+            return { data: detail, error: null };
           }
           return { data: null, error: null };
         },
@@ -383,7 +485,13 @@ function makeClient(opts: {
           if (table === "job_events") return { data: null, error: null };
           return { data: [], error: null };
         },
-        insert: async () => ({ data: null, error: null }),
+        insert: async (row: any) => {
+          if (table === "job_events") {
+            opts.onJobEventInsert?.(row);
+            return { data: null, error: opts.jobEventsError || null };
+          }
+          return { data: null, error: null };
+        },
       };
       // Make thenable for await client.from().select()...
       api.then = (onful: any, onrej: any) =>
@@ -433,6 +541,7 @@ Deno.test("mailer ops action: dry_run default prepares report without Graph/effe
       org_id: "00000000-0000-4000-8000-000000000001",
       job_id: "job-1",
       kind: "report",
+      to: "mlb.mailer@primeeco.tech",
       // dry_run omitted → true
     },
     {
@@ -479,6 +588,7 @@ Deno.test("mailer ops action: dry_run photo uses cap and records sent-versus-ava
       org_id: "00000000-0000-4000-8000-000000000001",
       job_id: "job-1",
       kind: "photo",
+      to: "mlb.mailer@primeeco.tech",
       dry_run: true,
     },
     {
@@ -520,6 +630,7 @@ Deno.test("mailer ops action: live path records Sent Items proof with CC + opera
       org_id: "00000000-0000-4000-8000-000000000001",
       job_id: "job-1",
       kind: "report",
+      to: "mlb.mailer@primeeco.tech",
       dry_run: false,
     },
     {
@@ -573,7 +684,7 @@ Deno.test("mailer ops action: live path records Sent Items proof with CC + opera
 });
 
 Deno.test("mailer ops action: refuses billing report_recipient as To", async () => {
-  await assertRejects(
+  const err = await assertRejects(
     () =>
       sendMailerOpsVisibilityAction(
         makeClient({
@@ -583,6 +694,35 @@ Deno.test("mailer ops action: refuses billing report_recipient as To", async () 
             report_recipient: "makesafes@mlbuilders.com.au",
           },
         }),
+        { mode: "api_key", user: null },
+        {
+          org_id: "00000000-0000-4000-8000-000000000001",
+          job_id: "job-1",
+          kind: "report",
+          // Allowlisted, but it is the billing pack mailbox: still refused.
+          to: "makesafes@mlbuilders.com.au",
+          dry_run: true,
+        },
+        {
+          makeMailGateway: () => {
+            throw new Error("no");
+          },
+          effectStore: new MemoryEffectStore(),
+        },
+      ),
+    SesActionError,
+  );
+  assertEquals(
+    ((err as SesActionError).refusal as any).code,
+    "mailer_ops_billing_recipient_forbidden",
+  );
+});
+
+Deno.test("mailer ops action: To must be named explicitly, never auto-selected", async () => {
+  const err = await assertRejects(
+    () =>
+      sendMailerOpsVisibilityAction(
+        makeClient({}),
         { mode: "api_key", user: null },
         {
           org_id: "00000000-0000-4000-8000-000000000001",
@@ -599,6 +739,267 @@ Deno.test("mailer ops action: refuses billing report_recipient as To", async () 
       ),
     SesActionError,
   );
+  assertEquals(
+    ((err as SesActionError).refusal as any).code,
+    "mailer_recipient_confirmation_required",
+  );
+});
+
+Deno.test("mailer ops action: receipts never ride the builder-facing photo pack", async () => {
+  const result = await sendMailerOpsVisibilityAction(
+    makeClient({
+      media: [
+        {
+          id: "media-site-1",
+          job_id: "job-1",
+          type: "photo",
+          phase: "completion",
+          storage_url:
+            "https://example.supabase.co/storage/v1/object/public/job-photos/job-1/site.jpg",
+          created_at: "2026-08-01T00:00:00Z",
+        },
+        {
+          id: "media-receipt-1",
+          job_id: "job-1",
+          type: "photo",
+          phase: "receipt",
+          storage_url:
+            "https://example.supabase.co/storage/v1/object/public/job-photos/job-1/receipt.jpg",
+          created_at: "2026-08-01T00:00:01Z",
+        },
+      ],
+    }),
+    { mode: "api_key", user: null },
+    {
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "job-1",
+      kind: "photo",
+      to: "mlb.mailer@primeeco.tech",
+      dry_run: true,
+    },
+    {
+      makeMailGateway: () => {
+        throw new Error("no gateway");
+      },
+      effectStore: new MemoryEffectStore(),
+    },
+  );
+  const photo = result.photo_selection as any;
+  assertEquals(photo.media_ids, ["media-site-1"]);
+  assertEquals(photo.available_count, 1);
+  assertEquals(photo.excluded_receipt_count, 1);
+});
+
+Deno.test("mailer ops action: reattended card only carries current-cycle evidence", async () => {
+  const detail = {
+    job_id: "job-1",
+    requesting_company_slug: "mlb",
+    attendance_cycle_id: "cycle-2",
+    cycle_number: 2,
+    reattend_count: 1,
+  };
+  const media = [
+    {
+      id: "media-old",
+      job_id: "job-1",
+      type: "photo",
+      phase: "completion",
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+      storage_url:
+        "https://example.supabase.co/storage/v1/object/public/job-photos/job-1/old.jpg",
+      created_at: "2026-07-01T00:00:00Z",
+    },
+    {
+      id: "media-current",
+      job_id: "job-1",
+      type: "photo",
+      phase: "completion",
+      attendance_cycle_id: "cycle-2",
+      cycle_attribution: "bound",
+      storage_url:
+        "https://example.supabase.co/storage/v1/object/public/job-photos/job-1/new.jpg",
+      created_at: "2026-08-01T00:00:00Z",
+    },
+  ];
+  const photoResult = await sendMailerOpsVisibilityAction(
+    makeClient({ detail, media }),
+    { mode: "api_key", user: null },
+    {
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "job-1",
+      kind: "photo",
+      to: "mlb.mailer@primeeco.tech",
+      dry_run: true,
+    },
+    {
+      makeMailGateway: () => {
+        throw new Error("no gateway");
+      },
+      effectStore: new MemoryEffectStore(),
+    },
+  );
+  const photo = photoResult.photo_selection as any;
+  assertEquals(photo.media_ids, ["media-current"]);
+  assertEquals(photo.excluded_other_cycle_count, 1);
+  assertEquals(photo.cycle_scoped, true);
+  assertEquals((photoResult.attendance_cycle as any).attendance_cycle_id, "cycle-2");
+
+  // A previous cycle's curated report must not be mailed as this visit's report.
+  await assertRejects(
+    () =>
+      sendMailerOpsVisibilityAction(
+        makeClient({
+          detail,
+          media,
+          documents: [{
+            id: "doc-old",
+            job_id: "job-1",
+            type: "makesafe_report",
+            file_name: "old.pdf",
+            storage_url:
+              "https://example.supabase.co/storage/v1/object/public/job-documents/job-1/report.pdf",
+            attendance_cycle_id: "cycle-1",
+            cycle_attribution: "bound",
+            data_snapshot_json: {
+              curated_source_kind: "durable_curated_revision",
+            },
+            created_at: "2026-07-01T00:00:00Z",
+          }],
+        }),
+        { mode: "api_key", user: null },
+        {
+          org_id: "00000000-0000-4000-8000-000000000001",
+          job_id: "job-1",
+          kind: "report",
+          to: "mlb.mailer@primeeco.tech",
+          dry_run: true,
+        },
+        {
+          makeMailGateway: () => {
+            throw new Error("no gateway");
+          },
+          effectStore: new MemoryEffectStore(),
+        },
+      ),
+    SesActionError,
+  );
+});
+
+Deno.test("mailer ops action: confirmed replay reports the ORIGINAL ledger proof", async () => {
+  const store = new MemoryEffectStore();
+  const args = {
+    org_id: "00000000-0000-4000-8000-000000000001",
+    job_id: "job-1",
+    kind: "report" as const,
+    to: "mlb.mailer@primeeco.tech",
+    dry_run: false,
+  };
+  let lastToken = "";
+  const gateway = (loadAttachments: any) => ({
+    createDraftAndSend: async (route: any, context: any) => {
+      lastToken = context.external_token;
+      await loadAttachments(route.attachment_hashes || []);
+      return {
+        message_id: "graph-msg-1",
+        internet_message_id: "<msg-1@secureworks>",
+        state: "sent" as const,
+        operation_token: context.external_token,
+      };
+    },
+    reconcileSent: (token: string) =>
+      token && token === lastToken
+        ? Promise.resolve([{
+          message_id: "graph-msg-1",
+          internet_message_id: "<msg-1@secureworks>",
+          state: "sent" as const,
+          operation_token: token,
+        }])
+        : Promise.resolve([]),
+  });
+  await sendMailerOpsVisibilityAction(
+    makeClient({}),
+    { mode: "api_key", user: null },
+    args,
+    { makeMailGateway: gateway, effectStore: store },
+  );
+
+  // Same card, same kind, same content: the effect is already confirmed. The
+  // reply must be the stored proof, never a freshly recomposed one.
+  let secondGraphCalls = 0;
+  const replay = await sendMailerOpsVisibilityAction(
+    makeClient({}),
+    { mode: "api_key", user: null },
+    args,
+    {
+      makeMailGateway: () => ({
+        createDraftAndSend: () => {
+          secondGraphCalls++;
+          throw new Error("must not redispatch");
+        },
+        reconcileSent: () => Promise.resolve([]),
+      }),
+      effectStore: store,
+    },
+  );
+  assertEquals(secondGraphCalls, 0);
+  assertEquals(replay.already_sent, true);
+  assertEquals(replay.proof_source, "ses_external_effects_ledger");
+  assertEquals((replay.recorded_proof as any).message_id, "graph-msg-1");
+  assertEquals(replay.proof, undefined);
+  assertEquals(
+    (replay.recorded_proof as any).provider_digest.subject_as_sent,
+    "NEW WORK ORDER - MLB-26267 U24/ 28 Peninsula Road, Maylands, WA 6051",
+  );
+});
+
+Deno.test("mailer ops action: a database failure on the audit row is logged, not swallowed", async () => {
+  const store = new MemoryEffectStore();
+  const warnings: unknown[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...parts: unknown[]) => warnings.push(parts.join(" "));
+  let lastToken = "";
+  try {
+    await sendMailerOpsVisibilityAction(
+      makeClient({ jobEventsError: { message: "rls denied" } }),
+      { mode: "api_key", user: null },
+      {
+        org_id: "00000000-0000-4000-8000-000000000001",
+        job_id: "job-1",
+        kind: "report",
+        to: "mlb.mailer@primeeco.tech",
+        dry_run: false,
+      },
+      {
+        makeMailGateway: (loadAttachments) => ({
+          createDraftAndSend: async (route, context) => {
+            lastToken = context.external_token;
+            await loadAttachments(route.attachment_hashes || []);
+            return {
+              message_id: "graph-msg-1",
+              state: "sent" as const,
+              operation_token: context.external_token,
+            };
+          },
+          reconcileSent: (token: string) =>
+            token && token === lastToken
+              ? Promise.resolve([{
+                message_id: "graph-msg-1",
+                state: "sent" as const,
+                operation_token: token,
+              }])
+              : Promise.resolve([]),
+        }),
+        effectStore: store,
+      },
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert(
+    warnings.some((w) => String(w).includes("rls denied")),
+    "job_events {error} must surface as a warning",
+  );
 });
 
 Deno.test("mailer ops action: routine auth refused", async () => {
@@ -611,6 +1012,7 @@ Deno.test("mailer ops action: routine auth refused", async () => {
           org_id: "00000000-0000-4000-8000-000000000001",
           job_id: "job-1",
           kind: "report",
+          to: "mlb.mailer@primeeco.tech",
           dry_run: true,
         },
         {
@@ -633,6 +1035,7 @@ Deno.test("mailer ops action: single-card drive — kind report does not require
       org_id: "00000000-0000-4000-8000-000000000001",
       job_id: "job-1",
       kind: "report",
+      to: "mlb.mailer@primeeco.tech",
       dry_run: true,
     },
     {
@@ -700,4 +1103,21 @@ Deno.test("mailer ops: migration adds mailer_ops_send without invoice route_kind
   // Shape requires no release/invoice/docket ids
   assertStringIncludes(sql, "release_revision_id IS NULL");
   assertStringIncludes(sql, "invoice_obligation_revision_id IS NULL");
+  // The attempt hash is the retry coordinate: required, and part of uniqueness
+  // so a deliberate new attempt is a new row rather than a stranded card.
+  assertStringIncludes(sql, "artifact_hash IS NOT NULL");
+  assertStringIncludes(
+    sql,
+    "(job_id, route_kind, artifact_hash)",
+  );
+});
+
+Deno.test("mailer ops: edge schema gate declares the migration marker", async () => {
+  const manifest = await Deno.readTextFile(
+    new URL("../../../scripts/edge-function-schema-requirements.txt", import.meta.url),
+  );
+  assertStringIncludes(
+    manifest,
+    "ops-api|supabase/migrations/20260805020000_ses_mailer_ops_send_effect.sql|index|uq_ses_external_mailer_ops_send",
+  );
 });

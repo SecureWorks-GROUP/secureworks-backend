@@ -11,7 +11,7 @@ Both emails:
 | Field | Value |
 |-------|--------|
 | FROM | `admin@secureworkswa.com.au` (structural) |
-| TO | card work-order mailer (e.g. `mlb.mailer@primeeco.tech` from company `sender_patterns`) |
+| TO | card work-order mailer (e.g. `mlb.mailer@primeeco.tech`), **named explicitly by the operator** and confirmed against the card-bound / configured allowlist |
 | CC | **`ses@secureworkswa.com.au` exactly** (structural; intake mailbox = second proof surface) |
 | Subject | Exact original WO subject (PR 591 path); photo fallback `Photo Evidence - {REF}` |
 | Email 1 | make-safe report PDF only |
@@ -29,7 +29,7 @@ Both emails:
 | Module | `supabase/functions/ops-api/ses_mailer_ops_send.ts` |
 | Tests | `supabase/functions/ops-api/ses_mailer_ops_send_test.ts` (20 pass, **zero Graph**) |
 | Wiring | `ops-api/index.ts` case `send_mailer_ops_visibility` + `makeMailerOpsGraphMailGateway` |
-| Effect kind | `mailer_ops_send` on `ses_external_effects` (job_id + report\|photo; no release_revision_id) |
+| Effect kind | `mailer_ops_send` on `ses_external_effects` (job_id + report\|photo + attempt `artifact_hash`; no release_revision_id) |
 
 ### Call shape
 
@@ -43,6 +43,7 @@ Content-Type: application/json
   "kind": "report" | "photo",
   "dry_run": true,
   "to": "mlb.mailer@primeeco.tech",
+  "attempt_key": "<optional; only for a deliberate retry>",
   "job_document_id": "<optional makesafe_report id>"
 }
 ```
@@ -50,6 +51,38 @@ Content-Type: application/json
 - **`dry_run` defaults true.** Live Graph requires explicit `dry_run: false` under Captain supervision.
 - Privileged only (`api_key` or admin/owner JWT). **Not** on `ROUTINE_ALLOWED_ACTIONS`.
 - One card, one kind per call — never a batch of four.
+- **`to` is required.** It is confirmed against this card's own intake sender
+  (`emails.from_email` reached through the card's intake case sources) plus the
+  company's full-address `sender_patterns` entries. `sender_patterns` is an
+  INBOUND trust list — who we accept work orders FROM — so it may confirm a
+  destination but never auto-select one. The refusal
+  (`mailer_recipient_confirmation_required`) lists both candidate sets, so the
+  operator still gets the preview an auto-select would have given.
+
+### Retry coordinate (exact-once without a dead end)
+
+The effect identity is `mailer_ops_send + job_id + route_kind + artifact_hash`,
+where `artifact_hash` is a content address of the exact send (kind, to, cc,
+subject, attachment hashes) plus the operator's optional `attempt_key`. That is
+the same escape `route_send` gets from a fresh `release_revision_id`:
+
+- the same content under the same attempt key is ONE effect (exact-once);
+- a confirmed replay sends nothing and returns `already_sent: true` with the
+  **stored** ledger proof (`recorded_proof`), never a recomposed one;
+- a Graph failure parks that attempt on `unknown` and it is still **never**
+  redispatched — the operator reconciles Sent Items by token, then retries
+  deliberately under a new `attempt_key`, which mints a new operation key.
+
+### Evidence scope
+
+Attachments are scoped to the card's CURRENT attendance cycle through the shared
+`filterMediaForCurrentCycle` / `isEvidenceBoundToCurrentCycle` boundary in
+`makesafe_cycle_evidence.ts` (no private fourth copy of that rule), so a
+reattended card cannot mail a previous visit's photos or report. `phase:'receipt'`
+media are excluded: receipts are our cost evidence, stored as `type:'photo'`, and
+must never reach the builder on the one route whose invariant is that no money
+information travels. Both exclusions are counted in the response
+(`excluded_receipt_count`, `excluded_other_cycle_count`).
 
 ### Structural no-invoice
 
@@ -82,9 +115,13 @@ PR 587 volume guard still refuses an oversize capped set (no further silent trim
 
 ## Migration named (required)
 
-`20260805020000_ses_mailer_ops_send_effect.sql` — adds `mailer_ops_send` to `ses_external_effects` because existing `route_send` **requires** `release_revision_id`, which this ops-visibility path must not invent.
+`20260805020000_ses_mailer_ops_send_effect.sql` — adds `mailer_ops_send` to `ses_external_effects` because existing `route_send` **requires** `release_revision_id`, which this ops-visibility path must not invent. The shape CHECK requires `artifact_hash` (the attempt coordinate) and the partial unique index is `(job_id, route_kind, artifact_hash)`.
 
-Apply **before** deploying matching `ops-api` (standard edge deploy lane).
+Apply **before** deploying matching `ops-api` (standard edge deploy lane). The
+new index is declared in `scripts/edge-function-schema-requirements.txt`, so an
+`ops-api` deploy that lands ahead of the migration is refused by the read-only
+schema gate rather than failing later at claim time (both constraint names it
+rewrites already exist, so only the index proves the apply).
 
 ## What a green suite does **not** prove
 
