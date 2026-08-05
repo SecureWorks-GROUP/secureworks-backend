@@ -2975,3 +2975,153 @@ Deno.test("five-minute clock stops at committed ready/blocked and reports max/P9
     ),
   );
 });
+
+// Photo-mail volume guard at PREPARE: a pack that cannot fit one Graph message
+// must block the docket before it can claim Docs Ready, and it must never be
+// shortened. Wiring lives in `prepareOne`; the pure guard is proved separately
+// in ses_photo_mail_volume_guard_test.ts.
+function photoHeavyInput(
+  row: SesFamilyMatrixRow,
+  count: number,
+): SesAssemblerInputV1 {
+  const input = fixtureInput(row);
+  input.cycle_facts.photos = Array.from({ length: count }, (_, index) => ({
+    id: `photo-${index + 1}`,
+    path_or_key: `ARTIFACTS/photos/${String(index + 1).padStart(2, "0")}.jpg`,
+    caption: `Completed barrier ${index + 1}`,
+    order: index + 1,
+  }));
+  return input;
+}
+
+function photoBytesDependencies(
+  input: SesAssemblerInputV1,
+  sizeBytes: number,
+  persistCalls: { count: number },
+): Partial<SesPrepareDependencies> {
+  return {
+    resolvePhotoArtifacts: async (resolvedInput) =>
+      resolvedInput.cycle_facts.photos.map((photo, index) => {
+        const bytes = new Uint8Array(sizeBytes);
+        bytes[0] = 255;
+        bytes[1] = 216;
+        bytes[2] = 255;
+        bytes[3] = index;
+        return {
+          photo_id: photo.id,
+          source_pointer: photo.path_or_key,
+          file_name: `${String(index + 1).padStart(3, "0")}.jpg`,
+          media_type: "image/jpeg" as const,
+          bytes,
+        };
+      }),
+    persist: async () => {
+      persistCalls.count++;
+      return { committed_at: FIXED_TIME.toISOString() };
+    },
+  };
+}
+
+Deno.test("prepare blocks an AJS photo pack over the Exchange message ceiling and never trims it", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = photoHeavyInput(row, 2);
+  const persistCalls = { count: 0 };
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false),
+    dependencies(input, photoBytesDependencies(input, 18 * 1024 * 1024, persistCalls)),
+  )).results[0];
+
+  const blocker = result.blockers.find((item) =>
+    item.reason_code === "photo_mail_volume_exceeds_graph_limit"
+  )!;
+  assert(blocker, "expected the named photo-mail volume blocker");
+  assertStringIncludes(blocker.reason, "36.00 MiB");
+  assertStringIncludes(blocker.reason, "35.00 MiB");
+  assertStringIncludes(blocker.reason, "not culled");
+  assertEquals(object(blocker.facts).transport, "user_mailbox");
+  assertEquals(object(blocker.facts).exceeded, "message_total");
+  assertEquals(object(blocker.facts).attachment_count, 2);
+  assertEquals(object(blocker.facts).photo_cull, false);
+  // Every original photo survives the refusal; nothing is dropped or resized.
+  assertEquals(
+    result.artifacts.filter((artifact) =>
+      artifact.role === "completion_photo"
+    ).length,
+    2,
+  );
+  assertEquals(
+    result.artifacts
+      .filter((artifact) => artifact.role === "completion_photo")
+      .map((artifact) => artifact.size_bytes),
+    [18 * 1024 * 1024, 18 * 1024 * 1024],
+  );
+  // A blocked pack never reaches Docs Ready and never drafts a builder email.
+  // The revision itself is still persisted so the blocker is visible to the
+  // operator (normal prepare semantics for a blocked revision).
+  assertEquals(result.state, "blocked");
+  assertEquals(result.envelope.pre_xero_docs_ready, false);
+  assertEquals(Object.keys(result.email_drafts).length, 0);
+  assertEquals(persistCalls.count, 1);
+});
+
+Deno.test("prepare allows the same AJS pack once it fits, proving the guard is size-driven", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = photoHeavyInput(row, 2);
+  const persistCalls = { count: 0 };
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false),
+    dependencies(input, photoBytesDependencies(input, 8 * 1024 * 1024, persistCalls)),
+  )).results[0];
+
+  assertEquals(
+    blockerCodes(result).includes("photo_mail_volume_exceeds_graph_limit"),
+    false,
+  );
+  assertEquals(result.envelope.pre_xero_docs_ready, true);
+  assertEquals(Object.keys(result.email_drafts).sort(), [
+    "PHOTO_EMAIL_DRAFT",
+    "REPORT_EMAIL_DRAFT",
+  ]);
+});
+
+Deno.test("prepare blocks an MLB group-thread photo over the 3 MiB per-file post limit", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe" &&
+    candidate.routing_rule === "mlb-perth-routing"
+  )!;
+  const input = photoHeavyInput(row, 1);
+  const persistCalls = { count: 0 };
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false),
+    dependencies(input, photoBytesDependencies(input, 4 * 1024 * 1024, persistCalls)),
+  )).results[0];
+
+  const blocker = result.blockers.find((item) =>
+    item.reason_code === "photo_mail_volume_exceeds_graph_limit"
+  )!;
+  assert(blocker, "expected the named photo-mail volume blocker");
+  assertEquals(object(blocker.facts).transport, "group_thread_reply");
+  assertEquals(object(blocker.facts).exceeded, "group_post_no_upload_session");
+  assertEquals(
+    object(blocker.facts).per_attachment_limit_bytes,
+    3 * 1024 * 1024,
+  );
+  assertStringIncludes(blocker.reason, "4.00 MiB");
+  assertStringIncludes(blocker.reason, "group-post");
+  assertEquals(result.state, "blocked");
+  assertEquals(Object.keys(result.email_drafts).length, 0);
+  // The single 4 MiB photo is retained in full, never downscaled to fit.
+  assertEquals(
+    result.artifacts
+      .filter((artifact) => artifact.role === "completion_photo")
+      .map((artifact) => artifact.size_bytes),
+    [4 * 1024 * 1024],
+  );
+});
