@@ -15869,7 +15869,10 @@ async function makesafePipeline(
     // blockers) keeps the value the board ladder, chip truth and M1 already read.
     const hasReportDoc = makesafeDocBooleans(docsMap[j.id]).has_report_doc
     const packPresentation = presentSesPackHonesty({
-      docket: docket && !legacySent
+      // The current docket is fed in whenever one exists. `legacySent` gates
+      // DERIVATION only: withholding the docket here would tell an
+      // authorised-not-sent card that no revision is assembled, which is false.
+      docket: docket
         ? {
           id: docket.id,
           state: docket.state,
@@ -15925,7 +15928,9 @@ async function makesafePipeline(
     const enriched = enrichMakesafeBoardJob(j, detail, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, packForBoard)
     // Additive top-level honesty so a card with no pack row and no docket can
     // still say incomplete/refused without inventing a `report_pack` object.
-    enriched.pack_presentation = {
+    // Kind `none` is nothing to say: leaving the key off keeps `pack_status`
+    // null on every packless New/Allocated card, as it has always been.
+    enriched.pack_presentation = packPresentation.kind === 'none' ? null : {
       kind: packPresentation.kind,
       state: packPresentation.state,
       reason: packPresentation.reason,

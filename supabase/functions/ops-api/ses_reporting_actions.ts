@@ -2224,22 +2224,22 @@ export async function getSesReviewablePackAction(
     const source: Record<string, unknown> = raw && typeof raw === "object"
       ? { ...(raw as Record<string, unknown>) }
       : { fact: String(raw ?? "") };
-    const code = String(
-      source.code ?? source.reason_code ?? source.reasonCode ?? "",
-    ).trim();
+    const code = String(source.code || source.reason_code || source.reasonCode ||
+      "").trim();
     const normalized = code ? normalizedBlockerByCode.get(code) : undefined;
+    const fact = String(source.fact || source.reason || source.message || "")
+      .trim();
+    const recovery = String(
+      source.recovery_action || source.recoveryAction || "",
+    ).trim();
     return {
       ...source,
       state: "refused" as const,
       code,
-      fact: String(
-        source.fact ?? normalized?.fact ?? `Pack refused: ${code}.`,
-      ),
-      recovery_action: String(
-        source.recovery_action ?? normalized?.recovery_action ??
-          "Resolve the named refusal and re-prepare the pack.",
-      ),
-      category: String(source.category ?? normalized?.category ?? "ses_docket"),
+      fact: fact || normalized?.fact || `Pack refused: ${code}.`,
+      recovery_action: recovery || normalized?.recovery_action ||
+        "Resolve the named refusal and re-prepare the pack.",
+      category: String(source.category || normalized?.category || "ses_docket"),
     };
   });
   return {

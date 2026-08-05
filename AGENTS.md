@@ -1561,8 +1561,12 @@ top-level) plus `report_pack.presentation_kind` / `presentation_reason` /
 `review_state` or `blockers`: those are what the stage ladder, the SENT chip and
 M1 read, and a presentation string there moves columns. Likewise never mint a
 `report_pack` object for a card with no pack row and no docket — M1's `!pack`
-short-circuit is load-bearing. Board `pack_status` stays a STRING; changing its
-type needs a `MAKESAFE_BOARD_CONTRACT_VERSION` bump.
+short-circuit is load-bearing, and kind `none` stamps nothing at all so
+`pack_status` stays null on every packless New/Allocated card. Board
+`pack_status` stays a STRING; changing its type needs a
+`MAKESAFE_BOARD_CONTRACT_VERSION` bump. The current docket is always an input to
+the presentation even when the legacy row is sent/authorised-not-sent; that gate
+belongs to derivation only.
 
 ## Curated Bind Materials Are A Subset Of The Service Report, Never A Super-Set
 

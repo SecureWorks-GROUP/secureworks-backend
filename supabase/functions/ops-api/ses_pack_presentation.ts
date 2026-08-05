@@ -345,26 +345,3 @@ export function presentSesPackHonesty(input: {
     legacy_pack_status: legacyPackStatus,
   };
 }
-
-/**
- * Board card `pack_status` field. Prefer an object the resume chip can read
- * without treating a ready docket as legacy failed. `status` is the honest
- * presentation state; `kind` + `reason` name refusal vs incomplete.
- */
-export function packStatusForBoard(
-  presentation: SesPackPresentation,
-): {
-  status: string;
-  kind: SesPackPresentationKind;
-  reason: string | null;
-  pre_xero_docs_ready: boolean;
-  docket_revision_id: string | null;
-} {
-  return {
-    status: presentation.state,
-    kind: presentation.kind,
-    reason: presentation.reason,
-    pre_xero_docs_ready: presentation.pre_xero_docs_ready,
-    docket_revision_id: presentation.docket_revision_id,
-  };
-}

@@ -2,10 +2,7 @@ import {
   assertEquals,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  packStatusForBoard,
-  presentSesPackHonesty,
-} from "./ses_pack_presentation.ts";
+import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 
 Deno.test("ready docket supersedes legacy failed — never presents failed or refused", () => {
   const p = presentSesPackHonesty({
@@ -29,9 +26,6 @@ Deno.test("ready docket supersedes legacy failed — never presents failed or re
   assertEquals(p.reason, null);
   assertEquals(p.legacy_pack_status, "failed");
   assertEquals(p.blockers, []);
-  // Board pack_status must not keep advertising failed over a ready docket.
-  assertEquals(packStatusForBoard(p).status, "drafted");
-  assertEquals(packStatusForBoard(p).kind, "ready");
 });
 
 Deno.test("docket blockers present as refused with fact, not failed and not ready", () => {
