@@ -1,0 +1,206 @@
+[
+  {
+    "job_number": "SWMS-26953",
+    "suburb": "Gidgegannup",
+    "ref": "MLB-25971PO-55855",
+    "photos": "9/9",
+    "sha_ok": true,
+    "sha": "sha256:5a6842fd4c0d4dbc7656b49f76bc1b7a8c6005d53fcdc1a984fdf736362a7168",
+    "kind": "durable_curated_revision",
+    "cycle": null,
+    "version": 2,
+    "emdash": false,
+    "works_in_pdf": true,
+    "materials_pdf": "Timber x 1m; Bugle screws x 5",
+    "invoice": {
+      "invoice_number": "INV-1129",
+      "status": "DRAFT",
+      "total": "280.50",
+      "sub_total": "255.00",
+      "total_tax": "25.50",
+      "reference": "MLB-25971PO-55855"
+    },
+    "cockpit": "INVOICE_CREATE_READY",
+    "approve_enabled": true,
+    "scope": "Make safe the roof structure under the roof-mounted hot water system.",
+    "findings": "Storm / wind. The hot water system on the roof is not engineered for the load. Timber beams have dipped under the weight.",
+    "works": "Fitted two structural timber pieces with bugle screws from the base plate to the underpurlin, giving the roof extra support under the hot water system.",
+    "materials_prose": "Timber 1 m. Bugle screws x 5.",
+    "mint": {
+      "scanned_accrec": 1154,
+      "invoice_number": "INV-1129",
+      "status": "DRAFT",
+      "total": 280.5,
+      "allows_create": null
+    },
+    "prepare": {
+      "state": "ready",
+      "persisted": true,
+      "blocker_codes": [],
+      "pre_xero_docs_ready": null
+    }
+  },
+  {
+    "job_number": "SWMS-26902",
+    "suburb": "Ballajura",
+    "ref": "MLB-26443",
+    "photos": "15/15",
+    "sha_ok": true,
+    "sha": "sha256:a562153ce17f2e3cad7741ff60f5cf8275a487c234ca8fa8cd17d79aaa454778",
+    "kind": "durable_curated_revision",
+    "cycle": null,
+    "version": 2,
+    "emdash": false,
+    "works_in_pdf": true,
+    "materials_pdf": "Timber x 3; Bugle screws x 10",
+    "invoice": {
+      "invoice_number": "INV-1130",
+      "status": "DRAFT",
+      "total": "280.50",
+      "sub_total": "255.00",
+      "total_tax": "25.50",
+      "reference": "MLB-26443"
+    },
+    "cockpit": "INVOICE_CREATE_READY",
+    "approve_enabled": true,
+    "scope": "Make safe the ceiling that needed extra support.",
+    "findings": "Storm / wind. Client reported the ceiling had cracked further and needed extra prop support.",
+    "works": "Added structural timber to the ceiling using bugle screws.",
+    "materials_prose": "Timber x 3. Bugle screws x 10.",
+    "mint": {
+      "scanned_accrec": 1155,
+      "invoice_number": "INV-1130",
+      "status": "DRAFT",
+      "total": 280.5,
+      "allows_create": null
+    },
+    "prepare": {
+      "state": "ready",
+      "persisted": true,
+      "blocker_codes": [],
+      "pre_xero_docs_ready": null
+    }
+  },
+  {
+    "job_number": "SWMS-261128",
+    "suburb": "Woodvale",
+    "ref": "MLB-27335",
+    "photos": "28/28",
+    "sha_ok": true,
+    "sha": "sha256:3873894d3b52e0485e53d92d4461e6d9a793ae9ca811691519d211e2d57ba24a",
+    "kind": "durable_curated_revision",
+    "cycle": null,
+    "version": 2,
+    "emdash": false,
+    "works_in_pdf": true,
+    "materials_pdf": "Silicone x 1; Flashing tape x 1m",
+    "invoice": {
+      "invoice_number": "INV-1131",
+      "status": "DRAFT",
+      "total": "280.50",
+      "sub_total": "255.00",
+      "total_tax": "25.50",
+      "reference": "MLB-27335"
+    },
+    "cockpit": "INVOICE_CREATE_READY",
+    "approve_enabled": true,
+    "scope": "Make safe water ingress into the bedroom cupboard.",
+    "findings": "Storm / wind. Water entering the corner of a bedroom cupboard through the roof.",
+    "works": "Siliconed cracked ridge-cap pointing and large gaps between tiles. Flashing-taped the larger tile gaps. Resecured an unsecured batten.",
+    "materials_prose": "Silicone x 1. Flashing tape 1 m.",
+    "mint": {
+      "scanned_accrec": 1156,
+      "invoice_number": "INV-1131",
+      "status": "DRAFT",
+      "total": 280.5,
+      "allows_create": null
+    },
+    "prepare": {
+      "state": "ready",
+      "persisted": true,
+      "blocker_codes": [],
+      "pre_xero_docs_ready": null
+    }
+  },
+  {
+    "job_number": "SWMS-261129",
+    "suburb": "Carine",
+    "ref": "MLB-25876",
+    "photos": "33/33",
+    "sha_ok": true,
+    "sha": "sha256:fc9fdf7b788398fe3905c6a2c48afab1a54ae23b33d55c730128eb700d263689",
+    "kind": "durable_curated_revision",
+    "cycle": null,
+    "version": 2,
+    "emdash": false,
+    "works_in_pdf": true,
+    "materials_pdf": "Silicone x 1; Flashing tape x 0.4m",
+    "invoice": {
+      "invoice_number": "INV-1132",
+      "status": "DRAFT",
+      "total": "280.50",
+      "sub_total": "255.00",
+      "total_tax": "25.50",
+      "reference": "MLB-25876"
+    },
+    "cockpit": "INVOICE_CREATE_READY",
+    "approve_enabled": true,
+    "scope": "Make safe water ingress through the skylight into the front door walkway.",
+    "findings": "Storm / wind. Water entering through the skylight into the front door walkway. A tarp was already on the roof but the leak continued. Sarking is installed and is cut at the skylight, so water was entering from above the skylight.",
+    "works": "Above the skylight, rebent the valley tray to about 80 degrees. Flashing-taped and siliconed tiles with large gaps at the joins. Removed unsecured tiles and the tarp from the roof.",
+    "materials_prose": "Silicone x 1. Flashing tape 0.4 m.",
+    "mint": {
+      "scanned_accrec": 1157,
+      "invoice_number": "INV-1132",
+      "status": "DRAFT",
+      "total": 280.5,
+      "allows_create": null
+    },
+    "prepare": {
+      "state": "ready",
+      "persisted": true,
+      "blocker_codes": [],
+      "pre_xero_docs_ready": null
+    }
+  },
+  {
+    "job_number": "SWMS-261137",
+    "suburb": "Attadale",
+    "ref": "AJBR-70499",
+    "photos": "16/16",
+    "sha_ok": true,
+    "sha": "sha256:37b3779cb259bf4c600dc191614b430b0c563606bc76d2a0d78cbd933ab8fb28",
+    "kind": "durable_curated_revision",
+    "cycle": null,
+    "version": 5,
+    "emdash": false,
+    "works_in_pdf": true,
+    "materials_pdf": "Acro prop x 2; Timber x 2; Screws x 2",
+    "invoice": {
+      "invoice_number": "INV-1133",
+      "status": "DRAFT",
+      "total": "220.00",
+      "sub_total": "200.00",
+      "total_tax": "20.00",
+      "reference": "AJBR-70499"
+    },
+    "cockpit": "HOLD",
+    "approve_enabled": true,
+    "scope": "Make safe the drooping ceiling in the kitchen / living area.",
+    "findings": "Storm / wind. Corner of the ceiling in the living / kitchen space is drooping and not connected to the joists above.",
+    "works": "Propped the falling ceiling in the corner of the kitchen / living space with acro props and structural timber planks. Planks are screwed into the top of the acro props.",
+    "materials_prose": "Acro prop x 2. Timber x 2. Screws x 2.",
+    "mint": {
+      "scanned_accrec": 1158,
+      "invoice_number": "INV-1133",
+      "status": "DRAFT",
+      "total": 220,
+      "allows_create": null
+    },
+    "prepare": {
+      "state": "ready",
+      "persisted": true,
+      "blocker_codes": []
+    }
+  }
+]

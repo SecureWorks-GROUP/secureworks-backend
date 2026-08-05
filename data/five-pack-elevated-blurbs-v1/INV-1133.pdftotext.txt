@@ -1,0 +1,17 @@
+DRAFT INVOICE extract (structured from mint + xero_invoices row; binary PDF not stored in repo)
+Invoice Number: INV-1133
+Status: DRAFT
+Reference: AJBR-70499
+Xero id: e0149ed6-9a34-4a8f-b2a7-c4ffd17c8d8a
+
+Description                                             Quantity    Unit Price    Amount AUD
+AJBR-70499 - make-safe attendance - 1 trade x 2.5 hours       2.50      80.00       200.00
+
+                                                                 Subtotal             200.00
+                                                                 TOTAL GST 10%         20.00
+                                                                 TOTAL AUD             220.00
+
+commercial_quantity_override: false
+materials_line: none
+scanned_accrec: 1158
+extract_source: structured_fallback

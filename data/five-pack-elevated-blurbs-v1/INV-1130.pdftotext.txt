@@ -1,0 +1,17 @@
+DRAFT INVOICE extract (structured from mint + xero_invoices row; binary PDF not stored in repo)
+Invoice Number: INV-1130
+Status: DRAFT
+Reference: MLB-26443
+Xero id: fa60bc1a-863f-486b-9696-3d3b0b124040
+
+Description                                             Quantity    Unit Price    Amount AUD
+MLB-26443 - make-safe attendance - 1 trade x 3 hours       3.00      85.00       255.00
+
+                                                                 Subtotal             255.00
+                                                                 TOTAL GST 10%         25.50
+                                                                 TOTAL AUD             280.50
+
+commercial_quantity_override: false
+materials_line: none
+scanned_accrec: 1155
+extract_source: structured_fallback
