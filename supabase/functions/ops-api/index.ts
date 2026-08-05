@@ -14139,7 +14139,11 @@ export function _deriveMakesafeSurfacing(
 // stamps it onto the base row; the read model publishes it beside
 // `declared_stage`. It is ADVISORY provenance: nothing selects or buckets on it.
 // Pinned once, in makesafe_draft_invoice_stage_test.ts.
-export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v4-authorised-awaiting-send'
+// v5-pack-sent-softens-closeout — packSent + AUTHORISED softens the hard
+// close-out doc gate without requiring substatus `complete` (SES U6R never
+// flips that substatus; requiring it left fully released cards in
+// trade_report_in). M1 already treated packSent + AUTHORISED as closeout.
+export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v5-pack-sent-softens-closeout'
 
 export function _deriveMakesafeBoardStage(
   job: any,
@@ -14199,7 +14203,15 @@ export function _deriveMakesafeBoardStage(
   // gateSoftenSent deliberately EXCLUDES a bare packSent marker AND
   // detail.report_sent_at (the latter is stamped at the ready_to_invoice move, not
   // at send time, so it is not safe gate-softening evidence — adversarial #3).
-  const verifiedSent = (packSent === true && invoiceAuthorised && normalizedSub === 'complete') ||
+  // SES U6R closeout writes the MAKESAFE_PACK_SENT | main marker and a
+  // terminal proof, but does not flip substatus to `complete` or the durable
+  // makesafe_report_packs.status to `sent`. Requiring substatus complete here
+  // left fully released cards (e.g. AJBR-70488) in trade_report_in after the
+  // hard doc gate, while M1 correctly derived completed. A proved packSent
+  // marker plus an authorised invoice is enough to soften the gate — same bar
+  // as closeoutSatisfied(packSent + AUTHORISED/PAID). gateSoftenSent still
+  // covers durable pack-status sends without a marker.
+  const verifiedSent = (packSent === true && invoiceAuthorised) ||
     surf.gateSoftenSent
 
   // Canonical MakeSafe command flow:

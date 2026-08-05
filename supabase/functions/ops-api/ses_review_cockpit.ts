@@ -588,6 +588,124 @@ export function evaluateSesMechanicalClean(
   };
 }
 
+/**
+ * Progress of the sealed SES release against the builder for this card.
+ * Pure classification over release state + route proofs — never invents a send.
+ *
+ *   none               — no proved routes; SEND IT may still be the honest action
+ *   partially_released — some required routes proved, others not (Captain decision)
+ *   closeout_pending   — every required route proved, closeout not yet verified
+ *   released           — release state released and/or closeout verified
+ */
+export type SesReleaseSendProgress =
+  | { kind: "none" }
+  | {
+    kind: "released";
+    release_revision_id: string;
+    release_state: string;
+    proved_route_kinds: string[];
+    required_route_kinds: string[];
+  }
+  | {
+    kind: "closeout_pending";
+    release_revision_id: string;
+    release_state: string;
+    proved_route_kinds: string[];
+    required_route_kinds: string[];
+  }
+  | {
+    kind: "partially_released";
+    release_revision_id: string;
+    release_state: string;
+    proved_route_kinds: string[];
+    required_route_kinds: string[];
+    missing_route_kinds: string[];
+  };
+
+/**
+ * Classify release/send progress from ledger facts only. Does not mark a route
+ * sent without a proof row; does not invent closeout.
+ */
+export function classifySesReleaseSendProgress(args: {
+  release_revision_id?: string | null;
+  release_state?: string | null;
+  required_route_kinds?: string[] | null;
+  proved_route_kinds?: string[] | null;
+  closeout_verified?: boolean | null;
+}): SesReleaseSendProgress {
+  const releaseId = String(args.release_revision_id || "").trim();
+  if (!releaseId) return { kind: "none" };
+  const releaseState = String(args.release_state || "").trim().toLowerCase();
+  const required = [
+    ...new Set(
+      (args.required_route_kinds || []).map((k) => String(k || "").trim())
+        .filter(Boolean),
+    ),
+  ].sort();
+  const proved = [
+    ...new Set(
+      (args.proved_route_kinds || []).map((k) => String(k || "").trim())
+        .filter(Boolean),
+    ),
+  ].sort();
+  const missing = required.filter((kind) => !proved.includes(kind));
+  const allProved = required.length > 0 && missing.length === 0;
+  const closeoutVerified = args.closeout_verified === true ||
+    releaseState === "released";
+
+  if (closeoutVerified && (allProved || proved.length > 0)) {
+    return {
+      kind: "released",
+      release_revision_id: releaseId,
+      release_state: releaseState || "released",
+      proved_route_kinds: proved,
+      required_route_kinds: required,
+    };
+  }
+  if (allProved) {
+    return {
+      kind: "closeout_pending",
+      release_revision_id: releaseId,
+      release_state: releaseState || "dispatching",
+      proved_route_kinds: proved,
+      required_route_kinds: required,
+    };
+  }
+  if (proved.length > 0) {
+    return {
+      kind: "partially_released",
+      release_revision_id: releaseId,
+      release_state: releaseState || "dispatching",
+      proved_route_kinds: proved,
+      required_route_kinds: required,
+      missing_route_kinds: missing,
+    };
+  }
+  return { kind: "none" };
+}
+
+export function releaseSendProgressBlocksSend(
+  progress: SesReleaseSendProgress,
+): boolean {
+  return progress.kind !== "none";
+}
+
+export function describeReleaseSendProgress(
+  progress: SesReleaseSendProgress,
+): string | null {
+  if (progress.kind === "none") return null;
+  if (progress.kind === "released") {
+    return `This release is already complete (release ${progress.release_revision_id.slice(0, 8)}…). Do not send again.`;
+  }
+  if (progress.kind === "closeout_pending") {
+    const kinds = progress.proved_route_kinds.join(", ") || "all required routes";
+    return `Every required route is already proved on the ledger (${kinds}); closeout verification is still incomplete. Do not send again — finish closeout, never re-dispatch.`;
+  }
+  const missing = progress.missing_route_kinds.join(", ") || "unknown";
+  const proved = progress.proved_route_kinds.join(", ") || "none";
+  return `This release is only part-proved (proved: ${proved}; missing: ${missing}). Do not send again — escalate the missing route to the Captain.`;
+}
+
 export interface SesCockpitDocket {
   job_id: string;
   job_number: string | null;
@@ -618,6 +736,11 @@ export interface SesCockpitDocket {
   routes: SesReviewRoute[];
   crew_and_trade_visits: unknown;
   clean_input: SesCleanInput;
+  /**
+   * Sealed release/send progress for this job. Absent or `none` means the
+   * card has no proved routes yet; any other kind must leave SEND_READY.
+   */
+  release_send_progress?: SesReleaseSendProgress;
 }
 
 export interface SesCockpitView {
@@ -627,6 +750,9 @@ export interface SesCockpitView {
     | "PRE_XERO_DOCS_READY"
     | "INVOICE_CREATE_READY"
     | "SEND_READY"
+    | "RELEASED"
+    | "CLOSEOUT_PENDING"
+    | "PARTIALLY_RELEASED"
     | "HOLD";
   stale: boolean;
   verdict: SesMechanicalCleanResult;
@@ -689,13 +815,33 @@ export function buildSesCockpitView(
     !!docket.invoice_obligation_revision_id &&
     !!docket.xero_binding &&
     xeroIsDraft;
-  const sendIt = !stale && verdict.clean &&
+  const releaseProgress = docket.release_send_progress || { kind: "none" };
+  const releaseBlocksSend = releaseSendProgressBlocksSend(releaseProgress);
+  // A proved or released pack must never read as SEND_READY — that would invite
+  // a second builder send of routes already on the ledger.
+  const sendIt = !stale && !releaseBlocksSend && verdict.clean &&
     (xeroAuthorised || noAdditionalCharge);
-  const status: SesCockpitView["status"] = stale || verdict.blockers.length > 0
-    ? "HOLD"
-    : (sendIt
-      ? "SEND_READY"
-      : (approveInvoice ? "INVOICE_CREATE_READY" : "PRE_XERO_DOCS_READY"));
+  let status: SesCockpitView["status"];
+  if (releaseProgress.kind === "released") {
+    status = "RELEASED";
+  } else if (releaseProgress.kind === "closeout_pending") {
+    status = "CLOSEOUT_PENDING";
+  } else if (releaseProgress.kind === "partially_released") {
+    status = "PARTIALLY_RELEASED";
+  } else if (stale || verdict.blockers.length > 0) {
+    status = "HOLD";
+  } else if (sendIt) {
+    status = "SEND_READY";
+  } else if (approveInvoice) {
+    status = "INVOICE_CREATE_READY";
+  } else {
+    status = "PRE_XERO_DOCS_READY";
+  }
+  const releaseReason = describeReleaseSendProgress(releaseProgress);
+  const statusReasons = [
+    ...verdict.blockers.map((blocker) => blocker.fact),
+    ...(releaseReason ? [releaseReason] : []),
+  ];
   return {
     schema: "secureworks.makesafe.ses-review-cockpit/v1",
     section_order: SES_REVIEW_SECTION_ORDER,
@@ -711,7 +857,8 @@ export function buildSesCockpitView(
       status: {
         status,
         stale,
-        reasons: verdict.blockers.map((blocker) => blocker.fact),
+        reasons: statusReasons,
+        release_send_progress: releaseProgress,
       },
       insurance_work_order: docket.work_order || {
         state: "missing",
@@ -771,12 +918,15 @@ export function buildSesCockpitView(
         // Narrate the real pack (563 honesty). AJS report_invoice + photo packs
         // read as two routes; MLB three-route packs still read as three.
         plan: describeSesSendItPlan(docket.routes),
-        disabled_reason: sendIt ? null : sendItDisabledReason(verdict, {
-          stale,
-          xeroAuthorised,
-          noAdditionalCharge,
-          xeroStatus: docket.xero_binding?.status ?? null,
-        }),
+        disabled_reason: sendIt
+          ? null
+          : (releaseReason ||
+            sendItDisabledReason(verdict, {
+              stale,
+              xeroAuthorised,
+              noAdditionalCharge,
+              xeroStatus: docket.xero_binding?.status ?? null,
+            })),
         failed_checks: sesFailedChecks(verdict),
         route_kinds: sesRouteKindsOnPack(docket.routes),
         route_count: sesRouteKindsOnPack(docket.routes).length,

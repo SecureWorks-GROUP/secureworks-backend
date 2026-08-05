@@ -161,6 +161,49 @@ Deno.test("a DRAFT invoice + its attached PDF no longer archives a report card",
   );
 });
 
+Deno.test(
+  "SES U6R: packSent + AUTHORISED completes without substatus complete",
+  () => {
+    // AJBR-70488 class: closeout wrote MAKESAFE_PACK_SENT | main and left
+    // substatus admin_to_send_report. Missing invoice PDF must soft-warn, not
+    // hold the card in trade_report_in after a proved send.
+    const card = {
+      job: {
+        id: "job-ajbr-70488",
+        job_number: "SWMS-261130",
+        status: "processing",
+        type: "makesafe",
+        completed_at: RECENT,
+      },
+      detail: {
+        substatus: "admin_to_send_report",
+        cycle_number: 1,
+        report_received_at: RECENT,
+      },
+    };
+    const docsMissingInvoice = {
+      has_invoice_doc: false,
+      has_report_doc: true,
+      has_swms_doc: false,
+    };
+    assertEquals(
+      stage(card, invoice("AUTHORISED", RECENT), docsMissingInvoice, {
+        packSent: true,
+        report: { id: "report-1" },
+      }),
+      "completed",
+    );
+    // Without packSent, authorised + report still docs-ready (not completed).
+    assertEquals(
+      stage(card, invoice("AUTHORISED", RECENT), docsMissingInvoice, {
+        packSent: false,
+        report: { id: "report-1" },
+      }),
+      "report_ready",
+    );
+  },
+);
+
 Deno.test("a RAISED invoice + its attached PDF still closes a report card", () => {
   const card = roofCard();
   // Unchanged behaviour: real money went out, the gate is satisfied, and the
@@ -401,7 +444,7 @@ Deno.test("the visible ladder's version is pinned and published", () => {
   // derivation that produced it, exactly as `SES_STAGE_ENGINE_V2_VERSION` does.
   assertEquals(
     MAKESAFE_STAGE_LADDER_VERSION,
-    "makesafe-stage-ladder.v4-authorised-awaiting-send",
+    "makesafe-stage-ladder.v5-pack-sent-softens-closeout",
   );
   // The read model republishes whatever enrich stamped, and null when a caller
   // built the base row without it — never a silent default that would attribute
