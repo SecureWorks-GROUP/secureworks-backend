@@ -2193,9 +2193,12 @@ export async function getSesReviewablePackAction(
       }).`,
     });
   }
-  const storedBlockers = Array.isArray(docket.blockers) ? docket.blockers : [];
-  const reviewBlockers = sourceRefusal
-    ? [...storedBlockers, sourceRefusal]
+  const storedBlockers: Record<string, unknown>[] =
+    Array.isArray(docket.blockers)
+      ? (docket.blockers as Record<string, unknown>[])
+      : [];
+  const reviewBlockers: Record<string, unknown>[] = sourceRefusal
+    ? [...storedBlockers, sourceRefusal as unknown as Record<string, unknown>]
     : storedBlockers;
   const envelope = object(docket.envelope);
   // Presentation honesty for the review surface: a green READY tick over a
@@ -2211,6 +2214,34 @@ export async function getSesReviewablePackAction(
     },
     review_blockers: sourceRefusal ? [sourceRefusal] : [],
   });
+  // Enrich the ORIGINAL refusal objects rather than rebuilding them from the
+  // normalized shape: `evidence` and `decision_key` are the only things telling
+  // curated_source_superseded apart from supporting_report_pdf_missing.
+  const normalizedBlockerByCode = new Map(
+    presentation.blockers.map((blocker) => [blocker.code, blocker]),
+  );
+  const responseBlockers = reviewBlockers.map((raw) => {
+    const source: Record<string, unknown> = raw && typeof raw === "object"
+      ? { ...(raw as Record<string, unknown>) }
+      : { fact: String(raw ?? "") };
+    const code = String(
+      source.code ?? source.reason_code ?? source.reasonCode ?? "",
+    ).trim();
+    const normalized = code ? normalizedBlockerByCode.get(code) : undefined;
+    return {
+      ...source,
+      state: "refused" as const,
+      code,
+      fact: String(
+        source.fact ?? normalized?.fact ?? `Pack refused: ${code}.`,
+      ),
+      recovery_action: String(
+        source.recovery_action ?? normalized?.recovery_action ??
+          "Resolve the named refusal and re-prepare the pack.",
+      ),
+      category: String(source.category ?? normalized?.category ?? "ses_docket"),
+    };
+  });
   return {
     review,
     docket: sourceRefusal
@@ -2222,17 +2253,7 @@ export async function getSesReviewablePackAction(
     artifacts,
     suppressed_artifacts: suppressedArtifacts,
     // All named refusals (stored + read-time trust), not only sourceRefusal.
-    blockers: presentation.blockers.length
-      ? presentation.blockers.map((blocker) => ({
-        state: "refused" as const,
-        code: blocker.code,
-        fact: blocker.fact ||
-          `Pack refused: ${blocker.code}.`,
-        recovery_action: blocker.recovery_action ||
-          "Resolve the named refusal and re-prepare the pack.",
-        category: blocker.category,
-      }))
-      : (sourceRefusal ? [sourceRefusal] : []),
+    blockers: responseBlockers,
     // Operator-facing honesty: ready vs refused vs incomplete, with reason.
     presentation: {
       kind: presentation.kind,

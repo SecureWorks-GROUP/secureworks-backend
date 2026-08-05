@@ -38,10 +38,7 @@ import {
   sesStageV2OverlayCandidate,
 } from "./ses_stage_engine_v2.ts";
 import type { MakesafeTerminalProofFact } from "./makesafe_terminal_proof.ts";
-import {
-  packStatusForBoard,
-  presentSesPackHonesty,
-} from "./ses_pack_presentation.ts";
+import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 import { projectMakesafeJobIdentity } from "./makesafe_job_identity_read_model.ts";
 
 export const MAKESAFE_BOARD_CONTRACT_VERSION = "makesafe-board.v1";
@@ -177,25 +174,11 @@ export function boardPresentationFields(base: any) {
     is_reattend: base?.is_reattend === true,
     last_reattend_at: base?.last_reattend_at || null,
     resume_action: base?.resume_action || null,
-    // Prefer the honest pack_status object when present; never fall back to a
-    // raw legacy `failed` string over a ready docket (see pack presentation).
-    pack_status: base?.pack_status ||
-      (base?.report_pack
-        ? packStatusForBoard(presentSesPackHonesty({
-          docket: base.report_pack.docket_revision_id
-            ? {
-              id: base.report_pack.docket_revision_id,
-              pre_xero_docs_ready: base.report_pack.pre_xero_docs_ready === true,
-              blockers: base.report_pack.blockers,
-            }
-            : null,
-          legacy_pack: {
-            status: base.report_pack.legacy_pack_status ||
-              base.report_pack.status,
-          },
-          pack_sent: base.pack_sent === true || base.report_pack.sent === true,
-        }))
-        : null),
+    // Stays a STRING (legacy payload shape). It reads the pipeline's single
+    // presentation stamp so a ready docket never publishes a stale legacy
+    // `failed`, and falls back to the raw status when nothing stamped it.
+    pack_status: base?.pack_status || base?.pack_presentation?.state ||
+      base?.report_pack?.status || null,
     needs_money_review: base?.needs_money_review === true,
     cancel_reason: base?.cancel_reason || null,
     cancel_note: base?.cancel_note || null,
@@ -941,6 +924,16 @@ function ageFacts(base: any) {
   };
 }
 
+/**
+ * The pipeline's additive top-level pack-presentation stamp. It is deliberately
+ * NOT `report_pack`: a card with no pack row and no docket must keep publishing
+ * `report_pack: null` so M1's `!pack` short-circuit still fires.
+ */
+function stampedPackPresentation(base: any): any | null {
+  const stamp = base?.pack_presentation;
+  return stamp && typeof stamp === "object" && txt(stamp.kind) ? stamp : null;
+}
+
 function blockerFacts(base: any, assignments: any[]) {
   const substatus = txt(base?.substatus || base?.makesafe_details?.substatus);
   const hasAllocation = assignments.length > 0 ||
@@ -984,17 +977,18 @@ function blockerFacts(base: any, assignments: any[]) {
   }
   // Surface a presentation-level refusal reason even when the blocker list is
   // empty (legacy failed without structured codes).
+  const refusal = stampedPackPresentation(base) || base?.report_pack || null;
   if (
     real.length === 0 &&
-    String(base?.report_pack?.presentation_kind || "").toLowerCase() ===
+    String(refusal?.presentation_kind || refusal?.kind || "").toLowerCase() ===
       "refused" &&
-    txt(base?.report_pack?.presentation_reason)
+    txt(refusal?.presentation_reason || refusal?.reason)
   ) {
     real.push({
       code: "pack_refused",
       category: "ses_docket",
       docket_revision_id: base?.report_pack?.docket_revision_id || null,
-      fact: txt(base.report_pack.presentation_reason),
+      fact: txt(refusal.presentation_reason || refusal.reason),
     });
   }
   return {
@@ -1274,50 +1268,38 @@ export function buildCanonicalMakesafeRows(
       base,
       cardMode ? null : extras.intakeCaseByJobId?.[base?.id],
     );
-    // Prefer honesty fields already stamped on report_pack by the pipeline;
-    // re-derive only when absent so tests that inject report_pack directly still
-    // get a consistent presentation.
-    const packHonesty = pack?.presentation_kind
-      ? {
-        kind: String(pack.presentation_kind),
-        state: String(pack.status || "not_started"),
-        reason: pack.presentation_reason ?? null,
-        pre_xero_docs_ready: pack.pre_xero_docs_ready === true,
-        drafted: !!pack?.report_doc_id ||
-          pack?.pre_xero_docs_ready === true ||
-          ["drafted", "authorised_not_sent", "refused", "ready"].includes(
-            String(pack?.status || "").toLowerCase(),
-          ),
-        legacy_pack_status: pack.legacy_pack_status ?? null,
-      }
-      : (() => {
-        const derived = presentSesPackHonesty({
-          docket: pack?.docket_revision_id
-            ? {
-              id: pack.docket_revision_id,
-              pre_xero_docs_ready: pack.pre_xero_docs_ready === true,
-              blockers: pack.blockers,
-            }
-            : null,
-          legacy_pack: pack
-            ? {
-              status: pack.status,
-              failed_step: pack.failed_step,
-              error_detail: pack.error_detail,
-            }
-            : null,
-          pack_sent: packSent || base?.sent_to_builder === true,
-          has_report_doc: base?.has_report_doc === true,
-        });
-        return {
-          kind: derived.kind,
-          state: derived.state,
-          reason: derived.reason,
-          pre_xero_docs_ready: derived.pre_xero_docs_ready,
-          drafted: derived.drafted || !!pack?.report_doc_id,
-          legacy_pack_status: derived.legacy_pack_status,
-        };
-      })();
+    // The pipeline's own `pack_presentation` stamp is the single presentation
+    // authority; re-derive only when a caller injected `report_pack` directly
+    // (tests, the parity harness) so both paths agree. `drafted` always comes
+    // from the presentation, never from reading a presentation state string.
+    const stamped = stampedPackPresentation(base);
+    const derived = stamped ? null : presentSesPackHonesty({
+      docket: pack?.docket_revision_id
+        ? {
+          id: pack.docket_revision_id,
+          pre_xero_docs_ready: pack.pre_xero_docs_ready === true,
+          blockers: pack.blockers,
+        }
+        : null,
+      legacy_pack: pack
+        ? {
+          status: pack.legacy_pack_status || pack.status,
+          failed_step: pack.failed_step,
+          error_detail: pack.error_detail,
+        }
+        : null,
+      pack_sent: packSent || base?.sent_to_builder === true,
+      has_report_doc: base?.has_report_doc === true,
+    });
+    const packHonesty = {
+      kind: String(stamped?.kind ?? derived?.kind ?? "none"),
+      state: String(stamped?.state ?? derived?.state ?? "not_started"),
+      reason: stamped?.reason ?? derived?.reason ?? null,
+      drafted: (stamped?.drafted ?? derived?.drafted) === true ||
+        !!pack?.report_doc_id,
+      legacy_pack_status: stamped?.legacy_pack_status ??
+        derived?.legacy_pack_status ?? null,
+    };
     const packPayload = {
       // Honest state: never a stale legacy `failed` over a ready docket.
       state: packHonesty.state ||
@@ -1328,7 +1310,7 @@ export function buildCanonicalMakesafeRows(
         : null,
       drafted: packHonesty.drafted === true,
       docket_revision_id: pack?.docket_revision_id || null,
-      pre_xero_docs_ready: packHonesty.pre_xero_docs_ready === true,
+      pre_xero_docs_ready: pack?.pre_xero_docs_ready === true,
       // Refusal / incomplete / ready distinction for the operator surface.
       presentation_kind: packHonesty.kind,
       presentation_reason: packHonesty.reason,

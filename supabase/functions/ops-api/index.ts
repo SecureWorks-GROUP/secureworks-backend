@@ -15865,12 +15865,9 @@ async function makesafePipeline(
       legacyStatus === 'authorised_not_sent'
     // Pack presentation honesty: a ready U4 docket never publishes stale legacy
     // `failed`, and a refused docket names its reason instead of green-ticking.
-    // Does not change board column placement — only what the card says.
-    const hasReportDoc = Array.isArray(docsMap[j.id]) &&
-      (docsMap[j.id] as any[]).some((doc) =>
-        String(doc?.type || '').toLowerCase() === 'makesafe_report' ||
-        String(doc?.type || '').toLowerCase() === 'report'
-      )
+    // Strictly additive — every derivation input below (status, review_state,
+    // blockers) keeps the value the board ladder, chip truth and M1 already read.
+    const hasReportDoc = makesafeDocBooleans(docsMap[j.id]).has_report_doc
     const packPresentation = presentSesPackHonesty({
       docket: docket && !legacySent
         ? {
@@ -15887,42 +15884,55 @@ async function makesafePipeline(
           error_detail: rowPack.error_detail,
         }
         : null,
-      pack_sent: packSentMap[j.id] === true || legacySent,
+      // The durable send marker only. `legacySent` also covers
+      // authorised_not_sent, which is money raised and NOT sent — folding it in
+      // here would present an unsent pack as sent and hide the resume chip.
+      pack_sent: packSentMap[j.id] === true,
       has_report_doc: hasReportDoc,
       has_trade_report: !!reportMap[j.id],
     })
-    // Always publish a pack block when we have an honest presentation to show
-    // (including incomplete/refused with no legacy row) so the card can name why.
-    const packForBoard: MakesafeReportPackLike | null =
-      (docket && !legacySent) || rowPack ||
-          packPresentation.kind === 'incomplete' ||
-          packPresentation.kind === 'refused'
-        ? {
-          ...(rowPack || {}),
-          status: packPresentation.state,
-          review_state: packPresentation.review_state,
-          docket_revision_id: packPresentation.docket_revision_id ||
-            rowPack?.docket_revision_id || null,
-          pre_xero_docs_ready: packPresentation.pre_xero_docs_ready,
-          blockers: packPresentation.blockers.map((blocker) => ({
-            reason_code: blocker.code,
-            code: blocker.code,
-            fact: blocker.fact,
-            recovery_action: blocker.recovery_action,
-            category: blocker.category,
-            ...(packPresentation.kind === 'refused'
-              ? { state: 'refused' as const }
-              : {}),
-          })),
-          presentation_kind: packPresentation.kind,
-          presentation_reason: packPresentation.reason,
-          legacy_pack_status: packPresentation.legacy_pack_status,
-          cycle_attribution: docket && !legacySent
-            ? (docketIsCurrent ? 'bound' : null)
-            : (packIsCurrent ? 'bound' : null),
-        }
-        : null
+    // `report_pack` stays exactly the derivation shape it has always been: the
+    // status/review_state/blockers the ladder, the SENT chip and M1 consume are
+    // the raw legacy + docket values, never the presentation state. A synthetic
+    // pack block is never minted for a card with no row and no docket, so M1's
+    // `!pack` short-circuit keeps firing. Honesty rides alongside, on the
+    // `presentation_*` keys only.
+    const packHonestyFields = {
+      presentation_kind: packPresentation.kind,
+      presentation_reason: packPresentation.reason,
+      legacy_pack_status: packPresentation.legacy_pack_status,
+    }
+    const packForBoard: MakesafeReportPackLike | null = docket && !legacySent
+      ? {
+        ...(rowPack || {}),
+        status: rowPack?.status || 'drafted',
+        review_state: docket.pre_xero_docs_ready
+          ? 'READY'
+          : 'U4_BLOCKED',
+        docket_revision_id: docket.id,
+        pre_xero_docs_ready: docket.pre_xero_docs_ready === true,
+        blockers: Array.isArray(docket.blockers) ? docket.blockers : [],
+        cycle_attribution: docketIsCurrent ? 'bound' : null,
+        ...packHonestyFields,
+      }
+      : rowPack
+      ? {
+        ...rowPack,
+        cycle_attribution: packIsCurrent ? 'bound' : null,
+        ...packHonestyFields,
+      }
+      : null
     const enriched = enrichMakesafeBoardJob(j, detail, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, packForBoard)
+    // Additive top-level honesty so a card with no pack row and no docket can
+    // still say incomplete/refused without inventing a `report_pack` object.
+    enriched.pack_presentation = {
+      kind: packPresentation.kind,
+      state: packPresentation.state,
+      reason: packPresentation.reason,
+      drafted: packPresentation.drafted,
+      legacy_pack_status: packPresentation.legacy_pack_status,
+      docket_revision_id: packPresentation.docket_revision_id,
+    }
     const captainMark = captainActionMap[j.id]
     enriched.captain_action = captainMark
       ? {
