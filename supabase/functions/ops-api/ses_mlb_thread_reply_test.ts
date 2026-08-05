@@ -248,6 +248,44 @@ Deno.test("pickIntakeThreadFromApprovedDraft: story sourcePostId breaks a multi-
   assertEquals(olderByStory?.post_id, "post-old");
 });
 
+Deno.test("pickIntakeThreadFromApprovedDraft: one thread with two posts is corroborated, not ambiguous", () => {
+  // A builder follow-up posted into the SAME intake conversation and approved
+  // onto the same job. Graph reply needs only thread_id, and it is unanimous.
+  const followUp = maylandsDraftCandidate({
+    draft_id: "follow-up",
+    approved_at: "2026-07-24T02:00:00Z",
+    graph_message_id: "post-follow-up",
+    email_post_id: "post-follow-up",
+    email_thread_id: MAYLANDS_THREAD,
+  });
+  const coords = pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+    NEWER_DRAFT,
+    followUp,
+  ]);
+  assertEquals(coords?.thread_id, MAYLANDS_THREAD);
+  // Two posts on that one thread prove no single audit anchor.
+  assertEquals(coords?.post_id, null);
+
+  // The story naming exactly one of them restores the anchor.
+  const anchored = pickIntakeThreadFromApprovedDraft(
+    MAYLANDS_JOB,
+    [NEWER_DRAFT, followUp],
+    [MAYLANDS_POST],
+  );
+  assertEquals(anchored?.thread_id, MAYLANDS_THREAD);
+  assertEquals(anchored?.post_id, MAYLANDS_POST);
+
+  // A second DISTINCT thread is still ambiguity, and still refuses.
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      NEWER_DRAFT,
+      followUp,
+      OLDER_DRAFT,
+    ]),
+    null,
+  );
+});
+
 Deno.test("pickIntakeThreadFromApprovedDraft: duplicate rows of one coordinate are one answer", () => {
   const coords = pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
     maylandsDraftCandidate({ draft_id: "a" }),
