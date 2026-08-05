@@ -1231,10 +1231,14 @@ export async function sendMailerOpsVisibilityAction(
   const dryRun = args.dry_run !== false; // default true
   const actor = text(args.actor) || auth.user?.email || "mailer-ops-operator";
 
-  // Load job + company
+  // Load job. Live `jobs` has no company columns — company identity and the
+  // builder external_ref live on makesafe_job_details (verified against the
+  // production OpenAPI catalog: jobs lacks requesting_company_slug /
+  // requesting_company_id / external_ref; detail has all three). Selecting a
+  // phantom jobs column 400s the whole route.
   const jobRes = await client.from("jobs")
     .select(
-      "id,org_id,type,job_number,status,metadata,requesting_company_slug,external_ref,site_suburb,ses_money_sealed_at",
+      "id,org_id,type,job_number,status,metadata,site_suburb,ses_money_sealed_at",
     )
     .eq("id", jobId)
     .maybeSingle();
@@ -1249,30 +1253,12 @@ export async function sendMailerOpsVisibilityAction(
   }
   const job = jobRes.data;
   const metadata = object(job.metadata);
-  const slug = text(job.requesting_company_slug) ||
-    text(metadata.requesting_company_slug) ||
-    text(metadata.company_slug);
 
-  const companyRes = slug
-    ? await client.from("makesafe_companies")
-      .select("slug,name,sender_patterns,report_recipient")
-      .eq("slug", slug)
-      .maybeSingle()
-    : { data: null, error: null };
-  if (companyRes.error) {
-    throw new SesActionError(
-      503,
-      mailerRefusal(
-        "mailer_ops_company_lookup_failed",
-        `Company lookup failed (${companyRes.error.message}).`,
-      ),
-    );
-  }
-  // Make-safe detail carries the attendance-cycle facts (and the fallback
-  // company slug). Read it once for both.
+  // Make-safe detail carries company identity + attendance-cycle facts.
+  // Read it once for both.
   const detailRes = await client.from("makesafe_job_details")
     .select(
-      "job_id,requesting_company_slug,requesting_company_name,attendance_cycle_id,cycle_number,reattend_count",
+      "job_id,requesting_company_id,requesting_company_slug,requesting_company_name,external_ref,attendance_cycle_id,cycle_number,reattend_count",
     )
     .eq("job_id", jobId)
     .maybeSingle();
@@ -1286,16 +1272,60 @@ export async function sendMailerOpsVisibilityAction(
     );
   }
   const cycle = mailerOpsCycleContext(detailRes.data);
+  const companyId = text(detailRes.data?.requesting_company_id);
+  const detailSlug = text(detailRes.data?.requesting_company_slug);
+  const metadataSlug = text(metadata.requesting_company_slug) ||
+    text(metadata.company_slug);
+  const slug = detailSlug || metadataSlug;
 
-  let company = companyRes.data || null;
-  if (!company?.sender_patterns) {
-    const detailSlug = text(detailRes.data?.requesting_company_slug);
-    if (detailSlug && detailSlug !== slug) {
-      const co2 = await client.from("makesafe_companies")
-        .select("slug,name,sender_patterns,report_recipient")
-        .eq("slug", detailSlug)
-        .maybeSingle();
-      if (co2.data) company = co2.data;
+  // Prefer the FK on detail (authoritative), then slug. Never read company
+  // columns from jobs — they do not exist in production.
+  type MailerOpsCompanyRow = {
+    id?: string | null;
+    slug?: string | null;
+    name?: string | null;
+    sender_patterns?: unknown;
+    report_recipient?: string | null;
+  };
+  const readCompanyBy = async (
+    column: "id" | "slug",
+    value: string,
+  ): Promise<MailerOpsCompanyRow | null> => {
+    const res = await client.from("makesafe_companies")
+      .select("id,slug,name,sender_patterns,report_recipient")
+      .eq(column, value)
+      .maybeSingle();
+    if (res.error) {
+      throw new SesActionError(
+        503,
+        mailerRefusal(
+          "mailer_ops_company_lookup_failed",
+          `Company lookup by ${column} failed (${res.error.message}).`,
+        ),
+      );
+    }
+    return res.data || null;
+  };
+  const usableMailerAddressCount = (row: MailerOpsCompanyRow | null) =>
+    extractMailerAddressesFromSenderPatterns(row?.sender_patterns).length;
+
+  let company: MailerOpsCompanyRow | null = null;
+  const companiesConsulted: MailerOpsCompanyRow[] = [];
+  if (companyId) {
+    company = await readCompanyBy("id", companyId);
+    if (company) companiesConsulted.push(company);
+  }
+  // sender_patterns is `text[] NOT NULL DEFAULT '{}'`, so a found row ALWAYS
+  // carries an array — often empty or domain-only. Fall through on USABLE
+  // addresses, never on column presence, or the slug tier is dead code.
+  if (
+    usableMailerAddressCount(company) === 0 && slug &&
+    slug !== text(company?.slug)
+  ) {
+    const bySlug = await readCompanyBy("slug", slug);
+    if (bySlug) {
+      companiesConsulted.push(bySlug);
+      if (!company || usableMailerAddressCount(bySlug) > 0) company = bySlug;
     }
   }
   const senderPatterns = company?.sender_patterns;
@@ -1313,8 +1343,14 @@ export async function sendMailerOpsVisibilityAction(
   });
 
   // Structural: never use report_recipient (makesafes@) as To on this path.
-  const reportRecipient = text(company?.report_recipient).toLowerCase();
-  if (reportRecipient && recipient.to === reportRecipient) {
+  // Every company row consulted counts — the winning row is chosen for its
+  // usable sender_patterns, not for its billing address.
+  const billingRecipients = new Set(
+    companiesConsulted
+      .map((row) => text(row.report_recipient).toLowerCase())
+      .filter((value) => value.length > 0),
+  );
+  if (billingRecipients.has(recipient.to)) {
     throw new SesActionError(
       409,
       mailerRefusal(
@@ -1325,7 +1361,8 @@ export async function sendMailerOpsVisibilityAction(
             "Configure sender_patterns with the work-order mailer full address and pass that as To.",
           evidence: {
             refused_to: recipient.to,
-            report_recipient: reportRecipient,
+            report_recipient: recipient.to,
+            billing_recipients: [...billingRecipients],
           },
         },
       ),
@@ -1338,7 +1375,7 @@ export async function sendMailerOpsVisibilityAction(
     draftSubjects: subjectInputs.draftSubjects,
     jobMetadataSubject: subjectInputs.jobMetadataSubject,
     builderReference: subjectInputs.builderReference ||
-      text(job.external_ref) || null,
+      text(detailRes.data?.external_ref) || null,
     jobNumber: text(job.job_number) || null,
   });
 

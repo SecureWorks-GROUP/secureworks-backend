@@ -398,6 +398,7 @@ function minimalPdfBytes(): Uint8Array {
 function makeClient(opts: {
   job?: Record<string, unknown>;
   company?: Record<string, unknown> | null;
+  companies?: Record<string, unknown>[];
   detail?: Record<string, unknown> | null;
   documents?: any[];
   media?: any[];
@@ -408,6 +409,7 @@ function makeClient(opts: {
   jobEventsError?: { message: string };
   onJobEventInsert?: (row: any) => void;
 }): any {
+  // jobs has no company columns in production — company lives on detail.
   const job = opts.job || {
     id: "job-1",
     org_id: "00000000-0000-4000-8000-000000000001",
@@ -419,17 +421,21 @@ function makeClient(opts: {
         "NEW WORK ORDER - MLB-26267 U24/ 28 Peninsula Road, Maylands, WA 6051",
       builder_reference: "MLB-26267",
     },
-    requesting_company_slug: "mlb",
-    external_ref: "MLB-26267",
     site_suburb: "Maylands",
     ses_money_sealed_at: "2026-08-01T00:00:00Z",
   };
   const company = opts.company === null ? null : opts.company || {
+    id: "company-mlb-1",
     slug: "mlb",
     name: "ML Builders",
     sender_patterns: ["mlb.mailer@primeeco.tech"],
     report_recipient: "makesafes@mlbuilders.com.au",
   };
+  // Company rows resolve by the filter the route actually used, so a test can
+  // prove which coordinate (FK id vs slug) selected the row.
+  const companies: Record<string, unknown>[] = opts.companies ||
+    (company ? [company] : []);
+  const queries: { table: string; filters: any[] }[] = [];
   const documents = opts.documents || [{
     id: "doc-report-1",
     job_id: "job-1",
@@ -455,7 +461,17 @@ function makeClient(opts: {
       `https://example.supabase.co/storage/v1/object/public/job-photos/job-1/p${i}.jpg`,
     created_at: `2026-08-01T00:00:${String(i).padStart(2, "0")}Z`,
   }));
-  const detail = opts.detail === null ? null : opts.detail || null;
+  // Default detail mirrors live makesafe_job_details company + cycle columns.
+  const detail = opts.detail === null ? null : opts.detail || {
+    job_id: "job-1",
+    requesting_company_id: "company-mlb-1",
+    requesting_company_slug: "mlb",
+    requesting_company_name: "ML Builders",
+    external_ref: "MLB-26267",
+    attendance_cycle_id: null,
+    cycle_number: null,
+    reattend_count: 0,
+  };
   const cases = opts.cases || [{
     id: "case-1",
     job_id: "job-1",
@@ -474,6 +490,7 @@ function makeClient(opts: {
   const photoBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]); // minimal jpeg markers
 
   return {
+    __queries: queries,
     from(table: string) {
       const state: any = { table, filters: [] as any[] };
       const api: any = {
@@ -495,9 +512,16 @@ function makeClient(opts: {
           return api;
         },
         maybeSingle: async () => {
+          queries.push({ table, filters: [...state.filters] });
           if (table === "jobs") return { data: job, error: null };
           if (table === "makesafe_companies") {
-            return { data: company, error: null };
+            const row = companies.find((candidate: any) =>
+              state.filters.length > 0 &&
+              state.filters.every(([op, col, val]: any[]) =>
+                op === "eq" ? candidate?.[col] === val : true
+              )
+            ) || null;
+            return { data: row, error: null };
           }
           if (table === "makesafe_job_details") {
             return { data: detail, error: null };
@@ -1306,6 +1330,224 @@ Deno.test("mailer ops: source pins — no invoice string in attachment role unio
   // Structural invoice impossibility is typed, not a runtime allow-list of money docs only.
   assert(
     !source.includes('MailerOpsRouteKind = "report" | "photo" | "invoice"'),
+  );
+});
+
+Deno.test("mailer ops: jobs select never names production-phantom company columns", async () => {
+  // Live failure that shipped once: column jobs.requesting_company_slug does
+  // not exist. Company identity is on makesafe_job_details; external_ref too.
+  const source = await Deno.readTextFile(
+    new URL("./ses_mailer_ops_send.ts", import.meta.url),
+  );
+  // The jobs select is the single line that caused the live 400. Pin the real
+  // projection, then refuse the phantoms COLUMN-WISE so a reordered or widened
+  // select cannot slip a phantom back past a whole-string literal.
+  const jobsSelect = /from\("jobs"\)\s*\n?\s*\.select\(\s*\n?\s*"([^"]+)"/.exec(
+    source,
+  )?.[1];
+  assert(jobsSelect, "could not locate the jobs select projection");
+  const jobsColumns = jobsSelect!.split(",").map((c) => c.trim());
+  for (
+    const phantom of [
+      "requesting_company_slug",
+      "requesting_company_id",
+      "external_ref",
+    ]
+  ) {
+    assert(
+      !jobsColumns.includes(phantom),
+      `jobs select must not name production-phantom column ${phantom}`,
+    );
+  }
+  assertEquals(jobsColumns, [
+    "id",
+    "org_id",
+    "type",
+    "job_number",
+    "status",
+    "metadata",
+    "site_suburb",
+    "ses_money_sealed_at",
+  ]);
+  assertStringIncludes(
+    source,
+    '"job_id,requesting_company_id,requesting_company_slug,requesting_company_name,external_ref,attendance_cycle_id,cycle_number,reattend_count"',
+  );
+  // Company resolution prefers the FK on detail.
+  assertStringIncludes(source, 'readCompanyBy("id", companyId)');
+  assertStringIncludes(source, "detailRes.data?.requesting_company_id");
+  assertStringIncludes(source, "detailRes.data?.external_ref");
+});
+
+Deno.test("mailer ops action: resolves company from detail FK, not jobs columns", async () => {
+  // Job row deliberately has no company fields (matching live jobs). Detail
+  // carries requesting_company_id; company is found by that id. Two rows share
+  // the fixture so the FK — not the slug, not the first row — has to pick it.
+  const client = makeClient({
+    companies: [
+      {
+        id: "company-other-1",
+        slug: "mlb",
+        name: "Wrong Row",
+        sender_patterns: ["wrong.mailer@primeeco.tech"],
+        report_recipient: "makesafes@wrong.example",
+      },
+      {
+        id: "company-mlb-1",
+        slug: "mlb-fk",
+        name: "ML Builders",
+        sender_patterns: ["mlb.mailer@primeeco.tech"],
+        report_recipient: "makesafes@mlbuilders.com.au",
+      },
+    ],
+    job: {
+      id: "job-1",
+      org_id: "00000000-0000-4000-8000-000000000001",
+      type: "makesafe",
+      job_number: "SWMS-261017",
+      status: "active",
+      metadata: {},
+      site_suburb: "Maylands",
+      ses_money_sealed_at: "2026-08-01T00:00:00Z",
+    },
+    detail: {
+      job_id: "job-1",
+      requesting_company_id: "company-mlb-1",
+      requesting_company_slug: "mlb",
+      requesting_company_name: "ML Builders",
+      external_ref: "MLB-26267",
+      attendance_cycle_id: null,
+      cycle_number: null,
+      reattend_count: 0,
+    },
+    drafts: [{
+      id: "draft-1",
+      subject: "NEW WORK ORDER - MLB-26267 Maylands",
+      status: "approved",
+      approved_job_id: "job-1",
+    }],
+  });
+  const result = await sendMailerOpsVisibilityAction(
+    client,
+    { mode: "api_key", user: null },
+    {
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "job-1",
+      kind: "report",
+      to: "mlb.mailer@primeeco.tech",
+      dry_run: true,
+    },
+    {
+      makeMailGateway: () => {
+        throw new Error("no gateway");
+      },
+      effectStore: new MemoryEffectStore(),
+    },
+  );
+  assertEquals(result.success, true);
+  assertEquals(result.dry_run, true);
+  assertEquals(result.to, ["mlb.mailer@primeeco.tech"]);
+  // The lookup coordinate itself is pinned: id, with the detail FK value.
+  const companyQueries = client.__queries.filter((q: any) =>
+    q.table === "makesafe_companies"
+  );
+  assertEquals(companyQueries.length, 1);
+  assertEquals(companyQueries[0].filters, [["eq", "id", "company-mlb-1"]]);
+});
+
+Deno.test("mailer ops action: falls through to slug when FK row has no usable mailer address", async () => {
+  // sender_patterns is text[] NOT NULL, so the FK row returns [] rather than
+  // null. Presence must never satisfy the tier — usable addresses must.
+  const client = makeClient({
+    companies: [
+      {
+        id: "company-mlb-1",
+        slug: "mlb-fk",
+        name: "ML Builders (no mailer configured)",
+        sender_patterns: [],
+        report_recipient: "makesafes@mlbuilders.com.au",
+      },
+      {
+        id: "company-mlb-2",
+        slug: "mlb",
+        name: "ML Builders",
+        sender_patterns: ["mlb.mailer@primeeco.tech"],
+        report_recipient: "makesafes@mlbuilders.com.au",
+      },
+    ],
+  });
+  const result = await sendMailerOpsVisibilityAction(
+    client,
+    { mode: "api_key", user: null },
+    {
+      org_id: "00000000-0000-4000-8000-000000000001",
+      job_id: "job-1",
+      kind: "report",
+      to: "mlb.mailer@primeeco.tech",
+      dry_run: true,
+    },
+    {
+      makeMailGateway: () => {
+        throw new Error("no gateway");
+      },
+      effectStore: new MemoryEffectStore(),
+    },
+  );
+  assertEquals(result.success, true);
+  assertEquals(result.to, ["mlb.mailer@primeeco.tech"]);
+  const companyQueries = client.__queries.filter((q: any) =>
+    q.table === "makesafe_companies"
+  );
+  assertEquals(companyQueries.map((q: any) => q.filters), [
+    [["eq", "id", "company-mlb-1"]],
+    [["eq", "slug", "mlb"]],
+  ]);
+});
+
+Deno.test("mailer ops action: billing recipient of the FK row is refused after slug fall-through", async () => {
+  // The winning row is chosen for usable sender_patterns; the row it replaced
+  // still owns a billing mailbox that must never be a mailer-ops To.
+  const err = await assertRejects(
+    () =>
+      sendMailerOpsVisibilityAction(
+        makeClient({
+          companies: [
+            {
+              id: "company-mlb-1",
+              slug: "mlb-fk",
+              name: "ML Builders (billing only)",
+              sender_patterns: [],
+              report_recipient: "makesafes@mlbuilders.com.au",
+            },
+            {
+              id: "company-mlb-2",
+              slug: "mlb",
+              name: "ML Builders",
+              sender_patterns: ["makesafes@mlbuilders.com.au"],
+              report_recipient: null,
+            },
+          ],
+        }),
+        { mode: "api_key", user: null },
+        {
+          org_id: "00000000-0000-4000-8000-000000000001",
+          job_id: "job-1",
+          kind: "report",
+          to: "makesafes@mlbuilders.com.au",
+          dry_run: true,
+        },
+        {
+          makeMailGateway: () => {
+            throw new Error("no");
+          },
+          effectStore: new MemoryEffectStore(),
+        },
+      ),
+    SesActionError,
+  );
+  assertEquals(
+    ((err as SesActionError).refusal as any).code,
+    "mailer_ops_billing_recipient_forbidden",
   );
 });
 
