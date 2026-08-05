@@ -1,0 +1,26 @@
+{
+  "job_id": "b406ac52-6134-4105-9ab5-78645bd89057",
+  "job_number": "SWMS-261065",
+  "builder_ref": "MLB-26344",
+  "prior_invoice": {
+    "number": "INV-1101",
+    "status": "DELETED",
+    "total": 561
+  },
+  "live_non_deleted": [
+    {
+      "invoice_number": "INV-1117",
+      "status": "DRAFT",
+      "total": 935.0,
+      "sub_total": 850.0,
+      "total_tax": 85.0,
+      "xero_invoice_id": "210f32de-3ac1-49fe-ac90-f2c41e729e3e",
+      "reference": "MLB-26344"
+    }
+  ],
+  "live_count": 1,
+  "obligation_revision_id": "d3f3c876-d7e9-5b3a-bede-3fb33f57666e",
+  "pricing_disposition": "priced_with_line_override",
+  "trade_labour_hours": 3,
+  "decision_key": "munster-2x5h-travel-v1"
+}
