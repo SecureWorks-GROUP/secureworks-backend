@@ -1,0 +1,76 @@
+{
+  "action": "prepare_ses_docket_revision",
+  "dry_run": true,
+  "state": "ready",
+  "blockers": [],
+  "docket_revision_id": "f87609cf-c2d7-50cc-a5d6-68318eb354f9",
+  "persisted": false,
+  "input_content_hash": "sha256:11f5ae52b58ea624ec4e1f77970500ab14786e2979e493c947a679abeb96819d",
+  "output_content_hash": "sha256:856a6be777a5b8ff1b19de5f60fa0a6883c651c6f64c0180fa023db4395de887",
+  "invoice_proposal": {
+    "version": "ses-local-invoice-proposal/v1",
+    "builder_reference": "MLB-25971PO-55855",
+    "basis": "standard_labour_materials",
+    "trades": 1,
+    "reported_hours_per_trade": 3,
+    "billable_hours_per_trade": 3,
+    "billable_hours_floor": 3,
+    "billable_hours_raised_to_floor": false,
+    "line_items": [
+      {
+        "description": "MLB-25971PO-55855 - make-safe attendance - 1 trade x 3 hours",
+        "quantity": 3,
+        "unit_price_ex_gst": 85,
+        "amount_ex_gst": 255
+      },
+      {
+        "description": "MLB-25971PO-55855 - Materials used: Timber x 1m; Bugle screws x 5; Tarps / roof materials; Fixings / consumables",
+        "quantity": 1,
+        "unit_price_ex_gst": 45,
+        "amount_ex_gst": 45
+      }
+    ],
+    "subtotal_ex_gst": 300,
+    "gst": 30,
+    "total_inc_gst": 330,
+    "xero_identity": null,
+    "materials_charge": {
+      "schema": "secureworks.makesafe.materials-charge-figure/v1",
+      "decision": "charge",
+      "materials_charge_ex_gst": 45,
+      "materials_used": [
+        "Timber x 1m",
+        "Bugle screws x 5",
+        "Tarps / roof materials",
+        "Fixings / consumables"
+      ],
+      "source": "operator_materials_charge_figure",
+      "authorised_by": "Captain Marnin Stobbe",
+      "authorised_at": "2026-08-05T12:30:00.000Z",
+      "decision_key": "gidge-report-redo-v1-materials-45",
+      "reason": "Match existing locked INV-1135 materials line of $45 ex GST; invoice untouched",
+      "estimate": false,
+      "note": "Operator commercial materials figure. Trade attendance evidence was not written; the sealed labour rate and logged hours are unchanged."
+    }
+  },
+  "artifact_roles": {
+    "source_attachment": 1,
+    "completion_photo_proof": 9,
+    "supporting_report_plan": 1,
+    "swms_generation_plan": 1,
+    "photo_selection": 1,
+    "invoice_proposal": 1,
+    "invoice_email_draft": 1,
+    "report_email_draft": 1,
+    "photo_email_draft": 1,
+    "review_spec": 1,
+    "review_html": 1,
+    "release_payload": 1,
+    "case_story": 1,
+    "docket_manifest": 1,
+    "assembler_envelope": 1,
+    "capability": 1,
+    "timing": 1,
+    "hashes": 1
+  }
+}
