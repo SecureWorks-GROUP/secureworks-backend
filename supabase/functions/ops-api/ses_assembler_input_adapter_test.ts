@@ -1626,6 +1626,9 @@ Deno.test(
     assertEquals(input.cycle_facts.hours_and_materials, {
       trades: 2,
       hours_per_trade: 2,
+      // materials_used is surfaced for the invoice materials-charge guard so a
+      // labour-only proposal cannot silently drop trade-recorded materials.
+      materials_used: ["RAW CHECKBOX MATERIAL MUST NOT LEAK"],
     });
     assertEquals(input.cycle_facts.swms_fact_context, {
       evidence_kind: "current_card",
@@ -1736,6 +1739,13 @@ Deno.test(
     assertEquals(input.cycle_facts.hours_and_materials, {
       trades: 2,
       hours_per_trade: 3,
+      materials_used: [
+        "Star pickets x 20",
+        "Bases / feet",
+        "Tarps / roof materials",
+        "Fixings / consumables",
+        "Other / none",
+      ],
       existing_fence_star_picket_count: 20,
       existing_fence_star_picket_evidence: {
         source: "job_service_reports.checklist_json.materials_used",

@@ -51,6 +51,7 @@ import {
   buildSesSwmsGenerationPlan,
   type SesSwmsGenerationPlan,
 } from "./ses_swms_template.ts";
+import { decideStandardLabourMaterialsCharge } from "./ses_materials_charge_guard.ts";
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
@@ -941,6 +942,63 @@ function localInvoiceProposal(
       lines.push(lineItem(`${ref} - ${description}`, quantity, unitPrice));
     }
   }
+
+  // MLB / standard_labour_materials: never emit a silent labour-only proposal
+  // when the trade recorded materials_used. No general materials unit-price
+  // list exists — do not invent one. Either accept a priced materials line /
+  // operator one-figure charge, or refuse with a named ask-one-figure blocker.
+  // AJS/AJBR (ajs_labour_materials) keep their picket carve-out unchanged.
+  let materialsChargeMeta: Record<string, unknown> | null = null;
+  if (row.invoice_basis === "standard_labour_materials") {
+    const materialsUsed = Object.hasOwn(facts, "materials_used")
+      ? facts.materials_used
+      : object(object(input.cycle_facts.trade_report).checklist_json)
+        .materials_used;
+    const labourLineCount = 1;
+    const pricedMaterialsLineCount = Math.max(
+      0,
+      lines.length - labourLineCount,
+    );
+    const materialsDecision = decideStandardLabourMaterialsCharge({
+      materials_used: materialsUsed,
+      materials_charge_ex_gst: facts.materials_charge_ex_gst,
+      priced_materials_line_count: pricedMaterialsLineCount,
+    });
+    if (materialsDecision.action === "ask_one_figure") {
+      return {
+        proposal: null,
+        blocker: blocked(
+          materialsDecision.reason_code,
+          materialsDecision.reason,
+          materialsDecision.recovery_action,
+          ["canonical-input-envelope", "trade-materials-used"],
+          [],
+          {
+            materials_used: materialsDecision.materials,
+            invoice_basis: row.invoice_basis,
+            priced_materials_line_count: pricedMaterialsLineCount,
+          },
+        ),
+      };
+    }
+    if (materialsDecision.action === "charge_line") {
+      lines.push(
+        lineItem(
+          `${ref} - ${materialsDecision.description_suffix}`,
+          1,
+          materialsDecision.amount_ex_gst,
+        ),
+      );
+      materialsChargeMeta = {
+        materials_charge_ex_gst: materialsDecision.amount_ex_gst,
+        materials_used: materialsDecision.materials,
+        source: "operator_materials_charge_figure",
+        // Not an auto-estimate — figure was supplied, materials list is trade evidence.
+        estimate: false,
+      };
+    }
+  }
+
   const subtotal = Math.round(
     lines.reduce((sum, line) => sum + Number(line.amount_ex_gst || 0), 0) *
       100,
@@ -962,6 +1020,9 @@ function localInvoiceProposal(
       gst: Math.round(subtotal * 10) / 100,
       total_inc_gst: Math.round(subtotal * 110) / 100,
       xero_identity: null,
+      ...(materialsChargeMeta
+        ? { materials_charge: materialsChargeMeta }
+        : {}),
     },
     blocker: null,
   };

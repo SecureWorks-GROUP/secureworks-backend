@@ -1073,6 +1073,30 @@ function explicitHoursAndMaterials(
     ? array(pricing.materials)
     : array(checklist.materials);
   if (materials.length) facts.materials = materials;
+  // Trade-recorded materials_used must reach the invoice proposal path. Leaving
+  // it only on checklist_json is what let standard_labour_materials emit silent
+  // labour-only proposals while the report still listed materials. Surfacing is
+  // read-only; the prepare guard decides charge vs ask-one-figure.
+  if (
+    Object.hasOwn(checklist, "materials_used") &&
+    checklist.materials_used !== null &&
+    checklist.materials_used !== undefined
+  ) {
+    facts.materials_used = checklist.materials_used;
+  } else if (
+    Object.hasOwn(pricing, "materials_used") &&
+    pricing.materials_used !== null &&
+    pricing.materials_used !== undefined
+  ) {
+    facts.materials_used = pricing.materials_used;
+  }
+  // Operator answer to the materials one-figure question (ex GST). Never invent
+  // this — only copy an explicit trade/pricing fact when present.
+  copy(
+    "materials_charge_ex_gst",
+    pricing.materials_charge_ex_gst,
+    checklist.materials_charge_ex_gst,
+  );
   if (
     isAjsBuilderKey(classification.builder) &&
     isSesPhysicalShapedFamily(classification.family)

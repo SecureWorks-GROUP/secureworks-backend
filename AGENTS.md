@@ -1512,6 +1512,36 @@ promote raw checklist prose. The Bertram acceptance and refusal controls are
 pinned in `ses_assembler_input_adapter_test.ts`,
 `ses_prepare_docket_revision_test.ts`, and `makesafe_invoice_obligation_test.ts`.
 
+## MLB Physical Materials Must Never Silently Drop Off The Invoice
+
+`standard_labour_materials` (MLB physical / repair / restoration, and other
+non-AJS builders on that basis) used to emit a complete-looking labour-only
+proposal whenever `facts.materials` lacked priced unit lines — even when the
+trade had recorded `materials_used` that the report still printed. That silent
+omission cost real money (Munster, Morley, labour-floor-only draft batches).
+
+There is **no** authoritative general materials unit-price list in this system
+for physical make-safe consumables. Do not invent unit prices on a builder
+invoice. The AJS existing-fence star-picket $13.50 rate is a different, sealed
+carve-out and is not a materials catalogue.
+
+Guard (Captain 2026-08-05): `ses_materials_charge_guard.ts` +
+`localInvoiceProposal` in `ses_prepare_docket_revision.ts`. When trade
+`materials_used` has real entries (not `None` / `Other / none` placeholders)
+and the proposal would have zero materials charge lines, refuse with
+`materials_charge_figure_required` naming the materials and asking for **one**
+ex-GST figure. Answers: operator `materials_charge_ex_gst` (one marked charge
+line) or typed priced `materials[]` lines. Never raise labour hours or the
+sealed rate to cover materials. The adapter always surfaces
+`checklist.materials_used` onto `hours_and_materials` so the guard can see it.
+
+**Families changed:** `standard_labour_materials` only. **AJS/AJBR
+(`ajs_labour_materials`) still silently omit non-picket materials** — same
+class of defect, out of this slice; only the picket carve-out bills materials
+there. Temporary-fence hire bases are unchanged. Regression:
+`ses_materials_charge_guard_test.ts` and the silent-labour-only case in
+`ses_prepare_docket_revision_test.ts`.
+
 ## Docs Ready Is A Queue, Not A Board Column
 
 Count Docs Ready from `ops-api?action=list_ses_docs_ready_reviews`, not by eye
