@@ -62,6 +62,21 @@ const SENT_STATUSES = new Set([
   "close_failed",
 ]);
 
+/**
+ * Money is already raised and the send did not happen. Nothing is missing, so
+ * this stays `ready` — inventing a blocker here would be the same lie as a
+ * false green, pointed the other way. It must never read as a fresh
+ * pre-authorise draft either, so it keeps its own state string and names the
+ * awaiting-send fact.
+ */
+const RESUME_SEND_STATUSES = new Set([
+  "authorised_not_sent",
+  "authorized_not_sent",
+]);
+
+const AWAITING_SEND_REASON =
+  "Invoice is authorised; the pack is ready and awaiting send.";
+
 function txt(value: unknown): string {
   return String(value ?? "").trim();
 }
@@ -199,15 +214,17 @@ export function presentSesPackHonesty(input: {
     }
     // Ready: docket proves docs ready and no refusal blockers.
     if (preXero) {
+      const awaitingSend = RESUME_SEND_STATUSES.has(legacyStatus);
       return {
         kind: "ready",
-        // Never publish stale legacy `failed` over a ready docket.
-        state: "drafted",
+        // Never publish stale legacy `failed` over a ready docket, and never
+        // call an authorised-not-sent pack a fresh draft.
+        state: awaitingSend ? "authorised_not_sent" : "drafted",
         review_state: "READY",
         pre_xero_docs_ready: true,
         docket_revision_id: docketId,
         drafted: true,
-        reason: null,
+        reason: awaitingSend ? AWAITING_SEND_REASON : null,
         blockers: [],
         legacy_pack_status: legacyPackStatus,
       };

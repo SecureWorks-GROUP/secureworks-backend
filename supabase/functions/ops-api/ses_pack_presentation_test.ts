@@ -146,6 +146,25 @@ Deno.test("sent pack is sent even when a current docket also exists", () => {
   assertEquals(p.reason, null);
 });
 
+Deno.test("authorised-not-sent over a ready docket stays ready and names the send", () => {
+  const p = presentSesPackHonesty({
+    docket: { id: "rev-ready", pre_xero_docs_ready: true, blockers: [] },
+    legacy_pack: { status: "authorised_not_sent" },
+  });
+  assertEquals(p.kind, "ready");
+  assertEquals(p.state, "authorised_not_sent");
+  assertEquals(p.legacy_pack_status, "authorised_not_sent");
+  assertEquals(p.blockers, []);
+  assertStringIncludes(String(p.reason), "awaiting send");
+
+  const fresh = presentSesPackHonesty({
+    docket: { id: "rev-ready", pre_xero_docs_ready: true, blockers: [] },
+    legacy_pack: { status: "drafted" },
+  });
+  assertEquals(fresh.state, "drafted");
+  assertEquals(fresh.reason, null);
+});
+
 Deno.test("three kinds stay distinct — ready / refused / incomplete", () => {
   const ready = presentSesPackHonesty({
     docket: { id: "a", pre_xero_docs_ready: true, blockers: [] },
