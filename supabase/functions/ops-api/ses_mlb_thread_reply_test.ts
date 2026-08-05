@@ -5,6 +5,7 @@ import {
   isMlbPhysicalReleaseShape,
   MLB_ORDINARY_MAIL_SEND_TRANSPORT,
   MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1,
+  mlbOrdinaryMailSendEffectPayloadFields,
   mlbPhysicalUsesOrdinaryMailSendFallback,
   mlbRouteRequiresIntakeThreadReply,
   pickIntakeThreadCoordinates,
@@ -438,6 +439,102 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "applyMlbThreadReplyToRoute locked shape still requires the intake thread",
+  () => {
+    // The exception is temporary and restores by flipping the module flag, so
+    // the locked branch must stay provable while the exception is live.
+    const stamped = applyMlbThreadReplyToRoute(
+      {
+        route_kind: "report",
+        ready: true,
+        recipients: ["site@mlb.example"],
+        subject: "R",
+        body: "B",
+        attachment_hashes: ["h1"],
+      } as any,
+      { builder_key: "MLB", family: "physical_makesafe" },
+      {
+        thread_id: "thread-1",
+        post_id: "post-1",
+        conversation_id: null,
+        case_id: "c1",
+        internet_message_id: "mid@mlb.example",
+      },
+      false,
+    );
+    assertEquals(stamped.requires_thread_reply, true);
+    assertEquals(stamped.reply_to_thread_id, "thread-1");
+    assertEquals(stamped.reply_to_graph_message_id, "post-1");
+    assertEquals(stamped.mlb_transport, "group_thread_reply");
+    assertEquals(stamped.in_reply_to_internet_message_id, null);
+    assertEquals(stamped.ready, true);
+
+    // No thread id is not ready under the locked shape — never a quiet new thread.
+    const unready = applyMlbThreadReplyToRoute(
+      {
+        route_kind: "photo",
+        ready: true,
+        recipients: ["site@mlb.example"],
+        subject: "P",
+        body: "B",
+        attachment_hashes: ["h2"],
+      } as any,
+      { builder_key: "MLB", family: "physical_makesafe" },
+      null,
+      false,
+    );
+    assertEquals(unready.ready, false);
+    assertEquals(unready.requires_thread_reply, true);
+    assertEquals(unready.reply_to_thread_id, null);
+  },
+);
+
+Deno.test(
+  "route_send effect payload gains the exception keys only under the exception",
+  () => {
+    // Canonical JSON serialises explicit nulls, so an extra null key changes
+    // payload_hash and claim_ses_external_effect_v1 refuses the existing
+    // operation_key before it can confirm or reconcile. AJS/AJBR, the MLB
+    // invoice route and the locked shape must therefore hash unchanged.
+    assertEquals(mlbOrdinaryMailSendEffectPayloadFields(null), {});
+    assertEquals(mlbOrdinaryMailSendEffectPayloadFields({}), {});
+    assertEquals(
+      mlbOrdinaryMailSendEffectPayloadFields({ mlb_transport: null }),
+      {},
+    );
+    assertEquals(
+      mlbOrdinaryMailSendEffectPayloadFields({
+        mlb_transport: "group_thread_reply",
+        intended_intake_thread_id: "thread-1",
+      }),
+      {},
+    );
+    assertEquals(
+      mlbOrdinaryMailSendEffectPayloadFields({
+        mlb_transport: MLB_ORDINARY_MAIL_SEND_TRANSPORT,
+        intended_intake_thread_id: "thread-1",
+        in_reply_to_internet_message_id: "mid@mlb.example",
+      }),
+      {
+        in_reply_to_internet_message_id: "mid@mlb.example",
+        mlb_transport: MLB_ORDINARY_MAIL_SEND_TRANSPORT,
+        intended_intake_thread_id: "thread-1",
+      },
+    );
+    assertEquals(
+      mlbOrdinaryMailSendEffectPayloadFields({
+        mlb_transport: MLB_ORDINARY_MAIL_SEND_TRANSPORT,
+      }),
+      {
+        in_reply_to_internet_message_id: null,
+        mlb_transport: MLB_ORDINARY_MAIL_SEND_TRANSPORT,
+        intended_intake_thread_id: null,
+      },
+    );
+  },
+);
+
 Deno.test("invoice and AJS routes do not require intake-thread reply", () => {
   assertEquals(
     mlbRouteRequiresIntakeThreadReply("invoice", {
@@ -615,6 +712,51 @@ Deno.test(
     assertEquals((report as any).mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
     assertEquals(invoice.ready, true);
     assertEquals(invoice.requires_thread_reply, false);
+  },
+);
+
+Deno.test(
+  "MLB physical resolveDocketRoutes locked shape: report/photo reply on the intake thread",
+  () => {
+    const routes = resolveDocketRoutes(
+      mlbPhysicalDocket("thread-intake-1"),
+      MLB_ARTIFACTS,
+      null,
+      { mlbOrdinaryMailSendFallback: false },
+    );
+    const report = routes.find((r) => r.route_kind === "report")!;
+    const photo = routes.find((r) => r.route_kind === "photo")!;
+    const invoice = routes.find((r) => r.route_kind === "invoice")!;
+    assertEquals(report.ready, true);
+    assertEquals(report.requires_thread_reply, true);
+    assertEquals(report.reply_to_thread_id, "thread-intake-1");
+    assertEquals(report.reply_to_graph_message_id, "post-root");
+    assertEquals((report as any).mlb_transport, "group_thread_reply");
+    assertEquals(photo.requires_thread_reply, true);
+    assertEquals(photo.reply_to_thread_id, "thread-intake-1");
+    // Billing stays an ordinary makesafes@ message under both transports.
+    assertEquals(invoice.requires_thread_reply, false);
+    assertEquals(invoice.ready, true);
+  },
+);
+
+Deno.test(
+  "MLB physical resolveDocketRoutes locked shape: not ready when intake_thread_id missing",
+  () => {
+    const routes = resolveDocketRoutes(
+      mlbPhysicalDocket(null),
+      MLB_ARTIFACTS,
+      null,
+      { mlbOrdinaryMailSendFallback: false },
+    );
+    const report = routes.find((r) => r.route_kind === "report")!;
+    const photo = routes.find((r) => r.route_kind === "photo")!;
+    const invoice = routes.find((r) => r.route_kind === "invoice")!;
+    assertEquals(report.ready, false);
+    assertEquals(photo.ready, false);
+    assertEquals(report.requires_thread_reply, true);
+    assertEquals(report.reply_to_thread_id, null);
+    assertEquals(invoice.ready, true);
   },
 );
 

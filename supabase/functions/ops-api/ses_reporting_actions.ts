@@ -49,6 +49,8 @@ import {
 import {
   applyMlbThreadReplyToRoute,
   isMlbPhysicalReleaseShape,
+  mlbOrdinaryMailSendEffectPayloadFields,
+  mlbPhysicalUsesOrdinaryMailSendFallback,
   routingIntakeThread,
 } from "./ses_mlb_thread_reply.ts";
 import {
@@ -406,6 +408,7 @@ export function resolveDocketRoutes(
   docket: Record<string, any>,
   artifacts: Array<Record<string, any>>,
   obligation: Record<string, any> | null,
+  options?: { mlbOrdinaryMailSendFallback?: boolean },
 ): SesReviewRoute[] {
   const byPath = new Map<string, Record<string, any>>();
   const basedOnRevisionId = String(docket.based_on_revision_id || "").trim();
@@ -542,8 +545,10 @@ export function resolveDocketRoutes(
     const shape = { builder_key: builderKey, family };
     if (!isMlbPhysicalReleaseShape(shape)) return resolvedRoutes;
     const thread = routingIntakeThread(routing);
+    const ordinaryMailSend = options?.mlbOrdinaryMailSendFallback ??
+      mlbPhysicalUsesOrdinaryMailSendFallback();
     return resolvedRoutes.map((route) =>
-      applyMlbThreadReplyToRoute(route, shape, thread)
+      applyMlbThreadReplyToRoute(route, shape, thread, ordinaryMailSend)
     );
   }
 
@@ -4473,6 +4478,9 @@ export async function executeSesReleaseRevisionAction(
         ),
       );
     }
+    const mlbExceptionRouteFields = mlbOrdinaryMailSendEffectPayloadFields(
+      sendRoute as any,
+    );
     const effect = await buildSesEffect({
       org_id: args.org_id,
       effect_kind: "route_send",
@@ -4488,11 +4496,7 @@ export async function executeSesReleaseRevisionAction(
         reply_to_thread_id: sendRoute.reply_to_thread_id || null,
         reply_to_graph_message_id: sendRoute.reply_to_graph_message_id || null,
         requires_thread_reply: sendRoute.requires_thread_reply === true,
-        in_reply_to_internet_message_id:
-          (sendRoute as any).in_reply_to_internet_message_id || null,
-        mlb_transport: (sendRoute as any).mlb_transport || null,
-        intended_intake_thread_id:
-          (sendRoute as any).intended_intake_thread_id || null,
+        ...mlbExceptionRouteFields,
       },
     });
     const adapter: SesExternalAdapter<
@@ -4517,11 +4521,7 @@ export async function executeSesReleaseRevisionAction(
         reply_to_thread_id: sendRoute.reply_to_thread_id || null,
         reply_to_graph_message_id: sendRoute.reply_to_graph_message_id || null,
         requires_thread_reply: sendRoute.requires_thread_reply === true,
-        in_reply_to_internet_message_id:
-          (sendRoute as any).in_reply_to_internet_message_id || null,
-        mlb_transport: (sendRoute as any).mlb_transport || null,
-        intended_intake_thread_id:
-          (sendRoute as any).intended_intake_thread_id || null,
+        ...mlbExceptionRouteFields,
       },
       adapter,
       actor: args.actor,

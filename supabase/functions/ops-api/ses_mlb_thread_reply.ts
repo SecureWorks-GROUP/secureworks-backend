@@ -58,6 +58,36 @@ export function mlbPhysicalUsesOrdinaryMailSendFallback(): boolean {
   return MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1 === true;
 }
 
+/**
+ * Exception-only additions to the route_send external-effect payload.
+ *
+ * Returns `{}` for every route the exception does not govern (AJS/AJBR, the
+ * MLB invoice billing pack, and the locked group-thread shape). That emptiness
+ * is load-bearing: the effect payload is canonicalised into `payload_hash`,
+ * canonical JSON serialises explicit nulls, and `claim_ses_external_effect_v1`
+ * raises on content drift for an existing operation_key BEFORE it can report a
+ * confirmed effect or reconcile an unknown one. Stamping `mlb_transport: null`
+ * on an AJS route would therefore make a re-run of `execute` refuse a release
+ * that already sent.
+ */
+export function mlbOrdinaryMailSendEffectPayloadFields(
+  route: {
+    mlb_transport?: string | null;
+    in_reply_to_internet_message_id?: string | null;
+    intended_intake_thread_id?: string | null;
+  } | null | undefined,
+): Record<string, string | null> {
+  const transport = String(route?.mlb_transport || "").trim();
+  if (transport !== MLB_ORDINARY_MAIL_SEND_TRANSPORT) return {};
+  return {
+    in_reply_to_internet_message_id:
+      String(route?.in_reply_to_internet_message_id || "").trim() || null,
+    mlb_transport: MLB_ORDINARY_MAIL_SEND_TRANSPORT,
+    intended_intake_thread_id:
+      String(route?.intended_intake_thread_id || "").trim() || null,
+  };
+}
+
 export interface IntakeThreadSourceRow {
   case_id?: string | null;
   post_id?: string | null;
@@ -349,6 +379,10 @@ export function routingIntakeThread(
  * same routes stay ready without a thread id, clear reply_to_thread_id so the
  * gateway never calls app-unsupported group reply, and ride ordinary Mail.Send.
  * Intended thread coordinates remain as audit-only fields for restore.
+ *
+ * `useOrdinaryMailSendFallback` defaults to the module flag and exists so both
+ * branches stay covered: the locked shape must remain verifiable while the
+ * exception is live, otherwise flipping the flag back is an unproven change.
  */
 export function applyMlbThreadReplyToRoute<
   T extends {
@@ -366,6 +400,7 @@ export function applyMlbThreadReplyToRoute<
   route: T,
   shape: { builder_key?: unknown; family?: unknown },
   thread: IntakeThreadCoordinates | null,
+  useOrdinaryMailSendFallback: boolean = mlbPhysicalUsesOrdinaryMailSendFallback(),
 ): T {
   const requires = mlbRouteRequiresIntakeThreadReply(route.route_kind, shape);
   if (!requires) {
@@ -381,7 +416,7 @@ export function applyMlbThreadReplyToRoute<
   const internetMessageId = String(thread?.internet_message_id || "").trim();
 
   // Temporary Captain exception — ordinary Mail.Send (not the locked default).
-  if (mlbPhysicalUsesOrdinaryMailSendFallback()) {
+  if (useOrdinaryMailSendFallback) {
     return {
       ...route,
       // Must stay false so the gateway does not POST /groups/.../threads/.../reply.
