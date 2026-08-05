@@ -370,6 +370,55 @@ Deno.test(
 );
 
 Deno.test(
+  "an omitted materials_charge and a present null are different answers",
+  () => {
+    const base = {
+      selection: { mode: "job_number", job_number: "SWMS-26980" },
+      idempotency_key: "materials-charge-request-shape",
+      dry_run: true,
+    };
+    const omitted = normalizeSesPrepareRequest({ ...base });
+    assertEquals(Object.hasOwn(omitted, "materials_charge"), false);
+    assertEquals(Object.hasOwn(omitted, "materials_charge_cleared"), false);
+
+    const cleared = normalizeSesPrepareRequest({
+      ...base,
+      materials_charge: null,
+    });
+    assertEquals(cleared.materials_charge_cleared, true);
+    assertEquals(Object.hasOwn(cleared, "materials_charge"), false);
+
+    const charged = normalizeSesPrepareRequest({
+      ...base,
+      materials_charge: {
+        schema: "secureworks.makesafe.materials-charge-figure/v1",
+        amount_ex_gst: 65,
+        authorised_by: "captain@secureworksgroup.app",
+        authorised_at: "2026-08-05T02:00:00.000Z",
+        decision_key: "materials-figure-2026-08-05",
+        reason: "Operator commercial materials figure.",
+      },
+    });
+    assertEquals(charged.materials_charge?.amount_ex_gst, 65);
+    assertEquals(Object.hasOwn(charged, "materials_charge_cleared"), false);
+
+    // A withdrawal names one card, exactly like the figure it withdraws.
+    try {
+      normalizeSesPrepareRequest({
+        selection: { mode: "board_batch", limit: 5 },
+        idempotency_key: "materials-charge-batch-clear",
+        dry_run: true,
+        materials_charge: null,
+      });
+      throw new Error("expected batch clear rejection");
+    } catch (error) {
+      assert(error instanceof SesAssemblerAdapterError);
+      assertEquals(error.status, 400);
+    }
+  },
+);
+
+Deno.test(
   "public U4 request defaults sealed versions but requires explicit dry-run and one selector",
   () => {
     assertEquals(

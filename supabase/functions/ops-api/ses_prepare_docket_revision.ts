@@ -1831,8 +1831,9 @@ function validateRequest(request: SesPrepareRequest): void {
       throw new TypeError("board_batch requires limit between 1 and 50");
     }
     // One authorised materials figure describes one card's materials. Spreading
-    // it across a batch would bill cards nobody priced.
-    if (request.materials_charge) {
+    // it across a batch would bill cards nobody priced, and withdrawing across
+    // a batch would strip figures from cards nobody reviewed.
+    if (request.materials_charge || request.materials_charge_cleared) {
       throw new TypeError(
         "materials_charge requires a job_id or job_number selection",
       );
@@ -1871,17 +1872,31 @@ async function prepareOne(
   stagesMs.T0 = 0;
   const input = await measure("T1", () => deps.resolveInput(selection));
   const blockers = inputBlockers(input);
+  const matrix = resolveSesFamilyMatrixRow({
+    builder_key: input.classification.builder_key,
+    family: input.classification.family,
+    strata: input.classification.strata,
+    own_template_requested: input.classification.own_template_requested,
+    site_suburb: input.source.site_suburb,
+  });
   // An operator materials figure changes what the invoice says, so it belongs
   // inside the revision identity. Wrapping only when one is supplied keeps the
   // ordinary hash byte-identical, so no existing Docs Ready signoff is churned.
   //
-  // A prepare that omits the body figure inherits the one this card's latest
+  // A prepare that OMITS the body figure inherits the one this card's latest
   // revision already carries for the same attendance cycle and the same
   // recorded materials. The Captain answers once; a routine re-prepare must
-  // never quietly return the card to a labour-only proposal.
+  // never quietly return the card to a labour-only proposal. An EXPLICIT clear
+  // is the opposite answer and must never be swallowed by that inheritance.
+  // Inheritance is bounded to the basis whose pricing has a charge line at all,
+  // so a card reclassified onto another basis cannot carry a stale figure into
+  // a refusal the operator did not ask for.
   let operatorMaterialsCharge = request.materials_charge || null;
   if (
     !operatorMaterialsCharge &&
+    !request.materials_charge_cleared &&
+    matrix.ok &&
+    matrix.row.invoice_basis === "standard_labour_materials" &&
     deps.resolvePriorMaterialsCharge &&
     recordedMaterialsUsed(recordedMaterialsFact(input)).length > 0
   ) {
@@ -1906,13 +1921,6 @@ async function prepareOne(
     if (current) return current;
   }
 
-  const matrix = resolveSesFamilyMatrixRow({
-    builder_key: input.classification.builder_key,
-    family: input.classification.family,
-    strata: input.classification.strata,
-    own_template_requested: input.classification.own_template_requested,
-    site_suburb: input.source.site_suburb,
-  });
   stagesMs.T2 = 0;
   let applicabilityBlocker: SesBlocker | null = null;
   if (!matrix.ok) {

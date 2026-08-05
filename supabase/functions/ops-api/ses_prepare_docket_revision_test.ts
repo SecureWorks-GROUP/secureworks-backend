@@ -1845,7 +1845,7 @@ async function labourProposal(
   builderKey: string,
   family: string,
   hoursAndMaterials: Record<string, unknown>,
-  materialsCharge?: SesMaterialsChargeAuthorisation,
+  materialsCharge?: SesMaterialsChargeAuthorisation | "cleared",
   dependencyOverrides: Partial<SesPrepareDependencies> = {},
 ) {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
@@ -1856,7 +1856,11 @@ async function labourProposal(
   const result = (await prepareSesDocketRevision(
     {
       ...request(input.identity.job_id),
-      ...(materialsCharge ? { materials_charge: materialsCharge } : {}),
+      ...(materialsCharge === "cleared"
+        ? { materials_charge_cleared: true as const }
+        : materialsCharge
+        ? { materials_charge: materialsCharge }
+        : {}),
     },
     dependencies(input, dependencyOverrides),
   )).results[0];
@@ -2118,6 +2122,87 @@ Deno.test(
       reprepared.output_content_hash,
       answered.output_content_hash,
     );
+  },
+);
+
+Deno.test(
+  "an explicitly withdrawn figure is not inherited back",
+  async () => {
+    const materials = {
+      trades: 2,
+      hours_per_trade: 2,
+      rate_ex_gst: 85,
+      materials: [],
+      materials_used: ["Polycarb disposal / tipping"],
+    };
+    const answered = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      materials,
+      materialsChargeAuthorisation(65),
+    );
+    const priorCharge =
+      (answered.invoice_proposal as Record<string, unknown>).materials_charge;
+    let inheritanceConsulted = false;
+    const standingFigure = async () => {
+      inheritanceConsulted = true;
+      return priorCharge;
+    };
+
+    // Omitting the key inherits, so the withdrawal has something to withdraw.
+    const inherited = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      materials,
+      undefined,
+      { resolvePriorMaterialsCharge: standingFigure },
+    );
+    assert(inherited.invoice_proposal, "expected the inherited figure");
+
+    // An explicit clear is the opposite answer and must never be swallowed by
+    // that inheritance: the card returns to the honest question.
+    const cleared = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      materials,
+      "cleared",
+      { resolvePriorMaterialsCharge: standingFigure },
+    );
+    assertEquals(cleared.invoice_proposal, null);
+    assertEquals(
+      cleared.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_required"
+      ),
+      true,
+    );
+
+    // A card on another pricing basis inherits nothing, so a stale figure can
+    // never block a shape that has no materials charge line at all.
+    inheritanceConsulted = false;
+    const otherBasis = await labourProposal(
+      "MLB",
+      "temporary_fencing",
+      {
+        trades: 1,
+        hours_per_trade: 4,
+        rate_ex_gst: 85,
+        materials: [],
+        panel_count: 8,
+        base_count: 8,
+        star_picket_count: 0,
+        materials_used: ["Polycarb disposal / tipping"],
+      },
+      undefined,
+      { resolvePriorMaterialsCharge: standingFigure },
+    );
+    assertEquals(inheritanceConsulted, false);
+    assertEquals(
+      otherBasis.blockers.some((item) =>
+        item.reason_code.startsWith("materials_charge_figure")
+      ),
+      false,
+    );
+    assert(otherBasis.invoice_proposal, "temporary fencing still prices");
   },
 );
 

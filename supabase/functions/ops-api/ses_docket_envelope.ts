@@ -238,6 +238,12 @@ export interface SesPrepareRequest {
    * one revision id.
    */
   materials_charge?: SesMaterialsChargeAuthorisation;
+  /**
+   * The operator explicitly withdrew the figure this card was carrying. This
+   * is NOT the same state as omitting `materials_charge`, which inherits the
+   * standing figure — a withdrawn figure must never come back by inheritance.
+   */
+  materials_charge_cleared?: true;
 }
 
 export interface SesBlocker {

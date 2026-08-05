@@ -51,6 +51,26 @@ export interface SesMaterialsChargeAuthorisation {
   reason: string;
 }
 
+/**
+ * An operator withdrawing a figure they previously authorised.
+ *
+ * A cleared card is exactly a card that was never answered: it inherits
+ * nothing and returns to the honest `materials_charge_figure_required`
+ * question. "Not supplied" and "explicitly cleared" are different states and
+ * must never collapse into each other — treating a deliberate clear as absent
+ * would put a withdrawn figure back onto a builder invoice.
+ */
+export interface SesMaterialsChargeClearance {
+  cleared_by: string | null;
+  cleared_at: string | null;
+  decision_key: string | null;
+  reason: string | null;
+}
+
+export type SesMaterialsChargeDirective =
+  | { kind: "charge"; authorisation: SesMaterialsChargeAuthorisation }
+  | { kind: "cleared"; clearance: SesMaterialsChargeClearance };
+
 /** Validation error for materials-charge payloads (mapped to HTTP by callers). */
 export class SesMaterialsChargeAuthorisationError extends Error {
   readonly httpStatus: number;
@@ -149,7 +169,7 @@ export function parseSesMaterialsChargeAuthorisation(
   if (amount === null) {
     throw new SesMaterialsChargeAuthorisationError(
       400,
-      "materials_charge.amount_ex_gst must be a positive ex-GST figure. Do not send zero to clear the materials question.",
+      "materials_charge.amount_ex_gst must be a positive ex-GST figure. Send null, or amount_ex_gst 0 with the same authority fields, to withdraw a figure.",
     );
   }
   const authorised_by = requiredText(payload.authorised_by);
@@ -169,6 +189,62 @@ export function parseSesMaterialsChargeAuthorisation(
     authorised_at,
     decision_key,
     reason,
+  };
+}
+
+/**
+ * Read the operator's `materials_charge` body field, which the caller supplies
+ * only when the key is actually present. A present `null` — or an explicit
+ * zero carrying the same authority fields — withdraws the figure; anything
+ * else must be a positive authorised charge.
+ */
+export function parseSesMaterialsChargeDirective(
+  raw: unknown,
+): SesMaterialsChargeDirective {
+  if (raw === null) {
+    return {
+      kind: "cleared",
+      clearance: {
+        cleared_by: null,
+        cleared_at: null,
+        decision_key: null,
+        reason: null,
+      },
+    };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new SesMaterialsChargeAuthorisationError(
+      400,
+      "materials_charge must be an object carrying the ex-GST figure and who authorised it, or null to withdraw the figure.",
+    );
+  }
+  const payload = raw as Record<string, unknown>;
+  const amount = Number(payload.amount_ex_gst);
+  if (Number.isFinite(amount) && amount === 0) {
+    if (payload.schema !== SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA) {
+      throw new SesMaterialsChargeAuthorisationError(
+        400,
+        `materials_charge.schema must be ${SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA}.`,
+      );
+    }
+    const cleared_by = requiredText(payload.authorised_by);
+    const cleared_at = requiredText(payload.authorised_at);
+    const decision_key = requiredText(payload.decision_key);
+    const reason = requiredText(payload.reason);
+    if (!cleared_by || !cleared_at || !decision_key || !reason) {
+      throw new SesMaterialsChargeAuthorisationError(
+        400,
+        "Withdrawing a materials charge with amount_ex_gst 0 requires authorised_by, authorised_at, decision_key and reason so the withdrawal stays attributable. Send materials_charge null for an unattributed clear.",
+      );
+    }
+    return {
+      kind: "cleared",
+      clearance: { cleared_by, cleared_at, decision_key, reason },
+    };
+  }
+  return {
+    kind: "charge",
+    authorisation: parseSesMaterialsChargeAuthorisation(raw),
   };
 }
 
@@ -239,6 +315,14 @@ export const MATERIALS_CHARGE_OPERATOR_PATH =
   `Re-run prepare_ses_docket_revision for this one card (selection.mode job_id or job_number) with body materials_charge = { schema: "${SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA}", amount_ex_gst, authorised_by, authorised_at, decision_key, reason }. That is an operator commercial figure and writes no trade evidence.`;
 
 /**
+ * How an operator withdraws a figure a previous revision carries. Named on
+ * every refusal that a still-standing figure causes, so the instruction is
+ * always one the operator can actually follow.
+ */
+export const MATERIALS_CHARGE_CLEAR_PATH =
+  "Withdraw the standing figure by re-running prepare_ses_docket_revision for this one card with body materials_charge = null (or amount_ex_gst 0 with authorised_by, authorised_at, decision_key and reason to record who withdrew it). Omitting the field inherits the standing figure; only an explicit clear removes it.";
+
+/**
  * Decide whether a standard_labour_materials proposal needs a materials charge
  * line, already has one (via priced typed materials), can accept the operator's
  * one-figure answer, or must refuse.
@@ -266,7 +350,7 @@ export function decideStandardLabourMaterialsCharge(input: {
         reason:
           `A materials charge of $${charge.amount_ex_gst} ex GST was authorised but this card records no materials used, so there is nothing the charge describes.`,
         recovery_action:
-          "Drop materials_charge and let the card price labour only, or recover the trade's materials-used evidence first. Never bill a figure the report cannot show.",
+          `Let the card price labour only, or recover the trade's materials-used evidence first. Never bill a figure the report cannot show. ${MATERIALS_CHARGE_CLEAR_PATH}`,
       };
     }
     if (alreadyPriced) {
@@ -277,7 +361,7 @@ export function decideStandardLabourMaterialsCharge(input: {
         reason:
           `A materials charge of $${charge.amount_ex_gst} ex GST was authorised while the proposal already prices ${input.priced_materials_line_count} materials line(s), so the charge would either double-bill or be dropped.`,
         recovery_action:
-          "Choose one: keep the typed priced materials lines and drop materials_charge, or remove the typed lines and bill the single authorised figure.",
+          `Choose one: keep the typed priced materials lines and withdraw the figure, or remove the typed lines and bill the single authorised figure. ${MATERIALS_CHARGE_CLEAR_PATH}`,
       };
     }
     const joined = materials.join("; ");

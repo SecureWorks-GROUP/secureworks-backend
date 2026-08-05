@@ -9,6 +9,7 @@ import {
   MATERIALS_CHARGE_FIGURE_REQUIRED,
   MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
   parseSesMaterialsChargeAuthorisation,
+  parseSesMaterialsChargeDirective,
   positiveMaterialsChargeExGst,
   recordedMaterialsUsed,
   SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
@@ -225,6 +226,63 @@ Deno.test("a committed figure is inherited only for the materials it names", () 
     }),
     null,
   );
+});
+
+Deno.test("a present null and an attributed zero both withdraw the figure", () => {
+  assertEquals(parseSesMaterialsChargeDirective(null), {
+    kind: "cleared",
+    clearance: {
+      cleared_by: null,
+      cleared_at: null,
+      decision_key: null,
+      reason: null,
+    },
+  });
+  assertEquals(
+    parseSesMaterialsChargeDirective({
+      ...authorisation(0),
+      reason: "Materials were billed on the other card.",
+    }),
+    {
+      kind: "cleared",
+      clearance: {
+        cleared_by: "captain@secureworksgroup.app",
+        cleared_at: "2026-08-05T02:00:00.000Z",
+        decision_key: "materials-figure-2026-08-05-swms-261065",
+        reason: "Materials were billed on the other card.",
+      },
+    },
+  );
+  assertEquals(parseSesMaterialsChargeDirective(authorisation(65)), {
+    kind: "charge",
+    authorisation: authorisation(65),
+  });
+  // An unattributed zero is neither a figure nor a recorded withdrawal.
+  assertThrows(
+    () =>
+      parseSesMaterialsChargeDirective({
+        ...authorisation(0),
+        decision_key: "",
+      }),
+    SesMaterialsChargeAuthorisationError,
+  );
+});
+
+Deno.test("every refusal a standing figure causes names the clear path", () => {
+  const nothingRecorded = decideStandardLabourMaterialsCharge({
+    materials_used: ["Other / none"],
+    operator_charge: authorisation(65),
+    priced_materials_line_count: 0,
+  });
+  const alreadyPriced = decideStandardLabourMaterialsCharge({
+    materials_used: ["Tarps"],
+    operator_charge: authorisation(65),
+    priced_materials_line_count: 1,
+  });
+  for (const decision of [nothingRecorded, alreadyPriced]) {
+    if (decision.action !== "refuse") throw new Error("expected a refusal");
+    assertStringIncludes(decision.recovery_action, "materials_charge = null");
+  }
 });
 
 Deno.test("an unattributable or non-positive materials figure is refused at the door", () => {

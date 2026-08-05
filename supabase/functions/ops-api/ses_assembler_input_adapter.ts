@@ -28,9 +28,9 @@ import {
 } from "./ses_family_matrix.ts";
 import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
 import {
-  parseSesMaterialsChargeAuthorisation,
-  type SesMaterialsChargeAuthorisation,
+  parseSesMaterialsChargeDirective,
   SesMaterialsChargeAuthorisationError,
+  type SesMaterialsChargeDirective,
 } from "./ses_materials_charge_guard.ts";
 import {
   type ApprovedDraftThreadCandidate,
@@ -3238,8 +3238,9 @@ export function createSesAssemblerRuntimeDependencies(
           .select("id,local_invoice_proposal,committed_at")
           .eq("job_id", job_id)
           .eq("current_attendance_cycle_id", attendance_cycle_id)
+          .not("local_invoice_proposal->materials_charge", "is", null)
           .order("committed_at", { ascending: false })
-          .limit(10),
+          .limit(1),
         "makesafe_docket_revisions.materials_charge",
       );
       for (const row of rows) {
@@ -3309,8 +3310,10 @@ export function normalizeSesPrepareRequest(
   }
   // Operator answer to `materials_charge_figure_required`. One authorised
   // figure describes ONE card's materials, so a board batch can never carry it.
-  let materialsCharge: SesMaterialsChargeAuthorisation | null = null;
-  if (body?.materials_charge != null) {
+  // Presence of the KEY is what is read: a present null withdraws the standing
+  // figure, while omitting the key inherits it. The two are different answers.
+  let materialsCharge: SesMaterialsChargeDirective | null = null;
+  if (Object.hasOwn(record(body), "materials_charge")) {
     if (mode !== "job_id" && mode !== "job_number") {
       throw new SesAssemblerAdapterError(
         "ses_materials_charge_selection_invalid",
@@ -3319,7 +3322,7 @@ export function normalizeSesPrepareRequest(
       );
     }
     try {
-      materialsCharge = parseSesMaterialsChargeAuthorisation(
+      materialsCharge = parseSesMaterialsChargeDirective(
         body.materials_charge,
       );
     } catch (error) {
@@ -3339,7 +3342,12 @@ export function normalizeSesPrepareRequest(
       : mode === "job_number"
       ? { mode, job_number: jobNumber }
       : { mode: "board_batch", limit },
-    ...(materialsCharge ? { materials_charge: materialsCharge } : {}),
+    ...(materialsCharge?.kind === "charge"
+      ? { materials_charge: materialsCharge.authorisation }
+      : {}),
+    ...(materialsCharge?.kind === "cleared"
+      ? { materials_charge_cleared: true as const }
+      : {}),
     idempotency_key: idempotencyKey,
     assembler_version: SES_ASSEMBLER_VERSION,
     dry_run: body.dry_run,
