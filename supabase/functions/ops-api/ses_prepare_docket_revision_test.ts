@@ -2995,7 +2995,7 @@ function photoHeavyInput(
 }
 
 function photoBytesDependencies(
-  input: SesAssemblerInputV1,
+  _input: SesAssemblerInputV1,
   sizeBytes: number,
   persistCalls: { count: number },
 ): Partial<SesPrepareDependencies> {
@@ -3031,7 +3031,10 @@ Deno.test("prepare blocks an AJS photo pack over the Exchange message ceiling an
   const persistCalls = { count: 0 };
   const result = (await prepareSesDocketRevision(
     request(input.identity.job_id, false),
-    dependencies(input, photoBytesDependencies(input, 18 * 1024 * 1024, persistCalls)),
+    dependencies(
+      input,
+      photoBytesDependencies(input, 18 * 1024 * 1024, persistCalls),
+    ),
   )).results[0];
 
   const blocker = result.blockers.find((item) =>
@@ -3050,9 +3053,8 @@ Deno.test("prepare blocks an AJS photo pack over the Exchange message ceiling an
   assertEquals(object(blocker.facts).photo_cull, false);
   // Every original photo survives the refusal; nothing is dropped or resized.
   assertEquals(
-    result.artifacts.filter((artifact) =>
-      artifact.role === "completion_photo"
-    ).length,
+    result.artifacts.filter((artifact) => artifact.role === "completion_photo")
+      .length,
     2,
   );
   assertEquals(
@@ -3079,7 +3081,10 @@ Deno.test("prepare allows the same AJS pack once it fits, proving the guard is s
   const persistCalls = { count: 0 };
   const result = (await prepareSesDocketRevision(
     request(input.identity.job_id, false),
-    dependencies(input, photoBytesDependencies(input, 8 * 1024 * 1024, persistCalls)),
+    dependencies(
+      input,
+      photoBytesDependencies(input, 8 * 1024 * 1024, persistCalls),
+    ),
   )).results[0];
 
   assertEquals(
@@ -3103,7 +3108,10 @@ Deno.test("prepare blocks an MLB group-thread photo over the 3 MiB per-file post
   const persistCalls = { count: 0 };
   const result = (await prepareSesDocketRevision(
     request(input.identity.job_id, false),
-    dependencies(input, photoBytesDependencies(input, 4 * 1024 * 1024, persistCalls)),
+    dependencies(
+      input,
+      photoBytesDependencies(input, 4 * 1024 * 1024, persistCalls),
+    ),
   )).results[0];
 
   const blocker = result.blockers.find((item) =>

@@ -1238,9 +1238,9 @@ have no upload session and inline base64). Per-file ceilings compare RAW bytes;
 the 35 MB message ceiling compares the **base64-encoded** total on BOTH
 transports, because mail travels MIME-encoded — comparing raw there passed the
 measured 51-photo / 33.5 MB pack (~42.6 MiB encoded) that Exchange would reject.
-AJS photo uses the sequential
-per-file `uploadAttachment` loop in `ses_graph_mail_gateway.ts`; MLB photo is
-one group-thread reply. **Never cull, downscale, or re-encode photos to fit** —
+AJS photo uses the sequential per-file `uploadAttachment` loop in
+`ses_graph_mail_gateway.ts`; MLB photo is one group-thread reply.
+**Never cull, downscale, or re-encode photos to fit** —
 a pack over the ceiling is an honest blocker/refusal, not a shortened pack.
 Multi-email split is a Captain recommendation only, not implemented here.
 Evidence + measure script: `docs/evidence/ses-photo-mail-volume-guard-2026-08-05.md`,

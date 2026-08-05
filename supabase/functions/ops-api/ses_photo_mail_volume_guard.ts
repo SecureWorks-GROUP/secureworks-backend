@@ -36,7 +36,7 @@
 
 import type { SesBlocker } from "./ses_docket_envelope.ts";
 import { mlbRouteRequiresIntakeThreadReply } from "./ses_mlb_thread_reply.ts";
-import { sesRefusal, type SesRefusal } from "./ses_reporting_refusals.ts";
+import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
 
 /** 3 MiB — Graph direct fileAttachment POST (message, event, group post). */
 export const GRAPH_ATTACHMENT_DIRECT_POST_MAX_BYTES = 3 * 1024 * 1024;

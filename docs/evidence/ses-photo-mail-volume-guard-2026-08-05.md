@@ -73,6 +73,15 @@ observation as the working distribution; do not invent percentiles.
 | Default Exchange Online message size | **35 MB** (tenant may raise to 150 MB) | Whole message (body + attachments) | Noted on createUploadSession docs |
 | Group thread reply | **No upload session**; attachments inlined as `contentBytes` on `POST /groups/{id}/threads/{id}/reply`; **per file under 3 MB** | MLB physical report/photo intake-thread replies | [post-post-attachments](https://learn.microsoft.com/en-us/graph/api/post-post-attachments) + our `sendGroupThreadReply` |
 
+Units: Microsoft documents these ceilings in decimal MB; the guard's constants
+(`GRAPH_DEFAULT_MESSAGE_SIZE_LIMIT_BYTES`,
+`GRAPH_ATTACHMENT_DIRECT_POST_MAX_BYTES`,
+`GRAPH_ATTACHMENT_UPLOAD_SESSION_MAX_BYTES`) implement them as binary MiB
+(35 MiB = 36.7 MB, 3 MiB, 150 MiB), so the message ceiling is ~5% more generous
+than the documented figure. That slack is inside the unmeasured tenant-specific
+limit, not a licence to raise it; do not re-scale a constant without a live
+measurement.
+
 **AJS photo route** = admin@ **user mailbox** draft → sequential
 `uploadAttachment` → send. Per-file can use upload sessions; **message total**
 still bound by the 35 MB default unless the tenant is raised, and that total is

@@ -243,8 +243,7 @@ async function main() {
 
   if (Deno.args.includes("--write")) {
     const day = new Date().toISOString().slice(0, 10);
-    const path =
-      `docs/evidence/ses-photo-mail-volume-measure-${day}.json`;
+    const path = `docs/evidence/ses-photo-mail-volume-measure-${day}.json`;
     await Deno.writeTextFile(path, JSON.stringify(report, null, 2) + "\n");
     console.error(`wrote ${path}`);
   }

@@ -1,4 +1,3 @@
-// deno-lint-ignore-file no-explicit-any
 import {
   assert,
   assertEquals,
@@ -8,8 +7,8 @@ import {
 import {
   assertSesPhotoMailVolumeFits,
   base64EncodedLength,
-  evaluateSesPhotoMailVolume,
   estimateAttachmentGraphCalls,
+  evaluateSesPhotoMailVolume,
   formatByteCount,
   GRAPH_ATTACHMENT_DIRECT_POST_MAX_BYTES,
   GRAPH_ATTACHMENT_UPLOAD_SESSION_MAX_BYTES,
@@ -23,7 +22,10 @@ import {
 import { mlbRouteRequiresIntakeThreadReply } from "./ses_mlb_thread_reply.ts";
 import { createSesGraphMailGateway } from "./ses_graph_mail_gateway.ts";
 
-function nBytes(n: number, name = "photo.jpg"): { name: string; size_bytes: number } {
+function nBytes(
+  n: number,
+  name = "photo.jpg",
+): { name: string; size_bytes: number } {
   return { name, size_bytes: n };
 }
 
@@ -121,8 +123,9 @@ Deno.test("user mailbox: ~31 MiB raw over 70 photos refuses once base64-encoded"
   // Raw fits under 35 MiB, but the wire form (base64) is ~41.3 MiB, and
   // Exchange enforces its message-size limit on the MIME-encoded message.
   const per = Math.floor((31 * 1024 * 1024) / 70);
-  const attachments = Array.from({ length: 70 }, (_, i) =>
-    nBytes(per, `photo-${i + 1}.jpg`)
+  const attachments = Array.from(
+    { length: 70 },
+    (_, i) => nBytes(per, `photo-${i + 1}.jpg`),
   );
   const verdict = evaluateSesPhotoMailVolume(attachments, "user_mailbox");
   assertEquals(verdict.ok, false);
@@ -145,8 +148,9 @@ Deno.test("user mailbox: the measured 51-photo / 33.5 MB pin refuses on encoded 
   // Prior storage.objects pin (not re-measured this session): 51 files,
   // 33.5 MB raw -> ~44.7 MB base64, over the 35 MiB documented ceiling.
   const per = Math.floor((33.5 * 1000 * 1000) / 51);
-  const attachments = Array.from({ length: 51 }, (_, i) =>
-    nBytes(per, `photo-${i + 1}.jpg`)
+  const attachments = Array.from(
+    { length: 51 },
+    (_, i) => nBytes(per, `photo-${i + 1}.jpg`),
   );
   const verdict = evaluateSesPhotoMailVolume(attachments, "user_mailbox");
   assertEquals(verdict.ok, false);
@@ -168,8 +172,9 @@ Deno.test("user mailbox: the measured 51-photo / 33.5 MB pin refuses on encoded 
 Deno.test("user mailbox: a pack that still fits once encoded passes", () => {
   // 24 MiB raw -> 32 MiB base64, under the 35 MiB ceiling.
   const per = Math.floor((24 * 1024 * 1024) / 48);
-  const attachments = Array.from({ length: 48 }, (_, i) =>
-    nBytes(per, `photo-${i + 1}.jpg`)
+  const attachments = Array.from(
+    { length: 48 },
+    (_, i) => nBytes(per, `photo-${i + 1}.jpg`),
   );
   const verdict = evaluateSesPhotoMailVolume(attachments, "user_mailbox");
   assertEquals(verdict.ok, true);
@@ -279,14 +284,17 @@ Deno.test("group thread: base64 wire size over message ceiling refuses", () => {
   // Many small files whose base64 sum exceeds 35 MiB
   const per = 500 * 1024; // 500 KiB each, under 3 MiB
   const count = 80; // 40 MiB raw → ~53 MiB base64
-  const many = Array.from({ length: count }, (_, i) =>
-    nBytes(per, `p${i}.jpg`)
+  const many = Array.from(
+    { length: count },
+    (_, i) => nBytes(per, `p${i}.jpg`),
   );
   const manyVerdict = evaluateSesPhotoMailVolume(many, "group_thread_reply");
   assertEquals(manyVerdict.ok, false);
   if (!manyVerdict.ok) {
     assertEquals(manyVerdict.exceeded, "message_total");
-    assert(manyVerdict.total_base64_bytes > GRAPH_DEFAULT_MESSAGE_SIZE_LIMIT_BYTES);
+    assert(
+      manyVerdict.total_base64_bytes > GRAPH_DEFAULT_MESSAGE_SIZE_LIMIT_BYTES,
+    );
   }
 });
 
