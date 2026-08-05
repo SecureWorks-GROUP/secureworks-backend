@@ -172,6 +172,107 @@ Deno.test("unknown invoice outcome reconciles original token and never redispatc
   assertEquals(resumed.dispatched, false);
 });
 
+Deno.test(
+  "unknown route_send (Maylands class) reconciles and never redispatches the exact token",
+  async () => {
+    // Mirrors release adbfa921 report effect SES-94343b5e-…: after graph_outcome_unknown,
+    // a second execute of the SAME operation_key must reconcile only — never call Graph again.
+    const store = new MemoryEffectStore();
+    let dispatches = 0;
+    let reconcileMatches: Array<{ message_id: string }> = [];
+    const effect = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "adbfa921-5c98-5dd4-8e36-b3aa6e6a9fff",
+      route_kind: "report",
+      payload: {
+        subject: "MLB-26267 - physical makesafe",
+        recipients: ["makesafes@mlbuilders.com.au"],
+      },
+    });
+    const adapter = {
+      async dispatch() {
+        dispatches++;
+        throw new Error(
+          "Microsoft Graph 403: ErrorAccessDenied (conversationThread:reply)",
+        );
+      },
+      reconcile() {
+        return Promise.resolve(reconcileMatches);
+      },
+      identify(result: { message_id: string }) {
+        return result.message_id;
+      },
+      digest(result: { message_id: string }) {
+        return result;
+      },
+    };
+
+    const first = await executeSesExternalEffect({
+      store,
+      effect,
+      payload: { subject: "MLB-26267 - physical makesafe" },
+      adapter,
+      actor: "operator-1",
+    });
+    assertEquals(first.state, "refused");
+    assertEquals(first.effect.state, "unknown");
+    assertEquals(first.dispatched, true);
+    assertEquals(first.refusal?.code, "graph_outcome_unknown");
+    assert(String(first.refusal?.fact || "").includes("403"));
+
+    // Reconcile finds nothing (thread still has only the original WO post).
+    const stuck = await executeSesExternalEffect({
+      store,
+      effect,
+      payload: { subject: "MLB-26267 - physical makesafe" },
+      adapter,
+      actor: "operator-1",
+    });
+    assertEquals(stuck.state, "refused");
+    assertEquals(stuck.dispatched, false);
+    assertEquals(dispatches, 1, "exact-once: must not re-call Graph dispatch");
+    assertEquals(stuck.refusal?.code, "graph_outcome_unknown");
+
+    // Later human/Sent Items proof of the original token may confirm without redispatch.
+    reconcileMatches = [{ message_id: "sent-after-manual-proof" }];
+    const confirmed = await executeSesExternalEffect({
+      store,
+      effect,
+      payload: { subject: "MLB-26267 - physical makesafe" },
+      adapter,
+      actor: "operator-1",
+    });
+    assertEquals(confirmed.state, "confirmed");
+    assertEquals(confirmed.dispatched, false);
+    assertEquals(dispatches, 1);
+  },
+);
+
+Deno.test(
+  "a fresh release revision gets a new route_send operation_key (not the stuck token)",
+  async () => {
+    // Identity includes release_revision_id: re-preparing a new release is a
+    // different exact-once coordinate. The stuck adbfa921 report token is never reused.
+    const stuck = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "adbfa921-5c98-5dd4-8e36-b3aa6e6a9fff",
+      route_kind: "report",
+      payload: { subject: "MLB-26267 - physical makesafe" },
+    });
+    const fresh = await buildSesEffect({
+      org_id: "00000000-0000-4000-8000-000000000001",
+      effect_kind: "route_send",
+      release_revision_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      route_kind: "report",
+      payload: { subject: "MLB-26267 - physical makesafe" },
+    });
+    assert(stuck.operation_key !== fresh.operation_key);
+    assert(stuck.external_token !== fresh.external_token);
+  },
+);
+
 Deno.test("direct token reconcile finds an existing Xero invoice before dispatch", async () => {
   const store = new MemoryEffectStore();
   let dispatches = 0;

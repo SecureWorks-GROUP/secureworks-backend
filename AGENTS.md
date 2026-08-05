@@ -1208,23 +1208,26 @@ order lives in `ses_release_route_shape.ts`. Apply
 `ops-api` (widens `route_kind` and allows two-route `commit_ses_release_revision_v1`).
 
 MLB physical (Captain 2026-08-05 / Maylands): three routes, two destinations —
-`report` and `photo` as **replies on the ses@ group intake thread** (thread_id
-plumbed onto docket `envelope.v2.routing.intake_thread_id` via
+`report` / `photo` / `invoice` order. **Locked design** is report+photo as
+replies on the ses@ group intake thread (`intake_thread_id` via
 `ses_mlb_thread_reply.ts`); `invoice` is the billing pack to `makesafes@`
-carrying report + AUTHORISED invoice + SWMS (finance@ cc, no ses@). Thread
-coordinate authority: (1) `makesafe_intake_case_sources` whenever any source
-row exists for the job's cases — never outranked; (2) only when case_sources
-is **empty**, recover from the job's approved `makesafe_intake_drafts` row via
-`emails` on `post_id = graph_message_id`, and only when
-`approved_job_id === job.id` and the email join carries a real `thread_id`
-(`resolveIntakeThreadCoordinates` / Captain B, Maylands sourceless case).
-Selection inside tier 2 is corroboration, never recency (Captain option C): one
-distinct proven thread_id wins; several are narrowed to the primary intake
-case story's `story_json[].sourcePostId`; anything still ambiguous refuses. Do
-not repoint append-only case_sources. Missing thread_id still refuses
-report/photo (`intake_thread_reply_unavailable`) rather than opening a new
-thread. AJS shape is untouched. Report-only MLB families keep the legacy
-non-threaded split.
+(report + AUTHORISED invoice + SWMS, finance@ cc). Thread coordinate authority
+is unchanged: case_sources first; empty sources may recover via approved draft
+→ emails; corroboration not recency. AJS shape is untouched. Report-only MLB
+families keep the legacy non-threaded split.
+
+**TEMPORARY CAPTAIN EXCEPTION (2026-08-05):** Microsoft marks
+`conversationThread: reply` as Application: Not supported, so app-only Graph
+403s on group-thread reply (Maylands first live failure). While
+`MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1` is true in `ses_mlb_thread_reply.ts`,
+report and photo use ordinary admin@ `Mail.Send` (draft → send → Sent Items proof
+by `x-secureworks-ses-operation`), same transport as Munster/invoice. Routes stamp
+`mlb_transport: ordinary_mail_send_captain_exception_v1` and keep intended thread
+ids as audit-only. Optional RFC `In-Reply-To` is best-effort only — never block
+send. This is **not** the silent default; flip the flag false to restore locked
+thread-reply once a supported auth model exists. A stuck `unknown` route_send
+effect is exact-once (reconcile only, never redispatch); a new release revision
+gets a new operation_key. Do not soften `graph_outcome_unknown`.
 
 Closeout proof hashes are a **set**, not a route-kind-ordered array: apply
 `20260805010000_ses_closeout_proof_hash_set_compare.sql` before the matching

@@ -529,9 +529,12 @@ export function resolveDocketRoutes(
   });
 
   if (!ajs) {
-    // MLB physical (Captain 2026-08-05): report + photo must reply on the intake
-    // thread. Billing (invoice) stays a new message to makesafes@ with
-    // report + SWMS + AUTHORISED invoice. Missing thread_id → not ready.
+    // MLB physical (Captain 2026-08-05 locked shape): report + photo reply on
+    // the intake thread; invoice is ordinary makesafes@ billing pack.
+    // TEMPORARY exception (MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1): report
+    // and photo also use ordinary Mail.Send because conversationThread:reply
+    // is Application: Not supported. applyMlbThreadReplyToRoute stamps the
+    // exception transport visibly; restore by flipping that flag.
     const classification = object(object(object(docket.envelope).v2).classification);
     const family = String(
       classification.family || object(docket.review_spec).family || "",
@@ -4437,8 +4440,11 @@ export async function executeSesReleaseRevisionAction(
         );
       }
     }
-    // MLB physical report/photo: stamp intake-thread reply coordinates and
-    // refuse when the thread id is missing. Never open a quiet new thread.
+    // MLB physical report/photo: stamp transport. Locked shape requires intake
+    // thread reply and refuses a quiet new thread. Under the temporary Captain
+    // ordinary-mail exception, requires_thread_reply stays false and routes
+    // use admin@ Mail.Send with Sent Items header proof (see
+    // MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1).
     const sendRoute = applyMlbThreadReplyToRoute(
       {
         ...route,
@@ -4482,6 +4488,11 @@ export async function executeSesReleaseRevisionAction(
         reply_to_thread_id: sendRoute.reply_to_thread_id || null,
         reply_to_graph_message_id: sendRoute.reply_to_graph_message_id || null,
         requires_thread_reply: sendRoute.requires_thread_reply === true,
+        in_reply_to_internet_message_id:
+          (sendRoute as any).in_reply_to_internet_message_id || null,
+        mlb_transport: (sendRoute as any).mlb_transport || null,
+        intended_intake_thread_id:
+          (sendRoute as any).intended_intake_thread_id || null,
       },
     });
     const adapter: SesExternalAdapter<
@@ -4506,6 +4517,11 @@ export async function executeSesReleaseRevisionAction(
         reply_to_thread_id: sendRoute.reply_to_thread_id || null,
         reply_to_graph_message_id: sendRoute.reply_to_graph_message_id || null,
         requires_thread_reply: sendRoute.requires_thread_reply === true,
+        in_reply_to_internet_message_id:
+          (sendRoute as any).in_reply_to_internet_message_id || null,
+        mlb_transport: (sendRoute as any).mlb_transport || null,
+        intended_intake_thread_id:
+          (sendRoute as any).intended_intake_thread_id || null,
       },
       adapter,
       actor: args.actor,

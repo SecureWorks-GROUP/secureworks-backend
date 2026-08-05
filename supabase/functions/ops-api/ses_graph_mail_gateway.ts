@@ -278,13 +278,38 @@ async function listFolderMessagesForReconcile(
   return await hydrateOperationHeaders(graphJson, mailbox, listed);
 }
 
+/**
+ * Best-effort RFC In-Reply-To / References when an internetMessageId is known.
+ * Never required for send; absence must not block ordinary Mail.Send.
+ * Graph draft create accepts these as internetMessageHeaders (same carrier as
+ * the SES operation token). This does not prove a client will thread the mail.
+ */
+export function sesOptionalThreadingHeaders(
+  inReplyToInternetMessageId: unknown,
+): Array<{ name: string; value: string }> {
+  const mid = String(inReplyToInternetMessageId || "").trim();
+  if (!mid) return [];
+  // Normalize to angle-bracket form when callers pass a bare id.
+  const value = mid.startsWith("<") ? mid : `<${mid}>`;
+  return [
+    { name: "In-Reply-To", value },
+    { name: "References", value },
+  ];
+}
+
 function draftMessagePayload(
   route: Record<string, any>,
   subject: string,
   html: string,
   externalToken: string,
 ): Record<string, unknown> {
-  const headers = sesOperationInternetMessageHeaders(externalToken);
+  const headers = [
+    ...sesOperationInternetMessageHeaders(externalToken),
+    ...sesOptionalThreadingHeaders(
+      route.in_reply_to_internet_message_id ||
+        route.threading_internet_message_id,
+    ),
+  ];
   return {
     subject,
     body: { contentType: "HTML", content: html },
@@ -342,10 +367,12 @@ async function resolveSesIntakeGroupId(
  * Creates a draft on admin@, checkpoints the draft id, attaches bytes, sends,
  * then proves the message in Sent Items by the SES operation header.
  *
- * MLB physical report/photo: when reply_to_thread_id is set, posts a reply on
- * the ses@ M365 group intake thread (conversationThread: reply). That path
- * never falls through to a new admin@ thread. requires_thread_reply without a
- * thread id refuses.
+ * Group-thread reply (locked MLB report/photo intent): only when
+ * `requires_thread_reply === true` AND a thread id is present. Microsoft does
+ * not support conversationThread:reply under application permissions, so the
+ * temporary Captain exception (ordinary Mail.Send for MLB report/photo) must
+ * leave `requires_thread_reply` false and must not set reply_to_thread_id.
+ * A bare thread id without requires_thread_reply must never force the group path.
  */
 export function createSesGraphMailGateway(
   deps: SesGraphMailGatewayDeps,
@@ -501,8 +528,9 @@ export function createSesGraphMailGateway(
           "Route requires an intake-thread reply but reply_to_thread_id is missing; refusing to open a new thread",
         );
       }
-      if (threadId) {
-        // MLB physical report/photo: reply on the ses@ group intake thread.
+      // Only the locked group-thread shape enters here. Ordinary Mail.Send
+      // (including the MLB Captain exception) must not set requires_thread_reply.
+      if (requiresThread && threadId) {
         return await sendGroupThreadReply(
           route,
           context,
@@ -512,10 +540,14 @@ export function createSesGraphMailGateway(
         );
       }
 
+      // Ordinary draft→send path (AJS packs, MLB invoice, MLB report/photo under
+      // the temporary ordinary-mail Captain exception). Stamps
+      // x-secureworks-ses-operation and proves via admin@ Sent Items.
+      // Optional In-Reply-To is best-effort only — never required to send.
+      // Do NOT createReply with a group post id; only a known user-mailbox
+      // Graph message id may use createReply (explicit flag).
       const replyToId = String(
-        route.reply_to_graph_message_id ||
-          route.in_reply_to_graph_message_id ||
-          "",
+        route.reply_to_user_mailbox_message_id || "",
       ).trim();
       const messageBody = draftMessagePayload(
         route,
@@ -526,8 +558,6 @@ export function createSesGraphMailGateway(
 
       let message: any;
       if (replyToId) {
-        // Optional mailbox createReply when a user-mailbox message id is known
-        // (not the group post id). Prefer thread_id for intake replies.
         message = await deps.graphJson(
           `https://graph.microsoft.com/v1.0/users/${
             encodeURIComponent(mailbox)

@@ -6,9 +6,10 @@
 //
 // Captain ruling 2026-08-05 (MLB physical / Maylands):
 //   three emails, two destinations — still route_kind order report/photo/invoice:
-//   1. report  — report-only reply on the intake thread (thread_id required)
-//   2. photo   — photos-only reply on the same thread (thread_id required)
+//   1. report  — report-only (locked: intake-thread reply; TEMP exception: ordinary Mail.Send)
+//   2. photo   — photos-only (same transport as report)
 //   3. invoice — billing pack to makesafes@ (report + AUTHORISED invoice + SWMS)
+//   Exception flag: MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1 in ses_mlb_thread_reply.ts
 //   AJS shape is untouched.
 
 import type { SesRouteKind } from "./ses_review_cockpit.ts";
