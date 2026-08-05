@@ -3,6 +3,9 @@ import {
   applyMlbThreadReplyToRoute,
   isMlbBuilderKey,
   isMlbPhysicalReleaseShape,
+  MLB_ORDINARY_MAIL_SEND_TRANSPORT,
+  MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1,
+  mlbPhysicalUsesOrdinaryMailSendFallback,
   mlbRouteRequiresIntakeThreadReply,
   pickIntakeThreadCoordinates,
   pickIntakeThreadFromApprovedDraft,
@@ -371,44 +374,69 @@ Deno.test("resolveIntakeThreadCoordinates: empty sources and no draft still refu
   );
 });
 
-Deno.test("applyMlbThreadReplyToRoute refuses ready without thread", () => {
-  const report = applyMlbThreadReplyToRoute(
-    {
-      route_kind: "report",
-      ready: true,
-      recipients: ["site@mlb.example"],
-      subject: "R",
-      body: "B",
-      attachment_hashes: ["h1"],
-    } as any,
-    { builder_key: "MLB", family: "physical_makesafe" },
-    null,
-  );
-  assertEquals(report.requires_thread_reply, true);
-  assertEquals(report.ready, false);
-  assertEquals(report.reply_to_thread_id, null);
+Deno.test(
+  "Captain ordinary-mail exception is visible and active for tonight's path",
+  () => {
+    // The locked design remains group-thread reply; this flag is the stopgap.
+    assertEquals(MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1, true);
+    assertEquals(mlbPhysicalUsesOrdinaryMailSendFallback(), true);
+  },
+);
 
-  const stamped = applyMlbThreadReplyToRoute(
-    {
-      route_kind: "photo",
-      ready: true,
-      recipients: ["site@mlb.example"],
-      subject: "P",
-      body: "B",
-      attachment_hashes: ["h2"],
-    } as any,
-    { builder_key: "MLB", family: "physical_makesafe" },
-    {
-      thread_id: "thread-1",
-      post_id: "post-1",
-      conversation_id: null,
-      case_id: "c1",
-    },
-  );
-  assertEquals(stamped.ready, true);
-  assertEquals(stamped.reply_to_thread_id, "thread-1");
-  assertEquals(stamped.reply_to_graph_message_id, "post-1");
-});
+Deno.test(
+  "applyMlbThreadReplyToRoute under Captain exception uses ordinary Mail.Send",
+  () => {
+    assertEquals(mlbPhysicalUsesOrdinaryMailSendFallback(), true);
+
+    // Missing thread no longer blocks readiness under the exception.
+    const report = applyMlbThreadReplyToRoute(
+      {
+        route_kind: "report",
+        ready: true,
+        recipients: ["site@mlb.example"],
+        subject: "R",
+        body: "B",
+        attachment_hashes: ["h1"],
+      } as any,
+      { builder_key: "MLB", family: "physical_makesafe" },
+      null,
+    );
+    assertEquals(report.requires_thread_reply, false);
+    assertEquals(report.ready, true);
+    assertEquals(report.reply_to_thread_id, null);
+    assertEquals(report.reply_to_graph_message_id, null);
+    assertEquals(report.mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
+    assertEquals(report.intended_intake_thread_id, null);
+
+    // Known thread is audit-only — never forces group-thread reply.
+    const stamped = applyMlbThreadReplyToRoute(
+      {
+        route_kind: "photo",
+        ready: true,
+        recipients: ["site@mlb.example"],
+        subject: "P",
+        body: "B",
+        attachment_hashes: ["h2"],
+      } as any,
+      { builder_key: "MLB", family: "physical_makesafe" },
+      {
+        thread_id: "thread-1",
+        post_id: "post-1",
+        conversation_id: null,
+        case_id: "c1",
+        internet_message_id: "mid@mlb.example",
+      },
+    );
+    assertEquals(stamped.ready, true);
+    assertEquals(stamped.requires_thread_reply, false);
+    assertEquals(stamped.reply_to_thread_id, null);
+    assertEquals(stamped.reply_to_graph_message_id, null);
+    assertEquals(stamped.intended_intake_thread_id, "thread-1");
+    assertEquals(stamped.intended_intake_post_id, "post-1");
+    assertEquals(stamped.in_reply_to_internet_message_id, "mid@mlb.example");
+    assertEquals(stamped.mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
+  },
+);
 
 Deno.test("invoice and AJS routes do not require intake-thread reply", () => {
   assertEquals(
@@ -527,7 +555,7 @@ const MLB_ARTIFACTS = [
 ];
 
 Deno.test(
-  "MLB physical resolveDocketRoutes: three routes, billing pack, thread on report/photo",
+  "MLB physical resolveDocketRoutes: three routes, billing pack, ordinary-mail exception on report/photo",
   () => {
     const routes = resolveDocketRoutes(
       mlbPhysicalDocket("thread-intake-1"),
@@ -542,16 +570,20 @@ Deno.test(
 
     const report = routes.find((r) => r.route_kind === "report")!;
     assertEquals(report.ready, true);
-    assertEquals(report.requires_thread_reply, true);
-    assertEquals(report.reply_to_thread_id, "thread-intake-1");
-    assertEquals(report.reply_to_graph_message_id, "post-root");
+    // Captain exception: ordinary Mail.Send, not group-thread reply.
+    assertEquals(report.requires_thread_reply, false);
+    assertEquals(report.reply_to_thread_id, null);
+    assertEquals(report.reply_to_graph_message_id, null);
+    assertEquals((report as any).intended_intake_thread_id, "thread-intake-1");
+    assertEquals((report as any).mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
     assertEquals(report.attachment_hashes, ["report-hash"]);
     assertEquals(report.cc || [], []);
 
     const photo = routes.find((r) => r.route_kind === "photo")!;
     assertEquals(photo.ready, true);
-    assertEquals(photo.requires_thread_reply, true);
-    assertEquals(photo.reply_to_thread_id, "thread-intake-1");
+    assertEquals(photo.requires_thread_reply, false);
+    assertEquals(photo.reply_to_thread_id, null);
+    assertEquals((photo as any).mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
     assertEquals(photo.attachment_hashes, ["photo-hash-1"]);
 
     const invoice = routes.find((r) => r.route_kind === "invoice")!;
@@ -567,7 +599,7 @@ Deno.test(
 );
 
 Deno.test(
-  "MLB physical report/photo not ready when intake_thread_id missing",
+  "MLB physical report/photo remain ready without intake_thread_id under ordinary-mail exception",
   () => {
     const routes = resolveDocketRoutes(
       mlbPhysicalDocket(null),
@@ -577,9 +609,10 @@ Deno.test(
     const report = routes.find((r) => r.route_kind === "report")!;
     const photo = routes.find((r) => r.route_kind === "photo")!;
     const invoice = routes.find((r) => r.route_kind === "invoice")!;
-    assertEquals(report.ready, false);
-    assertEquals(photo.ready, false);
-    assertEquals(report.requires_thread_reply, true);
+    assertEquals(report.ready, true);
+    assertEquals(photo.ready, true);
+    assertEquals(report.requires_thread_reply, false);
+    assertEquals((report as any).mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
     assertEquals(invoice.ready, true);
     assertEquals(invoice.requires_thread_reply, false);
   },
@@ -682,6 +715,20 @@ Deno.test("routingIntakeThread reads envelope routing fields", () => {
       post_id: "p1",
       conversation_id: "c1",
       case_id: null,
+      internet_message_id: null,
+    },
+  );
+  assertEquals(
+    routingIntakeThread({
+      intake_thread_id: "t1",
+      internet_message_id: "mid@example",
+    }),
+    {
+      thread_id: "t1",
+      post_id: null,
+      conversation_id: null,
+      case_id: null,
+      internet_message_id: "mid@example",
     },
   );
   assertEquals(routingIntakeThread({ report_to: "x@y.com" }), null);

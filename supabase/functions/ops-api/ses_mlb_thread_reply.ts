@@ -19,8 +19,16 @@
 //      case story's sourcePostId; anything still ambiguous REFUSES.
 //      No guess, no partial match, no outranking of real case_sources rows.
 // internet_message_id alone is insufficient across the group-sync path
-// (see makesafe_intake_dedup.ts). A missing thread_id is a hard refuse for
-// report/photo — never a quiet new thread.
+// (see makesafe_intake_dedup.ts).
+//
+// TEMPORARY CAPTAIN EXCEPTION (2026-08-05, Maylands ships tonight):
+// Microsoft marks conversationThread:reply as Application: "Not supported".
+// App-only Graph therefore 403s on group-thread reply (Maylands report route).
+// While MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1 is true, report/photo use
+// ordinary admin@ Mail.Send (Munster path) instead of group-thread reply.
+// That is an explicitly-authorised stopgap, NOT the locked design default.
+// Restore: flip the flag false after a supported auth model can prove
+// group-thread reply (delegated Group.ReadWrite.All or equivalent).
 //
 // AJS/AJBR is untouched (report_invoice + photo, ses@).
 
@@ -28,6 +36,27 @@ import { isSesPhysicalShapedFamily } from "./ses_family_matrix.ts";
 
 /** M365 group that hosts the make-safe work-order intake conversations. */
 export const SES_INTAKE_GROUP_MAIL = "ses@secureworkswa.com.au";
+
+/**
+ * TEMPORARY CAPTAIN EXCEPTION (2026-08-05).
+ *
+ * When true, MLB physical report/photo routes ride ordinary admin@ Mail.Send
+ * (draft → send → Sent Items proof by x-secureworks-ses-operation) instead of
+ * POST /groups/.../threads/.../reply, which Microsoft does not support under
+ * application permissions.
+ *
+ * Visible on purpose: this is not a silent default. Set false to restore the
+ * locked intake-thread reply shape once a supported Graph auth path exists.
+ */
+export const MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1 = true;
+
+/** Honest transport stamp written onto release routes under the exception. */
+export const MLB_ORDINARY_MAIL_SEND_TRANSPORT =
+  "ordinary_mail_send_captain_exception_v1";
+
+export function mlbPhysicalUsesOrdinaryMailSendFallback(): boolean {
+  return MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1 === true;
+}
 
 export interface IntakeThreadSourceRow {
   case_id?: string | null;
@@ -60,6 +89,12 @@ export interface IntakeThreadCoordinates {
   post_id: string | null;
   conversation_id: string | null;
   case_id: string | null;
+  /**
+   * RFC Internet Message-ID of the intake message when known. Used only as a
+   * best-effort In-Reply-To / References header on the ordinary Mail.Send
+   * fallback — never as group-thread authority, and never required to send.
+   */
+  internet_message_id?: string | null;
   /**
    * Where the coordinate came from. `case_sources` is authoritative;
    * `approved_draft_emails` only applies when case_sources had zero rows.
@@ -296,12 +331,24 @@ export function routingIntakeThread(
         "",
     ).trim() || null,
     case_id: String((row as any).intake_case_id || "").trim() || null,
+    internet_message_id: String(
+      (row as any).intake_internet_message_id ||
+        (row as any).internet_message_id ||
+        "",
+    ).trim() || null,
   };
 }
 
 /**
- * Stamp reply coordinates onto a release route. When the shape requires a
- * thread reply and coordinates are missing, ready becomes false.
+ * Stamp reply coordinates onto a release route.
+ *
+ * Locked shape: MLB physical report/photo require intake-thread reply; missing
+ * coordinates make the route not ready.
+ *
+ * Under MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1 (Captain exception): the
+ * same routes stay ready without a thread id, clear reply_to_thread_id so the
+ * gateway never calls app-unsupported group reply, and ride ordinary Mail.Send.
+ * Intended thread coordinates remain as audit-only fields for restore.
  */
 export function applyMlbThreadReplyToRoute<
   T extends {
@@ -310,6 +357,10 @@ export function applyMlbThreadReplyToRoute<
     reply_to_thread_id?: string | null;
     reply_to_graph_message_id?: string | null;
     requires_thread_reply?: boolean;
+    in_reply_to_internet_message_id?: string | null;
+    intended_intake_thread_id?: string | null;
+    intended_intake_post_id?: string | null;
+    mlb_transport?: string | null;
   },
 >(
   route: T,
@@ -321,10 +372,35 @@ export function applyMlbThreadReplyToRoute<
     return {
       ...route,
       requires_thread_reply: false,
+      mlb_transport: null,
     };
   }
+
   const threadId = thread?.thread_id || "";
   const postId = thread?.post_id || "";
+  const internetMessageId = String(thread?.internet_message_id || "").trim();
+
+  // Temporary Captain exception — ordinary Mail.Send (not the locked default).
+  if (mlbPhysicalUsesOrdinaryMailSendFallback()) {
+    return {
+      ...route,
+      // Must stay false so the gateway does not POST /groups/.../threads/.../reply.
+      requires_thread_reply: false,
+      // Must stay null: any non-empty reply_to_thread_id previously forced the
+      // group-thread path even without requires_thread_reply.
+      reply_to_thread_id: null,
+      // Group post ids are not admin@ message ids — never createReply on them.
+      reply_to_graph_message_id: null,
+      // Best-effort RFC threading only; never block send when absent.
+      in_reply_to_internet_message_id: internetMessageId || null,
+      intended_intake_thread_id: threadId || null,
+      intended_intake_post_id: postId || null,
+      mlb_transport: MLB_ORDINARY_MAIL_SEND_TRANSPORT,
+      ready: route.ready,
+    };
+  }
+
+  // Locked intended shape (restore when group-thread reply is app-supported).
   return {
     ...route,
     requires_thread_reply: true,
@@ -332,6 +408,10 @@ export function applyMlbThreadReplyToRoute<
     // post_id is the group-conversation post id (audit anchor). Group reply
     // uses thread_id; createReply on admin@ with this id is not the path.
     reply_to_graph_message_id: postId || null,
+    in_reply_to_internet_message_id: null,
+    intended_intake_thread_id: threadId || null,
+    intended_intake_post_id: postId || null,
+    mlb_transport: "group_thread_reply",
     ready: route.ready && !!threadId,
   };
 }

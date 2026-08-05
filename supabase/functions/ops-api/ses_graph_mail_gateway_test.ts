@@ -14,6 +14,7 @@ import {
   SES_RELEASE_MAILBOX,
   sesOperationInternetMessageHeaders,
   sesOperationSubject,
+  sesOptionalThreadingHeaders,
   sesReleaseHtmlBody,
   subjectHasOperationToken,
   toSesRouteSendResults,
@@ -378,4 +379,122 @@ Deno.test("requires_thread_reply without thread id refuses rather than new threa
   }
   assertEquals(failed, true);
   assertEquals(called, false);
+});
+
+Deno.test(
+  "ordinary Mail.Send ignores bare reply_to_thread_id without requires_thread_reply",
+  async () => {
+    // Captain exception path: intended_intake_thread_id may be known for audit,
+    // but must not force conversationThread:reply (app-only 403).
+    const token = "SES-ordinary-fallback";
+    const calls: Array<{ url: string; method: string; body?: any }> = [];
+    let draftSent = false;
+    const graphJson = async (
+      url: string,
+      init: RequestInit,
+      expected: number[],
+    ) => {
+      const method = String(init.method || "GET").toUpperCase();
+      const parsedBody = init.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ url, method, body: parsedBody });
+      if (url.includes("/threads/") && url.includes("/reply")) {
+        throw new Error("group-thread reply must not run on ordinary fallback");
+      }
+      if (
+        method === "POST" && url.endsWith("/messages") && !url.includes("/send")
+      ) {
+        assert(expected.includes(201));
+        assertEquals(
+          parsedBody.internetMessageHeaders.some(
+            (h: any) =>
+              h.name === SES_OPERATION_HEADER && h.value === token,
+          ),
+          true,
+        );
+        // Best-effort In-Reply-To when provided.
+        assertEquals(
+          parsedBody.internetMessageHeaders.some(
+            (h: any) =>
+              h.name === "In-Reply-To" &&
+              h.value === "<mid@mlb.example>",
+          ),
+          true,
+        );
+        return { id: "draft-ordinary-1" };
+      }
+      if (method === "POST" && url.endsWith("/send")) {
+        draftSent = true;
+        return null;
+      }
+      if (method === "GET" && url.includes("mailFolders/sentitems")) {
+        if (!draftSent) return { value: [] };
+        return {
+          value: [{
+            id: "sent-ordinary-1",
+            internetMessageId: "<sent@sw>",
+            subject: "Report",
+            internetMessageHeaders: [{
+              name: SES_OPERATION_HEADER,
+              value: token,
+            }],
+          }],
+        };
+      }
+      if (method === "GET" && url.includes("mailFolders/drafts")) {
+        return { value: [] };
+      }
+      throw new Error(`unexpected graph call ${method} ${url}`);
+    };
+
+    const gateway = createSesGraphMailGateway({
+      graphJson,
+      loadAttachments: async () => [],
+      checkpointDraft: async () => {},
+      uploadAttachment: async () => {},
+      sentPollAttempts: 3,
+      sentPollDelayMs: 1,
+    });
+
+    const sent = await gateway.createDraftAndSend(
+      {
+        subject: "Report",
+        body: "Body",
+        recipients: ["makesafes@mlbuilders.com.au"],
+        cc: [],
+        attachment_hashes: [],
+        // Deliberately present but requires_thread_reply false — ordinary path.
+        reply_to_thread_id: "thread-must-be-ignored",
+        requires_thread_reply: false,
+        in_reply_to_internet_message_id: "mid@mlb.example",
+        mlb_transport: "ordinary_mail_send_captain_exception_v1",
+      },
+      { external_token: token, operation_key: "op-ordinary-1" },
+    );
+    assertEquals(sent.message_id, "sent-ordinary-1");
+    assertEquals(sent.operation_token, token);
+    assert(
+      calls.some((c) =>
+        c.method === "POST" &&
+        c.url.includes("/users/") &&
+        c.url.endsWith("/messages")
+      ),
+    );
+    assertEquals(
+      calls.some((c) => c.url.includes("/threads/") && c.url.includes("/reply")),
+      false,
+    );
+  },
+);
+
+Deno.test("sesOptionalThreadingHeaders is best-effort and normalizes angle brackets", () => {
+  assertEquals(sesOptionalThreadingHeaders(null), []);
+  assertEquals(sesOptionalThreadingHeaders(""), []);
+  assertEquals(sesOptionalThreadingHeaders("mid@ex"), [
+    { name: "In-Reply-To", value: "<mid@ex>" },
+    { name: "References", value: "<mid@ex>" },
+  ]);
+  assertEquals(sesOptionalThreadingHeaders("<mid@ex>"), [
+    { name: "In-Reply-To", value: "<mid@ex>" },
+    { name: "References", value: "<mid@ex>" },
+  ]);
 });
