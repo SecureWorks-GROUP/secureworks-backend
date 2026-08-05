@@ -40,6 +40,17 @@ Deno.test("system prompt states draft-only boundaries", () => {
   assertStringIncludes(prompt, "authorised");
 });
 
+Deno.test("system and user prompts demand short explanatory report paragraphs", () => {
+  const system = buildDraftPackSystemPrompt();
+  const user = buildDraftPackUserPrompt({});
+  for (const prompt of [system, user]) {
+    assertStringIncludes(prompt, "short explanatory paragraphs");
+    assertStringIncludes(prompt, "Never invent");
+    assertStringIncludes(prompt, "No em dashes");
+    assertStringIncludes(prompt, "write less");
+  }
+});
+
 Deno.test("user prompt carries selected photo urls and feedback notes", () => {
   const prompt = buildDraftPackUserPrompt({
     job: { job_number: "SWF-1" },
