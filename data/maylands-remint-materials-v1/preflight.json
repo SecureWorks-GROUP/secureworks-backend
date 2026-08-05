@@ -1,0 +1,37 @@
+{
+  "job_id": "1e05db49-cc42-477b-9689-cbdceed649da",
+  "job_number": "SWMS-261017",
+  "suburb": "Maylands",
+  "builder_ref": "MLB-26267PO-56642",
+  "bound_report": {
+    "document_id": "f24ae0f7-4bc7-4fe0-877a-74a95fb13d9e",
+    "file_name": "Make-Safe-Report-MLB-26267-Maylands-e925c4e48396.pdf",
+    "crew_line": "CREW                       2 trades",
+    "service_report_trade_count": 2,
+    "service_report_labour_hours": 2
+  },
+  "invoice_inv_1104": {
+    "xero_invoice_id": "e8279f0c-fe7c-4d4f-bf0a-413385bdc10e",
+    "status": "DRAFT",
+    "total": 561.00,
+    "invoice_obligation_revision_id": "25c789f5-560e-5a6a-ab13-295583766ce7"
+  },
+  "void_revision": {
+    "id": "58923167-fcf6-5bdc-be20-6ab75ae0de2d",
+    "state": "proposed",
+    "target_status": "DELETED",
+    "reason": "Captain commercial: add $65 polycarb disposal; keep 2 trades x 3h",
+    "created_by": "marnin@secureworkswa.com.au"
+  },
+  "obligation_cycle": {
+    "obligation_revision_id": "25c789f5-560e-5a6a-ab13-295583766ce7",
+    "attendance_cycle_id": "afcb8f5a-e55e-4335-af18-2b6b0cf28d30",
+    "active": true
+  },
+  "blocker": "approve_ses_invoice_void_revision requires captain/admin JWT; api_key returns 403",
+  "target_mint": {
+    "labour": "2 trades x 3 hours @ $85 = $510 ex",
+    "materials": "polycarb disposal / tipping $65 ex",
+    "total": "$575 ex / $632.50 inc"
+  }
+}
