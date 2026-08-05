@@ -18,12 +18,14 @@ Path: same as commercial-remint-three-cards / Maylands / Munster remint ledgers
 
 ## CAPTAIN — WA delivery list (act on these)
 
-| # | Job number | Suburb | Builder ref | Invoice | Total inc GST |
-|---:|---|---|---|---|---:|
-| 1 | **SWMS-26953** | Gidgegannup | MLB-25971PO-55855 | **INV-1135** DRAFT | **$1,078.00** |
-| 2 | **SWMS-26902** | Ballajura | MLB-26443 | **INV-1136** DRAFT | **$387.75** |
-| 3 | **SWMS-261128** | Woodvale | MLB-27335 | **INV-1137** DRAFT | **$341.00** |
-| 4 | **SWMS-261129** | Carine | MLB-25876 | **INV-1138** DRAFT | **$330.00** |
+| # | Job number | Suburb | Builder ref | Invoice | Total inc GST | Report matches invoice |
+|---:|---|---|---|---|---:|---|
+| 1 | **SWMS-26953** | Gidgegannup | MLB-25971PO-55855 | **INV-1135** DRAFT | **$1,078.00** | **Yes** — two-attendance narrative bound + three-way hash proof |
+| 2 | **SWMS-26902** | Ballajura | MLB-26443 | **INV-1136** DRAFT | **$387.75** | Clean (materials remint; elevated report already serving) |
+| 3 | **SWMS-261128** | Woodvale | MLB-27335 | **INV-1137** DRAFT | **$341.00** | Clean |
+| 4 | **SWMS-261129** | Carine | MLB-25876 | **INV-1138** DRAFT | **$330.00** | Clean |
+
+**B, C and D are clean to approve.** Card A was held until the served report matched the two-attendance invoice; that re-bind is now complete (see Card A).
 
 **No authorise. No send. No approve** on these DRAFTs beyond the void-approve path below.
 
@@ -36,7 +38,7 @@ Path: same as commercial-remint-three-cards / Maylands / Munster remint ledgers
 - MLB sealed labour rate **$85** unchanged (`override_kind: commercial_quantity_not_rate`).
 - No photo cull / downscale.
 - No migration.
-- **Card A bound report PDF was not re-bound this run.** Serving elevated wording remains the five-pack reattendance narrative. Report narrative required by the Captain is written below as the attributable text for a separate curated re-bind (see Card A).
+- No fabricated street address: report Property uses **`jobs.site_address` only** (`11 Crest Side Cl`), same as the prior bound PDF.
 
 ## Shared operational path
 
@@ -117,7 +119,7 @@ Subtotal 980.00 / GST 98.00 / TOTAL AUD 1,078.00
 
 **Two separate labour lines** with different crew structures, not one blended line. Full extract: `INV-1135.pdftotext.txt`.
 
-## Pack
+## Pack (money remint; superseded by report re-bind pack below)
 
 | Field | Value |
 | --- | --- |
@@ -126,34 +128,67 @@ Subtotal 980.00 / GST 98.00 / TOTAL AUD 1,078.00
 | Blockers | `[]` |
 | Persisted | true |
 
-## Report narrative (Card A)
+## Report re-bind (Card A — completed)
 
-### Bound PDF status
+Eight-gate curated supersession after money remint so the **served report matches the two-attendance invoice**. Captain rule: write the stated facts only; invent nothing beyond Captain word.
 
-Serving curated report still has the five-pack elevated reattendance wording only (scope/findings/works for timber under HWS; crew **1 trade**). **Not re-bound this run** (eight-gate curated supersession is a separate pass; money remint and pack re-prepare completed without it).
+### Path
 
-### Required narrative (for Captain review / future re-bind)
+1. Offline wiki render at authoritative `915e9b423fc597d656c7cb090671bf206138114b` (script SHA `fda63bcf…` matches `MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256`)
+2. `attach_makesafe_document` on the **same** document id / file name (idempotent overwrite)
+3. `bind_current_cycle_curated_makesafe_report` (all eight gates; `supersedes_prior_bind: true`)
+4. `prepare_ses_docket_revision` so one pack serves the new report bytes
 
-Plain trade English. No em dashes. No fluff.
+### Address
 
-**Works / attendance story (proposed):**
+Property on the PDF is **`jobs.site_address` only**: `11 Crest Side Cl`.  
+Not assembled with suburb/postcode. Same string as the previous bound report.
 
-1. First attendance used two trades on the day of the work order. The crew assessed the roof and manhole, found no make-safe work they could complete on that visit, called the after-hours line, and left when told to leave. *(Trade evidence: initial service report work_done.)*
-2. On that first visit there was no site staff available for clarification, and the work order referenced a patio, so communications on the instruction were insufficient for a completed make-safe that day. *(Captain-supplied site knowledge — not on the trade form. Attribute as Captain/site knowledge if written onto a builder-facing report; do not present as trade-logged fact.)*
-3. Reattendance used one trade. The crew fitted two structural timber pieces with bugle screws from the base plate to the underpurlin to support the roof under the hot water system. *(Trade evidence: reattendance service report + existing elevated findings about HWS load / dipped timber.)*
-4. Materials: timber 1 m and bugle screws × 5. *(Trade materials_used.)*
+### Bound PDF status (serving now)
 
-### Attribution table
-
-| Sentence content | Source |
+| Field | Value |
 | --- | --- |
-| Two trades first visit; assessed roof/manhole; no work completed; after-hours call; left | **Trade** initial report |
-| WO referenced patio; no site staff for clarity; insufficient WO communications | **Captain-supplied** (this brief) |
-| Reattendance 1 trade; timber + bugle from base plate to underpurlin under HWS | **Trade** reattendance report |
-| HWS not engineered / beams dipped (existing elevated findings) | **Prior curated report** (from earlier elevated pass; still on bound PDF) |
-| Materials timber 1m / bugle × 5 | **Trade** materials_used |
+| Document | `883a4b6e-…` version **4** |
+| Cycle | `5c0c8a6b-…` **bound** |
+| `source_kind` | `durable_curated_revision` |
+| `supersedes_prior_bind` | **true** |
+| Curation revision | `ses-curated-report:SWMS-26953:2026-08-05-two-attendance-v1` |
+| Renderer | `secureworks.wiki-python/915e9b42…` |
+| Local render SHA | `sha256:187e09f45339ac178d71f83a04fd8f350e5c4c4480d178baa05656b0a0a460b1` |
+| Bound `expected_raw_sha256` | **same** |
+| Served storage bytes SHA | **same** |
+| Three-way hash match | **Pass** (`A-report-hash-proof.json`) |
+| Photos | **9/9** current-cycle (reattendance) |
+| Pack after re-bind | docket `75afc5a2-…` **ready**, blockers `[]` |
 
-Nothing else invented (no asbestos, no measurements, no hazard class upgrades).
+### Works text on the served PDF
+
+```
+First attendance failed to make safe due to insufficient work-order communications.
+The work order referenced a patio. No staff were on site for clarity.
+Reattendance completed the timber and bugle work.
+Fitted two structural timber pieces with bugle screws from the base plate to the
+underpurlin, giving the roof extra support under the hot water system.
+```
+
+Crew line: `2 trades first visit; 1 trade reattendance`  
+Materials: `Timber x 1m` / `Bugle screws x 5`  
+Full extract: `SWMS-26953-report.pdftotext.txt` (contact redacted in ledger).
+
+### Attribution
+
+| Text on report | Source |
+| --- | --- |
+| First attendance failed makesafe due to insufficient WO communications | **Captain** |
+| Work order referenced a patio | **Captain** |
+| No staff on site for clarity | **Captain** |
+| Reattendance completed timber and bugle work | **Captain** |
+| Fitted two structural timber pieces… under HWS | **Trade** reattendance `work_done` |
+| Materials Timber x 1m / Bugle screws x 5 | **Trade** `materials_used` |
+| Scope / findings (HWS load, dipped timber) | Prior elevated + trade damage (unchanged substance) |
+| Crew 2 then 1 | **Trade** service reports (`trade_count`) |
+
+**Not written:** builder blame, speculation about staff absence, delay/consequence claims, any WO characterisation beyond patio reference, commercial hours (3h / 5h stay on the invoice only).
 
 ---
 
@@ -317,12 +352,12 @@ Subtotal 300.00 / GST 30.00 / TOTAL AUD 330.00
 | Full ACCREC guard | scans 1160–1163 on successive mints |
 | One live DRAFT per reminted card | verified (old DELETED + one new DRAFT) |
 | Pack ready | all four `state=ready`, blockers `[]` |
+| Card A report matches two-attendance invoice | **Yes** — three-way hash proof after eight-gate re-bind |
 
 ## Follow-up (not this task)
 
-1. Card A curated report re-bind with attributed two-attendance narrative (Captain patio / no-staff sentence + trade reattendance works).
-2. Product debt: void confirm should deactivate `makesafe_invoice_obligation_cycles.active` so hand-clear is unnecessary.
-3. Captain previews DRAFTs INV-1135–1138 and decides authorise/send.
+1. Product debt: void confirm should deactivate `makesafe_invoice_obligation_cycles.active` so hand-clear is unnecessary.
+2. Captain previews DRAFTs INV-1135–1138 and decides authorise/send. **B/C/D clean; A report now matches invoice.**
 
 ## Code / PR
 
