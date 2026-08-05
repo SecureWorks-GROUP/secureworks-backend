@@ -196,4 +196,8 @@ ops-api|supabase/migrations/20260804090000_ses_release_report_invoice_route_kind
 ops-api|supabase/migrations/20260804090000_ses_release_report_invoice_route_kind.sql|constraint|makesafe_release_revision_routes_route_kind_check
 ops-api|supabase/migrations/20260804090000_ses_release_report_invoice_route_kind.sql|constraint|ses_external_effects_route_kind_check
 ops-api|supabase/migrations/20260804090000_ses_release_report_invoice_route_kind.sql|constraint|ses_release_route_proofs_route_kind_check
-ops-api|supabase/migrations/20260805010000_ses_closeout_proof_hash_set_compare.sql|function|commit_ses_release_closeout_v1
+# 20260805010000_ses_closeout_proof_hash_set_compare.sql deliberately NOT gated
+# here: it replaces commit_ses_release_closeout_v1 and needs Captain approval
+# before apply. The ops-api honesty path (SEND_READY / board ladder) works
+# without it. Pin this requirement only in the same deploy that applies the
+# migration, never before.
