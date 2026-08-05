@@ -1,0 +1,30 @@
+{
+  "action": "prepare_ses_docket_revision",
+  "dry_run": false,
+  "state": "ready",
+  "blockers": [],
+  "docket_revision_id": "d1e39c05-7a86-5b73-8738-bba73003efe8",
+  "persisted": true,
+  "input_content_hash": "sha256:fd0fe1dcef853226a238afde8c06cfb27cb4c9653c6eaee399ea5a2904d86296",
+  "output_content_hash": "sha256:708b2894b715d67d94be8e8f9f5f626a285e025d79f78454dcfdad2e79750cd7",
+  "artifact_roles": {
+    "source_attachment": 1,
+    "completion_photo": 9,
+    "supporting_report_pdf": 1,
+    "swms_artifact": 1,
+    "photo_selection": 1,
+    "invoice_proposal": 1,
+    "invoice_email_draft": 1,
+    "report_email_draft": 1,
+    "photo_email_draft": 1,
+    "review_spec": 1,
+    "review_html": 1,
+    "release_payload": 1,
+    "case_story": 1,
+    "docket_manifest": 1,
+    "assembler_envelope": 1,
+    "capability": 1,
+    "timing": 1,
+    "hashes": 1
+  }
+}

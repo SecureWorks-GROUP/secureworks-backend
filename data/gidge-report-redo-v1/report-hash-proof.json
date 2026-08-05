@@ -1,0 +1,18 @@
+{
+  "document_id": "883a4b6e-6713-4c1b-8bc5-2d13439623d8",
+  "version": 8,
+  "cycle_attribution": "bound",
+  "attendance_cycle_id": "5c0c8a6b-4903-4f5b-ab68-bb5ee51f7cbd",
+  "served_raw_sha256": "sha256:8b7a689a912e2aa734ae56fb9763f0f3f098137c0e98261a156d0b453384c3be",
+  "local_render_sha256": "sha256:8b7a689a912e2aa734ae56fb9763f0f3f098137c0e98261a156d0b453384c3be",
+  "bound_expected_raw_sha256": "sha256:8b7a689a912e2aa734ae56fb9763f0f3f098137c0e98261a156d0b453384c3be",
+  "bound_report_input_hash": "sha256:a140aecb264a95761ee0a35dc1984030938afc508974329c81e5ca71c09c337b",
+  "source_kind": "durable_curated_revision",
+  "source_revision_id": "ses-curated-report:SWMS-26953:2026-08-05-two-visit-justify-v2",
+  "source_identity": "curation-revision:ses-curated-report:SWMS-26953:2026-08-05-two-visit-justify-v2/artifact:ses-curated-report-artifact:8b7a689a912e2aa734ae56fb9763f0f3",
+  "match_served_eq_local": true,
+  "match_served_eq_bound_expected": true,
+  "match_three_way": true,
+  "served_bytes": 1587574,
+  "supersedes_prior_bind": true
+}

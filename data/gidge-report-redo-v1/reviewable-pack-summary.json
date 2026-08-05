@@ -1,0 +1,39 @@
+{
+  "docket_revision_id": "d1e39c05-7a86-5b73-8738-bba73003efe8",
+  "artifact_roles": {
+    "invoice_proposal": 1,
+    "supporting_report_pdf": 1,
+    "photo_selection": 1,
+    "completion_photo": 9,
+    "swms_artifact": 1,
+    "assembler_envelope": 1,
+    "capability": 1,
+    "case_story": 1,
+    "docket_manifest": 1,
+    "invoice_email_draft": 1,
+    "photo_email_draft": 1,
+    "report_email_draft": 1,
+    "release_payload": 1,
+    "review_spec": 1,
+    "review_html": 1,
+    "source_attachment": 1,
+    "xero_invoice_pdf": 1
+  },
+  "builder_docs": [
+    {
+      "role": "supporting_report_pdf",
+      "object_key": "makesafe-docket-artifacts/d34b779e-e2f4-4f22-bc0b-9131b7e24997/d1e39c05-7a86-5b73-8738-bba73003efe8/ARTIFACTS/Make-Safe-Report-SWMS-26953-Gidgegannup-5a6842fd4c0d.pdf",
+      "content_hash": "sha256:fffc6772c9c5f316e9ffe5cdff5144ad9650da0906653eafe1cae5e88acade22"
+    },
+    {
+      "role": "swms_artifact",
+      "object_key": "makesafe-docket-artifacts/d34b779e-e2f4-4f22-bc0b-9131b7e24997/d1e39c05-7a86-5b73-8738-bba73003efe8/ARTIFACTS/SWMS - MLB-25971PO-55855 - 11-Crest-Side-Cl-Gidgegannup.pdf",
+      "content_hash": "sha256:92287cb4fed7ffc3445e437cade463618597284dea6877e01a9282b0983d38b8"
+    },
+    {
+      "role": "xero_invoice_pdf",
+      "object_key": "makesafe-docket-artifacts/d34b779e-e2f4-4f22-bc0b-9131b7e24997/xero-invoice-pdfs/d6ed17b1-b93c-487d-8d01-8f32ab62594e/INV-1135.pdf",
+      "content_hash": "sha256:1b9cb99db691123d1e7136677e4fdf22a4ecfe79909922a6e7cc0a5ce67f49af"
+    }
+  ]
+}
