@@ -1,0 +1,664 @@
+{
+  "schema": "secureworks.mailer-ops-visibility-live-send-ledger/v1",
+  "sent_at_window_utc": "2026-08-05T14:03:57Z .. 2026-08-05T14:06:28Z",
+  "action": "ops-api?action=send_mailer_ops_visibility",
+  "deploy_run": "31012899493",
+  "route_contract": {
+    "from": "admin@secureworkswa.com.au",
+    "to": "mlb.mailer@primeeco.tech",
+    "cc": "ses@secureworkswa.com.au",
+    "invoice": "structurally impossible",
+    "dry_run_default": true,
+    "identity": "moves only on deliberate attempt_key"
+  },
+  "pre_send_gate": {
+    "maylands_dry_run": "clean (report + photo) after PR #601 deploy",
+    "prior_phantoms_caught_before_any_external_mail": [
+      {
+        "error": "column jobs.requesting_company_slug does not exist",
+        "fix": "PR #600 \u2014 company from makesafe_job_details / makesafe_companies"
+      },
+      {
+        "error": "column makesafe_intake_cases.status does not exist",
+        "fix": "PR #601 \u2014 select live column state",
+        "caught_by": "Maylands dry_run:true before any dry_run:false"
+      }
+    ]
+  },
+  "sends": [
+    {
+      "job_id": "1e05db49-cc42-477b-9689-cbdceed649da",
+      "job_number": "SWMS-261017",
+      "kind": "report",
+      "subject_as_sent": "NEW WORK ORDER - MLB-26267 U24/ 28 Peninsula Road, Maylands, WA 6051",
+      "subject_source": "intake_draft_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "Make-Safe-Report-MLB-26267-Maylands-e925c4e48396.pdf"
+      ],
+      "attachment_count": 1,
+      "attachment_roles": [
+        "report_pdf"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5buAAA=",
+      "internet_message_id": "<SY8P300MB084067FB6E29E97D368B797E93D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-578d56af-c61a-5f0d-80b9-59b0aebd4ac2",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:578d56af-c61a-5f0d-80b9-59b0aebd4ac2",
+      "attempt_key": "maylands-report-live-v1-20260805T140357Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "1e05db49-cc42-477b-9689-cbdceed649da",
+      "job_number": "SWMS-261017",
+      "kind": "photo",
+      "subject_as_sent": "NEW WORK ORDER - MLB-26267 U24/ 28 Peninsula Road, Maylands, WA 6051",
+      "subject_source": "intake_draft_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "site-photo-01.jpg",
+        "site-photo-02.jpg",
+        "site-photo-03.jpg",
+        "site-photo-04.jpg",
+        "site-photo-05.jpg",
+        "site-photo-06.jpeg",
+        "site-photo-07.jpeg",
+        "site-photo-08.jpg",
+        "site-photo-09.jpg",
+        "site-photo-10.jpg",
+        "site-photo-11.jpg"
+      ],
+      "attachment_count": 11,
+      "attachment_roles": [
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5bvAAA=",
+      "internet_message_id": "<SY8P300MB0840FD55C0287BF66471BD2593D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-1181ffc3-9efb-5f94-80d3-8a06ca85a33b",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:1181ffc3-9efb-5f94-80d3-8a06ca85a33b",
+      "attempt_key": "maylands-photo-live-v1-20260805T140402Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "f8c19311-611d-4c8f-87b6-bb2005c47bda",
+      "job_number": "SWMS-261080",
+      "kind": "report",
+      "subject_as_sent": "NEW WORK ORDER - MLB-27148 5 EVERTON ST, Floreat, WA 6014",
+      "subject_source": "emails_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "Make-Safe-Report-MLB-27148-Floreat-c7b46b9ba21f.pdf"
+      ],
+      "attachment_count": 1,
+      "attachment_roles": [
+        "report_pdf"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5bwAAA=",
+      "internet_message_id": "<SY8P300MB08401073A3D304A6C3CE956C93D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-4e8adf57-8864-5800-92d8-89dc34b7e035",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:4e8adf57-8864-5800-92d8-89dc34b7e035",
+      "attempt_key": "f8c19311-report-live-v1-20260805T140417Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "f8c19311-611d-4c8f-87b6-bb2005c47bda",
+      "job_number": "SWMS-261080",
+      "kind": "photo",
+      "subject_as_sent": "NEW WORK ORDER - MLB-27148 5 EVERTON ST, Floreat, WA 6014",
+      "subject_source": "emails_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "site-photo-01.jpg",
+        "site-photo-02.jpg",
+        "site-photo-03.jpg",
+        "site-photo-04.jpg",
+        "site-photo-05.jpg",
+        "site-photo-06.jpg",
+        "site-photo-07.jpg",
+        "site-photo-08.jpg",
+        "site-photo-09.jpg",
+        "site-photo-10.jpg",
+        "site-photo-11.jpg",
+        "site-photo-12.jpg"
+      ],
+      "attachment_count": 12,
+      "attachment_roles": [
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5bxAAA=",
+      "internet_message_id": "<SY8P300MB0840B2DD8AE235790D70911693D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-55a0ab98-2aad-59ba-a705-3726f9263c9b",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:55a0ab98-2aad-59ba-a705-3726f9263c9b",
+      "attempt_key": "f8c19311-photo-live-v1-20260805T140421Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "db3f2242-d10c-42f0-80b9-7d684e62c6fe",
+      "job_number": "SWMS-261020",
+      "kind": "report",
+      "subject_as_sent": "NEW WORK ORDER - MLB-27037 5 Draper St, Floreat, WA 6014",
+      "subject_source": "intake_draft_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "Make-Safe-Report-MLB-27037-Floreat-7fcdc093ec46.pdf"
+      ],
+      "attachment_count": 1,
+      "attachment_roles": [
+        "report_pdf"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5byAAA=",
+      "internet_message_id": "<SY8P300MB0840244753B13DEF8DD3885893D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-c10f0fa4-fe52-5e05-a334-abf9544debf5",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:c10f0fa4-fe52-5e05-a334-abf9544debf5",
+      "attempt_key": "db3f2242-report-live-v1-20260805T140436Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "db3f2242-d10c-42f0-80b9-7d684e62c6fe",
+      "job_number": "SWMS-261020",
+      "kind": "photo",
+      "subject_as_sent": "NEW WORK ORDER - MLB-27037 5 Draper St, Floreat, WA 6014",
+      "subject_source": "intake_draft_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "site-photo-01.jpg",
+        "site-photo-02.jpg",
+        "site-photo-03.jpg",
+        "site-photo-04.jpg",
+        "site-photo-05.jpg",
+        "site-photo-06.jpg",
+        "site-photo-07.jpg",
+        "site-photo-08.jpg",
+        "site-photo-09.jpg",
+        "site-photo-10.jpg",
+        "site-photo-11.jpg",
+        "site-photo-12.jpg"
+      ],
+      "attachment_count": 12,
+      "attachment_roles": [
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5bzAAA=",
+      "internet_message_id": "<SY8P300MB08402E3116FF9A517853EF4293D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-4eba63d6-2ed5-58e8-b321-514a1f4f4946",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:4eba63d6-2ed5-58e8-b321-514a1f4f4946",
+      "attempt_key": "db3f2242-photo-live-v1-20260805T140441Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "d97067be-62e7-48e2-acff-344bb7473dd5",
+      "job_number": "SWMS-261115",
+      "kind": "report",
+      "subject_as_sent": "NEW WORK ORDER - MLB-27387 27 Kennedy Road, Morley, WA 6062",
+      "subject_source": "emails_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "Make-Safe-Report-MLB-27387-Morley-ffac55a6dd9a.pdf"
+      ],
+      "attachment_count": 1,
+      "attachment_roles": [
+        "report_pdf"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5b0AAA=",
+      "internet_message_id": "<SY8P300MB08404B0D304D08A076EC0CB793D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-f4c2770c-9742-5761-a527-f07ef46cc4e7",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:f4c2770c-9742-5761-a527-f07ef46cc4e7",
+      "attempt_key": "d97067be-report-live-v1-20260805T140454Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "d97067be-62e7-48e2-acff-344bb7473dd5",
+      "job_number": "SWMS-261115",
+      "kind": "photo",
+      "subject_as_sent": "NEW WORK ORDER - MLB-27387 27 Kennedy Road, Morley, WA 6062",
+      "subject_source": "emails_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "site-photo-01.jpg",
+        "site-photo-02.jpg",
+        "site-photo-03.jpg",
+        "site-photo-04.jpg",
+        "site-photo-05.jpg",
+        "site-photo-06.jpg",
+        "site-photo-07.jpg",
+        "site-photo-08.jpg",
+        "site-photo-09.jpg",
+        "site-photo-10.jpg",
+        "site-photo-11.jpg",
+        "site-photo-12.jpg"
+      ],
+      "attachment_count": 12,
+      "attachment_roles": [
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5b1AAA=",
+      "internet_message_id": "<SY8P300MB0840537E67F72AFC8290365993D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-7e215f6c-1be6-5cfd-ad65-23c0f7f07052",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:7e215f6c-1be6-5cfd-ad65-23c0f7f07052",
+      "attempt_key": "d97067be-photo-live-v1-20260805T140459Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "7aa83351-a1c1-450f-af9d-77e7777da92a",
+      "job_number": "SWMS-26902",
+      "kind": "report",
+      "subject_as_sent": "NEW WORK ORDER - MLB-26443 208 Summerlakes Pde, Ballajura, WA 6066",
+      "subject_source": "intake_draft_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "Make-Safe-Report-SWMS-26902-Ballajura-a562153ce17f.pdf"
+      ],
+      "attachment_count": 1,
+      "attachment_roles": [
+        "report_pdf"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5b2AAA=",
+      "internet_message_id": "<SY8P300MB08409E609552D93AE9F162D693D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-1634697a-d7f4-59fd-8af9-0592d522a143",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:1634697a-d7f4-59fd-8af9-0592d522a143",
+      "attempt_key": "7aa83351-report-live-v1-20260805T140546Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "7aa83351-a1c1-450f-af9d-77e7777da92a",
+      "job_number": "SWMS-26902",
+      "kind": "photo",
+      "subject_as_sent": "NEW WORK ORDER - MLB-26443 208 Summerlakes Pde, Ballajura, WA 6066",
+      "subject_source": "intake_draft_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "site-photo-01.jpg",
+        "site-photo-02.jpg",
+        "site-photo-03.jpg",
+        "site-photo-04.jpg",
+        "site-photo-05.jpg",
+        "site-photo-06.jpg",
+        "site-photo-07.jpg",
+        "site-photo-08.jpg",
+        "site-photo-09.jpg",
+        "site-photo-10.jpg",
+        "site-photo-11.jpg",
+        "site-photo-12.jpg"
+      ],
+      "attachment_count": 12,
+      "attachment_roles": [
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5b3AAA=",
+      "internet_message_id": "<SY8P300MB0840DA7ACE645F4B857A3B3393D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-99266438-3111-5aa6-8882-0c07905d3147",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:99266438-3111-5aa6-8882-0c07905d3147",
+      "attempt_key": "7aa83351-photo-live-v1-20260805T140550Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "047dbe8d-e632-4d29-adaa-5a3d42f38542",
+      "job_number": "SWMS-261128",
+      "kind": "report",
+      "subject_as_sent": "NEW WORK ORDER - MLB-27335 10 MONTASH RETREAT, Woodvale, WA 6026",
+      "subject_source": "emails_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "Make-Safe-Report-SWMS-261128-Woodvale-3873894d3b52.pdf"
+      ],
+      "attachment_count": 1,
+      "attachment_roles": [
+        "report_pdf"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5b4AAA=",
+      "internet_message_id": "<SY8P300MB08404E7E412958AFBAAD2E4C93D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-56eb5eba-f0f2-5394-bfcf-12a4da480da0",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:56eb5eba-f0f2-5394-bfcf-12a4da480da0",
+      "attempt_key": "047dbe8d-report-live-v1-20260805T140603Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "047dbe8d-e632-4d29-adaa-5a3d42f38542",
+      "job_number": "SWMS-261128",
+      "kind": "photo",
+      "subject_as_sent": "NEW WORK ORDER - MLB-27335 10 MONTASH RETREAT, Woodvale, WA 6026",
+      "subject_source": "emails_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "site-photo-01.jpg",
+        "site-photo-02.jpg",
+        "site-photo-03.jpg",
+        "site-photo-04.jpg",
+        "site-photo-05.jpg",
+        "site-photo-06.jpg",
+        "site-photo-07.jpg",
+        "site-photo-08.jpg",
+        "site-photo-09.jpg",
+        "site-photo-10.jpg",
+        "site-photo-11.jpg",
+        "site-photo-12.jpg"
+      ],
+      "attachment_count": 12,
+      "attachment_roles": [
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5b5AAA=",
+      "internet_message_id": "<SY8P300MB084001D8164139141C20F40493D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-e7a682f9-7a7e-5453-ac75-d8d439ee5ea8",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:e7a682f9-7a7e-5453-ac75-d8d439ee5ea8",
+      "attempt_key": "047dbe8d-photo-live-v1-20260805T140607Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "8a631233-2f23-4756-9e7a-8528fe980610",
+      "job_number": "SWMS-261129",
+      "kind": "report",
+      "subject_as_sent": "NEW WORK ORDER - MLB-25876 48 Doriot Way, Carine, WA 6020",
+      "subject_source": "emails_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "Make-Safe-Report-SWMS-261129-Carine-fc9fdf7b7883.pdf"
+      ],
+      "attachment_count": 1,
+      "attachment_roles": [
+        "report_pdf"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5b6AAA=",
+      "internet_message_id": "<SY8P300MB0840996D41D5ADA19B11D50293D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-cdeeecda-58c2-5bc1-a297-9e219ff47010",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:cdeeecda-58c2-5bc1-a297-9e219ff47010",
+      "attempt_key": "8a631233-report-live-v1-20260805T140621Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    },
+    {
+      "job_id": "8a631233-2f23-4756-9e7a-8528fe980610",
+      "job_number": "SWMS-261129",
+      "kind": "photo",
+      "subject_as_sent": "NEW WORK ORDER - MLB-25876 48 Doriot Way, Carine, WA 6020",
+      "subject_source": "emails_subject",
+      "from": "admin@secureworkswa.com.au",
+      "to": [
+        "mlb.mailer@primeeco.tech"
+      ],
+      "cc": [
+        "ses@secureworkswa.com.au"
+      ],
+      "attachment_names": [
+        "site-photo-01.jpg",
+        "site-photo-02.jpg",
+        "site-photo-03.jpg",
+        "site-photo-04.jpg",
+        "site-photo-05.jpg",
+        "site-photo-06.jpg",
+        "site-photo-07.jpg",
+        "site-photo-08.jpg",
+        "site-photo-09.jpg",
+        "site-photo-10.jpg",
+        "site-photo-11.jpg",
+        "site-photo-12.jpg"
+      ],
+      "attachment_count": 12,
+      "attachment_roles": [
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo",
+        "site_photo"
+      ],
+      "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5b7AAA=",
+      "internet_message_id": "<SY8P300MB084078A883E33C163E826D9593D32@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+      "operation_token": "SES-bbb8f271-5515-5a01-8012-d5af7874d2ed",
+      "operation_header": "x-secureworks-ses-operation",
+      "proof_surfaces": [
+        "admin_sent_items",
+        "ses_intake_cc"
+      ],
+      "effect_operation_key": "ses:mailer_ops_send:bbb8f271-5515-5a01-8012-d5af7874d2ed",
+      "attempt_key": "8a631233-photo-live-v1-20260805T140628Z",
+      "success": true,
+      "dry_run": false,
+      "invoice": false
+    }
+  ],
+  "counts": {
+    "cards": 7,
+    "live_emails": 14,
+    "failures": 0,
+    "unknown_outcomes": 0
+  }
+}
