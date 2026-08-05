@@ -1723,6 +1723,20 @@ tests mock external services, so assert the generated where-clause string
 (`xero_where_clause_test.ts`); a green pipeline alone does not prove Xero
 accepts the query.
 
+## Make-Safe Report Prose Is Short Paragraphs, Not Form Blurbs
+
+Builder-facing make-safe report wording (scope / findings / works / materials)
+must be short explanatory paragraphs of complete sentences, not bullet
+fragments or `Damage:` / `Work:` form dumps. The pure contract and trade-
+evidence composer is `makesafe_report_prose.ts` (`report-prose-paragraphs/v1`);
+draft-pack prompts import the same style rules, and `draftPackReportPayload`
+uses the composer when Claude leaves a field empty or still a raw checklist
+dump. Honesty is load-bearing: never invent findings, materials, quantities,
+measurements, or hazard classifications; when evidence is thin, write less.
+No em dashes. Existing bound curated reports do not change until re-bound
+(attach same `file_name` → curated supersession → prepare). Do not re-prepare
+packs whose money/signoff is held for Captain decision.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
