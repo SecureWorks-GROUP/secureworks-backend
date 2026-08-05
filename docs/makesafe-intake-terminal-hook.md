@@ -25,8 +25,12 @@ Every reporting run calls `makesafe_reporting_intake_pass` exactly once before i
 reporting work. After intake, a run may prepare the selected card's deterministic
 U4 docket with `POST ops-api?action=prepare_ses_docket_revision`, passing only a
 `job_id` or `job_number` selection, an idempotency key and explicit `dry_run`.
-The server owns the canonical `ses.assembler-input/v1` adapter. The caller must
-never hand-author an assembler envelope.
+The one other operator-supplied body field is `materials_charge`, the answer to
+a `materials_charge_figure_required` refusal on a single named card; its three
+states and inheritance rules are owned by `ses_materials_charge_guard.ts` and
+the AGENTS.md entry "MLB Physical Materials Must Never Silently Drop Off The
+Invoice". The server owns the canonical `ses.assembler-input/v1` adapter. The
+caller must never hand-author an assembler envelope.
 
 The intake action performs:
 

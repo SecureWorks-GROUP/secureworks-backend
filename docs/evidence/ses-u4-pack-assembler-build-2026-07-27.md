@@ -12,7 +12,9 @@ Sections read before implementation:
 
 This change builds the deterministic U4 assembler core. One function,
 `prepare_ses_docket_revision`, accepts only a job/job-number/batch selection
-plus an idempotency key.
+plus an idempotency key. (A later slice added the single-card
+`materials_charge` operator decision — a commercial figure, not an envelope
+fact — owned by `ses_materials_charge_guard.ts`.)
 It obtains the complete `ses.assembler-input/v1` envelope through one resolver;
 callers cannot pass hand-composed family, deliverable, routing or portal-status
 fields into the command.
