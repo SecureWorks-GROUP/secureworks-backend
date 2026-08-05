@@ -1200,6 +1200,17 @@ order lives in `ses_release_route_shape.ts`. Apply
 `20260804090000_ses_release_report_invoice_route_kind.sql` before the matching
 `ops-api` (widens `route_kind` and allows two-route `commit_ses_release_revision_v1`).
 
+Closeout proof hashes are a **set**, not a route-kind-ordered array: apply
+`20260805010000_ses_closeout_proof_hash_set_compare.sql` before the matching
+`ops-api` so `commit_ses_release_closeout_v1` compares ledger and payload with
+the same `ORDER BY proof_hash`. Ordering by `route_kind` on one side and hash
+text on the other refused fully proved AJS releases (AJBR-70487 class). The
+cockpit must never stay `SEND_READY` once route proofs exist —
+`classifySesReleaseSendProgress` in `ses_review_cockpit.ts` yields
+`RELEASED` / `CLOSEOUT_PENDING` / `PARTIALLY_RELEASED` and disables SEND IT.
+Do not resend on a closeout-proof mismatch; re-run execute only after the set
+compare is deployed (confirmed effects are exact-once, no Graph redispatch).
+
 ## The Repository Root Stays npm-Package-Free
 
 This repo is Deno-rooted (`deno.jsonc` at the root). Deno 2 auto-discovers a root

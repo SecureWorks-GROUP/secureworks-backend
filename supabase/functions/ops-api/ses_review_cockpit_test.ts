@@ -8,6 +8,7 @@ import {
 import {
   approveInvoiceDisabledReason,
   buildSesCockpitView,
+  classifySesReleaseSendProgress,
   buildSesReleaseRevision,
   canRecordSesApproval,
   describeSesSendItPlan,
@@ -332,6 +333,135 @@ Deno.test("document-only reattendance skips invoice approval and enables SEND IT
   assertEquals(view.status, "SEND_READY");
   assertEquals(view.controls.approve_invoice.enabled, false);
   assertEquals(view.controls.send_it.enabled, true);
+});
+
+Deno.test("classifySesReleaseSendProgress: production AJBR shapes", () => {
+  // 70488: both proofs + closeout verified → released
+  assertEquals(
+    classifySesReleaseSendProgress({
+      release_revision_id: "e8a410e8-f155-5c9e-9cf3-c7a6d9d938bd",
+      release_state: "released",
+      required_route_kinds: ["report_invoice", "photo"],
+      proved_route_kinds: ["photo", "report_invoice"],
+      closeout_verified: true,
+    }).kind,
+    "released",
+  );
+  // 70487: both proofs, dispatching, no closeout → closeout_pending
+  assertEquals(
+    classifySesReleaseSendProgress({
+      release_revision_id: "5d94726e-b854-57ac-8108-f9d4d984d3dc",
+      release_state: "dispatching",
+      required_route_kinds: ["report_invoice", "photo"],
+      proved_route_kinds: ["report_invoice", "photo"],
+      closeout_verified: false,
+    }).kind,
+    "closeout_pending",
+  );
+  // Genuine partial: only photo proved
+  const partial = classifySesReleaseSendProgress({
+    release_revision_id: "partial-release",
+    release_state: "dispatching",
+    required_route_kinds: ["report_invoice", "photo"],
+    proved_route_kinds: ["photo"],
+    closeout_verified: false,
+  });
+  assertEquals(partial.kind, "partially_released");
+  if (partial.kind === "partially_released") {
+    assertEquals(partial.missing_route_kinds, ["report_invoice"]);
+  }
+  // No proofs → none (SEND still possible)
+  assertEquals(
+    classifySesReleaseSendProgress({
+      release_revision_id: "approved-only",
+      release_state: "approved",
+      required_route_kinds: ["report_invoice", "photo"],
+      proved_route_kinds: [],
+    }).kind,
+    "none",
+  );
+});
+
+Deno.test("released card leaves SEND_READY and disables SEND IT", () => {
+  const input = cleanInput({
+    invoice_already_bound: true,
+    duplicate_allows_create: false,
+  });
+  const base: SesCockpitDocket = {
+    job_id: "job-70488",
+    job_number: "SWMS-261130",
+    docket_revision_id: "docket-released",
+    readiness_revision:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    dependency_generation: 4,
+    invoice_obligation_revision_id: "obligation-1",
+    attendance_cycle_ids: ["cycle-1"],
+    xero_binding: {
+      xero_invoice_id: "xero-1",
+      invoice_number: "INV-1110",
+      status: "AUTHORISED",
+    },
+    local_invoice_proposal: { total: 269.5 },
+    work_order: { state: "ready" },
+    family_evidence: {},
+    swms: {},
+    routes: input.routes,
+    crew_and_trade_visits: [],
+    clean_input: input,
+  };
+  const released = buildSesCockpitView({
+    ...base,
+    release_send_progress: {
+      kind: "released",
+      release_revision_id: "e8a410e8-f155-5c9e-9cf3-c7a6d9d938bd",
+      release_state: "released",
+      proved_route_kinds: ["photo", "report_invoice"],
+      required_route_kinds: ["photo", "report_invoice"],
+    },
+  });
+  assertEquals(released.status, "RELEASED");
+  assertEquals(released.controls.send_it.enabled, false);
+  assertStringIncludes(
+    String(released.controls.send_it.disabled_reason || ""),
+    "already complete",
+  );
+
+  const pending = buildSesCockpitView({
+    ...base,
+    job_id: "job-70487",
+    job_number: "SWMS-261131",
+    release_send_progress: {
+      kind: "closeout_pending",
+      release_revision_id: "5d94726e-b854-57ac-8108-f9d4d984d3dc",
+      release_state: "dispatching",
+      proved_route_kinds: ["photo", "report_invoice"],
+      required_route_kinds: ["photo", "report_invoice"],
+    },
+  });
+  assertEquals(pending.status, "CLOSEOUT_PENDING");
+  assertEquals(pending.controls.send_it.enabled, false);
+  assertStringIncludes(
+    String(pending.controls.send_it.disabled_reason || ""),
+    "already proved",
+  );
+
+  const partial = buildSesCockpitView({
+    ...base,
+    release_send_progress: {
+      kind: "partially_released",
+      release_revision_id: "partial-release",
+      release_state: "dispatching",
+      proved_route_kinds: ["photo"],
+      required_route_kinds: ["photo", "report_invoice"],
+      missing_route_kinds: ["report_invoice"],
+    },
+  });
+  assertEquals(partial.status, "PARTIALLY_RELEASED");
+  assertEquals(partial.controls.send_it.enabled, false);
+  assertStringIncludes(
+    String(partial.controls.send_it.disabled_reason || ""),
+    "part-proved",
+  );
 });
 
 Deno.test("release identity changes when route content or order changes", async () => {

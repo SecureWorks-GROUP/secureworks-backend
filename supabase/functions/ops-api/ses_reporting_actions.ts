@@ -30,6 +30,7 @@ import {
 import {
   assertSesRouteRecipients,
   buildSesCockpitView,
+  classifySesReleaseSendProgress,
   buildSesReleaseRevision,
   canRecordSesApproval,
   evaluateSesMechanicalClean,
@@ -929,6 +930,10 @@ export async function loadSesCockpitDocket(
         .trim();
     }
   }
+  const releaseSendProgress = await loadSesReleaseSendProgressForJob(
+    client,
+    jobId,
+  );
   return {
     job_id: jobId,
     job_number: object(manifest.classification).job_number || null,
@@ -952,7 +957,88 @@ export async function loadSesCockpitDocket(
       visit_reports: reportsResponse.data || [],
     },
     clean_input: cleanInput,
+    release_send_progress: releaseSendProgress,
   };
+}
+
+/**
+ * Read the latest non-proposed release membership for this job and classify
+ * send progress from the route-proof ledger + closeout verification. Failures
+ * degrade to `none` rather than inventing a send (SEND_READY is safer than a
+ * false RELEASED when the ledger is unreadable — the Captain still sees the
+ * board facts).
+ */
+async function loadSesReleaseSendProgressForJob(
+  client: SesSupabaseClient,
+  jobId: string,
+) {
+  const membersResponse = await client.from("makesafe_release_revision_members")
+    .select("release_revision_id, ordinal")
+    .eq("job_id", jobId)
+    .order("ordinal", { ascending: true });
+  if (membersResponse.error || !membersResponse.data?.length) {
+    return classifySesReleaseSendProgress({});
+  }
+  const releaseIds = [
+    ...new Set(
+      membersResponse.data
+        .map((row: any) => String(row.release_revision_id || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (releaseIds.length === 0) {
+    return classifySesReleaseSendProgress({});
+  }
+  const releasesResponse = await client.from("makesafe_release_revisions")
+    .select("id, state, updated_at, created_at")
+    .in("id", releaseIds)
+    .in("state", ["approved", "dispatching", "released"])
+    .order("updated_at", { ascending: false });
+  if (releasesResponse.error || !releasesResponse.data?.length) {
+    return classifySesReleaseSendProgress({});
+  }
+  // Prefer a released revision; otherwise the most recently updated active one.
+  const sorted = [...releasesResponse.data].sort((a: any, b: any) => {
+    const aReleased = String(a.state || "") === "released" ? 1 : 0;
+    const bReleased = String(b.state || "") === "released" ? 1 : 0;
+    if (aReleased !== bReleased) return bReleased - aReleased;
+    return String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
+  });
+  const release = sorted[0];
+  const releaseId = String(release.id || "").trim();
+  const [routesResponse, proofsResponse, closeoutResponse] = await Promise.all([
+    client.from("makesafe_release_revision_routes")
+      .select("route_kind, required")
+      .eq("release_revision_id", releaseId)
+      .order("ordinal"),
+    client.from("ses_release_route_proofs")
+      .select("route_kind, proof_hash")
+      .eq("release_revision_id", releaseId),
+    client.from("makesafe_closeout_revisions")
+      .select("id, verified")
+      .eq("release_revision_id", releaseId)
+      .maybeSingle(),
+  ]);
+  if (routesResponse.error || proofsResponse.error) {
+    return classifySesReleaseSendProgress({});
+  }
+  const requiredKinds = (routesResponse.data || [])
+    .filter((row: any) => row.required !== false)
+    .map((row: any) => String(row.route_kind || "").trim())
+    .filter(Boolean);
+  const provedKinds = (proofsResponse.data || [])
+    .map((row: any) => String(row.route_kind || "").trim())
+    .filter(Boolean);
+  const closeoutVerified = !closeoutResponse.error &&
+    !!closeoutResponse.data &&
+    closeoutResponse.data.verified === true;
+  return classifySesReleaseSendProgress({
+    release_revision_id: releaseId,
+    release_state: String(release.state || ""),
+    required_route_kinds: requiredKinds,
+    proved_route_kinds: provedKinds,
+    closeout_verified: closeoutVerified,
+  });
 }
 
 export async function querySesReviewCockpitAction(
