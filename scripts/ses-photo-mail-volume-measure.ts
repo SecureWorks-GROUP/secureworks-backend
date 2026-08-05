@@ -130,7 +130,7 @@ async function main() {
     ),
     photo_stats AS (
       SELECT
-        a.docket_revision_id,
+        a.revision_id AS docket_revision_id,
         count(*)::int AS photo_count,
         coalesce(sum(a.size_bytes), 0)::bigint AS total_raw_bytes,
         coalesce(max(a.size_bytes), 0)::bigint AS max_photo_bytes
@@ -138,7 +138,7 @@ async function main() {
       WHERE a.role = 'completion_photo'
         AND a.size_bytes IS NOT NULL
         AND a.size_bytes > 0
-      GROUP BY a.docket_revision_id
+      GROUP BY a.revision_id
     )
     SELECT
       j.job_number,
@@ -170,7 +170,7 @@ async function main() {
     Number(r.total_raw_bytes) > MESSAGE_LIMIT
   );
   const overGroupPerFile = rows.filter((r) =>
-    Number(r.max_photo_bytes) > GROUP_PER_FILE
+    Number(r.max_photo_bytes) >= GROUP_PER_FILE
   );
   // AJS user-mailbox path: raw total vs 35 MiB. Group path also base64-expands.
   const overBase64Message = rows.filter((r) => {
@@ -210,7 +210,7 @@ async function main() {
       },
       cards_over_35mib_raw: overMessage.length,
       cards_over_35mib_base64_estimate: overBase64Message.length,
-      cards_with_any_photo_over_3mib: overGroupPerFile.length,
+      cards_with_any_photo_at_or_over_3mib: overGroupPerFile.length,
     },
     heaviest_10: rows.slice(0, 10).map((r) => ({
       job_number: r.job_number,

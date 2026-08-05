@@ -27,6 +27,7 @@
  */
 
 import type { SesBlocker } from "./ses_docket_envelope.ts";
+import { mlbRouteRequiresIntakeThreadReply } from "./ses_mlb_thread_reply.ts";
 import { sesRefusal, type SesRefusal } from "./ses_reporting_refusals.ts";
 
 /** 3 MiB — Graph direct fileAttachment POST (message, event, group post). */
@@ -145,24 +146,20 @@ export function resolveSesMailTransport(
 
 /**
  * Prepare-time transport from family matrix builder/family (before a release
- * route exists). Mirrors ses_mlb_thread_reply / buildEmailDrafts shape.
+ * route exists). Delegates to the execute-path authority
+ * (`mlbRouteRequiresIntakeThreadReply`) so prepare and SEND IT can never
+ * resolve different per-file ceilings for the same card.
  */
 export function resolveSesMailTransportForPrepare(args: {
   builder_key: string;
   family: string;
   route_kind: "photo" | "report" | "invoice" | "report_invoice";
 }): SesMailTransportKind {
-  const builder = String(args.builder_key || "").trim().toUpperCase();
-  const family = String(args.family || "").trim();
-  const mlbPhysical = builder === "MLB" && (
-    family === "physical_makesafe" ||
-    family === "temporary_fencing" ||
-    family === "repair" ||
-    family === "restoration"
-  );
   if (
-    mlbPhysical &&
-    (args.route_kind === "photo" || args.route_kind === "report")
+    mlbRouteRequiresIntakeThreadReply(args.route_kind, {
+      builder_key: args.builder_key,
+      family: args.family,
+    })
   ) {
     return "group_thread_reply";
   }
@@ -173,6 +170,21 @@ function perAttachmentLimit(transport: SesMailTransportKind): number {
   return transport === "group_thread_reply"
     ? GRAPH_ATTACHMENT_DIRECT_POST_MAX_BYTES
     : GRAPH_ATTACHMENT_UPLOAD_SESSION_MAX_BYTES;
+}
+
+/**
+ * Direct fileAttachment POST (group post) is documented as "under 3 MB", so an
+ * exactly-3-MiB file is refused by Graph; createUploadSession's 150 MB is an
+ * inclusive maximum.
+ */
+function attachmentExceedsLimit(
+  sizeBytes: number,
+  transport: SesMailTransportKind,
+  limit: number,
+): boolean {
+  return transport === "group_thread_reply"
+    ? sizeBytes >= limit
+    : sizeBytes > limit;
 }
 
 /**
@@ -242,7 +254,9 @@ export function evaluateSesPhotoMailVolume(
       SOURCES.create_upload_session,
     ];
 
-  const oversizeFiles = rows.filter((row) => row.size_bytes > perFileLimit);
+  const oversizeFiles = rows.filter((row) =>
+    attachmentExceedsLimit(row.size_bytes, transport, perFileLimit)
+  );
   if (oversizeFiles.length > 0) {
     const biggest = oversizeFiles.slice().sort((a, b) =>
       b.size_bytes - a.size_bytes

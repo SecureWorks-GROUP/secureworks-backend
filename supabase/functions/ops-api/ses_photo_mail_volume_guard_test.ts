@@ -20,6 +20,7 @@ import {
   sesPhotoMailVolumeBlocker,
   sesPhotoMailVolumeRefusal,
 } from "./ses_photo_mail_volume_guard.ts";
+import { mlbRouteRequiresIntakeThreadReply } from "./ses_mlb_thread_reply.ts";
 import { createSesGraphMailGateway } from "./ses_graph_mail_gateway.ts";
 
 function nBytes(n: number, name = "photo.jpg"): { name: string; size_bytes: number } {
@@ -78,6 +79,42 @@ Deno.test("resolveSesMailTransportForPrepare: MLB physical photo is group thread
     }),
     "user_mailbox",
   );
+});
+
+Deno.test("resolveSesMailTransportForPrepare agrees with the execute-path authority", () => {
+  const families = [
+    "physical_makesafe",
+    "temporary_fencing",
+    "repair",
+    "restoration",
+    "roof",
+    "assessment",
+  ];
+  const routeKinds: Array<"photo" | "report" | "invoice" | "report_invoice"> = [
+    "photo",
+    "report",
+    "invoice",
+    "report_invoice",
+  ];
+  for (const builder_key of ["MLB", "AJ", "AJS", "BW"]) {
+    for (const family of families) {
+      for (const route_kind of routeKinds) {
+        const expected =
+          mlbRouteRequiresIntakeThreadReply(route_kind, { builder_key, family })
+            ? "group_thread_reply"
+            : "user_mailbox";
+        assertEquals(
+          resolveSesMailTransportForPrepare({
+            builder_key,
+            family,
+            route_kind,
+          }),
+          expected,
+          `${builder_key}/${family}/${route_kind}`,
+        );
+      }
+    }
+  }
 });
 
 Deno.test("user mailbox: 70 ~450 KiB photos (~31 MiB) passes under 35 MiB default", () => {
@@ -139,6 +176,30 @@ Deno.test("group thread: single attachment over 3 MiB refuses (no upload session
     );
     assertStringIncludes(verdict.reason, "group-post");
   }
+});
+
+Deno.test("group thread: exactly 3 MiB refuses; user mailbox allows exactly 150 MiB", () => {
+  const atLimit = evaluateSesPhotoMailVolume(
+    [nBytes(GRAPH_ATTACHMENT_DIRECT_POST_MAX_BYTES, "exact.jpg")],
+    "group_thread_reply",
+  );
+  assertEquals(atLimit.ok, false);
+  if (!atLimit.ok) {
+    assertEquals(atLimit.exceeded, "group_post_no_upload_session");
+  }
+
+  const underLimit = evaluateSesPhotoMailVolume(
+    [nBytes(GRAPH_ATTACHMENT_DIRECT_POST_MAX_BYTES - 1, "just-under.jpg")],
+    "group_thread_reply",
+  );
+  assertEquals(underLimit.ok, true);
+
+  const uploadSessionAtLimit = evaluateSesPhotoMailVolume(
+    [nBytes(GRAPH_ATTACHMENT_UPLOAD_SESSION_MAX_BYTES, "exact.bin")],
+    "user_mailbox",
+    { message_size_limit_bytes: GRAPH_ATTACHMENT_UPLOAD_SESSION_MAX_BYTES },
+  );
+  assertEquals(uploadSessionAtLimit.ok, true);
 });
 
 Deno.test("group thread: base64 wire size over message ceiling refuses", () => {
