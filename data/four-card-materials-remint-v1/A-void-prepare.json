@@ -1,0 +1,17 @@
+{
+  "revision_id": "4090df7b-affd-5a39-8d19-547eb82f3c6d",
+  "state_after_prepare": "proposed",
+  "job_id": "d34b779e-e2f4-4f22-bc0b-9131b7e24997",
+  "xero_invoice_id": "cd5f7833-207b-4643-bb10-35879a72e814",
+  "invoice_number": "INV-1129",
+  "observed_status": "DRAFT",
+  "target_status": "DELETED",
+  "invoice_obligation_revision_id": "c8a9441a-3d7e-5e9d-a8a6-371c67f2e8bb",
+  "content_hash": "sha256:4090df7baffd7a398d19547eb82f3c6d3a6fe02e7adbbb7d4d3e972471d64201",
+  "reason": "Captain commercial remint INV-1129 two labour lines + materials four-card-materials-remint-v1 A",
+  "execute": {
+    "state": "confirmed",
+    "status": "DELETED",
+    "dispatched": true
+  }
+}

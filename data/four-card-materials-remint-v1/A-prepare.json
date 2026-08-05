@@ -1,0 +1,41 @@
+{
+  "state": "prepared",
+  "obligation_id": "0fc7ecb3-d2f7-4995-9b97-06370363f95e",
+  "revision_id": "4e715cf7-0f73-5f2b-b1ab-30258c200681",
+  "pricing_disposition": "priced_with_line_override",
+  "totals": {
+    "ex": 980,
+    "inc": 1078
+  },
+  "lines": [
+    {
+      "description": "MLB-25971 - initial attendance - 2 trades x 3 hours",
+      "quantity": 6,
+      "unit_price": 85,
+      "line_kind": "labour"
+    },
+    {
+      "description": "MLB-25971 - reattendance - 1 trade x 5 hours",
+      "quantity": 5,
+      "unit_price": 85,
+      "line_kind": "labour"
+    },
+    {
+      "description": "MLB-25971 - Materials: timber and bugle screws",
+      "quantity": 1,
+      "unit_price": 45,
+      "line_kind": "materials"
+    }
+  ],
+  "duplicate_probe": {
+    "allows_create": true,
+    "match_tier": null,
+    "ambiguity": "void_only"
+  },
+  "commercial_quantity_override": {
+    "decision_key": "four-card-materials-remint-v1-A-MLB-25971",
+    "override_kind": "commercial_quantity_not_rate",
+    "trade_reported_hours_per_trade": 3,
+    "sealed_billable_hours_floor": 3
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "revision_id": "8a506656-aeab-5ad8-bb8b-947bb3042bcd",
+  "state_after_prepare": "proposed",
+  "job_id": "047dbe8d-e632-4d29-adaa-5a3d42f38542",
+  "xero_invoice_id": "900feea2-756c-49e5-be9f-5770d40416a9",
+  "invoice_number": "INV-1131",
+  "observed_status": "DRAFT",
+  "target_status": "DELETED",
+  "invoice_obligation_revision_id": "8dc9da40-8ba6-54a5-9373-549d242adbaa",
+  "content_hash": "sha256:8a506656aeabaad87b8b947bb3042bcd8bef35946f5bd93b45b18433f1a4e7f8",
+  "reason": "Captain commercial remint INV-1131 four-card-materials-remint-v1 C",
+  "execute": {
+    "state": "confirmed",
+    "status": "DELETED",
+    "dispatched": true
+  }
+}

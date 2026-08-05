@@ -1,0 +1,35 @@
+{
+  "state": "prepared",
+  "obligation_id": "a366f7d4-a950-41ca-b74a-06f780a98684",
+  "revision_id": "ccf5cae1-a1b3-5b0a-b853-cd09f1275453",
+  "pricing_disposition": "priced_with_line_override",
+  "totals": {
+    "ex": 310,
+    "inc": 341
+  },
+  "lines": [
+    {
+      "description": "MLB-27335 - make-safe attendance - 1 trade x 3 hours",
+      "quantity": 3,
+      "unit_price": 85,
+      "line_kind": "labour"
+    },
+    {
+      "description": "MLB-27335 - Materials: timber, bugle screws, Sikaflex and flashing",
+      "quantity": 1,
+      "unit_price": 55,
+      "line_kind": "materials"
+    }
+  ],
+  "duplicate_probe": {
+    "allows_create": true,
+    "match_tier": null,
+    "ambiguity": "void_only"
+  },
+  "commercial_quantity_override": {
+    "decision_key": "four-card-materials-remint-v1-C-MLB-27335",
+    "override_kind": "commercial_quantity_not_rate",
+    "trade_reported_hours_per_trade": 2,
+    "sealed_billable_hours_floor": 3
+  }
+}

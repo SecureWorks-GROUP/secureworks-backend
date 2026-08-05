@@ -1,0 +1,13 @@
+{
+  "action": "prepare_ses_docket_revision",
+  "dry_run": false,
+  "results": [
+    {
+      "state": "ready",
+      "docket_revision_id": "c7a58f7f-1ea4-5b40-a467-4074ecd4e3a7",
+      "blockers": [],
+      "persisted": true,
+      "artifact_count": 50
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+[
+  {
+    "attendance_cycle_id": "a1630441-16e2-41cc-bd1f-286fc5897d73",
+    "trade_count": 1,
+    "labour_hours": 2,
+    "job_type": "Roof / tarp",
+    "work_done": "Investigated into the leak, pulled back tiles and noticed the valley tray side walls were bent down instead of being 80 degrees upright. The valley is 40cm from the water leak suggesting it would be the cause of water ingress. Then removed tiles covering the tray and rebent the valley side walls up to 80 degrees.",
+    "materials_used": [
+      "Temp fence panels",
+      "Bases / feet",
+      "Tarps / roof materials",
+      "Fixings / consumables",
+      "Other / none"
+    ],
+    "damage_cause": "Storm / wind",
+    "damage_description": "Make-safe type: Roof / tarp\nDamage: Water leak into cupboard of bedroom, water damage to cornice, shelves and carpet in the cupboard."
+  },
+  {
+    "attendance_cycle_id": "e773a6a2-dc6e-46f2-9a65-b768303a407d",
+    "trade_count": 1,
+    "labour_hours": 2,
+    "job_type": "Ceiling / water ingress",
+    "work_done": "Siliconed over cracked ridge cap pointing and large gaps between tiles. As well flashing taped larger gaps between tiles and re secured a batten that was unsecured.",
+    "materials_used": [
+      "Silicone x 1",
+      "Flashing tape x 1m",
+      "Tarps / roof materials",
+      "Fixings / consumables",
+      "Other / none"
+    ],
+    "damage_cause": "Storm / wind",
+    "damage_description": "Make-safe type: Ceiling / water ingress\nDamage: Water ingress into corner of cupboard in bedroom."
+  }
+]

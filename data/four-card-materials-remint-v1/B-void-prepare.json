@@ -1,0 +1,17 @@
+{
+  "revision_id": "a84d03e2-7ccc-59c0-8f53-c237d1ad36c3",
+  "state_after_prepare": "proposed",
+  "job_id": "7aa83351-a1c1-450f-af9d-77e7777da92a",
+  "xero_invoice_id": "fa60bc1a-863f-486b-9696-3d3b0b124040",
+  "invoice_number": "INV-1130",
+  "observed_status": "DRAFT",
+  "target_status": "DELETED",
+  "invoice_obligation_revision_id": "7e4bbf2d-c37e-5bf3-96f0-5f59c77cd4a6",
+  "content_hash": "sha256:a84d03e27cccf9c08f53c237d1ad36c35d3505a4877b60d9151b3271ff197b63",
+  "reason": "Captain commercial remint INV-1130 labour 3.5h + materials 55 four-card-materials-remint-v1 B",
+  "execute": {
+    "state": "confirmed",
+    "status": "DELETED",
+    "dispatched": true
+  }
+}

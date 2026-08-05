@@ -1,0 +1,15 @@
+[
+  {
+    "id": "883a4b6e-6713-4c1b-8bc5-2d13439623d8",
+    "file_name": "Make-Safe-Report-SWMS-26953-Gidgegannup-5a6842fd4c0d.pdf",
+    "created_at": "2026-08-05T09:23:10.18152+00:00",
+    "expected_raw_sha256": "sha256:5a6842fd4c0d4dbc7656b49f76bc1b7a8c6005d53fcdc1a984fdf736362a7168",
+    "revision_id": "ses-curated-report:SWMS-26953:2026-08-05-elevated-v1",
+    "narratives": [
+      "Make safe the roof structure under the roof-mounted hot water system.",
+      "Storm / wind. The hot water system on the roof is not engineered for the load. Timber beams have dipped under the weight.",
+      "Fitted two structural timber pieces with bugle screws from the base plate to the underpurlin, giving the roof extra support under the hot water system.",
+      "Timber 1 m. Bugle screws x 5."
+    ]
+  }
+]
