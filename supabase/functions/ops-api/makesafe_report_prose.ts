@@ -65,8 +65,6 @@ export function sanitiseReportProse(value: unknown): string {
   return String(value ?? "")
     .replace(/\u2014/g, "-")
     .replace(/\u2013/g, "-")
-    .replace(/—/g, "-")
-    .replace(/–/g, "-")
     .replace(/\r\n/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
@@ -136,12 +134,8 @@ function polishSentence(sentence: string, isContinuation: boolean): string {
   if (isContinuation && /^Giving\b/i.test(s)) {
     s = s.replace(/^Giving\b/i, "This gave");
   }
-  if (isContinuation && /^Also\s+([a-z])/i.test(s)) {
-    // "Also flashing-taped larger gaps..." is already a usable continuation.
-  }
   // Mid-clause trade shorthand: "create dip" → "creating a dip".
   s = s.replace(/\bcreate dip\b/gi, "creating a dip");
-  s = s.replace(/\bnot engineered,\s*creating\b/gi, "not engineered, creating");
   return ensureSentence(s);
 }
 
@@ -180,7 +174,7 @@ function paragraph(...parts: Array<string | string[]>): string {
   return sanitiseReportProse(polished.join(" "));
 }
 
-/** Quantified materials only. Tick-box noise is dropped unless nothing else remains. */
+/** Quantified materials only. Bare tick-box labels carry no quantity and are dropped. */
 export function quantifiedMaterialItems(materialsUsed: unknown): string[] {
   const raw = Array.isArray(materialsUsed)
     ? materialsUsed
@@ -190,10 +184,7 @@ export function quantifiedMaterialItems(materialsUsed: unknown): string[] {
   const items = raw
     .map((item) => text(item))
     .filter(Boolean);
-  const quantified = items.filter((item) =>
-    !MATERIALS_TICK_NOISE.has(item.toLowerCase())
-  );
-  return quantified.length ? quantified : [];
+  return items.filter((item) => !MATERIALS_TICK_NOISE.has(item.toLowerCase()));
 }
 
 function materialsParagraph(items: string[]): string {

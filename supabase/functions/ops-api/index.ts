@@ -37059,7 +37059,7 @@ function draftPackReportPayload(parsed: any, ctx: DraftPackContext, selectedPhot
     {
       scope: parsed.report.scope,
       findings: parsed.report.findings,
-      works: parsed.report.works || (ctx.service_report as any)?.notes,
+      works: parsed.report.works || checklist.work_done || (ctx.service_report as any)?.notes,
       materials: parsed.report.materials,
     },
     checklist,
