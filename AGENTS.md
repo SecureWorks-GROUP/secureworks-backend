@@ -1530,15 +1530,28 @@ Guard (Captain 2026-08-05): `ses_materials_charge_guard.ts` +
 `materials_used` has real entries (not `None` / `Other / none` placeholders)
 and the proposal would have zero materials charge lines, refuse with
 `materials_charge_figure_required` naming the materials and asking for **one**
-ex-GST figure. Answers: operator `materials_charge_ex_gst` (one marked charge
-line) or typed priced `materials[]` lines. Never raise labour hours or the
-sealed rate to cover materials. The adapter always surfaces
-`checklist.materials_used` onto `hours_and_materials` so the guard can see it.
+ex-GST figure. Never raise labour hours or the sealed rate to cover materials.
 
-**Families changed:** `standard_labour_materials` only. **AJS/AJBR
-(`ajs_labour_materials`) still silently omit non-picket materials** — same
-class of defect, out of this slice; only the picket carve-out bills materials
-there. Temporary-fence hire bases are unchanged. Regression:
+The operator answers on the OPERATOR surface, never by rewriting trade
+evidence: the `materials_charge` body field of `prepare_ses_docket_revision`
+(`{schema: secureworks.makesafe.materials-charge-figure/v1, amount_ex_gst,
+authorised_by, authorised_at, decision_key, reason}`), single-card selections
+only, folded into the docket input hash so two different figures can never
+collide on one revision id. Typed priced `materials[]` lines remain a valid
+answer. A supplied figure is never discarded: nothing recorded, materials
+already priced, or a basis with no charge line each refuse with
+`materials_charge_figure_unsupported`. The invoice line the builder reads is
+`<ref> - Materials used: <labels>` — trade wording only, and label
+normalisation replaces underscores but keeps hyphens.
+
+**Families changed:** `standard_labour_materials` only (non-AJS builder x
+physical-shaped family). That is also the exact scope of the adapter's
+`materials_used` surfacing onto `hours_and_materials` — it is inside the docket
+input hash, so widening it to AJS, temporary fencing or report-only cards would
+re-key those revisions and drop their Docs Ready signoff for no pricing effect.
+**AJS/AJBR (`ajs_labour_materials`) still silently omit non-picket materials** —
+same class of defect, out of this slice; only the picket carve-out bills
+materials there. Temporary-fence hire bases are unchanged. Regression:
 `ses_materials_charge_guard_test.ts` and the silent-labour-only case in
 `ses_prepare_docket_revision_test.ts`.
 

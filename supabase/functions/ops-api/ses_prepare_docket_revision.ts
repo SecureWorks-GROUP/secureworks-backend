@@ -51,7 +51,11 @@ import {
   buildSesSwmsGenerationPlan,
   type SesSwmsGenerationPlan,
 } from "./ses_swms_template.ts";
-import { decideStandardLabourMaterialsCharge } from "./ses_materials_charge_guard.ts";
+import {
+  decideStandardLabourMaterialsCharge,
+  MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
+  type SesMaterialsChargeAuthorisation,
+} from "./ses_materials_charge_guard.ts";
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
@@ -637,6 +641,7 @@ function attendanceLineSubject(family: SesFamilyId): string {
 function localInvoiceProposal(
   input: SesAssemblerInputV1,
   row: SesFamilyMatrixRow,
+  operatorMaterialsCharge: SesMaterialsChargeAuthorisation | null = null,
 ): {
   proposal: Record<string, unknown> | null;
   blocker: SesBlocker | null;
@@ -650,6 +655,29 @@ function localInvoiceProposal(
         "invoice_reference_missing",
         "A local invoice proposal requires a non-empty builder WO/PO reference.",
         "Recover the canonical builder reference before assembling any invoice line.",
+      ),
+    };
+  }
+  // An authorised money figure is never silently dropped. Only the
+  // standard_labour_materials basis can host it; every other basis refuses
+  // loudly rather than pricing as if the figure had not been sent.
+  if (
+    operatorMaterialsCharge &&
+    row.invoice_basis !== "standard_labour_materials"
+  ) {
+    return {
+      proposal: null,
+      blocker: blocked(
+        MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
+        `A materials charge of $${operatorMaterialsCharge.amount_ex_gst} ex GST was authorised, but this card prices on ${row.invoice_basis}, which has no operator materials charge line.`,
+        "Remove materials_charge and re-run. The one-figure materials answer exists only for the standard_labour_materials basis (non-AJS physical, repair and restoration cards).",
+        ["canonical-input-envelope", "sealed-family-matrix"],
+        [],
+        {
+          invoice_basis: row.invoice_basis,
+          materials_charge_ex_gst: operatorMaterialsCharge.amount_ex_gst,
+          decision_key: operatorMaterialsCharge.decision_key,
+        },
       ),
     };
   }
@@ -788,6 +816,10 @@ function localInvoiceProposal(
       canonicalRate,
     ),
   ];
+  // Counted where the typed-materials loop actually pushes, never inferred by
+  // subtracting a labour-line constant: a future travel or allowance line would
+  // otherwise read as a priced materials line and disable the guard silently.
+  let pricedMaterialsLineCount = 0;
   let existingFencePickets: number | null = null;
   if (
     row.invoice_basis === "ajs_labour_materials" &&
@@ -940,6 +972,7 @@ function localInvoiceProposal(
         }
       }
       lines.push(lineItem(`${ref} - ${description}`, quantity, unitPrice));
+      pricedMaterialsLineCount += 1;
     }
   }
 
@@ -954,17 +987,12 @@ function localInvoiceProposal(
       ? facts.materials_used
       : object(object(input.cycle_facts.trade_report).checklist_json)
         .materials_used;
-    const labourLineCount = 1;
-    const pricedMaterialsLineCount = Math.max(
-      0,
-      lines.length - labourLineCount,
-    );
     const materialsDecision = decideStandardLabourMaterialsCharge({
       materials_used: materialsUsed,
-      materials_charge_ex_gst: facts.materials_charge_ex_gst,
+      operator_charge: operatorMaterialsCharge,
       priced_materials_line_count: pricedMaterialsLineCount,
     });
-    if (materialsDecision.action === "ask_one_figure") {
+    if (materialsDecision.action === "refuse") {
       return {
         proposal: null,
         blocker: blocked(
@@ -984,18 +1012,12 @@ function localInvoiceProposal(
     if (materialsDecision.action === "charge_line") {
       lines.push(
         lineItem(
-          `${ref} - ${materialsDecision.description_suffix}`,
+          `${ref} - ${materialsDecision.description}`,
           1,
           materialsDecision.amount_ex_gst,
         ),
       );
-      materialsChargeMeta = {
-        materials_charge_ex_gst: materialsDecision.amount_ex_gst,
-        materials_used: materialsDecision.materials,
-        source: "operator_materials_charge_figure",
-        // Not an auto-estimate — figure was supplied, materials list is trade evidence.
-        estimate: false,
-      };
+      materialsChargeMeta = materialsDecision.provenance;
     }
   }
 
@@ -1020,9 +1042,7 @@ function localInvoiceProposal(
       gst: Math.round(subtotal * 10) / 100,
       total_inc_gst: Math.round(subtotal * 110) / 100,
       xero_identity: null,
-      ...(materialsChargeMeta
-        ? { materials_charge: materialsChargeMeta }
-        : {}),
+      ...(materialsChargeMeta ? { materials_charge: materialsChargeMeta } : {}),
     },
     blocker: null,
   };
@@ -1791,6 +1811,13 @@ function validateRequest(request: SesPrepareRequest): void {
     ) {
       throw new TypeError("board_batch requires limit between 1 and 50");
     }
+    // One authorised materials figure describes one card's materials. Spreading
+    // it across a batch would bill cards nobody priced.
+    if (request.materials_charge) {
+      throw new TypeError(
+        "materials_charge requires a job_id or job_number selection",
+      );
+    }
     return;
   }
   throw new TypeError("selection.mode is invalid");
@@ -1825,7 +1852,15 @@ async function prepareOne(
   stagesMs.T0 = 0;
   const input = await measure("T1", () => deps.resolveInput(selection));
   const blockers = inputBlockers(input);
-  const inputContentHash = await sesSha256(input);
+  // An operator materials figure changes what the invoice says, so it belongs
+  // inside the revision identity. Wrapping only when one is supplied keeps the
+  // ordinary hash byte-identical, so no existing Docs Ready signoff is churned.
+  const operatorMaterialsCharge = request.materials_charge || null;
+  const inputContentHash = await sesSha256(
+    operatorMaterialsCharge
+      ? { input, operator_materials_charge: operatorMaterialsCharge }
+      : input,
+  );
   if (!request.force_refresh && deps.findCurrentRevision) {
     const current = await deps.findCurrentRevision(
       input.identity.job_id,
@@ -2947,7 +2982,10 @@ async function prepareOne(
   const priced = row
     ? await measure(
       "T6",
-      () => Promise.resolve(localInvoiceProposal(input, row)),
+      () =>
+        Promise.resolve(
+          localInvoiceProposal(input, row, operatorMaterialsCharge),
+        ),
     )
     : { proposal: null, blocker: null };
   if (!row) stagesMs.T6 = 0;

@@ -30,6 +30,10 @@ import {
 } from "./ses_docket_persistence.ts";
 import { mlbPhysicalUsesOrdinaryMailSendFallback } from "./ses_mlb_thread_reply.ts";
 import {
+  SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
+  type SesMaterialsChargeAuthorisation,
+} from "./ses_materials_charge_guard.ts";
+import {
   prepare_ses_docket_revision as prepareSesDocketRevision,
   SES_ASSESSMENT_RECIPE_VERSION,
   SES_DOCKET_REVIEW_SPEC_VERSION,
@@ -1841,6 +1845,7 @@ async function labourProposal(
   builderKey: string,
   family: string,
   hoursAndMaterials: Record<string, unknown>,
+  materialsCharge?: SesMaterialsChargeAuthorisation,
 ) {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === builderKey && candidate.family === family
@@ -1848,10 +1853,27 @@ async function labourProposal(
   const input = fixtureInput(row);
   input.cycle_facts.hours_and_materials = hoursAndMaterials;
   const result = (await prepareSesDocketRevision(
-    request(input.identity.job_id),
+    {
+      ...request(input.identity.job_id),
+      ...(materialsCharge ? { materials_charge: materialsCharge } : {}),
+    },
     dependencies(input),
   )).results[0];
   return result;
+}
+
+/** The operator's sanctioned one-figure answer. Writes no trade evidence. */
+function materialsChargeAuthorisation(
+  amount: number,
+): SesMaterialsChargeAuthorisation {
+  return {
+    schema: SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
+    amount_ex_gst: amount,
+    authorised_by: "captain@secureworksgroup.app",
+    authorised_at: "2026-08-05T02:00:00.000Z",
+    decision_key: "materials-figure-2026-08-05-fixture",
+    reason: "Operator commercial materials figure for the recorded materials.",
+  };
 }
 
 Deno.test("a two-hour MLB trade report prices at the sealed three-hour floor instead of blocking", async () => {
@@ -1909,24 +1931,32 @@ Deno.test(
     assert(blocker, "expected named materials_charge_figure_required blocker");
     assertStringIncludes(blocker.reason, "Polycarb disposal / tipping");
     assertStringIncludes(blocker.reason, "Screws and fixings");
+    // The recovery action must name an ops path the operator can actually run,
+    // never a trade-evidence rewrite.
     assertStringIncludes(
       blocker.recovery_action,
-      "materials_charge_ex_gst",
+      "prepare_ses_docket_revision",
     );
+    assertStringIncludes(blocker.recovery_action, "materials_charge");
 
-    // Operator answers the one-figure question — materials become a separate
-    // charge line. Sealed labour floor/rate stay untouched.
-    const answered = await labourProposal("MLB", "physical_makesafe", {
-      trades: 2,
-      hours_per_trade: 2,
-      rate_ex_gst: 85,
-      materials: [],
-      materials_used: [
-        "Polycarb disposal / tipping",
-        "Screws and fixings",
-      ],
-      materials_charge_ex_gst: 65,
-    });
+    // Operator answers the one-figure question on the sanctioned prepare
+    // surface — materials become a separate charge line. Sealed labour
+    // floor/rate stay untouched and no trade row is written.
+    const answered = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 2,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: [
+          "Polycarb disposal / tipping",
+          "Screws and fixings",
+        ],
+      },
+      materialsChargeAuthorisation(65),
+    );
     assertEquals(answered.blockers.map((item) => item.reason_code), []);
     const proposal = answered.invoice_proposal as Record<string, unknown>;
     assert(proposal, "expected proposal after materials figure is supplied");
@@ -1941,11 +1971,125 @@ Deno.test(
     );
     assertEquals(lines[1].quantity, 1);
     assertEquals(lines[1].unit_price_ex_gst, 65);
+    // The builder reads this line verbatim on a real Xero invoice: trade
+    // wording only, never our internal description of where the figure came
+    // from.
+    assertEquals(
+      String(lines[1].description).includes("operator"),
+      false,
+      "internal jargon must not reach the builder-facing invoice line",
+    );
     assertEquals(proposal.subtotal_ex_gst, 575);
     const charge = proposal.materials_charge as Record<string, unknown>;
     assertEquals(charge.estimate, false);
     assertEquals(charge.source, "operator_materials_charge_figure");
     assertEquals(charge.materials_charge_ex_gst, 65);
+    assertEquals(charge.authorised_by, "captain@secureworksgroup.app");
+    assertEquals(charge.decision_key, "materials-figure-2026-08-05-fixture");
+    // The sealed labour facts are untouched by the commercial figure.
+    assertEquals(proposal.reported_hours_per_trade, 2);
+    assertEquals(proposal.billable_hours_per_trade, 3);
+  },
+);
+
+Deno.test(
+  "an authorised materials figure is never silently discarded",
+  async () => {
+    // Nothing to charge for: the figure must refuse, not vanish into a
+    // complete-looking labour-only proposal.
+    const nothingRecorded = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 3,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: ["Other / none"],
+      },
+      materialsChargeAuthorisation(65),
+    );
+    assertEquals(nothingRecorded.invoice_proposal, null);
+    assertEquals(
+      nothingRecorded.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_unsupported"
+      ),
+      true,
+    );
+
+    // Already priced by typed lines: charging again would double-bill, so the
+    // operator is asked to choose rather than having one silently dropped.
+    const alreadyPriced = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 3,
+        rate_ex_gst: 85,
+        materials_used: ["Weatherproof sheet x 1"],
+        materials: [{
+          description: "Weatherproof sheet and fixings",
+          quantity: 1,
+          unit_price_ex_gst: 95,
+        }],
+      },
+      materialsChargeAuthorisation(65),
+    );
+    assertEquals(alreadyPriced.invoice_proposal, null);
+    assertEquals(
+      alreadyPriced.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_unsupported"
+      ),
+      true,
+    );
+
+    // AJS prices on ajs_labour_materials, which has no operator materials
+    // charge line: refuse rather than price as though the figure never came.
+    const wrongBasis = await labourProposal(
+      "AJS",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 3,
+        rate_ex_gst: 80,
+        materials: [],
+      },
+      materialsChargeAuthorisation(65),
+    );
+    assertEquals(wrongBasis.invoice_proposal, null);
+    assertEquals(
+      wrongBasis.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_unsupported"
+      ),
+      true,
+    );
+  },
+);
+
+Deno.test(
+  "AJS materials_used keeps its existing labour-only pricing path",
+  async () => {
+    // Deliberately unchanged this slice: AJS/AJBR still omit non-picket
+    // materials, so the guard must not fire on that basis.
+    const result = await labourProposal("AJS", "physical_makesafe", {
+      trades: 2,
+      hours_per_trade: 3,
+      rate_ex_gst: 80,
+      materials: [],
+      materials_used: ["Polycarb disposal / tipping"],
+    });
+    assertEquals(
+      result.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_required"
+      ),
+      false,
+    );
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assert(proposal, "AJS labour-only pricing is unchanged by this guard");
+    assertEquals(
+      (proposal.line_items as Array<Record<string, unknown>>).length,
+      1,
+    );
   },
 );
 

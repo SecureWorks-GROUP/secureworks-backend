@@ -28,6 +28,11 @@ import {
 } from "./ses_family_matrix.ts";
 import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
 import {
+  parseSesMaterialsChargeAuthorisation,
+  type SesMaterialsChargeAuthorisation,
+  SesMaterialsChargeAuthorisationError,
+} from "./ses_materials_charge_guard.ts";
+import {
   type ApprovedDraftThreadCandidate,
   pickIntakeWorkOrderEmailSubject,
   resolveIntakeThreadCoordinates,
@@ -1077,26 +1082,30 @@ function explicitHoursAndMaterials(
   // it only on checklist_json is what let standard_labour_materials emit silent
   // labour-only proposals while the report still listed materials. Surfacing is
   // read-only; the prepare guard decides charge vs ask-one-figure.
+  //
+  // Deliberately scoped to the `standard_labour_materials` rows only (non-AJS
+  // builder x physical-shaped family). This key lands in the envelope the
+  // docket input hash covers, so widening it to AJS, temporary fencing or
+  // report-only cards would re-key every such revision and drop its Docs Ready
+  // signoff for no pricing effect.
   if (
-    Object.hasOwn(checklist, "materials_used") &&
-    checklist.materials_used !== null &&
-    checklist.materials_used !== undefined
+    !isAjsBuilderKey(classification.builder) &&
+    isSesPhysicalShapedFamily(classification.family)
   ) {
-    facts.materials_used = checklist.materials_used;
-  } else if (
-    Object.hasOwn(pricing, "materials_used") &&
-    pricing.materials_used !== null &&
-    pricing.materials_used !== undefined
-  ) {
-    facts.materials_used = pricing.materials_used;
+    if (
+      Object.hasOwn(checklist, "materials_used") &&
+      checklist.materials_used !== null &&
+      checklist.materials_used !== undefined
+    ) {
+      facts.materials_used = checklist.materials_used;
+    } else if (
+      Object.hasOwn(pricing, "materials_used") &&
+      pricing.materials_used !== null &&
+      pricing.materials_used !== undefined
+    ) {
+      facts.materials_used = pricing.materials_used;
+    }
   }
-  // Operator answer to the materials one-figure question (ex GST). Never invent
-  // this — only copy an explicit trade/pricing fact when present.
-  copy(
-    "materials_charge_ex_gst",
-    pricing.materials_charge_ex_gst,
-    checklist.materials_charge_ex_gst,
-  );
   if (
     isAjsBuilderKey(classification.builder) &&
     isSesPhysicalShapedFamily(classification.family)
@@ -3276,12 +3285,39 @@ export function normalizeSesPrepareRequest(
       400,
     );
   }
+  // Operator answer to `materials_charge_figure_required`. One authorised
+  // figure describes ONE card's materials, so a board batch can never carry it.
+  let materialsCharge: SesMaterialsChargeAuthorisation | null = null;
+  if (body?.materials_charge != null) {
+    if (mode !== "job_id" && mode !== "job_number") {
+      throw new SesAssemblerAdapterError(
+        "ses_materials_charge_selection_invalid",
+        "materials_charge applies to one named card; select it with selection.mode job_id or job_number.",
+        400,
+      );
+    }
+    try {
+      materialsCharge = parseSesMaterialsChargeAuthorisation(
+        body.materials_charge,
+      );
+    } catch (error) {
+      if (error instanceof SesMaterialsChargeAuthorisationError) {
+        throw new SesAssemblerAdapterError(
+          "ses_materials_charge_invalid",
+          error.message,
+          error.httpStatus,
+        );
+      }
+      throw error;
+    }
+  }
   return {
     selection: mode === "job_id"
       ? { mode, job_id: jobId }
       : mode === "job_number"
       ? { mode, job_number: jobNumber }
       : { mode: "board_batch", limit },
+    ...(materialsCharge ? { materials_charge: materialsCharge } : {}),
     idempotency_key: idempotencyKey,
     assembler_version: SES_ASSEMBLER_VERSION,
     dry_run: body.dry_run,
