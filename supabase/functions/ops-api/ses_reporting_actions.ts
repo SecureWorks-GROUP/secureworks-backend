@@ -42,6 +42,7 @@ import {
   type SesCockpitDocket,
   type SesReviewRoute,
 } from "./ses_review_cockpit.ts";
+import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 import {
   ajsPackCc,
   ajsPackRecipients,
@@ -2283,20 +2284,78 @@ export async function getSesReviewablePackAction(
       }).`,
     });
   }
+  const storedBlockers: Record<string, unknown>[] =
+    Array.isArray(docket.blockers)
+      ? (docket.blockers as Record<string, unknown>[])
+      : [];
+  const reviewBlockers: Record<string, unknown>[] = sourceRefusal
+    ? [...storedBlockers, sourceRefusal as unknown as Record<string, unknown>]
+    : storedBlockers;
+  const envelope = object(docket.envelope);
+  // Presentation honesty for the review surface: a green READY tick over a
+  // trust refusal is the defect this field removes. Kind is refused / ready /
+  // incomplete — never collapsed into a single warning.
+  const presentation = presentSesPackHonesty({
+    docket: {
+      id: docket.id,
+      state: docket.state ?? null,
+      pre_xero_docs_ready: envelope.pre_xero_docs_ready === true ||
+        docket.pre_xero_docs_ready === true,
+      blockers: storedBlockers,
+    },
+    review_blockers: sourceRefusal ? [sourceRefusal] : [],
+  });
+  // Enrich the ORIGINAL refusal objects rather than rebuilding them from the
+  // normalized shape: `evidence` and `decision_key` are the only things telling
+  // curated_source_superseded apart from supporting_report_pdf_missing.
+  const normalizedBlockerByCode = new Map(
+    presentation.blockers.map((blocker) => [blocker.code, blocker]),
+  );
+  const responseBlockers = reviewBlockers.map((raw) => {
+    const source: Record<string, unknown> = raw && typeof raw === "object"
+      ? { ...(raw as Record<string, unknown>) }
+      : { fact: String(raw ?? "") };
+    const code = String(
+      source.code || source.reason_code || source.reasonCode ||
+        "",
+    ).trim();
+    const normalized = code ? normalizedBlockerByCode.get(code) : undefined;
+    const fact = String(source.fact || source.reason || source.message || "")
+      .trim();
+    const recovery = String(
+      source.recovery_action || source.recoveryAction || "",
+    ).trim();
+    return {
+      ...source,
+      state: "refused" as const,
+      code,
+      fact: fact || normalized?.fact || `Pack refused: ${code}.`,
+      recovery_action: recovery || normalized?.recovery_action ||
+        "Resolve the named refusal and re-prepare the pack.",
+      category: String(source.category || normalized?.category || "ses_docket"),
+    };
+  });
   return {
     review,
     docket: sourceRefusal
       ? {
         ...docket,
-        blockers: [
-          ...(Array.isArray(docket.blockers) ? docket.blockers : []),
-          sourceRefusal,
-        ],
+        blockers: reviewBlockers,
       }
       : docket,
     artifacts,
     suppressed_artifacts: suppressedArtifacts,
-    blockers: sourceRefusal ? [sourceRefusal] : [],
+    // All named refusals (stored + read-time trust), not only sourceRefusal.
+    blockers: responseBlockers,
+    // Operator-facing honesty: ready vs refused vs incomplete, with reason.
+    presentation: {
+      kind: presentation.kind,
+      state: presentation.state,
+      reason: presentation.reason,
+      pre_xero_docs_ready: presentation.pre_xero_docs_ready,
+      review_state: presentation.review_state,
+      docket_revision_id: presentation.docket_revision_id,
+    },
     audit_trail: historyResponse.data || [],
     // Explicit Invoice-tab projection for bound DRAFTs: the UI must prefer the
     // real Xero PDF (or honest unavailable) over any local proposal invention.

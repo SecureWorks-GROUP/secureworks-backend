@@ -320,6 +320,7 @@ import {
   resolveSesFamilyMatrixRow,
   SES_FAMILY_MATRIX_VERSION,
 } from './ses_family_matrix.ts'
+import { presentSesPackHonesty } from './ses_pack_presentation.ts'
 import {
   assertReportingIntakeAccounting as _assertReportingIntakeAccounting,
 } from './makesafe_reporting_accounting.ts'
@@ -14025,6 +14026,14 @@ export interface MakesafeReportPackLike {
   docket_revision_id?: string | null
   pre_xero_docs_ready?: boolean
   blockers?: Array<Record<string, unknown>> | null
+  /** Honest presentation kind: ready | refused | incomplete | sent | none */
+  presentation_kind?: string | null
+  /** Operator-facing reason for refused/incomplete, or the awaiting-send fact on a ready authorised-not-sent pack */
+  presentation_reason?: string | null
+  /** Raw legacy pack status; not presentation authority when a docket exists */
+  legacy_pack_status?: string | null
+  failed_step?: string | null
+  error_detail?: unknown
 }
 export interface MakesafeSurfacing {
   normalizedSub: string | null
@@ -14821,6 +14830,9 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
       docket_revision_id: scopedPack.docket_revision_id || null,
       pre_xero_docs_ready: scopedPack.pre_xero_docs_ready === true,
       blockers: scopedPack.blockers || [],
+      presentation_kind: scopedPack.presentation_kind || null,
+      presentation_reason: scopedPack.presentation_reason || null,
+      legacy_pack_status: scopedPack.legacy_pack_status || null,
     } : null,
     ...(scopedDocFlags || {}),
     // pack_sent is only meaningful (defined) when the caller loaded the marker.
@@ -15749,7 +15761,7 @@ async function makesafePipeline(
         ? _fetchAllByJobIdChunked(
           client,
           'makesafe_report_packs',
-          'id, job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at',
+          'id, job_id, pack_kind, status, report_doc_id, invoice_doc_id, swms_doc_id, sent_at, failed_step, error_detail',
           stageDependentJobIds,
         )
         : emptyRows,
@@ -15851,6 +15863,48 @@ async function makesafePipeline(
     const legacyStatus = String(rowPack?.status || '').toLowerCase()
     const legacySent = MAKESAFE_PACK_SENT_STATUSES.includes(legacyStatus) ||
       legacyStatus === 'authorised_not_sent'
+    // Pack presentation honesty: a ready U4 docket never publishes stale legacy
+    // `failed`, and a refused docket names its reason instead of green-ticking.
+    // Strictly additive — every derivation input below (status, review_state,
+    // blockers) keeps the value the board ladder, chip truth and M1 already read.
+    const hasReportDoc = makesafeDocBooleans(docsMap[j.id]).has_report_doc
+    const packPresentation = presentSesPackHonesty({
+      // The current docket is fed in whenever one exists. `legacySent` gates
+      // DERIVATION only: withholding the docket here would tell an
+      // authorised-not-sent card that no revision is assembled, which is false.
+      docket: docket
+        ? {
+          id: docket.id,
+          state: docket.state,
+          pre_xero_docs_ready: docket.pre_xero_docs_ready === true,
+          blockers: docket.blockers,
+        }
+        : null,
+      legacy_pack: rowPack
+        ? {
+          status: rowPack.status,
+          failed_step: rowPack.failed_step,
+          error_detail: rowPack.error_detail,
+        }
+        : null,
+      // The durable send marker only. `legacySent` also covers
+      // authorised_not_sent, which is money raised and NOT sent — folding it in
+      // here would present an unsent pack as sent and hide the resume chip.
+      pack_sent: packSentMap[j.id] === true,
+      has_report_doc: hasReportDoc,
+      has_trade_report: !!reportMap[j.id],
+    })
+    // `report_pack` stays exactly the derivation shape it has always been: the
+    // status/review_state/blockers the ladder, the SENT chip and M1 consume are
+    // the raw legacy + docket values, never the presentation state. A synthetic
+    // pack block is never minted for a card with no row and no docket, so M1's
+    // `!pack` short-circuit keeps firing. Honesty rides alongside, on the
+    // `presentation_*` keys only.
+    const packHonestyFields = {
+      presentation_kind: packPresentation.kind,
+      presentation_reason: packPresentation.reason,
+      legacy_pack_status: packPresentation.legacy_pack_status,
+    }
     const packForBoard: MakesafeReportPackLike | null = docket && !legacySent
       ? {
         ...(rowPack || {}),
@@ -15862,11 +15916,28 @@ async function makesafePipeline(
         pre_xero_docs_ready: docket.pre_xero_docs_ready === true,
         blockers: Array.isArray(docket.blockers) ? docket.blockers : [],
         cycle_attribution: docketIsCurrent ? 'bound' : null,
+        ...packHonestyFields,
       }
       : rowPack
-      ? { ...rowPack, cycle_attribution: packIsCurrent ? 'bound' : null }
+      ? {
+        ...rowPack,
+        cycle_attribution: packIsCurrent ? 'bound' : null,
+        ...packHonestyFields,
+      }
       : null
     const enriched = enrichMakesafeBoardJob(j, detail, assignMap[j.id] || [], reportMap[j.id], invoiceMap[j.id], docsMap[j.id] || [], packSentMap[j.id] === true, packForBoard)
+    // Additive top-level honesty so a card with no pack row and no docket can
+    // still say incomplete/refused without inventing a `report_pack` object.
+    // Kind `none` is nothing to say: leaving the key off keeps `pack_status`
+    // null on every packless New/Allocated card, as it has always been.
+    enriched.pack_presentation = packPresentation.kind === 'none' ? null : {
+      kind: packPresentation.kind,
+      state: packPresentation.state,
+      reason: packPresentation.reason,
+      drafted: packPresentation.drafted,
+      legacy_pack_status: packPresentation.legacy_pack_status,
+      docket_revision_id: packPresentation.docket_revision_id,
+    }
     const captainMark = captainActionMap[j.id]
     enriched.captain_action = captainMark
       ? {

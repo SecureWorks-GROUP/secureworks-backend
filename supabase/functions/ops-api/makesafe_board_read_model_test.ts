@@ -933,6 +933,8 @@ Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers wit
         docket_revision_id: "revision-ready",
         pre_xero_docs_ready: true,
         blockers: [],
+        presentation_kind: "ready",
+        presentation_reason: null,
         local_invoice_proposal: { total_inc: 999999 },
       },
     }),
@@ -940,31 +942,60 @@ Deno.test("canonical board exposes U4 Docs Ready identity and typed blockers wit
   assertEquals(ready.pack.docket_revision_id, "revision-ready");
   assertEquals(ready.pack.pre_xero_docs_ready, true);
   assertEquals(ready.pack.drafted, true);
+  assertEquals(ready.pack.presentation_kind, "ready");
+  assertEquals(ready.pack.state, "drafted");
   assertEquals(ready.blockers.real, []);
   assertEquals("local_invoice_proposal" in ready.pack, false);
 
   const [blocked] = buildCanonicalMakesafeRows([
     baseJob("trade_report_in", "u4-blocked", {
       report_pack: {
-        status: "drafted",
+        status: "refused",
         review_state: "U4_BLOCKED",
         docket_revision_id: "revision-blocked",
         pre_xero_docs_ready: false,
+        presentation_kind: "refused",
+        presentation_reason: "not projected to the board",
         local_invoice_proposal: { total_inc: 999999 },
         blockers: [{
           reason_code: "spine_missing_source",
           reason: "not projected to the board",
+          fact: "not projected to the board",
         }],
       },
     }),
   ]);
   assertEquals(blocked.pack.pre_xero_docs_ready, false);
+  assertEquals(blocked.pack.presentation_kind, "refused");
+  assertEquals(blocked.pack.state, "refused");
   assertEquals(blocked.blockers.real, [{
     code: "spine_missing_source",
     category: "ses_docket",
     docket_revision_id: "revision-blocked",
+    fact: "not projected to the board",
   }]);
   assertEquals("local_invoice_proposal" in blocked.pack, false);
+});
+
+Deno.test("legacy failed pack over a ready docket presents ready, not failed", () => {
+  const [row] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", "legacy-failed-ready-docket", {
+      report_pack: {
+        // Stale legacy status that used to green-tick or red-lie on the board.
+        status: "failed",
+        review_state: "READY",
+        docket_revision_id: "revision-live",
+        pre_xero_docs_ready: true,
+        blockers: [],
+        legacy_pack_status: "failed",
+      },
+    }),
+  ]);
+  assertEquals(row.pack.presentation_kind, "ready");
+  assertEquals(row.pack.state, "drafted");
+  assertEquals(row.pack.pre_xero_docs_ready, true);
+  assertEquals(row.pack.legacy_pack_status, "failed");
+  assertEquals(row.blockers.real, []);
 });
 
 Deno.test("restoration stays explicitly typed and sealed through ops and trade board projections", () => {
@@ -978,13 +1009,16 @@ Deno.test("restoration stays explicitly typed and sealed through ops and trade b
         makesafe_job_family: "general_makesafe",
       },
       report_pack: {
-        status: "drafted",
+        status: "refused",
         review_state: "U4_BLOCKED",
         docket_revision_id: "restoration-revision",
         pre_xero_docs_ready: false,
+        presentation_kind: "refused",
+        presentation_reason: "no curated report yet",
         blockers: [{
           reason_code: "curated_source_missing",
           reason: "no curated report yet",
+          fact: "no curated report yet",
         }],
       },
     }),
@@ -998,6 +1032,7 @@ Deno.test("restoration stays explicitly typed and sealed through ops and trade b
     code: "curated_source_missing",
     category: "ses_docket",
     docket_revision_id: "restoration-revision",
+    fact: "no curated report yet",
   }]);
 
   const trade = projectTradeMakesafeBoard([canonical], {

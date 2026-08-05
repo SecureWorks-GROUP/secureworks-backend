@@ -1546,13 +1546,30 @@ board — the key is absent from EVERY `makesafe_board` row (0 of 447 on
 2026-08-04), so a parse returns "missing", not the server's value. It is an
 internal seam: `makesafePipeline` synthesises `packForBoard` from the CURRENT
 docket revision (grep the `packForBoard` initialiser in `index.ts`; the line
-number drifts every release) and
-sets `review_state: 'READY'`
-whenever `pre_xero_docs_ready` is true, with no `makesafe_report_packs` row
-required. A card with ZERO rows in that table therefore still has
-`packState: READY`. Treating the absent key as null makes `docsReady()` fall to
-its legacy `!pack` branch and invents a second, non-existent blocker — which
-happened on SWMS-261109 before it was caught.
+number drifts every release) and sets `review_state: 'READY'` whenever
+`pre_xero_docs_ready` is true, with no `makesafe_report_packs` row required. A
+card with ZERO rows in that table therefore still has `packState: READY`.
+Treating the absent key as null makes `docsReady()` fall to its legacy `!pack`
+branch and invents a second, non-existent blocker — which happened on
+SWMS-261109 before it was caught.
+
+Pack HONESTY is a strictly parallel channel, never a derivation input.
+`presentSesPackHonesty` (`ses_pack_presentation.ts`) is the one producer, and
+its kinds are **ready / refused / incomplete / sent / none** — never collapse
+them; a refusal names its fact (an honest stop, not a green tick and not a
+send-pipeline failure). Its output rides on `pack_presentation` (additive,
+top-level) plus `report_pack.presentation_kind` / `presentation_reason` /
+`legacy_pack_status`, and `get_ses_reviewable_pack` returns it under its own
+`presentation` key. It must NEVER be written into `report_pack.status`,
+`review_state` or `blockers`: those are what the stage ladder, the SENT chip and
+M1 read, and a presentation string there moves columns. Likewise never mint a
+`report_pack` object for a card with no pack row and no docket — M1's `!pack`
+short-circuit is load-bearing, and kind `none` stamps nothing at all so
+`pack_status` stays null on every packless New/Allocated card. Board
+`pack_status` stays a STRING; changing its type needs a
+`MAKESAFE_BOARD_CONTRACT_VERSION` bump. The current docket is always an input to
+the presentation even when the legacy row is sent/authorised-not-sent; that gate
+belongs to derivation only.
 
 ## Curated Bind Materials Are A Subset Of The Service Report, Never A Super-Set
 
