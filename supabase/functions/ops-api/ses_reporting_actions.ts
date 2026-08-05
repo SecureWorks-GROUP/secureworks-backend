@@ -47,6 +47,11 @@ import {
   sesReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import {
+  applyMlbThreadReplyToRoute,
+  isMlbPhysicalReleaseShape,
+  routingIntakeThread,
+} from "./ses_mlb_thread_reply.ts";
+import {
   sesSha256,
   sesSha256Bytes,
   stableUuidFromSha256,
@@ -523,7 +528,21 @@ export function resolveDocketRoutes(
     };
   });
 
-  if (!ajs) return resolvedRoutes;
+  if (!ajs) {
+    // MLB physical (Captain 2026-08-05): report + photo must reply on the intake
+    // thread. Billing (invoice) stays a new message to makesafes@ with
+    // report + SWMS + AUTHORISED invoice. Missing thread_id → not ready.
+    const classification = object(object(object(docket.envelope).v2).classification);
+    const family = String(
+      classification.family || object(docket.review_spec).family || "",
+    );
+    const shape = { builder_key: builderKey, family };
+    if (!isMlbPhysicalReleaseShape(shape)) return resolvedRoutes;
+    const thread = routingIntakeThread(routing);
+    return resolvedRoutes.map((route) =>
+      applyMlbThreadReplyToRoute(route, shape, thread)
+    );
+  }
 
   // AJS/AJBR two-email shape (skill backend release contract / Captain 2026-08-04):
   //   route_kind report_invoice = report PDF + real Xero invoice PDF
@@ -4342,6 +4361,32 @@ export async function executeSesReleaseRevisionAction(
   const exactDocketRevisionIds = members.map((member: any) =>
     String(member.docket_revision_id || "")
   );
+  // Reload primary docket envelope so MLB intake-thread coordinates survive
+  // even when release_revision_routes has no reply columns (no migration).
+  const primaryDocket = members[0]
+    ? await client.from("makesafe_docket_revisions").select(
+      "id,envelope,review_spec",
+    ).eq("id", members[0].docket_revision_id).maybeSingle()
+    : { data: null, error: null };
+  const primaryEnvelope = object(primaryDocket.data?.envelope);
+  const primaryRouting = object(object(primaryEnvelope.v2).routing);
+  const primaryClassification = object(
+    object(primaryEnvelope.v2).classification,
+  );
+  const primaryShape = {
+    builder_key: String(
+      primaryClassification.builder_key ||
+        object(primaryDocket.data?.review_spec).builder_key ||
+        "",
+    ),
+    family: String(
+      primaryClassification.family ||
+        object(primaryDocket.data?.review_spec).family ||
+        "",
+    ),
+  };
+  const primaryThread = routingIntakeThread(primaryRouting);
+
   for (const kind of requiredOrder) {
     const route = routes.find((candidate: any) =>
       candidate.route_kind === kind
@@ -4392,6 +4437,36 @@ export async function executeSesReleaseRevisionAction(
         );
       }
     }
+    // MLB physical report/photo: stamp intake-thread reply coordinates and
+    // refuse when the thread id is missing. Never open a quiet new thread.
+    const sendRoute = applyMlbThreadReplyToRoute(
+      {
+        ...route,
+        route_kind: kind,
+        ready: true,
+      },
+      primaryShape,
+      primaryThread,
+    );
+    if (
+      sendRoute.requires_thread_reply &&
+      !String(sendRoute.reply_to_thread_id || "").trim()
+    ) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "intake_thread_reply_unavailable",
+          "MLB physical report and photo routes must reply on the work-order intake thread. The docket has no intake_thread_id — re-prepare after the intake case source is bound, or recover the thread id. A new thread is refused.",
+          {
+            evidence: {
+              route_kind: kind,
+              builder_key: primaryShape.builder_key,
+              family: primaryShape.family,
+            },
+          },
+        ),
+      );
+    }
     const effect = await buildSesEffect({
       org_id: args.org_id,
       effect_kind: "route_send",
@@ -4404,6 +4479,9 @@ export async function executeSesReleaseRevisionAction(
         body: route.body,
         body_hash: route.body_hash,
         attachment_hashes: route.attachment_hashes,
+        reply_to_thread_id: sendRoute.reply_to_thread_id || null,
+        reply_to_graph_message_id: sendRoute.reply_to_graph_message_id || null,
+        requires_thread_reply: sendRoute.requires_thread_reply === true,
       },
     });
     const adapter: SesExternalAdapter<
@@ -4423,7 +4501,12 @@ export async function executeSesReleaseRevisionAction(
     const sent = await executeSesExternalEffect({
       store,
       effect,
-      payload: route,
+      payload: {
+        ...route,
+        reply_to_thread_id: sendRoute.reply_to_thread_id || null,
+        reply_to_graph_message_id: sendRoute.reply_to_graph_message_id || null,
+        requires_thread_reply: sendRoute.requires_thread_reply === true,
+      },
       adapter,
       actor: args.actor,
     });

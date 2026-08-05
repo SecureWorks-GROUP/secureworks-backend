@@ -31,6 +31,18 @@ export interface SesReviewRoute {
   body: string;
   attachment_hashes: string[];
   ready: boolean;
+  /**
+   * MLB physical report/photo: Graph Groups conversationThreadId for the
+   * mailer / work-order intake thread. Required when requires_thread_reply.
+   */
+  reply_to_thread_id?: string | null;
+  /**
+   * Optional group post id (audit / anchor). Group-thread reply uses
+   * reply_to_thread_id; this is not a silent admin@ createReply fallback.
+   */
+  reply_to_graph_message_id?: string | null;
+  /** When true, send must reply on the intake thread or refuse. */
+  requires_thread_reply?: boolean;
 }
 
 const SES_EMAIL_ADDRESS_RE = /^[^\s@<>,;:]+@[^\s@<>,;:]+$/;

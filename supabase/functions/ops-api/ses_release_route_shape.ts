@@ -3,15 +3,22 @@
 // Captain ruling 2026-08-04 (AJS/AJBR only):
 //   two emails — (A) report + invoice together, (B) photos follow-up;
 //   TO workorders@ajs.build + thread participants; CC ses@; from admin@.
-// MLB and every other builder keep the three-route shape (report, photo, invoice).
+//
+// Captain ruling 2026-08-05 (MLB physical / Maylands):
+//   three emails, two destinations — still route_kind order report/photo/invoice:
+//   1. report  — report-only reply on the intake thread (thread_id required)
+//   2. photo   — photos-only reply on the same thread (thread_id required)
+//   3. invoice — billing pack to makesafes@ (report + AUTHORISED invoice + SWMS)
+//   AJS shape is untouched.
 
 import type { SesRouteKind } from "./ses_review_cockpit.ts";
 import {
   AJS_WORK_ORDERS_MAILBOX,
   SES_RELEASE_CC,
 } from "./ses_graph_mail_gateway.ts";
+import { isMlbBuilderKey } from "./ses_mlb_thread_reply.ts";
 
-export { AJS_WORK_ORDERS_MAILBOX, SES_RELEASE_CC };
+export { AJS_WORK_ORDERS_MAILBOX, SES_RELEASE_CC, isMlbBuilderKey };
 
 export type SesReleaseBuilderKey = "AJS" | "AJBR" | "MLB" | "WESTERN" | string;
 
@@ -28,6 +35,11 @@ export const SES_UNIVERSAL_ROUTE_ORDER: SesRouteKind[] = [
 export const SES_AJS_ROUTE_ORDER: SesRouteKind[] = [
   "report_invoice",
   "photo",
+];
+
+/** MLB physical still uses the three-route order (report / photo / invoice). */
+export const SES_MLB_PHYSICAL_ROUTE_ORDER: SesRouteKind[] = [
+  ...SES_UNIVERSAL_ROUTE_ORDER,
 ];
 
 export function isAjsBuilderKey(builderKey: unknown): boolean {

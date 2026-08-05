@@ -28,6 +28,8 @@ export interface SesMailGateway {
 export const SES_RELEASE_MAILBOX = "admin@secureworkswa.com.au";
 export const SES_RELEASE_CC = "ses@secureworkswa.com.au";
 export const AJS_WORK_ORDERS_MAILBOX = "workorders@ajs.build";
+/** M365 group that hosts make-safe work-order intake threads (monitor-ses). */
+export const SES_INTAKE_GROUP_MAIL = "ses@secureworkswa.com.au";
 
 /** Non-visible carrier for crash-safe Sent Items / Drafts reconciliation. */
 export const SES_OPERATION_HEADER = "x-secureworks-ses-operation";
@@ -197,6 +199,11 @@ export interface SesGraphMailGatewayDeps {
   /** Delay between Sent Items polls in ms (default 500). */
   sentPollDelayMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Resolve the M365 group id that hosts intake threads (default: ses@ group).
+   * Overridable for tests.
+   */
+  resolveIntakeGroupId?: (graphJson: SesGraphJson) => Promise<string>;
 }
 
 const MESSAGE_LIST_SELECT =
@@ -291,10 +298,54 @@ function draftMessagePayload(
   };
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  // Chunked to avoid call-stack limits on large photo sets.
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+async function resolveSesIntakeGroupId(
+  graphJson: SesGraphJson,
+): Promise<string> {
+  const filter = encodeURIComponent(`mail eq '${SES_INTAKE_GROUP_MAIL}'`);
+  const response = await graphJson(
+    `https://graph.microsoft.com/v1.0/groups?$filter=${filter}&$select=id,mail`,
+    { method: "GET" },
+    [200],
+  );
+  const groups = Array.isArray(response?.value) ? response.value : [];
+  if (groups.length === 0) {
+    throw new Error(
+      `No M365 group found for intake mail ${SES_INTAKE_GROUP_MAIL}`,
+    );
+  }
+  if (groups.length > 1) {
+    throw new Error(
+      `Ambiguous group resolution: ${groups.length} groups match ${SES_INTAKE_GROUP_MAIL}`,
+    );
+  }
+  const id = String(groups[0]?.id || "").trim();
+  if (!id) {
+    throw new Error(
+      `Group resolution for ${SES_INTAKE_GROUP_MAIL} returned no id`,
+    );
+  }
+  return id;
+}
+
 /**
  * Build the sealed release Graph mail gateway.
  * Creates a draft on admin@, checkpoints the draft id, attaches bytes, sends,
  * then proves the message in Sent Items by the SES operation header.
+ *
+ * MLB physical report/photo: when reply_to_thread_id is set, posts a reply on
+ * the ses@ M365 group intake thread (conversationThread: reply). That path
+ * never falls through to a new admin@ thread. requires_thread_reply without a
+ * thread id refuses.
  */
 export function createSesGraphMailGateway(
   deps: SesGraphMailGatewayDeps,
@@ -304,6 +355,8 @@ export function createSesGraphMailGateway(
   const pollDelayMs = deps.sentPollDelayMs ?? 500;
   const sleep = deps.sleep ||
     ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const resolveGroupId = deps.resolveIntakeGroupId ||
+    ((graphJson: SesGraphJson) => resolveSesIntakeGroupId(graphJson));
 
   const reconcileSentOnly = async (
     externalToken: string,
@@ -340,6 +393,85 @@ export function createSesGraphMailGateway(
     return filterMessagesByOperationToken(drafts, externalToken);
   };
 
+  /**
+   * Reply on the ses@ group work-order intake thread.
+   * Proof: list newest posts on the thread and match the exact HTML body we
+   * sent (operation token is not placed in builder-facing body; body identity
+   * is the proof coordinate).
+   */
+  const sendGroupThreadReply = async (
+    route: Record<string, any>,
+    context: { external_token: string; operation_key: string },
+    threadId: string,
+    attachments: SesRouteAttachment[],
+    html: string,
+  ): Promise<SesRouteSendResult> => {
+    const groupId = await resolveGroupId(deps.graphJson);
+    const postAttachments = attachments.map((attachment) => ({
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      name: attachment.name,
+      contentType: attachment.contentType,
+      contentBytes: bytesToBase64(attachment.bytes),
+    }));
+    // Checkpoint a stable operation key before the fire-and-forget reply so a
+    // crash mid-send can still be reconciled by human review of the thread.
+    await deps.checkpointDraft(
+      context.operation_key,
+      `group-thread:${groupId}:${threadId}`,
+    );
+    await deps.graphJson(
+      `https://graph.microsoft.com/v1.0/groups/${
+        encodeURIComponent(groupId)
+      }/threads/${encodeURIComponent(threadId)}/reply`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          post: {
+            body: { contentType: "HTML", content: html },
+            ...(postAttachments.length
+              ? { attachments: postAttachments }
+              : {}),
+          },
+        }),
+      },
+      [202],
+    );
+    // Prove the post landed on the thread by exact body match.
+    let matchedPostId = "";
+    for (let attempt = 0; attempt < pollAttempts; attempt++) {
+      const listed = await deps.graphJson(
+        `https://graph.microsoft.com/v1.0/groups/${
+          encodeURIComponent(groupId)
+        }/threads/${
+          encodeURIComponent(threadId)
+        }/posts?$select=id,body,createdDateTime&$orderby=createdDateTime desc&$top=10`,
+        { method: "GET" },
+        [200],
+      );
+      const posts = Array.isArray(listed?.value) ? listed.value : [];
+      const match = posts.find((post: any) => {
+        const content = String(post?.body?.content || "");
+        return content === html || content.includes(html.slice(0, 120));
+      });
+      if (match?.id) {
+        matchedPostId = String(match.id);
+        break;
+      }
+      if (attempt + 1 < pollAttempts) await sleep(pollDelayMs);
+    }
+    if (!matchedPostId) {
+      throw new Error(
+        `Group thread reply accepted but the post is not yet proven on thread ${threadId} for token ${context.external_token}`,
+      );
+    }
+    return {
+      message_id: matchedPostId,
+      state: "sent",
+      operation_token: context.external_token,
+    };
+  };
+
   return {
     async createDraftAndSend(route, context) {
       const attachments = await deps.loadAttachments(
@@ -360,6 +492,26 @@ export function createSesGraphMailGateway(
           "SES operation token must not appear in builder-facing subject or body",
         );
       }
+      const threadId = String(
+        route.reply_to_thread_id || route.intake_thread_id || "",
+      ).trim();
+      const requiresThread = route.requires_thread_reply === true;
+      if (requiresThread && !threadId) {
+        throw new Error(
+          "Route requires an intake-thread reply but reply_to_thread_id is missing; refusing to open a new thread",
+        );
+      }
+      if (threadId) {
+        // MLB physical report/photo: reply on the ses@ group intake thread.
+        return await sendGroupThreadReply(
+          route,
+          context,
+          threadId,
+          attachments,
+          html,
+        );
+      }
+
       const replyToId = String(
         route.reply_to_graph_message_id ||
           route.in_reply_to_graph_message_id ||
@@ -374,9 +526,12 @@ export function createSesGraphMailGateway(
 
       let message: any;
       if (replyToId) {
-        // Reply on the builder work-order thread when the intake graph id is known.
+        // Optional mailbox createReply when a user-mailbox message id is known
+        // (not the group post id). Prefer thread_id for intake replies.
         message = await deps.graphJson(
-          `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(replyToId)}/createReply`,
+          `https://graph.microsoft.com/v1.0/users/${
+            encodeURIComponent(mailbox)
+          }/messages/${encodeURIComponent(replyToId)}/createReply`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -386,7 +541,9 @@ export function createSesGraphMailGateway(
         );
       } else {
         message = await deps.graphJson(
-          `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages`,
+          `https://graph.microsoft.com/v1.0/users/${
+            encodeURIComponent(mailbox)
+          }/messages`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -403,7 +560,9 @@ export function createSesGraphMailGateway(
         await deps.uploadAttachment(mailbox, String(message.id), attachment);
       }
       await deps.graphJson(
-        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(String(message.id))}/send`,
+        `https://graph.microsoft.com/v1.0/users/${
+          encodeURIComponent(mailbox)
+        }/messages/${encodeURIComponent(String(message.id))}/send`,
         { method: "POST" },
         [202],
       );
@@ -424,7 +583,9 @@ export function createSesGraphMailGateway(
       const draftId = String(drafts[0].id || "");
       if (!draftId) return [];
       await deps.graphJson(
-        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}/send`,
+        `https://graph.microsoft.com/v1.0/users/${
+          encodeURIComponent(mailbox)
+        }/messages/${encodeURIComponent(draftId)}/send`,
         { method: "POST" },
         [202],
       );

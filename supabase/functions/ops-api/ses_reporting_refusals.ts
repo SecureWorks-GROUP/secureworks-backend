@@ -34,6 +34,8 @@ const FACTS = {
     "The current Xero invoice is not AUTHORISED, so its real invoice PDF cannot be released.",
   route_draft_missing:
     "A required builder email draft is missing from the current docket revision.",
+  intake_thread_reply_unavailable:
+    "The MLB physical report or photo route must reply on the work-order intake thread, but no intake_thread_id is available.",
   route_recipient_invalid:
     "A release email route contains text that is not an email recipient.",
   canonical_recipient_missing:

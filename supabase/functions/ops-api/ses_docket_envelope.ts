@@ -150,6 +150,14 @@ export interface SesAssemblerInputV1 {
       url: string;
       source: "intake" | "job_detail" | "email_recovery";
     }>;
+    /**
+     * Graph Groups conversationThreadId from makesafe_intake_case_sources.
+     * Plumbed onto envelope.routing for MLB physical report/photo reply.
+     */
+    intake_thread_id?: string | null;
+    /** Group post id of the chosen intake source (audit anchor). */
+    intake_post_id?: string | null;
+    intake_conversation_id?: string | null;
   };
   cycle_facts: {
     trade_report: Record<string, unknown> | null;
@@ -273,6 +281,10 @@ export interface SesManifestV2 {
     report_to: string;
     photo_to: string;
     invoice_to: string;
+    /** Graph Groups conversationThreadId for MLB physical report/photo reply. */
+    intake_thread_id?: string;
+    intake_post_id?: string;
+    intake_conversation_id?: string;
   };
   items: Record<string, SesObligationState>;
   deliverables: Array<{
