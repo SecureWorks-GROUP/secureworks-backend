@@ -51,6 +51,15 @@ import {
   buildSesSwmsGenerationPlan,
   type SesSwmsGenerationPlan,
 } from "./ses_swms_template.ts";
+import {
+  carriedMaterialsChargeDecision,
+  decideStandardLabourMaterialsCharge,
+  MATERIALS_CHARGE_DECISION_FACT,
+  MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
+  materialsChargeDecisionMarker,
+  recordedMaterialsUsed,
+  type SesMaterialsChargeStandingDecision,
+} from "./ses_materials_charge_guard.ts";
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
@@ -236,6 +245,15 @@ export interface SesPrepareDependencies {
     jobId: string,
     inputContentHash: SesSha256,
   ) => Promise<SesPreparedRevision | null>;
+  /**
+   * The `materials_charge` provenance already committed on this card's most
+   * recent docket revision for this attendance cycle, so a prepare that omits
+   * the body figure inherits the Captain's answer instead of re-asking.
+   */
+  resolvePriorMaterialsCharge?: (args: {
+    job_id: string;
+    attendance_cycle_id: string;
+  }) => Promise<unknown>;
   persist?: (payload: SesPersistPayload) => Promise<{ committed_at: string }>;
   now?: () => Date;
 }
@@ -633,9 +651,22 @@ function attendanceLineSubject(family: SesFamilyId): string {
   }
 }
 
+/**
+ * The card's recorded materials-used fact, in one place. The envelope surfaces
+ * it only for the families the materials-charge guard governs, so the trade
+ * report's own checklist stays the fallback.
+ */
+function recordedMaterialsFact(input: SesAssemblerInputV1): unknown {
+  const facts = input.cycle_facts.hours_and_materials || {};
+  if (Object.hasOwn(facts, "materials_used")) return facts.materials_used;
+  return object(object(input.cycle_facts.trade_report).checklist_json)
+    .materials_used;
+}
+
 function localInvoiceProposal(
   input: SesAssemblerInputV1,
   row: SesFamilyMatrixRow,
+  materialsChargeDecision: SesMaterialsChargeStandingDecision | null = null,
 ): {
   proposal: Record<string, unknown> | null;
   blocker: SesBlocker | null;
@@ -649,6 +680,40 @@ function localInvoiceProposal(
         "invoice_reference_missing",
         "A local invoice proposal requires a non-empty builder WO/PO reference.",
         "Recover the canonical builder reference before assembling any invoice line.",
+      ),
+    };
+  }
+  // A materials-charge decision is never silently dropped. Only the
+  // standard_labour_materials basis can host one; every other basis refuses
+  // loudly rather than pricing as if the operator had said nothing.
+  // Inheritance is already basis-gated, so only a body-supplied decision
+  // reaches this.
+  if (
+    materialsChargeDecision &&
+    row.invoice_basis !== "standard_labour_materials"
+  ) {
+    const charged = materialsChargeDecision.decision === "charge";
+    return {
+      proposal: null,
+      blocker: blocked(
+        MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
+        `${
+          charged
+            ? `A materials charge of $${materialsChargeDecision.authorisation.amount_ex_gst} ex GST was authorised`
+            : "A no-materials-charge decision was recorded"
+        }, but this card prices on ${row.invoice_basis}, which has no operator materials charge line.`,
+        "Drop the materials_charge body key and re-run. The materials-charge decision exists only for the standard_labour_materials basis (non-AJS physical, repair and restoration cards).",
+        ["canonical-input-envelope", "sealed-family-matrix"],
+        [],
+        {
+          invoice_basis: row.invoice_basis,
+          materials_charge_ex_gst: charged
+            ? materialsChargeDecision.authorisation.amount_ex_gst
+            : 0,
+          decision_key: charged
+            ? materialsChargeDecision.authorisation.decision_key
+            : materialsChargeDecision.clearance.decision_key,
+        },
       ),
     };
   }
@@ -787,6 +852,10 @@ function localInvoiceProposal(
       canonicalRate,
     ),
   ];
+  // Counted where the typed-materials loop actually pushes, never inferred by
+  // subtracting a labour-line constant: a future travel or allowance line would
+  // otherwise read as a priced materials line and disable the guard silently.
+  let pricedMaterialsLineCount = 0;
   let existingFencePickets: number | null = null;
   if (
     row.invoice_basis === "ajs_labour_materials" &&
@@ -939,8 +1008,55 @@ function localInvoiceProposal(
         }
       }
       lines.push(lineItem(`${ref} - ${description}`, quantity, unitPrice));
+      pricedMaterialsLineCount += 1;
     }
   }
+
+  // MLB / standard_labour_materials: never emit a silent labour-only proposal
+  // when the trade recorded materials_used. No general materials unit-price
+  // list exists — do not invent one. Either accept a priced materials line /
+  // operator one-figure charge / recorded no-charge decision, or refuse with a
+  // named ask-one-figure blocker.
+  // AJS/AJBR (ajs_labour_materials) keep their picket carve-out unchanged.
+  let materialsChargeMeta: Record<string, unknown> | null = null;
+  if (row.invoice_basis === "standard_labour_materials") {
+    const materialsDecision = decideStandardLabourMaterialsCharge({
+      materials_used: recordedMaterialsFact(input),
+      standing_decision: materialsChargeDecision,
+      priced_materials_line_count: pricedMaterialsLineCount,
+    });
+    if (materialsDecision.action === "refuse") {
+      return {
+        proposal: null,
+        blocker: blocked(
+          materialsDecision.reason_code,
+          materialsDecision.reason,
+          materialsDecision.recovery_action,
+          ["canonical-input-envelope", "trade-materials-used"],
+          [],
+          {
+            materials_used: materialsDecision.materials,
+            invoice_basis: row.invoice_basis,
+            priced_materials_line_count: pricedMaterialsLineCount,
+          },
+        ),
+      };
+    }
+    if (materialsDecision.action === "charge_line") {
+      lines.push(
+        lineItem(
+          `${ref} - ${materialsDecision.description}`,
+          1,
+          materialsDecision.amount_ex_gst,
+        ),
+      );
+      materialsChargeMeta = materialsDecision.provenance;
+    }
+    if (materialsDecision.action === "no_charge_recorded") {
+      materialsChargeMeta = materialsDecision.provenance;
+    }
+  }
+
   const subtotal = Math.round(
     lines.reduce((sum, line) => sum + Number(line.amount_ex_gst || 0), 0) *
       100,
@@ -962,6 +1078,7 @@ function localInvoiceProposal(
       gst: Math.round(subtotal * 10) / 100,
       total_inc_gst: Math.round(subtotal * 110) / 100,
       xero_identity: null,
+      ...(materialsChargeMeta ? { materials_charge: materialsChargeMeta } : {}),
     },
     blocker: null,
   };
@@ -1730,6 +1847,14 @@ function validateRequest(request: SesPrepareRequest): void {
     ) {
       throw new TypeError("board_batch requires limit between 1 and 50");
     }
+    // One authorised materials figure describes one card's materials. Spreading
+    // it across a batch would bill cards nobody priced, and withdrawing across
+    // a batch would strip figures from cards nobody reviewed.
+    if (request.materials_charge || request.materials_charge_cleared) {
+      throw new TypeError(
+        "materials_charge requires a job_id or job_number selection",
+      );
+    }
     return;
   }
   throw new TypeError("selection.mode is invalid");
@@ -1764,7 +1889,55 @@ async function prepareOne(
   stagesMs.T0 = 0;
   const input = await measure("T1", () => deps.resolveInput(selection));
   const blockers = inputBlockers(input);
-  const inputContentHash = await sesSha256(input);
+  const matrix = resolveSesFamilyMatrixRow({
+    builder_key: input.classification.builder_key,
+    family: input.classification.family,
+    strata: input.classification.strata,
+    own_template_requested: input.classification.own_template_requested,
+    site_suburb: input.source.site_suburb,
+  });
+  // The card carries a standing materials-charge decision — UNSET, SET or
+  // NONE — and it changes what the invoice says, so the decided states belong
+  // inside the revision identity. UNSET wraps nothing, which keeps the ordinary
+  // hash byte-identical and churns no existing Docs Ready signoff.
+  //
+  // An OMITTED body key inherits whatever this card's newest revision decided
+  // for the same attendance cycle and the same recorded materials, in either
+  // direction: a figure keeps billing and a withdrawal keeps not billing. Only
+  // an explicit body value moves the decision. Inheritance is bounded to the
+  // basis whose pricing has a charge line at all, so a card reclassified onto
+  // another basis cannot carry a stale decision into a refusal nobody asked for.
+  let materialsChargeDecision: SesMaterialsChargeStandingDecision | null =
+    request.materials_charge
+      ? { decision: "charge", authorisation: request.materials_charge }
+      : request.materials_charge_cleared
+      ? { decision: "none", clearance: request.materials_charge_cleared }
+      : null;
+  if (
+    !materialsChargeDecision &&
+    matrix.ok &&
+    matrix.row.invoice_basis === "standard_labour_materials" &&
+    deps.resolvePriorMaterialsCharge &&
+    recordedMaterialsUsed(recordedMaterialsFact(input)).length > 0
+  ) {
+    materialsChargeDecision = carriedMaterialsChargeDecision({
+      prior_materials_charge: await deps.resolvePriorMaterialsCharge({
+        job_id: input.identity.job_id,
+        attendance_cycle_id: input.attendance.current_attendance_cycle_id,
+      }),
+      materials_used: recordedMaterialsFact(input),
+    });
+  }
+  const inputContentHash = await sesSha256(
+    materialsChargeDecision?.decision === "charge"
+      ? {
+        input,
+        operator_materials_charge: materialsChargeDecision.authorisation,
+      }
+      : materialsChargeDecision?.decision === "none"
+      ? { input, materials_charge_cleared: materialsChargeDecision.clearance }
+      : input,
+  );
   if (!request.force_refresh && deps.findCurrentRevision) {
     const current = await deps.findCurrentRevision(
       input.identity.job_id,
@@ -1773,13 +1946,6 @@ async function prepareOne(
     if (current) return current;
   }
 
-  const matrix = resolveSesFamilyMatrixRow({
-    builder_key: input.classification.builder_key,
-    family: input.classification.family,
-    strata: input.classification.strata,
-    own_template_requested: input.classification.own_template_requested,
-    site_suburb: input.source.site_suburb,
-  });
   stagesMs.T2 = 0;
   let applicabilityBlocker: SesBlocker | null = null;
   if (!matrix.ok) {
@@ -2886,11 +3052,29 @@ async function prepareOne(
   const priced = row
     ? await measure(
       "T6",
-      () => Promise.resolve(localInvoiceProposal(input, row)),
+      () =>
+        Promise.resolve(
+          localInvoiceProposal(input, row, materialsChargeDecision),
+        ),
     )
     : { proposal: null, blocker: null };
   if (!row) stagesMs.T6 = 0;
-  if (priced.blocker) addBlocker(blockers, priced.blocker);
+  if (priced.blocker) {
+    // A decision made while the card is blocked for some OTHER pricing reason
+    // has no proposal to ride on. Stamping it here is what keeps the standing
+    // decision durable on every revision, so the next prepare inherits this
+    // answer rather than an older one.
+    if (materialsChargeDecision && !priced.proposal) {
+      priced.blocker.facts = {
+        ...(priced.blocker.facts || {}),
+        [MATERIALS_CHARGE_DECISION_FACT]: materialsChargeDecisionMarker(
+          materialsChargeDecision,
+          recordedMaterialsUsed(recordedMaterialsFact(input)),
+        ),
+      };
+    }
+    addBlocker(blockers, priced.blocker);
+  }
   if (priced.proposal) {
     artifacts.push(
       await artifactFromText({

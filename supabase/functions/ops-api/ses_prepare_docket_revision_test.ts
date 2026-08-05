@@ -30,6 +30,11 @@ import {
 } from "./ses_docket_persistence.ts";
 import { mlbPhysicalUsesOrdinaryMailSendFallback } from "./ses_mlb_thread_reply.ts";
 import {
+  materialsChargeDecisionFromRevision,
+  SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
+  type SesMaterialsChargeAuthorisation,
+} from "./ses_materials_charge_guard.ts";
+import {
   prepare_ses_docket_revision as prepareSesDocketRevision,
   SES_ASSESSMENT_RECIPE_VERSION,
   SES_DOCKET_REVIEW_SPEC_VERSION,
@@ -1841,6 +1846,8 @@ async function labourProposal(
   builderKey: string,
   family: string,
   hoursAndMaterials: Record<string, unknown>,
+  materialsCharge?: SesMaterialsChargeAuthorisation | "cleared",
+  dependencyOverrides: Partial<SesPrepareDependencies> = {},
 ) {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === builderKey && candidate.family === family
@@ -1848,10 +1855,38 @@ async function labourProposal(
   const input = fixtureInput(row);
   input.cycle_facts.hours_and_materials = hoursAndMaterials;
   const result = (await prepareSesDocketRevision(
-    request(input.identity.job_id),
-    dependencies(input),
+    {
+      ...request(input.identity.job_id),
+      ...(materialsCharge === "cleared"
+        ? {
+          materials_charge_cleared: {
+            cleared_by: "captain@secureworksgroup.app",
+            cleared_at: "2026-08-05T03:00:00.000Z",
+            decision_key: "materials-none-2026-08-05-fixture",
+            reason: "No materials charge on this card.",
+          },
+        }
+        : materialsCharge
+        ? { materials_charge: materialsCharge }
+        : {}),
+    },
+    dependencies(input, dependencyOverrides),
   )).results[0];
   return result;
+}
+
+/** The operator's sanctioned one-figure answer. Writes no trade evidence. */
+function materialsChargeAuthorisation(
+  amount: number,
+): SesMaterialsChargeAuthorisation {
+  return {
+    schema: SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
+    amount_ex_gst: amount,
+    authorised_by: "captain@secureworksgroup.app",
+    authorised_at: "2026-08-05T02:00:00.000Z",
+    decision_key: "materials-figure-2026-08-05-fixture",
+    reason: "Operator commercial materials figure for the recorded materials.",
+  };
 }
 
 Deno.test("a two-hour MLB trade report prices at the sealed three-hour floor instead of blocking", async () => {
@@ -1881,6 +1916,558 @@ Deno.test("a two-hour MLB trade report prices at the sealed three-hour floor ins
   assertEquals(lines[0].unit_price_ex_gst ?? lines[0].unit_price, 85);
   assertEquals(proposal.subtotal_ex_gst, 510);
 });
+
+// The defect that survived every prior suite: trade materials_used is printed on
+// the report and omitted from the invoice, so a complete-looking labour-only
+// proposal goes out in the builder's favour. This test is the structural catch.
+Deno.test(
+  "MLB physical with materials_used cannot produce a silent labour-only proposal",
+  async () => {
+    const silent = await labourProposal("MLB", "physical_makesafe", {
+      trades: 2,
+      hours_per_trade: 2,
+      rate_ex_gst: 85,
+      materials: [],
+      materials_used: [
+        "Polycarb disposal / tipping",
+        "Screws and fixings",
+      ],
+    });
+    assertEquals(
+      silent.invoice_proposal,
+      null,
+      "old behaviour produced labour-only $510 with materials absent — that must be impossible",
+    );
+    const blocker = silent.blockers.find((item) =>
+      item.reason_code === "materials_charge_figure_required"
+    );
+    assert(blocker, "expected named materials_charge_figure_required blocker");
+    assertStringIncludes(blocker.reason, "Polycarb disposal / tipping");
+    assertStringIncludes(blocker.reason, "Screws and fixings");
+    // The recovery action must name an ops path the operator can actually run,
+    // never a trade-evidence rewrite.
+    assertStringIncludes(
+      blocker.recovery_action,
+      "prepare_ses_docket_revision",
+    );
+    assertStringIncludes(blocker.recovery_action, "materials_charge");
+
+    // Operator answers the one-figure question on the sanctioned prepare
+    // surface — materials become a separate charge line. Sealed labour
+    // floor/rate stay untouched and no trade row is written.
+    const answered = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 2,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: [
+          "Polycarb disposal / tipping",
+          "Screws and fixings",
+        ],
+      },
+      materialsChargeAuthorisation(65),
+    );
+    assertEquals(answered.blockers.map((item) => item.reason_code), []);
+    const proposal = answered.invoice_proposal as Record<string, unknown>;
+    assert(proposal, "expected proposal after materials figure is supplied");
+    const lines = proposal.line_items as Array<Record<string, unknown>>;
+    assertEquals(lines.length, 2);
+    assertEquals(lines[0].quantity, 6);
+    assertEquals(lines[0].unit_price_ex_gst, 85);
+    assertStringIncludes(String(lines[1].description), "Materials used");
+    assertStringIncludes(
+      String(lines[1].description),
+      "Polycarb disposal / tipping",
+    );
+    assertEquals(lines[1].quantity, 1);
+    assertEquals(lines[1].unit_price_ex_gst, 65);
+    // The builder reads this line verbatim on a real Xero invoice: trade
+    // wording only, never our internal description of where the figure came
+    // from.
+    assertEquals(
+      String(lines[1].description).includes("operator"),
+      false,
+      "internal jargon must not reach the builder-facing invoice line",
+    );
+    assertEquals(proposal.subtotal_ex_gst, 575);
+    const charge = proposal.materials_charge as Record<string, unknown>;
+    assertEquals(charge.estimate, false);
+    assertEquals(charge.source, "operator_materials_charge_figure");
+    assertEquals(charge.materials_charge_ex_gst, 65);
+    assertEquals(charge.authorised_by, "captain@secureworksgroup.app");
+    assertEquals(charge.decision_key, "materials-figure-2026-08-05-fixture");
+    // The sealed labour facts are untouched by the commercial figure.
+    assertEquals(proposal.reported_hours_per_trade, 2);
+    assertEquals(proposal.billable_hours_per_trade, 3);
+  },
+);
+
+Deno.test(
+  "an authorised materials figure is never silently discarded",
+  async () => {
+    // Nothing to charge for: the figure must refuse, not vanish into a
+    // complete-looking labour-only proposal.
+    const nothingRecorded = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 3,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: ["Other / none"],
+      },
+      materialsChargeAuthorisation(65),
+    );
+    assertEquals(nothingRecorded.invoice_proposal, null);
+    assertEquals(
+      nothingRecorded.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_unsupported"
+      ),
+      true,
+    );
+
+    // Already priced by typed lines: charging again would double-bill, so the
+    // operator is asked to choose rather than having one silently dropped.
+    const alreadyPriced = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 3,
+        rate_ex_gst: 85,
+        materials_used: ["Weatherproof sheet x 1"],
+        materials: [{
+          description: "Weatherproof sheet and fixings",
+          quantity: 1,
+          unit_price_ex_gst: 95,
+        }],
+      },
+      materialsChargeAuthorisation(65),
+    );
+    assertEquals(alreadyPriced.invoice_proposal, null);
+    assertEquals(
+      alreadyPriced.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_unsupported"
+      ),
+      true,
+    );
+
+    // AJS prices on ajs_labour_materials, which has no operator materials
+    // charge line: refuse rather than price as though the figure never came.
+    const wrongBasis = await labourProposal(
+      "AJS",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 3,
+        rate_ex_gst: 80,
+        materials: [],
+      },
+      materialsChargeAuthorisation(65),
+    );
+    assertEquals(wrongBasis.invoice_proposal, null);
+    assertEquals(
+      wrongBasis.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_unsupported"
+      ),
+      true,
+    );
+  },
+);
+
+Deno.test(
+  "one authorised materials figure keeps answering later prepares",
+  async () => {
+    const materials = {
+      trades: 2,
+      hours_per_trade: 2,
+      rate_ex_gst: 85,
+      materials: [],
+      materials_used: ["Polycarb disposal / tipping", "Screws and fixings"],
+    };
+    const answered = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      materials,
+      materialsChargeAuthorisation(65),
+    );
+    const answeredProposal = answered.invoice_proposal as Record<
+      string,
+      unknown
+    >;
+    assert(answeredProposal, "expected the answered proposal");
+
+    // The SES reporting skill re-prepares this card as a matter of course and
+    // sends no figure. It must inherit the Captain's answer, not re-ask and
+    // silently drop the materials back off the invoice.
+    const reprepared = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      materials,
+      undefined,
+      {
+        resolvePriorMaterialsCharge: async () =>
+          answeredProposal.materials_charge,
+      },
+    );
+    assertEquals(reprepared.blockers.map((item) => item.reason_code), []);
+    const inherited = reprepared.invoice_proposal as Record<string, unknown>;
+    assert(inherited, "expected the inherited proposal");
+    assertEquals(inherited.line_items, answeredProposal.line_items);
+    assertEquals(inherited.subtotal_ex_gst, 575);
+    assertEquals(inherited.materials_charge, answeredProposal.materials_charge);
+    // Inheriting reproduces the same revision identity, so the card's Docs
+    // Ready signoff is not re-keyed by a routine re-prepare.
+    assertEquals(
+      reprepared.docket_revision_id,
+      answered.docket_revision_id,
+    );
+    assertEquals(
+      reprepared.output_content_hash,
+      answered.output_content_hash,
+    );
+  },
+);
+
+// The three-state decision, driven through the SAME surface production reads:
+// each prepare's committed revision is pushed onto the store, and inheritance
+// resolves the newest marker out of it exactly as the live lookup does.
+Deno.test(
+  "the standing materials decision survives in both directions",
+  async () => {
+    const materials = {
+      trades: 2,
+      hours_per_trade: 2,
+      rate_ex_gst: 85,
+      materials: [],
+      materials_used: ["Polycarb disposal / tipping"],
+    };
+    const committed: Array<{
+      local_invoice_proposal: unknown;
+      blockers: unknown;
+    }> = [];
+    let consulted = 0;
+    const standingDecision = async () => {
+      consulted += 1;
+      for (const revision of committed) {
+        const marker = materialsChargeDecisionFromRevision(revision);
+        if (marker != null) return marker;
+      }
+      return null;
+    };
+    const commit = (result: {
+      invoice_proposal: unknown;
+      blockers: unknown;
+    }) => {
+      committed.unshift({
+        local_invoice_proposal: result.invoice_proposal,
+        blockers: result.blockers,
+      });
+    };
+    const prepare = (
+      charge?: SesMaterialsChargeAuthorisation | "cleared",
+      hoursAndMaterials: Record<string, unknown> = materials,
+    ) =>
+      labourProposal("MLB", "physical_makesafe", hoursAndMaterials, charge, {
+        resolvePriorMaterialsCharge: standingDecision,
+      });
+
+    // UNSET: nobody has answered, so the card asks.
+    const unset = await prepare();
+    assertEquals(unset.invoice_proposal, null);
+    assertEquals(
+      unset.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_required"
+      ),
+      true,
+    );
+    commit(unset);
+
+    // SET: the figure bills, and keeps billing on an omitting prepare.
+    const set = await prepare(materialsChargeAuthorisation(65));
+    assertEquals(set.blockers.map((item) => item.reason_code), []);
+    assertEquals(
+      (set.invoice_proposal as Record<string, unknown>).subtotal_ex_gst,
+      575,
+    );
+    commit(set);
+    const inheritedSet = await prepare();
+    assertEquals(
+      (inheritedSet.invoice_proposal as Record<string, unknown>)
+        .subtotal_ex_gst,
+      575,
+    );
+    commit(inheritedSet);
+
+    // NONE: the operator records no materials charge. It prices labour only,
+    // says so on the proposal, and is not the silent omission this guard exists
+    // to prevent.
+    const none = await prepare("cleared");
+    assertEquals(none.blockers.map((item) => item.reason_code), []);
+    const nonePlan = none.invoice_proposal as Record<string, unknown>;
+    assertEquals(nonePlan.subtotal_ex_gst, 510);
+    assertEquals(
+      (nonePlan.line_items as Array<Record<string, unknown>>).length,
+      1,
+    );
+    const noneMarker = nonePlan.materials_charge as Record<string, unknown>;
+    assertEquals(noneMarker.decision, "none");
+    assertEquals(noneMarker.materials_charge_ex_gst, 0);
+    assertEquals(noneMarker.cleared_by, "captain@secureworksgroup.app");
+    assertEquals(noneMarker.materials_used, ["Polycarb disposal / tipping"]);
+    commit(none);
+
+    // THE REGRESSION: the next routine prepare omits the key. The withdrawal
+    // must stand — the $65 the operator removed can never come back on its own.
+    const afterWithdrawal = await prepare();
+    assertEquals(afterWithdrawal.blockers.map((item) => item.reason_code), []);
+    const standing = afterWithdrawal.invoice_proposal as Record<
+      string,
+      unknown
+    >;
+    assertEquals(standing.subtotal_ex_gst, 510);
+    assertEquals(
+      (standing.materials_charge as Record<string, unknown>).decision,
+      "none",
+    );
+    assertEquals(
+      JSON.stringify(standing.line_items).includes("Materials used"),
+      false,
+      "a withdrawn materials charge must not reappear on the invoice",
+    );
+
+    // Re-settable by the same person: a new figure moves the decision back.
+    const reset = await prepare(materialsChargeAuthorisation(80));
+    assertEquals(
+      (reset.invoice_proposal as Record<string, unknown>).subtotal_ex_gst,
+      590,
+    );
+    commit(reset);
+    assertEquals(
+      ((await prepare()).invoice_proposal as Record<string, unknown>)
+        .subtotal_ex_gst,
+      590,
+    );
+
+    // A card on another pricing basis inherits nothing, so a stale decision can
+    // never block a shape that has no materials charge line at all.
+    consulted = 0;
+    const otherBasis = await labourProposal(
+      "MLB",
+      "temporary_fencing",
+      {
+        trades: 1,
+        hours_per_trade: 4,
+        rate_ex_gst: 85,
+        materials: [],
+        panel_count: 8,
+        base_count: 8,
+        star_picket_count: 0,
+        materials_used: ["Polycarb disposal / tipping"],
+      },
+      undefined,
+      { resolvePriorMaterialsCharge: standingDecision },
+    );
+    assertEquals(consulted, 0);
+    assertEquals(
+      otherBasis.blockers.some((item) =>
+        item.reason_code.startsWith("materials_charge_figure")
+      ),
+      false,
+    );
+    assert(otherBasis.invoice_proposal, "temporary fencing still prices");
+  },
+);
+
+Deno.test(
+  "a decision made while the card is otherwise blocked still stands",
+  async () => {
+    // The clear lands on a card blocked for an unrelated pricing reason, so
+    // there is no proposal to carry it. It must still be the standing decision
+    // on the next prepare rather than falling through to the older figure.
+    const materials = ["Polycarb disposal / tipping"];
+    const charged = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 2,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: materials,
+      },
+      materialsChargeAuthorisation(65),
+    );
+    const blockedClear = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      { trades: 2, rate_ex_gst: 85, materials: [], materials_used: materials },
+      "cleared",
+    );
+    assertEquals(blockedClear.invoice_proposal, null);
+    assertEquals(
+      blockedClear.blockers.some((item) =>
+        item.reason_code === "pricing_evidence_missing"
+      ),
+      true,
+    );
+
+    const committed = [
+      {
+        local_invoice_proposal: blockedClear.invoice_proposal,
+        blockers: blockedClear.blockers,
+      },
+      {
+        local_invoice_proposal: charged.invoice_proposal,
+        blockers: charged.blockers,
+      },
+    ];
+    const resolved = committed
+      .map((revision) => materialsChargeDecisionFromRevision(revision))
+      .find((marker) => marker != null);
+    assertEquals(
+      (resolved as Record<string, unknown>).decision,
+      "none",
+      "the newest decision wins even when its revision could not price",
+    );
+
+    const afterHoursRecovered = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 2,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: materials,
+      },
+      undefined,
+      { resolvePriorMaterialsCharge: async () => resolved },
+    );
+    assertEquals(
+      (afterHoursRecovered.invoice_proposal as Record<string, unknown>)
+        .subtotal_ex_gst,
+      510,
+    );
+  },
+);
+
+Deno.test(
+  "a figure authorised for other materials is never inherited",
+  async () => {
+    const answered = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 2,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: ["Polycarb disposal / tipping"],
+      },
+      materialsChargeAuthorisation(65),
+    );
+    const priorCharge =
+      (answered.invoice_proposal as Record<string, unknown>).materials_charge;
+
+    // The trade re-attended and consumed different materials. Yesterday's
+    // figure was never authorised for them, so the card asks again.
+    const changed = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      {
+        trades: 2,
+        hours_per_trade: 2,
+        rate_ex_gst: 85,
+        materials: [],
+        materials_used: ["Structural propping timber", "Tarps"],
+      },
+      undefined,
+      { resolvePriorMaterialsCharge: async () => priorCharge },
+    );
+    assertEquals(changed.invoice_proposal, null);
+    assertEquals(
+      changed.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_required"
+      ),
+      true,
+    );
+  },
+);
+
+Deno.test(
+  "AJS materials_used keeps its existing labour-only pricing path",
+  async () => {
+    // Deliberately unchanged this slice: AJS/AJBR still omit non-picket
+    // materials, so the guard must not fire on that basis.
+    const result = await labourProposal("AJS", "physical_makesafe", {
+      trades: 2,
+      hours_per_trade: 3,
+      rate_ex_gst: 80,
+      materials: [],
+      materials_used: ["Polycarb disposal / tipping"],
+    });
+    assertEquals(
+      result.blockers.some((item) =>
+        item.reason_code === "materials_charge_figure_required"
+      ),
+      false,
+    );
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assert(proposal, "AJS labour-only pricing is unchanged by this guard");
+    assertEquals(
+      (proposal.line_items as Array<Record<string, unknown>>).length,
+      1,
+    );
+  },
+);
+
+Deno.test(
+  "typed priced materials lines still satisfy the MLB materials charge guard",
+  async () => {
+    const result = await labourProposal("MLB", "physical_makesafe", {
+      trades: 2,
+      hours_per_trade: 3,
+      rate_ex_gst: 85,
+      materials_used: ["Weatherproof sheet x 1"],
+      materials: [{
+        description: "Weatherproof sheet and fixings",
+        quantity: 1,
+        unit_price_ex_gst: 95,
+      }],
+    });
+    assertEquals(result.blockers.map((item) => item.reason_code), []);
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    const lines = proposal.line_items as Array<Record<string, unknown>>;
+    assertEquals(lines.length, 2);
+    assertEquals(lines[1].unit_price_ex_gst, 95);
+    assertEquals(proposal.subtotal_ex_gst, 510 + 95);
+  },
+);
+
+Deno.test(
+  "placeholder materials_used does not force a materials charge on MLB labour-only",
+  async () => {
+    const result = await labourProposal("MLB", "physical_makesafe", {
+      trades: 2,
+      hours_per_trade: 3,
+      rate_ex_gst: 85,
+      materials: [],
+      materials_used: ["Other / none", "None"],
+    });
+    assertEquals(result.blockers.map((item) => item.reason_code), []);
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assertEquals(
+      (proposal.line_items as Array<Record<string, unknown>>).length,
+      1,
+    );
+    assertEquals(proposal.subtotal_ex_gst, 510);
+  },
+);
 
 Deno.test("Bertram AJS existing-fence pickets price through the sealed docket proposal", async () => {
   const result = await labourProposal("AJS", "physical_makesafe", {

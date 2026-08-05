@@ -1557,6 +1557,81 @@ promote raw checklist prose. The Bertram acceptance and refusal controls are
 pinned in `ses_assembler_input_adapter_test.ts`,
 `ses_prepare_docket_revision_test.ts`, and `makesafe_invoice_obligation_test.ts`.
 
+## MLB Physical Materials Must Never Silently Drop Off The Invoice
+
+`standard_labour_materials` (MLB physical / repair / restoration, and other
+non-AJS builders on that basis) used to emit a complete-looking labour-only
+proposal whenever `facts.materials` lacked priced unit lines — even when the
+trade had recorded `materials_used` that the report still printed. That silent
+omission cost real money (Munster, Morley, labour-floor-only draft batches).
+
+There is **no** authoritative general materials unit-price list in this system
+for physical make-safe consumables. Do not invent unit prices on a builder
+invoice. The AJS existing-fence star-picket $13.50 rate is a different, sealed
+carve-out and is not a materials catalogue.
+
+Guard (Captain 2026-08-05): `ses_materials_charge_guard.ts` +
+`localInvoiceProposal` in `ses_prepare_docket_revision.ts`. When trade
+`materials_used` has real entries (not `None` / `Other / none` placeholders)
+and the proposal would have zero materials charge lines, refuse with
+`materials_charge_figure_required` naming the materials and asking for **one**
+ex-GST figure. Never raise labour hours or the sealed rate to cover materials.
+
+The card carries a standing materials-charge DECISION with three states, and
+the operator moves between them on the OPERATOR surface, never by rewriting
+trade evidence: the `materials_charge` body field of
+`prepare_ses_docket_revision`, single-card selections only.
+
+- **UNSET** — nobody answered. Materials recorded → the blocker above.
+- **SET** — `{schema: secureworks.makesafe.materials-charge-figure/v1,
+  amount_ex_gst, authorised_by, authorised_at, decision_key, reason}` → one
+  charge line naming the materials.
+- **NONE** — body `null`, or `amount_ex_gst: 0` with the same authority fields
+  (which records who decided it) → labour only, decision recorded on the
+  proposal. That is an explicit answer, not the silent omission this guard
+  exists to prevent.
+
+Typed priced `materials[]` lines remain a valid answer. Both decided states are
+folded into the docket input hash, so two different decisions can never collide
+on one revision id; UNSET wraps nothing and churns no existing hash.
+
+The Captain answers ONCE, in both directions. SET and NONE are both stamped as
+the `materials_charge` marker on the revision the prepare commits — on the
+proposal when one is produced, on the refusing blocker's `facts` when one is
+not (`materialsChargeDecisionMarker`) — so a decision taken while the card was
+blocked for an unrelated pricing reason is just as durable. A prepare that
+OMITS the body key inherits the NEWEST marker of either kind
+(`resolvePriorMaterialsCharge` → `materialsChargeDecisionFromRevision` →
+`carriedMaterialsChargeDecision`) and changes nothing; a withdrawal can
+therefore never be overtaken by the figure it withdrew. Only an explicit body
+value moves the decision. An inherited SET is rebuilt byte-identically, so the
+inheriting revision reproduces the same input hash — and, for the same
+`idempotency_key`, the same revision id and output hash, since
+`revisionIdentityHash` folds that key in.
+
+Inheritance is bounded by the materials the decision names and by the basis: a
+re-attendance whose `materials_used` differs was never decided on, and a card
+reclassified off `standard_labour_materials` inherits nothing, so neither can
+bill nor block on a stale decision. That read is docket-side only — trade
+attendance evidence is never read for the decision and never written. A
+supplied figure is never discarded either: nothing recorded, materials already
+priced, or a basis with no charge line each refuse with
+`materials_charge_figure_unsupported`, and every such refusal names the
+no-charge path so the instruction is always one the operator can follow. The
+invoice line the builder reads is `<ref> - Materials used: <labels>` — trade
+wording only, and label normalisation replaces underscores but keeps hyphens.
+
+**Families changed:** `standard_labour_materials` only (non-AJS builder x
+physical-shaped family). That is also the exact scope of the adapter's
+`materials_used` surfacing onto `hours_and_materials` — it is inside the docket
+input hash, so widening it to AJS, temporary fencing or report-only cards would
+re-key those revisions and drop their Docs Ready signoff for no pricing effect.
+**AJS/AJBR (`ajs_labour_materials`) still silently omit non-picket materials** —
+same class of defect, out of this slice; only the picket carve-out bills
+materials there. Temporary-fence hire bases are unchanged. Regression:
+`ses_materials_charge_guard_test.ts` and the silent-labour-only case in
+`ses_prepare_docket_revision_test.ts`.
+
 ## Docs Ready Is A Queue, Not A Board Column
 
 Count Docs Ready from `ops-api?action=list_ses_docs_ready_reviews`, not by eye

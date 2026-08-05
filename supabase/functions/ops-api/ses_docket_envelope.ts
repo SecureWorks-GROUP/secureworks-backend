@@ -1,4 +1,8 @@
 import type { SesBuilderKey, SesFamilyId } from "./ses_family_matrix.ts";
+import type {
+  SesMaterialsChargeAuthorisation,
+  SesMaterialsChargeClearance,
+} from "./ses_materials_charge_guard.ts";
 
 export const SES_ASSEMBLER_VERSION = "ses-pack-assembler/v1";
 export const SES_INPUT_CONTRACT_VERSION = "ses.assembler-input/v1";
@@ -230,6 +234,20 @@ export interface SesPrepareRequest {
   force_refresh: boolean;
   require_ready_for_persistence?: boolean;
   expected_physical_report_proof?: SesPhysicalReportProof;
+  /**
+   * Operator answer to `materials_charge_figure_required` on a
+   * `standard_labour_materials` card. Single-card selections only, and folded
+   * into the docket input hash so two different figures can never collide on
+   * one revision id.
+   */
+  materials_charge?: SesMaterialsChargeAuthorisation;
+  /**
+   * The operator explicitly decided this card carries NO materials charge.
+   * This is NOT the same state as omitting `materials_charge`, which inherits
+   * whatever decision already stands — a withdrawn figure must never come back
+   * by inheritance. Present means cleared; the value carries who decided it.
+   */
+  materials_charge_cleared?: SesMaterialsChargeClearance;
 }
 
 export interface SesBlocker {

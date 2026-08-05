@@ -28,6 +28,13 @@ import {
 } from "./ses_family_matrix.ts";
 import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
 import {
+  materialsChargeDecisionFromRevision,
+  parseSesMaterialsChargeDirective,
+  SES_MATERIALS_CHARGE_DECISION_SCAN_LIMIT,
+  SesMaterialsChargeAuthorisationError,
+  type SesMaterialsChargeDirective,
+} from "./ses_materials_charge_guard.ts";
+import {
   type ApprovedDraftThreadCandidate,
   pickIntakeWorkOrderEmailSubject,
   resolveIntakeThreadCoordinates,
@@ -1073,6 +1080,34 @@ function explicitHoursAndMaterials(
     ? array(pricing.materials)
     : array(checklist.materials);
   if (materials.length) facts.materials = materials;
+  // Trade-recorded materials_used must reach the invoice proposal path. Leaving
+  // it only on checklist_json is what let standard_labour_materials emit silent
+  // labour-only proposals while the report still listed materials. Surfacing is
+  // read-only; the prepare guard decides charge vs ask-one-figure.
+  //
+  // Deliberately scoped to the `standard_labour_materials` rows only (non-AJS
+  // builder x physical-shaped family). This key lands in the envelope the
+  // docket input hash covers, so widening it to AJS, temporary fencing or
+  // report-only cards would re-key every such revision and drop its Docs Ready
+  // signoff for no pricing effect.
+  if (
+    !isAjsBuilderKey(classification.builder) &&
+    isSesPhysicalShapedFamily(classification.family)
+  ) {
+    if (
+      Object.hasOwn(checklist, "materials_used") &&
+      checklist.materials_used !== null &&
+      checklist.materials_used !== undefined
+    ) {
+      facts.materials_used = checklist.materials_used;
+    } else if (
+      Object.hasOwn(pricing, "materials_used") &&
+      pricing.materials_used !== null &&
+      pricing.materials_used !== undefined
+    ) {
+      facts.materials_used = pricing.materials_used;
+    }
+  }
   if (
     isAjsBuilderKey(classification.builder) &&
     isSesPhysicalShapedFamily(classification.family)
@@ -3193,6 +3228,36 @@ export function createSesAssemblerRuntimeDependencies(
         return null;
       }
     },
+    // Read-only recovery of the materials-charge decision this card already
+    // carries, from the docket revisions themselves. No trade row is read or
+    // written, and a fault refuses the prepare rather than quietly forgetting
+    // a decision.
+    //
+    // The NEWEST marker wins whichever state it holds, and both states are
+    // stamped on every revision that prices or refuses, so a withdrawal can
+    // never be overtaken by the figure it withdrew. A revision that carries no
+    // marker at all decided nothing and is skipped.
+    resolvePriorMaterialsCharge: async ({ job_id, attendance_cycle_id }) => {
+      if (!text(job_id) || !text(attendance_cycle_id)) return null;
+      const rows = await many(
+        client
+          .from("makesafe_docket_revisions")
+          .select("id,local_invoice_proposal,blockers,committed_at")
+          .eq("job_id", job_id)
+          .eq("current_attendance_cycle_id", attendance_cycle_id)
+          .order("committed_at", { ascending: false })
+          .limit(SES_MATERIALS_CHARGE_DECISION_SCAN_LIMIT),
+        "makesafe_docket_revisions.materials_charge",
+      );
+      for (const row of rows) {
+        const marker = materialsChargeDecisionFromRevision({
+          local_invoice_proposal: row.local_invoice_proposal,
+          blockers: row.blockers,
+        });
+        if (marker != null) return marker;
+      }
+      return null;
+    },
     persist: createSesDocketPersistenceAdapter({
       client,
       org_id: options.org_id,
@@ -3252,12 +3317,46 @@ export function normalizeSesPrepareRequest(
       400,
     );
   }
+  // Operator answer to `materials_charge_figure_required`. One authorised
+  // figure describes ONE card's materials, so a board batch can never carry it.
+  // Presence of the KEY is what is read: a present null withdraws the standing
+  // figure, while omitting the key inherits it. The two are different answers.
+  let materialsCharge: SesMaterialsChargeDirective | null = null;
+  if (Object.hasOwn(record(body), "materials_charge")) {
+    if (mode !== "job_id" && mode !== "job_number") {
+      throw new SesAssemblerAdapterError(
+        "ses_materials_charge_selection_invalid",
+        "materials_charge applies to one named card; select it with selection.mode job_id or job_number.",
+        400,
+      );
+    }
+    try {
+      materialsCharge = parseSesMaterialsChargeDirective(
+        body.materials_charge,
+      );
+    } catch (error) {
+      if (error instanceof SesMaterialsChargeAuthorisationError) {
+        throw new SesAssemblerAdapterError(
+          "ses_materials_charge_invalid",
+          error.message,
+          error.httpStatus,
+        );
+      }
+      throw error;
+    }
+  }
   return {
     selection: mode === "job_id"
       ? { mode, job_id: jobId }
       : mode === "job_number"
       ? { mode, job_number: jobNumber }
       : { mode: "board_batch", limit },
+    ...(materialsCharge?.kind === "charge"
+      ? { materials_charge: materialsCharge.authorisation }
+      : {}),
+    ...(materialsCharge?.kind === "cleared"
+      ? { materials_charge_cleared: materialsCharge.clearance }
+      : {}),
     idempotency_key: idempotencyKey,
     assembler_version: SES_ASSEMBLER_VERSION,
     dry_run: body.dry_run,

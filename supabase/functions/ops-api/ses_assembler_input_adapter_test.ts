@@ -370,6 +370,77 @@ Deno.test(
 );
 
 Deno.test(
+  "an omitted materials_charge and a present null are different answers",
+  () => {
+    const base = {
+      selection: { mode: "job_number", job_number: "SWMS-26980" },
+      idempotency_key: "materials-charge-request-shape",
+      dry_run: true,
+    };
+    const omitted = normalizeSesPrepareRequest({ ...base });
+    assertEquals(Object.hasOwn(omitted, "materials_charge"), false);
+    assertEquals(Object.hasOwn(omitted, "materials_charge_cleared"), false);
+
+    const cleared = normalizeSesPrepareRequest({
+      ...base,
+      materials_charge: null,
+    });
+    assertEquals(cleared.materials_charge_cleared, {
+      cleared_by: null,
+      cleared_at: null,
+      decision_key: null,
+      reason: null,
+    });
+    assertEquals(Object.hasOwn(cleared, "materials_charge"), false);
+
+    // An attributed zero is the same NONE decision, carrying who decided it.
+    const attributedClear = normalizeSesPrepareRequest({
+      ...base,
+      materials_charge: {
+        schema: "secureworks.makesafe.materials-charge-figure/v1",
+        amount_ex_gst: 0,
+        authorised_by: "captain@secureworksgroup.app",
+        authorised_at: "2026-08-05T03:00:00.000Z",
+        decision_key: "materials-none-2026-08-05",
+        reason: "No materials charge on this card.",
+      },
+    });
+    assertEquals(
+      attributedClear.materials_charge_cleared?.cleared_by,
+      "captain@secureworksgroup.app",
+    );
+
+    const charged = normalizeSesPrepareRequest({
+      ...base,
+      materials_charge: {
+        schema: "secureworks.makesafe.materials-charge-figure/v1",
+        amount_ex_gst: 65,
+        authorised_by: "captain@secureworksgroup.app",
+        authorised_at: "2026-08-05T02:00:00.000Z",
+        decision_key: "materials-figure-2026-08-05",
+        reason: "Operator commercial materials figure.",
+      },
+    });
+    assertEquals(charged.materials_charge?.amount_ex_gst, 65);
+    assertEquals(Object.hasOwn(charged, "materials_charge_cleared"), false);
+
+    // A withdrawal names one card, exactly like the figure it withdraws.
+    try {
+      normalizeSesPrepareRequest({
+        selection: { mode: "board_batch", limit: 5 },
+        idempotency_key: "materials-charge-batch-clear",
+        dry_run: true,
+        materials_charge: null,
+      });
+      throw new Error("expected batch clear rejection");
+    } catch (error) {
+      assert(error instanceof SesAssemblerAdapterError);
+      assertEquals(error.status, 400);
+    }
+  },
+);
+
+Deno.test(
   "public U4 request defaults sealed versions but requires explicit dry-run and one selector",
   () => {
     assertEquals(
@@ -1626,6 +1697,11 @@ Deno.test(
     assertEquals(input.cycle_facts.hours_and_materials, {
       trades: 2,
       hours_per_trade: 2,
+      // materials_used is surfaced for the invoice materials-charge guard so a
+      // labour-only proposal cannot silently drop trade-recorded materials.
+      // MLB physical prices on standard_labour_materials, which is the only
+      // basis that consumes it.
+      materials_used: ["RAW CHECKBOX MATERIAL MUST NOT LEAK"],
     });
     assertEquals(input.cycle_facts.swms_fact_context, {
       evidence_kind: "current_card",
@@ -1733,6 +1809,10 @@ Deno.test(
     const input = buildSesAssemblerInput(live);
     assertEquals(input.classification.builder_key, "AJBR");
     assertEquals(input.classification.family, "physical_makesafe");
+    // AJS/AJBR price on ajs_labour_materials, which has no materials-charge
+    // guard, so materials_used is deliberately NOT surfaced here: adding it
+    // would re-key every AJS docket revision and drop its Docs Ready signoff
+    // for no pricing effect.
     assertEquals(input.cycle_facts.hours_and_materials, {
       trades: 2,
       hours_per_trade: 3,
