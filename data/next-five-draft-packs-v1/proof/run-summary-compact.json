@@ -1,0 +1,260 @@
+[
+  {
+    "job_number": "SWMS-261139",
+    "suburb": "Swanbourne",
+    "ref": "AJBR-70554",
+    "outcome": "pack_and_draft",
+    "error": null,
+    "photo_count": 13,
+    "trade_hours": 2,
+    "trade_count": 1,
+    "trade_materials": [
+      "Make safe tarp x 8m2",
+      "Bases / feet",
+      "Tarps / roof materials",
+      "Fixings / consumables",
+      "Other / none"
+    ],
+    "materials_mode": "ajs_labour",
+    "materials_question": null,
+    "bind": {
+      "success": true,
+      "skipped": false,
+      "document_version": 2,
+      "cycle_attribution": "bound",
+      "source_kind": "durable_curated_revision",
+      "expected_raw_sha256": "sha256:94c368988332c0fcc0790d1d38034216b68024b9f5aa04e9835a420b44a03bde",
+      "report_input_hash": "sha256:bcd5623c2fb0e2eaa86989c23ed0f56b7d9e17a6881d9feff8facc6dcc603a2c",
+      "writes": 2
+    },
+    "prepare_live": {
+      "state": "ready",
+      "persisted": true,
+      "blocker_codes": [],
+      "docket_revision_id": "d61d82ef-975a-593c-98f3-415a818817ca"
+    },
+    "proposal": {
+      "version": "ses-local-invoice-proposal/v1",
+      "builder_reference": "AJBR-70554",
+      "basis": "ajs_labour_materials",
+      "trades": 1,
+      "reported_hours_per_trade": 2,
+      "billable_hours_per_trade": 2,
+      "billable_hours_floor": 2,
+      "billable_hours_raised_to_floor": false,
+      "line_items": [
+        {
+          "description": "AJBR-70554 - make-safe attendance - 1 trade x 2 hours",
+          "quantity": 2,
+          "unit_price_ex_gst": 80,
+          "amount_ex_gst": 160
+        }
+      ],
+      "subtotal_ex_gst": 160,
+      "gst": 16,
+      "total_inc_gst": 176,
+      "xero_identity": null
+    },
+    "mint": {
+      "scanned_accrec": 1164,
+      "send_dispatched": false,
+      "invoice_number": "INV-1139",
+      "status": "DRAFT",
+      "total": 176
+    },
+    "cockpit": {
+      "status": "HOLD",
+      "verdict_clean": false,
+      "controls": {
+        "approve_invoice": {
+          "enabled": true,
+          "disabled_reason": ""
+        },
+        "send_it": {
+          "enabled": false,
+          "disabled_reason": "The report invoice email is not marked ready on the current docket revision."
+        }
+      }
+    },
+    "pdf_sha256": "sha256:94c368988332c0fcc0790d1d38034216b68024b9f5aa04e9835a420b44a03bde",
+    "served_sha_matches_bind": true
+  },
+  {
+    "job_number": "SWMS-261025",
+    "suburb": "Koondoola",
+    "ref": "MLB-27093",
+    "outcome": "pack_and_draft",
+    "error": null,
+    "photo_count": 50,
+    "trade_hours": 2,
+    "trade_count": 1,
+    "trade_materials": [
+      "Temp fence panels",
+      "Bases / feet",
+      "Tarps / roof materials",
+      "Fixings / consumables",
+      "Other / none"
+    ],
+    "materials_mode": "none_ticks",
+    "materials_question": null,
+    "bind": {
+      "success": true,
+      "skipped": false,
+      "document_version": 2,
+      "cycle_attribution": "bound",
+      "source_kind": "durable_curated_revision",
+      "expected_raw_sha256": "sha256:537ef17af3aee952051a5ad01962e915cc13ea1ea90a77ed78f484e4c2faa713",
+      "report_input_hash": "sha256:6b8ea8056dce50dc8377bdd180a23c504d3efe92f500af8e466550dfe8cff8ce",
+      "writes": 2
+    },
+    "prepare_live": {
+      "state": "ready",
+      "persisted": true,
+      "blocker_codes": [],
+      "docket_revision_id": "5bc86ba2-485d-5c69-b23a-0dc964d2ae36"
+    },
+    "proposal": {
+      "version": "ses-local-invoice-proposal/v1",
+      "builder_reference": "MLB-27093",
+      "basis": "standard_labour_materials",
+      "trades": 1,
+      "reported_hours_per_trade": 2,
+      "billable_hours_per_trade": 3,
+      "billable_hours_floor": 3,
+      "billable_hours_raised_to_floor": true,
+      "line_items": [
+        {
+          "description": "MLB-27093 - make-safe attendance - 1 trade x 3 hours",
+          "quantity": 3,
+          "unit_price_ex_gst": 85,
+          "amount_ex_gst": 255
+        }
+      ],
+      "subtotal_ex_gst": 255,
+      "gst": 25.5,
+      "total_inc_gst": 280.5,
+      "xero_identity": null,
+      "materials_charge": {
+        "schema": "secureworks.makesafe.materials-charge-figure/v1",
+        "decision": "none",
+        "materials_charge_ex_gst": 0,
+        "materials_used": [
+          "Temp fence panels",
+          "Bases / feet",
+          "Tarps / roof materials",
+          "Fixings / consumables"
+        ],
+        "source": "operator_materials_charge_withdrawn",
+        "cleared_by": "next-five-draft-packs-v1",
+        "cleared_at": "2026-08-05T13:01:53Z",
+        "decision_key": "next-five-draft-packs-v1-SWMS-261025-ticks-none",
+        "reason": "Trade materials_used contains only unquantified checklist template labels (Temp fence panels / Bases / feet / Tarps / roof materials / Fixings / consumables / Other none). No chargeable materials figure. Labour-only proposal is deliberate, not silent omission.",
+        "estimate": false,
+        "note": "Operator decided this card carries no materials charge. Recorded so a later prepare inherits the decision instead of re-asking or re-billing. Trade attendance evidence was not written."
+      }
+    },
+    "mint": {
+      "scanned_accrec": 1165,
+      "send_dispatched": false,
+      "invoice_number": "INV-1140",
+      "status": "DRAFT",
+      "total": 280.5
+    },
+    "cockpit": {
+      "status": "INVOICE_CREATE_READY",
+      "verdict_clean": true,
+      "controls": {
+        "approve_invoice": {
+          "enabled": true,
+          "disabled_reason": ""
+        },
+        "send_it": {
+          "enabled": false,
+          "disabled_reason": "The bound Xero invoice is DRAFT, not AUTHORISED. The invoice email cannot go out against an unauthorised invoice."
+        }
+      }
+    },
+    "pdf_sha256": "sha256:159c081567f567dcc5f9b546591d12ae02c30b421a3332d29ccd34c4546c9ab0",
+    "served_sha_matches_bind": true,
+    "clean_materials_rebind": {
+      "pdf_sha256": "sha256:159c081567f567dcc5f9b546591d12ae02c30b421a3332d29ccd34c4546c9ab0",
+      "document_id": "55ae5c93-0b3f-4ce6-a1c0-acd4557d1954",
+      "file_name": "Make-Safe-Report-SWMS-261025-Koondoola-537ef17af3ae.pdf",
+      "bind": {
+        "success": true,
+        "supersedes_prior_bind": true,
+        "expected_raw_sha256": "sha256:159c081567f567dcc5f9b546591d12ae02c30b421a3332d29ccd34c4546c9ab0",
+        "report_input_hash": "sha256:a292f58804293438ef6b07a22a0486fd463380e3fbdbfd82b092ce27f24cdf83"
+      },
+      "prepare_state": "ready",
+      "blockers": [],
+      "cockpit": "INVOICE_CREATE_READY",
+      "photos": 50,
+      "ticks": false
+    },
+    "note": "Materials tick dump corrected via superseding curated re-bind; INV-1140 retained"
+  },
+  {
+    "job_number": "SWMS-261147",
+    "suburb": "Mosman Park",
+    "ref": "MLB-27482",
+    "outcome": "report_bound_materials_question",
+    "error": null,
+    "photo_count": 15,
+    "trade_hours": 5,
+    "trade_count": 1,
+    "trade_materials": [
+      "Structural timber x 8m",
+      "Plyboard 12mm 2.4x1.8 x 3",
+      "Screws x 40",
+      "Fixings / consumables",
+      "Other / none"
+    ],
+    "materials_mode": "ask",
+    "materials_question": {
+      "reason_code": "materials_charge_figure_required",
+      "named_materials": [
+        "Structural timber x 8m",
+        "Plyboard 12mm 2.4x1.8 x 3",
+        "Screws x 40"
+      ],
+      "instruction": "Captain: supply one ex-GST materials figure via prepare_ses_docket_revision materials_charge for SWMS-261147, or materials_charge amount_ex_gst 0 with authority fields if materials are deliberately not charged."
+    },
+    "bind": {
+      "success": true,
+      "skipped": false,
+      "document_version": 2,
+      "cycle_attribution": "bound",
+      "source_kind": "durable_curated_revision",
+      "expected_raw_sha256": "sha256:359775313575658bd0c018bf871ec100989afad0df907cf634483d7323908553",
+      "report_input_hash": "sha256:193b5f22c389ddd86de1b98c635f4ee5e3ec13b16d4d790fcc99b7b97c2b6c89",
+      "writes": 2
+    },
+    "prepare_live": {
+      "state": "blocked",
+      "persisted": true,
+      "blocker_codes": [
+        "materials_charge_figure_required"
+      ],
+      "docket_revision_id": "58aabd9b-b449-5698-a570-4a306897d6a1"
+    },
+    "proposal": null,
+    "mint": null,
+    "cockpit": {
+      "status": "HOLD",
+      "verdict_clean": false,
+      "controls": {
+        "approve_invoice": {
+          "enabled": false,
+          "disabled_reason": "No Xero DRAFT invoice is bound to this card yet. Mint the draft first, then approve it."
+        },
+        "send_it": {
+          "enabled": false,
+          "disabled_reason": "Trade recorded materials used (Structural timber x 8m; Plyboard 12mm 2.4x1.8 x 3; Screws x 40; Fixings / consumables) but the invoice proposal has no materials charge. Silent labour-only pricing is re"
+        }
+      }
+    },
+    "pdf_sha256": "sha256:359775313575658bd0c018bf871ec100989afad0df907cf634483d7323908553",
+    "served_sha_matches_bind": true
+  }
+]
