@@ -1226,12 +1226,13 @@ the sealed money fence. Tests: `ses_mailer_ops_send_test.ts` (wiring only; zero
 Graph — green suite does not prove delivery). Evidence:
 `data/mailer-ops-send-action-v1/report.md`.
 
-Company resolution on this route must use live columns only: prefer
-`makesafe_job_details.requesting_company_id` → `makesafe_companies.id`, then
-detail `requesting_company_slug`, then job `metadata` fallbacks. Never select
-company or `external_ref` from `jobs` (phantoms; see wrong-column section).
-Builder `external_ref` for subject fallback is detail-side. Re-verify every
-selected column against live schema before another mailer deploy.
+Company identity and the builder `external_ref` are read from
+`makesafe_job_details` / `makesafe_companies` — never from `jobs`, which carries
+neither in production (see the wrong-column section above; the route shipped
+once on that phantom and 400ed live). Re-verify every selected column against
+live schema before another mailer deploy. Resolution order and the
+billing-recipient refusal are owned by
+`data/mailer-ops-send-action-v1/report.md`.
 
 Three boundaries on that route are load-bearing. `body.to` is REQUIRED and only
 confirmed against an allowlist (this card's own intake `emails.from_email` plus

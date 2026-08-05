@@ -27,7 +27,7 @@ Both emails:
 | Migration | `supabase/migrations/20260805020000_ses_mailer_ops_send_effect.sql` |
 | Rollback | `supabase/rollbacks/20260805020000_ses_mailer_ops_send_effect_down.sql` |
 | Module | `supabase/functions/ops-api/ses_mailer_ops_send.ts` |
-| Tests | `supabase/functions/ops-api/ses_mailer_ops_send_test.ts` (31 pass, **zero Graph**) |
+| Tests | `supabase/functions/ops-api/ses_mailer_ops_send_test.ts` (35 pass, **zero Graph**) |
 | Wiring | `ops-api/index.ts` case `send_mailer_ops_visibility` + `makeMailerOpsGraphMailGateway` |
 | Effect kind | `mailer_ops_send` on `ses_external_effects` (job_id + report\|photo + attempt `artifact_hash`; no release_revision_id) |
 
@@ -58,11 +58,40 @@ Content-Type: application/json
 - One card, one kind per call — never a batch of four.
 - **`to` is required.** It is confirmed against this card's own intake sender
   (`emails.from_email` reached through the card's intake case sources) plus the
-  company's full-address `sender_patterns` entries. `sender_patterns` is an
+  resolved company's full-address `sender_patterns` entries (resolution order
+  below). `sender_patterns` is an
   INBOUND trust list — who we accept work orders FROM — so it may confirm a
   destination but never auto-select one. The refusal
   (`mailer_recipient_confirmation_required`) lists both candidate sets, so the
   operator still gets the preview an auto-select would have given.
+
+### Company resolution (live schema only)
+
+Live `jobs` has no `requesting_company_slug`, no `requesting_company_id` and no
+`external_ref` — naming any of them in the `jobs` select is a PostgREST 400 that
+fails the whole route. The route shipped once on that phantom. All three are read
+from `makesafe_job_details`, and the builder reference used for the subject
+fallback is `detail.external_ref`.
+
+Resolution order:
+
+1. `makesafe_job_details.requesting_company_id` → `makesafe_companies.id` (the
+   authoritative FK).
+2. `makesafe_job_details.requesting_company_slug`, else
+   `jobs.metadata.requesting_company_slug` / `.company_slug` →
+   `makesafe_companies.slug`.
+
+The slug tier is consulted when the FK row yields **zero usable mailer
+addresses**, not when it is missing a column: `sender_patterns` is
+`text[] NOT NULL DEFAULT '{}'`, so a found row always carries an array — often
+empty or domain-only — and a column-presence test would make tier 2 dead code.
+The winning row is the one that supplies `sender_patterns` for the `to`
+allowlist.
+
+Because the winner is chosen for its usable `sender_patterns` and not for its
+billing address, the makesafes@ refusal compares `to` against the
+`report_recipient` of **every** company row consulted, not just the winner. The
+refusal evidence lists them (`billing_recipients`).
 
 ### Retry coordinate (exact-once without a dead end)
 
@@ -120,7 +149,7 @@ information travels. Both exclusions are counted in the response
 1. TypeScript: `MailerOpsRouteKind = "report" | "photo"` (no invoice).
 2. TypeScript: `MailerOpsAttachmentRole = "report_pdf" | "site_photo"` (no invoice role).
 3. DB CHECK: `mailer_ops_send` only allows `route_kind IN ('report','photo')`.
-4. Runtime refuses money document types and refuses To == company `report_recipient` (makesafes@ billing path).
+4. Runtime refuses money document types and refuses To == the `report_recipient` of any company row consulted during resolution (makesafes@ billing path).
 5. Attachment loader is closed over this send’s prepared map only — never docket invoice hashes, never Xero PDF path.
 
 ### Fences satisfied, not softened
@@ -156,7 +185,7 @@ rewrites already exist, so only the index proves the apply).
 
 ## What a green suite does **not** prove
 
-The mail gateway is mocked in tests. **31/31 wiring tests pass with zero outbound Graph calls.**  
+The mail gateway is mocked in tests. **35/35 wiring tests pass with zero outbound Graph calls.**  
 That proves shape, fences, CC, provenance wiring, effect identity, and dry_run defaults — **not delivery**.  
 A prior send on this system has already reported success and delivered nothing; do not treat green tests as Sent Items proof.
 
