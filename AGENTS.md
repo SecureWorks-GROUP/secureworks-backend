@@ -1217,7 +1217,10 @@ row exists for the job's cases — never outranked; (2) only when case_sources
 is **empty**, recover from the job's approved `makesafe_intake_drafts` row via
 `emails` on `post_id = graph_message_id`, and only when
 `approved_job_id === job.id` and the email join carries a real `thread_id`
-(`resolveIntakeThreadCoordinates` / Captain B, Maylands sourceless case). Do
+(`resolveIntakeThreadCoordinates` / Captain B, Maylands sourceless case).
+Selection inside tier 2 is corroboration, never recency (Captain option C): one
+distinct proven coordinate wins; several are narrowed to the primary intake
+case story's `story_json[].sourcePostId`; anything still ambiguous refuses. Do
 not repoint append-only case_sources. Missing thread_id still refuses
 report/photo (`intake_thread_reply_unavailable`) rather than opening a new
 thread. AJS shape is untouched. Report-only MLB families keep the legacy

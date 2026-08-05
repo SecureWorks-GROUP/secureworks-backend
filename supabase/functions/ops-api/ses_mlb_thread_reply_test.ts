@@ -182,22 +182,76 @@ Deno.test("pickIntakeThreadFromApprovedDraft refuses unproven joins", () => {
   );
 });
 
-Deno.test("pickIntakeThreadFromApprovedDraft prefers newest approved draft", () => {
+const OLDER_DRAFT = maylandsDraftCandidate({
+  draft_id: "older",
+  approved_at: "2026-07-16T00:00:00Z",
+  graph_message_id: "post-old",
+  email_post_id: "post-old",
+  email_thread_id: "thread-old",
+  email_received_at: "2026-07-16T00:00:00Z",
+});
+
+const NEWER_DRAFT = maylandsDraftCandidate({
+  draft_id: "newer",
+  approved_at: "2026-07-20T07:00:00Z",
+  graph_message_id: MAYLANDS_POST,
+  email_post_id: MAYLANDS_POST,
+  email_thread_id: MAYLANDS_THREAD,
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft refuses ambiguity instead of guessing recency", () => {
+  // Neither newest nor earliest is evidence: two proven drafts with no story
+  // corroboration must refuse rather than target a builder-visible thread.
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      OLDER_DRAFT,
+      NEWER_DRAFT,
+    ]),
+    null,
+  );
+  // A story that names both candidates is still ambiguous.
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(
+      MAYLANDS_JOB,
+      [OLDER_DRAFT, NEWER_DRAFT],
+      ["post-old", MAYLANDS_POST],
+    ),
+    null,
+  );
+  // A story that names neither candidate is likewise a refuse.
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(
+      MAYLANDS_JOB,
+      [OLDER_DRAFT, NEWER_DRAFT],
+      ["post-unrelated"],
+    ),
+    null,
+  );
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft: story sourcePostId breaks a multi-draft tie", () => {
+  const newerByStory = pickIntakeThreadFromApprovedDraft(
+    MAYLANDS_JOB,
+    [OLDER_DRAFT, NEWER_DRAFT],
+    [MAYLANDS_POST],
+  );
+  assertEquals(newerByStory?.thread_id, MAYLANDS_THREAD);
+  assertEquals(newerByStory?.post_id, MAYLANDS_POST);
+
+  // Story authority is not recency: the older post wins when the story names it.
+  const olderByStory = pickIntakeThreadFromApprovedDraft(
+    MAYLANDS_JOB,
+    [OLDER_DRAFT, NEWER_DRAFT],
+    "post-old",
+  );
+  assertEquals(olderByStory?.thread_id, "thread-old");
+  assertEquals(olderByStory?.post_id, "post-old");
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft: duplicate rows of one coordinate are one answer", () => {
   const coords = pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
-    maylandsDraftCandidate({
-      draft_id: "older",
-      approved_at: "2026-07-16T00:00:00Z",
-      graph_message_id: "post-old",
-      email_post_id: "post-old",
-      email_thread_id: "thread-old",
-    }),
-    maylandsDraftCandidate({
-      draft_id: "newer",
-      approved_at: "2026-07-20T07:00:00Z",
-      graph_message_id: MAYLANDS_POST,
-      email_post_id: MAYLANDS_POST,
-      email_thread_id: MAYLANDS_THREAD,
-    }),
+    maylandsDraftCandidate({ draft_id: "a" }),
+    maylandsDraftCandidate({ draft_id: "b", approved_at: "2026-07-21T00:00:00Z" }),
   ]);
   assertEquals(coords?.thread_id, MAYLANDS_THREAD);
   assertEquals(coords?.post_id, MAYLANDS_POST);
@@ -251,6 +305,23 @@ Deno.test("resolveIntakeThreadCoordinates: empty sources use approved draft", ()
   assertEquals(coords?.thread_id, MAYLANDS_THREAD);
   assertEquals(coords?.post_id, MAYLANDS_POST);
   assertEquals(coords?.recovery_source, "approved_draft_emails");
+});
+
+Deno.test("resolveIntakeThreadCoordinates: story post ids reach the draft tier", () => {
+  const args = {
+    caseSources: [],
+    preferredCaseId: "ad6b6a2e-206f-49af-9d8f-e41ea2504081",
+    jobId: MAYLANDS_JOB,
+    approvedDraftCandidates: [OLDER_DRAFT, NEWER_DRAFT],
+  };
+  assertEquals(resolveIntakeThreadCoordinates(args), null);
+  assertEquals(
+    resolveIntakeThreadCoordinates({
+      ...args,
+      preferredStorySourcePostId: [MAYLANDS_POST],
+    })?.thread_id,
+    MAYLANDS_THREAD,
+  );
 });
 
 Deno.test("resolveIntakeThreadCoordinates: empty sources and no draft still refuse", () => {

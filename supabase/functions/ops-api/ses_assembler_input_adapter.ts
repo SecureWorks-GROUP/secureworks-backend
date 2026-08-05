@@ -895,6 +895,18 @@ function workflow(
   return "active";
 }
 
+function intakeCaseStorySourcePostIds(
+  intakeCase: LiveRow | null,
+): string[] {
+  return [
+    ...new Set(
+      array(intakeCase?.story_json)
+        .map((event) => text(record(event).sourcePostId))
+        .filter(Boolean),
+    ),
+  ];
+}
+
 function sourceCase(cases: LiveRow[]): LiveRow | null {
   const live = cases.filter((item) =>
     ["confirmed_live_job", "blocked_live_job"].includes(text(item.state))
@@ -1409,6 +1421,7 @@ export function buildSesAssemblerInput(
     preferredCaseId: text(intakeCase?.id) || null,
     jobId: text(job.id),
     approvedDraftCandidates: snapshot.approved_draft_thread_candidates,
+    preferredStorySourcePostId: intakeCaseStorySourcePostIds(intakeCase),
   });
 
   return {
@@ -1939,6 +1952,8 @@ export async function loadSesAssemblerLiveSnapshot(
   // Empty case_sources only: recover group thread from the approved intake draft
   // via emails. When any source row exists it stays authoritative (even if the
   // row lacks thread_id — that remains a refuse, not a silent draft override).
+  // Row order here is not authority: selection is corroboration then story match
+  // then refuse (see pickIntakeThreadFromApprovedDraft).
   let approvedDraftThreadCandidates: ApprovedDraftThreadCandidate[] = [];
   if (caseSources.length === 0) {
     const approvedDrafts = await many(
