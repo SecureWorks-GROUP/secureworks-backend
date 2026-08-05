@@ -13,6 +13,10 @@ import {
   type SesPricingDisposition,
 } from "./makesafe_invoice_obligation.ts";
 import {
+  buildCommercialQuantityOverrideLines,
+  SesCommercialQuantityOverrideError,
+} from "./ses_commercial_quantity_override.ts";
+import {
   resolveSesInvoiceDuplicates,
   type SesInvoiceDuplicateRequest,
   type SesInvoiceIndexRow,
@@ -1078,6 +1082,11 @@ export async function prepareSesInvoiceObligationAction(
     docket_revision_id?: string;
     post_release_disposition?: string | null;
     created_by: string;
+    /**
+     * Captain-authorised commercial quantity/materials figure above the sealed
+     * schedule. Leaves trade attendance evidence untouched. Privileged only.
+     */
+    commercial_quantity_override?: unknown;
   },
 ) {
   if (
@@ -1089,6 +1098,11 @@ export async function prepareSesInvoiceObligationAction(
       fact:
         "The later attendance has no identified human disposition; an operator must choose second invoice, combine/credit review, document only, or hold pricing.",
     });
+  }
+  if (args.commercial_quantity_override != null) {
+    // Same authority bar as draft mint: api_key / routine, or captain/admin JWT.
+    // Never a silent trade-evidence rewrite and never a schedule floor change.
+    await requireSesInvoiceMintAuthority(client, auth);
   }
   const docketQuery = client.from("makesafe_docket_revisions")
     .select("*").eq("job_id", args.job_id);
@@ -1184,7 +1198,17 @@ export async function prepareSesInvoiceObligationAction(
       ],
     }
     : duplicate;
-  const lines = Array.isArray(local.line_items)
+  type ObligationLine = {
+    description: string;
+    quantity: number;
+    unit_price: number;
+    account_code: string;
+    evidence: Record<string, unknown>;
+    rate_override_approved?: boolean;
+    rate_override_by?: string;
+    rate_override_at?: string;
+  };
+  let lines: ObligationLine[] = Array.isArray(local.line_items)
     ? local.line_items.map((line: any) => ({
       description: String(line.description || ""),
       quantity: Number(line.quantity),
@@ -1197,6 +1221,66 @@ export async function prepareSesInvoiceObligationAction(
       },
     }))
     : [];
+  let commercialProvenance: Record<string, unknown> | null = null;
+  let pricingDisposition: SesPricingDisposition = explicitDocumentOnly
+    ? "no_additional_charge"
+    : (existingIsCommerciallyBound &&
+        ["combine_credit", "hold_pricing"].includes(
+          String(args.post_release_disposition || ""),
+        )
+      ? "money_review_required"
+      : (existingIsCommerciallyBound && !args.post_release_disposition
+        ? "blocked_billing_disposition"
+        : (effectiveDuplicate.allows_create
+          ? "priced_from_canon"
+          : "blocked_duplicate_live")));
+
+  if (args.commercial_quantity_override != null && !explicitDocumentOnly) {
+    if (pricingDisposition !== "priced_from_canon") {
+      throw new SesActionError(409, {
+        state: "refused",
+        fact:
+          `A commercial_quantity_override cannot be applied while pricing disposition is ${pricingDisposition}. Clear the live draft/void or disposition block first.`,
+      });
+    }
+    // Sealed labour rate from the U4 proposal (first positive line unit price).
+    // Commercial path must keep this rate; only quantity/materials may change.
+    const sealedLabourRate = (() => {
+      for (const line of Array.isArray(local.line_items) ? local.line_items : []) {
+        const price = Number(
+          (line as any)?.unit_price_ex_gst ?? (line as any)?.unit_price,
+        );
+        if (Number.isFinite(price) && price > 0) return price;
+      }
+      return null;
+    })();
+    try {
+      const built = buildCommercialQuantityOverrideLines({
+        override: args.commercial_quantity_override,
+        docket_revision_id: docket.id,
+        attendance_cycle_ids: docket.attendance_cycle_ids,
+        sealed_labour_unit_price_ex_gst: sealedLabourRate,
+        builder_reference: reference,
+      });
+      lines = built.lines;
+      commercialProvenance = built.provenance as unknown as Record<
+        string,
+        unknown
+      >;
+      // Hosted on priced_with_line_override (existing DB CHECK) with explicit
+      // evidence.override_kind=commercial_quantity_not_rate — not a false rate.
+      pricingDisposition = "priced_with_line_override";
+    } catch (error) {
+      if (error instanceof SesCommercialQuantityOverrideError) {
+        throw new SesActionError(error.httpStatus, {
+          state: "refused",
+          fact: error.message,
+        });
+      }
+      throw error;
+    }
+  }
+
   const prepared = await prepareSesInvoiceObligation({
     org_id: args.org_id,
     job_id: args.job_id,
@@ -1204,18 +1288,7 @@ export async function prepareSesInvoiceObligationAction(
     attendance_cycle_ids: existing?.state === "released" && currentCycleId
       ? [currentCycleId]
       : docket.attendance_cycle_ids,
-    pricing_disposition: explicitDocumentOnly
-      ? "no_additional_charge"
-      : (existingIsCommerciallyBound &&
-          ["combine_credit", "hold_pricing"].includes(
-            String(args.post_release_disposition || ""),
-          )
-        ? "money_review_required"
-        : (existingIsCommerciallyBound && !args.post_release_disposition
-          ? "blocked_billing_disposition"
-          : (effectiveDuplicate.allows_create
-            ? "priced_from_canon"
-            : "blocked_duplicate_live"))),
+    pricing_disposition: pricingDisposition,
     pricing_canon_version: SES_PRICING_CANON_VERSION,
     company,
     reference,
@@ -1223,7 +1296,11 @@ export async function prepareSesInvoiceObligationAction(
     lines: explicitDocumentOnly ? [] : lines,
     guard_result: {
       hard_failures: [],
-      warnings: [],
+      warnings: commercialProvenance
+        ? [
+          "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged",
+        ]
+        : [],
     },
     duplicate_probe: effectiveDuplicate,
     created_by: args.created_by,
@@ -1237,6 +1314,13 @@ export async function prepareSesInvoiceObligationAction(
       : null,
     post_release_disposition: args.post_release_disposition as any,
   });
+  if (commercialProvenance) {
+    // Stamp the committed proposal so a year later the commercial figure is
+    // attributable. proposal is jsonb — extra keys are retained as written.
+    (prepared.proposal as any).commercial_quantity_override =
+      commercialProvenance;
+    (prepared.revision as any).proposal = prepared.proposal;
+  }
   const committed = await client.rpc(
     "commit_ses_invoice_obligation_revision_v1",
     {
@@ -1246,6 +1330,7 @@ export async function prepareSesInvoiceObligationAction(
   );
   return {
     ...prepared,
+    commercial_quantity_override: commercialProvenance,
     commit: requireValue(
       committed,
       "The invoice obligation revision could not be committed.",

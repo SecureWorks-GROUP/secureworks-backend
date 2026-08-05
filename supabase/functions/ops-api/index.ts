@@ -6537,6 +6537,9 @@ if (import.meta.main) serve(async (req: Request) => {
             docket_revision_id: body.docket_revision_id,
             post_release_disposition: body.post_release_disposition || null,
             created_by: authUser?.email || body.created_by || 'ses-standing-preparer',
+            // Captain-authorised commercial quantity/materials above sealed schedule.
+            // Leaves trade attendance evidence and the global AJS floor untouched.
+            commercial_quantity_override: body.commercial_quantity_override ?? null,
           },
         ))
       // Option B (Captain 2026-08-04): mint Xero DRAFT without prior APPROVE INVOICE.
