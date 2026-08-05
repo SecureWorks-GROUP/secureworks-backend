@@ -1,0 +1,34 @@
+[
+  {
+    "attendance_cycle_id": "db3b1485-8e7a-48ac-89c8-9bb1d9ec0c05",
+    "trade_count": 2,
+    "labour_hours": 2,
+    "job_type": "Temporary fencing",
+    "work_done": "Neatly stacked all broken hardy, temp fenced boundary fence to other neighbours. Boundary fence between 2 of the houses on the property area got half temp fenced as ran out of temporary fencing and was too late too get more. Fence will be completed upon the next day.",
+    "materials_used": [
+      "Temp fence panels x 8",
+      "Star pickets x 10",
+      "Zip ties x 50",
+      "Fixings / consumables",
+      "Other / none"
+    ],
+    "damage_cause": "Storm / wind",
+    "damage_description": "Make-safe type: Temporary fencing\nDamage: 2 fences damaged on a 3 property area. Hardy fence broken, half fallen and half barely stood up."
+  },
+  {
+    "attendance_cycle_id": "0886aa7d-8ecb-4fba-9a9e-333262a72b20",
+    "trade_count": 1,
+    "labour_hours": 2,
+    "job_type": "Ceiling / water ingress",
+    "work_done": "Added timber to ceiling using bugle screws.",
+    "materials_used": [
+      "Timber x 3",
+      "Bugle screws x 10",
+      "Tarps / roof materials",
+      "Fixings / consumables",
+      "Other / none"
+    ],
+    "damage_cause": "Storm / wind",
+    "damage_description": "Make-safe type: Ceiling / water ingress\nDamage: Re propped up ceiling as client was worried the ceiling had cracked more and needed extra support."
+  }
+]

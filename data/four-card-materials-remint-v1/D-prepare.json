@@ -1,0 +1,35 @@
+{
+  "state": "prepared",
+  "obligation_id": "a8839e6a-a4f3-4847-a910-f112570bb1e0",
+  "revision_id": "c47dfbda-29b6-5ead-a621-4d92f643baec",
+  "pricing_disposition": "priced_with_line_override",
+  "totals": {
+    "ex": 300,
+    "inc": 330
+  },
+  "lines": [
+    {
+      "description": "MLB-25876 - make-safe attendance - 1 trade x 3 hours",
+      "quantity": 3,
+      "unit_price": 85,
+      "line_kind": "labour"
+    },
+    {
+      "description": "MLB-25876 - Materials: flashing and Sikaflex",
+      "quantity": 1,
+      "unit_price": 45,
+      "line_kind": "materials"
+    }
+  ],
+  "duplicate_probe": {
+    "allows_create": true,
+    "match_tier": null,
+    "ambiguity": "void_only"
+  },
+  "commercial_quantity_override": {
+    "decision_key": "four-card-materials-remint-v1-D-MLB-25876",
+    "override_kind": "commercial_quantity_not_rate",
+    "trade_reported_hours_per_trade": 2,
+    "sealed_billable_hours_floor": 3
+  }
+}

@@ -1,0 +1,18 @@
+[
+  {
+    "attendance_cycle_id": "4e630f7f-cd43-4a62-a1d1-36fbf2c39803",
+    "trade_count": 1,
+    "labour_hours": 2,
+    "job_type": "Roof / tarp",
+    "work_done": "The roof leaked even with the tarp over it suggesting the water ingress was coming from above the skylight as there is Sarking installed and the sarking would be cut for the skylight. Above the skylight I rebent back the valley tray to 80degrees and flashing tapped and siliconed numerous tiles that had large gaps where the tiles connect. I then removed the unsecured tiles and tarp from the roof.",
+    "materials_used": [
+      "Silicone x 1",
+      "Flashing tape x 0.4m",
+      "Tarps / roof materials",
+      "Fixings / consumables",
+      "Other / none"
+    ],
+    "damage_cause": "Storm / wind",
+    "damage_description": "Make-safe type: Roof / tarp\nDamage: Water ingress through skylight into front door walkway."
+  }
+]
