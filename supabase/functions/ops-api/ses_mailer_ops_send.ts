@@ -1012,9 +1012,10 @@ async function loadMailerOpsSubjectInputs(
   /** From addresses of THIS card's own intake work-order emails. */
   intakeSenders: string[];
 }> {
+  // Live column is state (not status) — production dry-run 2026-08-05.
   const cases = await client.from("makesafe_intake_cases")
     .select(
-      "id,job_id,builder_wo_canonical,builder_po_canonical,external_ref_canonical,status",
+      "id,job_id,builder_wo_canonical,builder_po_canonical,external_ref_canonical,state",
     )
     .eq("job_id", jobId);
   if (cases.error) {
