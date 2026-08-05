@@ -43,16 +43,23 @@ read-only `storage.objects` metadata pass on SES cards:
 | 2 | 69 | 27.9 MB |
 | 3 | 50 | 20.9 MB |
 
-Interpretation against a **35 MiB** Exchange default message ceiling:
+Interpretation against a **35 MiB** Exchange default message ceiling. Mail
+attachments travel **base64-encoded** (≈4/3 of raw), and Exchange enforces the
+message-size limit on the **MIME-encoded** message, so the comparison below is
+against encoded size on **both** transports (Captain ruling, 2026-08-05):
 
-- The heaviest known card (33.5 MB / 51) sits **under** 35 MiB raw but has almost
-  no headroom for MIME/body overhead.
-- A **69-photo / ~28 MB** pack is under the ceiling on raw bytes but implies
-  **~69 sequential attachment POSTs** on the AJS user-mailbox path.
-- Tonight’s **~31 MB / ~70 calls** observation is consistent with that band — not
-  a freak one-off, and not “half the board over the limit” either. The structural
-  risk is the **near-ceiling total + sequential call count**, not a universal
-  31 MB floor.
+- The heaviest known card (33.5 MB / 51) sits under 35 MiB *raw* but is
+  **~42.6 MiB encoded** — **over** the ceiling. An earlier draft of this guard
+  compared raw bytes on the user-mailbox path and reported this pack as FITS;
+  that under-refusal is fixed, because a guard that says FITS and then dies at
+  Exchange is worse than no guard.
+- A **69-photo / ~28 MB** pack is ~35.5 MiB encoded — also at/over the ceiling —
+  and implies **~69 sequential attachment POSTs** on the AJS user-mailbox path.
+- The **50-photo / 20.9 MB** pin is ~26.6 MiB encoded and still fits.
+- Tonight’s **~31 MB / ~70 calls** observation is ~41.3 MiB encoded, so it too
+  refuses. It is consistent with that band — not a freak one-off, and not “half
+  the board over the limit” either. The structural risk is the **near-ceiling
+  total + sequential call count**, not a universal 31 MB floor.
 
 Until the measurement script succeeds, treat those three pins plus the 31 MB
 observation as the working distribution; do not invent percentiles.
@@ -68,7 +75,8 @@ observation as the working distribution; do not invent percentiles.
 
 **AJS photo route** = admin@ **user mailbox** draft → sequential
 `uploadAttachment` → send. Per-file can use upload sessions; **message total**
-still bound by the 35 MB default unless the tenant is raised.
+still bound by the 35 MB default unless the tenant is raised, and that total is
+measured on the **base64-encoded** message, not the raw bytes we upload.
 
 **MLB photo route** = **group thread reply** with all attachments base64-inlined
 in one POST. Per-file hard-capped at 3 MB; total base64 wire size must also fit
@@ -111,8 +119,10 @@ sequential attach loops.
 
 ### Behaviour
 
-- Evaluates **raw attachment sizes** (and base64 wire size for group posts)
-  against the documented ceilings.
+- Evaluates **raw attachment sizes** against the documented **per-file** ceilings
+  (under 3 MB direct/group post; 3–150 MB user-mailbox upload session), and the
+  **base64-encoded total** against the 35 MB Exchange message ceiling on **both**
+  transports, because the message travels MIME-encoded either way.
 - On exceed: **clear named refusal** with actual total, actual limit, transport
   kind, and offending files.
 - **Never** drops, downscales, re-encodes, or truncates photos.
@@ -145,8 +155,9 @@ sequential attach loops.
 - This tenant’s **customised** Exchange message size (may be higher than 35 MB).
 - Whether Graph rejects a multi-attachment group post earlier than the
   documented per-file / message limits (request body limits, gateway timeouts).
-- Whether a 33.5 MB user-mailbox send with 51 sequential attaches succeeds
-  within the edge worker’s wall clock.
+- The exact MIME envelope/header overhead on top of the encoded attachment
+  bytes (the guard counts encoded attachments only, so it is if anything still
+  slightly generous).
 - End-to-end builder receipt.
 
 **No live send was performed** (hard boundary). The residual unknown is the

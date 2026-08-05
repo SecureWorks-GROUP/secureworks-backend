@@ -117,22 +117,71 @@ Deno.test("resolveSesMailTransportForPrepare agrees with the execute-path author
   }
 });
 
-Deno.test("user mailbox: 70 ~450 KiB photos (~31 MiB) passes under 35 MiB default", () => {
+Deno.test("user mailbox: ~31 MiB raw over 70 photos refuses once base64-encoded", () => {
+  // Raw fits under 35 MiB, but the wire form (base64) is ~41.3 MiB, and
+  // Exchange enforces its message-size limit on the MIME-encoded message.
   const per = Math.floor((31 * 1024 * 1024) / 70);
   const attachments = Array.from({ length: 70 }, (_, i) =>
     nBytes(per, `photo-${i + 1}.jpg`)
   );
   const verdict = evaluateSesPhotoMailVolume(attachments, "user_mailbox");
-  assertEquals(verdict.ok, true);
-  if (verdict.ok) {
+  assertEquals(verdict.ok, false);
+  if (!verdict.ok) {
+    assertEquals(verdict.code, PHOTO_MAIL_VOLUME_EXCEEDS_GRAPH_LIMIT);
+    assertEquals(verdict.exceeded, "message_total");
     assertEquals(verdict.attachment_count, 70);
     assert(verdict.total_raw_bytes < GRAPH_DEFAULT_MESSAGE_SIZE_LIMIT_BYTES);
+    assert(
+      verdict.total_base64_bytes > GRAPH_DEFAULT_MESSAGE_SIZE_LIMIT_BYTES,
+    );
     // Sequential attachment POSTs: one per file under 3 MB.
     assertEquals(verdict.estimated_attachment_graph_calls, 70);
+    // Every photo is still accounted for — nothing culled to make it fit.
+    assertEquals(verdict.offending_attachments.length, 70);
   }
 });
 
-Deno.test("user mailbox: total raw over 35 MiB refuses with named code and sizes", () => {
+Deno.test("user mailbox: the measured 51-photo / 33.5 MB pin refuses on encoded size", () => {
+  // Prior storage.objects pin (not re-measured this session): 51 files,
+  // 33.5 MB raw -> ~44.7 MB base64, over the 35 MiB documented ceiling.
+  const per = Math.floor((33.5 * 1000 * 1000) / 51);
+  const attachments = Array.from({ length: 51 }, (_, i) =>
+    nBytes(per, `photo-${i + 1}.jpg`)
+  );
+  const verdict = evaluateSesPhotoMailVolume(attachments, "user_mailbox");
+  assertEquals(verdict.ok, false);
+  if (!verdict.ok) {
+    assertEquals(verdict.exceeded, "message_total");
+    assert(verdict.total_raw_bytes < GRAPH_DEFAULT_MESSAGE_SIZE_LIMIT_BYTES);
+    assert(
+      verdict.total_base64_bytes > GRAPH_DEFAULT_MESSAGE_SIZE_LIMIT_BYTES,
+    );
+    // Reason names the actual encoded size AND the actual documented limit.
+    // 44.7 MB decimal == 42.60 MiB binary, which is how the reason renders it.
+    assertStringIncludes(verdict.reason, "42.60 MiB");
+    assertStringIncludes(verdict.reason, "35.00 MiB");
+    assertStringIncludes(verdict.reason, "not culled");
+    assertEquals(verdict.attachment_count, 51);
+  }
+});
+
+Deno.test("user mailbox: a pack that still fits once encoded passes", () => {
+  // 24 MiB raw -> 32 MiB base64, under the 35 MiB ceiling.
+  const per = Math.floor((24 * 1024 * 1024) / 48);
+  const attachments = Array.from({ length: 48 }, (_, i) =>
+    nBytes(per, `photo-${i + 1}.jpg`)
+  );
+  const verdict = evaluateSesPhotoMailVolume(attachments, "user_mailbox");
+  assertEquals(verdict.ok, true);
+  if (verdict.ok) {
+    assertEquals(verdict.attachment_count, 48);
+    assert(
+      verdict.total_base64_bytes < GRAPH_DEFAULT_MESSAGE_SIZE_LIMIT_BYTES,
+    );
+  }
+});
+
+Deno.test("user mailbox: total over 35 MiB refuses with named code and sizes", () => {
   const attachments = [
     nBytes(20 * 1024 * 1024, "a.jpg"),
     nBytes(16 * 1024 * 1024, "b.jpg"),
@@ -147,7 +196,13 @@ Deno.test("user mailbox: total raw over 35 MiB refuses with named code and sizes
       GRAPH_DEFAULT_MESSAGE_SIZE_LIMIT_BYTES,
     );
     assertEquals(verdict.total_raw_bytes, 36 * 1024 * 1024);
+    assertEquals(
+      verdict.total_base64_bytes,
+      base64EncodedLength(20 * 1024 * 1024) +
+        base64EncodedLength(16 * 1024 * 1024),
+    );
     assertStringIncludes(verdict.reason, "36.00 MiB");
+    assertStringIncludes(verdict.reason, "48.00 MiB");
     assertStringIncludes(verdict.reason, "35.00 MiB");
     assertStringIncludes(verdict.reason, "not culled");
     assertStringIncludes(verdict.recommendation, "split");
@@ -194,10 +249,16 @@ Deno.test("group thread: exactly 3 MiB refuses; user mailbox allows exactly 150 
   );
   assertEquals(underLimit.ok, true);
 
+  // The 150 MiB per-file maximum is inclusive. Raise the message ceiling to the
+  // ENCODED size of that file so this case tests the per-attachment term alone.
   const uploadSessionAtLimit = evaluateSesPhotoMailVolume(
     [nBytes(GRAPH_ATTACHMENT_UPLOAD_SESSION_MAX_BYTES, "exact.bin")],
     "user_mailbox",
-    { message_size_limit_bytes: GRAPH_ATTACHMENT_UPLOAD_SESSION_MAX_BYTES },
+    {
+      message_size_limit_bytes: base64EncodedLength(
+        GRAPH_ATTACHMENT_UPLOAD_SESSION_MAX_BYTES,
+      ),
+    },
   );
   assertEquals(uploadSessionAtLimit.ok, true);
 });

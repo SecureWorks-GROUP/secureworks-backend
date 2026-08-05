@@ -20,10 +20,18 @@
  *   are inlined as contentBytes on POST /groups/{id}/threads/{id}/reply and
  *   each file is limited to under 3 MB.
  *
+ * Message-total basis (Captain ruling 2026-08-05): BOTH transports compare the
+ * BASE64-ENCODED total to the message ceiling, because mail attachments are
+ * transported base64-encoded and Exchange enforces its message-size limit on
+ * the MIME-encoded message. Comparing raw bytes on the user-mailbox path
+ * under-refused — the measured heaviest SES card (51 photos / 33.5 MB raw,
+ * ~44.7 MB encoded) read as FITS and would have died at Exchange, which is
+ * worse than no guard.
+ *
  * Residual unknown without a live send: the tenant's actual customised message
- * size limit, and whether base64 + MIME overhead on a multi-attachment group
- * post is refused earlier than 35 MB. The guard uses documented defaults and
- * names them; it does not invent a higher limit.
+ * size limit, and the exact MIME envelope/header overhead on top of the encoded
+ * attachment bytes. The guard uses documented defaults and names them; it does
+ * not invent a higher limit.
  */
 
 import type { SesBlocker } from "./ses_docket_envelope.ts";
@@ -300,13 +308,12 @@ export function evaluateSesPhotoMailVolume(
     };
   }
 
-  // Group-thread replies inline every attachment as base64 contentBytes in one
-  // POST. Compare estimated wire size (base64) to the message ceiling so we
-  // refuse before Graph rejects the whole reply. User-mailbox uploads store
-  // binary; compare raw total to the same ceiling.
-  const totalForMessageLimit = transport === "group_thread_reply"
-    ? totalBase64
-    : totalRaw;
+  // Mail attachments are transported base64-encoded and Exchange enforces its
+  // message-size limit on the MIME-encoded message, so BOTH transports compare
+  // the encoded total: group-thread replies inline every attachment as base64
+  // contentBytes on one POST, and a user-mailbox message is likewise assembled
+  // and delivered MIME-encoded regardless of how the bytes were uploaded.
+  const totalForMessageLimit = totalBase64;
 
   if (totalForMessageLimit > messageLimit) {
     const reason = transport === "group_thread_reply"
@@ -319,7 +326,9 @@ export function evaluateSesPhotoMailVolume(
       }. Photos are not culled.`
       : `Photo pack cannot send: ${rows.length} attachment(s) total ${
         formatByteCount(totalRaw)
-      } which exceeds the documented Exchange Online default message size of ${
+      } raw (~${
+        formatByteCount(totalBase64)
+      } base64-encoded on the wire) which exceeds the documented Exchange Online default message size of ${
         formatByteCount(messageLimit)
       }. Photos are not culled.`;
     return {
@@ -441,6 +450,7 @@ export function assertSesPhotoMailVolumeFits(
     throw new Error(
       `${verdict.code}: ${verdict.reason} ` +
         `[total_raw_bytes=${verdict.total_raw_bytes}; ` +
+        `total_base64_bytes=${verdict.total_base64_bytes}; ` +
         `message_size_limit_bytes=${verdict.message_size_limit_bytes}; ` +
         `per_attachment_limit_bytes=${verdict.per_attachment_limit_bytes}; ` +
         `transport=${verdict.transport}]`,

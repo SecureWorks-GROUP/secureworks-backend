@@ -1234,7 +1234,11 @@ call** by `ses_photo_mail_volume_guard.ts` — named
 `photo_mail_volume_exceeds_graph_limit`. Documented ceilings: Exchange Online
 default **35 MB** message size; group-post / direct attach **under 3 MB** per
 file; user-mailbox upload session **3–150 MB** per file (group thread replies
-have no upload session and inline base64). AJS photo uses the sequential
+have no upload session and inline base64). Per-file ceilings compare RAW bytes;
+the 35 MB message ceiling compares the **base64-encoded** total on BOTH
+transports, because mail travels MIME-encoded — comparing raw there passed the
+measured 51-photo / 33.5 MB pack (~42.6 MiB encoded) that Exchange would reject.
+AJS photo uses the sequential
 per-file `uploadAttachment` loop in `ses_graph_mail_gateway.ts`; MLB photo is
 one group-thread reply. **Never cull, downscale, or re-encode photos to fit** —
 a pack over the ceiling is an honest blocker/refusal, not a shortened pack.

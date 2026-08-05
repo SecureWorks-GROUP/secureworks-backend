@@ -17,7 +17,10 @@ import {
   SesActionError,
   type SesSupabaseClient,
 } from "./ses_reporting_actions.ts";
-import { PHOTO_MAIL_VOLUME_EXCEEDS_GRAPH_LIMIT } from "./ses_photo_mail_volume_guard.ts";
+import {
+  base64EncodedLength,
+  PHOTO_MAIL_VOLUME_EXCEEDS_GRAPH_LIMIT,
+} from "./ses_photo_mail_volume_guard.ts";
 
 const RELEASE_ID = "release-1";
 const JOB_ID = "job-ajs-1";
@@ -261,10 +264,16 @@ Deno.test("SEND IT refuses an oversized photo route with a named 409 and no Grap
   assertEquals(refusal.code, PHOTO_MAIL_VOLUME_EXCEEDS_GRAPH_LIMIT);
   // The refusal states the actual total against the actual documented limit.
   assertStringIncludes(refusal.fact, "39.00 MiB");
+  // The message-total term compares the base64-encoded wire size.
+  assertStringIncludes(refusal.fact, "52.00 MiB");
   assertStringIncludes(refusal.fact, "35.00 MiB");
   assertStringIncludes(refusal.fact, "not culled");
   assertEquals(refusal.evidence.attachment_count, 3);
   assertEquals(refusal.evidence.total_raw_bytes, 39 * 1024 * 1024);
+  assertEquals(
+    refusal.evidence.total_base64_bytes,
+    3 * base64EncodedLength(13 * 1024 * 1024),
+  );
   assertEquals(
     refusal.evidence.message_size_limit_bytes,
     35 * 1024 * 1024,

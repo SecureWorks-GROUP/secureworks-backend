@@ -3039,9 +3039,12 @@ Deno.test("prepare blocks an AJS photo pack over the Exchange message ceiling an
   )!;
   assert(blocker, "expected the named photo-mail volume blocker");
   assertStringIncludes(blocker.reason, "36.00 MiB");
+  // The message-total term compares the base64-encoded wire size.
+  assertStringIncludes(blocker.reason, "48.00 MiB");
   assertStringIncludes(blocker.reason, "35.00 MiB");
   assertStringIncludes(blocker.reason, "not culled");
   assertEquals(object(blocker.facts).transport, "user_mailbox");
+  assertEquals(object(blocker.facts).total_base64_bytes, 48 * 1024 * 1024);
   assertEquals(object(blocker.facts).exceeded, "message_total");
   assertEquals(object(blocker.facts).attachment_count, 2);
   assertEquals(object(blocker.facts).photo_cull, false);
