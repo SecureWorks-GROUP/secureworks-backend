@@ -15,12 +15,14 @@
 --   - job_id required
 --   - route_kind is report|photo only (invoice is structurally impossible)
 --   - release / invoice-obligation / docket ids must be null
---   - artifact_hash required: it is the retry coordinate (a content address of
---     the exact send plus the operator's attempt key) that route_send gets from
+--   - artifact_hash required: it is the retry coordinate (recipients plus the
+--     operator's deliberate attempt key) that route_send gets from
 --     release_revision_id. Without it one Graph failure would park a card on a
---     stuck `unknown` row forever, since a token is never redispatched.
---   - unique (job_id, route_kind, artifact_hash) so one exact send attempt is
---     one ledger row per kind per card, while a deliberate new attempt can run
+--     stuck `unknown` row forever, since a token is never redispatched. It
+--     carries no re-resolved send content, so incidental drift cannot mint a
+--     second row and mail the builder twice.
+--   - unique (job_id, route_kind, artifact_hash) so one named attempt is one
+--     ledger row per kind per card, while a deliberate new attempt can run
 --
 -- Writes zero operational rows. Does not send, mint, authorise, void, or
 -- release. Rollback twin:

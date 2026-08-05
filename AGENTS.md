@@ -1220,12 +1220,18 @@ Three boundaries on that route are load-bearing. `body.to` is REQUIRED and only
 confirmed against an allowlist (this card's own intake `emails.from_email` plus
 the company's full-address entries) — `sender_patterns` is an INBOUND trust list
 and must never auto-select a destination. The effect identity carries an
-`artifact_hash` retry coordinate (content address of kind/to/cc/subject/
-attachment hashes plus the operator's `attempt_key`), which is what
-`release_revision_id` is for `route_send`: exact-once still holds per attempt,
-a confirmed replay returns the STORED ledger proof rather than a recomposed one,
-and a stuck `unknown` token is still never redispatched — the operator retries
-under a new `attempt_key`. Evidence is current-attendance-cycle scoped through
+`artifact_hash` retry coordinate — kind, recipients and the operator's
+`attempt_key`, and deliberately NOT the subject, attachment hashes or photo
+selection — which is what `release_revision_id` is for `route_send`. Keep
+re-resolved content out of it: a newly uploaded photo re-picks the spread and a
+transient `emails` read error changes the recovered subject, so content in the
+identity would mint a second operation_key and mail the builder twice. Content
+lives in `payload_hash`, where drift reconciles the ORIGINAL effect. Exact-once
+holds per attempt, a confirmed replay returns the STORED ledger proof rather
+than a recomposed one, and a stuck `unknown` token is still never redispatched —
+the operator retries under a new `attempt_key`. Photo attachments are named from
+the trade's `label` (ordinal-prefixed, `site-photo-NN.ext` when unlabelled);
+never ship the storage UUID as the builder-facing file name. Evidence is current-attendance-cycle scoped through
 the shared `makesafe_cycle_evidence.ts` boundary and excludes `phase:'receipt'`
 media (receipts are cost evidence, not builder-facing site photos).
 

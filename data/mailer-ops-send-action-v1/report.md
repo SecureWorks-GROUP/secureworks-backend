@@ -62,16 +62,36 @@ Content-Type: application/json
 ### Retry coordinate (exact-once without a dead end)
 
 The effect identity is `mailer_ops_send + job_id + route_kind + artifact_hash`,
-where `artifact_hash` is a content address of the exact send (kind, to, cc,
-subject, attachment hashes) plus the operator's optional `attempt_key`. That is
-the same escape `route_send` gets from a fresh `release_revision_id`:
+where `artifact_hash` covers only STABLE coordinates: kind, `to`, `cc` and the
+operator's optional `attempt_key`. That is the same escape `route_send` gets
+from a fresh `release_revision_id`:
 
-- the same content under the same attempt key is ONE effect (exact-once);
+- the same card + kind + recipients + attempt key is ONE effect (exact-once);
 - a confirmed replay sends nothing and returns `already_sent: true` with the
   **stored** ledger proof (`recorded_proof`), never a recomposed one;
 - a Graph failure parks that attempt on `unknown` and it is still **never**
   redispatched — the operator reconciles Sent Items by token, then retries
   deliberately under a new `attempt_key`, which mints a new operation key.
+
+Re-resolved content (subject, attachment hashes, photo selection) is
+deliberately **excluded** from the identity. It moves on its own — one more
+uploaded photo re-picks the representative spread, and a transient `emails` /
+`makesafe_intake_drafts` read error changes the recovered subject — so content
+in the identity would mint a second operation key and mail the builder again
+with no operator decision behind it. Content travels in `payload_hash` instead,
+where `claim_ses_external_effect_v1` raises 23505 and
+`reconcileSesEffectAfterContentDrift` returns the ORIGINAL effect: drift
+reconciles, it never sends. Only a named `attempt_key` frees a stranded card,
+and stranded-and-visible is the deliberate trade against a duplicate the builder
+sees.
+
+### Attachment names
+
+Photo attachments are named from the trade's own `label`, ordinal-prefixed
+(`01-front-fence-damage.jpg`), falling back to `site-photo-NN.ext` when the row
+carries no label. Storage objects are UUID-named, so the raw object name is
+never the builder-facing one. The extension comes from the stored object /
+content type, and `job_media` has no `file_name` column — do not read one.
 
 ### Evidence scope
 

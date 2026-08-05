@@ -91,9 +91,11 @@ export async function buildSesEffect(args: {
   // (no release revision). The attempt hash is the retry coordinate that
   // `release_revision_id` gives route_send: exact-once holds for one attempt,
   // and a deliberate new attempt mints a new operation_key instead of being
-  // stranded behind a stuck `unknown` row. Include job_id in the identity ONLY
-  // for that kind so existing operation keys for invoice/release effects stay
-  // bit-stable.
+  // stranded behind a stuck `unknown` row. It must stay free of re-resolved
+  // send content (see mailerOpsAttemptHash) — content drift belongs in
+  // payload_hash, which reconciles the original effect rather than minting a
+  // second email. Include job_id in the identity ONLY for that kind so
+  // existing operation keys for invoice/release effects stay bit-stable.
   const identity = args.effect_kind === "mailer_ops_send"
     ? {
       effect_kind: args.effect_kind,

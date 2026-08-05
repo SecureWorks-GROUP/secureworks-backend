@@ -23,8 +23,9 @@
  *   - one job_id per call (cards are independently driveable; hard stop after card one)
  *   - To is never auto-selected: the operator names it and it must be on the
  *     card-bound / configured destination allowlist
- *   - the effect identity carries a content-addressed attempt hash, so a stuck
- *     `unknown` token is never redispatched and a deliberate retry can still run
+ *   - the effect identity moves ONLY on a deliberate attempt_key, so a stuck
+ *     `unknown` token is never redispatched, a named retry can still run, and
+ *     re-resolved content can never mint a second builder email by itself
  *   - evidence is current-attendance-cycle scoped and never carries receipts
  */
 
@@ -820,11 +821,53 @@ export interface MailerOpsPhotoSelection {
   }>;
 }
 
-/** Storage object path is the fallback name when a row has only a label. */
-function photoFileName(row: any, storageUrl: string): string {
-  const fromPath = storageUrl.split("?")[0].split("/").pop() || "";
-  return text(row.file_name) || text(fromPath) || text(row.label) ||
-    `photo-${text(row.id).slice(0, 8)}.jpg`;
+const EXTENSION_BY_CONTENT_TYPE: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/heic": "heic",
+  "image/heif": "heif",
+  "image/bmp": "bmp",
+  "image/tiff": "tif",
+};
+
+function photoExtension(storageUrl: string, contentType: string): string {
+  const fromPath = storageUrl.split("?")[0].split(".").pop()?.toLowerCase() ||
+    "";
+  if (fromPath && IMAGE_CONTENT_TYPE_BY_EXTENSION[fromPath]) return fromPath;
+  return EXTENSION_BY_CONTENT_TYPE[contentType.toLowerCase()] || "jpg";
+}
+
+/**
+ * Builder-facing attachment name. Storage objects are named by UUID, so the
+ * trade's own `label` is the only human description of what a photo shows and
+ * is what the builder must see. Ordinal-prefixed so the pack keeps its order
+ * and two identically labelled photos cannot collide.
+ */
+export function mailerOpsPhotoFileName(
+  label: string | null | undefined,
+  ordinal: number,
+  storageUrl: string,
+  contentType: string,
+): string {
+  const extension = photoExtension(storageUrl, contentType);
+  const position = String(Math.max(1, Math.floor(ordinal))).padStart(2, "0");
+  const raw = String(label ?? "").trim();
+  const trailingExtension = raw.split(".").pop()?.toLowerCase() || "";
+  const slug = (
+    raw.includes(".") && IMAGE_CONTENT_TYPE_BY_EXTENSION[trailingExtension]
+      ? raw.slice(0, raw.length - trailingExtension.length - 1)
+      : raw
+  )
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60)
+    .replace(/-+$/g, "")
+    .toLowerCase();
+  return slug
+    ? `${position}-${slug}.${extension}`
+    : `site-photo-${position}.${extension}`;
 }
 
 export async function resolveMailerOpsPhotoAttachments(
@@ -891,7 +934,9 @@ export async function resolveMailerOpsPhotoAttachments(
   const selectedRows = indices.map((i) => all[i]!);
   const photos: MailerOpsPhotoSelection["photos"] = [];
 
+  let ordinal = 0;
   for (const row of selectedRows) {
+    ordinal += 1;
     const storageUrl = text(row.storage_url);
     if (!storageUrl) {
       throw new SesActionError(
@@ -909,18 +954,22 @@ export async function resolveMailerOpsPhotoAttachments(
         /^sha256:[0-9a-f]{64}$/i.test(text(row.makesafe_content_hash))
       ? text(row.makesafe_content_hash).toLowerCase()
       : await sesSha256Bytes(bytes);
-    const name = photoFileName(row, storageUrl);
+    const contentType = resolvePhotoContentType(
+      downloaded.content_type,
+      storageUrl,
+    );
     photos.push({
       media_id: text(row.id),
-      file_name: name,
+      file_name: mailerOpsPhotoFileName(
+        row.label,
+        ordinal,
+        storageUrl,
+        contentType,
+      ),
       storage_url: storageUrl,
       size_bytes: bytes.byteLength,
       content_hash: contentHash,
-      content_type: resolvePhotoContentType(
-        downloaded.content_type,
-        name,
-        storageUrl,
-      ),
+      content_type: contentType,
       bytes,
       role: "site_photo",
     });
@@ -1066,11 +1115,10 @@ export interface SendMailerOpsVisibilityArgs {
   /** Optional preferred makesafe_report document id. */
   job_document_id?: string | null;
   /**
-   * Deliberate retry coordinate. The effect identity is content-addressed over
-   * the exact send (kind, to, cc, subject, attachment hashes) plus this key, so
-   * a Graph failure that parks the ledger row on `unknown` never strands the
-   * card: the operator retries under a new attempt key, which mints a new
-   * operation_key. A stuck token itself is still never redispatched.
+   * The ONLY deliberate retry coordinate. A Graph failure parks the ledger row
+   * on `unknown`; naming a new attempt key mints a new operation_key so the
+   * card is not stranded. The stuck token itself is never redispatched, and
+   * nothing else may move the identity.
    */
   attempt_key?: string | null;
   /**
@@ -1082,16 +1130,19 @@ export interface SendMailerOpsVisibilityArgs {
 }
 
 /**
- * Content-addressed identity of the exact email this call would send. Two calls
- * that would send the same email under the same attempt key are one effect
- * (exact-once); a deliberately different attempt is a different effect.
+ * The attempt coordinate. STABLE facts only: route kind, the recipients, and
+ * the operator's attempt key. Re-resolved content — subject, attachment hashes,
+ * photo selection — is deliberately EXCLUDED, because that content moves on its
+ * own (one more uploaded photo re-picks the spread; a transient `emails` read
+ * error changes the recovered subject) and any of it in the identity would let
+ * incidental drift mint a second operation_key and mail the builder twice.
+ * Content still travels in `payload_hash`, so drift on the same identity is a
+ * reconcile of the ORIGINAL effect, never a new send.
  */
 export async function mailerOpsAttemptHash(input: {
   kind: MailerOpsRouteKind;
   to: string;
   cc: readonly string[];
-  subject: string;
-  attachment_hashes: readonly string[];
   attempt_key?: string | null;
 }): Promise<string> {
   return await sesSha256({
@@ -1099,8 +1150,6 @@ export async function mailerOpsAttemptHash(input: {
     kind: input.kind,
     to: input.to,
     cc: [...input.cc],
-    subject: input.subject,
-    attachment_hashes: [...input.attachment_hashes],
     attempt_key: text(input.attempt_key) || null,
   }, "SecureWorks:mailer-ops-send-attempt:v1\n");
 }
@@ -1400,8 +1449,6 @@ export async function sendMailerOpsVisibilityAction(
     kind,
     to: recipient.to,
     cc,
-    subject: subjectDecision.subject,
-    attachment_hashes: attachmentHashes,
     attempt_key: attemptKey,
   });
 
@@ -1435,7 +1482,7 @@ export async function sendMailerOpsVisibilityAction(
     job_id: jobId,
     effect_kind: "mailer_ops_send",
     route_kind: kind,
-    // Retry coordinate: content address of the exact send plus attempt key.
+    // Retry coordinate: stable recipients plus the operator's attempt key only.
     artifact_hash: attemptHash,
     payload: effectPayload,
   });

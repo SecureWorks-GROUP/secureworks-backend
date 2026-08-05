@@ -31,6 +31,7 @@ import {
   MAILER_OPS_PHOTO_CAP,
   MAILER_OPS_SEND_CONTRACT_VERSION,
   mailerOpsAttemptHash,
+  mailerOpsPhotoFileName,
   mailerOpsRouteKindAllowsInvoice,
   parsePublicStorageUrl,
   resolveMailerOpsRecipient,
@@ -198,25 +199,55 @@ Deno.test("mailer ops: destination is never auto-selected from inbound sender_pa
   }
 });
 
-Deno.test("mailer ops: attempt hash is the retry coordinate, content-addressed", async () => {
+Deno.test("mailer ops: attempt hash moves only on a deliberate attempt_key", async () => {
   const base = {
     kind: "report" as const,
     to: "mlb.mailer@primeeco.tech",
     cc: [MAILER_OPS_CC],
-    subject: "NEW WORK ORDER - MLB-26267",
-    attachment_hashes: ["sha256:" + "ab".repeat(32)],
   };
   const first = await mailerOpsAttemptHash(base);
   const replay = await mailerOpsAttemptHash({ ...base });
   const retry = await mailerOpsAttemptHash({ ...base, attempt_key: "retry-2" });
-  const otherContent = await mailerOpsAttemptHash({
-    ...base,
-    subject: "Photo Evidence - MLB-26267",
-  });
+  const otherKind = await mailerOpsAttemptHash({ ...base, kind: "photo" });
+  const otherTo = await mailerOpsAttemptHash({ ...base, to: "someone@x.com" });
   assertEquals(first, replay);
   assert(first !== retry);
-  assert(first !== otherContent);
+  assert(first !== otherKind);
+  assert(first !== otherTo);
   assert(/^sha256:[0-9a-f]{64}$/.test(first));
+  // The signature itself must not accept re-resolved content: a subject or an
+  // attachment set in the identity is what would mail the builder twice.
+  const signature = (mailerOpsAttemptHash as unknown as { toString(): string })
+    .toString();
+  assert(!signature.includes("subject"));
+  assert(!signature.includes("attachment_hashes"));
+});
+
+Deno.test("mailer ops: photo attachments are named from the trade label, never a storage uuid", () => {
+  assertEquals(
+    mailerOpsPhotoFileName(
+      "Front fence damage",
+      1,
+      "https://x/storage/v1/object/public/job-photos/o/j/photos/4f2a9c1e-0000.jpg",
+      "image/jpeg",
+    ),
+    "01-front-fence-damage.jpg",
+  );
+  // Empty label → sequential human name, still never the uuid object path.
+  assertEquals(
+    mailerOpsPhotoFileName(
+      "",
+      2,
+      "https://x/storage/v1/object/public/job-photos/o/j/photos/4f2a9c1e-0000.png",
+      "image/png",
+    ),
+    "site-photo-02.png",
+  );
+  // Extension comes from the stored object / content type, not from the label.
+  assertEquals(
+    mailerOpsPhotoFileName("Rear.jpg", 3, "https://x/o/p", "image/heic"),
+    "03-rear.heic",
+  );
 });
 
 Deno.test("mailer ops: subject uses exact original; photo fallback Photo Evidence - REF", () => {
@@ -950,6 +981,98 @@ Deno.test("mailer ops action: confirmed replay reports the ORIGINAL ledger proof
   assertEquals(
     (replay.recorded_proof as any).provider_digest.subject_as_sent,
     "NEW WORK ORDER - MLB-26267 U24/ 28 Peninsula Road, Maylands, WA 6051",
+  );
+});
+
+Deno.test("mailer ops action: incidental content drift cannot mail the builder twice", async () => {
+  const store = new MemoryEffectStore();
+  const photoRow = (n: number) => ({
+    id: `media-${n}`,
+    job_id: "job-1",
+    type: "photo",
+    phase: "completion",
+    label: `Site photo ${n}`,
+    storage_url:
+      `https://example.supabase.co/storage/v1/object/public/job-photos/job-1/p${n}.jpg`,
+    created_at: `2026-08-01T00:00:0${n}Z`,
+  });
+  const args = {
+    org_id: "00000000-0000-4000-8000-000000000001",
+    job_id: "job-1",
+    kind: "photo" as const,
+    to: "mlb.mailer@primeeco.tech",
+    dry_run: false,
+  };
+  let lastToken = "";
+  const first = await sendMailerOpsVisibilityAction(
+    makeClient({ media: [photoRow(1), photoRow(2)] }),
+    { mode: "api_key", user: null },
+    args,
+    {
+      makeMailGateway: (loadAttachments) => ({
+        createDraftAndSend: async (route, context) => {
+          lastToken = context.external_token;
+          await loadAttachments(route.attachment_hashes || []);
+          return {
+            message_id: "graph-msg-1",
+            state: "sent" as const,
+            operation_token: context.external_token,
+          };
+        },
+        reconcileSent: (token: string) =>
+          token && token === lastToken
+            ? Promise.resolve([{
+              message_id: "graph-msg-1",
+              state: "sent" as const,
+              operation_token: token,
+            }])
+            : Promise.resolve([]),
+      }),
+      effectStore: store,
+    },
+  );
+
+  // A trade uploads another photo, so the representative spread and every
+  // attachment hash move. That is not an operator decision: the identity must
+  // not move with it, and no second email may go out.
+  let secondGraphCalls = 0;
+  const drifted = await sendMailerOpsVisibilityAction(
+    makeClient({ media: [photoRow(1), photoRow(2), photoRow(3)] }),
+    { mode: "api_key", user: null },
+    args,
+    {
+      makeMailGateway: () => ({
+        createDraftAndSend: () => {
+          secondGraphCalls++;
+          throw new Error("content drift must not send a second email");
+        },
+        reconcileSent: () => Promise.resolve([]),
+      }),
+      effectStore: store,
+    },
+  );
+  assertEquals(secondGraphCalls, 0);
+  assertEquals(drifted.already_sent, true);
+  assertEquals(
+    (drifted.effect as any).operation_key,
+    (first.effect as any).operation_key,
+  );
+
+  // Only a deliberately named attempt key mints a new operation key.
+  const retryEffect = await sendMailerOpsVisibilityAction(
+    makeClient({ media: [photoRow(1), photoRow(2)] }),
+    { mode: "api_key", user: null },
+    { ...args, attempt_key: "captain-retry-2", dry_run: true },
+    {
+      makeMailGateway: () => {
+        throw new Error("no gateway in dry_run");
+      },
+      effectStore: new MemoryEffectStore(),
+    },
+  );
+  assert(
+    (retryEffect.effect_preview as any).operation_key !==
+      (first.effect as any).operation_key,
   );
 });
 
