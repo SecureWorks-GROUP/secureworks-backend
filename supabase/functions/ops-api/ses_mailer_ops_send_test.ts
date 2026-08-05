@@ -1379,6 +1379,22 @@ Deno.test("mailer ops: jobs select never names production-phantom company column
   assertStringIncludes(source, "detailRes.data?.external_ref");
 });
 
+Deno.test("mailer ops: intake cases select uses live state not status", async () => {
+  const source = await Deno.readTextFile(
+    new URL("./ses_mailer_ops_send.ts", import.meta.url),
+  );
+  assertStringIncludes(
+    source,
+    '"id,job_id,builder_wo_canonical,builder_po_canonical,external_ref_canonical,state"',
+  );
+  assert(
+    !source.includes(
+      '"id,job_id,builder_wo_canonical,builder_po_canonical,external_ref_canonical,status"',
+    ),
+    "must not re-select phantom makesafe_intake_cases.status",
+  );
+});
+
 Deno.test("mailer ops action: resolves company from detail FK, not jobs columns", async () => {
   // Job row deliberately has no company fields (matching live jobs). Detail
   // carries requesting_company_id; company is found by that id. Two rows share
