@@ -1565,59 +1565,35 @@ step is `prepare_ses_docket_revision` (`dry_run`, then `dry_run: false`) plus a
 fresh signoff. Pure logic and both regression directions:
 `ses_supporting_report_trust.ts`, `ses_reporting_actions_regression_test.ts`.
 
-## An SES Labour Line Is A Floor, Not A Price You Can Set
+## An SES Labour Line Is A Floor; Commercial Quantity Is A Separate Seam
 
-`prepare_ses_invoice_obligation` takes only `job_id`, `docket_revision_id`,
-`post_release_disposition` and `created_by`. It copies lines VERBATIM from
-`docket.local_invoice_proposal.line_items` (the `const lines` map in
-`prepareSesInvoiceObligationAction`, `ses_reporting_actions.ts` — grep the
-symbol, the file moves too often for a line pin);
-there is no price, quantity or hours parameter. Upstream,
+Default path: `prepare_ses_invoice_obligation` copies lines VERBATIM from
+`docket.local_invoice_proposal.line_items`. Upstream,
 `hoursPerTrade = Math.max(reportedHoursPerTrade, minimum)`
-(`ses_prepare_docket_revision.ts:731`) raises short attendances to the sealed
-floor and **never lowers a longer one**. The `rate_override_approved` fields
-(the override-audit guard, `makesafe_invoice_obligation.ts:144-150`) guard the
-`priced_with_line_override`
-disposition, which that action never sets, and they govern the RATE, not hours.
+(`ses_prepare_docket_revision.ts`) raises short attendances to the sealed
+builder floor and **never lowers a longer one**. AJS/AJBR floor is **2h** at
+$80; MLB is **3h** at $85. Do **not** change those floors for a one-off card.
 
-There is no separate commercial seam to write instead. `hours_per_trade` resolves
-from `pricing.hours_per_trade` → `completion.hours_per_trade` →
-`checklist.hours_per_trade` → `checklist.labour_hours`
-(the `copy("hours_per_trade", …)` call, `ses_assembler_input_adapter.ts:964-970`),
-and all four are nested keys inside
-ONE row: `checklist = record(currentReport.checklist_json)`, with `pricing` and
-`completion` read off that same checklist (`:929-931`). **Setting any of them is
-a write to `job_service_reports.checklist_json`** — the trade's own report.
+`hours_per_trade` resolves from four aliases nested inside the one
+`job_service_reports.checklist_json` row (`ses_assembler_input_adapter.ts`).
+**Never edit recorded trade hours to make a price come out** — that falsifies
+attendance evidence. Charge-in (trade → us) and charge-out (us → builder) are
+different commercial facts (`ses_prepare_docket_revision.ts`).
 
-Consequence: billing FEWER hours than the trade recorded is currently
-unreachable. **Never edit recorded trade hours to make a price come out** — that
-is altering evidence to fit a commercial answer, and it is an owner decision, not
-an agent one. Equally, never quietly prepare at the derived figure instead:
-writing the number nobody chose is a silent substitution. Report the blocker.
+**Captain-authorised commercial quantity above the sealed schedule** (per card,
+not a schedule change): optional body
+`commercial_quantity_override` on `prepare_ses_invoice_obligation`
+(`ses_commercial_quantity_override.ts`). Hosts on disposition
+`priced_with_line_override` (existing DB CHECK — no migration) with
+`evidence.override_kind = commercial_quantity_not_rate`. Labour unit price must
+stay the sealed schedule rate; only quantity and separate materials lines may
+change. Provenance (authorised_by / authorised_at / decision_key / trade
+reported hours / sealed floor) stamps the proposal. api_key/routine or
+Captain/admin JWT only. Do **not** force a total through a false hourly rate.
 
-Charge-in and charge-out are legitimately different numbers, and the code says so
-at `ses_prepare_docket_revision.ts:698-702` — the field report's hours are what
-the TRADE bills US, the billed hours are what WE bill the builder. A gap between
-the report and the invoice is a commercial decision to document, not a
-discrepancy to reconcile.
-
-The `priced_with_line_override` instrument is mostly built (DB constraint,
-disposition union, per-line `rate_override_approved`/`_by`/`_at`, the audit
-guard, `line_overrides_audited`, release and cockpit support) but is
-**unreachable**: nothing ever selects that disposition (the
-`pricing_disposition` ternary in `prepareSesInvoiceObligationAction`) and lines
-are built without the override fields. Review feedback is not a route either —
-it only appends a row (`recordSesReviewFeedbackAction`'s
-`record_ses_review_feedback_v1` insert) and the pricing path never reads it.
-
-**Do not wire it up without settling rate-versus-quantity first.** Those fields
-override the RATE, not the QUANTITY. Reaching a reduced total while holding the
-evidence-derived unit count yields a non-schedule rate — on the worked example,
-$400 across 6 units is $66.67/hour against a sealed $80 schedule. That writes a
-FALSE RATE into the billing record to reach a TRUE TOTAL, which is the same
-class of dishonesty as editing the trade's hours, just relocated. An honest
-reduction needs a quantity-level override or a visible discount/credit line, and
-neither exists today. Treat it as an open design decision for the owner.
+Billing **fewer** hours than the trade recorded is still unreachable without an
+honest reduction instrument (quantity credit/discount). Do not invent one via
+rate fakery.
 
 Worked example: SWMS-261109 / AJBR-70271, trade reported 2 x 3 hours ($750 ex /
 $825 inc) against an owner-chosen 2 x 2.5 hours ($670 / $737); six candidate
