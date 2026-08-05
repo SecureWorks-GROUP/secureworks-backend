@@ -7,6 +7,8 @@ import {
   isMlbPhysicalReleaseShape,
   mlbRouteRequiresIntakeThreadReply,
   pickIntakeThreadCoordinates,
+  pickIntakeThreadFromApprovedDraft,
+  resolveIntakeThreadCoordinates,
   routingIntakeThread,
 } from "./ses_mlb_thread_reply.ts";
 import {
@@ -96,6 +98,168 @@ Deno.test("pickIntakeThreadCoordinates returns null when no thread_id exists", (
       { case_id: "c1", post_id: "p1", thread_id: null },
       { case_id: "c1", post_id: "p2", thread_id: "   " },
     ]),
+    null,
+  );
+});
+
+const MAYLANDS_JOB = "1e05db49-cc42-477b-9689-cbdceed649da";
+const MAYLANDS_POST =
+  "AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAApJdqPAAA=";
+const MAYLANDS_THREAD =
+  "AAQkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOAMkABAADnAYXK0wJkmwUunYT4ZGvBAAKOYU_og240GZQy_7BGb1kA==";
+
+function maylandsDraftCandidate(overrides: Record<string, unknown> = {}) {
+  return {
+    draft_id: "6960c405-50b5-4008-9513-e05c0a25c0b3",
+    status: "approved",
+    approved_job_id: MAYLANDS_JOB,
+    graph_message_id: MAYLANDS_POST,
+    approved_at: "2026-07-20T07:00:00Z",
+    email_post_id: MAYLANDS_POST,
+    email_thread_id: MAYLANDS_THREAD,
+    email_conversation_id: null,
+    email_received_at: "2026-07-20T06:45:07Z",
+    ...overrides,
+  };
+}
+
+Deno.test("pickIntakeThreadFromApprovedDraft recovers Maylands-shaped coordinates", () => {
+  const coords = pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+    maylandsDraftCandidate(),
+  ]);
+  assertEquals(coords?.thread_id, MAYLANDS_THREAD);
+  assertEquals(coords?.post_id, MAYLANDS_POST);
+  assertEquals(coords?.recovery_source, "approved_draft_emails");
+  assertEquals(coords?.case_id, null);
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft refuses wrong job (no guess)", () => {
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft("other-job-id", [
+      maylandsDraftCandidate(),
+    ]),
+    null,
+  );
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      maylandsDraftCandidate({ approved_job_id: "stranger-job" }),
+    ]),
+    null,
+  );
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft refuses unproven joins", () => {
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      maylandsDraftCandidate({ status: "pending" }),
+    ]),
+    null,
+  );
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      maylandsDraftCandidate({ email_post_id: "different-post" }),
+    ]),
+    null,
+  );
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      maylandsDraftCandidate({ email_thread_id: null }),
+    ]),
+    null,
+  );
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+      maylandsDraftCandidate({
+        graph_message_id: null,
+        email_post_id: null,
+      }),
+    ]),
+    null,
+  );
+  assertEquals(
+    pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, []),
+    null,
+  );
+});
+
+Deno.test("pickIntakeThreadFromApprovedDraft prefers newest approved draft", () => {
+  const coords = pickIntakeThreadFromApprovedDraft(MAYLANDS_JOB, [
+    maylandsDraftCandidate({
+      draft_id: "older",
+      approved_at: "2026-07-16T00:00:00Z",
+      graph_message_id: "post-old",
+      email_post_id: "post-old",
+      email_thread_id: "thread-old",
+    }),
+    maylandsDraftCandidate({
+      draft_id: "newer",
+      approved_at: "2026-07-20T07:00:00Z",
+      graph_message_id: MAYLANDS_POST,
+      email_post_id: MAYLANDS_POST,
+      email_thread_id: MAYLANDS_THREAD,
+    }),
+  ]);
+  assertEquals(coords?.thread_id, MAYLANDS_THREAD);
+  assertEquals(coords?.post_id, MAYLANDS_POST);
+});
+
+Deno.test("resolveIntakeThreadCoordinates: case_sources outrank draft fallback", () => {
+  const fromSources = resolveIntakeThreadCoordinates({
+    caseSources: [
+      {
+        case_id: "case-live",
+        post_id: "post-source",
+        thread_id: "thread-from-sources",
+        received_at: "2026-07-01T00:00:00Z",
+      },
+    ],
+    preferredCaseId: "case-live",
+    jobId: MAYLANDS_JOB,
+    approvedDraftCandidates: [maylandsDraftCandidate()],
+  });
+  assertEquals(fromSources?.thread_id, "thread-from-sources");
+  assertEquals(fromSources?.recovery_source, "case_sources");
+});
+
+Deno.test("resolveIntakeThreadCoordinates: non-empty sources without thread do NOT fall through", () => {
+  // Real case_sources rows stay authoritative: missing thread is a refuse,
+  // not a silent draft override.
+  assertEquals(
+    resolveIntakeThreadCoordinates({
+      caseSources: [
+        {
+          case_id: "case-live",
+          post_id: "post-no-thread",
+          thread_id: null,
+        },
+      ],
+      preferredCaseId: "case-live",
+      jobId: MAYLANDS_JOB,
+      approvedDraftCandidates: [maylandsDraftCandidate()],
+    }),
+    null,
+  );
+});
+
+Deno.test("resolveIntakeThreadCoordinates: empty sources use approved draft", () => {
+  const coords = resolveIntakeThreadCoordinates({
+    caseSources: [],
+    preferredCaseId: "ad6b6a2e-206f-49af-9d8f-e41ea2504081",
+    jobId: MAYLANDS_JOB,
+    approvedDraftCandidates: [maylandsDraftCandidate()],
+  });
+  assertEquals(coords?.thread_id, MAYLANDS_THREAD);
+  assertEquals(coords?.post_id, MAYLANDS_POST);
+  assertEquals(coords?.recovery_source, "approved_draft_emails");
+});
+
+Deno.test("resolveIntakeThreadCoordinates: empty sources and no draft still refuse", () => {
+  assertEquals(
+    resolveIntakeThreadCoordinates({
+      caseSources: [],
+      jobId: MAYLANDS_JOB,
+      approvedDraftCandidates: [],
+    }),
     null,
   );
 });

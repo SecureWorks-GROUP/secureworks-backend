@@ -27,7 +27,10 @@ import {
   type SesFamilyId,
 } from "./ses_family_matrix.ts";
 import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
-import { pickIntakeThreadCoordinates } from "./ses_mlb_thread_reply.ts";
+import {
+  resolveIntakeThreadCoordinates,
+  type ApprovedDraftThreadCandidate,
+} from "./ses_mlb_thread_reply.ts";
 import {
   currentCycleNumber,
   filterAssignmentsForCurrentCycle,
@@ -141,6 +144,11 @@ export interface SesAssemblerLiveSnapshot {
   cases: LiveRow[];
   /** Intake case sources (thread_id / post_id) for MLB thread-reply plumbing. */
   case_sources?: LiveRow[];
+  /**
+   * Approved-draft → emails join candidates for empty-case_sources thread recovery.
+   * Populated only when case_sources is empty; never outranks real source rows.
+   */
+  approved_draft_thread_candidates?: ApprovedDraftThreadCandidate[];
   cycles: LiveRow[];
   reports: LiveRow[];
   assignments: LiveRow[];
@@ -1396,10 +1404,12 @@ export function buildSesAssemblerInput(
     (item) => text(item.status).toLowerCase() === "sent",
   );
   const siblingBundleEvidence = resolveSiblingBundleEvidence(snapshot);
-  const intakeThread = pickIntakeThreadCoordinates(
-    snapshot.case_sources,
-    text(intakeCase?.id) || null,
-  );
+  const intakeThread = resolveIntakeThreadCoordinates({
+    caseSources: snapshot.case_sources,
+    preferredCaseId: text(intakeCase?.id) || null,
+    jobId: text(job.id),
+    approvedDraftCandidates: snapshot.approved_draft_thread_candidates,
+  });
 
   return {
     contract_version: SES_INPUT_CONTRACT_VERSION,
@@ -1480,8 +1490,8 @@ export function buildSesAssemblerInput(
         .filter((item) => !item.endsWith(":"))
         .sort(),
       portal_links: portalLinks,
-      // Graph Groups conversationThreadId from case sources — required for
-      // MLB physical report/photo reply on the intake thread.
+      // Graph Groups conversationThreadId — case_sources first; empty-source
+      // cards may recover via approved draft → emails (see ses_mlb_thread_reply).
       intake_thread_id: intakeThread?.thread_id || null,
       intake_post_id: intakeThread?.post_id || null,
       intake_conversation_id: intakeThread?.conversation_id || null,
@@ -1926,12 +1936,71 @@ export async function loadSesAssemblerLiveSnapshot(
     )
     : [];
 
+  // Empty case_sources only: recover group thread from the approved intake draft
+  // via emails. When any source row exists it stays authoritative (even if the
+  // row lacks thread_id — that remains a refuse, not a silent draft override).
+  let approvedDraftThreadCandidates: ApprovedDraftThreadCandidate[] = [];
+  if (caseSources.length === 0) {
+    const approvedDrafts = await many(
+      client
+        .from("makesafe_intake_drafts")
+        .select(
+          "id,status,approved_job_id,graph_message_id,approved_at",
+        )
+        .eq("approved_job_id", jobId)
+        .eq("status", "approved")
+        .order("approved_at", { ascending: false }),
+      "makesafe_intake_drafts.approved_job_thread_recovery",
+    );
+    const graphIds = [
+      ...new Set(
+        approvedDrafts
+          .map((row) => text(row.graph_message_id))
+          .filter(Boolean),
+      ),
+    ];
+    const emailByPost = new Map<string, LiveRow>();
+    if (graphIds.length) {
+      const emailRows = await many(
+        client
+          .from("emails")
+          .select(
+            "post_id,thread_id,conversation_id,received_at",
+          )
+          .in("post_id", graphIds),
+        "emails.approved_draft_thread_recovery",
+      );
+      for (const row of emailRows) {
+        const postId = text(row.post_id);
+        if (postId) emailByPost.set(postId, row);
+      }
+    }
+    approvedDraftThreadCandidates = approvedDrafts.map((draft) => {
+      const graphId = text(draft.graph_message_id);
+      const email = graphId ? emailByPost.get(graphId) : undefined;
+      return {
+        draft_id: text(draft.id) || null,
+        status: text(draft.status) || null,
+        approved_job_id: text(draft.approved_job_id) || null,
+        graph_message_id: graphId || null,
+        approved_at: text(draft.approved_at) || null,
+        email_post_id: email ? text(email.post_id) || null : null,
+        email_thread_id: email ? text(email.thread_id) || null : null,
+        email_conversation_id: email
+          ? text(email.conversation_id) || null
+          : null,
+        email_received_at: email ? text(email.received_at) || null : null,
+      };
+    });
+  }
+
   return {
     job,
     detail,
     identity_revision: identityRevision,
     cases,
     case_sources: caseSources,
+    approved_draft_thread_candidates: approvedDraftThreadCandidates,
     cycles,
     reports,
     assignments,
