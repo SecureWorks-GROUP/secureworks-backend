@@ -10,6 +10,11 @@
 // Do not route sealed SES releases through send-outlook-email; that function
 // refuses sealed jobs by design. This path is the controlled release transport.
 
+import {
+  assertSesPhotoMailVolumeFits,
+  resolveSesMailTransport,
+} from "./ses_photo_mail_volume_guard.ts";
+
 export interface SesRouteSendResult {
   message_id: string;
   internet_message_id?: string;
@@ -115,7 +120,9 @@ export function messageHasOperationToken(
   externalToken: string,
 ): boolean {
   if (!message) return false;
-  if (headersHaveOperationToken(message.internetMessageHeaders, externalToken)) {
+  if (
+    headersHaveOperationToken(message.internetMessageHeaders, externalToken)
+  ) {
     return true;
   }
   return subjectHasOperationToken(message.subject, externalToken);
@@ -225,8 +232,9 @@ async function listFolderMessages(
       : "createdDateTime desc",
     "$top": String(top),
   });
-  const url =
-    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/mailFolders/${folder}/messages?${params}`;
+  const url = `https://graph.microsoft.com/v1.0/users/${
+    encodeURIComponent(mailbox)
+  }/mailFolders/${folder}/messages?${params}`;
   const response = await graphJson(url, { method: "GET" }, [200]);
   return Array.isArray(response?.value) ? response.value : [];
 }
@@ -248,7 +256,11 @@ async function hydrateOperationHeaders(
     if (!id) return;
     try {
       const full = await graphJson(
-        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(id)}?$select=id,internetMessageId,subject,internetMessageHeaders,isDraft`,
+        `https://graph.microsoft.com/v1.0/users/${
+          encodeURIComponent(mailbox)
+        }/messages/${
+          encodeURIComponent(id)
+        }?$select=id,internetMessageId,subject,internetMessageHeaders,isDraft`,
         { method: "GET" },
         [200],
       );
@@ -469,9 +481,7 @@ export function createSesGraphMailGateway(
         body: JSON.stringify({
           post: {
             body: { contentType: "HTML", content: html },
-            ...(postAttachments.length
-              ? { attachments: postAttachments }
-              : {}),
+            ...(postAttachments.length ? { attachments: postAttachments } : {}),
           },
         }),
       },
@@ -541,9 +551,18 @@ export function createSesGraphMailGateway(
           "Route requires an intake-thread reply but reply_to_thread_id is missing; refusing to open a new thread",
         );
       }
-      // Only the locked group-thread shape enters here. Ordinary Mail.Send
-      // (including the MLB Captain exception) must not set requires_thread_reply.
-      if (requiresThread && threadId) {
+      // Only the locked group-thread shape enters the group post path. Ordinary
+      // Mail.Send (including the MLB Captain exception) must not set
+      // requires_thread_reply, and keeps the user-mailbox ceilings.
+      const usesGroupThreadReply = requiresThread && Boolean(threadId);
+      // Loud volume guard BEFORE the first Graph call. Never cull photos.
+      const transport = resolveSesMailTransport({
+        reply_to_thread_id: usesGroupThreadReply ? threadId : "",
+        requires_thread_reply: usesGroupThreadReply,
+      });
+      assertSesPhotoMailVolumeFits(attachments, transport);
+      if (usesGroupThreadReply) {
+        // MLB physical report/photo: reply on the ses@ group intake thread.
         return await sendGroupThreadReply(
           route,
           context,

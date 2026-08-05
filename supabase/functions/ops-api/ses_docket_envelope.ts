@@ -158,6 +158,18 @@ export interface SesAssemblerInputV1 {
     /** Group post id of the chosen intake source (audit anchor). */
     intake_post_id?: string | null;
     intake_conversation_id?: string | null;
+    /**
+     * Verbatim original work-order email subject (emails.subject preferred).
+     * Used only for MLB physical report/photo ordinary Mail.Send inbox
+     * grouping — not real threading. Never reconstructed.
+     */
+    intake_email_subject?: string | null;
+    /** Which store supplied intake_email_subject (audit). */
+    intake_email_subject_source?:
+      | "emails_subject"
+      | "intake_draft_subject"
+      | "job_metadata_builder_email_subject"
+      | null;
   };
   cycle_facts: {
     trade_report: Record<string, unknown> | null;
@@ -285,6 +297,12 @@ export interface SesManifestV2 {
     intake_thread_id?: string;
     intake_post_id?: string;
     intake_conversation_id?: string;
+    /**
+     * Verbatim original WO email subject for ordinary-mail inbox grouping.
+     * Inbox grouping only — not real threading. Empty when unrecovered.
+     */
+    intake_email_subject?: string;
+    intake_email_subject_source?: string;
   };
   items: Record<string, SesObligationState>;
   deliverables: Array<{

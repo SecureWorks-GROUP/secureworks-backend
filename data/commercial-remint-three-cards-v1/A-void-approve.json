@@ -1,0 +1,30 @@
+[
+  {
+    "result": {
+      "approval": {
+        "id": "1dc39c21-6289-4a92-bebd-6cd6e9410644",
+        "decided_at": "2026-08-05T08:17:28.181079+00:00",
+        "decided_by": "Captain brief commercial-remint-three-cards-v1 (void DRAFT INV-1105 authorised)",
+        "void_revision_id": "b32396c2-346d-5565-ac9f-151e34ca3d54",
+        "approval_content_hash": "sha256:b32396c2346df565ac9f151e34ca3d5469b3988a3f8eccc20c96d9638f75d905"
+      },
+      "revision": {
+        "id": "b32396c2-346d-5565-ac9f-151e34ca3d54",
+        "state": "approved",
+        "job_id": "f8c19311-611d-4c8f-87b6-bb2005c47bda",
+        "org_id": "00000000-0000-0000-0000-000000000001",
+        "reason": "Captain commercial remint INV-1105 materials $45",
+        "created_at": "2026-08-05T08:16:27.003135+00:00",
+        "created_by": "ses-void-preparer",
+        "updated_at": "2026-08-05T08:17:28.184468+00:00",
+        "confirmed_at": null,
+        "content_hash": "sha256:b32396c2346df565ac9f151e34ca3d5469b3988a3f8eccc20c96d9638f75d905",
+        "target_status": "DELETED",
+        "observed_status": "DRAFT",
+        "provider_digest": {},
+        "xero_invoice_id": "87c289af-8a98-4705-bde1-6fc9e67e62b7",
+        "invoice_obligation_revision_id": "be130ff5-ba69-5f27-8e10-189e1b48edb3"
+      }
+    }
+  }
+]

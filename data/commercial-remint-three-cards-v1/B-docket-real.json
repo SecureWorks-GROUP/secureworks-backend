@@ -1,0 +1,168 @@
+{
+  "action": "prepare_ses_docket_revision",
+  "assembler_version": "ses-pack-assembler/v1",
+  "dry_run": false,
+  "result": {
+    "state": "ready",
+    "docket_revision_id": "4d2025b8-a479-5eec-9136-1d30a0c7626b",
+    "blockers": [],
+    "persisted": true,
+    "artifacts": [
+      {
+        "content_hash": "sha256:3bc373d5d681d2662952d4bac4221a8a99bc0b0eff2890ad5f7c590ca858ab5b",
+        "size_bytes": 151660,
+        "role": "source_attachment"
+      },
+      {
+        "content_hash": "sha256:9a67c5b76860a7e5517ae7ec1f3b7a155e64df90a098fb2fc3d95fb793bdd2a6",
+        "size_bytes": 241510,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:2c12cecfd57397ea9be4888d719ba6fe66ae2d05876f31f286b46597a9763788",
+        "size_bytes": 305282,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:a917dabc203b4d99fd16b247bb55b431572b9d30e8ac4bb644eb6515860534e7",
+        "size_bytes": 254508,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:d9ad23b21adf95e5b19d9a38b4efb2207d0c25084b53134938161dc3766b499c",
+        "size_bytes": 248510,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:a82cdf9883f2dcef1d8aa1588a9410bcb66a0429acbd66d14e43e03ba73591e4",
+        "size_bytes": 393741,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:a58101cccbda21541085b8c0fbf296920be41f1819b447a8189af6dfd5065b54",
+        "size_bytes": 217741,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:17e473733dee9d1d54e0da3a92e8992c833580f14d2e4d576a6e4af44d648123",
+        "size_bytes": 264847,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:8234876372995fcef83516ccc2cc3a910dec623a692b240a615143bc3985a080",
+        "size_bytes": 232814,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:2dac8f5a16e9fd8c435f6e243798fa30fcacd1d41106b3f900a03326f3a63e15",
+        "size_bytes": 414801,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:a7deedc6f23af391cc792569f993f640548f6b820143b7d5cb1a8e646f435be3",
+        "size_bytes": 228048,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:2f8f5894fc5a96ab2ff995dbcd0875d0200fcb7d463e1cca7a455e663273e8ec",
+        "size_bytes": 273054,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:c4f00645318851e89f33345334b5d336df8b363b689c0054969f2602ed95dce9",
+        "size_bytes": 306082,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:313ed0ca8e52c10d5778fe17ff7952e79b9264515f46382e91186f817eaadac3",
+        "size_bytes": 244282,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:ca1e818ecc8f6c5e2fc20742e44ed08d03e96ad6b63e97fc48169855c6f6285a",
+        "size_bytes": 445802,
+        "role": "completion_photo"
+      },
+      {
+        "content_hash": "sha256:cf5afe17f72f3da7bdb417cb06de2d882e79af9dcf0fce4c229c981ad2f29d52",
+        "size_bytes": 1346365,
+        "role": "supporting_report_pdf"
+      },
+      {
+        "content_hash": "sha256:e8adf9ff545a1a572e2ecdcfe0f9c6d543b332d7f415ea81c1e96705c6056264",
+        "size_bytes": 919198,
+        "role": "swms_artifact"
+      },
+      {
+        "content_hash": "sha256:86154e0375302f8b716e0487f38eb9c8ea6ebb5514606b521e9a925c6ffbda46",
+        "size_bytes": 1124,
+        "role": "photo_selection"
+      },
+      {
+        "content_hash": "sha256:dd8b5b80d070b689a1cc37fc634dd9d0c8ea940849e8cb96d9a90dee03dfcaab",
+        "size_bytes": 461,
+        "role": "invoice_proposal"
+      },
+      {
+        "content_hash": "sha256:207b07f056b3fb025f108b1a46220207b2e95854d7c3506e8646071b33606a44",
+        "size_bytes": 414,
+        "role": "invoice_email_draft"
+      },
+      {
+        "content_hash": "sha256:43da2194d5ba52ff2b617426f3a1d8a7b621209b41a323851609a5abbc8c183d",
+        "size_bytes": 303,
+        "role": "report_email_draft"
+      },
+      {
+        "content_hash": "sha256:7b2a295a9068f5da34095dbf69680ea374deab9370e1286c353d043b634d2e60",
+        "size_bytes": 1096,
+        "role": "photo_email_draft"
+      },
+      {
+        "content_hash": "sha256:4dfee05a8b225c430dca616b35dc45d209ba1ac8b52558ca49914f8d66ff9350",
+        "size_bytes": 3009,
+        "role": "review_spec"
+      },
+      {
+        "content_hash": "sha256:bc49ebb91cfea97cb9b59f6f5481f9705be2f0093e03ed246bcdf016823f6300",
+        "size_bytes": 2369,
+        "role": "review_html"
+      },
+      {
+        "content_hash": "sha256:dcb363dcde0b5e3447ae8ead88ee6b721a7cd96db746d1bc88b0212e711be6aa",
+        "size_bytes": 276,
+        "role": "release_payload"
+      },
+      {
+        "content_hash": "sha256:d29a08d21b260db270eb056405b6b92a4b884e6d842390d14cfa67ff36308910",
+        "size_bytes": 519,
+        "role": "case_story"
+      },
+      {
+        "content_hash": "sha256:7c37b51c2a920c72a69e9804587dd4cac02c97fed4851ab58b17d138e2f4b6df",
+        "size_bytes": 4447,
+        "role": "docket_manifest"
+      },
+      {
+        "content_hash": "sha256:0154f2b12dba6c8df99c018be55507c032b9c6aa885b7abcdd6d0a1ce1cc2677",
+        "size_bytes": 5547,
+        "role": "assembler_envelope"
+      },
+      {
+        "content_hash": "sha256:5bd626ca66870f12e69c1cb0fad0039c9a388afbd9e76cc1a881e805db2e59ea",
+        "size_bytes": 548,
+        "role": "capability"
+      },
+      {
+        "content_hash": "sha256:345d082ad7f13b6a7f030778cbf5402b403862de1deb1ce0b090a17152c49763",
+        "size_bytes": 341,
+        "role": "timing"
+      },
+      {
+        "content_hash": "sha256:5aa987395a57ec4eb3af2f23137d7277bbdd4d850f1ba51830a5499cb7107122",
+        "size_bytes": 3327,
+        "role": "hashes"
+      }
+    ]
+  }
+}

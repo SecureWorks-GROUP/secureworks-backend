@@ -1,0 +1,25 @@
+{
+  "status": 200,
+  "body": {
+    "state": "xero_draft_created",
+    "invoice": {
+      "xero_invoice_id": "d4cb2329-e69a-4272-80a4-48ac8d21a493",
+      "invoice_number": "INV-1127",
+      "status": "DRAFT",
+      "reference": "MLB-27037",
+      "total": 374
+    },
+    "draft_pdf": {
+      "content_hash": "sha256:aee2865a19aadb565f314b25cca66a66cb840b330e0125317ad240bb76e37fd5",
+      "size_bytes": 52040,
+      "object_key": "makesafe-docket-artifacts/db3f2242-d10c-42f0-80b9-7d684e62c6fe/xero-invoice-pdfs/d4cb2329-e69a-4272-80a4-48ac8d21a493/INV-1127.pdf"
+    },
+    "invoice_create_dispatched": true,
+    "send_dispatched": false,
+    "scanned_accrec": 1152,
+    "external_mutations": {
+      "xero": 1,
+      "email": 0
+    }
+  }
+}

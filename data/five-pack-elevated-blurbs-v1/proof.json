@@ -1,0 +1,470 @@
+{
+  "task": "five-pack-elevated-blurbs-v1",
+  "date": "2026-08-05",
+  "mode": "operations-only",
+  "boundaries": {
+    "no_send": true,
+    "no_approve": true,
+    "no_authorise": true,
+    "no_void": true,
+    "no_binary_pdfs_in_repo": true,
+    "commercial_quantity_override_used": false
+  },
+  "mlb_money_note": "Four MLB cards (INV-1129, INV-1130, INV-1131, INV-1132) minted at the sealed labour floor only (1 trade x 3 hours @ $85 = $255.00 ex / $280.50 inc GST). No commercial_quantity_override was applied. Trade materials appear on the bound elevated reports but not on these invoices. The Captain is deciding whether to remint with materials; this ledger must not be read as settling that money question.",
+  "cards": [
+    {
+      "job_number": "SWMS-26953",
+      "suburb": "Gidgegannup",
+      "builder_ref": "MLB-25971PO-55855",
+      "family_lane": "MLB",
+      "photo_count_media": 9,
+      "document_id": "883a4b6e-6713-4c1b-8bc5-2d13439623d8",
+      "pdf_sha256": "sha256:5a6842fd4c0d4dbc7656b49f76bc1b7a8c6005d53fcdc1a984fdf736362a7168",
+      "pdf_size": 1587117,
+      "bind": {
+        "success": true,
+        "source_kind": "durable_curated_revision",
+        "cycle_attribution": "bound",
+        "expected_raw_sha256": "sha256:5a6842fd4c0d4dbc7656b49f76bc1b7a8c6005d53fcdc1a984fdf736362a7168",
+        "report_input_hash": "sha256:963072d4104d43432995193714b203df2bbf97156ce945178b76a148c3ba03ca",
+        "supersedes_prior_bind": null
+      },
+      "prepare": {
+        "state": "ready",
+        "persisted": true,
+        "blocker_codes": [],
+        "pre_xero_docs_ready": null
+      },
+      "mint": {
+        "invoice_number": "INV-1129",
+        "status": "DRAFT",
+        "total": "280.50",
+        "sub_total": "255.00",
+        "total_tax": "25.50",
+        "reference": "MLB-25971PO-55855",
+        "xero_invoice_id": "cd5f7833-207b-4643-bb10-35879a72e814",
+        "scanned_accrec": 1154,
+        "invoice_extract_source": "structured_fallback"
+      },
+      "commercial_quantity_override": false,
+      "invoice_contains_materials_line": false,
+      "materials_on_report_only": true,
+      "labour_floor_note": "MLB sealed floor 3h @ $85; trade hours left at 2; no materials line on invoice",
+      "elevated_sections": {
+        "scope": "Make safe the roof structure under the roof-mounted hot water system.",
+        "findings": "Storm / wind. The hot water system on the roof is not engineered for the load. Timber beams have dipped under the weight.",
+        "works": "Fitted two structural timber pieces with bugle screws from the base plate to the underpurlin, giving the roof extra support under the hot water system.",
+        "materials": "Timber 1 m. Bugle screws x 5."
+      },
+      "report_pdftotext_file": "SWMS-26953-report.pdftotext.txt",
+      "invoice_pdftotext_file": "INV-1129.pdftotext.txt"
+    },
+    {
+      "job_number": "SWMS-26902",
+      "suburb": "Ballajura",
+      "builder_ref": "MLB-26443",
+      "family_lane": "MLB",
+      "photo_count_media": 15,
+      "document_id": "bba92850-6192-4f68-af9a-3334aa7a58e6",
+      "pdf_sha256": "sha256:a562153ce17f2e3cad7741ff60f5cf8275a487c234ca8fa8cd17d79aaa454778",
+      "pdf_size": 964122,
+      "bind": {
+        "success": true,
+        "source_kind": "durable_curated_revision",
+        "cycle_attribution": "bound",
+        "expected_raw_sha256": "sha256:a562153ce17f2e3cad7741ff60f5cf8275a487c234ca8fa8cd17d79aaa454778",
+        "report_input_hash": "sha256:ae4c75cef282d6629148c59a2261eaf64507b44933f8fa8ee88662ec35eea276",
+        "supersedes_prior_bind": null
+      },
+      "prepare": {
+        "state": "ready",
+        "persisted": true,
+        "blocker_codes": [],
+        "pre_xero_docs_ready": null
+      },
+      "mint": {
+        "invoice_number": "INV-1130",
+        "status": "DRAFT",
+        "total": "280.50",
+        "sub_total": "255.00",
+        "total_tax": "25.50",
+        "reference": "MLB-26443",
+        "xero_invoice_id": "fa60bc1a-863f-486b-9696-3d3b0b124040",
+        "scanned_accrec": 1155,
+        "invoice_extract_source": "structured_fallback"
+      },
+      "commercial_quantity_override": false,
+      "invoice_contains_materials_line": false,
+      "materials_on_report_only": true,
+      "labour_floor_note": "MLB sealed floor 3h @ $85; trade hours left at 2; no materials line on invoice",
+      "elevated_sections": {
+        "scope": "Make safe the ceiling that needed extra support.",
+        "findings": "Storm / wind. Client reported the ceiling had cracked further and needed extra prop support.",
+        "works": "Added structural timber to the ceiling using bugle screws.",
+        "materials": "Timber x 3. Bugle screws x 10."
+      },
+      "report_pdftotext_file": "SWMS-26902-report.pdftotext.txt",
+      "invoice_pdftotext_file": "INV-1130.pdftotext.txt"
+    },
+    {
+      "job_number": "SWMS-261128",
+      "suburb": "Woodvale",
+      "builder_ref": "MLB-27335",
+      "family_lane": "MLB",
+      "photo_count_media": 28,
+      "document_id": "28e39864-5aab-4406-8a50-ab2c84c969f4",
+      "pdf_sha256": "sha256:3873894d3b52e0485e53d92d4461e6d9a793ae9ca811691519d211e2d57ba24a",
+      "pdf_size": 7069119,
+      "bind": {
+        "success": true,
+        "source_kind": "durable_curated_revision",
+        "cycle_attribution": "bound",
+        "expected_raw_sha256": "sha256:3873894d3b52e0485e53d92d4461e6d9a793ae9ca811691519d211e2d57ba24a",
+        "report_input_hash": "sha256:5e3563d6a53456e62ff71a978d6c21212eb9c28967dff4b1e43bdf3c1c952393",
+        "supersedes_prior_bind": null
+      },
+      "prepare": {
+        "state": "ready",
+        "persisted": true,
+        "blocker_codes": [],
+        "pre_xero_docs_ready": null
+      },
+      "mint": {
+        "invoice_number": "INV-1131",
+        "status": "DRAFT",
+        "total": "280.50",
+        "sub_total": "255.00",
+        "total_tax": "25.50",
+        "reference": "MLB-27335",
+        "xero_invoice_id": "900feea2-756c-49e5-be9f-5770d40416a9",
+        "scanned_accrec": 1156,
+        "invoice_extract_source": "structured_fallback"
+      },
+      "commercial_quantity_override": false,
+      "invoice_contains_materials_line": false,
+      "materials_on_report_only": true,
+      "labour_floor_note": "MLB sealed floor 3h @ $85; trade hours left at 2; no materials line on invoice",
+      "elevated_sections": {
+        "scope": "Make safe water ingress into the bedroom cupboard.",
+        "findings": "Storm / wind. Water entering the corner of a bedroom cupboard through the roof.",
+        "works": "Siliconed cracked ridge-cap pointing and large gaps between tiles. Flashing-taped the larger tile gaps. Resecured an unsecured batten.",
+        "materials": "Silicone x 1. Flashing tape 1 m."
+      },
+      "report_pdftotext_file": "SWMS-261128-report.pdftotext.txt",
+      "invoice_pdftotext_file": "INV-1131.pdftotext.txt"
+    },
+    {
+      "job_number": "SWMS-261129",
+      "suburb": "Carine",
+      "builder_ref": "MLB-25876",
+      "family_lane": "MLB",
+      "photo_count_media": 33,
+      "document_id": "a63d6e8b-e851-472f-ba4c-0286fc5d4bb8",
+      "pdf_sha256": "sha256:fc9fdf7b788398fe3905c6a2c48afab1a54ae23b33d55c730128eb700d263689",
+      "pdf_size": 8046915,
+      "bind": {
+        "success": true,
+        "source_kind": "durable_curated_revision",
+        "cycle_attribution": "bound",
+        "expected_raw_sha256": "sha256:fc9fdf7b788398fe3905c6a2c48afab1a54ae23b33d55c730128eb700d263689",
+        "report_input_hash": "sha256:da710fdb9a2def86773d39c8e639de5ec2c23b828303a4913d99b4c80c502d7b",
+        "supersedes_prior_bind": null
+      },
+      "prepare": {
+        "state": "ready",
+        "persisted": true,
+        "blocker_codes": [],
+        "pre_xero_docs_ready": null
+      },
+      "mint": {
+        "invoice_number": "INV-1132",
+        "status": "DRAFT",
+        "total": "280.50",
+        "sub_total": "255.00",
+        "total_tax": "25.50",
+        "reference": "MLB-25876",
+        "xero_invoice_id": "42abf372-4084-4298-ae4f-c3b5fe156e65",
+        "scanned_accrec": 1157,
+        "invoice_extract_source": "structured_fallback"
+      },
+      "commercial_quantity_override": false,
+      "invoice_contains_materials_line": false,
+      "materials_on_report_only": true,
+      "labour_floor_note": "MLB sealed floor 3h @ $85; trade hours left at 2; no materials line on invoice",
+      "elevated_sections": {
+        "scope": "Make safe water ingress through the skylight into the front door walkway.",
+        "findings": "Storm / wind. Water entering through the skylight into the front door walkway. A tarp was already on the roof but the leak continued. Sarking is installed and is cut at the skylight, so water was entering from above the skylight.",
+        "works": "Above the skylight, rebent the valley tray to about 80 degrees. Flashing-taped and siliconed tiles with large gaps at the joins. Removed unsecured tiles and the tarp from the roof.",
+        "materials": "Silicone x 1. Flashing tape 0.4 m."
+      },
+      "report_pdftotext_file": "SWMS-261129-report.pdftotext.txt",
+      "invoice_pdftotext_file": "INV-1132.pdftotext.txt"
+    },
+    {
+      "job_number": "SWMS-261137",
+      "suburb": "Attadale",
+      "builder_ref": "AJBR-70499",
+      "family_lane": "AJS",
+      "photo_count_media": 16,
+      "document_id": "2a33fffd-bc42-4ef5-88ad-7aa76b1406de",
+      "pdf_sha256": "sha256:37b3779cb259bf4c600dc191614b430b0c563606bc76d2a0d78cbd933ab8fb28",
+      "pdf_size": 1751293,
+      "bind": {
+        "success": true,
+        "source_kind": "durable_curated_revision",
+        "cycle_attribution": "bound",
+        "expected_raw_sha256": "sha256:4a3787d96c0893f107121f3d136f389ad1a20ac70de71d61f9a67d32d733b431",
+        "report_input_hash": "sha256:94ba2c4199e05a1f5b4d9cbb51e259f05e09461840d1548f09107a79b2f8d040",
+        "supersedes_prior_bind": true
+      },
+      "prepare": {
+        "state": "ready",
+        "persisted": true,
+        "blocker_codes": []
+      },
+      "mint": {
+        "invoice_number": "INV-1133",
+        "status": "DRAFT",
+        "total": "220.00",
+        "sub_total": "200.00",
+        "total_tax": "20.00",
+        "reference": "AJBR-70499",
+        "xero_invoice_id": "e0149ed6-9a34-4a8f-b2a7-c4ffd17c8d8a",
+        "scanned_accrec": 1158,
+        "invoice_extract_source": "structured_fallback"
+      },
+      "commercial_quantity_override": false,
+      "invoice_contains_materials_line": false,
+      "materials_on_report_only": false,
+      "labour_floor_note": "AJS rate $80; trade hours 2.5 above 2h floor; no materials line on invoice this mint",
+      "elevated_sections": {
+        "scope": "Make safe the drooping ceiling in the kitchen / living area.",
+        "findings": "Storm / wind. Corner of the ceiling in the living / kitchen space is drooping and not connected to the joists above.",
+        "works": "Propped the falling ceiling in the corner of the kitchen / living space with acro props and structural timber planks. Planks are screwed into the top of the acro props.",
+        "materials": "Acro prop x 2. Timber x 2. Screws x 2."
+      },
+      "report_pdftotext_file": "SWMS-261137-report.pdftotext.txt",
+      "invoice_pdftotext_file": "INV-1133.pdftotext.txt"
+    }
+  ],
+  "final_verify": [
+    {
+      "job_number": "SWMS-26953",
+      "suburb": "Gidgegannup",
+      "ref": "MLB-25971PO-55855",
+      "photos": "9/9",
+      "sha_ok": true,
+      "sha": "sha256:5a6842fd4c0d4dbc7656b49f76bc1b7a8c6005d53fcdc1a984fdf736362a7168",
+      "kind": "durable_curated_revision",
+      "cycle": null,
+      "version": 2,
+      "emdash": false,
+      "works_in_pdf": true,
+      "materials_pdf": "Timber x 1m; Bugle screws x 5",
+      "invoice": {
+        "invoice_number": "INV-1129",
+        "status": "DRAFT",
+        "total": "280.50",
+        "sub_total": "255.00",
+        "total_tax": "25.50",
+        "reference": "MLB-25971PO-55855"
+      },
+      "cockpit": "INVOICE_CREATE_READY",
+      "approve_enabled": true,
+      "scope": "Make safe the roof structure under the roof-mounted hot water system.",
+      "findings": "Storm / wind. The hot water system on the roof is not engineered for the load. Timber beams have dipped under the weight.",
+      "works": "Fitted two structural timber pieces with bugle screws from the base plate to the underpurlin, giving the roof extra support under the hot water system.",
+      "materials_prose": "Timber 1 m. Bugle screws x 5.",
+      "mint": {
+        "scanned_accrec": 1154,
+        "invoice_number": "INV-1129",
+        "status": "DRAFT",
+        "total": 280.5,
+        "allows_create": null
+      },
+      "prepare": {
+        "state": "ready",
+        "persisted": true,
+        "blocker_codes": [],
+        "pre_xero_docs_ready": null
+      }
+    },
+    {
+      "job_number": "SWMS-26902",
+      "suburb": "Ballajura",
+      "ref": "MLB-26443",
+      "photos": "15/15",
+      "sha_ok": true,
+      "sha": "sha256:a562153ce17f2e3cad7741ff60f5cf8275a487c234ca8fa8cd17d79aaa454778",
+      "kind": "durable_curated_revision",
+      "cycle": null,
+      "version": 2,
+      "emdash": false,
+      "works_in_pdf": true,
+      "materials_pdf": "Timber x 3; Bugle screws x 10",
+      "invoice": {
+        "invoice_number": "INV-1130",
+        "status": "DRAFT",
+        "total": "280.50",
+        "sub_total": "255.00",
+        "total_tax": "25.50",
+        "reference": "MLB-26443"
+      },
+      "cockpit": "INVOICE_CREATE_READY",
+      "approve_enabled": true,
+      "scope": "Make safe the ceiling that needed extra support.",
+      "findings": "Storm / wind. Client reported the ceiling had cracked further and needed extra prop support.",
+      "works": "Added structural timber to the ceiling using bugle screws.",
+      "materials_prose": "Timber x 3. Bugle screws x 10.",
+      "mint": {
+        "scanned_accrec": 1155,
+        "invoice_number": "INV-1130",
+        "status": "DRAFT",
+        "total": 280.5,
+        "allows_create": null
+      },
+      "prepare": {
+        "state": "ready",
+        "persisted": true,
+        "blocker_codes": [],
+        "pre_xero_docs_ready": null
+      }
+    },
+    {
+      "job_number": "SWMS-261128",
+      "suburb": "Woodvale",
+      "ref": "MLB-27335",
+      "photos": "28/28",
+      "sha_ok": true,
+      "sha": "sha256:3873894d3b52e0485e53d92d4461e6d9a793ae9ca811691519d211e2d57ba24a",
+      "kind": "durable_curated_revision",
+      "cycle": null,
+      "version": 2,
+      "emdash": false,
+      "works_in_pdf": true,
+      "materials_pdf": "Silicone x 1; Flashing tape x 1m",
+      "invoice": {
+        "invoice_number": "INV-1131",
+        "status": "DRAFT",
+        "total": "280.50",
+        "sub_total": "255.00",
+        "total_tax": "25.50",
+        "reference": "MLB-27335"
+      },
+      "cockpit": "INVOICE_CREATE_READY",
+      "approve_enabled": true,
+      "scope": "Make safe water ingress into the bedroom cupboard.",
+      "findings": "Storm / wind. Water entering the corner of a bedroom cupboard through the roof.",
+      "works": "Siliconed cracked ridge-cap pointing and large gaps between tiles. Flashing-taped the larger tile gaps. Resecured an unsecured batten.",
+      "materials_prose": "Silicone x 1. Flashing tape 1 m.",
+      "mint": {
+        "scanned_accrec": 1156,
+        "invoice_number": "INV-1131",
+        "status": "DRAFT",
+        "total": 280.5,
+        "allows_create": null
+      },
+      "prepare": {
+        "state": "ready",
+        "persisted": true,
+        "blocker_codes": [],
+        "pre_xero_docs_ready": null
+      }
+    },
+    {
+      "job_number": "SWMS-261129",
+      "suburb": "Carine",
+      "ref": "MLB-25876",
+      "photos": "33/33",
+      "sha_ok": true,
+      "sha": "sha256:fc9fdf7b788398fe3905c6a2c48afab1a54ae23b33d55c730128eb700d263689",
+      "kind": "durable_curated_revision",
+      "cycle": null,
+      "version": 2,
+      "emdash": false,
+      "works_in_pdf": true,
+      "materials_pdf": "Silicone x 1; Flashing tape x 0.4m",
+      "invoice": {
+        "invoice_number": "INV-1132",
+        "status": "DRAFT",
+        "total": "280.50",
+        "sub_total": "255.00",
+        "total_tax": "25.50",
+        "reference": "MLB-25876"
+      },
+      "cockpit": "INVOICE_CREATE_READY",
+      "approve_enabled": true,
+      "scope": "Make safe water ingress through the skylight into the front door walkway.",
+      "findings": "Storm / wind. Water entering through the skylight into the front door walkway. A tarp was already on the roof but the leak continued. Sarking is installed and is cut at the skylight, so water was entering from above the skylight.",
+      "works": "Above the skylight, rebent the valley tray to about 80 degrees. Flashing-taped and siliconed tiles with large gaps at the joins. Removed unsecured tiles and the tarp from the roof.",
+      "materials_prose": "Silicone x 1. Flashing tape 0.4 m.",
+      "mint": {
+        "scanned_accrec": 1157,
+        "invoice_number": "INV-1132",
+        "status": "DRAFT",
+        "total": 280.5,
+        "allows_create": null
+      },
+      "prepare": {
+        "state": "ready",
+        "persisted": true,
+        "blocker_codes": [],
+        "pre_xero_docs_ready": null
+      }
+    },
+    {
+      "job_number": "SWMS-261137",
+      "suburb": "Attadale",
+      "ref": "AJBR-70499",
+      "photos": "16/16",
+      "sha_ok": true,
+      "sha": "sha256:37b3779cb259bf4c600dc191614b430b0c563606bc76d2a0d78cbd933ab8fb28",
+      "kind": "durable_curated_revision",
+      "cycle": null,
+      "version": 5,
+      "emdash": false,
+      "works_in_pdf": true,
+      "materials_pdf": "Acro prop x 2; Timber x 2; Screws x 2",
+      "invoice": {
+        "invoice_number": "INV-1133",
+        "status": "DRAFT",
+        "total": "220.00",
+        "sub_total": "200.00",
+        "total_tax": "20.00",
+        "reference": "AJBR-70499"
+      },
+      "cockpit": "HOLD",
+      "approve_enabled": true,
+      "scope": "Make safe the drooping ceiling in the kitchen / living area.",
+      "findings": "Storm / wind. Corner of the ceiling in the living / kitchen space is drooping and not connected to the joists above.",
+      "works": "Propped the falling ceiling in the corner of the kitchen / living space with acro props and structural timber planks. Planks are screwed into the top of the acro props.",
+      "materials_prose": "Acro prop x 2. Timber x 2. Screws x 2.",
+      "mint": {
+        "scanned_accrec": 1158,
+        "invoice_number": "INV-1133",
+        "status": "DRAFT",
+        "total": 220,
+        "allows_create": null
+      },
+      "prepare": {
+        "state": "ready",
+        "persisted": true,
+        "blocker_codes": []
+      }
+    }
+  ],
+  "refusals": [
+    {
+      "job_number": "SWMS-261029",
+      "reason": "curated_bind_family_not_eligible (repair family)"
+    },
+    {
+      "job_number": "SWMS-26955",
+      "reason": "elevated report bound; INV-0994 already AUTHORISED; mint refused invoice_duplicate_live"
+    },
+    {
+      "job_number": "SWMS-26804",
+      "reason": "elevated report bound; prepare blocked on spine_missing_*"
+    }
+  ]
+}
