@@ -91,7 +91,8 @@ const WOODVALE_CHECKLIST = {
 
 // Prior elevated short-sentence blurbs (what the Captain called too terse).
 const GIDGE_BEFORE = {
-  scope: "Make safe the roof structure under the roof-mounted hot water system.",
+  scope:
+    "Make safe the roof structure under the roof-mounted hot water system.",
   findings:
     "Storm / wind. The hot water system on the roof is not engineered for the load. Timber beams have dipped under the weight.",
   works:
@@ -155,13 +156,19 @@ Deno.test("thin evidence writes less rather than inventing materials", () => {
     ],
   });
   assertStringIncludes(prose.works.toLowerCase(), "shed");
-  assertStringIncludes(prose.materials.toLowerCase(), "no quantified materials");
+  assertStringIncludes(
+    prose.materials.toLowerCase(),
+    "no quantified materials",
+  );
   assert(!/star picket/i.test(prose.materials));
 });
 
 Deno.test("reportProseNeedsComposition detects raw checklist dumps and bullets", () => {
   assertEquals(
-    reportProseNeedsComposition(GIDGE_CHECKLIST.damage_description, GIDGE_CHECKLIST),
+    reportProseNeedsComposition(
+      GIDGE_CHECKLIST.damage_description,
+      GIDGE_CHECKLIST,
+    ),
     true,
   );
   assertEquals(
@@ -179,7 +186,10 @@ Deno.test("reportProseNeedsComposition detects raw checklist dumps and bullets",
 });
 
 Deno.test("resolveMakesafeReportProseSections keeps good draft prose and replaces dumps", () => {
-  const good = resolveMakesafeReportProseSections(GIDGE_BEFORE, GIDGE_CHECKLIST);
+  const good = resolveMakesafeReportProseSections(
+    GIDGE_BEFORE,
+    GIDGE_CHECKLIST,
+  );
   assertEquals(good.works, GIDGE_BEFORE.works);
 
   const replaced = resolveMakesafeReportProseSections(

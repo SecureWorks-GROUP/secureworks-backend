@@ -178,9 +178,7 @@ function paragraph(...parts: Array<string | string[]>): string {
 export function quantifiedMaterialItems(materialsUsed: unknown): string[] {
   const raw = Array.isArray(materialsUsed)
     ? materialsUsed
-    : (materialsUsed == null || materialsUsed === ""
-      ? []
-      : [materialsUsed]);
+    : (materialsUsed == null || materialsUsed === "" ? [] : [materialsUsed]);
   const items = raw
     .map((item) => text(item))
     .filter(Boolean);
@@ -298,7 +296,8 @@ export function composeMakesafeReportProseFromTradeEvidence(
   const findings = paragraph(
     cause,
     damage,
-  ) || paragraph(jobType || makeSafeType) || "Site findings were not recorded on the trade form.";
+  ) || paragraph(jobType || makeSafeType) ||
+    "Site findings were not recorded on the trade form.";
 
   // Works: trade work narrative only, shaped into complete sentences.
   const works = paragraph(work) ||
