@@ -640,24 +640,40 @@ Deno.test(
   () => {
     assertEquals(
       pickIntakeWorkOrderEmailSubject({
-        emailsSubject: MAYLANDS_WO_SUBJECT,
-        draftSubject: "draft copy",
+        emailsSubjects: [MAYLANDS_WO_SUBJECT],
+        draftSubjects: ["draft copy"],
         jobMetadataSubject: "meta copy",
       }),
       {
         subject: MAYLANDS_WO_SUBJECT,
         subject_source: "emails_subject",
+        ambiguous: false,
       },
     );
     assertEquals(
       pickIntakeWorkOrderEmailSubject({
-        emailsSubject: "  ",
-        draftSubject: "  Draft Subject From Intake  ",
+        emailsSubjects: ["  ", null],
+        draftSubjects: ["  Draft Subject From Intake  "],
         jobMetadataSubject: "meta",
       }),
       {
         subject: "Draft Subject From Intake",
         subject_source: "intake_draft_subject",
+        ambiguous: false,
+      },
+    );
+    // Repeats of the SAME stored string are one candidate, not ambiguity.
+    assertEquals(
+      pickIntakeWorkOrderEmailSubject({
+        draftSubjects: [
+          "  Draft Subject From Intake  ",
+          "Draft Subject From Intake",
+        ],
+      }),
+      {
+        subject: "Draft Subject From Intake",
+        subject_source: "intake_draft_subject",
+        ambiguous: false,
       },
     );
     assertEquals(
@@ -667,11 +683,39 @@ Deno.test(
       {
         subject: "Builder meta subject",
         subject_source: "job_metadata_builder_email_subject",
+        ambiguous: false,
       },
     );
     assertEquals(
       pickIntakeWorkOrderEmailSubject({}),
-      { subject: null, subject_source: null },
+      { subject: null, subject_source: null, ambiguous: false },
+    );
+  },
+);
+
+Deno.test(
+  "pickIntakeWorkOrderEmailSubject refuses to guess between distinct candidates",
+  () => {
+    // Two approved drafts on one job: the newest is NOT evidence. A wrong WO
+    // subject groups builder mail into another property's conversation.
+    assertEquals(
+      pickIntakeWorkOrderEmailSubject({
+        draftSubjects: [
+          "NEW WORK ORDER - MLB-26267 U24/ 28 Peninsula Road",
+          "NEW WORK ORDER - MLB-26999 12 Other Street",
+        ],
+        jobMetadataSubject: "Builder meta subject",
+      }),
+      { subject: null, subject_source: null, ambiguous: true },
+    );
+    // Ambiguity in a tier refuses outright — a lower tier never rescues it.
+    assertEquals(
+      pickIntakeWorkOrderEmailSubject({
+        emailsSubjects: ["Subject A", "Subject B"],
+        draftSubjects: ["Draft only one"],
+        jobMetadataSubject: "meta",
+      }),
+      { subject: null, subject_source: null, ambiguous: true },
     );
   },
 );
@@ -706,6 +750,15 @@ Deno.test(
     assertEquals(fallback.subject, "MLB-26267 - physical makesafe");
     assertEquals(fallback.subject_source, "generated_fallback");
     assertEquals(fallback.original_subject, null);
+
+    // Unknown provenance is left unknown — never upgraded to emails_subject.
+    const unknownSource = mlbOrdinaryMailSubject(
+      MAYLANDS_WO_SUBJECT,
+      "MLB-26267 - physical makesafe",
+    );
+    assertEquals(unknownSource.subject, MAYLANDS_WO_SUBJECT);
+    assertEquals(unknownSource.subject_source, null);
+    assertEquals(unknownSource.original_subject, MAYLANDS_WO_SUBJECT);
   },
 );
 
@@ -726,7 +779,10 @@ Deno.test(
     );
     assertEquals(report.subject, MAYLANDS_WO_SUBJECT);
     assertEquals((report as any).subject_source, "emails_subject");
-    assertEquals((report as any).original_work_order_subject, MAYLANDS_WO_SUBJECT);
+    assertEquals(
+      (report as any).original_work_order_subject,
+      MAYLANDS_WO_SUBJECT,
+    );
 
     const invoice = applyMlbOrdinaryMailSubjectToRoute(
       {
@@ -813,7 +869,10 @@ Deno.test(
     assertEquals(report.reply_to_thread_id, null);
     assertEquals(report.reply_to_graph_message_id, null);
     assertEquals((report as any).intended_intake_thread_id, "thread-intake-1");
-    assertEquals((report as any).mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
+    assertEquals(
+      (report as any).mlb_transport,
+      MLB_ORDINARY_MAIL_SEND_TRANSPORT,
+    );
     // No original subject on routing → visible generated fallback; still ready.
     assertEquals((report as any).subject_source, "generated_fallback");
     assertEquals(report.subject, "MLB-PO-54000 - physical makesafe");
@@ -824,7 +883,10 @@ Deno.test(
     assertEquals(photo.ready, true);
     assertEquals(photo.requires_thread_reply, false);
     assertEquals(photo.reply_to_thread_id, null);
-    assertEquals((photo as any).mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
+    assertEquals(
+      (photo as any).mlb_transport,
+      MLB_ORDINARY_MAIL_SEND_TRANSPORT,
+    );
     assertEquals((photo as any).subject_source, "generated_fallback");
     assertEquals(photo.attachment_hashes, ["photo-hash-1"]);
 
@@ -877,7 +939,10 @@ Deno.test(
     assertEquals(invoice.subject.includes("INV-9001"), true);
     assertEquals(invoice.subject, "MLB-PO-54000 - Xero invoice INV-9001");
     // Still ordinary mail, still ready, still no group-thread path.
-    assertEquals((report as any).mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
+    assertEquals(
+      (report as any).mlb_transport,
+      MLB_ORDINARY_MAIL_SEND_TRANSPORT,
+    );
     assertEquals(report.requires_thread_reply, false);
     assertEquals(report.reply_to_thread_id, null);
     assertEquals(report.ready, true);
@@ -899,7 +964,10 @@ Deno.test(
     assertEquals(report.ready, true);
     assertEquals(photo.ready, true);
     assertEquals(report.requires_thread_reply, false);
-    assertEquals((report as any).mlb_transport, MLB_ORDINARY_MAIL_SEND_TRANSPORT);
+    assertEquals(
+      (report as any).mlb_transport,
+      MLB_ORDINARY_MAIL_SEND_TRANSPORT,
+    );
     assertEquals(invoice.ready, true);
     assertEquals(invoice.requires_thread_reply, false);
   },

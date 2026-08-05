@@ -32,9 +32,9 @@ import {
 import {
   assertSesRouteRecipients,
   buildSesCockpitView,
-  classifySesReleaseSendProgress,
   buildSesReleaseRevision,
   canRecordSesApproval,
+  classifySesReleaseSendProgress,
   evaluateSesMechanicalClean,
   SES_ROUTE_ORDER,
   type SesApprovalAuth,
@@ -552,7 +552,9 @@ export function resolveDocketRoutes(
     // (emails.subject preferred at prepare). That is inbox grouping only —
     // not real threading. Missing subject falls back to the generated draft
     // subject and still sends (subject_source: generated_fallback).
-    const classification = object(object(object(docket.envelope).v2).classification);
+    const classification = object(
+      object(object(docket.envelope).v2).classification,
+    );
     const family = String(
       classification.family || object(docket.review_spec).family || "",
     );
@@ -567,13 +569,13 @@ export function resolveDocketRoutes(
     const originalSubjectSourceRaw = String(
       (routing as any).intake_email_subject_source || "",
     ).trim();
+    // Unrecognised or absent provenance stays null — never claim the strongest
+    // store for a subject whose origin the envelope does not actually name.
     const originalSubjectSource =
       originalSubjectSourceRaw === "emails_subject" ||
         originalSubjectSourceRaw === "intake_draft_subject" ||
         originalSubjectSourceRaw === "job_metadata_builder_email_subject"
         ? originalSubjectSourceRaw
-        : originalSubject
-        ? "emails_subject" as const
         : null;
     return resolvedRoutes.map((route) =>
       applyMlbThreadReplyToRoute(
@@ -612,22 +614,27 @@ export function resolveDocketRoutes(
     const invoiceHashes = (invoice?.attachment_hashes || []).filter((hash) => {
       return !!hash;
     });
-    const combinedHashes = [...new Set([
-      ...(invoicePdf?.content_hash ? [String(invoicePdf.content_hash)] : []),
-      ...reportHashes,
-      ...invoiceHashes,
-    ])];
+    const combinedHashes = [
+      ...new Set([
+        ...(invoicePdf?.content_hash ? [String(invoicePdf.content_hash)] : []),
+        ...reportHashes,
+        ...invoiceHashes,
+      ]),
+    ];
     const reference = String(
       object(docket.local_invoice_proposal).builder_reference || "",
     );
     const invoiceNumber = boundInvoiceNumber;
-    const authorised = xeroStatus === "AUTHORISED" && !!invoicePdf?.content_hash;
+    const authorised = xeroStatus === "AUTHORISED" &&
+      !!invoicePdf?.content_hash;
     const combined: SesReviewRoute = {
       route_kind: "report_invoice",
       recipients,
       cc,
       subject: authorised
-        ? `${reference || "Make-safe"} - report and Xero invoice ${invoiceNumber}`
+        ? `${
+          reference || "Make-safe"
+        } - report and Xero invoice ${invoiceNumber}`
           .trim()
         : (report?.subject ||
           `${reference || "Make-safe"} - report and invoice`).trim(),
@@ -639,8 +646,9 @@ export function resolveDocketRoutes(
       ready: !!report?.ready && authorised && recipients.length > 0,
     };
     if (noAdditionalCharge && report) {
-      combined.subject =
-        `${reference || "Make-safe"} - report (no additional charge)`;
+      combined.subject = `${
+        reference || "Make-safe"
+      } - report (no additional charge)`;
       combined.body =
         "This later attendance is recorded as document only with no additional charge. Please find the current report attached.";
       combined.attachment_hashes = [...new Set(reportHashes)];
@@ -1398,7 +1406,9 @@ export async function prepareSesInvoiceObligationAction(
     // Sealed labour rate from the U4 proposal (first positive line unit price).
     // Commercial path must keep this rate; only quantity/materials may change.
     const sealedLabourRate = (() => {
-      for (const line of Array.isArray(local.line_items) ? local.line_items : []) {
+      for (
+        const line of Array.isArray(local.line_items) ? local.line_items : []
+      ) {
         const price = Number(
           (line as any)?.unit_price_ex_gst ?? (line as any)?.unit_price,
         );
@@ -3150,12 +3160,16 @@ function invoiceIdentityMatchesBinding(
   invoice: SesXeroInvoiceResult,
   binding: Record<string, unknown>,
 ): boolean {
-  if (String(binding.xero_invoice_id || "").trim() !==
-    String(invoice.xero_invoice_id || "").trim()) {
+  if (
+    String(binding.xero_invoice_id || "").trim() !==
+      String(invoice.xero_invoice_id || "").trim()
+  ) {
     return false;
   }
-  if (String(binding.invoice_number || "").trim() !==
-    String(invoice.invoice_number || "").trim()) {
+  if (
+    String(binding.invoice_number || "").trim() !==
+      String(invoice.invoice_number || "").trim()
+  ) {
     return false;
   }
   if (String(binding.status || "").toUpperCase() !== "AUTHORISED") return false;
@@ -3242,11 +3256,12 @@ export async function findExistingAuthorisedInvoiceBoundDocket(
   const pdfs = Array.isArray(artifactsResponse.data)
     ? artifactsResponse.data
     : [];
-  const matchingPdf = pdfs.find((artifact: any) =>
-    object(artifact.metadata).xero_invoice_id ===
-      args.invoice.xero_invoice_id &&
-    object(artifact.metadata).invoice_number === args.invoice.invoice_number
-  ) || pdfs[0] || null;
+  const matchingPdf =
+    pdfs.find((artifact: any) =>
+      object(artifact.metadata).xero_invoice_id ===
+        args.invoice.xero_invoice_id &&
+      object(artifact.metadata).invoice_number === args.invoice.invoice_number
+    ) || pdfs[0] || null;
   return {
     adoptable: {
       docket: chosen,
@@ -3529,7 +3544,9 @@ export async function recoverAuthorisedInvoicePdfBind(
     });
   }
   const boundTotal = Number(binding.total);
-  if (Number.isFinite(boundTotal) && !moneyTotalsMatch(boundTotal, live.total)) {
+  if (
+    Number.isFinite(boundTotal) && !moneyTotalsMatch(boundTotal, live.total)
+  ) {
     throw new SesActionError(409, {
       state: "refused",
       fact:
@@ -3548,7 +3565,8 @@ export async function recoverAuthorisedInvoicePdfBind(
   };
 
   const cockpit = await loadSesCockpitDocket(client, args.job_id);
-  if (cockpit.invoice_obligation_revision_id &&
+  if (
+    cockpit.invoice_obligation_revision_id &&
     cockpit.invoice_obligation_revision_id !== revision.id
   ) {
     throw new SesActionError(409, {
@@ -3569,8 +3587,10 @@ export async function recoverAuthorisedInvoicePdfBind(
   const currentXero = object(currentDocket.xero_binding);
   if (
     currentDocket.stage === "invoice_bound" &&
-    String(currentXero.xero_invoice_id || "") === authorisedInvoice.xero_invoice_id &&
-    String(currentXero.invoice_number || "") === authorisedInvoice.invoice_number &&
+    String(currentXero.xero_invoice_id || "") ===
+      authorisedInvoice.xero_invoice_id &&
+    String(currentXero.invoice_number || "") ===
+      authorisedInvoice.invoice_number &&
     String(currentXero.status || "").toUpperCase() === "AUTHORISED"
   ) {
     const artifactsResponse = await client.from("makesafe_docket_artifacts")
@@ -3755,7 +3775,9 @@ export async function executeSesInvoiceRevisionAction(
       String(revision.state || ""),
     ) ||
     String(recoveryBinding.status || "").toUpperCase() === "AUTHORISED";
-  if (recoveryEligible && String(recoveryBinding.xero_invoice_id || "").trim()) {
+  if (
+    recoveryEligible && String(recoveryBinding.xero_invoice_id || "").trim()
+  ) {
     return await recoverAuthorisedInvoicePdfBind(client, args, gateway);
   }
   if (revision.pricing_disposition === "no_additional_charge") {
@@ -4595,9 +4617,9 @@ export async function executeSesReleaseRevisionAction(
     // applied when operators build the payload; at execute we only have content
     // hashes, so we enforce the sealed envelope facts that survive hashing.
     if (isAjsRelease) {
-      const ccList = (Array.isArray(route.cc) ? route.cc : []).map((v: string) =>
-        String(v || "").trim().toLowerCase()
-      );
+      const ccList = (Array.isArray(route.cc) ? route.cc : []).map((
+        v: string,
+      ) => String(v || "").trim().toLowerCase());
       if (!ccList.includes(MAKESAFE_CC)) {
         throw new SesActionError(
           409,
@@ -4779,7 +4801,9 @@ export async function executeSesReleaseRevisionAction(
       if (failureMessage && refusal.code === "graph_outcome_unknown") {
         throw new SesActionError(409, {
           ...refusal,
-          fact: `${refusal.fact} Underlying error: ${failureMessage.slice(0, 400)}`,
+          fact: `${refusal.fact} Underlying error: ${
+            failureMessage.slice(0, 400)
+          }`,
           evidence: {
             ...(refusal.evidence || {}),
             underlying_error: failureMessage.slice(0, 500),

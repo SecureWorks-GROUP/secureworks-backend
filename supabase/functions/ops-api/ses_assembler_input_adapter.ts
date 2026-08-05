@@ -41,6 +41,10 @@ import {
 } from "./makesafe_cycle_evidence.ts";
 import { extractPortalLinks } from "./makesafe_portal_guard.ts";
 import {
+  chunkByUrlBudget,
+  withBoundedFetchSlot,
+} from "./makesafe_compact_reads.ts";
+import {
   SES_ASSESSMENT_RECIPE_VERSION,
   type SesPhotoArtifact,
   type SesPhotoProof,
@@ -1438,26 +1442,44 @@ export function buildSesAssemblerInput(
   // Original WO subject lives primarily on emails.subject (Graph projection of
   // the intake post). Fallbacks: approved intake draft.subject, then job
   // metadata builder_email_subject. Verbatim only — never reconstructed.
+  //
+  // emails.subject is read only for a PROVEN intake post id: the resolved
+  // thread anchor, else the primary case's own story source posts, else that
+  // case's own source rows. Never the ambient post set, and never the newest
+  // approved draft — a wrong work-order subject groups builder mail into the
+  // wrong conversation, which is worse than no grouping at all. Ambiguity in a
+  // tier refuses; the route then rides the generated pack subject and sends.
   const subjectByPost = snapshot.intake_email_subjects_by_post_id || {};
-  const postIdForSubject = text(intakeThread?.post_id);
-  const emailsSubject = postIdForSubject
-    ? text(subjectByPost[postIdForSubject])
-    : "";
-  // When thread recovery came from an approved draft, that candidate may also
-  // carry emails.subject / draft.subject even if the post map is empty.
+  const primaryCaseId = text(intakeCase?.id);
+  const threadPostId = text(intakeThread?.post_id);
+  const storyPostIds = intakeCaseStorySourcePostIds(intakeCase);
+  const primaryCaseSourcePostIds = primaryCaseId
+    ? [
+      ...new Set(
+        (snapshot.case_sources || [])
+          .filter((row) => text(row.case_id) === primaryCaseId)
+          .map((row) => text(row.post_id))
+          .filter(Boolean),
+      ),
+    ]
+    : [];
+  const provenIntakePostIds = threadPostId
+    ? [threadPostId]
+    : storyPostIds.length
+    ? storyPostIds
+    : primaryCaseSourcePostIds;
+  const provenIntakePostIdSet = new Set(provenIntakePostIds);
+  // Draft-recovered thread candidates carry emails.subject inline; they count
+  // as emails.subject only when their post id is one of the proven anchors.
   const draftCandidates = snapshot.approved_draft_thread_candidates || [];
-  const matchingDraft = postIdForSubject
-    ? draftCandidates.find((row) =>
-      text(row.email_post_id) === postIdForSubject ||
-      text(row.graph_message_id) === postIdForSubject
-    )
-    : draftCandidates[0];
   const intakeSubjectPick = pickIntakeWorkOrderEmailSubject({
-    emailsSubject: emailsSubject || text(matchingDraft?.email_subject) || null,
-    draftSubject: firstText(
-      matchingDraft?.draft_subject,
-      ...(snapshot.approved_draft_subjects || []),
-    ) || null,
+    emailsSubjects: [
+      ...provenIntakePostIds.map((postId) => text(subjectByPost[postId])),
+      ...draftCandidates
+        .filter((row) => provenIntakePostIdSet.has(text(row.email_post_id)))
+        .map((row) => text(row.email_subject)),
+    ],
+    draftSubjects: snapshot.approved_draft_subjects || [],
     jobMetadataSubject: firstText(metadata.builder_email_subject) || null,
   });
 
@@ -1637,6 +1659,60 @@ async function many(
     );
   }
   return array(data).map(record);
+}
+
+// Additive reads only: a fault degrades the derived field instead of refusing
+// the whole prepare. Never use this for a fact the docket is derived from.
+async function manyOptional(
+  // deno-lint-ignore no-explicit-any
+  query: PromiseLike<{ data: any; error: any }>,
+  label: string,
+): Promise<LiveRow[]> {
+  try {
+    const { data, error } = await query;
+    if (error) {
+      console.warn(
+        `[ses-adapter] optional ${label} read failed: ${
+          error.message || String(error)
+        }`,
+      );
+      return [];
+    }
+    return array(data).map(record);
+  } catch (err) {
+    console.warn(
+      `[ses-adapter] optional ${label} read threw: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return [];
+  }
+}
+
+// `.in(col, ids)` over Graph post ids: those are ~150+ chars each, so an
+// unchunked list blows the gateway URL budget and 414s. Same budget and shared
+// concurrency bound every other board-path fan-out uses.
+async function manyInChunks(
+  ids: string[],
+  buildQueryForChunk: (
+    chunk: string[],
+    // deno-lint-ignore no-explicit-any
+  ) => PromiseLike<{ data: any; error: any }>,
+  label: string,
+  optional: boolean,
+): Promise<LiveRow[]> {
+  const unique = [...new Set(ids.filter(Boolean))];
+  if (!unique.length) return [];
+  const pages = await Promise.all(
+    chunkByUrlBudget(unique).map((chunk) =>
+      withBoundedFetchSlot(() =>
+        optional
+          ? manyOptional(buildQueryForChunk(chunk), label)
+          : many(buildQueryForChunk(chunk), label)
+      )
+    ),
+  );
+  return pages.flat();
 }
 
 export async function loadSesAssemblerLiveSnapshot(
@@ -1995,12 +2071,16 @@ export async function loadSesAssemblerLiveSnapshot(
   // Row order here is not authority: selection is corroboration then story match
   // then refuse (see pickIntakeThreadFromApprovedDraft).
   //
-  // Subject recovery is separate and always loads approved-draft subjects +
-  // emails.subject for case-source post_ids so ordinary Mail.Send can group
-  // by the exact original WO subject (inbox grouping, not real threading).
+  // Subject recovery is separate: it also reads approved-draft subjects and
+  // emails.subject for case-source post_ids so ordinary Mail.Send can group by
+  // the exact original WO subject (inbox grouping, not real threading).
+  //
+  // It is ADDITIVE and must never refuse a prepare. Thread recovery stays fatal
+  // where it always was (case_sources empty); every subject-only read degrades
+  // to no subject, and the route then rides the generated pack subject.
   let approvedDraftThreadCandidates: ApprovedDraftThreadCandidate[] = [];
   const intakeEmailSubjectsByPostId: Record<string, string> = {};
-  let approvedDraftSubjects: string[] = [];
+  const threadRecoveryNeeded = caseSources.length === 0;
 
   const caseSourcePostIds = [
     ...new Set(
@@ -2008,9 +2088,7 @@ export async function loadSesAssemblerLiveSnapshot(
     ),
   ];
 
-  // Always load approved drafts for subject fallback (and for thread recovery
-  // when case_sources is empty). Subject is additive; thread authority is not.
-  const approvedDrafts = await many(
+  const approvedDraftsQuery = () =>
     client
       .from("makesafe_intake_drafts")
       .select(
@@ -2018,10 +2096,17 @@ export async function loadSesAssemblerLiveSnapshot(
       )
       .eq("approved_job_id", jobId)
       .eq("status", "approved")
-      .order("approved_at", { ascending: false }),
-    "makesafe_intake_drafts.approved_job_thread_and_subject",
-  );
-  approvedDraftSubjects = approvedDrafts
+      .order("approved_at", { ascending: false });
+  const approvedDrafts = threadRecoveryNeeded
+    ? await many(
+      approvedDraftsQuery(),
+      "makesafe_intake_drafts.approved_job_thread_recovery",
+    )
+    : await manyOptional(
+      approvedDraftsQuery(),
+      "makesafe_intake_drafts.approved_job_subject_fallback",
+    );
+  const approvedDraftSubjects = approvedDrafts
     .map((row) => text(row.subject))
     .filter(Boolean);
 
@@ -2032,62 +2117,71 @@ export async function loadSesAssemblerLiveSnapshot(
         .filter(Boolean),
     ),
   ];
-  const subjectPostIds = [
-    ...new Set([...caseSourcePostIds, ...draftGraphIds]),
-  ];
-  if (subjectPostIds.length) {
-    const emailRows = await many(
-      client
-        .from("emails")
-        .select(
-          "post_id,thread_id,conversation_id,received_at,subject",
-        )
-        .in("post_id", subjectPostIds),
-      "emails.intake_subject_and_thread_recovery",
-    );
-    const emailByPost = new Map<string, LiveRow>();
-    for (const row of emailRows) {
+  // deno-lint-ignore no-explicit-any
+  const emailsQueryForChunk = (chunk: string[]): any =>
+    client
+      .from("emails")
+      .select(
+        "post_id,thread_id,conversation_id,received_at,subject",
+      )
+      .in("post_id", chunk);
+
+  const emailByPost = new Map<string, LiveRow>();
+  const absorbEmailRows = (rows: LiveRow[]) => {
+    for (const row of rows) {
       const postId = text(row.post_id);
       if (!postId) continue;
       emailByPost.set(postId, row);
       const subject = text(row.subject);
       if (subject) intakeEmailSubjectsByPostId[postId] = subject;
     }
-    if (caseSources.length === 0) {
-      approvedDraftThreadCandidates = approvedDrafts.map((draft) => {
-        const graphId = text(draft.graph_message_id);
-        const email = graphId ? emailByPost.get(graphId) : undefined;
-        return {
-          draft_id: text(draft.id) || null,
-          status: text(draft.status) || null,
-          approved_job_id: text(draft.approved_job_id) || null,
-          graph_message_id: graphId || null,
-          approved_at: text(draft.approved_at) || null,
-          email_post_id: email ? text(email.post_id) || null : null,
-          email_thread_id: email ? text(email.thread_id) || null : null,
-          email_conversation_id: email
-            ? text(email.conversation_id) || null
-            : null,
-          email_received_at: email ? text(email.received_at) || null : null,
-          email_subject: email ? text(email.subject) || null : null,
-          draft_subject: text(draft.subject) || null,
-        };
-      });
-    }
-  } else if (caseSources.length === 0) {
-    approvedDraftThreadCandidates = approvedDrafts.map((draft) => ({
-      draft_id: text(draft.id) || null,
-      status: text(draft.status) || null,
-      approved_job_id: text(draft.approved_job_id) || null,
-      graph_message_id: text(draft.graph_message_id) || null,
-      approved_at: text(draft.approved_at) || null,
-      email_post_id: null,
-      email_thread_id: null,
-      email_conversation_id: null,
-      email_received_at: null,
-      email_subject: null,
-      draft_subject: text(draft.subject) || null,
-    }));
+  };
+
+  if (threadRecoveryNeeded) {
+    absorbEmailRows(
+      await manyInChunks(
+        draftGraphIds,
+        emailsQueryForChunk,
+        "emails.approved_draft_thread_recovery",
+        false,
+      ),
+    );
+  }
+  const subjectOnlyPostIds = [
+    ...new Set([
+      ...caseSourcePostIds,
+      ...(threadRecoveryNeeded ? [] : draftGraphIds),
+    ]),
+  ].filter((postId) => !emailByPost.has(postId));
+  absorbEmailRows(
+    await manyInChunks(
+      subjectOnlyPostIds,
+      emailsQueryForChunk,
+      "emails.intake_subject_recovery",
+      true,
+    ),
+  );
+
+  if (threadRecoveryNeeded) {
+    approvedDraftThreadCandidates = approvedDrafts.map((draft) => {
+      const graphId = text(draft.graph_message_id);
+      const email = graphId ? emailByPost.get(graphId) : undefined;
+      return {
+        draft_id: text(draft.id) || null,
+        status: text(draft.status) || null,
+        approved_job_id: text(draft.approved_job_id) || null,
+        graph_message_id: graphId || null,
+        approved_at: text(draft.approved_at) || null,
+        email_post_id: email ? text(email.post_id) || null : null,
+        email_thread_id: email ? text(email.thread_id) || null : null,
+        email_conversation_id: email
+          ? text(email.conversation_id) || null
+          : null,
+        email_received_at: email ? text(email.received_at) || null : null,
+        email_subject: email ? text(email.subject) || null : null,
+        draft_subject: text(draft.subject) || null,
+      };
+    });
   }
 
   return {

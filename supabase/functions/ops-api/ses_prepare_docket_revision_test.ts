@@ -977,8 +977,14 @@ Deno.test(
       result.envelope.v2.routing.intake_email_subject_source,
       "emails_subject",
     );
-    assertStringIncludes(result.email_drafts.REPORT_EMAIL_DRAFT, `Subject: ${original}`);
-    assertStringIncludes(result.email_drafts.PHOTO_EMAIL_DRAFT, `Subject: ${original}`);
+    assertStringIncludes(
+      result.email_drafts.REPORT_EMAIL_DRAFT,
+      `Subject: ${original}`,
+    );
+    assertStringIncludes(
+      result.email_drafts.PHOTO_EMAIL_DRAFT,
+      `Subject: ${original}`,
+    );
     // Invoice keeps the generated billing subject.
     assertStringIncludes(
       result.email_drafts.INVOICE_EMAIL_DRAFT,
@@ -1756,6 +1762,8 @@ Deno.test("builder routing uses only company/matrix evidence and blocks when the
     intake_thread_id: "",
     intake_post_id: "",
     intake_conversation_id: "",
+    intake_email_subject: "",
+    intake_email_subject_source: "",
   });
   assertEquals(result.email_drafts, {});
 });

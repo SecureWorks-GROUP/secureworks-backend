@@ -74,11 +74,14 @@ export function mlbPhysicalUsesOrdinaryMailSendFallback(): boolean {
  * that already sent.
  */
 export function mlbOrdinaryMailSendEffectPayloadFields(
-  route: {
-    mlb_transport?: string | null;
-    in_reply_to_internet_message_id?: string | null;
-    intended_intake_thread_id?: string | null;
-  } | null | undefined,
+  route:
+    | {
+      mlb_transport?: string | null;
+      in_reply_to_internet_message_id?: string | null;
+      intended_intake_thread_id?: string | null;
+    }
+    | null
+    | undefined,
 ): Record<string, string | null> {
   const transport = String(route?.mlb_transport || "").trim();
   if (transport !== MLB_ORDINARY_MAIL_SEND_TRANSPORT) return {};
@@ -148,44 +151,66 @@ export type MlbIntakeEmailSubjectSource =
   | "intake_draft_subject"
   | "job_metadata_builder_email_subject";
 
+function distinctSubjects(
+  value: readonly (string | null | undefined)[] | string | null | undefined,
+): string[] {
+  const raw = typeof value === "string" ? [value] : (value || []);
+  return [
+    ...new Set(raw.map((item) => String(item || "").trim()).filter(Boolean)),
+  ];
+}
+
 /**
  * Recover the original work-order email subject VERBATIM.
  *
- * Authority (first non-empty wins):
- *   1. `emails.subject` for the intake post_id (Graph projection — preferred)
- *   2. `makesafe_intake_drafts.subject` (captured at intake from the same mail)
+ * Authority (first tier that has any candidate decides — a lower tier never
+ * rescues a higher one that could not be resolved):
+ *   1. `emails.subject` for a PROVEN intake post id (Graph projection)
+ *   2. `makesafe_intake_drafts.subject` for approved drafts on this job
  *   3. `jobs.metadata.builder_email_subject` (mint-time stamp)
  *
- * Do not reconstruct or template. Empty → null (caller falls back to the
- * generated pack subject and still sends).
+ * Each tier must resolve to exactly ONE distinct string. Several distinct
+ * candidates is ambiguity, not a race to pick the newest: recency is not
+ * evidence, and a wrong work-order subject groups builder mail into the WRONG
+ * work-order conversation, which is worse than an ungrouped plain email. An
+ * ambiguous or empty result is null, and the caller falls back to the generated
+ * pack subject and still sends (Captain: volume over perfect threading).
+ *
+ * Do not reconstruct or template.
  */
 export function pickIntakeWorkOrderEmailSubject(args: {
-  /** Verbatim emails.subject for the chosen intake post_id. */
-  emailsSubject?: string | null;
-  /** Verbatim makesafe_intake_drafts.subject. */
-  draftSubject?: string | null;
+  /** Verbatim emails.subject values for PROVEN intake post ids only. */
+  emailsSubjects?: readonly (string | null | undefined)[] | string | null;
+  /** Verbatim makesafe_intake_drafts.subject values for this job. */
+  draftSubjects?: readonly (string | null | undefined)[] | string | null;
   /** Verbatim jobs.metadata.builder_email_subject. */
   jobMetadataSubject?: string | null;
 }): {
   subject: string | null;
   subject_source: MlbIntakeEmailSubjectSource | null;
+  /** True when a tier held several distinct candidates and was refused. */
+  ambiguous: boolean;
 } {
-  const emails = String(args.emailsSubject || "").trim();
-  if (emails) {
-    return { subject: emails, subject_source: "emails_subject" };
-  }
-  const draft = String(args.draftSubject || "").trim();
-  if (draft) {
-    return { subject: draft, subject_source: "intake_draft_subject" };
-  }
-  const meta = String(args.jobMetadataSubject || "").trim();
-  if (meta) {
+  const tiers: Array<[MlbIntakeEmailSubjectSource, string[]]> = [
+    ["emails_subject", distinctSubjects(args.emailsSubjects)],
+    ["intake_draft_subject", distinctSubjects(args.draftSubjects)],
+    [
+      "job_metadata_builder_email_subject",
+      distinctSubjects(args.jobMetadataSubject),
+    ],
+  ];
+  for (const [source, candidates] of tiers) {
+    if (candidates.length === 0) continue;
+    if (candidates.length > 1) {
+      return { subject: null, subject_source: null, ambiguous: true };
+    }
     return {
-      subject: meta,
-      subject_source: "job_metadata_builder_email_subject",
+      subject: candidates[0]!,
+      subject_source: source,
+      ambiguous: false,
     };
   }
-  return { subject: null, subject_source: null };
+  return { subject: null, subject_source: null, ambiguous: false };
 }
 
 /**
@@ -204,6 +229,10 @@ export function pickIntakeWorkOrderEmailSubject(args: {
  *
  * Missing original never blocks send: fall back to the generated pack subject
  * and stamp `subject_source: generated_fallback` so the fallback is visible.
+ *
+ * Provenance is never invented: a recovered subject whose stored source is
+ * absent or unrecognised stamps `subject_source: null` rather than claiming the
+ * strongest store. `original_subject` is what proves the recovery happened.
  */
 export function mlbOrdinaryMailSubject(
   originalSubject: string | null | undefined,
@@ -211,7 +240,7 @@ export function mlbOrdinaryMailSubject(
   originalSubjectSource?: MlbIntakeEmailSubjectSource | null,
 ): {
   subject: string;
-  subject_source: MlbIntakeEmailSubjectSource | "generated_fallback";
+  subject_source: MlbIntakeEmailSubjectSource | "generated_fallback" | null;
   /**
    * When recovered, same string as subject. Null on generated fallback.
    */
@@ -222,7 +251,7 @@ export function mlbOrdinaryMailSubject(
     // Verbatim — no Re: add/strip (see applyMlbOrdinaryMailSubjectToRoute).
     return {
       subject: original,
-      subject_source: originalSubjectSource || "emails_subject",
+      subject_source: originalSubjectSource || null,
       original_subject: original,
     };
   }
@@ -240,6 +269,10 @@ export function mlbOrdinaryMailSubject(
  *
  * `subjectSource` is the finer pickIntake source when original was recovered;
  * otherwise `generated_fallback` is stamped so a missing original is never silent.
+ *
+ * The subject decision itself (verbatim original, no Re: add/strip, visible
+ * fallback) lives once in `mlbOrdinaryMailSubject`; this helper only decides
+ * WHICH routes it applies to.
  */
 export function applyMlbOrdinaryMailSubjectToRoute<
   T extends {
@@ -264,23 +297,18 @@ export function applyMlbOrdinaryMailSubjectToRoute<
   const kind = String(route.route_kind || "").trim();
   if (kind !== "report" && kind !== "photo") return route;
 
-  const original = String(args.originalSubject || "").trim();
-  if (original) {
-    const source = args.originalSubjectSource || "emails_subject";
-    return {
-      ...route,
-      // Exact stored WO subject — inbox grouping only, not real threading.
-      subject: original,
-      subject_source: source,
-      original_work_order_subject: original,
-    };
-  }
+  const pick = mlbOrdinaryMailSubject(
+    args.originalSubject,
+    String(route.subject || ""),
+    args.originalSubjectSource,
+  );
   return {
     ...route,
-    // Generated pack subject remains; fallback is visible on the route.
-    subject: String(route.subject || "").trim(),
-    subject_source: "generated_fallback",
-    original_work_order_subject: null,
+    // Exact stored WO subject when recovered (inbox grouping only, not real
+    // threading); otherwise the generated pack subject with a visible fallback.
+    subject: pick.subject,
+    subject_source: pick.subject_source,
+    original_work_order_subject: pick.original_subject,
   };
 }
 
@@ -555,7 +583,8 @@ export function applyMlbThreadReplyToRoute<
   route: T,
   shape: { builder_key?: unknown; family?: unknown },
   thread: IntakeThreadCoordinates | null,
-  useOrdinaryMailSendFallback: boolean = mlbPhysicalUsesOrdinaryMailSendFallback(),
+  useOrdinaryMailSendFallback: boolean =
+    mlbPhysicalUsesOrdinaryMailSendFallback(),
   /**
    * Optional original WO subject for ordinary-mail inbox grouping (report/photo).
    * When omitted, callers may still apply subject later via
