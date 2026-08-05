@@ -67,8 +67,14 @@ operator's optional `attempt_key`. That is the same escape `route_send` gets
 from a fresh `release_revision_id`:
 
 - the same card + kind + recipients + attempt key is ONE effect (exact-once);
-- a confirmed replay sends nothing and returns `already_sent: true` with the
-  **stored** ledger proof (`recorded_proof`), never a recomposed one;
+- any call that did not itself dispatch — an already-confirmed replay, or a
+  reconcile that proves an EARLIER attempt's message under the same token —
+  sends nothing and returns `already_sent: true` with the **stored** ledger
+  proof (`recorded_proof`), never a proof recomposed from today's re-resolved
+  subject and attachments. Such a call audits as
+  `mailer_ops_visibility_reconciled`, not as a fresh send, and the effect's
+  `provider_digest` carries subject/attachment claims only when that same call
+  composed the message (`content_proof`);
 - a Graph failure parks that attempt on `unknown` and it is still **never**
   redispatched — the operator reconciles Sent Items by token, then retries
   deliberately under a new `attempt_key`, which mints a new operation key.

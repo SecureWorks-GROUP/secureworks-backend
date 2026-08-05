@@ -1570,23 +1570,38 @@ export async function sendMailerOpsVisibilityAction(
   };
   const mailGateway = deps.makeMailGateway(loadAttachments);
 
+  // Only a message this call actually composed may be described by this call's
+  // subject and attachment names. A reconcile proves an EARLIER attempt's
+  // message, whose content this call never saw.
+  let dispatchedByThisCall = false;
   const adapter: SesExternalAdapter<typeof routePayload, SesRouteSendResult> = {
-    dispatch: (payload, context) =>
-      mailGateway.createDraftAndSend(payload, context),
+    dispatch: (payload, context) => {
+      dispatchedByThisCall = true;
+      return mailGateway.createDraftAndSend(payload, context);
+    },
     reconcile: (context) => mailGateway.reconcileSent(context.external_token),
     identify: (result) => result.message_id,
     digest: (result) => ({
       message_id: result.message_id,
       internet_message_id: result.internet_message_id || null,
       operation_token: result.operation_token,
-      subject_as_sent: subjectDecision.subject,
+      // Recipients are identity coordinates, so they are the original send's.
       to: [recipient.to],
       cc: [...cc],
-      attachment_names: attachmentNames,
-      attachment_roles: attachmentRoles,
       operation_header: SES_OPERATION_HEADER,
       // ses@ CC is a second proof surface (intake mailbox we control).
       proof_surfaces: ["admin_sent_items", "ses_intake_cc"],
+      ...(dispatchedByThisCall
+        ? {
+          content_proof: "dispatched_by_this_call",
+          subject_as_sent: subjectDecision.subject,
+          attachment_names: attachmentNames,
+          attachment_roles: attachmentRoles,
+        }
+        : {
+          content_proof: "reconciled_prior_attempt",
+          content_recomposed: false,
+        }),
     }),
   };
 
@@ -1618,28 +1633,76 @@ export async function sendMailerOpsVisibilityAction(
     });
   }
 
-  // Already-confirmed replay: executeSesExternalEffect returns no result, so
-  // there is nothing new to prove. Report the ORIGINAL ledger proof rather than
-  // recomposing one from this call's freshly resolved subject/attachments —
-  // those bytes were never sent under this message id.
-  if (!sent.result) {
+  const writeMailerOpsAudit = async (
+    eventType: string,
+    detail: Record<string, unknown>,
+  ) => {
+    // Append-only human-readable audit (best-effort; effect ledger is
+    // authoritative). supabase-js reports database failures on `error` rather
+    // than throwing, so check both.
+    try {
+      const audit = await client.from("job_events").insert({
+        job_id: jobId,
+        event_type: eventType,
+        detail_json: {
+          contract_version: MAILER_OPS_SEND_CONTRACT_VERSION,
+          kind,
+          effect_operation_key: effect.operation_key,
+          effect_id: sent.effect.id || null,
+          attempt_key: attemptKey,
+          attempt_hash: attemptHash,
+          actor,
+          ...detail,
+        },
+      });
+      if (audit?.error) {
+        console.warn(
+          "[mailer-ops] job_events insert failed:",
+          audit.error.message,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        "[mailer-ops] job_events insert failed:",
+        (err as Error).message,
+      );
+    }
+  };
+
+  // This call did not compose the message: either the effect was already
+  // confirmed (no result at all) or a reconcile proved an EARLIER attempt's
+  // message under the same token. Report the ORIGINAL ledger proof. Never
+  // recompose one from this call's freshly resolved subject/attachments — a
+  // newly uploaded photo or a re-recovered subject would otherwise be asserted
+  // as delivered under a message id that never carried it.
+  if (!sent.dispatched) {
     const storedDigest = object(sent.effect.provider_digest);
+    const recordedProof = {
+      message_id: text(sent.effect.external_id) ||
+        text(sent.result?.message_id) || null,
+      operation_token: effect.external_token,
+      operation_header: SES_OPERATION_HEADER,
+      provider_digest: storedDigest,
+      proof_surfaces: ["admin_sent_items", "ses_intake_cc"],
+    };
+    const reconciled = Boolean(sent.result);
+    if (reconciled) {
+      await writeMailerOpsAudit("mailer_ops_visibility_reconciled", {
+        recorded_proof: recordedProof,
+        effect_state: sent.effect.state,
+      });
+    }
     return {
       success: true,
       dry_run: false,
       already_sent: true,
+      reconciled_prior_attempt: reconciled,
       contract_version: MAILER_OPS_SEND_CONTRACT_VERSION,
       job_id: jobId,
       job_number: text(job.job_number) || null,
       kind,
       proof_source: "ses_external_effects_ledger",
-      recorded_proof: {
-        message_id: text(sent.effect.external_id) || null,
-        operation_token: effect.external_token,
-        operation_header: SES_OPERATION_HEADER,
-        provider_digest: storedDigest,
-        proof_surfaces: ["admin_sent_items", "ses_intake_cc"],
-      },
+      recorded_proof: recordedProof,
       effect: {
         operation_key: effect.operation_key,
         external_token: effect.external_token,
@@ -1649,8 +1712,9 @@ export async function sendMailerOpsVisibilityAction(
         attempt_key: attemptKey,
         attempt_hash: attemptHash,
       },
-      note:
-        "This exact send is already confirmed; no email was sent and no new proof exists. The fields above are the ORIGINAL recorded proof. A deliberately different send needs a new attempt_key.",
+      note: reconciled
+        ? "An earlier attempt under this token is now proven sent; this call dispatched nothing. The fields above are that attempt's recorded proof, not this call's freshly resolved content. A deliberately different send needs a new attempt_key."
+        : "This exact send is already confirmed; no email was sent and no new proof exists. The fields above are the ORIGINAL recorded proof. A deliberately different send needs a new attempt_key.",
     };
   }
 
@@ -1686,38 +1750,11 @@ export async function sendMailerOpsVisibilityAction(
     proof_surfaces: ["admin_sent_items", "ses_intake_cc"],
   };
 
-  // Append-only human-readable audit (best-effort; effect ledger is
-  // authoritative). supabase-js reports database failures on `error` rather
-  // than throwing, so check both.
-  try {
-    const audit = await client.from("job_events").insert({
-      job_id: jobId,
-      event_type: "mailer_ops_visibility_sent",
-      detail_json: {
-        contract_version: MAILER_OPS_SEND_CONTRACT_VERSION,
-        kind,
-        proof,
-        effect_operation_key: effect.operation_key,
-        effect_id: sent.effect.id || null,
-        attempt_key: attemptKey,
-        attempt_hash: attemptHash,
-        report_provenance: reportProvenance,
-        photo_selection: photoSelectionMeta,
-        actor,
-      },
-    });
-    if (audit?.error) {
-      console.warn(
-        "[mailer-ops] job_events insert failed:",
-        audit.error.message,
-      );
-    }
-  } catch (err) {
-    console.warn(
-      "[mailer-ops] job_events insert failed:",
-      (err as Error).message,
-    );
-  }
+  await writeMailerOpsAudit("mailer_ops_visibility_sent", {
+    proof,
+    report_provenance: reportProvenance,
+    photo_selection: photoSelectionMeta,
+  });
 
   return {
     success: true,

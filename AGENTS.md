@@ -1227,9 +1227,13 @@ re-resolved content out of it: a newly uploaded photo re-picks the spread and a
 transient `emails` read error changes the recovered subject, so content in the
 identity would mint a second operation_key and mail the builder twice. Content
 lives in `payload_hash`, where drift reconciles the ORIGINAL effect. Exact-once
-holds per attempt, a confirmed replay returns the STORED ledger proof rather
-than a recomposed one, and a stuck `unknown` token is still never redispatched —
-the operator retries under a new `attempt_key`. Photo attachments are named from
+holds per attempt, and a stuck `unknown` token is still never redispatched — the
+operator retries under a new `attempt_key`. Any call that did not itself
+dispatch (`dispatched === false`: an already-confirmed replay OR a reconcile of
+an earlier attempt's message) returns the STORED ledger proof and audits as
+`mailer_ops_visibility_reconciled`; it must never recompose a proof, and the
+effect `provider_digest` only carries subject/attachment claims when that same
+call composed the message. Photo attachments are named from
 the trade's `label` (ordinal-prefixed, `site-photo-NN.ext` when unlabelled);
 never ship the storage UUID as the builder-facing file name. Evidence is current-attendance-cycle scoped through
 the shared `makesafe_cycle_evidence.ts` boundary and excludes `phase:'receipt'`

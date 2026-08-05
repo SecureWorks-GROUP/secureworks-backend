@@ -984,6 +984,100 @@ Deno.test("mailer ops action: confirmed replay reports the ORIGINAL ledger proof
   );
 });
 
+Deno.test("mailer ops action: a reconciled prior attempt reports stored proof, not today's content", async () => {
+  // Run one dispatches but its Sent Items proof never lands, so the ledger row
+  // parks on `unknown`. Run two under the SAME attempt key reconciles that
+  // original message — it composed nothing, so it must assert nothing.
+  const store = new MemoryEffectStore();
+  const auditRows: any[] = [];
+  const args = {
+    org_id: "00000000-0000-4000-8000-000000000001",
+    job_id: "job-1",
+    kind: "report" as const,
+    to: "mlb.mailer@primeeco.tech",
+    dry_run: false,
+  };
+  await assertRejects(
+    () =>
+      sendMailerOpsVisibilityAction(
+        makeClient({}),
+        { mode: "api_key", user: null },
+        args,
+        {
+          makeMailGateway: () => ({
+            createDraftAndSend: () =>
+              Promise.resolve({
+                message_id: "graph-msg-original",
+                state: "sent" as const,
+                operation_token: "tok",
+              }),
+            // Sent Items polling comes back empty → effect parks on unknown.
+            reconcileSent: () => Promise.resolve([]),
+          }),
+          effectStore: store,
+        },
+      ),
+    SesActionError,
+  );
+  assertEquals(store.row?.state, "unknown");
+
+  let secondDispatches = 0;
+  const reconciled = await sendMailerOpsVisibilityAction(
+    makeClient({
+      // The card's report was re-bound between the two runs.
+      documents: [{
+        id: "doc-report-2",
+        job_id: "job-1",
+        type: "makesafe_report",
+        file_name: "Corrected-Report.pdf",
+        storage_url:
+          "https://example.supabase.co/storage/v1/object/public/job-documents/job-1/report.pdf",
+        data_snapshot_json: {},
+        created_at: "2026-08-04T00:00:00Z",
+      }],
+      onJobEventInsert: (row: any) => auditRows.push(row),
+    }),
+    { mode: "api_key", user: null },
+    args,
+    {
+      makeMailGateway: () => ({
+        createDraftAndSend: () => {
+          secondDispatches++;
+          throw new Error("must not redispatch a stuck token");
+        },
+        reconcileSent: () =>
+          Promise.resolve([{
+            message_id: "graph-msg-original",
+            state: "sent" as const,
+            operation_token: "tok",
+          }]),
+      }),
+      effectStore: store,
+    },
+  );
+  assertEquals(secondDispatches, 0);
+  assertEquals(reconciled.already_sent, true);
+  assertEquals(reconciled.reconciled_prior_attempt, true);
+  assertEquals(reconciled.proof, undefined);
+  const recorded = reconciled.recorded_proof as any;
+  assertEquals(recorded.message_id, "graph-msg-original");
+  // The reconciled message's content is unknown to this call: never claimed.
+  assertEquals(recorded.provider_digest.subject_as_sent, undefined);
+  assertEquals(recorded.provider_digest.attachment_names, undefined);
+  assertEquals(
+    recorded.provider_digest.content_proof,
+    "reconciled_prior_attempt",
+  );
+  // No audit row may claim this call sent the re-bound report.
+  assertEquals(auditRows.length, 1);
+  assertEquals(auditRows[0].event_type, "mailer_ops_visibility_reconciled");
+  assertEquals(auditRows[0].detail_json.proof, undefined);
+  assertEquals(
+    JSON.stringify(auditRows[0].detail_json).includes("Corrected-Report.pdf"),
+    false,
+  );
+});
+
 Deno.test("mailer ops action: incidental content drift cannot mail the builder twice", async () => {
   const store = new MemoryEffectStore();
   const photoRow = (n: number) => ({
