@@ -37055,11 +37055,14 @@ function draftPackReportPayload(parsed: any, ctx: DraftPackContext, selectedPhot
   // Builder-facing prose: prefer a good Claude draft; otherwise compose short
   // explanatory paragraphs from the trade checklist. Never ship raw form dumps
   // (Damage:/Work: fragments or tick-box materials lists) as the report body.
+  // Works precedence: Claude draft, then trade checklist work_done, then
+  // service_report notes last. Notes must never outrank the trade narrative.
   const prose = resolveMakesafeReportProseSections(
     {
       scope: parsed.report.scope,
       findings: parsed.report.findings,
-      works: parsed.report.works || (ctx.service_report as any)?.notes,
+      works: parsed.report.works || checklist.work_done ||
+        (ctx.service_report as any)?.notes,
       materials: parsed.report.materials,
     },
     checklist,

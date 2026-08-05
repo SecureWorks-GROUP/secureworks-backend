@@ -13,7 +13,7 @@ import {
   composeMakesafeReportProseFromTradeEvidence,
   MAKESAFE_REPORT_PROSE_CONTRACT_VERSION,
   MAKESAFE_REPORT_PROSE_STYLE_RULES,
-  quantifiedMaterialItems,
+  materialItemsForReport,
   reportProseNeedsComposition,
   resolveMakesafeReportProseSections,
   sanitiseReportProse,
@@ -22,40 +22,55 @@ import {
 Deno.test("report prose contract version is pinned", () => {
   assertEquals(
     MAKESAFE_REPORT_PROSE_CONTRACT_VERSION,
-    "report-prose-paragraphs/v1",
+    "report-prose-paragraphs/v2",
   );
 });
 
-Deno.test("style rules demand paragraphs and forbid invention/filler", () => {
+Deno.test("style rules demand connected form-facts and forbid invention", () => {
   const joined = MAKESAFE_REPORT_PROSE_STYLE_RULES.join("\n");
   assertStringIncludes(joined, "short explanatory paragraphs");
   assertStringIncludes(joined, "Never invent");
+  assertStringIncludes(joined, "showed signs of");
   assertStringIncludes(joined, "No em dashes");
   assertStringIncludes(joined, "write less");
-  assertStringIncludes(joined, "bullet lists");
 });
 
 Deno.test("sanitiseReportProse strips em and en dashes", () => {
   assertEquals(
-    sanitiseReportProse("Fitted timber — then bugles – done."),
+    sanitiseReportProse("Fitted timber \u2014 then bugles \u2013 done."),
     "Fitted timber - then bugles - done.",
   );
 });
 
-Deno.test("quantifiedMaterialItems drops tick-box noise", () => {
+Deno.test("materialItemsForReport keeps tarp ticks and drops pure noise only", () => {
   assertEquals(
-    quantifiedMaterialItems([
+    materialItemsForReport([
       "Timber x 1m",
       "Bugle screws x 5",
       "Tarps / roof materials",
       "Fixings / consumables",
       "Other / none",
-    ]),
-    ["Timber x 1m", "Bugle screws x 5"],
+    ]).items,
+    ["Timber x 1m", "Bugle screws x 5", "Tarps / roof materials"],
   );
+  // Tarp alone is a real material name the trade recorded - keep it.
+  assertEquals(
+    materialItemsForReport(["Tarps / roof materials"]).items,
+    ["Tarps / roof materials"],
+  );
+  // Empty list: do not invent consumable ticks.
+  const empty = materialItemsForReport([]);
+  assertEquals(empty.items, []);
+  assertEquals(empty.had_consumable_ticks_only, false);
+  const ticksOnly = materialItemsForReport([
+    "Fixings / consumables",
+    "Other / none",
+  ]);
+  assertEquals(ticksOnly.items, []);
+  assertEquals(ticksOnly.had_consumable_ticks_only, true);
 });
 
-// Real trade evidence from SWMS-26953 Gidgegannup (five-pack elevated run).
+// Real trade evidence from SWMS-26953 Gidgegannup.
 const GIDGE_CHECKLIST = {
   job_type: "Other",
   damage_cause: "Storm / wind",
@@ -89,58 +104,131 @@ const WOODVALE_CHECKLIST = {
   ],
 };
 
-// Prior elevated short-sentence blurbs (what the Captain called too terse).
-const GIDGE_BEFORE = {
-  scope: "Make safe the roof structure under the roof-mounted hot water system.",
-  findings:
-    "Storm / wind. The hot water system on the roof is not engineered for the load. Timber beams have dipped under the weight.",
-  works:
-    "Fitted two structural timber pieces with bugle screws from the base plate to the underpurlin, giving the roof extra support under the hot water system.",
-  materials: "Timber 1 m. Bugle screws x 5.",
-};
-
-Deno.test("Gidgegannup trade evidence becomes short explanatory paragraphs", () => {
+Deno.test("Gidgegannup: connected form-facts, no invented inspection findings", () => {
   const prose = composeMakesafeReportProseFromTradeEvidence(GIDGE_CHECKLIST);
 
-  // Purpose, not a form dump.
+  // Scope uses form nouns only - hot water + roof - not invented framing inspection.
   assertStringIncludes(prose.scope.toLowerCase(), "hot water");
+  assertStringIncludes(prose.scope.toLowerCase(), "roof");
+  assert(!/showed signs/i.test(prose.scope));
+  assert(!/overload/i.test(prose.scope));
   assert(!/make-safe type:/i.test(prose.scope));
-  assert(!/^\s*damage:/im.test(prose.scope));
+  assert(!/^make safe the other/i.test(prose.scope));
 
-  // Findings paragraph: cause + damage, complete sentences.
-  assertStringIncludes(prose.findings, "Storm / wind");
+  // Findings: cause + damage connected, form facts only.
+  assertStringIncludes(prose.findings.toLowerCase(), "storm");
   assertStringIncludes(prose.findings.toLowerCase(), "hot water");
   assertStringIncludes(prose.findings.toLowerCase(), "timber");
-  assert(!prose.findings.includes("—"));
-  assert(!/^\s*[-*]\s+/m.test(prose.findings));
+  assertStringIncludes(prose.findings.toLowerCase(), "dip");
+  assert(!/showed signs of/i.test(prose.findings));
+  assert(!/was found to be/i.test(prose.findings));
+  assert(!/appeared/i.test(prose.findings));
+  assert(!/asbestos/i.test(prose.findings));
+  assert(!/collaps/i.test(prose.findings));
 
-  // Works paragraph: timber + bugles, not a bare fragment.
+  // Works: action + form's own purpose (extra support / hold up HWS).
   assertStringIncludes(prose.works.toLowerCase(), "bugle");
   assertStringIncludes(prose.works.toLowerCase(), "timber");
-  assert(/[.!?]\s+[A-Z]/.test(prose.works) || prose.works.endsWith("."));
+  assertStringIncludes(prose.works.toLowerCase(), "underpurlin");
+  assert(
+    /support|hold up/i.test(prose.works),
+    "works should keep the form's purpose clause about support",
+  );
 
-  // Materials: quantified only.
+  // Materials: quantified + real tarp tick, not pure noise alone.
   assertStringIncludes(prose.materials, "Timber x 1m");
   assertStringIncludes(prose.materials, "Bugle screws x 5");
-  assert(!/tarps \/ roof materials/i.test(prose.materials));
+  assert(!/fixings \/ consumables/i.test(prose.materials));
+  assert(!/other \/ none/i.test(prose.materials));
 });
 
-Deno.test("Woodvale trade evidence connects tile work without inventing asbestos or collapse", () => {
+Deno.test("Woodvale: water ingress facts without inventing roof path or collapse", () => {
   const prose = composeMakesafeReportProseFromTradeEvidence(WOODVALE_CHECKLIST);
 
   assertStringIncludes(prose.scope.toLowerCase(), "water");
   assertStringIncludes(prose.findings.toLowerCase(), "bedroom");
+  assertStringIncludes(prose.findings.toLowerCase(), "cupboard");
+  // Form did not say "through the roof" - do not invent that path.
+  assert(
+    !/through the roof/i.test(prose.findings),
+    "must not invent path through the roof",
+  );
   assertStringIncludes(prose.works.toLowerCase(), "silicon");
   assertStringIncludes(prose.works.toLowerCase(), "flashing");
   assertStringIncludes(prose.works.toLowerCase(), "batten");
-
-  // Honesty: never invent hazard classes or collapse claims.
   assert(!/asbestos/i.test(JSON.stringify(prose)));
   assert(!/collaps/i.test(JSON.stringify(prose)));
   assert(!/at risk/i.test(JSON.stringify(prose)));
 });
 
-Deno.test("thin evidence writes less rather than inventing materials", () => {
+Deno.test("scope-phrase-invention: shed token must not invent destroyed backyard", () => {
+  const prose = composeMakesafeReportProseFromTradeEvidence({
+    job_type: "Other",
+    damage_cause: "Storm / wind",
+    damage_description:
+      "Make-safe type: Other\nDamage: Shed roller door dented by tree branch.",
+    work_done: "Secured roller door.",
+    materials_used: [],
+  });
+  assert(!/destroyed/i.test(prose.scope));
+  assert(!/backyard/i.test(prose.scope));
+  assertStringIncludes(prose.scope.toLowerCase(), "shed");
+});
+
+Deno.test("scope-phrase-invention: prop alone must not invent drooping ceiling", () => {
+  const prose = composeMakesafeReportProseFromTradeEvidence({
+    job_type: "Other",
+    damage_cause: "Storm / wind",
+    damage_description:
+      "Make-safe type: Other\nDamage: Ceiling cornice cracked at bedroom.",
+    work_done: "Propped patio post.",
+    materials_used: [],
+  });
+  assert(!/drooping/i.test(prose.scope));
+  assert(!/drooping/i.test(prose.findings));
+});
+
+Deno.test("form-label-leaks: bare Other and empty findings stay honest", () => {
+  const prose = composeMakesafeReportProseFromTradeEvidence({
+    job_type: "Other",
+    damage_cause: "",
+    damage_description: "Make-safe type: Other\nDamage: Garage door off track.",
+    work_done: "Secured garage door.",
+    materials_used: [],
+  });
+  assert(!/^make safe the other\.?$/i.test(prose.scope));
+  assert(!/^other\.?$/i.test(prose.findings));
+
+  const emptyFindings = composeMakesafeReportProseFromTradeEvidence({
+    job_type: "Ceiling / water ingress",
+    damage_cause: "",
+    damage_description: "",
+    work_done: "Made safe.",
+    materials_used: [],
+  });
+  assertStringIncludes(
+    emptyFindings.findings.toLowerCase(),
+    "not recorded",
+  );
+  assert(!/^ceiling \/ water ingress\.?$/i.test(emptyFindings.findings));
+});
+
+Deno.test("materials empty list does not invent consumable ticks", () => {
+  const prose = composeMakesafeReportProseFromTradeEvidence({
+    job_type: "Other",
+    damage_cause: "Storm / wind",
+    damage_description: "Damage: Fence panel loose.",
+    work_done: "Resecured panel.",
+    materials_used: [],
+  });
+  assertEquals(
+    prose.materials,
+    "No materials were recorded on the trade form.",
+  );
+  assert(!/consumable ticks/i.test(prose.materials));
+});
+
+Deno.test("thin shed evidence writes less rather than inventing materials", () => {
   const prose = composeMakesafeReportProseFromTradeEvidence({
     job_type: "Patio / structure",
     damage_cause: "Storm / wind",
@@ -155,13 +243,16 @@ Deno.test("thin evidence writes less rather than inventing materials", () => {
     ],
   });
   assertStringIncludes(prose.works.toLowerCase(), "shed");
-  assertStringIncludes(prose.materials.toLowerCase(), "no quantified materials");
-  assert(!/star picket/i.test(prose.materials));
+  // Real ticks kept.
+  assertStringIncludes(prose.materials.toLowerCase(), "tarp");
 });
 
-Deno.test("reportProseNeedsComposition detects raw checklist dumps and bullets", () => {
+Deno.test("reportProseNeedsComposition detects raw dumps and bare form labels", () => {
   assertEquals(
-    reportProseNeedsComposition(GIDGE_CHECKLIST.damage_description, GIDGE_CHECKLIST),
+    reportProseNeedsComposition(
+      GIDGE_CHECKLIST.damage_description,
+      GIDGE_CHECKLIST,
+    ),
     true,
   );
   assertEquals(
@@ -169,19 +260,16 @@ Deno.test("reportProseNeedsComposition detects raw checklist dumps and bullets",
     true,
   );
   assertEquals(
-    reportProseNeedsComposition("- cracked tiles\n- water in", GIDGE_CHECKLIST),
+    reportProseNeedsComposition("Make safe the other.", GIDGE_CHECKLIST),
     true,
   );
   assertEquals(
-    reportProseNeedsComposition(GIDGE_BEFORE.works, GIDGE_CHECKLIST),
-    false,
+    reportProseNeedsComposition("- cracked tiles\n- water in", GIDGE_CHECKLIST),
+    true,
   );
 });
 
-Deno.test("resolveMakesafeReportProseSections keeps good draft prose and replaces dumps", () => {
-  const good = resolveMakesafeReportProseSections(GIDGE_BEFORE, GIDGE_CHECKLIST);
-  assertEquals(good.works, GIDGE_BEFORE.works);
-
+Deno.test("resolveMakesafeReportProseSections replaces dumps", () => {
   const replaced = resolveMakesafeReportProseSections(
     {
       scope: GIDGE_CHECKLIST.damage_description,
