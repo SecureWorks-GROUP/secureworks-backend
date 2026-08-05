@@ -314,7 +314,16 @@ Audit-grade, family-complete non-dry revisions enter the append-only
   `xero_invoice_pdf` artifact is replaced by the re-fetched real Xero document
   (or reported unavailable) and the response carries an `invoice_pdf`
   projection — that contract is owned by
-  `data/ses-draft-invoice-create-409-v1/report.md`.
+  `data/ses-draft-invoice-create-409-v1/report.md`. The response also carries
+  `presentation` (`presentSesPackHonesty`: `kind` of
+  `ready | refused | incomplete | sent | none`, plus `state`, `reason`,
+  `review_state`, `pre_xero_docs_ready`, `docket_revision_id`) so the review
+  surface distinguishes a refusal from an incomplete pack and from a ready one.
+  `blockers[]` lists every named refusal — stored docket blockers **and**
+  read-time trust refusals such as `curated_source_superseded` — each keeping
+  its original `evidence` / `decision_key` and gaining `state: "refused"`,
+  `fact`, `recovery_action` and `category`. A refusal is an honest stop, not a
+  send-pipeline failure, and it never relaxes a gate.
 - `POST ops-api?action=sign_off_ses_docket` with
   `{"docket_revision_id":"<uuid>","expected_output_content_hash":"sha256:<64 lowercase hex>"}`
   records `signed_off` only for the displayed current hash. Only an identified

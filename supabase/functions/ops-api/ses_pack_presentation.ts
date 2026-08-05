@@ -48,7 +48,11 @@ export interface SesPackPresentation {
   pre_xero_docs_ready: boolean;
   docket_revision_id: string | null;
   drafted: boolean;
-  /** Short operator-facing reason for refused / incomplete; null when ready/sent/none. */
+  /**
+   * Short operator-facing reason for refused / incomplete, plus the
+   * awaiting-send fact on a ready authorised-not-sent pack. Null on every other
+   * ready pack and on sent / none.
+   */
   reason: string | null;
   blockers: SesPackPresentationBlocker[];
   /** Raw legacy pack status preserved for audit; not presentation authority. */

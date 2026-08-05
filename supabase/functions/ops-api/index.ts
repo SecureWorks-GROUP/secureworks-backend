@@ -14028,7 +14028,7 @@ export interface MakesafeReportPackLike {
   blockers?: Array<Record<string, unknown>> | null
   /** Honest presentation kind: ready | refused | incomplete | sent | none */
   presentation_kind?: string | null
-  /** Operator-facing reason for refused/incomplete; null when ready/sent/none */
+  /** Operator-facing reason for refused/incomplete, or the awaiting-send fact on a ready authorised-not-sent pack */
   presentation_reason?: string | null
   /** Raw legacy pack status; not presentation authority when a docket exists */
   legacy_pack_status?: string | null

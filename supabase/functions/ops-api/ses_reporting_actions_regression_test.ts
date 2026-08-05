@@ -38,6 +38,8 @@ function reviewPackClient(
     jobEvents?: Array<Record<string, unknown>>;
     jobEventsError?: Record<string, unknown>;
     boundDocument?: Record<string, unknown> | null;
+    /** Envelope-level docs-ready flag, as `prepare_ses_docket_revision` writes it. */
+    preXeroDocsReady?: boolean;
   } = {},
 ) {
   const signedPaths: string[] = [];
@@ -72,6 +74,7 @@ function reviewPackClient(
     committed_at: "2026-08-04T00:00:00.000Z",
     envelope: {
       v2: { classification: { family: "physical_makesafe" } },
+      pre_xero_docs_ready: options.preXeroDocsReady === true,
     },
     blockers: [],
     email_drafts: {},
@@ -315,6 +318,95 @@ Deno.test("the corrected curated content stays served, and an unreadable bind le
     "curated_source_supersession_unreadable",
   );
   assertEquals(unreadable.signedPaths, []);
+});
+
+Deno.test("get_ses_reviewable_pack presents refused / ready / incomplete as three distinct states", async () => {
+  // 1. Refused — a read-time trust refusal must name its reason instead of
+  //    green-ticking, and must not read as a send-pipeline failure.
+  const supersededBytes = new TextEncoder().encode("%PDF-1.7\nsuperseded");
+  const supersededArtifact = await curatedReportArtifact(supersededBytes, {
+    source_identity: SUPERSEDED_IDENTITY,
+    expected_raw_sha256: SUPERSEDED_RAW,
+    report_input_hash: SUPERSEDED_INPUT,
+  });
+  const supersededMark = supersessionEvent();
+  supersededMark.detail_json.prior_expected_raw_sha256 = String(
+    supersededArtifact.metadata.expected_raw_sha256,
+  );
+  const refused = await getSesReviewablePackAction(
+    reviewPackClient(supersededArtifact, supersededBytes, {
+      jobEvents: [supersededMark],
+      // Even a docs-ready docket is refused once the served report is untrusted.
+      preXeroDocsReady: true,
+    }).client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(refused.presentation.kind, "refused");
+  assertEquals(refused.presentation.state, "refused");
+  assertEquals(refused.presentation.review_state, "U4_BLOCKED");
+  assertEquals(refused.presentation.pre_xero_docs_ready, false);
+  assertEquals(refused.presentation.docket_revision_id, "docket-fixture");
+  assertStringIncludes(String(refused.presentation.reason || ""), "curated");
+  // A refusal is an honest stop: never the legacy send-pipeline "failed" word.
+  assertEquals(refused.presentation.state === "failed", false);
+  // Every named refusal reaches the operator with a fact and a recovery action.
+  assertEquals(refused.blockers.length, 1);
+  assertEquals(refused.blockers[0].state, "refused");
+  assertStringIncludes(String(refused.blockers[0].fact || ""), "curated");
+
+  // 2. Ready — trusted pack on a docs-ready docket. No invented blocker.
+  const goodBytes = new TextEncoder().encode("%PDF-1.7\ncorrected");
+  const goodArtifact = await curatedReportArtifact(goodBytes, {
+    source_identity: CORRECTED_IDENTITY,
+    expected_raw_sha256: CORRECTED_RAW,
+    report_input_hash: CORRECTED_INPUT,
+  });
+  const goodMark = supersessionEvent();
+  goodMark.detail_json.expected_raw_sha256 = String(
+    goodArtifact.metadata.expected_raw_sha256,
+  );
+  const ready = await getSesReviewablePackAction(
+    reviewPackClient(goodArtifact, goodBytes, {
+      jobEvents: [goodMark],
+      preXeroDocsReady: true,
+    }).client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(ready.presentation.kind, "ready");
+  assertEquals(ready.presentation.state, "drafted");
+  assertEquals(ready.presentation.review_state, "READY");
+  assertEquals(ready.presentation.pre_xero_docs_ready, true);
+  assertEquals(ready.presentation.reason, null);
+  assertEquals(ready.blockers, []);
+
+  // 3. Incomplete — same trusted pack, docket not yet docs-ready and naming no
+  //    refusal. Still assembling is not a refusal and not a green ready.
+  const incomplete = await getSesReviewablePackAction(
+    reviewPackClient(goodArtifact, goodBytes, {
+      jobEvents: [goodMark],
+      preXeroDocsReady: false,
+    }).client,
+    { mode: "api_key", user: null },
+    "docket-fixture",
+  );
+  assertEquals(incomplete.presentation.kind, "incomplete");
+  assertEquals(incomplete.presentation.pre_xero_docs_ready, false);
+  assertStringIncludes(
+    String(incomplete.presentation.reason || ""),
+    "still assembling",
+  );
+  assertEquals(incomplete.blockers, []);
+
+  assertEquals(
+    new Set([
+      refused.presentation.kind,
+      ready.presentation.kind,
+      incomplete.presentation.kind,
+    ]).size,
+    3,
+  );
 });
 
 Deno.test("retired commercial and self-consistent raw provenance remain untrusted without job-specific code", () => {

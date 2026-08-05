@@ -152,7 +152,13 @@ Every card originates as one canonical job row with:
   legacy composite references at render time
 - `lineage`: same-property claim key, intake lineage, one-card-per-PO identity and sibling links
 - `age`: current age, target, hard maximum and overdue state
-- `blockers.real[]` and `blockers.stale_artifacts[]` as separate facts
+- `blockers.real[]` and `blockers.stale_artifacts[]` as separate facts. A real
+  blocker carries `code`, `category`, `docket_revision_id` and, when the
+  producer named one, a plain-English `fact` and `recovery_action`. A refused
+  pack that names no structured code still reaches the operator as the single
+  synthesized `pack_refused` blocker carrying its reason
+- `pack.presentation_kind` / `presentation_reason` / `legacy_pack_status`: the
+  ops pack-honesty channel (see below)
 - `contact`: current client name, phone, full address and linked Call/Text/Navigate actions
 - U2-S1 additive spine (nullable-safe before/without migration apply):
   `attendance_cycle_id`, `cycle_number`, `cycle_attribution_flags[]`,
@@ -160,6 +166,36 @@ Every card originates as one canonical job row with:
   `commercial_warning` when prior-cycle commercial is visible but non-closing
 
 A stale `company_contact_required` substatus on an already allocated/scheduled job is reported as `stale_company_contact_substatus`. It is not presented as a real client blocker.
+
+### Pack presentation honesty
+
+Pack state is produced once, by `presentSesPackHonesty`
+(`ses_pack_presentation.ts`), as a kind of
+`ready | refused | incomplete | sent | none`. Ready, refused and incomplete stay
+distinct on the ops card: a refusal is an honest stop naming its fact, never a
+green tick and never the legacy send-pipeline `failed`.
+
+Ops rows publish it as:
+
+- `pack.presentation_kind`, `pack.presentation_reason` (plain-English reason for
+  a refused/incomplete pack, or the awaiting-send fact on a ready
+  authorised-not-sent one) and `pack.legacy_pack_status` (the raw
+  `makesafe_report_packs` status, audit only). Present in both card and full
+  shape
+- `pack.state` / `pack_status` (still a plain string) carrying the honest
+  presentation state, so a ready docket never republishes a stale legacy
+  `failed`
+- a card with nothing to say (kind `none`) stamps nothing: `pack.state` stays
+  `not_started` and `pack_status` stays `null`, exactly as before, so every
+  packless New/Allocated card is unchanged
+
+Consumers read pack state from those keys rather than re-deriving it from the
+legacy status. It is presentation only: placement, `canonical_stage`, and the
+raw pack status / review state / blocker list that feed derivation are
+unchanged, and AGENTS.md ("Previously Committed PDF Is Restorable, Not
+Complete") owns the rule keeping it out of every derivation input. The
+`pack_presentation` object on the internal `makesafe_pipeline` row is that
+stamp's carrier; the board reads it and never re-derives one.
 
 ### U2-S1 cycle-scoped evidence (board + audit)
 

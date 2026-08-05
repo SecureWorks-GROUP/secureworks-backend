@@ -1556,8 +1556,8 @@ its kinds are **ready / refused / incomplete / sent / none** — never collapse
 them; a refusal names its fact (an honest stop, not a green tick and not a
 send-pipeline failure). Its output rides on `pack_presentation` (additive,
 top-level) plus `report_pack.presentation_kind` / `presentation_reason` /
-`legacy_pack_status`, and `get_ses_reviewable_pack` returns the same shape as
-`presentation`. It must NEVER be written into `report_pack.status`,
+`legacy_pack_status`, and `get_ses_reviewable_pack` returns it under its own
+`presentation` key. It must NEVER be written into `report_pack.status`,
 `review_state` or `blockers`: those are what the stage ladder, the SENT chip and
 M1 read, and a presentation string there moves columns. Likewise never mint a
 `report_pack` object for a card with no pack row and no docket — M1's `!pack`

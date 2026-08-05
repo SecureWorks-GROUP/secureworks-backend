@@ -2224,8 +2224,10 @@ export async function getSesReviewablePackAction(
     const source: Record<string, unknown> = raw && typeof raw === "object"
       ? { ...(raw as Record<string, unknown>) }
       : { fact: String(raw ?? "") };
-    const code = String(source.code || source.reason_code || source.reasonCode ||
-      "").trim();
+    const code = String(
+      source.code || source.reason_code || source.reasonCode ||
+        "",
+    ).trim();
     const normalized = code ? normalizedBlockerByCode.get(code) : undefined;
     const fact = String(source.fact || source.reason || source.message || "")
       .trim();

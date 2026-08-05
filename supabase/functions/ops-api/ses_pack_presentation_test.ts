@@ -39,7 +39,8 @@ Deno.test("docket blockers present as refused with fact, not failed and not read
         code: "curated_source_missing",
         fact:
           "The completion report lacks an independently byte-bound current-cycle curated source, so it is hidden from the trusted pack.",
-        recovery_action: "Bind a current-cycle curated report, then re-prepare.",
+        recovery_action:
+          "Bind a current-cycle curated report, then re-prepare.",
       }],
     },
     legacy_pack: { status: "drafted" },
@@ -173,7 +174,10 @@ Deno.test("three kinds stay distinct — ready / refused / incomplete", () => {
     docket: {
       id: "b",
       pre_xero_docs_ready: false,
-      blockers: [{ reason_code: "pricing_evidence_missing", fact: "No price." }],
+      blockers: [{
+        reason_code: "pricing_evidence_missing",
+        fact: "No price.",
+      }],
     },
   });
   const incomplete = presentSesPackHonesty({
