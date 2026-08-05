@@ -27,7 +27,7 @@ Both emails:
 | Migration | `supabase/migrations/20260805020000_ses_mailer_ops_send_effect.sql` |
 | Rollback | `supabase/rollbacks/20260805020000_ses_mailer_ops_send_effect_down.sql` |
 | Module | `supabase/functions/ops-api/ses_mailer_ops_send.ts` |
-| Tests | `supabase/functions/ops-api/ses_mailer_ops_send_test.ts` (20 pass, **zero Graph**) |
+| Tests | `supabase/functions/ops-api/ses_mailer_ops_send_test.ts` (31 pass, **zero Graph**) |
 | Wiring | `ops-api/index.ts` case `send_mailer_ops_visibility` + `makeMailerOpsGraphMailGateway` |
 | Effect kind | `mailer_ops_send` on `ses_external_effects` (job_id + report\|photo + attempt `artifact_hash`; no release_revision_id) |
 
@@ -151,7 +151,7 @@ rewrites already exist, so only the index proves the apply).
 
 ## What a green suite does **not** prove
 
-The mail gateway is mocked in tests. **20/20 wiring tests pass with zero outbound Graph calls.**  
+The mail gateway is mocked in tests. **31/31 wiring tests pass with zero outbound Graph calls.**  
 That proves shape, fences, CC, provenance wiring, effect identity, and dry_run defaults — **not delivery**.  
 A prior send on this system has already reported success and delivered nothing; do not treat green tests as Sent Items proof.
 

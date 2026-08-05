@@ -4,6 +4,13 @@
 **Checkpoint:** card one (Maylands) prepared; zero of eight emails sent.  
 **Authorised scope (Captain YES):** eight ordinary `admin@` → `mlb.mailer@primeeco.tech` sends (report PDF + capped photos), no invoice, no `makesafes@` packs, no `execute_ses_release_revision`.
 
+> **Superseded as a send plan (2026-08-05).** This is a historical block ledger
+> only. The sanctioned route (Option 3 below) has since been built as
+> `ops-api?action=send_mailer_ops_visibility`, and its contract — mandatory
+> `ses@secureworkswa.com.au` CC, required allowlisted `to`, `MAILER_OPS_PHOTO_CAP`,
+> `dry_run` default — is owned by `data/mailer-ops-send-action-v1/report.md`.
+> Card-one readiness facts below stay valid; the per-card send plan does not.
+
 ---
 
 ## Cards (resolved)
@@ -147,6 +154,10 @@ After the block, the crewmate offered three ways to unblock the eight sends. **N
 **What was offered:** A real action (e.g. `send_mailer_ops_visibility`) wired to ordinary admin@ Mail.Send with operation-token Sent Items proof, hard-coded recipient, no-invoice allow-list, deployed only from release `main`.
 
 **Disposition:** This is the shape of the sanctioned route. **This crewmate does not build or deploy it** — another worker owns that work. This ledger only records the block, the readiness of card one, and that we must not ship by weakening fences or by credential smuggling while that route lands.
+
+**Landed:** built on `fm/mailer-ops-send-action-v1` as
+`ops-api?action=send_mailer_ops_visibility`. Contract, fences and the supervised
+send sequence: `data/mailer-ops-send-action-v1/report.md`.
 
 ---
 

@@ -1178,7 +1178,11 @@ authoritative API and gate code is in `ses_docs_ready.ts`,
 `ses_docket_persistence.ts`, and `ses_reporting_actions.ts`; do not add a
 client-only send bypass or a second family-completeness rule.
 
-## Sealed Release Graph Send Is The Only Builder Transport
+## Sealed Release Graph Send Is The Only Builder Pack Transport
+
+Every builder-facing report / photo / invoice PACK ships here. The one other
+builder-facing route is ops-visibility mail (next section), which is separately
+audited and can never carry an invoice.
 
 Approved SEND IT is `prepare_ses_release_revision` →
 `approve_ses_release_revision` → `execute_ses_release_revision`. The Graph

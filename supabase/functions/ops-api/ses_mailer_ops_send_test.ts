@@ -95,7 +95,10 @@ Deno.test("mailer ops: attachment roles refuse invoice-shaped sets", () => {
   assertMailerOpsAttachmentRoles(["report_pdf"], "report");
   assertMailerOpsAttachmentRoles(["site_photo", "site_photo"], "photo");
   assertRejectsSync(() =>
-    assertMailerOpsAttachmentRoles(["report_pdf", "site_photo"] as any, "report")
+    assertMailerOpsAttachmentRoles(
+      ["report_pdf", "site_photo"] as any,
+      "report",
+    )
   );
 });
 
@@ -119,7 +122,11 @@ Deno.test("mailer ops: photo content type is real, never assumed jpeg", () => {
   assertEquals(resolvePhotoContentType("image/png", "a.jpg"), "image/png");
   assertEquals(resolvePhotoContentType("", "site-photo.PNG"), "image/png");
   assertEquals(
-    resolvePhotoContentType(null, null, "https://x/storage/v1/object/public/b/p.heic?token=1"),
+    resolvePhotoContentType(
+      null,
+      null,
+      "https://x/storage/v1/object/public/b/p.heic?token=1",
+    ),
     "image/heic",
   );
   // Storage sometimes reports a generic type; the extension then decides.
@@ -127,7 +134,10 @@ Deno.test("mailer ops: photo content type is real, never assumed jpeg", () => {
     resolvePhotoContentType("application/octet-stream", "p.jpeg"),
     "image/jpeg",
   );
-  assertEquals(resolvePhotoContentType(null, "noextension"), "application/octet-stream");
+  assertEquals(
+    resolvePhotoContentType(null, "noextension"),
+    "application/octet-stream",
+  );
 });
 
 Deno.test("mailer ops: sender_patterns extracts full emails only", () => {
@@ -371,8 +381,7 @@ class MemoryEffectStore implements SesExternalEffectStore {
       state: to,
       external_id: String(detail.external_id || this.row.external_id || "") ||
         null,
-      provider_digest:
-        (detail.provider_digest as Record<string, unknown>) ||
+      provider_digest: (detail.provider_digest as Record<string, unknown>) ||
         this.row.provider_digest,
     };
     if (to === "dispatching") this.dispatches++;
@@ -525,8 +534,7 @@ function makeClient(opts: {
         },
       };
       // Make thenable for await client.from().select()...
-      api.then = (onful: any, onrej: any) =>
-        api._result().then(onful, onrej);
+      api.then = (onful: any, onrej: any) => api._result().then(onful, onrej);
       return api;
     },
     storage: {
@@ -536,20 +544,22 @@ function makeClient(opts: {
             if (path.includes("report") || path.endsWith(".pdf")) {
               return {
                 data: {
-                  arrayBuffer: async () => pdfBytes.buffer.slice(
-                    pdfBytes.byteOffset,
-                    pdfBytes.byteOffset + pdfBytes.byteLength,
-                  ),
+                  arrayBuffer: async () =>
+                    pdfBytes.buffer.slice(
+                      pdfBytes.byteOffset,
+                      pdfBytes.byteOffset + pdfBytes.byteLength,
+                    ),
                 },
                 error: null,
               };
             }
             return {
               data: {
-                arrayBuffer: async () => photoBytes.buffer.slice(
-                  photoBytes.byteOffset,
-                  photoBytes.byteOffset + photoBytes.byteLength,
-                ),
+                arrayBuffer: async () =>
+                  photoBytes.buffer.slice(
+                    photoBytes.byteOffset,
+                    photoBytes.byteOffset + photoBytes.byteLength,
+                  ),
               },
               error: null,
             };
@@ -636,9 +646,10 @@ Deno.test("mailer ops action: dry_run photo uses cap and records sent-versus-ava
   assertEquals(photo.available_count, 20);
   assertEquals(photo.selected_count, MAILER_OPS_PHOTO_CAP);
   assertEquals(photo.cap, MAILER_OPS_PHOTO_CAP);
-  assertEquals((result.attachment_roles as string[]).every((r) =>
-    r === "site_photo"
-  ), true);
+  assertEquals(
+    (result.attachment_roles as string[]).every((r) => r === "site_photo"),
+    true,
+  );
   // Representative spread: not only first 12 media ids
   const ids: string[] = photo.media_ids;
   assert(ids.includes("media-0"));
@@ -874,7 +885,10 @@ Deno.test("mailer ops action: reattended card only carries current-cycle evidenc
   assertEquals(photo.media_ids, ["media-current"]);
   assertEquals(photo.excluded_other_cycle_count, 1);
   assertEquals(photo.cycle_scoped, true);
-  assertEquals((photoResult.attendance_cycle as any).attendance_cycle_id, "cycle-2");
+  assertEquals(
+    (photoResult.attendance_cycle as any).attendance_cycle_id,
+    "cycle-2",
+  );
 
   // A previous cycle's curated report must not be mailed as this visit's report.
   await assertRejects(
@@ -1275,8 +1289,11 @@ Deno.test("mailer ops: source pins — no invoice string in attachment role unio
     source,
     'export type MailerOpsAttachmentRole = "report_pdf" | "site_photo"',
   );
-  assertStringIncludes(source, 'export type MailerOpsRouteKind = "report" | "photo"');
-  assertStringIncludes(source, 'export const MAILER_OPS_CC = SES_RELEASE_CC');
+  assertStringIncludes(
+    source,
+    'export type MailerOpsRouteKind = "report" | "photo"',
+  );
+  assertStringIncludes(source, "export const MAILER_OPS_CC = SES_RELEASE_CC");
   assertStringIncludes(source, "ses@secureworkswa.com.au");
   // Import graph: no docket preparer / release executor / fence exemption.
   const importLines = source.split("\n").filter((l) =>
@@ -1287,7 +1304,9 @@ Deno.test("mailer ops: source pins — no invoice string in attachment role unio
   assert(!importLines.includes("SEALED_SES_MONEY_READ_EXEMPT"));
   assert(!importLines.includes("send-outlook-email"));
   // Structural invoice impossibility is typed, not a runtime allow-list of money docs only.
-  assert(!source.includes('MailerOpsRouteKind = "report" | "photo" | "invoice"'));
+  assert(
+    !source.includes('MailerOpsRouteKind = "report" | "photo" | "invoice"'),
+  );
 });
 
 Deno.test("mailer ops: index wires send_mailer_ops_visibility and dedicated gateway", async () => {
@@ -1331,7 +1350,10 @@ Deno.test("mailer ops: migration adds mailer_ops_send without invoice route_kind
 
 Deno.test("mailer ops: edge schema gate declares the migration marker", async () => {
   const manifest = await Deno.readTextFile(
-    new URL("../../../scripts/edge-function-schema-requirements.txt", import.meta.url),
+    new URL(
+      "../../../scripts/edge-function-schema-requirements.txt",
+      import.meta.url,
+    ),
   );
   assertStringIncludes(
     manifest,

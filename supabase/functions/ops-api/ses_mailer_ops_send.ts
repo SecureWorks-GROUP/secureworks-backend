@@ -35,10 +35,7 @@ import {
   type SesExternalAdapter,
   type SesExternalEffectStore,
 } from "./ses_external_effects.ts";
-import {
-  sesSha256,
-  sesSha256Bytes,
-} from "./ses_docket_envelope.ts";
+import { sesSha256, sesSha256Bytes } from "./ses_docket_envelope.ts";
 import {
   filterMediaForCurrentCycle,
   hasReattendBoundary,
@@ -53,18 +50,15 @@ import {
   type SesRouteSendResult,
 } from "./ses_graph_mail_gateway.ts";
 import {
+  type MlbIntakeEmailSubjectSource,
   mlbOrdinaryMailSubject,
   pickIntakeWorkOrderEmailSubject,
-  type MlbIntakeEmailSubjectSource,
 } from "./ses_mlb_thread_reply.ts";
 import {
   evaluateSesPhotoMailVolume,
   sesPhotoMailVolumeRefusal,
 } from "./ses_photo_mail_volume_guard.ts";
-import {
-  SesActionError,
-  type SesActionAuth,
-} from "./ses_reporting_actions.ts";
+import { type SesActionAuth, SesActionError } from "./ses_reporting_actions.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
 
 /** Local refusal builder — mailer-ops codes are not on the shared FACTS table. */
@@ -125,7 +119,9 @@ const MONEY_DOCUMENT_TYPES = new Set([
 
 // ── Pure helpers (exported for in-process tests) ───────────────────────────
 
-export function isMailerOpsRouteKind(value: unknown): value is MailerOpsRouteKind {
+export function isMailerOpsRouteKind(
+  value: unknown,
+): value is MailerOpsRouteKind {
   return value === "report" || value === "photo";
 }
 
@@ -607,7 +603,11 @@ export async function resolveMailerOpsReportAttachment(
   // Current-attendance-cycle scope through the shared evidence boundary.
   const rows = cycle.cycle_scoped
     ? allRows.filter((row) =>
-      isEvidenceBoundToCurrentCycle(row, cycle.detail, cycle.attendance_cycle_id)
+      isEvidenceBoundToCurrentCycle(
+        row,
+        cycle.detail,
+        cycle.attendance_cycle_id,
+      )
     )
     : allRows;
   if (rows.length === 0) {
@@ -675,7 +675,8 @@ export async function resolveMailerOpsReportAttachment(
       {
         state: "refused",
         code: "pdf_provenance_required",
-        fact: "Mailer ops report attachment must be a makesafe_report job_document.",
+        fact:
+          "Mailer ops report attachment must be a makesafe_report job_document.",
         recovery_action: "Attach only the bound make-safe report PDF.",
         evidence: {
           job_document_id: chosen.id,
@@ -714,9 +715,11 @@ export async function resolveMailerOpsReportAttachment(
   }
 
   const { bytes } = await downloadStorageBytes(client, storageUrl);
-  if (bytes.byteLength < 5 ||
+  if (
+    bytes.byteLength < 5 ||
     String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]) !==
-      "%PDF-") {
+      "%PDF-"
+  ) {
     throw new SesActionError(
       409,
       mailerRefusal(
@@ -740,7 +743,6 @@ export async function resolveMailerOpsReportAttachment(
   );
   if (expectedRaw) {
     // Prove served bytes match the curated bind coordinate (satisfy provenance).
-    const actualRaw = contentHash.slice("sha256:".length);
     // Note: sesSha256Bytes uses artifact domain; curated raw is plain file SHA.
     // Recompute plain SHA-256 of raw bytes for the bind coordinate check.
     const plainDigest = new Uint8Array(
