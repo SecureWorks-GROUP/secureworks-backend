@@ -50,6 +50,11 @@ Content-Type: application/json
 
 - **`dry_run` defaults true.** Live Graph requires explicit `dry_run: false` under Captain supervision.
 - Privileged only (`api_key` or admin/owner JWT). **Not** on `ROUTINE_ALLOWED_ACTIONS`.
+- Declared on the canonical action surface
+  (`scripts/_ops-api-required-actions.txt`) as `probe=source-only`, matching
+  `create_ses_invoice_draft` / `retire_ses_docket_revision` / the invoice-void
+  trio: the pre-deploy source gate proves recognition, and the post-deploy smoke
+  iteration never fires a builder-facing send route at production.
 - One card, one kind per call — never a batch of four.
 - **`to` is required.** It is confirmed against this card's own intake sender
   (`emails.from_email` reached through the card's intake case sources) plus the
