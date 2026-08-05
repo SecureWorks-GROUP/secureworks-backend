@@ -37,6 +37,10 @@ import {
   resolveSesMailTransportForPrepare,
   sesPhotoMailVolumeBlocker,
 } from "./ses_photo_mail_volume_guard.ts";
+import {
+  mlbOrdinaryMailSubject,
+  mlbPhysicalUsesOrdinaryMailSendFallback,
+} from "./ses_mlb_thread_reply.ts";
 import { AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST } from "./makesafe_existing_fence_pickets.ts";
 import {
   MAKESAFE_REPORT_CONTRACT_VERSION,
@@ -1310,6 +1314,11 @@ function manifestBase(
       intake_thread_id: input.source.intake_thread_id || "",
       intake_post_id: input.source.intake_post_id || "",
       intake_conversation_id: input.source.intake_conversation_id || "",
+      // Verbatim original WO subject (emails.subject preferred). Used only for
+      // MLB ordinary-mail report/photo inbox grouping — not real threading.
+      intake_email_subject: input.source.intake_email_subject || "",
+      intake_email_subject_source: input.source.intake_email_subject_source ||
+        "",
     },
     items,
     deliverables: input.source.deliverables.map((deliverable) => ({
@@ -1532,6 +1541,33 @@ function buildEmailDrafts(
     row.family === "restoration"
   );
 
+  // MLB ordinary Mail.Send (Captain exception): report/photo use the EXACT
+  // original WO email subject so mail clients can group them next to the WO.
+  // This is inbox grouping only — not real threading (group-thread reply is
+  // Application: Not supported). Re: is neither added nor stripped; missing
+  // original falls back to the generated subject and still drafts.
+  const ordinaryMailSubjectMatch = mlbPhysical &&
+    mlbPhysicalUsesOrdinaryMailSendFallback();
+  const originalWoSubject = text(input.source.intake_email_subject);
+  const originalSubjectSource = input.source.intake_email_subject_source ||
+    null;
+  const reportGenerated = `${ref} - ${row.family.replaceAll("_", " ")}`;
+  const photoGenerated = `Photo Evidence - ${ref}`;
+  const reportSubject = ordinaryMailSubjectMatch
+    ? mlbOrdinaryMailSubject(
+      originalWoSubject,
+      reportGenerated,
+      originalSubjectSource,
+    ).subject
+    : reportGenerated;
+  const photoSubject = ordinaryMailSubjectMatch
+    ? mlbOrdinaryMailSubject(
+      originalWoSubject,
+      photoGenerated,
+      originalSubjectSource,
+    ).subject
+    : photoGenerated;
+
   const invoice = draftEmail({
     to: invoiceTo,
     cc: "finance@secureworkswa.com.au",
@@ -1547,11 +1583,15 @@ function buildEmailDrafts(
   if (reportFile) {
     drafts.REPORT_EMAIL_DRAFT = draftEmail({
       to: reportTo,
-      subject: `${ref} - ${row.family.replaceAll("_", " ")}`,
+      subject: reportSubject,
       body: mlbPhysical
-        ? `Draft only. Report-only reply on the work-order intake thread for ${
-          address || "the instructed property"
-        }. Photos and the billing pack travel on separate routes.`
+        ? ordinaryMailSubjectMatch
+          ? `Draft only. Report pack for ${
+            address || "the instructed property"
+          }. Ordinary Mail.Send (group-thread reply is Application: Not supported); subject matches the original work-order email for inbox grouping only — not real threading. Photos and the billing pack travel on separate routes.`
+          : `Draft only. Report-only reply on the work-order intake thread for ${
+            address || "the instructed property"
+          }. Photos and the billing pack travel on separate routes.`
         : `Draft only. Please find the prepared ${
           row.family.replaceAll(
             "_",
@@ -1564,9 +1604,11 @@ function buildEmailDrafts(
   if (row.photo_route === "work_order_sender" && photoFiles.length > 0) {
     drafts.PHOTO_EMAIL_DRAFT = draftEmail({
       to: reportTo,
-      subject: `Photo Evidence - ${ref}`,
+      subject: photoSubject,
       body: mlbPhysical
-        ? "Draft only. Photos-only reply on the work-order intake thread. The complete, ordered original photo set is listed on the docket."
+        ? ordinaryMailSubjectMatch
+          ? "Draft only. Photo pack. Ordinary Mail.Send; subject matches the original work-order email for inbox grouping only — not real threading. The complete, ordered original photo set is listed on the docket."
+          : "Draft only. Photos-only reply on the work-order intake thread. The complete, ordered original photo set is listed on the docket."
         : "Draft only. The complete, ordered original photo set is listed on the docket.",
       attachments: photoFiles,
     });

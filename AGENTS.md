@@ -1251,6 +1251,32 @@ Multi-email split is a Captain recommendation only, not implemented here.
 Evidence + measure script: `docs/evidence/ses-photo-mail-volume-guard-2026-08-05.md`,
 `scripts/ses-photo-mail-volume-measure.ts`.
 
+**Ordinary-mail subject = exact original WO subject (inbox grouping only):** Under
+the exception, report/photo subjects are the **verbatim** original work-order
+email subject — never reconstructed. Preferred store is `emails.subject` for a
+PROVEN intake `post_id` (the resolved thread anchor, else the primary case's own
+story sources, else that case's own source rows); fallbacks are
+`makesafe_intake_drafts.subject` then `jobs.metadata.builder_email_subject`.
+Each tier must resolve to exactly ONE distinct string — several distinct
+candidates refuses, and recency is never a tiebreak, because a wrong WO subject
+groups builder mail into the WRONG conversation while an ungrouped email is
+merely plain. Provenance is likewise never invented: an unrecognised stored
+source stamps `subject_source: null`, not `emails_subject`.
+Plumbed on the manifest as `routing.intake_email_subject` /
+`routing.intake_email_subject_source`, and stamped on the route as
+`subject_source` / `original_work_order_subject`. Do
+**not** add or strip a leading `Re:` — exact match is the point. Missing,
+ambiguous or unreadable original never blocks prepare or send: keep the
+generated pack subject and stamp `subject_source: generated_fallback`. The
+subject reads are additive, chunked by URL budget, and degrade rather than
+refuse a prepare — only the pre-existing empty-`case_sources` thread recovery
+stays fatal. This is **not** real mail threading (messages
+will not appear as replies on the WO conversationThread); mail clients only group
+by subject. Invoice route is unchanged. Helpers:
+`pickIntakeWorkOrderEmailSubject` / `mlbOrdinaryMailSubject` in
+`ses_mlb_thread_reply.ts`. In-process tests prove wiring only — zero Graph calls;
+a green suite does not prove any mailbox groups the result.
+
 Closeout proof hashes are a **set**, not a route-kind-ordered array: apply
 `20260805010000_ses_closeout_proof_hash_set_compare.sql` before the matching
 `ops-api` so `commit_ses_release_closeout_v1` compares ledger and payload with

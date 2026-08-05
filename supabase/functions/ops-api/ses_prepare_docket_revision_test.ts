@@ -952,6 +952,78 @@ Deno.test("MLB keeps the three-email split and its own invoice-bundle draft", as
   );
 });
 
+Deno.test(
+  "MLB ordinary-mail report/photo drafts use exact original WO subject; invoice does not",
+  async () => {
+    // Inbox grouping only — not real threading. In-process wiring; no Graph.
+    const row = SES_FAMILY_MATRIX.find((candidate) =>
+      candidate.builder_key === "MLB" &&
+      candidate.family === "physical_makesafe" &&
+      candidate.routing_rule === "mlb-perth-routing"
+    )!;
+    const original =
+      "NEW WORK ORDER - MLB-26267 U24/ 28 Peninsula Road, Maylands, WA 6051";
+    const input = fixtureInput(row);
+    input.source.builder_reference = "MLB-26267";
+    input.source.intake_email_subject = original;
+    input.source.intake_email_subject_source = "emails_subject";
+    const result = (await prepareSesDocketRevision(
+      request(input.identity.job_id),
+      dependencies(input),
+    )).results[0];
+    assertEquals(result.state, "ready");
+    assertEquals(result.envelope.v2.routing.intake_email_subject, original);
+    assertEquals(
+      result.envelope.v2.routing.intake_email_subject_source,
+      "emails_subject",
+    );
+    assertStringIncludes(
+      result.email_drafts.REPORT_EMAIL_DRAFT,
+      `Subject: ${original}`,
+    );
+    assertStringIncludes(
+      result.email_drafts.PHOTO_EMAIL_DRAFT,
+      `Subject: ${original}`,
+    );
+    // Invoice keeps the generated billing subject.
+    assertStringIncludes(
+      result.email_drafts.INVOICE_EMAIL_DRAFT,
+      "Subject: MLB-26267 - billing pack",
+    );
+    assertEquals(
+      result.email_drafts.INVOICE_EMAIL_DRAFT.includes(original),
+      false,
+    );
+  },
+);
+
+Deno.test(
+  "MLB ordinary-mail drafts fall back to generated subject when original WO subject is missing",
+  async () => {
+    const row = SES_FAMILY_MATRIX.find((candidate) =>
+      candidate.builder_key === "MLB" &&
+      candidate.family === "physical_makesafe" &&
+      candidate.routing_rule === "mlb-perth-routing"
+    )!;
+    const input = fixtureInput(row);
+    input.source.builder_reference = "MLB-26267";
+    // No intake_email_subject — must not block prepare.
+    const result = (await prepareSesDocketRevision(
+      request(input.identity.job_id),
+      dependencies(input),
+    )).results[0];
+    assertEquals(result.state, "ready");
+    assertStringIncludes(
+      result.email_drafts.REPORT_EMAIL_DRAFT,
+      "Subject: MLB-26267 - physical makesafe",
+    );
+    assertStringIncludes(
+      result.email_drafts.PHOTO_EMAIL_DRAFT,
+      "Subject: Photo Evidence - MLB-26267",
+    );
+  },
+);
+
 Deno.test("AJS report-only input is rejected instead of silently rerouted", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "MLB" &&
@@ -1690,6 +1762,8 @@ Deno.test("builder routing uses only company/matrix evidence and blocks when the
     intake_thread_id: "",
     intake_post_id: "",
     intake_conversation_id: "",
+    intake_email_subject: "",
+    intake_email_subject_source: "",
   });
   assertEquals(result.email_drafts, {});
 });
