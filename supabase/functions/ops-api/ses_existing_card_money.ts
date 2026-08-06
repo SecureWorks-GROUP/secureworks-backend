@@ -141,10 +141,25 @@ export function classifyExistingCardMoney(
   return { exists: rows.length > 0, unreadable: false, rows };
 }
 
+export const UNREADABLE_CARD_MONEY: SesExistingCardMoney = {
+  exists: true,
+  unreadable: true,
+  rows: [],
+};
+
+/**
+ * Page size for the per-digit-run reference read. A FULL page is treated as a
+ * truncated read (`unreadable`), never as a complete answer: an unordered
+ * `LIKE` window that happens to exclude the card's own already-billed invoice
+ * would restore the mint invitation this module exists to remove.
+ */
+const REFERENCE_PAGE_SIZE = 500;
+
 /**
  * Read the Xero mirror for this card: everything attributed to the job, plus
- * everything naming its builder reference. Any read fault yields
- * `unreadable: true`, which the consumer must treat as existing money.
+ * everything naming its builder reference. Any read fault, or a truncated
+ * reference page, yields `unreadable: true`, which the consumer must treat as
+ * existing money.
  */
 export async function readSesExistingCardMoney(
   client: any,
@@ -158,19 +173,44 @@ export async function readSesExistingCardMoney(
 
   const byJob = await client.from("xero_invoices").select(columns)
     .eq("job_id", jobId);
-  if (byJob?.error) return { exists: true, unreadable: true, rows: [] };
+  if (byJob?.error) return UNREADABLE_CARD_MONEY;
   collected.push(...((byJob?.data || []) as SesMatchInvoice[]));
 
   for (const digits of builderReferenceDigits(externalRef)) {
     const byRef = await client.from("xero_invoices").select(columns)
       .eq("invoice_type", "ACCREC")
       .like("reference", `%${digits}%`)
-      .limit(50);
-    if (byRef?.error) return { exists: true, unreadable: true, rows: [] };
-    collected.push(...((byRef?.data || []) as SesMatchInvoice[]));
+      .limit(REFERENCE_PAGE_SIZE);
+    if (byRef?.error) return UNREADABLE_CARD_MONEY;
+    const rows = (byRef?.data || []) as SesMatchInvoice[];
+    if (rows.length >= REFERENCE_PAGE_SIZE) return UNREADABLE_CARD_MONEY;
+    collected.push(...rows);
   }
 
   return classifyExistingCardMoney(jobId, externalRef, collected, boundXeroInvoiceId);
+}
+
+/**
+ * The whole card-money question, including the `external_ref` read that feeds
+ * the reference half. Owned here so no caller can degrade the reference half to
+ * silence: an unreadable or absent detail row is `unreadable` money, not
+ * "job-linked invoices only" — which would return `exists: false` for exactly
+ * the unlinked-invoice case this module exists to catch.
+ */
+export async function readSesExistingCardMoneyForJob(
+  client: any,
+  jobId: string,
+  boundXeroInvoiceId: string | null,
+): Promise<SesExistingCardMoney> {
+  const detail = await client.from("makesafe_job_details")
+    .select("external_ref").eq("job_id", jobId).maybeSingle();
+  if (detail?.error || !detail?.data) return UNREADABLE_CARD_MONEY;
+  return await readSesExistingCardMoney(
+    client,
+    jobId,
+    (detail.data as Record<string, unknown>).external_ref,
+    boundXeroInvoiceId,
+  );
 }
 
 /** One operator-facing sentence naming the money that already exists. */

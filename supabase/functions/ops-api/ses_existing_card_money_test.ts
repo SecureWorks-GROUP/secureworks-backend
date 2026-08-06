@@ -19,11 +19,15 @@ import {
   classifyExistingCardMoney,
   describeExistingCardMoney,
   NO_EXISTING_CARD_MONEY,
+  readSesExistingCardMoneyForJob,
   type SesExistingCardMoney,
 } from "./ses_existing_card_money.ts";
 import {
   approveInvoiceDisabledReason,
+  canRecordSesApproval,
   existingCardMoneyRefusal,
+  type SesMechanicalCleanResult,
+  sesVerdictWithExistingMoney,
 } from "./ses_review_cockpit.ts";
 
 const JOB = "job-1";
@@ -145,6 +149,136 @@ Deno.test("an UNREADABLE Xero mirror refuses — it never reads as 'no money'", 
   const refusal = existingCardMoneyRefusal(null, unreadable);
   assert(refusal, "expected a refusal");
   assertStringIncludes(refusal!.fact, "could not be read");
+});
+
+// ── the shared verdict producer, and the approve-path stop ───────────────────
+
+const mechanical = (over: Partial<SesMechanicalCleanResult> = {}) => ({
+  clean: true,
+  checks: [],
+  blockers: [],
+  approval_band: "shaun_clean" as const,
+  ...over,
+}) as SesMechanicalCleanResult;
+
+const someMoney = () =>
+  classifyExistingCardMoney(JOB, "MLB-26565", [inv({ job_id: JOB })], null);
+
+Deno.test("the shared producer forces clean false and names the money FIRST", () => {
+  const other = existingCardMoneyRefusal(null, someMoney())!;
+  const verdict = sesVerdictWithExistingMoney(
+    mechanical({ blockers: [{ ...other, code: "xero_not_authorised" } as any] }),
+    null,
+    someMoney(),
+  );
+  assertEquals(verdict.clean, false);
+  assertEquals(verdict.blockers.length, 2);
+  // blockers[0] is what the approve actions report; it must be the money.
+  assertEquals(verdict.blockers[0].code, "invoice_exists_unbound");
+});
+
+Deno.test("the shared producer leaves a BOUND card byte-identical", () => {
+  const base = mechanical();
+  assertEquals(sesVerdictWithExistingMoney(base, "DRAFT", someMoney()), base);
+  assertEquals(sesVerdictWithExistingMoney(base, "AUTHORISED", someMoney()), base);
+  assertEquals(
+    sesVerdictWithExistingMoney(base, null, NO_EXISTING_CARD_MONEY),
+    base,
+  );
+});
+
+Deno.test("a non-clean verdict is captain-OVERRIDABLE — which is why the approve actions hard-stop", () => {
+  // This pins the reason `refuseWhenCardMoneyExists` exists rather than relying
+  // on the enriched verdict alone: forcing `clean` false hands a Captain an
+  // override, i.e. it would make the card MORE approvable, not less.
+  const authority = canRecordSesApproval(
+    { mode: "jwt", user_id: "u", role: "admin", operator_class: "captain" },
+    sesVerdictWithExistingMoney(mechanical(), null, someMoney()),
+  );
+  assertEquals(authority.allowed, true);
+  assertEquals(authority.captain_override, true);
+});
+
+Deno.test("both approve actions run the hard stop before any authority check", async () => {
+  const source = await Deno.readTextFile(
+    new URL("./ses_reporting_actions.ts", import.meta.url),
+  );
+  const guards = source.split("refuseWhenCardMoneyExists(docket)").length - 1;
+  assertEquals(guards, 2, "invoice approve and release approve must both stop");
+  for (const call of ["sesVerdictWithExistingMoney("]) {
+    assert(source.includes(call), `${call} must be the one verdict producer`);
+  }
+});
+
+// ── the read fails CLOSED ────────────────────────────────────────────────────
+
+function fakeClient(plan: Record<string, unknown>[]) {
+  let call = -1;
+  const builder = () => {
+    const chain: any = {
+      select: () => chain,
+      eq: () => chain,
+      like: () => chain,
+      limit: () => Promise.resolve(plan[call]),
+      maybeSingle: () => Promise.resolve(plan[call]),
+      then: (resolve: any) => Promise.resolve(plan[call]).then(resolve),
+    };
+    return chain;
+  };
+  return {
+    from: () => {
+      call += 1;
+      return builder();
+    },
+  };
+}
+
+Deno.test("an unreadable detail row is UNREADABLE money, never 'no money'", async () => {
+  const money = await readSesExistingCardMoneyForJob(
+    fakeClient([{ data: null, error: { message: "42703" } }]),
+    JOB,
+    null,
+  );
+  assertEquals(money.exists, true);
+  assertEquals(money.unreadable, true);
+});
+
+Deno.test("an ABSENT detail row is unreadable too — the reference half is the point", async () => {
+  const money = await readSesExistingCardMoneyForJob(
+    fakeClient([{ data: null, error: null }]),
+    JOB,
+    null,
+  );
+  assertEquals(money.unreadable, true);
+});
+
+Deno.test("a TRUNCATED reference page refuses rather than reading as no money", async () => {
+  const full = Array.from({ length: 500 }, (_, i) => inv({ id: `f${i}`, reference: "MLB-99999" }));
+  const money = await readSesExistingCardMoneyForJob(
+    fakeClient([
+      { data: { external_ref: "MLB-26565" }, error: null },
+      { data: [], error: null },
+      { data: full, error: null },
+    ]),
+    JOB,
+    null,
+  );
+  assertEquals(money.exists, true);
+  assertEquals(money.unreadable, true);
+});
+
+Deno.test("a readable card with no money still reads as no money", async () => {
+  const money = await readSesExistingCardMoneyForJob(
+    fakeClient([
+      { data: { external_ref: "MLB-26565" }, error: null },
+      { data: [], error: null },
+      { data: [], error: null },
+    ]),
+    JOB,
+    null,
+  );
+  assertEquals(money.exists, false);
+  assertEquals(money.unreadable, false);
 });
 
 // ── the operator sentence ────────────────────────────────────────────────────

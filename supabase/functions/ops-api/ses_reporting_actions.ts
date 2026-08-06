@@ -8,7 +8,10 @@ import {
   splitRefPo,
 } from "./makesafe_send_pack.ts";
 import { composeInvoiceReferenceWithPo } from "./ses_invoice_reference_grain.ts";
-import { readSesExistingCardMoney } from "./ses_existing_card_money.ts";
+import {
+  NO_EXISTING_CARD_MONEY,
+  readSesExistingCardMoneyForJob,
+} from "./ses_existing_card_money.ts";
 import {
   prepareSesInvoiceObligation,
   SES_PRICING_CANON_VERSION,
@@ -39,11 +42,13 @@ import {
   canRecordSesApproval,
   classifySesReleaseSendProgress,
   evaluateSesMechanicalClean,
+  existingCardMoneyRefusal,
   SES_ROUTE_ORDER,
   type SesApprovalAuth,
   type SesCleanInput,
   type SesCockpitDocket,
   type SesReviewRoute,
+  sesVerdictWithExistingMoney,
 } from "./ses_review_cockpit.ts";
 import { presentSesPackHonesty } from "./ses_pack_presentation.ts";
 import {
@@ -1065,14 +1070,17 @@ export async function loadSesCockpitDocket(
   // to `xero_binding`, and the APPROVE INVOICE control would invite a mint on
   // top of it. Checked BY REFERENCE against the Xero mirror. Read-only, and
   // consumed only to REFUSE — it can never make a card more approvable.
-  const detailForMoney = await client.from("makesafe_job_details")
-    .select("external_ref").eq("job_id", jobId).maybeSingle();
-  const existingCardMoney = await readSesExistingCardMoney(
-    client,
-    jobId,
-    object(detailForMoney.data).external_ref,
-    xeroBinding?.xero_invoice_id ? String(xeroBinding.xero_invoice_id) : null,
-  );
+  //
+  // Only asked when NOTHING is bound: that is the only state the refusal fires
+  // in, so a bound card skips the (non-indexable) reference scan entirely. The
+  // unbound answer is unchanged.
+  const existingCardMoney = String(xeroBinding?.status || "").trim()
+    ? NO_EXISTING_CARD_MONEY
+    : await readSesExistingCardMoneyForJob(
+      client,
+      jobId,
+      xeroBinding?.xero_invoice_id ? String(xeroBinding.xero_invoice_id) : null,
+    );
   return {
     job_id: jobId,
     existing_card_money: existingCardMoney,
@@ -2805,6 +2813,24 @@ export async function retireSesDocketRevisionAction(
   };
 }
 
+/**
+ * A hard stop, not an overridable blocker.
+ *
+ * `canRecordSesApproval` turns any non-clean verdict into a Captain OVERRIDE,
+ * so folding the money blocker into the verdict alone would convert today's
+ * hard refusal on a mechanically clean card into an overridable one — i.e. make
+ * the card MORE approvable, which is exactly what this control may never do.
+ * The verdict enrichment is still applied (so the blocker is recorded and named
+ * everywhere), and this refusal sits in front of it.
+ */
+function refuseWhenCardMoneyExists(docket: SesCockpitDocket): void {
+  const blocker = existingCardMoneyRefusal(
+    docket.xero_binding?.status ?? null,
+    docket.existing_card_money ?? null,
+  );
+  if (blocker) throw new SesActionError(409, blocker);
+}
+
 export async function approveSesInvoiceRevisionAction(
   client: SesSupabaseClient,
   auth: SesActionAuth,
@@ -2825,7 +2851,12 @@ export async function approveSesInvoiceRevisionAction(
         "This later attendance is explicitly no additional charge, so there is no Xero invoice action to approve; review the document-only routes and use SEND IT.",
     });
   }
-  const verdict = evaluateSesMechanicalClean(docket.clean_input);
+  refuseWhenCardMoneyExists(docket);
+  const verdict = sesVerdictWithExistingMoney(
+    evaluateSesMechanicalClean(docket.clean_input),
+    docket.xero_binding?.status ?? null,
+    docket.existing_card_money ?? null,
+  );
   const operatorAuth = await loadOperatorAuth(client, auth);
   const authority = canRecordSesApproval(operatorAuth, verdict);
   if (!authority.allowed || operatorAuth.mode !== "jwt" || !auth.user) {
@@ -4345,7 +4376,12 @@ export async function approveSesReleaseRevisionAction(
   const approvals = [];
   for (const member of members) {
     const docket = await loadSesCockpitDocket(client, member.job_id);
-    const verdict = evaluateSesMechanicalClean(docket.clean_input);
+    refuseWhenCardMoneyExists(docket);
+    const verdict = sesVerdictWithExistingMoney(
+      evaluateSesMechanicalClean(docket.clean_input),
+      docket.xero_binding?.status ?? null,
+      docket.existing_card_money ?? null,
+    );
     const authority = canRecordSesApproval(operatorAuth, verdict);
     const cockpit = buildSesCockpitView(docket);
     if (

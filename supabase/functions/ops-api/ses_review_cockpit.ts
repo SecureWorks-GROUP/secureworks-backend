@@ -255,6 +255,34 @@ export function existingCardMoneyRefusal(
 }
 
 /**
+ * The ONE producer of the verdict every approval surface must evaluate. The
+ * cockpit view and both approve actions consume it, so they can never disagree
+ * about whether the money blocker exists.
+ *
+ * Strictly additive: the blocker list only ever GROWS and `clean` is only ever
+ * forced false. The money blocker is placed FIRST so a caller that reports
+ * `blockers[0]` names the money rather than a generic hold.
+ *
+ * NOTE for the approve actions: a non-clean verdict is CAPTAIN-OVERRIDABLE
+ * (`canRecordSesApproval`), so enriching the verdict is not on its own a stop.
+ * Pair it with `existingCardMoneyRefusal` as a hard refusal — see
+ * `refuseWhenCardMoneyExists` in ses_reporting_actions.ts.
+ */
+export function sesVerdictWithExistingMoney(
+  mechanical: SesMechanicalCleanResult,
+  boundStatus: string | null | undefined,
+  money: SesExistingCardMoney | null | undefined,
+): SesMechanicalCleanResult {
+  const blocker = existingCardMoneyRefusal(boundStatus, money);
+  if (!blocker) return mechanical;
+  return {
+    ...mechanical,
+    blockers: [blocker, ...mechanical.blockers],
+    clean: false,
+  };
+}
+
+/**
  * Why APPROVE INVOICE is unavailable, in the operator's terms. The commonest
  * case by far is the healthy one: the invoice is already authorised, so there is
  * nothing left to approve and a second approve would commit the money twice.
@@ -900,21 +928,14 @@ export function buildSesCockpitView(
     dependency_generation: number;
   },
 ): SesCockpitView {
-  const mechanical = evaluateSesMechanicalClean(docket.clean_input);
   // ONE-WAY by construction: the blocker list only ever GROWS here and `clean`
   // is only ever forced false, so a card can never become more approvable by
   // this path. Keep it that way — see existingCardMoneyRefusal.
-  const existingMoneyBlocker = existingCardMoneyRefusal(
+  const verdict = sesVerdictWithExistingMoney(
+    evaluateSesMechanicalClean(docket.clean_input),
     docket.xero_binding?.status ?? null,
     docket.existing_card_money ?? null,
   );
-  const verdict: SesMechanicalCleanResult = existingMoneyBlocker
-    ? {
-      ...mechanical,
-      blockers: [...mechanical.blockers, existingMoneyBlocker],
-      clean: false,
-    }
-    : mechanical;
   const stale = !!displayedBinding &&
     (displayedBinding.readiness_revision !== docket.readiness_revision ||
       displayedBinding.dependency_generation !== docket.dependency_generation);

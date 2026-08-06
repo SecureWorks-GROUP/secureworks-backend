@@ -14,8 +14,20 @@
  * SWMS-261021 / SWMS-261020 are the worked pair: one address, both errors).
  *
  * The forward producer is already gone. This action cures the rows the old
- * producer left behind, and it is deliberately the ONLY sanctioned way to do
- * it — a direct `update` could erase the stamp of a card that really was sent.
+ * producer left behind, and it is the SANCTIONED way to do it — a direct
+ * `update` could erase the stamp of a card that really was sent.
+ *
+ * KNOWN OPEN HOLE: that sanction is NOT ENFORCED
+ * ----------------------------------------------
+ * This is the sanctioned path, not the only possible one. `update_makesafe_details`
+ * (index.ts, the make-safe detail field allow-list) still carries
+ * `report_sent_at` with no privilege gate and no send-truth derivation, so any
+ * caller of that action can clear a REAL send's stamp or SET a false one — the
+ * exact failure mode this module exists to prevent. The applied 5-card
+ * correction script itself went through that unguarded door. Closing it is a
+ * behaviour decision that was deliberately deferred (no-coding day, ticketed
+ * separately); do not read this module's existence as proof the field is
+ * protected. See docs/evidence/ses-manufactured-blockers-2026-08-07.md.
  *
  * WHAT IT WILL AND WILL NOT DO
  * ----------------------------
@@ -93,6 +105,11 @@ export interface FalseSendStampOutcome {
   before_report_sent_at: string | null;
   after_report_sent_at: string | null;
   send_evidence: FalseSendStampSendEvidence | null;
+  /**
+   * Present only when the stamp WAS cleared but its audit event could not be
+   * written. The correction stands; the record of it does not.
+   */
+  audit_write_failed?: string;
 }
 
 function asIso(value: unknown): string | null {
@@ -320,7 +337,7 @@ export async function correctMakesafeFalseSendStamps(
       continue;
     }
 
-    await client.from("job_events").insert({
+    const { error: auditErr } = await client.from("job_events").insert({
       job_id: jobId,
       event_type: "makesafe_evidence_correction",
       detail_json: {
@@ -334,9 +351,20 @@ export async function correctMakesafeFalseSendStamps(
         actor: ctx.actor ?? null,
         corrected_at: nowIso,
       },
-    }).then(() => {}).catch(() => {});
+    });
 
-    push("cleared", { after_report_sent_at: null, send_evidence: evidence });
+    // PostgREST RETURNS errors, it does not throw, so a `.catch()` here would
+    // catch nothing and a rejected insert would leave the stamp cleared with no
+    // record of what was cleared or on what evidence. The clear is already
+    // committed and must NOT be silently rolled back — report it instead, so an
+    // unaudited correction is visible in the result.
+    push("cleared", {
+      after_report_sent_at: null,
+      send_evidence: evidence,
+      audit_write_failed: auditErr
+        ? String((auditErr as any)?.message || auditErr)
+        : undefined,
+    });
   }
 
   return {

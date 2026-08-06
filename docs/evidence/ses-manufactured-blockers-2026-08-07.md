@@ -79,6 +79,22 @@ privileged call after `ops-api` deploys from `main` should return
 `refused / no_stamp_to_clear` for all five (idempotence), and
 `refused / send_evidence_present` for any card carrying a legacy marker.
 
+### KNOWN OPEN HOLE: the sanctioned path is not the ONLY path
+
+`correct_makesafe_false_send_stamp` is the sanctioned way to clear
+`report_sent_at`; its exclusivity is **not enforced**. `update_makesafe_details`
+(`index.ts`, the make-safe detail field allow-list) still carries
+`report_sent_at` with **no privilege gate and no send-truth derivation**, so any
+caller of that action can clear a REAL send's stamp or SET a false one — the
+exact failure mode the guarded action exists to prevent. The applied 5-card
+correction script itself went through that unguarded door.
+
+Deferred deliberately (no-coding day) and ticketed separately: removing
+`report_sent_at` from that allow-list is a behaviour change to a live typed
+action, not an incidental fix. Until it lands, `report_sent_at` being clean
+board-wide today is a measurement, not a guarantee — re-derive from the four
+send surfaces before trusting it again.
+
 ---
 
 ## 2. The board says `missing_invoice`; Xero says PAID (MOST IMPORTANT FINDING)
