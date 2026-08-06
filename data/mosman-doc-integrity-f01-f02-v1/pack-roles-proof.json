@@ -1,11 +1,19 @@
 {
+  "presentation": {
+    "kind": "ready",
+    "state": "drafted",
+    "reason": null,
+    "pre_xero_docs_ready": true,
+    "review_state": "READY",
+    "docket_revision_id": "df705ac3-1c4a-5d52-a9e8-ad442c25b7c4"
+  },
   "blockers": [],
   "suppressed_artifacts": [],
   "invoice_pdf": {
     "source": "live_fetch",
     "pdf_unavailable": false,
-    "xero_invoice_id": "8f7687b0-effb-4522-aaf7-7b4148168d1e",
-    "invoice_number": "INV-1147"
+    "xero_invoice_id": "0829842e-008e-4a5b-a012-299ad7ff947a",
+    "invoice_number": "INV-1152"
   },
   "roles": [
     {
@@ -76,16 +84,5 @@
       "role": "xero_invoice_pdf",
       "n": 1
     }
-  ],
-  "report": {
-    "object_key": "makesafe-docket-artifacts/762ebaad-5f6f-4477-acb7-30db016b15ea/68bd7247-0662-555d-b183-17e6c5e65e97/ARTIFACTS/Make-Safe-Report-SWMS-261147-Mosman-Park-359775313575.pdf",
-    "size_bytes": 2635527,
-    "raw_sha256": "sha256:e8b2974f53d50d10ab3cb42c8abae50c8074e000a33f3984c08e0145ee4244d0"
-  },
-  "swms": {
-    "object_key": "makesafe-docket-artifacts/762ebaad-5f6f-4477-acb7-30db016b15ea/68bd7247-0662-555d-b183-17e6c5e65e97/ARTIFACTS/SWMS - MLB-27482 - 33-37-Fairlight-Street-Mosman-Park-Mosman-Park.pdf",
-    "size_bytes": 919559,
-    "render_hash": "902ae11d40ef20736969fb4a875e4c49f9a9702bffeb60d508f6c0abbf8f5cb3",
-    "cycle": "b7edf9d8-6f68-4cc4-b12a-7aa20d3b070a"
-  }
+  ]
 }

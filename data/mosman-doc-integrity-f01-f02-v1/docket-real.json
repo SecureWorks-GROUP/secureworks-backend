@@ -1,0 +1,8 @@
+{
+  "state": "ready",
+  "blockers": [],
+  "docket_revision_id": "df705ac3-1c4a-5d52-a9e8-ad442c25b7c4",
+  "persisted": true,
+  "output_content_hash": "sha256:e34b4137695a85ef52742e1c46079b3740920ec6880f7108408c57045b08bfcb",
+  "input_content_hash": "sha256:216e1b0d83ce48086b3d7928f241bb6411928f7f27082a45e088e8706dd83a9e"
+}
