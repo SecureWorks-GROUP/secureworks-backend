@@ -35,15 +35,16 @@ What you are approving on each pair: **the portal is locked/submitted** (screens
 ## What this run did
 
 1. **Census:** Management API read-only list of `roof_report` family board cards with `primeeco.tech/share/` links (61+ rows; 74 share URLs after expand). Excluded owned/forbidden suburbs and job numbers from the brief.
-2. **Portal observation:** `chrome-devtools-axi` open → classify locked/submitted vs expired vs open form. Screenshot only when locked/submitted.
-3. **Mint path (SES-native only):**  
+2. **Portal observation:** `chrome-devtools-axi` open live `primeeco.tech/share/…` URLs → classify locked/submitted vs expired vs open form. Screenshot only when locked/submitted.
+3. **Screenshot honesty (Captain hold 2026-08-06):** Pair PNGs must be **Primeeco’s own UI** (locked banner + filled roof report), not F7’s opaque “Prime portal observation” assertion card. Client PII is redacted **in the live page** before capture by blanking `prime-object-summary` only — no SecureWorks overlay covering the form. SWMS-261081 was wrongly replaced once with an F7 evidence frame; all three green-pair screenshots were re-captured as real Prime pages.
+4. **Mint path (SES-native only):**  
    `mark_makesafe_portal_report_done` (portal-truth stamp for current cycle) →  
    `prepare_ses_docket_revision` →  
    `prepare_ses_invoice_obligation` →  
    `create_ses_invoice_draft` (**full live ACCREC** scan before create).  
    Legacy `create_makesafe_draft_invoice` is retired (HTTP 410) and was not used.
-4. **Invoice PDFs:** `get_invoice_pdf` (sealed-money **read** exemption; operator api_key). PDF bytes stored under `invoices/`; base64 stripped from proof JSON.
-5. **SWMS-261081 only:** scoped `makesafe_state_seed_scoped` (cycle bind; spine already complete) + F7 `record_ses_portal_capture_evidence` so U4 could see portal capture for the current cycle. No stage/money authorise/send.
+5. **Invoice PDFs:** `get_invoice_pdf` (sealed-money **read** exemption; operator api_key). PDF bytes stored under `invoices/`; base64 stripped from proof JSON.
+6. **SWMS-261081 only (ledger, not the pair PNG):** scoped `makesafe_state_seed_scoped` (cycle bind) + F7 capture **revision** for U4. The Captain pair screenshot is a separate real-Prime capture, not the F7 observation frame.
 
 ---
 
@@ -55,8 +56,8 @@ What you are approving on each pair: **the portal is locked/submitted** (screens
 |---|---|
 | Family | `roof_report` / ordinary roof portal |
 | Storeys | double (invoice line: double-storey roof report) |
-| Portal | Locked: “This form has been locked and is no longer available for editing or submission” |
-| Portal screenshot | `data/roof-report-portal-pairs-v1/screenshots/SWMS-26980-portal.png` |
+| Portal | Live Primeeco page: locked banner + filled Roof Report (20 of 23). Job-details panel blanked in-page before capture. |
+| Portal screenshot | `data/roof-report-portal-pairs-v1/screenshots/SWMS-26980-portal.png` (real Prime UI, not F7 frame) |
 | Invoice | **INV-1015** DRAFT **$385.00** (pre-existing; not reminted) |
 | Invoice PDF | `data/roof-report-portal-pairs-v1/invoices/SWMS-26980-INV-1015.pdf` |
 | Sibling note | Separate Gwelup card holds a different PO (`…PO-56773` AUTHORISED). This card’s own PO-scoped DRAFT is clean. |
@@ -68,8 +69,8 @@ What you are approving on each pair: **the portal is locked/submitted** (screens
 |---|---|
 | Family | `roof_report` / ordinary roof portal |
 | Storeys | double → **$350 ex / $385 inc** fixed roof schedule |
-| Portal | Locked (live + prior capture ledger `done`) |
-| Portal screenshot | `data/roof-report-portal-pairs-v1/screenshots/SWMS-261114-portal.png` |
+| Portal | Live Primeeco page: locked banner + filled Roof Report (24 of 24). Job-details panel blanked in-page (no customer/site block in the PNG). |
+| Portal screenshot | `data/roof-report-portal-pairs-v1/screenshots/SWMS-261114-portal.png` (real Prime UI) |
 | Portal stamp | `mark_makesafe_portal_report_done` → `portal_verified_cycle=2` |
 | Docket | `prepare_ses_docket_revision` ready (`dry_run` then live) |
 | Obligation | new revision `ddcd08aa-…` superseding stuck prior revision |
@@ -85,8 +86,8 @@ What you are approving on each pair: **the portal is locked/submitted** (screens
 | Family | `roof_report` / ordinary roof portal |
 | Identity grain | `MLB:PO-56960` (intake); invoice reference `MLB-27100` |
 | Storeys | double → **$350 ex / $385 inc** |
-| Portal | Locked live |
-| Portal screenshot | `data/roof-report-portal-pairs-v1/screenshots/SWMS-261081-portal.png` (F7 evidence-frame capture) |
+| Portal | Live Primeeco page: locked banner + filled Roof Report (21 of 23). Job-details panel blanked in-page. |
+| Portal screenshot | `data/roof-report-portal-pairs-v1/screenshots/SWMS-261081-portal.png` (**real Prime UI** — earlier F7 observation frame discarded) |
 | Portal stamp | `mark_makesafe_portal_report_done` → cycle 1 verified |
 | Cycle bind | `makesafe_state_seed_scoped` run_key `roof-report-portal-pairs-v1-261081-seed` → attendance cycle created + bound (`attendance_cycles_created: 1`) |
 | Portal capture ledger | F7 observer `--commit` → `submitted_locked` **written** (1 production evidence write; 0 stage moves) |
