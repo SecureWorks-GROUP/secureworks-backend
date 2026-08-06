@@ -589,10 +589,13 @@ Deno.test("updateMakesafeSubstatus tolerates a PostgREST insert builder that lac
       };
     },
   };
+  // Rescue SES T2: pass an internal source so the external evidence guards
+  // (which need a fuller client mock) stay out of the way — the regression
+  // under test is the event-insert idiom, which runs on every source.
   const res = await _updateMakesafeSubstatus(client, {
     job_id: "job-a",
     substatus: "complete",
-  });
+  }, { source: "internal:event_insert_regression" });
   assertEquals(res.ok, true);
   assertEquals(eventInserted, true);
 });
