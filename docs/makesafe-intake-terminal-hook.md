@@ -77,7 +77,10 @@ without a bundle-evidence claim retain the ordinary local-evidence behavior.
 `makesafe_cron_settings.auto_file_enabled=false` remains an explicit emergency brake.
 Without either explicit brake, advance-what-passes is the default.
 
-A third, non-emergency condition sits alongside them (captain ruling 2026-08-06):
+A third, non-emergency condition sits alongside them. The captain's 2026-08-06
+ruling is the outcome it serves — advancement must be an explicit action or a
+scheduled path, never a side effect of rendering a board; the allow-list below is
+the implementing mechanism, chosen in that change rather than specified by him.
 `auto_approve_clean_intake_drafts` performs live approvals only for a `triggered_by`
 on the closed allow-list in `makesafe_intake_advance_trigger.ts` —
 `ses-reporting-skill` (the `makesafe_reporting_intake_pass` coupling below) or

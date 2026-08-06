@@ -68,6 +68,15 @@ stuck, so there was almost never anything for it to succeed at.
 
 ## 4. Shape chosen: explicit action, with the existing scheduled path left in place
 
+Attribution first, because it governs how far any of this may be changed later. The
+Captain ruled the **outcome**: advancement must be an explicit action or a scheduled
+path, never a side effect of rendering, and the two historical approvals are not to
+be reversed. Everything below — which of the two directions, the trigger allow-list,
+preview-on-refusal, refusal by name — is this change's **mechanism**, chosen here and
+argued here. Treat the outcome as settled and the mechanism as ordinary code. Do not
+let a later reader promote the mechanism to a ruling; the wording in the code and in
+`docs/makesafe-intake-terminal-hook.md` deliberately keeps the two apart.
+
 The ruling named two directions. Both, deliberately, because each alone is wrong
 here:
 

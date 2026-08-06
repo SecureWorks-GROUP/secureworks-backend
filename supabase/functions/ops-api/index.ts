@@ -19299,11 +19299,13 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
   // Both explicit brakes remain fail-safe. When either is disabled this sweep still
   // produces a preview, but it performs no live approvals.
   const enabled = autoApproveCleanIntakeEnabled() && await isAutoFileEnabled(client)
-  // Intent gate (captain ruling 2026-08-06), separate from and additional to the
-  // privileged auth gate on the action. Approving mints a live job, so a live sweep
-  // must name an explicit or scheduled trigger; a render-path, unnamed or unknown
-  // trigger still gets the full preview below and approves nothing. See
-  // makesafe_intake_advance_trigger.ts for why this is fail-safe by construction.
+  // Intent gate, separate from and additional to the privileged auth gate on the
+  // action. Approving mints a live job, so a live sweep must name an explicit or
+  // scheduled trigger; a render-path, unnamed or unknown trigger still gets the full
+  // preview below and approves nothing. The captain's 2026-08-06 ruling is the
+  // outcome (never a render side effect); the allow-list mechanism is this change's
+  // own choice. See makesafe_intake_advance_trigger.ts for both, and for why the
+  // refusal is fail-safe by construction.
   const trigger = _resolveMakesafeIntakeAdvanceTrigger(body)
   const triggerRefusal = _describeMakesafeIntakeAdvanceRefusal(trigger)
   if (triggerRefusal && !requestedDryRun && enabled) {

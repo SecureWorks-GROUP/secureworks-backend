@@ -4,8 +4,17 @@
  * `auto_approve_clean_intake_drafts` batch-approves intake drafts, and approving a
  * draft CREATES A LIVE MAKE-SAFE JOB. The privileged auth gate on the action
  * (ops key or admin/owner JWT) is correct and is NOT touched here — it answers
- * "may this caller approve?". This module answers the different question the
- * 2026-08-06 captain ruling named: "did anybody actually ASK for an approval?"
+ * "may this caller approve?". This module answers a different question: "did
+ * anybody actually ASK for an approval?"
+ *
+ * Attribution, because the distinction is load-bearing for anyone deciding how far
+ * this may be changed. The captain's 2026-08-06 ruling is the OUTCOME: advancement
+ * must be an explicit action someone invokes or a scheduled path on its own clock,
+ * never a side effect of rendering. The MECHANISM below — a closed trigger
+ * allow-list, preview-on-refusal, refusal by name — is this change's own design
+ * choice implementing that ruling, not something the captain specified. Treat the
+ * outcome as settled and the mechanism as ordinary code, open to a better one that
+ * still delivers it.
  *
  * The defect it closes: the ops dashboard awaited this action on the make-safe
  * board's RENDER path (`triggered_by: 'ops_board_autoload'`, ops.html `loadJobs`).
