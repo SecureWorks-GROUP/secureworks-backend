@@ -1789,6 +1789,21 @@ Downstream, `executeSesReleaseRevisionAction` and the cockpit read accept the
 ruled one-route invoice-only release, because the stored route set is pinned by
 the content hash the approval signed.
 
+**That one ruling took FIVE route-shape sites**, because the shape is re-derived
+independently at every layer. Apply
+`20260806010000_ses_release_one_route_invoice_shape.sql` BEFORE the matching
+`ops-api`: it widens `commit_ses_release_revision_v1` to accept the one-route
+invoice shape, and without it a ruled release RAISES at the database after the
+money is already authorised. The other four are `requiredSesRouteKinds` (the
+producer), `buildSesReleaseRevision`, `executeSesReleaseRevisionAction` and
+`querySesReviewCockpitAction` — the last three each bypassed the producer with
+their own hardcoded order or route count. Before changing any route shape,
+search for all five; a sweep of `SES_ROUTE_ORDER` / `sesReleaseRouteOrder` /
+`requiredSesRouteKinds` consumers plus literal route triples and every
+`routes.length` comparison is what found them, and it did not find the SQL one —
+that surfaced only from this file's note that the RPC constrains route counts.
+Centralising the derivation is an open follow-up.
+
 **The applicability key is the manifest, not `report_only`.** `own_template_roof`
 is `report_only: true` and still sends a real report email on our own
 letterhead, so keying the exemption on `report_only` silently drops a route that
