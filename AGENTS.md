@@ -1780,7 +1780,14 @@ Route requirement lives in `requiredSesRouteKinds` (`ses_review_cockpit.ts`),
 which now filters `report` by `reportRouteApplicable` exactly as it filters
 `photo` by `photoRouteApplicable`. Both default STRICT — an unstated
 applicability means required — so a producer that has not been taught the field
-can only be stricter than the matrix, never looser.
+can only be stricter than the matrix, never looser. It is the ONE producer of
+"what does this card owe", consumed by both the cockpit's refusal path and
+`buildSesReleaseRevision` (the send path) — never re-derive the requirement
+from `sesReleaseRouteOrder` directly, which is the bypass that let a card clear
+the cockpit, have its invoice AUTHORISED, and only then be refused at prepare.
+Downstream, `executeSesReleaseRevisionAction` and the cockpit read accept the
+ruled one-route invoice-only release, because the stored route set is pinned by
+the content hash the approval signed.
 
 **The applicability key is the manifest, not `report_only`.** `own_template_roof`
 is `report_only: true` and still sends a real report email on our own

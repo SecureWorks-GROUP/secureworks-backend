@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any
 // Read-only: pulls each card's LIVE cockpit, reconstructs the clean input from
 // the live facts it publishes, and runs the PATCHED evaluator over it.
 import {

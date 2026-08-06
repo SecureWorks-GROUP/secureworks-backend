@@ -20,6 +20,8 @@ than inventing a second mechanism.
 | `ses_reporting_refusals.ts` | The retired code's FACT is removed — it asserted the decision was "still awaiting the Captain", which is now false text. |
 | `ses_review_cockpit.ts` | `buildSesReleaseRevision` consumes `requiredSesRouteKinds` instead of calling `sesReleaseRouteOrder` raw, so the send path requires exactly what the approve path required. |
 | `ses_reporting_actions.ts` | `prepareSesReleaseRevisionAction` threads family + both applicability flags, conservatively across composite members. |
+| `ses_reporting_actions.ts` | `executeSesReleaseRevisionAction` accepts the ruled invoice-only route set (one route, kind `invoice`) alongside AJS and universal shapes — the stored set is pinned by the release content hash the approval signed, so refusing it at SEND IT would reject a release the Captain already approved, after money is AUTHORISED. A one-route release whose single route is anything other than `invoice` still refuses. |
+| `ses_reporting_actions.ts` | `querySesReviewCockpitAction` accepts a one-route release read (previously only 2 or 3 routes), so the cockpit can read back a ruled invoice-only release. |
 
 ## Approve and send obey ONE ruling
 
@@ -145,11 +147,20 @@ worktree, and I neither merge nor deploy. See the escalation note in the PR.
 
 ## Test evidence
 
-`ses_review_cockpit_test.ts`: 26 passed, including four new — the ruled
-exemption, the retired decision key, the physical-make-safe control, and the
-honesty control. Full ops-api suite 3546 passed / 23 failed, against a
-pre-change baseline of 3542 / 23 on the same tree: same 23 pre-existing failures,
-plus the four new tests. `deno check --config deno.jsonc
+`ses_review_cockpit_test.ts`: 29 passed, including the four cockpit tests (the
+ruled exemption, the retired decision key, the physical-make-safe control, and
+the honesty control) plus three release-builder tests (a ruled card builds a
+one-route release with a strict-default control; physical make-safe still owes
+three routes at send and the throw names the missing route; an exempt card is
+still refused when its invoice route is absent).
+`ses_reporting_actions_regression_test.ts` adds the execute/read half — SEND IT
+executes a sealed invoice-only release, still refuses a non-AJS release missing
+routes it owes, still refuses a one-route release whose single route is not the
+invoice, and the cockpit read accepts the one-route release while still
+refusing a release that does not contain the job — 52 passed across the two
+files. Full ops-api suite 3549 passed / 23 failed, against a pre-change
+baseline of 3542 / 23 on the same tree: same 23 pre-existing failures, plus the
+new tests. `deno check --config deno.jsonc
 supabase/functions/ops-api/index.ts` is clean.
 
 The 23 baseline failures and the two `cp1_drag_reschedule_test.ts` type errors

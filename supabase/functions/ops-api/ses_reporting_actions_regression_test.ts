@@ -1598,7 +1598,11 @@ Deno.test("SEND IT executes a sealed one-route invoice-only release", async () =
   const result: any = await executeSesReleaseRevisionAction(
     releaseExecuteClient([INVOICE_ONLY_ROUTE]),
     { mode: "api_key", user: null },
-    { org_id: "org-1", release_revision_id: "release-fixture", actor: "captain" },
+    {
+      org_id: "org-1",
+      release_revision_id: "release-fixture",
+      actor: "captain",
+    },
     releaseExecuteMailGateway(sentSubjects),
     { readAuthorised: () => Promise.resolve(true) } as any,
   );

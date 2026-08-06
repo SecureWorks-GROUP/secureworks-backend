@@ -2,10 +2,7 @@ import { sesSha256, stableUuidFromSha256 } from "./ses_docket_envelope.ts";
 import type { SesPricingDisposition } from "./makesafe_invoice_obligation.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
 import { SES_ASSESSMENT_RECIPE_VERSION } from "./ses_family_matrix.ts";
-import {
-  isAjsBuilderKey,
-  sesReleaseRouteOrder,
-} from "./ses_release_route_shape.ts";
+import { sesReleaseRouteOrder } from "./ses_release_route_shape.ts";
 
 export const SES_REVIEW_SECTION_ORDER = [
   "job_story",
