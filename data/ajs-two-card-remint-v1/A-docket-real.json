@@ -1,0 +1,671 @@
+{
+  "action": "prepare_ses_docket_revision",
+  "assembler_version": "ses-pack-assembler/v1",
+  "dry_run": false,
+  "results": [
+    {
+      "state": "ready",
+      "docket_revision_id": "b84beb4a-e280-58d1-b0c4-747323b4f1b3",
+      "input_content_hash": "sha256:649a3b3f3dbb3ec7e08056e0eac769d13a49709b5f7b2cbe107fb3121431d57f",
+      "output_content_hash": "sha256:e83ae77dd17068cb936d76a135375669971c154a3260872d1e89fc5337b1d729",
+      "envelope": {
+        "version": "secureworks.makesafe.docket-manifest/v3-envelope",
+        "v2": {
+          "version": "secureworks.makesafe.docket-manifest/v2",
+          "docket_id": "SWMS-261139",
+          "classification": {
+            "workflow": "active",
+            "builder_key": "AJBR",
+            "family": "physical_makesafe",
+            "job_type": "physical_makesafe",
+            "subtype": null,
+            "recipe_selected": true,
+            "delivery_render_route": "not_applicable",
+            "delivery_render_route_reason_code": "non_roof_family",
+            "delivery_render_route_reason": "Family physical_makesafe has no roof delivery/render route.",
+            "delivery_render_route_evidence": [
+              "builder-family:AJBR/physical_makesafe"
+            ],
+            "builder_reference": "AJBR-70554",
+            "report_only": false,
+            "lineage": "none",
+            "swms_required": false,
+            "hrcw": false,
+            "hrcw_categories": [],
+            "source_hazard_terms": [],
+            "required_deliverable_ids": [
+              "GENERAL_MAKESAFE"
+            ]
+          },
+          "routing": {
+            "builder": "aj",
+            "report_to": "workorders@ajs.build",
+            "photo_to": "workorders@ajs.build",
+            "invoice_to": "workorders@ajs.build",
+            "intake_thread_id": "AAQkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOAMkABAAb4JUUX7gTI_1q_S8IofM-hAAb4JUUX7gTI_1q_S8IofM-g==",
+            "intake_post_id": "AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAAzEKQyAAA=",
+            "intake_conversation_id": "",
+            "intake_email_subject": "Make Safe - Swanbourne - Job No 70554",
+            "intake_email_subject_source": "emails_subject"
+          },
+          "items": {
+            "source_work_order_retrieval": {
+              "state": "ready",
+              "evidence": "spine:source/fingerprint%3A396b6fdb41041e0f%2Fdeliverable%3Awo%253AAJBR-70554%2Fcycle%3A1"
+            },
+            "source_work_order_identity": {
+              "state": "ready",
+              "evidence": "spine:lineage/08d5b2f7-d576-4dad-9c7c-c6a090cdae31#job/b8c08b16-31b2-410e-9d22-39ee4821fc50#hash/sha256:2c8daf2ce866aebfe722491743ced27dd4e200564ddd22f992ef04a9d5b284f8#reference/AJBR-70554"
+            },
+            "source_work_order_attachment": {
+              "state": "ready",
+              "evidence": "files:SOURCE/Works Order.pdf"
+            },
+            "instruction_deliverables": {
+              "state": "ready",
+              "evidence": "spine:deliverables/GENERAL_MAKESAFE"
+            },
+            "lineage_review": {
+              "state": "not_applicable",
+              "rule": "no-related-docket-detected"
+            },
+            "case_story_recovery": {
+              "state": "ready",
+              "evidence": "file:case_story.json"
+            },
+            "exception_disposition": {
+              "state": "not_applicable",
+              "rule": "ordinary-active-docket"
+            },
+            "hrcw_assessment": {
+              "state": "ready",
+              "evidence": "file:case_story.json#hrcw"
+            },
+            "swms_requirement": {
+              "state": "ready",
+              "evidence": "rule:swms-not-required-under-named-builder-job-rule#ajs-make-safes-do-not-normally-carry-swms"
+            },
+            "swms_artifact": {
+              "state": "not_applicable",
+              "rule": "swms-not-required-under-named-builder-job-rule"
+            },
+            "builder_routing": {
+              "state": "ready",
+              "evidence": "company:workorders@ajs.build#matrix:workorders@ajs.build#rule:ajs-routing"
+            },
+            "supporting_report_pdf": {
+              "state": "ready",
+              "evidence": "file:ARTIFACTS/Make-Safe-Report-SWMS-261139-Swanbourne-94c368988332.pdf"
+            },
+            "supporting_invoice_pdf": {
+              "state": "blocked",
+              "reason": "Pre-Xero review carries a local proposal, never a Xero PDF.",
+              "reason_code": "recovery-not-run",
+              "searches_attempted": [
+                "canonical-input-envelope"
+              ],
+              "rejected_candidates": [],
+              "recovery_action": "After Captain invoice-create approval, U5/U6 creates and binds the real invoice PDF."
+            },
+            "supporting_portal_links": {
+              "state": "not_applicable",
+              "rule": "physical-work-has-no-portal-deliverable"
+            },
+            "roof_report_link": {
+              "state": "not_applicable",
+              "rule": "not-a-roof-report"
+            },
+            "roof_report_capture": {
+              "state": "not_applicable",
+              "rule": "not-a-roof-report"
+            },
+            "assessment_report_link": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "assessment_report_capture": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "assessment_photos_link": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "assessment_photos_capture": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "assessment_scope_link": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "assessment_scope_capture": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "physical_reporting_evidence": {
+              "state": "ready",
+              "evidence": "file:ARTIFACTS/PHOTO_SELECTION.md"
+            },
+            "draft_builder_report_email": {
+              "state": "ready",
+              "evidence": "file:DRAFTS/REPORT_EMAIL_DRAFT.txt"
+            },
+            "draft_photo_evidence_email": {
+              "state": "ready",
+              "evidence": "file:DRAFTS/PHOTO_EMAIL_DRAFT.txt"
+            },
+            "draft_invoice_bundle_email": {
+              "state": "ready",
+              "evidence": "file:DRAFTS/REPORT_EMAIL_DRAFT.txt"
+            },
+            "email_drafts_presented": {
+              "state": "ready",
+              "evidence": "review:review.html#email-drafts"
+            }
+          },
+          "deliverables": [
+            {
+              "id": "GENERAL_MAKESAFE",
+              "kind": "physical_makesafe",
+              "completion": {
+                "state": "ready",
+                "evidence": "spine:deliverable/GENERAL_MAKESAFE"
+              }
+            }
+          ]
+        },
+        "spine": {
+          "source_instruction_id": "fingerprint:396b6fdb41041e0f/deliverable:wo%3AAJBR-70554/cycle:1",
+          "lineage_id": "08d5b2f7-d576-4dad-9c7c-c6a090cdae31",
+          "job_id": "b8c08b16-31b2-410e-9d22-39ee4821fc50",
+          "card_id": "b8c08b16-31b2-410e-9d22-39ee4821fc50",
+          "property_id": null,
+          "attendance_cycle_ids": [
+            "5aae59f0-4676-4c30-8509-30221c562e02"
+          ],
+          "current_attendance_cycle_id": "5aae59f0-4676-4c30-8509-30221c562e02",
+          "readiness_revision": null,
+          "docket_revision_id": "b84beb4a-e280-58d1-b0c4-747323b4f1b3"
+        },
+        "pre_xero_docs_ready": true,
+        "local_invoice_proposal": {
+          "state": "ready",
+          "evidence": "file:ARTIFACTS/invoice_proposal.json"
+        },
+        "invoice_create_approved": false,
+        "client_send_approved": false,
+        "family_matrix_version": "ses-builder-family-matrix/2026-08-04.1",
+        "assembler_version": "ses-pack-assembler/v1",
+        "input_content_hash": "sha256:649a3b3f3dbb3ec7e08056e0eac769d13a49709b5f7b2cbe107fb3121431d57f",
+        "output_content_hash": "sha256:e83ae77dd17068cb936d76a135375669971c154a3260872d1e89fc5337b1d729"
+      },
+      "blockers": [],
+      "portal_evidence": [],
+      "invoice_proposal": {
+        "version": "ses-local-invoice-proposal/v1",
+        "builder_reference": "AJBR-70554",
+        "basis": "ajs_labour_materials",
+        "trades": 1,
+        "reported_hours_per_trade": 2,
+        "billable_hours_per_trade": 2,
+        "billable_hours_floor": 2,
+        "billable_hours_raised_to_floor": false,
+        "line_items": [
+          {
+            "description": "AJBR-70554 - make-safe attendance - 1 trade x 2 hours",
+            "quantity": 2,
+            "unit_price_ex_gst": 80,
+            "amount_ex_gst": 160
+          }
+        ],
+        "subtotal_ex_gst": 160,
+        "gst": 16,
+        "total_inc_gst": 176,
+        "xero_identity": null
+      },
+      "email_drafts": {
+        "REPORT_EMAIL_DRAFT": "To: workorders@ajs.build, workorders@ajs.build\nCc: ses@secureworkswa.com.au\nSubject: AJBR-70554 - report and invoice\nAttachments: ARTIFACTS/Make-Safe-Report-SWMS-261139-Swanbourne-94c368988332.pdf\n\nDraft only. Please find the prepared physical makesafe report and invoice for 24 Mitford Street, Swanbourne WA 6010, Swanbourne. The real Xero invoice PDF attaches when authorised.",
+        "PHOTO_EMAIL_DRAFT": "To: workorders@ajs.build, workorders@ajs.build\nCc: ses@secureworkswa.com.au\nSubject: Photo Evidence - AJBR-70554\nAttachments: ARTIFACTS/photos/001-49f87358-73ef-4634-a4fd-173736d5f6d3.jpg, ARTIFACTS/photos/002-511711da-733a-4066-9f56-a2c0013a051d.jpg, ARTIFACTS/photos/003-566dcab6-6209-4f4b-86e6-7ff403cd4bd8.jpg, ARTIFACTS/photos/004-662000aa-6a6c-47eb-bca6-c12debc10779.jpg, ARTIFACTS/photos/005-7e8ced55-9d4d-4f84-a531-a2583d53262b.jpg, ARTIFACTS/photos/006-85ee9e84-bb4e-45bb-adae-5e79c24b68a4.jpg, ARTIFACTS/photos/007-991f3cea-80ba-45fb-a83b-361afb5bc9a2.jpg, ARTIFACTS/photos/008-a719418c-0eb9-4a5d-9331-dc0c9a617243.jpg, ARTIFACTS/photos/009-b2187121-8c24-4694-89ec-563c5fdf4d6d.jpg, ARTIFACTS/photos/010-b5ed17a5-6276-4c78-ae1c-baf43af46bd3.jpg, ARTIFACTS/photos/011-dab2f8a1-bcd6-4a35-b87f-2ff9180492d4.jpg, ARTIFACTS/photos/012-f1fa2418-55b4-4243-bcc6-95ae1e5d900b.jpg, ARTIFACTS/photos/013-fa950291-644c-4f3c-89b9-45364069322d.jpg\n\nDraft only. The complete, ordered original photo set is listed on the docket."
+      },
+      "review_spec": {
+        "version": "ses-docket-review/v2",
+        "property_id": null,
+        "address": "24 Mitford Street, Swanbourne WA 6010, Swanbourne",
+        "cards": [
+          {
+            "job_id": "b8c08b16-31b2-410e-9d22-39ee4821fc50",
+            "family": "physical_makesafe",
+            "builder_reference": "AJBR-70554",
+            "trade_report": {
+              "source": {
+                "relation": "job_service_reports",
+                "id": "5aae59f0-4676-4c30-8509-30221c562e02",
+                "status": "submitted",
+                "submitted_at": "2026-08-05T07:10:05.96+00:00",
+                "job_id": "b8c08b16-31b2-410e-9d22-39ee4821fc50",
+                "attendance_cycle_id": "5aae59f0-4676-4c30-8509-30221c562e02",
+                "cycle_number": 1,
+                "selection": "current_attendance_cycle"
+              },
+              "asserted_written_narrative": {
+                "scope": null,
+                "damage_description": "Make-safe type: Roof / tarp\nDamage: Previous contractor had tarp that was secured using flashing tape, this tarp had come done and needed replacement.",
+                "findings": null,
+                "damage_cause": "Storm / wind",
+                "works_completed": null,
+                "works": null,
+                "work_done": "Replaced the standard tarp with make safe tarp, secured using the screws on the roof.",
+                "materials": null,
+                "materials_used": null,
+                "notes": "Replaced the standard tarp with make safe tarp, secured using the screws on the roof."
+              },
+              "raw_source_evidence": {
+                "checklist_json": {
+                  "job_type": "Roof / tarp",
+                  "work_done": "Replaced the standard tarp with make safe tarp, secured using the screws on the roof.",
+                  "trade_count": 1,
+                  "arrival_time": "2026-08-05 14:02",
+                  "damage_cause": "Storm / wind",
+                  "labour_hours": 2,
+                  "access_issues": "I suggest the issue is that the valley needs to either be siliconed or have foam under the corrugation in the valley to stop high intensity water from flowing over the valley side walls.",
+                  "invoice_notes": "I suggest the issue is that the valley needs to either be siliconed or have foam under the corrugation in the valley to stop high intensity water from flowing over the valley side walls.",
+                  "materials_used": [
+                    "Make safe tarp x 8m2",
+                    "Bases / feet",
+                    "Tarps / roof materials",
+                    "Fixings / consumables",
+                    "Other / none"
+                  ],
+                  "job_type_detail": "",
+                  "damage_description": "Make-safe type: Roof / tarp\nDamage: Previous contractor had tarp that was secured using flashing tape, this tarp had come done and needed replacement.",
+                  "follow_up_required": false,
+                  "makesafe_type_detail": ""
+                },
+                "notes": "Replaced the standard tarp with make safe tarp, secured using the screws on the roof."
+              }
+            },
+            "portal_proof": [],
+            "artifact_paths": [
+              "ARTIFACTS/Make-Safe-Report-SWMS-261139-Swanbourne-94c368988332.pdf",
+              "ARTIFACTS/PHOTO_SELECTION.md",
+              "ARTIFACTS/invoice_proposal.json",
+              "ARTIFACTS/photos/001-49f87358-73ef-4634-a4fd-173736d5f6d3.jpg",
+              "ARTIFACTS/photos/002-511711da-733a-4066-9f56-a2c0013a051d.jpg",
+              "ARTIFACTS/photos/003-566dcab6-6209-4f4b-86e6-7ff403cd4bd8.jpg",
+              "ARTIFACTS/photos/004-662000aa-6a6c-47eb-bca6-c12debc10779.jpg",
+              "ARTIFACTS/photos/005-7e8ced55-9d4d-4f84-a531-a2583d53262b.jpg",
+              "ARTIFACTS/photos/006-85ee9e84-bb4e-45bb-adae-5e79c24b68a4.jpg",
+              "ARTIFACTS/photos/007-991f3cea-80ba-45fb-a83b-361afb5bc9a2.jpg",
+              "ARTIFACTS/photos/008-a719418c-0eb9-4a5d-9331-dc0c9a617243.jpg",
+              "ARTIFACTS/photos/009-b2187121-8c24-4694-89ec-563c5fdf4d6d.jpg",
+              "ARTIFACTS/photos/010-b5ed17a5-6276-4c78-ae1c-baf43af46bd3.jpg",
+              "ARTIFACTS/photos/011-dab2f8a1-bcd6-4a35-b87f-2ff9180492d4.jpg",
+              "ARTIFACTS/photos/012-f1fa2418-55b4-4243-bcc6-95ae1e5d900b.jpg",
+              "ARTIFACTS/photos/013-fa950291-644c-4f3c-89b9-45364069322d.jpg",
+              "DRAFTS/PHOTO_EMAIL_DRAFT.txt",
+              "DRAFTS/REPORT_EMAIL_DRAFT.txt",
+              "SOURCE/Works Order.pdf"
+            ],
+            "blocker_codes": [],
+            "waiting_on": []
+          }
+        ]
+      },
+      "release_payload": {
+        "version": "ses-inert-release-proposal/v1",
+        "job_id": "b8c08b16-31b2-410e-9d22-39ee4821fc50",
+        "invoice_create_approved": false,
+        "client_send_approved": false,
+        "send_email": false,
+        "send_sms": false,
+        "create_invoice": false,
+        "authorise_invoice": false,
+        "close_job": false,
+        "portal_evidence": []
+      },
+      "artifacts": [
+        {
+          "role": "source_attachment",
+          "path": "SOURCE/Works Order.pdf",
+          "media_type": "application/pdf",
+          "content_hash": "sha256:f349e0dfcdc0e3f5e4fcc1747ccb9580dd5b49f0ae6719af2e4f6fe50a62269a",
+          "size_bytes": 363770,
+          "metadata": {
+            "source_pointer": "job_document:d04296a5-07b5-4b68-9842-4a42962cc631"
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/001-49f87358-73ef-4634-a4fd-173736d5f6d3.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:4e22055ebfcf1aa31a8460b9b7188811b1cb1e3fd51b3cfcd668e48243c0ac5f",
+          "size_bytes": 371515,
+          "metadata": {
+            "photo_id": "49f87358-73ef-4634-a4fd-173736d5f6d3",
+            "source_pointer": "job_media:49f87358-73ef-4634-a4fd-173736d5f6d3",
+            "order": 1,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/002-511711da-733a-4066-9f56-a2c0013a051d.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:c03458bb26f3597219bfc06a842b3bf18a5592a9a84197dc320752f764b584ed",
+          "size_bytes": 591104,
+          "metadata": {
+            "photo_id": "511711da-733a-4066-9f56-a2c0013a051d",
+            "source_pointer": "job_media:511711da-733a-4066-9f56-a2c0013a051d",
+            "order": 2,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/003-566dcab6-6209-4f4b-86e6-7ff403cd4bd8.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:adec0d7950b0f732b5208ca9e57b4021f5eacc6ba156c9a9dc5886ab0cbca7a9",
+          "size_bytes": 388146,
+          "metadata": {
+            "photo_id": "566dcab6-6209-4f4b-86e6-7ff403cd4bd8",
+            "source_pointer": "job_media:566dcab6-6209-4f4b-86e6-7ff403cd4bd8",
+            "order": 3,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/004-662000aa-6a6c-47eb-bca6-c12debc10779.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:f61ed925f46344bdf9a965fb14dd8530aecec7aafc6ed6decd00a02e3ec7c3d4",
+          "size_bytes": 691767,
+          "metadata": {
+            "photo_id": "662000aa-6a6c-47eb-bca6-c12debc10779",
+            "source_pointer": "job_media:662000aa-6a6c-47eb-bca6-c12debc10779",
+            "order": 4,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/005-7e8ced55-9d4d-4f84-a531-a2583d53262b.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:09b8c64dd77be7cf516997626cfa2afbbf7c376ce45b2b936b76a3dd735e2133",
+          "size_bytes": 355538,
+          "metadata": {
+            "photo_id": "7e8ced55-9d4d-4f84-a531-a2583d53262b",
+            "source_pointer": "job_media:7e8ced55-9d4d-4f84-a531-a2583d53262b",
+            "order": 5,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/006-85ee9e84-bb4e-45bb-adae-5e79c24b68a4.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:9e470ee1cf509ecefd5047658b918253e62a996105de5228f34b87952debe9ad",
+          "size_bytes": 400653,
+          "metadata": {
+            "photo_id": "85ee9e84-bb4e-45bb-adae-5e79c24b68a4",
+            "source_pointer": "job_media:85ee9e84-bb4e-45bb-adae-5e79c24b68a4",
+            "order": 6,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/007-991f3cea-80ba-45fb-a83b-361afb5bc9a2.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:eba1192eddf670db2e5fb8715e7cba2387f884db97b224bda55e7736aa53644e",
+          "size_bytes": 388386,
+          "metadata": {
+            "photo_id": "991f3cea-80ba-45fb-a83b-361afb5bc9a2",
+            "source_pointer": "job_media:991f3cea-80ba-45fb-a83b-361afb5bc9a2",
+            "order": 7,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/008-a719418c-0eb9-4a5d-9331-dc0c9a617243.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:37500f5960cce35b31d5be60ce083799f367f4bc3a662867a7380f5a9c721566",
+          "size_bytes": 364958,
+          "metadata": {
+            "photo_id": "a719418c-0eb9-4a5d-9331-dc0c9a617243",
+            "source_pointer": "job_media:a719418c-0eb9-4a5d-9331-dc0c9a617243",
+            "order": 8,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/009-b2187121-8c24-4694-89ec-563c5fdf4d6d.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:40119520f6c0ad0c9c0f17e894a64253f4a79820e915b91ea171235068afd824",
+          "size_bytes": 395132,
+          "metadata": {
+            "photo_id": "b2187121-8c24-4694-89ec-563c5fdf4d6d",
+            "source_pointer": "job_media:b2187121-8c24-4694-89ec-563c5fdf4d6d",
+            "order": 9,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/010-b5ed17a5-6276-4c78-ae1c-baf43af46bd3.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:36ef55c7075c565cd52e25fc2a811e8f42de0770e3b38e9c9d21ed004a77c7f0",
+          "size_bytes": 364280,
+          "metadata": {
+            "photo_id": "b5ed17a5-6276-4c78-ae1c-baf43af46bd3",
+            "source_pointer": "job_media:b5ed17a5-6276-4c78-ae1c-baf43af46bd3",
+            "order": 10,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/011-dab2f8a1-bcd6-4a35-b87f-2ff9180492d4.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:5179f09b44c2d14df7437167df9b71b6506a903b8692e1ef923b8f25ad6f6f6f",
+          "size_bytes": 429600,
+          "metadata": {
+            "photo_id": "dab2f8a1-bcd6-4a35-b87f-2ff9180492d4",
+            "source_pointer": "job_media:dab2f8a1-bcd6-4a35-b87f-2ff9180492d4",
+            "order": 11,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/012-f1fa2418-55b4-4243-bcc6-95ae1e5d900b.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:9ca04b16ad0754b450aae1109f8990843244cb2b1e5695f8afd62cb6f53a8985",
+          "size_bytes": 335343,
+          "metadata": {
+            "photo_id": "f1fa2418-55b4-4243-bcc6-95ae1e5d900b",
+            "source_pointer": "job_media:f1fa2418-55b4-4243-bcc6-95ae1e5d900b",
+            "order": 12,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/013-fa950291-644c-4f3c-89b9-45364069322d.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:0efccf09c12ae49fc6259d65cb0993faff6ed9d61ce83664c65da72aa0a6bfd2",
+          "size_bytes": 398216,
+          "metadata": {
+            "photo_id": "fa950291-644c-4f3c-89b9-45364069322d",
+            "source_pointer": "job_media:fa950291-644c-4f3c-89b9-45364069322d",
+            "order": 13,
+            "caption": null
+          }
+        },
+        {
+          "role": "supporting_report_pdf",
+          "path": "ARTIFACTS/Make-Safe-Report-SWMS-261139-Swanbourne-94c368988332.pdf",
+          "media_type": "application/pdf",
+          "content_hash": "sha256:55811f83da10b863ce577b5217299f6767f4d5193e2eeabcc9ca79479e749a13",
+          "size_bytes": 2274015,
+          "metadata": {
+            "evidence_source": "current_cycle_curated_makesafe_report",
+            "report_document_id": "d8c22ade-f5a3-430a-b1de-4d59cf28de96",
+            "report_contract_version": "secureworks.makesafe-report/curated-2026-08-03",
+            "report_renderer_version": "secureworks.wiki-python/915e9b423fc597d656c7cb090671bf206138114b",
+            "report_renderer_source_revision": "915e9b423fc597d656c7cb090671bf206138114b",
+            "report_renderer_script_sha256": "fda63bcffa0177b702089e67b5719ae50642a9972aa3628c516fcedb1cfe42dc",
+            "source_kind": "durable_curated_revision",
+            "source_identity": "curation-revision:ses-curated-report:SWMS-261139:2026-08-05-next-five-v1/artifact:ses-curated-report-artifact:94c368988332c0fcc0790d1d38034216",
+            "source_document_id": "d8c22ade-f5a3-430a-b1de-4d59cf28de96",
+            "source_revision_id": "ses-curated-report:SWMS-261139:2026-08-05-next-five-v1",
+            "source_artifact_id": "ses-curated-report-artifact:94c368988332c0fcc0790d1d38034216",
+            "source_artifact_content_hash": "sha256:55811f83da10b863ce577b5217299f6767f4d5193e2eeabcc9ca79479e749a13",
+            "report_input_hash": "sha256:bcd5623c2fb0e2eaa86989c23ed0f56b7d9e17a6881d9feff8facc6dcc603a2c",
+            "expected_raw_sha256": "sha256:94c368988332c0fcc0790d1d38034216b68024b9f5aa04e9835a420b44a03bde",
+            "output_sha256": "sha256:94c368988332c0fcc0790d1d38034216b68024b9f5aa04e9835a420b44a03bde",
+            "output_content_hash": "sha256:55811f83da10b863ce577b5217299f6767f4d5193e2eeabcc9ca79479e749a13",
+            "render_hash": "94c368988332c0fcc0790d1d38034216b68024b9f5aa04e9835a420b44a03bde"
+          }
+        },
+        {
+          "role": "photo_selection",
+          "path": "ARTIFACTS/PHOTO_SELECTION.md",
+          "media_type": "text/markdown",
+          "content_hash": "sha256:ba1f6fdf04f87635dd2d82c719087cad2a265a80568db9755047a381ff57ace7",
+          "size_bytes": 1043,
+          "metadata": {}
+        },
+        {
+          "role": "invoice_proposal",
+          "path": "ARTIFACTS/invoice_proposal.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:9292fd22405b0f51d40407eb152035cc1430fad141c1cfe2a9b7fee361dc64ab",
+          "size_bytes": 455,
+          "metadata": {}
+        },
+        {
+          "role": "report_email_draft",
+          "path": "DRAFTS/REPORT_EMAIL_DRAFT.txt",
+          "media_type": "text/plain",
+          "content_hash": "sha256:20a0fd08e76155af3057bdd5de157dc3801731507fcd302b479f13d4635487ca",
+          "size_bytes": 378,
+          "metadata": {}
+        },
+        {
+          "role": "photo_email_draft",
+          "path": "DRAFTS/PHOTO_EMAIL_DRAFT.txt",
+          "media_type": "text/plain",
+          "content_hash": "sha256:a422215bbdc1d45dabfa1e88b596d95367d01d7650d6f034d75c543f76c086a5",
+          "size_bytes": 1022,
+          "metadata": {}
+        },
+        {
+          "role": "review_spec",
+          "path": "review_spec.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:52759b1837e033aa2d3012f71a95fe8df0d544b02ddbd55cb42ebfd169242e95",
+          "size_bytes": 3377,
+          "metadata": {}
+        },
+        {
+          "role": "review_html",
+          "path": "review.html",
+          "media_type": "text/html",
+          "content_hash": "sha256:599609b8f86ccb861d5c7329dacb6f7c788195178d7350549e5340343c2c487c",
+          "size_bytes": 1900,
+          "metadata": {}
+        },
+        {
+          "role": "release_payload",
+          "path": "release_payload.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:89ac79114e52d5ca45dbac29260cadef535e1b696a3579c3680934c84a961c20",
+          "size_bytes": 276,
+          "metadata": {}
+        },
+        {
+          "role": "case_story",
+          "path": "case_story.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:ca1deb05a2065e022787f5c180de24392b3f01557d4e545ffa4cf32b67a616f1",
+          "size_bytes": 456,
+          "metadata": {}
+        },
+        {
+          "role": "docket_manifest",
+          "path": "docket_manifest.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:19898b73ec1dde1d8b56dde6f966b65691aa8026775c1e89b63b3e6117c140ed",
+          "size_bytes": 4391,
+          "metadata": {}
+        },
+        {
+          "role": "assembler_envelope",
+          "path": "ASSEMBLER_ENVELOPE.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:b6fd22a11512ffb0cbae9896026fd1e0695788c9ef121521ca6dd30cfeb336ce",
+          "size_bytes": 5428,
+          "metadata": {}
+        },
+        {
+          "role": "capability",
+          "path": "CAPABILITY.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:ed28c3e4b6453631fc21e7c8e3b7c1d37f8ec8678d6313d0a469d3ad13929b7b",
+          "size_bytes": 518,
+          "metadata": {}
+        },
+        {
+          "role": "timing",
+          "path": "TIMING.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:775b05eccb028184d0ae9e54fea7ea9c26494f5e85046e1fe1d0e8425775cbd6",
+          "size_bytes": 342,
+          "metadata": {}
+        },
+        {
+          "role": "hashes",
+          "path": "hashes.sha256",
+          "media_type": "text/plain",
+          "content_hash": "sha256:96c8d6a0ad3aa9a72583ac217f55ee8710e07c0981de5eed9064bf866bad50b5",
+          "size_bytes": 2937,
+          "metadata": {}
+        }
+      ],
+      "timing": {
+        "job_id": "b8c08b16-31b2-410e-9d22-39ee4821fc50",
+        "accepted_at": "2026-08-06T00:00:38.407Z",
+        "committed_at": "2026-08-06T00:00:42.551107+00:00",
+        "duration_ms": 4202,
+        "stages_ms": {
+          "T0": 0,
+          "T1": 239,
+          "T2": 0,
+          "T3": 27,
+          "T4": 0,
+          "T5": 767,
+          "T6": 1,
+          "T7": 0,
+          "T8": 0,
+          "T9": 0,
+          "T10": 0,
+          "T11": 3156,
+          "T12": 0
+        },
+        "retries": {},
+        "degraded_capabilities": [],
+        "within_five_minutes": true
+      },
+      "persisted": true
+    }
+  ],
+  "timing_summary": {
+    "count": 1,
+    "max_ms": 4202,
+    "p95_ms": 4202,
+    "all_within_five_minutes": true
+  }
+}

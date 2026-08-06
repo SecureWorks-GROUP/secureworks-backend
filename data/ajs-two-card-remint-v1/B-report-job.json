@@ -1,0 +1,159 @@
+{
+  "ref": "AJBR-70499",
+  "address": "5 Dandenong Road, Attadale WA 6156",
+  "contact": "Kathleen KANIA",
+  "date": "2026-08-05",
+  "arrival": "2026-08-05 13:12",
+  "crew": "1 trade",
+  "scope": "Make safe the ceiling in the kitchen and living area.",
+  "findings": "Storm / wind. The corner of the ceiling in the living and kitchen space was drooping and was not connected to the joists above. Per the Captain's account, the bulkhead fell completely and needed to be propped.",
+  "works": "The attending trade propped the falling ceiling in the kitchen and living corner using acro props and structural timber planks. The timber planks were screwed into the tops of the acro props.",
+  "materials": "Acro prop x 2. Timber x 2. Screws x 2.",
+  "materials_evidence": {
+    "state": "recorded_used",
+    "items": [
+      "Acro prop x 2",
+      "Timber x 2",
+      "Screws x 2"
+    ]
+  },
+  "photo_evidence": {
+    "source_revision": "job_service_report:a3b3a498-cb7b-4468-92f5-8ee4abbf7127",
+    "completeness_verified": true,
+    "source_count": 16,
+    "applicable_count": 16,
+    "selected_count": 16,
+    "applicable_ids": [
+      "43c1732d-5fe8-468d-b44d-4b3cb10db64d",
+      "91edd1d0-1c79-4872-9dc1-4ab88767cf3f",
+      "c643e0be-9ede-4c1d-8a5d-13936ed9d651",
+      "7a4f0b26-fdf4-4d0f-a6eb-f9a0395b020f",
+      "a2c8ee2f-2263-48b9-ac80-fe6161b53b95",
+      "5dbc4c94-70ff-4161-9634-1af5a77f0cfa",
+      "254abc7c-b317-426e-8b04-214e5d0e0935",
+      "9f846a16-b895-470e-b983-7800dbdf4867",
+      "792713dd-381f-4797-b261-e5cb7e864756",
+      "e5d8530a-d4a8-43db-80f5-7d3a28f7b472",
+      "1d1fc6d6-8f0b-44ff-9707-eb59a884e082",
+      "27d60e50-34eb-4dd3-9251-324958f91b2f",
+      "2ec7492f-171c-4b44-8aa5-2303f721c44e",
+      "ae3467f2-882b-4f2b-8c3b-b8eba9d678cc",
+      "ca0a0d68-5faa-4921-ac48-4e1e0ba18d55",
+      "f75128bd-ee9f-4dc8-9d23-83ca63ebf21d"
+    ],
+    "selected_ids": [
+      "43c1732d-5fe8-468d-b44d-4b3cb10db64d",
+      "91edd1d0-1c79-4872-9dc1-4ab88767cf3f",
+      "c643e0be-9ede-4c1d-8a5d-13936ed9d651",
+      "7a4f0b26-fdf4-4d0f-a6eb-f9a0395b020f",
+      "a2c8ee2f-2263-48b9-ac80-fe6161b53b95",
+      "5dbc4c94-70ff-4161-9634-1af5a77f0cfa",
+      "254abc7c-b317-426e-8b04-214e5d0e0935",
+      "9f846a16-b895-470e-b983-7800dbdf4867",
+      "792713dd-381f-4797-b261-e5cb7e864756",
+      "e5d8530a-d4a8-43db-80f5-7d3a28f7b472",
+      "1d1fc6d6-8f0b-44ff-9707-eb59a884e082",
+      "27d60e50-34eb-4dd3-9251-324958f91b2f",
+      "2ec7492f-171c-4b44-8aa5-2303f721c44e",
+      "ae3467f2-882b-4f2b-8c3b-b8eba9d678cc",
+      "ca0a0d68-5faa-4921-ac48-4e1e0ba18d55",
+      "f75128bd-ee9f-4dc8-9d23-83ca63ebf21d"
+    ],
+    "excluded": [],
+    "rejected": []
+  },
+  "photos": [
+    {
+      "evidence_id": "43c1732d-5fe8-468d-b44d-4b3cb10db64d",
+      "caption": "Site photo 1",
+      "content_sha256": "sha256:54dde2e4e98c36001581f96295697736770dcc5459ddf8d51a4ac02b3c8e673c"
+    },
+    {
+      "evidence_id": "91edd1d0-1c79-4872-9dc1-4ab88767cf3f",
+      "caption": "Site photo 2",
+      "content_sha256": "sha256:4c34c44d425ea1eb024e25da98156f3ebfe78b788840fa266d34029d016a9b62"
+    },
+    {
+      "evidence_id": "c643e0be-9ede-4c1d-8a5d-13936ed9d651",
+      "caption": "Site photo 3",
+      "content_sha256": "sha256:b70f392b180c0298e1d2cac9ba7b9e5227bfe88933d8f2092d0a16335277144e"
+    },
+    {
+      "evidence_id": "7a4f0b26-fdf4-4d0f-a6eb-f9a0395b020f",
+      "caption": "Site photo 4",
+      "content_sha256": "sha256:2b8ec28825603936912076b0c204b16adecb62f73124865186afc2f6e8c1312a"
+    },
+    {
+      "evidence_id": "a2c8ee2f-2263-48b9-ac80-fe6161b53b95",
+      "caption": "Site photo 5",
+      "content_sha256": "sha256:6a714122b3a9d870c033090d59958bb3914d23afd32175074e696275299d32e6"
+    },
+    {
+      "evidence_id": "5dbc4c94-70ff-4161-9634-1af5a77f0cfa",
+      "caption": "Site photo 6",
+      "content_sha256": "sha256:f9dd36eda44278c1571a2eec8367c0dadf1f0d37cc308563550fb5d895fc28a1"
+    },
+    {
+      "evidence_id": "254abc7c-b317-426e-8b04-214e5d0e0935",
+      "caption": "Site photo 7",
+      "content_sha256": "sha256:83de2528d9d9390f28764debb757615da9d47ffa7e2fff305a536c9988b69116"
+    },
+    {
+      "evidence_id": "9f846a16-b895-470e-b983-7800dbdf4867",
+      "caption": "Site photo 8",
+      "content_sha256": "sha256:4720a0de957a34392657e44eb13f9ea009f13610176e8821ac2b1b846af8848c"
+    },
+    {
+      "evidence_id": "792713dd-381f-4797-b261-e5cb7e864756",
+      "caption": "Site photo 9",
+      "content_sha256": "sha256:8b4459d8723a3d81d27402539c93b1eadd0d6a6c07233c70a42509dcb6116d48"
+    },
+    {
+      "evidence_id": "e5d8530a-d4a8-43db-80f5-7d3a28f7b472",
+      "caption": "Site photo 10",
+      "content_sha256": "sha256:71384a30488bd4d16aca3c7be2d7e2c5f122c7b301e9338f54cd44d4956980ba"
+    },
+    {
+      "evidence_id": "1d1fc6d6-8f0b-44ff-9707-eb59a884e082",
+      "caption": "Site photo 11",
+      "content_sha256": "sha256:533bae35734da3e587fef4f00654fcf2b16c2df8bf0c7059c7636f7b77e279a7"
+    },
+    {
+      "evidence_id": "27d60e50-34eb-4dd3-9251-324958f91b2f",
+      "caption": "Site photo 12",
+      "content_sha256": "sha256:73999f6d50627f90d9c4d541dca8d618d341e10513e73fc5cb257c68dcc953a8"
+    },
+    {
+      "evidence_id": "2ec7492f-171c-4b44-8aa5-2303f721c44e",
+      "caption": "Site photo 13",
+      "content_sha256": "sha256:57310791ea290c850c166c1906529673afd3a42d9085182b2e33eef38f205d8d"
+    },
+    {
+      "evidence_id": "ae3467f2-882b-4f2b-8c3b-b8eba9d678cc",
+      "caption": "Site photo 14",
+      "content_sha256": "sha256:83122746d3cfb61ed1f5e30784b660f2394bf56e0fb7048cadcbeb1fa2a4ea88"
+    },
+    {
+      "evidence_id": "ca0a0d68-5faa-4921-ac48-4e1e0ba18d55",
+      "caption": "Site photo 15",
+      "content_sha256": "sha256:167369b2f49d206d3e34b15e0b5b00bc42b4f1464d9a14c082a7e2a46587de9b"
+    },
+    {
+      "evidence_id": "f75128bd-ee9f-4dc8-9d23-83ca63ebf21d",
+      "caption": "Site photo 16",
+      "content_sha256": "sha256:9f9697ee671b5dee25feb472f91d7686684a2984fd01811380ef808150fcda07"
+    }
+  ],
+  "attribution": {
+    "captain": [
+      "bulkhead fell completely and needed to be propped"
+    ],
+    "trade": [
+      "corner ceiling drooping / not connected to joists",
+      "propped with acro props and structural timber planks screwed into tops of props",
+      "materials Acro prop x 2, Timber x 2, Screws x 2",
+      "labour_hours 2.5, trade_count 1, arrival 2026-08-05 13:12",
+      "damage_cause Storm / wind"
+    ]
+  }
+}

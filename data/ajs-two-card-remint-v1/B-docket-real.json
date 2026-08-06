@@ -1,0 +1,713 @@
+{
+  "action": "prepare_ses_docket_revision",
+  "assembler_version": "ses-pack-assembler/v1",
+  "dry_run": false,
+  "results": [
+    {
+      "state": "ready",
+      "docket_revision_id": "cd3d288a-2f71-53a3-b412-00c341eda211",
+      "input_content_hash": "sha256:060bfb47ffe38191984c82a0d32e5e811b7dffc2a2cabd2babe1fe185eb8eb66",
+      "output_content_hash": "sha256:69a291700736c77ce5513b022ea1d69b71ef8ccbe91d9d3275dac12e4933612a",
+      "envelope": {
+        "version": "secureworks.makesafe.docket-manifest/v3-envelope",
+        "v2": {
+          "version": "secureworks.makesafe.docket-manifest/v2",
+          "docket_id": "SWMS-261137",
+          "classification": {
+            "workflow": "active",
+            "builder_key": "AJBR",
+            "family": "physical_makesafe",
+            "job_type": "physical_makesafe",
+            "subtype": null,
+            "recipe_selected": true,
+            "delivery_render_route": "not_applicable",
+            "delivery_render_route_reason_code": "non_roof_family",
+            "delivery_render_route_reason": "Family physical_makesafe has no roof delivery/render route.",
+            "delivery_render_route_evidence": [
+              "builder-family:AJBR/physical_makesafe"
+            ],
+            "builder_reference": "AJBR-70499",
+            "report_only": false,
+            "lineage": "none",
+            "swms_required": false,
+            "hrcw": false,
+            "hrcw_categories": [],
+            "source_hazard_terms": [],
+            "required_deliverable_ids": [
+              "GENERAL_MAKESAFE"
+            ]
+          },
+          "routing": {
+            "builder": "aj",
+            "report_to": "workorders@ajs.build",
+            "photo_to": "workorders@ajs.build",
+            "invoice_to": "workorders@ajs.build",
+            "intake_thread_id": "AAQkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOAMkABAA_hNpd9bKRHmHOB5nl9oaahAA_hNpd9bKRHmHOB5nl9oaag==",
+            "intake_post_id": "AAMkADA3OWRlMzg2LTAyNzQtNGI4Ni05ODkyLWNiOGY1YTQ1MWNjOABGAAAAAABXcqgbD6QKT47mlZIoOe32BwD6HiEwBbb9SIm64hKZ9RyzAAAAAAEMAAD6HiEwBbb9SIm64hKZ9RyzAAAzEKQpAAA=",
+            "intake_conversation_id": "",
+            "intake_email_subject": "Make Safe - Attadale - Job No 70499",
+            "intake_email_subject_source": "emails_subject"
+          },
+          "items": {
+            "source_work_order_retrieval": {
+              "state": "ready",
+              "evidence": "spine:source/fingerprint%3Ad5312e7841041e0f%2Fdeliverable%3Awo%253AAJBR-70499%2Fcycle%3A1"
+            },
+            "source_work_order_identity": {
+              "state": "ready",
+              "evidence": "spine:lineage/db757fed-f50c-434e-962e-855f8ffa8631#job/8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c#hash/sha256:72fcd3920bbbcf4512c5226ab0700c59cbf0c0ded8eb5f4b00d5c3fcfa6032d3#reference/AJBR-70499"
+            },
+            "source_work_order_attachment": {
+              "state": "ready",
+              "evidence": "files:SOURCE/Works Order.pdf"
+            },
+            "instruction_deliverables": {
+              "state": "ready",
+              "evidence": "spine:deliverables/GENERAL_MAKESAFE"
+            },
+            "lineage_review": {
+              "state": "not_applicable",
+              "rule": "no-related-docket-detected"
+            },
+            "case_story_recovery": {
+              "state": "ready",
+              "evidence": "file:case_story.json"
+            },
+            "exception_disposition": {
+              "state": "not_applicable",
+              "rule": "ordinary-active-docket"
+            },
+            "hrcw_assessment": {
+              "state": "ready",
+              "evidence": "file:case_story.json#hrcw"
+            },
+            "swms_requirement": {
+              "state": "ready",
+              "evidence": "rule:swms-not-required-under-named-builder-job-rule#ajs-make-safes-do-not-normally-carry-swms"
+            },
+            "swms_artifact": {
+              "state": "not_applicable",
+              "rule": "swms-not-required-under-named-builder-job-rule"
+            },
+            "builder_routing": {
+              "state": "ready",
+              "evidence": "company:workorders@ajs.build#matrix:workorders@ajs.build#rule:ajs-routing"
+            },
+            "supporting_report_pdf": {
+              "state": "ready",
+              "evidence": "file:ARTIFACTS/Make-Safe-Report-SWMS-261137-Attadale-4a3787d96c08.pdf"
+            },
+            "supporting_invoice_pdf": {
+              "state": "blocked",
+              "reason": "Pre-Xero review carries a local proposal, never a Xero PDF.",
+              "reason_code": "recovery-not-run",
+              "searches_attempted": [
+                "canonical-input-envelope"
+              ],
+              "rejected_candidates": [],
+              "recovery_action": "After Captain invoice-create approval, U5/U6 creates and binds the real invoice PDF."
+            },
+            "supporting_portal_links": {
+              "state": "not_applicable",
+              "rule": "physical-work-has-no-portal-deliverable"
+            },
+            "roof_report_link": {
+              "state": "not_applicable",
+              "rule": "not-a-roof-report"
+            },
+            "roof_report_capture": {
+              "state": "not_applicable",
+              "rule": "not-a-roof-report"
+            },
+            "assessment_report_link": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "assessment_report_capture": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "assessment_photos_link": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "assessment_photos_capture": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "assessment_scope_link": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "assessment_scope_capture": {
+              "state": "not_applicable",
+              "rule": "not-an-assessment-report"
+            },
+            "physical_reporting_evidence": {
+              "state": "ready",
+              "evidence": "file:ARTIFACTS/PHOTO_SELECTION.md"
+            },
+            "draft_builder_report_email": {
+              "state": "ready",
+              "evidence": "file:DRAFTS/REPORT_EMAIL_DRAFT.txt"
+            },
+            "draft_photo_evidence_email": {
+              "state": "ready",
+              "evidence": "file:DRAFTS/PHOTO_EMAIL_DRAFT.txt"
+            },
+            "draft_invoice_bundle_email": {
+              "state": "ready",
+              "evidence": "file:DRAFTS/REPORT_EMAIL_DRAFT.txt"
+            },
+            "email_drafts_presented": {
+              "state": "ready",
+              "evidence": "review:review.html#email-drafts"
+            }
+          },
+          "deliverables": [
+            {
+              "id": "GENERAL_MAKESAFE",
+              "kind": "physical_makesafe",
+              "completion": {
+                "state": "ready",
+                "evidence": "spine:deliverable/GENERAL_MAKESAFE"
+              }
+            }
+          ]
+        },
+        "spine": {
+          "source_instruction_id": "fingerprint:d5312e7841041e0f/deliverable:wo%3AAJBR-70499/cycle:1",
+          "lineage_id": "db757fed-f50c-434e-962e-855f8ffa8631",
+          "job_id": "8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c",
+          "card_id": "8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c",
+          "property_id": null,
+          "attendance_cycle_ids": [
+            "a3b3a498-cb7b-4468-92f5-8ee4abbf7127"
+          ],
+          "current_attendance_cycle_id": "a3b3a498-cb7b-4468-92f5-8ee4abbf7127",
+          "readiness_revision": null,
+          "docket_revision_id": "cd3d288a-2f71-53a3-b412-00c341eda211"
+        },
+        "pre_xero_docs_ready": true,
+        "local_invoice_proposal": {
+          "state": "ready",
+          "evidence": "file:ARTIFACTS/invoice_proposal.json"
+        },
+        "invoice_create_approved": false,
+        "client_send_approved": false,
+        "family_matrix_version": "ses-builder-family-matrix/2026-08-04.1",
+        "assembler_version": "ses-pack-assembler/v1",
+        "input_content_hash": "sha256:060bfb47ffe38191984c82a0d32e5e811b7dffc2a2cabd2babe1fe185eb8eb66",
+        "output_content_hash": "sha256:69a291700736c77ce5513b022ea1d69b71ef8ccbe91d9d3275dac12e4933612a"
+      },
+      "blockers": [],
+      "portal_evidence": [],
+      "invoice_proposal": {
+        "version": "ses-local-invoice-proposal/v1",
+        "builder_reference": "AJBR-70499",
+        "basis": "ajs_labour_materials",
+        "trades": 1,
+        "reported_hours_per_trade": 2.5,
+        "billable_hours_per_trade": 2.5,
+        "billable_hours_floor": 2,
+        "billable_hours_raised_to_floor": false,
+        "line_items": [
+          {
+            "description": "AJBR-70499 - make-safe attendance - 1 trade x 2.5 hours",
+            "quantity": 2.5,
+            "unit_price_ex_gst": 80,
+            "amount_ex_gst": 200
+          }
+        ],
+        "subtotal_ex_gst": 200,
+        "gst": 20,
+        "total_inc_gst": 220,
+        "xero_identity": null
+      },
+      "email_drafts": {
+        "REPORT_EMAIL_DRAFT": "To: workorders@ajs.build, workorders@ajs.build\nCc: ses@secureworkswa.com.au\nSubject: AJBR-70499 - report and invoice\nAttachments: ARTIFACTS/Make-Safe-Report-SWMS-261137-Attadale-4a3787d96c08.pdf\n\nDraft only. Please find the prepared physical makesafe report and invoice for 5 Dandenong Road, Attadale WA 6156, Attadale. The real Xero invoice PDF attaches when authorised.",
+        "PHOTO_EMAIL_DRAFT": "To: workorders@ajs.build, workorders@ajs.build\nCc: ses@secureworkswa.com.au\nSubject: Photo Evidence - AJBR-70499\nAttachments: ARTIFACTS/photos/001-1d1fc6d6-8f0b-44ff-9707-eb59a884e082.jpg, ARTIFACTS/photos/002-254abc7c-b317-426e-8b04-214e5d0e0935.jpg, ARTIFACTS/photos/003-27d60e50-34eb-4dd3-9251-324958f91b2f.jpg, ARTIFACTS/photos/004-2ec7492f-171c-4b44-8aa5-2303f721c44e.jpg, ARTIFACTS/photos/005-43c1732d-5fe8-468d-b44d-4b3cb10db64d.jpg, ARTIFACTS/photos/006-5dbc4c94-70ff-4161-9634-1af5a77f0cfa.jpg, ARTIFACTS/photos/007-792713dd-381f-4797-b261-e5cb7e864756.jpg, ARTIFACTS/photos/008-7a4f0b26-fdf4-4d0f-a6eb-f9a0395b020f.jpg, ARTIFACTS/photos/009-91edd1d0-1c79-4872-9dc1-4ab88767cf3f.jpg, ARTIFACTS/photos/010-9f846a16-b895-470e-b983-7800dbdf4867.jpg, ARTIFACTS/photos/011-a2c8ee2f-2263-48b9-ac80-fe6161b53b95.jpg, ARTIFACTS/photos/012-ae3467f2-882b-4f2b-8c3b-b8eba9d678cc.jpg, ARTIFACTS/photos/013-c643e0be-9ede-4c1d-8a5d-13936ed9d651.jpg, ARTIFACTS/photos/014-ca0a0d68-5faa-4921-ac48-4e1e0ba18d55.jpg, ARTIFACTS/photos/015-e5d8530a-d4a8-43db-80f5-7d3a28f7b472.jpg, ARTIFACTS/photos/016-f75128bd-ee9f-4dc8-9d23-83ca63ebf21d.jpg\n\nDraft only. The complete, ordered original photo set is listed on the docket."
+      },
+      "review_spec": {
+        "version": "ses-docket-review/v2",
+        "property_id": null,
+        "address": "5 Dandenong Road, Attadale WA 6156, Attadale",
+        "cards": [
+          {
+            "job_id": "8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c",
+            "family": "physical_makesafe",
+            "builder_reference": "AJBR-70499",
+            "trade_report": {
+              "source": {
+                "relation": "job_service_reports",
+                "id": "a3b3a498-cb7b-4468-92f5-8ee4abbf7127",
+                "status": "submitted",
+                "submitted_at": "2026-08-05T05:13:10.559+00:00",
+                "job_id": "8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c",
+                "attendance_cycle_id": "a3b3a498-cb7b-4468-92f5-8ee4abbf7127",
+                "cycle_number": 1,
+                "selection": "current_attendance_cycle"
+              },
+              "asserted_written_narrative": {
+                "scope": null,
+                "damage_description": "Make-safe type: Ceiling / water ingress\nDamage: Corner of ceiling in living/kitchen space drooping down and not connected to joists above.",
+                "findings": null,
+                "damage_cause": "Storm / wind",
+                "works_completed": null,
+                "works": null,
+                "work_done": "Propped up falling ceiling in corner of kitchen/living space using acro props and structural timber planks. Planks are screwed into the top of the acro props.",
+                "materials": null,
+                "materials_used": null,
+                "notes": "Propped up falling ceiling in corner of kitchen/living space using acro props and structural timber planks. Planks are screwed into the top of the acro props."
+              },
+              "raw_source_evidence": {
+                "checklist_json": {
+                  "job_type": "Ceiling / water ingress",
+                  "work_done": "Propped up falling ceiling in corner of kitchen/living space using acro props and structural timber planks. Planks are screwed into the top of the acro props.",
+                  "trade_count": 1,
+                  "arrival_time": "2026-08-05 13:12",
+                  "damage_cause": "Storm / wind",
+                  "labour_hours": 2.5,
+                  "access_issues": "",
+                  "invoice_notes": "",
+                  "materials_used": [
+                    "Acro prop x 2",
+                    "Timber x 2",
+                    "Screws x 2",
+                    "Fixings / consumables",
+                    "Other / none"
+                  ],
+                  "job_type_detail": "",
+                  "damage_description": "Make-safe type: Ceiling / water ingress\nDamage: Corner of ceiling in living/kitchen space drooping down and not connected to joists above.",
+                  "follow_up_required": false,
+                  "makesafe_type_detail": ""
+                },
+                "notes": "Propped up falling ceiling in corner of kitchen/living space using acro props and structural timber planks. Planks are screwed into the top of the acro props."
+              }
+            },
+            "portal_proof": [],
+            "artifact_paths": [
+              "ARTIFACTS/Make-Safe-Report-SWMS-261137-Attadale-4a3787d96c08.pdf",
+              "ARTIFACTS/PHOTO_SELECTION.md",
+              "ARTIFACTS/invoice_proposal.json",
+              "ARTIFACTS/photos/001-1d1fc6d6-8f0b-44ff-9707-eb59a884e082.jpg",
+              "ARTIFACTS/photos/002-254abc7c-b317-426e-8b04-214e5d0e0935.jpg",
+              "ARTIFACTS/photos/003-27d60e50-34eb-4dd3-9251-324958f91b2f.jpg",
+              "ARTIFACTS/photos/004-2ec7492f-171c-4b44-8aa5-2303f721c44e.jpg",
+              "ARTIFACTS/photos/005-43c1732d-5fe8-468d-b44d-4b3cb10db64d.jpg",
+              "ARTIFACTS/photos/006-5dbc4c94-70ff-4161-9634-1af5a77f0cfa.jpg",
+              "ARTIFACTS/photos/007-792713dd-381f-4797-b261-e5cb7e864756.jpg",
+              "ARTIFACTS/photos/008-7a4f0b26-fdf4-4d0f-a6eb-f9a0395b020f.jpg",
+              "ARTIFACTS/photos/009-91edd1d0-1c79-4872-9dc1-4ab88767cf3f.jpg",
+              "ARTIFACTS/photos/010-9f846a16-b895-470e-b983-7800dbdf4867.jpg",
+              "ARTIFACTS/photos/011-a2c8ee2f-2263-48b9-ac80-fe6161b53b95.jpg",
+              "ARTIFACTS/photos/012-ae3467f2-882b-4f2b-8c3b-b8eba9d678cc.jpg",
+              "ARTIFACTS/photos/013-c643e0be-9ede-4c1d-8a5d-13936ed9d651.jpg",
+              "ARTIFACTS/photos/014-ca0a0d68-5faa-4921-ac48-4e1e0ba18d55.jpg",
+              "ARTIFACTS/photos/015-e5d8530a-d4a8-43db-80f5-7d3a28f7b472.jpg",
+              "ARTIFACTS/photos/016-f75128bd-ee9f-4dc8-9d23-83ca63ebf21d.jpg",
+              "DRAFTS/PHOTO_EMAIL_DRAFT.txt",
+              "DRAFTS/REPORT_EMAIL_DRAFT.txt",
+              "SOURCE/Works Order.pdf"
+            ],
+            "blocker_codes": [],
+            "waiting_on": []
+          }
+        ]
+      },
+      "release_payload": {
+        "version": "ses-inert-release-proposal/v1",
+        "job_id": "8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c",
+        "invoice_create_approved": false,
+        "client_send_approved": false,
+        "send_email": false,
+        "send_sms": false,
+        "create_invoice": false,
+        "authorise_invoice": false,
+        "close_job": false,
+        "portal_evidence": []
+      },
+      "artifacts": [
+        {
+          "role": "source_attachment",
+          "path": "SOURCE/Works Order.pdf",
+          "media_type": "application/pdf",
+          "content_hash": "sha256:da91be5f900854e8d95132ed14b9355c24a56db2ea2f235b3356e40dbeab924d",
+          "size_bytes": 361869,
+          "metadata": {
+            "source_pointer": "job_document:0f9858c2-655b-4127-ae4d-2917c0063de8"
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/001-1d1fc6d6-8f0b-44ff-9707-eb59a884e082.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:8b2dcfba1db697064199731396a2201015c7d24faa3d02c03c049c5c7013e330",
+          "size_bytes": 200738,
+          "metadata": {
+            "photo_id": "1d1fc6d6-8f0b-44ff-9707-eb59a884e082",
+            "source_pointer": "job_media:1d1fc6d6-8f0b-44ff-9707-eb59a884e082",
+            "order": 1,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/002-254abc7c-b317-426e-8b04-214e5d0e0935.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:937a1f32047c27a20cdff07afe2184af2109b30ceb3a484a2d10def8dfe595b9",
+          "size_bytes": 230285,
+          "metadata": {
+            "photo_id": "254abc7c-b317-426e-8b04-214e5d0e0935",
+            "source_pointer": "job_media:254abc7c-b317-426e-8b04-214e5d0e0935",
+            "order": 2,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/003-27d60e50-34eb-4dd3-9251-324958f91b2f.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:5ba63b13906c1e256299dc3aaa4ac1a431aafa806ee0281ffab1ad11afd69f1a",
+          "size_bytes": 215820,
+          "metadata": {
+            "photo_id": "27d60e50-34eb-4dd3-9251-324958f91b2f",
+            "source_pointer": "job_media:27d60e50-34eb-4dd3-9251-324958f91b2f",
+            "order": 3,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/004-2ec7492f-171c-4b44-8aa5-2303f721c44e.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:1e72eee188f135b0f8b63edeedd7a155c285194396143e75f294b62817d616a9",
+          "size_bytes": 434272,
+          "metadata": {
+            "photo_id": "2ec7492f-171c-4b44-8aa5-2303f721c44e",
+            "source_pointer": "job_media:2ec7492f-171c-4b44-8aa5-2303f721c44e",
+            "order": 4,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/005-43c1732d-5fe8-468d-b44d-4b3cb10db64d.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:980cb30d425362b142e46fc9e79d3ed17c7632657687e5599bb06504576d308f",
+          "size_bytes": 521673,
+          "metadata": {
+            "photo_id": "43c1732d-5fe8-468d-b44d-4b3cb10db64d",
+            "source_pointer": "job_media:43c1732d-5fe8-468d-b44d-4b3cb10db64d",
+            "order": 5,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/006-5dbc4c94-70ff-4161-9634-1af5a77f0cfa.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:9ab0648f0052d5940df5d91099b5ad0c5e0c1518bf93fd452c76f2ab8abe6395",
+          "size_bytes": 114146,
+          "metadata": {
+            "photo_id": "5dbc4c94-70ff-4161-9634-1af5a77f0cfa",
+            "source_pointer": "job_media:5dbc4c94-70ff-4161-9634-1af5a77f0cfa",
+            "order": 6,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/007-792713dd-381f-4797-b261-e5cb7e864756.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:52dde2da9f9546f891bc0d4072e2b1228ff441d36f581177e7bc64db2ec74844",
+          "size_bytes": 420441,
+          "metadata": {
+            "photo_id": "792713dd-381f-4797-b261-e5cb7e864756",
+            "source_pointer": "job_media:792713dd-381f-4797-b261-e5cb7e864756",
+            "order": 7,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/008-7a4f0b26-fdf4-4d0f-a6eb-f9a0395b020f.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:ee4e6c68324efa4000a2fe215121880a1ef05cdb36aab6b0c30e770d44d5aa5a",
+          "size_bytes": 371679,
+          "metadata": {
+            "photo_id": "7a4f0b26-fdf4-4d0f-a6eb-f9a0395b020f",
+            "source_pointer": "job_media:7a4f0b26-fdf4-4d0f-a6eb-f9a0395b020f",
+            "order": 8,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/009-91edd1d0-1c79-4872-9dc1-4ab88767cf3f.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:eaec125dd2c6c68c318ce939b4670fed8ba06306da3c495b0cde52311e046712",
+          "size_bytes": 266465,
+          "metadata": {
+            "photo_id": "91edd1d0-1c79-4872-9dc1-4ab88767cf3f",
+            "source_pointer": "job_media:91edd1d0-1c79-4872-9dc1-4ab88767cf3f",
+            "order": 9,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/010-9f846a16-b895-470e-b983-7800dbdf4867.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:4cf141ecd0b4a44f6ba337d3c27766b425250f501137708da7b343a72ecabf67",
+          "size_bytes": 149100,
+          "metadata": {
+            "photo_id": "9f846a16-b895-470e-b983-7800dbdf4867",
+            "source_pointer": "job_media:9f846a16-b895-470e-b983-7800dbdf4867",
+            "order": 10,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/011-a2c8ee2f-2263-48b9-ac80-fe6161b53b95.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:8c099b11f9735a9d86bebcc0db800ad541bacda8cba9b2e68e39c7401ddd5a30",
+          "size_bytes": 206955,
+          "metadata": {
+            "photo_id": "a2c8ee2f-2263-48b9-ac80-fe6161b53b95",
+            "source_pointer": "job_media:a2c8ee2f-2263-48b9-ac80-fe6161b53b95",
+            "order": 11,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/012-ae3467f2-882b-4f2b-8c3b-b8eba9d678cc.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:5003a41c70d1472f351df5dd6efd0af8486a0ef437be39db3971332f178b84e6",
+          "size_bytes": 242763,
+          "metadata": {
+            "photo_id": "ae3467f2-882b-4f2b-8c3b-b8eba9d678cc",
+            "source_pointer": "job_media:ae3467f2-882b-4f2b-8c3b-b8eba9d678cc",
+            "order": 12,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/013-c643e0be-9ede-4c1d-8a5d-13936ed9d651.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:53ce7db38f1bacd5ee9523252a7de2389b62bbe4822d2c3613e89d7234c3b6d2",
+          "size_bytes": 486424,
+          "metadata": {
+            "photo_id": "c643e0be-9ede-4c1d-8a5d-13936ed9d651",
+            "source_pointer": "job_media:c643e0be-9ede-4c1d-8a5d-13936ed9d651",
+            "order": 13,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/014-ca0a0d68-5faa-4921-ac48-4e1e0ba18d55.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:970547902276add6a9d08074841205465ff6dcb8a951506fce142d96c71ebc18",
+          "size_bytes": 290781,
+          "metadata": {
+            "photo_id": "ca0a0d68-5faa-4921-ac48-4e1e0ba18d55",
+            "source_pointer": "job_media:ca0a0d68-5faa-4921-ac48-4e1e0ba18d55",
+            "order": 14,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/015-e5d8530a-d4a8-43db-80f5-7d3a28f7b472.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:1264b893fcc667e63bf0729799e495cd6edf1ebcff6d56461455fd4646c28554",
+          "size_bytes": 437213,
+          "metadata": {
+            "photo_id": "e5d8530a-d4a8-43db-80f5-7d3a28f7b472",
+            "source_pointer": "job_media:e5d8530a-d4a8-43db-80f5-7d3a28f7b472",
+            "order": 15,
+            "caption": null
+          }
+        },
+        {
+          "role": "completion_photo",
+          "path": "ARTIFACTS/photos/016-f75128bd-ee9f-4dc8-9d23-83ca63ebf21d.jpg",
+          "media_type": "image/jpeg",
+          "content_hash": "sha256:36be3340887107bae259f5610de5d96392222f33721f68781074e23f04b07ec9",
+          "size_bytes": 443360,
+          "metadata": {
+            "photo_id": "f75128bd-ee9f-4dc8-9d23-83ca63ebf21d",
+            "source_pointer": "job_media:f75128bd-ee9f-4dc8-9d23-83ca63ebf21d",
+            "order": 16,
+            "caption": null
+          }
+        },
+        {
+          "role": "supporting_report_pdf",
+          "path": "ARTIFACTS/Make-Safe-Report-SWMS-261137-Attadale-4a3787d96c08.pdf",
+          "media_type": "application/pdf",
+          "content_hash": "sha256:d577bd0dd9daa5ded18150081bd1196e5c75dbb844ae0e41b9abcafb9a58331b",
+          "size_bytes": 1751369,
+          "metadata": {
+            "evidence_source": "current_cycle_curated_makesafe_report",
+            "report_document_id": "2a33fffd-bc42-4ef5-88ad-7aa76b1406de",
+            "report_contract_version": "secureworks.makesafe-report/curated-2026-08-03",
+            "report_renderer_version": "secureworks.wiki-python/915e9b423fc597d656c7cb090671bf206138114b",
+            "report_renderer_source_revision": "915e9b423fc597d656c7cb090671bf206138114b",
+            "report_renderer_script_sha256": "fda63bcffa0177b702089e67b5719ae50642a9972aa3628c516fcedb1cfe42dc",
+            "source_kind": "durable_curated_revision",
+            "source_identity": "curation-revision:ses-curated-report:SWMS-261137:2026-08-06-bulkhead-prop-v1/artifact:ses-curated-report-artifact:84b6238a0d6c91bb20445fd54f7037b7",
+            "source_document_id": "2a33fffd-bc42-4ef5-88ad-7aa76b1406de",
+            "source_revision_id": "ses-curated-report:SWMS-261137:2026-08-06-bulkhead-prop-v1",
+            "source_artifact_id": "ses-curated-report-artifact:84b6238a0d6c91bb20445fd54f7037b7",
+            "source_artifact_content_hash": "sha256:d577bd0dd9daa5ded18150081bd1196e5c75dbb844ae0e41b9abcafb9a58331b",
+            "report_input_hash": "sha256:8c484f1cbe4e8fe6874f85664d5cb5cef5d95b55b863c2fba71ae2459e87c823",
+            "expected_raw_sha256": "sha256:84b6238a0d6c91bb20445fd54f7037b7d300a1e22cb28692165ebc4fa007afc4",
+            "output_sha256": "sha256:84b6238a0d6c91bb20445fd54f7037b7d300a1e22cb28692165ebc4fa007afc4",
+            "output_content_hash": "sha256:d577bd0dd9daa5ded18150081bd1196e5c75dbb844ae0e41b9abcafb9a58331b",
+            "render_hash": "84b6238a0d6c91bb20445fd54f7037b7d300a1e22cb28692165ebc4fa007afc4"
+          }
+        },
+        {
+          "role": "photo_selection",
+          "path": "ARTIFACTS/PHOTO_SELECTION.md",
+          "media_type": "text/markdown",
+          "content_hash": "sha256:8851eb4ab134a2a6222243d22ee9585a2e304fdcc060722754fbabd38fa73acf",
+          "size_bytes": 1286,
+          "metadata": {}
+        },
+        {
+          "role": "invoice_proposal",
+          "path": "ARTIFACTS/invoice_proposal.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:08b510dcea29c2131da77b42eeb389f710f8f2423b249834e6196baef1a286c2",
+          "size_bytes": 463,
+          "metadata": {}
+        },
+        {
+          "role": "report_email_draft",
+          "path": "DRAFTS/REPORT_EMAIL_DRAFT.txt",
+          "media_type": "text/plain",
+          "content_hash": "sha256:ce0e38da0972977ae8e995f2f0970f43c914030d0b2394d8808b60e55f9a4490",
+          "size_bytes": 371,
+          "metadata": {}
+        },
+        {
+          "role": "photo_email_draft",
+          "path": "DRAFTS/PHOTO_EMAIL_DRAFT.txt",
+          "media_type": "text/plain",
+          "content_hash": "sha256:d87a39041f1f4d44b706c02d1cab71ab4660d131c604627db324008acc2e0673",
+          "size_bytes": 1211,
+          "metadata": {}
+        },
+        {
+          "role": "review_spec",
+          "path": "review_spec.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:81a237b419155ac97aa19bb06a81e2f24c4c63bac5339eaaf3b51d535b04b1db",
+          "size_bytes": 3452,
+          "metadata": {}
+        },
+        {
+          "role": "review_html",
+          "path": "review.html",
+          "media_type": "text/html",
+          "content_hash": "sha256:6e4f74b46c7f0c8bd6a65bb3a1b4365123cda619271178b6ce4bb9897c057f91",
+          "size_bytes": 2082,
+          "metadata": {}
+        },
+        {
+          "role": "release_payload",
+          "path": "release_payload.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:681094de579f0896ce6f9bfd79fd667cb0d8e47af83c64c79f84bad2f21d2084",
+          "size_bytes": 276,
+          "metadata": {}
+        },
+        {
+          "role": "case_story",
+          "path": "case_story.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:78b455e39b9e228a5783e7ae50ad933f7597d6024e8bb06d74ddc9933528c305",
+          "size_bytes": 456,
+          "metadata": {}
+        },
+        {
+          "role": "docket_manifest",
+          "path": "docket_manifest.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:10fd0393f7ee27bae87588fc1bb84df06e0c219806b9ace6886cd09c06e544f1",
+          "size_bytes": 4387,
+          "metadata": {}
+        },
+        {
+          "role": "assembler_envelope",
+          "path": "ASSEMBLER_ENVELOPE.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:4ed1da4016f5695f1d8702d841ce8d8538bdbddecbdc30ec7b89cd1fb5feef33",
+          "size_bytes": 5424,
+          "metadata": {}
+        },
+        {
+          "role": "capability",
+          "path": "CAPABILITY.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:ed28c3e4b6453631fc21e7c8e3b7c1d37f8ec8678d6313d0a469d3ad13929b7b",
+          "size_bytes": 518,
+          "metadata": {}
+        },
+        {
+          "role": "timing",
+          "path": "TIMING.json",
+          "media_type": "application/json",
+          "content_hash": "sha256:2d2d8a8b425a130726d87295a584c7f0d5d91b0a2ce184dbffe2c42ee6bb1eef",
+          "size_bytes": 342,
+          "metadata": {}
+        },
+        {
+          "role": "hashes",
+          "path": "hashes.sha256",
+          "media_type": "text/plain",
+          "content_hash": "sha256:8e9bc7c0e9c66352dd538af8b2237b76bd945024e5b23b9ae2edd7f459dd246a",
+          "size_bytes": 3319,
+          "metadata": {}
+        }
+      ],
+      "timing": {
+        "job_id": "8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c",
+        "accepted_at": "2026-08-06T00:06:04.518Z",
+        "committed_at": "2026-08-06T00:06:09.002846+00:00",
+        "duration_ms": 4537,
+        "stages_ms": {
+          "T0": 0,
+          "T1": 216,
+          "T2": 0,
+          "T3": 35,
+          "T4": 0,
+          "T5": 534,
+          "T6": 1,
+          "T7": 0,
+          "T8": 0,
+          "T9": 0,
+          "T10": 0,
+          "T11": 3739,
+          "T12": 0
+        },
+        "retries": {},
+        "degraded_capabilities": [],
+        "within_five_minutes": true
+      },
+      "persisted": true
+    }
+  ],
+  "timing_summary": {
+    "count": 1,
+    "max_ms": 4537,
+    "p95_ms": 4537,
+    "all_within_five_minutes": true
+  }
+}
