@@ -14316,7 +14316,13 @@ export function _deriveMakesafeSurfacing(
 // close-out doc gate without requiring substatus `complete` (SES U6R never
 // flips that substatus; requiring it left fully released cards in
 // trade_report_in). M1 already treated packSent + AUTHORISED as closeout.
-export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v5-pack-sent-softens-closeout'
+// v6-reattend-current-draft-visible — on a reattend card, enrich no longer
+// blanks the invoice wholesale before the ladder runs. A DRAFT that the shared
+// qualifier has already certified as current-cycle (`qualifying_draft`) reaches
+// the ladder, so `readyForReview` can be true and the card renders in Docs
+// Ready. Closeout is unchanged: `qualifies` requires DRAFT, and every closeout
+// driver requires a RAISED invoice. See the comment on `invoiceForStage`.
+export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v6-reattend-current-draft-visible'
 
 export function _deriveMakesafeBoardStage(
   job: any,
@@ -14788,7 +14794,34 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   const scopedPackSent = packSent === undefined ? undefined : scoped.packSent
   // Suppress closeout drivers (invoiceDone / sentClosed) on reattend while
   // still exposing invoice_status for commercial warning visibility.
-  const invoiceForStage = scoped.allowCloseoutFromEvidence ? invoice : null
+  //
+  // A QUALIFYING CURRENT-CYCLE DRAFT is the one exception, and it cannot widen
+  // closeout by construction. `allowCloseoutFromEvidence` is a blunt
+  // `!hasReattendBoundary(detail)` — it says nothing about THIS invoice. The
+  // per-invoice cycle answer already lives in the shared qualifier
+  // (`invoiceBelongsToCurrentAttendance`: a draft created at/after
+  // `last_reattend_at` is current, and a missing stamp fails closed), which is
+  // exactly what `invoiceQualifiesForCurrentAttendance` above reports as
+  // `qualifying_draft`. Blanking the invoice here ran the cycle guard a second
+  // time, more crudely, and destroyed the precise first answer: the ladder saw
+  // no invoice at all, so `readyForReview` could never be true and a reattend
+  // card with a rendered current-cycle pack and a current-cycle DRAFT at the
+  // Captain's figure fell to `trade_report_in` instead of Docs Ready
+  // (White Gum Valley SWMS-261114, Koondoola SWMS-261025, 2026-08-06).
+  //
+  // Passing it through is closeout-safe, not a judgement call: `qualifies`
+  // REQUIRES `status === 'DRAFT'`, and every closeout driver in the ladder
+  // (`invoiceDone`, `invoiceAuthorisedLive`, `resumeNotSent`,
+  // `authorisedAwaitingSend`, and the `makesafeCompletedAt` fallback behind
+  // them) requires `_makesafeInvoiceIsRaised` — AUTHORISED/SUBMITTED/PAID. A
+  // DRAFT satisfies none of them, so the only term this can reach is the
+  // pre-Xero `invoiceIsDraft` Docs Ready positive. The closeout suppression
+  // this line exists for is untouched, as are `invoice_raw_status` /
+  // `invoice_date` / `invoice_created_at` below (completion-time inputs).
+  const invoiceForStage =
+    (scoped.allowCloseoutFromEvidence || invoiceQualifiesForCurrentAttendance)
+      ? invoice
+      : null
   const boardStage = deriveMakesafeBoardStage(
     j,
     detail,

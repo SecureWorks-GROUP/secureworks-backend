@@ -758,6 +758,26 @@ the captain's ruling REQUIRES a DRAFT invoice to reach Docs Ready. The two
 non-invoice terms (`jobs.status='invoiced'`, substatus `complete`) are operator
 declarations and are deliberately untouched.
 
+On a REATTEND card the ladder must still see a qualifying current-cycle DRAFT.
+`allowCloseoutFromEvidence` is a blunt `!hasReattendBoundary(detail)` and says
+nothing about a particular invoice, so `enrichMakesafeBoardJob`'s
+`invoiceForStage` may suppress closeout on reattend but must NOT blank the
+invoice outright — that ran the cycle guard a second time, more crudely, and
+destroyed the precise per-invoice answer the shared qualifier already computed
+(`invoiceBelongsToCurrentAttendance`: a draft created at/after
+`last_reattend_at` is current, missing stamp fails closed). The card then
+derived `trade_report_in` while the SAME row published
+`invoice_qualifies_as_current_draft: true` — an internally contradictory board
+that hid ready cards from the Captain (White Gum Valley SWMS-261114, Koondoola
+SWMS-261025, 2026-08-06). Passing a `qualifying_draft` through is closeout-safe
+by construction: `qualifies` requires `status === 'DRAFT'` and every closeout
+driver requires `_makesafeInvoiceIsRaised`. Leave `invoice_raw_status` /
+`invoice_date` / `invoice_created_at` suppressed — those are completion-time
+inputs. Diagnose such a card from `invoice_draft_qualification_reason`, never
+from `commercial_warning`, which fires on every reattend regardless of the
+invoice. Regression + three controls:
+`makesafe_reattend_current_draft_stage_test.ts`.
+
 `MAKESAFE_STAGE_LADDER_VERSION` versions the visible ladder (published as
 `declared_stage_engine_version`, advisory, ops payload only) so a measurement
 can name the derivation that produced it. Bump it whenever the ladder's output
