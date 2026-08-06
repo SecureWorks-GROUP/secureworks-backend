@@ -1,0 +1,20 @@
+{
+  "success": true,
+  "skipped": false,
+  "document_id": "55ae5c93-0b3f-4ce6-a1c0-acd4557d1954",
+  "document_version": 6,
+  "attendance_cycle_id": "30198e44-9a1f-4b4e-979f-2a1afc00d9c1",
+  "cycle_attribution": "bound",
+  "source_kind": "durable_curated_revision",
+  "source_identity": "curation-revision:ses-curated-report:SWMS-261025:2026-08-06-mlb-two-report-jobs-v1-multi-return/artifact:ses-curated-report-artifact:4d27982b90d952a73cbb93e16453912a",
+  "source_revision_id": "ses-curated-report:SWMS-261025:2026-08-06-mlb-two-report-jobs-v1-multi-return",
+  "source_artifact_id": "ses-curated-report-artifact:4d27982b90d952a73cbb93e16453912a",
+  "source_artifact_content_hash": "sha256:230fd3651516077f739de3d684eeea0d6638e4793a1772f2416e64db2198bd4a",
+  "expected_raw_sha256": "sha256:4d27982b90d952a73cbb93e16453912a65d6e7a4f4f34588727fbe77775d68a5",
+  "report_input_hash": "sha256:9550c129341cc384ea104e7a9ac2f71b5a0ab72888ec69a6ba3ecca4d9991ff9",
+  "renderer_source_revision": "915e9b423fc597d656c7cb090671bf206138114b",
+  "renderer_script_sha256": "sha256:fda63bcffa0177b702089e67b5719ae50642a9972aa3628c516fcedb1cfe42dc",
+  "renderer_version": "secureworks.wiki-python/915e9b423fc597d656c7cb090671bf206138114b",
+  "writes": 2,
+  "supersedes_prior_bind": true
+}

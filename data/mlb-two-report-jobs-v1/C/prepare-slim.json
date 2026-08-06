@@ -1,0 +1,14 @@
+{
+  "prepare_dry_state": "ready",
+  "prepare_live_state": "ready",
+  "docket_revision_id": "81c6a74c-c2b3-5604-8ca4-603b034b0c95",
+  "invoices_after": [
+    {
+      "invoice_number": "INV-1140",
+      "status": "DRAFT",
+      "total": 280.5,
+      "reference": "MLB-27093"
+    }
+  ],
+  "three_way_match": true
+}

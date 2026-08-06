@@ -1,0 +1,74 @@
+[
+  {
+    "id": "cd1f7bdf-c823-47cf-8702-24c59341fb3f",
+    "cycle": "b53357d1-d537-4ec4-b789-16f0c8e103c0",
+    "submitted_at": "2026-07-22T10:48:39.225+00:00",
+    "arrival": "2026-07-22 14:43",
+    "trade_count": 1,
+    "labour_hours": 3,
+    "damage_cause": "Other: Bust water pipe",
+    "damage_description": "Make-safe type: Ceiling / water ingress\nDamage: Burst water pipe and wet insulation in roof",
+    "work_done": "Investigated in major water ingress, found burst water pipe, informed MLB on urgent call for plumber, removed all wet insulation from roof space. Disposed of 10 bags of wet insulation",
+    "materials_used": [
+      "Bin bags x 10",
+      "Bases / feet",
+      "Tarps / roof materials",
+      "Fixings / consumables",
+      "Other / none"
+    ]
+  },
+  {
+    "id": "30198e44-9a1f-4b4e-979f-2a1afc00d9c1",
+    "cycle": "30198e44-9a1f-4b4e-979f-2a1afc00d9c1",
+    "submitted_at": "2026-08-03T14:46:05.428+00:00",
+    "arrival": "2026-07-24 13:43",
+    "trade_count": 1,
+    "labour_hours": 2,
+    "damage_cause": "Storm / wind",
+    "damage_description": "Make-safe type: Temporary fencing\nDamage: Moisture inside walls of walkway and kitchen.",
+    "work_done": "Re attended property and checked water ingresses walls using moisture meter to check if the walls where dry or drier since the installation of 3 fans and dehumidifier a week prior. Walls slightly dried but definitely still have moisture inside and need longer drying time.",
+    "materials_used": [
+      "Temp fence panels",
+      "Bases / feet",
+      "Tarps / roof materials",
+      "Fixings / consumables",
+      "Other / none"
+    ]
+  },
+  {
+    "id": "1d2a0271-1efa-4fad-b910-4b34934c88bf",
+    "cycle": "1d2a0271-1efa-4fad-b910-4b34934c88bf",
+    "submitted_at": "2026-08-03T14:34:27.254+00:00",
+    "arrival": "2026-07-29 10:27",
+    "trade_count": 1,
+    "labour_hours": 4,
+    "damage_cause": "Storm / wind",
+    "damage_description": "Make-safe type: Other: Scraping back walls (RESTORATION)\nDamage: High levels of moisture in walls not escaping even with the use of high rated fans and dehumidifier.",
+    "work_done": "Scraped back the render off the brick hallway wall, above kitchen sink, and besides kitchen cupboard. Too allow the moisture In the wall to dry out.",
+    "materials_used": [
+      "Temp fence panels",
+      "Bases / feet",
+      "Tarps / roof materials",
+      "Fixings / consumables",
+      "Other / none"
+    ]
+  },
+  {
+    "id": "6145cab3-0b5e-44c0-aed0-69346b8aaab0",
+    "cycle": "6145cab3-0b5e-44c0-aed0-69346b8aaab0",
+    "submitted_at": "2026-08-03T14:25:37.248+00:00",
+    "arrival": "2026-07-31 16:11",
+    "trade_count": 1,
+    "labour_hours": 2,
+    "damage_cause": "Storm / wind",
+    "damage_description": "Make-safe type: Other: Check moisture reading\nDamage: Checked moisture reading of wall and uninstalled 3 fans and dehumidifier, returning equipment.",
+    "work_done": "Checked moisture reading of wall and uninstalled 3 fans and dehumidifier, returning equipment.",
+    "materials_used": [
+      "Temp fence panels",
+      "Bases / feet",
+      "Tarps / roof materials",
+      "Fixings / consumables",
+      "Other / none"
+    ]
+  }
+]

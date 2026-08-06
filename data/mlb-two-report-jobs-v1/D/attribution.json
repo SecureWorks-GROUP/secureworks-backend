@@ -1,0 +1,23 @@
+{
+  "scope": {
+    "text": "Make safe the smashed bedroom window and roller door.",
+    "source": "trade job_type_detail Board up frames + work_done"
+  },
+  "findings": {
+    "text": "Fire. Completely smashed bedroom window and smashed roller door around the handle. Glass shattered around the window area.",
+    "source": "SR damage_cause Fire + damage_description"
+  },
+  "works": {
+    "text": "Cleaned up glass... secure board-up.",
+    "source": "SR work_done (elevated grammar only; same facts)"
+  },
+  "materials": {
+    "items": [
+      "Structural timber x 8m",
+      "Plyboard 12mm 2.4x1.8 x 3",
+      "Screws x 40"
+    ],
+    "source": "SR materials_used quantified entries; ticks stripped"
+  },
+  "money": "materials_charge_figure_required still open; no invent figure; no mint"
+}
