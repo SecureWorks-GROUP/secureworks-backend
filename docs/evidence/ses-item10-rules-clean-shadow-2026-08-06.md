@@ -422,7 +422,7 @@ Stated plainly, because the ticket asks for it and because it is the honest limi
 | L6 | **The roof branch of `check_report_rate_spec` refuses an overcharge (F1).** | The wiki-skill change to two-sided equality lands through the governed release path. Until then the skill's pre-create gate cannot refuse a roof overcharge, even though `B5` can. |
 | L8 | **`A6` refuses a Xero draft edited away from the sealed total on real data.** Unit-tested only; no live card has carried the shape. | First `authorise`-point card whose draft total disagrees with the sealed derivation, or a deliberate rehearsal on a card the Captain nominates. |
 | L10 | **`A6` answered from a LIVE Xero read.** Every determination so far has been mirror-sourced and therefore parked; the `xero_api` branch has never run against production. | The first call site that reads the draft from Xero at determination time — which is the same switch-on the §8 migration gates. |
-| L9 | **The regenerated shadow artifact under `ses-rules-clean/v2`.** | Next run with production credentials; the committed `2026-08-06` artifact stays marked stale until then. |
+| L9 | **The regenerated shadow artifact under the current contract (`ses-rules-clean/v5`).** | Next run with production credentials; the committed `2026-08-06` artifact stays marked stale until then. |
 | L7 | **The deployed backend is observed pricing a double-storey roof.** No post-deploy roof docket exists, so its roof price is currently unobserved rather than confirmed — see §5a. | First roof docket prepared after the 11:36Z deploy; expect $300 ex / $330 inc with no override. `SWMS-261079` is the obvious candidate, its docket being a pre-ruling $350 fossil. |
 
 ---
