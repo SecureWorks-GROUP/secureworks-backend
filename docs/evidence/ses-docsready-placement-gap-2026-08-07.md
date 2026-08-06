@@ -2,6 +2,11 @@
 
 Evidence key: `docsready-placement-gap-two-cards`
 
+**This PR is PARKED and unmergeable BY CAUSE** — it touches only `docs/evidence/**`,
+which matches no path filter in `.github/workflows/pr-check.yml`, so the required
+check never registers (Mode A below). That is a deliberate decision, not a failed
+or abandoned change: the diagnosis is committed and readable, which is the value.
+
 Read-only diagnosis against production. **No production write was made.** The
 conclusion is that the Release 12 recipe refuses both cards **correctly**, and
 that the board publishes the **wrong reason** for the refusal.
@@ -221,6 +226,47 @@ with the `x-api-key` header.
 These are live values and they move. A re-read may legitimately differ; the
 correct response to a difference is to **re-derive**, never to edit a figure
 recorded here.
+
+## Two CI failure modes that look identical and have opposite remedies
+
+From outside, both look the same: a PR stuck at `BLOCKED` with nothing to read.
+The remedies are opposite, and applying the wrong one to the wrong branch costs
+hours. Read this before diagnosing a stuck PR in this repo.
+
+**THE DISTINGUISHING SIGNAL: registered-but-zero-steps means no runner arrived;
+never-registered means no path match.** Check `statusCheckRollup` first — empty
+means Mode A, present means Mode B — then check the starved job's step count.
+
+### Mode A — NEVER REGISTERED
+
+The diff matches no entry in the workflow's `paths:` filter, so no workflow run
+is created at all and the required status never appears.
+
+- **Symptoms:** PR `mergeStateStatus` `BLOCKED`; `statusCheckRollup` **EMPTY**
+  (zero checks); no run object; nothing to cancel, because nothing exists.
+- **It waits forever. Patience never helps.**
+- **Remedy:** widen the path filter, or change the shape of the PR.
+- **Instances:** THIS PR (three files, all `docs/evidence/*.md`); previously the
+  watchdog-only PR; and PR #509, measured at 68 files under `data/` plus
+  `AGENTS.md`, with `mergeStateStatus` `BLOCKED` and `statusCheckRollup` 0.
+- **The trap that causes it:** `*` does not match `/`, so the filter's `*.md`
+  entry covers only the tracked **root** markdown files and does **not** pull in
+  `docs/**`.
+
+### Mode B — REGISTERED BUT NO RUNNER ARRIVED
+
+The diff matches, the run is created and the checks **do** register, but a job
+never gets a runner.
+
+- **Symptoms:** checks present and `QUEUED`; run object exists; the starved job
+  reports **ZERO STEPS** — typically ending cancelled at about fifteen minutes —
+  with no logs. The cancel endpoint may 502.
+- **Remedy:** a fresh run when machines free. Transient, but it recurs whenever
+  jobs contend.
+- **Instance:** measured 2026-08-06 on another branch, PR 630, run 31121700604 —
+  `deno-check` completed/success with 16 steps while `ses-proof-harness`
+  completed/cancelled with 0 steps after 15m52s. The required check had already
+  passed; only the second job starved.
 
 ## Follow-ons
 

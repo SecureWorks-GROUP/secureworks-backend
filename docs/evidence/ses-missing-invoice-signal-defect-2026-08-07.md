@@ -121,6 +121,21 @@ missing — that is the matcher's founding rule and it still holds.
 - Regression to add: a card whose bare claim is shared by siblings and whose PO
   uniquely names the invoice must match; the siblings must not.
 
+## Follow-up awaiting a decision — `agents-md-pointer-to-this-defect`
+
+**Proposed, not done.** An `AGENTS.md` pointer to this OPEN defect was proposed
+and is awaiting a decision. It was proposed because `AGENTS.md` already asserts
+that the C4 board UI must consume `makesafe_invoice_reference_match.ts`, while
+the code does not — so the gap is live drift a future agent needs to know about,
+and `AGENTS.md` is the repo's always-loaded surface.
+
+It was deliberately **not** made in this PR: changing shared project memory has
+not been ruled on, and is not a change to make unattended before a no-coding
+day. The durable knowledge is not lost — it lives here, in this defect's own
+owner document. The minimal edit, if approved, is a two-line pointer under the
+existing "A Missing Purchase Order Is Not A Different One" section, not a new
+`AGENTS.md` section.
+
 ## Related
 
 - `ses-docsready-placement-gap-2026-08-07.md` — the diagnosis this came out of.
