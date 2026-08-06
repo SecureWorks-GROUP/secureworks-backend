@@ -197,6 +197,7 @@ import {
 import {
   currentMakesafeReceivableInvoicesByJobId,
   makesafeHasQualifyingCurrentDraftInvoice,
+  makesafeInvoiceIsCurrentAttendanceReceivable,
   qualifyMakesafeCurrentDraftInvoice,
   selectCurrentMakesafeReceivableInvoice,
 } from './makesafe_docs_ready_invoice.ts'
@@ -14326,7 +14327,15 @@ export function _deriveMakesafeSurfacing(
 // the ladder, so `readyForReview` can be true and the card renders in Docs
 // Ready. Closeout is unchanged: `qualifies` requires DRAFT, and every closeout
 // driver requires a RAISED invoice. See the comment on `invoiceForStage`.
-export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v6-reattend-current-draft-visible'
+// v7-reattend-current-raised-visible — the other half of v6. v6 used the DRAFT
+// qualifier as the reattend exception, so it admitted a current-cycle DRAFT and
+// still blanked a current-cycle AUTHORISED invoice, and a reattend card that had
+// been sent and billed lost `invoiceDone` entirely and sat in Trade Report In.
+// The cycle boundary is unchanged (`invoiceBelongsToCurrentAttendance`); only
+// the lifecycle status the boundary is applied to widens, from DRAFT to
+// DRAFT-or-raised. Prior-cycle commercial evidence is still refused. Closeout
+// still requires the doc gate, `verifiedSent` and the 7-day clock.
+export const MAKESAFE_STAGE_LADDER_VERSION = 'makesafe-stage-ladder.v7-reattend-current-raised-visible'
 
 export function _deriveMakesafeBoardStage(
   job: any,
@@ -14834,8 +14843,38 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   // same pair, for the same reason, one seam later). Binding presentation to
   // the invoice the ladder actually used keeps the two answers structurally
   // incapable of disagreeing.
+  //
+  // A RAISED invoice that the SAME cycle boundary certifies as current is the
+  // second exception, and it is the one the DRAFT-shaped test above could not
+  // express. `qualifyMakesafeCurrentDraftInvoice` fuses two questions — "is this
+  // invoice this card's own, for this attendance" and "what stage of its life is
+  // it at" — and answers the first only when the second is DRAFT. So a reattend
+  // card that had already been SENT with route proofs and BILLED with an
+  // AUTHORISED current-cycle invoice reported `wrong_status`, was blanked here,
+  // and lost the ladder's raised-invoice term altogether: `invoiceDone` false,
+  // no closeout branch reachable, and the card fell to `trade_report_in` while
+  // its own money and send proofs said otherwise (SWMS-26953, SWMS-26902,
+  // SWMS-261128, SWMS-261131 — 2026-08-06; measured as the complete population).
+  //
+  // This is NOT a relaxation of the reattend guard. It applies the guard's own
+  // per-invoice predicate (`invoiceBelongsToCurrentAttendance` — created at or
+  // after `last_reattend_at`, missing/unparseable stamp fails closed) to a
+  // strictly STRONGER money status than the one already admitted. Prior-cycle
+  // commercial evidence is refused by the identical boundary that refuses it
+  // today; the control is SWMS-26651, whose PAID invoice predates its reattend
+  // and stays suppressed. Wrong job, wrong type, absent or foreign reference all
+  // still fail closed.
+  //
+  // What it does NOT do: it does not close a card by itself. Everything
+  // downstream still applies — the close-out doc gate, `verifiedSent`, and the
+  // 7-day completion clock. A card whose docs are incomplete and whose pack is
+  // not proved sent holds in Docs Ready, which is an honest destination, not a
+  // green one.
+  const invoiceRaisedForCurrentAttendance = _makesafeInvoiceIsRaised(invoice) &&
+    makesafeInvoiceIsCurrentAttendanceReceivable(j, detail, invoice)
   const invoiceForStage =
-    (scoped.allowCloseoutFromEvidence || invoiceQualifiesForCurrentAttendance)
+    (scoped.allowCloseoutFromEvidence || invoiceQualifiesForCurrentAttendance ||
+        invoiceRaisedForCurrentAttendance)
       ? invoice
       : null
   const boardStage = deriveMakesafeBoardStage(
@@ -14859,12 +14898,18 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   // has gone to completed with a soft docs_warning (verified-sent).
   let missingDocs: string[] = []
   let invoiceDone = false
-  if (docFlags && scoped.allowCloseoutFromEvidence) {
+  if (
+    docFlags &&
+    (scoped.allowCloseoutFromEvidence || invoiceRaisedForCurrentAttendance)
+  ) {
     // MUST stay term-for-term identical to the ladder's own invoiceDone
-    // (_deriveMakesafeBoardStage) — including the raised-invoice term. If this
-    // copy counted a DRAFT invoice the board would advertise a hard
-    // `docs_missing` hold on a card the ladder is no longer holding for docs.
-    invoiceDone = _makesafeInvoiceIsRaised(invoice) ||
+    // (_deriveMakesafeBoardStage) — including the raised-invoice term, and
+    // including WHICH invoice that term reads. If this copy counted a DRAFT
+    // invoice the board would advertise a hard `docs_missing` hold on a card the
+    // ladder is no longer holding for docs; if it read the raw `invoice` while
+    // the ladder read `invoiceForStage`, the two would disagree in the opposite
+    // direction. Both consume `invoiceForStage`, which is the one binding.
+    invoiceDone = _makesafeInvoiceIsRaised(invoiceForStage) ||
       String(j?.status || '').toLowerCase() === 'invoiced' ||
       normalizeMakesafeSubstatus(detail?.substatus) === 'complete'
     if (invoiceDone) {
@@ -14884,10 +14929,27 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     scopedPackSent,
     scopedPack,
   )
-  const invoiceAuthorised = scoped.allowCloseoutFromEvidence &&
-    _makesafeInvoiceIsRaised(invoice)
-  const verifiedSent = (scopedPackSent === true && invoiceAuthorised &&
-    normalizeMakesafeSubstatus(detail?.substatus) === 'complete') || surf.gateSoftenSent
+  // Same one-binding rule as `invoiceDone` above: the ladder's own
+  // `invoiceAuthorised` is `_makesafeInvoiceIsRaised(invoiceForStage)` (that is
+  // the invoice it is handed), so this copy reads the identical binding rather
+  // than re-running the blunt reattend suppression on the raw row.
+  const invoiceAuthorised = _makesafeInvoiceIsRaised(invoiceForStage)
+  // Verified-sent reconciles the same way the board stage derives it: the
+  // MAKESAFE_PACK_SENT marker is TRIAGE only and never softens the gate on its
+  // own — it must coincide with an authorised invoice OR the trustworthy
+  // gateSoftenSent signal (a DURABLE pack sent-status).
+  //
+  // The `substatus === 'complete'` term the ladder dropped at v5 was still here,
+  // so the two copies disagreed on exactly the cards v5 was written for: SES U6R
+  // closeout writes the pack-sent marker but never flips that substatus, so the
+  // ladder completes the card (soft `docs_warning`) while this copy still called
+  // it un-sent and published `docs_missing: true` — a HARD doc hold advertised on
+  // a card nothing is holding. Latent until v7 let a reattend card reach the doc
+  // gate at all; it surfaced immediately on SWMS-26953, SWMS-26902 and
+  // SWMS-261128, which complete with `["invoice","swms"]` still outstanding.
+  // Pinned at source in makesafe_draft_invoice_stage_test.ts.
+  const verifiedSent = (scopedPackSent === true && invoiceAuthorised) ||
+    surf.gateSoftenSent
 
   // Split the missing-docs signal:
   //  - HARD docs_missing: the un-sent job is held in report_ready by the gate.

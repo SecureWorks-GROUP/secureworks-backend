@@ -420,10 +420,16 @@ Deno.test("enrichMakesafeBoardJob's invoiceDone uses the same raised-invoice ter
   // board's `docs_missing` / `missing_docs` chip. If that copy still counted a
   // DRAFT, the board would advertise a hard doc hold on a card the ladder is no
   // longer holding for docs. It is not exported, so this is pinned at source.
+  //
+  // The ladder is handed its invoice as the `invoice` parameter; enrich resolves
+  // the same row into `invoiceForStage` and passes THAT to the ladder. So the two
+  // copies name different identifiers and still read the identical binding — a
+  // pin on one spelling would force the enrich copy to re-read the raw row and
+  // reintroduce exactly the drift this test exists to catch.
   const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
-  const raised =
-    (src.match(/invoiceDone = _makesafeInvoiceIsRaised\(invoice\) \|\|/g) ?? [])
-      .length;
+  const raised = (src.match(
+    /invoiceDone = _makesafeInvoiceIsRaised\((?:invoice|invoiceForStage)\) \|\|/g,
+  ) ?? []).length;
   assertEquals(
     raised,
     2,
@@ -433,6 +439,27 @@ Deno.test("enrichMakesafeBoardJob's invoiceDone uses the same raised-invoice ter
     (src.match(/invoiceDone = hasActiveMakesafeInvoice\(/g) ?? []).length,
     0,
     "no invoiceDone assignment may count a DRAFT invoice",
+  );
+
+  // `verifiedSent` is the OTHER copied term, and it drifted where `invoiceDone`
+  // did not. v5 dropped `substatus === 'complete'` from the ladder because SES
+  // U6R closeout never flips that substatus, but the enrich copy kept it — so
+  // the ladder completed a pack-sent card while the same row published
+  // `docs_missing: true`, a hard doc hold on a card nothing was holding. Both
+  // copies must now read `(packSent === true && invoiceAuthorised)`.
+  assertEquals(
+    // `packSent` in the ladder, `scopedPackSent` in enrich — one pattern, both.
+    (src.match(/[Pp]ackSent === true && invoiceAuthorised\) \|\|/g) ?? [])
+      .length,
+    2,
+    "both verifiedSent copies must soften on packSent + a raised invoice alone",
+  );
+  assertEquals(
+    (src.match(
+      /invoiceAuthorised &&\s*\n\s*normalizeMakesafeSubstatus\(detail\?\.substatus\) === 'complete'/g,
+    ) ?? []).length,
+    0,
+    "no verifiedSent copy may require substatus 'complete' (dropped at ladder v5)",
   );
 });
 
@@ -444,7 +471,7 @@ Deno.test("the visible ladder's version is pinned and published", () => {
   // derivation that produced it, exactly as `SES_STAGE_ENGINE_V2_VERSION` does.
   assertEquals(
     MAKESAFE_STAGE_LADDER_VERSION,
-    "makesafe-stage-ladder.v6-reattend-current-draft-visible",
+    "makesafe-stage-ladder.v7-reattend-current-raised-visible",
   );
   // The read model republishes whatever enrich stamped, and null when a caller
   // built the base row without it — never a silent default that would attribute

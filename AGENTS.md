@@ -850,6 +850,39 @@ the captain's ruling REQUIRES a DRAFT invoice to reach Docs Ready. The two
 non-invoice terms (`jobs.status='invoiced'`, substatus `complete`) are operator
 declarations and are deliberately untouched.
 
+A re-attend card's own current-cycle money reaches the ladder whatever its
+lifecycle status. `invoiceForStage` asks TWO questions, and they must stay
+separate: `makesafeInvoiceIsCurrentAttendanceReceivable` answers "is this
+invoice this card's own, for this attendance" (exact `job_id`, ACCREC, the
+`invoiceBelongsToCurrentAttendance` boundary, card-owned reference — all
+status-agnostic), and the caller pairs it with whatever lifecycle predicate its
+question needs. Fusing them is what broke: v6 reached cycle attribution only
+through the DRAFT qualifier, so a card SENT with route proofs and BILLED with an
+AUTHORISED current-cycle invoice reported `wrong_status`, was blanked, lost
+`invoiceDone`, and sat in `trade_report_in` (SWMS-26953, SWMS-26902,
+SWMS-261128, SWMS-261131 — the complete class, 4 of 456 cards, 2026-08-06).
+Widening the STATUS is safe; widening the BOUNDARY is not — prior-cycle money
+must never place or close a card, and the control is SWMS-26651. A raised
+invoice still does not close anything on its own: the close-out doc gate,
+`verifiedSent` and the 7-day clock all still apply. `report_status` and `health`
+are OUTPUTS of the derived stage, never inputs — do not go hunting there, and
+never force a card green through `jobs.status='invoiced'` / substatus
+`complete`, which bypass `invoiceForStage` entirely. The close-out contract
+(`close-out-contract.md` in the wiki skill) predates attendance cycles: its
+document step cannot move such a card, proved by counterfactual. Evidence and
+the read-only re-proof
+(`scripts/ses-reattend-raised-invoice-closeout-verify.ts`, `--mode=served` must
+be empty post-deploy; `--mode=derive` compares against `declared_stage`, NEVER
+`canonical_stage`, which carries the Captain's display overlay):
+`docs/evidence/ses-reattend-raised-invoice-closeout-2026-08-06.md`.
+
+`invoiceDone` and `verifiedSent` each exist TWICE — once in the ladder, once in
+`enrichMakesafeBoardJob` — and both copies must read `invoiceForStage`, not the
+raw row, and must stay term-for-term identical. `verifiedSent` had drifted since
+v5 (the enrich copy still required substatus `complete`), so a pack-sent card
+completed while the same row published a hard `docs_missing`. Both are pinned at
+source in `makesafe_draft_invoice_stage_test.ts`.
+
 On a REATTEND card the ladder must still see a qualifying current-cycle DRAFT.
 `allowCloseoutFromEvidence` is a blunt `!hasReattendBoundary(detail)` and says
 nothing about a particular invoice, so `enrichMakesafeBoardJob`'s
