@@ -1267,6 +1267,12 @@ on **every** AJS/AJBR pack email (report_invoice and photo). Domain is always
 `ses_graph_mail_gateway.ts`); legacy `makesafe_send_pack` and
 `checkExactRecipientGate` consume the same list via
 `requiredPackCcForReportRecipient`. Do **not** put vanessa/mandi on the To.
+The execute envelope gate applies the widened set only to a release with no
+`route_send` effect yet; one already dispatching keeps the `ses@` floor it was
+approved under, because a stored envelope cannot be rewritten and re-preparing a
+half-sent release re-mails the builder. An unreadable send ledger refuses as
+`route_send_proof_unreadable` rather than guessing a floor. That boundary and the
+live domain audit are owned by `docs/evidence/ajs-cc-routing-fix-2026-08-06.md`.
 MLB pack routing is untouched (`makesafes@` / finance@ invoice path). Client-send
 gate kinds match the skill table exactly: `report_invoice`, `report`, `photo`,
 `invoice` in `makesafe_send_pack.ts` (`checkSesClientSendRouteGate`). Route

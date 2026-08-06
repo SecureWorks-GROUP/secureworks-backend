@@ -7,8 +7,8 @@
 // input yields "do not send / do not authorise".
 
 import {
-  ajsPackCc,
   AJS_WORK_ORDERS_MAILBOX,
+  ajsPackCc,
 } from "./ses_release_route_shape.ts";
 
 // ── Privileged-caller auth gate (decision: scoped-routine-key-2026-06-17) ──
@@ -457,9 +457,9 @@ export function checkExactRecipientGate(args: {
   }
   if (extras.length > 0) {
     failures.push(
-      `cc must be EXACTLY [${requiredCc.join(", ")}] only; rejected extra cc(s): ${
-        extras.join(", ")
-      }`,
+      `cc must be EXACTLY [${
+        requiredCc.join(", ")
+      }] only; rejected extra cc(s): ${extras.join(", ")}`,
     );
   }
 

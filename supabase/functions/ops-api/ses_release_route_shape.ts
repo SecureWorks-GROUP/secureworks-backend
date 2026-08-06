@@ -29,8 +29,8 @@ export {
   AJS_MANDI_CC,
   AJS_VANESSA_CC,
   AJS_WORK_ORDERS_MAILBOX,
-  SES_RELEASE_CC,
   isMlbBuilderKey,
+  SES_RELEASE_CC,
 };
 
 export type SesReleaseBuilderKey = "AJS" | "AJBR" | "MLB" | "WESTERN" | string;

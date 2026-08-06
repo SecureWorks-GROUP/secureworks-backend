@@ -29,6 +29,7 @@ import {
   type SesDocketPersistenceClient,
 } from "./ses_docket_persistence.ts";
 import { mlbPhysicalUsesOrdinaryMailSendFallback } from "./ses_mlb_thread_reply.ts";
+import { ajsPackCc } from "./ses_release_route_shape.ts";
 import {
   materialsChargeDecisionFromRevision,
   SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
@@ -891,6 +892,68 @@ Deno.test("AJS 70062 roof wording assembles the physical make-safe pack", async 
     "PHOTO_EMAIL_DRAFT",
     "REPORT_EMAIL_DRAFT",
   ]);
+});
+
+// Captain 2026-08-06: the operator-facing AJS/AJBR drafts must render the SAME
+// permanent pack CC set the sealed route sends on — ses@ + vanessa@ + mandi@,
+// domain always ajs.build — and must never put a billing contact on the To.
+// MLB drafts are untouched by that ruling and must carry neither address.
+Deno.test("AJS/AJBR email drafts render the permanent pack CC set; MLB drafts do not", async () => {
+  const expectedCc = `Cc: ${ajsPackCc().join(", ")}`;
+  assertEquals(
+    expectedCc,
+    "Cc: ses@secureworkswa.com.au, vanessa@ajs.build, mandi@ajs.build",
+  );
+  for (const builderKey of ["AJS", "AJBR"] as const) {
+    const row = SES_FAMILY_MATRIX.find((candidate) =>
+      candidate.builder_key === builderKey &&
+      candidate.family === "physical_makesafe"
+    )!;
+    const input = fixtureInput(row);
+    const result = (await prepareSesDocketRevision(
+      request(input.identity.job_id),
+      dependencies(input),
+    )).results[0];
+    for (
+      const draft of [
+        result.email_drafts.REPORT_EMAIL_DRAFT,
+        result.email_drafts.PHOTO_EMAIL_DRAFT,
+      ]
+    ) {
+      assertStringIncludes(draft, expectedCc);
+      const toLine = String(draft).split("\n").find((line) =>
+        line.startsWith("To:")
+      )!;
+      assertStringIncludes(toLine, "workorders@ajs.build");
+      assertEquals(
+        toLine.includes("vanessa@") || toLine.includes("mandi@"),
+        false,
+        `${builderKey} billing contacts must stay on CC: ${toLine}`,
+      );
+      assertEquals(
+        /ajsbuild|ajsbuid/.test(draft),
+        false,
+        `${builderKey} draft must never carry a misspelled ajs.build domain`,
+      );
+    }
+  }
+
+  const mlbRow = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "MLB" &&
+    candidate.family === "physical_makesafe" &&
+    candidate.routing_rule === "mlb-perth-routing"
+  )!;
+  const mlbResult = (await prepareSesDocketRevision(
+    request(fixtureInput(mlbRow).identity.job_id),
+    dependencies(fixtureInput(mlbRow)),
+  )).results[0];
+  for (const draft of Object.values(mlbResult.email_drafts)) {
+    assertEquals(
+      String(draft).includes("vanessa@") || String(draft).includes("mandi@"),
+      false,
+      "MLB drafts must not gain AJS builder CCs",
+    );
+  }
 });
 
 // The two-email route drops INVOICE_EMAIL_DRAFT entirely, so the invoice-bundle
