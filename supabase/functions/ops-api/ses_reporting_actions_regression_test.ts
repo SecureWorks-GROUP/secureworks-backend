@@ -823,6 +823,129 @@ Deno.test("review pack keeps an independently proved sibling bundle report visib
   assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
 });
 
+function roofPortalCockpitClient(
+  draftBuilderReportEmailState: string,
+): any {
+  const rows: Record<string, unknown> = {
+    makesafe_docket_revisions_current: {
+      id: "docket-fixture",
+      job_id: "job-fixture",
+      family_matrix_version: "family-matrix-fixture",
+      invoice_obligation_revision_id: null,
+      attendance_cycle_ids: ["cycle-fixture"],
+      stage: "pre_xero",
+      pre_xero_docs_ready: true,
+      envelope: {
+        v2: {
+          classification: {
+            family: "ordinary_roof_portal",
+            job_number: "SWMS-TEST",
+            report_only: true,
+            builder_key: "MLB",
+          },
+          routing: { invoice_to: "makesafes@builder.example" },
+          items: {
+            draft_builder_report_email: {
+              state: draftBuilderReportEmailState,
+            },
+          },
+        },
+      },
+      blockers: [],
+      review_spec: { cards: [{ family: "ordinary_roof_portal" }] },
+      email_drafts: {
+        INVOICE_EMAIL_DRAFT:
+          "To: makesafes@builder.example\nSubject: Invoice\nAttachments: invoice-hash\n\nBody",
+      },
+    },
+    makesafe_readiness_current_v2: {
+      readiness_revision: "readiness-fixture",
+      dependency_generation: 1,
+      ready: true,
+      blockers: [],
+    },
+    makesafe_invoice_obligation_revisions_current: {
+      id: "obligation-fixture",
+      pricing_disposition: "no_additional_charge",
+      blockers: [],
+      duplicate_probe: { allows_create: true, ambiguity: "none" },
+    },
+    makesafe_docket_artifacts: [],
+    job_assignments: [],
+    job_service_reports: [],
+  };
+  return {
+    storage: {
+      from() {
+        return {
+          download: () => Promise.resolve({ data: new Blob([]), error: null }),
+        };
+      },
+    },
+    from(table: string) {
+      let single = false;
+      const query: any = {
+        select: () => query,
+        eq: () => query,
+        order: () => query,
+        limit: () => query,
+        maybeSingle: () => {
+          single = true;
+          return query;
+        },
+        then: (resolve: (value: unknown) => unknown) => {
+          const value = rows[table];
+          return Promise.resolve({
+            data: single && Array.isArray(value) ? value[0] || null : value,
+            error: null,
+          }).then(resolve);
+        },
+      };
+      return query;
+    },
+  } as any;
+}
+
+Deno.test("cockpit reads the portal-is-the-report manifest declaration and drops the report email requirement", async () => {
+  // Producer seam for the 2026-08-06 ruling: the manifest's own
+  // draft_builder_report_email: not_applicable stamp (not `report_only`) is what
+  // flows into report_route_applicable, so a live roof-portal card with one
+  // invoice draft is no longer held for a report email nobody may fabricate.
+  const cockpit = await querySesReviewCockpitAction(
+    roofPortalCockpitClient("not_applicable"),
+    "job-fixture",
+  );
+  const codes = cockpit.verdict.blockers.map((item: any) => item.code);
+  assertEquals(
+    codes.filter((code: string) =>
+      code === "report_only_email_applicability_parked"
+    ),
+    [],
+  );
+  assertEquals(
+    cockpit.verdict.blockers
+      .filter((item: any) => item.code === "route_draft_missing")
+      .filter((item: any) => String(item.fact).includes("report email")),
+    [],
+  );
+});
+
+Deno.test("cockpit still demands the report email when the manifest does not declare not_applicable", async () => {
+  // Fail-strict control: any other manifest state (here the initial "blocked")
+  // keeps the report route required, so a family that owes a report email and
+  // failed to build one is still held honestly.
+  const cockpit = await querySesReviewCockpitAction(
+    roofPortalCockpitClient("blocked"),
+    "job-fixture",
+  );
+  const held = cockpit.verdict.blockers.find((item: any) =>
+    item.code === "route_draft_missing" &&
+    String(item.fact).includes("report email")
+  );
+  assertEquals(Boolean(held), true);
+  assertEquals(cockpit.status, "HOLD");
+});
+
 Deno.test("cockpit response converts missing independent report proof into a visible HOLD", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nlegacy fixture");
   const reportHash = await sesSha256Bytes(bytes);

@@ -8,9 +8,9 @@ import {
 import {
   approveInvoiceDisabledReason,
   buildSesCockpitView,
-  classifySesReleaseSendProgress,
   buildSesReleaseRevision,
   canRecordSesApproval,
+  classifySesReleaseSendProgress,
   describeSesSendItPlan,
   evaluateSesMechanicalClean,
   requiredSesRouteKinds,
@@ -732,11 +732,16 @@ Deno.test("physical make-safe still owes its report email after the ruling", () 
       route.route_kind !== "report"
     ),
   });
-  for (const input of [noReport, { ...noReport, report_route_applicable: true }]) {
+  for (
+    const input of [noReport, { ...noReport, report_route_applicable: true }]
+  ) {
     const blocker = evaluateSesMechanicalClean(input).blockers.find(
       (item) => item.code === "route_draft_missing",
     );
-    assert(blocker, "physical make-safe must still be held for its report email");
+    assert(
+      blocker,
+      "physical make-safe must still be held for its report email",
+    );
     assertStringIncludes(blocker!.fact, "report email");
   }
   // The report route is required, and dropping the photo email does not drop it.

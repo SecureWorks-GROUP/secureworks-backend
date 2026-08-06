@@ -227,7 +227,7 @@ export function requiredSesRouteKinds(
  * nothing left to approve and a second approve would commit the money twice.
  */
 export function approveInvoiceDisabledReason(
-  docket: { xero_binding?: Record<string, any> | null },
+  docket: { xero_binding?: Record<string, unknown> | null },
   state: {
     stale: boolean;
     xeroAuthorised: boolean;
@@ -743,10 +743,13 @@ export function describeReleaseSendProgress(
 ): string | null {
   if (progress.kind === "none") return null;
   if (progress.kind === "released") {
-    return `This release is already complete (release ${progress.release_revision_id.slice(0, 8)}…). Do not send again.`;
+    return `This release is already complete (release ${
+      progress.release_revision_id.slice(0, 8)
+    }…). Do not send again.`;
   }
   if (progress.kind === "closeout_pending") {
-    const kinds = progress.proved_route_kinds.join(", ") || "all required routes";
+    const kinds = progress.proved_route_kinds.join(", ") ||
+      "all required routes";
     return `Every required route is already proved on the ledger (${kinds}); closeout verification is still incomplete. Do not send again — finish closeout, never re-dispatch.`;
   }
   const missing = progress.missing_route_kinds.join(", ") || "unknown";
@@ -966,15 +969,13 @@ export function buildSesCockpitView(
         // Narrate the real pack (563 honesty). AJS report_invoice + photo packs
         // read as two routes; MLB three-route packs still read as three.
         plan: describeSesSendItPlan(docket.routes),
-        disabled_reason: sendIt
-          ? null
-          : (releaseReason ||
-            sendItDisabledReason(verdict, {
-              stale,
-              xeroAuthorised,
-              noAdditionalCharge,
-              xeroStatus: docket.xero_binding?.status ?? null,
-            })),
+        disabled_reason: sendIt ? null : (releaseReason ||
+          sendItDisabledReason(verdict, {
+            stale,
+            xeroAuthorised,
+            noAdditionalCharge,
+            xeroStatus: docket.xero_binding?.status ?? null,
+          })),
         failed_checks: sesFailedChecks(verdict),
         route_kinds: sesRouteKindsOnPack(docket.routes),
         route_count: sesRouteKindsOnPack(docket.routes).length,

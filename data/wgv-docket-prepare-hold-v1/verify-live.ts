@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-explicit-any
 // Read-only: pulls each card's LIVE cockpit, reconstructs the clean input from
 // the live facts it publishes, and runs the PATCHED evaluator over it.
 import {
@@ -10,8 +11,14 @@ const URL_BASE = Deno.env.get("SW_SUPABASE_URL")!;
 const KEY = Deno.env.get("SW_API_KEY")!;
 
 const CARDS = [
-  { job: "088dee02-91d0-4539-8c9c-6014c9ebf06e", label: "SWMS-261114 White Gum Valley" },
-  { job: "967cdb6e-e57e-46ea-89d8-14e8afbc2ada", label: "SWMS-261081 Mindarie" },
+  {
+    job: "088dee02-91d0-4539-8c9c-6014c9ebf06e",
+    label: "SWMS-261114 White Gum Valley",
+  },
+  {
+    job: "967cdb6e-e57e-46ea-89d8-14e8afbc2ada",
+    label: "SWMS-261081 Mindarie",
+  },
 ];
 
 for (const card of CARDS) {
@@ -62,22 +69,68 @@ for (const card of CARDS) {
     builder_key: "MLB",
   };
 
-  const before = evaluateSesMechanicalClean({ ...base, report_route_applicable: true });
-  const after = evaluateSesMechanicalClean({ ...base, report_route_applicable: false });
+  const before = evaluateSesMechanicalClean({
+    ...base,
+    report_route_applicable: true,
+  });
+  const after = evaluateSesMechanicalClean({
+    ...base,
+    report_route_applicable: false,
+  });
 
   console.log(`\n=== ${card.label} ===`);
-  console.log("live status/band  :", live.status, "/", live.verdict.approval_band);
-  console.log("live blockers     :", live.verdict.blockers.map((b: any) => b.code).join(", "));
-  console.log("live routes       :", routes.map((r: any) => r.route_kind).join(", "));
-  console.log("live xero status  :", live.sections.money?.xero?.status, live.sections.money?.xero?.invoice_number);
+  console.log(
+    "live status/band  :",
+    live.status,
+    "/",
+    live.verdict.approval_band,
+  );
+  console.log(
+    "live blockers     :",
+    live.verdict.blockers.map((b: any) => b.code).join(", "),
+  );
+  console.log(
+    "live routes       :",
+    routes.map((r: any) => r.route_kind).join(", "),
+  );
+  console.log(
+    "live xero status  :",
+    live.sections.money?.xero?.status,
+    live.sections.money?.xero?.invoice_number,
+  );
   console.log("--- patched evaluator over those live facts ---");
-  console.log("required routes   :", requiredSesRouteKinds("ordinary_roof_portal", false, "MLB", false).join(", "));
-  console.log("strict (old)      : blockers =", before.blockers.map((b) => b.code).join(", ") || "(none)", "| band", before.approval_band);
-  console.log("ruled  (new)      : blockers =", after.blockers.map((b) => b.code).join(", ") || "(none)", "| clean", after.clean, "| band", after.approval_band);
-  console.log("failed checks     :", after.checks.filter((c) => !c.passed).map((c) => c.id).join(", ") || "(none)");
+  console.log(
+    "required routes   :",
+    requiredSesRouteKinds("ordinary_roof_portal", false, "MLB", false).join(
+      ", ",
+    ),
+  );
+  console.log(
+    "strict (old)      : blockers =",
+    before.blockers.map((b) => b.code).join(", ") || "(none)",
+    "| band",
+    before.approval_band,
+  );
+  console.log(
+    "ruled  (new)      : blockers =",
+    after.blockers.map((b) => b.code).join(", ") || "(none)",
+    "| clean",
+    after.clean,
+    "| band",
+    after.approval_band,
+  );
+  console.log(
+    "failed checks     :",
+    after.checks.filter((c) => !c.passed).map((c) => c.id).join(", ") ||
+      "(none)",
+  );
   const approveInvoice = after.approval_band !== "decision_blocked" &&
     after.checks.filter((c) => c.id !== "C11").every((c) => c.passed);
   console.log("APPROVE INVOICE   :", approveInvoice ? "ENABLED" : "disabled");
-  console.log("SEND IT           :", after.clean && live.sections.money?.xero?.status === "AUTHORISED"
-    ? "ENABLED" : `disabled until invoice AUTHORISED (now ${live.sections.money?.xero?.status})`);
+  console.log(
+    "SEND IT           :",
+    after.clean && live.sections.money?.xero?.status === "AUTHORISED"
+      ? "ENABLED"
+      : `disabled until invoice AUTHORISED (now ${live.sections.money?.xero?.status})`,
+  );
 }
