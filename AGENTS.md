@@ -1701,9 +1701,35 @@ and the proposal would have zero materials charge lines, refuse with
 `materials_charge_figure_required` naming the materials and asking for **one**
 ex-GST figure. Never raise labour hours or the sealed rate to cover materials.
 
-The card carries a standing materials-charge DECISION with three states, and
-the operator moves between them on the OPERATOR surface, never by rewriting
-trade evidence: the `materials_charge` body field of
+**Settled cards are never asked** (2026-08-06,
+`docs/evidence/ses-materials-blocker-reconcile-2026-08-06.md`). Two read-only
+readers in `ses_invoiced_materials_evidence.ts` answer the question before the
+operator is:
+
+- `readSesReleasedCycleEvidence` — the CURRENT attendance cycle has a release
+  route proof AND an issued ACCREC invoice, so nothing is left to price. Prove
+  it from `ses_release_route_proofs` (it carries `job_id`);
+  `ses_external_effects.job_id` is NULL on all 41 `route_send` rows, so a job
+  join there reads as "nothing sent". Cycle-scoped: a re-attendance is a
+  genuine new question.
+- `readSesInvoicedMaterialsEvidence` — one issued ACCREC invoice whose lines
+  this reading can fully account for and which prices materials. **A labour-only
+  invoice must never silence a materials question**: labour is classified first,
+  disposal is a service excluded from the total, and one unrecognised line
+  refuses the whole reading rather than yielding a partial total.
+
+Both RECORD a marker and add no money (the charge is already billed; a second
+line is what a later mint would double-bill), neither is inherited, and neither
+touches a card that already carries a decision or already prices typed
+materials. Precedence the coming derived-proposal path must inherit: released
+cycle -> operator decision -> committed invoice money -> derived proposal ->
+ask. Committed money outranks derivation permanently. Live 2026-08-06: 25 of 33
+`standard_labour_materials` cards settle (8 terminal, 17 itemised); re-measure
+read-only with `scripts/ses-materials-blocker-reconcile-measure.ts`.
+
+Where nothing has settled it, the card carries a standing materials-charge
+DECISION with three states, and the operator moves between them on the OPERATOR
+surface, never by rewriting trade evidence: the `materials_charge` body field of
 `prepare_ses_docket_revision`, single-card selections only.
 
 - **UNSET** — nobody answered. Materials recorded → the blocker above.

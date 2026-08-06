@@ -35,6 +35,10 @@ import {
   type SesMaterialsChargeDirective,
 } from "./ses_materials_charge_guard.ts";
 import {
+  readSesInvoicedMaterialsEvidence,
+  readSesReleasedCycleEvidence,
+} from "./ses_invoiced_materials_evidence.ts";
+import {
   type ApprovedDraftThreadCandidate,
   pickIntakeWorkOrderEmailSubject,
   resolveIntakeThreadCoordinates,
@@ -3257,6 +3261,62 @@ export function createSesAssemblerRuntimeDependencies(
         if (marker != null) return marker;
       }
       return null;
+    },
+    // Read-only reading of what this card has already settled: whether its
+    // current cycle shipped, and what its issued invoice priced. Both select
+    // from local mirrors and write nothing — no Xero call, no mirror write, no
+    // invoice link — so the sealed SES money fence is not engaged.
+    //
+    // Send proof comes from `ses_release_route_proofs`, which carries `job_id`.
+    // Never reach for `ses_external_effects`: its `job_id` is NULL on every
+    // `route_send` row, so a job join there reads as "nothing was ever sent".
+    //
+    // A fault throws rather than returning "nothing settled", because an
+    // unreadable mirror and a genuinely open card must not become the same
+    // answer — the first would silently re-ask a shipped card to price itself.
+    resolveMaterialsAnswerEvidence: async ({ job_id, attendance_cycle_id }) => {
+      const invoiceRows = text(job_id)
+        ? await many(
+          client
+            .from("xero_invoices")
+            // `xero_invoice_id` is the LIVE column name; there is no
+            // `invoice_id` on `xero_invoices`, and selecting one is a
+            // production 400 that reads as "this card has no invoice".
+            .select(
+              "invoice_id:xero_invoice_id,invoice_number,status,invoice_type,line_items",
+            )
+            .eq("job_id", job_id),
+          "xero_invoices.materials_answer_evidence",
+        )
+        : [];
+      const invoices = invoiceRows.map((row) => ({
+        invoice_id: row.invoice_id ?? null,
+        invoice_number: row.invoice_number ?? null,
+        status: row.status ?? null,
+        invoice_type: row.invoice_type ?? null,
+        line_items: row.line_items,
+      }));
+      const proofRows = text(job_id) && text(attendance_cycle_id)
+        ? await many(
+          client
+            .from("ses_release_route_proofs")
+            .select("route_kind,proven_at,attendance_cycle_ids")
+            .eq("job_id", job_id),
+          "ses_release_route_proofs.materials_answer_evidence",
+        )
+        : [];
+      return {
+        released: readSesReleasedCycleEvidence({
+          attendance_cycle_id: attendance_cycle_id ?? null,
+          route_proofs: proofRows.map((row) => ({
+            route_kind: row.route_kind ?? null,
+            proven_at: row.proven_at ?? null,
+            attendance_cycle_ids: row.attendance_cycle_ids,
+          })),
+          invoices,
+        }),
+        invoiced: readSesInvoicedMaterialsEvidence(invoices),
+      };
     },
     persist: createSesDocketPersistenceAdapter({
       client,

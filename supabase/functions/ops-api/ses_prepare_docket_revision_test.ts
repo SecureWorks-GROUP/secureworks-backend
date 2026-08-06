@@ -4015,3 +4015,199 @@ Deno.test(
     }
   },
 );
+
+// ---------------------------------------------------------------------------
+// End to end: settled cards answer the materials question from their own money
+// and send evidence, and unsettled ones still ask. The two live cards this was
+// measured against are Queens Park SWMS-26845 / INV-0942 and Herne Hill
+// SWMS-26955 / INV-0994 (2026-08-06).
+// ---------------------------------------------------------------------------
+
+const SETTLED_MATERIALS = {
+  trades: 2,
+  hours_per_trade: 2,
+  rate_ex_gst: 85,
+  materials: [],
+  materials_used: [
+    "Star picket x 2",
+    "Zip ties x 20",
+    "Fixings / consumables",
+  ],
+};
+
+function materialsAnswerDeps(
+  released: unknown,
+  invoiced: unknown,
+): Partial<SesPrepareDependencies> {
+  return {
+    resolveMaterialsAnswerEvidence: () =>
+      // deno-lint-ignore no-explicit-any
+      Promise.resolve({ released, invoiced } as any),
+  };
+}
+
+const NOT_RELEASED = {
+  kind: "none",
+  reason_code: "current_cycle_not_shipped",
+  detail: "nothing has shipped",
+};
+
+const ITEMISED_INVOICE = {
+  kind: "evidence",
+  evidence: {
+    invoice_id: "xero-uuid-1",
+    invoice_number: "INV-0942",
+    status: "AUTHORISED",
+    materials_ex_gst: 172,
+    materials_lines: [
+      { description: "Star pickets supplied - 2 units", amount_ex_gst: 27 },
+      { description: "Cable ties and small consumables", amount_ex_gst: 25 },
+      { description: "Temporary fence hire: 2 panels", amount_ex_gst: 120 },
+    ],
+    labour_line_count: 1,
+    excluded_service_line_count: 0,
+  },
+};
+
+const LABOUR_ONLY_INVOICE = {
+  kind: "none",
+  reason_code: "invoice_prices_no_materials",
+  detail: "prices no materials",
+};
+
+Deno.test(
+  "an itemised issued invoice answers the materials question without adding money",
+  async () => {
+    const result = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      SETTLED_MATERIALS,
+      undefined,
+      materialsAnswerDeps(NOT_RELEASED, ITEMISED_INVOICE),
+    );
+    assertEquals(
+      result.blockers.filter((item) =>
+        item.reason_code === "materials_charge_figure_required"
+      ),
+      [],
+      "an invoice that already prices these materials must not ask for a figure",
+    );
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assert(proposal, "expected a priced proposal");
+    const lines = proposal.line_items as Array<Record<string, unknown>>;
+    // Labour only on the proposal, because the materials money is committed on
+    // the invoice — a second line here is what a later mint would double-bill.
+    assertEquals(lines.length, 1);
+    assertEquals(proposal.subtotal_ex_gst, 510);
+    const marker = proposal.materials_charge as Record<string, unknown>;
+    assertEquals(marker.decision, "already_invoiced");
+    assertEquals(marker.already_invoiced_materials_ex_gst, 172);
+    assertEquals(marker.invoice_number, "INV-0942");
+  },
+);
+
+Deno.test(
+  "a labour-only issued invoice still has to be answered by a human",
+  async () => {
+    const result = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      SETTLED_MATERIALS,
+      undefined,
+      materialsAnswerDeps(NOT_RELEASED, LABOUR_ONLY_INVOICE),
+    );
+    assertEquals(result.invoice_proposal, null);
+    const blocker = result.blockers.find((item) =>
+      item.reason_code === "materials_charge_figure_required"
+    );
+    assert(
+      blocker,
+      "an invoice that prices no materials must never silence the question",
+    );
+  },
+);
+
+Deno.test(
+  "a shipped and billed cycle is not asked to price anything at all",
+  async () => {
+    const result = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      SETTLED_MATERIALS,
+      undefined,
+      materialsAnswerDeps(
+        {
+          kind: "released",
+          evidence: {
+            route_kinds: ["invoice", "photo", "report"],
+            last_proven_at: "2026-08-05T11:26:31.529Z",
+            invoice_number: "INV-1137",
+            invoice_status: "AUTHORISED",
+          },
+        },
+        // Woodvale mirrors no invoice line items, so the invoice reading is
+        // blind here. Terminal is the only rule that reaches this card.
+        { kind: "none", reason_code: "invoice_line_items_absent", detail: "" },
+      ),
+    );
+    assertEquals(
+      result.blockers.filter((item) =>
+        item.reason_code === "materials_charge_figure_required"
+      ),
+      [],
+    );
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assert(proposal, "expected a priced proposal");
+    assertEquals(
+      (proposal.line_items as unknown[]).length,
+      1,
+      "a released cycle adds no money",
+    );
+    const marker = proposal.materials_charge as Record<string, unknown>;
+    assertEquals(marker.decision, "already_released");
+    assertEquals(marker.invoice_number, "INV-1137");
+  },
+);
+
+Deno.test(
+  "a settled reading changes the revision identity, and an unsettled card is untouched",
+  async () => {
+    // A card nobody can settle must hash exactly as it does today, so no
+    // still-to-be-priced revision is re-keyed and no Docs Ready tick is lost.
+    const open = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      SETTLED_MATERIALS,
+      undefined,
+      materialsAnswerDeps(NOT_RELEASED, LABOUR_ONLY_INVOICE),
+    );
+    const noDependency = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      SETTLED_MATERIALS,
+    );
+    assertEquals(
+      open.input_content_hash,
+      noDependency.input_content_hash,
+      "an unsettled card must hash identically to today",
+    );
+
+    // A settled one is a different revision: without this a blocked revision
+    // and the settled one collide on a single revision id.
+    const settled = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      SETTLED_MATERIALS,
+      undefined,
+      materialsAnswerDeps(NOT_RELEASED, ITEMISED_INVOICE),
+    );
+    assert(
+      settled.input_content_hash !== open.input_content_hash,
+      "settled money must move the revision identity",
+    );
+    assert(
+      settled.docket_revision_id !== open.docket_revision_id,
+      "settled money must move the revision id",
+    );
+  },
+);
