@@ -1349,7 +1349,23 @@ replies on the ses@ group intake thread (`intake_thread_id` via
 `ses_mlb_thread_reply.ts`); `invoice` is the billing pack to `makesafes@`
 (report + AUTHORISED invoice + SWMS, finance@ cc). Thread coordinate authority
 is unchanged: case_sources first; empty sources may recover via approved draft
-→ emails; corroboration not recency. AJS shape is untouched. Report-only MLB
+→ emails; corroboration not recency. AJS shape is untouched.
+
+The two destinations are `mlbPhysicalRouteRecipients()` in
+`ses_release_route_shape.ts` and NOTHING else (Captain 2026-08-06): `invoice` to
+the sealed matrix billing mailbox, `report` and `photo` to the Prime mailer
+`MLB_PRIME_MAILER` (`mlb.mailer@primeeco.tech`), never an invoice on either
+mailer route. The bug that ruling fixed is why it must stay sealed — MLB's
+`makesafe_companies.report_recipient` IS `makesafes@mlbuilders.com.au`, so
+`report_route: "work_order_sender"` resolved all three MLB emails to one inbox
+and the mailer received nothing. `sender_patterns` is an INBOUND trust list and
+must never auto-select a destination. Recipients live in three stores and
+`resolveDocketRoutes` is AUTHORITATIVE: it SETS them (as it already does for
+AJS) so a docket drafted before the ruling resolves correctly with no
+re-prepare, while `buildEmailDrafts` and the envelope `routing` block write the
+same values from the same producer. Scope is `isMlbPhysicalReleaseShape` only —
+MLB report-only roof/assessment cards keep the work-order sender. Never read a
+stored `REPORT_EMAIL_DRAFT` `To:` line as the destination. Report-only MLB
 families keep the legacy non-threaded split.
 
 **TEMPORARY CAPTAIN EXCEPTION (2026-08-05):** Microsoft marks

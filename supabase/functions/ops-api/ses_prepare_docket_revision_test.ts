@@ -3921,3 +3921,97 @@ Deno.test("prepare prices an MLB photo against the transport it will actually se
     [4 * 1024 * 1024],
   );
 });
+
+Deno.test(
+  "MLB physical drafts address the Captain's three destinations, and the envelope declares the same",
+  async () => {
+    // Prepare-side half of the one-producer rule: the draft the operator reads
+    // and the routing the envelope declares must both name what
+    // resolveDocketRoutes will send to. In-process only; no Graph, so this
+    // proves addressing, never delivery.
+    const row = SES_FAMILY_MATRIX.find((candidate) =>
+      candidate.builder_key === "MLB" &&
+      candidate.family === "physical_makesafe" &&
+      candidate.routing_rule === "mlb-perth-routing"
+    )!;
+    const input = fixtureInput(row);
+    // The company row that used to be inherited is MLB's BILLING mailbox — the
+    // exact value that sent all three emails to one inbox before this ruling.
+    input.source.work_order_sender = "makesafes@mlbuilders.com.au";
+    const result = (await prepareSesDocketRevision(
+      request(input.identity.job_id),
+      dependencies(input),
+    )).results[0];
+    assertEquals(result.state, "ready");
+
+    assertStringIncludes(
+      result.email_drafts.REPORT_EMAIL_DRAFT,
+      "To: mlb.mailer@primeeco.tech",
+    );
+    assertStringIncludes(
+      result.email_drafts.PHOTO_EMAIL_DRAFT,
+      "To: mlb.mailer@primeeco.tech",
+    );
+    assertStringIncludes(
+      result.email_drafts.INVOICE_EMAIL_DRAFT,
+      "To: makesafes@mlbuilders.com.au",
+    );
+    // No invoice on either Prime mailer route.
+    assertEquals(
+      result.email_drafts.REPORT_EMAIL_DRAFT.includes("Xero"),
+      false,
+    );
+    assertEquals(
+      result.email_drafts.PHOTO_EMAIL_DRAFT.includes("Xero"),
+      false,
+    );
+    // Envelope routing agrees with the drafts.
+    assertEquals(
+      result.envelope.v2.routing.report_to,
+      "mlb.mailer@primeeco.tech",
+    );
+    assertEquals(
+      result.envelope.v2.routing.photo_to,
+      "mlb.mailer@primeeco.tech",
+    );
+    assertEquals(
+      result.envelope.v2.routing.invoice_to,
+      "makesafes@mlbuilders.com.au",
+    );
+  },
+);
+
+Deno.test(
+  "AJS drafts and non-MLB builders keep the work-order sender destination",
+  async () => {
+    for (
+      const [builderKey, expectedReportTo] of [
+        ["AJS", "workorders@ajs.build"],
+        ["WESTERN", "site.manager@western.example"],
+      ] as const
+    ) {
+      const row = SES_FAMILY_MATRIX.find((candidate) =>
+        candidate.builder_key === builderKey &&
+        candidate.family === "physical_makesafe"
+      )!;
+      const input = fixtureInput(row);
+      input.source.work_order_sender = builderKey === "AJS"
+        ? "workorders@ajs.build"
+        : "site.manager@western.example";
+      const result = (await prepareSesDocketRevision(
+        request(input.identity.job_id),
+        dependencies(input),
+      )).results[0];
+      assertEquals(result.state, "ready");
+      const report = String(result.email_drafts.REPORT_EMAIL_DRAFT || "");
+      assertStringIncludes(report, expectedReportTo);
+      assertEquals(report.includes("mlb.mailer@primeeco.tech"), false);
+      assertEquals(
+        String(result.envelope.v2.routing.report_to || "").includes(
+          "primeeco.tech",
+        ),
+        false,
+      );
+    }
+  },
+);

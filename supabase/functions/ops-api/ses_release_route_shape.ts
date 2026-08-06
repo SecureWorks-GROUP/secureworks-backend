@@ -15,12 +15,20 @@
 //   3. invoice — billing pack to makesafes@ (report + AUTHORISED invoice + SWMS)
 //   Exception flag: MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1 in ses_mlb_thread_reply.ts
 //   AJS shape is untouched (CC list is AJS-only; do not widen to MLB).
+//
+// Captain ruling 2026-08-06 (MLB physical destinations — the two-destination
+// half of the 2026-08-05 shape, which had never actually resolved):
+//   1. TO makesafes@mlbuilders.com.au — invoice + SWMS + report TOGETHER
+//   2. TO mlb.mailer@primeeco.tech    — the report, on the work-order subject
+//   3. TO mlb.mailer@primeeco.tech    — all the photos
+//   No invoice on either Prime mailer route. Producer: mlbPhysicalRouteRecipients().
 
 import type { SesRouteKind } from "./ses_review_cockpit.ts";
 import {
   AJS_MANDI_CC,
   AJS_VANESSA_CC,
   AJS_WORK_ORDERS_MAILBOX,
+  MLB_PRIME_MAILER,
   SES_RELEASE_CC,
 } from "./ses_graph_mail_gateway.ts";
 import { isMlbBuilderKey } from "./ses_mlb_thread_reply.ts";
@@ -30,6 +38,7 @@ export {
   AJS_VANESSA_CC,
   AJS_WORK_ORDERS_MAILBOX,
   isMlbBuilderKey,
+  MLB_PRIME_MAILER,
   SES_RELEASE_CC,
 };
 
@@ -107,6 +116,66 @@ export function ajsPackCc(): string[] {
     AJS_VANESSA_CC,
     AJS_MANDI_CC,
   ]);
+}
+
+/**
+ * Authoritative MLB physical destination per route (Captain 2026-08-06).
+ *
+ *   invoice — the sealed matrix billing mailbox (`makesafes@mlbuilders.com.au`,
+ *             or the south-west `bunbury@` row): invoice + SWMS + report TOGETHER.
+ *   report  — the Prime mailer, on the verbatim work-order subject, report only.
+ *   photo   — the Prime mailer, all photos, and nothing else.
+ *
+ * This is the SINGLE producer for those three destinations. Both the prepare
+ * draft (`buildEmailDrafts`, what the operator reads) and the resolved release
+ * route (`resolveDocketRoutes`, what the cockpit renders and execute sends)
+ * consume it, so the two stores cannot drift apart again.
+ *
+ * Why a sealed constant and not the company row: MLB's
+ * `makesafe_companies.report_recipient` IS `makesafes@mlbuilders.com.au`, so
+ * `report_route: "work_order_sender"` resolved report and photo to the billing
+ * mailbox and all three MLB emails landed in one inbox — the Prime mailer never
+ * received anything. `sender_patterns` is an inbound trust list and must never
+ * auto-select a destination, so the mailer address is declared here instead.
+ *
+ * `billingMailbox` stays caller-supplied because the matrix already picks
+ * Perth vs south-west; this function must not re-decide that.
+ */
+export function mlbPhysicalRouteRecipients(
+  routeKind: SesRouteKind,
+  billingMailbox: string | null | undefined,
+): string[] {
+  if (routeKind === "report" || routeKind === "photo") {
+    return uniqueEmails([MLB_PRIME_MAILER]);
+  }
+  return uniqueEmails([billingMailbox]);
+}
+
+/** True when this route is one of the two MLB Prime mailer routes. */
+export function isMlbPrimeMailerRouteKind(routeKind: SesRouteKind): boolean {
+  return routeKind === "report" || routeKind === "photo";
+}
+
+/**
+ * Captain's absolute boundary: NO invoice on either Prime mailer route.
+ *
+ * The report and photo routes are composed from the report PDF and the photo
+ * set respectively, so this can only fire if a future change lets the bound Xero
+ * invoice PDF onto one of them. It returns true rather than filtering, because
+ * the honest answer to "this pack would mail the builder's invoice to the
+ * mailer" is to refuse the route, not to quietly reshape it.
+ */
+export function mlbPrimeMailerRouteCarriesInvoice(args: {
+  routeKind: SesRouteKind;
+  attachmentHashes: readonly string[];
+  invoicePdfContentHash?: string | null;
+}): boolean {
+  if (!isMlbPrimeMailerRouteKind(args.routeKind)) return false;
+  const invoiceHash = String(args.invoicePdfContentHash || "").trim();
+  if (!invoiceHash) return false;
+  return (args.attachmentHashes || []).some((hash) =>
+    String(hash || "").trim() === invoiceHash
+  );
 }
 
 /**

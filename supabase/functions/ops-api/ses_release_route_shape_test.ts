@@ -7,6 +7,10 @@ import {
   ajsPackRecipients,
   clientSendGateKindForRoute,
   isAjsBuilderKey,
+  isMlbPrimeMailerRouteKind,
+  MLB_PRIME_MAILER,
+  mlbPhysicalRouteRecipients,
+  mlbPrimeMailerRouteCarriesInvoice,
   SES_AJS_ROUTE_ORDER,
   SES_UNIVERSAL_ROUTE_ORDER,
   sesReleaseRouteOrder,
@@ -534,3 +538,104 @@ Deno.test(
     assertEquals(pack?.attachment_hashes.includes("report-hash"), true);
   },
 );
+
+// ---------------------------------------------------------------------------
+// MLB physical three-route destinations (Captain 2026-08-06).
+//
+// These are pure-producer proofs. The mail gateway is mocked everywhere in this
+// suite, so nothing here proves a message ARRIVES at either mailbox — only that
+// one producer resolves the three destinations and that the boundary holds.
+// ---------------------------------------------------------------------------
+
+Deno.test(
+  "MLB physical routes: billing pack to the matrix mailbox, report and photo to the Prime mailer",
+  () => {
+    assertEquals(MLB_PRIME_MAILER, "mlb.mailer@primeeco.tech");
+    assertEquals(
+      mlbPhysicalRouteRecipients("invoice", "makesafes@mlbuilders.com.au"),
+      ["makesafes@mlbuilders.com.au"],
+    );
+    assertEquals(
+      mlbPhysicalRouteRecipients("report", "makesafes@mlbuilders.com.au"),
+      [MLB_PRIME_MAILER],
+    );
+    assertEquals(
+      mlbPhysicalRouteRecipients("photo", "makesafes@mlbuilders.com.au"),
+      [MLB_PRIME_MAILER],
+    );
+    assertEquals(isMlbPrimeMailerRouteKind("report"), true);
+    assertEquals(isMlbPrimeMailerRouteKind("photo"), true);
+    assertEquals(isMlbPrimeMailerRouteKind("invoice"), false);
+  },
+);
+
+Deno.test(
+  "MLB billing mailbox stays the sealed matrix value, so the south-west row still routes to bunbury@",
+  () => {
+    // The matrix picks Perth vs south-west; this producer must never re-decide.
+    assertEquals(
+      mlbPhysicalRouteRecipients("invoice", "bunbury@mlbuilders.com.au"),
+      ["bunbury@mlbuilders.com.au"],
+    );
+    // …and the mailer routes are unaffected by which billing mailbox applies.
+    assertEquals(
+      mlbPhysicalRouteRecipients("report", "bunbury@mlbuilders.com.au"),
+      [MLB_PRIME_MAILER],
+    );
+    // A legacy envelope with no declared billing mailbox yields nothing rather
+    // than inventing one — the caller keeps the route as prepared.
+    assertEquals(mlbPhysicalRouteRecipients("invoice", ""), []);
+    assertEquals(mlbPhysicalRouteRecipients("invoice", null), []);
+  },
+);
+
+Deno.test(
+  "no invoice on either Prime mailer route: the guard fires on the bound Xero PDF only",
+  () => {
+    const invoiceHash = "xero-hash";
+    for (const routeKind of ["report", "photo"] as const) {
+      assertEquals(
+        mlbPrimeMailerRouteCarriesInvoice({
+          routeKind,
+          attachmentHashes: ["report-hash", invoiceHash],
+          invoicePdfContentHash: invoiceHash,
+        }),
+        true,
+      );
+      assertEquals(
+        mlbPrimeMailerRouteCarriesInvoice({
+          routeKind,
+          attachmentHashes: ["report-hash", "photo-hash-1"],
+          invoicePdfContentHash: invoiceHash,
+        }),
+        false,
+      );
+    }
+    // The billing pack is SUPPOSED to carry the invoice — never refuse it.
+    assertEquals(
+      mlbPrimeMailerRouteCarriesInvoice({
+        routeKind: "invoice",
+        attachmentHashes: ["report-hash", "swms-hash", invoiceHash],
+        invoicePdfContentHash: invoiceHash,
+      }),
+      false,
+    );
+    // No bound invoice PDF means there is nothing to leak.
+    assertEquals(
+      mlbPrimeMailerRouteCarriesInvoice({
+        routeKind: "report",
+        attachmentHashes: ["report-hash"],
+        invoicePdfContentHash: null,
+      }),
+      false,
+    );
+  },
+);
+
+Deno.test("AJS/AJBR destinations are untouched by the MLB ruling", () => {
+  const recipients = ajsPackRecipients({ workOrderSender: null });
+  assertEquals(recipients, [AJS_WORK_ORDERS_MAILBOX]);
+  assertEquals(ajsPackCc(), AJS_PACK_CC);
+  assertEquals(recipients.includes(MLB_PRIME_MAILER), false);
+  assertEquals(ajsPackCc().includes(MLB_PRIME_MAILER), false);
+});
