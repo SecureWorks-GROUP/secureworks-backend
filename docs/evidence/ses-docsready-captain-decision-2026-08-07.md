@@ -19,6 +19,11 @@ full working is in `ses-docsready-placement-gap-2026-08-07.md`.
 
 The two words are not symmetric. Only `VOID` unsticks a card.
 
+The Xero figures and card states below are read-only production reads, taken
+and re-read unchanged on 2026-08-07. How they were obtained and how to re-verify
+each one is in the provenance section of
+`ses-docsready-placement-gap-2026-08-07.md`.
+
 You can answer differently per card. Neither word is actioned tonight.
 
 ---

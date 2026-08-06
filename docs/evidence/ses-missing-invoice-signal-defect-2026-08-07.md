@@ -102,7 +102,9 @@ certificated surface. Production currently holds **176** unlinked issued ACCREC
 rows (158 PAID, 18 AUTHORISED) against **3** unlinked drafts, so a guard change
 moves the issued population far more than the draft one. Any change to steps 2
 or 3 must be bracketed by a before/after `ses-c2-measure-board-evidence.ts` run
-and must bump `SES_EVIDENCE_CONTRACT_VERSION`.
+and must bump `SES_EVIDENCE_CONTRACT_VERSION`. Those counts are read-only
+production reads taken and re-read unchanged on 2026-08-07; see the provenance
+section of `ses-docsready-placement-gap-2026-08-07.md` for how to re-verify them.
 
 Do **not** fix this by relaxing the matcher's uniqueness guards wholesale. A
 wrong invoice attributed to a card is worse than a card reporting its invoice

@@ -22,7 +22,7 @@ that the board publishes the **wrong reason** for the refusal.
 Both dockets are healthy: `state=ready`, `stage=pre_xero`,
 `pre_xero_docs_ready=true`, **zero blockers**, 38 and 39 artifacts. So
 `packState` reaches the engine as `READY` (`packForBoard.review_state` is set
-from `docket.pre_xero_docs_ready`, `index.ts:16330`). The pack half of the
+from `docket.pre_xero_docs_ready`, `index.ts:16331`). The pack half of the
 recipe is satisfied on both.
 
 The money half is not, and it fails **twice**.
@@ -180,6 +180,47 @@ recorded on the dockets with his decision keys
 So the two available paths produce different money, in opposite directions.
 Voiding and re-minting produces the ruled figures; binding the existing drafts
 supersedes those rulings.
+
+## Provenance of the numbers in this document
+
+**Every production figure here is a read-only production read.** The
+no-mistakes pipeline cannot independently reach production — the
+`SUPABASE_ACCESS_TOKEN` available to it returns `Unauthorized` against the
+Management API — so inside CI these claims are **unverified by construction**.
+That is a limit of the pipeline's reach, not a weakness in the claims.
+
+What was actually done, and nothing more: the reads were taken read-only
+against production on 2026-08-07 during the investigation, using credentials
+from `~/.config/secureworks/env`, and every one of them was re-read and
+reproduced unchanged at the end of that session. No third party and no
+independent party verified them.
+
+**The load-bearing logical claim is not a production claim.** That closing the
+invoice-visibility gap alone leaves both cards in `trade_report_in`, and that
+only the invoice artifact reaches `report_ready`, is engine behaviour. It was
+independently reproduced in-pipeline by running the real `deriveSesStageV2`
+against the card facts recorded above, and it stands on its own. Only the
+**data snapshot** depends on production.
+
+Re-verification, per production-dependent claim. Database claims are a
+`read_only: true` SELECT through the Supabase Management API
+`/database/query`; board claims are
+`GET ops-api?action=makesafe_board&fields=full&include_diagnostics=1&include_archive=1`
+with the `x-api-key` header.
+
+| claim | how to re-verify |
+|---|---|
+| INV-1115 / INV-1116 status, reference, total, and `job_id` NULL | SELECT on `xero_invoices` where `invoice_number in ('INV-1115','INV-1116')` |
+| unlinked ACCREC population: 158 PAID, 18 AUTHORISED (176 issued), 3 DRAFT | SELECT count grouped by `status` on `xero_invoices` where `type='ACCREC'` and `job_id is null` |
+| docket, obligation, `ses_external_effects` and invoice-document state of both cards | SELECT on `makesafe_docket_revisions`, `makesafe_invoice_obligations`, `ses_external_effects` and `job_documents` (`type='invoice'`), each filtered to the two `job_id`s |
+| 31 `general_makesafe` cards carrying a typed `invoice` document | SELECT distinct `job_id` count on `job_documents` where `type='invoice'`, joined to the SES board population |
+| three-engine agreement on `trade_report_in` for both cards | board GET above; compare `declared_stage`, `derived_stage_v2` and `canonical_stage` on the two cards |
+| the 10-card wider class, and the two-member `report_ready` column | board GET above; filter to READY unsent dockets, and read the `report_ready` column members |
+| the `materials_charge` rulings recorded on both dockets | SELECT on `makesafe_docket_revisions` for the two `job_id`s, reading the `materials_charge` decision marker and its decision key |
+
+These are live values and they move. A re-read may legitimately differ; the
+correct response to a difference is to **re-derive**, never to edit a figure
+recorded here.
 
 ## Follow-ons
 
