@@ -180,7 +180,19 @@ export function isVoidStatus(status: unknown): boolean {
 // "MLB-25898PO-54817"). Marnin's rule: same builder ref + a DIFFERENT PO number = a NEW, separately
 // invoiceable piece of work, so a sibling card's invoice must NOT block it. Identical full refs
 // (a true re-send) and refs where the base matches but NEITHER side carries a distinguishing PO
-// keep the strict per-ref block. Mirror of invoice_utils.py split_ref_po / _same_work_ref.
+// keep the strict per-ref block.
+//
+// DIVERGED FROM THE PYTHON TWIN (2026-08-06): this predicate was deliberately NARROWED so that
+// only `distinct_po` clears a sibling — a one-sided PO pair (claim-only reference beside a
+// PO-bearing one) now blocks unless the candidate invoice is already attributed to a different
+// card. The wiki skill-script twin still carries the identical PRE-FIX predicate: wiki
+// `invoice_utils.py:89` is `if o_base and c_base and o_base == c_base and o_po != c_po: return
+// False`, and `create_makesafe_draft_invoice.py:204` calls `resolve_existing_invoice` off it — a
+// LIVE mint guard, not dead code. So the Koondoola double-bill shape (see
+// docs/evidence/ses-duplicate-guard-po-blindness-2026-08-06.md) remains REACHABLE through the
+// skill-script path; this repo closes the ops-api/backend route only. That wiki repo is
+// version-pinned and must NEVER be edited from here — narrowing the twin is filed separately for
+// the governed release path.
 const _PO_TOKEN_RE = /po[-\s]?(\d+)/i;
 
 export function splitRefPo(raw: unknown): { base: string; po: string | null } {
@@ -193,14 +205,130 @@ export function splitRefPo(raw: unknown): { base: string; po: string | null } {
   return { base: normRef(s.slice(0, m.index)), po: m[1] };
 }
 
-// True when a reference-tier candidate is the SAME piece of work as our card (still blocks); false
-// ONLY when both refs share a base builder-ref but carry DIFFERENT PO numbers. Fail-closed: anything
-// not confidently a different-PO sibling stays a block, preserving the strict per-ref guard.
-export function sameWorkRef(ourRef: unknown, candRef: unknown): boolean {
+/**
+ * How a candidate invoice reference relates to our card's reference. One shared
+ * vocabulary so the full-estate guard, the indexed probe and every measurement
+ * describe the same pair the same way.
+ *
+ * - `unrelated`        different claim base (or no usable base on one side)
+ * - `same_work`        same base and the PO evidence AGREES (both absent, or equal)
+ * - `distinct_po`      same base, BOTH sides name a PO, and the POs differ
+ * - `po_indeterminate` same base, exactly ONE side names a PO
+ */
+export type SesWorkRefRelation =
+  | "unrelated"
+  | "same_work"
+  | "distinct_po"
+  | "po_indeterminate";
+
+export function workRefRelation(
+  ourRef: unknown,
+  candRef: unknown,
+): SesWorkRefRelation {
   const o = splitRefPo(ourRef);
   const c = splitRefPo(candRef);
-  if (o.base && c.base && o.base === c.base && o.po !== c.po) return false;
+  if (!o.base || !c.base || o.base !== c.base) return "unrelated";
+  if (o.po === c.po) return "same_work";
+  if (o.po && c.po) return "distinct_po";
+  return "po_indeterminate";
+}
+
+/**
+ * True when a reference-tier candidate must still be treated as the SAME piece of work (blocks).
+ *
+ * The escape hatch is `distinct_po` and nothing else: a differing PO only proves separate work when
+ * BOTH references actually NAME a PO. A claim-only reference names a claim, and one claim routinely
+ * hosts several purchase orders — proved live on 2026-08-06, where claim `MLB-27093` carried
+ * AUTHORISED `MLB-27093PO-56481` and `MLB-27093PO-56479` at once. So a claim-only reference beside a
+ * PO-bearing invoice is INDETERMINATE, not distinct: it could denote either sibling, or both.
+ *
+ * That one-sided case is what let Koondoola SWMS-261025 mint DRAFT INV-1140 (`MLB-27093`) on top of
+ * the already-AUTHORISED INV-1080 (`MLB-27093PO-56481`) and double-bill the builder. The predicate
+ * used to answer `o.po !== c.po`, which reads `null !== "56481"` as "different PO, different work".
+ * Indeterminate now blocks, because a wrong refusal costs an operator a question and a wrong
+ * permission reaches the customer as a second invoice.
+ */
+export function sameWorkRef(ourRef: unknown, candRef: unknown): boolean {
+  return workRefRelation(ourRef, candRef) !== "distinct_po";
+}
+
+/**
+ * Whether a one-sided PO pair (`po_indeterminate`) must block.
+ *
+ * The string evidence alone genuinely cannot separate these two live cases:
+ *
+ *   MLB-24732  SWMS-26526 (`MLB-24732`, PAID INV-0745 $1556.50) and SWMS-26938
+ *              (`MLB-24732PO-55712`, AUTHORISED INV-0999 $929.50) are two REAL, separately
+ *              billed jobs on one claim, differing only by a PO suffix on one side.
+ *   MLB-27093  Koondoola SWMS-261025 minted DRAFT INV-1140 (`MLB-27093`) on top of AUTHORISED
+ *              INV-1080 (`MLB-27093PO-56481`) — the same work, billed twice.
+ *
+ * What separates them is not the reference, it is ATTRIBUTION. INV-0745 is already linked to
+ * SWMS-26526's job, so it is demonstrably another card's money and cannot be ours. INV-1080 carries
+ * `job_id = NULL`, so nothing rules out that it is ours — and it was.
+ *
+ * So: an unattributed one-sided sibling blocks; a sibling already owned by a DIFFERENT card does
+ * not. Fail-closed on every gap — no candidate job, no caller job, either side unreadable — because
+ * the cost of a wrong refusal is a question and the cost of a wrong permission is a second invoice
+ * in the customer's inbox.
+ *
+ * This is why `xero_invoices.job_id` being NULL on 179 live ACCREC rows (2026-08-06) is not merely a
+ * join that returns zero: it is the missing evidence that turns a resolvable pair into an ambiguous
+ * one. The seal refuses to repair it at write time (Captain 2026-08-01), so the guard treats absent
+ * attribution as what it is — an unknown, not a clearance.
+ */
+export function poIndeterminateSiblingBlocks(
+  ourJobId: unknown,
+  candidateJobId: unknown,
+): boolean {
+  const ours = String(ourJobId ?? "").trim();
+  const theirs = String(candidateJobId ?? "").trim();
+  if (!theirs || !ours) return true;
+  return theirs === ours;
+}
+
+/**
+ * The one predicate every reference tier consults: may this candidate invoice be our work?
+ *
+ * `distinct_po` is the only outright clearance on reference evidence alone. `po_indeterminate`
+ * defers to attribution. Everything else defers to the tier's own string test.
+ */
+export function referenceCandidateBlocks(
+  ourRef: unknown,
+  candRef: unknown,
+  ourJobId: unknown,
+  candidateJobId: unknown,
+): boolean {
+  const relation = workRefRelation(ourRef, candRef);
+  if (relation === "distinct_po") return false;
+  if (relation === "po_indeterminate") {
+    return poIndeterminateSiblingBlocks(ourJobId, candidateJobId);
+  }
   return true;
+}
+
+/**
+ * PO-insensitive reference match: the two references share a claim base, and the PO evidence does
+ * not demonstrably separate them. Symmetric, so it catches the pair whichever side carries the PO —
+ * unlike the substring tier, which only ever asks whether the CANDIDATE contains our reference.
+ *
+ * The `>= 5` floor on the base is the same digit-safety floor the substring tier uses: a short token
+ * collides across builders. A shorter base is not thereby permitted — it falls through to the
+ * indexed probe, which refuses it as an ambiguity rather than matching a named invoice.
+ */
+export const MIN_REF_BASE_LENGTH = 5;
+
+export function sameWorkRefPoBase(
+  ourRef: unknown,
+  candRef: unknown,
+  ourJobId: unknown = null,
+  candidateJobId: unknown = null,
+): boolean {
+  if (workRefRelation(ourRef, candRef) === "unrelated") return false;
+  if (!referenceCandidateBlocks(ourRef, candRef, ourJobId, candidateJobId)) {
+    return false;
+  }
+  return splitRefPo(ourRef).base.length >= MIN_REF_BASE_LENGTH;
 }
 
 export interface ExistingInvoiceHit {
@@ -211,7 +339,11 @@ export interface ExistingInvoiceHit {
   total?: number | null;
   total_tax?: number | null;
   line_items?: unknown;
-  match_method: "job_id" | "reference" | "reference_substring";
+  match_method:
+    | "job_id"
+    | "reference"
+    | "reference_substring"
+    | "reference_po_base";
 }
 
 /**
@@ -271,7 +403,7 @@ export function resolveExistingInvoice(
 
   // Tier 1 (job_id) is our OWN card: a live invoice already on this job always blocks — a second
   // invoice on the same card is a true re-invoice, whatever the PO suffix. Only the reference tiers
-  // below (which reach OTHER jobs' invoices) get the same-ref-new-PO scoping via sameWorkRef.
+  // below (which reach OTHER jobs' invoices) get the same-ref-new-PO scoping via referenceCandidateBlocks.
   if (jobId) {
     const byJob = all.filter((r) => r?.job_id && r.job_id === jobId);
     const hit = liveHit(byJob);
@@ -281,26 +413,42 @@ export function resolveExistingInvoice(
   const nref = normRef(externalRef);
   if (!nref) return null;
 
-  // Tier 2: exact normalised reference (a different-PO sibling never exact-matches; sameWorkRef is a
-  // no-op here, applied for symmetry so the reference tiers read uniformly).
+  // Every reference tier below consults the SAME candidate predicate, so a pair can never be
+  // cleared by one tier and blocked by another.
+  const blocks = (r: any) =>
+    referenceCandidateBlocks(externalRef, r?.reference, jobId, r?.job_id);
+
+  // Tier 2: exact normalised reference (a different-PO sibling never exact-matches; the predicate is
+  // a no-op here, applied for symmetry so the reference tiers read uniformly).
   const exact = all.filter((r) =>
-    normRef(r?.reference) === nref && normRef(r?.reference) !== "" &&
-    sameWorkRef(externalRef, r?.reference)
+    normRef(r?.reference) === nref && normRef(r?.reference) !== "" && blocks(r)
   );
   const exactHit = liveHit(exact);
   if (exactHit) return toHit(exactHit, "reference");
 
   // Tier 3: reference substring (>= 5 chars). A base ref ("MLB-24732") is a substring of a
-  // PO-suffixed sibling's reference ("MLB-24732PO-55712"); sameWorkRef scopes that sibling out so it
-  // does not block a genuinely separate piece of work.
+  // PO-suffixed sibling's reference ("MLB-24732PO-55712").
   if (nref.length >= 5) {
     const sub = all.filter((r) => {
       const ir = normRef(r?.reference);
-      return ir !== "" && ir.includes(nref) && sameWorkRef(externalRef, r?.reference);
+      return ir !== "" && ir.includes(nref) && blocks(r);
     });
     const subHit = liveHit(sub);
     if (subHit) return toHit(subHit, "reference_substring");
   }
+
+  // Tier 4: PO-insensitive claim base. Tier 3 is DIRECTIONAL — it asks only whether the candidate
+  // contains our reference — so it sees a claim-only card against a PO-bearing invoice but is blind
+  // to the reverse. Once every minted reference carries its PO (see the obligation reference
+  // composition in ses_reporting_actions.ts), OUR side is the longer string and a legacy claim-only
+  // invoice would sit outside tier 3 entirely. Base equality is exact, never substring.
+  const baseHit = liveHit(
+    all.filter((r) =>
+      normRef(r?.reference) !== "" &&
+      sameWorkRefPoBase(externalRef, r?.reference, jobId, r?.job_id)
+    ),
+  );
+  if (baseHit) return toHit(baseHit, "reference_po_base");
   return null;
 }
 

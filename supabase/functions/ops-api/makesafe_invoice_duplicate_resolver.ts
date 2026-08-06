@@ -1,15 +1,19 @@
 import {
   isVoidStatus,
   normRef,
-  sameWorkRef,
+  poIndeterminateSiblingBlocks,
+  referenceCandidateBlocks,
+  sameWorkRefPoBase,
   splitRefPo,
+  workRefRelation,
 } from "./makesafe_send_pack.ts";
 
 export type SesInvoiceMatchTier =
   | "obligation_binding"
   | "job_id"
   | "reference"
-  | "reference_substring";
+  | "reference_substring"
+  | "reference_po_base";
 
 export type SesInvoiceAmbiguity =
   | "none"
@@ -77,34 +81,49 @@ function resolveOne(
     : [];
   const byJob = liveRows.filter((row) => row.job_id === request.job_id);
   const ref = normRef(request.external_ref);
+  // One shared candidate predicate across every reference tier — see referenceCandidateBlocks.
+  const blocks = (row: SesInvoiceIndexRow) =>
+    referenceCandidateBlocks(
+      request.external_ref,
+      row.reference,
+      request.job_id,
+      row.job_id,
+    );
   const exact = ref
-    ? liveRows.filter((row) =>
-      normRef(row.reference) === ref &&
-      sameWorkRef(request.external_ref, row.reference)
-    )
+    ? liveRows.filter((row) => normRef(row.reference) === ref && blocks(row))
     : [];
   const substring = ref.length >= 5
-    ? liveRows.filter((row) => {
-      const candidate = normRef(row.reference);
-      return candidate.includes(ref) &&
-        sameWorkRef(request.external_ref, row.reference);
-    })
+    ? liveRows.filter((row) =>
+      normRef(row.reference).includes(ref) && blocks(row)
+    )
     : [];
-  const siblingPo = ref.length >= 5 &&
-    liveRows.some((row) => {
-      const candidate = normRef(row.reference);
-      const ourBase = splitRefPo(request.external_ref).base;
-      const candidateBase = splitRefPo(row.reference).base;
-      return (candidate.includes(ref) ||
-        (!!ourBase && ourBase === candidateBase)) &&
-        !sameWorkRef(request.external_ref, row.reference);
-    });
+  // PO-insensitive claim-base tier — symmetric, so it holds whichever side carries the PO.
+  const poBase = liveRows.filter((row) =>
+    normRef(row.reference) !== "" &&
+    sameWorkRefPoBase(
+      request.external_ref,
+      row.reference,
+      request.job_id,
+      row.job_id,
+    )
+  );
+  // Rows sharing our claim base where exactly ONE side names a purchase order AND nothing attributes
+  // that invoice to a different card. The evidence cannot separate them from our work, so they are
+  // an ambiguity — and an ambiguity refuses.
+  const indeterminate = ref
+    ? liveRows.filter((row) =>
+      workRefRelation(request.external_ref, row.reference) ===
+        "po_indeterminate" &&
+      poIndeterminateSiblingBlocks(request.job_id, row.job_id)
+    )
+    : [];
 
   const tierRows: Array<[SesInvoiceMatchTier, SesInvoiceIndexRow[]]> = [
     ["obligation_binding", byObligation],
     ["job_id", byJob],
     ["reference", exact],
     ["reference_substring", substring],
+    ["reference_po_base", poBase],
   ];
   const match = tierRows.find(([, candidates]) => candidates.length > 0);
   if (match) {
@@ -128,17 +147,45 @@ function resolveOne(
     };
   }
 
+  // No tier matched. A claim-base sibling whose PO evidence is one-sided is still an AMBIGUITY, and
+  // an ambiguity refuses — that is the whole point of detecting it. In production this branch is
+  // NOT currently reachable: `loadIndexedInvoiceRows` (ses_reporting_actions.ts) floors both the
+  // full normalised reference and the claim base at >= 5 characters before querying, so a claim
+  // base shorter than that never has candidate rows fetched (unless already attributed to our job),
+  // and `resolveExistingInvoice`'s substring/po_base tiers carry the same floor. So this is a guard
+  // on the resolver's own contract and against a future tier regression — reachable in unit tests,
+  // not a live second line of defence today. Koondoola SWMS-261025 recorded exactly this ambiguity
+  // on 2026-08-05 and minted anyway, via the `reference_po_base` tier above, not this branch.
+  if (indeterminate.length > 0) {
+    return {
+      job_id: request.job_id,
+      match_tier: null,
+      ambiguity: "sibling_po",
+      live_invoices: indeterminate,
+      allows_create: false,
+      reason_codes: [
+        "po_indeterminate_sibling_blocks",
+        "ambiguous_live_invoices",
+      ],
+    };
+  }
+
+  // A sibling that names a DIFFERENT purchase order on the same claim is not ambiguous at all: the
+  // builder said so twice, in two purchase orders. It is separately invoiceable work and still does
+  // not block (Marnin's rule, 2026-07-08).
+  const distinctPoSibling = liveRows.some((row) =>
+    workRefRelation(request.external_ref, row.reference) === "distinct_po"
+  );
   return {
     job_id: request.job_id,
     match_tier: null,
-    ambiguity: siblingPo
-      ? "sibling_po"
-      : (voidRows.length > 0 ? "void_only" : "none"),
+    ambiguity: voidRows.length > 0 ? "void_only" : "none",
     live_invoices: [],
     allows_create: true,
-    reason_codes: siblingPo
-      ? ["different_po_sibling_does_not_block"]
-      : (voidRows.length > 0 ? ["void_only_does_not_block"] : []),
+    reason_codes: [
+      ...(distinctPoSibling ? ["different_po_sibling_does_not_block"] : []),
+      ...(voidRows.length > 0 ? ["void_only_does_not_block"] : []),
+    ],
   };
 }
 
@@ -156,11 +203,19 @@ export function resolveSesInvoiceDuplicates(
       (value): value is string => !!value,
     ),
   );
+  // The >= 5 floor guards the SUBSTRING test, where a short token false-matches inside an unrelated
+  // number. Claim-base membership is exact EQUALITY, so it carries no such risk and takes no floor
+  // in THIS function. But `loadIndexedInvoiceRows` (ses_reporting_actions.ts), which supplies
+  // `indexedRows` in production, floors both the full ref and the claim base at >= 5 chars before
+  // querying — so a claim base shorter than 5 chars never has candidate rows fetched there (unless
+  // already attributed to our job), and the `sibling_po` ambiguity branch below cannot fire through
+  // the production probe today. It remains reachable in unit tests and guards against a future tier
+  // regression.
   const requestRefs = requests.map((request) => normRef(request.external_ref))
     .filter((value) => value.length >= 5);
   const requestBases = requests.map((request) =>
     splitRefPo(request.external_ref).base
-  ).filter((value) => value.length >= 5);
+  ).filter((value) => value.length > 0);
   const boundedRows = indexedRows.filter((row) => {
     if (row.job_id && requestJobs.has(row.job_id)) return true;
     if (

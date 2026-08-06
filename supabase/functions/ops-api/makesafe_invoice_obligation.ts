@@ -188,12 +188,17 @@ export async function prepareSesInvoiceObligation(
     input.pricing_disposition !== "no_additional_charge" &&
     !input.duplicate_probe.allows_create
   ) {
+    // `sibling_po` joins `multi_live` on the AMBIGUOUS refusal rather than the plain duplicate one:
+    // the card has no bound invoice to point at, it has a claim sibling whose purchase-order
+    // evidence cannot say which invoice covers this work. "Resolve which invoice owns this" is the
+    // action an operator can actually take; "use the bound live invoice" names one that may not exist.
+    const ambiguous = ["multi_live", "sibling_po"].includes(
+      input.duplicate_probe.ambiguity,
+    );
     blockers.push(
       sesRefusal(
-        input.duplicate_probe.ambiguity === "multi_live"
-          ? "invoice_duplicate_ambiguous"
-          : "invoice_duplicate_live",
-        input.duplicate_probe.ambiguity === "multi_live"
+        ambiguous ? "invoice_duplicate_ambiguous" : "invoice_duplicate_live",
+        ambiguous
           ? "Resolve which live Xero invoice owns this work before creating any invoice."
           : "Use the bound live invoice or record an explicit post-release compensation disposition.",
         { evidence: { duplicate_probe: input.duplicate_probe } },
