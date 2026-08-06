@@ -79,6 +79,16 @@ version sequence, and the persisted row is handed to the **real**
 
 ### No card moves
 
+> **Superseded in part by Release 12 (2026-08-06).** The WRITE guarantee below
+> still holds and is still enforced: recording a capture commits evidence and
+> issues no stage or substatus write, so no raw board state changes. The READ
+> half no longer holds — the evidence engine now places the board, so an
+> accepted current-cycle capture moves the derived column as far as it proves
+> (and no further); a refused capture still moves nothing. Current invariant:
+> AGENTS.md "The Corrected Stage Engine Is The Placement Authority (Release
+> 12)"; regressions: `ses_portal_capture_writer_test.ts`. The measurements
+> below are the 2026-08-02 record and are not restated.
+
 Three independent proofs, because the cheap one alone is not enough.
 
 1. **Structural.** `_deriveMakesafeBoardStage` — the legacy ladder that places

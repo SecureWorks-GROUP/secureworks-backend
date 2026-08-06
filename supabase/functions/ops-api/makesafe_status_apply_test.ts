@@ -130,3 +130,59 @@ Deno.test("status apply planner reports missing and already-matching rows withou
     ],
   );
 });
+
+Deno.test("R12: source_status anchors on the derived stage, not the legacy ladder", () => {
+  const rows = [
+    row("SWMS-DIVERGED", "report_ready", "allocated", {
+      declared_stage: "trade_report_in",
+      canonical_stage: "report_ready",
+      derived_stage_v2: "report_ready",
+    }),
+  ];
+
+  const plan = planMakesafeStatusApplications(rows, ["SWMS-DIVERGED"]);
+
+  assertEquals(plan.skipped, []);
+  assertEquals(plan.transitions.length, 1);
+  assertEquals(plan.transitions[0].source_status, "report_ready");
+  assertEquals(plan.transitions[0].before_status, "report_ready");
+  assertEquals(plan.transitions[0].after_status, "allocated");
+});
+
+Deno.test("R12: a row without derived_stage_v2 falls back to canonical_stage", () => {
+  const rows = [
+    row("SWMS-NO-V2", "report_ready", "allocated", {
+      declared_stage: "trade_report_in",
+      canonical_stage: "report_ready",
+    }),
+  ];
+
+  const plan = planMakesafeStatusApplications(rows, ["SWMS-NO-V2"]);
+
+  assertEquals(plan.transitions[0].source_status, "report_ready");
+});
+
+Deno.test("R12: a decision_required card is parked, never planned", () => {
+  const rows = [
+    row("SWMS-26517", "decision_required", "allocated", {
+      declared_stage: "trade_report_in",
+      canonical_stage: "decision_required",
+      derived_stage_v2: "decision_required",
+    }),
+    row("SWMS-CLEAN", "new", "allocated", { derived_stage_v2: "new" }),
+  ];
+
+  const plan = planMakesafeStatusApplications(rows, [
+    "SWMS-26517",
+    "SWMS-CLEAN",
+  ]);
+
+  assertEquals(
+    plan.skipped.map((skip) => [skip.job_number, skip.reason]),
+    [["SWMS-26517", "decision_required_display_status"]],
+  );
+  assertEquals(
+    plan.transitions.map((transition) => transition.job_number),
+    ["SWMS-CLEAN"],
+  );
+});

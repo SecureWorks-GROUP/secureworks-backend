@@ -292,3 +292,72 @@ Deno.test("every survivor is reported so the caller can verify it stayed live", 
     ["SWMS-26736", "SWMS-26787", "SWMS-26845", "SWMS-261065"],
   );
 });
+
+Deno.test("R12: source_status anchors on the derived stage, not the legacy ladder", () => {
+  const plan = planMakesafeDuplicateSurvivorArchives(
+    boardRows({
+      "SWMS-26920": {
+        declared_stage: "trade_report_in",
+        canonical_stage: "allocated",
+        derived_stage_v2: "allocated",
+      },
+    }),
+    ["mlb-23067-makesafe"],
+    NOW,
+  );
+  assertEquals(plan.skipped, []);
+  assertEquals(plan.archives.length, 1);
+  assertEquals(plan.archives[0].source_status, "allocated");
+  assertEquals(plan.archives[0].before_status, "allocated");
+});
+
+Deno.test("R12: a decision_required loser is skipped, never archived", () => {
+  const plan = planMakesafeDuplicateSurvivorArchives(
+    boardRows({
+      "SWMS-26920": {
+        canonical_stage: "decision_required",
+        derived_stage_v2: "decision_required",
+      },
+    }),
+    ["mlb-23067-makesafe"],
+    NOW,
+  );
+  assertEquals(plan.archives.length, 0);
+  assertEquals(
+    plan.skipped[0].reason,
+    "loser_decision_required_display_status",
+  );
+});
+
+Deno.test("R12: natural completion reads the derived stage, not the legacy ladder", () => {
+  const plan = planMakesafeDuplicateSurvivorArchives(
+    boardRows({
+      "SWMS-26787": {
+        ...FINISHED_SURVIVOR,
+        declared_stage: "report_ready",
+        derived_stage_v2: "archive",
+      },
+    }),
+    ["mlb-26189-assessment"],
+    NOW,
+  );
+  assertEquals(plan.skipped, []);
+  assertEquals(plan.archives.length, 1);
+  assertEquals(plan.archives[0].job_number, "SWMS-26791");
+  assertEquals(plan.archives[0].duplicate_of_job_number, "SWMS-26787");
+});
+
+Deno.test("R12: a derived stage that is not archive still refuses the survivor", () => {
+  const plan = planMakesafeDuplicateSurvivorArchives(
+    boardRows({
+      "SWMS-26787": {
+        ...FINISHED_SURVIVOR,
+        derived_stage_v2: "report_ready",
+      },
+    }),
+    ["mlb-26189-assessment"],
+    NOW,
+  );
+  assertEquals(plan.archives.length, 0);
+  assertEquals(plan.skipped[0].reason, "survivor_terminal_display_status");
+});

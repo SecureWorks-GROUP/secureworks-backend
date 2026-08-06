@@ -78,6 +78,41 @@ function baseRow(over: Record<string, any> = {}): any {
   };
 }
 
+// ── Release 12 fixture evidence ─────────────────────────────────────────────
+//
+// R12 made the corrected engine the placement authority, so a board fixture can
+// no longer name its column with `board_stage` — it has to carry the evidence
+// that derives it. `evidenceFor` is the one place that knows how, so a change
+// in the engine's predicates is a single edit rather than one per fixture.
+// These are physical make-safes, the family `baseRow` declares.
+function evidenceFor(stage: string): Record<string, any> {
+  switch (stage) {
+    // No allocation, no report: nothing beyond the card's existence is proved.
+    case "new":
+      return { assignments: [] };
+    // An active assignment and no submitted report.
+    case "allocated":
+      return { assignments: [{ id: "a1", user_id: "u1" }] };
+    // A submitted current-cycle report; the photo floor comes from `extras`.
+    case "trade_report_in":
+      return {
+        assignments: [{ id: "a1", user_id: "u1" }],
+        report: { status: "submitted", cycle_number: 1 },
+      };
+    case "archive":
+      return { status: "archived", assignments: [] };
+    case "cancelled":
+      return { status: "cancelled", assignments: [] };
+    default:
+      throw new Error(`evidenceFor has no recipe for stage ${stage}`);
+  }
+}
+
+/** Completion photos are placement evidence since R12; clear the floor. */
+function photoFloorFor(...ids: string[]): Record<string, number> {
+  return Object.fromEntries(ids.map((id) => [id, 8]));
+}
+
 // ── The authority boundary ──────────────────────────────────────────────────
 
 Deno.test("shadow: the corrected engine cannot see the displayed stage", () => {
@@ -102,20 +137,30 @@ Deno.test("shadow: the corrected engine cannot see the displayed stage", () => {
   );
 });
 
-Deno.test("shadow: canonical_stage stays legacy-authoritative when v2 disagrees", () => {
-  // A card the legacy ladder places in report_ready while the evidence proves
-  // only allocation — the G2/G3 shape, 23 live cards at the 2026-08-02 snapshot.
+Deno.test("r12: canonical_stage follows the corrected engine when the legacy ladder disagrees", () => {
+  // Evolved from "shadow: canonical_stage stays legacy-authoritative when v2
+  // disagrees". Same fixture, opposite verdict: the R12 cutover made the
+  // corrected engine the placement authority, so the 23 live G2/G3 cards the
+  // legacy ladder parked in report_ready while the evidence proved only
+  // allocation now render where the evidence says. The legacy ladder's answer
+  // survives as `declared_stage` provenance, and nothing else.
   const rows = buildCanonicalMakesafeRows([
     baseRow({ board_stage: "report_ready" }),
   ], { computedAt: NOW });
-  assertEquals(rows[0].canonical_stage, "report_ready");
+  assertEquals(rows[0].canonical_stage, "allocated");
   assertEquals(rows[0].declared_stage, "report_ready");
   assertEquals(rows[0].derived_stage_v2, "allocated");
-  assertEquals(rows[0].derived_stage_v2_agrees_with_canonical, false);
-  // The column the card is actually rendered into is the legacy one.
+  assertEquals(rows[0].derived_stage_v2_agrees_with_canonical, true);
+  // The stamp names WHICH engine placed the card, so a past board snapshot
+  // stays attributable to the derivation that produced it.
+  assertEquals(
+    rows[0].placement_engine_version,
+    `${SES_STAGE_ENGINE_V2_VERSION}+overlay-r12`,
+  );
+  // The column the card is actually rendered into is the corrected one.
   const ops = projectOpsMakesafeBoard(rows);
-  assertEquals(ops.columns.report_ready.length, 1);
-  assertEquals(ops.columns.allocated.length, 0);
+  assertEquals(ops.columns.allocated.length, 1);
+  assertEquals(ops.columns.report_ready.length, 0);
 });
 
 Deno.test("shadow: the advisory fields never reach the trade projection", () => {
@@ -139,16 +184,33 @@ Deno.test("shadow: the advisory fields never reach the trade projection", () => 
 });
 
 Deno.test("shadow: the ops projection buckets on canonical_stage, never on the advisory value", () => {
+  // R12 cutover: `canonical_stage` and the raw advisory value used to diverge
+  // because the legacy ladder placed the card. Post-cutover the only thing that
+  // can separate them is the display-ledger OVERLAY — so that is the fixture
+  // now: the evidence derives `allocated`, a captain's archive decision anchored
+  // on that derivation moves the display, and the projection must follow the
+  // overlaid canonical value rather than the bare engine output.
   const rows = buildCanonicalMakesafeRows([
-    // Legacy says archive; the evidence-only derivation says new. Two of these
-    // exist live (G6) and both must stay in Archive until Release 9 re-anchors.
-    baseRow({ id: "j1", board_stage: "archive", assignments: [] }),
-  ], { computedAt: NOW });
-  assertEquals(rows[0].derived_stage_v2, "new");
+    baseRow({ id: "j1", ...evidenceFor("allocated") }),
+  ], {
+    computedAt: NOW,
+    statusApplicationsByJobId: {
+      j1: {
+        run_key: "captain-archive-projection",
+        source_status: "allocated",
+        before_status: "allocated",
+        after_status: "archive",
+        evidence_ref: "captain-ruling",
+        applied_by: "captain",
+        applied_at: daysAgo(1),
+      },
+    },
+  });
+  assertEquals(rows[0].derived_stage_v2, "allocated");
   assertEquals(rows[0].canonical_stage, "archive");
   const ops = projectOpsMakesafeBoard(rows);
   assertEquals(ops.columns.archive.length, 1);
-  assertEquals(ops.columns.new.length, 0);
+  assertEquals(ops.columns.allocated.length, 0);
   assertEquals(ops.unmapped_stage_job_ids.length, 0);
 });
 
@@ -179,33 +241,56 @@ Deno.test("shadow: every advisory key is published and version-stamped", () => {
 
 // ── The overlay candidate is a simulation, not a binding ─────────────────────
 
-Deno.test("overlay candidate: real overlay binding is untouched by the advisory value", () => {
-  // The overlay's source_status is the LEGACY stage, so it binds today. Under
-  // the v2 derivation its source no longer matches, which is exactly the
-  // 9-row unbind risk Release 9 re-anchors — and the harness must see it.
-  const application = {
+Deno.test("overlay: real binding is anchored on the corrected derivation, not the legacy ladder", () => {
+  // Evolved from "overlay candidate: real overlay binding is untouched by the
+  // advisory value". Before R12 the resolver matched `source_status` against
+  // the LEGACY declared stage, and the advisory simulation existed to measure
+  // which captain decisions would unbind at cutover. R12 landed that cutover
+  // with the Release 9 re-anchored rows, so the simulation and the real
+  // resolver now ask the same question — and this test proves the anchor moved.
+  const application = (source: string) => ({
     run_key: "r1",
-    source_status: "allocated",
-    before_status: "allocated",
+    source_status: source,
+    before_status: source,
     after_status: "archive",
     evidence_ref: "captain-ruling",
     applied_by: "captain",
     applied_at: daysAgo(10),
-  };
-  const rows = buildCanonicalMakesafeRows([
-    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+  });
+
+  // Anchored on the DERIVED stage: the evidence proves allocation, the decision
+  // names `allocated`, so it binds — even though the legacy ladder said `new`.
+  const anchored = buildCanonicalMakesafeRows([
+    baseRow({ id: "j1", board_stage: "new", ...evidenceFor("allocated") }),
   ], {
     computedAt: NOW,
-    statusApplicationsByJobId: { "j1": application },
+    statusApplicationsByJobId: { "j1": application("allocated") },
   });
-  // Real binding: legacy declared_stage === source_status, so it applies.
-  assertEquals(rows[0].declared_stage, "allocated");
-  assertEquals(rows[0].canonical_stage, "archive");
-  assert(rows[0].status_application !== null);
-  // Simulated binding under v2: the derivation is `new`, so it would UNBIND.
-  assertEquals(rows[0].derived_stage_v2, "new");
-  assertEquals(rows[0].derived_stage_v2_overlay_binds, false);
-  assertEquals(rows[0].derived_stage_v2_post_overlay, "new");
+  assertEquals(anchored[0].declared_stage, "new");
+  assertEquals(anchored[0].derived_stage_v2, "allocated");
+  assertEquals(anchored[0].canonical_stage, "archive");
+  assert(anchored[0].status_application !== null);
+  assertEquals(anchored[0].derived_stage_v2_overlay_binds, true);
+  assertEquals(anchored[0].derived_stage_v2_post_overlay, "archive");
+
+  // A decision still anchored on the LEGACY stage is now stale: its source
+  // names the declared column, the derivation says otherwise, and it detaches.
+  // This is the un-re-anchored half of the 9-row Release 9 set.
+  const legacyAnchored = buildCanonicalMakesafeRows([
+    baseRow({
+      id: "j2",
+      board_stage: "report_ready",
+      ...evidenceFor("allocated"),
+    }),
+  ], {
+    computedAt: NOW,
+    statusApplicationsByJobId: { "j2": application("report_ready") },
+  });
+  assertEquals(legacyAnchored[0].declared_stage, "report_ready");
+  assertEquals(legacyAnchored[0].derived_stage_v2, "allocated");
+  assertEquals(legacyAnchored[0].canonical_stage, "allocated");
+  assertEquals(legacyAnchored[0].status_application, null);
+  assertEquals(legacyAnchored[0].derived_stage_v2_overlay_binds, false);
 });
 
 Deno.test("overlay candidate: a matching source binds in the simulation too", () => {
@@ -237,6 +322,28 @@ Deno.test("overlay candidate: terminal guards are not relaxed in the simulation"
       "cancelled",
     ),
     { stage: "allocated", binds: false },
+  );
+});
+
+Deno.test("overlay candidate: report_ready target requires the qualifying draft invoice, exactly like the real resolver", () => {
+  const decision = {
+    source_status: "trade_report_in",
+    after_status: "report_ready",
+  };
+  // No qualifying current-cycle draft invoice: the real resolver refuses, so
+  // the simulation must refuse too or the advisory agreement fields lie.
+  assertEquals(
+    sesStageV2OverlayCandidate("trade_report_in", decision, "in_progress"),
+    { stage: "trade_report_in", binds: false },
+  );
+  assertEquals(
+    sesStageV2OverlayCandidate(
+      "trade_report_in",
+      decision,
+      "in_progress",
+      true,
+    ),
+    { stage: "report_ready", binds: true },
   );
 });
 
@@ -439,7 +546,14 @@ Deno.test("clock: each trusted source is used, in priority order, and named", ()
   assertEquals(deriveSesStageV2(both).stage, "completed");
 });
 
-Deno.test("clock: a refused terminal card still places no card and still shows as decision_required", () => {
+Deno.test("clock: a refused terminal card is rendered in decision_required, not guessed into archive", () => {
+  // Evolved from "…still places no card and still shows as decision_required".
+  // The refusal is unchanged — an issued invoice with no trusted completion
+  // timestamp proves nothing about WHEN the work finished, so the engine will
+  // not pick between Completed and Archive. What R12 changed is where such a
+  // card goes: `decision_required` is a real rendered column now ("Captain
+  // Decision"), so the question is visible on the board instead of the card
+  // sitting in whatever column the stale legacy ladder had claimed.
   const rows = buildCanonicalMakesafeRows([
     baseRow({
       id: "j1",
@@ -454,10 +568,13 @@ Deno.test("clock: a refused terminal card still places no card and still shows a
   assertEquals(rows[0].derived_stage_v2_conflicts, [
     "completion_timestamp_missing",
   ]);
-  // Still archived on the board. The advisory value places nothing.
-  assertEquals(rows[0].canonical_stage, "archive");
-  assertEquals(projectOpsMakesafeBoard(rows).columns.archive.length, 1);
-  assertEquals(projectOpsMakesafeBoard(rows).unmapped_stage_job_ids.length, 0);
+  assertEquals(rows[0].canonical_stage, "decision_required");
+  assertEquals(rows[0].canonical_stage_label, "Captain Decision");
+  const ops = projectOpsMakesafeBoard(rows);
+  assertEquals(ops.columns.decision_required.length, 1);
+  assertEquals(ops.columns.archive.length, 0);
+  // Rendered, not parked in `new` as an unrecognised stage.
+  assertEquals(ops.unmapped_stage_job_ids.length, 0);
 });
 
 // ── Release 3 — corroborate the terminal shortcut ───────────────────────────
@@ -531,7 +648,12 @@ Deno.test("terminal: a raw terminal claim with no evidence at all proves NOTHING
   }
 });
 
-Deno.test("terminal: an unproved card STOPS the cutover gate, and stays where it is", () => {
+Deno.test("terminal: an unproved card STOPS the cutover gate, and is placed in decision_required", () => {
+  // Evolved from "…and stays where it is". `sesStageCutoverGate` is unchanged
+  // and still refuses SWMS-261059, because a card the engine will not place
+  // cannot prove a cutover. What R12 changed is the second half: the card no
+  // longer "stays where it is" in a legacy column it was never proved to
+  // belong in — it is rendered as the captain question it is.
   const rows = buildCanonicalMakesafeRows([
     baseRow({
       id: "j1",
@@ -556,11 +678,14 @@ Deno.test("terminal: an unproved card STOPS the cutover gate, and stays where it
     gate.blocked[0].conflicts.includes("terminal_without_supporting_evidence"),
   );
 
-  // ...and the board is unaffected: the card is still rendered where it was.
-  assertEquals(rows[0].canonical_stage, "report_ready");
+  // ...and the board shows the question rather than the legacy ladder's guess.
+  assertEquals(rows[0].canonical_stage, "decision_required");
+  assertEquals(rows[0].declared_stage, "report_ready");
   const ops = projectOpsMakesafeBoard(rows);
-  assertEquals(ops.columns.report_ready.length, 1);
-  // `decision_required` is not an ops column and must never become one here.
+  assertEquals(ops.columns.decision_required.length, 1);
+  assertEquals(ops.columns.report_ready.length, 0);
+  // `decision_required` is a real ops column since R12, so it is never parked
+  // in `new` as an unrecognised stage.
   assertEquals(ops.unmapped_stage_job_ids.length, 0);
 });
 
@@ -1449,10 +1574,13 @@ const CAPTAIN_ARCHIVE = {
 };
 
 Deno.test("reanchor: a legacy row with no decision_kind still binds exactly as before", () => {
-  // Every row in the ledger today has no decision_kind. This release must be
-  // a no-op for all of them, which is why the blast is zero.
+  // Every row in the ledger today has no decision_kind, so it reads as a
+  // display override and this release is a no-op for all of them.
+  // R12 cutover: the binding anchor moved from the declared stage to the
+  // DERIVED one, so the fixture now carries allocation evidence instead of
+  // declaring `board_stage: "allocated"`. The guarantee is unchanged.
   const rows = buildCanonicalMakesafeRows([
-    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+    baseRow({ id: "j1", ...evidenceFor("allocated") }),
   ], { computedAt: NOW, statusApplicationsByJobId: { j1: CAPTAIN_ARCHIVE } });
   assertEquals(rows[0].canonical_stage, "archive");
   assertEquals(rows[0].status_application?.effect, "override");
@@ -1462,19 +1590,22 @@ Deno.test("reanchor: a legacy row with no decision_kind still binds exactly as b
 
 Deno.test("reanchor: a stage attestation NEVER changes a column", () => {
   // The load-bearing guarantee of this release. Even with a source that
-  // matches the declared stage exactly — the shape that WOULD bind as an
+  // matches the card's stage exactly — the shape that WOULD bind as an
   // override — an attestation must leave the column alone.
+  // R12 cutover: "matches the card's stage" now means the DERIVED stage, so the
+  // fixture carries allocation evidence rather than declaring the column.
   const attestation = {
     ...CAPTAIN_ARCHIVE,
     decision_kind: "stage_attestation",
     after_status: "archive",
   };
   const rows = buildCanonicalMakesafeRows([
-    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+    baseRow({ id: "j1", ...evidenceFor("allocated") }),
   ], { computedAt: NOW, statusApplicationsByJobId: { j1: attestation } });
-  // Column is the legacy declared stage, NOT the attestation's after_status.
+  // Column is where the evidence puts the card, NOT the attestation's
+  // after_status.
   assertEquals(rows[0].canonical_stage, "allocated");
-  assertEquals(rows[0].declared_stage, "allocated");
+  assertEquals(rows[0].derived_stage_v2, "allocated");
   const ops = projectOpsMakesafeBoard(rows);
   assertEquals(ops.columns.allocated.length, 1);
   assertEquals(ops.columns.archive.length, 0);
@@ -1484,6 +1615,8 @@ Deno.test("reanchor: a same-column attestation keeps its provenance instead of v
   // Four of the nine re-anchor rows are this shape. Before R8 a same-column
   // decision nulled status_application and erased the Captain's authority
   // from the card; the column was right and the history was gone.
+  // R12 cutover: "same column" is judged against the derived stage, so the card
+  // now derives `archive` from its archived job state.
   const attestation = {
     ...CAPTAIN_ARCHIVE,
     decision_kind: "stage_attestation",
@@ -1492,7 +1625,7 @@ Deno.test("reanchor: a same-column attestation keeps its provenance instead of v
     after_status: "archive",
   };
   const rows = buildCanonicalMakesafeRows([
-    baseRow({ id: "j1", board_stage: "archive", assignments: [] }),
+    baseRow({ id: "j1", board_stage: "archive", ...evidenceFor("archive") }),
   ], { computedAt: NOW, statusApplicationsByJobId: { j1: attestation } });
   assertEquals(rows[0].canonical_stage, "archive");
   assert(rows[0].status_application !== null, "provenance must survive");
@@ -1527,9 +1660,16 @@ Deno.test("reanchor: an attestation on a TERMINAL card attaches without moving i
 Deno.test("reanchor: a stale override still does not attach", () => {
   // The existing guard must not be relaxed by this release. A decision whose
   // source no longer matches the card's stage is stale and stays detached.
+  // R12 cutover: the card really has moved on — a submitted current-cycle
+  // report and the photo floor derive `trade_report_in` — while the captain's
+  // decision still names `allocated`.
   const rows = buildCanonicalMakesafeRows([
-    baseRow({ id: "j1", board_stage: "trade_report_in", assignments: [] }),
-  ], { computedAt: NOW, statusApplicationsByJobId: { j1: CAPTAIN_ARCHIVE } });
+    baseRow({ id: "j1", ...evidenceFor("trade_report_in") }),
+  ], {
+    computedAt: NOW,
+    photoCountByJobId: photoFloorFor("j1"),
+    statusApplicationsByJobId: { j1: CAPTAIN_ARCHIVE },
+  });
   assertEquals(rows[0].canonical_stage, "trade_report_in");
   assertEquals(rows[0].status_application, null);
 });
@@ -1537,6 +1677,8 @@ Deno.test("reanchor: a stale override still does not attach", () => {
 Deno.test("reanchor: a stale ATTESTATION also does not attach", () => {
   // An attestation may only describe where the card actually is. One whose
   // source has moved on says nothing true and must not attach provenance.
+  // R12 cutover: "where the card actually is" is the derived stage, and this
+  // card's evidence has advanced it to `trade_report_in`.
   const stale = {
     ...CAPTAIN_ARCHIVE,
     decision_kind: "stage_attestation",
@@ -1544,8 +1686,12 @@ Deno.test("reanchor: a stale ATTESTATION also does not attach", () => {
     after_status: "allocated",
   };
   const rows = buildCanonicalMakesafeRows([
-    baseRow({ id: "j1", board_stage: "trade_report_in", assignments: [] }),
-  ], { computedAt: NOW, statusApplicationsByJobId: { j1: stale } });
+    baseRow({ id: "j1", ...evidenceFor("trade_report_in") }),
+  ], {
+    computedAt: NOW,
+    photoCountByJobId: photoFloorFor("j1"),
+    statusApplicationsByJobId: { j1: stale },
+  });
   assertEquals(rows[0].canonical_stage, "trade_report_in");
   assertEquals(rows[0].status_application, null);
 });
@@ -1599,8 +1745,12 @@ Deno.test("reanchor: the advisory overlay candidate is unchanged by decision_kin
 });
 
 Deno.test("reanchor: unknown decision_kind is non-binding in both resolvers", () => {
+  // R12 cutover: both fixtures now carry allocation evidence instead of
+  // declaring `board_stage`, because the resolver anchors on the derived stage.
+  // The guarantee is unchanged — an unrecognised `decision_kind` is refused by
+  // the real resolver and by the advisory simulation alike.
   const legacy = buildCanonicalMakesafeRows([
-    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+    baseRow({ id: "j1", ...evidenceFor("allocated") }),
   ], {
     computedAt: NOW,
     statusApplicationsByJobId: { j1: CAPTAIN_ARCHIVE },
@@ -1608,7 +1758,7 @@ Deno.test("reanchor: unknown decision_kind is non-binding in both resolvers", ()
   assertEquals(legacy[0].canonical_stage, "archive");
 
   const unknown = buildCanonicalMakesafeRows([
-    baseRow({ id: "j1", board_stage: "allocated", assignments: [] }),
+    baseRow({ id: "j1", ...evidenceFor("allocated") }),
   ], {
     computedAt: NOW,
     statusApplicationsByJobId: {

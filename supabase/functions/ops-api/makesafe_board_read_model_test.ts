@@ -79,6 +79,84 @@ function baseJob(
   };
 }
 
+// ── Release 12 fixture evidence ─────────────────────────────────────────────
+//
+// R12 flipped placement authority to the corrected evidence engine, so a card's
+// column is no longer whatever `board_stage` claims: it is what the evidence on
+// the card proves. A fixture therefore has to CARRY that evidence. `evidenceFor`
+// is the single place that knows how, so when a predicate in the engine moves,
+// one helper moves with it instead of twenty inlined blobs.
+//
+// Every fixture here is the physical make-safe family (`general_makesafe`), the
+// path `baseJob` already declares.
+const SUBMITTED_REPORT = {
+  status: "submitted",
+  cycle_number: 1,
+  submitted_at: NOW,
+};
+const READY_UNSENT_PACK = {
+  status: "drafted",
+  review_state: "READY",
+  report_doc_id: "doc-report",
+  invoice_doc_id: "doc-invoice",
+  docket_revision_id: "rev-ready",
+  pre_xero_docs_ready: true,
+  blockers: [],
+};
+
+/** Base-row overrides that make the corrected engine derive `stage`. */
+function evidenceFor(stage: string): Record<string, unknown> {
+  switch (stage) {
+    // No allocation and no report: the card exists and nothing else is proved.
+    case "new":
+      return { assignments: [] };
+    // An active assignment, no submitted report.
+    case "allocated":
+      return {};
+    // Trade report submitted this cycle (plus the photo floor from `extras`).
+    case "trade_report_in":
+      return { report: SUBMITTED_REPORT };
+    // Report-in evidence PLUS an assembled, READY, unsent pack with a current
+    // draft invoice — the captain's "one click from sending".
+    case "report_ready":
+      return {
+        report: SUBMITTED_REPORT,
+        report_pack: READY_UNSENT_PACK,
+        invoice_status: "draft",
+        invoice_qualifies_as_current_draft: true,
+        has_report_doc: true,
+        has_invoice_doc: true,
+        has_swms_doc: false,
+        missing_docs: [],
+      };
+    // Raw state claims the job is finished, but no issued invoice corroborates
+    // it and no other evidence proves any column. A captain question.
+    case "decision_required":
+      return { status: "complete", assignments: [] };
+    // Finished and corroborated by an issued invoice inside the seven-day clock.
+    case "completed":
+      return {
+        status: "complete",
+        invoice_status: "invoiced",
+        invoice_date: "2026-07-18T00:00:00Z",
+      };
+    case "archive":
+      return { status: "archived" };
+    case "cancelled":
+      return { status: "cancelled" };
+    default:
+      throw new Error(`evidenceFor has no recipe for stage ${stage}`);
+  }
+}
+
+/**
+ * Completion photos are PLACEMENT evidence since R12 (card mode loads them
+ * too), so any fixture that has to clear the floor gets it from here.
+ */
+function photoFloorFor(...ids: string[]): Record<string, number> {
+  return Object.fromEntries(ids.map((id) => [id, 8]));
+}
+
 type LoaderQueryCall = {
   table: string;
   selected?: string;
@@ -204,9 +282,21 @@ function makeCanonicalLoaderClient(failTable?: string) {
 }
 
 Deno.test("parity: every ops stage maps exactly once to the captain's four trade columns", () => {
+  // R12 cutover: this used to declare each stage with `board_stage`. Placement
+  // now follows the corrected engine, so every fixture carries the evidence for
+  // its own stage — and the guarantee is unchanged: one card, exactly one ops
+  // column, exactly one trade column. It now also covers `decision_required`,
+  // which R12 promoted from a cutover-stopper to a real rendered column.
+  const ids = OPS_MAKESAFE_STAGES.map((stage) => `job-${stage}`);
   const rows = buildCanonicalMakesafeRows(
-    OPS_MAKESAFE_STAGES.map((stage) => baseJob(stage)),
+    OPS_MAKESAFE_STAGES.map((stage) =>
+      baseJob(stage, `job-${stage}`, evidenceFor(stage))
+    ),
+    { photoCountByJobId: photoFloorFor(...ids), computedAt: NOW },
   );
+  // The fixtures really do derive the stage they are named for; without this
+  // the column assertions below could pass on a board that placed nothing.
+  assertEquals(rows.map((r) => r.canonical_stage), [...OPS_MAKESAFE_STAGES]);
   const parity = checkMakesafeBoardParity(rows);
   assertEquals(parity.ok, true);
   assertEquals(parity.checked, OPS_MAKESAFE_STAGES.length);
@@ -233,9 +323,11 @@ Deno.test("parity: every ops stage maps exactly once to the captain's four trade
     trade.columns.Complete.map((r) => r.canonical_stage),
     ["trade_report_in", "report_ready"],
   );
+  // R12: `decision_required` joins the captain's Archive lane — a captain
+  // question is not trade work, so it stays off the trade's active columns.
   assertEquals(
     trade.columns.Archive.map((r) => r.canonical_stage),
-    ["completed", "archive", "cancelled"],
+    ["decision_required", "completed", "archive", "cancelled"],
   );
 });
 
@@ -257,7 +349,13 @@ Deno.test("historical divergence: Docs Ready/report_ready deterministically appe
   });
 });
 
-Deno.test("F7 board read model consumes one exact-cycle screenshot-backed ledger revision without moving canonical stage", () => {
+Deno.test("F7 board read model consumes one exact-cycle screenshot-backed ledger revision, and R12 places the card on it", () => {
+  // Evolved from "…without moving canonical stage". The F7 guarantee that
+  // survives is about the LEDGER: exactly one exact-cycle, screenshot-backed
+  // revision is projected, with its provenance intact. What changed at the R12
+  // cutover is the consequence — that accepted capture is now placement
+  // evidence, so the card lands on the column the evidence proves
+  // (`trade_report_in`) instead of staying wherever the legacy ladder had it.
   const sourceUrl = "https://www.primeeco.tech/share/portal-fixture";
   const source = baseJob("allocated", "portal-ledger", {
     external_ref: "MLB-PORTAL-1",
@@ -296,7 +394,7 @@ Deno.test("F7 board read model consumes one exact-cycle screenshot-backed ledger
     portalCaptureRowsByJobId: { "portal-ledger": [revision] },
     computedAt: NOW,
   });
-  assertEquals(row.canonical_stage, "allocated");
+  assertEquals(row.canonical_stage, "trade_report_in");
   assertEquals(row.computed_status, "trade_report_in");
   assertEquals(row.computed_status_evidence.has_current_portal_capture, true);
   assertEquals(row.computed_status_evidence.portal_capture_revisions, [{
@@ -543,9 +641,27 @@ Deno.test("canonical loader logs explicit degradation evidence for additive evid
 });
 
 Deno.test("historical divergence: unknown stage never vanishes silently", () => {
-  const rows = buildCanonicalMakesafeRows([
-    baseJob("mystery_status", "job-mystery"),
-  ]);
+  // R12 cutover: the old fixture produced an unknown canonical stage by giving
+  // a base job an unrecognised `board_stage`. Placement no longer reads
+  // `board_stage`, so that route is closed and the engine can only ever emit a
+  // known stage. The guarantee itself is about the PROJECTIONS, not about how
+  // the bad value arrived — a row carrying a canonical stage neither projection
+  // recognises must still be parked in `new`, flagged, and counted — so the
+  // fixture is now a raw row that carries the unknown value directly. That is
+  // also the honest shape of the real risk after R12: a drifted or replayed row
+  // reaching the projection from somewhere other than today's engine.
+  const rows = [{
+    contract_version: "makesafe-board.v1",
+    id: "job-mystery",
+    job_number: "SWMS-job-mystery",
+    type: "makesafe",
+    job_state: "scheduled",
+    declared_stage: "mystery_status",
+    canonical_stage: "mystery_status",
+    canonical_stage_label: "mystery_status",
+    assignments: [],
+    contact: { client_name: "Kim Client", phone: null, address: null },
+  }];
   const ops = projectOpsMakesafeBoard(rows);
   const trade = projectTradeMakesafeBoard(rows, {
     userId: "hugo-id",
@@ -598,20 +714,25 @@ Deno.test("parseMakesafeBoardColumnScope defaults to active; full/include_archiv
 });
 
 Deno.test("active column scope drops archive without moving other cards", () => {
+  // R12 cutover: the fixtures now derive their stages from evidence rather than
+  // declaring them with `board_stage`, and the overlay anchors on that derived
+  // stage. The scope invariants under test are unchanged.
   const full = buildCanonicalMakesafeRows([
-    baseJob("new", "job-new"),
-    baseJob("allocated", "job-alloc"),
+    baseJob("new", "job-new", evidenceFor("new")),
+    baseJob("allocated", "job-alloc", evidenceFor("allocated")),
     baseJob("report_ready", "job-ready", {
+      ...evidenceFor("report_ready"),
       has_wo: true,
-      has_report_doc: true,
-      invoice_status: "draft",
     }),
-    baseJob("archive", "job-arch"),
-    baseJob("cancelled", "job-cancel", { status: "cancelled" }),
+    baseJob("archive", "job-arch", evidenceFor("archive")),
+    baseJob("cancelled", "job-cancel", evidenceFor("cancelled")),
   ], {
+    photoCountByJobId: photoFloorFor("job-ready"),
+    computedAt: NOW,
     statusApplicationsByJobId: {
       // Overlay parks a Docs Ready card into archive — active scope must drop it,
-      // and the census must still count it under archive.
+      // and the census must still count it under archive. Its `source_status`
+      // now has to match the DERIVED stage, which the evidence supplies.
       "job-ready": {
         run_key: "cap-arch",
         source_status: "report_ready",
@@ -687,15 +808,31 @@ Deno.test("active column scope drops archive without moving other cards", () => 
 });
 
 Deno.test("card shape preserves placement and drops diagnostic / detail payloads", () => {
-  const full = buildCanonicalMakesafeRows([
+  // R12 cutover: card mode now loads and projects the same placement evidence
+  // full mode does (portal captures, holds, photo counts), because the
+  // corrected engine reads them. That makes "card places identically to full"
+  // a stronger claim than it was, so both builds below are given the SAME
+  // evidence and the same extras — including the photo floor, which card mode
+  // previously never even loaded.
+  const source = () =>
     baseJob("report_ready", "job-card", {
+      ...evidenceFor("report_ready"),
       has_wo: true,
-      has_report_doc: true,
-      invoice_status: "draft",
       site_suburb: "Bertram",
       requesting_company_slug: "mlb",
-    }),
-  ], {
+    });
+  const application = {
+    run_key: "cap-1",
+    source_status: "report_ready",
+    before_status: "report_ready",
+    after_status: "archive",
+    evidence_ref: "captain",
+    applied_by: "captain",
+    applied_at: NOW,
+  };
+  const full = buildCanonicalMakesafeRows([source()], {
+    photoCountByJobId: photoFloorFor("job-card"),
+    computedAt: NOW,
     notesByJobId: {
       "job-card": [{
         id: "n1",
@@ -704,44 +841,24 @@ Deno.test("card shape preserves placement and drops diagnostic / detail payloads
         created_at: NOW,
       }],
     },
-    statusApplicationsByJobId: {
-      "job-card": {
-        run_key: "cap-1",
-        source_status: "report_ready",
-        before_status: "report_ready",
-        after_status: "archive",
-        evidence_ref: "captain",
-        applied_by: "captain",
-        applied_at: NOW,
-      },
-    },
+    statusApplicationsByJobId: { "job-card": application },
   }, "full");
-  const card = buildCanonicalMakesafeRows([
-    baseJob("report_ready", "job-card", {
-      has_wo: true,
-      has_report_doc: true,
-      invoice_status: "draft",
-      site_suburb: "Bertram",
-      requesting_company_slug: "mlb",
-    }),
-  ], {
-    statusApplicationsByJobId: {
-      "job-card": {
-        run_key: "cap-1",
-        source_status: "report_ready",
-        before_status: "report_ready",
-        after_status: "archive",
-        evidence_ref: "captain",
-        applied_by: "captain",
-        applied_at: NOW,
-      },
-    },
+  const card = buildCanonicalMakesafeRows([source()], {
+    photoCountByJobId: photoFloorFor("job-card"),
+    computedAt: NOW,
+    statusApplicationsByJobId: { "job-card": application },
   }, "card");
 
   // Placement is identical: the captain display overlay still archives the card.
   assertEquals(full[0].canonical_stage, "archive");
   assertEquals(card[0].canonical_stage, "archive");
   assertEquals(full[0].declared_stage, card[0].declared_stage);
+  // R12 stamps which engine placed the card, in both shapes and identically.
+  assertEquals(
+    card[0].placement_engine_version,
+    full[0].placement_engine_version,
+  );
+  assert(String(card[0].placement_engine_version).endsWith("+overlay-r12"));
 
   // Diagnostics and detail-view blobs are gone from card.
   assertEquals(card[0].notes, undefined);
@@ -765,11 +882,43 @@ Deno.test("card shape preserves placement and drops diagnostic / detail payloads
   assertEquals(opsCard.columns.archive[0].id, "job-card");
   assertEquals(opsCard.row_count, 1);
 
-  // Stripping a full row through projectOpsMakesafeCardRow never moves stage.
+  // Stripping a full row through projectOpsMakesafeCardRow never moves stage
+  // and never loses the record of which engine placed it.
   const stripped = projectOpsMakesafeCardRow(full[0]);
   assertEquals(stripped.canonical_stage, full[0].canonical_stage);
+  assertEquals(
+    stripped.placement_engine_version,
+    full[0].placement_engine_version,
+  );
   assertEquals(stripped.computed_status_evidence, undefined);
   assertEquals(stripped.notes, undefined);
+});
+
+Deno.test("cancelled detail block keys on the derived stage, not a stale board_stage", () => {
+  // A builder-cancelled job whose stored board_stage never caught up: R12
+  // derives `cancelled` from job status, and the reason/note/by/at must render
+  // with the card in the Cancelled column instead of vanishing.
+  const rows = buildCanonicalMakesafeRows(
+    [
+      baseJob("allocated", "job-stale-cancel", {
+        status: "cancelled",
+        cancel_reason: "builder_cancelled",
+        cancel_note: "WO withdrawn by MLB",
+        cancelled_by: "ops",
+        cancelled_at: NOW,
+      }),
+    ],
+    { computedAt: NOW },
+    "full",
+  );
+  assertEquals(rows[0].canonical_stage, "cancelled");
+  assertEquals(rows[0].declared_stage, "allocated");
+  assertEquals(rows[0].cancelled, {
+    reason: "builder_cancelled",
+    note: "WO withdrawn by MLB",
+    by: "ops",
+    at: NOW,
+  });
 });
 
 Deno.test("trade visibility is server-shaped: ordinary allocated-only, Hugo all, Khairo make-safe allocated-only", () => {
@@ -1059,7 +1208,13 @@ Deno.test("repair stays explicitly typed and sealed through board projection", (
 });
 
 Deno.test("captain-applied status is a display overlay and never rewrites declared or raw state", () => {
+  // R12 cutover: the overlay's `source_status` is matched against the DERIVED
+  // stage now, not the declared one, so the card carries the evidence that
+  // derives `new` (no allocation, no report). The guarantee is untouched: an
+  // overlay moves the DISPLAY and rewrites neither the declared stage nor any
+  // raw state on the source row.
   const source = baseJob("new", "overlay", {
+    ...evidenceFor("new"),
     substatus: "company_contact_required",
     makesafe_details: {
       substatus: "company_contact_required",
@@ -1067,6 +1222,7 @@ Deno.test("captain-applied status is a display overlay and never rewrites declar
     },
   });
   const [row] = buildCanonicalMakesafeRows([source], {
+    computedAt: NOW,
     statusApplicationsByJobId: {
       overlay: {
         run_key: "makesafe-stage1-20260724",
@@ -1146,11 +1302,23 @@ Deno.test("a duplicate-survivor archive displays as archive and points at its su
 });
 
 Deno.test("display overlay fails closed when its source is stale or the card is terminal", () => {
+  // R12 cutover: all three refusals now anchor on the DERIVED stage. The card
+  // shapes are chosen so each refusal is still the one being tested —
+  //  - `stale`:     derives `new`, the overlay claims a source of `allocated`;
+  //  - `terminal`:  derives `archive` from its archived job state, and a
+  //                 terminal derived stage can never be overridden;
+  //  - `closed-job`: derives `allocated` and its overlay names that exact
+  //                 source, so the ONLY thing refusing it is the terminal raw
+  //                 job state — which is the guard this row is here to prove.
   const rows = buildCanonicalMakesafeRows([
-    baseJob("new", "stale"),
-    baseJob("archive", "terminal"),
-    baseJob("new", "closed-job", { status: "closed" }),
+    baseJob("new", "stale", evidenceFor("new")),
+    baseJob("archive", "terminal", evidenceFor("archive")),
+    baseJob("new", "closed-job", {
+      ...evidenceFor("allocated"),
+      status: "closed",
+    }),
   ], {
+    computedAt: NOW,
     statusApplicationsByJobId: {
       stale: {
         source_status: "allocated",
@@ -1163,9 +1331,9 @@ Deno.test("display overlay fails closed when its source is stale or the card is 
         after_status: "allocated",
       },
       "closed-job": {
-        source_status: "new",
-        before_status: "new",
-        after_status: "allocated",
+        source_status: "allocated",
+        before_status: "allocated",
+        after_status: "trade_report_in",
       },
     },
   });
@@ -1175,7 +1343,7 @@ Deno.test("display overlay fails closed when its source is stale or the card is 
   assertEquals(rows[1].canonical_stage, "archive");
   assertEquals(rows[1].computed_status, "archive");
   assertEquals(rows[1].status_application, null);
-  assertEquals(rows[2].canonical_stage, "new");
+  assertEquals(rows[2].canonical_stage, "allocated");
   assertEquals(rows[2].computed_status, "completed");
   assertEquals(rows[2].status_application, null);
 });
@@ -1275,11 +1443,23 @@ Deno.test("terminally accounted synthetic live-fire jobs disappear from both boa
 Deno.test("the archive census excludes exactly what the canonical build excludes", () => {
   const marker =
     "SWG-SES-LIVEFIRE-TEST-ONLY-018F7F2C-4DB4-7C61-92C7-2B2B97E0A111";
+  // R12 cutover: the archive rows now derive `archive` from an archived job
+  // state rather than declaring it with `board_stage`. The invariant is
+  // unchanged — the census added back OUTSIDE the canonical build must exclude
+  // exactly the rows the build itself excludes.
   const syntheticArchive = baseJob("archive", "synthetic-archived", {
-    metadata: { synthetic_livefire_marker: marker },
+    ...evidenceFor("archive"),
+    metadata: {
+      makesafe_job_family: "general_makesafe",
+      synthetic_livefire_marker: marker,
+    },
   });
-  const realArchive = baseJob("archive", "real-archived");
-  const active = baseJob("allocated", "job-alloc");
+  const realArchive = baseJob(
+    "archive",
+    "real-archived",
+    evidenceFor("archive"),
+  );
+  const active = baseJob("allocated", "job-alloc", evidenceFor("allocated"));
   const terminalIds = new Set([syntheticArchive.id]);
 
   assertEquals(

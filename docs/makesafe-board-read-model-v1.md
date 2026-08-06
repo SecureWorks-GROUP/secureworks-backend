@@ -18,7 +18,8 @@ Contract version: `makesafe-board.v1`.
 
 Ops projection defaults to a **card-shaped** payload (`fields=card`, response
 `shape: "card"`). Card shape is what the kanban paints: placement keys
-(`canonical_stage` from the declared ladder + display-ledger overlay), crew,
+(`canonical_stage` from the corrected evidence engine + display-ledger overlay,
+plus `placement_engine_version`), crew,
 pack/report chips, age, blockers, and the small presentation keys
 (`has_wo`, `invoice_status`, `site_suburb`, `requesting_company_slug`, …) that
 previously required a second `makesafe_pipeline?history=all` dual-fetch.
@@ -33,8 +34,12 @@ Card shape deliberately omits:
   byte-for-byte duplicate of every card)
 
 Opt into the full diagnostic dump with `fields=full` or
-`include_diagnostics=1`. Placement is identical in both shapes — card mode never
-re-derives a column. Trade projection is unchanged and always full.
+`include_diagnostics=1`. Placement is identical in both shapes: since Release 12
+both derive `canonical_stage` from the same evidence engine, so every
+placement-bearing evidence read (completion photos, portal captures, holds,
+terminal proofs) is loaded and projected in card mode too. Card mode may only
+skip DETAIL, never a placement input. Trade projection is unchanged and always
+full.
 
 ### Archive on demand (`column_scope=active` default)
 
@@ -48,7 +53,7 @@ Model") owns that analysis and the bounded fan-out rules that follow from it.
 
 | Request | What returns |
 | --- | --- |
-| `projection=ops` (default) | Active columns only: new, allocated, trade_report_in, report_ready, completed, cancelled. `columns.archive` is `[]`. |
+| `projection=ops` (default) | Active columns only: new, allocated, trade_report_in, report_ready, decision_required, completed, cancelled. `columns.archive` is `[]`. |
 | `include_archive=1` or `columns=all` | Every column, including Archive. |
 | `columns=archive` | Archive only (lazy open). Optional `limit` / `offset` for paging (max 500). A non-integer, non-positive or over-max `limit`, or a negative `offset`, is a `400` — never silently clamped to a page nobody asked for. |
 | `fields=full` | Full diagnostic fields **and** every column (diagnostics never silently drop history). |
@@ -60,8 +65,10 @@ The response always publishes an honest census so Archive never looks deleted:
 - `archive`: `{ included, scope, total, returned, offset, limit, fetch }` with
   the exact query strings to load history on demand
 
-Placement for every **returned** card is unchanged: declared ladder +
-display-ledger overlay. Scope only decides which cards are present. Overlays
+Placement for every **returned** card is the same in every scope: corrected
+evidence engine + display-ledger overlay. Since Release 12 every scope builds
+every base row (an archived-status card can legitimately derive back out of
+archive), and scope only decides which cards are returned. Overlays
 that move a card into archive still remove it from the active payload and
 increment `column_counts.archive`.
 
@@ -240,16 +247,23 @@ model. The engine stays pure and never changes an operational record.
 - `computed_status_hold`: an active, reason-coded hold surfaced as a badge on the derived column (never moves the card)
 - `computed_status_evidence`: `report_received_at`, `has_submitted_service_report`, `has_current_portal_capture`
 
-Release 1 also publishes the corrected engine as advisory-only shadow fields:
-`derived_stage_v2`, `derived_stage_v2_post_overlay`,
-`derived_stage_v2_overlay_binds`, `derived_stage_v2_agrees_with_canonical`,
-`derived_stage_v2_reasons`, `derived_stage_v2_missing`,
-`derived_stage_v2_conflicts`, and `derived_stage_v2_engine_version`. These
-fields are for comparison and audit only: `canonical_stage` remains the sole
-board placement authority, and no consumer may bucket or render a card from
-the `derived_stage_v2*` values. The advisory engine receives no displayed
-stage, and its post-overlay value simulates existing guards without binding an
-overlay. Promotion requires a separate captain-approved release.
+Since **Release 12** the corrected engine (`ses_stage_engine_v2.ts`,
+`deriveSesStageV2`) is the board placement authority: `canonical_stage` is its
+answer plus the display-ledger overlay, and every row stamps
+`placement_engine_version` (the engine version suffixed `+overlay-r12`). The
+engine still receives no displayed stage, so placement can never be derived
+from the column previously displayed. `computed_status` (M1) stays published
+for measurement continuity, and the legacy ladder's answer stays published as
+`declared_stage` / `declared_stage_engine_version` provenance only.
+
+The `derived_stage_v2*` keys (`derived_stage_v2`,
+`derived_stage_v2_post_overlay`, `derived_stage_v2_overlay_binds`,
+`derived_stage_v2_agrees_with_canonical`, `derived_stage_v2_reasons`,
+`derived_stage_v2_missing`, `derived_stage_v2_conflicts`,
+`derived_stage_v2_engine_version`) remain full-shape diagnostics for comparison
+and audit; the post-overlay diagnostic only simulates the real overlay guards.
+No consumer may bucket a card from them, and they never enter the trade
+allow-list.
 
 The derivation is a pure engine (`makesafe_computed_status.ts`) fed by typed
 portal evidence (assessment-report/quote cards require the assessment 3-of-3
@@ -264,15 +278,25 @@ the existing `record_ses_portal_capture_evidence` contract may append rows to
 it matches the card's current attendance cycle, typed current-cycle portal
 URL, builder reference, approved producer, source hash, result/status pair,
 and the screenshot requirement for reachable results. Accepted rows replace
-older embedded capture detail for the same role and URL; they provide evidence
-to this engine but never derive or move `canonical_stage`. The observer may
+older embedded capture detail for the same role and URL. Recording a capture
+still writes no stage or substatus, but since Release 12 an accepted
+current-cycle capture is genuine PLACEMENT evidence, so the derived column may
+move as far as that capture proves — and no further. The observer may
 retain archived and other off-board observations in its wider read-only
 population, but the canonical live-board partition uses the shared status
 predicate and is reported separately.
 
-The raw projection stage is returned as `declared_stage`. A captain-approved
-transition changes `canonical_stage` only through the latest applicable row in
-the append-only `makesafe_board_status_applications` ledger. It never rewrites
+The legacy ladder's raw projection stage is returned as `declared_stage`
+(provenance only). A captain-approved transition changes `canonical_stage` only
+through the latest applicable row in the append-only
+`makesafe_board_status_applications` ledger, and since Release 12 that overlay
+is anchored on the DERIVED stage: a row binds only while its `source_status`
+equals the engine's pre-overlay answer, so every writer stamps `source_status`
+through the one producer `makesafeOverlaySourceStatus`
+(`makesafe_status_apply.ts`) and never `declared_stage`. A card sitting in
+`decision_required` is never a ledger `before_status` and is never plannable —
+apply, reconcile and duplicate-survivor planners park it as a captain question
+with a reason. It never rewrites
 `jobs`, `makesafe_job_details.substatus`, assignments, invoices, events, or
 communications. `status_application` carries its run key, before/after,
 evidence reference, attribution, and timestamp. It also carries the additive
@@ -314,7 +338,14 @@ migration-first.
 
 Ops retains the full stages:
 
-`new`, `allocated`, `trade_report_in`, `report_ready`, `completed`, `archive`, `cancelled`.
+`new`, `allocated`, `trade_report_in`, `report_ready`, `decision_required`,
+`completed`, `archive`, `cancelled`.
+
+`decision_required` (label **Captain Decision**) is a Release 12 column: the
+evidence engine refuses to guess a column when a card's evidence contradicts
+itself, so the card is a visible captain question instead of a silent
+mis-placement. It is resolved by recording the captain's sign-off as evidence
+(a terminal-proof row), never by writing a stage.
 
 Each row appears exactly once. An unknown stage is retained in `new`, carries `projection_warning`, and is listed in `unmapped_stage_job_ids`. It never disappears.
 
@@ -371,6 +402,7 @@ The only column names are:
 | `allocated` | Allocated |
 | `trade_report_in` | Complete |
 | `report_ready` | Complete |
+| `decision_required` | Archive |
 | `completed` | Archive |
 | `archive` | Archive |
 | `cancelled` | Archive |

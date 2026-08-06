@@ -1,25 +1,21 @@
-// The corrected SES stage engine — SHADOW ONLY.
+// The corrected SES stage engine — THE PLACEMENT AUTHORITY since Release 12.
 //
-// The board currently runs two stage engines that disagree on 71 of 407 active
-// cards: the legacy ladder in `index.ts` places every card people see, while
-// `computeMakesafeStatus` is what every measurement and certificate grades
-// against. The captain's 2026-08-02 ruling supersedes the legacy ladder but
-// explicitly refuses a straight flip to the newer engine, which is measurably
-// wrong on its terminal paths. This module is the correction that will one day
-// replace both.
+// History: the board ran two stage engines that disagreed on 71 of 407 active
+// cards: the legacy ladder in `index.ts` placed every card people saw, while
+// `computeMakesafeStatus` was what every measurement graded against. The
+// captain's 2026-08-02 ruling superseded the legacy ladder but refused a
+// straight flip to the newer engine until its terminal faults were repaired
+// (R0-R8) — this module is that correction.
 //
 // ── AUTHORITY BOUNDARY. Read this before changing anything here. ────────────
 //
-// This engine has NO authority over any card. `canonical_stage` remains the
-// legacy ladder plus the existing overlay resolver, and `projectOpsMakesafeBoard`
-// still buckets on `canonical_stage` alone. Everything this module returns is
-// published as advisory `derived_stage_v2*` fields for comparison and audit.
-//
-// There is deliberately no flag, env var or config switch that promotes the
-// advisory value to authority. The authority flip is Release 12 of the design's
-// landing plan and is a separate captain-approved decision with its own exact
-// manifest, overlay re-anchoring (Release 9) and soak gate (Release 11). It has
-// to be WRITTEN, not thrown.
+// RELEASE 12 LANDED 2026-08-06 (Rescue SES mission, captain-approved: wiki
+// makesafe-system/missions/rescue-ses-2026-08/CONTRACT.md). `canonical_stage`
+// is now `deriveSesStageV2` plus the display-ledger overlay anchored on the
+// DERIVED stage (Release 9 re-anchor rows carry matching source_status). The
+// legacy ladder's answer survives only as `declared_stage` provenance. The
+// pre-cutover manifest (25 expected moves, 2 re-anchors, 1 decision_required
+// card) is filed in the mission's evidence folder.
 //
 // Three further boundaries hold the design up:
 //
@@ -59,6 +55,7 @@ import {
 import {
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
+  MAKESAFE_DECISION_REQUIRED_DISPLAY_STATUS,
 } from "./makesafe_status_apply.ts";
 import {
   canonicalSesFamilyFromCard,
@@ -94,7 +91,8 @@ export const SES_STAGE_COMPLETED_WINDOW_MS = 7 * 86_400_000;
  * rather than picking a plausible column; the design is explicit that a
  * mechanical fall-through is not evidence about the job.
  */
-export const SES_STAGE_DECISION_REQUIRED = "decision_required" as const;
+export const SES_STAGE_DECISION_REQUIRED =
+  MAKESAFE_DECISION_REQUIRED_DISPLAY_STATUS;
 
 export type SesStageV2Stage =
   | MakesafeComputedStatus
@@ -866,12 +864,14 @@ export interface SesStageV2OverlayCandidate {
  * predicate exactly — same terminal-display guard, same terminal-job-state
  * guard, same strict source equality — because the point of the measurement is
  * to expose which captain decisions would unbind, not to make more of them bind.
- * Relaxing any of these three guards here would understate that risk.
+ * Relaxing any of these guards (including the report_ready draft-invoice
+ * prerequisite) would understate that risk.
  */
 export function sesStageV2OverlayCandidate(
   derivedStage: SesStageV2Stage,
   application: SesStageOverlayApplication | null | undefined,
   rawJobState: unknown,
+  invoiceQualifiesAsCurrentDraft = false,
 ): SesStageV2OverlayCandidate {
   const stage = String(derivedStage || "").toLowerCase();
   const decisionKind = sesOverlayDecisionKind(application);
@@ -879,7 +879,9 @@ export function sesStageV2OverlayCandidate(
     !isMakesafeTerminalDisplayStatus(stage) &&
     !isMakesafeTerminalJobState(rawJobState) &&
     !!application &&
-    String(application.source_status || "").toLowerCase() === stage;
+    String(application.source_status || "").toLowerCase() === stage &&
+    (String(application.after_status || "").toLowerCase() !== "report_ready" ||
+      invoiceQualifiesAsCurrentDraft);
   return {
     stage: binds
       ? String(application?.after_status || stage).toLowerCase()

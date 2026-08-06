@@ -183,6 +183,7 @@ import {
   planMakesafeStatusApplications,
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
+  makesafeOverlaySourceStatus,
   type MakesafeStatusApplication,
 } from './makesafe_status_apply.ts'
 import {
@@ -4312,7 +4313,7 @@ if (import.meta.main) serve(async (req: Request) => {
             job_id: outcome.job_id,
             job_number: outcome.job_number,
             outcome: outcome.outcome,
-            source_status: String(row?.declared_stage || row?.canonical_stage || '').toLowerCase(),
+            source_status: makesafeOverlaySourceStatus(row || {}),
             before_status: String(row?.canonical_stage || '').toLowerCase(),
             after_status: transition?.after_status || null,
             computed_at: row?.state_v2?.computed_at || computedAt,
@@ -14400,12 +14401,13 @@ export function _deriveMakesafeSurfacing(
   }
 }
 
-// The version of the VISIBLE stage ladder — `_deriveMakesafeBoardStage`, whose
-// output becomes `declared_stage` and then `canonical_stage`, the column a card
-// is rendered in. The corrected shadow engine has carried
-// `SES_STAGE_ENGINE_V2_VERSION` since it was born; the ladder that actually
-// places every card had no version at all, so a past measurement could not say
-// which derivation produced it.
+// The version of the legacy stage ladder — `_deriveMakesafeBoardStage`, whose
+// output is `declared_stage` and NOTHING else. Since Release 12 the placement
+// authority is `deriveSesStageV2` plus the captain overlay anchored on that
+// derived stage; `canonical_stage`, the column a card is rendered in, comes from
+// there. The engine has carried `SES_STAGE_ENGINE_V2_VERSION` since it was born;
+// the ladder had no version at all, so a past measurement could not say which
+// derivation produced the stage it recorded.
 //
 //   v1 (implicit, unversioned) — `invoiceDone` counted any non-VOIDED/DELETED
 //      ACCREC row, so a Xero DRAFT closed a card.
@@ -16727,14 +16729,16 @@ async function loadCanonicalMakesafeBoard(
   if (restrictToJobIds && restrictToJobIds.length === 0) {
     return finish([], countOpsCanonicalStages([]), 0)
   }
-  // Active ops paint only needs full stage-dependent joins for non-archived-
-  // status cards. Archive-on-demand / trade / seed keep full joins (default).
+  // Every scope keeps full stage-dependent joins: placement is derived from
+  // evidence, so no card may be built from a thinner read than another.
   const pipeline = await makesafePipeline(
     client,
     new URLSearchParams('history=all'),
     restrictToJobIds,
     {
-      skipArchivedStatusDependents: columnScope === 'active',
+      // Release 12: archived-status cards need their evidence joins too — the
+      // corrected engine can derive a wrongly-archived card back out.
+      skipArchivedStatusDependents: false,
     },
   )
   const baseRows: any[] = []
@@ -16757,39 +16761,20 @@ async function loadCanonicalMakesafeBoard(
   const isTerminalSyntheticRow = (row: any) =>
     isExcludedTerminalSyntheticBoardRow(row, terminalSyntheticIds)
 
-  // Archive is a terminal display stage: overlays cannot move a card OUT of it.
-  // They can only move a non-archive declared stage INTO archive. So for the
-  // default active board we still build every non-archive base row (to apply
-  // overlays and keep placement identical) and skip the heavy follow-on work for
-  // cards the pipeline already parked in archive.
-  const declaredArchiveBase = baseRows.filter((row) =>
-    String(row?.board_stage || '').toLowerCase() === 'archive' &&
-    !isTerminalSyntheticRow(row)
-  )
-  const nonArchiveBase = baseRows.filter((row) =>
-    String(row?.board_stage || '').toLowerCase() !== 'archive'
-  )
-  // Which base rows enter the expensive extras + buildCanonical path.
-  const buildBase = columnScope === 'all'
-    ? baseRows
-    : columnScope === 'archive'
-    // Archive page needs declared archive cards + any non-archive that overlay in.
-    ? baseRows
-    // active: skip declared-archive base rows (terminal → stay archive).
-    : nonArchiveBase
+  // Release 12: the corrected engine places every card from evidence, and an
+  // archived-status card can legitimately derive OUT of archive (a wrong
+  // archive is now visible instead of frozen). So every scope builds every
+  // base row; `columnScope` only filters the RETURNED rows below.
+  const buildBase = baseRows
   const jobIds = buildBase.map((row) => row.id)
-  // Active scope with only declared-archive cards: nothing to build, but still
-  // report the honest archive census so the column never looks deleted.
   if (jobIds.length === 0) {
-    const column_counts = countOpsCanonicalStages([])
-    column_counts.archive = declaredArchiveBase.length
-    return finish([], column_counts, 0)
+    return finish([], countOpsCanonicalStages([]), 0)
   }
 
-  // Card mode: only the display-ledger overlay is load-bearing for placement
-  // beyond the pipeline base. Notes, contacts, photos, portal captures, holds,
-  // intake cases, own-roof drafts and terminal proofs are detail/diagnostic and
-  // are skipped so the Captain board is not waiting on them.
+  // Release 12: photo counts, portal captures and holds are PLACEMENT evidence
+  // (the corrected engine reads them), so every mode loads them. Notes,
+  // contacts and intake lineage stay detail-only and card mode still skips
+  // them for paint speed.
   let notes: any[] = []
   let photos: any[] = []
   let contacts: any[] = []
@@ -16797,10 +16782,23 @@ async function loadCanonicalMakesafeBoard(
   let holds: any[] = []
   let intakeCases: any[] = []
 
-  if (!cardMode) {
-    // These reads are business-meaningful. _fetchAllByJobIdChunked checks every
-    // PostgREST error and paginates every 1000 rows, so empty means genuinely empty.
-    ;[notes, photos, contacts] = await Promise.all([
+  // Placement-bearing photo count, every mode. _fetchAllByJobIdChunked checks
+  // every PostgREST error and paginates every 1000 rows. Built first and awaited
+  // together with the detail-only reads so full mode pays no extra serial wave —
+  // serial round-trips, not payload bytes, dominate board TTFB.
+  const photosPromise = _fetchAllByJobIdChunked(
+    client,
+    'job_media',
+    'id, job_id, type, phase',
+    jobIds,
+    (q) => q.eq('type', 'photo').eq('phase', 'completion'),
+  )
+
+  if (cardMode) {
+    photos = await photosPromise
+  } else {
+    ;[photos, notes, contacts] = await Promise.all([
+      photosPromise,
       _fetchAllByJobIdChunked(
         client,
         'job_events',
@@ -16810,20 +16808,15 @@ async function loadCanonicalMakesafeBoard(
       ),
       _fetchAllByJobIdChunked(
         client,
-        'job_media',
-        'id, job_id, type, phase',
-        jobIds,
-        (q) => q.eq('type', 'photo').eq('phase', 'completion'),
-      ),
-      _fetchAllByJobIdChunked(
-        client,
         'job_contacts',
         'job_id, client_name, client_phone, is_primary, contact_label, status',
         jobIds,
         (q) => q.eq('status', 'active'),
       ),
     ])
+  }
 
+  {
     // F7: the append-only capture ledger is the durable Prime truth source. Read
     // it into the canonical row; do not mutate details, substatus, or stage.
     try {
@@ -16858,17 +16851,19 @@ async function loadCanonicalMakesafeBoard(
     // The intake-case migration is shadow-first and can legitimately lag an edge
     // function in a preview database. Claim/ref grouping below remains canonical;
     // log loudly rather than failing the entire operational board on that additive
-    // lineage overlay.
-    try {
-      intakeCases = await _fetchAllByJobIdChunked(
-        client,
-        'makesafe_intake_cases',
-        'id, job_id, lineage_id, parent_case_id, parent_relation, cycle, updated_at',
-        jobIds,
-        (q) => q.order('cycle', { ascending: false }),
-      )
-    } catch (error) {
-      console.error('[ops-api] makesafe_board intake lineage read unavailable:', (error as Error).message)
+    // lineage overlay. Detail-only: card mode skips it.
+    if (!cardMode) {
+      try {
+        intakeCases = await _fetchAllByJobIdChunked(
+          client,
+          'makesafe_intake_cases',
+          'id, job_id, lineage_id, parent_case_id, parent_relation, cycle, updated_at',
+          jobIds,
+          (q) => q.order('cycle', { ascending: false }),
+        )
+      } catch (error) {
+        console.error('[ops-api] makesafe_board intake lineage read unavailable:', (error as Error).message)
+      }
     }
   }
 
@@ -16948,8 +16943,8 @@ async function loadCanonicalMakesafeBoard(
   // the first such card exists, and never for the other ~407. The family test
   // is the same canonical one the read model applies, kept in
   // `ownTemplateRoofJobIdsForBoard` so the two cannot drift apart.
-  // Card mode skips: own-roof drafts only feed M1/v2 diagnostics, never placement.
-  const ownRoofJobIds = cardMode ? [] : ownTemplateRoofJobIdsForBoard(buildBase)
+  // Release 12: own-roof drafts feed the placing engine — every mode loads them.
+  const ownRoofJobIds = ownTemplateRoofJobIdsForBoard(buildBase)
   let ownRoofDraftByJobId: Record<string, any> = {}
   let ownRoofReportDocumentIdsByJobId: Record<string, Set<string>> = {}
   if (ownRoofJobIds.length > 0) {
@@ -16993,10 +16988,10 @@ async function loadCanonicalMakesafeBoard(
   // and the attendance-cycle SETS a proof must cover are read ONLY for the jobs
   // that actually carry one. With no proof on the board that second query never
   // runs, and the board's cost is unchanged.
-  // Card mode skips: terminal proofs feed M1/v2 only.
+  // Release 12: terminal proofs feed the placing engine — every mode loads them.
   const terminalProofsByJobId: Record<string, any[]> = {}
   const attendanceCycleIdsByJobId: Record<string, string[]> = {}
-  if (!cardMode) {
+  {
     try {
       const proofRows = await _fetchAllByJobIdChunked(
         client,
@@ -17045,15 +17040,9 @@ async function loadCanonicalMakesafeBoard(
     terminalSyntheticLivefireJobIds: terminalSyntheticIds,
   }, fields)
 
-  // Honest full-board census. Active scope never builds declared-archive base
-  // rows (terminal display — overlays cannot leave archive), so add that count
-  // back onto the archive total after counting overlay→archive moves among the
-  // non-archive base set.
+  // Honest full-board census. Release 12 builds every base row in every scope,
+  // so the counts fall straight out of the built rows.
   const column_counts = countOpsCanonicalStages(built)
-  if (columnScope === 'active') {
-    column_counts.archive =
-      Number(column_counts.archive || 0) + declaredArchiveBase.length
-  }
 
   const rows = filterCanonicalRowsByColumnScope(built, columnScope, {
     limit: opts?.archiveLimit,

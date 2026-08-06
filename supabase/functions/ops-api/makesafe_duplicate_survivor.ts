@@ -14,8 +14,10 @@
 // docs/evidence/makesafe-duplicate-survivors-2026-08-01.md.
 
 import {
+  isMakesafeDecisionRequiredDisplayStatus,
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
+  makesafeOverlaySourceStatus,
   type MakesafeStatusApplyRow,
 } from "./makesafe_status_apply.ts";
 
@@ -77,6 +79,7 @@ export interface MakesafeDuplicateSkip {
     | "survivor_terminal_display_status"
     | "survivor_terminal_job_status"
     | "already_archived_as_duplicate"
+    | "loser_decision_required_display_status"
     | "group_not_authorized";
   detail?: string;
 }
@@ -265,9 +268,11 @@ export interface MakesafeDuplicateSurvivorRow extends MakesafeStatusApplyRow {
  *
  * - the display is `archive` specifically — `cancelled` and every other terminal
  *   display still refuse;
- * - the card derived that stage from its OWN facts (`declared_stage`), with no
- *   status-application overlay in play, so nothing a previous run decided is
- *   being read as completion;
+ * - the card derived that stage from its OWN facts — post-R12 that is the
+ *   evidence engine's pre-overlay answer, read through the same
+ *   `makesafeOverlaySourceStatus` anchor every ledger writer stamps, never the
+ *   legacy ladder — with no status-application overlay in play, so nothing a
+ *   previous run decided is being read as completion;
  * - the card is not itself an archived duplicate, which would build a pointer
  *   chain;
  * - and the read model's independent closeout verdict is true. That verdict is
@@ -280,7 +285,7 @@ export function survivorArchiveIsNaturalCompletion(
   survivor: MakesafeDuplicateSurvivorRow,
 ): boolean {
   if (token(survivor?.canonical_stage) !== "archive") return false;
-  if (token(survivor?.declared_stage) !== "archive") return false;
+  if (makesafeOverlaySourceStatus(survivor || {}) !== "archive") return false;
   if (survivor?.status_application) return false;
   if (survivor?.duplicate_of_job_id) return false;
   return survivor?.computed_status_evidence?.closeout_satisfied === true;
@@ -393,6 +398,14 @@ export function planMakesafeDuplicateSurvivorArchives(
       continue;
     }
     const before = token(loser.canonical_stage);
+    if (isMakesafeDecisionRequiredDisplayStatus(before)) {
+      skipped.push({
+        ...base,
+        reason: "loser_decision_required_display_status",
+        detail: before,
+      });
+      continue;
+    }
     if (isMakesafeTerminalDisplayStatus(before)) {
       skipped.push({
         ...base,
@@ -413,7 +426,7 @@ export function planMakesafeDuplicateSurvivorArchives(
     archives.push({
       job_id: String(loser.id),
       job_number: String(loser.job_number),
-      source_status: token(loser.declared_stage || loser.canonical_stage),
+      source_status: makesafeOverlaySourceStatus(loser),
       before_status: before,
       after_status: "archive",
       computed_at: nowIso,
