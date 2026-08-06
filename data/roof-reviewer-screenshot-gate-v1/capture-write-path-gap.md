@@ -356,7 +356,7 @@ document**, which would replace better evidence with worse.
 
 ## 8. Open items for the Captain
 
-Recorded, not acted on. Both are his calls, not an implementer's.
+Recorded, not acted on. Each is his call, not an implementer's.
 
 ### 8a. Mindarie carries a duplicate capture document — deletion is destructive
 
@@ -383,6 +383,19 @@ Every attached capture is retrievable by URL with no authentication; all three d
 referenced in this document were fetched that way during the investigation. Given that a
 genuine capture carries the policyholder's name, full site address and site photographs
 (section 1), this deserves its own look. It is pre-existing and was not caused by anything
+here.
+
+### 8c. The wiki skill reference describes the capture path without the write-path caveat
+
+`secureworks-makesafe-reporting/references/portal-proof-and-roof-reports.md` (wiki
+repository, not this one) documents `capture_portal_evidence.py` as the capture path and
+its screenshot as the proof. That is correct as far as it goes, but it does not record
+that the script's output has no sanctioned route into `makesafe_portal_capture_revisions`
+(section 3). A reader following it therefore reaches the dead end described there and is
+tempted by one of the two shortcuts that already caused defects (section 4): run the
+observer and get a synthetic card, or hand-assemble a POST and corrupt
+`source_content_hash`. The remedy is either a caveat in that reference or the option-1
+wiring in section 9 — both are work in the wiki repository and neither can be done from
 here.
 
 ---
