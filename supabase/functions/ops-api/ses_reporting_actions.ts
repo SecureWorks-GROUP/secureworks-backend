@@ -597,6 +597,8 @@ export function resolveDocketRoutes(
   //   route_kind report_invoice = report PDF + real Xero invoice PDF
   //   route_kind photo = labelled images follow-up
   // Separate invoice route is dropped so SEND IT only releases two emails.
+  // Builder-facing body is set here (not inherited from internal draft jargon):
+  // what is attached, job ref, thanks. No draft/docket/pack/route/cycle/revision.
   const byKind = new Map(
     resolvedRoutes.map((route) => [route.route_kind, route]),
   );
@@ -608,6 +610,16 @@ export function resolveDocketRoutes(
   const recipients = ajsPackRecipients({ workOrderSender });
   const cc = ajsPackCc();
   const out: SesReviewRoute[] = [];
+  const reference = String(
+    object(docket.local_invoice_proposal).builder_reference || "",
+  );
+  const jobRef = reference || "this job";
+  const ajsReportInvoiceBody =
+    `Please find attached the report and invoice for ${jobRef}.\n\nThank you.`;
+  const ajsPhotoBody =
+    `Please find attached site photos for ${jobRef}.\n\nThank you.`;
+  const ajsNoChargeBody =
+    `Please find attached the report for ${jobRef}. There is no additional charge for this attendance.\n\nThank you.`;
 
   if (report || invoice) {
     const reportHashes = report?.attachment_hashes || [];
@@ -621,9 +633,6 @@ export function resolveDocketRoutes(
         ...invoiceHashes,
       ]),
     ];
-    const reference = String(
-      object(docket.local_invoice_proposal).builder_reference || "",
-    );
     const invoiceNumber = boundInvoiceNumber;
     const authorised = xeroStatus === "AUTHORISED" &&
       !!invoicePdf?.content_hash;
@@ -638,10 +647,7 @@ export function resolveDocketRoutes(
           .trim()
         : (report?.subject ||
           `${reference || "Make-safe"} - report and invoice`).trim(),
-      body: authorised
-        ? "Please find the SecureWorks make-safe report and the authorised Xero invoice attached."
-        : (report?.body ||
-          "Draft only. The combined report and invoice pack is not yet fully bound."),
+      body: ajsReportInvoiceBody,
       attachment_hashes: combinedHashes,
       ready: !!report?.ready && authorised && recipients.length > 0,
     };
@@ -649,8 +655,7 @@ export function resolveDocketRoutes(
       combined.subject = `${
         reference || "Make-safe"
       } - report (no additional charge)`;
-      combined.body =
-        "This later attendance is recorded as document only with no additional charge. Please find the current report attached.";
+      combined.body = ajsNoChargeBody;
       combined.attachment_hashes = [...new Set(reportHashes)];
       combined.ready = report.ready && recipients.length > 0;
     }
@@ -661,6 +666,7 @@ export function resolveDocketRoutes(
     out.push({
       ...photo,
       route_kind: "photo",
+      body: ajsPhotoBody,
       recipients: recipients.length ? recipients : photo.recipients,
       cc,
       ready: photo.ready &&
@@ -4731,11 +4737,13 @@ export async function executeSesReleaseRevisionAction(
       const attachmentHashes: unknown[] = Array.isArray(route.attachment_hashes)
         ? route.attachment_hashes
         : [];
-      const hashes: string[] = [...new Set<string>(
-        attachmentHashes
-          .map((h: unknown) => String(h || "").trim())
-          .filter((h): h is string => typeof h === "string" && h.length > 0),
-      )];
+      const hashes: string[] = [
+        ...new Set<string>(
+          attachmentHashes
+            .map((h: unknown) => String(h || "").trim())
+            .filter((h): h is string => typeof h === "string" && h.length > 0),
+        ),
+      ];
       if (hashes.length > 0) {
         const sizeRows = await client.from("makesafe_docket_artifacts").select(
           "content_hash,size_bytes,object_key,media_type",
@@ -4758,7 +4766,9 @@ export async function executeSesReleaseRevisionAction(
             sesRefusal(
               "route_draft_missing",
               "Release attachments are missing size metadata; re-prepare the docket before SEND IT.",
-              { evidence: { missing_content_hashes: missing, route_kind: kind } },
+              {
+                evidence: { missing_content_hashes: missing, route_kind: kind },
+              },
             ),
           );
         }

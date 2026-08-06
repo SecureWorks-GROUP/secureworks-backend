@@ -1,12 +1,10 @@
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  assertEquals,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  ajsPackCc,
-  ajsPackRecipients,
   AJS_MANDI_CC,
   AJS_VANESSA_CC,
   AJS_WORK_ORDERS_MAILBOX,
+  ajsPackCc,
+  ajsPackRecipients,
   clientSendGateKindForRoute,
   isAjsBuilderKey,
   SES_AJS_ROUTE_ORDER,
@@ -384,6 +382,69 @@ Deno.test("AJS resolveDocketRoutes emits report_invoice + photo with Xero PDF on
   assertEquals(routes[1].cc, AJS_PACK_CC);
   assertEquals(routes[1].attachment_hashes, ["photo-hash-1"]);
   assertEquals(routes[1].ready, true);
+});
+
+/** Builder-facing AJS bodies: what is attached, job ref, thanks. No internal jargon. */
+const AJS_INTERNAL_BODY_TERMS = [
+  "Draft only",
+  "docket",
+  "pack",
+  "route",
+  "cycle",
+  "revision",
+  "fully bound",
+  "AUTHORISED",
+  "Mail.Send",
+];
+
+Deno.test("AJS release email bodies are plain professional English with job ref", () => {
+  // Stored draft bodies deliberately carry the old internal jargon so the
+  // release resolver must rewrite them rather than inherit them.
+  const docket = {
+    ...ajsDocket("invoice_bound", {
+      status: "AUTHORISED",
+      xero_invoice_id: "xero-1",
+      invoice_number: "INV-1",
+    }),
+    email_drafts: {
+      REPORT_EMAIL_DRAFT: [
+        "To: workorders@ajs.build",
+        "Cc:",
+        "Subject: AJBR-70100 - report and invoice",
+        "Attachments: ARTIFACTS/report.pdf",
+        "",
+        "Draft only. The combined report and invoice pack is not yet fully bound.",
+      ].join("\n"),
+      PHOTO_EMAIL_DRAFT: [
+        "To: workorders@ajs.build",
+        "Cc:",
+        "Subject: Photo Evidence - AJBR-70100",
+        "Attachments: ARTIFACTS/photo1.jpg",
+        "",
+        "Draft only. The complete, ordered original photo set is listed on the docket.",
+      ].join("\n"),
+    },
+  };
+  const routes = resolveDocketRoutes(docket, AJS_ARTIFACTS, null);
+  const pack = routes.find((r) => r.route_kind === "report_invoice")!;
+  const photo = routes.find((r) => r.route_kind === "photo")!;
+  assertEquals(
+    pack.body,
+    "Please find attached the report and invoice for AJBR-70100.\n\nThank you.",
+  );
+  assertEquals(
+    photo.body,
+    "Please find attached site photos for AJBR-70100.\n\nThank you.",
+  );
+  for (const body of [pack.body, photo.body]) {
+    for (const term of AJS_INTERNAL_BODY_TERMS) {
+      assertEquals(
+        body.toLowerCase().includes(term.toLowerCase()),
+        false,
+        `AJS body must not contain internal term "${term}": ${body}`,
+      );
+    }
+  }
 });
 
 /**
