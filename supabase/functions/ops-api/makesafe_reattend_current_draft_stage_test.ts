@@ -1,3 +1,5 @@
+// deno-lint-ignore-file no-import-prefix
+//
 // Regression + control for the reattend Docs Ready placement defect.
 //
 // White Gum Valley (SWMS-261114, cycle 2) and Koondoola (SWMS-261025, cycle 4)
@@ -27,7 +29,10 @@
 //
 // Pure derivation only. No network, no Supabase, no Xero, no money write.
 
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _enrichMakesafeBoardJobForTest } from "./index.ts";
 import { qualifyMakesafeCurrentDraftInvoice } from "./makesafe_docs_ready_invoice.ts";
 
@@ -210,7 +215,11 @@ Deno.test("a first-attendance card behaves exactly as before", () => {
     job,
     detail,
     [],
-    { id: "r1", status: "submitted", submitted_at: "2026-08-05T12:08:49.473+00:00" },
+    {
+      id: "r1",
+      status: "submitted",
+      submitted_at: "2026-08-05T12:08:49.473+00:00",
+    },
     inv,
     [],
     false,
