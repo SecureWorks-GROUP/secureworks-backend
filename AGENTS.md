@@ -1527,11 +1527,21 @@ ruling — that mistake was made once already and is corrected in
 
 That report also measures the population and pins a live integrity defect: five
 of the six stored rows carry `screenshot_content_hash` EQUAL to
-`source_content_hash`. Those digest different artifacts (page text vs PNG
-bytes) and can never legitimately match, so on those rows `status: verified`
-does not attest the image bytes, and the storage path — derived from that
-column by `captureScreenshotStoragePath` — carries the source-text digest. Do
-not use that column as a byte coordinate without re-checking it per row.
+`source_content_hash`. Those digest different artifacts (normalised page text
+vs PNG bytes) and can never legitimately match — but the corrupted column is
+`source_content_hash`, NOT the screenshot one. `screenshot_content_hash` is
+SERVER-computed from the uploaded bytes (`ses_portal_capture_evidence.ts:319`,
+after the PNG check at :313, with a 409 `ses_portal_capture_hash_mismatch` when
+a caller disagrees), so it is sound, `status: verified` DOES attest the image
+bytes, and the `captureScreenshotStoragePath` paths are correct.
+`ses_assembler_input_adapter.ts:2704-2725` re-hashes the downloaded object
+against that column and those cards still assemble, which proves the direction.
+`source_content_hash` is caller-supplied and unrecomputable server-side, so on
+those five rows the PAGE-TEXT fingerprint is lost and the textual basis of the
+`done` verdict cannot be re-verified. Do not use `source_content_hash` on those
+rows as a page-text coordinate without re-checking it per row. The report's
+section 2 carries this as a labelled correction because the original entry
+stated the direction backwards; that withdrawal must stay visible.
 
 The cockpit payload carries the roof share link
 (`sections.family_evidence.roof_report_link`) but NO reference to the stored

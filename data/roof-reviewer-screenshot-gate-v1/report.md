@@ -114,29 +114,72 @@ They fingerprint different artifacts, and the contract says so:
 A SHA-256 of a UTF-8 text string and a SHA-256 of a PNG byte stream collide only if the
 two inputs are byte-identical, which they are not and cannot be — one is page text, the
 other begins with the PNG signature `89 50 4E 47`. Equality therefore does not indicate a
-collision; it indicates the screenshot hash **was not derived from the image at all**, and
-that the source hash was copied into the screenshot field.
-
-That the storage object key is built from the same value confirms the copy rather than
-contradicting it: `captureScreenshotStoragePath` derives the object path from
-`screenshot_content_hash`, so a copied value propagates into the path. The stored paths
-for those five rows end in the source-text digest.
+collision. One of the two columns is carrying the other's digest.
 
 The one row where the two differ is SWMS-261081: screenshot `sha256:900796d7…` against
 source `sha256:da47eedd…`. That is the shape a correctly computed pair takes.
 
-### Consequence: `status: verified` does not attest the bytes on those five rows
+### CORRECTION (2026-08-06): the direction of the copy was stated backwards
 
-`verified` on those rows cannot mean "the stored image matches its recorded digest",
-because the recorded digest is a digest of something else. Any downstream check that
-re-hashes the PNG and compares it to `screenshot_content_hash` will mismatch. Anything
-relying on that column as a byte-integrity coordinate for those five images is relying on
-a value that never described them.
+**This correction was already relayed upward in its original, wrong form. Read it in
+full — the earlier version leads to the OPPOSITE conclusion about which coordinate to
+trust.**
 
-This is a defect in the integrity coordinate **only**. It says nothing about whether the
-image itself is a genuine capture, and it is not evidence that any image is wrong. It
-remains a defect even where the image is a genuine page capture — which, per section 3, is
-the case for all five.
+**The claim that was wrong.** This section originally said the screenshot hash "was not
+derived from the image at all", that the source hash had been copied into the screenshot
+field, and drew three consequences from that: that `status: verified` does not attest the
+image bytes, that the storage path carries the source-text digest, and that a downstream
+re-hash of the PNG would mismatch. **All four statements are withdrawn. They are wrong,
+and each is wrong in the opposite direction.**
+
+**The corrected facts.** The sanctioned writer
+(`supabase/functions/ops-api/ses_portal_capture_evidence.ts`) settles the direction:
+
+- `screenshot_content_hash` is **server-computed from the uploaded PNG bytes**. Line 313
+  validates the bytes are PNG (`isSesPortalCapturePng`); line 319 computes
+  `screenshotContentHash = await rawSesPortalCaptureSha256(screenshotBytes)`; lines
+  320–326 refuse a caller whose claimed hash disagrees with a 409
+  `ses_portal_capture_hash_mismatch`. The value persisted at line 351 is the server's own
+  computation, never the caller's string. **That column is SOUND and genuinely fingerprints
+  the stored image.**
+- `source_content_hash` is **caller-supplied and unchecked**. It is only shape-validated
+  (`isSesSha256`, ~line 237), because the server cannot recompute it — it fingerprints
+  normalised page text the server never sees. **That is the corrupted coordinate.** On
+  those five rows the caller put the PNG digest where the page-text digest belonged.
+
+**The confirming consumer, and the empirical discriminator.**
+`supabase/functions/ops-api/ses_assembler_input_adapter.ts` lines 2704–2725 downloads the
+stored object and refuses via `invalidPersistedPortalCapture` —
+`screenshot failed its byte-hash check` — when
+`rawSesPortalCaptureSha256(bytes) !== row.screenshot_content_hash`. Had the screenshot
+column been a copied source-text digest, all five of those cards would already fail docket
+assembly on that check. They do not. A downstream re-hash of the PNG **matches**.
+
+It follows that `status: verified` **does** attest the image bytes on those rows, and that
+the storage paths are correct: `captureScreenshotStoragePath` derives the path from
+`screenshot_content_hash`, which is the genuine PNG digest.
+
+### The defect is still real, and it is on the source side
+
+On those five rows **the page-text fingerprint is lost.** `source_content_hash` does not
+fingerprint the page text on them — it repeats the image digest — so the textual basis of
+the "done" verdict cannot be re-verified against the page the classifier read. That is
+narrower than originally written and different in kind, but it is a genuine integrity
+defect and is not softened here.
+
+Do not use `source_content_hash` on those rows as a page-text coordinate without
+re-checking it per row. `screenshot_content_hash` needs no such caveat.
+
+**This correction touches the hash question only.** Section 3's producer finding stands
+unchanged: SWMS-261081 Mindarie is still the deviation (a synthetic observation card from
+`ses-prime-portal-observer/2026-08-02.4`), SWMS-261114 White Gum Valley is still the
+skill-compliant real page capture, and the retake instruction is still inverted. Which
+card was captured by which producer, and which shape is compliant, does not depend on
+either hash column.
+
+The two findings also remain independent in the other direction: the source-hash defect
+holds on all five rows regardless of what any of those images shows, and per section 3
+all five are genuine page captures.
 
 ---
 
@@ -332,8 +375,8 @@ Stated precisely, because the distinction matters in both directions.
   producer identity and size band, which is strong but is inference.
 
 - **`status: verified` was not traced to its writer.** What that status asserted at write
-  time was not established, only that on the five rows it cannot be asserting a byte digest
-  match (section 2).
+  time was not established. It is established that the byte digest it sits beside is sound
+  (section 2 correction), and that the page-text digest on those five rows is not.
 
 - **The 63-card roof population is a metadata predicate**
   (`jobs.metadata->>'makesafe_job_family' = 'roof_report'`), not the canonical `ses_family`
