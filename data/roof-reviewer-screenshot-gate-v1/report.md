@@ -147,17 +147,31 @@ and each is wrong in the opposite direction.**
   normalised page text the server never sees. **That is the corrupted coordinate.** On
   those five rows the caller put the PNG digest where the page-text digest belonged.
 
-**The confirming consumer, and the empirical discriminator.**
-`supabase/functions/ops-api/ses_assembler_input_adapter.ts` lines 2704–2725 downloads the
-stored object and refuses via `invalidPersistedPortalCapture` —
-`screenshot failed its byte-hash check` — when
-`rawSesPortalCaptureSha256(bytes) !== row.screenshot_content_hash`. Had the screenshot
-column been a copied source-text digest, all five of those cards would already fail docket
-assembly on that check. They do not. A downstream re-hash of the PNG **matches**.
+That is a **source-level proof about how the column is produced**, and it is conclusive on
+its own. It reads the writer, not the data, so it needs no stored object to be opened and
+no capture bytes to be read. It follows directly that `status: verified` **does** attest
+the image bytes on those rows, and that the storage paths are correct:
+`captureScreenshotStoragePath` derives the path from `screenshot_content_hash`, which is
+the genuine PNG digest.
 
-It follows that `status: verified` **does** attest the image bytes on those rows, and that
-the storage paths are correct: `captureScreenshotStoragePath` derives the path from
-`screenshot_content_hash`, which is the genuine PNG digest.
+**A checkable discriminator, NOT run here.** There is also an empirical test of the same
+question, and this investigation did not execute it — it is stated as a prediction, not as
+an observation. `supabase/functions/ops-api/ses_assembler_input_adapter.ts` lines
+2704–2725 downloads the stored object and refuses via `invalidPersistedPortalCapture` —
+`screenshot failed its byte-hash check` — when
+`rawSesPortalCaptureSha256(bytes) !== row.screenshot_content_hash`. No card was put
+through `buildSesAssemblerInput` in this run, no capture bytes were read, and no storage
+credential was available (section 7), so no assembly outcome for those five cards is
+reported here either way.
+
+Someone holding a service-role key can settle it directly by assembling one of the five
+cards and reading whether that check refuses. The two outcomes are unambiguous:
+
+- **Assembly succeeds** (or fails for any reason other than the byte-hash check) —
+  the stored PNG re-hashes to `screenshot_content_hash`, confirming the correction.
+- **Assembly refuses on `screenshot failed its byte-hash check`** — the screenshot column
+  does not describe the bytes after all, and this correction is overturned and must be
+  re-examined against whichever writer produced those rows.
 
 ### The defect is still real, and it is on the source side
 
@@ -377,6 +391,22 @@ Stated precisely, because the distinction matters in both directions.
 - **`status: verified` was not traced to its writer.** What that status asserted at write
   time was not established. It is established that the byte digest it sits beside is sound
   (section 2 correction), and that the page-text digest on those five rows is not.
+
+- **The corrected hash direction is established from the writer's SOURCE, not from any
+  stored image.** Section 2's correction reads how `record_ses_portal_capture_evidence`
+  produces the column; no capture bytes were read (no storage credential, per the first
+  limit above), and the adapter re-hash check at
+  `ses_assembler_input_adapter.ts:2704-2725` was **not run** — no card was put through
+  `buildSesAssemblerInput`. The report therefore reports no assembly outcome for the five
+  cards in either direction. That check is named in section 2 as the concrete next step
+  for anyone holding a service-role key.
+
+- **Which code path wrote the five rows was not established.** The persist RPC
+  `commit_makesafe_portal_capture_v1` is reachable from more than one caller, so a row is
+  not proved to have come through `record_ses_portal_capture_evidence` merely by existing.
+  What was checked: the other in-repo caller, `ses_trade_portal_confirmation_action.ts`,
+  writes `screenshot_content_hash: null` (line 308) and so cannot have produced a row
+  carrying a screenshot hash. Callers outside this repository were not enumerated.
 
 - **The 63-card roof population is a metadata predicate**
   (`jobs.metadata->>'makesafe_job_family' = 'roof_report'`), not the canonical `ses_family`

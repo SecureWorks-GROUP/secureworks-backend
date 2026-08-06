@@ -1533,9 +1533,11 @@ vs PNG bytes) and can never legitimately match — but the corrupted column is
 SERVER-computed from the uploaded bytes (`ses_portal_capture_evidence.ts:319`,
 after the PNG check at :313, with a 409 `ses_portal_capture_hash_mismatch` when
 a caller disagrees), so it is sound, `status: verified` DOES attest the image
-bytes, and the `captureScreenshotStoragePath` paths are correct.
-`ses_assembler_input_adapter.ts:2704-2725` re-hashes the downloaded object
-against that column and those cards still assemble, which proves the direction.
+bytes, and the `captureScreenshotStoragePath` paths are correct. That is a
+source-level proof about how the column is produced and needs no stored object;
+`ses_assembler_input_adapter.ts:2704-2725` (re-hash the downloaded object
+against that column) is the empirical discriminator, NOT run in that
+investigation.
 `source_content_hash` is caller-supplied and unrecomputable server-side, so on
 those five rows the PAGE-TEXT fingerprint is lost and the textual basis of the
 `done` verdict cannot be re-verified. Do not use `source_content_hash` on those
