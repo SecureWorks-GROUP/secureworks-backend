@@ -1,0 +1,37 @@
+{
+  "bound_invoice": {
+    "xero_invoice_id": "5ebf0656-4440-4802-95bf-8d0324d8269e",
+    "invoice_number": "INV-1149",
+    "status": "DRAFT",
+    "total": 330,
+    "pdf_content_hash": "sha256:6c701fcad767bb901276b9cf91af54abdb2f0eb2839f17a8dd144f16467f2ef8",
+    "pdf_available": true
+  },
+  "xero": {
+    "xero_invoice_id": "5ebf0656-4440-4802-95bf-8d0324d8269e",
+    "invoice_number": "INV-1149",
+    "status": "DRAFT",
+    "pdf_content_hash": "sha256:6c701fcad767bb901276b9cf91af54abdb2f0eb2839f17a8dd144f16467f2ef8",
+    "pdf_object_key": "makesafe-docket-artifacts/088dee02-91d0-4539-8c9c-6014c9ebf06e/xero-invoice-pdfs/5ebf0656-4440-4802-95bf-8d0324d8269e/INV-1149.pdf",
+    "pdf_size_bytes": 51907,
+    "total": 330
+  },
+  "local_invoice_proposal": {
+    "gst": 35,
+    "basis": "roof_storey_fixed",
+    "storeys": "double",
+    "version": "ses-local-invoice-proposal/v1",
+    "line_items": [
+      {
+        "quantity": 1,
+        "description": "RR-26836 - Double Storey roof report",
+        "amount_ex_gst": 350,
+        "unit_price_ex_gst": 350
+      }
+    ],
+    "total_inc_gst": 385,
+    "xero_identity": null,
+    "subtotal_ex_gst": 350,
+    "builder_reference": "RR-26836"
+  }
+}

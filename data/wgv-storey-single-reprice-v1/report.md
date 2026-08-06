@@ -312,6 +312,83 @@ these cards finds the ruling attached to the number instead of re-raising the al
 The make-safe trade-observation override is untouched by any of this and continues to
 apply on make-safe cards, where it belongs.
 
+## 10. Post-ruling verification: is the card clickable and sendable?
+
+Read-only, 2026-08-06, after the ruling. Everything below is **what the production
+cockpit says**, not an inference (`cockpit-verdict-and-controls.json`,
+`cockpit-money.json`, `docs-ready-queue-row.json`).
+
+`ops-api?action=query_ses_review_cockpit` for `SWMS-261114`:
+
+| Field | Value |
+| --- | --- |
+| `status` | **`INVOICE_CREATE_READY`** |
+| `stale` | `false` |
+| `verdict.clean` | **`true`** |
+| `verdict.checks` | **12 of 12 passed** (C1-C12) |
+| `verdict.blockers` | **`[]`** |
+| `approval_band` | `shaun_clean` |
+| `controls.captain_only` | `false` |
+
+**APPROVE INVOICE is genuinely active, not merely unblocked:**
+
+```
+"approve_invoice": { "enabled": true, "disabled_reason": null,
+  "plan": "Approve the existing Xero DRAFT for this exact obligation revision;
+           authorise only if this approval explicitly includes authorise;
+           then attach the real Xero PDF as a new docket revision." }
+```
+
+It targets **the existing draft** - it is not proposing a fresh mint.
+
+**SEND IT is honestly disabled, and for the right reason:**
+
+```
+"send_it": { "enabled": false, "failed_checks": [],
+  "route_kinds": ["invoice"], "route_count": 1,
+  "disabled_reason": "The bound Xero invoice is DRAFT, not AUTHORISED.
+                      The invoice email cannot go out against an unauthorised invoice." }
+```
+
+`failed_checks: []` - nothing is wrong with the card. SEND IT is sequenced behind
+APPROVE INVOICE by design and lights up once the invoice is AUTHORISED.
+
+**Bound money reads the ruled figure:** `INV-1149`, `DRAFT`, **total 330**,
+`pdf_available: true`.
+
+### Three things a reader should not misread
+
+1. **The cockpit's `local_invoice_proposal` shows $350 ex / $385 inc, storeys
+   `double`.** That is the *canon* derivation on the current docket. The **bound**
+   invoice is $330 inc because the Captain's `commercial_rate_override` was applied at
+   obligation-prepare. Both numbers are correct and they are different things. The
+   invoice is the $330.
+2. **`supporting_invoice_pdf` reads `blocked`** with `reason_code: recovery-not-run`
+   ("Pre-Xero review carries a local proposal, never a Xero PDF"). That is the expected
+   `pre_xero` docket state and it gates nothing - `verdict.blockers` is empty and C2
+   passes. APPROVE INVOICE is what binds the real Xero PDF as a new docket revision.
+3. **The live PDF content hash differs from the one stored on the obligation's
+   `xero_binding`** (`sha256:6c701fca…` live vs `sha256:6133d587…` stored). Expected: a
+   DRAFT stays editable in Xero, so the cockpit re-fetches current bytes rather than
+   serving the stored pointer. Not drift.
+
+### The second gate, which the cockpit does not surface as the blocking one
+
+`list_ses_docs_ready_reviews` has this card at **`review_state: needs_review`** on
+docket `ab859c53…` (`docket_stage: pre_xero`, committed 2026-08-06T04:16:11Z,
+`invalidated_signoff_event_id: null`). So Docs Ready signoff has **not** been ticked.
+Send-time re-checks current signoff, so both the AUTHORISED invoice and the signoff are
+needed before the pack can go. The cockpit names the invoice wall because that is the
+one hit first.
+
+### Plain reading
+
+The card is **clickable now** - APPROVE INVOICE is live, with clean 12-of-12 checks and
+no blockers. It is **not yet sendable**, honestly so: the invoice is still a DRAFT and
+the Docs Ready tick is outstanding. Both are the Captain's clicks, in that order.
+
+Nothing in this verification wrote anything.
+
 ## Files
 
 | File | What it is |
@@ -325,4 +402,7 @@ apply on make-safe cards, where it belongs.
 | `duplicate-probe.json` | Read-only duplicate-guard probe output |
 | `gap-sizing-counts.json` | Roof-family census behind section 9 (by design, not a gap) |
 | `gap-sizing-exposed-cards.json` | The 6 cards with both a work-order storey fact and a captured portal form |
+| `cockpit-verdict-and-controls.json` | Post-ruling cockpit verdict + controls (section 10) |
+| `cockpit-money.json` | Post-ruling bound-invoice and proposal money block |
+| `docs-ready-queue-row.json` | This card's Docs Ready queue row (`needs_review`) |
 | `../decisions/2026-08-06-roof-reports-priced-off-work-order-only.md` | The ruling that settles this record |
