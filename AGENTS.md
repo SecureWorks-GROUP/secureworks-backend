@@ -1375,6 +1375,39 @@ a before/after `ses-c2-measure-board-evidence.ts` run. Evidence, the 51-card
 cohort and the measured board effect are in
 `docs/evidence/ses-c3-invoice-link-seal-conflict-2026-08-01.md`.
 
+**That matcher has NO runtime consumer, and it only ever sees UNLINKED money.**
+Both facts are load-bearing before anyone plans work against it. Nothing under
+`supabase/functions/` imports it — the three consumers are all measurement
+scripts (C1 `ses-measure-card-evidence.ts`, C2 `ses-c2-measure-board-evidence.ts`,
+C3 `derive-ses-c3-invoice-link-cohort-v1.ts`), and the evidence ruler
+`makesafe_evidence_requirements.ts` names it only in a comment. So it cannot
+place a card, cannot reach the cockpit, and changing it cannot make a card more
+or less approvable — the board's placement engine binds an invoice through
+`invoiceForStage`, which requires exact `xero_invoices.job_id`. And
+`isUnlinkedIssuedAccrec` refuses any row that already has a `job_id`, so a card
+whose invoice IS linked is structurally out of reach: measured 2026-08-07, 11 of
+the 16 Docs Ready cards the cockpit tells to "mint the draft first" already carry
+a LINKED live ACCREC (7 PAID, 4 AUTHORISED), which is a cockpit-binding defect,
+never a matching one. Do not diagnose a "mint the draft first" card from here.
+
+Card identity is the claim reference **and** `jobs.metadata.builder_po_number`,
+united and DE-DUPLICATED by `sesMatchJobIdentityDigits`. The PO was added
+2026-08-07 so this module stops disagreeing with
+`makesafe_docs_ready_invoice.ts`, which always read it. The de-dupe is the trap:
+the commonest live shape is a card whose `external_ref` already embeds its own PO
+(`MLB-24881PO-56387` + `PO-56387`, 30 of 67 PO-bearing rows), and without a set
+the card becomes its own guard-2 rival and LOSES a correct match — measured, it
+destroyed SWMS-261018's match to its own AUTHORISED INV-1083. Supplying the PO
+moves nothing live (0 gained / 0 lost / 0 reassigned; the full 420-card C2
+measurement is byte-identical), because every PO-bearing job also has an
+`external_ref`. C1 therefore still supplies `external_ref` alone and is
+output-identical by construction — an absent PO contributes no digits. A shared
+claim is NOT rescued by the PO either: the one eligible invoice still names the
+shared claim, so it is a candidate for every sibling and none owns it uniquely
+(the three live `MLB-27037` Floreat cards). Withholding there is correct; do not
+"fix" it by preferring the PO-matching candidate. Full measurement:
+`docs/evidence/ses-reference-identity-po-grain-2026-08-07.md`.
+
 The seal permits exactly ONE read: fetching the bytes of an invoice PDF that
 already exists (`get_invoice_pdf`), by the Captain's 2026-08-02 ruling. The
 exemption is declared in `_shared/sealed_ses_money_fence.ts` as the closed
@@ -1788,6 +1821,23 @@ those five rows the PAGE-TEXT fingerprint is lost and the textual basis of the
 rows as a page-text coordinate without re-checking it per row. The report's
 section 2 carries this as a labelled correction because the original entry
 stated the direction backwards; that withdrawal must stay visible.
+
+**A caseless card stores its captures under an EMPTY `builder_reference`.**
+`buildSesAssemblerInput` only falls back to `makesafe_job_details.external_ref`
+behind a `legacy_job_record` identity revision, so a card with neither an intake
+case nor an identity revision derives `""` — measured 2026-08-07, 21 of the 28
+persisted capture rows across 8 cards, every one of them caseless. Those rows
+resolve TODAY only because both sides derive the same empty string;
+`resolvePersistedPortalCapture` compares `builder_reference` as one of five
+coordinates, so the moment any of those cards gains an intake case or a seeded
+identity revision (`makesafe_state_seed`), all 21 become unmatchable at once and
+read as "no capture was ever taken" — whose apparent cure is to capture again,
+producing another row rejected identically. `missingCaptureSignal` now NAMES that
+rejection, and is diagnosis only: the capture stays `missing`. Do not "fix" this
+by accepting a reference-mismatched row (that admits evidence the selector
+rejects) nor by widening the adapter's fallback (`source.builder_reference` is
+inside the docket INPUT hash, so it re-keys every revision and drops every Docs
+Ready signoff).
 
 The cockpit payload carries the roof share link
 (`sections.family_evidence.roof_report_link`) but NO reference to the stored

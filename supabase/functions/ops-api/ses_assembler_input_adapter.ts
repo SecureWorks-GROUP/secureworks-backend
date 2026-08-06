@@ -2577,9 +2577,53 @@ function persistedCaptureContent(
   };
 }
 
+/**
+ * Name the coordinate that actually rejected the capture.
+ *
+ * The selection filter compares FIVE coordinates but the signal only ever named
+ * four, so a capture rejected on `builder_reference` alone read as "no capture
+ * was ever taken" - and the cure for that appears to be taking the capture
+ * again, which produces another row that is rejected the same way. Measured on
+ * 2026-08-07, 21 of the 28 persisted capture rows (8 cards, every one of them
+ * caseless with no identity revision) carry an EMPTY `builder_reference`,
+ * because `buildSesAssemblerInput` only falls back to
+ * `makesafe_job_details.external_ref` behind a `legacy_job_record` identity
+ * revision. Those 8 cards resolve today only because both sides derive the same
+ * empty string; the moment any of them gains an intake case or a seeded identity
+ * revision, all 21 rows become unmatchable at once.
+ *
+ * This is deliberately DIAGNOSIS ONLY. The capture stays `missing`, the blocker
+ * still fires, and no card becomes more sendable - widening the match to accept
+ * a reference-mismatched row would be admitting evidence the selector rejects.
+ */
+export function missingCaptureSignal(
+  request: SesPortalCaptureRequest,
+  cycleId: string,
+  referenceRejected: readonly SesPersistedPortalCaptureRow[],
+): string {
+  const base =
+    `No persisted portal capture matches job_id=${request.job_id}, attendance_cycle_id=${
+      cycleId || "(missing)"
+    }, role=${request.role}, source_url=${request.url}.`;
+  if (referenceRejected.length === 0) return base;
+  const stored = [
+    ...new Set(
+      referenceRejected.map((row) =>
+        text(row.builder_reference) ? row.builder_reference : "(empty)"
+      ),
+    ),
+  ].join(", ");
+  return `${base} ${referenceRejected.length} capture${
+    referenceRejected.length === 1 ? "" : "s"
+  } for this job, cycle, role and URL were rejected on builder_reference alone: stored ${stored}, this card is ${
+    text(request.builder_reference) ? request.builder_reference : "(empty)"
+  }. Re-capturing will not change this - the stored evidence exists and the references disagree.`;
+}
+
 async function missingPersistedPortalCapture(
   request: SesPortalCaptureRequest,
   cycleId: string,
+  referenceRejected: readonly SesPersistedPortalCaptureRow[] = [],
 ): Promise<SesPortalCapture> {
   return {
     status: "missing",
@@ -2598,10 +2642,7 @@ async function missingPersistedPortalCapture(
       ),
     ),
     idempotency_key: request.idempotency_key,
-    signal:
-      `No persisted portal capture matches job_id=${request.job_id}, attendance_cycle_id=${
-        cycleId || "(missing)"
-      }, role=${request.role}, source_url=${request.url}.`,
+    signal: missingCaptureSignal(request, cycleId, referenceRejected),
   };
 }
 
@@ -2635,7 +2676,12 @@ async function resolvePersistedPortalCapture(
 ): Promise<SesPortalCapture> {
   const cycleId = text(snapshot.detail?.attendance_cycle_id);
   const sourceUrl = canonicalSesPortalSourceUrl(request.url);
-  const matches = snapshot.portal_captures
+  // Split in two so a rejection on `builder_reference` alone can be NAMED. The
+  // selection is unchanged - a capture still has to satisfy all five
+  // coordinates - but "no capture exists" and "the capture exists and its
+  // reference disagrees" are different facts, and only one of them is fixed by
+  // capturing again. See `missingCaptureSignal`.
+  const onCaptureCoordinates = snapshot.portal_captures
     .map((row) => row as SesPersistedPortalCaptureRow)
     .filter((row) =>
       // The docket needs the SCREENSHOT the capture produced, so U4 selects
@@ -2650,16 +2696,23 @@ async function resolvePersistedPortalCapture(
       row.attendance_cycle_id === cycleId &&
       canonicalSesPortalCaptureRole(row.role) === request.role &&
       sourceUrl !== null &&
-      canonicalSesPortalSourceUrl(row.source_url) === sourceUrl &&
-      row.builder_reference === request.builder_reference
-    )
+      canonicalSesPortalSourceUrl(row.source_url) === sourceUrl
+    );
+  const matches = onCaptureCoordinates
+    .filter((row) => row.builder_reference === request.builder_reference)
     .sort((left, right) =>
       Number(right.makesafe_fact_version) -
         Number(left.makesafe_fact_version) ||
       String(right.created_at).localeCompare(String(left.created_at))
     );
   const row = matches[0];
-  if (!row) return await missingPersistedPortalCapture(request, cycleId);
+  if (!row) {
+    return await missingPersistedPortalCapture(
+      request,
+      cycleId,
+      onCaptureCoordinates,
+    );
+  }
 
   const result = canonicalSesPortalCaptureResult(row.capture_result);
   const role = canonicalSesPortalCaptureRole(row.role);

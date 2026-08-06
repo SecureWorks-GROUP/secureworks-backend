@@ -12,6 +12,7 @@ import {
   buildSesAssemblerInput,
   createSesAssemblerRuntimeDependencies,
   currentCuratedReportDocument,
+  missingCaptureSignal,
   normalizeSesPrepareRequest,
   physicalReportRenderJob,
   selectPhysicalReportProofForCycle,
@@ -4107,3 +4108,77 @@ Deno.test(
     assertEquals(none.source.intake_email_subject_source, null);
   },
 );
+
+// ---------------------------------------------------------------------------
+// A rejected portal capture must name the coordinate that rejected it.
+//
+// The selection filter compares five coordinates; the signal named four. A
+// capture rejected on `builder_reference` alone therefore read as "no capture
+// was ever taken", whose apparent cure is to capture again - producing another
+// row rejected the same way, invisibly. Measured on 2026-08-07: 21 of the 28
+// persisted capture rows, across 8 caseless cards, carry an EMPTY
+// `builder_reference`.
+//
+// These pin DIAGNOSIS ONLY. The verdict stays `missing` and no capture is
+// admitted, so nothing becomes more sendable.
+// ---------------------------------------------------------------------------
+
+const captureRequest = {
+  job_id: "job-1",
+  docket_id: "docket-1",
+  builder_reference: "MLB-25777",
+  role: "roof_report" as const,
+  url: "https://documents.primeeco.tech/share/abc",
+  idempotency_key: "idem-1",
+};
+
+function capturedRow(builderReference: string) {
+  return { builder_reference: builderReference } as never;
+}
+
+Deno.test("missing capture signal is unchanged when nothing was rejected", () => {
+  // Byte-identical to the pre-existing wording, so every card that is NOT hit
+  // by this defect produces the same docket output it produced before.
+  assertEquals(
+    missingCaptureSignal(captureRequest, "cycle-1", []),
+    "No persisted portal capture matches job_id=job-1, attendance_cycle_id=cycle-1, " +
+      "role=roof_report, source_url=https://documents.primeeco.tech/share/abc.",
+  );
+});
+
+Deno.test("a reference-rejected capture is named, and re-capturing is ruled out", () => {
+  const signal = missingCaptureSignal(captureRequest, "cycle-1", [
+    capturedRow(""),
+    capturedRow(""),
+    capturedRow(""),
+  ]);
+  assertStringIncludes(signal, "3 captures for this job, cycle, role and URL");
+  assertStringIncludes(signal, "rejected on builder_reference alone");
+  assertStringIncludes(signal, "stored (empty)");
+  assertStringIncludes(signal, "this card is MLB-25777");
+  assertStringIncludes(signal, "Re-capturing will not change this");
+});
+
+Deno.test("the reference-rejected signal reports each distinct stored value once", () => {
+  const signal = missingCaptureSignal(captureRequest, "cycle-1", [
+    capturedRow("MLB-26111"),
+    capturedRow("MLB-26111"),
+  ]);
+  assertStringIncludes(signal, "2 captures");
+  assertStringIncludes(signal, "stored MLB-26111,");
+  assert(
+    !signal.includes("MLB-26111, MLB-26111"),
+    "a repeated stored reference must be de-duplicated",
+  );
+});
+
+Deno.test("an empty card reference is reported as (empty), never as blank", () => {
+  // The caseless direction: the card itself derives no reference, so an
+  // operator reading the signal must still be able to see that.
+  const signal = missingCaptureSignal(
+    { ...captureRequest, builder_reference: "" },
+    "cycle-1",
+    [capturedRow("MLB-26111")],
+  );
+  assertStringIncludes(signal, "this card is (empty)");
+});

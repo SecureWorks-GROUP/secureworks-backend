@@ -50,6 +50,22 @@ export interface SesMatchJob {
   job_number?: string | null;
   /** `makesafe_job_details.external_ref` - the builder's own claim reference. */
   external_ref?: string | null;
+  /**
+   * `jobs.metadata.builder_po_number` - the card's OWN declared purchase order.
+   *
+   * This is the second half of the card's identity, and it is here because the
+   * system was disagreeing with itself about what identifies a card:
+   * `makesafe_docs_ready_invoice.ts` has always accepted this field as card
+   * identity (`makesafeInvoiceReferenceMatchesCard`) while this module read only
+   * the claim reference. Per the captain's 2026-08-02 grain ruling the purchase
+   * order is the instruction key and the claim is the GROUP, so a claim shared
+   * between sibling cards (live: `MLB-27037` across three) is precisely the case
+   * where the PO is the only thing that tells them apart.
+   *
+   * OPTIONAL, and an omitted value contributes exactly nothing - a caller that
+   * cannot reach `jobs.metadata` keeps its previous answer byte for byte.
+   */
+  builder_po_number?: string | null;
   /** Whether this job is an SES board card. Non-board jobs still contest refs. */
   on_board?: boolean;
 }
@@ -98,6 +114,33 @@ export function builderReferenceDigits(externalRef: unknown): string[] {
   );
 }
 
+/**
+ * Every identity digit run a card contributes: its builder claim reference plus
+ * its own declared purchase order, as ONE de-duplicated set.
+ *
+ * The de-duplication is load-bearing, not tidiness. The commonest live shape is
+ * a card whose `external_ref` ALREADY embeds its own purchase order
+ * (`MLB-24881PO-56387` with `builder_po_number: PO-56387` - 30 of the 67
+ * PO-bearing production rows on 2026-08-07). Concatenating the two sources
+ * without a set yields the run `56387` twice, the ownership map below then
+ * counts the card as two separate owners of its own digits, guard 2 reads that
+ * self-collision as a shared reference, and the card LOSES a correct match. That
+ * is not hypothetical: measured against live production, the naive version
+ * destroyed SWMS-261018's correct match to its own AUTHORISED INV-1083.
+ *
+ * Order is claim digits first, then any purchase-order digits the claim did not
+ * already carry, so a card with no `builder_po_number` produces the identical
+ * array this module produced before the field existed.
+ */
+export function sesMatchJobIdentityDigits(job: SesMatchJob): string[] {
+  return [
+    ...new Set([
+      ...builderReferenceDigits(job.external_ref),
+      ...builderReferenceDigits(job.builder_po_number),
+    ]),
+  ];
+}
+
 /** Whole-digit-run containment. Never a substring test. */
 export function invoiceNamesBuilderReference(
   invoiceReference: unknown,
@@ -122,8 +165,10 @@ export function isUnlinkedIssuedAccrec(invoice: SesMatchInvoice): boolean {
  *
  * Three guards, all of which must hold:
  *
- * 1. Exactly one eligible invoice names the card's builder reference.
- * 2. That reference is owned by exactly ONE job across the FULL `jobs` table.
+ * 1. Exactly one eligible invoice names the card's identity digits (claim
+ *    reference and/or the card's own purchase order - see
+ *    `sesMatchJobIdentityDigits`).
+ * 2. Those digits are owned by exactly ONE job across the FULL `jobs` table.
  *    Adversarial verification refuted "one invoice candidate" as sufficient:
  *    cards routinely share a builder claim with a sibling, so the candidate set
  *    alone does not prove which card owns the money. Both sides of a contested
@@ -145,7 +190,7 @@ export function deriveSesUnlinkedInvoiceMatches(
   // Guard 2 input: how many jobs anywhere claim each digit run.
   const ownersByDigits = new Map<string, SesMatchJob[]>();
   for (const job of jobs) {
-    for (const digits of builderReferenceDigits(job.external_ref)) {
+    for (const digits of sesMatchJobIdentityDigits(job)) {
       const owners = ownersByDigits.get(digits) ?? [];
       owners.push(job);
       ownersByDigits.set(digits, owners);
@@ -157,7 +202,7 @@ export function deriveSesUnlinkedInvoiceMatches(
 
   for (const job of jobs) {
     if (job.on_board === false) continue;
-    const referenceDigits = builderReferenceDigits(job.external_ref);
+    const referenceDigits = sesMatchJobIdentityDigits(job);
     // No usable builder identity is not an exclusion; there is nothing to match.
     if (referenceDigits.length === 0) continue;
 
