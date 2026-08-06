@@ -1,0 +1,71 @@
+{
+  "revision_id": "b8108b7d-3810-577f-adff-c2c4bed2c408",
+  "state": "proposed",
+  "disposition": "priced_with_line_override",
+  "totals": {
+    "ex": 855,
+    "inc": 940.5
+  },
+  "lines": [
+    {
+      "description": "MLB-27482 - make-safe attendance - 1 trade x 5 hours (after hours)",
+      "quantity": 5,
+      "unit_price": 110
+    },
+    {
+      "description": "MLB-27482 - Materials: structural timber 8m + ply 12mm 2.4x1.8 x3 + screws",
+      "quantity": 1,
+      "unit_price": 235
+    },
+    {
+      "description": "MLB-27482 - Glass disposal",
+      "quantity": 1,
+      "unit_price": 70
+    }
+  ],
+  "blockers": [],
+  "duplicate_probe": {
+    "allows_create": true,
+    "match_tier": null,
+    "ambiguity": "void_only"
+  },
+  "override": {
+    "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+    "authorised_by": "Captain Marnin Stobbe",
+    "authorised_at": "2026-08-06T04:30:00.000Z",
+    "decision_key": "mosman-doc-integrity-f01-f02-v1-mlb-afterhours-110",
+    "reason": "Captain standing rule 2026-08-06: MLB after-hours labour is $110/h (was $100). Mosman Park was after hours. Labour 5h x $110 = 550; materials $235 unchanged; glass disposal $70 unchanged, Captain explicitly kept. Totals 855 ex / 940.50 inc. Trade attendance evidence unchanged. Sealed MLB $85 schedule matrix unchanged globally.",
+    "trade_reported_hours_per_trade": 5,
+    "sealed_billable_hours_floor": 3,
+    "lines": [
+      {
+        "line_kind": "labour",
+        "description": "MLB-27482 - make-safe attendance - 1 trade x 5 hours (after hours)",
+        "quantity": 5,
+        "unit_price_ex_gst": 110
+      },
+      {
+        "line_kind": "materials",
+        "description": "MLB-27482 - Materials: structural timber 8m + ply 12mm 2.4x1.8 x3 + screws",
+        "quantity": 1,
+        "unit_price_ex_gst": 235
+      },
+      {
+        "line_kind": "materials",
+        "description": "MLB-27482 - Glass disposal",
+        "quantity": 1,
+        "unit_price_ex_gst": 70
+      }
+    ],
+    "labour_rate_override": {
+      "sealed_unit_price_ex_gst": 85,
+      "authorised_unit_price_ex_gst": 110,
+      "reason": "after hours"
+    },
+    "applied_at": "2026-08-06T05:00:52.283Z",
+    "docket_revision_id": "68bd7247-0662-555d-b183-17e6c5e65e97",
+    "sealed_labour_unit_price_ex_gst": 85,
+    "override_kind": "commercial_rate_override",
+    "note": "priced_with_line_override hosts this commercial path without a migration. override_kind=commercial_rate_override: Captain explicitly authorised a card-scoped labour rate different from the sealed schedule. Sealed matrix unchanged. Trade evidence was not written."
+  }
+}

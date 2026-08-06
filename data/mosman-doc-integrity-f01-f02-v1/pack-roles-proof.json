@@ -1,0 +1,88 @@
+{
+  "presentation": {
+    "kind": "ready",
+    "state": "drafted",
+    "reason": null,
+    "pre_xero_docs_ready": true,
+    "review_state": "READY",
+    "docket_revision_id": "df705ac3-1c4a-5d52-a9e8-ad442c25b7c4"
+  },
+  "blockers": [],
+  "suppressed_artifacts": [],
+  "invoice_pdf": {
+    "source": "live_fetch",
+    "pdf_unavailable": false,
+    "xero_invoice_id": "0829842e-008e-4a5b-a012-299ad7ff947a",
+    "invoice_number": "INV-1152"
+  },
+  "roles": [
+    {
+      "role": "assembler_envelope",
+      "n": 1
+    },
+    {
+      "role": "capability",
+      "n": 1
+    },
+    {
+      "role": "case_story",
+      "n": 1
+    },
+    {
+      "role": "completion_photo",
+      "n": 15
+    },
+    {
+      "role": "docket_manifest",
+      "n": 1
+    },
+    {
+      "role": "invoice_email_draft",
+      "n": 1
+    },
+    {
+      "role": "invoice_proposal",
+      "n": 1
+    },
+    {
+      "role": "photo_email_draft",
+      "n": 1
+    },
+    {
+      "role": "photo_selection",
+      "n": 1
+    },
+    {
+      "role": "release_payload",
+      "n": 1
+    },
+    {
+      "role": "report_email_draft",
+      "n": 1
+    },
+    {
+      "role": "review_html",
+      "n": 1
+    },
+    {
+      "role": "review_spec",
+      "n": 1
+    },
+    {
+      "role": "source_attachment",
+      "n": 1
+    },
+    {
+      "role": "supporting_report_pdf",
+      "n": 1
+    },
+    {
+      "role": "swms_artifact",
+      "n": 1
+    },
+    {
+      "role": "xero_invoice_pdf",
+      "n": 1
+    }
+  ]
+}
