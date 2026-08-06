@@ -407,21 +407,48 @@ Deno.test("an attestation for the wrong role, cycle or reference is refused by t
   }
 });
 
-// ── No card moves ───────────────────────────────────────────────────────────
+// ── The tick writes evidence; placement follows that evidence ───────────────
 
-Deno.test("recording an attestation writes evidence, not a stage", () => {
+Deno.test("recording an attestation writes evidence, and the column follows the evidence", () => {
+  // Evolved from "recording an attestation writes evidence, not a stage".
+  //
+  // The "writes evidence, not a stage" half is still exactly right and still
+  // enforced — it is proved against the REAL action by "an assigned trade's
+  // tick records evidence with its producer and writes no stage", which asserts
+  // `stage_written === false` and inspects every table the recorder touched.
+  //
+  // The R12 cutover changed this test's other half. The old comment here read
+  // "the board column is the legacy ladder plus the overlay resolver; neither
+  // reads portal evidence, so the tick cannot move the card", and its first
+  // clause is no longer true: placement is the corrected evidence engine now,
+  // and an accepted attestation IS evidence. So the card SHOULD move, and the
+  // guarantee worth protecting is that it moves because of the recorded proof
+  // and by exactly the distance that proof carries.
   const before = buildCanonicalMakesafeRows([roofCard()], {
     portalCaptureRowsByJobId: {},
   })[0];
   const after = buildCanonicalMakesafeRows([roofCard()], {
     portalCaptureRowsByJobId: { [JOB_ID]: [attestationRow()] },
   })[0];
-  // The board column is the legacy ladder plus the overlay resolver; neither
-  // reads portal evidence, so the tick cannot move the card.
-  assertEquals(after.canonical_stage, before.canonical_stage);
+
+  // Raw board state is untouched: the tick wrote a capture row, not a stage.
   assertEquals(after.declared_stage, before.declared_stage);
   assertEquals(after.substatus, before.substatus);
   assertEquals(after.job_state, before.job_state);
+
+  // The column moves to what the attestation proves: the builder's roof form is
+  // confirmed done, which is report-in. Not report_ready — a tick is not a pack.
+  assertEquals(before.canonical_stage, "allocated");
+  assertEquals(after.canonical_stage, "trade_report_in");
+
+  // An attestation the projection refuses proves nothing, so it moves nothing.
+  // Absence of accepted evidence can never advance a card.
+  const refused = buildCanonicalMakesafeRows([roofCard()], {
+    portalCaptureRowsByJobId: {
+      [JOB_ID]: [attestationRow({ captured_by: "  " })],
+    },
+  })[0];
+  assertEquals(refused.canonical_stage, "allocated");
 });
 
 // ── The trade projection ────────────────────────────────────────────────────

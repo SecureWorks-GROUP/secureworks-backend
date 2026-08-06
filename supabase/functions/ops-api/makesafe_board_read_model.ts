@@ -239,6 +239,7 @@ export function projectOpsMakesafeCardRow(row: any) {
     declared_stage: row?.declared_stage || null,
     canonical_stage: row?.canonical_stage || null,
     canonical_stage_label: row?.canonical_stage_label || null,
+    placement_engine_version: row?.placement_engine_version || null,
     status_application: row?.status_application || null,
     duplicate_of_job_id: row?.duplicate_of_job_id || null,
     duplicate_of_job_number: row?.duplicate_of_job_number || null,
@@ -396,6 +397,14 @@ export const OPS_MAKESAFE_STAGES = [
   "allocated",
   "trade_report_in",
   "report_ready",
+  // Release 12: the corrected engine refuses to guess a column when a card's
+  // evidence contradicts itself (e.g. raw state says closed but no issued
+  // invoice and no report corroborates it). Such a card is a captain question
+  // and gets its own visible column instead of being silently dropped into a
+  // wrong one. Resolved the way SWMS-261059 was: the captain reads the card,
+  // his sign-off is recorded as a terminal-proof row, and the engine then
+  // derives the column from that evidence — nobody writes a stage.
+  "decision_required",
   "completed",
   "archive",
   "cancelled",
@@ -416,6 +425,8 @@ export const OPS_TO_TRADE_COLUMN: Record<
   allocated: "Allocated",
   trade_report_in: "Complete",
   report_ready: "Complete",
+  // A captain question is not trade work; keep it off the trade's active lanes.
+  decision_required: "Archive",
   completed: "Archive",
   archive: "Archive",
   cancelled: "Archive",
@@ -425,6 +436,7 @@ export const OPS_MAKESAFE_STAGE_LABELS: Record<OpsMakesafeStage, string> = {
   allocated: "Allocated",
   trade_report_in: "Trade Report In",
   report_ready: "Report Ready",
+  decision_required: "Captain Decision",
   completed: "Completed This Week",
   archive: "Archive",
   cancelled: "Cancelled",
@@ -1198,20 +1210,14 @@ export function buildCanonicalMakesafeRows(
       report_delivery: base?.metadata?.report_delivery ||
         detail?.report_delivery,
     });
-    // Card mode never loads portal/hold extras; skip the pure projections too.
-    const ledgerRows = cardMode
-      ? []
-      : (extras.portalCaptureRowsByJobId?.[base?.id] || []);
-    const ledgerPortalCaptures = cardMode
-      ? []
-      : portalCapturesFromLedger(base, ledgerRows);
-    const portalCaptures = cardMode
-      ? []
-      : projectMakesafePortalCaptures(base, ledgerRows);
-    const hold = cardMode ? null : (extras.holdsByJobId?.[base?.id] || null);
-    const rawPhotoCount = cardMode
-      ? 0
-      : Number(extras.photoCountByJobId?.[base?.id] || 0);
+    // Release 12: portal captures, holds and photo counts are PLACEMENT
+    // evidence now (the corrected engine reads them), so card mode loads and
+    // projects them like full mode. Card and full mode must place identically.
+    const ledgerRows = extras.portalCaptureRowsByJobId?.[base?.id] || [];
+    const ledgerPortalCaptures = portalCapturesFromLedger(base, ledgerRows);
+    const portalCaptures = projectMakesafePortalCaptures(base, ledgerRows);
+    const hold = extras.holdsByJobId?.[base?.id] || null;
+    const rawPhotoCount = Number(extras.photoCountByJobId?.[base?.id] || 0);
     const photoCount = photoCountForCurrentCycle(
       rawPhotoCount,
       detail,
@@ -1228,20 +1234,66 @@ export function buildCanonicalMakesafeRows(
     // ledger today, so this reads as `display_override` and the binding below
     // is unchanged for all of them.
     const decisionKind = sesOverlayDecisionKind(application);
+    // enrich already cycle-scopes pack/invoice closeout inputs on reattend.
+    const invoiceStatus = rawInvoiceStatus(base);
+    const packSent = base?.pack_sent === true;
+
+    // ── RELEASE 12: the corrected evidence engine PLACES the card. ──────────
+    // Captain-approved 2026-08-06 (Rescue SES mission, wiki
+    // makesafe-system/missions/rescue-ses-2026-08/CONTRACT.md). The legacy
+    // ladder's answer stays published as `declared_stage` provenance, but
+    // `canonical_stage` is now the corrected engine plus the display-ledger
+    // overlay, anchored on the DERIVED stage (Release 9 re-anchor rows carry
+    // the matching source_status). Built WITHOUT `displayedStatus`, so the
+    // engine physically cannot see the stage the board previously displayed.
+    const statusInput = {
+      job: base,
+      detail,
+      evidence: {
+        assignments,
+        serviceReports: report ? [report] : [],
+        completionPhotoCount: photoCount,
+        portalCaptures,
+        packState: pack?.review_state || null,
+        pack,
+        invoiceStatus,
+        invoiceQualifiesAsCurrentDraft,
+        invoiceDate: base?.invoice_date || null,
+        invoiceCreatedAt: base?.invoice_created_at || null,
+        packSent,
+        documents: {
+          report: base?.has_report_doc === true,
+          ownRoofReportDocumentIds: extras?.ownRoofReportDocumentIdsByJobId?.[
+            String(base?.id || "")
+          ] ?? new Set<string>(),
+          invoice: base?.has_invoice_doc === true,
+          swms: base?.has_swms_doc === true,
+        },
+        swmsRequired,
+        hold,
+        ownRoofDraft: extras?.ownRoofDraftByJobId?.[String(base?.id || "")] ??
+          null,
+        terminalProofs:
+          extras?.terminalProofsByJobId?.[String(base?.id || "")] ??
+            null,
+        attendanceCycleIds:
+          extras?.attendanceCycleIdsByJobId?.[String(base?.id || "")] ?? null,
+        currentAttendanceCycleId: base?.attendance_cycle_id ??
+          detail?.attendance_cycle_id ?? null,
+      },
+      ses_family: sesFamily,
+      nowIso: computedAt,
+    };
+    const stageV2 = deriveSesStageV2(statusInput);
+    const derivedStage = String(stageV2.stage || "").toLowerCase();
     // R8 — ATTESTATIONS CAN NEVER BIND. The `decisionKind` test is FIRST and
-    // structural: an attestation short-circuits before the display-override
-    // predicate is even evaluated, so no attestation can move a column by any
-    // path, including a future row whose source happens to equal the declared
-    // stage. Release 9 writes the re-anchor rows; this release only teaches the
-    // read model to understand them.
+    // structural. Binding is anchored on the DERIVED stage (post-R12); the
+    // report_ready draft-invoice prerequisite is unchanged.
     const applicationApplies = decisionKind === "display_override" &&
       !!application &&
-      !isMakesafeTerminalDisplayStatus(declaredStage) &&
+      !isMakesafeTerminalDisplayStatus(derivedStage) &&
       !isMakesafeTerminalJobState(base?.status) &&
-      String(application.source_status || "").toLowerCase() === declaredStage &&
-      // A legacy display override is not a parallel escape hatch around the
-      // deterministic Docs Ready gate. Other destinations keep their existing
-      // overlay semantics; only report_ready consumes the shared prerequisite.
+      String(application.source_status || "").toLowerCase() === derivedStage &&
       (String(application.after_status || "").toLowerCase() !==
           "report_ready" ||
         invoiceQualifiesAsCurrentDraft);
@@ -1249,16 +1301,13 @@ export function buildCanonicalMakesafeRows(
     // describes where the card already is. It never changes `displayStage`.
     const attestationAttaches = decisionKind === "stage_attestation" &&
       !!application &&
-      String(application.source_status || "").toLowerCase() === declaredStage &&
-      String(application.after_status || "").toLowerCase() === declaredStage;
-    // Placement authority: declared ladder + display-ledger overlay. Identical
-    // in card and full mode — card mode must never re-derive a column.
+      String(application.source_status || "").toLowerCase() === derivedStage &&
+      String(application.after_status || "").toLowerCase() === derivedStage;
+    // Placement authority: corrected engine + display-ledger overlay.
+    // Identical in card and full mode — card mode must never re-derive.
     const displayStage = applicationApplies
-      ? String(application.after_status || declaredStage).toLowerCase()
-      : declaredStage;
-    // enrich already cycle-scopes pack/invoice closeout inputs on reattend.
-    const invoiceStatus = rawInvoiceStatus(base);
-    const packSent = base?.pack_sent === true;
+      ? String(application.after_status || derivedStage).toLowerCase()
+      : derivedStage;
     const presentation = boardPresentationFields(base);
     const contact = buildMakesafeContact(
       base,
@@ -1360,12 +1409,14 @@ export function buildCanonicalMakesafeRows(
       job_state: base?.status || null,
       substatus: base?.substatus || null,
       declared_stage: declaredStage,
-      // Placement authority — identical in card and full mode.
+      // Placement authority — identical in card and full mode. Release 12:
+      // the corrected engine (+ overlay) places the card; `declared_stage`
+      // above is the legacy ladder's answer, kept as provenance only.
       canonical_stage: displayStage,
-      canonical_stage_label: applicationApplies
-        ? OPS_MAKESAFE_STAGE_LABELS[displayStage as OpsMakesafeStage] ||
-          displayStage
-        : base?.board_label || null,
+      canonical_stage_label:
+        OPS_MAKESAFE_STAGE_LABELS[displayStage as OpsMakesafeStage] ||
+          base?.board_label || displayStage,
+      placement_engine_version: `${stageV2.engine_version}+overlay-r12`,
       status_application: statusApplication,
       // Present regardless of whether the overlay currently applies, so the
       // planner can refuse to re-archive a card it already archived.
@@ -1398,7 +1449,7 @@ export function buildCanonicalMakesafeRows(
       pack: packPayload,
       age: ageFacts(base),
       blockers: blockerFacts(base, assignments),
-      cancelled: base?.board_stage === "cancelled"
+      cancelled: displayStage === "cancelled"
         ? {
           reason: base?.cancel_reason || null,
           note: base?.cancel_note || null,
@@ -1423,71 +1474,19 @@ export function buildCanonicalMakesafeRows(
       };
     }
 
-    // Built WITHOUT `displayedStatus`, so the corrected shadow engine below
-    // physically cannot see the stage the board is currently displaying. M1
-    // still gets it (appended one line down) because its published value is
-    // what today's certificates grade against and must not change here.
-    const statusInput = {
-      job: base,
-      detail,
-      evidence: {
-        assignments,
-        serviceReports: report ? [report] : [],
-        completionPhotoCount: photoCount,
-        portalCaptures,
-        packState: pack?.review_state || null,
-        pack,
-        invoiceStatus,
-        invoiceQualifiesAsCurrentDraft,
-        invoiceDate: base?.invoice_date || null,
-        invoiceCreatedAt: base?.invoice_created_at || null,
-        packSent,
-        documents: {
-          report: base?.has_report_doc === true,
-          ownRoofReportDocumentIds: extras?.ownRoofReportDocumentIdsByJobId?.[
-            String(base?.id || "")
-          ] ?? new Set<string>(),
-          invoice: base?.has_invoice_doc === true,
-          swms: base?.has_swms_doc === true,
-        },
-        swmsRequired,
-        hold,
-        // R5 — present only for own-template roof cards; undefined otherwise,
-        // so no other family's evidence changes shape.
-        ownRoofDraft: extras?.ownRoofDraftByJobId?.[String(base?.id || "")] ??
-          null,
-        // R7 — recorded terminal-proof evidence. Present only for the cards
-        // that carry a proof; M1 ignores all three keys.
-        terminalProofs:
-          extras?.terminalProofsByJobId?.[String(base?.id || "")] ??
-            null,
-        attendanceCycleIds:
-          extras?.attendanceCycleIdsByJobId?.[String(base?.id || "")] ?? null,
-        // The base row's own cycle-scoped value first: both `enrichMakesafeBoardJob`
-        // and the parity harness stamp it from `projectCycleScopedEvidence`, which
-        // is the cycle boundary every other evidence read on this card already
-        // honours. The raw detail column is the fallback.
-        currentAttendanceCycleId: base?.attendance_cycle_id ??
-          detail?.attendance_cycle_id ?? null,
-      },
-      // R4 — the canonical family this row already computed, handed to the
-      // shadow engine so it reads a real family instead of re-guessing one.
-      // M1 ignores the key; its published output is unchanged.
-      ses_family: sesFamily,
-      nowIso: computedAt,
-    };
+    // Release 12: `statusInput` and `stageV2` are computed ABOVE, before
+    // placement — the engine's answer IS the placement. M1 stays published for
+    // measurement continuity and still receives the displayed stage.
     const computation = computeMakesafeStatus({
       ...statusInput,
       displayedStatus: displayStage,
     });
     const reportIn = reportInEvidence(statusInput);
-    // SHADOW ONLY. Advisory comparison value; it places no card. See the
-    // authority boundary at the top of ses_stage_engine_v2.ts.
-    const stageV2 = deriveSesStageV2(statusInput);
     const stageV2Overlay = sesStageV2OverlayCandidate(
       stageV2.stage,
       application,
       base?.status,
+      invoiceQualifiesAsCurrentDraft,
     );
     const roofEligibility = sesRoofConfirmationEligibility(
       base,

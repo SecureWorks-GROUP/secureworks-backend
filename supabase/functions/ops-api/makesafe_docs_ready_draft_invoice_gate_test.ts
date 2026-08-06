@@ -370,8 +370,15 @@ Deno.test("named-branch preservation: every pre-existing physical Docs Ready con
   }
 });
 
-Deno.test("canonical overlay and Ops/Trade projections cannot re-promote an invoice-gated card", () => {
-  const [canonical] = buildCanonicalMakesafeRows([{
+/**
+ * The invoice-gated card, as the R12 evidence engine sees it.
+ *
+ * A `ready_to_invoice` substatus is a CLAIM about money that the card's own
+ * evidence has to back. `invoice_qualifies_as_current_draft: false` is what
+ * makes it unbacked, and it is the fact the gate turns on.
+ */
+function invoiceGatedCard(over: Record<string, any> = {}) {
+  return {
     id: "job-current",
     job_number: "SWMS-TEST-1",
     type: "makesafe",
@@ -380,6 +387,9 @@ Deno.test("canonical overlay and Ops/Trade projections cannot re-promote an invo
     board_label: "Allocated",
     board_stage_engine_version: "test",
     substatus: "ready_to_invoice",
+    // R12: the engine reads the card's family to pick an evidence recipe, so a
+    // fixture has to declare one. Physical make-safe is the standard path.
+    metadata: { makesafe_job_family: "general_makesafe" },
     makesafe_details: {
       substatus: "ready_to_invoice",
       external_ref: "MLB-99999",
@@ -388,24 +398,45 @@ Deno.test("canonical overlay and Ops/Trade projections cannot re-promote an invo
     external_ref: "MLB-99999",
     assignments: [],
     invoice_qualifies_as_current_draft: false,
-  }], {
+    ...over,
+  };
+}
+
+/** A captain decision trying to promote the card into Docs Ready. */
+const PROMOTE_TO_REPORT_READY = {
+  run_key: "test-display-override",
+  job_id: "job-current",
+  source_status: "allocated",
+  before_status: "allocated",
+  after_status: "report_ready",
+  evidence_ref: "test://invoice-gate",
+  applied_by: "test",
+  applied_at: SNAPSHOT_NOW,
+};
+
+Deno.test("canonical overlay and Ops/Trade projections cannot re-promote an invoice-gated card", () => {
+  // R12 cutover: the fixture used to reach `allocated` by declaring
+  // `board_stage`, with no allocation evidence on the card at all. Placement
+  // now follows the evidence, so it carries a real assignment — and that makes
+  // the gate a SHARPER test than before, not a weaker one. The overlay's
+  // `source_status` matches the derived stage exactly, so source-staleness is
+  // ruled out as the reason it fails, and the ONLY thing left refusing the
+  // promotion is the money gate: `after_status` is `report_ready` and no
+  // qualifying current draft invoice backs it.
+  const [canonical] = buildCanonicalMakesafeRows([
+    invoiceGatedCard({
+      assignments: [{ id: "a1", user_id: "u1", status: "scheduled" }],
+    }),
+  ], {
     computedAt: SNAPSHOT_NOW,
-    statusApplicationsByJobId: {
-      "job-current": {
-        run_key: "test-display-override",
-        job_id: "job-current",
-        source_status: "allocated",
-        before_status: "allocated",
-        after_status: "report_ready",
-        evidence_ref: "test://invoice-gate",
-        applied_by: "test",
-        applied_at: SNAPSHOT_NOW,
-      },
-    },
+    statusApplicationsByJobId: { "job-current": PROMOTE_TO_REPORT_READY },
   });
 
   assertEquals(canonical.declared_stage, "allocated");
+  assertEquals(canonical.derived_stage_v2, "allocated");
   assertEquals(canonical.canonical_stage, "allocated");
+  // Refused outright: an overlay the gate rejects attaches no provenance.
+  assertEquals(canonical.status_application, null);
 
   const ops = projectOpsMakesafeBoard([canonical]);
   assertEquals(ops.columns.allocated.map((row: any) => row.job_number), [
@@ -422,6 +453,41 @@ Deno.test("canonical overlay and Ops/Trade projections cannot re-promote an invo
     "SWMS-TEST-1",
   ]);
   assertEquals(trade.columns.Complete.length, 0);
+});
+
+Deno.test("an invoice-gated card with no identifiable family is refused, not guessed into a column", () => {
+  // The original fixture for the test above, preserved: a `ready_to_invoice`
+  // money claim with no allocation, no report, no qualifying draft AND no
+  // declared job family. Before R12 it rendered wherever `board_stage` said.
+  //
+  // It now derives `decision_required`, and the honest reason is the family,
+  // not the money: with no identifiable family there is no evidence recipe, so
+  // nothing downstream can say what would advance this card. The engine refuses
+  // rather than reading it as a physical make-safe — the failure mode that
+  // silently mislabelled 19 cards at the 2026-08-02 snapshot. The money gate
+  // still holds underneath it: the promotion to `report_ready` does not bind.
+  const [canonical] = buildCanonicalMakesafeRows([
+    invoiceGatedCard({ metadata: undefined }),
+  ], {
+    computedAt: SNAPSHOT_NOW,
+    statusApplicationsByJobId: { "job-current": PROMOTE_TO_REPORT_READY },
+  });
+
+  assertEquals(canonical.canonical_stage, "decision_required");
+  assertEquals(canonical.derived_stage_v2_conflicts, ["family_unknown"]);
+  assertEquals(canonical.status_application, null);
+
+  const ops = projectOpsMakesafeBoard([canonical]);
+  assertEquals(
+    ops.columns.decision_required.map((row: any) => row.job_number),
+    [
+      "SWMS-TEST-1",
+    ],
+  );
+  assertEquals(ops.columns.report_ready.length, 0);
+  // A real rendered column since R12, so the card is visible rather than parked
+  // in `new` as an unrecognised stage.
+  assertEquals(ops.unmapped_stage_job_ids.length, 0);
 });
 
 Deno.test("read-side readiness fingerprint changes with current invoice lifecycle inputs", () => {

@@ -396,13 +396,43 @@ function acceptedRevision() {
   };
 }
 
-Deno.test("F7 writer: recording a capture moves no stage", () => {
-  const revision = acceptedRevision();
+Deno.test("F7 writer: recording a capture writes evidence only, and the stage follows that evidence", async () => {
+  // Evolved from "F7 writer: recording a capture moves no stage".
+  //
+  // Before the R12 cutover a capture was display-only, so "no stage moved" was
+  // both the WRITE guarantee and the READ guarantee, and one assertion covered
+  // both. R12 made an accepted exact-cycle capture genuine PLACEMENT evidence,
+  // which splits them apart:
+  //
+  //   - The write guarantee survives untouched and is what this test protects.
+  //     Recording a capture commits evidence and nothing else: it issues no
+  //     stage or substatus write, so no raw board state changes.
+  //   - The read consequence is now the opposite. The derived stage SHOULD
+  //     move, because the evidence the derivation reads has changed. A card
+  //     whose column ignored new proof would be the bug, not the fix.
+  //
+  // Running the REAL recorder is what makes the write half load-bearing: the
+  // client double exposes no `update` and no `insert` at all, so an attempt to
+  // write board state would throw rather than pass unnoticed.
+  const live = liveSnapshot();
+  const ledger = new LedgerDouble();
+  const request = await observerRequest();
+  await recordSesPortalCaptureEvidence(
+    clientFor(live, ledger) as any,
+    request.body,
+    "ops-api:api_key",
+  );
+
+  // WRITE: exactly one mutation reached the database and it was the evidence
+  // commit. No stage-write RPC, and no second call.
+  assertEquals(ledger.rpcNames, ["commit_makesafe_portal_capture_v1"]);
+  assertEquals(ledger.rows.length, 1);
+
   const [before] = buildCanonicalMakesafeRows([boardCard()], {
     computedAt: NOW,
   });
   const [after] = buildCanonicalMakesafeRows([boardCard()], {
-    portalCaptureRowsByJobId: { [JOB_ID]: [revision] },
+    portalCaptureRowsByJobId: { [JOB_ID]: [ledger.rows[0]] },
     computedAt: NOW,
   });
 
@@ -412,14 +442,33 @@ Deno.test("F7 writer: recording a capture moves no stage", () => {
     false,
   );
   assertEquals(after.computed_status_evidence.has_current_portal_capture, true);
-  // ...and the card has not moved.
-  assertEquals(after.canonical_stage, before.canonical_stage);
+
+  // ...raw board state is untouched, because nothing wrote any...
   assertEquals(after.declared_stage, before.declared_stage);
   assertEquals(after.substatus, before.substatus);
-  assertEquals(after.status, before.status);
+  assertEquals(after.job_state, before.job_state);
+
+  // ...and the derived column moves exactly as far as the new proof carries it.
+  // The builder's roof form is now proved submitted and locked, which is
+  // report-in. It does NOT overshoot into report_ready: there is still no
+  // assembled pack, and a capture is not a pack.
+  assertEquals(before.canonical_stage, "allocated");
+  assertEquals(after.canonical_stage, "trade_report_in");
 });
 
-Deno.test("F7 writer: no board stage can move because a capture exists", () => {
+Deno.test("F7 writer: a capture changes only what it proves, and never raw board state", () => {
+  // Evolved from "F7 writer: no board stage can move because a capture exists".
+  //
+  // The R12 cutover made an accepted capture placement evidence, so the blanket
+  // "no column may move" claim is no longer the guarantee — moving on new proof
+  // is the point. Two things survive, and both are asserted below:
+  //
+  //   - No capture ever writes raw board state. `declared_stage`, `substatus`
+  //     and `job_state` are identical before and after, in every combination.
+  //   - A capture moves a column only as far as it PROVES. An accepted
+  //     exact-cycle capture proves report-in; a capture the reader refuses
+  //     proves nothing and moves nothing at all.
+  //
   // 1. STRUCTURAL. The legacy ladder that places every card takes no capture
   //    argument, so a ledger row is not an input it could read.
   const legacySource = _deriveMakesafeBoardStage.toString();
@@ -435,7 +484,10 @@ Deno.test("F7 writer: no board stage can move because a capture exists", () => {
   }
 
   // 2. BEHAVIOURAL, across every stage the board can display. Injecting a valid
-  //    accepted capture on a card in each stage moves none of them.
+  //    accepted capture on a card in each stage writes no raw state on any of
+  //    them, and moves every one of them to exactly the column the capture
+  //    proves — never past it, and never somewhere the old `board_stage`
+  //    happened to claim.
   for (const stage of OPS_MAKESAFE_STAGES) {
     for (
       const substatus of [
@@ -460,15 +512,63 @@ Deno.test("F7 writer: no board stage can move because a capture exists", () => {
         portalCaptureRowsByJobId: { [JOB_ID]: [acceptedRevision()] },
         computedAt: NOW,
       });
+      // Raw board state: written by nothing, so identical either side.
+      assertEquals(
+        after.declared_stage,
+        before.declared_stage,
+        `${stage}/${substatus} declared_stage was written`,
+      );
+      assertEquals(
+        after.substatus,
+        before.substatus,
+        `${stage}/${substatus} substatus was written`,
+      );
+      assertEquals(
+        after.job_state,
+        before.job_state,
+        `${stage}/${substatus} job_state was written`,
+      );
+      // Derived column: the card starts short of report-in whatever the stale
+      // `board_stage` claimed, and the accepted capture proves exactly
+      // report-in. Same answer for all 40 combinations, which is the point —
+      // placement follows the evidence, not the declared column.
+      assertEquals(
+        before.canonical_stage,
+        "allocated",
+        `${stage}/${substatus} unexpected pre-capture placement`,
+      );
       assertEquals(
         after.canonical_stage,
-        before.canonical_stage,
-        `${stage}/${substatus} canonical_stage moved`,
+        "trade_report_in",
+        `${stage}/${substatus} capture did not place the card on its evidence`,
       );
-      assertEquals(after.declared_stage, before.declared_stage);
-      assertEquals(after.substatus, before.substatus);
-      assertEquals(after.job_state, before.job_state);
     }
+  }
+
+  // 3. A capture the reader REFUSES proves nothing, so it moves nothing. This
+  //    is the half of the original guarantee that survives verbatim: absence of
+  //    accepted evidence can never advance a card.
+  const refused: Array<[string, Record<string, unknown>]> = [
+    ["stale attendance cycle", { attendance_cycle_id: "cycle-stale" }],
+    ["wrong source URL", {
+      source_url: "https://www.primeeco.tech/share/somewhere-else",
+    }],
+    ["observed not done", { capture_result: "not_done", status: "captured" }],
+    ["missing screenshot", { screenshot_object_key: null }],
+  ];
+  for (const [name, over] of refused) {
+    const [after] = buildCanonicalMakesafeRows([boardCard()], {
+      portalCaptureRowsByJobId: {
+        [JOB_ID]: [{ ...acceptedRevision(), ...over }],
+      },
+      computedAt: NOW,
+    });
+    assertEquals(after.canonical_stage, "allocated", name);
+    assertEquals(
+      after.computed_status_evidence.has_current_portal_capture,
+      false,
+      name,
+    );
   }
 });
 
