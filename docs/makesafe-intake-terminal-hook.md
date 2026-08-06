@@ -77,6 +77,16 @@ without a bundle-evidence claim retain the ordinary local-evidence behavior.
 `makesafe_cron_settings.auto_file_enabled=false` remains an explicit emergency brake.
 Without either explicit brake, advance-what-passes is the default.
 
+A third, non-emergency condition sits alongside them (captain ruling 2026-08-06):
+`auto_approve_clean_intake_drafts` performs live approvals only for a `triggered_by`
+on the closed allow-list in `makesafe_intake_advance_trigger.ts` —
+`ses-reporting-skill` (the `makesafe_reporting_intake_pass` coupling below) or
+`ops_intake_review_sweep` (the operator's INTAKE-column button). This is an INTENT
+gate, not an authority gate: the privileged caller check is unchanged, and an
+unnamed or unrecognised trigger still receives the full preview, so a direct
+privileged call with no `triggered_by` returns eligibility and evidence while
+approving nothing. Advance-what-passes remains the default for the named triggers.
+
 The scoped routine credential may call `makesafe_reporting_intake_pass`. It may not
 call
 `approve_intake_draft` or `auto_approve_clean_intake_drafts` directly, and raw
