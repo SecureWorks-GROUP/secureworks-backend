@@ -526,10 +526,11 @@ Deno.test("D3 feed: an attached SWMS is surfaced in draft_docs", async () => {
 
 // ─────────────────────────────────────────────────────────────────
 // BLOCKER C — feed recipient resolution. The To is the builder's WORK-ORDERS
-// inbox (makesafe_companies.report_recipient) ONLY, and the cc is EXACTLY [ses@].
-// invoice_email (the billing contact, vanessa@ajs.build for AJS) is NEVER the To.
+// inbox (makesafe_companies.report_recipient) ONLY. AJS/AJBR CC is the permanent
+// pack set (ses@ + vanessa@ + mandi@); other builders stay [ses@] only.
+// invoice_email (billing contact) is NEVER the To.
 // ─────────────────────────────────────────────────────────────────
-Deno.test("C feed: report_recipient set -> recipient_email = work-orders inbox, cc = [ses@]", async () => {
+Deno.test("C feed: AJS report_recipient set -> To=workorders, permanent pack CCs", async () => {
   const seed = ferndaleSeed();
   // AJS-shaped: a billing contact (invoice_email = vanessa) PLUS the work-orders
   // inbox (report_recipient). The To must be the work-orders inbox, never vanessa.
@@ -548,7 +549,11 @@ Deno.test("C feed: report_recipient set -> recipient_email = work-orders inbox, 
     row.recipient_email !== "vanessa@ajs.build",
     "vanessa (billing) must NEVER be the To",
   );
-  assertEquals(row.cc, [MAKESAFE_CC]);
+  assertEquals(row.cc, [
+    MAKESAFE_CC,
+    "vanessa@ajs.build",
+    "mandi@ajs.build",
+  ]);
 });
 
 Deno.test("C feed: report_recipient null -> recipient_email null (warning), NOT invoice_email", async () => {

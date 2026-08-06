@@ -1164,20 +1164,23 @@ Deno.test("N-1 isInvoiceAmbiguous: >1 non-void is ambiguous; voided/deleted neve
 // ═════════════════════════════════════════════════════════════════
 // 8. EXACT-RECIPIENT GATE (BLOCKER C — money/comms, FAIL CLOSED).
 //    The To MUST equal the SERVER-CONFIGURED work-orders inbox (report_recipient)
-//    and the CC MUST be EXACTLY [ses@secureworkswa.com.au]. vanessa@ajs.build (the
-//    billing contact) must NEVER be a To or a CC. Cross-ref index.ts:makesafeSendPack
-//    recipient-gate block (server-derives report_recipient from makesafe_companies).
+//    and the CC MUST be EXACTLY the permanent pack set for that builder.
+//    AJS/AJBR: [ses@, vanessa@ajs.build, mandi@ajs.build] (Captain 2026-08-06).
+//    Others: [ses@] only. vanessa/mandi must NEVER be the To.
+//    Cross-ref index.ts:makesafeSendPack recipient-gate block.
 // ═════════════════════════════════════════════════════════════════
 
 const AJS_WORKORDERS = "workorders@ajs.build";
 const VANESSA = "vanessa@ajs.build";
+const MANDI = "mandi@ajs.build";
+const AJS_PACK_CC = [MAKESAFE_CC, VANESSA, MANDI];
 
-Deno.test("recipient-gate: To=work-orders inbox + CC=[ses@] PASSES", () => {
+Deno.test("recipient-gate: AJS To=workorders + permanent CCs PASSES", () => {
   assertEquals(
     checkExactRecipientGate({
       configuredReportRecipient: AJS_WORKORDERS,
       to: AJS_WORKORDERS,
-      cc: [MAKESAFE_CC],
+      cc: AJS_PACK_CC,
     }),
     [],
   );
@@ -1186,30 +1189,42 @@ Deno.test("recipient-gate: To=work-orders inbox + CC=[ses@] PASSES", () => {
     checkExactRecipientGate({
       configuredReportRecipient: AJS_WORKORDERS,
       to: AJS_WORKORDERS,
-      cc: MAKESAFE_CC,
+      cc: AJS_PACK_CC.join(", "),
     }),
     [],
   );
 });
 
-Deno.test("recipient-gate: CC containing vanessa is REJECTED (vanessa never on CC)", () => {
+Deno.test("recipient-gate: AJS with only ses@ is REJECTED (missing permanent builder CCs)", () => {
+  const f = checkExactRecipientGate({
+    configuredReportRecipient: AJS_WORKORDERS,
+    to: AJS_WORKORDERS,
+    cc: [MAKESAFE_CC],
+  });
+  assert(f.length > 0);
+  assert(
+    f.some((x) => x.includes(VANESSA) || x.includes(MANDI)),
+    `expected missing vanessa/mandi rejection, got: ${f.join(" | ")}`,
+  );
+});
+
+Deno.test("recipient-gate: AJS missing mandi is REJECTED", () => {
   const f = checkExactRecipientGate({
     configuredReportRecipient: AJS_WORKORDERS,
     to: AJS_WORKORDERS,
     cc: [MAKESAFE_CC, VANESSA],
   });
-  assert(f.length > 0);
   assert(
-    f.some((x) => x.includes("EXACTLY") && x.includes(VANESSA)),
-    `expected a vanessa cc rejection, got: ${f.join(" | ")}`,
+    f.some((x) => x.includes(MANDI)),
+    `expected missing mandi rejection, got: ${f.join(" | ")}`,
   );
 });
 
-Deno.test("recipient-gate: CC with an extra (non-ses) address is REJECTED", () => {
+Deno.test("recipient-gate: AJS CC with an extra address is REJECTED", () => {
   const f = checkExactRecipientGate({
     configuredReportRecipient: AJS_WORKORDERS,
     to: AJS_WORKORDERS,
-    cc: [MAKESAFE_CC, "someone-else@example.com"],
+    cc: [...AJS_PACK_CC, "someone-else@example.com"],
   });
   assert(
     f.some((x) => x.includes("someone-else@example.com")),
@@ -1217,7 +1232,27 @@ Deno.test("recipient-gate: CC with an extra (non-ses) address is REJECTED", () =
   );
 });
 
-Deno.test("recipient-gate: missing ses@ on CC is REJECTED", () => {
+Deno.test("recipient-gate: non-AJS still requires exact [ses@] only", () => {
+  assertEquals(
+    checkExactRecipientGate({
+      configuredReportRecipient: "makesafes@mlbuilders.com.au",
+      to: "makesafes@mlbuilders.com.au",
+      cc: [MAKESAFE_CC],
+    }),
+    [],
+  );
+  const f = checkExactRecipientGate({
+    configuredReportRecipient: "makesafes@mlbuilders.com.au",
+    to: "makesafes@mlbuilders.com.au",
+    cc: [MAKESAFE_CC, VANESSA],
+  });
+  assert(
+    f.some((x) => x.includes(VANESSA)),
+    `expected vanessa rejected on MLB pack, got: ${f.join(" | ")}`,
+  );
+});
+
+Deno.test("recipient-gate: missing required CCs is REJECTED", () => {
   const f = checkExactRecipientGate({
     configuredReportRecipient: AJS_WORKORDERS,
     to: AJS_WORKORDERS,
@@ -1225,7 +1260,7 @@ Deno.test("recipient-gate: missing ses@ on CC is REJECTED", () => {
   });
   assert(
     f.some((x) => x.includes("cc must be exactly")),
-    `expected a missing-ses cc rejection, got: ${f.join(" | ")}`,
+    `expected a missing-cc rejection, got: ${f.join(" | ")}`,
   );
 });
 
@@ -1233,7 +1268,7 @@ Deno.test("recipient-gate: To != configured report_recipient is REJECTED (vaness
   const f = checkExactRecipientGate({
     configuredReportRecipient: AJS_WORKORDERS,
     to: VANESSA, // the billing contact must never be the To
-    cc: [MAKESAFE_CC],
+    cc: AJS_PACK_CC,
   });
   assert(
     f.some((x) =>
@@ -1248,7 +1283,7 @@ Deno.test("recipient-gate: no report_recipient configured is REJECTED (cannot se
   const f = checkExactRecipientGate({
     configuredReportRecipient: null,
     to: VANESSA,
-    cc: [MAKESAFE_CC],
+    cc: AJS_PACK_CC,
   });
   assert(
     f.some((x) => x.includes("no work-order recipient")),
@@ -1260,7 +1295,7 @@ Deno.test("recipient-gate: a second To address is REJECTED (exactly one recipien
   const f = checkExactRecipientGate({
     configuredReportRecipient: AJS_WORKORDERS,
     to: [AJS_WORKORDERS, VANESSA],
-    cc: [MAKESAFE_CC],
+    cc: AJS_PACK_CC,
   });
   assert(
     f.some((x) =>
@@ -1268,6 +1303,15 @@ Deno.test("recipient-gate: a second To address is REJECTED (exactly one recipien
     ),
     `expected a too-many-To rejection, got: ${f.join(" | ")}`,
   );
+});
+
+Deno.test("recipient-gate: permanent AJS CCs use ajs.build spelling only", () => {
+  for (const addr of AJS_PACK_CC) {
+    if (addr.includes("@ajs")) {
+      assertEquals(addr.endsWith("@ajs.build"), true);
+      assertEquals(/ajsbuild|ajsbuid/i.test(addr), false);
+    }
+  }
 });
 
 // ═════════════════════════════════════════════════════════════════

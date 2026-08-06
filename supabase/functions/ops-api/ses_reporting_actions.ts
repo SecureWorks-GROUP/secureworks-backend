@@ -4594,6 +4594,38 @@ export async function executeSesReleaseRevisionAction(
     ),
   };
   const primaryThread = routingIntakeThread(primaryRouting);
+  // Once ANY route of this release has a send effect, execution is in flight:
+  // the loop reconciles those routes rather than re-dispatching them, and the
+  // stored envelope of the routes still to go cannot be rewritten. Enforcing a
+  // CC rule minted after that envelope was approved would strand the release —
+  // the only escape a refusal can offer is a new release revision, whose
+  // content-derived id mints fresh operation keys and re-mails whatever already
+  // went. So an in-flight release keeps the ses@ floor that governed when it
+  // was approved; a release that has never dispatched is fully gated, and
+  // re-preparing it is safe because no builder copy exists yet.
+  let releaseSendInFlight = false;
+  if (isAjsRelease) {
+    const priorSends = await client.from("ses_external_effects")
+      .select("operation_key")
+      .eq("release_revision_id", args.release_revision_id)
+      .eq("effect_kind", "route_send")
+      .limit(1);
+    if (priorSends.error) {
+      throw new SesActionError(
+        503,
+        sesRefusal(
+          "route_send_proof_unreadable",
+          "Retry SEND IT once the release send ledger is readable; never prepare a new release revision to work around this read fault.",
+          {
+            fact: priorSends.error.message ||
+              "The release send effect ledger could not be read.",
+            evidence: { release_revision_id: args.release_revision_id },
+          },
+        ),
+      );
+    }
+    releaseSendInFlight = (priorSends.data || []).length > 0;
+  }
 
   for (const kind of requiredOrder) {
     const route = routes.find((candidate: any) =>
@@ -4612,7 +4644,10 @@ export async function executeSesReleaseRevisionAction(
       client,
       exactDocketRevisionIds,
     );
-    // Envelope check for AJS two-email shape: cc must include ses@, TO present.
+    // Envelope check for AJS two-email shape: cc must include the permanent pack
+    // set (ses@ + vanessa@ajs.build + mandi@ajs.build), TO present. A release
+    // already in flight keeps the ses@ floor that governed at approval — see
+    // releaseSendInFlight above.
     // Filename-level client-send gates (report+invoice PDFs / photo images) are
     // applied when operators build the payload; at execute we only have content
     // hashes, so we enforce the sealed envelope facts that survive hashing.
@@ -4620,15 +4655,27 @@ export async function executeSesReleaseRevisionAction(
       const ccList = (Array.isArray(route.cc) ? route.cc : []).map((
         v: string,
       ) => String(v || "").trim().toLowerCase());
-      if (!ccList.includes(MAKESAFE_CC)) {
-        throw new SesActionError(
-          409,
-          sesRefusal(
-            "route_recipient_invalid",
-            `AJS pack routes must CC ${MAKESAFE_CC}; prepare a new release revision.`,
-            { evidence: { route_kind: kind, cc: ccList } },
-          ),
-        );
+      const requiredCc = releaseSendInFlight ? [MAKESAFE_CC] : ajsPackCc();
+      for (const required of requiredCc) {
+        if (!ccList.includes(required.trim().toLowerCase())) {
+          throw new SesActionError(
+            409,
+            sesRefusal(
+              "route_recipient_invalid",
+              releaseSendInFlight
+                ? `AJS pack routes must CC ${required}; this release has already dispatched a route, so reconcile it by its SES operation token and raise the envelope on the next release, never by re-preparing this one.`
+                : `AJS pack routes must CC ${required}; prepare a new release revision.`,
+              {
+                evidence: {
+                  route_kind: kind,
+                  cc: ccList,
+                  required: requiredCc,
+                  release_send_in_flight: releaseSendInFlight,
+                },
+              },
+            ),
+          );
+        }
       }
       if (
         (kind === "report_invoice" || kind === "report") &&

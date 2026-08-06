@@ -33,6 +33,13 @@ export interface SesMailGateway {
 export const SES_RELEASE_MAILBOX = "admin@secureworkswa.com.au";
 export const SES_RELEASE_CC = "ses@secureworkswa.com.au";
 export const AJS_WORK_ORDERS_MAILBOX = "workorders@ajs.build";
+/**
+ * Permanent builder CCs on every AJS/AJBR sealed pack email (Captain 2026-08-06).
+ * Domain is always `ajs.build` — never copy a live value that may be misspelled.
+ * ses@ remains the SecureWorks proof-surface CC and is composed in ajsPackCc().
+ */
+export const AJS_VANESSA_CC = "vanessa@ajs.build";
+export const AJS_MANDI_CC = "mandi@ajs.build";
 /** M365 group that hosts make-safe work-order intake threads (monitor-ses). */
 export const SES_INTAKE_GROUP_MAIL = "ses@secureworkswa.com.au";
 

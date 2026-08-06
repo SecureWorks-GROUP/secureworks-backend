@@ -4,6 +4,8 @@ import {
 import {
   ajsPackCc,
   ajsPackRecipients,
+  AJS_MANDI_CC,
+  AJS_VANESSA_CC,
   AJS_WORK_ORDERS_MAILBOX,
   clientSendGateKindForRoute,
   isAjsBuilderKey,
@@ -29,6 +31,9 @@ import { resolveDocketRoutes } from "./ses_reporting_actions.ts";
 const MAVERICK_HTML =
   '<p>Body</p><div data-secureworks-signature="maverick">Maverick</div>';
 
+/** Permanent AJS pack CC set (ses@ + vanessa@ + mandi@). Domain always ajs.build. */
+const AJS_PACK_CC = [MAKESAFE_CC, AJS_VANESSA_CC, AJS_MANDI_CC];
+
 Deno.test("AJS builder keys select report_invoice + photo only", () => {
   assertEquals(isAjsBuilderKey("AJS"), true);
   assertEquals(isAjsBuilderKey("ajbr"), true);
@@ -38,7 +43,7 @@ Deno.test("AJS builder keys select report_invoice + photo only", () => {
   assertEquals(sesReleaseRouteOrder("AJS"), ["report_invoice", "photo"]);
 });
 
-Deno.test("AJS pack recipients always include workorders@ and ses@ cc", () => {
+Deno.test("AJS pack recipients always include workorders@ and permanent CCs", () => {
   assertEquals(
     ajsPackRecipients({
       workOrderSender: "site.manager@ajs.build",
@@ -50,7 +55,15 @@ Deno.test("AJS pack recipients always include workorders@ and ses@ cc", () => {
       "other@ajs.build",
     ],
   );
-  assertEquals(ajsPackCc(), [MAKESAFE_CC]);
+  assertEquals(ajsPackCc(), AJS_PACK_CC);
+  // Spelling pin: never ajsbuild / ajsbuid.
+  for (const addr of ajsPackCc()) {
+    if (addr.endsWith("@ajs.build") || addr.includes("@ajs.")) {
+      assertEquals(addr.endsWith("@ajs.build"), true);
+      assertEquals(addr.includes("ajsbuild"), false);
+      assertEquals(addr.includes("ajsbuid"), false);
+    }
+  }
 });
 
 Deno.test("gate kinds match skill contract names exactly", () => {
@@ -83,7 +96,7 @@ Deno.test("gate kinds match skill contract names exactly", () => {
 const AJS_COMBINED_PAYLOAD = {
   from: MAKESAFE_ADMIN_FROM,
   to: AJS_INVOICE_TO,
-  cc: MAKESAFE_CC,
+  cc: AJS_PACK_CC,
   subject: "AJBR-70000 - report and invoice",
   htmlBody: MAVERICK_HTML,
   attachments: [
@@ -182,7 +195,7 @@ Deno.test("MLB report gate refuses any cc and invoice/photo bleed", () => {
   );
 });
 
-Deno.test("photo gate: AJS requires ses@; MLB forbids cc; raw photoNN refused", () => {
+Deno.test("photo gate: AJS requires permanent pack CCs; MLB forbids cc; raw photoNN refused", () => {
   assertEquals(isRawPhotoDumpName("photo12.jpg"), true);
   assertEquals(isRawPhotoDumpName("Front elevation.jpg"), false);
 
@@ -194,10 +207,17 @@ Deno.test("photo gate: AJS requires ses@; MLB forbids cc; raw photoNN refused", 
     attachments: [{ name: "Front elevation.jpg" }],
   };
   assertEquals(
-    checkPhotoRouteClientSendGate({ ...base, cc: MAKESAFE_CC }, {
+    checkPhotoRouteClientSendGate({ ...base, cc: AJS_PACK_CC }, {
       builderKey: "AJS",
     }),
     [],
+  );
+  // ses@ alone is no longer enough for AJS — vanessa and mandi are permanent.
+  assertEquals(
+    checkPhotoRouteClientSendGate({ ...base, cc: MAKESAFE_CC }, {
+      builderKey: "AJS",
+    }).some((f) => f.includes(AJS_VANESSA_CC) || f.includes(AJS_MANDI_CC)),
+    true,
   );
   assertEquals(
     checkPhotoRouteClientSendGate({ ...base, cc: "" }, { builderKey: "AJS" })
@@ -356,12 +376,12 @@ Deno.test("AJS resolveDocketRoutes emits report_invoice + photo with Xero PDF on
   assertEquals(routes.map((r) => r.route_kind), ["report_invoice", "photo"]);
   const pack = routes[0];
   assertEquals(pack.recipients[0], AJS_WORK_ORDERS_MAILBOX);
-  assertEquals(pack.cc, [MAKESAFE_CC]);
+  assertEquals(pack.cc, AJS_PACK_CC);
   assertEquals(pack.attachment_hashes.includes("xero-hash"), true);
   assertEquals(pack.attachment_hashes.includes("report-hash"), true);
   assertEquals(pack.ready, true);
   assertEquals(routes[1].route_kind, "photo");
-  assertEquals(routes[1].cc, [MAKESAFE_CC]);
+  assertEquals(routes[1].cc, AJS_PACK_CC);
   assertEquals(routes[1].attachment_hashes, ["photo-hash-1"]);
   assertEquals(routes[1].ready, true);
 });
