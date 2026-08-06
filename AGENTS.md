@@ -1511,6 +1511,34 @@ here. The implementation is
 `scripts/ses-f7-prime-portal-observer.ts` and its end-to-end proof is
 `supabase/functions/ops-api/ses_portal_capture_writer_test.ts`.
 
+`capture_producer` is `capture_portal_evidence.py/v1` on every stored row — it
+names the approved CONTRACT, never the implementation. Read `captured_by` to
+know what actually looked at the page, because two implementations write under
+that one contract and they produce **different images**. The wiki skill's
+`capture_portal_evidence.py` screenshots the ACTUAL portal page and that
+screenshot is the proof (skill reference
+`secureworks-makesafe-reporting/references/portal-proof-and-roof-reports.md`).
+The in-repo F7 observer does NOT: `installSafeCaptureFrame` covers the viewport
+with a verified opaque frame before every `captureViewportPng`, so its images
+are a synthetic observation card carrying no portal form fields at all. Reading
+the observer's fail-closed privacy design as the compliant path inverts the
+ruling — that mistake was made once already and is corrected in
+`data/roof-reviewer-screenshot-gate-v1/report.md`.
+
+That report also measures the population and pins a live integrity defect: five
+of the six stored rows carry `screenshot_content_hash` EQUAL to
+`source_content_hash`. Those digest different artifacts (page text vs PNG
+bytes) and can never legitimately match, so on those rows `status: verified`
+does not attest the image bytes, and the storage path — derived from that
+column by `captureScreenshotStoragePath` — carries the source-text digest. Do
+not use that column as a byte coordinate without re-checking it per row.
+
+The cockpit payload carries the roof share link
+(`sections.family_evidence.roof_report_link`) but NO reference to the stored
+screenshot, and no ops-api action serves capture bytes or a signed URL. A
+reviewer display of the image is therefore an API change plus a view change,
+and the view is not in this repo — see the `dashboard` submodule entry above.
+
 ## Deterministic Intake Notifies After Board Proof
 
 The post-mint Hugo notification and honest five-minute denominator are owned by
