@@ -2829,16 +2829,19 @@ export async function retireSesDocketRevisionAction(
  * and its converse, which is the same rule read the other way: prior-cycle
  * money must never refuse a current cycle. A re-attendance is new work, so the
  * money this guard reads is cycle-scoped upstream in
- * `classifyExistingCardMoney`, and a member that mints nothing at all
- * (`no_additional_charge`) is outside the guard's scope entirely — it cannot
- * double-bill, and refusing it would strand a supported document-only release
- * with no override path.
+ * `classifyExistingCardMoney`.
+ *
+ * The ONE exemption is a `no_additional_charge` release member: it mints
+ * nothing, so it cannot double-bill, and a hard refusal there would strand a
+ * supported document-only release with no override path. That exemption is
+ * applied at THAT call site only — never in `existingCardMoneyRefusal`, which
+ * would take the refusal off the cockpit and off APPROVE INVOICE, i.e. make a
+ * card more approvable.
  */
 function refuseWhenCardMoneyExists(docket: SesCockpitDocket): void {
   const blocker = existingCardMoneyRefusal(
     docket.xero_binding?.status ?? null,
     docket.existing_card_money ?? null,
-    docket.clean_input.pricing_disposition,
   );
   if (blocker) throw new SesActionError(409, blocker);
 }
@@ -2868,7 +2871,6 @@ export async function approveSesInvoiceRevisionAction(
     evaluateSesMechanicalClean(docket.clean_input),
     docket.xero_binding?.status ?? null,
     docket.existing_card_money ?? null,
-    docket.clean_input.pricing_disposition,
   );
   const operatorAuth = await loadOperatorAuth(client, auth);
   const authority = canRecordSesApproval(operatorAuth, verdict);
@@ -4389,12 +4391,13 @@ export async function approveSesReleaseRevisionAction(
   const approvals = [];
   for (const member of members) {
     const docket = await loadSesCockpitDocket(client, member.job_id);
-    refuseWhenCardMoneyExists(docket);
+    if (docket.clean_input.pricing_disposition !== "no_additional_charge") {
+      refuseWhenCardMoneyExists(docket);
+    }
     const verdict = sesVerdictWithExistingMoney(
       evaluateSesMechanicalClean(docket.clean_input),
       docket.xero_binding?.status ?? null,
       docket.existing_card_money ?? null,
-      docket.clean_input.pricing_disposition,
     );
     const authority = canRecordSesApproval(operatorAuth, verdict);
     const cockpit = buildSesCockpitView(docket);

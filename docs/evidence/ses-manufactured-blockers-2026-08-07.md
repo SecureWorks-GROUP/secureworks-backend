@@ -173,10 +173,13 @@ guard to exactly what it was built to catch, unbound money for THIS cycle's
 work:
 
 - An invoice attributable only to a PRIOR attendance cycle does not refuse.
-- A `no_additional_charge` member is outside the guard entirely: it mints
-  nothing, so it cannot double-bill, and refusing it would strand a supported
-  document-only release with no override path. Applied in the one producer, so
-  the cockpit and the approve actions cannot disagree about the scope.
+- A `no_additional_charge` member is outside the HARD STOP at SEND IT: it mints
+  nothing, so it cannot double-bill, and a hard 409 there would strand a
+  supported document-only release with no override path. That exemption is
+  applied at THAT call site only. It is deliberately NOT in
+  `existingCardMoneyRefusal`: the cockpit and APPROVE INVOICE must keep refusing
+  such a card, because taking a refusal off a mint-adjacent surface is a card
+  becoming more approvable, which this control may never do.
 
 Live proof, real classifier over real production rows: **16 refuse, 3
 unaffected** (the three carrying a bound DRAFT). **Tier 2 first-live-proof:**

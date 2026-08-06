@@ -246,12 +246,7 @@ export function requiredSesRouteKinds(
 export function existingCardMoneyRefusal(
   boundStatus: string | null | undefined,
   money: SesExistingCardMoney | null | undefined,
-  pricingDisposition?: string | null,
 ): SesRefusal | null {
-  // A member that mints nothing cannot double-bill, so the guard is
-  // inapplicable rather than satisfied. Applied HERE, in the one producer, so
-  // the cockpit and both approve actions cannot disagree about its scope.
-  if (String(pricingDisposition || "") === "no_additional_charge") return null;
   if (String(boundStatus || "").trim()) return null;
   if (!money) return null;
   if (money.evaluated && !money.exists) return null;
@@ -283,18 +278,19 @@ export function existingCardMoneyRefusal(
  * (`canRecordSesApproval`), so enriching the verdict is not on its own a stop.
  * Pair it with `existingCardMoneyRefusal` as a hard refusal — see
  * `refuseWhenCardMoneyExists` in ses_reporting_actions.ts.
+ *
+ * Pricing disposition is deliberately NOT an input. The only path where the
+ * question is inapplicable is a release member that mints nothing, and that
+ * exemption belongs to that one call site: applying it here would take the
+ * refusal off the cockpit and off APPROVE INVOICE, which is a card becoming
+ * more approvable.
  */
 export function sesVerdictWithExistingMoney(
   mechanical: SesMechanicalCleanResult,
   boundStatus: string | null | undefined,
   money: SesExistingCardMoney | null | undefined,
-  pricingDisposition?: string | null,
 ): SesMechanicalCleanResult {
-  const blocker = existingCardMoneyRefusal(
-    boundStatus,
-    money,
-    pricingDisposition,
-  );
+  const blocker = existingCardMoneyRefusal(boundStatus, money);
   if (!blocker) return mechanical;
   return {
     ...mechanical,
@@ -959,7 +955,6 @@ export function buildSesCockpitView(
     evaluateSesMechanicalClean(docket.clean_input),
     docket.xero_binding?.status ?? null,
     docket.existing_card_money ?? null,
-    docket.clean_input.pricing_disposition,
   );
   const stale = !!displayedBinding &&
     (displayedBinding.readiness_revision !== docket.readiness_revision ||

@@ -205,21 +205,15 @@ Deno.test("a non-clean verdict is captain-OVERRIDABLE — which is why the appro
   assertEquals(authority.captain_override, true);
 });
 
-Deno.test("a member that mints nothing is outside the guard entirely", () => {
-  // Not a weakening: a no-additional-charge release creates no invoice, so it
-  // cannot double-bill, and refusing it would strand a supported document-only
-  // path with no override. Applied in the one producer so the cockpit and both
-  // approve actions cannot disagree about the scope.
-  assertEquals(
-    existingCardMoneyRefusal(null, someMoney(), "no_additional_charge"),
-    null,
-  );
-  const base = mechanical();
-  assertEquals(
-    sesVerdictWithExistingMoney(base, null, someMoney(), "no_additional_charge"),
-    base,
-  );
-  assert(existingCardMoneyRefusal(null, someMoney(), "priced_from_canon"));
+Deno.test("the shared producer refuses on the money alone, whatever the pricing", () => {
+  // The no-additional-charge exemption belongs to the release member loop
+  // alone. Honouring it here would take the refusal off the cockpit and off
+  // APPROVE INVOICE — a card becoming more approvable, which this control may
+  // never do.
+  assert(existingCardMoneyRefusal(null, someMoney()));
+  const enriched = sesVerdictWithExistingMoney(mechanical(), null, someMoney());
+  assertEquals(enriched.clean, false);
+  assertEquals(enriched.blockers[0].code, "invoice_exists_unbound");
 });
 
 Deno.test("PRIOR-cycle money is not this cycle's money; unknown still refuses", () => {

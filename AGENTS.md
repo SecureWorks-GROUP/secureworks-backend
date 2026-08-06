@@ -906,8 +906,11 @@ cycle-scoped through the card's ONE cycle engine
 (`makesafeInvoiceAttendanceCycle`, `makesafe_docs_ready_invoice.ts`) — never a
 second one — with `unknown` still refusing here while placement/closeout reads
 it as not-current. A `no_additional_charge` member mints nothing and is outside
-the guard entirely. A bound card publishes `not_evaluated` ("nobody asked"),
-which is never "no other money" and never a licence to mint.
+the HARD STOP — but that exemption lives at the release-action call site ONLY,
+never in `existingCardMoneyRefusal`, because taking the refusal off the cockpit
+or off APPROVE INVOICE is a card becoming more approvable. A bound card
+publishes `not_evaluated` ("nobody asked"), which is never "no other money" and
+never a licence to mint.
 
 **`report_sent_at` is wrong in both directions.** The retired
 `ready_to_invoice` auto-stamp minted it for sends that never happened, while a

@@ -22,8 +22,10 @@ import {
 import {
   approveSesInvoiceRevisionAction,
   approveSesReleaseRevisionAction,
+  loadSesCockpitDocket,
   SesActionError,
 } from "./ses_reporting_actions.ts";
+import { buildSesCockpitView } from "./ses_review_cockpit.ts";
 
 const ORG_ID = "00000000-0000-4000-8000-000000000099";
 const JOB_ID = "208450c0-7161-4b30-9514-66226b054609";
@@ -304,7 +306,7 @@ Deno.test("an UNKNOWN cycle still refuses — this question fails closed", async
   assertEquals(refusal?.code, "invoice_exists_unbound");
 });
 
-Deno.test("a no_additional_charge member is outside the guard at SEND IT", async () => {
+Deno.test("a no_additional_charge member is outside the HARD STOP at SEND IT", async () => {
   const refusal = await refusalFrom(() =>
     approveRelease(
       fixtureClient({ pricingDisposition: "no_additional_charge" }),
@@ -314,4 +316,28 @@ Deno.test("a no_additional_charge member is outside the guard at SEND IT", async
     refusal?.code !== "invoice_exists_unbound",
     "a member that mints nothing cannot double-bill",
   );
+});
+
+Deno.test("...and that exemption does NOT reach the cockpit or APPROVE INVOICE", async () => {
+  // The pair that stops the exemption drifting back into the shared producer:
+  // taking the refusal off a mint-adjacent surface is a card becoming more
+  // approvable, which this control may never do.
+  const docket = await loadSesCockpitDocket(
+    fixtureClient({ pricingDisposition: "no_additional_charge" }) as any,
+    JOB_ID,
+  );
+  const cockpit = buildSesCockpitView(docket);
+  assert(
+    cockpit.verdict.blockers.some((blocker) =>
+      blocker.code === "invoice_exists_unbound"
+    ),
+    "the cockpit must still name the unbound money on a no-charge card",
+  );
+  assertEquals(cockpit.verdict.clean, false);
+  assertEquals(cockpit.controls.send_it.enabled, false);
+
+  const refusal = await refusalFrom(() =>
+    approveInvoice(fixtureClient({ pricingDisposition: "no_additional_charge" }))
+  );
+  assert(refusal, "APPROVE INVOICE must still refuse such a card");
 });
