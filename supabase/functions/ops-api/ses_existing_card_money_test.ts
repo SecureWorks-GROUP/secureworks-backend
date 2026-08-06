@@ -19,6 +19,7 @@ import {
   classifyExistingCardMoney,
   describeExistingCardMoney,
   NO_EXISTING_CARD_MONEY,
+  NOT_EVALUATED_CARD_MONEY,
   readSesExistingCardMoneyForJob,
   type SesExistingCardMoney,
 } from "./ses_existing_card_money.ts";
@@ -145,7 +146,12 @@ Deno.test("no existing money -> no refusal (it can only ADD a stop)", () => {
 });
 
 Deno.test("an UNREADABLE Xero mirror refuses — it never reads as 'no money'", () => {
-  const unreadable: SesExistingCardMoney = { exists: true, unreadable: true, rows: [] };
+  const unreadable: SesExistingCardMoney = {
+    exists: true,
+    unreadable: true,
+    evaluated: true,
+    rows: [],
+  };
   const refusal = existingCardMoneyRefusal(null, unreadable);
   assert(refusal, "expected a refusal");
   assertStringIncludes(refusal!.fact, "could not be read");
@@ -199,15 +205,77 @@ Deno.test("a non-clean verdict is captain-OVERRIDABLE — which is why the appro
   assertEquals(authority.captain_override, true);
 });
 
-Deno.test("both approve actions run the hard stop before any authority check", async () => {
-  const source = await Deno.readTextFile(
-    new URL("./ses_reporting_actions.ts", import.meta.url),
+Deno.test("a member that mints nothing is outside the guard entirely", () => {
+  // Not a weakening: a no-additional-charge release creates no invoice, so it
+  // cannot double-bill, and refusing it would strand a supported document-only
+  // path with no override. Applied in the one producer so the cockpit and both
+  // approve actions cannot disagree about the scope.
+  assertEquals(
+    existingCardMoneyRefusal(null, someMoney(), "no_additional_charge"),
+    null,
   );
-  const guards = source.split("refuseWhenCardMoneyExists(docket)").length - 1;
-  assertEquals(guards, 2, "invoice approve and release approve must both stop");
-  for (const call of ["sesVerdictWithExistingMoney("]) {
-    assert(source.includes(call), `${call} must be the one verdict producer`);
-  }
+  const base = mechanical();
+  assertEquals(
+    sesVerdictWithExistingMoney(base, null, someMoney(), "no_additional_charge"),
+    base,
+  );
+  assert(existingCardMoneyRefusal(null, someMoney(), "priced_from_canon"));
+});
+
+Deno.test("PRIOR-cycle money is not this cycle's money; unknown still refuses", () => {
+  const reattended = { reattend_count: 1, last_reattend_at: "2026-08-01T00:00:00.000Z" };
+  const prior = classifyExistingCardMoney(
+    JOB,
+    "MLB-26565",
+    [inv({ job_id: JOB, created_at: "2026-07-01T00:00:00.000Z" })],
+    null,
+    reattended,
+  );
+  assertEquals(prior.exists, false);
+
+  const current = classifyExistingCardMoney(
+    JOB,
+    "MLB-26565",
+    [inv({ job_id: JOB, created_at: "2026-08-02T00:00:00.000Z" })],
+    null,
+    reattended,
+  );
+  assertEquals(current.exists, true);
+  assertEquals(current.rows[0].attendance_cycle, "current");
+
+  const unknown = classifyExistingCardMoney(
+    JOB,
+    "MLB-26565",
+    [inv({ job_id: JOB, created_at: null })],
+    null,
+    reattended,
+  );
+  assertEquals(unknown.exists, true);
+  assertEquals(unknown.rows[0].attendance_cycle, "unknown");
+});
+
+Deno.test("a BOUND card publishes not_evaluated, which is never 'no money'", () => {
+  assertEquals(NOT_EVALUATED_CARD_MONEY.evaluated, false);
+  // Unbound + never asked is not a licence to mint: it refuses like an
+  // unreadable mirror.
+  const refusal = existingCardMoneyRefusal(null, NOT_EVALUATED_CARD_MONEY);
+  assert(refusal, "an unanswered money question must refuse");
+  assertStringIncludes(refusal!.fact, "not checked");
+  // The state it actually occurs in — a bound card — is still untouched.
+  assertEquals(
+    existingCardMoneyRefusal("DRAFT", NOT_EVALUATED_CARD_MONEY),
+    null,
+  );
+  const invited = approveInvoiceDisabledReason(
+    { xero_binding: null },
+    {
+      stale: false,
+      xeroAuthorised: false,
+      noAdditionalCharge: false,
+      existingMoney: NOT_EVALUATED_CARD_MONEY,
+    },
+  );
+  assert(!invited.includes("Mint the draft first"), "must not invite a mint");
 });
 
 // ── the read fails CLOSED ────────────────────────────────────────────────────
@@ -323,6 +391,7 @@ Deno.test("describeExistingCardMoney names status and amount, and caps the list"
   const many: SesExistingCardMoney = {
     exists: true,
     unreadable: false,
+    evaluated: true,
     rows: Array.from({ length: 6 }, (_, i) => ({
       invoice_number: `INV-${i}`,
       xero_invoice_id: `x${i}`,
@@ -330,6 +399,7 @@ Deno.test("describeExistingCardMoney names status and amount, and caps the list"
       total: 100 + i,
       reference: "MLB-1",
       attribution: "own_job" as const,
+      attendance_cycle: "current" as const,
     })),
   };
   const text = describeExistingCardMoney(many);

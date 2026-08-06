@@ -9,7 +9,7 @@ import {
 } from "./makesafe_send_pack.ts";
 import { composeInvoiceReferenceWithPo } from "./ses_invoice_reference_grain.ts";
 import {
-  NO_EXISTING_CARD_MONEY,
+  NOT_EVALUATED_CARD_MONEY,
   readSesExistingCardMoneyForJob,
 } from "./ses_existing_card_money.ts";
 import {
@@ -1072,10 +1072,12 @@ export async function loadSesCockpitDocket(
   // consumed only to REFUSE — it can never make a card more approvable.
   //
   // Only asked when NOTHING is bound: that is the only state the refusal fires
-  // in, so a bound card skips the (non-indexable) reference scan entirely. The
-  // unbound answer is unchanged.
+  // in, so a bound card skips the (non-indexable) reference scan entirely and
+  // publishes `not_evaluated` — "nobody asked", which is never the same claim
+  // as "there is no other money" and is never a licence to mint. The unbound
+  // answer is unchanged.
   const existingCardMoney = String(xeroBinding?.status || "").trim()
-    ? NO_EXISTING_CARD_MONEY
+    ? NOT_EVALUATED_CARD_MONEY
     : await readSesExistingCardMoneyForJob(
       client,
       jobId,
@@ -2822,11 +2824,21 @@ export async function retireSesDocketRevisionAction(
  * the card MORE approvable, which is exactly what this control may never do.
  * The verdict enrichment is still applied (so the blocker is recorded and named
  * everywhere), and this refusal sits in front of it.
+ *
+ * A PRIOR-CYCLE TERMINAL STATE MUST NEVER SILENCE A CURRENT-CYCLE QUESTION —
+ * and its converse, which is the same rule read the other way: prior-cycle
+ * money must never refuse a current cycle. A re-attendance is new work, so the
+ * money this guard reads is cycle-scoped upstream in
+ * `classifyExistingCardMoney`, and a member that mints nothing at all
+ * (`no_additional_charge`) is outside the guard's scope entirely — it cannot
+ * double-bill, and refusing it would strand a supported document-only release
+ * with no override path.
  */
 function refuseWhenCardMoneyExists(docket: SesCockpitDocket): void {
   const blocker = existingCardMoneyRefusal(
     docket.xero_binding?.status ?? null,
     docket.existing_card_money ?? null,
+    docket.clean_input.pricing_disposition,
   );
   if (blocker) throw new SesActionError(409, blocker);
 }
@@ -2856,6 +2868,7 @@ export async function approveSesInvoiceRevisionAction(
     evaluateSesMechanicalClean(docket.clean_input),
     docket.xero_binding?.status ?? null,
     docket.existing_card_money ?? null,
+    docket.clean_input.pricing_disposition,
   );
   const operatorAuth = await loadOperatorAuth(client, auth);
   const authority = canRecordSesApproval(operatorAuth, verdict);
@@ -4381,6 +4394,7 @@ export async function approveSesReleaseRevisionAction(
       evaluateSesMechanicalClean(docket.clean_input),
       docket.xero_binding?.status ?? null,
       docket.existing_card_money ?? null,
+      docket.clean_input.pricing_disposition,
     );
     const authority = canRecordSesApproval(operatorAuth, verdict);
     const cockpit = buildSesCockpitView(docket);

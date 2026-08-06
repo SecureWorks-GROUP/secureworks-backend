@@ -896,6 +896,19 @@ unique-match entrypoint, because **a matcher for attribution must be unique and
 a matcher for refusal must be inclusive**. Keep it ONE-WAY: it may only add a
 blocker, never clear one.
 
+It is ENFORCED, not displayed: `sesVerdictWithExistingMoney` is the one producer
+the cockpit and both approve actions consume, and because a non-clean verdict is
+Captain-OVERRIDABLE, the approve actions also run the blocker as a hard 409
+(`refuseWhenCardMoneyExists`) in front of it. **A PRIOR-CYCLE TERMINAL STATE
+MUST NEVER SILENCE A CURRENT-CYCLE QUESTION**, and its converse binds this
+guard: prior-cycle money must never refuse a current cycle. So the money is
+cycle-scoped through the card's ONE cycle engine
+(`makesafeInvoiceAttendanceCycle`, `makesafe_docs_ready_invoice.ts`) — never a
+second one — with `unknown` still refusing here while placement/closeout reads
+it as not-current. A `no_additional_charge` member mints nothing and is outside
+the guard entirely. A bound card publishes `not_evaluated` ("nobody asked"),
+which is never "no other money" and never a licence to mint.
+
 **`report_sent_at` is wrong in both directions.** The retired
 `ready_to_invoice` auto-stamp minted it for sends that never happened, while a
 card sent through the sealed release graph gets none. Across the 419-card board

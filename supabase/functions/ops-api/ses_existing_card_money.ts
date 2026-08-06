@@ -34,6 +34,16 @@
  *
  * Fail-closed: an unreadable mirror reports `unreadable`, which the consumer
  * treats as "cannot rule out existing money" and still refuses.
+ *
+ * A PRIOR-CYCLE TERMINAL STATE MUST NEVER SILENCE A CURRENT-CYCLE QUESTION
+ * ------------------------------------------------------------------------
+ * The mirror image of that rule applies here, and it is the same rule: a
+ * re-attendance is genuinely NEW WORK, so an invoice that belongs only to an
+ * EARLIER attendance cycle is not this cycle's money and must not refuse this
+ * cycle. Prior-cycle money was never the double-bill risk. The cycle boundary
+ * is `makesafeInvoiceAttendanceCycle` — the card's one existing cycle engine,
+ * consumed here, never restated — and the fail-closed direction for THIS
+ * question is that an `unknown` cycle still refuses.
  */
 
 import {
@@ -41,6 +51,7 @@ import {
   invoiceNamesBuilderReference,
   type SesMatchInvoice,
 } from "./makesafe_invoice_reference_match.ts";
+import { makesafeInvoiceAttendanceCycle } from "./makesafe_docs_ready_invoice.ts";
 
 /** Statuses that mean the invoice is dead and cannot be double-billed against. */
 const DEAD_INVOICE_STATUSES = ["VOIDED", "DELETED"];
@@ -58,18 +69,35 @@ export interface SesExistingCardMoneyRow {
   total: number | null;
   reference: string | null;
   attribution: SesExistingMoneyAttribution;
+  /** `current` or `unknown`; prior-cycle money is never reported. */
+  attendance_cycle: "current" | "unknown";
 }
 
 export interface SesExistingCardMoney {
   /** True when any live invoice was found, OR the mirror could not be read. */
   exists: boolean;
   unreadable: boolean;
+  /**
+   * False means the question was NOT ASKED (a card whose docket already binds
+   * its invoice), which is never the same claim as "there is no other money"
+   * and is never a licence to mint.
+   */
+  evaluated: boolean;
   rows: SesExistingCardMoneyRow[];
 }
 
 export const NO_EXISTING_CARD_MONEY: SesExistingCardMoney = {
   exists: false,
   unreadable: false,
+  evaluated: true,
+  rows: [],
+};
+
+/** The card already binds an invoice, so the mirror was never questioned. */
+export const NOT_EVALUATED_CARD_MONEY: SesExistingCardMoney = {
+  exists: false,
+  unreadable: false,
+  evaluated: false,
   rows: [],
 };
 
@@ -85,6 +113,7 @@ function isAccrec(invoice: SesMatchInvoice): boolean {
 function toRow(
   invoice: SesMatchInvoice,
   attribution: SesExistingMoneyAttribution,
+  attendanceCycle: "current" | "unknown",
 ): SesExistingCardMoneyRow {
   const total = Number(invoice.total);
   return {
@@ -94,7 +123,18 @@ function toRow(
     total: Number.isFinite(total) ? total : null,
     reference: invoice.reference ?? null,
     attribution,
+    attendance_cycle: attendanceCycle,
   };
+}
+
+/**
+ * The card facts the cycle boundary needs. `reattend_count` of zero (or an
+ * absent detail row) means the card has one attendance and all its money is
+ * current.
+ */
+export interface SesExistingCardMoneyCycleDetail {
+  reattend_count?: number | null;
+  last_reattend_at?: string | null;
 }
 
 /**
@@ -107,6 +147,7 @@ export function classifyExistingCardMoney(
   externalRef: unknown,
   invoices: readonly SesMatchInvoice[],
   boundXeroInvoiceId: string | null,
+  cycleDetail: SesExistingCardMoneyCycleDetail | null = null,
 ): SesExistingCardMoney {
   const bound = String(boundXeroInvoiceId || "").trim();
   const digits = builderReferenceDigits(externalRef);
@@ -134,16 +175,29 @@ export function classifyExistingCardMoney(
     const referenceHit = matchedDigits.length > 0;
 
     if (!ownJob && !referenceHit) continue;
+    // A re-attendance is new work: an invoice raised for an EARLIER attendance
+    // cycle is not this cycle's money and must not refuse it. `unknown` still
+    // refuses — this question fails closed towards the double-bill.
+    const cycle = makesafeInvoiceAttendanceCycle(cycleDetail, invoice);
+    if (cycle === "prior") continue;
     if (id) seen.add(id);
-    rows.push(toRow(invoice, ownJob ? "own_job" : "unlinked_reference_match"));
+    rows.push(
+      toRow(invoice, ownJob ? "own_job" : "unlinked_reference_match", cycle),
+    );
   }
 
-  return { exists: rows.length > 0, unreadable: false, rows };
+  return {
+    exists: rows.length > 0,
+    unreadable: false,
+    evaluated: true,
+    rows,
+  };
 }
 
 export const UNREADABLE_CARD_MONEY: SesExistingCardMoney = {
   exists: true,
   unreadable: true,
+  evaluated: true,
   rows: [],
 };
 
@@ -166,9 +220,10 @@ export async function readSesExistingCardMoney(
   jobId: string,
   externalRef: unknown,
   boundXeroInvoiceId: string | null,
+  cycleDetail: SesExistingCardMoneyCycleDetail | null = null,
 ): Promise<SesExistingCardMoney> {
   const columns =
-    "id:xero_invoice_id,invoice_number,reference,status,invoice_type,job_id,total";
+    "id:xero_invoice_id,invoice_number,reference,status,invoice_type,job_id,total,created_at";
   const collected: SesMatchInvoice[] = [];
 
   const byJob = await client.from("xero_invoices").select(columns)
@@ -187,7 +242,13 @@ export async function readSesExistingCardMoney(
     collected.push(...rows);
   }
 
-  return classifyExistingCardMoney(jobId, externalRef, collected, boundXeroInvoiceId);
+  return classifyExistingCardMoney(
+    jobId,
+    externalRef,
+    collected,
+    boundXeroInvoiceId,
+    cycleDetail,
+  );
 }
 
 /**
@@ -203,18 +264,29 @@ export async function readSesExistingCardMoneyForJob(
   boundXeroInvoiceId: string | null,
 ): Promise<SesExistingCardMoney> {
   const detail = await client.from("makesafe_job_details")
-    .select("external_ref").eq("job_id", jobId).maybeSingle();
+    .select("external_ref,reattend_count,last_reattend_at")
+    .eq("job_id", jobId).maybeSingle();
   if (detail?.error || !detail?.data) return UNREADABLE_CARD_MONEY;
+  const row = detail.data as Record<string, unknown>;
   return await readSesExistingCardMoney(
     client,
     jobId,
-    (detail.data as Record<string, unknown>).external_ref,
+    row.external_ref,
     boundXeroInvoiceId,
+    {
+      reattend_count: Number(row.reattend_count ?? 0) || 0,
+      last_reattend_at: row.last_reattend_at == null
+        ? null
+        : String(row.last_reattend_at),
+    },
   );
 }
 
 /** One operator-facing sentence naming the money that already exists. */
 export function describeExistingCardMoney(money: SesExistingCardMoney): string {
+  if (!money.evaluated) {
+    return "This card's Xero money was not checked, so it is not possible to rule out that an invoice already exists.";
+  }
   if (money.unreadable) {
     return "The Xero mirror could not be read, so it is not possible to rule out that this card already has an invoice.";
   }

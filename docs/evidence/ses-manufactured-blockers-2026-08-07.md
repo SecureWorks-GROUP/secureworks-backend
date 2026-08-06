@@ -142,7 +142,41 @@ inclusive* — so a contested claim refuses, and DRAFT counts.
 
 **One-way by construction:** the blocker list only grows and `clean` is only
 forced false, so nothing here can make a card more approvable. A card whose
-docket binds its invoice is never touched; an unreadable mirror refuses.
+docket binds its invoice is never touched (and publishes `not_evaluated`, which
+is "nobody asked", never "no other money"); an unreadable mirror refuses.
+
+The refusal is ENFORCED, not displayed. `sesVerdictWithExistingMoney` is the one
+producer the cockpit and both approve actions consume, and because
+`canRecordSesApproval` turns any non-clean verdict into a Captain OVERRIDE, the
+approve actions also run `refuseWhenCardMoneyExists` as a hard 409 in front of
+it — folding the blocker into the verdict alone would have converted a hard stop
+into an overridable one.
+
+### A PRIOR-CYCLE TERMINAL STATE MUST NEVER SILENCE A CURRENT-CYCLE QUESTION
+
+That invariant was broken in three separate places on 2026-08-06/07, the third
+time inside this very guard, so it is written here rather than left as tribal
+knowledge. Its converse is the same rule read the other way and binds this
+module: a re-attendance is genuinely NEW WORK, prior-cycle money was never the
+double-bill risk, and refusing a current cycle because an EARLIER one was
+legitimately invoiced is the same defect removed from the stage ladder twice.
+
+So the money this guard reads is **cycle-scoped**, through the card's one
+existing cycle engine (`makesafeInvoiceAttendanceCycle`, exported from
+`makesafe_docs_ready_invoice.ts` — never a second engine). The fail-closed
+direction differs by question and both come from that one derivation: a
+placement/closeout driver treats `unknown` as NOT current, while this refusal
+treats `unknown` as possibly current and still refuses.
+
+Two scope rules follow, and neither is a weakening — together they narrow the
+guard to exactly what it was built to catch, unbound money for THIS cycle's
+work:
+
+- An invoice attributable only to a PRIOR attendance cycle does not refuse.
+- A `no_additional_charge` member is outside the guard entirely: it mints
+  nothing, so it cannot double-bill, and refusing it would strand a supported
+  document-only release with no override path. Applied in the one producer, so
+  the cockpit and the approve actions cannot disagree about the scope.
 
 Live proof, real classifier over real production rows: **16 refuse, 3
 unaffected** (the three carrying a bound DRAFT). **Tier 2 first-live-proof:**

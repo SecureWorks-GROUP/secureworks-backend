@@ -233,13 +233,28 @@ export function requiredSesRouteKinds(
  *
  * It fires only when nothing is bound. A card whose docket already binds its
  * invoice is the healthy case and is never touched.
+ *
+ * The money it reads is CURRENT-CYCLE money. A prior-cycle terminal state must
+ * never silence a current-cycle question, and the converse holds too: an
+ * invoice raised for an earlier attendance is not this cycle's money and never
+ * refuses this cycle. That boundary lives in `classifyExistingCardMoney`, which
+ * consumes the card's one cycle engine.
+ *
+ * An UNEVALUATED reading (nobody asked) is not "no money": with nothing bound
+ * it refuses, exactly like an unreadable mirror.
  */
 export function existingCardMoneyRefusal(
   boundStatus: string | null | undefined,
   money: SesExistingCardMoney | null | undefined,
+  pricingDisposition?: string | null,
 ): SesRefusal | null {
+  // A member that mints nothing cannot double-bill, so the guard is
+  // inapplicable rather than satisfied. Applied HERE, in the one producer, so
+  // the cockpit and both approve actions cannot disagree about its scope.
+  if (String(pricingDisposition || "") === "no_additional_charge") return null;
   if (String(boundStatus || "").trim()) return null;
-  if (!money?.exists) return null;
+  if (!money) return null;
+  if (money.evaluated && !money.exists) return null;
   return sesRefusal(
     "invoice_exists_unbound",
     "Check Xero by REFERENCE before any mint. Bind or link the existing invoice, " +
@@ -248,6 +263,7 @@ export function existingCardMoneyRefusal(
       fact: describeExistingCardMoney(money),
       evidence: {
         mirror_unreadable: money.unreadable,
+        mirror_evaluated: money.evaluated,
         invoices: money.rows,
       },
     },
@@ -272,8 +288,13 @@ export function sesVerdictWithExistingMoney(
   mechanical: SesMechanicalCleanResult,
   boundStatus: string | null | undefined,
   money: SesExistingCardMoney | null | undefined,
+  pricingDisposition?: string | null,
 ): SesMechanicalCleanResult {
-  const blocker = existingCardMoneyRefusal(boundStatus, money);
+  const blocker = existingCardMoneyRefusal(
+    boundStatus,
+    money,
+    pricingDisposition,
+  );
   if (!blocker) return mechanical;
   return {
     ...mechanical,
@@ -321,7 +342,10 @@ export function approveInvoiceDisabledReason(
     // is an invitation to bill already-billed work. Measured 2026-08-06: all 16
     // unbound Docs Ready cards already had live money under their own
     // reference, seven of them already PAID.
-    if (state.existingMoney?.exists) {
+    if (
+      state.existingMoney &&
+      (state.existingMoney.exists || !state.existingMoney.evaluated)
+    ) {
       return `${describeExistingCardMoney(state.existingMoney)} Do NOT mint a second invoice. ` +
         `Bind or link the existing invoice, or record an explicit disposition — ` +
         `this card is a finding for the Captain, not a mint.`;
@@ -935,6 +959,7 @@ export function buildSesCockpitView(
     evaluateSesMechanicalClean(docket.clean_input),
     docket.xero_binding?.status ?? null,
     docket.existing_card_money ?? null,
+    docket.clean_input.pricing_disposition,
   );
   const stale = !!displayedBinding &&
     (displayedBinding.readiness_revision !== docket.readiness_revision ||
