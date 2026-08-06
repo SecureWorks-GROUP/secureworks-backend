@@ -1914,9 +1914,12 @@ different labour unit price for one card (e.g. after hours), supply
 then stamp `override_kind = commercial_rate_override` with both rates. The
 shared sealed schedule matrix is never changed; a sealed stamp that does not
 match the U4 sealed rate refuses. Without `labour_rate_override`, a non-sealed
-labour unit price still refuses (no quiet rate fakery to force a total). Worked
-example: Mosman Park SWMS-261147 / INV-1146 DRAFT
-`data/mosman-park-remint-v1/report.md`.
+labour unit price still refuses (no quiet rate fakery to force a total).
+MLB after-hours labour bills **$110/h** (Captain standing rule 2026-08-06),
+applied through this per-card instrument — the sealed $85 schedule matrix stays
+unchanged. Worked example: Mosman Park SWMS-261147 / INV-1152 DRAFT
+`data/mosman-doc-integrity-f01-f02-v1/report.md` (supersedes the $100 remint in
+`data/mosman-park-remint-v1/report.md`).
 
 Billing **fewer** hours than the trade recorded is still unreachable without an
 honest reduction instrument (quantity credit/discount). Do not invent one via
