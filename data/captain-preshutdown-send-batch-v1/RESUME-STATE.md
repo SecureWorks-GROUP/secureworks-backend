@@ -77,3 +77,28 @@ No Vanessa resend. No photo cull. No trade evidence edits.
 
 `SW_API_KEY` was printed to the pane by a shell-expansion error in this session
 (`${VAR:-NO}` returns the value when set). The key should be rotated.
+
+## Board move: NOT applied — wrong instrument, would have gone backwards
+
+Three cards are genuinely already released, confirmed by the authoritative
+cockpit (`status: RELEASED`, `release_send_progress.release_state: released`),
+yet sit in `trade_report_in`:
+
+| Card | Job id | pack | invoice |
+|---|---|---|---|
+| SWMS-261128 | `047dbe8d` | sent | invoiced |
+| SWMS-26953 | `d34b779e` | sent | invoiced |
+| SWMS-26902 | `7aa83351` | sent | invoiced |
+
+`makesafe_status_apply` is the only sanctioned display-ledger writer, but it
+takes **no target status** — it derives the destination from M1. The dry-run
+(`board/20-status-apply-dryrun.json`) plans all three as
+`trade_report_in -> allocated`, reason "job assignment exists", missing
+"5 completion photos (found 0)".
+
+That is backwards, and the opposite of the Captain's instruction. Running it
+would drag three released, invoiced, sent cards back to Allocated. Not applied.
+
+Moving a released card to `completed` needs either a Captain ruling recorded as
+evidence that M1 can derive from, or an instrument that accepts an explicit
+target. Neither exists on this path today. Board disagreement count is 23.
