@@ -440,7 +440,7 @@ Stated plainly, because the ticket asks for it and because it is the honest limi
 ## 11. What must not change
 
 - **SEND IT stays the Captain's per-card hard press.** The determination carries `authorises_send: false` and a test asserts the serialised verdict names no route, recipient, send, mail or Graph marker at all.
-- The sealed money fence, the duplicate guard, the evidence checks and every send gate are **consumed** here, never adjusted. This work adds one pure module, one test file, one read-only script and one artifact, and modifies **no existing code file** — the only edit to an existing file is the `AGENTS.md` entry recording §2 and §5.
+- The sealed money fence, the duplicate guard, the evidence checks and every send gate are **consumed** here, never adjusted. This work adds one pure module, one test file, one read-only script and one artifact, and modifies **no existing code file** — the only edits to an existing file are the `AGENTS.md` entries recording §2, §5 and the classifier's own contract.
 - No board write. The classifier reads the board and touches nothing.
 - Voids stay out of scope entirely.
 
