@@ -1,0 +1,18 @@
+[observed-total link 1/1; canonical_live_board] SWMS-261081 roof_report submitted_locked written
+complete: observed-total 1/1 links across 1/418 portal/candidate cards; canonical-live-board 1/1 links and 1/52 provable roof cards
+result:
+  mode: commit
+  production_writes: 1
+  stage_moves: 0
+  observed_total_candidate_cards: 418 of 418 observed-total candidate cards
+  observed_total_portal_cards: 1 of 418 observed-total candidate cards
+  observed_total_portal_links: 1 of 1 observed-total links
+  canonical_live_board_portal_cards: 1 of [street-redacted]
+  canonical_live_board_portal_links: 1 of 1 observed-total links
+  observed_total_submitted_locked: 1 of 1 observed-total links
+  canonical_live_board_submitted_locked: 1 of [street-redacted]
+  observed_total_roof_provable: 1 of 61 observed-total roof cards
+  canonical_live_board_roof_provable: 1 of [street-redacted]
+artifacts[2]{kind,path}:
+  report,"data/roof-report-portal-pairs-v1/f7-261081/report.md"
+  manifest,"data/roof-report-portal-pairs-v1/f7-261081/dry-run.json"
