@@ -40,13 +40,13 @@
 
 /** Minimal shape the lock reasons about. */
 export interface AssignmentLockRef {
-  id: string
-  invoiced_in?: string | null
+  id: string;
+  invoiced_in?: string | null;
 }
 
 /** Clocked-lane auto-fill shape (hours decide whether a row is billable). */
 export interface ClockedAssignmentRef extends AssignmentLockRef {
-  hours_worked?: number | null
+  hours_worked?: number | null;
 }
 
 /**
@@ -63,7 +63,7 @@ export function selectUnlockedAssignments<T extends AssignmentLockRef>(
 ): T[] {
   return (assignments || []).filter(
     (a) => !(a.invoiced_in && liveInvoiceIds.has(String(a.invoiced_in))),
-  )
+  );
 }
 
 /**
@@ -78,18 +78,18 @@ export function selectUnlockedAssignments<T extends AssignmentLockRef>(
 export function isClockedAssignmentBillable(
   a: ClockedAssignmentRef,
 ): boolean {
-  return Number(a?.hours_worked ?? 0) > 0
+  return Number(a?.hours_worked ?? 0) > 0;
 }
 
 export interface AssignmentLockPlan {
   /** Every expected assignment is claimable — safe to issue the UPDATE. */
-  ok: boolean
+  ok: boolean;
   /** Assignments free to claim (unstamped, or held by a released invoice). */
-  claimableIds: string[]
+  claimableIds: string[];
   /** Assignments held by a live invoice, or missing from the candidate read. */
-  blockedIds: string[]
+  blockedIds: string[];
   /** Expected ids with no matching candidate row. */
-  missingIds: string[]
+  missingIds: string[];
 }
 
 /**
@@ -102,29 +102,29 @@ export interface AssignmentLockPlan {
  * lock refuses rather than silently overwriting it.
  */
 export function planAssignmentLock(params: {
-  expectedIds: readonly string[]
-  candidates: readonly AssignmentLockRef[]
-  releasedInvoiceIds: readonly string[]
+  expectedIds: readonly string[];
+  candidates: readonly AssignmentLockRef[];
+  releasedInvoiceIds: readonly string[];
 }): AssignmentLockPlan {
-  const released = new Set((params.releasedInvoiceIds || []).map(String))
-  const byId = new Map<string, AssignmentLockRef>()
-  for (const c of params.candidates || []) byId.set(String(c.id), c)
+  const released = new Set((params.releasedInvoiceIds || []).map(String));
+  const byId = new Map<string, AssignmentLockRef>();
+  for (const c of params.candidates || []) byId.set(String(c.id), c);
 
-  const claimableIds: string[] = []
-  const blockedIds: string[] = []
-  const missingIds: string[] = []
+  const claimableIds: string[] = [];
+  const blockedIds: string[] = [];
+  const missingIds: string[] = [];
 
   for (const rawId of params.expectedIds || []) {
-    const id = String(rawId)
-    const c = byId.get(id)
+    const id = String(rawId);
+    const c = byId.get(id);
     if (!c) {
-      missingIds.push(id)
-      blockedIds.push(id)
-      continue
+      missingIds.push(id);
+      blockedIds.push(id);
+      continue;
     }
-    const held = c.invoiced_in ? String(c.invoiced_in) : null
-    if (!held || released.has(held)) claimableIds.push(id)
-    else blockedIds.push(id)
+    const held = c.invoiced_in ? String(c.invoiced_in) : null;
+    if (!held || released.has(held)) claimableIds.push(id);
+    else blockedIds.push(id);
   }
 
   return {
@@ -132,7 +132,7 @@ export function planAssignmentLock(params: {
     claimableIds,
     blockedIds,
     missingIds,
-  }
+  };
 }
 
 /**
@@ -145,20 +145,22 @@ export function describeAssignmentLockBlock(
   plan: AssignmentLockPlan,
   jobLabelById: Readonly<Record<string, string>> = {},
 ): string {
-  const label = (id: string) => jobLabelById[id] || id
-  const parts: string[] = []
-  const alreadyHeld = plan.blockedIds.filter((id) => !plan.missingIds.includes(id))
+  const label = (id: string) => jobLabelById[id] || id;
+  const parts: string[] = [];
+  const alreadyHeld = plan.blockedIds.filter((id) =>
+    !plan.missingIds.includes(id)
+  );
   if (alreadyHeld.length > 0) {
     parts.push(
-      alreadyHeld.length + ' job card(s) already on a live invoice: ' +
-        alreadyHeld.map(label).join(', '),
-    )
+      alreadyHeld.length + " job card(s) already on a live invoice: " +
+        alreadyHeld.map(label).join(", "),
+    );
   }
   if (plan.missingIds.length > 0) {
     parts.push(
-      plan.missingIds.length + ' job card(s) not found: ' +
-        plan.missingIds.map(label).join(', '),
-    )
+      plan.missingIds.length + " job card(s) not found: " +
+        plan.missingIds.map(label).join(", "),
+    );
   }
-  return parts.join('; ') || 'no claimable job cards'
+  return parts.join("; ") || "no claimable job cards";
 }
