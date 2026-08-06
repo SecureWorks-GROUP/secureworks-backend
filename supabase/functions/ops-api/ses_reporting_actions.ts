@@ -5,7 +5,9 @@ import {
   normRef,
   resolveExistingInvoice,
   splitEmails,
+  splitRefPo,
 } from "./makesafe_send_pack.ts";
+import { composeInvoiceReferenceWithPo } from "./ses_invoice_reference_grain.ts";
 import {
   prepareSesInvoiceObligation,
   SES_PRICING_CANON_VERSION,
@@ -1207,17 +1209,68 @@ export async function querySesReviewCockpitAction(
   };
 }
 
+/**
+ * The card's own canonical purchase order, or null.
+ *
+ * Mirrors the assembler adapter's `sourceCase` exactly: cases reachable by `job_id` OR
+ * `target_job_id`, deduped by id, and a PO is returned only when EXACTLY ONE of them is live
+ * (`confirmed_live_job` / `blocked_live_job`). Several live cases disagreeing about the purchase
+ * order is not a tie to break — it composes nothing, and the duplicate guard's claim-base tier still
+ * refuses the pair on its own.
+ *
+ * Read-only and non-fatal: an unreadable case list composes nothing rather than failing a prepare
+ * that has no other reason to fail. The reference then keeps its existing claim-only grain, which is
+ * exactly the grain the PO-insensitive guard was rebuilt to catch.
+ */
+async function readCardPurchaseOrder(
+  client: SesSupabaseClient,
+  jobId: string,
+): Promise<string | null> {
+  const columns = "id,state,builder_po_canonical";
+  const [byJob, byTarget] = await Promise.all([
+    client.from("makesafe_intake_cases").select(columns).eq("job_id", jobId),
+    client.from("makesafe_intake_cases").select(columns).eq(
+      "target_job_id",
+      jobId,
+    ),
+  ]);
+  if (byJob.error || byTarget.error) {
+    console.warn(
+      "[ses] purchase-order read for the minted invoice reference failed:",
+      byJob.error?.message || byTarget.error?.message,
+    );
+    return null;
+  }
+  const cases = new Map<string, any>();
+  for (const row of [...(byJob.data || []), ...(byTarget.data || [])]) {
+    const id = String(row?.id || "");
+    if (id) cases.set(id, row);
+  }
+  const live = [...cases.values()].filter((row) =>
+    ["confirmed_live_job", "blocked_live_job"].includes(
+      String(row?.state || ""),
+    )
+  );
+  if (live.length !== 1) return null;
+  return String(live[0].builder_po_canonical || "").trim() || null;
+}
+
 async function loadIndexedInvoiceRows(
   client: SesSupabaseClient,
   orgId: string,
   requests: SesInvoiceDuplicateRequest[],
 ): Promise<SesInvoiceIndexRow[]> {
   const jobs = [...new Set(requests.map((request) => request.job_id))];
+  // Search on the full normalised reference AND on its claim base. The base is what makes the
+  // PO-insensitive tier reachable in BOTH directions: a `*mlb27093po56481*` search can never find
+  // the claim-only `mlb27093` row, so a PO-bearing mint would be probed against an empty candidate
+  // set and read as clean. Adding the base is what puts the legacy claim-only invoice in front of it.
   const refs = [
     ...new Set(
-      requests.map((request) => normRef(request.external_ref)).filter((value) =>
-        value.length >= 5
-      ),
+      requests.flatMap((request) => [
+        normRef(request.external_ref),
+        splitRefPo(request.external_ref).base,
+      ]).filter((value) => value.length >= 5),
     ),
   ];
   const columns =
@@ -1357,7 +1410,15 @@ export async function prepareSesInvoiceObligationAction(
     });
   }
   const local = object(docket.local_invoice_proposal);
-  const reference = String(local.builder_reference || "");
+  // The minted reference carries the card's purchase order whenever the card knows one. The docket's
+  // builder_reference prefers the work order and drops the PO, which is how Koondoola SWMS-261025
+  // minted `MLB-27093` beside the already-authorised `MLB-27093PO-56481`. See
+  // ses_invoice_reference_grain.ts for why the composition lands here and not in the assembler.
+  const composedReference = composeInvoiceReferenceWithPo(
+    local.builder_reference,
+    await readCardPurchaseOrder(client, args.job_id),
+  );
+  const reference = composedReference.reference;
   const [duplicate] = (await resolveSesInvoiceDuplicatesAction(
     client,
     args.org_id,
@@ -1513,13 +1574,20 @@ export async function prepareSesInvoiceObligationAction(
       : null,
     post_release_disposition: args.post_release_disposition as any,
   });
+  // Stamp WHY the minted reference has the grain it has, so a later reader can tell a composed
+  // claim+PO reference from one the docket already carried, and can see when no PO was known.
+  (prepared.proposal as any).reference_grain = {
+    grain: composedReference.grain,
+    purchase_order: composedReference.purchase_order,
+    docket_builder_reference: String(local.builder_reference || "") || null,
+  };
   if (commercialProvenance) {
     // Stamp the committed proposal so a year later the commercial figure is
     // attributable. proposal is jsonb — extra keys are retained as written.
     (prepared.proposal as any).commercial_quantity_override =
       commercialProvenance;
-    (prepared.revision as any).proposal = prepared.proposal;
   }
+  (prepared.revision as any).proposal = prepared.proposal;
   const committed = await client.rpc(
     "commit_ses_invoice_obligation_revision_v1",
     {
@@ -1809,10 +1877,24 @@ export async function createSesInvoiceDraftAction(
   ) {
     throw new SesActionError(
       409,
-      duplicate.ambiguity === "multi_live"
+      ["multi_live", "sibling_po"].includes(duplicate.ambiguity)
         ? sesRefusal(
           "invoice_duplicate_ambiguous",
           "Resolve which Xero invoice owns this work before minting a DRAFT.",
+          {
+            evidence: {
+              duplicate_probe: {
+                ambiguity: duplicate.ambiguity,
+                match_tier: duplicate.match_tier,
+                reason_codes: duplicate.reason_codes,
+                live_invoices: duplicate.live_invoices.map((row) => ({
+                  invoice_number: row.invoice_number,
+                  status: row.status,
+                  reference: row.reference,
+                })),
+              },
+            },
+          },
         )
         : sesRefusal(
           "invoice_duplicate_live",

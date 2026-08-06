@@ -77,7 +77,11 @@ Deno.test("different PO sibling remains separately invoiceable", () => {
     ],
   );
   assertEquals(result.match_tier, null);
-  assertEquals(result.ambiguity, "sibling_po");
+  // Both references NAME a purchase order and the two differ, so the builder itself has said these
+  // are two pieces of work. That is a demonstrated distinction, not an ambiguity — `sibling_po` is
+  // now reserved for the one-sided case, which refuses.
+  assertEquals(result.ambiguity, "none");
+  assertEquals(result.reason_codes, ["different_po_sibling_does_not_block"]);
   assert(result.allows_create);
 });
 

@@ -1169,14 +1169,54 @@ boundary is `_shared/sealed_ses_money_fence.ts`.
 `create_ses_invoice_draft` always runs the full live-ACCREC duplicate guard
 (`fetchAllAccrecInvoices` + `resolveExistingInvoice` in `makesafe_send_pack.ts`)
 before any Xero create — never skip it, never substitute the indexed
-`resolve_ses_invoice_duplicates` probe (`scanned_full_estate: false`). The
-guard's reference tiers are PO-scoped only when **both** the obligation
-`proposal.reference` and the live invoice reference carry distinguishable PO
-tokens. If the local proposal emits a claim-only builder ref (e.g. `MLB-27037`
-for two cards that are really `…PO-56397` and `…PO-56459`), the second mint
-correctly refuses as `invoice_duplicate_live` / `reference_substring`. That is
-fail-closed money safety, not a reason to weaken the guard — fix the proposal
-reference grain so multi-PO siblings can mint separately.
+`resolve_ses_invoice_duplicates` probe (`scanned_full_estate: false`).
+
+## A Missing Purchase Order Is Not A Different One
+
+The guard's reference tiers are PO-scoped only when **both** references carry a
+PO token and the two differ (`workRefRelation` -> `distinct_po`). `sameWorkRef`
+clears that case and nothing else. A claim-only reference beside a PO-bearing
+one is `po_indeterminate`, NOT distinct: one claim routinely hosts several POs
+(live, `MLB-27093` carried AUTHORISED `PO-56481` and `PO-56479` at once).
+Reading `null !== "56481"` as "different work" is what let Koondoola
+SWMS-261025 mint a second invoice over already-authorised money.
+
+Comparison is PO-insensitive and symmetric. The substring tier only asks whether
+the CANDIDATE contains our reference, so `reference_po_base` (exact claim-base
+equality, never substring) carries the other direction.
+
+**A one-sided pair blocks unless the candidate invoice is already attributed to
+a DIFFERENT card** (`poIndeterminateSiblingBlocks`); every gap fails closed. The
+string alone cannot decide — live, `MLB-24732` is two REAL separately-billed
+jobs on one claim (SWMS-26526 / SWMS-26938) while `MLB-27093` is one job billed
+twice. Attribution is what separates them, which is why `xero_invoices.job_id`
+being NULL on ~142 live ACCREC rows is missing EVIDENCE, not just a join that
+returns zero. The seal refuses to repair that at write time (Captain
+2026-08-01); the read-side answer is `makesafe_invoice_reference_match.ts`, and
+note it is deliberately UNIQUE-match-only, so it correctly returns nothing for a
+claim with two candidates. A matcher for attribution must be unique; a matcher
+for refusal must be inclusive — do not swap one for the other.
+
+Ambiguity `sibling_po` means one-sided PO evidence and REFUSES, carrying the
+invoices it refused on; both refusal sites route it to
+`invoice_duplicate_ambiguous`. The permitted both-POs case is reported as
+`ambiguity: "none"` with `different_po_sibling_does_not_block` — a demonstrated
+distinction is not an ambiguity. Never restore `allows_create: true` on a
+recorded ambiguity.
+
+The minted reference carries the card's own `builder_po_canonical`
+(`composeInvoiceReferenceWithPo`, `ses_invoice_reference_grain.ts`), which is
+also the F07 repair: three Floreat cards all keyed `MLB-27037` separate once
+each carries its PO. Composition lives at the INVOICE OBLIGATION layer — the
+adapter's `source.builder_reference` is inside the docket INPUT hash
+(re-keys every revision, drops every Docs Ready signoff) and
+`local_invoice_proposal` is inside the docket OUTPUT hash. Never compose a PO
+from `external_ref_canonical`: that is usually the claim, and it would fabricate
+`MLB-27093PO-27093`.
+
+Board-wide count, denominator and the two other at-risk cards:
+`scripts/ses-po-suffix-duplicate-census.ts` (read-only, re-runnable). Full
+diagnosis: `docs/evidence/ses-duplicate-guard-po-blindness-2026-08-06.md`.
 
 The seal is not a Xero-API fence — it fences the LOCAL money mirror, and
 `linked` is one of the sealed verbs alongside created/authorised/changed/sent.

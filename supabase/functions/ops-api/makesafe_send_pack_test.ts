@@ -44,6 +44,7 @@ import {
   // ambiguous-invoice fail-closed).
   planPostSendResume,
   planSendingResolution,
+  poIndeterminateSiblingBlocks,
   resolveExistingInvoice,
   RESUMABLE_PACK_STATUSES,
   RESUME_CLOSE_ALLOWED_STATUSES,
@@ -52,6 +53,7 @@ import {
   SendLockCell,
   sendPackAllowed,
   splitRefPo,
+  workRefRelation,
 } from "./makesafe_send_pack.ts";
 
 // ─────────────────────────────────────────────────────────────────
@@ -581,13 +583,50 @@ Deno.test("splitRefPo: base ref, PO-suffixed ref, and spaced PO", () => {
   });
 });
 
-Deno.test("sameWorkRef: same base + different PO is different work; identical / no-PO stays same", () => {
-  assertEquals(sameWorkRef("MLB-24732PO-55712", "MLB-24732"), false); // PO vs base
-  assertEquals(sameWorkRef("MLB-24732", "MLB-24732PO-55712"), false); // base vs PO
-  assertEquals(sameWorkRef("MLB-25898PO-55547", "MLB-25898PO-54817"), false); // two POs
+Deno.test("sameWorkRef: only BOTH-sides-name-a-PO proves different work", () => {
+  // The escape hatch narrowed on 2026-08-06. A PO only separates two references when both of them
+  // actually NAME one; a claim-only reference beside a PO-bearing invoice is indeterminate, because
+  // one claim routinely hosts several POs (live: MLB-27093 carried PO-56481 and PO-56479 at once).
+  // Permitting that one-sided pair is what double-billed Koondoola SWMS-261025.
+  assertEquals(sameWorkRef("MLB-24732PO-55712", "MLB-24732"), true); // PO vs base -> indeterminate
+  assertEquals(sameWorkRef("MLB-24732", "MLB-24732PO-55712"), true); // base vs PO -> indeterminate
+  assertEquals(sameWorkRef("MLB-25898PO-55547", "MLB-25898PO-54817"), false); // two POs -> distinct
   assertEquals(sameWorkRef("MLB-24732PO-55712", "MLB-24732PO-55712"), true); // identical
   assertEquals(sameWorkRef("MLB-24732", "MLB-24732"), true); // neither has a PO
   assertEquals(sameWorkRef("MLB-24732", "AJS-9999"), true); // unrelated base -> fail-closed block
+});
+
+Deno.test("workRefRelation names all four pair shapes", () => {
+  assertEquals(workRefRelation("MLB-24732", "AJS-9999"), "unrelated");
+  assertEquals(workRefRelation("MLB-24732", "MLB-24732"), "same_work");
+  assertEquals(
+    workRefRelation("MLB-24732PO-55712", "MLB 24732 PO 55712"),
+    "same_work",
+  );
+  assertEquals(
+    workRefRelation("MLB-25898PO-55547", "MLB-25898PO-54817"),
+    "distinct_po",
+  );
+  assertEquals(
+    workRefRelation("MLB-27093", "MLB-27093PO-56481"),
+    "po_indeterminate",
+  );
+  assertEquals(
+    workRefRelation("MLB-27093PO-56481", "MLB-27093"),
+    "po_indeterminate",
+  );
+});
+
+Deno.test("a one-sided PO pair blocks unless the invoice is already ANOTHER card's money", () => {
+  // Unattributed: nothing rules out that the invoice is ours. Block. (Koondoola INV-1080.)
+  assertEquals(poIndeterminateSiblingBlocks("job-a", null), true);
+  assertEquals(poIndeterminateSiblingBlocks("job-a", ""), true);
+  // Owned by a different card: demonstrably not ours. Permit. (MLB-24732 INV-0745 on SWMS-26526.)
+  assertEquals(poIndeterminateSiblingBlocks("job-a", "job-b"), false);
+  // Owned by US: tier 1 blocks anyway, and so does this.
+  assertEquals(poIndeterminateSiblingBlocks("job-a", "job-a"), true);
+  // No caller job to compare against -> cannot prove it is not ours -> fail closed.
+  assertEquals(poIndeterminateSiblingBlocks(null, "job-b"), true);
 });
 
 Deno.test("W3-H dup-guard: SWMS-26938 (MLB-24732PO-55712) is invoiceable while sibling MLB-24732 is invoiced", () => {
