@@ -38,6 +38,19 @@
 //     That is the answer to "a fault class absent from the shadow window": an
 //     unmodelled fault is a mismatch, and a mismatch parks.
 //
+//  3. THE OBLIGATION IS THE INTENT; THE XERO DRAFT IS THE MONEY. A DRAFT stays
+//     editable in Xero after the mint, and authorise acts on whatever the draft
+//     carries at that moment, not on what we meant it to carry. So A6 compares
+//     the sealed derivation against the DRAFT's OWN ex-GST total. Without it
+//     every upstream guard can read clean while the invoice being advanced
+//     carries a different number.
+//
+// v2 (2026-08-07) closed two blind-guard shapes found in this file by review,
+// not by the shadow run: A5 used to report `clean` when no invoice was supplied,
+// which made an ABSENCE of evidence into a pass, and nothing bound the sealed
+// price to the Xero draft. The determination point is now a POSITIVE CLAIM the
+// caller states (`pre_mint` / `authorise`); an unstated one parks.
+//
 // Divergence rule, stated so a future maintainer cannot get it backwards: this
 // classifier is a SUBTRACTIVE gate, never a pricing authority. If it and the
 // skill's Python guards ever disagree, the correct resolution is the one that
@@ -53,17 +66,15 @@ import {
   roofReportPrice,
 } from "./roof_report_template.ts";
 import { AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST } from "./makesafe_existing_fence_pickets.ts";
-import type {
-  SesInvoiceAmbiguity,
-  SesInvoiceDuplicateResolution,
-} from "./makesafe_invoice_duplicate_resolver.ts";
+import type { SesFamilyId } from "./ses_family_matrix.ts";
+import type { SesInvoiceDuplicateResolution } from "./makesafe_invoice_duplicate_resolver.ts";
 
 /**
  * Bump on ANY change to what this module admits or refuses, so a past
  * determination stays attributable to the definition that produced it. A
  * recorded verdict without a version is not re-derivable.
  */
-export const SES_RULES_CLEAN_CONTRACT_VERSION = "ses-rules-clean/v1";
+export const SES_RULES_CLEAN_CONTRACT_VERSION = "ses-rules-clean/v2";
 
 export type SesRulesCleanFamily = "A" | "B" | "C";
 export type SesRulesCleanGuardStatus = "clean" | "flagged" | "unevaluable";
@@ -105,7 +116,13 @@ export const SES_RULES_CLEAN_GUARDS = [
     id: "A5_subject_invoice_is_our_current_draft",
     family: "A",
     what:
-      "If an invoice is already minted, it is a DRAFT bound to THIS card's current obligation revision.",
+      "The stated determination point holds: pre-mint carries no invoice, and at authorise the subject is a DRAFT bound to THIS card's current obligation revision.",
+  },
+  {
+    id: "A6_xero_draft_total_is_the_sealed_total",
+    family: "A",
+    what:
+      "The Xero DRAFT's own ex-GST total equals the total the sealed pricing law derives; the draft is the money, the obligation is only the intent.",
   },
   // ── B. Pricing: "is this money derived from sealed rules?" ──
   {
@@ -256,6 +273,21 @@ export interface SesRulesCleanEvidence {
   /** SES family id from the matrix; drives the sealed attendance floor. */
   family?: string | null;
 
+  /**
+   * WHEN this determination is being made, stated by the caller rather than
+   * inferred from what happens to be present.
+   *
+   * `pre_mint`  -- no invoice exists; the question is "may the skill mint and
+   *                then advance without the Captain?".
+   * `authorise` -- a DRAFT exists and IS the thing being advanced; the caller
+   *                excluded exactly that invoice from the duplicate question.
+   *
+   * Absent or unrecognised is UNEVALUABLE and parks. It used to be inferred
+   * from the absence of `subject_invoice`, which turned missing evidence into
+   * a passing guard -- the exact blind-guard shape this module exists to stop.
+   */
+  determination_point?: "pre_mint" | "authorise" | null;
+
   docket: SesRulesCleanDocket | null;
   docket_read_error?: string | null;
   /** The card's own current attendance cycle, from the board read model. */
@@ -320,14 +352,27 @@ export interface SesRulesCleanEvidence {
    *
    * The caller MUST have removed exactly this invoice from the rows it fed the
    * duplicate resolver and the full-ACCREC scan, and nothing else. Leave this
-   * absent for a pre-mint determination, where nothing is excluded.
+   * absent for a pre-mint determination, where nothing is excluded -- and say
+   * so on `determination_point`, because absence alone proves nothing.
+   *
+   * `sub_total` / `total` are the DRAFT'S OWN money, and A6 compares the
+   * ex-GST `sub_total` against the sealed derivation. `totals_source` records
+   * whether that came from Xero itself or from the local mirror, which can
+   * drift; an absent, unrecognised or unreadable total is unevaluable and
+   * parks, never assumed to match.
    */
   subject_invoice?: {
     xero_invoice_id?: unknown;
     invoice_number?: unknown;
     status?: unknown;
     invoice_obligation_revision_id?: unknown;
+    sub_total?: unknown;
+    total?: unknown;
+    totals_source?: "xero_api" | "local_mirror" | null;
+    totals_read_error?: string | null;
   } | null;
+  /** The subject-invoice read itself failed. Parks; never absorbed as absent. */
+  subject_invoice_read_error?: string | null;
 
   /**
    * Independent completeness proof for the supporting report, per
@@ -365,26 +410,31 @@ const DERIVABLE_BASES = new Set<string>([
   "standard_labour_materials",
 ]);
 
-/** Mirrors `attendanceLineSubject` in ses_prepare_docket_revision.ts. */
+/**
+ * Mirrors `attendanceLineSubject` in ses_prepare_docket_revision.ts. Keyed by
+ * the real `SesFamilyId` union so a family added to the matrix is a compile
+ * error here rather than a silently missing case; `null` means the family has
+ * no sealed attendance wording and the derivation refuses.
+ */
+const ATTENDANCE_SUBJECT: Record<SesFamilyId, string | null> = {
+  temporary_fencing: "temporary fencing make-safe",
+  repair: "repair attendance",
+  restoration: "restoration attendance",
+  physical_makesafe: "make-safe attendance",
+  own_template_roof: "make-safe attendance",
+  ordinary_roof_portal: null,
+  assessment_quote: null,
+  unknown: null,
+};
+
 function attendanceSubject(family: string | null | undefined): string | null {
-  switch (String(family || "")) {
-    case "temporary_fencing":
-      return "temporary fencing make-safe";
-    case "repair":
-      return "repair attendance";
-    case "restoration":
-      return "restoration attendance";
-    case "makesafe":
-    case "physical_makesafe":
-    case "own_template_roof":
-    case "portal_roof":
-    case "assessment":
-      return "make-safe attendance";
-    default:
-      // An unrecognised family cannot derive the builder-facing wording, so the
-      // derivation is refused rather than guessed.
-      return null;
+  const key = text(family);
+  // An unrecognised family cannot derive the builder-facing wording, so the
+  // derivation is refused rather than guessed.
+  if (!Object.prototype.hasOwnProperty.call(ATTENDANCE_SUBJECT, key)) {
+    return null;
   }
+  return ATTENDANCE_SUBJECT[key as SesFamilyId];
 }
 
 /** Sealed attendance floor: temp-fencing solo 4h, AJS 2h, otherwise 3h. */
@@ -451,6 +501,15 @@ interface SealedDerivation {
   lines: SealedLine[] | null;
   /** Why the sealed shape could not be derived. Non-null means UNEVALUABLE. */
   undeterminable: string | null;
+  /**
+   * Set when every fact is present and the billable hours simply disagree with
+   * the sealed `max(reported, floor)`. That is a FLAG, and naming it here is
+   * what stops the card reporting "the sealed law derives 0 line(s)" -- the
+   * wrong rule -- instead of the hours rule it actually broke.
+   */
+  hours_mismatch:
+    | { billable: number; reported: number; floor: number; expected: number }
+    | null;
 }
 
 /**
@@ -468,6 +527,7 @@ export function deriveSealedProposal(
     return {
       lines: null,
       undeterminable: "the proposal declares no pricing basis",
+      hours_mismatch: null,
     };
   }
   if (!DERIVABLE_BASES.has(basis)) {
@@ -475,12 +535,14 @@ export function deriveSealedProposal(
       lines: null,
       undeterminable:
         `pricing basis ${basis} has no sealed derivation in this module`,
+      hours_mismatch: null,
     };
   }
   if (!ref) {
     return {
       lines: null,
       undeterminable: "the proposal carries no builder reference",
+      hours_mismatch: null,
     };
   }
 
@@ -493,6 +555,7 @@ export function deriveSealedProposal(
         lines: null,
         undeterminable:
           "the roof card declares no explicit single/double storey classification",
+        hours_mismatch: null,
       };
     }
     return {
@@ -502,6 +565,7 @@ export function deriveSealedProposal(
         unit_price_ex_gst: priced.ex_gst,
       }],
       undeterminable: null,
+      hours_mismatch: null,
     };
   }
 
@@ -511,6 +575,7 @@ export function deriveSealedProposal(
         lines: null,
         undeterminable:
           "the assessment card does not state whether the scope is fence-only",
+        hours_mismatch: null,
       };
     }
     const ex = proposal.fence_only
@@ -525,6 +590,7 @@ export function deriveSealedProposal(
         unit_price_ex_gst: ex,
       }],
       undeterminable: null,
+      hours_mismatch: null,
     };
   }
 
@@ -536,6 +602,7 @@ export function deriveSealedProposal(
       undeterminable: `SES family ${
         text(family) || "<absent>"
       } has no sealed attendance wording`,
+      hours_mismatch: null,
     };
   }
   const trades = finiteNumber(proposal.trades);
@@ -545,6 +612,7 @@ export function deriveSealedProposal(
     return {
       lines: null,
       undeterminable: "the proposal declares no positive whole trade count",
+      hours_mismatch: null,
     };
   }
   if (billable === null || billable <= 0) {
@@ -552,6 +620,7 @@ export function deriveSealedProposal(
       lines: null,
       undeterminable:
         "the proposal declares no positive billable hours per trade",
+      hours_mismatch: null,
     };
   }
   if (reported === null || reported <= 0) {
@@ -559,17 +628,24 @@ export function deriveSealedProposal(
       lines: null,
       undeterminable:
         "the proposal records no positive reported hours per trade, so the floor cannot be re-derived",
+      hours_mismatch: null,
     };
   }
   const floor = sealedHoursFloor(basis, family, trades);
   const expectedBillable = Math.max(reported, floor);
   if (!money(billable, expectedBillable)) {
     // Not `undeterminable`: the facts are all present and they disagree with
-    // the sealed law. That is a FLAG, expressed as a derivation the caller's
-    // equality test will refuse.
+    // the sealed law. That is a FLAG, and it is named so the parked card can
+    // state the hours rule rather than a line-count mismatch downstream of it.
     return {
       lines: [],
       undeterminable: null,
+      hours_mismatch: {
+        billable,
+        reported,
+        floor,
+        expected: expectedBillable,
+      },
     };
   }
   const rate = SEALED_LABOUR_RATE_EX_GST[basis];
@@ -580,7 +656,7 @@ export function deriveSealedProposal(
     quantity: trades * billable,
     unit_price_ex_gst: rate,
   }];
-  return { lines, undeterminable: null };
+  return { lines, undeterminable: null, hours_mismatch: null };
 }
 
 // ── The sweep ─────────────────────────────────────────────────────────────
@@ -607,12 +683,17 @@ function unevaluableRest(
   for (const id of ids) record(outcomes, id, "unevaluable", reason);
 }
 
-const AMBIGUITY_REFUSALS: SesInvoiceAmbiguity[] = [
-  "multi_live",
-  "sibling_po",
-  "void_only",
-  "mirror_xero_mismatch",
-];
+/**
+ * ANY ambiguity refuses. Tested against the one "no ambiguity" value rather
+ * than against a list of the known ambiguous ones, so a state added to
+ * `SesInvoiceAmbiguity` later parks by construction instead of being reported
+ * clean by an allow-list nobody remembered to extend.
+ */
+function ambiguityRefuses(
+  ambiguity: SesInvoiceDuplicateResolution["ambiguity"],
+) {
+  return ambiguity !== "none";
+}
 
 function classifyFamilyA(
   evidence: SesRulesCleanEvidence,
@@ -653,7 +734,7 @@ function classifyFamilyA(
         }).`
         : "The five-tier duplicate resolver found no live invoice for this work.",
     );
-    const ambiguous = AMBIGUITY_REFUSALS.includes(duplicate.ambiguity);
+    const ambiguous = ambiguityRefuses(duplicate.ambiguity);
     record(
       outcomes,
       "A2_ambiguity_is_refusal",
@@ -691,12 +772,51 @@ function classifyFamilyA(
   }
 
   const subject = evidence.subject_invoice ?? null;
-  if (!subject) {
+  const point = text(evidence.determination_point);
+  const subjectGuards: readonly SesRulesCleanGuardId[] = [
+    "A5_subject_invoice_is_our_current_draft",
+    "A6_xero_draft_total_is_the_sealed_total",
+  ];
+  if (evidence.subject_invoice_read_error) {
+    unevaluableRest(
+      outcomes,
+      subjectGuards,
+      `The invoice this determination is about could not be read (${evidence.subject_invoice_read_error}).`,
+    );
+  } else if (point !== "pre_mint" && point !== "authorise") {
+    // Absence is not an answer. Without a stated determination point this
+    // module cannot tell "nothing has been minted" from "the mint read failed",
+    // and those two must never resolve to the same word.
+    unevaluableRest(
+      outcomes,
+      subjectGuards,
+      `This determination states no recognised determination point (${
+        point || "<absent>"
+      }), so whether an invoice already exists for this card is unknown.`,
+    );
+  } else if (point === "pre_mint") {
+    const contradicted = subject !== null;
     record(
       outcomes,
       "A5_subject_invoice_is_our_current_draft",
-      "clean",
-      "No invoice has been minted yet, so nothing was excluded from the duplicate question.",
+      contradicted ? "flagged" : "clean",
+      contradicted
+        ? "This determination claims nothing has been minted yet, and yet an invoice was supplied as its subject; the two cannot both be true."
+        : "The caller states nothing has been minted yet, so no invoice was excluded from the duplicate question.",
+    );
+    record(
+      outcomes,
+      "A6_xero_draft_total_is_the_sealed_total",
+      contradicted ? "flagged" : "clean",
+      contradicted
+        ? "No Xero total can be checked against the sealed derivation while the stated determination point and the supplied invoice disagree."
+        : "No invoice exists in Xero yet, so there is no draft total to compare against the sealed derivation.",
+    );
+  } else if (!subject) {
+    unevaluableRest(
+      outcomes,
+      subjectGuards,
+      "This determination is about advancing an existing DRAFT, and no readable invoice was supplied for it.",
     );
   } else {
     const status = text(subject.status).toUpperCase();
@@ -729,7 +849,98 @@ function classifyFamilyA(
         }.`
         : "The invoice under consideration is this card's own DRAFT, bound to its current obligation revision, and it alone was excluded from the duplicate question.",
     );
+    classifyXeroDraftTotal(evidence, subject, outcomes);
   }
+}
+
+/**
+ * A6. The obligation is what we MEANT to bill; the Xero DRAFT is what would
+ * actually be authorised, and it stays editable in Xero after the mint. So the
+ * sealed derivation is compared against the draft's own ex-GST total. An
+ * absent, unreadable or non-numeric total is unevaluable and parks -- it is
+ * never assumed to match.
+ */
+function classifyXeroDraftTotal(
+  evidence: SesRulesCleanEvidence,
+  subject: NonNullable<SesRulesCleanEvidence["subject_invoice"]>,
+  outcomes: Outcomes,
+): void {
+  const id: SesRulesCleanGuardId = "A6_xero_draft_total_is_the_sealed_total";
+  if (subject.totals_read_error) {
+    record(
+      outcomes,
+      id,
+      "unevaluable",
+      `The DRAFT's own money could not be read from Xero (${subject.totals_read_error}).`,
+    );
+    return;
+  }
+  const source = subject.totals_source ?? null;
+  if (source !== "xero_api" && source !== "local_mirror") {
+    record(
+      outcomes,
+      id,
+      "unevaluable",
+      `The DRAFT's ex-GST total states no recognised origin (${
+        source ?? "<absent>"
+      }), so it cannot be trusted as the money this would advance.`,
+    );
+    return;
+  }
+  const subTotal = finiteNumber(subject.sub_total);
+  if (subTotal === null) {
+    record(
+      outcomes,
+      id,
+      "unevaluable",
+      "The DRAFT carries no numeric ex-GST total, so the money this would advance is unknown.",
+    );
+    return;
+  }
+  const proposal = evidence.docket?.local_invoice_proposal ?? null;
+  if (evidence.docket_read_error || !proposal) {
+    record(
+      outcomes,
+      id,
+      "unevaluable",
+      "No persisted invoice proposal is readable for this card, so the sealed total the DRAFT should carry cannot be derived.",
+    );
+    return;
+  }
+  const derived = deriveSealedProposal(proposal, evidence.family);
+  if (derived.undeterminable || derived.lines === null) {
+    record(
+      outcomes,
+      id,
+      "unevaluable",
+      `The sealed total could not be derived, so the DRAFT's $${subTotal} ex cannot be checked: ${
+        derived.undeterminable ?? "the sealed line set is unknown"
+      }.`,
+    );
+    return;
+  }
+  if (derived.hours_mismatch) {
+    record(
+      outcomes,
+      id,
+      "unevaluable",
+      `The sealed total could not be derived, so the DRAFT's $${subTotal} ex cannot be checked: the proposal bills ${derived.hours_mismatch.billable} hour(s) per trade where the sealed law derives ${derived.hours_mismatch.expected}.`,
+    );
+    return;
+  }
+  const sealedTotal = derived.lines.reduce(
+    (running, line) => running + line.quantity * line.unit_price_ex_gst,
+    0,
+  );
+  const matches = money(subTotal, sealedTotal);
+  record(
+    outcomes,
+    id,
+    matches ? "clean" : "flagged",
+    matches
+      ? `The DRAFT in Xero carries $${subTotal} ex, exactly the total the sealed pricing law derives (read from ${source}).`
+      : `The DRAFT in Xero carries $${subTotal} ex where the sealed pricing law derives $${sealedTotal} ex (read from ${source}). A draft stays editable after the mint, and it is the draft that would be advanced.`,
+  );
 }
 
 const FAMILY_B_IDS: readonly SesRulesCleanGuardId[] = [
@@ -886,6 +1097,20 @@ function classifyFamilyB(
         "B5_report_rate",
       ],
       `The sealed line set could not be derived: ${derived.undeterminable}.`,
+    );
+  } else if (derived.hours_mismatch) {
+    // Every fact is present and the HOURS are what disagree. Say that, rather
+    // than letting the derivation collapse to an empty line set and reporting a
+    // line-count mismatch, which names a rule this card did not break.
+    const mismatch = derived.hours_mismatch;
+    const detail =
+      `The proposal bills ${mismatch.billable} hour(s) per trade where the sealed law derives ${mismatch.expected} (the greater of the ${mismatch.reported} reported and the sealed ${mismatch.floor}-hour floor).`;
+    record(outcomes, "B2_sealed_line_derivation", "flagged", detail);
+    record(outcomes, "B4_attendance_hours_floor", "flagged", detail);
+    unevaluableRest(
+      outcomes,
+      ["B3_company_labour_schedule", "B5_report_rate"],
+      `The sealed line set could not be derived while the billable hours disagree with the sealed law: ${detail}`,
     );
   } else {
     const expected = derived.lines ?? [];

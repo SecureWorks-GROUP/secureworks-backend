@@ -2347,9 +2347,17 @@ obligation and never touches the docket, so checking the docket while authorisin
 the obligation checks money nobody is about to bill.
 
 `makesafe_invoice_rules_clean.ts` is the pure, closed-list determination for
-Item 10 auto-authorisation (16 guards in three families; `unevaluable` PARKS, and
+Item 10 auto-authorisation (17 guards in three families, contract
+`ses-rules-clean/v2`; `unevaluable` PARKS, and
 family B is a WHITELIST that re-derives the sealed line set and demands equality,
-so an unmodelled fault shape parks by construction). It has no call site in
+so an unmodelled fault shape parks by construction). Two rules the 2026-08-07
+review had to install because the module was blind in its own way: the
+determination point (`pre_mint` / `authorise`) is a POSITIVE CLAIM the caller
+states, never inferred from an absent `subject_invoice` — absence is not a clean
+branch — and `A6` compares the sealed derivation against the **Xero DRAFT's own
+ex-GST total**, because a draft stays editable after the mint, so the obligation
+is the INTENT and the draft is the MONEY that authorise acts on. An absent or
+unreadable draft total parks; it is never assumed to match. It has no call site in
 `ops-api` yet — switch-on needs Captain decision D5 plus a migration, because
 `record_ses_revision_approval_v1` requires an `operator_id` active on
 `ses_release_operators` that a skill caller does not have. The zero-write dry run

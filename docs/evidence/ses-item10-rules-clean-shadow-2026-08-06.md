@@ -3,10 +3,11 @@
 **Date:** 2026-08-06
 **Ticket:** `secureworks-wiki` `coding/work/campaigns/makesafe-system/tickets/rescue-ses-remainder-v1/10-invoice-automation-auto-authorise.md`, plus `SPEC.md` Item 10
 **Status:** classifier built, guard suite green, **zero-write shadow run executed live across the board**. **No invoice was authorised, minted, voided, sent or re-priced.**
+**Amended 2026-08-07 (contract `ses-rules-clean/v2`):** code review found **two blind guards inside the classifier itself**. Both are closed. See §0 "Four" and §6a. The committed run artifact predates the amendment and is **stale** — see §4.
 
 ---
 
-## 0. For the Captain — three things, no code required
+## 0. For the Captain — four things, no code required
 
 ### One. Roof reports currently have NO guard that can refuse an overcharge
 
@@ -37,6 +38,18 @@ I got there by reading a saved database row and reporting it as *current deploye
 
 The rule, which now sits in `AGENTS.md` where the next agent reads it before working rather than only here: **measure the deployed thing, or say you did not.** A claim about what production does must come from production, or from something produced after the deploy. Where neither is available — as here, because there is no roof card prepared since the deploy — the honest answer is "not observed", never a confident number.
 
+### Four. Two guards were themselves blind, and the dry run did not catch it — the review did
+
+This is the part worth reading twice, because it is the same fault this whole item exists to survive, found **inside the thing built to prevent it**.
+
+**Gap one — a guard that said "clean" because it had been shown nothing.** The guard that asks *"does this card already have an invoice, and is it our own draft?"* answered **clean** whenever no invoice was handed to it. That sounds harmless. It is not: "nobody gave me an invoice to look at" and "there is genuinely no invoice" are different facts, and the guard reported the same word for both. A read that failed, a half-built evidence bundle or a future refactor would each have produced a **clean** verdict manufactured out of nothing. Fixed: the caller must now **state** which question it is asking — "nothing minted yet" or "advance this existing draft" — as a positive claim. An unstated one parks. An absent invoice where one was claimed parks.
+
+**Gap two, the more serious — nothing checked the number on the actual invoice.** Every pricing guard checked *our own saved pricing sheet*. Not one of them looked at the total on the **Xero draft that would actually be authorised**. A Xero draft stays editable in Xero after it is created, so the whole classification could read clean while the invoice being advanced carried a different figure. Everything upstream correct, the money still wrong, and nobody looking — which is precisely the situation this automation creates. Fixed: a new guard (`A6`) compares the **actual ex-GST total on the Xero draft** against the price the sealed rules derive. A disagreement flags. A total that is absent or unreadable parks; it is never assumed to match.
+
+**Neither gap showed up in the live shadow run.** The run was honest and useful, but it exercised the guards against the board as it happens to be tonight; it could not see a guard that reports clean for the wrong reason. That is the strongest evidence yet that the dry-run-first instinct was right. Had this gone straight to a supervised first fire, one card would have been watched very carefully while **two guard gaps sat underneath it**, invisible, in the exact place the safety is supposed to live.
+
+**The claim your money now rests on, stated plainly:** the classifier verifies the price against the **actual total on the Xero invoice**, not merely against what we intended to bill.
+
 ---
 
 ## 1. What was built tonight, and what was deliberately not
@@ -45,10 +58,10 @@ The rule, which now sits in `AGENTS.md` where the next agent reads it before wor
 
 | Artifact | What it is |
 |---|---|
-| `supabase/functions/ops-api/makesafe_invoice_rules_clean.ts` | The pure rules-clean determination. 16 guards in three closed families. No I/O. |
-| `supabase/functions/ops-api/makesafe_invoice_rules_clean_test.ts` | 26 tests: one per guard proving it can PARK the card and name itself, plus errors-park, the PO-suffix regression in both directions, and the no-send assertion. |
+| `supabase/functions/ops-api/makesafe_invoice_rules_clean.ts` | The pure rules-clean determination. **17 guards** in three closed families (16 as first landed; `A6` added by the 2026-08-07 review, contract `ses-rules-clean/v2`). No I/O. |
+| `supabase/functions/ops-api/makesafe_invoice_rules_clean_test.ts` | 30 tests (26 as first landed, plus four for the review fixes): one per guard proving it can PARK the card and name itself, plus errors-park, the PO-suffix regression in both directions, and the no-send assertion. |
 | `scripts/ses-rules-clean-shadow.ts` | The dry-run mode. Read-only, Management API `read_only:true` only, no ops-api action called at all. |
-| `scripts/ses-rules-clean-shadow-2026-08-06.json` | The run's per-card verdict manifest, generation `4cc87f37d6acd41b…` (content-derived; a rerun over unchanged state reproduces it). |
+| `scripts/ses-rules-clean-shadow-2026-08-06.json` | The run's per-card verdict manifest, generation `4cc87f37d6acd41b…` (content-derived; a rerun over unchanged state reproduces it). **STALE** — produced under `ses-rules-clean/v1`; see §4. |
 
 **Deliberately NOT built:** the wiring that makes `approve_ses_invoice_revision` / `execute_ses_invoice_revision` reachable by the skill. See §8 — it needs a migration, and the ticket's D5 gate has not been answered. Nothing shipped tonight changes any behaviour the Captain will meet tomorrow: the classifier is a new module with no call site in `ops-api`, and the shadow is a script. **The skill runs tomorrow exactly as it runs today.**
 
@@ -94,7 +107,8 @@ This list **is** the definition. An invoice is rules-clean only if every guard i
 | `A2_ambiguity_is_refusal` | `multi_live`, `sibling_po`, `void_only`, `mirror_xero_mismatch` each REFUSE. A probe that records an ambiguity **and** `allows_create: true` — the exact Koondoola combination — parks. |
 | `A3_builder_reference_present` | A non-empty canonical builder reference. The reference tiers are inert without one. |
 | `A4_full_accrec_scan` | The full live-ACCREC estate scan (`resolveExistingInvoice`, the same resolver the mint runs) found nothing. The indexed probe answers a narrower question and **cannot stand in for it**. |
-| `A5_subject_invoice_is_our_current_draft` | **Added by this work; not on the ticket's list.** See §6. |
+| `A5_subject_invoice_is_our_current_draft` | **Added by this work; not on the ticket's list.** See §6. The determination point (`pre_mint` / `authorise`) is a POSITIVE CLAIM the caller states; an unstated point, or a claimed-but-missing subject invoice, is `unevaluable` and parks. |
+| `A6_xero_draft_total_is_the_sealed_total` | **Added by the 2026-08-07 review; see §6a.** The Xero DRAFT's OWN ex-GST total equals the total the sealed law derives. The obligation is the intent; the draft is the money, and it is the draft that gets authorised. An absent, unreadable or origin-less total is `unevaluable` and parks — never assumed to match. |
 
 ### B. Pricing — "is this money derived from sealed rules?"
 
@@ -108,6 +122,8 @@ This list **is** the definition. An invoice is rules-clean only if every guard i
 | `B6_nonzero` | At least one line, no negative unit price, positive ex-GST total. |
 | `B7_no_hand_pricing` | No rate override, commercial quantity override, or operator materials-charge decision. |
 | `B8_materials_rate_card_sealed` | No materials-bearing line. Item 08 has not sealed a rate card, so no guard can check the figure. |
+
+`B4_attendance_hours_floor` also owns the case where the billable hours simply disagree with `max(reported, floor)`: the derivation names it, so the parked card states the hours rule rather than a line-count mismatch downstream of it.
 
 ### C. Evidence and readiness — "is the pack real?"
 
@@ -128,6 +144,8 @@ The classifier is a **subtractive gate, never a pricing authority**. If it and t
 ---
 
 ## 4. The live shadow run
+
+> **The numbers below are from contract `ses-rules-clean/v1` and are STALE.** The 2026-08-07 review added `A6` and made the determination point a stated claim, so a rerun will differ — notably `A5` is no longer clean on a card that supplies no invoice, and the three `authorise` cards now answer `A6` as well. The committed artifact `scripts/ses-rules-clean-shadow-2026-08-06.json` still carries `ruler_contract_version: ses-rules-clean/v1` and is **not** edited by hand: regenerating it needs production credentials this change did not have, and it lands as a follow-up commit (§12). Re-run before quoting any count from this section.
 
 Read-only, 8 queries, 2026-08-06. Denominator: `ses-board-population/active-v1` — **not the whole board**, Captain decision C.5 is open and the ~33 cancelled cards sit outside it.
 
@@ -255,6 +273,36 @@ The same finding forced a second correction: at the authorise point, family B re
 
 ---
 
+## 6a. Two blind guards found by review, not by the run (2026-08-07, `ses-rules-clean/v2`)
+
+Both are the module's own failure mode turned on itself, and both are closed. Neither weakens an existing guard; the classifier now refuses strictly more.
+
+**(1) `A5` treated missing evidence as passing evidence.** It read `clean` whenever `subject_invoice` was absent, on the reasoning "nothing was minted, so nothing was excluded". But absence is not a fact this module can see: a failed mirror read, a partial evidence build or a refactor that stopped populating the field produced the same `clean`. Meanwhile `A1`/`A4` would still be scanning rows an excluded invoice had been removed from. That is a manufactured clean verdict — the blind-guard shape named in the module header, in the module itself.
+
+The determination point is now **stated**, not inferred: `determination_point: "pre_mint" | "authorise"`, plus a `subject_invoice_read_error` channel like every other input has.
+
+| Case | Outcome |
+|---|---|
+| `authorise`, no readable subject invoice | `unevaluable` → parks |
+| `authorise`, subject read failed | `unevaluable` → parks |
+| determination point absent or unrecognised | `unevaluable` → parks |
+| `pre_mint` claimed, and a subject invoice supplied anyway | `flagged` → parks (the two cannot both be true) |
+| `pre_mint` claimed, no subject invoice | `clean` |
+
+A card with an empty evidence object now has **no clean guard at all**, which the suite asserts directly.
+
+**(2) Nothing bound the sealed price to the Xero draft.** Family B checked the local obligation/docket lines. `subject_invoice` carried no total, `makeSesXeroGateway.authorise` posts only `{ InvoiceID, Status: 'AUTHORISED' }` and compares nothing, and a Xero DRAFT stays editable after the mint. So a draft edited in Xero between mint and auto-authorise would have reached AUTHORISED at the edited figure with every pricing guard reporting `clean`. Today the human at APPROVE INVOICE is what closes that; the point of this item is to remove him. Three live cards were already at the `authorise` point in the shadow run.
+
+`A6_xero_draft_total_is_the_sealed_total` compares the DRAFT's own ex-GST `sub_total` against the total the sealed derivation produces, inside the existing money tolerance. **Mismatch flags. Absent, non-numeric, origin-less or unreadable is `unevaluable` and parks.** The rule recorded in the module: *the obligation is the INTENT; the Xero draft is the MONEY, and authorise acts on the money.*
+
+The shadow supplies that total from the local `xero_invoices` mirror and stamps `totals_source: "local_mirror"`; a live call site must read the draft from Xero itself and stamp `xero_api`, because the mirror can drift (`mirror_xero_mismatch` exists for exactly that reason).
+
+**Contract bumped to `ses-rules-clean/v2`** so every past determination stays attributable to the definition that produced it.
+
+Two smaller review fixes rode along: any duplicate ambiguity now refuses by testing `!== "none"` rather than by membership of a hand-kept list (a state added to the union later parks by construction), and the attendance-wording map is keyed by the real `SesFamilyId` union so a new family is a compile error rather than a silently missing case.
+
+---
+
 ## 7. The staged first fire
 
 **Card: `SWMS-261029` — MLB, `MLB-25147`, Midland. 2 trades × 5 hours at the sealed $85 = $850 ex / $935 inc.**
@@ -331,6 +379,8 @@ Stated plainly, because the ticket asks for it and because it is the honest limi
 | L4 | **The audit row answers "why was this authorised without me" per card.** | With the §8 migration, at the first authorisation. |
 | L5 | **The deployed classifier agrees with the local one.** Byte-for-byte the same module, but it has never executed in the edge runtime. | First deploy through the normal edge lane. |
 | L6 | **The roof branch of `check_report_rate_spec` refuses an overcharge (F1).** | The wiki-skill change to two-sided equality lands through the governed release path. Until then the skill's pre-create gate cannot refuse a roof overcharge, even though `B5` can. |
+| L8 | **`A6` refuses a Xero draft edited away from the sealed total on real data.** Unit-tested only; no live card has carried the shape. | First `authorise`-point card whose draft total disagrees with the sealed derivation, or a deliberate rehearsal on a card the Captain nominates. |
+| L9 | **The regenerated shadow artifact under `ses-rules-clean/v2`.** | Next run with production credentials; the committed `2026-08-06` artifact stays marked stale until then. |
 | L7 | **The deployed backend is observed pricing a double-storey roof.** No post-deploy roof docket exists, so its roof price is currently unobserved rather than confirmed — see §5a. | First roof docket prepared after the 11:36Z deploy; expect $300 ex / $330 inc with no override. `SWMS-261079` is the obvious candidate, its docket being a pre-ruling $350 fossil. |
 
 ---
@@ -356,6 +406,8 @@ deno test --allow-env --allow-net=127.0.0.1 --allow-read \
   supabase/functions/ops-api/makesafe_invoice_rules_clean_test.ts
 ```
 
+**The committed `scripts/ses-rules-clean-shadow-2026-08-06.json` is STALE.** It records `ruler_contract_version: ses-rules-clean/v1`, produced before the 2026-08-07 review added `A6` and the stated determination point. It has deliberately **not** been hand-edited: a manifest whose numbers were typed rather than measured is worse than an admittedly old one. Regenerating it needs a production `SUPABASE_ACCESS_TOKEN`, which the change that amended this document did not have, so it lands as a follow-up commit.
+
 The artifact's `generation.generation_id` is content-derived: a rerun over unchanged state reproduces it exactly, which is how a second reader independently verifies this run rather than trusting it. Verified twice tonight — `4cc87f37d6acd41b…` both times.
 
-**Suite impact:** `deno task test:ops-api` currently fails type-checking on a **pre-existing** error in `cp1_drag_reschedule_test.ts:466,508` (`assertStringIncludes(dup.reason, …)` where `dup.reason` is `string | undefined`), unrelated to this work and present on a clean tree. Run with `--no-check` to get a comparable number: **baseline 3647 passed / 24 failed; with this change 3673 passed / 24 failed** — exactly the 26 new tests, no regression. `deno check supabase/functions/ops-api/index.ts` stays clean.
+**Suite impact (as first landed; the 2026-08-07 amendment adds four more tests, 30 in that file):** `deno task test:ops-api` currently fails type-checking on a **pre-existing** error in `cp1_drag_reschedule_test.ts:466,508` (`assertStringIncludes(dup.reason, …)` where `dup.reason` is `string | undefined`), unrelated to this work and present on a clean tree. Run with `--no-check` to get a comparable number: **baseline 3647 passed / 24 failed; with this change 3673 passed / 24 failed** — exactly the 26 new tests, no regression. `deno check supabase/functions/ops-api/index.ts` stays clean.

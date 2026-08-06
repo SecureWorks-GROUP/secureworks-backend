@@ -38,6 +38,9 @@ function baseline(): SesRulesCleanEvidence {
     job_id: "job-1",
     job_number: "SWMS-000001",
     family: "physical_makesafe",
+    // The determination point is a POSITIVE CLAIM, never inferred from what
+    // happens to be absent: this baseline is a pre-mint card.
+    determination_point: "pre_mint",
     docket: {
       revision_id: "rev-1",
       job_id: "job-1",
@@ -202,11 +205,14 @@ Deno.test("A5: an excluded invoice that is not this card's own current DRAFT par
   // AUTHORISED, so not a thing this automation may advance.
   assertParksOn(
     mutate((evidence) => {
+      evidence.determination_point = "authorise";
       evidence.obligation = { revision_id: "ob-1" };
       evidence.subject_invoice = {
         xero_invoice_id: "x-9",
         status: "AUTHORISED",
         invoice_obligation_revision_id: "ob-1",
+        sub_total: 850,
+        totals_source: "xero_api",
       };
     }),
     "A5_subject_invoice_is_our_current_draft",
@@ -216,11 +222,14 @@ Deno.test("A5: an excluded invoice that is not this card's own current DRAFT par
   // duplicate question would hide money that is not ours.
   assertParksOn(
     mutate((evidence) => {
+      evidence.determination_point = "authorise";
       evidence.obligation = { revision_id: "ob-1" };
       evidence.subject_invoice = {
         xero_invoice_id: "x-9",
         status: "DRAFT",
         invoice_obligation_revision_id: "ob-other",
+        sub_total: 850,
+        totals_source: "xero_api",
       };
     }),
     "A5_subject_invoice_is_our_current_draft",
@@ -230,14 +239,138 @@ Deno.test("A5: an excluded invoice that is not this card's own current DRAFT par
 
 Deno.test("A5: this card's own current DRAFT is the subject, not a duplicate", () => {
   const verdict = classifySesInvoiceRulesClean(mutate((evidence) => {
+    evidence.determination_point = "authorise";
     evidence.obligation = { revision_id: "ob-1" };
     evidence.subject_invoice = {
       xero_invoice_id: "x-9",
       status: "DRAFT",
       invoice_obligation_revision_id: "ob-1",
+      // 2 trades x 5 hours at the sealed $85 is $850 ex, and the DRAFT in Xero
+      // carries exactly that. This is the case that must stay clean, or the
+      // A6 cases below prove nothing.
+      sub_total: 850,
+      total: 935,
+      totals_source: "xero_api",
     };
   }));
   assertEquals(verdict.verdict, "rules_clean", verdict.parked_on.join(","));
+});
+
+Deno.test("A5: an absent or unreadable subject at the authorise point parks, it never passes", () => {
+  // The card says it is advancing an existing DRAFT and supplies none. That is
+  // missing evidence, and missing evidence is not passing evidence.
+  assertParksOn(
+    mutate((evidence) => {
+      evidence.determination_point = "authorise";
+      evidence.obligation = { revision_id: "ob-1" };
+      evidence.subject_invoice = null;
+    }),
+    "A5_subject_invoice_is_our_current_draft",
+    "unevaluable",
+  );
+  // And a read that failed says so, rather than being absorbed as "absent".
+  assertParksOn(
+    mutate((evidence) => {
+      evidence.determination_point = "authorise";
+      evidence.subject_invoice_read_error = "xero_invoices unreadable";
+    }),
+    "A5_subject_invoice_is_our_current_draft",
+    "unevaluable",
+  );
+});
+
+Deno.test("A5: an unstated or unrecognised determination point parks the card", () => {
+  for (
+    const change of [
+      (evidence: SesRulesCleanEvidence) => {
+        delete evidence.determination_point;
+      },
+      (evidence: SesRulesCleanEvidence) => {
+        evidence.determination_point = null;
+      },
+      (evidence: SesRulesCleanEvidence) => {
+        (evidence as { determination_point: unknown }).determination_point =
+          "after_the_fact";
+      },
+    ]
+  ) {
+    assertParksOn(
+      mutate(change),
+      "A5_subject_invoice_is_our_current_draft",
+      "unevaluable",
+    );
+  }
+  // A pre-mint claim contradicted by a supplied invoice is a flag, not a pass.
+  assertParksOn(
+    mutate((evidence) => {
+      evidence.determination_point = "pre_mint";
+      evidence.subject_invoice = {
+        xero_invoice_id: "x-9",
+        status: "DRAFT",
+        invoice_obligation_revision_id: "ob-1",
+      };
+    }),
+    "A5_subject_invoice_is_our_current_draft",
+    "flagged",
+  );
+});
+
+Deno.test("A6: a Xero DRAFT whose own total is not the sealed total parks the card", () => {
+  // The draft stays editable in Xero after the mint. Everything upstream can be
+  // correct and the money still wrong; A6 is the only guard that looks at it.
+  assertParksOn(
+    mutate((evidence) => {
+      evidence.determination_point = "authorise";
+      evidence.obligation = { revision_id: "ob-1" };
+      evidence.subject_invoice = {
+        xero_invoice_id: "x-9",
+        status: "DRAFT",
+        invoice_obligation_revision_id: "ob-1",
+        sub_total: 1250,
+        totals_source: "xero_api",
+      };
+    }),
+    "A6_xero_draft_total_is_the_sealed_total",
+    "flagged",
+  );
+});
+
+Deno.test("A6: an absent, non-numeric or unreadable Xero total parks rather than passing", () => {
+  const draft = (
+    extra: Record<string, unknown>,
+  ): (evidence: SesRulesCleanEvidence) => void =>
+  (evidence) => {
+    evidence.determination_point = "authorise";
+    evidence.obligation = { revision_id: "ob-1" };
+    evidence.subject_invoice = {
+      xero_invoice_id: "x-9",
+      status: "DRAFT",
+      invoice_obligation_revision_id: "ob-1",
+      ...extra,
+    };
+  };
+  for (
+    const change of [
+      // No total at all.
+      draft({ totals_source: "xero_api" }),
+      // A total that is not a number.
+      draft({ sub_total: "850.00", totals_source: "xero_api" }),
+      // A total with no stated origin: it cannot be trusted as the money.
+      draft({ sub_total: 850 }),
+      // The read itself failed.
+      draft({
+        sub_total: 850,
+        totals_source: "xero_api",
+        totals_read_error: "Xero 503",
+      }),
+    ]
+  ) {
+    assertParksOn(
+      mutate(change),
+      "A6_xero_draft_total_is_the_sealed_total",
+      "unevaluable",
+    );
+  }
 });
 
 // ── The PO-suffix regression, in BOTH directions ──────────────────────────
@@ -363,6 +496,22 @@ Deno.test("B4: billing under the sealed attendance floor parks the card", () => 
     }),
     "B4_attendance_hours_floor",
     "flagged",
+  );
+  // And the card names the rule it actually broke: the hours, not a line count
+  // downstream of them.
+  const verdict = classifySesInvoiceRulesClean(mutate((evidence) => {
+    const proposal = evidence.docket!.local_invoice_proposal!;
+    proposal.billable_hours_per_trade = 8;
+    proposal.line_items = [{
+      description: "MLB-25147 - make-safe attendance - 2 trades x 8 hours",
+      quantity: 16,
+      unit_price_ex_gst: 85,
+    }];
+  }));
+  assert(verdict.park_reason);
+  assert(
+    verdict.park_reason.toLowerCase().includes("hour"),
+    verdict.park_reason,
   );
 });
 
@@ -685,10 +834,11 @@ Deno.test("a bare evidence object with nothing in it parks rather than passing",
   );
   assertEquals(verdict.verdict, "parks");
   assertEquals(
+    // NOTHING on a bare card is clean. A5 used to be, on the strength of an
+    // absent `subject_invoice` -- which is missing evidence read as passing
+    // evidence, the blind-guard shape this module exists to refuse.
     verdict.guards.filter((guard) => guard.status === "clean").map((g) => g.id),
-    // Only A5 is legitimately clean on a bare card: no invoice was minted, so
-    // nothing was excluded from the duplicate question. Everything else parks.
-    ["A5_subject_invoice_is_our_current_draft"],
+    [],
   );
 });
 

@@ -1,4 +1,5 @@
 {
+  "stale": "Produced under ses-rules-clean/v1. The 2026-08-07 review added A6 (Xero draft total vs sealed total) and made the determination point a stated claim, so these verdicts no longer describe the current contract. Deliberately NOT hand-edited: regeneration needs a production SUPABASE_ACCESS_TOKEN and lands as a follow-up commit. See docs/evidence/ses-item10-rules-clean-shadow-2026-08-06.md sections 4 and 6a.",
   "generation": {
     "generation_id": "4cc87f37d6acd41ba93b25f0e374d2c810d3bc850b609f4fa5952d591b444824",
     "snapshot_at": "2026-08-06T16:02:51.624Z",

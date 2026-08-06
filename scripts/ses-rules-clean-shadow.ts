@@ -223,12 +223,26 @@ group by 1
 const ACCREC_SQL = `
 select
   id, job_id, xero_invoice_id, invoice_number, status, reference,
-  invoice_type, invoice_obligation_revision_id
+  invoice_type, invoice_obligation_revision_id, sub_total, total
 from xero_invoices
 where invoice_type = 'ACCREC'
 `;
 
 // ── Evidence assembly ─────────────────────────────────────────────────────
+
+/**
+ * PostgREST/Management API returns `numeric` as a string. A value that is not a
+ * finite number stays absent rather than becoming 0, so the classifier reads it
+ * as "no total" and parks instead of comparing an invented figure.
+ */
+function numeric(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
 
 function indexBy<T>(rows: T[], key: (row: T) => string): Map<string, T> {
   const map = new Map<string, T>();
@@ -327,7 +341,19 @@ export async function runShadow(limit: number | null): Promise<{
       )
       : [];
     const subject = ownDrafts.length === 1 ? ownDrafts[0] : null;
-    const determinationPoint = subject ? "authorise" : "pre_mint";
+    const determinationPoint: "pre_mint" | "authorise" = subject
+      ? "authorise"
+      : "pre_mint";
+    const obligationLinesReadable = Array.isArray(obligation?.lines);
+    const pricedLines = subject && obligationLinesReadable
+      ? obligation!.lines
+      : null;
+    const pricedLinesSource = subject && obligationLinesReadable
+      ? "invoice_obligation_revision" as const
+      : "docket_local_invoice_proposal" as const;
+    const pricedLinesReadError = subject && !obligationLinesReadable
+      ? "the bound obligation revision carries no readable line array, and the docket proposal is not the money this DRAFT would advance"
+      : null;
     const excludedId = subject
       ? String(subject.xero_invoice_id || subject.id)
       : null;
@@ -428,15 +454,16 @@ export async function runShadow(limit: number | null): Promise<{
           pricing_disposition: obligation.pricing_disposition,
         }
         : null,
+      determination_point: determinationPoint,
       // At the authorise point the money under consideration is the bound
       // obligation's lines, not the docket's -- a Captain rate override lives
-      // on the obligation and never touches the docket proposal.
-      priced_lines: subject && Array.isArray(obligation?.lines)
-        ? obligation.lines
-        : null,
-      priced_lines_source: subject && Array.isArray(obligation?.lines)
-        ? "invoice_obligation_revision"
-        : "docket_local_invoice_proposal",
+      // on the obligation and never touches the docket proposal. If that read
+      // is not an array on a card that IS at the authorise point, the harness
+      // must NOT quietly fall back to the docket: that would classify money
+      // nobody is about to bill. It parks instead.
+      priced_lines: pricedLines,
+      priced_lines_source: pricedLinesSource,
+      priced_lines_read_error: pricedLinesReadError,
       commercial_quantity_override: subject
         ? obligation?.commercial_quantity_override ?? null
         : null,
@@ -448,6 +475,12 @@ export async function runShadow(limit: number | null): Promise<{
           status: subject.status,
           invoice_obligation_revision_id:
             subject.invoice_obligation_revision_id,
+          // The DRAFT's OWN money. This shadow reads the local mirror, which
+          // can drift from Xero; a live call site must read the draft from
+          // Xero itself and say `xero_api`.
+          sub_total: numeric((subject as any).sub_total),
+          total: numeric((subject as any).total),
+          totals_source: "local_mirror",
         }
         : null,
     };
