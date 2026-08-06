@@ -103,6 +103,12 @@ import {
   xeroAccrecReferenceContainsWhere,
   xeroContactNameContainsWhere,
 } from './xero_where_clause.ts'
+import {
+  describeAssignmentLockBlock,
+  isClockedAssignmentBillable,
+  planAssignmentLock,
+  selectUnlockedAssignments,
+} from './trade_invoice_assignment_lock.ts'
 // CAP0-QUOTE-REVISION-QUICKQUOTE — shared release-packet builders so Quick Quote
 // records the same immutable quote_revisions row shape as send-quote /send.
 import { canonicalJsonAndHash } from '../_shared/release_packet/canonicalize.ts'
@@ -1183,6 +1189,12 @@ function logEmailToGHL(contactId: string | null, subject: string, recipient: str
 // A trade invoice in one of these statuses holds nothing: its work order,
 // assignments and charge lines are released for re-invoicing. Single source of
 // truth for every released/live invoice rule in this file.
+// NOTE: 'failed' is retained defensively but is UNREACHABLE — the live
+// `trade_invoices_status_check` (migration 20260611000001) does not permit it,
+// so no row can ever hold it. Never write 'failed' to trade_invoices.status:
+// PostgREST returns the CHECK violation instead of throwing, so the write looks
+// like it succeeded and the invoice silently stays LIVE, holding its
+// assignments forever. Use 'draft' for a released/retryable invoice.
 const RELEASED_INVOICE_STATUSES: readonly string[] = ['draft', 'failed', 'ops-reject']
 const RELEASED_INVOICE_STATUS_SET: ReadonlySet<string> = new Set(RELEASED_INVOICE_STATUSES)
 
@@ -8064,14 +8076,41 @@ if (import.meta.main) serve(async (req: Request) => {
             } else if (week_start && weekEnd) {
               // Legacy clocked path: re-query completed assignments server-side.
               const { data: asn } = await client.from('job_assignments')
-                .select('id, job_id, clocked_on_at, clocked_off_at, hours_worked, hourly_rate, break_minutes, manual_override_flag, scheduled_date, status')
+                .select('id, job_id, clocked_on_at, clocked_off_at, hours_worked, hourly_rate, break_minutes, manual_override_flag, scheduled_date, status, invoiced_in')
                 .eq('user_id', tradeUser.id)
                 .gte('scheduled_date', week_start)
                 .lte('scheduled_date', weekEnd)
                 .eq('status', 'complete')
+              // ── Dup-assignment guard, clocked lane ────────────────────────
+              // This lane AUTO-FILLS: the trade never ticks these cards, so the
+              // server must not re-add work the Pay tab already hides. my_hours
+              // and the manual lane both drop assignments held by a LIVE
+              // invoice; without the same filter here the handler re-collected
+              // already-billed cards, Layer B refused to re-stamp them, and the
+              // whole submission died on "Only stamped 0 of N assignments".
+              // Skipped silently, not 409: the trade cannot deselect a card
+              // they were never shown.                                      [F3]
+              const clockedRefIds = [...new Set((asn || []).map((a: any) => a.invoiced_in).filter(Boolean))]
+              let clockedLiveRefIds = new Set<string>()
+              if (clockedRefIds.length > 0) {
+                const { data: clockedRefInv, error: clockedRefErr } = await client.from('trade_invoices')
+                  .select('id, status').in('id', clockedRefIds)
+                if (clockedRefErr) {
+                  throw new Error('Failed to check which job cards are already on a live invoice: ' + clockedRefErr.message)
+                }
+                clockedLiveRefIds = new Set((clockedRefInv || [])
+                  .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
+                  .map((ti: any) => ti.id))
+              }
+              // A status='complete' card with no clocked hours was never clocked.
+              // Auto-filling it bills $0 AND permanently stamps invoiced_in, so
+              // the card can never be invoiced again. Only real clocked time
+              // belongs in this lane; manual-hours submissions never reach it.
+              const clockedBillable = selectUnlockedAssignments(asn || [], clockedLiveRefIds)
+                .filter((a: any) => isClockedAssignmentBillable(a))
               // Stamp the server-resolved rate so clocked lines never trust a
               // client/stale assignment rate for pricing.                     [F2]
-              assignments = (asn || []).map((a: any) => ({
+              assignments = clockedBillable.map((a: any) => ({
                 ...a,
                 hourly_rate: resolvedRate > 0 ? resolvedRate : (a.hourly_rate || 0),
               }))
@@ -8520,19 +8559,22 @@ if (import.meta.main) serve(async (req: Request) => {
                 .maybeSingle()
               if (draftToSubmit?.status === 'draft') {
                 invoice = { id: draftToSubmit.id }
-                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', invoice.id)
               }
             }
             if (!invoice && week_start) {
-              const { data: existingDraft } = await client.from('trade_invoices')
+              const { data: existingDrafts, error: existingDraftErr } = await client.from('trade_invoices')
                 .select('id, status')
                 .eq('user_id', tradeUser.id)
                 .eq('week_start', week_start)
                 .eq('status', 'draft')
-                .maybeSingle()
+                .order('created_at', { ascending: true })
+                .limit(1)
+              if (existingDraftErr) {
+                throw new Error('Failed to look up the weekly draft invoice: ' + existingDraftErr.message)
+              }
+              const existingDraft = (existingDrafts || [])[0]
               if (existingDraft) {
                 invoice = { id: existingDraft.id }
-                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', invoice.id)
               }
             }
 
@@ -8554,8 +8596,34 @@ if (import.meta.main) serve(async (req: Request) => {
             }
 
             if (invoice) {
-              const { error: updErr } = await client.from('trade_invoices').update(invoicePayload).eq('id', invoice.id)
+              // Compare-and-swap promotion: the weekly draft row (and its id) is
+              // shared across submissions, so promote it ONLY from 'draft'. Two
+              // concurrent submits (double-tap) would otherwise share invoice.id,
+              // and the loser's stamp rollback below would unstamp the rows the
+              // winner just claimed while the winner pushes the Xero bill.
+              const { data: promoted, error: updErr } = await client.from('trade_invoices')
+                .update(invoicePayload)
+                .eq('id', invoice.id)
+                .eq('status', 'draft')
+                .select('id')
               if (updErr) throw new Error('Failed to submit draft invoice: ' + updErr.message)
+              if (!promoted || promoted.length === 0) {
+                throw new ApiError('This invoice is already being submitted. Wait a moment, then check your Pay tab before trying again.', 409)
+              }
+              // Clear stale draft lines only AFTER winning the promotion, so a
+              // losing concurrent submit can never delete the winner's lines.
+              const { error: lineClearErr } = await client.from('trade_invoice_lines')
+                .delete().eq('trade_invoice_id', invoice.id)
+              if (lineClearErr) {
+                const { error: markErr } = await client.from('trade_invoices').update({
+                  status: 'draft',
+                  query_note: ('Invoice line clear failed before Xero push: ' + lineClearErr.message).slice(0, 500),
+                }).eq('id', invoice.id)
+                if (markErr) {
+                  console.error('[ops-api] Failed to mark invoice line-clear failure:', markErr.message)
+                }
+                throw new Error('Failed to clear draft invoice line items: ' + lineClearErr.message)
+              }
             } else {
               const { data: newInvoice, error: invErr } = await client.from('trade_invoices').insert(invoicePayload).select('id').single()
               if (invErr) {
@@ -8615,13 +8683,17 @@ if (import.meta.main) serve(async (req: Request) => {
             // leaves the invoice recoverable and prevents a Xero bill with no P&L lines.
             const { error: lineErr } = await client.from('trade_invoice_lines').insert(lineRows)
             if (lineErr) {
-              try {
-                await client.from('trade_invoices').update({
-                  status: 'failed',
-                  query_note: ('Invoice line save failed before Xero push: ' + lineErr.message).slice(0, 500),
-                }).eq('id', invoice.id)
-              } catch (markErr) {
-                console.log('[ops-api] Failed to mark invoice line-save failure:', (markErr as Error).message)
+              // 'draft', not 'failed': `trade_invoices_status_check` does not
+              // permit 'failed', so the old write was silently rejected and the
+              // invoice stayed LIVE at 'pending_acknowledgment'. 'draft' is
+              // CHECK-legal, is in RELEASED_INVOICE_STATUSES, and is re-used by
+              // the next submission for this week rather than orphaned.
+              const { error: markErr } = await client.from('trade_invoices').update({
+                status: 'draft',
+                query_note: ('Invoice line save failed before Xero push: ' + lineErr.message).slice(0, 500),
+              }).eq('id', invoice.id)
+              if (markErr) {
+                console.error('[ops-api] Failed to mark invoice line-save failure:', markErr.message)
               }
               throw new Error('Failed to save invoice line items: ' + lineErr.message)
             }
@@ -8635,14 +8707,30 @@ if (import.meta.main) serve(async (req: Request) => {
               .filter(Boolean)
             if (includedAssignmentIds.length > 0) {
               const expectedAssignmentIds = [...new Set(includedAssignmentIds)]
+              // assignment id → job number, so a refusal names the offending job
+              // cards instead of an opaque "0 of 6".
+              const stampJobLabels: Record<string, string> = {}
+              for (const l of lineItems) {
+                for (const aid of (Array.isArray(l?.assignment_ids) ? l.assignment_ids : [])) {
+                  if (aid && l?.job_number) stampJobLabels[String(aid)] = String(l.job_number)
+                }
+              }
+              // Release the invoice on failure so the trade can retry.
+              // MUST be a status `trade_invoices_status_check` permits —
+              // 'failed' is NOT in that CHECK (migration 20260611000001), so the
+              // previous code's update was rejected by PostgREST, the error was
+              // discarded, and the invoice stayed at 'pending_acknowledgment'.
+              // That is a LIVE status, so it held its assignments forever and
+              // wedged every retry. 'draft' is both CHECK-legal and in
+              // RELEASED_INVOICE_STATUSES, and the submit path above re-uses an
+              // existing weekly 'draft' row instead of orphaning another invoice.
               const failAssignmentStamp = async (stampMsg: string) => {
-                try {
-                  await client.from('trade_invoices').update({
-                    status: 'failed',
-                    query_note: ('Invoice assignment stamp failed before Xero push: ' + stampMsg).slice(0, 500),
-                  }).eq('id', invoice.id)
-                } catch (markErr) {
-                  console.log('[ops-api] Failed to mark assignment-stamp failure:', (markErr as Error).message)
+                const { error: markErr } = await client.from('trade_invoices').update({
+                  status: 'draft',
+                  query_note: ('Invoice assignment stamp failed before Xero push: ' + stampMsg).slice(0, 500),
+                }).eq('id', invoice.id)
+                if (markErr) {
+                  console.error('[ops-api] Failed to mark assignment-stamp failure:', markErr.message)
                 }
                 throw new Error('Failed to lock invoiced job cards before Xero push: ' + stampMsg)
               }
@@ -8651,9 +8739,6 @@ if (import.meta.main) serve(async (req: Request) => {
                 .eq('user_id', tradeUser.id)
                 .in('id', expectedAssignmentIds)
               if (stampReadErr) await failAssignmentStamp(stampReadErr.message)
-              if ((stampCandidates || []).length !== expectedAssignmentIds.length) {
-                await failAssignmentStamp('Only found ' + (stampCandidates || []).length + ' of ' + expectedAssignmentIds.length + ' assignments')
-              }
               const stampRefIds = [...new Set((stampCandidates || []).map((a: any) => a.invoiced_in).filter(Boolean))]
               let releasedStampInvoiceIds: string[] = []
               if (stampRefIds.length > 0) {
@@ -8665,19 +8750,60 @@ if (import.meta.main) serve(async (req: Request) => {
                   .filter((ti: any) => RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
                   .map((ti: any) => ti.id)
               }
-              let stampQuery = client.from('job_assignments')
+              // Rows already stamped with THIS invoice's id are claimable too:
+              // re-stamping them is idempotent. The invoice was promoted to
+              // 'pending_acknowledgment' (LIVE) above, so without this a prior
+              // failed rollback that left invoiced_in = invoice.id would wedge
+              // every retry of this week behind the trade's own stamps. The CAS
+              // promotion guarantees no concurrent submit shares this id.
+              const claimableStampInvoiceIds = [
+                ...new Set([...releasedStampInvoiceIds, String(invoice.id)]),
+              ]
+              // Decide BEFORE writing. The previous code issued the UPDATE first
+              // and counted matched rows afterwards, so a partial match mutated
+              // the rows it did match and then threw — permanently consuming
+              // those job cards and turning a recoverable "stamped 2 of 6" into
+              // an unrecoverable "stamped 0 of 6" on the next attempt.
+              const lockPlan = planAssignmentLock({
+                expectedIds: expectedAssignmentIds,
+                candidates: (stampCandidates || []) as any,
+                releasedInvoiceIds: claimableStampInvoiceIds,
+              })
+              if (!lockPlan.ok) {
+                await failAssignmentStamp(describeAssignmentLockBlock(lockPlan, stampJobLabels))
+              }
+              const stampQuery = client.from('job_assignments')
                 .update({ invoiced_in: invoice.id })
                 .eq('user_id', tradeUser.id)
                 .in('id', expectedAssignmentIds)
-              stampQuery = releasedStampInvoiceIds.length > 0
-                ? stampQuery.or('invoiced_in.is.null,invoiced_in.in.(' + releasedStampInvoiceIds.join(',') + ')')
-                : stampQuery.is('invoiced_in', null)
+                .or('invoiced_in.is.null,invoiced_in.in.(' + claimableStampInvoiceIds.join(',') + ')')
               const { data: stampedAssignments, error: stampErr } = await stampQuery.select('id')
               const stampedIds = new Set((stampedAssignments || []).map((a: any) => a.id))
               if (stampErr || stampedIds.size !== expectedAssignmentIds.length) {
+                // Every assignment was claimable a moment ago, so reaching here
+                // means a concurrent submission took some of them. Release ONLY
+                // the rows THIS statement stamped (the ids it returned) before
+                // failing, so a half-claim never outlives the request. A bare
+                // `invoiced_in = invoice.id` filter would be wrong here: the
+                // weekly draft id predates this request, so rows stamped by an
+                // earlier attempt whose rollback failed also carry it.
+                const stampedIdList = [...stampedIds]
+                let rollbackErr: { message: string } | null = null
+                if (stampedIdList.length > 0) {
+                  const { error } = await client.from('job_assignments')
+                    .update({ invoiced_in: null })
+                    .eq('invoiced_in', invoice.id)
+                    .in('id', stampedIdList)
+                  rollbackErr = error
+                }
+                if (rollbackErr) {
+                  console.error('[ops-api] Assignment stamp rollback failed:', rollbackErr.message)
+                }
                 const stampMsg = stampErr
                   ? stampErr.message
-                  : 'Only stamped ' + stampedIds.size + ' of ' + expectedAssignmentIds.length + ' assignments'
+                  : 'Only stamped ' + stampedIds.size + ' of ' + expectedAssignmentIds.length +
+                    ' assignments (concurrent submission; claim rolled back' +
+                    (rollbackErr ? ' FAILED — assignments may still be held' : '') + ')'
                 await failAssignmentStamp(stampMsg)
               }
             }

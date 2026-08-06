@@ -20,6 +20,11 @@ Use `scripts/deploy-edge-function.sh ops-api` and
 `sb.from('table').insert({...}).catch(() => {})` will CRASH with "catch is not a function".
 **Fix**: Use `try { await sb.from('table').insert({...}) } catch (_) { }` instead.
 
+### A failed write returns an error, it does not throw
+`await client.from(x).update(y)` never rejects on a DB error, so wrapping it in `try/catch` catches nothing and a failed write reads as a success. This silently broke the trade-invoice money path: the failure handler wrote `trade_invoices.status = 'failed'`, which `trade_invoices_status_check` (`20260611000001_trade_invoice_guards.sql`) does not permit, so failed invoices stayed LIVE and held their assignments forever.
+
+**Fix pattern**: always destructure `{ error }` and act on it; before writing any enum-ish status, check the live CHECK constraint (`pg_constraint` on the table) rather than trusting the constant in `index.ts`. See `docs/trade-invoice-assignment-lock-root-cause-2026-08-06.md`.
+
 ### A wrong column name returns zero rows, not an error
 PostgREST rejects a select naming a non-existent column with a 400 (`42703`): `data` is null and `error` is set. Call sites that destructure `{ data }` only degrade silently to zero rows — a $0 pipeline figure, an empty digest, or an unmatched invoice reads exactly like a quiet week. Several of these survived for months.
 
