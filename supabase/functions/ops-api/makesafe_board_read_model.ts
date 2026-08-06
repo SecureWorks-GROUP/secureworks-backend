@@ -27,6 +27,13 @@ import {
   SES_TRADE_PORTAL_CONFIRMATION_QUESTION,
   sesPortalCaptureProducerHasScreenshot,
 } from "./ses_portal_capture_contract.ts";
+import {
+  DOCS_READY_STAGE,
+  type DocsReadyCaptureGate,
+  docsReadyCaptureGateBlockers,
+  docsReadyCaptureGateFamilyApplies,
+  evaluateDocsReadyCaptureGate,
+} from "./makesafe_docs_ready_capture_gate.ts";
 import { extractPortalLinks } from "./makesafe_portal_guard.ts";
 import {
   sesRoofConfirmationEligibility,
@@ -339,6 +346,43 @@ export function ownTemplateRoofJobIdsForBoard(baseRows: any[]): string[] {
 }
 
 /**
+ * The job ids whose placement the Docs Ready capture gate can actually change.
+ *
+ * The card shape skips the capture-ledger read for TTFB, but the gate needs it,
+ * so the loader reads it for these ids only — the cards a ladder or an overlay
+ * is putting in Docs Ready, in a family that has a capture opinion. On today's
+ * board that is ~13 of 155 active rows: one bounded chunked read, not a second
+ * board-wide fan-out.
+ *
+ * Overlay candidacy is deliberately loose here (any ledger row pointing at
+ * `report_ready`, before the overlay's own applicability guards run). Over-
+ * reading costs a few ids in one filter; under-reading would leave a card
+ * un-gated for want of evidence, which is the failure this exists to prevent.
+ */
+export function docsReadyCaptureGateJobIdsForBoard(
+  baseRows: any[],
+  statusApplicationsByJobId: Record<string, any> = {},
+): string[] {
+  const ids: string[] = [];
+  for (const base of baseRows || []) {
+    const id = String(base?.id || "");
+    if (!id) continue;
+    const declared = String(base?.board_stage || "").toLowerCase();
+    const overlay = String(
+      statusApplicationsByJobId?.[id]?.after_status || "",
+    ).toLowerCase();
+    if (declared !== DOCS_READY_STAGE && overlay !== DOCS_READY_STAGE) continue;
+    if (
+      !docsReadyCaptureGateFamilyApplies(base?.makesafe_details || {}, base)
+    ) {
+      continue;
+    }
+    ids.push(id);
+  }
+  return ids;
+}
+
+/**
  * The current own-roof draft per job: one row per job by contract, but if a
  * database ever holds more, take the newest submitted cycle rather than an
  * arbitrary one. Never merges two drafts into a synthetic record.
@@ -601,6 +645,17 @@ export interface CanonicalMakesafeExtras {
   holdsByJobId?: Record<string, MakesafeStatusHold>;
   statusApplicationsByJobId?: Record<string, any>;
   portalCaptureRowsByJobId?: Record<string, any[]>;
+  /**
+   * Did the capture-ledger read this request depends on actually succeed?
+   *
+   * `portalCaptureRowsByJobId` fails closed to an empty map, so it cannot
+   * distinguish "this card has no captures" from "the ledger was unreadable" —
+   * and the Docs Ready capture gate must move a card only on the first. A
+   * caller that omits the key is declaring the evidence readable, which keeps
+   * every existing caller (tests, the parity harness) on its current
+   * behaviour: they inject the captures they mean.
+   */
+  portalCaptureEvidenceReadable?: boolean;
   /** R5 — current own-template roof draft per job, for that family only. */
   ownRoofDraftByJobId?: Record<string, any>;
   ownRoofReportDocumentIdsByJobId?: Record<string, Set<string>>;
@@ -934,7 +989,11 @@ function stampedPackPresentation(base: any): any | null {
   return stamp && typeof stamp === "object" && txt(stamp.kind) ? stamp : null;
 }
 
-function blockerFacts(base: any, assignments: any[]) {
+function blockerFacts(
+  base: any,
+  assignments: any[],
+  captureGate?: DocsReadyCaptureGate | null,
+) {
   const substatus = txt(base?.substatus || base?.makesafe_details?.substatus);
   const hasAllocation = assignments.length > 0 ||
     ["scheduled", "in_progress"].includes(
@@ -991,6 +1050,11 @@ function blockerFacts(base: any, assignments: any[]) {
       fact: txt(refusal.presentation_reason || refusal.reason),
     });
   }
+  // The other half of the capture gate: a card held out of Docs Ready says what
+  // it is missing, in M1's own wording, on the surface the operator already
+  // reads. Appended LAST so it cannot suppress the `pack_refused` fallback
+  // above, which only fires on an otherwise empty list.
+  real.push(...docsReadyCaptureGateBlockers(captureGate));
   return {
     blocked: real.length > 0,
     real,
@@ -1198,14 +1262,24 @@ export function buildCanonicalMakesafeRows(
       report_delivery: base?.metadata?.report_delivery ||
         detail?.report_delivery,
     });
+    const declaredStage = String(base?.board_stage || "new").toLowerCase();
+    const application = extras.statusApplicationsByJobId?.[base?.id] || null;
     // Card mode never loads portal/hold extras; skip the pure projections too.
-    const ledgerRows = cardMode
+    // The ONE exception is a card the ladder or an overlay is putting in Docs
+    // Ready in a capture-gated family: its captures decide placement, and
+    // placement must be identical in card and full mode. The loader reads the
+    // ledger for exactly those ids (`docsReadyCaptureGateJobIdsForBoard`).
+    const captureGateCandidate = (declaredStage === DOCS_READY_STAGE ||
+      String(application?.after_status || "").toLowerCase() ===
+        DOCS_READY_STAGE) &&
+      docsReadyCaptureGateFamilyApplies(detail, base);
+    const ledgerRows = (cardMode && !captureGateCandidate)
       ? []
       : (extras.portalCaptureRowsByJobId?.[base?.id] || []);
     const ledgerPortalCaptures = cardMode
       ? []
       : portalCapturesFromLedger(base, ledgerRows);
-    const portalCaptures = cardMode
+    const portalCaptures = (cardMode && !captureGateCandidate)
       ? []
       : projectMakesafePortalCaptures(base, ledgerRows);
     const hold = cardMode ? null : (extras.holdsByJobId?.[base?.id] || null);
@@ -1219,10 +1293,38 @@ export function buildCanonicalMakesafeRows(
     );
     const swmsRequired = base?.has_swms_doc === true || !!pack?.swms_doc_id ||
       (Array.isArray(base?.missing_docs) && base.missing_docs.includes("swms"));
-    const declaredStage = String(base?.board_stage || "new").toLowerCase();
-    const application = extras.statusApplicationsByJobId?.[base?.id] || null;
     const invoiceQualifiesAsCurrentDraft =
       base?.invoice_qualifies_as_current_draft === true;
+    // enrich already cycle-scopes pack/invoice closeout inputs on reattend.
+    const invoiceStatus = rawInvoiceStatus(base);
+    const packSent = base?.pack_sent === true;
+    // The status engine's evidence, built ONCE. Full mode appends the keys only
+    // a physical card is judged on (photos, hold) and the diagnostic-only ones
+    // M1 ignores; the Docs Ready capture gate consumes this subset, which is
+    // everything the portal-report families are judged on and everything the
+    // card shape can supply. That shared object is what makes the gate's
+    // verdict and the published `computed_status` the same reading.
+    const statusEvidence = {
+      assignments,
+      serviceReports: report ? [report] : [],
+      portalCaptures,
+      packState: pack?.review_state || null,
+      pack,
+      invoiceStatus,
+      invoiceQualifiesAsCurrentDraft,
+      invoiceDate: base?.invoice_date || null,
+      invoiceCreatedAt: base?.invoice_created_at || null,
+      packSent,
+      documents: {
+        report: base?.has_report_doc === true,
+        ownRoofReportDocumentIds: extras?.ownRoofReportDocumentIdsByJobId?.[
+          String(base?.id || "")
+        ] ?? new Set<string>(),
+        invoice: base?.has_invoice_doc === true,
+        swms: base?.has_swms_doc === true,
+      },
+      swmsRequired,
+    };
     // R8 — an overlay row declares what it is allowed to do. A row with no
     // `decision_kind` is a legacy display override, which is every row in the
     // ledger today, so this reads as `display_override` and the binding below
@@ -1256,9 +1358,21 @@ export function buildCanonicalMakesafeRows(
     const displayStage = applicationApplies
       ? String(application.after_status || declaredStage).toLowerCase()
       : declaredStage;
-    // enrich already cycle-scopes pack/invoice closeout inputs on reattend.
-    const invoiceStatus = rawInvoiceStatus(base);
-    const packSent = base?.pack_sent === true;
+    // Docs Ready capture gate. Neither the declared ladder nor the overlay
+    // reads the portal-capture evidence, and for the portal-report families
+    // that evidence IS the report-in proof. The gate is one-directional — it
+    // can only hold a card OUT of Docs Ready, never place one there — and its
+    // verdict, its held destination and its published missing list are one
+    // `computeMakesafeStatus` call, so `canonical_stage` and `computed_status`
+    // cannot disagree. Runs in card and full mode off the same evidence; see
+    // the module header for why a physical card, an unreadable ledger and a
+    // card already past Docs Ready each move nothing.
+    const captureGate = evaluateDocsReadyCaptureGate({
+      displayStage,
+      input: { job: base, detail, evidence: statusEvidence },
+      captureEvidenceReadable: extras.portalCaptureEvidenceReadable !== false,
+    });
+    const placedStage = captureGate.held_to_stage || displayStage;
     const presentation = boardPresentationFields(base);
     const contact = buildMakesafeContact(
       base,
@@ -1361,11 +1475,19 @@ export function buildCanonicalMakesafeRows(
       substatus: base?.substatus || null,
       declared_stage: declaredStage,
       // Placement authority — identical in card and full mode.
-      canonical_stage: displayStage,
-      canonical_stage_label: applicationApplies
-        ? OPS_MAKESAFE_STAGE_LABELS[displayStage as OpsMakesafeStage] ||
-          displayStage
+      // Declared ladder + display-ledger overlay, then the Docs Ready capture
+      // gate, which can only subtract from `report_ready`.
+      canonical_stage: placedStage,
+      // A held card must never keep the Docs Ready label it was placed under —
+      // the label is what the Captain reads, so it follows the placement.
+      canonical_stage_label: (applicationApplies || captureGate.held_to_stage)
+        ? OPS_MAKESAFE_STAGE_LABELS[placedStage as OpsMakesafeStage] ||
+          placedStage
         : base?.board_label || null,
+      // Published on every row: `applies:false` is the honest answer for a
+      // family or a stage the rule has no opinion on, and `satisfied:null` for
+      // an unreadable ledger. Only `satisfied:false` moved anything.
+      docs_ready_capture_gate: captureGate,
       status_application: statusApplication,
       // Present regardless of whether the overlay currently applies, so the
       // planner can refuse to re-archive a card it already archived.
@@ -1397,7 +1519,7 @@ export function buildCanonicalMakesafeRows(
       report: reportPayload,
       pack: packPayload,
       age: ageFacts(base),
-      blockers: blockerFacts(base, assignments),
+      blockers: blockerFacts(base, assignments, captureGate),
       cancelled: base?.board_stage === "cancelled"
         ? {
           reason: base?.cancel_reason || null,
@@ -1431,26 +1553,11 @@ export function buildCanonicalMakesafeRows(
       job: base,
       detail,
       evidence: {
-        assignments,
-        serviceReports: report ? [report] : [],
+        // The SAME object the capture gate consumed, so the gate's verdict and
+        // the `computed_status` published below are provably one reading rather
+        // than two that happen to agree today.
+        ...statusEvidence,
         completionPhotoCount: photoCount,
-        portalCaptures,
-        packState: pack?.review_state || null,
-        pack,
-        invoiceStatus,
-        invoiceQualifiesAsCurrentDraft,
-        invoiceDate: base?.invoice_date || null,
-        invoiceCreatedAt: base?.invoice_created_at || null,
-        packSent,
-        documents: {
-          report: base?.has_report_doc === true,
-          ownRoofReportDocumentIds: extras?.ownRoofReportDocumentIdsByJobId?.[
-            String(base?.id || "")
-          ] ?? new Set<string>(),
-          invoice: base?.has_invoice_doc === true,
-          swms: base?.has_swms_doc === true,
-        },
-        swmsRequired,
         hold,
         // R5 — present only for own-template roof cards; undefined otherwise,
         // so no other family's evidence changes shape.
@@ -1478,7 +1585,13 @@ export function buildCanonicalMakesafeRows(
     };
     const computation = computeMakesafeStatus({
       ...statusInput,
-      displayedStatus: displayStage,
+      // The stage the board actually displays, which is what the no-revival
+      // invariant reads. The capture gate cannot change M1's output through
+      // this key: it only ever holds a card from `report_ready` into
+      // `trade_report_in` / `allocated` / `new`, and every one of those —
+      // including the one it replaced — falls straight through the three
+      // terminal short-circuits unchanged.
+      displayedStatus: placedStage,
     });
     const reportIn = reportInEvidence(statusInput);
     // SHADOW ONLY. Advisory comparison value; it places no card. See the
@@ -1550,7 +1663,7 @@ export function buildCanonicalMakesafeRows(
       derived_stage_v2_post_overlay: stageV2Overlay.stage,
       derived_stage_v2_overlay_binds: stageV2Overlay.binds,
       derived_stage_v2_agrees_with_canonical:
-        stageV2Overlay.stage === displayStage,
+        stageV2Overlay.stage === placedStage,
       derived_stage_v2_reasons: stageV2.reasons,
       derived_stage_v2_missing: stageV2.missing,
       derived_stage_v2_conflicts: stageV2.conflicts,

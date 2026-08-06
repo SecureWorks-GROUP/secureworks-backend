@@ -419,7 +419,26 @@ Deno.test("F7 writer: recording a capture moves no stage", () => {
   assertEquals(after.status, before.status);
 });
 
-Deno.test("F7 writer: no board stage can move because a capture exists", () => {
+/**
+ * NARROWED 2026-08-06 by the Docs Ready capture gate, and narrowed to exactly
+ * what F7 was protecting.
+ *
+ * F7's promise is that the OBSERVER cannot advance a card: writing evidence
+ * must never promote work into a readiness nobody proved. That promise is
+ * intact and is asserted below — a capture still cannot put a card in Docs
+ * Ready. What is no longer true, deliberately, is the strictly wider claim that
+ * a capture is invisible to placement at every stage: the board now consumes
+ * the status engine's verdict at `report_ready`, and for the portal-report
+ * families the captures are what that verdict is made of. On production
+ * 2026-08-06, 10 of the 15 cards the declared ladder put in Docs Ready were
+ * behind it by that same computation.
+ *
+ * So a capture can move a HELD card's position within the stages below Docs
+ * Ready — that is the evidence becoming visible, which is what F7 is for — and
+ * it moves nothing at any other stage. Both are asserted here rather than
+ * assumed.
+ */
+Deno.test("F7 writer: a capture never promotes a card into Docs Ready, and moves no other stage", () => {
   // 1. STRUCTURAL. The legacy ladder that places every card takes no capture
   //    argument, so a ledger row is not an input it could read.
   const legacySource = _deriveMakesafeBoardStage.toString();
@@ -460,14 +479,50 @@ Deno.test("F7 writer: no board stage can move because a capture exists", () => {
         portalCaptureRowsByJobId: { [JOB_ID]: [acceptedRevision()] },
         computedAt: NOW,
       });
+      // The declared ladder is the placement authority and never sees a
+      // capture. This is the assertion F7 actually rests on.
+      assertEquals(after.declared_stage, before.declared_stage);
+      assertEquals(after.declared_stage, stage);
+      assertEquals(after.substatus, before.substatus);
+      assertEquals(after.job_state, before.job_state);
+
+      if (stage === "report_ready") {
+        // The one gated stage. The card is held below its declared Docs Ready
+        // either way — this fixture carries no READY draft pack, so the status
+        // engine does not call it ready with or without the capture, and the
+        // gate consumes that answer rather than forming its own.
+        //
+        // What the capture DOES change is how far along the held card is
+        // (short of its captures → carrying them). What it can never do is
+        // reach Docs Ready, which is the F7 promise restated precisely.
+        assert(
+          before.canonical_stage !== "report_ready",
+          "an uncaptured report card must not sit in Docs Ready",
+        );
+        assertEquals(before.docs_ready_capture_gate.satisfied, false);
+        assert(before.docs_ready_capture_gate.missing.length > 0);
+        assert(
+          after.canonical_stage !== "report_ready",
+          "a capture alone must not promote a card into Docs Ready",
+        );
+        assertEquals(after.docs_ready_capture_gate.satisfied, false);
+        // ...and the evidence is visible, which is the whole point of F7.
+        assertEquals(after.docs_ready_capture_gate.missing, []);
+        assertEquals(after.canonical_stage, "trade_report_in");
+        continue;
+      }
+
       assertEquals(
         after.canonical_stage,
         before.canonical_stage,
         `${stage}/${substatus} canonical_stage moved`,
       );
-      assertEquals(after.declared_stage, before.declared_stage);
-      assertEquals(after.substatus, before.substatus);
-      assertEquals(after.job_state, before.job_state);
+      // And a capture never manufactures a Docs Ready the ladder did not
+      // declare — the gate can only subtract.
+      assert(
+        after.canonical_stage !== "report_ready",
+        `${stage}/${substatus} was promoted into Docs Ready by a capture`,
+      );
     }
   }
 });

@@ -310,6 +310,70 @@ A missing status-hold or status-application table in a preview environment is
 tolerated and logged, never fatal to the board. Production remains
 migration-first.
 
+### Docs Ready capture gate — PARKED, NOT LIVE
+
+**This section describes code on the unmerged branch
+`fm/docsready-consume-computed-status-v1`, which is parked and must not land as
+written.** `computed_status` was found to be CIRCULAR (the displayed stage is
+fed back into the computation that produces it), so a column consuming it would
+derive from a field that derives from the column; and board-truth placement has
+another owner. Read
+`docs/evidence/ses-docs-ready-capture-gate-2026-08-06.md` before acting on
+anything below. Nothing here is deployed.
+
+Placement into `report_ready` has a third term after the declared ladder and
+the display overlay: `makesafe_docs_ready_capture_gate.ts`. Neither of the
+first two reads portal-capture evidence, so a roof or assessment card reached
+Docs Ready with none of its Prime forms captured — measured 2026-08-06, 10 of
+the 15 cards the declared ladder put there were behind `report_ready` by the
+board's own `computed_status`.
+
+The gate is one-directional and consumes the existing engine rather than
+re-deriving it. For a card at `report_ready` in a portal-report family
+(`roof_report` / `assessment_report_quote`) it runs one
+`computeMakesafeStatus` call over the SAME evidence object the published
+`computed_status` is built from, and:
+
+- `computed_status` in `new` / `allocated` / `trade_report_in` → the card is
+  placed at that stage instead, `canonical_stage_label` follows the placement,
+  and every entry of `computed_status_missing` is republished as a
+  `portal_capture_not_proven` blocker in `blockers.real[]` so a card that
+  leaves the column says what it is missing;
+- `computed_status` = `report_ready` → placement unchanged. In particular the
+  gate does NOT re-check captures behind `docsReady()`'s roof pack shortcut;
+  out-stricting the engine at the placement layer is not this gate's job;
+- anything else → no verdict, no movement.
+
+`docs_ready_capture_gate` is published on every row (`applies`, `satisfied`,
+`computed_status`, `missing[]`, `held_from_stage`, `held_to_stage`, `reason`,
+`version`). Three shapes deliberately record NO verdict and move nothing:
+`physical_makesafe` (judged on service report + photo floor, which the card
+shape does not load — gating it would demote for missing inputs), an
+unreadable capture ledger (`portal_capture_evidence_unreadable`), and a card
+the engine already puts past Docs Ready
+(`computed_status_ahead_of_docs_ready`).
+
+The gate can only subtract from `report_ready`; it never places a card there,
+so a capture can still never promote work (the F7 observer boundary above is
+intact). Placement stays identical in card and full mode: the loader reads the
+capture ledger in card mode for the gate's own candidate ids only
+(`docsReadyCaptureGateJobIdsForBoard` — ~13 of 155 active rows, and no read at
+all when the column is empty), never board-wide.
+
+`MAKESAFE_BOARD_CONTRACT_VERSION` is unchanged (the payload addition is
+additive) and so is `MAKESAFE_STAGE_LADDER_VERSION` (the declared ladder is
+untouched; the gate runs after it, like the overlay resolver). The gate carries
+its own `DOCS_READY_CAPTURE_GATE_VERSION` so a past measurement can name the
+rule that produced its placement.
+
+Re-prove read-only against production, before or after deploy, with
+`scripts/ses-docs-ready-capture-gate-verify.ts`: it recovers the pre-gate
+column from `declared_stage`, so it gives the same before/after answer whenever
+it is run. Note the `makesafe_pipeline` fallback path does not apply the gate —
+per the board-truth rule, a non-200 from `makesafe_board` is an outage, and on
+that fallback this filter is invisible along with every captain display
+transition.
+
 ## Ops projection
 
 Ops retains the full stages:

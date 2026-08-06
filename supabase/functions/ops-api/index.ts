@@ -133,6 +133,7 @@ import {
   buildCanonicalMakesafeRows,
   checkMakesafeBoardParity,
   countOpsCanonicalStages,
+  docsReadyCaptureGateJobIdsForBoard,
   filterCanonicalRowsByColumnScope,
   isExcludedTerminalSyntheticBoardRow,
   isSyntheticLivefireJob,
@@ -16533,6 +16534,11 @@ async function loadCanonicalMakesafeBoard(
   let portalCaptureRows: any[] = []
   let holds: any[] = []
   let intakeCases: any[] = []
+  // Both capture reads below fail closed to an empty list, which is
+  // indistinguishable from a card that genuinely has no captures. The Docs
+  // Ready capture gate must only move a card on the second, so the read says
+  // out loud whether it worked.
+  let portalCaptureEvidenceReadable = true
 
   if (!cardMode) {
     // These reads are business-meaningful. _fetchAllByJobIdChunked checks every
@@ -16573,6 +16579,7 @@ async function loadCanonicalMakesafeBoard(
       )
     } catch (error) {
       // Fail closed to no capture evidence while keeping the legacy board visible.
+      portalCaptureEvidenceReadable = false
       console.error('[ops-api] makesafe board portal capture read unavailable:', (error as Error).message)
     }
 
@@ -16654,6 +16661,32 @@ async function loadCanonicalMakesafeBoard(
   for (const application of statusApplications) {
     if (application?.job_id && !statusApplicationsByJobId[application.job_id]) {
       statusApplicationsByJobId[application.job_id] = application
+    }
+  }
+  // Card mode skips the board-wide capture read above for TTFB, but the Docs
+  // Ready capture gate decides PLACEMENT from that evidence, and placement must
+  // be identical in card and full mode. So read the ledger for the gate's own
+  // candidate ids only — the cards a ladder or an overlay is putting in Docs
+  // Ready, in a family that has a capture opinion. That is ~13 of 155 active
+  // rows today: one bounded chunked read, not a second board-wide fan-out, and
+  // it disappears entirely when the column is empty.
+  if (cardMode) {
+    const gateJobIds = docsReadyCaptureGateJobIdsForBoard(buildBase, statusApplicationsByJobId)
+    if (gateJobIds.length > 0) {
+      try {
+        portalCaptureRows = await _fetchAllByJobIdChunked(
+          client,
+          'makesafe_portal_capture_revisions',
+          'id, job_id, attendance_cycle_id, role, status, makesafe_fact_version, capture_result, source_url, source_content_hash, builder_reference, captured_at, captured_by, capture_producer, signal, screenshot_object_key, screenshot_media_type, screenshot_content_hash, screenshot_size_bytes',
+          gateJobIds,
+          (q) => q.order('makesafe_fact_version', { ascending: false }),
+        )
+      } catch (error) {
+        // No verdict rather than a wrong one: the gate leaves every candidate
+        // exactly where the ladder and overlay put it, and says why on the card.
+        portalCaptureEvidenceReadable = false
+        console.error('[ops-api] makesafe board docs-ready capture gate read unavailable:', (error as Error).message)
+      }
     }
   }
   const portalCaptureRowsByJobId: Record<string, any[]> = {}
@@ -16775,6 +16808,7 @@ async function loadCanonicalMakesafeBoard(
     holdsByJobId,
     statusApplicationsByJobId,
     portalCaptureRowsByJobId,
+    portalCaptureEvidenceReadable,
     ownRoofDraftByJobId,
     ownRoofReportDocumentIdsByJobId,
     terminalProofsByJobId,
