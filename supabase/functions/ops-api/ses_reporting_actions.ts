@@ -1198,7 +1198,7 @@ export async function querySesReviewCockpitAction(
   if (
     membersResponse.error || routesResponse.error ||
     !members.some((member: any) => member.job_id === jobId) ||
-    (routes.length !== 3 && routes.length !== 2)
+    (routes.length !== 3 && routes.length !== 2 && routes.length !== 1)
   ) {
     throw new SesActionError(409, {
       state: "refused",
@@ -4532,16 +4532,26 @@ export async function executeSesReleaseRevisionAction(
   }
   // Infer shape from the release's own route set (not live job state):
   //   AJS: report_invoice + photo (or legacy report+photo half-match)
+  //   ruled roof-report (Captain 2026-08-06): invoice alone
   //   universal: report + photo + invoice
+  // The invoice-only shape can only exist because prepare built it through
+  // requiredSesRouteKinds under the ruling, and the stored route set is pinned
+  // by the release content hash the approval signed — refusing it here would
+  // reject at SEND IT the exact release the Captain already approved, after
+  // money is AUTHORISED.
   const routeKinds = routes.map((route: any) => String(route.route_kind || ""));
   const isAjsRelease = routeKinds.length === 2 &&
     routeKinds.includes("photo") &&
     !routeKinds.includes("invoice") &&
     (routeKinds.includes("report_invoice") || routeKinds.includes("report"));
+  const isInvoiceOnlyRelease = routeKinds.length === 1 &&
+    routeKinds[0] === "invoice";
   const requiredOrder = isAjsRelease
     ? (routeKinds.includes("report_invoice")
       ? sesReleaseRouteOrder("AJS")
       : (["report", "photo"] as typeof SES_ROUTE_ORDER))
+    : isInvoiceOnlyRelease
+    ? (["invoice"] as typeof SES_ROUTE_ORDER)
     : SES_ROUTE_ORDER;
   if (routes.length !== requiredOrder.length) {
     throw new SesActionError(409, {
