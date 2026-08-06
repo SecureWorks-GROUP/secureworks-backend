@@ -14816,8 +14816,20 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   // them) requires `_makesafeInvoiceIsRaised` — AUTHORISED/SUBMITTED/PAID. A
   // DRAFT satisfies none of them, so the only term this can reach is the
   // pre-Xero `invoiceIsDraft` Docs Ready positive. The closeout suppression
-  // this line exists for is untouched, as are `invoice_raw_status` /
-  // `invoice_date` / `invoice_created_at` below (completion-time inputs).
+  // this line exists for is untouched.
+  //
+  // `invoiceForStage` is also the ONE invoice binding this card presents from
+  // (`invoice_raw_status` / `invoice_date` / `invoice_created_at` below). They
+  // used to run `allowCloseoutFromEvidence` a second time on their own, which
+  // reproduced the exact defect the paragraph above describes one level down:
+  // the ladder derived `report_ready` from a qualifying current-cycle DRAFT
+  // while the SAME row presented no invoice status, no invoice date and no
+  // created-at, so the cockpit had nothing to bind an approve control to and
+  // the Captain could not action a card the board had already called ready
+  // (White Gum Valley SWMS-261114, Koondoola SWMS-261025, 2026-08-06 — the
+  // same pair, for the same reason, one seam later). Binding presentation to
+  // the invoice the ladder actually used keeps the two answers structurally
+  // incapable of disagreeing.
   const invoiceForStage =
     (scoped.allowCloseoutFromEvidence || invoiceQualifiesForCurrentAttendance)
       ? invoice
@@ -14929,12 +14941,15 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     crew_members: crew.crew_members,
     report_status: makesafeReportStatus(boardStage, detail, scopedReport),
     invoice_status: makesafeInvoiceStatus(boardStage, invoice),
-    // Server-only inputs for the computed status completion-time fallback. The
-    // canonical projection consumes them but neither trade nor ops payloads expose
-    // raw invoice records. On reattend, suppress closeout status for the engine.
-    invoice_raw_status: scoped.allowCloseoutFromEvidence ? (invoice?.status || null) : null,
-    invoice_date: scoped.allowCloseoutFromEvidence ? (invoice?.invoice_date || null) : null,
-    invoice_created_at: scoped.allowCloseoutFromEvidence ? (invoice?.created_at || null) : null,
+    // Server-only inputs for the computed status completion-time fallback, and
+    // the invoice facts the ops card presents. Both read the SAME binding the
+    // ladder derived from (see `invoiceForStage`): a reattend card still
+    // suppresses prior-cycle commercial evidence, but a current-cycle DRAFT the
+    // shared qualifier has already certified is presented rather than blanked.
+    // Neither trade nor ops payloads expose raw invoice records.
+    invoice_raw_status: invoiceForStage?.status || null,
+    invoice_date: invoiceForStage?.invoice_date || null,
+    invoice_created_at: invoiceForStage?.created_at || null,
     // Independent deterministic prerequisite consumed by the canonical overlay,
     // M1 and stage-v2. The reason distinguishes a bad invoice from prior-cycle
     // commercial evidence that cannot close the current attendance.

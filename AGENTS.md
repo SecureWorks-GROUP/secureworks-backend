@@ -802,12 +802,29 @@ derived `trade_report_in` while the SAME row published
 that hid ready cards from the Captain (White Gum Valley SWMS-261114, Koondoola
 SWMS-261025, 2026-08-06). Passing a `qualifying_draft` through is closeout-safe
 by construction: `qualifies` requires `status === 'DRAFT'` and every closeout
-driver requires `_makesafeInvoiceIsRaised`. Leave `invoice_raw_status` /
-`invoice_date` / `invoice_created_at` suppressed — those are completion-time
-inputs. Diagnose such a card from `invoice_draft_qualification_reason`, never
-from `commercial_warning`, which fires on every reattend regardless of the
-invoice. Regression + three controls:
-`makesafe_reattend_current_draft_stage_test.ts`.
+driver requires `_makesafeInvoiceIsRaised`. Diagnose such a card from
+`invoice_draft_qualification_reason`, never from `commercial_warning`, which
+fires on every reattend regardless of the invoice.
+
+`invoiceForStage` is the card's ONE invoice binding: `invoice_raw_status` /
+`invoice_date` / `invoice_created_at` read it too. They previously re-ran
+`allowCloseoutFromEvidence` themselves, which reproduced the same defect one
+seam later — the board derived `report_ready` FROM the DRAFT while the same row
+served all three as null, so the cockpit had nothing to bind an approve control
+to and the Captain could not action a card the board had already called ready
+(the SAME pair, SWMS-261114 and SWMS-261025, 2026-08-06). Placement and
+presentation must stay structurally incapable of disagreeing; do not re-split
+them, and do not "fix" a null by defaulting it to `"DRAFT"`. Widening is
+closeout-safe for the same reason as the ladder: the qualifier refuses any
+non-DRAFT, so a raised invoice is still never presented on reattend, and the
+completion-time consumers (M1 `completedAt`, `ops.html`
+`isMakesafeCompletedThisWeek`) can only be reached by a card that is both
+placed by a current-cycle DRAFT and displayed terminal — measured empty on the
+456-card board at the time of the fix. Regression + controls:
+`makesafe_reattend_current_draft_stage_test.ts`. Re-provable read-only, before
+or after deploy: `scripts/ses-reattend-invoice-presentation-verify.ts`
+(`--mode=served` reports the live defect population, which must be empty;
+`--mode=derive` runs real production rows through the working tree).
 
 `MAKESAFE_STAGE_LADDER_VERSION` versions the visible ladder (published as
 `declared_stage_engine_version`, advisory, ops payload only) so a measurement

@@ -17,9 +17,18 @@
 // the ladder saw no invoice, `readyForReview` could never be true, and the card
 // fell through to `trade_report_in`.
 //
+// The same defect then repeated one seam later, on the same two cards. The
+// ladder was fixed but the card's PRESENTATION fields (`invoice_raw_status` /
+// `invoice_date` / `invoice_created_at`) still ran `allowCloseoutFromEvidence`
+// on their own, so the board derived `report_ready` from the DRAFT while the
+// same row served no invoice status, no invoice date and no created-at. The
+// cockpit had nothing to bind an approve control to and the Captain could not
+// action a card the board had already called ready. Both now read the single
+// `invoiceForStage` binding, so placement and presentation cannot disagree.
+//
 // The pair below is the whole contract:
 //   - REGRESSION: a reattend card whose DRAFT the qualifier certifies as
-//     current-cycle reaches Docs Ready.
+//     current-cycle reaches Docs Ready AND presents that DRAFT.
 //   - CONTROL: a reattend card whose DRAFT predates the reattend boundary is
 //     `prior_cycle_commercial` and STAYS OUT. Prior-cycle commercial evidence
 //     must never place a card the Captain could approve.
@@ -134,6 +143,40 @@ Deno.test("a reattend card with a qualifying current-cycle DRAFT renders in Docs
   assert(
     (row.cycle_attribution_flags ?? []).includes("commercial_from_prior_cycle"),
   );
+
+  // PRESENTATION: the card must serve the DRAFT it was placed by. A board that
+  // derives `report_ready` from an invoice while presenting no invoice at all
+  // is internally contradictory, and the cockpit cannot offer an approve
+  // control against nulls. These are the exact three fields that came back null
+  // on the served White Gum Valley card while Mindarie (identical but
+  // first-attendance) served all three.
+  assertEquals(row.invoice_raw_status, "DRAFT");
+  assertEquals(row.invoice_date, "2026-08-06");
+  assertEquals(row.invoice_created_at, AFTER_BOUNDARY);
+});
+
+Deno.test("presentation and placement read one binding, so they cannot disagree", () => {
+  // The defect's signature was a single row asserting both "this DRAFT places
+  // the card" and "this card has no invoice". Pin the implication itself rather
+  // than the two values independently: any future re-split of the binding
+  // reproduces the contradiction and fails here regardless of which side moved.
+  for (
+    const [label, inv] of [
+      ["current-cycle draft", invoice("DRAFT", AFTER_BOUNDARY)],
+      ["prior-cycle draft", invoice("DRAFT", BEFORE_BOUNDARY)],
+      ["authorised", invoice("AUTHORISED", AFTER_BOUNDARY)],
+      ["no invoice", null],
+    ] as const
+  ) {
+    const row = enrich(inv);
+    if (row.invoice_qualifies_as_current_draft === true) {
+      assertEquals(
+        row.invoice_raw_status,
+        "DRAFT",
+        `${label}: placed by a qualifying draft but presented none`,
+      );
+    }
+  }
 });
 
 // ── CONTROL: a prior-cycle draft must not place the card ───────────────────
@@ -176,9 +219,12 @@ Deno.test("an AUTHORISED invoice on a reattend card still cannot close it", () =
     row.board_stage !== "completed" && row.board_stage !== "archive",
     `reattend closeout suppression broken: derived ${row.board_stage}`,
   );
-  // The completion-time inputs stay suppressed on reattend — this fix does not
-  // touch them.
+  // Prior-cycle commercial evidence is still not presented either: the
+  // qualifier refuses a non-DRAFT, so the shared binding is null and the
+  // completion-time inputs stay suppressed. Widening presentation to the
+  // certified current-cycle DRAFT cannot reach a raised invoice.
   assertEquals(row.invoice_raw_status, null);
+  assertEquals(row.invoice_date, null);
   assertEquals(row.invoice_created_at, null);
 });
 
