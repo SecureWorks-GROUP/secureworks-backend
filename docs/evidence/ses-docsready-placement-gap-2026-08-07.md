@@ -41,7 +41,7 @@ doors, either of which alone is sufficient:
 
 1. `supabase/functions/ops-api/index.ts:16161-16169` — the board loads
    `xero_invoices` **chunked by `job_id`**, so an unlinked row is never fetched.
-2. `supabase/functions/ops-api/makesafe_docs_ready_invoice.ts:204` —
+2. `supabase/functions/ops-api/makesafe_docs_ready_invoice.ts:207` —
    `currentMakesafeReceivableInvoicesByJobId` skips any row with no `job_id`
    (`if (!jobId) continue;`).
 
@@ -162,3 +162,28 @@ it means running the SES-native mint/bind (`create_ses_invoice_draft` →
 `execute_ses_invoice_revision`) — a production money write. Removing the artifact
 term would weaken the completeness gate. Neither is available here, so the
 refusal stands and is recorded as the finding.
+
+## The two hand-typed drafts contradict the Captain's own later rulings
+
+Worth knowing before anyone proposes binding them. The labour line is identical
+on both sides (same hours, same sealed $85 rate); only the second line differs,
+and the hand-typed drafts were written on **5 August**, the day *before* the
+Captain ruled these materials figures on **6 August**. Both rulings are already
+recorded on the dockets with his decision keys
+(`tuart-hill-261015-disposal-70`, `captain-materials-proposal-2026-08-06-floreat-60`).
+
+| card | hand-typed draft (5 Aug) | docket proposal / ruling (6 Aug) |
+|---|---|---|
+| SWMS-261015 | disposal-and-tip line $125 ex → **$464.75 inc** | materials $70 ex → **$404.25 inc** |
+| SWMS-261021 | materials $45 ex → **$330.00 inc** | materials $60 ex → **$346.50 inc** |
+
+So the two available paths produce different money, in opposite directions.
+Voiding and re-minting produces the ruled figures; binding the existing drafts
+supersedes those rulings.
+
+## Follow-ons
+
+- `ses-docsready-captain-decision-2026-08-07.md` — the staged one-word-per-card
+  decision, with per-card evidence and the seal collision on the link option.
+- `ses-missing-invoice-signal-defect-2026-08-07.md` — the wrong-signal defect
+  this investigation exposed, written up as its own fixable item.
