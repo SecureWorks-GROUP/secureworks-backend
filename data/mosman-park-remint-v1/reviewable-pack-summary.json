@@ -1,0 +1,60 @@
+{
+  "docket_revision_id": "8e314d57-6114-574f-9cb4-8763ec12164b",
+  "role_counts": {
+    "invoice_proposal": 1,
+    "supporting_report_pdf": 1,
+    "photo_selection": 1,
+    "completion_photo": 15,
+    "swms_artifact": 1,
+    "assembler_envelope": 1,
+    "capability": 1,
+    "case_story": 1,
+    "docket_manifest": 1,
+    "invoice_email_draft": 1,
+    "photo_email_draft": 1,
+    "report_email_draft": 1,
+    "release_payload": 1,
+    "review_spec": 1,
+    "review_html": 1,
+    "source_attachment": 1,
+    "xero_invoice_pdf": 1
+  },
+  "builder_docs": [
+    {
+      "role": "supporting_report_pdf",
+      "file_name": null,
+      "object_key": "makesafe-docket-artifacts/762ebaad-5f6f-4477-acb7-30db016b15ea/8e314d57-6114-574f-9cb4-8763ec12164b/ARTIFACTS/Make-Safe-Report-SWMS-261147-Mosman-Park-359775313",
+      "content_hash": "sha256:7739ab1e5ae4936daba9972b1643d81754623a2466933356dd3d21047cd3a713",
+      "suppressed": null,
+      "url": "https://kevgrhcjxspbxgovpmfl.supabase.co/storage/v1/object/sign/makesafe-docket-artifacts/762ebaad-5f6f-4477-acb7-30db016b15ea/8e314d57-6114-574f-9cb4-8763ec121"
+    },
+    {
+      "role": "swms_artifact",
+      "file_name": null,
+      "object_key": "makesafe-docket-artifacts/762ebaad-5f6f-4477-acb7-30db016b15ea/8e314d57-6114-574f-9cb4-8763ec12164b/ARTIFACTS/SWMS - MLB-27482 - 33-37-Fairlight-Street-Mosman-P",
+      "content_hash": "sha256:68f914f89a4a5c2dd5d42bfc74aaaf84323b3180e434dc82d4c308cb40a47344",
+      "suppressed": null,
+      "url": "https://kevgrhcjxspbxgovpmfl.supabase.co/storage/v1/object/sign/makesafe-docket-artifacts/762ebaad-5f6f-4477-acb7-30db016b15ea/8e314d57-6114-574f-9cb4-8763ec121"
+    },
+    {
+      "role": "xero_invoice_pdf",
+      "file_name": null,
+      "object_key": "makesafe-docket-artifacts/762ebaad-5f6f-4477-acb7-30db016b15ea/xero-invoice-pdfs/b5d36e8c-5a24-4bc3-a1b8-88df5bd1ebfd/INV-1146.pdf",
+      "content_hash": "sha256:74d05ab317214572dfc7ff82a1ecc7b2464e6d3d587ea04d78d5a14f3bddae43",
+      "suppressed": null,
+      "url": "https://kevgrhcjxspbxgovpmfl.supabase.co/storage/v1/object/sign/makesafe-docket-artifacts/762ebaad-5f6f-4477-acb7-30db016b15ea/xero-invoice-pdfs/b5d36e8c-5a24-4"
+    }
+  ],
+  "presentation": {
+    "kind": "ready",
+    "state": "drafted",
+    "reason": null,
+    "pre_xero_docs_ready": true,
+    "review_state": "READY",
+    "docket_revision_id": "8e314d57-6114-574f-9cb4-8763ec12164b"
+  },
+  "state": null,
+  "blockers": [],
+  "success": null,
+  "error": null
+}

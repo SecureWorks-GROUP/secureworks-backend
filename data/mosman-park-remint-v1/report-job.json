@@ -1,0 +1,156 @@
+{
+  "ref": "MLB-27482",
+  "address": "33-37 Fairlight Street, Mosman Park",
+  "contact": "The Owners of 33 Fairlight Street Mosman Park Strata Plan 13038",
+  "date": "2026-08-05",
+  "arrival": "2026-08-05 18:00",
+  "crew": "1 trade",
+  "scope": "Make safe the smashed bedroom window and roller door.",
+  "findings": "Fire. Completely smashed bedroom window and smashed roller door around the handle. Glass shattered around the window area.",
+  "works": "This attendance was after hours.\n\nThe site was dirty and had to be cleaned and worked around debris to facilitate the repair.\n\nOne trade cleaned up glass shards and removed glass still in the bedroom window frame. Sharp edges on the roller door were taped and any loose glass was removed. Board-up frames were built on the bedroom window and the roller door area, and plyboard was screwed onto the frames to create a secure board-up. Glass and off cuts from the work were disposed of.",
+  "materials": "Structural timber x 8m. Plyboard 12mm 2.4x1.8 x 3. Screws x 40.",
+  "materials_evidence": {
+    "state": "recorded_used",
+    "items": [
+      "Structural timber x 8m",
+      "Plyboard 12mm 2.4x1.8 x 3",
+      "Screws x 40"
+    ]
+  },
+  "photo_evidence": {
+    "source_revision": "job_service_report:b7edf9d8-6f68-4cc4-b12a-7aa20d3b070a",
+    "completeness_verified": true,
+    "source_count": 15,
+    "applicable_count": 15,
+    "selected_count": 15,
+    "applicable_ids": [
+      "d1db5c5e-12ec-47be-b60b-eca594a4649f",
+      "3df2d25f-0ee0-4c42-8e8d-c0b563222762",
+      "2bdaf886-d195-467d-8bb4-b104f38b410c",
+      "780ec2ba-2334-4d66-b5b5-2e28114f8af9",
+      "c126c1da-4a82-4a49-aae7-2c88531c646f",
+      "07a9765e-b437-407c-8120-2ee3acd7b2f8",
+      "ab8a18fb-56f7-4e29-9c35-04fee6cfb82a",
+      "a5c11ff3-fbaf-492f-bee9-73bb694e3522",
+      "5a0b48c7-37da-4982-b13f-e32b15ce60c5",
+      "61ba64d0-5454-4762-98ba-5da05ed3ca67",
+      "87a915d2-972b-49e1-9d9f-92cfbe242b5f",
+      "25212d1b-85f6-4ce2-890f-d27f40275e3e",
+      "3ed578e6-b462-4d75-9ba7-a0794013e308",
+      "d91d4e9d-8702-4a62-bfa2-d2e3708da741",
+      "e9e0e1de-bbf7-40cd-afc7-3e8c05d8a2dc"
+    ],
+    "selected_ids": [
+      "d1db5c5e-12ec-47be-b60b-eca594a4649f",
+      "3df2d25f-0ee0-4c42-8e8d-c0b563222762",
+      "2bdaf886-d195-467d-8bb4-b104f38b410c",
+      "780ec2ba-2334-4d66-b5b5-2e28114f8af9",
+      "c126c1da-4a82-4a49-aae7-2c88531c646f",
+      "07a9765e-b437-407c-8120-2ee3acd7b2f8",
+      "ab8a18fb-56f7-4e29-9c35-04fee6cfb82a",
+      "a5c11ff3-fbaf-492f-bee9-73bb694e3522",
+      "5a0b48c7-37da-4982-b13f-e32b15ce60c5",
+      "61ba64d0-5454-4762-98ba-5da05ed3ca67",
+      "87a915d2-972b-49e1-9d9f-92cfbe242b5f",
+      "25212d1b-85f6-4ce2-890f-d27f40275e3e",
+      "3ed578e6-b462-4d75-9ba7-a0794013e308",
+      "d91d4e9d-8702-4a62-bfa2-d2e3708da741",
+      "e9e0e1de-bbf7-40cd-afc7-3e8c05d8a2dc"
+    ],
+    "excluded": [],
+    "rejected": []
+  },
+  "photos": [
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-01-d1db5c5e.jpg",
+      "evidence_id": "d1db5c5e-12ec-47be-b60b-eca594a4649f",
+      "caption": "Site photo 1",
+      "content_sha256": "sha256:28897989f71e4f4440794c27386288675b8cb7ea1f2512f8193aed7c78ac9623"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-02-3df2d25f.jpg",
+      "evidence_id": "3df2d25f-0ee0-4c42-8e8d-c0b563222762",
+      "caption": "Site photo 2",
+      "content_sha256": "sha256:310f4809749cc8b9553272f56423ab1b2ef4f9489a2f8f27010db73a5fc4014f"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-03-2bdaf886.jpg",
+      "evidence_id": "2bdaf886-d195-467d-8bb4-b104f38b410c",
+      "caption": "Site photo 3",
+      "content_sha256": "sha256:cd3a268e4cf7d406cf233939ddc9d19e0afc819e10346f2381b8c52a48b78a66"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-04-780ec2ba.jpg",
+      "evidence_id": "780ec2ba-2334-4d66-b5b5-2e28114f8af9",
+      "caption": "Site photo 4",
+      "content_sha256": "sha256:7b6a3b6adb17287fbc997f568cd04c02bd10cae3f169e1d105da52e188a30015"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-05-c126c1da.jpg",
+      "evidence_id": "c126c1da-4a82-4a49-aae7-2c88531c646f",
+      "caption": "Site photo 5",
+      "content_sha256": "sha256:0d02037537b83110a427c07c24dc1d6ab3af26989f61585b72296ba6752f3d30"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-06-07a9765e.jpg",
+      "evidence_id": "07a9765e-b437-407c-8120-2ee3acd7b2f8",
+      "caption": "Site photo 6",
+      "content_sha256": "sha256:736da0750d2b5e4e998c03e26fa51ca0303e2571c54d13b517d5dac302062ef4"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-07-ab8a18fb.jpg",
+      "evidence_id": "ab8a18fb-56f7-4e29-9c35-04fee6cfb82a",
+      "caption": "Site photo 7",
+      "content_sha256": "sha256:9b1b571b29b63cf83c1dd5be9d73aa865815476e7beb3280d6c0ce91b2b00a0d"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-08-a5c11ff3.jpg",
+      "evidence_id": "a5c11ff3-fbaf-492f-bee9-73bb694e3522",
+      "caption": "Site photo 8",
+      "content_sha256": "sha256:b4b08b0c5cb14ea03016bb0be15dadaadf95b3051813ca5cdc3cb9d49a9780f3"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-09-5a0b48c7.jpg",
+      "evidence_id": "5a0b48c7-37da-4982-b13f-e32b15ce60c5",
+      "caption": "Site photo 9",
+      "content_sha256": "sha256:d1571f7b1a03d5d374dfabd4fb5d2d2dba5006d70e756ba710ae49282f242878"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-10-61ba64d0.jpg",
+      "evidence_id": "61ba64d0-5454-4762-98ba-5da05ed3ca67",
+      "caption": "Site photo 10",
+      "content_sha256": "sha256:8f0546e24c4879fda3935c0797dcfcdccb01b6ca3fba182c036837d87f75c6cb"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-11-87a915d2.jpg",
+      "evidence_id": "87a915d2-972b-49e1-9d9f-92cfbe242b5f",
+      "caption": "Site photo 11",
+      "content_sha256": "sha256:037a5b81b714f520bdf26bdaf4180e00bacf72f7448263c5be92b7b241e7a8b6"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-12-25212d1b.jpg",
+      "evidence_id": "25212d1b-85f6-4ce2-890f-d27f40275e3e",
+      "caption": "Site photo 12",
+      "content_sha256": "sha256:e6d80b73245a090e38386bcb1927fffbfe3f57bba51503ccddc61fab9f1add94"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-13-3ed578e6.jpg",
+      "evidence_id": "3ed578e6-b462-4d75-9ba7-a0794013e308",
+      "caption": "Site photo 13",
+      "content_sha256": "sha256:9c3c3223fbb37d90572f0d4195555651090c88aeac2a48181feeb72b1caee20e"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-14-d91d4e9d.jpg",
+      "evidence_id": "d91d4e9d-8702-4a62-bfa2-d2e3708da741",
+      "caption": "Site photo 14",
+      "content_sha256": "sha256:9daf2cae74ebae1dd49b0e602559757018a7f2890056e005d2df2200001be3ef"
+    },
+    {
+      "file": "/Users/marninstobbe/.treehouse/secureworks-backend-5961a6/5/secureworks-backend/data/mosman-park-remint-v1/photos/photo-15-e9e0e1de.jpg",
+      "evidence_id": "e9e0e1de-bbf7-40cd-afc7-3e8c05d8a2dc",
+      "caption": "Site photo 15",
+      "content_sha256": "sha256:60e3c724a3244e93aa75975546955dddb15c2efa6c2ba3f22b447ebc43e20a80"
+    }
+  ],
+  "output_name": "Make-Safe-Report-SWMS-261147-Mosman-Park"
+}

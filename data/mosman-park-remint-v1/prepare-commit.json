@@ -1,0 +1,50 @@
+{
+  "http": 200,
+  "prepared": {
+    "state": "prepared",
+    "obligation_id": "0c5170ea-02a4-4b76-a78b-b464e9d7c3ad",
+    "revision_id": "45e65461-39e5-537b-bfb1-8842256c6f14",
+    "content_hash": "sha256:45e6546139e5237b7fb18842256c6f14b18e6d3d36fbc4363e0ac6b97c103582",
+    "pricing_disposition": "priced_with_line_override",
+    "totals": {
+      "ex": 837.3,
+      "inc": 921.03
+    },
+    "lines": [
+      {
+        "description": "MLB-27482 - make-safe attendance - 1 trade x 5 hours (after hours)",
+        "quantity": 5,
+        "unit_price": 100,
+        "override_kind": "commercial_rate_override"
+      },
+      {
+        "description": "MLB-27482 - Materials: structural timber 8m + ply 12mm 2.4x1.8 x3 + screws",
+        "quantity": 1,
+        "unit_price": 267.3,
+        "override_kind": "commercial_rate_override"
+      },
+      {
+        "description": "MLB-27482 - Glass disposal",
+        "quantity": 1,
+        "unit_price": 70,
+        "override_kind": "commercial_rate_override"
+      }
+    ],
+    "override_kind": "commercial_rate_override",
+    "decision_key": "mosman-park-remint-v1",
+    "labour_rate_override": {
+      "sealed_unit_price_ex_gst": 85,
+      "authorised_unit_price_ex_gst": 100,
+      "reason": "after hours"
+    }
+  },
+  "commit": {
+    "idempotent": false,
+    "content_hash": "sha256:45e6546139e5237b7fb18842256c6f14b18e6d3d36fbc4363e0ac6b97c103582",
+    "obligation_id": "0c5170ea-02a4-4b76-a78b-b464e9d7c3ad",
+    "readiness_revision": null,
+    "readiness_certified": false,
+    "dependency_generation": 26,
+    "invoice_obligation_revision_id": "45e65461-39e5-537b-bfb1-8842256c6f14"
+  }
+}
