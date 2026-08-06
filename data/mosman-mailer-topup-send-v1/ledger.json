@@ -1,0 +1,162 @@
+{
+  "schema": "secureworks.mosman-mailer-topup-send/v1",
+  "card": {
+    "job_id": "762ebaad-5f6f-4477-acb7-30db016b15ea",
+    "job_number": "SWMS-261147",
+    "builder_reference": "MLB-27482",
+    "site_suburb": "Mosman Park",
+    "company_slug": "mlb",
+    "attendance_cycle_id": "b7edf9d8-6f68-4cc4-b12a-7aa20d3b070a",
+    "cycle_number": 1,
+    "reattend_count": 0
+  },
+  "state": "dry_run_complete_awaiting_captain_go",
+  "route_used": {
+    "action": "ops-api?action=send_mailer_ops_visibility",
+    "implementation": "supabase/functions/ops-api/ses_mailer_ops_send.ts:1175 (sendMailerOpsVisibilityAction)",
+    "dispatch": "supabase/functions/ops-api/index.ts:6895",
+    "fallback_considered": "supplementary release via execute_ses_release_revision",
+    "fallback_rejected_because": "the release machinery has an invoice route kind; this route cannot represent an invoice at the type, runtime or DB CHECK level, and it structurally refuses the billing report_recipient"
+  },
+  "already_delivered": {
+    "mailer_ops_send_effects_for_this_job": 0,
+    "ever_sent_to_prime_mailer": false,
+    "billing_pack_release_revision_id": "1f354c78-5e57-5962-9b5f-bee413c56b86",
+    "routes": [
+      {
+        "route_kind": "report",
+        "to": ["makesafes@mlbuilders.com.au"],
+        "cc": [],
+        "confirmed_at_utc": "2026-08-06T05:10:41.879Z",
+        "effect_id": "9d7fcbca-9b7e-4735-adec-794c53ce33f4",
+        "operation_token": "SES-362b48a4-babc-5113-99be-dec5f0a31ed6",
+        "internet_message_id": "<SY8P300MB08402663F3C1535F555FDBF693D22@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>"
+      },
+      {
+        "route_kind": "photo",
+        "to": ["makesafes@mlbuilders.com.au"],
+        "cc": [],
+        "confirmed_at_utc": "2026-08-06T05:10:57.417Z",
+        "effect_id": "d5621f25-a9eb-42d1-bcbf-540485c83a79",
+        "operation_token": "SES-a1911f9c-248b-57ab-833a-51277c1304d3",
+        "internet_message_id": "<SY8P300MB0840A90C21898632F400A08193D22@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>"
+      },
+      {
+        "route_kind": "invoice",
+        "to": ["makesafes@mlbuilders.com.au"],
+        "cc": ["finance@secureworkswa.com.au"],
+        "confirmed_at_utc": "2026-08-06T05:11:04.390Z",
+        "effect_id": "60c9045a-93dc-4fe7-b339-b66e2838ba19",
+        "operation_token": "SES-61001a69-b0d1-501c-b9b3-66fea86255c8",
+        "internet_message_id": "<SY8P300MB084032C6F5AC8A2D2438614093D22@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>"
+      }
+    ]
+  },
+  "invoice_state_confirmed": {
+    "brief_said": "INV-1152 stays a DRAFT and stays untouched",
+    "production_says": "INV-1152 is AUTHORISED, total 940.50, authorised by effect e190b0be-a299-46e4-bab9-63fff0b1c311 confirmed 2026-08-06T05:10:04.772Z, then mailed on the invoice route at 05:11:04Z",
+    "captain_confirmed": "AUTHORISED at 940.50 as of 05:19Z; he approved it and the billing pack has already gone to makesafes@. Settled state, not work to do.",
+    "effect_on_this_task": "none; no invoice is touched and the mailer ops route cannot carry one",
+    "other_invoices_on_card": [
+      { "number": "INV-1143", "status": "DELETED", "total": "467.50" },
+      { "number": "INV-1146", "status": "DELETED", "total": "921.03" },
+      { "number": "INV-1147", "status": "DELETED", "total": "885.50" }
+    ]
+  },
+  "subject": {
+    "resolved_redacted": "NEW WORK ORDER - MLB-27482 U7/ <street address redacted>, Mosman Park, WA 6012",
+    "exact_string_sha256": "78ed5e1987733d5e9d9fca86a3819936fef9e718775356f1b6b35768d4ecb3a9",
+    "exact_string_length": 75,
+    "subject_source": "emails_subject",
+    "pick_ambiguous": false,
+    "corroborating_stores": [
+      "emails.subject via makesafe_intake_case_sources post_id (2 rows, identical)",
+      "makesafe_intake_drafts.subject for the approved draft",
+      "jobs.metadata.builder_email_subject"
+    ],
+    "distinct_candidates": 1,
+    "recency_fallback_used": false,
+    "matches_already_sent_makesafes_routes": true
+  },
+  "dry_run": {
+    "ran_at_note": "no Graph call, no effect claim, no email",
+    "common": {
+      "from": "admin@secureworkswa.com.au",
+      "to": ["mlb.mailer@primeeco.tech"],
+      "to_source": "card_intake_work_order_sender",
+      "to_card_bound": true,
+      "allowlist_expanded": false,
+      "cc": ["ses@secureworkswa.com.au"],
+      "cycle_scoped": false,
+      "invoice_present": false,
+      "invoice_structurally_impossible": true
+    },
+    "report": {
+      "success": true,
+      "attachment_names": ["Make-Safe-Report-SWMS-261147-Mosman-Park-359775313575.pdf"],
+      "attachment_roles": ["report_pdf"],
+      "attachment_size_bytes": 2635527,
+      "attachment_content_hash": "sha256:7739ab1e5ae4936daba9972b1643d81754623a2466933356dd3d21047cd3a713",
+      "job_document_id": "71f64d51-58f4-426a-83fe-57bf800cfd9c",
+      "provenance_satisfied": "curated_bind",
+      "expected_raw_sha256": "sha256:e8b2974f53d50d10ab3cb42c8abae50c8074e000a33f3984c08e0145ee4244d0",
+      "attempt_key": "762ebaad-report-mailer-topup-v1",
+      "operation_key": "ses:mailer_ops_send:71d3e3a3-58d1-55ac-92eb-8195b0ad7923",
+      "external_token": "SES-71d3e3a3-58d1-55ac-92eb-8195b0ad7923"
+    },
+    "photo": {
+      "success": true,
+      "attachment_names": [
+        "site-photo-01.jpg", "site-photo-02.jpg", "site-photo-03.jpg",
+        "site-photo-04.jpg", "site-photo-05.jpg", "site-photo-06.jpg",
+        "site-photo-07.jpg", "site-photo-08.jpg", "site-photo-09.jpg",
+        "site-photo-10.jpg", "site-photo-11.jpg", "site-photo-12.jpg"
+      ],
+      "attachment_roles_all": "site_photo",
+      "available_count": 15,
+      "selected_count": 12,
+      "cap": 12,
+      "cap_source": "MAILER_OPS_PHOTO_CAP, ses_mailer_ops_send.ts:105",
+      "excluded_receipt_count": 0,
+      "excluded_other_cycle_count": 0,
+      "selection_rule": "representative spread across the ordered list, not first N",
+      "attempt_key": "762ebaad-photo-mailer-topup-v1",
+      "operation_key": "ses:mailer_ops_send:0f0602b2-1c6f-56ae-b9a2-1947ee6a3966",
+      "external_token": "SES-0f0602b2-1c6f-56ae-b9a2-1947ee6a3966"
+    }
+  },
+  "photo_cap_disclosure": {
+    "true_total": 15,
+    "would_attach": 12,
+    "would_drop": 3,
+    "dropped_media": [
+      { "media_id": "2bdaf886-d195-467d-8bb4-b104f38b410c", "position": 3, "size_bytes": 508845 },
+      { "media_id": "a5c11ff3-fbaf-492f-bee9-73bb694e3522", "position": 8, "size_bytes": 364823 },
+      { "media_id": "3ed578e6-b462-4d75-9ba7-a0794013e308", "position": 13, "size_bytes": 510327 }
+    ],
+    "selected_12_total_bytes": 3959993,
+    "all_15_total_bytes": 5343988,
+    "all_15_base64_mib": 6.8,
+    "exchange_message_ceiling_mb": 35,
+    "size_forces_the_cap": false,
+    "note": "All 15 clear every documented Graph and Exchange ceiling with large margin. The three are dropped only because the module constant is a flat 12, so this is a real choice and is put to the Captain."
+  },
+  "gates": {
+    "any_gate_refused": false,
+    "sealed_ses_money_fence": "untouched",
+    "duplicate_send_guard": "intact; identity moves only on the deliberate attempt_key",
+    "pdf_provenance": "satisfied at curated_bind; served bytes matched the bind coordinate",
+    "billing_recipient_refusal": "armed and correctly not triggered (To is the work-order mailer, not makesafes@)",
+    "photo_volume_guard": "evaluated on the composed set, passed",
+    "money_verbs_performed": []
+  },
+  "live_send": {
+    "performed": false,
+    "reason": "dry run first; stopped for the Captain's go per the brief",
+    "proof": null
+  },
+  "open_decisions": [
+    "Go / no-go on the live send. Both routes dry-run clean; this is a first send to the Prime mailer, not a re-send.",
+    "12 of 15 photos as the route does today, or raise MAILER_OPS_PHOTO_CAP (ses_mailer_ops_send.ts:105) to carry all 15. Size is not the constraint either way; the constant is sealed and the change is the Captain's call."
+  ]
+}
