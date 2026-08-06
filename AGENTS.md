@@ -2348,7 +2348,7 @@ the obligation checks money nobody is about to bill.
 
 `makesafe_invoice_rules_clean.ts` is the pure, closed-list determination for
 Item 10 auto-authorisation (17 guards in three families, contract
-`ses-rules-clean/v3`; `unevaluable` PARKS, and
+`ses-rules-clean/v4`; `unevaluable` PARKS, and
 family B is a WHITELIST that re-derives the sealed line set and demands equality,
 so an unmodelled fault shape parks by construction). Three rules the 2026-08-07
 review had to install because the module was blind in its own way: the
@@ -2365,7 +2365,12 @@ uncertified `makesafe_portal_capture_revisions` row is NOT-evidence at `C3`
 rather than evidence with a caveat (the writer can append and then fail its own
 re-read; it cannot un-write). `C3`'s portal branch takes capture rows
 UNFILTERED, qualifies them itself, and NAMES the capture it relied on instead of
-counting; it never dedupes or alters a row. An absent, mirrored or unreadable
+counting; it never dedupes or alters a row. Note the two capture facts are
+DIFFERENT: `status` certifies the capture ARTIFACT, `capture_result` is what the
+capture SAW, so a certified `not_done`/`unreachable` FLAGS as evidence against
+completion and an unrecognised result parks. Role, and which floor a card owes
+(`report_evidence_floor`), are likewise module-side stated claims, never a
+caller's query filter. An absent, mirrored or unreadable
 draft total parks; it is never assumed to match. It has no call site in
 `ops-api` yet — switch-on needs Captain decision D5 plus a migration, because
 `record_ses_revision_approval_v1` requires an `operator_id` active on

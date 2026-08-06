@@ -68,6 +68,16 @@
 // not-evidence, and the verdict NAMES the capture it relied on rather than
 // counting rows.
 //
+// v4 (2026-08-07), the same class again inside the v3 fix: a SUCCESSFUL CAPTURE
+// IS NOT A COMPLETE REPORT. `status = verified` certifies the capture artifact;
+// `capture_result` is what the capture saw, so a certified `not_done` or
+// `unreachable` is positive evidence AGAINST completion and must flag rather
+// than satisfy the floor. C3 also owns the ROLE test (it may not sit in a
+// caller's query), the evidence floor is a STATED claim rather than one
+// inferred from which field the caller happened to populate, and the capture
+// relied on is chosen deterministically so two identical runs name the same
+// row.
+//
 // Divergence rule, stated so a future maintainer cannot get it backwards: this
 // classifier is a SUBTRACTIVE gate, never a pricing authority. If it and the
 // skill's Python guards ever disagree, the correct resolution is the one that
@@ -91,7 +101,7 @@ import type { SesInvoiceDuplicateResolution } from "./makesafe_invoice_duplicate
  * determination stays attributable to the definition that produced it. A
  * recorded verdict without a version is not re-derivable.
  */
-export const SES_RULES_CLEAN_CONTRACT_VERSION = "ses-rules-clean/v3";
+export const SES_RULES_CLEAN_CONTRACT_VERSION = "ses-rules-clean/v4";
 
 export type SesRulesCleanFamily = "A" | "B" | "C";
 export type SesRulesCleanGuardStatus = "clean" | "flagged" | "unevaluable";
@@ -207,7 +217,7 @@ export const SES_RULES_CLEAN_GUARDS = [
     id: "C3_report_evidence_floor",
     family: "C",
     what:
-      "The report evidence floor and photo completeness are independently proven, not self-vouched. On the portal branch a specific CERTIFIED capture is named as the evidence relied on.",
+      "The report evidence floor and photo completeness are independently proven, not self-vouched. The floor a card owes is STATED, and on the portal branch a specific certified roof_report capture RECORDING THE REPORT DONE is named as the evidence relied on.",
   },
 ] as const satisfies ReadonlyArray<
   { id: string; family: SesRulesCleanFamily; what: string }
@@ -404,6 +414,22 @@ export interface SesRulesCleanEvidence {
   report_evidence_read_error?: string | null;
 
   /**
+   * WHERE this card's report lives, stated by the caller rather than inferred
+   * from which evidence field happens to be populated.
+   *
+   * `pack_supporting_report` -- the pack carries the report, and the floor is
+   *                             the independent completeness proof.
+   * `portal_capture`         -- a report-only family whose report lives in the
+   *                             builder portal, so a certified capture is the
+   *                             floor.
+   *
+   * Absent or unrecognised is UNEVALUABLE and parks. Selecting the branch by
+   * field presence was a real widening: a pack card whose independence proof
+   * was UNKNOWN passed on a capture that says nothing about it.
+   */
+  report_evidence_floor?: "pack_supporting_report" | "portal_capture" | null;
+
+  /**
    * The portal-capture branch of the C3 floor, for a report-only family whose
    * report lives in the builder portal rather than in the pack. Supply the
    * card's capture rows AS READ -- unfiltered -- and this module decides which
@@ -426,7 +452,18 @@ export interface SesRulesCleanEvidence {
  */
 export interface SesRulesCleanPortalCapture {
   id?: unknown;
+  /**
+   * `roof_report` / `assessment` / `photos` / `scope`. Only `roof_report` is
+   * the roof-report evidence floor; the rest are other artifacts entirely.
+   */
   role?: unknown;
+  /**
+   * WHAT THE CAPTURE SAW: `done` / `not_done` / `unreachable`. This is a
+   * different fact from `status`, which certifies only that the capture
+   * artifact itself is sound. A certified capture of an INCOMPLETE portal is
+   * evidence against completion, not evidence for it.
+   */
+  capture_result?: unknown;
   /** `captured` / `verified` / `rejected`. Only `verified` is evidence. */
   status?: unknown;
   attendance_cycle_id?: unknown;
@@ -460,6 +497,11 @@ const SEALED_LABOUR_RATE_EX_GST: Record<string, number> = {
 
 /** Australian GST, as `ses_prepare_docket_revision` applies it (`ex * 1.1`). */
 const GST_INCLUSIVE_MULTIPLIER = 1.1;
+
+/** The producer stores cents, so the comparison and the message use cents. */
+function roundToCents(value: number): number {
+  return Math.round(value * 100) / 100;
+}
 
 /** Sealed assessment prices (ses_prepare_docket_revision assessment_fixed). */
 const ASSESSMENT_EX_GST = 150;
@@ -1027,7 +1069,7 @@ function classifyXeroDraftTotal(
     (running, line) => running + line.quantity * line.unit_price_ex_gst,
     0,
   );
-  const sealedIncTotal = sealedTotal * GST_INCLUSIVE_MULTIPLIER;
+  const sealedIncTotal = roundToCents(sealedTotal * GST_INCLUSIVE_MULTIPLIER);
   const faults: string[] = [];
   if (!money(subTotal, sealedTotal)) {
     faults.push(
@@ -1468,7 +1510,19 @@ function classifyFamilyC(
       "unevaluable",
       `The card's portal captures could not be read (${evidence.portal_capture_read_error}).`,
     );
-  } else if (evidence.portal_captures != null) {
+  } else if (
+    evidence.report_evidence_floor !== "pack_supporting_report" &&
+    evidence.report_evidence_floor !== "portal_capture"
+  ) {
+    record(
+      outcomes,
+      "C3_report_evidence_floor",
+      "unevaluable",
+      `This determination states no recognised report evidence floor (${
+        text(evidence.report_evidence_floor) || "<absent>"
+      }), so which proof this card owes is unknown.`,
+    );
+  } else if (evidence.report_evidence_floor === "portal_capture") {
     classifyPortalCaptureEvidence(evidence, outcomes);
   } else if (evidence.report_evidence_independent !== true) {
     // The two open readiness gaps live exactly here. Until they close, a card
@@ -1499,8 +1553,9 @@ function classifyFamilyC(
  * verdict names the evidence it relied on and stays auditable afterwards. A
  * card may legitimately hold several capture rows -- including a byte-identical
  * duplicate that is an open Captain item -- and several qualifying rows is not
- * a failure, but the one relied on must still be named. Nothing here alters,
- * dedupes or orders away a row; duplicates are the Captain's to resolve.
+ * a failure, but the one relied on must still be named, and it is chosen
+ * deterministically so two identical runs agree. Nothing here alters, dedupes
+ * or orders away a caller's rows; duplicates are the Captain's to resolve.
  */
 function classifyPortalCaptureEvidence(
   evidence: SesRulesCleanEvidence,
@@ -1517,38 +1572,63 @@ function classifyPortalCaptureEvidence(
     return;
   }
   const captures = evidence.portal_captures ?? [];
-  const qualifying = captures.filter((capture) =>
-    portalCaptureRefusal(capture, evidence.current_attendance_cycle_id) === null
-  );
+  const cycle = evidence.current_attendance_cycle_id;
+  const refusals = captures.map((capture, index) => ({
+    capture,
+    index,
+    refusal: portalCaptureRefusal(capture, cycle),
+  }));
+  const qualifying = refusals.filter((row) => row.refusal === null);
   if (qualifying.length === 0) {
-    const refusals = captures.map((capture, index) =>
-      `capture ${describePortalCapture(capture, index)}: ${
-        portalCaptureRefusal(capture, evidence.current_attendance_cycle_id)
-      }`
-    );
+    const flagged = refusals.some((row) => row.refusal?.status === "flagged");
     record(
       outcomes,
       id,
-      captures.length === 0 ? "unevaluable" : "flagged",
+      captures.length > 0 && flagged ? "flagged" : "unevaluable",
       captures.length === 0
         ? "This card's report lives in the builder portal and it holds no portal capture at all, so its evidence floor rests on nothing."
-        : `No portal capture on this card is evidence: ${refusals.join("; ")}.`,
+        : `No portal capture on this card is evidence: ${
+          refusals.map((row) =>
+            `capture ${describePortalCapture(row.capture, row.index)}: ${
+              row.refusal?.reason ?? "it does not qualify"
+            }`
+          ).join("; ")
+        }.`,
     );
     return;
   }
-  const relied = qualifying[0];
+  const relied = reliedOnPortalCapture(qualifying);
   record(
     outcomes,
     id,
     "clean",
     `The evidence relied on is portal capture ${
-      describePortalCapture(relied, captures.indexOf(relied))
-    }, certified verified${
+      describePortalCapture(relied.capture, relied.index)
+    }, certified verified and recording the portal report done${
       qualifying.length > 1
-        ? `, one of ${qualifying.length} qualifying captures on this card`
+        ? `, the newest of ${qualifying.length} qualifying captures on this card`
         : ""
     }.`,
   );
+}
+
+/**
+ * Newest capture wins, with the id as the tiebreak and the caller's own order
+ * as the last resort, so the same rows in a different order name the same
+ * evidence. The caller's array is copied rather than sorted in place.
+ */
+function reliedOnPortalCapture<
+  T extends { capture: SesRulesCleanPortalCapture; index: number },
+>(qualifying: T[]): T {
+  return [...qualifying].sort((a, b) => {
+    const at = text(a.capture.captured_at);
+    const bt = text(b.capture.captured_at);
+    if (at !== bt) return at < bt ? 1 : -1;
+    const ai = text(a.capture.id);
+    const bi = text(b.capture.id);
+    if (ai !== bi) return ai < bi ? -1 : 1;
+    return a.index - b.index;
+  })[0];
 }
 
 /** Identifying coordinates, so the verdict names its own evidence. */
@@ -1559,6 +1639,7 @@ function describePortalCapture(
   const parts = [
     text(capture.id) || `#${index + 1}`,
     `role ${text(capture.role) || "<absent>"}`,
+    `result ${text(capture.capture_result) || "<absent>"}`,
     `cycle ${text(capture.attendance_cycle_id) || "<absent>"}`,
     `captured by ${text(capture.captured_by) || "<absent>"}`,
   ];
@@ -1567,40 +1648,103 @@ function describePortalCapture(
   return parts.join(", ");
 }
 
+/** The role whose capture IS the roof-report evidence floor. */
+const SES_PORTAL_CAPTURE_EVIDENCE_ROLE = "roof_report";
+
+/** What the capture saw. Only `done` reports a report that exists. */
+const SES_PORTAL_CAPTURE_RESULTS = ["done", "not_done", "unreachable"];
+
+interface PortalCaptureRefusal {
+  /** `flagged` is a fact against this card; `unevaluable` is a fact missing. */
+  status: "flagged" | "unevaluable";
+  reason: string;
+}
+
 /**
  * Why this capture is not evidence, or `null` when it is. Every test is
- * positive: an unrecognised status, an absent screenshot flag or an unstated
- * producer refuses, so a caller that forgets a filter parks rather than passes.
+ * positive: an unrecognised status, role or result, an absent screenshot flag
+ * or an unstated producer refuses, so a caller that forgets a filter parks
+ * rather than passes. No qualification boundary may live in a caller's query.
  */
 function portalCaptureRefusal(
   capture: SesRulesCleanPortalCapture,
   currentCycleId: string | null | undefined,
-): string | null {
+): PortalCaptureRefusal | null {
+  const role = text(capture.role);
+  if (role !== SES_PORTAL_CAPTURE_EVIDENCE_ROLE) {
+    return {
+      status: "unevaluable",
+      reason: `it is a ${
+        role || "role-less"
+      } capture, and only a ${SES_PORTAL_CAPTURE_EVIDENCE_ROLE} capture is this evidence floor`,
+    };
+  }
   const status = text(capture.status);
   if (status !== "verified") {
     // The writer can append a row and then fail its own re-read. It refuses to
     // certify, but it cannot un-write. Uncertified is not evidence.
-    return `it is ${status || "of unstated status"}, not certified verified`;
+    return {
+      status: "flagged",
+      reason: `it is ${status || "of unstated status"}, not certified verified`,
+    };
+  }
+  const result = text(capture.capture_result);
+  if (!SES_PORTAL_CAPTURE_RESULTS.includes(result)) {
+    return {
+      status: "unevaluable",
+      reason: `it states ${
+        result || "no"
+      } capture result, and an unrecognised result is never read as done`,
+    };
+  }
+  if (result !== "done") {
+    // Certified, and what it certifies is that the portal was NOT complete.
+    return {
+      status: "flagged",
+      reason:
+        `it is a certified capture recording ${result}, which is evidence that the portal report does not exist`,
+    };
   }
   if (capture.has_screenshot !== true) {
-    return "it carries no server-computed screenshot hash";
+    return {
+      status: "flagged",
+      reason: "it carries no server-computed screenshot hash",
+    };
   }
   if (capture.page_text_hash_corrupted !== false) {
-    return capture.page_text_hash_corrupted === true
-      ? "its page-text coordinate equals its screenshot hash, which is impossible for two different artifacts, so the textual basis of its verdict is not re-verifiable"
-      : "whether its page-text coordinate is re-verifiable was not stated";
+    return {
+      status: "flagged",
+      reason: capture.page_text_hash_corrupted === true
+        ? "its page-text coordinate equals its screenshot hash, which is impossible for two different artifacts, so the textual basis of its verdict is not re-verifiable"
+        : "whether its page-text coordinate is re-verifiable was not stated",
+    };
   }
   const capturedBy = text(capture.captured_by);
   if (!capturedBy) {
-    return "it does not state what looked at the page";
+    return {
+      status: "flagged",
+      reason: "it does not state what looked at the page",
+    };
   }
   if (capturedBy.startsWith(SES_SYNTHETIC_PORTAL_OBSERVER_PREFIX)) {
-    return "it was captured by the in-repo observer, whose images are a synthetic observation card carrying no portal form fields";
+    return {
+      status: "flagged",
+      reason:
+        "it was captured by the in-repo observer, whose images are a synthetic observation card carrying no portal form fields",
+    };
   }
   const cycle = text(currentCycleId);
-  if (!cycle) return "the card's current attendance cycle is not known";
+  if (!cycle) {
+    return {
+      status: "unevaluable",
+      reason: "the card's current attendance cycle is not known",
+    };
+  }
   if (text(capture.attendance_cycle_id) !== cycle) {
-    return "it belongs to an earlier attendance cycle";
+    return {
+      status: "flagged",
+      reason: "it belongs to an earlier attendance cycle",
+    };
   }
   return null;
 }

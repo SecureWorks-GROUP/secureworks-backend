@@ -75,6 +75,9 @@ function baseline(): SesRulesCleanEvidence {
       reason_codes: [],
     },
     full_accrec_scan: { rows_scanned: 930, matches: 0 },
+    // Where the report lives is likewise a stated claim: this card's pack
+    // carries it, and its floor is the independent completeness proof.
+    report_evidence_floor: "pack_supporting_report",
     report_evidence_independent: true,
   };
 }
@@ -767,6 +770,7 @@ const CERTIFIED_CAPTURE = {
   id: "capture-real",
   role: "roof_report",
   status: "verified",
+  capture_result: "done",
   attendance_cycle_id: CYCLE,
   captured_by: "capture_portal_evidence.py/2026-08-02",
   capture_producer: "capture_portal_evidence.py/v1",
@@ -779,6 +783,7 @@ function onPortalBranch(
   captures: SesRulesCleanEvidence["portal_captures"],
 ): (evidence: SesRulesCleanEvidence) => void {
   return (evidence) => {
+    evidence.report_evidence_floor = "portal_capture";
     evidence.report_evidence_independent = null;
     evidence.portal_captures = captures;
   };
@@ -833,8 +838,16 @@ Deno.test("C3: with several qualifying captures the verdict names the one it rel
     // Not evidence: uncertified, and it comes first so a count-based rule
     // would have been satisfied by a row nobody looked at.
     { ...CERTIFIED_CAPTURE, id: "capture-uncertified", status: "captured" },
-    { ...CERTIFIED_CAPTURE, id: "capture-relied-on" },
-    { ...CERTIFIED_CAPTURE, id: "capture-duplicate" },
+    {
+      ...CERTIFIED_CAPTURE,
+      id: "capture-relied-on",
+      captured_at: "2026-08-05T02:00:00.000Z",
+    },
+    {
+      ...CERTIFIED_CAPTURE,
+      id: "capture-duplicate",
+      captured_at: "2026-08-04T02:00:00.000Z",
+    },
   ])));
   assertEquals(verdict.verdict, "rules_clean", verdict.parked_on.join(","));
   const outcome = verdict.guards.find((row) =>
@@ -844,10 +857,106 @@ Deno.test("C3: with several qualifying captures the verdict names the one it rel
     outcome.detail.includes("capture-relied-on"),
     outcome.detail,
   );
-  assert(outcome.detail.includes("2 qualifying"), outcome.detail);
+  assert(outcome.detail.includes("newest of 2 qualifying"), outcome.detail);
   assertFalse(
     outcome.detail.includes("capture-uncertified"),
     "an uncertified row must never be named as the evidence relied on",
+  );
+});
+
+Deno.test("C3: a certified capture of an INCOMPLETE portal is evidence against completion", () => {
+  // `status: verified` certifies the capture artifact. `capture_result` is what
+  // the capture SAW, and those are different facts.
+  for (const captureResult of ["not_done", "unreachable"]) {
+    assertParksOn(
+      mutate(
+        onPortalBranch([{
+          ...CERTIFIED_CAPTURE,
+          capture_result: captureResult,
+        }]),
+      ),
+      "C3_report_evidence_floor",
+      "flagged",
+    );
+  }
+  // An absent or unrecognised result is never read as done.
+  for (const captureResult of [undefined, "", "DONE", "partial"]) {
+    assertParksOn(
+      mutate(
+        onPortalBranch([{
+          ...CERTIFIED_CAPTURE,
+          capture_result: captureResult,
+        }]),
+      ),
+      "C3_report_evidence_floor",
+      "unevaluable",
+    );
+  }
+});
+
+Deno.test("C3: only a roof_report capture is the roof-report evidence floor", () => {
+  // The role boundary lives here, not in a caller's query: a caller that
+  // forgets the filter must park, not pass.
+  for (const role of ["assessment", "photos", "scope", "", undefined]) {
+    assertParksOn(
+      mutate(onPortalBranch([{ ...CERTIFIED_CAPTURE, role }])),
+      "C3_report_evidence_floor",
+      "unevaluable",
+    );
+  }
+});
+
+Deno.test("C3: an unstated evidence floor parks, and unknown independence never passes", () => {
+  for (
+    const change of [
+      (evidence: SesRulesCleanEvidence) => {
+        delete evidence.report_evidence_floor;
+      },
+      (evidence: SesRulesCleanEvidence) => {
+        evidence.report_evidence_floor = null;
+      },
+      (evidence: SesRulesCleanEvidence) => {
+        (evidence as { report_evidence_floor: unknown })
+          .report_evidence_floor = "somewhere_else";
+      },
+    ]
+  ) {
+    assertParksOn(mutate(change), "C3_report_evidence_floor", "unevaluable");
+  }
+  // A pack card whose independence proof is UNKNOWN parks, and attaching
+  // capture rows to it cannot change that: the floor it owes is stated.
+  assertParksOn(
+    mutate((evidence) => {
+      evidence.report_evidence_independent = null;
+      evidence.portal_captures = [CERTIFIED_CAPTURE];
+    }),
+    "C3_report_evidence_floor",
+    "unevaluable",
+  );
+});
+
+Deno.test("C3: the capture relied on is the same one whatever order the rows arrive in", () => {
+  const older = {
+    ...CERTIFIED_CAPTURE,
+    id: "capture-older",
+    captured_at: "2026-08-04T02:00:00.000Z",
+  };
+  const newer = {
+    ...CERTIFIED_CAPTURE,
+    id: "capture-newer",
+    captured_at: "2026-08-05T02:00:00.000Z",
+  };
+  const detailFor = (captures: SesRulesCleanEvidence["portal_captures"]) =>
+    classifySesInvoiceRulesClean(mutate(onPortalBranch(captures))).guards.find((
+      row,
+    ) => row.id === "C3_report_evidence_floor")!.detail;
+  const forwards = detailFor([older, newer]);
+  const backwards = detailFor([newer, older]);
+  assert(forwards.includes("capture-newer"), forwards);
+  assertEquals(
+    forwards.replace("#1", "#2"),
+    backwards.replace("#1", "#2"),
+    "the same rows in a different order must name the same evidence",
   );
 });
 

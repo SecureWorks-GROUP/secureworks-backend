@@ -172,6 +172,7 @@ select
   p.attendance_cycle_id,
   p.role,
   p.status,
+  p.capture_result,
   p.captured_by,
   p.capture_producer,
   p.captured_at,
@@ -404,19 +405,27 @@ export async function runShadow(limit: number | null): Promise<{
     const proof = proofBy.get(jobId) ?? null;
     let reportIndependent: boolean | null = null;
     let portalCaptures: SesRulesCleanPortalCapture[] | null = null;
+    // Which floor this card owes is STATED, never inferred from which evidence
+    // field this harness happened to populate. No docket means no stated
+    // floor, and an unstated floor parks.
+    let reportEvidenceFloor:
+      | "pack_supporting_report"
+      | "portal_capture"
+      | null = null;
     if (docket) {
       if (String(docket.supporting_report_state) === "not_applicable") {
+        reportEvidenceFloor = "portal_capture";
         // Report-only family: the builder portal holds the report, so the
         // portal capture IS the evidence floor. Which capture -- if any -- is
-        // evidence is the classifier's decision, not this harness's: it is
-        // handed every row of the relevant role, unfiltered, and it names the
-        // one it relied on.
+        // evidence is the classifier's decision, not this harness's: every row
+        // is handed over unfiltered, role and status and result included, and
+        // it names the one it relied on.
         portalCaptures = (captureBy.get(jobId) ?? [])
-          .filter((row) => String(row.role) === "roof_report")
           .map((row) => ({
             id: row.id,
             role: row.role,
             status: row.status,
+            capture_result: row.capture_result,
             attendance_cycle_id: row.attendance_cycle_id,
             captured_by: row.captured_by,
             capture_producer: row.capture_producer,
@@ -425,8 +434,10 @@ export async function runShadow(limit: number | null): Promise<{
             page_text_hash_corrupted: row.page_text_hash_corrupted === true,
           }));
       } else if (!proof) {
+        reportEvidenceFloor = "pack_supporting_report";
         reportIndependent = null;
       } else {
+        reportEvidenceFloor = "pack_supporting_report";
         reportIndependent =
           String(proof.source_kind) === "durable_curated_revision" &&
             proof.has_report_input_hash === true &&
@@ -479,6 +490,7 @@ export async function runShadow(limit: number | null): Promise<{
         ? obligation?.commercial_quantity_override ?? null
         : null,
       report_evidence_independent: reportIndependent,
+      report_evidence_floor: reportEvidenceFloor,
       portal_captures: portalCaptures,
       subject_invoice: subject
         ? {
