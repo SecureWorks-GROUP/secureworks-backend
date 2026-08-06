@@ -1619,6 +1619,8 @@ function buildEmailDrafts(
   // to makesafes@. Other builders keep the universal three-email split.
   const ajs = isAjsBuilderKey(row.builder_key);
   if (ajs) {
+    // Builder-facing copy only: what is attached, job ref, thanks.
+    // No internal vocabulary (draft, docket, pack, route, cycle, revision).
     const drafts: Record<string, string> = {};
     const ajsCc = ajsPackCc().join(", ");
     if (reportFile) {
@@ -1627,11 +1629,7 @@ function buildEmailDrafts(
           .join(", "),
         cc: ajsCc,
         subject: `${ref} - report and invoice`,
-        body: `Draft only. Please find the prepared ${
-          row.family.replaceAll("_", " ")
-        } report and invoice for ${
-          address || "the instructed property"
-        }. The real Xero invoice PDF attaches when authorised.`,
+        body: `Please find attached the report and invoice for ${ref}.\n\nThank you.`,
         attachments: [
           reportFile,
           ...invoiceAttachments.filter((name) => name !== reportFile),
@@ -1644,8 +1642,7 @@ function buildEmailDrafts(
           .join(", "),
         cc: ajsCc,
         subject: `Photo Evidence - ${ref}`,
-        body:
-          "Draft only. The complete, ordered original photo set is listed on the docket.",
+        body: `Please find attached site photos for ${ref}.\n\nThank you.`,
         attachments: photoFiles,
       });
     }

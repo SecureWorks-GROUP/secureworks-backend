@@ -956,6 +956,53 @@ Deno.test("AJS/AJBR email drafts render the permanent pack CC set; MLB drafts do
   }
 });
 
+Deno.test("AJS builder-facing email drafts are plain English with job ref (no internal jargon)", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  const ref = String(input.source.builder_reference || "").trim();
+  assert(ref.length > 0, "fixture must carry a builder reference");
+  const result = (await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  )).results[0];
+  assertEquals(result.state, "ready");
+  const report = String(result.email_drafts.REPORT_EMAIL_DRAFT || "");
+  const photo = String(result.email_drafts.PHOTO_EMAIL_DRAFT || "");
+  assertStringIncludes(
+    report,
+    `Please find attached the report and invoice for ${ref}.`,
+  );
+  assertStringIncludes(report, "Thank you.");
+  assertStringIncludes(
+    photo,
+    `Please find attached site photos for ${ref}.`,
+  );
+  assertStringIncludes(photo, "Thank you.");
+  for (const body of [report, photo]) {
+    for (
+      const term of [
+        "Draft only",
+        "docket",
+        "pack",
+        "route",
+        "cycle",
+        "revision",
+        "fully bound",
+        "authorised",
+      ]
+    ) {
+      assertEquals(
+        body.toLowerCase().includes(term.toLowerCase()),
+        false,
+        `AJS draft body must not contain "${term}"`,
+      );
+    }
+  }
+});
+
 // The two-email route drops INVOICE_EMAIL_DRAFT entirely, so the invoice-bundle
 // obligation has to be satisfied from the COMBINED report draft. Without that,
 // `draft_invoice_bundle_email` stays blocked at its `recovery-not-run` default
@@ -3421,10 +3468,10 @@ Deno.test("draft-only wall exposes no money/send dependency and emits an inert r
     close_job: false,
     portal_evidence: [],
   });
-  // AJS combined report+invoice draft carries the no-Xero-invoice language.
+  // AJS emits one combined report+invoice draft, in plain builder-facing copy.
   assertStringIncludes(
     response.results[0].email_drafts.REPORT_EMAIL_DRAFT,
-    "The real Xero invoice PDF attaches when authorised",
+    "Please find attached the report and invoice for ",
   );
   assertEquals(
     response.results[0].email_drafts.INVOICE_EMAIL_DRAFT,
