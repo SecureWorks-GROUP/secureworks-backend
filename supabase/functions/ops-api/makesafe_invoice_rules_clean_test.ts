@@ -960,6 +960,75 @@ Deno.test("C3: the capture relied on is the same one whatever order the rows arr
   );
 });
 
+Deno.test("C3: only a positively APPROVED capture implementation is evidence", () => {
+  // The question is not "do we know this producer is bad" but "have we approved
+  // it": the F7 observer is exactly the producer nobody had thought to exclude.
+  for (
+    const capturedBy of [
+      "prime-portal-scraper/2026-09-01",
+      "some-new-agent",
+      "",
+      undefined,
+    ]
+  ) {
+    assertParksOn(
+      mutate(
+        onPortalBranch([{ ...CERTIFIED_CAPTURE, captured_by: capturedBy }]),
+      ),
+      "C3_report_evidence_floor",
+      "unevaluable",
+    );
+  }
+  // And the F7 observer is still refused BY NAME, so a stale caller is
+  // diagnosable rather than silently unevaluable.
+  const verdict = classifySesInvoiceRulesClean(mutate(onPortalBranch([{
+    ...CERTIFIED_CAPTURE,
+    captured_by: "ses-prime-portal-observer/2026-08-02.4",
+  }])));
+  const outcome = verdict.guards.find((row) =>
+    row.id === "C3_report_evidence_floor"
+  )!;
+  assertEquals(outcome.status, "flagged");
+  assert(outcome.detail.includes("opaque frame"), outcome.detail);
+});
+
+Deno.test("C3: the capture CONTRACT is a separate positive question from the implementation", () => {
+  // An approved implementation writing under an unapproved contract parks...
+  for (
+    const producer of [
+      "capture_portal_evidence.py/v2",
+      "some_other_contract/v1",
+      "",
+      undefined,
+    ]
+  ) {
+    assertParksOn(
+      mutate(onPortalBranch([{
+        ...CERTIFIED_CAPTURE,
+        capture_producer: producer,
+      }])),
+      "C3_report_evidence_floor",
+      "unevaluable",
+    );
+  }
+  // ...and so does the trade attestation contract, which renders no page and
+  // therefore can never carry the screenshot this floor is proved by.
+  assertParksOn(
+    mutate(onPortalBranch([{
+      ...CERTIFIED_CAPTURE,
+      capture_producer: "trade_portal_confirmation/v1",
+    }])),
+    "C3_report_evidence_floor",
+    "unevaluable",
+  );
+  // The approved contract by the approved implementation still classifies
+  // clean, so this suite is not vacuous.
+  const clean = classifySesInvoiceRulesClean(
+    mutate(onPortalBranch([CERTIFIED_CAPTURE])),
+  );
+  assertEquals(clean.verdict, "rules_clean", clean.parked_on.join(","));
+});
+
 // ── A guard that ERRORS parks the card. Never clean. ──────────────────────
 
 Deno.test("a guard that cannot evaluate parks the card, in every family", () => {

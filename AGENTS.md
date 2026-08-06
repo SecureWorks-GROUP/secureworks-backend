@@ -2348,7 +2348,7 @@ the obligation checks money nobody is about to bill.
 
 `makesafe_invoice_rules_clean.ts` is the pure, closed-list determination for
 Item 10 auto-authorisation (17 guards in three families, contract
-`ses-rules-clean/v4`; `unevaluable` PARKS, and
+`ses-rules-clean/v5`; `unevaluable` PARKS, and
 family B is a WHITELIST that re-derives the sealed line set and demands equality,
 so an unmodelled fault shape parks by construction). Three rules the 2026-08-07
 review had to install because the module was blind in its own way: the
@@ -2365,7 +2365,11 @@ uncertified `makesafe_portal_capture_revisions` row is NOT-evidence at `C3`
 rather than evidence with a caveat (the writer can append and then fail its own
 re-read; it cannot un-write). `C3`'s portal branch takes capture rows
 UNFILTERED, qualifies them itself, and NAMES the capture it relied on instead of
-counting; it never dedupes or alters a row. Note the two capture facts are
+counting; it never dedupes or alters a row. Producer trust there is an
+ALLOW-LIST, never a blacklist — an approved screenshot-bearing
+`capture_producer` contract AND a `captured_by` on the closed approved-
+implementation list, both positive, because the F7 observer is exactly the
+producer nobody had thought to exclude. Note the two capture facts are
 DIFFERENT: `status` certifies the capture ARTIFACT, `capture_result` is what the
 capture SAW, so a certified `not_done`/`unreachable` FLAGS as evidence against
 completion and an unrecognised result parks. Role, and which floor a card owes

@@ -78,6 +78,13 @@
 // relied on is chosen deterministically so two identical runs name the same
 // row.
 //
+// v5 (2026-08-07): what PRODUCED a capture is an ALLOW-LIST too. Refusing one
+// known-bad implementation and passing everything else is the blacklist shape
+// point 2 argues against, and the F7 observer is exactly the producer nobody
+// had thought to exclude -- so the next unanticipated one would have passed by
+// default. The capture contract and the implementation are two separate
+// positive questions, and either one unestablished parks.
+//
 // Divergence rule, stated so a future maintainer cannot get it backwards: this
 // classifier is a SUBTRACTIVE gate, never a pricing authority. If it and the
 // skill's Python guards ever disagree, the correct resolution is the one that
@@ -95,13 +102,19 @@ import {
 import { AJS_EXISTING_FENCE_STAR_PICKET_RATE_EX_GST } from "./makesafe_existing_fence_pickets.ts";
 import type { SesFamilyId } from "./ses_family_matrix.ts";
 import type { SesInvoiceDuplicateResolution } from "./makesafe_invoice_duplicate_resolver.ts";
+import {
+  isTrustedSesPortalCaptureProducer,
+  SES_PORTAL_CAPTURE_RESULTS,
+  SES_TRADE_PORTAL_CONFIRMATION_ROLE,
+  sesPortalCaptureProducerHasScreenshot,
+} from "./ses_portal_capture_contract.ts";
 
 /**
  * Bump on ANY change to what this module admits or refuses, so a past
  * determination stays attributable to the definition that produced it. A
  * recorded verdict without a version is not re-derivable.
  */
-export const SES_RULES_CLEAN_CONTRACT_VERSION = "ses-rules-clean/v4";
+export const SES_RULES_CLEAN_CONTRACT_VERSION = "ses-rules-clean/v5";
 
 export type SesRulesCleanFamily = "A" | "B" | "C";
 export type SesRulesCleanGuardStatus = "clean" | "flagged" | "unevaluable";
@@ -217,7 +230,7 @@ export const SES_RULES_CLEAN_GUARDS = [
     id: "C3_report_evidence_floor",
     family: "C",
     what:
-      "The report evidence floor and photo completeness are independently proven, not self-vouched. The floor a card owes is STATED, and on the portal branch a specific certified roof_report capture RECORDING THE REPORT DONE is named as the evidence relied on.",
+      "The report evidence floor and photo completeness are independently proven, not self-vouched. The floor a card owes is STATED, and on the portal branch a specific certified roof_report capture RECORDING THE REPORT DONE, by an approved contract and an approved implementation, is named as the evidence relied on.",
   },
 ] as const satisfies ReadonlyArray<
   { id: string; family: SesRulesCleanFamily; what: string }
@@ -1641,6 +1654,7 @@ function describePortalCapture(
     `role ${text(capture.role) || "<absent>"}`,
     `result ${text(capture.capture_result) || "<absent>"}`,
     `cycle ${text(capture.attendance_cycle_id) || "<absent>"}`,
+    `contract ${text(capture.capture_producer) || "<absent>"}`,
     `captured by ${text(capture.captured_by) || "<absent>"}`,
   ];
   const capturedAt = text(capture.captured_at);
@@ -1648,11 +1662,45 @@ function describePortalCapture(
   return parts.join(", ");
 }
 
-/** The role whose capture IS the roof-report evidence floor. */
-const SES_PORTAL_CAPTURE_EVIDENCE_ROLE = "roof_report";
+/**
+ * `captured_by` prefix of the in-repo F7 observer. It writes under the same
+ * approved `capture_producer` contract name as the compliant skill script, so
+ * only this field separates a real page capture from a synthetic one.
+ */
+export const SES_SYNTHETIC_PORTAL_OBSERVER_PREFIX = "ses-prime-portal-observer";
 
-/** What the capture saw. Only `done` reports a report that exists. */
-const SES_PORTAL_CAPTURE_RESULTS = ["done", "not_done", "unreachable"];
+/**
+ * The role whose capture IS the roof-report evidence floor, and what a capture
+ * may have seen: both taken from the capture contract rather than restated, the
+ * same "imported never copied" discipline the sealed pricing law follows.
+ */
+const SES_PORTAL_CAPTURE_EVIDENCE_ROLE = SES_TRADE_PORTAL_CONFIRMATION_ROLE;
+
+/**
+ * Implementations whose output is accepted as a real capture of the real page,
+ * matched on the `captured_by` prefix. Positive membership is REQUIRED: an
+ * absent, empty or unrecognised implementation is "I cannot tell what looked at
+ * the page", which parks. Widening this set is a Captain question, not a code
+ * edit -- the same rule the producer-trust set carries.
+ */
+const SES_APPROVED_PORTAL_CAPTURE_IMPLEMENTATIONS: readonly string[] = [
+  // The wiki skill script, which screenshots the ACTUAL Prime page.
+  "capture_portal_evidence.py",
+];
+
+/**
+ * Implementations refused BY NAME, so a stale caller is diagnosable rather than
+ * silently unevaluable and a reader learns why the boundary exists.
+ */
+const SES_REFUSED_PORTAL_CAPTURE_IMPLEMENTATIONS: ReadonlyArray<
+  { prefix: string; reason: string }
+> = [
+  {
+    prefix: SES_SYNTHETIC_PORTAL_OBSERVER_PREFIX,
+    reason:
+      "it was captured by the in-repo observer, which covers the viewport with an opaque frame before every capture, so its images are a synthetic observation card carrying no portal form fields",
+  },
+];
 
 interface PortalCaptureRefusal {
   /** `flagged` is a fact against this card; `unevaluable` is a fact missing. */
@@ -1689,7 +1737,7 @@ function portalCaptureRefusal(
     };
   }
   const result = text(capture.capture_result);
-  if (!SES_PORTAL_CAPTURE_RESULTS.includes(result)) {
+  if (!(SES_PORTAL_CAPTURE_RESULTS as readonly string[]).includes(result)) {
     return {
       status: "unevaluable",
       reason: `it states ${
@@ -1719,18 +1767,36 @@ function portalCaptureRefusal(
         : "whether its page-text coordinate is re-verifiable was not stated",
     };
   }
-  const capturedBy = text(capture.captured_by);
-  if (!capturedBy) {
+  if (!isTrustedSesPortalCaptureProducer(capture.capture_producer)) {
     return {
-      status: "flagged",
-      reason: "it does not state what looked at the page",
+      status: "unevaluable",
+      reason: `it names ${
+        text(capture.capture_producer) || "no"
+      } capture contract, and only an approved contract is evidence`,
     };
   }
-  if (capturedBy.startsWith(SES_SYNTHETIC_PORTAL_OBSERVER_PREFIX)) {
+  if (!sesPortalCaptureProducerHasScreenshot(capture.capture_producer)) {
     return {
-      status: "flagged",
+      status: "unevaluable",
       reason:
-        "it was captured by the in-repo observer, whose images are a synthetic observation card carrying no portal form fields",
+        "its contract renders no page, so it can never carry the screenshot this evidence floor is proved by",
+    };
+  }
+  const capturedBy = text(capture.captured_by);
+  const refused = SES_REFUSED_PORTAL_CAPTURE_IMPLEMENTATIONS.find((entry) =>
+    capturedBy.startsWith(entry.prefix)
+  );
+  if (refused) return { status: "flagged", reason: refused.reason };
+  if (
+    !SES_APPROVED_PORTAL_CAPTURE_IMPLEMENTATIONS.some((prefix) =>
+      capturedBy.startsWith(prefix)
+    )
+  ) {
+    return {
+      status: "unevaluable",
+      reason: capturedBy
+        ? `${capturedBy} is not an approved capture implementation, and only a positively approved one is evidence`
+        : "it does not state what looked at the page, and only a positively approved implementation is evidence",
     };
   }
   const cycle = text(currentCycleId);
@@ -1748,13 +1814,6 @@ function portalCaptureRefusal(
   }
   return null;
 }
-
-/**
- * `captured_by` prefix of the in-repo F7 observer. It writes under the same
- * approved `capture_producer` contract name as the compliant skill script, so
- * only this field separates a real page capture from a synthetic one.
- */
-export const SES_SYNTHETIC_PORTAL_OBSERVER_PREFIX = "ses-prime-portal-observer";
 
 /**
  * The one determination. `rules_clean` requires every guard on the closed list

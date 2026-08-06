@@ -3,7 +3,7 @@
 **Date:** 2026-08-06
 **Ticket:** `secureworks-wiki` `coding/work/campaigns/makesafe-system/tickets/rescue-ses-remainder-v1/10-invoice-automation-auto-authorise.md`, plus `SPEC.md` Item 10
 **Status:** classifier built, guard suite green, **zero-write shadow run executed live across the board**. **No invoice was authorised, minted, voided, sent or re-priced.**
-**Amended 2026-08-07 (contract `ses-rules-clean/v4`):** code review found **blind guards inside the classifier itself**, over three rounds — including three inside the fix for the previous round. All are closed. See §0 "Four" and §6a. The committed run artifact predates the amendment and is **stale** — see §4.
+**Amended 2026-08-07 (contract `ses-rules-clean/v5`):** code review found **blind guards inside the classifier itself**, over four rounds — including gaps found inside the fix for the previous round, twice. All are closed. See §0 "Four" and §6a. The committed run artifact predates the amendment and is **stale** — see §4.
 
 ---
 
@@ -57,6 +57,8 @@ This is the part worth reading twice, because it is the same fault this whole it
 
 **A successful photo of the portal is not a finished report.** Found in the third review pass, and it is the sharpest version of this whole pattern. Each portal screenshot carries two separate facts: whether the **screenshot itself** is sound, and what the screenshot **actually saw** — done, not done, or the page could not be reached. The check was reading only the first one. So a perfectly good screenshot of an **unfinished portal** satisfied the evidence floor, and the verdict would have named it as the proof the report exists. It is evidence of the opposite. A capture recording *not done* or *unreachable* now **flags** the card, and a capture that does not say what it saw parks.
 
+**Approved, not merely "not known to be bad".** Found in the fourth pass. The screenshot check was refusing **one** producer we knew was wrong — the in-house observer that photographs a blank frame — and accepting everything else by default. But the whole reason that observer is on the list is that **nobody had thought to exclude it** until it caused a problem; the next one like it would have sailed through the same way. It is now the other way round: a screenshot counts only if it came from a tool we have **positively approved**, and anything we do not recognise parks. Two separate questions are asked, both positively — which approved *method* was used, and which approved *tool* did the looking. The in-house observer is still refused **by name**, with its reason, so anyone reading a parked card learns why the boundary exists.
+
 **And the same reasoning applied to the evidence side.** A portal screenshot is only evidence when it was **positively certified** — the writing process can save a record and then fail its own verification, and it cannot delete what it refused to certify, so an uncertified record exists and looks present. Anything not certified is now treated as **no evidence at all**, not as evidence with a caveat. And where a card holds several screenshots (including a duplicate that is still an open item for you), the verdict now **names the exact one it relied on** instead of merely counting that at least one was there.
 
 ---
@@ -67,8 +69,8 @@ This is the part worth reading twice, because it is the same fault this whole it
 
 | Artifact | What it is |
 |---|---|
-| `supabase/functions/ops-api/makesafe_invoice_rules_clean.ts` | The pure rules-clean determination. **17 guards** in three closed families (16 as first landed; `A6` added by the 2026-08-07 review, contract `ses-rules-clean/v4` after the third pass). No I/O — the caller does the live Xero read and states its provenance. |
-| `supabase/functions/ops-api/makesafe_invoice_rules_clean_test.ts` | 37 tests (26 as first landed, plus eleven across the three review passes): one per guard proving it can PARK the card and name itself, plus errors-park, the PO-suffix regression in both directions, and the no-send assertion. |
+| `supabase/functions/ops-api/makesafe_invoice_rules_clean.ts` | The pure rules-clean determination. **17 guards** in three closed families (16 as first landed; `A6` added by the 2026-08-07 review, contract `ses-rules-clean/v5` after the fourth pass). No I/O — the caller does the live Xero read and states its provenance. |
+| `supabase/functions/ops-api/makesafe_invoice_rules_clean_test.ts` | 39 tests (26 as first landed, plus thirteen across the four review passes): one per guard proving it can PARK the card and name itself, plus errors-park, the PO-suffix regression in both directions, and the no-send assertion. |
 | `scripts/ses-rules-clean-shadow.ts` | The dry-run mode. Read-only, Management API `read_only:true` only, no ops-api action called at all. |
 | `scripts/ses-rules-clean-shadow-2026-08-06.json` | The run's per-card verdict manifest, generation `4cc87f37d6acd41b…` (content-derived; a rerun over unchanged state reproduces it). **STALE** — produced under `ses-rules-clean/v1`; see §4. |
 
@@ -140,7 +142,7 @@ This list **is** the definition. An invoice is rules-clean only if every guard i
 |---|---|
 | `C1_docket_ready_zero_blockers` | A persisted `pre_xero` docket, `state: ready`, zero blockers, `pre_xero_docs_ready`. |
 | `C2_docket_bound_to_this_card_and_cycle` | That docket belongs to THIS job and covers its current attendance cycle. |
-| `C3_report_evidence_floor` | The report evidence is **independently** proven, not self-vouched. This is where the two open readiness gaps are excluded by name. Which floor a card owes is a **stated claim** (`report_evidence_floor`), never inferred from which field the caller populated; unstated parks, and unknown independence never passes on the pack branch. On the portal branch the classifier — not a caller's query string — decides which capture qualifies: only a `roof_report` capture that is **positively certified** (`status = verified`) **and records `capture_result: done`**, by a real producer, with a re-verifiable page-text coordinate, on the card's current cycle. A certified `not_done` / `unreachable` **flags** — it is evidence against completion — and an unrecognised result parks. It **names the capture it relied on** in the verdict rather than counting rows, and it never alters, dedupes or orders away a row. |
+| `C3_report_evidence_floor` | The report evidence is **independently** proven, not self-vouched. This is where the two open readiness gaps are excluded by name. Which floor a card owes is a **stated claim** (`report_evidence_floor`), never inferred from which field the caller populated; unstated parks, and unknown independence never passes on the pack branch. On the portal branch the classifier — not a caller's query string — decides which capture qualifies: only a `roof_report` capture that is **positively certified** (`status = verified`) **and records `capture_result: done`**, written under an **approved, screenshot-bearing capture contract** by an implementation on the **closed approved allow-list** (unrecognised parks; the F7 observer is refused by name), with a re-verifiable page-text coordinate, on the card's current cycle. A certified `not_done` / `unreachable` **flags** — it is evidence against completion — and an unrecognised result parks. It **names the capture it relied on** in the verdict rather than counting rows, and it never alters, dedupes or orders away a row. |
 
 ### Why B is a whitelist and not a checklist
 
@@ -154,7 +156,7 @@ The classifier is a **subtractive gate, never a pricing authority**. If it and t
 
 ## 4. The live shadow run
 
-> **The numbers below are from contract `ses-rules-clean/v1` and are STALE.** The 2026-08-07 review added `A6` and made the determination point a stated claim, so a rerun will differ — notably `A5` is no longer clean on a card that supplies no invoice, the three `authorise` cards now park on `A6`, because the shadow can only read the local mirror and the mirror is refused as a provenance. The portal-capture branch of `C3` also moved into the classifier and now demands a certified `roof_report` capture recording `done` that it can name, and every card must state which evidence floor it owes. The committed artifact `scripts/ses-rules-clean-shadow-2026-08-06.json` still carries `ruler_contract_version: ses-rules-clean/v1` and is **not** edited by hand: regenerating it needs production credentials this change did not have, and it lands as a follow-up commit (§12). Re-run before quoting any count from this section.
+> **The numbers below are from contract `ses-rules-clean/v1` and are STALE.** The 2026-08-07 review added `A6` and made the determination point a stated claim, so a rerun will differ — notably `A5` is no longer clean on a card that supplies no invoice, the three `authorise` cards now park on `A6`, because the shadow can only read the local mirror and the mirror is refused as a provenance. The portal-capture branch of `C3` also moved into the classifier and now demands a certified `roof_report` capture recording `done` that it can name, and every card must state which evidence floor it owes; the capture's producer must be positively approved rather than merely not-known-to-be-bad. The committed artifact `scripts/ses-rules-clean-shadow-2026-08-06.json` still carries `ruler_contract_version: ses-rules-clean/v1` and is **not** edited by hand: regenerating it needs production credentials this change did not have, and it lands as a follow-up commit (§12). Re-run before quoting any count from this section.
 
 Read-only, 8 queries, 2026-08-06. Denominator: `ses-board-population/active-v1` — **not the whole board**, Captain decision C.5 is open and the ~33 cancelled cards sit outside it.
 
@@ -329,6 +331,14 @@ The shadow supplies that total from the local `xero_invoices` mirror and stamps 
 **(9) Two smaller ones.** The capture relied on is now chosen deterministically (newest `captured_at`, id tiebreak, caller order last) so two identical read-only runs name the same row — without reordering or altering the caller's rows. And the sealed inc-GST total is rounded to cents for both the comparison and the operator-facing message, matching the producer's `Math.round(subtotal * 110) / 100`, so a parked card never shows `$935.0000000000001`.
 
 **Contract bumped to `ses-rules-clean/v4`.** Every one of these was caught by REVIEW, not by the live shadow run.
+
+### The fourth pass, `ses-rules-clean/v5` — the producer test was itself a blacklist
+
+**(10) `captured_by` was tested negatively.** Role, status and result had all been inverted to positive tests, but what PRODUCED the capture was still "refuse the one known-bad prefix, pass everything else" — precisely the blacklist shape the module's own header rejects for family B, and precisely how the F7 observer got in. `capture_producer` was declared on the input and never read at all. Both are now positive and separate: `capture_producer` must be a trusted contract per `isTrustedSesPortalCaptureProducer`, and must be a screenshot-bearing one (`sesPortalCaptureProducerHasScreenshot`), so the trade attestation — an approved producer of the FACT, with no rendered page — can never stand in for a screenshot. `captured_by` must then match an entry on the closed `SES_APPROVED_PORTAL_CAPTURE_IMPLEMENTATIONS` allow-list; absent, empty or unrecognised is `unevaluable` and parks. The F7 observer stays refused BY NAME with its reason, so a stale caller is diagnosable rather than silently unevaluable.
+
+**(11) The role and result constants are imported, not copied.** `SES_PORTAL_CAPTURE_RESULTS` and the roof-report role now come from `ses_portal_capture_contract.ts` — the authority that matches the live CHECK — instead of being restated here under the same names, matching the "imported never copied" discipline the sealed pricing law follows.
+
+**Contract bumped to `ses-rules-clean/v5`.**
 
 Two smaller review fixes rode along: any duplicate ambiguity now refuses by testing `!== "none"` rather than by membership of a hand-kept list (a state added to the union later parks by construction), and the attendance-wording map is keyed by the real `SesFamilyId` union so a new family is a compile error rather than a silently missing case.
 
