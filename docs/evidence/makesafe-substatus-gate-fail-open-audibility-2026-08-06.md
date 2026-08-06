@@ -46,9 +46,14 @@ with its own outage profile and is not authorised by this spec.
   transport/client fault, a different incident, and it must never be counted as
   a PostgREST fail-open. The two markers are mutually exclusive per incident.
 - The gate's header comment no longer claims every write passes it. It names
-  the two real limits: the `makesafe_send_pack` and
-  `mark_makesafe_portal_report_done` direct patches bypass it (documented
-  design, preserved per the mission contract), and it fails open. The adjacent
+  the two real limits: two paths set `makesafe_job_details.substatus` without
+  reaching the assert (the detail-row insert at card creation and the
+  historical-backfill repair, which establish a first substatus rather than
+  moving one, and `approveIntakeDraft` parking a report-only card in
+  `awaiting_portal_completion`), and it fails open. The privileged routes are
+  not among them — `makesafe_send_pack` closes through `applyMakesafeCloseOut`
+  (`internal:closeout`) and `mark_makesafe_portal_report_done` gates its own
+  patch; what those skip is the external evidence guards. The adjacent
   external-guards comment claiming "no external entry point can skip them" is
   corrected the same way. A comment that overstates a guard is how the next
   reader stops checking.
@@ -192,10 +197,10 @@ unblocked. What item 2 inherits:
   without a second pass. Refusals still throw `ApiError(409)` from
   `index.ts`; the module returns a typed `refusal` and never throws for a
   business reason.
-- The two documented bypasses (`makesafe_send_pack`,
-  `mark_makesafe_portal_report_done`) are named in the gate header comment.
-  They are preserved per the mission contract and item 2 must not fold them
-  into the helper.
+- The two ungated substatus writes (the detail-row insert at card creation /
+  historical-backfill repair, and `approveIntakeDraft`'s report-only park) are
+  named in the gate header comment. They are preserved, and item 2 must not
+  fold them into the helper.
 - Item 3 replaces the `source` string in the marker payload with a typed
   write-origin. The payload key is already `source`; that is the one line to
   change.

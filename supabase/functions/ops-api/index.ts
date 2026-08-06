@@ -15187,12 +15187,17 @@ export const _enrichMakesafeBoardJobForTest = enrichMakesafeBoardJob
 // TWO HONEST LIMITS, because a comment that overstates a guard is how the next
 // reader stops checking (spec item 1):
 //
-//  1. It is not literally EVERY write. The makesafe_send_pack direct substatus
-//     patches, and the mark_makesafe_portal_report_done patch below, write
+//  1. It is not literally EVERY write. Two paths set
 //     `makesafe_job_details.substatus` straight through PostgREST and never
-//     reach this assert. Those bypasses are documented design (privileged-only
-//     routes) and the mission contract says to preserve them — but they exist,
-//     so "no entry point can skip this" was never true.
+//     reach this assert: the detail-row INSERT at card creation (and the
+//     historical-backfill repair), which establishes a first substatus rather
+//     than moving one, and approveIntakeDraft parking a report-only card in
+//     `awaiting_portal_completion`. Both are deliberate and preserved, but they
+//     exist, so "no entry point can skip this" was never true. The privileged
+//     routes DO reach the assert — makesafe_send_pack closes through
+//     applyMakesafeCloseOut ('internal:closeout') and
+//     mark_makesafe_portal_report_done gates its own patch — what those skip is
+//     the external evidence guards below, which is a different boundary.
 //  2. The gate FAILS OPEN when a pre-read fails. That trade is deliberate: the
 //     gate stops known-incoherent moves and must not add a new outage mode to
 //     every evidence event when a read hiccups. Since spec item 1 the fail-open
