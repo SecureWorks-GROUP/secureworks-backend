@@ -1626,6 +1626,18 @@ the observer's fail-closed privacy design as the compliant path inverts the
 ruling — that mistake was made once already and is corrected in
 `data/roof-reviewer-screenshot-gate-v1/report.md`.
 
+The store has NO sanctioned writer for a compliant capture: the skill script
+writes local files only, and the F7 observer is the sole caller of
+`record_ses_portal_capture_evidence`. Treat "record a portal capture" as
+blocked work, never improvise — the two available shortcuts are the two that
+already caused defects (the observer's synthetic card; a hand-assembled POST,
+which is how `source_content_hash` got corrupted). Attached portal captures in
+`job_documents` are image-only PDFs, so a complete two-page capture yields ~3
+characters of extractable text: any completeness check must render the PDF or
+count image streams/pages, never test extracted text. Both invariants, the
+Mindarie duplicate-document Captain item and the write-path options are owned
+by `data/roof-reviewer-screenshot-gate-v1/capture-write-path-gap.md`.
+
 That report also measures the population and pins a live integrity defect: five
 of the six stored rows carry `screenshot_content_hash` EQUAL to
 `source_content_hash`. Those digest different artifacts (normalised page text
