@@ -1065,8 +1065,10 @@ display stages and terminal job states are structurally read-only. The release
 sequence and seven-card first tranche are in
 `docs/makesafe-board-truth-cutover-2026-07-24.md`.
 
-An overlay only binds while its `source_status` equals the freshly derived
-`board_stage`, so before calling a ledger row stale, read the card's CURRENT
+An overlay only binds while its `source_status` equals the card's freshly
+derived pre-overlay stage — since Release 12 that is the evidence engine's
+answer (`derived_stage_v2`), not the legacy ladder — so before calling a ledger
+row stale, read the card's CURRENT
 derived stage — linking an AUTHORISED invoice to a card with no close-out docs
 moves it to `report_ready` on its own. Never diagnose a display stage from the
 rendered board alone: `ops.html` retries `makesafe_board` twice and then silently
@@ -1793,7 +1795,7 @@ must consume them rather than hand-writing the equivalent:
 
 `scripts/ses-stage-parity-harness.ts` runs the legacy ladder and M1 over one set
 of read-only production reads, reads the corrected engine from the board row's
-published advisory fields, and is the only tool that answers "did the
+published `derived_stage_v2*` diagnostics, and is the only tool that answers "did the
 divergence move?". It imports the real legacy ladder (`_deriveMakesafeBoardStage`
 via the read model) and `computeMakesafeStatus`, and must never reimplement
 either. The current frozen baseline is documented in

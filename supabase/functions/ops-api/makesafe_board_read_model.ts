@@ -1415,7 +1415,7 @@ export function buildCanonicalMakesafeRows(
       canonical_stage: displayStage,
       canonical_stage_label:
         OPS_MAKESAFE_STAGE_LABELS[displayStage as OpsMakesafeStage] ||
-          base?.board_label || displayStage,
+        base?.board_label || displayStage,
       placement_engine_version: `${stageV2.engine_version}+overlay-r12`,
       status_application: statusApplication,
       // Present regardless of whether the overlay currently applies, so the

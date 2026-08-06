@@ -323,7 +323,10 @@ Deno.test("R12: a decision_required loser is skipped, never archived", () => {
     NOW,
   );
   assertEquals(plan.archives.length, 0);
-  assertEquals(plan.skipped[0].reason, "loser_decision_required_display_status");
+  assertEquals(
+    plan.skipped[0].reason,
+    "loser_decision_required_display_status",
+  );
 });
 
 Deno.test("R12: natural completion reads the derived stage, not the legacy ladder", () => {

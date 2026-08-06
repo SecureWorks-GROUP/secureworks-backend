@@ -195,7 +195,9 @@ still need their own captain decision.
 - RPC `apply_makesafe_duplicate_survivor_archive` is service-role only and
   refuses: a terminal or stale loser, a terminal **or archived survivor** (so an
   archive can never strand work), a self-pointer, a pointer chain, and any batch
-  over 50 rows.
+  over 50 rows. Since Release 12 a loser displaying `decision_required` is also
+  skipped (`loser_decision_required_display_status`): a card whose evidence
+  contradicts itself is a captain question, never plannable.
 - ops-api action `makesafe_duplicate_survivor_archive` is API-key only and
   **dry-run by default** — a live run requires `dry_run: false` plus explicit
   `group_keys`, `run_key`, `applied_by` and `evidence_ref`. It refuses to write
@@ -393,9 +395,11 @@ refusal untouched. `survivorArchiveIsNaturalCompletion` in
 `makesafe_duplicate_survivor.ts` requires all four of:
 
 - the display is `archive` specifically — `cancelled` still refuses;
-- `declared_stage` is also `archive`, so the stage is the card's own, and
-  `status_application` is null, so no earlier run's decision is being read as
-  completion;
+- the card's own pre-overlay stage is also `archive`, so the stage is the card's
+  own, and `status_application` is null, so no earlier run's decision is being
+  read as completion. Since Release 12 that pre-overlay answer is the evidence
+  engine's, read through the same `makesafeOverlaySourceStatus` anchor every
+  ledger writer stamps, never the legacy `declared_stage`;
 - the card is not itself an archived duplicate, which would build a pointer chain;
 - the read model's independent `closeout_satisfied` verdict is true. It is
   computed before the display-status short-circuit and requires a durable send

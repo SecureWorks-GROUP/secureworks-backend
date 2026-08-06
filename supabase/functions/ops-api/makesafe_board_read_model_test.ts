@@ -898,15 +898,19 @@ Deno.test("cancelled detail block keys on the derived stage, not a stale board_s
   // A builder-cancelled job whose stored board_stage never caught up: R12
   // derives `cancelled` from job status, and the reason/note/by/at must render
   // with the card in the Cancelled column instead of vanishing.
-  const rows = buildCanonicalMakesafeRows([
-    baseJob("allocated", "job-stale-cancel", {
-      status: "cancelled",
-      cancel_reason: "builder_cancelled",
-      cancel_note: "WO withdrawn by MLB",
-      cancelled_by: "ops",
-      cancelled_at: NOW,
-    }),
-  ], { computedAt: NOW }, "full");
+  const rows = buildCanonicalMakesafeRows(
+    [
+      baseJob("allocated", "job-stale-cancel", {
+        status: "cancelled",
+        cancel_reason: "builder_cancelled",
+        cancel_note: "WO withdrawn by MLB",
+        cancelled_by: "ops",
+        cancelled_at: NOW,
+      }),
+    ],
+    { computedAt: NOW },
+    "full",
+  );
   assertEquals(rows[0].canonical_stage, "cancelled");
   assertEquals(rows[0].declared_stage, "allocated");
   assertEquals(rows[0].cancelled, {

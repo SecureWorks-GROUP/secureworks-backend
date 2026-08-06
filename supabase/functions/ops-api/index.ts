@@ -16729,8 +16729,8 @@ async function loadCanonicalMakesafeBoard(
   if (restrictToJobIds && restrictToJobIds.length === 0) {
     return finish([], countOpsCanonicalStages([]), 0)
   }
-  // Active ops paint only needs full stage-dependent joins for non-archived-
-  // status cards. Archive-on-demand / trade / seed keep full joins (default).
+  // Every scope keeps full stage-dependent joins: placement is derived from
+  // evidence, so no card may be built from a thinner read than another.
   const pipeline = await makesafePipeline(
     client,
     new URLSearchParams('history=all'),
@@ -16761,11 +16761,6 @@ async function loadCanonicalMakesafeBoard(
   const isTerminalSyntheticRow = (row: any) =>
     isExcludedTerminalSyntheticBoardRow(row, terminalSyntheticIds)
 
-  // Archive is a terminal display stage: overlays cannot move a card OUT of it.
-  // They can only move a non-archive declared stage INTO archive. So for the
-  // default active board we still build every non-archive base row (to apply
-  // overlays and keep placement identical) and skip the heavy follow-on work for
-  // cards the pipeline already parked in archive.
   // Release 12: the corrected engine places every card from evidence, and an
   // archived-status card can legitimately derive OUT of archive (a wrong
   // archive is now visible instead of frozen). So every scope builds every

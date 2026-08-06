@@ -246,10 +246,13 @@ authority flip is the captain's call, and it has not been pre-empted. The stale
 `new` → `archive` overlay already on the card (id 10, 2026-07-28) is untouched
 and still does not bind.
 
-## 7. Open follow-up
+## 7. Open follow-up — CLOSED by Release 12 (2026-08-06)
 
-`ses_stage_engine_v2.ts`'s advisory value is still advisory. This work did not
-change the authority boundary: `canonical_stage` remains the legacy ladder plus
-the existing overlay resolver, `projectOpsMakesafeBoard` still buckets on it
-alone, and there is still no flag that promotes the corrected engine. The
-authority flip is Release 12 and still has to be written.
+At the time of writing, `ses_stage_engine_v2.ts` was advisory and this work did
+not change that boundary. **Release 12 flipped it:** `canonical_stage` is now
+the corrected engine plus the display-ledger overlay anchored on the derived
+stage, so a card like this one is placed by the recorded terminal proof with no
+overlay row at all. Current contract: AGENTS.md "The Corrected Stage Engine Is
+The Placement Authority (Release 12)" and
+`docs/makesafe-board-read-model-v1.md`. Everything above stands as the
+2026-08-02 record.

@@ -204,6 +204,14 @@ the control appears on 3; the other 6 are exactly the set above.
 
 ## No card moves
 
+> **Superseded in part by Release 12 (2026-08-06).** An attestation still writes
+> evidence and never a stage — no raw board state changes. But the board column
+> is no longer the legacy ladder: the evidence engine places every card, so the
+> derived column follows the recorded confirmation. Current invariant:
+> AGENTS.md "The Corrected Stage Engine Is The Placement Authority (Release
+> 12)"; regression: `ses_trade_portal_confirmation_test.ts`. The 2026-08-02
+> parity measurement below stands as the record of that day.
+
 `scripts/ses-stage-parity-harness.ts` run against live production on the base
 commit and on this branch, same `--now`, both 407 cards:
 

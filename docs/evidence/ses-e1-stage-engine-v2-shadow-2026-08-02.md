@@ -28,6 +28,15 @@ replace both. They do NOT cut over to it. Through all four:
 
 ## Standing invariants this work adds
 
+> **The "no authority" invariant was retired by Release 12 (2026-08-06):** the
+> corrected engine now places the board (`canonical_stage` = `deriveSesStageV2`
+> + the overlay, anchored on the DERIVED stage). Everything else below still
+> stands — the engine is still pure and still receives no displayed stage, and
+> the freeze is still an identity manifest. Current placement contract:
+> AGENTS.md "The Corrected Stage Engine Is The Placement Authority (Release
+> 12)" and `docs/makesafe-board-read-model-v1.md`. The measurements in this
+> document are the Release 0-3 record and are not restated.
+
 **The shadow engine is pure and has no authority.** `ses_stage_engine_v2.ts`
 receives no displayed stage, queries no overlay, and its output is published as
 advisory fields only. `projectOpsMakesafeBoard` still buckets on
