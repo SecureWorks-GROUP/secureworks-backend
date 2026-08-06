@@ -318,10 +318,13 @@ Deno.test("a no_additional_charge member is outside the HARD STOP at SEND IT", a
   );
 });
 
-Deno.test("...and that exemption does NOT reach the cockpit or APPROVE INVOICE", async () => {
-  // The pair that stops the exemption drifting back into the shared producer:
-  // taking the refusal off a mint-adjacent surface is a card becoming more
-  // approvable, which this control may never do.
+Deno.test("...and that exemption does NOT reach the cockpit", async () => {
+  // Half of the pair that stops the exemption drifting back into the shared
+  // producer: taking the refusal off a mint-adjacent surface is a card becoming
+  // more approvable, which this control may never do. The other half is the
+  // money guard at APPROVE INVOICE, pinned by the priced-disposition tests
+  // above — a no-charge card cannot prove it, because that action refuses on
+  // the disposition first.
   const docket = await loadSesCockpitDocket(
     fixtureClient({ pricingDisposition: "no_additional_charge" }) as any,
     JOB_ID,
@@ -335,9 +338,14 @@ Deno.test("...and that exemption does NOT reach the cockpit or APPROVE INVOICE",
   );
   assertEquals(cockpit.verdict.clean, false);
   assertEquals(cockpit.controls.send_it.enabled, false);
+});
 
+Deno.test("APPROVE INVOICE refuses a no-charge card on the DISPOSITION, not the money", async () => {
+  // Named for what actually fires. Asserting only "something refused" here
+  // would pass with the money guard deleted, which is no proof at all.
   const refusal = await refusalFrom(() =>
     approveInvoice(fixtureClient({ pricingDisposition: "no_additional_charge" }))
   );
-  assert(refusal, "APPROVE INVOICE must still refuse such a card");
+  assertEquals(refusal?.code, undefined);
+  assertStringIncludes(refusal.fact, "no additional charge");
 });
