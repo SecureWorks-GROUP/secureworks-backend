@@ -1995,6 +1995,30 @@ No em dashes. Existing bound curated reports do not change until re-bound
 (attach same `file_name` → curated supersession → prepare). Do not re-prepare
 packs whose money/signoff is held for Captain decision.
 
+## PostgREST Returns Errors, It Does Not Throw
+
+`await client.from(x).update(y)` never rejects on a DB error, so wrapping it in
+`try/catch` catches nothing and a failed write reads as a success. Always
+destructure `{ error }` and act on it. This silently broke the trade-invoice
+money path: the failure handler wrote `trade_invoices.status = 'failed'`, which
+`trade_invoices_status_check` (`20260611000001_trade_invoice_guards.sql`) does
+not permit, so failed invoices stayed LIVE and held their assignments forever.
+Before writing any enum-ish status, check the live CHECK constraint
+(`pg_constraint` on the table) rather than trusting the constant in `index.ts`.
+See `docs/trade-invoice-assignment-lock-root-cause-2026-08-06.md`.
+
+## Reads And Writes Must Share One Eligibility Filter
+
+Where a read model hides rows, every write path over the same rows needs the
+identical filter, or the server will act on rows the user cannot see. In
+`generate_trade_invoice` the `my_hours` read and the manual lane both dropped
+assignments held by a live invoice while the legacy clocked lane did not, so
+hidden already-billed job cards were silently re-invoiced and the submission
+died in the Layer B lock. Shared predicates live in
+`supabase/functions/ops-api/trade_invoice_assignment_lock.ts`. Also decide
+claim eligibility BEFORE the UPDATE: PostgREST has no transaction across calls,
+so an update-then-count-rows check leaves a partial write behind on failure.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

@@ -141,8 +141,12 @@ Deno.test("trade invoice submit saves local lines before Xero and checks insert 
   const source = await Deno.readTextFile(
     new URL("./index.ts", import.meta.url),
   );
+  // NOTE: keep in sync with toTradeInvoiceLineRow. `_woProblems: _wp` joined the
+  // destructure when WO labour reconciliation landed but this literal was never
+  // updated, so this assertion failed and masked every ordering pin below it —
+  // including the ones guarding the assignment-lock/Xero-push sequence.
   const stripMemoryOnlyField = source.indexOf(
-    "const { site_address: _siteAddress, _hoursFlag: _hf, ...dbLine } = { ...defaults, ...line }",
+    "const { site_address: _siteAddress, _hoursFlag: _hf, _woProblems: _wp, ...dbLine } = { ...defaults, ...line }",
   );
   const normalizedShape = source.indexOf(
     "const toTradeInvoiceLineRow = (line: any, defaults: any = {})",
