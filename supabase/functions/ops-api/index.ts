@@ -2612,9 +2612,26 @@ async function xeroGet(
 }
 
 // Xero API POST/PUT
+//
+// 429 RETRY IS GATED ON THE IDEMPOTENCY KEY, and that gate is the whole safety
+// argument. xeroGet has always retried a rate limit; this write path did not,
+// so a transient 60-calls-per-minute rejection surfaced as a thrown dispatch.
+// For a sealed SES mint that is not a slow card, it is a DEAD one: the throw
+// lands in executeSesExternalEffect's catch, the effect goes to `unknown`, and
+// every later call on the same operation_key can only reconcile — so the card
+// cannot mint again until a fresh invoice obligation revision is prepared. A
+// rate limit is exactly the failure that appears only at batch size, so at one
+// card a minute it never showed.
+//
+// Retrying is safe ONLY where Xero can collapse the repeat: it honours
+// Idempotency-Key for 12 hours, so a keyed create/authorise/void returns the
+// same record rather than a second one. The un-keyed calls here are not merely
+// unproven, they are the ones that must never repeat — POST /Invoices/{id}/Email
+// sends the client a real email every time it succeeds. So an un-keyed 429
+// still throws immediately, exactly as before.
 async function xeroPost(
   path: string, accessToken: string, tenantId: string,
-  body: any, method = 'POST', idempotencyKey?: string
+  body: any, method = 'POST', idempotencyKey?: string, retryCount = 0
 ): Promise<any> {
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${accessToken}`,
@@ -2632,6 +2649,14 @@ async function xeroPost(
     headers,
     body: JSON.stringify(body),
   })
+  if (resp.status === 429 && idempotencyKey) {
+    if (retryCount >= 3) {
+      throw new Error(`Xero rate limited on ${path} after ${retryCount} retries`)
+    }
+    const retryAfter = parseInt(resp.headers.get('Retry-After') || '5')
+    await new Promise(r => setTimeout(r, (Number.isFinite(retryAfter) ? retryAfter : 5) * 1000))
+    return xeroPost(path, accessToken, tenantId, body, method, idempotencyKey, retryCount + 1)
+  }
   if (!resp.ok) {
     const errText = await resp.text()
     // Extract the actual validation message from Xero's verbose response
@@ -2647,6 +2672,10 @@ async function xeroPost(
   }
   return resp.json()
 }
+
+// Test seam: the rate-limit contract above is a runtime capability, so its test
+// drives the real function rather than a mirrored copy.
+export const _xeroPostForTest = xeroPost
 
 function xeroContactWherePath(field: string, value: string): string {
   const escaped = String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
