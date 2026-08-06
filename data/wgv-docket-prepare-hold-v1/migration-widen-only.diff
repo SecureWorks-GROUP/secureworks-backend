@@ -1,0 +1,25 @@
+--- /private/tmp/claude-501/-Users-marninstobbe--treehouse-secureworks-backend-5961a6-22-secureworks-backend/71d85c9e-2a7a-42ec-9b1c-e241a96a05a0/scratchpad/wgv/orig_fn.sql	2026-08-06 16:04:55
++++ /private/tmp/claude-501/-Users-marninstobbe--treehouse-secureworks-backend-5961a6-22-secureworks-backend/71d85c9e-2a7a-42ec-9b1c-e241a96a05a0/scratchpad/wgv/new_fn.sql	2026-08-06 16:04:55
+@@ -18,6 +18,7 @@
+   kind2 text;
+   universal boolean := false;
+   ajs_two boolean := false;
++  report_only_one boolean := false;
+ BEGIN
+   IF jsonb_typeof(p_release) IS DISTINCT FROM 'object'
+      OR jsonb_typeof(p_members) IS DISTINCT FROM 'array'
+@@ -46,9 +47,13 @@
+      AND (p_routes->0->>'ordinal')::integer = 0
+      AND (p_routes->1->>'ordinal')::integer = 1 THEN
+     ajs_two := true;
++  ELSIF route_count = 1
++     AND kind0 = 'invoice'
++     AND (p_routes->0->>'ordinal')::integer = 0 THEN
++    report_only_one := true;
+   END IF;
+ 
+-  IF NOT universal AND NOT ajs_two THEN
++  IF NOT universal AND NOT ajs_two AND NOT report_only_one THEN
+     RAISE EXCEPTION
+       'release routes must be ordered report/photo/invoice (universal) or report_invoice/photo (AJS)'
+       USING ERRCODE = '22023';

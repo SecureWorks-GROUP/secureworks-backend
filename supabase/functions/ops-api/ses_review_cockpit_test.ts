@@ -8,11 +8,12 @@ import {
 import {
   approveInvoiceDisabledReason,
   buildSesCockpitView,
-  classifySesReleaseSendProgress,
   buildSesReleaseRevision,
   canRecordSesApproval,
+  classifySesReleaseSendProgress,
   describeSesSendItPlan,
   evaluateSesMechanicalClean,
+  requiredSesRouteKinds,
   sendItDisabledReason,
   SES_REVIEW_SECTION_ORDER,
   type SesCleanInput,
@@ -498,6 +499,115 @@ Deno.test("release identity changes when route content or order changes", async 
   );
 });
 
+Deno.test("the send path honours the same route ruling as the approve path", async () => {
+  // The gap this closes: a roof-report card could clear the cockpit, have its
+  // invoice AUTHORISED, and only THEN be refused here — committed money with no
+  // send path. Approve and send must require the same routes.
+  const member = {
+    job_id: "job-1",
+    docket_revision_id: "docket-1",
+    invoice_obligation_revision_id: "obligation-1",
+    attendance_cycle_ids: ["cycle-1"],
+    readiness_revision:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    dependency_generation: 1,
+  };
+  const invoiceOnly = cleanInput().routes.filter((route) =>
+    route.route_kind === "invoice"
+  );
+
+  // Ruled roof-report card: one invoice route IS the whole release.
+  const plan = await buildSesReleaseRevision({
+    org_id: "org-1",
+    members: [member],
+    routes: invoiceOnly,
+    created_by: "operator",
+    builder_key: "MLB",
+    family: "ordinary_roof_portal",
+    photo_route_applicable: false,
+    report_route_applicable: false,
+  });
+  assertEquals(plan.routes.map((route) => route.route_kind), ["invoice"]);
+
+  // Strict by default: a caller that has not been taught the new fields gets
+  // exactly the old universal-three behaviour.
+  await assertRejects(
+    () =>
+      buildSesReleaseRevision({
+        org_id: "org-1",
+        members: [member],
+        routes: invoiceOnly,
+        created_by: "operator",
+        builder_key: "MLB",
+      }),
+    TypeError,
+  );
+});
+
+Deno.test("physical make-safe still owes three routes at send", async () => {
+  const member = {
+    job_id: "job-1",
+    docket_revision_id: "docket-1",
+    invoice_obligation_revision_id: "obligation-1",
+    attendance_cycle_ids: ["cycle-1"],
+    readiness_revision:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    dependency_generation: 1,
+  };
+  // Physical make-safe never declares either route inapplicable, so even with
+  // the new fields present and honest it still owes report, photo and invoice.
+  const error = await assertRejects(
+    () =>
+      buildSesReleaseRevision({
+        org_id: "org-1",
+        members: [member],
+        routes: cleanInput().routes.filter((route) =>
+          route.route_kind !== "report"
+        ),
+        created_by: "operator",
+        builder_key: "MLB",
+        family: "physical_makesafe",
+        photo_route_applicable: true,
+        report_route_applicable: true,
+      }),
+    TypeError,
+  );
+  // The message names what is actually missing, not a fixed three-route recital.
+  assertStringIncludes(error.message, "missing the report route");
+  assertStringIncludes(error.message, "report, photo and invoice");
+});
+
+Deno.test("an exempt card is still refused when the route it DOES owe is absent", async () => {
+  // Honesty, not green: dropping report and photo from the required set does
+  // not stop the invoice route being required.
+  const member = {
+    job_id: "job-1",
+    docket_revision_id: "docket-1",
+    invoice_obligation_revision_id: "obligation-1",
+    attendance_cycle_ids: ["cycle-1"],
+    readiness_revision:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    dependency_generation: 1,
+  };
+  const error = await assertRejects(
+    () =>
+      buildSesReleaseRevision({
+        org_id: "org-1",
+        members: [member],
+        routes: cleanInput().routes.filter((route) =>
+          route.route_kind === "report"
+        ),
+        created_by: "operator",
+        builder_key: "MLB",
+        family: "ordinary_roof_portal",
+        photo_route_applicable: false,
+        report_route_applicable: false,
+      }),
+    TypeError,
+  );
+  assertStringIncludes(error.message, "missing the invoice route");
+});
+
 Deno.test("release construction rejects subject prose in Cc", async () => {
   const routes = cleanInput().routes.map((route) =>
     route.route_kind === "report"
@@ -662,6 +772,117 @@ Deno.test("a family whose matrix routes no photo email is not held for one", () 
       item.code === "route_draft_missing"
     ),
   );
+});
+
+Deno.test("a family whose report lives in the portal is not held for a report email", () => {
+  // The live White Gum Valley / Mindarie shape: roof-report card, one invoice
+  // route, no REPORT_EMAIL_DRAFT because the portal IS the report.
+  const portalReport = cleanInput({
+    report_only: true,
+    routes: cleanInput().routes.filter((route) =>
+      route.route_kind === "invoice"
+    ),
+    photo_route_applicable: false,
+  });
+  // Manifest says draft_builder_report_email is a real obligation → required.
+  assert(
+    evaluateSesMechanicalClean({
+      ...portalReport,
+      report_route_applicable: true,
+    }).blockers.some((item) => item.code === "route_draft_missing"),
+  );
+  // Manifest says not_applicable ("portal-is-the-report") → demanding one is
+  // unsatisfiable, and the Captain ruled the exemption on 2026-08-06.
+  const ruled = evaluateSesMechanicalClean({
+    ...portalReport,
+    report_route_applicable: false,
+  });
+  assertEquals(
+    ruled.blockers.map((blocker) => blocker.code),
+    [],
+  );
+  assert(ruled.clean, "one invoice route is a complete roof-report pack");
+  assertEquals(ruled.approval_band, "shaun_clean");
+  // An absent field can only ever be stricter, never looser.
+  assert(
+    evaluateSesMechanicalClean(portalReport).blockers.some((item) =>
+      item.code === "route_draft_missing"
+    ),
+  );
+});
+
+Deno.test("the ruled report-only question no longer parks any card", () => {
+  // `report-only-email-applicability` was decided on 2026-08-06. A decided
+  // question must stop holding cards: no blocker may carry that decision key,
+  // and a report-only card must not be decision_blocked for it.
+  const result = evaluateSesMechanicalClean(cleanInput({
+    report_only: true,
+    report_route_applicable: false,
+    photo_route_applicable: false,
+    routes: cleanInput().routes.filter((route) =>
+      route.route_kind === "invoice"
+    ),
+  }));
+  assertEquals(
+    result.blockers.map((blocker) => blocker.decision_key).filter(Boolean),
+    [],
+  );
+  assert(result.approval_band !== "decision_blocked");
+});
+
+Deno.test("physical make-safe still owes its report email after the ruling", () => {
+  // The ruling covers report-only portal cards ONLY. Ordinary physical
+  // make-safe keeps all three destinations, so a missing report route is still
+  // an honest hold — and no producer may exempt it by leaving the field unset.
+  const noReport = cleanInput({
+    family: "physical_makesafe",
+    report_only: false,
+    routes: cleanInput().routes.filter((route) =>
+      route.route_kind !== "report"
+    ),
+  });
+  for (
+    const input of [noReport, { ...noReport, report_route_applicable: true }]
+  ) {
+    const blocker = evaluateSesMechanicalClean(input).blockers.find(
+      (item) => item.code === "route_draft_missing",
+    );
+    assert(
+      blocker,
+      "physical make-safe must still be held for its report email",
+    );
+    assertStringIncludes(blocker!.fact, "report email");
+  }
+  // The report route is required, and dropping the photo email does not drop it.
+  assertEquals(
+    requiredSesRouteKinds("physical_makesafe", false, "MLB", true),
+    ["report", "invoice"],
+  );
+  assertEquals(
+    requiredSesRouteKinds("physical_makesafe", true, "MLB"),
+    ["report", "photo", "invoice"],
+  );
+});
+
+Deno.test("a ruled roof-report card requires exactly the one invoice route", () => {
+  assertEquals(
+    requiredSesRouteKinds("ordinary_roof_portal", false, "MLB", false),
+    ["invoice"],
+  );
+  // Honesty, not green: an unready invoice route on that same card still holds.
+  const unreadyInvoice = evaluateSesMechanicalClean(cleanInput({
+    report_only: true,
+    report_route_applicable: false,
+    photo_route_applicable: false,
+    routes: cleanInput().routes
+      .filter((route) => route.route_kind === "invoice")
+      .map((route) => ({ ...route, ready: false })),
+  }));
+  const blocker = unreadyInvoice.blockers.find(
+    (item) => item.code === "route_draft_missing",
+  );
+  assert(blocker, "an unready invoice route must still be named");
+  assertStringIncludes(blocker!.fact, "invoice email");
 });
 
 Deno.test("SEND IT states the real cause, quoting the blocker's own fact", () => {

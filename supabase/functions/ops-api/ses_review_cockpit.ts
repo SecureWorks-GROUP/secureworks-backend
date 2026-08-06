@@ -2,10 +2,7 @@ import { sesSha256, stableUuidFromSha256 } from "./ses_docket_envelope.ts";
 import type { SesPricingDisposition } from "./makesafe_invoice_obligation.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
 import { SES_ASSESSMENT_RECIPE_VERSION } from "./ses_family_matrix.ts";
-import {
-  isAjsBuilderKey,
-  sesReleaseRouteOrder,
-} from "./ses_release_route_shape.ts";
+import { sesReleaseRouteOrder } from "./ses_release_route_shape.ts";
 
 export const SES_REVIEW_SECTION_ORDER = [
   "job_story",
@@ -96,6 +93,24 @@ export interface SesCleanInput {
    * taught this field can only ever be stricter, never accidentally looser.
    */
   photo_route_applicable?: boolean;
+  /**
+   * Whether this card's family sends a builder report email at all. A card whose
+   * report is the builder portal declares `draft_builder_report_email:
+   * not_applicable` ("portal-is-the-report") and the assembler correctly emits
+   * no REPORT_EMAIL_DRAFT for it — so demanding one is an unsatisfiable HOLD,
+   * exactly as it was for the photo email above.
+   *
+   * Captain ruling 2026-08-06 (`report-only-email-applicability`): a roof-report
+   * card sends ONE email, to the group inbox, carrying the invoice. Note this is
+   * NOT the same set as `report_only`: `own_template_roof` is report-only and
+   * still sends a real report email on our own letterhead, so it must keep the
+   * route. Requirement scope belongs to the family matrix and the manifest it
+   * drives, not to this consumer.
+   *
+   * Optional: an absent value means "required", so a producer that has not been
+   * taught this field can only ever be stricter, never accidentally looser.
+   */
+  report_route_applicable?: boolean;
   type_check_hold: boolean;
   story_unverified: boolean;
   trade_report_submitted: boolean;
@@ -182,13 +197,24 @@ export function requiredSesRouteKinds(
   family: string,
   photoRouteApplicable: boolean,
   builderKey?: string | null,
+  reportRouteApplicable = true,
 ): SesRouteKind[] {
   if (family === "assessment_quote") return ["invoice"];
   // AJS/AJBR: report_invoice then photo. Everyone else: report/photo/invoice.
   // photo_route_applicable still drops the photo email on report-only families
   // so the cockpit does not invent an unsatisfiable HOLD (PR 563 honesty).
+  // report_route_applicable is the same argument for the report email, ruled by
+  // the Captain on 2026-08-06: a roof-report card sends ONE email, to the group
+  // inbox, carrying the invoice. The portal holds the report and no empty report
+  // email is fabricated to satisfy this checklist.
+  //
+  // Both defaults are STRICT — an unstated applicability means the route is
+  // required — so a producer that has not been taught either field can only be
+  // stricter than the matrix, never looser. Physical make-safe declares a real
+  // report email and is untouched: it still owes all three destinations.
   return sesReleaseRouteOrder(builderKey).filter((kind) =>
-    kind !== "photo" || photoRouteApplicable
+    (kind !== "photo" || photoRouteApplicable) &&
+    (kind !== "report" || reportRouteApplicable)
   );
 }
 
@@ -198,7 +224,7 @@ export function requiredSesRouteKinds(
  * nothing left to approve and a second approve would commit the money twice.
  */
 export function approveInvoiceDisabledReason(
-  docket: { xero_binding?: Record<string, any> | null },
+  docket: { xero_binding?: Record<string, unknown> | null },
   state: {
     stale: boolean;
     xeroAuthorised: boolean;
@@ -383,16 +409,20 @@ function missingRouteRefusals(
   family: string,
   photoRouteApplicable: boolean,
   builderKey?: string | null,
+  reportRouteApplicable = true,
 ): SesRefusal[] {
   const byKind = new Map(routes.map((route) => [route.route_kind, route]));
   const refusals: SesRefusal[] = [];
   // Assessment stays invoice-only. AJS/AJBR use the two-email shape
   // (report+invoice combined, photo). Everyone else keeps three routes.
-  // photoRouteApplicable keeps report-only families from demanding a photo.
+  // photoRouteApplicable keeps report-only families from demanding a photo, and
+  // reportRouteApplicable does the same for the report email on a card whose
+  // report lives in the builder portal (Captain 2026-08-06).
   const requiredRoutes = requiredSesRouteKinds(
     family,
     photoRouteApplicable,
     builderKey,
+    reportRouteApplicable,
   );
   for (const kind of requiredRoutes) {
     const route = byKind.get(kind);
@@ -452,6 +482,7 @@ export function evaluateSesMechanicalClean(
     input.family,
     input.photo_route_applicable !== false,
     input.builder_key,
+    input.report_route_applicable !== false,
   );
   const checks: SesCleanCheck[] = [
     check(
@@ -564,15 +595,17 @@ export function evaluateSesMechanicalClean(
       ),
     );
   }
-  if (input.report_only && input.family !== "assessment_quote") {
-    blockers.push(
-      sesRefusal(
-        "report_only_email_applicability_parked",
-        "Wait for the Captain to decide the report-only email route applicability, then prepare a new release revision.",
-        { decision_key: "report-only-email-applicability" },
-      ),
-    );
-  }
+  // RULED, not removed. `report-only-email-applicability` parked every
+  // report-only card here pending the Captain's decision on whether report-only
+  // work uses the universal three-email release. He ruled it on 2026-08-06
+  // (`data/decisions/2026-08-06-roof-report-email-shape.md`): a roof-report card
+  // sends ONE email, to the group inbox, carrying the invoice — the exemption
+  // path, not a fabricated empty report email. A decided question must stop
+  // holding cards, so nothing is pushed here any more; the ruling now lives in
+  // `report_route_applicable` above, where it changes what is REQUIRED rather
+  // than adding a second thing to wait for. Do not reintroduce this blocker to
+  // re-park the question — reopening it is a new Captain decision with its own
+  // key, not a revival of this one.
   if (
     input.post_release_disposition_outstanding &&
     !blockers.some((blocker) =>
@@ -707,10 +740,13 @@ export function describeReleaseSendProgress(
 ): string | null {
   if (progress.kind === "none") return null;
   if (progress.kind === "released") {
-    return `This release is already complete (release ${progress.release_revision_id.slice(0, 8)}…). Do not send again.`;
+    return `This release is already complete (release ${
+      progress.release_revision_id.slice(0, 8)
+    }…). Do not send again.`;
   }
   if (progress.kind === "closeout_pending") {
-    const kinds = progress.proved_route_kinds.join(", ") || "all required routes";
+    const kinds = progress.proved_route_kinds.join(", ") ||
+      "all required routes";
     return `Every required route is already proved on the ledger (${kinds}); closeout verification is still incomplete. Do not send again — finish closeout, never re-dispatch.`;
   }
   const missing = progress.missing_route_kinds.join(", ") || "unknown";
@@ -930,15 +966,13 @@ export function buildSesCockpitView(
         // Narrate the real pack (563 honesty). AJS report_invoice + photo packs
         // read as two routes; MLB three-route packs still read as three.
         plan: describeSesSendItPlan(docket.routes),
-        disabled_reason: sendIt
-          ? null
-          : (releaseReason ||
-            sendItDisabledReason(verdict, {
-              stale,
-              xeroAuthorised,
-              noAdditionalCharge,
-              xeroStatus: docket.xero_binding?.status ?? null,
-            })),
+        disabled_reason: sendIt ? null : (releaseReason ||
+          sendItDisabledReason(verdict, {
+            stale,
+            xeroAuthorised,
+            noAdditionalCharge,
+            xeroStatus: docket.xero_binding?.status ?? null,
+          })),
         failed_checks: sesFailedChecks(verdict),
         route_kinds: sesRouteKindsOnPack(docket.routes),
         route_count: sesRouteKindsOnPack(docket.routes).length,
@@ -970,6 +1004,18 @@ export async function buildSesReleaseRevision(args: {
   created_by: string;
   /** When set, selects AJS two-route vs universal three-route order. */
   builder_key?: string | null;
+  /**
+   * The family whose route requirement applies, and which routes that family
+   * actually sends. These are the SAME inputs the cockpit's C11 uses, so the
+   * path that lights APPROVE INVOICE and the path that builds the send obey one
+   * ruling — see the note on `requiredSesRouteKinds`.
+   *
+   * All three are optional and default to the STRICT universal shape, so a
+   * caller that has not been taught them gets exactly the old behaviour.
+   */
+  family?: string | null;
+  photo_route_applicable?: boolean;
+  report_route_applicable?: boolean;
 }): Promise<SesReleaseRevisionPlan> {
   if (args.members.length === 0) {
     throw new TypeError("release members required");
@@ -977,13 +1023,27 @@ export async function buildSesReleaseRevision(args: {
   const routeByKind = new Map(
     args.routes.map((route) => [route.route_kind, route]),
   );
-  const requiredOrder = sesReleaseRouteOrder(args.builder_key);
+  // ONE producer of "what does this card owe". This used to call
+  // sesReleaseRouteOrder directly, which is why a report-only card could clear
+  // the cockpit, have its invoice AUTHORISED, and only then be refused here —
+  // committed money with no send path. The photo exemption had the identical
+  // gap. Requirement scope stays in requiredSesRouteKinds; never re-derive it.
+  const requiredOrder = requiredSesRouteKinds(
+    String(args.family || ""),
+    args.photo_route_applicable !== false,
+    args.builder_key,
+    args.report_route_applicable !== false,
+  );
   const orderedRoutes = requiredOrder.map((kind) => routeByKind.get(kind));
-  if (orderedRoutes.some((route) => !route)) {
+  const missingKinds = requiredOrder.filter((kind) => !routeByKind.has(kind));
+  if (missingKinds.length > 0) {
+    // Name the missing route AND the family's full requirement. The old message
+    // recited a fixed three-route list, which on an exempt family named routes
+    // that family never owed.
     throw new TypeError(
-      isAjsBuilderKey(args.builder_key)
-        ? "AJS report_invoice and photo routes are both required"
-        : "report, photo, and invoice routes are all required",
+      `this release is missing the ${joinRouteKinds([...missingKinds])} ${
+        missingKinds.length === 1 ? "route" : "routes"
+      }; this family requires ${joinRouteKinds([...requiredOrder])}`,
     );
   }
   const members = args.members.map((member, ordinal) => ({

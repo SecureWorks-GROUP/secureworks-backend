@@ -1870,6 +1870,64 @@ Persisting a new docket revision on a card whose `pack.state` is already `sent`
 re-opens it as `needs_review` and invalidates the previous signoff tick. Check
 `pack.state` before treating such a card as reachable work.
 
+## A Roof-Report Card Sends ONE Email, And Route Applicability Is Not `report_only`
+
+Captain 2026-08-06 (`data/decisions/2026-08-06-roof-report-email-shape.md`,
+firstmate home), closing `report-only-email-applicability`: a roof-report card
+sends ONE email, to the group inbox, carrying the invoice. The portal holds the
+report and **no empty report email is to be fabricated** to satisfy a checklist.
+
+Route requirement lives in `requiredSesRouteKinds` (`ses_review_cockpit.ts`),
+which now filters `report` by `reportRouteApplicable` exactly as it filters
+`photo` by `photoRouteApplicable`. Both default STRICT — an unstated
+applicability means required — so a producer that has not been taught the field
+can only be stricter than the matrix, never looser. It is the ONE producer of
+"what does this card owe", consumed by both the cockpit's refusal path and
+`buildSesReleaseRevision` (the send path) — never re-derive the requirement
+from `sesReleaseRouteOrder` directly, which is the bypass that let a card clear
+the cockpit, have its invoice AUTHORISED, and only then be refused at prepare.
+Downstream, `executeSesReleaseRevisionAction` and the cockpit read accept the
+ruled one-route invoice-only release, because the stored route set is pinned by
+the content hash the approval signed.
+
+**That one ruling took FIVE route-shape sites**, because the shape is re-derived
+independently at every layer. Apply
+`20260806010000_ses_release_one_route_invoice_shape.sql` BEFORE the matching
+`ops-api`: it widens `commit_ses_release_revision_v1` to accept the one-route
+invoice shape, and without it a ruled release RAISES at the database after the
+money is already authorised. The other four are `requiredSesRouteKinds` (the
+producer), `buildSesReleaseRevision`, `executeSesReleaseRevisionAction` and
+`querySesReviewCockpitAction` — the last three each bypassed the producer with
+their own hardcoded order or route count. Before changing any route shape,
+search for all five; a sweep of `SES_ROUTE_ORDER` / `sesReleaseRouteOrder` /
+`requiredSesRouteKinds` consumers plus literal route triples and every
+`routes.length` comparison is what found them, and it did not find the SQL one —
+that surfaced only from this file's note that the RPC constrains route counts.
+Centralising the derivation is an open follow-up.
+
+**The applicability key is the manifest, not `report_only`.** `own_template_roof`
+is `report_only: true` and still sends a real report email on our own
+letterhead, so keying the exemption on `report_only` silently drops a route that
+family owes. The producer keys on the assembler's own declaration instead —
+`items.draft_builder_report_email.state !== "not_applicable"` — which is stamped
+`not_applicable` only where the matrix says the portal is the report.
+`initialManifestItems()` seeds every item `blocked`, never `not_applicable`, so a
+family that owes a report email and failed to build one is still held.
+
+Physical make-safe is untouched and still owes all three destinations. Dropping a
+route from the required set never stops the remaining routes being checked: an
+unready invoice route on an exempt card is still an honest hold. Contract,
+the live two-card verification and the controls it lights:
+`data/wgv-docket-prepare-hold-v1/ruling-implementation.md`; the diagnosis that
+found the two blockers were one question is in that folder's `report.md`.
+
+Related trap that survives the ruling: `route_draft_missing`'s recovery text says
+"prepare a new docket revision so the report email is assembled". For a portal
+report-only family that instruction is still unsatisfiable — `reportFile` is
+structurally null (the producing block is gated on `job_type ===
+"physical_makesafe"`), so no number of prepares will ever produce the draft.
+SWMS-261114 took three in one morning before anyone checked.
+
 ## A Curated Bind Does Not Retroactively Trust An Existing Docket Revision
 
 `bind_current_cycle_curated_makesafe_report` writes provenance onto the

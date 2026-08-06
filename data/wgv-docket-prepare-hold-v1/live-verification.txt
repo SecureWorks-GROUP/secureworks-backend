@@ -1,0 +1,30 @@
+
+=== SWMS-261114 White Gum Valley ===
+live status/band  : HOLD / decision_blocked
+live blockers     : route_draft_missing, report_only_email_applicability_parked
+live routes       : invoice
+live xero status  : DRAFT INV-1149
+--- patched evaluator over those live facts ---
+required routes   : invoice
+strict (old)      : blockers = route_draft_missing | band captain_only
+ruled  (new)      : blockers = (none) | clean true | band shaun_clean
+failed checks     : (none)
+APPROVE INVOICE   : ENABLED
+SEND IT           : disabled until invoice AUTHORISED (now DRAFT)
+SENDABLE (release): BUILDS - 1 route(s): invoice
+  control (strict) : REFUSED - this release is missing the report and photo routes; this family requires report, photo and invoice
+
+=== SWMS-261081 Mindarie ===
+live status/band  : HOLD / decision_blocked
+live blockers     : route_draft_missing, report_only_email_applicability_parked
+live routes       : invoice
+live xero status  : DRAFT INV-1150
+--- patched evaluator over those live facts ---
+required routes   : invoice
+strict (old)      : blockers = route_draft_missing | band captain_only
+ruled  (new)      : blockers = (none) | clean true | band shaun_clean
+failed checks     : (none)
+APPROVE INVOICE   : ENABLED
+SEND IT           : disabled until invoice AUTHORISED (now DRAFT)
+SENDABLE (release): BUILDS - 1 route(s): invoice
+  control (strict) : REFUSED - this release is missing the report and photo routes; this family requires report, photo and invoice

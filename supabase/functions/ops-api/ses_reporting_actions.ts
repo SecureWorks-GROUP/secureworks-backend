@@ -797,6 +797,18 @@ function cleanInputFromRows(args: {
     // behaviour (photo required) rather than silently dropping the route.
     photo_route_applicable: !routingDeclared ||
       String(routing.photo_to || "").trim().length > 0,
+    // The manifest's own declaration, not `report_only`. A card whose report is
+    // the builder portal stamps draft_builder_report_email: not_applicable
+    // ("portal-is-the-report") and never produces a REPORT_EMAIL_DRAFT, so the
+    // cockpit must not demand one (Captain 2026-08-06: one email, group inbox,
+    // carrying the invoice). Keying on `report_only` instead would ALSO exempt
+    // own_template_roof, which is report-only but sends a real report email on
+    // our own letterhead — a loosening that ruling does not authorise. Every
+    // other state (ready, blocked, and the initial "Evidence not recorded")
+    // keeps the route required, so a family that owes a report email and failed
+    // to build one is still held, honestly.
+    report_route_applicable:
+      object(items.draft_builder_report_email).state !== "not_applicable",
     type_check_hold: storedBlockers.some((blocker) =>
       blocker.code === "type_check"
     ),
@@ -1186,7 +1198,7 @@ export async function querySesReviewCockpitAction(
   if (
     membersResponse.error || routesResponse.error ||
     !members.some((member: any) => member.job_id === jobId) ||
-    (routes.length !== 3 && routes.length !== 2)
+    (routes.length !== 3 && routes.length !== 2 && routes.length !== 1)
   ) {
     throw new SesActionError(409, {
       state: "refused",
@@ -4100,6 +4112,25 @@ export async function prepareSesReleaseRevisionAction(
       builderKeys.every((key) => isAjsBuilderKey(key))
     ? builderKeys[0]
     : (builderKeys.length === 1 ? builderKeys[0] : null);
+  // Route applicability travels with the builder key so the send path requires
+  // exactly what the cockpit required (Captain 2026-08-06). Composite releases
+  // are CONSERVATIVE by the same rule the builder key uses: a route is exempt
+  // only when EVERY member exempts it, and a mixed family falls back to the
+  // strict universal shape. One dissenting member can only make the release
+  // stricter, never looser.
+  const families = dockets.map((docket) =>
+    String(docket.clean_input.family || "")
+  );
+  const family = families.length > 0 &&
+      families.every((value) => value === families[0])
+    ? families[0]
+    : null;
+  const photoRouteApplicable = dockets.some((docket) =>
+    docket.clean_input.photo_route_applicable !== false
+  );
+  const reportRouteApplicable = dockets.some((docket) =>
+    docket.clean_input.report_route_applicable !== false
+  );
   const plan = await buildSesReleaseRevision({
     org_id: args.org_id,
     members: dockets.map((docket) => ({
@@ -4113,6 +4144,9 @@ export async function prepareSesReleaseRevisionAction(
     routes,
     created_by: args.created_by,
     builder_key: builderKey,
+    family,
+    photo_route_applicable: photoRouteApplicable,
+    report_route_applicable: reportRouteApplicable,
   });
   const committed = await client.rpc("commit_ses_release_revision_v1", {
     p_release: plan.release,
@@ -4498,16 +4532,26 @@ export async function executeSesReleaseRevisionAction(
   }
   // Infer shape from the release's own route set (not live job state):
   //   AJS: report_invoice + photo (or legacy report+photo half-match)
+  //   ruled roof-report (Captain 2026-08-06): invoice alone
   //   universal: report + photo + invoice
+  // The invoice-only shape can only exist because prepare built it through
+  // requiredSesRouteKinds under the ruling, and the stored route set is pinned
+  // by the release content hash the approval signed — refusing it here would
+  // reject at SEND IT the exact release the Captain already approved, after
+  // money is AUTHORISED.
   const routeKinds = routes.map((route: any) => String(route.route_kind || ""));
   const isAjsRelease = routeKinds.length === 2 &&
     routeKinds.includes("photo") &&
     !routeKinds.includes("invoice") &&
     (routeKinds.includes("report_invoice") || routeKinds.includes("report"));
+  const isInvoiceOnlyRelease = routeKinds.length === 1 &&
+    routeKinds[0] === "invoice";
   const requiredOrder = isAjsRelease
     ? (routeKinds.includes("report_invoice")
       ? sesReleaseRouteOrder("AJS")
       : (["report", "photo"] as typeof SES_ROUTE_ORDER))
+    : isInvoiceOnlyRelease
+    ? (["invoice"] as typeof SES_ROUTE_ORDER)
     : SES_ROUTE_ORDER;
   if (routes.length !== requiredOrder.length) {
     throw new SesActionError(409, {

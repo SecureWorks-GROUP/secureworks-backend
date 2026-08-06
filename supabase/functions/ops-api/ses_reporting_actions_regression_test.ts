@@ -7,6 +7,7 @@ import {
 import {
   _parseSesDraftForTest,
   docketArtifactPackRelativePath,
+  executeSesReleaseRevisionAction,
   getSesReviewablePackAction,
   inspectSesSupportingReportProof,
   listSesDocsReadyReviewsAction,
@@ -823,6 +824,131 @@ Deno.test("review pack keeps an independently proved sibling bundle report visib
   assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
 });
 
+function roofPortalCockpitClient(
+  draftBuilderReportEmailState: string,
+  extraRows: Record<string, unknown> = {},
+): any {
+  const rows: Record<string, unknown> = {
+    ...extraRows,
+    makesafe_docket_revisions_current: {
+      id: "docket-fixture",
+      job_id: "job-fixture",
+      family_matrix_version: "family-matrix-fixture",
+      invoice_obligation_revision_id: null,
+      attendance_cycle_ids: ["cycle-fixture"],
+      stage: "pre_xero",
+      pre_xero_docs_ready: true,
+      envelope: {
+        v2: {
+          classification: {
+            family: "ordinary_roof_portal",
+            job_number: "SWMS-TEST",
+            report_only: true,
+            builder_key: "MLB",
+          },
+          routing: { invoice_to: "makesafes@builder.example" },
+          items: {
+            draft_builder_report_email: {
+              state: draftBuilderReportEmailState,
+            },
+          },
+        },
+      },
+      blockers: [],
+      review_spec: { cards: [{ family: "ordinary_roof_portal" }] },
+      email_drafts: {
+        INVOICE_EMAIL_DRAFT:
+          "To: makesafes@builder.example\nSubject: Invoice\nAttachments: invoice-hash\n\nBody",
+      },
+    },
+    makesafe_readiness_current_v2: {
+      readiness_revision: "readiness-fixture",
+      dependency_generation: 1,
+      ready: true,
+      blockers: [],
+    },
+    makesafe_invoice_obligation_revisions_current: {
+      id: "obligation-fixture",
+      pricing_disposition: "no_additional_charge",
+      blockers: [],
+      duplicate_probe: { allows_create: true, ambiguity: "none" },
+    },
+    makesafe_docket_artifacts: [],
+    job_assignments: [],
+    job_service_reports: [],
+  };
+  return {
+    storage: {
+      from() {
+        return {
+          download: () => Promise.resolve({ data: new Blob([]), error: null }),
+        };
+      },
+    },
+    from(table: string) {
+      let single = false;
+      const query: any = {
+        select: () => query,
+        eq: () => query,
+        order: () => query,
+        limit: () => query,
+        maybeSingle: () => {
+          single = true;
+          return query;
+        },
+        then: (resolve: (value: unknown) => unknown) => {
+          const value = rows[table];
+          return Promise.resolve({
+            data: single && Array.isArray(value) ? value[0] || null : value,
+            error: null,
+          }).then(resolve);
+        },
+      };
+      return query;
+    },
+  } as any;
+}
+
+Deno.test("cockpit reads the portal-is-the-report manifest declaration and drops the report email requirement", async () => {
+  // Producer seam for the 2026-08-06 ruling: the manifest's own
+  // draft_builder_report_email: not_applicable stamp (not `report_only`) is what
+  // flows into report_route_applicable, so a live roof-portal card with one
+  // invoice draft is no longer held for a report email nobody may fabricate.
+  const cockpit = await querySesReviewCockpitAction(
+    roofPortalCockpitClient("not_applicable"),
+    "job-fixture",
+  );
+  const codes = cockpit.verdict.blockers.map((item: any) => item.code);
+  assertEquals(
+    codes.filter((code: string) =>
+      code === "report_only_email_applicability_parked"
+    ),
+    [],
+  );
+  assertEquals(
+    cockpit.verdict.blockers
+      .filter((item: any) => item.code === "route_draft_missing")
+      .filter((item: any) => String(item.fact).includes("report email")),
+    [],
+  );
+});
+
+Deno.test("cockpit still demands the report email when the manifest does not declare not_applicable", async () => {
+  // Fail-strict control: any other manifest state (here the initial "blocked")
+  // keeps the report route required, so a family that owes a report email and
+  // failed to build one is still held honestly.
+  const cockpit = await querySesReviewCockpitAction(
+    roofPortalCockpitClient("blocked"),
+    "job-fixture",
+  );
+  const held = cockpit.verdict.blockers.find((item: any) =>
+    item.code === "route_draft_missing" &&
+    String(item.fact).includes("report email")
+  );
+  assertEquals(Boolean(held), true);
+  assertEquals(cockpit.status, "HOLD");
+});
+
 Deno.test("cockpit response converts missing independent report proof into a visible HOLD", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nlegacy fixture");
   const reportHash = await sesSha256Bytes(bytes);
@@ -1230,4 +1356,309 @@ Deno.test("Docs Ready list refuses rather than masking proposal hydration failur
     SesActionError,
   );
   assertEquals(error.status, 503);
+});
+
+// ─── Ruled invoice-only release shape at the cockpit read and SEND IT ───
+//
+// Captain 2026-08-06: a roof-report card sends ONE email, to the group inbox,
+// carrying the invoice. Prepare and approve now build that release as a single
+// invoice route, so the two later consumers of the stored route set — the
+// cockpit's composite-release read and SEND IT execute — must recognise the
+// same shape. Without these, the Captain clears the cockpit, AUTHORISES real
+// money, approves the release, and is only then refused: money committed
+// before the refusal appears, the exact outcome the Captain rejected.
+
+function releaseFixtureRows(
+  memberJobId: string,
+  routes: Array<Record<string, unknown>>,
+): Record<string, unknown> {
+  return {
+    makesafe_release_revisions: {
+      id: "release-fixture",
+      content_hash: "sha256:" + "e".repeat(64),
+      state: "approved",
+      readiness_bindings: [],
+    },
+    makesafe_release_revision_members: [{
+      ordinal: 1,
+      job_id: memberJobId,
+      docket_revision_id: "docket-fixture",
+      invoice_obligation_revision_id: "obligation-fixture",
+    }],
+    makesafe_release_revision_routes: routes,
+  };
+}
+
+const INVOICE_ONLY_ROUTE = {
+  ordinal: 1,
+  route_kind: "invoice",
+  recipients: ["makesafes@mlbuilders.com.au"],
+  cc: ["finance@mlbuilders.com.au"],
+  subject: "Invoice",
+  body: "Invoice body",
+  body_hash: "sha256:" + "1".repeat(64),
+  attachment_hashes: ["sha256:" + "3".repeat(64)],
+};
+
+Deno.test("cockpit read accepts the ruled one-route invoice-only release", async () => {
+  const cockpit: any = await querySesReviewCockpitAction(
+    roofPortalCockpitClient(
+      "not_applicable",
+      releaseFixtureRows("job-fixture", [INVOICE_ONLY_ROUTE]),
+    ),
+    "job-fixture",
+    undefined,
+    "release-fixture",
+  );
+  assertEquals(cockpit.release_revision.id, "release-fixture");
+  assertEquals(
+    cockpit.release_revision.routes.map((route: any) => route.route_kind),
+    ["invoice"],
+  );
+});
+
+Deno.test("cockpit read still refuses a release that does not contain this job", async () => {
+  const error = await assertRejects(
+    () =>
+      querySesReviewCockpitAction(
+        roofPortalCockpitClient(
+          "not_applicable",
+          releaseFixtureRows("some-other-job", [INVOICE_ONLY_ROUTE]),
+        ),
+        "job-fixture",
+        undefined,
+        "release-fixture",
+      ),
+    SesActionError,
+  );
+  assertEquals(error.status, 409);
+  assertStringIncludes(
+    String((error.refusal as any).fact),
+    "does not contain this job",
+  );
+});
+
+function releaseExecuteClient(routes: Array<Record<string, unknown>>): any {
+  const effects = new Map<string, any>();
+  return {
+    from(table: string) {
+      const result = (() => {
+        switch (table) {
+          case "makesafe_release_revisions":
+            return {
+              data: {
+                id: "release-fixture",
+                content_hash: "sha256:" + "e".repeat(64),
+              },
+              error: null,
+            };
+          case "makesafe_release_revision_members":
+            return {
+              data: [{
+                ordinal: 1,
+                job_id: "job-fixture",
+                docket_revision_id: "docket-fixture",
+                invoice_obligation_revision_id: "obligation-fixture",
+              }],
+              error: null,
+            };
+          case "makesafe_release_revision_routes":
+            return { data: routes, error: null };
+          case "makesafe_docket_revisions":
+            return {
+              data: {
+                id: "docket-fixture",
+                job_id: "job-fixture",
+                xero_binding: {
+                  status: "AUTHORISED",
+                  xero_invoice_id: "xero-invoice-1",
+                },
+                invoice_obligation_revision_id: "obligation-fixture",
+                envelope: {
+                  v2: {
+                    classification: {
+                      builder_key: "MLB",
+                      family: "ordinary_roof_portal",
+                      report_only: true,
+                    },
+                    routing: {},
+                  },
+                },
+                review_spec: {},
+              },
+              error: null,
+            };
+          case "makesafe_docket_artifacts":
+            return {
+              data: [{
+                content_hash: "sha256:" + "3".repeat(64),
+                size_bytes: 500_000,
+                object_key: "dockets/docket-fixture/invoice.pdf",
+                media_type: "application/pdf",
+              }],
+              error: null,
+            };
+          case "makesafe_closeout_revisions":
+            return { data: effects.get("closeout") || null, error: null };
+          case "makesafe_revision_approvals_current_v2":
+            return {
+              data: {
+                id: "approval-1",
+                approval_content_hash: "sha256:" + "e".repeat(64),
+              },
+              error: null,
+            };
+          default:
+            return { data: null, error: null };
+        }
+      })();
+      const builder: any = {
+        select: () => builder,
+        eq: () => builder,
+        in: () => builder,
+        order: () => Promise.resolve(result),
+        limit: () => builder,
+        maybeSingle: () => Promise.resolve(result),
+        then: (resolve: any, reject: any) =>
+          Promise.resolve(result).then(resolve, reject),
+      };
+      return builder;
+    },
+    rpc(name: string, rpcArgs: Record<string, any>) {
+      if (name === "assert_ses_dockets_signed_off_v1") {
+        return Promise.resolve({ data: true, error: null });
+      }
+      if (name === "begin_ses_release_execution_v1") {
+        return Promise.resolve({ data: { reserved: true }, error: null });
+      }
+      if (name === "claim_ses_external_effect_v1") {
+        const effect = { ...rpcArgs.p_effect, state: "reserved" };
+        effects.set(String(effect.operation_key), effect);
+        return Promise.resolve({
+          data: { claim_mode: "reserved", effect },
+          error: null,
+        });
+      }
+      if (name === "transition_ses_external_effect_v1") {
+        const effect = effects.get(String(rpcArgs.p_operation_key)) || {
+          operation_key: String(rpcArgs.p_operation_key),
+          external_token: "",
+          effect_kind: "route_send",
+        };
+        return Promise.resolve({
+          data: { ...effect, state: rpcArgs.p_to_state },
+          error: null,
+        });
+      }
+      if (name === "confirm_ses_release_route_v1") {
+        return Promise.resolve({
+          data: { proof_hash: rpcArgs.p_proof_hash },
+          error: null,
+        });
+      }
+      if (name === "commit_ses_release_closeout_v1") {
+        const closeout = { ...(rpcArgs.p_closeout || {}), verified: true };
+        effects.set("closeout", closeout);
+        return Promise.resolve({ data: closeout, error: null });
+      }
+      return Promise.resolve({ data: null, error: null });
+    },
+    storage: {
+      from: () => ({
+        upload: () => Promise.resolve({ data: null, error: null }),
+        createSignedUrl: () => Promise.resolve({ data: null, error: null }),
+        download: () => Promise.resolve({ data: null, error: null }),
+      }),
+    },
+  };
+}
+
+function releaseExecuteMailGateway(sentSubjects: string[]): any {
+  const sentByToken = new Map<string, any>();
+  return {
+    createDraftAndSend: (payload: any, context: any) => {
+      sentSubjects.push(String(payload.subject));
+      const result = {
+        message_id: `graph-message-${sentSubjects.length}`,
+        internet_message_id: `<msg-${sentSubjects.length}@graph>`,
+        operation_token: context.external_token,
+      };
+      sentByToken.set(String(context.external_token), result);
+      return Promise.resolve(result);
+    },
+    reconcileSent: (token: string) =>
+      Promise.resolve(
+        sentByToken.has(String(token)) ? [sentByToken.get(String(token))] : [],
+      ),
+  };
+}
+
+Deno.test("SEND IT executes a sealed one-route invoice-only release", async () => {
+  const sentSubjects: string[] = [];
+  const result: any = await executeSesReleaseRevisionAction(
+    releaseExecuteClient([INVOICE_ONLY_ROUTE]),
+    { mode: "api_key", user: null },
+    {
+      org_id: "org-1",
+      release_revision_id: "release-fixture",
+      actor: "captain",
+    },
+    releaseExecuteMailGateway(sentSubjects),
+    { readAuthorised: () => Promise.resolve(true) } as any,
+  );
+  assertEquals(result.state, "released");
+  assertEquals(sentSubjects, ["Invoice"]);
+});
+
+Deno.test("SEND IT still refuses a non-AJS release missing routes it owes", async () => {
+  const sentSubjects: string[] = [];
+  const error = await assertRejects(
+    () =>
+      executeSesReleaseRevisionAction(
+        releaseExecuteClient([
+          {
+            ...INVOICE_ONLY_ROUTE,
+            ordinal: 1,
+            route_kind: "report",
+          },
+          { ...INVOICE_ONLY_ROUTE, ordinal: 2 },
+        ]),
+        { mode: "api_key", user: null },
+        {
+          org_id: "org-1",
+          release_revision_id: "release-fixture",
+          actor: "captain",
+        },
+        releaseExecuteMailGateway(sentSubjects),
+        { readAuthorised: () => Promise.resolve(true) } as any,
+      ),
+    SesActionError,
+  );
+  assertEquals(error.status, 409);
+  assertStringIncludes(
+    String((error.refusal as any).fact),
+    "all three required routes",
+  );
+  assertEquals(sentSubjects, []);
+});
+
+Deno.test("SEND IT still refuses a one-route release whose single route is not the invoice", async () => {
+  const sentSubjects: string[] = [];
+  const error = await assertRejects(
+    () =>
+      executeSesReleaseRevisionAction(
+        releaseExecuteClient([{ ...INVOICE_ONLY_ROUTE, route_kind: "report" }]),
+        { mode: "api_key", user: null },
+        {
+          org_id: "org-1",
+          release_revision_id: "release-fixture",
+          actor: "captain",
+        },
+        releaseExecuteMailGateway(sentSubjects),
+        { readAuthorised: () => Promise.resolve(true) } as any,
+      ),
+    SesActionError,
+  );
+  assertEquals(error.status, 409);
+  assertEquals(sentSubjects, []);
 });
