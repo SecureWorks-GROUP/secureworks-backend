@@ -14,8 +14,10 @@
 // docs/evidence/makesafe-duplicate-survivors-2026-08-01.md.
 
 import {
+  isMakesafeDecisionRequiredDisplayStatus,
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
+  makesafeOverlaySourceStatus,
   type MakesafeStatusApplyRow,
 } from "./makesafe_status_apply.ts";
 
@@ -77,6 +79,7 @@ export interface MakesafeDuplicateSkip {
     | "survivor_terminal_display_status"
     | "survivor_terminal_job_status"
     | "already_archived_as_duplicate"
+    | "loser_decision_required_display_status"
     | "group_not_authorized";
   detail?: string;
 }
@@ -393,6 +396,14 @@ export function planMakesafeDuplicateSurvivorArchives(
       continue;
     }
     const before = token(loser.canonical_stage);
+    if (isMakesafeDecisionRequiredDisplayStatus(before)) {
+      skipped.push({
+        ...base,
+        reason: "loser_decision_required_display_status",
+        detail: before,
+      });
+      continue;
+    }
     if (isMakesafeTerminalDisplayStatus(before)) {
       skipped.push({
         ...base,
@@ -413,7 +424,7 @@ export function planMakesafeDuplicateSurvivorArchives(
     archives.push({
       job_id: String(loser.id),
       job_number: String(loser.job_number),
-      source_status: token(loser.declared_stage || loser.canonical_stage),
+      source_status: makesafeOverlaySourceStatus(loser),
       before_status: before,
       after_status: "archive",
       computed_at: nowIso,

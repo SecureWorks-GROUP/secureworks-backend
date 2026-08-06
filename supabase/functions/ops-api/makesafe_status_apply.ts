@@ -9,6 +9,16 @@ export const MAKESAFE_TERMINAL_DISPLAY_STATUSES = [
   "cancelled",
 ] as const;
 
+/**
+ * Release 12: the evidence engine says "the column is not proved" rather than
+ * picking a plausible one. It is a real `canonical_stage` value, so every
+ * planner over canonical rows has to recognise it — but it is never a ledger
+ * `before_status` (the table CHECK rejects it) and never plannable: it is a
+ * question for the Captain, parked with a reason.
+ */
+export const MAKESAFE_DECISION_REQUIRED_DISPLAY_STATUS =
+  "decision_required" as const;
+
 const TERMINAL_DISPLAY = new Set<string>(MAKESAFE_TERMINAL_DISPLAY_STATUSES);
 const TERMINAL_JOB_STATES = new Set([
   "archived",
@@ -35,6 +45,7 @@ export interface MakesafeStatusApplyRow {
   job_number?: string | null;
   job_state?: string | null;
   declared_stage?: string | null;
+  derived_stage_v2?: string | null;
   canonical_stage?: string | null;
   computed_status?: string | null;
   computed_status_reasons?: string[] | null;
@@ -66,6 +77,7 @@ export interface MakesafeStatusApplicationSkip {
     | "terminal_job_status"
     | "missing_computed_status"
     | "missing_computed_evidence"
+    | "decision_required_display_status"
     | "already_matches";
   current_status?: string | null;
   computed_status?: string | null;
@@ -81,6 +93,26 @@ export function isMakesafeTerminalDisplayStatus(value: unknown): boolean {
 
 export function isMakesafeTerminalJobState(value: unknown): boolean {
   return TERMINAL_JOB_STATES.has(token(value));
+}
+
+export function isMakesafeDecisionRequiredDisplayStatus(
+  value: unknown,
+): boolean {
+  return token(value) === MAKESAFE_DECISION_REQUIRED_DISPLAY_STATUS;
+}
+
+/**
+ * The ONE producer of an overlay ledger row's `source_status`. Release 12 moved
+ * placement to the evidence engine, so the anchor the reader compares against is
+ * the engine's own pre-overlay answer (`derived_stage_v2`), falling back to
+ * `canonical_stage` when a caller built the row without the diagnostic field.
+ * Never `declared_stage`: the legacy ladder is provenance only, and stamping it
+ * here writes a row the R12 reader can never bind and the guarded RPC rejects.
+ */
+export function makesafeOverlaySourceStatus(
+  row: Pick<MakesafeStatusApplyRow, "derived_stage_v2" | "canonical_stage">,
+): string {
+  return token(row?.derived_stage_v2) || token(row?.canonical_stage);
 }
 
 export function countMakesafeBoardStages(
@@ -139,8 +171,18 @@ export function planMakesafeStatusApplications(
       continue;
     }
     const before = token(row.canonical_stage);
-    const source = token(row.declared_stage || row.canonical_stage);
+    const source = makesafeOverlaySourceStatus(row);
     const after = token(row.computed_status);
+    if (isMakesafeDecisionRequiredDisplayStatus(before)) {
+      skipped.push({
+        job_id: row.id,
+        job_number: row.job_number || null,
+        reason: "decision_required_display_status",
+        current_status: before,
+        computed_status: after || null,
+      });
+      continue;
+    }
     if (isMakesafeTerminalDisplayStatus(before)) {
       skipped.push({
         job_id: row.id,

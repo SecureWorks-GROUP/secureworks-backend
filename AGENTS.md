@@ -51,8 +51,13 @@ Ops projection defaults to **card shape** (`fields=card`, response `shape:"card"
 placement keys plus the presentation fields the kanban paints. Diagnostics
 (`computed_status_evidence`, `derived_stage_v2_*`, fat `lineage` siblings,
 `notes`, `job_identity`, …) and the flat `rows` duplicate opt in via
-`fields=full` / `include_diagnostics=1`. Card mode must never re-derive a column
-— `canonical_stage` stays declared ladder + display-ledger overlay. Do not
+`fields=full` / `include_diagnostics=1`. Card and full mode must PLACE
+identically: `canonical_stage` is the v2 evidence engine (`deriveSesStageV2`)
+plus the display-ledger overlay in both, and every placement-bearing evidence
+read (completion photos, portal captures, holds, terminal proofs) is therefore
+deliberately ungated in `loadCanonicalMakesafeBoard`. Card mode may only skip
+DETAIL (notes, contacts, intake lineage, diagnostics), never a placement input.
+Do not
 reintroduce a board-path dual-fetch of `makesafe_pipeline?history=all`; card
 shape stamps `has_wo` / `invoice_status` / `site_suburb` / company slug so the
 board is self-sufficient. Contract: `docs/makesafe-board-read-model-v1.md`.
@@ -66,11 +71,16 @@ meta so history never looks deleted. Placement for returned cards is unchanged.
 Board **TTFB** after card shape + archive-on-demand is dominated by **serial
 PostgREST round-trips inside `makesafePipeline`**, not payload bytes (active
 and `include_archive=1` share the same TTFB class live). Keep
-`fetchAllRowsInChunks` concurrent across URL-budget chunks, one dependent-read
-wave in the pipeline, and active-scope skip of stage-dependent joins for
-`jobs.status='archived'` (early-return archive; census only). Do not re-cut
-card bytes and call it a TTFB win. Remeasure wall time on production after
-every board-path change.
+`fetchAllRowsInChunks` concurrent across URL-budget chunks and one dependent-read
+wave in the pipeline. Release 12 RETIRED the active-scope skip of stage-dependent
+joins for `jobs.status='archived'` (`skipArchivedStatusDependents: false` on the
+board path): the evidence engine can derive a wrongly-archived card back out, so
+every scope builds every base row and `column_scope` only filters the RETURNED
+rows. That widened per-card join and evidence work is the accepted cost of one
+truth, and it makes a production wall-time remeasure due. Keep the
+placement-bearing reads overlapped in one `Promise.all` wave rather than awaited
+one at a time. Do not re-cut card bytes and call it a TTFB win. Remeasure wall
+time on production after every board-path change.
 
 That concurrency is BOUNDED, and the bound is module-wide, not per call:
 `CHUNK_FETCH_CONCURRENCY` in `makesafe_compact_reads.ts` (8, captain's cap
@@ -1796,25 +1806,38 @@ Pin a contract version literal in ONE place only — the owning module's own sui
 A second suite restating it is what turned the correct `c1-po-ruling-v2` →
 `c1-unlinked-invoice-v3` bump into a red baseline; consumers import the constant.
 
-## The Corrected Stage Engine Is A Shadow, And Stays One
+## The Corrected Stage Engine Is The Placement Authority (Release 12)
 
-`ses_stage_engine_v2.ts` is the one corrected evidence-derived stage engine that
-will eventually replace BOTH the legacy ladder and `computeMakesafeStatus`. It
-has no authority today. `canonical_stage` is still the legacy ladder plus the
-existing overlay resolver, `projectOpsMakesafeBoard` still buckets on it alone,
-and everything v2 returns is published as advisory `derived_stage_v2*` keys.
-There is deliberately no flag that promotes it; the authority flip is Release 12
-of `data/ses-f10-stage-engine-v2-design-v1/report.md` and has to be written, not
-thrown. Do not add one, and do not let the advisory value into the trade
-allow-list.
+`ses_stage_engine_v2.ts` is the one corrected evidence-derived stage engine, and
+since Release 12 of the Rescue SES mission (secureworks-wiki
+`coding/work/campaigns/makesafe-system/missions/rescue-ses-2026-08/CONTRACT.md`,
+design in `data/ses-f10-stage-engine-v2-design-v1/report.md`) it PLACES the
+board. Stages are computed from evidence, never written: `canonical_stage` is
+`deriveSesStageV2` plus the captain overlay ledger, `projectOpsMakesafeBoard`
+buckets on that, and every card stamps `placement_engine_version` ending
+`+overlay-r12`. The legacy ladder is intentionally NOT deleted — `declared_stage`
+(and `declared_stage_engine_version`) are provenance only — and
+`computeMakesafeStatus` (M1) stays published for measurement continuity. Do not
+re-shadow the engine, and do not let a diagnostic `derived_stage_v2*` key into
+the trade allow-list.
+
+The overlay is anchored on the DERIVED stage, not the ladder: the reader binds an
+application only when `source_status === derived_stage_v2`, so every WRITER of
+`makesafe_board_status_applications` stamps `source_status` through the one
+producer `makesafeOverlaySourceStatus` (`derived_stage_v2`, falling back to
+`canonical_stage`). Never stamp `declared_stage` — the guarded RPC's
+`COALESCE(latest.after_status, source_status) = before_status` predicate would
+exclude the row and RAISE, failing the whole apply/reconcile/duplicate-archive
+run. `decision_required` (Captain Decision) is a real display stage for a card
+whose evidence contradicts itself, so every planner over canonical rows must
+recognise it and PARK it with a reason — it is never a ledger `before_status`
+(the table CHECK rejects it) and never plannable.
 
 Two boundaries are structural, not documented: `SesStageV2Input` OMITS
 `displayedStatus` (the read model builds the evidence input without it and
 appends it only for M1's own call, ending the circular "display determines
 computation" path), and `sesStageV2OverlayCandidate` only SIMULATES the overlay
-resolver with the same three guards. Real overlay binding is untouched — nine of
-the 46 rows would unbind under a corrected derivation and five reverse the
-captain's own archive rulings, which is Release 9's job.
+resolver with the same three guards for the diagnostic keys.
 
 The evidence half of the ladder lives ONCE, in `makesafe_computed_status.ts`'s
 `deriveMakesafeEvidenceStage`, and both engines call it. The terminal half

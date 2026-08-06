@@ -183,6 +183,7 @@ import {
   planMakesafeStatusApplications,
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
+  makesafeOverlaySourceStatus,
   type MakesafeStatusApplication,
 } from './makesafe_status_apply.ts'
 import {
@@ -4312,7 +4313,7 @@ if (import.meta.main) serve(async (req: Request) => {
             job_id: outcome.job_id,
             job_number: outcome.job_number,
             outcome: outcome.outcome,
-            source_status: String(row?.declared_stage || row?.canonical_stage || '').toLowerCase(),
+            source_status: makesafeOverlaySourceStatus(row || {}),
             before_status: String(row?.canonical_stage || '').toLowerCase(),
             after_status: transition?.after_status || null,
             computed_at: row?.state_v2?.computed_at || computedAt,
@@ -16786,8 +16787,10 @@ async function loadCanonicalMakesafeBoard(
   let intakeCases: any[] = []
 
   // Placement-bearing photo count, every mode. _fetchAllByJobIdChunked checks
-  // every PostgREST error and paginates every 1000 rows.
-  photos = await _fetchAllByJobIdChunked(
+  // every PostgREST error and paginates every 1000 rows. Built first and awaited
+  // together with the detail-only reads so full mode pays no extra serial wave —
+  // serial round-trips, not payload bytes, dominate board TTFB.
+  const photosPromise = _fetchAllByJobIdChunked(
     client,
     'job_media',
     'id, job_id, type, phase',
@@ -16795,8 +16798,11 @@ async function loadCanonicalMakesafeBoard(
     (q) => q.eq('type', 'photo').eq('phase', 'completion'),
   )
 
-  if (!cardMode) {
-    ;[notes, contacts] = await Promise.all([
+  if (cardMode) {
+    photos = await photosPromise
+  } else {
+    ;[photos, notes, contacts] = await Promise.all([
+      photosPromise,
       _fetchAllByJobIdChunked(
         client,
         'job_events',

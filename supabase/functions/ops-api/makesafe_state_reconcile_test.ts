@@ -285,3 +285,46 @@ Deno.test("seed chunk accounting never coerces a missing count to zero", () => {
   assertEquals(summary.valid, false);
   assertStringIncludes(summary.error || "", "invalid accounting");
 });
+
+Deno.test("R12: a decision_required card parks as a Captain question and never aborts the run", () => {
+  const plan = planMakesafeStateReconciliation([
+    row("SWMS-26517", "decision_required", state("allocated"), {
+      declared_stage: "trade_report_in",
+      derived_stage_v2: "decision_required",
+    }),
+    row("SWMS-CLEAN", "new", state("allocated"), {
+      derived_stage_v2: "new",
+    }),
+  ]);
+
+  assertEquals(plan.requested, 2);
+  assertEquals(plan.captain_marked, 1);
+  assertEquals(plan.trustworthy, 1);
+  assertEquals(plan.neither, 0);
+  assertEquals(
+    plan.transitions.map((transition) => transition.job_number),
+    ["SWMS-CLEAN"],
+  );
+  const parked = plan.outcomes.find((outcome) =>
+    outcome.job_number === "SWMS-26517"
+  );
+  assertEquals(parked?.outcome, "captain_marked");
+  assertEquals(parked?.fact_derived_status, null);
+  const attention = plan.attention_applications.find((item) =>
+    item.job_number === "SWMS-26517"
+  );
+  assertEquals(attention?.code, "board_evidence_contradiction_ruling");
+  assertEquals(attention?.state, "active");
+});
+
+Deno.test("R12: reconciliation stamps source_status from the derived stage", () => {
+  const plan = planMakesafeStateReconciliation([
+    row("SWMS-DIVERGED", "report_ready", state("allocated"), {
+      declared_stage: "trade_report_in",
+      derived_stage_v2: "report_ready",
+    }),
+  ]);
+
+  assertEquals(plan.transitions[0].source_status, "report_ready");
+  assertEquals(plan.transitions[0].before_status, "report_ready");
+});

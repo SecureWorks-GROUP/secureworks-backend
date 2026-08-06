@@ -1538,11 +1538,12 @@ export function buildCanonicalMakesafeRows(
           screenshot_available: !!capture.screenshot,
         })),
       },
-      // ── Corrected stage engine — ADVISORY, SHADOW ONLY ──────────────────
-      // Published for comparison and audit. `canonical_stage` above is, and
-      // stays, the legacy ladder plus the existing overlay resolver; nothing
-      // in this block places a card, and no consumer may bucket on it. The
-      // authority flip is a separate captain-approved release.
+      // ── Corrected stage engine — PLACEMENT AUTHORITY (Release 12) ───────
+      // `derived_stage_v2` is the engine's own pre-overlay answer, and it is
+      // what `canonical_stage` above is built from (engine + overlay). It is
+      // also the ledger anchor every overlay writer stamps as `source_status`
+      // (`makesafeOverlaySourceStatus`). The remaining keys in this block stay
+      // diagnostic: comparison, audit, and measurement continuity.
       derived_stage_v2: stageV2.stage,
       // What the EXISTING overlay resolver would produce if the derivation
       // changed. A simulation with the same guards — it binds nothing.

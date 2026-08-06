@@ -55,6 +55,7 @@ import {
 import {
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
+  MAKESAFE_DECISION_REQUIRED_DISPLAY_STATUS,
 } from "./makesafe_status_apply.ts";
 import {
   canonicalSesFamilyFromCard,
@@ -90,7 +91,8 @@ export const SES_STAGE_COMPLETED_WINDOW_MS = 7 * 86_400_000;
  * rather than picking a plausible column; the design is explicit that a
  * mechanical fall-through is not evidence about the job.
  */
-export const SES_STAGE_DECISION_REQUIRED = "decision_required" as const;
+export const SES_STAGE_DECISION_REQUIRED =
+  MAKESAFE_DECISION_REQUIRED_DISPLAY_STATUS;
 
 export type SesStageV2Stage =
   | MakesafeComputedStatus

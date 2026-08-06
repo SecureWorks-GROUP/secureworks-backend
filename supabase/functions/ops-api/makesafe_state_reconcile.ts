@@ -1,6 +1,9 @@
 import {
+  isMakesafeDecisionRequiredDisplayStatus,
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
+  MAKESAFE_DECISION_REQUIRED_DISPLAY_STATUS,
+  makesafeOverlaySourceStatus,
   type MakesafeStatusApplication,
 } from "./makesafe_status_apply.ts";
 import type {
@@ -16,6 +19,10 @@ const VALID_DISPLAY_STAGES = new Set([
   "completed",
   "archive",
   "cancelled",
+  // Release 12: a real display stage, so it is valid INPUT here. It is parked as
+  // a Captain question below rather than planned — never invalid input that
+  // aborts the whole full-board run.
+  MAKESAFE_DECISION_REQUIRED_DISPLAY_STATUS,
 ]);
 
 const STAGE_RANK = new Map([
@@ -144,6 +151,7 @@ export interface MakesafeReconcileRow {
   job_number?: string | null;
   job_state?: string | null;
   declared_stage?: string | null;
+  derived_stage_v2?: string | null;
   canonical_stage?: string | null;
   captain_action?: MakesafeCaptainAction | null;
   state_v2?: MakesafeStateV2 | null;
@@ -358,11 +366,40 @@ export function planMakesafeStateReconciliation(
     seen.add(jobId);
     const state = row.state_v2;
     const before = token(row.canonical_stage);
-    const source = token(row.declared_stage || row.canonical_stage);
+    const source = makesafeOverlaySourceStatus(row);
     if (!state || !VALID_DISPLAY_STAGES.has(before) || !source) {
       throw new Error(
         `Job ${jobNumber} is missing its v2 state or displayed status.`,
       );
+    }
+    if (isMakesafeDecisionRequiredDisplayStatus(before)) {
+      const message = sentence(
+        "Need you to rule on this card: the board evidence engine could not prove " +
+          "a column because its evidence contradicts itself",
+      );
+      attentionApplications.push({
+        job_id: jobId,
+        job_number: jobNumber,
+        attendance_cycle_id: state.identity.current_attendance_cycle_id,
+        state: "active",
+        code: "board_evidence_contradiction_ruling",
+        message,
+        since: state.computed_at,
+        evidence_refs: [
+          ...new Set(state.stage_evidence.evidence_refs.filter(Boolean)),
+        ],
+        computed_at: state.computed_at,
+      });
+      captainMarked += 1;
+      outcomes.push({
+        job_id: jobId,
+        job_number: jobNumber,
+        outcome: "captain_marked",
+        displayed_status: before,
+        fact_derived_status: null,
+        reason: message,
+      });
+      continue;
     }
     const derived = effectiveDisplayStage(state);
     const determinate = stageIsDeterminate(state, before, derived);
