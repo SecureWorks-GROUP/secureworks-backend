@@ -499,6 +499,115 @@ Deno.test("release identity changes when route content or order changes", async 
   );
 });
 
+Deno.test("the send path honours the same route ruling as the approve path", async () => {
+  // The gap this closes: a roof-report card could clear the cockpit, have its
+  // invoice AUTHORISED, and only THEN be refused here — committed money with no
+  // send path. Approve and send must require the same routes.
+  const member = {
+    job_id: "job-1",
+    docket_revision_id: "docket-1",
+    invoice_obligation_revision_id: "obligation-1",
+    attendance_cycle_ids: ["cycle-1"],
+    readiness_revision:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    dependency_generation: 1,
+  };
+  const invoiceOnly = cleanInput().routes.filter((route) =>
+    route.route_kind === "invoice"
+  );
+
+  // Ruled roof-report card: one invoice route IS the whole release.
+  const plan = await buildSesReleaseRevision({
+    org_id: "org-1",
+    members: [member],
+    routes: invoiceOnly,
+    created_by: "operator",
+    builder_key: "MLB",
+    family: "ordinary_roof_portal",
+    photo_route_applicable: false,
+    report_route_applicable: false,
+  });
+  assertEquals(plan.routes.map((route) => route.route_kind), ["invoice"]);
+
+  // Strict by default: a caller that has not been taught the new fields gets
+  // exactly the old universal-three behaviour.
+  await assertRejects(
+    () =>
+      buildSesReleaseRevision({
+        org_id: "org-1",
+        members: [member],
+        routes: invoiceOnly,
+        created_by: "operator",
+        builder_key: "MLB",
+      }),
+    TypeError,
+  );
+});
+
+Deno.test("physical make-safe still owes three routes at send", async () => {
+  const member = {
+    job_id: "job-1",
+    docket_revision_id: "docket-1",
+    invoice_obligation_revision_id: "obligation-1",
+    attendance_cycle_ids: ["cycle-1"],
+    readiness_revision:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    dependency_generation: 1,
+  };
+  // Physical make-safe never declares either route inapplicable, so even with
+  // the new fields present and honest it still owes report, photo and invoice.
+  const error = await assertRejects(
+    () =>
+      buildSesReleaseRevision({
+        org_id: "org-1",
+        members: [member],
+        routes: cleanInput().routes.filter((route) =>
+          route.route_kind !== "report"
+        ),
+        created_by: "operator",
+        builder_key: "MLB",
+        family: "physical_makesafe",
+        photo_route_applicable: true,
+        report_route_applicable: true,
+      }),
+    TypeError,
+  );
+  // The message names what is actually missing, not a fixed three-route recital.
+  assertStringIncludes(error.message, "missing the report route");
+  assertStringIncludes(error.message, "report, photo and invoice");
+});
+
+Deno.test("an exempt card is still refused when the route it DOES owe is absent", async () => {
+  // Honesty, not green: dropping report and photo from the required set does
+  // not stop the invoice route being required.
+  const member = {
+    job_id: "job-1",
+    docket_revision_id: "docket-1",
+    invoice_obligation_revision_id: "obligation-1",
+    attendance_cycle_ids: ["cycle-1"],
+    readiness_revision:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    dependency_generation: 1,
+  };
+  const error = await assertRejects(
+    () =>
+      buildSesReleaseRevision({
+        org_id: "org-1",
+        members: [member],
+        routes: cleanInput().routes.filter((route) =>
+          route.route_kind === "report"
+        ),
+        created_by: "operator",
+        builder_key: "MLB",
+        family: "ordinary_roof_portal",
+        photo_route_applicable: false,
+        report_route_applicable: false,
+      }),
+    TypeError,
+  );
+  assertStringIncludes(error.message, "missing the invoice route");
+});
+
 Deno.test("release construction rejects subject prose in Cc", async () => {
   const routes = cleanInput().routes.map((route) =>
     route.route_kind === "report"

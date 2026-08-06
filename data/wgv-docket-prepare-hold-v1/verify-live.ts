@@ -1,7 +1,7 @@
-// deno-lint-ignore-file no-explicit-any
 // Read-only: pulls each card's LIVE cockpit, reconstructs the clean input from
 // the live facts it publishes, and runs the PATCHED evaluator over it.
 import {
+  buildSesReleaseRevision,
   evaluateSesMechanicalClean,
   requiredSesRouteKinds,
   type SesCleanInput,
@@ -133,4 +133,55 @@ for (const card of CARDS) {
       ? "ENABLED"
       : `disabled until invoice AUTHORISED (now ${live.sections.money?.xero?.status})`,
   );
+
+  // SENDABLE: the release the Captain would build after authorising. Pure
+  // construction over the live routes — no write, no send, no Graph call.
+  try {
+    const plan = await buildSesReleaseRevision({
+      org_id: "org-verify",
+      members: [{
+        job_id: card.job,
+        docket_revision_id: "verify",
+        invoice_obligation_revision_id: "verify",
+        attendance_cycle_ids: ["verify"],
+        readiness_revision: "sha256:" + "a".repeat(64),
+        dependency_generation: 1,
+      }],
+      routes,
+      created_by: "verify",
+      builder_key: "MLB",
+      family: "ordinary_roof_portal",
+      photo_route_applicable: false,
+      report_route_applicable: false,
+    });
+    console.log(
+      "SENDABLE (release):",
+      "BUILDS -",
+      plan.routes.length,
+      "route(s):",
+      plan.routes.map((r: any) => r.route_kind).join(", "),
+    );
+  } catch (error) {
+    console.log("SENDABLE (release):", "REFUSED -", (error as Error).message);
+  }
+  // Control: the same live routes under the OLD strict shape.
+  try {
+    await buildSesReleaseRevision({
+      org_id: "org-verify",
+      members: [{
+        job_id: card.job,
+        docket_revision_id: "verify",
+        invoice_obligation_revision_id: "verify",
+        attendance_cycle_ids: ["verify"],
+        readiness_revision: "sha256:" + "a".repeat(64),
+        dependency_generation: 1,
+      }],
+      routes,
+      created_by: "verify",
+      builder_key: "MLB",
+    });
+    console.log("  control (strict) :", "BUILDS (unexpected)");
+  } catch (error) {
+    console.log("  control (strict) :", "REFUSED -", (error as Error).message);
+  }
 }

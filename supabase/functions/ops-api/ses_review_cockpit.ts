@@ -1007,6 +1007,18 @@ export async function buildSesReleaseRevision(args: {
   created_by: string;
   /** When set, selects AJS two-route vs universal three-route order. */
   builder_key?: string | null;
+  /**
+   * The family whose route requirement applies, and which routes that family
+   * actually sends. These are the SAME inputs the cockpit's C11 uses, so the
+   * path that lights APPROVE INVOICE and the path that builds the send obey one
+   * ruling — see the note on `requiredSesRouteKinds`.
+   *
+   * All three are optional and default to the STRICT universal shape, so a
+   * caller that has not been taught them gets exactly the old behaviour.
+   */
+  family?: string | null;
+  photo_route_applicable?: boolean;
+  report_route_applicable?: boolean;
 }): Promise<SesReleaseRevisionPlan> {
   if (args.members.length === 0) {
     throw new TypeError("release members required");
@@ -1014,13 +1026,27 @@ export async function buildSesReleaseRevision(args: {
   const routeByKind = new Map(
     args.routes.map((route) => [route.route_kind, route]),
   );
-  const requiredOrder = sesReleaseRouteOrder(args.builder_key);
+  // ONE producer of "what does this card owe". This used to call
+  // sesReleaseRouteOrder directly, which is why a report-only card could clear
+  // the cockpit, have its invoice AUTHORISED, and only then be refused here —
+  // committed money with no send path. The photo exemption had the identical
+  // gap. Requirement scope stays in requiredSesRouteKinds; never re-derive it.
+  const requiredOrder = requiredSesRouteKinds(
+    String(args.family || ""),
+    args.photo_route_applicable !== false,
+    args.builder_key,
+    args.report_route_applicable !== false,
+  );
   const orderedRoutes = requiredOrder.map((kind) => routeByKind.get(kind));
-  if (orderedRoutes.some((route) => !route)) {
+  const missingKinds = requiredOrder.filter((kind) => !routeByKind.has(kind));
+  if (missingKinds.length > 0) {
+    // Name the missing route AND the family's full requirement. The old message
+    // recited a fixed three-route list, which on an exempt family named routes
+    // that family never owed.
     throw new TypeError(
-      isAjsBuilderKey(args.builder_key)
-        ? "AJS report_invoice and photo routes are both required"
-        : "report, photo, and invoice routes are all required",
+      `this release is missing the ${joinRouteKinds([...missingKinds])} ${
+        missingKinds.length === 1 ? "route" : "routes"
+      }; this family requires ${joinRouteKinds([...requiredOrder])}`,
     );
   }
   const members = args.members.map((member, ordinal) => ({

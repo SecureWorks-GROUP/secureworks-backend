@@ -4112,6 +4112,25 @@ export async function prepareSesReleaseRevisionAction(
       builderKeys.every((key) => isAjsBuilderKey(key))
     ? builderKeys[0]
     : (builderKeys.length === 1 ? builderKeys[0] : null);
+  // Route applicability travels with the builder key so the send path requires
+  // exactly what the cockpit required (Captain 2026-08-06). Composite releases
+  // are CONSERVATIVE by the same rule the builder key uses: a route is exempt
+  // only when EVERY member exempts it, and a mixed family falls back to the
+  // strict universal shape. One dissenting member can only make the release
+  // stricter, never looser.
+  const families = dockets.map((docket) =>
+    String(docket.clean_input.family || "")
+  );
+  const family = families.length > 0 &&
+      families.every((value) => value === families[0])
+    ? families[0]
+    : null;
+  const photoRouteApplicable = dockets.some((docket) =>
+    docket.clean_input.photo_route_applicable !== false
+  );
+  const reportRouteApplicable = dockets.some((docket) =>
+    docket.clean_input.report_route_applicable !== false
+  );
   const plan = await buildSesReleaseRevision({
     org_id: args.org_id,
     members: dockets.map((docket) => ({
@@ -4125,6 +4144,9 @@ export async function prepareSesReleaseRevisionAction(
     routes,
     created_by: args.created_by,
     builder_key: builderKey,
+    family,
+    photo_route_applicable: photoRouteApplicable,
+    report_route_applicable: reportRouteApplicable,
   });
   const committed = await client.rpc("commit_ses_release_revision_v1", {
     p_release: plan.release,

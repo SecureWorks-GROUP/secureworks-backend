@@ -11,6 +11,8 @@ ruled  (new)      : blockers = (none) | clean true | band shaun_clean
 failed checks     : (none)
 APPROVE INVOICE   : ENABLED
 SEND IT           : disabled until invoice AUTHORISED (now DRAFT)
+SENDABLE (release): BUILDS - 1 route(s): invoice
+  control (strict) : REFUSED - this release is missing the report and photo routes; this family requires report, photo and invoice
 
 === SWMS-261081 Mindarie ===
 live status/band  : HOLD / decision_blocked
@@ -24,3 +26,5 @@ ruled  (new)      : blockers = (none) | clean true | band shaun_clean
 failed checks     : (none)
 APPROVE INVOICE   : ENABLED
 SEND IT           : disabled until invoice AUTHORISED (now DRAFT)
+SENDABLE (release): BUILDS - 1 route(s): invoice
+  control (strict) : REFUSED - this release is missing the report and photo routes; this family requires report, photo and invoice
