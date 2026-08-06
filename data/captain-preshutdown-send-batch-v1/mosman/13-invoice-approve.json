@@ -1,0 +1,1 @@
+{"success":false,"refusal":{"state":"refused","fact":"Human approval requires an identified SES operator session; API keys and automation keys cannot approve."},"error":"Human approval requires an identified SES operator session; API keys and automation keys cannot approve."}

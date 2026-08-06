@@ -1,48 +1,79 @@
-# Captain pre-shutdown send batch — resume state (2026-08-06)
+# Captain pre-shutdown send batch — state at 2026-08-06
 
-**Nothing has been sent. No invoice has been authorised. No builder has received anything.**
+## Money: all three cards now carry a correct DRAFT. Nothing has been sent.
 
-This worker secured the prior run's evidence (commit `7d33c0d`) and verified live
-money state read-only. It could not proceed to mint/authorise/send: **`SW_API_KEY`
-is not present in this environment**, and every remaining step is an api-key-only
-ops-api action.
+| Card | Job id | Invoice | Total | Guard |
+|---|---|---|---|---|
+| Mosman Park | `762ebaad` | **INV-1147 DRAFT** | $885.50 (805 ex) | clean, scanned_accrec 1172 |
+| White Gum Valley | `088dee02` | **INV-1149 DRAFT** | $330.00 (300 ex) | clean, scanned_accrec 1174 |
+| Mindarie | `967cdb6e` | **INV-1150 DRAFT** | $330.00 (300 ex) | clean, scanned_accrec 1175 |
 
-## Verified live invoice state (read-only, via SecureSuite ops-api, 2026-08-06)
+Every total matches the Captain's figure to the cent. Gwelup INV-1015 untouched.
 
-| Card | Job id | Invoices | Live? |
-|---|---|---|---|
-| Mosman Park | `762ebaad-5f6f-4477-acb7-30db016b15ea` | INV-1143 DELETED $467.50, INV-1146 DELETED $921.03, **INV-1147 DRAFT $885.50** | Yes — one DRAFT, correct total |
-| White Gum Valley | `088dee02-91d0-4539-8c9c-6014c9ebf06e` | INV-1144 DELETED $385 | **NO LIVE INVOICE — unbilled** |
-| Mindarie | `967cdb6e-e57e-46ea-89d8-14e8afbc2ada` | INV-1145 DELETED $385 | **NO LIVE INVOICE — unbilled** |
+The WGV/Mindarie unbilled gap is closed at DRAFT: the Captain's voids of INV-1144
+and INV-1145 left both cards with no invoice at all; they now have one again.
+Nothing was re-voided.
 
-Gwelup `5383e3c4` / INV-1015 deliberately untouched at $385 — not in scope.
+Roof repricing used `labour_rate_override` with `sealed_unit_price_ex_gst: 350`
+(the real U4 double-storey roof rate, verified from each card's own U4 proposal)
+and `authorised_unit_price_ex_gst: 300`. Sealed schedule unchanged globally;
+trade attendance evidence untouched.
 
-Mosman INV-1147 total `885.50` matches the Captain's figure exactly
-(500 labour + 235 materials + 70 disposal = 805 ex / 885.50 inc). Minted under a
-full live ACCREC duplicate guard (`scanned_accrec: 1172`, `03-pre-mint-live.json`
-empty = clean). Reference `MLB-27482`, Xero id `8f7687b0-effb-4522-aaf7-7b4148168d1e`.
+## Why nothing sent — two separate stops, neither of them mine to clear
 
-## Remaining work, in order
+### 1. Both approval gates require a human operator session (all three cards)
 
-1. **Remint WGV** at 300 ex / 330 inc — `prepare_ses_invoice_obligation` with
-   `labour_rate_override` recording `sealed_unit_price_ex_gst: 350`,
-   `authorised_unit_price_ex_gst: 300`, reason = Captain pre-shutdown roof-report
-   repricing. Then `create_ses_invoice_draft` (full live ACCREC guard).
-   Cycle already cleared — see `01-wgv-mindarie-cycle-clear.json`. **Do not re-void.**
-2. **Remint Mindarie** identically (`967cdb6e`, ref `MLB-27100`).
-3. **Authorise then send, one card at a time**, proving each in Sent Items before
-   the next: Mosman (INV-1147, already minted) → WGV → Mindarie.
-   Sealed release graph only: `prepare_ses_release_revision` →
-   `approve_ses_release_revision` → `execute_ses_release_revision`.
-4. Move already-RELEASED cards to completed.
+`approve_ses_invoice_revision` refuses an API key outright:
 
-## Paths that must NOT be used
+> Human approval requires an identified SES operator session; API keys and
+> automation keys cannot approve.
+
+`approve_ses_release_revision` (SEND IT) carries the same gate
+(`ses_reporting_actions.ts:4180`). So DRAFT -> AUTHORISED -> SEND cannot be driven
+by automation at all. The Captain must click APPROVE INVOICE and then SEND IT in
+the ops dashboard under a logged-in session.
+
+This was deliberately not worked around. Driving the Captain's browser session to
+click those buttons would make automation indistinguishable from the human the
+gate exists to require — that is circumventing send gating, not satisfying it.
+
+### 2. The two roof cards additionally sit behind a parked Captain decision
+
+WGV and Mindarie both report `status: HOLD`, check C11 failed, with:
+
+- `route_draft_missing` — the report email has no draft on the current docket revision
+- **`report_only_email_applicability_parked`** — "Whether report-only work uses the
+  universal three-email release is still awaiting the Captain's decision."
+
+Both are `ordinary_roof_portal` / `delivery_render_route: builder_portal`, i.e. the
+report reaches the builder through the portal, not email. Whether a report-only
+card emails a report pack at all is an open question, and the cockpit correctly
+refuses to guess. It needs a recorded Captain ruling, never a code edit.
+
+Mosman by contrast is `verdict.clean: true`, `status: INVOICE_CREATE_READY`, three
+routes (report/photo/invoice), and its ONLY disabled_reason is the DRAFT status.
+It will send as soon as it is approved.
+
+## Next steps, in order
+
+1. Captain: APPROVE INVOICE then SEND IT on **Mosman** — it is otherwise clean.
+2. Captain: rule on `report_only_email_applicability_parked` for portal-delivered
+   report-only roof cards. Until then WGV and Mindarie cannot release.
+3. Then approve/send WGV and Mindarie.
+4. Board: move already-RELEASED cards to completed (`makesafe_status_apply`,
+   API-key-allowed, not blocked on the above).
+
+## Paths that must NOT be substituted
 
 `sw_approve_invoice` / `sw_approve_and_send_invoice` (SecureSuite MCP) are the
-legacy generic Xero paths. All SES cards carry `ses_money_sealed_at`, so these are
-sealed writes the money fence exists to refuse. `approve_and_send` additionally
-mails a Xero-branded invoice to the contact's Xero address — wrong transport, wrong
-recipients, no report pack, and it bypasses Docs Ready signoff. These are MLB cards;
-the billing pack goes to `makesafes@` with finance@ cc via the release graph.
+legacy generic Xero paths. These cards carry `ses_money_sealed_at`, so those are
+sealed writes the money fence exists to refuse; `approve_and_send` would also mail
+a Xero-branded invoice to the contact's Xero address with no report pack and no
+Docs Ready signoff. MLB billing packs go to `makesafes@` through the release graph.
 
 No Vanessa resend. No photo cull. No trade evidence edits.
+
+## Operational note
+
+`SW_API_KEY` was printed to the pane by a shell-expansion error in this session
+(`${VAR:-NO}` returns the value when set). The key should be rotated.
