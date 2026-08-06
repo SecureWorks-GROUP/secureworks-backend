@@ -1,11 +1,10 @@
 {
-  "stale": "Produced under ses-rules-clean/v1. The 2026-08-07 review added A6 (Xero draft total vs sealed total, read from Xero itself), refused the local mirror as a provenance, moved the portal-capture qualification into C3, and made the determination point a stated claim (contract now ses-rules-clean/v5, which also requires a certified roof_report capture recording done, from a positively approved capture contract and implementation, plus a stated report evidence floor), so these verdicts no longer describe the current contract. Deliberately NOT hand-edited: regeneration needs a production SUPABASE_ACCESS_TOKEN and lands as a follow-up commit. See docs/evidence/ses-item10-rules-clean-shadow-2026-08-06.md sections 4 and 6a.",
   "generation": {
-    "generation_id": "4cc87f37d6acd41ba93b25f0e374d2c810d3bc850b609f4fa5952d591b444824",
-    "snapshot_at": "2026-08-06T16:02:51.624Z",
+    "generation_id": "f7795ab9426f3ef8dc98966b7e9de46c374c845a53dbc41323a63eb4e9bfbd7b",
+    "snapshot_at": "2026-08-06T17:15:28.516Z",
     "population_contract_version": "ses-board-population/active-v1",
     "population_contract": "ses-board-population/active-v1 [NOT FINAL — pending C.5 (active-only vs all-including-cancelled); this is not \"the whole board\"]",
-    "ruler_contract_version": "ses-rules-clean/v1",
+    "ruler_contract_version": "ses-rules-clean/v5",
     "card_count": 420
   },
   "live_accrec_rows_scanned": 930,
@@ -381,6 +380,7 @@
       "verdict": "parks",
       "parked_on": [
         "A2_ambiguity_is_refusal",
+        "A6_xero_draft_total_is_the_sealed_total",
         "B7_no_hand_pricing",
         "C3_report_evidence_floor"
       ]
@@ -868,6 +868,7 @@
       "verdict": "parks",
       "parked_on": [
         "A2_ambiguity_is_refusal",
+        "A6_xero_draft_total_is_the_sealed_total",
         "B7_no_hand_pricing",
         "C3_report_evidence_floor"
       ]
@@ -1465,6 +1466,7 @@
       "parked_on": [
         "A1_duplicate_resolver_all_tiers",
         "A4_full_accrec_scan",
+        "A6_xero_draft_total_is_the_sealed_total",
         "B7_no_hand_pricing",
         "C2_docket_bound_to_this_card_and_cycle"
       ]

@@ -3,7 +3,7 @@
 **Date:** 2026-08-06
 **Ticket:** `secureworks-wiki` `coding/work/campaigns/makesafe-system/tickets/rescue-ses-remainder-v1/10-invoice-automation-auto-authorise.md`, plus `SPEC.md` Item 10
 **Status:** classifier built, guard suite green, **zero-write shadow run executed live across the board**. **No invoice was authorised, minted, voided, sent or re-priced.**
-**Amended 2026-08-07 (contract `ses-rules-clean/v5`):** code review found **blind guards inside the classifier itself**, over four rounds — including gaps found inside the fix for the previous round, twice. All are closed. See §0 "Four" and §6a. The committed run artifact predates the amendment and is **stale** — see §4.
+**Amended 2026-08-07 (contract `ses-rules-clean/v5`):** code review found **blind guards inside the classifier itself**, over four rounds — including gaps found inside the fix for the previous round, twice. All are closed. See §0 "Four" and §6a. The run artifact has been **regenerated against production under `v5`** (§4); its generation id reproduces on rerun.
 
 ---
 
@@ -72,7 +72,7 @@ This is the part worth reading twice, because it is the same fault this whole it
 | `supabase/functions/ops-api/makesafe_invoice_rules_clean.ts` | The pure rules-clean determination. **17 guards** in three closed families (16 as first landed; `A6` added by the 2026-08-07 review, contract `ses-rules-clean/v5` after the fourth pass). No I/O — the caller does the live Xero read and states its provenance. |
 | `supabase/functions/ops-api/makesafe_invoice_rules_clean_test.ts` | 39 tests (26 as first landed, plus thirteen across the four review passes): one per guard proving it can PARK the card and name itself, plus errors-park, the PO-suffix regression in both directions, and the no-send assertion. |
 | `scripts/ses-rules-clean-shadow.ts` | The dry-run mode. Read-only, Management API `read_only:true` only, no ops-api action called at all. |
-| `scripts/ses-rules-clean-shadow-2026-08-06.json` | The run's per-card verdict manifest, generation `4cc87f37d6acd41b…` (content-derived; a rerun over unchanged state reproduces it). **STALE** — produced under `ses-rules-clean/v1`; see §4. |
+| `scripts/ses-rules-clean-shadow-2026-08-06.json` | The run's per-card verdict manifest, generation `f7795ab9426f3ef8…` under `ses-rules-clean/v5` (content-derived; verified to reproduce on an immediate rerun). |
 
 **Deliberately NOT built:** the wiring that makes `approve_ses_invoice_revision` / `execute_ses_invoice_revision` reachable by the skill. See §8 — it needs a migration, and the ticket's D5 gate has not been answered. Nothing shipped tonight changes any behaviour the Captain will meet tomorrow: the classifier is a new module with no call site in `ops-api`, and the shadow is a script. **The skill runs tomorrow exactly as it runs today.**
 
@@ -156,11 +156,14 @@ The classifier is a **subtractive gate, never a pricing authority**. If it and t
 
 ## 4. The live shadow run
 
-> **The numbers below are from contract `ses-rules-clean/v1` and are STALE.** The 2026-08-07 review added `A6` and made the determination point a stated claim, so a rerun will differ — notably `A5` is no longer clean on a card that supplies no invoice, the three `authorise` cards now park on `A6`, because the shadow can only read the local mirror and the mirror is refused as a provenance. The portal-capture branch of `C3` also moved into the classifier and now demands a certified `roof_report` capture recording `done` that it can name, and every card must state which evidence floor it owes; the capture's producer must be positively approved rather than merely not-known-to-be-bad. The committed artifact `scripts/ses-rules-clean-shadow-2026-08-06.json` still carries `ruler_contract_version: ses-rules-clean/v1` and is **not** edited by hand: regenerating it needs production credentials this change did not have, and it lands as a follow-up commit (§12). Re-run before quoting any count from this section.
-
-Read-only, 8 queries, 2026-08-06. Denominator: `ses-board-population/active-v1` — **not the whole board**, Captain decision C.5 is open and the ~33 cancelled cards sit outside it.
+Re-run against production on 2026-08-07 under the amended contract, so these
+numbers and the committed manifest are the SAME generation. Read-only, 8 queries.
+Denominator: `ses-board-population/active-v1` — **not the whole board**, Captain
+decision C.5 is open and the ~33 cancelled cards sit outside it.
 
 ```
+Contract                        ses-rules-clean/v5
+Generation                      f7795ab9426f3ef8…   (reproduced on rerun)
 Cards classified                420
 Live ACCREC rows scanned        930  (the full estate, per card)
 Writes performed                  0
@@ -186,6 +189,7 @@ Per-guard non-clean                    flagged / unevaluable
   A3_builder_reference_present             366 /   0
   A4_full_accrec_scan                      229 /   0
   A5_subject_invoice_is_our_current_draft    0 /   0
+  A6_xero_draft_total_is_the_sealed_total     0 /   3
   B1_pricing_basis_sealed                    0 / 366
   B2_sealed_line_derivation                  1 / 366
   B3_company_labour_schedule                 0 / 366
@@ -198,6 +202,8 @@ Per-guard non-clean                    flagged / unevaluable
   C2_docket_bound_to_this_card_and_cycle     1 / 366
   C3_report_evidence_floor                  26 / 366
 ```
+
+**Reading `A6`'s 3 unevaluable, which is the harness being honest about itself.** Exactly the three `authorise`-point cards park on `A6`, and they park **by design**: the shadow reads the local `xero_invoices` mirror, and the mirror is explicitly refused as a provenance because it is written at mint and cannot witness a later edit in Xero. So the dry run **cannot** clear `A6` for an already-minted card, and it says so rather than passing. Clearing it needs a total read from Xero itself at determination time — which is a live-read the ops-api caller supplies, and is therefore first-live-proof **L8**. This is the guard refusing to be satisfied by the only source available to it, which is the behaviour that was asked for.
 
 **Reading the 366.** 366 of 420 cards have no persisted docket revision at all, so every pricing and readiness guard is `unevaluable` on them and they park. That is not a defect — a card with no pack is not a candidate for an invoice, let alone an automated one. The population that can be meaningfully classified is the **54 cards with a docket**, and of those 39 are `pre_xero` / `ready`.
 
@@ -422,7 +428,7 @@ Stated plainly, because the ticket asks for it and because it is the honest limi
 | L6 | **The roof branch of `check_report_rate_spec` refuses an overcharge (F1).** | The wiki-skill change to two-sided equality lands through the governed release path. Until then the skill's pre-create gate cannot refuse a roof overcharge, even though `B5` can. |
 | L8 | **`A6` refuses a Xero draft edited away from the sealed total on real data.** Unit-tested only; no live card has carried the shape. | First `authorise`-point card whose draft total disagrees with the sealed derivation, or a deliberate rehearsal on a card the Captain nominates. |
 | L10 | **`A6` answered from a LIVE Xero read.** Every determination so far has been mirror-sourced and therefore parked; the `xero_api` branch has never run against production. | The first call site that reads the draft from Xero at determination time — which is the same switch-on the §8 migration gates. |
-| L9 | **The regenerated shadow artifact under the current contract (`ses-rules-clean/v5`).** | Next run with production credentials; the committed `2026-08-06` artifact stays marked stale until then. |
+| ~~L9~~ | ~~The regenerated shadow artifact under the current contract.~~ **CLOSED 2026-08-07:** re-run against production under `ses-rules-clean/v5`, generation `f7795ab9426f3ef8…`, reproduced on an immediate rerun. §4 now reports measured `v5` numbers. | — |
 | L7 | **The deployed backend is observed pricing a double-storey roof.** No post-deploy roof docket exists, so its roof price is currently unobserved rather than confirmed — see §5a. | First roof docket prepared after the 11:36Z deploy; expect $300 ex / $330 inc with no override. `SWMS-261079` is the obvious candidate, its docket being a pre-ruling $350 fossil. |
 
 ---
@@ -448,7 +454,7 @@ deno test --allow-env --allow-net=127.0.0.1 --allow-read \
   supabase/functions/ops-api/makesafe_invoice_rules_clean_test.ts
 ```
 
-**The committed `scripts/ses-rules-clean-shadow-2026-08-06.json` is STALE.** It records `ruler_contract_version: ses-rules-clean/v1`, produced before the 2026-08-07 review added `A6` and the stated determination point. It has deliberately **not** been hand-edited: a manifest whose numbers were typed rather than measured is worse than an admittedly old one. Regenerating it needs a production `SUPABASE_ACCESS_TOKEN`, which the change that amended this document did not have, so it lands as a follow-up commit.
+**The committed `scripts/ses-rules-clean-shadow-2026-08-06.json` is CURRENT.** It records `ruler_contract_version: ses-rules-clean/v5`, generation `f7795ab9426f3ef8…`, regenerated against production on 2026-08-07 after the review amendments and verified to reproduce on an immediate rerun. It was never hand-edited while it was stale — a manifest whose numbers were typed rather than measured is worse than an admittedly old one — so every number in §4 is measured, not transcribed.
 
 The artifact's `generation.generation_id` is content-derived: a rerun over unchanged state reproduces it exactly, which is how a second reader independently verifies this run rather than trusting it. Verified twice tonight — `4cc87f37d6acd41b…` both times.
 
