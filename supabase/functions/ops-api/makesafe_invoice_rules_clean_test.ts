@@ -327,6 +327,7 @@ Deno.test("A6: a Xero DRAFT whose own total is not the sealed total parks the ca
         status: "DRAFT",
         invoice_obligation_revision_id: "ob-1",
         sub_total: 1250,
+        total: 1375,
         totals_source: "xero_api",
       };
     }),
@@ -335,7 +336,28 @@ Deno.test("A6: a Xero DRAFT whose own total is not the sealed total parks the ca
   );
 });
 
-Deno.test("A6: an absent, non-numeric or unreadable Xero total parks rather than passing", () => {
+Deno.test("A6: an inc-GST total that disagrees parks even when the ex-GST total matches", () => {
+  // 2 trades x 5 hours at $85 is $850 ex / $935 inc. A tax-treatment edit moves
+  // only the inc figure, and the inc figure is what the builder pays.
+  assertParksOn(
+    mutate((evidence) => {
+      evidence.determination_point = "authorise";
+      evidence.obligation = { revision_id: "ob-1" };
+      evidence.subject_invoice = {
+        xero_invoice_id: "x-9",
+        status: "DRAFT",
+        invoice_obligation_revision_id: "ob-1",
+        sub_total: 850,
+        total: 1000,
+        totals_source: "xero_api",
+      };
+    }),
+    "A6_xero_draft_total_is_the_sealed_total",
+    "flagged",
+  );
+});
+
+Deno.test("A6: an absent, non-numeric, mirrored or unreadable Xero total parks rather than passing", () => {
   const draft = (
     extra: Record<string, unknown>,
   ): (evidence: SesRulesCleanEvidence) => void =>
@@ -354,12 +376,20 @@ Deno.test("A6: an absent, non-numeric or unreadable Xero total parks rather than
       // No total at all.
       draft({ totals_source: "xero_api" }),
       // A total that is not a number.
-      draft({ sub_total: "850.00", totals_source: "xero_api" }),
+      draft({ sub_total: "850.00", total: 935, totals_source: "xero_api" }),
+      // An ex-GST total with no inc-GST total beside it: a tax-treatment edit
+      // moves what the builder is billed without touching the ex figure.
+      draft({ sub_total: 850, totals_source: "xero_api" }),
+      // Read from the LOCAL MIRROR, which is written at the mint and cannot
+      // witness an edit made in Xero afterwards. Comparing against it compares
+      // the sealed total with itself.
+      draft({ sub_total: 850, total: 935, totals_source: "local_mirror" }),
       // A total with no stated origin: it cannot be trusted as the money.
-      draft({ sub_total: 850 }),
+      draft({ sub_total: 850, total: 935 }),
       // The read itself failed.
       draft({
         sub_total: 850,
+        total: 935,
         totals_source: "xero_api",
         totals_read_error: "Xero 503",
       }),
@@ -727,6 +757,97 @@ Deno.test("C3: a self-vouched or unproven pack parks the card", () => {
     }),
     "C3_report_evidence_floor",
     "unevaluable",
+  );
+});
+
+// ── C3, the portal branch: uncertified is not evidence, and the verdict names
+// the capture it relied on rather than counting rows. ─────────────────────
+
+const CERTIFIED_CAPTURE = {
+  id: "capture-real",
+  role: "roof_report",
+  status: "verified",
+  attendance_cycle_id: CYCLE,
+  captured_by: "capture_portal_evidence.py/2026-08-02",
+  capture_producer: "capture_portal_evidence.py/v1",
+  captured_at: "2026-08-05T02:00:00.000Z",
+  has_screenshot: true,
+  page_text_hash_corrupted: false,
+};
+
+function onPortalBranch(
+  captures: SesRulesCleanEvidence["portal_captures"],
+): (evidence: SesRulesCleanEvidence) => void {
+  return (evidence) => {
+    evidence.report_evidence_independent = null;
+    evidence.portal_captures = captures;
+  };
+}
+
+Deno.test("C3: a portal capture that is not certified verified is not evidence", () => {
+  for (const status of ["captured", "rejected", "", "VERIFIED"]) {
+    assertParksOn(
+      mutate(onPortalBranch([{ ...CERTIFIED_CAPTURE, status }])),
+      "C3_report_evidence_floor",
+      "flagged",
+    );
+  }
+  // The writer can append a row and then fail its own re-read: an uncertified
+  // row exists and looks present. Absence of certification is absence of
+  // evidence, so a card holding only that one parks.
+  assertParksOn(
+    mutate(onPortalBranch([])),
+    "C3_report_evidence_floor",
+    "unevaluable",
+  );
+  // And the synthetic in-repo observer, which photographs an opaque frame.
+  assertParksOn(
+    mutate(onPortalBranch([{
+      ...CERTIFIED_CAPTURE,
+      captured_by: "ses-prime-portal-observer/2026-08-02.4",
+    }])),
+    "C3_report_evidence_floor",
+    "flagged",
+  );
+  // And a corrupted page-text coordinate, and an unstated one.
+  assertParksOn(
+    mutate(onPortalBranch([{
+      ...CERTIFIED_CAPTURE,
+      page_text_hash_corrupted: true,
+    }])),
+    "C3_report_evidence_floor",
+    "flagged",
+  );
+  assertParksOn(
+    mutate(onPortalBranch([{
+      ...CERTIFIED_CAPTURE,
+      page_text_hash_corrupted: undefined,
+    }])),
+    "C3_report_evidence_floor",
+    "flagged",
+  );
+});
+
+Deno.test("C3: with several qualifying captures the verdict names the one it relied on", () => {
+  const verdict = classifySesInvoiceRulesClean(mutate(onPortalBranch([
+    // Not evidence: uncertified, and it comes first so a count-based rule
+    // would have been satisfied by a row nobody looked at.
+    { ...CERTIFIED_CAPTURE, id: "capture-uncertified", status: "captured" },
+    { ...CERTIFIED_CAPTURE, id: "capture-relied-on" },
+    { ...CERTIFIED_CAPTURE, id: "capture-duplicate" },
+  ])));
+  assertEquals(verdict.verdict, "rules_clean", verdict.parked_on.join(","));
+  const outcome = verdict.guards.find((row) =>
+    row.id === "C3_report_evidence_floor"
+  )!;
+  assert(
+    outcome.detail.includes("capture-relied-on"),
+    outcome.detail,
+  );
+  assert(outcome.detail.includes("2 qualifying"), outcome.detail);
+  assertFalse(
+    outcome.detail.includes("capture-uncertified"),
+    "an uncertified row must never be named as the evidence relied on",
   );
 });
 

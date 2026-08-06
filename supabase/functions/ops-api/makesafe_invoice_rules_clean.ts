@@ -41,15 +41,32 @@
 //  3. THE OBLIGATION IS THE INTENT; THE XERO DRAFT IS THE MONEY. A DRAFT stays
 //     editable in Xero after the mint, and authorise acts on whatever the draft
 //     carries at that moment, not on what we meant it to carry. So A6 compares
-//     the sealed derivation against the DRAFT's OWN ex-GST total. Without it
-//     every upstream guard can read clean while the invoice being advanced
-//     carries a different number.
+//     the sealed derivation against the DRAFT's OWN money, ex and inc, read
+//     from XERO ITSELF. Without it every upstream guard can read clean while
+//     the invoice being advanced carries a different number.
+//
+//  4. A GUARD MAY ONLY READ A SOURCE THAT CAN SEE THE FAULT. The local
+//     `xero_invoices` mirror is written from Xero's response at the mint, so a
+//     freshly minted draft's mirrored figures equal the sealed derivation by
+//     construction and a later edit in Xero never touches them. Answering A6
+//     from the mirror compares the sealed total against itself and reports
+//     clean on the very drift the guard exists to catch, so the mirror is
+//     refused as a provenance. The same rule makes an UNCERTIFIED portal
+//     capture not-evidence at C3 rather than evidence with a caveat: the
+//     capture writer can append a row and then fail its own re-read, and it
+//     cannot un-write what it refused to certify.
 //
 // v2 (2026-08-07) closed two blind-guard shapes found in this file by review,
 // not by the shadow run: A5 used to report `clean` when no invoice was supplied,
 // which made an ABSENCE of evidence into a pass, and nothing bound the sealed
 // price to the Xero draft. The determination point is now a POSITIVE CLAIM the
 // caller states (`pre_mint` / `authorise`); an unstated one parks.
+//
+// v3 (2026-08-07), same review round, one seam deeper: A6 refuses the local
+// mirror as a provenance and checks the inc-GST total as well as the ex, and
+// C3 owns the portal-capture qualification rule itself -- uncertified is
+// not-evidence, and the verdict NAMES the capture it relied on rather than
+// counting rows.
 //
 // Divergence rule, stated so a future maintainer cannot get it backwards: this
 // classifier is a SUBTRACTIVE gate, never a pricing authority. If it and the
@@ -74,7 +91,7 @@ import type { SesInvoiceDuplicateResolution } from "./makesafe_invoice_duplicate
  * determination stays attributable to the definition that produced it. A
  * recorded verdict without a version is not re-derivable.
  */
-export const SES_RULES_CLEAN_CONTRACT_VERSION = "ses-rules-clean/v2";
+export const SES_RULES_CLEAN_CONTRACT_VERSION = "ses-rules-clean/v3";
 
 export type SesRulesCleanFamily = "A" | "B" | "C";
 export type SesRulesCleanGuardStatus = "clean" | "flagged" | "unevaluable";
@@ -122,7 +139,7 @@ export const SES_RULES_CLEAN_GUARDS = [
     id: "A6_xero_draft_total_is_the_sealed_total",
     family: "A",
     what:
-      "The Xero DRAFT's own ex-GST total equals the total the sealed pricing law derives; the draft is the money, the obligation is only the intent.",
+      "The DRAFT's own ex-GST and inc-GST totals, read from Xero itself, equal the money the sealed pricing law derives; the draft is the money, the obligation is only the intent, and the local mirror cannot witness a post-mint edit.",
   },
   // ── B. Pricing: "is this money derived from sealed rules?" ──
   {
@@ -190,7 +207,7 @@ export const SES_RULES_CLEAN_GUARDS = [
     id: "C3_report_evidence_floor",
     family: "C",
     what:
-      "The report evidence floor and photo completeness are independently proven, not self-vouched.",
+      "The report evidence floor and photo completeness are independently proven, not self-vouched. On the portal branch a specific CERTIFIED capture is named as the evidence relied on.",
   },
 ] as const satisfies ReadonlyArray<
   { id: string; family: SesRulesCleanFamily; what: string }
@@ -355,11 +372,13 @@ export interface SesRulesCleanEvidence {
    * absent for a pre-mint determination, where nothing is excluded -- and say
    * so on `determination_point`, because absence alone proves nothing.
    *
-   * `sub_total` / `total` are the DRAFT'S OWN money, and A6 compares the
-   * ex-GST `sub_total` against the sealed derivation. `totals_source` records
-   * whether that came from Xero itself or from the local mirror, which can
-   * drift; an absent, unrecognised or unreadable total is unevaluable and
-   * parks, never assumed to match.
+   * `sub_total` / `total` are the DRAFT'S OWN money, and A6 compares BOTH
+   * against the sealed derivation. `totals_source` must be `xero_api`: a
+   * figure read from the local `xero_invoices` mirror can never satisfy A6,
+   * because the mirror is written at the mint and cannot witness an edit made
+   * in Xero afterwards. An absent, mirrored, unrecognised or unreadable total
+   * is unevaluable and parks, never assumed to match. This module stays pure:
+   * the CALLER performs the live Xero read and states its provenance here.
    */
   subject_invoice?: {
     xero_invoice_id?: unknown;
@@ -383,6 +402,51 @@ export interface SesRulesCleanEvidence {
    */
   report_evidence_independent?: boolean | null;
   report_evidence_read_error?: string | null;
+
+  /**
+   * The portal-capture branch of the C3 floor, for a report-only family whose
+   * report lives in the builder portal rather than in the pack. Supply the
+   * card's capture rows AS READ -- unfiltered -- and this module decides which
+   * one, if any, is evidence. Absent means the card is not on that branch.
+   *
+   * The qualification rule lives here rather than in a caller's query string
+   * because a caller that forgets a filter must PARK, not pass. In particular
+   * `status` must be positively `verified`: the capture writer can append a row
+   * and then fail its own re-read, and it cannot un-write what it refused to
+   * certify, so an uncertified row exists and looks present. Absence of
+   * certification is absence of evidence, never evidence with a caveat.
+   */
+  portal_captures?: SesRulesCleanPortalCapture[] | null;
+  portal_capture_read_error?: string | null;
+}
+
+/**
+ * One `makesafe_portal_capture_revisions` row, as read. Nothing here is
+ * trusted by default: every field is a claim the selector tests.
+ */
+export interface SesRulesCleanPortalCapture {
+  id?: unknown;
+  role?: unknown;
+  /** `captured` / `verified` / `rejected`. Only `verified` is evidence. */
+  status?: unknown;
+  attendance_cycle_id?: unknown;
+  /**
+   * What actually LOOKED at the page. The in-repo F7 observer writes under the
+   * same approved `capture_producer` contract name as the compliant skill
+   * script but covers the viewport with an opaque frame first, so its images
+   * carry no portal form fields at all; only `captured_by` separates them.
+   */
+  captured_by?: unknown;
+  capture_producer?: unknown;
+  captured_at?: unknown;
+  /** The server-computed screenshot hash exists. */
+  has_screenshot?: unknown;
+  /**
+   * `screenshot_content_hash = source_content_hash`, which is impossible for
+   * two different artifacts and means the page-text coordinate is corrupted,
+   * so the textual basis of the capture's verdict is not re-verifiable.
+   */
+  page_text_hash_corrupted?: unknown;
 }
 
 // ── Sealed pricing law, imported never copied ──────────────────────────────
@@ -393,6 +457,9 @@ const SEALED_LABOUR_RATE_EX_GST: Record<string, number> = {
   ajs_temporary_fence_labour_only: 80,
   standard_labour_materials: 85,
 };
+
+/** Australian GST, as `ses_prepare_docket_revision` applies it (`ex * 1.1`). */
+const GST_INCLUSIVE_MULTIPLIER = 1.1;
 
 /** Sealed assessment prices (ses_prepare_docket_revision assessment_fixed). */
 const ASSESSMENT_EX_GST = 150;
@@ -856,9 +923,18 @@ function classifyFamilyA(
 /**
  * A6. The obligation is what we MEANT to bill; the Xero DRAFT is what would
  * actually be authorised, and it stays editable in Xero after the mint. So the
- * sealed derivation is compared against the draft's own ex-GST total. An
- * absent, unreadable or non-numeric total is unevaluable and parks -- it is
- * never assumed to match.
+ * sealed derivation is compared against the draft's own money -- BOTH the
+ * ex-GST sub-total and the inc-GST total, because a tax-treatment edit moves
+ * what the builder is billed while leaving the ex figure alone. An absent,
+ * unreadable or non-numeric total is unevaluable and parks -- it is never
+ * assumed to match.
+ *
+ * ONLY a total read from Xero itself at determination time may reach `clean`.
+ * The local `xero_invoices` mirror is written from Xero's response AT THE MINT,
+ * so a freshly minted draft's mirrored figures equal the sealed derivation by
+ * construction and an edit made in Xero afterwards never touches them:
+ * comparing against the mirror is comparing the sealed total against itself,
+ * and it reports clean on exactly the drift this guard exists to catch.
  */
 function classifyXeroDraftTotal(
   evidence: SesRulesCleanEvidence,
@@ -876,12 +952,21 @@ function classifyXeroDraftTotal(
     return;
   }
   const source = subject.totals_source ?? null;
-  if (source !== "xero_api" && source !== "local_mirror") {
+  if (source === "local_mirror") {
     record(
       outcomes,
       id,
       "unevaluable",
-      `The DRAFT's ex-GST total states no recognised origin (${
+      "The DRAFT's money was read from the local invoice mirror, which is written at the mint and cannot witness an edit made in Xero afterwards; only a total read from Xero itself at determination time can answer this guard.",
+    );
+    return;
+  }
+  if (source !== "xero_api") {
+    record(
+      outcomes,
+      id,
+      "unevaluable",
+      `The DRAFT's total states no recognised origin (${
         source ?? "<absent>"
       }), so it cannot be trusted as the money this would advance.`,
     );
@@ -894,6 +979,16 @@ function classifyXeroDraftTotal(
       id,
       "unevaluable",
       "The DRAFT carries no numeric ex-GST total, so the money this would advance is unknown.",
+    );
+    return;
+  }
+  const incTotal = finiteNumber(subject.total);
+  if (incTotal === null) {
+    record(
+      outcomes,
+      id,
+      "unevaluable",
+      "The DRAFT carries no numeric inc-GST total, and a tax-treatment edit moves what the builder is billed without touching the ex-GST figure.",
     );
     return;
   }
@@ -932,14 +1027,28 @@ function classifyXeroDraftTotal(
     (running, line) => running + line.quantity * line.unit_price_ex_gst,
     0,
   );
-  const matches = money(subTotal, sealedTotal);
+  const sealedIncTotal = sealedTotal * GST_INCLUSIVE_MULTIPLIER;
+  const faults: string[] = [];
+  if (!money(subTotal, sealedTotal)) {
+    faults.push(
+      `it carries $${subTotal} ex where the sealed pricing law derives $${sealedTotal} ex`,
+    );
+  }
+  if (!money(incTotal, sealedIncTotal)) {
+    faults.push(
+      `it carries $${incTotal} inc where the sealed pricing law derives $${sealedIncTotal} inc`,
+    );
+  }
+  const matches = faults.length === 0;
   record(
     outcomes,
     id,
     matches ? "clean" : "flagged",
     matches
-      ? `The DRAFT in Xero carries $${subTotal} ex, exactly the total the sealed pricing law derives (read from ${source}).`
-      : `The DRAFT in Xero carries $${subTotal} ex where the sealed pricing law derives $${sealedTotal} ex (read from ${source}). A draft stays editable after the mint, and it is the draft that would be advanced.`,
+      ? `The DRAFT read from Xero itself carries $${subTotal} ex / $${incTotal} inc, exactly the money the sealed pricing law derives.`
+      : `The DRAFT read from Xero itself is not the money the sealed pricing law derives: ${
+        faults.join("; ")
+      }. A draft stays editable after the mint, and it is the draft that would be advanced.`,
   );
 }
 
@@ -1352,6 +1461,15 @@ function classifyFamilyC(
       "unevaluable",
       `The supporting report's independence proof could not be read (${evidence.report_evidence_read_error}).`,
     );
+  } else if (evidence.portal_capture_read_error) {
+    record(
+      outcomes,
+      "C3_report_evidence_floor",
+      "unevaluable",
+      `The card's portal captures could not be read (${evidence.portal_capture_read_error}).`,
+    );
+  } else if (evidence.portal_captures != null) {
+    classifyPortalCaptureEvidence(evidence, outcomes);
   } else if (evidence.report_evidence_independent !== true) {
     // The two open readiness gaps live exactly here. Until they close, a card
     // whose completeness is not INDEPENDENTLY proven is excluded by name.
@@ -1374,6 +1492,125 @@ function classifyFamilyC(
     );
   }
 }
+
+/**
+ * The portal branch of C3. It READS rather than counts: a qualifying capture is
+ * identified and its coordinates are carried into the guard detail, so the
+ * verdict names the evidence it relied on and stays auditable afterwards. A
+ * card may legitimately hold several capture rows -- including a byte-identical
+ * duplicate that is an open Captain item -- and several qualifying rows is not
+ * a failure, but the one relied on must still be named. Nothing here alters,
+ * dedupes or orders away a row; duplicates are the Captain's to resolve.
+ */
+function classifyPortalCaptureEvidence(
+  evidence: SesRulesCleanEvidence,
+  outcomes: Outcomes,
+): void {
+  const id: SesRulesCleanGuardId = "C3_report_evidence_floor";
+  if (evidence.report_evidence_independent === false) {
+    record(
+      outcomes,
+      id,
+      "flagged",
+      "The supporting report self-vouches its own completeness, so no portal capture can stand in for the independent proof it lacks.",
+    );
+    return;
+  }
+  const captures = evidence.portal_captures ?? [];
+  const qualifying = captures.filter((capture) =>
+    portalCaptureRefusal(capture, evidence.current_attendance_cycle_id) === null
+  );
+  if (qualifying.length === 0) {
+    const refusals = captures.map((capture, index) =>
+      `capture ${describePortalCapture(capture, index)}: ${
+        portalCaptureRefusal(capture, evidence.current_attendance_cycle_id)
+      }`
+    );
+    record(
+      outcomes,
+      id,
+      captures.length === 0 ? "unevaluable" : "flagged",
+      captures.length === 0
+        ? "This card's report lives in the builder portal and it holds no portal capture at all, so its evidence floor rests on nothing."
+        : `No portal capture on this card is evidence: ${refusals.join("; ")}.`,
+    );
+    return;
+  }
+  const relied = qualifying[0];
+  record(
+    outcomes,
+    id,
+    "clean",
+    `The evidence relied on is portal capture ${
+      describePortalCapture(relied, captures.indexOf(relied))
+    }, certified verified${
+      qualifying.length > 1
+        ? `, one of ${qualifying.length} qualifying captures on this card`
+        : ""
+    }.`,
+  );
+}
+
+/** Identifying coordinates, so the verdict names its own evidence. */
+function describePortalCapture(
+  capture: SesRulesCleanPortalCapture,
+  index: number,
+): string {
+  const parts = [
+    text(capture.id) || `#${index + 1}`,
+    `role ${text(capture.role) || "<absent>"}`,
+    `cycle ${text(capture.attendance_cycle_id) || "<absent>"}`,
+    `captured by ${text(capture.captured_by) || "<absent>"}`,
+  ];
+  const capturedAt = text(capture.captured_at);
+  if (capturedAt) parts.push(`at ${capturedAt}`);
+  return parts.join(", ");
+}
+
+/**
+ * Why this capture is not evidence, or `null` when it is. Every test is
+ * positive: an unrecognised status, an absent screenshot flag or an unstated
+ * producer refuses, so a caller that forgets a filter parks rather than passes.
+ */
+function portalCaptureRefusal(
+  capture: SesRulesCleanPortalCapture,
+  currentCycleId: string | null | undefined,
+): string | null {
+  const status = text(capture.status);
+  if (status !== "verified") {
+    // The writer can append a row and then fail its own re-read. It refuses to
+    // certify, but it cannot un-write. Uncertified is not evidence.
+    return `it is ${status || "of unstated status"}, not certified verified`;
+  }
+  if (capture.has_screenshot !== true) {
+    return "it carries no server-computed screenshot hash";
+  }
+  if (capture.page_text_hash_corrupted !== false) {
+    return capture.page_text_hash_corrupted === true
+      ? "its page-text coordinate equals its screenshot hash, which is impossible for two different artifacts, so the textual basis of its verdict is not re-verifiable"
+      : "whether its page-text coordinate is re-verifiable was not stated";
+  }
+  const capturedBy = text(capture.captured_by);
+  if (!capturedBy) {
+    return "it does not state what looked at the page";
+  }
+  if (capturedBy.startsWith(SES_SYNTHETIC_PORTAL_OBSERVER_PREFIX)) {
+    return "it was captured by the in-repo observer, whose images are a synthetic observation card carrying no portal form fields";
+  }
+  const cycle = text(currentCycleId);
+  if (!cycle) return "the card's current attendance cycle is not known";
+  if (text(capture.attendance_cycle_id) !== cycle) {
+    return "it belongs to an earlier attendance cycle";
+  }
+  return null;
+}
+
+/**
+ * `captured_by` prefix of the in-repo F7 observer. It writes under the same
+ * approved `capture_producer` contract name as the compliant skill script, so
+ * only this field separates a real page capture from a synthetic one.
+ */
+export const SES_SYNTHETIC_PORTAL_OBSERVER_PREFIX = "ses-prime-portal-observer";
 
 /**
  * The one determination. `rules_clean` requires every guard on the closed list

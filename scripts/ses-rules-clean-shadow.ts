@@ -40,6 +40,7 @@ import {
   SES_RULES_CLEAN_CONTRACT_VERSION,
   SES_RULES_CLEAN_GUARDS,
   type SesRulesCleanEvidence,
+  type SesRulesCleanPortalCapture,
   type SesRulesCleanVerdict,
 } from "../supabase/functions/ops-api/makesafe_invoice_rules_clean.ts";
 import {
@@ -146,7 +147,10 @@ order by r.job_id, r.committed_at desc
 
 /**
  * The portal-capture half of the C3 evidence floor, for report-only families
- * whose report lives in the builder portal rather than in the pack.
+ * whose report lives in the builder portal rather than in the pack. Rows are
+ * read UNFILTERED and the classifier decides which one, if any, is evidence:
+ * a caller that forgets a filter must park, not pass, so the qualification
+ * rule may not live in this query string.
  *
  * `screenshot_content_hash` is SERVER-computed from the uploaded PNG, so a
  * `verified` row does attest the image bytes. Two documented facts stop that
@@ -163,14 +167,17 @@ order by r.job_id, r.committed_at desc
  */
 const PORTAL_CAPTURE_SQL = `
 select
+  p.id,
   p.job_id,
   p.attendance_cycle_id,
   p.role,
+  p.status,
   p.captured_by,
+  p.capture_producer,
+  p.captured_at,
   (p.screenshot_content_hash is not null) as has_screenshot,
   (p.screenshot_content_hash = p.source_content_hash) as page_text_hash_corrupted
 from makesafe_portal_capture_revisions p
-where p.status = 'verified'
 `;
 
 /**
@@ -396,23 +403,27 @@ export async function runShadow(limit: number | null): Promise<{
     // Family C3: independent completeness proof for the report evidence.
     const proof = proofBy.get(jobId) ?? null;
     let reportIndependent: boolean | null = null;
+    let portalCaptures: SesRulesCleanPortalCapture[] | null = null;
     if (docket) {
       if (String(docket.supporting_report_state) === "not_applicable") {
         // Report-only family: the builder portal holds the report, so the
-        // portal capture IS the evidence floor. It counts only when a real
-        // producer looked at the real page AND the page-text coordinate is
-        // re-verifiable.
-        const cycle = String(detail?.attendance_cycle_id ?? "");
-        const usable = (captureBy.get(jobId) ?? []).filter((row) =>
-          String(row.role) === "roof_report" &&
-          row.has_screenshot === true &&
-          row.page_text_hash_corrupted !== true &&
-          !String(row.captured_by ?? "").startsWith(
-            "ses-prime-portal-observer",
-          ) &&
-          (!cycle || String(row.attendance_cycle_id ?? "") === cycle)
-        );
-        reportIndependent = usable.length > 0 ? true : false;
+        // portal capture IS the evidence floor. Which capture -- if any -- is
+        // evidence is the classifier's decision, not this harness's: it is
+        // handed every row of the relevant role, unfiltered, and it names the
+        // one it relied on.
+        portalCaptures = (captureBy.get(jobId) ?? [])
+          .filter((row) => String(row.role) === "roof_report")
+          .map((row) => ({
+            id: row.id,
+            role: row.role,
+            status: row.status,
+            attendance_cycle_id: row.attendance_cycle_id,
+            captured_by: row.captured_by,
+            capture_producer: row.capture_producer,
+            captured_at: row.captured_at,
+            has_screenshot: row.has_screenshot === true,
+            page_text_hash_corrupted: row.page_text_hash_corrupted === true,
+          }));
       } else if (!proof) {
         reportIndependent = null;
       } else {
@@ -468,6 +479,7 @@ export async function runShadow(limit: number | null): Promise<{
         ? obligation?.commercial_quantity_override ?? null
         : null,
       report_evidence_independent: reportIndependent,
+      portal_captures: portalCaptures,
       subject_invoice: subject
         ? {
           xero_invoice_id: subject.xero_invoice_id,
@@ -475,9 +487,11 @@ export async function runShadow(limit: number | null): Promise<{
           status: subject.status,
           invoice_obligation_revision_id:
             subject.invoice_obligation_revision_id,
-          // The DRAFT's OWN money. This shadow reads the local mirror, which
-          // can drift from Xero; a live call site must read the draft from
-          // Xero itself and say `xero_api`.
+          // The DRAFT's OWN money. This shadow can only read the local
+          // mirror, which is written at the mint and cannot witness a later
+          // edit made in Xero -- so it is stamped `local_mirror` and A6
+          // correctly parks on it. A live call site must read the draft from
+          // Xero itself and stamp `xero_api`; there is no shortcut here.
           sub_total: numeric((subject as any).sub_total),
           total: numeric((subject as any).total),
           totals_source: "local_mirror",
