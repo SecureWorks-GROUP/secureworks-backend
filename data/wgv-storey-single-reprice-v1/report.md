@@ -1,24 +1,40 @@
-# White Gum Valley SWMS-261114 - storey fact is SINGLE; reprice STOPPED at the Captain's void
+# White Gum Valley SWMS-261114 - the portal contradicts the work order, and the work order governs
 
 Date: 2026-08-06
 Branch: `fm/wgv-storey-single-reprice-v1`
 Mode: **read-only investigation. Nothing was written to production.**
 Actor: `fm/wgv-storey-single-reprice-v1`
+Status: **SETTLED by Captain ruling 2026-08-06. Nothing pending.**
 
-## Verdict in one line
+## The ruling this record exists under
 
-The single-storey reading is **confirmed** from production evidence, and the sealed
-price that derives from it is **$250.00 ex / $275.00 inc**. Both halves of the
-instructed change are blocked, for different reasons, and both blocks are the
-Captain's call rather than mine:
+> **ROOF REPORTS ARE PRICED OFF THE WORK ORDER ONLY.** The trade-observation override is
+> a MAKE-SAFE rule and does not apply to roof reports.
 
-1. **The fact cannot be recorded.** No production surface writes a *trade-observed*
-   storey correction onto a card. Every existing storey writer derives the value from
-   the work order, which is the source being overridden.
-2. **The number cannot follow in place.** `INV-1149` is a bound Xero DRAFT and the SES
-   Xero gateway has no invoice-update verb. Reaching $275.00 inc requires
-   **void-and-remint**, which the task says to name and stop on. The live duplicate
-   guard independently confirms it: `allows_create: false`.
+`data/decisions/2026-08-06-roof-reports-priced-off-work-order-only.md`.
+
+**`INV-1149` stays at $300.00 ex / $330.00 inc. No void, no reprice, no storey
+correction, and the storey-correction mechanism is not to be built.**
+
+## What this record is, and is not
+
+It **is** the evidence record of a real contradiction on a live card: the builder's own
+locked portal form says single storey, the builder's own work order says two, and under
+the ruling above the work order governs the price regardless. Recording that is the
+point - a future reader who finds this disagreement on this card, or the same shape on
+another roof card, should land here and stop rather than re-derive a reprice from it.
+
+It is **not** a pending reprice, an open question, or work for anyone to pick up. The
+investigation below was carried out under a premise that the ruling has since reversed:
+the trade-observation override was applied to a roof card in error. The Captain's words:
+*"That was my error, not yours: I applied a make-safe rule to a roof card and had you
+size an alarming number off it. Your evidence was correct throughout; the rule I applied
+to it was wrong."*
+
+So read sections 1, 4, 6 and 7 as findings that stand. Read sections 2, 3, 5 and 8 as
+the working-out of a change that is **not happening** - kept because each documents a
+real, still-true property of the system, not because anything is owed. Section 9's
+census is **by design**, not a gap; it has been rewritten to say so.
 
 Nothing was authorised, sent, approved, voided or minted. No builder was contacted.
 
@@ -109,7 +125,11 @@ read-only by contract, and a hand-written money-path fact with no audit row, no
 expects-before guard and no evidence binding is precisely the shortcut the storey
 backfill's preview-by-default design exists to prevent.
 
-## 3. The derivation of $250.00 ex, once the fact is corrected
+## 3. The derivation of $250.00 ex - NOT APPLIED, kept for the arithmetic
+
+Under the ruling this never happens: the work order says two storey and the work order
+governs. What follows is the sum as it would have run, retained only so the figure
+quoted during the investigation is checkable rather than floating.
 
 `roof_storey_fixed` prices with no free parameters
 (`ses_prepare_docket_revision.ts:725`):
@@ -133,8 +153,9 @@ Check: `250.00 + 25.00 = 275.00`. GST is exactly 1/11th of inc (`275 / 11 = 25.0
 Movement from the live draft: **$330.00 inc -> $275.00 inc, a reduction of $55.00 inc
 ($300.00 ex -> $250.00 ex, $50.00 ex).**
 
-**No hand-set figure is involved.** With `storeys = "single"` the sealed schedule
-produces $250.00 on its own. That is the whole point of correcting the fact.
+**No hand-set figure is involved.** With `storeys = "single"` the sealed schedule would
+produce $250.00 on its own. **This was not applied.** `INV-1149` stands at $300.00 ex /
+$330.00 inc under the Captain's own rate authorisation.
 
 ## 4. A correction to the brief: the $300 is not a work-order price
 
@@ -168,7 +189,7 @@ The straight reading is that $300 was a discount off $350 for a job believed to 
 double storey; on a single-storey job the sealed price is $250 and no override is
 needed. I am not assuming that.
 
-## 5. The invoice: void-and-remint is required. Stopping here.
+## 5. The invoice: any reprice would be void-and-remint - and no reprice is happening
 
 `INV-1149` mirror readback (`invoice-mirror-readback.json`, live today):
 
@@ -204,7 +225,9 @@ This card has already been through that sequence once: `INV-1144` at $385 was
 system's own.
 
 Per the task boundary - *"If a void-and-remint is required rather than an in-place
-change, say so and stop"* - I stop here. The void is the Captain's click.
+change, say so and stop"* - I stopped here and named it. **The Captain then ruled no
+void.** The sequence above was never run and is recorded only as the general shape of a
+reprice on this system, which remains true for any future repricing question.
 
 ## 6. Duplicate guard: clean, and it blocks a remint by design
 
@@ -248,66 +271,46 @@ Done: production reads only (Management API `read_only: true`, the read-only ops
 duplicate probe, and one browser read of the builder's own share link), plus this
 ledger.
 
-## 8. What the Captain is being asked
+## 8. What the Captain was asked, and what he ruled
 
-Two decisions, in this order:
+Two decisions were put up: build a storey-correction action, and void `INV-1149`. **Both
+were declined**, on a ground that made the questions moot rather than answering them
+individually - the trade-observation override does not reach roof reports at all.
 
-1. **Approve building the storey-correction action** - the `update_makesafe_job_family`
-   pattern applied to `storeys`, privileged, expects-before `double`, evidence-bound to
-   the portal share URL and capture hash `sha256:38957022…`, reason recorded as
-   *trade-observed single storey overriding the work order*, audit event written. Needs
-   its own PR and an edge deploy. Without it the fact cannot be corrected honestly, and
-   without the fact the price cannot derive.
-2. **Void `INV-1149`** (DRAFT -> DELETED) so a $250.00 ex / $275.00 inc draft can be
-   minted from the corrected fact - and confirm that the $300 authorisation
-   (`captain-preshutdown-send-batch-v1-wgv-roof300`) is withdrawn rather than
-   re-expressed against the single-storey schedule.
+| Asked | Ruled |
+| --- | --- |
+| Approve building a privileged storey-correction action | **No. Not to be built.** |
+| Void `INV-1149` so a $250.00 / $275.00 draft can be minted | **No void.** Stays $300.00 ex / $330.00 inc. |
+| Confirm whether the $300 authorisation is withdrawn | **Stands.** |
 
-Doing (2) before (1) would remint at $300 again, because the fact would still say
-double. Doing (1) alone leaves a card that correctly says single carrying a draft that
-says "Double Storey roof report" at $330 - visible, honest, and waiting for the void.
+Nothing here is open.
 
-## 9. The gap, in one sentence, and its size
+## 9. The 40-of-63 census is BY DESIGN, not a gap
 
-**A privileged `record_makesafe_roof_storey_correction` action would need to replace
-`jobs.metadata.storeys` on one named card, refusing unless the caller states the value
-it expects to find there, and only when the write carries a portal-form evidence
-reference plus its capture content hash, a free-text reason, and an identified human -
-writing an audit event and touching nothing else.**
+This section previously argued that 40 roof cards sat behind a hole worth closing. **That
+reading was wrong**, and it was wrong because the premise it rested on was wrong, not
+because the numbers were. The counts are accurate; what they mean has changed completely.
 
-That is the whole shape. It is the `update_makesafe_job_family` pattern with `storeys`
-in place of the family: expects-before guard so a card that moved underneath the
-operator stops the write, evidence binding so a storey can never be asserted without
-naming what was observed, privileged-only, no stage move, no price write. The price is
-never set by it - correcting the fact is what makes `roofReportPrice` produce the right
-number by itself.
-
-**Why this is not one card.** Read-only census of the roof-report family today
-(`gap-sizing-counts.json`, `gap-sizing-exposed-cards.json`):
+Read-only census of the roof-report family, 2026-08-06 (`gap-sizing-counts.json`,
+`gap-sizing-exposed-cards.json`):
 
 | Measure | Count |
 | --- | ---: |
 | Roof-report cards | 63 |
 | Carrying a **work-order-derived** `storeys` fact | **40** (29 single, 11 double) |
-| Of those, with a captured trade portal form on record | **6** (all live) |
-| Carrying the fact and a portal share link but **no capture yet** | 14 |
+| Of those, with a captured trade portal form on record | 6 |
+| Carrying the fact and a portal share link but no capture pulled yet | 14 |
 
-Every one of those 40 cards is priced off the builder's instruction, and the only
-storey writers in the system read that same instruction. So for all 40, a trade who
-observes otherwise on site has **nowhere to record it** - the contradiction can be seen
-on the portal form and still cannot reach the price. The 6 with captured forms are
-where a contradiction is even checkable today; the 14 uncaptured are the same exposure
-with the evidence not yet pulled.
+Those 40 cards are priced off the builder's instruction because **that is the rule for
+roof reports**. The absence of any surface to overwrite a roof card's storey with a trade
+observation is the design working, not an exposure. A trade contradiction on a roof card
+is worth seeing and worth recording; it is not a pricing input.
 
-**I checked the storey answer on this card only.** The other five captured cards are
-listed for sizing, not adjudicated - I did not open their forms, and nothing here says
-any of them is wrong. Mindarie `SWMS-261081` in particular is out of scope by
-instruction and its work order and evidence are stated to agree.
+**Nothing follows from this table.** It is retained so that the next person who counts
+these cards finds the ruling attached to the number instead of re-raising the alarm.
 
-So the question in front of the Captain is not really "is White Gum Valley worth a
-void". It is whether a $50 correction on one card is the moment to close a hole that
-sits under 40, and the answer may well be that the action is worth building even if
-this card's void is not.
+The make-safe trade-observation override is untouched by any of this and continues to
+apply on make-safe cards, where it belongs.
 
 ## Files
 
@@ -320,5 +323,6 @@ this card's void is not.
 | `invoice-mirror-readback.json` | Live `xero_invoices` readback for SWMS-261114 |
 | `obligation-history.json` | All three obligation revisions with totals and bindings |
 | `duplicate-probe.json` | Read-only duplicate-guard probe output |
-| `gap-sizing-counts.json` | Roof-family census behind section 9 |
+| `gap-sizing-counts.json` | Roof-family census behind section 9 (by design, not a gap) |
 | `gap-sizing-exposed-cards.json` | The 6 cards with both a work-order storey fact and a captured portal form |
+| `../decisions/2026-08-06-roof-reports-priced-off-work-order-only.md` | The ruling that settles this record |
