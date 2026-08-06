@@ -148,11 +148,14 @@ function resolveOne(
   }
 
   // No tier matched. A claim-base sibling whose PO evidence is one-sided is still an AMBIGUITY, and
-  // an ambiguity refuses — that is the whole point of detecting it. This branch is normally
-  // unreachable now (the `reference_po_base` tier claims the same rows first) and is deliberately
-  // kept as the second line of defence: it still fires for a claim base shorter than the tier's
-  // digit-safety floor, and it is what stops a future tier regression from reading as a permission.
-  // Koondoola SWMS-261025 recorded exactly this ambiguity on 2026-08-05 and minted anyway.
+  // an ambiguity refuses — that is the whole point of detecting it. In production this branch is
+  // NOT currently reachable: `loadIndexedInvoiceRows` (ses_reporting_actions.ts) floors both the
+  // full normalised reference and the claim base at >= 5 characters before querying, so a claim
+  // base shorter than that never has candidate rows fetched (unless already attributed to our job),
+  // and `resolveExistingInvoice`'s substring/po_base tiers carry the same floor. So this is a guard
+  // on the resolver's own contract and against a future tier regression — reachable in unit tests,
+  // not a live second line of defence today. Koondoola SWMS-261025 recorded exactly this ambiguity
+  // on 2026-08-05 and minted anyway, via the `reference_po_base` tier above, not this branch.
   if (indeterminate.length > 0) {
     return {
       job_id: request.job_id,
@@ -201,9 +204,13 @@ export function resolveSesInvoiceDuplicates(
     ),
   );
   // The >= 5 floor guards the SUBSTRING test, where a short token false-matches inside an unrelated
-  // number. Claim-base membership is exact EQUALITY, so it carries no such risk and takes no floor:
-  // dropping short bases here made a short-claim card invisible to the whole probe, which silently
-  // made the `sibling_po` ambiguity below unreachable rather than safe.
+  // number. Claim-base membership is exact EQUALITY, so it carries no such risk and takes no floor
+  // in THIS function. But `loadIndexedInvoiceRows` (ses_reporting_actions.ts), which supplies
+  // `indexedRows` in production, floors both the full ref and the claim base at >= 5 chars before
+  // querying — so a claim base shorter than 5 chars never has candidate rows fetched there (unless
+  // already attributed to our job), and the `sibling_po` ambiguity branch below cannot fire through
+  // the production probe today. It remains reachable in unit tests and guards against a future tier
+  // regression.
   const requestRefs = requests.map((request) => normRef(request.external_ref))
     .filter((value) => value.length >= 5);
   const requestBases = requests.map((request) =>

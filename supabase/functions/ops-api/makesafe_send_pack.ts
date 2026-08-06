@@ -180,7 +180,19 @@ export function isVoidStatus(status: unknown): boolean {
 // "MLB-25898PO-54817"). Marnin's rule: same builder ref + a DIFFERENT PO number = a NEW, separately
 // invoiceable piece of work, so a sibling card's invoice must NOT block it. Identical full refs
 // (a true re-send) and refs where the base matches but NEITHER side carries a distinguishing PO
-// keep the strict per-ref block. Mirror of invoice_utils.py split_ref_po / _same_work_ref.
+// keep the strict per-ref block.
+//
+// DIVERGED FROM THE PYTHON TWIN (2026-08-06): this predicate was deliberately NARROWED so that
+// only `distinct_po` clears a sibling — a one-sided PO pair (claim-only reference beside a
+// PO-bearing one) now blocks unless the candidate invoice is already attributed to a different
+// card. The wiki skill-script twin still carries the identical PRE-FIX predicate: wiki
+// `invoice_utils.py:89` is `if o_base and c_base and o_base == c_base and o_po != c_po: return
+// False`, and `create_makesafe_draft_invoice.py:204` calls `resolve_existing_invoice` off it — a
+// LIVE mint guard, not dead code. So the Koondoola double-bill shape (see
+// docs/evidence/ses-duplicate-guard-po-blindness-2026-08-06.md) remains REACHABLE through the
+// skill-script path; this repo closes the ops-api/backend route only. That wiki repo is
+// version-pinned and must NEVER be edited from here — narrowing the twin is filed separately for
+// the governed release path.
 const _PO_TOKEN_RE = /po[-\s]?(\d+)/i;
 
 export function splitRefPo(raw: unknown): { base: string; po: string | null } {

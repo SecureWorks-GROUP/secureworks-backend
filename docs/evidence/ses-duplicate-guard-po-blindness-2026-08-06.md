@@ -12,6 +12,10 @@ the guard treated a missing purchase order as a distinguishing one.**
 Every number below was read from the live mirror on 2026-08-06 with the Supabase Management API at
 `read_only: true`. No production write was made.
 
+**LIMITATION (see §4b): this fix closes the `ops-api` backend duplicate-guard route only. The wiki
+skill-script twin carries the identical pre-fix predicate and remains a live, unclosed mint guard —
+do not read a green merge as full coverage.**
+
 ---
 
 ## 1. What the live data actually says
@@ -221,6 +225,20 @@ intake case's work-order canonical is the claim-only `MLB-24881` that the mint w
 
 The two cards saved by the attribution discriminator — `SWMS-261118` Munster and `SWMS-261057`
 Mindarie — would have been refused by a naive "any one-sided pair blocks" rule.
+
+## 4b. LIMITATION — this fix closes the backend route only, not the skill-script route
+
+**Landing this change closes the `ops-api` (backend) duplicate-guard route. It does NOT close the
+skill-script route.** The wiki `invoice_utils.py` / `create_makesafe_draft_invoice.py` twin carries
+the identical PRE-FIX predicate — `_same_work_ref` still answers "different PO, different work" for
+a claim-only reference beside a PO-bearing one — wired into a LIVE mint guard
+(`create_makesafe_draft_invoice.py:204` calls `resolve_existing_invoice`), not dead code. That wiki
+repo is version-pinned and must never be edited from this repository; narrowing the twin is filed
+separately for the governed release path.
+
+A green merge of this PR must NOT be read as full coverage of the Koondoola-class defect. The two
+at-risk census cards named in §4, `SWMS-26931` (Clarkson) and `SWMS-261018` (West Perth), remain
+mintable against their existing AUTHORISED invoices through the skill-script route.
 
 ## 5. Follow-ups named, not taken
 
