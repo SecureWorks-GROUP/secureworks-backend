@@ -1,0 +1,113 @@
+{
+  "card": {
+    "job_id": "088dee02-91d0-4539-8c9c-6014c9ebf06e",
+    "job_number": "SWMS-261114",
+    "suburb": "White Gum Valley",
+    "builder": "MLB",
+    "family": "ordinary_roof_portal",
+    "builder_reference": "RR-26836"
+  },
+  "ops_api": {
+    "version": "v1058",
+    "commit": "ebd97881"
+  },
+  "cockpit_before": {
+    "status": "HOLD",
+    "stale": false,
+    "approval_band": "decision_blocked",
+    "failed_checks": [
+      "C11"
+    ],
+    "blockers": [
+      {
+        "state": "refused",
+        "code": "route_draft_missing",
+        "fact": "The report email has no draft on the current docket revision.",
+        "recovery_action": "This docket revision carries no report email draft at all. Prepare a new docket revision (prepare_ses_docket_revision) so the report email is assembled, then re-check this card.",
+        "evidence": {
+          "route_kind": "report",
+          "route_present": false,
+          "route_ready": false,
+          "attachment_count": 0
+        }
+      },
+      {
+        "state": "refused",
+        "code": "report_only_email_applicability_parked",
+        "fact": "Whether report-only work uses the universal three-email release is still awaiting the Captain's decision.",
+        "recovery_action": "Wait for the Captain to decide the report-only email route applicability, then prepare a new release revision.",
+        "decision_key": "report-only-email-applicability"
+      }
+    ],
+    "email_draft_route_kinds": [
+      "invoice"
+    ],
+    "decision_controls": {
+      "approve_invoice": false,
+      "send_it": false
+    },
+    "release_send_progress": {
+      "kind": "none"
+    }
+  },
+  "prepare_dry_run": {
+    "request": {
+      "dry_run": true,
+      "idempotency_key": "wgv-docket-prepare-hold-v1-dryrun-1",
+      "selection": {
+        "mode": "job_id"
+      }
+    },
+    "persisted": false,
+    "state": "ready",
+    "blockers": [],
+    "email_draft_keys": [
+      "INVOICE_EMAIL_DRAFT"
+    ],
+    "manifest_items": {
+      "supporting_report_pdf": {
+        "state": "not_applicable",
+        "rule": "report-only-portal-is-the-report"
+      },
+      "roof_report_link": {
+        "state": "ready",
+        "evidence": "url:<redacted portal share link>"
+      },
+      "roof_report_capture": {
+        "state": "ready",
+        "evidence": "file:EVIDENCE/portal_roof_report.json"
+      },
+      "assessment_report_link": {
+        "state": "not_applicable",
+        "rule": "not-an-assessment-report"
+      },
+      "assessment_report_capture": {
+        "state": "not_applicable",
+        "rule": "not-an-assessment-report"
+      },
+      "physical_reporting_evidence": {
+        "state": "not_applicable",
+        "rule": "report-only-has-no-physical-reporting-evidence"
+      },
+      "draft_builder_report_email": {
+        "state": "not_applicable",
+        "rule": "portal-is-the-report"
+      },
+      "draft_photo_evidence_email": {
+        "state": "not_applicable",
+        "rule": "report-only-has-no-photo-email"
+      },
+      "draft_invoice_bundle_email": {
+        "state": "ready",
+        "evidence": "file:DRAFTS/INVOICE_EMAIL_DRAFT.txt"
+      },
+      "email_drafts_presented": {
+        "state": "ready",
+        "evidence": "review:review.html#email-drafts"
+      }
+    }
+  },
+  "writes_performed": [],
+  "release_run": false,
+  "blocker_2_touched": false
+}
