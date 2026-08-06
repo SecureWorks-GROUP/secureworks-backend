@@ -1095,9 +1095,15 @@ Deno.test(
     ];
     const routes = resolveDocketRoutes(docket, artifacts, null);
     assertEquals(routes.map((r) => r.route_kind), ["report_invoice", "photo"]);
-    assertEquals(routes[0].cc, [MAKESAFE_CC]);
+    // Permanent AJS pack CCs (Captain 2026-08-06): ses@ + vanessa@ + mandi@.
+    const ajsPackCc = [
+      MAKESAFE_CC,
+      "vanessa@ajs.build",
+      "mandi@ajs.build",
+    ];
+    assertEquals(routes[0].cc, ajsPackCc);
     assertEquals(routes[0].requires_thread_reply, undefined);
-    assertEquals(routes[1].cc, [MAKESAFE_CC]);
+    assertEquals(routes[1].cc, ajsPackCc);
     // AJS does not stamp MLB thread reply fields.
     assertEquals(routes[0].reply_to_thread_id, undefined);
   },

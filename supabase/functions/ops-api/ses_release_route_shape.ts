@@ -2,7 +2,11 @@
 //
 // Captain ruling 2026-08-04 (AJS/AJBR only):
 //   two emails — (A) report + invoice together, (B) photos follow-up;
-//   TO workorders@ajs.build + thread participants; CC ses@; from admin@.
+//   TO workorders@ajs.build + thread participants; from admin@.
+//
+// Captain ruling 2026-08-06 (AJS/AJBR permanent builder CCs):
+//   CC on ALL AJS/AJBR pack emails: ses@ + vanessa@ajs.build + mandi@ajs.build.
+//   Domain spelling is always ajs.build (never ajsbuild / ajsbuid).
 //
 // Captain ruling 2026-08-05 (MLB physical / Maylands):
 //   three emails, two destinations — still route_kind order report/photo/invoice:
@@ -10,16 +14,24 @@
 //   2. photo   — photos-only (same transport as report)
 //   3. invoice — billing pack to makesafes@ (report + AUTHORISED invoice + SWMS)
 //   Exception flag: MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1 in ses_mlb_thread_reply.ts
-//   AJS shape is untouched.
+//   AJS shape is untouched (CC list is AJS-only; do not widen to MLB).
 
 import type { SesRouteKind } from "./ses_review_cockpit.ts";
 import {
+  AJS_MANDI_CC,
+  AJS_VANESSA_CC,
   AJS_WORK_ORDERS_MAILBOX,
   SES_RELEASE_CC,
 } from "./ses_graph_mail_gateway.ts";
 import { isMlbBuilderKey } from "./ses_mlb_thread_reply.ts";
 
-export { AJS_WORK_ORDERS_MAILBOX, SES_RELEASE_CC, isMlbBuilderKey };
+export {
+  AJS_MANDI_CC,
+  AJS_VANESSA_CC,
+  AJS_WORK_ORDERS_MAILBOX,
+  SES_RELEASE_CC,
+  isMlbBuilderKey,
+};
 
 export type SesReleaseBuilderKey = "AJS" | "AJBR" | "MLB" | "WESTERN" | string;
 
@@ -83,8 +95,18 @@ export function ajsPackRecipients(args: {
   ]);
 }
 
+/**
+ * Authoritative AJS/AJBR pack CC set (Captain 2026-08-06).
+ * Order is stable: SecureWorks proof surface first, then permanent builder CCs.
+ * This function is the single producer for sealed SES release routes; legacy
+ * makesafe_send_pack and recipient gates must consume the same list.
+ */
 export function ajsPackCc(): string[] {
-  return [SES_RELEASE_CC];
+  return uniqueEmails([
+    SES_RELEASE_CC,
+    AJS_VANESSA_CC,
+    AJS_MANDI_CC,
+  ]);
 }
 
 /**

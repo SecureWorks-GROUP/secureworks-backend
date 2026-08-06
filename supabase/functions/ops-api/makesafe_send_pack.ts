@@ -6,6 +6,11 @@
 // MONEY/COMMS critical. Every gate here FAILS CLOSED: an ambiguous or incomplete
 // input yields "do not send / do not authorise".
 
+import {
+  ajsPackCc,
+  AJS_WORK_ORDERS_MAILBOX,
+} from "./ses_release_route_shape.ts";
+
 // ── Privileged-caller auth gate (decision: scoped-routine-key-2026-06-17) ──
 //
 // send_pack authorises a Xero invoice and emails a builder. It is reachable by
@@ -380,18 +385,32 @@ export interface ClientSendPayload {
 
 // ── Exact-recipient gate (BLOCKER C — money/comms, FAIL CLOSED) ──
 //
-// The previous gate only required CC to INCLUDE ses@; it did not enforce the To
-// and did not reject EXTRA CCs (e.g. vanessa@ajs.build via special_instructions).
-// This gate enforces the EXACT recipient set, SERVER-DERIVED (never trusting the
-// UI body alone):
+// Enforces the EXACT recipient set, SERVER-DERIVED (never trusting the UI body
+// alone):
 //   - To MUST equal the configured work-orders inbox (report_recipient) for the
-//     job's builder. If no report_recipient is configured -> REJECT (cannot send
-//     to the right place). If the body's To != the configured inbox -> REJECT.
-//   - CC MUST equal EXACTLY [ses@secureworkswa.com.au]. Any extra address
-//     (vanessa, anyone) or a missing ses@ -> REJECT.
+//     job's builder. If no report_recipient is configured -> REJECT. If the
+//     body's To != the configured inbox -> REJECT.
+//   - CC MUST equal EXACTLY the builder's permanent pack-CC set:
+//       AJS/AJBR (workorders@ajs.build): ajsPackCc() =
+//         [ses@, vanessa@ajs.build, mandi@ajs.build]  (Captain 2026-08-06)
+//       all other email builders: [ses@secureworkswa.com.au] only
+//     Any missing required address or any extra address -> REJECT.
+//   - vanessa/mandi must NEVER be the To (billing contacts stay on CC only).
 //
 // Returns [] when the recipient set is exactly correct; otherwise a list of hard
 // failures. The caller MUST treat any non-empty result as a do-not-send stop.
+export function requiredPackCcForReportRecipient(
+  configuredReportRecipient: string | null | undefined,
+): string[] {
+  const configured = String(configuredReportRecipient ?? "").trim()
+    .toLowerCase();
+  // AJS/AJBR processing mailbox — domain always ajs.build (hard-coded constant).
+  if (configured === AJS_WORK_ORDERS_MAILBOX) {
+    return ajsPackCc();
+  }
+  return [MAKESAFE_CC];
+}
+
 export function checkExactRecipientGate(args: {
   configuredReportRecipient: string | null | undefined;
   to: unknown;
@@ -424,19 +443,21 @@ export function checkExactRecipientGate(args: {
     );
   }
 
-  // CC MUST equal exactly [ses@]. Reject any extra (vanessa, etc.) or a miss.
+  const requiredCc = requiredPackCcForReportRecipient(configured);
+  const requiredSet = new Set(requiredCc);
   const ccList = splitEmails(args.cc);
-  const extras = ccList.filter((c) => c !== MAKESAFE_CC);
-  if (!ccList.includes(MAKESAFE_CC)) {
+  const missing = requiredCc.filter((c) => !ccList.includes(c));
+  const extras = ccList.filter((c) => !requiredSet.has(c));
+  if (missing.length > 0) {
     failures.push(
-      `cc must be exactly ${MAKESAFE_CC}; got ${
-        ccList.length ? ccList.join(", ") : "<missing>"
-      }`,
+      `cc must be exactly [${requiredCc.join(", ")}]; missing ${
+        missing.join(", ")
+      }; got ${ccList.length ? ccList.join(", ") : "<missing>"}`,
     );
   }
   if (extras.length > 0) {
     failures.push(
-      `cc must be EXACTLY ${MAKESAFE_CC} only; rejected extra cc(s): ${
+      `cc must be EXACTLY [${requiredCc.join(", ")}] only; rejected extra cc(s): ${
         extras.join(", ")
       }`,
     );
@@ -723,7 +744,8 @@ function toIncludesConfigured(
 
 /**
  * AJS/AJBR `report_invoice`: combined final report + real Xero invoice PDF.
- * TO must include explicit invoice_to (workorders@ajs.build); CC must include ses@.
+ * TO must include explicit invoice_to (workorders@ajs.build); CC must include
+ * the permanent AJS pack set (ses@ + vanessa@ + mandi@).
  */
 export function checkReportInvoiceClientSendGate(
   payload: ClientSendPayload,
@@ -744,8 +766,10 @@ export function checkReportInvoiceClientSendGate(
     );
   }
   const cc = splitEmails(payload.cc);
-  if (!cc.includes(MAKESAFE_CC)) {
-    failures.push(`report_invoice cc must include ${MAKESAFE_CC}`);
+  for (const required of ajsPackCc()) {
+    if (!cc.includes(required)) {
+      failures.push(`report_invoice cc must include ${required}`);
+    }
   }
   const names = attachmentNames(payload.attachments);
   const reportNames = names.filter((n) => isReportPdf(n));
@@ -815,7 +839,7 @@ export function checkMlbReportClientSendGate(
 
 /**
  * `photo` route — builder-aware CC:
- *   AJS/AJBR: must include ses@
+ *   AJS/AJBR: must include permanent pack CCs (ses@ + vanessa@ + mandi@)
  *   MLB/others: must have no cc
  * Attachments: labelled images only; refuse PDF pack bleed and raw photoNN names.
  */
@@ -827,8 +851,10 @@ export function checkPhotoRouteClientSendGate(
   const ajs = isAjsBuilder(ctx.builderKey);
   const cc = splitEmails(payload.cc);
   if (ajs) {
-    if (!cc.includes(MAKESAFE_CC)) {
-      failures.push(`AJS photo route cc must include ${MAKESAFE_CC}`);
+    for (const required of ajsPackCc()) {
+      if (!cc.includes(required)) {
+        failures.push(`AJS photo route cc must include ${required}`);
+      }
     }
   } else if (cc.length > 0) {
     failures.push(

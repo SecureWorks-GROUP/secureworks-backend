@@ -1259,12 +1259,23 @@ media (receipts are cost evidence, not builder-facing site photos).
 
 AJS/AJBR only (Captain 2026-08-04 / skill backend release contract): two routes
 — `report_invoice` (report PDF + real Xero invoice PDF) then `photo`; TO
-`workorders@ajs.build` + participants; CC `ses@secureworkswa.com.au`. Client-send
+`workorders@ajs.build` + participants. **Permanent pack CC** (Captain 2026-08-06):
+`ses@secureworkswa.com.au` **and** `vanessa@ajs.build` **and** `mandi@ajs.build`
+on **every** AJS/AJBR pack email (report_invoice and photo). Domain is always
+`ajs.build` — never `ajsbuild` / `ajsbuid`. Authoritative producer is
+`ajsPackCc()` in `ses_release_route_shape.ts` (constants in
+`ses_graph_mail_gateway.ts`); legacy `makesafe_send_pack` and
+`checkExactRecipientGate` consume the same list via
+`requiredPackCcForReportRecipient`. Do **not** put vanessa/mandi on the To.
+MLB pack routing is untouched (`makesafes@` / finance@ invoice path). Client-send
 gate kinds match the skill table exactly: `report_invoice`, `report`, `photo`,
 `invoice` in `makesafe_send_pack.ts` (`checkSesClientSendRouteGate`). Route
 order lives in `ses_release_route_shape.ts`. Apply
 `20260804090000_ses_release_report_invoice_route_kind.sql` before the matching
 `ops-api` (widens `route_kind` and allows two-route `commit_ses_release_revision_v1`).
+Wiki skill `secureworks-makesafe-reporting` references
+(`email-routing-and-approval.md`, `path-board.md`, `close-out-contract.md`) must
+stay aligned with `ajsPackCc()` — code is authoritative for what actually sends.
 
 MLB physical (Captain 2026-08-05 / Maylands): three routes, two destinations —
 `report` / `photo` / `invoice` order. **Locked design** is report+photo as

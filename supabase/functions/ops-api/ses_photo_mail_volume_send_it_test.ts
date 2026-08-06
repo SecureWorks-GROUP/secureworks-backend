@@ -173,13 +173,19 @@ function scriptedClient(args: {
   } as unknown as SesSupabaseClient;
 }
 
+const AJS_PACK_CC = [
+  MAKESAFE_CC,
+  "vanessa@ajs.build",
+  "mandi@ajs.build",
+];
+
 function ajsRoutes(photoHashes: string[]): any[] {
   return [
     {
       ordinal: 1,
       route_kind: "report_invoice",
       recipients: ["workorders@ajs.build"],
-      cc: [MAKESAFE_CC],
+      cc: AJS_PACK_CC,
       subject: "Report + Invoice",
       body: "Report and invoice",
       body_hash: hash(1),
@@ -189,7 +195,7 @@ function ajsRoutes(photoHashes: string[]): any[] {
       ordinal: 2,
       route_kind: "photo",
       recipients: ["workorders@ajs.build"],
-      cc: [MAKESAFE_CC],
+      cc: AJS_PACK_CC,
       subject: "Photos",
       body: "Photo pack",
       body_hash: hash(2),

@@ -738,6 +738,7 @@ import {
   fetchAllAccrecInvoices as _fetchAllAccrecInvoicesShared,
   checkClientSendGate,
   checkExactRecipientGate,
+  requiredPackCcForReportRecipient,
   buildPackSentMarkerText,
   isPackSentMainEvent as _sendPackIsPackSentMainEvent,
   isPackSentTriageEvent as _sendPackIsPackSentTriageEvent,
@@ -34272,11 +34273,12 @@ async function makesafeReportDrafts(client: any, params: URLSearchParams) {
       // deriveResumeAction is the single source of truth; a terminal job is
       // excluded above (resumeAction === null), never surfaced as sendable.
       resume_action: resumeAction,
-      // BLOCKER C — the EXACT (and only) cc set for a make-safe report send. The
-      // cockpit/send carries this so the To = work-orders inbox + CC = ses@ only
-      // (vanessa@ajs.build is never a recipient or cc). send_pack re-derives +
-      // enforces this server-side too (checkExactRecipientGate).
-      cc: [MAKESAFE_CC],
+      // BLOCKER C — the EXACT cc set for a make-safe report send. Server-derived
+      // from the work-orders inbox: AJS/AJBR packs include permanent builder CCs
+      // (ses@ + vanessa@ajs.build + mandi@ajs.build); others are ses@ only.
+      // vanessa/mandi must never be the To. send_pack re-derives + enforces this
+      // server-side too (checkExactRecipientGate).
+      cc: requiredPackCcForReportRecipient(recipientEmail),
       // N-1: when true, MORE THAN ONE non-void invoice maps to this job. The
       // cockpit must show the ambiguity (not a single amount) and block sending;
       // makesafe_send_pack returns 412 on the same condition.
@@ -37867,9 +37869,10 @@ async function makesafeSendPack(
   // Re-derive the builder's WORK-ORDERS inbox SERVER-SIDE from
   // makesafe_companies.report_recipient (the job's requesting company) — never
   // trust body.recipient_email alone. The send To MUST equal that inbox and the
-  // CC MUST be EXACTLY ses@secureworkswa.com.au. This blocks vanessa@ajs.build
-  // (the billing contact) ever being the To, and blocks any extra/legacy CC
-  // (e.g. a 'CC vanessa@ajs.build' special_instructions value).
+  // CC MUST equal the permanent pack-CC set for that builder (AJS/AJBR:
+  // ses@ + vanessa@ajs.build + mandi@ajs.build; others: ses@ only). This blocks
+  // vanessa/mandi ever being the To, and blocks any extra/legacy CC outside the
+  // sealed permanent set.
   // Skipped for portal builders (no email -> no recipient to gate).
   if (!isPortalBuilder) {
     const configuredReportRecipient = resolveMakesafeReportRecipient({
@@ -37880,10 +37883,11 @@ async function makesafeSendPack(
       companyName: detail?.requesting_company_name || detail?.makesafe_companies?.name || null,
       externalRef: detail?.external_ref || job?.metadata?.external_ref || job?.job_number || null,
     })
+    const packCc = requiredPackCcForReportRecipient(configuredReportRecipient)
     const recipientFailures = checkExactRecipientGate({
       configuredReportRecipient,
       to: recipientEmail,
-      cc: [MAKESAFE_CC], // the send hard-codes CC = ses@ only; assert it is exactly that
+      cc: packCc, // send hard-codes the same permanent set; assert exact match
     })
     if (recipientFailures.length > 0) {
       await _ensurePackRow(client, jobId, packKind)
@@ -38177,10 +38181,14 @@ async function makesafeSendPack(
           { contentBytes: authorisedPdfB64, name: invoicePdfName, contentType: 'application/pdf' },
           ...(swmsPdfB64 ? [{ contentBytes: swmsPdfB64, name: swmsFileName!, contentType: 'application/pdf' }] : []),
         ]
+    // Permanent pack CC set: AJS/AJBR = ses@ + vanessa@ + mandi@; others = ses@ only.
+    // recipientEmail has already passed the exact-recipient gate against report_recipient.
+    const packCcList = requiredPackCcForReportRecipient(recipientEmail)
+    const packCc = packCcList.join(', ')
     const gatePayload = {
       from: MAKESAFE_ADMIN_FROM,
       to: recipientEmail,
-      cc: MAKESAFE_CC,
+      cc: packCc,
       subject,
       htmlBody,
       attachments: attachments.map((a) => ({ name: a.name })),
@@ -38223,7 +38231,7 @@ async function makesafeSendPack(
       emailResp = await _sendEmail({
         from: MAKESAFE_ADMIN_FROM,
         to: recipientEmail,
-        cc: MAKESAFE_CC,
+        cc: packCc,
         subject,
         htmlBody,
         attachments,
@@ -38573,6 +38581,8 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
     }
 
     // ── Send email ──
+    // Same permanent pack CC set as the main pack (AJS: ses@+vanessa@+mandi@).
+    const photoPackCc = requiredPackCcForReportRecipient(recipientEmail).join(', ')
     emailAttempted = true
     const emailResp = await fetch(`${SUPABASE_URL}/functions/v1/send-outlook-email`, {
       method: 'POST',
@@ -38580,7 +38590,7 @@ async function makesafeSendPhotoFollowup(client: any, body: any) {
       body: JSON.stringify({
         from: MAKESAFE_ADMIN_FROM,
         to: recipientEmail,
-        cc: MAKESAFE_CC,
+        cc: photoPackCc,
         subject,
         htmlBody,
         attachments,

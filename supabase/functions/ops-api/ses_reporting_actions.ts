@@ -4612,7 +4612,8 @@ export async function executeSesReleaseRevisionAction(
       client,
       exactDocketRevisionIds,
     );
-    // Envelope check for AJS two-email shape: cc must include ses@, TO present.
+    // Envelope check for AJS two-email shape: cc must include the permanent pack
+    // set (ses@ + vanessa@ajs.build + mandi@ajs.build), TO present.
     // Filename-level client-send gates (report+invoice PDFs / photo images) are
     // applied when operators build the payload; at execute we only have content
     // hashes, so we enforce the sealed envelope facts that survive hashing.
@@ -4620,15 +4621,17 @@ export async function executeSesReleaseRevisionAction(
       const ccList = (Array.isArray(route.cc) ? route.cc : []).map((
         v: string,
       ) => String(v || "").trim().toLowerCase());
-      if (!ccList.includes(MAKESAFE_CC)) {
-        throw new SesActionError(
-          409,
-          sesRefusal(
-            "route_recipient_invalid",
-            `AJS pack routes must CC ${MAKESAFE_CC}; prepare a new release revision.`,
-            { evidence: { route_kind: kind, cc: ccList } },
-          ),
-        );
+      for (const required of ajsPackCc()) {
+        if (!ccList.includes(required)) {
+          throw new SesActionError(
+            409,
+            sesRefusal(
+              "route_recipient_invalid",
+              `AJS pack routes must CC ${required}; prepare a new release revision.`,
+              { evidence: { route_kind: kind, cc: ccList, required: ajsPackCc() } },
+            ),
+          );
+        }
       }
       if (
         (kind === "report_invoice" || kind === "report") &&
