@@ -4,6 +4,10 @@
 **Status:** investigation only. No production writes, no display built, no capture committed.
 **Scope:** read-only reads against production (Management API `read_only: true`, and one
 `GET ops-api?action=query_ses_review_cockpit` per card) plus in-repo and secureworks-ux source reads.
+**Companion:** `capture-write-path-gap.md` in this directory (2026-08-06, later the same
+day) records why the retake this report left pending could not be stored — the compliant
+script has no write path to the capture store — and carries the image-only-PDF measurement
+that supersedes any "blank capture" reading of the attached documents.
 
 The display work this investigation was opened for was **not** built here, for two reasons
 established below: the reviewer UI is in another repository (section 5), and the product
