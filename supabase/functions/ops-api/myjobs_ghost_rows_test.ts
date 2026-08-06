@@ -387,7 +387,10 @@ Deno.test("fencing manager Board feed excludes the ghost row", async () => {
     managerScope,
     TENANT_A,
   );
-  assertEquals(feedRows(grouped).map((a) => a.id).sort(), calendarVisibleIds(fx));
+  assertEquals(
+    feedRows(grouped).map((a) => a.id).sort(),
+    calendarVisibleIds(fx),
+  );
 });
 
 Deno.test("personal feed: the watcher's own ghost row is not their field work", async () => {
