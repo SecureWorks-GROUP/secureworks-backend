@@ -1,0 +1,15 @@
+[
+  {
+    "id": "71f64d51-58f4-426a-83fe-57bf800cfd9c",
+    "type": "makesafe_report",
+    "version": 4,
+    "file_name": "Make-Safe-Report-SWMS-261147-Mosman-Park-359775313575.pdf",
+    "makesafe_fact_version": 4,
+    "makesafe_content_hash": "sha256:9f32e2ccc91cf23ef82f75e6a7780155d19e1d81edad63b1839f089509bcae7a",
+    "superseded_at": null,
+    "cycle_attribution": "bound",
+    "bound_raw_sha256": "sha256:e8b2974f53d50d10ab3cb42c8abae50c8074e000a33f3984c08e0145ee4244d0",
+    "report_render_hash": "e8b2974f53d50d10ab3cb42c8abae50c8074e000a33f3984c08e0145ee4244d0",
+    "report_input_hash": "sha256:08a84e4abc659bf9b11e4d3c7ed46d360aa8c501d2adafb8a71b34f0618ee9d7"
+  }
+]

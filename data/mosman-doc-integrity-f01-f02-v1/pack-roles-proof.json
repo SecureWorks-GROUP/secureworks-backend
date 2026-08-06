@@ -1,0 +1,91 @@
+{
+  "blockers": [],
+  "suppressed_artifacts": [],
+  "invoice_pdf": {
+    "source": "live_fetch",
+    "pdf_unavailable": false,
+    "xero_invoice_id": "8f7687b0-effb-4522-aaf7-7b4148168d1e",
+    "invoice_number": "INV-1147"
+  },
+  "roles": [
+    {
+      "role": "assembler_envelope",
+      "n": 1
+    },
+    {
+      "role": "capability",
+      "n": 1
+    },
+    {
+      "role": "case_story",
+      "n": 1
+    },
+    {
+      "role": "completion_photo",
+      "n": 15
+    },
+    {
+      "role": "docket_manifest",
+      "n": 1
+    },
+    {
+      "role": "invoice_email_draft",
+      "n": 1
+    },
+    {
+      "role": "invoice_proposal",
+      "n": 1
+    },
+    {
+      "role": "photo_email_draft",
+      "n": 1
+    },
+    {
+      "role": "photo_selection",
+      "n": 1
+    },
+    {
+      "role": "release_payload",
+      "n": 1
+    },
+    {
+      "role": "report_email_draft",
+      "n": 1
+    },
+    {
+      "role": "review_html",
+      "n": 1
+    },
+    {
+      "role": "review_spec",
+      "n": 1
+    },
+    {
+      "role": "source_attachment",
+      "n": 1
+    },
+    {
+      "role": "supporting_report_pdf",
+      "n": 1
+    },
+    {
+      "role": "swms_artifact",
+      "n": 1
+    },
+    {
+      "role": "xero_invoice_pdf",
+      "n": 1
+    }
+  ],
+  "report": {
+    "object_key": "makesafe-docket-artifacts/762ebaad-5f6f-4477-acb7-30db016b15ea/68bd7247-0662-555d-b183-17e6c5e65e97/ARTIFACTS/Make-Safe-Report-SWMS-261147-Mosman-Park-359775313575.pdf",
+    "size_bytes": 2635527,
+    "raw_sha256": "sha256:e8b2974f53d50d10ab3cb42c8abae50c8074e000a33f3984c08e0145ee4244d0"
+  },
+  "swms": {
+    "object_key": "makesafe-docket-artifacts/762ebaad-5f6f-4477-acb7-30db016b15ea/68bd7247-0662-555d-b183-17e6c5e65e97/ARTIFACTS/SWMS - MLB-27482 - 33-37-Fairlight-Street-Mosman-Park-Mosman-Park.pdf",
+    "size_bytes": 919559,
+    "render_hash": "902ae11d40ef20736969fb4a875e4c49f9a9702bffeb60d508f6c0abbf8f5cb3",
+    "cycle": "b7edf9d8-6f68-4cc4-b12a-7aa20d3b070a"
+  }
+}

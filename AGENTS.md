@@ -745,6 +745,37 @@ pack, send or digest path selects on it. Evidence, the money proof, the trade
 open-pool consequence and the before/after parity run:
 `docs/evidence/ses-f4-report-intake-stage-2026-08-02.md`.
 
+## `makesafe_content_hash` Is A ROW Fact Hash, Never A File Byte Hash
+
+Despite the name and the `sha256:<64hex>` shape, this column is stamped by
+`stamp_makesafe_fact_identity_v1` (`20260728060000_makesafe_board_reconcile_truth_u2.sql`)
+over `to_jsonb(NEW)` minus `makesafe_fact_version` / `makesafe_content_hash` /
+`updated_at`, digested as `'SecureWorks:make-safe-fact:v1:<table>\n' || canonical_json`.
+It includes the row's own `id`, so it **cannot** equal the stored file's sha256 by
+construction. It pairs with `makesafe_fact_version` so `makesafe_state_compare.ts`
+and the board reconcile engine can tell whether a row changed. One BEFORE trigger
+serves six tables (`job_documents`, `job_media`, `job_service_reports`, …).
+
+A card's real byte-integrity coordinates live elsewhere and are what
+`inspectSesSupportingReportProof` / `sesSupportingReportDocumentBinding` enforce:
+`job_documents.data_snapshot_json.curated_source_expected_raw_sha256` /
+`report_render_hash`, and the docket artifact's `metadata.expected_raw_sha256` /
+`output_sha256`. Measured 2026-08-06: of the 31 curated-bound report rows,
+**0** have `makesafe_content_hash` equal to their bound byte hash. That is the
+whole population, not a defect — comparing the two produced one high-severity
+false "the integrity column is lying" finding on a live money card.
+
+Do not "repair" the column to a byte hash: the BEFORE trigger recomputes it on
+every write so it would not persist, and if it did it would corrupt the state
+comparator. Changing its meaning is a migration across all six tables.
+
+Known adjacent confusion, unfixed: `ses_mailer_ops_send.ts` reads
+`job_media.makesafe_content_hash` as a photo byte hash (falling back to
+`sesSha256Bytes` only when absent, which for make-safe media never happens), so the
+audited `content_hash` on a builder-facing attachment does not attest the bytes
+sent. It still uniquely keys each row, so no wrong attachment ships. Evidence:
+`data/mosman-doc-integrity-f01-f02-v1/report.md`.
+
 ## A DRAFT Invoice Never Closes A Card, And The Visible Ladder Has A Version
 
 `_makesafeInvoiceIsRaised` (AUTHORISED / SUBMITTED / PAID) is the invoice term of
