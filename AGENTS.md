@@ -452,6 +452,37 @@ advances only clean/high-confidence drafts through the same guarded approval
 function as the human review button. Explicit environment/database auto-file
 brakes remain, but advance-what-passes is the default.
 
+## Advancing A Clean Intake Draft Needs An Asker, Not Just An Authoriser
+
+Approving an intake draft creates a LIVE make-safe job. The privileged auth gate on
+`auto_approve_clean_intake_drafts` answers "may this caller approve?"; it does NOT
+answer "did anybody ask?". `ops.html` used to await that action on the board's render
+path (`triggered_by: 'ops_board_autoload'`), and because the dashboard holds the
+master ops key the gate was satisfied — so merely LOOKING at the board batch-approved
+drafts, and cost ~28.6s of the ~32s click-to-paint while it did.
+
+`makesafe_intake_advance_trigger.ts` is the additive intent gate: a live run must
+name a trigger on a closed allow-list (`ses-reporting-skill` scheduled,
+`ops_intake_review_sweep` explicit). A render-path, unnamed or unrecognised trigger
+still gets the FULL preview — same counts, same eligibility, same clean evidence —
+and approves nothing. It is fail-safe on purpose: "I could not tell who asked" must
+resolve to a preview, never a run. `ops_board_autoload` is refused BY NAME so a stale
+cached client is diagnosable, and so the fix does not depend on the dashboard
+deploying. Do not weaken the separate privileged gate, and do not add a name to that
+allow-list for anything reached by rendering a page.
+
+Removing the board trigger left no gap: `scanSesMakesafes` (`makesafe-ses-poll`, every
+2 minutes) advances each run's own drafts, `scanFreshMakesafeSource` covers a late
+PDF, and `makesafe_reporting_intake_pass` already owns the BACKLOG re-sweep — the
+board was a redundant third caller of that same batch. Do not hang the backlog sweep
+off `makesafe-ses-poll` instead; that path runs under a 5-second `pg_net` deadline.
+
+Measured 2026-08-06 and worth knowing before diagnosing this batch: all 51 reviewable
+drafts already carry a live card on the same `external_ref`, so 48 pass the clean gate
+and every one is then refused by `approveIntakeDraft`'s duplicate/identity guards. A
+slow sweep is that, not a slow query. History, the shape argument and the before/after:
+`docs/evidence/ses-board-autoload-decouple-2026-08-06.md`.
+
 ## Make-safe Scheduled Scan Completion Boundary
 
 `makesafe-ses-poll` is called by `pg_net` with a 5-second request deadline, but a
