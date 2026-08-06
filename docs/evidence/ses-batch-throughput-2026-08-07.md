@@ -43,7 +43,9 @@ contains at least ten deterministic refusals that fire **before a single Xero ca
 sealed money fence, `assertSealedSesInvoiceCreateIsUnique`,
 `assertNoSyntheticLivefireJobs`, `assertMakesafePortalVerifiedForDraftInvoice`,
 `assertMakesafeReportInForInvoice`, `preflightInvoiceCreation`, missing line items, missing
-contact, the report-charge check — plus any Xero non-2xx, including a 429.
+contact, the report-charge check — plus any Xero non-2xx. A 429 was one of those until the
+§8 fix, which now retries a short one on the keyed writes; an un-keyed 429, or one whose
+`Retry-After` overruns the bounded backoff, still throws and still lands here.
 
 Every one of those is a case where the invoice **definitively does not exist**. All of them
 are recorded as "outcome unknown, reconcile Xero, do not create another invoice."
@@ -442,11 +444,21 @@ writes here are not merely unproven — they are the ones that must never repeat
 still throws on the first response, exactly as before. Retries are bounded at 3 and honour
 `Retry-After`.
 
+The backoff is bounded in both directions, for the same poisoning reason: sleeping an
+arbitrary `Retry-After` inside the dispatch means an isolate that dies mid-sleep leaves the
+effect row in `dispatching` with no failure message at all. Only the 60-per-minute window
+is worth waiting out and it clears in seconds, so each sleep is capped at 5 s
+(`XERO_POST_RETRY_SLEEP_CEILING_MS`) and the chain at a cumulative 15 s
+(`XERO_POST_RETRY_SLEEP_BUDGET_MS`). A `Retry-After` above the per-sleep ceiling, or one
+that would overrun the budget, throws at once — the pre-change behaviour, which is the
+honest outcome for a daily-limit or concurrency 429.
+
 Tests: `xero_post_rate_limit_retry_test.ts` — drives the real `xeroPost` through a stubbed
-`globalThis.fetch` (no network, no Xero) and pins all five directions: keyed retry
+`globalThis.fetch` (no network, no Xero) and pins all seven directions: keyed retry
 succeeds carrying the same key, retries bounded at 3, un-keyed 429 never repeats, a 400
-validation failure is not retried and keeps its message, and a clean success makes exactly
-one call.
+validation failure is not retried and keeps its message, a long `Retry-After` throws at
+once without sleeping, each sleep is clamped and the chain stays inside the budget, and a
+clean success makes exactly one call.
 
 ### Named, not fixed
 

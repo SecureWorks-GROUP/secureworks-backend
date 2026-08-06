@@ -283,7 +283,9 @@ Deno.test("keyed write: each sleep is clamped and the chain stays inside the bud
   );
   assert(
     delays.reduce((a, b) => a + b, 0) <= 15_000,
-    `cumulative backoff must stay inside the 15s budget, got: ${delays.join(",")}`,
+    `cumulative backoff must stay inside the 15s budget, got: ${
+      delays.join(",")
+    }`,
   );
 });
 
