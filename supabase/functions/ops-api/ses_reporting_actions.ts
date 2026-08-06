@@ -47,6 +47,8 @@ import {
   ajsPackCc,
   ajsPackRecipients,
   isAjsBuilderKey,
+  mlbPhysicalRouteRecipients,
+  mlbPrimeMailerRouteCarriesInvoice,
   sesReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import {
@@ -561,6 +563,16 @@ export function resolveDocketRoutes(
     const shape = { builder_key: builderKey, family };
     if (!isMlbPhysicalReleaseShape(shape)) return resolvedRoutes;
     const thread = routingIntakeThread(routing);
+    // Captain 2026-08-06: the three destinations are SET here, not inherited
+    // from the stored draft's To: header. mlbPhysicalRouteRecipients is the one
+    // producer (prepare writes the same values into the draft), so the cockpit
+    // tab, the persisted release route and the send can never disagree — and a
+    // revision drafted before this ruling resolves to the correct addresses
+    // without a re-prepare. The billing mailbox stays the sealed matrix value
+    // that the envelope already declares (Perth makesafes@ / south-west bunbury@).
+    const billingMailbox = String(routing.invoice_to || "").trim();
+    const invoicePdfHash = String(invoicePdf?.content_hash || "").trim() ||
+      null;
     const ordinaryMailSend = options?.mlbOrdinaryMailSendFallback ??
       mlbPhysicalUsesOrdinaryMailSendFallback();
     const originalSubject = String(
@@ -577,9 +589,28 @@ export function resolveDocketRoutes(
         originalSubjectSourceRaw === "job_metadata_builder_email_subject"
         ? originalSubjectSourceRaw
         : null;
-    return resolvedRoutes.map((route) =>
-      applyMlbThreadReplyToRoute(
-        route,
+    return resolvedRoutes.map((route) => {
+      const declared = mlbPhysicalRouteRecipients(
+        route.route_kind,
+        billingMailbox,
+      );
+      // A legacy envelope that declares no billing mailbox keeps whatever the
+      // draft addressed the invoice to: emptying a money route is worse than
+      // leaving it as prepared, and assertSesRouteRecipients still guards it.
+      const recipients = declared.length > 0 ? declared : route.recipients;
+      const invoiceOnMailerRoute = mlbPrimeMailerRouteCarriesInvoice({
+        routeKind: route.route_kind,
+        attachmentHashes: route.attachment_hashes,
+        invoicePdfContentHash: invoicePdfHash,
+      });
+      return applyMlbThreadReplyToRoute(
+        {
+          ...route,
+          recipients,
+          // The Captain's boundary is absolute, so a Prime mailer route holding
+          // the invoice PDF is refused rather than silently stripped.
+          ready: route.ready && recipients.length > 0 && !invoiceOnMailerRoute,
+        },
         shape,
         thread,
         ordinaryMailSend,
@@ -589,8 +620,8 @@ export function resolveDocketRoutes(
             originalSubjectSource,
           }
           : null,
-      )
-    );
+      );
+    });
   }
 
   // AJS/AJBR two-email shape (skill backend release contract / Captain 2026-08-04):

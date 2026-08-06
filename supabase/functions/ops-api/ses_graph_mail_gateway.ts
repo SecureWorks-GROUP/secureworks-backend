@@ -40,6 +40,16 @@ export const AJS_WORK_ORDERS_MAILBOX = "workorders@ajs.build";
  */
 export const AJS_VANESSA_CC = "vanessa@ajs.build";
 export const AJS_MANDI_CC = "mandi@ajs.build";
+/**
+ * MLB's Prime (primeeco.tech) work-order mailer (Captain 2026-08-06).
+ *
+ * Destination for the MLB physical report and photo routes. It is a SEALED
+ * constant on purpose: `makesafe_companies.report_recipient` for MLB is the
+ * billing mailbox `makesafes@mlbuilders.com.au`, which is why inheriting it sent
+ * all three MLB emails to the same place, and `sender_patterns` is an INBOUND
+ * trust list that must never auto-select a destination (see ses_mailer_ops_send).
+ */
+export const MLB_PRIME_MAILER = "mlb.mailer@primeeco.tech";
 /** M365 group that hosts make-safe work-order intake threads (monitor-ses). */
 export const SES_INTAKE_GROUP_MAIL = "ses@secureworkswa.com.au";
 

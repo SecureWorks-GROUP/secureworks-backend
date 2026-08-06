@@ -31,13 +31,18 @@ import {
   type SesFamilyId,
   type SesFamilyMatrixRow,
 } from "./ses_family_matrix.ts";
-import { ajsPackCc, isAjsBuilderKey } from "./ses_release_route_shape.ts";
+import {
+  ajsPackCc,
+  isAjsBuilderKey,
+  mlbPhysicalRouteRecipients,
+} from "./ses_release_route_shape.ts";
 import {
   evaluateSesPhotoMailVolume,
   resolveSesMailTransportForPrepare,
   sesPhotoMailVolumeBlocker,
 } from "./ses_photo_mail_volume_guard.ts";
 import {
+  isMlbPhysicalReleaseShape,
   mlbOrdinaryMailSubject,
   mlbPhysicalUsesOrdinaryMailSendFallback,
 } from "./ses_mlb_thread_reply.ts";
@@ -1109,6 +1114,31 @@ const SPINE_MANIFEST_ITEMS = [
   "swms_requirement",
 ] as const satisfies readonly ManifestItem[];
 
+/**
+ * Declared destination for an MLB physical report/photo route, or null when the
+ * card is not on that shape (every other row keeps the work-order sender).
+ *
+ * One producer, three stores: this stamps the envelope, `buildEmailDrafts`
+ * addresses the draft, and `resolveDocketRoutes` sets the resolved route — all
+ * from `mlbPhysicalRouteRecipients`, so the operator's draft, the cockpit tab
+ * and the send agree by construction rather than by coincidence.
+ */
+function mlbPhysicalDeclaredRouting(
+  row: SesFamilyMatrixRow,
+  kind: "report" | "photo",
+): string | null {
+  if (
+    !isMlbPhysicalReleaseShape({
+      builder_key: row.builder_key,
+      family: row.family,
+    })
+  ) {
+    return null;
+  }
+  if (kind === "photo" && row.photo_route !== "work_order_sender") return null;
+  return mlbPhysicalRouteRecipients(kind, row.invoice_to).join(", ");
+}
+
 function routingBlocker(
   input: SesAssemblerInputV1,
   row: SesFamilyMatrixRow,
@@ -1415,12 +1445,19 @@ function manifestBase(
     },
     routing: {
       builder: input.classification.builder_label,
-      report_to: row.report_route === "work_order_sender"
-        ? input.source.work_order_sender || ""
-        : "",
-      photo_to: row.photo_route === "work_order_sender"
-        ? input.source.work_order_sender || ""
-        : "",
+      // MLB physical report/photo go to the sealed Prime mailer (Captain
+      // 2026-08-06), not to the company work-order sender — which for MLB is
+      // the billing mailbox and is why all three emails used to land there.
+      // Declared here from the same producer the drafts and the resolved routes
+      // use, so the envelope, the draft and the send state one address.
+      report_to: mlbPhysicalDeclaredRouting(row, "report") ??
+        (row.report_route === "work_order_sender"
+          ? input.source.work_order_sender || ""
+          : ""),
+      photo_to: mlbPhysicalDeclaredRouting(row, "photo") ??
+        (row.photo_route === "work_order_sender"
+          ? input.source.work_order_sender || ""
+          : ""),
       invoice_to: row.invoice_to || "",
       // Intake-thread coordinates for MLB physical report/photo reply.
       // Two-tier authority (never internet_message_id): makesafe_intake_case_sources
@@ -1650,12 +1687,22 @@ function buildEmailDrafts(
     return drafts;
   }
 
-  const mlbPhysical = row.builder_key === "MLB" && (
-    row.family === "physical_makesafe" ||
-    row.family === "temporary_fencing" ||
-    row.family === "repair" ||
-    row.family === "restoration"
-  );
+  // Same family set the release shape and the envelope routing use — declared
+  // once in ses_mlb_thread_reply so the three producers cannot drift apart.
+  const mlbPhysical = isMlbPhysicalReleaseShape({
+    builder_key: row.builder_key,
+    family: row.family,
+  });
+
+  // Captain 2026-08-06: MLB physical report and photo go to the Prime mailer;
+  // only the billing pack goes to makesafes@. Both destinations come from the
+  // one producer that resolveDocketRoutes uses, so the draft the operator reads
+  // and the route that actually sends state the same address. Other builders on
+  // the universal split (and MLB report-only families) keep the work-order
+  // sender from makesafe_companies.report_recipient.
+  const reportPhotoTo = mlbPhysical
+    ? mlbPhysicalRouteRecipients("report", invoiceTo).join(", ")
+    : reportTo;
 
   // MLB ordinary Mail.Send (Captain exception): report/photo use the EXACT
   // original WO email subject so mail clients can group them next to the WO.
@@ -1698,7 +1745,7 @@ function buildEmailDrafts(
   const drafts: Record<string, string> = { INVOICE_EMAIL_DRAFT: invoice };
   if (reportFile) {
     drafts.REPORT_EMAIL_DRAFT = draftEmail({
-      to: reportTo,
+      to: reportPhotoTo,
       subject: reportSubject,
       body: mlbPhysical
         ? ordinaryMailSubjectMatch
@@ -1719,7 +1766,7 @@ function buildEmailDrafts(
   }
   if (row.photo_route === "work_order_sender" && photoFiles.length > 0) {
     drafts.PHOTO_EMAIL_DRAFT = draftEmail({
-      to: reportTo,
+      to: reportPhotoTo,
       subject: photoSubject,
       body: mlbPhysical
         ? ordinaryMailSubjectMatch

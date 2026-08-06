@@ -18,6 +18,7 @@ import {
 } from "./ses_mlb_thread_reply.ts";
 import {
   isAjsBuilderKey,
+  MLB_PRIME_MAILER,
   SES_AJS_ROUTE_ORDER,
   SES_UNIVERSAL_ROUTE_ORDER,
   sesReleaseRouteOrder,
@@ -878,6 +879,12 @@ Deno.test(
     assertEquals(report.subject, "MLB-PO-54000 - physical makesafe");
     assertEquals(report.attachment_hashes, ["report-hash"]);
     assertEquals(report.cc || [], []);
+    // Captain 2026-08-06: report goes to the Prime mailer, report only. The
+    // fixture drafts address site.manager@mlb.example, so this also proves the
+    // resolved route is SET here rather than inherited from a stale draft.
+    assertEquals(report.recipients, [MLB_PRIME_MAILER]);
+    assertEquals(report.attachment_hashes.includes("xero-hash"), false);
+    assertEquals(report.attachment_hashes.includes("swms-hash"), false);
 
     const photo = routes.find((r) => r.route_kind === "photo")!;
     assertEquals(photo.ready, true);
@@ -889,11 +896,16 @@ Deno.test(
     );
     assertEquals((photo as any).subject_source, "generated_fallback");
     assertEquals(photo.attachment_hashes, ["photo-hash-1"]);
+    // Photos only, to the Prime mailer — no report, no invoice.
+    assertEquals(photo.recipients, [MLB_PRIME_MAILER]);
+    assertEquals(photo.attachment_hashes.includes("xero-hash"), false);
+    assertEquals(photo.attachment_hashes.includes("report-hash"), false);
 
     const invoice = routes.find((r) => r.route_kind === "invoice")!;
     assertEquals(invoice.ready, true);
     assertEquals(invoice.requires_thread_reply, false);
-    assertEquals(invoice.recipients[0], "makesafes@mlbuilders.com.au");
+    assertEquals(invoice.recipients, ["makesafes@mlbuilders.com.au"]);
+    assertEquals(invoice.recipients.includes(MLB_PRIME_MAILER), false);
     assertEquals(invoice.cc, [MAKESAFE_FINANCE_CC]);
     // Billing pack: AUTHORISED invoice + report + SWMS support.
     assertEquals(invoice.attachment_hashes.includes("xero-hash"), true);
@@ -1139,3 +1151,109 @@ Deno.test("routingIntakeThread reads envelope routing fields", () => {
   );
   assertEquals(routingIntakeThread({ report_to: "x@y.com" }), null);
 });
+
+Deno.test(
+  "MLB physical resolves the Captain's three-destination shape from one card",
+  () => {
+    // Wiring proof only: the mail gateway is mocked throughout this suite, so a
+    // green result proves the routes RESOLVE this way, never that a message
+    // reached makesafes@ or the Prime mailer.
+    const routes = resolveDocketRoutes(
+      mlbPhysicalDocket("thread-intake-1", {
+        intake_email_subject: MAYLANDS_WO_SUBJECT,
+        intake_email_subject_source: "emails_subject",
+      }),
+      MLB_ARTIFACTS,
+      null,
+    );
+    const shape = routes.map((route) => ({
+      route_kind: route.route_kind,
+      recipients: route.recipients,
+      attachments: [...route.attachment_hashes].sort(),
+    }));
+    assertEquals(shape, [
+      {
+        route_kind: "report",
+        recipients: [MLB_PRIME_MAILER],
+        attachments: ["report-hash"],
+      },
+      {
+        route_kind: "photo",
+        recipients: [MLB_PRIME_MAILER],
+        attachments: ["photo-hash-1"],
+      },
+      {
+        // Route 1 of the ruling: invoice + SWMS + report together.
+        route_kind: "invoice",
+        recipients: ["makesafes@mlbuilders.com.au"],
+        attachments: ["report-hash", "swms-hash", "xero-hash"],
+      },
+    ]);
+    // Route 2 still carries the verbatim work-order subject (PR 591 path).
+    assertEquals(
+      routes.find((r) => r.route_kind === "report")!.subject,
+      MAYLANDS_WO_SUBJECT,
+    );
+  },
+);
+
+Deno.test(
+  "MLB destinations are the same under the locked group-thread shape",
+  () => {
+    // Flipping MLB_PHYSICAL_ORDINARY_MAIL_SEND_FALLBACK_V1 back must not move
+    // the recipients — the transport exception and the destinations are
+    // independent decisions.
+    const routes = resolveDocketRoutes(
+      mlbPhysicalDocket("thread-intake-1"),
+      MLB_ARTIFACTS,
+      null,
+      { mlbOrdinaryMailSendFallback: false },
+    );
+    assertEquals(
+      routes.find((r) => r.route_kind === "report")!.recipients,
+      [MLB_PRIME_MAILER],
+    );
+    assertEquals(
+      routes.find((r) => r.route_kind === "photo")!.recipients,
+      [MLB_PRIME_MAILER],
+    );
+    assertEquals(
+      routes.find((r) => r.route_kind === "invoice")!.recipients,
+      ["makesafes@mlbuilders.com.au"],
+    );
+  },
+);
+
+Deno.test(
+  "MLB report-only families keep the legacy work-order-sender destination",
+  () => {
+    // The Captain's ruling is about the MLB make-safe send. A roof/assessment
+    // report-only card is not on the physical release shape and must not be
+    // silently re-pointed at the Prime mailer by this change.
+    const docket = mlbPhysicalDocket("thread-intake-1");
+    docket.envelope.v2.classification.family = "ordinary_roof_portal";
+    const routes = resolveDocketRoutes(docket, MLB_ARTIFACTS, null);
+    assertEquals(
+      routes.find((r) => r.route_kind === "report")!.recipients,
+      ["site.manager@mlb.example"],
+    );
+  },
+);
+
+Deno.test(
+  "a legacy MLB envelope with no declared billing mailbox keeps its prepared invoice recipient",
+  () => {
+    const docket = mlbPhysicalDocket("thread-intake-1");
+    docket.envelope.v2.routing.invoice_to = "";
+    const routes = resolveDocketRoutes(docket, MLB_ARTIFACTS, null);
+    const invoice = routes.find((r) => r.route_kind === "invoice")!;
+    // Emptying a money route would be worse than leaving it as drafted.
+    assertEquals(invoice.recipients, ["makesafes@mlbuilders.com.au"]);
+    assertEquals(invoice.ready, true);
+    // The mailer routes are unaffected by the missing declaration.
+    assertEquals(
+      routes.find((r) => r.route_kind === "photo")!.recipients,
+      [MLB_PRIME_MAILER],
+    );
+  },
+);
