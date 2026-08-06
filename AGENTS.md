@@ -623,13 +623,37 @@ report-type jobs is the point). Full flow + action contract in
 
 ## The Ops Dash UI Lives In The `dashboard` Submodule
 
+**Read this before forming any theory about the gitlink: it is NOT the serving
+path, and bumping it deploys nothing.** The Ops Dash is served by GitHub Pages
+from `secureworks-ux`'s OWN `main`
+(`https://secureworks-group.github.io/secureworks-ux/ops.html`). This repo has no
+Pages site and no workflow that touches `dashboard`, so merged UX work reaches
+the Captain within ~3 minutes of merge with no action here. A stale pin can
+therefore never explain a missing UI fix, an unshipped cockpit change, or a slow
+board. Measure the served bytes before believing otherwise — a confident
+diagnosis was once built on this gitlink plus a commit count, and the Captain was
+told his cockpit was 29 commits stale when it was already current.
+
 `dashboard/` is a git SUBMODULE of `SecureWorks-GROUP/secureworks-ux` (see
 `.gitmodules`) — `ops.html`, `trade.html`, and their Playwright tests live THERE,
-not in this repo, and the pinned commit here is routinely far behind ux `main`.
-For any Ops Dash / Trade App UI work: `git submodule update --init dashboard`,
-then branch the submodule off ITS `origin/main` (not the stale pin). UI changes
-ship as a secureworks-ux PR; this repo's gitlink is only bumped by occasional
-pointer chores — never point it at an unpushed commit.
+not in this repo, and the pinned commit here is routinely far behind ux `main`
+(harmlessly, per above). For any Ops Dash / Trade App UI work:
+`git submodule update --init dashboard`, then branch the submodule off ITS
+`origin/main` (not the stale pin). UI changes ship as a secureworks-ux PR; this
+repo's gitlink is only bumped by occasional pointer chores — never point it at an
+unpushed commit.
+
+Separate hygiene trap: the pin is a **DIVERGENCE, not a lag**. It sits on the
+HEAD of an UNMERGED ux branch, so `main` does not contain it and it carries
+commits `main` lacks — all of them superseded there, by strictly stronger
+implementations. `git log <pin>..main` reports a plain "behind" count and hides
+this; only `merge-base --is-ancestor` catches it, and it FAILS. It was
+deliberately NOT bumped (Captain, 2026-08-06): a bump is a divergence rather than
+a fast-forward, it would discard the superseded commits, and it changes no
+deployed artifact — a change delivering nothing to production was declined. If it
+is ever bumped, do it as a declared pointer chore and say in the PR that it ships
+no artifact. Evidence, timing proof and the measured 3.3-4.2s click-to-paint:
+`docs/evidence/dashboard-gitlink-is-not-the-serving-path-2026-08-06.md`.
 
 ## Production Edge Deploy Rule
 
