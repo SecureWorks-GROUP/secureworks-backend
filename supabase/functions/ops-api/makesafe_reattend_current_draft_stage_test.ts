@@ -192,6 +192,44 @@ Deno.test("a reattend card whose DRAFT predates the boundary stays out of Docs R
   const row = enrich(inv);
   assertEquals(row.board_stage, "trade_report_in");
   assertEquals(row.invoice_qualifies_as_current_draft, false);
+
+  // PRESENTATION, and the sharper half of this control. Widening presentation
+  // to a certified current-cycle DRAFT must NOT leak an earlier visit's money
+  // onto the card. A card showing a prior cycle's invoice as though it were
+  // this attendance's is worse than the blanking bug it replaced: the Captain
+  // would approve against a figure that does not belong to the work in front of
+  // him. The qualifier is the only gate, and it said `prior_cycle_commercial`,
+  // so all three fields stay null even though a DRAFT row exists and is linked.
+  assertEquals(row.invoice_raw_status, null);
+  assertEquals(row.invoice_date, null);
+  assertEquals(row.invoice_created_at, null);
+});
+
+Deno.test("prior-cycle money never reaches the Captain's approve list", () => {
+  // The approve control needs BOTH a Docs Ready placement and something to bind
+  // to. Pin the conjunction directly against every non-current invoice shape:
+  // no prior-cycle or non-DRAFT invoice may produce a card that is both placed
+  // for approval and presenting a figure. Asserting the two halves separately
+  // would let a future change satisfy each in a different test while a real card
+  // became approvable on an earlier visit's money.
+  for (
+    const [label, inv] of [
+      ["prior-cycle draft", invoice("DRAFT", BEFORE_BOUNDARY)],
+      ["prior-cycle authorised", invoice("AUTHORISED", BEFORE_BOUNDARY)],
+      ["authorised this cycle", invoice("AUTHORISED", AFTER_BOUNDARY)],
+      ["voided", invoice("VOIDED", AFTER_BOUNDARY)],
+    ] as const
+  ) {
+    const row = enrich(inv);
+    const approvable = row.board_stage === "report_ready" &&
+      row.invoice_raw_status != null;
+    assert(
+      !approvable,
+      `${label}: card became approvable on money the qualifier refused ` +
+        `(stage=${row.board_stage}, presented=${row.invoice_raw_status}, ` +
+        `reason=${row.invoice_draft_qualification_reason})`,
+    );
+  }
 });
 
 Deno.test("a reattend card with no invoice at all stays out of Docs Ready", () => {
