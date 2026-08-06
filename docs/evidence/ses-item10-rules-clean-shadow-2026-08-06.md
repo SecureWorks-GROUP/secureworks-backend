@@ -1,0 +1,361 @@
+# SES Item 10 — the rules-clean determination, and its first live shadow run
+
+**Date:** 2026-08-06
+**Ticket:** `secureworks-wiki` `coding/work/campaigns/makesafe-system/tickets/rescue-ses-remainder-v1/10-invoice-automation-auto-authorise.md`, plus `SPEC.md` Item 10
+**Status:** classifier built, guard suite green, **zero-write shadow run executed live across the board**. **No invoice was authorised, minted, voided, sent or re-priced.**
+
+---
+
+## 0. For the Captain — three things, no code required
+
+### One. Roof reports currently have NO guard that can refuse an overcharge
+
+The pricing guard that checks roof reports only ever asks *"is this at least $300?"* It never asks *"is this exactly $300?"* So on a roof card where $300 is the correct price, an invoice of **$350, $500 or $5,000 all come back CLEAN**. Not "unsure" — clean, the same word a correct invoice gets. Nothing else covers the gap: the other pricing checks either only want a positive total, or never look at a roof line at all.
+
+**This does not get more severe under automation. It changes character.**
+
+- **Today, with you at APPROVE INVOICE:** it is a robustness problem. The guard is blind, but **you read the number.** You are the check. An overcharge stops at your press.
+- **Under auto-authorisation:** it is a money problem. The invoice reaches **AUTHORISED in Xero with nobody looking**, and the pricing guard named on the rules-clean list says `clean` the entire way. There is no second look, because removing the second look is the whole feature.
+
+That is the clearest single argument for why **rules-clean carries the entire safety of this**. The guards are not a safety net under a human any more. They *are* the safety. A guard that cannot see the fault it exists to catch is not a small defect once you are no longer standing behind it — it is the only thing standing there.
+
+The automated class is covered: the new `B5_report_rate` compares against the sealed rate rather than a floor, and refuses in both directions. **The skill's own guard is not fixed** — that is a wiki change through the governed release path, and until it lands the skill's pre-create gate still cannot refuse a roof overcharge.
+
+### Two. One card is carrying a stale price right now, and only one thing is stopping it
+
+`SWMS-261079` has a saved pricing sheet that says **$350 ex** for a double-storey roof report. That number was correct when it was saved on 3 August. It was superseded by your 6 August ruling to $300. That card has **no override on it**, so unlike the other two roof cards, nothing has corrected it.
+
+The reason that is not a live overcharge waiting to happen is narrow and worth naming: **the classifier re-derives the price from the current sealed rule instead of trusting the number saved on the card.** It recalculates $300, sees $350, and parks the card.
+
+**This is a property to keep, not an implementation detail.** Someone will eventually be tempted to read the saved number directly — it is right there, it is faster, and it looks authoritative. It is not. A saved pricing sheet records what the rules said **then**; an invoice must be priced by what they say **now**. Every card prepared before a ruling is a card carrying a superseded price, and trusting the artifact is how one of them gets billed.
+
+### Three. The standing rule I broke tonight, and had to withdraw
+
+I told you production was still pricing double-storey roofs at $350. **That was wrong**, and it is withdrawn in §5a. Your live pricing is correct at $300.
+
+I got there by reading a saved database row and reporting it as *current deployed behaviour*. The row was seven hours older than the deploy. I never actually asked the deployment anything.
+
+The rule, which now sits in `AGENTS.md` where the next agent reads it before working rather than only here: **measure the deployed thing, or say you did not.** A claim about what production does must come from production, or from something produced after the deploy. Where neither is available — as here, because there is no roof card prepared since the deploy — the honest answer is "not observed", never a confident number.
+
+---
+
+## 1. What was built tonight, and what was deliberately not
+
+**Built:**
+
+| Artifact | What it is |
+|---|---|
+| `supabase/functions/ops-api/makesafe_invoice_rules_clean.ts` | The pure rules-clean determination. 16 guards in three closed families. No I/O. |
+| `supabase/functions/ops-api/makesafe_invoice_rules_clean_test.ts` | 26 tests: one per guard proving it can PARK the card and name itself, plus errors-park, the PO-suffix regression in both directions, and the no-send assertion. |
+| `scripts/ses-rules-clean-shadow.ts` | The dry-run mode. Read-only, Management API `read_only:true` only, no ops-api action called at all. |
+| `scripts/ses-rules-clean-shadow-2026-08-06.json` | The run's per-card verdict manifest, generation `4cc87f37d6acd41b…` (content-derived; a rerun over unchanged state reproduces it). |
+
+**Deliberately NOT built:** the wiring that makes `approve_ses_invoice_revision` / `execute_ses_invoice_revision` reachable by the skill. See §8 — it needs a migration, and the ticket's D5 gate has not been answered. Nothing shipped tonight changes any behaviour the Captain will meet tomorrow: the classifier is a new module with no call site in `ops-api`, and the shadow is a script. **The skill runs tomorrow exactly as it runs today.**
+
+---
+
+## 2. The thing the ticket asked to be verified in code first
+
+> "The ticket's rehearsability conclusion was read from the spec rather than the code… **Check that in the code yourself.** If preparing persists anything, 'zero writes' is not free."
+
+**`prepare_ses_invoice_obligation` PERSISTS. Confirmed in code, not inferred.**
+
+`prepareSesInvoiceObligationAction` (`supabase/functions/ops-api/ses_reporting_actions.ts`) ends with:
+
+```ts
+const committed = await client.rpc(
+  "commit_ses_invoice_obligation_revision_v1",
+  { p_obligation: prepared.obligation, p_revision: prepared.revision },
+);
+```
+
+It takes **no `dry_run` parameter** and has no non-persisting branch. Preparing writes an obligation row and a revision row every time. So "prepare it and look at what comes back" is a write to the money ledger, not a rehearsal.
+
+**Consequence, and it shaped the whole harness:** the shadow classifies from the **already-persisted docket revision** instead. That is sound rather than a compromise — `prepare` copies `local_invoice_proposal.line_items` **verbatim** into the obligation lines (same file, the `ObligationLine` map), so the money a prepare would produce is already sitting on the docket. Nothing needed to be prepared to see it.
+
+Two other paths were checked for the same reason:
+
+- `prepare_ses_docket_revision` with `dry_run: true` **does** skip persistence (`if (!request.dry_run)` guards the `deps.persist` call). It was still not used — the persisted docket answers the question and needs no call at all.
+- `resolve_ses_invoice_duplicates` is a pure read plus a pure resolver. Also not called: the shadow runs the same pure resolver locally over rows it read itself.
+
+**Total writes performed by tonight's run: zero.** The only production access was `POST /database/query` with `read_only: true`, which the database itself enforces, behind two client-side refusals (`assertReadOnlySql`, `assertNoPiiColumns`).
+
+---
+
+## 3. The guard families that define rules-clean
+
+This list **is** the definition. An invoice is rules-clean only if every guard is evaluated and every one returns `clean`. There are three outcomes, never two — `clean`, `flagged`, `unevaluable` — and **`unevaluable` parks**. There is no branch in the module that turns "I could not tell" into "clean".
+
+### A. Identity and duplication — "does this work already have an invoice?"
+
+| Guard | What it asks |
+|---|---|
+| `A1_duplicate_resolver_all_tiers` | The five-tier resolver (`obligation_binding`, `job_id`, `reference`, `reference_substring`, `reference_po_base`) returns no live match. |
+| `A2_ambiguity_is_refusal` | `multi_live`, `sibling_po`, `void_only`, `mirror_xero_mismatch` each REFUSE. A probe that records an ambiguity **and** `allows_create: true` — the exact Koondoola combination — parks. |
+| `A3_builder_reference_present` | A non-empty canonical builder reference. The reference tiers are inert without one. |
+| `A4_full_accrec_scan` | The full live-ACCREC estate scan (`resolveExistingInvoice`, the same resolver the mint runs) found nothing. The indexed probe answers a narrower question and **cannot stand in for it**. |
+| `A5_subject_invoice_is_our_current_draft` | **Added by this work; not on the ticket's list.** See §6. |
+
+### B. Pricing — "is this money derived from sealed rules?"
+
+| Guard | What it asks |
+|---|---|
+| `B1_pricing_basis_sealed` | The basis has a sealed derivation in this module. An unmodelled basis is `unevaluable`, not clean. |
+| `B2_sealed_line_derivation` | **The whitelist.** Every priced line reproduces exactly the line the sealed law derives from the card's own declared facts — wording, quantity and rate. |
+| `B3_company_labour_schedule` | Labour at the sealed rate ($80 ex AJS/AJBR, $85 ex MLB) per trade-hour. |
+| `B4_attendance_hours_floor` | Billable hours at or above the sealed floor, and the declared floor IS the sealed one. |
+| `B5_report_rate` | Roof $250 ex single / $300 ex double; assessment $150 ex ($130 fence-only). |
+| `B6_nonzero` | At least one line, no negative unit price, positive ex-GST total. |
+| `B7_no_hand_pricing` | No rate override, commercial quantity override, or operator materials-charge decision. |
+| `B8_materials_rate_card_sealed` | No materials-bearing line. Item 08 has not sealed a rate card, so no guard can check the figure. |
+
+### C. Evidence and readiness — "is the pack real?"
+
+| Guard | What it asks |
+|---|---|
+| `C1_docket_ready_zero_blockers` | A persisted `pre_xero` docket, `state: ready`, zero blockers, `pre_xero_docs_ready`. |
+| `C2_docket_bound_to_this_card_and_cycle` | That docket belongs to THIS job and covers its current attendance cycle. |
+| `C3_report_evidence_floor` | The report evidence is **independently** proven, not self-vouched. This is where the two open readiness gaps are excluded by name. |
+
+### Why B is a whitelist and not a checklist
+
+`deriveSealedProposal` re-derives the exact line set the sealed law would have produced, and B2 requires equality. A blacklist can only catch fault shapes someone anticipated. This refuses **every** shape that is not the one sealed shape — so an unmodelled fault is a mismatch, and a mismatch parks. That is the structural answer to "a fault class absent from the shadow window", and it is why the tests include an unmodelled `site allowance` line and a hand-edited builder-facing wording, neither of which any named guard describes.
+
+### The divergence rule
+
+The classifier is a **subtractive gate, never a pricing authority**. If it and the skill's Python guards disagree, the correct resolution is **the one that parks more**. Widening it to admit a card the Python guards would refuse is a money-safety defect; narrowing it so a card parks unnecessarily costs one Captain press.
+
+---
+
+## 4. The live shadow run
+
+Read-only, 8 queries, 2026-08-06. Denominator: `ses-board-population/active-v1` — **not the whole board**, Captain decision C.5 is open and the ~33 cancelled cards sit outside it.
+
+```
+Cards classified                420
+Live ACCREC rows scanned        930  (the full estate, per card)
+Writes performed                  0
+
+Verdicts
+  rules_clean                     0
+  parks                         420
+
+Determination point
+  pre_mint                      417
+  authorise                       3   (card carries exactly one own DRAFT)
+
+First parking guard — the one the card would name
+  A1_duplicate_resolver_all_tiers   229
+  A3_builder_reference_present      183
+  A2_ambiguity_is_refusal             4
+  C3_report_evidence_floor            3
+  B2_sealed_line_derivation           1
+
+Per-guard non-clean                    flagged / unevaluable
+  A1_duplicate_resolver_all_tiers          229 /   0
+  A2_ambiguity_is_refusal                    4 /   0
+  A3_builder_reference_present             366 /   0
+  A4_full_accrec_scan                      229 /   0
+  A5_subject_invoice_is_our_current_draft    0 /   0
+  B1_pricing_basis_sealed                    0 / 366
+  B2_sealed_line_derivation                  1 / 366
+  B3_company_labour_schedule                 0 / 366
+  B4_attendance_hours_floor                  0 / 366
+  B5_report_rate                             1 / 366
+  B6_nonzero                                 0 / 366
+  B7_no_hand_pricing                         7 / 366
+  B8_materials_rate_card_sealed              5 / 366
+  C1_docket_ready_zero_blockers             15 / 366
+  C2_docket_bound_to_this_card_and_cycle     1 / 366
+  C3_report_evidence_floor                  26 / 366
+```
+
+**Reading the 366.** 366 of 420 cards have no persisted docket revision at all, so every pricing and readiness guard is `unevaluable` on them and they park. That is not a defect — a card with no pack is not a candidate for an invoice, let alone an automated one. The population that can be meaningfully classified is the **54 cards with a docket**, and of those 39 are `pre_xero` / `ready`.
+
+**Zero rules-clean tonight, and the reason is not the classifier.** Of the 54 docket cards, 28 clear the evidence floor (C3) — and **all 28 already carry a live invoice**, so A1 correctly refuses. The un-invoiced cards are the ones whose report evidence is not independently proven. The board tonight simply has no card that is both un-invoiced and evidence-clean. See §7 for what the closest card needs.
+
+---
+
+## 5. Three money-safety findings from the run
+
+### F1 — the roof branch of `check_report_rate_spec` is one-sided, so it cannot catch an overcharge
+
+> **Correction, 2026-08-06.** An earlier version of this finding claimed *"the deployed ops-api still derives $350 ex / $385 inc"*. **That claim was wrong and is withdrawn.** Production is on `cb1deee`, which contains the pricing commit `312bc04` as an ancestor and reads `double: { ex_gst: 300, inc_gst: 330 }`. The correction and how the error was made are in §5a. The guard-blindness half below is unaffected — it never depended on the backend figure — and it is the finding that stands.
+
+`check_report_rate_spec` compares a roof invoice **one-sidedly**:
+
+```python
+if expected is not None and ex + 0.01 < expected:      # roof: FLOOR only
+...
+if not any(abs(ex - v) < 0.01 for v in (ASSESSMENT_EX, ASSESSMENT_FENCE_ONLY_EX)):   # assessment: EQUALITY
+```
+
+The assessment branch tests equality and catches both directions. **The roof branch tests only a floor.** On a card where $300 ex is the correct sealed price, a roof invoice of $350, $500 or $5,000 all return **clean**, at any magnitude. And nothing else on the rules-clean list covers the gap: `check_nonzero_spec` only wants a positive total, and `check_company_labour_schedule_spec` never sees a roof line at all (`"Double Storey roof report"` matches none of its labour/attendance/trade patterns).
+
+So the roof class has, today, **no guard that can refuse an overcharge.**
+
+Under a human at APPROVE INVOICE that is a robustness problem: he reads the number. Under auto-authorisation it is a money problem — an over-priced roof invoice would reach AUTHORISED in Xero with nobody looking, and the pricing guard the rules-clean list names would say `clean` the whole way. **A blind guard reports clean.** That is the exact class of fault this item exists to survive, present right now, in a guard on the list.
+
+`B5_report_rate` closes it for the automated class by comparing against the sealed rate rather than a floor. The suite pins it in **both** directions: $350 against a sealed $300 parks, and $300 classifies clean.
+
+**Action:** this is a wiki-skill change (`makesafe_invoice_guards.py`, roof branch to equality), through the governed release path. Not made here — this repo does not own that file. Until it lands, the skill's own pre-create gate remains unable to refuse a roof overcharge even though the automated class now can.
+
+### F1a — separately, a persisted docket can carry a superseded price
+
+Three double-storey roof dockets carry $350 ex: `SWMS-261114` and `SWMS-261081` (committed 04:16–04:17Z on 2026-08-06) and `SWMS-261079` (committed 2026-08-03). All three **predate** the 11:36Z pricing deploy, so they are pre-ruling fossils, not evidence about the current backend.
+
+The first two were resolved the same morning: each carries a Captain `labour_rate_override` on its obligation taking it $350 → $300, and both minted drafts (`INV-1149`, `INV-1150`) are $300 ex / $330 inc. The wiki's own pricing reference records that both "stand and need no remint". `SWMS-261079` has no obligation and no override, so its stale $350 docket is still the live artifact; a re-prepare on the current backend would produce $300.
+
+The classifier handles all three correctly, and for the right reason: `B2`/`B5` **re-derive** from the current sealed constant rather than trusting the persisted artifact, so a stale docket flags instead of passing. `SWMS-261114` and `SWMS-261081` additionally park on `B7_no_hand_pricing` because of the override. This is a property worth keeping: a persisted proposal is a record of what the rules said *then*, and auto-authorisation must price against what they say *now*.
+
+### F2 — one roof card's only portal proof is a synthetic observation card
+
+Of the seven `verified` rows in `makesafe_portal_capture_revisions`, one (`SWMS-261081`, the card carrying live DRAFT INV-1150) was captured by `ses-prime-portal-observer/2026-08-02.4`. That is the in-repo F7 observer, which `installSafeCaptureFrame` covers with an opaque frame before every capture, so its images carry **no portal form fields at all**. It writes under the same approved `capture_producer` contract name as the compliant skill script, so `capture_producer` alone cannot tell them apart — only `captured_by` can.
+
+Five of the remaining six carry `screenshot_content_hash = source_content_hash`, which is impossible for two different artifacts and means the caller-supplied page-text coordinate is corrupted (the documented live defect). The screenshot hash is server-computed and sound; the **textual** basis of the capture's verdict is not re-verifiable on those rows.
+
+`C3` encodes both: a portal capture counts only when a real producer looked at the real page **and** the page-text coordinate is re-verifiable. All five roof portal cards are excluded tonight on one or the other.
+
+### 5a — the withdrawn claim, and the check that would have caught it
+
+Kept visible rather than edited away, because the mistake generalises and this repo has made it before.
+
+**What I claimed:** "The deployed ops-api still derives $350 ex / $385 inc."
+
+**What is true:** production is on `cb1deee`, deployed 11:36Z. `312bc04` (*"double-storey roof report price is $300 ex / $330 inc"*, PR #618) is an **ancestor** of it — verified with `git merge-base --is-ancestor`, not by reading a commit list — and `ROOF_REPORT_PRICING` on that tree reads `double: { ex_gst: 300, inc_gst: 330 }`. The deployed backend prices double-storey roof at $300 ex. **The Captain's live pricing is correct.**
+
+**How the error was made, precisely.** I never queried the deployment. I read `sealed_unit_price_ex_gst: 350` out of **persisted obligation rows** and reported it as current deployed behaviour. Those rows were written at 04:16–04:17Z, **seven hours before** the 11:36Z deploy: they are a true record of what the backend derived *that morning*, which is exactly why the Captain had to apply per-card overrides to reach $300. Extrapolating a stored artifact to "still derives" turned a historical fact into a false live one.
+
+Two things worth being exact about, because both are tempting excuses and neither holds:
+
+- **It was not a too-early sample.** My shadow ran at 16:02Z, four and a half hours *after* the deploy. Run timing was never the issue — I was reading stored rows, so my own clock was irrelevant. What I failed to check was the **artifacts'** timestamps against the deploy.
+- **It was not the wiki guard's copy either.** `makesafe_invoice_guards.py` reads `ROOF_REPORT_DOUBLE_EX = 300.0` in **both** clones, including the governed runtime pinned at `secureai-team-v1.0.4`. The wiki guard's *value* is right; only its *comparison* is one-sided, which is F1.
+
+**The check that would have caught it, and which is now the standing rule:** a claim about deployed behaviour must be answered by the deployment — or, where the action is not reachable (`roof_report_template` is trade-authenticated and returned 401 to the ops key), by an artifact produced **after** the deploy. There is no post-deploy roof docket at all, so the correct honest statement was always *"the deployed roof price has not been observed"*, not *"it still derives $350"*.
+
+This is the same shape as the incident recorded in `AGENTS.md` under the dashboard gitlink: a confident diagnosis of production built from a stale local coordinate instead of a measurement. **Measure the deployed thing, or say you did not.**
+
+### F3 — the obligation's own `guard_result` is hardcoded empty, and must never be read as proof the guards ran
+
+`prepareSesInvoiceObligationAction` writes `guard_result: { hard_failures: [], warnings: [...] }` with `hard_failures` a **literal empty array**. A future reader treating that field as "the pricing guards ran and passed" would be reading a guard that never ran. The classifier deliberately does not consult it.
+
+---
+
+## 6. One guard was added beyond the ticket's list, and why
+
+`A5_subject_invoice_is_our_current_draft`.
+
+The shadow found the gap: "does this work already have an invoice?" has two different correct answers depending on **when** it is asked. Before the mint, any live money on the card is a duplicate. After the mint, the card's own DRAFT is on the card — and that DRAFT is the very thing being authorised, not a duplicate of it. A classifier that cannot tell those apart either refuses every post-mint card (useless) or waves a second invoice through (dangerous).
+
+So the evidence carries an explicit `subject_invoice`, the caller must exclude **exactly** that invoice from the duplicate question and nothing else, and A5 checks that what was excluded really is this card's own DRAFT bound to its own current obligation revision. An `AUTHORISED` subject parks. A DRAFT bound to someone else's obligation parks.
+
+The same finding forced a second correction: at the authorise point, family B reads the **bound obligation's** lines, not the docket's. A Captain rate override lives on the obligation and never touches the docket, so classifying the docket while authorising the obligation would check money nobody is about to bill. That is exactly the shape of the two live roof drafts, and it is why `B7_no_hand_pricing` flags 7 cards rather than 5.
+
+**This is a proposal to D5, not a decision.** The Captain's confirmation is what makes the list the definition; A5 is offered as an addition because it is strictly stricter.
+
+---
+
+## 7. The staged first fire
+
+**Card: `SWMS-261029` — MLB, `MLB-25147`, Midland. 2 trades × 5 hours at the sealed $85 = $850 ex / $935 inc.**
+
+**Why this one.** It is the **only** card on the live board that is clean across the whole of family A and the whole of family B:
+
+- duplicate resolver: no match on any of five tiers
+- full live-ACCREC scan across 930 rows: no invoice attributed to this work
+- builder reference present (`MLB-25147`)
+- sealed basis `standard_labour_materials`, sealed $85 rate, 2 trades × 5 hours = quantity 10, floor 3 and billable 5 both re-derive exactly
+- no materials line, no rate override, no commercial override, no materials-charge decision
+- docket `pre_xero` / `ready`, zero blockers, `pre_xero_docs_ready`, bound to this job and its current cycle
+
+**Its dry-run verdict tonight: `parks`, on exactly one guard.**
+
+```
+[flagged] C3_report_evidence_floor: The supporting report self-vouches its own
+completeness; an incomplete pack can pass the readiness read
+(tuart-self-vouch-completeness-gate-v1, docket-readiness-photo-completeness-v1),
+so this card class is excluded from automation.
+```
+
+Its current docket's `supporting_report_pdf` artifact carries only a `render_hash` — no `source_kind`, no `report_input_hash`, no `expected_raw_sha256` — and its two `makesafe_report` documents carry no curated coordinates and no attendance cycle.
+
+**What clears it, by the sanctioned route and no other:** `bind_current_cycle_curated_makesafe_report` on the current cycle, then `prepare_ses_docket_revision` (`dry_run` first to confirm `supporting_report_plan.metadata.mode == curated_report_artifact_recovery`, then `dry_run: false`). Both are routine skill steps the Captain already runs. Neither is a code change, and neither was performed tonight.
+
+**Honest caveat: $935 inc is not a small first fire.** It is simply the only candidate the board offers. If the Captain prefers a smaller blast radius, the correct move is to wait for a smaller card to reach the clean set rather than to relax a guard — and the shadow can be re-run at zero cost any time to see when one does.
+
+**Excluded by name from first-fire staging** (still classified, because the run is read-only): `SWMS-261025` Koondoola, `SWMS-26931` Clarkson, `SWMS-261018` West Perth, `SWMS-26845` Queens Park.
+
+### The classifier catches the incident card
+
+`SWMS-261025` (Koondoola, live DRAFT INV-1140, reference `MLB-27093`) parks on `A1_duplicate_resolver_all_tiers` **and** `A4_full_accrec_scan`, both flagged, against the already-authorised `MLB-27093PO-56481`. That is the double-bill this whole item is built around, refused by the determination, on live production data. It is the strongest single piece of evidence in this run that family A has eyes.
+
+---
+
+## 8. What still blocks switch-on
+
+**Gate 1 — D5, unanswered.** The Captain has ruled *that* the skill auto-approves. D5 is *when the definition is trustworthy enough*. §3 is the proposal; his confirmation makes it the definition. §6 adds one guard he has not seen.
+
+**Gate 2 — a migration, named here rather than made.** `approveSesInvoiceRevisionAction` refuses any caller that is not a JWT user (`operatorAuth.mode !== "jwt" || !auth.user`), and beneath it `record_ses_revision_approval_v1` requires an `operator_id` present and active on `ses_release_operators`, or `is_admin_owner`. **A skill caller has neither.** Making auto-authorisation reachable therefore needs a standing-authority branch in that RPC — a migration. Per the brief I stopped and named it instead of writing it. It is also the right sequencing: a migration lands before its matching `ops-api`, and tomorrow is a no-coding day.
+
+**Gate 3 — item 08.** No materials rate card exists, so `B8` parks every materials-bearing card. 5 cards flagged tonight.
+
+**Gate 4 — the two open readiness gaps.** Not closed. Their card classes are **excluded by name** in `C3`, which is the ticket's stated alternative. 26 cards flagged, 366 unevaluable.
+
+**Gate 5 — the agent-permission layer.** Untested tonight, because nothing tonight attempted a write. Still unproven for the mint sequence.
+
+---
+
+## 9. The residual — what the shadow run did NOT cover
+
+Stated plainly, because the ticket asks for it and because it is the honest limit of this proof.
+
+**What the shadow DID prove.** That the classifier, run against 420 real cards and the full 930-row live ACCREC estate, produces a verdict and a named reason for every one; that it refuses the live double-bill card on the tier that failed in the incident; that it refuses a superseded roof rate two other guards call clean; and that it never returned `rules_clean` on a card carrying live money.
+
+**What it did NOT and cannot prove:**
+
+1. **Fault classes absent from tonight's board.** The run only exercises the faults the 420 cards happen to carry. Concretely, **no live card exercised** `B1` (unmodelled basis), `B3` (off-schedule labour rate), `B4` (under-floor hours), `B6` (zero/negative invoice), or `A5` (wrong subject invoice) — every one of those is flagged 0 times in §4. Each is covered by a guard-specific unit test, which is a weaker proof than a live one: a test proves the guard fires on the shape **I** wrote, not on the shape production would produce.
+2. **The whitelist's coverage of the genuinely unimagined.** `B2` refuses anything that is not the sealed derivation, which is why an unanticipated fault parks. But that is an argument from construction, and construction arguments have been wrong before in this system.
+3. **The end-to-end path.** No mint, no approve, no authorise ran, so the acceptance check "a rules-clean card reaches AUTHORISED with no human press, and the audit row records the determination" **has still never executed**, exactly as the ticket recorded. Two earlier sessions were denied by the local permission classifier; this session did not attempt it, by instruction.
+4. **The audit row.** Designed (the verdict is the record: closed guard list, per-guard status, detail, contract version) but not written anywhere, because writing it needs the migration in §8.
+5. **The deployed classifier.** The module is in the repo and unreferenced by `ops-api`. It has never run inside an edge function.
+
+---
+
+## 10. Tier-2: first-live-proofs, each with its trigger
+
+| # | Proof | Trigger condition |
+|---|---|---|
+| L1 | **The supervised first fire.** One card, Captain informed before it happens, result verified in Xero, class opens only after. | Captain's morning check-in, **after** D5 is answered and the §8 migration has landed and deployed. Candidate `SWMS-261029`, once its C3 is cleared by the routine bind + re-prepare and the shadow is re-run to confirm the flip. |
+| L2 | **`rules_clean` is reachable on live data at all.** Tonight's run returned zero, so the clean branch has never fired on a real card. | Re-run `scripts/ses-rules-clean-shadow.ts` after any card clears its evidence floor. Zero cost, zero writes, any time. |
+| L3 | **The five never-flagged guards against real faults** (`B1`, `B3`, `B4`, `B6`, `A5`). | First live card that carries each shape. Until then they are unit-tested only, and §9.1 is the standing caveat. |
+| L4 | **The audit row answers "why was this authorised without me" per card.** | With the §8 migration, at the first authorisation. |
+| L5 | **The deployed classifier agrees with the local one.** Byte-for-byte the same module, but it has never executed in the edge runtime. | First deploy through the normal edge lane. |
+| L6 | **The roof branch of `check_report_rate_spec` refuses an overcharge (F1).** | The wiki-skill change to two-sided equality lands through the governed release path. Until then the skill's pre-create gate cannot refuse a roof overcharge, even though `B5` can. |
+| L7 | **The deployed backend is observed pricing a double-storey roof.** No post-deploy roof docket exists, so its roof price is currently unobserved rather than confirmed — see §5a. | First roof docket prepared after the 11:36Z deploy; expect $300 ex / $330 inc with no override. `SWMS-261079` is the obvious candidate, its docket being a pre-ruling $350 fossil. |
+
+---
+
+## 11. What must not change
+
+- **SEND IT stays the Captain's per-card hard press.** The determination carries `authorises_send: false` and a test asserts the serialised verdict names no route, recipient, send, mail or Graph marker at all.
+- The sealed money fence, the duplicate guard, the evidence checks and every send gate are **consumed** here, never adjusted. This work adds one pure module, one test file, one read-only script and one artifact, and modifies **no existing code file** — the only edit to an existing file is the `AGENTS.md` entry recording §2 and §5.
+- No board write. The classifier reads the board and touches nothing.
+- Voids stay out of scope entirely.
+
+---
+
+## 12. Reproducing this
+
+```bash
+# Read-only. Zero writes. Refuses non-SELECT and PII-naming SQL before sending.
+SUPABASE_ACCESS_TOKEN=... deno run --allow-env --allow-net --allow-read --allow-write \
+  scripts/ses-rules-clean-shadow.ts --json scripts/ses-rules-clean-shadow-2026-08-06.json
+
+# The guard suite.
+deno test --allow-env --allow-net=127.0.0.1 --allow-read \
+  supabase/functions/ops-api/makesafe_invoice_rules_clean_test.ts
+```
+
+The artifact's `generation.generation_id` is content-derived: a rerun over unchanged state reproduces it exactly, which is how a second reader independently verifies this run rather than trusting it. Verified twice tonight — `4cc87f37d6acd41b…` both times.
+
+**Suite impact:** `deno task test:ops-api` currently fails type-checking on a **pre-existing** error in `cp1_drag_reschedule_test.ts:466,508` (`assertStringIncludes(dup.reason, …)` where `dup.reason` is `string | undefined`), unrelated to this work and present on a clean tree. Run with `--no-check` to get a comparable number: **baseline 3647 passed / 24 failed; with this change 3673 passed / 24 failed** — exactly the 26 new tests, no regression. `deno check supabase/functions/ops-api/index.ts` stays clean.
