@@ -1,0 +1,50 @@
+                                                                   Invoice Date                SecureWorks Group Pty
+DRAFT INVOICE                                                      6 Aug 2026                  Ltd
+                                                                   Invoice Number              swwa@secureworkswa.co
+                aj                                                 INV-1141                    m.au
+                                                                   Reference                   15 Utah Gr
+                                                                   AJBR-70554                  JOONDALUP WA 6027
+                                                                                               AUSTRALIA
+                                                                   ABN
+                                                                   64 689 223 416
+
+
+
+
+Description                                             Quantity           Unit Price           GST        Amount AUD
+
+AJBR-70554 - make-safe attendance - 1 trade x 3 hours       3.00                  80.00         10%               240.00
+
+AJBR-70554 - Materials: Makesafe tarp                       1.00              110.00            10%               110.00
+
+AJBR-70554 - Materials: flashing tape                       1.00                  15.00         10%                 15.00
+
+                                                                                             Subtotal             365.00
+
+                                                                                  TOTAL GST 10%                     36.50
+
+                                                                                          TOTAL AUD               401.50
+
+
+
+
+Due Date: 19 Aug 2026
+Secureworks Group Pty Ltd
+BSB: 036226
+Acc Nr: 725236
+
+
+
+
+                                                              Customer                aj
+PAYMENT ADVICE                                                Invoice Number          INV-1141
+                                                              Amount Due              401.50
+                                                              Due Date                19 Aug 2026
+                                                              Amount Enclosed
+       To:       SecureWorks Group Pty Ltd
+                                                                                      Enter the amount you are paying above
+                 swwa@secureworkswa.com.au
+                 15 Utah Gr
+                 JOONDALUP WA 6027
+                 AUSTRALIA
+

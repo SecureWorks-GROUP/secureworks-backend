@@ -1,0 +1,123 @@
+{
+  "card": "B",
+  "job_id": "8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c",
+  "job_number": "SWMS-261137",
+  "suburb": "Attadale",
+  "external_ref": "AJBR-70499",
+  "void": {
+    "prior_invoice": "INV-1133",
+    "prior_total": 220.0,
+    "xero_invoice_id": "e0149ed6-9a34-4a8f-b2a7-c4ffd17c8d8a",
+    "void_revision_id": "e8a68ff2-3b06-5f46-9083-dbf1d59078eb",
+    "final_status": "DELETED"
+  },
+  "report": {
+    "bind": {
+      "success": true,
+      "skipped": false,
+      "document_id": "2a33fffd-bc42-4ef5-88ad-7aa76b1406de",
+      "document_version": 7,
+      "attendance_cycle_id": "a3b3a498-cb7b-4468-92f5-8ee4abbf7127",
+      "cycle_attribution": "bound",
+      "source_kind": "durable_curated_revision",
+      "source_identity": "curation-revision:ses-curated-report:SWMS-261137:2026-08-06-bulkhead-prop-v1/artifact:ses-curated-report-artifact:84b6238a0d6c91bb20445fd54f7037b7",
+      "source_revision_id": "ses-curated-report:SWMS-261137:2026-08-06-bulkhead-prop-v1",
+      "source_artifact_id": "ses-curated-report-artifact:84b6238a0d6c91bb20445fd54f7037b7",
+      "source_artifact_content_hash": "sha256:d577bd0dd9daa5ded18150081bd1196e5c75dbb844ae0e41b9abcafb9a58331b",
+      "expected_raw_sha256": "sha256:84b6238a0d6c91bb20445fd54f7037b7d300a1e22cb28692165ebc4fa007afc4",
+      "report_input_hash": "sha256:8c484f1cbe4e8fe6874f85664d5cb5cef5d95b55b863c2fba71ae2459e87c823",
+      "renderer_source_revision": "915e9b423fc597d656c7cb090671bf206138114b",
+      "renderer_script_sha256": "sha256:fda63bcffa0177b702089e67b5719ae50642a9972aa3628c516fcedb1cfe42dc",
+      "renderer_version": "secureworks.wiki-python/915e9b423fc597d656c7cb090671bf206138114b",
+      "writes": 2,
+      "supersedes_prior_bind": true
+    },
+    "text_file": "B-report.pdftotext.txt",
+    "bulkhead_sentence": "Per the Captain's account, the bulkhead fell completely and needed to be propped.",
+    "provenance": {
+      "captain": [
+        "bulkhead fell completely and needed to be propped"
+      ],
+      "trade": [
+        "ceiling drooping / not connected to joists",
+        "propped with acro props and timber planks",
+        "materials Acro prop x 2, Timber x 2, Screws x 2",
+        "labour_hours 2.5"
+      ]
+    }
+  },
+  "commercial_quantity_override": {
+    "decision_key": "ajs-two-card-remint-v1-B-AJBR-70499",
+    "override_kind": "commercial_quantity_not_rate",
+    "disposition": "priced_with_line_override",
+    "trade_reported_hours_per_trade": 2.5,
+    "sealed_billable_hours_floor": 2,
+    "sealed_labour_unit_price_ex_gst": 80,
+    "proposal_totals": {
+      "ex": 525,
+      "inc": 577.5
+    },
+    "lines": [
+      {
+        "description": "AJBR-70499 - make-safe attendance - 1 trade x 3 hours",
+        "qty": 3,
+        "unit": 80,
+        "amount": 240
+      },
+      {
+        "description": "AJBR-70499 - Materials: purchase acro props",
+        "qty": 1,
+        "unit": 240,
+        "amount": 240
+      },
+      {
+        "description": "AJBR-70499 - Materials: timber and screws",
+        "qty": 1,
+        "unit": 45,
+        "amount": 45
+      }
+    ]
+  },
+  "mint": {
+    "invoice_number": "INV-1142",
+    "status": "DRAFT",
+    "total": 577.5,
+    "xero_invoice_id": "11f826bd-0fc2-4439-a67b-424a93ac130d",
+    "scanned_accrec": 1167,
+    "send_dispatched": false
+  },
+  "captain_target": {
+    "ex": 525,
+    "inc": 577.5
+  },
+  "landed_match": true,
+  "trade_evidence_after": {
+    "trade_count": "1",
+    "labour_hours": "2.5"
+  },
+  "pack": {
+    "docket_revision_id": "cd3d288a-2f71-53a3-b412-00c341eda211",
+    "state": "ready",
+    "blockers": [],
+    "persisted": true,
+    "artifact_roles": {
+      "source_attachment": 1,
+      "completion_photo": 16,
+      "supporting_report_pdf": 1,
+      "photo_selection": 1,
+      "invoice_proposal": 1,
+      "report_email_draft": 1,
+      "photo_email_draft": 1,
+      "review_spec": 1,
+      "review_html": 1,
+      "release_payload": 1,
+      "case_story": 1,
+      "docket_manifest": 1,
+      "assembler_envelope": 1,
+      "capability": 1,
+      "timing": 1,
+      "hashes": 1
+    }
+  },
+  "pdf_line_extract_file": "INV-1142.pdftotext.txt"
+}

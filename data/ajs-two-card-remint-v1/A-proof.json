@@ -1,0 +1,96 @@
+{
+  "card": "A",
+  "job_id": "b8c08b16-31b2-410e-9d22-39ee4821fc50",
+  "job_number": "SWMS-261139",
+  "suburb": "Swanbourne",
+  "external_ref": "AJBR-70554",
+  "void": {
+    "prior_invoice": "INV-1139",
+    "prior_total": 176.0,
+    "xero_invoice_id": "6aa70cd3-2b70-4d27-911a-1d00ad52c905",
+    "void_revision_id": "dea10c78-c93a-5f19-98c8-4e811f686c98",
+    "final_status": "DELETED",
+    "approve_path": "approve_ses_invoice_void_revision_v1 SECURITY DEFINER RPC (Captain-authorised in task brief; edge JWT unavailable)"
+  },
+  "commercial_quantity_override": {
+    "decision_key": "ajs-two-card-remint-v1-A-AJBR-70554",
+    "override_kind": "commercial_quantity_not_rate",
+    "disposition": "priced_with_line_override",
+    "trade_reported_hours_per_trade": 2,
+    "sealed_billable_hours_floor": 2,
+    "sealed_labour_unit_price_ex_gst": 80,
+    "proposal_totals": {
+      "ex": 365,
+      "inc": 401.5
+    },
+    "lines": [
+      {
+        "description": "AJBR-70554 - make-safe attendance - 1 trade x 3 hours",
+        "qty": 3,
+        "unit": 80,
+        "amount": 240
+      },
+      {
+        "description": "AJBR-70554 - Materials: Makesafe tarp",
+        "qty": 1,
+        "unit": 110,
+        "amount": 110
+      },
+      {
+        "description": "AJBR-70554 - Materials: flashing tape",
+        "qty": 1,
+        "unit": 15,
+        "amount": 15
+      }
+    ]
+  },
+  "mint": {
+    "invoice_number": "INV-1141",
+    "status": "DRAFT",
+    "total": 401.5,
+    "xero_invoice_id": "97cb4386-03d5-4313-9220-276d5c575c39",
+    "scanned_accrec": 1166,
+    "send_dispatched": false,
+    "invoice_create_dispatched": true
+  },
+  "captain_target": {
+    "ex": 365,
+    "inc": 401.5
+  },
+  "landed_match": true,
+  "trade_evidence_after": {
+    "labour_hours": "2",
+    "trade_count": "1"
+  },
+  "pack": {
+    "docket_revision_id": "b84beb4a-e280-58d1-b0c4-747323b4f1b3",
+    "state": "ready",
+    "blockers": [],
+    "persisted": true,
+    "supporting_report_pdf": "ready once",
+    "swms_artifact": "not_applicable (AJS make-safes do not normally carry SWMS)",
+    "supporting_invoice_pdf_item": "blocked pre_xero local proposal (expected); real DRAFT PDF via get_invoice_pdf INV-1141",
+    "live_non_deleted_accrec": [
+      "INV-1141 DRAFT 401.50"
+    ],
+    "artifact_roles": {
+      "source_attachment": 1,
+      "completion_photo": 13,
+      "supporting_report_pdf": 1,
+      "photo_selection": 1,
+      "invoice_proposal": 1,
+      "report_email_draft": 1,
+      "photo_email_draft": 1,
+      "review_spec": 1,
+      "review_html": 1,
+      "release_payload": 1,
+      "case_story": 1,
+      "docket_manifest": 1,
+      "assembler_envelope": 1,
+      "capability": 1,
+      "timing": 1,
+      "hashes": 1
+    }
+  },
+  "pdf_line_extract_file": "INV-1141.pdftotext.txt"
+}

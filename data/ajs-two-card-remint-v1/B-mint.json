@@ -1,0 +1,22 @@
+{
+  "state": "xero_draft_created",
+  "invoice": {
+    "xero_invoice_id": "11f826bd-0fc2-4439-a67b-424a93ac130d",
+    "invoice_number": "INV-1142",
+    "status": "DRAFT",
+    "reference": "AJBR-70499",
+    "total": 577.5
+  },
+  "draft_pdf": {
+    "content_hash": "sha256:b2f701f066c36ffd9c8f1a3ee8e58ae31c13a0e79516819b8581cfbbb5937f68",
+    "size_bytes": 52105,
+    "object_key": "makesafe-docket-artifacts/8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c/xero-invoice-pdfs/11f826bd-0fc2-4439-a67b-424a93ac130d/INV-1142.pdf"
+  },
+  "invoice_create_dispatched": true,
+  "send_dispatched": false,
+  "scanned_accrec": 1167,
+  "external_mutations": {
+    "xero": 1,
+    "email": 0
+  }
+}

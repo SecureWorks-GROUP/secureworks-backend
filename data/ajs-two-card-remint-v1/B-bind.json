@@ -1,0 +1,20 @@
+{
+  "success": true,
+  "skipped": false,
+  "document_id": "2a33fffd-bc42-4ef5-88ad-7aa76b1406de",
+  "document_version": 7,
+  "attendance_cycle_id": "a3b3a498-cb7b-4468-92f5-8ee4abbf7127",
+  "cycle_attribution": "bound",
+  "source_kind": "durable_curated_revision",
+  "source_identity": "curation-revision:ses-curated-report:SWMS-261137:2026-08-06-bulkhead-prop-v1/artifact:ses-curated-report-artifact:84b6238a0d6c91bb20445fd54f7037b7",
+  "source_revision_id": "ses-curated-report:SWMS-261137:2026-08-06-bulkhead-prop-v1",
+  "source_artifact_id": "ses-curated-report-artifact:84b6238a0d6c91bb20445fd54f7037b7",
+  "source_artifact_content_hash": "sha256:d577bd0dd9daa5ded18150081bd1196e5c75dbb844ae0e41b9abcafb9a58331b",
+  "expected_raw_sha256": "sha256:84b6238a0d6c91bb20445fd54f7037b7d300a1e22cb28692165ebc4fa007afc4",
+  "report_input_hash": "sha256:8c484f1cbe4e8fe6874f85664d5cb5cef5d95b55b863c2fba71ae2459e87c823",
+  "renderer_source_revision": "915e9b423fc597d656c7cb090671bf206138114b",
+  "renderer_script_sha256": "sha256:fda63bcffa0177b702089e67b5719ae50642a9972aa3628c516fcedb1cfe42dc",
+  "renderer_version": "secureworks.wiki-python/915e9b423fc597d656c7cb090671bf206138114b",
+  "writes": 2,
+  "supersedes_prior_bind": true
+}

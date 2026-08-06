@@ -1,0 +1,376 @@
+{
+  "state": "prepared",
+  "obligation": {
+    "id": "6cd6f800-fe9e-4d8a-85f1-2f6e469fb311",
+    "org_id": "00000000-0000-0000-0000-000000000001",
+    "job_id": "8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c",
+    "status": "open",
+    "mint_reason": "first_u4_commercial_proposal",
+    "minted_by": "fm/ajs-two-card-remint-v1",
+    "supersedes_obligation_id": null,
+    "post_release_disposition": null
+  },
+  "revision": {
+    "id": "e3d6f119-7cfe-5a04-8a8a-6b85279788ab",
+    "org_id": "00000000-0000-0000-0000-000000000001",
+    "job_id": "8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c",
+    "obligation_id": "6cd6f800-fe9e-4d8a-85f1-2f6e469fb311",
+    "content_hash": "sha256:e3d6f1197cfe3a048a8a6b85279788ab41abdacb2afb51f746d437b05bd2ed7e",
+    "attendance_cycle_ids": [
+      "a3b3a498-cb7b-4468-92f5-8ee4abbf7127"
+    ],
+    "attendance_cycle_set_hash": "sha256:ba16b849b4e75a2583529a335d7a90325d220c18a66ad8ccd9d8a73bb5fec98d",
+    "pricing_disposition": "priced_with_line_override",
+    "proposal": {
+      "schema": "secureworks.makesafe.invoice-proposal/v1",
+      "invoice_obligation_id": "6cd6f800-fe9e-4d8a-85f1-2f6e469fb311",
+      "invoice_obligation_revision_id": "e3d6f119-7cfe-5a04-8a8a-6b85279788ab",
+      "job_id": "8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c",
+      "attendance_cycle_ids": [
+        "a3b3a498-cb7b-4468-92f5-8ee4abbf7127"
+      ],
+      "pricing_disposition": "priced_with_line_override",
+      "pricing_canon_version": "pricing-and-invoice-rules@sha256:7a116693ed57ab19a0076238fd860f572bb054868465e27415e7f85e983fe42b",
+      "company": "aj",
+      "reference": "AJBR-70499",
+      "contact_name": "aj",
+      "currency": "AUD",
+      "lines": [
+        {
+          "description": "AJBR-70499 - make-safe attendance - 1 trade x 3 hours",
+          "quantity": 3,
+          "unit_price": 80,
+          "account_code": "210",
+          "rate_override_approved": true,
+          "rate_override_by": "Captain Marnin Stobbe",
+          "rate_override_at": "2026-08-06T00:00:00.000Z",
+          "evidence": {
+            "source": "secureworks.makesafe.commercial-quantity-override/v1",
+            "override_kind": "commercial_quantity_not_rate",
+            "line_kind": "labour",
+            "authorised_by": "Captain Marnin Stobbe",
+            "authorised_at": "2026-08-06T00:00:00.000Z",
+            "decision_key": "ajs-two-card-remint-v1-B-AJBR-70499",
+            "reason": "Captain-authorised commercial remint Attadale AJBR-70499: labour 3h at sealed AJS $80 (=240) + purchase acro props $240 + timber and screws $45 = 525 ex / 577.50 inc. Trade attendance evidence unchanged.",
+            "trade_reported_hours_per_trade": 2.5,
+            "sealed_billable_hours_floor": 2,
+            "sealed_labour_unit_price_ex_gst": 80,
+            "docket_revision_id": "09b01ce1-0404-5b83-9252-186cedaa499e",
+            "attendance_cycle_ids": [
+              "a3b3a498-cb7b-4468-92f5-8ee4abbf7127"
+            ],
+            "builder_reference": "AJBR-70499",
+            "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+          }
+        },
+        {
+          "description": "AJBR-70499 - Materials: purchase acro props",
+          "quantity": 1,
+          "unit_price": 240,
+          "account_code": "210",
+          "rate_override_approved": true,
+          "rate_override_by": "Captain Marnin Stobbe",
+          "rate_override_at": "2026-08-06T00:00:00.000Z",
+          "evidence": {
+            "source": "secureworks.makesafe.commercial-quantity-override/v1",
+            "override_kind": "commercial_quantity_not_rate",
+            "line_kind": "materials",
+            "authorised_by": "Captain Marnin Stobbe",
+            "authorised_at": "2026-08-06T00:00:00.000Z",
+            "decision_key": "ajs-two-card-remint-v1-B-AJBR-70499",
+            "reason": "Captain-authorised commercial remint Attadale AJBR-70499: labour 3h at sealed AJS $80 (=240) + purchase acro props $240 + timber and screws $45 = 525 ex / 577.50 inc. Trade attendance evidence unchanged.",
+            "trade_reported_hours_per_trade": 2.5,
+            "sealed_billable_hours_floor": 2,
+            "sealed_labour_unit_price_ex_gst": 80,
+            "docket_revision_id": "09b01ce1-0404-5b83-9252-186cedaa499e",
+            "attendance_cycle_ids": [
+              "a3b3a498-cb7b-4468-92f5-8ee4abbf7127"
+            ],
+            "builder_reference": "AJBR-70499",
+            "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+          }
+        },
+        {
+          "description": "AJBR-70499 - Materials: timber and screws",
+          "quantity": 1,
+          "unit_price": 45,
+          "account_code": "210",
+          "rate_override_approved": true,
+          "rate_override_by": "Captain Marnin Stobbe",
+          "rate_override_at": "2026-08-06T00:00:00.000Z",
+          "evidence": {
+            "source": "secureworks.makesafe.commercial-quantity-override/v1",
+            "override_kind": "commercial_quantity_not_rate",
+            "line_kind": "materials",
+            "authorised_by": "Captain Marnin Stobbe",
+            "authorised_at": "2026-08-06T00:00:00.000Z",
+            "decision_key": "ajs-two-card-remint-v1-B-AJBR-70499",
+            "reason": "Captain-authorised commercial remint Attadale AJBR-70499: labour 3h at sealed AJS $80 (=240) + purchase acro props $240 + timber and screws $45 = 525 ex / 577.50 inc. Trade attendance evidence unchanged.",
+            "trade_reported_hours_per_trade": 2.5,
+            "sealed_billable_hours_floor": 2,
+            "sealed_labour_unit_price_ex_gst": 80,
+            "docket_revision_id": "09b01ce1-0404-5b83-9252-186cedaa499e",
+            "attendance_cycle_ids": [
+              "a3b3a498-cb7b-4468-92f5-8ee4abbf7127"
+            ],
+            "builder_reference": "AJBR-70499",
+            "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+          }
+        }
+      ],
+      "totals": {
+        "ex": 525,
+        "inc": 577.5
+      },
+      "guard_result": {
+        "hard_failures": [],
+        "warnings": [
+          "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged"
+        ]
+      },
+      "duplicate_probe": {
+        "allows_create": true,
+        "match_tier": null,
+        "ambiguity": "void_only"
+      },
+      "xero": null,
+      "commercial_quantity_override": {
+        "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+        "authorised_by": "Captain Marnin Stobbe",
+        "authorised_at": "2026-08-06T00:00:00.000Z",
+        "decision_key": "ajs-two-card-remint-v1-B-AJBR-70499",
+        "reason": "Captain-authorised commercial remint Attadale AJBR-70499: labour 3h at sealed AJS $80 (=240) + purchase acro props $240 + timber and screws $45 = 525 ex / 577.50 inc. Trade attendance evidence unchanged.",
+        "trade_reported_hours_per_trade": 2.5,
+        "sealed_billable_hours_floor": 2,
+        "lines": [
+          {
+            "line_kind": "labour",
+            "description": "AJBR-70499 - make-safe attendance - 1 trade x 3 hours",
+            "quantity": 3,
+            "unit_price_ex_gst": 80
+          },
+          {
+            "line_kind": "materials",
+            "description": "AJBR-70499 - Materials: purchase acro props",
+            "quantity": 1,
+            "unit_price_ex_gst": 240
+          },
+          {
+            "line_kind": "materials",
+            "description": "AJBR-70499 - Materials: timber and screws",
+            "quantity": 1,
+            "unit_price_ex_gst": 45
+          }
+        ],
+        "applied_at": "2026-08-06T00:05:52.551Z",
+        "docket_revision_id": "09b01ce1-0404-5b83-9252-186cedaa499e",
+        "sealed_labour_unit_price_ex_gst": 80,
+        "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+      }
+    },
+    "duplicate_probe": {
+      "allows_create": true,
+      "match_tier": null,
+      "ambiguity": "void_only"
+    },
+    "blockers": [],
+    "supersedes_revision_id": null,
+    "state": "proposed",
+    "created_by": "fm/ajs-two-card-remint-v1",
+    "docket_revision_id": "09b01ce1-0404-5b83-9252-186cedaa499e"
+  },
+  "proposal": {
+    "schema": "secureworks.makesafe.invoice-proposal/v1",
+    "invoice_obligation_id": "6cd6f800-fe9e-4d8a-85f1-2f6e469fb311",
+    "invoice_obligation_revision_id": "e3d6f119-7cfe-5a04-8a8a-6b85279788ab",
+    "job_id": "8c4f5c42-d99f-40d2-96ed-b30d0a7ac17c",
+    "attendance_cycle_ids": [
+      "a3b3a498-cb7b-4468-92f5-8ee4abbf7127"
+    ],
+    "pricing_disposition": "priced_with_line_override",
+    "pricing_canon_version": "pricing-and-invoice-rules@sha256:7a116693ed57ab19a0076238fd860f572bb054868465e27415e7f85e983fe42b",
+    "company": "aj",
+    "reference": "AJBR-70499",
+    "contact_name": "aj",
+    "currency": "AUD",
+    "lines": [
+      {
+        "description": "AJBR-70499 - make-safe attendance - 1 trade x 3 hours",
+        "quantity": 3,
+        "unit_price": 80,
+        "account_code": "210",
+        "rate_override_approved": true,
+        "rate_override_by": "Captain Marnin Stobbe",
+        "rate_override_at": "2026-08-06T00:00:00.000Z",
+        "evidence": {
+          "source": "secureworks.makesafe.commercial-quantity-override/v1",
+          "override_kind": "commercial_quantity_not_rate",
+          "line_kind": "labour",
+          "authorised_by": "Captain Marnin Stobbe",
+          "authorised_at": "2026-08-06T00:00:00.000Z",
+          "decision_key": "ajs-two-card-remint-v1-B-AJBR-70499",
+          "reason": "Captain-authorised commercial remint Attadale AJBR-70499: labour 3h at sealed AJS $80 (=240) + purchase acro props $240 + timber and screws $45 = 525 ex / 577.50 inc. Trade attendance evidence unchanged.",
+          "trade_reported_hours_per_trade": 2.5,
+          "sealed_billable_hours_floor": 2,
+          "sealed_labour_unit_price_ex_gst": 80,
+          "docket_revision_id": "09b01ce1-0404-5b83-9252-186cedaa499e",
+          "attendance_cycle_ids": [
+            "a3b3a498-cb7b-4468-92f5-8ee4abbf7127"
+          ],
+          "builder_reference": "AJBR-70499",
+          "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+        }
+      },
+      {
+        "description": "AJBR-70499 - Materials: purchase acro props",
+        "quantity": 1,
+        "unit_price": 240,
+        "account_code": "210",
+        "rate_override_approved": true,
+        "rate_override_by": "Captain Marnin Stobbe",
+        "rate_override_at": "2026-08-06T00:00:00.000Z",
+        "evidence": {
+          "source": "secureworks.makesafe.commercial-quantity-override/v1",
+          "override_kind": "commercial_quantity_not_rate",
+          "line_kind": "materials",
+          "authorised_by": "Captain Marnin Stobbe",
+          "authorised_at": "2026-08-06T00:00:00.000Z",
+          "decision_key": "ajs-two-card-remint-v1-B-AJBR-70499",
+          "reason": "Captain-authorised commercial remint Attadale AJBR-70499: labour 3h at sealed AJS $80 (=240) + purchase acro props $240 + timber and screws $45 = 525 ex / 577.50 inc. Trade attendance evidence unchanged.",
+          "trade_reported_hours_per_trade": 2.5,
+          "sealed_billable_hours_floor": 2,
+          "sealed_labour_unit_price_ex_gst": 80,
+          "docket_revision_id": "09b01ce1-0404-5b83-9252-186cedaa499e",
+          "attendance_cycle_ids": [
+            "a3b3a498-cb7b-4468-92f5-8ee4abbf7127"
+          ],
+          "builder_reference": "AJBR-70499",
+          "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+        }
+      },
+      {
+        "description": "AJBR-70499 - Materials: timber and screws",
+        "quantity": 1,
+        "unit_price": 45,
+        "account_code": "210",
+        "rate_override_approved": true,
+        "rate_override_by": "Captain Marnin Stobbe",
+        "rate_override_at": "2026-08-06T00:00:00.000Z",
+        "evidence": {
+          "source": "secureworks.makesafe.commercial-quantity-override/v1",
+          "override_kind": "commercial_quantity_not_rate",
+          "line_kind": "materials",
+          "authorised_by": "Captain Marnin Stobbe",
+          "authorised_at": "2026-08-06T00:00:00.000Z",
+          "decision_key": "ajs-two-card-remint-v1-B-AJBR-70499",
+          "reason": "Captain-authorised commercial remint Attadale AJBR-70499: labour 3h at sealed AJS $80 (=240) + purchase acro props $240 + timber and screws $45 = 525 ex / 577.50 inc. Trade attendance evidence unchanged.",
+          "trade_reported_hours_per_trade": 2.5,
+          "sealed_billable_hours_floor": 2,
+          "sealed_labour_unit_price_ex_gst": 80,
+          "docket_revision_id": "09b01ce1-0404-5b83-9252-186cedaa499e",
+          "attendance_cycle_ids": [
+            "a3b3a498-cb7b-4468-92f5-8ee4abbf7127"
+          ],
+          "builder_reference": "AJBR-70499",
+          "note": "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial."
+        }
+      }
+    ],
+    "totals": {
+      "ex": 525,
+      "inc": 577.5
+    },
+    "guard_result": {
+      "hard_failures": [],
+      "warnings": [
+        "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged"
+      ]
+    },
+    "duplicate_probe": {
+      "allows_create": true,
+      "match_tier": null,
+      "ambiguity": "void_only"
+    },
+    "xero": null,
+    "commercial_quantity_override": {
+      "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+      "authorised_by": "Captain Marnin Stobbe",
+      "authorised_at": "2026-08-06T00:00:00.000Z",
+      "decision_key": "ajs-two-card-remint-v1-B-AJBR-70499",
+      "reason": "Captain-authorised commercial remint Attadale AJBR-70499: labour 3h at sealed AJS $80 (=240) + purchase acro props $240 + timber and screws $45 = 525 ex / 577.50 inc. Trade attendance evidence unchanged.",
+      "trade_reported_hours_per_trade": 2.5,
+      "sealed_billable_hours_floor": 2,
+      "lines": [
+        {
+          "line_kind": "labour",
+          "description": "AJBR-70499 - make-safe attendance - 1 trade x 3 hours",
+          "quantity": 3,
+          "unit_price_ex_gst": 80
+        },
+        {
+          "line_kind": "materials",
+          "description": "AJBR-70499 - Materials: purchase acro props",
+          "quantity": 1,
+          "unit_price_ex_gst": 240
+        },
+        {
+          "line_kind": "materials",
+          "description": "AJBR-70499 - Materials: timber and screws",
+          "quantity": 1,
+          "unit_price_ex_gst": 45
+        }
+      ],
+      "applied_at": "2026-08-06T00:05:52.551Z",
+      "docket_revision_id": "09b01ce1-0404-5b83-9252-186cedaa499e",
+      "sealed_labour_unit_price_ex_gst": 80,
+      "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+    }
+  },
+  "blockers": [],
+  "commercial_quantity_override": {
+    "schema": "secureworks.makesafe.commercial-quantity-override/v1",
+    "authorised_by": "Captain Marnin Stobbe",
+    "authorised_at": "2026-08-06T00:00:00.000Z",
+    "decision_key": "ajs-two-card-remint-v1-B-AJBR-70499",
+    "reason": "Captain-authorised commercial remint Attadale AJBR-70499: labour 3h at sealed AJS $80 (=240) + purchase acro props $240 + timber and screws $45 = 525 ex / 577.50 inc. Trade attendance evidence unchanged.",
+    "trade_reported_hours_per_trade": 2.5,
+    "sealed_billable_hours_floor": 2,
+    "lines": [
+      {
+        "line_kind": "labour",
+        "description": "AJBR-70499 - make-safe attendance - 1 trade x 3 hours",
+        "quantity": 3,
+        "unit_price_ex_gst": 80
+      },
+      {
+        "line_kind": "materials",
+        "description": "AJBR-70499 - Materials: purchase acro props",
+        "quantity": 1,
+        "unit_price_ex_gst": 240
+      },
+      {
+        "line_kind": "materials",
+        "description": "AJBR-70499 - Materials: timber and screws",
+        "quantity": 1,
+        "unit_price_ex_gst": 45
+      }
+    ],
+    "applied_at": "2026-08-06T00:05:52.551Z",
+    "docket_revision_id": "09b01ce1-0404-5b83-9252-186cedaa499e",
+    "sealed_labour_unit_price_ex_gst": 80,
+    "note": "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written."
+  },
+  "commit": {
+    "idempotent": false,
+    "content_hash": "sha256:e3d6f1197cfe3a048a8a6b85279788ab41abdacb2afb51f746d437b05bd2ed7e",
+    "obligation_id": "6cd6f800-fe9e-4d8a-85f1-2f6e469fb311",
+    "readiness_revision": null,
+    "readiness_certified": false,
+    "dependency_generation": 32,
+    "invoice_obligation_revision_id": "e3d6f119-7cfe-5a04-8a8a-6b85279788ab"
+  },
+  "external_mutations": {
+    "xero": 0,
+    "email": 0
+  }
+}
