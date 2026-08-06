@@ -268,9 +268,11 @@ export interface MakesafeDuplicateSurvivorRow extends MakesafeStatusApplyRow {
  *
  * - the display is `archive` specifically — `cancelled` and every other terminal
  *   display still refuse;
- * - the card derived that stage from its OWN facts (`declared_stage`), with no
- *   status-application overlay in play, so nothing a previous run decided is
- *   being read as completion;
+ * - the card derived that stage from its OWN facts — post-R12 that is the
+ *   evidence engine's pre-overlay answer, read through the same
+ *   `makesafeOverlaySourceStatus` anchor every ledger writer stamps, never the
+ *   legacy ladder — with no status-application overlay in play, so nothing a
+ *   previous run decided is being read as completion;
  * - the card is not itself an archived duplicate, which would build a pointer
  *   chain;
  * - and the read model's independent closeout verdict is true. That verdict is
@@ -283,7 +285,7 @@ export function survivorArchiveIsNaturalCompletion(
   survivor: MakesafeDuplicateSurvivorRow,
 ): boolean {
   if (token(survivor?.canonical_stage) !== "archive") return false;
-  if (token(survivor?.declared_stage) !== "archive") return false;
+  if (makesafeOverlaySourceStatus(survivor || {}) !== "archive") return false;
   if (survivor?.status_application) return false;
   if (survivor?.duplicate_of_job_id) return false;
   return survivor?.computed_status_evidence?.closeout_satisfied === true;

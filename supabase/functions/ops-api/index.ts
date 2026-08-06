@@ -14401,12 +14401,13 @@ export function _deriveMakesafeSurfacing(
   }
 }
 
-// The version of the VISIBLE stage ladder — `_deriveMakesafeBoardStage`, whose
-// output becomes `declared_stage` and then `canonical_stage`, the column a card
-// is rendered in. The corrected shadow engine has carried
-// `SES_STAGE_ENGINE_V2_VERSION` since it was born; the ladder that actually
-// places every card had no version at all, so a past measurement could not say
-// which derivation produced it.
+// The version of the legacy stage ladder — `_deriveMakesafeBoardStage`, whose
+// output is `declared_stage` and NOTHING else. Since Release 12 the placement
+// authority is `deriveSesStageV2` plus the captain overlay anchored on that
+// derived stage; `canonical_stage`, the column a card is rendered in, comes from
+// there. The engine has carried `SES_STAGE_ENGINE_V2_VERSION` since it was born;
+// the ladder had no version at all, so a past measurement could not say which
+// derivation produced the stage it recorded.
 //
 //   v1 (implicit, unversioned) — `invoiceDone` counted any non-VOIDED/DELETED
 //      ACCREC row, so a Xero DRAFT closed a card.
