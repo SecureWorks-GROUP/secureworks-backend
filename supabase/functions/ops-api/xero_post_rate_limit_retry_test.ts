@@ -37,6 +37,7 @@ function stubFetch(
   rateLimited: number,
   terminal: () => Response,
   attempts: Attempt[],
+  retryAfter = "0",
 ): typeof globalThis.fetch {
   let seen = 0;
   return ((input: string | URL | Request, init?: RequestInit) => {
@@ -50,12 +51,36 @@ function stubFetch(
       return Promise.resolve(
         new Response("rate limited", {
           status: 429,
-          headers: { "Retry-After": "0" },
+          headers: { "Retry-After": retryAfter },
         }),
       );
     }
     return Promise.resolve(terminal());
   }) as typeof globalThis.fetch;
+}
+
+/**
+ * Records the delays the real backoff asks for and fires them immediately, so a
+ * bounded-sleep contract can be asserted without spending the wall time. The
+ * production code path is still the one running.
+ */
+async function withRecordedSleeps<T>(
+  run: () => Promise<T>,
+): Promise<{ result: T | null; error: Error | null; delays: number[] }> {
+  const delays: number[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((cb: (...a: unknown[]) => void, ms?: number) => {
+    delays.push(Number(ms ?? 0));
+    return originalSetTimeout(cb, 0);
+    // deno-lint-ignore no-explicit-any
+  }) as any;
+  try {
+    return { result: await run(), error: null, delays };
+  } catch (err) {
+    return { result: null, error: err as Error, delays };
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
 }
 
 function okInvoice(): Response {
@@ -198,6 +223,67 @@ Deno.test("keyed write: a non-429 failure is NOT retried", async () => {
     attempts.length,
     1,
     "a deterministic validation failure is not a rate limit and must not retry",
+  );
+});
+
+Deno.test("keyed write: a long Retry-After throws at once and never sleeps", async () => {
+  const attempts: Attempt[] = [];
+  const { error, delays } = await withStubbedFetch(
+    stubFetch(99, okInvoice, attempts, "3600"),
+    () =>
+      withRecordedSleeps(() =>
+        _xeroPostForTest(
+          "/Invoices",
+          "token",
+          "tenant",
+          { Invoices: [] },
+          "PUT",
+          "ses-invoice-create-rev-5",
+        )
+      ),
+  );
+  assert(error, "a daily/concurrency rate limit must refuse, not wait");
+  assert(
+    error!.message.includes("rate limited"),
+    `expected a rate-limit message, got: ${error!.message}`,
+  );
+  assertEquals(
+    attempts.length,
+    1,
+    "a Retry-After above the ceiling must throw on the FIRST response",
+  );
+  assertEquals(
+    delays,
+    [],
+    "sleeping inside the dispatch is what strands the effect — never do it here",
+  );
+});
+
+Deno.test("keyed write: each sleep is clamped and the chain stays inside the budget", async () => {
+  const attempts: Attempt[] = [];
+  const { error, delays } = await withStubbedFetch(
+    stubFetch(99, okInvoice, attempts, "5"),
+    () =>
+      withRecordedSleeps(() =>
+        _xeroPostForTest(
+          "/Invoices",
+          "token",
+          "tenant",
+          { Invoices: [] },
+          "PUT",
+          "ses-invoice-create-rev-6",
+        )
+      ),
+  );
+  assert(error, "an exhausted retry chain still throws");
+  assertEquals(attempts.length, 4, "the first attempt plus exactly 3 retries");
+  assert(
+    delays.every((ms) => ms <= 5_000),
+    `every sleep must be clamped to the 5s ceiling, got: ${delays.join(",")}`,
+  );
+  assert(
+    delays.reduce((a, b) => a + b, 0) <= 15_000,
+    `cumulative backoff must stay inside the 15s budget, got: ${delays.join(",")}`,
   );
 });
 

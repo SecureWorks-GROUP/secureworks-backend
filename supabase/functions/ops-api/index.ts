@@ -2629,9 +2629,29 @@ async function xeroGet(
 // unproven, they are the ones that must never repeat — POST /Invoices/{id}/Email
 // sends the client a real email every time it succeeds. So an un-keyed 429
 // still throws immediately, exactly as before.
+//
+// THE BACKOFF IS BOUNDED IN BOTH DIRECTIONS, and that is load-bearing for the
+// same reason. Sleeping for an arbitrary Retry-After inside the dispatch swaps
+// one poisoning mechanism for a worse one: if the isolate or caller dies
+// mid-sleep the effect row never leaves `dispatching` and carries no failure
+// message at all. Only the 60-calls-per-minute window is worth waiting out, and
+// it clears in seconds; a daily-limit or concurrency 429 carries a large
+// delta-seconds value that must never be slept through here. So a Retry-After
+// above the per-sleep ceiling, or one that would overrun the cumulative budget,
+// throws immediately — the pre-change behaviour, and the honest outcome.
+const XERO_POST_RETRY_SLEEP_CEILING_MS = 5_000
+const XERO_POST_RETRY_SLEEP_BUDGET_MS = 15_000
+
+function xeroPostRetryAfterMs(header: string | null): number {
+  const parsed = parseInt(header || '', 10)
+  if (!Number.isFinite(parsed) || parsed < 0) return XERO_POST_RETRY_SLEEP_CEILING_MS
+  return parsed * 1000
+}
+
 async function xeroPost(
   path: string, accessToken: string, tenantId: string,
-  body: any, method = 'POST', idempotencyKey?: string, retryCount = 0
+  body: any, method = 'POST', idempotencyKey?: string, retryCount = 0,
+  sleptMs = 0
 ): Promise<any> {
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${accessToken}`,
@@ -2653,9 +2673,22 @@ async function xeroPost(
     if (retryCount >= 3) {
       throw new Error(`Xero rate limited on ${path} after ${retryCount} retries`)
     }
-    const retryAfter = parseInt(resp.headers.get('Retry-After') || '5')
-    await new Promise(r => setTimeout(r, (Number.isFinite(retryAfter) ? retryAfter : 5) * 1000))
-    return xeroPost(path, accessToken, tenantId, body, method, idempotencyKey, retryCount + 1)
+    const retryAfterMs = xeroPostRetryAfterMs(resp.headers.get('Retry-After'))
+    if (retryAfterMs > XERO_POST_RETRY_SLEEP_CEILING_MS) {
+      throw new Error(
+        `Xero rate limited on ${path}: Retry-After ${retryAfterMs / 1000}s exceeds the ${XERO_POST_RETRY_SLEEP_CEILING_MS / 1000}s backoff ceiling`,
+      )
+    }
+    if (sleptMs + retryAfterMs > XERO_POST_RETRY_SLEEP_BUDGET_MS) {
+      throw new Error(
+        `Xero rate limited on ${path}: backoff budget of ${XERO_POST_RETRY_SLEEP_BUDGET_MS / 1000}s exhausted`,
+      )
+    }
+    await new Promise(r => setTimeout(r, retryAfterMs))
+    return xeroPost(
+      path, accessToken, tenantId, body, method, idempotencyKey, retryCount + 1,
+      sleptMs + retryAfterMs,
+    )
   }
   if (!resp.ok) {
     const errText = await resp.text()
