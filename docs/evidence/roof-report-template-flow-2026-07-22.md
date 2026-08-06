@@ -34,12 +34,24 @@ Request/response shapes:
   post-release billing review and does not choose a disposition.
 - **roof_report_template** returns `{ template, job, draft }`.
 
-## Storey pricing (locked 2026-07-16, Marnin/Shaun, every builder)
+## Storey pricing (double storey superseded 2026-08-06; see note below)
 
-The `storeys` field is the pricing driver:
+The `storeys` field is the pricing driver. CURRENT figures:
 
-- Single Storey -> $250 ex GST / **$275 inc GST**
-- Double Storey -> $350 ex GST / **$385 inc GST**
+- Single Storey -> $250 ex GST / **$275 inc GST** (locked 2026-07-16,
+  Marnin/Shaun, every builder; unchanged)
+- Double Storey -> $300 ex GST / **$330 inc GST** (Captain ruling 2026-08-06,
+  every builder)
+
+**Supersession note (2026-08-06).** The original 2026-07-16 lock
+(Marnin/Shaun) recorded "Double Storey -> $350 ex GST / $385 inc GST". The
+Captain ruled on 2026-08-06 that double-storey roof reports are $300 ex GST /
+$330 inc GST, explicitly superseding that $350/$385 figure. Ruling:
+`data/decisions/2026-08-06-roof-report-pricing-300-double.md`. Single storey is
+NOT superseded: its 2026-07-16 lock at $250 ex / $275 inc still stands. Any
+$350/$385 figure elsewhere in this document is a dated 2026-07-22 record, not
+the live price. The one authoritative in-repo constant is
+`ROOF_REPORT_PRICING` in `supabase/functions/ops-api/roof_report_template.ts`.
 
 Source: `secureworks-makesafe-reporting/references/pricing-and-invoice-rules.md`.
 `roofReportPrice()` throws rather than guess an unrecognised storey, so a report
