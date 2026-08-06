@@ -797,6 +797,18 @@ function cleanInputFromRows(args: {
     // behaviour (photo required) rather than silently dropping the route.
     photo_route_applicable: !routingDeclared ||
       String(routing.photo_to || "").trim().length > 0,
+    // The manifest's own declaration, not `report_only`. A card whose report is
+    // the builder portal stamps draft_builder_report_email: not_applicable
+    // ("portal-is-the-report") and never produces a REPORT_EMAIL_DRAFT, so the
+    // cockpit must not demand one (Captain 2026-08-06: one email, group inbox,
+    // carrying the invoice). Keying on `report_only` instead would ALSO exempt
+    // own_template_roof, which is report-only but sends a real report email on
+    // our own letterhead — a loosening that ruling does not authorise. Every
+    // other state (ready, blocked, and the initial "Evidence not recorded")
+    // keeps the route required, so a family that owes a report email and failed
+    // to build one is still held, honestly.
+    report_route_applicable:
+      object(items.draft_builder_report_email).state !== "not_applicable",
     type_check_hold: storedBlockers.some((blocker) =>
       blocker.code === "type_check"
     ),

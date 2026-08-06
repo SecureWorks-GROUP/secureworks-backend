@@ -1,0 +1,106 @@
+# Captain ruling implemented: a roof-report card sends ONE email
+
+Date: 2026-08-06. Implements
+`data/decisions/2026-08-06-roof-report-email-shape.md` (firstmate home), closing
+the parked decision `report-only-email-applicability`.
+
+**The ruling.** A roof-report card sends ONE email, to the group inbox, carrying
+the invoice. The portal holds the report; no empty report email is fabricated.
+
+## What changed
+
+The exemption path identified on PR 614, mirroring the photo precedent rather
+than inventing a second mechanism.
+
+| file | change |
+|---|---|
+| `ses_review_cockpit.ts` | `requiredSesRouteKinds` gains `reportRouteApplicable` (default `true` = strict), filtering `report` exactly as `photoRouteApplicable` already filters `photo`. `missingRouteRefusals` threads it. New optional input `report_route_applicable` (absent = required). |
+| `ses_review_cockpit.ts` | The `report_only_email_applicability_parked` blocker is retired, with a comment recording the ruling and forbidding its revival to re-park the question. |
+| `ses_reporting_actions.ts` | Producer derives `report_route_applicable` from the manifest's own `draft_builder_report_email` state. |
+| `ses_reporting_refusals.ts` | The retired code's FACT is removed — it asserted the decision was "still awaiting the Captain", which is now false text. |
+
+## The one judgement call: not keyed on `report_only`
+
+The obvious key is `report_only`, and it is **wrong**. `own_template_roof` is
+`report_only: true` and still sends a real report email — the SecureWorks
+own-letterhead roof report, rendered by `renderOwnRoofReport`, drafted as a real
+`REPORT_EMAIL_DRAFT`. Exempting it would have dropped a route that family
+genuinely owes, which the ruling does not authorise.
+
+The correct key is the manifest declaration the assembler already makes:
+
+```ts
+report_route_applicable:
+  object(items.draft_builder_report_email).state !== "not_applicable",
+```
+
+`not_applicable` is stamped only where the matrix says the portal is the report
+(`ordinary_roof_portal` → `"portal-is-the-report"`; `assessment_quote`, which is
+invoice-only by an earlier return anyway). `initialManifestItems()` seeds every
+item `blocked`, never `not_applicable`, so a family that owes a report email and
+failed to build one keeps the route required and is still held. Fail-strict by
+construction, in both the producer and the consumer.
+
+## Scope held: physical make-safe is untouched
+
+`physical_makesafe` (and `temporary_fencing`, `repair`, `restoration`) stamp
+`draft_builder_report_email` from a real draft, never `not_applicable`, so the
+report route stays required and MLB still owes its three destinations. Pinned by
+`physical make-safe still owes its report email after the ruling`, which asserts
+the hold both with the field absent and with it explicitly `true`, and pins
+`requiredSesRouteKinds("physical_makesafe", …)` at `["report", "photo",
+"invoice"]`.
+
+## Honesty, not green
+
+`a ruled roof-report card requires exactly the one invoice route` pins the
+required set at `["invoice"]` and then makes that one route unready — the card is
+still held, and the blocker still names the invoice email. Dropping a route from
+the required set does not stop the remaining routes being checked, and no other
+check was touched: C1–C10 and C12 evaluate exactly as before.
+
+## Live verification
+
+`data/wgv-docket-prepare-hold-v1/verify-live.ts` pulls each card's live cockpit
+through ops-api and runs the **patched** evaluator over the facts it publishes.
+Output: `live-verification.txt`.
+
+| | SWMS-261114 White Gum Valley | SWMS-261081 Mindarie |
+|---|---|---|
+| live status / band | HOLD / decision_blocked | HOLD / decision_blocked |
+| live blockers | `route_draft_missing`, `report_only_email_applicability_parked` | same |
+| live routes on pack | `invoice` | `invoice` |
+| bound Xero | INV-1149 DRAFT | INV-1150 DRAFT |
+| required routes (patched) | `invoice` | `invoice` |
+| blockers (patched) | **none** | **none** |
+| verdict | **clean**, band `shaun_clean` | **clean**, band `shaun_clean` |
+| failed checks | none | none |
+| APPROVE INVOICE | **ENABLED** | **ENABLED** |
+| SEND IT | disabled until AUTHORISED | disabled until AUTHORISED |
+
+**Read the last row correctly — it is the ladder working, not a residual hold.**
+`sendIt` requires `xeroAuthorised || noAdditionalCharge`, and both invoices are
+DRAFT. APPROVE INVOICE is what authorises them. So the Captain's path is
+APPROVE INVOICE → invoice goes AUTHORISED → SEND IT lights. Both cards are
+clickable for that sequence; neither is clickable straight to SEND while the
+money is still a draft, and making it so would mean sending an unpayable
+invoice.
+
+## What this proof is not
+
+It runs the patched evaluator over live card facts. It is **not** a readback from
+a deployed ops-api, because the fix is not deployed — production is still v1058.
+A deployed cockpit readback needs this merged and shipped from the release
+worktree, and I neither merge nor deploy. See the escalation note in the PR.
+
+## Test evidence
+
+`ses_review_cockpit_test.ts`: 26 passed, including four new — the ruled
+exemption, the retired decision key, the physical-make-safe control, and the
+honesty control. Full ops-api suite 3546 passed / 23 failed, against a
+pre-change baseline of 3542 / 23 on the same tree: same 23 pre-existing failures,
+plus the four new tests. `deno check --config deno.jsonc
+supabase/functions/ops-api/index.ts` is clean.
+
+The 23 baseline failures and the two `cp1_drag_reschedule_test.ts` type errors
+are pre-existing and unrelated; both reproduce on a stashed (clean) tree.

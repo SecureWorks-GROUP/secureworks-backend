@@ -1769,32 +1769,41 @@ Persisting a new docket revision on a card whose `pack.state` is already `sent`
 re-opens it as `needs_review` and invalidates the previous signoff tick. Check
 `pack.state` before treating such a card as reachable work.
 
-## On A Report-Only Card, `route_draft_missing` Is Not Fixable By Preparing
+## A Roof-Report Card Sends ONE Email, And Route Applicability Is Not `report_only`
 
-The blocker's own recovery text says "prepare a new docket revision so the report
-email is assembled". On a report-only family (`ordinary_roof_portal`,
-`own_template_roof`, `assessment_quote`) that instruction is unsatisfiable and no
-number of prepares will clear it — SWMS-261114 took three in one morning before
-anyone checked.
+Captain 2026-08-06 (`data/decisions/2026-08-06-roof-report-email-shape.md`,
+firstmate home), closing `report-only-email-applicability`: a roof-report card
+sends ONE email, to the group inbox, carrying the invoice. The portal holds the
+report and **no empty report email is to be fabricated** to satisfy a checklist.
 
-`mlbReportRow` gives those families `job_type: roof_report` /
-`assessment_report_quote`, and the whole `reportFile`-producing block in
-`ses_prepare_docket_revision.ts` is gated on `job_type === "physical_makesafe"`
-(one `else if` for `own_template_roof`). So `reportFile` is structurally null,
-`buildEmailDrafts` gates `REPORT_EMAIL_DRAFT` on `if (reportFile)`, and the
-manifest hard-codes `draft_builder_report_email = notApplicable`
-("portal-is-the-report"). The portal IS the report; there is nothing to attach.
-The cockpit requires it anyway: `requiredSesRouteKinds` returns the universal
-order and filters out only `photo`.
+Route requirement lives in `requiredSesRouteKinds` (`ses_review_cockpit.ts`),
+which now filters `report` by `reportRouteApplicable` exactly as it filters
+`photo` by `photoRouteApplicable`. Both default STRICT — an unstated
+applicability means required — so a producer that has not been taught the field
+can only be stricter than the matrix, never looser.
 
-That asymmetry is not a bug to patch — it is the open
-`report-only-email-applicability` Captain decision, which the cockpit also serves
-directly as `report_only_email_applicability_parked`. Both blockers are one
-question, so answering the first by widening the assembler or by narrowing the
-required route set decides the second. The `photo` half is the precedent for how
-it gets answered once ruled (`photoRouteApplicable`, PR 563). Worked card, the
-read-only dry-run proof and the five-revision history:
-`data/wgv-docket-prepare-hold-v1/report.md`.
+**The applicability key is the manifest, not `report_only`.** `own_template_roof`
+is `report_only: true` and still sends a real report email on our own
+letterhead, so keying the exemption on `report_only` silently drops a route that
+family owes. The producer keys on the assembler's own declaration instead —
+`items.draft_builder_report_email.state !== "not_applicable"` — which is stamped
+`not_applicable` only where the matrix says the portal is the report.
+`initialManifestItems()` seeds every item `blocked`, never `not_applicable`, so a
+family that owes a report email and failed to build one is still held.
+
+Physical make-safe is untouched and still owes all three destinations. Dropping a
+route from the required set never stops the remaining routes being checked: an
+unready invoice route on an exempt card is still an honest hold. Contract,
+the live two-card verification and the controls it lights:
+`data/wgv-docket-prepare-hold-v1/ruling-implementation.md`; the diagnosis that
+found the two blockers were one question is in that folder's `report.md`.
+
+Related trap that survives the ruling: `route_draft_missing`'s recovery text says
+"prepare a new docket revision so the report email is assembled". For a portal
+report-only family that instruction is still unsatisfiable — `reportFile` is
+structurally null (the producing block is gated on `job_type ===
+"physical_makesafe"`), so no number of prepares will ever produce the draft.
+SWMS-261114 took three in one morning before anyone checked.
 
 ## A Curated Bind Does Not Retroactively Trust An Existing Docket Revision
 

@@ -16,8 +16,13 @@ const FACTS = {
     "The SecureWorks roof report has not been filled out.",
   assessment_recipe_parked:
     "The assessment outbound recipe is still awaiting the Captain's decision.",
-  report_only_email_applicability_parked:
-    "Whether report-only work uses the universal three-email release is still awaiting the Captain's decision.",
+  // `report_only_email_applicability_parked` was retired on 2026-08-06 when the
+  // Captain ruled the question (`data/decisions/2026-08-06-roof-report-email-shape.md`):
+  // a roof-report card sends ONE email, to the group inbox, carrying the
+  // invoice. Its fact said the decision was "still awaiting the Captain" and
+  // keeping that sentence in the catalogue would have been false text for a
+  // question that is answered. Nothing emits the code; see the retirement note
+  // in ses_review_cockpit.ts for where the ruling now lives.
   invoice_duplicate_live:
     "A live non-void Xero invoice already covers this released work.",
   invoice_duplicate_ambiguous:
