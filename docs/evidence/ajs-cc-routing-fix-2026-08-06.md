@@ -33,6 +33,7 @@ AJS/AJBR pack emails (with `workorders@`). Typos of interest: `ajsbuild` /
 | Constants (hard-coded `ajs.build`) | `AJS_VANESSA_CC`, `AJS_MANDI_CC`, `AJS_WORK_ORDERS_MAILBOX`, `SES_RELEASE_CC` in `ses_graph_mail_gateway.ts` |
 | Legacy pack + exact gate | `requiredPackCcForReportRecipient` / `checkExactRecipientGate` in `makesafe_send_pack.ts`; `makesafeSendPack` + photo follow-up + draft feed in `index.ts` |
 | Execute envelope | AJS branch in `ses_reporting_actions.ts` requires every `ajsPackCc()` address |
+| Operator email drafts | AJS branch of `buildEmailDrafts` in `ses_prepare_docket_revision.ts` renders `ajsPackCc()` (no second literal) |
 | Docs in this repo | `AGENTS.md` (AJS pack CC paragraph) |
 | Skill (wiki, outside this worktree) | `secureworks-makesafe-reporting` refs (`email-routing-and-approval.md`, `path-board.md`, `close-out-contract.md`) — **must be updated in wiki separately**; code is what sends |
 
@@ -44,3 +45,24 @@ No migration required: pack CCs are code constants, not DB rows.
 
 - **TO:** `workorders@ajs.build` (+ thread participants on sealed release)
 - **CC:** `ses@secureworkswa.com.au`, `vanessa@ajs.build`, `mandi@ajs.build`
+
+## In-flight releases approved before the ruling
+
+The 10 pre-ruling `makesafe_release_revision_routes` rows store `cc: [ses@]`
+only, and a stored envelope cannot be rewritten. So the execute gate scopes the
+widened requirement by whether the release has already begun dispatching: if
+any `ses_external_effects` `route_send` row exists for the release, every route
+holds the `ses@` floor that governed at approval; with no send effect at all the
+full `ajsPackCc()` set is required.
+
+That boundary is the difference between a safe refusal and a stranded release.
+`execute_ses_release_revision` reconciles a confirmed route rather than
+re-dispatching it, and the refusal's own recovery ("prepare a new release
+revision") mints a new content-derived `release_revision_id` and therefore new
+route-send operation keys — so refusing a half-sent release would either freeze
+it or mail the builder a second copy of what already went. Refusing a release
+that has never dispatched costs nothing: re-prepare picks up the permanent CCs.
+
+An unreadable send ledger is its own refusal (`route_send_proof_unreadable`,
+503) rather than a guessed floor in either direction. Regression:
+`ses_ajs_pack_cc_execute_gate_test.ts`.

@@ -31,7 +31,7 @@ import {
   type SesFamilyId,
   type SesFamilyMatrixRow,
 } from "./ses_family_matrix.ts";
-import { isAjsBuilderKey } from "./ses_release_route_shape.ts";
+import { ajsPackCc, isAjsBuilderKey } from "./ses_release_route_shape.ts";
 import {
   evaluateSesPhotoMailVolume,
   resolveSesMailTransportForPrepare,
@@ -1620,11 +1620,12 @@ function buildEmailDrafts(
   const ajs = isAjsBuilderKey(row.builder_key);
   if (ajs) {
     const drafts: Record<string, string> = {};
+    const ajsCc = ajsPackCc().join(", ");
     if (reportFile) {
       drafts.REPORT_EMAIL_DRAFT = draftEmail({
         to: [invoiceTo || "workorders@ajs.build", reportTo].filter(Boolean)
           .join(", "),
-        cc: "ses@secureworkswa.com.au",
+        cc: ajsCc,
         subject: `${ref} - report and invoice`,
         body: `Draft only. Please find the prepared ${
           row.family.replaceAll("_", " ")
@@ -1641,7 +1642,7 @@ function buildEmailDrafts(
       drafts.PHOTO_EMAIL_DRAFT = draftEmail({
         to: [invoiceTo || "workorders@ajs.build", reportTo].filter(Boolean)
           .join(", "),
-        cc: "ses@secureworkswa.com.au",
+        cc: ajsCc,
         subject: `Photo Evidence - ${ref}`,
         body:
           "Draft only. The complete, ordered original photo set is listed on the docket.",
