@@ -1273,6 +1273,15 @@ approved under, because a stored envelope cannot be rewritten and re-preparing a
 half-sent release re-mails the builder. An unreadable send ledger refuses as
 `route_send_proof_unreadable` rather than guessing a floor. That boundary and the
 live domain audit are owned by `docs/evidence/ajs-cc-routing-fix-2026-08-06.md`.
+Builder-facing body copy is plain client English (what is attached, the job
+reference, thanks) and carries no internal vocabulary: no draft, docket, pack,
+route, cycle or revision. `resolveDocketRoutes` (`ses_reporting_actions.ts`) SETS
+that body rather than inheriting `report?.body` / `photo.body`, so a draft stored
+under older wording cannot leak it into builder mail; `buildEmailDrafts`
+(`ses_prepare_docket_revision.ts`) writes the same wording at prepare. Both
+places are pinned by `ses_release_route_shape_test.ts` and
+`ses_prepare_docket_revision_test.ts`; keep the wording duplicated in the two
+producers rather than abstracting it.
 MLB pack routing is untouched (`makesafes@` / finance@ invoice path). Client-send
 gate kinds match the skill table exactly: `report_invoice`, `report`, `photo`,
 `invoice` in `makesafe_send_pack.ts` (`checkSesClientSendRouteGate`). Route

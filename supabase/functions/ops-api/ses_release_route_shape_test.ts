@@ -1,12 +1,10 @@
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  assertEquals,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
-import {
-  ajsPackCc,
-  ajsPackRecipients,
   AJS_MANDI_CC,
   AJS_VANESSA_CC,
   AJS_WORK_ORDERS_MAILBOX,
+  ajsPackCc,
+  ajsPackRecipients,
   clientSendGateKindForRoute,
   isAjsBuilderKey,
   SES_AJS_ROUTE_ORDER,

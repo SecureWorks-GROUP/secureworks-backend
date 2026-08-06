@@ -4737,11 +4737,13 @@ export async function executeSesReleaseRevisionAction(
       const attachmentHashes: unknown[] = Array.isArray(route.attachment_hashes)
         ? route.attachment_hashes
         : [];
-      const hashes: string[] = [...new Set<string>(
-        attachmentHashes
-          .map((h: unknown) => String(h || "").trim())
-          .filter((h): h is string => typeof h === "string" && h.length > 0),
-      )];
+      const hashes: string[] = [
+        ...new Set<string>(
+          attachmentHashes
+            .map((h: unknown) => String(h || "").trim())
+            .filter((h): h is string => typeof h === "string" && h.length > 0),
+        ),
+      ];
       if (hashes.length > 0) {
         const sizeRows = await client.from("makesafe_docket_artifacts").select(
           "content_hash,size_bytes,object_key,media_type",
@@ -4764,7 +4766,9 @@ export async function executeSesReleaseRevisionAction(
             sesRefusal(
               "route_draft_missing",
               "Release attachments are missing size metadata; re-prepare the docket before SEND IT.",
-              { evidence: { missing_content_hashes: missing, route_kind: kind } },
+              {
+                evidence: { missing_content_hashes: missing, route_kind: kind },
+              },
             ),
           );
         }

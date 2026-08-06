@@ -1629,7 +1629,8 @@ function buildEmailDrafts(
           .join(", "),
         cc: ajsCc,
         subject: `${ref} - report and invoice`,
-        body: `Please find attached the report and invoice for ${ref}.\n\nThank you.`,
+        body:
+          `Please find attached the report and invoice for ${ref}.\n\nThank you.`,
         attachments: [
           reportFile,
           ...invoiceAttachments.filter((name) => name !== reportFile),
