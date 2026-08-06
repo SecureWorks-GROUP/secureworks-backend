@@ -670,6 +670,10 @@ import {
   correlateIntakeApprovalIdentity as _correlateIntakeApprovalIdentity,
   intakeIdentityAttachmentNames as _intakeIdentityAttachmentNames,
 } from './makesafe_intake_approval_identity.ts'
+import {
+  describeMakesafeIntakeAdvanceRefusal as _describeMakesafeIntakeAdvanceRefusal,
+  resolveMakesafeIntakeAdvanceTrigger as _resolveMakesafeIntakeAdvanceTrigger,
+} from './makesafe_intake_advance_trigger.ts'
 import { refreshMakesafeIdentityAfterWorkOrderAttach as _refreshMakesafeIdentityAfterWorkOrderAttach } from './makesafe_work_order_identity_refresh.ts'
 import {
   assertInstructionCardMintAvailable as _assertInstructionCardMintAvailable,
@@ -19270,6 +19274,10 @@ export const _autoApproveCleanIntakeEnabledForTest = autoApproveCleanIntakeEnabl
 // and prove the M1 fail-loud banner is still written via the base-only retry.
 export const _writeIntakeHealthForTest = writeIntakeHealth
 export const _shouldAutoApproveCleanIntakeDraftRowForTest = shouldAutoApproveCleanIntakeDraftRow
+// Exported so the intent gate is proved through the REAL sweep rather than a stub:
+// the whole point of the 2026-08-06 ruling is that a render-path caller reaches
+// approveIntakeDraft zero times, and only the real wiring can show that.
+export const _autoApproveCleanIntakeDraftsForTest = autoApproveCleanIntakeDrafts
 // D-a fail-loud: exported so a test can prove auth-failure (dead key) is distinguished
 // from a transient failure, and the extraction-down marker is a stable constant.
 export const _isAnthropicAuthFailureForTest = isAnthropicAuthFailure
@@ -19291,7 +19299,23 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
   // Both explicit brakes remain fail-safe. When either is disabled this sweep still
   // produces a preview, but it performs no live approvals.
   const enabled = autoApproveCleanIntakeEnabled() && await isAutoFileEnabled(client)
-  const dryRun = requestedDryRun || !enabled
+  // Intent gate, separate from and additional to the privileged auth gate on the
+  // action. Approving mints a live job, so a live sweep must name an explicit or
+  // scheduled trigger; a render-path, unnamed or unknown trigger still gets the full
+  // preview below and approves nothing. The captain's 2026-08-06 ruling is the
+  // outcome (never a render side effect); the allow-list mechanism is this change's
+  // own choice. See makesafe_intake_advance_trigger.ts for both, and for why the
+  // refusal is fail-safe by construction.
+  const trigger = _resolveMakesafeIntakeAdvanceTrigger(body)
+  const triggerRefusal = _describeMakesafeIntakeAdvanceRefusal(trigger)
+  if (triggerRefusal && !requestedDryRun && enabled) {
+    // Loud, because a sanctioned caller landing here is a broken caller, not a
+    // no-op — and because a stale client hitting this is the defect still firing.
+    console.warn(
+      `[ops-api] auto_approve_clean_intake_drafts withheld live approval: ${triggerRefusal}`,
+    )
+  }
+  const dryRun = requestedDryRun || !enabled || !trigger.liveAuthorised
   const statuses = Array.isArray(body.statuses) && body.statuses.length
     ? body.statuses.map((s: any) => String(s || '').trim()).filter(Boolean)
     : ['needs_review', 'draft']
@@ -19342,8 +19366,12 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
     try {
       const approved = await approveIntakeDraft(client, {
         draft_id: draft.id,
-        approved_by: body.triggered_by || 'auto_intake_clean_gate',
-        review_notes: 'Auto-approved clean make-safe intake from board sweep: high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',
+        // The note names NO caller: authoritative per-row provenance is approved_by
+        // (the actual trigger). A note describing a deleted code path (the removed
+        // board render sweep) only misleads whoever later asks how a live job appeared.
+        // Rows written under the old wording are historically true of it and stay as-is.
+        approved_by: trigger.trigger,
+        review_notes: 'Auto-approved clean make-safe intake sweep: high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',
       })
       autoApproved.push({
         draft_id: draft.id,
@@ -19372,6 +19400,13 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
     enabled,
     dry_run: dryRun,
     requested_dry_run: requestedDryRun,
+    // Intent gate outcome. A caller that expected a live run and reads
+    // live_approval_authorised:false has a trigger problem, not an empty backlog.
+    trigger: trigger.trigger,
+    trigger_kind: trigger.kind,
+    live_approval_authorised: trigger.liveAuthorised,
+    trigger_refusal_reason: trigger.refusalReason,
+    trigger_refusal: triggerRefusal,
     checked_count: checked.length,
     eligible_count: eligible.length,
     auto_approved: autoApproved,
@@ -25098,9 +25133,17 @@ async function intakeHealth(client: any) {
     .gte('created_at', since24h)
   // Auto-filed = approved by the internal auto-intake path (new label 'auto-intake';
   // the older 'auto_intake_clean_gate' label is still counted for continuity).
+  // 'ops_intake_review_sweep' is the operator-invoked run of that SAME batch gate
+  // (no per-draft review), so it belongs here too — leaving it out would quietly
+  // shrink this number as callers move off the render-path trigger.
   const { count: autoFiled24h } = await client.from('makesafe_intake_drafts')
     .select('id', { count: 'exact', head: true })
-    .in('approved_by', ['auto-intake', 'auto_intake_clean_gate', 'ses-reporting-skill'])
+    .in('approved_by', [
+      'auto-intake',
+      'auto_intake_clean_gate',
+      'ses-reporting-skill',
+      'ops_intake_review_sweep',
+    ])
     .gte('approved_at', since24h)
 
   // M1.5 cost dashboard: read the per-draft cost records for the last 24h and roll them
