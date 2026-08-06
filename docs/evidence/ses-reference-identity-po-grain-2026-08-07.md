@@ -164,6 +164,30 @@ deno test --allow-read --allow-net --config deno.jsonc \
   supabase/functions/ops-api/makesafe_invoice_reference_match_test.ts
 ```
 
+## 6b. `SES_EVIDENCE_CONTRACT_VERSION`: considered, and declined
+
+The bump was considered and DECLINED. It stays at
+`c1-repair-restoration-sealed-v5`. An unbumped contract sitting beside an
+identity change is otherwise indistinguishable from one somebody forgot, so the
+reasoning is recorded here rather than left implicit.
+
+The standing AGENTS.md rule is to bump on a ruler-semantics change AND bracket
+it with a before/after `scripts/ses-c2-measure-board-evidence.ts` run. That
+bracket was run and returned BYTE-IDENTICAL output on both sides — same
+content-derived generation id
+`51ac167b20088c09a6eeecfa47ee9a8c55a0dd8a29bc05377afaba774a56d701`, same
+normalised output sha256
+`2839e4b53bba6188da3e7f8a8c1736935ba1a7f6318c0b935aa8c7d51e7f632d`. By the
+rule's own test the ruler semantics did not change, and
+`makesafe_evidence_requirements.ts` is untouched. AGENTS.md separately records
+that restating a version literal outside its owning suite is what reddened a
+baseline before, so bumping here would churn a ruler baseline for a change that
+provably moved nothing.
+
+Attribution is not lost by declining: a future measurement is attributable to
+the PO-aware versus PO-blind grammar by this dated document plus that generation
+id, which reproduces on rerun over unchanged state.
+
 ## 7. Tier 2 — named first-live-proofs
 
 | Item | Trigger |

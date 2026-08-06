@@ -417,21 +417,63 @@ Deno.test("siblings on one claim stay excluded when the PO cannot separate them"
   assertEquals(exclusions.length, 3);
 });
 
-Deno.test("an absent PO leaves the production cohort byte-identical", () => {
-  // Every consumer that cannot reach `jobs.metadata` must keep its previous
-  // answer exactly. This is what makes it safe for the C1 single-card
-  // entrypoint to go on supplying `external_ref` alone.
+Deno.test("identity no invoice names leaves the production cohort byte-identical", () => {
+  // The C1 safety property: a consumer that cannot reach `jobs.metadata` and
+  // supplies `external_ref` ALONE gets the same answer as the PO-aware
+  // consumers, because identity no eligible invoice names contributes nothing.
+  //
+  // The fixture carries no `builder_po_number` at all, so stripping the field
+  // would assert nothing. This adds one instead: every job gets a card-unique
+  // synthetic purchase order whose digits no invoice reference names.
+  //
+  // The first cards get a DECOY - the leading `SES_MIN_REFERENCE_DIGITS` of a
+  // LONGER invoice run, so a whole-run comparison never matches it while a
+  // substring test would. That is what makes this test able to fail: leak PO
+  // digits into candidate matching by substring and the decoys attach invoices,
+  // moving both the cohort and the exclusions. (De-duplication is pinned by the
+  // redundant-PO test below, which is the mutation-proof for that half.)
+  const invoiceRuns = new Set(
+    fixture.invoices.flatMap((inv) => digitRuns(inv.reference)),
+  );
+  const jobRuns = new Set(
+    fixture.jobs.flatMap((job) => digitRuns(job.external_ref)),
+  );
+  const taken = new Set([...invoiceRuns, ...jobRuns]);
+  const decoys = [
+    ...new Set(
+      [...invoiceRuns]
+        .filter((run) => run.length > SES_MIN_REFERENCE_DIGITS)
+        .map((run) => run.slice(0, SES_MIN_REFERENCE_DIGITS)),
+    ),
+  ].filter((run) => !taken.has(run));
+  assert(decoys.length > 0, "the fixture must supply substring decoys");
+
+  const syntheticPoDigits = fixture.jobs.map((_job, index) =>
+    index < decoys.length ? decoys[index] : `7${String(index).padStart(6, "0")}`
+  );
+  assertEquals(
+    new Set(syntheticPoDigits).size,
+    syntheticPoDigits.length,
+    "synthetic purchase orders must be card-unique",
+  );
+  for (const digits of syntheticPoDigits) {
+    assert(!taken.has(digits), `synthetic ${digits} collides with real identity`);
+  }
+
   const base = deriveSesUnlinkedInvoiceMatches(fixture.jobs, fixture.invoices);
-  const undefinedPo = deriveSesUnlinkedInvoiceMatches(
-    fixture.jobs.map(({ builder_po_number: _drop, ...job }) => job),
+  const withUnnamedPo = deriveSesUnlinkedInvoiceMatches(
+    fixture.jobs.map((job, index) => ({
+      ...job,
+      builder_po_number: `PO-${syntheticPoDigits[index]}`,
+    })),
     fixture.invoices,
   );
   assertEquals(
-    undefinedPo.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
+    withUnnamedPo.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
     base.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
   );
   assertEquals(
-    undefinedPo.exclusions.map((e) => `${e.job_id}:${e.reason}`),
+    withUnnamedPo.exclusions.map((e) => `${e.job_id}:${e.reason}`),
     base.exclusions.map((e) => `${e.job_id}:${e.reason}`),
   );
 });
