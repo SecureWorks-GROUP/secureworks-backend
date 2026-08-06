@@ -600,6 +600,19 @@ then branch the submodule off ITS `origin/main` (not the stale pin). UI changes
 ship as a secureworks-ux PR; this repo's gitlink is only bumped by occasional
 pointer chores — never point it at an unpushed commit.
 
+**The gitlink is NOT the serving path, and bumping it deploys nothing.** The Ops
+Dash is served by GitHub Pages from `secureworks-ux` `main` directly
+(`https://secureworks-group.github.io/secureworks-ux/ops.html`); this repo has no
+Pages site and no workflow that touches `dashboard`. Merged UX work reaches the
+Captain within ~3 minutes of merge with no action here, so a stale pin never
+explains a missing UI fix or a slow board — measure before believing that theory.
+The pin is also a DIVERGENCE, not a lag: it sits on the HEAD of an unmerged UX
+branch whose 5 commits are all superseded on `main`, so `git log <pin>..main`
+undercounts and `merge-base --is-ancestor` fails. Captain declined the bump
+(2026-08-06) as a zero-effect change. Evidence, timing proof and the measured
+3.3-4.2s click-to-paint:
+`docs/evidence/dashboard-gitlink-is-not-the-serving-path-2026-08-06.md`.
+
 ## Production Edge Deploy Rule
 
 `ops-api` and `send-quote` are production backend functions. They must have one
