@@ -5,8 +5,8 @@ Scope: ONE card. Captain authorised the make-safe report and the site photos to 
 Prime work-order mailer `mlb.mailer@primeeco.tech` under the exact work-order subject.
 Nothing re-sent to `makesafes@mlbuilders.com.au`. No invoice on this path.
 
-Status at time of writing: **dry run complete, both routes clean, live send NOT run.**
-Waiting on the Captain's go.
+Status: **SENT.** Both emails dispatched 2026-08-06 under Captain go, both confirmed,
+both read back from admin@ Sent Items. Proof in section 6.
 
 Privacy: this ledger carries suburb and job reference only. The work-order subject
 contains a street address, so it is recorded here redacted plus a SHA-256 of the exact
@@ -192,9 +192,32 @@ are dropped purely because the module constant is a flat 12, not because Graph o
 Exchange would refuse them.
 
 Standing rule is no photo cull; the Captain's narrow exception permits roughly 10-15 on
-this ops-visibility path. 12 sits inside that band, so sending 12 is defensible. But
-because nothing physical forces the loss, this is a real choice and is put to the
-Captain rather than absorbed. See the open decision below.
+this ops-visibility path. 12 sits inside that band. Because nothing physical forces the
+loss, this was put up as a decision rather than absorbed.
+
+**Decision taken, and what it cost.** The direction was: send all 15 if the route lets
+the count be set for this one send, but do NOT raise `MAILER_OPS_PHOTO_CAP`, because
+that is a standing change to every future send. The route does not allow a per-send
+count. `SendMailerOpsVisibilityArgs` (line 1107) has no cap or photo-limit field, and
+the call site at line 1419 is `resolveMailerOpsPhotoAttachments(client, jobId, cycle)`
+with the fourth `cap` parameter defaulted to the module constant. 15 was therefore
+reachable only through the global cap, which was ruled out.
+
+**So 12 of the 15 photos were sent, and these three were left out:**
+
+| media_id | position by creation order | size |
+|---|---|---|
+| `2bdaf886-d195-467d-8bb4-b104f38b410c` | 3 of 15 | 508,845 bytes |
+| `a5c11ff3-fbaf-492f-bee9-73bb694e3522` | 8 of 15 | 364,823 bytes |
+| `3ed578e6-b462-4d75-9ba7-a0794013e308` | 13 of 15 | 510,327 bytes |
+
+They were left out for one reason only: the module's flat cap of 12. Not size, not
+cycle scope, not receipt exclusion, not quality. Both excluded counts were zero and all
+15 sit in the current attendance cycle. The builder therefore holds 12 of the 15
+current-cycle site photos on the Prime mailer thread. The complete 15 remain on the
+card and in the billing pack that already went to `makesafes@`.
+
+Raising the cap goes to the Captain separately.
 
 ## 5. Fences and gates
 
@@ -216,20 +239,85 @@ Nothing was weakened, bypassed or worked around. No gate refused either dry run.
 
 ## 6. Live send proof
 
-Not yet run. This section is filled after the Captain's go, and will carry, for each of
-the two emails: Graph `message_id`, `internet_message_id`, the recipient list as the
-API recorded it, the effect operation key and state, and an admin@ Sent Items readback
-matched on the `x-secureworks-ses-operation` header.
+Both sent 2026-08-06 with `dry_run: false`, each under its own deliberate
+`attempt_key`. Both returned `success: true` and both effects reached
+`state: confirmed` with `content_proof: dispatched_by_this_call`.
 
-## 7. Open decision for the Captain
+### Email 1 of 2 - report
 
-1. **Go / no-go on the live send.** Both routes are dry-run clean. Nothing has gone to
-   the Prime mailer for this card, so this is a first send to that destination, not a
-   re-send.
-2. **12 of 15 photos, or all 15?** Sending 12 is what the route does today and needs no
-   change. Sending all 15 would require raising `MAILER_OPS_PHOTO_CAP`
-   (`ses_mailer_ops_send.ts:105`), which is a sealed module constant and is his call,
-   not mine. Size is not the constraint either way.
+| field | value |
+|---|---|
+| Graph `message_id` | `AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5cUAAA=` |
+| `internet_message_id` | `<SY8P300MB0840C0BF6B17F0107617642993D22@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>` |
+| from | `admin@secureworkswa.com.au` |
+| to (as the API recorded it) | `["mlb.mailer@primeeco.tech"]` |
+| cc (as the API recorded it) | `["ses@secureworkswa.com.au"]` |
+| attachments | `Make-Safe-Report-SWMS-261147-Mosman-Park-359775313575.pdf` (1, role `report_pdf`) |
+| operation token | `SES-71d3e3a3-58d1-55ac-92eb-8195b0ad7923` |
+| operation header | `x-secureworks-ses-operation` |
+| effect operation_key | `ses:mailer_ops_send:71d3e3a3-58d1-55ac-92eb-8195b0ad7923` |
+| effect state | `confirmed` at 2026-08-06 05:35:23.139Z |
+| attempt_key | `762ebaad-report-mailer-topup-v1` |
+| subject_source | `emails_subject` |
+| provenance | `curated_bind` |
+
+### Email 2 of 2 - photos
+
+| field | value |
+|---|---|
+| Graph `message_id` | `AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5cVAAA=` |
+| `internet_message_id` | `<SY8P300MB08401DEFB7234C910AA1DF7A93D22@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>` |
+| from | `admin@secureworkswa.com.au` |
+| to (as the API recorded it) | `["mlb.mailer@primeeco.tech"]` |
+| cc (as the API recorded it) | `["ses@secureworkswa.com.au"]` |
+| attachments | `site-photo-01.jpg` .. `site-photo-12.jpg` (12, all role `site_photo`, all `image/jpeg`) |
+| operation token | `SES-0f0602b2-1c6f-56ae-b9a2-1947ee6a3966` |
+| operation header | `x-secureworks-ses-operation` |
+| effect operation_key | `ses:mailer_ops_send:0f0602b2-1c6f-56ae-b9a2-1947ee6a3966` |
+| effect state | `confirmed` at 2026-08-06 05:35:42.864Z |
+| attempt_key | `762ebaad-photo-mailer-topup-v1` |
+| subject_source | `emails_subject` |
+| photo_selection | 15 available, 12 selected, cap 12, 0 receipts excluded, 0 other-cycle excluded |
+
+Neither email carried an invoice. `fences.invoice_structurally_impossible: true` on
+both responses.
+
+### Sent Items readback
+
+Read back independently from the `admin@secureworkswa.com.au` mailbox, Sent Items,
+search `MLB-27482`, after the send. Both messages are present and their Graph ids match
+the ids the API returned exactly:
+
+| # | Graph id (tail) | sentDateTime | to | cc | hasAttachments | body opening |
+|---|---|---|---|---|---|---|
+| report | `…AAI1-5cUAAA=` | 2026-08-06T05:35:20Z | `mlb.mailer@primeeco.tech` | `ses@secureworkswa.com.au` | true | "Please find attached the make-safe report for SWMS-261147." |
+| photo | `…AAI1-5cVAAA=` | 2026-08-06T05:35:40Z | `mlb.mailer@primeeco.tech` | `ses@secureworkswa.com.au` | true | "Please find attached site photo evidence for SWMS-261147." |
+
+Both show `from: Admin <admin@secureworkswa.com.au>`, both carry the exact work-order
+subject, and both are addressed to the Prime mailer with the ses@ CC. The same readback
+also shows the three earlier billing-pack messages to `makesafes@mlbuilders.com.au`
+(report 05:10:38Z, photo 05:10:54Z, invoice 05:11:01Z), which independently corroborates
+section 1. **Nothing new was sent to `makesafes@`.**
+
+Builder-facing body copy on both new emails is plain client English naming what is
+attached and the job reference, with no internal vocabulary and no em dashes.
+
+Note on how this readback was obtained: the interactive ms365 session
+(`marnin@secureworkswa.com.au`) has no delegate access to admin@ and returns
+`ErrorAccessDenied` on that mailbox. The readback above came through the SecureSuite
+mailbox search, which uses the platform's own application credentials. No credential was
+substituted to get around a gate; the ses@ CC is a second independent proof surface if
+a third confirmation is ever wanted.
+
+## 7. Outstanding for the Captain
+
+One item, and it is not a blocker on this card.
+
+**`MAILER_OPS_PHOTO_CAP` is a flat 12 and cost this card three photos.** Per section 4,
+the route has no per-send count, so all 15 was unreachable without changing the standing
+constant, which was correctly ruled out for a single card. The three left out are named
+in section 4. If the cap should be higher, that is a standing change affecting every
+future mailer ops send and belongs to the Captain, not to this task.
 
 ## Reproduction
 

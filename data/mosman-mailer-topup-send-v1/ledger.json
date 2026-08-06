@@ -10,7 +10,7 @@
     "cycle_number": 1,
     "reattend_count": 0
   },
-  "state": "dry_run_complete_awaiting_captain_go",
+  "state": "sent_and_proved",
   "route_used": {
     "action": "ops-api?action=send_mailer_ops_visibility",
     "implementation": "supabase/functions/ops-api/ses_mailer_ops_send.ts:1175 (sendMailerOpsVisibilityAction)",
@@ -139,7 +139,15 @@
     "all_15_base64_mib": 6.8,
     "exchange_message_ceiling_mb": 35,
     "size_forces_the_cap": false,
-    "note": "All 15 clear every documented Graph and Exchange ceiling with large margin. The three are dropped only because the module constant is a flat 12, so this is a real choice and is put to the Captain."
+    "note": "All 15 clear every documented Graph and Exchange ceiling with large margin. The three were dropped only because the module constant is a flat 12.",
+    "decision": {
+      "instruction": "Send all 15 if the route allows a per-send count; do NOT raise MAILER_OPS_PHOTO_CAP for one card; if 15 needs the global cap, send 12 and name the 3.",
+      "per_send_count_supported": false,
+      "evidence": "SendMailerOpsVisibilityArgs (ses_mailer_ops_send.ts:1107) has no cap or photo-limit field, and the call site at line 1419 is resolveMailerOpsPhotoAttachments(client, jobId, cycle) with the fourth cap parameter defaulted to the module constant.",
+      "outcome": "sent 12 of 15; global cap NOT raised; the 3 excluded are named above and in report.md section 4",
+      "why_excluded": "the flat module cap of 12 only - not size, not cycle scope, not receipt exclusion, not quality; excluded_receipt_count and excluded_other_cycle_count were both 0 and all 15 are in the current attendance cycle",
+      "escalated": "raising the cap is a standing change to every future send and goes to the Captain separately"
+    }
   },
   "gates": {
     "any_gate_refused": false,
@@ -151,12 +159,110 @@
     "money_verbs_performed": []
   },
   "live_send": {
-    "performed": false,
-    "reason": "dry run first; stopped for the Captain's go per the brief",
-    "proof": null
+    "performed": true,
+    "authorised_by": "Captain, this card by name; go relayed 2026-08-06",
+    "emails": [
+      {
+        "sequence": 1,
+        "kind": "report",
+        "success": true,
+        "dry_run": false,
+        "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5cUAAA=",
+        "internet_message_id": "<SY8P300MB0840C0BF6B17F0107617642993D22@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+        "from": "admin@secureworkswa.com.au",
+        "to_as_api_recorded": ["mlb.mailer@primeeco.tech"],
+        "cc_as_api_recorded": ["ses@secureworkswa.com.au"],
+        "attachment_names": ["Make-Safe-Report-SWMS-261147-Mosman-Park-359775313575.pdf"],
+        "attachment_roles": ["report_pdf"],
+        "attachment_count": 1,
+        "invoice_present": false,
+        "operation_token": "SES-71d3e3a3-58d1-55ac-92eb-8195b0ad7923",
+        "operation_header": "x-secureworks-ses-operation",
+        "effect_operation_key": "ses:mailer_ops_send:71d3e3a3-58d1-55ac-92eb-8195b0ad7923",
+        "effect_state": "confirmed",
+        "effect_confirmed_at_utc": "2026-08-06T05:35:23.139Z",
+        "content_proof": "dispatched_by_this_call",
+        "attempt_key": "762ebaad-report-mailer-topup-v1",
+        "subject_source": "emails_subject",
+        "provenance_satisfied": "curated_bind",
+        "proof_surfaces": ["admin_sent_items", "ses_intake_cc"]
+      },
+      {
+        "sequence": 2,
+        "kind": "photo",
+        "success": true,
+        "dry_run": false,
+        "message_id": "AAMkADE1Zjk0YmY3LTJkYjMtNDk4YS1hYjE2LWM5ODViYTZkOWRkZQBGAAAAAABRIFe74Q0ORre95NRvsgLFBwCdk5KDKwsUTpeEHVKg6rR_AAAAAAEJAACdk5KDKwsUTpeEHVKg6rR_AAI1-5cVAAA=",
+        "internet_message_id": "<SY8P300MB08401DEFB7234C910AA1DF7A93D22@SY8P300MB0840.AUSP300.PROD.OUTLOOK.COM>",
+        "from": "admin@secureworkswa.com.au",
+        "to_as_api_recorded": ["mlb.mailer@primeeco.tech"],
+        "cc_as_api_recorded": ["ses@secureworkswa.com.au"],
+        "attachment_names": [
+          "site-photo-01.jpg", "site-photo-02.jpg", "site-photo-03.jpg",
+          "site-photo-04.jpg", "site-photo-05.jpg", "site-photo-06.jpg",
+          "site-photo-07.jpg", "site-photo-08.jpg", "site-photo-09.jpg",
+          "site-photo-10.jpg", "site-photo-11.jpg", "site-photo-12.jpg"
+        ],
+        "attachment_roles_all": "site_photo",
+        "attachment_count": 12,
+        "photos_available": 15,
+        "photos_not_sent": 3,
+        "invoice_present": false,
+        "operation_token": "SES-0f0602b2-1c6f-56ae-b9a2-1947ee6a3966",
+        "operation_header": "x-secureworks-ses-operation",
+        "effect_operation_key": "ses:mailer_ops_send:0f0602b2-1c6f-56ae-b9a2-1947ee6a3966",
+        "effect_state": "confirmed",
+        "effect_confirmed_at_utc": "2026-08-06T05:35:42.864Z",
+        "content_proof": "dispatched_by_this_call",
+        "attempt_key": "762ebaad-photo-mailer-topup-v1",
+        "subject_source": "emails_subject",
+        "proof_surfaces": ["admin_sent_items", "ses_intake_cc"]
+      }
+    ],
+    "sent_items_readback": {
+      "mailbox": "admin@secureworkswa.com.au",
+      "folder": "Sent Items",
+      "search": "MLB-27482",
+      "obtained_via": "SecureSuite mailbox search using the platform's own application credentials; the interactive ms365 session (marnin@secureworkswa.com.au) has no delegate access to admin@ and returns ErrorAccessDenied",
+      "credential_substituted_to_bypass_a_gate": false,
+      "messages_found": [
+        {
+          "kind": "report",
+          "graph_id_matches_api_message_id": true,
+          "sent_date_time_utc": "2026-08-06T05:35:20Z",
+          "from": "admin@secureworkswa.com.au",
+          "to": ["mlb.mailer@primeeco.tech"],
+          "cc": ["ses@secureworkswa.com.au"],
+          "has_attachments": true,
+          "body_opening": "Please find attached the make-safe report for SWMS-261147."
+        },
+        {
+          "kind": "photo",
+          "graph_id_matches_api_message_id": true,
+          "sent_date_time_utc": "2026-08-06T05:35:40Z",
+          "from": "admin@secureworkswa.com.au",
+          "to": ["mlb.mailer@primeeco.tech"],
+          "cc": ["ses@secureworkswa.com.au"],
+          "has_attachments": true,
+          "body_opening": "Please find attached site photo evidence for SWMS-261147."
+        }
+      ],
+      "corroboration": "the same readback shows the three earlier billing-pack messages to makesafes@mlbuilders.com.au (report 05:10:38Z, photo 05:10:54Z, invoice 05:11:01Z), independently confirming section 1",
+      "new_mail_to_makesafes": "none"
+    }
   },
-  "open_decisions": [
-    "Go / no-go on the live send. Both routes dry-run clean; this is a first send to the Prime mailer, not a re-send.",
-    "12 of 15 photos as the route does today, or raise MAILER_OPS_PHOTO_CAP (ses_mailer_ops_send.ts:105) to carry all 15. Size is not the constraint either way; the constant is sealed and the change is the Captain's call."
+  "boundaries_held": {
+    "sent_to_makesafes": false,
+    "invoice_on_this_path": false,
+    "money_verbs_performed": [],
+    "inv_1152_touched": false,
+    "allowlist_expanded": false,
+    "photo_cap_constant_changed": false,
+    "other_cards_touched": 0,
+    "gates_refused_or_bypassed": 0,
+    "em_dashes_in_builder_facing_copy": 0
+  },
+  "outstanding_for_captain": [
+    "MAILER_OPS_PHOTO_CAP (ses_mailer_ops_send.ts:105) is a flat 12 and cost this card three photos. The route has no per-send count, so all 15 was unreachable without changing the standing constant, which was ruled out for a single card. Raising it affects every future mailer ops send and is the Captain's call."
   ]
 }
