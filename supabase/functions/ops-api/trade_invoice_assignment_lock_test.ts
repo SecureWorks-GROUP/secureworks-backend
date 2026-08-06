@@ -218,7 +218,7 @@ Deno.test("index.ts clocked lane filters live-invoiced and never-clocked rows", 
 
 Deno.test("index.ts decides the lock before issuing the stamp UPDATE", () => {
   const planAt = INDEX.indexOf("const lockPlan = planAssignmentLock({");
-  const updateAt = INDEX.indexOf("let stampQuery = client.from('job_assignments')");
+  const updateAt = INDEX.indexOf("const stampQuery = client.from('job_assignments')");
   assert(planAt > 0, "Layer B must build a lock plan");
   assert(updateAt > 0, "Layer B must still issue the stamp UPDATE");
   assert(
@@ -228,9 +228,46 @@ Deno.test("index.ts decides the lock before issuing the stamp UPDATE", () => {
   assertStringIncludes(INDEX, "if (!lockPlan.ok) {");
 });
 
-Deno.test("index.ts rolls back a partial claim scoped to this invoice", () => {
+Deno.test("index.ts promotes a reused weekly draft by compare-and-swap", () => {
+  // The weekly draft row (and its id) is shared across submissions. Without a
+  // status='draft' CAS on the promotion UPDATE, two concurrent submits share
+  // invoice.id: the loser's rollback then unstamps the rows the winner just
+  // claimed while the winner pushes the Xero bill — unheld, re-billable
+  // assignments on a live pushed invoice (double pay).
+  const promoteAt = INDEX.indexOf(".update(invoicePayload)");
+  assert(promoteAt > 0, "reused-draft promotion must exist");
+  const promote = INDEX.slice(promoteAt, promoteAt + 300);
+  assertStringIncludes(promote, ".eq('status', 'draft')");
+  assertStringIncludes(promote, ".select('id')");
+  assertStringIncludes(INDEX, "This invoice is already being submitted.");
+  // The stale-line delete must run AFTER winning the CAS, or a losing
+  // concurrent submit deletes the winner's freshly inserted lines.
+  const lineClearAt = INDEX.indexOf("const { error: lineClearErr } = await client.from('trade_invoice_lines')");
+  assert(lineClearAt > promoteAt, "draft lines are cleared only after the CAS promotion");
+});
+
+Deno.test("index.ts treats the current invoice's own stamps as claimable", () => {
+  // A failed rollback leaves invoiced_in = invoice.id while the invoice is
+  // demoted to 'draft'. The retry reuses that draft and promotes it LIVE before
+  // the stamp read, so without this the trade's own prior stamps read as
+  // "already on a live invoice" — a permanent wedge for the week.
+  assertStringIncludes(INDEX, "...new Set([...releasedStampInvoiceIds, String(invoice.id)])");
+  assertStringIncludes(INDEX, "releasedInvoiceIds: claimableStampInvoiceIds,");
+  assertStringIncludes(
+    INDEX,
+    ".or('invoiced_in.is.null,invoiced_in.in.(' + claimableStampInvoiceIds.join(',') + ')')",
+  );
+});
+
+Deno.test("index.ts rolls back a partial claim scoped to the rows it stamped", () => {
+  // The weekly draft id predates the request, so `invoiced_in = invoice.id`
+  // alone can match rows stamped by an earlier attempt or a concurrent winner.
+  // The rollback must release only the ids the stamp UPDATE returned.
   assertStringIncludes(INDEX, ".update({ invoiced_in: null })");
-  assertStringIncludes(INDEX, ".eq('invoiced_in', invoice.id)");
+  const rollbackAt = INDEX.indexOf(".update({ invoiced_in: null })");
+  const rollback = INDEX.slice(rollbackAt, rollbackAt + 200);
+  assertStringIncludes(rollback, ".eq('invoiced_in', invoice.id)");
+  assertStringIncludes(rollback, ".in('id', stampedIdList)");
 });
 
 Deno.test("index.ts never writes the CHECK-illegal 'failed' status to trade_invoices", () => {

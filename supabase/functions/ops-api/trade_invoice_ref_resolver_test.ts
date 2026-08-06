@@ -164,7 +164,7 @@ Deno.test("trade invoice submit saves local lines before Xero and checks insert 
     "POSSIBLE DUPLICATE - verify prior trade invoice before approving",
   );
   const conditionalStamp = source.indexOf(
-    "stampQuery.or('invoiced_in.is.null,invoiced_in.in.(' + releasedStampInvoiceIds.join(',') + ')')",
+    ".or('invoiced_in.is.null,invoiced_in.in.(' + claimableStampInvoiceIds.join(',') + ')')",
   );
   const stampOwnership = source.indexOf(
     ".eq('user_id', tradeUser.id)",

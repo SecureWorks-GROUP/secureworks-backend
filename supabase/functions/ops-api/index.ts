@@ -8551,7 +8551,6 @@ if (import.meta.main) serve(async (req: Request) => {
                 .maybeSingle()
               if (draftToSubmit?.status === 'draft') {
                 invoice = { id: draftToSubmit.id }
-                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', invoice.id)
               }
             }
             if (!invoice && week_start) {
@@ -8563,7 +8562,6 @@ if (import.meta.main) serve(async (req: Request) => {
                 .maybeSingle()
               if (existingDraft) {
                 invoice = { id: existingDraft.id }
-                await client.from('trade_invoice_lines').delete().eq('trade_invoice_id', invoice.id)
               }
             }
 
@@ -8585,8 +8583,34 @@ if (import.meta.main) serve(async (req: Request) => {
             }
 
             if (invoice) {
-              const { error: updErr } = await client.from('trade_invoices').update(invoicePayload).eq('id', invoice.id)
+              // Compare-and-swap promotion: the weekly draft row (and its id) is
+              // shared across submissions, so promote it ONLY from 'draft'. Two
+              // concurrent submits (double-tap) would otherwise share invoice.id,
+              // and the loser's stamp rollback below would unstamp the rows the
+              // winner just claimed while the winner pushes the Xero bill.
+              const { data: promoted, error: updErr } = await client.from('trade_invoices')
+                .update(invoicePayload)
+                .eq('id', invoice.id)
+                .eq('status', 'draft')
+                .select('id')
               if (updErr) throw new Error('Failed to submit draft invoice: ' + updErr.message)
+              if (!promoted || promoted.length === 0) {
+                throw new ApiError('This invoice is already being submitted. Wait a moment, then check your Pay tab before trying again.', 409)
+              }
+              // Clear stale draft lines only AFTER winning the promotion, so a
+              // losing concurrent submit can never delete the winner's lines.
+              const { error: lineClearErr } = await client.from('trade_invoice_lines')
+                .delete().eq('trade_invoice_id', invoice.id)
+              if (lineClearErr) {
+                const { error: markErr } = await client.from('trade_invoices').update({
+                  status: 'draft',
+                  query_note: ('Invoice line clear failed before Xero push: ' + lineClearErr.message).slice(0, 500),
+                }).eq('id', invoice.id)
+                if (markErr) {
+                  console.error('[ops-api] Failed to mark invoice line-clear failure:', markErr.message)
+                }
+                throw new Error('Failed to clear draft invoice line items: ' + lineClearErr.message)
+              }
             } else {
               const { data: newInvoice, error: invErr } = await client.from('trade_invoices').insert(invoicePayload).select('id').single()
               if (invErr) {
@@ -8713,6 +8737,15 @@ if (import.meta.main) serve(async (req: Request) => {
                   .filter((ti: any) => RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
                   .map((ti: any) => ti.id)
               }
+              // Rows already stamped with THIS invoice's id are claimable too:
+              // re-stamping them is idempotent. The invoice was promoted to
+              // 'pending_acknowledgment' (LIVE) above, so without this a prior
+              // failed rollback that left invoiced_in = invoice.id would wedge
+              // every retry of this week behind the trade's own stamps. The CAS
+              // promotion guarantees no concurrent submit shares this id.
+              const claimableStampInvoiceIds = [
+                ...new Set([...releasedStampInvoiceIds, String(invoice.id)]),
+              ]
               // Decide BEFORE writing. The previous code issued the UPDATE first
               // and counted matched rows afterwards, so a partial match mutated
               // the rows it did match and then threw — permanently consuming
@@ -8721,29 +8754,35 @@ if (import.meta.main) serve(async (req: Request) => {
               const lockPlan = planAssignmentLock({
                 expectedIds: expectedAssignmentIds,
                 candidates: (stampCandidates || []) as any,
-                releasedInvoiceIds: releasedStampInvoiceIds,
+                releasedInvoiceIds: claimableStampInvoiceIds,
               })
               if (!lockPlan.ok) {
                 await failAssignmentStamp(describeAssignmentLockBlock(lockPlan, stampJobLabels))
               }
-              let stampQuery = client.from('job_assignments')
+              const stampQuery = client.from('job_assignments')
                 .update({ invoiced_in: invoice.id })
                 .eq('user_id', tradeUser.id)
                 .in('id', expectedAssignmentIds)
-              stampQuery = releasedStampInvoiceIds.length > 0
-                ? stampQuery.or('invoiced_in.is.null,invoiced_in.in.(' + releasedStampInvoiceIds.join(',') + ')')
-                : stampQuery.is('invoiced_in', null)
+                .or('invoiced_in.is.null,invoiced_in.in.(' + claimableStampInvoiceIds.join(',') + ')')
               const { data: stampedAssignments, error: stampErr } = await stampQuery.select('id')
               const stampedIds = new Set((stampedAssignments || []).map((a: any) => a.id))
               if (stampErr || stampedIds.size !== expectedAssignmentIds.length) {
                 // Every assignment was claimable a moment ago, so reaching here
-                // means a concurrent submission took some of them. Release the
-                // rows THIS invoice just claimed before failing, so a half-claim
-                // never outlives the request. `invoiced_in = invoice.id` can only
-                // match rows this statement stamped: the id was minted above.
-                const { error: rollbackErr } = await client.from('job_assignments')
-                  .update({ invoiced_in: null })
-                  .eq('invoiced_in', invoice.id)
+                // means a concurrent submission took some of them. Release ONLY
+                // the rows THIS statement stamped (the ids it returned) before
+                // failing, so a half-claim never outlives the request. A bare
+                // `invoiced_in = invoice.id` filter would be wrong here: the
+                // weekly draft id predates this request, so rows stamped by an
+                // earlier attempt whose rollback failed also carry it.
+                const stampedIdList = [...stampedIds]
+                let rollbackErr: { message: string } | null = null
+                if (stampedIdList.length > 0) {
+                  const { error } = await client.from('job_assignments')
+                    .update({ invoiced_in: null })
+                    .eq('invoiced_in', invoice.id)
+                    .in('id', stampedIdList)
+                  rollbackErr = error
+                }
                 if (rollbackErr) {
                   console.error('[ops-api] Assignment stamp rollback failed:', rollbackErr.message)
                 }
