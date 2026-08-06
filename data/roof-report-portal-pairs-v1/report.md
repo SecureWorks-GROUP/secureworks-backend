@@ -32,11 +32,38 @@ What you are approving on each pair: **the portal is locked/submitted** (screens
 
 ---
 
+## Captain hold — two facts that must sit on the ledger (not buried)
+
+These are the reason the first screenshot set was held. Say them plainly:
+
+### 1) The three pair filenames were **not uniform**
+
+| File (first ship) | What it actually was |
+|---|---|
+| `SWMS-261081-portal.png` | **Our F7 “Prime portal observation” assertion card** — SecureWorks text claiming locked/submitted, not Primeeco’s UI |
+| `SWMS-261114-portal.png` | **Real Primeeco page** (already) |
+| `SWMS-26980-portal.png` | **Real Primeeco page** (already) |
+
+Only **one** of the three was a synthetic observation frame. The other two were genuine portal screenshots. Filenames alone gave the Captain **no way to tell which was which**. That is a process failure: pair evidence must be the same *kind* of thing, or each file must be labelled so the difference cannot be missed.
+
+### 2) **SWMS-261114 first real capture carried unredacted client PII**
+
+The first real Primeeco PNG for White Gum Valley included the Job Details panel with **client-identifying content** (customer names and site address on the builder portal). That image was staged for the Captain and for this repo. That is a privacy failure. It must not be soft-pedalled as “we redacted later.”
+
+**What was wrong:** real page, yes — but **not** redacted.  
+**What is in the deliverable now:** the page was re-opened, `prime-object-summary` blanked in-page, full-page PNG re-shot so Job Details PII is gone while locked banner + filled Roof Report remain.
+
+### Re-verify of deliverable PNGs (2026-08-06, open each live share + re-read files)
+
+Live re-open of all three share URLs (after same in-page blank): `prime=true`, `locked=true`, `ourObservation=false`, no customer/site-address labels, no street/email/phone hits in page text. Deliverable files re-read from disk: PRIME ECOSYSTEM header, locked banner, filled Roof Report progress (21/23, 24/24, 20/23). **None** is the F7 observation card. **None** shows residual Job Details client PII in the deliverable set.
+
+---
+
 ## What this run did
 
 1. **Census:** Management API read-only list of `roof_report` family board cards with `primeeco.tech/share/` links (61+ rows; 74 share URLs after expand). Excluded owned/forbidden suburbs and job numbers from the brief.
 2. **Portal observation:** `chrome-devtools-axi` open live `primeeco.tech/share/…` URLs → classify locked/submitted vs expired vs open form. Screenshot only when locked/submitted.
-3. **Screenshot honesty (Captain hold 2026-08-06):** Pair PNGs must be **Primeeco’s own UI** (locked banner + filled roof report), not F7’s opaque “Prime portal observation” assertion card. Client PII is redacted **in the live page** before capture by blanking `prime-object-summary` only — no SecureWorks overlay covering the form. SWMS-261081 was wrongly replaced once with an F7 evidence frame; all three green-pair screenshots were re-captured as real Prime pages.
+3. **Screenshot honesty (Captain hold 2026-08-06):** Pair PNGs must be **Primeeco’s own UI** (locked banner + filled roof report), not F7’s opaque “Prime portal observation” assertion card. Client PII is redacted **in the live page** before capture by blanking `prime-object-summary` only — no SecureWorks overlay covering the form. First ship mixed one F7 frame (261081) with two real pages (261114 unredacted PII, 26980 real); all three green-pair screenshots were then re-captured as real redacted Prime pages and re-verified.
 4. **Mint path (SES-native only):**  
    `mark_makesafe_portal_report_done` (portal-truth stamp for current cycle) →  
    `prepare_ses_docket_revision` →  
