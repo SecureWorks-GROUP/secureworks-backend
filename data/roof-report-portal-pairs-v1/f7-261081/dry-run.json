@@ -1,0 +1,119 @@
+{
+  "schema_version": "ses-f7-prime-portal-observation/v3",
+  "observer_version": "ses-prime-portal-observer/2026-08-02.4",
+  "mode": "commit",
+  "capture_producer_contract": "capture_portal_evidence.py/v1",
+  "capture_observer_agent": "ses-prime-portal-observer/2026-08-02.4",
+  "generated_at": "2026-08-06T00:31:54.940Z",
+  "generation_id": "sha256:5f82163c36fdc6a99ccc",
+  "production_access": {
+    "database": "management-api read_only:true",
+    "browser": "chrome-devtools-axi open/eval/screenshot only",
+    "write_action": "record_ses_portal_capture_evidence",
+    "write_cap": 1,
+    "writes": 1,
+    "stage_moves": 0
+  },
+  "counts": {
+    "observed_total": {
+      "population": "observed_total",
+      "candidate_cards": 418,
+      "portal_cards": 1,
+      "portal_links": 1,
+      "by_outcome": {
+        "submitted_locked": 1
+      },
+      "by_planned_action": {
+        "create_revision": 1
+      },
+      "by_write_outcome": {
+        "written": 1
+      },
+      "revisions_written": 1,
+      "existing_capture_rows": 5,
+      "roof_cards": 61,
+      "roof_would_become_provable": 1,
+      "roof_would_remain_unprovable": 60,
+      "roof_remain_unprovable_by_reason": {
+        "no_genuine_portal_link": 60
+      }
+    },
+    "canonical_live_board": {
+      "population": "canonical_live_board",
+      "candidate_cards": 281,
+      "portal_cards": 1,
+      "portal_links": 1,
+      "by_outcome": {
+        "submitted_locked": 1
+      },
+      "by_planned_action": {
+        "create_revision": 1
+      },
+      "by_write_outcome": {
+        "written": 1
+      },
+      "revisions_written": 1,
+      "existing_capture_rows": 5,
+      "roof_cards": 52,
+      "roof_would_become_provable": 1,
+      "roof_would_remain_unprovable": 51,
+      "roof_remain_unprovable_by_reason": {
+        "no_genuine_portal_link": 51
+      }
+    },
+    "off_board_observed": {
+      "population": "off_board_observed",
+      "candidate_cards": 137,
+      "portal_cards": 0,
+      "portal_links": 0,
+      "by_outcome": {},
+      "by_planned_action": {},
+      "by_write_outcome": {},
+      "revisions_written": 0,
+      "existing_capture_rows": 0,
+      "roof_cards": 9,
+      "roof_would_become_provable": 0,
+      "roof_would_remain_unprovable": 9,
+      "roof_remain_unprovable_by_reason": {
+        "no_genuine_portal_link": 9
+      }
+    }
+  },
+  "results": [
+    {
+      "job_id": "967cdb6e-e57e-46ea-89d8-14e8afbc2ada",
+      "job_number": "SWMS-261081",
+      "builder_reference": "MLB-27100",
+      "family": "roof_report",
+      "population": "canonical_live_board",
+      "cycle_number": 1,
+      "attendance_cycle_id": "90bbf1ee-70ac-4cb0-ae7e-1356423ad5db",
+      "link_index": 1,
+      "role": "roof_report",
+      "source_url_hash": "sha256:8c824e08c910869c9c5c37fbbea5fcc9e2439555d28dd5c433d98a51427e5400",
+      "source_content_hash": "sha256:da47eeddc92a806ab067abbe1c180f2260fec2930f9ec6795f5baee095fded80",
+      "outcome": "submitted_locked",
+      "reason_code": "locked_or_submitted_observed",
+      "capture_result": "done",
+      "answered_fields": 21,
+      "total_fields": 23,
+      "signal": "submitted/locked observed, 21 of 23 fields answered",
+      "screenshot": {
+        "relative_path": "screenshots/SWMS-261081-roof_report-1-8a51427e5400.png",
+        "content_hash": "sha256:900796d727d8f73230289ac1c8873a1743cc806ad429f650de1b5bf8f8d82000",
+        "size_bytes": 65985,
+        "width": 1200,
+        "height": 800,
+        "job_details_panels_redacted": 1,
+        "opaque_frame_verified": true
+      },
+      "recordable": true,
+      "planned_action": "create_revision",
+      "plan_reason": "new_or_changed_observation",
+      "capture_idempotency_key": "sha256:a1a9e38ded9ae35b64ef3ae96d155364ccebb5f6d527cf9475daf984efd6cab4",
+      "write_outcome": "written",
+      "write_reason": "revision_appended",
+      "revision_id": "67286880-9474-4b34-a764-628560d82680"
+    }
+  ]
+}
