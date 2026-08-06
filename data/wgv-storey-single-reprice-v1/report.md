@@ -267,6 +267,48 @@ Doing (2) before (1) would remint at $300 again, because the fact would still sa
 double. Doing (1) alone leaves a card that correctly says single carrying a draft that
 says "Double Storey roof report" at $330 - visible, honest, and waiting for the void.
 
+## 9. The gap, in one sentence, and its size
+
+**A privileged `record_makesafe_roof_storey_correction` action would need to replace
+`jobs.metadata.storeys` on one named card, refusing unless the caller states the value
+it expects to find there, and only when the write carries a portal-form evidence
+reference plus its capture content hash, a free-text reason, and an identified human -
+writing an audit event and touching nothing else.**
+
+That is the whole shape. It is the `update_makesafe_job_family` pattern with `storeys`
+in place of the family: expects-before guard so a card that moved underneath the
+operator stops the write, evidence binding so a storey can never be asserted without
+naming what was observed, privileged-only, no stage move, no price write. The price is
+never set by it - correcting the fact is what makes `roofReportPrice` produce the right
+number by itself.
+
+**Why this is not one card.** Read-only census of the roof-report family today
+(`gap-sizing-counts.json`, `gap-sizing-exposed-cards.json`):
+
+| Measure | Count |
+| --- | ---: |
+| Roof-report cards | 63 |
+| Carrying a **work-order-derived** `storeys` fact | **40** (29 single, 11 double) |
+| Of those, with a captured trade portal form on record | **6** (all live) |
+| Carrying the fact and a portal share link but **no capture yet** | 14 |
+
+Every one of those 40 cards is priced off the builder's instruction, and the only
+storey writers in the system read that same instruction. So for all 40, a trade who
+observes otherwise on site has **nowhere to record it** - the contradiction can be seen
+on the portal form and still cannot reach the price. The 6 with captured forms are
+where a contradiction is even checkable today; the 14 uncaptured are the same exposure
+with the evidence not yet pulled.
+
+**I checked the storey answer on this card only.** The other five captured cards are
+listed for sizing, not adjudicated - I did not open their forms, and nothing here says
+any of them is wrong. Mindarie `SWMS-261081` in particular is out of scope by
+instruction and its work order and evidence are stated to agree.
+
+So the question in front of the Captain is not really "is White Gum Valley worth a
+void". It is whether a $50 correction on one card is the moment to close a hole that
+sits under 40, and the answer may well be that the action is worth building even if
+this card's void is not.
+
 ## Files
 
 | File | What it is |
@@ -278,3 +320,5 @@ says "Double Storey roof report" at $330 - visible, honest, and waiting for the 
 | `invoice-mirror-readback.json` | Live `xero_invoices` readback for SWMS-261114 |
 | `obligation-history.json` | All three obligation revisions with totals and bindings |
 | `duplicate-probe.json` | Read-only duplicate-guard probe output |
+| `gap-sizing-counts.json` | Roof-family census behind section 9 |
+| `gap-sizing-exposed-cards.json` | The 6 cards with both a work-order storey fact and a captured portal form |
