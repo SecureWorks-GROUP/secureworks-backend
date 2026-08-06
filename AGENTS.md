@@ -574,8 +574,14 @@ renders our branded PDF. The renderer that actually runs is the TS/jsPDF
 `supabase/functions/ops-api/roof_report_render.ts` (sibling of
 `makesafe_report_render.ts`), NOT the wiki `render_makesafe_report.py` - render
 executes in ops-api. `roof_report_template.ts` is the single source of truth for
-the field set, the locked storey pricing (Single $275 inc / Double $385 inc,
-2026-07-16), validation, and the field->render-job mapping. Actions:
+the field set, the locked storey pricing (Single $275 inc, locked 2026-07-16 /
+Double $330 inc, Captain ruling 2026-08-06 superseding the earlier $385),
+validation, and the field->render-job mapping. `ROOF_REPORT_PRICING` is the ONE
+roof price in this repo — every consumer reads it via `roofReportPrice`. The
+skill-side guard `makesafe_invoice_guards.py` keeps its OWN copy of both figures
+in the wiki repo (`ROOF_REPORT_SINGLE_EX` / `ROOF_REPORT_DOUBLE_EX`), so a roof
+price change is always two repos or the guard and the template disagree about
+money. Actions:
 `roof_report_template` (read), `save_roof_report` (draft), `submit_roof_report`
 (render + advance checklist), `render_roof_report` (routine-safe re-render). Fills
 persist in `makesafe_roof_report_drafts` (one row per job, pack_kind `roof`).

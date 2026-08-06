@@ -2,7 +2,8 @@
  * The storey a builder ORDERED, read off the work-order instruction at intake.
  *
  * Why this exists. A roof report's fee is a fixed function of storeys - single
- * $250 ex, double $350 ex - and the canon is explicit that storeys are
+ * $250 ex, double $300 ex (Captain ruling 2026-08-06, superseding $350) - and
+ * the canon is explicit that storeys are
  * "explicitly classified, never inferred from narrative". U4 honours that: with
  * no storey fact it refuses with `pricing_evidence_missing` rather than guess.
  *

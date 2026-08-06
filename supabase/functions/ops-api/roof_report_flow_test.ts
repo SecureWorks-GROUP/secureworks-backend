@@ -630,13 +630,13 @@ Deno.test("submit_roof_report: renders our PDF, persists submitted, advances the
 
   assertEquals(res.ok, true);
   assertEquals(res.status, "submitted");
-  assertEquals(res.price.inc_gst, 385); // double storey
+  assertEquals(res.price.inc_gst, 330); // double storey
   assertEquals(res.board_sync.ok, true);
   assertEquals(res.event_sync.ok, true);
 
   // Render was called once, with the fee computed onto the render job.
   assertEquals(calls.length, 1);
-  assertEquals(calls[0].renderJob.price_inc_gst, 385);
+  assertEquals(calls[0].renderJob.price_inc_gst, 330);
   assertEquals(calls[0].renderJob.ref, "MLB-17270PO-54939 / SWMS-26861");
   assertEquals((calls[0].renderJob.photos as any[])[0].label, "Ridge capping");
 
@@ -663,7 +663,7 @@ Deno.test("submit_roof_report: renders our PDF, persists submitted, advances the
     e.event_type === "roof_report_submitted"
   );
   assert(submitEvent, "roof_report_submitted event recorded");
-  assertEquals(submitEvent.detail_json.price_inc_gst, 385);
+  assertEquals(submitEvent.detail_json.price_inc_gst, 330);
 });
 
 Deno.test("submit_roof_report: merges an existing draft with the submit request fields", async () => {

@@ -7,9 +7,14 @@
 //   deno run --allow-net --allow-write \
 //     scripts/render-roof-report-sample.ts [out.pdf]
 //
-// Verified output (2026-07-22): 4 pages, "Double Storey $385.00 inc GST",
+// Verified output (2026-07-22): 4 pages,
 // file name "Roof Inspection Report - MLB-17270PO-54939-SWMS-26861 - Caversham-WA.pdf",
 // no em dashes in the rendered bytes.
+//
+// That run printed "Double Storey $385.00 inc GST", which is the SUPERSEDED
+// figure. The fee is read live from `roofReportPrice`, so the script now prints
+// $330.00 inc GST under the Captain's 2026-08-06 ruling. Page count and file
+// name are unchanged.
 
 import { renderRoofReportPdf } from "../supabase/functions/ops-api/roof_report_render.ts";
 import {
