@@ -8088,8 +8088,11 @@ if (import.meta.main) serve(async (req: Request) => {
               const clockedRefIds = [...new Set((asn || []).map((a: any) => a.invoiced_in).filter(Boolean))]
               let clockedLiveRefIds = new Set<string>()
               if (clockedRefIds.length > 0) {
-                const { data: clockedRefInv } = await client.from('trade_invoices')
+                const { data: clockedRefInv, error: clockedRefErr } = await client.from('trade_invoices')
                   .select('id, status').in('id', clockedRefIds)
+                if (clockedRefErr) {
+                  throw new Error('Failed to check which job cards are already on a live invoice: ' + clockedRefErr.message)
+                }
                 clockedLiveRefIds = new Set((clockedRefInv || [])
                   .filter((ti: any) => !RELEASED_INVOICE_STATUS_SET.has(String(ti.status || '')))
                   .map((ti: any) => ti.id))
@@ -8554,12 +8557,17 @@ if (import.meta.main) serve(async (req: Request) => {
               }
             }
             if (!invoice && week_start) {
-              const { data: existingDraft } = await client.from('trade_invoices')
+              const { data: existingDrafts, error: existingDraftErr } = await client.from('trade_invoices')
                 .select('id, status')
                 .eq('user_id', tradeUser.id)
                 .eq('week_start', week_start)
                 .eq('status', 'draft')
-                .maybeSingle()
+                .order('created_at', { ascending: true })
+                .limit(1)
+              if (existingDraftErr) {
+                throw new Error('Failed to look up the weekly draft invoice: ' + existingDraftErr.message)
+              }
+              const existingDraft = (existingDrafts || [])[0]
               if (existingDraft) {
                 invoice = { id: existingDraft.id }
               }
