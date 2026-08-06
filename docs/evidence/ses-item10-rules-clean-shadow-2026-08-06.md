@@ -50,6 +50,8 @@ This is the part worth reading twice, because it is the same fault this whole it
 
 **The claim your money now rests on, stated plainly:** the classifier verifies the price against the **actual total on the Xero invoice**, not merely against what we intended to bill.
 
+**And a clean answer is only ever permission for the next single step.** The invoice does not exist until it is created, so a check run *before* creation has no number to look at — it can only say "go ahead and create it". Every clean answer now states which of the two it is: **create the invoice**, or **advance an invoice that already exists**. An answer given before the invoice existed can never be read as permission to advance one, so the card is always checked a second time, against the real figure, before any money moves.
+
 **Two more of the same kind, found in the second review pass.** Both are guards that were reading a source which cannot see the fault they exist to catch.
 
 - **The price check must ask Xero, not our own copy of Xero.** The first fix bound the check to the draft's total — but the total it read came from our **local copy** of the invoice, which is written once when the invoice is created and never updated afterwards. So if someone edits the draft in Xero, our copy still shows the original figure, and the guard would have compared the correct price against the correct price and said clean while the edited invoice went through. Our local copy is now **explicitly refused** as a source: only a total read from **Xero itself, at the moment of the decision**, can satisfy the check. The dry run can only read the local copy, so it now parks every already-minted card by design, and says so.
@@ -314,6 +316,8 @@ A card with an empty evidence object now has **no clean guard at all**, which th
 
 The shadow supplies that total from the local `xero_invoices` mirror and stamps `totals_source: "local_mirror"`; a live call site must read the draft from Xero itself and stamp `xero_api`, because the mirror can drift (`mirror_xero_mismatch` exists for exactly that reason).
 
+**The price check runs at the `authorise` point, because that is the only point at which the money exists.** The mint is what creates the draft, and the draft stays editable in Xero afterwards, so a determination taken at `pre_mint` — where `A6` records `clean` because there is genuinely nothing yet to compare — can never speak for the figure the invoice ends up carrying. A pre-mint pass is therefore **permission to mint, and nothing more**. The verdict says so itself rather than leaving a reader to infer it: `permits` is `mint_only` on a clean `pre_mint` determination and `advance` only on a clean `authorise` one, `requires_second_determination_at_authorise` is true on the former, and `permits_detail` states in operator English that the card must be classified again, against the live Xero total, before anything is advanced. Parking every `pre_mint` card instead would have been the wrong fix — it makes the whole pre-mint class unreachable and gives the automation nothing to do. `authorises_send: false` is unchanged and unrelated: this is a third thing the verdict refuses to authorise, not a replacement for it.
+
 **Contract bumped to `ses-rules-clean/v2`** so every past determination stays attributable to the definition that produced it.
 
 ### The second pass, `ses-rules-clean/v3` — the same blindness, one seam deeper
@@ -456,6 +460,6 @@ deno test --allow-env --allow-net=127.0.0.1 --allow-read \
 
 **The committed `scripts/ses-rules-clean-shadow-2026-08-06.json` is CURRENT.** It records `ruler_contract_version: ses-rules-clean/v5`, generation `f7795ab9426f3ef8…`, regenerated against production on 2026-08-07 after the review amendments and verified to reproduce on an immediate rerun. It was never hand-edited while it was stale — a manifest whose numbers were typed rather than measured is worse than an admittedly old one — so every number in §4 is measured, not transcribed.
 
-The artifact's `generation.generation_id` is content-derived: a rerun over unchanged state reproduces it exactly, which is how a second reader independently verifies this run rather than trusting it. Verified twice tonight — `4cc87f37d6acd41b…` both times.
+The artifact's `generation.generation_id` is content-derived: a rerun over unchanged state reproduces it exactly, which is how a second reader independently verifies this run rather than trusting it. The `v5` run is the one verified to reproduce: `f7795ab9426f3ef8…` on the run and on an immediate rerun over unchanged state.
 
 **Suite impact (as first landed; the 2026-08-07 amendment adds four more tests, 30 in that file):** `deno task test:ops-api` currently fails type-checking on a **pre-existing** error in `cp1_drag_reschedule_test.ts:466,508` (`assertStringIncludes(dup.reason, …)` where `dup.reason` is `string | undefined`), unrelated to this work and present on a clean tree. Run with `--no-check` to get a comparable number: **baseline 3647 passed / 24 failed; with this change 3673 passed / 24 failed** — exactly the 26 new tests, no regression. `deno check supabase/functions/ops-api/index.ts` stays clean.

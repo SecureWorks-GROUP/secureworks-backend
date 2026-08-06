@@ -1103,6 +1103,70 @@ Deno.test("no path from a rules-clean determination reaches send", () => {
   }
 });
 
+Deno.test("a pre-mint clean determination permits the mint alone, never the advance", () => {
+  // The baseline is a pre-mint card: A6 had no draft to check, because the mint
+  // is what creates one. So this verdict is authority to mint and nothing more.
+  const verdict = classifySesInvoiceRulesClean(baseline());
+  assertEquals(verdict.verdict, "rules_clean", verdict.parked_on.join(","));
+  assertEquals(verdict.permits, "mint_only");
+  assert(verdict.requires_second_determination_at_authorise);
+  assert(
+    verdict.permits_detail.toLowerCase().includes("authorise point"),
+    verdict.permits_detail,
+  );
+});
+
+Deno.test("an authorise-point clean determination is what permits the advance", () => {
+  const verdict = classifySesInvoiceRulesClean(mutate((evidence) => {
+    evidence.determination_point = "authorise";
+    evidence.obligation = { revision_id: "ob-1" };
+    evidence.subject_invoice = {
+      xero_invoice_id: "x-9",
+      status: "DRAFT",
+      invoice_obligation_revision_id: "ob-1",
+      sub_total: 850,
+      total: 935,
+      totals_source: "xero_api",
+    };
+  }));
+  assertEquals(verdict.verdict, "rules_clean", verdict.parked_on.join(","));
+  assertEquals(verdict.permits, "advance");
+  assertFalse(verdict.requires_second_determination_at_authorise);
+});
+
+Deno.test("no pre-mint verdict ever carries advance permission, however clean the rest is", () => {
+  // Every guard outside the subject pair is left exactly as the clean baseline
+  // has it; the point alone decides the scope.
+  for (
+    const change of [
+      (_evidence: SesRulesCleanEvidence) => {},
+      (evidence: SesRulesCleanEvidence) => {
+        evidence.full_accrec_scan = { rows_scanned: 4000, matches: 0 };
+      },
+      (evidence: SesRulesCleanEvidence) => {
+        evidence.report_evidence_independent = true;
+      },
+    ]
+  ) {
+    const verdict = classifySesInvoiceRulesClean(mutate(change));
+    assertEquals(verdict.verdict, "rules_clean", verdict.parked_on.join(","));
+    assertFalse(
+      verdict.permits === "advance",
+      "a determination taken before the draft existed cannot speak for its money",
+    );
+  }
+  // And a parked card permits nothing at all, at either point.
+  for (const point of ["pre_mint", "authorise"] as const) {
+    const parked = classifySesInvoiceRulesClean(mutate((evidence) => {
+      evidence.determination_point = point;
+      evidence.composed_reference = null;
+    }));
+    assertEquals(parked.verdict, "parks");
+    assertEquals(parked.permits, "nothing");
+    assertFalse(parked.requires_second_determination_at_authorise);
+  }
+});
+
 Deno.test("every guard on the closed list is answered on every verdict", () => {
   const ids = SES_RULES_CLEAN_GUARDS.map((guard) => guard.id);
   assertEquals(new Set(ids).size, ids.length, "guard ids must be unique");

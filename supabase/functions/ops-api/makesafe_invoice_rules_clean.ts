@@ -45,6 +45,13 @@
 //     from XERO ITSELF. Without it every upstream guard can read clean while
 //     the invoice being advanced carries a different number.
 //
+//     It follows that the MINT is what creates the draft, and the draft stays
+//     editable in Xero afterwards, so no determination taken BEFORE the draft
+//     existed can speak for the money on it. A `pre_mint` rules-clean verdict
+//     therefore permits the mint and nothing else (`permits: "mint_only"`);
+//     advancing anything needs a SECOND determination at the `authorise` point,
+//     where A6 has a live Xero total to compare against.
+//
 //  4. A GUARD MAY ONLY READ A SOURCE THAT CAN SEE THE FAULT. The local
 //     `xero_invoices` mirror is written from Xero's response at the mint, so a
 //     freshly minted draft's mirrored figures equal the sealed derivation by
@@ -246,6 +253,19 @@ export interface SesRulesCleanGuardOutcome {
   detail: string;
 }
 
+/**
+ * WHAT A CLEAN VERDICT PERMITS, which is never "everything".
+ *
+ * `nothing`   -- the card parks and waits on the Captain's press.
+ * `mint_only` -- taken at `pre_mint`, before any draft existed, so A6 had no
+ *                money to check. It permits minting the DRAFT and nothing
+ *                more; a second determination at `authorise` is what permits
+ *                advancing it.
+ * `advance`   -- taken at `authorise` against the live Xero draft total, so it
+ *                permits advancing this card's own DRAFT to AUTHORISED.
+ */
+export type SesRulesCleanPermission = "nothing" | "mint_only" | "advance";
+
 export interface SesRulesCleanVerdict {
   verdict: "rules_clean" | "parks";
   contract_version: string;
@@ -256,6 +276,22 @@ export interface SesRulesCleanVerdict {
   parked_on: SesRulesCleanGuardId[];
   /** One sentence naming the guard that parked the card, for the board. */
   park_reason: string | null;
+  /**
+   * The SCOPE of this verdict, machine-readable. A clean determination is
+   * authority for exactly one step, never for the next one: `mint_only` before
+   * any draft exists, `advance` only once one does and A6 has checked its live
+   * money. A consumer must read this rather than treating `rules_clean` as
+   * blanket permission.
+   */
+  permits: SesRulesCleanPermission;
+  /**
+   * True on a `mint_only` verdict: whatever this determination cleared, the
+   * card must be classified AGAIN at the `authorise` point, with the live Xero
+   * total that only exists after the mint, before anything is advanced.
+   */
+  requires_second_determination_at_authorise: boolean;
+  /** Operator-facing sentence saying what this verdict does and does not permit. */
+  permits_detail: string;
   /**
    * Always false. Auto-authorisation may never reach the send path; this key
    * exists so a consumer asserting "no send affordance" has something to
@@ -1843,6 +1879,10 @@ export function classifySesInvoiceRulesClean(
     guard,
   ) => guard.id);
   const first = guards.find((guard) => guard.status !== "clean") ?? null;
+  const permits = rulesCleanPermission(
+    parkedOn.length === 0,
+    text(evidence.determination_point),
+  );
   return {
     verdict: parkedOn.length === 0 ? "rules_clean" : "parks",
     contract_version: SES_RULES_CLEAN_CONTRACT_VERSION,
@@ -1855,9 +1895,40 @@ export function classifySesInvoiceRulesClean(
         first.status === "flagged" ? "flagged" : "could not evaluate"
       }. ${first.detail}`
       : null,
+    permits,
+    requires_second_determination_at_authorise: permits === "mint_only",
+    permits_detail: SES_RULES_CLEAN_PERMISSION_DETAIL[permits],
     authorises_send: false,
   };
 }
+
+/**
+ * A clean sweep of the guard list is authority for ONE step, and which step it
+ * is depends on when the determination was taken. An unrecognised point can
+ * only reach here on a parked card (A5/A6 make it unevaluable), and resolves to
+ * `nothing` regardless -- permission is granted positively or not at all.
+ */
+function rulesCleanPermission(
+  clean: boolean,
+  point: string,
+): SesRulesCleanPermission {
+  if (!clean) return "nothing";
+  if (point === "pre_mint") return "mint_only";
+  if (point === "authorise") return "advance";
+  return "nothing";
+}
+
+const SES_RULES_CLEAN_PERMISSION_DETAIL: Record<
+  SesRulesCleanPermission,
+  string
+> = {
+  nothing:
+    "This determination permits nothing; the card waits on the Captain's press.",
+  mint_only:
+    "This determination was taken before any invoice existed, so it permits minting the DRAFT and nothing more. It is not authority to advance that DRAFT to AUTHORISED: the mint creates the draft, the draft stays editable in Xero afterwards, so the card must be classified again at the authorise point, against the live Xero total, before anything is advanced.",
+  advance:
+    "This determination was taken at the authorise point against the live Xero draft total, so it permits advancing this card's own DRAFT to AUTHORISED, and nothing beyond that.",
+};
 
 /** Only for a caller that needs the star-picket rate in a message. */
 export const SES_RULES_CLEAN_SEALED_RATES = {
