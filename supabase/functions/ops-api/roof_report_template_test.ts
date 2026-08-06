@@ -90,8 +90,14 @@ Deno.test("ROOF_REPORT_PRICING: Captain 2026-08-06 double $300 ex / $330 inc, si
     p.ex_gst,
     p.inc_gst,
   ]);
-  assert(!figures.includes(350), "retired $350 ex double-storey figure present");
-  assert(!figures.includes(385), "retired $385 inc double-storey figure present");
+  assert(
+    !figures.includes(350),
+    "retired $350 ex double-storey figure present",
+  );
+  assert(
+    !figures.includes(385),
+    "retired $385 inc double-storey figure present",
+  );
 
   // inc_gst is ex_gst + 10% GST on both rows.
   for (const p of Object.values(ROOF_REPORT_PRICING)) {
