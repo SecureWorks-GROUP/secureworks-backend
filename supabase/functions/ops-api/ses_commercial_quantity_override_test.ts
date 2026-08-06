@@ -140,6 +140,110 @@ Deno.test("commercial override refuses a false labour rate that reaches a total"
   );
 });
 
+Deno.test("commercial override accepts Captain labour_rate_override for this card only", () => {
+  const { lines, provenance } = buildCommercialQuantityOverrideLines({
+    override: {
+      schema: SES_COMMERCIAL_QUANTITY_OVERRIDE_SCHEMA,
+      authorised_by: "Captain Marnin Stobbe",
+      authorised_at: "2026-08-06T00:00:00.000Z",
+      decision_key: "mosman-park-remint-v1",
+      reason:
+        "Captain after-hours rate $100 and commercial materials/glass for Mosman Park only; sealed MLB $85 unchanged globally.",
+      trade_reported_hours_per_trade: 5,
+      sealed_billable_hours_floor: 3,
+      labour_rate_override: {
+        sealed_unit_price_ex_gst: 85,
+        authorised_unit_price_ex_gst: 100,
+        reason: "after hours",
+      },
+      lines: [
+        {
+          line_kind: "labour",
+          description:
+            "MLB-27482 - make-safe attendance - 1 trade x 5 hours (after hours)",
+          quantity: 5,
+          unit_price_ex_gst: 100,
+        },
+        {
+          line_kind: "materials",
+          description:
+            "MLB-27482 - Materials: structural timber 8m + ply 12mm 2.4x1.8 x3 + screws",
+          quantity: 1,
+          unit_price_ex_gst: 267.3,
+        },
+        {
+          line_kind: "materials",
+          description: "MLB-27482 - Glass disposal",
+          quantity: 1,
+          unit_price_ex_gst: 70,
+        },
+      ],
+    },
+    docket_revision_id: "docket-mosman",
+    attendance_cycle_ids: ["cycle-mosman"],
+    sealed_labour_unit_price_ex_gst: 85,
+    builder_reference: "MLB-27482",
+  });
+  assertEquals(lines.length, 3);
+  assertEquals(lines[0].quantity, 5);
+  assertEquals(lines[0].unit_price, 100);
+  assertEquals(lines[1].unit_price, 267.3);
+  assertEquals(lines[2].unit_price, 70);
+  assertEquals(
+    (lines[0].evidence as any).override_kind,
+    "commercial_rate_override",
+  );
+  assertEquals(
+    (lines[0].evidence as any).labour_rate_override.authorised_unit_price_ex_gst,
+    100,
+  );
+  assertEquals(
+    (lines[0].evidence as any).labour_rate_override.sealed_unit_price_ex_gst,
+    85,
+  );
+  assertEquals(provenance.override_kind, "commercial_rate_override");
+  const ex = Math.round(
+    lines.reduce((s, l) => s + l.quantity * l.unit_price, 0) * 100,
+  ) / 100;
+  assertEquals(ex, 837.3);
+  assertEquals(Math.round(ex * 1.1 * 100) / 100, 921.03);
+});
+
+Deno.test("commercial rate override refuses when sealed stamp mismatches U4 sealed rate", () => {
+  assertRejects(
+    async () => {
+      buildCommercialQuantityOverrideLines({
+        override: {
+          schema: SES_COMMERCIAL_QUANTITY_OVERRIDE_SCHEMA,
+          authorised_by: "Captain",
+          authorised_at: "2026-08-06T00:00:00.000Z",
+          decision_key: "bad-sealed-stamp",
+          reason: "test",
+          trade_reported_hours_per_trade: 5,
+          sealed_billable_hours_floor: 3,
+          labour_rate_override: {
+            sealed_unit_price_ex_gst: 80,
+            authorised_unit_price_ex_gst: 100,
+            reason: "after hours",
+          },
+          lines: [{
+            line_kind: "labour",
+            description: "x",
+            quantity: 5,
+            unit_price_ex_gst: 100,
+          }],
+        },
+        docket_revision_id: "d",
+        attendance_cycle_ids: ["c"],
+        sealed_labour_unit_price_ex_gst: 85,
+        builder_reference: "MLB-1",
+      });
+    },
+    SesCommercialQuantityOverrideError,
+    "does not match the U4 sealed schedule rate",
+  );
+});
+
 Deno.test("commercial override refuses missing Captain provenance", () => {
   assertRejects(
     async () => {

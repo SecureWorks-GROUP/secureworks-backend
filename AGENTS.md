@@ -1840,12 +1840,23 @@ different commercial facts (`ses_prepare_docket_revision.ts`).
 not a schedule change): optional body
 `commercial_quantity_override` on `prepare_ses_invoice_obligation`
 (`ses_commercial_quantity_override.ts`). Hosts on disposition
-`priced_with_line_override` (existing DB CHECK — no migration) with
-`evidence.override_kind = commercial_quantity_not_rate`. Labour unit price must
+`priced_with_line_override` (existing DB CHECK — no migration). Default
+`evidence.override_kind = commercial_quantity_not_rate`: labour unit price must
 stay the sealed schedule rate; only quantity and separate materials lines may
 change. Provenance (authorised_by / authorised_at / decision_key / trade
 reported hours / sealed floor) stamps the proposal. api_key/routine or
-Captain/admin JWT only. Do **not** force a total through a false hourly rate.
+Captain/admin JWT only.
+
+**Card-scoped Captain labour rate override** (optional
+`labour_rate_override` on the same body): when the Captain explicitly names a
+different labour unit price for one card (e.g. after hours), supply
+`sealed_unit_price_ex_gst`, `authorised_unit_price_ex_gst`, and `reason`. Lines
+then stamp `override_kind = commercial_rate_override` with both rates. The
+shared sealed schedule matrix is never changed; a sealed stamp that does not
+match the U4 sealed rate refuses. Without `labour_rate_override`, a non-sealed
+labour unit price still refuses (no quiet rate fakery to force a total). Worked
+example: Mosman Park SWMS-261147 / INV-1146 DRAFT
+`data/mosman-park-remint-v1/report.md`.
 
 Billing **fewer** hours than the trade recorded is still unreachable without an
 honest reduction instrument (quantity credit/discount). Do not invent one via

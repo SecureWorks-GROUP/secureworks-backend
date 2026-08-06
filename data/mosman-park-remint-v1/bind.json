@@ -1,0 +1,20 @@
+{
+  "success": true,
+  "skipped": false,
+  "document_id": "71f64d51-58f4-426a-83fe-57bf800cfd9c",
+  "document_version": 4,
+  "attendance_cycle_id": "b7edf9d8-6f68-4cc4-b12a-7aa20d3b070a",
+  "cycle_attribution": "bound",
+  "source_kind": "durable_curated_revision",
+  "source_identity": "curation-revision:ses-curated-report:SWMS-261147:2026-08-06-mosman-park-remint-v1/artifact:ses-curated-report-artifact:e8b2974f53d50d10ab3cb42c8abae50c",
+  "source_revision_id": "ses-curated-report:SWMS-261147:2026-08-06-mosman-park-remint-v1",
+  "source_artifact_id": "ses-curated-report-artifact:e8b2974f53d50d10ab3cb42c8abae50c",
+  "source_artifact_content_hash": "sha256:7739ab1e5ae4936daba9972b1643d81754623a2466933356dd3d21047cd3a713",
+  "expected_raw_sha256": "sha256:e8b2974f53d50d10ab3cb42c8abae50c8074e000a33f3984c08e0145ee4244d0",
+  "report_input_hash": "sha256:08a84e4abc659bf9b11e4d3c7ed46d360aa8c501d2adafb8a71b34f0618ee9d7",
+  "renderer_source_revision": "915e9b423fc597d656c7cb090671bf206138114b",
+  "renderer_script_sha256": "sha256:fda63bcffa0177b702089e67b5719ae50642a9972aa3628c516fcedb1cfe42dc",
+  "renderer_version": "secureworks.wiki-python/915e9b423fc597d656c7cb090671bf206138114b",
+  "writes": 2,
+  "supersedes_prior_bind": true
+}

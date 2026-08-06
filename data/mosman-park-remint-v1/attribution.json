@@ -1,0 +1,49 @@
+{
+  "after_hours_attendance": {
+    "source": "Captain",
+    "note": "Captain commercial account; trade arrival_time 2026-08-05 18:00 is consistent with evening attendance but after-hours rate is Captain decision"
+  },
+  "dirty_site_cleaned_worked_around_debris": {
+    "source": "Captain",
+    "note": "Not on trade form; Captain account only"
+  },
+  "board_up_bedroom_window_and_roller_door": {
+    "source": "Trade",
+    "trade_fields": [
+      "job_type_detail",
+      "work_done"
+    ]
+  },
+  "glass_cleanup_and_disposal": {
+    "source": "Trade",
+    "trade_fields": [
+      "work_done"
+    ]
+  },
+  "findings_fire_smashed_window_roller_door": {
+    "source": "Trade",
+    "trade_fields": [
+      "damage_cause",
+      "damage_description"
+    ]
+  },
+  "materials_timber_ply_screws": {
+    "source": "Trade",
+    "trade_fields": [
+      "materials_used"
+    ],
+    "note": "quantified items only; Fixings/Other ticks omitted"
+  },
+  "materials_commercial_figure_267_30": {
+    "source": "Captain",
+    "note": "Captain commercial estimate backed by Bunnings retail check; not system-derived"
+  },
+  "glass_disposal_line_70": {
+    "source": "Captain",
+    "note": "Separate commercial line on invoice"
+  },
+  "labour_rate_100_after_hours": {
+    "source": "Captain",
+    "note": "Card-scoped rate override; sealed MLB $85 unchanged"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "action": "prepare_ses_docket_revision",
+  "dry_run": true,
+  "state": "ready",
+  "blockers": [],
+  "docket_revision_id": "eb1b8c04-d49d-54fa-890f-36fdfd3b092e",
+  "persisted": false
+}
