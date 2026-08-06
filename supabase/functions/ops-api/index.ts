@@ -4734,7 +4734,7 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await createMakesafeJob(client, body))
       }
       case 'list_makesafe_companies': return json(await listMakesafeCompanies(client))
-      case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body))
+      case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body, { authMode }))
       case 'update_makesafe_job_family': {
         const isPrivileged = authMode === 'api_key' ||
           (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
@@ -4772,40 +4772,12 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await backfillMakesafeJobFamilies(client, body))
       }
       case 'update_makesafe_substatus': {
-        await assertNoSyntheticLivefireJobs(
-          client,
-          body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
-          'update_makesafe_substatus',
-        )
-        // B3 (Wave 0): AUTH-MODE TRANSITION GUARD. The automation routine key
-        // (authMode='routine') MUST NOT set ready_to_invoice or complete — those are
-        // sent/closed states. The master plan: "automation cannot close a job."
-        // Only the gated send path (makesafe_send_pack, privileged-only) closes jobs.
-        //
-        // NOTE: the direct makesafe_job_details.update({substatus:...}) patches
-        // INSIDE makesafe_send_pack (at advanceMakesafeSubstatusOnInvoice and the
-        // resume close path) intentionally BYPASS this guard. Those patches are only
-        // reachable from makesafe_send_pack which is already privileged-only (the
-        // route case above). This dispatch block is the routine's entry point.
-        const ROUTINE_FORBIDDEN_SUBSTATUSES = ['ready_to_invoice', 'complete']
-        if (authMode === 'routine' && ROUTINE_FORBIDDEN_SUBSTATUSES.includes(String(body?.substatus || ''))) {
-          return json({ error: `routine key is not permitted to set substatus='${body.substatus}'. Only a privileged caller (api_key or admin/owner jwt) may advance to sent/closed states.` }, 403)
-        }
-        // W2-C (item 14): a REPORT-TYPE card cannot be advanced to a report-complete
-        // substatus (admin_to_send_report / ready_to_invoice / complete) via this
-        // external entry point without a recorded portal-locked verification — this
-        // is where "graf" stamped report cards ready with the portal unsubmitted.
-        // Applies to EVERY caller (api_key/jwt/routine), since graf may hold any key;
-        // it is a business invariant, not an authz rule. The internal send-pack close
-        // path calls updateMakesafeSubstatus directly (not this dispatch) and so is
-        // not re-gated. Throws 409 via ApiError (surfaced by the outer handler).
-        await assertMakesafePortalVerifiedForAdvance(client, body?.job_id || body?.jobId, body?.substatus)
-        // M-G FIX 1 — physical twin of item-14: a NON-report make-safe cannot be
-        // advanced to a report-complete substatus without OUR trade report filed
-        // (job_service_reports submitted/approved this cycle, or a typed makesafe_report
-        // doc). No-op for report-type cards (portal guard above) and non-make-safe jobs.
-        await assertMakesafeReportInForAdvance(client, body?.job_id || body?.jobId, body?.substatus)
-        return json(await updateMakesafeSubstatus(client, body))
+        // Rescue SES T2: the guards (synthetic-livefire, B3 routine money ban,
+        // item-14 portal verification, M-G FIX 1 report-in) now live INSIDE
+        // updateMakesafeSubstatus via assertExternalMakesafeSubstatusGuards,
+        // plus the transition-coherence assert every write path shares — so no
+        // entry point (dispatch, details editor, internal caller) can skip them.
+        return json(await updateMakesafeSubstatus(client, body, { source: 'external', authMode }))
       }
       // B4 (makesafe-report-types): "Report completed on builder portal" marker.
       // STATE/EVENT ONLY — no job_service_reports, no docs, no render, no invoice,
@@ -13593,7 +13565,7 @@ async function listMakesafeCompanies(client: any) {
 }
 
 // ── Slice 2: update make-safe overlay details ──
-async function updateMakesafeDetails(client: any, body: any) {
+async function updateMakesafeDetails(client: any, body: any, opts: { authMode?: string } = {}) {
   const { job_id, jobId } = body
   const jId = job_id || jobId
   if (!jId) throw new Error('job_id required')
@@ -13607,6 +13579,13 @@ async function updateMakesafeDetails(client: any, body: any) {
   const updates: Record<string, any> = { updated_at: new Date().toISOString() }
   for (const key of allowed) {
     if (body[key] !== undefined) updates[key] = key === 'substatus' ? requireValidMakesafeSubstatus(body[key]) : body[key]
+  }
+  // Rescue SES T2: this editor was a second external substatus door with only
+  // vocabulary validation. A substatus change through here now carries the same
+  // evidence guards and transition coherence as the dedicated action.
+  if (updates.substatus !== undefined) {
+    await assertExternalMakesafeSubstatusGuards(client, jId, updates.substatus, opts.authMode)
+    await assertMakesafeSubstatusTransition(client, jId, updates.substatus, 'external:details')
   }
 
   const { data, error } = await client.from('makesafe_job_details')
@@ -15188,22 +15167,116 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
 // Test-only export for the board-job enrichment (chip-truth wiring).
 export const _enrichMakesafeBoardJobForTest = enrichMakesafeBoardJob
 
-async function updateMakesafeSubstatus(client: any, body: any) {
+// ── Rescue SES T2: one coherence gate for EVERY substatus write ──────────────
+// Mission: wiki coding/work/campaigns/makesafe-system/missions/rescue-ses-2026-08.
+// Production carried substatus/status combinations both stage engines assume
+// impossible (68 cards complete-under-processing, active substatuses on
+// cancelled jobs) because each write site validated vocabulary only. Every
+// substatus write — the dispatch action, the details editor, and the internal
+// evidence events — now passes this assert. Sources beginning 'internal:' are
+// the evidence events themselves (trade report submitted, close-out, reattend);
+// they are transition-checked but not re-gated on the external evidence guards,
+// which they constitute.
+const MAKESAFE_SUBSTATUS_TRANSITIONS: Record<string, readonly string[]> = {
+  company_contact_required: ['company_contact_done', 'waiting_on_trade_report', 'awaiting_portal_completion', 'admin_to_send_report'],
+  company_contact_done: ['company_contact_required', 'waiting_on_trade_report', 'awaiting_portal_completion', 'admin_to_send_report'],
+  awaiting_portal_completion: ['company_contact_required', 'waiting_on_trade_report', 'admin_to_send_report'],
+  waiting_on_trade_report: ['company_contact_required', 'awaiting_portal_completion', 'admin_to_send_report'],
+  admin_to_send_report: ['waiting_on_trade_report', 'awaiting_portal_completion', 'ready_to_invoice', 'complete'],
+  ready_to_invoice: ['waiting_on_trade_report', 'admin_to_send_report', 'complete'],
+  complete: ['waiting_on_trade_report', 'admin_to_send_report'],
+}
+
+async function assertMakesafeSubstatusTransition(
+  client: any,
+  jobId: string,
+  nextSubstatus: string,
+  source: string,
+): Promise<void> {
+  const next = requireValidMakesafeSubstatus(nextSubstatus)
+  let detailRes: any = null
+  let jobRes: any = null
+  try {
+    ;[detailRes, jobRes] = await Promise.all([
+      client.from('makesafe_job_details').select('substatus').eq('job_id', jobId).maybeSingle(),
+      client.from('jobs').select('status').eq('id', jobId).maybeSingle(),
+    ])
+  } catch (e: any) {
+    // Fail-OPEN on read failure: the gate stops known-incoherent moves; it must
+    // not add a new outage mode to every evidence event when a read hiccups.
+    console.warn('[ops-api] substatus transition check skipped (read failed):', {
+      job_id: jobId, next, source, error: e?.message || String(e),
+    })
+    return
+  }
+  const jobState = String(jobRes?.data?.status || '').toLowerCase()
+  if (['cancelled', 'lost'].includes(jobState) && !source.startsWith('internal:intake_')) {
+    throw new ApiError(
+      `substatus write refused: job is ${jobState} (source=${source}); reinstate the job before changing its work state`,
+      409,
+    )
+  }
+  const current = normalizeMakesafeSubstatus(detailRes?.data?.substatus)
+  if (!current || current === next) return // first set / idempotent repeat
+  const allowed = MAKESAFE_SUBSTATUS_TRANSITIONS[current] || []
+  if (!allowed.includes(next)) {
+    throw new ApiError(
+      `substatus transition refused: '${current}' -> '${next}' is not a coherent move (source=${source})`,
+      409,
+    )
+  }
+}
+
+// External-caller evidence guards, shared by the dispatch action and the
+// details editor so no external entry point can skip them (previously they
+// lived only on the dispatch router case).
+async function assertExternalMakesafeSubstatusGuards(
+  client: any,
+  jobId: string,
+  nextSubstatus: string,
+  authMode: string | undefined,
+): Promise<void> {
+  await assertNoSyntheticLivefireJobs(client, [jobId], 'update_makesafe_substatus')
+  // B3 (Wave 0): the automation routine key MUST NOT set sent/closed states.
+  const ROUTINE_FORBIDDEN_SUBSTATUSES = ['ready_to_invoice', 'complete']
+  if (authMode === 'routine' && ROUTINE_FORBIDDEN_SUBSTATUSES.includes(String(nextSubstatus || ''))) {
+    throw new ApiError(
+      `routine key is not permitted to set substatus='${nextSubstatus}'. Only a privileged caller (api_key or admin/owner jwt) may advance to sent/closed states.`,
+      403,
+    )
+  }
+  // W2-C (item 14) + M-G FIX 1: report-type cards need portal-locked
+  // verification, physical cards need OUR trade report filed, before any
+  // report-complete advance. Business invariants, not authz rules.
+  await assertMakesafePortalVerifiedForAdvance(client, jobId, nextSubstatus)
+  await assertMakesafeReportInForAdvance(client, jobId, nextSubstatus)
+}
+
+async function updateMakesafeSubstatus(
+  client: any,
+  body: any,
+  opts: { source?: string; authMode?: string } = {},
+) {
   const { job_id, jobId, substatus } = body
   const jId = job_id || jobId
   if (!jId || !substatus) throw new Error('job_id and substatus required')
   const nextSubstatus = requireValidMakesafeSubstatus(substatus)
+  const source = opts.source || 'external'
+  if (source === 'external') {
+    await assertExternalMakesafeSubstatusGuards(client, jId, nextSubstatus, opts.authMode)
+  }
+  await assertMakesafeSubstatusTransition(client, jId, nextSubstatus, source)
 
   const updates: Record<string, any> = {
     substatus: nextSubstatus,
     updated_at: new Date().toISOString(),
   }
-  // Auto-set timestamps based on substatus transition
-  const now = new Date().toISOString()
-  if (nextSubstatus === 'company_contact_done') updates.company_contacted_at = now
-  if (nextSubstatus === 'admin_to_send_report') updates.report_received_at = now
-  if (nextSubstatus === 'ready_to_invoice') updates.report_sent_at = now
-  if (nextSubstatus === 'complete') updates.invoice_ready_at = now
+  // T2: the report_received_at / report_sent_at / invoice_ready_at auto-stamps
+  // are gone. A substatus write is a CLAIM; stamping evidence timestamps from a
+  // claim minted false evidence (SWMS-261021 carried a report_sent_at with no
+  // send; send truth lives only in ses_release_route_proofs). The real evidence
+  // events stamp their own timestamps at their own write sites.
+  if (nextSubstatus === 'company_contact_done') updates.company_contacted_at = new Date().toISOString()
 
   const { data, error } = await client.from('makesafe_job_details')
     .update(updates)
@@ -15435,6 +15508,8 @@ async function markMakesafePortalReportDone(client: any, body: any) {
     }
   }
 
+  // Rescue SES T2: every substatus write shares the one coherence gate.
+  await assertMakesafeSubstatusTransition(client, jId, 'admin_to_send_report', 'internal:portal_report_done')
   const updates: Record<string, any> = {
     substatus: 'admin_to_send_report',
     report_received_at: nowIso,
@@ -18577,6 +18652,8 @@ async function submitMakesafeReport(
       ? assignmentBinding.assignment
       : null
 
+    // Rescue SES T2: every substatus write shares the one coherence gate.
+    await assertMakesafeSubstatusTransition(client, jId, 'admin_to_send_report', 'internal:trade_report_submitted')
     const { data: detailSync, error: detailSyncErr } = await client.from('makesafe_job_details')
       .update({
         attendance_cycle_id: attendanceCycle.id,
@@ -28817,7 +28894,7 @@ async function syncSuppliers(client: any) {
 async function advanceMakesafeSubstatusOnInvoice(client: any, job: any, jId: string): Promise<boolean> {
   if (String(job?.type || '').toLowerCase() !== 'makesafe') return false
   try {
-    await updateMakesafeSubstatus(client, { job_id: jId, substatus: 'complete' })
+    await updateMakesafeSubstatus(client, { job_id: jId, substatus: 'complete' }, { source: 'internal:invoice_advance' })
     return true
   } catch (e) {
     console.log('[completeAndInvoice] makesafe substatus advance failed (non-blocking):', (e as Error).message)
@@ -37034,6 +37111,8 @@ async function advanceRoofReportChecklist(
     }
   }
 
+  // Rescue SES T2: every substatus write shares the one coherence gate.
+  await assertMakesafeSubstatusTransition(client, jobId, 'admin_to_send_report', 'internal:roof_report_submitted')
   const { data: updated, error } = await client.from('makesafe_job_details')
     .update({
       substatus: 'admin_to_send_report',
@@ -37507,6 +37586,8 @@ function draftPackInvoiceStatus(invoiceResult: any): string | null {
 
 async function defaultMarkDraftPackReady(client: any, jobId: string, detail: any): Promise<void> {
   const now = new Date().toISOString()
+  // Rescue SES T2: every substatus write shares the one coherence gate.
+  await assertMakesafeSubstatusTransition(client, jobId, REPORT_DRAFT_READY_SUBSTATUS, 'internal:draft_pack_ready')
   const { data, error } = await client.from('makesafe_job_details')
     .update({
       substatus: REPORT_DRAFT_READY_SUBSTATUS,
@@ -37813,6 +37894,8 @@ async function applyMakesafeCloseOut(
     .eq('job_id', jobId)
     .maybeSingle()
   const reportSentAt = msd?.report_sent_at || now
+  // Rescue SES T2: every substatus write shares the one coherence gate.
+  await assertMakesafeSubstatusTransition(client, jobId, 'complete', 'internal:closeout')
   const detailPatch: Record<string, any> = { substatus: 'complete', updated_at: now }
   if (!msd?.report_sent_at) detailPatch.report_sent_at = reportSentAt
   const { data: detailRows, error: detailErr } = await client.from('makesafe_job_details')
@@ -39958,6 +40041,8 @@ export async function reattendMakesafe(client: any, args: {
   )
 
   // Reset board signals + increment cycle + write the re-attend marker.
+  // Rescue SES T2: every substatus write shares the one coherence gate.
+  await assertMakesafeSubstatusTransition(client, jobId, 'waiting_on_trade_report', 'internal:reattend')
   let detailTransition = client.from('makesafe_job_details')
     .update({
       substatus: 'waiting_on_trade_report',
