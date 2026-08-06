@@ -37,7 +37,30 @@ either stall or step around the gate.
 
 Artifacts: `void-prepare.json`, `void-approve.json`, `void-execute.json`.
 
-## 1. F01 - the integrity column is not lying, it is a different thing
+## 1. F01 - NOT AN INTEGRITY DEFECT. Category error. Finding withdrawn.
+
+> **If you have arrived here from Maverick's F01 ("A document row's recorded content hash
+> disagrees with the bytes it serves"), read this box before anything else.**
+>
+> **There is no integrity defect on SWMS-261147, and there never was.** The document's
+> recorded byte hash matches the bytes it serves, exactly, verified four independent ways.
+>
+> The two values F01 compared are **not the same kind of thing**:
+> `job_documents.makesafe_content_hash` is a **row fact-identity hash** - a change-detection
+> fingerprint over the database row - and it is **mathematically incapable** of equalling the
+> file's sha256, because it digests the row (including the row's own `id`) rather than the
+> file. The `sha256:` prefix on both is what makes them look comparable. They are not.
+>
+> The population proves it: of the **31** curated-bound report rows on the whole board,
+> **0** have `makesafe_content_hash` equal to their bound byte hash. Not one. If that column
+> were a byte hash, all 31 would match. SWMS-261147 is not an outlier - it is the rule.
+>
+> **Nothing here needs correcting, and the column must not be "repaired" to the byte hash.**
+> Doing so would not persist (a BEFORE trigger recomputes it on every write) and, if it did,
+> would corrupt the state-authority comparator that reads it.
+>
+> **Do not re-file this.** If you see the same shape on another card, it is the same category
+> error, and the answer is this box.
 
 **Cause: misread column, not a broken write.** `job_documents.makesafe_content_hash` is
 **not** a hash of the file's bytes and never was. It is the row **fact-identity** hash
