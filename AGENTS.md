@@ -87,6 +87,27 @@ without a measurement (`makesafe_compact_reads_test.ts` pins it in-call, across
 a 10-wide wave, and after a failed chunk;
 `makesafe_board_population_test.ts` pins the 20-lane job-source fan-out).
 
+A slow board is a CLIENT measurement before it is a server one. Measured
+2026-08-06: the board API is ~2.5-3.5 s, gzipped to 83 kB, and the kanban
+renders 170 cards in 46 ms — but click-to-painted in `ops.html` was ~32 s,
+because `makesafe_board` is not issued until
+`auto_approve_clean_intake_drafts` (~28.6 s, fired by
+`autoApproveCleanMakesafeIntakeDraftsIfNeeded()` on board autoload) returns,
+with `daily-digest` (~18 s, `loadAiAlerts()`) alongside it. Both long poles and
+the serialisation live in the `dashboard` submodule, not here. So do NOT answer
+"the board is slow" with another server-side byte or round-trip cut; reproduce
+it in the browser with Resource Timing first and find which call the board is
+queued behind. Note that loading the board VIEW fires a real approval write, so
+repeat browser runs are not free. Evidence:
+`docs/evidence/makesafe-board-ttfb-rescue-and-browser-measurement-2026-08-06.md`.
+
+That document also records why `238cd9d1` ("Cut make-safe board TTFB by
+parallelising PostgREST waves") looks stranded and must not be re-applied: it is
+the pre-squash branch head of PR #564, so it is not an ancestor of `main` while
+being byte-identical to `54be0a0` already on it. Re-applying it would revert
+#567's bounded fan-out. Check `git cherry origin/main <sha>` before "rescuing"
+any commit that is missing from `main` only by SHA.
+
 U2-S1 cycle-scoped evidence lives in `makesafe_cycle_evidence.ts` and is shared by
 board enrich and `makesafe_audit`. Apply
 `20260727000001_makesafe_attendance_cycles_u2_s1.sql` **before** the matching
