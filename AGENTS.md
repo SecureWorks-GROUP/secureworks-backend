@@ -621,6 +621,35 @@ NOT subject to the make-safe report-type gate (generating our own report for
 report-type jobs is the point). Full flow + action contract in
 `docs/evidence/roof-report-template-flow-2026-07-22.md`.
 
+**Roof reports are priced off the WORK ORDER only** (Captain 2026-08-06,
+`data/decisions/2026-08-06-roof-reports-priced-off-work-order-only.md`). The
+trade-observation override — the work order's statement is authority unless the trade
+observed otherwise on site — is a MAKE-SAFE rule and does not reach roof cards. So
+every writer of `storeys` deriving from the work order (intake
+`makesafe_roof_storey_fact.ts`, and `preview_makesafe_roof_storey_backfill`, which
+additionally HOLDS any card already carrying a storey signal) is correct BY DESIGN,
+and the absence of any surface that records a trade-observed storey is not a gap.
+**Do not build one**; the mechanism was explicitly declined. Measured 2026-08-06: 40
+of 63 roof cards carry a work-order-derived storey fact — that number is the design,
+not an exposure.
+
+A trade portal form CAN contradict the work order on storeys, and it is still worth
+recording — it simply does not move the price. Worked case, with the live evidence on
+both sides: `data/wgv-storey-single-reprice-v1/report.md` (White Gum Valley
+SWMS-261114, portal locked 24/24 says single, work order says two, invoice stayed at
+the work order's price).
+
+Repricing a card is therefore never an edit. `makeSesXeroGateway` exposes
+`createDraft` / `authorise` / `fetchAuthorisedPdf` plus `voidInvoice` and NO update
+verb ("changed" is a sealed money-fence verb), so moving a bound DRAFT's total is
+always void-and-remint, in that order - the duplicate guard returns
+`blocked_duplicate_live` / `allows_create: false` while the old invoice is live, and
+`prepareSesInvoiceObligationAction` refuses a `commercial_quantity_override` under
+that disposition. A stored `labour_rate_override` also 409s once the sealed rate
+moves (`sealed_unit_price_ex_gst` must equal the live U4 sealed rate), so correcting
+a pricing FACT structurally invalidates any card-scoped rate override built on the
+old one.
+
 ## The Ops Dash UI Lives In The `dashboard` Submodule
 
 **Read this before forming any theory about the gitlink: it is NOT the serving

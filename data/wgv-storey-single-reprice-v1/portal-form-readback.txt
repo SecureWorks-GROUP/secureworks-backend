@@ -1,0 +1,69 @@
+Live read of the builder's Prime portal share form, 2026-08-06, via chrome-devtools-axi.
+URL: https://primeeco.tech/share/bd8dff3e-a24d-4f33-8163-cf65505b3638
+
+Customer name and site street address appear on the live page and are DELIBERATELY
+OMITTED here. Suburb and job reference only, per the task boundary.
+
+--- verbatim, redacted ---
+PRIME ECOSYSTEM
+This link is available until 31st Aug, 2026 4:57 pm
+Job Details
+Job Number
+MLB-RR-26836
+Customer
+[REDACTED]
+Site Address
+[REDACTED], White Gum Valley, WA, 6162
+This form has been locked and is no longer available for editing or submission
+Roof Report
+24 of 24
+Inspection Details
+Date of Inspection
+3rd Aug 2026
+Time of Inspection
+11:30 am
+Inspection By
+Weather at Time of Inspection
+Sunny/Fine
+Property Details
+Construction Type
+Double Brick
+Number of Storeys
+Single Storey
+Property Condition
+Average
+Roof Type
+Colorbond
+Roof Pitch
+Roof Profile Correct
+Yes
+Gutters, Valleys and Downpipes serviceable
+Roof Condition
+Average
+Services / penetrations present on roof
+Report Details
+Any storm created openings in the roof
+No
+Is there a water leak through the roof
+Yes
+Cause of water leak
+Maintenance Issues Present
+Yes - Related to Damage
+[...template explanatory text elided...]
+Is the Maintenance Recommended and/or Required? *
+Recommended
+Required
+Details of Recommended Maintenance Items
+Details of Required Maintenance Issues
+Insured advised of maintenance / defect issues
+Does the Roof Structure Comply with Applicable Standards
+Yes
+Other Comments
+Photo Schedule
+Overall view of each affected room/area and close up photos of damage
+--- end ---
+
+Note on "Construction Type: Double Brick". That is a WALL construction fact, not a
+storey count, and it sits two rows above "Number of Storeys: Single Storey". It is the
+single most likely thing to be misread as corroborating the work order's "two storey".
+It does not.

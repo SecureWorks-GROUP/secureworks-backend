@@ -1,0 +1,92 @@
+{
+  "schema": "secureworks.makesafe.ses-review-cockpit/v1",
+  "status": "INVOICE_CREATE_READY",
+  "stale": false,
+  "verdict": {
+    "clean": true,
+    "checks": [
+      {
+        "id": "C1",
+        "passed": true,
+        "fact": "The current family docket is commercially ready."
+      },
+      {
+        "id": "C2",
+        "passed": true,
+        "fact": "No named readiness blockers remain on the current revision."
+      },
+      {
+        "id": "C3",
+        "passed": true,
+        "fact": "Pricing is settled by canon or audited override."
+      },
+      {
+        "id": "C4",
+        "passed": true,
+        "fact": "The duplicate probe is consistent with the requested money action."
+      },
+      {
+        "id": "C5",
+        "passed": true,
+        "fact": "No unresolved money hold remains."
+      },
+      {
+        "id": "C6",
+        "passed": true,
+        "fact": "No post-release billing disposition is outstanding."
+      },
+      {
+        "id": "C7",
+        "passed": true,
+        "fact": "The family matrix and required assessment recipe are versioned."
+      },
+      {
+        "id": "C8",
+        "passed": true,
+        "fact": "Required portal truth is captured."
+      },
+      {
+        "id": "C9",
+        "passed": true,
+        "fact": "Physical work has the full media floor and completed-work proof."
+      },
+      {
+        "id": "C10",
+        "passed": true,
+        "fact": "Exactly one non-ambiguous obligation revision owns this work."
+      },
+      {
+        "id": "C11",
+        "passed": true,
+        "fact": "Every route required by this family has canonical recipients and a draft."
+      },
+      {
+        "id": "C12",
+        "passed": true,
+        "fact": "No type-check or unverified-story hold remains."
+      }
+    ],
+    "blockers": [],
+    "approval_band": "shaun_clean"
+  },
+  "controls": {
+    "approve_invoice": {
+      "enabled": true,
+      "label": "APPROVE INVOICE",
+      "plan": "Approve the existing Xero DRAFT for this exact obligation revision; authorise only if this approval explicitly includes authorise; then attach the real Xero PDF as a new docket revision.",
+      "disabled_reason": null
+    },
+    "send_it": {
+      "enabled": false,
+      "label": "SEND IT",
+      "plan": "Send the approved invoice route (1) for this exact release revision, then write route proofs and closeout.",
+      "disabled_reason": "The bound Xero invoice is DRAFT, not AUTHORISED. The invoice email cannot go out against an unauthorised invoice.",
+      "failed_checks": [],
+      "route_kinds": [
+        "invoice"
+      ],
+      "route_count": 1
+    },
+    "captain_only": false
+  }
+}
