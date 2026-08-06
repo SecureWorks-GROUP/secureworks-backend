@@ -16,6 +16,37 @@ non-compliant synthetic card.
 
 ---
 
+## READ FIRST: a capture document with no extractable text is NOT empty
+
+**Attached portal captures are image-only PDFs — a wrapped full-page screenshot with no
+text layer. Text extraction on a complete, perfectly good capture returns roughly three
+characters.**
+
+This is the single most dangerous thing in this campaign for a future author, because the
+obvious completeness check is the wrong one:
+
+```python
+# WRONG - condemns every valid portal capture ever attached
+if len(pdf_text(doc)) < 100:
+    refuse("capture document is blank")
+```
+
+Mindarie's attached capture yields 3 characters of extracted text. Rendered, it is the
+**full two-page Prime roof report**: page 1 with the Job Details panel, the form-locked
+banner, the `Roof Report` heading, the `21 of 23` progress bar and the answered Inspection /
+Property / Report Details; page 2 with Recommended and Required Maintenance, Other Comments,
+and the complete Photo Schedule of roughly 24 site photographs. **Neither page is blank.**
+
+The premise that this card carried a "blank page-2 attachment" was measured and is **false**.
+It came from exactly the reading above, and this investigation nearly repeated it.
+
+**Any completeness check on a capture document must RENDER it, or test for embedded image
+streams and page count — never for extractable text.** A text-based gate will refuse valid
+evidence, on every roof card, silently, and it will look like a data problem rather than a
+check problem.
+
+---
+
 ## 1. The retake capture works, and proves the compliant path is sound
 
 Run 2026-08-06 against Mindarie `SWMS-261081`
@@ -323,7 +354,40 @@ document**, which would replace better evidence with worse.
 - **No removal of the duplicate row.** Deleting `ba373f52-15fe-4359-98f6-1b2fb001b3c1` is the
   correct remedy and is a destructive write outside this task's authority.
 
-## 8. Options for the write path, for whoever owns the decision
+## 8. Open items for the Captain
+
+Recorded, not acted on. Both are his calls, not an implementer's.
+
+### 8a. Mindarie carries a duplicate capture document — deletion is destructive
+
+`SWMS-261081` has two byte-identical `roof_report` documents (section 5a):
+
+| Disposition | Document id | File name |
+|---|---|---|
+| **Keep** — canonical, idempotency-key row | `eea6fe2e-3e53-442b-8c1e-605d9c0e27cd` | `Prime Portal Roof Report - MLB-27100 - 1 Keys Cl Mindarie.pdf` |
+| **Remove** — duplicate created by a renamed re-attach | `ba373f52-15fe-4359-98f6-1b2fb001b3c1` | `Prime Portal Roof Report - MLB-27100 - 1 Keys Cl Mindarie - RETAKE.pdf` |
+
+The content is not at risk either way — both rows point at the same bytes
+(`sha256 1711bd64…`) and the canonical row is the one a re-attach under the correct file name
+would continue to update. **Deleting a document is a destructive write and was not
+performed.** It needs the Captain's ruling on which row is authoritative and on whether the
+stored object is removed with the row or left in place.
+
+Note that the duplicate is not harmful in itself — it is the same evidence twice. The reason
+to resolve it is that a pack showing two capture documents invites exactly the "which one is
+real" question this campaign has been answering all day.
+
+### 8b. `job-documents` is a public bucket
+
+Every attached capture is retrievable by URL with no authentication; all three documents
+referenced in this document were fetched that way during the investigation. Given that a
+genuine capture carries the policyholder's name, full site address and site photographs
+(section 1), this deserves its own look. It is pre-existing and was not caused by anything
+here.
+
+---
+
+## 9. Options for the write path, for whoever owns the decision
 
 Recorded as options, not as a recommendation to act on without a ruling.
 
