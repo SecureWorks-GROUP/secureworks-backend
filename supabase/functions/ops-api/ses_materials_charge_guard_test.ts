@@ -450,8 +450,8 @@ function releasedEvidence(): SesReleasedCycleEvidence {
   return {
     route_kinds: ["invoice", "photo", "report"],
     last_proven_at: "2026-08-05T11:26:31.529Z",
-    invoice_number: "INV-1137",
-    invoice_status: "AUTHORISED",
+    invoice_numbers: ["INV-1137"],
+    invoice_statuses: ["AUTHORISED"],
   };
 }
 
@@ -546,7 +546,7 @@ Deno.test("a shipped and billed cycle is never asked to price anything", () => {
   if (decision.action !== "already_released") throw new Error("unreachable");
   assertEquals(decision.provenance.decision, "already_released");
   assertEquals(decision.provenance.materials_charge_ex_gst, 0);
-  assertEquals(decision.provenance.invoice_number, "INV-1137");
+  assertEquals(decision.provenance.invoice_numbers, ["INV-1137"]);
   assertStringIncludes(String(decision.provenance.note), "already shipped");
 });
 

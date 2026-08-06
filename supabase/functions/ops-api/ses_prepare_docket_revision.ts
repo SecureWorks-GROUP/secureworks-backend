@@ -712,6 +712,14 @@ function localInvoiceProposal(
 ): {
   proposal: Record<string, unknown> | null;
   blocker: SesBlocker | null;
+  /**
+   * The materials decision REFUSED the figure it was given. A refused figure
+   * was never an accepted decision, so the caller must not stamp it as the
+   * card's durable materials-charge marker: inheriting it would let a figure
+   * nobody accepted answer the next prepare — and, on a released cycle, bill
+   * materials the builder has already paid for.
+   */
+  materials_charge_refused?: boolean;
 } {
   const facts = input.cycle_facts.hours_and_materials || {};
   const ref = input.source.builder_reference;
@@ -737,6 +745,7 @@ function localInvoiceProposal(
     const charged = materialsChargeDecision.decision === "charge";
     return {
       proposal: null,
+      materials_charge_refused: true,
       blocker: blocked(
         MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
         `${
@@ -1073,6 +1082,7 @@ function localInvoiceProposal(
     if (materialsDecision.action === "refuse") {
       return {
         proposal: null,
+        materials_charge_refused: true,
         blocker: blocked(
           materialsDecision.reason_code,
           materialsDecision.reason,
@@ -2070,13 +2080,24 @@ async function prepareOne(
   }
   if (materialsQuestionAnswered) invoicedMaterialsEvidence = null;
   // A card that the money or the send has already settled is a different
-  // revision from the same card before that happened, so the evidence belongs
-  // inside the identity: without it a blocked revision and the settled one
-  // collide on a single revision id. Absent evidence wraps nothing, which keeps
-  // every card that still has to be priced byte-identical to today.
+  // revision from the same card before that happened, so the fact that it
+  // settled belongs inside the identity: without it a blocked revision and the
+  // settled one collide on a single revision id. Absent evidence wraps nothing,
+  // which keeps every card that still has to be priced byte-identical to today.
+  //
+  // Only a MINIMAL, stable coordinate goes in. The full evidence is recorded on
+  // the marker for audit, but proof timestamps, route kinds, invoice status and
+  // line detail all legitimately move AFTER settlement (a later route proof, the
+  // mirror flipping AUTHORISED to PAID), and each such move would re-key an
+  // already-shipped revision, reopen its pack as needs_review and drop a Docs
+  // Ready signoff the Captain has already given.
   const inputContentHash = await sesSha256(
     materialsChargeDecision === null && releasedCycleEvidence
-      ? { input, released_attendance_cycle: releasedCycleEvidence }
+      ? {
+        input,
+        settled_attendance_cycle_id:
+          input.attendance.current_attendance_cycle_id,
+      }
       : materialsChargeDecision?.decision === "charge"
       ? {
         input,
@@ -2085,7 +2106,14 @@ async function prepareOne(
       : materialsChargeDecision?.decision === "none"
       ? { input, materials_charge_cleared: materialsChargeDecision.clearance }
       : invoicedMaterialsEvidence
-      ? { input, already_invoiced_materials: invoicedMaterialsEvidence }
+      ? {
+        input,
+        already_invoiced_materials: {
+          invoice_id: invoicedMaterialsEvidence.invoice_id,
+          invoice_number: invoicedMaterialsEvidence.invoice_number,
+          materials_ex_gst: invoicedMaterialsEvidence.materials_ex_gst,
+        },
+      }
       : input,
   );
   if (!request.force_refresh && deps.findCurrentRevision) {
@@ -3221,7 +3249,17 @@ async function prepareOne(
     // has no proposal to ride on. Stamping it here is what keeps the standing
     // decision durable on every revision, so the next prepare inherits this
     // answer rather than an older one.
-    if (materialsChargeDecision && !priced.proposal) {
+    //
+    // A decision the materials guard REFUSED is not such a decision and is
+    // never stamped. Persisting it would make the refusal survive exactly one
+    // prepare: the next one, sent with no body key, would inherit the rejected
+    // figure as a standing answer, terminal would stand aside because a
+    // decision appears to exist, and a charge line would land on a cycle that
+    // has already shipped and been billed.
+    if (
+      materialsChargeDecision && !priced.proposal &&
+      !priced.materials_charge_refused
+    ) {
       priced.blocker.facts = {
         ...(priced.blocker.facts || {}),
         [MATERIALS_CHARGE_DECISION_FACT]: materialsChargeDecisionMarker(

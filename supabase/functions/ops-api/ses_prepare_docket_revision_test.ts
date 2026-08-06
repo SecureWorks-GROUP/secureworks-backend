@@ -4069,6 +4069,16 @@ const ITEMISED_INVOICE = {
   },
 };
 
+const RELEASED_CYCLE = {
+  kind: "released",
+  evidence: {
+    route_kinds: ["invoice", "photo", "report"],
+    last_proven_at: "2026-08-05T11:26:31.529Z",
+    invoice_numbers: ["INV-1137"],
+    invoice_statuses: ["AUTHORISED"],
+  },
+};
+
 const LABOUR_ONLY_INVOICE = {
   kind: "none",
   reason_code: "invoice_prices_no_materials",
@@ -4136,15 +4146,7 @@ Deno.test(
       SETTLED_MATERIALS,
       undefined,
       materialsAnswerDeps(
-        {
-          kind: "released",
-          evidence: {
-            route_kinds: ["invoice", "photo", "report"],
-            last_proven_at: "2026-08-05T11:26:31.529Z",
-            invoice_number: "INV-1137",
-            invoice_status: "AUTHORISED",
-          },
-        },
+        RELEASED_CYCLE,
         // Woodvale mirrors no invoice line items, so the invoice reading is
         // blind here. Terminal is the only rule that reaches this card.
         { kind: "none", reason_code: "invoice_line_items_absent", detail: "" },
@@ -4165,7 +4167,119 @@ Deno.test(
     );
     const marker = proposal.materials_charge as Record<string, unknown>;
     assertEquals(marker.decision, "already_released");
-    assertEquals(marker.invoice_number, "INV-1137");
+    assertEquals(marker.invoice_numbers, ["INV-1137"]);
+  },
+);
+
+Deno.test(
+  "a figure refused against a released cycle does not become a standing decision",
+  async () => {
+    // The double-bill this whole change exists to prevent, one prepare later.
+    // The refusal must not be undone by the refused figure persisting as the
+    // card's durable marker and being inherited by the next prepare.
+    const releasedDeps = materialsAnswerDeps(RELEASED_CYCLE, {
+      kind: "none",
+      reason_code: "invoice_line_items_absent",
+      detail: "",
+    });
+
+    const refused = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      SETTLED_MATERIALS,
+      materialsChargeAuthorisation(65),
+      releasedDeps,
+    );
+    assertEquals(refused.invoice_proposal, null);
+    const blocker = refused.blockers.find((item) =>
+      item.reason_code === "materials_charge_figure_unsupported"
+    );
+    assert(blocker, "a figure aimed at a released cycle must refuse loudly");
+    assertEquals(
+      materialsChargeDecisionFromRevision({
+        local_invoice_proposal: refused.invoice_proposal,
+        blockers: refused.blockers,
+      }),
+      null,
+      "a refused figure must not be stamped as the card's standing decision",
+    );
+
+    // The SES reporting skill re-prepares this card with no body key. It must
+    // see the same released cycle, not a decision nobody made.
+    const reprepared = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      SETTLED_MATERIALS,
+      undefined,
+      {
+        ...releasedDeps,
+        resolvePriorMaterialsCharge: () =>
+          Promise.resolve(
+            materialsChargeDecisionFromRevision({
+              local_invoice_proposal: refused.invoice_proposal,
+              blockers: refused.blockers,
+            }),
+          ),
+      },
+    );
+    const proposal = reprepared.invoice_proposal as Record<string, unknown>;
+    assert(proposal, "expected a priced proposal on the released cycle");
+    const marker = proposal.materials_charge as Record<string, unknown>;
+    assertEquals(marker.decision, "already_released");
+    const lines = proposal.line_items as Array<Record<string, unknown>>;
+    assertEquals(lines.length, 1, "a released cycle adds no charge line");
+    assertEquals(
+      lines.some((line) =>
+        String(line.description).includes("Materials used") ||
+        Number(line.unit_price_ex_gst) === 65
+      ),
+      false,
+      "the refused figure must never reach a line on an already billed cycle",
+    );
+    assertEquals(proposal.subtotal_ex_gst, 510);
+  },
+);
+
+Deno.test(
+  "a figure the card legitimately shipped under still reproduces unchanged",
+  async () => {
+    // Mosman Park SWMS-261147 / Gidgegannup SWMS-26953: shipped WITH a materials
+    // charge line. Terminal stands aside for an inherited decision, so the card
+    // reproduces the figure it was billed under rather than being rewritten.
+    const answered = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      SETTLED_MATERIALS,
+      materialsChargeAuthorisation(65),
+    );
+    const answeredProposal = answered.invoice_proposal as Record<
+      string,
+      unknown
+    >;
+    assert(answeredProposal, "expected the answered proposal");
+
+    const reprepared = await labourProposal(
+      "MLB",
+      "physical_makesafe",
+      SETTLED_MATERIALS,
+      undefined,
+      {
+        ...materialsAnswerDeps(RELEASED_CYCLE, {
+          kind: "none",
+          reason_code: "invoice_line_items_absent",
+          detail: "",
+        }),
+        resolvePriorMaterialsCharge: () =>
+          Promise.resolve(answeredProposal.materials_charge),
+      },
+    );
+    const inherited = reprepared.invoice_proposal as Record<string, unknown>;
+    assert(inherited, "expected the inherited proposal");
+    assertEquals(inherited.line_items, answeredProposal.line_items);
+    assertEquals(
+      inherited.subtotal_ex_gst,
+      answeredProposal.subtotal_ex_gst,
+    );
   },
 );
 

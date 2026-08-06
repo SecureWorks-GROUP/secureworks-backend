@@ -154,8 +154,15 @@ export interface SesReleasedCycleEvidence {
   route_kinds: string[];
   /** Newest proof timestamp among them. */
   last_proven_at: string | null;
-  invoice_number: string;
-  invoice_status: string;
+  /**
+   * EVERY issued ACCREC invoice on the card, sorted, never an arbitrary first.
+   * Which one billed this cycle is a guess when there are two, and the local
+   * mirror read is unordered, so naming one would make the reading depend on
+   * PostgREST row order. The rule only needs "this cycle is billed", so it
+   * records what it read and guesses nothing.
+   */
+  invoice_numbers: string[];
+  invoice_statuses: string[];
 }
 
 export type SesReleasedCycleRefusalCode =
@@ -231,8 +238,16 @@ export function readSesReleasedCycleEvidence(input: {
     evidence: {
       route_kinds: routeKinds,
       last_proven_at: provenAt.length ? provenAt[provenAt.length - 1] : null,
-      invoice_number: text(issued[0].invoice_number),
-      invoice_status: text(issued[0].status).toUpperCase(),
+      invoice_numbers: [
+        ...new Set(
+          issued.map((row) => text(row.invoice_number)).filter(Boolean),
+        ),
+      ].sort(),
+      invoice_statuses: [
+        ...new Set(
+          issued.map((row) => text(row.status).toUpperCase()).filter(Boolean),
+        ),
+      ].sort(),
     },
   };
 }
@@ -245,16 +260,30 @@ export function readSesReleasedCycleEvidence(input: {
 function lineAmountExGst(line: Record<string, unknown>): number | null {
   for (const key of ["LineAmount", "line_amount", "lineAmount"] as const) {
     if (!Object.hasOwn(line, key)) continue;
-    const amount = Number(line[key]);
-    if (Number.isFinite(amount)) return Math.round(amount * 100) / 100;
-    return null;
+    return readableNumber(line[key]);
   }
-  const quantity = Number(
+  const quantity = readableNumber(
     line.Quantity ?? line.quantity ?? (line as { qty?: unknown }).qty,
   );
-  const unit = Number(line.UnitAmount ?? line.unit_amount ?? line.unitAmount);
-  if (!Number.isFinite(quantity) || !Number.isFinite(unit)) return null;
+  const unit = readableNumber(
+    line.UnitAmount ?? line.unit_amount ?? line.unitAmount,
+  );
+  if (quantity === null || unit === null) return null;
   return Math.round(quantity * unit * 100) / 100;
+}
+
+/**
+ * A number the mirror actually states. A present-but-null (or blank) value is
+ * UNREADABLE, never zero: `Number(null)` and `Number("")` are both a finite 0,
+ * which would drop a real materials line out of the total while the reading
+ * still yielded evidence — understating what the builder was billed.
+ */
+function readableNumber(raw: unknown): number | null {
+  if (typeof raw !== "number" && typeof raw !== "string") return null;
+  if (typeof raw === "string" && !raw.trim()) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return null;
+  return Math.round(value * 100) / 100;
 }
 
 function lineDescription(line: Record<string, unknown>): string {

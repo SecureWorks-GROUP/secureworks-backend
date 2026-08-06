@@ -356,6 +356,11 @@ export const MATERIALS_CHARGE_ALREADY_RELEASED = "already_released";
  * a re-attendance opens a new cycle whose materials are a real question again,
  * so it is never inherited.
  */
+function releasedInvoiceLabel(evidence: SesReleasedCycleEvidence): string {
+  return evidence.invoice_numbers.join(", ") ||
+    "an issued invoice this card carries";
+}
+
 export function releasedCycleMaterialsMarker(
   evidence: SesReleasedCycleEvidence,
   materials: string[],
@@ -366,15 +371,17 @@ export function releasedCycleMaterialsMarker(
     materials_charge_ex_gst: 0,
     materials_used: materials,
     source: "released_and_billed_attendance_cycle",
-    invoice_number: evidence.invoice_number,
-    invoice_status: evidence.invoice_status,
+    invoice_numbers: evidence.invoice_numbers,
+    invoice_statuses: evidence.invoice_statuses,
     released_route_kinds: evidence.route_kinds,
     released_at: evidence.last_proven_at,
     estimate: false,
     note:
       `This card's current attendance cycle already shipped to the builder (${
         evidence.route_kinds.join(", ") || "route proof"
-      }) and is billed on ${evidence.invoice_number}. Nothing here is still to be priced, so no materials figure is asked for and none is added. Re-read from send and money evidence on every prepare; not inherited.`,
+      }) and is billed on ${
+        releasedInvoiceLabel(evidence)
+      }. Nothing here is still to be priced, so no materials figure is asked for and none is added. Re-read from send and money evidence on every prepare; not inherited.`,
   };
 }
 
@@ -640,7 +647,9 @@ export function decideStandardLabourMaterialsCharge(input: {
       materials,
       reason_code: MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
       reason:
-        `A materials charge of $${charge.amount_ex_gst} ex GST was supplied, but this card's current attendance cycle has already shipped to the builder and is billed on ${released.invoice_number}. Adding the figure now would bill those materials a second time.`,
+        `A materials charge of $${charge.amount_ex_gst} ex GST was supplied, but this card's current attendance cycle has already shipped to the builder and is billed on ${
+          releasedInvoiceLabel(released)
+        }. Adding the figure now would bill those materials a second time.`,
       recovery_action:
         "Nothing on this cycle is still to be priced, so withdraw the figure and leave the shipped pack alone. If the materials genuinely went unbilled, that is a credit or a new invoice decision on the money itself, never a second charge line on a released docket.",
     };

@@ -14,8 +14,14 @@
  *                     asked for one figure, exactly as today.
  *
  * It runs the SHIPPED readers (`ses_invoiced_materials_evidence.ts`) over live
- * rows rather than restating their rules, so the number it reports is the
- * number the assembler will actually produce.
+ * rows rather than restating their rules, and applies them in the SAME order
+ * `prepareOne` does (a standing decision, then no recorded materials, then
+ * typed priced material facts, each of which stops the reading before it
+ * starts), so the number it reports is the number the assembler will actually
+ * produce. Typed material facts are read from the two checklist sources the
+ * adapter itself resolves `hours_and_materials.materials` from
+ * (`checklist_json->'pricing'->'materials'`, else `checklist_json->'materials'`);
+ * if the adapter gains another alias, add it to the population query too.
  *
  * Production safety:
  * - the only production access is the Supabase Management API `/database/query`
@@ -166,20 +172,11 @@ function classify(row: Record<string, any>): CardResult {
       } decision`,
     };
   }
-  const released = readSesReleasedCycleEvidence({
-    attendance_cycle_id: row.cycle_id ?? null,
-    route_proofs: proofs,
-    invoices,
-  });
-  if (materials.length && released.kind === "released") {
-    return {
-      ...base,
-      outcome: "already_released",
-      detail: `shipped ${
-        released.evidence.route_kinds.join("+")
-      }, billed ${released.evidence.invoice_number}`,
-    };
-  }
+  // `prepareOne` skips the evidence lookup entirely unless the card records
+  // materials AND carries no typed material facts, so both gates come BEFORE
+  // either reading here — otherwise a released card that also prices typed
+  // materials would be counted as terminal here and priced as typed materials
+  // in production.
   if (!materials.length) {
     return {
       ...base,
@@ -192,6 +189,20 @@ function classify(row: Record<string, any>): CardResult {
       ...base,
       outcome: "typed_priced_materials",
       detail: "proposal already prices typed materials lines",
+    };
+  }
+  const released = readSesReleasedCycleEvidence({
+    attendance_cycle_id: row.cycle_id ?? null,
+    route_proofs: proofs,
+    invoices,
+  });
+  if (released.kind === "released") {
+    return {
+      ...base,
+      outcome: "already_released",
+      detail: `shipped ${released.evidence.route_kinds.join("+")}, billed ${
+        released.evidence.invoice_numbers.join(", ")
+      }`,
     };
   }
   const invoiced = readSesInvoicedMaterialsEvidence(invoices);

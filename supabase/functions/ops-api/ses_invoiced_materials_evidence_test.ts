@@ -423,8 +423,8 @@ Deno.test("a shipped and billed current cycle is terminal", () => {
   assertEquals(reading.kind, "released");
   if (reading.kind !== "released") throw new Error("unreachable");
   assertEquals(reading.evidence.route_kinds, ["invoice", "photo", "report"]);
-  assertEquals(reading.evidence.invoice_number, "INV-1137");
-  assertEquals(reading.evidence.invoice_status, "AUTHORISED");
+  assertEquals(reading.evidence.invoice_numbers, ["INV-1137"]);
+  assertEquals(reading.evidence.invoice_statuses, ["AUTHORISED"]);
 
   // …and that same invoice, read for its materials, answers nothing.
   const invoiced = readSesInvoicedMaterialsEvidence(ISSUED);
@@ -493,4 +493,56 @@ Deno.test("terminal is proven from send evidence, never inferred", () => {
   assertEquals(unattributed.kind, "none");
   if (unattributed.kind !== "none") throw new Error("unreachable");
   assertEquals(unattributed.reason_code, "current_cycle_not_shipped");
+});
+
+Deno.test("the terminal reading never depends on mirror row order", () => {
+  // The local `xero_invoices` read is unordered, so a card carrying two issued
+  // invoices must not read differently depending on which row PostgREST
+  // returned first. Which invoice billed the cycle is a guess with two of them,
+  // so the reading records both and guesses nothing.
+  const first = invoice({
+    invoice_id: "xero-uuid-a",
+    invoice_number: "INV-1136",
+    status: "AUTHORISED",
+  });
+  const second = invoice({
+    invoice_id: "xero-uuid-b",
+    invoice_number: "INV-1137",
+    status: "PAID",
+  });
+  const read = (invoices: SesIssuedInvoiceCandidate[]) =>
+    readSesReleasedCycleEvidence({
+      attendance_cycle_id: CURRENT_CYCLE,
+      route_proofs: [proof([CURRENT_CYCLE])],
+      invoices,
+    });
+  const forwards = read([first, second]);
+  const backwards = read([second, first]);
+  assertEquals(forwards, backwards);
+  assertEquals(forwards.kind, "released");
+  if (forwards.kind !== "released") throw new Error("unreachable");
+  assertEquals(forwards.evidence.invoice_numbers, ["INV-1136", "INV-1137"]);
+  assertEquals(forwards.evidence.invoice_statuses, ["AUTHORISED", "PAID"]);
+});
+
+Deno.test("a null line amount is unreadable, never a silent zero", () => {
+  // `Number(null)` is a finite 0, which would drop a real materials line out of
+  // the total while the reading still yielded evidence from the others — the
+  // recorded audit figure would understate what the builder was billed.
+  const reading = readSesInvoicedMaterialsEvidence([
+    invoice({
+      invoice_number: "INV-1039",
+      line_items: [
+        line("MLB-26705 - Balga roof make-safe - 1 trade x 3 hours", 255),
+        {
+          Description: "MLB-26705 - Fixings and consumables",
+          LineAmount: null,
+        },
+        line("MLB-26705 - Tarps supplied", 60),
+      ],
+    }),
+  ]);
+  assertEquals(reading.kind, "none");
+  if (reading.kind !== "none") throw new Error("unreachable");
+  assertEquals(reading.reason_code, "invoice_line_unreadable");
 });

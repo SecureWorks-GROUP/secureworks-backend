@@ -1721,7 +1721,15 @@ operator is:
 Both RECORD a marker and add no money (the charge is already billed; a second
 line is what a later mint would double-bill), neither is inherited, and neither
 touches a card that already carries a decision or already prices typed
-materials. Precedence the coming derived-proposal path must inherit: released
+materials — a card that shipped WITH a charge line reproduces the figure it was
+billed under. A figure supplied on THIS request against a released cycle is a
+different case and IS refused loudly, and a refused figure is never stamped as
+the card's durable `materials_charge_decision` marker: persisting it would let
+the very next prepare inherit a decision nobody made and bill the materials a
+second time. Only a minimal stable coordinate of either reading (the settled
+cycle id, or the invoice identity plus its materials total) enters the revision
+input hash, so post-settlement movement cannot re-key a shipped revision and
+drop its Docs Ready signoff. Precedence the coming derived-proposal path must inherit: released
 cycle -> operator decision -> committed invoice money -> derived proposal ->
 ask. Committed money outranks derivation permanently. Live 2026-08-06: 25 of 33
 `standard_labour_materials` cards settle (8 terminal, 17 itemised); re-measure

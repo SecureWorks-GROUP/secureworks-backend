@@ -97,7 +97,15 @@ otherwise                              -> ask (today's blocker, unchanged)
   line; terminal stands aside so they reproduce the figure they were billed
   under. Overriding would rewrite a shipped docket and drop its signoff.
 - A figure supplied on THIS request against a released cycle is refused loudly
-  as `materials_charge_figure_unsupported` — the Koondoola trap.
+  as `materials_charge_figure_unsupported` — the Koondoola trap. A REFUSED
+  figure is never stamped as the card's `materials_charge_decision` marker
+  either: persisting it would make the refusal survive exactly one prepare, and
+  the next one (no body key) would inherit a decision nobody made and bill the
+  materials a second time.
+- The terminal reading records EVERY issued ACCREC invoice on the card
+  (`invoice_numbers` / `invoice_statuses`, sorted). The mirror read is
+  unordered and, with two issued invoices, which one billed the cycle is a
+  guess — the rule only needs "this cycle is billed", so it guesses nothing.
 - Neither marker is ever inherited (`carriedMaterialsChargeDecision` returns
   null for both), so a voided invoice or a re-attendance can reopen the
   question, and a zero-charge marker can never read back as an operator NONE
@@ -105,7 +113,13 @@ otherwise                              -> ask (today's blocker, unchanged)
 - A card nobody can settle hashes **byte-identically to today**, so no
   still-to-be-priced revision is re-keyed and no Docs Ready tick is lost. A
   settled one does move identity, deliberately: otherwise a blocked revision and
-  the settled one collide on a single revision id.
+  the settled one collide on a single revision id. Only a MINIMAL stable
+  coordinate goes into that identity — the settled attendance cycle id, or the
+  invoice identity plus its materials total. Proof timestamps, route kinds,
+  invoice status and line detail all legitimately move AFTER settlement, and
+  each such move would otherwise re-key an already-shipped revision and drop a
+  Docs Ready signoff the Captain has already given. The full evidence still
+  rides on the marker for audit.
 
 ## Measured effect (33 `standard_labour_materials` cards, live 2026-08-06)
 
