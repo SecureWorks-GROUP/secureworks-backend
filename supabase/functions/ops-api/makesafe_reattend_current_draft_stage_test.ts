@@ -17,9 +17,18 @@
 // the ladder saw no invoice, `readyForReview` could never be true, and the card
 // fell through to `trade_report_in`.
 //
+// The same defect then repeated one seam later, on the same two cards. The
+// ladder was fixed but the card's PRESENTATION fields (`invoice_raw_status` /
+// `invoice_date` / `invoice_created_at`) still ran `allowCloseoutFromEvidence`
+// on their own, so the board derived `report_ready` from the DRAFT while the
+// same row served no invoice status, no invoice date and no created-at. The
+// cockpit had nothing to bind an approve control to and the Captain could not
+// action a card the board had already called ready. Both now read the single
+// `invoiceForStage` binding, so placement and presentation cannot disagree.
+//
 // The pair below is the whole contract:
 //   - REGRESSION: a reattend card whose DRAFT the qualifier certifies as
-//     current-cycle reaches Docs Ready.
+//     current-cycle reaches Docs Ready AND presents that DRAFT.
 //   - CONTROL: a reattend card whose DRAFT predates the reattend boundary is
 //     `prior_cycle_commercial` and STAYS OUT. Prior-cycle commercial evidence
 //     must never place a card the Captain could approve.
@@ -134,6 +143,40 @@ Deno.test("a reattend card with a qualifying current-cycle DRAFT renders in Docs
   assert(
     (row.cycle_attribution_flags ?? []).includes("commercial_from_prior_cycle"),
   );
+
+  // PRESENTATION: the card must serve the DRAFT it was placed by. A board that
+  // derives `report_ready` from an invoice while presenting no invoice at all
+  // is internally contradictory, and the cockpit cannot offer an approve
+  // control against nulls. These are the exact three fields that came back null
+  // on the served White Gum Valley card while Mindarie (identical but
+  // first-attendance) served all three.
+  assertEquals(row.invoice_raw_status, "DRAFT");
+  assertEquals(row.invoice_date, "2026-08-06");
+  assertEquals(row.invoice_created_at, AFTER_BOUNDARY);
+});
+
+Deno.test("presentation and placement read one binding, so they cannot disagree", () => {
+  // The defect's signature was a single row asserting both "this DRAFT places
+  // the card" and "this card has no invoice". Pin the implication itself rather
+  // than the two values independently: any future re-split of the binding
+  // reproduces the contradiction and fails here regardless of which side moved.
+  for (
+    const [label, inv] of [
+      ["current-cycle draft", invoice("DRAFT", AFTER_BOUNDARY)],
+      ["prior-cycle draft", invoice("DRAFT", BEFORE_BOUNDARY)],
+      ["authorised", invoice("AUTHORISED", AFTER_BOUNDARY)],
+      ["no invoice", null],
+    ] as const
+  ) {
+    const row = enrich(inv);
+    if (row.invoice_qualifies_as_current_draft === true) {
+      assertEquals(
+        row.invoice_raw_status,
+        "DRAFT",
+        `${label}: placed by a qualifying draft but presented none`,
+      );
+    }
+  }
 });
 
 // ── CONTROL: a prior-cycle draft must not place the card ───────────────────
@@ -149,6 +192,44 @@ Deno.test("a reattend card whose DRAFT predates the boundary stays out of Docs R
   const row = enrich(inv);
   assertEquals(row.board_stage, "trade_report_in");
   assertEquals(row.invoice_qualifies_as_current_draft, false);
+
+  // PRESENTATION, and the sharper half of this control. Widening presentation
+  // to a certified current-cycle DRAFT must NOT leak an earlier visit's money
+  // onto the card. A card showing a prior cycle's invoice as though it were
+  // this attendance's is worse than the blanking bug it replaced: the Captain
+  // would approve against a figure that does not belong to the work in front of
+  // him. The qualifier is the only gate, and it said `prior_cycle_commercial`,
+  // so all three fields stay null even though a DRAFT row exists and is linked.
+  assertEquals(row.invoice_raw_status, null);
+  assertEquals(row.invoice_date, null);
+  assertEquals(row.invoice_created_at, null);
+});
+
+Deno.test("prior-cycle money never reaches the Captain's approve list", () => {
+  // The approve control needs BOTH a Docs Ready placement and something to bind
+  // to. Pin the conjunction directly against every non-current invoice shape:
+  // no prior-cycle or non-DRAFT invoice may produce a card that is both placed
+  // for approval and presenting a figure. Asserting the two halves separately
+  // would let a future change satisfy each in a different test while a real card
+  // became approvable on an earlier visit's money.
+  for (
+    const [label, inv] of [
+      ["prior-cycle draft", invoice("DRAFT", BEFORE_BOUNDARY)],
+      ["prior-cycle authorised", invoice("AUTHORISED", BEFORE_BOUNDARY)],
+      ["authorised this cycle", invoice("AUTHORISED", AFTER_BOUNDARY)],
+      ["voided", invoice("VOIDED", AFTER_BOUNDARY)],
+    ] as const
+  ) {
+    const row = enrich(inv);
+    const approvable = row.board_stage === "report_ready" &&
+      row.invoice_raw_status != null;
+    assert(
+      !approvable,
+      `${label}: card became approvable on money the qualifier refused ` +
+        `(stage=${row.board_stage}, presented=${row.invoice_raw_status}, ` +
+        `reason=${row.invoice_draft_qualification_reason})`,
+    );
+  }
 });
 
 Deno.test("a reattend card with no invoice at all stays out of Docs Ready", () => {
@@ -176,9 +257,12 @@ Deno.test("an AUTHORISED invoice on a reattend card still cannot close it", () =
     row.board_stage !== "completed" && row.board_stage !== "archive",
     `reattend closeout suppression broken: derived ${row.board_stage}`,
   );
-  // The completion-time inputs stay suppressed on reattend — this fix does not
-  // touch them.
+  // Prior-cycle commercial evidence is still not presented either: the
+  // qualifier refuses a non-DRAFT, so the shared binding is null and the
+  // completion-time inputs stay suppressed. Widening presentation to the
+  // certified current-cycle DRAFT cannot reach a raised invoice.
   assertEquals(row.invoice_raw_status, null);
+  assertEquals(row.invoice_date, null);
   assertEquals(row.invoice_created_at, null);
 });
 
