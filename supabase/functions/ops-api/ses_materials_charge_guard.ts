@@ -17,6 +17,14 @@
  *   SET    an authorised ex-GST figure   -> one charge line naming the materials
  *   NONE   an explicit "no materials charge" -> labour-only, decision recorded
  *
+ * A fourth answer needs no operator at all, because a human already gave it in
+ * money: when the card's own ISSUED Xero invoice explicitly prices materials,
+ * that is a stronger answer than a figure typed onto a docket, and UNSET
+ * resolves to `already_invoiced` instead of asking. It is read fresh from the
+ * money on every prepare and adds nothing to the proposal — see
+ * `ses_invoiced_materials_evidence.ts`. A labour-only invoice is not an answer
+ * and never reaches this.
+ *
  * All three are DURABLE, because SET and NONE are both stamped as the
  * `materials_charge` marker on the revision the prepare commits (on the
  * proposal when one is produced, and on the refusing blocker's facts when one
@@ -34,6 +42,11 @@
  * picket carve-out and labour path; they share the silent-omit defect for
  * non-picket materials but are out of scope for this change.
  */
+
+import type {
+  SesInvoicedMaterialsEvidence,
+  SesReleasedCycleEvidence,
+} from "./ses_invoiced_materials_evidence.ts";
 
 export const MATERIALS_CHARGE_FIGURE_REQUIRED =
   "materials_charge_figure_required";
@@ -321,6 +334,89 @@ export function materialsChargeDecisionMarker(
 }
 
 /**
+ * The `decision` value the already-invoiced marker carries.
+ *
+ * It is deliberately NOT `none`. A NONE marker records a human deciding this
+ * card carries no materials charge; this one records that the charge exists and
+ * is already on an issued invoice. Collapsing the two would let a voided or
+ * re-issued invoice leave behind a standing "do not charge materials" nobody
+ * ever decided.
+ */
+export const MATERIALS_CHARGE_ALREADY_INVOICED = "already_invoiced";
+
+/** The `decision` value the shipped-and-billed marker carries. */
+export const MATERIALS_CHARGE_ALREADY_RELEASED = "already_released";
+
+/**
+ * The marker a card records when its CURRENT cycle has already shipped to the
+ * builder and been billed. Nothing on this card is still to be priced, so the
+ * revision records what settled it and adds no money.
+ *
+ * Like the already-invoiced marker this is a reading, not a standing decision:
+ * a re-attendance opens a new cycle whose materials are a real question again,
+ * so it is never inherited.
+ */
+function releasedInvoiceLabel(evidence: SesReleasedCycleEvidence): string {
+  return evidence.invoice_numbers.join(", ") ||
+    "an issued invoice this card carries";
+}
+
+export function releasedCycleMaterialsMarker(
+  evidence: SesReleasedCycleEvidence,
+  materials: string[],
+): Record<string, unknown> {
+  return {
+    schema: SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
+    decision: MATERIALS_CHARGE_ALREADY_RELEASED,
+    materials_charge_ex_gst: 0,
+    materials_used: materials,
+    source: "released_and_billed_attendance_cycle",
+    invoice_numbers: evidence.invoice_numbers,
+    invoice_statuses: evidence.invoice_statuses,
+    released_route_kinds: evidence.route_kinds,
+    released_at: evidence.last_proven_at,
+    estimate: false,
+    note:
+      `This card's current attendance cycle already shipped to the builder (${
+        evidence.route_kinds.join(", ") || "route proof"
+      }) and is billed on ${
+        releasedInvoiceLabel(evidence)
+      }. Nothing here is still to be priced, so no materials figure is asked for and none is added. Re-read from send and money evidence on every prepare; not inherited.`,
+  };
+}
+
+/**
+ * The marker an already-invoiced revision commits. It records the money that
+ * answers the question and the invoice that carries it, and it adds nothing to
+ * the proposal: the materials are billed on that invoice, so a second charge
+ * line here is what a later mint would double-bill.
+ *
+ * It is written for the audit trail and read by nobody as a standing decision —
+ * `carriedMaterialsChargeDecision` refuses to inherit it on purpose, so every
+ * prepare re-derives the answer from the money as it stands then.
+ */
+export function invoicedMaterialsChargeMarker(
+  evidence: SesInvoicedMaterialsEvidence,
+  materials: string[],
+): Record<string, unknown> {
+  return {
+    schema: SES_MATERIALS_CHARGE_AUTHORISATION_SCHEMA,
+    decision: MATERIALS_CHARGE_ALREADY_INVOICED,
+    materials_charge_ex_gst: 0,
+    already_invoiced_materials_ex_gst: evidence.materials_ex_gst,
+    materials_used: materials,
+    source: "issued_invoice_materials_lines",
+    invoice_number: evidence.invoice_number,
+    invoice_id: evidence.invoice_id,
+    invoice_status: evidence.status,
+    invoice_materials_lines: evidence.materials_lines,
+    estimate: false,
+    note:
+      `Materials on this card are already priced on issued invoice ${evidence.invoice_number} at $${evidence.materials_ex_gst} ex GST. This proposal adds no further materials charge, so nothing here can double-bill that invoice. Re-read from the money on every prepare; not inherited.`,
+  };
+}
+
+/**
  * The key the refusing half of a revision stamps its decision under, so a
  * decision made while the card was blocked for an unrelated pricing reason is
  * just as durable as one made on a priced revision.
@@ -379,6 +475,15 @@ export function carriedMaterialsChargeDecision(input: {
   const prior = input.prior_materials_charge;
   if (!prior || typeof prior !== "object" || Array.isArray(prior)) return null;
   const marker = prior as Record<string, unknown>;
+  // An already-invoiced marker is a RECORD of money read at the time, never a
+  // standing decision. Inheriting it would freeze one prepare's reading of the
+  // invoice onto the card: a voided invoice would keep answering, and (because
+  // it carries a zero charge) it would read back as an operator NONE nobody
+  // decided. Re-derive from the money instead.
+  if (
+    marker.decision === MATERIALS_CHARGE_ALREADY_INVOICED ||
+    marker.decision === MATERIALS_CHARGE_ALREADY_RELEASED
+  ) return null;
   const current = recordedMaterialsUsed(input.materials_used);
   if (!current.length) return null;
   const decidedFor = recordedMaterialsUsed(marker.materials_used);
@@ -427,6 +532,28 @@ export type MaterialsChargeDecision =
     provenance: Record<string, unknown>;
   }
   | {
+    /**
+     * The card's issued invoice already prices these materials. No charge line
+     * — that money is committed elsewhere — but the answer is recorded, so the
+     * proposal is explicit about it rather than silently labour-only.
+     */
+    action: "already_invoiced";
+    materials: string[];
+    invoice: SesInvoicedMaterialsEvidence;
+    provenance: Record<string, unknown>;
+  }
+  | {
+    /**
+     * The card's current cycle has already shipped to the builder and been
+     * billed. Nothing here is still to be priced, so nothing is asked for and
+     * nothing is added.
+     */
+    action: "already_released";
+    materials: string[];
+    release: SesReleasedCycleEvidence;
+    provenance: Record<string, unknown>;
+  }
+  | {
     action: "refuse";
     materials: string[];
     reason_code:
@@ -461,6 +588,26 @@ export function decideStandardLabourMaterialsCharge(input: {
   materials_used: unknown;
   standing_decision: SesMaterialsChargeStandingDecision | null;
   priced_materials_line_count: number;
+  /**
+   * The card's own issued-invoice materials evidence, when it has any. Read
+   * fresh from the money each prepare and consulted ONLY where this function
+   * would otherwise refuse: an operator decision and typed priced materials
+   * both outrank it, so it can never collide with either.
+   */
+  invoiced_materials_evidence?: SesInvoicedMaterialsEvidence | null;
+  /**
+   * Proof that this card's CURRENT attendance cycle already shipped to the
+   * builder and is billed. Outranks everything below, because a settled cycle
+   * has nothing left to price — see the terminal branch.
+   */
+  released_cycle_evidence?: SesReleasedCycleEvidence | null;
+  /**
+   * Whether `standing_decision` was supplied on THIS request rather than
+   * inherited from the card's own newest revision. It is the difference
+   * between a new figure aimed at a released cycle (the double-bill trap) and
+   * the figure that cycle already shipped under.
+   */
+  standing_decision_supplied_now?: boolean;
 }): MaterialsChargeDecision {
   const materials = recordedMaterialsUsed(input.materials_used);
   const standing = input.standing_decision;
@@ -469,6 +616,44 @@ export function decideStandardLabourMaterialsCharge(input: {
     : null;
   const alreadyPriced = Number.isFinite(input.priced_materials_line_count) &&
     input.priced_materials_line_count > 0;
+
+  // Terminal is the strongest answer to an UNASKED question (Captain
+  // 2026-08-06). A card whose current cycle has shipped and been billed must
+  // not be asked to price anything, wherever its materials decision was
+  // recorded — that is what makes this rule hold on the eight already-sent
+  // cards whose money the docket cannot read line by line.
+  //
+  // It is stated as "do not ask", not "assume none", and the distinction is
+  // load-bearing in both directions. A figure aimed at a released cycle NOW is
+  // the double-bill trap and is refused loudly rather than dropped. A decision
+  // the card was ALREADY carrying is the figure that cycle shipped under, so
+  // terminal stands aside and lets it reproduce unchanged — overriding it would
+  // rewrite a shipped docket to say something different from what was billed.
+  const released = input.released_cycle_evidence;
+  if (released && materials.length && !standing) {
+    return {
+      action: "already_released",
+      materials,
+      release: released,
+      provenance: releasedCycleMaterialsMarker(released, materials),
+    };
+  }
+  if (
+    released && materials.length && charge &&
+    input.standing_decision_supplied_now
+  ) {
+    return {
+      action: "refuse",
+      materials,
+      reason_code: MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
+      reason:
+        `A materials charge of $${charge.amount_ex_gst} ex GST was supplied, but this card's current attendance cycle has already shipped to the builder and is billed on ${
+          releasedInvoiceLabel(released)
+        }. Adding the figure now would bill those materials a second time.`,
+      recovery_action:
+        "Nothing on this cycle is still to be priced, so withdraw the figure and leave the shipped pack alone. If the materials genuinely went unbilled, that is a credit or a new invoice decision on the money itself, never a second charge line on a released docket.",
+    };
+  }
 
   if (standing?.decision === "none") {
     return {
@@ -516,6 +701,20 @@ export function decideStandardLabourMaterialsCharge(input: {
 
   if (!materials.length) return { action: "none" };
   if (alreadyPriced) return { action: "none" };
+
+  // Money already committed answers the question. This sits BELOW an operator
+  // decision and below typed priced materials — both are handled above and
+  // return before here — and ABOVE the ask, so it only ever converts a refusal
+  // into a recorded answer and can never change a card that prices today.
+  const invoiced = input.invoiced_materials_evidence;
+  if (invoiced && invoiced.materials_ex_gst > 0) {
+    return {
+      action: "already_invoiced",
+      materials,
+      invoice: invoiced,
+      provenance: invoicedMaterialsChargeMarker(invoiced, materials),
+    };
+  }
 
   const listed = materials.join("; ");
   return {
