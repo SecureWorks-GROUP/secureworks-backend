@@ -876,6 +876,43 @@ audited `content_hash` on a builder-facing attachment does not attest the bytes
 sent. It still uniquely keys each row, so no wrong attachment ships. Evidence:
 `data/mosman-doc-integrity-f01-f02-v1/report.md`.
 
+## "Nothing Is BOUND" Is Not "Nothing EXISTS", And `report_sent_at` Is Never Send Truth
+
+Two fields lie about state, in opposite directions, and both have burned a run.
+
+**A card with no bound invoice may already be PAID.** The review cockpit reads
+invoice presence from `xero_binding` alone, so a hand-made Xero invoice never
+linked to the job — or linked but never bound to the current docket — is
+invisible, and APPROVE INVOICE used to say "mint the draft first". Measured
+2026-08-06: **all 16** Docs Ready cards with no bound invoice already carried
+live money under their own reference (7 PAID, 6 AUTHORISED, 3 unlinked DRAFT),
+at a proposal price differing from what was billed (SWMS-26841: $561 proposal
+against INV-0850 already PAID $882.20). Never treat an absent
+`bound_invoice` / `missing_invoice` as authority to mint, or as evidence a card
+needs a draft. Check Xero **by reference** first. `ses_existing_card_money.ts`
+is that check and the cockpit refuses on it (`invoice_exists_unbound`); it
+consumes `makesafe_invoice_reference_match.ts`'s reference GRAMMAR, not its
+unique-match entrypoint, because **a matcher for attribution must be unique and
+a matcher for refusal must be inclusive**. Keep it ONE-WAY: it may only add a
+blocker, never clear one.
+
+**`report_sent_at` is wrong in both directions.** The retired
+`ready_to_invoice` auto-stamp minted it for sends that never happened, while a
+card sent through the sealed release graph gets none. Across the 419-card board
+on 2026-08-06, 33 cards carried a stamp, 15 carried a real route proof, and the
+two sets did **not intersect at all**. Send truth is `ses_release_route_proofs`
+(carries `job_id`), `route_send` effects reached through
+`makesafe_release_revision_members` (**never** `ses_external_effects.job_id`,
+NULL on every such row — a direct join reads as "nothing sent"), a sent
+`makesafe_report_packs.status`, or the legacy `MAKESAFE_PACK_SENT` marker.
+Clearing a false stamp goes through `correct_makesafe_false_send_stamp`
+(`makesafe_false_send_stamp.ts`), which re-derives all four server-side, only
+ever CLEARS, and fails closed on an unreadable surface.
+
+Both measurements, the applied 5-card correction and the open accounting
+question on the seven PAID cards are in
+`docs/evidence/ses-manufactured-blockers-2026-08-07.md`.
+
 ## A DRAFT Invoice Never Closes A Card, And The Visible Ladder Has A Version
 
 `_makesafeInvoiceIsRaised` (AUTHORISED / SUBMITTED / PAID) is the invoice term of
