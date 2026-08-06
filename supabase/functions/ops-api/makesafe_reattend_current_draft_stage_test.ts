@@ -26,15 +26,26 @@
 // action a card the board had already called ready. Both now read the single
 // `invoiceForStage` binding, so placement and presentation cannot disagree.
 //
-// The pair below is the whole contract:
+// v7 then closed the OTHER half of the same conflation. v6 reached cycle
+// attribution only through the DRAFT qualifier, so a reattend card's own
+// current-cycle AUTHORISED invoice — money already committed and payable —
+// reported `wrong_status` and was blanked exactly as prior-cycle money is.
+// Four cards that had been sent with route proofs and billed (SWMS-26953,
+// SWMS-26902, SWMS-261128, SWMS-261131) therefore sat in Trade Report In with
+// the ladder holding no invoice at all. The cycle boundary is unchanged; only
+// the lifecycle statuses it is applied to widen, from DRAFT to DRAFT-or-raised.
+//
+// The set below is the whole contract:
 //   - REGRESSION: a reattend card whose DRAFT the qualifier certifies as
 //     current-cycle reaches Docs Ready AND presents that DRAFT.
-//   - CONTROL: a reattend card whose DRAFT predates the reattend boundary is
-//     `prior_cycle_commercial` and STAYS OUT. Prior-cycle commercial evidence
+//   - REGRESSION: a reattend card's own current-cycle RAISED invoice does the
+//     same, rather than being blanked as though it were an earlier visit's.
+//   - CONTROL: a reattend card whose invoice predates the reattend boundary is
+//     refused at every status and STAYS OUT. Prior-cycle commercial evidence
 //     must never place a card the Captain could approve.
-//   - CONTROL: closeout stays suppressed on reattend — an AUTHORISED invoice on
-//     a reattend card still cannot complete/archive it. That is what the
-//     suppressed line exists for, and it is untouched.
+//   - CONTROL: a current-cycle raised invoice does not CLOSE a card on its own.
+//     The close-out doc gate, send proof and 7-day clock all still apply.
+//   - CONTROL: first-attendance cards are untouched.
 //
 // Pure derivation only. No network, no Supabase, no Xero, no money write.
 
@@ -43,7 +54,10 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { _enrichMakesafeBoardJobForTest } from "./index.ts";
-import { qualifyMakesafeCurrentDraftInvoice } from "./makesafe_docs_ready_invoice.ts";
+import {
+  makesafeInvoiceIsCurrentAttendanceReceivable,
+  qualifyMakesafeCurrentDraftInvoice,
+} from "./makesafe_docs_ready_invoice.ts";
 
 const REATTEND_BOUNDARY = "2026-08-03T13:37:52.648+00:00";
 /** After the boundary — the current attendance's own commercial evidence. */
@@ -207,17 +221,35 @@ Deno.test("a reattend card whose DRAFT predates the boundary stays out of Docs R
 
 Deno.test("prior-cycle money never reaches the Captain's approve list", () => {
   // The approve control needs BOTH a Docs Ready placement and something to bind
-  // to. Pin the conjunction directly against every non-current invoice shape:
-  // no prior-cycle or non-DRAFT invoice may produce a card that is both placed
-  // for approval and presenting a figure. Asserting the two halves separately
-  // would let a future change satisfy each in a different test while a real card
-  // became approvable on an earlier visit's money.
+  // to. Pin the conjunction directly: no invoice the cycle boundary refuses, and
+  // no dead invoice, may produce a card that is both placed for approval and
+  // presenting a figure. Asserting the two halves separately would let a future
+  // change satisfy each in a different test while a real card became approvable
+  // on an earlier visit's money.
+  //
+  // `authorised this cycle` was in this list until v7 and is NOT any more — see
+  // the dedicated test below for why that case is a different fact, and note
+  // that BOTH prior-cycle rows here are unchanged. The invariant this control
+  // names is the cycle boundary, and the cycle boundary is what v7 left alone.
   for (
     const [label, inv] of [
       ["prior-cycle draft", invoice("DRAFT", BEFORE_BOUNDARY)],
       ["prior-cycle authorised", invoice("AUTHORISED", BEFORE_BOUNDARY)],
-      ["authorised this cycle", invoice("AUTHORISED", AFTER_BOUNDARY)],
+      ["prior-cycle paid", invoice("PAID", BEFORE_BOUNDARY)],
       ["voided", invoice("VOIDED", AFTER_BOUNDARY)],
+      ["deleted", invoice("DELETED", AFTER_BOUNDARY)],
+      ["another card's invoice", {
+        ...invoice("AUTHORISED", AFTER_BOUNDARY),
+        job_id: "job-someone-else",
+      }],
+      ["foreign reference", {
+        ...invoice("AUTHORISED", AFTER_BOUNDARY),
+        reference: "MLB-99999",
+      }],
+      ["payable, not receivable", {
+        ...invoice("AUTHORISED", AFTER_BOUNDARY),
+        invoice_type: "ACCPAY",
+      }],
     ] as const
   ) {
     const row = enrich(inv);
@@ -232,6 +264,52 @@ Deno.test("prior-cycle money never reaches the Captain's approve list", () => {
   }
 });
 
+Deno.test("a reattend card's own current-cycle RAISED invoice places and presents", () => {
+  // v7. This case used to sit inside the control above, and moving it out is the
+  // one behaviour this release changes, so the argument is recorded here rather
+  // than in a commit message.
+  //
+  // The control's stated invariant is "prior-cycle money must not place a card
+  // the Captain could approve". Its fixture for this row was
+  // `invoice("AUTHORISED", AFTER_BOUNDARY)` — money created AFTER the reattend
+  // boundary, which by the module's own predicate
+  // (`invoiceBelongsToCurrentAttendance`) is THIS attendance's money, not an
+  // earlier visit's. The row was there because v6 reached cycle attribution only
+  // through the DRAFT qualifier, so "not a DRAFT" and "not this cycle" were the
+  // same answer; the label `authorised this cycle` in a test named
+  // `prior-cycle money` is that conflation showing through.
+  //
+  // Separating them is not a relaxation. The cycle boundary is byte-for-byte
+  // unchanged and still refuses every prior-cycle shape above. What widens is
+  // only WHICH lifecycle statuses that unchanged boundary is applied to, and it
+  // widens toward the STRONGER fact: an AUTHORISED invoice is money already
+  // committed and payable, where a DRAFT — already admitted by v6 — is money
+  // still being drafted.
+  //
+  // The cost of the conflation was measured, not hypothetical: SWMS-26953,
+  // SWMS-26902, SWMS-261128 and SWMS-261131 had all been sent with route proofs
+  // and billed with AUTHORISED current-cycle invoices, and all four sat in Trade
+  // Report In because the ladder was handed no invoice at all.
+  for (const status of ["AUTHORISED", "SUBMITTED", "PAID"] as const) {
+    const row = enrich(invoice(status, AFTER_BOUNDARY));
+    assertEquals(
+      row.board_stage,
+      "report_ready",
+      `${status}: a sent-and-billed reattend card must not sit in Trade Report In`,
+    );
+    // Placement and presentation read the one `invoiceForStage` binding, so a
+    // card the board places on an invoice always shows which invoice that was.
+    assertEquals(row.invoice_raw_status, status);
+    assertEquals(row.invoice_date, "2026-08-06");
+    assertEquals(row.invoice_created_at, AFTER_BOUNDARY);
+    // The DRAFT qualifier still reports `wrong_status`, and that stays accurate:
+    // its question is "is this a current-cycle DRAFT", and the answer is no. The
+    // presented raw status is what explains the placement.
+    assertEquals(row.invoice_draft_qualification_reason, "wrong_status");
+    assertEquals(row.invoice_qualifies_as_current_draft, false);
+  }
+});
+
 Deno.test("a reattend card with no invoice at all stays out of Docs Ready", () => {
   const row = enrich(null);
   assertEquals(row.board_stage, "trade_report_in");
@@ -240,16 +318,26 @@ Deno.test("a reattend card with no invoice at all stays out of Docs Ready", () =
 
 // ── CONTROL: closeout suppression on reattend is untouched ─────────────────
 
-Deno.test("an AUTHORISED invoice on a reattend card still cannot close it", () => {
+Deno.test("a PRIOR-cycle AUTHORISED invoice on a reattend card still cannot close it", () => {
   // This is what blanking the invoice existed to prevent, and it must survive:
-  // prior-cycle money may not complete/archive the current attendance. The
-  // qualifier refuses a non-DRAFT (`wrong_status`), so the pass-through added
-  // for the DRAFT case can never reach a raised invoice.
-  const inv = invoice("AUTHORISED", AFTER_BOUNDARY);
+  // an earlier visit's money may not complete/archive the current attendance.
+  // The cycle boundary refuses it (`prior_cycle_commercial`), so neither the
+  // DRAFT pass-through added in v6 nor the raised pass-through added in v7 can
+  // reach it.
+  const inv = invoice("AUTHORISED", BEFORE_BOUNDARY);
   assertEquals(
     qualifyMakesafeCurrentDraftInvoice(reattendJob(), reattendDetail(), inv)
       .reason,
     "wrong_status",
+  );
+  assertEquals(
+    makesafeInvoiceIsCurrentAttendanceReceivable(
+      reattendJob(),
+      reattendDetail(),
+      inv,
+    ),
+    false,
+    "an invoice created before the reattend boundary is never current-cycle",
   );
 
   const row = enrich(inv);
@@ -257,13 +345,28 @@ Deno.test("an AUTHORISED invoice on a reattend card still cannot close it", () =
     row.board_stage !== "completed" && row.board_stage !== "archive",
     `reattend closeout suppression broken: derived ${row.board_stage}`,
   );
-  // Prior-cycle commercial evidence is still not presented either: the
-  // qualifier refuses a non-DRAFT, so the shared binding is null and the
-  // completion-time inputs stay suppressed. Widening presentation to the
-  // certified current-cycle DRAFT cannot reach a raised invoice.
+  // Prior-cycle commercial evidence is not presented either: the shared binding
+  // is null, so the completion-time inputs stay suppressed.
   assertEquals(row.invoice_raw_status, null);
   assertEquals(row.invoice_date, null);
   assertEquals(row.invoice_created_at, null);
+});
+
+Deno.test("a current-cycle RAISED invoice does not close a card on its own", () => {
+  // v7 widens WHICH invoice the ladder is handed. It does not widen what closing
+  // a card takes. The fixture here is a live reattend card with current-cycle
+  // AUTHORISED money and a rendered pack that has NOT been sent and carries no
+  // close-out documents, so every downstream closeout requirement is still
+  // unmet: the card must reach Docs Ready and stop there.
+  //
+  // Without this, "the invoice is visible again" and "the card closes" would be
+  // indistinguishable, and a reattend card could complete on money alone.
+  const row = enrich(invoice("AUTHORISED", AFTER_BOUNDARY));
+  assert(
+    row.board_stage !== "completed" && row.board_stage !== "archive",
+    `a raised invoice closed a card with no send proof and no docs: ${row.board_stage}`,
+  );
+  assertEquals(row.board_stage, "report_ready");
 });
 
 // ── CONTROL: first-attendance cards are completely unaffected ──────────────

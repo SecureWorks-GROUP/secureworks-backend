@@ -60,9 +60,47 @@ export function makesafeInvoiceReferenceMatchesCard(
 }
 
 /**
+ * Every gate this module applies EXCEPT the lifecycle-status test: exact job
+ * linkage, ACCREC type, current-attendance-cycle attribution and card-owned
+ * reference. It is deliberately status-agnostic — "does this invoice belong to
+ * THIS card's CURRENT attendance" is a different question from "what stage of
+ * its life is it at", and the two were previously fused so that only a DRAFT
+ * could ever be answered.
+ *
+ * Returns `"ok"` or the reason it failed, using the same reason vocabulary the
+ * DRAFT qualifier publishes, so a caller never has to invent one.
+ */
+function evaluateMakesafeInvoiceCardIdentity(
+  job: any,
+  detail: any,
+  invoice: any,
+): "ok" | MakesafeDraftInvoiceReason {
+  if (!invoice) return "missing_invoice";
+  if (!job?.id || String(invoice?.job_id || "") !== String(job.id)) {
+    return "wrong_job";
+  }
+  if (String(invoice?.invoice_type || "").toUpperCase() !== "ACCREC") {
+    return "wrong_type";
+  }
+  if (!invoiceBelongsToCurrentAttendance(detail, invoice)) {
+    return "prior_cycle_commercial";
+  }
+  if (!String(invoice?.reference || "").trim()) return "missing_reference";
+  if (!makesafeInvoiceReferenceMatchesCard(job, detail, invoice)) {
+    return "wrong_reference";
+  }
+  return "ok";
+}
+
+/**
  * Evaluate the already-selected current receivable candidate for one card.
  * Exact job linkage remains mandatory: a reference match never substitutes for
  * `job_id`, so sibling and unrelated invoices fail closed.
+ *
+ * The first three gates are restated here rather than delegated so the REASON
+ * ordering stays byte-identical to the published contract: an invoice that is
+ * both non-DRAFT and prior-cycle must keep reporting `wrong_status`, which is
+ * what `invoice_draft_qualification_reason` consumers diagnose from.
  */
 export function qualifyMakesafeCurrentDraftInvoice(
   job: any,
@@ -79,16 +117,33 @@ export function qualifyMakesafeCurrentDraftInvoice(
   if (String(invoice?.status || "").toUpperCase() !== "DRAFT") {
     return { qualifies: false, reason: "wrong_status" };
   }
-  if (!invoiceBelongsToCurrentAttendance(detail, invoice)) {
-    return { qualifies: false, reason: "prior_cycle_commercial" };
-  }
-  if (!String(invoice?.reference || "").trim()) {
-    return { qualifies: false, reason: "missing_reference" };
-  }
-  if (!makesafeInvoiceReferenceMatchesCard(job, detail, invoice)) {
-    return { qualifies: false, reason: "wrong_reference" };
-  }
+  const identity = evaluateMakesafeInvoiceCardIdentity(job, detail, invoice);
+  if (identity !== "ok") return { qualifies: false, reason: identity };
   return { qualifies: true, reason: "qualifying_draft" };
+}
+
+/**
+ * Is this invoice this card's own, and does it belong to the card's CURRENT
+ * attendance cycle? Status-agnostic by design — the caller pairs it with
+ * whatever lifecycle predicate its question needs (`_makesafeInvoiceIsRaised`
+ * for a closeout driver, the DRAFT qualifier above for pre-Xero review).
+ *
+ * This exists because the re-attend suppression in `enrichMakesafeBoardJob` used
+ * the DRAFT qualifier as a proxy for cycle attribution. That admitted a
+ * current-cycle DRAFT and blanked a current-cycle AUTHORISED invoice — the
+ * strictly STRONGER money fact — so a re-attend card that had been sent and
+ * billed lost the ladder's raised-invoice term entirely and fell to
+ * `trade_report_in`. The cycle boundary applied here is the identical one
+ * (`invoiceBelongsToCurrentAttendance`: created at/after `last_reattend_at`,
+ * missing or unparseable stamp fails closed), so prior-cycle commercial evidence
+ * is refused exactly as before.
+ */
+export function makesafeInvoiceIsCurrentAttendanceReceivable(
+  job: any,
+  detail: any,
+  invoice: any,
+): boolean {
+  return evaluateMakesafeInvoiceCardIdentity(job, detail, invoice) === "ok";
 }
 
 export function makesafeHasQualifyingCurrentDraftInvoice(
