@@ -46,7 +46,7 @@ Deno.test("yesNo: normalises booleans/strings, blank stays blank", () => {
 
 Deno.test("formatAud: money format, non-numeric -> blank", () => {
   assertEquals(formatAud(275), "$275.00");
-  assertEquals(formatAud(385), "$385.00");
+  assertEquals(formatAud(330), "$330.00");
   assertEquals(formatAud(undefined), "");
 });
 
@@ -141,8 +141,8 @@ Deno.test("render PDF: a full roof report on our letterhead stays a sane page co
     maintenance_recommendation: "Recommended",
     maintenance_details: "Re-bed and point the ridge line.",
     scope_summary: "Full external roof inspection following the storm claim.",
-    price_ex_gst: 350,
-    price_inc_gst: 385,
+    price_ex_gst: 300,
+    price_inc_gst: 330,
     photos: [],
   });
   const pages = countPdfPages(rendered.bytes);

@@ -2636,7 +2636,7 @@ Deno.test(
       },
     )).results[0];
     assertEquals(roofResult.invoice_proposal?.storeys, "double");
-    assertEquals(roofResult.invoice_proposal?.subtotal_ex_gst, 350);
+    assertEquals(roofResult.invoice_proposal?.subtotal_ex_gst, 300);
 
     const cleanPricingBoundary = snapshot();
     cleanPricingBoundary.job.metadata.makesafe_job_family =
