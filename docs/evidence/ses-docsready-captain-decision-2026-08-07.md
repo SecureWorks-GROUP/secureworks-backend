@@ -10,9 +10,14 @@ full working is in `ses-docsready-placement-gap-2026-08-07.md`.
 | Floreat **SWMS-261021** | `VOID` or `LINK` |
 
 - **`VOID`** — void the hand-typed Xero draft and let the docket path mint a
-  proper linked invoice. **Recommended for both.**
+  proper linked invoice. **This is the only word that reaches Docs Ready.
+  Recommended for both.**
 - **`LINK`** — keep the hand-typed draft and have us build a guarded per-card
-  action to bind it to the card. **Read the two warnings under option B first.**
+  action to bind it to the card. **`LINK` does NOT move either card. Both stay
+  in `trade_report_in`.** It is a choice about which money is bound, not a way
+  to place the card. **Read the three notes under option B first.**
+
+The two words are not symmetric. Only `VOID` unsticks a card.
 
 You can answer differently per card. Neither word is actioned tonight.
 
@@ -49,8 +54,25 @@ code, no seal exception, no backfill.
 
 ## Option B — `LINK`
 
-Keep the hand-typed draft and bind it to the card. **Two things you should see
+Keep the hand-typed draft and bind it to the card. **Three things you should see
 before choosing this.**
+
+**B0 — `LINK` does not place the card.** Both cards stay in `trade_report_in`
+after it. Binding the money answers the link question and nothing else: the
+Docs Ready recipe's invoice term
+(`supabase/functions/ops-api/ses_stage_engine_v2.ts:604-608`) asks for a DRAFT
+status **and** a durable invoice ARTIFACT — `documents.invoice` or
+`pack.invoice_doc_id` — and neither card has one in any location. The artifact
+is the binding constraint, not the link. This is proved in the companion
+diagnosis (`ses-docsready-placement-gap-2026-08-07.md`, Term 2): running the
+real `deriveSesStageV2` with the unlinked draft made visible, but still no
+invoice document, derives `trade_report_in`.
+
+To actually place the card an invoice artifact has to exist, which means the
+docket mint and bind that attaches the invoice document
+(`create_ses_invoice_draft` then `execute_ses_invoice_revision`) — exactly the
+machinery `VOID` routes through. So `LINK` is a choice about which money is
+bound and about accounting correctness, not a route into Docs Ready.
 
 **B1 — it collides with your own seal.** Your 2026-08-01 ruling was to leave the
 money mirror alone and fix this on the read side instead;
@@ -92,7 +114,9 @@ invoice artifact anywhere — no `job_documents` row of `type='invoice'`, no
 zero blockers, 38 artifacts, report and SWMS documents present.
 
 **`VOID` produces:** $404.25 inc, linked, artifact attached, card in Docs Ready.
-**`LINK` produces:** $464.75 inc bound to the card, plus a seal exception.
+**`LINK` produces:** $464.75 inc bound to the card, plus a seal exception. The
+card does **not** move — still `trade_report_in`, still short an invoice
+artifact.
 
 ### Floreat — SWMS-261021 (`MLB-27037`)
 
@@ -116,7 +140,8 @@ one.
 
 **`VOID` produces:** $346.50 inc, linked, artifact attached, card in Docs Ready.
 **`LINK` produces:** $330.00 inc bound to the card, plus a seal exception and a
-hand-adjudicated match.
+hand-adjudicated match. The card does **not** move — still `trade_report_in`,
+still short an invoice artifact.
 
 ---
 
@@ -125,6 +150,15 @@ hand-adjudicated match.
 - **`VOID`** — void in Xero, then run the normal docket mint. No code ships.
 - **`LINK`** — we build the guarded per-card link action first (it does not
   exist today); it would be API-key-only, dry-run by default, exact-invoice
-  guarded, and would need the seal exception recorded against your ruling.
+  guarded, and would need the seal exception recorded against your ruling. The
+  card still would not be in Docs Ready afterwards.
+
+---
+
+**This card was corrected before it reached you.** An automated review caught
+that the `LINK` option implied an outcome it does not deliver — it read as a
+second way to unstick a card when it places neither. The defect was in this
+decision artefact, not in any code: the thing you would have acted on was
+itself misleading. It was fixed before you saw it.
 
 Nothing in this file changes any card. No production write has been made.
