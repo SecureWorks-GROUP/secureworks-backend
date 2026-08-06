@@ -19364,8 +19364,12 @@ async function autoApproveCleanIntakeDrafts(client: any, body: any = {}) {
     try {
       const approved = await approveIntakeDraft(client, {
         draft_id: draft.id,
+        // The note names NO caller: authoritative per-row provenance is approved_by
+        // (the actual trigger). A note describing a deleted code path (the removed
+        // board render sweep) only misleads whoever later asks how a live job appeared.
+        // Rows written under the old wording are historically true of it and stay as-is.
         approved_by: trigger.trigger,
-        review_notes: 'Auto-approved clean make-safe intake from board sweep: high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',
+        review_notes: 'Auto-approved clean make-safe intake sweep: high-confidence extraction, requesting company/ref/client/address present, and servable work-order PDF captured. Draft-only intake promotion; no invoice/send/authorise/close action.',
       })
       autoApproved.push({
         draft_id: draft.id,
