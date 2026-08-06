@@ -403,7 +403,7 @@ export function resolveExistingInvoice(
 
   // Tier 1 (job_id) is our OWN card: a live invoice already on this job always blocks — a second
   // invoice on the same card is a true re-invoice, whatever the PO suffix. Only the reference tiers
-  // below (which reach OTHER jobs' invoices) get the same-ref-new-PO scoping via sameWorkRef.
+  // below (which reach OTHER jobs' invoices) get the same-ref-new-PO scoping via referenceCandidateBlocks.
   if (jobId) {
     const byJob = all.filter((r) => r?.job_id && r.job_id === jobId);
     const hit = liveHit(byJob);
