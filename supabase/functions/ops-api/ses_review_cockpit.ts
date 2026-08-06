@@ -3,6 +3,10 @@ import type { SesPricingDisposition } from "./makesafe_invoice_obligation.ts";
 import { type SesRefusal, sesRefusal } from "./ses_reporting_refusals.ts";
 import { SES_ASSESSMENT_RECIPE_VERSION } from "./ses_family_matrix.ts";
 import { sesReleaseRouteOrder } from "./ses_release_route_shape.ts";
+import {
+  describeExistingCardMoney,
+  type SesExistingCardMoney,
+} from "./ses_existing_card_money.ts";
 
 export const SES_REVIEW_SECTION_ORDER = [
   "job_story",
@@ -219,6 +223,38 @@ export function requiredSesRouteKinds(
 }
 
 /**
+ * A refusal when Xero already holds live money for this card that the current
+ * docket does not bind.
+ *
+ * This is deliberately ONE-WAY: it returns a refusal or it returns null. There
+ * is no branch here that clears an existing blocker, so wiring it can only ever
+ * make a card LESS approvable. That property is the reason it was safe to land
+ * hours before the Captain approves from this board, and it must be preserved.
+ *
+ * It fires only when nothing is bound. A card whose docket already binds its
+ * invoice is the healthy case and is never touched.
+ */
+export function existingCardMoneyRefusal(
+  boundStatus: string | null | undefined,
+  money: SesExistingCardMoney | null | undefined,
+): SesRefusal | null {
+  if (String(boundStatus || "").trim()) return null;
+  if (!money?.exists) return null;
+  return sesRefusal(
+    "invoice_exists_unbound",
+    "Check Xero by REFERENCE before any mint. Bind or link the existing invoice, " +
+      "or record an explicit disposition. Do not mint a second invoice on this card.",
+    {
+      fact: describeExistingCardMoney(money),
+      evidence: {
+        mirror_unreadable: money.unreadable,
+        invoices: money.rows,
+      },
+    },
+  );
+}
+
+/**
  * Why APPROVE INVOICE is unavailable, in the operator's terms. The commonest
  * case by far is the healthy one: the invoice is already authorised, so there is
  * nothing left to approve and a second approve would commit the money twice.
@@ -229,6 +265,12 @@ export function approveInvoiceDisabledReason(
     stale: boolean;
     xeroAuthorised: boolean;
     noAdditionalCharge: boolean;
+    /**
+     * Live money already in Xero for this card that the docket does NOT bind.
+     * Present only to REPLACE the mint invitation below with the truth; it can
+     * never enable this control.
+     */
+    existingMoney?: SesExistingCardMoney | null;
   },
 ): string {
   const binding = docket.xero_binding || {};
@@ -245,6 +287,17 @@ export function approveInvoiceDisabledReason(
     return "This view is showing an older docket revision. Reload the card, then approve against the current pack.";
   }
   if (!binding || !String(binding.status || "").trim()) {
+    // "Nothing is BOUND" is not "nothing EXISTS". A hand-made Xero invoice that
+    // was never linked to the job, or one linked but never bound to this
+    // docket, is invisible to `xero_binding` — and inviting a mint on top of it
+    // is an invitation to bill already-billed work. Measured 2026-08-06: all 16
+    // unbound Docs Ready cards already had live money under their own
+    // reference, seven of them already PAID.
+    if (state.existingMoney?.exists) {
+      return `${describeExistingCardMoney(state.existingMoney)} Do NOT mint a second invoice. ` +
+        `Bind or link the existing invoice, or record an explicit disposition — ` +
+        `this card is a finding for the Captain, not a mint.`;
+    }
     return "No Xero DRAFT invoice is bound to this card yet. Mint the draft first, then approve it.";
   }
   const status = String(binding.status || "").toUpperCase();
@@ -777,6 +830,11 @@ export interface SesCockpitDocket {
    * which reads as unavailable — never claim a document from a stored hash.
    */
   xero_invoice_pdf_available?: boolean;
+  /**
+   * Live Xero money for this card that the docket does NOT bind. Read by
+   * reference, because "nothing is bound" is not "nothing exists".
+   */
+  existing_card_money?: SesExistingCardMoney | null;
   local_invoice_proposal: Record<string, unknown> | null;
   work_order: Record<string, unknown> | null;
   family_evidence: Record<string, unknown>;
@@ -842,7 +900,21 @@ export function buildSesCockpitView(
     dependency_generation: number;
   },
 ): SesCockpitView {
-  const verdict = evaluateSesMechanicalClean(docket.clean_input);
+  const mechanical = evaluateSesMechanicalClean(docket.clean_input);
+  // ONE-WAY by construction: the blocker list only ever GROWS here and `clean`
+  // is only ever forced false, so a card can never become more approvable by
+  // this path. Keep it that way — see existingCardMoneyRefusal.
+  const existingMoneyBlocker = existingCardMoneyRefusal(
+    docket.xero_binding?.status ?? null,
+    docket.existing_card_money ?? null,
+  );
+  const verdict: SesMechanicalCleanResult = existingMoneyBlocker
+    ? {
+      ...mechanical,
+      blockers: [...mechanical.blockers, existingMoneyBlocker],
+      clean: false,
+    }
+    : mechanical;
   const stale = !!displayedBinding &&
     (displayedBinding.readiness_revision !== docket.readiness_revision ||
       displayedBinding.dependency_generation !== docket.dependency_generation);
@@ -958,6 +1030,7 @@ export function buildSesCockpitView(
             stale,
             xeroAuthorised,
             noAdditionalCharge,
+            existingMoney: docket.existing_card_money ?? null,
           }),
       },
       send_it: {

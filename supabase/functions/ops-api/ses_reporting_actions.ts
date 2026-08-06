@@ -8,6 +8,7 @@ import {
   splitRefPo,
 } from "./makesafe_send_pack.ts";
 import { composeInvoiceReferenceWithPo } from "./ses_invoice_reference_grain.ts";
+import { readSesExistingCardMoney } from "./ses_existing_card_money.ts";
 import {
   prepareSesInvoiceObligation,
   SES_PRICING_CANON_VERSION,
@@ -1059,8 +1060,22 @@ export async function loadSesCockpitDocket(
     client,
     jobId,
   );
+  // "Nothing is BOUND" is not "nothing EXISTS": a hand-made Xero invoice never
+  // linked to the job, or linked but never bound to this docket, is invisible
+  // to `xero_binding`, and the APPROVE INVOICE control would invite a mint on
+  // top of it. Checked BY REFERENCE against the Xero mirror. Read-only, and
+  // consumed only to REFUSE — it can never make a card more approvable.
+  const detailForMoney = await client.from("makesafe_job_details")
+    .select("external_ref").eq("job_id", jobId).maybeSingle();
+  const existingCardMoney = await readSesExistingCardMoney(
+    client,
+    jobId,
+    object(detailForMoney.data).external_ref,
+    xeroBinding?.xero_invoice_id ? String(xeroBinding.xero_invoice_id) : null,
+  );
   return {
     job_id: jobId,
+    existing_card_money: existingCardMoney,
     job_number: object(manifest.classification).job_number || null,
     docket_revision_id: docket.id,
     readiness_revision: readiness.readiness_revision,
