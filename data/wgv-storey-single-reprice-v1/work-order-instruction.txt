@@ -1,0 +1,14 @@
+The contradicting work-order statement, read from production jobs.notes for
+SWMS-261114 (the same field the intake storey matcher reads). Client name, street
+address and phone are not present in the extract below.
+
+  "Allocation Work Order MLB-RR-26836PO-57514 Roof Reports EXTERNAL
+   PLEASE ATTEND SITE TO COMPLETE THE FOLLOWING: Roof Report Request
+   Please attend site and conduct a two storey roof report noting cause of
+   damage/point of water entry, along with any maintenance issues identified.
+   If multiple stories noted, please contact the office ..."
+
+`roofStoreyOrderedProductFact` (makesafe_roof_storey_fact.ts) matches
+"two storey roof report" against its ordered-product pattern and yields
+storeys = "double". That is how jobs.metadata.storeys = "double" was recorded at
+intake, and it is the value U4 still prices from today.

@@ -584,6 +584,32 @@ NOT subject to the make-safe report-type gate (generating our own report for
 report-type jobs is the point). Full flow + action contract in
 `docs/evidence/roof-report-template-flow-2026-07-22.md`.
 
+A roof card's `storeys` is the SOLE determinant of its fee, and every writer of it
+derives from the WORK ORDER: intake (`makesafe_roof_storey_fact.ts`, narrow
+`<qualifier> storey <roof product>` match) and the preview-by-default
+`preview_makesafe_roof_storey_backfill`, which additionally HOLDS any card that
+already carries a storey signal. So there is NO surface for the opposite case - a
+trade-observed storey that overrides the work order. `update_job_field`'s allow-list
+is 8 top-level `jobs` columns and excludes metadata; a roof DRAFT's `storey` is only
+an adapter FALLBACK, unreachable once `jobs.metadata.storeys` is set; and the
+correction cannot be additive because `structuredSourceFact` returns a value only
+when all four roots agree on one, so a second value yields
+`pricing_evidence_missing`. Building it means an `update_makesafe_job_family`-shaped
+privileged action (expects-before guard, evidence binding, audit event) for
+`storeys`. Worked case, with the portal-vs-work-order evidence:
+`data/wgv-storey-single-reprice-v1/report.md`.
+
+Repricing a card is therefore never an edit. `makeSesXeroGateway` exposes
+`createDraft` / `authorise` / `fetchAuthorisedPdf` plus `voidInvoice` and NO update
+verb ("changed" is a sealed money-fence verb), so moving a bound DRAFT's total is
+always void-and-remint, in that order - the duplicate guard returns
+`blocked_duplicate_live` / `allows_create: false` while the old invoice is live, and
+`prepareSesInvoiceObligationAction` refuses a `commercial_quantity_override` under
+that disposition. A stored `labour_rate_override` also 409s once the sealed rate
+moves (`sealed_unit_price_ex_gst` must equal the live U4 sealed rate), so correcting
+a pricing FACT structurally invalidates any card-scoped rate override built on the
+old one.
+
 ## The Ops Dash UI Lives In The `dashboard` Submodule
 
 `dashboard/` is a git SUBMODULE of `SecureWorks-GROUP/secureworks-ux` (see
