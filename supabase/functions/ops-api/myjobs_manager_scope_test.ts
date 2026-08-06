@@ -616,6 +616,7 @@ Deno.test("occupancy probe chunks pool ids and pages past the 1000-row cap", asy
       const b: any = {
         select: () => b,
         in: (_col: string, arr: string[]) => { st.ids = arr; return b; },
+        eq: () => b, // the probe's is_ghost exclusion (ghost rows never hold a job)
         neq: () => b,
         not: () => b,
         order: () => b,
@@ -666,6 +667,7 @@ Deno.test("occupancy probe picks the latest active assignment for a job", async 
       const b: any = {
         select: () => b,
         in: () => b,
+        eq: () => b, // the probe's is_ghost exclusion (ghost rows never hold a job)
         neq: () => b,
         not: () => b,
         order: () => b,

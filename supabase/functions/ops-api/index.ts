@@ -31544,6 +31544,29 @@ async function readPagedRows(
   )
   return rows
 }
+// ── GHOST ROWS: the my_jobs feed applies the calendar_events rule at source ──
+// A ghost row (`job_assignments.is_ghost = true`, always `role:'observer'` in
+// practice) mirrors a job onto an ops manager's own list. It is never moved when
+// the crew's real row is rescheduled, so it keeps the job's OLD scheduled_date
+// and carries no start_time.
+//
+// Every calendar surface already excludes ghosts because `calendar_events` is
+// defined `... FROM job_assignments ja ... WHERE ja.is_ghost = false`. my_jobs
+// selected job_assignments raw, so it was the one schedule surface that never
+// learned the rule: any consumer that dedupes to one row per job could pick the
+// ghost's staler date, which is exactly the stale-date defect reported on the
+// Trade App board 2026-08-04 (SWF-26813, SWF-261042, plus 4 live patio jobs).
+//
+// GHOST_EXCLUDED_COLUMN/VALUE is the view's own predicate, not a broader filter.
+// The column is `boolean NOT NULL DEFAULT false`, so `.eq(..., false)` is exactly
+// the view's `= false` with no NULL third case to reason about. It must be
+// applied to EVERY job_assignments read whose rows can reach the returned feed —
+// including the occupancy probe, whose winning row is emitted verbatim by
+// `occupiedPoolAssignmentCard`. `myjobs_ghost_rows_test.ts` asserts that, so a
+// query added later without the rule fails rather than silently regressing.
+const GHOST_EXCLUDED_COLUMN = 'is_ghost'
+const GHOST_EXCLUDED_VALUE = false
+
 const OCCUPANCY_PROBE_SELECT = `
         job_id, id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name,
         started_at, completed_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
@@ -31586,6 +31609,11 @@ async function fetchOccupyingAssignments(
         .from('job_assignments')
         .select(OCCUPANCY_PROBE_SELECT)
         .in('job_id', chunk)
+        // Ghost rows never HOLD a job (see GHOST ROWS note): the winning row here
+        // is emitted verbatim as a feed card, so a ghost winning the pick would
+        // put a stale-dated role:'observer' card straight into my_jobs. No live
+        // job is held by ghosts alone, so no job's occupied/available verdict moves.
+        .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
         .not('status', 'in', _poolReleasingStatusFilter())
         .order('job_id', { ascending: true })
         .order('id', { ascending: true })
@@ -31788,6 +31816,7 @@ export async function myJobs(
         .from('job_assignments')
         .select(ASSIGNMENT_SELECT_ADMIN_INNER)
         .neq('status', 'cancelled')
+        .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE) // see GHOST ROWS note
         .eq('jobs.org_id', orgId)
         .order('scheduled_date', { ascending: true })
         .order('id', { ascending: true })
@@ -31835,6 +31864,7 @@ export async function myJobs(
         .from('job_assignments')
         .select(ASSIGNMENT_SELECT_ADMIN_INNER)
         .neq('status', 'cancelled')
+        .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE) // see GHOST ROWS note
         .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
         .eq('jobs.org_id', orgId)
         .or(verticalFilter(rollingVerticals), { referencedTable: 'jobs' })
@@ -31851,6 +31881,7 @@ export async function myJobs(
           .from('job_assignments')
           .select(ASSIGNMENT_SELECT_ADMIN_INNER)
           .neq('status', 'cancelled')
+          .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE) // see GHOST ROWS note
           .eq('jobs.org_id', orgId)
           .or(verticalFilter(['fencing']), { referencedTable: 'jobs' })
           .order('scheduled_date', { ascending: true })
@@ -31872,11 +31903,15 @@ export async function myJobs(
     assignments = [...new Map(assignments.map((row: any) => [row.id, row])).values()]
   } else {
     // ── Normal mode: only this user's assignments ──
+    // Ghost rows carry the requesting ops manager's own user_id, so this is the
+    // one path where a ghost row targets the caller directly (see GHOST ROWS
+    // note). It gets the same rule: a watcher row is not the caller's field work.
     const res = await client
       .from('job_assignments')
       .select(ASSIGNMENT_SELECT_USER)
       .eq('user_id', userId)
       .neq('status', 'cancelled')
+      .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
       .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
       .order('scheduled_date', { ascending: true })
     assignments = res.data
@@ -31928,6 +31963,7 @@ export async function myJobs(
       if (!runManagerMakesafeBackstop) backstopQuery = backstopQuery.eq('user_id', userId)
       const resMakesafe = await backstopQuery
         .neq('status', 'cancelled')
+        .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE) // see GHOST ROWS note
         .gte('scheduled_date', makesafeSixMonthsAgo.toISOString().slice(0, 10))
         .lt('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
         .eq('jobs.org_id', orgId)
