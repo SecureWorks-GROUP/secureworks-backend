@@ -1,0 +1,50 @@
+{
+  "scope": "Synthesised from four attendance service reports: burst pipe (22 Jul) + moisture/walls work across 24/29/31 Jul",
+  "findings": [
+    {
+      "sentence": "Burst water pipe and wet insulation in the roof space on the first attendance.",
+      "source": "SR 22 Jul damage_description / work_done"
+    },
+    {
+      "sentence": "Later attendances recorded moisture still inside the walkway and kitchen walls",
+      "source": "SR 24 Jul damage_description; SR 29 Jul damage_description"
+    },
+    {
+      "sentence": "including high moisture that was not escaping with drying equipment in place.",
+      "source": "SR 29 Jul damage_description: High levels of moisture in walls not escaping even with high rated fans and dehumidifier"
+    }
+  ],
+  "works": [
+    {
+      "sentence": "SecureWorks attended this property four times.",
+      "source": "Four submitted job_service_reports on the card"
+    },
+    {
+      "sentence": "22 July ... burst water pipe ... 10 bags of wet insulation",
+      "source": "SR arrival 2026-07-22 work_done + materials Bin bags x 10 (materials section not listed: current-cycle bind materials gate)"
+    },
+    {
+      "sentence": "24 July ... moisture meter ... 3 fans and a dehumidifier ... slightly dried but still had moisture",
+      "source": "SR arrival 2026-07-24 work_done"
+    },
+    {
+      "sentence": "29 July ... scraped back the render ... hallway wall, above kitchen sink, beside kitchen cupboard",
+      "source": "SR arrival 2026-07-29 work_done"
+    },
+    {
+      "sentence": "31 July ... moisture reading ... uninstalled the 3 fans and dehumidifier, and returned the equipment",
+      "source": "SR arrival 2026-07-31 work_done"
+    }
+  ],
+  "materials": {
+    "text": "No materials supplied.",
+    "source": "Current-cycle materials_used are checklist ticks only; bind materials_evidence state none_recorded"
+  },
+  "not_written": [
+    "No invented single cause for the returns beyond the sequence of work_done facts",
+    "Did not claim this card installed the fans/dehumidifier (only that 24 Jul checked after they had been installed; 31 Jul removed them)",
+    "Did not put first-visit Bin bags x 10 into materials section (would fail current-cycle materials subset gate)",
+    "No commercial hours on the report",
+    "No em dashes, no bullets in works body paragraphs"
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "http": 200,
+  "presentation": {
+    "kind": "ready",
+    "state": "drafted",
+    "reason": null,
+    "pre_xero_docs_ready": true,
+    "review_state": "READY",
+    "docket_revision_id": "81c6a74c-c2b3-5604-8ca4-603b034b0c95"
+  },
+  "blockers": [],
+  "role_counts": {
+    "invoice_proposal": 1,
+    "supporting_report_pdf": 1,
+    "photo_selection": 1,
+    "completion_photo": 50,
+    "swms_artifact": 1,
+    "assembler_envelope": 1,
+    "capability": 1,
+    "case_story": 1,
+    "docket_manifest": 1,
+    "invoice_email_draft": 1,
+    "photo_email_draft": 1,
+    "report_email_draft": 1,
+    "release_payload": 1,
+    "review_spec": 1,
+    "review_html": 1,
+    "source_attachment": 1,
+    "xero_invoice_pdf": 1
+  },
+  "supporting_report": {
+    "role": "supporting_report_pdf",
+    "content_hash": "sha256:230fd3651516077f739de3d684eeea0d6638e4793a1772f2416e64db2198bd4a",
+    "media_type": "application/pdf",
+    "object_key_tail": "4-603b034b0c95/ARTIFACTS/Make-Safe-Report-SWMS-261025-Koondoola-537ef17af3ae.pdf",
+    "metadata_keys": [
+      "render_hash",
+      "source_kind",
+      "output_sha256",
+      "evidence_source",
+      "source_identity",
+      "report_input_hash",
+      "report_document_id",
+      "source_artifact_id",
+      "source_document_id",
+      "source_revision_id",
+      "expected_raw_sha256",
+      "output_content_hash",
+      "report_contract_version",
+      "report_renderer_version",
+      "source_artifact_content_hash",
+      "report_renderer_script_sha256",
+      "report_renderer_source_revision"
+    ]
+  },
+  "xero_invoice_pdf": {
+    "role": "xero_invoice_pdf",
+    "content_hash": "sha256:eed99d3704b6607d1e59ceef195db934b05206df9dac2e62706ddceb81ea4305",
+    "media_type": "application/pdf",
+    "object_key_tail": "61ea6c7dccb6/xero-invoice-pdfs/b239af75-1a79-45a5-b246-080165f6539d/INV-1140.pdf",
+    "metadata_keys": [
+      "xero_invoice_id",
+      "invoice_number",
+      "status",
+      "source"
+    ]
+  },
+  "invoice_pdf_present": true
+}

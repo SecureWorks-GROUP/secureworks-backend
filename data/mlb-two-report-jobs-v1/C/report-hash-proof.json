@@ -1,0 +1,25 @@
+{
+  "document_id": "55ae5c93-0b3f-4ce6-a1c0-acd4557d1954",
+  "file_name": "Make-Safe-Report-SWMS-261025-Koondoola-537ef17af3ae.pdf",
+  "local_sha": "sha256:4d27982b90d952a73cbb93e16453912a65d6e7a4f4f34588727fbe77775d68a5",
+  "served_sha": "sha256:4d27982b90d952a73cbb93e16453912a65d6e7a4f4f34588727fbe77775d68a5",
+  "expected_raw_sha256": "sha256:4d27982b90d952a73cbb93e16453912a65d6e7a4f4f34588727fbe77775d68a5",
+  "report_input_hash": "sha256:9550c129341cc384ea104e7a9ac2f71b5a0ab72888ec69a6ba3ecca4d9991ff9",
+  "supersedes_prior_bind": true,
+  "source_kind": "durable_curated_revision",
+  "cycle_attribution": "bound",
+  "document_version": 6,
+  "three_way_match": true,
+  "prepare_dry_state": "ready",
+  "prepare_live_state": "ready",
+  "prepare_live_docket": "81c6a74c-c2b3-5604-8ca4-603b034b0c95",
+  "invoices_after": [
+    {
+      "invoice_number": "INV-1140",
+      "status": "DRAFT",
+      "total": 280.5,
+      "reference": "MLB-27093"
+    }
+  ],
+  "photos": 50
+}

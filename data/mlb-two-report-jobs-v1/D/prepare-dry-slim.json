@@ -1,0 +1,13 @@
+{
+  "state": "blocked",
+  "blocker_codes": [
+    "materials_charge_figure_required"
+  ],
+  "blockers": [
+    {
+      "reason_code": "materials_charge_figure_required",
+      "reason": "Trade recorded materials used (Structural timber x 8m; Plyboard 12mm 2.4x1.8 x 3; Screws x 40; Fixings / consumables) but the invoice proposal has no materials charge. Silent labour-only pricing is refused.",
+      "recovery_action": "Supply one materials charge figure ex GST for the listed materials, or typed materials lines with approved ex-GST unit prices. Re-run prepare_ses_docket_revision for this one card (selection.mode job_id or job_number) with body materials_charge = { schema: \"secureworks.makesafe.materials-charge-figu"
+    }
+  ]
+}

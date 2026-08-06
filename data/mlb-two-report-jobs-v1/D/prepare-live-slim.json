@@ -1,0 +1,14 @@
+{
+  "state": "blocked",
+  "persisted": true,
+  "docket_revision_id": "8d2e8179-23be-5fdf-90fe-707fcd5d7021",
+  "blocker_codes": [
+    "materials_charge_figure_required"
+  ],
+  "blockers": [
+    {
+      "reason_code": "materials_charge_figure_required",
+      "reason": "Trade recorded materials used (Structural timber x 8m; Plyboard 12mm 2.4x1.8 x 3; Screws x 40; Fixings / consumables) but the invoice proposal has no materials charge. Silent labour-only pricing is refused."
+    }
+  ]
+}

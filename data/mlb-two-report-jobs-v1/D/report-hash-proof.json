@@ -1,0 +1,33 @@
+{
+  "document_id": "71f64d51-58f4-426a-83fe-57bf800cfd9c",
+  "file_name": "Make-Safe-Report-SWMS-261147-Mosman-Park-359775313575.pdf",
+  "document_version": 2,
+  "served_sha256": "sha256:359775313575658bd0c018bf871ec100989afad0df907cf634483d7323908553",
+  "prior_bind_sha": "sha256:359775313575658bd0c018bf871ec100989afad0df907cf634483d7323908553",
+  "matches_prior_bind_sha": true,
+  "served_url": "https://kevgrhcjxspbxgovpmfl.supabase.co/storage/v1/object/public/job-documents/762ebaad-5f6f-4477-acb7-30db016b15ea/Make-Safe-Report-SWMS-261147-Mosman-Park-359775313575.pdf",
+  "materials_on_pdf": true,
+  "has_emdash": false,
+  "materials_question_open": true,
+  "named_materials": [
+    "Structural timber x 8m",
+    "Plyboard 12mm 2.4x1.8 x 3",
+    "Screws x 40"
+  ],
+  "prepare_live": {
+    "state": "blocked",
+    "persisted": true,
+    "docket_revision_id": "8d2e8179-23be-5fdf-90fe-707fcd5d7021",
+    "blocker_codes": [
+      "materials_charge_figure_required"
+    ],
+    "blockers": [
+      {
+        "reason_code": "materials_charge_figure_required",
+        "reason": "Trade recorded materials used (Structural timber x 8m; Plyboard 12mm 2.4x1.8 x 3; Screws x 40; Fixings / consumables) but the invoice proposal has no materials charge. Silent labour-only pricing is refused."
+      }
+    ]
+  },
+  "no_invoice": true,
+  "report_available": true
+}
