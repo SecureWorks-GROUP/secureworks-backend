@@ -117,6 +117,40 @@ rows for supersessions; that loader now returns both facts
   an artifact failing any other check (pinned by
   `bind-time validity opens nothing else`).
 
+### Sibling bundles
+
+A bundled supporting report is persisted with `source_kind:
+"durable_curated_revision"` and its `source_document_id` naming the **sibling**
+job's document, so the docket job's audit trail can never carry its bind
+instant. `verifyStoredSupportingReport` therefore reads the sibling job's own
+trail — the same access shape the adapter already uses, since sibling snapshots
+load through `loadSesAssemblerLiveSnapshot` and carry `curated_bind_events`.
+Without it the two call sites would disagree for exactly this class, which is
+the partial-fix shape rather than the cure, and 34 of the 36 live binds carry
+the superseded identity, so bundles built on one are the dominant case.
+
+The read is deliberately narrow and no more permissive than a same-job bind. It
+fires only when the own-job lookup found nothing AND the artifact declares
+`evidence_source: "explicit_sibling_bundle"` AND names a `sibling_job_id`, and
+each of these refuses (each pinned by a test that was watched to fail against a
+deliberately broken guard):
+
+- a sibling bind made **after** the identity's window closed — the forward
+  fence, unchanged across a job boundary;
+- a sibling bind made **before** the window opened;
+- an in-window sibling bind **superseded by a later one** past the window, since
+  the newest bind decides and the friendliest event never wins;
+- **no sibling bind event at all**, leaving the current pin the only acceptable
+  stamp;
+- an **unreadable** sibling trail, which reports the read fault
+  (`curated_source_supersession_unreadable`) rather than a renderer-provenance
+  failure — calling it the latter sends an operator to re-bind a card whose bind
+  is fine, which is this defect's own lie one seam over. It fails closed.
+
+Isolating that last case needs the sibling trail to fault while the docket job's
+own trail reads cleanly; faulting both stops at the own-job audit and never
+reaches the sibling branch at all.
+
 ## Proofs
 
 1. **The cards recover with no re-bind.** `--mode=served` (a `dry_run: true`
