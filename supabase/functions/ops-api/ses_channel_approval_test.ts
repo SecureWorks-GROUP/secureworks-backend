@@ -146,6 +146,7 @@ function baseState(): FakeState {
 async function deps(
   overrides: Partial<SesChannelApprovalDeps> = {},
   calls: { auth?: any; args?: any }[] = [],
+  sendCalls: { auth?: any; args?: any }[] = [],
 ): Promise<SesChannelApprovalDeps> {
   return {
     env: { bindings_raw: await bindingsJson(), root_secret: ROOT_SECRET },
@@ -153,6 +154,10 @@ async function deps(
     approveInvoice: async (auth, args) => {
       calls.push({ auth, args });
       return { approval: { id: "approval-1" } };
+    },
+    executeSendIt: async (auth, args) => {
+      sendCalls.push({ auth, args });
+      return { release: { id: "release-1" } };
     },
     ...overrides,
   };
@@ -588,19 +593,35 @@ Deno.test("an unscoped or double scoped message approves nothing", async () => {
   );
 });
 
-Deno.test("SEND IT is recognised and named, never silently half done", async () => {
-  const client = fakeClient(baseState());
-  const refusal = await refusalCode(async () =>
-    submitSesChannelApprovalAction(
-      client,
-      apiKeyAuth,
-      await request({ message_text: `SEND SWMS-260000 ${await liveCode()}` }),
-      await deps(),
-    )
+Deno.test("SEND IT acts as the bound operator through the send path only", async () => {
+  const approveCalls: { auth?: any; args?: any }[] = [];
+  const sendCalls: { auth?: any; args?: any }[] = [];
+  const result: any = await submitSesChannelApprovalAction(
+    fakeClient(baseState()),
+    apiKeyAuth,
+    await request({ message_text: `SEND IT SWMS-260000 ${await liveCode()}` }),
+    await deps({}, approveCalls, sendCalls),
   );
-  assertEquals(refusal.code, "channel_act_not_enabled");
-  assertStringIncludes(refusal.fact, "not wired");
-  assertEquals([...SES_CHANNEL_APPROVAL_ENABLED_ACTS], ["approve_invoice"]);
+  // The word routes to the send path and never touches the invoice path.
+  assertEquals(approveCalls.length, 0);
+  assertEquals(sendCalls.length, 1);
+  const { auth, args } = sendCalls[0]!;
+  assertEquals(auth.mode, "jwt");
+  assertEquals(auth.user.id, OPERATOR_USER_ID);
+  assertEquals(auth.identity_provenance, "bound_channel_totp");
+  assertEquals(args.job_id, JOB_ID);
+  assertEquals(args.actor, "operator@example.test");
+  const act = args.evidence_refs[0];
+  assertEquals(act.kind, "ses_channel_operator_act");
+  assertEquals(act.act, "send_it");
+  assertEquals(act.card_reference, "SWMS-260000");
+  assert(!JSON.stringify(act).includes(SENDER_ID));
+  assertEquals(result.channel_approval.act, "send_it");
+  assertEquals(result.release.release.id, "release-1");
+  assertEquals(
+    [...SES_CHANNEL_APPROVAL_ENABLED_ACTS],
+    ["approve_invoice", "send_it"],
+  );
 });
 
 Deno.test("conversation is not an instruction", async () => {

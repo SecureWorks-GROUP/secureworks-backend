@@ -490,6 +490,7 @@ import {
   sesChannelEnrolmentAction,
   submitSesChannelApprovalAction,
 } from './ses_channel_approval.ts'
+import { executeSesChannelSendIt } from './ses_channel_send_it.ts'
 import { createSesGraphMailGateway } from './ses_graph_mail_gateway.ts'
 import {
   sendMailerOpsVisibilityAction,
@@ -6922,6 +6923,50 @@ if (import.meta.main) serve(async (req: Request) => {
                 'approve_ses_invoice_revision',
               )
               return await approveSesInvoiceRevisionAction(client, operatorAuth, args)
+            },
+            // SEND IT (Harden SES ticket 07): bind the word to the card's one
+            // prepared release revision, then drive the SAME approve/execute
+            // release actions a cockpit press drives — every guard, money
+            // check and exact-once send unchanged.
+            executeSendIt: async (operatorAuth, args) => {
+              await assertNoSyntheticLivefireJobs(
+                client,
+                [args.job_id],
+                'submit_ses_channel_approval:send_it',
+              )
+              return await executeSesChannelSendIt(
+                client,
+                operatorAuth,
+                args,
+                {
+                  approveRelease: async (releaseAuth, releaseArgs) => {
+                    await assertNoSyntheticLivefireReleaseRevision(
+                      client,
+                      releaseArgs.release_revision_id,
+                      'approve_ses_release_revision',
+                    )
+                    return await approveSesReleaseRevisionAction(
+                      client,
+                      releaseAuth,
+                      releaseArgs,
+                    )
+                  },
+                  executeRelease: async (releaseAuth, releaseArgs) => {
+                    await assertNoSyntheticLivefireReleaseRevision(
+                      client,
+                      releaseArgs.release_revision_id,
+                      'execute_ses_release_revision',
+                    )
+                    return await executeSesReleaseRevisionAction(
+                      client,
+                      releaseAuth,
+                      releaseArgs,
+                      makeSesGraphMailGateway(client),
+                      makeSesReleaseXeroReader(client),
+                    )
+                  },
+                },
+              )
             },
           },
         ))
