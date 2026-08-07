@@ -283,8 +283,17 @@ async function run(): Promise<void> {
   // ownership read deliberately does NOT reuse `DETAIL_SQL`, which drops
   // cancelled/lost jobs - a cancelled sibling still contests a builder
   // reference, and omitting it would manufacture false uniqueness.
+  // The card's own purchase order rides along because it is the OTHER half of
+  // card identity (`sesMatchJobIdentityDigits`) and the only thing that tells
+  // siblings on one builder claim apart. LEFT JOIN, so the universe stays every
+  // `makesafe_job_details` row exactly as before.
   const [refUniverse, unlinkedInvoices] = await Promise.all([
-    query("select job_id, external_ref from makesafe_job_details"),
+    query(
+      `select d.job_id, d.external_ref,
+              j.metadata->>'builder_po_number' as builder_po_number
+       from makesafe_job_details d
+       left join jobs j on j.id = d.job_id`,
+    ),
     query(
       `select x.id, x.job_id, x.invoice_number, x.reference, x.status,
               x.invoice_type, x.total
@@ -300,6 +309,7 @@ async function run(): Promise<void> {
       (refUniverse as any[]).map((row) => ({
         id: String(row.job_id),
         external_ref: row.external_ref ?? null,
+        builder_po_number: row.builder_po_number ?? null,
       })),
       unlinkedInvoices as any[],
     );

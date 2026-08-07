@@ -96,7 +96,12 @@ The docket evidence records `captured_by`, `captured_at`, `capture_producer`,
 source URL, source content fingerprint, and evidence revision id.
 
 When the row is absent U4 emits `portal_capture_missing`, naming the exact job,
-cycle, role, and URL required. Corrupt or incomplete evidence emits
+cycle, role, and URL required. Since 2026-08-07 the signal also NAMES a capture
+rejected on `builder_reference` alone, so "the reference disagrees" is no longer
+reported as "no capture was ever taken"; selection and the `missing` verdict are
+unchanged (`missingCaptureSignal`, and
+`docs/evidence/ses-reference-identity-po-grain-2026-08-07.md` §5). Corrupt or
+incomplete evidence emits
 `portal_capture_invalid`. These replace the former bare
 `capability_portal_degraded` blocker.
 
