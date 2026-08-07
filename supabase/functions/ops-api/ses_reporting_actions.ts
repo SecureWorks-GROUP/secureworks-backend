@@ -1109,6 +1109,8 @@ export async function loadSesCockpitDocket(
     existing_card_money: existingCardMoney,
     job_number: object(manifest.classification).job_number || null,
     docket_revision_id: docket.id,
+    docket_output_content_hash: String(docket.output_content_hash || "") ||
+      null,
     readiness_revision: readiness.readiness_revision,
     dependency_generation: Number(readiness.dependency_generation),
     invoice_obligation_revision_id: obligation?.id || null,
