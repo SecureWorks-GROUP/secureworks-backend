@@ -26,6 +26,7 @@ import {
   SYNTHETIC_LIVEFIRE_MARKER_PREFIX,
 } from "./makesafe_synthetic_livefire.ts";
 import { buildSourceIssueOperationalFact } from "./makesafe_intake_operational_facts.ts";
+import { flagIntakeCommitWithoutSiteSuburb } from "./makesafe_intake_suburb_backstop.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -6865,6 +6866,10 @@ Deno.test("D3: a reattend with no findable original parks for review instead of 
 // tests are a matched pair: the same fixture differing only in whether the work
 // order's address carries a suburb, so the guard is proved to both fire and
 // stay quiet rather than merely to exist.
+//
+// The guard itself lives in the guarded approval gate, the one seam every mint
+// path converges on, so the stub below mirrors what that gate does with its own
+// approved suburb and the runtime is proved to account what the gate reports.
 function suburbBacktopFixture(postId: string, siteAddress: string): Store {
   const store = baseStore();
   store.emails.push(email({
@@ -6897,6 +6902,31 @@ function suburbBacktopFixture(postId: string, siteAddress: string): Store {
   return store;
 }
 
+function approveDraftThroughSuburbBackstop(store: Store) {
+  return async (client: any, body: any) => {
+    const draft = (store.makesafe_intake_drafts as any[]).find((row: any) =>
+      row.id === body.draft_id
+    );
+    const sourcePostIds =
+      (draft?.extraction_json?.intake_source_post_ids as string[]) || [];
+    const flag = await flagIntakeCommitWithoutSiteSuburb(client, {
+      jobCreated: true,
+      jobId: "job-abc",
+      siteSuburb: draft?.site_suburb,
+      orgId: draft?.org_id || ORG,
+      mailbox: draft?.mailbox || "ses@secureworkswa.com.au",
+      sourcePostIds,
+      instructionKey: draft?.external_ref || null,
+      caseId: body.intake_case_id || null,
+    });
+    return {
+      job: { id: "job-abc" },
+      job_created: true,
+      committed_without_site_suburb: flag.flagged,
+    };
+  };
+}
+
 function suburbIssueRows(store: Store) {
   return store.email_events_raw.filter((row: any) =>
     row.change_type === "intake_exception_committed_without_site_suburb"
@@ -6913,7 +6943,7 @@ Deno.test("a job minted with an empty suburb is flagged as an open source issue 
       selectionMode: "exact",
       allowSourcePostIds: ["suburb-missing-1"],
       maxCases: 1,
-      approveDraft,
+      approveDraft: approveDraftThroughSuburbBackstop(store),
       nowIso: NOW,
     },
   );
@@ -6953,7 +6983,7 @@ Deno.test("a job minted with a suburb is not flagged", async () => {
       selectionMode: "exact",
       allowSourcePostIds: ["suburb-present-1"],
       maxCases: 1,
-      approveDraft,
+      approveDraft: approveDraftThroughSuburbBackstop(store),
       nowIso: NOW,
     },
   );
@@ -6977,7 +7007,7 @@ Deno.test("the empty-suburb flag reaches the operational desk a human reads", as
     selectionMode: "exact",
     allowSourcePostIds: ["suburb-visible-1"],
     maxCases: 1,
-    approveDraft,
+    approveDraft: approveDraftThroughSuburbBackstop(store),
     nowIso: NOW,
   });
 

@@ -554,6 +554,9 @@ function sourceAlarmBlockerSentence(fact: IntakeOperationalFact): string {
       "Intake finished without deciding whether this source is work.",
     intake_exception_scan_handoff_failed:
       "The intake handoff failed before this source received a final outcome.",
+    committed_without_site_suburb: `This source committed and its card ${
+      fact.instruction_key ? `(${fact.instruction_key}) ` : ""
+    }is live, but it was minted with no site suburb, so it is invisible to every suburb-keyed view.`,
   };
   return known[String(fact.reason_code || "")] ||
     `This source still needs review: ${

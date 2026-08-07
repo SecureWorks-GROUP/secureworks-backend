@@ -1404,15 +1404,19 @@ in-repo `addressSuburb()` also misses a comma before `WA` and a trailing
 `, Australia`; `deriveSuburb()` in the backfill script handles both and is the
 reference for that fix.
 
-That extraction bug is now BACKSTOPPED, not fixed: a job the deterministic
-runtime MINTS with an empty suburb writes an open source issue
-(`committed_without_site_suburb` ->
+That extraction bug is now BACKSTOPPED, not fixed: a job MINTED with an empty
+suburb writes an open source issue (`committed_without_site_suburb` ->
 `intake_exception_committed_without_site_suburb`, next action
 `human_supply_site_suburb`) and bumps
 `report.totals.committed_without_site_suburb`. The guard is
-`makesafe_intake_suburb_backstop.ts`, called from the post-commit `if (jobId)`
-block in `makesafe_deterministic_intake_runtime.ts`. It FLAGS, never blocks —
-refusing intake would trade a quiet card for a lost one — and it fires only on
+`makesafe_intake_suburb_backstop.ts`, called ONCE from `approveIntakeDraft`'s
+minting return in `index.ts` — the single seam the deterministic runtime (via
+its `approveDraft` callback), the `autoApproveCleanIntakeDrafts` backlog sweep
+and the manual review button all converge on. Do not add a second call site in
+the runtime; it only counts what the gate reports back as
+`committed_without_site_suburb`. It FLAGS, never blocks —
+refusing intake would trade a quiet card for a lost one, and a failed flag write
+is caught and accounted rather than failing the mint — and it fires only on
 `jobCreated`, so re-linking an already-live card never re-flags it. Suburb only;
 do not widen it to another field. Extending `INTAKE_SOURCE_ISSUE_REASONS` is
 code-only (no migration): that array plus the exhaustive
