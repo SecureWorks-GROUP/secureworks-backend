@@ -159,18 +159,41 @@ function invoiceSortTimestamp(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
 }
 
-function invoiceBelongsToCurrentAttendance(detail: any, invoice: any): boolean {
-  if ((Number(detail?.reattend_count ?? 0) || 0) <= 0) return true;
+export type MakesafeInvoiceAttendanceCycle = "current" | "prior" | "unknown";
+
+/**
+ * Which attendance cycle does this invoice's money belong to?
+ *
+ * The ONE cycle boundary on the card. Callers pair it with their own
+ * fail-closed direction, which differs by question: a placement/closeout driver
+ * treats `unknown` as NOT current (prior-cycle money must never place or close
+ * a card), while a double-bill refusal treats `unknown` as possibly current
+ * (unresolvable attribution must still refuse). Both readings come from this
+ * one derivation — do not add a second engine for either.
+ */
+export function makesafeInvoiceAttendanceCycle(
+  detail: any,
+  invoice: any,
+): MakesafeInvoiceAttendanceCycle {
+  if ((Number(detail?.reattend_count ?? 0) || 0) <= 0) return "current";
 
   // Reattendance is the only explicit commercial-evidence boundary available
   // on the card. A draft created before that boundary belongs to an earlier
   // visit; a draft created at or after it is current. Missing/invalid stamps
-  // fail closed rather than making old commercial evidence current.
+  // are unresolvable rather than current.
   const boundary = invoiceSortTimestamp(detail?.last_reattend_at);
   const createdAt = invoiceSortTimestamp(invoice?.created_at);
-  return Number.isFinite(boundary) && Number.isFinite(createdAt) &&
-    boundary !== Number.NEGATIVE_INFINITY &&
-    createdAt !== Number.NEGATIVE_INFINITY && createdAt >= boundary;
+  if (
+    boundary === Number.NEGATIVE_INFINITY ||
+    createdAt === Number.NEGATIVE_INFINITY
+  ) {
+    return "unknown";
+  }
+  return createdAt >= boundary ? "current" : "prior";
+}
+
+function invoiceBelongsToCurrentAttendance(detail: any, invoice: any): boolean {
+  return makesafeInvoiceAttendanceCycle(detail, invoice) === "current";
 }
 
 /**

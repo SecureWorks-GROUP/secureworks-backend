@@ -41,7 +41,6 @@ on:
       # coverage the harness has. Why the harness owns its own npm project under
       # tests/e2e is documented in docs/ses-reporting-proof-harness.md.
       - 'tests/e2e/**'
-      - 'docs/ses-reporting-proof-harness.md'
       # Same reason a fourth time, for evidence and project-memory changes.
       # An agent run that lands only its report, screenshots and ledgers under
       # data/ — or only updates AGENTS.md / CLAUDE.md — matched NO path here, so
@@ -52,6 +51,20 @@ on:
       # tracked ROOT markdown files only and does not pull in docs/**.
       - 'data/**'
       - '*.md'
+      # Same reason a fifth time, and it is the gap the note above NAMES without
+      # closing: '*.md' is root-only, so a PR landing only docs/** — a diagnosis
+      # under docs/evidence/, an ADR, a contract — matched no path here at all.
+      # deno-check is the ONE required status on main, so such a PR registers
+      # zero check runs and is unmergeable BY CAUSE, not by failure. Measured on
+      # PR #631 (3 files, all docs/evidence/**): `gh run list --branch` returned
+      # count 0 and mergeStateStatus BLOCKED. This is the correct fix for that
+      # class: the remedy for "no workflow matched the diff" is the trigger, and
+      # re-running changes nothing because there is no run to re-run. It weakens
+      # nothing — deno-check diffs for supabase/functions/** itself and no-ops to
+      # pass when none changed, exactly as it already does for a migrations-only
+      # or data/-only PR. This subsumes the former single-file
+      # 'docs/ses-reporting-proof-harness.md' entry.
+      - 'docs/**'
 
 permissions:
   contents: read

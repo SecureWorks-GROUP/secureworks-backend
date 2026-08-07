@@ -47,6 +47,8 @@ const FACTS = {
     "A required email route has no canonical builder mailbox recipient.",
   pricing_evidence_missing:
     "The current evidence does not prove the invoice price.",
+  invoice_exists_unbound:
+    "Xero already carries live money for this card that the current docket does not bind, so minting here would bill already-billed work.",
   post_release_disposition_missing:
     "Released work has a later attendance, but no human billing disposition has been recorded.",
   release_approval_missing:
