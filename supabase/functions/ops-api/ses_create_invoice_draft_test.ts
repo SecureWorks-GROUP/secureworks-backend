@@ -66,6 +66,8 @@ function revisionRow(overrides: Record<string, unknown> = {}) {
 
 function mintClient(opts: {
   revision?: Record<string, unknown>;
+  /** Stored ses_external_effects rows served to list reads (retry gate). */
+  effectRows?: Array<Record<string, unknown>>;
 } = {}) {
   const revision = opts.revision || revisionRow();
   const effects = new Map<string, Record<string, any>>();
@@ -112,7 +114,12 @@ function mintClient(opts: {
           return { data: null, error: null };
         },
         then: (resolve: any, reject: any) =>
-          Promise.resolve({ data: [], error: null }).then(resolve, reject),
+          Promise.resolve({
+            data: table === "ses_external_effects"
+              ? (opts.effectRows || [])
+              : [],
+            error: null,
+          }).then(resolve, reject),
       };
       return builder;
     },
@@ -649,4 +656,159 @@ Deno.test("shared resolveExistingInvoice: job_id always blocks regardless of PO"
   );
   assertEquals(hit?.match_method, "job_id");
   assertEquals(hit?.invoice_number, "INV-J");
+});
+
+
+// ── Deliberate retry gate (issue #644) ──────────────────────────────────────
+
+function strandedEffectRow(overrides: Record<string, unknown> = {}) {
+  return {
+    operation_key: "ses:invoice_create:stuck-1",
+    state: "unknown",
+    external_id: null,
+    external_token: "SES-stuck-token-1",
+    ...overrides,
+  };
+}
+
+Deno.test("R1: a provably stranded attempt permits a deliberate retry that mints a fresh row", async () => {
+  const gateway = draftGateway();
+  // The stranded token reconciles to nothing; only a real create yields a hit.
+  const originalReconcile = gateway.reconcileCreate.bind(gateway);
+  gateway.reconcileCreate = async (token: string) =>
+    token === "SES-stuck-token-1" ? [] : await originalReconcile(token);
+  const client = mintClient({ effectRows: [strandedEffectRow()] });
+  const result = await createSesInvoiceDraftAction(
+    client as any,
+    apiKeyAuth,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "skill@test",
+      retry_attempt_key: "captain-authorised-retry-1",
+    },
+    gateway,
+    { fetchAllAccrecInvoices: async () => [] },
+  );
+  assertEquals(result.state, "xero_draft_created");
+  assertEquals(result.invoice_create_dispatched, true);
+  assertEquals(gateway.createCalls, 1);
+});
+
+Deno.test("R2: a retry refuses when the prior attempt carries a Xero checkpoint", async () => {
+  const gateway = draftGateway();
+  const client = mintClient({
+    effectRows: [strandedEffectRow({ external_id: "xero-maybe-1" })],
+  });
+  const error = await assertRejects(
+    () =>
+      createSesInvoiceDraftAction(
+        client as any,
+        apiKeyAuth,
+        {
+          org_id: ORG_ID,
+          job_id: JOB_ID,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "skill@test",
+          retry_attempt_key: "retry-2",
+        },
+        gateway,
+        { fetchAllAccrecInvoices: async () => [] },
+      ),
+    SesActionError,
+  );
+  const refusal = (error as SesActionError).refusal as any;
+  assertEquals(refusal.code, "invoice_retry_not_permitted");
+  assertEquals(gateway.createCalls, 0);
+});
+
+Deno.test("R3: a retry refuses when a prior attempt is not unknown/failed", async () => {
+  const gateway = draftGateway();
+  const client = mintClient({
+    effectRows: [strandedEffectRow({ state: "dispatching" })],
+  });
+  const error = await assertRejects(
+    () =>
+      createSesInvoiceDraftAction(
+        client as any,
+        apiKeyAuth,
+        {
+          org_id: ORG_ID,
+          job_id: JOB_ID,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "skill@test",
+          retry_attempt_key: "retry-3",
+        },
+        gateway,
+        { fetchAllAccrecInvoices: async () => [] },
+      ),
+    SesActionError,
+  );
+  assertEquals(
+    ((error as SesActionError).refusal as any).code,
+    "invoice_retry_not_permitted",
+  );
+  assertEquals(gateway.createCalls, 0);
+});
+
+Deno.test("R4: a retry refuses when the stranded token reconciles to a live invoice", async () => {
+  const gateway = draftGateway();
+  gateway.reconcileCreate = async () => [{
+    xero_invoice_id: "xero-live-1",
+    invoice_number: "INV-9002",
+    status: "DRAFT",
+    reference: "MLB-24732 | token",
+    total: 330,
+  }];
+  const client = mintClient({ effectRows: [strandedEffectRow()] });
+  const error = await assertRejects(
+    () =>
+      createSesInvoiceDraftAction(
+        client as any,
+        apiKeyAuth,
+        {
+          org_id: ORG_ID,
+          job_id: JOB_ID,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "skill@test",
+          retry_attempt_key: "retry-4",
+        },
+        gateway,
+        { fetchAllAccrecInvoices: async () => [] },
+      ),
+    SesActionError,
+  );
+  assertEquals(
+    ((error as SesActionError).refusal as any).code,
+    "invoice_retry_not_permitted",
+  );
+  assertEquals(gateway.createCalls, 0);
+});
+
+Deno.test("R5: a retry key with no prior attempt refuses (mint normally instead)", async () => {
+  const gateway = draftGateway();
+  const client = mintClient({ effectRows: [] });
+  const error = await assertRejects(
+    () =>
+      createSesInvoiceDraftAction(
+        client as any,
+        apiKeyAuth,
+        {
+          org_id: ORG_ID,
+          job_id: JOB_ID,
+          invoice_obligation_revision_id: OBLIGATION_ID,
+          actor: "skill@test",
+          retry_attempt_key: "retry-5",
+        },
+        gateway,
+        { fetchAllAccrecInvoices: async () => [] },
+      ),
+    SesActionError,
+  );
+  assertEquals(
+    ((error as SesActionError).refusal as any).code,
+    "invoice_retry_not_permitted",
+  );
+  assertEquals(gateway.createCalls, 0);
 });

@@ -4,11 +4,14 @@ import {
   assertEquals,
   assertMatch,
   assertNotEquals,
+  assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { prepareSesInvoiceObligation } from "./makesafe_invoice_obligation.ts";
 import type { SesInvoiceDuplicateResolution } from "./makesafe_invoice_duplicate_resolver.ts";
+import { SES_FAMILY_MATRIX_VERSION } from "./ses_family_matrix.ts";
 import {
   prepareSesInvoiceObligationAction,
+  SesActionError,
   type SesSupabaseClient,
 } from "./ses_reporting_actions.ts";
 
@@ -66,6 +69,7 @@ Deno.test("Bertram persisted docket reaches prepare_ses_invoice_obligation at $7
     id: "40000000-0000-4000-8000-000000007502",
     job_id: "208450c0-7161-4b30-9514-66226b054609",
     stage: "pre_xero",
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
     attendance_cycle_ids: [CYCLE_1],
     current_attendance_cycle_id: CYCLE_1,
     envelope: {
@@ -151,6 +155,81 @@ Deno.test("Bertram persisted docket reaches prepare_ses_invoice_obligation at $7
   assertEquals(result.proposal.totals, { ex: 750, inc: 825 });
   assertEquals(result.proposal.lines.length, 2);
   assertEquals(result.external_mutations, { xero: 0, email: 0 });
+});
+
+Deno.test("a docket priced under a superseded family matrix refuses the mint with docket_pricing_stale", async () => {
+  const docket = {
+    id: "40000000-0000-4000-8000-000000007503",
+    job_id: "208450c0-7161-4b30-9514-66226b054609",
+    stage: "pre_xero",
+    family_matrix_version: "ses-builder-family-matrix/2026-07-30.6",
+    attendance_cycle_ids: [CYCLE_1],
+    current_attendance_cycle_id: CYCLE_1,
+    envelope: { v2: { routing: { builder: "MLB" } } },
+    local_invoice_proposal: {
+      builder_reference: "MLB-27148",
+      line_items: [{
+        description: "MLB-27148 - Double Storey roof report",
+        quantity: 1,
+        unit_price_ex_gst: 350,
+      }],
+      subtotal_ex_gst: 350,
+      gst: 35,
+      total_inc_gst: 385,
+    },
+  };
+  const rows: Record<string, unknown> = {
+    makesafe_docket_revisions: docket,
+    makesafe_invoice_obligation_revisions_current: null,
+    xero_invoices: [],
+  };
+  const client = {
+    from(table: string) {
+      const response = () => ({ data: rows[table] ?? null, error: null });
+      const query = {
+        select() { return query; },
+        eq() { return query; },
+        in() { return query; },
+        not() { return query; },
+        or() { return query; },
+        order() { return query; },
+        limit() { return query; },
+        maybeSingle() { return Promise.resolve(response()); },
+        then(resolve: (value: ReturnType<typeof response>) => unknown) {
+          return Promise.resolve(response()).then(resolve);
+        },
+      };
+      return query;
+    },
+    rpc() { return Promise.resolve({ data: null, error: null }); },
+    storage: { from: () => ({}) },
+  } as unknown as SesSupabaseClient;
+
+  const error = await assertRejects(
+    () =>
+      prepareSesInvoiceObligationAction(
+        client,
+        { mode: "routine", user: null },
+        {
+          org_id: ORG,
+          job_id: docket.job_id,
+          docket_revision_id: docket.id,
+          created_by: "stale-guard-test",
+        },
+      ),
+    SesActionError,
+  );
+  const refusal = (error as SesActionError).refusal as Record<string, unknown>;
+  assertEquals(refusal.code, "docket_pricing_stale");
+  const evidence = refusal.evidence as Record<string, unknown>;
+  assertEquals(
+    evidence.docket_family_matrix_version,
+    "ses-builder-family-matrix/2026-07-30.6",
+  );
+  assertEquals(
+    evidence.current_family_matrix_version,
+    SES_FAMILY_MATRIX_VERSION,
+  );
 });
 
 Deno.test("pre-release cycle change keeps obligation but supersedes revision", async () => {
