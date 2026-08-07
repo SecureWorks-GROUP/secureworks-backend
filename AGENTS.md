@@ -2791,6 +2791,41 @@ tests mock external services, so assert the generated where-clause string
 (`xero_where_clause_test.ts`); a green pipeline alone does not prove Xero
 accepts the query.
 
+## The Curated Renderer Pin Spans Two Repos And Moves As A Pair
+
+`MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION` and
+`MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256`
+(`makesafe_report_render.ts`) pin the WIKI renderer
+`harness/ops/skills/secureworks-makesafe-reporting/scripts/render_makesafe_report.py`.
+Any merge to secureworks-wiki `main` that touches that file breaks curated
+binding here until this repo re-pins and DEPLOYS — merged is not live, and the
+gap is real, so sequence the two merges deliberately.
+
+Rules. Take the revision from the SQUASH commit on wiki `main`
+(`gh-axi api repos/SecureWorks-GROUP/secureworks-wiki/commits/main`), never a
+PR branch head, and take the fingerprint from that commit's own bytes
+(`git cat-file -p <commit>:<path> | shasum -a 256`); cross-check the blob id
+against the API's file entry so you know you hashed what main has. Move BOTH
+together — the provenance stamp is written server-side from both without
+asking what produced the artifact, so a fresh fingerprint on a stale revision
+binds a false claim about which renderer made the document.
+`..._RENDERER_VERSION` derives from the revision; confirm rather than assume.
+Never add a second accepted fingerprint to smooth the transition: exactly one
+value is honoured, and widening it weakens the curated-bind evidence check
+permanently. A short honest outage is the better trade.
+
+Consequence to expect, not a defect: `inspectSesSupportingReportProof` compares
+the ARTIFACT's stamped revision/sha against the live constants, so every
+`durable_curated_revision` artifact stamped under the old pin turns
+`active_renderer_input_binding_missing` at the moment of re-pin. Those cards
+clear via `prepare_ses_docket_revision` (dry-run first), never by relaxing a
+gate. The literal old values under `data/` and `docs/evidence/` are dated bind
+records of the pin they were produced under — do not rewrite them.
+
+Deployed truth is the read-only `ops-api?action=ops_api_version` (`commit_sha`,
+`deployed_at`); prove the change is live with
+`git merge-base --is-ancestor <fix> <commit_sha>`, never a "behind by N" count.
+
 ## Make-Safe Report Prose Is Short Paragraphs, Not Form Blurbs
 
 Builder-facing make-safe report wording (scope / findings / works / materials)

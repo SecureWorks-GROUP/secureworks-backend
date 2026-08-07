@@ -28,10 +28,18 @@ export const MAKESAFE_REPORT_CONTRACT_VERSION =
   "secureworks.makesafe-report/curated-2026-08-03";
 export const MAKESAFE_REPORT_TS_SOURCE_REVISION =
   "b20d9ec3c5ac5c82bb463aef6ff52bfe63fc15ce";
+// Pinned to the wiki renderer at secureworks-wiki main. These two move
+// TOGETHER: the provenance stamp is written server-side from both without
+// asking what produced the artifact, so a fingerprint pinned against a stale
+// revision would bind a false claim about which renderer made the document.
+// Current pin: harness/ops/skills/secureworks-makesafe-reporting/scripts/
+// render_makesafe_report.py at the squash commit for wiki PR #325 (per-job
+// photo_max_size / photo_quality). Only ONE fingerprint is ever accepted --
+// never add a second to smooth a transition.
 export const MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION =
-  "915e9b423fc597d656c7cb090671bf206138114b";
+  "2cb60bf05f0aecf24d8b6c0a54181de3a8aa3dfb";
 export const MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256 =
-  "fda63bcffa0177b702089e67b5719ae50642a9972aa3628c516fcedb1cfe42dc";
+  "c3e48d4fac7f040c68296bb3b6d6676535fc464d67fedfd10b07b7d7232b54a7";
 export const MAKESAFE_REPORT_RENDERER_VERSION =
   `secureworks.ops-api-jspdf/${MAKESAFE_REPORT_TS_SOURCE_REVISION}`;
 export const MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION =
