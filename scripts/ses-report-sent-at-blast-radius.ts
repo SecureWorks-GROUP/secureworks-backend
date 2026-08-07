@@ -5,22 +5,27 @@
  * READ-ONLY. Management API, `read_only: true`, SELECT/WITH only. It writes
  * nothing and calls no ops-api action.
  *
- * WHAT IT ANSWERS
- * ---------------
- * The change under measurement closes `update_makesafe_details` to the field
- * and derives it from a recorded send instead. Two questions follow, and the
- * second is the one that matters:
+ * TWO MODES
+ * ---------
+ *   --mode=report (default) — the census: which cards carry a stamp with NO
+ *     send on any surface (false stamps), and which unstamped cards DO carry
+ *     send evidence (the historical gap). Its zero-loss statement is a
+ *     STRUCTURAL argument, not an empirical measurement: the derived producer
+ *     writes only where `report_sent_at IS NULL`, and no branch in it writes
+ *     null. Report mode always exits 0 on a successful read.
  *
- *   1. Which cards carry a stamp with NO send on any surface? (false stamps)
- *   2. Which cards would LOSE a stamp? — because a card that genuinely had its
- *      report sent must keep its stamp, and losing a true one is as much a
- *      defect as keeping a false one.
+ *   --mode=verify — the empirical half. Re-reads production and compares every
+ *     card in the pinned manifest (`ses-report-sent-at-baseline-v1.json`, the
+ *     31 stamped cards measured 2026-08-07) against its pinned stamp. A card
+ *     whose stamp is now NULL, whose stamp changed to a different value, or
+ *     which is absent from the board FAILS the run with a non-zero exit,
+ *     naming the card and both values. This is the mode that "exits non-zero
+ *     if any card would lose a stamp".
  *
- * The answer to (2) is structurally ZERO: the change writes nothing to existing
- * rows. The derived producer is additive (it only ever fills an ABSENT stamp),
- * and the one path that clears is the pre-existing, separately guarded
- * `correct_makesafe_false_send_stamp`. This script proves that empirically
- * rather than by assertion, and EXITS NON-ZERO if any card would lose one.
+ * The manifest is a snapshot to prove against and must NEVER be re-snapshotted
+ * to make a failing run green — same spirit as the ses-e1 stage baseline and
+ * the ses-c3 backfill ledgers. A verify failure is a real defect to diagnose,
+ * not drift to absorb.
  *
  * THE FOUR SURFACES, AND THE JOIN THAT IS A TRAP
  * ----------------------------------------------
@@ -34,8 +39,12 @@
  * NO CLIENT-IDENTIFYING COLUMNS ARE SELECTED. Cards are named by job number.
  *
  * Usage:  SUPABASE_ACCESS_TOKEN=... deno run --allow-env --allow-net \
- *           scripts/ses-report-sent-at-blast-radius.ts
+ *           scripts/ses-report-sent-at-blast-radius.ts [--mode=report|verify]
  */
+
+import baseline from "./ses-report-sent-at-baseline-v1.json" with {
+  type: "json",
+};
 
 const PROJECT_REF = "kevgrhcjxspbxgovpmfl";
 const MANAGEMENT_QUERY_URL =
@@ -122,7 +131,18 @@ function surfaces(row: CardRow): string {
     `pack=${row.sent_packs} marker=${row.legacy_markers}`;
 }
 
-async function main(): Promise<number> {
+function normaliseUtcSecond(raw: string): string | null {
+  const s = raw.trim().replace(" ", "T");
+  const m = s.match(
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/,
+  );
+  if (m && (!m[2] || m[2] === "Z" || /^[+-]00:?00$/.test(m[2]))) return m[1];
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString().slice(0, 19);
+}
+
+async function report(): Promise<number> {
   const rows = await query<CardRow>(CARD_EVIDENCE_SQL);
   const stamped = rows.filter((r) => r.report_sent_at !== null);
   const unstamped = rows.filter((r) => r.report_sent_at === null);
@@ -137,9 +157,10 @@ async function main(): Promise<number> {
   console.log(`  unstamped                     ${unstamped.length}`);
   console.log(`    but a surface records a send ${unstampedSent.length}  (the historical gap; NOT backfilled by this change)`);
 
-  console.log(`\n  stamps that would CHANGE under the derivation: 0`);
-  console.log(`    the derived producer is additive (fills an ABSENT stamp only)`);
-  console.log(`    and no path in it writes null.\n`);
+  console.log(`\n  stamps that would CHANGE under the derivation: 0 — STRUCTURAL,`);
+  console.log(`    not measured here: the derived producer writes only where`);
+  console.log(`    report_sent_at IS NULL, and no branch in it writes null.`);
+  console.log(`    The empirical check is --mode=verify against the pinned manifest.\n`);
 
   if (stampedFalse.length) {
     console.log("  Stamped with NO send evidence (pre-existing, untouched here):");
@@ -147,19 +168,64 @@ async function main(): Promise<number> {
       console.log(`    ${r.job_number.padEnd(14)} ${String(r.report_sent_at).slice(0, 19)}  ${surfaces(r)}`);
     }
   }
+  console.log("");
+  return 0;
+}
 
-  // The invariant. A card can only lose a stamp if something WRITES null to it,
-  // and nothing in this change does — so any occurrence is a real defect and
-  // must fail the run rather than be reported.
-  const wouldLose = stamped.filter((r) => r.report_sent_at === null);
-  if (wouldLose.length > 0) {
+async function verify(): Promise<number> {
+  const rows = await query<CardRow>(CARD_EVIDENCE_SQL);
+  const byJobNumber = new Map(rows.map((r) => [r.job_number, r]));
+  const failures: string[] = [];
+  let ok = 0;
+
+  for (const card of baseline.cards) {
+    const live = byJobNumber.get(card.job_number);
+    if (!live) {
+      failures.push(
+        `${card.job_number}: ABSENT from the board (pinned ${card.report_sent_at})`,
+      );
+      continue;
+    }
+    if (live.report_sent_at === null) {
+      failures.push(
+        `${card.job_number}: stamp is now NULL (pinned ${card.report_sent_at})`,
+      );
+      continue;
+    }
+    const liveNormalised = normaliseUtcSecond(live.report_sent_at);
+    if (liveNormalised !== card.report_sent_at) {
+      failures.push(
+        `${card.job_number}: stamp changed — pinned ${card.report_sent_at}, live ${live.report_sent_at}`,
+      );
+      continue;
+    }
+    ok += 1;
+  }
+
+  console.log(
+    `\nses-report-sent-at-blast-radius --mode=verify — ${baseline.cards.length} pinned cards (${baseline.measured_at})\n`,
+  );
+  console.log(`  unchanged  ${ok}`);
+  console.log(`  failures   ${failures.length}\n`);
+
+  if (failures.length > 0) {
     console.error(
-      `\nFAIL: ${wouldLose.length} card(s) would lose a stamp; the derivation must be additive.`,
+      `FAIL: ${failures.length} pinned card(s) lost or changed a stamp. Diagnose the defect; never re-snapshot the manifest to make this green.`,
     );
+    for (const f of failures) console.error(`  ${f}`);
     return 1;
   }
-  console.log("\n  OK: no card loses a stamp.\n");
+  console.log("  OK: every pinned stamp is intact and unchanged.\n");
   return 0;
+}
+
+async function main(): Promise<number> {
+  const modeArg = Deno.args.find((a) => a.startsWith("--mode="));
+  const mode = modeArg ? modeArg.slice("--mode=".length) : "report";
+  if (mode === "report") return await report();
+  if (mode === "verify") return await verify();
+  console.error(`unknown mode "${mode}" — use --mode=report or --mode=verify`);
+  return 2;
 }
 
 if (import.meta.main) {

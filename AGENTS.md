@@ -1020,8 +1020,11 @@ set-on-demand action; that is the same hole under a new name. The guarded clear
 stays a COMPARE-AND-SET because a derived producer can still move the stamp
 under it (`stamp_drift`, never a clobber).
 
-Blast radius is re-provable read-only and exits non-zero if any card would lose
-a stamp: `scripts/ses-report-sent-at-blast-radius.ts`. Measured 2026-08-07 over
+Blast radius is re-provable read-only:
+`scripts/ses-report-sent-at-blast-radius.ts` (`--mode=verify` compares the
+pinned 31-stamp manifest `ses-report-sent-at-baseline-v1.json` against live and
+exits non-zero if any card lost or changed a stamp; the manifest is never
+re-snapshotted to green a failing run). Measured 2026-08-07 over
 461 cards: 31 stamped (28 corroborated, 3 with no surface at all), and **229
 unstamped cards DO carry send evidence** — a historical gap deliberately not
 backfilled, because writing those stamps changes `sentClosed` surfacing on 229

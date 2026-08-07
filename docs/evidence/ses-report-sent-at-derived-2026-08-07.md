@@ -67,11 +67,12 @@ and are untouched.
 
 ## Blast radius
 
-Re-provable read-only, exits non-zero if any card would lose a stamp:
+Re-provable read-only. The census is the default `--mode=report`;
+`--mode=verify` is the mode that exits non-zero if any card lost a stamp:
 
 ```
 SUPABASE_ACCESS_TOKEN=... deno run --allow-env --allow-net \
-  scripts/ses-report-sent-at-blast-radius.ts
+  scripts/ses-report-sent-at-blast-radius.ts [--mode=report|verify]
 ```
 
 Measured 2026-08-07 across 461 SES cards:
@@ -85,8 +86,14 @@ Measured 2026-08-07 across 461 SES cards:
 | — but a surface records a send (historical gap) | 229 |
 | **stamps that CHANGE under the derivation** | **0** |
 
-Zero is structural, not a coincidence of today's data: the derived producer
-writes only where `report_sent_at IS NULL`, and no branch in it writes null.
+Zero is a STRUCTURAL argument, not an empirical measurement: the derived
+producer writes only where `report_sent_at IS NULL`, and no branch in it
+writes null. The empirical half is `--mode=verify`, which compares every
+stamped card against the pinned manifest
+`scripts/ses-report-sent-at-baseline-v1.json` (the 31 stamps measured
+2026-08-07) and fails non-zero on a card whose stamp is now NULL, changed, or
+absent from the board. That manifest is a snapshot to prove against and must
+never be re-snapshotted to make a failing run green.
 The 28 true stamps are untouched. The 3 false ones stay exactly as they are —
 clearing them belongs to `correct_makesafe_false_send_stamp` and is a separate
 adjudication, not a side effect of closing a door.
