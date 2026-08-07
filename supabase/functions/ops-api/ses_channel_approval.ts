@@ -148,9 +148,10 @@ export const SES_CHANNEL_TOTP_DIGITS = 6;
 export const SES_CHANNEL_TOTP_WINDOW_STEPS = 1;
 
 /**
- * Recognised command words. Only `approve` executes in v1. `send` is recognised
- * on purpose so a SEND IT message gets a named refusal that says the act is not
- * wired yet, rather than being silently read as an approval or ignored.
+ * Recognised command words. `approve` records the invoice approval; `send`
+ * (SEND IT — Harden SES ticket 07) binds the Captain's word to the card's one
+ * prepared release revision and drives the existing deterministic release
+ * path. Binding and refusal rules for `send` live in ses_channel_send_it.ts.
  */
 export const SES_CHANNEL_APPROVAL_ACTS = {
   approve: "approve_invoice",
@@ -161,7 +162,7 @@ export type SesChannelApprovalAct =
 
 /** Acts this contract version will actually execute. */
 export const SES_CHANNEL_APPROVAL_ENABLED_ACTS:
-  readonly SesChannelApprovalAct[] = ["approve_invoice"];
+  readonly SesChannelApprovalAct[] = ["approve_invoice", "send_it"];
 
 /**
  * KNOWN RESIDUAL GAP, stated rather than papered over. The replay guard is a
@@ -814,6 +815,20 @@ export interface SesChannelApprovalDeps {
       evidence_refs: unknown[];
     },
   ) => Promise<unknown>;
+  /**
+   * SEND IT (Harden SES ticket 07): bind the word to the card's one prepared
+   * release revision and drive the existing deterministic release path
+   * (ses_channel_send_it.ts). Same guards as a cockpit press.
+   */
+  executeSendIt: (
+    auth: SesActionAuth,
+    args: {
+      org_id: string;
+      job_id: string;
+      actor: string;
+      evidence_refs: unknown[];
+    },
+  ) => Promise<unknown>;
 }
 
 /**
@@ -1017,12 +1032,23 @@ export async function submitSesChannelApprovalAction(
 
   // 10. THE SAME ACT AS A COCKPIT PRESS. Every downstream guard runs unchanged;
   //     a card the cockpit refuses is refused here too, with the same refusal.
-  const approval = await deps.approveInvoice(operatorAuth, {
-    org_id: request.org_id,
-    job_id: card.job_id,
-    includes_authorise: false,
-    evidence_refs: [operatorAct],
-  });
+  const outcome = intent.act === SES_CHANNEL_APPROVAL_ACTS.send
+    ? {
+      release: await deps.executeSendIt(operatorAuth, {
+        org_id: request.org_id,
+        job_id: card.job_id,
+        actor: operatorUser.email || binding.label,
+        evidence_refs: [operatorAct],
+      }),
+    }
+    : {
+      approval: await deps.approveInvoice(operatorAuth, {
+        org_id: request.org_id,
+        job_id: card.job_id,
+        includes_authorise: false,
+        evidence_refs: [operatorAct],
+      }),
+    };
 
   return {
     channel_approval: {
@@ -1034,7 +1060,7 @@ export async function submitSesChannelApprovalAction(
       operator_act: operatorAct,
       identity_provenance: "bound_channel_totp",
     },
-    approval,
+    ...outcome,
   };
 }
 
