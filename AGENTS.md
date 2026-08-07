@@ -2043,6 +2043,28 @@ Persisting a new docket revision on a card whose `pack.state` is already `sent`
 re-opens it as `needs_review` and invalidates the previous signoff tick. Check
 `pack.state` before treating such a card as reachable work.
 
+`pre_xero_docs_ready` on a board card is NOT a mint precondition and NOT a
+placement promise, and both gaps have already cost a run:
+
+- A report-type card (`makesafe_job_details.report_type` non-null) publishing
+  `pre_xero_docs_ready: true` still cannot have a draft cut — the item-14
+  portal-truth guard (`assertMakesafePortalVerifiedForDraftInvoice`) refuses
+  unless `portal_verified_at` / `portal_verified_cycle` name the CURRENT cycle.
+  The board signal does not include the capture, so such a card looks ready and
+  is not. The refusal surfaces under code `xero_outcome_unknown` and leaves an
+  `invoice_create` effect in state `unknown` with `external_id: null` even
+  though nothing reached Xero — a later mint therefore needs a fresh obligation
+  revision. Read the two columns before attempting; the guard reads nothing else.
+- Minting a DRAFT alone never places a PHYSICAL-shaped card in Docs Ready.
+  `sesStageDocsReady` additionally requires the invoice DOCUMENT on the pack
+  (`closeout_documents.invoice`), attached at APPROVE INVOICE. Roof and
+  assessment place on a qualifying draft alone because the non-physical branch
+  does not require it. A repair/make-safe card sitting in `trade_report_in` with
+  `invoice_raw_status: DRAFT` is that rule, not a defect.
+
+Worked run, with the PO-grain reference screen that keeps a sibling's money from
+refusing a mintable card: `docs/evidence/ses-draft-mint-run-2026-08-07.md`.
+
 ## A Roof-Report Card Sends ONE Email, And Route Applicability Is Not `report_only`
 
 Captain 2026-08-06 (`data/decisions/2026-08-06-roof-report-email-shape.md`,
