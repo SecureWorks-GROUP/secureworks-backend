@@ -896,6 +896,21 @@ unique-match entrypoint, because **a matcher for attribution must be unique and
 a matcher for refusal must be inclusive**. Keep it ONE-WAY: it may only add a
 blocker, never clear one.
 
+Inclusive is not GRAINLESS, because a FALSE REFUSAL IS NOT A SAFE FAILURE:
+telling the Captain "this card already has live money" about a SIBLING card's
+invoice on the same claim is a new false statement, the same disease pointed the
+other way. So the PO grain comes from the deployed duplicate guard
+(`workRefRelation` / `poIndeterminateSiblingBlocks` / `referenceCandidateBlocks`
+in `makesafe_send_pack.ts`) and is CONSUMED, never restated — a second, cruder
+"is this the same work" matcher is exactly the defect. Both sides naming
+DIFFERENT POs is other work and does not refuse; a one-sided PO pair refuses
+unless the candidate is already attributed to another card; unlinked money on
+our own claim still refuses. The attribution the refusal PUBLISHES is what
+narrowed, not the refusal: `own_job` / `unlinked_reference_match` assert the
+card's own money, `claim_reference_match` asserts only money on the claim that
+may be a sibling's. Pinned by "PO grain 1..4" in
+`ses_existing_card_money_test.ts`.
+
 It is ENFORCED, not displayed: `sesVerdictWithExistingMoney` is the one producer
 the cockpit and both approve actions consume, and because a non-clean verdict is
 Captain-OVERRIDABLE, the approve actions also run the blocker as a hard 409
@@ -923,7 +938,12 @@ NULL on every such row — a direct join reads as "nothing sent"), a sent
 `makesafe_report_packs.status`, or the legacy `MAKESAFE_PACK_SENT` marker.
 Clearing a false stamp goes through `correct_makesafe_false_send_stamp`
 (`makesafe_false_send_stamp.ts`), which re-derives all four server-side, only
-ever CLEARS, and fails closed on an unreadable surface.
+ever CLEARS, and fails closed on an unreadable surface. It is sanctioned but NOT
+exclusive: `update_makesafe_details` still carries `report_sent_at` on its
+allow-list with no privilege gate and no send derivation, which is why the
+guarded clear is a COMPARE-AND-SET (a stamp that moves under it is
+`stamp_drift`, never a clobber) and why a clean board today is a measurement,
+not a guarantee.
 
 Both measurements, the applied 5-card correction and the open accounting
 question on the seven PAID cards are in
@@ -1391,6 +1411,11 @@ invoices it refused on; both refusal sites route it to
 `ambiguity: "none"` with `different_po_sibling_does_not_block` — a demonstrated
 distinction is not an ambiguity. Never restore `allows_create: true` on a
 recorded ambiguity.
+
+These tiers now have a SECOND consumer: `ses_existing_card_money.ts` imports
+them rather than re-deriving "is this the same work" (see the "Nothing Is
+BOUND" section). Changing the relation semantics changes what the cockpit and
+APPROVE INVOICE refuse on, not just what the mint guard blocks.
 
 The minted reference carries the card's own `builder_po_canonical`
 (`composeInvoiceReferenceWithPo`, `ses_invoice_reference_grain.ts`), which is

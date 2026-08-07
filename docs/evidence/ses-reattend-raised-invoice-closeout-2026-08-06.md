@@ -220,6 +220,14 @@ correct ladder behaviour, a different problem, and explicitly out of bounds here
 (no mint). The Captain's standing order that all of Trade Report In reach
 Completed or Report Ready needs that mint step for the remaining nine.
 
+**Superseded 2026-08-07 on the inference only:** `missing_invoice` is NOT
+evidence that a card needs a draft — it reads `xero_binding` alone, and every
+measured card carrying it already held live money in Xero under its own
+reference. Check by reference before minting any of those nine; the guard, the
+measurement and the retraction are in
+`docs/evidence/ses-manufactured-blockers-2026-08-07.md`. The stage findings
+above are unaffected.
+
 Nothing here sends, mints, voids, approves, authorises or re-prices. No
 migration. No board write, no document attach, no status write of any kind: the
 entire change is board derivation, and every production interaction was a SELECT
