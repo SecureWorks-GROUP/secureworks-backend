@@ -2867,6 +2867,39 @@ them and only the second is a fail-open. Count the marker rather than reading
 the gate as watertight. Evidence:
 `docs/evidence/makesafe-substatus-gate-fail-open-audibility-2026-08-06.md`.
 
+## `writeMakesafeSubstatus` Is The Only Gated Substatus Writer
+
+`makesafe_job_details.substatus` has ONE gated writer,
+`writeMakesafeSubstatus` in `ops-api/index.ts` — gate first, then update — and
+all eight origins go through it (`external:details`, the dispatch action,
+`internal:` portal_report_done / trade_report_submitted /
+roof_report_submitted / draft_pack_ready / closeout / reattend). Before this
+each site PASTED the assert ahead of its own `.update({ substatus })`; all
+eight were correct, but nothing made them, and the earlier form of that
+(seven direct writers) is what produced the impossible substatus/timestamp
+combinations seen in production.
+
+Three properties are load-bearing and easy to break by "improving" it. The
+PostgREST error is **returned, not thrown**, so each origin keeps its own
+message, status and zero-rows handling. Per-origin evidence stamping is
+deliberately **not** hoisted into the writer — `company_contacted_at` is the
+worked example: the dispatch door stamps it and the details editor does not,
+so moving it changes an origin's output. And `row: 'none'` means no
+`.select()` at all, not `.select()` with no columns; a bare update and an
+update+select are different requests.
+
+There are exactly FOUR ungated substatus writes and each names itself: two
+first-substatus INSERTs (`createMakesafeJob`,
+`ensureHistoricalBackfillJobCard`) and the two
+`MakesafeSubstatusUngatedEscape` values routed through
+`writeMakesafeSubstatusUngated`. Adding a fifth is a reviewable act, not an
+omission: `makesafe_substatus_single_writer_test.ts` parses every
+`makesafe_job_details` mutation out of index.ts and diffs it against a
+committed manifest, so **any** new write site there fails review. Verified
+red against three deliberate violations — note the allowlist alone does NOT
+catch a raw write hidden inside an already-allowlisted function; the manifest
+does, which is why both assertions exist.
+
 ## Reads And Writes Must Share One Eligibility Filter
 
 Where a read model hides rows, every write path over the same rows needs the

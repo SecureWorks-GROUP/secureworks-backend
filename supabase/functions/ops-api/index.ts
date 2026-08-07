@@ -13903,9 +13903,18 @@ async function updateMakesafeDetails(client: any, body: any, opts: { authMode?: 
   // Rescue SES T2: this editor was a second external substatus door with only
   // vocabulary validation. A substatus change through here now carries the same
   // evidence guards and transition coherence as the dedicated action.
+  //
+  // Item 2: the two doors are now structurally separate. A patch CARRYING a
+  // substatus goes through the one gated writer; a patch that does not is an
+  // ordinary details edit and must not acquire a gate it never had. The write
+  // statement is deliberately spelled twice rather than branching on a nullable
+  // origin inside the helper — an origin that can be absent is exactly the
+  // "skipped by omission" hole this item closes.
   if (updates.substatus !== undefined) {
     await assertExternalMakesafeSubstatusGuards(client, jId, updates.substatus, opts.authMode)
-    await assertMakesafeSubstatusTransition(client, jId, updates.substatus, 'external:details')
+    const { data, error } = await writeMakesafeSubstatus(client, jId, updates, 'external:details')
+    if (error) throw error
+    return { ok: true, details: data }
   }
 
   const { data, error } = await client.from('makesafe_job_details')
@@ -15526,17 +15535,22 @@ export const _enrichMakesafeBoardJobForTest = enrichMakesafeBoardJob
 //     `makesafe_substatus_gate_fail_open` marker.
 //
 // The transition table and the evaluator live in makesafe_substatus_gate.ts so
-// they are importable by tests; index.ts cannot be imported in a test because
-// serve(...) boots the production HTTP server at module load. Only the ApiError
-// throw stays here — the serve() error handler matches on `instanceof ApiError`.
+// they are importable by tests and so the decision half is unit-testable on its
+// own. Only the ApiError throw stays here — the serve() error handler matches on
+// `instanceof ApiError`. (index.ts itself IS importable by a test: serve() is
+// behind `if (import.meta.main)`. An earlier revision of this comment said
+// otherwise; the structural test below imports this file and depends on it.)
 
 /**
  * Run the coherence gate. Throws ApiError(409) on a refusal.
  *
  * Returns the gate's own answer, which distinguishes "applied the checks to
  * real data" (`outcome: 'checked'`) from "stepped aside because a pre-read
- * failed" (`outcome: 'fail_open_unreadable'`). Callers are not required to act
- * on it yet; item 2's writeMakesafeSubstatus helper is where it becomes useful.
+ * failed" (`outcome: 'fail_open_unreadable'`).
+ *
+ * Prefer `writeMakesafeSubstatus` below. This assert stays exported-in-module
+ * because that helper is its one caller, and because a caller that must gate
+ * WITHOUT writing (there are none today) would need it.
  */
 async function assertMakesafeSubstatusTransition(
   client: any,
@@ -15550,6 +15564,170 @@ async function assertMakesafeSubstatusTransition(
   })
   if (refusal) throw new ApiError(refusal.message, refusal.status)
   return result
+}
+
+// ── Rescue SES remainder item 2: ONE substatus writer ────────────────────────
+// Spec: coding/work/campaigns/makesafe-system/SPEC.md item 2.
+//
+// Before this, eight sites each PASTED `await assertMakesafeSubstatusTransition`
+// ahead of their own `.update({ substatus })`. All eight were correct, and that
+// was a fact about the present rather than a property of the system: a ninth
+// site simply misses the gate by omission. The truth audit found that exact
+// shape in its earlier form — seven direct writers, which also skipped the
+// timestamp stamping the governed path does, producing the impossible
+// substatus/timestamp combinations then visible in production.
+//
+// So: `writeMakesafeSubstatus` is the ONE gated writer, and the structural test
+// `makesafe_substatus_single_writer_test.ts` fails review on any substatus
+// write to `makesafe_job_details` that is not this function or one of the four
+// NAMED escapes below. That test is what makes a ninth site impossible rather
+// than merely unlikely.
+//
+// WHAT THIS IS NOT. It is not a place to add policy. It centralises exactly the
+// policy that already applied — gate, then update — and it deliberately does
+// NOT hoist per-origin evidence stamping into itself. `report_received_at`,
+// `report_sent_at`, `company_contacted_at`, the cycle pointers and the portal
+// verification stamp differ per origin and are part of each origin's own
+// evidence contract; moving any of them here would change what at least one
+// origin writes. The one field this helper will supply is `updated_at`, and
+// only when the caller omitted it — all eight of today's callers set it
+// themselves, so that branch changes nothing now and exists so a ninth caller
+// cannot forget it. It is unit-tested directly rather than left as an
+// unexercised claim.
+//
+// The PostgREST error is RETURNED, not thrown: each origin keeps its own
+// message, status code and zero-rows handling, which is what makes this
+// refactor behaviour-preserving rather than a rewrite of eight error contracts.
+// (Backend AGENTS.md: PostgREST returns errors, it does not throw.)
+
+/**
+ * `none` means no `.select()` at all — NOT `.select()` with no columns. A bare
+ * update and an update+select are different PostgREST requests (the latter asks
+ * for a representation back), so a caller that never selected must not start.
+ */
+type MakesafeSubstatusRowShape = 'single' | 'maybeSingle' | 'rows' | 'none'
+
+interface MakesafeSubstatusWriteOptions {
+  /** Passed straight to `.select(...)`. Omitted -> bare `.select()`. */
+  select?: string
+  /** `.single()` / `.maybeSingle()` / array / no select at all. Default `single`. */
+  row?: MakesafeSubstatusRowShape
+  /**
+   * Extra filters applied AFTER `.eq('job_id', …)` and BEFORE `.select(…)`.
+   * Exists for reattend's compare-and-set, which narrows the update to the exact
+   * row it read. Without this the helper could not host that origin and reattend
+   * would have to stay a raw write.
+   */
+  narrow?: (query: any) => any
+}
+
+interface MakesafeSubstatusWriteResult {
+  data: any
+  error: any
+  /** The gate's own answer — `checked` vs `fail_open_unreadable`. */
+  gate: MakesafeSubstatusGateResult
+}
+
+/** Shared query construction, so the gated and ungated paths cannot shape-drift. */
+function _makesafeDetailUpdateQuery(
+  client: any,
+  jobId: string,
+  patch: Record<string, any>,
+  opts: MakesafeSubstatusWriteOptions,
+) {
+  let query = client.from('makesafe_job_details').update(patch).eq('job_id', jobId)
+  if (opts.narrow) query = opts.narrow(query)
+  const row = opts.row || 'single'
+  if (row === 'none') return query
+  query = opts.select === undefined ? query.select() : query.select(opts.select)
+  if (row === 'single') return query.single()
+  if (row === 'maybeSingle') return query.maybeSingle()
+  return query
+}
+
+/**
+ * THE substatus writer. Gate, then update. Nothing else may write
+ * `makesafe_job_details.substatus` except the four named escapes below.
+ *
+ * `patch.substatus` must be present and non-null — a null/absent substatus is
+ * not a transition and belongs on the ungated escape, not here.
+ *
+ * Throws ApiError(409) from the gate on a refused transition or a terminal job,
+ * exactly as the pasted assert did. Returns the PostgREST `{ data, error }` for
+ * the caller to handle in its own terms.
+ */
+async function writeMakesafeSubstatus(
+  client: any,
+  jobId: string,
+  patch: Record<string, any>,
+  origin: string,
+  opts: MakesafeSubstatusWriteOptions = {},
+): Promise<MakesafeSubstatusWriteResult> {
+  const next = patch?.substatus
+  if (next === undefined || next === null || next === '') {
+    // A programming error, not a caller-facing refusal: this helper exists to
+    // gate a TRANSITION, and there is nothing to gate.
+    throw new ApiError(
+      `writeMakesafeSubstatus requires a substatus in the patch (origin=${origin})`,
+      500,
+    )
+  }
+  const gate = await assertMakesafeSubstatusTransition(client, jobId, String(next), origin)
+  const finalPatch = patch.updated_at === undefined
+    ? { ...patch, updated_at: new Date().toISOString() }
+    : patch
+  const { data, error } = await _makesafeDetailUpdateQuery(client, jobId, finalPatch, opts)
+  return { data, error, gate }
+}
+// Test-only export (mirrors the `_`-prefixed convention for the make-safe helpers).
+export const _writeMakesafeSubstatus = writeMakesafeSubstatus
+
+/**
+ * The complete, closed set of substatus writes that do NOT run the coherence
+ * gate. Each is deliberate and each is preserved with its existing behaviour;
+ * naming them is what turns "a raw update someone forgot to gate" into "a raw
+ * update someone had to argue for".
+ *
+ * Two are INSERTs and are not routed through the escape helper below, because
+ * an insert establishes a first substatus rather than moving one and has no
+ * `.eq('job_id', …)` to gate against. They are allowlisted BY ENCLOSING
+ * FUNCTION in the structural test, which is what stops a new insert-shaped
+ * write from hiding among them.
+ */
+type MakesafeSubstatusUngatedEscape =
+  /**
+   * approveIntakeDraft parks a freshly approved report-only card in
+   * `awaiting_portal_completion`. It is the card's FIRST substatus after
+   * creation, written non-blockingly inside a try/catch whose failure is logged
+   * and swallowed; running a 409-throwing gate inside it would turn a logged
+   * warning into a refused intake approval. Ungated before item 2, ungated
+   * after it.
+   */
+  | 'intake_approval_report_only_park'
+  /**
+   * reopenMakesafe CLEARS the substatus (`null`) on a cancel -> reopen so the
+   * derived stage falls back to `new`. `null` is not a member of the substatus
+   * vocabulary, so `requireValidMakesafeSubstatus` would throw and the
+   * transition table has no row for "clear". Clearing is also the one write
+   * that must survive a terminal job status, which is precisely what the
+   * cancelled/lost guard refuses. Ungated before item 2, ungated after it.
+   */
+  | 'reopen_clears_cancelled_board_signals'
+
+/**
+ * A raw `makesafe_job_details` update that touches substatus WITHOUT the gate.
+ * Callable only with one of the two named escapes above. It runs no checks by
+ * design — the value is that every ungated substatus write is now greppable,
+ * enumerated, and has to name itself.
+ */
+function writeMakesafeSubstatusUngated(
+  client: any,
+  jobId: string,
+  patch: Record<string, any>,
+  _escape: MakesafeSubstatusUngatedEscape,
+  opts: MakesafeSubstatusWriteOptions = {},
+) {
+  return _makesafeDetailUpdateQuery(client, jobId, patch, opts)
 }
 
 // External-caller evidence guards, shared by the dispatch action and the
@@ -15593,8 +15771,6 @@ async function updateMakesafeSubstatus(
   if (source === 'external') {
     await assertExternalMakesafeSubstatusGuards(client, jId, nextSubstatus, opts.authMode)
   }
-  await assertMakesafeSubstatusTransition(client, jId, nextSubstatus, source)
-
   const updates: Record<string, any> = {
     substatus: nextSubstatus,
     updated_at: new Date().toISOString(),
@@ -15604,13 +15780,15 @@ async function updateMakesafeSubstatus(
   // claim minted false evidence (SWMS-261021 carried a report_sent_at with no
   // send; send truth lives only in ses_release_route_proofs). The real evidence
   // events stamp their own timestamps at their own write sites.
+  //
+  // Item 2: `company_contacted_at` stays HERE and is deliberately not hoisted
+  // into writeMakesafeSubstatus. The details editor can also write
+  // `company_contact_done` and does NOT stamp it today (the caller supplies it
+  // through the allow-list); hoisting the stamp would change that origin's
+  // output, which a behaviour-preserving refactor may not do.
   if (nextSubstatus === 'company_contact_done') updates.company_contacted_at = new Date().toISOString()
 
-  const { data, error } = await client.from('makesafe_job_details')
-    .update(updates)
-    .eq('job_id', jId)
-    .select()
-    .single()
+  const { data, error } = await writeMakesafeSubstatus(client, jId, updates, source)
   if (error) throw error
 
   // ── M3d U2b: advancing a make-safe INTO a finished substatus closes the job's
@@ -15836,8 +16014,7 @@ async function markMakesafePortalReportDone(client: any, body: any) {
     }
   }
 
-  // Rescue SES T2: every substatus write shares the one coherence gate.
-  await assertMakesafeSubstatusTransition(client, jId, 'admin_to_send_report', 'internal:portal_report_done')
+  // Rescue SES T2 / item 2: every substatus write shares the one gated writer.
   const updates: Record<string, any> = {
     substatus: 'admin_to_send_report',
     report_received_at: nowIso,
@@ -15854,11 +16031,9 @@ async function markMakesafePortalReportDone(client: any, body: any) {
   const mergedLinks = mergePortalLink(detail.external_links)
   if (mergedLinks) updates.external_links = mergedLinks
 
-  const { data: updated, error: upErr } = await client.from('makesafe_job_details')
-    .update(updates)
-    .eq('job_id', jId)
-    .select()
-    .single()
+  const { data: updated, error: upErr } = await writeMakesafeSubstatus(
+    client, jId, updates, 'internal:portal_report_done',
+  )
   if (upErr) throw upErr
 
   // ── M3d U2b: the portal-done marker advances the make-safe to a finished
@@ -19050,20 +19225,21 @@ async function submitMakesafeReport(
       ? assignmentBinding.assignment
       : null
 
-    // Rescue SES T2: every substatus write shares the one coherence gate.
-    await assertMakesafeSubstatusTransition(client, jId, 'admin_to_send_report', 'internal:trade_report_submitted')
-    const { data: detailSync, error: detailSyncErr } = await client.from('makesafe_job_details')
-      .update({
+    // Rescue SES T2 / item 2: every substatus write shares the one gated writer.
+    const { data: detailSync, error: detailSyncErr } = await writeMakesafeSubstatus(
+      client,
+      jId,
+      {
         attendance_cycle_id: attendanceCycle.id,
         cycle_attribution: 'bound',
         substatus: 'admin_to_send_report',
         report_received_at: syncAt,
         invoice_notes: invoice_notes || null,
         updated_at: syncAt,
-      })
-      .eq('job_id', jId)
-      .select('job_id, substatus, report_received_at')
-      .maybeSingle()
+      },
+      'internal:trade_report_submitted',
+      { select: 'job_id, substatus, report_received_at', row: 'maybeSingle' },
+    )
     if (detailSyncErr) {
       throw new ApiError(`MakeSafe report saved but board sync failed: ${detailSyncErr.message || detailSyncErr}`, 500)
     }
@@ -21010,17 +21186,28 @@ async function approveIntakeDraft(client: any, body: any) {
     // selects on either value.
     if (primaryIsReportOnly && createdJobId) {
       try {
-        const { data: updatedDetails, error: detailUpdateError } = await client.from('makesafe_job_details').update({
-          report_type: effectiveReportType,
-          // Reconciliation of still-owed work starts at the createMakesafeJob
-          // default (company_contact_required -> New) when the privileged caller
-          // explicitly supplies report_unsubmitted=true. Everything else waits on
-          // portal completion in Allocated.
-          ...(body?.report_unsubmitted === true
-            ? {}
-            : { substatus: MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION }),
-          updated_at: new Date().toISOString(),
-        }).eq('job_id', createdJobId).select('job_id')
+        // Item 2: one of the two NAMED ungated substatus escapes. See
+        // MakesafeSubstatusUngatedEscape for why this one stays ungated —
+        // in short, it is the card's first substatus after creation and its
+        // failure is logged and swallowed, so a 409-throwing gate here would
+        // turn a warning into a refused intake approval.
+        const { data: updatedDetails, error: detailUpdateError } = await writeMakesafeSubstatusUngated(
+          client,
+          createdJobId,
+          {
+            report_type: effectiveReportType,
+            // Reconciliation of still-owed work starts at the createMakesafeJob
+            // default (company_contact_required -> New) when the privileged caller
+            // explicitly supplies report_unsubmitted=true. Everything else waits on
+            // portal completion in Allocated.
+            ...(body?.report_unsubmitted === true
+              ? {}
+              : { substatus: MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION }),
+            updated_at: new Date().toISOString(),
+          },
+          'intake_approval_report_only_park',
+          { select: 'job_id', row: 'rows' },
+        )
         if (detailUpdateError || !updatedDetails?.length) {
           console.error('[ops-api] approveIntakeDraft: report_type/substatus update did not establish detail state', {
             job_id: createdJobId,
@@ -37545,18 +37732,19 @@ async function advanceRoofReportChecklist(
     }
   }
 
-  // Rescue SES T2: every substatus write shares the one coherence gate.
-  await assertMakesafeSubstatusTransition(client, jobId, 'admin_to_send_report', 'internal:roof_report_submitted')
-  const { data: updated, error } = await client.from('makesafe_job_details')
-    .update({
+  // Rescue SES T2 / item 2: every substatus write shares the one gated writer.
+  const { data: updated, error } = await writeMakesafeSubstatus(
+    client,
+    jobId,
+    {
       substatus: 'admin_to_send_report',
       report_received_at: nowIso,
       ...verificationStamp,
       updated_at: nowIso,
-    })
-    .eq('job_id', jobId)
-    .select('substatus, report_received_at')
-    .maybeSingle()
+    },
+    'internal:roof_report_submitted',
+    { select: 'substatus, report_received_at', row: 'maybeSingle' },
+  )
   if (error) {
     throw new ApiError('roof report saved but board sync failed: ' + (error.message || error), 500)
   }
@@ -38020,16 +38208,18 @@ function draftPackInvoiceStatus(invoiceResult: any): string | null {
 
 async function defaultMarkDraftPackReady(client: any, jobId: string, detail: any): Promise<void> {
   const now = new Date().toISOString()
-  // Rescue SES T2: every substatus write shares the one coherence gate.
-  await assertMakesafeSubstatusTransition(client, jobId, REPORT_DRAFT_READY_SUBSTATUS, 'internal:draft_pack_ready')
-  const { data, error } = await client.from('makesafe_job_details')
-    .update({
+  // Rescue SES T2 / item 2: every substatus write shares the one gated writer.
+  const { data, error } = await writeMakesafeSubstatus(
+    client,
+    jobId,
+    {
       substatus: REPORT_DRAFT_READY_SUBSTATUS,
       report_received_at: detail?.report_received_at || now,
       updated_at: now,
-    })
-    .eq('job_id', jobId)
-    .select('job_id')
+    },
+    'internal:draft_pack_ready',
+    { select: 'job_id', row: 'rows' },
+  )
   if (error) throw new ApiError('draft pack ready mark failed: ' + error.message, 500)
   if (!data || data.length === 0) throw new ApiError('draft pack ready mark affected 0 rows', 500)
 }
@@ -38328,14 +38518,12 @@ async function applyMakesafeCloseOut(
     .eq('job_id', jobId)
     .maybeSingle()
   const reportSentAt = msd?.report_sent_at || now
-  // Rescue SES T2: every substatus write shares the one coherence gate.
-  await assertMakesafeSubstatusTransition(client, jobId, 'complete', 'internal:closeout')
+  // Rescue SES T2 / item 2: every substatus write shares the one gated writer.
   const detailPatch: Record<string, any> = { substatus: 'complete', updated_at: now }
   if (!msd?.report_sent_at) detailPatch.report_sent_at = reportSentAt
-  const { data: detailRows, error: detailErr } = await client.from('makesafe_job_details')
-    .update(detailPatch)
-    .eq('job_id', jobId)
-    .select()
+  const { data: detailRows, error: detailErr } = await writeMakesafeSubstatus(
+    client, jobId, detailPatch, 'internal:closeout', { row: 'rows' },
+  )
   if (detailErr) throw new ApiError('make-safe close detail update failed: ' + detailErr.message, 500)
   if (!detailRows || detailRows.length === 0) {
     throw new ApiError('make-safe close detail update affected 0 rows; verify the makesafe_job_details row exists', 409)
@@ -40010,9 +40198,14 @@ async function reopenMakesafe(client: any, body: any, authz?: {
     detailUpdate.cancelled_by = null
     detailUpdate.cancelled_at = null
   }
-  const { error: detailErr } = await client.from('makesafe_job_details')
-    .update(detailUpdate)
-    .eq('job_id', jobId)
+  // Item 2: the second NAMED ungated substatus escape — and only when
+  // `wasCancelled`, which is the branch above that sets `substatus = null`.
+  // See MakesafeSubstatusUngatedEscape: null is outside the substatus
+  // vocabulary and clearing must survive the terminal-job status the
+  // cancelled/lost guard exists to refuse.
+  const { error: detailErr } = await writeMakesafeSubstatusUngated(
+    client, jobId, detailUpdate, 'reopen_clears_cancelled_board_signals', { row: 'none' },
+  )
   if (detailErr) {
     // Non-fatal: detail row may not exist for very old jobs. Log but do not roll back.
     console.log('[ops-api] reopenMakesafe: detail update failed (non-fatal):', detailErr.message)
@@ -40475,10 +40668,14 @@ export async function reattendMakesafe(client: any, args: {
   )
 
   // Reset board signals + increment cycle + write the re-attend marker.
-  // Rescue SES T2: every substatus write shares the one coherence gate.
-  await assertMakesafeSubstatusTransition(client, jobId, 'waiting_on_trade_report', 'internal:reattend')
-  let detailTransition = client.from('makesafe_job_details')
-    .update({
+  // Rescue SES T2 / item 2: every substatus write shares the one gated writer.
+  // The compare-and-set filters ride on `narrow`, applied in the same position
+  // as before (after `.eq('job_id', …)`, before `.select(…)`), so the optimistic
+  // concurrency contract and its contention recovery below are untouched.
+  const { data: updatedDetail, error: upErr } = await writeMakesafeSubstatus(
+    client,
+    jobId,
+    {
       substatus: 'waiting_on_trade_report',
       report_received_at: null,
       report_sent_at: null,
@@ -40489,17 +40686,22 @@ export async function reattendMakesafe(client: any, args: {
       last_reattend_at: nowIso,
       last_reattend_reason: reason,
       updated_at: nowIso,
-    })
-    .eq('job_id', jobId)
-    .eq('cycle_number', currentCycle)
-    .eq('reattend_count', detail.reattend_count ?? 0)
-    .eq('substatus', detail.substatus)
-  detailTransition = detail.report_received_at == null
-    ? detailTransition.is('report_received_at', null)
-    : detailTransition.eq('report_received_at', detail.report_received_at)
-  const { data: updatedDetail, error: upErr } = await detailTransition
-    .select('job_id, substatus, cycle_number, reattend_count, attendance_cycle_id, last_reattend_at')
-    .maybeSingle()
+    },
+    'internal:reattend',
+    {
+      select: 'job_id, substatus, cycle_number, reattend_count, attendance_cycle_id, last_reattend_at',
+      row: 'maybeSingle',
+      narrow: (q: any) => {
+        const cas = q
+          .eq('cycle_number', currentCycle)
+          .eq('reattend_count', detail.reattend_count ?? 0)
+          .eq('substatus', detail.substatus)
+        return detail.report_received_at == null
+          ? cas.is('report_received_at', null)
+          : cas.eq('report_received_at', detail.report_received_at)
+      },
+    },
+  )
   if (upErr) throw new ApiError('reattendMakesafe: detail update failed: ' + upErr.message, 500)
 
   if (!updatedDetail) {
