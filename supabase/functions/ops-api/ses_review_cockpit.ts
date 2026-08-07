@@ -859,6 +859,8 @@ export interface SesCockpitDocket {
   job_id: string;
   job_number: string | null;
   docket_revision_id: string;
+  /** The revision's sealed output hash, so a viewer can fetch the byte-exact pack. */
+  docket_output_content_hash?: string | null;
   readiness_revision: string;
   dependency_generation: number;
   invoice_obligation_revision_id: string | null;
@@ -1014,6 +1016,14 @@ export function buildSesCockpitView(
         job_id: docket.job_id,
         job_number: docket.job_number,
         attendance_cycle_ids: docket.attendance_cycle_ids,
+        // Ticket 11 follow-up: the review pane needs the exact revision
+        // identity on a FRESH page load (a signed-off card drops out of the
+        // needs_review list, which was the only job->revision map the UI had),
+        // so it can offer this back to get_ses_reviewable_pack. The server
+        // still validates currency; nothing client-side decides a pack is
+        // current.
+        docket_revision_id: docket.docket_revision_id,
+        docket_output_content_hash: docket.docket_output_content_hash ?? null,
       },
       status: {
         status,

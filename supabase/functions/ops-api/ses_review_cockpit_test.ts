@@ -167,6 +167,12 @@ Deno.test("cockpit uses fixed Stage D order and split invoice/send controls", ()
     clean_input: input,
   });
   assertEquals(preXero.section_order, SES_REVIEW_SECTION_ORDER);
+  // Ticket 11 follow-up: a fresh page load must be able to fetch the
+  // byte-exact pack for ANY card (signed-off ones drop out of the
+  // needs_review list), so job_story carries the revision identity.
+  const preXeroStory = preXero.sections.job_story as Record<string, unknown>;
+  assertEquals(preXeroStory.docket_revision_id, "docket-1");
+  assertEquals(preXeroStory.docket_output_content_hash, null);
   // Option B: no Xero DRAFT yet → APPROVE INVOICE disabled (mint is separate).
   assertEquals(preXero.controls.approve_invoice.enabled, false);
   assertEquals(preXero.controls.send_it.enabled, false);
