@@ -1632,6 +1632,63 @@ cockpit must never stay `SEND_READY` once route proofs exist —
 Do not resend on a closeout-proof mismatch; re-run execute only after the set
 compare is deployed (confirmed effects are exact-once, no Graph redispatch).
 
+## A Pre-Xero Mint Refusal Burns The Card's Revision, So Batch In Fours
+
+**Every throw inside `createInvoice` — which IS the SES `dispatch` — is recorded
+as effect state `unknown`**, and `claim_ses_external_effect_v1` returns
+`claim_mode: reconcile` for every non-confirmed state. So the ten deterministic
+PRE-Xero refusals (sealed fence, portal-truth guard, report-in, preflight, …)
+and a Xero 429 all leave a card **permanently unmintable on that invoice
+obligation revision**, even though the invoice definitively does not exist. The
+only self-healing failures are the ones where Xero actually did something; the
+ones where it definitively did not are the permanent ones. Live once already
+(SWMS-261114, portal guard, recovered only via a third revision 16.5h later).
+Recovery is `prepare_ses_invoice_obligation` then mint — a NEW revision mints a
+new `operation_key`. Never fight the old one; reconcile-only is what stops
+double-minting. A real fix needs a migration letting the claim RPC re-dispatch
+from a definitely-not-dispatched state.
+
+Diagnose a batch with `select job_id, failure from ses_external_effects where
+effect_kind='invoice_create' and state='unknown'`; per card, the 409 code is the
+discriminator — `invoice_duplicate_live` / `_ambiguous` precede `buildSesEffect`
+and write nothing (safe, re-runnable), `xero_outcome_unknown` does not.
+
+**Batch in fours** (Captain-facing ruling, 2026-08-07). There is no cross-card
+state, so chunk size IS blast radius one-for-one, and ~2 min of hand recovery per
+stuck card makes four a fix and twenty an investigation. Ceiling ten, only after
+pre-flighting portal verification on report-type cards. Chunking is free:
+throughput has ~5x headroom (below), so nothing is traded but operator
+attention, which is the thing worth buying.
+
+Throughput was measured and is NOT the constraint
+(`docs/evidence/ses-batch-throughput-2026-08-07.md`): 20 cold cards through
+`prepare_ses_docket_revision` in 120.5s, zero errors, no position-dependent
+degradation; production already put 17 distinct cards through the persisting
+path in 82s. Both advisory locks (`commit_makesafe_docket_revision_v1`,
+`claim_ses_external_effect_v1`) are per-card, so nothing global serialises a
+batch. Real cost by family (232 production runs): roof_report p50 2.0s / 0.3 MB
+artifacts, general_makesafe p50 7.9s / p90 18.8s / 12.6 MB. `dry_run` takes
+proof-only photo and report routes, so it under-states the persisting path
+~1.5x — never plan off a dry-run number, and never off a warm re-run (storage
+cache alone is 5.6x).
+
+The likely companion at scale: **`selection.mode: "board_batch"` is an unbounded
+`Promise.all` over up to 50 cards in ONE isolate**, persisting per card. Never
+used in production (0 of 232 revisions carry its `:job:<n>` key suffix). At
+12.6 MB artifacts/card against the documented 6-8x re-encoding multiple it is a
+546, not a slow response; a partial 546 leaves an arbitrary committed subset and
+`Promise.all` discards the survivors' results, so the caller cannot learn which.
+Its queue head is currently a do-not-touch card. Drive batches card-by-card from
+the client instead.
+
+Mint budget: one `create_ses_invoice_draft` is ~6s and **4 Xero API calls**
+(Contacts name search, TrackingCategories, Invoices PUT, Invoice PDF GET)
+against Xero's 60/min tenant ceiling — 40 calls/min sequentially, but two
+concurrent mint chains trip it. **Mint sequentially, never fanned out.**
+`xeroPost` retries a 429 only when an Idempotency-Key was supplied
+(`xero_post_rate_limit_retry_test.ts`): keyed writes collapse a repeat, and the
+un-keyed `POST /Invoices/{id}/Email` must never repeat.
+
 ## The Repository Root Stays npm-Package-Free
 
 This repo is Deno-rooted (`deno.jsonc` at the root). Deno 2 auto-discovers a root

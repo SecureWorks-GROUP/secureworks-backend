@@ -2612,9 +2612,46 @@ async function xeroGet(
 }
 
 // Xero API POST/PUT
+//
+// 429 RETRY IS GATED ON THE IDEMPOTENCY KEY, and that gate is the whole safety
+// argument. xeroGet has always retried a rate limit; this write path did not,
+// so a transient 60-calls-per-minute rejection surfaced as a thrown dispatch.
+// For a sealed SES mint that is not a slow card, it is a DEAD one: the throw
+// lands in executeSesExternalEffect's catch, the effect goes to `unknown`, and
+// every later call on the same operation_key can only reconcile — so the card
+// cannot mint again until a fresh invoice obligation revision is prepared. A
+// rate limit is exactly the failure that appears only at batch size, so at one
+// card a minute it never showed.
+//
+// Retrying is safe ONLY where Xero can collapse the repeat: it honours
+// Idempotency-Key for 12 hours, so a keyed create/authorise/void returns the
+// same record rather than a second one. The un-keyed calls here are not merely
+// unproven, they are the ones that must never repeat — POST /Invoices/{id}/Email
+// sends the client a real email every time it succeeds. So an un-keyed 429
+// still throws immediately, exactly as before.
+//
+// THE BACKOFF IS BOUNDED IN BOTH DIRECTIONS, and that is load-bearing for the
+// same reason. Sleeping for an arbitrary Retry-After inside the dispatch swaps
+// one poisoning mechanism for a worse one: if the isolate or caller dies
+// mid-sleep the effect row never leaves `dispatching` and carries no failure
+// message at all. Only the 60-calls-per-minute window is worth waiting out, and
+// it clears in seconds; a daily-limit or concurrency 429 carries a large
+// delta-seconds value that must never be slept through here. So a Retry-After
+// above the per-sleep ceiling, or one that would overrun the cumulative budget,
+// throws immediately — the pre-change behaviour, and the honest outcome.
+const XERO_POST_RETRY_SLEEP_CEILING_MS = 5_000
+const XERO_POST_RETRY_SLEEP_BUDGET_MS = 15_000
+
+function xeroPostRetryAfterMs(header: string | null): number {
+  const parsed = parseInt(header || '', 10)
+  if (!Number.isFinite(parsed) || parsed < 0) return XERO_POST_RETRY_SLEEP_CEILING_MS
+  return parsed * 1000
+}
+
 async function xeroPost(
   path: string, accessToken: string, tenantId: string,
-  body: any, method = 'POST', idempotencyKey?: string
+  body: any, method = 'POST', idempotencyKey?: string, retryCount = 0,
+  sleptMs = 0
 ): Promise<any> {
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${accessToken}`,
@@ -2632,6 +2669,27 @@ async function xeroPost(
     headers,
     body: JSON.stringify(body),
   })
+  if (resp.status === 429 && idempotencyKey) {
+    if (retryCount >= 3) {
+      throw new Error(`Xero rate limited on ${path} after ${retryCount} retries`)
+    }
+    const retryAfterMs = xeroPostRetryAfterMs(resp.headers.get('Retry-After'))
+    if (retryAfterMs > XERO_POST_RETRY_SLEEP_CEILING_MS) {
+      throw new Error(
+        `Xero rate limited on ${path}: Retry-After ${retryAfterMs / 1000}s exceeds the ${XERO_POST_RETRY_SLEEP_CEILING_MS / 1000}s backoff ceiling`,
+      )
+    }
+    if (sleptMs + retryAfterMs > XERO_POST_RETRY_SLEEP_BUDGET_MS) {
+      throw new Error(
+        `Xero rate limited on ${path}: backoff budget of ${XERO_POST_RETRY_SLEEP_BUDGET_MS / 1000}s exhausted`,
+      )
+    }
+    await new Promise(r => setTimeout(r, retryAfterMs))
+    return xeroPost(
+      path, accessToken, tenantId, body, method, idempotencyKey, retryCount + 1,
+      sleptMs + retryAfterMs,
+    )
+  }
   if (!resp.ok) {
     const errText = await resp.text()
     // Extract the actual validation message from Xero's verbose response
@@ -2647,6 +2705,10 @@ async function xeroPost(
   }
   return resp.json()
 }
+
+// Test seam: the rate-limit contract above is a runtime capability, so its test
+// drives the real function rather than a mirrored copy.
+export const _xeroPostForTest = xeroPost
 
 function xeroContactWherePath(field: string, value: string): string {
   const escaped = String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
