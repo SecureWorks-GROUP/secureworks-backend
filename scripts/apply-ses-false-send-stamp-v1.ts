@@ -315,7 +315,11 @@ async function clearStamp(jobId: string, observedStamp: string): Promise<void> {
   }
   // The action returns 200 with a per-card outcome; a refusal is NOT an HTTP
   // error, so an unchecked 200 would report a clear that never happened.
-  let parsed: any;
+  let parsed: {
+    results?: Array<
+      { outcome?: string; refusal_code?: string; refusal_fact?: string }
+    >;
+  };
   try {
     parsed = JSON.parse(text);
   } catch {

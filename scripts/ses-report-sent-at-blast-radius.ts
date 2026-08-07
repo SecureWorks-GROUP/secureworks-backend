@@ -54,7 +54,9 @@ async function query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
   const token = Deno.env.get("SUPABASE_ACCESS_TOKEN");
   if (!token) throw new Error("SUPABASE_ACCESS_TOKEN required");
   if (!/^\s*(with|select)\b/i.test(sql)) {
-    throw new Error("read-only script: only SELECT/WITH statements are permitted");
+    throw new Error(
+      "read-only script: only SELECT/WITH statements are permitted",
+    );
   }
   const res = await fetch(MANAGEMENT_QUERY_URL, {
     method: "POST",
@@ -65,7 +67,9 @@ async function query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
     body: JSON.stringify({ query: sql, read_only: true }),
   });
   if (!res.ok) {
-    throw new Error(`management query failed ${res.status}: ${await res.text()}`);
+    throw new Error(
+      `management query failed ${res.status}: ${await res.text()}`,
+    );
   }
   return await res.json() as T[];
 }
@@ -152,20 +156,36 @@ async function report(): Promise<number> {
 
   console.log(`\nses-report-sent-at-blast-radius — ${rows.length} SES cards\n`);
   console.log(`  stamped                       ${stamped.length}`);
-  console.log(`    corroborated by a surface   ${stampedTrue.length}  (kept — no write touches them)`);
-  console.log(`    no surface at all           ${stampedFalse.length}  (false stamps; clearing them is correct_makesafe_false_send_stamp's job, not this change's)`);
+  console.log(
+    `    corroborated by a surface   ${stampedTrue.length}  (kept — no write touches them)`,
+  );
+  console.log(
+    `    no surface at all           ${stampedFalse.length}  (false stamps; clearing them is correct_makesafe_false_send_stamp's job, not this change's)`,
+  );
   console.log(`  unstamped                     ${unstamped.length}`);
-  console.log(`    but a surface records a send ${unstampedSent.length}  (the historical gap; NOT backfilled by this change)`);
+  console.log(
+    `    but a surface records a send ${unstampedSent.length}  (the historical gap; NOT backfilled by this change)`,
+  );
 
-  console.log(`\n  stamps that would CHANGE under the derivation: 0 — STRUCTURAL,`);
+  console.log(
+    `\n  stamps that would CHANGE under the derivation: 0 — STRUCTURAL,`,
+  );
   console.log(`    not measured here: the derived producer writes only where`);
   console.log(`    report_sent_at IS NULL, and no branch in it writes null.`);
-  console.log(`    The empirical check is --mode=verify against the pinned manifest.\n`);
+  console.log(
+    `    The empirical check is --mode=verify against the pinned manifest.\n`,
+  );
 
   if (stampedFalse.length) {
-    console.log("  Stamped with NO send evidence (pre-existing, untouched here):");
+    console.log(
+      "  Stamped with NO send evidence (pre-existing, untouched here):",
+    );
     for (const r of stampedFalse) {
-      console.log(`    ${r.job_number.padEnd(14)} ${String(r.report_sent_at).slice(0, 19)}  ${surfaces(r)}`);
+      console.log(
+        `    ${r.job_number.padEnd(14)} ${
+          String(r.report_sent_at).slice(0, 19)
+        }  ${surfaces(r)}`,
+      );
     }
   }
   console.log("");

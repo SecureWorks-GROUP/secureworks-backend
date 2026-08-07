@@ -186,7 +186,9 @@ Deno.test("bodyAssertsReportSentAt keys on PRESENCE, not truthiness", () => {
   assert(!bodyAssertsReportSentAt({ invoice_notes: "x" }));
   assert(!bodyAssertsReportSentAt(null));
   assert(
-    REPORT_SENT_AT_ASSERTION_REFUSAL.includes("correct_makesafe_false_send_stamp"),
+    REPORT_SENT_AT_ASSERTION_REFUSAL.includes(
+      "correct_makesafe_false_send_stamp",
+    ),
     "the refusal must name the path that CAN correct a stamp",
   );
 });

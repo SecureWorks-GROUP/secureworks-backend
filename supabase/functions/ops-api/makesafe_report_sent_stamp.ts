@@ -147,7 +147,10 @@ export async function stampMakesafeReportSentFromRouteProofs(
 
   try {
     const { data, error } = await client.from("makesafe_job_details")
-      .update({ report_sent_at: provenAt, updated_at: new Date().toISOString() })
+      .update({
+        report_sent_at: provenAt,
+        updated_at: new Date().toISOString(),
+      })
       .eq("job_id", jobId)
       .is("report_sent_at", null)
       .select("job_id");
@@ -162,7 +165,11 @@ export async function stampMakesafeReportSentFromRouteProofs(
       };
     }
     if (!Array.isArray(data) || data.length === 0) {
-      return { job_id: jobId, outcome: "already_stamped", report_sent_at: null };
+      return {
+        job_id: jobId,
+        outcome: "already_stamped",
+        report_sent_at: null,
+      };
     }
   } catch (err) {
     return {
