@@ -189,11 +189,23 @@ interface BindRow {
   bound_at: string | null;
 }
 
-/** The question the two call sites asked BEFORE this change: is it today's pin? */
+/**
+ * The question the two call sites asked BEFORE this change: is it today's pin?
+ *
+ * Derived from the register's own stamp matcher against the OPEN entry, never
+ * restated as a field comparison. The shipped pre-change check also required the
+ * renderer VERSION string to be current, and a reconstruction that drops it
+ * misreports the very baseline this script exists to measure.
+ */
 function trustedUnderCurrentPinOnly(row: BindRow): boolean {
-  const current = makesafeCurrentRendererAuthorityEntry();
-  return row.stamp_revision === current.source_revision &&
-    row.stamp_sha256 === current.script_sha256;
+  const entry = makesafeRendererAuthorityEntryForStamp({
+    version: row.stamp_version,
+    source_revision: row.stamp_revision,
+    script_sha256: row.stamp_sha256,
+  });
+  return entry !== null &&
+    entry.script_sha256 ===
+      makesafeCurrentRendererAuthorityEntry().script_sha256;
 }
 
 async function derive(): Promise<number> {

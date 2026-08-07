@@ -92,11 +92,21 @@ caller-supplied and never rewritten. The **newest** event per document wins, so 
 document re-bound under a newer renderer cannot be vouched for by its own older
 bind.
 
-The adapter reaches it by widening its existing single `job_events` read from
-`event_type = 'note'` to `.in(['note', <bind event>])` — one round trip, split
-into two snapshot fields. `ses_reporting_actions.ts` already read exactly these
-rows for supersessions; that loader now returns both facts
+The adapter reaches it through its own `job_events` read in the existing
+concurrent wave, deliberately NOT a widened `.in(['note', <bind event>])` beside
+the bundle-candidate notes: one read would put both classes under a single
+PostgREST row ceiling, so a chatty job could truncate the notes, and this trail
+is the sole authority for when a renderer identity was stamped. Each class gets
+its own bound and its own snapshot field. `ses_reporting_actions.ts` already read
+exactly these rows for supersessions; that loader now returns both facts
 (`loadSesCuratedBindAudit`).
+
+Ordering across the two readers of that trail is deliberately ASYMMETRIC and must
+not be harmonised: an unparseable `created_at` sorts newest for supersession
+(suppressing more) and is discarded for bind-instant lookup (leaving the current
+pin the only acceptable stamp). The reasoning is on
+`sesCuratedSourceSupersessionsFromEvents` / `sesCuratedBindInstantsByDocument` in
+`ses_supporting_report_trust.ts`.
 
 ## What did not weaken
 
@@ -116,6 +126,40 @@ rows for supersessions; that loader now returns both facts
   suppression and send gating are untouched. A real bind instant does not rescue
   an artifact failing any other check (pinned by
   `bind-time validity opens nothing else`).
+
+### Sibling bundles
+
+A bundled supporting report is persisted with `source_kind:
+"durable_curated_revision"` and its `source_document_id` naming the **sibling**
+job's document, so the docket job's audit trail can never carry its bind
+instant. `verifyStoredSupportingReport` therefore reads the sibling job's own
+trail — the same access shape the adapter already uses, since sibling snapshots
+load through `loadSesAssemblerLiveSnapshot` and carry `curated_bind_events`.
+Without it the two call sites would disagree for exactly this class, which is
+the partial-fix shape rather than the cure, and 34 of the 36 live binds carry
+the superseded identity, so bundles built on one are the dominant case.
+
+The read is deliberately narrow and no more permissive than a same-job bind. It
+fires only when the own-job lookup found nothing AND the artifact declares
+`evidence_source: "explicit_sibling_bundle"` AND names a `sibling_job_id`, and
+each of these refuses (each pinned by a test that was watched to fail against a
+deliberately broken guard):
+
+- a sibling bind made **after** the identity's window closed — the forward
+  fence, unchanged across a job boundary;
+- a sibling bind made **before** the window opened;
+- an in-window sibling bind **superseded by a later one** past the window, since
+  the newest bind decides and the friendliest event never wins;
+- **no sibling bind event at all**, leaving the current pin the only acceptable
+  stamp;
+- an **unreadable** sibling trail, which reports the read fault
+  (`curated_source_supersession_unreadable`) rather than a renderer-provenance
+  failure — calling it the latter sends an operator to re-bind a card whose bind
+  is fine, which is this defect's own lie one seam over. It fails closed.
+
+Isolating that last case needs the sibling trail to fault while the docket job's
+own trail reads cleanly; faulting both stops at the own-job audit and never
+reaches the sibling branch at all.
 
 ## Proofs
 

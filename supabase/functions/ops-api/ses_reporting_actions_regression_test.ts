@@ -42,6 +42,13 @@ function reviewPackClient(
   options: {
     jobEvents?: Array<Record<string, unknown>>;
     jobEventsError?: Record<string, unknown>;
+    /**
+     * Fault ONLY the trail of this job. `jobEventsError` faults every
+     * `job_events` read, which cannot distinguish the docket job's own trail
+     * from a sibling's - and a test that faults both never reaches the sibling
+     * branch at all, so it proves nothing about it.
+     */
+    jobEventsErrorForJob?: { job_id: string; error: Record<string, unknown> };
     boundDocument?: Record<string, unknown> | null;
     /** Envelope-level docs-ready flag, as `prepare_ses_docket_revision` writes it. */
     preXeroDocsReady?: boolean;
@@ -156,6 +163,17 @@ function reviewPackClient(
               data: null,
               error: options.jobEventsError,
             }).then(resolve);
+          }
+          const faultFor = options.jobEventsErrorForJob;
+          if (
+            table === "job_events" && faultFor &&
+            filters.some(([column, value]) =>
+              column === "job_id" && value === faultFor.job_id
+            )
+          ) {
+            return Promise.resolve({ data: null, error: faultFor.error }).then(
+              resolve,
+            );
           }
           // Curated-bind events are read per job, so a fixture row that names
           // its own job is honoured here - a sibling's trail must not answer a
@@ -913,6 +931,133 @@ Deno.test(
       refused.suppressed_artifacts[0].suppression_reason,
       "active_renderer_input_binding_missing",
     );
+  },
+);
+
+Deno.test(
+  "the sibling bind read cannot admit a bundle whose sibling bind is invalid",
+  async () => {
+    // Reaching into another job's audit trail is the one place bind-time
+    // validity crosses a job boundary, so it is the one place a permissive read
+    // would let a bundle in on evidence a same-job bind would be refused for.
+    // Each case below is a genuinely invalid sibling bind, broken deliberately.
+    const bytes = new TextEncoder().encode("%PDF-1.7\nsibling fence fixture");
+    const contentHash = await sesSha256Bytes(bytes);
+    const rawHash = await rawSha256(bytes);
+    const superseded = MAKESAFE_REPORT_RENDERER_AUTHORITY_REGISTER[1];
+    const artifact = {
+      role: "supporting_report_pdf",
+      object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+      media_type: "application/pdf",
+      content_hash: contentHash,
+      size_bytes: bytes.byteLength,
+      metadata: {
+        source_kind: "durable_curated_revision",
+        source_identity:
+          "curation-revision:source-revision/artifact:source-artifact",
+        source_document_id: "sibling-document",
+        report_document_id: "sibling-document",
+        source_revision_id: "source-revision",
+        source_artifact_id: "source-artifact",
+        source_artifact_content_hash: contentHash,
+        expected_raw_sha256: `sha256:${rawHash}`,
+        output_sha256: `sha256:${rawHash}`,
+        render_hash: rawHash,
+        report_input_hash: `sha256:${"a".repeat(64)}`,
+        evidence_source: "explicit_sibling_bundle",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        bundle_id: "bundle-fixture",
+        sibling_job_id: "sibling-job-fixture",
+        binding_revision_id: "binding-revision-fixture",
+        report_renderer_version: makesafeRendererAuthorityVersion(superseded),
+        report_renderer_source_revision: superseded.source_revision,
+        report_renderer_script_sha256: superseded.script_sha256,
+      },
+    };
+    const siblingBindAt = (createdAt: string) => ({
+      job_id: "sibling-job-fixture",
+      created_at: createdAt,
+      detail_json: { document_id: "sibling-document" },
+    });
+
+    // 1. The forward fence, unchanged across a job boundary. The sibling's
+    //    newest bind was made AFTER the re-pin closed this identity's window, so
+    //    the stamp claims a renderer that was no longer authoritative when the
+    //    bind was made. Crossing jobs must not buy a bundle past that.
+    const afterRepin = reviewPackClient(artifact, bytes, {
+      jobEvents: [siblingBindAt("2026-08-07T12:00:00.000Z")],
+    });
+    const fenced = await getSesReviewablePackAction(
+      afterRepin.client,
+      { mode: "api_key", user: null },
+      "docket-fixture",
+    );
+    assertEquals(fenced.artifacts, []);
+    assertEquals(
+      fenced.suppressed_artifacts[0].suppression_reason,
+      "active_renderer_input_binding_missing",
+    );
+    assertEquals(afterRepin.signedPaths, []);
+
+    // 2. A sibling bind made BEFORE this identity's window opened is equally not
+    //    authoritative. The window is a window, not a ceiling.
+    const beforeWindow = reviewPackClient(artifact, bytes, {
+      jobEvents: [siblingBindAt("2026-08-01T00:00:00.000Z")],
+    });
+    const early = await getSesReviewablePackAction(
+      beforeWindow.client,
+      { mode: "api_key", user: null },
+      "docket-fixture",
+    );
+    assertEquals(early.artifacts, []);
+    assertEquals(
+      early.suppressed_artifacts[0].suppression_reason,
+      "active_renderer_input_binding_missing",
+    );
+
+    // 3. The sibling's newest bind decides. An in-window bind must not be
+    //    resurrected by a later one that moved the document past the window -
+    //    picking the friendliest event is how a cross-job read goes wrong.
+    const reBound = reviewPackClient(artifact, bytes, {
+      jobEvents: [
+        siblingBindAt("2026-08-05T00:00:00.000Z"),
+        siblingBindAt("2026-08-07T12:00:00.000Z"),
+      ],
+    });
+    const stale = await getSesReviewablePackAction(
+      reBound.client,
+      { mode: "api_key", user: null },
+      "docket-fixture",
+    );
+    assertEquals(stale.artifacts, []);
+    assertEquals(
+      stale.suppressed_artifacts[0].suppression_reason,
+      "active_renderer_input_binding_missing",
+    );
+
+    // 4. An unreadable SIBLING trail is a READ FAULT, and must report as one.
+    //    Calling it a renderer-provenance failure sends an operator to re-bind a
+    //    card whose bind is fine - the same lie this whole change removes, and
+    //    the same reason code the own-job path already uses. It still refuses.
+    //    Only the sibling's trail faults here: faulting both would stop at the
+    //    docket job's own audit and never exercise the sibling branch.
+    const unreadable = reviewPackClient(artifact, bytes, {
+      jobEventsErrorForJob: {
+        job_id: "sibling-job-fixture",
+        error: { message: "sibling curated bind ledger unavailable" },
+      },
+    });
+    const faulted = await getSesReviewablePackAction(
+      unreadable.client,
+      { mode: "api_key", user: null },
+      "docket-fixture",
+    );
+    assertEquals(faulted.artifacts, []);
+    assertEquals(
+      faulted.suppressed_artifacts[0].suppression_reason,
+      "curated_source_supersession_unreadable",
+    );
+    assertEquals(unreadable.signedPaths, []);
   },
 );
 

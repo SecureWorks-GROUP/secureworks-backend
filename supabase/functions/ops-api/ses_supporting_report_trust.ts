@@ -233,6 +233,22 @@ function sameCuratedStamp(
  * `SES_CURATED_SOURCE_BIND_EVENT_TYPE`; they are ordered oldest first here, so
  * the last entry for a document carries its currently bound stamp.
  *
+ * Ordering is on PARSED instants, the same rule as
+ * `sesCuratedBindInstantsByDocument` below, because both read the identical row
+ * set and must never disagree about which event is newest: a representation
+ * drift ("Z" beside "+00:00") that picked the wrong `current` stamp would clear
+ * a supersession and serve a superseded report to a builder.
+ *
+ * An unparseable `created_at` sorts NEWEST here, and that is deliberately the
+ * OPPOSITE placement to `sesCuratedBindInstantsByDocument` below. The two ask
+ * different questions and each fails closed its own way. "Was this renderer
+ * authorised at bind time" fails closed by supplying NO instant, which leaves
+ * the current pin the only acceptable stamp. "Has this content been superseded"
+ * fails closed by treating the unplaceable event's stamp as the bound one, which
+ * suppresses MORE: if we cannot tell when an event happened, the prior stamps
+ * stay superseded. Sorting it oldest there would make a superseded report
+ * servable, so do not harmonise the two — the asymmetry is the point.
+ *
  * A supersession whose superseded and current stamps are identical (a re-bind
  * that changed only renderer constants, say) records nothing: it moved no
  * builder-visible content, so nothing it produced is stale.
@@ -240,9 +256,16 @@ function sameCuratedStamp(
 export function sesCuratedSourceSupersessionsFromEvents(
   rows: Array<Record<string, unknown>>,
 ): SesCuratedSourceSupersession[] {
-  const ordered = rows.slice().sort((left, right) =>
-    String(left.created_at || "").localeCompare(String(right.created_at || ""))
-  );
+  const orderable = (value: unknown): number => {
+    const parsed = Date.parse(String(value || "").trim());
+    return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+  };
+  const ordered = rows
+    .map((row, index) => ({ row, index, at: orderable(row.created_at) }))
+    .sort((left, right) =>
+      left.at === right.at ? left.index - right.index : left.at - right.at
+    )
+    .map((entry) => entry.row);
   const supersessions: SesCuratedSourceSupersession[] = [];
   for (const row of ordered) {
     const detail = object(row.detail_json);
@@ -288,7 +311,11 @@ export function sesCuratedSourceSupersessionsFromEvents(
  * "Newest" is decided on PARSED instants, never on text order: this map is the
  * sole authority for which bind vouches for a document, so a representation
  * drift ("Z" beside "+00:00") must not silently pick the wrong event. An
- * unparseable `created_at` is refused rather than allowed to win.
+ * unparseable `created_at` is DISCARDED rather than allowed to win, which is
+ * this question's fail-closed direction: a document left with no instant is
+ * judged against the current pin alone. That is the opposite placement to the
+ * supersession reader above, and deliberately so — see the asymmetry recorded
+ * there before making the two agree.
  */
 export function sesCuratedBindInstantsByDocument(
   rows: Array<Record<string, unknown>>,
