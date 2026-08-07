@@ -23,6 +23,7 @@ import {
   SES_MIN_REFERENCE_DIGITS,
   type SesMatchInvoice,
   type SesMatchJob,
+  sesMatchJobIdentityDigits,
   sesUnlinkedInvoiceDetail,
 } from "./makesafe_invoice_reference_match.ts";
 
@@ -303,4 +304,207 @@ Deno.test("the fixture carries no deposit-shaped reference", () => {
   );
   const dep = matches.filter((m) => /dep/i.test(String(m.invoice.reference)));
   assertEquals(dep.map((m) => m.invoice.invoice_number), []);
+});
+
+// ---------------------------------------------------------------------------
+// Card identity: claim reference AND the card's own purchase order
+//
+// `makesafe_docs_ready_invoice.ts` has always read
+// `jobs.metadata.builder_po_number` as card identity. This module read only the
+// claim reference, so the two disagreed about what identifies a card. These
+// tests pin the corrected grammar and, just as importantly, pin that a caller
+// which does NOT supply a purchase order keeps its previous answer exactly.
+// ---------------------------------------------------------------------------
+
+Deno.test("identity digits are the claim reference plus the card's own PO", () => {
+  assertEquals(
+    sesMatchJobIdentityDigits({ id: "j", external_ref: "MLB-27037" }),
+    ["27037"],
+  );
+  assertEquals(
+    sesMatchJobIdentityDigits({
+      id: "j",
+      external_ref: "MLB-27037",
+      builder_po_number: "PO-56459",
+    }),
+    ["27037", "56459"],
+  );
+  // Claim digits first, PO after: an existing consumer's `matched_digits`
+  // ordering cannot shift when the PO adds nothing.
+  assertEquals(
+    sesMatchJobIdentityDigits({ id: "j", builder_po_number: "PO-56459" }),
+    ["56459"],
+  );
+  // The floor still applies to the PO half.
+  assertEquals(
+    sesMatchJobIdentityDigits({ id: "j", builder_po_number: "PO-6771" }),
+    [],
+  );
+});
+
+Deno.test("a card whose reference already embeds its own PO never contests itself", () => {
+  // The regression this guards is real and was measured against production: the
+  // naive concatenation yields the run "56387" twice, the ownership map counts
+  // the card as two owners of its own digits, and guard 2 then destroys a
+  // CORRECT match. Live shape, SWMS-261018 against its own AUTHORISED INV-1083.
+  const job = {
+    id: "job-1",
+    job_number: "SWMS-261018",
+    external_ref: "MLB-24881PO-56387",
+    builder_po_number: "PO-56387",
+  };
+  assertEquals(sesMatchJobIdentityDigits(job), ["24881", "56387"]);
+
+  const { matches, exclusions } = deriveSesUnlinkedInvoiceMatches(
+    [job],
+    [invoice({ id: "inv-1", reference: "MLB-24881PO-56387" })],
+  );
+  assertEquals(exclusions, []);
+  assertEquals(matches.length, 1);
+  assertEquals(matches[0].matched_digits, ["24881", "56387"]);
+});
+
+Deno.test("a PO shared by two cards contests, exactly as a claim does", () => {
+  // Live: SWMS-26929 and SWMS-26930 both declare PO-55622. Identity that is not
+  // card-unique must exclude both sides, never pick a winner.
+  const { matches, exclusions } = deriveSesUnlinkedInvoiceMatches(
+    [
+      { id: "job-1", job_number: "SWMS-1", builder_po_number: "PO-55622" },
+      { id: "job-2", job_number: "SWMS-2", builder_po_number: "PO-55622" },
+    ],
+    [invoice({ id: "inv-1", reference: "MLB-26721PO-55622" })],
+  );
+  assertEquals(matches, []);
+  assertEquals(exclusions.length, 2);
+  assertEquals(
+    new Set(exclusions.map((e) => e.reason)),
+    new Set(["builder_reference_shared_with_other_job"]),
+  );
+});
+
+Deno.test("siblings on one claim stay excluded when the PO cannot separate them", () => {
+  // The three live Floreat cards share claim MLB-27037 and differ only by PO.
+  // Adding the PO does NOT rescue them: the one eligible invoice still names
+  // the shared claim, so it is a candidate for all three and no card owns it
+  // uniquely. Withholding here is the correct answer, and this test exists so
+  // nobody "fixes" it by preferring the PO-matching candidate - that would
+  // attribute money to a card on evidence that does not single it out.
+  const jobs: SesMatchJob[] = [
+    {
+      id: "job-1",
+      job_number: "SWMS-261019",
+      external_ref: "MLB-27037",
+      builder_po_number: "PO-56395",
+    },
+    {
+      id: "job-2",
+      job_number: "SWMS-261020",
+      external_ref: "MLB-27037",
+      builder_po_number: "PO-56397",
+    },
+    {
+      id: "job-3",
+      job_number: "SWMS-261021",
+      external_ref: "MLB-27037",
+      builder_po_number: "PO-56459",
+    },
+  ];
+  const { matches, exclusions } = deriveSesUnlinkedInvoiceMatches(
+    jobs,
+    [invoice({ id: "inv-1", reference: "MLB-27037" })],
+  );
+  assertEquals(matches, []);
+  assertEquals(exclusions.length, 3);
+});
+
+Deno.test("identity no invoice names leaves the production cohort byte-identical", () => {
+  // The C1 safety property: a consumer that cannot reach `jobs.metadata` and
+  // supplies `external_ref` ALONE gets the same answer as the PO-aware
+  // consumers, because identity no eligible invoice names contributes nothing.
+  //
+  // The fixture carries no `builder_po_number` at all, so stripping the field
+  // would assert nothing. This adds one instead: every job gets a card-unique
+  // synthetic purchase order whose digits no invoice reference names.
+  //
+  // The first cards get a DECOY - the leading `SES_MIN_REFERENCE_DIGITS` of a
+  // LONGER invoice run, so a whole-run comparison never matches it while a
+  // substring test would. That is what makes this test able to fail: leak PO
+  // digits into candidate matching by substring and the decoys attach invoices,
+  // moving both the cohort and the exclusions. (De-duplication is pinned by the
+  // redundant-PO test below, which is the mutation-proof for that half.)
+  const invoiceRuns = new Set(
+    fixture.invoices.flatMap((inv) => digitRuns(inv.reference)),
+  );
+  const jobRuns = new Set(
+    fixture.jobs.flatMap((job) => digitRuns(job.external_ref)),
+  );
+  const taken = new Set([...invoiceRuns, ...jobRuns]);
+  const decoys = [
+    ...new Set(
+      [...invoiceRuns]
+        .filter((run) => run.length > SES_MIN_REFERENCE_DIGITS)
+        .map((run) => run.slice(0, SES_MIN_REFERENCE_DIGITS)),
+    ),
+  ].filter((run) => !taken.has(run));
+  assert(decoys.length > 0, "the fixture must supply substring decoys");
+
+  const syntheticPoDigits = fixture.jobs.map((_job, index) =>
+    index < decoys.length ? decoys[index] : `7${String(index).padStart(6, "0")}`
+  );
+  assertEquals(
+    new Set(syntheticPoDigits).size,
+    syntheticPoDigits.length,
+    "synthetic purchase orders must be card-unique",
+  );
+  for (const digits of syntheticPoDigits) {
+    assert(
+      !taken.has(digits),
+      `synthetic ${digits} collides with real identity`,
+    );
+  }
+
+  const base = deriveSesUnlinkedInvoiceMatches(fixture.jobs, fixture.invoices);
+  const withUnnamedPo = deriveSesUnlinkedInvoiceMatches(
+    fixture.jobs.map((job, index) => ({
+      ...job,
+      builder_po_number: `PO-${syntheticPoDigits[index]}`,
+    })),
+    fixture.invoices,
+  );
+  assertEquals(
+    withUnnamedPo.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
+    base.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
+  );
+  assertEquals(
+    withUnnamedPo.exclusions.map((e) => `${e.job_id}:${e.reason}`),
+    base.exclusions.map((e) => `${e.job_id}:${e.reason}`),
+  );
+});
+
+Deno.test("a redundant PO leaves the production cohort byte-identical", () => {
+  // The self-contest regression at COHORT scale, not just on one hand-built
+  // row. The commonest live shape is a card whose `external_ref` already embeds
+  // its own purchase order, so re-declaring that same PO on every fixture job
+  // must move nothing. Without the de-duplication in
+  // `sesMatchJobIdentityDigits` this fails loudly: every such card becomes its
+  // own guard-2 rival and loses a correct match.
+  const base = deriveSesUnlinkedInvoiceMatches(fixture.jobs, fixture.invoices);
+  const redundantPo = deriveSesUnlinkedInvoiceMatches(
+    fixture.jobs.map((job) => ({
+      ...job,
+      // The job's own longest identity run, restated as a PO token.
+      builder_po_number: builderReferenceDigits(job.external_ref)
+        .map((digits) => `PO-${digits}`)
+        .join(" ") || null,
+    })),
+    fixture.invoices,
+  );
+  assertEquals(
+    redundantPo.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
+    base.matches.map((m) => `${m.job_id}:${m.invoice.id}`),
+  );
+  assertEquals(
+    redundantPo.exclusions.map((e) => `${e.job_id}:${e.reason}`),
+    base.exclusions.map((e) => `${e.job_id}:${e.reason}`),
+  );
 });

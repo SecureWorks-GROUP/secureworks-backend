@@ -406,6 +406,44 @@ wrong rows: quote-number search in `ops-api` (`quote_revisions.quote_number`)
 and the inbox-to-PO domain matcher in `monitor-inbox`
 (`purchase_orders.supplier_email`). Both need a join rewrite, not a rename.
 
+## A Parked PR Has Two Opposite Diagnoses; Read The Job, Not The Badge
+
+`deno-check` is the ONE required status on `main` (branch protection,
+`strict: false`), so a PR that never REGISTERS it is unmergeable by cause and
+looks identical from a badge to one whose runner never started. The remedies are
+opposite, and the discriminator is per job, at the forge:
+
+- **Registered, never ran** — `gh-axi run list --branch <b>` returns a run, and
+  the job has `steps: []`, `runner_name: ""`, and ~15m00s between `started_at`
+  and `completed_at` with `conclusion: cancelled`. That 15 minutes is GitHub's
+  queue timeout, not a workflow timeout (this repo sets no `timeout-minutes`) —
+  it is starvation. **`gh-axi run rerun <id> --failed` fixes it**, on the same
+  head SHA, no new commit. Verified on PRs #629/#630: the re-run took a runner in
+  under 2s and both jobs went green in ~35s.
+- **Never registered** — `run list --branch` returns `count: 0`. The diff matched
+  no `paths:` entry in `.github/workflows/pr-check.yml`. **Re-running is
+  impossible; the fix is the trigger.** Never manufacture a code edit to trip the
+  filter.
+
+Beware two readings that mislead. `gh-axi pr checks` renders a **cancelled** job
+as `skip`, so the rollup understates a starved job as a skip — always confirm
+with `run view <id>`. And a rollup only reflects the LATEST run per check name:
+PR #630 had a green `deno-check` in run `31121700604` that a later starved run
+masked.
+
+The `paths:` list is the whole gate, and its own comments record four earlier
+instances of the same class (watchdog-only, migrations-only, scripts-only,
+`data/`+root-`*.md`). `docs/**` was the fifth (PR #631, all three files under
+`docs/evidence/`). Adding a path weakens nothing: both jobs diff for their own
+inputs and no-op to pass when none changed. Any new top-level path that can be
+changed ALONE must be added there or PRs touching only it sit at
+`mergeStateStatus: BLOCKED` with zero checks forever.
+
+Path filters for `pull_request` are evaluated against the merge ref, so a
+trigger fix landing on `main` does not retroactively register a check on an
+already-open PR — that PR needs a `synchronize` event
+(`gh-axi pr update-branch <n>`) before the check appears.
+
 ## Migrations Apply Before Edge Deploys
 
 The production Edge Function workflow applies pending reviewed migrations before
@@ -905,6 +943,79 @@ audited `content_hash` on a builder-facing attachment does not attest the bytes
 sent. It still uniquely keys each row, so no wrong attachment ships. Evidence:
 `data/mosman-doc-integrity-f01-f02-v1/report.md`.
 
+## "Nothing Is BOUND" Is Not "Nothing EXISTS", And `report_sent_at` Is Never Send Truth
+
+Two fields lie about state, in opposite directions, and both have burned a run.
+
+**A card with no bound invoice may already be PAID.** The review cockpit reads
+invoice presence from `xero_binding` alone, so a hand-made Xero invoice never
+linked to the job — or linked but never bound to the current docket — is
+invisible, and APPROVE INVOICE used to say "mint the draft first". Measured
+2026-08-06: **all 16** Docs Ready cards with no bound invoice already carried
+live money under their own reference (7 PAID, 6 AUTHORISED, 3 unlinked DRAFT),
+at a proposal price differing from what was billed (SWMS-26841: $561 proposal
+against INV-0850 already PAID $882.20). Never treat an absent
+`bound_invoice` / `missing_invoice` as authority to mint, or as evidence a card
+needs a draft. Check Xero **by reference** first. `ses_existing_card_money.ts`
+is that check and the cockpit refuses on it (`invoice_exists_unbound`); it
+consumes `makesafe_invoice_reference_match.ts`'s reference GRAMMAR, not its
+unique-match entrypoint, because **a matcher for attribution must be unique and
+a matcher for refusal must be inclusive**. Keep it ONE-WAY: it may only add a
+blocker, never clear one.
+
+Inclusive is not GRAINLESS, because a FALSE REFUSAL IS NOT A SAFE FAILURE:
+telling the Captain "this card already has live money" about a SIBLING card's
+invoice on the same claim is a new false statement, the same disease pointed the
+other way. So the PO grain comes from the deployed duplicate guard
+(`workRefRelation` / `poIndeterminateSiblingBlocks` / `referenceCandidateBlocks`
+in `makesafe_send_pack.ts`) and is CONSUMED, never restated — a second, cruder
+"is this the same work" matcher is exactly the defect. Both sides naming
+DIFFERENT POs is other work and does not refuse; a one-sided PO pair refuses
+unless the candidate is already attributed to another card; unlinked money on
+our own claim still refuses. The attribution the refusal PUBLISHES is what
+narrowed, not the refusal: `own_job` / `unlinked_reference_match` assert the
+card's own money, `claim_reference_match` asserts only money on the claim that
+may be a sibling's. Pinned by "PO grain 1..4" in
+`ses_existing_card_money_test.ts`.
+
+It is ENFORCED, not displayed: `sesVerdictWithExistingMoney` is the one producer
+the cockpit and both approve actions consume, and because a non-clean verdict is
+Captain-OVERRIDABLE, the approve actions also run the blocker as a hard 409
+(`refuseWhenCardMoneyExists`) in front of it. **A PRIOR-CYCLE TERMINAL STATE
+MUST NEVER SILENCE A CURRENT-CYCLE QUESTION**, and its converse binds this
+guard: prior-cycle money must never refuse a current cycle. So the money is
+cycle-scoped through the card's ONE cycle engine
+(`makesafeInvoiceAttendanceCycle`, `makesafe_docs_ready_invoice.ts`) — never a
+second one — with `unknown` still refusing here while placement/closeout reads
+it as not-current. A `no_additional_charge` member mints nothing and is outside
+the HARD STOP — but that exemption lives at the release-action call site ONLY,
+never in `existingCardMoneyRefusal`, because taking the refusal off the cockpit
+or off APPROVE INVOICE is a card becoming more approvable. A bound card
+publishes `not_evaluated` ("nobody asked"), which is never "no other money" and
+never a licence to mint.
+
+**`report_sent_at` is wrong in both directions.** The retired
+`ready_to_invoice` auto-stamp minted it for sends that never happened, while a
+card sent through the sealed release graph gets none. Across the 419-card board
+on 2026-08-06, 33 cards carried a stamp, 15 carried a real route proof, and the
+two sets did **not intersect at all**. Send truth is `ses_release_route_proofs`
+(carries `job_id`), `route_send` effects reached through
+`makesafe_release_revision_members` (**never** `ses_external_effects.job_id`,
+NULL on every such row — a direct join reads as "nothing sent"), a sent
+`makesafe_report_packs.status`, or the legacy `MAKESAFE_PACK_SENT` marker.
+Clearing a false stamp goes through `correct_makesafe_false_send_stamp`
+(`makesafe_false_send_stamp.ts`), which re-derives all four server-side, only
+ever CLEARS, and fails closed on an unreadable surface. It is sanctioned but NOT
+exclusive: `update_makesafe_details` still carries `report_sent_at` on its
+allow-list with no privilege gate and no send derivation, which is why the
+guarded clear is a COMPARE-AND-SET (a stamp that moves under it is
+`stamp_drift`, never a clobber) and why a clean board today is a measurement,
+not a guarantee.
+
+Both measurements, the applied 5-card correction and the open accounting
+question on the seven PAID cards are in
+`docs/evidence/ses-manufactured-blockers-2026-08-07.md`.
+
 ## A DRAFT Invoice Never Closes A Card, And The Visible Ladder Has A Version
 
 `_makesafeInvoiceIsRaised` (AUTHORISED / SUBMITTED / PAID) is the invoice term of
@@ -1320,6 +1431,51 @@ service-role key; `scripts/ses-c2-measure-board-evidence.ts` batches the same
 ruler over the named SES population through the Management API alone, and lets verify
 assert that NO board card moved.
 
+## An Approval Is An Identified HUMAN, And There Are Now Two Ways To Prove One
+
+`canRecordSesApproval` (`ses_review_cockpit.ts`) refuses every machine caller
+("Human approval requires an identified SES operator session"). It is untouched
+and stays that way. `ses_channel_approval.ts` adds a SECOND way to satisfy it so
+the Captain can approve from WhatsApp/SMS: `submit_ses_channel_approval` accepts
+a relayed message only when THREE independent things hold — the ops key
+(transport, and it grants **no** approval authority alone), a sender that
+fingerprints to an enrolled `SES_CHANNEL_APPROVAL_BINDINGS` entry (possession),
+and a live RFC 6238 code (knowledge). The seed is DERIVED from
+`SES_CHANNEL_APPROVAL_ROOT_SECRET` plus the binding, never stored, and only
+`ses_channel_enrolment` issues it — to the operator's OWN identified Supabase
+session, never to a key and never to another admin. Both secrets are unset in
+production, so the path currently refuses everything.
+
+It changes WHO may approve, never WHAT: the resolved operator goes into the same
+`approveSesInvoiceRevisionAction` a cockpit press calls, so every guard runs
+unchanged. `auth.identity_provenance` (`SesActionAuth`, additive, optional)
+exists so nobody reads `mode: "jwt"` on that path as a verified session, because
+no JWT is presented. Exactly ONE refusal reads it — the `ses_channel_enrolment`
+gate — and strictly to FAIL CLOSED, so a channel-derived identity cannot
+bootstrap itself a seed. Nothing widens on it: no authorisation decision
+anywhere is made more permissive by its presence.
+
+The operator act is his MESSAGE ID, written to
+`makesafe_revision_approvals.evidence_refs` and re-read (jsonb containment)
+before every approval; the consumed TOTP step is a second single-use coordinate.
+That is also why there is no migration. Two parsing traps are pinned: a card
+number ends in six digits, so card refs are stripped BEFORE scanning for a code;
+and a digit-bearing email must not normalise as a phone number.
+
+**The binding is weaker than a cockpit session in two named ways.** If the
+authenticator lives on the phone that holds WhatsApp, possession and knowledge
+collapse into one factor. And TOTP verify has NO attempt limit, lockout or
+per-binding failure state and records nothing on failure
+(`SES_CHANNEL_APPROVAL_TOTP_ONLINE_GUESSING`), so a caller holding the ops key
+AND an enrolled sender id — a compromised relay — can guess a live code online
+within hours; the ops key alone is still not enough. Narrowing the ±1 step
+window is NOT the fix (3x, and it costs clock-skew tolerance); the fix is
+durable per-binding failed-attempt state, i.e. a migration. Those trades, the
+full attacker table, the residual read-then-write replay race, and the enrolment
+steps are owned by
+`docs/evidence/ses-channel-approval-binding-2026-08-07.md`. Only APPROVE INVOICE
+is wired; `SEND` is recognised and refused BY NAME, never half-executed.
+
 ## The SES Money And Outbound Seal Is Write-Once
 
 The write-once SES money/outbound seal and its sanctioned SES-native paths (the
@@ -1368,6 +1524,11 @@ invoices it refused on; both refusal sites route it to
 distinction is not an ambiguity. Never restore `allows_create: true` on a
 recorded ambiguity.
 
+These tiers now have a SECOND consumer: `ses_existing_card_money.ts` imports
+them rather than re-deriving "is this the same work" (see the "Nothing Is
+BOUND" section). Changing the relation semantics changes what the cockpit and
+APPROVE INVOICE refuse on, not just what the mint guard blocks.
+
 The minted reference carries the card's own `builder_po_canonical`
 (`composeInvoiceReferenceWithPo`, `ses_invoice_reference_grain.ts`), which is
 also the F07 repair: three Floreat cards all keyed `MLB-27037` separate once
@@ -1403,6 +1564,39 @@ consume it rather than re-deriving the rule. Bump
 a before/after `ses-c2-measure-board-evidence.ts` run. Evidence, the 51-card
 cohort and the measured board effect are in
 `docs/evidence/ses-c3-invoice-link-seal-conflict-2026-08-01.md`.
+
+**That matcher has NO runtime consumer, and it only ever sees UNLINKED money.**
+Both facts are load-bearing before anyone plans work against it. Nothing under
+`supabase/functions/` imports it — the three consumers are all measurement
+scripts (C1 `ses-measure-card-evidence.ts`, C2 `ses-c2-measure-board-evidence.ts`,
+C3 `derive-ses-c3-invoice-link-cohort-v1.ts`), and the evidence ruler
+`makesafe_evidence_requirements.ts` names it only in a comment. So it cannot
+place a card, cannot reach the cockpit, and changing it cannot make a card more
+or less approvable — the board's placement engine binds an invoice through
+`invoiceForStage`, which requires exact `xero_invoices.job_id`. And
+`isUnlinkedIssuedAccrec` refuses any row that already has a `job_id`, so a card
+whose invoice IS linked is structurally out of reach: measured 2026-08-07, 11 of
+the 16 Docs Ready cards the cockpit tells to "mint the draft first" already carry
+a LINKED live ACCREC (7 PAID, 4 AUTHORISED), which is a cockpit-binding defect,
+never a matching one. Do not diagnose a "mint the draft first" card from here.
+
+Card identity is the claim reference **and** `jobs.metadata.builder_po_number`,
+united and DE-DUPLICATED by `sesMatchJobIdentityDigits`. The PO was added
+2026-08-07 so this module stops disagreeing with
+`makesafe_docs_ready_invoice.ts`, which always read it. The de-dupe is the trap:
+the commonest live shape is a card whose `external_ref` already embeds its own PO
+(`MLB-24881PO-56387` + `PO-56387`, 30 of 67 PO-bearing rows), and without a set
+the card becomes its own guard-2 rival and LOSES a correct match — measured, it
+destroyed SWMS-261018's match to its own AUTHORISED INV-1083. Supplying the PO
+moves nothing live (0 gained / 0 lost / 0 reassigned; the full 420-card C2
+measurement is byte-identical), because every PO-bearing job also has an
+`external_ref`. C1 therefore still supplies `external_ref` alone and is
+output-identical by construction — an absent PO contributes no digits. A shared
+claim is NOT rescued by the PO either: the one eligible invoice still names the
+shared claim, so it is a candidate for every sibling and none owns it uniquely
+(the three live `MLB-27037` Floreat cards). Withholding there is correct; do not
+"fix" it by preferring the PO-matching candidate. Full measurement:
+`docs/evidence/ses-reference-identity-po-grain-2026-08-07.md`.
 
 The seal permits exactly ONE read: fetching the bytes of an invoice PDF that
 already exists (`get_invoice_pdf`), by the Captain's 2026-08-02 ruling. The
@@ -1661,6 +1855,63 @@ cockpit must never stay `SEND_READY` once route proofs exist —
 Do not resend on a closeout-proof mismatch; re-run execute only after the set
 compare is deployed (confirmed effects are exact-once, no Graph redispatch).
 
+## A Pre-Xero Mint Refusal Burns The Card's Revision, So Batch In Fours
+
+**Every throw inside `createInvoice` — which IS the SES `dispatch` — is recorded
+as effect state `unknown`**, and `claim_ses_external_effect_v1` returns
+`claim_mode: reconcile` for every non-confirmed state. So the ten deterministic
+PRE-Xero refusals (sealed fence, portal-truth guard, report-in, preflight, …)
+and a Xero 429 all leave a card **permanently unmintable on that invoice
+obligation revision**, even though the invoice definitively does not exist. The
+only self-healing failures are the ones where Xero actually did something; the
+ones where it definitively did not are the permanent ones. Live once already
+(SWMS-261114, portal guard, recovered only via a third revision 16.5h later).
+Recovery is `prepare_ses_invoice_obligation` then mint — a NEW revision mints a
+new `operation_key`. Never fight the old one; reconcile-only is what stops
+double-minting. A real fix needs a migration letting the claim RPC re-dispatch
+from a definitely-not-dispatched state.
+
+Diagnose a batch with `select job_id, failure from ses_external_effects where
+effect_kind='invoice_create' and state='unknown'`; per card, the 409 code is the
+discriminator — `invoice_duplicate_live` / `_ambiguous` precede `buildSesEffect`
+and write nothing (safe, re-runnable), `xero_outcome_unknown` does not.
+
+**Batch in fours** (Captain-facing ruling, 2026-08-07). There is no cross-card
+state, so chunk size IS blast radius one-for-one, and ~2 min of hand recovery per
+stuck card makes four a fix and twenty an investigation. Ceiling ten, only after
+pre-flighting portal verification on report-type cards. Chunking is free:
+throughput has ~5x headroom (below), so nothing is traded but operator
+attention, which is the thing worth buying.
+
+Throughput was measured and is NOT the constraint
+(`docs/evidence/ses-batch-throughput-2026-08-07.md`): 20 cold cards through
+`prepare_ses_docket_revision` in 120.5s, zero errors, no position-dependent
+degradation; production already put 17 distinct cards through the persisting
+path in 82s. Both advisory locks (`commit_makesafe_docket_revision_v1`,
+`claim_ses_external_effect_v1`) are per-card, so nothing global serialises a
+batch. Real cost by family (232 production runs): roof_report p50 2.0s / 0.3 MB
+artifacts, general_makesafe p50 7.9s / p90 18.8s / 12.6 MB. `dry_run` takes
+proof-only photo and report routes, so it under-states the persisting path
+~1.5x — never plan off a dry-run number, and never off a warm re-run (storage
+cache alone is 5.6x).
+
+The likely companion at scale: **`selection.mode: "board_batch"` is an unbounded
+`Promise.all` over up to 50 cards in ONE isolate**, persisting per card. Never
+used in production (0 of 232 revisions carry its `:job:<n>` key suffix). At
+12.6 MB artifacts/card against the documented 6-8x re-encoding multiple it is a
+546, not a slow response; a partial 546 leaves an arbitrary committed subset and
+`Promise.all` discards the survivors' results, so the caller cannot learn which.
+Its queue head is currently a do-not-touch card. Drive batches card-by-card from
+the client instead.
+
+Mint budget: one `create_ses_invoice_draft` is ~6s and **4 Xero API calls**
+(Contacts name search, TrackingCategories, Invoices PUT, Invoice PDF GET)
+against Xero's 60/min tenant ceiling — 40 calls/min sequentially, but two
+concurrent mint chains trip it. **Mint sequentially, never fanned out.**
+`xeroPost` retries a 429 only when an Idempotency-Key was supplied
+(`xero_post_rate_limit_retry_test.ts`): keyed writes collapse a repeat, and the
+un-keyed `POST /Invoices/{id}/Email` must never repeat.
+
 ## The Repository Root Stays npm-Package-Free
 
 This repo is Deno-rooted (`deno.jsonc` at the root). Deno 2 auto-discovers a root
@@ -1761,6 +2012,23 @@ rows as a page-text coordinate without re-checking it per row. The report's
 section 2 carries this as a labelled correction because the original entry
 stated the direction backwards; that withdrawal must stay visible.
 
+**A caseless card stores its captures under an EMPTY `builder_reference`.**
+`buildSesAssemblerInput` only falls back to `makesafe_job_details.external_ref`
+behind a `legacy_job_record` identity revision, so a card with neither an intake
+case nor an identity revision derives `""` — measured 2026-08-07, 21 of the 28
+persisted capture rows across 8 cards, every one of them caseless. Those rows
+resolve TODAY only because both sides derive the same empty string;
+`resolvePersistedPortalCapture` compares `builder_reference` as one of five
+coordinates, so the moment any of those cards gains an intake case or a seeded
+identity revision (`makesafe_state_seed`), all 21 become unmatchable at once and
+read as "no capture was ever taken" — whose apparent cure is to capture again,
+producing another row rejected identically. `missingCaptureSignal` now NAMES that
+rejection, and is diagnosis only: the capture stays `missing`. Do not "fix" this
+by accepting a reference-mismatched row (that admits evidence the selector
+rejects) nor by widening the adapter's fallback (`source.builder_reference` is
+inside the docket INPUT hash, so it re-keys every revision and drops every Docs
+Ready signoff).
+
 The cockpit payload carries the roof share link
 (`sections.family_evidence.roof_report_link`) but NO reference to the stored
 screenshot, and no ops-api action serves capture bytes or a signed URL. A
@@ -1799,6 +2067,15 @@ when the representative row is reassigned to a person already on that job/date,
 return the existing target row idempotently rather than collapsing the crew or
 surfacing a raw uniqueness error. Diagnosis and the response contract live in
 `docs/evidence/trade-allocation-collision-2026-08-03.md`.
+
+The my_jobs feed excludes ghost watcher rows at source: every `job_assignments`
+read in `myJobs()` (occupancy probe included) carries `.eq('is_ghost', false)`,
+the `calendar_events` view's own predicate. A ghost `role:'observer'` row keeps
+a job's OLD scheduled date after a reschedule, so a raw read re-creates the
+2026-08-04 Trade App stale-date defect. `is_ghost` is live-drift (in no repo
+migration; `boolean NOT NULL DEFAULT false` in production). Structural guard:
+`myjobs_ghost_rows_test.ts`; evidence:
+`docs/evidence/trade-feed-ghost-row-source-exclusion-2026-08-06.md`.
 
 ## Every SES Measurement Names Its Denominator And Its Generation
 
@@ -2071,6 +2348,28 @@ in `archive`. Also note board rows key on `id`, while the review queue keys on
 Persisting a new docket revision on a card whose `pack.state` is already `sent`
 re-opens it as `needs_review` and invalidates the previous signoff tick. Check
 `pack.state` before treating such a card as reachable work.
+
+`pre_xero_docs_ready` on a board card is NOT a mint precondition and NOT a
+placement promise, and both gaps have already cost a run:
+
+- A report-type card (`makesafe_job_details.report_type` non-null) publishing
+  `pre_xero_docs_ready: true` still cannot have a draft cut — the item-14
+  portal-truth guard (`assertMakesafePortalVerifiedForDraftInvoice`) refuses
+  unless `portal_verified_at` / `portal_verified_cycle` name the CURRENT cycle.
+  The board signal does not include the capture, so such a card looks ready and
+  is not. The refusal surfaces under code `xero_outcome_unknown` and leaves an
+  `invoice_create` effect in state `unknown` with `external_id: null` even
+  though nothing reached Xero — a later mint therefore needs a fresh obligation
+  revision. Read the two columns before attempting; the guard reads nothing else.
+- Minting a DRAFT alone never places a PHYSICAL-shaped card in Docs Ready.
+  `sesStageDocsReady` additionally requires the invoice DOCUMENT on the pack
+  (`closeout_documents.invoice`), attached at APPROVE INVOICE. Roof and
+  assessment place on a qualifying draft alone because the non-physical branch
+  does not require it. A repair/make-safe card sitting in `trade_report_in` with
+  `invoice_raw_status: DRAFT` is that rule, not a defect.
+
+Worked run, with the PO-grain reference screen that keeps a sibling's money from
+refusing a mintable card: `docs/evidence/ses-draft-mint-run-2026-08-07.md`.
 
 ## A Roof-Report Card Sends ONE Email, And Route Applicability Is Not `report_only`
 
@@ -2441,6 +2740,21 @@ not permit, so failed invoices stayed LIVE and held their assignments forever.
 Before writing any enum-ish status, check the live CHECK constraint
 (`pg_constraint` on the table) rather than trusting the constant in `index.ts`.
 See `docs/trade-invoice-assignment-lock-root-cause-2026-08-06.md`.
+
+The same rule cost the make-safe substatus coherence gate its voice: it wrapped
+its two pre-reads in `try/catch`, so the catch was dead code and a failed read
+opened the only gate in front of every substatus write **silently**. The gate's
+decision now lives in `makesafe_substatus_gate.ts` (index.ts keeps only the
+`ApiError` throw, because the serve() handler matches `instanceof ApiError`).
+Two rules there are load-bearing. The fail-open **stays open** — the gate must
+not add a new outage mode to every evidence event when a read hiccups — so this
+is an audibility contract, not a stricter one: one `makesafe_substatus_gate_fail_open`
+line per gated write (never per failed read), and `makesafe_substatus_gate_read_threw`
+for the last-resort catch, which is a transport fault and a different incident.
+And `absent` (clean read, no row) is not `unreadable`: the old code conflated
+them and only the second is a fail-open. Count the marker rather than reading
+the gate as watertight. Evidence:
+`docs/evidence/makesafe-substatus-gate-fail-open-audibility-2026-08-06.md`.
 
 ## Reads And Writes Must Share One Eligibility Filter
 

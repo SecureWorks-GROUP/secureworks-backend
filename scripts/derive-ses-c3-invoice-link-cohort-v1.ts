@@ -77,6 +77,7 @@ export const JOBS_SQL = `
     j.status,
     j.ses_money_sealed_at,
     d.external_ref,
+    j.metadata->>'builder_po_number' as builder_po_number,
     (
       j.type = 'makesafe'
       or (j.type = 'insurance' and j.metadata->>'insurance_job_type' = 'restoration')
@@ -192,12 +193,14 @@ if (import.meta.main) {
         "with --fixture-out=. Contains no client name, phone, email or address.",
       jobs: jobs
         .filter((job) =>
-          (job.external_ref ?? "") !== ""
+          (job.external_ref ?? "") !== "" ||
+          (job.builder_po_number ?? "") !== ""
         )
         .map((job) => ({
           id: job.id,
           job_number: job.job_number ?? null,
           external_ref: job.external_ref ?? null,
+          builder_po_number: job.builder_po_number ?? null,
           on_board: job.on_board !== false,
         })),
       invoices: invoices.map((invoice) => ({

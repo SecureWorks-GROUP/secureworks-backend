@@ -8,7 +8,9 @@ export type SesEffectKind =
   | "route_send"
   | "document_store"
   /** Ops-visibility ordinary mail to the work-order mailer (report|photo only). */
-  | "mailer_ops_send";
+  | "mailer_ops_send"
+  /** Captain's one Docs Ready SMS — exact-once per job per attendance cycle. */
+  | "docs_ready_sms";
 export type SesEffectState =
   | "reserved"
   | "dispatching"

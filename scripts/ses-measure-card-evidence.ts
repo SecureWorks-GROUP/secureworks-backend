@@ -743,6 +743,16 @@ async function readUnlinkedInvoiceMatch(
       `unlinked xero_invoices read failed: ${invoiceResult.error.message}`,
     );
   }
+  // `builder_po_number` is deliberately NOT supplied here, and the omission is
+  // safe by construction rather than by luck: `sesMatchJobIdentityDigits` treats
+  // an absent purchase order as contributing no digits, so this entrypoint
+  // returns the identical answer it returned before the field existed. Measured
+  // against live production on 2026-08-07, supplying it moves nothing anyway -
+  // 0 matches gained, 0 lost, 0 reassigned across 2414 jobs and 176 unlinked
+  // issued ACCREC invoices - because every one of the 67 PO-bearing jobs also
+  // carries an `external_ref`. Plumbing it costs a second `jobs` read this
+  // script cannot currently prove live (it needs a service-role key), and the
+  // C2 batch above already measures the PO-aware universe.
   const jobs = (detailResult.data || []).map((row: any) => ({
     id: text(row.job_id),
     external_ref: row.external_ref ?? null,

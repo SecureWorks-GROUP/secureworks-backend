@@ -180,6 +180,10 @@ import {
   MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
 } from './makesafe_computed_status.ts'
 import {
+  evaluateMakesafeSubstatusGate,
+  type MakesafeSubstatusGateResult,
+} from './makesafe_substatus_gate.ts'
+import {
   planMakesafeStatusApplications,
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
@@ -217,6 +221,10 @@ import {
 import {
   prepare_ses_docket_revision,
 } from './ses_prepare_docket_revision.ts'
+import {
+  notifySesDocsReadySms,
+  SES_DOCS_READY_SMS_DEFAULT_TO,
+} from './ses_docs_ready_sms.ts'
 import {
   recordSesPortalCaptureEvidence,
   SesPortalCaptureEvidenceError,
@@ -344,6 +352,13 @@ import {
   GapFillError as _GapFillError,
   loadGapFillQueue as _loadGapFillQueue,
 } from './makesafe_gap_fill.ts'
+// The one sanctioned way to clear a provably-false report_sent_at. It re-derives
+// send truth from the four real send surfaces server-side and refuses any card
+// it cannot prove was never sent, so it can never erase a real send record.
+import {
+  correctMakesafeFalseSendStamps as _correctMakesafeFalseSendStamps,
+  FalseSendStampRequestError as _FalseSendStampRequestError,
+} from './makesafe_false_send_stamp.ts'
 import {
   degradedIntakeExceptionProjection as _degradedIntakeExceptionProjection,
   findIntakeExceptionItem as _findIntakeExceptionItem,
@@ -471,6 +486,15 @@ import {
   type SesXeroGateway,
   type SesXeroInvoiceResult,
 } from './ses_reporting_actions.ts'
+// Second way to satisfy the identified-operator approval gate: an enrolled
+// channel sender plus a live authenticator code. The gate itself is untouched;
+// the exact trust statement is at the top of the module.
+import {
+  readSesChannelApprovalEnv,
+  sesChannelEnrolmentAction,
+  submitSesChannelApprovalAction,
+} from './ses_channel_approval.ts'
+import { executeSesChannelSendIt } from './ses_channel_send_it.ts'
 import { createSesGraphMailGateway } from './ses_graph_mail_gateway.ts'
 import {
   sendMailerOpsVisibilityAction,
@@ -2612,9 +2636,46 @@ async function xeroGet(
 }
 
 // Xero API POST/PUT
+//
+// 429 RETRY IS GATED ON THE IDEMPOTENCY KEY, and that gate is the whole safety
+// argument. xeroGet has always retried a rate limit; this write path did not,
+// so a transient 60-calls-per-minute rejection surfaced as a thrown dispatch.
+// For a sealed SES mint that is not a slow card, it is a DEAD one: the throw
+// lands in executeSesExternalEffect's catch, the effect goes to `unknown`, and
+// every later call on the same operation_key can only reconcile — so the card
+// cannot mint again until a fresh invoice obligation revision is prepared. A
+// rate limit is exactly the failure that appears only at batch size, so at one
+// card a minute it never showed.
+//
+// Retrying is safe ONLY where Xero can collapse the repeat: it honours
+// Idempotency-Key for 12 hours, so a keyed create/authorise/void returns the
+// same record rather than a second one. The un-keyed calls here are not merely
+// unproven, they are the ones that must never repeat — POST /Invoices/{id}/Email
+// sends the client a real email every time it succeeds. So an un-keyed 429
+// still throws immediately, exactly as before.
+//
+// THE BACKOFF IS BOUNDED IN BOTH DIRECTIONS, and that is load-bearing for the
+// same reason. Sleeping for an arbitrary Retry-After inside the dispatch swaps
+// one poisoning mechanism for a worse one: if the isolate or caller dies
+// mid-sleep the effect row never leaves `dispatching` and carries no failure
+// message at all. Only the 60-calls-per-minute window is worth waiting out, and
+// it clears in seconds; a daily-limit or concurrency 429 carries a large
+// delta-seconds value that must never be slept through here. So a Retry-After
+// above the per-sleep ceiling, or one that would overrun the cumulative budget,
+// throws immediately — the pre-change behaviour, and the honest outcome.
+const XERO_POST_RETRY_SLEEP_CEILING_MS = 5_000
+const XERO_POST_RETRY_SLEEP_BUDGET_MS = 15_000
+
+function xeroPostRetryAfterMs(header: string | null): number {
+  const parsed = parseInt(header || '', 10)
+  if (!Number.isFinite(parsed) || parsed < 0) return XERO_POST_RETRY_SLEEP_CEILING_MS
+  return parsed * 1000
+}
+
 async function xeroPost(
   path: string, accessToken: string, tenantId: string,
-  body: any, method = 'POST', idempotencyKey?: string
+  body: any, method = 'POST', idempotencyKey?: string, retryCount = 0,
+  sleptMs = 0
 ): Promise<any> {
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${accessToken}`,
@@ -2632,6 +2693,27 @@ async function xeroPost(
     headers,
     body: JSON.stringify(body),
   })
+  if (resp.status === 429 && idempotencyKey) {
+    if (retryCount >= 3) {
+      throw new Error(`Xero rate limited on ${path} after ${retryCount} retries`)
+    }
+    const retryAfterMs = xeroPostRetryAfterMs(resp.headers.get('Retry-After'))
+    if (retryAfterMs > XERO_POST_RETRY_SLEEP_CEILING_MS) {
+      throw new Error(
+        `Xero rate limited on ${path}: Retry-After ${retryAfterMs / 1000}s exceeds the ${XERO_POST_RETRY_SLEEP_CEILING_MS / 1000}s backoff ceiling`,
+      )
+    }
+    if (sleptMs + retryAfterMs > XERO_POST_RETRY_SLEEP_BUDGET_MS) {
+      throw new Error(
+        `Xero rate limited on ${path}: backoff budget of ${XERO_POST_RETRY_SLEEP_BUDGET_MS / 1000}s exhausted`,
+      )
+    }
+    await new Promise(r => setTimeout(r, retryAfterMs))
+    return xeroPost(
+      path, accessToken, tenantId, body, method, idempotencyKey, retryCount + 1,
+      sleptMs + retryAfterMs,
+    )
+  }
   if (!resp.ok) {
     const errText = await resp.text()
     // Extract the actual validation message from Xero's verbose response
@@ -2647,6 +2729,10 @@ async function xeroPost(
   }
   return resp.json()
 }
+
+// Test seam: the rate-limit contract above is a runtime capability, so its test
+// drives the real function rather than a mirrored copy.
+export const _xeroPostForTest = xeroPost
 
 function xeroContactWherePath(field: string, value: string): string {
   const escaped = String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
@@ -4752,6 +4838,32 @@ if (import.meta.main) serve(async (req: Request) => {
         }
         return json(await convertMakesafeToInsurance(client, body))
       }
+      // Clear a provably-false report_sent_at. `report_sent_at` was never send
+      // truth — the retired ready_to_invoice auto-stamp minted it for sends that
+      // never happened, while a genuinely sent card carries none — so this
+      // action re-derives send truth from the four real surfaces and refuses any
+      // card it cannot prove was never sent. It only ever CLEARS; it can never
+      // stamp one. Dry run by default, explicit job list, capped at 25.
+      case 'correct_makesafe_false_send_stamp': {
+        const isPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!isPrivileged) {
+          return json({ error: 'forbidden: correct_makesafe_false_send_stamp requires the privileged ops key or an admin/owner session' }, 403)
+        }
+        try {
+          return json(await _correctMakesafeFalseSendStamps(client, body, {
+            actor: authMode === 'api_key' ? 'ops-api:api_key' : (authUser?.id || 'ops-api:jwt'),
+          }))
+        } catch (err) {
+          // A malformed request is the caller's fault, not an outage: without
+          // this the generic catch below returns 500 and invites a retry of a
+          // request that can never succeed as written.
+          if (err instanceof _FalseSendStampRequestError) {
+            throw new ApiError(err.message, 400, { error: err.message })
+          }
+          throw err
+        }
+      }
       // Preview (and, only on an explicit dry_run:false, apply) the ordered roof
       // storey for cards that already exist. `storeys` is the sole determinant of
       // a roof report's fee and every candidate is a sealed job, so this defaults
@@ -5298,7 +5410,29 @@ if (import.meta.main) serve(async (req: Request) => {
               created_by: actor,
             }),
           )
-          return json(summarizeSesPrepareResponseForHttp(response))
+          // Harden SES ticket 06: the Captain's ONE ping. Exact-once per job
+          // per attendance cycle via the docs_ready_sms effect kind; the
+          // notifier never throws, so a persist cannot fail on a courtesy SMS.
+          const docsReadySms = request.dry_run ? [] : await notifySesDocsReadySms(
+            response.results,
+            {
+              org_id: DEFAULT_ORG_ID,
+              store: createSupabaseSesEffectStore(client),
+              sendSms: (phone, message) => sendSmsViaGhl(phone, message),
+              phone: Deno.env.get('SES_DOCS_READY_SMS_TO') ||
+                SES_DOCS_READY_SMS_DEFAULT_TO,
+              lookupJobNumber: async (jobId) => {
+                const { data } = await client.from('jobs')
+                  .select('job_number').eq('id', jobId).maybeSingle()
+                return data?.job_number || null
+              },
+              actor,
+            },
+          )
+          return json({
+            ...summarizeSesPrepareResponseForHttp(response),
+            docs_ready_sms: docsReadySms,
+          })
         } catch (error) {
           if (error instanceof SesAssemblerAdapterError) {
             return json({ error: error.message, code: error.code }, error.status)
@@ -6756,6 +6890,98 @@ if (import.meta.main) serve(async (req: Request) => {
             reason_text: body.reason_text,
             actor: authUser?.email || body.actor,
           },
+        ))
+      // ── Channel APPROVE INVOICE (WhatsApp / SMS) ────────────────────────
+      // Widens WHO may approve, never WHAT may be approved. The relay presents
+      // the ops key, which authenticates the RELAY and grants no approval
+      // authority on its own: the message must also come from an enrolled
+      // sender and carry a live authenticator code belonging to the bound
+      // operator. It then calls the very same approve action a cockpit press
+      // calls, so every guard, evidence check and refusal is unchanged.
+      // Deliberately NOT on ROUTINE_ALLOWED_ACTIONS.
+      case 'submit_ses_channel_approval': {
+        if (req.method !== 'POST') {
+          return json({ error: 'submit_ses_channel_approval requires POST' }, 405)
+        }
+        const channelOrgId = body.org_id || DEFAULT_ORG_ID
+        return json(await submitSesChannelApprovalAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: channelOrgId,
+            channel: body.channel,
+            sender_id: body.sender_id,
+            message_id: body.message_id,
+            message_text: body.message_text,
+            message_sent_at: body.message_sent_at,
+          },
+          {
+            env: readSesChannelApprovalEnv(),
+            now: () => Date.now(),
+            approveInvoice: async (operatorAuth, args) => {
+              // The synthetic live-fire fence runs here exactly as it does on
+              // the cockpit action, before any approval is recorded.
+              await assertNoSyntheticLivefireJobs(
+                client,
+                [args.job_id],
+                'approve_ses_invoice_revision',
+              )
+              return await approveSesInvoiceRevisionAction(client, operatorAuth, args)
+            },
+            // SEND IT (Harden SES ticket 07): bind the word to the card's one
+            // prepared release revision, then drive the SAME approve/execute
+            // release actions a cockpit press drives — every guard, money
+            // check and exact-once send unchanged.
+            executeSendIt: async (operatorAuth, args) => {
+              await assertNoSyntheticLivefireJobs(
+                client,
+                [args.job_id],
+                'submit_ses_channel_approval:send_it',
+              )
+              return await executeSesChannelSendIt(
+                client,
+                operatorAuth,
+                args,
+                {
+                  approveRelease: async (releaseAuth, releaseArgs) => {
+                    await assertNoSyntheticLivefireReleaseRevision(
+                      client,
+                      releaseArgs.release_revision_id,
+                      'approve_ses_release_revision',
+                    )
+                    return await approveSesReleaseRevisionAction(
+                      client,
+                      releaseAuth,
+                      releaseArgs,
+                    )
+                  },
+                  executeRelease: async (releaseAuth, releaseArgs) => {
+                    await assertNoSyntheticLivefireReleaseRevision(
+                      client,
+                      releaseArgs.release_revision_id,
+                      'execute_ses_release_revision',
+                    )
+                    return await executeSesReleaseRevisionAction(
+                      client,
+                      releaseAuth,
+                      releaseArgs,
+                      makeSesGraphMailGateway(client),
+                      makeSesReleaseXeroReader(client),
+                    )
+                  },
+                },
+              )
+            },
+          },
+        ))
+      }
+      // Issue the caller's OWN authenticator seed. Identified Supabase session
+      // only: the ops key is refused here on purpose, so it can never become
+      // approval authority by reading a seed.
+      case 'ses_channel_enrolment':
+        return json(await sesChannelEnrolmentAction(
+          sesActionAuth(authMode, authUser),
+          readSesChannelApprovalEnv(),
         ))
       case 'approve_ses_invoice_revision':
         await assertNoSyntheticLivefireJobs(
@@ -15169,69 +15395,71 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
 // Test-only export for the board-job enrichment (chip-truth wiring).
 export const _enrichMakesafeBoardJobForTest = enrichMakesafeBoardJob
 
-// ── Rescue SES T2: one coherence gate for EVERY substatus write ──────────────
+// ── Rescue SES T2: the coherence gate in front of substatus writes ───────────
 // Mission: wiki coding/work/campaigns/makesafe-system/missions/rescue-ses-2026-08.
 // Production carried substatus/status combinations both stage engines assume
 // impossible (68 cards complete-under-processing, active substatuses on
 // cancelled jobs) because each write site validated vocabulary only. Every
-// substatus write — the dispatch action, the details editor, and the internal
-// evidence events — now passes this assert. Sources beginning 'internal:' are
-// the evidence events themselves (trade report submitted, close-out, reattend);
-// they are transition-checked but not re-gated on the external evidence guards,
-// which they constitute.
-const MAKESAFE_SUBSTATUS_TRANSITIONS: Record<string, readonly string[]> = {
-  company_contact_required: ['company_contact_done', 'waiting_on_trade_report', 'awaiting_portal_completion', 'admin_to_send_report'],
-  company_contact_done: ['company_contact_required', 'waiting_on_trade_report', 'awaiting_portal_completion', 'admin_to_send_report'],
-  awaiting_portal_completion: ['company_contact_required', 'waiting_on_trade_report', 'admin_to_send_report'],
-  waiting_on_trade_report: ['company_contact_required', 'awaiting_portal_completion', 'admin_to_send_report'],
-  admin_to_send_report: ['waiting_on_trade_report', 'awaiting_portal_completion', 'ready_to_invoice', 'complete'],
-  ready_to_invoice: ['waiting_on_trade_report', 'admin_to_send_report', 'complete'],
-  complete: ['waiting_on_trade_report', 'admin_to_send_report'],
-}
+// substatus write that goes through updateMakesafeSubstatus — the dispatch
+// action, the details editor, and the internal evidence events — passes this
+// assert. Sources beginning 'internal:' are the evidence events themselves
+// (trade report submitted, close-out, reattend); they are transition-checked
+// but not re-gated on the external evidence guards, which they constitute.
+//
+// TWO HONEST LIMITS, because a comment that overstates a guard is how the next
+// reader stops checking (spec item 1):
+//
+//  1. It is not literally EVERY write. Two paths set
+//     `makesafe_job_details.substatus` straight through PostgREST and never
+//     reach this assert: the detail-row INSERT at card creation (and the
+//     historical-backfill repair), which establishes a first substatus rather
+//     than moving one, and approveIntakeDraft parking a report-only card in
+//     `awaiting_portal_completion`. Both are deliberate and preserved, but they
+//     exist, so "no entry point can skip this" was never true. The privileged
+//     routes DO reach the assert — makesafe_send_pack closes through
+//     applyMakesafeCloseOut ('internal:closeout') and
+//     mark_makesafe_portal_report_done gates its own patch — what those skip is
+//     the external evidence guards below, which is a different boundary.
+//  2. The gate FAILS OPEN when a pre-read fails. That trade is deliberate: the
+//     gate stops known-incoherent moves and must not add a new outage mode to
+//     every evidence event when a read hiccups. Since spec item 1 the fail-open
+//     is at least audible — see makesafe_substatus_gate.ts, which owns the
+//     decision, the read-state vocabulary and the
+//     `makesafe_substatus_gate_fail_open` marker.
+//
+// The transition table and the evaluator live in makesafe_substatus_gate.ts so
+// they are importable by tests; index.ts cannot be imported in a test because
+// serve(...) boots the production HTTP server at module load. Only the ApiError
+// throw stays here — the serve() error handler matches on `instanceof ApiError`.
 
+/**
+ * Run the coherence gate. Throws ApiError(409) on a refusal.
+ *
+ * Returns the gate's own answer, which distinguishes "applied the checks to
+ * real data" (`outcome: 'checked'`) from "stepped aside because a pre-read
+ * failed" (`outcome: 'fail_open_unreadable'`). Callers are not required to act
+ * on it yet; item 2's writeMakesafeSubstatus helper is where it becomes useful.
+ */
 async function assertMakesafeSubstatusTransition(
   client: any,
   jobId: string,
   nextSubstatus: string,
   source: string,
-): Promise<void> {
+): Promise<MakesafeSubstatusGateResult> {
   const next = requireValidMakesafeSubstatus(nextSubstatus)
-  let detailRes: any = null
-  let jobRes: any = null
-  try {
-    ;[detailRes, jobRes] = await Promise.all([
-      client.from('makesafe_job_details').select('substatus').eq('job_id', jobId).maybeSingle(),
-      client.from('jobs').select('status').eq('id', jobId).maybeSingle(),
-    ])
-  } catch (e: any) {
-    // Fail-OPEN on read failure: the gate stops known-incoherent moves; it must
-    // not add a new outage mode to every evidence event when a read hiccups.
-    console.warn('[ops-api] substatus transition check skipped (read failed):', {
-      job_id: jobId, next, source, error: e?.message || String(e),
-    })
-    return
-  }
-  const jobState = String(jobRes?.data?.status || '').toLowerCase()
-  if (['cancelled', 'lost'].includes(jobState) && !source.startsWith('internal:intake_')) {
-    throw new ApiError(
-      `substatus write refused: job is ${jobState} (source=${source}); reinstate the job before changing its work state`,
-      409,
-    )
-  }
-  const current = normalizeMakesafeSubstatus(detailRes?.data?.substatus)
-  if (!current || current === next) return // first set / idempotent repeat
-  const allowed = MAKESAFE_SUBSTATUS_TRANSITIONS[current] || []
-  if (!allowed.includes(next)) {
-    throw new ApiError(
-      `substatus transition refused: '${current}' -> '${next}' is not a coherent move (source=${source})`,
-      409,
-    )
-  }
+  const { result, refusal } = await evaluateMakesafeSubstatusGate(client, jobId, next, source, {
+    normalizeSubstatus: normalizeMakesafeSubstatus,
+  })
+  if (refusal) throw new ApiError(refusal.message, refusal.status)
+  return result
 }
 
 // External-caller evidence guards, shared by the dispatch action and the
-// details editor so no external entry point can skip them (previously they
-// lived only on the dispatch router case).
+// details editor (previously they lived only on the dispatch router case).
+// Scope, stated honestly: they run only for source==='external' writes that go
+// through updateMakesafeSubstatus. Internal evidence events skip them by
+// design — they constitute the evidence — and the direct substatus patches
+// named on the gate above skip them along with the gate itself.
 async function assertExternalMakesafeSubstatusGuards(
   client: any,
   jobId: string,
@@ -31544,6 +31772,29 @@ async function readPagedRows(
   )
   return rows
 }
+// ── GHOST ROWS: the my_jobs feed applies the calendar_events rule at source ──
+// A ghost row (`job_assignments.is_ghost = true`, always `role:'observer'` in
+// practice) mirrors a job onto an ops manager's own list. It is never moved when
+// the crew's real row is rescheduled, so it keeps the job's OLD scheduled_date
+// and carries no start_time.
+//
+// Every calendar surface already excludes ghosts because `calendar_events` is
+// defined `... FROM job_assignments ja ... WHERE ja.is_ghost = false`. my_jobs
+// selected job_assignments raw, so it was the one schedule surface that never
+// learned the rule: any consumer that dedupes to one row per job could pick the
+// ghost's staler date, which is exactly the stale-date defect reported on the
+// Trade App board 2026-08-04 (SWF-26813, SWF-261042, plus 4 live patio jobs).
+//
+// GHOST_EXCLUDED_COLUMN/VALUE is the view's own predicate, not a broader filter.
+// The column is `boolean NOT NULL DEFAULT false`, so `.eq(..., false)` is exactly
+// the view's `= false` with no NULL third case to reason about. It must be
+// applied to EVERY job_assignments read whose rows can reach the returned feed —
+// including the occupancy probe, whose winning row is emitted verbatim by
+// `occupiedPoolAssignmentCard`. `myjobs_ghost_rows_test.ts` asserts that, so a
+// query added later without the rule fails rather than silently regressing.
+const GHOST_EXCLUDED_COLUMN = 'is_ghost'
+const GHOST_EXCLUDED_VALUE = false
+
 const OCCUPANCY_PROBE_SELECT = `
         job_id, id, scheduled_date, scheduled_end, start_time, status, role, notes, assignment_type, crew_name,
         started_at, completed_at, clocked_on_at, clocked_off_at, travel_started_at, arrived_at, break_minutes, job_phase,
@@ -31586,6 +31837,11 @@ async function fetchOccupyingAssignments(
         .from('job_assignments')
         .select(OCCUPANCY_PROBE_SELECT)
         .in('job_id', chunk)
+        // Ghost rows never HOLD a job (see GHOST ROWS note): the winning row here
+        // is emitted verbatim as a feed card, so a ghost winning the pick would
+        // put a stale-dated role:'observer' card straight into my_jobs. No live
+        // job is held by ghosts alone, so no job's occupied/available verdict moves.
+        .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
         .not('status', 'in', _poolReleasingStatusFilter())
         .order('job_id', { ascending: true })
         .order('id', { ascending: true })
@@ -31788,6 +32044,7 @@ export async function myJobs(
         .from('job_assignments')
         .select(ASSIGNMENT_SELECT_ADMIN_INNER)
         .neq('status', 'cancelled')
+        .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE) // see GHOST ROWS note
         .eq('jobs.org_id', orgId)
         .order('scheduled_date', { ascending: true })
         .order('id', { ascending: true })
@@ -31835,6 +32092,7 @@ export async function myJobs(
         .from('job_assignments')
         .select(ASSIGNMENT_SELECT_ADMIN_INNER)
         .neq('status', 'cancelled')
+        .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE) // see GHOST ROWS note
         .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
         .eq('jobs.org_id', orgId)
         .or(verticalFilter(rollingVerticals), { referencedTable: 'jobs' })
@@ -31851,6 +32109,7 @@ export async function myJobs(
           .from('job_assignments')
           .select(ASSIGNMENT_SELECT_ADMIN_INNER)
           .neq('status', 'cancelled')
+          .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE) // see GHOST ROWS note
           .eq('jobs.org_id', orgId)
           .or(verticalFilter(['fencing']), { referencedTable: 'jobs' })
           .order('scheduled_date', { ascending: true })
@@ -31872,11 +32131,15 @@ export async function myJobs(
     assignments = [...new Map(assignments.map((row: any) => [row.id, row])).values()]
   } else {
     // ── Normal mode: only this user's assignments ──
+    // Ghost rows carry the requesting ops manager's own user_id, so this is the
+    // one path where a ghost row targets the caller directly (see GHOST ROWS
+    // note). It gets the same rule: a watcher row is not the caller's field work.
     const res = await client
       .from('job_assignments')
       .select(ASSIGNMENT_SELECT_USER)
       .eq('user_id', userId)
       .neq('status', 'cancelled')
+      .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE)
       .gte('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
       .order('scheduled_date', { ascending: true })
     assignments = res.data
@@ -31928,6 +32191,7 @@ export async function myJobs(
       if (!runManagerMakesafeBackstop) backstopQuery = backstopQuery.eq('user_id', userId)
       const resMakesafe = await backstopQuery
         .neq('status', 'cancelled')
+        .eq(GHOST_EXCLUDED_COLUMN, GHOST_EXCLUDED_VALUE) // see GHOST ROWS note
         .gte('scheduled_date', makesafeSixMonthsAgo.toISOString().slice(0, 10))
         .lt('scheduled_date', thirtyDaysAgo.toISOString().slice(0, 10))
         .eq('jobs.org_id', orgId)
