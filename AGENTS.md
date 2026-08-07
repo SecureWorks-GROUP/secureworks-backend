@@ -341,6 +341,35 @@ not hardcode either shape — the calendar uses a plain `select('*')`, which is
 drift-proof in both directions and keeps readiness output identical on each.
 Closing the drift is a separate task.
 
+## Measure The Deployed Thing, Or Say You Did Not
+
+A claim about what production DOES must be answered by production. Not by this
+repo's constants, not by a commit count, not by a stored row — those tell you what
+production did at some past moment, and the gap between that moment and now is
+exactly where the wrong answer lives.
+
+This has produced a confident, alarming and false diagnosis at least three times:
+the dashboard gitlink (the Captain was told his cockpit was 29 commits stale when
+it was already current — see that section), and twice on 2026-08-06, including
+"the deployed ops-api still prices double-storey roof at $350" read off obligation
+rows written seven hours BEFORE the deploy that fixed it. Production was correct.
+
+The discipline, in order:
+
+- **Ask the deployment.** An action, a served page, a response header.
+- **If the action is not reachable** (auth class, no such endpoint), use an
+  artifact produced **AFTER** the deploy — and check its timestamp against the
+  deploy time, not against your own clock. Your run being recent proves nothing
+  about the age of the row you read.
+- **If neither exists, say "not observed".** That is a complete, honest answer.
+  A confident number you did not measure is worse than an admitted gap, because
+  the gap gets checked and the number gets believed.
+- Ancestry, not lag: `git merge-base --is-ancestor <fix> <deployed>` answers "is
+  this change live". A "behind by N" count does not, and can invert the truth.
+
+Worked example, including the withdrawal and the check that catches it:
+`docs/evidence/ses-item10-rules-clean-shadow-2026-08-06.md` §5a.
+
 ## A Wrong Column Name Reads As "No Data", Not As An Error
 
 PostgREST rejects a select naming a column that does not exist with a 400
@@ -2596,6 +2625,80 @@ unaltered. Evidence lives OUTSIDE this repository, deliberately — task reports
 never enter the shared project repo — at
 **`<firstmate-home>/data/bertram-live-bind-v1/report.md`**. Do not look for it
 under this repo's `data/`; its absence here is intended, not a missing artifact.
+
+## Preparing An Invoice Obligation Is A WRITE, And `guard_result` Proves Nothing
+
+`prepare_ses_invoice_obligation` **persists**. `prepareSesInvoiceObligationAction`
+(`ses_reporting_actions.ts`) ends in `commit_ses_invoice_obligation_revision_v1`
+and takes **no `dry_run`** — there is no non-persisting branch. So "prepare it and
+look at the result" is a write to the money ledger, never a rehearsal. To inspect
+what a prepare WOULD price, read the persisted docket's `local_invoice_proposal`
+instead: prepare copies `line_items` VERBATIM into the obligation lines. (By
+contrast `prepare_ses_docket_revision` does honour `dry_run`, guarding
+`deps.persist`.)
+
+Two more traps on that same row. The obligation's `guard_result.hard_failures` is
+a **hardcoded empty array** written by the prepare action — it is not the output
+of any guard, and reading it as "the pricing guards ran and passed" is reading a
+guard that never ran. And after a mint the money is on the OBLIGATION's
+`proposal.lines`, not the docket's: a Captain `labour_rate_override` lives on the
+obligation and never touches the docket, so checking the docket while authorising
+the obligation checks money nobody is about to bill.
+
+`makesafe_invoice_rules_clean.ts` is the pure, closed-list determination for
+Item 10 auto-authorisation (17 guards in three families, contract
+`ses-rules-clean/v5`; `unevaluable` PARKS, and
+family B is a WHITELIST that re-derives the sealed line set and demands equality,
+so an unmodelled fault shape parks by construction). Three rules the 2026-08-07
+review had to install because the module was blind in its own way: the
+determination point (`pre_mint` / `authorise`) is a POSITIVE CLAIM the caller
+states, never inferred from an absent `subject_invoice` — absence is not a clean
+branch; `A6` compares the sealed derivation against the **Xero DRAFT's own
+ex-GST AND inc-GST totals**, because a draft stays editable after the mint, so
+the obligation is the INTENT and the draft is the MONEY that authorise acts on;
+and a guard may only read a source that can SEE the fault it exists to catch.
+That last one is why `totals_source: "local_mirror"` can never reach `clean` —
+`xero_invoices` is written at the mint, so a mirrored total equals the sealed
+derivation by construction and cannot witness a later edit in Xero — and why an
+uncertified `makesafe_portal_capture_revisions` row is NOT-evidence at `C3`
+rather than evidence with a caveat (the writer can append and then fail its own
+re-read; it cannot un-write). `C3`'s portal branch takes capture rows
+UNFILTERED, qualifies them itself, and NAMES the capture it relied on instead of
+counting; it never dedupes or alters a row. Producer trust there is an
+ALLOW-LIST, never a blacklist — an approved screenshot-bearing
+`capture_producer` contract AND a `captured_by` on the closed approved-
+implementation list, both positive, because the F7 observer is exactly the
+producer nobody had thought to exclude. Note the two capture facts are
+DIFFERENT: `status` certifies the capture ARTIFACT, `capture_result` is what the
+capture SAW, so a certified `not_done`/`unreachable` FLAGS as evidence against
+completion and an unrecognised result parks. Role, and which floor a card owes
+(`report_evidence_floor`), are likewise module-side stated claims, never a
+caller's query filter. An absent, mirrored or unreadable
+draft total parks; it is never assumed to match. It has no call site in
+`ops-api` yet — switch-on needs Captain decision D5 plus a migration, because
+`record_ses_revision_approval_v1` requires an `operator_id` active on
+`ses_release_operators` that a skill caller does not have. The zero-write dry run
+is `scripts/ses-rules-clean-shadow.ts`. Contract, the 420-card live shadow run,
+the staged first fire and the named residual:
+`docs/evidence/ses-item10-rules-clean-shadow-2026-08-06.md`.
+
+**The roof branch of the skill's `check_report_rate_spec` cannot refuse an
+OVERCHARGE.** It compares `ex + 0.01 < expected` — a one-sided FLOOR — where the
+assessment branch beside it uses `abs(ex - v) < 0.01`. So on a card whose sealed
+price is $300 ex, a roof invoice of $350 or $5,000 returns clean, and nothing else
+covers it (`check_nonzero_spec` only wants a positive total; the labour schedule
+guard never matches a roof line). Fixing it is a wiki-skill change through the
+governed release path. `B5_report_rate` in `makesafe_invoice_rules_clean.ts`
+compares against the sealed rate instead, so the automated class is covered.
+
+A persisted proposal records what the rules said THEN; an invoice must be priced
+by what they say NOW. `SWMS-261079` carries a $350 double-storey docket saved
+2026-08-03, superseded by the 2026-08-06 ruling and with no override on it — it is
+not a live overcharge only because `B2`/`B5` re-derive from the current sealed
+constant instead of trusting the saved figure. Never read the stored number
+directly for speed: every card prepared before a ruling carries a superseded
+price. (`sealed_unit_price_ex_gst` on an obligation is the same trap — it is the
+rate at write time, not today's.)
 
 ## Xero Optional-Field `.Contains` Needs A Null Guard
 
