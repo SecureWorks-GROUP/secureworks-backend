@@ -1417,12 +1417,15 @@ refusing intake would trade a quiet card for a lost one — and it fires only on
 do not widen it to another field. The write goes through
 `persistIssueForSources` so the row carries the source's `received_at` — the
 desk projection reads `email_events_raw` through a `received_at` window, so a
-row without one is a flag nobody can see. A failed flag write is caught,
-accounted as a degraded write plus the
+row without one is a flag nobody can see. A failed flag write is caught and
+recorded as a `write_failure_reasons` entry plus the
 `committed_without_site_suburb_flag_unwritten` caveat, and never fails the case:
 the counter only moves after the write lands, and the post-board notification
 (which is never retried once the case carries its job) and the settlement stamp
-still run. Extending `INTAKE_SOURCE_ISSUE_REASONS` is
+still run. It deliberately does NOT bump `totals.write_failures` — that degrades
+the run, which `assertFreshMakesafeSourceSettled` reads as a source that never
+settled, so an informational flag would become blocking on the fresh-source
+lane. Extending `INTAKE_SOURCE_ISSUE_REASONS` is
 code-only (no migration): that array plus the exhaustive
 `INTAKE_SOURCE_ISSUE_NEXT_ACTION` map is the whole contract, and
 `email_events_raw.change_type` has no CHECK. Tests:

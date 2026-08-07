@@ -5079,8 +5079,11 @@ export async function runDeterministicIntake(
             // The flag is informational, so its own write must never turn a
             // successful mint into a failed case: a throw here would skip the
             // post-board notification and the settlement stamp below, and the
-            // notification is never retried once the case carries its job. It
-            // is accounted as a degraded write instead, and the counter only
+            // notification is never retried once the case carries its job. A
+            // failure is recorded as a caveat and a write-failure REASON only -
+            // never `totals.write_failures`, which degrades the run and reads to
+            // `assertFreshMakesafeSourceSettled` as a source that never settled,
+            // so an informational flag would become blocking. The counter only
             // moves once the write has actually landed.
             try {
               await persistIssueForSources(
@@ -5097,7 +5100,6 @@ export async function runDeterministicIntake(
               );
               report.totals.committed_without_site_suburb++;
             } catch (suburbFlagError) {
-              report.totals.write_failures++;
               report.write_failure_reasons[INTAKE_MISSING_SUBURB_REASON] =
                 (report.write_failure_reasons[INTAKE_MISSING_SUBURB_REASON] ||
                   0) + 1;

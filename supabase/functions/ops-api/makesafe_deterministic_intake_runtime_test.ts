@@ -6999,7 +6999,7 @@ Deno.test("the empty-suburb flag reaches the operational desk a human reads", as
   assertEquals(fact.severity, "critical");
 });
 
-Deno.test("a failed flag write degrades the run instead of failing the commit it describes", async () => {
+Deno.test("a failed flag write stays visible without failing or degrading the commit it describes", async () => {
   const store = suburbBacktopFixture(
     "suburb-write-fail-1",
     "12 Fixture Street",
@@ -7033,11 +7033,16 @@ Deno.test("a failed flag write degrades the run instead of failing the commit it
   assertEquals(report.totals.cases_failed, 0);
   assertEquals(store.makesafe_intake_cases[0].job_id, "job-abc");
   assertEquals(store.emails[0].makesafe_scanned_at, NOW);
+  // `totals.write_failures` and the run status are settlement gates
+  // (`assertFreshMakesafeSourceSettled`), so an informational flag must move
+  // neither: doing so throws past a mint that succeeded and marks a healthy
+  // fresh-source handoff failed.
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.completion_status, "completed");
 
-  // ...and the unwritten flag is accounted honestly rather than counted.
+  // ...and the unwritten flag stays visible rather than counted.
   assertEquals(report.totals.committed_without_site_suburb, 0);
   assertEquals(suburbIssueRows(store).length, 0);
-  assertEquals(report.totals.write_failures, 1);
   assertEquals(
     report.write_failure_reasons.committed_without_site_suburb,
     1,
@@ -7047,5 +7052,4 @@ Deno.test("a failed flag write degrades the run instead of failing the commit it
       "committed_without_site_suburb_flag_unwritten",
     ),
   );
-  assertEquals(report.completion_status, "completed_degraded");
 });
