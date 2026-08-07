@@ -84,6 +84,8 @@ import {
   SES_CURATED_SOURCE_SUPERSEDED_REASON,
   SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
   SES_SUPPORTING_REPORT_MAX_BYTES,
+  sesCuratedBindInstantForArtifact,
+  sesCuratedBindInstantsByDocument,
   type SesCuratedSourceSupersession,
   sesCuratedSourceSupersessionsFromEvents,
   sesSupportingReportDocumentBinding,
@@ -195,38 +197,61 @@ export const SES_CURATED_SOURCE_RECOVERY_ACTION =
   "POST ops-api?action=bind_current_cycle_curated_makesafe_report with job_id, document_id, pdf_base64, pdf_sha256 (sha256:<64 lowercase hex>), report_job (photo content_sha256 same format), curation_revision_id, and curation_artifact_id; server derives current attendance cycle, renderer provenance, artifact content hash and report_input_hash, then establishes cycle attribution. Then prepare_ses_docket_revision (dry_run or draft only).";
 
 /**
- * Curated-bind supersessions recorded on ONE job. `null` means the audit trail
- * could not be read, which every caller must treat as untrusted rather than as
- * "no supersession" - a superseded report is the one thing that must never
- * reach a builder.
+ * What ONE job's append-only curated-bind trail records: the supersessions it
+ * declares, and when each document's current bind was made. Both come from the
+ * same rows, so they are read once together.
  */
-async function loadSesCuratedSourceSupersessions(
+interface SesCuratedBindAudit {
+  supersessions: SesCuratedSourceSupersession[];
+  /** document id -> ISO instant of that document's newest curated bind. */
+  bind_instants: Map<string, string>;
+}
+
+/**
+ * Curated-bind audit for ONE job. `null` means the audit trail could not be
+ * read, which every caller must treat as untrusted rather than as "no
+ * supersession" - a superseded report is the one thing that must never reach a
+ * builder.
+ */
+async function loadSesCuratedBindAudit(
   client: SesSupabaseClient,
   jobId: string,
-): Promise<SesCuratedSourceSupersession[] | null> {
+): Promise<SesCuratedBindAudit | null> {
   if (!String(jobId || "").trim()) return null;
   const response = await client.from("job_events")
     .select("detail_json,created_at")
     .eq("job_id", jobId)
     .eq("event_type", SES_CURATED_SOURCE_BIND_EVENT_TYPE);
   if (response.error) return null;
-  return sesCuratedSourceSupersessionsFromEvents(response.data || []);
+  const rows = response.data || [];
+  return {
+    supersessions: sesCuratedSourceSupersessionsFromEvents(rows),
+    bind_instants: sesCuratedBindInstantsByDocument(rows),
+  };
 }
 
 async function verifyStoredSupportingReport(
   client: SesSupabaseClient,
   artifact: Record<string, any>,
-  supersessions: SesCuratedSourceSupersession[] | null,
+  audit: SesCuratedBindAudit | null,
 ): Promise<SesSupportingReportTrust> {
-  const inspected = inspectSesSupportingReportProof(artifact);
+  // The bind instant is what makes the renderer identity judgeable against the
+  // register window that was open when the bind happened, rather than against
+  // today's pin. An unreadable trail supplies none, which leaves the current
+  // pin as the only acceptable stamp - the refusal that already existed.
+  const inspected = inspectSesSupportingReportProof(artifact, {
+    curated_bind_at: audit
+      ? sesCuratedBindInstantForArtifact(artifact, audit.bind_instants)
+      : null,
+  });
   if (!inspected.trusted) return inspected;
-  if (!supersessions) {
+  if (!audit) {
     return {
       trusted: false,
       reason: SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
     };
   }
-  if (sesSupportingReportIsSuperseded(artifact, supersessions)) {
+  if (sesSupportingReportIsSuperseded(artifact, audit.supersessions)) {
     return { trusted: false, reason: SES_CURATED_SOURCE_SUPERSEDED_REASON };
   }
   const metadata = object(artifact.metadata);
@@ -941,7 +966,7 @@ export async function loadSesCockpitDocket(
       ? await verifyStoredSupportingReport(
         client,
         reportArtifacts[0],
-        await loadSesCuratedSourceSupersessions(client, jobId),
+        await loadSesCuratedBindAudit(client, jobId),
       )
       : {
         trusted: false as const,
@@ -2449,16 +2474,16 @@ export async function getSesReviewablePackAction(
       }).`,
     });
   }
-  const supersessions = physicalReview
-    ? await loadSesCuratedSourceSupersessions(client, String(docket.job_id))
-    : [];
+  const bindAudit = physicalReview
+    ? await loadSesCuratedBindAudit(client, String(docket.job_id))
+    : { supersessions: [], bind_instants: new Map<string, string>() };
   const projectedArtifacts = await Promise.all(
     (artifactsResponse.data || []).map(async (artifact: any) => {
       if (physicalReview && artifact.role === "supporting_report_pdf") {
         const trust = await verifyStoredSupportingReport(
           client,
           artifact,
-          supersessions,
+          bindAudit,
         );
         if (!trust.trusted) {
           return {
@@ -4716,10 +4741,10 @@ async function assertSesReleasedSourcesNotSuperseded(
       ? await client.from("makesafe_docket_artifacts")
         .select("role,metadata").eq("revision_id", revisionId)
       : { data: null, error: { message: "job identity missing" } };
-    const supersessions = jobId
-      ? await loadSesCuratedSourceSupersessions(client, jobId)
+    const bindAudit = jobId
+      ? await loadSesCuratedBindAudit(client, jobId)
       : null;
-    if (revision.error || !jobId || artifacts.error || !supersessions) {
+    if (revision.error || !jobId || artifacts.error || !bindAudit) {
       throw new SesActionError(
         409,
         curatedSourceMissingRefusal(
@@ -4729,7 +4754,7 @@ async function assertSesReleasedSourcesNotSuperseded(
     }
     const superseded = (artifacts.data || []).some((artifact: any) =>
       artifact.role === "supporting_report_pdf" &&
-      sesSupportingReportIsSuperseded(artifact, supersessions)
+      sesSupportingReportIsSuperseded(artifact, bindAudit.supersessions)
     );
     if (superseded) {
       throw new SesActionError(

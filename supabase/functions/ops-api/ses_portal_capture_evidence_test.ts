@@ -86,6 +86,9 @@ function clientFor(
         eq() {
           return query;
         },
+        in() {
+          return query;
+        },
         neq() {
           return query;
         },

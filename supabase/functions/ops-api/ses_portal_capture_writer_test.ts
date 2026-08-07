@@ -248,6 +248,7 @@ function clientFor(live: Record<string, unknown>, ledger: LedgerDouble) {
         select: () => query,
         eq: () => query,
         neq: () => query,
+        in: () => query,
         order: () => query,
         maybeSingle: () => {
           single = true;
