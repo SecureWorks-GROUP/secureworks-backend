@@ -994,26 +994,45 @@ or off APPROVE INVOICE is a card becoming more approvable. A bound card
 publishes `not_evaluated` ("nobody asked"), which is never "no other money" and
 never a licence to mint.
 
-**`report_sent_at` is wrong in both directions.** The retired
-`ready_to_invoice` auto-stamp minted it for sends that never happened, while a
-card sent through the sealed release graph gets none. Across the 419-card board
-on 2026-08-06, 33 cards carried a stamp, 15 carried a real route proof, and the
-two sets did **not intersect at all**. Send truth is `ses_release_route_proofs`
-(carries `job_id`), `route_send` effects reached through
-`makesafe_release_revision_members` (**never** `ses_external_effects.job_id`,
-NULL on every such row — a direct join reads as "nothing sent"), a sent
-`makesafe_report_packs.status`, or the legacy `MAKESAFE_PACK_SENT` marker.
-Clearing a false stamp goes through `correct_makesafe_false_send_stamp`
-(`makesafe_false_send_stamp.ts`), which re-derives all four server-side, only
-ever CLEARS, and fails closed on an unreadable surface. It is sanctioned but NOT
-exclusive: `update_makesafe_details` still carries `report_sent_at` on its
-allow-list with no privilege gate and no send derivation, which is why the
-guarded clear is a COMPARE-AND-SET (a stamp that moves under it is
-`stamp_drift`, never a clobber) and why a clean board today is a measurement,
-not a guarantee.
+**`report_sent_at` is DERIVED from a recorded send, never asserted.** The
+retired `ready_to_invoice` auto-stamp minted it for sends that never happened,
+while a card sent through the sealed release graph got none — wrong in both
+directions. Across the 419-card board on 2026-08-06, 33 cards carried a stamp,
+15 carried a real route proof, and the two sets did **not intersect at all**.
+Send truth is `ses_release_route_proofs` (carries `job_id`), `route_send`
+effects reached through `makesafe_release_revision_members` (**never**
+`ses_external_effects.job_id`, NULL on every such row — a direct join reads as
+"nothing sent"), a sent `makesafe_report_packs.status`, or the legacy
+`MAKESAFE_PACK_SENT` marker.
 
-Both measurements, the applied 5-card correction and the open accounting
-question on the seven PAID cards are in
+There are exactly THREE producers, named in `makesafe_report_sent_stamp.ts`, and
+none takes a timestamp from a caller: `applyMakesafeCloseOut` (legacy pack
+close, both call sites gated on a real send), the sealed release graph
+(`stampMakesafeReportSentFromRouteProofs`, stamping each release MEMBER from the
+earliest `proven_at` after the closeout read-back — never from
+`route_proofs.job_id`, which holds the first member's id alone), and the
+privileged `correct_makesafe_false_send_stamp`, which only ever CLEARS. The
+first two are strictly additive: a compare-and-set on `report_sent_at IS NULL`,
+so a real stamp is never overwritten, and no branch writes null.
+`update_makesafe_details` REFUSES the field entirely (400, `null` included) —
+do not re-add it to any general-purpose editor, and do not build a
+set-on-demand action; that is the same hole under a new name. The guarded clear
+stays a COMPARE-AND-SET because a derived producer can still move the stamp
+under it (`stamp_drift`, never a clobber).
+
+Blast radius is re-provable read-only and exits non-zero if any card would lose
+a stamp: `scripts/ses-report-sent-at-blast-radius.ts`. Measured 2026-08-07 over
+461 cards: 31 stamped (28 corroborated, 3 with no surface at all), and **229
+unstamped cards DO carry send evidence** — a historical gap deliberately not
+backfilled, because writing those stamps changes `sentClosed` surfacing on 229
+live cards. Queens Park SWMS-26845 is the named conflict: it carries a
+`MAKESAFE_PACK_SENT` marker (`msgid=-`) while standing instructions say it was
+never sent, so it must be adjudicated before anyone acts on that gap.
+
+The derivation contract, the caller inventory and the per-card blast radius are
+in `docs/evidence/ses-report-sent-at-derived-2026-08-07.md`. Both earlier
+measurements, the applied 5-card correction and the open accounting question on
+the seven PAID cards are in
 `docs/evidence/ses-manufactured-blockers-2026-08-07.md`.
 
 ## A DRAFT Invoice Never Closes A Card, And The Visible Ladder Has A Version

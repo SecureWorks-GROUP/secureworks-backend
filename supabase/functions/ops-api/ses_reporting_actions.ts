@@ -8,6 +8,11 @@ import {
   splitRefPo,
 } from "./makesafe_send_pack.ts";
 import { composeInvoiceReferenceWithPo } from "./ses_invoice_reference_grain.ts";
+// A sealed-release send used to leave `report_sent_at` untouched, so the field
+// was wrong in BOTH directions: false where the retired auto-stamp minted it,
+// absent where a pack demonstrably shipped. The route proof is the send record;
+// this stamps the card from it, additively and without ever throwing.
+import { stampMakesafeReportSentFromRouteProofs } from "./makesafe_report_sent_stamp.ts";
 import {
   NOT_EVALUATED_CARD_MONEY,
   readSesExistingCardMoneyForJob,
@@ -5200,12 +5205,39 @@ export async function executeSesReleaseRevisionAction(
         : "All three routes are sent, but the independent closeout read-back does not prove the exact route-proof set; do not send again.",
     });
   }
+  // ── Derive `report_sent_at` from the send that just closed out ──
+  // Runs ONLY after the closeout read-back proved the exact route-proof set, so
+  // it can never stamp a half-sent release. Every card on the release is stamped
+  // from its own earliest `proven_at`; the helper is additive (a card that
+  // already carries a stamp keeps it) and never throws, so a stamping fault
+  // cannot turn a delivered pack into a failed action or invite a re-send.
+  // Cards come from the release MEMBER set, never from `route_proofs.job_id` —
+  // that column holds the first member's id alone, so keying on it would stamp
+  // one card of a multi-card release and silently skip the others.
+  const reportSentStampJobIds: string[] = [];
+  for (const member of members) {
+    const memberJobId = String(member?.job_id || "").trim();
+    if (memberJobId && !reportSentStampJobIds.includes(memberJobId)) {
+      reportSentStampJobIds.push(memberJobId);
+    }
+  }
+  const reportSentStamps = [];
+  for (const jobId of reportSentStampJobIds) {
+    reportSentStamps.push(
+      await stampMakesafeReportSentFromRouteProofs(client, jobId, routeProofs, {
+        releaseRevisionId: args.release_revision_id,
+        actor: args.actor,
+      }),
+    );
+  }
+
   return {
     state: "released",
     release_revision_id: args.release_revision_id,
     release_content_hash: release.content_hash,
     route_proofs: routeProofs,
     closeout: verification.data,
+    report_sent_at_stamps: reportSentStamps,
   };
 }
 

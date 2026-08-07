@@ -17,17 +17,22 @@
  * producer left behind, and it is the SANCTIONED way to do it — a direct
  * `update` could erase the stamp of a card that really was sent.
  *
- * KNOWN OPEN HOLE: that sanction is NOT ENFORCED
- * ----------------------------------------------
- * This is the sanctioned path, not the only possible one. `update_makesafe_details`
- * (index.ts, the make-safe detail field allow-list) still carries
- * `report_sent_at` with no privilege gate and no send-truth derivation, so any
- * caller of that action can clear a REAL send's stamp or SET a false one — the
- * exact failure mode this module exists to prevent. The applied 5-card
- * correction script itself went through that unguarded door. Closing it is a
- * behaviour decision that was deliberately deferred (no-coding day, ticketed
- * separately); do not read this module's existence as proof the field is
- * protected. See docs/evidence/ses-manufactured-blockers-2026-08-07.md.
+ * THE SANCTION IS NOW ENFORCED (2026-08-07)
+ * -----------------------------------------
+ * `update_makesafe_details` used to carry `report_sent_at` on its ordinary field
+ * allow-list with no privilege gate and no send-truth derivation, so any caller
+ * of that action could clear a REAL send's stamp or SET a false one — the exact
+ * failure mode this module exists to prevent, and the door the applied 5-card
+ * correction script itself went through. That editor now REFUSES any request
+ * naming the field (`makesafe_report_sent_stamp.ts`), so this is the only path
+ * that clears a stamp, and the only paths that set one are the two derived
+ * producers named in that module. See
+ * docs/evidence/ses-report-sent-at-derived-2026-08-07.md and
+ * docs/evidence/ses-manufactured-blockers-2026-08-07.md.
+ *
+ * Do not re-add the field to any general-purpose editor. `report_sent_at`
+ * asserts something that happened OUTSIDE this system, and no editor here can
+ * check it.
  *
  * WHAT IT WILL AND WILL NOT DO
  * ----------------------------
@@ -372,11 +377,12 @@ export async function correctMakesafeFalseSendStamps(
     }
 
     // COMPARE-AND-SET, not read-then-write. The drift check above is a read,
-    // and `update_makesafe_details` (the still-unguarded door in the module
-    // header) can move `report_sent_at` between that read and this write — an
-    // unconditional clear would erase whatever landed there while the audit
-    // event recorded the stale `before`. Matching the observed value makes the
-    // race a zero-row update, which is reported as drift rather than success.
+    // and a derived producer (a concurrent close-out, or a sealed release the
+    // Captain sent while this correction was in flight) can move
+    // `report_sent_at` between that read and this write — an unconditional clear
+    // would erase whatever landed there while the audit event recorded the stale
+    // `before`. Matching the observed value makes the race a zero-row update,
+    // which is reported as drift rather than success.
     const nowIso = new Date().toISOString();
     const { data: updated, error: updateErr } = await client
       .from("makesafe_job_details")
