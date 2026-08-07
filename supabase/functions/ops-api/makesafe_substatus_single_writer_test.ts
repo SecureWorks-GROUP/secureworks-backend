@@ -176,7 +176,7 @@ function collectWriteSites(src: string): WriteSite[] {
   const sites: WriteSite[] = []
   let from = src.indexOf(TABLE)
   while (from !== -1) {
-    let cursor = from + TABLE.length
+    const cursor = from + TABLE.length
     // Walk the chain to the first method call after `from(...)`.
     const chain = /^[\s\r\n]*\.\s*(\w+)\s*\(/
     const rest = src.slice(cursor, cursor + 400)
