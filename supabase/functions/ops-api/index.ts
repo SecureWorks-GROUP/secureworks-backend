@@ -363,6 +363,13 @@ import {
   correctMakesafeFalseSendStamps as _correctMakesafeFalseSendStamps,
   FalseSendStampRequestError as _FalseSendStampRequestError,
 } from './makesafe_false_send_stamp.ts'
+// report_sent_at is derived from a recorded send, never asserted by a caller.
+// This module names the producers and carries the refusal the generic detail
+// editor throws when a caller tries to supply the field.
+import {
+  bodyAssertsReportSentAt as _bodyAssertsReportSentAt,
+  REPORT_SENT_AT_ASSERTION_REFUSAL as _REPORT_SENT_AT_ASSERTION_REFUSAL,
+} from './makesafe_report_sent_stamp.ts'
 import {
   degradedIntakeExceptionProjection as _degradedIntakeExceptionProjection,
   findIntakeExceptionItem as _findIntakeExceptionItem,
@@ -13802,11 +13809,22 @@ async function updateMakesafeDetails(client: any, body: any, opts: { authMode?: 
   const jId = job_id || jobId
   if (!jId) throw new Error('job_id required')
 
+  // `report_sent_at` is NOT on this list and must never be re-added. It is the
+  // one field here that asserts something happened OUTSIDE this system — that a
+  // builder received a report — and this editor has no way to check. A caller
+  // could set a stamp for a send that never happened (the card then drops out of
+  // every chase silently) or clear one for a send that did. It is now derived
+  // from the send record by the producers named in makesafe_report_sent_stamp.ts,
+  // and corrected only by correct_makesafe_false_send_stamp.
+  if (_bodyAssertsReportSentAt(body)) {
+    throw new ApiError(_REPORT_SENT_AT_ASSERTION_REFUSAL, 400)
+  }
+
   const allowed = [
     'requesting_company_id', 'requesting_company_slug', 'requesting_company_name',
     'external_ref', 'substatus', 'safety_requirements', 'special_instructions',
     'external_links', 'billing_rules', 'invoice_notes',
-    'company_contacted_at', 'report_received_at', 'report_sent_at', 'invoice_ready_at',
+    'company_contacted_at', 'report_received_at', 'invoice_ready_at',
   ]
   const updates: Record<string, any> = { updated_at: new Date().toISOString() }
   for (const key of allowed) {
@@ -13828,6 +13846,10 @@ async function updateMakesafeDetails(client: any, body: any, opts: { authMode?: 
   if (error) throw error
   return { ok: true, details: data }
 }
+// Test-only export: the `report_sent_at` refusal is the whole point of this
+// editor's field list, and a source-reading assertion would not prove the door
+// actually throws.
+export const _updateMakesafeDetails = updateMakesafeDetails
 
 const RECONCILE_MAKESAFE_FAMILIES = new Set([
   'assessment_report_quote',

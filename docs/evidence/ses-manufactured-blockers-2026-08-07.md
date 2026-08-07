@@ -81,6 +81,13 @@ privileged call after `ops-api` deploys from `main` should return
 
 ### KNOWN OPEN HOLE: the sanctioned path is not the ONLY path
 
+> **CLOSED LATER THE SAME DAY (2026-08-07).** The deferred fix landed:
+> `update_makesafe_details` now REFUSES any request naming `report_sent_at`
+> (400, `null` included), and a sealed-release send stamps the field from its
+> own route proofs. The current derivation contract is owned by
+> `docs/evidence/ses-report-sent-at-derived-2026-08-07.md`; the text below is
+> the state at the time of this investigation, kept for the record.
+
 `correct_makesafe_false_send_stamp` is the sanctioned way to clear
 `report_sent_at`; its exclusivity is **not enforced**. `update_makesafe_details`
 (`index.ts`, the make-safe detail field allow-list) still carries

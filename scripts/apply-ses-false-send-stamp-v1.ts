@@ -25,9 +25,15 @@
  * --------------
  * `makesafe_job_details.report_sent_at` -> NULL, and nothing else. It never
  * writes a substatus, a stage, an assignment, an invoice or a communication,
- * and it never SETS a stamp. Writes go through the existing typed ops-api
- * `update_makesafe_details` action (the field is on that action's allow-list);
- * no raw SQL write and no new endpoint.
+ * and it never SETS a stamp. Writes go through the guarded ops-api
+ * `correct_makesafe_false_send_stamp` action; no raw SQL write and no new
+ * endpoint.
+ *
+ * (Originally it wrote `{ report_sent_at: null }` through
+ * `update_makesafe_details`, because the field sat on that editor's ordinary
+ * allow-list. That door was closed on 2026-08-07 — the field is now derived
+ * from a recorded send and the editor refuses any request naming it — so the
+ * old write would 400. See `clearStamp` below.)
  *
  * THE GUARD, AND THE JOIN THAT IS A TRAP
  * --------------------------------------
@@ -48,9 +54,9 @@
  *
  * The durable mechanism is the guarded ops-api action
  * `correct_makesafe_false_send_stamp` (makesafe_false_send_stamp.ts), which
- * enforces all of the above server-side. This script exists because that action
- * is not yet deployed; it applies the identical guard from the client side and
- * writes through the already-deployed typed action.
+ * enforces all of the above server-side and is what this script now calls. The
+ * client-side assessment is kept as a second opinion, so a card this script
+ * would refuse is never even offered to the action.
  *
  * Modes:
  *   dry-run  read-only plan (default): card | stamp | each surface's count
@@ -269,16 +275,63 @@ function report(assessments: Assessment[]): void {
 // The write — through the deployed typed ops-api action, never raw SQL
 // ---------------------------------------------------------------------------
 
-async function clearStamp(jobId: string): Promise<void> {
+/**
+ * REPOINTED. This used to write `{ report_sent_at: null }` through
+ * `update_makesafe_details`, which was possible only because that editor
+ * carried the field on its ordinary allow-list — the unguarded door the module
+ * header called out. That door is now closed: the field is derived from a
+ * recorded send, and the editor refuses any request that names it at all
+ * (`bodyAssertsReportSentAt`), so the old write would now 400.
+ *
+ * The correction goes through `correct_makesafe_false_send_stamp`, which
+ * enforces server-side the identical guard this script computes client-side —
+ * the same four surfaces, the same fail-closed reading, plus a compare-and-set
+ * on the stamp the caller observed. Belt and braces: this script keeps its own
+ * assessment (so a card it would refuse is never even offered), and the action
+ * refuses independently if production disagrees.
+ */
+async function clearStamp(jobId: string, observedStamp: string): Promise<void> {
   const key = Deno.env.get("SW_API_KEY");
   if (!key) throw new Error("SW_API_KEY required for apply");
-  const res = await fetch(`${FUNCTIONS_BASE}/ops-api?action=update_makesafe_details`, {
-    method: "POST",
-    headers: { "x-api-key": key, "Content-Type": "application/json" },
-    body: JSON.stringify({ job_id: jobId, report_sent_at: null }),
-  });
+  const res = await fetch(
+    `${FUNCTIONS_BASE}/ops-api?action=correct_makesafe_false_send_stamp`,
+    {
+      method: "POST",
+      headers: { "x-api-key": key, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_ids: [jobId],
+        expected_report_sent_at: { [jobId]: observedStamp },
+        reason:
+          `${RUN_LABEL}: retired ready_to_invoice auto-stamp; no send on any of the four surfaces`,
+        dry_run: false,
+      }),
+    },
+  );
   const text = await res.text();
-  if (!res.ok) throw new Error(`update_makesafe_details failed ${res.status}: ${text.slice(0, 400)}`);
+  if (!res.ok) {
+    throw new Error(
+      `correct_makesafe_false_send_stamp failed ${res.status}: ${text.slice(0, 400)}`,
+    );
+  }
+  // The action returns 200 with a per-card outcome; a refusal is NOT an HTTP
+  // error, so an unchecked 200 would report a clear that never happened.
+  let parsed: {
+    results?: Array<
+      { outcome?: string; refusal_code?: string; refusal_fact?: string }
+    >;
+  };
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`correct_makesafe_false_send_stamp returned unparseable JSON: ${text.slice(0, 200)}`);
+  }
+  const outcome = (parsed?.results || [])[0];
+  if (outcome?.outcome !== "cleared") {
+    throw new Error(
+      `correct_makesafe_false_send_stamp did not clear ${jobId}: ` +
+        `${outcome?.outcome ?? "no result"} (${outcome?.refusal_code ?? "-"}) ${outcome?.refusal_fact ?? ""}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -334,8 +387,14 @@ async function main(): Promise<number> {
       failed++;
       continue;
     }
+    const observedStamp = recheck.live?.stamp ?? a.live?.stamp ?? null;
+    if (!observedStamp) {
+      console.error(`  ${a.card}: REFUSED at apply — no observed stamp to compare-and-set against`);
+      failed++;
+      continue;
+    }
     try {
-      await clearStamp(a.jobId);
+      await clearStamp(a.jobId, observedStamp);
       console.log(`  ${a.card}: cleared`);
       ledger.push({
         card: a.card,

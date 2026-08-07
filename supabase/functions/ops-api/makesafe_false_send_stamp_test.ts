@@ -369,8 +369,9 @@ Deno.test("the clear is a compare-and-set: a stamp that moves mid-apply is a los
     if (t === "makesafe_job_details") {
       const origUpdate = q.update.bind(q);
       q.update = (payload: any) => {
-        // Another writer (the unguarded update_makesafe_details door) moves the
-        // stamp after the drift read and before this write.
+        // Another writer (a derived producer: a concurrent close-out, or a
+        // sealed release sent mid-correction) moves the stamp after the drift
+        // read and before this write.
         store.makesafe_job_details[0].report_sent_at = "2026-08-01T00:00:00.000Z";
         return origUpdate(payload);
       };
