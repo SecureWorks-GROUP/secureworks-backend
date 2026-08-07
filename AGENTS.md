@@ -1416,6 +1416,47 @@ matching `ops-api`; keep live seed invocation dark until the migration-first
 deploy and schema gate complete. Detailed ownership and sequencing live in
 `docs/makesafe-board-read-model-v1.md`.
 
+## `xero_outcome_unknown` Is Often A Guard Refusal, Not A Transport Failure
+
+`executeSesExternalEffect` catches EVERY throw from `adapter.dispatch` into state
+`unknown` with `xero_outcome_unknown`. A guard that throws before the Xero call
+(the item-14 portal-truth guard is the live example) is therefore reported as
+"Xero accepted or may have accepted" when nothing was created. Read
+`ses_external_effects.failure.message` for the real cause BEFORE treating one as a
+transport incident — the refusal text is only there.
+
+That misclassification costs the operation key: `unknown` is reconcile-only
+forever, and reconcile searches the mirror by `ses_external_token`, then the effect
+`external_id` checkpoint, then a legacy `Reference.Contains` that a modern
+builder-facing reference never carries. So a guard-refused mint can never
+re-dispatch under that obligation revision. Recovery is a FRESH
+`prepare_ses_invoice_obligation` (new revision id, new operation key) — never a
+retry, and never clearing the effect row. Corroborate "nothing was created" from
+Xero invoice numbering, not from the mirror alone. Worked case (three roof cards,
+0 minted): `docs/evidence/ses-roof-remint-three-2026-08-07.md`.
+
+## The Item-14 Portal Guard Reads A Marker, Not The Capture Table
+
+`portalVerificationSatisfied` (`makesafe_portal_guard.ts`) reads exactly
+`makesafe_job_details.portal_verified_at` / `.portal_verified_cycle`. It never
+consults `makesafe_portal_capture_revisions`, so a report-type card can hold a
+`verified` / `done`, current-cycle, `capture_portal_evidence.py/v1` capture with a
+form-locked signal and still refuse both a substatus advance and a DRAFT mint.
+Measured 2026-08-07: three roof cards in exactly that state, captures days old and
+the marker never recorded — a standing gap, not a race.
+
+The only recorder is `mark_makesafe_portal_report_done`, which ALSO advances
+substatus to `admin_to_send_report` and closes open assignments as complete. It is
+an attestation plus an operational state change, so it is not a mechanical
+prerequisite an agent should satisfy on its own to make a mint go through — the
+guard exists to kill the "graf" class (roof DRAFTs cut before the portal form was
+submitted). Diagnose such a card from the two marker columns, never from the
+presence of an attached portal PDF.
+
+Adjacent, unfixed: `makesafe_job_details.external_links` rows on these cards carry
+`kind: "builder_portal"` and NO `type` key at all, so a sweep filtering
+`external_links[].type == 'roof_report'` matches none of them.
+
 ## SES Docs Ready Signoff Approves Exact Pack Bytes
 
 Apply `20260728210000_makesafe_ses_docs_ready_signoff.sql` before the matching
