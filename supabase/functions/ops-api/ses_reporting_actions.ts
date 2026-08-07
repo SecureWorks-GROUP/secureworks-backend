@@ -261,18 +261,28 @@ async function verifyStoredSupportingReport(
   );
   const provenance = object(artifact.metadata);
   const siblingJobId = String(provenance.sibling_job_id || "").trim();
-  if (
-    !curatedBindAt &&
+  const isSiblingBundle =
     String(provenance.evidence_source || "") === "explicit_sibling_bundle" &&
-    siblingJobId
-  ) {
-    const siblingAudit = await loadSesCuratedBindAudit(client, siblingJobId);
-    if (!siblingAudit) {
-      return {
-        trusted: false,
-        reason: SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
-      };
-    }
+    Boolean(siblingJobId);
+  // A sibling bundle's report document belongs to the SIBLING job, so BOTH
+  // questions this audit answers are recorded on that job's trail and never on
+  // the docket's: when the document was bound, and whether a later bind has
+  // superseded it. Scoping the supersession read to the docket job does not
+  // merely miss rows - `sesSupportingReportIsSuperseded` filters by the
+  // artifact's own (sibling) document id, which the docket job's events can
+  // never carry, so the filter is empty for every bundle and the answer is
+  // always "not superseded". A sibling report corrected on its own job would be
+  // served to a builder, which is the one thing that must never happen.
+  const siblingAudit = isSiblingBundle
+    ? await loadSesCuratedBindAudit(client, siblingJobId)
+    : null;
+  if (isSiblingBundle && !siblingAudit) {
+    return {
+      trusted: false,
+      reason: SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
+    };
+  }
+  if (!curatedBindAt && siblingAudit) {
     curatedBindAt = sesCuratedBindInstantForArtifact(
       artifact,
       siblingAudit.bind_instants,
@@ -282,7 +292,12 @@ async function verifyStoredSupportingReport(
     curated_bind_at: curatedBindAt,
   });
   if (!inspected.trusted) return inspected;
-  if (sesSupportingReportIsSuperseded(artifact, audit.supersessions)) {
+  if (
+    sesSupportingReportIsSuperseded(
+      artifact,
+      (siblingAudit || audit).supersessions,
+    )
+  ) {
     return { trusted: false, reason: SES_CURATED_SOURCE_SUPERSEDED_REASON };
   }
   const metadata = object(artifact.metadata);

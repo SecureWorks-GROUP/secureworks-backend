@@ -1899,3 +1899,83 @@ Deno.test("SEND IT still refuses a one-route release whose single route is not t
   assertEquals(error.status, 409);
   assertEquals(sentSubjects, []);
 });
+
+Deno.test(
+  "a sibling bundle superseded on its OWN job is suppressed, not served",
+  async () => {
+    // A bundle's report document belongs to the sibling job, so the correction
+    // that supersedes it is recorded on THAT job's trail. Reading supersessions
+    // from the docket job filters by the sibling's document id against events
+    // that can never carry it, so the answer is always "not superseded" and the
+    // superseded report reaches the builder - the one outcome the supersession
+    // ledger exists to prevent.
+    const bytes = new TextEncoder().encode("%PDF-1.7\nsuperseded sibling");
+    const contentHash = await sesSha256Bytes(bytes);
+    const rawHash = await rawSha256(bytes);
+    const superseded = MAKESAFE_REPORT_RENDERER_AUTHORITY_REGISTER[1];
+    const artifact = {
+      role: "supporting_report_pdf",
+      object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+      media_type: "application/pdf",
+      content_hash: contentHash,
+      size_bytes: bytes.byteLength,
+      metadata: {
+        source_kind: "durable_curated_revision",
+        source_identity: SUPERSEDED_IDENTITY,
+        source_document_id: "sibling-document",
+        report_document_id: "sibling-document",
+        source_revision_id: "asbestos-misstatement",
+        source_artifact_id: "asbestos-misstatement",
+        source_artifact_content_hash: contentHash,
+        expected_raw_sha256: `sha256:${rawHash}`,
+        output_sha256: `sha256:${rawHash}`,
+        render_hash: rawHash,
+        report_input_hash: SUPERSEDED_INPUT,
+        evidence_source: "explicit_sibling_bundle",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        bundle_id: "bundle-fixture",
+        sibling_job_id: "sibling-job-fixture",
+        binding_revision_id: "binding-revision-fixture",
+        report_renderer_version: makesafeRendererAuthorityVersion(superseded),
+        report_renderer_source_revision: superseded.source_revision,
+        report_renderer_script_sha256: superseded.script_sha256,
+      },
+    };
+    // Both events live on the SIBLING job: the bind that supplies the instant,
+    // and the correction that supersedes the bytes this artifact carries.
+    const siblingBind = {
+      job_id: "sibling-job-fixture",
+      created_at: "2026-08-05T00:00:00.000Z",
+      detail_json: { document_id: "sibling-document" },
+    };
+    const siblingSupersession = {
+      job_id: "sibling-job-fixture",
+      created_at: "2026-08-05T01:00:00.000Z",
+      detail_json: {
+        document_id: "sibling-document",
+        supersedes_prior_bind: true,
+        source_identity: CORRECTED_IDENTITY,
+        expected_raw_sha256: CORRECTED_RAW,
+        report_input_hash: CORRECTED_INPUT,
+        prior_source_identity: SUPERSEDED_IDENTITY,
+        prior_expected_raw_sha256: `sha256:${rawHash}`,
+        prior_report_input_hash: SUPERSEDED_INPUT,
+      },
+    };
+    const { client, signedPaths } = reviewPackClient(artifact, bytes, {
+      jobEvents: [siblingBind, siblingSupersession],
+    });
+    const pack = await getSesReviewablePackAction(
+      client,
+      { mode: "api_key", user: null },
+      "docket-fixture",
+    );
+    assertEquals(pack.artifacts, []);
+    assertEquals(
+      pack.suppressed_artifacts[0].suppression_reason,
+      "curated_source_superseded",
+    );
+    // Suppressed means suppressed: no signed URL is ever handed out for it.
+    assertEquals(signedPaths, []);
+  },
+);
