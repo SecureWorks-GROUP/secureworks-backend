@@ -86,10 +86,26 @@ Three independent arguments, any one of which is sufficient:
    SWMS-26931 matched INV-1051; SWMS-26845 silent).
 
 The C1 single-card entrypoint deliberately still supplies `external_ref` alone.
-That is safe by construction, not by luck — an absent PO contributes no digits,
-pinned by `an absent PO leaves the production cohort byte-identical`. Plumbing it
-needs a `SUPABASE_SERVICE_ROLE_KEY` this lane does not hold, so it could not be
-proved live; see Tier 2.
+That is safe by construction, not by luck: identity no eligible invoice names
+contributes nothing, pinned by `identity no invoice names leaves the production
+cohort byte-identical`. Plumbing it needs a `SUPABASE_SERVICE_ROLE_KEY` this lane
+does not hold, so it could not be proved live; see Tier 2.
+
+The first version of that test was VACUOUS and is worth recording, because a
+green test that cannot fail is worse than no test — it gets cited as proof, and
+it was: this document cited it as the C1 safety proof. It mapped over the fixture
+stripping `builder_po_number`, but the fixture carries zero such keys, so it
+compared the base derivation against itself and passed identically with or
+without the de-duplication or the PO wiring. Review caught it. The replacement
+gives every fixture job a card-unique synthetic purchase order that no invoice
+reference names, and seeds the first cards with DECOYS — the leading
+`SES_MIN_REFERENCE_DIGITS` of a longer invoice run, which a whole-run comparison
+can never match but a substring test would. It is mutation-proven in both
+directions: red when `invoiceNamesBuilderReference` is switched to substring
+containment, and the sibling `a redundant PO leaves the production cohort
+byte-identical` red when the `new Set` de-duplication is removed. Mutation-test
+every claim-bearing test here; the cheap discriminator is to break the thing the
+test names and confirm it goes red.
 
 ## 4. The three faces, as measured
 
