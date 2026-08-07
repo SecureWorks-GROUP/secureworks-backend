@@ -67,12 +67,8 @@ import {
   createSesDocketPersistenceAdapter,
   SES_DOCKET_BUCKET,
 } from "./ses_docket_persistence.ts";
-import {
-  isCurrentCuratedRendererVersion,
-  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-  MAKESAFE_REPORT_CONTRACT_VERSION,
-} from "./makesafe_report_render.ts";
+import { MAKESAFE_REPORT_CONTRACT_VERSION } from "./makesafe_report_render.ts";
+import { makesafeRendererStampAuthorisedAtBind } from "./makesafe_report_renderer_authority.ts";
 import {
   renderRoofReportPdf,
   type RoofReportJob,
@@ -83,7 +79,10 @@ import { isBundledCoverageSendNote } from "./makesafe_send_pack.ts";
 import { renderSesSwmsPdf } from "./ses_swms_render.ts";
 import {
   inspectSesSupportingReportProof,
+  SES_CURATED_SOURCE_BIND_EVENT_TYPE,
   SES_SUPPORTING_REPORT_MAX_BYTES,
+  sesCuratedBindInstantForArtifact,
+  sesCuratedBindInstantsByDocument,
   sesSupportingReportDocumentBinding,
 } from "./ses_supporting_report_trust.ts";
 import {
@@ -186,7 +185,14 @@ export interface SesAssemblerLiveSnapshot {
   legacy_packs: LiveRow[];
   docket_revisions?: LiveRow[];
   docket_artifacts?: LiveRow[];
+  /** `job_events` rows of type `note` only. */
   events?: LiveRow[];
+  /**
+   * The job's own append-only curated-bind audit rows. Their `created_at` is
+   * the instant a document's renderer identity was stamped, which is what the
+   * renderer register is asked about — never today's pin.
+   */
+  curated_bind_events?: LiveRow[];
   bundle_bindings?: LiveRow[];
   bundle_claims?: LiveRow[];
   bundle_jobs?: LiveRow[];
@@ -1897,7 +1903,10 @@ export async function loadSesAssemblerLiveSnapshot(
         .from("job_events")
         .select("id,job_id,event_type,detail_json,created_at")
         .eq("job_id", jobId)
-        .eq("event_type", "note")
+        // Two consumers, one round trip: bundle-candidate notes, and the
+        // append-only curated-bind trail whose `created_at` is the only record
+        // of WHEN a document's renderer identity was stamped.
+        .in("event_type", ["note", SES_CURATED_SOURCE_BIND_EVENT_TYPE])
         .order("created_at", { ascending: false }),
       "job_events.bundle_candidate",
     ),
@@ -2243,7 +2252,12 @@ export async function loadSesAssemblerLiveSnapshot(
     legacy_packs: packs,
     docket_revisions: docketRevisions,
     docket_artifacts: docketArtifacts,
-    events,
+    events: (events || []).filter((row: LiveRow) =>
+      text(row.event_type) === "note"
+    ),
+    curated_bind_events: (events || []).filter((row: LiveRow) =>
+      text(row.event_type) === SES_CURATED_SOURCE_BIND_EVENT_TYPE
+    ),
     bundle_bindings: bundleBindings,
     bundle_claims: bundleClaims,
     bundle_jobs: bundleJobs,
@@ -2280,6 +2294,9 @@ function durableCuratedDocumentForCycle(
   snapshot: SesAssemblerLiveSnapshot,
   currentCycleId: string,
 ): LiveRow | null {
+  const bindInstants = sesCuratedBindInstantsByDocument(
+    snapshot.curated_bind_events || [],
+  );
   return snapshot.documents
     .filter((row) => text(row.type).toLowerCase() === "makesafe_report")
     .filter((row) => row.visible_to_trades === true)
@@ -2288,9 +2305,15 @@ function durableCuratedDocumentForCycle(
       if (
         text(provenance.report_contract_version) !==
           MAKESAFE_REPORT_CONTRACT_VERSION ||
-        !isCurrentCuratedRendererVersion(
-          text(provenance.report_renderer_version),
-        ) ||
+        // Bind-time validity, the same register as the served-pack trust check.
+        // A re-pin closes the outgoing identity's window; it does not make the
+        // binds already stamped under it untrue, and this filter must not drop
+        // them. A bind made now still has to carry the current pin.
+        !makesafeRendererStampAuthorisedAtBind({
+          version: provenance.report_renderer_version,
+          source_revision: provenance.report_renderer_source_revision,
+          script_sha256: provenance.report_renderer_script_sha256,
+        }, bindInstants.get(text(row.id)) || null) ||
         !/^[0-9a-f]{64}$/.test(text(provenance.report_render_hash)) ||
         text(provenance.evidence_source) !==
           "current_cycle_curated_makesafe_report" ||
@@ -2302,10 +2325,6 @@ function durableCuratedDocumentForCycle(
         !text(provenance.curated_source_artifact_id) ||
         !isSesSha256(text(provenance.curated_source_artifact_content_hash)) ||
         !isSesSha256(text(provenance.curated_source_expected_raw_sha256)) ||
-        text(provenance.report_renderer_source_revision) !==
-          MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION ||
-        text(provenance.report_renderer_script_sha256) !==
-          MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256 ||
         !/^sha256:[0-9a-f]{64}$/.test(
           text(provenance.report_input_hash),
         )
@@ -2351,6 +2370,9 @@ function physicalReportSourceForCycle(
   );
   const documents = new Map(
     snapshot.documents.map((row) => [text(row.id), row]),
+  );
+  const curatedBindInstants = sesCuratedBindInstantsByDocument(
+    snapshot.curated_bind_events || [],
   );
   const candidates: Array<PhysicalReportSource & { committed_at: string }> = [];
   for (const document of snapshot.documents) {
@@ -2423,7 +2445,12 @@ function physicalReportSourceForCycle(
       : (documentBinding === "matched"
         ? text(provenance.report_input_hash)
         : "");
-    const trust = inspectSesSupportingReportProof(artifact);
+    const trust = inspectSesSupportingReportProof(artifact, {
+      curated_bind_at: sesCuratedBindInstantForArtifact(
+        artifact,
+        curatedBindInstants,
+      ),
+    });
     // Restorable docket lineage without an independent completeness coordinate
     // (report_input_hash from curated bind accounting) is not a source. Allow
     // selection only when the document still carries a hash bound to these

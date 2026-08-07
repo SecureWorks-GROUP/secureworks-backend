@@ -2814,13 +2814,30 @@ Never add a second accepted fingerprint to smooth the transition: exactly one
 value is honoured, and widening it weakens the curated-bind evidence check
 permanently. A short honest outage is the better trade.
 
-Consequence to expect, not a defect: `inspectSesSupportingReportProof` compares
-the ARTIFACT's stamped revision/sha against the live constants, so every
-`durable_curated_revision` artifact stamped under the old pin turns
-`active_renderer_input_binding_missing` at the moment of re-pin. Those cards
-clear via `prepare_ses_docket_revision` (dry-run first), never by relaxing a
-gate. The literal old values under `data/` and `docs/evidence/` are dated bind
-records of the pin they were produced under — do not rewrite them.
+**A re-pin is a THREE-part change, in one commit.** Move both constants, close
+the outgoing entry in `makesafe_report_renderer_authority.ts` at the MEASURED
+DEPLOY INSTANT, and append the new identity with `authorised_until: null`. That
+register is the append-only record of which renderer was authoritative WHEN, and
+`makesafeRendererStampAuthorisedAtBind` is the one predicate both readers of a
+bind's renderer stamp consume — `inspectSesSupportingReportProof` (check 8) and
+the adapter's `durableCuratedDocumentForCycle`. They previously compared the
+stamp against TODAY'S constants, which un-trusted 34 live binds across 33 cards
+the moment the 2026-08-07 re-pin deployed, without one bind record changing:
+`curated_source_missing` on cards whose binds were never wrong. Do NOT re-bind
+such a card and do NOT relax a gate; fix the register.
+`assertMakesafeRendererRegisterMatchesPin()` fails the suite when the register
+falls behind. Take the window instant from the DEPLOY job (the "Deploy changed
+edge functions" step of that commit's `Deploy Edge Functions` run), never the
+merge commit — until that build is live production still stamps the OLD identity
+and those binds are legitimate. A new bind must still match the current pin
+exactly: an older identity is admissible only for a bind instant inside its own
+closed window, and no instant at all still means current-pin-only. The bind
+instant is the append-only `ses_curated_report_source_bind_validated` job_event
+(newest per document); `job_documents` has no bind timestamp. Blast radius and
+both proof modes: `scripts/ses-renderer-bind-time-validity-verify.ts`; contract:
+`docs/evidence/ses-renderer-bind-time-validity-2026-08-07.md`. The literal old
+values under `data/` and `docs/evidence/` are dated bind records of the pin they
+were produced under — do not rewrite them.
 
 Deployed truth is the read-only `ops-api?action=ops_api_version` (`commit_sha`,
 `deployed_at`); prove the change is live with

@@ -23,6 +23,10 @@ import {
   MAKESAFE_REPORT_CONTRACT_VERSION,
 } from "./makesafe_report_render.ts";
 import { sesSha256Bytes } from "./ses_docket_envelope.ts";
+import {
+  MAKESAFE_REPORT_RENDERER_AUTHORITY_REGISTER,
+  makesafeRendererAuthorityVersion,
+} from "./makesafe_report_renderer_authority.ts";
 
 async function rawSha256(bytes: Uint8Array): Promise<string> {
   const digest = new Uint8Array(
@@ -130,12 +134,16 @@ function reviewPackClient(
           )
         );
       };
+      const filters: Array<[string, unknown]> = [];
       const query: any = {
         select: (cols?: string) => {
           columns = String(cols || "");
           return query;
         },
-        eq: () => query,
+        eq: (column: string, value: unknown) => {
+          filters.push([column, value]);
+          return query;
+        },
         order: () => query,
         limit: () => query,
         maybeSingle: () => {
@@ -149,7 +157,18 @@ function reviewPackClient(
               error: options.jobEventsError,
             }).then(resolve);
           }
-          const value = project(rows[table]);
+          // Curated-bind events are read per job, so a fixture row that names
+          // its own job is honoured here - a sibling's trail must not answer a
+          // read scoped to the docket's job, or the test proves nothing.
+          const scoped = table === "job_events"
+            ? (rows[table] as Array<Record<string, unknown>>).filter((row) =>
+              row.job_id === undefined ||
+              filters.every(([column, value]) =>
+                column !== "job_id" || row.job_id === value
+              )
+            )
+            : rows[table];
+          const value = project(scoped);
           return Promise.resolve({
             data: single && Array.isArray(value) ? value[0] || null : value,
             error: null,
@@ -823,6 +842,79 @@ Deno.test("review pack keeps an independently proved sibling bundle report visib
   assertEquals(pack.blockers, []);
   assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
 });
+
+Deno.test(
+  "review pack judges a sibling bundle's renderer against the sibling's own bind instant",
+  async () => {
+    const bytes = new TextEncoder().encode("%PDF-1.7\nsibling curated fixture");
+    const contentHash = await sesSha256Bytes(bytes);
+    const rawHash = await rawSha256(bytes);
+    // The identity authorised before the 2026-08-07 re-pin, on a bind made
+    // inside its window. The docket job has no bind event of its own, so only
+    // the sibling job's trail can supply the instant.
+    const superseded = MAKESAFE_REPORT_RENDERER_AUTHORITY_REGISTER[1];
+    const artifact = {
+      role: "supporting_report_pdf",
+      object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+      media_type: "application/pdf",
+      content_hash: contentHash,
+      size_bytes: bytes.byteLength,
+      metadata: {
+        source_kind: "durable_curated_revision",
+        source_identity:
+          "curation-revision:source-revision/artifact:source-artifact",
+        source_document_id: "sibling-document",
+        report_document_id: "sibling-document",
+        source_revision_id: "source-revision",
+        source_artifact_id: "source-artifact",
+        source_artifact_content_hash: contentHash,
+        expected_raw_sha256: `sha256:${rawHash}`,
+        output_sha256: `sha256:${rawHash}`,
+        render_hash: rawHash,
+        report_input_hash: `sha256:${"a".repeat(64)}`,
+        evidence_source: "explicit_sibling_bundle",
+        report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+        bundle_id: "bundle-fixture",
+        sibling_job_id: "sibling-job-fixture",
+        binding_revision_id: "binding-revision-fixture",
+        report_renderer_version: makesafeRendererAuthorityVersion(superseded),
+        report_renderer_source_revision: superseded.source_revision,
+        report_renderer_script_sha256: superseded.script_sha256,
+      },
+    };
+    const bindEvent = {
+      job_id: "sibling-job-fixture",
+      created_at: "2026-08-05T00:00:00.000Z",
+      detail_json: { document_id: "sibling-document" },
+    };
+    const { client, signedPaths } = reviewPackClient(artifact, bytes, {
+      jobEvents: [bindEvent],
+    });
+    const pack = await getSesReviewablePackAction(
+      client,
+      { mode: "api_key", user: null },
+      "docket-fixture",
+    );
+    assertEquals(pack.suppressed_artifacts, []);
+    assertEquals(pack.artifacts.length, 1);
+    assertEquals(pack.blockers, []);
+    assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
+
+    // Same artifact, sibling bind event missing: the current pin is then the
+    // only acceptable stamp, so the superseded identity still refuses.
+    const unbound = reviewPackClient(artifact, bytes, { jobEvents: [] });
+    const refused = await getSesReviewablePackAction(
+      unbound.client,
+      { mode: "api_key", user: null },
+      "docket-fixture",
+    );
+    assertEquals(refused.artifacts, []);
+    assertEquals(
+      refused.suppressed_artifacts[0].suppression_reason,
+      "active_renderer_input_binding_missing",
+    );
+  },
+);
 
 function roofPortalCockpitClient(
   draftBuilderReportEmailState: string,

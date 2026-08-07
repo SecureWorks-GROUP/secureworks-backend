@@ -1,13 +1,26 @@
-import {
-  isCurrentCuratedRendererVersion,
-  MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-  MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-  MAKESAFE_REPORT_CONTRACT_VERSION,
-} from "./makesafe_report_render.ts";
+import { MAKESAFE_REPORT_CONTRACT_VERSION } from "./makesafe_report_render.ts";
+import { makesafeRendererStampAuthorisedAtBind } from "./makesafe_report_renderer_authority.ts";
 
 export type SesSupportingReportTrust =
   | { trusted: true }
   | { trusted: false; reason: string };
+
+/**
+ * Facts about the artifact's own curated bind that this pure inspection cannot
+ * read for itself. Today that is one thing: WHEN the source document's current
+ * curated bind was made, so the renderer identity it stamped can be judged
+ * against the register window that was open at the time rather than against
+ * whatever pin happens to be current.
+ *
+ * Omitting it is safe by construction — the register accepts the current
+ * identity with no instant, so an unaware caller gets exactly the behaviour that
+ * existed before bind-time validity. It is only an OLDER identity that needs the
+ * instant, and only inside that identity's own closed window.
+ */
+export interface SesSupportingReportTrustContext {
+  /** ISO instant of the source document's current curated bind, if known. */
+  curated_bind_at?: string | null;
+}
 
 export const SES_SUPPORTING_REPORT_MAX_BYTES = 8 * 1024 * 1024;
 
@@ -52,6 +65,7 @@ export function sesSupportingReportDocumentBinding(
 
 export function inspectSesSupportingReportProof(
   artifact: Record<string, unknown>,
+  context: SesSupportingReportTrustContext = {},
 ): SesSupportingReportTrust {
   if (
     artifact.role !== "supporting_report_pdf" ||
@@ -119,14 +133,21 @@ export function inspectSesSupportingReportProof(
   ) {
     return { trusted: false, reason: "sibling_bundle_provenance_missing" };
   }
+  // The renderer identity is judged against the register window that was open
+  // when this artifact's source document was bound, not against today's pin.
+  // Re-pinning does not make a past bind false, and this check must not say it
+  // does. A bind made NOW still has to carry the current pin exactly: the
+  // register only opens an older identity for an instant inside that identity's
+  // own closed window, and no instant at all leaves the current pin the only
+  // acceptable stamp.
   if (
     sourceKind === "durable_curated_revision" &&
     (!sha256Shape(metadata.report_input_hash) ||
-      !isCurrentCuratedRendererVersion(metadata.report_renderer_version) ||
-      metadata.report_renderer_source_revision !==
-        MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION ||
-      metadata.report_renderer_script_sha256 !==
-        MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256)
+      !makesafeRendererStampAuthorisedAtBind({
+        version: metadata.report_renderer_version,
+        source_revision: metadata.report_renderer_source_revision,
+        script_sha256: metadata.report_renderer_script_sha256,
+      }, context.curated_bind_at))
   ) {
     return { trusted: false, reason: "active_renderer_input_binding_missing" };
   }
@@ -246,6 +267,57 @@ export function sesCuratedSourceSupersessionsFromEvents(
     supersessions.push({ document_id: documentId, superseded, current });
   }
   return supersessions;
+}
+
+/**
+ * When each document's CURRENT curated bind was made, read off the same
+ * append-only audit trail as the supersessions above (a job's own `job_events`
+ * rows for `SES_CURATED_SOURCE_BIND_EVENT_TYPE`). The event is written by the
+ * server immediately before the snapshot it describes, so its `created_at` is
+ * the bind's own instant — it is never supplied by a caller and never rewritten.
+ *
+ * The LATEST event per document wins, deliberately. A document re-bound under a
+ * newer renderer is described by its newest bind; letting an older event keep
+ * vouching would be exactly the stale claim this coordinate exists to catch. The
+ * paths that write no event (an exact-snapshot skip, a cycle-column CAS repair)
+ * change no provenance, so the latest event still describes what is stored.
+ *
+ * A document with no bind event gets no instant, and the register then accepts
+ * only the current pin for it. That is the pre-existing refusal, not a new one.
+ *
+ * "Newest" is decided on PARSED instants, never on text order: this map is the
+ * sole authority for which bind vouches for a document, so a representation
+ * drift ("Z" beside "+00:00") must not silently pick the wrong event. An
+ * unparseable `created_at` is refused rather than allowed to win.
+ */
+export function sesCuratedBindInstantsByDocument(
+  rows: Array<Record<string, unknown>>,
+): Map<string, string> {
+  const latest = new Map<string, { value: string; at: number }>();
+  for (const row of rows) {
+    const documentId = String(object(row.detail_json).document_id || "").trim();
+    const createdAt = String(row.created_at || "").trim();
+    if (!documentId || !createdAt) continue;
+    const at = Date.parse(createdAt);
+    if (!Number.isFinite(at)) continue;
+    const held = latest.get(documentId);
+    if (!held || held.at < at) latest.set(documentId, { value: createdAt, at });
+  }
+  return new Map(
+    Array.from(latest.entries()).map(([id, held]) => [id, held.value]),
+  );
+}
+
+/** The bind instant an artifact's own source document carries, or `null`. */
+export function sesCuratedBindInstantForArtifact(
+  artifact: Record<string, unknown>,
+  instants: Map<string, string>,
+): string | null {
+  const metadata = object(artifact.metadata);
+  const documentId = String(
+    metadata.source_document_id || metadata.report_document_id || "",
+  ).trim();
+  return (documentId && instants.get(documentId)) || null;
 }
 
 /**
