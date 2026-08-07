@@ -218,6 +218,10 @@ import {
   prepare_ses_docket_revision,
 } from './ses_prepare_docket_revision.ts'
 import {
+  notifySesDocsReadySms,
+  SES_DOCS_READY_SMS_DEFAULT_TO,
+} from './ses_docs_ready_sms.ts'
+import {
   recordSesPortalCaptureEvidence,
   SesPortalCaptureEvidenceError,
 } from './ses_portal_capture_evidence.ts'
@@ -5401,7 +5405,29 @@ if (import.meta.main) serve(async (req: Request) => {
               created_by: actor,
             }),
           )
-          return json(summarizeSesPrepareResponseForHttp(response))
+          // Harden SES ticket 06: the Captain's ONE ping. Exact-once per job
+          // per attendance cycle via the docs_ready_sms effect kind; the
+          // notifier never throws, so a persist cannot fail on a courtesy SMS.
+          const docsReadySms = request.dry_run ? [] : await notifySesDocsReadySms(
+            response.results,
+            {
+              org_id: DEFAULT_ORG_ID,
+              store: createSupabaseSesEffectStore(client),
+              sendSms: (phone, message) => sendSmsViaGhl(phone, message),
+              phone: Deno.env.get('SES_DOCS_READY_SMS_TO') ||
+                SES_DOCS_READY_SMS_DEFAULT_TO,
+              lookupJobNumber: async (jobId) => {
+                const { data } = await client.from('jobs')
+                  .select('job_number').eq('id', jobId).maybeSingle()
+                return data?.job_number || null
+              },
+              actor,
+            },
+          )
+          return json({
+            ...summarizeSesPrepareResponseForHttp(response),
+            docs_ready_sms: docsReadySms,
+          })
         } catch (error) {
           if (error instanceof SesAssemblerAdapterError) {
             return json({ error: error.message, code: error.code }, error.status)
