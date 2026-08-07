@@ -535,17 +535,36 @@ Deno.test("one trail, one ordering rule: mixed 'Z' and '+00:00' cannot split the
   }
 });
 
-Deno.test("an unparseable bind instant never becomes the currently bound stamp", () => {
-  // Refused as an ordering authority rather than dropped: dropping it would
-  // lose a suppression, and trusting it would let text order decide.
-  const supersessions = sesCuratedSourceSupersessionsFromEvents([
-    driftBindEvent(DRIFT_OLDER_AT, SHA_0, SHA_1),
-    driftBindEvent("not-a-timestamp", SHA_1, SHA_2),
-  ]);
-  assertEquals(supersessions.length, 2);
-  assert(sesSupportingReportIsSuperseded(driftArtifact(SHA_0), supersessions));
-  assertFalse(
-    sesSupportingReportIsSuperseded(driftArtifact(SHA_1), supersessions),
-    "the newest parseable bind still decides what is currently bound",
-  );
+Deno.test("an unparseable bind instant never un-suppresses a superseded stamp", () => {
+  // Fail-closed direction for THIS question: an event nobody can place in time
+  // is treated as the newest, so its stamp is the bound one and every prior
+  // stamp stays superseded. Sorting it oldest would make SHA_1 - content a
+  // later bind replaced - servable to a builder.
+  for (
+    const rows of [
+      [
+        driftBindEvent(DRIFT_OLDER_AT, SHA_0, SHA_1),
+        driftBindEvent("not-a-timestamp", SHA_1, SHA_2),
+      ],
+      [
+        driftBindEvent("not-a-timestamp", SHA_1, SHA_2),
+        driftBindEvent(DRIFT_OLDER_AT, SHA_0, SHA_1),
+      ],
+    ]
+  ) {
+    const supersessions = sesCuratedSourceSupersessionsFromEvents(rows);
+    assertEquals(supersessions.length, 2);
+    assert(
+      sesSupportingReportIsSuperseded(driftArtifact(SHA_0), supersessions),
+      "the oldest superseded content stays superseded",
+    );
+    assert(
+      sesSupportingReportIsSuperseded(driftArtifact(SHA_1), supersessions),
+      "content superseded by an unplaceable event stays suppressed",
+    );
+    assertFalse(
+      sesSupportingReportIsSuperseded(driftArtifact(SHA_2), supersessions),
+      "the unplaceable event's own stamp is the bound one",
+    );
+  }
 });
