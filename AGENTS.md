@@ -2636,12 +2636,19 @@ That audit event is also the supersession LEDGER. A docket revision keeps its
 own consistent copy of the bytes it was assembled from, so artifact
 self-verification alone cannot see the correction and a signed-off pack would
 keep serving the superseded (e.g. asbestos) report. `verifyStoredSupportingReport`
-therefore reads the job's `ses_curated_report_source_bind_validated` events and
-refuses any supporting report whose stamped source document + superseded stamp
-matches, as `curated_source_superseded` — visible on the pack (suppressed
-artifact + blocker), the cockpit HOLD, the Docs Ready signoff, and the send-time
-signoff wall (`assertSesDocketsSignedOffForSend`). An unreadable ledger is
-untrusted, never "no supersession". Scoping is exact: only the artifact's own
+therefore reads the OWNING job's `ses_curated_report_source_bind_validated`
+events and refuses any supporting report whose stamped source document +
+superseded stamp matches, as `curated_source_superseded` — visible on the pack
+(suppressed artifact + blocker), the cockpit HOLD, the Docs Ready signoff, and
+the send-time signoff wall (`assertSesDocketsSignedOffForSend`). The owning job
+is resolved through the one producer `sesSupportingReportSiblingJobId`: the
+SIBLING job for an explicit sibling bundle, the docket job otherwise. That
+distinction is load-bearing rather than cosmetic — a bundle's report document
+id can never appear on the docket job's trail, so scoping the read there filters
+to nothing and answers "not superseded" for every bundle. The send wall
+(`assertSesReleasedSourcesNotSuperseded`) resolves each artifact through the same
+producer, reading each trail at most once per release. An unreadable ledger —
+docket or sibling — is untrusted, never "no supersession". Scoping is exact: only the artifact's own
 source document and only the superseded stamp, never the currently bound one,
 so no other card, cycle or document is reached, and a re-bind that changed only
 renderer constants marks nothing. The prior revision and its signoff are
