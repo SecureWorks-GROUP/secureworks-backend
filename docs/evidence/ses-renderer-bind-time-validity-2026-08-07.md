@@ -121,7 +121,13 @@ rows for supersessions; that loader now returns both facts
 
 1. **The cards recover with no re-bind.** `--mode=served` (a `dry_run: true`
    prepare, which guards `deps.persist` and writes nothing) against the deployed
-   backend, before and after.
+   backend. The BEFORE state is captured against the deployed unfixed backend and
+   reproduces the symptom exactly (SWMS-261157 / SWMS-261140 / SWMS-261161
+   refuse, SWMS-261156 does not). The AFTER read-back is **still outstanding at
+   commit time** — it needs this fix merged and deployed. Trigger: re-run
+   `--mode=served` once `ops-api?action=ops_api_version` reports a `commit_sha`
+   that has this fix as an ancestor
+   (`git merge-base --is-ancestor <fix> <commit_sha>`).
 2. **The fence holds forward.** `the fence holds forward: a superseded identity
    with a current instant is refused`, at the register and at both call sites,
    plus `the newest bind decides` and a live check that no recovered card's

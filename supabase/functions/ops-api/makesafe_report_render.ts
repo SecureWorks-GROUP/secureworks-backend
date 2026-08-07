@@ -36,6 +36,10 @@ export const MAKESAFE_REPORT_TS_SOURCE_REVISION =
 // render_makesafe_report.py at the squash commit for wiki PR #325 (per-job
 // photo_max_size / photo_quality). Only ONE fingerprint is ever accepted --
 // never add a second to smooth a transition.
+// Moving them is a THREE-part change: also close the outgoing window and append
+// the new identity in makesafe_report_renderer_authority.ts, or every bind made
+// under the outgoing pin is silently un-trusted (that module owns the rule, and
+// assertMakesafeRendererRegisterMatchesPin() fails the suite if it is skipped).
 export const MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION =
   "2cb60bf05f0aecf24d8b6c0a54181de3a8aa3dfb";
 export const MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256 =
