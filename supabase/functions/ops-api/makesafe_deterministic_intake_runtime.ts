@@ -42,6 +42,10 @@ import {
   persistIntakeSourceIssue,
 } from "./makesafe_intake_source_issues.ts";
 import {
+  INTAKE_MISSING_SUBURB_REASON,
+  intakeCommittedWithoutSiteSuburb,
+} from "./makesafe_intake_suburb_backstop.ts";
+import {
   stripSyntheticLivefireSignature,
   verifySyntheticLivefireMarker,
 } from "./makesafe_synthetic_livefire.ts";
@@ -185,6 +189,9 @@ export interface DeterministicRuntimeReport {
     cases_deferred: number;
     cases_failed: number;
     job_creation_deferred: number;
+    // Jobs this run minted with no site suburb. Each one also carries an open
+    // source issue; the counter makes the class visible in the run report.
+    committed_without_site_suburb: number;
     components_failed: number;
     sources_quarantined: number;
     hugo_notifications_required: number;
@@ -4594,6 +4601,7 @@ export async function runDeterministicIntake(
       cases_deferred: 0,
       cases_failed: missingParents.length,
       job_creation_deferred: 0,
+      committed_without_site_suburb: 0,
       components_failed: isolatedFailures.length,
       sources_quarantined: new Set(
         isolatedFailures.flatMap((failure) => failure.source_post_ids),
@@ -5057,6 +5065,31 @@ export async function runDeterministicIntake(
             saved.caseRow,
             true,
           );
+          // Backstop: a card minted without a suburb is invisible to every
+          // suburb-keyed view. Flag it rather than refuse it - the job is
+          // already live and must stay actionable; the point is that a human
+          // is told. Never widen this to another field.
+          if (
+            intakeCommittedWithoutSiteSuburb({
+              jobCreated: live.jobCreated,
+              jobId,
+              siteSuburb: effectivePlan.identity.siteSuburb,
+            })
+          ) {
+            report.totals.committed_without_site_suburb++;
+            await persistIssueForSources(
+              client,
+              effectivePlan.sourcePostIds.flatMap((postId) => {
+                const source = sourceMap.get(postId);
+                return source ? [source] : [];
+              }),
+              INTAKE_MISSING_SUBURB_REASON,
+              {
+                instructionKey: effectivePlan.instructionKey,
+                caseId: saved.caseRow.id,
+              },
+            );
+          }
         }
         // Job-keyed post-board notification makes newly live SES/insurance work consistently queryable across every family; source retries and later lifecycle updates never create another notification.
         for (
