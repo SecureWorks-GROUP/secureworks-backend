@@ -14422,8 +14422,9 @@ export function _requiresMakesafeSwms(detail: any, job: any): boolean {
 }
 
 // Close-out doc gate. A make-safe may only resolve to completed/archive once its
-// invoice + report PDFs are attached. SWMS is additionally required only when
-// _requiresMakesafeSwms resolves the sealed MLB physical-family rule.
+// invoice + report PDFs are attached. SWMS is additionally required when
+// _requiresMakesafeSwms resolves the physical-family rule (Captain 2026-08-07:
+// every physical make-safe, any builder).
 // Returns the set of docs that are still missing (empty => gate satisfied).
 export function _makesafeMissingCloseoutDocs(
   docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null | undefined,
