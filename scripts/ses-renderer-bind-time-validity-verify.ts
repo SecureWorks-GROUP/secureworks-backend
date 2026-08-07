@@ -20,9 +20,13 @@
  *   --mode=derive   (default) read live rows read-only and run the WORKING TREE
  *                   predicate over them. Answers "which cards change verdict,
  *                   and does any card fail to recover". Valid before deploy.
- *   --mode=served   ask the DEPLOYED ops-api (`query_ses_review_cockpit`, a
- *                   read) whether each card's supporting report is still
- *                   refused. Post-deploy proof. Needs SW_SUPABASE_URL/SW_API_KEY.
+ *   --mode=served   ask the DEPLOYED ops-api whether each card's supporting
+ *                   report is still refused, by POSTing
+ *                   `prepare_ses_docket_revision` with `dry_run: true` — which
+ *                   guards `deps.persist` and so writes nothing. The cockpit
+ *                   read cannot answer for these cards: they have no current
+ *                   docket revision, which is the symptom itself.
+ *                   Post-deploy proof. Needs SW_SUPABASE_URL/SW_API_KEY.
  *
  * Production safety:
  * - the only database access is the Management API `/database/query` with
@@ -30,7 +34,9 @@
  * - `assertReadOnlySql` refuses any non-SELECT/WITH statement before it is sent;
  * - `assertNoPiiColumns` refuses any statement naming a client-identifying
  *   column. Nothing here selects a name, phone, email or street address;
- * - `--mode=served` calls one READ action and nothing else.
+ * - `--mode=served` calls one non-persisting action and nothing else: a
+ *   `dry_run: true` `prepare_ses_docket_revision`, whose dry-run branch guards
+ *   every persist.
  *
  * NO write, NO re-bind, NO mint, NO approve, NO send, NO stage move.
  *

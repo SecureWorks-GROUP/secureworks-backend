@@ -284,21 +284,28 @@ export function sesCuratedSourceSupersessionsFromEvents(
  *
  * A document with no bind event gets no instant, and the register then accepts
  * only the current pin for it. That is the pre-existing refusal, not a new one.
+ *
+ * "Newest" is decided on PARSED instants, never on text order: this map is the
+ * sole authority for which bind vouches for a document, so a representation
+ * drift ("Z" beside "+00:00") must not silently pick the wrong event. An
+ * unparseable `created_at` is refused rather than allowed to win.
  */
 export function sesCuratedBindInstantsByDocument(
   rows: Array<Record<string, unknown>>,
 ): Map<string, string> {
-  const latest = new Map<string, string>();
+  const latest = new Map<string, { value: string; at: number }>();
   for (const row of rows) {
     const documentId = String(object(row.detail_json).document_id || "").trim();
     const createdAt = String(row.created_at || "").trim();
     if (!documentId || !createdAt) continue;
+    const at = Date.parse(createdAt);
+    if (!Number.isFinite(at)) continue;
     const held = latest.get(documentId);
-    if (!held || held.localeCompare(createdAt) < 0) {
-      latest.set(documentId, createdAt);
-    }
+    if (!held || held.at < at) latest.set(documentId, { value: createdAt, at });
   }
-  return latest;
+  return new Map(
+    Array.from(latest.entries()).map(([id, held]) => [id, held.value]),
+  );
 }
 
 /** The bind instant an artifact's own source document carries, or `null`. */

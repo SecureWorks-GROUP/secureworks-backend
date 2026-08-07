@@ -235,22 +235,27 @@ async function verifyStoredSupportingReport(
   artifact: Record<string, any>,
   audit: SesCuratedBindAudit | null,
 ): Promise<SesSupportingReportTrust> {
-  // The bind instant is what makes the renderer identity judgeable against the
-  // register window that was open when the bind happened, rather than against
-  // today's pin. An unreadable trail supplies none, which leaves the current
-  // pin as the only acceptable stamp - the refusal that already existed.
-  const inspected = inspectSesSupportingReportProof(artifact, {
-    curated_bind_at: audit
-      ? sesCuratedBindInstantForArtifact(artifact, audit.bind_instants)
-      : null,
-  });
-  if (!inspected.trusted) return inspected;
+  // An unreadable trail is a read fault about the audit, never a statement
+  // about the renderer, so it refuses under its own reason before any
+  // provenance judgement is made. Reporting it as a renderer failure would send
+  // an operator to re-bind a card whose bind is fine.
   if (!audit) {
     return {
       trusted: false,
       reason: SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
     };
   }
+  // The bind instant is what makes the renderer identity judgeable against the
+  // register window that was open when the bind happened, rather than against
+  // today's pin. A document with no bind event supplies none, which leaves the
+  // current pin as the only acceptable stamp - the refusal that already existed.
+  const inspected = inspectSesSupportingReportProof(artifact, {
+    curated_bind_at: sesCuratedBindInstantForArtifact(
+      artifact,
+      audit.bind_instants,
+    ),
+  });
+  if (!inspected.trusted) return inspected;
   if (sesSupportingReportIsSuperseded(artifact, audit.supersessions)) {
     return { trusted: false, reason: SES_CURATED_SOURCE_SUPERSEDED_REASON };
   }
