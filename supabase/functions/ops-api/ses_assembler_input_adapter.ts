@@ -1799,6 +1799,7 @@ export async function loadSesAssemblerLiveSnapshot(
     portalCaptures,
     packs,
     events,
+    curatedBindEvents,
     outboundBindings,
     inboundBindings,
     docketRevisions,
@@ -1903,12 +1904,23 @@ export async function loadSesAssemblerLiveSnapshot(
         .from("job_events")
         .select("id,job_id,event_type,detail_json,created_at")
         .eq("job_id", jobId)
-        // Two consumers, one round trip: bundle-candidate notes, and the
-        // append-only curated-bind trail whose `created_at` is the only record
-        // of WHEN a document's renderer identity was stamped.
-        .in("event_type", ["note", SES_CURATED_SOURCE_BIND_EVENT_TYPE])
+        .eq("event_type", "note")
         .order("created_at", { ascending: false }),
       "job_events.bundle_candidate",
+    ),
+    many(
+      // Deliberately its own read rather than a widened `.in()` beside the
+      // notes above: one read would put both classes under a single PostgREST
+      // row ceiling, so a chatty job could truncate bundle-candidate notes, and
+      // this trail is the sole authority for WHEN a document's renderer
+      // identity was stamped. Each class gets its own bound.
+      client
+        .from("job_events")
+        .select("id,job_id,event_type,detail_json,created_at")
+        .eq("job_id", jobId)
+        .eq("event_type", SES_CURATED_SOURCE_BIND_EVENT_TYPE)
+        .order("created_at", { ascending: false }),
+      "job_events.curated_bind",
     ),
     many(
       client
@@ -2252,12 +2264,8 @@ export async function loadSesAssemblerLiveSnapshot(
     legacy_packs: packs,
     docket_revisions: docketRevisions,
     docket_artifacts: docketArtifacts,
-    events: (events || []).filter((row: LiveRow) =>
-      text(row.event_type) === "note"
-    ),
-    curated_bind_events: (events || []).filter((row: LiveRow) =>
-      text(row.event_type) === SES_CURATED_SOURCE_BIND_EVENT_TYPE
-    ),
+    events,
+    curated_bind_events: curatedBindEvents,
     bundle_bindings: bundleBindings,
     bundle_claims: bundleClaims,
     bundle_jobs: bundleJobs,

@@ -30,7 +30,13 @@ import {
   MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
   MAKESAFE_REPORT_CONTRACT_VERSION,
 } from "./makesafe_report_render.ts";
-import { inspectSesSupportingReportProof } from "./ses_supporting_report_trust.ts";
+import {
+  inspectSesSupportingReportProof,
+  SES_CURATED_SOURCE_BIND_EVENT_TYPE,
+  sesCuratedBindInstantsByDocument,
+  sesCuratedSourceSupersessionsFromEvents,
+  sesSupportingReportIsSuperseded,
+} from "./ses_supporting_report_trust.ts";
 import {
   selectPhysicalReportProofForCycle,
   type SesAssemblerLiveSnapshot,
@@ -452,4 +458,94 @@ Deno.test("both call sites answer the same way about the same identity", () => {
       );
     }
   }
+});
+
+// One audit trail, two readers of it. `sesCuratedBindInstantsByDocument` decides
+// which bind vouches for a document; `sesCuratedSourceSupersessionsFromEvents`
+// decides which stamp is currently bound. Fed the identical rows, they must
+// never disagree about which event is newest — the supersession side picking the
+// wrong `current` would clear a suppression and serve a superseded report.
+// The rows below are ordered one way by text and the other way by instant.
+const DRIFT_DOCUMENT = "document-drift";
+/** 08:00Z, written with an offset. Text-sorts LAST; is actually the OLDER row. */
+const DRIFT_OLDER_AT = "2026-08-07T10:00:00+02:00";
+/** 09:00Z, written with a Z suffix. Text-sorts FIRST; is actually the NEWER row. */
+const DRIFT_NEWER_AT = "2026-08-07T09:00:00Z";
+const SHA_0 = "a".repeat(64);
+const SHA_1 = "b".repeat(64);
+const SHA_2 = "c".repeat(64);
+
+function driftBindEvent(
+  createdAt: string,
+  priorSha: string,
+  currentSha: string,
+): Record<string, unknown> {
+  return {
+    created_at: createdAt,
+    event_type: SES_CURATED_SOURCE_BIND_EVENT_TYPE,
+    detail_json: {
+      document_id: DRIFT_DOCUMENT,
+      supersedes_prior_bind: true,
+      prior_expected_raw_sha256: `sha256:${priorSha}`,
+      prior_source_identity: `curation:${priorSha.slice(0, 4)}`,
+      prior_report_input_hash: `sha256:${priorSha}`,
+      expected_raw_sha256: `sha256:${currentSha}`,
+      source_identity: `curation:${currentSha.slice(0, 4)}`,
+      report_input_hash: `sha256:${currentSha}`,
+    },
+  };
+}
+
+function driftArtifact(sha: string): Record<string, unknown> {
+  return {
+    metadata: {
+      source_kind: "durable_curated_revision",
+      source_document_id: DRIFT_DOCUMENT,
+      expected_raw_sha256: `sha256:${sha}`,
+      source_identity: `curation:${sha.slice(0, 4)}`,
+      report_input_hash: `sha256:${sha}`,
+    },
+  };
+}
+
+Deno.test("one trail, one ordering rule: mixed 'Z' and '+00:00' cannot split the two readers", () => {
+  const rows = [
+    driftBindEvent(DRIFT_OLDER_AT, SHA_0, SHA_1),
+    driftBindEvent(DRIFT_NEWER_AT, SHA_1, SHA_2),
+  ];
+  for (const ordering of [rows, rows.slice().reverse()]) {
+    // The bind-instant map already compares parsed instants.
+    assertEquals(
+      sesCuratedBindInstantsByDocument(ordering).get(DRIFT_DOCUMENT),
+      DRIFT_NEWER_AT,
+    );
+    const supersessions = sesCuratedSourceSupersessionsFromEvents(ordering);
+    assertEquals(supersessions.length, 2);
+    // The supersession side must call the SAME row newest. Under text order the
+    // offset row lands last, SHA_1 reads as currently bound, and the artifact
+    // carrying it is cleared — a superseded report served to a builder.
+    assert(
+      sesSupportingReportIsSuperseded(driftArtifact(SHA_1), supersessions),
+      "the superseded content must stay superseded",
+    );
+    assertFalse(
+      sesSupportingReportIsSuperseded(driftArtifact(SHA_2), supersessions),
+      "the currently bound content is not superseded",
+    );
+  }
+});
+
+Deno.test("an unparseable bind instant never becomes the currently bound stamp", () => {
+  // Refused as an ordering authority rather than dropped: dropping it would
+  // lose a suppression, and trusting it would let text order decide.
+  const supersessions = sesCuratedSourceSupersessionsFromEvents([
+    driftBindEvent(DRIFT_OLDER_AT, SHA_0, SHA_1),
+    driftBindEvent("not-a-timestamp", SHA_1, SHA_2),
+  ]);
+  assertEquals(supersessions.length, 2);
+  assert(sesSupportingReportIsSuperseded(driftArtifact(SHA_0), supersessions));
+  assertFalse(
+    sesSupportingReportIsSuperseded(driftArtifact(SHA_1), supersessions),
+    "the newest parseable bind still decides what is currently bound",
+  );
 });

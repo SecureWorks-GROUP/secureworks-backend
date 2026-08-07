@@ -233,6 +233,15 @@ function sameCuratedStamp(
  * `SES_CURATED_SOURCE_BIND_EVENT_TYPE`; they are ordered oldest first here, so
  * the last entry for a document carries its currently bound stamp.
  *
+ * Ordering is on PARSED instants, the same rule as
+ * `sesCuratedBindInstantsByDocument` below, because both read the identical row
+ * set and must never disagree about which event is newest: a representation
+ * drift ("Z" beside "+00:00") that picked the wrong `current` stamp would clear
+ * a supersession and serve a superseded report to a builder. A row whose
+ * `created_at` cannot be parsed is refused as an ordering authority — it is kept
+ * (dropping it would lose a suppression) but sorted oldest, so it can never
+ * become the currently bound stamp.
+ *
  * A supersession whose superseded and current stamps are identical (a re-bind
  * that changed only renderer constants, say) records nothing: it moved no
  * builder-visible content, so nothing it produced is stale.
@@ -240,9 +249,16 @@ function sameCuratedStamp(
 export function sesCuratedSourceSupersessionsFromEvents(
   rows: Array<Record<string, unknown>>,
 ): SesCuratedSourceSupersession[] {
-  const ordered = rows.slice().sort((left, right) =>
-    String(left.created_at || "").localeCompare(String(right.created_at || ""))
-  );
+  const orderable = (value: unknown): number => {
+    const parsed = Date.parse(String(value || "").trim());
+    return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+  };
+  const ordered = rows
+    .map((row, index) => ({ row, index, at: orderable(row.created_at) }))
+    .sort((left, right) =>
+      left.at === right.at ? left.index - right.index : left.at - right.at
+    )
+    .map((entry) => entry.row);
   const supersessions: SesCuratedSourceSupersession[] = [];
   for (const row of ordered) {
     const detail = object(row.detail_json);
