@@ -76,6 +76,7 @@ import {
   sesSha256Bytes,
   stableUuidFromSha256,
 } from "./ses_docket_envelope.ts";
+import { SES_FAMILY_MATRIX_VERSION } from "./ses_family_matrix.ts";
 import {
   inspectSesSupportingReportProof,
   rawSesSupportingReportSha,
@@ -1427,6 +1428,33 @@ export async function prepareSesInvoiceObligationAction(
       fact:
         "The current docket is not a pre-Xero proposal that can mint an invoice obligation.",
     });
+  }
+  // The mint prices from the STORED docket proposal, so a docket persisted
+  // under an earlier pricing canon silently mints the old rates — SWMS-261079
+  // minted a $350 roof draft on 2026-08-07 from a 2026-07-30.6 docket while
+  // the live canon said $300. A stale matrix version therefore refuses here,
+  // before any obligation exists, and the recovery is a cheap re-persist.
+  if (
+    String(docket.family_matrix_version || "") !== SES_FAMILY_MATRIX_VERSION
+  ) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "docket_pricing_stale",
+        "Re-run prepare_ses_docket_revision (dry_run false) so the card re-prices from the current sealed canon, then prepare the obligation from that fresh revision.",
+        {
+          fact:
+            `The docket was priced under family matrix ${docket.family_matrix_version}, but the current canon is ${SES_FAMILY_MATRIX_VERSION}; minting from it could reissue superseded rates.`,
+          evidence: {
+            docket_revision_id: String(docket.id),
+            docket_family_matrix_version: String(
+              docket.family_matrix_version || "",
+            ),
+            current_family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+          },
+        },
+      ),
+    );
   }
   const manifest = object(object(docket.envelope).v2);
   const company = String(object(manifest.routing).builder || "").trim();

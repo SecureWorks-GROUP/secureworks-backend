@@ -1,4 +1,5 @@
 // deno-lint-ignore-file no-import-prefix
+import { SES_FAMILY_MATRIX_VERSION } from "./ses_family_matrix.ts";
 import {
   assertEquals,
   assertRejects,
@@ -268,6 +269,7 @@ Deno.test("prepare_ses_invoice_obligation applies commercial override without to
     id: "40000000-0000-4000-8000-00000000d001",
     job_id: "6006c332-3bb5-473e-beda-bef627172784",
     stage: "pre_xero",
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
     attendance_cycle_ids: ["20000000-0000-4000-8000-000000000001"],
     current_attendance_cycle_id: "20000000-0000-4000-8000-000000000001",
     envelope: { v2: { routing: { builder: "aj" } } },
