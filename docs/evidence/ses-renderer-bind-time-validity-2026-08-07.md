@@ -92,11 +92,21 @@ caller-supplied and never rewritten. The **newest** event per document wins, so 
 document re-bound under a newer renderer cannot be vouched for by its own older
 bind.
 
-The adapter reaches it by widening its existing single `job_events` read from
-`event_type = 'note'` to `.in(['note', <bind event>])` — one round trip, split
-into two snapshot fields. `ses_reporting_actions.ts` already read exactly these
-rows for supersessions; that loader now returns both facts
+The adapter reaches it through its own `job_events` read in the existing
+concurrent wave, deliberately NOT a widened `.in(['note', <bind event>])` beside
+the bundle-candidate notes: one read would put both classes under a single
+PostgREST row ceiling, so a chatty job could truncate the notes, and this trail
+is the sole authority for when a renderer identity was stamped. Each class gets
+its own bound and its own snapshot field. `ses_reporting_actions.ts` already read
+exactly these rows for supersessions; that loader now returns both facts
 (`loadSesCuratedBindAudit`).
+
+Ordering across the two readers of that trail is deliberately ASYMMETRIC and must
+not be harmonised: an unparseable `created_at` sorts newest for supersession
+(suppressing more) and is discarded for bind-instant lookup (leaving the current
+pin the only acceptable stamp). The reasoning is on
+`sesCuratedSourceSupersessionsFromEvents` / `sesCuratedBindInstantsByDocument` in
+`ses_supporting_report_trust.ts`.
 
 ## What did not weaken
 
