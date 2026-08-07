@@ -1381,9 +1381,12 @@ production, so the path currently refuses everything.
 
 It changes WHO may approve, never WHAT: the resolved operator goes into the same
 `approveSesInvoiceRevisionAction` a cockpit press calls, so every guard runs
-unchanged. `auth.identity_provenance` (`SesActionAuth`, additive, optional) is
-AUDIT ONLY — no authorisation decision reads it — and exists so nobody reads
-`mode: "jwt"` on that path as a verified session, because no JWT is presented.
+unchanged. `auth.identity_provenance` (`SesActionAuth`, additive, optional)
+exists so nobody reads `mode: "jwt"` on that path as a verified session, because
+no JWT is presented. Exactly ONE refusal reads it — the `ses_channel_enrolment`
+gate — and strictly to FAIL CLOSED, so a channel-derived identity cannot
+bootstrap itself a seed. Nothing widens on it: no authorisation decision
+anywhere is made more permissive by its presence.
 
 The operator act is his MESSAGE ID, written to
 `makesafe_revision_approvals.evidence_refs` and re-read (jsonb containment)
@@ -1392,10 +1395,17 @@ That is also why there is no migration. Two parsing traps are pinned: a card
 number ends in six digits, so card refs are stripped BEFORE scanning for a code;
 and a digit-bearing email must not normalise as a phone number.
 
-**The binding is weaker than a cockpit session in one named way** — if the
+**The binding is weaker than a cockpit session in two named ways.** If the
 authenticator lives on the phone that holds WhatsApp, possession and knowledge
-collapse into one factor. That trade, the full attacker table, the residual
-read-then-write replay race, and the enrolment steps are owned by
+collapse into one factor. And TOTP verify has NO attempt limit, lockout or
+per-binding failure state and records nothing on failure
+(`SES_CHANNEL_APPROVAL_TOTP_ONLINE_GUESSING`), so a caller holding the ops key
+AND an enrolled sender id — a compromised relay — can guess a live code online
+within hours; the ops key alone is still not enough. Narrowing the ±1 step
+window is NOT the fix (3x, and it costs clock-skew tolerance); the fix is
+durable per-binding failed-attempt state, i.e. a migration. Those trades, the
+full attacker table, the residual read-then-write replay race, and the enrolment
+steps are owned by
 `docs/evidence/ses-channel-approval-binding-2026-08-07.md`. Only APPROVE INVOICE
 is wired; `SEND` is recognised and refused BY NAME, never half-executed.
 

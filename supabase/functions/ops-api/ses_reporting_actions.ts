@@ -136,9 +136,11 @@ export interface SesActionAuth {
     role: string;
   } | null;
   /**
-   * HOW the identified human on this request was proven. AUDIT ONLY — no
-   * authorisation decision anywhere reads it, so adding a provenance can never
-   * widen what a caller may do.
+   * HOW the identified human on this request was proven. Exactly one refusal
+   * reads it — the `ses_channel_enrolment` gate in `ses_channel_approval.ts` —
+   * and it reads it strictly to fail closed, so a channel-derived identity
+   * cannot bootstrap itself a seed. Nothing widens on it: no authorisation
+   * decision anywhere is made more permissive by its presence.
    *
    * Absent (the default) means the ordinary path: a Supabase JWT was verified
    * by `auth.getUser` in `index.ts`. `bound_channel_totp` means the identity

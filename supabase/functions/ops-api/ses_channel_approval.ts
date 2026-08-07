@@ -33,8 +33,10 @@
 //      operator's own authenticator app. The seed is NOT stored anywhere: it is
 //      derived on demand from `SES_CHANNEL_APPROVAL_ROOT_SECRET` plus the
 //      binding, and the ONLY way to obtain it is `ses_channel_enrolment`, which
-//      requires an authenticated Captain/admin-owner Supabase session for THAT
-//      SAME user id. An operator can only ever enrol themselves.
+//      requires the caller's OWN identified Supabase session and a binding that
+//      names THAT SAME user id. There is no role check: the binding secret is a
+//      project-owner write, and that is what decides who may enrol. An operator
+//      can only ever enrol themselves.
 //
 // (3) is the part that binds the act to HIM rather than to a channel: it can be
 // produced only by someone who once held his Supabase session and loaded the
@@ -48,6 +50,10 @@
 //                                      IS. See the honest weakening below.
 //   * His authenticator seed alone ... nothing; the message must also arrive
 //                                      from the enrolled sender.
+//   * Ops key + an enrolled sender id .. cannot approve on that alone, but may
+//                                      guess codes with no limit and is
+//                                      expected to succeed within hours. See
+//                                      `SES_CHANNEL_APPROVAL_TOTP_ONLINE_GUESSING`.
 //   * Ops key + enrolled sender + a live code ... can APPROVE INVOICE on any
 //                                      card that is ALREADY approvable in the
 //                                      cockpit. It can never approve a card the
@@ -69,8 +75,12 @@
 //      cannot enforce or detect.
 //   b. RELAY-ASSERTED SENDER. We trust the relay's claim about who sent the
 //      message. We do not verify it cryptographically — WhatsApp gives us no
-//      way to. A compromised relay holding the ops key still cannot approve
-//      (it has no code), but it CAN mislabel which enrolled operator acted.
+//      way to. A compromised relay holds BOTH the ops key AND a known enrolled
+//      sender id, so it cannot approve immediately — but nothing here limits
+//      how often it may try a code, so it is expected to guess one within
+//      hours. See `SES_CHANNEL_APPROVAL_TOTP_ONLINE_GUESSING`. It can also
+//      mislabel which enrolled operator acted. The ops key ALONE is still not
+//      enough, because an enrolled sender id is required as well.
 //   c. NO SESSION REVOCATION UX. Revocation is removing the binding from the
 //      function secret, not clicking "sign out".
 //
@@ -98,7 +108,8 @@
 // `evidence_refs` entry on the approval row itself (`sesChannelOperatorActRef`)
 // and re-read before every approval, so the same message can never approve
 // twice and a later reader can always answer "who approved this, and by which
-// message". See `SES_CHANNEL_APPROVAL_REPLAY_RACE` for the one residual gap.
+// message". See `SES_CHANNEL_APPROVAL_REPLAY_RACE` and
+// `SES_CHANNEL_APPROVAL_TOTP_ONLINE_GUESSING` for the two residual gaps.
 //
 // No migration: the binding lives in a function secret, the seed is derived
 // rather than stored, and the act ledger is the existing append-only
@@ -163,6 +174,25 @@ export const SES_CHANNEL_APPROVAL_ENABLED_ACTS:
  */
 export const SES_CHANNEL_APPROVAL_REPLAY_RACE =
   "read-then-write over evidence_refs; duplicate approval row possible under exact concurrency, duplicate money is not";
+
+/**
+ * KNOWN RESIDUAL GAP, stated rather than papered over. TOTP verification here
+ * has NO attempt limiting, no lockout and no per-sender failure state, and
+ * nothing at all is recorded on a failed verify. The ±1 step window makes 3 of
+ * 10^6 codes valid per attempt, so a caller who can keep trying is expected to
+ * reach a hit within hours at a sustained request rate. Reaching that surface
+ * requires BOTH the ops key AND a sender id that fingerprints to an enrolled
+ * binding — which is exactly what a compromised relay holds. The ops key alone
+ * is still not enough.
+ *
+ * NARROWING THE WINDOW FROM ±1 TO ±0 IS NOT THE FIX. It is a 3x reduction on a
+ * search a patient attacker completes anyway, and it costs the clock-skew
+ * tolerance the ±1 window exists for. The real fix is durable per-binding
+ * failed-attempt state (count, lockout, alarm), which is a new table, which is
+ * a migration, which this slice deliberately does not take.
+ */
+export const SES_CHANNEL_APPROVAL_TOTP_ONLINE_GUESSING =
+  "no attempt limit, lockout or per-binding failure state on TOTP verify; a holder of the ops key plus an enrolled sender id can guess a live code online within hours";
 
 export interface SesChannelOperatorBinding {
   channel: SesChannelApprovalChannel;
@@ -585,8 +615,11 @@ export function sesChannelCodeProbe(
  * exists on this path. It is this module asserting, on the evidence of the
  * enrolled sender plus a live authenticator code, that the human behind
  * `operator_user_id` acted. `identity_provenance` records which of the two
- * proofs was actually presented so an auditor never has to guess, and it is
- * carried for AUDIT ONLY: no authorisation decision anywhere reads it.
+ * proofs was actually presented so an auditor never has to guess. Exactly one
+ * refusal reads it — the `ses_channel_enrolment` gate — and it reads it
+ * strictly to FAIL CLOSED, so a channel-derived identity can never bootstrap
+ * itself a seed. Nothing widens on it: no authorisation decision anywhere is
+ * made more permissive by its presence.
  *
  * The user row is loaded from the database, never from the request, so a relay
  * can never supply a role. If the bound user has no row, or is not an
@@ -718,6 +751,16 @@ async function resolveSesChannelCard(
   const jobId = String(rows[0].job_id);
   const job = await client.from("jobs").select("job_number").eq("id", jobId)
     .maybeSingle();
+  if (job.error) {
+    refuse(
+      503,
+      "channel_card_unreadable",
+      `The card behind the invoice named in the message could not be read (${
+        job.error.message || "unknown database error"
+      }).`,
+      "Retry once the jobs table is readable.",
+    );
+  }
   return { job_id: jobId, job_number: String(job.data?.job_number || "") };
 }
 

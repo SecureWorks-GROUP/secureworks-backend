@@ -46,6 +46,7 @@ approval authority by the back door.
 | The ops key alone | **Nothing new.** Still refused at the gate, exactly as today. |
 | His phone / WhatsApp alone | **Nothing** — unless his authenticator app is on that same phone. See (a) below. |
 | His authenticator seed alone | Nothing. The message must also arrive from the enrolled sender. |
+| The ops key **plus** a known enrolled sender id | Cannot approve on that alone — but may guess codes with no limit and is expected to succeed within hours. See §5b. |
 | Ops key + enrolled sender + a live code | APPROVE INVOICE on a card **that is already approvable in the cockpit**. Never a card the cockpit would refuse. |
 | The root secret, plus the ability to write the binding secret | Mint codes for any operator. This is the strongest single point of failure and is equivalent to holding the Supabase project itself. |
 
@@ -63,15 +64,18 @@ accept one he was not told about. So, plainly:
   operator choice, and it is the single biggest difference from a cockpit press.
 - **(b) Relay-asserted sender.** We trust the relay's claim about who sent the
   message; WhatsApp gives us no way to verify it cryptographically. A
-  compromised relay still cannot approve (it has no code), but it can mislabel
+  compromised relay holds **both** the ops key **and** a known enrolled sender
+  id, so it cannot approve immediately — but it can guess codes online with no
+  limit, and is expected to succeed within hours (§5b). It can also mislabel
   which enrolled operator acted.
 - **(c) No session revocation UX.** Revocation is removing the binding from the
   function secret, not clicking "sign out".
 
 Net: **for an attacker who has physically taken his unlocked phone, this path is
-weaker than the cockpit.** For every other attacker — including one holding the
-ops key, the service key, or the relay — it is not weaker, because none of them
-can produce a code.
+weaker than the cockpit** — and so is it **for an attacker who has compromised
+the relay**, because that attacker can guess a code online without limit. The
+ops key **alone** is still not enough: an enrolled sender id is required as
+well, so a bare key holder — including the service key — gains nothing new.
 
 If any of that stops being acceptable, delete the binding from the function
 secret. The path then refuses everything and the cockpit is unaffected.
@@ -112,7 +116,9 @@ Two parsing traps are pinned by name because both would have been silent:
   message with no code at all would have carried its own card number as one.
 - An email-shaped sender containing digits must not normalise as a phone number.
 
-## 5. The one residual gap
+## 5. The two residual gaps
+
+### 5a. Replay race
 
 `SES_CHANNEL_APPROVAL_REPLAY_RACE`: the replay guard is a read-then-write over
 `evidence_refs`, not a database uniqueness constraint, so two byte-identical
@@ -121,6 +127,23 @@ to a **duplicate approval row, never duplicate money** —
 `execute_ses_invoice_revision` and every release send are exact-once through
 `ses_external_effects`. Closing it properly needs a uniquely-indexed message
 ledger, which is a migration, which this slice deliberately did not take.
+
+### 5b. Unthrottled online code guessing
+
+`SES_CHANNEL_APPROVAL_TOTP_ONLINE_GUESSING`: TOTP verification has **no attempt
+limiting, no lockout and no per-binding failure state**, and nothing at all is
+recorded on a failed verify. The ±1 step window makes 3 of 10^6 codes valid per
+attempt, so a caller who can keep trying is expected to reach a hit **within
+hours** at a sustained request rate. Reaching that surface needs **both** the
+ops key **and** a sender id that fingerprints to an enrolled binding — which is
+exactly what a compromised relay holds. The ops key alone is still not enough.
+
+**Narrowing the window from ±1 to ±0 is not the fix.** It is a 3x reduction on a
+search a patient attacker completes anyway, and it costs the clock-skew
+tolerance the ±1 window exists for. The real fix is durable per-binding
+failed-attempt state (count, lockout, alarm), which is a new table, which is a
+migration, which this slice deliberately did not take. It is the natural first
+follow-up slice, ahead of wiring SEND.
 
 ## 6. Why there is no migration
 
