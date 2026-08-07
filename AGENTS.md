@@ -2638,6 +2638,21 @@ Before writing any enum-ish status, check the live CHECK constraint
 (`pg_constraint` on the table) rather than trusting the constant in `index.ts`.
 See `docs/trade-invoice-assignment-lock-root-cause-2026-08-06.md`.
 
+The same rule cost the make-safe substatus coherence gate its voice: it wrapped
+its two pre-reads in `try/catch`, so the catch was dead code and a failed read
+opened the only gate in front of every substatus write **silently**. The gate's
+decision now lives in `makesafe_substatus_gate.ts` (index.ts keeps only the
+`ApiError` throw, because the serve() handler matches `instanceof ApiError`).
+Two rules there are load-bearing. The fail-open **stays open** — the gate must
+not add a new outage mode to every evidence event when a read hiccups — so this
+is an audibility contract, not a stricter one: one `makesafe_substatus_gate_fail_open`
+line per gated write (never per failed read), and `makesafe_substatus_gate_read_threw`
+for the last-resort catch, which is a transport fault and a different incident.
+And `absent` (clean read, no row) is not `unreadable`: the old code conflated
+them and only the second is a fail-open. Count the marker rather than reading
+the gate as watertight. Evidence:
+`docs/evidence/makesafe-substatus-gate-fail-open-audibility-2026-08-06.md`.
+
 ## Reads And Writes Must Share One Eligibility Filter
 
 Where a read model hides rows, every write path over the same rows needs the

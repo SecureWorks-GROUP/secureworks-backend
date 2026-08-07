@@ -180,6 +180,10 @@ import {
   MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
 } from './makesafe_computed_status.ts'
 import {
+  evaluateMakesafeSubstatusGate,
+  type MakesafeSubstatusGateResult,
+} from './makesafe_substatus_gate.ts'
+import {
   planMakesafeStatusApplications,
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
@@ -15391,69 +15395,71 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
 // Test-only export for the board-job enrichment (chip-truth wiring).
 export const _enrichMakesafeBoardJobForTest = enrichMakesafeBoardJob
 
-// ── Rescue SES T2: one coherence gate for EVERY substatus write ──────────────
+// ── Rescue SES T2: the coherence gate in front of substatus writes ───────────
 // Mission: wiki coding/work/campaigns/makesafe-system/missions/rescue-ses-2026-08.
 // Production carried substatus/status combinations both stage engines assume
 // impossible (68 cards complete-under-processing, active substatuses on
 // cancelled jobs) because each write site validated vocabulary only. Every
-// substatus write — the dispatch action, the details editor, and the internal
-// evidence events — now passes this assert. Sources beginning 'internal:' are
-// the evidence events themselves (trade report submitted, close-out, reattend);
-// they are transition-checked but not re-gated on the external evidence guards,
-// which they constitute.
-const MAKESAFE_SUBSTATUS_TRANSITIONS: Record<string, readonly string[]> = {
-  company_contact_required: ['company_contact_done', 'waiting_on_trade_report', 'awaiting_portal_completion', 'admin_to_send_report'],
-  company_contact_done: ['company_contact_required', 'waiting_on_trade_report', 'awaiting_portal_completion', 'admin_to_send_report'],
-  awaiting_portal_completion: ['company_contact_required', 'waiting_on_trade_report', 'admin_to_send_report'],
-  waiting_on_trade_report: ['company_contact_required', 'awaiting_portal_completion', 'admin_to_send_report'],
-  admin_to_send_report: ['waiting_on_trade_report', 'awaiting_portal_completion', 'ready_to_invoice', 'complete'],
-  ready_to_invoice: ['waiting_on_trade_report', 'admin_to_send_report', 'complete'],
-  complete: ['waiting_on_trade_report', 'admin_to_send_report'],
-}
+// substatus write that goes through updateMakesafeSubstatus — the dispatch
+// action, the details editor, and the internal evidence events — passes this
+// assert. Sources beginning 'internal:' are the evidence events themselves
+// (trade report submitted, close-out, reattend); they are transition-checked
+// but not re-gated on the external evidence guards, which they constitute.
+//
+// TWO HONEST LIMITS, because a comment that overstates a guard is how the next
+// reader stops checking (spec item 1):
+//
+//  1. It is not literally EVERY write. Two paths set
+//     `makesafe_job_details.substatus` straight through PostgREST and never
+//     reach this assert: the detail-row INSERT at card creation (and the
+//     historical-backfill repair), which establishes a first substatus rather
+//     than moving one, and approveIntakeDraft parking a report-only card in
+//     `awaiting_portal_completion`. Both are deliberate and preserved, but they
+//     exist, so "no entry point can skip this" was never true. The privileged
+//     routes DO reach the assert — makesafe_send_pack closes through
+//     applyMakesafeCloseOut ('internal:closeout') and
+//     mark_makesafe_portal_report_done gates its own patch — what those skip is
+//     the external evidence guards below, which is a different boundary.
+//  2. The gate FAILS OPEN when a pre-read fails. That trade is deliberate: the
+//     gate stops known-incoherent moves and must not add a new outage mode to
+//     every evidence event when a read hiccups. Since spec item 1 the fail-open
+//     is at least audible — see makesafe_substatus_gate.ts, which owns the
+//     decision, the read-state vocabulary and the
+//     `makesafe_substatus_gate_fail_open` marker.
+//
+// The transition table and the evaluator live in makesafe_substatus_gate.ts so
+// they are importable by tests; index.ts cannot be imported in a test because
+// serve(...) boots the production HTTP server at module load. Only the ApiError
+// throw stays here — the serve() error handler matches on `instanceof ApiError`.
 
+/**
+ * Run the coherence gate. Throws ApiError(409) on a refusal.
+ *
+ * Returns the gate's own answer, which distinguishes "applied the checks to
+ * real data" (`outcome: 'checked'`) from "stepped aside because a pre-read
+ * failed" (`outcome: 'fail_open_unreadable'`). Callers are not required to act
+ * on it yet; item 2's writeMakesafeSubstatus helper is where it becomes useful.
+ */
 async function assertMakesafeSubstatusTransition(
   client: any,
   jobId: string,
   nextSubstatus: string,
   source: string,
-): Promise<void> {
+): Promise<MakesafeSubstatusGateResult> {
   const next = requireValidMakesafeSubstatus(nextSubstatus)
-  let detailRes: any = null
-  let jobRes: any = null
-  try {
-    ;[detailRes, jobRes] = await Promise.all([
-      client.from('makesafe_job_details').select('substatus').eq('job_id', jobId).maybeSingle(),
-      client.from('jobs').select('status').eq('id', jobId).maybeSingle(),
-    ])
-  } catch (e: any) {
-    // Fail-OPEN on read failure: the gate stops known-incoherent moves; it must
-    // not add a new outage mode to every evidence event when a read hiccups.
-    console.warn('[ops-api] substatus transition check skipped (read failed):', {
-      job_id: jobId, next, source, error: e?.message || String(e),
-    })
-    return
-  }
-  const jobState = String(jobRes?.data?.status || '').toLowerCase()
-  if (['cancelled', 'lost'].includes(jobState) && !source.startsWith('internal:intake_')) {
-    throw new ApiError(
-      `substatus write refused: job is ${jobState} (source=${source}); reinstate the job before changing its work state`,
-      409,
-    )
-  }
-  const current = normalizeMakesafeSubstatus(detailRes?.data?.substatus)
-  if (!current || current === next) return // first set / idempotent repeat
-  const allowed = MAKESAFE_SUBSTATUS_TRANSITIONS[current] || []
-  if (!allowed.includes(next)) {
-    throw new ApiError(
-      `substatus transition refused: '${current}' -> '${next}' is not a coherent move (source=${source})`,
-      409,
-    )
-  }
+  const { result, refusal } = await evaluateMakesafeSubstatusGate(client, jobId, next, source, {
+    normalizeSubstatus: normalizeMakesafeSubstatus,
+  })
+  if (refusal) throw new ApiError(refusal.message, refusal.status)
+  return result
 }
 
 // External-caller evidence guards, shared by the dispatch action and the
-// details editor so no external entry point can skip them (previously they
-// lived only on the dispatch router case).
+// details editor (previously they lived only on the dispatch router case).
+// Scope, stated honestly: they run only for source==='external' writes that go
+// through updateMakesafeSubstatus. Internal evidence events skip them by
+// design — they constitute the evidence — and the direct substatus patches
+// named on the gate above skip them along with the gate itself.
 async function assertExternalMakesafeSubstatusGuards(
   client: any,
   jobId: string,
