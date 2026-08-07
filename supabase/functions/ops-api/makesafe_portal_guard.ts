@@ -38,6 +38,23 @@ export type PortalVerificationState = {
   verifiedCycle: number | null;
   requiresAssessmentProof?: boolean;
   assessmentProofSatisfied?: boolean;
+  // TWO PLACES, ONE FACT. The card-level `portal_verified_*` columns above are
+  // written by exactly one caller (`mark_makesafe_portal_report_done`). The
+  // append-only `makesafe_portal_capture_revisions` ledger is where the portal
+  // observer and the trade attestation actually record a capture, and it is
+  // written WITHOUT stamping those columns. A card can therefore hold a
+  // verified, current-cycle, compliant capture while both columns read NULL —
+  // measured live on three roof cards, 2026-08-07.
+  //
+  // This flag is the ledger's answer to the SAME question, computed by
+  // `ledgerPortalCapturesSatisfy` over captures the board read model has
+  // already validated (`portalCapturesFromLedger`). It is deliberately an
+  // INPUT, not a second derivation: this module cannot import the board read
+  // model (that module imports THIS one), so the composition lives at the one
+  // caller in index.ts and the cycle rule stays owned by one implementation.
+  //
+  // Absent/false is the status quo — the guard falls through to the columns.
+  ledgerCaptureSatisfied?: boolean;
 };
 
 // A report-type card is portal-verified only when a verification was recorded FOR
@@ -48,6 +65,12 @@ export function portalVerificationSatisfied(
   state: PortalVerificationState,
 ): boolean {
   if (!state.isReportType) return true;
+  // Ledger evidence short-circuits the assessment re-check below on purpose, and
+  // only because it is NOT a shortcut: `ledgerPortalCapturesSatisfy` demands the
+  // SAME required-role set (`requiredPortalCaptureRoles`) the assessment proof
+  // demands — all three Prime members for an assessment card, done and locked.
+  // A roof-only ledger capture on an assessment card does not reach here.
+  if (state.ledgerCaptureSatisfied === true) return true;
   if (!state.verifiedAt) return false;
   if (state.requiresAssessmentProof && !state.assessmentProofSatisfied) {
     return false;
@@ -202,6 +225,76 @@ const ASSESSMENT_CAPTURE_ROLES = [
   "quote",
 ] as const;
 
+export type RequiredPortalCaptureRole =
+  | "roof_report"
+  | typeof ASSESSMENT_CAPTURE_ROLES[number];
+
+/**
+ * The portal members a report type must prove — the ONE definition of "what
+ * portal truth requires", so the card-column path
+ * (`validatePortalEvidenceForReportType`) and the ledger path
+ * (`ledgerPortalCapturesSatisfy`) can never drift into requiring different
+ * things. Assessment needs the three distinct Prime members; everything else
+ * (roof) needs the one roof report.
+ *
+ * Never returns an empty list: an unknown report type falls to the roof floor
+ * rather than to "nothing required", so a token nobody taught this function can
+ * only be gated, never waved through.
+ */
+export function requiredPortalCaptureRoles(
+  reportType: string | null | undefined,
+): readonly RequiredPortalCaptureRole[] {
+  const reportToken = String(reportType || "").trim().toLowerCase();
+  return reportToken === "assessment_report" ||
+      reportToken === "assessment_report_quote"
+    ? [...ASSESSMENT_CAPTURE_ROLES]
+    : ["roof_report"];
+}
+
+/** A capture as `portalCapturesFromLedger` emits it (board read model). */
+export type LedgerPortalCaptureLike = {
+  role?: unknown;
+  status?: unknown;
+  locked?: unknown;
+  url?: unknown;
+};
+
+/**
+ * Does this card's VALIDATED ledger capture set prove portal truth?
+ *
+ * The bar is deliberately unchanged from the card-column path: every role in
+ * `requiredPortalCaptureRoles` must be present as a `done` + `locked` capture
+ * carrying a URL. What changes is only WHERE the answer is read from.
+ *
+ * CURRENT-CYCLE SCOPING IS NOT DONE HERE, and that is deliberate. `captures`
+ * must already be current-cycle: `portalCapturesFromLedger` drops any row whose
+ * `attendance_cycle_id` differs from the card's own, which is a stronger test
+ * than a cycle-number compare (an id cannot be reused across a re-attend). Its
+ * output then stamps the CARD's `cycle_number` onto every capture, so a cycle
+ * field re-read here would compare a value to itself and read as a check while
+ * proving nothing. The caller narrows the read to the current cycle as well, so
+ * a prior-cycle capture is refused twice over and by neither of these lines.
+ *
+ * Roles are canonicalised through `canonicalizeKind`, whose unknown bucket is
+ * `builder_portal` — never a required role — so an unrecognised capture role
+ * can only fail to satisfy, never accidentally satisfy.
+ */
+export function ledgerPortalCapturesSatisfy(
+  reportType: string | null | undefined,
+  captures: readonly LedgerPortalCaptureLike[] | null | undefined,
+): boolean {
+  const required = requiredPortalCaptureRoles(reportType);
+  const proven = new Set<string>();
+  for (const capture of captures || []) {
+    if (!capture || typeof capture !== "object") continue;
+    if (String(capture.status ?? "").trim().toLowerCase() !== "done") continue;
+    if (capture.locked !== true) continue;
+    if (!String(capture.url ?? "").trim()) continue;
+    proven.add(canonicalizeKind(String(capture.role ?? "")));
+  }
+  return required.every((role) => proven.has(role));
+}
+
 function portalRoleLabel(role: string): string {
   if (role === "assessment_report") return "assessment";
   if (role === "photos") return "photos";
@@ -253,11 +346,7 @@ export function validatePortalEvidenceForReportType(
   externalLinks: unknown,
   portalEvidence: unknown,
 ): PortalEvidenceValidation {
-  const reportToken = String(reportType || "").trim().toLowerCase();
-  const required = reportToken === "assessment_report" ||
-      reportToken === "assessment_report_quote"
-    ? [...ASSESSMENT_CAPTURE_ROLES]
-    : ["roof_report"];
+  const required = requiredPortalCaptureRoles(reportType);
   const links = extractPortalLinks(externalLinks);
   const evidenceRows = Array.isArray(portalEvidence)
     ? portalEvidence.filter((item): item is PortalCaptureEvidence =>
@@ -331,6 +420,10 @@ export type PortalRecheckCard = {
   verifiedCycle: number | null;
   requiresAssessmentProof?: boolean;
   assessmentProofSatisfied?: boolean;
+  // Same ledger answer the guard consumes. Optional and absent by default: the
+  // recheck queue is an honest "go look again" list, not a gate, so a caller
+  // that has not loaded the ledger keeps the queue exactly as it was.
+  ledgerCaptureSatisfied?: boolean;
 };
 
 // Should this card be in the portal-recheck queue an agent run consumes? A card
@@ -352,6 +445,7 @@ export function portalRecheckEligible(card: PortalRecheckCard): boolean {
       verifiedCycle: card.verifiedCycle,
       requiresAssessmentProof: card.requiresAssessmentProof,
       assessmentProofSatisfied: card.assessmentProofSatisfied,
+      ledgerCaptureSatisfied: card.ledgerCaptureSatisfied,
     })
   ) return false; // already verified this cycle
   return extractPortalLinks(card.externalLinks).length > 0;
