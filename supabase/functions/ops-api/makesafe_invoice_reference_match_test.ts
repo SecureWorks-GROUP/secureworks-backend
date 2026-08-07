@@ -457,7 +457,10 @@ Deno.test("identity no invoice names leaves the production cohort byte-identical
     "synthetic purchase orders must be card-unique",
   );
   for (const digits of syntheticPoDigits) {
-    assert(!taken.has(digits), `synthetic ${digits} collides with real identity`);
+    assert(
+      !taken.has(digits),
+      `synthetic ${digits} collides with real identity`,
+    );
   }
 
   const base = deriveSesUnlinkedInvoiceMatches(fixture.jobs, fixture.invoices);
