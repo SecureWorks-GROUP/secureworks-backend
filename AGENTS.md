@@ -876,6 +876,79 @@ audited `content_hash` on a builder-facing attachment does not attest the bytes
 sent. It still uniquely keys each row, so no wrong attachment ships. Evidence:
 `data/mosman-doc-integrity-f01-f02-v1/report.md`.
 
+## "Nothing Is BOUND" Is Not "Nothing EXISTS", And `report_sent_at` Is Never Send Truth
+
+Two fields lie about state, in opposite directions, and both have burned a run.
+
+**A card with no bound invoice may already be PAID.** The review cockpit reads
+invoice presence from `xero_binding` alone, so a hand-made Xero invoice never
+linked to the job — or linked but never bound to the current docket — is
+invisible, and APPROVE INVOICE used to say "mint the draft first". Measured
+2026-08-06: **all 16** Docs Ready cards with no bound invoice already carried
+live money under their own reference (7 PAID, 6 AUTHORISED, 3 unlinked DRAFT),
+at a proposal price differing from what was billed (SWMS-26841: $561 proposal
+against INV-0850 already PAID $882.20). Never treat an absent
+`bound_invoice` / `missing_invoice` as authority to mint, or as evidence a card
+needs a draft. Check Xero **by reference** first. `ses_existing_card_money.ts`
+is that check and the cockpit refuses on it (`invoice_exists_unbound`); it
+consumes `makesafe_invoice_reference_match.ts`'s reference GRAMMAR, not its
+unique-match entrypoint, because **a matcher for attribution must be unique and
+a matcher for refusal must be inclusive**. Keep it ONE-WAY: it may only add a
+blocker, never clear one.
+
+Inclusive is not GRAINLESS, because a FALSE REFUSAL IS NOT A SAFE FAILURE:
+telling the Captain "this card already has live money" about a SIBLING card's
+invoice on the same claim is a new false statement, the same disease pointed the
+other way. So the PO grain comes from the deployed duplicate guard
+(`workRefRelation` / `poIndeterminateSiblingBlocks` / `referenceCandidateBlocks`
+in `makesafe_send_pack.ts`) and is CONSUMED, never restated — a second, cruder
+"is this the same work" matcher is exactly the defect. Both sides naming
+DIFFERENT POs is other work and does not refuse; a one-sided PO pair refuses
+unless the candidate is already attributed to another card; unlinked money on
+our own claim still refuses. The attribution the refusal PUBLISHES is what
+narrowed, not the refusal: `own_job` / `unlinked_reference_match` assert the
+card's own money, `claim_reference_match` asserts only money on the claim that
+may be a sibling's. Pinned by "PO grain 1..4" in
+`ses_existing_card_money_test.ts`.
+
+It is ENFORCED, not displayed: `sesVerdictWithExistingMoney` is the one producer
+the cockpit and both approve actions consume, and because a non-clean verdict is
+Captain-OVERRIDABLE, the approve actions also run the blocker as a hard 409
+(`refuseWhenCardMoneyExists`) in front of it. **A PRIOR-CYCLE TERMINAL STATE
+MUST NEVER SILENCE A CURRENT-CYCLE QUESTION**, and its converse binds this
+guard: prior-cycle money must never refuse a current cycle. So the money is
+cycle-scoped through the card's ONE cycle engine
+(`makesafeInvoiceAttendanceCycle`, `makesafe_docs_ready_invoice.ts`) — never a
+second one — with `unknown` still refusing here while placement/closeout reads
+it as not-current. A `no_additional_charge` member mints nothing and is outside
+the HARD STOP — but that exemption lives at the release-action call site ONLY,
+never in `existingCardMoneyRefusal`, because taking the refusal off the cockpit
+or off APPROVE INVOICE is a card becoming more approvable. A bound card
+publishes `not_evaluated` ("nobody asked"), which is never "no other money" and
+never a licence to mint.
+
+**`report_sent_at` is wrong in both directions.** The retired
+`ready_to_invoice` auto-stamp minted it for sends that never happened, while a
+card sent through the sealed release graph gets none. Across the 419-card board
+on 2026-08-06, 33 cards carried a stamp, 15 carried a real route proof, and the
+two sets did **not intersect at all**. Send truth is `ses_release_route_proofs`
+(carries `job_id`), `route_send` effects reached through
+`makesafe_release_revision_members` (**never** `ses_external_effects.job_id`,
+NULL on every such row — a direct join reads as "nothing sent"), a sent
+`makesafe_report_packs.status`, or the legacy `MAKESAFE_PACK_SENT` marker.
+Clearing a false stamp goes through `correct_makesafe_false_send_stamp`
+(`makesafe_false_send_stamp.ts`), which re-derives all four server-side, only
+ever CLEARS, and fails closed on an unreadable surface. It is sanctioned but NOT
+exclusive: `update_makesafe_details` still carries `report_sent_at` on its
+allow-list with no privilege gate and no send derivation, which is why the
+guarded clear is a COMPARE-AND-SET (a stamp that moves under it is
+`stamp_drift`, never a clobber) and why a clean board today is a measurement,
+not a guarantee.
+
+Both measurements, the applied 5-card correction and the open accounting
+question on the seven PAID cards are in
+`docs/evidence/ses-manufactured-blockers-2026-08-07.md`.
+
 ## A DRAFT Invoice Never Closes A Card, And The Visible Ladder Has A Version
 
 `_makesafeInvoiceIsRaised` (AUTHORISED / SUBMITTED / PAID) is the invoice term of
@@ -1338,6 +1411,11 @@ invoices it refused on; both refusal sites route it to
 `ambiguity: "none"` with `different_po_sibling_does_not_block` — a demonstrated
 distinction is not an ambiguity. Never restore `allows_create: true` on a
 recorded ambiguity.
+
+These tiers now have a SECOND consumer: `ses_existing_card_money.ts` imports
+them rather than re-deriving "is this the same work" (see the "Nothing Is
+BOUND" section). Changing the relation semantics changes what the cockpit and
+APPROVE INVOICE refuse on, not just what the mint guard blocks.
 
 The minted reference carries the card's own `builder_po_canonical`
 (`composeInvoiceReferenceWithPo`, `ses_invoice_reference_grain.ts`), which is

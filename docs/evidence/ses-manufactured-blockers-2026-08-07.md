@@ -1,0 +1,324 @@
+# System-manufactured blockers on the SES board — 2026-08-07
+
+Read-only measurement plus two code cures and one applied data correction.
+Everything here is re-provable; each claim names the surface that proved it.
+
+## Method rules that governed every measurement
+
+- **Never** join `ses_external_effects` on `job_id`. It is NULL on every
+  `route_send` row, so the join returns zero and reads as "nothing was ever
+  sent" — which is how a shipped card looks unshipped. Join through
+  `makesafe_release_revision_members`; cross-check `ses_release_route_proofs`,
+  which does carry `job_id`.
+- **Never** read `report_sent_at` as send truth in either direction (below).
+- Prove money by **reference search**, never by the board's flag and never by a
+  `job_id` join.
+
+---
+
+## 1. `report_sent_at` is wrong in both directions (CONFIRMED, board-wide)
+
+`report_sent_at` was never send truth. Until Rescue SES T2 (`e71a324a`) removed
+it, `updateMakesafeSubstatus` stamped it on the move to `ready_to_invoice` — an
+operator CLAIM, not a send — while a card genuinely sent through the sealed
+release graph gets no stamp at all.
+
+Measured across the 419-card active board, 2026-08-06:
+
+| | count |
+|---|---|
+| cards carrying a `report_sent_at` stamp | 33 |
+| cards carrying a real route proof | 15 |
+| **overlap between those two sets** | **0** |
+
+Zero. The field is anti-correlated with send truth on the live population.
+
+Of the 33 stamps, **28 are corroborated** by the legacy `MAKESAFE_PACK_SENT`
+job_events marker (real pre-pack-table sends — those stamps are kept). The
+remaining **5** are the auto-stamp's own output:
+
+| card | stamp | its own `ready_to_invoice` event | send evidence |
+|---|---|---|---|
+| SWMS-26851 | 00:12:51.200 | 00:12:51.279 (+79ms) | none on 4 surfaces |
+| SWMS-26852 | 00:12:52.782 | 00:12:52.901 (+119ms) | none |
+| SWMS-26853 | 00:12:53.360 | 00:12:53.414 (+54ms) | none |
+| SWMS-26855 | 00:46:35.841 | 00:46:36.195 (+354ms) | none |
+| SWMS-26857 | 00:46:37.118 | 00:46:37.216 (+98ms) | none |
+
+Each stamp precedes its own substatus event by 50–350ms: the same transaction.
+This is the identical defect the Captain named on Floreat SWMS-261021, which a
+prior agent cured at 2026-08-06 10:02 (`makesafe_evidence_correction` event).
+
+### Consumers that read it as send truth
+
+`_deriveMakesafeSurfacing.sentClosed` (`index.ts`) includes `!!report_sent_at`,
+and `sentClosed` gates both `readyForReview` and `authorisedAwaitingSend`; a
+false stamp therefore suppresses a card's Docs Ready terms. `ses_stage_engine_v2`
+lists it as a terminal evidence source, `makesafe_draft_pack` skips any card
+carrying it, and `isOpenTradeMakesafeDetail` drops it from the trade pool.
+`_makesafeSentToBuilder` (the SENT chip) already excludes it, correctly.
+
+### Cure applied
+
+`scripts/apply-ses-false-send-stamp-v1.ts` — closed 5-card fixture, no
+discovery step, live re-derivation of all four send surfaces at dry-run **and**
+again immediately before each write, writing through the existing typed
+`update_makesafe_details` action. Applied and verified 2026-08-07: 5 cleared, 0
+refused, substatus unchanged on every card, ledger at
+`scripts/ses-false-send-stamp-v1.ledger.json`. Board-wide readback afterwards:
+28 stamped, **0 uncorroborated**.
+
+None of the five moved into the Captain's queue: they sat in `allocated` (4) and
+`archive` (1) before the cure and carry no docket, so they were never candidates.
+
+The durable mechanism is the new ops-api action
+`correct_makesafe_false_send_stamp` (`makesafe_false_send_stamp.ts`), which
+enforces the same guard server-side, only ever CLEARS a stamp, and refuses any
+card it cannot prove was never sent. **Tier 2 first-live-proof:** first
+privileged call after `ops-api` deploys from `main` should return
+`refused / no_stamp_to_clear` for all five (idempotence), and
+`refused / send_evidence_present` for any card carrying a legacy marker.
+
+### KNOWN OPEN HOLE: the sanctioned path is not the ONLY path
+
+`correct_makesafe_false_send_stamp` is the sanctioned way to clear
+`report_sent_at`; its exclusivity is **not enforced**. `update_makesafe_details`
+(`index.ts`, the make-safe detail field allow-list) still carries
+`report_sent_at` with **no privilege gate and no send-truth derivation**, so any
+caller of that action can clear a REAL send's stamp or SET a false one — the
+exact failure mode the guarded action exists to prevent. The applied 5-card
+correction script itself went through that unguarded door.
+
+Because that door stays open, the guarded action's clear is a **compare-and-set**
+(`.eq("report_sent_at", <observed>)`), not a read-then-write: a stamp that moves
+between the drift check and the write is a zero-row update reported as
+`stamp_drift`, so the other writer's value is never clobbered and the audit
+event never records a `before` that was already stale. Two smaller boundaries
+ship with it: a malformed request throws the typed `FalseSendStampRequestError`
+that the router maps to **400** (a plain Error surfaced as a 500 and invited a
+retry of a request that can never succeed), and the legacy-marker scan reads
+`job_events` a bounded page at a time — the marker is written under varying
+event types and varying blob keys, so it cannot be found by a server-side
+filter, but hauling every event body for 25 jobs into one isolate risks a
+`WORKER_RESOURCE_LIMIT` part-way through a batch that has already cleared
+stamps. Overrunning the scan ceiling is `unreadable`, never "no marker".
+
+Deferred deliberately (no-coding day) and ticketed separately: removing
+`report_sent_at` from that allow-list is a behaviour change to a live typed
+action, not an incidental fix. Until it lands, `report_sent_at` being clean
+board-wide today is a measurement, not a guarantee — re-derive from the four
+send surfaces before trusting it again.
+
+---
+
+## 2. The board says `missing_invoice`; Xero says PAID (MOST IMPORTANT FINDING)
+
+The review cockpit decided whether a card had an invoice from `xero_binding`
+alone. A hand-made Xero invoice never linked to the job, or linked but never
+bound to the current docket, is invisible to that read — so the cockpit reported
+no invoice and the APPROVE INVOICE control said *"Mint the draft first."*
+
+Reference search over the 19 Docs Ready cards, 2026-08-06. **All 16 cards with
+no bound invoice already had live money under their own reference:**
+
+| status of existing money | cards |
+|---|---|
+| **PAID** | **7** |
+| AUTHORISED | 6 |
+| unlinked DRAFT | 3 |
+
+And the proposal the cockpit offered differs from what was actually billed:
+
+| card | cockpit proposal | reality |
+|---|---|---|
+| **SWMS-26841** | **$561.00** | **INV-0850 already PAID $882.20** |
+| SWMS-26891 | $352.00 | INV-0918 PAID $621.50 |
+| SWMS-26894 | $352.00 | INV-0916 PAID $528.00 |
+| SWMS-26875 | $561.00 | INV-0846 PAID $880.00 |
+| SWMS-261015 | $404.25 | INV-1115 DRAFT $464.75, unlinked, exact reference |
+
+That is not a stale flag. It is an invitation to double-bill a customer who has
+already paid us, shown to the Captain as the next action.
+
+**Root cause**, the same two-files-disagree shape as the placement defect one
+layer up: `ses_review_cockpit.ts` does not consume
+`makesafe_invoice_reference_match.ts`, which `makesafe_evidence_requirements.ts`
+already uses.
+
+### Cure applied
+
+`ses_existing_card_money.ts` reads the Xero mirror **by reference** and the
+cockpit refuses on it (`invoice_exists_unbound`), replacing the mint invitation
+with the invoice that already exists. It consumes the matcher's reference
+GRAMMAR rather than its unique-match entrypoint, per that module's own rule —
+*a matcher for attribution must be unique; a matcher for refusal must be
+inclusive* — so a contested claim refuses, and DRAFT counts.
+
+**One-way by construction:** the blocker list only grows and `clean` is only
+forced false, so nothing here can make a card more approvable. A card whose
+docket binds its invoice is never touched (and publishes `not_evaluated`, which
+is "nobody asked", never "no other money"); an unreadable mirror refuses.
+
+The refusal is ENFORCED, not displayed. `sesVerdictWithExistingMoney` is the one
+producer the cockpit and both approve actions consume, and because
+`canRecordSesApproval` turns any non-clean verdict into a Captain OVERRIDE, the
+approve actions also run `refuseWhenCardMoneyExists` as a hard 409 in front of
+it — folding the blocker into the verdict alone would have converted a hard stop
+into an overridable one.
+
+### A FALSE REFUSAL IS NOT A SAFE FAILURE
+
+The one-way property protects against wrongly APPROVING. It does **not** protect
+against wrongly REFUSING WITH A FALSE EXPLANATION: a refusal that tells the
+Captain "Xero already carries live money for this card" when the money belongs
+to a SIBLING card on the same claim is a new false statement from the board
+about his money. It is the same disease as the defect being cured, pointed the
+other way, and it must be treated as a defect, not as a safe failure.
+
+The symmetry is the whole lesson, and both halves land on **MLB-27037**, the
+claim shared across the three Floreat cards:
+
+- The ORIGINAL defect matched too **narrowly** — the reference read ignored the
+  PO, so a card could not find its OWN invoice.
+- This guard, as first written, matched too **broadly** — a bare shared
+  `>= 5`-digit run, no PO grain, so a claim-only card found someone ELSE'S.
+
+Same missing grain, opposite failures. The grain is therefore taken from the
+already-deployed duplicate guard and never re-implemented: `workRefRelation`,
+`poIndeterminateSiblingBlocks` and `referenceCandidateBlocks` in
+`makesafe_send_pack.ts` are CONSUMED by `ses_existing_card_money.ts`. One engine
+per question — a second, cruder "is this the same work" matcher contradicting
+the deployed one is exactly the defect.
+
+What that means at the card:
+
+- Both sides name a PO and the POs DIFFER -> separate billed work -> no refusal
+  (`MLB-24732` = SWMS-26526 / SWMS-26938).
+- One-sided PO -> refuses UNLESS the candidate invoice is already attributed to
+  a DIFFERENT card. **Unlinked money on our own claim still refuses** (Floreat
+  INV-1116): nothing rules out that it is ours, and that is the live danger.
+- Identical reference -> refuses.
+- `own_job` (`xero_invoices.job_id` IS this job) is untouched by all of it and
+  refuses exactly as before — that path carries 11 of the 16 measured cards.
+
+The WORDING now says only what has been established. `own_job` and a same-grain
+reference read as "Xero already carries live money for this card"; a
+claim-level match (`claim_reference_match`) reads as money on this card's claim
+that **may belong to a sibling card**. The refusal is unchanged in both cases —
+what changed is that it no longer asserts ownership it has not proved. Adding
+the grain narrows WHICH cards are in scope; inside scope the guard is still
+strictly one-way. Both directions are pinned in
+`ses_existing_card_money_test.ts` ("PO grain 1..4").
+
+### A PRIOR-CYCLE TERMINAL STATE MUST NEVER SILENCE A CURRENT-CYCLE QUESTION
+
+That invariant was broken in three separate places on 2026-08-06/07, the third
+time inside this very guard, so it is written here rather than left as tribal
+knowledge. Its converse is the same rule read the other way and binds this
+module: a re-attendance is genuinely NEW WORK, prior-cycle money was never the
+double-bill risk, and refusing a current cycle because an EARLIER one was
+legitimately invoiced is the same defect removed from the stage ladder twice.
+
+So the money this guard reads is **cycle-scoped**, through the card's one
+existing cycle engine (`makesafeInvoiceAttendanceCycle`, exported from
+`makesafe_docs_ready_invoice.ts` — never a second engine). The fail-closed
+direction differs by question and both come from that one derivation: a
+placement/closeout driver treats `unknown` as NOT current, while this refusal
+treats `unknown` as possibly current and still refuses.
+
+Two scope rules follow, and neither is a weakening — together they narrow the
+guard to exactly what it was built to catch, unbound money for THIS cycle's
+work:
+
+- An invoice attributable only to a PRIOR attendance cycle does not refuse.
+- A `no_additional_charge` member is outside the HARD STOP at SEND IT: it mints
+  nothing, so it cannot double-bill, and a hard 409 there would strand a
+  supported document-only release with no override path. That exemption is
+  applied at THAT call site only. It is deliberately NOT in
+  `existingCardMoneyRefusal`: the cockpit and APPROVE INVOICE must keep refusing
+  such a card, because taking a refusal off a mint-adjacent surface is a card
+  becoming more approvable, which this control may never do.
+
+Live proof, real classifier over real production rows: **16 refuse, 3
+unaffected** (the three carrying a bound DRAFT). **Tier 2 first-live-proof:**
+after deploy, `query_ses_review_cockpit` on SWMS-26841 must carry blocker
+`invoice_exists_unbound` naming INV-0850 PAID $882.20, and SWMS-261114 must be
+unchanged.
+
+### For the Captain, above both of us
+
+**Seven cards have been PAID for work the board still presents as needing an
+invoice.** That is an accounting question, not an engineering one:
+SWMS-26841, SWMS-26867, SWMS-26875, SWMS-26884, SWMS-26887, SWMS-26891,
+SWMS-26894.
+
+---
+
+## 3. Reference normalisation: nothing left to normalise
+
+`scripts/ses-po-suffix-duplicate-census.ts` (read-only, re-runnable), run live
+after the PO-insensitive guard shipped:
+
+| | count |
+|---|---|
+| cards measured | 420 |
+| references differing from a live invoice only by a PO suffix | 31 |
+| newly refused by the PO-insensitive fix | 2 |
+| permitted because the sibling is another card's money | 11 |
+
+Both newly-refused cards (SWMS-26931 Clarkson, SWMS-261018 West Perth) are on
+the do-not-touch list. Every remaining park is either the card's **own** real
+money or an invoice whose attribution is genuinely missing evidence — which the
+sealed money fence forbids repairing at write time (Captain 2026-08-01).
+
+**Nothing here is our data disease. No change made, and that is the finding.**
+
+---
+
+## 4. The honest Docs Ready count
+
+The Captain's four criteria are: complete pack, qualifying draft, capture per
+family rules, and no open money question. Counted from
+`list_ses_docs_ready_reviews` (19 dockets), not from the board column
+(`report_ready` shows 2 — Docs Ready is a queue, not a column):
+
+| meets all four | cards |
+|---|---|
+| **SWMS-261114** (roof, INV-1149 DRAFT $330, portal capture ready, sole invoice on `RR-26836`) | ✅ all four |
+| **SWMS-261081** (roof, INV-1150 DRAFT $330, portal capture ready) | ✅ all four, with one caveat below |
+| SWMS-261025 Koondoola | clean per cockpit, but **do-not-touch live finding** — two unlinked AUTHORISED invoices totalling $4,290 sit on its claim |
+| the other 16 | ❌ — already billed (§2) |
+
+**The honest number that meets all four is 1–2, not 15 and not 25.**
+
+Caveat on SWMS-261081: its INV-1150 carries the bare claim `MLB-27100` while
+sibling card SWMS-261057 carries `MLB-27100PO-56960`. The guard permits it, but
+the bare-claim reference is the F07 grain issue and worth a look before send.
+
+Caveat on SWMS-261114: `c49e547a` records the Captain's ruling that this card
+stays at $300 while the bound draft is $330. Not touched — repricing is out of
+bounds here.
+
+### What the gap is NOT
+
+An earlier reading of this run concluded the 16 needed their invoices minted.
+**That was wrong and is retracted.** It was derived from the cockpit's absent
+`bound_invoice`, which is exactly the unsafe inference §2 exists to prevent.
+Acting on it would have double-billed 16 cards, seven of them already paid.
+
+---
+
+## 5. For the board-placement owner (not touched here)
+
+- `report_ready` holds 2 cards while the review queue holds 19. Cards whose job
+  finished more than seven days ago derive `canonical_stage: archive`, so ready
+  packs are invisible in the live columns.
+- `route_draft_missing` is reported on the invoice route whenever the invoice is
+  not AUTHORISED, and its recovery text says *"Prepare a new docket revision."*
+  That instruction is unsatisfiable for this cause — the route can only become
+  ready once money is authorised — and it is the same trap already documented
+  for SWMS-261114, which took three prepares in one morning. The refusal should
+  name the money, not invite a prepare.
+- Two pre-existing type errors in `cp1_drag_reschedule_test.ts` (from PR #367)
+  fail `deno task test:ops-api` at the type-check step. Unrelated to this work,
+  confirmed present at base commit `cb1deee4`.

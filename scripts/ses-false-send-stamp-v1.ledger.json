@@ -1,0 +1,76 @@
+{
+  "run": "ses-false-send-stamp-v1",
+  "applied": 5,
+  "ledger": [
+    {
+      "card": "SWMS-26851",
+      "job_id": "c2b58041-bbfa-4135-9c2a-42b23d38cf89",
+      "before_report_sent_at": "2026-06-30T00:12:51.200Z",
+      "after_report_sent_at": null,
+      "substatus_unchanged": "ready_to_invoice",
+      "send_evidence_at_apply": {
+        "route_proofs": 0,
+        "effect_sends_via_release_members": 0,
+        "sent_packs": 0,
+        "legacy_markers": 0
+      },
+      "applied_at": "2026-08-06T17:25:51.630Z"
+    },
+    {
+      "card": "SWMS-26852",
+      "job_id": "0ec5c7d3-bc1a-48ad-9a70-0bc916200ea3",
+      "before_report_sent_at": "2026-06-30T00:12:52.782Z",
+      "after_report_sent_at": null,
+      "substatus_unchanged": "ready_to_invoice",
+      "send_evidence_at_apply": {
+        "route_proofs": 0,
+        "effect_sends_via_release_members": 0,
+        "sent_packs": 0,
+        "legacy_markers": 0
+      },
+      "applied_at": "2026-08-06T17:25:53.144Z"
+    },
+    {
+      "card": "SWMS-26853",
+      "job_id": "1caa4531-910c-45af-95c5-d5ce3b99d4e9",
+      "before_report_sent_at": "2026-06-30T00:12:53.360Z",
+      "after_report_sent_at": null,
+      "substatus_unchanged": "ready_to_invoice",
+      "send_evidence_at_apply": {
+        "route_proofs": 0,
+        "effect_sends_via_release_members": 0,
+        "sent_packs": 0,
+        "legacy_markers": 0
+      },
+      "applied_at": "2026-08-06T17:25:54.554Z"
+    },
+    {
+      "card": "SWMS-26855",
+      "job_id": "39d082b7-2819-4595-bee2-c3e8509dfb0c",
+      "before_report_sent_at": "2026-06-30T00:46:35.841Z",
+      "after_report_sent_at": null,
+      "substatus_unchanged": "ready_to_invoice",
+      "send_evidence_at_apply": {
+        "route_proofs": 0,
+        "effect_sends_via_release_members": 0,
+        "sent_packs": 0,
+        "legacy_markers": 0
+      },
+      "applied_at": "2026-08-06T17:25:55.895Z"
+    },
+    {
+      "card": "SWMS-26857",
+      "job_id": "232a2e8c-863c-4ffa-bc43-254bfbf6fe56",
+      "before_report_sent_at": "2026-06-30T00:46:37.118Z",
+      "after_report_sent_at": null,
+      "substatus_unchanged": "ready_to_invoice",
+      "send_evidence_at_apply": {
+        "route_proofs": 0,
+        "effect_sends_via_release_members": 0,
+        "sent_packs": 0,
+        "legacy_markers": 0
+      },
+      "applied_at": "2026-08-06T17:25:57.291Z"
+    }
+  ]
+}
