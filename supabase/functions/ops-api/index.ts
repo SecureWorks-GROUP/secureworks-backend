@@ -347,7 +347,10 @@ import {
 // The one sanctioned way to clear a provably-false report_sent_at. It re-derives
 // send truth from the four real send surfaces server-side and refuses any card
 // it cannot prove was never sent, so it can never erase a real send record.
-import { correctMakesafeFalseSendStamps as _correctMakesafeFalseSendStamps } from './makesafe_false_send_stamp.ts'
+import {
+  correctMakesafeFalseSendStamps as _correctMakesafeFalseSendStamps,
+  FalseSendStampRequestError as _FalseSendStampRequestError,
+} from './makesafe_false_send_stamp.ts'
 import {
   degradedIntakeExceptionProjection as _degradedIntakeExceptionProjection,
   findIntakeExceptionItem as _findIntakeExceptionItem,
@@ -4830,9 +4833,19 @@ if (import.meta.main) serve(async (req: Request) => {
         if (!isPrivileged) {
           return json({ error: 'forbidden: correct_makesafe_false_send_stamp requires the privileged ops key or an admin/owner session' }, 403)
         }
-        return json(await _correctMakesafeFalseSendStamps(client, body, {
-          actor: authMode === 'api_key' ? 'ops-api:api_key' : (authUser?.id || 'ops-api:jwt'),
-        }))
+        try {
+          return json(await _correctMakesafeFalseSendStamps(client, body, {
+            actor: authMode === 'api_key' ? 'ops-api:api_key' : (authUser?.id || 'ops-api:jwt'),
+          }))
+        } catch (err) {
+          // A malformed request is the caller's fault, not an outage: without
+          // this the generic catch below returns 500 and invites a retry of a
+          // request that can never succeed as written.
+          if (err instanceof _FalseSendStampRequestError) {
+            throw new ApiError(err.message, 400, { error: err.message })
+          }
+          throw err
+        }
       }
       // Preview (and, only on an explicit dry_run:false, apply) the ordered roof
       // storey for cards that already exist. `storeys` is the sole determinant of

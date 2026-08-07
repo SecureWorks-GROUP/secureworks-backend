@@ -16,6 +16,7 @@ import {
 import {
   correctMakesafeFalseSendStamps,
   FALSE_SEND_STAMP_MAX_JOBS,
+  FalseSendStampRequestError,
   readMakesafeSendEvidence,
 } from "./makesafe_false_send_stamp.ts";
 
@@ -44,21 +45,35 @@ class FakeQuery {
     this.filters.push((r) => set.has(String(r?.[col] ?? "")));
     return this;
   }
+  order(_col: string, _opts?: any) {
+    return this;
+  }
+  range(from: number, to: number) {
+    this.window = [from, to];
+    return this;
+  }
   select(_cols?: string) {
     return this;
   }
+  private window: [number, number] | null = null;
   private rows() {
-    return (this.store[this.table] || []).filter((r) =>
+    const matched = (this.store[this.table] || []).filter((r) =>
       this.filters.every((f) => f(r))
     );
+    if (!this.window) return matched;
+    return matched.slice(this.window[0], this.window[1] + 1);
   }
   private settle() {
     if (this.failTables.has(this.table)) {
       return { data: null, error: { message: `${this.table} unreadable` } };
     }
     if (this.op === "update") {
-      for (const row of this.rows()) Object.assign(row, this.payload);
-      return { data: this.rows(), error: null };
+      // Snapshot the matched rows BEFORE writing: a compare-and-set update
+      // filters on the value it is about to overwrite, so re-reading after the
+      // write would report zero rows affected on a successful update.
+      const matched = this.rows();
+      for (const row of matched) Object.assign(row, this.payload);
+      return { data: matched, error: null };
     }
     if (this.op === "insert") {
       (this.store[this.table] ||= []).push(this.payload);
@@ -282,6 +297,96 @@ Deno.test("requires job_ids, a reason and an expectation map; caps the batch", a
       reason: "r",
     })
   );
+});
+
+Deno.test("a validation fault is a typed 400, not a 500-shaped plain Error", async () => {
+  const client = fakeClient(baseStore());
+  for (
+    const body of [
+      { job_ids: [] },
+      { job_ids: [JOB], expected_report_sent_at: { [JOB]: STAMP } }, // no reason
+      { job_ids: [JOB], reason: "r" }, // no expectation map
+    ]
+  ) {
+    const err = await correctMakesafeFalseSendStamps(client, body).then(
+      () => null,
+      (e) => e,
+    );
+    assert(
+      err instanceof FalseSendStampRequestError,
+      "the router maps this class to 400; a plain Error surfaces as an outage",
+    );
+    assertEquals((err as FalseSendStampRequestError).status, 400);
+  }
+});
+
+Deno.test("the legacy marker is found beyond the first page of job_events", async () => {
+  // The scan is paged so a long history cannot pull every event body into one
+  // isolate — but a marker on a later page must still refuse.
+  const events = Array.from({ length: 450 }, (_, i) => ({
+    id: `e${String(i).padStart(4, "0")}`,
+    job_id: JOB,
+    event_type: "status_change",
+    detail_json: { note: `routine ${i}` },
+  }));
+  events[430] = {
+    id: "e0430",
+    job_id: JOB,
+    event_type: "note_added",
+    detail_json: { note: "MAKESAFE_PACK_SENT | main | INV-0700" },
+  };
+  const store = baseStore({ job_events: events });
+  const res = await correctMakesafeFalseSendStamps(
+    fakeClient(store),
+    okBody({ dry_run: false }),
+  );
+  assertEquals(res.results[0].refusal_code, "send_evidence_present");
+  assertEquals(res.results[0].send_evidence?.surfaces.legacy_pack_sent_marker, 1);
+  assertEquals(store.makesafe_job_details[0].report_sent_at, STAMP);
+});
+
+Deno.test("a history longer than the scan ceiling is unreadable, never 'no marker'", async () => {
+  const events = Array.from({ length: 4200 }, (_, i) => ({
+    id: `e${String(i).padStart(5, "0")}`,
+    job_id: JOB,
+    event_type: "status_change",
+    detail_json: { note: `routine ${i}` },
+  }));
+  const ev = await readMakesafeSendEvidence(
+    fakeClient(baseStore({ job_events: events })),
+    JOB,
+  );
+  assertEquals(ev.surfaces.legacy_pack_sent_marker, "unreadable");
+  assertEquals(ev.sent, true);
+});
+
+Deno.test("the clear is a compare-and-set: a stamp that moves mid-apply is a lost race, not a silent overwrite", async () => {
+  const store = baseStore();
+  const client = fakeClient(store);
+  const orig = client.from.bind(client);
+  (client as any).from = (t: string) => {
+    const q = orig(t);
+    if (t === "makesafe_job_details") {
+      const origUpdate = q.update.bind(q);
+      q.update = (payload: any) => {
+        // Another writer (the unguarded update_makesafe_details door) moves the
+        // stamp after the drift read and before this write.
+        store.makesafe_job_details[0].report_sent_at = "2026-08-01T00:00:00.000Z";
+        return origUpdate(payload);
+      };
+    }
+    return q;
+  };
+  const res = await correctMakesafeFalseSendStamps(client, okBody({ dry_run: false }));
+  assertEquals(res.cleared, 0);
+  assertEquals(res.results[0].outcome, "refused");
+  assertEquals(res.results[0].refusal_code, "stamp_drift");
+  assertEquals(
+    store.makesafe_job_details[0].report_sent_at,
+    "2026-08-01T00:00:00.000Z",
+    "the other writer's value is preserved, not clobbered",
+  );
+  assertEquals(store.job_events.length, 0, "no audit event for a clear that did not happen");
 });
 
 Deno.test("readMakesafeSendEvidence reports a clean card as not sent, with all four surfaces at zero", async () => {

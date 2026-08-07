@@ -35,6 +35,29 @@
  * Fail-closed: an unreadable mirror reports `unreadable`, which the consumer
  * treats as "cannot rule out existing money" and still refuses.
  *
+ * INCLUSIVE IS NOT GRAINLESS — A FALSE REFUSAL IS NOT A SAFE FAILURE
+ * -----------------------------------------------------------------
+ * Refusing is only ever the safe direction about MINTING. It is not safe about
+ * TELLING THE CAPTAIN WHY: a refusal that says "Xero already carries live money
+ * for this card" when the money belongs to a SIBLING card on the same claim is
+ * a new false statement from the board, in the opposite direction from the one
+ * this module cures. One claim routinely hosts several separately billed jobs
+ * (`MLB-24732` = SWMS-26526 / SWMS-26938; the Floreat `MLB-27037` trio), so a
+ * bare shared-digit-run hit cannot establish ownership.
+ *
+ * The PO grain that separates those cases already ships, in the deployed
+ * duplicate guard: `workRefRelation` / `poIndeterminateSiblingBlocks` /
+ * `referenceCandidateBlocks` (`makesafe_send_pack.ts`). They are CONSUMED here,
+ * never restated — a second, cruder "is this the same work" matcher is exactly
+ * the defect. So a reference hit whose relation is `distinct_po` (both sides
+ * name a PO and they differ) is other work and does not refuse, and a one-sided
+ * PO pair refuses UNLESS the candidate invoice is already attributed to a
+ * DIFFERENT card. Unlinked money on our own claim still refuses: nothing rules
+ * out that it is ours, and that is the live danger case.
+ *
+ * `own_job` money — `xero_invoices.job_id` IS this job — is untouched by all of
+ * that and refuses exactly as before.
+ *
  * A PRIOR-CYCLE TERMINAL STATE MUST NEVER SILENCE A CURRENT-CYCLE QUESTION
  * ------------------------------------------------------------------------
  * The mirror image of that rule applies here, and it is the same rule: a
@@ -52,6 +75,10 @@ import {
   type SesMatchInvoice,
 } from "./makesafe_invoice_reference_match.ts";
 import { makesafeInvoiceAttendanceCycle } from "./makesafe_docs_ready_invoice.ts";
+import {
+  referenceCandidateBlocks,
+  workRefRelation,
+} from "./makesafe_send_pack.ts";
 
 /** Statuses that mean the invoice is dead and cannot be double-billed against. */
 const DEAD_INVOICE_STATUSES = ["VOIDED", "DELETED"];
@@ -59,8 +86,18 @@ const DEAD_INVOICE_STATUSES = ["VOIDED", "DELETED"];
 export type SesExistingMoneyAttribution =
   /** `xero_invoices.job_id` is this job: the card's own money, just not bound. */
   | "own_job"
-  /** Unlinked live ACCREC whose reference names this card's builder reference. */
-  | "unlinked_reference_match";
+  /**
+   * Unlinked live ACCREC whose reference names this card's work at the SAME PO
+   * grain (identical reference, or both sides carrying the same PO evidence).
+   * This is the card's own money.
+   */
+  | "unlinked_reference_match"
+  /**
+   * Money on this card's CLAIM that the reference cannot attribute: a one-sided
+   * PO pair with no owning card. It may be this card's, and it may be a
+   * sibling's — it refuses, but it must never be described as this card's.
+   */
+  | "claim_reference_match";
 
 export interface SesExistingCardMoneyRow {
   invoice_number: string | null;
@@ -128,6 +165,29 @@ function toRow(
 }
 
 /**
+ * Which of the three things this row IS. Only `own_job` and a same-grain
+ * reference (`same_work`: identical, or the same PO on both sides) establish
+ * that the money is this card's. A one-sided PO pair — or a digit-run hit whose
+ * bases do not even relate — establishes only that money exists on the claim,
+ * so it is reported as claim-level and never described as this card's.
+ */
+function attributionFor(
+  externalRef: unknown,
+  invoice: SesMatchInvoice,
+  ownJob: boolean,
+): SesExistingMoneyAttribution {
+  if (ownJob) return "own_job";
+  // Already owned by a different card: whatever the reference says, it is not
+  // this card's money — it merely cannot be ruled out as covering this work.
+  if (String(invoice.job_id || "").trim().length > 0) {
+    return "claim_reference_match";
+  }
+  return workRefRelation(externalRef, invoice.reference) === "same_work"
+    ? "unlinked_reference_match"
+    : "claim_reference_match";
+}
+
+/**
  * The card facts the cycle boundary needs. `reattend_count` of zero (or an
  * absent detail row) means the card has one attendance and all its money is
  * current.
@@ -163,8 +223,8 @@ export function classifyExistingCardMoney(
     const ownJob = String(invoice.job_id || "").trim() === String(jobId).trim() &&
       String(invoice.job_id || "").trim().length > 0;
     // Inclusive on purpose: a reference hit refuses even when the invoice is
-    // attributed elsewhere or contested, because a mint here would still be a
-    // second invoice on the same builder reference.
+    // contested, because a mint here could still be a second invoice on the
+    // same work.
     //
     // `invoiceNamesBuilderReference` returns the ARRAY of digit runs it
     // matched, and an empty array is truthy — testing it directly matches every
@@ -172,7 +232,16 @@ export function classifyExistingCardMoney(
     const matchedDigits = digits.length > 0
       ? invoiceNamesBuilderReference(invoice.reference, digits)
       : [];
-    const referenceHit = matchedDigits.length > 0;
+    // PO grain, from the deployed duplicate guard: demonstrably different work
+    // (`distinct_po`), or a one-sided PO pair already owned by another card, is
+    // not this card's question at all.
+    const referenceHit = matchedDigits.length > 0 &&
+      referenceCandidateBlocks(
+        externalRef,
+        invoice.reference,
+        jobId,
+        invoice.job_id,
+      );
 
     if (!ownJob && !referenceHit) continue;
     // A re-attendance is new work: an invoice raised for an EARLIER attendance
@@ -181,9 +250,7 @@ export function classifyExistingCardMoney(
     const cycle = makesafeInvoiceAttendanceCycle(cycleDetail, invoice);
     if (cycle === "prior") continue;
     if (id) seen.add(id);
-    rows.push(
-      toRow(invoice, ownJob ? "own_job" : "unlinked_reference_match", cycle),
-    );
+    rows.push(toRow(invoice, attributionFor(externalRef, invoice, ownJob), cycle));
   }
 
   return {
@@ -282,7 +349,15 @@ export async function readSesExistingCardMoneyForJob(
   );
 }
 
-/** One operator-facing sentence naming the money that already exists. */
+/**
+ * One operator-facing sentence naming the money that already exists.
+ *
+ * It must never claim more than the evidence establishes. Money attributed to
+ * this job, or matched at the same PO grain, IS this card's. A claim-level
+ * match may belong to a sibling card on the same claim, so it is described as
+ * exactly that — the refusal still stands, but on the honest ground that the
+ * money cannot be ruled out, not on a false ownership claim.
+ */
 export function describeExistingCardMoney(money: SesExistingCardMoney): string {
   if (!money.evaluated) {
     return "This card's Xero money was not checked, so it is not possible to rule out that an invoice already exists.";
@@ -294,11 +369,17 @@ export function describeExistingCardMoney(money: SesExistingCardMoney): string {
     const total = row.total === null ? "" : ` $${row.total.toFixed(2)}`;
     const where = row.attribution === "own_job"
       ? "on this card"
-      : `unlinked, reference ${row.reference ?? "?"}`;
+      : row.attribution === "unlinked_reference_match"
+      ? `unlinked, reference ${row.reference ?? "?"}`
+      : `unlinked on this claim, reference ${row.reference ?? "?"}`;
     return `${row.invoice_number ?? "(no number)"} ${row.status ?? "?"}${total} (${where})`;
   });
   const more = money.rows.length > parts.length
     ? ` and ${money.rows.length - parts.length} more`
     : "";
-  return `Xero already carries live money for this card: ${parts.join("; ")}${more}.`;
+  const ownsIt = money.rows.some((row) => row.attribution !== "claim_reference_match");
+  const lead = ownsIt
+    ? "Xero already carries live money for this card"
+    : "Xero carries live money on this card's claim that cannot be ruled out as this card's (it may belong to a sibling card on the same claim)";
+  return `${lead}: ${parts.join("; ")}${more}.`;
 }

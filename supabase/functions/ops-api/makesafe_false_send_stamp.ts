@@ -63,13 +63,23 @@
 
 /**
  * `ApiError` lives in `index.ts`, which imports this module — importing it back
- * would be circular, so validation faults are plain Errors carrying a `status`
- * the router maps, matching the convention in the sibling make-safe modules.
+ * would be circular. The router's catch maps `sesActionErrorResponse` and
+ * `ApiError` and NOTHING else, so a plain Error carrying a `status` surfaced as
+ * an HTTP 500: a caller who forgot `reason` was told the server had failed, and
+ * invited to retry. This typed class is what the router recognises (see the
+ * `correct_makesafe_false_send_stamp` case in index.ts), so a malformed request
+ * gets its 400.
  */
+export class FalseSendStampRequestError extends Error {
+  readonly status = 400;
+  constructor(message: string) {
+    super(message);
+    this.name = "FalseSendStampRequestError";
+  }
+}
+
 function badRequest(message: string): Error {
-  const err = new Error(message) as Error & { status?: number };
-  err.status = 400;
-  return err;
+  return new FalseSendStampRequestError(message);
 }
 
 /** Pack statuses that only exist after the irreversible send step. */
@@ -117,6 +127,56 @@ function asIso(value: unknown): string | null {
   const d = new Date(String(value));
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString();
+}
+
+/**
+ * Rows per page of the legacy-marker scan, and the hard ceiling across all
+ * pages for one job.
+ *
+ * The marker cannot be found by a server-side filter: it is written under
+ * varying event types (`note`, `note_added`) and varying keys inside the blob
+ * (`text`, `note`), so a `detail_json->>text` predicate would MISS real markers
+ * — and missing one means erasing the record of a real send. The scan therefore
+ * still reads the blob, but a page at a time, so a card with a long event
+ * history cannot pull every `job_events` body of 25 jobs into one isolate and
+ * blow the worker memory limit part-way through a batch that has already
+ * cleared some stamps. Overrunning the ceiling is `unreadable` — fail closed,
+ * never "no marker found".
+ */
+const MARKER_SCAN_PAGE_SIZE = 200;
+const MARKER_SCAN_MAX_ROWS = 4000;
+
+function rowCarriesPackSentMarker(row: any): boolean {
+  const type = String(row?.event_type || "").toLowerCase();
+  if (type.includes("pack_sent")) return true;
+  let blob = "";
+  try {
+    blob = JSON.stringify(row?.detail_json ?? "");
+  } catch {
+    return true; // unserialisable -> fail closed
+  }
+  return blob.includes("MAKESAFE_PACK_SENT");
+}
+
+async function countLegacyPackSentMarkers(
+  client: any,
+  jobId: string,
+): Promise<number | "unreadable"> {
+  let matched = 0;
+  for (let from = 0; from < MARKER_SCAN_MAX_ROWS; from += MARKER_SCAN_PAGE_SIZE) {
+    const page = await client.from("job_events")
+      .select("id, event_type, detail_json")
+      .eq("job_id", jobId)
+      .order("id", { ascending: true })
+      .range(from, from + MARKER_SCAN_PAGE_SIZE - 1);
+    if (page?.error) return "unreadable";
+    const rows = (page?.data || []) as any[];
+    matched += rows.filter(rowCarriesPackSentMarker).length;
+    if (rows.length < MARKER_SCAN_PAGE_SIZE) return matched;
+  }
+  // More history than the ceiling allows: the remainder was never looked at, so
+  // a send cannot be ruled out.
+  return "unreadable";
 }
 
 /**
@@ -182,23 +242,10 @@ export async function readMakesafeSendEvidence(
   }
 
   // 4. Legacy MAKESAFE_PACK_SENT marker (pre-pack-table send path).
-  const events = await client.from("job_events")
-    .select("id, event_type, detail_json").eq("job_id", jobId);
-  if (events?.error) {
-    surfaces.legacy_pack_sent_marker = "unreadable";
-  } else {
-    surfaces.legacy_pack_sent_marker = (events?.data || []).filter((e: any) => {
-      const type = String(e?.event_type || "").toLowerCase();
-      if (type.includes("pack_sent")) return true;
-      let blob = "";
-      try {
-        blob = JSON.stringify(e?.detail_json ?? "");
-      } catch {
-        return true; // unserialisable -> fail closed
-      }
-      return blob.includes("MAKESAFE_PACK_SENT");
-    }).length;
-  }
+  surfaces.legacy_pack_sent_marker = await countLegacyPackSentMarkers(
+    client,
+    jobId,
+  );
 
   const sent = Object.values(surfaces).some((v) => v === "unreadable" || (typeof v === "number" && v > 0));
   return { sent, surfaces };
@@ -324,14 +371,32 @@ export async function correctMakesafeFalseSendStamps(
       continue;
     }
 
+    // COMPARE-AND-SET, not read-then-write. The drift check above is a read,
+    // and `update_makesafe_details` (the still-unguarded door in the module
+    // header) can move `report_sent_at` between that read and this write — an
+    // unconditional clear would erase whatever landed there while the audit
+    // event recorded the stale `before`. Matching the observed value makes the
+    // race a zero-row update, which is reported as drift rather than success.
     const nowIso = new Date().toISOString();
-    const { error: updateErr } = await client.from("makesafe_job_details")
+    const { data: updated, error: updateErr } = await client
+      .from("makesafe_job_details")
       .update({ report_sent_at: null, updated_at: nowIso })
-      .eq("job_id", jobId);
+      .eq("job_id", jobId)
+      .eq("report_sent_at", before)
+      .select("job_id");
     if (updateErr) {
       push("refused", {
         refusal_code: "update_failed",
         refusal_fact: String(updateErr?.message || updateErr),
+        send_evidence: evidence,
+      });
+      continue;
+    }
+    if (!Array.isArray(updated) || updated.length === 0) {
+      push("refused", {
+        refusal_code: "stamp_drift",
+        refusal_fact:
+          `report_sent_at moved while this correction was being applied (expected ${before}); nothing was cleared.`,
         send_evidence: evidence,
       });
       continue;

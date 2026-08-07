@@ -122,6 +122,90 @@ Deno.test("a short reference cannot attach another builder's invoice by substrin
   assertEquals(money.exists, false);
 });
 
+// ── PO grain: both directions, or the guard is only half-checked ─────────────
+//
+// The original defect matched too NARROWLY (no PO, so a card could not find its
+// OWN invoice). Matching on a bare shared digit run is too BROAD (no PO, so a
+// card finds a SIBLING's). Same missing grain, opposite failures, both landing
+// on MLB-27037. The grain comes from the deployed duplicate guard.
+
+Deno.test("PO grain 1: a card MUST find its own invoice at the same grain (SWMS-261015)", () => {
+  const money = classifyExistingCardMoney(
+    JOB,
+    "MLB-26658PO-56313",
+    [inv({ id: "own", invoice_number: "INV-1115", status: "DRAFT", reference: "MLB-26658PO-56313", job_id: null })],
+    null,
+  );
+  assertEquals(money.exists, true);
+  assertEquals(money.rows[0].attribution, "unlinked_reference_match");
+  assertStringIncludes(
+    describeExistingCardMoney(money),
+    "Xero already carries live money for this card",
+  );
+});
+
+Deno.test("PO grain 2: a claim-only card does NOT match a sibling's already-attributed invoice", () => {
+  // The Floreat trio: MLB-27037 is one claim across three cards. An invoice
+  // minted as MLB-27037PO-56xxx and already linked to a DIFFERENT job is that
+  // card's money, and saying otherwise is a false statement about the Captain's
+  // money in the opposite direction from the defect being cured.
+  const money = classifyExistingCardMoney(
+    JOB,
+    "MLB-27037",
+    [inv({ id: "sib", invoice_number: "INV-1127", status: "AUTHORISED", reference: "MLB-27037PO-56501", job_id: OTHER })],
+    null,
+  );
+  assertEquals(money.exists, false);
+  assertEquals(money.rows.length, 0);
+  assertEquals(existingCardMoneyRefusal(null, money), null);
+});
+
+Deno.test("PO grain 3: UNLINKED money on our own claim still REFUSES (Floreat INV-1116)", () => {
+  // Direction 2 must not overshoot into under-refusing: nothing rules out that
+  // this invoice is ours. It refuses — but as claim money, not as this card's.
+  const money = classifyExistingCardMoney(
+    JOB,
+    "MLB-27037",
+    [inv({ id: "un", invoice_number: "INV-1116", status: "DRAFT", reference: "MLB-27037PO-56459", job_id: null })],
+    null,
+  );
+  assertEquals(money.exists, true);
+  assertEquals(money.rows[0].attribution, "claim_reference_match");
+  assert(existingCardMoneyRefusal(null, money), "unlinked claim money still refuses");
+  const text = describeExistingCardMoney(money);
+  assertStringIncludes(text, "may belong to a sibling card");
+  assert(
+    !text.includes("live money for this card"),
+    "never assert ownership the reference has not established",
+  );
+});
+
+Deno.test("PO grain 4: differing POs on both sides are separate billed work (MLB-24732)", () => {
+  // SWMS-26526 (MLB-24732PO-55712, PAID INV-0745) and SWMS-26938
+  // (MLB-24732PO-55713) are two real, separately billed jobs on one claim.
+  const money = classifyExistingCardMoney(
+    JOB,
+    "MLB-24732PO-55713",
+    [inv({ id: "sep", invoice_number: "INV-0745", status: "PAID", reference: "MLB-24732PO-55712", job_id: null })],
+    null,
+  );
+  assertEquals(money.exists, false);
+  assertEquals(existingCardMoneyRefusal(null, money), null);
+});
+
+Deno.test("own_job money is untouched by the PO grain (11 of the 16 measured cards)", () => {
+  // The invoice is linked to THIS job; its reference carries a different PO.
+  // Attribution outranks the string, and it refuses exactly as before.
+  const money = classifyExistingCardMoney(
+    JOB,
+    "MLB-24732PO-55713",
+    [inv({ id: "mine", reference: "MLB-24732PO-55712", job_id: JOB })],
+    null,
+  );
+  assertEquals(money.exists, true);
+  assertEquals(money.rows[0].attribution, "own_job");
+});
+
 // ── the refusal, and the one-way property ────────────────────────────────────
 
 Deno.test("no bound invoice + existing money -> a refusal naming the invoice", () => {

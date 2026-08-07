@@ -89,6 +89,20 @@ caller of that action can clear a REAL send's stamp or SET a false one — the
 exact failure mode the guarded action exists to prevent. The applied 5-card
 correction script itself went through that unguarded door.
 
+Because that door stays open, the guarded action's clear is a **compare-and-set**
+(`.eq("report_sent_at", <observed>)`), not a read-then-write: a stamp that moves
+between the drift check and the write is a zero-row update reported as
+`stamp_drift`, so the other writer's value is never clobbered and the audit
+event never records a `before` that was already stale. Two smaller boundaries
+ship with it: a malformed request throws the typed `FalseSendStampRequestError`
+that the router maps to **400** (a plain Error surfaced as a 500 and invited a
+retry of a request that can never succeed), and the legacy-marker scan reads
+`job_events` a bounded page at a time — the marker is written under varying
+event types and varying blob keys, so it cannot be found by a server-side
+filter, but hauling every event body for 25 jobs into one isolate risks a
+`WORKER_RESOURCE_LIMIT` part-way through a batch that has already cleared
+stamps. Overrunning the scan ceiling is `unreadable`, never "no marker".
+
 Deferred deliberately (no-coding day) and ticketed separately: removing
 `report_sent_at` from that allow-list is a behaviour change to a live typed
 action, not an incidental fix. Until it lands, `report_sent_at` being clean
@@ -151,6 +165,50 @@ producer the cockpit and both approve actions consume, and because
 approve actions also run `refuseWhenCardMoneyExists` as a hard 409 in front of
 it — folding the blocker into the verdict alone would have converted a hard stop
 into an overridable one.
+
+### A FALSE REFUSAL IS NOT A SAFE FAILURE
+
+The one-way property protects against wrongly APPROVING. It does **not** protect
+against wrongly REFUSING WITH A FALSE EXPLANATION: a refusal that tells the
+Captain "Xero already carries live money for this card" when the money belongs
+to a SIBLING card on the same claim is a new false statement from the board
+about his money. It is the same disease as the defect being cured, pointed the
+other way, and it must be treated as a defect, not as a safe failure.
+
+The symmetry is the whole lesson, and both halves land on **MLB-27037**, the
+claim shared across the three Floreat cards:
+
+- The ORIGINAL defect matched too **narrowly** — the reference read ignored the
+  PO, so a card could not find its OWN invoice.
+- This guard, as first written, matched too **broadly** — a bare shared
+  `>= 5`-digit run, no PO grain, so a claim-only card found someone ELSE'S.
+
+Same missing grain, opposite failures. The grain is therefore taken from the
+already-deployed duplicate guard and never re-implemented: `workRefRelation`,
+`poIndeterminateSiblingBlocks` and `referenceCandidateBlocks` in
+`makesafe_send_pack.ts` are CONSUMED by `ses_existing_card_money.ts`. One engine
+per question — a second, cruder "is this the same work" matcher contradicting
+the deployed one is exactly the defect.
+
+What that means at the card:
+
+- Both sides name a PO and the POs DIFFER -> separate billed work -> no refusal
+  (`MLB-24732` = SWMS-26526 / SWMS-26938).
+- One-sided PO -> refuses UNLESS the candidate invoice is already attributed to
+  a DIFFERENT card. **Unlinked money on our own claim still refuses** (Floreat
+  INV-1116): nothing rules out that it is ours, and that is the live danger.
+- Identical reference -> refuses.
+- `own_job` (`xero_invoices.job_id` IS this job) is untouched by all of it and
+  refuses exactly as before — that path carries 11 of the 16 measured cards.
+
+The WORDING now says only what has been established. `own_job` and a same-grain
+reference read as "Xero already carries live money for this card"; a
+claim-level match (`claim_reference_match`) reads as money on this card's claim
+that **may belong to a sibling card**. The refusal is unchanged in both cases —
+what changed is that it no longer asserts ownership it has not proved. Adding
+the grain narrows WHICH cards are in scope; inside scope the guard is still
+strictly one-way. Both directions are pinned in
+`ses_existing_card_money_test.ts` ("PO grain 1..4").
 
 ### A PRIOR-CYCLE TERMINAL STATE MUST NEVER SILENCE A CURRENT-CYCLE QUESTION
 
