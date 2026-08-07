@@ -230,6 +230,23 @@ async function loadSesCuratedBindAudit(
   };
 }
 
+/**
+ * The job whose curated-bind trail owns this artifact's report document: the
+ * SIBLING job for an explicit sibling bundle, and nobody otherwise (the docket
+ * job's own trail already answers for its own documents). Every consumer of a
+ * supersession answer resolves the owning job through here so the read path and
+ * the send wall cannot disagree about which trail is authoritative.
+ */
+function sesSupportingReportSiblingJobId(
+  artifact: Record<string, any>,
+): string {
+  const provenance = object(artifact.metadata);
+  const siblingJobId = String(provenance.sibling_job_id || "").trim();
+  return String(provenance.evidence_source || "") === "explicit_sibling_bundle"
+    ? siblingJobId
+    : "";
+}
+
 async function verifyStoredSupportingReport(
   client: SesSupabaseClient,
   artifact: Record<string, any>,
@@ -259,11 +276,8 @@ async function verifyStoredSupportingReport(
     artifact,
     audit.bind_instants,
   );
-  const provenance = object(artifact.metadata);
-  const siblingJobId = String(provenance.sibling_job_id || "").trim();
-  const isSiblingBundle =
-    String(provenance.evidence_source || "") === "explicit_sibling_bundle" &&
-    Boolean(siblingJobId);
+  const siblingJobId = sesSupportingReportSiblingJobId(artifact);
+  const isSiblingBundle = Boolean(siblingJobId);
   // A sibling bundle's report document belongs to the SIBLING job, so BOTH
   // questions this audit answers are recorded on that job's trail and never on
   // the docket's: when the document was bound, and whether a later bind has
@@ -4779,6 +4793,24 @@ async function assertSesReleasedSourcesNotSuperseded(
   client: SesSupabaseClient,
   docketRevisionIds: string[],
 ): Promise<void> {
+  // One release can carry several bundles from several sibling jobs, so each
+  // artifact is answered by ITS OWN owning job's trail and never by another
+  // artifact's. Each trail is read at most once across the whole wall.
+  const audits = new Map<string, SesCuratedBindAudit | null>();
+  const auditFor = async (auditJobId: string) => {
+    if (!audits.has(auditJobId)) {
+      audits.set(auditJobId, await loadSesCuratedBindAudit(client, auditJobId));
+    }
+    return audits.get(auditJobId) as SesCuratedBindAudit | null;
+  };
+  const refuseUnreadable = () => {
+    throw new SesActionError(
+      409,
+      curatedSourceMissingRefusal(
+        SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
+      ),
+    );
+  };
   for (const revisionId of docketRevisionIds) {
     const revision = await client.from("makesafe_docket_revisions")
       .select("id,job_id").eq("id", revisionId).maybeSingle();
@@ -4787,26 +4819,37 @@ async function assertSesReleasedSourcesNotSuperseded(
       ? await client.from("makesafe_docket_artifacts")
         .select("role,metadata").eq("revision_id", revisionId)
       : { data: null, error: { message: "job identity missing" } };
-    const bindAudit = jobId
-      ? await loadSesCuratedBindAudit(client, jobId)
-      : null;
+    const bindAudit = jobId ? await auditFor(jobId) : null;
     if (revision.error || !jobId || artifacts.error || !bindAudit) {
-      throw new SesActionError(
-        409,
-        curatedSourceMissingRefusal(
-          SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
-        ),
-      );
+      refuseUnreadable();
     }
-    const superseded = (artifacts.data || []).some((artifact: any) =>
-      artifact.role === "supporting_report_pdf" &&
-      sesSupportingReportIsSuperseded(artifact, bindAudit.supersessions)
-    );
-    if (superseded) {
-      throw new SesActionError(
-        409,
-        curatedSourceMissingRefusal(SES_CURATED_SOURCE_SUPERSEDED_REASON),
-      );
+    for (const artifact of (artifacts.data || []) as any[]) {
+      if (artifact.role !== "supporting_report_pdf") continue;
+      // A sibling bundle's report document belongs to the SIBLING job, so the
+      // correction that supersedes it is recorded on that job's trail. The
+      // docket job's events can never carry the sibling document's id, so
+      // `sesSupportingReportIsSuperseded` would filter to nothing and always
+      // answer "not superseded" - and a superseded report would be mailed to a
+      // builder, the one outcome this wall exists to prevent.
+      const siblingJobId = sesSupportingReportSiblingJobId(artifact);
+      const owningAudit = siblingJobId
+        ? await auditFor(siblingJobId)
+        : bindAudit;
+      // An unreadable sibling trail is untrusted exactly like an unreadable
+      // docket trail: it refuses the whole send under the same read-fault
+      // reason, never as "no supersession" and never as a skipped artifact.
+      if (!owningAudit) refuseUnreadable();
+      if (
+        sesSupportingReportIsSuperseded(
+          artifact,
+          (owningAudit as SesCuratedBindAudit).supersessions,
+        )
+      ) {
+        throw new SesActionError(
+          409,
+          curatedSourceMissingRefusal(SES_CURATED_SOURCE_SUPERSEDED_REASON),
+        );
+      }
     }
   }
 }

@@ -6,6 +6,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _parseSesDraftForTest,
+  assertSesDocketsSignedOffForSend,
   docketArtifactPackRelativePath,
   executeSesReleaseRevisionAction,
   getSesReviewablePackAction,
@@ -1977,5 +1978,118 @@ Deno.test(
     );
     // Suppressed means suppressed: no signed URL is ever handed out for it.
     assertEquals(signedPaths, []);
+  },
+);
+
+/**
+ * A sibling bundle whose bind AND supersession both live on the sibling job's
+ * own trail - the shape the docket job's events can never describe.
+ */
+async function supersededSiblingBundleFixture() {
+  const bytes = new TextEncoder().encode("%PDF-1.7\nsuperseded sibling send");
+  const contentHash = await sesSha256Bytes(bytes);
+  const rawHash = await rawSha256(bytes);
+  const superseded = MAKESAFE_REPORT_RENDERER_AUTHORITY_REGISTER[1];
+  const artifact = {
+    role: "supporting_report_pdf",
+    object_key: "makesafe-docket-artifacts/docket-fixture/report.pdf",
+    media_type: "application/pdf",
+    content_hash: contentHash,
+    size_bytes: bytes.byteLength,
+    metadata: {
+      source_kind: "durable_curated_revision",
+      source_identity: SUPERSEDED_IDENTITY,
+      source_document_id: "sibling-document",
+      report_document_id: "sibling-document",
+      source_revision_id: "asbestos-misstatement",
+      source_artifact_id: "asbestos-misstatement",
+      source_artifact_content_hash: contentHash,
+      expected_raw_sha256: `sha256:${rawHash}`,
+      output_sha256: `sha256:${rawHash}`,
+      render_hash: rawHash,
+      report_input_hash: SUPERSEDED_INPUT,
+      evidence_source: "explicit_sibling_bundle",
+      report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
+      bundle_id: "bundle-fixture",
+      sibling_job_id: "sibling-job-fixture",
+      binding_revision_id: "binding-revision-fixture",
+      report_renderer_version: makesafeRendererAuthorityVersion(superseded),
+      report_renderer_source_revision: superseded.source_revision,
+      report_renderer_script_sha256: superseded.script_sha256,
+    },
+  };
+  const siblingEvents = [
+    {
+      job_id: "sibling-job-fixture",
+      created_at: "2026-08-05T00:00:00.000Z",
+      detail_json: { document_id: "sibling-document" },
+    },
+    {
+      job_id: "sibling-job-fixture",
+      created_at: "2026-08-05T01:00:00.000Z",
+      detail_json: {
+        document_id: "sibling-document",
+        supersedes_prior_bind: true,
+        source_identity: CORRECTED_IDENTITY,
+        expected_raw_sha256: CORRECTED_RAW,
+        report_input_hash: CORRECTED_INPUT,
+        prior_source_identity: SUPERSEDED_IDENTITY,
+        prior_expected_raw_sha256: `sha256:${rawHash}`,
+        prior_report_input_hash: SUPERSEDED_INPUT,
+      },
+    },
+  ];
+  return { artifact, bytes, siblingEvents };
+}
+
+Deno.test(
+  "SEND IT refuses a release whose sibling bundle was superseded on the SIBLING job",
+  async () => {
+    // The send wall is the stronger surface: pack display only hides the
+    // artifact, this stops the superseded report being mailed to the builder.
+    // Scoping the supersession read to the DOCKET job filters by the sibling's
+    // document id against events that can never carry it, so the wall would
+    // always answer "not superseded" and the send would proceed.
+    const { artifact, bytes, siblingEvents } =
+      await supersededSiblingBundleFixture();
+    const { client } = reviewPackClient(artifact, bytes, {
+      jobEvents: siblingEvents,
+    });
+    const error = await assertRejects(
+      () => assertSesDocketsSignedOffForSend(client, ["docket-fixture"]),
+      SesActionError,
+    );
+    assertEquals(error.status, 409);
+    assertEquals(
+      (error.refusal as any).evidence.suppression_reason,
+      "curated_source_superseded",
+    );
+  },
+);
+
+Deno.test(
+  "SEND IT refuses when only the SIBLING job's supersession trail is unreadable",
+  async () => {
+    // An unreadable sibling trail is untrusted exactly like an unreadable
+    // docket trail - never "no supersession", never a silently skipped
+    // artifact. The docket job's own trail reads cleanly here, so the refusal
+    // can only come from the sibling read.
+    const { artifact, bytes } = await supersededSiblingBundleFixture();
+    const { client } = reviewPackClient(artifact, bytes, {
+      jobEvents: [],
+      jobEventsErrorForJob: {
+        job_id: "sibling-job-fixture",
+        error: { message: "sibling trail unreadable" },
+      },
+    });
+    const error = await assertRejects(
+      () => assertSesDocketsSignedOffForSend(client, ["docket-fixture"]),
+      SesActionError,
+    );
+    assertEquals(error.status, 409);
+    assertEquals(
+      (error.refusal as any).evidence.suppression_reason,
+      "curated_source_supersession_unreadable",
+    );
   },
 );
