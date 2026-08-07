@@ -2324,14 +2324,14 @@ re-opens it as `needs_review` and invalidates the previous signoff tick. Check
 placement promise, and both gaps have already cost a run:
 
 - A report-type card (`makesafe_job_details.report_type` non-null) publishing
-  `pre_xero_docs_ready: true` still cannot have a draft cut — the item-14
-  portal-truth guard (`assertMakesafePortalVerifiedForDraftInvoice`) refuses
-  unless `portal_verified_at` / `portal_verified_cycle` name the CURRENT cycle.
+  `pre_xero_docs_ready: true` still cannot have a draft cut unless the item-14
+  portal-truth guard (`assertMakesafePortalVerifiedForDraftInvoice`) is
+  satisfied for the CURRENT cycle — the next section owns what satisfies it.
   The board signal does not include the capture, so such a card looks ready and
   is not. The refusal surfaces under code `xero_outcome_unknown` and leaves an
   `invoice_create` effect in state `unknown` with `external_id: null` even
   though nothing reached Xero — a later mint therefore needs a fresh obligation
-  revision. Read the two columns before attempting; the guard reads nothing else.
+  revision.
 - Minting a DRAFT alone never places a PHYSICAL-shaped card in Docs Ready.
   `sesStageDocsReady` additionally requires the invoice DOCUMENT on the pack
   (`closeout_documents.invoice`), attached at APPROVE INVOICE. Roof and
@@ -2341,6 +2341,60 @@ placement promise, and both gaps have already cost a run:
 
 Worked run, with the PO-grain reference screen that keeps a sibling's money from
 refusing a mintable card: `docs/evidence/ses-draft-mint-run-2026-08-07.md`.
+
+## Portal Truth Has Two Stores, And `portal_verified_at` Is Only One Of Them
+
+`makesafe_job_details.portal_verified_at` / `.portal_verified_cycle` have exactly
+ONE writer, `mark_makesafe_portal_report_done`. They are NOT the only record of a
+portal capture: the portal observer (`capture_portal_evidence.py/v1`) and the
+trade attestation (`trade_portal_confirmation/v1`) write the append-only
+`makesafe_portal_capture_revisions` ledger and stamp no column. Reading only the
+columns is how three roof cards with verified, current-cycle, compliant captures
+were refused as having "no portal-locked verification" (2026-08-07). So NEVER
+diagnose a portal refusal from those two columns alone, and never conclude from
+NULL that no capture exists.
+
+The item-14 guard now reads both, through `loadMakesafePortalVerification`'s
+`ledgerCaptureSatisfied` term. It writes no new rule, and neither should any
+future consumer:
+
+- **Which ledger rows count** is `portalCapturesFromLedger`
+  (`makesafe_board_read_model.ts`) — the one validator (sealed producer trust via
+  `isTrustedSesPortalCaptureProducer`, status/result agreement, builder-reference
+  match, `sha256:` source hash, real PNG in the capture bucket for the observer
+  producer, and the URL having to be one of the card's own genuine portal links).
+- **What is enough** is `ledgerPortalCapturesSatisfy` over
+  `requiredPortalCaptureRoles` (`makesafe_portal_guard.ts`) — the SAME
+  required-role set `validatePortalEvidenceForReportType` enforces, so the two
+  paths cannot drift. Roof needs one `roof_report`; assessment needs the triad.
+
+`makesafe_portal_guard.ts` cannot import the board read model (that module
+imports this one), so the pure predicate takes already-projected captures and the
+composition lives at the one caller in `index.ts`. Both guard entry points
+(draft-invoice AND substatus-advance) share the one predicate — never teach one
+about a source and not the other.
+
+CURRENT CYCLE IS ENFORCED TWICE, INDEPENDENTLY: the runtime read is narrowed to
+the card's own `attendance_cycle_id`, and `portalCapturesFromLedger` drops any row
+whose `attendance_cycle_id` differs (an id compare, stronger than a cycle number —
+an id cannot be reused across a re-attend). Do not add a third cycle check inside
+`ledgerPortalCapturesSatisfy`: its input captures carry the CARD's `cycle_number`
+stamped by the projection, so such a check compares a value to itself and proves
+nothing. Everything fails CLOSED — no report type, no attendance cycle, an
+unreadable ledger or a PostgREST error all refuse, because a read fault must never
+be why a card becomes invoiceable.
+
+Blast radius is re-provable read-only and exits non-zero on a card that becomes
+eligible without a compliant capture:
+`scripts/ses-portal-truth-ledger-blast-radius.ts`. Measured 2026-08-07: 118 report
+cards, 16 -> 19 satisfied, 3 newly eligible (exactly the three named cards), 0
+newly refused, 12 of the 15 ledger-bearing cards still refused. Note two `done`
+captures are correctly unusable because their `builder_reference` is EMPTY.
+Evidence: `docs/evidence/ses-portal-truth-guard-reads-the-ledger-2026-08-07.md`.
+
+Adjacent, unfixed: those cards' genuine portal links are tagged `builder_portal`
+rather than `roof_report`. The projection resolves that on a roof card, so the
+guard is unaffected, but a consumer keying on the link `kind` will miss them.
 
 ## A Roof-Report Card Sends ONE Email, And Route Applicability Is Not `report_only`
 

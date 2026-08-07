@@ -147,6 +147,10 @@ import {
   ownTemplateRoofJobIdsForBoard,
   parseMakesafeBoardColumnScope,
   parseMakesafeBoardFields,
+  // The one validator of "is this ledger row a trustworthy CURRENT-CYCLE portal
+  // capture for this card". The item-14 portal-truth guard consumes it rather
+  // than re-deriving the rule — see loadMakesafeLedgerPortalCaptureSatisfied.
+  portalCapturesFromLedger,
   projectOpsMakesafeBoard,
   projectTradeMakesafeBoard,
   type MakesafeBoardColumnScope,
@@ -622,6 +626,7 @@ import {
 // portal-locked verification) + the honest-fallback recheck queue.
 import {
   extractPortalLinks as _extractPortalLinks,
+  ledgerPortalCapturesSatisfy as _ledgerPortalCapturesSatisfy,
   portalRecheckDue as _portalRecheckDue,
   portalRecheckEligible as _portalRecheckEligible,
   portalVerificationSatisfied as _portalVerificationSatisfied,
@@ -15818,7 +15823,7 @@ async function loadMakesafePortalVerification(
   jobId: string,
 ): Promise<PortalVerificationState & { reportType: string | null }> {
   const { data: detail } = await client.from('makesafe_job_details')
-    .select('report_type, cycle_number, external_links, portal_verified_at, portal_verified_cycle, portal_verified_signal')
+    .select('report_type, cycle_number, attendance_cycle_id, external_ref, external_links, portal_verified_at, portal_verified_cycle, portal_verified_signal')
     .eq('job_id', jobId)
     .maybeSingle()
   let reportType = String(detail?.report_type || '').trim() || null
@@ -15845,9 +15850,90 @@ async function loadMakesafePortalVerification(
     verifiedCycle: detail?.portal_verified_cycle ?? null,
     requiresAssessmentProof,
     assessmentProofSatisfied,
+    ledgerCaptureSatisfied: await loadMakesafeLedgerPortalCaptureSatisfied(
+      client,
+      jobId,
+      detail,
+      reportType,
+    ),
   }
 }
 export const _loadMakesafePortalVerification = loadMakesafePortalVerification
+
+/**
+ * The item-14 guard's SECOND source for the same fact: the append-only
+ * `makesafe_portal_capture_revisions` ledger.
+ *
+ * `mark_makesafe_portal_report_done` is the only writer of the card's
+ * `portal_verified_*` columns, but it is not the only PRODUCER of a portal
+ * capture — the portal observer and the trade attestation write the ledger and
+ * stamp no column. So a card could hold a verified, current-cycle, compliant
+ * capture and still be refused for having "no portal-locked verification".
+ * Measured live 2026-08-07 on three roof cards whose captures were sound.
+ *
+ * This does NOT lower the bar, and it deliberately writes no new rule:
+ *
+ *  • WHICH ROWS COUNT is `portalCapturesFromLedger` — the board read model's
+ *    existing validator (trusted producer via the sealed
+ *    `isTrustedSesPortalCaptureProducer` seam, status/result agreement,
+ *    builder-reference match, sha256 source hash, a real PNG screenshot for the
+ *    observer producer, and the capture URL having to be one of the card's own
+ *    genuine portal links). Re-deriving any of that here is what makes two
+ *    places disagree; this asks the one that already exists.
+ *  • WHAT IS ENOUGH is `ledgerPortalCapturesSatisfy`, over the same
+ *    `requiredPortalCaptureRoles` set the card-column path enforces.
+ *
+ * CURRENT CYCLE IS ENFORCED TWICE, INDEPENDENTLY. The read below is narrowed to
+ * the card's own `attendance_cycle_id`, and `portalCapturesFromLedger` drops any
+ * row whose `attendance_cycle_id` differs from the card's regardless. A card
+ * with no current attendance cycle reads no rows at all. A prior-cycle capture
+ * therefore cannot satisfy the current cycle through either path.
+ *
+ * FAILS CLOSED. No report type, no cycle, an unreadable ledger or a PostgREST
+ * error all yield `false` — exactly the behaviour before this existed. A read
+ * fault must never be the reason a card becomes invoiceable.
+ */
+async function loadMakesafeLedgerPortalCaptureSatisfied(
+  client: any,
+  jobId: string,
+  detail: any,
+  reportType: string | null,
+): Promise<boolean> {
+  if (!reportType || !detail) return false
+  const attendanceCycleId = String(detail?.attendance_cycle_id || '').trim()
+  if (!attendanceCycleId) return false
+  try {
+    const { data: rows, error } = await client
+      .from('makesafe_portal_capture_revisions')
+      .select(
+        'id, job_id, attendance_cycle_id, role, capture_result, status, source_url, source_content_hash, builder_reference, capture_producer, captured_by, captured_at, signal, screenshot_object_key, screenshot_media_type, screenshot_content_hash, screenshot_size_bytes, makesafe_fact_version',
+      )
+      .eq('job_id', jobId)
+      .eq('attendance_cycle_id', attendanceCycleId)
+    if (error) {
+      console.error('[portal-truth] ledger capture read failed', jobId, error)
+      return false
+    }
+    if (!Array.isArray(rows) || rows.length === 0) return false
+    // The resolved report type is handed over explicitly so a family-detected
+    // card gets the same link-role resolution as one whose report_type is
+    // persisted — the board reader falls back to jobs.metadata otherwise.
+    const captures = portalCapturesFromLedger(
+      {
+        id: jobId,
+        external_ref: detail?.external_ref ?? null,
+        makesafe_details: { ...detail, report_type: reportType },
+      },
+      rows,
+    )
+    return _ledgerPortalCapturesSatisfy(reportType, captures)
+  } catch (err) {
+    console.error('[portal-truth] ledger capture read threw', jobId, err)
+    return false
+  }
+}
+export const _loadMakesafeLedgerPortalCaptureSatisfied =
+  loadMakesafeLedgerPortalCaptureSatisfied
 
 function hasStoredAssessmentPortalProof(
   reportType: string | null,
@@ -15897,7 +15983,8 @@ async function assertMakesafePortalVerifiedForAdvance(
   if (_portalVerificationSatisfied(state)) return
   throw new ApiError(
     `portal-truth guard (item 14): cannot advance report-type job ${jobId} to '${norm}' — ` +
-    `no portal-locked verification recorded for cycle ${state.currentCycle}. Confirm the ` +
+    `no portal-locked verification recorded for cycle ${state.currentCycle}, and no ` +
+    `verified current-cycle capture in makesafe_portal_capture_revisions. Confirm the ` +
     `builder portal is submitted (capture_portal_evidence.py -> locked) and record it via ` +
     `mark_makesafe_portal_report_done first.`,
     409,
@@ -15919,8 +16006,9 @@ async function assertMakesafePortalVerifiedForDraftInvoice(
   if (_portalVerificationSatisfied(state)) return
   throw new ApiError(
     `portal-truth guard (item 14): refusing to draft an invoice for report-type job ${jobId} — ` +
-    `no portal-locked verification recorded for cycle ${state.currentCycle}. Verify the portal ` +
-    `is submitted and record it via mark_makesafe_portal_report_done before invoicing.`,
+    `no portal-locked verification recorded for cycle ${state.currentCycle}, and no verified ` +
+    `current-cycle capture in makesafe_portal_capture_revisions. Verify the portal is ` +
+    `submitted and record it via mark_makesafe_portal_report_done before invoicing.`,
     409,
   )
 }
