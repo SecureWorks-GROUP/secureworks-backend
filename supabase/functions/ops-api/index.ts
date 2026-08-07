@@ -478,6 +478,14 @@ import {
   type SesXeroGateway,
   type SesXeroInvoiceResult,
 } from './ses_reporting_actions.ts'
+// Second way to satisfy the identified-operator approval gate: an enrolled
+// channel sender plus a live authenticator code. The gate itself is untouched;
+// the exact trust statement is at the top of the module.
+import {
+  readSesChannelApprovalEnv,
+  sesChannelEnrolmentAction,
+  submitSesChannelApprovalAction,
+} from './ses_channel_approval.ts'
 import { createSesGraphMailGateway } from './ses_graph_mail_gateway.ts'
 import {
   sendMailerOpsVisibilityAction,
@@ -6851,6 +6859,54 @@ if (import.meta.main) serve(async (req: Request) => {
             reason_text: body.reason_text,
             actor: authUser?.email || body.actor,
           },
+        ))
+      // ── Channel APPROVE INVOICE (WhatsApp / SMS) ────────────────────────
+      // Widens WHO may approve, never WHAT may be approved. The relay presents
+      // the ops key, which authenticates the RELAY and grants no approval
+      // authority on its own: the message must also come from an enrolled
+      // sender and carry a live authenticator code belonging to the bound
+      // operator. It then calls the very same approve action a cockpit press
+      // calls, so every guard, evidence check and refusal is unchanged.
+      // Deliberately NOT on ROUTINE_ALLOWED_ACTIONS.
+      case 'submit_ses_channel_approval': {
+        if (req.method !== 'POST') {
+          return json({ error: 'submit_ses_channel_approval requires POST' }, 405)
+        }
+        const channelOrgId = body.org_id || DEFAULT_ORG_ID
+        return json(await submitSesChannelApprovalAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          {
+            org_id: channelOrgId,
+            channel: body.channel,
+            sender_id: body.sender_id,
+            message_id: body.message_id,
+            message_text: body.message_text,
+            message_sent_at: body.message_sent_at,
+          },
+          {
+            env: readSesChannelApprovalEnv(),
+            now: () => Date.now(),
+            approveInvoice: async (operatorAuth, args) => {
+              // The synthetic live-fire fence runs here exactly as it does on
+              // the cockpit action, before any approval is recorded.
+              await assertNoSyntheticLivefireJobs(
+                client,
+                [args.job_id],
+                'approve_ses_invoice_revision',
+              )
+              return await approveSesInvoiceRevisionAction(client, operatorAuth, args)
+            },
+          },
+        ))
+      }
+      // Issue the caller's OWN authenticator seed. Identified Supabase session
+      // only: the ops key is refused here on purpose, so it can never become
+      // approval authority by reading a seed.
+      case 'ses_channel_enrolment':
+        return json(await sesChannelEnrolmentAction(
+          sesActionAuth(authMode, authUser),
+          readSesChannelApprovalEnv(),
         ))
       case 'approve_ses_invoice_revision':
         await assertNoSyntheticLivefireJobs(

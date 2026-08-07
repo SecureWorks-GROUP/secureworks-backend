@@ -1364,6 +1364,41 @@ service-role key; `scripts/ses-c2-measure-board-evidence.ts` batches the same
 ruler over the named SES population through the Management API alone, and lets verify
 assert that NO board card moved.
 
+## An Approval Is An Identified HUMAN, And There Are Now Two Ways To Prove One
+
+`canRecordSesApproval` (`ses_review_cockpit.ts`) refuses every machine caller
+("Human approval requires an identified SES operator session"). It is untouched
+and stays that way. `ses_channel_approval.ts` adds a SECOND way to satisfy it so
+the Captain can approve from WhatsApp/SMS: `submit_ses_channel_approval` accepts
+a relayed message only when THREE independent things hold — the ops key
+(transport, and it grants **no** approval authority alone), a sender that
+fingerprints to an enrolled `SES_CHANNEL_APPROVAL_BINDINGS` entry (possession),
+and a live RFC 6238 code (knowledge). The seed is DERIVED from
+`SES_CHANNEL_APPROVAL_ROOT_SECRET` plus the binding, never stored, and only
+`ses_channel_enrolment` issues it — to the operator's OWN identified Supabase
+session, never to a key and never to another admin. Both secrets are unset in
+production, so the path currently refuses everything.
+
+It changes WHO may approve, never WHAT: the resolved operator goes into the same
+`approveSesInvoiceRevisionAction` a cockpit press calls, so every guard runs
+unchanged. `auth.identity_provenance` (`SesActionAuth`, additive, optional) is
+AUDIT ONLY — no authorisation decision reads it — and exists so nobody reads
+`mode: "jwt"` on that path as a verified session, because no JWT is presented.
+
+The operator act is his MESSAGE ID, written to
+`makesafe_revision_approvals.evidence_refs` and re-read (jsonb containment)
+before every approval; the consumed TOTP step is a second single-use coordinate.
+That is also why there is no migration. Two parsing traps are pinned: a card
+number ends in six digits, so card refs are stripped BEFORE scanning for a code;
+and a digit-bearing email must not normalise as a phone number.
+
+**The binding is weaker than a cockpit session in one named way** — if the
+authenticator lives on the phone that holds WhatsApp, possession and knowledge
+collapse into one factor. That trade, the full attacker table, the residual
+read-then-write replay race, and the enrolment steps are owned by
+`docs/evidence/ses-channel-approval-binding-2026-08-07.md`. Only APPROVE INVOICE
+is wired; `SEND` is recognised and refused BY NAME, never half-executed.
+
 ## The SES Money And Outbound Seal Is Write-Once
 
 The write-once SES money/outbound seal and its sanctioned SES-native paths (the

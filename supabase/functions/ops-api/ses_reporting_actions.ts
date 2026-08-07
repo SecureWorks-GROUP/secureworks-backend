@@ -135,6 +135,19 @@ export interface SesActionAuth {
     email: string;
     role: string;
   } | null;
+  /**
+   * HOW the identified human on this request was proven. AUDIT ONLY — no
+   * authorisation decision anywhere reads it, so adding a provenance can never
+   * widen what a caller may do.
+   *
+   * Absent (the default) means the ordinary path: a Supabase JWT was verified
+   * by `auth.getUser` in `index.ts`. `bound_channel_totp` means the identity
+   * came from `ses_channel_approval.ts` — an enrolled channel sender plus a
+   * live authenticator code, with no JWT in the request. It exists so a reader
+   * of `mode: "jwt"` is never misled into assuming a session was presented; the
+   * exact trust statement lives at the top of that module.
+   */
+  identity_provenance?: "bound_channel_totp";
 }
 
 export class SesActionError extends Error {
