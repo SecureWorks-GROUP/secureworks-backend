@@ -377,6 +377,44 @@ wrong rows: quote-number search in `ops-api` (`quote_revisions.quote_number`)
 and the inbox-to-PO domain matcher in `monitor-inbox`
 (`purchase_orders.supplier_email`). Both need a join rewrite, not a rename.
 
+## A Parked PR Has Two Opposite Diagnoses; Read The Job, Not The Badge
+
+`deno-check` is the ONE required status on `main` (branch protection,
+`strict: false`), so a PR that never REGISTERS it is unmergeable by cause and
+looks identical from a badge to one whose runner never started. The remedies are
+opposite, and the discriminator is per job, at the forge:
+
+- **Registered, never ran** — `gh-axi run list --branch <b>` returns a run, and
+  the job has `steps: []`, `runner_name: ""`, and ~15m00s between `started_at`
+  and `completed_at` with `conclusion: cancelled`. That 15 minutes is GitHub's
+  queue timeout, not a workflow timeout (this repo sets no `timeout-minutes`) —
+  it is starvation. **`gh-axi run rerun <id> --failed` fixes it**, on the same
+  head SHA, no new commit. Verified on PRs #629/#630: the re-run took a runner in
+  under 2s and both jobs went green in ~35s.
+- **Never registered** — `run list --branch` returns `count: 0`. The diff matched
+  no `paths:` entry in `.github/workflows/pr-check.yml`. **Re-running is
+  impossible; the fix is the trigger.** Never manufacture a code edit to trip the
+  filter.
+
+Beware two readings that mislead. `gh-axi pr checks` renders a **cancelled** job
+as `skip`, so the rollup understates a starved job as a skip — always confirm
+with `run view <id>`. And a rollup only reflects the LATEST run per check name:
+PR #630 had a green `deno-check` in run `31121700604` that a later starved run
+masked.
+
+The `paths:` list is the whole gate, and its own comments record four earlier
+instances of the same class (watchdog-only, migrations-only, scripts-only,
+`data/`+root-`*.md`). `docs/**` was the fifth (PR #631, all three files under
+`docs/evidence/`). Adding a path weakens nothing: both jobs diff for their own
+inputs and no-op to pass when none changed. Any new top-level path that can be
+changed ALONE must be added there or PRs touching only it sit at
+`mergeStateStatus: BLOCKED` with zero checks forever.
+
+Path filters for `pull_request` are evaluated against the merge ref, so a
+trigger fix landing on `main` does not retroactively register a check on an
+already-open PR — that PR needs a `synchronize` event
+(`gh-axi pr update-branch <n>`) before the check appears.
+
 ## Migrations Apply Before Edge Deploys
 
 The production Edge Function workflow applies pending reviewed migrations before
