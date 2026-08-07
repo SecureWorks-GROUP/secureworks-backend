@@ -6797,6 +6797,7 @@ if (import.meta.main) serve(async (req: Request) => {
             job_id: body.job_id,
             invoice_obligation_revision_id: body.invoice_obligation_revision_id,
             actor: authUser?.email || body.actor || body.created_by || 'ses-draft-minter',
+            retry_attempt_key: body.retry_attempt_key,
           },
           makeSesXeroGateway(client),
         ))

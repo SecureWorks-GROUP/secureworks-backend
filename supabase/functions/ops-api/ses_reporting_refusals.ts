@@ -49,6 +49,8 @@ const FACTS = {
     "The current evidence does not prove the invoice price.",
   docket_pricing_stale:
     "The docket was priced under a superseded family matrix, so minting from it could reissue superseded rates.",
+  invoice_retry_not_permitted:
+    "A deliberate mint retry is only permitted when every prior attempt is provably stranded (unknown/failed, no Xero checkpoint, nothing reconcilable).",
   invoice_exists_unbound:
     "Xero already carries live money for this card that the current docket does not bind, so minting here would bill already-billed work.",
   post_release_disposition_missing:

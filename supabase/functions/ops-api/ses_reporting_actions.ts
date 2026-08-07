@@ -1728,6 +1728,14 @@ export async function createSesInvoiceDraftAction(
     job_id: string;
     invoice_obligation_revision_id?: string;
     actor: string;
+    /**
+     * Deliberate retry coordinate for a mint whose prior attempt is provably
+     * stranded (issue #644). Only honoured when EVERY prior invoice_create
+     * effect for this obligation revision sits at unknown/failed with no
+     * external_id AND a live Xero reconcile by each stored token finds
+     * nothing. The unskippable live ACCREC dup scan still runs first.
+     */
+    retry_attempt_key?: string;
   },
   gateway: SesXeroGateway,
   deps: {
@@ -1988,12 +1996,77 @@ export async function createSesInvoiceDraftAction(
     );
   }
 
+  // Deliberate retry (issue #644): permitted ONLY when the prior attempt is
+  // provably stranded. Any prior effect that is confirmed, still in flight,
+  // carrying an external checkpoint, or reconcilable to a live Xero invoice
+  // refuses — the stuck row must be reconciled, never raced.
+  let retryArtifactHash: string | null = null;
+  const retryKey = String(args.retry_attempt_key || "").trim();
+  if (retryKey) {
+    const priorResponse = await client.from("ses_external_effects")
+      .select("operation_key,state,external_id,external_token")
+      .eq("effect_kind", "invoice_create")
+      .eq("invoice_obligation_revision_id", revision.id);
+    if (priorResponse.error) {
+      throw new SesActionError(503, {
+        state: "refused",
+        fact: `The prior mint attempts could not be read (${
+          priorResponse.error.message || "unknown database error"
+        }), so a deliberate retry cannot prove the first attempt is stranded.`,
+      });
+    }
+    const priors = (priorResponse.data || []) as Array<{
+      operation_key: string;
+      state: string;
+      external_id: string | null;
+      external_token: string;
+    }>;
+    const refuseRetry = (fact: string): never => {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "invoice_retry_not_permitted",
+          "Reconcile or resolve the existing mint attempt; a deliberate retry is only for a provably stranded one.",
+          { fact },
+        ),
+      );
+    };
+    if (priors.length === 0) {
+      refuseRetry(
+        "No prior mint attempt exists for this obligation revision; mint normally without a retry key.",
+      );
+    }
+    for (const prior of priors) {
+      if (!["unknown", "failed"].includes(String(prior.state))) {
+        refuseRetry(
+          `A prior mint attempt is in state ${prior.state}; only unknown/failed attempts may be retried.`,
+        );
+      }
+      if (String(prior.external_id || "").trim()) {
+        refuseRetry(
+          "A prior mint attempt carries a Xero checkpoint id, so an invoice may exist; reconcile it instead of retrying.",
+        );
+      }
+      const reconciled = await gateway.reconcileCreate(prior.external_token);
+      if (reconciled.length > 0) {
+        refuseRetry(
+          "A live Xero invoice reconciles to a prior attempt's token; use that invoice instead of minting again.",
+        );
+      }
+    }
+    retryArtifactHash = await sesSha256(
+      { retry_attempt_key: retryKey },
+      "SecureWorks:ses-invoice-create-retry:v1\n",
+    );
+  }
+
   const store = createSupabaseSesEffectStore(client);
   const createEffect = await buildSesEffect({
     org_id: args.org_id,
     job_id: args.job_id,
     effect_kind: "invoice_create",
     invoice_obligation_revision_id: revision.id,
+    artifact_hash: retryArtifactHash,
     payload: proposal,
   });
   const createAdapter: SesExternalAdapter<
