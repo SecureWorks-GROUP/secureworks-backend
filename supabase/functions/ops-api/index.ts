@@ -230,6 +230,9 @@ import {
   SES_DOCS_READY_SMS_DEFAULT_TO,
 } from './ses_docs_ready_sms.ts'
 import {
+  runSesTradeChase,
+} from './ses_trade_chase.ts'
+import {
   recordSesPortalCaptureEvidence,
   SesPortalCaptureEvidenceError,
 } from './ses_portal_capture_evidence.ts'
@@ -5397,6 +5400,72 @@ if (import.meta.main) serve(async (req: Request) => {
           return json({ error: 'forbidden: makesafe_reporting_intake_pass requires the privileged ops key, the make-safe reporting routine, or an admin/owner session; a non-admin session cannot run the intake scan and advancement sweep' }, 403)
         }
         return json(await runMakesafeReportingIntakePass(client))
+      }
+      case 'run_ses_trade_chase': {
+        // Harden SES ticket 10: KPI trade chase. DARK unless
+        // SES_TRADE_CHASE_ENABLED=true (flipped only after the ticket-09
+        // backlog reconcile). Internal trade phones only; the module's own
+        // fences exclude the Captain's number and everything non-internal.
+        const chaseIsPrivileged = authMode === 'api_key' ||
+          authMode === 'routine' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!chaseIsPrivileged) {
+          return json({
+            error: 'forbidden: run_ses_trade_chase requires the privileged ops key, the make-safe reporting routine, or an admin/owner session',
+          }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'run_ses_trade_chase requires POST' }, 405)
+        }
+        const chaseActor = authMode === 'routine'
+          ? 'makesafe-reporting-routine'
+          : authUser?.email || `ops-api:${authMode}`
+        const summary = await runSesTradeChase({
+          org_id: DEFAULT_ORG_ID,
+          enabled: Deno.env.get('SES_TRADE_CHASE_ENABLED') === 'true',
+          now: new Date(),
+          store: createSupabaseSesEffectStore(client),
+          sendSms: (phone, message) => sendSmsViaGhl(phone, message),
+          listCards: async () => {
+            const rows = await loadCanonicalMakesafeBoard(client, {
+              fields: 'card',
+              columnScope: 'active',
+            })
+            return rows
+              .filter((r: any) =>
+                String(r?.canonical_stage || '').toLowerCase() === 'allocated'
+              )
+              .map((r: any) => ({
+                job_id: String(r?.id || ''),
+                job_number: String(r?.job_number || r?.id || ''),
+                address: String(r?.site_address || r?.site_suburb || ''),
+              }))
+              .filter((c: any) => c.job_id)
+          },
+          latestLiveAssignment: async (jobId) => {
+            const { data } = await client.from('job_assignments')
+              .select('scheduled_date, status, users:user_id(name, phone)')
+              .eq('job_id', jobId)
+              .neq('status', 'cancelled')
+              .order('scheduled_date', { ascending: false })
+              .limit(1)
+              .maybeSingle()
+            if (!data) return null
+            const joined: any = (data as any).users
+            const user = Array.isArray(joined) ? joined[0] : joined
+            return {
+              user_name: String(user?.name || ''),
+              phone: user?.phone || null,
+              scheduled_date: (data as any).scheduled_date || null,
+            }
+          },
+          forbiddenPhones: [
+            Deno.env.get('SES_DOCS_READY_SMS_TO') || SES_DOCS_READY_SMS_DEFAULT_TO,
+            SES_DOCS_READY_SMS_DEFAULT_TO,
+          ],
+          actor: chaseActor,
+        })
+        return json(summary)
       }
       case 'prepare_ses_docket_revision': {
         const assemblerIsPrivileged = authMode === 'api_key' ||

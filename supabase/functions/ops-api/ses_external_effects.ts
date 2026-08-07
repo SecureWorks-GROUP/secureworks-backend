@@ -10,7 +10,9 @@ export type SesEffectKind =
   /** Ops-visibility ordinary mail to the work-order mailer (report|photo only). */
   | "mailer_ops_send"
   /** Captain's one Docs Ready SMS — exact-once per job per attendance cycle. */
-  | "docs_ready_sms";
+  | "docs_ready_sms"
+  /** KPI trade chase — exact-once per job per local day, internal trade phone only. */
+  | "trade_chase_sms";
 export type SesEffectState =
   | "reserved"
   | "dispatching"
