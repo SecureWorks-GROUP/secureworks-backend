@@ -26,7 +26,6 @@ import {
   SYNTHETIC_LIVEFIRE_MARKER_PREFIX,
 } from "./makesafe_synthetic_livefire.ts";
 import { buildSourceIssueOperationalFact } from "./makesafe_intake_operational_facts.ts";
-import { flagIntakeCommitWithoutSiteSuburb } from "./makesafe_intake_suburb_backstop.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -6866,10 +6865,6 @@ Deno.test("D3: a reattend with no findable original parks for review instead of 
 // tests are a matched pair: the same fixture differing only in whether the work
 // order's address carries a suburb, so the guard is proved to both fire and
 // stay quiet rather than merely to exist.
-//
-// The guard itself lives in the guarded approval gate, the one seam every mint
-// path converges on, so the stub below mirrors what that gate does with its own
-// approved suburb and the runtime is proved to account what the gate reports.
 function suburbBacktopFixture(postId: string, siteAddress: string): Store {
   const store = baseStore();
   store.emails.push(email({
@@ -6902,31 +6897,6 @@ function suburbBacktopFixture(postId: string, siteAddress: string): Store {
   return store;
 }
 
-function approveDraftThroughSuburbBackstop(store: Store) {
-  return async (client: any, body: any) => {
-    const draft = (store.makesafe_intake_drafts as any[]).find((row: any) =>
-      row.id === body.draft_id
-    );
-    const sourcePostIds =
-      (draft?.extraction_json?.intake_source_post_ids as string[]) || [];
-    const flag = await flagIntakeCommitWithoutSiteSuburb(client, {
-      jobCreated: true,
-      jobId: "job-abc",
-      siteSuburb: draft?.site_suburb,
-      orgId: draft?.org_id || ORG,
-      mailbox: draft?.mailbox || "ses@secureworkswa.com.au",
-      sourcePostIds,
-      instructionKey: draft?.external_ref || null,
-      caseId: body.intake_case_id || null,
-    });
-    return {
-      job: { id: "job-abc" },
-      job_created: true,
-      committed_without_site_suburb: flag.flagged,
-    };
-  };
-}
-
 function suburbIssueRows(store: Store) {
   return store.email_events_raw.filter((row: any) =>
     row.change_type === "intake_exception_committed_without_site_suburb"
@@ -6943,7 +6913,7 @@ Deno.test("a job minted with an empty suburb is flagged as an open source issue 
       selectionMode: "exact",
       allowSourcePostIds: ["suburb-missing-1"],
       maxCases: 1,
-      approveDraft: approveDraftThroughSuburbBackstop(store),
+      approveDraft,
       nowIso: NOW,
     },
   );
@@ -6964,6 +6934,10 @@ Deno.test("a job minted with an empty suburb is flagged as an open source issue 
     "human_supply_site_suburb",
   );
   assertEquals(issues[0].page_meta.case_id, store.makesafe_intake_cases[0].id);
+  // The desk reads `email_events_raw` through a `received_at` window, so a row
+  // written without one is a flag nobody can see.
+  assertEquals(issues[0].received_at, store.emails[0].received_at);
+  assert(issues[0].received_at);
 
   // The flag is an open issue, not a lost source: the case-source row still
   // makes this a final fate, so the source is never re-queued by the guard.
@@ -6983,7 +6957,7 @@ Deno.test("a job minted with a suburb is not flagged", async () => {
       selectionMode: "exact",
       allowSourcePostIds: ["suburb-present-1"],
       maxCases: 1,
-      approveDraft: approveDraftThroughSuburbBackstop(store),
+      approveDraft,
       nowIso: NOW,
     },
   );
@@ -7007,7 +6981,7 @@ Deno.test("the empty-suburb flag reaches the operational desk a human reads", as
     selectionMode: "exact",
     allowSourcePostIds: ["suburb-visible-1"],
     maxCases: 1,
-    approveDraft: approveDraftThroughSuburbBackstop(store),
+    approveDraft,
     nowIso: NOW,
   });
 
@@ -7023,4 +6997,55 @@ Deno.test("the empty-suburb flag reaches the operational desk a human reads", as
   assertEquals(fact.reason_code, "committed_without_site_suburb");
   assertEquals(fact.next_action_code, "human_supply_site_suburb");
   assertEquals(fact.severity, "critical");
+});
+
+Deno.test("a failed flag write degrades the run instead of failing the commit it describes", async () => {
+  const store = suburbBacktopFixture(
+    "suburb-write-fail-1",
+    "12 Fixture Street",
+  );
+  const report = await runDeterministicIntake(
+    fakeClient(
+      store,
+      [],
+      undefined,
+      () => new Uint8Array([1, 2, 3]),
+      (table, operation, payload) =>
+        table === "email_events_raw" && operation === "insert" &&
+          payload?.change_type ===
+            "intake_exception_committed_without_site_suburb"
+          ? { code: "XX000", message: "flag write failed" }
+          : null,
+    ),
+    {
+      dryRun: false,
+      selectionMode: "exact",
+      allowSourcePostIds: ["suburb-write-fail-1"],
+      maxCases: 1,
+      approveDraft,
+      nowIso: NOW,
+    },
+  );
+
+  // The mint stands and everything downstream of it still ran: an informational
+  // flag must never cost a live card its notification or its settlement stamp.
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(store.makesafe_intake_cases[0].job_id, "job-abc");
+  assertEquals(store.emails[0].makesafe_scanned_at, NOW);
+
+  // ...and the unwritten flag is accounted honestly rather than counted.
+  assertEquals(report.totals.committed_without_site_suburb, 0);
+  assertEquals(suburbIssueRows(store).length, 0);
+  assertEquals(report.totals.write_failures, 1);
+  assertEquals(
+    report.write_failure_reasons.committed_without_site_suburb,
+    1,
+  );
+  assert(
+    report.evidence.caveats.includes(
+      "committed_without_site_suburb_flag_unwritten",
+    ),
+  );
+  assertEquals(report.completion_status, "completed_degraded");
 });

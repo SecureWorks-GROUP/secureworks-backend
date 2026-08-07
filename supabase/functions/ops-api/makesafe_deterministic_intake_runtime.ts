@@ -42,6 +42,10 @@ import {
   persistIntakeSourceIssue,
 } from "./makesafe_intake_source_issues.ts";
 import {
+  INTAKE_MISSING_SUBURB_REASON,
+  intakeCommittedWithoutSiteSuburb,
+} from "./makesafe_intake_suburb_backstop.ts";
+import {
   stripSyntheticLivefireSignature,
   verifySyntheticLivefireMarker,
 } from "./makesafe_synthetic_livefire.ts";
@@ -3536,7 +3540,6 @@ async function ensureDraftAndJob(
     jobId: string | null;
     draftCreated: boolean;
     jobCreated: boolean;
-    committedWithoutSiteSuburb: boolean;
     notificationJobIds: string[];
     resumed: boolean;
     parked: boolean;
@@ -3674,8 +3677,6 @@ async function ensureDraftAndJob(
         jobId,
         draftCreated,
         jobCreated: approved?.job_created === true,
-        committedWithoutSiteSuburb:
-          approved?.committed_without_site_suburb === true,
         notificationJobIds: Array.isArray(approved?.notification_job_ids)
           ? approved.notification_job_ids
           : [],
@@ -3687,7 +3688,6 @@ async function ensureDraftAndJob(
       jobId: draft.approved_job_id,
       draftCreated,
       jobCreated: false,
-      committedWithoutSiteSuburb: false,
       notificationJobIds: [],
       resumed: true,
       parked: false,
@@ -3700,7 +3700,6 @@ async function ensureDraftAndJob(
         jobId: refreshed.approved_job_id,
         draftCreated,
         jobCreated: false,
-        committedWithoutSiteSuburb: false,
         notificationJobIds: [],
         resumed: true,
         parked: false,
@@ -3715,7 +3714,6 @@ async function ensureDraftAndJob(
       jobId: null,
       draftCreated,
       jobCreated: false,
-      committedWithoutSiteSuburb: false,
       notificationJobIds: [],
       resumed: !draftCreated,
       parked: true,
@@ -3739,8 +3737,6 @@ async function ensureDraftAndJob(
     jobId,
     draftCreated,
     jobCreated: approved?.job_created !== false,
-    committedWithoutSiteSuburb:
-      approved?.committed_without_site_suburb === true,
     notificationJobIds: Array.isArray(approved?.notification_job_ids)
       ? approved.notification_job_ids
       : [],
@@ -5069,12 +5065,52 @@ export async function runDeterministicIntake(
             saved.caseRow,
             true,
           );
-        }
-        // The suburb backstop itself runs inside the guarded approval gate, the
-        // one seam every mint path converges on. The run report only counts what
-        // that gate reported it flagged.
-        if (live.committedWithoutSiteSuburb) {
-          report.totals.committed_without_site_suburb++;
+          // Backstop: a card minted without a suburb is invisible to every
+          // suburb-keyed view. Flag it rather than refuse it - the job is
+          // already live and must stay actionable; the point is that a human
+          // is told. Never widen this to another field.
+          if (
+            intakeCommittedWithoutSiteSuburb({
+              jobCreated: live.jobCreated,
+              jobId,
+              siteSuburb: effectivePlan.identity.siteSuburb,
+            })
+          ) {
+            // The flag is informational, so its own write must never turn a
+            // successful mint into a failed case: a throw here would skip the
+            // post-board notification and the settlement stamp below, and the
+            // notification is never retried once the case carries its job. It
+            // is accounted as a degraded write instead, and the counter only
+            // moves once the write has actually landed.
+            try {
+              await persistIssueForSources(
+                client,
+                effectivePlan.sourcePostIds.flatMap((postId) => {
+                  const source = sourceMap.get(postId);
+                  return source ? [source] : [];
+                }),
+                INTAKE_MISSING_SUBURB_REASON,
+                {
+                  instructionKey: effectivePlan.instructionKey,
+                  caseId: saved.caseRow.id,
+                },
+              );
+              report.totals.committed_without_site_suburb++;
+            } catch (suburbFlagError) {
+              report.totals.write_failures++;
+              report.write_failure_reasons[INTAKE_MISSING_SUBURB_REASON] =
+                (report.write_failure_reasons[INTAKE_MISSING_SUBURB_REASON] ||
+                  0) + 1;
+              report.evidence.caveats.push(
+                "committed_without_site_suburb_flag_unwritten",
+              );
+              console.error(
+                `[ops-api] deterministic intake: suburb backstop flag write failed for job ${jobId}: ${
+                  (suburbFlagError as Error)?.message || suburbFlagError
+                }`,
+              );
+            }
+          }
         }
         // Job-keyed post-board notification makes newly live SES/insurance work consistently queryable across every family; source retries and later lifecycle updates never create another notification.
         for (

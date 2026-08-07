@@ -350,9 +350,6 @@ import {
 import {
   drainLegacyIntakeDrafts as _drainLegacyIntakeDrafts,
 } from './makesafe_intake_legacy_drain.ts'
-import {
-  flagIntakeCommitWithoutSiteSuburb,
-} from './makesafe_intake_suburb_backstop.ts'
 // Batch AI gap-fill for deterministic-intake "needs-a-human" flags. Read (queue)
 // + additive audited write (apply). No paid API: the AI judgment runs on the
 // captain's subscription Claude, which reads this queue and posts fills back here.
@@ -21403,25 +21400,6 @@ async function approveIntakeDraft(client: any, body: any) {
       .eq('id', draft_id)
     if (settlementError) throw settlementError
 
-    // Backstop: a card minted without a suburb is invisible to every
-    // suburb-keyed view. Flag it rather than refuse it - the job is already
-    // live and must stay actionable; the point is that a human is told. This is
-    // the one seam every mint path converges on (deterministic runtime,
-    // clean-draft backlog sweep, manual review button), and it fires only when
-    // this call actually minted the card. Never widen it to another field, and
-    // never let its write failure reach the caller.
-    const suburbBackstop = await flagIntakeCommitWithoutSiteSuburb(client, {
-      jobCreated: true,
-      jobId: jobResult.job.id,
-      siteSuburb: approvedFields.site_suburb,
-      orgId: draft.org_id || DEFAULT_ORG_ID,
-      mailbox: draft.mailbox || _SES_MAILBOX,
-      sourcePostIds: authority?.sourcePostIds || [],
-      instructionKey: canonicalInstructionKeys[0] || null,
-      caseId: authority?.caseId || null,
-      syntheticLivefireMarker: extraction?.synthetic_livefire_marker || null,
-    })
-
     return {
       ok: true,
       job: jobResult.job,
@@ -21433,7 +21411,6 @@ async function approveIntakeDraft(client: any, body: any) {
       split_combined: !!secondaryJob,
       job_ids: secondaryJob ? [jobResult.job.id, secondaryJob.id] : [jobResult.job.id],
       job_created: true,
-      committed_without_site_suburb: suburbBackstop.flagged,
       notification_job_ids: settlement.notificationJobIds,
       hugo_notifications_accepted: settlement.notificationsAccepted,
     }

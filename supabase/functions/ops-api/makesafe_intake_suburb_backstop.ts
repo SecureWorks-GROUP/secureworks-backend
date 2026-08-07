@@ -1,5 +1,3 @@
-// deno-lint-ignore-file no-explicit-any
-
 /**
  * Backstop for the one intake fact whose absence is silent: the site suburb.
  *
@@ -16,17 +14,10 @@
  * (`makesafe_intake_source_issues.ts` -> `email_events_raw` ->
  * `buildIntakeExceptionProjection` / `buildSourceIssueOperationalFact`).
  *
- * It lives at the ONE seam every mint path converges on, `approveIntakeDraft`,
- * so the deterministic runtime, the clean-draft backlog sweep and the manual
- * review button are all covered by this single guard.
- *
  * Scope is deliberately suburb-only. Do not widen it to other fields here.
  */
 
-import {
-  type IntakeSourceIssueReason,
-  persistIntakeSourceIssue,
-} from "./makesafe_intake_source_issues.ts";
+import type { IntakeSourceIssueReason } from "./makesafe_intake_source_issues.ts";
 
 export const INTAKE_MISSING_SUBURB_REASON: IntakeSourceIssueReason =
   "committed_without_site_suburb";
@@ -47,58 +38,4 @@ export function intakeCommittedWithoutSiteSuburb(args: {
   if (!args.jobCreated) return false;
   if (!args.jobId) return false;
   return String(args.siteSuburb ?? "").trim().length === 0;
-}
-
-export interface IntakeSuburbBackstopArgs {
-  jobCreated: boolean;
-  jobId: string | null | undefined;
-  siteSuburb: string | null | undefined;
-  orgId: string;
-  mailbox: string;
-  sourcePostIds: readonly string[];
-  instructionKey?: string | null;
-  caseId?: string | null;
-  syntheticLivefireMarker?: string | null;
-}
-
-/**
- * Writes the open source issue for a suburb-less commit.
- *
- * The flag is purely informational, so a failed write must never convert a
- * successful mint into a failed commit: every persist is caught per source and
- * accounted, and the caller continues. `flagged` is true only once a write has
- * actually landed, so a counter driven by it can never over-count a throw.
- */
-export async function flagIntakeCommitWithoutSiteSuburb(
-  client: any,
-  args: IntakeSuburbBackstopArgs,
-): Promise<{ flagged: boolean; writeFailures: number }> {
-  if (!intakeCommittedWithoutSiteSuburb(args)) {
-    return { flagged: false, writeFailures: 0 };
-  }
-  let flagged = false;
-  let writeFailures = 0;
-  for (const postId of args.sourcePostIds) {
-    if (!postId) continue;
-    try {
-      await persistIntakeSourceIssue(client, {
-        orgId: args.orgId,
-        mailbox: args.mailbox,
-        postId,
-        reason: INTAKE_MISSING_SUBURB_REASON,
-        instructionKey: args.instructionKey ?? null,
-        caseId: args.caseId ?? null,
-        syntheticLivefireMarker: args.syntheticLivefireMarker ?? null,
-      });
-      flagged = true;
-    } catch (error) {
-      writeFailures++;
-      console.error(
-        `[ops-api] intake suburb backstop: flag write failed for job ${args.jobId}: ${
-          (error as Error)?.message || error
-        }`,
-      );
-    }
-  }
-  return { flagged, writeFailures };
 }
