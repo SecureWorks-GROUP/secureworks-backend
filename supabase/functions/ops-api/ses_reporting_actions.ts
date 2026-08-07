@@ -249,11 +249,37 @@ async function verifyStoredSupportingReport(
   // register window that was open when the bind happened, rather than against
   // today's pin. A document with no bind event supplies none, which leaves the
   // current pin as the only acceptable stamp - the refusal that already existed.
-  const inspected = inspectSesSupportingReportProof(artifact, {
-    curated_bind_at: sesCuratedBindInstantForArtifact(
+  //
+  // A sibling-bundle report names the SIBLING's document, whose bind event is on
+  // that job's own append-only trail, so the docket job's audit can never carry
+  // its instant. Reading the sibling's trail is what keeps this call site
+  // agreeing with the adapter, which already loads the sibling snapshot. An
+  // unreadable sibling trail is the same read fault as an unreadable own trail.
+  let curatedBindAt = sesCuratedBindInstantForArtifact(
+    artifact,
+    audit.bind_instants,
+  );
+  const provenance = object(artifact.metadata);
+  const siblingJobId = String(provenance.sibling_job_id || "").trim();
+  if (
+    !curatedBindAt &&
+    String(provenance.evidence_source || "") === "explicit_sibling_bundle" &&
+    siblingJobId
+  ) {
+    const siblingAudit = await loadSesCuratedBindAudit(client, siblingJobId);
+    if (!siblingAudit) {
+      return {
+        trusted: false,
+        reason: SES_CURATED_SOURCE_SUPERSESSION_UNREADABLE_REASON,
+      };
+    }
+    curatedBindAt = sesCuratedBindInstantForArtifact(
       artifact,
-      audit.bind_instants,
-    ),
+      siblingAudit.bind_instants,
+    );
+  }
+  const inspected = inspectSesSupportingReportProof(artifact, {
+    curated_bind_at: curatedBindAt,
   });
   if (!inspected.trusted) return inspected;
   if (sesSupportingReportIsSuperseded(artifact, audit.supersessions)) {
