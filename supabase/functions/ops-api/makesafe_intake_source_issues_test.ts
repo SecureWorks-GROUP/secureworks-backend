@@ -134,6 +134,7 @@ Deno.test("every source issue reason has one typed change type", () => {
       "intake_deferred_attachment_recovery_failed",
       "intake_exception_legacy_draft_source_missing",
       "intake_exception_legacy_draft_attribution_ambiguous",
+      "intake_exception_committed_without_site_suburb",
     ],
   );
 });

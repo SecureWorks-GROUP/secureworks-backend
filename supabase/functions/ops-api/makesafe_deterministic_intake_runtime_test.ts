@@ -25,6 +25,7 @@ import {
   signSyntheticLivefireMarker,
   SYNTHETIC_LIVEFIRE_MARKER_PREFIX,
 } from "./makesafe_synthetic_livefire.ts";
+import { buildSourceIssueOperationalFact } from "./makesafe_intake_operational_facts.ts";
 
 const NOW = "2026-07-20T12:00:00.000Z";
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -6857,4 +6858,198 @@ Deno.test("D3: a reattend with no findable original parks for review instead of 
     "reattendance_target_not_found",
   );
   assertEquals(store.makesafe_intake_cases[0].job_id, null);
+});
+
+// Suburb backstop. The Ops board renders `jobs.site_suburb` alone, so a card
+// minted without one is present and unfindable by the normal route. These two
+// tests are a matched pair: the same fixture differing only in whether the work
+// order's address carries a suburb, so the guard is proved to both fire and
+// stay quiet rather than merely to exist.
+function suburbBacktopFixture(postId: string, siteAddress: string): Store {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: postId,
+    subject: "NEW WORK ORDER",
+    body_content: "Please attend. The builder work order is attached.",
+  }));
+  store.email_attachments.push({
+    id: `${postId}-att`,
+    email_id: postId,
+    name: "MLB Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: `raw/${postId}.pdf`,
+    status: "uploaded",
+    size_bytes: 1200,
+    pdf_extraction_status: "extracted",
+    pdf_extraction_text: [
+      "Work Order Number MLB-26770PO-55296",
+      "Policyholders Name Fixture Person",
+      "Mobile 0400000000",
+      `Site Address ${siteAddress}`,
+      "Scope of Works Install temporary roof tarps and make the storm damaged property safe",
+    ].join("\n"),
+    pdf_extraction_char_count: 220,
+    pdf_extraction_page_count: 1,
+    pdf_extraction_extractor: "unpdf@1.6.2",
+    pdf_extraction_truncated: false,
+    pdf_extraction_reason: null,
+  });
+  return store;
+}
+
+function suburbIssueRows(store: Store) {
+  return store.email_events_raw.filter((row: any) =>
+    row.change_type === "intake_exception_committed_without_site_suburb"
+  );
+}
+
+Deno.test("a job minted with an empty suburb is flagged as an open source issue and still committed", async () => {
+  // Address truncated to the street portion: no suburb parsed, none derivable.
+  const store = suburbBacktopFixture("suburb-missing-1", "12 Fixture Street");
+  const report = await runDeterministicIntake(
+    fakeClient(store, [], undefined, () => new Uint8Array([1, 2, 3])),
+    {
+      dryRun: false,
+      selectionMode: "exact",
+      allowSourcePostIds: ["suburb-missing-1"],
+      maxCases: 1,
+      approveDraft,
+      nowIso: NOW,
+    },
+  );
+
+  // Flag, never block: the case still commits onto a live job.
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(store.makesafe_intake_cases[0].job_id, "job-abc");
+  assertEquals(store.makesafe_intake_cases[0].site_suburb, null);
+
+  assertEquals(report.totals.committed_without_site_suburb, 1);
+  const issues = suburbIssueRows(store);
+  assertEquals(issues.length, 1);
+  assertEquals(issues[0].post_id, "suburb-missing-1");
+  assertEquals(issues[0].exclusion_reason, "committed_without_site_suburb");
+  assertEquals(issues[0].page_meta.source_fate, "open_source_issue");
+  assertEquals(
+    issues[0].page_meta.next_action_code,
+    "human_supply_site_suburb",
+  );
+  assertEquals(issues[0].page_meta.case_id, store.makesafe_intake_cases[0].id);
+  // The desk reads `email_events_raw` through a `received_at` window, so a row
+  // written without one is a flag nobody can see.
+  assertEquals(issues[0].received_at, store.emails[0].received_at);
+  assert(issues[0].received_at);
+
+  // The flag is an open issue, not a lost source: the case-source row still
+  // makes this a final fate, so the source is never re-queued by the guard.
+  assertEquals(store.makesafe_intake_case_sources.length, 1);
+  assertEquals(report.evidence.durable_source_fates.final, 1);
+});
+
+Deno.test("a job minted with a suburb is not flagged", async () => {
+  const store = suburbBacktopFixture(
+    "suburb-present-1",
+    "12 Fixture Street, Fixtureton WA 6000",
+  );
+  const report = await runDeterministicIntake(
+    fakeClient(store, [], undefined, () => new Uint8Array([1, 2, 3])),
+    {
+      dryRun: false,
+      selectionMode: "exact",
+      allowSourcePostIds: ["suburb-present-1"],
+      maxCases: 1,
+      approveDraft,
+      nowIso: NOW,
+    },
+  );
+
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(store.makesafe_intake_cases[0].site_suburb, "Fixtureton");
+  assertEquals(report.totals.committed_without_site_suburb, 0);
+  assertEquals(suburbIssueRows(store).length, 0);
+});
+
+Deno.test("the empty-suburb flag reaches the operational desk a human reads", async () => {
+  const store = suburbBacktopFixture("suburb-visible-1", "12 Fixture Street");
+  const client = fakeClient(
+    store,
+    [],
+    undefined,
+    () => new Uint8Array([1, 2, 3]),
+  );
+  await runDeterministicIntake(client, {
+    dryRun: false,
+    selectionMode: "exact",
+    allowSourcePostIds: ["suburb-visible-1"],
+    maxCases: 1,
+    approveDraft,
+    nowIso: NOW,
+  });
+
+  // The row the guard actually wrote, run through the desk's own producer, so
+  // the flag is proved to render rather than merely to exist in a table.
+  const row = suburbIssueRows(store)[0];
+  const fact = buildSourceIssueOperationalFact(
+    [{ ...row, id: "event-1", observed_at: row.received_at }] as any,
+    NOW,
+  );
+  assertEquals(fact.item_id, "source:suburb-visible-1");
+  assertEquals(fact.fate, "open_source_issue");
+  assertEquals(fact.reason_code, "committed_without_site_suburb");
+  assertEquals(fact.next_action_code, "human_supply_site_suburb");
+  assertEquals(fact.severity, "critical");
+});
+
+Deno.test("a failed flag write stays visible without failing or degrading the commit it describes", async () => {
+  const store = suburbBacktopFixture(
+    "suburb-write-fail-1",
+    "12 Fixture Street",
+  );
+  const report = await runDeterministicIntake(
+    fakeClient(
+      store,
+      [],
+      undefined,
+      () => new Uint8Array([1, 2, 3]),
+      (table, operation, payload) =>
+        table === "email_events_raw" && operation === "insert" &&
+          payload?.change_type ===
+            "intake_exception_committed_without_site_suburb"
+          ? { code: "XX000", message: "flag write failed" }
+          : null,
+    ),
+    {
+      dryRun: false,
+      selectionMode: "exact",
+      allowSourcePostIds: ["suburb-write-fail-1"],
+      maxCases: 1,
+      approveDraft,
+      nowIso: NOW,
+    },
+  );
+
+  // The mint stands and everything downstream of it still ran: an informational
+  // flag must never cost a live card its notification or its settlement stamp.
+  assertEquals(report.totals.jobs_created, 1);
+  assertEquals(report.totals.cases_failed, 0);
+  assertEquals(store.makesafe_intake_cases[0].job_id, "job-abc");
+  assertEquals(store.emails[0].makesafe_scanned_at, NOW);
+  // `totals.write_failures` and the run status are settlement gates
+  // (`assertFreshMakesafeSourceSettled`), so an informational flag must move
+  // neither: doing so throws past a mint that succeeded and marks a healthy
+  // fresh-source handoff failed.
+  assertEquals(report.totals.write_failures, 0);
+  assertEquals(report.completion_status, "completed");
+
+  // ...and the unwritten flag stays visible rather than counted.
+  assertEquals(report.totals.committed_without_site_suburb, 0);
+  assertEquals(suburbIssueRows(store).length, 0);
+  assertEquals(
+    report.write_failure_reasons.committed_without_site_suburb,
+    1,
+  );
+  assert(
+    report.evidence.caveats.includes(
+      "committed_without_site_suburb_flag_unwritten",
+    ),
+  );
 });

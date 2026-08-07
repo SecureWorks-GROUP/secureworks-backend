@@ -1404,6 +1404,45 @@ in-repo `addressSuburb()` also misses a comma before `WA` and a trailing
 `, Australia`; `deriveSuburb()` in the backfill script handles both and is the
 reference for that fix.
 
+That extraction bug is now BACKSTOPPED, not fixed: a job the deterministic
+runtime MINTS with an empty suburb writes an open source issue
+(`committed_without_site_suburb` ->
+`intake_exception_committed_without_site_suburb`, next action
+`human_supply_site_suburb`) and bumps
+`report.totals.committed_without_site_suburb`. The guard is
+`makesafe_intake_suburb_backstop.ts`, called from the post-commit `if (jobId)`
+block in `makesafe_deterministic_intake_runtime.ts`. It FLAGS, never blocks —
+refusing intake would trade a quiet card for a lost one — and it fires only on
+`jobCreated`, so re-linking an already-live card never re-flags it. Suburb only;
+do not widen it to another field. The write goes through
+`persistIssueForSources` so the row carries the source's `received_at` — the
+desk projection reads `email_events_raw` through a `received_at` window, so a
+row without one is a flag nobody can see. A failed flag write is caught and
+recorded as a `write_failure_reasons` entry plus the
+`committed_without_site_suburb_flag_unwritten` caveat, and never fails the case:
+the counter only moves after the write lands, and the post-board notification
+(which is never retried once the case carries its job) and the settlement stamp
+still run. It deliberately does NOT bump `totals.write_failures` — that degrades
+the run, which `assertFreshMakesafeSourceSettled` reads as a source that never
+settled, so an informational flag would become blocking on the fresh-source
+lane. Extending `INTAKE_SOURCE_ISSUE_REASONS` is
+code-only (no migration): that array plus the exhaustive
+`INTAKE_SOURCE_ISSUE_NEXT_ACTION` map is the whole contract, and
+`email_events_raw.change_type` has no CHECK. Tests:
+`makesafe_intake_suburb_backstop_test.ts` and the matched-pair cases in
+`makesafe_deterministic_intake_runtime_test.ts`.
+
+Two mint paths are deliberately NOT covered, and both are their own ticket. The
+`autoApproveCleanIntakeDrafts` backlog sweep mints a deferred deterministic
+draft (run cap, `transitionAllowed` false, `advanceDrafts` disabled) straight
+through `approveIntakeDraft`, and nothing flags an empty suburb there. Legacy /
+manual / non-deterministic drafts are uncovered on every path. Moving the guard
+to that shared seam was TRIED and reverted: `intakeMintAuthority` returns null
+without `extraction.deterministic_intake === true`, so the guard had no source
+post id to key on and became a silent no-op — less coverage while reading as
+more. Keying a legacy draft's issue (the `graph_message_id` precedent in
+`intakeMintAuthority`) is the product call that ticket has to make first.
+
 ## Missing SES Work-Order PDFs Are Re-Attached, Never Re-Minted
 
 An SES card with no `work_order` `job_documents` row usually still has the

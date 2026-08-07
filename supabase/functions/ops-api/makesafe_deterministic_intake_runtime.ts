@@ -42,6 +42,10 @@ import {
   persistIntakeSourceIssue,
 } from "./makesafe_intake_source_issues.ts";
 import {
+  INTAKE_MISSING_SUBURB_REASON,
+  intakeCommittedWithoutSiteSuburb,
+} from "./makesafe_intake_suburb_backstop.ts";
+import {
   stripSyntheticLivefireSignature,
   verifySyntheticLivefireMarker,
 } from "./makesafe_synthetic_livefire.ts";
@@ -185,6 +189,9 @@ export interface DeterministicRuntimeReport {
     cases_deferred: number;
     cases_failed: number;
     job_creation_deferred: number;
+    // Jobs this run minted with no site suburb. Each one also carries an open
+    // source issue; the counter makes the class visible in the run report.
+    committed_without_site_suburb: number;
     components_failed: number;
     sources_quarantined: number;
     hugo_notifications_required: number;
@@ -4594,6 +4601,7 @@ export async function runDeterministicIntake(
       cases_deferred: 0,
       cases_failed: missingParents.length,
       job_creation_deferred: 0,
+      committed_without_site_suburb: 0,
       components_failed: isolatedFailures.length,
       sources_quarantined: new Set(
         isolatedFailures.flatMap((failure) => failure.source_post_ids),
@@ -5057,6 +5065,54 @@ export async function runDeterministicIntake(
             saved.caseRow,
             true,
           );
+          // Backstop: a card minted without a suburb is invisible to every
+          // suburb-keyed view. Flag it rather than refuse it - the job is
+          // already live and must stay actionable; the point is that a human
+          // is told. Never widen this to another field.
+          if (
+            intakeCommittedWithoutSiteSuburb({
+              jobCreated: live.jobCreated,
+              jobId,
+              siteSuburb: effectivePlan.identity.siteSuburb,
+            })
+          ) {
+            // The flag is informational, so its own write must never turn a
+            // successful mint into a failed case: a throw here would skip the
+            // post-board notification and the settlement stamp below, and the
+            // notification is never retried once the case carries its job. A
+            // failure is recorded as a caveat and a write-failure REASON only -
+            // never `totals.write_failures`, which degrades the run and reads to
+            // `assertFreshMakesafeSourceSettled` as a source that never settled,
+            // so an informational flag would become blocking. The counter only
+            // moves once the write has actually landed.
+            try {
+              await persistIssueForSources(
+                client,
+                effectivePlan.sourcePostIds.flatMap((postId) => {
+                  const source = sourceMap.get(postId);
+                  return source ? [source] : [];
+                }),
+                INTAKE_MISSING_SUBURB_REASON,
+                {
+                  instructionKey: effectivePlan.instructionKey,
+                  caseId: saved.caseRow.id,
+                },
+              );
+              report.totals.committed_without_site_suburb++;
+            } catch (suburbFlagError) {
+              report.write_failure_reasons[INTAKE_MISSING_SUBURB_REASON] =
+                (report.write_failure_reasons[INTAKE_MISSING_SUBURB_REASON] ||
+                  0) + 1;
+              report.evidence.caveats.push(
+                "committed_without_site_suburb_flag_unwritten",
+              );
+              console.error(
+                `[ops-api] deterministic intake: suburb backstop flag write failed for job ${jobId}: ${
+                  (suburbFlagError as Error)?.message || suburbFlagError
+                }`,
+              );
+            }
+          }
         }
         // Job-keyed post-board notification makes newly live SES/insurance work consistently queryable across every family; source retries and later lifecycle updates never create another notification.
         for (
