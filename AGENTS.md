@@ -1553,12 +1553,16 @@ stay ALIAS-QUALIFIED: `failed_attempts` and `locked_until` are also
 reference is ambiguous" and rolls back the consume, leaving the request neither
 spent nor counted. The suite mocks the RPC, so no test catches that.
 
-The operator act is his MESSAGE ID, written to
-`makesafe_revision_approvals.evidence_refs` and re-read (jsonb containment)
-before every approval; the consumed request id is a second single-use
-coordinate. Two parsing traps are pinned: a card number ends in six digits, so
-card refs are stripped BEFORE scanning for a code; and a digit-bearing email
-must not normalise as a phone number.
+The operator act is his MESSAGE ID, RECORDED for audit on
+`makesafe_revision_approvals.evidence_refs`. On this path that record is
+evidence, NOT a guard: replay is prevented solely by the single-use request
+consume above. The `evidence_refs` jsonb-containment re-read
+(`assertNotAlreadyActed`) belongs to the retired TOTP path and its only callers
+are inside `submitSesChannelApprovalAction`, so do not reason about echo-code
+replay from it — there is no second idempotence layer here. Two parsing traps
+are pinned: a card number ends in six digits, so card refs are stripped BEFORE
+scanning for a code; and a digit-bearing email must not normalise as a phone
+number.
 
 **Still weaker than a cockpit session in two named ways.** If the phone that
 receives the issued code also holds WhatsApp, possession and knowledge collapse
