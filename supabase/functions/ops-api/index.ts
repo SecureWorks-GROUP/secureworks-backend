@@ -500,15 +500,17 @@ import {
   type SesXeroGateway,
   type SesXeroInvoiceResult,
 } from './ses_reporting_actions.ts'
-// Second way to satisfy the identified-operator approval gate: an enrolled
-// channel sender plus a live authenticator code. The gate itself is untouched;
-// the exact trust statement is at the top of the module.
+// Second way to satisfy the identified-operator approval gate: a server-issued
+// echo code bound to one request, enrolled sender and exact message. The gate
+// itself is untouched; the exact trust statement is in the implementation.
 import {
   readSesChannelApprovalEnv,
   sesChannelEnrolmentAction,
-  submitSesChannelApprovalAction,
 } from './ses_channel_approval.ts'
-import { executeSesChannelSendIt } from './ses_channel_send_it.ts'
+import {
+  issueSesChannelApprovalAction,
+  submitSesEchoCodeApprovalAction,
+} from './ses_echo_code_approval.ts'
 import { createSesGraphMailGateway } from './ses_graph_mail_gateway.ts'
 import {
   sendMailerOpsVisibilityAction,
@@ -6975,86 +6977,48 @@ if (import.meta.main) serve(async (req: Request) => {
         ))
       // ── Channel APPROVE INVOICE (WhatsApp / SMS) ────────────────────────
       // Widens WHO may approve, never WHAT may be approved. The relay presents
-      // the ops key, which authenticates the RELAY and grants no approval
-      // authority on its own: the message must also come from an enrolled
-      // sender and carry a live authenticator code belonging to the bound
-      // operator. It then calls the very same approve action a cockpit press
-      // calls, so every guard, evidence check and refusal is unchanged.
+      // the ops key, which authenticates transport and grants no authority:
+      // only a server-issued code bound to this request, sender and exact
+      // message can reach the unchanged cockpit approval action.
       // Deliberately NOT on ROUTINE_ALLOWED_ACTIONS.
       case 'submit_ses_channel_approval': {
         if (req.method !== 'POST') {
           return json({ error: 'submit_ses_channel_approval requires POST' }, 405)
         }
-        const channelOrgId = body.org_id || DEFAULT_ORG_ID
-        return json(await submitSesChannelApprovalAction(
+        return json(await submitSesEchoCodeApprovalAction(
           client,
           sesActionAuth(authMode, authUser),
           {
-            org_id: channelOrgId,
+            org_id: body.org_id || DEFAULT_ORG_ID,
             channel: body.channel,
             sender_id: body.sender_id,
             message_id: body.message_id,
             message_text: body.message_text,
             message_sent_at: body.message_sent_at,
+            request_id: body.request_id,
           },
           {
             env: readSesChannelApprovalEnv(),
             now: () => Date.now(),
             approveInvoice: async (operatorAuth, args) => {
-              // The synthetic live-fire fence runs here exactly as it does on
-              // the cockpit action, before any approval is recorded.
-              await assertNoSyntheticLivefireJobs(
-                client,
-                [args.job_id],
-                'approve_ses_invoice_revision',
-              )
+              await assertNoSyntheticLivefireJobs(client, [args.job_id], 'approve_ses_invoice_revision')
               return await approveSesInvoiceRevisionAction(client, operatorAuth, args)
             },
-            // SEND IT (Harden SES ticket 07): bind the word to the card's one
-            // prepared release revision, then drive the SAME approve/execute
-            // release actions a cockpit press drives — every guard, money
-            // check and exact-once send unchanged.
-            executeSendIt: async (operatorAuth, args) => {
-              await assertNoSyntheticLivefireJobs(
-                client,
-                [args.job_id],
-                'submit_ses_channel_approval:send_it',
-              )
-              return await executeSesChannelSendIt(
-                client,
-                operatorAuth,
-                args,
-                {
-                  approveRelease: async (releaseAuth, releaseArgs) => {
-                    await assertNoSyntheticLivefireReleaseRevision(
-                      client,
-                      releaseArgs.release_revision_id,
-                      'approve_ses_release_revision',
-                    )
-                    return await approveSesReleaseRevisionAction(
-                      client,
-                      releaseAuth,
-                      releaseArgs,
-                    )
-                  },
-                  executeRelease: async (releaseAuth, releaseArgs) => {
-                    await assertNoSyntheticLivefireReleaseRevision(
-                      client,
-                      releaseArgs.release_revision_id,
-                      'execute_ses_release_revision',
-                    )
-                    return await executeSesReleaseRevisionAction(
-                      client,
-                      releaseAuth,
-                      releaseArgs,
-                      makeSesGraphMailGateway(client),
-                      makeSesReleaseXeroReader(client),
-                    )
-                  },
-                },
-              )
+            executeSendIt: async () => {
+              throw new SesActionError(409, { state: 'refused', code: 'channel_send_not_supported', fact: 'SEND IT remains a separate act and is not coupled to echo-code approval.', recovery_action: 'Use the separate SEND IT path.' } as any)
             },
           },
+        ))
+      }
+      case 'issue_ses_channel_approval': {
+        if (req.method !== 'POST') {
+          return json({ error: 'issue_ses_channel_approval requires POST' }, 405)
+        }
+        return json(await issueSesChannelApprovalAction(
+          client,
+          sesActionAuth(authMode, authUser),
+          { org_id: body.org_id || DEFAULT_ORG_ID, job_id: body.job_id, channel: body.channel },
+          readSesChannelApprovalEnv(),
         ))
       }
       // Issue the caller's OWN authenticator seed. Identified Supabase session

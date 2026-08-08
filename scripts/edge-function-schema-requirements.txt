@@ -206,3 +206,18 @@ ops-api|supabase/migrations/20260805020000_ses_mailer_ops_send_effect.sql|index|
 # before apply. The ops-api honesty path (SEND_READY / board ladder) works
 # without it. Pin this requirement only in the same deploy that applies the
 # migration, never before.
+# 20260808010000 backs echo-code text approvals: the attempt-limit table plus
+# the two SECURITY DEFINER doors ops-api calls. Without it both echo-code
+# actions 503 at runtime, so the deploy must refuse rather than ship ahead of
+# the migration. The service-role-only policy is pinned because the table IS
+# the single-use and lockout invariant.
+ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|table|ses_channel_approval_attempts
+ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|column|ses_channel_approval_attempts.request_id
+ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|column|ses_channel_approval_attempts.code_hash
+ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|column|ses_channel_approval_attempts.message_hash
+ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|column|ses_channel_approval_attempts.consumed_at
+ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|column|ses_channel_approval_attempts.locked_until
+ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|index|ses_channel_approval_lockout_identity
+ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|policy|ses_channel_approval_attempts.ses_channel_approval_attempts_service_role_only
+ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|function|issue_ses_channel_approval_request
+ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|function|consume_ses_channel_approval_code
