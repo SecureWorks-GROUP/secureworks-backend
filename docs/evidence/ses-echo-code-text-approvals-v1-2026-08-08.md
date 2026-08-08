@@ -83,27 +83,38 @@ card's number cannot be composed into one unambiguous approval message the
 verifier can read back, so no request is persisted and no code is transported
 that could never verify.
 
-## Adversarial proof — watched failures
+## Adversarial proof status
 
 The hostile suite is
-`supabase/functions/ops-api/ses_echo_code_approval_test.ts`. I watched each
-attack fail:
+`supabase/functions/ops-api/ses_echo_code_approval_test.ts`. Its mocked-RPC
+TypeScript plumbing checks watched each refusal fail, but Postgres-backed
+execution is unavailable in this environment. Therefore the following six
+properties are **unproven against the real SQL enforcement** and must be run
+against a Postgres-backed test database before enrolment:
 
-- A valid code from an **unenrolled sender** failed with
+- A valid code from an **unenrolled sender** — the mock failed with
   `channel_sender_not_bound`, and the pending request was not consumed.
-- **Repeated mismatched-sender attempts** — six unenrolled and six
+- **Repeated mismatched-sender attempts** — the mock failed six unenrolled and six
   different-enrolled-operator attempts against one pending request — failed
   with `channel_sender_not_bound` and `echo_code_sender_mismatch`, left the
   failure counter at zero, left the lockout unset, left the request unconsumed,
   and the captain's own correct verification then still succeeded.
-- A valid code against a **different request** failed with
+- A valid code against a **different request** — the mock failed with
   `echo_code_invalid`, and the target request was consumed.
-- A **reused code** failed with `echo_code_already_used` after the first
+- A **reused code** — the mock failed with `echo_code_already_used` after the first
   verification succeeded.
-- **Wrong guesses** failed three times and the third failure produced
+- **Wrong guesses** — the mock failed three times and the third failure produced
   `echo_code_sender_locked`.
-- **Fresh-code lockout bypass** failed: after the third failed request, issuing
+- **Fresh-code lockout bypass** — the mock failed: after the third failed request, issuing
   another request produced `echo_code_sender_locked` rather than a new code.
+
+The same real-SQL gate covers the message-content hash, expiry, and single-use
+consumption properties exercised by the suite. No claim is made here that any
+of those SQL-side bindings have been proved. The trigger is availability of a
+Postgres-backed test environment; enrolment must not happen until all six
+attack proofs have been watched fail against the real SQL.
+
+Additional mocked-only observations:
 - A changed message failed with `echo_code_invalid`, and replaying the issued
   request then failed with `echo_code_already_used`.
 - A wrong first verification spent the request; a later correct retry failed
@@ -124,8 +135,9 @@ Fresh local evidence:
 - `deno check supabase/functions/ops-api/ses_echo_code_approval.ts`
 - `deno check supabase/functions/ops-api/index.ts`
 - `deno test --no-check supabase/functions/ops-api/ses_echo_code_approval_test.ts`
-  — 11 passed, including all six watched attack failures, the relay-authority
-  refusal, and the unusable-card-reference issuance refusal.
+  — 11 passed for the mocked TypeScript plumbing, including the six mocked
+  attack scenarios, the relay-authority refusal, and the unusable-card-reference
+  issuance refusal. No Postgres-backed SQL test was available.
 
 Deployment confirmation, production secret configuration, captain enrolment,
 and a live approval remain Tier 2 until the merged PR is deployed and the
