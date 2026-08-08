@@ -153,6 +153,22 @@ export async function issueSesChannelApprovalAction(
   }
   const code = secureCode();
   const messageText = `APPROVE ${String(job.data.job_number)} ${code}`;
+  // Issue only a message the verifier can actually read back. A card number
+  // outside the verifier's reference grammar would mint a request and transport
+  // a code that could never verify.
+  const issuedIntent = parseSesChannelApprovalMessage(messageText);
+  if (
+    issuedIntent.act !== "approve_invoice" || issuedIntent.act_ambiguous ||
+    issuedIntent.card_references.length !== 1 || issuedIntent.totp_ambiguous ||
+    issuedIntent.totp_code !== code
+  ) {
+    refuse(
+      409,
+      "echo_code_card_reference_unusable",
+      "This card's reference cannot be expressed as one unambiguous approval message.",
+      "Approve this card in the cockpit; text approval needs a card reference the verifier can read back unambiguously.",
+    );
+  }
   const now = new Date();
   const expiresAt = new Date(now.getTime() + SES_ECHO_CODE_EXPIRY_MS);
   const requestId = crypto.randomUUID();
@@ -247,6 +263,17 @@ export async function submitSesEchoCodeApprovalAction(
       "Use the exact one-card message from the issued transport envelope.",
     );
   }
+  // Sender identity is settled BEFORE the request is touched. An unenrolled
+  // sender is somebody else's act: it must not consume the captain's pending
+  // request and must not move any failure counter.
+  if (!binding) {
+    refuse(
+      403,
+      "channel_sender_not_bound",
+      "The message did not come from an enrolled sender identity.",
+      "Use the enrolled sender identity or approve in the cockpit.",
+    );
+  }
   const result = await client.rpc("consume_ses_channel_approval_code", {
     p_request_id: requestId,
     p_channel: channel,
@@ -266,19 +293,19 @@ export async function submitSesEchoCodeApprovalAction(
     );
   }
   const row = Array.isArray(result.data) ? result.data[0] : result.data;
-  // The database consumes the request before returning any mismatch, including
-  // a valid code presented by an unenrolled sender. That preserves single-use
-  // semantics even when the sender check itself fails.
-  if (!binding) {
-    refuse(
-      403,
-      "channel_sender_not_bound",
-      "The message did not come from an enrolled sender identity.",
-      "Use the enrolled sender identity or approve in the cockpit.",
-    );
-  }
+  // The database consumes the request before returning a message or code
+  // mismatch, so a wrong guess spends its own request. A sender that is not the
+  // one this request was issued to consumes nothing and counts nothing.
   if (!row?.accepted) {
     const reason = String(row?.reason || "invalid");
+    if (reason === "sender_mismatch") {
+      refuse(
+        403,
+        "echo_code_sender_mismatch",
+        "This approval request was issued to a different enrolled sender identity.",
+        "Verify from the enrolled sender the request was issued to, or issue a fresh request.",
+      );
+    }
     if (reason === "already_used") {
       refuse(
         409,
@@ -306,11 +333,11 @@ export async function submitSesEchoCodeApprovalAction(
   }
   const operatorUser = await loadBoundOperatorUser(client, binding);
   const card = await resolveSesChannelCard(client, intent.card_references[0]!);
-  const operatorAuth = {
+  const operatorAuth: SesActionAuth = {
     mode: "jwt",
     user: operatorUser,
     identity_provenance: "bound_channel_echo_code",
-  } as any;
+  };
   const operatorAct = {
     kind: "ses_channel_echo_operator_act",
     contract: SES_ECHO_CODE_CONTRACT_VERSION,
@@ -340,15 +367,4 @@ export async function submitSesEchoCodeApprovalAction(
     },
     approval,
   };
-}
-
-// Kept for the explicit proof that the old TOTP door is not a second approval
-// route. The production route dispatches only to submitSesEchoCodeApprovalAction.
-export function legacyTotpApprovalDoor(): never {
-  refuse(
-    410,
-    "channel_totp_retired",
-    "The former TOTP channel approval path is retired; echo-code is the only text approval path.",
-    "Issue and transport a server-minted echo code.",
-  );
 }

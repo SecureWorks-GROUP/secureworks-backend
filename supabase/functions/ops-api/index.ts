@@ -511,7 +511,6 @@ import {
   issueSesChannelApprovalAction,
   submitSesEchoCodeApprovalAction,
 } from './ses_echo_code_approval.ts'
-import { executeSesChannelSendIt } from './ses_channel_send_it.ts'
 import { createSesGraphMailGateway } from './ses_graph_mail_gateway.ts'
 import {
   sendMailerOpsVisibilityAction,

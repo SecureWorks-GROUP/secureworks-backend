@@ -1,6 +1,29 @@
 // ════════════════════════════════════════════════════════════════════════════
 // SES channel approval — a SECOND way to satisfy the identified-operator gate.
 //
+// ── READ FIRST: THE KNOWLEDGE FACTOR DESCRIBED BELOW IS RETIRED ─────────────
+//
+// The production text approval route is `ses_echo_code_approval.ts`. The
+// knowledge factor is now a SERVER-MINTED single-use echo code bound to one
+// issued request, the enrolled sender, and the exact approval message hash —
+// NOT an RFC 6238 TOTP code. `submitSesChannelApprovalAction` below has no
+// production call site; `index.ts` dispatches only to
+// `submitSesEchoCodeApprovalAction`, so TOTP is not a second approval door.
+// It is kept as legacy module code because its pure helpers
+// (`parseSesChannelApprovalMessage`, the binding parser, the fingerprint, the
+// card resolver) ARE the live grammar the echo-code path consumes, and its
+// tests pin them.
+//
+// Two consequences for the paragraphs that follow. `SES_CHANNEL_APPROVAL_TOTP_
+// ONLINE_GUESSING` no longer describes the live route: echo codes are
+// single-use and a sender-scoped lockout (3 failed requests / 15 minutes)
+// bounds guessing, held in the `ses_channel_approval_attempts` table. And "No
+// migration" is no longer true of the live route — that table is the one
+// authorised schema change (`20260808010000_ses_echo_code_approval.sql`).
+// Everything else below — transport, possession, what the path changes and
+// what it does not, the same-device collapse and relay-asserted-sender
+// weakenings — still holds verbatim.
+//
 // WHAT THIS IS
 // ------------
 // `canRecordSesApproval` (ses_review_cockpit.ts) refuses every machine caller:

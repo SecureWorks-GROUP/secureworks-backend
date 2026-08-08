@@ -151,13 +151,16 @@ export interface SesActionAuth {
    * decision anywhere is made more permissive by its presence.
    *
    * Absent (the default) means the ordinary path: a Supabase JWT was verified
-   * by `auth.getUser` in `index.ts`. `bound_channel_totp` means the identity
-   * came from `ses_channel_approval.ts` — an enrolled channel sender plus a
-   * live authenticator code, with no JWT in the request. It exists so a reader
-   * of `mode: "jwt"` is never misled into assuming a session was presented; the
-   * exact trust statement lives at the top of that module.
+   * by `auth.getUser` in `index.ts`. `bound_channel_echo_code` means the
+   * identity came from `ses_echo_code_approval.ts` — an enrolled channel sender
+   * plus a server-issued single-use code bound to one request and the exact
+   * message, with no JWT in the request. `bound_channel_totp` is the retired
+   * TOTP form of the same statement, kept so historical evidence stays
+   * readable. Both exist so a reader of `mode: "jwt"` is never misled into
+   * assuming a session was presented; the exact trust statement lives at the
+   * top of the producing module.
    */
-  identity_provenance?: "bound_channel_totp";
+  identity_provenance?: "bound_channel_totp" | "bound_channel_echo_code";
 }
 
 export class SesActionError extends Error {

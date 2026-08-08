@@ -15,8 +15,10 @@ import { SesActionError } from "./ses_reporting_actions.ts";
 const USER = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
 const JOB = "cccccccc-3333-4333-8333-cccccccccccc";
 const ORG = "00000000-0000-0000-0000-000000000001";
+const SECOND_USER = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
 const SENDER = "test-sender-token-alpha";
 const OTHER_SENDER = "test-sender-token-beta";
+const SECOND_ENROLLED_SENDER = "test-sender-token-gamma";
 const ROOT = "echo-code-test-root";
 const NOW = Date.UTC(2026, 7, 8, 3, 0, 0);
 
@@ -30,25 +32,24 @@ type RequestRow = {
   expires: number;
 };
 
-async function digest(value: string): Promise<string> {
-  const bytes = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(value),
-  );
-  return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 async function bindingJson(): Promise<string> {
   return JSON.stringify([{
     channel: "whatsapp",
     sender_fingerprint: await sesChannelSenderFingerprint("whatsapp", SENDER),
     operator_user_id: USER,
     label: "captain",
+  }, {
+    channel: "whatsapp",
+    sender_fingerprint: await sesChannelSenderFingerprint(
+      "whatsapp",
+      SECOND_ENROLLED_SENDER,
+    ),
+    operator_user_id: SECOND_USER,
+    label: "second-operator",
   }]);
 }
 
-function makeClient() {
+function makeClient(jobNumber = "SWMS-260000") {
   const requests = new Map<string, RequestRow>();
   const lock = { failed_attempts: 0, locked_until: 0 };
   const client: any = {
@@ -56,7 +57,7 @@ function makeClient() {
     lock,
     from(table: string) {
       const rows = table === "jobs"
-        ? [{ id: JOB, job_number: "SWMS-260000" }]
+        ? [{ id: JOB, job_number: jobNumber }]
         : table === "users"
         ? [{ id: USER, email: "operator-account", role: "admin" }]
         : [];
@@ -112,14 +113,21 @@ function makeClient() {
           error: null,
         };
       }
+      if (
+        row.channel !== args.p_channel ||
+        row.sender !== args.p_sender_fingerprint
+      ) {
+        return {
+          data: [{ accepted: false, reason: "sender_mismatch" }],
+          error: null,
+        };
+      }
       row.consumed = true;
       const now = Date.parse(String(args.p_now));
       if (lock.locked_until > now) {
         return { data: [{ accepted: false, reason: "locked" }], error: null };
       }
-      const match = row.channel === args.p_channel &&
-        row.sender === args.p_sender_fingerprint &&
-        row.message_hash === args.p_message_hash &&
+      const match = row.message_hash === args.p_message_hash &&
         row.code_hash === args.p_code_hash;
       if (!match) {
         lock.failed_attempts++;
@@ -202,6 +210,13 @@ Deno.test("issue is server-minted and returns the code only in the transport env
   assert(!JSON.stringify(client.requests).includes("operator-account"));
 });
 
+Deno.test("issuance refuses a card whose reference the verifier cannot read back", async () => {
+  const client = makeClient("260000");
+  const result = await refusal(() => issue(client));
+  assertEquals(result.code, "echo_code_card_reference_unusable");
+  assertEquals(client.requests.size, 0);
+});
+
 Deno.test("the relay cannot issue a code", async () => {
   const client = makeClient();
   const bindings_raw = await bindingJson();
@@ -223,6 +238,37 @@ Deno.test("ATTACK PROOF watched fail: a valid code from an unenrolled sender", a
   );
   assertEquals(result.code, "channel_sender_not_bound");
   assertStringIncludes(result.fact, "enrolled sender");
+  assertEquals(
+    client.requests.get(issued.echo_code.request_id).consumed,
+    false,
+  );
+});
+
+Deno.test("ATTACK PROOF watched fail: repeated mismatched-sender attempts neither lock the captain out nor spend his request", async () => {
+  const client = makeClient();
+  const issued: any = await issue(client);
+  for (
+    let attempt = 0;
+    attempt < SES_ECHO_CODE_LOCKOUT_THRESHOLD * 2;
+    attempt++
+  ) {
+    const unenrolled = await refusal(() =>
+      submit(client, issued, { sender_id: OTHER_SENDER })
+    );
+    assertEquals(unenrolled.code, "channel_sender_not_bound");
+    const otherOperator = await refusal(() =>
+      submit(client, issued, { sender_id: SECOND_ENROLLED_SENDER })
+    );
+    assertEquals(otherOperator.code, "echo_code_sender_mismatch");
+  }
+  assertEquals(client.lock.failed_attempts, 0);
+  assertEquals(client.lock.locked_until, 0);
+  assertEquals(
+    client.requests.get(issued.echo_code.request_id).consumed,
+    false,
+  );
+  const approved: any = await submit(client, issued);
+  assertEquals(approved.approval.approved_job_id, JOB);
 });
 
 Deno.test("ATTACK PROOF watched fail: a valid code against a different request", async () => {

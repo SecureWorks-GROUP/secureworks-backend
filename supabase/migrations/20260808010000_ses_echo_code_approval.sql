@@ -55,6 +55,9 @@ BEGIN
     AND channel = p_channel
     AND sender_fingerprint = p_sender_fingerprint
   FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ses_channel_approval_lockout_row_missing';
+  END IF;
   IF lock_row.locked_until IS NOT NULL AND lock_row.locked_until > p_issued_at THEN
     RETURN QUERY SELECT NULL::uuid, p_expires_at, lock_row.locked_until;
     RETURN;
@@ -101,12 +104,25 @@ BEGIN
     RETURN;
   END IF;
 
+  -- The presenting sender must BE the enrolled sender this request was issued
+  -- to. Anybody else's attempt is somebody else's act: it must neither consume
+  -- the captain's pending request nor move any failure counter, or holding the
+  -- relay key alone would be a denial-of-approval instrument.
+  IF request_row.channel IS DISTINCT FROM p_channel
+     OR request_row.sender_fingerprint IS DISTINCT FROM p_sender_fingerprint THEN
+    RETURN QUERY SELECT false, 'sender_mismatch'::text, 0, NULL::timestamptz;
+    RETURN;
+  END IF;
+
   SELECT * INTO lock_row
   FROM public.ses_channel_approval_attempts
   WHERE record_type = 'lockout'
     AND channel = request_row.channel
     AND sender_fingerprint = request_row.sender_fingerprint
   FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ses_channel_approval_lockout_row_missing';
+  END IF;
 
   IF request_row.consumed_at IS NOT NULL THEN
     RETURN QUERY SELECT false, 'already_used'::text, lock_row.failed_attempts, lock_row.locked_until;
@@ -123,9 +139,7 @@ BEGIN
     RETURN;
   END IF;
 
-  is_match := request_row.channel = p_channel
-    AND request_row.sender_fingerprint = p_sender_fingerprint
-    AND request_row.message_hash = p_message_hash
+  is_match := request_row.message_hash = p_message_hash
     AND request_row.code_hash = p_code_hash;
   IF NOT is_match THEN
     UPDATE public.ses_channel_approval_attempts
@@ -147,6 +161,23 @@ BEGIN
 END;
 $$;
 
+-- Single-use lives in consumed_at and lockout lives in the lockout row, so the
+-- table itself is the invariant. Nothing outside service_role may read or write
+-- it: an anon UPDATE clearing consumed_at would make an observed approval
+-- message replayable, and deleting a lockout row would restore unlimited
+-- guessing.
+ALTER TABLE public.ses_channel_approval_attempts ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS ses_channel_approval_attempts_service_role_only
+  ON public.ses_channel_approval_attempts;
+CREATE POLICY ses_channel_approval_attempts_service_role_only
+  ON public.ses_channel_approval_attempts
+  FOR ALL TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+REVOKE ALL ON public.ses_channel_approval_attempts FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.ses_channel_approval_attempts TO service_role;
 REVOKE ALL ON FUNCTION public.issue_ses_channel_approval_request(uuid, uuid, text, text, uuid, text, text, timestamptz, timestamptz) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.consume_ses_channel_approval_code(uuid, text, text, text, text, timestamptz, integer, interval) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.issue_ses_channel_approval_request(uuid, uuid, text, text, uuid, text, text, timestamptz, timestamptz) TO service_role;
