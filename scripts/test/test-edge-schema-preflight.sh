@@ -31,6 +31,7 @@ ROOF_INITIAL_CYCLE_MIGRATION="$REPO_ROOT/supabase/migrations/20260803080000_make
 INVOICE_BOUND_ADOPT_MIGRATION="$REPO_ROOT/supabase/migrations/20260804010000_ses_invoice_bound_docket_idempotent_adopt.sql"
 RELEASE_ROUTE_KIND_MIGRATION="$REPO_ROOT/supabase/migrations/20260804090000_ses_release_report_invoice_route_kind.sql"
 MAILER_OPS_SEND_MIGRATION="$REPO_ROOT/supabase/migrations/20260805020000_ses_mailer_ops_send_effect.sql"
+ECHO_CODE_APPROVAL_MIGRATION="$REPO_ROOT/supabase/migrations/20260808010000_ses_echo_code_approval.sql"
 
 
 PASS_COUNT=0
@@ -149,6 +150,10 @@ mailer_ops_send_migration_sha() {
   shasum -a 256 "$MAILER_OPS_SEND_MIGRATION" | awk '{print $1}'
 }
 
+echo_code_approval_migration_sha() {
+  shasum -a 256 "$ECHO_CODE_APPROVAL_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -179,6 +184,7 @@ write_response() {
   INVOICE_BOUND_ADOPT_EXPECTED_SHA="$(invoice_bound_adopt_migration_sha)" \
   RELEASE_ROUTE_KIND_EXPECTED_SHA="$(release_route_kind_migration_sha)" \
   MAILER_OPS_SEND_EXPECTED_SHA="$(mailer_ops_send_migration_sha)" \
+  ECHO_CODE_APPROVAL_EXPECTED_SHA="$(echo_code_approval_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -456,6 +462,17 @@ mailer_ops_send_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+echo_code_approval_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260808010000",
+    "expected_migration_name": "ses_echo_code_approval",
+    "expected_statement_sha256": os.environ["ECHO_CODE_APPROVAL_EXPECTED_SHA"],
+    "actual_migration_version": "20260808010000",
+    "actual_migration_name": "ses_echo_code_approval",
+    "actual_statement_count": 13,
+    "actual_statement_sha256": None,
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -483,6 +500,7 @@ with open(sys.argv[1], "w") as f:
             invoice_bound_adopt_row,
             release_route_kind_row,
             mailer_ops_send_row,
+            echo_code_approval_row,
         ],
         f,
     )
@@ -691,7 +709,7 @@ PY
 main() {
   echo "Running Edge Function schema preflight tests..."
   echo
-  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" || ! -f "$BOARD_V2_PREVIEW_MIGRATION" || ! -f "$VAULT_SYNC_MIGRATION" || ! -f "$SES_RECOVERY_MIGRATION" || ! -f "$ROOF_INITIAL_CYCLE_MIGRATION" || ! -f "$INVOICE_BOUND_ADOPT_MIGRATION" || ! -f "$RELEASE_ROUTE_KIND_MIGRATION" || ! -f "$MAILER_OPS_SEND_MIGRATION" ]]; then
+  if [[ ! -f "$PREFLIGHT" || ! -f "$MANIFEST" || ! -f "$MIGRATION" || ! -f "$MEDIA_MIGRATION" || ! -f "$FRESH_HEALTH_MIGRATION" || ! -f "$U5_U6_MIGRATION" || ! -f "$FENCE_HARDENING_MIGRATION" || ! -f "$DOCS_READY_MIGRATION" || ! -f "$SIBLING_EVIDENCE_MIGRATION" || ! -f "$PORTAL_CAPTURE_MIGRATION" || ! -f "$SEED_SCOPE_MIGRATION" || ! -f "$HUGO_NOTIFICATION_MIGRATION" || ! -f "$CYCLE_UNIQUENESS_MIGRATION" || ! -f "$PDF_EXTRACTION_MIGRATION" || ! -f "$INTAKE_SETTLEMENT_MIGRATION" || ! -f "$BOARD_V2_PREVIEW_MIGRATION" || ! -f "$VAULT_SYNC_MIGRATION" || ! -f "$SES_RECOVERY_MIGRATION" || ! -f "$ROOF_INITIAL_CYCLE_MIGRATION" || ! -f "$INVOICE_BOUND_ADOPT_MIGRATION" || ! -f "$RELEASE_ROUTE_KIND_MIGRATION" || ! -f "$MAILER_OPS_SEND_MIGRATION" || ! -f "$ECHO_CODE_APPROVAL_MIGRATION" ]]; then
     fail "test_setup" "preflight, manifest, or canonical migration missing"
   else
     test_incident_dependency_is_declared
