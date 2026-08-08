@@ -43,10 +43,21 @@ second approval door.
 ## Storage and limits
 
 The only schema change is the authorised
-`ses_channel_approval_attempts` attempt-limit table. Request rows contain the
-server-generated request identity, enrolled sender fingerprint, exact message
-hash, HMAC-protected code hash, expiry, and consumed timestamp. Lockout rows
-contain sender-scoped failure state, so a fresh request cannot reset it.
+`ses_channel_approval_attempts` attempt-limit table, with its rollback twin
+`supabase/rollbacks/20260808010000_ses_echo_code_approval_down.sql` (run only
+with the echo-code call sites already withdrawn — dropping the table clears the
+single-use and lockout state). Request rows contain the server-generated request
+identity, the org and card the request was ISSUED against, the enrolled sender
+fingerprint, exact message hash, HMAC-protected code hash, expiry, and consumed
+timestamp. Lockout rows contain sender-scoped failure state, so a fresh request
+cannot reset it.
+
+`consume_ses_channel_approval_code` returns that issued `org_id` / `job_id` on
+acceptance, and the verifier approves those rather than the org on the relay's
+transport body; a message whose card resolves elsewhere refuses
+`echo_code_card_binding_mismatch` (409) and an unreadable issued binding refuses
+`echo_code_issued_binding_unreadable` (503). The relay transports; it chooses no
+persisted field on the money-approval ledger row.
 
 The table IS the single-use and lockout invariant, so it carries RLS, a
 service-role-only `FOR ALL` policy, and a table-level revoke from `PUBLIC`,
