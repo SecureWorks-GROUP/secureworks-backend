@@ -651,7 +651,7 @@ export function readSesChannelApprovalEnv(): SesChannelApprovalEnv {
   };
 }
 
-async function loadBoundOperatorUser(
+export async function loadBoundOperatorUser(
   client: SesSupabaseClient,
   binding: SesChannelOperatorBinding,
 ): Promise<{ id: string; email: string; role: string }> {
@@ -688,7 +688,7 @@ async function loadBoundOperatorUser(
  * a `job_id`. Zero matches or more than one matching row both refuse: an
  * approval names its card or it approves nothing.
  */
-async function resolveSesChannelCard(
+export async function resolveSesChannelCard(
   client: SesSupabaseClient,
   reference: string,
 ): Promise<{ job_id: string; job_number: string }> {

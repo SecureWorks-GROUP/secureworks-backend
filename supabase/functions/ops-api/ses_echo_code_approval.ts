@@ -1,0 +1,354 @@
+import {
+  type SesActionAuth,
+  SesActionError,
+  type SesSupabaseClient,
+} from "./ses_reporting_actions.ts";
+import type {
+  SesChannelApprovalDeps,
+  SesChannelApprovalEnv,
+  SesChannelApprovalRequest,
+  SesChannelOperatorBinding,
+} from "./ses_channel_approval.ts";
+import {
+  loadBoundOperatorUser,
+  parseSesChannelApprovalMessage,
+  parseSesChannelOperatorBindings,
+  resolveSesChannelCard,
+  resolveSesChannelOperatorBinding,
+  SES_CHANNEL_APPROVAL_CHANNELS,
+  sesChannelSenderFingerprint,
+} from "./ses_channel_approval.ts";
+
+export const SES_ECHO_CODE_CONTRACT_VERSION = "ses-echo-code/v1";
+export const SES_ECHO_CODE_EXPIRY_MS = 10 * 60_000;
+export const SES_ECHO_CODE_LOCKOUT_THRESHOLD = 3;
+export const SES_ECHO_CODE_LOCKOUT_WINDOW_MS = 15 * 60_000;
+
+type EchoRequest = { org_id: string; job_id: string; channel: unknown };
+
+function refuse(
+  status: number,
+  code: string,
+  fact: string,
+  recovery_action: string,
+  evidence?: Record<string, unknown>,
+): never {
+  throw new SesActionError(status, {
+    state: "refused",
+    code,
+    fact,
+    recovery_action,
+    ...(evidence ? { evidence } : {}),
+  } as any);
+}
+
+async function sha256(value: string): Promise<string> {
+  const bytes = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(bytes)].map((byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+async function hmacCode(rootSecret: string, code: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(rootSecret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(code),
+  );
+  return [...new Uint8Array(signature)].map((byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+function secureCode(): string {
+  const max = Math.floor(0x1_0000_0000 / 1_000_000) * 1_000_000;
+  const bytes = new Uint32Array(1);
+  do crypto.getRandomValues(bytes); while (bytes[0] >= max);
+  return String(bytes[0] % 1_000_000).padStart(6, "0");
+}
+
+function ownBinding(
+  bindings: SesChannelOperatorBinding[],
+  channel: string,
+  userId: string,
+): SesChannelOperatorBinding | null {
+  const matches = bindings.filter((binding) =>
+    binding.channel === channel && binding.operator_user_id === userId
+  );
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+function requireCaptainSession(
+  auth: SesActionAuth,
+): asserts auth is SesActionAuth & { mode: "jwt"; user: { id: string } } {
+  if (auth.mode !== "jwt" || !auth.user || auth.identity_provenance) {
+    refuse(
+      403,
+      "echo_code_issue_requires_session",
+      "Only the identified operator session may issue an approval request.",
+      "Issue the request from the captain's authenticated board session.",
+    );
+  }
+}
+
+function requireRelay(auth: SesActionAuth): void {
+  if (auth.mode !== "api_key") {
+    refuse(
+      403,
+      "echo_code_transport_not_privileged",
+      "Only the privileged relay may transport an approval message for verification.",
+      "Route the message through the configured relay.",
+    );
+  }
+}
+
+export async function issueSesChannelApprovalAction(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+  request: EchoRequest,
+  env: SesChannelApprovalEnv,
+) {
+  requireCaptainSession(auth);
+  const channel = String(request.channel ?? "").toLowerCase();
+  if (!SES_CHANNEL_APPROVAL_CHANNELS.includes(channel as any)) {
+    refuse(
+      400,
+      "channel_unsupported",
+      "The approval request names an unsupported channel.",
+      `Use one of: ${SES_CHANNEL_APPROVAL_CHANNELS.join(", ")}.`,
+    );
+  }
+  const bindings = parseSesChannelOperatorBindings(env.bindings_raw);
+  const rootSecret = String(env.root_secret || "");
+  const binding = ownBinding(bindings, channel, auth.user.id);
+  if (!binding || !rootSecret) {
+    refuse(
+      503,
+      "channel_binding_not_configured",
+      "No enrolled sender binding is available for this operator and channel.",
+      "Enrol the sender binding and root secret before issuing an approval request.",
+    );
+  }
+  const job = await client.from("jobs").select("id,job_number").eq(
+    "id",
+    request.job_id,
+  ).maybeSingle();
+  if (job.error || !job.data) {
+    refuse(
+      409,
+      "channel_card_not_found",
+      "The approval request does not name one readable card.",
+      "Issue the request for one existing card.",
+    );
+  }
+  const code = secureCode();
+  const messageText = `APPROVE ${String(job.data.job_number)} ${code}`;
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + SES_ECHO_CODE_EXPIRY_MS);
+  const requestId = crypto.randomUUID();
+  const rpc = await client.rpc("issue_ses_channel_approval_request", {
+    p_org_id: request.org_id,
+    p_job_id: request.job_id,
+    p_channel: channel,
+    p_sender_fingerprint: binding.sender_fingerprint,
+    p_request_id: requestId,
+    p_message_hash: `sha256:${await sha256(messageText)}`,
+    p_code_hash: `sha256:${await hmacCode(rootSecret, code)}`,
+    p_issued_at: now.toISOString(),
+    p_expires_at: expiresAt.toISOString(),
+  });
+  if (rpc.error) {
+    refuse(
+      503,
+      "echo_code_issue_unreadable",
+      "The approval request could not be durably issued.",
+      "Retry once the approval ledger is readable.",
+    );
+  }
+  const row = Array.isArray(rpc.data) ? rpc.data[0] : rpc.data;
+  if (!row?.request_id) {
+    refuse(
+      429,
+      "echo_code_sender_locked",
+      "Approval requests for this enrolled sender are temporarily locked after repeated failures.",
+      "Wait 15 minutes for the cooling-off window to expire, then issue a new request.",
+    );
+  }
+  // This is the sole code-bearing transport envelope. No read action returns
+  // the code, and no log/error path includes it.
+  return {
+    echo_code: {
+      contract: SES_ECHO_CODE_CONTRACT_VERSION,
+      request_id: String(row.request_id),
+      channel,
+      message_text: messageText,
+      expires_at: String(row.expires_at),
+    },
+  };
+}
+
+export async function submitSesEchoCodeApprovalAction(
+  client: SesSupabaseClient,
+  auth: SesActionAuth,
+  request: SesChannelApprovalRequest & { request_id?: unknown },
+  deps: SesChannelApprovalDeps,
+) {
+  requireRelay(auth);
+  const bindings = parseSesChannelOperatorBindings(deps.env.bindings_raw);
+  const rootSecret = String(deps.env.root_secret || "");
+  if (!bindings.length || !rootSecret) {
+    refuse(
+      503,
+      "channel_binding_not_configured",
+      "No enrolled sender binding is configured.",
+      "Enrol the sender binding before verifying an approval.",
+    );
+  }
+  const channel = String(request.channel ?? "").toLowerCase();
+  const senderFingerprint = await sesChannelSenderFingerprint(
+    channel,
+    request.sender_id,
+  );
+  const binding = resolveSesChannelOperatorBinding(
+    bindings,
+    channel,
+    senderFingerprint,
+  );
+  const requestId = String(request.request_id ?? "").trim();
+  if (!requestId) {
+    refuse(
+      400,
+      "echo_code_request_id_missing",
+      "The message carries no issued approval request identity.",
+      "Transport the issued request id with the message.",
+    );
+  }
+  const messageText = String(request.message_text ?? "");
+  const intent = parseSesChannelApprovalMessage(messageText);
+  if (
+    intent.act !== "approve_invoice" || intent.act_ambiguous ||
+    intent.card_references.length !== 1 || intent.totp_ambiguous ||
+    !intent.totp_code
+  ) {
+    refuse(
+      403,
+      "echo_code_message_invalid",
+      "The exact issued approval message could not be established.",
+      "Use the exact one-card message from the issued transport envelope.",
+    );
+  }
+  const result = await client.rpc("consume_ses_channel_approval_code", {
+    p_request_id: requestId,
+    p_channel: channel,
+    p_sender_fingerprint: senderFingerprint,
+    p_message_hash: `sha256:${await sha256(messageText)}`,
+    p_code_hash: `sha256:${await hmacCode(rootSecret, intent.totp_code)}`,
+    p_now: new Date(deps.now()).toISOString(),
+    p_lockout_threshold: SES_ECHO_CODE_LOCKOUT_THRESHOLD,
+    p_lockout_window: `${SES_ECHO_CODE_LOCKOUT_WINDOW_MS / 60000} minutes`,
+  });
+  if (result.error) {
+    refuse(
+      503,
+      "echo_code_verify_unreadable",
+      "The approval request could not be verified durably.",
+      "Retry once the approval ledger is readable.",
+    );
+  }
+  const row = Array.isArray(result.data) ? result.data[0] : result.data;
+  // The database consumes the request before returning any mismatch, including
+  // a valid code presented by an unenrolled sender. That preserves single-use
+  // semantics even when the sender check itself fails.
+  if (!binding) {
+    refuse(
+      403,
+      "channel_sender_not_bound",
+      "The message did not come from an enrolled sender identity.",
+      "Use the enrolled sender identity or approve in the cockpit.",
+    );
+  }
+  if (!row?.accepted) {
+    const reason = String(row?.reason || "invalid");
+    if (reason === "already_used") {
+      refuse(
+        409,
+        "echo_code_already_used",
+        "This issued approval code has already been consumed and cannot authorise another message.",
+        "Request a fresh approval code.",
+      );
+    }
+    if (reason === "expired") {
+      refuse(
+        409,
+        "echo_code_expired",
+        "This issued approval code has expired.",
+        "Request a fresh approval code.",
+      );
+    }
+    refuse(
+      reason === "locked" ? 429 : 403,
+      reason === "locked" ? "echo_code_sender_locked" : "echo_code_invalid",
+      "The issued code, enrolled sender and exact approval message did not verify together.",
+      reason === "locked"
+        ? "Wait 15 minutes for the cooling-off window to expire."
+        : "Request a fresh approval code and use its exact message.",
+    );
+  }
+  const operatorUser = await loadBoundOperatorUser(client, binding);
+  const card = await resolveSesChannelCard(client, intent.card_references[0]!);
+  const operatorAuth = {
+    mode: "jwt",
+    user: operatorUser,
+    identity_provenance: "bound_channel_echo_code",
+  } as any;
+  const operatorAct = {
+    kind: "ses_channel_echo_operator_act",
+    contract: SES_ECHO_CODE_CONTRACT_VERSION,
+    request_id: requestId,
+    message_id: String(request.message_id ?? ""),
+    message_hash: `sha256:${await sha256(messageText)}`,
+    channel,
+    sender_fingerprint: senderFingerprint,
+    operator_user_id: binding.operator_user_id,
+    operator_label: binding.label,
+    act: "approve_invoice",
+    card_reference: intent.card_references[0]!,
+  };
+  const approval = await deps.approveInvoice(operatorAuth, {
+    org_id: request.org_id,
+    job_id: card.job_id,
+    includes_authorise: false,
+    evidence_refs: [operatorAct],
+  });
+  return {
+    echo_code_approval: {
+      contract: SES_ECHO_CODE_CONTRACT_VERSION,
+      request_id: requestId,
+      job_id: card.job_id,
+      job_number: card.job_number,
+      operator_act: operatorAct,
+    },
+    approval,
+  };
+}
+
+// Kept for the explicit proof that the old TOTP door is not a second approval
+// route. The production route dispatches only to submitSesEchoCodeApprovalAction.
+export function legacyTotpApprovalDoor(): never {
+  refuse(
+    410,
+    "channel_totp_retired",
+    "The former TOTP channel approval path is retired; echo-code is the only text approval path.",
+    "Issue and transport a server-minted echo code.",
+  );
+}
