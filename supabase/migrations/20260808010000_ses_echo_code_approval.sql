@@ -142,11 +142,15 @@ BEGIN
   is_match := request_row.message_hash = p_message_hash
     AND request_row.code_hash = p_code_hash;
   IF NOT is_match THEN
-    UPDATE public.ses_channel_approval_attempts
-    SET failed_attempts = failed_attempts + 1,
-        locked_until = CASE WHEN failed_attempts + 1 >= p_lockout_threshold
-          THEN p_now + p_lockout_window ELSE locked_until END
-    WHERE id = lock_row.id;
+    -- Qualified through the alias because failed_attempts and locked_until are
+    -- also RETURNS TABLE output variables: an unqualified read of either raises
+    -- "column reference is ambiguous" and would roll back the consume above,
+    -- leaving the request neither spent nor counted.
+    UPDATE public.ses_channel_approval_attempts AS a
+    SET failed_attempts = a.failed_attempts + 1,
+        locked_until = CASE WHEN a.failed_attempts + 1 >= p_lockout_threshold
+          THEN p_now + p_lockout_window ELSE a.locked_until END
+    WHERE a.id = lock_row.id;
     SELECT * INTO lock_row FROM public.ses_channel_approval_attempts WHERE id = lock_row.id;
     RETURN QUERY SELECT false,
       CASE WHEN lock_row.locked_until IS NOT NULL AND lock_row.locked_until > p_now THEN 'locked' ELSE 'invalid' END,
