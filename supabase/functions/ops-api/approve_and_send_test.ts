@@ -494,3 +494,38 @@ Deno.test("A12c: undefined email_override → ok=true (skips verification)", asy
 
   assertEquals(result.ok, true)
 })
+
+Deno.test("company branch anchor authorizes while an arbitrary same-domain override refuses", async () => {
+  const fix = happyFixture()
+  const { client } = makeStubClient({
+    ...fix.seed,
+    makesafe_job_details: {
+      "job-1": { job_id: "job-1", requesting_company_id: "company-1" },
+    },
+    makesafe_companies: {
+      "company-1": {
+        id: "company-1",
+        report_recipient: "reports@builder.test",
+        sender_patterns: ["branch@builder.test"],
+      },
+    },
+  } as Seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-1": fix.xeroInvoice } })
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const branch = await _verifyApproveAndSendRecipient({
+    client,
+    body: { xero_invoice_id: "inv-1", email_override: "branch@builder.test" },
+    getToken, xeroGet, logBusinessEvent,
+  })
+  assertEquals(branch.ok, true)
+
+  const arbitrary = await _verifyApproveAndSendRecipient({
+    client,
+    body: { xero_invoice_id: "inv-1", email_override: "unlisted@builder.test" },
+    getToken, xeroGet, logBusinessEvent,
+  })
+  assertEquals(arbitrary.ok, false)
+  if (!arbitrary.ok) assertEquals((await jsonOf(arbitrary.response)).code, "recipient_mismatch")
+})

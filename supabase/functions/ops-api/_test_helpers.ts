@@ -5,6 +5,8 @@
 export type TableSeed = {
   xero_invoices?: Record<string, any>  // keyed by xero_invoice_id
   jobs?: Record<string, any>           // keyed by id
+  makesafe_job_details?: Record<string, any> // keyed by job_id
+  makesafe_companies?: Record<string, any> // keyed by id
 }
 
 export type StubClientCalls = {

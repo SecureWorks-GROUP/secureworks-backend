@@ -104,6 +104,13 @@ import {
   xeroContactNameContainsWhere,
 } from './xero_where_clause.ts'
 import {
+  addDelimitedEmails,
+  buildExpectedRecipientSet,
+  loadCompanyRecipientAnchors,
+  normaliseFullEmail,
+  RecipientAnchorLookupError,
+} from './recipient_anchors.ts'
+import {
   describeAssignmentLockBlock,
   isClockedAssignmentBillable,
   planAssignmentLock,
@@ -2902,13 +2909,6 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   // would re-open the recipient-drift hole. Token acquisition is folded into the same
   // try block so getToken outages produce the same code as /Invoices outages.
   const verifiedJobId = siInv.job_id || null
-  const addToSet = (set: Set<string>, e: unknown) => {
-    if (typeof e !== 'string') return
-    for (const part of e.split(',')) {
-      const norm = part.trim().toLowerCase()
-      if (norm) set.add(norm)
-    }
-  }
   let siAt = ''
   let siTi = ''
   const xeroEmails = new Set<string>()
@@ -2920,8 +2920,8 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     siTi = tok.tenantId
     const xInv = await xeroGet(`/Invoices/${siId}`, siAt, siTi)
     const xContact = xInv?.Invoices?.[0]?.Contact
-    addToSet(xeroEmails, xContact?.EmailAddress)
-    for (const cp of (xContact?.ContactPersons || [])) addToSet(xeroEmails, cp?.EmailAddress)
+    addDelimitedEmails(xeroEmails, xContact?.EmailAddress)
+    for (const cp of (xContact?.ContactPersons || [])) addDelimitedEmails(xeroEmails, cp?.EmailAddress)
     xeroLookupOk = true
   } catch (e) {
     xeroLookupErr = (e as Error).message || 'unknown error'
@@ -2939,17 +2939,35 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   if (verifiedJobId) {
     const { data: siJob } = await client.from('jobs')
       .select('client_email').eq('id', verifiedJobId).maybeSingle()
-    addToSet(jobEmails, siJob?.client_email)
+    addDelimitedEmails(jobEmails, siJob?.client_email)
+  }
+
+  let companyEmails = new Set<string>()
+  try {
+    companyEmails = await loadCompanyRecipientAnchors(client, verifiedJobId)
+  } catch (e) {
+    const detail = e instanceof RecipientAnchorLookupError
+      ? e.message
+      : 'unexpected company anchor lookup failure'
+    return json({
+      error: 'Could not verify recipient — company anchors could not be loaded. Retry before sending.',
+      code: 'company_recipient_lookup_failed',
+      xero_invoice_id: siId,
+      detail,
+    }, 503)
   }
 
   // Selection rule (option 2 — cross-check):
-  //   - Xero lookup succeeded with ≥1 email → expectedSet = Xero emails. jobs.client_email
-  //     can only authorize a send via overlap; a drifted job email never expands the
-  //     allowlist past what Xero confirms.
-  //   - Xero lookup succeeded with 0 emails → legacy fallback to verified jobs.client_email.
-  //     This branch is ONLY reachable when Xero genuinely has no contact email on file —
-  //     not when the lookup itself failed (handled above).
-  const expectedSet: Set<string> = xeroEmails.size > 0 ? xeroEmails : jobEmails
+  //   - Xero lookup succeeded with ≥1 email → Xero emails plus server-owned company
+  //     anchors; a drifted jobs.client_email never expands the Xero set.
+  //   - Xero lookup succeeded with 0 emails → verified jobs.client_email plus
+  //     server-owned company anchors. This is only reachable when Xero genuinely
+  //     has no contact email on file, not when lookup failed.
+  const expectedSet = buildExpectedRecipientSet({
+    xeroEmails,
+    jobEmails,
+    companyEmails,
+  })
 
   if (expectedSet.size === 0) {
     return json({
@@ -3153,14 +3171,6 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
   }
   const verifiedJobId = asInvVerif.job_id || null
 
-  const addToSetT3 = (set: Set<string>, e: unknown) => {
-    if (typeof e !== 'string') return
-    for (const part of e.split(',')) {
-      const norm = part.trim().toLowerCase()
-      if (norm) set.add(norm)
-    }
-  }
-
   // Xero contact lookup. Token failure or contact-fetch failure both fold into
   // xero_contact_lookup_failed — we cannot verify without Xero, so we hard-stop.
   const xeroEmails = new Set<string>()
@@ -3170,8 +3180,8 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
     const tok = await getToken(client)
     const xInv = await xeroGet(`/Invoices/${asId}`, tok.accessToken, tok.tenantId)
     const xContact = xInv?.Invoices?.[0]?.Contact
-    addToSetT3(xeroEmails, xContact?.EmailAddress)
-    for (const cp of (xContact?.ContactPersons || [])) addToSetT3(xeroEmails, cp?.EmailAddress)
+    addDelimitedEmails(xeroEmails, xContact?.EmailAddress)
+    for (const cp of (xContact?.ContactPersons || [])) addDelimitedEmails(xeroEmails, cp?.EmailAddress)
     xeroLookupOk = true
   } catch (e) {
     xeroLookupErr = (e as Error).message || 'unknown error'
@@ -3194,12 +3204,35 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
   if (verifiedJobId) {
     const { data: asJobVerif } = await client.from('jobs')
       .select('client_email').eq('id', verifiedJobId).maybeSingle()
-    addToSetT3(jobEmails, asJobVerif?.client_email)
+    addDelimitedEmails(jobEmails, asJobVerif?.client_email)
   }
 
-  // Selection rule: Xero canonical when present; jobs.client_email is legacy fallback
-  // only when Xero genuinely has no contact email (lookup succeeded with empty result).
-  const expectedSet: Set<string> = xeroEmails.size > 0 ? xeroEmails : jobEmails
+  let companyEmails = new Set<string>()
+  try {
+    companyEmails = await loadCompanyRecipientAnchors(client, verifiedJobId)
+  } catch (e) {
+    const detail = e instanceof RecipientAnchorLookupError
+      ? e.message
+      : 'unexpected company anchor lookup failure'
+    return {
+      ok: false,
+      response: json({
+        error: 'Could not verify recipient — company anchors could not be loaded. Retry before approving.',
+        code: 'company_recipient_lookup_failed',
+        xero_invoice_id: asId,
+        detail,
+      }, 503),
+    }
+  }
+
+  // Selection rule: Xero is canonical when present; jobs.client_email is legacy
+  // fallback only when Xero genuinely has no contact email. Company anchors are
+  // independent server-owned additions in either case.
+  const expectedSet = buildExpectedRecipientSet({
+    xeroEmails,
+    jobEmails,
+    companyEmails,
+  })
   if (expectedSet.size === 0) {
     return {
       ok: false,
@@ -4839,6 +4872,23 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await createMakesafeJob(client, body))
       }
       case 'list_makesafe_companies': return json(await listMakesafeCompanies(client))
+      case 'update_makesafe_company_addresses': {
+        const isPrivileged = authMode === 'api_key' ||
+          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!isPrivileged) {
+          return json({
+            error: 'forbidden: update_makesafe_company_addresses requires the privileged ops key or an admin/owner session',
+          }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'update_makesafe_company_addresses requires POST' }, 405)
+        }
+        return json(await updateMakesafeCompanyAddresses(
+          client,
+          body,
+          authUser?.email || (authMode === 'api_key' ? 'ops-api:api_key' : null),
+        ))
+      }
       case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body, { authMode }))
       case 'update_makesafe_job_family': {
         const isPrivileged = authMode === 'api_key' ||
@@ -13836,6 +13886,95 @@ async function listMakesafeCompanies(client: any) {
     .order('name')
   if (error) throw error
   return { companies: data || [] }
+}
+
+// ── Captain-sanctioned company recipient address maintenance ──
+// The existing sender_patterns text[] is the company-owned address set. This
+// action only permits full email entries; bare domains remain inbound matcher
+// patterns and never become invoice recipients. It is intentionally separate
+// from the routine allow-list and requires the privileged ops key or admin/owner.
+export async function updateMakesafeCompanyAddresses(
+  client: any,
+  body: any,
+  actor: string | null = null,
+) {
+  const operation = String(body?.operation || '').trim().toLowerCase()
+  if (operation !== 'add' && operation !== 'remove') {
+    throw new ApiError("operation must be 'add' or 'remove'", 400)
+  }
+  if (String(body?.address || '').includes(',')) {
+    throw new ApiError('address must contain exactly one email address', 400)
+  }
+  const address = normaliseFullEmail(body?.address)
+  if (!address) {
+    throw new ApiError('address must be one full email address', 400)
+  }
+
+  const companyId = String(body?.company_id || '').trim()
+  const companySlug = String(body?.company_slug || body?.slug || '').trim().toLowerCase()
+  if (!companyId && !companySlug) {
+    throw new ApiError('company_id or company_slug required', 400)
+  }
+
+  let query = client.from('makesafe_companies')
+    .select('id,slug,report_recipient,sender_patterns')
+  query = companyId ? query.eq('id', companyId) : query.eq('slug', companySlug)
+  const { data: company, error: companyError } = await query.maybeSingle()
+  if (companyError) throw new ApiError(`company lookup failed: ${companyError.message}`, 503)
+  if (!company) throw new ApiError('make-safe company not found', 404)
+
+  const reportRecipient = normaliseFullEmail(company.report_recipient)
+  if (reportRecipient === address) {
+    throw new ApiError('report_recipient is the primary company anchor; maintain branch addresses separately', 409)
+  }
+
+  const patterns = Array.isArray(company.sender_patterns)
+    ? company.sender_patterns.map((value: unknown) => String(value ?? '').trim()).filter(Boolean)
+    : []
+  const hasAddress = patterns.some((value: string) => normaliseFullEmail(value) === address)
+  let nextPatterns = patterns
+  let changed = false
+  if (operation === 'add' && !hasAddress) {
+    nextPatterns = [...patterns, address]
+    changed = true
+  } else if (operation === 'remove' && hasAddress) {
+    nextPatterns = patterns.filter((value: string) => normaliseFullEmail(value) !== address)
+    changed = true
+  }
+
+  if (changed) {
+    const { error } = await client.from('makesafe_companies')
+      .update({ sender_patterns: nextPatterns, updated_at: new Date().toISOString() })
+      .eq('id', company.id)
+    if (error) throw new ApiError(`company address update failed: ${error.message}`, 503)
+
+    try {
+      await client.from('business_events').insert({
+        event_type: 'makesafe_company_recipient_updated',
+        source: 'ops-api/update_makesafe_company_addresses',
+        entity_type: 'makesafe_company',
+        entity_id: company.id,
+        correlation_id: company.id,
+        payload: { operation, address, company_slug: company.slug },
+        metadata: { actor },
+      })
+    } catch (e) {
+      console.warn('[ops-api] company recipient audit write failed:', (e as Error).message)
+    }
+  }
+
+  const branchAddressCount = nextPatterns
+    .map((value: string) => normaliseFullEmail(value))
+    .filter((value: string | null): value is string => Boolean(value) && value !== reportRecipient)
+    .length
+  return {
+    success: true,
+    company_id: company.id,
+    company_slug: company.slug,
+    operation,
+    changed,
+    configured_branch_address_count: branchAddressCount,
+  }
 }
 
 // ── Slice 2: update make-safe overlay details ──
