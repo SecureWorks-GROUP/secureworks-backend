@@ -56,7 +56,7 @@ function makeClient(jobNumber = "SWMS-260000") {
     requests,
     lock,
     from(table: string) {
-      const rows = table === "jobs"
+      const rows: Record<string, string>[] = table === "jobs"
         ? [{ id: JOB, job_number: jobNumber }]
         : table === "users"
         ? [{ id: USER, email: "operator-account", role: "admin" }]
