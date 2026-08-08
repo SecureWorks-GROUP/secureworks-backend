@@ -251,6 +251,17 @@ export async function submitSesEchoCodeApprovalAction(
   }
   const messageText = String(request.message_text ?? "");
   const intent = parseSesChannelApprovalMessage(messageText);
+  // Text SEND IT is retired, and its refusal is named rather than folded into
+  // the generic message refusal: a recognised send word must be answerable as
+  // "that act is not on this door", never as "your message was unreadable".
+  if (intent.act === "send_it" && !intent.act_ambiguous) {
+    refuse(
+      409,
+      "channel_send_not_supported",
+      "SEND IT remains a separate act and is not coupled to echo-code approval.",
+      "Use the separate SEND IT path.",
+    );
+  }
   if (
     intent.act !== "approve_invoice" || intent.act_ambiguous ||
     intent.card_references.length !== 1 || intent.totp_ambiguous ||
@@ -331,8 +342,29 @@ export async function submitSesEchoCodeApprovalAction(
         : "Request a fresh approval code and use its exact message.",
     );
   }
+  // The approval is recorded against the org and card bound at ISSUANCE. The
+  // relay's own body carries an org too, and it must never choose a persisted
+  // field on the money-approval ledger row.
+  const issuedOrgId = String(row?.org_id ?? "");
+  const issuedJobId = String(row?.job_id ?? "");
+  if (!issuedOrgId || !issuedJobId) {
+    refuse(
+      503,
+      "echo_code_issued_binding_unreadable",
+      "The verified request did not return the org and card it was issued against.",
+      "Retry once the approval ledger returns the issued binding.",
+    );
+  }
   const operatorUser = await loadBoundOperatorUser(client, binding);
   const card = await resolveSesChannelCard(client, intent.card_references[0]!);
+  if (card.job_id !== issuedJobId) {
+    refuse(
+      409,
+      "echo_code_card_binding_mismatch",
+      "The card named in the approval message is not the card this request was issued against.",
+      "Issue a fresh approval request for the card you intend to approve.",
+    );
+  }
   const operatorAuth: SesActionAuth = {
     mode: "jwt",
     user: operatorUser,
@@ -352,8 +384,8 @@ export async function submitSesEchoCodeApprovalAction(
     card_reference: intent.card_references[0]!,
   };
   const approval = await deps.approveInvoice(operatorAuth, {
-    org_id: request.org_id,
-    job_id: card.job_id,
+    org_id: issuedOrgId,
+    job_id: issuedJobId,
     includes_authorise: false,
     evidence_refs: [operatorAct],
   });

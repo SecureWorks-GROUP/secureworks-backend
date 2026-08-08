@@ -22,9 +22,12 @@ Behavioural call sites that must honour the contract:
 6. SEND IT. The **cockpit** SEND IT route (`approve_ses_release_revision` /
    `execute_ses_release_revision`) is unchanged. The **text** SEND IT route
    shipped as Harden SES ticket 07 is REMOVED: `submit_ses_channel_approval`
-   no longer binds `executeSesChannelSendIt`, refuses `send_it` with
-   `channel_send_not_supported` (409), and the echo-code verifier refuses any
-   non-`approve_invoice` message before that point. `ses_channel_send_it.ts`
+   no longer binds `executeSesChannelSendIt`. The echo-code verifier itself
+   refuses a recognised send word by name with `channel_send_not_supported`
+   (409) — an observable refusal, not a claim — and refuses every other
+   non-`approve_invoice` message with `echo_code_message_invalid` (403).
+   Neither path consumes a request or moves a failure counter.
+   `ses_channel_send_it.ts`
    therefore has no production call site and is covered only by its own unit
    tests; the dead `index.ts` import is removed. Re-wiring text SEND IT behind
    its own echo-code request is a NAMED FOLLOW-UP and requires the Captain's

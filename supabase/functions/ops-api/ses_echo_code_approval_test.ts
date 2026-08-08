@@ -30,6 +30,8 @@ type RequestRow = {
   code_hash: string;
   consumed: boolean;
   expires: number;
+  org_id: string;
+  job_id: string;
 };
 
 async function bindingJson(): Promise<string> {
@@ -97,6 +99,8 @@ function makeClient(jobNumber = "SWMS-260000") {
           code_hash: String(args.p_code_hash),
           consumed: false,
           expires: Date.parse(String(args.p_expires_at)),
+          org_id: String(args.p_org_id),
+          job_id: String(args.p_job_id),
         });
         return {
           data: [{
@@ -145,7 +149,15 @@ function makeClient(jobNumber = "SWMS-260000") {
       }
       lock.failed_attempts = 0;
       lock.locked_until = 0;
-      return { data: [{ accepted: true, reason: "accepted" }], error: null };
+      return {
+        data: [{
+          accepted: true,
+          reason: "accepted",
+          org_id: row.org_id,
+          job_id: row.job_id,
+        }],
+        error: null,
+      };
     },
   };
   return client;
@@ -184,6 +196,7 @@ async function submit(
     now: () => NOW,
     approveInvoice: async (_operator, args) => ({
       approved_job_id: args.job_id,
+      approved_org_id: args.org_id,
     }),
     executeSendIt: async () => {
       throw new Error("SEND IT must not be coupled");
@@ -337,4 +350,27 @@ Deno.test("ATTACK PROOF watched fail: a fresh code cannot bypass sender lockout"
   }
   const result = await refusal(() => issue(client));
   assertEquals(result.code, "echo_code_sender_locked");
+});
+
+Deno.test("a relayed SEND IT word is refused by name and consumes nothing", async () => {
+  const client = makeClient();
+  const issued: any = await issue(client);
+  const result = await refusal(() =>
+    submit(client, issued, { message_text: "SEND IT SWMS-260000 123456" })
+  );
+  assertEquals(result.code, "channel_send_not_supported");
+  assertEquals(
+    client.requests.get(issued.echo_code.request_id).consumed,
+    false,
+  );
+});
+
+Deno.test("the approval records the org bound at issuance, never the relay's", async () => {
+  const client = makeClient();
+  const issued: any = await issue(client);
+  const approved: any = await submit(client, issued, {
+    org_id: "99999999-9999-4999-8999-999999999999",
+  });
+  assertEquals(approved.approval.approved_org_id, ORG);
+  assertEquals(approved.approval.approved_job_id, JOB);
 });

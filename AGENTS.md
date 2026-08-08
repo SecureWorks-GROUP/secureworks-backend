@@ -1523,6 +1523,14 @@ replayable) and increments a sender-scoped counter, and 3 failures lock that
 sender for 15 minutes across BOTH doors — a fresh request cannot bypass it,
 because issuance reads the same lockout row.
 
+The approval is recorded against the org and card the request was ISSUED
+against, never the ones on the relay's transport body:
+`consume_ses_channel_approval_code` returns the request row's
+`org_id` / `job_id` and the verifier
+approves those, refusing `echo_code_card_binding_mismatch` if the message's
+card resolves elsewhere. The relay transports; it chooses no persisted field
+on the money-approval ledger row.
+
 **A sender mismatch is the one deliberate exception** (Captain ruling
 2026-08-08): it refuses as a security event, consumes nothing and counts
 nothing against either party. Otherwise a caller holding only the relay key

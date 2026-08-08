@@ -5,9 +5,10 @@
 // ── READ FIRST: TEXT SEND IT HAS NO PRODUCTION CALL SITE ────────────────────
 //
 // Nothing imports `executeSesChannelSendIt`. The live text route
-// (`ses_echo_code_approval.ts`) refuses any non-`approve_invoice` message, and
-// `submit_ses_channel_approval` answers `send_it` with
-// `channel_send_not_supported` (409). The COCKPIT SEND IT route
+// (`ses_echo_code_approval.ts`) answers a recognised send word with
+// `channel_send_not_supported` (409) and every other non-`approve_invoice`
+// message with `echo_code_message_invalid` (403); neither consumes a request.
+// The COCKPIT SEND IT route
 // (`approve_ses_release_revision` / `execute_ses_release_revision`) is
 // untouched. This module is kept for its binding rules and its own unit
 // tests; re-wiring text SEND IT behind its own echo-code request is a NAMED

@@ -79,6 +79,11 @@ BEGIN
 END;
 $$;
 
+DROP FUNCTION IF EXISTS public.consume_ses_channel_approval_code(uuid, text, text, text, text, timestamptz, integer, interval);
+
+-- The issued org and job are returned so the caller approves what was ISSUED.
+-- The relay supplies its own org on the transport body; it must never be the
+-- org persisted on the money-approval ledger row.
 CREATE OR REPLACE FUNCTION public.consume_ses_channel_approval_code(
   p_request_id uuid,
   p_channel text,
@@ -88,7 +93,7 @@ CREATE OR REPLACE FUNCTION public.consume_ses_channel_approval_code(
   p_now timestamptz,
   p_lockout_threshold integer DEFAULT 3,
   p_lockout_window interval DEFAULT interval '15 minutes'
-) RETURNS TABLE(accepted boolean, reason text, failed_attempts integer, locked_until timestamptz)
+) RETURNS TABLE(accepted boolean, reason text, failed_attempts integer, locked_until timestamptz, org_id uuid, job_id uuid)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   request_row public.ses_channel_approval_attempts;
@@ -100,7 +105,7 @@ BEGIN
   WHERE record_type = 'request' AND request_id = p_request_id
   FOR UPDATE;
   IF NOT FOUND THEN
-    RETURN QUERY SELECT false, 'invalid'::text, 0, NULL::timestamptz;
+    RETURN QUERY SELECT false, 'invalid'::text, 0, NULL::timestamptz, NULL::uuid, NULL::uuid;
     RETURN;
   END IF;
 
@@ -110,7 +115,7 @@ BEGIN
   -- relay key alone would be a denial-of-approval instrument.
   IF request_row.channel IS DISTINCT FROM p_channel
      OR request_row.sender_fingerprint IS DISTINCT FROM p_sender_fingerprint THEN
-    RETURN QUERY SELECT false, 'sender_mismatch'::text, 0, NULL::timestamptz;
+    RETURN QUERY SELECT false, 'sender_mismatch'::text, 0, NULL::timestamptz, NULL::uuid, NULL::uuid;
     RETURN;
   END IF;
 
@@ -125,17 +130,17 @@ BEGIN
   END IF;
 
   IF request_row.consumed_at IS NOT NULL THEN
-    RETURN QUERY SELECT false, 'already_used'::text, lock_row.failed_attempts, lock_row.locked_until;
+    RETURN QUERY SELECT false, 'already_used'::text, lock_row.failed_attempts, lock_row.locked_until, NULL::uuid, NULL::uuid;
     RETURN;
   END IF;
   UPDATE public.ses_channel_approval_attempts SET consumed_at = p_now WHERE id = request_row.id;
 
   IF lock_row.locked_until IS NOT NULL AND lock_row.locked_until > p_now THEN
-    RETURN QUERY SELECT false, 'locked'::text, lock_row.failed_attempts, lock_row.locked_until;
+    RETURN QUERY SELECT false, 'locked'::text, lock_row.failed_attempts, lock_row.locked_until, NULL::uuid, NULL::uuid;
     RETURN;
   END IF;
   IF request_row.expires_at <= p_now THEN
-    RETURN QUERY SELECT false, 'expired'::text, lock_row.failed_attempts, lock_row.locked_until;
+    RETURN QUERY SELECT false, 'expired'::text, lock_row.failed_attempts, lock_row.locked_until, NULL::uuid, NULL::uuid;
     RETURN;
   END IF;
 
@@ -154,14 +159,14 @@ BEGIN
     SELECT * INTO lock_row FROM public.ses_channel_approval_attempts WHERE id = lock_row.id;
     RETURN QUERY SELECT false,
       CASE WHEN lock_row.locked_until IS NOT NULL AND lock_row.locked_until > p_now THEN 'locked' ELSE 'invalid' END,
-      lock_row.failed_attempts, lock_row.locked_until;
+      lock_row.failed_attempts, lock_row.locked_until, NULL::uuid, NULL::uuid;
     RETURN;
   END IF;
 
   UPDATE public.ses_channel_approval_attempts
   SET failed_attempts = 0, locked_until = NULL
   WHERE id = lock_row.id;
-  RETURN QUERY SELECT true, 'accepted'::text, 0, NULL::timestamptz;
+  RETURN QUERY SELECT true, 'accepted'::text, 0, NULL::timestamptz, request_row.org_id, request_row.job_id;
 END;
 $$;
 
