@@ -221,3 +221,8 @@ ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|index|ses_
 ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|policy|ses_channel_approval_attempts.ses_channel_approval_attempts_service_role_only
 ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|function|issue_ses_channel_approval_request
 ops-api|supabase/migrations/20260808010000_ses_echo_code_approval.sql|function|consume_ses_channel_approval_code
+# 20260809000001 backs the independent D1 reconcile SMS kill switch. loadNotifySettings
+# selects the column, and a 42703 there degrades to DEFAULT_NOTIFY_SETTINGS for EVERY
+# field (alarm_phones empties, operator-configured arrival phones revert), so the deploy
+# must refuse rather than ship ahead of the migration.
+ops-api|supabase/migrations/20260809000001_makesafe_d1_reconcile_sms_kill_switch.sql|column|makesafe_notify_settings.d1_reconcile_enabled
