@@ -852,14 +852,14 @@ export interface AlertSink {
   logBusinessEvent: (client: SB, event: any) => Promise<void>;
   // Optional SMS fan-out for ERROR/WARN. No-op if not
   // supplied. Recipient is resolved by the injected sender from config, never here.
-  notifySms?: (text: string) => Promise<void>;
+  notifySms?: (text: string, source?: string) => Promise<void>;
 }
 
 const SES_MAILBOX = "ses@secureworkswa.com.au";
 
 // Emit one business_event per alert plus an SMS summary. business_events is the
 // canonical alert channel.
-async function emitAlerts(
+export async function emitAlerts(
   client: SB,
   sink: AlertSink,
   source: string,
@@ -894,7 +894,7 @@ async function emitAlerts(
         ...errors.slice(0, 10).map((a) => `ERROR ${a.direction} ${a.ref ?? a.post_id ?? ""}`),
         ...warns.slice(0, 5).map((a) => `WARN ${a.direction} ${a.ref ?? ""}`),
       ];
-      await sink.notifySms(lines.join("\n"));
+      await sink.notifySms(lines.join("\n"), source);
     }
   }
 }

@@ -32,6 +32,7 @@ INVOICE_BOUND_ADOPT_MIGRATION="$REPO_ROOT/supabase/migrations/20260804010000_ses
 RELEASE_ROUTE_KIND_MIGRATION="$REPO_ROOT/supabase/migrations/20260804090000_ses_release_report_invoice_route_kind.sql"
 MAILER_OPS_SEND_MIGRATION="$REPO_ROOT/supabase/migrations/20260805020000_ses_mailer_ops_send_effect.sql"
 ECHO_CODE_APPROVAL_MIGRATION="$REPO_ROOT/supabase/migrations/20260808010000_ses_echo_code_approval.sql"
+D1_RECONCILE_KILL_SWITCH_MIGRATION="$REPO_ROOT/supabase/migrations/20260809000001_makesafe_d1_reconcile_sms_kill_switch.sql"
 
 
 PASS_COUNT=0
@@ -154,6 +155,10 @@ echo_code_approval_migration_sha() {
   shasum -a 256 "$ECHO_CODE_APPROVAL_MIGRATION" | awk '{print $1}'
 }
 
+d1_reconcile_kill_switch_migration_sha() {
+  shasum -a 256 "$D1_RECONCILE_KILL_SWITCH_MIGRATION" | awk '{print $1}'
+}
+
 write_response() {
   local file="$1"
   local actual_name="$2"
@@ -185,6 +190,7 @@ write_response() {
   RELEASE_ROUTE_KIND_EXPECTED_SHA="$(release_route_kind_migration_sha)" \
   MAILER_OPS_SEND_EXPECTED_SHA="$(mailer_ops_send_migration_sha)" \
   ECHO_CODE_APPROVAL_EXPECTED_SHA="$(echo_code_approval_migration_sha)" \
+  D1_RECONCILE_KILL_SWITCH_EXPECTED_SHA="$(d1_reconcile_kill_switch_migration_sha)" \
   ACTUAL_NAME="$actual_name" \
   ACTUAL_SHA="$actual_sha" \
   MISSING_MARKERS_JSON="$missing_markers_json" \
@@ -473,6 +479,17 @@ echo_code_approval_row = {
     "actual_statement_sha256": None,
     "missing_markers": [],
 }
+d1_reconcile_kill_switch_row = {
+    "function_name": "ops-api",
+    "migration_version": "20260809000001",
+    "expected_migration_name": "makesafe_d1_reconcile_sms_kill_switch",
+    "expected_statement_sha256": os.environ["D1_RECONCILE_KILL_SWITCH_EXPECTED_SHA"],
+    "actual_migration_version": "20260809000001",
+    "actual_migration_name": "makesafe_d1_reconcile_sms_kill_switch",
+    "actual_statement_count": 2,
+    "actual_statement_sha256": None,
+    "missing_markers": [],
+}
 with open(sys.argv[1], "w") as f:
     json.dump(
         [
@@ -501,6 +518,7 @@ with open(sys.argv[1], "w") as f:
             release_route_kind_row,
             mailer_ops_send_row,
             echo_code_approval_row,
+            d1_reconcile_kill_switch_row,
         ],
         f,
     )

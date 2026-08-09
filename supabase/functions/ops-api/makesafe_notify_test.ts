@@ -18,6 +18,7 @@ import {
   DEFAULT_NOTIFY_SETTINGS,
   isRoofArrival,
   loadNotifySettings,
+  shouldSendAlarmSms,
   type NotifySettings,
   sendMakesafeArrivalTexts,
   shouldSendArrival,
@@ -27,6 +28,7 @@ import {
 const S: NotifySettings = {
   notify_enabled: true,
   alarm_enabled: true,
+  d1_reconcile_enabled: false,
   arrival_general_phones: ["+61400753169"], // Hugo
   arrival_roof_phones: ["+61400753169", "+61417795299"], // Hugo + Nithin
   alarm_phones: [],
@@ -92,6 +94,15 @@ Deno.test("notify: shouldSendArrival gates on kill switch / reopen / degraded / 
   assertEquals(shouldSendArrival({ notifyEnabled: true, isReopen: false, extractionDegraded: true, hasDedupKey: true }).ok, false);
   assertEquals(shouldSendArrival({ notifyEnabled: true, isReopen: false, extractionDegraded: false, hasDedupKey: false }).ok, false);
   assertEquals(shouldSendArrival({ notifyEnabled: true, isReopen: false, extractionDegraded: false, hasDedupKey: true }).ok, true);
+});
+
+Deno.test("alarm gate: D1 kill switch suppresses only the D1 digest", () => {
+  const settings = { alarm_enabled: true, d1_reconcile_enabled: false };
+  assertEquals(shouldSendAlarmSms("D1", settings), false);
+  assertEquals(shouldSendAlarmSms("D3", settings), true);
+  assertEquals(shouldSendAlarmSms("D5-heartbeat", settings), true);
+  assertEquals(shouldSendAlarmSms("B1-extraction-health", settings), true);
+  assertEquals(shouldSendAlarmSms("D1", { ...settings, alarm_enabled: false, d1_reconcile_enabled: true }), false);
 });
 
 // ── DB-bound fire-once send ──
@@ -170,4 +181,32 @@ Deno.test("notify: loadNotifySettings falls back to seeded defaults on read erro
   assertEquals(s.notify_enabled, true);
   assertEquals(s.arrival_general_phones, DEFAULT_NOTIFY_SETTINGS.arrival_general_phones);
   assertEquals(s.arrival_roof_phones, DEFAULT_NOTIFY_SETTINGS.arrival_roof_phones);
+  assertEquals(s.d1_reconcile_enabled, false);
+});
+
+Deno.test("notify: settings read-back preserves shared alarm and D1-specific state", async () => {
+  const client = {
+    from: () => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({
+            data: {
+              notify_enabled: true,
+              alarm_enabled: true,
+              d1_reconcile_enabled: false,
+              arrival_general_phones: ["+61400000001"],
+              arrival_roof_phones: ["+61400000001", "+61400000002"],
+              alarm_phones: ["+61400000003"],
+              from_number: "+61400000004",
+            },
+            error: null,
+          }),
+        }),
+      }),
+    }),
+  } as any;
+  const s = await loadNotifySettings(client);
+  assertEquals(s.alarm_enabled, true);
+  assertEquals(s.d1_reconcile_enabled, false);
+  assertEquals(s.alarm_phones, ["+61400000003"]);
 });

@@ -699,6 +699,7 @@ import {
   loadNotifySettings as _loadNotifySettings,
   sendMakesafeArrivalTexts as _sendMakesafeArrivalTexts,
   shouldSendArrival as _shouldSendArrival,
+  shouldSendAlarmSms as _shouldSendAlarmSms,
   type NotifySettings as _NotifySettings,
 } from './makesafe_notify.ts'
 // GAP-A (WO selection + unique per-attachment key).
@@ -2001,11 +2002,11 @@ export const _notifyMintedDeterministicPhysicalJobForTest =
 // alarm_phones in makesafe_notify_settings (recipient is CONFIG, never hardcoded).
 // If no alarm number is configured yet the alert still writes its business_event (the
 // canonical record) — it just cannot SMS. Non-blocking; never throws.
-async function notifyBusinessEventsSms(text: string): Promise<void> {
+async function notifyBusinessEventsSms(text: string, source = ''): Promise<void> {
   try {
     const svc = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     const settings = await _loadNotifySettings(svc)
-    if (!settings.alarm_enabled) return
+    if (!_shouldSendAlarmSms(source, settings)) return
     const recipients = (settings.alarm_phones || []).map((p) => String(p || '').trim()).filter(Boolean)
     if (!recipients.length) {
       console.warn('[ops-api] extraction alarm has no alarm_phones configured; business_event written, no SMS sent. Seed makesafe_notify_settings.alarm_phones with the owner number.')
