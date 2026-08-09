@@ -15,6 +15,7 @@
 export interface NotifySettings {
   notify_enabled: boolean;
   alarm_enabled: boolean;
+  d1_reconcile_enabled: boolean;
   arrival_general_phones: string[];
   arrival_roof_phones: string[];
   alarm_phones: string[];
@@ -27,6 +28,8 @@ export interface NotifySettings {
 export const DEFAULT_NOTIFY_SETTINGS: NotifySettings = {
   notify_enabled: true,
   alarm_enabled: true,
+  // D1 reconcile SMS is deliberately silenced until explicitly re-enabled.
+  d1_reconcile_enabled: false,
   arrival_general_phones: ["+61400753169"], // Hugo
   arrival_roof_phones: ["+61400753169", "+61417795299"], // Hugo + Nithin
   alarm_phones: [], // seeded empty — owner alarm number not yet known
@@ -125,13 +128,25 @@ export function shouldSendArrival(input: {
   return { ok: true, reason: "ok" };
 }
 
+/**
+ * Per-kind alarm gate. The shared alarm switch remains authoritative for every
+ * alarm except the noisy D1 reconcile digest, which has its own kill switch.
+ */
+export function shouldSendAlarmSms(
+  source: string,
+  settings: Pick<NotifySettings, "alarm_enabled" | "d1_reconcile_enabled">,
+): boolean {
+  if (!settings.alarm_enabled) return false;
+  return source !== "D1" || settings.d1_reconcile_enabled;
+}
+
 // ── DB-bound: load settings (fail-safe to the seeded defaults) ──
 export async function loadNotifySettings(client: any): Promise<NotifySettings> {
   try {
     const { data, error } = await client
       .from("makesafe_notify_settings")
       .select(
-        "notify_enabled, alarm_enabled, arrival_general_phones, arrival_roof_phones, alarm_phones, from_number",
+        "notify_enabled, alarm_enabled, d1_reconcile_enabled, arrival_general_phones, arrival_roof_phones, alarm_phones, from_number",
       )
       .eq("id", true)
       .maybeSingle();
@@ -139,6 +154,7 @@ export async function loadNotifySettings(client: any): Promise<NotifySettings> {
     return {
       notify_enabled: data.notify_enabled !== false,
       alarm_enabled: data.alarm_enabled !== false,
+      d1_reconcile_enabled: data.d1_reconcile_enabled === true,
       arrival_general_phones: Array.isArray(data.arrival_general_phones)
         ? data.arrival_general_phones
         : DEFAULT_NOTIFY_SETTINGS.arrival_general_phones,
