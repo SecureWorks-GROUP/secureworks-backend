@@ -56,7 +56,7 @@ Deno.test("alarm wiring: D1 flag OFF emits no SMS, while D5/B1 still pass shared
   };
   const alert = [{
     severity: "ERROR" as const,
-    direction: "email_no_job",
+    direction: "email_no_job" as const,
     ref: "MLB-1",
     post_id: null,
     job_number: null,
