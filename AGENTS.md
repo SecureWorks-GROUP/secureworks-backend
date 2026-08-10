@@ -1404,6 +1404,45 @@ in-repo `addressSuburb()` also misses a comma before `WA` and a trailing
 `, Australia`; `deriveSuburb()` in the backfill script handles both and is the
 reference for that fix.
 
+That extraction bug is now BACKSTOPPED, not fixed: a job the deterministic
+runtime MINTS with an empty suburb writes an open source issue
+(`committed_without_site_suburb` ->
+`intake_exception_committed_without_site_suburb`, next action
+`human_supply_site_suburb`) and bumps
+`report.totals.committed_without_site_suburb`. The guard is
+`makesafe_intake_suburb_backstop.ts`, called from the post-commit `if (jobId)`
+block in `makesafe_deterministic_intake_runtime.ts`. It FLAGS, never blocks —
+refusing intake would trade a quiet card for a lost one — and it fires only on
+`jobCreated`, so re-linking an already-live card never re-flags it. Suburb only;
+do not widen it to another field. The write goes through
+`persistIssueForSources` so the row carries the source's `received_at` — the
+desk projection reads `email_events_raw` through a `received_at` window, so a
+row without one is a flag nobody can see. A failed flag write is caught and
+recorded as a `write_failure_reasons` entry plus the
+`committed_without_site_suburb_flag_unwritten` caveat, and never fails the case:
+the counter only moves after the write lands, and the post-board notification
+(which is never retried once the case carries its job) and the settlement stamp
+still run. It deliberately does NOT bump `totals.write_failures` — that degrades
+the run, which `assertFreshMakesafeSourceSettled` reads as a source that never
+settled, so an informational flag would become blocking on the fresh-source
+lane. Extending `INTAKE_SOURCE_ISSUE_REASONS` is
+code-only (no migration): that array plus the exhaustive
+`INTAKE_SOURCE_ISSUE_NEXT_ACTION` map is the whole contract, and
+`email_events_raw.change_type` has no CHECK. Tests:
+`makesafe_intake_suburb_backstop_test.ts` and the matched-pair cases in
+`makesafe_deterministic_intake_runtime_test.ts`.
+
+Two mint paths are deliberately NOT covered, and both are their own ticket. The
+`autoApproveCleanIntakeDrafts` backlog sweep mints a deferred deterministic
+draft (run cap, `transitionAllowed` false, `advanceDrafts` disabled) straight
+through `approveIntakeDraft`, and nothing flags an empty suburb there. Legacy /
+manual / non-deterministic drafts are uncovered on every path. Moving the guard
+to that shared seam was TRIED and reverted: `intakeMintAuthority` returns null
+without `extraction.deterministic_intake === true`, so the guard had no source
+post id to key on and became a silent no-op — less coverage while reading as
+more. Keying a legacy draft's issue (the `graph_message_id` precedent in
+`intakeMintAuthority`) is the product call that ticket has to make first.
+
 ## Missing SES Work-Order PDFs Are Re-Attached, Never Re-Minted
 
 An SES card with no `work_order` `job_documents` row usually still has the
@@ -1457,46 +1496,98 @@ assert that NO board card moved.
 
 `canRecordSesApproval` (`ses_review_cockpit.ts`) refuses every machine caller
 ("Human approval requires an identified SES operator session"). It is untouched
-and stays that way. `ses_channel_approval.ts` adds a SECOND way to satisfy it so
-the Captain can approve from WhatsApp/SMS: `submit_ses_channel_approval` accepts
-a relayed message only when THREE independent things hold — the ops key
-(transport, and it grants **no** approval authority alone), a sender that
-fingerprints to an enrolled `SES_CHANNEL_APPROVAL_BINDINGS` entry (possession),
-and a live RFC 6238 code (knowledge). The seed is DERIVED from
-`SES_CHANNEL_APPROVAL_ROOT_SECRET` plus the binding, never stored, and only
-`ses_channel_enrolment` issues it — to the operator's OWN identified Supabase
-session, never to a key and never to another admin. Both secrets are unset in
-production, so the path currently refuses everything.
+and stays that way. `ses_echo_code_approval.ts` is the SECOND way to satisfy it
+so the Captain can approve from WhatsApp/SMS. **TOTP is RETIRED**:
+`ses_channel_approval.ts` keeps the message grammar, binding parser, sender
+fingerprint and card resolver that the echo-code path consumes, but
+`submitSesChannelApprovalAction` has NO production call site — `index.ts`
+dispatches only `submitSesEchoCodeApprovalAction`, so there is no second
+approval door. Read that module's header before believing anything it says
+about a live authenticator code.
+
+The knowledge factor is a SERVER-MINTED one-time six-digit code
+(`crypto.getRandomValues`, rejection-sampled so the modulo is unbiased), issued
+by `issue_ses_channel_approval` to the captain's OWN identified Supabase
+session — the ops key is refused there, so the relay can never mint, choose or
+validate a code. The issuance response is the SOLE code-bearing envelope: no
+read returns it, no log or refusal fact carries it, and only an HMAC of it is
+stored. Issuance also refuses `echo_code_card_reference_unusable` rather than
+minting a request whose message the verifier could never read back.
+
+Verification (`submit_ses_channel_approval`, relay ops key = transport only)
+requires THREE bindings SIMULTANEOUSLY: the server-generated request id, the
+enrolled sender fingerprint, and a sha256 of the EXACT approval message. Codes
+expire after 10 minutes; a wrong code from the matching enrolled sender both
+CONSUMES that request (`consumed_at`, so an observed message is never
+replayable) and increments a sender-scoped counter, and 3 failures lock that
+sender for 15 minutes across BOTH doors — a fresh request cannot bypass it,
+because issuance reads the same lockout row.
+
+The approval is recorded against the org and card the request was ISSUED
+against, never the ones on the relay's transport body:
+`consume_ses_channel_approval_code` returns the request row's
+`org_id` / `job_id` and the verifier
+approves those, refusing `echo_code_card_binding_mismatch` if the message's
+card resolves elsewhere. The relay transports; it chooses no persisted field
+on the money-approval ledger row.
+
+**A sender mismatch is the one deliberate exception** (Captain ruling
+2026-08-08): it refuses as a security event, consumes nothing and counts
+nothing against either party. Otherwise a caller holding only the relay key
+could spend the captain's pending requests and lock him out. Identity is
+therefore settled first at both layers — an unenrolled sender refuses
+`channel_sender_not_bound` before the database is touched, a different
+*enrolled* sender refuses `echo_code_sender_mismatch` before the consume.
 
 It changes WHO may approve, never WHAT: the resolved operator goes into the same
 `approveSesInvoiceRevisionAction` a cockpit press calls, so every guard runs
-unchanged. `auth.identity_provenance` (`SesActionAuth`, additive, optional)
-exists so nobody reads `mode: "jwt"` on that path as a verified session, because
-no JWT is presented. Exactly ONE refusal reads it — the `ses_channel_enrolment`
-gate — and strictly to FAIL CLOSED, so a channel-derived identity cannot
-bootstrap itself a seed. Nothing widens on it: no authorisation decision
-anywhere is made more permissive by its presence.
+unchanged. `auth.identity_provenance` (`SesActionAuth`, additive, optional;
+`bound_channel_echo_code` live, `bound_channel_totp` retained so historical
+evidence stays readable) exists so nobody reads `mode: "jwt"` on that path as a
+verified session, because no JWT is presented. Exactly ONE refusal reads it —
+the `ses_channel_enrolment` gate — and strictly to FAIL CLOSED, so a
+channel-derived identity cannot bootstrap itself a seed. Nothing widens on it.
 
-The operator act is his MESSAGE ID, written to
-`makesafe_revision_approvals.evidence_refs` and re-read (jsonb containment)
-before every approval; the consumed TOTP step is a second single-use coordinate.
-That is also why there is no migration. Two parsing traps are pinned: a card
-number ends in six digits, so card refs are stripped BEFORE scanning for a code;
-and a digit-bearing email must not normalise as a phone number.
+This path DOES own schema, contrary to the retired TOTP design: the one
+authorised change is `20260808010000_ses_echo_code_approval.sql`, whose
+`ses_channel_approval_attempts` table IS the single-use and lockout invariant.
+It therefore carries RLS, a service-role-only policy and a table-level revoke —
+without them an anon PostgREST UPDATE clearing `consumed_at` makes an approval
+message replayable and deleting a lockout row restores unlimited guessing. Both
+SECURITY DEFINER doors RAISE on an absent lockout row rather than silently
+no-opping. Inside `consume_ses_channel_approval_code` the failure increment must
+stay ALIAS-QUALIFIED: `failed_attempts` and `locked_until` are also
+`RETURNS TABLE` output variables, so an unqualified read raises "column
+reference is ambiguous" and rolls back the consume, leaving the request neither
+spent nor counted. The suite mocks the RPC, so no test catches that.
 
-**The binding is weaker than a cockpit session in two named ways.** If the
-authenticator lives on the phone that holds WhatsApp, possession and knowledge
-collapse into one factor. And TOTP verify has NO attempt limit, lockout or
-per-binding failure state and records nothing on failure
-(`SES_CHANNEL_APPROVAL_TOTP_ONLINE_GUESSING`), so a caller holding the ops key
-AND an enrolled sender id — a compromised relay — can guess a live code online
-within hours; the ops key alone is still not enough. Narrowing the ±1 step
-window is NOT the fix (3x, and it costs clock-skew tolerance); the fix is
-durable per-binding failed-attempt state, i.e. a migration. Those trades, the
-full attacker table, the residual read-then-write replay race, and the enrolment
-steps are owned by
-`docs/evidence/ses-channel-approval-binding-2026-08-07.md`. Only APPROVE INVOICE
-is wired; `SEND` is recognised and refused BY NAME, never half-executed.
+The operator act is his MESSAGE ID, RECORDED for audit on
+`makesafe_revision_approvals.evidence_refs`. On this path that record is
+evidence, NOT a guard: replay is prevented solely by the single-use request
+consume above. The `evidence_refs` jsonb-containment re-read
+(`assertNotAlreadyActed`) belongs to the retired TOTP path and its only callers
+are inside `submitSesChannelApprovalAction`, so do not reason about echo-code
+replay from it — there is no second idempotence layer here. Two parsing traps
+are pinned: a card number ends in six digits, so card refs are stripped BEFORE
+scanning for a code; and a digit-bearing email must not normalise as a phone
+number.
+
+**Still weaker than a cockpit session in two named ways.** If the phone that
+receives the issued code also holds WhatsApp, possession and knowledge collapse
+into one factor. And the sender is RELAY-ASSERTED — a compromised relay holds
+the ops key and a known enrolled sender id, though it can no longer guess: the
+code is single-use and 3 failures buy a 15-minute cooling window. The residual
+read-then-write replay race and the enrolment steps are owned by
+`docs/evidence/ses-channel-approval-binding-2026-08-07.md`; the echo-code
+contract, its call-site inventory and the six watched attack proofs are in
+`docs/evidence/ses-echo-code-text-approvals-v1-2026-08-08.md`.
+
+Only APPROVE INVOICE is wired. **Text SEND IT is REMOVED**, not merely refused:
+`submit_ses_channel_approval` returns `channel_send_not_supported` (409),
+`ses_channel_send_it.ts` has no production call site, and the COCKPIT SEND IT
+route is untouched. Re-wiring text SEND IT behind its own echo-code request is
+a named follow-up requiring the Captain's word — do not restore it as a side
+effect of another slice.
 
 ## The SES Money And Outbound Seal Is Write-Once
 

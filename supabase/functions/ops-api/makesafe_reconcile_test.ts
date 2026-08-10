@@ -31,6 +31,7 @@ import {
   makesafeEmailCanary,
   makesafeEmailReconcile,
   makesafeEmailReconcileFullInventory,
+  emitAlerts,
   normaliseReconRef,
   type PipelineRef,
   reconcileD1,
@@ -38,10 +39,37 @@ import {
   seedCanaryExpectation,
   summarizeDrift,
 } from "./makesafe_reconcile.ts";
+import { shouldSendAlarmSms } from "./makesafe_notify.ts";
 // The chunking budget constants are single-sourced in makesafe_compact_reads and
 // imported by makesafe_reconcile; the chunking test asserts each `.in()` chunk
 // stays within them.
 import { IN_MAX_COUNT, IN_URL_BUDGET } from "./makesafe_compact_reads.ts";
+
+Deno.test("alarm wiring: D1 flag OFF emits no SMS, while D5/B1 still pass shared gate", async () => {
+  const sent: Array<{ source: string; text: string }> = [];
+  const settings = { alarm_enabled: true, d1_reconcile_enabled: false };
+  const sink = {
+    logBusinessEvent: async () => {},
+    notifySms: async (text: string, source?: string) => {
+      if (shouldSendAlarmSms(source || "", settings)) sent.push({ source: source || "", text });
+    },
+  };
+  const alert = [{
+    severity: "ERROR" as const,
+    direction: "email_no_job" as const,
+    ref: "MLB-1",
+    post_id: null,
+    job_number: null,
+    source_email_id: null,
+    detail: "test alert",
+  }];
+  await emitAlerts({} as any, sink, "D1", alert);
+  assertEquals(sent.length, 0);
+  await emitAlerts({} as any, sink, "D5-heartbeat", alert);
+  assertEquals(sent.length, 1);
+  await emitAlerts({} as any, sink, "B1-extraction-health", alert);
+  assertEquals(sent.length, 2);
+});
 
 // ── normaliseReconRef ─────────────────────────────────────────────────────────
 Deno.test("normaliseReconRef: AJBR 67200 == AJBR-67200 == 67200 (>=5 chars)", () => {

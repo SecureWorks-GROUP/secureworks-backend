@@ -6,6 +6,37 @@
 **Actions:** `submit_ses_channel_approval`, `ses_channel_enrolment`
 **Migration:** none. Deliberately — see §6.
 
+> **STATUS 2026-08-08: the TOTP knowledge factor is RETIRED.** The live text
+> approval path is server-minted single-use echo codes, owned by
+> `docs/evidence/ses-echo-code-text-approvals-v1-2026-08-08.md`. Read that
+> document for what production does. This one is the dated record of the
+> binding it replaced, and four of its sections no longer describe the
+> deployed route:
+>
+> - **§2 factor 3** — the knowledge factor is no longer an RFC 6238 code derived
+>   from a seed; it is a six-digit code the server mints per request
+>   (`issue_ses_channel_approval`) and binds to the request identity, the
+>   enrolled sender, and the exact message hash.
+> - **§9 enrolment** — steps 1-2 still hold verbatim: both function secrets are
+>   still required, and `SES_CHANNEL_APPROVAL_ROOT_SECRET` now HMAC-keys the
+>   stored code hash instead of deriving a seed (rotating it still invalidates
+>   every pending request; removing the binding still revokes the path). Steps
+>   3-4 are retired — there is no `otpauth://` seed to scan, and the Captain
+>   sends back the exact message the issuance envelope generated.
+> - **§4** — idempotence no longer rests on the `evidence_refs` re-read; the
+>   single-use request consume is the guard, and the message id is audit
+>   evidence only.
+> - **§5b** — unthrottled online guessing is CLOSED: codes are single-use and 3
+>   failed requests lock a sender for 15 minutes.
+> - **§6 and §7** — there is now one authorised migration
+>   (`20260808010000_ses_echo_code_approval.sql`, the attempt-limit table), and
+>   text SEND IT is REMOVED rather than "the natural next slice"
+>   (`channel_send_not_supported`, 409).
+>
+> §3 (same-device collapse, relay-asserted sender, no session revocation UX),
+> §5a (the read-then-write replay race) and the §8 measurement still hold and
+> are what AGENTS.md points here for.
+
 ## 1. The ask and the gate
 
 The Captain asked to approve over text and WhatsApp as well as through the UI.

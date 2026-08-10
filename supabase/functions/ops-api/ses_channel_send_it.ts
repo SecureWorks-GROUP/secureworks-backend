@@ -2,8 +2,23 @@
 // SES channel SEND IT — the Captain's send word over WhatsApp/SMS
 // (Harden SES v1, ticket 07).
 //
-// The identity work (relay key + enrolled sender + live TOTP) is done by
-// ses_channel_approval.ts before this module runs. This module answers ONE
+// ── READ FIRST: TEXT SEND IT HAS NO PRODUCTION CALL SITE ────────────────────
+//
+// Nothing imports `executeSesChannelSendIt`. The live text route
+// (`ses_echo_code_approval.ts`) answers a recognised send word with
+// `channel_send_not_supported` (409) and every other non-`approve_invoice`
+// message with `echo_code_message_invalid` (403); neither consumes a request.
+// The COCKPIT SEND IT route
+// (`approve_ses_release_revision` / `execute_ses_release_revision`) is
+// untouched. This module is kept for its binding rules and its own unit
+// tests; re-wiring text SEND IT behind its own echo-code request is a NAMED
+// follow-up requiring the Captain's word — do not restore it as a side effect
+// of another slice. Contract:
+// `docs/evidence/ses-echo-code-text-approvals-v1-2026-08-08.md`.
+//
+// The identity work described below (relay key + enrolled sender + live TOTP)
+// is retired: the knowledge factor is now a server-minted single-use echo
+// code. This module answers ONE
 // question: which exact prepared release does the Captain's word bind to —
 // and then drives the very same approve/execute release actions a cockpit
 // press drives, so every guard, money check and exact-once send is unchanged.

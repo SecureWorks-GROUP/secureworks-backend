@@ -12,6 +12,7 @@ export const INTAKE_SOURCE_ISSUE_REASONS = [
   "attachment_recovery_failed",
   "legacy_draft_source_missing",
   "legacy_draft_attribution_ambiguous",
+  "committed_without_site_suburb",
 ] as const;
 
 export type IntakeSourceIssueReason =
@@ -41,6 +42,7 @@ export const INTAKE_SOURCE_ISSUE_NEXT_ACTION: Readonly<
   attachment_recovery_failed: "recover_attachment_then_replay",
   legacy_draft_source_missing: "locate_or_import_exact_ses_source",
   legacy_draft_attribution_ambiguous: "human_resolve_exact_attribution",
+  committed_without_site_suburb: "human_supply_site_suburb",
 };
 
 export function intakeSourceIssueChangeType(
