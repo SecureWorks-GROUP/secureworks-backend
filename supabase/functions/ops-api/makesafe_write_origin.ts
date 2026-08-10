@@ -126,8 +126,9 @@ export function observeMakesafeMoneyStageFence(
   nextSubstatus: string,
   origin: MakesafeWriteOrigin,
   authMode: string | undefined,
+  strictEnabled = MAKESAFE_AGENT_MONEY_STAGE_FENCE_STRICT,
 ): MakesafeMoneyStageFenceObservation | null {
-  const decision = evaluateMakesafeMoneyStageFence(nextSubstatus, origin)
+  const decision = evaluateMakesafeMoneyStageFence(nextSubstatus, origin, strictEnabled)
   if (!decision.is_money_stage) return null
   return {
     marker: 'makesafe_agent_money_stage_fence',
@@ -136,7 +137,7 @@ export function observeMakesafeMoneyStageFence(
     caller_detail: origin.detail,
     auth_mode: authMode || null,
     next_substatus: nextSubstatus,
-    strict_enabled: MAKESAFE_AGENT_MONEY_STAGE_FENCE_STRICT,
+    strict_enabled: strictEnabled,
     strict_would_refuse: decision.strict_would_refuse,
     enforcement: decision.refusal ? 'refuse' : 'observe',
   }

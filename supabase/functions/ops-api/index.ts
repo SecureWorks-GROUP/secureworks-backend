@@ -15752,13 +15752,15 @@ function assertMakesafeMoneyStageFence(
   nextSubstatus: string,
   origin: MakesafeWriteOrigin,
   authMode: string | undefined,
+  strictEnabled?: boolean,
 ): void {
-  const moneyObservation = observeMakesafeMoneyStageFence(nextSubstatus, origin, authMode)
+  const moneyObservation = observeMakesafeMoneyStageFence(nextSubstatus, origin, authMode, strictEnabled)
   if (moneyObservation) {
     console.warn('[ops-api] makesafe_agent_money_stage_fence', moneyObservation)
     const strictDecision = evaluateMakesafeMoneyStageFence(
       nextSubstatus,
       origin,
+      strictEnabled,
     )
     if (strictDecision.refusal && authMode !== 'routine') {
       throw new ApiError(strictDecision.refusal.message, strictDecision.refusal.status)
@@ -38538,8 +38540,6 @@ async function applyMakesafeCloseOut(
     operatorEmail?: string | null
     source?: string
     origin?: MakesafeWriteOrigin
-    authMode?: string
-    external?: boolean
   } = {},
 ) {
   const now = opts.nowIso ? opts.nowIso() : new Date().toISOString()
@@ -38553,13 +38553,6 @@ async function applyMakesafeCloseOut(
   // Rescue SES T2 / item 2: every substatus write shares the one gated writer.
   const detailPatch: Record<string, any> = { substatus: 'complete', updated_at: now }
   if (!msd?.report_sent_at) detailPatch.report_sent_at = reportSentAt
-  if (opts.external) {
-    assertMakesafeMoneyStageFence(
-      'complete',
-      opts.origin || unidentifiedOrigin('external:makesafe_close_out'),
-      opts.authMode,
-    )
-  }
   const { data: detailRows, error: detailErr } = await writeMakesafeSubstatus(
     client, jobId, detailPatch, opts.origin || internalEvidenceOrigin('closeout'), { row: 'rows' },
   )
@@ -39700,7 +39693,12 @@ export const _makesafeSendPhotoFollowupForTest = makesafeSendPhotoFollowup
 async function makesafeResumeClose(
   client: any,
   body: any,
-  opts: { origin?: MakesafeWriteOrigin; authMode?: string; external?: boolean } = {},
+  opts: {
+    origin?: MakesafeWriteOrigin
+    authMode?: string
+    external?: boolean
+    strictEnabled?: boolean
+  } = {},
 ) {
   const jobId = body.job_id || body.jobId
   const packKind = body.pack_kind || 'main'
@@ -39725,6 +39723,15 @@ async function makesafeResumeClose(
     return { error: gate.reason, status: pack.status || null, marker_present: markerPresent, job_id: jobId, requires: 'sent_not_closed_or_close_failed_with_marker' }
   }
 
+  if (opts.external) {
+    assertMakesafeMoneyStageFence(
+      'complete',
+      opts.origin || unidentifiedOrigin('external:makesafe_resume_close'),
+      opts.authMode,
+      opts.strictEnabled,
+    )
+  }
+
   // CLOSE ONLY. Apply the make-safe close (substatus=complete + report_sent_at if
   // absent) and sync jobs.status/jobs.completed_at. NO email, NO authorise
   // anywhere in this path. Verify the close actually landed BEFORE flipping the
@@ -39735,8 +39742,6 @@ async function makesafeResumeClose(
       operatorEmail: body.operator_email || body.user_email || null,
       source: 'ops-api/makesafe_resume_close',
       origin: opts.origin,
-      authMode: opts.authMode,
-      external: opts.external,
     })
   } catch (closeErr) {
     const msg = ((closeErr as Error).message || String(closeErr)).slice(0, 500)
