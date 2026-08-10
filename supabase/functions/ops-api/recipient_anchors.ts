@@ -49,7 +49,7 @@ export function normaliseFullEmail(value: unknown): string | null {
 
 /** Add comma-separated email values from external contact records. */
 export function addDelimitedEmails(set: Set<string>, value: unknown): boolean {
-  if (typeof value !== "string") return false;
+  if (typeof value !== "string") return value !== null && value !== undefined;
   let malformed = false;
   for (const part of value.split(",")) {
     const normalized = normaliseFullEmail(part);

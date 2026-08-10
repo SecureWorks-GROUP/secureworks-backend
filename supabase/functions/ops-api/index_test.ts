@@ -542,6 +542,27 @@ Deno.test("T14b: malformed Xero contact email does not fall back to jobs.client_
   assertEquals(calls.length, 0)
 })
 
+Deno.test("T14c: non-string Xero contact email does not fall back to jobs.client_email", async () => {
+  const fix = happyFixture()
+  const xeroInvoice = {
+    InvoiceID: "inv-123",
+    Contact: { ContactID: "xero-contact-1", EmailAddress: {}, ContactPersons: [] },
+  }
+  const { client } = makeStubClient(fix.seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": xeroInvoice } })
+  const { fetch, calls } = makeStubFetch(fix.fetchRoutes)
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const response = await _verifyAndSendInvoiceEmail({
+    client, body: makeBody(), getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+  })
+
+  assertEquals(response.status, 400)
+  assertEquals((await jsonBody(response)).code, "xero_contact_email_invalid")
+  assertEquals(calls.length, 0)
+})
+
 // ─────────────────────────────────────────────────────────────────
 // T15 — ContactPersons emails are valid recipients (Xero contact's primary may
 // differ; ContactPersons array provides additional authorized addresses).

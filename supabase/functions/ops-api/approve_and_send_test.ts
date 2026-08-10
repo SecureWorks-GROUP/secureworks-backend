@@ -193,6 +193,27 @@ Deno.test("A2b: malformed Xero contact email does not fall back to jobs.client_e
   if (!result.ok) assertEquals((await jsonOf(result.response)).code, "xero_contact_email_invalid")
 })
 
+Deno.test("A2c: non-string Xero contact email does not fall back to jobs.client_email", async () => {
+  const fix = happyFixture()
+  const xeroInvoice = {
+    InvoiceID: "inv-1",
+    Contact: { ContactID: "xc-1", EmailAddress: {}, ContactPersons: [] },
+  }
+  const { client } = makeStubClient(fix.seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-1": xeroInvoice } })
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const result = await _verifyApproveAndSendRecipient({
+    client,
+    body: { xero_invoice_id: "inv-1", email_override: "client@example.com" },
+    getToken, xeroGet, logBusinessEvent,
+  })
+
+  assertEquals(result.ok, false)
+  if (!result.ok) assertEquals((await jsonOf(result.response)).code, "xero_contact_email_invalid")
+})
+
 // ─────────────────────────────────────────────────────────────────
 // A3 — email_override mismatches everything → 400 recipient_mismatch
 // ─────────────────────────────────────────────────────────────────
