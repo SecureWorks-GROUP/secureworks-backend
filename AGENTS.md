@@ -3020,6 +3020,20 @@ died in the Layer B lock. Shared predicates live in
 claim eligibility BEFORE the UPDATE: PostgREST has no transaction across calls,
 so an update-then-count-rows check leaves a partial write behind on failure.
 
+## Outbound SMS Sender Policy Is One Shared Module
+
+Every outbound SMS defaults to +61489267771 (SecureWorks Group Admin) — company
+rule (wiki OPS.md): replies land in the sending number inbox thread, so any
+other default strands client replies. The single source of truth is
+supabase/functions/_shared/sms_from_number.ts (default + five-number
+allowlist). Both send paths must resolve through it: ghl-proxy send_sms (the
+choke point every proxied SMS crosses) and ops-api sendCommsMessageAction (the
+one direct-to-GHL POST). Never reintroduce a conditional fromNumber that lets
+GHL fall back to the location default (+61489267774 Patios). Callers needing a
+different sender pass an allowlisted override explicitly — e.g. make-safe
+notifies pass +61489267776 Ops via makesafe_notify_settings.from_number. Tests:
+_shared/sms_from_number_test.ts, ghl-proxy/sms_sender_default_test.ts.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

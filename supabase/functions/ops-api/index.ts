@@ -130,6 +130,7 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 // future quote/invoice/payment writers. Channel='po' / 'invoice' / 'payment'.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
 import {
   MAKESAFE_BOARD_CONTRACT_VERSION,
   MAKESAFE_BOARD_MAX_ARCHIVE_PAGE,
@@ -41035,24 +41036,20 @@ async function sendCommsMessageAction(client: any, body: any) {
 
   const payload: any = { type, contactId, jobId }
 
-  // Optional per-message sending number (GHL `fromNumber`, E.164). When the
-  // Comms tab supplies a chosen number (e.g. +61489267776 Ops for scheduling),
-  // pass it through so the SMS originates from that number. Omitting it keeps
-  // the previous behaviour: GHL uses the location default (+61489267774).
-  // Restricted to the known SecureWorks numbers so a typo can't silently fail.
-  if (type === 'SMS' && body.fromNumber) {
-    const SW_FROM_NUMBERS = [
-      '+61489267771', // SecureWorks Group Admin
-      '+61489267772', // SecureWorks Fencing Sales
-      '+61489267774', // SecureWorks Patios (location default)
-      '+61489267776', // SecureWorks Group Ops
-      '+61489267778', // SecureWorks Fencing Mgmt
-    ]
-    const normalized = String(body.fromNumber).trim()
-    if (!SW_FROM_NUMBERS.includes(normalized)) {
-      throw new Error(`Invalid fromNumber: ${normalized}. Must be a SecureWorks number in E.164 form (e.g. +61489267776).`)
+  // Per-message sending number (GHL `fromNumber`, E.164). This path POSTs to
+  // the GHL conversations API directly (it never goes through ghl-proxy), so
+  // it applies the same sender policy as ghl-proxy send_sms: ops outbound SMS
+  // defaults to +61489267771 (SecureWorks Group Admin) per the company comms
+  // rule, so client replies land in the Admin inbox. The Comms tab can still
+  // choose another SecureWorks number (e.g. +61489267776 Ops for scheduling);
+  // anything outside the allowlist in _shared/sms_from_number.ts is rejected
+  // so a typo can't silently fail.
+  if (type === 'SMS') {
+    const resolvedFrom = resolveSmsFromNumber(body.fromNumber)
+    if (!resolvedFrom.ok) {
+      throw new Error(resolvedFrom.error)
     }
-    payload.fromNumber = normalized
+    payload.fromNumber = resolvedFrom.fromNumber
   }
 
   if (type === 'SMS') {
