@@ -139,13 +139,13 @@ Deno.test('production is explicitly loose, and strict is a one-argument policy f
 Deno.test('the explicit caller signal is per request; missing or malformed is unidentified', () => {
   assertEquals(
     makesafeExternalWriteOrigin({
-      caller: { class: 'agent', detail: 'mcp:one' },
+      caller: { class: 'agent', detail: 'mcp' },
     }, 'external'),
-    { class: 'agent', detail: 'mcp:one' },
+    { class: 'agent', detail: 'mcp' },
   )
   assertEquals(
     makesafeExternalWriteOrigin({
-      caller: { class: 'agent', detail: 'operator@example.test' },
+      caller: { class: 'agent', detail: 'agent:john-doe' },
     }, 'external'),
     { class: 'agent', detail: 'unspecified' },
   )

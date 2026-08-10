@@ -92,9 +92,13 @@ export function makesafeExternalWriteOrigin(
 function normaliseMakesafeCallerDetail(value: unknown): string {
   if (typeof value !== 'string') return 'unspecified'
   const detail = value.trim().toLowerCase()
-  return /^(?:mcp|agent|ops|ops_ui|integration):[a-z0-9][a-z0-9_-]{0,47}$/.test(detail)
-    ? detail
-    : 'unspecified'
+  const opaqueDetails: Record<string, string> = {
+    automation: 'automation',
+    integration: 'integration',
+    mcp: 'mcp',
+    ops_dashboard: 'ops_dashboard',
+  }
+  return opaqueDetails[detail] || 'unspecified'
 }
 
 export function evaluateMakesafeMoneyStageFence(
