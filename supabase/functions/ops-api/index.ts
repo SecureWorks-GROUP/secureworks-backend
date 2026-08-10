@@ -107,7 +107,6 @@ import {
   addDelimitedEmails,
   buildExpectedRecipientSet,
   loadCompanyRecipientAnchors,
-  normaliseFullEmail,
   RecipientAnchorLookupError,
 } from './recipient_anchors.ts'
 import {
@@ -4895,23 +4894,6 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(await createMakesafeJob(client, body))
       }
       case 'list_makesafe_companies': return json(await listMakesafeCompanies(client))
-      case 'update_makesafe_company_addresses': {
-        const isPrivileged = authMode === 'api_key' ||
-          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
-        if (!isPrivileged) {
-          return json({
-            error: 'forbidden: update_makesafe_company_addresses requires the privileged ops key or an admin/owner session',
-          }, 403)
-        }
-        if (req.method !== 'POST') {
-          return json({ error: 'update_makesafe_company_addresses requires POST' }, 405)
-        }
-        return json(await updateMakesafeCompanyAddresses(
-          client,
-          body,
-          authUser?.email || (authMode === 'api_key' ? 'ops-api:api_key' : null),
-        ))
-      }
       case 'update_makesafe_details': return json(await updateMakesafeDetails(client, body, { authMode }))
       case 'update_makesafe_job_family': {
         const isPrivileged = authMode === 'api_key' ||
@@ -13909,94 +13891,6 @@ async function listMakesafeCompanies(client: any) {
     .order('name')
   if (error) throw error
   return { companies: data || [] }
-}
-
-// ── Captain-sanctioned company recipient address maintenance ──
-// The existing sender_patterns text[] is the company-owned address set. This
-// action only permits full email entries; bare domains remain inbound matcher
-// patterns and never become invoice recipients. It is intentionally separate
-// from the routine allow-list and requires the privileged ops key or admin/owner.
-export async function updateMakesafeCompanyAddresses(
-  client: any,
-  body: any,
-  actor: string | null = null,
-) {
-  const operation = String(body?.operation || '').trim().toLowerCase()
-  if (operation !== 'add' && operation !== 'remove') {
-    throw new ApiError("operation must be 'add' or 'remove'", 400)
-  }
-  if (String(body?.address || '').includes(',')) {
-    throw new ApiError('address must contain exactly one email address', 400)
-  }
-  const address = normaliseFullEmail(body?.address)
-  if (!address) {
-    throw new ApiError('address must be one full email address', 400)
-  }
-
-  const companyId = String(body?.company_id || '').trim()
-  const companySlug = String(body?.company_slug || body?.slug || '').trim().toLowerCase()
-  if (!companyId && !companySlug) {
-    throw new ApiError('company_id or company_slug required', 400)
-  }
-
-  let query = client.from('makesafe_companies')
-    .select('id,slug,report_recipient,sender_patterns')
-  query = companyId ? query.eq('id', companyId) : query.eq('slug', companySlug)
-  const { data: company, error: companyError } = await query.maybeSingle()
-  if (companyError) throw new ApiError(`company lookup failed: ${companyError.message}`, 503)
-  if (!company) throw new ApiError('make-safe company not found', 404)
-
-  const reportRecipient = normaliseFullEmail(company.report_recipient)
-  if (reportRecipient === address) {
-    throw new ApiError('report_recipient is the primary company anchor; maintain branch addresses separately', 409)
-  }
-
-  const patterns = Array.isArray(company.sender_patterns)
-    ? company.sender_patterns.map((value: unknown) => String(value ?? '').trim()).filter(Boolean)
-    : []
-  const hasAddress = patterns.some((value: string) => normaliseFullEmail(value) === address)
-  let nextPatterns = patterns
-  let changed = false
-  if (operation === 'add' && !hasAddress) {
-    nextPatterns = [...patterns, address]
-    changed = true
-  } else if (operation === 'remove' && hasAddress) {
-    nextPatterns = patterns.filter((value: string) => normaliseFullEmail(value) !== address)
-    changed = true
-  }
-
-  if (changed) {
-    const { error } = await client.from('makesafe_companies')
-      .update({ sender_patterns: nextPatterns, updated_at: new Date().toISOString() })
-      .eq('id', company.id)
-    if (error) throw new ApiError(`company address update failed: ${error.message}`, 503)
-
-    const { error: auditError } = await client.from('business_events').insert({
-        event_type: 'makesafe_company_recipient_updated',
-        source: 'ops-api/update_makesafe_company_addresses',
-        entity_type: 'makesafe_company',
-        entity_id: company.id,
-        correlation_id: company.id,
-        payload: { operation, address, company_slug: company.slug },
-        metadata: { actor },
-      })
-    if (auditError) {
-      throw new ApiError(`company recipient audit write failed: ${auditError.message}`, 503)
-    }
-  }
-
-  const branchAddressCount = nextPatterns
-    .map((value: string) => normaliseFullEmail(value))
-    .filter((value: string | null): value is string => Boolean(value) && value !== reportRecipient)
-    .length
-  return {
-    success: true,
-    company_id: company.id,
-    company_slug: company.slug,
-    operation,
-    changed,
-    configured_branch_address_count: branchAddressCount,
-  }
 }
 
 // ── Slice 2: update make-safe overlay details ──

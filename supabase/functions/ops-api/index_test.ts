@@ -922,7 +922,7 @@ Deno.test("Quick Quote — both canonical events carry handler='ops-api/send_qui
   }
 })
 
-Deno.test("company report recipient and branch address authorize, arbitrary same-domain address refuses", async () => {
+Deno.test("company report recipient anchor authorizes", async () => {
   const fix = happyFixture()
   const { client } = makeStubClient({
     ...fix.seed,
@@ -933,7 +933,6 @@ Deno.test("company report recipient and branch address authorize, arbitrary same
       "company-1": {
         id: "company-1",
         report_recipient: "reports@builder.test",
-        sender_patterns: ["builder.test", "branch@builder.test"],
       },
     },
   })
@@ -942,46 +941,9 @@ Deno.test("company report recipient and branch address authorize, arbitrary same
   const { getToken } = makeStubGetToken()
   const { logBusinessEvent } = makeStubLogBusinessEvent()
 
-  for (const address of ["branch@builder.test", "reports@builder.test"]) {
-    const response = await _verifyAndSendInvoiceEmail({
-      client, body: makeBody({ to_email: address }),
-      getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
-    })
-    assertEquals(response.status, 200)
-  }
-
-  const arbitraryResponse = await _verifyAndSendInvoiceEmail({
-    client, body: makeBody({ to_email: "unlisted@builder.test" }),
-    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
-  })
-  assertEquals(arbitraryResponse.status, 400)
-  assertEquals((await jsonBody(arbitraryResponse)).code, "recipient_mismatch")
-})
-
-Deno.test("removed branch address no longer authorizes", async () => {
-  const fix = happyFixture()
-  const { client } = makeStubClient({
-    ...fix.seed,
-    makesafe_job_details: {
-      "job-uuid-1": { job_id: "job-uuid-1", requesting_company_id: "company-1" },
-    },
-    makesafe_companies: {
-      "company-1": {
-        id: "company-1",
-        report_recipient: "reports@builder.test",
-        sender_patterns: ["builder.test"],
-      },
-    },
-  })
-  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": fix.xeroInvoice } })
-  const { fetch, calls } = makeStubFetch(fix.fetchRoutes)
-  const { getToken } = makeStubGetToken()
-  const { logBusinessEvent } = makeStubLogBusinessEvent()
   const response = await _verifyAndSendInvoiceEmail({
-    client, body: makeBody({ to_email: "branch@builder.test" }),
+    client, body: makeBody({ to_email: "reports@builder.test" }),
     getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
   })
-  assertEquals(response.status, 400)
-  assertEquals((await jsonBody(response)).code, "recipient_mismatch")
-  assertEquals(calls.length, 0)
+  assertEquals(response.status, 200)
 })

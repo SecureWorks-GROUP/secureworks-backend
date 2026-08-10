@@ -2,8 +2,8 @@
  * Recipient anchors for caller-supplied invoice destinations.
  *
  * Company anchors are server-owned values only: the linked make-safe company
- * row contributes its report_recipient and full-email sender_patterns entries.
- * Bare domains remain inbound matching patterns, not recipient addresses.
+ * row contributes its report_recipient. Sender patterns remain inbound matching
+ * rules and must never become recipient addresses.
  */
 
 type RecipientAnchorQueryResult = {
@@ -23,7 +23,6 @@ type RecipientAnchorClient = {
 
 export type CompanyRecipientAnchorRow = {
   report_recipient?: unknown;
-  sender_patterns?: unknown;
 };
 
 export class RecipientAnchorLookupError extends Error {
@@ -70,12 +69,6 @@ export function companyRecipientAnchors(
   const anchors = new Set<string>();
   const reportRecipient = normaliseFullEmail(row?.report_recipient);
   if (reportRecipient) anchors.add(reportRecipient);
-  if (Array.isArray(row?.sender_patterns)) {
-    for (const pattern of row.sender_patterns) {
-      const address = normaliseFullEmail(pattern);
-      if (address) anchors.add(address);
-    }
-  }
   return anchors;
 }
 
@@ -104,7 +97,7 @@ export async function loadCompanyRecipientAnchors(
   if (!companyId) return new Set<string>();
 
   const company = await client.from("makesafe_companies")
-    .select("report_recipient,sender_patterns")
+    .select("report_recipient")
     .eq("id", companyId)
     .maybeSingle();
   if (company.error) {
