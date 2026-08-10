@@ -15,6 +15,13 @@ export type MakesafeCallerSignal =
   | { class: 'agent'; detail?: string }
   | { class: 'ops_ui'; detail?: string }
 
+const MAKESAFE_OPAQUE_CALLER_DETAILS = new Set([
+  'automation',
+  'integration',
+  'mcp',
+  'ops_dashboard',
+])
+
 /** One-line later flip. Shipped loose by firstmate ruled captain decision. */
 export const MAKESAFE_AGENT_MONEY_STAGE_FENCE_STRICT = false
 
@@ -92,13 +99,7 @@ export function makesafeExternalWriteOrigin(
 function normaliseMakesafeCallerDetail(value: unknown): string {
   if (typeof value !== 'string') return 'unspecified'
   const detail = value.trim().toLowerCase()
-  const opaqueDetails: Record<string, string> = {
-    automation: 'automation',
-    integration: 'integration',
-    mcp: 'mcp',
-    ops_dashboard: 'ops_dashboard',
-  }
-  return opaqueDetails[detail] || 'unspecified'
+  return MAKESAFE_OPAQUE_CALLER_DETAILS.has(detail) ? detail : 'unspecified'
 }
 
 export function evaluateMakesafeMoneyStageFence(

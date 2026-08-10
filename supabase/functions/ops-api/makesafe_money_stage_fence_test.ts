@@ -149,6 +149,12 @@ Deno.test('the explicit caller signal is per request; missing or malformed is un
     }, 'external'),
     { class: 'agent', detail: 'unspecified' },
   )
+  for (const detail of ['constructor', '__proto__']) {
+    assertEquals(
+      makesafeExternalWriteOrigin({ caller: { class: 'agent', detail } }, 'external'),
+      { class: 'agent', detail: 'unspecified' },
+    )
+  }
   assertEquals(
     makesafeExternalWriteOrigin({}, 'external'),
     { class: 'unidentified', detail: 'external' },
