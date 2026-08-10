@@ -3405,7 +3405,124 @@ Deno.test("same input and intent produce stable revision and output hashes", asy
   );
 });
 
-Deno.test("versioned docket identity keeps v1 records resolvable and replays conflict-free", async () => {
+type DocketLedgerRow = {
+  id: string;
+  input_content_hash: string;
+  output_content_hash: string;
+  committed_at: string;
+};
+
+function docketLedgerKey(
+  jobId: string,
+  idempotencyKey: string,
+  assemblerVersion: string,
+  familyMatrixVersion: string,
+): string {
+  return [jobId, idempotencyKey, assemblerVersion, familyMatrixVersion].join(
+    "|",
+  );
+}
+
+function docketLedgerClient(ledger: Map<string, DocketLedgerRow>) {
+  const uploads: string[] = [];
+  const rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const client = {
+    storage: {
+      from: () => ({
+        upload: async (path: string) => {
+          uploads.push(path);
+          return { data: {}, error: null };
+        },
+        download: async () => ({
+          data: null,
+          error: { message: "unexpected download" },
+        }),
+      }),
+    },
+    from: (table: string) => {
+      const filters: Record<string, string> = {};
+      const query = {
+        select: () => query,
+        eq: (column: string, value: string) => {
+          filters[column] = value;
+          return query;
+        },
+        maybeSingle: async () => {
+          if (table !== "makesafe_docket_revisions") {
+            return { data: null, error: null };
+          }
+          const found = ledger.get(
+            docketLedgerKey(
+              filters.job_id,
+              filters.idempotency_key,
+              filters.assembler_version,
+              filters.family_matrix_version,
+            ),
+          );
+          return { data: found ?? null, error: null };
+        },
+      };
+      return query;
+    },
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      rpcCalls.push({ name, args });
+      if (name !== "commit_makesafe_docket_revision_v1") {
+        return { data: { review_state: "needs_review" }, error: null };
+      }
+      const revision = args.p_revision as Record<string, string>;
+      const key = docketLedgerKey(
+        revision.job_id,
+        revision.idempotency_key,
+        revision.assembler_version,
+        revision.family_matrix_version,
+      );
+      const existing = ledger.get(key);
+      if (existing) {
+        if (
+          existing.id === revision.id &&
+          existing.input_content_hash === revision.input_content_hash &&
+          existing.output_content_hash === revision.output_content_hash
+        ) {
+          return {
+            data: { committed_at: existing.committed_at },
+            error: null,
+          };
+        }
+        return {
+          data: null,
+          error: {
+            message:
+              "input_hash_conflict: idempotency key resolves to different docket content",
+          },
+        };
+      }
+      for (const stored of ledger.values()) {
+        if (stored.id === revision.id) {
+          return {
+            data: null,
+            error: {
+              message:
+                "duplicate key value violates unique constraint makesafe_docket_revisions_pkey",
+            },
+          };
+        }
+      }
+      ledger.set(key, {
+        id: revision.id,
+        input_content_hash: revision.input_content_hash,
+        output_content_hash: revision.output_content_hash,
+        committed_at: "2026-07-27T02:00:00.000Z",
+      });
+      return {
+        data: { committed_at: "2026-07-27T02:00:00.000Z" },
+        error: null,
+      };
+    },
+  } as unknown as SesDocketPersistenceClient;
+  return { client, uploads, rpcCalls };
+}
+
+Deno.test("a legacy v1 docket retry resolves idempotently without inserting or superseding", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
     candidate.family === "physical_makesafe"
@@ -3423,48 +3540,6 @@ Deno.test("versioned docket identity keeps v1 records resolvable and replays con
     dependencies(input),
   )).results[0];
 
-  type LedgerRow = {
-    id: string;
-    input_content_hash: string;
-    output_content_hash: string;
-  };
-  const ledger = new Map<string, LedgerRow>();
-  const lookupKey = (payload: SesPersistPayload) =>
-    [
-      payload.revision.envelope.spine.job_id,
-      payload.idempotency_key,
-      payload.assembler_version,
-      payload.family_matrix_version,
-    ].join("|");
-  const commit = (payload: SesPersistPayload) => {
-    const existing = ledger.get(lookupKey(payload));
-    if (existing) {
-      if (
-        existing.id === payload.revision.docket_revision_id &&
-        existing.input_content_hash === payload.revision.input_content_hash &&
-        existing.output_content_hash === payload.revision.output_content_hash
-      ) {
-        return { committed_at: "2026-07-27T01:00:01.000Z", inserted: false };
-      }
-      throw new Error(
-        "docket revision commit failed: input_hash_conflict: idempotency key resolves to different docket content",
-      );
-    }
-    for (const stored of ledger.values()) {
-      if (stored.id === payload.revision.docket_revision_id) {
-        throw new Error(
-          "docket revision commit failed: duplicate key value violates unique constraint makesafe_docket_revisions_pkey",
-        );
-      }
-    }
-    ledger.set(lookupKey(payload), {
-      id: payload.revision.docket_revision_id,
-      input_content_hash: payload.revision.input_content_hash,
-      output_content_hash: payload.revision.output_content_hash,
-    });
-    return { committed_at: "2026-07-27T01:00:01.000Z", inserted: true };
-  };
-
   const legacyIdentity = await sesDocketRevisionIdentity({
     assembler_version: SES_ASSEMBLER_VERSION,
     family_matrix_version: SES_FAMILY_MATRIX_VERSION,
@@ -3474,73 +3549,116 @@ Deno.test("versioned docket identity keeps v1 records resolvable and replays con
   });
   assertEquals(legacyIdentity.idempotency_key, intent);
   assertEquals(sesDocketPersistedIdempotencyKey(intent, "v1"), intent);
-  const legacyRow: LedgerRow = {
+  const legacyRow: DocketLedgerRow = {
     id: legacyIdentity.revision_id,
     input_content_hash: probe.input_content_hash,
     output_content_hash: `sha256:${"a".repeat(64)}`,
+    committed_at: "2026-07-20T03:04:05.000Z",
   };
-  ledger.set(
-    [
-      input.identity.job_id,
-      legacyIdentity.idempotency_key,
-      SES_ASSEMBLER_VERSION,
-      SES_FAMILY_MATRIX_VERSION,
-    ].join("|"),
-    legacyRow,
+  const legacyKey = docketLedgerKey(
+    input.identity.job_id,
+    intent,
+    SES_ASSEMBLER_VERSION,
+    SES_FAMILY_MATRIX_VERSION,
   );
+  const ledger = new Map<string, DocketLedgerRow>([[legacyKey, legacyRow]]);
+  const { client, uploads, rpcCalls } = docketLedgerClient(ledger);
 
-  const persistedPayloads: SesPersistPayload[] = [];
-  const commits: Array<{ committed_at: string; inserted: boolean }> = [];
-  const persistingDependencies = dependencies(input, {
-    persist: async (payload: SesPersistPayload) => {
-      persistedPayloads.push(payload);
-      const committed = commit(payload);
-      commits.push(committed);
-      return { committed_at: committed.committed_at };
-    },
-  });
-  const firstPersist = (await prepareSesDocketRevision(
+  const retried = (await prepareSesDocketRevision(
     request(input.identity.job_id, false, intent),
-    persistingDependencies,
+    dependencies(input, {
+      persist: createSesDocketPersistenceAdapter({
+        client,
+        org_id: "00000000-0000-0000-0000-000000000001",
+        created_by: "ses-u4-test",
+      }),
+    }),
+  )).results[0];
+
+  assertEquals(retried.persisted, true);
+  assertEquals(retried.timing.committed_at, legacyRow.committed_at);
+  assertEquals(uploads, []);
+  assertEquals(rpcCalls, []);
+  assertEquals(ledger.size, 1);
+  assertEquals(ledger.get(legacyKey), legacyRow);
+  assertEquals(
+    [...ledger.values()].map((entry) => entry.id),
+    [legacyIdentity.revision_id],
+  );
+});
+
+Deno.test("a genuinely new prepare still inserts under the v2 docket identity", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.identity.job_id = "00000000-0000-0000-0000-000000007064";
+  input.attendance.attendance_cycle_ids = [
+    "00000000-0000-0000-0000-000000000064",
+  ];
+  input.attendance.current_attendance_cycle_id =
+    "00000000-0000-0000-0000-000000000064";
+  const intent = "fixture-intent-fresh";
+  const staleLegacyRow: DocketLedgerRow = {
+    id: "00000000-0000-0000-0000-0000000000ff",
+    input_content_hash: `sha256:${"b".repeat(64)}`,
+    output_content_hash: `sha256:${"c".repeat(64)}`,
+    committed_at: "2026-07-20T03:04:05.000Z",
+  };
+  const legacyKey = docketLedgerKey(
+    input.identity.job_id,
+    intent,
+    SES_ASSEMBLER_VERSION,
+    SES_FAMILY_MATRIX_VERSION,
+  );
+  const ledger = new Map<string, DocketLedgerRow>([
+    [legacyKey, staleLegacyRow],
+  ]);
+  const { client, uploads, rpcCalls } = docketLedgerClient(ledger);
+  const persist = createSesDocketPersistenceAdapter({
+    client,
+    org_id: "00000000-0000-0000-0000-000000000001",
+    created_by: "ses-u4-test",
+  });
+
+  const prepared = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false, intent),
+    dependencies(input, { persist }),
   )).results[0];
   const replay = (await prepareSesDocketRevision(
     request(input.identity.job_id, false, intent),
-    persistingDependencies,
+    dependencies(input, { persist }),
   )).results[0];
 
-  assertEquals(persistedPayloads.length, 2);
-  assertEquals(commits.map((entry) => entry.inserted), [true, false]);
-  assertEquals(
-    persistedPayloads[0].idempotency_key,
+  const versionedKey = docketLedgerKey(
+    input.identity.job_id,
     sesDocketPersistedIdempotencyKey(intent),
+    SES_ASSEMBLER_VERSION,
+    SES_FAMILY_MATRIX_VERSION,
   );
   assertEquals(
-    persistedPayloads[0].idempotency_key,
+    sesDocketPersistedIdempotencyKey(intent),
     `${intent}#ses-docket-output:${SES_DOCKET_OUTPUT_HASH_VERSION}`,
   );
-  assertNotEquals(persistedPayloads[0].idempotency_key, intent);
+  assertNotEquals(sesDocketPersistedIdempotencyKey(intent), intent);
+  assert(uploads.length > 0);
   assertEquals(
-    persistedPayloads[1].idempotency_key,
-    persistedPayloads[0].idempotency_key,
-  );
-  assertNotEquals(firstPersist.docket_revision_id, legacyIdentity.revision_id);
-  assertEquals(replay.docket_revision_id, firstPersist.docket_revision_id);
-  assertEquals(
-    replay.output_content_hash,
-    firstPersist.output_content_hash,
+    rpcCalls.filter((call) =>
+      call.name === "commit_makesafe_docket_revision_v1"
+    ).length,
+    2,
   );
   assertEquals(ledger.size, 2);
+  assertEquals(ledger.get(legacyKey), staleLegacyRow);
+  assertEquals(ledger.get(versionedKey)?.id, prepared.docket_revision_id);
   assertEquals(
-    ledger.get(
-      [
-        input.identity.job_id,
-        intent,
-        SES_ASSEMBLER_VERSION,
-        SES_FAMILY_MATRIX_VERSION,
-      ].join("|"),
-    ),
-    legacyRow,
+    ledger.get(versionedKey)?.output_content_hash,
+    prepared.output_content_hash,
   );
+  assertEquals(replay.docket_revision_id, prepared.docket_revision_id);
+  assertEquals(replay.output_content_hash, prepared.output_content_hash);
+  assertNotEquals(prepared.docket_revision_id, staleLegacyRow.id);
 });
 
 Deno.test("docket output hash bisect names run-key variance", async () => {

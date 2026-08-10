@@ -90,6 +90,8 @@ export function sesDocketPersistedIdempotencyKey(
     : `${idempotencyKey}#ses-docket-output:${outputHashVersion}`;
 }
 
+export const SES_DOCKET_LEGACY_OUTPUT_HASH_VERSION = "v1";
+
 export async function sesDocketRevisionIdentity(args: {
   assembler_version: string;
   family_matrix_version: string;
@@ -233,10 +235,16 @@ export interface SesPortalCaptureRequest {
   idempotency_key: string;
 }
 
+export interface SesDocketRevisionIdentity {
+  idempotency_key: string;
+  revision_id: string;
+}
+
 export interface SesPersistPayload {
   revision: Omit<SesPreparedRevision, "timing" | "persisted" | "artifacts">;
   artifacts: SesArtifact[];
   idempotency_key: string;
+  legacy_identity?: SesDocketRevisionIdentity;
   assembler_version: "ses-pack-assembler/v1";
   family_matrix_version: string;
   accepted_at: string;
@@ -3492,11 +3500,18 @@ async function prepareOne(
   }
   stagesMs.T9 = 0;
 
-  const revisionIdentity = await sesDocketRevisionIdentity({
+  const revisionIdentityArgs = {
     assembler_version: request.assembler_version,
     family_matrix_version: SES_FAMILY_MATRIX_VERSION,
     idempotency_key: request.idempotency_key,
     input_content_hash: inputContentHash,
+  };
+  const revisionIdentity = await sesDocketRevisionIdentity(
+    revisionIdentityArgs,
+  );
+  const legacyRevisionIdentity = await sesDocketRevisionIdentity({
+    ...revisionIdentityArgs,
+    output_hash_version: SES_DOCKET_LEGACY_OUTPUT_HASH_VERSION,
   });
   const docketRevisionId = revisionIdentity.revision_id;
   const stableOutput = {
@@ -3657,6 +3672,7 @@ async function prepareOne(
           revision: baseRevision,
           artifacts,
           idempotency_key: revisionIdentity.idempotency_key,
+          legacy_identity: legacyRevisionIdentity,
           assembler_version: request.assembler_version,
           family_matrix_version: SES_FAMILY_MATRIX_VERSION,
           accepted_at: acceptedAt.toISOString(),
