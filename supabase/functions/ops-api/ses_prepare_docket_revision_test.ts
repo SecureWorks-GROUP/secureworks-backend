@@ -3660,6 +3660,101 @@ Deno.test("a legacy v1 docket retry resolves idempotently without inserting or s
   );
 });
 
+async function assertLegacyIdentityGuardFallsThrough(
+  mismatch: "id" | "input_content_hash",
+  jobId: string,
+  cycleId: string,
+  intent: string,
+) {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.identity.job_id = jobId;
+  input.attendance.attendance_cycle_ids = [cycleId];
+  input.attendance.current_attendance_cycle_id = cycleId;
+  const probe = (await prepareSesDocketRevision(
+    request(jobId, true, intent),
+    dependencies(input),
+  )).results[0];
+  const legacyIdentity = await sesDocketRevisionIdentity({
+    assembler_version: SES_ASSEMBLER_VERSION,
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    idempotency_key: intent,
+    input_content_hash: probe.input_content_hash,
+    output_hash_version: "v1",
+  });
+  const legacyRow: DocketLedgerRow = {
+    id: mismatch === "id"
+      ? "00000000-0000-0000-0000-000000007999"
+      : legacyIdentity.revision_id,
+    input_content_hash: mismatch === "input_content_hash"
+      ? `sha256:${"d".repeat(64)}`
+      : probe.input_content_hash,
+    output_content_hash: await legacyOutputHashForResult(
+      probe,
+      legacyIdentity.revision_id,
+    ),
+    committed_at: "2026-07-20T03:04:05.000Z",
+  };
+  const legacyKey = docketLedgerKey(
+    jobId,
+    intent,
+    SES_ASSEMBLER_VERSION,
+    SES_FAMILY_MATRIX_VERSION,
+  );
+  const ledger = new Map<string, DocketLedgerRow>([[legacyKey, legacyRow]]);
+  const { client, uploads, rpcCalls } = docketLedgerClient(ledger);
+  const prepared = (await prepareSesDocketRevision(
+    request(jobId, false, intent),
+    dependencies(input, {
+      persist: createSesDocketPersistenceAdapter({
+        client,
+        org_id: "00000000-0000-0000-0000-000000000001",
+        created_by: "ses-u4-test",
+      }),
+    }),
+  )).results[0];
+  const versionedKey = docketLedgerKey(
+    jobId,
+    sesDocketPersistedIdempotencyKey(intent),
+    SES_ASSEMBLER_VERSION,
+    SES_FAMILY_MATRIX_VERSION,
+  );
+
+  assertEquals(prepared.resolved_legacy, undefined);
+  assertNotEquals(prepared.docket_revision_id, legacyRow.id);
+  assert(uploads.length > 0);
+  assertEquals(
+    rpcCalls.filter((call) =>
+      call.name === "commit_makesafe_docket_revision_v1"
+    ).length,
+    1,
+  );
+  assertEquals(ledger.size, 2);
+  assertEquals(ledger.get(legacyKey), legacyRow);
+  assertEquals(ledger.get(versionedKey)?.id, prepared.docket_revision_id);
+}
+
+Deno.test("a wrong legacy revision ID falls through to the v2 identity", async () => {
+  await assertLegacyIdentityGuardFallsThrough(
+    "id",
+    "00000000-0000-0000-0000-000000007065",
+    "00000000-0000-0000-0000-000000000065",
+    "fixture-intent-wrong-legacy-id",
+  );
+});
+
+Deno.test("a wrong legacy input hash falls through to the v2 identity", async () => {
+  await assertLegacyIdentityGuardFallsThrough(
+    "input_content_hash",
+    "00000000-0000-0000-0000-000000007066",
+    "00000000-0000-0000-0000-000000000066",
+    "fixture-intent-wrong-legacy-input",
+  );
+});
+
 Deno.test("a genuinely new prepare still inserts under the v2 docket identity", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
