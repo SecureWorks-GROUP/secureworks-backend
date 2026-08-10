@@ -36569,12 +36569,16 @@ async function bindCurrentCycleCuratedMakesafeReport(
     strata: metadata.strata,
     report_delivery: metadata.report_delivery,
   })
+  // Repair already takes the physical docket path, where a curated supporting
+  // report is mandatory. It must therefore be able to establish that source
+  // through this same fully-gated bind. Restoration remains deliberately out
+  // of this repair-scoped contract until separately reviewed.
   if (jobResponse.data.type !== 'makesafe' ||
-      !['physical_makesafe', 'temporary_fencing'].includes(family) ||
+      !['physical_makesafe', 'temporary_fencing', 'repair'].includes(family) ||
       detailResponse.data.report_type != null) {
     throw curatedBindError(
       'curated_bind_family_not_eligible',
-      'only a physical make-safe job may bind a makesafe_report source',
+      'only an eligible physical make-safe or repair job may bind a makesafe_report source',
     )
   }
   const attendanceCycleId = String(

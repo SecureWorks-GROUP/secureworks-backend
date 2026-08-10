@@ -119,6 +119,7 @@ function bindClient(
     prior?: Record<string, unknown>;
     otherDocuments?: Array<Record<string, unknown>>;
     jobType?: string;
+    family?: string;
     documentJobId?: string;
     documentType?: string;
     visibleToTrades?: boolean;
@@ -171,7 +172,9 @@ function bindClient(
       job_number: "SWMS-TEST",
       type: options.jobType || "makesafe",
       client_name: "Canonical site contact",
-      metadata: { makesafe_job_family: "general_makesafe" },
+      metadata: {
+        makesafe_job_family: options.family || "general_makesafe",
+      },
     },
     makesafe_job_details: {
       report_type: null,
@@ -388,6 +391,72 @@ Deno.test("byte-bound current-cycle curated report bind writes stable independen
   assertEquals(replay.skipped, true);
   assertEquals(replay.writes, 0);
   assertEquals(mutations.length, 2);
+});
+
+Deno.test("repair may establish the curated source its physical docket path requires", async () => {
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\nprivacy-safe repair fixture",
+  );
+  const { client, document, mutations } = bindClient(bytes, {
+    family: "repair",
+  });
+  const body = await bindBody(bytes);
+
+  const result = await withStoredPdf(
+    bytes,
+    () =>
+      _bindCurrentCycleCuratedMakesafeReportForTest(
+        client,
+        body,
+        FIXTURE_ACTOR,
+      ),
+  );
+
+  assertEquals(
+    result,
+    await expectedSuccessShape(
+      bytes,
+      body.report_job as Record<string, unknown>,
+      {
+        skipped: false,
+        writes: 2,
+        documentVersion: 2,
+      },
+    ),
+  );
+  assertEquals(mutations.map((item) => item.table), [
+    "job_events",
+    "job_documents",
+  ]);
+  assertEquals(
+    document.data_snapshot_json.curated_source_kind,
+    "durable_curated_revision",
+  );
+});
+
+Deno.test("repair scoped curated bind does not admit restoration", async () => {
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\nprivacy-safe restoration fixture",
+  );
+  const { client, mutations } = bindClient(bytes, { family: "restoration" });
+  const body = await bindBody(bytes);
+
+  const error = await assertRejects(
+    () =>
+      withStoredPdf(
+        bytes,
+        () =>
+          _bindCurrentCycleCuratedMakesafeReportForTest(
+            client,
+            body,
+            FIXTURE_ACTOR,
+          ),
+      ),
+    ApiError,
+    "eligible physical make-safe or repair job",
+  );
+  assertEquals((error as ApiError).status, 409);
+  assertEquals(mutations, []);
 });
 
 Deno.test("poisoned stopped-sweep snapshot is superseded after full evidence gates pass", async () => {
@@ -1005,7 +1074,7 @@ Deno.test("curated bind rejects wrong contact, hash, cycle, self-reference and c
       label: "wrong physical job type",
       body: baseline,
       clientOptions: { jobType: "fencing" },
-      message: "only a physical make-safe job",
+      message: "eligible physical make-safe or repair job",
     },
     {
       label: "wrong document job",
