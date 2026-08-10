@@ -2,6 +2,7 @@
 import {
   assert,
   assertEquals,
+  assertNotEquals,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import type {
@@ -13,6 +14,7 @@ import type {
 import {
   SES_ASSEMBLER_VERSION,
   SES_INPUT_CONTRACT_VERSION,
+  sesSha256,
 } from "./ses_docket_envelope.ts";
 import {
   isSesPhysicalShapedFamily,
@@ -38,6 +40,7 @@ import {
 import {
   prepare_ses_docket_revision as prepareSesDocketRevision,
   SES_ASSESSMENT_RECIPE_VERSION,
+  SES_DOCKET_OUTPUT_HASH_DOMAIN,
   SES_DOCKET_REVIEW_SPEC_VERSION,
   SES_PHYSICAL_FAMILY_RECIPE_VERSION,
   type SesPersistPayload,
@@ -224,10 +227,11 @@ function fixtureInput(
 function request(
   jobId = "job-fixture",
   dryRun = true,
+  idempotencyKey = "fixture-intent-1",
 ): SesPrepareRequest {
   return {
     selection: { mode: "job_id", job_id: jobId },
-    idempotency_key: "fixture-intent-1",
+    idempotency_key: idempotencyKey,
     assembler_version: SES_ASSEMBLER_VERSION,
     dry_run: dryRun,
     force_refresh: true,
@@ -3395,6 +3399,86 @@ Deno.test("same input and intent produce stable revision and output hashes", asy
       artifact.path,
       artifact.content_hash,
     ]),
+  );
+});
+
+Deno.test("docket output hash bisect names run-key variance", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  const first = (await prepareSesDocketRevision(
+    request(input.identity.job_id, true, "fixture-intent-first"),
+    dependencies(input),
+  )).results[0];
+  const second = (await prepareSesDocketRevision(
+    request(input.identity.job_id, true, "fixture-intent-second"),
+    dependencies(input),
+  )).results[0];
+  const keys = [
+    "docket_revision_id",
+    "manifest",
+    "invoice_proposal",
+    "email_drafts",
+    "portal_evidence",
+    "review_spec",
+    "release_payload",
+    "artifact_hashes",
+    "blockers",
+  ] as const;
+  const artifactHashes = (result: typeof first) =>
+    result.artifacts.filter((artifact) =>
+      !["docket_manifest", "assembler_envelope", "hashes", "timing"].includes(
+        artifact.role,
+      )
+    )
+      .map((artifact) => ({
+        role: artifact.role,
+        path: artifact.path,
+        content_hash: artifact.content_hash,
+        size_bytes: artifact.size_bytes,
+      })).sort((left, right) => left.path.localeCompare(right.path));
+  const value = (result: typeof first, key: (typeof keys)[number]) =>
+    key === "docket_revision_id"
+      ? result.docket_revision_id
+      : key === "manifest"
+      ? result.envelope.v2
+      : key === "invoice_proposal"
+      ? result.invoice_proposal
+      : key === "email_drafts"
+      ? result.email_drafts
+      : key === "portal_evidence"
+      ? result.portal_evidence
+      : key === "review_spec"
+      ? result.review_spec
+      : key === "release_payload"
+      ? result.release_payload
+      : key === "artifact_hashes"
+      ? artifactHashes(result)
+      : result.blockers;
+  const hashes = async (result: typeof first) =>
+    Object.fromEntries(
+      await Promise.all(
+        keys.map(async (key) => [key, await sesSha256(value(result, key))]),
+      ),
+    );
+  const firstHashes = await hashes(first);
+  const secondHashes = await hashes(second);
+  const varyingKeys = keys.filter((key) =>
+    firstHashes[key] !== secondHashes[key]
+  );
+
+  assertEquals(varyingKeys, ["docket_revision_id"]);
+  assertNotEquals(first.docket_revision_id, second.docket_revision_id);
+  assertEquals(
+    first.output_content_hash,
+    second.output_content_hash,
+    "run identity must not change the content hash",
+  );
+  assertEquals(
+    SES_DOCKET_OUTPUT_HASH_DOMAIN,
+    "SecureWorks:ses-docket-output:v2\n",
   );
 });
 

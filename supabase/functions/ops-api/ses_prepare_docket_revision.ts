@@ -74,6 +74,8 @@ import type {
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
+export const SES_DOCKET_OUTPUT_HASH_DOMAIN =
+  "SecureWorks:ses-docket-output:v2\n";
 export { SES_ASSESSMENT_RECIPE_VERSION, SES_PHYSICAL_FAMILY_RECIPE_VERSION };
 
 const MANIFEST_ITEMS = [
@@ -3463,7 +3465,6 @@ async function prepareOne(
   );
   const docketRevisionId = stableUuidFromSha256(revisionIdentityHash);
   const stableOutput = {
-    docket_revision_id: docketRevisionId,
     manifest,
     invoice_proposal: priced.proposal,
     email_drafts: drafts,
@@ -3482,7 +3483,7 @@ async function prepareOne(
   };
   const outputContentHash = await sesSha256(
     stableOutput,
-    "SecureWorks:ses-docket-output:v1\n",
+    SES_DOCKET_OUTPUT_HASH_DOMAIN,
   );
   const preXeroDocsReady = validatePreXero(
     manifest,
