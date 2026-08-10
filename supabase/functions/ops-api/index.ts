@@ -8132,7 +8132,7 @@ if (import.meta.main) serve(async (req: Request) => {
             const pdfBase64 = String(pdf_base64 || '').replace(/^data:application\/pdf;base64,/i, '').replace(/\s/g, '')
             const maxPdfBytes = 5 * 1024 * 1024
             if (pdfBase64.length > Math.ceil(maxPdfBytes * 4 / 3) + 16) throw new ApiError('PDF payload size is invalid', 413)
-            let pdfBytes: Uint8Array
+            let pdfBytes: Uint8Array<ArrayBuffer>
             try {
               pdfBytes = Uint8Array.from(atob(pdfBase64), (c: string) => c.charCodeAt(0))
             } catch {
