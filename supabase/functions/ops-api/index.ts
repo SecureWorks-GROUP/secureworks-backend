@@ -188,6 +188,15 @@ import {
   type MakesafeSubstatusGateResult,
 } from './makesafe_substatus_gate.ts'
 import {
+  describeMakesafeWriteOrigin,
+  evaluateMakesafeMoneyStageFence,
+  internalEvidenceOrigin,
+  makesafeExternalWriteOrigin,
+  observeMakesafeMoneyStageFence,
+  type MakesafeWriteOrigin,
+  unidentifiedOrigin,
+} from './makesafe_write_origin.ts'
+import {
   planMakesafeStatusApplications,
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
@@ -4908,7 +4917,11 @@ if (import.meta.main) serve(async (req: Request) => {
         // updateMakesafeSubstatus via assertExternalMakesafeSubstatusGuards,
         // plus the transition-coherence assert every write path shares — so no
         // entry point (dispatch, details editor, internal caller) can skip them.
-        return json(await updateMakesafeSubstatus(client, body, { source: 'external', authMode }))
+        return json(await updateMakesafeSubstatus(client, body, {
+          origin: makesafeExternalWriteOrigin(body, 'external'),
+          authMode,
+          external: true,
+        }))
       }
       // B4 (makesafe-report-types): "Report completed on builder portal" marker.
       // STATE/EVENT ONLY — no job_service_reports, no docs, no render, no invoice,
@@ -13876,8 +13889,9 @@ async function updateMakesafeDetails(client: any, body: any, opts: { authMode?: 
   // origin inside the helper — an origin that can be absent is exactly the
   // "skipped by omission" hole this item closes.
   if (updates.substatus !== undefined) {
-    await assertExternalMakesafeSubstatusGuards(client, jId, updates.substatus, opts.authMode)
-    const { data, error } = await writeMakesafeSubstatus(client, jId, updates, 'external:details')
+    const origin = makesafeExternalWriteOrigin(body, 'external:details')
+    await assertExternalMakesafeSubstatusGuards(client, jId, updates.substatus, opts.authMode, origin)
+    const { data, error } = await writeMakesafeSubstatus(client, jId, updates, origin)
     if (error) throw error
     return { ok: true, details: data }
   }
@@ -15474,9 +15488,9 @@ export const _enrichMakesafeBoardJobForTest = enrichMakesafeBoardJob
 // cancelled jobs) because each write site validated vocabulary only. Every
 // substatus write that goes through updateMakesafeSubstatus — the dispatch
 // action, the details editor, and the internal evidence events — passes this
-// assert. Sources beginning 'internal:' are the evidence events themselves
-// (trade report submitted, close-out, reattend); they are transition-checked
-// but not re-gated on the external evidence guards, which they constitute.
+// assert. Internal evidence events (trade report submitted, close-out,
+// reattend) are transition-checked but not re-gated on the external evidence
+// guards, which they constitute; their typed origin carries the detail.
 //
 // TWO HONEST LIMITS, because a comment that overstates a guard is how the next
 // reader stops checking (spec item 1):
@@ -15489,7 +15503,7 @@ export const _enrichMakesafeBoardJobForTest = enrichMakesafeBoardJob
 //     `awaiting_portal_completion`. Both are deliberate and preserved, but they
 //     exist, so "no entry point can skip this" was never true. The privileged
 //     routes DO reach the assert — makesafe_send_pack closes through
-//     applyMakesafeCloseOut ('internal:closeout') and
+//     applyMakesafeCloseOut (internal evidence origin 'closeout') and
 //     mark_makesafe_portal_report_done gates its own patch — what those skip is
 //     the external evidence guards below, which is a different boundary.
 //  2. The gate FAILS OPEN when a pre-read fails. That trade is deliberate: the
@@ -15521,10 +15535,10 @@ async function assertMakesafeSubstatusTransition(
   client: any,
   jobId: string,
   nextSubstatus: string,
-  source: string,
+  origin: MakesafeWriteOrigin,
 ): Promise<MakesafeSubstatusGateResult> {
   const next = requireValidMakesafeSubstatus(nextSubstatus)
-  const { result, refusal } = await evaluateMakesafeSubstatusGate(client, jobId, next, source, {
+  const { result, refusal } = await evaluateMakesafeSubstatusGate(client, jobId, next, origin, {
     normalizeSubstatus: normalizeMakesafeSubstatus,
   })
   if (refusal) throw new ApiError(refusal.message, refusal.status)
@@ -15625,7 +15639,7 @@ async function writeMakesafeSubstatus(
   client: any,
   jobId: string,
   patch: Record<string, any>,
-  origin: string,
+  origin: MakesafeWriteOrigin,
   opts: MakesafeSubstatusWriteOptions = {},
 ): Promise<MakesafeSubstatusWriteResult> {
   const next = patch?.substatus
@@ -15633,7 +15647,7 @@ async function writeMakesafeSubstatus(
     // A programming error, not a caller-facing refusal: this helper exists to
     // gate a TRANSITION, and there is nothing to gate.
     throw new ApiError(
-      `writeMakesafeSubstatus requires a substatus in the patch (origin=${origin})`,
+      `writeMakesafeSubstatus requires a substatus in the patch (origin=${describeMakesafeWriteOrigin(origin)})`,
       500,
     )
   }
@@ -15706,9 +15720,24 @@ async function assertExternalMakesafeSubstatusGuards(
   jobId: string,
   nextSubstatus: string,
   authMode: string | undefined,
+  origin: MakesafeWriteOrigin,
 ): Promise<void> {
   await assertNoSyntheticLivefireJobs(client, [jobId], 'update_makesafe_substatus')
+  const moneyObservation = observeMakesafeMoneyStageFence(nextSubstatus, origin, authMode)
+  if (moneyObservation) {
+    console.warn('[ops-api] makesafe_agent_money_stage_fence', moneyObservation)
+    const strictDecision = evaluateMakesafeMoneyStageFence(
+      nextSubstatus,
+      origin,
+    )
+    // The existing routine fence remains the authoritative refusal for routine
+    // callers. In loose production mode this branch is observational only.
+    if (strictDecision.refusal && authMode !== 'routine') {
+      throw new ApiError(strictDecision.refusal.message, strictDecision.refusal.status)
+    }
+  }
   // B3 (Wave 0): the automation routine key MUST NOT set sent/closed states.
+  // Keep this exact policy and refusal path unchanged.
   const ROUTINE_FORBIDDEN_SUBSTATUSES = ['ready_to_invoice', 'complete']
   if (authMode === 'routine' && ROUTINE_FORBIDDEN_SUBSTATUSES.includes(String(nextSubstatus || ''))) {
     throw new ApiError(
@@ -15726,15 +15755,16 @@ async function assertExternalMakesafeSubstatusGuards(
 async function updateMakesafeSubstatus(
   client: any,
   body: any,
-  opts: { source?: string; authMode?: string } = {},
+  opts: { origin?: MakesafeWriteOrigin; authMode?: string; external?: boolean } = {},
 ) {
   const { job_id, jobId, substatus } = body
   const jId = job_id || jobId
   if (!jId || !substatus) throw new Error('job_id and substatus required')
   const nextSubstatus = requireValidMakesafeSubstatus(substatus)
-  const source = opts.source || 'external'
-  if (source === 'external') {
-    await assertExternalMakesafeSubstatusGuards(client, jId, nextSubstatus, opts.authMode)
+  const origin = opts.origin || unidentifiedOrigin('external')
+  const external = opts.external ?? !opts.origin
+  if (external) {
+    await assertExternalMakesafeSubstatusGuards(client, jId, nextSubstatus, opts.authMode, origin)
   }
   const updates: Record<string, any> = {
     substatus: nextSubstatus,
@@ -15753,7 +15783,7 @@ async function updateMakesafeSubstatus(
   // output, which a behaviour-preserving refactor may not do.
   if (nextSubstatus === 'company_contact_done') updates.company_contacted_at = new Date().toISOString()
 
-  const { data, error } = await writeMakesafeSubstatus(client, jId, updates, source)
+  const { data, error } = await writeMakesafeSubstatus(client, jId, updates, origin)
   if (error) throw error
 
   // ── M3d U2b: advancing a make-safe INTO a finished substatus closes the job's
@@ -15997,7 +16027,7 @@ async function markMakesafePortalReportDone(client: any, body: any) {
   if (mergedLinks) updates.external_links = mergedLinks
 
   const { data: updated, error: upErr } = await writeMakesafeSubstatus(
-    client, jId, updates, 'internal:portal_report_done',
+    client, jId, updates, internalEvidenceOrigin('portal_report_done'),
   )
   if (upErr) throw upErr
 
@@ -19202,7 +19232,7 @@ async function submitMakesafeReport(
         invoice_notes: invoice_notes || null,
         updated_at: syncAt,
       },
-      'internal:trade_report_submitted',
+      internalEvidenceOrigin('trade_report_submitted'),
       { select: 'job_id, substatus, report_received_at', row: 'maybeSingle' },
     )
     if (detailSyncErr) {
@@ -29444,7 +29474,9 @@ async function syncSuppliers(client: any) {
 async function advanceMakesafeSubstatusOnInvoice(client: any, job: any, jId: string): Promise<boolean> {
   if (String(job?.type || '').toLowerCase() !== 'makesafe') return false
   try {
-    await updateMakesafeSubstatus(client, { job_id: jId, substatus: 'complete' }, { source: 'internal:invoice_advance' })
+    await updateMakesafeSubstatus(client, { job_id: jId, substatus: 'complete' }, {
+      origin: internalEvidenceOrigin('invoice_advance'),
+    })
     return true
   } catch (e) {
     console.log('[completeAndInvoice] makesafe substatus advance failed (non-blocking):', (e as Error).message)
@@ -37707,7 +37739,7 @@ async function advanceRoofReportChecklist(
       ...verificationStamp,
       updated_at: nowIso,
     },
-    'internal:roof_report_submitted',
+    internalEvidenceOrigin('roof_report_submitted'),
     { select: 'substatus, report_received_at', row: 'maybeSingle' },
   )
   if (error) {
@@ -38182,7 +38214,7 @@ async function defaultMarkDraftPackReady(client: any, jobId: string, detail: any
       report_received_at: detail?.report_received_at || now,
       updated_at: now,
     },
-    'internal:draft_pack_ready',
+    internalEvidenceOrigin('draft_pack_ready'),
     { select: 'job_id', row: 'rows' },
   )
   if (error) throw new ApiError('draft pack ready mark failed: ' + error.message, 500)
@@ -38487,7 +38519,7 @@ async function applyMakesafeCloseOut(
   const detailPatch: Record<string, any> = { substatus: 'complete', updated_at: now }
   if (!msd?.report_sent_at) detailPatch.report_sent_at = reportSentAt
   const { data: detailRows, error: detailErr } = await writeMakesafeSubstatus(
-    client, jobId, detailPatch, 'internal:closeout', { row: 'rows' },
+    client, jobId, detailPatch, internalEvidenceOrigin('closeout'), { row: 'rows' },
   )
   if (detailErr) throw new ApiError('make-safe close detail update failed: ' + detailErr.message, 500)
   if (!detailRows || detailRows.length === 0) {
@@ -40652,7 +40684,7 @@ export async function reattendMakesafe(client: any, args: {
       last_reattend_reason: reason,
       updated_at: nowIso,
     },
-    'internal:reattend',
+    internalEvidenceOrigin('reattend'),
     {
       select: 'job_id, substatus, cycle_number, reattend_count, attendance_cycle_id, last_reattend_at',
       row: 'maybeSingle',

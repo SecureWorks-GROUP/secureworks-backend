@@ -39,6 +39,7 @@ import {
   _updateMakesafeSubstatus,
   _writeMakesafeSubstatus,
 } from './index.ts'
+import { intakeOrigin, internalEvidenceOrigin, unidentifiedOrigin } from './makesafe_write_origin.ts'
 
 // ── Recording fake PostgREST client ─────────────────────────────────────────
 // Every builder method appends to `chain`, so the assertion is on the request
@@ -138,7 +139,7 @@ Deno.test('writer: a refused transition throws 409 and issues ZERO updates', asy
     detailRead: { data: { substatus: 'complete' }, error: null },
   })
   const err = await assertRejects(
-    () => _writeMakesafeSubstatus(client, 'job-1', { substatus: 'ready_to_invoice' }, 'internal:test'),
+    () => _writeMakesafeSubstatus(client, 'job-1', { substatus: 'ready_to_invoice' }, internalEvidenceOrigin('test')),
   ) as any
   assertEquals(err.status, 409)
   assertEquals(detailWrites().length, 0, 'the update must not be issued on a refusal')
@@ -150,7 +151,7 @@ Deno.test('writer: a cancelled job refuses 409 and issues ZERO updates', async (
     jobRead: { data: { status: 'cancelled' }, error: null },
   })
   const err = await assertRejects(
-    () => _writeMakesafeSubstatus(client, 'job-1', { substatus: 'admin_to_send_report' }, 'internal:closeout'),
+    () => _writeMakesafeSubstatus(client, 'job-1', { substatus: 'admin_to_send_report' }, internalEvidenceOrigin('closeout')),
   ) as any
   assertEquals(err.status, 409)
   assertEquals(detailWrites().length, 0)
@@ -169,7 +170,7 @@ Deno.test("writer: the internal:intake_ exemption from the cancelled guard survi
     client,
     'job-1',
     { substatus: 'admin_to_send_report' },
-    'internal:intake_settlement',
+    intakeOrigin('settlement'),
   )
   assertEquals(error, null)
   assertEquals(detailWrites().length, 1, 'the intake exemption must still let the write through')
@@ -179,7 +180,7 @@ Deno.test('writer: a patch with no substatus is refused before any read or write
   const { client, detailWrites } = makeRecordingClient()
   for (const bad of [{}, { substatus: null }, { substatus: '' }]) {
     const err = await assertRejects(
-      () => _writeMakesafeSubstatus(client, 'job-1', bad as any, 'internal:test'),
+      () => _writeMakesafeSubstatus(client, 'job-1', bad as any, internalEvidenceOrigin('test')),
     ) as any
     assertEquals(err.status, 500)
   }
@@ -204,7 +205,7 @@ Deno.test('writer: each row shape issues exactly the request its origin issued b
   ]
   for (const [opts, expected] of shapes) {
     const { client, detailWrites } = makeRecordingClient()
-    await _writeMakesafeSubstatus(client, 'job-1', { substatus: 'complete' }, 'internal:test', opts)
+    await _writeMakesafeSubstatus(client, 'job-1', { substatus: 'complete' }, internalEvidenceOrigin('test'), opts)
     assertEquals(detailWrites()[0].chain, expected, `row shape ${JSON.stringify(opts)}`)
   }
 })
@@ -215,7 +216,7 @@ Deno.test('writer: narrow filters land between eq(job_id) and select — reatten
     client,
     'job-1',
     { substatus: 'waiting_on_trade_report' },
-    'internal:reattend',
+    internalEvidenceOrigin('reattend'),
     {
       select: 'job_id, substatus',
       row: 'maybeSingle',
@@ -242,12 +243,12 @@ Deno.test("writer: updated_at is supplied only when the caller omitted it", asyn
     kept.client,
     'job-1',
     { substatus: 'complete', updated_at: '2020-01-01T00:00:00.000Z' },
-    'internal:test',
+    internalEvidenceOrigin('test'),
   )
   assertEquals(kept.detailWrites()[0].payload.updated_at, '2020-01-01T00:00:00.000Z')
 
   const defaulted = makeRecordingClient()
-  await _writeMakesafeSubstatus(defaulted.client, 'job-1', { substatus: 'complete' }, 'internal:test')
+  await _writeMakesafeSubstatus(defaulted.client, 'job-1', { substatus: 'complete' }, internalEvidenceOrigin('test'))
   assert(
     typeof defaulted.detailWrites()[0].payload.updated_at === 'string',
     'a caller that omits updated_at gets one',
@@ -263,7 +264,7 @@ Deno.test('writer: a PostgREST error is RETURNED, not thrown', async () => {
     client,
     'job-1',
     { substatus: 'complete' },
-    'internal:closeout',
+    internalEvidenceOrigin('closeout'),
     { row: 'rows' },
   )
   assertEquals(data, null)
@@ -281,7 +282,7 @@ Deno.test('origin external: updateMakesafeSubstatus issues the same request as b
   const res: any = await _updateMakesafeSubstatus(
     client,
     { job_id: 'job-1', substatus: 'waiting_on_trade_report' },
-    { source: 'internal:invoice_advance' },
+    { origin: internalEvidenceOrigin('invoice_advance') },
   )
   assertEquals(res.ok, true)
   const w = detailWrites()
@@ -314,7 +315,7 @@ Deno.test('origin external: company_contacted_at is still stamped HERE, not by t
     viaWriter.client,
     'job-1',
     { substatus: 'company_contact_done', updated_at: 'now' },
-    'external:details',
+    unidentifiedOrigin('external:details'),
   )
   assertEquals(
     viaWriter.detailWrites()[0].payload.company_contacted_at,
@@ -412,7 +413,7 @@ Deno.test('origin internal:portal_report_done — the transition table still ref
     detailRead: { data: { substatus: 'some_unmapped_state' }, error: null },
   })
   const err = await assertRejects(
-    () => _writeMakesafeSubstatus(client, 'job-1', { substatus: 'complete' }, 'internal:portal_report_done'),
+    () => _writeMakesafeSubstatus(client, 'job-1', { substatus: 'complete' }, internalEvidenceOrigin('portal_report_done')),
   ) as any
   assertEquals(err.status, 409)
   assertEquals(detailWrites().length, 0)

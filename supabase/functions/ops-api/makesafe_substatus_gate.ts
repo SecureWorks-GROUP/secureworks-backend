@@ -24,6 +24,8 @@
 // authorised by this spec. What changed is that the fail-open is now named,
 // counted and greppable rather than silent.
 
+import { describeMakesafeWriteOrigin, type MakesafeWriteOrigin } from './makesafe_write_origin.ts'
+
 /** Stable, greppable marker for the deliberate fail-open. Count these. */
 export const MAKESAFE_SUBSTATUS_GATE_FAIL_OPEN_MARKER = 'makesafe_substatus_gate_fail_open'
 
@@ -139,7 +141,7 @@ export async function evaluateMakesafeSubstatusGate(
   client: any,
   jobId: string,
   nextSubstatus: string,
-  source: string,
+  origin: MakesafeWriteOrigin,
   deps: MakesafeSubstatusGateDeps,
 ): Promise<MakesafeSubstatusGateDecision> {
   const warn = deps.warn || ((message: string, payload: Record<string, unknown>) => console.warn(message, payload))
@@ -162,7 +164,7 @@ export async function evaluateMakesafeSubstatusGate(
       marker: MAKESAFE_SUBSTATUS_GATE_READ_THREW_MARKER,
       job_id: jobId,
       next_substatus: nextSubstatus,
-      source,
+      source: origin,
       error: threwFault,
     })
   }
@@ -196,8 +198,7 @@ export async function evaluateMakesafeSubstatusGate(
       marker: MAKESAFE_SUBSTATUS_GATE_FAIL_OPEN_MARKER,
       job_id: jobId,
       next_substatus: nextSubstatus,
-      // Item 3 replaces this with the typed write-origin once it exists.
-      source,
+      source: origin,
       detail_read,
       job_read,
       faults,
@@ -222,13 +223,18 @@ export async function evaluateMakesafeSubstatusGate(
 
   // Cancelled/lost guard. An unreadable `jobs` row yields a null status and so
   // passes, exactly as the old `String(jobRes?.data?.status || '')` did.
-  if (jobStatus && ['cancelled', 'lost'].includes(jobStatus) && !source.startsWith('internal:intake_')) {
+  if (
+    jobStatus && ['cancelled', 'lost'].includes(jobStatus) &&
+    origin.class !== 'intake'
+  ) {
     return {
       result,
       refusal: {
         status: 409,
         rule: 'job_terminal',
-        message: `substatus write refused: job is ${jobStatus} (source=${source}); reinstate the job before changing its work state`,
+        message: `substatus write refused: job is ${jobStatus} (source=${
+          describeMakesafeWriteOrigin(origin)
+        }); reinstate the job before changing its work state`,
       },
     }
   }
@@ -246,7 +252,9 @@ export async function evaluateMakesafeSubstatusGate(
       refusal: {
         status: 409,
         rule: 'incoherent_transition',
-        message: `substatus transition refused: '${current}' -> '${nextSubstatus}' is not a coherent move (source=${source})`,
+        message: `substatus transition refused: '${current}' -> '${nextSubstatus}' is not a coherent move (source=${
+          describeMakesafeWriteOrigin(origin)
+        })`,
       },
     }
   }

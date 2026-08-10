@@ -33,6 +33,7 @@ import {
   MAKESAFE_SUBSTATUS_TRANSITIONS,
 } from "./makesafe_substatus_gate.ts";
 import { _normalizeMakesafeSubstatus, _updateMakesafeSubstatus } from "./index.ts";
+import { intakeOrigin, internalEvidenceOrigin, unidentifiedOrigin } from "./makesafe_write_origin.ts";
 
 // ── Fake PostgREST client ────────────────────────────────────────────────────
 // Mirrors the real builder shape the gate and the write use:
@@ -166,7 +167,7 @@ Deno.test("S1: makesafe_job_details pre-read errors -> write lands AND the fail-
     result = await _updateMakesafeSubstatus(
       client,
       { job_id: "job-1", substatus: "waiting_on_trade_report" },
-      { source: "internal:trade_report" },
+      { origin: internalEvidenceOrigin("trade_report") },
     );
   });
 
@@ -181,7 +182,7 @@ Deno.test("S1: makesafe_job_details pre-read errors -> write lands AND the fail-
   assertEquals(payload.marker, MAKESAFE_SUBSTATUS_GATE_FAIL_OPEN_MARKER);
   assertEquals(payload.job_id, "job-1");
   assertEquals(payload.next_substatus, "waiting_on_trade_report");
-  assertEquals(payload.source, "internal:trade_report");
+  assertEquals(payload.source, internalEvidenceOrigin("trade_report"));
   assertEquals(payload.detail_read, "unreadable");
   assertEquals(payload.job_read, "ok", "the healthy jobs read must not be smeared as unreadable");
   assertEquals(payload.faults.length, 1);
@@ -204,7 +205,7 @@ Deno.test("S1: jobs pre-read errors -> write lands AND the fail-open marker fire
     result = await _updateMakesafeSubstatus(
       client,
       { job_id: "job-2", substatus: "admin_to_send_report" },
-      { source: "internal:close_out" },
+      { origin: internalEvidenceOrigin("close_out") },
     );
   });
 
@@ -236,7 +237,7 @@ Deno.test("S1: BOTH pre-reads error -> still exactly ONE marker line, naming bot
     await _updateMakesafeSubstatus(
       client,
       { job_id: "job-3", substatus: "waiting_on_trade_report" },
-      { source: "internal:reattend" },
+      { origin: internalEvidenceOrigin("reattend") },
     );
   }).then((captured) => {
     const lines = failOpenLines(captured);
@@ -264,7 +265,7 @@ Deno.test("S1: the healthy path emits NO fail-open marker", async () => {
     await _updateMakesafeSubstatus(
       client,
       { job_id: "job-4", substatus: "admin_to_send_report" },
-      { source: "internal:trade_report" },
+      { origin: internalEvidenceOrigin("trade_report") },
     );
   });
 
@@ -289,7 +290,7 @@ Deno.test("S1: an ABSENT card (clean read, no row) is NOT reported as a fail-ope
     await _updateMakesafeSubstatus(
       client,
       { job_id: "job-5", substatus: "company_contact_required" },
-      { source: "internal:intake_mint" },
+      { origin: intakeOrigin("mint") },
     );
   });
 
@@ -306,7 +307,7 @@ Deno.test("an absent JOB row is also not a fail-open", async () => {
     { from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }) }) }) } as any,
     "job-6",
     "waiting_on_trade_report",
-    "internal:trade_report",
+    internalEvidenceOrigin("trade_report"),
     { normalizeSubstatus: _normalizeMakesafeSubstatus, warn: () => assert(false, "must not warn") },
   );
   assertEquals(decision.result.outcome, "checked");
@@ -335,7 +336,7 @@ Deno.test("outcome distinguishes a real check from a step-aside", async () => {
     gateClient({ data: { substatus: "waiting_on_trade_report" }, error: null }, { data: { status: "processing" }, error: null }),
     "job-a",
     "admin_to_send_report",
-    "external",
+    unidentifiedOrigin("external"),
     deps,
   );
   assertEquals(checked.result.outcome, "checked");
@@ -347,7 +348,7 @@ Deno.test("outcome distinguishes a real check from a step-aside", async () => {
     gateClient({ data: null, error: POSTGREST_UNDEFINED_COLUMN }, { data: { status: "processing" }, error: null }),
     "job-b",
     "admin_to_send_report",
-    "external",
+    unidentifiedOrigin("external"),
     deps,
   );
   assertEquals(steppedAside.result.outcome, "fail_open_unreadable");
@@ -363,7 +364,7 @@ Deno.test("the substatus alias map is injected, not duplicated — pending_alloc
     gateClient({ data: { substatus: "pending_allocation" }, error: null }, { data: { status: "processing" }, error: null }),
     "job-c",
     "waiting_on_trade_report",
-    "external",
+    unidentifiedOrigin("external"),
     { normalizeSubstatus: _normalizeMakesafeSubstatus, warn: () => {} },
   );
   assertEquals(decision.result.current_substatus, "company_contact_required");
@@ -381,7 +382,7 @@ Deno.test("regression: the cancelled/lost refusal still 409s on the healthy path
       gateClient({ data: { substatus: "waiting_on_trade_report" }, error: null }, { data: { status: jobState }, error: null }),
       "job-d",
       "admin_to_send_report",
-      "external",
+      unidentifiedOrigin("external"),
       { normalizeSubstatus: _normalizeMakesafeSubstatus, warn: () => {} },
     );
     assertEquals(decision.refusal?.status, 409);
@@ -395,7 +396,7 @@ Deno.test("regression: intake sources are still exempt from the cancelled/lost r
     gateClient({ data: { substatus: "waiting_on_trade_report" }, error: null }, { data: { status: "cancelled" }, error: null }),
     "job-e",
     "admin_to_send_report",
-    "internal:intake_recover",
+    intakeOrigin("recover"),
     { normalizeSubstatus: _normalizeMakesafeSubstatus, warn: () => {} },
   );
   assertEquals(decision.refusal, null);
@@ -408,7 +409,7 @@ Deno.test("regression: an incoherent transition still 409s, and a coherent one s
     gateClient({ data: { substatus: "company_contact_required" }, error: null }, { data: { status: "processing" }, error: null }),
     "job-f",
     "ready_to_invoice",
-    "external",
+    unidentifiedOrigin("external"),
     deps,
   );
   assertEquals(refused.refusal?.status, 409);
@@ -419,7 +420,7 @@ Deno.test("regression: an incoherent transition still 409s, and a coherent one s
     gateClient({ data: { substatus: "admin_to_send_report" }, error: null }, { data: { status: "processing" }, error: null }),
     "job-g",
     "ready_to_invoice",
-    "external",
+    unidentifiedOrigin("external"),
     deps,
   );
   assertEquals(allowed.refusal, null);
@@ -430,7 +431,7 @@ Deno.test("regression: an idempotent repeat is a clean CHECKED pass, not a step-
     gateClient({ data: { substatus: "ready_to_invoice" }, error: null }, { data: { status: "processing" }, error: null }),
     "job-h",
     "ready_to_invoice",
-    "external",
+    unidentifiedOrigin("external"),
     { normalizeSubstatus: _normalizeMakesafeSubstatus, warn: () => assert(false, "must not warn") },
   );
   assertEquals(decision.result.outcome, "checked");
@@ -475,7 +476,7 @@ Deno.test("a THROWN read logs the distinct read-threw marker, never the fail-ope
     client as any,
     "job-i",
     "waiting_on_trade_report",
-    "internal:trade_report",
+    internalEvidenceOrigin("trade_report"),
     {
       normalizeSubstatus: _normalizeMakesafeSubstatus,
       warn: (m, p) => warned.push({ m, p }),
