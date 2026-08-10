@@ -596,7 +596,7 @@ Deno.test("updateMakesafeSubstatus tolerates a PostgREST insert builder that lac
   const res = await _updateMakesafeSubstatus(client, {
     job_id: "job-a",
     substatus: "complete",
-  }, { origin: internalEvidenceOrigin('event_insert_regression') });
+  }, { origin: internalEvidenceOrigin("event_insert_regression") });
   assertEquals(res.ok, true);
   assertEquals(eventInserted, true);
 });

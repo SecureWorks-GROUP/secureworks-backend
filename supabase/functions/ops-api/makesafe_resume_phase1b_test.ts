@@ -935,7 +935,7 @@ Deno.test("resume_close: marker ABSENT -> refused (no proof of send)", async () 
 
 Deno.test("resume_close: strict agent refusal leaves recovery state untouched", async () => {
   const client = makeClient(closeSeed("sent_not_closed", true));
-  let error: any = null;
+  let error: { status?: number } | null = null;
   try {
     await _makesafeResumeCloseForTest(client, { job_id: "job-1" }, {
       external: true,
@@ -944,7 +944,7 @@ Deno.test("resume_close: strict agent refusal leaves recovery state untouched", 
       strictEnabled: true,
     });
   } catch (caught) {
-    error = caught;
+    error = caught as { status?: number };
   }
   assertEquals(error?.status, 403);
   assertEquals(packOf(client).status, "sent_not_closed");

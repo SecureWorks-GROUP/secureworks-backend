@@ -31,7 +31,7 @@ with its own outage profile and is not authorised by this spec.
 - One structured `makesafe_substatus_gate_fail_open` line per gated write that
   stepped aside — never one per failed read, because a marker that fires twice
   for one write cannot be counted. It carries the job id, the attempted
-  substatus, the write-origin (`source` until item 3's typed value exists), the
+  substatus, the typed write-origin in `source` (`{ class, detail }`), the
   per-read PostgREST `code`/`message`/`details`/`hint`, and a `skipped_checks`
   list naming what the gate could not do.
 - The gate returns `outcome: 'checked' | 'fail_open_unreadable'`, so "applied
@@ -201,9 +201,15 @@ unblocked. What item 2 inherits:
   historical-backfill repair, and `approveIntakeDraft`'s report-only park) are
   named in the gate header comment. They are preserved, and item 2 must not
   fold them into the helper.
-- Item 3 replaces the `source` string in the marker payload with a typed
-  write-origin. The payload key is already `source`; that is the one line to
-  change.
+- Item 3 replaced the `source` string with the typed write-origin while
+  retaining the `source` payload key. External requests may optionally send
+  `caller: { class: 'agent' | 'ops_ui', detail? }`; a missing, malformed, or
+  unsupported signal becomes `unidentified` so existing callers stay loose.
+  The separate `makesafe_agent_money_stage_fence` observation records a money
+  stage (`ready_to_invoice` or `complete`), caller class/detail, auth mode, and
+  whether strict mode would refuse. Strict mode ships off; only an explicitly
+  signalled `agent` would be refused after the one-line flip. The existing
+  routine-key refusal remains independent and unchanged.
 - **Do not re-open the fail-open decision.** Making it fail-closed has its own
   outage profile and is not authorised by this spec. If the helper looks like a
   natural place to "finally refuse on an unreadable read", that is a separate
