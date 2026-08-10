@@ -85,8 +85,16 @@ export function makesafeExternalWriteOrigin(
     return unidentifiedOrigin(`${detail}:invalid_signal`)
   }
 
-  const signalDetail = typeof signal.detail === 'string' && signal.detail.trim() ? signal.detail.trim() : 'unspecified'
+  const signalDetail = normaliseMakesafeCallerDetail(signal.detail)
   return { class: signal.class, detail: signalDetail }
+}
+
+function normaliseMakesafeCallerDetail(value: unknown): string {
+  if (typeof value !== 'string') return 'unspecified'
+  const detail = value.trim().toLowerCase()
+  return /^(?:mcp|agent|ops|ops_ui|integration):[a-z0-9][a-z0-9_-]{0,47}$/.test(detail)
+    ? detail
+    : 'unspecified'
 }
 
 export function evaluateMakesafeMoneyStageFence(

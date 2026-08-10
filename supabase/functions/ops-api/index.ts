@@ -6137,7 +6137,11 @@ if (import.meta.main) serve(async (req: Request) => {
           body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
           'complete_and_invoice',
         )
-        return json(await completeAndInvoice(client, body))
+        return json(await completeAndInvoice(client, body, {
+          origin: makesafeExternalWriteOrigin(body, 'external:complete_and_invoice'),
+          authMode,
+          external: true,
+        }))
       case 'create_deposit_invoice': {
         await assertNoSyntheticLivefireJobs(
           client,
@@ -7311,7 +7315,11 @@ if (import.meta.main) serve(async (req: Request) => {
           body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
           'makesafe_resume_close',
         )
-        return json(await makesafeResumeClose(client, body))
+        return json(await makesafeResumeClose(client, body, {
+          origin: makesafeExternalWriteOrigin(body, 'external:makesafe_resume_close'),
+          authMode,
+          external: true,
+        }))
       }
       // makesafe_reset_failed_pack (TASK D) — privileged reset of a 'failed' pack
       // back to a lockable state (no permanent dead-ends). Same privileged gate;
@@ -15723,19 +15731,7 @@ async function assertExternalMakesafeSubstatusGuards(
   origin: MakesafeWriteOrigin,
 ): Promise<void> {
   await assertNoSyntheticLivefireJobs(client, [jobId], 'update_makesafe_substatus')
-  const moneyObservation = observeMakesafeMoneyStageFence(nextSubstatus, origin, authMode)
-  if (moneyObservation) {
-    console.warn('[ops-api] makesafe_agent_money_stage_fence', moneyObservation)
-    const strictDecision = evaluateMakesafeMoneyStageFence(
-      nextSubstatus,
-      origin,
-    )
-    // The existing routine fence remains the authoritative refusal for routine
-    // callers. In loose production mode this branch is observational only.
-    if (strictDecision.refusal && authMode !== 'routine') {
-      throw new ApiError(strictDecision.refusal.message, strictDecision.refusal.status)
-    }
-  }
+  assertMakesafeMoneyStageFence(nextSubstatus, origin, authMode)
   // B3 (Wave 0): the automation routine key MUST NOT set sent/closed states.
   // Keep this exact policy and refusal path unchanged.
   const ROUTINE_FORBIDDEN_SUBSTATUSES = ['ready_to_invoice', 'complete']
@@ -15750,6 +15746,24 @@ async function assertExternalMakesafeSubstatusGuards(
   // report-complete advance. Business invariants, not authz rules.
   await assertMakesafePortalVerifiedForAdvance(client, jobId, nextSubstatus)
   await assertMakesafeReportInForAdvance(client, jobId, nextSubstatus)
+}
+
+function assertMakesafeMoneyStageFence(
+  nextSubstatus: string,
+  origin: MakesafeWriteOrigin,
+  authMode: string | undefined,
+): void {
+  const moneyObservation = observeMakesafeMoneyStageFence(nextSubstatus, origin, authMode)
+  if (moneyObservation) {
+    console.warn('[ops-api] makesafe_agent_money_stage_fence', moneyObservation)
+    const strictDecision = evaluateMakesafeMoneyStageFence(
+      nextSubstatus,
+      origin,
+    )
+    if (strictDecision.refusal && authMode !== 'routine') {
+      throw new ApiError(strictDecision.refusal.message, strictDecision.refusal.status)
+    }
+  }
 }
 
 async function updateMakesafeSubstatus(
@@ -29471,11 +29485,17 @@ async function syncSuppliers(client: any) {
 // been created. No-op for non-make-safe jobs. Never throws: a substatus write
 // failure must not break the (already-completed) invoice flow. Exported for
 // tests as `_advanceMakesafeSubstatusOnInvoice`.
-async function advanceMakesafeSubstatusOnInvoice(client: any, job: any, jId: string): Promise<boolean> {
+async function advanceMakesafeSubstatusOnInvoice(
+  client: any,
+  job: any,
+  jId: string,
+  origin: MakesafeWriteOrigin = internalEvidenceOrigin('invoice_advance'),
+): Promise<boolean> {
   if (String(job?.type || '').toLowerCase() !== 'makesafe') return false
   try {
     await updateMakesafeSubstatus(client, { job_id: jId, substatus: 'complete' }, {
-      origin: internalEvidenceOrigin('invoice_advance'),
+      origin,
+      external: false,
     })
     return true
   } catch (e) {
@@ -29491,7 +29511,11 @@ export const _advanceMakesafeSubstatusOnInvoice = advanceMakesafeSubstatusOnInvo
 // 3. Finds/creates Xero contact
 // 4. Creates Xero DRAFT invoice with line items + SW reference
 // 5. Sets job status to "invoiced"
-async function completeAndInvoice(client: any, body: any) {
+async function completeAndInvoice(
+  client: any,
+  body: any,
+  opts: { origin?: MakesafeWriteOrigin; authMode?: string; external?: boolean } = {},
+) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
 
@@ -29502,6 +29526,10 @@ async function completeAndInvoice(client: any, body: any) {
     .eq('id', jId)
     .single()
   if (jobErr || !job) throw new Error('Job not found')
+  const origin = opts.origin || internalEvidenceOrigin('invoice_advance')
+  if (opts.external && String(job.type || '').toLowerCase() === 'makesafe') {
+    assertMakesafeMoneyStageFence('complete', origin, opts.authMode)
+  }
   await assertLegacySesMoneyActionAllowedForJob(
     client,
     jId,
@@ -29712,7 +29740,7 @@ async function completeAndInvoice(client: any, body: any) {
   // substatus (73/75 jobs). For make-safe jobs only, advance the canonical
   // substatus to 'complete'. Guarded + non-throwing so a substatus write failure
   // never breaks the (already-completed) invoice flow.
-  await advanceMakesafeSubstatusOnInvoice(client, job, jId)
+  await advanceMakesafeSubstatusOnInvoice(client, job, jId, origin)
 
   return {
     success: true,
@@ -38505,7 +38533,14 @@ function normalisePhotoAttachmentName(candidate: any, url: string, index: number
 async function applyMakesafeCloseOut(
   client: any,
   jobId: string,
-  opts: { nowIso?: () => string; operatorEmail?: string | null; source?: string } = {},
+  opts: {
+    nowIso?: () => string
+    operatorEmail?: string | null
+    source?: string
+    origin?: MakesafeWriteOrigin
+    authMode?: string
+    external?: boolean
+  } = {},
 ) {
   const now = opts.nowIso ? opts.nowIso() : new Date().toISOString()
   const source = opts.source || 'ops-api/makesafe_close_out'
@@ -38518,8 +38553,15 @@ async function applyMakesafeCloseOut(
   // Rescue SES T2 / item 2: every substatus write shares the one gated writer.
   const detailPatch: Record<string, any> = { substatus: 'complete', updated_at: now }
   if (!msd?.report_sent_at) detailPatch.report_sent_at = reportSentAt
+  if (opts.external) {
+    assertMakesafeMoneyStageFence(
+      'complete',
+      opts.origin || unidentifiedOrigin('external:makesafe_close_out'),
+      opts.authMode,
+    )
+  }
   const { data: detailRows, error: detailErr } = await writeMakesafeSubstatus(
-    client, jobId, detailPatch, internalEvidenceOrigin('closeout'), { row: 'rows' },
+    client, jobId, detailPatch, opts.origin || internalEvidenceOrigin('closeout'), { row: 'rows' },
   )
   if (detailErr) throw new ApiError('make-safe close detail update failed: ' + detailErr.message, 500)
   if (!detailRows || detailRows.length === 0) {
@@ -39655,7 +39697,11 @@ export const _makesafeSendPhotoFollowupForTest = makesafeSendPhotoFollowup
 //   1. pack.status IN {sent_not_closed, close_failed}; and
 //   2. the MAKESAFE_PACK_SENT | main marker IS PRESENT (proof the email went out).
 // No marker => no proof of send => refuse (route the operator through send).
-async function makesafeResumeClose(client: any, body: any) {
+async function makesafeResumeClose(
+  client: any,
+  body: any,
+  opts: { origin?: MakesafeWriteOrigin; authMode?: string; external?: boolean } = {},
+) {
   const jobId = body.job_id || body.jobId
   const packKind = body.pack_kind || 'main'
   if (!jobId) throw new ApiError('job_id required', 400)
@@ -39688,6 +39734,9 @@ async function makesafeResumeClose(client: any, body: any) {
       nowIso,
       operatorEmail: body.operator_email || body.user_email || null,
       source: 'ops-api/makesafe_resume_close',
+      origin: opts.origin,
+      authMode: opts.authMode,
+      external: opts.external,
     })
   } catch (closeErr) {
     const msg = ((closeErr as Error).message || String(closeErr)).slice(0, 500)

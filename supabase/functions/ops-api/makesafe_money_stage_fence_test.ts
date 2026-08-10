@@ -144,6 +144,12 @@ Deno.test('the explicit caller signal is per request; missing or malformed is un
     { class: 'agent', detail: 'mcp:one' },
   )
   assertEquals(
+    makesafeExternalWriteOrigin({
+      caller: { class: 'agent', detail: 'operator@example.test' },
+    }, 'external'),
+    { class: 'agent', detail: 'unspecified' },
+  )
+  assertEquals(
     makesafeExternalWriteOrigin({}, 'external'),
     { class: 'unidentified', detail: 'external' },
   )
