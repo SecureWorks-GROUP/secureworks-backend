@@ -125,6 +125,8 @@ function bindClient(
     visibleToTrades?: boolean;
     documentCycleId?: string | null;
     documentCycleAttribution?: string | null;
+    documentPresent?: boolean;
+    reattendCount?: number;
     serviceReport?: Record<string, unknown> | null;
     media?: Array<Record<string, unknown>>;
     eventInsertError?: Record<string, unknown>;
@@ -150,6 +152,7 @@ function bindClient(
     data_snapshot_json: options.prior || {},
     version: 1,
   };
+  let documentPresent = options.documentPresent !== false;
   const serviceReport = options.serviceReport === null
     ? null
     : options.serviceReport || {
@@ -180,7 +183,7 @@ function bindClient(
       report_type: null,
       attendance_cycle_id: detailCycle,
       cycle_number: 1,
-      reattend_count: 0,
+      reattend_count: options.reattendCount || 0,
       external_ref: "REF-001",
     },
     job_documents: document,
@@ -200,7 +203,9 @@ function bindClient(
         maybeSingle: () => {
           if (table === "job_documents" && filters.id) {
             return Promise.resolve({
-              data: document.id === filters.id ? document : null,
+              data: documentPresent && document.id === filters.id
+                ? document
+                : null,
               error: null,
             });
           }
@@ -246,7 +251,10 @@ function bindClient(
         },
         then: (resolve: (value: unknown) => unknown) => {
           if (table === "job_documents" && !mutation) {
-            const list = [document, ...(options.otherDocuments || [])]
+            const list = [
+              ...(documentPresent ? [document] : []),
+              ...(options.otherDocuments || []),
+            ]
               .filter((row) => {
                 if (filters.type && row.type && row.type !== filters.type) {
                   return false;
@@ -283,7 +291,31 @@ function bindClient(
       return query;
     },
   } as any;
-  return { client, document, mutations, bytes };
+  const stageDocument = (
+    body: Record<string, unknown>,
+    trusted: Record<string, unknown>,
+  ) => {
+    documentPresent = true;
+    document.job_id = String(body.job_id || document.job_id);
+    document.type = String(body.type || document.type);
+    document.file_name = String(body.file_name || document.file_name);
+    document.visible_to_trades = body.visible_to_trades === true;
+    document.attendance_cycle_id = trusted.attendance_cycle_id as string | null;
+    document.cycle_attribution = trusted.cycle_attribution as string | null;
+    document.data_snapshot_json = trusted.data_snapshot_json as Record<
+      string,
+      unknown
+    >;
+    return { document_id: document.id };
+  };
+  return {
+    client,
+    document,
+    mutations,
+    bytes,
+    stageDocument,
+    isDocumentPresent: () => documentPresent,
+  };
 }
 
 async function bindBody(bytes: Uint8Array) {
@@ -1309,19 +1341,266 @@ function attachClient(
   return { client, mutations, updates };
 }
 
-Deno.test("current-wiki attachment is retired before every mutation", async () => {
-  const { client, mutations } = attachClient("SWMS-TEST", {});
-  const error = await assertRejects(
-    () =>
-      _attachCurrentWikiCuratedReportForTest(client, {
-        job_id: "job-fixture",
-      }),
-    ApiError,
-    "is retired",
-  );
-  assertEquals((error as ApiError).status, 410);
-  assertEquals(mutations, []);
-});
+Deno.test(
+  "current-wiki ingress rejects an incomplete curation identity before mutation",
+  async () => {
+    const { client, mutations } = attachClient("SWMS-TEST", {});
+    const error = await assertRejects(
+      () =>
+        _attachCurrentWikiCuratedReportForTest(client, {
+          job_id: "job-fixture",
+        }, FIXTURE_ACTOR),
+      ApiError,
+      "stable opaque identities",
+    );
+    assertEquals((error as ApiError).status, 400);
+    assertEquals(mutations, []);
+  },
+);
+
+Deno.test(
+  "current selected physical service-report evidence enters only through a typed staged document and validated bind",
+  async () => {
+    const bytes = new TextEncoder().encode(
+      "%PDF-1.7\nprivacy-safe ingress fixture",
+    );
+    const fixture = bindClient(bytes, { documentPresent: false });
+    const body = await bindBody(bytes);
+    delete (body as { document_id?: string }).document_id;
+    const staged: Array<{
+      body: Record<string, unknown>;
+      trusted: Record<string, unknown>;
+    }> = [];
+
+    const result = await withStoredPdf(
+      bytes,
+      () =>
+        _attachCurrentWikiCuratedReportForTest(
+          fixture.client,
+          body,
+          FIXTURE_ACTOR,
+          {
+            attach_document: (_client, attachBody, trusted) => {
+              staged.push({ body: attachBody, trusted });
+              return Promise.resolve(
+                fixture.stageDocument(attachBody, trusted),
+              );
+            },
+          },
+        ),
+    );
+
+    assertEquals(staged.length, 1);
+    assertEquals(staged[0].body.type, "makesafe_report");
+    assertEquals(staged[0].body.visible_to_trades, true);
+    assertEquals(staged[0].trusted.attendance_cycle_id, "cycle-fixture");
+    assertEquals(staged[0].trusted.cycle_attribution, "bound");
+    assertEquals(staged[0].trusted.data_snapshot_json, {
+      curated_source_ingress_state: "awaiting_curated_bind",
+      curated_source_expected_raw_sha256: "sha256:" + await sha(bytes),
+    });
+    assertEquals(
+      Object.hasOwn(
+        staged[0].trusted.data_snapshot_json as Record<string, unknown>,
+        "evidence_source",
+      ),
+      false,
+    );
+    assertEquals(fixture.isDocumentPresent(), true);
+    assertEquals((result as Record<string, unknown>).success, true);
+    assertEquals(
+      (result as Record<string, unknown>).source_kind,
+      "durable_curated_revision",
+    );
+    assertEquals(
+      fixture.document.data_snapshot_json.evidence_source,
+      "current_cycle_curated_makesafe_report",
+    );
+    assertEquals(
+      fixture.mutations.some((mutation) =>
+        mutation.table === "job_events" &&
+        mutation.values.event_type ===
+          "ses_curated_report_source_bind_validated"
+      ),
+      true,
+    );
+  },
+);
+
+Deno.test(
+  "current-wiki ingress refuses a staged typed document whose stored artifact bytes drift",
+  async () => {
+    const bytes = new TextEncoder().encode(
+      "%PDF-1.7\nprivacy-safe source fixture",
+    );
+    const storedBytes = new TextEncoder().encode(
+      "%PDF-1.7\nprivacy-safe drift fixture",
+    );
+    const fixture = bindClient(bytes, { documentPresent: false });
+    const body = await bindBody(bytes);
+    delete (body as { document_id?: string }).document_id;
+    let stageCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = () =>
+      Promise.resolve(new Response(new Uint8Array(storedBytes).buffer));
+    try {
+      const error = await assertRejects(
+        () =>
+          _attachCurrentWikiCuratedReportForTest(
+            fixture.client,
+            body,
+            FIXTURE_ACTOR,
+            {
+              attach_document: (_client, attachBody, trusted) => {
+                stageCalls += 1;
+                return Promise.resolve(
+                  fixture.stageDocument(attachBody, trusted),
+                );
+              },
+            },
+          ),
+        ApiError,
+        "existing makesafe_report bytes drift",
+      );
+      assertEquals((error as ApiError).status, 409);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    assertEquals(stageCalls, 1);
+    assertEquals(
+      fixture.mutations.some((mutation) =>
+        mutation.table === "job_events" &&
+        mutation.values.event_type ===
+          "ses_curated_report_source_bind_validated"
+      ),
+      false,
+    );
+    assertEquals(
+      Object.hasOwn(fixture.document.data_snapshot_json, "evidence_source"),
+      false,
+    );
+  },
+);
+
+Deno.test(
+  "current-wiki ingress refuses raw bytes, curation, report, materials, photo and cycle breaks before staging",
+  async () => {
+    const bytes = new TextEncoder().encode(
+      "%PDF-1.7\nprivacy-safe break fixture",
+    );
+    const baseBody = await bindBody(bytes);
+    delete (baseBody as { document_id?: string }).document_id;
+    const cases: Array<{
+      name: string;
+      clientOptions?: Parameters<typeof bindClient>[1];
+      body: (base: Record<string, any>) => Record<string, any>;
+      message: string;
+    }> = [
+      {
+        name: "raw artifact bytes",
+        body: (base) => ({
+          ...base,
+          pdf_sha256: "sha256:" + "0".repeat(64),
+        }),
+        message: "raw SHA-256 mismatch",
+      },
+      {
+        name: "curation identity",
+        body: (base) => ({ ...base, curation_revision_id: "short" }),
+        message: "stable opaque identities",
+      },
+      {
+        name: "report identity",
+        body: (base) => ({
+          ...base,
+          report_job: currentReportJob({ contact: "Different contact" }),
+        }),
+        message: "canonical jobs.client_name",
+      },
+      {
+        name: "materials evidence",
+        clientOptions: {
+          serviceReport: {
+            id: SERVICE_REPORT_ID,
+            status: "submitted",
+            checklist_json: { materials_used: ["recorded material"] },
+            attendance_cycle_id: "cycle-fixture",
+            cycle_attribution: "bound",
+            cycle_number: 1,
+          },
+        },
+        body: (base) => ({
+          ...base,
+          report_job: currentReportJob({
+            materials: "Invented material.",
+            materials_evidence: {
+              state: "recorded_used",
+              items: ["invented material"],
+            },
+          }),
+        }),
+        message: "absent from the selected current-cycle service report",
+      },
+      {
+        name: "photo source evidence",
+        body: (base) => ({
+          ...base,
+          report_job: currentReportJob({
+            photo_evidence: {
+              ...currentReportJob().photo_evidence,
+              source_revision: "job_service_report:not-current",
+            },
+          }),
+        }),
+        message: "not the selected current-cycle service report",
+      },
+      {
+        name: "cycle alignment",
+        clientOptions: {
+          reattendCount: 1,
+          serviceReport: {
+            id: SERVICE_REPORT_ID,
+            status: "submitted",
+            checklist_json: { materials_used: [] },
+            attendance_cycle_id: "prior-cycle",
+            cycle_attribution: "bound",
+            cycle_number: 1,
+          },
+        },
+        body: (base) => ({ ...base }),
+        message: "not the selected current-cycle service report",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const fixture = bindClient(bytes, {
+        documentPresent: false,
+        ...testCase.clientOptions,
+      });
+      let attachCalls = 0;
+      const error = await assertRejects(
+        () =>
+          _attachCurrentWikiCuratedReportForTest(
+            fixture.client,
+            testCase.body(baseBody),
+            FIXTURE_ACTOR,
+            {
+              attach_document: () => {
+                attachCalls += 1;
+                return Promise.resolve({ document_id: "must-not-stage" });
+              },
+            },
+          ),
+        ApiError,
+        testCase.message,
+      );
+      assertEquals((error as ApiError).status >= 400, true, testCase.name);
+      assertEquals(attachCalls, 0, testCase.name);
+      assertEquals(fixture.mutations, [], testCase.name);
+      assertEquals(fixture.isDocumentPresent(), false, testCase.name);
+    }
+  },
+);
 
 Deno.test("Bertram repair authority admits only the exact reviewed candidate and source", () => {
   const accepted = bertramProtectedReportRepairPlan({

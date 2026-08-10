@@ -2315,6 +2315,23 @@ Deno.test(
 );
 
 Deno.test(
+  "current physical service report is evidence only and never bypasses a typed durable curated source",
+  () => {
+    const live = mlbPhysicalSwmsSnapshot({ crew: "assigned_user" });
+    const cycleId = String(live.detail!.attendance_cycle_id);
+    // The current cycle still has a submitted, cycle-bound service report and
+    // completion photo. Neither is a report document or provenance ledger.
+    assertEquals(live.reports.length > 0, true);
+    assertEquals(live.documents.length > 0, true);
+    live.documents = [];
+    live.docket_revisions = [];
+    live.docket_artifacts = [];
+
+    assertEquals(selectPhysicalReportProofForCycle(live, cycleId), null);
+  },
+);
+
+Deno.test(
   "first durable curated bind is re-hashed into a served report without a prior docket artifact",
   async () => {
     const live = mlbPhysicalSwmsSnapshot({ crew: "assigned_user" });

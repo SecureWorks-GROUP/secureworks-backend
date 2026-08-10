@@ -3867,7 +3867,10 @@ if (import.meta.main) serve(async (req: Request) => {
       // Draft / render / read ONLY; the AUTHORISE + SEND stays in makesafe_send_pack,
       // which is DELIBERATELY NOT in this allow-list and so is denied by default-deny.
       'makesafe_render_report', // retired: clear 410, no artifact write
-      'attach_current_wiki_curated_report', // retired stop-ship endpoint; always 410
+      // Privileged composite ingress: stages a typed report document, then
+      // immediately subjects it to the same curated bind gate as every other
+      // supporting report. It does not accept a service report as a source.
+      'attach_current_wiki_curated_report',
       'render_roof_report', // Wave 3: renders OUR letterhead roof report PDF + attaches (no send)
       'makesafe_report_drafts', // READ-only report-draft cockpit feed (no writes)
       // Sealed SES U5/U6 draft/read surface. Local proposal/review facts, plus
@@ -6824,8 +6827,29 @@ if (import.meta.main) serve(async (req: Request) => {
         }, 410)
       case 'makesafe_render_report':
         return json(await makesafeRenderReport(client, body))
-      case 'attach_current_wiki_curated_report':
-        return json(await attachCurrentWikiCuratedReport(client, body))
+      case 'attach_current_wiki_curated_report': {
+        const attachIsPrivileged = authMode === 'api_key' ||
+          authMode === 'routine' ||
+          (authMode === 'jwt' &&
+            (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        if (!attachIsPrivileged) {
+          return json({
+            error: 'forbidden: attach_current_wiki_curated_report requires the privileged ops key, the make-safe reporting routine, or an admin/owner session',
+          }, 403)
+        }
+        if (req.method !== 'POST') {
+          return json({ error: 'attach_current_wiki_curated_report requires POST' }, 405)
+        }
+        const attachActor = {
+          id: String(authUser?.email || authUser?.id || "ops-api:" + authMode),
+          auth_mode: (authMode === 'jwt'
+            ? 'jwt'
+            : authMode === 'routine'
+            ? 'routine'
+            : 'api_key') as 'api_key' | 'jwt' | 'routine',
+        }
+        return json(await attachCurrentWikiCuratedReport(client, body, attachActor))
+      }
       // Wave 3 -- SecureWorks own-letterhead roof report. render_roof_report is
       // routine-safe (renders OUR PDF + attaches it; no send, no authorise). The
       // roof_report_template read + save_roof_report/submit_roof_report writes are
@@ -35912,6 +35936,11 @@ async function sha256BytesHex(bytes: Uint8Array): Promise<string> {
 }
 
 const CURATED_BIND_SHA256_RE = /^sha256:[0-9a-f]{64}$/
+const SES_CURATED_BIND_ELIGIBLE_FAMILIES = [
+  'physical_makesafe',
+  'temporary_fencing',
+  'repair',
+] as const
 
 function curatedBindError(
   code: string,
@@ -36367,6 +36396,215 @@ async function assertCurrentWikiSourceEvidence(
   return { materials_source_accounting: materialsSourceAccounting }
 }
 
+type CurrentCycleCuratedBindEvidence = {
+  job_id: string
+  curation_revision_id: string
+  curation_artifact_id: string
+  supplied_raw_sha256: string
+  attendance_cycle_id: string
+}
+
+/**
+ * Source-evidence preflight for the typed-document ingress. The final bind
+ * independently reruns these checks after it re-reads the stored PDF bytes.
+ * A service report proves current-cycle inputs only; it never becomes a curated
+ * report source by itself.
+ */
+async function validateCurrentCycleCuratedBindEvidence(
+  client: any,
+  body: any,
+  options: {
+    reject_mutation_excluded_job: boolean
+  },
+): Promise<CurrentCycleCuratedBindEvidence> {
+  const jobId = String(body.job_id || body.jobId || '').trim()
+  const documentId = String(body.document_id || '').trim()
+  const curationRevisionId = String(body.curation_revision_id || '').trim()
+  const curationArtifactId = String(body.curation_artifact_id || '').trim()
+  const opaqueIdentity = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/
+  if (!jobId) {
+    throw curatedBindError(
+      'curated_bind_required_fields_missing',
+      'job_id is required',
+      400,
+    )
+  }
+  if (!opaqueIdentity.test(curationRevisionId) ||
+      !opaqueIdentity.test(curationArtifactId)) {
+    throw curatedBindError(
+      'curated_bind_curation_identity_invalid',
+      'curation revision and artifact IDs must be stable opaque identities',
+      400,
+    )
+  }
+  const curationIdentities = documentId
+    ? [documentId, curationRevisionId, curationArtifactId]
+    : [curationRevisionId, curationArtifactId]
+  if (new Set(curationIdentities).size !== curationIdentities.length) {
+    throw curatedBindError(
+      'curated_bind_curation_self_reference',
+      'curation revision/artifact identity cannot self-reference the document',
+    )
+  }
+
+  const suppliedBase64 = String(body.pdf_base64 || '').trim()
+  if (!suppliedBase64) {
+    throw curatedBindError(
+      'curated_bind_pdf_required',
+      'pdf_base64 is required',
+      400,
+    )
+  }
+  let suppliedBytes: Uint8Array
+  try {
+    suppliedBytes = Uint8Array.from(
+      atob(suppliedBase64),
+      (value) => value.charCodeAt(0),
+    )
+  } catch {
+    throw curatedBindError(
+      'curated_bind_pdf_base64_invalid',
+      'pdf_base64 is invalid',
+      400,
+    )
+  }
+  if (!suppliedBytes.byteLength ||
+      suppliedBytes.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES) {
+    throw curatedBindError(
+      'curated_bind_pdf_size_invalid',
+      'curated report exceeds the configured 8 MiB byte budget',
+      413,
+    )
+  }
+  if (new TextDecoder().decode(suppliedBytes.slice(0, 5)) !== '%PDF-') {
+    throw curatedBindError(
+      'curated_bind_pdf_type_invalid',
+      'curated report is not a PDF',
+      400,
+    )
+  }
+  const suppliedRawHash = "sha256:" + await sha256BytesHex(suppliedBytes)
+  if (requireCuratedBindSha256(body.pdf_sha256, 'pdf_sha256') !== suppliedRawHash) {
+    throw curatedBindError(
+      'curated_bind_pdf_sha256_mismatch',
+      'curated report raw SHA-256 mismatch',
+    )
+  }
+  const [jobResponse, detailResponse] = await Promise.all([
+    client.from('jobs')
+      .select('id,job_number,type,client_name,metadata')
+      .eq('id', jobId).maybeSingle(),
+    client.from('makesafe_job_details')
+      .select('report_type,attendance_cycle_id,cycle_number,reattend_count,external_ref')
+      .eq('job_id', jobId).maybeSingle(),
+  ])
+  if (jobResponse.error || !jobResponse.data ||
+      detailResponse.error || !detailResponse.data) {
+    throw curatedBindError(
+      'curated_bind_authority_read_failed',
+      'current-cycle curated report authority rows could not be read',
+    )
+  }
+  const metadata = parseJsonObject(jobResponse.data.metadata)
+  const family = canonicalSesFamilyFromCard({
+    makesafe_job_family: metadata.makesafe_job_family,
+    insurance_job_type: metadata.insurance_job_type,
+    own_template_requested: metadata.own_template_requested,
+    strata: metadata.strata,
+    report_delivery: metadata.report_delivery,
+  })
+  if (jobResponse.data.type !== 'makesafe' ||
+      !SES_CURATED_BIND_ELIGIBLE_FAMILIES.includes(
+        family as typeof SES_CURATED_BIND_ELIGIBLE_FAMILIES[number],
+      ) ||
+      detailResponse.data.report_type != null) {
+    throw curatedBindError(
+      'curated_bind_family_not_eligible',
+      'only an eligible physical make-safe or repair job may bind a makesafe_report source',
+    )
+  }
+  if (options.reject_mutation_excluded_job &&
+      jobResponse.data.job_number ===
+        CURRENT_WIKI_REPORT_MUTATION_EXCLUDED_JOB_NUMBER) {
+    throw curatedBindError(
+      'curated_bind_mutation_excluded',
+      'this job is excluded from current-wiki curated report attachment',
+    )
+  }
+  const attendanceCycleId = String(
+    detailResponse.data.attendance_cycle_id || '',
+  ).trim()
+  if (!attendanceCycleId) {
+    throw curatedBindError(
+      'curated_bind_current_cycle_missing',
+      'job has no verified current attendance cycle',
+    )
+  }
+
+  // Preserve the same current-cycle source evidence checks the final bind will
+  // run after the typed document is stored. This preflight makes every ordinary
+  // failure refuse before a staging document can be written.
+  const [kvReportRes, kvAssignmentRes] = await Promise.all([
+    client.from('job_service_reports')
+      .select('id,status,checklist_json,attendance_cycle_id,cycle_attribution,cycle_number,submitted_at,created_at')
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: false }),
+    client.from('job_assignments')
+      .select(
+        'id,status,role,crew_name,user_id,attendance_cycle_id,cycle_attribution,arrived_at,users:user_id(name)',
+      )
+      .eq('job_id', jobId),
+  ])
+  if (kvReportRes.error || kvAssignmentRes.error) {
+    throw curatedBindError(
+      'curated_bind_source_evidence_read_failed',
+      'current-cycle report/assignment source evidence could not be read',
+      503,
+    )
+  }
+  const kvReport = selectCurrentCycleReport(
+    kvReportRes.data || [],
+    detailResponse.data,
+    attendanceCycleId,
+  )
+  const kvChecklist = parseJsonObject(kvReport?.checklist_json)
+  const kvAssignments = (kvAssignmentRes.data || []).filter((row: any) => {
+    const cycleId = String(row?.attendance_cycle_id || '').trim()
+    return !cycleId || cycleId === attendanceCycleId
+  })
+  const enrichedReportJob = enrichMakesafeReportJobKvFacts(
+    body.report_job && typeof body.report_job === 'object'
+      ? body.report_job as Record<string, unknown>
+      : {},
+    {
+      tradeCount: kvChecklist.trade_count,
+      checklistArrival: kvChecklist.arrival_time,
+      assignmentArrivedAt: kvAssignments
+        .map((row: any) => row?.arrived_at)
+        .find((value: unknown) => String(value || '').trim()),
+      assignments: kvAssignments,
+    },
+  )
+  const validatedInput = await assertCurrentWikiReportInput(
+    enrichedReportJob,
+    jobResponse.data.client_name,
+  )
+  await assertCurrentWikiSourceEvidence(
+    client,
+    jobId,
+    detailResponse.data,
+    attendanceCycleId,
+    validatedInput,
+  )
+  return {
+    job_id: jobId,
+    curation_revision_id: curationRevisionId,
+    curation_artifact_id: curationArtifactId,
+    supplied_raw_sha256: suppliedRawHash,
+    attendance_cycle_id: attendanceCycleId,
+  }
+}
+
 async function assertBertramProtectedReportRepairCas(
   client: any,
   plan: typeof BERTRAM_PROTECTED_REPORT_REPAIR,
@@ -36574,7 +36812,9 @@ async function bindCurrentCycleCuratedMakesafeReport(
   // through this same fully-gated bind. Restoration remains deliberately out
   // of this repair-scoped contract until separately reviewed.
   if (jobResponse.data.type !== 'makesafe' ||
-      !['physical_makesafe', 'temporary_fencing', 'repair'].includes(family) ||
+      !SES_CURATED_BIND_ELIGIBLE_FAMILIES.includes(
+        family as typeof SES_CURATED_BIND_ELIGIBLE_FAMILIES[number],
+      ) ||
       detailResponse.data.report_type != null) {
     throw curatedBindError(
       'curated_bind_family_not_eligible',
@@ -36977,188 +37217,82 @@ async function bindCurrentCycleCuratedMakesafeReport(
   }
 }
 
-async function attachCurrentWikiCuratedReport(client: any, body: any) {
-  throw new ApiError('current-wiki report attachment is retired', 410)
-  const jobId = String(body.job_id || body.jobId || '').trim()
-  if (!jobId) throw new ApiError('job_id required', 400)
-  if (
-    body.renderer_source_revision !==
-      MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION ||
-    body.renderer_script_sha256 !==
-      MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256
-  ) {
-    throw new ApiError(
-      'renderer provenance is not the deployed current-wiki boundary',
-      409,
-    )
-  }
-  const pdfBase64 = String(body.pdf_base64 || '').trim()
-  if (!pdfBase64) throw new ApiError('pdf_base64 required', 400)
-  let pdfBytes: Uint8Array
-  try {
-    pdfBytes = Uint8Array.from(
-      atob(pdfBase64),
-      (value) => value.charCodeAt(0),
-    )
-  } catch {
-    throw new ApiError('pdf_base64 is invalid', 400)
-  }
-  if (pdfBytes.byteLength > CURRENT_WIKI_REPORT_MAX_BYTES) {
-    throw new ApiError(
-      'current wiki report exceeds the 8 MiB attachment limit',
-      413,
-    )
-  }
-  if (new TextDecoder().decode(pdfBytes.slice(0, 5)) !== '%PDF-') {
-    throw new ApiError('current wiki report is not a PDF', 400)
-  }
-  const rawHash = await sha256BytesHex(pdfBytes)
-  if (rawHash !== String(body.pdf_sha256 || '').toLowerCase()) {
-    throw new ApiError('current wiki report raw SHA-256 mismatch', 409)
-  }
-
-  const [jobResponse, detailResponse] = await Promise.all([
-    client.from('jobs').select('id,job_number,client_name,site_suburb')
-      .eq('id', jobId).maybeSingle(),
-    client.from('makesafe_job_details')
-      .select('report_type,attendance_cycle_id,external_ref')
-      .eq('job_id', jobId).maybeSingle(),
-  ])
-  if (
-    jobResponse.error || !jobResponse.data ||
-    detailResponse.error || !detailResponse.data
-  ) {
-    throw new ApiError('canonical current-cycle job facts could not be read', 409)
-  }
-  if (detailResponse.data.report_type != null) {
-    throw new ApiError(
-      'report-type jobs use the builder portal and cannot attach a make-safe report',
-      409,
-    )
-  }
-  const validatedInput = await assertCurrentWikiReportInput(
-    body.report_job || {},
-    jobResponse.data.client_name,
-  )
-  const evidenceSource = 'current_cycle_curated_makesafe_report'
-  const trustedSnapshot = {
-    report_contract_version: MAKESAFE_REPORT_CONTRACT_VERSION,
-    report_renderer_version: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION,
-    report_renderer_source_revision: MAKESAFE_REPORT_AUTHORITATIVE_SOURCE_REVISION,
-    report_renderer_script_sha256: MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_SHA256,
-    report_render_hash: rawHash,
-    report_input_hash: validatedInput.inputHash,
-  }
-  const reportScopeNarratives = [
-    validatedInput.job.scope,
-    validatedInput.job.findings,
-    validatedInput.job.works,
-    validatedInput.job.materials,
-  ].filter((value: unknown) => typeof value === 'string' && value.trim())
-
-  const existingResponse = await client.from('job_documents')
-    .select('id,file_name,version,pdf_url,storage_url,data_snapshot_json')
-    .eq('job_id', jobId).eq('type', 'makesafe_report')
-  if (existingResponse.error) {
-    throw new ApiError('existing curated documents could not be read', 503)
-  }
-  const protectedRepairPlan = jobResponse.data.job_number ===
-      CURRENT_WIKI_REPORT_MUTATION_EXCLUDED_JOB_NUMBER
-    ? bertramProtectedReportRepairPlan({
-      job_id: jobId,
-      job_number: jobResponse.data.job_number,
-      candidate_raw_sha256: rawHash,
-      authority: body.protected_repair_authority,
-    })
-    : null
-  if (
-    jobResponse.data.job_number ===
-      CURRENT_WIKI_REPORT_MUTATION_EXCLUDED_JOB_NUMBER &&
-    !protectedRepairPlan
-  ) {
-    throw new ApiError(
-      'captain-corrected artifact is mutation-excluded unless the exact reviewed Bertram repair is supplied',
-      409,
-    )
-  }
-  const identical = (existingResponse.data || []).find((row: any) => {
-    const facts = row.data_snapshot_json || {}
-    return facts.report_render_hash === rawHash &&
-      facts.report_renderer_version ===
-        MAKESAFE_REPORT_AUTHORITATIVE_RENDERER_VERSION
-  })
-  if (identical) {
-    const facts = identical.data_snapshot_json || {}
-    const missingProvenance = Object.entries(trustedSnapshot).some(
-      ([key, value]) => facts[key] !== value,
-    ) || facts.evidence_source !== evidenceSource || !facts.source_document_id
-    if (missingProvenance) {
-      const { error: provenanceError } = await client.from('job_documents')
-        .update({
-          data_snapshot_json: {
-            ...facts,
-            ...trustedSnapshot,
-            report_scope_narratives: reportScopeNarratives,
-            evidence_source: evidenceSource,
-            source_document_id: identical.id,
-          },
-        })
-        .eq('id', identical.id)
-      if (provenanceError) throw provenanceError
-    }
-    return {
-      success: true,
-      skipped: true,
-      reason: 'identical current-wiki document already attached',
-      document_id: identical.id,
-      render_hash: rawHash,
-      writes: missingProvenance ? 1 : 0,
-    }
-  }
-  if (protectedRepairPlan) {
-    await assertBertramProtectedReportRepairCas(
-      client,
-      protectedRepairPlan as typeof BERTRAM_PROTECTED_REPORT_REPAIR,
-      existingResponse.data || [],
-    )
-  }
-
-  const safeRef = String(
-    detailResponse.data.external_ref || jobResponse.data.job_number || jobId,
-  ).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
-  const safeSuburb = String(
-    jobResponse.data.site_suburb || 'suburb-not-recorded',
-  ).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
-  const fileName =
-    `Make-Safe-Report-${safeRef}-${safeSuburb}-${rawHash.slice(0, 12)}.pdf`
-  const result = await attachMakesafeDocument(client, {
-    job_id: jobId,
-    type: 'makesafe_report',
-    file_name: fileName,
-    pdf_base64: pdfBase64,
-    uploaded_by: body.operator || 'guarded-current-wiki-rerender-sweep',
-  }, {
-    data_snapshot_json: {
-      ...trustedSnapshot,
-      report_scope_narratives: reportScopeNarratives,
+type CurrentWikiCuratedReportAttachDependencies = {
+  attach_document?: (
+    client: any,
+    body: any,
+    trustedDocumentFacts: {
+      data_snapshot_json?: Record<string, unknown>
+      attendance_cycle_id?: string | null
+      cycle_attribution?: 'bound' | null
     },
-    attendance_cycle_id: detailResponse.data.attendance_cycle_id || null,
-    cycle_attribution: detailResponse.data.attendance_cycle_id
-      ? 'bound'
-      : null,
+  ) => Promise<{ document_id?: unknown }>
+  bind?: typeof bindCurrentCycleCuratedMakesafeReport
+}
+
+/**
+ * Privileged composite ingress for a freshly curated current-cycle report.
+ *
+ * The staging document intentionally carries no curated-source identity. The
+ * existing bind then re-reads its stored bytes, reruns every evidence check and
+ * writes the only durable provenance/hash/bind-event authority. A service
+ * report remains evidence for that check, never a direct report source.
+ */
+async function attachCurrentWikiCuratedReport(
+  client: any,
+  body: any,
+  actor: { id: string; auth_mode: 'api_key' | 'jwt' | 'routine' },
+  dependencies: CurrentWikiCuratedReportAttachDependencies = {},
+) {
+  const preflight = await validateCurrentCycleCuratedBindEvidence(client, body, {
+    reject_mutation_excluded_job: true,
   })
-  const { error: provenanceError } = await client.from('job_documents')
-    .update({
-      data_snapshot_json: {
-        ...trustedSnapshot,
-        report_scope_narratives: reportScopeNarratives,
-        evidence_source: evidenceSource,
-        source_document_id: result.document_id,
-      },
-    })
-    .eq('id', result.document_id)
-  if (provenanceError) throw provenanceError
-  return result
+  const sourceKey = await sha256BytesHex(new TextEncoder().encode(
+    preflight.curation_revision_id + "/" + preflight.curation_artifact_id,
+  ))
+  const rawPrefix = preflight.supplied_raw_sha256.slice(
+    'sha256:'.length,
+    'sha256:'.length + 12,
+  )
+  const attachDocument = dependencies.attach_document || attachMakesafeDocument
+  const attached = await attachDocument(client, {
+    job_id: preflight.job_id,
+    type: 'makesafe_report',
+    file_name: [
+      "curated-makesafe-report",
+      preflight.job_id,
+      sourceKey.slice(0, 16),
+      rawPrefix,
+    ].join("-") + ".pdf",
+    pdf_base64: body.pdf_base64,
+    visible_to_trades: true,
+    uploaded_by: actor.id,
+  }, {
+    // Deliberately insufficient for durableCuratedDocumentForCycle. A failed
+    // second check leaves a visible but non-authoritative staged document, not
+    // a service-report shortcut or self-authored provenance stamp.
+    data_snapshot_json: {
+      curated_source_ingress_state: 'awaiting_curated_bind',
+      curated_source_expected_raw_sha256: preflight.supplied_raw_sha256,
+    },
+    attendance_cycle_id: preflight.attendance_cycle_id,
+    cycle_attribution: 'bound',
+  })
+  const documentId = String(attached?.document_id || '').trim()
+  if (!documentId) {
+    throw curatedBindError(
+      'curated_bind_document_attach_failed',
+      'typed makesafe_report attachment did not return a document ID',
+      503,
+    )
+  }
+  const bind = dependencies.bind || bindCurrentCycleCuratedMakesafeReport
+  return await bind(client, {
+    ...body,
+    job_id: preflight.job_id,
+    document_id: documentId,
+  }, actor)
+
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
