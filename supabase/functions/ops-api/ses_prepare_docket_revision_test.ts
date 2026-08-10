@@ -3629,6 +3629,26 @@ Deno.test("a legacy v1 docket retry resolves idempotently without inserting or s
     legacyIdentity.revision_id,
   );
   assertEquals(retried.envelope.output_content_hash, legacyOutputContentHash);
+  const returnedEnvelopeArtifact = retried.artifacts.find((artifact) =>
+    artifact.path === "ASSEMBLER_ENVELOPE.json"
+  );
+  assert(returnedEnvelopeArtifact, "expected returned assembler envelope");
+  const returnedEnvelope = JSON.parse(
+    new TextDecoder().decode(returnedEnvelopeArtifact.bytes),
+  );
+  assertEquals(
+    returnedEnvelope.spine.docket_revision_id,
+    legacyIdentity.revision_id,
+  );
+  assertEquals(returnedEnvelope.output_content_hash, legacyOutputContentHash);
+  const returnedHashesArtifact = retried.artifacts.find((artifact) =>
+    artifact.path === "hashes.sha256"
+  );
+  assert(returnedHashesArtifact, "expected returned artifact hashes");
+  assertStringIncludes(
+    new TextDecoder().decode(returnedHashesArtifact.bytes),
+    `${returnedEnvelopeArtifact.content_hash.slice(7)}  ASSEMBLER_ENVELOPE.json`,
+  );
   assertEquals(retried.timing.committed_at, legacyRow.committed_at);
   assertEquals(uploads, []);
   assertEquals(rpcCalls, []);

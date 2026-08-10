@@ -3712,6 +3712,18 @@ async function prepareOne(
           output_content_hash:
             persistedResult.resolved_legacy.output_content_hash,
         };
+        const envelopeArtifactIndex = artifacts.findIndex((artifact) =>
+          artifact.path === "ASSEMBLER_ENVELOPE.json"
+        );
+        if (envelopeArtifactIndex < 0) {
+          throw new Error("docket assembler envelope artifact missing");
+        }
+        artifacts[envelopeArtifactIndex] = await artifactFromText({
+          role: "assembler_envelope",
+          path: "ASSEMBLER_ENVELOPE.json",
+          media_type: "application/json",
+          text: canonicalSesJson(baseRevision.envelope),
+        });
         baseRevision.resolved_legacy = true;
       }
       persisted = true;
