@@ -2,10 +2,12 @@
 import {
   assertEquals,
   assertRejects,
+  assertStringIncludes,
+  assert,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { updateMakesafeCompanyAddresses } from "./index.ts";
 
-function makeClient() {
+function makeClient(options: { auditError?: { message: string } | null } = {}) {
   const state = {
     id: "company-1",
     slug: "builder",
@@ -19,7 +21,7 @@ function makeClient() {
         return {
           insert: async (row: any) => {
             events.push(row);
-            return { error: null };
+            return { error: options.auditError || null };
           },
         };
       }
@@ -73,6 +75,39 @@ Deno.test("sanctioned company-address action adds and removes only a full addres
   );
   assertEquals(removed.changed, true);
   assertEquals(state.sender_patterns, ["builder.test"]);
+});
+
+Deno.test("company-address action fails after a rejected audit insert", async () => {
+  const { client } = makeClient({ auditError: { message: "audit unavailable" } });
+  await assertRejects(
+    () => updateMakesafeCompanyAddresses(client, {
+      company_slug: "builder",
+      operation: "add",
+      address: "branch@builder.test",
+    }),
+    Error,
+    "audit write failed",
+  );
+});
+
+Deno.test("company-address dispatch remains privileged, POST-only, and routine-denied", async () => {
+  const source = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const routineStart = source.indexOf("const ROUTINE_ALLOWED_ACTIONS = new Set([");
+  const routineEnd = source.indexOf("])\n", routineStart);
+  const routineActions = source.slice(routineStart, routineEnd);
+  const routeStart = source.indexOf("case 'update_makesafe_company_addresses': {");
+  const routeEnd = source.indexOf("case 'update_makesafe_details':", routeStart);
+  const route = source.slice(routeStart, routeEnd);
+
+  assert(routineStart >= 0 && routineEnd > routineStart);
+  assert(routeStart >= 0 && routeEnd > routeStart);
+  assert(!routineActions.includes("update_makesafe_company_addresses"));
+  assertStringIncludes(route, "authMode === 'api_key'");
+  assertStringIncludes(route, "authUser?.role === 'admin'");
+  assertStringIncludes(route, "authUser?.role === 'owner'");
+  assertStringIncludes(route, "if (!isPrivileged)");
+  assertStringIncludes(route, "if (req.method !== 'POST')");
+  assertStringIncludes(route, "}, 405)");
 });
 
 Deno.test("company-address action rejects domains, multiple addresses, and the primary recipient", async () => {

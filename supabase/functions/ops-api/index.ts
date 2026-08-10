@@ -2912,6 +2912,7 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   let siAt = ''
   let siTi = ''
   const xeroEmails = new Set<string>()
+  let xeroEmailMalformed = false
   let xeroLookupOk = false
   let xeroLookupErr: string | null = null
   try {
@@ -2920,8 +2921,10 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     siTi = tok.tenantId
     const xInv = await xeroGet(`/Invoices/${siId}`, siAt, siTi)
     const xContact = xInv?.Invoices?.[0]?.Contact
-    addDelimitedEmails(xeroEmails, xContact?.EmailAddress)
-    for (const cp of (xContact?.ContactPersons || [])) addDelimitedEmails(xeroEmails, cp?.EmailAddress)
+    xeroEmailMalformed = addDelimitedEmails(xeroEmails, xContact?.EmailAddress)
+    for (const cp of (xContact?.ContactPersons || [])) {
+      xeroEmailMalformed = addDelimitedEmails(xeroEmails, cp?.EmailAddress) || xeroEmailMalformed
+    }
     xeroLookupOk = true
   } catch (e) {
     xeroLookupErr = (e as Error).message || 'unknown error'
@@ -2933,6 +2936,13 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
       code: 'xero_contact_lookup_failed',
       xero_invoice_id: siId,
       detail: xeroLookupErr,
+    }, 400)
+  }
+  if (xeroEmailMalformed) {
+    return json({
+      error: 'Could not verify recipient — Xero contact contains an invalid email address.',
+      code: 'xero_contact_email_invalid',
+      xero_invoice_id: siId,
     }, 400)
   }
   const jobEmails = new Set<string>()
@@ -3174,14 +3184,17 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
   // Xero contact lookup. Token failure or contact-fetch failure both fold into
   // xero_contact_lookup_failed — we cannot verify without Xero, so we hard-stop.
   const xeroEmails = new Set<string>()
+  let xeroEmailMalformed = false
   let xeroLookupOk = false
   let xeroLookupErr: string | null = null
   try {
     const tok = await getToken(client)
     const xInv = await xeroGet(`/Invoices/${asId}`, tok.accessToken, tok.tenantId)
     const xContact = xInv?.Invoices?.[0]?.Contact
-    addDelimitedEmails(xeroEmails, xContact?.EmailAddress)
-    for (const cp of (xContact?.ContactPersons || [])) addDelimitedEmails(xeroEmails, cp?.EmailAddress)
+    xeroEmailMalformed = addDelimitedEmails(xeroEmails, xContact?.EmailAddress)
+    for (const cp of (xContact?.ContactPersons || [])) {
+      xeroEmailMalformed = addDelimitedEmails(xeroEmails, cp?.EmailAddress) || xeroEmailMalformed
+    }
     xeroLookupOk = true
   } catch (e) {
     xeroLookupErr = (e as Error).message || 'unknown error'
@@ -3195,6 +3208,16 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
         code: 'xero_contact_lookup_failed',
         xero_invoice_id: asId,
         detail: xeroLookupErr,
+      }, 400),
+    }
+  }
+  if (xeroEmailMalformed) {
+    return {
+      ok: false,
+      response: json({
+        error: 'Could not verify recipient — Xero contact contains an invalid email address.',
+        code: 'xero_contact_email_invalid',
+        xero_invoice_id: asId,
       }, 400),
     }
   }
@@ -13948,8 +13971,7 @@ export async function updateMakesafeCompanyAddresses(
       .eq('id', company.id)
     if (error) throw new ApiError(`company address update failed: ${error.message}`, 503)
 
-    try {
-      await client.from('business_events').insert({
+    const { error: auditError } = await client.from('business_events').insert({
         event_type: 'makesafe_company_recipient_updated',
         source: 'ops-api/update_makesafe_company_addresses',
         entity_type: 'makesafe_company',
@@ -13958,8 +13980,8 @@ export async function updateMakesafeCompanyAddresses(
         payload: { operation, address, company_slug: company.slug },
         metadata: { actor },
       })
-    } catch (e) {
-      console.warn('[ops-api] company recipient audit write failed:', (e as Error).message)
+    if (auditError) {
+      throw new ApiError(`company recipient audit write failed: ${auditError.message}`, 503)
     }
   }
 

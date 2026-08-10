@@ -48,12 +48,18 @@ export function normaliseFullEmail(value: unknown): string | null {
 }
 
 /** Add comma-separated email values from external contact records. */
-export function addDelimitedEmails(set: Set<string>, value: unknown): void {
-  if (typeof value !== "string") return;
+export function addDelimitedEmails(set: Set<string>, value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  let malformed = false;
   for (const part of value.split(",")) {
     const normalized = normaliseFullEmail(part);
-    if (normalized) set.add(normalized);
+    if (normalized) {
+      set.add(normalized);
+    } else if (part.trim()) {
+      malformed = true;
+    }
   }
+  return malformed;
 }
 
 /** Resolve only the company-record anchors, never caller-provided values. */
