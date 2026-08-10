@@ -381,6 +381,7 @@ export interface SesPreparedRevision {
   email_drafts: Record<string, string>;
   review_spec: Record<string, unknown>;
   release_payload: Record<string, unknown>;
+  resolved_legacy?: true;
   timing: SesTiming;
   persisted: boolean;
 }

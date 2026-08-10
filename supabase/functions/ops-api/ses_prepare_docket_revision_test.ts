@@ -40,6 +40,7 @@ import {
 import {
   prepare_ses_docket_revision as prepareSesDocketRevision,
   SES_ASSESSMENT_RECIPE_VERSION,
+  SES_DOCKET_LEGACY_OUTPUT_HASH_DOMAIN,
   SES_DOCKET_OUTPUT_HASH_DOMAIN,
   SES_DOCKET_OUTPUT_HASH_VERSION,
   SES_DOCKET_REVIEW_SPEC_VERSION,
@@ -3522,6 +3523,44 @@ function docketLedgerClient(ledger: Map<string, DocketLedgerRow>) {
   return { client, uploads, rpcCalls };
 }
 
+async function legacyOutputHashForResult(
+  result: Awaited<
+    ReturnType<typeof prepareSesDocketRevision>
+  >["results"][number],
+  legacyRevisionId: string,
+): Promise<string> {
+  const artifactHashes = result.artifacts.filter((artifact) =>
+    ![
+      "docket_manifest",
+      "assembler_envelope",
+      "capability",
+      "hashes",
+      "timing",
+    ].includes(artifact.role)
+  )
+    .map((artifact) => ({
+      role: artifact.role,
+      path: artifact.path,
+      content_hash: artifact.content_hash,
+      size_bytes: artifact.size_bytes,
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  return await sesSha256(
+    {
+      docket_revision_id: legacyRevisionId,
+      manifest: result.envelope.v2,
+      invoice_proposal: result.invoice_proposal,
+      email_drafts: result.email_drafts,
+      portal_evidence: result.portal_evidence,
+      review_spec: result.review_spec,
+      release_payload: result.release_payload,
+      artifact_hashes: artifactHashes,
+      blockers: result.blockers,
+    },
+    SES_DOCKET_LEGACY_OUTPUT_HASH_DOMAIN,
+  );
+}
+
 Deno.test("a legacy v1 docket retry resolves idempotently without inserting or superseding", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
@@ -3536,8 +3575,10 @@ Deno.test("a legacy v1 docket retry resolves idempotently without inserting or s
     "00000000-0000-0000-0000-000000000063";
   const intent = "fixture-intent-replay";
   const probe = (await prepareSesDocketRevision(
-    request(input.identity.job_id, true, intent),
-    dependencies(input),
+    request(input.identity.job_id, false, intent),
+    dependencies(input, {
+      persist: async () => ({ committed_at: "2026-07-20T03:04:05.000Z" }),
+    }),
   )).results[0];
 
   const legacyIdentity = await sesDocketRevisionIdentity({
@@ -3547,12 +3588,16 @@ Deno.test("a legacy v1 docket retry resolves idempotently without inserting or s
     input_content_hash: probe.input_content_hash,
     output_hash_version: "v1",
   });
+  const legacyOutputContentHash = await legacyOutputHashForResult(
+    probe,
+    legacyIdentity.revision_id,
+  );
   assertEquals(legacyIdentity.idempotency_key, intent);
   assertEquals(sesDocketPersistedIdempotencyKey(intent, "v1"), intent);
   const legacyRow: DocketLedgerRow = {
     id: legacyIdentity.revision_id,
     input_content_hash: probe.input_content_hash,
-    output_content_hash: `sha256:${"a".repeat(64)}`,
+    output_content_hash: legacyOutputContentHash,
     committed_at: "2026-07-20T03:04:05.000Z",
   };
   const legacyKey = docketLedgerKey(
@@ -3576,6 +3621,14 @@ Deno.test("a legacy v1 docket retry resolves idempotently without inserting or s
   )).results[0];
 
   assertEquals(retried.persisted, true);
+  assertEquals(retried.resolved_legacy, true);
+  assertEquals(retried.docket_revision_id, legacyIdentity.revision_id);
+  assertEquals(retried.output_content_hash, legacyOutputContentHash);
+  assertEquals(
+    retried.envelope.spine.docket_revision_id,
+    legacyIdentity.revision_id,
+  );
+  assertEquals(retried.envelope.output_content_hash, legacyOutputContentHash);
   assertEquals(retried.timing.committed_at, legacyRow.committed_at);
   assertEquals(uploads, []);
   assertEquals(rpcCalls, []);
@@ -3600,9 +3653,20 @@ Deno.test("a genuinely new prepare still inserts under the v2 docket identity", 
   input.attendance.current_attendance_cycle_id =
     "00000000-0000-0000-0000-000000000064";
   const intent = "fixture-intent-fresh";
+  const probe = (await prepareSesDocketRevision(
+    request(input.identity.job_id, true, intent),
+    dependencies(input),
+  )).results[0];
+  const legacyIdentity = await sesDocketRevisionIdentity({
+    assembler_version: SES_ASSEMBLER_VERSION,
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    idempotency_key: intent,
+    input_content_hash: probe.input_content_hash,
+    output_hash_version: "v1",
+  });
   const staleLegacyRow: DocketLedgerRow = {
-    id: "00000000-0000-0000-0000-0000000000ff",
-    input_content_hash: `sha256:${"b".repeat(64)}`,
+    id: legacyIdentity.revision_id,
+    input_content_hash: probe.input_content_hash,
     output_content_hash: `sha256:${"c".repeat(64)}`,
     committed_at: "2026-07-20T03:04:05.000Z",
   };
@@ -3659,6 +3723,7 @@ Deno.test("a genuinely new prepare still inserts under the v2 docket identity", 
   assertEquals(replay.docket_revision_id, prepared.docket_revision_id);
   assertEquals(replay.output_content_hash, prepared.output_content_hash);
   assertNotEquals(prepared.docket_revision_id, staleLegacyRow.id);
+  assertEquals(prepared.resolved_legacy, undefined);
 });
 
 Deno.test("docket output hash bisect names run-key variance", async () => {

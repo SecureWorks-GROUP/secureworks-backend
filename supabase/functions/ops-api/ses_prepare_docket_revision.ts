@@ -77,6 +77,8 @@ export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
 export const SES_DOCKET_OUTPUT_HASH_VERSION = "v2";
 export const SES_DOCKET_OUTPUT_HASH_DOMAIN =
   `SecureWorks:ses-docket-output:${SES_DOCKET_OUTPUT_HASH_VERSION}\n`;
+export const SES_DOCKET_LEGACY_OUTPUT_HASH_DOMAIN =
+  "SecureWorks:ses-docket-output:v1\n";
 export const SES_DOCKET_REVISION_IDENTITY_DOMAIN =
   "SecureWorks:ses-docket-revision-id:v1\n";
 export { SES_ASSESSMENT_RECIPE_VERSION, SES_PHYSICAL_FAMILY_RECIPE_VERSION };
@@ -98,7 +100,7 @@ export async function sesDocketRevisionIdentity(args: {
   idempotency_key: string;
   input_content_hash: SesSha256;
   output_hash_version?: string;
-}): Promise<{ idempotency_key: string; revision_id: string }> {
+}): Promise<SesDocketRevisionIdentity> {
   const idempotencyKey = sesDocketPersistedIdempotencyKey(
     args.idempotency_key,
     args.output_hash_version ?? SES_DOCKET_OUTPUT_HASH_VERSION,
@@ -238,6 +240,15 @@ export interface SesPortalCaptureRequest {
 export interface SesDocketRevisionIdentity {
   idempotency_key: string;
   revision_id: string;
+  output_content_hash?: SesSha256;
+}
+
+export interface SesPersistResult {
+  committed_at: string;
+  resolved_legacy?: {
+    revision_id: string;
+    output_content_hash: SesSha256;
+  };
 }
 
 export interface SesPersistPayload {
@@ -328,7 +339,7 @@ export interface SesPrepareDependencies {
     released: SesReleasedCycleReading;
     invoiced: SesInvoicedMaterialsReading;
   }>;
-  persist?: (payload: SesPersistPayload) => Promise<{ committed_at: string }>;
+  persist?: (payload: SesPersistPayload) => Promise<SesPersistResult>;
   now?: () => Date;
 }
 
@@ -3535,6 +3546,14 @@ async function prepareOne(
     stableOutput,
     SES_DOCKET_OUTPUT_HASH_DOMAIN,
   );
+  const legacyOutputContentHash = await sesSha256(
+    {
+      docket_revision_id: legacyRevisionIdentity.revision_id,
+      ...stableOutput,
+    },
+    SES_DOCKET_LEGACY_OUTPUT_HASH_DOMAIN,
+  );
+  legacyRevisionIdentity.output_content_hash = legacyOutputContentHash;
   const preXeroDocsReady = validatePreXero(
     manifest,
     priced.proposal,
@@ -3679,6 +3698,22 @@ async function prepareOne(
           stage_durations_ms: stagesMs,
         }));
       committedAt = persistedResult.committed_at;
+      if (persistedResult.resolved_legacy) {
+        baseRevision.docket_revision_id =
+          persistedResult.resolved_legacy.revision_id;
+        baseRevision.output_content_hash =
+          persistedResult.resolved_legacy.output_content_hash;
+        baseRevision.envelope = {
+          ...baseRevision.envelope,
+          spine: {
+            ...baseRevision.envelope.spine,
+            docket_revision_id: persistedResult.resolved_legacy.revision_id,
+          },
+          output_content_hash:
+            persistedResult.resolved_legacy.output_content_hash,
+        };
+        baseRevision.resolved_legacy = true;
+      }
       persisted = true;
     } else {
       stagesMs.T11 = 0;
