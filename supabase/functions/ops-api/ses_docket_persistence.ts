@@ -128,6 +128,9 @@ async function resolveLegacyDocketRevision(
     };
   } | null
 > {
+  // A v1 retry may return only the exact signed-off legacy row.  Every identity
+  // and both hashes must agree; otherwise persistence continues with the v2
+  // identity so history is never rewritten or superseded.
   const legacy = payload.legacy_identity;
   if (!legacy || legacy.idempotency_key === payload.idempotency_key) {
     return null;

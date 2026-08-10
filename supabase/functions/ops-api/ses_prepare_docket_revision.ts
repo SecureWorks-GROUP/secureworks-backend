@@ -74,6 +74,12 @@ import type {
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
+/**
+ * New preparations use the v2 output domain and a versioned persisted key.
+ * The version is deliberately part of persistence identity: v1 rows and their
+ * sign-offs remain immutable, while a changed output contract can create a
+ * distinct revision without a migration or historical rewrite.
+ */
 export const SES_DOCKET_OUTPUT_HASH_VERSION = "v2";
 export const SES_DOCKET_OUTPUT_HASH_DOMAIN =
   `SecureWorks:ses-docket-output:${SES_DOCKET_OUTPUT_HASH_VERSION}\n`;
@@ -83,6 +89,7 @@ export const SES_DOCKET_REVISION_IDENTITY_DOMAIN =
   "SecureWorks:ses-docket-revision-id:v1\n";
 export { SES_ASSESSMENT_RECIPE_VERSION, SES_PHYSICAL_FAMILY_RECIPE_VERSION };
 
+/** Maps the caller key to the versioned key stored by the append-only ledger. */
 export function sesDocketPersistedIdempotencyKey(
   idempotencyKey: string,
   outputHashVersion: string = SES_DOCKET_OUTPUT_HASH_VERSION,
@@ -94,6 +101,11 @@ export function sesDocketPersistedIdempotencyKey(
 
 export const SES_DOCKET_LEGACY_OUTPUT_HASH_VERSION = "v1";
 
+/**
+ * Computes a deterministic revision identity for one output-hash namespace.
+ * The v1 form is retained solely to resolve an existing matching legacy row;
+ * new persistence always uses the default v2 form.
+ */
 export async function sesDocketRevisionIdentity(args: {
   assembler_version: string;
   family_matrix_version: string;

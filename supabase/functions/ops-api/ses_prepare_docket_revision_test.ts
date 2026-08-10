@@ -3647,7 +3647,9 @@ Deno.test("a legacy v1 docket retry resolves idempotently without inserting or s
   assert(returnedHashesArtifact, "expected returned artifact hashes");
   assertStringIncludes(
     new TextDecoder().decode(returnedHashesArtifact.bytes),
-    `${returnedEnvelopeArtifact.content_hash.slice(7)}  ASSEMBLER_ENVELOPE.json`,
+    `${
+      returnedEnvelopeArtifact.content_hash.slice(7)
+    }  ASSEMBLER_ENVELOPE.json`,
   );
   assertEquals(retried.timing.committed_at, legacyRow.committed_at);
   assertEquals(uploads, []);
