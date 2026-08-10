@@ -74,9 +74,47 @@ import type {
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
+export const SES_DOCKET_OUTPUT_HASH_VERSION = "v2";
 export const SES_DOCKET_OUTPUT_HASH_DOMAIN =
-  "SecureWorks:ses-docket-output:v2\n";
+  `SecureWorks:ses-docket-output:${SES_DOCKET_OUTPUT_HASH_VERSION}\n`;
+export const SES_DOCKET_REVISION_IDENTITY_DOMAIN =
+  "SecureWorks:ses-docket-revision-id:v1\n";
 export { SES_ASSESSMENT_RECIPE_VERSION, SES_PHYSICAL_FAMILY_RECIPE_VERSION };
+
+export function sesDocketPersistedIdempotencyKey(
+  idempotencyKey: string,
+  outputHashVersion: string = SES_DOCKET_OUTPUT_HASH_VERSION,
+): string {
+  return outputHashVersion === "v1"
+    ? idempotencyKey
+    : `${idempotencyKey}#ses-docket-output:${outputHashVersion}`;
+}
+
+export async function sesDocketRevisionIdentity(args: {
+  assembler_version: string;
+  family_matrix_version: string;
+  idempotency_key: string;
+  input_content_hash: SesSha256;
+  output_hash_version?: string;
+}): Promise<{ idempotency_key: string; revision_id: string }> {
+  const idempotencyKey = sesDocketPersistedIdempotencyKey(
+    args.idempotency_key,
+    args.output_hash_version ?? SES_DOCKET_OUTPUT_HASH_VERSION,
+  );
+  const identityHash = await sesSha256(
+    {
+      assembler_version: args.assembler_version,
+      family_matrix_version: args.family_matrix_version,
+      idempotency_key: idempotencyKey,
+      input_content_hash: args.input_content_hash,
+    },
+    SES_DOCKET_REVISION_IDENTITY_DOMAIN,
+  );
+  return {
+    idempotency_key: idempotencyKey,
+    revision_id: stableUuidFromSha256(identityHash),
+  };
+}
 
 const MANIFEST_ITEMS = [
   "source_work_order_retrieval",
@@ -3454,16 +3492,13 @@ async function prepareOne(
   }
   stagesMs.T9 = 0;
 
-  const revisionIdentityHash = await sesSha256(
-    {
-      assembler_version: request.assembler_version,
-      family_matrix_version: SES_FAMILY_MATRIX_VERSION,
-      idempotency_key: request.idempotency_key,
-      input_content_hash: inputContentHash,
-    },
-    "SecureWorks:ses-docket-revision-id:v1\n",
-  );
-  const docketRevisionId = stableUuidFromSha256(revisionIdentityHash);
+  const revisionIdentity = await sesDocketRevisionIdentity({
+    assembler_version: request.assembler_version,
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    idempotency_key: request.idempotency_key,
+    input_content_hash: inputContentHash,
+  });
+  const docketRevisionId = revisionIdentity.revision_id;
   const stableOutput = {
     manifest,
     invoice_proposal: priced.proposal,
@@ -3621,7 +3656,7 @@ async function prepareOne(
         deps.persist!({
           revision: baseRevision,
           artifacts,
-          idempotency_key: request.idempotency_key,
+          idempotency_key: revisionIdentity.idempotency_key,
           assembler_version: request.assembler_version,
           family_matrix_version: SES_FAMILY_MATRIX_VERSION,
           accepted_at: acceptedAt.toISOString(),

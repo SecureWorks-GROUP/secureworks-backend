@@ -41,8 +41,11 @@ import {
   prepare_ses_docket_revision as prepareSesDocketRevision,
   SES_ASSESSMENT_RECIPE_VERSION,
   SES_DOCKET_OUTPUT_HASH_DOMAIN,
+  SES_DOCKET_OUTPUT_HASH_VERSION,
   SES_DOCKET_REVIEW_SPEC_VERSION,
   SES_PHYSICAL_FAMILY_RECIPE_VERSION,
+  sesDocketPersistedIdempotencyKey,
+  sesDocketRevisionIdentity,
   type SesPersistPayload,
   type SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
@@ -3402,6 +3405,144 @@ Deno.test("same input and intent produce stable revision and output hashes", asy
   );
 });
 
+Deno.test("versioned docket identity keeps v1 records resolvable and replays conflict-free", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.identity.job_id = "00000000-0000-0000-0000-000000007063";
+  input.attendance.attendance_cycle_ids = [
+    "00000000-0000-0000-0000-000000000063",
+  ];
+  input.attendance.current_attendance_cycle_id =
+    "00000000-0000-0000-0000-000000000063";
+  const intent = "fixture-intent-replay";
+  const probe = (await prepareSesDocketRevision(
+    request(input.identity.job_id, true, intent),
+    dependencies(input),
+  )).results[0];
+
+  type LedgerRow = {
+    id: string;
+    input_content_hash: string;
+    output_content_hash: string;
+  };
+  const ledger = new Map<string, LedgerRow>();
+  const lookupKey = (payload: SesPersistPayload) =>
+    [
+      payload.revision.envelope.spine.job_id,
+      payload.idempotency_key,
+      payload.assembler_version,
+      payload.family_matrix_version,
+    ].join("|");
+  const commit = (payload: SesPersistPayload) => {
+    const existing = ledger.get(lookupKey(payload));
+    if (existing) {
+      if (
+        existing.id === payload.revision.docket_revision_id &&
+        existing.input_content_hash === payload.revision.input_content_hash &&
+        existing.output_content_hash === payload.revision.output_content_hash
+      ) {
+        return { committed_at: "2026-07-27T01:00:01.000Z", inserted: false };
+      }
+      throw new Error(
+        "docket revision commit failed: input_hash_conflict: idempotency key resolves to different docket content",
+      );
+    }
+    for (const stored of ledger.values()) {
+      if (stored.id === payload.revision.docket_revision_id) {
+        throw new Error(
+          "docket revision commit failed: duplicate key value violates unique constraint makesafe_docket_revisions_pkey",
+        );
+      }
+    }
+    ledger.set(lookupKey(payload), {
+      id: payload.revision.docket_revision_id,
+      input_content_hash: payload.revision.input_content_hash,
+      output_content_hash: payload.revision.output_content_hash,
+    });
+    return { committed_at: "2026-07-27T01:00:01.000Z", inserted: true };
+  };
+
+  const legacyIdentity = await sesDocketRevisionIdentity({
+    assembler_version: SES_ASSEMBLER_VERSION,
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    idempotency_key: intent,
+    input_content_hash: probe.input_content_hash,
+    output_hash_version: "v1",
+  });
+  assertEquals(legacyIdentity.idempotency_key, intent);
+  assertEquals(sesDocketPersistedIdempotencyKey(intent, "v1"), intent);
+  const legacyRow: LedgerRow = {
+    id: legacyIdentity.revision_id,
+    input_content_hash: probe.input_content_hash,
+    output_content_hash: `sha256:${"a".repeat(64)}`,
+  };
+  ledger.set(
+    [
+      input.identity.job_id,
+      legacyIdentity.idempotency_key,
+      SES_ASSEMBLER_VERSION,
+      SES_FAMILY_MATRIX_VERSION,
+    ].join("|"),
+    legacyRow,
+  );
+
+  const persistedPayloads: SesPersistPayload[] = [];
+  const commits: Array<{ committed_at: string; inserted: boolean }> = [];
+  const persistingDependencies = dependencies(input, {
+    persist: async (payload: SesPersistPayload) => {
+      persistedPayloads.push(payload);
+      const committed = commit(payload);
+      commits.push(committed);
+      return { committed_at: committed.committed_at };
+    },
+  });
+  const firstPersist = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false, intent),
+    persistingDependencies,
+  )).results[0];
+  const replay = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false, intent),
+    persistingDependencies,
+  )).results[0];
+
+  assertEquals(persistedPayloads.length, 2);
+  assertEquals(commits.map((entry) => entry.inserted), [true, false]);
+  assertEquals(
+    persistedPayloads[0].idempotency_key,
+    sesDocketPersistedIdempotencyKey(intent),
+  );
+  assertEquals(
+    persistedPayloads[0].idempotency_key,
+    `${intent}#ses-docket-output:${SES_DOCKET_OUTPUT_HASH_VERSION}`,
+  );
+  assertNotEquals(persistedPayloads[0].idempotency_key, intent);
+  assertEquals(
+    persistedPayloads[1].idempotency_key,
+    persistedPayloads[0].idempotency_key,
+  );
+  assertNotEquals(firstPersist.docket_revision_id, legacyIdentity.revision_id);
+  assertEquals(replay.docket_revision_id, firstPersist.docket_revision_id);
+  assertEquals(
+    replay.output_content_hash,
+    firstPersist.output_content_hash,
+  );
+  assertEquals(ledger.size, 2);
+  assertEquals(
+    ledger.get(
+      [
+        input.identity.job_id,
+        intent,
+        SES_ASSEMBLER_VERSION,
+        SES_FAMILY_MATRIX_VERSION,
+      ].join("|"),
+    ),
+    legacyRow,
+  );
+});
+
 Deno.test("docket output hash bisect names run-key variance", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
@@ -3429,9 +3570,13 @@ Deno.test("docket output hash bisect names run-key variance", async () => {
   ] as const;
   const artifactHashes = (result: typeof first) =>
     result.artifacts.filter((artifact) =>
-      !["docket_manifest", "assembler_envelope", "hashes", "timing"].includes(
-        artifact.role,
-      )
+      ![
+        "docket_manifest",
+        "assembler_envelope",
+        "capability",
+        "hashes",
+        "timing",
+      ].includes(artifact.role)
     )
       .map((artifact) => ({
         role: artifact.role,
