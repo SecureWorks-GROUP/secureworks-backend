@@ -70,7 +70,8 @@ import {
  * Bump on any change to what this engine derives. Published on every row so a
  * past measurement stays attributable to the engine that produced it.
  */
-export const SES_STAGE_ENGINE_V2_VERSION = "ses-stage-engine.v2-r8-shadow";
+export const SES_STAGE_ENGINE_V2_VERSION =
+  "ses-stage-engine.v2-r9-authorised-unsent";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -601,11 +602,13 @@ export function sesStageDocsReady(
     ) {
       missing.push("the SWMS this docket requires");
     }
+    // `docsReady()` above owns the lifecycle decision: either a qualifying
+    // current DRAFT, or an already-issued invoice whose pack remains unsent.
+    // This family gate only adds the physical pack's document requirement.
     if (
-      String(input.evidence?.invoiceStatus || "").toUpperCase() !== "DRAFT" ||
       !(input.evidence?.documents?.invoice === true || pack?.invoice_doc_id)
     ) {
-      missing.push("the draft invoice");
+      missing.push("the invoice document");
     }
   } else {
     // Roof and assessment produce no SecureWorks report. What one click needs

@@ -1389,7 +1389,7 @@ Deno.test("docs ready: READY_TO_BUILD is not a sendable pack", () => {
   );
 });
 
-Deno.test("docs ready: a physical card needs a draft invoice status", () => {
+Deno.test("docs ready: physical DRAFT and issued-unsent invoice paths remain sendable", () => {
   const base = {
     packState: "READY",
     assignments: [{ id: "a1" }],
@@ -1397,7 +1397,12 @@ Deno.test("docs ready: a physical card needs a draft invoice status", () => {
     completionPhotoCount: 6,
     documents: { report: true, invoice: true, swms: false },
     swmsRequired: false,
+    packSent: false,
+    pack: { status: "drafted" },
   };
+
+  // SWMS-261157-class control: pre-authorisation still requires the shared
+  // current-DRAFT qualifier and remains Docs Ready.
   assertEquals(
     deriveSesStageV2(input({
       evidence: {
@@ -1409,18 +1414,111 @@ Deno.test("docs ready: a physical card needs a draft invoice status", () => {
       .stage,
     "report_ready",
   );
+
+  // SWMS-261158-class regression: once that same unsent pack's invoice is
+  // issued, it remains one click from sending instead of falling backwards.
   for (const invoiceStatus of ["AUTHORISED", "PAID", "SUBMITTED"]) {
+    assertEquals(
+      deriveSesStageV2(input({
+        evidence: {
+          ...base,
+          invoiceStatus,
+          invoiceQualifiesAsCurrentDraft: false,
+        },
+      }))
+        .stage,
+      "report_ready",
+      `${invoiceStatus} unsent invoice regressed from Docs Ready`,
+    );
+  }
+
+  // SWMS-261028-class controls: dead invoice lifecycles are not sendable.
+  for (const invoiceStatus of ["DELETED", "VOIDED"]) {
     assert(
       deriveSesStageV2(input({
         evidence: {
           ...base,
           invoiceStatus,
-          invoiceQualifiesAsCurrentDraft: true,
+          invoiceQualifiesAsCurrentDraft: false,
         },
-      }))
-        .stage !==
-        "report_ready",
-      `${invoiceStatus} invoice must not be Docs Ready`,
+      })).stage !== "report_ready",
+      `${invoiceStatus} invoice must stay out of Docs Ready`,
+    );
+  }
+});
+
+Deno.test("docs ready: issued-unsent continuation preserves every physical safety fence", () => {
+  const complete = {
+    assignments: [{ id: "a1" }],
+    serviceReports: [{ status: "submitted", cycle_number: 1 }],
+    completionPhotoCount: 6,
+    documents: { report: true, invoice: true, swms: true },
+    swmsRequired: true,
+    invoiceStatus: "AUTHORISED",
+    invoiceQualifiesAsCurrentDraft: false,
+    packSent: false,
+  };
+  const readyPack = {
+    status: "drafted",
+    report_doc_id: "report-doc",
+    invoice_doc_id: "invoice-doc",
+    swms_doc_id: "swms-doc",
+  };
+  const readyIssued = {
+    ...complete,
+    packState: "READY",
+    pack: readyPack,
+  };
+
+  // SWMS-261024-class: the assembler's refused/blocking presentation is not a
+  // current READY pack, even when durable document ids happen to exist.
+  const refusals: Array<[string, Record<string, unknown>]> = [
+    ["pack_refused", {
+      ...readyIssued,
+      packState: "U4_BLOCKED",
+      pack: {
+        ...readyPack,
+        status: "refused",
+        blockers: [{ code: "pack_refused" }],
+      },
+    }],
+    // Cycle scoping removes an earlier attendance's READY pack before the stage
+    // engine runs. Pin that fail-closed input boundary here.
+    ["stale cycle", {
+      ...complete,
+      packState: null,
+      pack: null,
+      serviceReports: [{ status: "submitted", cycle_number: 1 }],
+    }],
+    ["sent pack", {
+      ...readyIssued,
+      packSent: true,
+      pack: { ...readyPack, status: "sent" },
+    }],
+    ["missing invoice document", {
+      ...readyIssued,
+      documents: { ...complete.documents, invoice: false },
+      pack: { ...readyPack, invoice_doc_id: null },
+    }],
+    ["missing report document", {
+      ...readyIssued,
+      documents: { ...complete.documents, report: false },
+      pack: { ...readyPack, report_doc_id: null },
+    }],
+    ["missing required SWMS", {
+      ...readyIssued,
+      documents: { ...complete.documents, swms: false },
+      pack: { ...readyPack, swms_doc_id: null },
+    }],
+  ];
+
+  for (const [name, evidence] of refusals) {
+    const detail = name === "stale cycle"
+      ? { cycle_number: 2, reattend_count: 1 }
+      : undefined;
+    assert(
+      deriveSesStageV2(input({ detail, evidence })).stage !== "report_ready",
+      `${name} must stay out of Docs Ready`,
     );
   }
 });
