@@ -521,6 +521,69 @@ Deno.test("T14: Xero contact has no email but jobs.client_email matches → 200 
   assertEquals(resp.status, 200)
 })
 
+Deno.test("T14b: malformed Xero contact email does not fall back to jobs.client_email", async () => {
+  const fix = happyFixture()
+  const xeroInvoice = {
+    InvoiceID: "inv-123",
+    Contact: { ContactID: "xero-contact-1", EmailAddress: "not-an-email", ContactPersons: [] },
+  }
+  const { client } = makeStubClient(fix.seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": xeroInvoice } })
+  const { fetch, calls } = makeStubFetch(fix.fetchRoutes)
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const response = await _verifyAndSendInvoiceEmail({
+    client, body: makeBody(), getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+  })
+
+  assertEquals(response.status, 400)
+  assertEquals((await jsonBody(response)).code, "xero_contact_email_invalid")
+  assertEquals(calls.length, 0)
+})
+
+Deno.test("T14c: non-string Xero contact email does not fall back to jobs.client_email", async () => {
+  const fix = happyFixture()
+  const xeroInvoice = {
+    InvoiceID: "inv-123",
+    Contact: { ContactID: "xero-contact-1", EmailAddress: {}, ContactPersons: [] },
+  }
+  const { client } = makeStubClient(fix.seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": xeroInvoice } })
+  const { fetch, calls } = makeStubFetch(fix.fetchRoutes)
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const response = await _verifyAndSendInvoiceEmail({
+    client, body: makeBody(), getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+  })
+
+  assertEquals(response.status, 400)
+  assertEquals((await jsonBody(response)).code, "xero_contact_email_invalid")
+  assertEquals(calls.length, 0)
+})
+
+Deno.test("T14d: delimiter-only Xero contact email does not fall back to jobs.client_email", async () => {
+  const fix = happyFixture()
+  const xeroInvoice = {
+    InvoiceID: "inv-123",
+    Contact: { ContactID: "xero-contact-1", EmailAddress: ",", ContactPersons: [] },
+  }
+  const { client } = makeStubClient(fix.seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": xeroInvoice } })
+  const { fetch, calls } = makeStubFetch(fix.fetchRoutes)
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const response = await _verifyAndSendInvoiceEmail({
+    client, body: makeBody(), getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+  })
+
+  assertEquals(response.status, 400)
+  assertEquals((await jsonBody(response)).code, "xero_contact_email_invalid")
+  assertEquals(calls.length, 0)
+})
+
 // ─────────────────────────────────────────────────────────────────
 // T15 — ContactPersons emails are valid recipients (Xero contact's primary may
 // differ; ContactPersons array provides additional authorized addresses).
@@ -857,4 +920,30 @@ Deno.test("Quick Quote — both canonical events carry handler='ops-api/send_qui
     assertEquals(call.metadata.handler, 'ops-api/send_quick_quote_email',
       `${call.event_type} missing or wrong handler`)
   }
+})
+
+Deno.test("company report recipient anchor authorizes", async () => {
+  const fix = happyFixture()
+  const { client } = makeStubClient({
+    ...fix.seed,
+    makesafe_job_details: {
+      "job-uuid-1": { job_id: "job-uuid-1", requesting_company_id: "company-1" },
+    },
+    makesafe_companies: {
+      "company-1": {
+        id: "company-1",
+        report_recipient: "reports@builder.test",
+      },
+    },
+  })
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-123": fix.xeroInvoice } })
+  const { fetch } = makeStubFetch(fix.fetchRoutes)
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const response = await _verifyAndSendInvoiceEmail({
+    client, body: makeBody({ to_email: "reports@builder.test" }),
+    getToken, xeroGet, logBusinessEvent, fetch, env: STUB_ENV,
+  })
+  assertEquals(response.status, 200)
 })

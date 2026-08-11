@@ -175,6 +175,66 @@ Deno.test("A2: matching email_override → ok=true", async () => {
   assertEquals(events.length, 0, "no drift event for matching override")
 })
 
+Deno.test("A2b: malformed Xero contact email does not fall back to jobs.client_email", async () => {
+  const fix = happyFixture()
+  fix.xeroInvoice.Contact.EmailAddress = "not-an-email"
+  const { client } = makeStubClient(fix.seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-1": fix.xeroInvoice } })
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const result = await _verifyApproveAndSendRecipient({
+    client,
+    body: { xero_invoice_id: "inv-1", email_override: "client@example.com" },
+    getToken, xeroGet, logBusinessEvent,
+  })
+
+  assertEquals(result.ok, false)
+  if (!result.ok) assertEquals((await jsonOf(result.response)).code, "xero_contact_email_invalid")
+})
+
+Deno.test("A2c: non-string Xero contact email does not fall back to jobs.client_email", async () => {
+  const fix = happyFixture()
+  const xeroInvoice = {
+    InvoiceID: "inv-1",
+    Contact: { ContactID: "xc-1", EmailAddress: {}, ContactPersons: [] },
+  }
+  const { client } = makeStubClient(fix.seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-1": xeroInvoice } })
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const result = await _verifyApproveAndSendRecipient({
+    client,
+    body: { xero_invoice_id: "inv-1", email_override: "client@example.com" },
+    getToken, xeroGet, logBusinessEvent,
+  })
+
+  assertEquals(result.ok, false)
+  if (!result.ok) assertEquals((await jsonOf(result.response)).code, "xero_contact_email_invalid")
+})
+
+Deno.test("A2d: delimiter-only Xero contact email does not fall back to jobs.client_email", async () => {
+  const fix = happyFixture()
+  const xeroInvoice = {
+    InvoiceID: "inv-1",
+    Contact: { ContactID: "xc-1", EmailAddress: ",", ContactPersons: [] },
+  }
+  const { client } = makeStubClient(fix.seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-1": xeroInvoice } })
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const result = await _verifyApproveAndSendRecipient({
+    client,
+    body: { xero_invoice_id: "inv-1", email_override: "client@example.com" },
+    getToken, xeroGet, logBusinessEvent,
+  })
+
+  assertEquals(result.ok, false)
+  if (!result.ok) assertEquals((await jsonOf(result.response)).code, "xero_contact_email_invalid")
+})
+
 // ─────────────────────────────────────────────────────────────────
 // A3 — email_override mismatches everything → 400 recipient_mismatch
 // ─────────────────────────────────────────────────────────────────
@@ -493,4 +553,31 @@ Deno.test("A12c: undefined email_override → ok=true (skips verification)", asy
   })
 
   assertEquals(result.ok, true)
+})
+
+Deno.test("company report recipient anchor authorizes", async () => {
+  const fix = happyFixture()
+  const { client } = makeStubClient({
+    ...fix.seed,
+    makesafe_job_details: {
+      "job-1": { job_id: "job-1", requesting_company_id: "company-1" },
+    },
+    makesafe_companies: {
+      "company-1": {
+        id: "company-1",
+        report_recipient: "reports@builder.test",
+      },
+    },
+  } as Seed)
+  const { xeroGet } = makeStubXeroGet({ invoices: { "inv-1": fix.xeroInvoice } })
+  const { getToken } = makeStubGetToken()
+  const { logBusinessEvent } = makeStubLogBusinessEvent()
+
+  const branch = await _verifyApproveAndSendRecipient({
+    client,
+    body: { xero_invoice_id: "inv-1", email_override: "reports@builder.test" },
+    getToken, xeroGet, logBusinessEvent,
+  })
+  assertEquals(branch.ok, true)
+
 })

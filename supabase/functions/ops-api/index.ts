@@ -104,6 +104,12 @@ import {
   xeroContactNameContainsWhere,
 } from './xero_where_clause.ts'
 import {
+  addDelimitedEmails,
+  buildExpectedRecipientSet,
+  loadCompanyRecipientAnchors,
+  RecipientAnchorLookupError,
+} from './recipient_anchors.ts'
+import {
   describeAssignmentLockBlock,
   isClockedAssignmentBillable,
   planAssignmentLock,
@@ -2903,16 +2909,10 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   // would re-open the recipient-drift hole. Token acquisition is folded into the same
   // try block so getToken outages produce the same code as /Invoices outages.
   const verifiedJobId = siInv.job_id || null
-  const addToSet = (set: Set<string>, e: unknown) => {
-    if (typeof e !== 'string') return
-    for (const part of e.split(',')) {
-      const norm = part.trim().toLowerCase()
-      if (norm) set.add(norm)
-    }
-  }
   let siAt = ''
   let siTi = ''
   const xeroEmails = new Set<string>()
+  let xeroEmailMalformed = false
   let xeroLookupOk = false
   let xeroLookupErr: string | null = null
   try {
@@ -2921,8 +2921,10 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     siTi = tok.tenantId
     const xInv = await xeroGet(`/Invoices/${siId}`, siAt, siTi)
     const xContact = xInv?.Invoices?.[0]?.Contact
-    addToSet(xeroEmails, xContact?.EmailAddress)
-    for (const cp of (xContact?.ContactPersons || [])) addToSet(xeroEmails, cp?.EmailAddress)
+    xeroEmailMalformed = addDelimitedEmails(xeroEmails, xContact?.EmailAddress)
+    for (const cp of (xContact?.ContactPersons || [])) {
+      xeroEmailMalformed = addDelimitedEmails(xeroEmails, cp?.EmailAddress) || xeroEmailMalformed
+    }
     xeroLookupOk = true
   } catch (e) {
     xeroLookupErr = (e as Error).message || 'unknown error'
@@ -2936,21 +2938,46 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
       detail: xeroLookupErr,
     }, 400)
   }
+  if (xeroEmailMalformed) {
+    return json({
+      error: 'Could not verify recipient — Xero contact contains an invalid email address.',
+      code: 'xero_contact_email_invalid',
+      xero_invoice_id: siId,
+    }, 400)
+  }
   const jobEmails = new Set<string>()
   if (verifiedJobId) {
     const { data: siJob } = await client.from('jobs')
       .select('client_email').eq('id', verifiedJobId).maybeSingle()
-    addToSet(jobEmails, siJob?.client_email)
+    addDelimitedEmails(jobEmails, siJob?.client_email)
+  }
+
+  let companyEmails = new Set<string>()
+  try {
+    companyEmails = await loadCompanyRecipientAnchors(client, verifiedJobId)
+  } catch (e) {
+    const detail = e instanceof RecipientAnchorLookupError
+      ? e.message
+      : 'unexpected company anchor lookup failure'
+    return json({
+      error: 'Could not verify recipient — company anchors could not be loaded. Retry before sending.',
+      code: 'company_recipient_lookup_failed',
+      xero_invoice_id: siId,
+      detail,
+    }, 503)
   }
 
   // Selection rule (option 2 — cross-check):
-  //   - Xero lookup succeeded with ≥1 email → expectedSet = Xero emails. jobs.client_email
-  //     can only authorize a send via overlap; a drifted job email never expands the
-  //     allowlist past what Xero confirms.
-  //   - Xero lookup succeeded with 0 emails → legacy fallback to verified jobs.client_email.
-  //     This branch is ONLY reachable when Xero genuinely has no contact email on file —
-  //     not when the lookup itself failed (handled above).
-  const expectedSet: Set<string> = xeroEmails.size > 0 ? xeroEmails : jobEmails
+  //   - Xero lookup succeeded with ≥1 email → Xero emails plus server-owned company
+  //     anchors; a drifted jobs.client_email never expands the Xero set.
+  //   - Xero lookup succeeded with 0 emails → verified jobs.client_email plus
+  //     server-owned company anchors. This is only reachable when Xero genuinely
+  //     has no contact email on file, not when lookup failed.
+  const expectedSet = buildExpectedRecipientSet({
+    xeroEmails,
+    jobEmails,
+    companyEmails,
+  })
 
   if (expectedSet.size === 0) {
     return json({
@@ -3154,25 +3181,20 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
   }
   const verifiedJobId = asInvVerif.job_id || null
 
-  const addToSetT3 = (set: Set<string>, e: unknown) => {
-    if (typeof e !== 'string') return
-    for (const part of e.split(',')) {
-      const norm = part.trim().toLowerCase()
-      if (norm) set.add(norm)
-    }
-  }
-
   // Xero contact lookup. Token failure or contact-fetch failure both fold into
   // xero_contact_lookup_failed — we cannot verify without Xero, so we hard-stop.
   const xeroEmails = new Set<string>()
+  let xeroEmailMalformed = false
   let xeroLookupOk = false
   let xeroLookupErr: string | null = null
   try {
     const tok = await getToken(client)
     const xInv = await xeroGet(`/Invoices/${asId}`, tok.accessToken, tok.tenantId)
     const xContact = xInv?.Invoices?.[0]?.Contact
-    addToSetT3(xeroEmails, xContact?.EmailAddress)
-    for (const cp of (xContact?.ContactPersons || [])) addToSetT3(xeroEmails, cp?.EmailAddress)
+    xeroEmailMalformed = addDelimitedEmails(xeroEmails, xContact?.EmailAddress)
+    for (const cp of (xContact?.ContactPersons || [])) {
+      xeroEmailMalformed = addDelimitedEmails(xeroEmails, cp?.EmailAddress) || xeroEmailMalformed
+    }
     xeroLookupOk = true
   } catch (e) {
     xeroLookupErr = (e as Error).message || 'unknown error'
@@ -3189,18 +3211,51 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
       }, 400),
     }
   }
+  if (xeroEmailMalformed) {
+    return {
+      ok: false,
+      response: json({
+        error: 'Could not verify recipient — Xero contact contains an invalid email address.',
+        code: 'xero_contact_email_invalid',
+        xero_invoice_id: asId,
+      }, 400),
+    }
+  }
 
   // jobs.client_email via cache linkage only. Caller-supplied job_id is NOT trusted here.
   const jobEmails = new Set<string>()
   if (verifiedJobId) {
     const { data: asJobVerif } = await client.from('jobs')
       .select('client_email').eq('id', verifiedJobId).maybeSingle()
-    addToSetT3(jobEmails, asJobVerif?.client_email)
+    addDelimitedEmails(jobEmails, asJobVerif?.client_email)
   }
 
-  // Selection rule: Xero canonical when present; jobs.client_email is legacy fallback
-  // only when Xero genuinely has no contact email (lookup succeeded with empty result).
-  const expectedSet: Set<string> = xeroEmails.size > 0 ? xeroEmails : jobEmails
+  let companyEmails = new Set<string>()
+  try {
+    companyEmails = await loadCompanyRecipientAnchors(client, verifiedJobId)
+  } catch (e) {
+    const detail = e instanceof RecipientAnchorLookupError
+      ? e.message
+      : 'unexpected company anchor lookup failure'
+    return {
+      ok: false,
+      response: json({
+        error: 'Could not verify recipient — company anchors could not be loaded. Retry before approving.',
+        code: 'company_recipient_lookup_failed',
+        xero_invoice_id: asId,
+        detail,
+      }, 503),
+    }
+  }
+
+  // Selection rule: Xero is canonical when present; jobs.client_email is legacy
+  // fallback only when Xero genuinely has no contact email. Company anchors are
+  // independent server-owned additions in either case.
+  const expectedSet = buildExpectedRecipientSet({
+    xeroEmails,
+    jobEmails,
+    companyEmails,
+  })
   if (expectedSet.size === 0) {
     return {
       ok: false,
