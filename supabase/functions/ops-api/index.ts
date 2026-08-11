@@ -104,6 +104,12 @@ import {
   xeroContactNameContainsWhere,
 } from './xero_where_clause.ts'
 import {
+  addDelimitedEmails,
+  buildExpectedRecipientSet,
+  loadCompanyRecipientAnchors,
+  RecipientAnchorLookupError,
+} from './recipient_anchors.ts'
+import {
   describeAssignmentLockBlock,
   isClockedAssignmentBillable,
   planAssignmentLock,
@@ -130,6 +136,7 @@ import { getEvidenceBody } from '../_shared/evidence/body_handler.ts'
 // future quote/invoice/payment writers. Channel='po' / 'invoice' / 'payment'.
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
+import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
 import {
   MAKESAFE_BOARD_CONTRACT_VERSION,
   MAKESAFE_BOARD_MAX_ARCHIVE_PAGE,
@@ -188,6 +195,15 @@ import {
   type MakesafeSubstatusGateResult,
 } from './makesafe_substatus_gate.ts'
 import {
+  describeMakesafeWriteOrigin,
+  evaluateMakesafeMoneyStageFence,
+  internalEvidenceOrigin,
+  makesafeExternalWriteOrigin,
+  observeMakesafeMoneyStageFence,
+  type MakesafeWriteOrigin,
+  unidentifiedOrigin,
+} from './makesafe_write_origin.ts'
+import {
   planMakesafeStatusApplications,
   isMakesafeTerminalDisplayStatus,
   isMakesafeTerminalJobState,
@@ -223,6 +239,7 @@ import {
   summarizeSesPrepareResponseForHttp,
 } from './ses_assembler_input_adapter.ts'
 import {
+  prepareSesDocketRevisionAtHttpBoundary,
   prepare_ses_docket_revision,
 } from './ses_prepare_docket_revision.ts'
 import {
@@ -741,12 +758,11 @@ import {
   canonicalCurrentWikiReportHashPayload,
   type MakesafeReportJob,
 } from './makesafe_report_render.ts'
+import { enrichMakesafeReportJobKvFacts } from './makesafe_report_kv_facts.ts'
 import {
-  deriveMakesafeReportArrival,
-  deriveMakesafeReportCrewLabel,
-  enrichMakesafeReportJobKvFacts,
-} from './makesafe_report_kv_facts.ts'
-import { resolveMakesafeReportProseSections } from './makesafe_report_prose.ts'
+  compactDraftPackBillingNote,
+  projectDraftPackReport,
+} from './makesafe_draft_pack_report_projection.ts'
 import {
   canonicalSesJson,
   sesSha256,
@@ -1266,6 +1282,25 @@ function json(data: unknown, status = 200) {
     headers: { 'Content-Type': 'application/json', ...CORS },
   })
 }
+
+async function makesafeGapFillQueueResponse(
+  client: any,
+  searchParams: URLSearchParams,
+): Promise<Response> {
+  try {
+    return json(await _loadGapFillQueue(client, {
+      limit: Number(searchParams.get('limit') || '') || undefined,
+      includeReportReady: searchParams.get('include_report_ready') !== 'false',
+      intakeCursorAt: searchParams.get('intake_cursor_at'),
+      intakeCursorCaseId: searchParams.get('intake_cursor_case_id'),
+    }))
+  } catch (e) {
+    if (e instanceof _GapFillError) return json({ error: e.message }, e.status)
+    throw e
+  }
+}
+
+export const _makesafeGapFillQueueResponseForTest = makesafeGapFillQueueResponse
 
 async function reconciliationStateToken(client: any, stateFacts: any): Promise<string> {
   const { data, error } = await client.rpc(
@@ -2902,16 +2937,10 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
   // would re-open the recipient-drift hole. Token acquisition is folded into the same
   // try block so getToken outages produce the same code as /Invoices outages.
   const verifiedJobId = siInv.job_id || null
-  const addToSet = (set: Set<string>, e: unknown) => {
-    if (typeof e !== 'string') return
-    for (const part of e.split(',')) {
-      const norm = part.trim().toLowerCase()
-      if (norm) set.add(norm)
-    }
-  }
   let siAt = ''
   let siTi = ''
   const xeroEmails = new Set<string>()
+  let xeroEmailMalformed = false
   let xeroLookupOk = false
   let xeroLookupErr: string | null = null
   try {
@@ -2920,8 +2949,10 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
     siTi = tok.tenantId
     const xInv = await xeroGet(`/Invoices/${siId}`, siAt, siTi)
     const xContact = xInv?.Invoices?.[0]?.Contact
-    addToSet(xeroEmails, xContact?.EmailAddress)
-    for (const cp of (xContact?.ContactPersons || [])) addToSet(xeroEmails, cp?.EmailAddress)
+    xeroEmailMalformed = addDelimitedEmails(xeroEmails, xContact?.EmailAddress)
+    for (const cp of (xContact?.ContactPersons || [])) {
+      xeroEmailMalformed = addDelimitedEmails(xeroEmails, cp?.EmailAddress) || xeroEmailMalformed
+    }
     xeroLookupOk = true
   } catch (e) {
     xeroLookupErr = (e as Error).message || 'unknown error'
@@ -2935,21 +2966,46 @@ export async function _verifyAndSendInvoiceEmail(deps: SendInvoiceVerifyDeps): P
       detail: xeroLookupErr,
     }, 400)
   }
+  if (xeroEmailMalformed) {
+    return json({
+      error: 'Could not verify recipient — Xero contact contains an invalid email address.',
+      code: 'xero_contact_email_invalid',
+      xero_invoice_id: siId,
+    }, 400)
+  }
   const jobEmails = new Set<string>()
   if (verifiedJobId) {
     const { data: siJob } = await client.from('jobs')
       .select('client_email').eq('id', verifiedJobId).maybeSingle()
-    addToSet(jobEmails, siJob?.client_email)
+    addDelimitedEmails(jobEmails, siJob?.client_email)
+  }
+
+  let companyEmails = new Set<string>()
+  try {
+    companyEmails = await loadCompanyRecipientAnchors(client, verifiedJobId)
+  } catch (e) {
+    const detail = e instanceof RecipientAnchorLookupError
+      ? e.message
+      : 'unexpected company anchor lookup failure'
+    return json({
+      error: 'Could not verify recipient — company anchors could not be loaded. Retry before sending.',
+      code: 'company_recipient_lookup_failed',
+      xero_invoice_id: siId,
+      detail,
+    }, 503)
   }
 
   // Selection rule (option 2 — cross-check):
-  //   - Xero lookup succeeded with ≥1 email → expectedSet = Xero emails. jobs.client_email
-  //     can only authorize a send via overlap; a drifted job email never expands the
-  //     allowlist past what Xero confirms.
-  //   - Xero lookup succeeded with 0 emails → legacy fallback to verified jobs.client_email.
-  //     This branch is ONLY reachable when Xero genuinely has no contact email on file —
-  //     not when the lookup itself failed (handled above).
-  const expectedSet: Set<string> = xeroEmails.size > 0 ? xeroEmails : jobEmails
+  //   - Xero lookup succeeded with ≥1 email → Xero emails plus server-owned company
+  //     anchors; a drifted jobs.client_email never expands the Xero set.
+  //   - Xero lookup succeeded with 0 emails → verified jobs.client_email plus
+  //     server-owned company anchors. This is only reachable when Xero genuinely
+  //     has no contact email on file, not when lookup failed.
+  const expectedSet = buildExpectedRecipientSet({
+    xeroEmails,
+    jobEmails,
+    companyEmails,
+  })
 
   if (expectedSet.size === 0) {
     return json({
@@ -3153,25 +3209,20 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
   }
   const verifiedJobId = asInvVerif.job_id || null
 
-  const addToSetT3 = (set: Set<string>, e: unknown) => {
-    if (typeof e !== 'string') return
-    for (const part of e.split(',')) {
-      const norm = part.trim().toLowerCase()
-      if (norm) set.add(norm)
-    }
-  }
-
   // Xero contact lookup. Token failure or contact-fetch failure both fold into
   // xero_contact_lookup_failed — we cannot verify without Xero, so we hard-stop.
   const xeroEmails = new Set<string>()
+  let xeroEmailMalformed = false
   let xeroLookupOk = false
   let xeroLookupErr: string | null = null
   try {
     const tok = await getToken(client)
     const xInv = await xeroGet(`/Invoices/${asId}`, tok.accessToken, tok.tenantId)
     const xContact = xInv?.Invoices?.[0]?.Contact
-    addToSetT3(xeroEmails, xContact?.EmailAddress)
-    for (const cp of (xContact?.ContactPersons || [])) addToSetT3(xeroEmails, cp?.EmailAddress)
+    xeroEmailMalformed = addDelimitedEmails(xeroEmails, xContact?.EmailAddress)
+    for (const cp of (xContact?.ContactPersons || [])) {
+      xeroEmailMalformed = addDelimitedEmails(xeroEmails, cp?.EmailAddress) || xeroEmailMalformed
+    }
     xeroLookupOk = true
   } catch (e) {
     xeroLookupErr = (e as Error).message || 'unknown error'
@@ -3188,18 +3239,51 @@ export async function _verifyApproveAndSendRecipient(deps: ApproveSendVerifyDeps
       }, 400),
     }
   }
+  if (xeroEmailMalformed) {
+    return {
+      ok: false,
+      response: json({
+        error: 'Could not verify recipient — Xero contact contains an invalid email address.',
+        code: 'xero_contact_email_invalid',
+        xero_invoice_id: asId,
+      }, 400),
+    }
+  }
 
   // jobs.client_email via cache linkage only. Caller-supplied job_id is NOT trusted here.
   const jobEmails = new Set<string>()
   if (verifiedJobId) {
     const { data: asJobVerif } = await client.from('jobs')
       .select('client_email').eq('id', verifiedJobId).maybeSingle()
-    addToSetT3(jobEmails, asJobVerif?.client_email)
+    addDelimitedEmails(jobEmails, asJobVerif?.client_email)
   }
 
-  // Selection rule: Xero canonical when present; jobs.client_email is legacy fallback
-  // only when Xero genuinely has no contact email (lookup succeeded with empty result).
-  const expectedSet: Set<string> = xeroEmails.size > 0 ? xeroEmails : jobEmails
+  let companyEmails = new Set<string>()
+  try {
+    companyEmails = await loadCompanyRecipientAnchors(client, verifiedJobId)
+  } catch (e) {
+    const detail = e instanceof RecipientAnchorLookupError
+      ? e.message
+      : 'unexpected company anchor lookup failure'
+    return {
+      ok: false,
+      response: json({
+        error: 'Could not verify recipient — company anchors could not be loaded. Retry before approving.',
+        code: 'company_recipient_lookup_failed',
+        xero_invoice_id: asId,
+        detail,
+      }, 503),
+    }
+  }
+
+  // Selection rule: Xero is canonical when present; jobs.client_email is legacy
+  // fallback only when Xero genuinely has no contact email. Company anchors are
+  // independent server-owned additions in either case.
+  const expectedSet = buildExpectedRecipientSet({
+    xeroEmails,
+    jobEmails,
+    companyEmails,
+  })
   if (expectedSet.size === 0) {
     return {
       ok: false,
@@ -4908,7 +4992,11 @@ if (import.meta.main) serve(async (req: Request) => {
         // updateMakesafeSubstatus via assertExternalMakesafeSubstatusGuards,
         // plus the transition-coherence assert every write path shares — so no
         // entry point (dispatch, details editor, internal caller) can skip them.
-        return json(await updateMakesafeSubstatus(client, body, { source: 'external', authMode }))
+        return json(await updateMakesafeSubstatus(client, body, {
+          origin: makesafeExternalWriteOrigin(body, 'external'),
+          authMode,
+          external: true,
+        }))
       }
       // B4 (makesafe-report-types): "Report completed on builder portal" marker.
       // STATE/EVENT ONLY — no job_service_reports, no docs, no render, no invoice,
@@ -5262,10 +5350,7 @@ if (import.meta.main) serve(async (req: Request) => {
         if (!gapFillQueueAllowed) {
           return json({ error: 'forbidden: makesafe_gap_fill_queue requires the routine/privileged ops key or an admin/owner session' }, 403)
         }
-        return json(await _loadGapFillQueue(client, {
-          limit: Number(url.searchParams.get('limit') || '') || undefined,
-          includeReportReady: url.searchParams.get('include_report_ready') !== 'false',
-        }))
+        return await makesafeGapFillQueueResponse(client, url.searchParams)
       }
       // U2 jobs+cases desk seam. These are SELECT-only projections; cards carry
       // explicit no-auto-create flags and link fillable material to the existing
@@ -5402,7 +5487,7 @@ if (import.meta.main) serve(async (req: Request) => {
         if (!reportingIsPrivileged) {
           return json({ error: 'forbidden: makesafe_reporting_intake_pass requires the privileged ops key, the make-safe reporting routine, or an admin/owner session; a non-admin session cannot run the intake scan and advancement sweep' }, 403)
         }
-        return json(await runMakesafeReportingIntakePass(client))
+        return await makesafeReportingIntakePassResponse(client)
       }
       case 'run_ses_trade_chase': {
         // Harden SES ticket 10: KPI trade chase. DARK unless
@@ -5487,12 +5572,24 @@ if (import.meta.main) serve(async (req: Request) => {
           const actor = authMode === 'routine'
             ? 'makesafe-reporting-routine'
             : authUser?.email || `ops-api:${authMode}`
-          const response = await prepare_ses_docket_revision(
+          const response = await prepareSesDocketRevisionAtHttpBoundary(
             request,
             createSesAssemblerRuntimeDependencies(client, {
               org_id: DEFAULT_ORG_ID,
               created_by: actor,
             }),
+            {
+              // Preserve the named request/auth/business refusals the handler
+              // already exposes. The bounded fallback below is solely for an
+              // otherwise untyped one-card dry-run failure; it never sees an
+              // Error message or stack and cannot persist or notify.
+              preserveError: (error) =>
+                error instanceof SesAssemblerAdapterError ||
+                error instanceof ApiError ||
+                error instanceof SesPortalCaptureEvidenceError ||
+                error instanceof SesRoofConfirmationError ||
+                sesActionErrorResponse(error) !== null,
+            },
           )
           // Harden SES ticket 06: the Captain's ONE ping. Exact-once per job
           // per attendance cycle via the docs_ready_sms effect kind; the
@@ -6124,7 +6221,11 @@ if (import.meta.main) serve(async (req: Request) => {
           body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
           'complete_and_invoice',
         )
-        return json(await completeAndInvoice(client, body))
+        return json(await completeAndInvoice(client, body, {
+          origin: makesafeExternalWriteOrigin(body, 'external:complete_and_invoice'),
+          authMode,
+          external: true,
+        }))
       case 'create_deposit_invoice': {
         await assertNoSyntheticLivefireJobs(
           client,
@@ -7298,7 +7399,11 @@ if (import.meta.main) serve(async (req: Request) => {
           body.job_id || body.jobId ? [body.job_id || body.jobId] : [],
           'makesafe_resume_close',
         )
-        return json(await makesafeResumeClose(client, body))
+        return json(await makesafeResumeClose(client, body, {
+          origin: makesafeExternalWriteOrigin(body, 'external:makesafe_resume_close'),
+          authMode,
+          external: true,
+        }))
       }
       // makesafe_reset_failed_pack (TASK D) — privileged reset of a 'failed' pack
       // back to a lockable state (no permanent dead-ends). Same privileged gate;
@@ -8131,7 +8236,7 @@ if (import.meta.main) serve(async (req: Request) => {
             const pdfBase64 = String(pdf_base64 || '').replace(/^data:application\/pdf;base64,/i, '').replace(/\s/g, '')
             const maxPdfBytes = 5 * 1024 * 1024
             if (pdfBase64.length > Math.ceil(maxPdfBytes * 4 / 3) + 16) throw new ApiError('PDF payload size is invalid', 413)
-            let pdfBytes: Uint8Array
+            let pdfBytes: Uint8Array<ArrayBuffer>
             try {
               pdfBytes = Uint8Array.from(atob(pdfBase64), (c: string) => c.charCodeAt(0))
             } catch {
@@ -13876,8 +13981,9 @@ async function updateMakesafeDetails(client: any, body: any, opts: { authMode?: 
   // origin inside the helper — an origin that can be absent is exactly the
   // "skipped by omission" hole this item closes.
   if (updates.substatus !== undefined) {
-    await assertExternalMakesafeSubstatusGuards(client, jId, updates.substatus, opts.authMode)
-    const { data, error } = await writeMakesafeSubstatus(client, jId, updates, 'external:details')
+    const origin = makesafeExternalWriteOrigin(body, 'external:details')
+    await assertExternalMakesafeSubstatusGuards(client, jId, updates.substatus, opts.authMode, origin)
+    const { data, error } = await writeMakesafeSubstatus(client, jId, updates, origin)
     if (error) throw error
     return { ok: true, details: data }
   }
@@ -15474,9 +15580,9 @@ export const _enrichMakesafeBoardJobForTest = enrichMakesafeBoardJob
 // cancelled jobs) because each write site validated vocabulary only. Every
 // substatus write that goes through updateMakesafeSubstatus — the dispatch
 // action, the details editor, and the internal evidence events — passes this
-// assert. Sources beginning 'internal:' are the evidence events themselves
-// (trade report submitted, close-out, reattend); they are transition-checked
-// but not re-gated on the external evidence guards, which they constitute.
+// assert. Internal evidence events (trade report submitted, close-out,
+// reattend) are transition-checked but not re-gated on the external evidence
+// guards, which they constitute; their typed origin carries the detail.
 //
 // TWO HONEST LIMITS, because a comment that overstates a guard is how the next
 // reader stops checking (spec item 1):
@@ -15489,7 +15595,7 @@ export const _enrichMakesafeBoardJobForTest = enrichMakesafeBoardJob
 //     `awaiting_portal_completion`. Both are deliberate and preserved, but they
 //     exist, so "no entry point can skip this" was never true. The privileged
 //     routes DO reach the assert — makesafe_send_pack closes through
-//     applyMakesafeCloseOut ('internal:closeout') and
+//     applyMakesafeCloseOut (internal evidence origin 'closeout') and
 //     mark_makesafe_portal_report_done gates its own patch — what those skip is
 //     the external evidence guards below, which is a different boundary.
 //  2. The gate FAILS OPEN when a pre-read fails. That trade is deliberate: the
@@ -15521,10 +15627,10 @@ async function assertMakesafeSubstatusTransition(
   client: any,
   jobId: string,
   nextSubstatus: string,
-  source: string,
+  origin: MakesafeWriteOrigin,
 ): Promise<MakesafeSubstatusGateResult> {
   const next = requireValidMakesafeSubstatus(nextSubstatus)
-  const { result, refusal } = await evaluateMakesafeSubstatusGate(client, jobId, next, source, {
+  const { result, refusal } = await evaluateMakesafeSubstatusGate(client, jobId, next, origin, {
     normalizeSubstatus: normalizeMakesafeSubstatus,
   })
   if (refusal) throw new ApiError(refusal.message, refusal.status)
@@ -15625,7 +15731,7 @@ async function writeMakesafeSubstatus(
   client: any,
   jobId: string,
   patch: Record<string, any>,
-  origin: string,
+  origin: MakesafeWriteOrigin,
   opts: MakesafeSubstatusWriteOptions = {},
 ): Promise<MakesafeSubstatusWriteResult> {
   const next = patch?.substatus
@@ -15633,7 +15739,7 @@ async function writeMakesafeSubstatus(
     // A programming error, not a caller-facing refusal: this helper exists to
     // gate a TRANSITION, and there is nothing to gate.
     throw new ApiError(
-      `writeMakesafeSubstatus requires a substatus in the patch (origin=${origin})`,
+      `writeMakesafeSubstatus requires a substatus in the patch (origin=${describeMakesafeWriteOrigin(origin)})`,
       500,
     )
   }
@@ -15706,9 +15812,12 @@ async function assertExternalMakesafeSubstatusGuards(
   jobId: string,
   nextSubstatus: string,
   authMode: string | undefined,
+  origin: MakesafeWriteOrigin,
 ): Promise<void> {
   await assertNoSyntheticLivefireJobs(client, [jobId], 'update_makesafe_substatus')
+  assertMakesafeMoneyStageFence(nextSubstatus, origin, authMode)
   // B3 (Wave 0): the automation routine key MUST NOT set sent/closed states.
+  // Keep this exact policy and refusal path unchanged.
   const ROUTINE_FORBIDDEN_SUBSTATUSES = ['ready_to_invoice', 'complete']
   if (authMode === 'routine' && ROUTINE_FORBIDDEN_SUBSTATUSES.includes(String(nextSubstatus || ''))) {
     throw new ApiError(
@@ -15723,18 +15832,39 @@ async function assertExternalMakesafeSubstatusGuards(
   await assertMakesafeReportInForAdvance(client, jobId, nextSubstatus)
 }
 
+function assertMakesafeMoneyStageFence(
+  nextSubstatus: string,
+  origin: MakesafeWriteOrigin,
+  authMode: string | undefined,
+  strictEnabled?: boolean,
+): void {
+  const moneyObservation = observeMakesafeMoneyStageFence(nextSubstatus, origin, authMode, strictEnabled)
+  if (moneyObservation) {
+    console.warn('[ops-api] makesafe_agent_money_stage_fence', moneyObservation)
+    const strictDecision = evaluateMakesafeMoneyStageFence(
+      nextSubstatus,
+      origin,
+      strictEnabled,
+    )
+    if (strictDecision.refusal && authMode !== 'routine') {
+      throw new ApiError(strictDecision.refusal.message, strictDecision.refusal.status)
+    }
+  }
+}
+
 async function updateMakesafeSubstatus(
   client: any,
   body: any,
-  opts: { source?: string; authMode?: string } = {},
+  opts: { origin?: MakesafeWriteOrigin; authMode?: string; external?: boolean } = {},
 ) {
   const { job_id, jobId, substatus } = body
   const jId = job_id || jobId
   if (!jId || !substatus) throw new Error('job_id and substatus required')
   const nextSubstatus = requireValidMakesafeSubstatus(substatus)
-  const source = opts.source || 'external'
-  if (source === 'external') {
-    await assertExternalMakesafeSubstatusGuards(client, jId, nextSubstatus, opts.authMode)
+  const origin = opts.origin || unidentifiedOrigin('external')
+  const external = opts.external ?? !opts.origin
+  if (external) {
+    await assertExternalMakesafeSubstatusGuards(client, jId, nextSubstatus, opts.authMode, origin)
   }
   const updates: Record<string, any> = {
     substatus: nextSubstatus,
@@ -15753,7 +15883,7 @@ async function updateMakesafeSubstatus(
   // output, which a behaviour-preserving refactor may not do.
   if (nextSubstatus === 'company_contact_done') updates.company_contacted_at = new Date().toISOString()
 
-  const { data, error } = await writeMakesafeSubstatus(client, jId, updates, source)
+  const { data, error } = await writeMakesafeSubstatus(client, jId, updates, origin)
   if (error) throw error
 
   // ── M3d U2b: advancing a make-safe INTO a finished substatus closes the job's
@@ -15997,7 +16127,7 @@ async function markMakesafePortalReportDone(client: any, body: any) {
   if (mergedLinks) updates.external_links = mergedLinks
 
   const { data: updated, error: upErr } = await writeMakesafeSubstatus(
-    client, jId, updates, 'internal:portal_report_done',
+    client, jId, updates, internalEvidenceOrigin('portal_report_done'),
   )
   if (upErr) throw upErr
 
@@ -19202,7 +19332,7 @@ async function submitMakesafeReport(
         invoice_notes: invoice_notes || null,
         updated_at: syncAt,
       },
-      'internal:trade_report_submitted',
+      internalEvidenceOrigin('trade_report_submitted'),
       { select: 'job_id, substatus, report_received_at', row: 'maybeSingle' },
     )
     if (detailSyncErr) {
@@ -23992,19 +24122,56 @@ async function drainMakesafePdfExtraction(
 export const _scanSesMakesafesForTest = scanSesMakesafes
 
 const REPORTING_INTAKE_ADVANCE_LIMIT = 100
+const REPORTING_INTAKE_RESPONSE_CONTRACT_VERSION =
+  'makesafe-reporting-intake-pass.v2'
+
+interface ReportingIntakePassDeps {
+  scan?: (client: any) => Promise<any>
+  advance?: (client: any, body?: any) => Promise<any>
+}
+
+function reportingIntakeCount(value: unknown): number {
+  const count = Number(value)
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0
+}
+
+function reportingIntakeScanFailure(intake: any): string | null {
+  const totals = intake?.totals || {}
+  if (reportingIntakeCount(totals.write_failures) > 0) {
+    return 'deterministic_write_failure'
+  }
+  const completionStatus = String(intake?.completion_status || '').trim()
+  if (completionStatus && completionStatus !== 'completed') {
+    return 'deterministic_intake_degraded'
+  }
+  return null
+}
 
 async function runMakesafeReportingIntakePass(
   client: any,
-  deps: {
-    scan?: (client: any) => Promise<any>
-    advance?: (client: any, body?: any) => Promise<any>
-  } = {},
+  deps: ReportingIntakePassDeps = {},
 ) {
   // One reporting run owns exactly one bounded scanner invocation. The follow-up
   // sweep advances only drafts that pass the same pure field gate and the same
   // approveIntakeDraft duplicate/atomic-claim guards as a human review-button click.
   const intake = await (deps.scan || scanSesMakesafes)(client)
   const accounting = _assertReportingIntakeAccounting(intake)
+  const scanFailure = reportingIntakeScanFailure(intake)
+  if (scanFailure) {
+    // The scan has already persisted its per-case outcomes and truthful degraded
+    // health. Do not cross into a second live write phase after that failure:
+    // replay remains idempotent, while the caller gets a prompt, bounded refusal.
+    return {
+      ok: false,
+      error: scanFailure,
+      trigger: 'ses-reporting-skill',
+      bounded_intake_passes: 1,
+      advancement_limit: REPORTING_INTAKE_ADVANCE_LIMIT,
+      intake,
+      accounting,
+      advancement: null,
+    }
+  }
   const advancement = await (deps.advance || autoApproveCleanIntakeDrafts)(client, {
     limit: REPORTING_INTAKE_ADVANCE_LIMIT,
     dry_run: false,
@@ -24020,7 +24187,77 @@ async function runMakesafeReportingIntakePass(
     advancement,
   }
 }
+
+function reportingIntakePassResponseBody(result: any) {
+  const intake = result?.intake || {}
+  const totals = intake?.totals || {}
+  const selection = intake?.selection || {}
+  const advancement = result?.advancement
+  return {
+    contract_version: REPORTING_INTAKE_RESPONSE_CONTRACT_VERSION,
+    ok: result?.ok === true,
+    ...(result?.ok === true
+      ? {}
+      : { error: String(result?.error || 'reporting_intake_pass_failed') }),
+    trigger: 'ses-reporting-skill',
+    bounded_intake_passes: 1,
+    advancement_limit: REPORTING_INTAKE_ADVANCE_LIMIT,
+    intake: {
+      completion_status: String(intake?.completion_status || 'unknown'),
+      selected_cases: reportingIntakeCount(selection.selected_cases),
+      selected_sources: reportingIntakeCount(selection.selected_sources),
+      cases_attempted: reportingIntakeCount(totals.cases_attempted),
+      cases_failed: reportingIntakeCount(totals.cases_failed),
+      cases_deferred: reportingIntakeCount(totals.cases_deferred),
+      write_failures: reportingIntakeCount(totals.write_failures),
+      drafts_created: reportingIntakeCount(totals.drafts_created),
+      jobs_created: reportingIntakeCount(totals.jobs_created),
+    },
+    accounting: {
+      checked: reportingIntakeCount(result?.accounting?.checked),
+      final: reportingIntakeCount(result?.accounting?.final),
+      transient: reportingIntakeCount(result?.accounting?.transient),
+    },
+    advancement: {
+      started: advancement !== null && advancement !== undefined,
+      checked_count: reportingIntakeCount(advancement?.checked_count),
+      auto_approved_count: reportingIntakeCount(
+        advancement?.auto_approved_count,
+      ),
+      skipped_count: reportingIntakeCount(advancement?.skipped_count),
+      failed_count: reportingIntakeCount(advancement?.failed_count),
+    },
+  }
+}
+
+async function makesafeReportingIntakePassResponse(
+  client: any,
+  deps: ReportingIntakePassDeps = {},
+): Promise<Response> {
+  try {
+    const result = await runMakesafeReportingIntakePass(client, deps)
+    return json(
+      reportingIntakePassResponseBody(result),
+      result.ok === true ? 200 : 503,
+    )
+  } catch (error) {
+    console.error('[ops-api] makesafe reporting intake pass failed:', error)
+    return json({
+      contract_version: REPORTING_INTAKE_RESPONSE_CONTRACT_VERSION,
+      ok: false,
+      error: 'reporting_intake_pass_failed',
+      trigger: 'ses-reporting-skill',
+      bounded_intake_passes: 1,
+      advancement_limit: REPORTING_INTAKE_ADVANCE_LIMIT,
+      intake: null,
+      accounting: null,
+      advancement: { started: false },
+    }, 500)
+  }
+}
 export const _runMakesafeReportingIntakePassForTest = runMakesafeReportingIntakePass
+export const _makesafeReportingIntakePassResponseForTest =
+  makesafeReportingIntakePassResponse
 
 // Retained only as historical/manual implementation evidence. No dispatch action,
 // cron, reporting hook, or standing scanner can invoke this paid-AI engine.
@@ -29441,10 +29678,18 @@ async function syncSuppliers(client: any) {
 // been created. No-op for non-make-safe jobs. Never throws: a substatus write
 // failure must not break the (already-completed) invoice flow. Exported for
 // tests as `_advanceMakesafeSubstatusOnInvoice`.
-async function advanceMakesafeSubstatusOnInvoice(client: any, job: any, jId: string): Promise<boolean> {
+async function advanceMakesafeSubstatusOnInvoice(
+  client: any,
+  job: any,
+  jId: string,
+  origin: MakesafeWriteOrigin = internalEvidenceOrigin('invoice_advance'),
+): Promise<boolean> {
   if (String(job?.type || '').toLowerCase() !== 'makesafe') return false
   try {
-    await updateMakesafeSubstatus(client, { job_id: jId, substatus: 'complete' }, { source: 'internal:invoice_advance' })
+    await updateMakesafeSubstatus(client, { job_id: jId, substatus: 'complete' }, {
+      origin,
+      external: false,
+    })
     return true
   } catch (e) {
     console.log('[completeAndInvoice] makesafe substatus advance failed (non-blocking):', (e as Error).message)
@@ -29459,7 +29704,11 @@ export const _advanceMakesafeSubstatusOnInvoice = advanceMakesafeSubstatusOnInvo
 // 3. Finds/creates Xero contact
 // 4. Creates Xero DRAFT invoice with line items + SW reference
 // 5. Sets job status to "invoiced"
-async function completeAndInvoice(client: any, body: any) {
+async function completeAndInvoice(
+  client: any,
+  body: any,
+  opts: { origin?: MakesafeWriteOrigin; authMode?: string; external?: boolean } = {},
+) {
   const jId = body.job_id || body.jobId
   if (!jId) throw new Error('job_id required')
 
@@ -29470,6 +29719,10 @@ async function completeAndInvoice(client: any, body: any) {
     .eq('id', jId)
     .single()
   if (jobErr || !job) throw new Error('Job not found')
+  const origin = opts.origin || internalEvidenceOrigin('invoice_advance')
+  if (opts.external && String(job.type || '').toLowerCase() === 'makesafe') {
+    assertMakesafeMoneyStageFence('complete', origin, opts.authMode)
+  }
   await assertLegacySesMoneyActionAllowedForJob(
     client,
     jId,
@@ -29680,7 +29933,7 @@ async function completeAndInvoice(client: any, body: any) {
   // substatus (73/75 jobs). For make-safe jobs only, advance the canonical
   // substatus to 'complete'. Guarded + non-throwing so a substatus write failure
   // never breaks the (already-completed) invoice flow.
-  await advanceMakesafeSubstatusOnInvoice(client, job, jId)
+  await advanceMakesafeSubstatusOnInvoice(client, job, jId, origin)
 
   return {
     success: true,
@@ -37707,7 +37960,7 @@ async function advanceRoofReportChecklist(
       ...verificationStamp,
       updated_at: nowIso,
     },
-    'internal:roof_report_submitted',
+    internalEvidenceOrigin('roof_report_submitted'),
     { select: 'substatus, report_received_at', row: 'maybeSingle' },
   )
   if (error) {
@@ -38032,104 +38285,7 @@ function normaliseStringArray(v: any): string[] {
   return v.map((x) => String(x || '').trim()).filter(Boolean)
 }
 
-function formatCompactHours(value: number): string {
-  return Number.isInteger(value) ? String(value) : String(Math.round(value * 10) / 10)
-}
-
-function compactDraftPackBillingNote(parsed: any, ctx: DraftPackContext): string {
-  const lines = Array.isArray(parsed?.invoice?.line_items) ? parsed.invoice.line_items : []
-  const ref = String(parsed?.invoice?.reference || parsed?.report?.ref || (ctx.detail as any)?.external_ref || '').toUpperCase()
-  const company = String(
-    parsed?.invoice?.contact_name ||
-      (ctx.detail as any)?.requesting_company_name ||
-      (ctx.detail as any)?.makesafe_companies?.name ||
-      '',
-  ).toLowerCase()
-  const isMlb = ref.includes('MLB') || company.includes('major loss') || company.includes('ml builders')
-  const labourLines = lines.filter((li: any) => {
-    const desc = String(li?.description || '').toLowerCase()
-    if (!desc) return false
-    if (/material|mould killer|tarp|panel|base|feet|fixing|consumable|photo|swms/.test(desc)) return false
-    return /labou?r|attendance|make[- ]safe|make safe|crew|trade/.test(desc)
-  })
-  const labourHours = labourLines.reduce((sum: number, li: any) => {
-    const qty = Number(li?.quantity ?? 0)
-    return sum + (Number.isFinite(qty) && qty > 0 ? qty : 0)
-  }, 0)
-  if (labourHours <= 0) return ''
-
-  const desc = labourLines.map((li: any) => String(li?.description || '')).join(' ')
-  const tradeHourMatch = desc.match(/(\d+(?:\.\d+)?)\s*(?:x\s*)?(?:trades?|crew|attendees?)\b[\s\S]{0,90}?(\d+(?:\.\d+)?)\s*(?:x\s*)?hours?/i)
-  if (tradeHourMatch) {
-    const trades = Number(tradeHourMatch[1])
-    const hours = Number(tradeHourMatch[2])
-    if (Number.isFinite(trades) && trades > 0 && Number.isFinite(hours) && hours > 0) {
-      const total = trades * hours
-      const tradeLabel = trades === 1 ? 'trade' : 'trades'
-      const totalSuffix = Math.abs(total - labourHours) < 0.2 || trades === 1
-        ? ''
-        : ` (${formatCompactHours(labourHours)} labour hours total)`
-      return `${formatCompactHours(trades)} ${tradeLabel} x ${formatCompactHours(hours)} hours${totalSuffix}.`
-    }
-  }
-  if (isMlb && Math.abs(labourHours - 3) < 0.2) return '1 trade x 3 hours.'
-  return `${formatCompactHours(labourHours)} labour hours total.`
-}
 export const _compactDraftPackBillingNoteForTest = compactDraftPackBillingNote
-
-function draftPackReportPayload(parsed: any, ctx: DraftPackContext, selectedPhotoUrls: string[]): any {
-  const job: any = ctx.job || {}
-  const detail: any = ctx.detail || {}
-  const checklist = ((ctx.service_report as any)?.checklist_json || {}) as any
-  const ref = parsed.report.ref || parsed.invoice.reference || detail.external_ref || job.job_number || job.id
-  const address = parsed.report.address || job.site_address || job.site_suburb || 'Address TBC'
-  const compactBillingNote = compactDraftPackBillingNote(parsed, ctx)
-  // Crew is a trade count only. Prefer a valid supplied form, else recover from
-  // the current-cycle service report trade_count, else from person-bearing
-  // job_assignments. Never invent a name and never default to "1 trade".
-  // Break that left the Queens Park (SWMS-26845) crew line blank while two
-  // complete assignments and trade_count=2 were already recorded:
-  //   crew: parsed.report.crew || ''
-  const crew = deriveMakesafeReportCrewLabel({
-    supplied: parsed.report.crew,
-    tradeCount: checklist.trade_count,
-    assignments: ctx.assignments || [],
-  })
-  const arrival = deriveMakesafeReportArrival({
-    supplied: parsed.report.arrival,
-    checklistArrival: checklist.arrival_time,
-  })
-  // Builder-facing prose: prefer a good Claude draft; otherwise compose short
-  // explanatory paragraphs from the trade checklist. Never ship raw form dumps
-  // (Damage:/Work: fragments or tick-box materials lists) as the report body.
-  // Works precedence: Claude draft, then trade checklist work_done, then
-  // service_report notes last. Notes must never outrank the trade narrative.
-  const prose = resolveMakesafeReportProseSections(
-    {
-      scope: parsed.report.scope,
-      findings: parsed.report.findings,
-      works: parsed.report.works || checklist.work_done ||
-        (ctx.service_report as any)?.notes,
-      materials: parsed.report.materials,
-    },
-    checklist,
-  )
-  return {
-    ref,
-    address,
-    contact: parsed.report.contact || job.client_name || '',
-    date: parsed.report.date || (ctx.service_report as any)?.submitted_at || job.updated_at || '',
-    arrival,
-    crew,
-    billing_note: compactBillingNote || parsed.report.billing_note || detail.invoice_notes || '',
-    scope: prose.scope,
-    findings: prose.findings,
-    works: prose.works,
-    materials: prose.materials,
-    photos: selectedPhotoUrls.map((url) => ({ url })),
-    photo_limit: parsed.report.photo_limit || 8,
-  }
-}
 
 function draftPackInvoiceBody(parsed: any, ctx: DraftPackContext, jobId: string, operator: string, sourceBody: any = {}): any {
   const job: any = ctx.job || {}
@@ -38182,7 +38338,7 @@ async function defaultMarkDraftPackReady(client: any, jobId: string, detail: any
       report_received_at: detail?.report_received_at || now,
       updated_at: now,
     },
-    'internal:draft_pack_ready',
+    internalEvidenceOrigin('draft_pack_ready'),
     { select: 'job_id', row: 'rows' },
   )
   if (error) throw new ApiError('draft pack ready mark failed: ' + error.message, 500)
@@ -38248,16 +38404,16 @@ async function draftMakesafeReportPack(
         422,
       )
     }
-    const reportPayload = draftPackReportPayload(parsed, context, photoSet)
+    const reportPayload = projectDraftPackReport(parsed, context, photoSet)
     const renderOutput = enforceDraftPackReportFeedbackTerms({
       ...parsed,
       report: {
         ...parsed.report,
-        billing_note: reportPayload.billing_note,
-        scope: reportPayload.scope,
-        findings: reportPayload.findings,
-        works: reportPayload.works,
-        materials: reportPayload.materials,
+        billing_note: typeof reportPayload.billing_note === 'string' ? reportPayload.billing_note : undefined,
+        scope: typeof reportPayload.scope === 'string' ? reportPayload.scope : undefined,
+        findings: typeof reportPayload.findings === 'string' ? reportPayload.findings : undefined,
+        works: typeof reportPayload.works === 'string' ? reportPayload.works : undefined,
+        materials: typeof reportPayload.materials === 'string' ? reportPayload.materials : undefined,
       },
     }, promptContext)
     Object.assign(reportPayload, {
@@ -38473,7 +38629,12 @@ function normalisePhotoAttachmentName(candidate: any, url: string, index: number
 async function applyMakesafeCloseOut(
   client: any,
   jobId: string,
-  opts: { nowIso?: () => string; operatorEmail?: string | null; source?: string } = {},
+  opts: {
+    nowIso?: () => string
+    operatorEmail?: string | null
+    source?: string
+    origin?: MakesafeWriteOrigin
+  } = {},
 ) {
   const now = opts.nowIso ? opts.nowIso() : new Date().toISOString()
   const source = opts.source || 'ops-api/makesafe_close_out'
@@ -38487,7 +38648,7 @@ async function applyMakesafeCloseOut(
   const detailPatch: Record<string, any> = { substatus: 'complete', updated_at: now }
   if (!msd?.report_sent_at) detailPatch.report_sent_at = reportSentAt
   const { data: detailRows, error: detailErr } = await writeMakesafeSubstatus(
-    client, jobId, detailPatch, 'internal:closeout', { row: 'rows' },
+    client, jobId, detailPatch, opts.origin || internalEvidenceOrigin('closeout'), { row: 'rows' },
   )
   if (detailErr) throw new ApiError('make-safe close detail update failed: ' + detailErr.message, 500)
   if (!detailRows || detailRows.length === 0) {
@@ -39623,7 +39784,16 @@ export const _makesafeSendPhotoFollowupForTest = makesafeSendPhotoFollowup
 //   1. pack.status IN {sent_not_closed, close_failed}; and
 //   2. the MAKESAFE_PACK_SENT | main marker IS PRESENT (proof the email went out).
 // No marker => no proof of send => refuse (route the operator through send).
-async function makesafeResumeClose(client: any, body: any) {
+async function makesafeResumeClose(
+  client: any,
+  body: any,
+  opts: {
+    origin?: MakesafeWriteOrigin
+    authMode?: string
+    external?: boolean
+    strictEnabled?: boolean
+  } = {},
+) {
   const jobId = body.job_id || body.jobId
   const packKind = body.pack_kind || 'main'
   if (!jobId) throw new ApiError('job_id required', 400)
@@ -39647,6 +39817,15 @@ async function makesafeResumeClose(client: any, body: any) {
     return { error: gate.reason, status: pack.status || null, marker_present: markerPresent, job_id: jobId, requires: 'sent_not_closed_or_close_failed_with_marker' }
   }
 
+  if (opts.external) {
+    assertMakesafeMoneyStageFence(
+      'complete',
+      opts.origin || unidentifiedOrigin('external:makesafe_resume_close'),
+      opts.authMode,
+      opts.strictEnabled,
+    )
+  }
+
   // CLOSE ONLY. Apply the make-safe close (substatus=complete + report_sent_at if
   // absent) and sync jobs.status/jobs.completed_at. NO email, NO authorise
   // anywhere in this path. Verify the close actually landed BEFORE flipping the
@@ -39656,6 +39835,7 @@ async function makesafeResumeClose(client: any, body: any) {
       nowIso,
       operatorEmail: body.operator_email || body.user_email || null,
       source: 'ops-api/makesafe_resume_close',
+      origin: opts.origin,
     })
   } catch (closeErr) {
     const msg = ((closeErr as Error).message || String(closeErr)).slice(0, 500)
@@ -40652,7 +40832,7 @@ export async function reattendMakesafe(client: any, args: {
       last_reattend_reason: reason,
       updated_at: nowIso,
     },
-    'internal:reattend',
+    internalEvidenceOrigin('reattend'),
     {
       select: 'job_id, substatus, cycle_number, reattend_count, attendance_cycle_id, last_reattend_at',
       row: 'maybeSingle',
@@ -41035,24 +41215,20 @@ async function sendCommsMessageAction(client: any, body: any) {
 
   const payload: any = { type, contactId, jobId }
 
-  // Optional per-message sending number (GHL `fromNumber`, E.164). When the
-  // Comms tab supplies a chosen number (e.g. +61489267776 Ops for scheduling),
-  // pass it through so the SMS originates from that number. Omitting it keeps
-  // the previous behaviour: GHL uses the location default (+61489267774).
-  // Restricted to the known SecureWorks numbers so a typo can't silently fail.
-  if (type === 'SMS' && body.fromNumber) {
-    const SW_FROM_NUMBERS = [
-      '+61489267771', // SecureWorks Group Admin
-      '+61489267772', // SecureWorks Fencing Sales
-      '+61489267774', // SecureWorks Patios (location default)
-      '+61489267776', // SecureWorks Group Ops
-      '+61489267778', // SecureWorks Fencing Mgmt
-    ]
-    const normalized = String(body.fromNumber).trim()
-    if (!SW_FROM_NUMBERS.includes(normalized)) {
-      throw new Error(`Invalid fromNumber: ${normalized}. Must be a SecureWorks number in E.164 form (e.g. +61489267776).`)
+  // Per-message sending number (GHL `fromNumber`, E.164). This path POSTs to
+  // the GHL conversations API directly (it never goes through ghl-proxy), so
+  // it applies the same sender policy as ghl-proxy send_sms: ops outbound SMS
+  // defaults to +61489267771 (SecureWorks Group Admin) per the company comms
+  // rule, so client replies land in the Admin inbox. The Comms tab can still
+  // choose another SecureWorks number (e.g. +61489267776 Ops for scheduling);
+  // anything outside the allowlist in _shared/sms_from_number.ts is rejected
+  // so a typo can't silently fail.
+  if (type === 'SMS') {
+    const resolvedFrom = resolveSmsFromNumber(body.fromNumber)
+    if (!resolvedFrom.ok) {
+      throw new Error(resolvedFrom.error)
     }
-    payload.fromNumber = normalized
+    payload.fromNumber = resolvedFrom.fromNumber
   }
 
   if (type === 'SMS') {

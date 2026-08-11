@@ -20,6 +20,7 @@ import {
   _requiresMakesafeSwms,
   _updateMakesafeSubstatus,
 } from "./index.ts";
+import { internalEvidenceOrigin } from "./makesafe_write_origin.ts";
 
 // ── Chainable Supabase query stub ──────────────────────────────────────────
 // Every builder method returns the same builder; the builder is awaitable and
@@ -595,7 +596,7 @@ Deno.test("updateMakesafeSubstatus tolerates a PostgREST insert builder that lac
   const res = await _updateMakesafeSubstatus(client, {
     job_id: "job-a",
     substatus: "complete",
-  }, { source: "internal:event_insert_regression" });
+  }, { origin: internalEvidenceOrigin("event_insert_regression") });
   assertEquals(res.ok, true);
   assertEquals(eventInserted, true);
 });

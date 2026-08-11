@@ -538,7 +538,7 @@ Deno.test("effective intake authority cannot publish a builder reference from th
 });
 
 Deno.test(
-  "SWMS-26980 production-shape dry-run is HTTP-envelope ready, write-free and specifically blocked",
+  "SWMS-26980 production-shape dry-run is HTTP-envelope ready, write-free and review-visible",
   async () => {
     const input = buildSesAssemblerInput(snapshot());
     let persistCalls = 0;
@@ -567,7 +567,8 @@ Deno.test(
     assertEquals(response.dry_run, true);
     assertEquals(response.results.length, 1);
     const result = response.results[0];
-    assertEquals(result.state, "blocked");
+    assertEquals(result.state, "ready");
+    assertEquals(result.envelope.pre_xero_docs_ready, true);
     assertEquals(result.persisted, false);
     assertEquals(persistCalls, 0);
     const codes = blockerCodes(result);
@@ -2629,6 +2630,27 @@ Deno.test(
         assembler_version: SES_ASSEMBLER_VERSION,
         dry_run: true,
         force_refresh: true,
+        draft_pack_output: {
+          report: {
+            ref: roofInput.source.builder_reference,
+            scope: "Roof report scope is recorded.",
+            findings: "Roof condition is recorded.",
+            works: "Roof report completed.",
+            materials: "No materials used.",
+          },
+          invoice: {
+            reference: roofInput.source.builder_reference,
+            line_items: [{
+              // This validates the DraftPackOutput against its own MLB labour
+              // contract. The roof fixed-price proposal is independently
+              // derived from the typed work-order storey fact below.
+              description: "Roof report attendance labour",
+              quantity: 3,
+              unit_price: 85,
+            }],
+          },
+          change_summary: "Canonical roof draft fixture.",
+        },
       },
       {
         resolveInput: async () => roofInput,
@@ -2636,8 +2658,17 @@ Deno.test(
         now: () => new Date("2026-07-28T08:00:00.000Z"),
       },
     )).results[0];
-    assertEquals(roofResult.invoice_proposal?.storeys, "double");
-    assertEquals(roofResult.invoice_proposal?.subtotal_ex_gst, 300);
+    // The reference-matching DraftPackOutput is valid; this fixture omits only
+    // the headless portal capability. That ordinary evidence gap must remain
+    // review-visible with an inert draft-zero proposal, never issue the fixed
+    // roof price or cross a send fence.
+    assertEquals(roofResult.blockers.map((blocker) => blocker.reason_code), [
+      "capability_portal_degraded",
+    ]);
+    assertEquals(roofResult.invoice_proposal?.state, "price_unresolved");
+    assertEquals(roofResult.envelope.invoice_create_approved, false);
+    assertEquals(roofResult.envelope.client_send_approved, false);
+    assertEquals(roofResult.release_payload.send_email, false);
 
     const cleanPricingBoundary = snapshot();
     cleanPricingBoundary.job.metadata.makesafe_job_family =
@@ -2785,7 +2816,8 @@ Deno.test(
       ),
       false,
     );
-    assertEquals(missing.results[0].state, "blocked");
+    assertEquals(missing.results[0].state, "ready");
+    assertEquals(missing.results[0].envelope.pre_xero_docs_ready, true);
     assertEquals(renderCalls, 0);
     assertEquals(
       missing.results[0].blockers.filter((blocker) =>
@@ -2845,7 +2877,8 @@ Deno.test(
         dependencies,
       );
       const result = response.results[0];
-      assertEquals(result.state, "blocked");
+      assertEquals(result.state, "ready");
+      assertEquals(result.envelope.pre_xero_docs_ready, true);
       assert(
         result.blockers.some((blocker) =>
           blocker.reason_code === "spine_missing_source" &&
@@ -3514,8 +3547,10 @@ Deno.test(
     assertEquals(result.envelope.v2.classification.recipe_selected, true);
     assert(!codes.includes("restoration_recipe_unsealed"));
     assert(!codes.includes("family_unknown"));
-    // No trade report / photos on this fixture — physical evidence path blocks.
-    assertEquals(result.state, "blocked");
+    // No trade report / photos on this fixture — physical evidence remains in
+    // the complete review pack without suppressing Docs Ready.
+    assertEquals(result.state, "ready");
+    assertEquals(result.envelope.pre_xero_docs_ready, true);
     assert(
       codes.some((code) =>
         code === "trade_evidence_missing" ||
@@ -3654,6 +3689,7 @@ Deno.test(
           "spine_missing_lineage",
           "spine_missing_source",
           "spine_missing_deliverables",
+          "canonical_draft_pack_output_missing",
           "capability_portal_degraded",
           "invoice_reference_missing",
         ],
@@ -3716,7 +3752,7 @@ Deno.test(
   async () => {
     assertEquals(
       SES_FAMILY_MATRIX_VERSION,
-      "ses-builder-family-matrix/2026-08-04.1",
+      "ses-builder-family-matrix/2026-08-07.1",
     );
     const shapes = [
       ["SWMS-26732", null, "photos"],

@@ -36,6 +36,14 @@ All in `supabase/functions/`. Deploy with:
   `contact_not_found`), and a NEW opportunity is created with a name built from
   the fetched contact's identity. `body.skipOpportunity` suppresses opportunity
   creation on either path.
+- **`send_sms` sender number**: every outbound SMS resolves its `fromNumber`
+  through `_shared/sms_from_number.ts` — an omitted/blank number defaults to
+  `+61489267771` (SecureWorks Group Admin, the company comms rule so client
+  replies land in the Admin inbox thread; the GHL location default
+  `+61489267774` Patios is never used implicitly), an explicit override must be
+  one of the five allowlisted SecureWorks numbers, and anything else is a 400.
+  ops-api `send_comms_message` (the one direct-to-GHL POST that bypasses
+  ghl-proxy) applies the same shared policy.
 - **Test-lab routing** (`&testMode=true`): an exact, request-level opt-in that
   shadows the production route so every scoping tool (fencing, patio, decking,
   combo) writes to the captain-approved GENERAL TESTTESTTEST GHL pipeline and

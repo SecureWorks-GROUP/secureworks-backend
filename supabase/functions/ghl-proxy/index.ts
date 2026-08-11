@@ -17,7 +17,7 @@
 //   POST ?action=update_contact  { contactId, name, email, phone, address, suburb }
 //   GET  ?action=get_conversation&contactId=xxx  — GHL conversation thread (last 30 msgs)
 //   GET  ?action=get_my_messages&contactId=xxx    — outbound-only messages (for Trade app)
-//   POST ?action=send_sms   { contactId, message, jobId?, userId? } — also logs to job_events
+//   POST ?action=send_sms   { contactId, message, jobId?, userId?, fromNumber? } — also logs to job_events; sender defaults to +61489267771 (Group Admin)
 //   POST ?action=send_email { contactId, subject, htmlBody }
 //   POST ?action=add_note  { contactId, body, jobId? } — add note to GHL contact
 //   GET  ?action=search_jobs&q=smith&type=patio&limit=30  — search Supabase jobs
@@ -47,6 +47,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import type { MatchMethod } from '../_shared/evidence/types.ts'
+import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
 import {
   assignJobNumberWithNullCas,
   buildLeadSearchRows,
@@ -3910,28 +3911,22 @@ serve(async (req: Request) => {
       }
       if (!contactId) return json({ error: 'could not resolve contactId from phone' }, 400)
 
-      // Optional per-message sending number (GHL `fromNumber`, E.164).
-      // When omitted, GHL falls back to the location default (+61489267774
-      // SecureWorks Patios) exactly as before — so existing callers are
-      // unaffected. The booking/make-safe path passes +61489267776
-      // (SecureWorks Group Ops) so those SMS go out from the Ops number.
-      // Only allow the known SecureWorks location numbers — a typo or a
+      // Per-message sending number (GHL `fromNumber`, E.164). Company rule
+      // (wiki OPS.md): every ops outbound SMS originates from +61489267771
+      // (SecureWorks Group Admin) so client replies land back in the Admin
+      // inbox thread. When the caller omits fromNumber we default to that
+      // number rather than letting GHL fall back to the location default
+      // (+61489267774 SecureWorks Patios), which used to strand replies in
+      // the Patios inbox. Callers that need a different sender pass it
+      // explicitly — e.g. the booking/make-safe path passes +61489267776
+      // (SecureWorks Group Ops). Overrides are restricted to the known
+      // SecureWorks numbers in _shared/sms_from_number.ts — a typo or a
       // foreign number would otherwise be silently rejected by GHL.
-      const SW_FROM_NUMBERS = [
-        '+61489267771', // SecureWorks Group Admin
-        '+61489267772', // SecureWorks Fencing Sales
-        '+61489267774', // SecureWorks Patios (location default)
-        '+61489267776', // SecureWorks Group Ops
-        '+61489267778', // SecureWorks Fencing Mgmt
-      ]
-      let fromNumber: string | undefined
-      if (body.fromNumber) {
-        const normalized = String(body.fromNumber).trim()
-        if (!SW_FROM_NUMBERS.includes(normalized)) {
-          return json({ error: `Invalid fromNumber: ${normalized}. Must be a SecureWorks number in E.164 form (e.g. +61489267776).` }, 400)
-        }
-        fromNumber = normalized
+      const resolvedFrom = resolveSmsFromNumber(body.fromNumber)
+      if (!resolvedFrom.ok) {
+        return json({ error: resolvedFrom.error }, 400)
       }
+      const fromNumber = resolvedFrom.fromNumber
 
       // Contact-job mismatch guard: if both contactId and jobId supplied, verify they match
       if (contactId && jobId) {
@@ -3981,12 +3976,13 @@ serve(async (req: Request) => {
             type: 'SMS',
             contactId,
             message,
-            // Only include when a valid SecureWorks number was supplied;
-            // omitting it preserves the GHL location-default behaviour.
-            ...(fromNumber ? { fromNumber } : {}),
+            // Always explicit: +61489267771 (Group Admin) unless the caller
+            // supplied an allowlisted override. Never omitted — omission
+            // would hand the choice back to the GHL location default.
+            fromNumber,
           }),
         })
-        console.log(`[ghl-proxy] SMS sent to contact ${contactId}${fromNumber ? ` from ${fromNumber}` : ''}`)
+        console.log(`[ghl-proxy] SMS sent to contact ${contactId} from ${fromNumber}`)
 
         // ── T7 Loop 4: closes G1 (outbound SMS missing job_id) ──
         // When ON: recordEvidence with channel='sms', direction='outbound'.

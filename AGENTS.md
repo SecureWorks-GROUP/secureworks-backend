@@ -153,6 +153,15 @@ per-attachment-id counting; the invariant, tests and replay proof are in
 `makesafe_duplicate_transport_dedupe_test.ts` and
 `docs/evidence/track-a-d8-duplicate-transport-2026-07-30.md`.
 
+The reporting intake action constructs its bounded JSON response immediately
+after durable scan accounting: a degraded scan never crosses into the live draft
+advancement sweep. `write_failures` are reported distinctly from other degraded
+completion causes, while completed-scan advancement keeps its prior semantics.
+Gap-fill queue and apply both resolve source corrections plus supersessions via
+`makesafe_intake_source_authority.ts`; omit/refuse a stored case only when it has
+source rows but none still resolves effectively to that case. Contract and F23
+evidence: `docs/evidence/ses-f23-reporting-intake-response-contract-2026-08-10.md`.
+
 The forward mint invariant is one canonical builder instruction per card,
 including terminal cards. The shared identity grammar, attach-time correction,
 self-generated WO exclusion and pre-mint refusal live in
@@ -825,6 +834,16 @@ an append-only `case_update` event. There is deliberately NO approval gate. `app
 is privileged-only (api_key / admin-owner jwt), NOT routine-callable; `queue` is a
 read (routine-allowed). Report-ready reuses `selectDraftPackDueJobIds` so the queue
 and the reporting run agree on "not yet drafted".
+
+For exhaustive intake sweeps, page only `intake_flags` with
+`include_report_ready=false` and the paired `intake_cursor_at` /
+`intake_cursor_case_id` cursor. `intake_page.eligible_total` is the full
+canonically eligible case set, while legacy `totals.intake_flags` remains the
+returned page length. Canonical source-authority filtering happens before the
+limit, tied timestamps order by case id, and wide queue joins are capped at 25
+ids. `report_ready` remains a separate current snapshot. Contract and regressions:
+`makesafe_gap_fill.ts`, `makesafe_gap_fill_report_ready.ts`, and
+`makesafe_gap_fill_test.ts`.
 
 ## U4 Generates Its Own SWMS; It Never Reuses An Attached One
 
@@ -3019,6 +3038,20 @@ died in the Layer B lock. Shared predicates live in
 `supabase/functions/ops-api/trade_invoice_assignment_lock.ts`. Also decide
 claim eligibility BEFORE the UPDATE: PostgREST has no transaction across calls,
 so an update-then-count-rows check leaves a partial write behind on failure.
+
+## Outbound SMS Sender Policy Is One Shared Module
+
+Every outbound SMS defaults to +61489267771 (SecureWorks Group Admin) — company
+rule (wiki OPS.md): replies land in the sending number inbox thread, so any
+other default strands client replies. The single source of truth is
+supabase/functions/_shared/sms_from_number.ts (default + five-number
+allowlist). Both send paths must resolve through it: ghl-proxy send_sms (the
+choke point every proxied SMS crosses) and ops-api sendCommsMessageAction (the
+one direct-to-GHL POST). Never reintroduce a conditional fromNumber that lets
+GHL fall back to the location default (+61489267774 Patios). Callers needing a
+different sender pass an allowlisted override explicitly — e.g. make-safe
+notifies pass +61489267776 Ops via makesafe_notify_settings.from_number. Tests:
+_shared/sms_from_number_test.ts, ghl-proxy/sms_sender_default_test.ts.
 
 ## Maintaining this file
 
