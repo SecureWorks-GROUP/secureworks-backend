@@ -297,6 +297,272 @@ export interface SesPrepareResponse {
   };
 }
 
+export const SES_PREPARE_SYSTEM_EXCEPTION_CODE = "ses_prepare_system_exception";
+
+type SesPrepareSingleCardSelection =
+  | { mode: "job_id"; job_id?: string; job_number?: string; limit?: number }
+  | {
+    mode: "job_number";
+    job_id?: string;
+    job_number?: string;
+    limit?: number;
+  };
+
+function isSingleCardDryRun(
+  request: SesPrepareRequest,
+): request is SesPrepareRequest & { selection: SesPrepareSingleCardSelection } {
+  return request.dry_run === true &&
+    (request.selection.mode === "job_id" ||
+      request.selection.mode === "job_number");
+}
+
+/**
+ * Builds the only response permitted for an otherwise untyped dry-run fault at
+ * the HTTP boundary. It deliberately receives no Error: the response must
+ * never disclose an exception message, stack, query, or source payload.
+ *
+ * The requested selection is echoed as a request identity, never a resolved
+ * card identity. In particular, a job-number selection does not pretend that
+ * its number is a job UUID or that any card facts were successfully read.
+ */
+async function systemExceptionPrepareResponse(
+  request: SesPrepareRequest & { selection: SesPrepareSingleCardSelection },
+  now = new Date(),
+): Promise<SesPrepareResponse> {
+  const selection = request.selection;
+  const requestedJobId = selection.mode === "job_id"
+    ? text(selection.job_id)
+    : "";
+  const requestedJobNumber = selection.mode === "job_number"
+    ? text(selection.job_number)
+    : "";
+  const requestedSelection = {
+    mode: selection.mode,
+    job_id: requestedJobId || null,
+    job_number: requestedJobNumber || null,
+    identity_state: "requested_not_resolved",
+  };
+  const docketId = requestedJobNumber || requestedJobId || "unresolved";
+  const inputContentHash = await sesSha256(
+    {
+      domain: "ses-prepare-system-exception/v1",
+      requested_selection: requestedSelection,
+    },
+    "SecureWorks:ses-docket-system-exception-input:v1\n",
+  );
+  const docketRevisionId = stableUuidFromSha256(
+    await sesSha256(
+      {
+        domain: "ses-prepare-system-exception-revision/v1",
+        idempotency_key: request.idempotency_key,
+        input_content_hash: inputContentHash,
+      },
+      "SecureWorks:ses-docket-system-exception-revision:v1\n",
+    ),
+  );
+  const blocker = blocked(
+    SES_PREPARE_SYSTEM_EXCEPTION_CODE,
+    "The dry preparation boundary encountered an untyped system failure before this card could be assembled.",
+    "Restore the prepare service boundary, then rerun one dry preparation for this same selected card. Do not persist, bind, invoice, send, stage, or release this result.",
+    [
+      "ops-api:prepare_ses_docket_revision",
+      `requested-selection:${selection.mode}`,
+    ],
+    [],
+    { requested_selection: requestedSelection },
+  );
+  const manifest: SesManifestV2 = {
+    version: SES_MANIFEST_V2_VERSION,
+    docket_id: docketId,
+    classification: {
+      state: "system_exception",
+      requested_selection: requestedSelection,
+      evidence_state: "not_read",
+    },
+    routing: {
+      builder: "",
+      report_to: "",
+      photo_to: "",
+      invoice_to: "",
+    },
+    items: Object.fromEntries(
+      MANIFEST_ITEMS.map((item) => [item, blocker]),
+    ) as Record<ManifestItem, SesObligationState>,
+    deliverables: [],
+  };
+  const invoiceProposal = {
+    kind: "ses_draft_zero_system_exception/v1",
+    state: "price_unresolved",
+    amount_ex_gst: 0,
+    gst: 0,
+    total_inc_gst: 0,
+    line_items: [],
+    reason_code: SES_PREPARE_SYSTEM_EXCEPTION_CODE,
+  };
+  const reviewSpec: Record<string, unknown> = {
+    version: "ses-system-exception-review/v1",
+    cards: [{
+      job_identity: requestedSelection,
+      blocker_codes: [SES_PREPARE_SYSTEM_EXCEPTION_CODE],
+      recovery_evidence: blocker.searches_attempted,
+      review_materials: {
+        make_safe_report: {
+          kind: "ses_system_exception_review",
+          state: "complete",
+          report: {
+            ref: docketId,
+            scope:
+              "System exception review pack; no source report content was read or asserted.",
+            findings:
+              "The dry preparation boundary returned an untyped system failure.",
+            works:
+              "No work-completion statement is asserted until a successful typed preparation result is available.",
+            materials:
+              "Materials are unknown; no material charge has been selected.",
+            photos: [],
+          },
+        },
+        draft_zero_invoice: invoiceProposal,
+      },
+    }],
+  };
+  const releasePayload: Record<string, unknown> = {
+    version: "ses-inert-release-proposal/v1",
+    requested_selection: requestedSelection,
+    system_exception_code: SES_PREPARE_SYSTEM_EXCEPTION_CODE,
+    invoice_create_approved: false,
+    client_send_approved: false,
+    send_email: false,
+    send_sms: false,
+    create_invoice: false,
+    authorise_invoice: false,
+    close_job: false,
+  };
+  const artifacts: SesArtifact[] = [
+    await artifactFromText({
+      role: "review_spec",
+      path: "review_spec.json",
+      media_type: "application/json",
+      text: canonicalSesJson(reviewSpec),
+    }),
+    await artifactFromText({
+      role: "review_html",
+      path: "review.html",
+      media_type: "text/html",
+      text:
+        '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SES system exception review</title></head><body><main><h1>System exception review</h1><p>Dry preparation did not complete. No report content, invoice, or release action has been asserted.</p></main></body></html>',
+    }),
+    await artifactFromText({
+      role: "release_payload",
+      path: "release_payload.json",
+      media_type: "application/json",
+      text: canonicalSesJson(releasePayload),
+    }),
+  ];
+  const outputContentHash = await sesSha256(
+    {
+      docket_revision_id: docketRevisionId,
+      manifest,
+      invoice_proposal: invoiceProposal,
+      review_spec: reviewSpec,
+      release_payload: releasePayload,
+      artifact_hashes: artifacts.map((artifact) => ({
+        role: artifact.role,
+        path: artifact.path,
+        content_hash: artifact.content_hash,
+        size_bytes: artifact.size_bytes,
+      })),
+      blockers: [blocker],
+    },
+    "SecureWorks:ses-docket-system-exception-output:v1\n",
+  );
+  const envelope: SesDocketEnvelopeV3 = {
+    version: SES_DOCKET_ENVELOPE_VERSION,
+    v2: manifest,
+    spine: {
+      source_instruction_id: "",
+      lineage_id: "",
+      // A job-number selection has not reached a resolving read. Blank is the
+      // truthful contract value; review_spec carries the safe request identity.
+      job_id: requestedJobId,
+      card_id: null,
+      property_id: null,
+      attendance_cycle_ids: [],
+      current_attendance_cycle_id: "",
+      readiness_revision: null,
+      docket_revision_id: docketRevisionId,
+    },
+    pre_xero_docs_ready: false,
+    local_invoice_proposal: {
+      state: "blocked",
+      evidence: `blocker:${SES_PREPARE_SYSTEM_EXCEPTION_CODE}`,
+    },
+    invoice_create_approved: false,
+    client_send_approved: false,
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    assembler_version: SES_ASSEMBLER_VERSION,
+    input_content_hash: inputContentHash,
+    output_content_hash: outputContentHash,
+  };
+  const timing = {
+    job_id: requestedJobId,
+    accepted_at: now.toISOString(),
+    committed_at: now.toISOString(),
+    duration_ms: 0,
+    stages_ms: { handler_system_exception: 0 },
+    retries: {},
+    degraded_capabilities: ["prepare_untyped_failure"],
+    within_five_minutes: false,
+  };
+  artifacts.push(
+    await artifactFromText({
+      role: "docket_manifest",
+      path: "docket_manifest.json",
+      media_type: "application/json",
+      text: canonicalSesJson(manifest),
+    }),
+    await artifactFromText({
+      role: "assembler_envelope",
+      path: "ASSEMBLER_ENVELOPE.json",
+      media_type: "application/json",
+      text: canonicalSesJson(envelope),
+    }),
+    await artifactFromText({
+      role: "timing",
+      path: "TIMING.json",
+      media_type: "application/json",
+      text: canonicalSesJson(timing),
+    }),
+  );
+  return {
+    action: "prepare_ses_docket_revision",
+    assembler_version: SES_ASSEMBLER_VERSION,
+    dry_run: true,
+    results: [{
+      state: "blocked",
+      docket_revision_id: docketRevisionId,
+      input_content_hash: inputContentHash,
+      output_content_hash: outputContentHash,
+      envelope,
+      blockers: [blocker],
+      artifacts,
+      portal_evidence: [],
+      invoice_proposal: invoiceProposal,
+      email_drafts: {},
+      review_spec: reviewSpec,
+      release_payload: releasePayload,
+      timing,
+      persisted: false,
+    }],
+    timing_summary: {
+      count: 1,
+      max_ms: 0,
+      p95_ms: 0,
+      all_within_five_minutes: false,
+    },
+  };
+}
+
 function blocked(
   reason_code: string,
   reason: string,
@@ -3738,6 +4004,34 @@ async function prepareSesDocketRevision(
     results,
     timing_summary: responseSummary(results),
   };
+}
+
+/**
+ * This is deliberately the HTTP action's last-resort, one-card dry-run
+ * boundary. `prepareOne` remains strict: typed operational/business outcomes
+ * keep their native errors and ordinary execution still returns its unchanged
+ * response. Only an otherwise untyped rejection can become this inert pack.
+ */
+export async function prepareSesDocketRevisionAtHttpBoundary(
+  request: SesPrepareRequest,
+  deps: SesPrepareDependencies,
+  options: {
+    invoke?: (
+      request: SesPrepareRequest,
+      deps: SesPrepareDependencies,
+    ) => Promise<SesPrepareResponse>;
+    preserveError?: (error: unknown) => boolean;
+    now?: () => Date;
+  } = {},
+): Promise<SesPrepareResponse> {
+  try {
+    return await (options.invoke || prepareSesDocketRevision)(request, deps);
+  } catch (error) {
+    if (!isSingleCardDryRun(request) || options.preserveError?.(error)) {
+      throw error;
+    }
+    return await systemExceptionPrepareResponse(request, options.now?.());
+  }
 }
 
 export const prepare_ses_docket_revision = prepareSesDocketRevision;

@@ -223,6 +223,7 @@ import {
   summarizeSesPrepareResponseForHttp,
 } from './ses_assembler_input_adapter.ts'
 import {
+  prepareSesDocketRevisionAtHttpBoundary,
   prepare_ses_docket_revision,
 } from './ses_prepare_docket_revision.ts'
 import {
@@ -5487,12 +5488,24 @@ if (import.meta.main) serve(async (req: Request) => {
           const actor = authMode === 'routine'
             ? 'makesafe-reporting-routine'
             : authUser?.email || `ops-api:${authMode}`
-          const response = await prepare_ses_docket_revision(
+          const response = await prepareSesDocketRevisionAtHttpBoundary(
             request,
             createSesAssemblerRuntimeDependencies(client, {
               org_id: DEFAULT_ORG_ID,
               created_by: actor,
             }),
+            {
+              // Preserve the named request/auth/business refusals the handler
+              // already exposes. The bounded fallback below is solely for an
+              // otherwise untyped one-card dry-run failure; it never sees an
+              // Error message or stack and cannot persist or notify.
+              preserveError: (error) =>
+                error instanceof SesAssemblerAdapterError ||
+                error instanceof ApiError ||
+                error instanceof SesPortalCaptureEvidenceError ||
+                error instanceof SesRoofConfirmationError ||
+                sesActionErrorResponse(error) !== null,
+            },
           )
           // Harden SES ticket 06: the Captain's ONE ping. Exact-once per job
           // per attendance cycle via the docs_ready_sms effect kind; the

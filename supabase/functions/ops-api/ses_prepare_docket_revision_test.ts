@@ -4,6 +4,10 @@ import {
   assertEquals,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  SesAssemblerAdapterError,
+  summarizeSesPrepareResponseForHttp,
+} from "./ses_assembler_input_adapter.ts";
 import type {
   SesAssemblerInputV1,
   SesPhysicalReportProof,
@@ -37,9 +41,11 @@ import {
 } from "./ses_materials_charge_guard.ts";
 import {
   prepare_ses_docket_revision as prepareSesDocketRevision,
+  prepareSesDocketRevisionAtHttpBoundary,
   SES_ASSESSMENT_RECIPE_VERSION,
   SES_DOCKET_REVIEW_SPEC_VERSION,
   SES_PHYSICAL_FAMILY_RECIPE_VERSION,
+  SES_PREPARE_SYSTEM_EXCEPTION_CODE,
   type SesPersistPayload,
   type SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
@@ -328,6 +334,128 @@ function reviewCard(result: {
     : [];
   return object(cards[0]);
 }
+
+Deno.test("one-card dry handler boundary returns a bounded system-exception pack without leaking the inner throw", async () => {
+  const marker = "sensitive-throw-marker";
+  const failureRequest: SesPrepareRequest = {
+    ...request(),
+    selection: { mode: "job_number", job_number: "SWMS-26832" },
+  };
+  const response = await prepareSesDocketRevisionAtHttpBoundary(
+    failureRequest,
+    {} as SesPrepareDependencies,
+    {
+      invoke: async () => {
+        throw new Error(marker);
+      },
+      now: () => FIXED_TIME,
+    },
+  );
+  const result = response.results[0];
+  assertEquals(response.dry_run, true);
+  assertEquals(result.state, "blocked");
+  assertEquals(result.persisted, false);
+  assertEquals(blockerCodes(result), [SES_PREPARE_SYSTEM_EXCEPTION_CODE]);
+  assertEquals(result.email_drafts, {});
+  assertEquals(result.envelope.pre_xero_docs_ready, false);
+  assertEquals(result.envelope.spine.job_id, "");
+  assertEquals(
+    object(reviewCard(result).job_identity),
+    {
+      mode: "job_number",
+      job_id: null,
+      job_number: "SWMS-26832",
+      identity_state: "requested_not_resolved",
+    },
+  );
+  const reviewMaterials = object(reviewCard(result).review_materials);
+  const report = object(object(reviewMaterials.make_safe_report).report);
+  assertStringIncludes(
+    String(report.works),
+    "No work-completion statement is asserted",
+  );
+  assertEquals(
+    object(reviewMaterials.draft_zero_invoice).total_inc_gst,
+    0,
+  );
+  assertEquals(result.release_payload.create_invoice, false);
+  assertEquals(result.release_payload.authorise_invoice, false);
+  assertEquals(result.release_payload.send_email, false);
+  assertEquals(result.release_payload.send_sms, false);
+  assertEquals(result.release_payload.close_job, false);
+  assertEquals(
+    result.artifacts.map((artifact) => artifact.role).sort(),
+    [
+      "assembler_envelope",
+      "docket_manifest",
+      "release_payload",
+      "review_html",
+      "review_spec",
+      "timing",
+    ],
+  );
+  const httpResponse = summarizeSesPrepareResponseForHttp(response);
+  assertEquals(JSON.stringify(httpResponse).includes(marker), false);
+  assertEquals(JSON.stringify(httpResponse).includes('"bytes"'), false);
+});
+
+Deno.test("one-card dry handler boundary preserves named refusals and healthy preparations", async () => {
+  const namedRefusal = new SesAssemblerAdapterError(
+    "ses_card_not_found",
+    "No SES reporting card matched the requested selection.",
+    404,
+  );
+  let caught: unknown = null;
+  try {
+    await prepareSesDocketRevisionAtHttpBoundary(
+      request(),
+      {} as SesPrepareDependencies,
+      {
+        invoke: async () => {
+          throw namedRefusal;
+        },
+        preserveError: (error) => error instanceof SesAssemblerAdapterError,
+        now: () => FIXED_TIME,
+      },
+    );
+  } catch (error) {
+    caught = error;
+  }
+  assertEquals(caught, namedRefusal);
+
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" && candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  const direct = await prepareSesDocketRevision(
+    request(input.identity.job_id),
+    dependencies(input),
+  );
+  const atBoundary = await prepareSesDocketRevisionAtHttpBoundary(
+    request(input.identity.job_id),
+    dependencies(input),
+  );
+  assertEquals(atBoundary, direct);
+
+  const nonDryRefusal = new Error(
+    "non-dry failure remains outside the fallback",
+  );
+  caught = null;
+  try {
+    await prepareSesDocketRevisionAtHttpBoundary(
+      request(input.identity.job_id, false),
+      {} as SesPrepareDependencies,
+      {
+        invoke: async () => {
+          throw nonDryRefusal;
+        },
+      },
+    );
+  } catch (error) {
+    caught = error;
+  }
+  assertEquals(caught, nonDryRefusal);
+});
 
 Deno.test("family matrix is a closed executable set with the AJS report guard", () => {
   assertEquals(SES_EMERGENCY_SERVICE_FAMILIES, [
