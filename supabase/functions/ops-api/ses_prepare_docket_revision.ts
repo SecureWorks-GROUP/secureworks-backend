@@ -85,7 +85,63 @@ import {
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
+/**
+ * New preparations use the v2 output domain and a versioned persisted key.
+ * The version is deliberately part of persistence identity: v1 rows and their
+ * sign-offs remain immutable, while a changed output contract can create a
+ * distinct revision without a migration or historical rewrite.
+ */
+export const SES_DOCKET_OUTPUT_HASH_VERSION = "v2";
+export const SES_DOCKET_OUTPUT_HASH_DOMAIN =
+  `SecureWorks:ses-docket-output:${SES_DOCKET_OUTPUT_HASH_VERSION}\n`;
+export const SES_DOCKET_LEGACY_OUTPUT_HASH_DOMAIN =
+  "SecureWorks:ses-docket-output:v1\n";
+export const SES_DOCKET_REVISION_IDENTITY_DOMAIN =
+  "SecureWorks:ses-docket-revision-id:v1\n";
 export { SES_ASSESSMENT_RECIPE_VERSION, SES_PHYSICAL_FAMILY_RECIPE_VERSION };
+
+/** Maps the caller key to the versioned key stored by the append-only ledger. */
+export function sesDocketPersistedIdempotencyKey(
+  idempotencyKey: string,
+  outputHashVersion: string = SES_DOCKET_OUTPUT_HASH_VERSION,
+): string {
+  return outputHashVersion === "v1"
+    ? idempotencyKey
+    : `${idempotencyKey}#ses-docket-output:${outputHashVersion}`;
+}
+
+export const SES_DOCKET_LEGACY_OUTPUT_HASH_VERSION = "v1";
+
+/**
+ * Computes a deterministic revision identity for one output-hash namespace.
+ * The v1 form is retained solely to resolve an existing matching legacy row;
+ * new persistence always uses the default v2 form.
+ */
+export async function sesDocketRevisionIdentity(args: {
+  assembler_version: string;
+  family_matrix_version: string;
+  idempotency_key: string;
+  input_content_hash: SesSha256;
+  output_hash_version?: string;
+}): Promise<SesDocketRevisionIdentity> {
+  const idempotencyKey = sesDocketPersistedIdempotencyKey(
+    args.idempotency_key,
+    args.output_hash_version ?? SES_DOCKET_OUTPUT_HASH_VERSION,
+  );
+  const identityHash = await sesSha256(
+    {
+      assembler_version: args.assembler_version,
+      family_matrix_version: args.family_matrix_version,
+      idempotency_key: idempotencyKey,
+      input_content_hash: args.input_content_hash,
+    },
+    SES_DOCKET_REVISION_IDENTITY_DOMAIN,
+  );
+  return {
+    idempotency_key: idempotencyKey,
+    revision_id: stableUuidFromSha256(identityHash),
+  };
+}
 
 const MANIFEST_ITEMS = [
   "source_work_order_retrieval",
@@ -204,10 +260,25 @@ export interface SesPortalCaptureRequest {
   idempotency_key: string;
 }
 
+export interface SesDocketRevisionIdentity {
+  idempotency_key: string;
+  revision_id: string;
+  output_content_hash?: SesSha256;
+}
+
+export interface SesPersistResult {
+  committed_at: string;
+  resolved_legacy?: {
+    revision_id: string;
+    output_content_hash: SesSha256;
+  };
+}
+
 export interface SesPersistPayload {
   revision: Omit<SesPreparedRevision, "timing" | "persisted" | "artifacts">;
   artifacts: SesArtifact[];
   idempotency_key: string;
+  legacy_identity?: SesDocketRevisionIdentity;
   assembler_version: "ses-pack-assembler/v1";
   family_matrix_version: string;
   accepted_at: string;
@@ -291,7 +362,7 @@ export interface SesPrepareDependencies {
     released: SesReleasedCycleReading;
     invoiced: SesInvoicedMaterialsReading;
   }>;
-  persist?: (payload: SesPersistPayload) => Promise<{ committed_at: string }>;
+  persist?: (payload: SesPersistPayload) => Promise<SesPersistResult>;
   now?: () => Date;
 }
 
@@ -4247,18 +4318,21 @@ async function prepareOne(
   }
   stagesMs.T9 = 0;
 
-  const revisionIdentityHash = await sesSha256(
-    {
-      assembler_version: request.assembler_version,
-      family_matrix_version: SES_FAMILY_MATRIX_VERSION,
-      idempotency_key: request.idempotency_key,
-      input_content_hash: inputContentHash,
-    },
-    "SecureWorks:ses-docket-revision-id:v1\n",
+  const revisionIdentityArgs = {
+    assembler_version: request.assembler_version,
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    idempotency_key: request.idempotency_key,
+    input_content_hash: inputContentHash,
+  };
+  const revisionIdentity = await sesDocketRevisionIdentity(
+    revisionIdentityArgs,
   );
-  const docketRevisionId = stableUuidFromSha256(revisionIdentityHash);
+  const legacyRevisionIdentity = await sesDocketRevisionIdentity({
+    ...revisionIdentityArgs,
+    output_hash_version: SES_DOCKET_LEGACY_OUTPUT_HASH_VERSION,
+  });
+  const docketRevisionId = revisionIdentity.revision_id;
   const stableOutput = {
-    docket_revision_id: docketRevisionId,
     manifest,
     invoice_proposal: reviewInvoiceProposal,
     email_drafts: drafts,
@@ -4277,8 +4351,16 @@ async function prepareOne(
   };
   const outputContentHash = await sesSha256(
     stableOutput,
-    "SecureWorks:ses-docket-output:v1\n",
+    SES_DOCKET_OUTPUT_HASH_DOMAIN,
   );
+  const legacyOutputContentHash = await sesSha256(
+    {
+      docket_revision_id: legacyRevisionIdentity.revision_id,
+      ...stableOutput,
+    },
+    SES_DOCKET_LEGACY_OUTPUT_HASH_DOMAIN,
+  );
+  legacyRevisionIdentity.output_content_hash = legacyOutputContentHash;
   const preXeroDocsReady = validatePreXero(
     manifest,
     reviewInvoiceProposal,
@@ -4415,13 +4497,42 @@ async function prepareOne(
         deps.persist!({
           revision: baseRevision,
           artifacts,
-          idempotency_key: request.idempotency_key,
+          idempotency_key: revisionIdentity.idempotency_key,
+          legacy_identity: legacyRevisionIdentity,
           assembler_version: request.assembler_version,
           family_matrix_version: SES_FAMILY_MATRIX_VERSION,
           accepted_at: acceptedAt.toISOString(),
           stage_durations_ms: stagesMs,
         }));
       committedAt = persistedResult.committed_at;
+      if (persistedResult.resolved_legacy) {
+        baseRevision.docket_revision_id =
+          persistedResult.resolved_legacy.revision_id;
+        baseRevision.output_content_hash =
+          persistedResult.resolved_legacy.output_content_hash;
+        baseRevision.envelope = {
+          ...baseRevision.envelope,
+          spine: {
+            ...baseRevision.envelope.spine,
+            docket_revision_id: persistedResult.resolved_legacy.revision_id,
+          },
+          output_content_hash:
+            persistedResult.resolved_legacy.output_content_hash,
+        };
+        const envelopeArtifactIndex = artifacts.findIndex((artifact) =>
+          artifact.path === "ASSEMBLER_ENVELOPE.json"
+        );
+        if (envelopeArtifactIndex < 0) {
+          throw new Error("docket assembler envelope artifact missing");
+        }
+        artifacts[envelopeArtifactIndex] = await artifactFromText({
+          role: "assembler_envelope",
+          path: "ASSEMBLER_ENVELOPE.json",
+          media_type: "application/json",
+          text: canonicalSesJson(baseRevision.envelope),
+        });
+        baseRevision.resolved_legacy = true;
+      }
       persisted = true;
     } else {
       stagesMs.T11 = 0;

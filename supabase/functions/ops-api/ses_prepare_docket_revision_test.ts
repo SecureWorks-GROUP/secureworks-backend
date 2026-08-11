@@ -2,6 +2,7 @@
 import {
   assert,
   assertEquals,
+  assertNotEquals,
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
@@ -17,6 +18,7 @@ import type {
 import {
   SES_ASSEMBLER_VERSION,
   SES_INPUT_CONTRACT_VERSION,
+  sesSha256,
 } from "./ses_docket_envelope.ts";
 import {
   isSesPhysicalShapedFamily,
@@ -43,8 +45,13 @@ import {
   prepare_ses_docket_revision as prepareSesDocketRevision,
   prepareSesDocketRevisionAtHttpBoundary,
   SES_ASSESSMENT_RECIPE_VERSION,
+  SES_DOCKET_LEGACY_OUTPUT_HASH_DOMAIN,
+  SES_DOCKET_OUTPUT_HASH_DOMAIN,
+  SES_DOCKET_OUTPUT_HASH_VERSION,
   SES_DOCKET_REVIEW_SPEC_VERSION,
   SES_PHYSICAL_FAMILY_RECIPE_VERSION,
+  sesDocketPersistedIdempotencyKey,
+  sesDocketRevisionIdentity,
   SES_PREPARE_SYSTEM_EXCEPTION_CODE,
   type SesPersistPayload,
   type SesPrepareDependencies,
@@ -231,6 +238,7 @@ function request(
   jobId = "job-fixture",
   dryRun = true,
   builderReference?: string | null,
+  idempotencyKey = "fixture-intent-1",
 ): SesPrepareRequest {
   const ajs = /job-(?:ajs|ajbr)-/.test(jobId);
   const ajsReference = /job-ajs-/.test(jobId);
@@ -241,7 +249,7 @@ function request(
     (ajsReference ? "AJS 70062" : "REF-70062");
   return {
     selection: { mode: "job_id", job_id: jobId },
-    idempotency_key: "fixture-intent-1",
+    idempotency_key: idempotencyKey,
     assembler_version: SES_ASSEMBLER_VERSION,
     dry_run: dryRun,
     force_refresh: true,
@@ -3596,6 +3604,537 @@ Deno.test("same input and intent produce stable revision and output hashes", asy
       artifact.path,
       artifact.content_hash,
     ]),
+  );
+});
+
+type DocketLedgerRow = {
+  id: string;
+  input_content_hash: string;
+  output_content_hash: string;
+  committed_at: string;
+};
+
+function docketLedgerKey(
+  jobId: string,
+  idempotencyKey: string,
+  assemblerVersion: string,
+  familyMatrixVersion: string,
+): string {
+  return [jobId, idempotencyKey, assemblerVersion, familyMatrixVersion].join(
+    "|",
+  );
+}
+
+function docketLedgerClient(ledger: Map<string, DocketLedgerRow>) {
+  const uploads: string[] = [];
+  const rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const client = {
+    storage: {
+      from: () => ({
+        upload: async (path: string) => {
+          uploads.push(path);
+          return { data: {}, error: null };
+        },
+        download: async () => ({
+          data: null,
+          error: { message: "unexpected download" },
+        }),
+      }),
+    },
+    from: (table: string) => {
+      const filters: Record<string, string> = {};
+      const query = {
+        select: () => query,
+        eq: (column: string, value: string) => {
+          filters[column] = value;
+          return query;
+        },
+        maybeSingle: async () => {
+          if (table !== "makesafe_docket_revisions") {
+            return { data: null, error: null };
+          }
+          const found = ledger.get(
+            docketLedgerKey(
+              filters.job_id,
+              filters.idempotency_key,
+              filters.assembler_version,
+              filters.family_matrix_version,
+            ),
+          );
+          return { data: found ?? null, error: null };
+        },
+      };
+      return query;
+    },
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      rpcCalls.push({ name, args });
+      if (name !== "commit_makesafe_docket_revision_v1") {
+        return { data: { review_state: "needs_review" }, error: null };
+      }
+      const revision = args.p_revision as Record<string, string>;
+      const key = docketLedgerKey(
+        revision.job_id,
+        revision.idempotency_key,
+        revision.assembler_version,
+        revision.family_matrix_version,
+      );
+      const existing = ledger.get(key);
+      if (existing) {
+        if (
+          existing.id === revision.id &&
+          existing.input_content_hash === revision.input_content_hash &&
+          existing.output_content_hash === revision.output_content_hash
+        ) {
+          return {
+            data: { committed_at: existing.committed_at },
+            error: null,
+          };
+        }
+        return {
+          data: null,
+          error: {
+            message:
+              "input_hash_conflict: idempotency key resolves to different docket content",
+          },
+        };
+      }
+      for (const stored of ledger.values()) {
+        if (stored.id === revision.id) {
+          return {
+            data: null,
+            error: {
+              message:
+                "duplicate key value violates unique constraint makesafe_docket_revisions_pkey",
+            },
+          };
+        }
+      }
+      ledger.set(key, {
+        id: revision.id,
+        input_content_hash: revision.input_content_hash,
+        output_content_hash: revision.output_content_hash,
+        committed_at: "2026-07-27T02:00:00.000Z",
+      });
+      return {
+        data: { committed_at: "2026-07-27T02:00:00.000Z" },
+        error: null,
+      };
+    },
+  } as unknown as SesDocketPersistenceClient;
+  return { client, uploads, rpcCalls };
+}
+
+async function legacyOutputHashForResult(
+  result: Awaited<
+    ReturnType<typeof prepareSesDocketRevision>
+  >["results"][number],
+  legacyRevisionId: string,
+): Promise<string> {
+  const artifactHashes = result.artifacts.filter((artifact) =>
+    ![
+      "docket_manifest",
+      "assembler_envelope",
+      "capability",
+      "hashes",
+      "timing",
+    ].includes(artifact.role)
+  )
+    .map((artifact) => ({
+      role: artifact.role,
+      path: artifact.path,
+      content_hash: artifact.content_hash,
+      size_bytes: artifact.size_bytes,
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  return await sesSha256(
+    {
+      docket_revision_id: legacyRevisionId,
+      manifest: result.envelope.v2,
+      invoice_proposal: result.invoice_proposal,
+      email_drafts: result.email_drafts,
+      portal_evidence: result.portal_evidence,
+      review_spec: result.review_spec,
+      release_payload: result.release_payload,
+      artifact_hashes: artifactHashes,
+      blockers: result.blockers,
+    },
+    SES_DOCKET_LEGACY_OUTPUT_HASH_DOMAIN,
+  );
+}
+
+Deno.test("a legacy v1 docket retry resolves idempotently without inserting or superseding", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.identity.job_id = "00000000-0000-0000-0000-000000007063";
+  input.attendance.attendance_cycle_ids = [
+    "00000000-0000-0000-0000-000000000063",
+  ];
+  input.attendance.current_attendance_cycle_id =
+    "00000000-0000-0000-0000-000000000063";
+  const intent = "fixture-intent-replay";
+  const probe = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false, undefined, intent),
+    dependencies(input, {
+      persist: async () => ({ committed_at: "2026-07-20T03:04:05.000Z" }),
+    }),
+  )).results[0];
+
+  const legacyIdentity = await sesDocketRevisionIdentity({
+    assembler_version: SES_ASSEMBLER_VERSION,
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    idempotency_key: intent,
+    input_content_hash: probe.input_content_hash,
+    output_hash_version: "v1",
+  });
+  const legacyOutputContentHash = await legacyOutputHashForResult(
+    probe,
+    legacyIdentity.revision_id,
+  );
+  assertEquals(legacyIdentity.idempotency_key, intent);
+  assertEquals(sesDocketPersistedIdempotencyKey(intent, "v1"), intent);
+  const legacyRow: DocketLedgerRow = {
+    id: legacyIdentity.revision_id,
+    input_content_hash: probe.input_content_hash,
+    output_content_hash: legacyOutputContentHash,
+    committed_at: "2026-07-20T03:04:05.000Z",
+  };
+  const legacyKey = docketLedgerKey(
+    input.identity.job_id,
+    intent,
+    SES_ASSEMBLER_VERSION,
+    SES_FAMILY_MATRIX_VERSION,
+  );
+  const ledger = new Map<string, DocketLedgerRow>([[legacyKey, legacyRow]]);
+  const { client, uploads, rpcCalls } = docketLedgerClient(ledger);
+
+  const retried = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false, undefined, intent),
+    dependencies(input, {
+      persist: createSesDocketPersistenceAdapter({
+        client,
+        org_id: "00000000-0000-0000-0000-000000000001",
+        created_by: "ses-u4-test",
+      }),
+    }),
+  )).results[0];
+
+  assertEquals(retried.persisted, true);
+  assertEquals(retried.resolved_legacy, true);
+  assertEquals(retried.docket_revision_id, legacyIdentity.revision_id);
+  assertEquals(retried.output_content_hash, legacyOutputContentHash);
+  assertEquals(
+    retried.envelope.spine.docket_revision_id,
+    legacyIdentity.revision_id,
+  );
+  assertEquals(retried.envelope.output_content_hash, legacyOutputContentHash);
+  const returnedEnvelopeArtifact = retried.artifacts.find((artifact) =>
+    artifact.path === "ASSEMBLER_ENVELOPE.json"
+  );
+  assert(returnedEnvelopeArtifact, "expected returned assembler envelope");
+  const returnedEnvelope = JSON.parse(
+    new TextDecoder().decode(returnedEnvelopeArtifact.bytes),
+  );
+  assertEquals(
+    returnedEnvelope.spine.docket_revision_id,
+    legacyIdentity.revision_id,
+  );
+  assertEquals(returnedEnvelope.output_content_hash, legacyOutputContentHash);
+  const returnedHashesArtifact = retried.artifacts.find((artifact) =>
+    artifact.path === "hashes.sha256"
+  );
+  assert(returnedHashesArtifact, "expected returned artifact hashes");
+  assertStringIncludes(
+    new TextDecoder().decode(returnedHashesArtifact.bytes),
+    `${
+      returnedEnvelopeArtifact.content_hash.slice(7)
+    }  ASSEMBLER_ENVELOPE.json`,
+  );
+  assertEquals(retried.timing.committed_at, legacyRow.committed_at);
+  assertEquals(uploads, []);
+  assertEquals(rpcCalls, []);
+  assertEquals(ledger.size, 1);
+  assertEquals(ledger.get(legacyKey), legacyRow);
+  assertEquals(
+    [...ledger.values()].map((entry) => entry.id),
+    [legacyIdentity.revision_id],
+  );
+});
+
+async function assertLegacyIdentityGuardFallsThrough(
+  mismatch: "id" | "input_content_hash",
+  jobId: string,
+  cycleId: string,
+  intent: string,
+) {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.identity.job_id = jobId;
+  input.attendance.attendance_cycle_ids = [cycleId];
+  input.attendance.current_attendance_cycle_id = cycleId;
+  const probe = (await prepareSesDocketRevision(
+    request(jobId, true, undefined, intent),
+    dependencies(input),
+  )).results[0];
+  const legacyIdentity = await sesDocketRevisionIdentity({
+    assembler_version: SES_ASSEMBLER_VERSION,
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    idempotency_key: intent,
+    input_content_hash: probe.input_content_hash,
+    output_hash_version: "v1",
+  });
+  const legacyRow: DocketLedgerRow = {
+    id: mismatch === "id"
+      ? "00000000-0000-0000-0000-000000007999"
+      : legacyIdentity.revision_id,
+    input_content_hash: mismatch === "input_content_hash"
+      ? `sha256:${"d".repeat(64)}`
+      : probe.input_content_hash,
+    output_content_hash: await legacyOutputHashForResult(
+      probe,
+      legacyIdentity.revision_id,
+    ),
+    committed_at: "2026-07-20T03:04:05.000Z",
+  };
+  const legacyKey = docketLedgerKey(
+    jobId,
+    intent,
+    SES_ASSEMBLER_VERSION,
+    SES_FAMILY_MATRIX_VERSION,
+  );
+  const ledger = new Map<string, DocketLedgerRow>([[legacyKey, legacyRow]]);
+  const { client, uploads, rpcCalls } = docketLedgerClient(ledger);
+  const prepared = (await prepareSesDocketRevision(
+    request(jobId, false, undefined, intent),
+    dependencies(input, {
+      persist: createSesDocketPersistenceAdapter({
+        client,
+        org_id: "00000000-0000-0000-0000-000000000001",
+        created_by: "ses-u4-test",
+      }),
+    }),
+  )).results[0];
+  const versionedKey = docketLedgerKey(
+    jobId,
+    sesDocketPersistedIdempotencyKey(intent),
+    SES_ASSEMBLER_VERSION,
+    SES_FAMILY_MATRIX_VERSION,
+  );
+
+  assertEquals(prepared.resolved_legacy, undefined);
+  assertNotEquals(prepared.docket_revision_id, legacyRow.id);
+  assert(uploads.length > 0);
+  assertEquals(
+    rpcCalls.filter((call) =>
+      call.name === "commit_makesafe_docket_revision_v1"
+    ).length,
+    1,
+  );
+  assertEquals(ledger.size, 2);
+  assertEquals(ledger.get(legacyKey), legacyRow);
+  assertEquals(ledger.get(versionedKey)?.id, prepared.docket_revision_id);
+}
+
+Deno.test("a wrong legacy revision ID falls through to the v2 identity", async () => {
+  await assertLegacyIdentityGuardFallsThrough(
+    "id",
+    "00000000-0000-0000-0000-000000007065",
+    "00000000-0000-0000-0000-000000000065",
+    "fixture-intent-wrong-legacy-id",
+  );
+});
+
+Deno.test("a wrong legacy input hash falls through to the v2 identity", async () => {
+  await assertLegacyIdentityGuardFallsThrough(
+    "input_content_hash",
+    "00000000-0000-0000-0000-000000007066",
+    "00000000-0000-0000-0000-000000000066",
+    "fixture-intent-wrong-legacy-input",
+  );
+});
+
+Deno.test("a genuinely new prepare still inserts under the v2 docket identity", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  input.identity.job_id = "00000000-0000-0000-0000-000000007064";
+  input.attendance.attendance_cycle_ids = [
+    "00000000-0000-0000-0000-000000000064",
+  ];
+  input.attendance.current_attendance_cycle_id =
+    "00000000-0000-0000-0000-000000000064";
+  const intent = "fixture-intent-fresh";
+  const probe = (await prepareSesDocketRevision(
+    request(input.identity.job_id, true, undefined, intent),
+    dependencies(input),
+  )).results[0];
+  const legacyIdentity = await sesDocketRevisionIdentity({
+    assembler_version: SES_ASSEMBLER_VERSION,
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    idempotency_key: intent,
+    input_content_hash: probe.input_content_hash,
+    output_hash_version: "v1",
+  });
+  const staleLegacyRow: DocketLedgerRow = {
+    id: legacyIdentity.revision_id,
+    input_content_hash: probe.input_content_hash,
+    output_content_hash: `sha256:${"c".repeat(64)}`,
+    committed_at: "2026-07-20T03:04:05.000Z",
+  };
+  const legacyKey = docketLedgerKey(
+    input.identity.job_id,
+    intent,
+    SES_ASSEMBLER_VERSION,
+    SES_FAMILY_MATRIX_VERSION,
+  );
+  const ledger = new Map<string, DocketLedgerRow>([
+    [legacyKey, staleLegacyRow],
+  ]);
+  const { client, uploads, rpcCalls } = docketLedgerClient(ledger);
+  const persist = createSesDocketPersistenceAdapter({
+    client,
+    org_id: "00000000-0000-0000-0000-000000000001",
+    created_by: "ses-u4-test",
+  });
+
+  const prepared = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false, undefined, intent),
+    dependencies(input, { persist }),
+  )).results[0];
+  const replay = (await prepareSesDocketRevision(
+    request(input.identity.job_id, false, undefined, intent),
+    dependencies(input, { persist }),
+  )).results[0];
+
+  const versionedKey = docketLedgerKey(
+    input.identity.job_id,
+    sesDocketPersistedIdempotencyKey(intent),
+    SES_ASSEMBLER_VERSION,
+    SES_FAMILY_MATRIX_VERSION,
+  );
+  assertEquals(
+    sesDocketPersistedIdempotencyKey(intent),
+    `${intent}#ses-docket-output:${SES_DOCKET_OUTPUT_HASH_VERSION}`,
+  );
+  assertNotEquals(sesDocketPersistedIdempotencyKey(intent), intent);
+  assert(uploads.length > 0);
+  assertEquals(
+    rpcCalls.filter((call) =>
+      call.name === "commit_makesafe_docket_revision_v1"
+    ).length,
+    2,
+  );
+  assertEquals(ledger.size, 2);
+  assertEquals(ledger.get(legacyKey), staleLegacyRow);
+  assertEquals(ledger.get(versionedKey)?.id, prepared.docket_revision_id);
+  assertEquals(
+    ledger.get(versionedKey)?.output_content_hash,
+    prepared.output_content_hash,
+  );
+  assertEquals(replay.docket_revision_id, prepared.docket_revision_id);
+  assertEquals(replay.output_content_hash, prepared.output_content_hash);
+  assertNotEquals(prepared.docket_revision_id, staleLegacyRow.id);
+  assertEquals(prepared.resolved_legacy, undefined);
+});
+
+Deno.test("docket output hash bisect names run-key variance", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJS" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  const first = (await prepareSesDocketRevision(
+    request(
+      input.identity.job_id,
+      true,
+      undefined,
+      "fixture-intent-first",
+    ),
+    dependencies(input),
+  )).results[0];
+  const second = (await prepareSesDocketRevision(
+    request(
+      input.identity.job_id,
+      true,
+      undefined,
+      "fixture-intent-second",
+    ),
+    dependencies(input),
+  )).results[0];
+  const keys = [
+    "docket_revision_id",
+    "manifest",
+    "invoice_proposal",
+    "email_drafts",
+    "portal_evidence",
+    "review_spec",
+    "release_payload",
+    "artifact_hashes",
+    "blockers",
+  ] as const;
+  const artifactHashes = (result: typeof first) =>
+    result.artifacts.filter((artifact) =>
+      ![
+        "docket_manifest",
+        "assembler_envelope",
+        "capability",
+        "hashes",
+        "timing",
+      ].includes(artifact.role)
+    )
+      .map((artifact) => ({
+        role: artifact.role,
+        path: artifact.path,
+        content_hash: artifact.content_hash,
+        size_bytes: artifact.size_bytes,
+      })).sort((left, right) => left.path.localeCompare(right.path));
+  const value = (result: typeof first, key: (typeof keys)[number]) =>
+    key === "docket_revision_id"
+      ? result.docket_revision_id
+      : key === "manifest"
+      ? result.envelope.v2
+      : key === "invoice_proposal"
+      ? result.invoice_proposal
+      : key === "email_drafts"
+      ? result.email_drafts
+      : key === "portal_evidence"
+      ? result.portal_evidence
+      : key === "review_spec"
+      ? result.review_spec
+      : key === "release_payload"
+      ? result.release_payload
+      : key === "artifact_hashes"
+      ? artifactHashes(result)
+      : result.blockers;
+  const hashes = async (result: typeof first) =>
+    Object.fromEntries(
+      await Promise.all(
+        keys.map(async (key) => [key, await sesSha256(value(result, key))]),
+      ),
+    );
+  const firstHashes = await hashes(first);
+  const secondHashes = await hashes(second);
+  const varyingKeys = keys.filter((key) =>
+    firstHashes[key] !== secondHashes[key]
+  );
+
+  assertEquals(varyingKeys, ["docket_revision_id"]);
+  assertNotEquals(first.docket_revision_id, second.docket_revision_id);
+  assertEquals(
+    first.output_content_hash,
+    second.output_content_hash,
+    "run identity must not change the content hash",
+  );
+  assertEquals(
+    SES_DOCKET_OUTPUT_HASH_DOMAIN,
+    "SecureWorks:ses-docket-output:v2\n",
   );
 });
 

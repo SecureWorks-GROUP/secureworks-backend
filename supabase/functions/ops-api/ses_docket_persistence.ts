@@ -12,6 +12,23 @@ interface SupabaseResult<T> {
   error: { message?: string; statusCode?: string; status?: number } | null;
 }
 
+export interface SesDocketArtifactRow {
+  content_hash: string;
+  size_bytes: number;
+}
+
+export interface SesDocketLegacyRevisionRow {
+  id: string;
+  input_content_hash: string;
+  output_content_hash: string;
+  committed_at: string;
+}
+
+interface SesDocketQuery<T> {
+  eq(column: string, value: string): SesDocketQuery<T>;
+  maybeSingle(): Promise<SupabaseResult<T>>;
+}
+
 export interface SesDocketPersistenceClient {
   storage: {
     from(bucket: string): {
@@ -27,16 +44,7 @@ export interface SesDocketPersistenceClient {
     };
   };
   from(table: string): {
-    select(columns: string): {
-      eq(column: string, value: string): {
-        maybeSingle(): Promise<
-          SupabaseResult<{
-            content_hash: string;
-            size_bytes: number;
-          }>
-        >;
-      };
-    };
+    select<T = SesDocketArtifactRow>(columns: string): SesDocketQuery<T>;
   };
   rpc(
     name: string,
@@ -108,12 +116,76 @@ async function assertExistingArtifactMatches(
   );
 }
 
+async function resolveLegacyDocketRevision(
+  client: SesDocketPersistenceClient,
+  payload: SesPersistPayload,
+): Promise<
+  {
+    committed_at: string;
+    resolved_legacy: {
+      revision_id: string;
+      output_content_hash: `sha256:${string}`;
+    };
+  } | null
+> {
+  // A v1 retry may return only the exact signed-off legacy row.  Every identity
+  // and both hashes must agree; otherwise persistence continues with the v2
+  // identity so history is never rewritten or superseded.
+  const legacy = payload.legacy_identity;
+  if (!legacy || legacy.idempotency_key === payload.idempotency_key) {
+    return null;
+  }
+  const existing = await client.from("makesafe_docket_revisions")
+    .select<SesDocketLegacyRevisionRow>(
+      "id,input_content_hash,output_content_hash,committed_at",
+    )
+    .eq("job_id", payload.revision.envelope.spine.job_id)
+    .eq("idempotency_key", legacy.idempotency_key)
+    .eq("assembler_version", payload.assembler_version)
+    .eq("family_matrix_version", payload.family_matrix_version)
+    .maybeSingle();
+  if (existing.error) {
+    throw new Error(
+      `docket revision legacy identity read failed: ${
+        existing.error.message || "unknown read error"
+      }`,
+    );
+  }
+  const row = existing.data;
+  if (
+    !row || String(row.id) !== legacy.revision_id ||
+    String(row.input_content_hash) !== payload.revision.input_content_hash ||
+    String(row.output_content_hash) !== String(legacy.output_content_hash)
+  ) {
+    return null;
+  }
+  const committedAt = String(row.committed_at || "");
+  if (!committedAt) {
+    throw new Error(
+      "docket revision legacy identity read omitted committed_at",
+    );
+  }
+  return {
+    committed_at: committedAt,
+    resolved_legacy: {
+      revision_id: row.id,
+      output_content_hash: row.output_content_hash as `sha256:${string}`,
+    },
+  };
+}
+
 export function createSesDocketPersistenceAdapter(
   options: SesDocketPersistenceOptions,
 ): NonNullable<SesPrepareDependencies["persist"]> {
   if (!options.org_id.trim()) throw new TypeError("org_id is required");
   if (!options.created_by.trim()) throw new TypeError("created_by is required");
   return async (payload: SesPersistPayload) => {
+    const legacyCommitted = await resolveLegacyDocketRevision(
+      options.client,
+      payload,
+    );
+    if (legacyCommitted) return legacyCommitted;
+
     const revision = payload.revision;
     const jobId = revision.envelope.spine.job_id;
     const revisionId = revision.docket_revision_id;
