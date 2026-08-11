@@ -74,14 +74,33 @@ it, but the raw HTTP calls above are the source of truth.
 ### Step A — pull the queue
 
 ```
-GET ops-api?action=makesafe_gap_fill_queue&limit=100
+GET ops-api?action=makesafe_gap_fill_queue&limit=100&include_report_ready=false
 ```
+
+An exhaustive intake sweep must page `intake_flags` independently from the
+`report_ready` snapshot. Continue with both cursor fields from `next_cursor`:
+
+```
+GET ops-api?action=makesafe_gap_fill_queue&limit=100&include_report_ready=false&intake_cursor_at=<timestamp>&intake_cursor_case_id=<case_id>
+```
+
+Stop when `next_cursor` is `null`. Both cursor fields are required together;
+the endpoint rejects a partial or malformed cursor with HTTP 400. Fetch
+`report_ready` separately without carrying an intake cursor when Step D needs
+its current snapshot.
 
 Response shape (`contract_version: "makesafe-gap-fill.v1"`):
 
 ```jsonc
 {
   "totals": { "intake_flags": N, "ai_fillable": N, "human_only": N, "report_ready": N },
+  "intake_page": {
+    "eligible_total": N,
+    "returned": N,
+    "has_more": true,
+    "cursor": null,
+    "next_cursor": { "received_at": "…", "case_id": "…" }
+  },
   "intake_flags": [
     {
       "kind": "intake_flag",

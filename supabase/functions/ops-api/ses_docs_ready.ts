@@ -37,9 +37,10 @@ function typedManifestBlockers(
 }
 
 /**
- * This gate deliberately reuses the assembler's existing completeness verdict
- * and typed blockers. It does not reinterpret a family recipe or add another
- * pack rule.
+ * This gate deliberately reuses the assembler's completeness verdict. Typed
+ * business blockers remain on the review/exception pack and at the protected
+ * send and irreversible-action fences; they do not hide a complete draft-zero
+ * pack from the Docs Ready review queue.
  */
 export function evaluateSesDocsReadyGate(
   revision: Pick<
@@ -49,8 +50,7 @@ export function evaluateSesDocsReadyGate(
 ): SesDocsReadyGate {
   if (
     revision.state === "ready" &&
-    revision.envelope.pre_xero_docs_ready &&
-    revision.blockers.length === 0
+    revision.envelope.pre_xero_docs_ready
   ) {
     return { state: "needs_review", blockers: [] };
   }

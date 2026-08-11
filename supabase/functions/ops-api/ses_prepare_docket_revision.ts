@@ -71,6 +71,17 @@ import type {
   SesReleasedCycleEvidence,
   SesReleasedCycleReading,
 } from "./ses_invoiced_materials_evidence.ts";
+import {
+  classifySesPreparationIssues,
+  isHardSesPreparationIssue,
+} from "./ses_preparation_issue_policy.ts";
+import { buildSesReviewPackMaterials } from "./ses_review_pack_materials.ts";
+import {
+  type DraftPackContext,
+  type DraftPackOutput,
+  normaliseDraftPackOutput,
+  verifyDraftPackOutput,
+} from "./makesafe_draft_pack.ts";
 
 export const SES_FIVE_MINUTES_MS = 300_000;
 export const SES_DOCKET_REVIEW_SPEC_VERSION = "ses-docket-review/v2";
@@ -297,6 +308,272 @@ export interface SesPrepareResponse {
   };
 }
 
+export const SES_PREPARE_SYSTEM_EXCEPTION_CODE = "ses_prepare_system_exception";
+
+type SesPrepareSingleCardSelection =
+  | { mode: "job_id"; job_id?: string; job_number?: string; limit?: number }
+  | {
+    mode: "job_number";
+    job_id?: string;
+    job_number?: string;
+    limit?: number;
+  };
+
+function isSingleCardDryRun(
+  request: SesPrepareRequest,
+): request is SesPrepareRequest & { selection: SesPrepareSingleCardSelection } {
+  return request.dry_run === true &&
+    (request.selection.mode === "job_id" ||
+      request.selection.mode === "job_number");
+}
+
+/**
+ * Builds the only response permitted for an otherwise untyped dry-run fault at
+ * the HTTP boundary. It deliberately receives no Error: the response must
+ * never disclose an exception message, stack, query, or source payload.
+ *
+ * The requested selection is echoed as a request identity, never a resolved
+ * card identity. In particular, a job-number selection does not pretend that
+ * its number is a job UUID or that any card facts were successfully read.
+ */
+async function systemExceptionPrepareResponse(
+  request: SesPrepareRequest & { selection: SesPrepareSingleCardSelection },
+  now = new Date(),
+): Promise<SesPrepareResponse> {
+  const selection = request.selection;
+  const requestedJobId = selection.mode === "job_id"
+    ? text(selection.job_id)
+    : "";
+  const requestedJobNumber = selection.mode === "job_number"
+    ? text(selection.job_number)
+    : "";
+  const requestedSelection = {
+    mode: selection.mode,
+    job_id: requestedJobId || null,
+    job_number: requestedJobNumber || null,
+    identity_state: "requested_not_resolved",
+  };
+  const docketId = requestedJobNumber || requestedJobId || "unresolved";
+  const inputContentHash = await sesSha256(
+    {
+      domain: "ses-prepare-system-exception/v1",
+      requested_selection: requestedSelection,
+    },
+    "SecureWorks:ses-docket-system-exception-input:v1\n",
+  );
+  const docketRevisionId = stableUuidFromSha256(
+    await sesSha256(
+      {
+        domain: "ses-prepare-system-exception-revision/v1",
+        idempotency_key: request.idempotency_key,
+        input_content_hash: inputContentHash,
+      },
+      "SecureWorks:ses-docket-system-exception-revision:v1\n",
+    ),
+  );
+  const blocker = blocked(
+    SES_PREPARE_SYSTEM_EXCEPTION_CODE,
+    "The dry preparation boundary encountered an untyped system failure before this card could be assembled.",
+    "Restore the prepare service boundary, then rerun one dry preparation for this same selected card. Do not persist, bind, invoice, send, stage, or release this result.",
+    [
+      "ops-api:prepare_ses_docket_revision",
+      `requested-selection:${selection.mode}`,
+    ],
+    [],
+    { requested_selection: requestedSelection },
+  );
+  const manifest: SesManifestV2 = {
+    version: SES_MANIFEST_V2_VERSION,
+    docket_id: docketId,
+    classification: {
+      state: "system_exception",
+      requested_selection: requestedSelection,
+      evidence_state: "not_read",
+    },
+    routing: {
+      builder: "",
+      report_to: "",
+      photo_to: "",
+      invoice_to: "",
+    },
+    items: Object.fromEntries(
+      MANIFEST_ITEMS.map((item) => [item, blocker]),
+    ) as Record<ManifestItem, SesObligationState>,
+    deliverables: [],
+  };
+  const invoiceProposal = {
+    kind: "ses_draft_zero_system_exception/v1",
+    state: "price_unresolved",
+    amount_ex_gst: 0,
+    gst: 0,
+    total_inc_gst: 0,
+    line_items: [],
+    reason_code: SES_PREPARE_SYSTEM_EXCEPTION_CODE,
+  };
+  const reviewSpec: Record<string, unknown> = {
+    version: "ses-system-exception-review/v1",
+    cards: [{
+      job_identity: requestedSelection,
+      blocker_codes: [SES_PREPARE_SYSTEM_EXCEPTION_CODE],
+      recovery_evidence: blocker.searches_attempted,
+      review_materials: {
+        make_safe_report: {
+          kind: "ses_system_exception_review",
+          state: "complete",
+          report: {
+            ref: docketId,
+            scope:
+              "System exception review pack; no source report content was read or asserted.",
+            findings:
+              "The dry preparation boundary returned an untyped system failure.",
+            works:
+              "No work-completion statement is asserted until a successful typed preparation result is available.",
+            materials:
+              "Materials are unknown; no material charge has been selected.",
+            photos: [],
+          },
+        },
+        draft_zero_invoice: invoiceProposal,
+      },
+    }],
+  };
+  const releasePayload: Record<string, unknown> = {
+    version: "ses-inert-release-proposal/v1",
+    requested_selection: requestedSelection,
+    system_exception_code: SES_PREPARE_SYSTEM_EXCEPTION_CODE,
+    invoice_create_approved: false,
+    client_send_approved: false,
+    send_email: false,
+    send_sms: false,
+    create_invoice: false,
+    authorise_invoice: false,
+    close_job: false,
+  };
+  const artifacts: SesArtifact[] = [
+    await artifactFromText({
+      role: "review_spec",
+      path: "review_spec.json",
+      media_type: "application/json",
+      text: canonicalSesJson(reviewSpec),
+    }),
+    await artifactFromText({
+      role: "review_html",
+      path: "review.html",
+      media_type: "text/html",
+      text:
+        '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SES system exception review</title></head><body><main><h1>System exception review</h1><p>Dry preparation did not complete. No report content, invoice, or release action has been asserted.</p></main></body></html>',
+    }),
+    await artifactFromText({
+      role: "release_payload",
+      path: "release_payload.json",
+      media_type: "application/json",
+      text: canonicalSesJson(releasePayload),
+    }),
+  ];
+  const outputContentHash = await sesSha256(
+    {
+      docket_revision_id: docketRevisionId,
+      manifest,
+      invoice_proposal: invoiceProposal,
+      review_spec: reviewSpec,
+      release_payload: releasePayload,
+      artifact_hashes: artifacts.map((artifact) => ({
+        role: artifact.role,
+        path: artifact.path,
+        content_hash: artifact.content_hash,
+        size_bytes: artifact.size_bytes,
+      })),
+      blockers: [blocker],
+    },
+    "SecureWorks:ses-docket-system-exception-output:v1\n",
+  );
+  const envelope: SesDocketEnvelopeV3 = {
+    version: SES_DOCKET_ENVELOPE_VERSION,
+    v2: manifest,
+    spine: {
+      source_instruction_id: "",
+      lineage_id: "",
+      // A job-number selection has not reached a resolving read. Blank is the
+      // truthful contract value; review_spec carries the safe request identity.
+      job_id: requestedJobId,
+      card_id: null,
+      property_id: null,
+      attendance_cycle_ids: [],
+      current_attendance_cycle_id: "",
+      readiness_revision: null,
+      docket_revision_id: docketRevisionId,
+    },
+    pre_xero_docs_ready: false,
+    local_invoice_proposal: {
+      state: "blocked",
+      evidence: `blocker:${SES_PREPARE_SYSTEM_EXCEPTION_CODE}`,
+    },
+    invoice_create_approved: false,
+    client_send_approved: false,
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    assembler_version: SES_ASSEMBLER_VERSION,
+    input_content_hash: inputContentHash,
+    output_content_hash: outputContentHash,
+  };
+  const timing = {
+    job_id: requestedJobId,
+    accepted_at: now.toISOString(),
+    committed_at: now.toISOString(),
+    duration_ms: 0,
+    stages_ms: { handler_system_exception: 0 },
+    retries: {},
+    degraded_capabilities: ["prepare_untyped_failure"],
+    within_five_minutes: false,
+  };
+  artifacts.push(
+    await artifactFromText({
+      role: "docket_manifest",
+      path: "docket_manifest.json",
+      media_type: "application/json",
+      text: canonicalSesJson(manifest),
+    }),
+    await artifactFromText({
+      role: "assembler_envelope",
+      path: "ASSEMBLER_ENVELOPE.json",
+      media_type: "application/json",
+      text: canonicalSesJson(envelope),
+    }),
+    await artifactFromText({
+      role: "timing",
+      path: "TIMING.json",
+      media_type: "application/json",
+      text: canonicalSesJson(timing),
+    }),
+  );
+  return {
+    action: "prepare_ses_docket_revision",
+    assembler_version: SES_ASSEMBLER_VERSION,
+    dry_run: true,
+    results: [{
+      state: "blocked",
+      docket_revision_id: docketRevisionId,
+      input_content_hash: inputContentHash,
+      output_content_hash: outputContentHash,
+      envelope,
+      blockers: [blocker],
+      artifacts,
+      portal_evidence: [],
+      invoice_proposal: invoiceProposal,
+      email_drafts: {},
+      review_spec: reviewSpec,
+      release_payload: releasePayload,
+      timing,
+      persisted: false,
+    }],
+    timing_summary: {
+      count: 1,
+      max_ms: 0,
+      p95_ms: 0,
+      all_within_five_minutes: false,
+    },
+  };
+}
+
 function blocked(
   reason_code: string,
   reason: string,
@@ -304,11 +581,16 @@ function blocked(
   searches_attempted: string[] = ["canonical-input-envelope"],
   rejected_candidates: string[] = [],
   facts?: Record<string, unknown>,
+  issueClass?: SesBlocker["issue_class"],
 ): SesBlocker {
   return {
     state: "blocked",
     reason,
     reason_code,
+    // Phase One continuously assembles a visible review pack. A new ordinary
+    // evidence gap must not silently turn into a hidden preparation stop;
+    // identity/integrity fences opt into the hard class at their call site.
+    issue_class: issueClass || "review_assumption",
     searches_attempted,
     rejected_candidates,
     recovery_action,
@@ -398,6 +680,19 @@ function sortedUnique(values: readonly string[]): string[] {
 
 function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
   const blockers: SesBlocker[] = [];
+  if (input.classification.workflow === "cancellation") {
+    blockers.push(
+      blocked(
+        "cancelled_case_review",
+        "This card is marked for cancellation and cannot progress to release or an irreversible action.",
+        "Confirm the cancellation disposition in Captain review; the exception pack remains available for audit.",
+        ["canonical-input-envelope", "case-workflow"],
+        [],
+        undefined,
+        "identity_safety_hard",
+      ),
+    );
+  }
   if (input.classification.builder_key === "SYNTHETIC") {
     blockers.push(blocked(
       "synthetic_livefire_release_forbidden",
@@ -436,6 +731,7 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
         ["canonical-input-envelope", "sibling-bundle-binding-ledger"],
         [sibling],
         sharedFacts,
+        "identity_safety_hard",
       ));
     } else if (bundle.status === "binding_not_bidirectional") {
       blockers.push(blocked(
@@ -445,6 +741,7 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
         ["canonical-input-envelope", "sibling-bundle-binding-ledger"],
         [sibling],
         sharedFacts,
+        "identity_safety_hard",
       ));
     } else {
       blockers.push(blocked(
@@ -458,6 +755,7 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
         ],
         [sibling, invoice],
         sharedFacts,
+        "identity_safety_hard",
       ));
     }
   }
@@ -549,15 +847,7 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
             input.classification.delivery_render_route_reason_code,
           route_evidence: input.classification.delivery_render_route_evidence,
         },
-      ),
-    );
-  }
-  if (!text(input.source.work_order_sender)) {
-    blockers.push(
-      blocked(
-        "routing_evidence_missing",
-        "The company routing table has no report recipient for this builder.",
-        "Set the builder report recipient in makesafe_companies; do not substitute a guessed or unrelated address.",
+        "send_gate",
       ),
     );
   }
@@ -567,6 +857,10 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
         "spine_missing_source",
         "The work order email has no work order attachment - ask the builder to send the work order.",
         "Recover the work order from the builder's source email, then prepare the card again.",
+        ["canonical-input-envelope"],
+        [],
+        undefined,
+        "review_assumption",
       ),
     );
   }
@@ -730,6 +1024,10 @@ function localInvoiceProposal(
         "invoice_reference_missing",
         "A local invoice proposal requires a non-empty builder WO/PO reference.",
         "Recover the canonical builder reference before assembling any invoice line.",
+        ["canonical-input-envelope"],
+        [],
+        undefined,
+        "invoice_gate",
       ),
     };
   }
@@ -765,6 +1063,7 @@ function localInvoiceProposal(
             ? materialsChargeDecision.authorisation.decision_key
             : materialsChargeDecision.clearance.decision_key,
         },
+        "invoice_gate",
       ),
     };
   }
@@ -800,6 +1099,10 @@ function localInvoiceProposal(
           "pricing_evidence_missing",
           "Roof report pricing requires an explicit single/double storey fact.",
           "Record the source-evidenced storey classification and re-run.",
+          ["canonical-input-envelope"],
+          [],
+          undefined,
+          "invoice_gate",
         ),
       };
     }
@@ -812,6 +1115,10 @@ function localInvoiceProposal(
           "pricing_evidence_missing",
           "Assessment pricing requires the work order to state whether the scope is fence-only.",
           "Confirm from the work order whether the assessment is fence-only before selecting the $130 or $150 ex-GST price.",
+          ["canonical-input-envelope"],
+          [],
+          undefined,
+          "invoice_gate",
         ),
       };
     }
@@ -868,6 +1175,10 @@ function localInvoiceProposal(
         "pricing_evidence_missing",
         "Pricing requires a positive trade count and the attended hours for each trade.",
         "Recover the number of trades and the attended hours for each trade from the field report; do not invent either fact.",
+        ["canonical-input-envelope"],
+        [],
+        undefined,
+        "invoice_gate",
       ),
     };
   }
@@ -890,6 +1201,10 @@ function localInvoiceProposal(
           )
         } does not match the sealed $${canonicalRate} ex GST schedule.`,
         "Attach a line-specific audited rate override or use the canonical rate.",
+        ["canonical-input-envelope"],
+        [],
+        undefined,
+        "invoice_gate",
       ),
     };
   }
@@ -908,6 +1223,7 @@ function localInvoiceProposal(
   // otherwise read as a priced materials line and disable the guard silently.
   let pricedMaterialsLineCount = 0;
   let existingFencePickets: number | null = null;
+  const priceNeeded: Array<Record<string, unknown>> = [];
   if (
     row.invoice_basis === "ajs_labour_materials" &&
     text(facts.existing_fence_star_picket_refusal)
@@ -924,6 +1240,10 @@ function localInvoiceProposal(
         genuineKit
           ? "Bill evidenced labour and defensible travel only; do not turn panels, bases, ties, clips, fixings, consumables, hire or retrieval materials into invoice lines."
           : "Record one explicit existing-fence prop/support narrative and one positive star-picket quantity from the trade report before pricing the material.",
+        ["canonical-input-envelope"],
+        [],
+        undefined,
+        "invoice_gate",
       ),
     };
   }
@@ -941,6 +1261,10 @@ function localInvoiceProposal(
           "pricing_evidence_missing",
           "The existing-fence star-picket quantity is not a positive whole number.",
           "Recover one positive star-picket quantity from the trade's materials-used evidence before pricing the material.",
+          ["canonical-input-envelope"],
+          [],
+          undefined,
+          "invoice_gate",
         ),
       };
     }
@@ -964,6 +1288,10 @@ function localInvoiceProposal(
           "pricing_evidence_missing",
           "Temporary-fencing pricing requires the number of panels and bases or blocks used.",
           "Recover the panel and base or block quantities from the work order or structured scope before pricing.",
+          ["canonical-input-envelope"],
+          [],
+          undefined,
+          "invoice_gate",
         ),
       };
     }
@@ -979,6 +1307,10 @@ function localInvoiceProposal(
             "pricing_evidence_missing",
             "Hire-card temporary fencing requires the number of star pickets used, including zero.",
             "Recover the star-picket quantity from the work order or structured scope before pricing.",
+            ["canonical-input-envelope"],
+            [],
+            undefined,
+            "invoice_gate",
           ),
         };
       }
@@ -1015,14 +1347,13 @@ function localInvoiceProposal(
       const quantity = positiveNumber(material.quantity);
       const unitPrice = positiveNumber(material.unit_price_ex_gst);
       if (!description || quantity === null || unitPrice === null) {
-        return {
-          proposal: null,
-          blocker: blocked(
-            "pricing_evidence_missing",
-            "A material proposal line lacks typed description, quantity or approved ex-GST unit price.",
-            "Record material facts from source/trade evidence or remove the unsupported line.",
-          ),
-        };
+        priceNeeded.push({
+          description: description || null,
+          quantity,
+          unit_price_ex_gst: unitPrice,
+          state: "price_needed",
+        });
+        continue;
       }
       if (row.invoice_basis === "ajs_labour_materials") {
         if (
@@ -1035,6 +1366,10 @@ function localInvoiceProposal(
               "pricing_evidence_missing",
               "AJS/AJBR cable ties, clips, fixings and small consumables remain non-billable.",
               "Remove the refused material line and bill only evidenced labour, defensible travel and materials allowed by the sealed AJS/AJBR rule.",
+              ["canonical-input-envelope"],
+              [],
+              undefined,
+              "invoice_gate",
             ),
           };
         }
@@ -1050,6 +1385,10 @@ function localInvoiceProposal(
                 "pricing_evidence_missing",
                 "An AJS/AJBR star-picket material line cannot bypass the trade-evidenced existing-fence quantity and sealed $13.50 ex-GST rate.",
                 "Derive the line from the trade report's materials-used evidence and the existing-fence support narrative.",
+                ["canonical-input-envelope"],
+                [],
+                undefined,
+                "invoice_gate",
               ),
             };
           }
@@ -1070,7 +1409,21 @@ function localInvoiceProposal(
   // named ask-one-figure blocker.
   // AJS/AJBR (ajs_labour_materials) keep their picket carve-out unchanged.
   let materialsChargeMeta: Record<string, unknown> | null = null;
-  if (row.invoice_basis === "standard_labour_materials") {
+  let invoiceGate: SesBlocker | null = null;
+  if (priceNeeded.length > 0) {
+    invoiceGate = blocked(
+      "invoice_gate",
+      "One or more technical materials have no sealed unit price; they are shown as price-needed and excluded from the invoice total.",
+      "Supply an approved unit price or an explicit materials-charge decision before any invoice action.",
+      ["canonical-input-envelope", "trade-materials-used"],
+      [],
+      { price_needed: priceNeeded },
+      "invoice_gate",
+    );
+  }
+  if (
+    row.invoice_basis === "standard_labour_materials" && !priceNeeded.length
+  ) {
     const materialsDecision = decideStandardLabourMaterialsCharge({
       materials_used: recordedMaterialsFact(input),
       standing_decision: materialsChargeDecision,
@@ -1094,6 +1447,7 @@ function localInvoiceProposal(
             invoice_basis: row.invoice_basis,
             priced_materials_line_count: pricedMaterialsLineCount,
           },
+          "invoice_gate",
         ),
       };
     }
@@ -1140,10 +1494,63 @@ function localInvoiceProposal(
       gst: Math.round(subtotal * 10) / 100,
       total_inc_gst: Math.round(subtotal * 110) / 100,
       xero_identity: null,
+      ...(priceNeeded.length ? { price_needed: priceNeeded } : {}),
+      ...(invoiceGate ? { invoice_gates: [invoiceGate.reason_code] } : {}),
       ...(materialsChargeMeta ? { materials_charge: materialsChargeMeta } : {}),
     },
-    blocker: null,
+    blocker: invoiceGate,
   };
+}
+
+function draftZeroInvoiceReview(
+  input: SesAssemblerInputV1,
+  row: SesFamilyMatrixRow | null,
+  blocker: SesBlocker,
+): Record<string, unknown> {
+  return {
+    version: "ses-draft-zero-invoice-review/v1",
+    state: "price_unresolved",
+    reference: input.source.builder_reference,
+    invoice_basis: row?.invoice_basis || null,
+    line_items: [],
+    known_line_items: [],
+    subtotal_ex_gst: null,
+    gst: null,
+    total_inc_gst: null,
+    xero_identity: null,
+    invoice_gates: [blocker.reason_code],
+    unresolved: [{
+      reason_code: blocker.reason_code,
+      reason: blocker.reason,
+      recovery_action: blocker.recovery_action,
+      alternatives: blocker.facts?.price_needed || blocker.facts || null,
+    }],
+  };
+}
+
+function exceptionReviewRecord(blocker: SesBlocker): Record<string, unknown> {
+  return {
+    reason_code: blocker.reason_code,
+    reason: blocker.reason,
+    recovery_action: blocker.recovery_action,
+    facts: blocker.facts || null,
+    evidence: blocker.searches_attempted,
+  };
+}
+
+function needsGenericExceptionReport(blocker: SesBlocker): boolean {
+  return isHardSesPreparationIssue(blocker) || [
+    "canonical_draft_pack_output_missing",
+    "canonical_draft_pack_output_incomplete",
+    "canonical_draft_pack_output_invalid",
+  ].includes(blocker.reason_code);
+}
+
+function genericExceptionReview(
+  blockers: readonly SesBlocker[],
+): Record<string, unknown> | null {
+  const blocker = blockers.find(needsGenericExceptionReport);
+  return blocker ? exceptionReviewRecord(blocker) : null;
 }
 
 function initialManifestItems(): Record<ManifestItem, SesObligationState> {
@@ -1226,6 +1633,9 @@ function routingBlocker(
     }.`,
     "Complete the company routing table or seal the matrix row; never default an address.",
     ["makesafe_companies", `family-matrix:${SES_FAMILY_MATRIX_VERSION}`],
+    [],
+    undefined,
+    "send_gate",
   );
 }
 
@@ -1606,6 +2016,9 @@ function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
       capture.signal,
       `Capture and persist the exact ${role} evidence for this job, current attendance cycle, role and source URL, then retry U4.`,
       [`portal-capture:${capture.role}`],
+      [],
+      undefined,
+      "review_assumption",
     );
   }
   if (capture.status === "invalid") {
@@ -1615,6 +2028,9 @@ function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
         `The persisted ${role} capture failed provenance validation.`,
       `Re-capture and persist valid ${role} evidence with actor, timestamp, source URL and content hash.`,
       [`portal-capture:${capture.role}`],
+      [],
+      undefined,
+      "review_assumption",
     );
   }
   if (capture.status === "done") {
@@ -1629,6 +2045,9 @@ function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
         `The ${role} capture returned done without complete persisted provenance and a valid content fingerprint.`,
         "Re-run the approved portal capture and persist the actor, timestamp, source URL, content hash and tied screenshot.",
         [`portal-capture:${capture.role}`],
+        [],
+        undefined,
+        "review_assumption",
       );
     }
     return null;
@@ -1641,6 +2060,9 @@ function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
       }.`,
       `Ask the trade to finish the ${role} form in Prime, then run the headless capture again.`,
       [`portal-capture:${capture.role}`],
+      [],
+      undefined,
+      "review_assumption",
     );
   }
   return blocked(
@@ -1650,6 +2072,9 @@ function captureBlocker(capture: SesPortalCapture): SesBlocker | null {
       : `The builder's ${role} link could not be opened - ask the builder to send a working ${role} link.`,
     `Recover the ${role} link, then run the headless capture again.`,
     [`portal-capture:${capture.role}`],
+    [],
+    undefined,
+    "review_assumption",
   );
 }
 
@@ -1839,7 +2264,10 @@ function buildEmailDrafts(
 function reviewHtml(
   input: SesAssemblerInputV1,
   family: string,
-  blockers: SesBlocker[],
+  hardBlockers: SesBlocker[],
+  reviewAssumptions: SesBlocker[],
+  sendGates: SesBlocker[],
+  invoiceGates: SesBlocker[],
   drafts: Record<string, string>,
 ): string {
   const escape = (value: unknown) =>
@@ -1847,6 +2275,15 @@ function reviewHtml(
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;");
+  const pendingClientRecipient = sendGates.some((blocker) =>
+    [
+      "routing_evidence_missing",
+      "canonical_recipient_missing",
+      "route_recipient_invalid",
+    ].includes(
+      blocker.reason_code,
+    )
+  );
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>${
     escape(
@@ -1856,11 +2293,27 @@ function reviewHtml(
 <body data-assembler="${SES_ASSEMBLER_VERSION}">
 <main><h1>${escape(input.source.builder_reference)}</h1>
 <p>Family: ${escape(family)}</p>
-<p>State: ${blockers.length ? "BLOCKED" : "PRE-XERO DOCS READY"}</p>
-<section id="blockers"><h2>Blockers</h2><pre>${
+${
+    pendingClientRecipient
+      ? '<p id="pending-client-recipient"><strong>PENDING CLIENT RECIPIENT</strong></p>'
+      : ""
+  }
+<p>State: ${
+    hardBlockers.length ? "EXCEPTION REVIEW" : "PRE-XERO DOCS READY"
+  }</p>
+<section id="exception-review"><h2>Exception review - identity/integrity evidence</h2><pre>${
     escape(
-      canonicalSesJson(blockers),
+      canonicalSesJson(hardBlockers),
     )
+  }</pre></section>
+<section id="review-assumptions"><h2>Review assumptions</h2><pre>${
+    escape(canonicalSesJson(reviewAssumptions))
+  }</pre></section>
+<section id="send-gates"><h2>Send/release gates</h2><pre>${
+    escape(canonicalSesJson(sendGates))
+  }</pre></section>
+<section id="invoice-gates"><h2>Invoice gates</h2><pre>${
+    escape(canonicalSesJson(invoiceGates))
   }</pre></section>
 <section id="email-drafts"><h2>Email drafts</h2>${
     Object.entries(drafts)
@@ -1876,19 +2329,32 @@ function reviewHtml(
 }
 
 function validatePreXero(
-  manifest: SesManifestV2,
+  _manifest: SesManifestV2,
   proposal: Record<string, unknown> | null,
   artifacts: SesArtifact[],
-  blockers: SesBlocker[],
+  reviewSpec: Record<string, unknown>,
 ): boolean {
-  if (blockers.length || !proposal) return false;
-  const required = MANIFEST_ITEMS.filter(
-    (name) => name !== "supporting_invoice_pdf",
-  );
-  if (required.some((name) => manifest.items[name]?.state === "blocked")) {
+  if (!proposal) return false;
+  if (!artifacts.some((artifact) => artifact.role === "invoice_proposal")) {
     return false;
   }
-  if (!artifacts.some((artifact) => artifact.role === "invoice_proposal")) {
+  const cards = Array.isArray(reviewSpec.cards) ? reviewSpec.cards : [];
+  const materials = cards.length > 0
+    ? (cards[0] && typeof cards[0] === "object"
+      ? (cards[0] as Record<string, unknown>).review_materials
+      : null)
+    : null;
+  const reportMaterials = materials && typeof materials === "object"
+    ? materials as Record<string, unknown>
+    : {};
+  const report = reportMaterials.make_safe_report;
+  if (
+    reportMaterials.version !== "ses-review-pack-materials/v1" ||
+    !report || typeof report !== "object" ||
+    (report as Record<string, unknown>).state !== "complete" ||
+    !(report as Record<string, unknown>).report ||
+    !artifacts.some((artifact) => artifact.role === "review_html")
+  ) {
     return false;
   }
   return true;
@@ -1953,14 +2419,129 @@ function validateRequest(request: SesPrepareRequest): void {
     // One authorised materials figure describes one card's materials. Spreading
     // it across a batch would bill cards nobody priced, and withdrawing across
     // a batch would strip figures from cards nobody reviewed.
-    if (request.materials_charge || request.materials_charge_cleared) {
+    if (
+      request.materials_charge || request.materials_charge_cleared ||
+      request.draft_pack_output !== undefined
+    ) {
       throw new TypeError(
-        "materials_charge requires a job_id or job_number selection",
+        "materials_charge and draft_pack_output require a job_id or job_number selection",
       );
     }
     return;
   }
   throw new TypeError("selection.mode is invalid");
+}
+
+function draftPackContextForInput(
+  input: SesAssemblerInputV1,
+): DraftPackContext {
+  return {
+    job: {
+      job_number: input.identity.job_number,
+      site_address: input.source.site_address,
+      site_suburb: input.source.site_suburb,
+    },
+    detail: {
+      external_ref: input.source.builder_reference,
+      requesting_company_name: input.classification.builder_label,
+    },
+    service_report: input.cycle_facts.trade_report,
+    assignments: [],
+  };
+}
+
+function normalisedDraftPackReference(value: unknown): string {
+  return text(value).toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function suppliedDraftPackOutput(
+  request: SesPrepareRequest,
+  input: SesAssemblerInputV1,
+): { output: DraftPackOutput | null; blocker: SesBlocker | null } {
+  if (request.draft_pack_output === undefined) {
+    return {
+      output: null,
+      blocker: blocked(
+        "canonical_draft_pack_output_missing",
+        "No Maverick draft pack was supplied for this selected card, so the report cannot be completed from raw checklist fields.",
+        "Generate and submit one complete Maverick DraftPackOutput for the selected current attendance cycle.",
+        ["maverick-draft-pack", "selected-trade-report-current-cycle"],
+        [],
+        undefined,
+        "review_assumption",
+      ),
+    };
+  }
+  try {
+    const output = normaliseDraftPackOutput(request.draft_pack_output);
+    const expectedReference = normalisedDraftPackReference(
+      input.source.builder_reference,
+    );
+    const reportReference = normalisedDraftPackReference(output.report.ref);
+    const invoiceReference = normalisedDraftPackReference(
+      output.invoice.reference,
+    );
+    if (
+      !expectedReference || reportReference !== expectedReference ||
+      invoiceReference !== expectedReference
+    ) {
+      return {
+        output: null,
+        blocker: blocked(
+          "draft_pack_reference_mismatch",
+          "The supplied Maverick draft pack does not bind both report and invoice references to this card's canonical builder reference.",
+          "Regenerate the draft pack for this exact selected card; do not reuse another card's report or invoice output.",
+          ["maverick-draft-pack", "selected-card-builder-reference"],
+          [
+            output.report.ref || "(missing report ref)",
+            output.invoice.reference || "(missing invoice ref)",
+          ],
+          {
+            expected_builder_reference: input.source.builder_reference,
+            report_reference: output.report.ref || null,
+            invoice_reference: output.invoice.reference || null,
+          },
+          "identity_safety_hard",
+        ),
+      };
+    }
+    const verification = verifyDraftPackOutput(
+      output,
+      draftPackContextForInput(input),
+    );
+    if (!verification.ok) {
+      return {
+        output: null,
+        blocker: blocked(
+          "canonical_draft_pack_output_invalid",
+          `The supplied Maverick draft pack failed the canonical verifier: ${
+            verification.blockers.join("; ")
+          }`,
+          "Regenerate the draft pack from the selected current-cycle report and submit the verified output again.",
+          ["maverick-draft-pack", "selected-trade-report-current-cycle"],
+          [],
+          { verifier_blockers: verification.blockers },
+          "review_assumption",
+        ),
+      };
+    }
+    return { output, blocker: null };
+  } catch (error) {
+    return {
+      output: null,
+      blocker: blocked(
+        "canonical_draft_pack_output_invalid",
+        `The supplied Maverick draft pack could not be normalised: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        "Submit one complete Maverick DraftPackOutput for the selected current attendance cycle.",
+        ["maverick-draft-pack", "selected-trade-report-current-cycle"],
+        [],
+        undefined,
+        "review_assumption",
+      ),
+    };
+  }
 }
 
 async function prepareOne(
@@ -1992,6 +2573,10 @@ async function prepareOne(
   stagesMs.T0 = 0;
   const input = await measure("T1", () => deps.resolveInput(selection));
   const blockers = inputBlockers(input);
+  const suppliedDraftPack = suppliedDraftPackOutput(request, input);
+  if (suppliedDraftPack.blocker) {
+    addBlocker(blockers, suppliedDraftPack.blocker);
+  }
   const matrix = resolveSesFamilyMatrixRow({
     builder_key: input.classification.builder_key,
     family: input.classification.family,
@@ -2091,30 +2676,38 @@ async function prepareOne(
   // mirror flipping AUTHORISED to PAID), and each such move would re-key an
   // already-shipped revision, reopen its pack as needs_review and drop a Docs
   // Ready signoff the Captain has already given.
+  const inputWithDraftPackOutput = suppliedDraftPack.output
+    ? { input, canonical_draft_pack_output: suppliedDraftPack.output }
+    : request.draft_pack_output === undefined
+    ? input
+    : { input, draft_pack_output_invalid: request.draft_pack_output };
   const inputContentHash = await sesSha256(
     materialsChargeDecision === null && releasedCycleEvidence
       ? {
-        input,
+        input: inputWithDraftPackOutput,
         settled_attendance_cycle_id:
           input.attendance.current_attendance_cycle_id,
       }
       : materialsChargeDecision?.decision === "charge"
       ? {
-        input,
+        input: inputWithDraftPackOutput,
         operator_materials_charge: materialsChargeDecision.authorisation,
       }
       : materialsChargeDecision?.decision === "none"
-      ? { input, materials_charge_cleared: materialsChargeDecision.clearance }
+      ? {
+        input: inputWithDraftPackOutput,
+        materials_charge_cleared: materialsChargeDecision.clearance,
+      }
       : invoicedMaterialsEvidence
       ? {
-        input,
+        input: inputWithDraftPackOutput,
         already_invoiced_materials: {
           invoice_id: invoicedMaterialsEvidence.invoice_id,
           invoice_number: invoicedMaterialsEvidence.invoice_number,
           materials_ex_gst: invoicedMaterialsEvidence.materials_ex_gst,
         },
       }
-      : input,
+      : inputWithDraftPackOutput,
   );
   if (!request.force_refresh && deps.findCurrentRevision) {
     const current = await deps.findCurrentRevision(
@@ -2207,6 +2800,10 @@ async function prepareOne(
           "spine_missing_source",
           "Source attachment recovery capability is unavailable.",
           "Resume with the canonical U1 case-source attachment adapter.",
+          ["canonical-input-envelope"],
+          [],
+          undefined,
+          "review_assumption",
         ),
       );
       manifest.items.source_work_order_retrieval = sourceBlocker;
@@ -2231,6 +2828,8 @@ async function prepareOne(
           "Recover every designated source attachment from the exact U1 case-source ledger.",
           ["canonical-input-envelope", "case-source-attachment-ledger"],
           missing,
+          undefined,
+          "review_assumption",
         ),
       );
       manifest.items.source_work_order_retrieval = sourceBlocker;
@@ -2340,6 +2939,7 @@ async function prepareOne(
             matches.length === 1
               ? { correlation: correlationFacts }
               : { candidate_count: matches.length, role },
+            matches.length ? "identity_safety_hard" : "review_assumption",
           ),
         );
         manifest.items[linkItem] = itemBlocker;
@@ -2357,6 +2957,9 @@ async function prepareOne(
             "Headless portal capture capability is unavailable.",
             "Resume on the approved capture_portal_evidence runner; never infer portal state.",
             [`portal-role:${role}`],
+            [],
+            undefined,
+            "send_gate",
           ),
         );
         manifest.items[captureItem] = itemBlocker;
@@ -2411,6 +3014,9 @@ async function prepareOne(
             `Portal capture for ${role} does not match this job, docket, builder reference and URL.`,
             "Reject the capture and re-run against the exact typed source link.",
             [`portal-capture:${role}`],
+            [],
+            undefined,
+            "identity_safety_hard",
           ),
         );
         manifest.items[captureItem] = itemBlocker;
@@ -2427,6 +3033,9 @@ async function prepareOne(
             `Portal ${role} returned a submitted/locked signal without the required screenshot.`,
             "Re-run the approved portal capture and retain the tied screenshot.",
             [`portal-capture:${role}`],
+            [],
+            undefined,
+            "send_gate",
           ),
         );
       } else {
@@ -2463,6 +3072,15 @@ async function prepareOne(
           "One or more required portal links/captures are not ready.",
           "Resolve the typed portal blocker and re-run.",
           row.required_portal_roles.map((role) => `portal-role:${role}`),
+          [],
+          undefined,
+          blockers.some((candidate) =>
+              (candidate.reason_code.startsWith("portal_") ||
+                candidate.reason_code === "capability_portal_degraded") &&
+              isHardSesPreparationIssue(candidate)
+            )
+            ? "identity_safety_hard"
+            : "review_assumption",
         )
         : ready("file:EVIDENCE/portal_evidence.json");
     }
@@ -2704,13 +3322,16 @@ async function prepareOne(
           manifest.items.physical_reporting_evidence = itemBlocker;
           manifest.items.supporting_report_pdf = itemBlocker;
         } else if (!deps.resolvePhysicalReportProof) {
-          persistenceRefused = true;
           const itemBlocker = addBlocker(
             blockers,
             blocked(
               "curated_source_missing",
               "No independent durable curated report source can be proved.",
               "Bind an approved durable curation revision or exact previously committed PDF artifact with its expected raw SHA-256, then re-run.",
+              ["current-cycle-curated-source"],
+              [],
+              undefined,
+              "review_assumption",
             ),
           );
           manifest.items.physical_reporting_evidence = itemBlocker;
@@ -2721,7 +3342,6 @@ async function prepareOne(
           const proofDrifted = expectedProof !== undefined &&
             !samePhysicalReportProof(reportProof, expectedProof);
           if (!validPhysicalReportProof(reportProof) || proofDrifted) {
-            persistenceRefused = true;
             reportProof = null;
             const refusal = {
               code: proofDrifted
@@ -2746,6 +3366,8 @@ async function prepareOne(
                 refusal.recovery_action,
                 ["current-cycle-curated-source"],
                 ["job_service_reports", "self-referential-report-document"],
+                undefined,
+                "review_assumption",
               ),
             );
             artifacts.push(
@@ -2760,13 +3382,16 @@ async function prepareOne(
             manifest.items.physical_reporting_evidence = itemBlocker;
             manifest.items.supporting_report_pdf = itemBlocker;
           } else if (!request.dry_run && !deps.renderPhysicalReport) {
-            persistenceRefused = true;
             const itemBlocker = addBlocker(
               blockers,
               blocked(
                 "curated_report_unrecoverable",
                 "The proved curated report bytes cannot be recovered.",
                 "Restore read access to the exact proved PDF artifact and re-run.",
+                ["curated-report-byte-recovery"],
+                [],
+                undefined,
+                "review_assumption",
               ),
             );
             manifest.items.physical_reporting_evidence = itemBlocker;
@@ -3030,7 +3655,6 @@ async function prepareOne(
             (claimedRenderHash &&
               `sha256:${claimedRenderHash}` !== outputSha256)
           ) {
-            persistenceRefused = true;
             const refusal = {
               code: "curated_report_hash_mismatch",
               source_identity: reportProof.source_identity,
@@ -3049,6 +3673,7 @@ async function prepareOne(
                 ["curated-report-byte-recovery"],
                 [reportProof.source_identity],
                 refusal,
+                "review_assumption",
               ),
             );
             artifacts.push(
@@ -3243,6 +3868,13 @@ async function prepareOne(
         ),
     )
     : { proposal: null, blocker: null };
+  let reviewInvoiceProposal = (suppliedDraftPack.blocker &&
+      isHardSesPreparationIssue(suppliedDraftPack.blocker))
+    ? draftZeroInvoiceReview(input, row, suppliedDraftPack.blocker)
+    : priced.proposal ||
+      (row && priced.blocker
+        ? draftZeroInvoiceReview(input, row, priced.blocker)
+        : null);
   if (!row) stagesMs.T6 = 0;
   if (priced.blocker) {
     // A decision made while the card is blocked for some OTHER pricing reason
@@ -3270,13 +3902,13 @@ async function prepareOne(
     }
     addBlocker(blockers, priced.blocker);
   }
-  if (priced.proposal) {
+  if (reviewInvoiceProposal) {
     artifacts.push(
       await artifactFromText({
         role: "invoice_proposal",
         path: "ARTIFACTS/invoice_proposal.json",
         media_type: "application/json",
-        text: canonicalSesJson(priced.proposal),
+        text: canonicalSesJson(reviewInvoiceProposal),
       }),
     );
   }
@@ -3306,17 +3938,133 @@ async function prepareOne(
       }
     }
   }
-  const drafts = row
-    ? blockers.length === 0
-      ? buildEmailDrafts(
+  let reviewMaterials = buildSesReviewPackMaterials({
+    selected_trade_report: input.cycle_facts.trade_report,
+    attendance_cycle_id: input.attendance.current_attendance_cycle_id,
+    invoice_proposal: reviewInvoiceProposal,
+    builder_key: row?.builder_key || input.classification.builder_key,
+    builder_reference: input.source.builder_reference || null,
+    family: row?.family || input.classification.family,
+    location: input.source.site_suburb || null,
+    invoice_basis: row?.invoice_basis || null,
+    material_facts: object(input.cycle_facts.hours_and_materials).materials,
+    canonical_draft_pack_output: suppliedDraftPack.output,
+    exception_review: genericExceptionReview(blockers),
+    draft_pack_context: draftPackContextForInput(input),
+    rule_inputs: {
+      family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+      location_rule: row?.routing_rule || null,
+      material_rule: row?.invoice_basis || null,
+    },
+  });
+  const canonicalReport = object(reviewMaterials.make_safe_report);
+  if (
+    suppliedDraftPack.output &&
+    canonicalReport.state === "canonical_output_incomplete"
+  ) {
+    addBlocker(
+      blockers,
+      blocked(
+        "canonical_draft_pack_output_incomplete",
+        "The supplied Maverick draft pack omitted required report prose and cannot be completed from raw checklist fields.",
+        "Regenerate the complete canonical draft pack with scope, findings, works and a truthful materials statement.",
+        ["maverick-draft-pack", "shared-canonical-report-projection"],
+        Array.isArray(canonicalReport.missing_sections)
+          ? canonicalReport.missing_sections.map((section) => String(section))
+          : [],
+        undefined,
+        "review_assumption",
+      ),
+    );
+  }
+  if (reviewMaterials.source_selection.blocker) {
+    const sourceBlocker = reviewMaterials.source_selection.blocker;
+    addBlocker(
+      blockers,
+      blocked(
+        String(sourceBlocker.code),
+        String(sourceBlocker.fact),
+        String(sourceBlocker.recovery_action),
+        ["selected-trade-report-source"],
+        reviewMaterials.source_selection.candidates.map((candidate) =>
+          String(candidate.identity || "")
+        ).filter(Boolean),
+        { source_selection: sourceBlocker },
+        String(sourceBlocker.code) === "source_identity_ambiguity"
+          ? "identity_safety_hard"
+          : "review_assumption",
+      ),
+    );
+  }
+  // Phase One never selects money while any business question remains. Keep
+  // the report visible and replace the commercial proposal with an inert
+  // draft-zero envelope; the typed category controls the later send/invoice
+  // fence, not whether the Captain can see the case.
+  const reviewPackBlocker = blockers[0];
+  if (reviewPackBlocker) {
+    const replaceInvoiceProposal = reviewInvoiceProposal?.state !==
+      "price_unresolved";
+    if (replaceInvoiceProposal) {
+      reviewInvoiceProposal = draftZeroInvoiceReview(
         input,
         row,
-        reportFile,
-        swmsFile,
-        photoFiles,
-        priced.proposal,
-      )
-      : {}
+        reviewPackBlocker,
+      );
+    }
+    reviewMaterials = buildSesReviewPackMaterials({
+      selected_trade_report: input.cycle_facts.trade_report,
+      attendance_cycle_id: input.attendance.current_attendance_cycle_id,
+      invoice_proposal: reviewInvoiceProposal,
+      builder_key: row?.builder_key || input.classification.builder_key,
+      builder_reference: input.source.builder_reference || null,
+      family: row?.family || input.classification.family,
+      location: input.source.site_suburb || null,
+      invoice_basis: row?.invoice_basis || null,
+      material_facts: object(input.cycle_facts.hours_and_materials).materials,
+      canonical_draft_pack_output: suppliedDraftPack.output,
+      exception_review: genericExceptionReview(blockers),
+      draft_pack_context: draftPackContextForInput(input),
+      rule_inputs: {
+        family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+        location_rule: row?.routing_rule || null,
+        material_rule: row?.invoice_basis || null,
+      },
+    });
+    if (replaceInvoiceProposal) {
+      const priorInvoiceArtifact = artifacts.findIndex((artifact) =>
+        artifact.role === "invoice_proposal"
+      );
+      if (priorInvoiceArtifact >= 0) artifacts.splice(priorInvoiceArtifact, 1);
+      artifacts.push(
+        await artifactFromText({
+          role: "invoice_proposal",
+          path: "ARTIFACTS/invoice_proposal.json",
+          media_type: "application/json",
+          text: canonicalSesJson(reviewInvoiceProposal),
+        }),
+      );
+    }
+  }
+  const issueBuckets = classifySesPreparationIssues(blockers);
+  const hardBlockers = issueBuckets.hard_blockers;
+  const reviewAssumptions = issueBuckets.review_assumptions;
+  const sendGates = issueBuckets.send_gates;
+  const invoiceGates = issueBuckets.invoice_gates;
+  const allReviewIssues = [
+    ...hardBlockers,
+    ...reviewAssumptions,
+    ...sendGates,
+    ...invoiceGates,
+  ];
+  const drafts = row && !hardBlockers.length
+    ? buildEmailDrafts(
+      input,
+      row,
+      reportFile,
+      swmsFile,
+      photoFiles,
+      priced.proposal,
+    )
     : {};
   if (drafts.REPORT_EMAIL_DRAFT) {
     manifest.items.draft_builder_report_email = ready(
@@ -3349,8 +4097,8 @@ async function prepareOne(
     manifest.items.email_drafts_presented = ready(
       "review:review.html#email-drafts",
     );
-  } else if (blockers.length) {
-    manifest.items.email_drafts_presented = blockers[0];
+  } else if (allReviewIssues.length) {
+    manifest.items.email_drafts_presented = allReviewIssues[0];
   }
   stagesMs.T8 = 0;
   for (const [name, body] of Object.entries(drafts)) {
@@ -3386,10 +4134,36 @@ async function prepareOne(
         family: row?.family || input.classification.family,
         builder_reference: input.source.builder_reference,
         trade_report: reviewTradeReport(input),
+        review_materials: reviewMaterials,
         portal_proof: portalEvidence,
         artifact_paths: artifacts.map((artifact) => artifact.path).sort(),
-        blocker_codes: blockers.map((item) => item.reason_code),
-        waiting_on: blockers.map((item) => item.reason),
+        exception_review_codes: hardBlockers.map((item) => item.reason_code),
+        exception_review_evidence: hardBlockers.map((item) => ({
+          reason: item.reason,
+          facts: item.facts || null,
+          searches_attempted: item.searches_attempted,
+        })),
+        blocker_codes: hardBlockers.map((item) => item.reason_code),
+        waiting_on: hardBlockers.map((item) => item.reason),
+        review_assumption_codes: reviewAssumptions.map((item) =>
+          item.reason_code
+        ),
+        review_assumptions: reviewAssumptions.map((item) => item.reason),
+        send_gate_codes: sendGates.map((item) => item.reason_code),
+        send_gates: sendGates.map((item) => item.reason),
+        invoice_gate_codes: invoiceGates.map((item) => item.reason_code),
+        invoice_gates: invoiceGates.map((item) => item.reason),
+        recipient_status: sendGates.some((item) =>
+            [
+              "routing_evidence_missing",
+              "canonical_recipient_missing",
+              "route_recipient_invalid",
+            ].includes(
+              item.reason_code,
+            )
+          )
+          ? "PENDING CLIENT RECIPIENT"
+          : "ready_or_not_applicable",
       },
     ],
   };
@@ -3404,11 +4178,32 @@ async function prepareOne(
     authorise_invoice: false,
     close_job: false,
     portal_evidence: portalEvidence,
+    ...(reviewAssumptions.length
+      ? {
+        review_assumption_codes: reviewAssumptions.map((item) =>
+          item.reason_code
+        ),
+      }
+      : {}),
+    ...(hardBlockers.length
+      ? {
+        exception_review_codes: hardBlockers.map((item) => item.reason_code),
+      }
+      : {}),
+    ...(sendGates.length
+      ? { send_gate_codes: sendGates.map((item) => item.reason_code) }
+      : {}),
+    ...(invoiceGates.length
+      ? { invoice_gate_codes: invoiceGates.map((item) => item.reason_code) }
+      : {}),
   };
   const review = reviewHtml(
     input,
     row?.family || input.classification.family,
-    blockers,
+    hardBlockers,
+    reviewAssumptions,
+    sendGates,
+    invoiceGates,
     drafts,
   );
   artifacts.push(
@@ -3465,7 +4260,7 @@ async function prepareOne(
   const stableOutput = {
     docket_revision_id: docketRevisionId,
     manifest,
-    invoice_proposal: priced.proposal,
+    invoice_proposal: reviewInvoiceProposal,
     email_drafts: drafts,
     portal_evidence: portalEvidence,
     review_spec: reviewSpec,
@@ -3478,7 +4273,7 @@ async function prepareOne(
         size_bytes: artifact.size_bytes,
       }))
       .sort((a, b) => a.path.localeCompare(b.path)),
-    blockers,
+    blockers: allReviewIssues,
   };
   const outputContentHash = await sesSha256(
     stableOutput,
@@ -3486,9 +4281,9 @@ async function prepareOne(
   );
   const preXeroDocsReady = validatePreXero(
     manifest,
-    priced.proposal,
+    reviewInvoiceProposal,
     artifacts,
-    blockers,
+    reviewSpec,
   );
   const envelope: SesDocketEnvelopeV3 = {
     version: SES_DOCKET_ENVELOPE_VERSION,
@@ -3505,7 +4300,7 @@ async function prepareOne(
       docket_revision_id: docketRevisionId,
     },
     pre_xero_docs_ready: preXeroDocsReady,
-    local_invoice_proposal: priced.proposal
+    local_invoice_proposal: priced.proposal && !invoiceGates.length
       ? { state: "ready", evidence: "file:ARTIFACTS/invoice_proposal.json" }
       : {
         state: "blocked",
@@ -3602,9 +4397,9 @@ async function prepareOne(
     input_content_hash: inputContentHash,
     output_content_hash: outputContentHash,
     envelope,
-    blockers,
+    blockers: allReviewIssues,
     portal_evidence: portalEvidence,
-    invoice_proposal: priced.proposal,
+    invoice_proposal: reviewInvoiceProposal,
     email_drafts: drafts,
     review_spec: reviewSpec,
     release_payload: releasePayload,
@@ -3673,9 +4468,7 @@ async function prepareOne(
   );
   return {
     ...baseRevision,
-    state: envelope.pre_xero_docs_ready && !blockers.length
-      ? "ready"
-      : "blocked",
+    state: envelope.pre_xero_docs_ready ? "ready" : "blocked",
     artifacts,
     timing,
     persisted,
@@ -3738,6 +4531,34 @@ async function prepareSesDocketRevision(
     results,
     timing_summary: responseSummary(results),
   };
+}
+
+/**
+ * This is deliberately the HTTP action's last-resort, one-card dry-run
+ * boundary. `prepareOne` remains strict: typed operational/business outcomes
+ * keep their native errors and ordinary execution still returns its unchanged
+ * response. Only an otherwise untyped rejection can become this inert pack.
+ */
+export async function prepareSesDocketRevisionAtHttpBoundary(
+  request: SesPrepareRequest,
+  deps: SesPrepareDependencies,
+  options: {
+    invoke?: (
+      request: SesPrepareRequest,
+      deps: SesPrepareDependencies,
+    ) => Promise<SesPrepareResponse>;
+    preserveError?: (error: unknown) => boolean;
+    now?: () => Date;
+  } = {},
+): Promise<SesPrepareResponse> {
+  try {
+    return await (options.invoke || prepareSesDocketRevision)(request, deps);
+  } catch (error) {
+    if (!isSingleCardDryRun(request) || options.preserveError?.(error)) {
+      throw error;
+    }
+    return await systemExceptionPrepareResponse(request, options.now?.());
+  }
 }
 
 export const prepare_ses_docket_revision = prepareSesDocketRevision;

@@ -3493,6 +3493,16 @@ export function normalizeSesPrepareRequest(
       throw error;
     }
   }
+  if (
+    Object.hasOwn(record(body), "draft_pack_output") &&
+    mode === "board_batch"
+  ) {
+    throw new SesAssemblerAdapterError(
+      "ses_draft_pack_output_selection_invalid",
+      "draft_pack_output applies to one named card; select it with selection.mode job_id or job_number.",
+      400,
+    );
+  }
   return {
     selection: mode === "job_id"
       ? { mode, job_id: jobId }
@@ -3504,6 +3514,9 @@ export function normalizeSesPrepareRequest(
       : {}),
     ...(materialsCharge?.kind === "cleared"
       ? { materials_charge_cleared: materialsCharge.clearance }
+      : {}),
+    ...(Object.hasOwn(record(body), "draft_pack_output")
+      ? { draft_pack_output: body.draft_pack_output }
       : {}),
     idempotency_key: idempotencyKey,
     assembler_version: SES_ASSEMBLER_VERSION,

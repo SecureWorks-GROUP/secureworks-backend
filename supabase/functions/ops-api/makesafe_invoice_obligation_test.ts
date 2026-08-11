@@ -64,6 +64,120 @@ Deno.test("first proposal mints opaque stable obligation and content revision", 
   assertEquals(result.proposal.totals, { ex: 320, inc: 352 });
 });
 
+Deno.test("review invoice gates refuse with a catalogue code and preserve exact gate evidence", async () => {
+  const docket = {
+    id: "40000000-0000-4000-8000-000000007501",
+    job_id: JOB,
+    stage: "pre_xero",
+    local_invoice_proposal: { line_items: [] },
+    review_spec: {
+      cards: [{
+        invoice_gate_codes: [
+          "invoice_gate",
+          "materials_charge_figure_required",
+        ],
+      }],
+    },
+  };
+  const client = {
+    from() {
+      const query = {
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        order() {
+          return query;
+        },
+        limit() {
+          return query;
+        },
+        maybeSingle() {
+          return Promise.resolve({ data: docket, error: null });
+        },
+      };
+      return query;
+    },
+  } as unknown as SesSupabaseClient;
+  const error = await assertRejects(
+    () =>
+      prepareSesInvoiceObligationAction(
+        client,
+        { mode: "routine", user: null },
+        {
+          org_id: ORG,
+          job_id: JOB,
+          docket_revision_id: docket.id,
+          created_by: "gate-test",
+        },
+      ),
+    SesActionError,
+  );
+  const refusal = (error as SesActionError).refusal as Record<string, unknown>;
+  assertEquals(refusal.code, "pricing_evidence_missing");
+  assertEquals(typeof refusal.fact, "string");
+  assertEquals(
+    (refusal.evidence as Record<string, unknown>).invoice_gate_codes,
+    ["invoice_gate", "materials_charge_figure_required"],
+  );
+});
+
+Deno.test("exception-review identity evidence refuses invoice mint without hiding the review pack", async () => {
+  const docket = {
+    id: "40000000-0000-4000-8000-000000007504",
+    job_id: JOB,
+    stage: "pre_xero",
+    local_invoice_proposal: { line_items: [] },
+    review_spec: {
+      cards: [{ exception_review_codes: ["draft_pack_reference_mismatch"] }],
+    },
+  };
+  const client = {
+    from() {
+      const query = {
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        order() {
+          return query;
+        },
+        limit() {
+          return query;
+        },
+        maybeSingle() {
+          return Promise.resolve({ data: docket, error: null });
+        },
+      };
+      return query;
+    },
+  } as unknown as SesSupabaseClient;
+  const error = await assertRejects(
+    () =>
+      prepareSesInvoiceObligationAction(
+        client,
+        { mode: "routine", user: null },
+        {
+          org_id: ORG,
+          job_id: JOB,
+          docket_revision_id: docket.id,
+          created_by: "exception-review-test",
+        },
+      ),
+    SesActionError,
+  );
+  const refusal = (error as SesActionError).refusal as Record<string, unknown>;
+  assertEquals(refusal.code, "pricing_evidence_missing");
+  assertEquals(
+    (refusal.evidence as Record<string, unknown>).exception_review_codes,
+    ["draft_pack_reference_mismatch"],
+  );
+});
+
 Deno.test("Bertram persisted docket reaches prepare_ses_invoice_obligation at $750 ex and $825 inc", async () => {
   const docket = {
     id: "40000000-0000-4000-8000-000000007502",
@@ -187,21 +301,39 @@ Deno.test("a docket priced under a superseded family matrix refuses the mint wit
     from(table: string) {
       const response = () => ({ data: rows[table] ?? null, error: null });
       const query = {
-        select() { return query; },
-        eq() { return query; },
-        in() { return query; },
-        not() { return query; },
-        or() { return query; },
-        order() { return query; },
-        limit() { return query; },
-        maybeSingle() { return Promise.resolve(response()); },
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        in() {
+          return query;
+        },
+        not() {
+          return query;
+        },
+        or() {
+          return query;
+        },
+        order() {
+          return query;
+        },
+        limit() {
+          return query;
+        },
+        maybeSingle() {
+          return Promise.resolve(response());
+        },
         then(resolve: (value: ReturnType<typeof response>) => unknown) {
           return Promise.resolve(response()).then(resolve);
         },
       };
       return query;
     },
-    rpc() { return Promise.resolve({ data: null, error: null }); },
+    rpc() {
+      return Promise.resolve({ data: null, error: null });
+    },
     storage: { from: () => ({}) },
   } as unknown as SesSupabaseClient;
 

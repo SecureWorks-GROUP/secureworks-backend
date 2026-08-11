@@ -30,6 +30,8 @@
 // "Trade submitted a report but the reporting pack has not been run yet" — loaded
 // against the live report lifecycle in makesafe_gap_fill_report_ready.ts.
 import { loadReportReadyItems } from "./makesafe_gap_fill_report_ready.ts";
+import { fetchAllRows } from "./makesafe_compact_reads.ts";
+import { resolveEffectiveIntakeSourceAuthority } from "./makesafe_intake_source_authority.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -256,6 +258,13 @@ interface QueueOptions {
   limit?: number;
   orgId?: string;
   includeReportReady?: boolean;
+  intakeCursorAt?: string | null;
+  intakeCursorCaseId?: string | null;
+}
+
+export interface GapFillIntakeCursor {
+  received_at: string;
+  case_id: string;
 }
 
 const QUEUE_DEFAULT_LIMIT = 100;
@@ -272,6 +281,8 @@ const CASE_QUEUE_COLUMNS = [
   "conflicting_fields",
   "blocked_reasons",
   "job_id",
+  "is_authoritative",
+  "normaliser_version",
   "company_id",
   "company_slug_raw",
   "external_ref_canonical",
@@ -295,6 +306,204 @@ function boundedLimit(limit: number | undefined): number {
   return Math.min(Math.floor(n), QUEUE_MAX_LIMIT);
 }
 
+const GAP_FILL_CASE_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const GAP_FILL_CURSOR_AT_RE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))$/;
+
+function gapFillCursorTimestampIsValid(value: string): boolean {
+  const match = GAP_FILL_CURSOR_AT_RE.exec(value);
+  if (!match) return false;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  if (year < 1 || month < 1 || month > 12) return false;
+  if (hour > 23 || minute > 59 || second > 59) return false;
+
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ][month - 1];
+  if (day < 1 || day > daysInMonth) return false;
+
+  if (match[8] !== "Z") {
+    const offsetHour = Number(match[10]);
+    const offsetMinute = Number(match[11]);
+    if (
+      offsetHour > 14 || offsetMinute > 59 ||
+      (offsetHour === 14 && offsetMinute !== 0)
+    ) {
+      return false;
+    }
+  }
+
+  return Number.isFinite(Date.parse(value));
+}
+
+function parseGapFillIntakeCursor(
+  receivedAtInput: string | null | undefined,
+  caseIdInput: string | null | undefined,
+): GapFillIntakeCursor | null {
+  const receivedAtProvided = receivedAtInput !== null &&
+    receivedAtInput !== undefined;
+  const caseIdProvided = caseIdInput !== null && caseIdInput !== undefined;
+  if (receivedAtProvided !== caseIdProvided) {
+    throw new GapFillError(
+      "intake_cursor_at and intake_cursor_case_id must be supplied together",
+      400,
+    );
+  }
+  if (!receivedAtProvided) return null;
+
+  const receivedAt = String(receivedAtInput).trim();
+  const caseId = String(caseIdInput).trim().toLowerCase();
+  const parsedAt = Date.parse(receivedAt);
+  if (!gapFillCursorTimestampIsValid(receivedAt)) {
+    throw new GapFillError("intake_cursor_at must be a valid timestamp", 400);
+  }
+  if (!GAP_FILL_CASE_ID_RE.test(caseId)) {
+    throw new GapFillError(
+      "intake_cursor_case_id must be a valid case identifier",
+      400,
+    );
+  }
+  return {
+    received_at: new Date(parsedAt).toISOString(),
+    case_id: caseId,
+  };
+}
+
+function isHistoricalIdentityReconciliationResidue(caseRow: any): boolean {
+  return String(caseRow?.last_decision_provenance || "") === "backfill" &&
+    String(caseRow?.normaliser_version || "").includes(
+      "po_box_reconciliation@v1",
+    );
+}
+
+const GAP_FILL_ID_CHUNK = 25;
+
+async function loadGapFillRowsByIds(
+  ids: string[],
+  readChunk: (chunk: string[]) => PromiseLike<{ data: any; error: any }>,
+  label: string,
+): Promise<any[]> {
+  const rows: any[] = [];
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  for (let offset = 0; offset < uniqueIds.length; offset += GAP_FILL_ID_CHUNK) {
+    const { data, error } = await readChunk(
+      uniqueIds.slice(offset, offset + GAP_FILL_ID_CHUNK),
+    );
+    if (error) {
+      throw new Error(
+        `gap-fill ${label} read failed: ${error.message || error}`,
+      );
+    }
+    rows.push(...(data || []));
+  }
+  return rows;
+}
+
+async function loadGapFillAuthorityRows(
+  client: any,
+  table: string,
+  columns: string,
+  orgId: string,
+  idColumn: string,
+  ids: string[],
+  label: string,
+): Promise<any[]> {
+  return await loadGapFillRowsByIds(
+    ids,
+    (chunk) =>
+      client.from(table).select(columns)
+        .eq("org_id", orgId)
+        .in(idColumn, chunk),
+    label,
+  );
+}
+
+// A stored case is correction residue only when it has source rows and every
+// one resolves away after the same correction + supersession overlay used by
+// the canonical intake-exception projector. One still-effective stored source
+// keeps the case gap-fillable.
+async function loadSourceAuthorityResidueCaseIds(
+  client: any,
+  orgId: string,
+  caseIds: string[],
+): Promise<Set<string>> {
+  const sources = await loadGapFillAuthorityRows(
+    client,
+    "makesafe_intake_case_sources",
+    "case_id,post_id",
+    orgId,
+    "case_id",
+    caseIds,
+    "source authority",
+  );
+  const postIds = sources.map((row: any) => String(row?.post_id || ""))
+    .filter(Boolean);
+  if (!postIds.length) return new Set();
+  const [sourceCorrections, sourceSupersessions] = await Promise.all([
+    loadGapFillAuthorityRows(
+      client,
+      "makesafe_intake_source_authority_corrections",
+      "id,source_post_id,legacy_case_id,effective_case_id,target_job_id",
+      orgId,
+      "source_post_id",
+      postIds,
+      "source authority correction",
+    ),
+    loadGapFillAuthorityRows(
+      client,
+      "makesafe_intake_source_authority_correction_supersessions",
+      "source_post_id,superseded_correction_id,prior_authority_case_id,effective_case_id",
+      orgId,
+      "source_post_id",
+      postIds,
+      "source authority supersession",
+    ),
+  ]);
+  const effectiveSources = resolveEffectiveIntakeSourceAuthority(
+    sources,
+    sourceCorrections,
+    sourceSupersessions,
+  );
+  const storedCounts = new Map<string, number>();
+  const stillEffectiveCounts = new Map<string, number>();
+  for (const source of effectiveSources) {
+    storedCounts.set(
+      source.storedCaseId,
+      (storedCounts.get(source.storedCaseId) || 0) + 1,
+    );
+    if (source.effectiveCaseId === source.storedCaseId) {
+      stillEffectiveCounts.set(
+        source.storedCaseId,
+        (stillEffectiveCounts.get(source.storedCaseId) || 0) + 1,
+      );
+    }
+  }
+  return new Set(
+    [...storedCounts.keys()].filter((caseId) =>
+      (stillEffectiveCounts.get(caseId) || 0) === 0
+    ),
+  );
+}
+
 // Per-case source evidence pointers: WHERE the AI should look. Carries no message
 // bodies — only post ids, subjects, sender, timestamps and attachment metadata.
 // The skill fetches bodies/PDFs with the existing read actions (get_makesafe_email
@@ -306,40 +515,40 @@ async function loadCaseEvidencePointers(
 ): Promise<Map<string, any[]>> {
   const byCase = new Map<string, any[]>();
   if (!caseIds.length) return byCase;
-  const { data: sources, error: srcErr } = await client
-    .from("makesafe_intake_case_sources")
-    .select("case_id,post_id,role,received_at,attachment_refs")
-    .eq("org_id", orgId)
-    .in("case_id", caseIds);
-  if (srcErr) {
-    throw new Error(`gap-fill source read failed: ${srcErr.message || srcErr}`);
-  }
-  const rows = sources || [];
+  const rows = await loadGapFillRowsByIds(
+    caseIds,
+    (chunk) =>
+      client.from("makesafe_intake_case_sources")
+        .select("case_id,post_id,role,received_at,attachment_refs")
+        .eq("org_id", orgId)
+        .in("case_id", chunk),
+    "source",
+  );
   const postIds = [...new Set(rows.map((r: any) => r.post_id).filter(Boolean))];
 
   const emailByPost = new Map<string, any>();
   if (postIds.length) {
-    const { data: emails, error: emErr } = await client
-      .from("emails")
-      .select("post_id,subject,from_email,from_name,received_at")
-      .in("post_id", postIds);
-    if (emErr) {
-      throw new Error(`gap-fill email read failed: ${emErr.message || emErr}`);
-    }
+    const emails = await loadGapFillRowsByIds(
+      postIds,
+      (chunk) =>
+        client.from("emails")
+          .select("post_id,subject,from_email,from_name,received_at")
+          .in("post_id", chunk),
+      "email",
+    );
     for (const e of emails || []) emailByPost.set(e.post_id, e);
   }
 
   const attByPost = new Map<string, any[]>();
   if (postIds.length) {
-    const { data: atts, error: attErr } = await client
-      .from("email_attachments")
-      .select("id,email_id,name,content_type,status,size_bytes")
-      .in("email_id", postIds);
-    if (attErr) {
-      throw new Error(
-        `gap-fill attachment read failed: ${attErr.message || attErr}`,
-      );
-    }
+    const atts = await loadGapFillRowsByIds(
+      postIds,
+      (chunk) =>
+        client.from("email_attachments")
+          .select("id,email_id,name,content_type,status,size_bytes")
+          .in("email_id", chunk),
+      "attachment",
+    );
     for (const a of atts || []) {
       const list = attByPost.get(a.email_id) || [];
       list.push({
@@ -410,30 +619,93 @@ export interface GapFillQueueItem {
   received_at: string | null;
 }
 
+interface GapFillIntakePage {
+  items: GapFillQueueItem[];
+  eligibleTotal: number;
+  cursor: GapFillIntakeCursor | null;
+  nextCursor: GapFillIntakeCursor | null;
+  hasMore: boolean;
+}
+
+function queueTuple(row: any): { receivedAt: number; caseId: string } {
+  const receivedAt = Date.parse(String(row?.received_at ?? ""));
+  const caseId = String(row?.id ?? "");
+  if (!Number.isFinite(receivedAt) || !caseId) {
+    throw new Error("gap-fill case row has no stable received_at/id cursor");
+  }
+  return { receivedAt, caseId };
+}
+
+// Negative means left sorts before right in the canonical descending page order.
+function compareGapFillCaseRows(left: any, right: any): number {
+  const leftTuple = queueTuple(left);
+  const rightTuple = queueTuple(right);
+  if (leftTuple.receivedAt !== rightTuple.receivedAt) {
+    return rightTuple.receivedAt - leftTuple.receivedAt;
+  }
+  return rightTuple.caseId.localeCompare(leftTuple.caseId);
+}
+
+function rowIsAfterCursor(
+  row: any,
+  cursor: GapFillIntakeCursor,
+): boolean {
+  return compareGapFillCaseRows(row, {
+    received_at: cursor.received_at,
+    id: cursor.case_id,
+  }) > 0;
+}
+
+function cursorForCaseRow(row: any): GapFillIntakeCursor {
+  const tuple = queueTuple(row);
+  return {
+    received_at: new Date(tuple.receivedAt).toISOString(),
+    case_id: tuple.caseId,
+  };
+}
+
 // Build the intake-flag portion of the queue: every exception + blocked case,
 // most-recent first, with evidence pointers and a per-field fill plan.
 async function loadIntakeFlagItems(
   client: any,
   orgId: string,
   limit: number,
-): Promise<GapFillQueueItem[]> {
-  const { data: cases, error } = await client
-    .from("makesafe_intake_cases")
-    .select(CASE_QUEUE_COLUMNS)
-    .eq("org_id", orgId)
-    .in("state", GAP_FILL_CASE_STATES as unknown as string[])
-    .order("received_at", { ascending: false })
-    .limit(limit);
-  if (error) {
-    throw new Error(`gap-fill case read failed: ${error.message || error}`);
-  }
-  const rows = cases || [];
+  cursor: GapFillIntakeCursor | null,
+): Promise<GapFillIntakePage> {
+  const cases = await fetchAllRows<any>(
+    () =>
+      client.from("makesafe_intake_cases")
+        .select(CASE_QUEUE_COLUMNS)
+        .eq("org_id", orgId)
+        .in("state", GAP_FILL_CASE_STATES as unknown as string[])
+        .order("received_at", { ascending: false }),
+    "gap-fill case read",
+    "id",
+    false,
+  );
+  const candidates = (cases || []).filter((row: any) =>
+    row?.is_authoritative !== false &&
+    !isHistoricalIdentityReconciliationResidue(row)
+  );
+  const sourceAuthorityResidueCaseIds = await loadSourceAuthorityResidueCaseIds(
+    client,
+    orgId,
+    candidates.map((row: any) => String(row.id)),
+  );
+  const eligibleRows = candidates.filter((row: any) =>
+    !sourceAuthorityResidueCaseIds.has(String(row.id))
+  ).sort(compareGapFillCaseRows);
+  const remainingRows = cursor
+    ? eligibleRows.filter((row: any) => rowIsAfterCursor(row, cursor))
+    : eligibleRows;
+  const hasMore = remainingRows.length > limit;
+  const rows = remainingRows.slice(0, limit);
   const evidenceByCase = await loadCaseEvidencePointers(
     client,
     orgId,
     rows.map((r: any) => r.id),
   );
-  return rows.map((row: any): GapFillQueueItem => ({
+  const items = rows.map((row: any): GapFillQueueItem => ({
     kind: "intake_flag",
     case_id: row.id,
     instruction_key: row.instruction_key,
@@ -466,6 +738,15 @@ async function loadIntakeFlagItems(
     evidence_sources: evidenceByCase.get(row.id) || [],
     received_at: row.received_at ?? null,
   }));
+  return {
+    items,
+    eligibleTotal: eligibleRows.length,
+    cursor,
+    nextCursor: hasMore && rows.length
+      ? cursorForCaseRow(rows[rows.length - 1])
+      : null,
+    hasMore,
+  };
 }
 
 // Assemble the whole queue. Report-ready items are loaded separately (see
@@ -476,7 +757,12 @@ export async function loadGapFillQueue(
 ): Promise<any> {
   const orgId = options.orgId ?? DEFAULT_ORG_ID;
   const limit = boundedLimit(options.limit);
-  const intakeFlags = await loadIntakeFlagItems(client, orgId, limit);
+  const cursor = parseGapFillIntakeCursor(
+    options.intakeCursorAt,
+    options.intakeCursorCaseId,
+  );
+  const intakePage = await loadIntakeFlagItems(client, orgId, limit, cursor);
+  const intakeFlags = intakePage.items;
   const reportReady = options.includeReportReady === false
     ? []
     : await loadReportReadyItems(client, orgId, limit);
@@ -493,6 +779,13 @@ export async function loadGapFillQueue(
       ai_fillable: aiFillable,
       human_only: intakeFlags.filter((i) => i.human_only).length,
       report_ready: reportReady.length,
+    },
+    intake_page: {
+      eligible_total: intakePage.eligibleTotal,
+      returned: intakeFlags.length,
+      has_more: intakePage.hasMore,
+      cursor: intakePage.cursor,
+      next_cursor: intakePage.nextCursor,
     },
     intake_flags: intakeFlags,
     report_ready: reportReady,
@@ -551,6 +844,27 @@ export async function applyGapFill(
   if (!(GAP_FILL_CASE_STATES as unknown as string[]).includes(caseRow.state)) {
     throw new GapFillError(
       `case is '${caseRow.state}', not a gap-fill flag (must be exception or blocked_live_job)`,
+      409,
+    );
+  }
+
+  if (caseRow?.is_authoritative === false) {
+    throw new GapFillError("case is not authoritative", 409);
+  }
+  if (isHistoricalIdentityReconciliationResidue(caseRow)) {
+    throw new GapFillError(
+      "case is historical identity reconciliation residue, not a gap-fill target",
+      409,
+    );
+  }
+  const sourceAuthorityResidueCaseIds = await loadSourceAuthorityResidueCaseIds(
+    client,
+    orgId,
+    [String(caseRow.id)],
+  );
+  if (sourceAuthorityResidueCaseIds.has(String(caseRow.id))) {
+    throw new GapFillError(
+      "case source authority was corrected away; fill the effective case instead",
       409,
     );
   }

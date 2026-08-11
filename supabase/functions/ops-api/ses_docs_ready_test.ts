@@ -104,6 +104,17 @@ Deno.test("audit-grade gate queues only the assembler-complete family pack", () 
   assertEquals(refused.state, "blocked");
   assertEquals(refused.blockers, [typedBlocker]);
   assertEquals(refused.blockers[0], typedBlocker);
+
+  // A complete exception-review pack is intentionally queued for human review;
+  // business uncertainty closes send and irreversible actions, not visibility.
+  assertEquals(
+    evaluateSesDocsReadyGate({
+      state: "ready",
+      envelope: envelope(true, typedBlocker),
+      blockers: [typedBlocker],
+    }),
+    { state: "needs_review", blockers: [] },
+  );
 });
 
 Deno.test("Docs Ready transitions are needs-review, signed-off, and invalidated", async () => {

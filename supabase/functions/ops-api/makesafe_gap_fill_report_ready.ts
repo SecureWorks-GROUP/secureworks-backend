@@ -46,6 +46,33 @@ const DETAIL_COLUMNS = [
   "cycle_number",
 ].join(",");
 
+const REPORT_READY_ID_CHUNK = 25;
+
+async function loadReportReadyRowsByIds(
+  ids: string[],
+  readChunk: (chunk: string[]) => PromiseLike<{ data: any; error: any }>,
+  label: string,
+): Promise<any[]> {
+  const rows: any[] = [];
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  for (
+    let offset = 0;
+    offset < uniqueIds.length;
+    offset += REPORT_READY_ID_CHUNK
+  ) {
+    const { data, error } = await readChunk(
+      uniqueIds.slice(offset, offset + REPORT_READY_ID_CHUNK),
+    );
+    if (error) {
+      throw new Error(
+        `gap-fill report-ready ${label} read failed: ${error.message || error}`,
+      );
+    }
+    rows.push(...(data || []));
+  }
+  return rows;
+}
+
 export async function loadReportReadyItems(
   client: any,
   // The report lifecycle tables (makesafe_job_details / jobs / job_service_reports)
@@ -70,17 +97,16 @@ export async function loadReportReadyItems(
   const jobIds = detailRows.map((d) => d.job_id).filter(Boolean);
   if (!jobIds.length) return [];
 
-  const { data: packs, error: packErr } = await client
-    .from("makesafe_report_packs")
-    .select(
-      "job_id,pack_kind,status,report_doc_id,invoice_doc_id,xero_invoice_id",
-    )
-    .in("job_id", jobIds);
-  if (packErr) {
-    throw new Error(
-      `gap-fill report-ready pack scan failed: ${packErr.message || packErr}`,
-    );
-  }
+  const packs = await loadReportReadyRowsByIds(
+    jobIds,
+    (chunk) =>
+      client.from("makesafe_report_packs")
+        .select(
+          "job_id,pack_kind,status,report_doc_id,invoice_doc_id,xero_invoice_id",
+        )
+        .in("job_id", chunk),
+    "pack scan",
+  );
 
   const dueIds = selectDraftPackDueJobIds(
     detailRows as DraftPackDueDetail[],
@@ -91,30 +117,26 @@ export async function loadReportReadyItems(
   if (!dueIds.length) return [];
 
   // Display data: job header + the submitted service report for the current cycle.
-  const { data: jobs, error: jobErr } = await client
-    .from("jobs")
-    .select("id,job_number,client_name,site_suburb")
-    .in("id", dueIds);
-  if (jobErr) {
-    throw new Error(
-      `gap-fill report-ready job read failed: ${jobErr.message || jobErr}`,
-    );
-  }
+  const jobs = await loadReportReadyRowsByIds(
+    dueIds,
+    (chunk) =>
+      client.from("jobs")
+        .select("id,job_number,client_name,site_suburb")
+        .in("id", chunk),
+    "job",
+  );
   const jobById = new Map<string, any>();
   for (const j of jobs || []) jobById.set(j.id, j);
 
-  const { data: reports, error: repErr } = await client
-    .from("job_service_reports")
-    .select("id,job_id,status,cycle_number,submitted_at")
-    .in("job_id", dueIds)
-    .eq("status", "submitted");
-  if (repErr) {
-    throw new Error(
-      `gap-fill report-ready service-report read failed: ${
-        repErr.message || repErr
-      }`,
-    );
-  }
+  const reports = await loadReportReadyRowsByIds(
+    dueIds,
+    (chunk) =>
+      client.from("job_service_reports")
+        .select("id,job_id,status,cycle_number,submitted_at")
+        .in("job_id", chunk)
+        .eq("status", "submitted"),
+    "service-report",
+  );
   // Keep the latest submitted report per job.
   const reportByJob = new Map<string, any>();
   for (const r of reports || []) {

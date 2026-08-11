@@ -21,6 +21,14 @@ import {
 } from "./makesafe_intake_operational_facts.ts";
 import { INTAKE_SOURCE_ISSUE_REASONS } from "./makesafe_intake_source_issues.ts";
 import { GAP_FILL_ALLOWED_FIELDS } from "./makesafe_gap_fill.ts";
+import {
+  type EffectiveIntakeSourceAuthority,
+  type IntakeSourceAuthorityCorrectionRow
+    as SharedIntakeSourceAuthorityCorrectionRow,
+  type IntakeSourceAuthoritySupersessionRow
+    as SharedIntakeSourceAuthoritySupersessionRow,
+  resolveEffectiveIntakeSourceAuthority,
+} from "./makesafe_intake_source_authority.ts";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const DEFAULT_MAILBOX = "ses@secureworkswa.com.au";
@@ -223,20 +231,11 @@ export interface IntakeExceptionSourceRow {
   attachment_refs: unknown;
 }
 
-export interface IntakeSourceAuthorityCorrectionRow {
-  id: string;
-  source_post_id: string;
-  legacy_case_id: string | null;
-  effective_case_id: string | null;
-  target_job_id: string | null;
-}
+export interface IntakeSourceAuthorityCorrectionRow
+  extends SharedIntakeSourceAuthorityCorrectionRow {}
 
-export interface IntakeSourceAuthoritySupersessionRow {
-  source_post_id: string;
-  superseded_correction_id: string;
-  prior_authority_case_id: string;
-  effective_case_id: string;
-}
+export interface IntakeSourceAuthoritySupersessionRow
+  extends SharedIntakeSourceAuthoritySupersessionRow {}
 
 export interface IntakeCaseAuthorityCorrectionRow {
   legacy_case_id: string;
@@ -298,12 +297,7 @@ export interface IntakeExceptionProjectionInput {
   outOfWindowExceptionCaseRows?: number;
 }
 
-interface EffectiveSource {
-  source: IntakeExceptionSourceRow;
-  storedCaseId: string;
-  effectiveCaseId: string | null;
-  targetJobId: string | null;
-}
+type EffectiveSource = EffectiveIntakeSourceAuthority<IntakeExceptionSourceRow>;
 
 const DEAD_JOB_STATUSES = new Set([
   "cancelled",
@@ -860,80 +854,6 @@ export function matchingLiveObligationJobIds(
     .sort();
 }
 
-function resolveEffectiveSources(
-  input: IntakeExceptionProjectionInput,
-): EffectiveSource[] {
-  const storedCaseByPost = new Map<string, string>();
-  for (const source of input.sources) {
-    const prior = storedCaseByPost.get(source.post_id);
-    if (prior && prior !== source.case_id) {
-      throw new Error(
-        `intake source authority is not unique for post ${source.post_id}`,
-      );
-    }
-    storedCaseByPost.set(source.post_id, source.case_id);
-  }
-  const correctionByPost = new Map<
-    string,
-    IntakeSourceAuthorityCorrectionRow
-  >();
-  for (const correction of input.sourceCorrections) {
-    if (correctionByPost.has(correction.source_post_id)) {
-      throw new Error(
-        `intake source correction is not unique for post ${correction.source_post_id}`,
-      );
-    }
-    const stored = storedCaseByPost.get(correction.source_post_id) || null;
-    if (correction.legacy_case_id && stored !== correction.legacy_case_id) {
-      throw new Error(
-        "intake source correction legacy authority mismatch",
-      );
-    }
-    correctionByPost.set(correction.source_post_id, correction);
-  }
-  const supersessionByPost = new Map<
-    string,
-    IntakeSourceAuthoritySupersessionRow
-  >();
-  for (const supersession of input.sourceSupersessions) {
-    if (supersessionByPost.has(supersession.source_post_id)) {
-      throw new Error(
-        `intake source supersession is not unique for post ${supersession.source_post_id}`,
-      );
-    }
-    supersessionByPost.set(supersession.source_post_id, supersession);
-  }
-
-  return input.sources.map((source) => {
-    const correction = correctionByPost.get(source.post_id) || null;
-    // A correction with effective_case_id=NULL deliberately clears case
-    // authority (usually because target_job_id accounts the source). Do not
-    // collapse that reviewed NULL back to the stale stored case.
-    let effectiveCaseId: string | null = correction
-      ? correction.effective_case_id
-      : source.case_id;
-    const supersession = supersessionByPost.get(source.post_id) || null;
-    if (supersession) {
-      if (
-        !correction ||
-        correction.id !== supersession.superseded_correction_id
-      ) {
-        throw new Error("intake source supersession target mismatch");
-      }
-      if (effectiveCaseId !== supersession.prior_authority_case_id) {
-        throw new Error("intake source supersession prior authority mismatch");
-      }
-      effectiveCaseId = supersession.effective_case_id;
-    }
-    return {
-      source,
-      storedCaseId: source.case_id,
-      effectiveCaseId,
-      targetJobId: correction?.target_job_id || null,
-    };
-  });
-}
-
 function evidenceSources(
   sourceRows: IntakeExceptionSourceRow[],
   emailByPost: Map<string, IntakeExceptionProjectionInput["emails"][number]>,
@@ -1081,7 +1001,11 @@ export function buildIntakeExceptionProjection(
     effective.add(correction.effective_case_id);
     caseCorrectionsByLegacy.set(correction.legacy_case_id, effective);
   }
-  const effectiveSources = resolveEffectiveSources(input);
+  const effectiveSources = resolveEffectiveIntakeSourceAuthority(
+    input.sources,
+    input.sourceCorrections,
+    input.sourceSupersessions,
+  );
   const effectiveSourcesByCase = new Map<string, EffectiveSource[]>();
   const storedSourcesByCase = new Map<string, EffectiveSource[]>();
   for (const source of effectiveSources) {
