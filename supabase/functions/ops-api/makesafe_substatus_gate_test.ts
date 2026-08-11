@@ -32,7 +32,15 @@ import {
   MAKESAFE_SUBSTATUS_GATE_READ_THREW_MARKER,
   MAKESAFE_SUBSTATUS_TRANSITIONS,
 } from "./makesafe_substatus_gate.ts";
-import { _normalizeMakesafeSubstatus, _updateMakesafeSubstatus } from "./index.ts";
+import {
+  _normalizeMakesafeSubstatus,
+  _updateMakesafeSubstatus,
+} from "./index.ts";
+import {
+  intakeOrigin,
+  internalEvidenceOrigin,
+  unidentifiedOrigin,
+} from "./makesafe_write_origin.ts";
 
 // ── Fake PostgREST client ────────────────────────────────────────────────────
 // Mirrors the real builder shape the gate and the write use:
@@ -62,7 +70,8 @@ function makeFakeClient(opts: FakeClientOpts) {
   const updates: Array<Record<string, any>> = [];
   const events: Array<Record<string, any>> = [];
   const detailRead = opts.detailRead ?? { data: null, error: null };
-  const jobRead = opts.jobRead ?? { data: { status: "processing" }, error: null };
+  const jobRead = opts.jobRead ??
+    { data: { status: "processing" }, error: null };
 
   const client = {
     from(table: string) {
@@ -81,8 +90,13 @@ function makeFakeClient(opts: FakeClientOpts) {
         },
         update(payload: Record<string, any>) {
           allUpdates.push({ table, ...payload });
-          if (table === "makesafe_job_details") updates.push({ table, ...payload });
-          const row = { data: { job_id: "job-1", substatus: payload.substatus }, error: null };
+          if (table === "makesafe_job_details") {
+            updates.push({ table, ...payload });
+          }
+          const row = {
+            data: { job_id: "job-1", substatus: payload.substatus },
+            error: null,
+          };
           const chain: any = {
             eq() {
               return chain;
@@ -103,7 +117,10 @@ function makeFakeClient(opts: FakeClientOpts) {
               return Promise.resolve(row);
             },
             then(onFulfilled: any, onRejected: any) {
-              return Promise.resolve({ data: [], error: null }).then(onFulfilled, onRejected);
+              return Promise.resolve({ data: [], error: null }).then(
+                onFulfilled,
+                onRejected,
+              );
             },
           };
           return chain;
@@ -144,7 +161,7 @@ function failOpenLines(captured: Array<{ message: string; payload: any }>) {
 
 const POSTGREST_UNDEFINED_COLUMN = {
   code: "42703",
-  message: 'column makesafe_job_details.substatus does not exist',
+  message: "column makesafe_job_details.substatus does not exist",
   details: null,
   hint: null,
 };
@@ -166,7 +183,7 @@ Deno.test("S1: makesafe_job_details pre-read errors -> write lands AND the fail-
     result = await _updateMakesafeSubstatus(
       client,
       { job_id: "job-1", substatus: "waiting_on_trade_report" },
-      { source: "internal:trade_report" },
+      { origin: internalEvidenceOrigin("trade_report") },
     );
   });
 
@@ -176,24 +193,41 @@ Deno.test("S1: makesafe_job_details pre-read errors -> write lands AND the fail-
   assertEquals(updates[0].substatus, "waiting_on_trade_report");
 
   const lines = failOpenLines(captured);
-  assertEquals(lines.length, 1, "the fail-open marker must fire exactly ONCE per gated write");
+  assertEquals(
+    lines.length,
+    1,
+    "the fail-open marker must fire exactly ONCE per gated write",
+  );
   const payload = lines[0].payload;
   assertEquals(payload.marker, MAKESAFE_SUBSTATUS_GATE_FAIL_OPEN_MARKER);
   assertEquals(payload.job_id, "job-1");
   assertEquals(payload.next_substatus, "waiting_on_trade_report");
-  assertEquals(payload.source, "internal:trade_report");
+  assertEquals(payload.source, internalEvidenceOrigin("trade_report"));
   assertEquals(payload.detail_read, "unreadable");
-  assertEquals(payload.job_read, "ok", "the healthy jobs read must not be smeared as unreadable");
+  assertEquals(
+    payload.job_read,
+    "ok",
+    "the healthy jobs read must not be smeared as unreadable",
+  );
   assertEquals(payload.faults.length, 1);
   assertEquals(payload.faults[0].read, "makesafe_job_details");
-  assertEquals(payload.faults[0].code, "42703", "the PostgREST error code must be present");
+  assertEquals(
+    payload.faults[0].code,
+    "42703",
+    "the PostgREST error code must be present",
+  );
   assertStringIncludes(payload.faults[0].message, "does not exist");
   // Name what could not be checked, so a log reader need not re-derive it.
   assertEquals(payload.skipped_checks, ["transition_table"]);
 });
 
 Deno.test("S1: jobs pre-read errors -> write lands AND the fail-open marker fires exactly once", async () => {
-  const jobFault = { code: "57014", message: "canceling statement due to statement timeout", details: null, hint: null };
+  const jobFault = {
+    code: "57014",
+    message: "canceling statement due to statement timeout",
+    details: null,
+    hint: null,
+  };
   const { client, updates } = makeFakeClient({
     detailRead: { data: { substatus: "waiting_on_trade_report" }, error: null },
     jobRead: { data: null, error: jobFault },
@@ -204,7 +238,7 @@ Deno.test("S1: jobs pre-read errors -> write lands AND the fail-open marker fire
     result = await _updateMakesafeSubstatus(
       client,
       { job_id: "job-2", substatus: "admin_to_send_report" },
-      { source: "internal:close_out" },
+      { origin: internalEvidenceOrigin("close_out") },
     );
   });
 
@@ -213,13 +247,21 @@ Deno.test("S1: jobs pre-read errors -> write lands AND the fail-open marker fire
   assertEquals(updates[0].substatus, "admin_to_send_report");
 
   const lines = failOpenLines(captured);
-  assertEquals(lines.length, 1, "the fail-open marker must fire exactly ONCE per gated write");
+  assertEquals(
+    lines.length,
+    1,
+    "the fail-open marker must fire exactly ONCE per gated write",
+  );
   const payload = lines[0].payload;
   assertEquals(payload.job_id, "job-2");
   assertEquals(payload.job_read, "unreadable");
   assertEquals(payload.detail_read, "ok");
   assertEquals(payload.faults[0].read, "jobs");
-  assertEquals(payload.faults[0].code, "57014", "the PostgREST error code must be present");
+  assertEquals(
+    payload.faults[0].code,
+    "57014",
+    "the PostgREST error code must be present",
+  );
   // The cancelled/lost guard is the check an unreadable jobs row costs us.
   assertEquals(payload.skipped_checks, ["cancelled_lost_guard"]);
 });
@@ -229,14 +271,17 @@ Deno.test("S1: BOTH pre-reads error -> still exactly ONE marker line, naming bot
   // is one line, however many reads inside it failed.
   const { client } = makeFakeClient({
     detailRead: { data: null, error: POSTGREST_UNDEFINED_COLUMN },
-    jobRead: { data: null, error: { code: "08006", message: "connection failure" } },
+    jobRead: {
+      data: null,
+      error: { code: "08006", message: "connection failure" },
+    },
   });
 
   return captureWarnings(async () => {
     await _updateMakesafeSubstatus(
       client,
       { job_id: "job-3", substatus: "waiting_on_trade_report" },
-      { source: "internal:reattend" },
+      { origin: internalEvidenceOrigin("reattend") },
     );
   }).then((captured) => {
     const lines = failOpenLines(captured);
@@ -245,7 +290,10 @@ Deno.test("S1: BOTH pre-reads error -> still exactly ONE marker line, naming bot
       "makesafe_job_details",
       "jobs",
     ]);
-    assertEquals(lines[0].payload.skipped_checks, ["cancelled_lost_guard", "transition_table"]);
+    assertEquals(lines[0].payload.skipped_checks, [
+      "cancelled_lost_guard",
+      "transition_table",
+    ]);
   });
 });
 
@@ -264,7 +312,7 @@ Deno.test("S1: the healthy path emits NO fail-open marker", async () => {
     await _updateMakesafeSubstatus(
       client,
       { job_id: "job-4", substatus: "admin_to_send_report" },
-      { source: "internal:trade_report" },
+      { origin: internalEvidenceOrigin("trade_report") },
     );
   });
 
@@ -289,7 +337,7 @@ Deno.test("S1: an ABSENT card (clean read, no row) is NOT reported as a fail-ope
     await _updateMakesafeSubstatus(
       client,
       { job_id: "job-5", substatus: "company_contact_required" },
-      { source: "internal:intake_mint" },
+      { origin: intakeOrigin("mint") },
     );
   });
 
@@ -303,11 +351,22 @@ Deno.test("S1: an ABSENT card (clean read, no row) is NOT reported as a fail-ope
 
 Deno.test("an absent JOB row is also not a fail-open", async () => {
   const decision = await evaluateMakesafeSubstatusGate(
-    { from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }) }) }) } as any,
+    {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    } as any,
     "job-6",
     "waiting_on_trade_report",
-    "internal:trade_report",
-    { normalizeSubstatus: _normalizeMakesafeSubstatus, warn: () => assert(false, "must not warn") },
+    internalEvidenceOrigin("trade_report"),
+    {
+      normalizeSubstatus: _normalizeMakesafeSubstatus,
+      warn: () => assert(false, "must not warn"),
+    },
   );
   assertEquals(decision.result.outcome, "checked");
   assertEquals(decision.result.detail_read, "absent");
@@ -332,10 +391,13 @@ Deno.test("outcome distinguishes a real check from a step-aside", async () => {
   };
 
   const checked = await evaluateMakesafeSubstatusGate(
-    gateClient({ data: { substatus: "waiting_on_trade_report" }, error: null }, { data: { status: "processing" }, error: null }),
+    gateClient(
+      { data: { substatus: "waiting_on_trade_report" }, error: null },
+      { data: { status: "processing" }, error: null },
+    ),
     "job-a",
     "admin_to_send_report",
-    "external",
+    unidentifiedOrigin("external"),
     deps,
   );
   assertEquals(checked.result.outcome, "checked");
@@ -344,15 +406,22 @@ Deno.test("outcome distinguishes a real check from a step-aside", async () => {
   assertEquals(checked.refusal, null);
 
   const steppedAside = await evaluateMakesafeSubstatusGate(
-    gateClient({ data: null, error: POSTGREST_UNDEFINED_COLUMN }, { data: { status: "processing" }, error: null }),
+    gateClient({ data: null, error: POSTGREST_UNDEFINED_COLUMN }, {
+      data: { status: "processing" },
+      error: null,
+    }),
     "job-b",
     "admin_to_send_report",
-    "external",
+    unidentifiedOrigin("external"),
     deps,
   );
   assertEquals(steppedAside.result.outcome, "fail_open_unreadable");
   assertEquals(steppedAside.result.current_substatus, null);
-  assertEquals(steppedAside.refusal, null, "the fail-open STAYS OPEN — it must never start refusing");
+  assertEquals(
+    steppedAside.refusal,
+    null,
+    "the fail-open STAYS OPEN — it must never start refusing",
+  );
   assertEquals(warned.length, 1);
 });
 
@@ -360,14 +429,21 @@ Deno.test("the substatus alias map is injected, not duplicated — pending_alloc
   // index.ts owns the alias; a second copy here is how the gate would drift
   // away from the board's reading of the same row.
   const decision = await evaluateMakesafeSubstatusGate(
-    gateClient({ data: { substatus: "pending_allocation" }, error: null }, { data: { status: "processing" }, error: null }),
+    gateClient({ data: { substatus: "pending_allocation" }, error: null }, {
+      data: { status: "processing" },
+      error: null,
+    }),
     "job-c",
     "waiting_on_trade_report",
-    "external",
+    unidentifiedOrigin("external"),
     { normalizeSubstatus: _normalizeMakesafeSubstatus, warn: () => {} },
   );
   assertEquals(decision.result.current_substatus, "company_contact_required");
-  assertEquals(decision.refusal, null, "company_contact_required -> waiting_on_trade_report is a coherent move");
+  assertEquals(
+    decision.refusal,
+    null,
+    "company_contact_required -> waiting_on_trade_report is a coherent move",
+  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -378,10 +454,13 @@ Deno.test("the substatus alias map is injected, not duplicated — pending_alloc
 Deno.test("regression: the cancelled/lost refusal still 409s on the healthy path", async () => {
   for (const jobState of ["cancelled", "lost"]) {
     const decision = await evaluateMakesafeSubstatusGate(
-      gateClient({ data: { substatus: "waiting_on_trade_report" }, error: null }, { data: { status: jobState }, error: null }),
+      gateClient({
+        data: { substatus: "waiting_on_trade_report" },
+        error: null,
+      }, { data: { status: jobState }, error: null }),
       "job-d",
       "admin_to_send_report",
-      "external",
+      unidentifiedOrigin("external"),
       { normalizeSubstatus: _normalizeMakesafeSubstatus, warn: () => {} },
     );
     assertEquals(decision.refusal?.status, 409);
@@ -392,23 +471,32 @@ Deno.test("regression: the cancelled/lost refusal still 409s on the healthy path
 
 Deno.test("regression: intake sources are still exempt from the cancelled/lost refusal", async () => {
   const decision = await evaluateMakesafeSubstatusGate(
-    gateClient({ data: { substatus: "waiting_on_trade_report" }, error: null }, { data: { status: "cancelled" }, error: null }),
+    gateClient(
+      { data: { substatus: "waiting_on_trade_report" }, error: null },
+      { data: { status: "cancelled" }, error: null },
+    ),
     "job-e",
     "admin_to_send_report",
-    "internal:intake_recover",
+    intakeOrigin("recover"),
     { normalizeSubstatus: _normalizeMakesafeSubstatus, warn: () => {} },
   );
   assertEquals(decision.refusal, null);
 });
 
 Deno.test("regression: an incoherent transition still 409s, and a coherent one still passes", async () => {
-  const deps = { normalizeSubstatus: _normalizeMakesafeSubstatus, warn: () => {} };
+  const deps = {
+    normalizeSubstatus: _normalizeMakesafeSubstatus,
+    warn: () => {},
+  };
 
   const refused = await evaluateMakesafeSubstatusGate(
-    gateClient({ data: { substatus: "company_contact_required" }, error: null }, { data: { status: "processing" }, error: null }),
+    gateClient(
+      { data: { substatus: "company_contact_required" }, error: null },
+      { data: { status: "processing" }, error: null },
+    ),
     "job-f",
     "ready_to_invoice",
-    "external",
+    unidentifiedOrigin("external"),
     deps,
   );
   assertEquals(refused.refusal?.status, 409);
@@ -416,10 +504,13 @@ Deno.test("regression: an incoherent transition still 409s, and a coherent one s
   assertStringIncludes(refused.refusal!.message, "is not a coherent move");
 
   const allowed = await evaluateMakesafeSubstatusGate(
-    gateClient({ data: { substatus: "admin_to_send_report" }, error: null }, { data: { status: "processing" }, error: null }),
+    gateClient({ data: { substatus: "admin_to_send_report" }, error: null }, {
+      data: { status: "processing" },
+      error: null,
+    }),
     "job-g",
     "ready_to_invoice",
-    "external",
+    unidentifiedOrigin("external"),
     deps,
   );
   assertEquals(allowed.refusal, null);
@@ -427,11 +518,17 @@ Deno.test("regression: an incoherent transition still 409s, and a coherent one s
 
 Deno.test("regression: an idempotent repeat is a clean CHECKED pass, not a step-aside", async () => {
   const decision = await evaluateMakesafeSubstatusGate(
-    gateClient({ data: { substatus: "ready_to_invoice" }, error: null }, { data: { status: "processing" }, error: null }),
+    gateClient({ data: { substatus: "ready_to_invoice" }, error: null }, {
+      data: { status: "processing" },
+      error: null,
+    }),
     "job-h",
     "ready_to_invoice",
-    "external",
-    { normalizeSubstatus: _normalizeMakesafeSubstatus, warn: () => assert(false, "must not warn") },
+    unidentifiedOrigin("external"),
+    {
+      normalizeSubstatus: _normalizeMakesafeSubstatus,
+      warn: () => assert(false, "must not warn"),
+    },
   );
   assertEquals(decision.result.outcome, "checked");
   assertEquals(decision.refusal, null);
@@ -475,7 +572,7 @@ Deno.test("a THROWN read logs the distinct read-threw marker, never the fail-ope
     client as any,
     "job-i",
     "waiting_on_trade_report",
-    "internal:trade_report",
+    internalEvidenceOrigin("trade_report"),
     {
       normalizeSubstatus: _normalizeMakesafeSubstatus,
       warn: (m, p) => warned.push({ m, p }),

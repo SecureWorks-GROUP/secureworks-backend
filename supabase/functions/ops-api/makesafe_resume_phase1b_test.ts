@@ -933,6 +933,25 @@ Deno.test("resume_close: marker ABSENT -> refused (no proof of send)", async () 
   );
 });
 
+Deno.test("resume_close: strict agent refusal leaves recovery state untouched", async () => {
+  const client = makeClient(closeSeed("sent_not_closed", true));
+  let error: { status?: number } | null = null;
+  try {
+    await _makesafeResumeCloseForTest(client, { job_id: "job-1" }, {
+      external: true,
+      authMode: "api_key",
+      origin: { class: "agent", detail: "mcp" },
+      strictEnabled: true,
+    });
+  } catch (caught) {
+    error = caught as { status?: number };
+  }
+  assertEquals(error?.status, 403);
+  assertEquals(packOf(client).status, "sent_not_closed");
+  assertEquals(client._tables.makesafe_report_packs[0].failed_step, undefined);
+  assertEquals(client._tables.makesafe_report_packs[0].error_detail, undefined);
+});
+
 Deno.test("resume_close: a FAILED close update does NOT mark the pack sent", async () => {
   // The update-error guard: if the makesafe_job_details update errors, the pack
   // must NOT be flipped to 'sent'.
