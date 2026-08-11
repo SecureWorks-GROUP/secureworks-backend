@@ -230,6 +230,7 @@ import {
   summarizeSesPrepareResponseForHttp,
 } from './ses_assembler_input_adapter.ts'
 import {
+  prepareSesDocketRevisionAtHttpBoundary,
   prepare_ses_docket_revision,
 } from './ses_prepare_docket_revision.ts'
 import {
@@ -748,12 +749,11 @@ import {
   canonicalCurrentWikiReportHashPayload,
   type MakesafeReportJob,
 } from './makesafe_report_render.ts'
+import { enrichMakesafeReportJobKvFacts } from './makesafe_report_kv_facts.ts'
 import {
-  deriveMakesafeReportArrival,
-  deriveMakesafeReportCrewLabel,
-  enrichMakesafeReportJobKvFacts,
-} from './makesafe_report_kv_facts.ts'
-import { resolveMakesafeReportProseSections } from './makesafe_report_prose.ts'
+  compactDraftPackBillingNote,
+  projectDraftPackReport,
+} from './makesafe_draft_pack_report_projection.ts'
 import {
   canonicalSesJson,
   sesSha256,
@@ -1273,6 +1273,25 @@ function json(data: unknown, status = 200) {
     headers: { 'Content-Type': 'application/json', ...CORS },
   })
 }
+
+async function makesafeGapFillQueueResponse(
+  client: any,
+  searchParams: URLSearchParams,
+): Promise<Response> {
+  try {
+    return json(await _loadGapFillQueue(client, {
+      limit: Number(searchParams.get('limit') || '') || undefined,
+      includeReportReady: searchParams.get('include_report_ready') !== 'false',
+      intakeCursorAt: searchParams.get('intake_cursor_at'),
+      intakeCursorCaseId: searchParams.get('intake_cursor_case_id'),
+    }))
+  } catch (e) {
+    if (e instanceof _GapFillError) return json({ error: e.message }, e.status)
+    throw e
+  }
+}
+
+export const _makesafeGapFillQueueResponseForTest = makesafeGapFillQueueResponse
 
 async function reconciliationStateToken(client: any, stateFacts: any): Promise<string> {
   const { data, error } = await client.rpc(
@@ -5318,10 +5337,7 @@ if (import.meta.main) serve(async (req: Request) => {
         if (!gapFillQueueAllowed) {
           return json({ error: 'forbidden: makesafe_gap_fill_queue requires the routine/privileged ops key or an admin/owner session' }, 403)
         }
-        return json(await _loadGapFillQueue(client, {
-          limit: Number(url.searchParams.get('limit') || '') || undefined,
-          includeReportReady: url.searchParams.get('include_report_ready') !== 'false',
-        }))
+        return await makesafeGapFillQueueResponse(client, url.searchParams)
       }
       // U2 jobs+cases desk seam. These are SELECT-only projections; cards carry
       // explicit no-auto-create flags and link fillable material to the existing
@@ -5458,7 +5474,7 @@ if (import.meta.main) serve(async (req: Request) => {
         if (!reportingIsPrivileged) {
           return json({ error: 'forbidden: makesafe_reporting_intake_pass requires the privileged ops key, the make-safe reporting routine, or an admin/owner session; a non-admin session cannot run the intake scan and advancement sweep' }, 403)
         }
-        return json(await runMakesafeReportingIntakePass(client))
+        return await makesafeReportingIntakePassResponse(client)
       }
       case 'run_ses_trade_chase': {
         // Harden SES ticket 10: KPI trade chase. DARK unless
@@ -5543,12 +5559,24 @@ if (import.meta.main) serve(async (req: Request) => {
           const actor = authMode === 'routine'
             ? 'makesafe-reporting-routine'
             : authUser?.email || `ops-api:${authMode}`
-          const response = await prepare_ses_docket_revision(
+          const response = await prepareSesDocketRevisionAtHttpBoundary(
             request,
             createSesAssemblerRuntimeDependencies(client, {
               org_id: DEFAULT_ORG_ID,
               created_by: actor,
             }),
+            {
+              // Preserve the named request/auth/business refusals the handler
+              // already exposes. The bounded fallback below is solely for an
+              // otherwise untyped one-card dry-run failure; it never sees an
+              // Error message or stack and cannot persist or notify.
+              preserveError: (error) =>
+                error instanceof SesAssemblerAdapterError ||
+                error instanceof ApiError ||
+                error instanceof SesPortalCaptureEvidenceError ||
+                error instanceof SesRoofConfirmationError ||
+                sesActionErrorResponse(error) !== null,
+            },
           )
           // Harden SES ticket 06: the Captain's ONE ping. Exact-once per job
           // per attendance cycle via the docs_ready_sms effect kind; the
@@ -24048,19 +24076,56 @@ async function drainMakesafePdfExtraction(
 export const _scanSesMakesafesForTest = scanSesMakesafes
 
 const REPORTING_INTAKE_ADVANCE_LIMIT = 100
+const REPORTING_INTAKE_RESPONSE_CONTRACT_VERSION =
+  'makesafe-reporting-intake-pass.v2'
+
+interface ReportingIntakePassDeps {
+  scan?: (client: any) => Promise<any>
+  advance?: (client: any, body?: any) => Promise<any>
+}
+
+function reportingIntakeCount(value: unknown): number {
+  const count = Number(value)
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0
+}
+
+function reportingIntakeScanFailure(intake: any): string | null {
+  const totals = intake?.totals || {}
+  if (reportingIntakeCount(totals.write_failures) > 0) {
+    return 'deterministic_write_failure'
+  }
+  const completionStatus = String(intake?.completion_status || '').trim()
+  if (completionStatus && completionStatus !== 'completed') {
+    return 'deterministic_intake_degraded'
+  }
+  return null
+}
 
 async function runMakesafeReportingIntakePass(
   client: any,
-  deps: {
-    scan?: (client: any) => Promise<any>
-    advance?: (client: any, body?: any) => Promise<any>
-  } = {},
+  deps: ReportingIntakePassDeps = {},
 ) {
   // One reporting run owns exactly one bounded scanner invocation. The follow-up
   // sweep advances only drafts that pass the same pure field gate and the same
   // approveIntakeDraft duplicate/atomic-claim guards as a human review-button click.
   const intake = await (deps.scan || scanSesMakesafes)(client)
   const accounting = _assertReportingIntakeAccounting(intake)
+  const scanFailure = reportingIntakeScanFailure(intake)
+  if (scanFailure) {
+    // The scan has already persisted its per-case outcomes and truthful degraded
+    // health. Do not cross into a second live write phase after that failure:
+    // replay remains idempotent, while the caller gets a prompt, bounded refusal.
+    return {
+      ok: false,
+      error: scanFailure,
+      trigger: 'ses-reporting-skill',
+      bounded_intake_passes: 1,
+      advancement_limit: REPORTING_INTAKE_ADVANCE_LIMIT,
+      intake,
+      accounting,
+      advancement: null,
+    }
+  }
   const advancement = await (deps.advance || autoApproveCleanIntakeDrafts)(client, {
     limit: REPORTING_INTAKE_ADVANCE_LIMIT,
     dry_run: false,
@@ -24076,7 +24141,77 @@ async function runMakesafeReportingIntakePass(
     advancement,
   }
 }
+
+function reportingIntakePassResponseBody(result: any) {
+  const intake = result?.intake || {}
+  const totals = intake?.totals || {}
+  const selection = intake?.selection || {}
+  const advancement = result?.advancement
+  return {
+    contract_version: REPORTING_INTAKE_RESPONSE_CONTRACT_VERSION,
+    ok: result?.ok === true,
+    ...(result?.ok === true
+      ? {}
+      : { error: String(result?.error || 'reporting_intake_pass_failed') }),
+    trigger: 'ses-reporting-skill',
+    bounded_intake_passes: 1,
+    advancement_limit: REPORTING_INTAKE_ADVANCE_LIMIT,
+    intake: {
+      completion_status: String(intake?.completion_status || 'unknown'),
+      selected_cases: reportingIntakeCount(selection.selected_cases),
+      selected_sources: reportingIntakeCount(selection.selected_sources),
+      cases_attempted: reportingIntakeCount(totals.cases_attempted),
+      cases_failed: reportingIntakeCount(totals.cases_failed),
+      cases_deferred: reportingIntakeCount(totals.cases_deferred),
+      write_failures: reportingIntakeCount(totals.write_failures),
+      drafts_created: reportingIntakeCount(totals.drafts_created),
+      jobs_created: reportingIntakeCount(totals.jobs_created),
+    },
+    accounting: {
+      checked: reportingIntakeCount(result?.accounting?.checked),
+      final: reportingIntakeCount(result?.accounting?.final),
+      transient: reportingIntakeCount(result?.accounting?.transient),
+    },
+    advancement: {
+      started: advancement !== null && advancement !== undefined,
+      checked_count: reportingIntakeCount(advancement?.checked_count),
+      auto_approved_count: reportingIntakeCount(
+        advancement?.auto_approved_count,
+      ),
+      skipped_count: reportingIntakeCount(advancement?.skipped_count),
+      failed_count: reportingIntakeCount(advancement?.failed_count),
+    },
+  }
+}
+
+async function makesafeReportingIntakePassResponse(
+  client: any,
+  deps: ReportingIntakePassDeps = {},
+): Promise<Response> {
+  try {
+    const result = await runMakesafeReportingIntakePass(client, deps)
+    return json(
+      reportingIntakePassResponseBody(result),
+      result.ok === true ? 200 : 503,
+    )
+  } catch (error) {
+    console.error('[ops-api] makesafe reporting intake pass failed:', error)
+    return json({
+      contract_version: REPORTING_INTAKE_RESPONSE_CONTRACT_VERSION,
+      ok: false,
+      error: 'reporting_intake_pass_failed',
+      trigger: 'ses-reporting-skill',
+      bounded_intake_passes: 1,
+      advancement_limit: REPORTING_INTAKE_ADVANCE_LIMIT,
+      intake: null,
+      accounting: null,
+      advancement: { started: false },
+    }, 500)
+  }
+}
 export const _runMakesafeReportingIntakePassForTest = runMakesafeReportingIntakePass
+export const _makesafeReportingIntakePassResponseForTest =
+  makesafeReportingIntakePassResponse
 
 // Retained only as historical/manual implementation evidence. No dispatch action,
 // cron, reporting hook, or standing scanner can invoke this paid-AI engine.
@@ -38088,104 +38223,7 @@ function normaliseStringArray(v: any): string[] {
   return v.map((x) => String(x || '').trim()).filter(Boolean)
 }
 
-function formatCompactHours(value: number): string {
-  return Number.isInteger(value) ? String(value) : String(Math.round(value * 10) / 10)
-}
-
-function compactDraftPackBillingNote(parsed: any, ctx: DraftPackContext): string {
-  const lines = Array.isArray(parsed?.invoice?.line_items) ? parsed.invoice.line_items : []
-  const ref = String(parsed?.invoice?.reference || parsed?.report?.ref || (ctx.detail as any)?.external_ref || '').toUpperCase()
-  const company = String(
-    parsed?.invoice?.contact_name ||
-      (ctx.detail as any)?.requesting_company_name ||
-      (ctx.detail as any)?.makesafe_companies?.name ||
-      '',
-  ).toLowerCase()
-  const isMlb = ref.includes('MLB') || company.includes('major loss') || company.includes('ml builders')
-  const labourLines = lines.filter((li: any) => {
-    const desc = String(li?.description || '').toLowerCase()
-    if (!desc) return false
-    if (/material|mould killer|tarp|panel|base|feet|fixing|consumable|photo|swms/.test(desc)) return false
-    return /labou?r|attendance|make[- ]safe|make safe|crew|trade/.test(desc)
-  })
-  const labourHours = labourLines.reduce((sum: number, li: any) => {
-    const qty = Number(li?.quantity ?? 0)
-    return sum + (Number.isFinite(qty) && qty > 0 ? qty : 0)
-  }, 0)
-  if (labourHours <= 0) return ''
-
-  const desc = labourLines.map((li: any) => String(li?.description || '')).join(' ')
-  const tradeHourMatch = desc.match(/(\d+(?:\.\d+)?)\s*(?:x\s*)?(?:trades?|crew|attendees?)\b[\s\S]{0,90}?(\d+(?:\.\d+)?)\s*(?:x\s*)?hours?/i)
-  if (tradeHourMatch) {
-    const trades = Number(tradeHourMatch[1])
-    const hours = Number(tradeHourMatch[2])
-    if (Number.isFinite(trades) && trades > 0 && Number.isFinite(hours) && hours > 0) {
-      const total = trades * hours
-      const tradeLabel = trades === 1 ? 'trade' : 'trades'
-      const totalSuffix = Math.abs(total - labourHours) < 0.2 || trades === 1
-        ? ''
-        : ` (${formatCompactHours(labourHours)} labour hours total)`
-      return `${formatCompactHours(trades)} ${tradeLabel} x ${formatCompactHours(hours)} hours${totalSuffix}.`
-    }
-  }
-  if (isMlb && Math.abs(labourHours - 3) < 0.2) return '1 trade x 3 hours.'
-  return `${formatCompactHours(labourHours)} labour hours total.`
-}
 export const _compactDraftPackBillingNoteForTest = compactDraftPackBillingNote
-
-function draftPackReportPayload(parsed: any, ctx: DraftPackContext, selectedPhotoUrls: string[]): any {
-  const job: any = ctx.job || {}
-  const detail: any = ctx.detail || {}
-  const checklist = ((ctx.service_report as any)?.checklist_json || {}) as any
-  const ref = parsed.report.ref || parsed.invoice.reference || detail.external_ref || job.job_number || job.id
-  const address = parsed.report.address || job.site_address || job.site_suburb || 'Address TBC'
-  const compactBillingNote = compactDraftPackBillingNote(parsed, ctx)
-  // Crew is a trade count only. Prefer a valid supplied form, else recover from
-  // the current-cycle service report trade_count, else from person-bearing
-  // job_assignments. Never invent a name and never default to "1 trade".
-  // Break that left the Queens Park (SWMS-26845) crew line blank while two
-  // complete assignments and trade_count=2 were already recorded:
-  //   crew: parsed.report.crew || ''
-  const crew = deriveMakesafeReportCrewLabel({
-    supplied: parsed.report.crew,
-    tradeCount: checklist.trade_count,
-    assignments: ctx.assignments || [],
-  })
-  const arrival = deriveMakesafeReportArrival({
-    supplied: parsed.report.arrival,
-    checklistArrival: checklist.arrival_time,
-  })
-  // Builder-facing prose: prefer a good Claude draft; otherwise compose short
-  // explanatory paragraphs from the trade checklist. Never ship raw form dumps
-  // (Damage:/Work: fragments or tick-box materials lists) as the report body.
-  // Works precedence: Claude draft, then trade checklist work_done, then
-  // service_report notes last. Notes must never outrank the trade narrative.
-  const prose = resolveMakesafeReportProseSections(
-    {
-      scope: parsed.report.scope,
-      findings: parsed.report.findings,
-      works: parsed.report.works || checklist.work_done ||
-        (ctx.service_report as any)?.notes,
-      materials: parsed.report.materials,
-    },
-    checklist,
-  )
-  return {
-    ref,
-    address,
-    contact: parsed.report.contact || job.client_name || '',
-    date: parsed.report.date || (ctx.service_report as any)?.submitted_at || job.updated_at || '',
-    arrival,
-    crew,
-    billing_note: compactBillingNote || parsed.report.billing_note || detail.invoice_notes || '',
-    scope: prose.scope,
-    findings: prose.findings,
-    works: prose.works,
-    materials: prose.materials,
-    photos: selectedPhotoUrls.map((url) => ({ url })),
-    photo_limit: parsed.report.photo_limit || 8,
-  }
-}
 
 function draftPackInvoiceBody(parsed: any, ctx: DraftPackContext, jobId: string, operator: string, sourceBody: any = {}): any {
   const job: any = ctx.job || {}
@@ -38304,16 +38342,16 @@ async function draftMakesafeReportPack(
         422,
       )
     }
-    const reportPayload = draftPackReportPayload(parsed, context, photoSet)
+    const reportPayload = projectDraftPackReport(parsed, context, photoSet)
     const renderOutput = enforceDraftPackReportFeedbackTerms({
       ...parsed,
       report: {
         ...parsed.report,
-        billing_note: reportPayload.billing_note,
-        scope: reportPayload.scope,
-        findings: reportPayload.findings,
-        works: reportPayload.works,
-        materials: reportPayload.materials,
+        billing_note: typeof reportPayload.billing_note === 'string' ? reportPayload.billing_note : undefined,
+        scope: typeof reportPayload.scope === 'string' ? reportPayload.scope : undefined,
+        findings: typeof reportPayload.findings === 'string' ? reportPayload.findings : undefined,
+        works: typeof reportPayload.works === 'string' ? reportPayload.works : undefined,
+        materials: typeof reportPayload.materials === 'string' ? reportPayload.materials : undefined,
       },
     }, promptContext)
     Object.assign(reportPayload, {

@@ -23,6 +23,7 @@ import {
   nextMissingFields,
   reasonIsHumanOnly,
 } from "./makesafe_gap_fill.ts";
+import { _makesafeGapFillQueueResponseForTest } from "./index.ts";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
 
@@ -35,11 +36,14 @@ class FakeQuery {
   private filters: Array<(row: any) => boolean> = [];
   private sortKeys: Array<{ column: string; ascending: boolean }> = [];
   private limitTo: number | null = null;
+  private rangeFrom: number | null = null;
+  private rangeTo: number | null = null;
   constructor(
     private store: Store,
     private table: string,
     private op: "select" | "update",
     private payload: any = null,
+    private maxInWidth: number | null = null,
   ) {}
   private rows(): any[] {
     return (this.store[this.table] || []).filter((r) =>
@@ -54,6 +58,11 @@ class FakeQuery {
     return this;
   }
   in(col: string, vals: any[]) {
+    if (this.maxInWidth !== null && vals.length > this.maxInWidth) {
+      throw new Error(
+        `wide .in refused: ${vals.length} values exceeds ${this.maxInWidth}`,
+      );
+    }
     this.filters.push((r) => vals.includes(r[col]));
     return this;
   }
@@ -63,6 +72,11 @@ class FakeQuery {
   }
   limit(n: number) {
     this.limitTo = n;
+    return this;
+  }
+  range(from: number, to: number) {
+    this.rangeFrom = from;
+    this.rangeTo = to;
     return this;
   }
   private run(): { data: any[]; error: any } {
@@ -83,7 +97,11 @@ class FakeQuery {
         return 0;
       });
     }
-    if (this.limitTo !== null) data = data.slice(0, this.limitTo);
+    if (this.rangeFrom !== null && this.rangeTo !== null) {
+      data = data.slice(this.rangeFrom, this.rangeTo + 1);
+    } else if (this.limitTo !== null) {
+      data = data.slice(0, this.limitTo);
+    }
     return { data, error: null };
   }
   maybeSingle() {
@@ -103,14 +121,30 @@ class FakeQuery {
   }
 }
 
-function fakeClient(store: Store) {
+function fakeClient(
+  store: Store,
+  options: { maxInWidth?: number } = {},
+) {
   return {
     store,
     from(table: string) {
       return {
-        select: (c?: string) => new FakeQuery(store, table, "select").select(c),
+        select: (c?: string) =>
+          new FakeQuery(
+            store,
+            table,
+            "select",
+            null,
+            options.maxInWidth ?? null,
+          ).select(c),
         update: (payload: any) =>
-          new FakeQuery(store, table, "update", payload),
+          new FakeQuery(
+            store,
+            table,
+            "update",
+            payload,
+            options.maxInWidth ?? null,
+          ),
       };
     },
   } as any;
@@ -120,6 +154,8 @@ function baseStore(): Store {
   return {
     makesafe_intake_cases: [],
     makesafe_intake_case_sources: [],
+    makesafe_intake_source_authority_corrections: [],
+    makesafe_intake_source_authority_correction_supersessions: [],
     emails: [],
     email_attachments: [],
     makesafe_job_details: [],
@@ -140,6 +176,8 @@ function exceptionCase(overrides: Record<string, any> = {}): any {
     missing_fields: ["client_name", "site_address"],
     conflicting_fields: {},
     blocked_reasons: [],
+    is_authoritative: true,
+    normaliser_version: "fixture-normaliser@v1",
     job_id: null,
     company_id: "11111111-1111-1111-1111-111111111111",
     company_slug_raw: "mlb",
@@ -379,6 +417,504 @@ Deno.test("loadGapFillQueue flags human-only cases and counts them separately", 
   assertEquals(queue.intake_flags[0].human_only, true);
 });
 
+Deno.test("loadGapFillQueue omits corrected legacy and reconciliation-only residue", async () => {
+  const store = baseStore();
+  store.makesafe_intake_cases.push(
+    exceptionCase({ id: "case-current" }),
+    exceptionCase({ id: "case-legacy" }),
+    exceptionCase({ id: "case-partial" }),
+    exceptionCase({
+      id: "case-reconciliation-only",
+      last_decision_provenance: "backfill",
+      normaliser_version: "fixture-normaliser@v1+po_box_reconciliation@v1",
+    }),
+  );
+  store.makesafe_intake_case_sources.push({
+    org_id: ORG,
+    case_id: "case-legacy",
+    post_id: "post-legacy",
+    role: "primary",
+    received_at: "2026-07-21T01:00:00.000Z",
+    attachment_refs: [],
+  }, {
+    org_id: ORG,
+    case_id: "case-partial",
+    post_id: "post-partial-corrected",
+    role: "primary",
+    received_at: "2026-07-21T01:00:00.000Z",
+    attachment_refs: [],
+  }, {
+    org_id: ORG,
+    case_id: "case-partial",
+    post_id: "post-partial-effective",
+    role: "primary",
+    received_at: "2026-07-21T01:01:00.000Z",
+    attachment_refs: [],
+  });
+  store.makesafe_intake_source_authority_corrections.push({
+    org_id: ORG,
+    id: "correction-legacy",
+    source_post_id: "post-legacy",
+    legacy_case_id: "case-legacy",
+    effective_case_id: "case-intermediate",
+    target_job_id: null,
+  }, {
+    org_id: ORG,
+    id: "correction-partial",
+    source_post_id: "post-partial-corrected",
+    legacy_case_id: "case-partial",
+    effective_case_id: "case-current",
+    target_job_id: null,
+  });
+  store.makesafe_intake_source_authority_correction_supersessions.push({
+    org_id: ORG,
+    source_post_id: "post-legacy",
+    superseded_correction_id: "correction-legacy",
+    prior_authority_case_id: "case-intermediate",
+    effective_case_id: "case-current",
+  });
+
+  const queue = await loadGapFillQueue(fakeClient(store), {
+    includeReportReady: false,
+  });
+
+  assertEquals(queue.intake_flags.map((item: any) => item.case_id), [
+    "case-partial",
+    "case-current",
+  ]);
+  assertEquals(queue.totals.intake_flags, 2);
+});
+
+Deno.test("loadGapFillQueue filters canonical eligibility before applying the response limit", async () => {
+  const store = baseStore();
+  store.makesafe_intake_cases.push(
+    exceptionCase({
+      id: "case-non-authoritative",
+      is_authoritative: false,
+      received_at: "2026-08-10T05:00:00.000Z",
+    }),
+    exceptionCase({
+      id: "case-corrected-away",
+      received_at: "2026-08-10T04:00:00.000Z",
+    }),
+    exceptionCase({
+      id: "case-eligible-newer",
+      received_at: "2026-08-10T03:00:00.000Z",
+    }),
+    exceptionCase({
+      id: "case-eligible-older",
+      received_at: "2026-08-10T02:00:00.000Z",
+    }),
+  );
+  store.makesafe_intake_case_sources.push({
+    org_id: ORG,
+    case_id: "case-corrected-away",
+    post_id: "post-corrected-away",
+  });
+  store.makesafe_intake_source_authority_corrections.push({
+    org_id: ORG,
+    id: "correction-away",
+    source_post_id: "post-corrected-away",
+    legacy_case_id: "case-corrected-away",
+    effective_case_id: "case-elsewhere",
+    target_job_id: null,
+  });
+
+  const queue = await loadGapFillQueue(fakeClient(store), {
+    limit: 2,
+    includeReportReady: false,
+  });
+
+  assertEquals(queue.intake_flags.map((item: any) => item.case_id), [
+    "case-eligible-newer",
+    "case-eligible-older",
+  ]);
+  assertEquals(queue.intake_page.eligible_total, 2);
+  assertEquals(queue.intake_page.returned, 2);
+});
+
+Deno.test("loadGapFillQueue keeps one effective stored source and excludes zero-effective residue", async () => {
+  const store = baseStore();
+  store.makesafe_intake_cases.push(
+    exceptionCase({ id: "case-partly-effective" }),
+    exceptionCase({ id: "case-zero-effective" }),
+  );
+  store.makesafe_intake_case_sources.push(
+    {
+      org_id: ORG,
+      case_id: "case-partly-effective",
+      post_id: "post-partial-corrected",
+    },
+    {
+      org_id: ORG,
+      case_id: "case-partly-effective",
+      post_id: "post-partial-effective",
+    },
+    {
+      org_id: ORG,
+      case_id: "case-zero-effective",
+      post_id: "post-zero-effective",
+    },
+  );
+  store.makesafe_intake_source_authority_corrections.push(
+    {
+      org_id: ORG,
+      id: "correction-partial",
+      source_post_id: "post-partial-corrected",
+      legacy_case_id: "case-partly-effective",
+      effective_case_id: "case-elsewhere",
+      target_job_id: null,
+    },
+    {
+      org_id: ORG,
+      id: "correction-zero",
+      source_post_id: "post-zero-effective",
+      legacy_case_id: "case-zero-effective",
+      effective_case_id: "case-elsewhere",
+      target_job_id: null,
+    },
+  );
+
+  const queue = await loadGapFillQueue(fakeClient(store), {
+    includeReportReady: false,
+  });
+
+  assertEquals(queue.intake_flags.map((item: any) => item.case_id), [
+    "case-partly-effective",
+  ]);
+  assertEquals(queue.intake_page.eligible_total, 1);
+});
+
+Deno.test("loadGapFillQueue composite cursor emits tied timestamps exactly once", async () => {
+  const store = baseStore();
+  const receivedAt = "2026-08-10T06:00:00.000Z";
+  const caseIds = [
+    "00000000-0000-4000-8000-000000000003",
+    "00000000-0000-4000-8000-000000000002",
+    "00000000-0000-4000-8000-000000000001",
+  ];
+  for (const id of caseIds) {
+    store.makesafe_intake_cases.push(
+      exceptionCase({ id, received_at: receivedAt }),
+    );
+  }
+
+  const seen: string[] = [];
+  let cursor: { received_at: string; case_id: string } | null = null;
+  do {
+    const queue = await loadGapFillQueue(fakeClient(store), {
+      limit: 1,
+      includeReportReady: false,
+      intakeCursorAt: cursor?.received_at,
+      intakeCursorCaseId: cursor?.case_id,
+    });
+    seen.push(...queue.intake_flags.map((item: any) => item.case_id));
+    cursor = queue.intake_page.next_cursor;
+  } while (cursor);
+
+  assertEquals(seen, caseIds);
+  assertEquals(new Set(seen).size, caseIds.length);
+});
+
+Deno.test("91-job Phase One review and exception fixture pages deterministically without a write path", async () => {
+  const store = baseStore();
+  const receivedAt = "2026-08-11T00:00:00.000Z";
+  const caseIds = Array.from(
+    { length: 91 },
+    (_, index) =>
+      `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+  );
+  const classes = [
+    { state: "exception", reason_code: "adapter_parse_failure" },
+    { state: "exception", reason_code: "conflicting_fields" },
+    { state: "exception", reason_code: "unknown_builder" },
+    { state: "exception", reason_code: "cancellation" },
+    {
+      state: "blocked_live_job",
+      reason_code: null,
+      blocked_reasons: ["missing:client_phone"],
+    },
+  ] as const;
+  for (const [index, id] of caseIds.entries()) {
+    store.makesafe_intake_cases.push(exceptionCase({
+      id,
+      received_at: receivedAt,
+      ...classes[index % classes.length],
+    }));
+  }
+
+  const baseClient = fakeClient(store, { maxInWidth: 25 });
+  const readTables = new Set<string>();
+  // Deliberately omit update/rpc/storage/send surfaces. Any regression from this
+  // review queue into persist, invoice, stage, or send work throws before it can
+  // mutate the deterministic fixture.
+  const readOnlyClient = {
+    from(table: string) {
+      readTables.add(table);
+      const reader = baseClient.from(table);
+      return { select: reader.select };
+    },
+  };
+  const before = structuredClone(store);
+  const readAll = async (): Promise<{ ids: string[]; classes: string[] }> => {
+    const ids: string[] = [];
+    const observedClasses: string[] = [];
+    let cursor: { received_at: string; case_id: string } | null = null;
+    do {
+      const page = await loadGapFillQueue(readOnlyClient, {
+        limit: 13,
+        includeReportReady: false,
+        intakeCursorAt: cursor?.received_at,
+        intakeCursorCaseId: cursor?.case_id,
+      });
+      assertEquals(page.intake_page.eligible_total, 91);
+      ids.push(...page.intake_flags.map((item: any) => item.case_id));
+      observedClasses.push(
+        ...page.intake_flags.map((item: any) =>
+          `${item.state}:${item.reason_code || "none"}`
+        ),
+      );
+      cursor = page.intake_page.next_cursor;
+    } while (cursor);
+    return { ids, classes: observedClasses };
+  };
+
+  const first = await readAll();
+  const second = await readAll();
+  const expected = [...caseIds].sort((left, right) =>
+    right.localeCompare(left)
+  );
+  assertEquals(first.ids, expected);
+  assertEquals(second.ids, expected);
+  assertEquals(new Set(first.ids).size, 91);
+  assertEquals(first.ids.length, 91);
+  assertEquals([...new Set(first.classes)].sort(), [
+    "blocked_live_job:none",
+    "exception:adapter_parse_failure",
+    "exception:cancellation",
+    "exception:conflicting_fields",
+    "exception:unknown_builder",
+  ]);
+  assertEquals(store, before);
+  assertEquals([...readTables].sort(), [
+    "makesafe_intake_case_sources",
+    "makesafe_intake_cases",
+  ]);
+});
+
+Deno.test("loadGapFillQueue eligible_total is invariant across limits and cursors", async () => {
+  const store = baseStore();
+  for (let index = 1; index <= 5; index++) {
+    store.makesafe_intake_cases.push(exceptionCase({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      received_at: `2026-08-10T0${index}:00:00.000Z`,
+    }));
+  }
+
+  const first = await loadGapFillQueue(fakeClient(store), {
+    limit: 1,
+    includeReportReady: false,
+  });
+  const second = await loadGapFillQueue(fakeClient(store), {
+    limit: 3,
+    includeReportReady: false,
+    intakeCursorAt: first.intake_page.next_cursor.received_at,
+    intakeCursorCaseId: first.intake_page.next_cursor.case_id,
+  });
+
+  assertEquals(first.intake_page.eligible_total, 5);
+  assertEquals(second.intake_page.eligible_total, 5);
+  assertEquals(first.intake_page.returned, 1);
+  assertEquals(second.intake_page.returned, 3);
+});
+
+Deno.test("loadGapFillQueue chunks every wide intake lookup and preserves evidence", async () => {
+  const store = baseStore();
+  for (let index = 1; index <= 30; index++) {
+    const caseId = `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+    const postId = `fixture-post-${index}`;
+    store.makesafe_intake_cases.push(exceptionCase({
+      id: caseId,
+      received_at: `2026-08-10T00:${String(index).padStart(2, "0")}:00.000Z`,
+    }));
+    store.makesafe_intake_case_sources.push({
+      org_id: ORG,
+      case_id: caseId,
+      post_id: postId,
+      role: "primary",
+      received_at: "2026-08-10T00:00:00.000Z",
+      attachment_refs: [`fixture-attachment-${index}`],
+    });
+    store.emails.push({
+      post_id: postId,
+      subject: null,
+      from_email: null,
+      from_name: null,
+      received_at: "2026-08-10T00:00:00.000Z",
+    });
+    store.email_attachments.push({
+      id: `fixture-attachment-${index}`,
+      email_id: postId,
+      name: "fixture.pdf",
+      content_type: "application/pdf",
+      status: "uploaded",
+      size_bytes: 1,
+    });
+  }
+
+  const queue = await loadGapFillQueue(
+    fakeClient(store, { maxInWidth: 25 }),
+    { limit: 30, includeReportReady: false },
+  );
+
+  assertEquals(queue.intake_flags.length, 30);
+  assertEquals(
+    queue.intake_flags.every((item: any) => item.evidence_sources.length === 1),
+    true,
+  );
+  assertEquals(
+    queue.intake_flags.every((item: any) =>
+      item.evidence_sources[0].attachments.length === 1
+    ),
+    true,
+  );
+});
+
+Deno.test("loadGapFillQueue chunks widened report-ready joins as a separate snapshot", async () => {
+  const store = baseStore();
+  for (let index = 1; index <= 30; index++) {
+    const jobId = `fixture-job-${index}`;
+    store.makesafe_job_details.push({
+      job_id: jobId,
+      substatus: "admin_to_send_report",
+      report_received_at: "2026-08-10T00:00:00.000Z",
+      report_sent_at: null,
+      report_type: null,
+      external_ref: null,
+      requesting_company_slug: null,
+      requesting_company_name: null,
+      cycle_number: 1,
+    });
+    store.jobs.push({
+      id: jobId,
+      job_number: null,
+      client_name: null,
+      site_suburb: null,
+    });
+    store.job_service_reports.push({
+      id: `fixture-report-${index}`,
+      job_id: jobId,
+      status: "submitted",
+      cycle_number: 1,
+      submitted_at: "2026-08-10T00:00:00.000Z",
+    });
+  }
+
+  const queue = await loadGapFillQueue(
+    fakeClient(store, { maxInWidth: 25 }),
+    {
+      limit: 30,
+      includeReportReady: true,
+      intakeCursorAt: "2026-08-10T00:00:00.000Z",
+      intakeCursorCaseId: "00000000-0000-4000-8000-000000000001",
+    },
+  );
+
+  assertEquals(queue.intake_page.eligible_total, 0);
+  assertEquals(queue.report_ready.length, 30);
+  assertEquals(queue.totals.report_ready, 30);
+  assertEquals(
+    queue.report_ready.every((item: any) => item.service_report_id !== null),
+    true,
+  );
+});
+
+Deno.test("gap-fill queue HTTP boundary rejects bad cursors and returns a valid next page", async () => {
+  const store = baseStore();
+  const newerId = "00000000-0000-4000-8000-000000000002";
+  const olderId = "00000000-0000-4000-8000-000000000001";
+  store.makesafe_intake_cases.push(
+    exceptionCase({
+      id: newerId,
+      received_at: "2026-08-10T02:00:00.000Z",
+    }),
+    exceptionCase({
+      id: olderId,
+      received_at: "2026-08-10T01:00:00.000Z",
+    }),
+  );
+
+  const partial = await _makesafeGapFillQueueResponseForTest(
+    fakeClient(store),
+    new URLSearchParams({
+      include_report_ready: "false",
+      intake_cursor_at: "2026-08-10T02:00:00.000Z",
+    }),
+  );
+  assertEquals(partial.status, 400);
+  assertEquals(await partial.json(), {
+    error:
+      "intake_cursor_at and intake_cursor_case_id must be supplied together",
+  });
+
+  const malformed = await _makesafeGapFillQueueResponseForTest(
+    fakeClient(store),
+    new URLSearchParams({
+      include_report_ready: "false",
+      intake_cursor_at: "not-a-timestamp",
+      intake_cursor_case_id: newerId,
+    }),
+  );
+  assertEquals(malformed.status, 400);
+  assertEquals(await malformed.json(), {
+    error: "intake_cursor_at must be a valid timestamp",
+  });
+
+  for (
+    const intakeCursorAt of [
+      "2026-02-31T00:00:00Z",
+      "2026-08-10T24:00:00Z",
+      "2026-08-10T00:00:00+14:01",
+    ]
+  ) {
+    const semanticallyInvalid = await _makesafeGapFillQueueResponseForTest(
+      fakeClient(store),
+      new URLSearchParams({
+        include_report_ready: "false",
+        intake_cursor_at: intakeCursorAt,
+        intake_cursor_case_id: newerId,
+      }),
+    );
+    assertEquals(semanticallyInvalid.status, 400);
+    assertEquals(await semanticallyInvalid.json(), {
+      error: "intake_cursor_at must be a valid timestamp",
+    });
+  }
+
+  const first = await _makesafeGapFillQueueResponseForTest(
+    fakeClient(store),
+    new URLSearchParams({ limit: "1", include_report_ready: "false" }),
+  );
+  assertEquals(first.status, 200);
+  const firstBody = await first.json();
+  const next = firstBody.intake_page.next_cursor;
+  const second = await _makesafeGapFillQueueResponseForTest(
+    fakeClient(store),
+    new URLSearchParams({
+      limit: "1",
+      include_report_ready: "false",
+      intake_cursor_at: next.received_at,
+      intake_cursor_case_id: next.case_id,
+    }),
+  );
+  assertEquals(second.status, 200);
+  const secondBody = await second.json();
+  assertEquals(secondBody.intake_flags.map((item: any) => item.case_id), [
+    olderId,
+  ]);
+  assertEquals(secondBody.intake_page.next_cursor, null);
+});
+
 Deno.test("loadGapFillQueue includes report-ready jobs (submitted, pack not drafted)", async () => {
   const store = baseStore();
   // Due: substatus report-ready, no pack row, not sent, not report-type.
@@ -437,7 +973,10 @@ Deno.test("loadGapFillQueue includes report-ready jobs (submitted, pack not draf
     submitted_at: "2026-07-21T06:00:00.000Z",
   });
 
-  const queue = await loadGapFillQueue(fakeClient(store), {});
+  const queue = await loadGapFillQueue(fakeClient(store), {
+    intakeCursorAt: "2026-08-10T00:00:00.000Z",
+    intakeCursorCaseId: "00000000-0000-4000-8000-000000000001",
+  });
   assertEquals(queue.report_ready.length, 1);
   assertEquals(queue.totals.report_ready, 1);
   const item = queue.report_ready[0];
@@ -543,6 +1082,155 @@ Deno.test("applyGapFill refuses a non-flag case and a missing case", async () =>
     GapFillError,
     "case not found",
   );
+});
+
+Deno.test("applyGapFill refuses corrected legacy and reconciliation-only residue before writing", async () => {
+  const store = baseStore();
+  store.makesafe_intake_cases.push(
+    exceptionCase({ id: "case-current" }),
+    exceptionCase({ id: "case-legacy" }),
+    exceptionCase({ id: "case-partial" }),
+    exceptionCase({
+      id: "case-reconciliation-only",
+      last_decision_provenance: "backfill",
+      normaliser_version: "fixture-normaliser@v1+po_box_reconciliation@v1",
+    }),
+  );
+  store.makesafe_intake_case_sources.push({
+    org_id: ORG,
+    case_id: "case-legacy",
+    post_id: "post-legacy",
+    role: "primary",
+    received_at: "2026-07-21T01:00:00.000Z",
+    attachment_refs: [],
+  }, {
+    org_id: ORG,
+    case_id: "case-partial",
+    post_id: "post-partial-corrected",
+    role: "primary",
+    received_at: "2026-07-21T01:00:00.000Z",
+    attachment_refs: [],
+  }, {
+    org_id: ORG,
+    case_id: "case-partial",
+    post_id: "post-partial-effective",
+    role: "primary",
+    received_at: "2026-07-21T01:01:00.000Z",
+    attachment_refs: [],
+  });
+  store.makesafe_intake_source_authority_corrections.push({
+    org_id: ORG,
+    id: "correction-legacy",
+    source_post_id: "post-legacy",
+    legacy_case_id: "case-legacy",
+    effective_case_id: "case-intermediate",
+    target_job_id: null,
+  }, {
+    org_id: ORG,
+    id: "correction-partial",
+    source_post_id: "post-partial-corrected",
+    legacy_case_id: "case-partial",
+    effective_case_id: "case-current",
+    target_job_id: null,
+  });
+  store.makesafe_intake_source_authority_correction_supersessions.push({
+    org_id: ORG,
+    source_post_id: "post-legacy",
+    superseded_correction_id: "correction-legacy",
+    prior_authority_case_id: "case-intermediate",
+    effective_case_id: "case-current",
+  });
+
+  const partial = await applyGapFill(fakeClient(store), {
+    caseId: "case-partial",
+    fills: { client_name: "fixture-value" },
+  });
+  assertEquals(partial.applied, true);
+
+  await assertRejects(
+    () =>
+      applyGapFill(fakeClient(store), {
+        caseId: "case-legacy",
+        fills: { client_name: "verified-client" },
+      }),
+    GapFillError,
+    "authority was corrected away",
+  );
+  await assertRejects(
+    () =>
+      applyGapFill(fakeClient(store), {
+        caseId: "case-reconciliation-only",
+        fills: { client_name: "verified-client" },
+      }),
+    GapFillError,
+    "historical identity reconciliation residue",
+  );
+
+  assertEquals(store.makesafe_intake_cases[1].client_name, null);
+  assertEquals(store.makesafe_intake_cases[3].client_name, null);
+});
+
+Deno.test("gap-fill queue and apply fail closed on malformed source authority overlays", async () => {
+  const queueStore = baseStore();
+  queueStore.makesafe_intake_cases.push(
+    exceptionCase({ id: "case-mismatch" }),
+  );
+  queueStore.makesafe_intake_case_sources.push({
+    org_id: ORG,
+    case_id: "case-mismatch",
+    post_id: "post-mismatch",
+  });
+  queueStore.makesafe_intake_source_authority_corrections.push({
+    org_id: ORG,
+    id: "correction-mismatch",
+    source_post_id: "post-mismatch",
+    legacy_case_id: "different-case",
+    effective_case_id: "case-current",
+    target_job_id: null,
+  });
+  await assertRejects(
+    () =>
+      loadGapFillQueue(fakeClient(queueStore), {
+        includeReportReady: false,
+      }),
+    Error,
+    "legacy authority mismatch",
+  );
+
+  const applyStore = baseStore();
+  applyStore.makesafe_intake_cases.push(
+    exceptionCase({ id: "case-supersession-mismatch" }),
+  );
+  applyStore.makesafe_intake_case_sources.push({
+    org_id: ORG,
+    case_id: "case-supersession-mismatch",
+    post_id: "post-supersession-mismatch",
+  });
+  applyStore.makesafe_intake_source_authority_corrections.push({
+    org_id: ORG,
+    id: "correction-superseded",
+    source_post_id: "post-supersession-mismatch",
+    legacy_case_id: "case-supersession-mismatch",
+    effective_case_id: "case-intermediate",
+    target_job_id: null,
+  });
+  applyStore.makesafe_intake_source_authority_correction_supersessions.push({
+    org_id: ORG,
+    source_post_id: "post-supersession-mismatch",
+    superseded_correction_id: "different-correction",
+    prior_authority_case_id: "case-intermediate",
+    effective_case_id: "case-current",
+  });
+  await assertRejects(
+    () =>
+      applyGapFill(fakeClient(applyStore), {
+        caseId: "case-supersession-mismatch",
+        fills: { client_name: "fixture-value" },
+      }),
+    Error,
+    "supersession target mismatch",
+  );
+  assertEquals(applyStore.makesafe_intake_cases[0].client_name, null);
 });
 
 Deno.test("applyGapFill requires an identifier and a fills object", async () => {

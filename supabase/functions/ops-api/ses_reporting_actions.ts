@@ -1490,6 +1490,65 @@ export async function prepareSesInvoiceObligationAction(
         "The current docket is not a pre-Xero proposal that can mint an invoice obligation.",
     });
   }
+  const reviewSpec = object(docket.review_spec);
+  const reviewCards = Array.isArray(reviewSpec.cards) ? reviewSpec.cards : [];
+  const reviewCard = object(reviewCards[0]);
+  const exceptionReviewCodes = Array.isArray(reviewCard.exception_review_codes)
+    ? reviewCard.exception_review_codes.map((code) => String(code || ""))
+      .filter(Boolean)
+    : [];
+  if (exceptionReviewCodes.length > 0) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "pricing_evidence_missing",
+        "Invoice creation is held by an identity/integrity exception review; resolve the named case evidence before any Xero action.",
+        {
+          fact:
+            "The review pack contains unresolved identity/integrity exception evidence, so no irreversible invoice action is permitted.",
+          evidence: { exception_review_codes: exceptionReviewCodes },
+        },
+      ),
+    );
+  }
+  const invoiceGateCodes = Array.isArray(reviewCard.invoice_gate_codes)
+    ? reviewCard.invoice_gate_codes.map((code) => String(code || "")).filter(
+      Boolean,
+    )
+    : [];
+  if (invoiceGateCodes.length > 0) {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "pricing_evidence_missing",
+        "Invoice creation is held by an explicit invoice gate in the review pack; resolve the price or duplicate-money fact before any Xero action.",
+        {
+          fact:
+            "The review pack contains unresolved invoice gates, so the stored proposal cannot create Xero money.",
+          evidence: { invoice_gate_codes: invoiceGateCodes },
+        },
+      ),
+    );
+  }
+  const localReviewProposal = object(docket.local_invoice_proposal);
+  if (localReviewProposal.state === "price_unresolved") {
+    throw new SesActionError(
+      409,
+      sesRefusal(
+        "pricing_evidence_missing",
+        "Invoice creation is held because the review pack contains an inert draft-zero proposal.",
+        {
+          fact:
+            "The review pack deliberately selected no amount, so no invoice action is permitted.",
+          evidence: {
+            invoice_gate_codes: Array.isArray(localReviewProposal.invoice_gates)
+              ? localReviewProposal.invoice_gates
+              : [],
+          },
+        },
+      ),
+    );
+  }
   // The mint prices from the STORED docket proposal, so a docket persisted
   // under an earlier pricing canon silently mints the old rates — SWMS-261079
   // minted a $350 roof draft on 2026-08-07 from a 2026-07-30.6 docket while

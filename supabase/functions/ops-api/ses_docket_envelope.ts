@@ -248,12 +248,25 @@ export interface SesPrepareRequest {
    * by inheritance. Present means cleared; the value carries who decided it.
    */
   materials_charge_cleared?: SesMaterialsChargeClearance;
+  /**
+   * The already-produced Maverick draft pack for ONE named card. It is never
+   * inferred from a trade report: the prepare boundary normalises and verifies
+   * it against that card's selected current-cycle report before it can make
+   * Docs Ready.
+   */
+  draft_pack_output?: unknown;
 }
 
 export interface SesBlocker {
   state: "blocked";
   reason: string;
   reason_code: string;
+  /** Explicit preparation boundary. Omitted means identity_safety_hard. */
+  issue_class?:
+    | "review_assumption"
+    | "send_gate"
+    | "invoice_gate"
+    | "identity_safety_hard";
   searches_attempted: string[];
   rejected_candidates: string[];
   recovery_action: string;
