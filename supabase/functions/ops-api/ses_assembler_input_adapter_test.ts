@@ -3752,7 +3752,7 @@ Deno.test(
   async () => {
     assertEquals(
       SES_FAMILY_MATRIX_VERSION,
-      "ses-builder-family-matrix/2026-08-04.1",
+      "ses-builder-family-matrix/2026-08-07.1",
     );
     const shapes = [
       ["SWMS-26732", null, "photos"],
