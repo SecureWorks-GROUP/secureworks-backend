@@ -50,9 +50,9 @@ import {
   SES_DOCKET_OUTPUT_HASH_VERSION,
   SES_DOCKET_REVIEW_SPEC_VERSION,
   SES_PHYSICAL_FAMILY_RECIPE_VERSION,
+  SES_PREPARE_SYSTEM_EXCEPTION_CODE,
   sesDocketPersistedIdempotencyKey,
   sesDocketRevisionIdentity,
-  SES_PREPARE_SYSTEM_EXCEPTION_CODE,
   type SesPersistPayload,
   type SesPrepareDependencies,
 } from "./ses_prepare_docket_revision.ts";
@@ -242,9 +242,8 @@ function request(
 ): SesPrepareRequest {
   const ajs = /job-(?:ajs|ajbr)-/.test(jobId);
   const ajsReference = /job-ajs-/.test(jobId);
-  const mlb = /job-mlb-/.test(jobId);
   const temporaryFencing = /temporary_fencing/.test(jobId);
-  const hours = temporaryFencing && mlb ? 4 : 3;
+  const hours = temporaryFencing ? 4 : 3;
   const reference = builderReference ||
     (ajsReference ? "AJS 70062" : "REF-70062");
   return {
@@ -2093,35 +2092,47 @@ Deno.test("builder routing uses only company/matrix evidence and blocks when the
   assertDraftZeroInvoice(result);
 });
 
-Deno.test("temporary fencing rejects missing typed panel/base evidence", async () => {
-  const row = SES_FAMILY_MATRIX.find((candidate) =>
-    candidate.builder_key === "AJS" &&
-    candidate.family === "temporary_fencing"
-  )!;
-  const input = fixtureInput(row);
-  input.cycle_facts.hours_and_materials = {
+Deno.test("AJS/AJBR temporary fencing prices labour-only at the solo four-hour floor without material counts", async () => {
+  for (const builderKey of ["AJS", "AJBR"] as const) {
+    const result = await labourProposal(builderKey, "temporary_fencing", {
+      trades: 1,
+      hours_per_trade: 3,
+      rate_ex_gst: 80,
+    });
+
+    assertEquals(
+      result.blockers.filter((item) =>
+        item.reason_code === "pricing_evidence_missing"
+      ),
+      [],
+      `${builderKey} must not require non-billable material counts`,
+    );
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assert(proposal, `${builderKey} must reach pricing`);
+    assertEquals(proposal.basis, "ajs_temporary_fence_labour_only");
+    assertEquals(proposal.reported_hours_per_trade, 3);
+    assertEquals(proposal.billable_hours_per_trade, 4);
+    assertEquals(proposal.billable_hours_floor, 4);
+    assertEquals(proposal.billable_hours_raised_to_floor, true);
+    const lines = proposal.line_items as Array<Record<string, unknown>>;
+    assertEquals(lines.length, 1, `${builderKey} must have no material line`);
+    assertStringIncludes(String(lines[0].description), "1 trade x 4 hours");
+    assertEquals(lines[0].quantity, 4);
+    assertEquals(lines[0].unit_price_ex_gst, 80);
+    assertEquals(proposal.subtotal_ex_gst, 320);
+  }
+});
+
+Deno.test("MLB temporary fencing still rejects missing typed panel/base evidence", async () => {
+  const result = await labourProposal("MLB", "temporary_fencing", {
     trades: 1,
     hours_per_trade: 4,
-    rate_ex_gst: 80,
-  };
-  const response = await prepareSesDocketRevision(
-    request(input.identity.job_id),
-    dependencies(input),
-  );
-  assertEquals(response.results[0].state, "ready");
-  assertEquals(
-    response.results[0].envelope.v2.classification.family,
-    "temporary_fencing",
-  );
-  assertEquals(
-    response.results[0].envelope.v2.classification.subtype,
-    "temporary_fencing",
-  );
-  assert(
-    blockerCodes(response.results[0]).includes("pricing_evidence_missing"),
-  );
-  assertDraftZeroInvoice(response.results[0], "pricing_evidence_missing");
-  const blocker = response.results[0].blockers.find((item) =>
+    rate_ex_gst: 85,
+  });
+
+  assert(blockerCodes(result).includes("pricing_evidence_missing"));
+  assertDraftZeroInvoice(result, "pricing_evidence_missing");
+  const blocker = result.blockers.find((item) =>
     item.reason_code === "pricing_evidence_missing"
   )!;
   assertStringIncludes(blocker.reason.toLowerCase(), "panels");
@@ -2130,6 +2141,27 @@ Deno.test("temporary fencing rejects missing typed panel/base evidence", async (
   assert(!blocker.reason.includes("base_count"));
   assert(!blocker.recovery_action.includes("panel_count"));
   assert(!blocker.recovery_action.includes("base_count"));
+});
+
+Deno.test("non-temporary-fencing labour pricing remains independent of panel/base counts", async () => {
+  const result = await labourProposal("AJS", "physical_makesafe", {
+    trades: 1,
+    hours_per_trade: 1,
+    rate_ex_gst: 80,
+    materials: [],
+  });
+
+  assertEquals(
+    result.blockers.filter((item) =>
+      item.reason_code === "pricing_evidence_missing"
+    ),
+    [],
+  );
+  const proposal = result.invoice_proposal as Record<string, unknown>;
+  assert(proposal, "non-temp family must still reach pricing");
+  assertEquals(proposal.basis, "ajs_labour_materials");
+  assertEquals(proposal.billable_hours_floor, 2);
+  assertEquals(proposal.billable_hours_per_trade, 2);
 });
 
 Deno.test("labour pricing blocks on missing field-report labour facts without naming storage fields", async () => {

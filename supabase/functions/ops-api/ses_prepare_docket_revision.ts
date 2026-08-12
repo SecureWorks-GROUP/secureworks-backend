@@ -1349,7 +1349,13 @@ function localInvoiceProposal(
       );
     }
   }
-  if (row.family === "temporary_fencing") {
+  // The sealed family matrix already owns the builder decision. AJS/AJBR
+  // temporary fencing is labour-only because the builder supplies the kit, so
+  // panel/base quantities cannot decide its price and must never gate it.
+  if (
+    row.family === "temporary_fencing" &&
+    row.invoice_basis !== "ajs_temporary_fence_labour_only"
+  ) {
     const panelCount = nonNegativeInteger(facts.panel_count);
     const baseCount = nonNegativeInteger(facts.base_count);
     if (panelCount === null || panelCount < 1 || baseCount === null) {
