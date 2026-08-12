@@ -32322,6 +32322,72 @@ export function _tradeLeadInstaller(crew: any[]): any | null {
   }
 }
 
+function tradeContactText(value: unknown): string | null {
+  const text = String(value ?? '').trim()
+  return text || null
+}
+
+function tradeContactPhoneHref(value: unknown): string | null {
+  const raw = tradeContactText(value)
+  if (!raw) return null
+  const digits = raw.replace(/\D/g, '')
+  return digits ? `${raw.startsWith('+') ? '+' : ''}${digits}` : null
+}
+
+function tradeContactAddress(job: any): string | null {
+  const address = tradeContactText(job?.site_address)
+  const suburb = tradeContactText(job?.site_suburb)
+  if (!address) return suburb
+  return !suburb || address.toLowerCase().includes(suburb.toLowerCase())
+    ? address
+    : `${address}, ${suburb}`
+}
+
+// Client contact is a separate, assignment-scoped projection. Job-detail access
+// can also come from dispatcher/managed-vertical authority or the open MakeSafe
+// reporting fallback; none of those paths entitles an unallocated trade to the
+// client's contact details. Tier is deliberately absent from this decision: the
+// Captain-approved boundary is one non-cancelled assignment, for Tier 1 and
+// Tier 2 alike.
+//
+// Keep this block minimum and action-specific. In particular there is no email,
+// text/message action, GHL contact identifier, or messaging permission here.
+export function _allocatedTradeContact(job: any): any {
+  const phone = tradeContactText(job?.client_phone)
+  const phoneHref = tradeContactPhoneHref(phone)
+  const address = tradeContactAddress(job)
+  return {
+    client_name: tradeContactText(job?.client_name),
+    job_number: tradeContactText(job?.job_number),
+    phone,
+    address,
+    actions: {
+      call: phoneHref
+        ? {
+          available: true,
+          href: `tel:${phoneHref}`,
+          unavailable_reason: null,
+        }
+        : {
+          available: false,
+          href: null,
+          unavailable_reason: 'No client phone on file',
+        },
+      navigate: address
+        ? {
+          available: true,
+          href: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`,
+          unavailable_reason: null,
+        }
+        : {
+          available: false,
+          href: null,
+          unavailable_reason: 'No site address on file',
+        },
+    },
+  }
+}
+
 async function tradeJobDetail(
   client: any,
   params: URLSearchParams,
@@ -32341,7 +32407,7 @@ async function tradeJobDetail(
 
   const [jobRes, docsRes, mediaRes, eventsRes, reportRes, woRes, crewRes, posRes] = await Promise.all([
     client.from('jobs')
-      .select('id, type, status, client_name, client_phone, client_email, site_address, site_suburb, site_lat, site_lng, notes, job_number, scope_json, ghl_opportunity_id, ghl_contact_id, metadata')
+      .select('id, type, status, client_name, client_phone, site_address, site_suburb, site_lat, site_lng, notes, job_number, scope_json, ghl_opportunity_id, ghl_contact_id, metadata')
       .eq('id', jobId).eq('org_id', viewer.orgId).single(),
     client.from('job_documents')
       .select('id, type, pdf_url, storage_url, file_name, visible_to_trades, version, quote_number, created_at')
@@ -32467,7 +32533,21 @@ async function tradeJobDetail(
     }
   }
 
-  const { metadata: _tradeJobMetadata, ...tradeSafeJob } = jobRes.data || {}
+  // Contact data leaves the raw job object unconditionally. That makes the
+  // server projection the access boundary instead of asking each browser
+  // surface to remember to hide fields. The values are projected back only via
+  // `contact` below when this viewer has a non-cancelled assignment.
+  const {
+    metadata: _tradeJobMetadata,
+    client_name: _tradeClientName,
+    client_phone: _tradeClientPhone,
+    client_email: _tradeClientEmail,
+    site_address: _tradeSiteAddress,
+    site_suburb: _tradeSiteSuburb,
+    site_lat: _tradeSiteLat,
+    site_lng: _tradeSiteLng,
+    ...tradeSafeJob
+  } = jobRes.data || {}
   const currentServiceReport = makesafeDetails
     ? selectCurrentCycleReport(
       reportRes.data || [],
@@ -32497,11 +32577,19 @@ async function tradeJobDetail(
   }
 
   const tradeCrew = _tradeCrewRoster(crewRes.data || [])
+  const hasActiveAssignment = tradeCrew.some((assignment: any) =>
+    String(assignment?.user_id || '') === String(viewer.id) &&
+    String(assignment?.status || '').toLowerCase() !== 'cancelled'
+  )
   const visibleDocuments = _tradeVisibleDocuments(docsRes.data || [])
   const workOrders = woRes.data || []
 
   return {
     job: tradeSafeJob,
+    // Explicitly null for a dispatcher/manager/open-MakeSafe viewer who may
+    // open the job but is not actively allocated. No raw contact sibling exists
+    // on `job`, so this denial cannot be bypassed by another client renderer.
+    contact: hasActiveAssignment ? _allocatedTradeContact(jobRes.data) : null,
     job_identity: _projectMakesafeJobIdentity({
       builder_claim_ref: _tradeJobMetadata?.builder_claim_ref,
       builder_work_order_number: _tradeJobMetadata?.builder_work_order_number,

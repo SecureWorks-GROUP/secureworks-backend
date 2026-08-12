@@ -19,6 +19,7 @@ import {
   assertRejects,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _allocatedTradeContact,
   _resolveAllocationAuthz,
   _resolveLeadTarget,
   _setJobLeadForTest,
@@ -139,6 +140,14 @@ function seed(): Tables {
       type: "patio",
       job_number: "SWP-90001",
       status: "processing",
+      client_name: "Kim Client",
+      client_phone: "+61 400 111 222",
+      client_email: "kim.client@example.test",
+      site_address: "10 Sample Street",
+      site_suburb: "Perth",
+      site_lat: -31.9523,
+      site_lng: 115.8613,
+      ghl_contact_id: "ghl-contact-1",
       metadata: { internal: "must not reach the trade" },
       scope_json: {
         config: {
@@ -249,10 +258,14 @@ const installerViewer = {
 };
 
 function detailFor(tables: Tables) {
+  return detailForViewer(tables, installerViewer);
+}
+
+function detailForViewer(tables: Tables, viewer: Record<string, any>) {
   return _tradeJobDetailForTest(
     makeClient(tables),
     new URLSearchParams({ jobId: JOB_ID }),
-    installerViewer as any,
+    viewer as any,
     false, // isAdmin — an assigned installer, NOT a dispatcher
   );
 }
@@ -361,6 +374,113 @@ Deno.test("assigned installer gets the work-order PDF as its own surface", async
   const d: any = await detailFor(seed());
   assertEquals(d.workOrderDocuments.length, 1);
   assertEquals(d.workOrderDocuments[0].id, "doc-wo");
+});
+
+// ── Allocated-trade client contact entitlement ─────────────────────────────
+
+Deno.test("assigned trade receives only the approved client contact projection", async () => {
+  const d: any = await detailFor(seed());
+  assertEquals(d.contact, {
+    client_name: "Kim Client",
+    job_number: "SWP-90001",
+    phone: "+61 400 111 222",
+    address: "10 Sample Street, Perth",
+    actions: {
+      call: {
+        available: true,
+        href: "tel:+61400111222",
+        unavailable_reason: null,
+      },
+      navigate: {
+        available: true,
+        href:
+          "https://www.google.com/maps/search/?api=1&query=10%20Sample%20Street%2C%20Perth",
+        unavailable_reason: null,
+      },
+    },
+  });
+});
+
+Deno.test("Tier 1 and Tier 2 receive the same allocated contact projection", async () => {
+  const tables = seed();
+  const tier1: any = await detailForViewer(tables, {
+    ...installerViewer,
+    tradeTier: 1,
+  });
+  const tier2: any = await detailForViewer(tables, {
+    ...installerViewer,
+    tradeTier: 2,
+  });
+  assertEquals(tier1.contact, tier2.contact);
+});
+
+Deno.test("missing client phone is explicit and never fabricates a call link", async () => {
+  const tables = seed();
+  tables.jobs[0].client_phone = "  ";
+  const d: any = await detailFor(tables);
+  assertEquals(d.contact.phone, null);
+  assertEquals(d.contact.actions.call, {
+    available: false,
+    href: null,
+    unavailable_reason: "No client phone on file",
+  });
+});
+
+Deno.test("client email and raw contact siblings never leak from trade_job_detail", async () => {
+  const d: any = await detailFor(seed());
+  for (
+    const field of [
+      "client_name",
+      "client_phone",
+      "client_email",
+      "site_address",
+      "site_suburb",
+      "site_lat",
+      "site_lng",
+    ]
+  ) {
+    assertEquals(d.job[field], undefined, `${field} leaked on the raw job`);
+  }
+  assert(
+    !JSON.stringify(d).includes("kim.client@example.test"),
+    "client email leaked anywhere in the trade projection",
+  );
+});
+
+Deno.test("contact entitlement does not add text, email, or messaging permission", async () => {
+  const d: any = await detailFor(seed());
+  assertEquals(Object.keys(d.contact.actions).sort(), ["call", "navigate"]);
+  assertEquals(d.contact.actions.text, undefined);
+  assertEquals(d.contact.actions.email, undefined);
+  assertEquals(d.contact.permissions, undefined);
+  assertEquals(d.permissions, undefined);
+});
+
+Deno.test("unassigned open-MakeSafe access does not include client contact", async () => {
+  const tables = seed();
+  tables.jobs[0].type = "makesafe";
+  tables.jobs[0].job_number = "SWMS-90001";
+  tables.job_assignments = tables.job_assignments.filter((a: any) =>
+    a.user_id !== INSTALLER
+  );
+  const d: any = await detailFor(tables);
+  assertEquals(d.contact, null);
+  assertEquals(d.job.client_phone, undefined);
+  assertEquals(d.job.client_email, undefined);
+  assertEquals(d.job.site_address, undefined);
+});
+
+Deno.test("contact projection helper never returns a client email field", () => {
+  const contact = _allocatedTradeContact({
+    client_name: "Kim Client",
+    job_number: "SWP-90001",
+    client_phone: "0400 111 222",
+    client_email: "kim.client@example.test",
+    site_address: "10 Sample Street",
+    site_suburb: "Perth",
+  });
+  assertEquals((contact as any).client_email, undefined);
+  assert(!JSON.stringify(contact).includes("kim.client@example.test"));
 });
 
 // ── CONTROLS: proof this did not widen too far ──────────────────────────────
