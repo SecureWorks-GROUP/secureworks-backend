@@ -3349,24 +3349,159 @@ export function _resolveOpsApiAuthIntent(input: {
   preferBearerOverApiKey?: boolean
 }): 'api_key' | 'jwt' | 'routine' | 'none' {
   const { xApiKey, bearerToken, validKey, serviceKey, routineKey, preferBearerOverApiKey } = input
+  // The service-role key is the existing non-browser server credential. Keep it
+  // ahead of browser Bearer preference so an agent request cannot be downgraded
+  // when an unrelated Authorization header is also present.
+  if (serviceKey && (xApiKey === serviceKey || bearerToken === serviceKey)) return 'api_key'
   if (routineKey && (xApiKey === routineKey || bearerToken === routineKey)) return 'routine'
-  if (bearerToken && (bearerToken === validKey || bearerToken === serviceKey)) return 'api_key'
-  // A verified user Bearer is the caller identity even when a browser wrapper
-  // also sends x-api-key — but ONLY for the make-safe Trade board request, whose
-  // browser clients legitimately carry both. Every other action keeps the
-  // pre-existing x-api-key-first precedence, so a master-key server call that
-  // also happens to carry a user Bearer stays classified as api_key (privileged).
+  if (bearerToken && bearerToken === validKey) return 'api_key'
+  // A user Bearer is the caller identity when the route opts into browser JWT
+  // precedence. The handler still verifies it with auth.getUser before use.
   if (preferBearerOverApiKey && bearerToken) return 'jwt'
-  if (xApiKey && (xApiKey === validKey || xApiKey === serviceKey)) return 'api_key'
+  if (xApiKey && xApiKey === validKey) return 'api_key'
   if (bearerToken) return 'jwt'
   return 'none'
 }
 
-export function _preferBearerForOpsApiAction(url: URL): boolean {
+const OPS_API_STATIC_KEY_COMPATIBLE_ACTIONS = new Set([
+  // Non-operator metadata/share surfaces only. The deploy lane and the signed
+  // cost-report route return before this auth envelope.
+  'ops_api_version',
+  'ses_synthetic_livefire_capabilities',
+  'view_shared_report',
+])
+
+const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
+  // Existing Trade/user routes do their narrower per-user, assignment,
+  // vertical-manager, or ownership authorization in their handlers.
+  'trade_calendar',
+  'my_work_orders',
+  'my_jobs',
+  'trade_job_detail',
+  'upload_photo',
+  'get_upload_url',
+  'confirm_upload',
+  'submit_service_report',
+  'get_service_report',
+  'update_my_assignment',
+  'my_hours',
+  'submit_trade_invoice',
+  'my_trade_invoices',
+  'get_trade_invoice',
+  'save_trade_invoice_draft',
+  'set_trade_rate',
+  'update_trade_profile',
+  'attach_invoice_pdf',
+  'delete_trade_invoice',
+  'create_trade_alert',
+  'trade_labour_budget',
+  'update_job_phase',
+  'list_pending_verifications',
+  'verify_hours',
+  'dispute_hours',
+  'crew_charges_on_my_jobs',
+  'review_crew_charge',
+  'submit_work_order_invoice',
+  'search_all_jobs',
+  'generate_trade_invoice',
+  'my_invoices',
+  'acknowledge_invoice_line',
+  'roof_report_template',
+  'save_roof_report',
+  'submit_roof_report',
+  'clock_event',
+  'submit_makesafe_report',
+  'request_assistance',
+  'set_availability',
+  'submit_expense',
+  'list_expenses',
+  'suggest_job_for_expense',
+  'update_expense',
+  // These mixed ops/Trade actions already enforce dispatcher, vertical-manager,
+  // relationship, or job-scoped authority inside the route.
+  'allocate_job',
+  'reattend_makesafe',
+  'confirm_roof_report_done',
+  'cancel_makesafe',
+  'reopen_makesafe',
+])
+
+export function _opsApiActionNeedsSignedCaller(url: URL): boolean {
   const action = url.searchParams.get('action')
-  return action === 'submit_makesafe_report' ||
-    (action === 'makesafe_board' &&
-      String(url.searchParams.get('projection') || '').toLowerCase() === 'trade')
+  return !!action && !OPS_API_STATIC_KEY_COMPATIBLE_ACTIONS.has(action)
+}
+
+export function _opsApiActionNeedsStaffRole(url: URL): boolean {
+  const action = url.searchParams.get('action')
+  if (!_opsApiActionNeedsSignedCaller(url) || !action) return false
+  if (
+    action === 'makesafe_board' &&
+    String(url.searchParams.get('projection') || '').toLowerCase() === 'trade'
+  ) return false
+  return !OPS_API_PROFILE_SCOPED_JWT_ACTIONS.has(action)
+}
+
+export function _opsApiServerSecretPresented(input: {
+  xApiKey: string | null
+  bearerToken: string | null
+  sharedKey?: string | null
+  serviceKey?: string | null
+}): boolean {
+  const { xApiKey, bearerToken, sharedKey, serviceKey } = input
+  // Fail closed if an environment is accidentally configured with the same
+  // value for the public/shared and server-only credentials.
+  return !!serviceKey && serviceKey !== sharedKey &&
+    (xApiKey === serviceKey || bearerToken === serviceKey)
+}
+
+export function _authorizeOpsApiAction(input: {
+  url: URL
+  authMode: 'api_key' | 'jwt' | 'routine' | 'none'
+  authUser?: Pick<TradeAuthContext, 'role'> | null
+  serverSecretPresented?: boolean
+}): { ok: true } | { ok: false; status: 401; code: string; error: string } {
+  const { url, authMode, authUser, serverSecretPresented = false } = input
+  if (!_opsApiActionNeedsSignedCaller(url)) return { ok: true }
+
+  // Scoped routine callers retain their existing default-deny allow-list below.
+  if (authMode === 'routine') return { ok: true }
+  if (authMode === 'api_key') {
+    if (serverSecretPresented) return { ok: true }
+    return {
+      ok: false,
+      status: 401,
+      code: 'user_jwt_required',
+      error: 'A signed-in Supabase user session is required.',
+    }
+  }
+  if (authMode !== 'jwt' || !authUser) {
+    return {
+      ok: false,
+      status: 401,
+      code: 'user_jwt_required',
+      error: 'A signed-in Supabase user session is required.',
+    }
+  }
+
+  if (_opsApiActionNeedsStaffRole(url)) {
+    const role = String(authUser.role || '').toLowerCase()
+    if (!['admin', 'owner', 'ops_manager'].includes(role)) {
+      return {
+        ok: false,
+        status: 401,
+        code: 'operator_access_required',
+        error: 'An authorised operator session is required.',
+      }
+    }
+  }
+  return { ok: true }
+}
+
+export function _preferBearerForOpsApiAction(url: URL): boolean {
+  // Browser wrappers may still send the legacy shared key alongside the real
+  // signed-in session during cutover. The JWT must be the caller identity for
+  // every protected route; routine and service credentials are resolved first.
+  return _opsApiActionNeedsSignedCaller(url)
 }
 
 export function _resolveMakesafeReportActor(
@@ -3777,10 +3912,11 @@ if (import.meta.main) serve(async (req: Request) => {
     }
   }
 
-  // ── Authentication: API key (server-to-server) + JWT (browser) + scoped routine ──
+  // ── Authentication: server secret + JWT (browser) + scoped routine ──
   // Three caller classes (decision: scoped-routine-key-2026-06-17):
-  //   api_key  — the master SW_API_KEY (the ops dashboard) or the service-role key.
-  //              PRIVILEGED: may approve / create live jobs / authorise.
+  //   api_key  — internal legacy mode for the service-role key. The shared
+  //              SW_API_KEY may classify this way but is rejected from every
+  //              protected route by the signed-caller gate below.
   //   jwt      — a logged-in Supabase user (role admin/owner = privileged).
   //   routine  — the LESSER MAKESAFE_ROUTINE_KEY held by the make-safe automation.
   //              May read/create drafts and trigger the DB-allowlisted deterministic
@@ -3800,18 +3936,23 @@ if (import.meta.main) serve(async (req: Request) => {
 
   let authMode: 'api_key' | 'jwt' | 'routine' = 'api_key'
   let authUser: TradeAuthContext | null = null
-  // Bearer-over-x-api-key precedence is scoped to the make-safe Trade board read
-  // and final report submit. Both browser calls legitimately carry both headers,
-  // and the submit must take attribution from the verified JWT rather than a
-  // spoofable body field. Every other action keeps x-api-key-first precedence.
-  const preferBearerForTradeIdentity = _preferBearerForOpsApiAction(_preAuthUrl)
+  // Browser calls may carry both the legacy shared key and a signed-in user's
+  // access token during cutover. Protected routes use the verified JWT identity;
+  // the distinct service-role and routine credentials retain higher precedence.
+  const preferBearerForSignedCaller = _preferBearerForOpsApiAction(_preAuthUrl)
   const authIntent = _resolveOpsApiAuthIntent({
     xApiKey,
     bearerToken,
     validKey,
     serviceKey,
     routineKey,
-    preferBearerOverApiKey: preferBearerForTradeIdentity,
+    preferBearerOverApiKey: preferBearerForSignedCaller,
+  })
+  const serverSecretPresented = _opsApiServerSecretPresented({
+    xApiKey,
+    bearerToken,
+    sharedKey: validKey,
+    serviceKey,
   })
 
   if (authIntent === 'routine') {
@@ -3851,6 +3992,22 @@ if (import.meta.main) serve(async (req: Request) => {
   } else {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
       status: 401, headers: { ...CORS, 'Content-Type': 'application/json' }
+    })
+  }
+
+  const actionAuthorization = _authorizeOpsApiAction({
+    url: _preAuthUrl,
+    authMode,
+    authUser,
+    serverSecretPresented,
+  })
+  if (!actionAuthorization.ok) {
+    return new Response(JSON.stringify({
+      error: actionAuthorization.error,
+      code: actionAuthorization.code,
+    }), {
+      status: actionAuthorization.status,
+      headers: { ...CORS, 'Content-Type': 'application/json' },
     })
   }
 
