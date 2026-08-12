@@ -17,9 +17,9 @@
 #   (no policy)           GET the action; if the deployed binary says "Unknown
 #                         action", retry once as a POST with an empty body.
 #   probe=jwt-fail-closed GET only. Recognition means the deployed binary
-#                         refused the API-key caller at authTrade with
-#                         "Login required" — a tenant read that answers with
-#                         data instead is drift, not a pass.
+#                         refused the API-key caller at authentication with
+#                         user_jwt_required, its signed-in-session message, or
+#                         legacy "Login required" — tenant data is drift.
 #   probe=bounded-refusal GET only, with probe-args appended. Recognition means
 #                         the handler refused a deliberately invalid bound
 #                         before touching any business data.
