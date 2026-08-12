@@ -394,6 +394,18 @@ function assertDraftZeroInvoice(
   return proposal;
 }
 
+function assertInvoiceHandoffCallable(
+  result: { invoice_proposal: unknown },
+): Record<string, unknown> {
+  const proposal = object(result.invoice_proposal);
+  assertEquals(proposal.state, undefined);
+  assert(
+    Array.isArray(proposal.line_items) && proposal.line_items.length > 0,
+    "expected the invoice-obligation input to survive pack caveats",
+  );
+  return proposal;
+}
+
 Deno.test("one-card dry handler boundary returns a bounded system-exception pack without leaking the inner throw", async () => {
   const marker = "sensitive-throw-marker";
   const failureRequest: SesPrepareRequest = {
@@ -696,15 +708,17 @@ Deno.test("raw PDF SHA-256 mismatch stays visible in a persisted review pack", a
   assertEquals(result.persisted, true);
 });
 
-Deno.test("missing curated source persists a review pack without serving a PDF", async () => {
+Deno.test("named card persists to Docs Ready with canonical and curated findings as non-blocking caveats", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJBR" &&
     candidate.family === "physical_makesafe"
   )!;
   const input = fixtureInput(row);
   let persistCalls = 0;
+  const prepareRequest = request(input.identity.job_id, false);
+  delete prepareRequest.draft_pack_output;
   const result = (await prepareSesDocketRevision(
-    request(input.identity.job_id, false),
+    prepareRequest,
     dependencies(input, {
       resolvePhysicalReportProof: async () => null,
       persist: async () => {
@@ -714,6 +728,10 @@ Deno.test("missing curated source persists a review pack without serving a PDF",
     }),
   )).results[0];
 
+  assertEquals(
+    blockerCodes(result).includes("canonical_draft_pack_output_missing"),
+    true,
+  );
   assertEquals(blockerCodes(result).includes("curated_source_missing"), true);
   assertEquals(
     result.artifacts.some((artifact) =>
@@ -723,6 +741,23 @@ Deno.test("missing curated source persists a review pack without serving a PDF",
   );
   assertEquals(persistCalls, 1);
   assertEquals(result.persisted, true);
+  assertEquals(result.state, "ready");
+  assertEquals(result.envelope.pre_xero_docs_ready, true);
+  assertInvoiceHandoffCallable(result);
+  const card = reviewCard(result);
+  assertEquals(card.exception_review_codes, []);
+  assertEquals(card.invoice_gate_codes, []);
+  const caveatCodes = Array.isArray(card.review_assumption_codes)
+    ? card.review_assumption_codes
+    : [];
+  assert(
+    caveatCodes.includes(
+        "canonical_draft_pack_output_missing",
+      ) &&
+      caveatCodes.includes(
+        "curated_source_missing",
+      ),
+  );
 });
 
 Deno.test("artifact content-hash mismatch stays visible in a persisted review pack", async () => {
@@ -953,7 +988,7 @@ Deno.test("every shippable matrix row has a ready golden and an intentional nega
       dependencies(negativeInput),
     );
     assertEquals(negative.results[0].state, "ready");
-    assertDraftZeroInvoice(negative.results[0]);
+    assertInvoiceHandoffCallable(negative.results[0]);
     assert(
       blockerCodes(negative.results[0]).includes("input_hash_conflict"),
       `${row.builder_key}/${row.family} negative`,
@@ -1495,7 +1530,7 @@ Deno.test("portal state is read through the capture adapter and surfaces review 
     );
     assertEquals(response.results[0].state, "ready");
     assert(blockerCodes(response.results[0]).includes(code));
-    assertDraftZeroInvoice(response.results[0]);
+    assertInvoiceHandoffCallable(response.results[0]);
   }
 });
 
@@ -1735,7 +1770,7 @@ Deno.test("missing final report proof remains a visible review pack while final-
   const result = response.results[0];
   assertEquals(result.state, "ready");
   assertEquals(result.email_drafts, {});
-  assertDraftZeroInvoice(result);
+  assertInvoiceHandoffCallable(result);
   assertEquals(
     result.envelope.v2.items.draft_builder_report_email.state,
     "blocked",
@@ -1799,7 +1834,7 @@ Deno.test("physical dry-run proves every current-cycle photo without copying byt
   assert(
     blockerCodes(incomplete.results[0]).includes("trade_evidence_missing"),
   );
-  assertDraftZeroInvoice(incomplete.results[0]);
+  assertInvoiceHandoffCallable(incomplete.results[0]);
 });
 
 Deno.test("bidirectional positive-scope bundle evidence clears the card-local physical and SWMS blockers", async () => {
@@ -2089,7 +2124,7 @@ Deno.test("builder routing uses only company/matrix evidence and blocks when the
     intake_email_subject_source: "",
   });
   assert(Object.keys(result.email_drafts).length > 0);
-  assertDraftZeroInvoice(result);
+  assertInvoiceHandoffCallable(result);
 });
 
 Deno.test("AJS/AJBR temporary fencing prices labour-only at the solo four-hour floor without material counts", async () => {
@@ -3469,7 +3504,7 @@ Deno.test("unsupported HRCW combination surfaces review for a sealed-template de
       "swms_generation_template_unavailable",
     ),
   );
-  assertDraftZeroInvoice(response.results[0]);
+  assertInvoiceHandoffCallable(response.results[0]);
 });
 
 Deno.test("review spec v2 carries provenance-bound written trade context while preserving noisy raw selections", async () => {
@@ -4614,7 +4649,7 @@ Deno.test("prepare blocks an AJS photo pack over the Exchange message ceiling an
   assertEquals(result.state, "ready");
   assertEquals(result.envelope.pre_xero_docs_ready, true);
   assert(Object.keys(result.email_drafts).length > 0);
-  assertDraftZeroInvoice(result);
+  assertInvoiceHandoffCallable(result);
   assertEquals(persistCalls.count, 1);
 });
 
@@ -5141,7 +5176,7 @@ Deno.test("canonical output exceptions retain an honest review pack and wrong-ca
   )).results[0];
   assertEquals(pending.state, "ready");
   assertEquals(pending.envelope.pre_xero_docs_ready, true);
-  assertDraftZeroInvoice(pending, "canonical_draft_pack_output_missing");
+  assertInvoiceHandoffCallable(pending);
   const pendingCard = reviewCard(pending);
   const materials = object(pendingCard.review_materials);
   assertEquals(
@@ -5180,13 +5215,9 @@ Deno.test("canonical output exceptions retain an honest review pack and wrong-ca
     refused.blockers.find((blocker) =>
       blocker.reason_code === "draft_pack_reference_mismatch"
     )?.issue_class,
-    "identity_safety_hard",
+    "send_gate",
   );
-  assertEquals(refused.invoice_proposal?.state, "price_unresolved");
-  assertEquals(
-    object(reviewCard(refused).review_materials).draft_zero_invoice === null,
-    false,
-  );
+  assertInvoiceHandoffCallable(refused);
   assertEquals(
     object(
       object(reviewCard(refused).review_materials).make_safe_report,
@@ -5211,24 +5242,17 @@ Deno.test("canonical output exceptions retain an honest review pack and wrong-ca
   )).results[0];
   assertEquals(incompleteRevision.state, "ready");
   assertEquals(incompleteRevision.envelope.pre_xero_docs_ready, true);
-  assertDraftZeroInvoice(
-    incompleteRevision,
-    "canonical_draft_pack_output_incomplete",
+  assertInvoiceHandoffCallable(incompleteRevision);
+  assert(
+    blockerCodes(incompleteRevision).includes(
+      "canonical_draft_pack_output_incomplete",
+    ),
   );
   assertEquals(
     object(
       object(reviewCard(incompleteRevision).review_materials).make_safe_report,
     ).state,
-    "complete",
-  );
-  const incompleteReport = object(
-    object(
-      object(reviewCard(incompleteRevision).review_materials).make_safe_report,
-    ).report,
-  );
-  assertStringIncludes(
-    String(incompleteReport.works),
-    "No work-completion statement is asserted",
+    "canonical_output_incomplete",
   );
   const incompleteReviewAssumptions = reviewCard(incompleteRevision)
     .review_assumption_codes;
@@ -5293,7 +5317,22 @@ function assertVisibleDraftZeroException(
   );
 }
 
-Deno.test("Phase One keeps business exceptions visible and draft-zero", async () => {
+function assertVisibleNonBlockingCaveat(
+  result: Awaited<
+    ReturnType<typeof prepareSesDocketRevision>
+  >["results"][number],
+  reasonCode: string,
+): void {
+  assertEquals(result.state, "ready");
+  assertEquals(result.envelope.pre_xero_docs_ready, true);
+  assertInvoiceHandoffCallable(result);
+  assert(
+    blockerCodes(result).includes(reasonCode),
+    `expected ${reasonCode}; got ${blockerCodes(result).join(", ")}`,
+  );
+}
+
+Deno.test("Phase One keeps business findings visible under the named-card gate policy", async () => {
   const ajsPhysical = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" && candidate.family === "physical_makesafe"
   )!;
@@ -5319,7 +5358,7 @@ Deno.test("Phase One keeps business exceptions visible and draft-zero", async ()
     suspected_sibling_job_number: "SWMS-TEST-SIBLING",
     suspected_invoice_number: null,
   };
-  assertVisibleDraftZeroException(
+  assertVisibleNonBlockingCaveat(
     (await prepareSesDocketRevision(
       request(duplicate.identity.job_id),
       dependencies(duplicate),
@@ -5330,7 +5369,7 @@ Deno.test("Phase One keeps business exceptions visible and draft-zero", async ()
   const missingRecipient = fixtureInput(ajsPhysical);
   missingRecipient.source.work_order_sender = null;
   missingRecipient.routing_seed.report_to = null;
-  assertVisibleDraftZeroException(
+  assertVisibleNonBlockingCaveat(
     (await prepareSesDocketRevision(
       request(missingRecipient.identity.job_id),
       dependencies(missingRecipient),
@@ -5342,7 +5381,7 @@ Deno.test("Phase One keeps business exceptions visible and draft-zero", async ()
     candidate.builder_key === "AJBR" && candidate.family === "physical_makesafe"
   )!;
   const missingFinalDocument = fixtureInput(ajbrPhysical);
-  assertVisibleDraftZeroException(
+  assertVisibleNonBlockingCaveat(
     (await prepareSesDocketRevision(
       request(missingFinalDocument.identity.job_id),
       dependencies(missingFinalDocument, {
