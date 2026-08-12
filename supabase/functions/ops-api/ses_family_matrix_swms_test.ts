@@ -1,11 +1,7 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 //
-// Captain ruling 2026-08-07 (Harden SES ticket 04): EVERY physical make-safe
-// carries a SWMS regardless of builder. The old AJS builder waiver and the
-// WESTERN hrcw-only carve-out are dead. Report-only families (roof,
-// assessment) stay swms-not-required at the blocker layer for now — the
-// generator includes a SWMS in their packs, and the requirement flips only
-// after the Captain has seen a week of accurate generation.
+// Captain ruling 2026-08-13: AJS/AJBR defaults to no SWMS unless the work is
+// HRCW. Other physical builders keep their standing SWMS requirement.
 
 import {
   assert,
@@ -13,34 +9,44 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { resolveSesFamilyMatrixRow } from "./ses_family_matrix.ts";
 
-const PHYSICAL_BUILDERS = ["MLB", "AJS", "AJBR", "WESTERN"] as const;
-
-Deno.test("every builder's physical family requires a SWMS", () => {
+Deno.test("AJS/AJBR physical families default to no SWMS while other builders stay required", () => {
   const PHYSICAL_FAMILIES = [
     "physical_makesafe",
     "temporary_fencing",
     "repair",
     "restoration",
   ] as const;
-  for (const builder_key of PHYSICAL_BUILDERS) {
+  for (const builder_key of ["AJS", "AJBR"] as const) {
     for (const family of PHYSICAL_FAMILIES) {
-    const matrix: any = resolveSesFamilyMatrixRow({
-      builder_key,
-      family,
-      strata: false,
-      own_template_requested: false,
-    });
-    assert(matrix.ok, `${builder_key} physical row must resolve`);
-    assertEquals(
-      matrix.row.swms_policy,
-      "always",
-      `${builder_key} physical must carry swms_policy=always`,
-    );
-    assertEquals(
-      matrix.row.swms_waiver_rule,
-      null,
-      `${builder_key} must carry no SWMS waiver`,
-    );
+      const matrix: any = resolveSesFamilyMatrixRow({
+        builder_key,
+        family,
+        strata: false,
+        own_template_requested: false,
+      });
+      assert(matrix.ok, `${builder_key} physical row must resolve`);
+      assertEquals(
+        matrix.row.swms_policy,
+        "builder_waiver_unless_hrcw",
+        `${builder_key} physical must default to no SWMS`,
+      );
+      assertEquals(
+        matrix.row.swms_waiver_rule,
+        "ajs-default-no-swms-unless-hrcw",
+      );
+    }
+  }
+  for (const builder_key of ["MLB", "WESTERN"] as const) {
+    for (const family of PHYSICAL_FAMILIES) {
+      const matrix: any = resolveSesFamilyMatrixRow({
+        builder_key,
+        family,
+        strata: false,
+        own_template_requested: false,
+      });
+      assert(matrix.ok, `${builder_key} physical row must resolve`);
+      assertEquals(matrix.row.swms_policy, "always");
+      assertEquals(matrix.row.swms_waiver_rule, null);
     }
   }
 });

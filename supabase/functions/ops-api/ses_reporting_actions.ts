@@ -1452,8 +1452,8 @@ export async function prepareSesInvoiceObligationAction(
     post_release_disposition?: string | null;
     created_by: string;
     /**
-     * Captain-authorised commercial quantity/materials figure above the sealed
-     * schedule. Leaves trade attendance evidence untouched. Privileged only.
+     * Captain/staff-authorised commercial figure for this card. Leaves trade
+     * attendance evidence and the shared schedule untouched. Privileged only.
      */
     commercial_quantity_override?: unknown;
   },
@@ -1468,9 +1468,11 @@ export async function prepareSesInvoiceObligationAction(
         "The later attendance has no identified human disposition; an operator must choose second invoice, combine/credit review, document only, or hold pricing.",
     });
   }
-  if (args.commercial_quantity_override != null) {
+  const hasLockedFigureOverride = args.commercial_quantity_override != null;
+  if (hasLockedFigureOverride) {
     // Same authority bar as draft mint: api_key / routine, or captain/admin JWT.
-    // Never a silent trade-evidence rewrite and never a schedule floor change.
+    // The attributed instruction may come from the Captain or another staff
+    // member. Never a silent trade-evidence rewrite or shared schedule change.
     await requireSesInvoiceMintAuthority(client, auth);
   }
   const docketQuery = client.from("makesafe_docket_revisions")
@@ -1516,7 +1518,7 @@ export async function prepareSesInvoiceObligationAction(
       Boolean,
     )
     : [];
-  if (invoiceGateCodes.length > 0) {
+  if (invoiceGateCodes.length > 0 && !hasLockedFigureOverride) {
     throw new SesActionError(
       409,
       sesRefusal(
@@ -1531,7 +1533,10 @@ export async function prepareSesInvoiceObligationAction(
     );
   }
   const localReviewProposal = object(docket.local_invoice_proposal);
-  if (localReviewProposal.state === "price_unresolved") {
+  if (
+    localReviewProposal.state === "price_unresolved" &&
+    !hasLockedFigureOverride
+  ) {
     throw new SesActionError(
       409,
       sesRefusal(
@@ -1615,12 +1620,13 @@ export async function prepareSesInvoiceObligationAction(
     });
   }
   const local = object(docket.local_invoice_proposal);
+  const docketBuilderReference = local.builder_reference || local.reference;
   // The minted reference carries the card's purchase order whenever the card knows one. The docket's
   // builder_reference prefers the work order and drops the PO, which is how Koondoola SWMS-261025
   // minted `MLB-27093` beside the already-authorised `MLB-27093PO-56481`. See
   // ses_invoice_reference_grain.ts for why the composition lands here and not in the assembler.
   const composedReference = composeInvoiceReferenceWithPo(
-    local.builder_reference,
+    docketBuilderReference,
     await readCardPurchaseOrder(client, args.job_id),
   );
   const reference = composedReference.reference;
@@ -1698,7 +1704,7 @@ export async function prepareSesInvoiceObligationAction(
           ? "priced_from_canon"
           : "blocked_duplicate_live")));
 
-  if (args.commercial_quantity_override != null && !explicitDocumentOnly) {
+  if (hasLockedFigureOverride && !explicitDocumentOnly) {
     if (pricingDisposition !== "priced_from_canon") {
       throw new SesActionError(409, {
         state: "refused",
@@ -1763,7 +1769,7 @@ export async function prepareSesInvoiceObligationAction(
       hard_failures: [],
       warnings: commercialProvenance
         ? [
-          "commercial_quantity_override_applied: Captain-authorised figure above sealed schedule; trade attendance evidence unchanged",
+          "commercial_quantity_override_applied: staff-authorised locked figure overrides the automatic floor for this card; trade attendance evidence unchanged",
         ]
         : [],
     },
@@ -1784,7 +1790,7 @@ export async function prepareSesInvoiceObligationAction(
   (prepared.proposal as any).reference_grain = {
     grain: composedReference.grain,
     purchase_order: composedReference.purchase_order,
-    docket_builder_reference: String(local.builder_reference || "") || null,
+    docket_builder_reference: String(docketBuilderReference || "") || null,
   };
   if (commercialProvenance) {
     // Stamp the committed proposal so a year later the commercial figure is

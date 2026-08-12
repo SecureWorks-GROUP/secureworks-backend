@@ -1,5 +1,5 @@
 /**
- * Captain-authorised commercial quantity (and optional rate) override for SES
+ * Staff-authorised commercial quantity (and optional rate) override for SES
  * invoice obligations.
  *
  * Default path — quantity / materials only:
@@ -7,10 +7,11 @@
  * - sealed builder floors in ses_prepare_docket_revision stay unchanged
  * - the unit price on labour lines must remain the sealed schedule rate
  * - quantity and materials totals may rise above the sealed schedule when the
- *   Captain authorises a one-off commercial figure for named cards only
+ *   Captain or another staff member locks a one-off commercial figure for
+ *   a named card
  * - evidence.override_kind is commercial_quantity_not_rate
  *
- * Explicit Captain labour rate override (card-scoped only):
+ * Explicit staff labour rate override (card-scoped only):
  * - labour_rate_override must be present with sealed + authorised rates and
  *   a reason (e.g. after hours). The sealed schedule matrix is never changed.
  * - evidence.override_kind is commercial_rate_override; sealed and authorised
@@ -19,7 +20,7 @@
  *   rate fakery to force a total).
  *
  * Disposition reuses priced_with_line_override (already in the DB CHECK) so no
- * migration is required. Line.rate_override_* fields carry the Captain audit.
+ * migration is required. Line.rate_override_* fields carry the staff audit.
  */
 
 import type { SesInvoiceProposalLine } from "./makesafe_invoice_obligation.ts";
@@ -51,13 +52,13 @@ export interface SesCommercialQuantityOverrideLineInput {
 }
 
 /**
- * Explicit Captain labour rate override for THIS card only.
+ * Explicit staff labour rate override for THIS card only.
  * Never changes the sealed schedule matrix; stamps sealed vs authorised rates.
  */
 export interface SesCommercialLabourRateOverride {
   /** Sealed schedule rate that would apply without this override (e.g. MLB 85). */
   sealed_unit_price_ex_gst: number;
-  /** Captain-authorised rate for this card (e.g. 100 after hours). */
+  /** Staff-authorised rate for this card (e.g. 100 after hours). */
   authorised_unit_price_ex_gst: number;
   /** Why the rate differs (must name the commercial reason, e.g. after hours). */
   reason: string;
@@ -65,9 +66,9 @@ export interface SesCommercialLabourRateOverride {
 
 export interface SesCommercialQuantityOverrideInput {
   schema: typeof SES_COMMERCIAL_QUANTITY_OVERRIDE_SCHEMA;
-  /** Who authorised the commercial figure (Captain). */
+  /** Staff member who authorised the commercial figure. */
   authorised_by: string;
-  /** ISO-8601 timestamp of the Captain instruction. */
+  /** ISO-8601 timestamp of the staff instruction. */
   authorised_at: string;
   /** Stable decision key for the instruction. */
   decision_key: string;
@@ -159,7 +160,7 @@ export function parseSesCommercialQuantityOverride(
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new SesCommercialQuantityOverrideError(
       400,
-      "commercial_quantity_override must be an object with Captain authority and line items.",
+      "commercial_quantity_override must be an object with attributed staff authority and line items.",
     );
   }
   const o = raw as Record<string, unknown>;
@@ -231,7 +232,7 @@ export function parseSesCommercialQuantityOverride(
   if (labourCount < 1) {
     throw new SesCommercialQuantityOverrideError(
       400,
-      "commercial_quantity_override must include at least one labour line so the Captain's hours figure is explicit on the invoice.",
+      "commercial_quantity_override must include at least one labour line so the staff-locked hours figure is explicit on the invoice.",
     );
   }
   if (labour_rate_override) {
@@ -263,7 +264,7 @@ export function parseSesCommercialQuantityOverride(
 
 /**
  * Build obligation lines from a validated commercial override.
- * Labour unit prices must match the sealed schedule rate unless the Captain
+ * Labour unit prices must match the sealed schedule rate unless staff
  * supplies an explicit labour_rate_override for this card only.
  */
 export function buildCommercialQuantityOverrideLines(
@@ -283,7 +284,8 @@ export function buildCommercialQuantityOverrideLines(
   const rateOverride = override.labour_rate_override;
   const lines: SesInvoiceProposalLine[] = [];
 
-  if (rateOverride && sealedRate != null &&
+  if (
+    rateOverride && sealedRate != null &&
     rateOverride.sealed_unit_price_ex_gst !== sealedRate
   ) {
     throw new SesCommercialQuantityOverrideError(
@@ -304,20 +306,20 @@ export function buildCommercialQuantityOverrideLines(
         ) {
           throw new SesCommercialQuantityOverrideError(
             409,
-            `Commercial labour unit price ${line.unit_price_ex_gst} does not match the Captain-authorised rate ${rateOverride.authorised_unit_price_ex_gst}.`,
+            `Commercial labour unit price ${line.unit_price_ex_gst} does not match the staff-authorised rate ${rateOverride.authorised_unit_price_ex_gst}.`,
           );
         }
       } else if (line.unit_price_ex_gst !== sealedRate) {
         throw new SesCommercialQuantityOverrideError(
           409,
-          `Commercial labour unit price ${line.unit_price_ex_gst} does not match the sealed schedule rate ${sealedRate}. Do not force a total through a false hourly rate; keep the schedule rate and override quantity only, or supply labour_rate_override with Captain provenance for a deliberate card-scoped rate change.`,
+          `Commercial labour unit price ${line.unit_price_ex_gst} does not match the sealed schedule rate ${sealedRate}. Do not force a total through a false hourly rate; keep the schedule rate and override quantity only, or supply labour_rate_override with staff provenance for a deliberate card-scoped rate change.`,
         );
       }
     }
 
     const lineNote = rateOverride
-      ? `Captain-authorised commercial figure for this card only. Trade attendance evidence is unchanged. Labour rate overridden from sealed $${rateOverride.sealed_unit_price_ex_gst} to $${rateOverride.authorised_unit_price_ex_gst} (${rateOverride.reason}). Quantity and materials are commercial. Shared sealed schedule matrix unchanged.`
-      : "Captain-authorised commercial figure above the sealed schedule. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial.";
+      ? `Staff-authorised commercial figure for this card only. Trade attendance evidence is unchanged. Labour rate overridden from sealed $${rateOverride.sealed_unit_price_ex_gst} to $${rateOverride.authorised_unit_price_ex_gst} (${rateOverride.reason}). Quantity and materials are commercial. Shared sealed schedule matrix unchanged.`
+      : "Staff-authorised commercial figure overrides the automatic floor for this card. Trade attendance evidence is unchanged. Unit price is the sealed schedule rate; quantity and materials are commercial.";
 
     lines.push({
       description: line.description,
@@ -358,8 +360,8 @@ export function buildCommercialQuantityOverrideLines(
   }
 
   const provenanceNote = rateOverride
-    ? "priced_with_line_override hosts this commercial path without a migration. override_kind=commercial_rate_override: Captain explicitly authorised a card-scoped labour rate different from the sealed schedule. Sealed matrix unchanged. Trade evidence was not written."
-    : "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry Captain approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written.";
+    ? "priced_with_line_override hosts this commercial path without a migration. override_kind=commercial_rate_override: staff explicitly authorised a card-scoped labour rate different from the sealed schedule. Sealed matrix unchanged. Trade evidence was not written."
+    : "priced_with_line_override disposition hosts this commercial quantity path without a migration. rate_override_* fields carry the staff approval audit only; override_kind=commercial_quantity_not_rate. Trade evidence was not written.";
 
   const provenance = {
     ...override,

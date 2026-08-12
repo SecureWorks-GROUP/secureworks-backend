@@ -7107,8 +7107,8 @@ if (import.meta.main) serve(async (req: Request) => {
             docket_revision_id: body.docket_revision_id,
             post_release_disposition: body.post_release_disposition || null,
             created_by: authUser?.email || body.created_by || 'ses-standing-preparer',
-            // Captain-authorised commercial quantity/materials above sealed schedule.
-            // Leaves trade attendance evidence and the global AJS floor untouched.
+            // Captain/staff-authorised locked figure for this card. The stored
+            // trade evidence and global AJS floor remain untouched.
             commercial_quantity_override: body.commercial_quantity_override ?? null,
           },
         ))

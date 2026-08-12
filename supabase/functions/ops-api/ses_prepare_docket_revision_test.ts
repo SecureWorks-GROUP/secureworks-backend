@@ -708,7 +708,7 @@ Deno.test("raw PDF SHA-256 mismatch stays visible in a persisted review pack", a
   assertEquals(result.persisted, true);
 });
 
-Deno.test("named card persists to Docs Ready with canonical and curated findings as non-blocking caveats", async () => {
+Deno.test("named AJS card persists to Docs Ready with DraftPack, curated and optional-SWMS caveats", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJBR" &&
     candidate.family === "physical_makesafe"
@@ -733,6 +733,15 @@ Deno.test("named card persists to Docs Ready with canonical and curated findings
     true,
   );
   assertEquals(blockerCodes(result).includes("curated_source_missing"), true);
+  assertEquals(blockerCodes(result).includes("optional_swms_missing"), true);
+  assertEquals(result.envelope.v2.items.swms_artifact.state, "not_applicable");
+  assertEquals(
+    result.artifacts.some((artifact) =>
+      artifact.role === "swms_artifact" ||
+      artifact.role === "swms_generation_plan"
+    ),
+    false,
+  );
   assertEquals(
     result.artifacts.some((artifact) =>
       artifact.role === "supporting_report_pdf"
@@ -752,11 +761,12 @@ Deno.test("named card persists to Docs Ready with canonical and curated findings
     : [];
   assert(
     caveatCodes.includes(
-        "canonical_draft_pack_output_missing",
-      ) &&
+      "canonical_draft_pack_output_missing",
+    ) &&
       caveatCodes.includes(
         "curated_source_missing",
-      ),
+      ) &&
+      caveatCodes.includes("optional_swms_missing"),
   );
 });
 
@@ -1253,7 +1263,7 @@ Deno.test("the AJS/AJBR two-email shape reaches pre-Xero Docs Ready without a th
     assertEquals(result.envelope.pre_xero_docs_ready, true, builderKey);
     assertEquals(
       result.blockers.map((item) => item.reason_code),
-      [],
+      ["optional_swms_missing"],
       builderKey,
     );
     assertEquals(Object.keys(result.email_drafts).sort(), [
@@ -2001,7 +2011,11 @@ Deno.test("assessment triad produces an invoice-only draft at the sealed price",
   );
   assertEquals(result.invoice_proposal?.subtotal_ex_gst, 150);
   assertEquals(result.invoice_proposal?.total_inc_gst, 165);
-  assertEquals(result.envelope.v2.items.swms_artifact.state, "not_applicable");
+  assertEquals(result.envelope.v2.items.swms_requirement, {
+    state: "ready",
+    evidence: "rule:hrcw-requires-swms",
+  });
+  assertEquals(result.envelope.v2.items.swms_artifact.state, "blocked");
 
   const fenceOnly = fixtureInput(row);
   fenceOnly.cycle_facts.hours_and_materials = { fence_only: true };
@@ -2876,7 +2890,9 @@ Deno.test("Bertram AJS existing-fence pickets price through the sealed docket pr
     [],
   );
   assertEquals(result.state, "ready");
-  assertEquals(result.blockers.map((item) => item.reason_code), []);
+  assertEquals(result.blockers.map((item) => item.reason_code), [
+    "optional_swms_missing",
+  ]);
   // AJBR uses the combined report+invoice draft (Captain 2026-08-04).
   assertEquals(Object.keys(result.email_drafts).sort(), [
     "PHOTO_EMAIL_DRAFT",
@@ -2942,7 +2958,7 @@ Deno.test("AJS/AJBR repair and restoration price the existing-fence pickets like
       });
       assertEquals(
         result.blockers.map((item) => item.reason_code),
-        [],
+        ["optional_swms_missing"],
         label,
       );
       const proposal = result.invoice_proposal as Record<string, unknown>;
@@ -3475,7 +3491,7 @@ Deno.test("missing trade report blocks SWMS generation without instructing staff
   );
 });
 
-Deno.test("unsupported HRCW combination surfaces review for a sealed-template decision", async () => {
+Deno.test("AJS HRCW still requires SWMS and surfaces an unsupported-template caveat", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
     candidate.family === "physical_makesafe"
@@ -3503,6 +3519,21 @@ Deno.test("unsupported HRCW combination surfaces review for a sealed-template de
     blockerCodes(response.results[0]).includes(
       "swms_generation_template_unavailable",
     ),
+  );
+  assertEquals(
+    response.results[0].envelope.v2.items.swms_requirement,
+    {
+      state: "ready",
+      evidence: "rule:hrcw-requires-swms",
+    },
+  );
+  assertEquals(
+    response.results[0].envelope.v2.items.swms_artifact.state,
+    "blocked",
+  );
+  assertEquals(
+    blockerCodes(response.results[0]).includes("optional_swms_missing"),
+    false,
   );
   assertInvoiceHandoffCallable(response.results[0]);
 });
@@ -4274,6 +4305,7 @@ Deno.test("draft-only wall exposes no money/send dependency and emits an inert r
     authorise_invoice: false,
     close_job: false,
     portal_evidence: [],
+    review_assumption_codes: ["optional_swms_missing"],
   });
   // AJS emits one combined report+invoice draft, in plain builder-facing copy.
   assertStringIncludes(
