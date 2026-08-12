@@ -2410,6 +2410,7 @@ function validatePreXero(
   proposal: Record<string, unknown> | null,
   artifacts: SesArtifact[],
   reviewSpec: Record<string, unknown>,
+  allowPackCaveats = false,
 ): boolean {
   if (!proposal) return false;
   if (!artifacts.some((artifact) => artifact.role === "invoice_proposal")) {
@@ -2428,8 +2429,9 @@ function validatePreXero(
   if (
     reportMaterials.version !== "ses-review-pack-materials/v1" ||
     !report || typeof report !== "object" ||
-    (report as Record<string, unknown>).state !== "complete" ||
-    !(report as Record<string, unknown>).report ||
+    (!allowPackCaveats &&
+      ((report as Record<string, unknown>).state !== "complete" ||
+        !(report as Record<string, unknown>).report)) ||
     !artifacts.some((artifact) => artifact.role === "review_html")
   ) {
     return false;
@@ -2621,6 +2623,35 @@ function suppliedDraftPackOutput(
   }
 }
 
+/**
+ * A named-card prepare is the thin transport boundary for an operator-selected
+ * card. Semantic/evidence findings remain visible on the persisted pack, but
+ * they may only hold release: they do not refuse attachment, Docs Ready
+ * placement, or the invoice-obligation handoff. Batch preparation keeps its
+ * existing classification because no operator selected an exact card.
+ */
+function isNormalNamedCardPrepare(
+  request: SesPrepareRequest,
+  input: SesAssemblerInputV1,
+  row: SesFamilyMatrixRow | null,
+): boolean {
+  return request.selection.mode !== "board_batch" && row !== null &&
+    input.classification.workflow === "active" &&
+    input.classification.builder_key !== "SYNTHETIC";
+}
+
+function neutraliseNamedCardPreparationHardStops(
+  normalNamedCard: boolean,
+  blockers: SesBlocker[],
+): void {
+  if (!normalNamedCard) return;
+  for (const blocker of blockers) {
+    if (isHardSesPreparationIssue(blocker)) {
+      blocker.issue_class = "send_gate";
+    }
+  }
+}
+
 async function prepareOne(
   request: SesPrepareRequest,
   selection:
@@ -2808,6 +2839,7 @@ async function prepareOne(
     );
   }
   const row = matrix.ok ? matrix.row : null;
+  const normalNamedCard = isNormalNamedCardPrepare(request, input, row);
   if (
     matrix.ok &&
     (input.classification.report_only !== matrix.row.report_only ||
@@ -3945,13 +3977,10 @@ async function prepareOne(
         ),
     )
     : { proposal: null, blocker: null };
-  let reviewInvoiceProposal = (suppliedDraftPack.blocker &&
-      isHardSesPreparationIssue(suppliedDraftPack.blocker))
-    ? draftZeroInvoiceReview(input, row, suppliedDraftPack.blocker)
-    : priced.proposal ||
-      (row && priced.blocker
-        ? draftZeroInvoiceReview(input, row, priced.blocker)
-        : null);
+  let reviewInvoiceProposal = priced.proposal ||
+    (row && priced.blocker
+      ? draftZeroInvoiceReview(input, row, priced.blocker)
+      : null);
   if (!row) stagesMs.T6 = 0;
   if (priced.blocker) {
     // A decision made while the card is blocked for some OTHER pricing reason
@@ -4073,11 +4102,16 @@ async function prepareOne(
       ),
     );
   }
-  // Phase One never selects money while any business question remains. Keep
-  // the report visible and replace the commercial proposal with an inert
-  // draft-zero envelope; the typed category controls the later send/invoice
-  // fence, not whether the Captain can see the case.
-  const reviewPackBlocker = blockers[0];
+  const hadPreparationHardStop = blockers.some(isHardSesPreparationIssue);
+  neutraliseNamedCardPreparationHardStops(normalNamedCard, blockers);
+  const issueBuckets = classifySesPreparationIssues(blockers);
+  // Semantic and evidence findings remain visible caveats/send-holds on an
+  // explicitly selected card. Only a typed invoice gate may replace a valid
+  // commercial proposal with draft-zero; the Xero duplicate guard remains at
+  // create_ses_invoice_draft, where the unsafe write can be refused/reused.
+  const reviewPackBlocker = normalNamedCard
+    ? issueBuckets.hard_blockers[0] || issueBuckets.invoice_gates[0]
+    : blockers[0];
   if (reviewPackBlocker) {
     const replaceInvoiceProposal = reviewInvoiceProposal?.state !==
       "price_unresolved";
@@ -4122,7 +4156,6 @@ async function prepareOne(
       );
     }
   }
-  const issueBuckets = classifySesPreparationIssues(blockers);
   const hardBlockers = issueBuckets.hard_blockers;
   const reviewAssumptions = issueBuckets.review_assumptions;
   const sendGates = issueBuckets.send_gates;
@@ -4133,7 +4166,7 @@ async function prepareOne(
     ...sendGates,
     ...invoiceGates,
   ];
-  const drafts = row && !hardBlockers.length
+  const drafts = row && !hadPreparationHardStop && !hardBlockers.length
     ? buildEmailDrafts(
       input,
       row,
@@ -4372,6 +4405,7 @@ async function prepareOne(
     reviewInvoiceProposal,
     artifacts,
     reviewSpec,
+    normalNamedCard,
   );
   const envelope: SesDocketEnvelopeV3 = {
     version: SES_DOCKET_ENVELOPE_VERSION,
@@ -4496,7 +4530,7 @@ async function prepareOne(
   let committedAt = now().toISOString();
   if (!request.dry_run) {
     if (
-      deps.persist && !persistenceRefused &&
+      deps.persist && (!persistenceRefused || normalNamedCard) &&
       (!request.require_ready_for_persistence || baseRevision.state === "ready")
     ) {
       const persistedResult = await measure("T11", () =>
