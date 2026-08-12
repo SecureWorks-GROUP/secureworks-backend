@@ -217,6 +217,7 @@ import {
   type MakesafeDuplicateArchive,
 } from './makesafe_duplicate_survivor.ts'
 import {
+  comparePackMediaCreatedAtThenId,
   currentCycleReportMap as cycleEvidenceReportMap,
   filterMediaForCurrentCycle,
   hasReattendBoundary,
@@ -36421,7 +36422,8 @@ async function assertCurrentWikiSourceEvidence(
     client.from('job_media')
       .select(CURATED_BIND_JOB_MEDIA_COLUMNS)
       .eq('job_id', jobId)
-      .order('created_at'),
+      .order('created_at', { ascending: true, nullsFirst: false })
+      .order('id', { ascending: true }),
   ])
   if (reportsResponse.error || mediaResponse.error) {
     throw curatedBindError(
@@ -36509,36 +36511,12 @@ async function assertCurrentWikiSourceEvidence(
   // pages match the current-cycle media in created_at order exactly, and NOT
   // in id order.
   //
-  // Compare parsed instants, never the raw strings: Postgres omits the
-  // fractional part when microseconds are exactly zero, and ICU collation
-  // weights '.' below '+'/'Z', so a string compare inverts
-  // `…:01+00:00` against `…:01.123+00:00`. A missing or unparseable timestamp
-  // sorts LAST, matching PostgREST's nulls-last ordering.
-  //
-  // `Date.parse` resolves to whole milliseconds and floors anything finer, so
-  // two rows written microseconds apart inside one millisecond would compare
-  // equal and fall to the id tiebreak while Postgres orders them by true
-  // chronology. Carry the sub-millisecond digits as a second key so the
-  // comparator keeps the ordering the database read already applied.
-  const mediaInstant = (value: unknown): [number, number] => {
-    const raw = String(value ?? '').trim()
-    const parsed = Date.parse(raw)
-    if (Number.isNaN(parsed)) {
-      return [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY]
-    }
-    const fraction = /\.(\d+)/.exec(raw)?.[1] || ''
-    return [parsed, Number(`${fraction}000000`.slice(3, 6))]
-  }
-  const mediaOrder = (left: any, right: any) => {
-    const [leftInstant, leftSub] = mediaInstant(left?.created_at)
-    const [rightInstant, rightSub] = mediaInstant(right?.created_at)
-    if (leftInstant !== rightInstant) return leftInstant < rightInstant ? -1 : 1
-    if (leftSub !== rightSub) return leftSub < rightSub ? -1 : 1
-    return String(left?.id || '').localeCompare(String(right?.id || ''))
-  }
-  const applicable = currentMedia.filter(photoIsApplicable).slice().sort(mediaOrder)
+  // Compare parsed instants, never raw timestamp strings. The shared comparator
+  // also preserves Postgres microseconds and puts missing timestamps last.
+  const applicable = currentMedia.filter(photoIsApplicable).slice()
+    .sort(comparePackMediaCreatedAtThenId)
   const excluded = currentMedia.filter((item: any) => !photoIsApplicable(item))
-    .slice().sort(mediaOrder)
+    .slice().sort(comparePackMediaCreatedAtThenId)
   const applicableIds = applicable.map((item: any) => String(item.id || '').trim())
   const excludedIds = excluded.map((item: any) => String(item.id || '').trim())
   const photoEvidence = (validated.supplied as any).photo_evidence

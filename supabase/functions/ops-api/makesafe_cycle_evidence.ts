@@ -114,6 +114,38 @@ export function filterMediaForCurrentCycle(
 }
 
 /**
+ * Canonical photo order for SES pack/report inputs.
+ *
+ * `created_at` is the chronological authority. Missing or unparseable values
+ * sort after real instants, then `id` supplies the deterministic total order.
+ * Keep the sub-millisecond digits separate because `Date.parse` truncates them
+ * while Postgres timestamps retain microsecond precision.
+ */
+function packMediaInstant(value: unknown): [number, number] {
+  const raw = String(value ?? "").trim();
+  const parsed = Date.parse(raw);
+  if (Number.isNaN(parsed)) {
+    return [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+  }
+  const fraction = /\.(\d+)/.exec(raw)?.[1] || "";
+  return [parsed, Number(`${fraction}000000`.slice(3, 6))];
+}
+
+export function comparePackMediaCreatedAtThenId(left: any, right: any): number {
+  const [leftInstant, leftSubMillisecond] = packMediaInstant(left?.created_at);
+  const [rightInstant, rightSubMillisecond] = packMediaInstant(
+    right?.created_at,
+  );
+  if (leftInstant !== rightInstant) return leftInstant < rightInstant ? -1 : 1;
+  if (leftSubMillisecond !== rightSubMillisecond) {
+    return leftSubMillisecond < rightSubMillisecond ? -1 : 1;
+  }
+  const leftId = String(left?.id ?? "");
+  const rightId = String(right?.id ?? "");
+  return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+}
+
+/**
  * Same contract as index currentCycleReportMap: reattend → current cycle only;
  * legacy → first-match any cycle. Prefer attendance_cycle_id when present.
  */

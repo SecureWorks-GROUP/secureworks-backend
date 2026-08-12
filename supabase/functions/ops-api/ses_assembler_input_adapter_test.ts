@@ -21,6 +21,7 @@ import {
   summarizeSesPrepareResponseForHttp,
 } from "./ses_assembler_input_adapter.ts";
 import {
+  canonicalSesJson,
   SES_ASSEMBLER_VERSION,
   SES_INPUT_CONTRACT_VERSION,
   sesSha256,
@@ -48,6 +49,10 @@ import {
   type SesPortalCaptureRevisionContent,
   sesPortalCaptureRevisionHash,
 } from "./ses_portal_capture_contract.ts";
+import {
+  PACK_PHOTO_ORDER_EXPECTED_IDS,
+  PACK_PHOTO_ORDER_MEDIA,
+} from "./ses_pack_photo_order_test_fixture.ts";
 
 function snapshot(): SesAssemblerLiveSnapshot {
   const { captured_from: _capturedFrom, ...liveSnapshot } = structuredClone(
@@ -367,6 +372,40 @@ Deno.test(
       "job_document:205d0d18-a40f-4617-9e41-0fa0934a112b",
     ]);
     assertEquals(Object.hasOwn(input, "sibling_bundle_evidence"), false);
+  },
+);
+
+Deno.test(
+  "assembler orders pack photos by created_at then id with nulls last",
+  () => {
+    const live = snapshot();
+    live.job.metadata.makesafe_job_family = "general_makesafe";
+    live.detail!.report_type = null;
+    live.detail!.external_links = [];
+    live.media = PACK_PHOTO_ORDER_MEDIA.map((row) => ({
+      ...row,
+      job_id: live.job.id,
+      attendance_cycle_id: live.detail!.attendance_cycle_id,
+      cycle_attribution: "bound",
+    }));
+
+    const photos = buildSesAssemblerInput(live).cycle_facts.photos;
+    assertEquals(
+      photos.map((photo) => photo.id),
+      [...PACK_PHOTO_ORDER_EXPECTED_IDS],
+    );
+    assertEquals(
+      photos.map((photo) => photo.order),
+      PACK_PHOTO_ORDER_EXPECTED_IDS.map((_, index) => index + 1),
+    );
+    assertEquals(
+      canonicalSesJson(photos.map((photo) => photo.id)) ===
+        canonicalSesJson(
+          PACK_PHOTO_ORDER_MEDIA.map((row) => row.id).toSorted(),
+        ),
+      false,
+      "chronological order must not collapse to lexicographic photo ID order",
+    );
   },
 );
 
