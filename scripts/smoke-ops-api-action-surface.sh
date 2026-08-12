@@ -212,8 +212,8 @@ else
 
     case "$policy" in
       jwt-fail-closed)
-        if printf '%s' "$body" | grep -Eqi '"error"[[:space:]]*:[[:space:]]*"Login required"'; then
-          record_pass "ops-api action '${action}' recognised and refused at authTrade"
+        if printf '%s' "$body" | grep -Eqi 'user_jwt_required|A signed-in Supabase user session is required\.|Login required'; then
+          record_pass "ops-api action '${action}' recognised and refused at authentication"
         else
           record_fail "ops-api drift: JWT action '${action}' did not fail closed at authentication"
           drift=$((drift + 1))
