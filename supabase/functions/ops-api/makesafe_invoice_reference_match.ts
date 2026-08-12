@@ -4,12 +4,11 @@
 // ---------------
 // An SES card's close-out invoice frequently exists in the Xero mirror while
 // `xero_invoices.job_id` is still null, so the C1 evidence ruler reads the card
-// as having no invoice at all. The obvious repair - backfill the foreign key -
-// is refused by design: `linked` is one of the verbs sealed by the write-once
-// SES money fence (`_shared/sealed_ses_money_fence.ts`), and every SES board
-// card carries an explicit `ses_money_sealed_at`. The Captain's 2026-08-01
-// ruling was to leave the money mirror alone and let the RULER see the evidence
-// instead. Full reasoning:
+// as having no invoice at all. This pure fallback was introduced while relinks
+// were blocked by the former SES money seal. The Captain made that classifier
+// inert on 2026-08-13, but historical unlinked rows still need the same unique,
+// read-only evidence projection until normal relinking catches them. Earlier
+// reasoning:
 // `docs/evidence/ses-c3-invoice-link-seal-conflict-2026-08-01.md`.
 //
 // This module is therefore pure, read-only and write-free by construction: it

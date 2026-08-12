@@ -1,6 +1,5 @@
 // deno-lint-ignore-file no-explicit-any
 import {
-  inspectSealedSesJob,
   invoiceLinkRequiredRefusal,
   sealedSesFenceCheckFailedRefusal,
 } from "../_shared/sealed_ses_money_fence.ts";
@@ -47,21 +46,6 @@ export function targetSesInvoiceVoidStatus(
           "Only a current DRAFT, SUBMITTED, or AUTHORISED invoice can be voided. Paid and already-terminal invoices are immutable.",
         ),
       );
-  }
-}
-
-async function inspectVoidJob(client: any, jobId: string) {
-  try {
-    return await inspectSealedSesJob(client, jobId);
-  } catch (error) {
-    throw new SesActionError(
-      503,
-      sealedSesFenceCheckFailedRefusal(
-        "prepare_ses_invoice_void_revision",
-        (error as Error).message,
-        { job_id: jobId },
-      ),
-    );
   }
 }
 
@@ -118,13 +102,15 @@ export async function prepareSesInvoiceVoidRevisionAction(
       }),
     );
   }
-  const inspection = await inspectVoidJob(client, invoice.data.job_id);
-  if (!inspection.sealed) {
+  if (
+    !invoice.data.invoice_obligation_revision_id &&
+    !invoice.data.ses_external_token
+  ) {
     throw new SesActionError(
       409,
       sesRefusal(
-        "ses_invoice_void_requires_sealed_job",
-        "This invoice belongs to a non-SES job; use the ordinary invoice void workflow.",
+        "ses_invoice_void_requires_binding",
+        "This invoice has no explicit SES obligation or external-effect binding; use the ordinary invoice void workflow.",
       ),
     );
   }
@@ -264,21 +250,6 @@ export async function executeSesInvoiceVoidRevisionAction(
       state: "refused",
       fact: "The approved SES invoice void revision no longer exists.",
     });
-  }
-  try {
-    const inspection = await inspectSealedSesJob(client, revision.data.job_id);
-    if (!inspection.sealed) {
-      throw new Error("the authoritative job is no longer sealed");
-    }
-  } catch (error) {
-    throw new SesActionError(
-      503,
-      sealedSesFenceCheckFailedRefusal(
-        "execute_ses_invoice_void_revision",
-        (error as Error).message,
-        { job_id: revision.data.job_id },
-      ),
-    );
   }
   const reserved = await client.rpc("begin_ses_invoice_void_execution_v1", {
     p_void_revision_id: revision.data.id,

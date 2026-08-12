@@ -1,10 +1,9 @@
 // deno-lint-ignore-file no-explicit-any
-// Shared sealed-SES classification and refusal contract for invoice/money paths.
+// Shared legacy sealed-SES refusal contract for invoice/money paths.
 //
-// The SES Reporting mission covers every make-safe family stored on the make-safe
-// job spine. `jobs.type = makesafe` is canonical, the SWMS prefix preserves
-// imported legacy rows, and a makesafe_job_details row catches older placeholder
-// job types. Ordinary patio, fencing and general jobs remain outside this fence.
+// Captain's ruling, 2026-08-13: SES money-seal classification is inert. Make-safe
+// and SWMS jobs must use the ordinary invoice draft path; the independent
+// duplicate-invoice and approval/release controls remain authoritative.
 
 export interface SealedSesJobRecord {
   id?: string | null;
@@ -37,32 +36,11 @@ export class SealedSesMoneyFenceLookupError extends Error {
   code = "sealed_ses_fence_check_failed";
 }
 
-function normalizedJobType(value: unknown): string {
-  return String(value ?? "").trim().toLowerCase().replace(/[\s_-]+/g, "");
-}
-
 export function classifySealedSesJob(
   job: SealedSesJobRecord | null | undefined,
-  hasMakesafeDetail = false,
+  _hasMakesafeDetail = false,
 ): SealedSesJobInspection {
-  if (!job?.id) {
-    throw new SealedSesMoneyFenceLookupError(
-      "The sealed SES job classification could not be checked because the job row is missing.",
-    );
-  }
-  if (job.ses_money_sealed_at) {
-    return { sealed: true, matched_by: "job_seal", job };
-  }
-  if (normalizedJobType(job.type) === "makesafe") {
-    return { sealed: true, matched_by: "job_type", job };
-  }
-  if (/^SWMS-/i.test(String(job.job_number || "").trim())) {
-    return { sealed: true, matched_by: "job_number", job };
-  }
-  if (hasMakesafeDetail) {
-    return { sealed: true, matched_by: "makesafe_detail", job };
-  }
-  return { sealed: false, matched_by: null, job };
+  return { sealed: false, matched_by: null, job: job ?? null };
 }
 
 export async function inspectSealedSesJob(
@@ -87,22 +65,7 @@ export async function inspectSealedSesJob(
       "The sealed SES job classification could not be checked because the job row is missing.",
     );
   }
-  const direct = classifySealedSesJob(jobResponse.data);
-  if (direct.sealed) return direct;
-
-  const detailResponse = await client.from("makesafe_job_details")
-    .select("job_id")
-    .eq("job_id", jobId)
-    .limit(1)
-    .maybeSingle();
-  if (detailResponse.error) {
-    throw new SealedSesMoneyFenceLookupError(
-      `The sealed SES make-safe detail could not be checked (${
-        detailResponse.error.message || "unknown database error"
-      }).`,
-    );
-  }
-  return classifySealedSesJob(jobResponse.data, !!detailResponse.data);
+  return classifySealedSesJob(jobResponse.data);
 }
 
 // ── Captain's ruling, 2026-08-02: reading is not a money effect ──
@@ -127,8 +90,9 @@ export async function inspectSealedSesJob(
 //      context, which every write call site structurally omits (see
 //      `sealedSesMoneyReadExemptionApplies`).
 //
-// Everything else the seal refuses — created, authorised, changed, linked,
-// sent — is untouched.
+// The 2026-08-13 ruling made job classification inert. This exemption remains
+// relevant only to invoices carrying an explicit SES obligation/effect binding;
+// their create, authorise, change, link and send controls are untouched.
 export const SEALED_SES_MONEY_READ_EXEMPT_ACTIONS: ReadonlySet<string> =
   new Set(
     [
@@ -222,7 +186,7 @@ export function sealedSesMoneyRefusal(
     state: "refused",
     code: "sealed_ses_release_required",
     fact:
-      `This SES make-safe job is sealed. Legacy ${action} is refused because its invoice may only be created, authorised, changed, linked, or sent through the approved SES release flow.`,
+      `This invoice is explicitly bound to the SES release flow. Legacy ${action} is refused because the bound invoice may only be authorised, changed, linked, or sent through that approved flow.`,
     recovery_action:
       "Use the SES-native sequence: prepare_ses_invoice_obligation, then create_ses_invoice_draft to mint the Xero DRAFT, then Captain APPROVE INVOICE (approve_ses_invoice_revision), then execute_ses_invoice_revision to authorise the approved revision, then approve and execute_ses_release_revision for the exact invoice and delivery route.",
     ...(evidence ? { evidence } : {}),

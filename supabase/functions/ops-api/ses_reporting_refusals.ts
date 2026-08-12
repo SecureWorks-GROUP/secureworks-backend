@@ -73,8 +73,8 @@ const FACTS = {
     "The invoice status cannot be changed through the SES-native void workflow.",
   ses_invoice_void_requires_accrec:
     "The SES-native void workflow applies only to sales invoices.",
-  ses_invoice_void_requires_sealed_job:
-    "The invoice is not bound to an authoritatively sealed SES job.",
+  ses_invoice_void_requires_binding:
+    "The invoice has no explicit SES obligation or external-effect binding.",
   photo_mail_volume_exceeds_graph_limit:
     "The photo pack exceeds the documented Microsoft Graph / Exchange mail size ceiling for a single message, so the builder photo email is refused before any Graph call. Photos are never culled or downscaled to fit.",
 } as const;

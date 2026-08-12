@@ -179,38 +179,41 @@ Deno.test("create choke fences F9 email and resolves duplicates before Xero", ()
   }
 });
 
-Deno.test("send-quote branded invoice email refuses sealed SES before Resend", () => {
+Deno.test("send-quote preserves explicit SES binding refusal before Resend", () => {
   const start = SEND_QUOTE.indexOf("if (path === 'send-invoice'");
   const invoiceLink = SEND_QUOTE.indexOf(".from('xero_invoices')", start);
-  const fence = SEND_QUOTE.indexOf(
-    "inspectSealedSesJob(sb, invoiceRecord.job_id)",
+  const binding = SEND_QUOTE.indexOf(
+    "validateBrandedInvoiceDeliveryBinding(",
     start,
-  );
-  const refusal = SEND_QUOTE.indexOf(
-    "sealedSesMoneyRefusal('send-quote/send-invoice'",
-    fence,
   );
   const provider = SEND_QUOTE.indexOf(
     "fetch('https://api.resend.com/emails'",
     start,
   );
   assert(
-    start >= 0 && invoiceLink > start && fence > invoiceLink &&
-      refusal > fence && provider > refusal,
+    start >= 0 && invoiceLink > start && binding > invoiceLink &&
+      provider > binding,
   );
   assertStringIncludes(FENCE, "sealed_ses_fence_check_failed");
   assertStringIncludes(FENCE, "invoice_link_required");
 });
 
-Deno.test("reporting auto-match cannot become an F8 relink path", () => {
+Deno.test("reporting auto-match preserves explicit SES binding refusal", () => {
   const start = REPORTING.indexOf("async function matchInvoicesToJobs(");
-  const details = REPORTING.indexOf(
-    "fetchAll(sb, 'makesafe_job_details'",
+  const obligation = REPORTING.indexOf(
+    "plan.invoice.invoice_obligation_revision_id",
     start,
   );
-  const fence = REPORTING.indexOf("classifySealedSesJob(", start);
+  const token = REPORTING.indexOf("plan.invoice.ses_external_token", obligation);
+  const refusal = REPORTING.indexOf(
+    "sealedSesMoneyRefusal('reporting-api/match_invoices'",
+    token,
+  );
   const update = REPORTING.indexOf(".update({ job_id: plan.job.id })", start);
-  assert(start >= 0 && details > start && fence > details && update > fence);
+  assert(
+    start >= 0 && obligation > start && token > obligation &&
+      refusal > token && update > refusal,
+  );
   assertStringIncludes(REPORTING, "ReportingApiRefusalError");
   assertStringIncludes(
     REPORTING,

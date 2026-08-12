@@ -327,7 +327,7 @@ Deno.test("Strategy 2: genuine empty result is not an error (no false log)", asy
   }
 });
 
-Deno.test("Strategy 2: sealed SES ACCREC match returns a typed refusal without linking", async () => {
+Deno.test("Strategy 2: SWMS ACCREC match auto-links after seal removal", async () => {
   const { client, updates } = makeClient({
     unlinked: UNLINKED,
     jobsByContact: {
@@ -345,16 +345,12 @@ Deno.test("Strategy 2: sealed SES ACCREC match returns a typed refusal without l
 
   const result = await matchUnlinkedInvoices(client);
   const refusals = result.refusals ?? [];
-  assertEquals(result.matched, 0);
-  assertEquals(result.refused, 1);
-  assertEquals(refusals[0]?.code, "sealed_ses_release_required");
-  assertStringIncludes(
-    refusals[0]?.fact || "",
-    "approved SES release flow",
-  );
+  assertEquals(result.matched, 1);
+  assertEquals(result.refused, 0);
+  assertEquals(refusals, []);
   assertEquals(
     updates.filter((update) => update.table === "xero_invoices").length,
-    0,
+    1,
   );
 });
 
@@ -377,7 +373,7 @@ Deno.test("ACCPAY remains outside the sealed SES sales-invoice link fence", asyn
   assertEquals(refusal, null);
 });
 
-Deno.test("unknown invoice type fails closed when the link target is sealed SES", async () => {
+Deno.test("legacy SWMS target classification is inert for unknown invoice types", async () => {
   const refusal = await sealedSesXeroLinkRefusal(
     {
       from: () => {
@@ -391,6 +387,22 @@ Deno.test("unknown invoice type fails closed when the link target is sealed SES"
     },
     { id: "job-ses-1", job_number: "SWMS-261055", type: "makesafe" },
     "test unknown invoice type link",
+  );
+  assertEquals(refusal, null);
+});
+
+Deno.test("explicit SES invoice bindings still refuse auto-linking", async () => {
+  const refusal = await sealedSesXeroLinkRefusal(
+    {},
+    {
+      xero_invoice_id: "ses-bound-1",
+      invoice_number: "INV-SES",
+      invoice_type: "ACCREC",
+      invoice_obligation_revision_id:
+        "20000000-0000-4000-8000-000000000002",
+    },
+    { id: "job-ses-1", job_number: "SWMS-261055", type: "makesafe" },
+    "test SES-bound invoice link",
   );
   assertEquals(refusal?.code, "sealed_ses_release_required");
 });

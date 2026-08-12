@@ -17,7 +17,6 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import {
-  classifySealedSesJob,
   sealedSesMoneyRefusal,
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
@@ -2301,7 +2300,7 @@ async function matchInvoicesToJobs(sb: any) {
   // Get all jobs with contact details + job_number for reference matching
   const { data: jobs, error: jobErr } = await sb
     .from('jobs')
-    .select('id, client_name, client_email, client_phone, ghl_contact_id, job_number, type, ses_money_sealed_at, ses_money_seal_source')
+    .select('id, client_name, client_email, client_phone, ghl_contact_id, job_number, type')
     .eq('org_id', DEFAULT_ORG_ID)
     .limit(5000)
 
@@ -2431,35 +2430,12 @@ async function matchInvoicesToJobs(sb: any) {
     }
   }
 
-  const makesafeDetailJobIds = new Set<string>()
-  const candidateJobIds = [...new Set(
-    plannedMatches.map((plan) => String(plan.job.id)),
-  )]
-  for (let offset = 0; offset < candidateJobIds.length; offset += 100) {
-    const jobIds = candidateJobIds.slice(offset, offset + 100)
-    let details: any[]
-    try {
-      details = await fetchAll(sb, 'makesafe_job_details', 'job_id', {
-        _in: { job_id: jobIds },
-      })
-    } catch (error) {
-      throw new Error(
-        `The sealed SES make-safe detail could not be checked before invoice matching (${(error as Error).message || 'unknown database error'}).`,
-      )
-    }
-    for (const row of details || []) makesafeDetailJobIds.add(String(row.job_id))
-  }
-
   const allowedMatches = plannedMatches.filter((plan) => {
     if (
       String(plan.invoice.invoice_type || '').toUpperCase() === 'ACCREC' &&
       (
         plan.invoice.invoice_obligation_revision_id ||
-        plan.invoice.ses_external_token ||
-        classifySealedSesJob(
-          plan.job,
-          makesafeDetailJobIds.has(String(plan.job.id)),
-        ).sealed
+        plan.invoice.ses_external_token
       )
     ) {
       refusals.push(sealedSesMoneyRefusal('reporting-api/match_invoices', {
