@@ -19025,7 +19025,7 @@ async function reconcileMakesafeReportBindingWithAllocation(
     )
   }
 
-  // Only a genuine trade relationship may satisfy report attribution. Observer,
+  // Only a genuine trade relationship may satisfy report completion. Observer,
   // ghost, declined and open-pool placeholders are retained for their own audit
   // purpose but cannot suppress or replace the canonical reporting binding.
   const rows = (exactRows || []).filter((row: any) => isGenuineTradeAssignment(row))
@@ -19045,7 +19045,7 @@ async function reconcileMakesafeReportBindingWithAllocation(
   )
 
   // Explicit allocation owns the assignment ledger. If it races the non-lead
-  // report-provenance row, retain the real scheduled allocation and remove only
+  // completing-trade row, retain the real scheduled allocation and remove only
   // the exact canonical row this seam is allowed to create. Both writers call
   // this after their committed insert, so whichever commits second observes and
   // resolves the pair without a new database constraint.
@@ -19126,7 +19126,8 @@ async function ensureMakesafeReportSubmitterAssignment(
       is_lead: false,
       status: 'complete',
       completed_at: input.completedAt,
-      notes: `${MAKESAFE_REPORT_BINDING_NOTE} (cycle ${input.cycleNumber}); not an intake allocation`,
+      notes:
+        `${MAKESAFE_REPORT_BINDING_NOTE} as completing trade (cycle ${input.cycleNumber}); not an intake allocation`,
     })
     .select('id, job_id, user_id, status, attendance_cycle_id, cycle_attribution')
     .single()
@@ -19547,6 +19548,7 @@ async function submitMakesafeReport(
             auto_assignment_id: autoAssignment?.id || null,
             auto_assigned_submitter: !!autoAssignment,
             assignment_attribution: autoAssignment ? 'final_makesafe_report_submitter' : null,
+            auto_assigned_at: autoAssignment ? syncAt : null,
             cycle_number: currentCycle,
             attendance_cycle_id: attendanceCycle.id,
           },

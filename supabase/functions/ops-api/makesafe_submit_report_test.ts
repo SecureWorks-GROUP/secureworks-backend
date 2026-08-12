@@ -514,7 +514,7 @@ Deno.test("trade completion handoff uses persisted roof mode and fails closed wh
   );
 });
 
-Deno.test("submit_makesafe_report binds an unassigned submitter as non-lead reporting provenance and leaves declared board behavior unchanged", async () => {
+Deno.test("submit_makesafe_report auto-assigns an unassigned submitter as the current-cycle completing trade and audits when", async () => {
   const { client, rows } = makeSubmitClient(baseRows());
 
   const res: any = await _submitMakesafeReportForTest(client, validBody());
@@ -546,7 +546,7 @@ Deno.test("submit_makesafe_report binds an unassigned submitter as non-lead repo
   assertEquals(rows.job_assignments[0].cycle_attribution, "bound");
   assertStringIncludes(
     rows.job_assignments[0].notes,
-    "Bound from final MakeSafe report submission",
+    "Bound from final MakeSafe report submission as completing trade",
   );
   assertStringIncludes(
     rows.job_assignments[0].notes,
@@ -562,6 +562,10 @@ Deno.test("submit_makesafe_report binds an unassigned submitter as non-lead repo
   assertEquals(rows.job_events[0].id, rows.job_service_reports[0].id);
   assertEquals(rows.job_events[0].event_type, "makesafe_report_submitted");
   assertEquals(rows.job_events[0].detail_json.auto_assigned_submitter, true);
+  assertEquals(
+    rows.job_events[0].detail_json.auto_assigned_at,
+    rows.makesafe_job_details[0].report_received_at,
+  );
 
   const pipeline: any = await _makesafePipelineForTest(
     client,
@@ -605,6 +609,51 @@ Deno.test("submit_makesafe_report does not let an unbound assignment suppress th
   );
   assertEquals(rows.job_assignments[1].cycle_attribution, "bound");
   assertEquals(res.board_sync.auto_assignment.user_id, "trade-1");
+  assertEquals(rows.job_events[0].detail_json.auto_assigned_submitter, true);
+});
+
+Deno.test("submit_makesafe_report preserves a different current-cycle assignment while attaching the submitter", async () => {
+  const { client, rows } = makeSubmitClient(baseRows({
+    makesafe_job_details: [{
+      job_id: "job-1",
+      substatus: "waiting_on_trade_report",
+      report_received_at: null,
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+    makesafe_attendance_cycles: [{
+      id: "cycle-1",
+      job_id: "job-1",
+      cycle_number: 1,
+    }],
+    job_assignments: [{
+      id: "assignment-existing",
+      job_id: "job-1",
+      user_id: "trade-existing",
+      status: "scheduled",
+      role: "lead_installer",
+      attendance_cycle_id: "cycle-1",
+      cycle_attribution: "bound",
+    }],
+  }));
+
+  const result: any = await _submitMakesafeReportForTest(client, validBody());
+
+  assertEquals(rows.job_assignments.length, 2);
+  const existing = rows.job_assignments.find((row) =>
+    row.id === "assignment-existing"
+  );
+  assert(existing);
+  assertEquals(existing.user_id, "trade-existing");
+  assertEquals(existing.attendance_cycle_id, "cycle-1");
+  const completingTrade = rows.job_assignments.find((row) =>
+    row.user_id === "trade-1"
+  );
+  assert(completingTrade);
+  assertEquals(completingTrade.attendance_cycle_id, "cycle-1");
+  assertEquals(completingTrade.status, "complete");
+  assertEquals(result.board_sync.auto_assignment.id, completingTrade.id);
   assertEquals(rows.job_events[0].detail_json.auto_assigned_submitter, true);
 });
 
@@ -1243,6 +1292,22 @@ Deno.test("submit_makesafe_report blocks a genuine duplicate once the board has 
     Error,
     "Report already submitted",
   );
+});
+
+Deno.test("submit_makesafe_report second submit creates no duplicate assignment or audit event", async () => {
+  const { client, rows } = makeSubmitClient(baseRows());
+
+  await _submitMakesafeReportForTest(client, validBody());
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_events.length, 1);
+
+  await assertRejects(
+    () => _submitMakesafeReportForTest(client, validBody()),
+    Error,
+    "Report already submitted",
+  );
+  assertEquals(rows.job_assignments.length, 1);
+  assertEquals(rows.job_events.length, 1);
 });
 
 Deno.test("submit_makesafe_report resumes a submitted report stuck before board sync", async () => {
