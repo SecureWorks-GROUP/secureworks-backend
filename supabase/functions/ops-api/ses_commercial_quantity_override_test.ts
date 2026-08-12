@@ -13,6 +13,7 @@ import {
 } from "./ses_commercial_quantity_override.ts";
 import {
   prepareSesInvoiceObligationAction,
+  SesActionError,
   type SesSupabaseClient,
 } from "./ses_reporting_actions.ts";
 
@@ -62,6 +63,112 @@ const AJBR_70487 = {
   ],
 };
 
+const STAFF_LOCKED_120 = {
+  schema: SES_COMMERCIAL_QUANTITY_OVERRIDE_SCHEMA,
+  authorised_by: "Operations staff",
+  authorised_at: "2026-08-13T00:00:00.000Z",
+  decision_key: "kelmscott-style-locked-120-v1",
+  reason:
+    "Staff locked the named card at $120 ex-GST; the AJS two-hour floor remains unchanged for cards without an override.",
+  trade_reported_hours_per_trade: 1.5,
+  sealed_billable_hours_floor: 2,
+  lines: [{
+    line_kind: "labour",
+    description: "AJBR-LOCKED - make-safe attendance - locked figure",
+    quantity: 1.5,
+    unit_price_ex_gst: 80,
+  }],
+};
+
+function missingPricingDocket() {
+  return {
+    id: "40000000-0000-4000-8000-00000000d120",
+    job_id: "6006c332-3bb5-473e-beda-bef627172120",
+    stage: "pre_xero",
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    attendance_cycle_ids: ["20000000-0000-4000-8000-000000000120"],
+    current_attendance_cycle_id: "20000000-0000-4000-8000-000000000120",
+    envelope: { v2: { routing: { builder: "aj" } } },
+    review_spec: {
+      cards: [{
+        exception_review_codes: [],
+        invoice_gate_codes: ["pricing_evidence_missing"],
+      }],
+    },
+    local_invoice_proposal: {
+      version: "ses-draft-zero-invoice-review/v1",
+      state: "price_unresolved",
+      reference: "AJBR-LOCKED",
+      invoice_basis: "ajs_labour_materials",
+      line_items: [],
+      subtotal_ex_gst: null,
+      total_inc_gst: null,
+      invoice_gates: ["pricing_evidence_missing"],
+    },
+  };
+}
+
+function preparationClient(docket: Record<string, unknown>) {
+  let committedRevision: any = null;
+  const client = {
+    from(table: string) {
+      const response = () => {
+        if (table === "makesafe_docket_revisions") {
+          return { data: docket, error: null };
+        }
+        if (table === "makesafe_invoice_obligation_revisions_current") {
+          return { data: null, error: null };
+        }
+        if (table === "xero_invoices") {
+          return { data: [], error: null };
+        }
+        return { data: null, error: null };
+      };
+      const query: any = {
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        in() {
+          return query;
+        },
+        not() {
+          return query;
+        },
+        or() {
+          return query;
+        },
+        order() {
+          return query;
+        },
+        limit() {
+          return query;
+        },
+        maybeSingle() {
+          return Promise.resolve(response());
+        },
+        then(resolve: (value: unknown) => unknown) {
+          return Promise.resolve(response()).then(resolve);
+        },
+      };
+      return query;
+    },
+    async rpc(name: string, args: any) {
+      if (name === "commit_ses_invoice_obligation_revision_v1") {
+        committedRevision = args.p_revision;
+        return { data: { ok: true, state: "proposed" }, error: null };
+      }
+      return { data: null, error: { message: `unexpected rpc ${name}` } };
+    },
+  } as unknown as SesSupabaseClient;
+  return {
+    client,
+    committedRevision: () => committedRevision,
+  };
+}
+
 Deno.test("commercial override parses Captain AJBR-70488 ceiling targets", () => {
   const parsed = parseSesCommercialQuantityOverride(AJBR_70488);
   assertEquals(parsed.trade_reported_hours_per_trade, 2);
@@ -70,6 +177,64 @@ Deno.test("commercial override parses Captain AJBR-70488 ceiling targets", () =>
   assertEquals(parsed.lines[0].line_kind, "labour");
   assertEquals(parsed.lines[0].quantity, 2.5);
   assertEquals(parsed.lines[1].unit_price_ex_gst, 45);
+});
+
+Deno.test("staff-locked $120 figure overrides a missing-pricing hold and the AJS floor", async () => {
+  const docket = missingPricingDocket();
+  const fixture = preparationClient(docket);
+  const result = await prepareSesInvoiceObligationAction(
+    fixture.client,
+    { mode: "api_key", user: null },
+    {
+      org_id: "00000000-0000-0000-0000-000000000001",
+      job_id: docket.job_id,
+      docket_revision_id: docket.id,
+      created_by: "fm/locked-figure-test",
+      commercial_quantity_override: STAFF_LOCKED_120,
+    },
+  );
+
+  assertEquals(result.state, "prepared");
+  assertEquals(
+    result.proposal.pricing_disposition,
+    "priced_with_line_override",
+  );
+  assertEquals(result.proposal.totals, { ex: 120, inc: 132 });
+  assertEquals(result.proposal.lines.length, 1);
+  assertEquals(result.proposal.lines[0].quantity, 1.5);
+  assertEquals(result.proposal.lines[0].unit_price, 80);
+  assertEquals(result.proposal.lines[0].rate_override_by, "Operations staff");
+  assertEquals(
+    (result.proposal as any).commercial_quantity_override.authorised_by,
+    "Operations staff",
+  );
+  assertEquals(
+    fixture.committedRevision().proposal.totals,
+    { ex: 120, inc: 132 },
+  );
+  assertEquals(docket.local_invoice_proposal.state, "price_unresolved");
+});
+
+Deno.test("missing pricing without a locked figure still refuses before money", async () => {
+  const docket = missingPricingDocket();
+  const fixture = preparationClient(docket);
+  const error = await assertRejects(
+    () =>
+      prepareSesInvoiceObligationAction(
+        fixture.client,
+        { mode: "api_key", user: null },
+        {
+          org_id: "00000000-0000-0000-0000-000000000001",
+          job_id: docket.job_id,
+          docket_revision_id: docket.id,
+          created_by: "fm/no-locked-figure-test",
+        },
+      ),
+    SesActionError,
+  );
+  assertEquals(error.status, 409);
+  assertStringIncludes(error.message, "unresolved invoice gates");
+  assertEquals(fixture.committedRevision(), null);
 });
 
 Deno.test("commercial override builds separate labour and materials lines at sealed rate", () => {
@@ -195,7 +360,8 @@ Deno.test("commercial override accepts Captain labour_rate_override for this car
     "commercial_rate_override",
   );
   assertEquals(
-    (lines[0].evidence as any).labour_rate_override.authorised_unit_price_ex_gst,
+    (lines[0].evidence as any).labour_rate_override
+      .authorised_unit_price_ex_gst,
     100,
   );
   assertEquals(
@@ -245,7 +411,7 @@ Deno.test("commercial rate override refuses when sealed stamp mismatches U4 seal
   );
 });
 
-Deno.test("commercial override refuses missing Captain provenance", () => {
+Deno.test("commercial override refuses missing staff provenance", () => {
   assertRejects(
     async () => {
       parseSesCommercialQuantityOverride({
@@ -288,63 +454,10 @@ Deno.test("prepare_ses_invoice_obligation applies commercial override without to
       total_inc_gst: 176,
     },
   };
-  let committedRevision: any = null;
-  const client = {
-    from(table: string) {
-      const response = () => {
-        if (table === "makesafe_docket_revisions") {
-          return { data: docket, error: null };
-        }
-        if (table === "makesafe_invoice_obligation_revisions_current") {
-          return { data: null, error: null };
-        }
-        if (table === "xero_invoices") {
-          return { data: [], error: null };
-        }
-        return { data: null, error: null };
-      };
-      const query: any = {
-        select() {
-          return query;
-        },
-        eq() {
-          return query;
-        },
-        in() {
-          return query;
-        },
-        not() {
-          return query;
-        },
-        or() {
-          return query;
-        },
-        order() {
-          return query;
-        },
-        limit() {
-          return query;
-        },
-        maybeSingle() {
-          return Promise.resolve(response());
-        },
-        then(resolve: (v: unknown) => unknown) {
-          return Promise.resolve(response()).then(resolve);
-        },
-      };
-      return query;
-    },
-    async rpc(name: string, args: any) {
-      if (name === "commit_ses_invoice_obligation_revision_v1") {
-        committedRevision = args.p_revision;
-        return { data: { ok: true, state: "proposed" }, error: null };
-      }
-      return { data: null, error: { message: `unexpected rpc ${name}` } };
-    },
-  } as unknown as SesSupabaseClient;
+  const fixture = preparationClient(docket);
 
   const result = await prepareSesInvoiceObligationAction(
-    client,
+    fixture.client,
     { mode: "api_key", user: null },
     {
       org_id: "00000000-0000-0000-0000-000000000001",
@@ -356,7 +469,10 @@ Deno.test("prepare_ses_invoice_obligation applies commercial override without to
   );
 
   assertEquals(result.state, "prepared");
-  assertEquals(result.proposal.pricing_disposition, "priced_with_line_override");
+  assertEquals(
+    result.proposal.pricing_disposition,
+    "priced_with_line_override",
+  );
   assertEquals(result.proposal.totals, { ex: 245, inc: 269.5 });
   assertEquals(result.proposal.lines.length, 2);
   assertEquals(result.proposal.lines[0].quantity, 2.5);
@@ -381,7 +497,8 @@ Deno.test("prepare_ses_invoice_obligation applies commercial override without to
     2,
   );
   assertEquals(
-    committedRevision.proposal.commercial_quantity_override.decision_key,
+    fixture.committedRevision().proposal.commercial_quantity_override
+      .decision_key,
     "ajbr-remint-25h-commercial-v1",
   );
   assertEquals(

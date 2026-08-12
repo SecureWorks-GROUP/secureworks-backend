@@ -167,9 +167,14 @@ function draftGateway(
     reference: string;
     total: number;
   }>,
-): SesXeroGateway & { createCalls: number; authoriseCalls: number } {
+): SesXeroGateway & {
+  createCalls: number;
+  authoriseCalls: number;
+  lastProposal: any;
+} {
   let createCalls = 0;
   let authoriseCalls = 0;
+  let lastProposal: any = null;
   const invoice = {
     xero_invoice_id: "xero-draft-1",
     invoice_number: "INV-9001",
@@ -185,8 +190,12 @@ function draftGateway(
     get authoriseCalls() {
       return authoriseCalls;
     },
-    async createDraft() {
+    get lastProposal() {
+      return lastProposal;
+    },
+    async createDraft(payload: any) {
       createCalls++;
+      lastProposal = payload;
       return invoice;
     },
     async reconcileCreate() {
@@ -241,6 +250,66 @@ Deno.test("A: create_ses_invoice_draft mints DRAFT with api_key and no approval"
     String(result.draft_pdf?.object_key || ""),
     "xero-invoice-pdfs/",
   );
+});
+
+Deno.test("A1: a staff-locked $120 proposal mints exactly $120 ex without reapplying the AJS floor", async () => {
+  const lockedProposal = {
+    ...proposal,
+    pricing_disposition: "priced_with_line_override" as const,
+    company: "AJ Building & Restoration",
+    reference: "AJBR-LOCKED",
+    contact_name: "AJ Building & Restoration",
+    lines: [{
+      description: "AJBR-LOCKED - make-safe attendance - locked figure",
+      quantity: 1.5,
+      unit_price: 80,
+      account_code: "210",
+      rate_override_approved: true,
+      rate_override_by: "Operations staff",
+      rate_override_at: "2026-08-13T00:00:00.000Z",
+      evidence: {
+        source: "secureworks.makesafe.commercial-quantity-override/v1",
+        override_kind: "commercial_quantity_not_rate",
+      },
+    }],
+    totals: { ex: 120, inc: 132 },
+    commercial_quantity_override: {
+      authorised_by: "Operations staff",
+      decision_key: "kelmscott-style-locked-120-v1",
+    },
+  };
+  const gateway = draftGateway({
+    reference: "AJBR-LOCKED | token",
+    total: 132,
+  });
+  const client = mintClient({
+    revision: revisionRow({
+      pricing_disposition: "priced_with_line_override",
+      proposal: lockedProposal,
+      reference: "AJBR-LOCKED",
+    }),
+  });
+  const result = await createSesInvoiceDraftAction(
+    client as any,
+    apiKeyAuth,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "staff@test",
+    },
+    gateway,
+    { fetchAllAccrecInvoices: async () => [] },
+  );
+
+  assertEquals(result.state, "xero_draft_created");
+  assertEquals(result.invoice.status, "DRAFT");
+  assertEquals(gateway.lastProposal.totals, { ex: 120, inc: 132 });
+  assertEquals(gateway.lastProposal.lines[0].quantity, 1.5);
+  assertEquals(gateway.lastProposal.lines[0].unit_price, 80);
+  assertEquals(gateway.createCalls, 1);
+  assertEquals(gateway.authoriseCalls, 0);
+  assertEquals(result.send_dispatched, false);
 });
 
 Deno.test("A7: an unfetchable Xero PDF never fails the mint or invents one", async () => {
@@ -657,7 +726,6 @@ Deno.test("shared resolveExistingInvoice: job_id always blocks regardless of PO"
   assertEquals(hit?.match_method, "job_id");
   assertEquals(hit?.invoice_number, "INV-J");
 });
-
 
 // ── Deliberate retry gate (issue #644) ──────────────────────────────────────
 

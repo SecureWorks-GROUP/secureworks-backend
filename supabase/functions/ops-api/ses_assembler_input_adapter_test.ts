@@ -2698,13 +2698,14 @@ Deno.test(
       },
     )).results[0];
     // The reference-matching DraftPackOutput is valid; this fixture omits only
-    // the headless portal capability. That ordinary evidence gap must remain
-    // review-visible with an inert draft-zero proposal, never issue the fixed
-    // roof price or cross a send fence.
+    // the headless portal capability. Named-card caveat mode keeps that
+    // ordinary evidence gap review-visible without destroying the typed fixed
+    // price; it may persist to Docs Ready but can never cross the send fence.
     assertEquals(roofResult.blockers.map((blocker) => blocker.reason_code), [
       "capability_portal_degraded",
     ]);
-    assertEquals(roofResult.invoice_proposal?.state, "price_unresolved");
+    assertEquals(roofResult.invoice_proposal?.subtotal_ex_gst, 300);
+    assertEquals(roofResult.envelope.pre_xero_docs_ready, true);
     assertEquals(roofResult.envelope.invoice_create_approved, false);
     assertEquals(roofResult.envelope.client_send_approved, false);
     assertEquals(roofResult.release_payload.send_email, false);
@@ -3791,7 +3792,7 @@ Deno.test(
   async () => {
     assertEquals(
       SES_FAMILY_MATRIX_VERSION,
-      "ses-builder-family-matrix/2026-08-07.1",
+      "ses-builder-family-matrix/2026-08-13.1",
     );
     const shapes = [
       ["SWMS-26732", null, "photos"],

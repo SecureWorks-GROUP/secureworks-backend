@@ -1,5 +1,5 @@
 export const SES_FAMILY_MATRIX_VERSION =
-  "ses-builder-family-matrix/2026-08-07.1";
+  "ses-builder-family-matrix/2026-08-13.1";
 export const SES_ASSESSMENT_RECIPE_VERSION =
   "assessment-triad-invoice-only/2026-07-27";
 /** Captain 2026-08-02: repair and restoration match the physical pack path. */
@@ -257,13 +257,12 @@ function physicalRow(
     subtype: null,
     report_only: false,
     report_delivery: null,
-    // Captain 2026-08-07 (Harden SES ticket 04): EVERY physical make-safe
-    // carries a SWMS regardless of builder. The old AJS waiver and the
-    // WESTERN hrcw-only carve-out are dead; HRCW remains an independent
-    // reason on top. Report-only families are unchanged here (the generator
-    // includes a SWMS in their packs; it becomes a requirement later).
-    swms_policy: "always",
-    swms_waiver_rule: null,
+    // Captain 2026-08-13: AJS/AJBR defaults to no SWMS. HRCW remains an
+    // independent requirement in swmsDecision, so this waiver can never hide
+    // genuinely high-risk work. Other physical builders keep the standing
+    // always-required policy.
+    swms_policy: ajs ? "builder_waiver_unless_hrcw" : "always",
+    swms_waiver_rule: ajs ? "ajs-default-no-swms-unless-hrcw" : null,
     invoice_basis: ajs ? "ajs_labour_materials" : "standard_labour_materials",
     routing_rule: ajs
       ? "ajs-routing"

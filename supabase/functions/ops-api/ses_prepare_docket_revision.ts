@@ -968,14 +968,6 @@ function swmsDecision(
   requirementEvidence: string;
   naRule: string | null;
 } {
-  if (row.report_only) {
-    return {
-      required: false,
-      requirementEvidence:
-        `rule:swms-not-required-under-named-builder-job-rule#${row.swms_waiver_rule}`,
-      naRule: "report-only-has-no-physical-work",
-    };
-  }
   if (
     input.hrcw.hrcw ||
     input.hrcw.categories.length > 0 ||
@@ -985,6 +977,14 @@ function swmsDecision(
       required: true,
       requirementEvidence: "rule:hrcw-requires-swms",
       naRule: null,
+    };
+  }
+  if (row.report_only) {
+    return {
+      required: false,
+      requirementEvidence:
+        `rule:swms-not-required-under-named-builder-job-rule#${row.swms_waiver_rule}`,
+      naRule: "report-only-has-no-physical-work",
     };
   }
   if (row.swms_policy === "always") {
@@ -3939,6 +3939,26 @@ async function prepareOne(
           );
         }
       }
+    } else if (
+      normalNamedCard &&
+      row.swms_policy === "builder_waiver_unless_hrcw"
+    ) {
+      addBlocker(
+        blockers,
+        blocked(
+          "optional_swms_missing",
+          "Builder policy makes SWMS optional for this non-HRCW card, and no SWMS is attached.",
+          "Review this visible caveat only; no SWMS is required unless HRCW evidence or builder policy requires one.",
+          ["sealed-builder-family-matrix"],
+          [],
+          {
+            builder_key: row.builder_key,
+            swms_policy: row.swms_policy,
+            swms_waiver_rule: row.swms_waiver_rule,
+          },
+          "review_assumption",
+        ),
+      );
     }
     if (row.job_type === "physical_makesafe") {
       artifacts.push(
