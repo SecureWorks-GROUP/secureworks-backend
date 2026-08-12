@@ -58,7 +58,7 @@ Deno.test("Trade board mixed credentials prefer the signed-in ES256 Bearer over 
   );
 });
 
-Deno.test("non-Trade actions keep x-api-key precedence under the same mixed credentials", () => {
+Deno.test("auth resolver retains explicit shared-key precedence when browser JWT preference is disabled", () => {
   assertEquals(
     _resolveOpsApiAuthIntent({
       xApiKey: "master-key",
@@ -69,7 +69,8 @@ Deno.test("non-Trade actions keep x-api-key precedence under the same mixed cred
     }),
     "api_key",
   );
-  // Absent flag defaults to the pre-existing precedence (no behaviour change).
+  // Absent flag keeps the low-level resolver default; protected routes enable
+  // browser JWT preference through _preferBearerForOpsApiAction.
   assertEquals(
     _resolveOpsApiAuthIntent({
       xApiKey: "master-key",
@@ -81,7 +82,7 @@ Deno.test("non-Trade actions keep x-api-key precedence under the same mixed cred
   );
 });
 
-Deno.test("master Bearer stays api_key even for the Trade board", () => {
+Deno.test("legacy shared-key Bearer remains classified as api_key before the protected-route rejection", () => {
   assertEquals(
     _resolveOpsApiAuthIntent({
       xApiKey: null,
