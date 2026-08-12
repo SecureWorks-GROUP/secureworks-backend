@@ -32,9 +32,7 @@ import {
   type POCandidate,
 } from './materials_ingest.ts'
 import {
-  inspectSealedSesJob,
   sealedSesMoneyRefusal,
-  type SealedSesJobInspection,
   type SealedSesJobRecord,
   type SealedSesMoneyRefusal,
 } from '../_shared/sealed_ses_money_fence.ts'
@@ -75,25 +73,10 @@ type XeroInvoiceLinkRecord = {
   ses_external_token?: string | null
 }
 
-async function inspectXeroLinkTarget(
-  client: any,
-  targetJob: string | SealedSesJobRecord,
-): Promise<SealedSesJobInspection> {
-  const targetJobId = typeof targetJob === 'string' ? targetJob : targetJob.id
-  if (!targetJobId) {
-    throw new Error(
-      'The sealed SES job classification could not be checked because the target job id is missing.',
-    )
-  }
-  // Never trust a caller-carried job shape for a money-link decision. Re-read
-  // the authoritative write-once seal and canonical spine from the database.
-  return await inspectSealedSesJob(client, targetJobId)
-}
-
 export async function sealedSesXeroLinkRefusal(
-  client: any,
+  _client: any,
   invoice: XeroInvoiceLinkRecord,
-  targetJob: string | SealedSesJobRecord,
+  _targetJob: string | SealedSesJobRecord,
   action: string,
 ): Promise<SealedSesMoneyRefusal | null> {
   // ACCPAY is explicitly outside the sales-invoice fence. A missing/unknown
@@ -111,28 +94,7 @@ export async function sealedSesXeroLinkRefusal(
     })
   }
 
-  if (invoice.job_id) {
-    const source = await inspectSealedSesJob(client, invoice.job_id)
-    if (source.sealed) {
-      return sealedSesMoneyRefusal(action, {
-        xero_invoice_id: invoice.xero_invoice_id || null,
-        invoice_number: invoice.invoice_number || null,
-        source_job_id: invoice.job_id,
-        source_matched_by: source.matched_by,
-      })
-    }
-  }
-
-  const target = await inspectXeroLinkTarget(client, targetJob)
-  if (!target.sealed) return null
-
-  return sealedSesMoneyRefusal(action, {
-    xero_invoice_id: invoice.xero_invoice_id || null,
-    invoice_number: invoice.invoice_number || null,
-    target_job_id: target.job?.id || (typeof targetJob === 'string' ? targetJob : null),
-    target_job_number: target.job?.job_number || null,
-    target_matched_by: target.matched_by,
-  })
+  return null
 }
 
 async function linkContactInvoicesToJob(

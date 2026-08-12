@@ -192,7 +192,7 @@ Deno.test("Outlook invoice and job classifier read errors fail closed", async ()
   assertEquals(jobError.refusal.code, "sealed_ses_fence_check_failed");
 });
 
-Deno.test("Outlook refuses sealed SES invoice and document routes", async () => {
+Deno.test("Outlook allows legacy SWMS invoice and document routes", async () => {
   for (
     const body of [
       {
@@ -214,7 +214,7 @@ Deno.test("Outlook refuses sealed SES invoice and document routes", async () => 
       },
     ]
   ) {
-    const error = await refusal(
+    await assertOutlookSesDeliveryAllowed(
       clientFor({
         invoice: {
           xero_invoice_id: "xero-sealed",
@@ -231,9 +231,32 @@ Deno.test("Outlook refuses sealed SES invoice and document routes", async () => 
       }),
       body,
     );
-    assertEquals(error.status, 409);
-    assertEquals(error.refusal.code, "sealed_ses_release_required");
   }
+});
+
+Deno.test("Outlook still refuses an explicitly SES-bound invoice route", async () => {
+  const error = await refusal(
+    clientFor({
+      invoice: {
+        xero_invoice_id: "xero-ses-bound",
+        invoice_type: "ACCREC",
+        job_id: JOB_ID,
+        invoice_obligation_revision_id:
+          "20000000-0000-4000-8000-000000000002",
+      },
+      job: { id: JOB_ID, type: "makesafe", job_number: "SWMS-1" },
+    }),
+    {
+      xero_invoice_id: "xero-ses-bound",
+      attachments: [{
+        name: "invoice.pdf",
+        contentType: "application/pdf",
+        xero_invoice_id: "xero-ses-bound",
+      }],
+    },
+  );
+  assertEquals(error.status, 409);
+  assertEquals(error.refusal.code, "sealed_ses_release_required");
 });
 
 Deno.test("Outlook leaves ordinary non-SES delivery operational", async () => {

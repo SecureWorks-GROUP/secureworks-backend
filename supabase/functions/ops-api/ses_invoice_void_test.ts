@@ -97,7 +97,7 @@ Deno.test("SES void prepare refuses unlinked ACCREC before any revision write", 
   assertEquals((error.refusal as any).code, "invoice_link_required");
 });
 
-Deno.test("SES void prepare refuses missing classifier authority", async () => {
+Deno.test("SES void prepare requires an explicit SES invoice binding", async () => {
   const error = await assertRejects(
     () =>
       prepareSesInvoiceVoidRevisionAction(
@@ -108,7 +108,6 @@ Deno.test("SES void prepare refuses missing classifier authority", async () => {
             job_id: JOB_ID,
             status: "AUTHORISED",
           },
-          job: null,
         }) as any,
         {
           org_id: ORG_ID,
@@ -119,7 +118,11 @@ Deno.test("SES void prepare refuses missing classifier authority", async () => {
       ),
     SesActionError,
   ) as SesActionError;
-  assertEquals(error.status, 503);
+  assertEquals(error.status, 409);
+  assertEquals(
+    (error.refusal as any).code,
+    "ses_invoice_void_requires_binding",
+  );
 });
 
 Deno.test("SES void prepare commits through the atomic authority RPC", async () => {
@@ -182,7 +185,7 @@ Deno.test("SES void approval requires an identified captain", async () => {
   assertEquals(error.status, 403);
 });
 
-Deno.test("SES void execute refuses classifier errors before Xero", async () => {
+Deno.test("SES void execute refuses a failed atomic reservation before Xero", async () => {
   let providerCalls = 0;
   const client = {
     from(table: string) {
@@ -201,15 +204,12 @@ Deno.test("SES void execute refuses classifier errors before Xero", async () => 
           error: null,
         });
       }
-      if (table === "jobs") {
-        return fluent({
-          data: null,
-          error: { message: "job authority unavailable" },
-        });
-      }
       return fluent({ data: null, error: null });
     },
-    rpc: async () => ({ data: null, error: null }),
+    rpc: async () => ({
+      data: null,
+      error: { message: "approved void reservation unavailable" },
+    }),
   };
   const error = await assertRejects(
     () =>
@@ -233,6 +233,6 @@ Deno.test("SES void execute refuses classifier errors before Xero", async () => 
       ),
     SesActionError,
   ) as SesActionError;
-  assertEquals(error.status, 503);
+  assertEquals(error.status, 409);
   assertEquals(providerCalls, 0);
 });

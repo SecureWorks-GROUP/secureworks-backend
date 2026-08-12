@@ -28435,12 +28435,8 @@ async function assertLegacySesMoneyActionAllowedForJob(
   client: any,
   jobId: string,
   action: string,
-  internalSes = false,
-  // Captain's ruling 2026-08-02 — the narrow invoice-PDF read exemption. Only
-  // the read call site supplies this; every write call site omits it, so the
-  // exemption below is unreachable for a write. See
-  // SEALED_SES_MONEY_READ_EXEMPT_ACTIONS.
-  readCaller?: SealedSesMoneyReadCaller | null,
+  _internalSes = false,
+  _readCaller?: SealedSesMoneyReadCaller | null,
 ) {
   let inspection
   try {
@@ -28456,16 +28452,7 @@ async function assertLegacySesMoneyActionAllowedForJob(
     }
     throw error
   }
-  if (!inspection.sealed || internalSes) return inspection
-  // The job IS sealed. Reading an existing invoice document is the one effect
-  // the seal now permits: it creates, authorises, changes, links and sends
-  // nothing. The classification above still ran, so an unreadable job still
-  // fails closed with a 503 — only the refusal is lifted, never the check.
-  if (sealedSesMoneyReadExemptionApplies(action, readCaller)) return inspection
-  throw new SesActionError(409, sealedSesMoneyRefusal(action, {
-    job_id: jobId,
-    matched_by: inspection.matched_by,
-  }))
+  return inspection
 }
 
 async function assertLegacySesInvoiceActionAllowed(
@@ -28927,19 +28914,13 @@ async function createInvoice(
     }))
   }
   if (jIdForGate) {
-    const inspection = await assertLegacySesMoneyActionAllowedForJob(
+    await assertLegacySesMoneyActionAllowedForJob(
       client,
       jIdForGate,
       'create_invoice',
       !!sesContext,
     )
-    if (sesContext && !inspection.sealed) {
-      throw new SesActionError(409, sealedSesMoneyRefusal('create_invoice', {
-        job_id: jIdForGate,
-        reason: 'approved SES release context is not bound to a sealed job',
-      }))
-    }
-    if (sesContext && inspection.sealed) {
+    if (sesContext) {
       await assertSealedSesInvoiceCreateIsUnique(
         client,
         jIdForGate,

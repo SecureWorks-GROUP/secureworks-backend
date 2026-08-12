@@ -35,12 +35,17 @@ const ORG_ID = "00000000-0000-0000-0000-000000000001";
 function fluentResponse(response: { data: any; error: any }) {
   const builder: any = {
     select: () => builder,
+    insert: () => builder,
+    update: () => builder,
+    upsert: () => builder,
     eq: () => builder,
     in: () => builder,
+    is: () => builder,
     not: () => builder,
     or: () => builder,
     order: () => builder,
     limit: () => builder,
+    range: () => builder,
     maybeSingle: async () => response,
     single: async () => response,
     then: (resolve: any, reject: any) =>
@@ -57,6 +62,7 @@ function lookupClient(options: {
   invoice?: Record<string, unknown> | null;
   invoiceError?: string;
   indexedInvoices?: Record<string, unknown>[];
+  xeroToken?: Record<string, unknown>;
 }) {
   return {
     from(table: string) {
@@ -91,45 +97,38 @@ function lookupClient(options: {
         builder.maybeSingle = async () => ({ data: single, error });
         return builder;
       }
+      if (table === "xero_tokens") {
+        const token = options.xeroToken ?? null;
+        return fluentResponse({ data: token, error: null });
+      }
       return fluentResponse({ data: null, error: null });
     },
   };
 }
 
-Deno.test("sealed SES classifier is exact to the make-safe spine", () => {
-  assertEquals(
-    classifySealedSesJob({ id: JOB_ID, type: "makesafe" }).sealed,
-    true,
-  );
-  assertEquals(
-    classifySealedSesJob({
-      id: JOB_ID,
-      type: "general",
-      job_number: "SWMS-261028",
-    }).sealed,
-    true,
-  );
-  assertEquals(
-    classifySealedSesJob({
+Deno.test("SES money-seal classification is inert for every legacy signal", () => {
+  const jobs = [
+    { id: JOB_ID, type: "makesafe", job_number: "SWMS-261028" },
+    { id: JOB_ID, type: "general", job_number: "SWMS-261028" },
+    {
       id: JOB_ID,
       type: "general",
       job_number: "GEN-100",
       ses_money_sealed_at: "2026-07-27T00:00:00.000Z",
       ses_money_seal_source: "makesafe_intake_case",
-    }, true).sealed,
-    true,
-  );
-  for (const type of ["fencing", "patio", "general"]) {
-    assertEquals(
-      classifySealedSesJob({
-        id: JOB_ID,
-        type,
-        job_number: `${type.toUpperCase()}-100`,
-      }).sealed,
-      false,
-      `${type} must remain outside the sealed SES fence`,
-    );
+    },
+    { id: JOB_ID, type: "fencing", job_number: "SWF-100" },
+  ];
+  for (const job of jobs) {
+    const result = classifySealedSesJob(job, true);
+    assertEquals(result.sealed, false);
+    assertEquals(result.matched_by, null);
   }
+  assertEquals(classifySealedSesJob(null), {
+    sealed: false,
+    matched_by: null,
+    job: null,
+  });
 });
 
 Deno.test("sealed SES inspection refuses missing or unreadable job identity", async () => {
@@ -151,19 +150,15 @@ Deno.test("sealed SES inspection refuses missing or unreadable job identity", as
     );
   }
 
-  await assertRejects(
-    () =>
-      _assertLegacySesMoneyActionAllowedForJobForTest(
-        lookupClient({
-          job: { id: JOB_ID, type: "general", job_number: "GEN-100" },
-          detailError: "details unavailable",
-        }),
-        JOB_ID,
-        "send_review_request",
-      ),
-    SesActionError,
-    "sealed SES",
+  const inert = await _assertLegacySesMoneyActionAllowedForJobForTest(
+    lookupClient({
+      job: { id: JOB_ID, type: "makesafe", job_number: "SWMS-261028" },
+      detailError: "details unavailable",
+    }),
+    JOB_ID,
+    "send_review_request",
   );
+  assertEquals(inert.sealed, false);
 });
 
 Deno.test("chase delivery binds its GHL contact to the resolved job", async () => {
@@ -222,45 +217,76 @@ Deno.test("chase delivery binds its GHL contact to the resolved job", async () =
   );
 });
 
-Deno.test("the live $1 create_invoice probe shape now gets a typed refusal before mocked Xero", async () => {
+Deno.test("ordinary create_invoice mints a DRAFT on an SWMS make-safe job", async () => {
   const client = lookupClient({
     job: {
       id: JOB_ID,
       type: "makesafe",
       job_number: "SWMS-261028",
+      client_name: "Probe Builder Pty Ltd",
+      client_email: null,
+      client_phone: null,
+      site_address: "Test site",
+      site_suburb: "Perth",
+      xero_contact_id: "xero-contact-1",
+      pricing_json: {},
+      payment_terms: null,
+      metadata: {},
+    },
+    xeroToken: {
+      access_token: "xero-access-token",
+      tenant_id: "xero-tenant",
+      expires_at: "2099-01-01T00:00:00.000Z",
     },
   });
   const originalFetch = globalThis.fetch;
-  let xeroCalls = 0;
-  globalThis.fetch = (() => {
-    xeroCalls++;
-    return Promise.reject(new Error("mocked Xero must not be reached"));
+  let invoiceCreates = 0;
+  let emailCalls = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const request = init as any;
+    if (url.includes("/TrackingCategories")) {
+      return Response.json({ TrackingCategories: [] });
+    }
+    if (url.endsWith("/Invoices") && request?.method === "PUT") {
+      invoiceCreates++;
+      const payload = JSON.parse(String(request.body || "{}"));
+      assertEquals(payload.Invoices?.[0]?.Status, "DRAFT");
+      return Response.json({
+        Invoices: [{
+          InvoiceID: "xero-draft-swms",
+          InvoiceNumber: "INV-TEST",
+          Status: "DRAFT",
+          Reference: "SWMS-261028",
+          SubTotal: 300,
+          TotalTax: 30,
+          Total: 330,
+          Contact: { ContactID: "xero-contact-1" },
+        }],
+      });
+    }
+    if (url.includes("/Email")) emailCalls++;
+    throw new Error(`unexpected provider call: ${url}`);
   }) as typeof fetch;
   try {
-    const error = await assertRejects(
-      () =>
-        _createInvoiceForTest(client, {
-          job_id: JOB_ID,
-          contact_name: "Probe Builder Pty Ltd",
-          reference: "",
-          line_items: [{
-            description: "Adversarial probe",
-            quantity: 1,
-            unit_price: 1,
-          }],
-          xero_status: "AUTHORISED",
-          send_email: true,
-        }),
-      SesActionError,
-    ) as SesActionError;
-    assertEquals(error.status, 409);
-    assertEquals((error.refusal as any).code, "sealed_ses_release_required");
-    assertStringIncludes(error.refusal.fact, "SES make-safe job is sealed");
-    assertStringIncludes(
-      (error.refusal as any).recovery_action,
-      "execute_ses_invoice_revision",
-    );
-    assertEquals(xeroCalls, 0);
+    const result = await _createInvoiceForTest(client, {
+      job_id: JOB_ID,
+      xero_contact_id: "xero-contact-1",
+      contact_name: "Probe Builder Pty Ltd",
+      reference: "SWMS-261028",
+      line_items: [{
+        description: "Approved make-safe work",
+        quantity: 1,
+        unit_price: 300,
+      }],
+      xero_status: "DRAFT",
+      send_email: false,
+    });
+    assertEquals(result.success, true);
+    assertEquals(result.status, "DRAFT");
+    assertEquals(result.xero_invoice_id, "xero-draft-swms");
+    assertEquals(invoiceCreates, 1);
+    assertEquals(emailCalls, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -322,7 +348,7 @@ Deno.test("duplicate resolver blocks the internal create choke before mocked Xer
   }
 });
 
-Deno.test("F8 job-link and legacy invoice effects refuse sealed or SES-bound invoices", async () => {
+Deno.test("legacy auto-seal is inert while SES-bound invoice effects still refuse", async () => {
   const linked = lookupClient({
     invoice: {
       job_id: JOB_ID,
@@ -332,19 +358,12 @@ Deno.test("F8 job-link and legacy invoice effects refuse sealed or SES-bound inv
     },
     job: { id: JOB_ID, type: "makesafe", job_number: "SWMS-261028" },
   });
-  const linkedError = await assertRejects(
-    () =>
-      _assertLegacySesInvoiceActionAllowedForTest(
-        linked,
-        "xero-linked",
-        "update_invoice_job_link",
-      ),
-    SesActionError,
-  ) as SesActionError;
-  assertEquals(
-    (linkedError.refusal as any).code,
-    "sealed_ses_release_required",
+  const linkedResult = await _assertLegacySesInvoiceActionAllowedForTest(
+    linked,
+    "xero-linked",
+    "update_invoice_job_link",
   );
+  assertEquals(linkedResult.job_id, JOB_ID);
 
   // The invoice carries a job link so the assertion below lands on the SES-bound
   // refusal it is about. Without one, the earlier authoritative-job-link guard
@@ -372,21 +391,14 @@ Deno.test("F8 job-link and legacy invoice effects refuse sealed or SES-bound inv
     "sealed_ses_release_required",
   );
 
-  const targetError = await assertRejects(
-    () =>
-      _assertLegacySesMoneyActionAllowedForJobForTest(
-        lookupClient({
-          job: { id: JOB_ID, type: "makesafe", job_number: "SWMS-261028" },
-        }),
-        JOB_ID,
-        "update_invoice_job_link",
-      ),
-    SesActionError,
-  ) as SesActionError;
-  assertEquals(
-    (targetError.refusal as any).code,
-    "sealed_ses_release_required",
+  const targetResult = await _assertLegacySesMoneyActionAllowedForJobForTest(
+    lookupClient({
+      job: { id: JOB_ID, type: "makesafe", job_number: "SWMS-261028" },
+    }),
+    JOB_ID,
+    "update_invoice_job_link",
   );
+  assertEquals(targetResult.sealed, false);
 });
 
 Deno.test("invoice action rejects a caller job that differs from mirror linkage", async () => {
@@ -901,10 +913,10 @@ Deno.test("execute_ses_invoice_revision legitimate approved draft path remains o
   assertEquals(result.invoice.xero_invoice_id, "xero-approved-path");
 });
 
-Deno.test("sealed refusal text is typed and names the approved release path", () => {
+Deno.test("explicit SES binding refusal names the approved release path", () => {
   const refusal = sealedSesMoneyRefusal("create_invoice");
   assertEquals(refusal.code, "sealed_ses_release_required");
-  assertStringIncludes(refusal.fact, "sealed");
+  assertStringIncludes(refusal.fact, "explicitly bound");
   assertStringIncludes(refusal.recovery_action, "execute_ses_invoice_revision");
 });
 
@@ -1039,7 +1051,7 @@ Deno.test("an operator may READ a sealed make-safe invoice PDF at draft, authori
   }
 });
 
-Deno.test("the read exemption covers every way a job is sealed, and SES-bound invoices", async () => {
+Deno.test("get_invoice_pdf works for every legacy seal shape and SES-bound invoices", async () => {
   const sealShapes = [
     { id: JOB_ID, type: "makesafe", job_number: "SWMS-261028" },
     { id: JOB_ID, type: "general", job_number: "SWMS-261124" },
@@ -1079,8 +1091,8 @@ Deno.test("the read exemption covers every way a job is sealed, and SES-bound in
   );
   assertEquals(bound.job_id, JOB_ID);
 
-  // And the job-level gate agrees, so a sealed card's own read is not refused
-  // one layer down.
+  // The job-level gate is inert too, so the card's own read is not refused one
+  // layer down.
   const jobLevel = await _assertLegacySesMoneyActionAllowedForJobForTest(
     lookupClient({ job: sealedJob() }),
     JOB_ID,
@@ -1088,10 +1100,10 @@ Deno.test("the read exemption covers every way a job is sealed, and SES-bound in
     false,
     OPS_KEY_CALLER,
   );
-  assertEquals(jobLevel.sealed, true);
+  assertEquals(jobLevel.sealed, false);
 });
 
-Deno.test("a non-operator caller keeps the sealed refusal on the invoice PDF read", async () => {
+Deno.test("the legacy seal no longer restricts invoice PDF reads by caller", async () => {
   for (
     const caller of [
       { mode: "jwt", role: "trade" } as SealedSesMoneyReadCaller,
@@ -1099,33 +1111,24 @@ Deno.test("a non-operator caller keeps the sealed refusal on the invoice PDF rea
       null,
     ]
   ) {
-    const error = await assertRejects(
-      () =>
-        _assertLegacySesInvoiceActionAllowedForTest(
-          lookupClient({
-            invoice: sealedInvoice("AUTHORISED"),
-            job: sealedJob(),
-          }),
-          "xero-unprivileged",
-          "get_invoice_pdf",
-          undefined,
-          caller,
-        ),
-      SesActionError,
-    ) as SesActionError;
-    assertEquals(error.status, 409);
-    assertEquals(
-      (error.refusal as any).code,
-      "sealed_ses_release_required",
+    const allowed = await _assertLegacySesInvoiceActionAllowedForTest(
+      lookupClient({
+        invoice: sealedInvoice("AUTHORISED"),
+        job: sealedJob(),
+      }),
+      "xero-unprivileged",
+      "get_invoice_pdf",
+      undefined,
+      caller,
     );
+    assertEquals(allowed.job_id, JOB_ID);
   }
 });
 
-// THE WIDENING GUARD. Every sealed money effect is re-run against the same
-// sealed fixture with the most privileged caller context that exists. If
-// someone later adds a write to SEALED_SES_MONEY_READ_EXEMPT_ACTIONS, or
-// loosens the exemption so the caller alone unlocks it, this fails.
-Deno.test("every write, issue, send, void, amend and relink still refuses on a sealed card", async () => {
+// The Captain removed the card classifier, not the explicit SES invoice binding.
+// Ordinary SWMS jobs now pass this legacy gate while obligation/token-bound
+// invoices retain their release-only refusal for every write action.
+Deno.test("ordinary SWMS effects pass while SES-bound writes retain release gates", async () => {
   const originalFetch = globalThis.fetch;
   let providerCalls = 0;
   globalThis.fetch = (() => {
@@ -1135,46 +1138,26 @@ Deno.test("every write, issue, send, void, amend and relink still refuses on a s
   try {
     for (const action of SEALED_WRITE_ACTIONS) {
       for (const caller of [OPS_KEY_CALLER, ADMIN_CALLER, OWNER_CALLER]) {
-        const invoiceError = await assertRejects(
-          () =>
-            _assertLegacySesInvoiceActionAllowedForTest(
-              lookupClient({
-                invoice: sealedInvoice("AUTHORISED"),
-                job: sealedJob(),
-              }),
-              `xero-${action}`,
-              action,
-              undefined,
-              caller,
-            ),
-          SesActionError,
+        const invoice = await _assertLegacySesInvoiceActionAllowedForTest(
+          lookupClient({
+            invoice: sealedInvoice("AUTHORISED"),
+            job: sealedJob(),
+          }),
+          `xero-${action}`,
+          action,
           undefined,
-          `${action} must stay sealed`,
-        ) as SesActionError;
-        assertEquals(invoiceError.status, 409);
-        assertEquals(
-          (invoiceError.refusal as any).code,
-          "sealed_ses_release_required",
+          caller,
         );
+        assertEquals(invoice.job_id, JOB_ID);
 
-        const jobError = await assertRejects(
-          () =>
-            _assertLegacySesMoneyActionAllowedForJobForTest(
-              lookupClient({ job: sealedJob() }),
-              JOB_ID,
-              action,
-              false,
-              caller,
-            ),
-          SesActionError,
-          undefined,
-          `${action} must stay sealed at the job level`,
-        ) as SesActionError;
-        assertEquals(jobError.status, 409);
-        assertEquals(
-          (jobError.refusal as any).code,
-          "sealed_ses_release_required",
+        const job = await _assertLegacySesMoneyActionAllowedForJobForTest(
+          lookupClient({ job: sealedJob() }),
+          JOB_ID,
+          action,
+          false,
+          caller,
         );
+        assertEquals(job.sealed, false);
       }
     }
 
