@@ -54,11 +54,12 @@ Timestamps are compared as instants plus their sub-millisecond digits, because
 inside one millisecond would otherwise compare equal and be inverted by the id
 tiebreak against the database's own chronology.
 
-Note the separate, untouched inconsistency: the assembler's own photo list
-(`ses_assembler_input_adapter.ts`) still applies the same
-`sort_order ?? order_index ?? 0` sort after its `created_at` fetch, so it too
-collapses to id order. That is outside this fix's boundary and is recorded, not
-changed.
+Follow-up 2026-08-12: the assembler inconsistency is closed. The curated bind
+and `ses_assembler_input_adapter.ts` now use the same shared comparator from
+`makesafe_cycle_evidence.ts`: `created_at` ascending, nulls last, then `id`.
+Both PostgREST reads also state the same two-key order explicitly. The docket
+continues to consume the assembler's ordinal photo order without a second
+source-ID sort.
 
 ## Boundary
 

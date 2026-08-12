@@ -21,6 +21,17 @@ import {
   renderMakesafeReportPdf,
 } from "./makesafe_report_render.ts";
 import { canonicalSesJson, sesSha256Bytes } from "./ses_docket_envelope.ts";
+import fixture from "./fixtures/ses_u4_swms_26980_live_snapshot.json" with {
+  type: "json",
+};
+import {
+  buildSesAssemblerInput,
+  type SesAssemblerLiveSnapshot,
+} from "./ses_assembler_input_adapter.ts";
+import {
+  PACK_PHOTO_ORDER_EXPECTED_IDS,
+  PACK_PHOTO_ORDER_MEDIA,
+} from "./ses_pack_photo_order_test_fixture.ts";
 
 const FIXTURE_ACTOR = { id: "ops-test", auth_mode: "api_key" as const };
 const SERVICE_REPORT_ID = "service-report-fixture";
@@ -1412,75 +1423,38 @@ Deno.test("curated bind survives a client that rejects unknown job_media columns
   assertEquals(result.cycle_attribution, "bound");
 });
 
-Deno.test("curated bind photo accounting orders by created_at, then id", async () => {
+Deno.test("curated bind and assembler agree on created_at then id photo order", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nordered photo fixture");
   // Deliberately adversarial: id order and created_at order fully disagree, and
-  // two rows share a timestamp so the id tiebreak is exercised as well.
-  //   created_at: zzz, bbb, mmm, ppp, fff, aaa, nnn   id: aaa, bbb, fff, mmm, nnn, ppp, zzz
+  // two real rows and two null rows share timestamps so both id tiebreaks run.
   //
   // ppp/fff differ ONLY by a fractional-seconds component, which Postgres omits
   // when microseconds are exactly zero. A string comparator orders them the
   // wrong way round (ICU weights '.' below 'Z'), so they pin chronological
   // comparison. nnn carries a null created_at and must sort LAST, as PostgREST
   // returns nulls last rather than first.
-  const media = [
-    {
-      id: "aaa",
-      type: "photo",
-      phase: "completion",
-      created_at: "2026-07-30T02:24:07Z",
-      storage_url: "https://storage.example.test/a.jpg",
-    },
-    {
-      id: "zzz",
-      type: "photo",
-      phase: "completion",
-      created_at: "2026-07-30T02:23:53Z",
-      storage_url: "https://storage.example.test/z.jpg",
-    },
-    {
-      id: "mmm",
-      type: "photo",
-      phase: "completion",
-      created_at: "2026-07-30T02:24:01Z",
-      storage_url: "https://storage.example.test/m.jpg",
-    },
-    {
-      id: "bbb",
-      type: "photo",
-      phase: "completion",
-      created_at: "2026-07-30T02:24:01Z",
-      storage_url: "https://storage.example.test/b.jpg",
-    },
-    {
-      id: "fff",
-      type: "photo",
-      phase: "completion",
-      created_at: "2026-07-30T02:24:03.500Z",
-      storage_url: "https://storage.example.test/f.jpg",
-    },
-    {
-      id: "ppp",
-      type: "photo",
-      phase: "completion",
-      created_at: "2026-07-30T02:24:03Z",
-      storage_url: "https://storage.example.test/p.jpg",
-    },
-    {
-      id: "nnn",
-      type: "photo",
-      phase: "completion",
-      created_at: null,
-      storage_url: "https://storage.example.test/n.jpg",
-    },
-  ];
+  const media = PACK_PHOTO_ORDER_MEDIA.map((row) => ({ ...row }));
   // Guard the fixture itself: a string comparator genuinely disagrees with
   // chronology on this pair, so the assertions below cannot pass by accident.
   assertEquals(
     String(media[5].created_at).localeCompare(String(media[4].created_at)) > 0,
     true,
   );
-  const expected = ["zzz", "bbb", "mmm", "ppp", "fff", "aaa", "nnn"];
+  const live = structuredClone(fixture) as unknown as SesAssemblerLiveSnapshot;
+  live.job.metadata.makesafe_job_family = "general_makesafe";
+  live.detail!.report_type = null;
+  live.detail!.external_links = [];
+  live.media = media.map((row) => ({
+    ...row,
+    job_id: live.job.id,
+    attendance_cycle_id: live.detail!.attendance_cycle_id,
+    cycle_attribution: "bound",
+  }));
+  const assemblerOrder = buildSesAssemblerInput(live).cycle_facts.photos.map(
+    (photo) => photo.id,
+  );
+  assertEquals(assemblerOrder, [...PACK_PHOTO_ORDER_EXPECTED_IDS]);
+  const expected = [...assemblerOrder];
   const photoBytes = new TextEncoder().encode("photo-bytes");
   const contentHash = `sha256:${await sha(photoBytes)}`;
   const { client } = bindClient(bytes, {
@@ -1539,7 +1513,7 @@ Deno.test("curated bind photo accounting orders by created_at, then id", async (
   // The id-only comparator this replaced would have demanded id order. That
   // payload is internally self-consistent, so only the source-order comparison
   // can catch it — it must now be refused.
-  const idOrdered = ["aaa", "bbb", "fff", "mmm", "nnn", "ppp", "zzz"];
+  const idOrdered = media.map((row) => row.id).toSorted();
   assertEquals(
     canonicalSesJson(idOrdered) === canonicalSesJson(expected),
     false,

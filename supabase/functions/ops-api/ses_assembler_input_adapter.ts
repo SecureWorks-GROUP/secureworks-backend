@@ -44,6 +44,7 @@ import {
   resolveIntakeThreadCoordinates,
 } from "./ses_mlb_thread_reply.ts";
 import {
+  comparePackMediaCreatedAtThenId,
   currentCycleNumber,
   filterAssignmentsForCurrentCycle,
   filterMediaForCurrentCycle,
@@ -1426,12 +1427,7 @@ export function buildSesAssemblerInput(
         phase.includes("after")
       );
     })
-    .sort(
-      (left, right) =>
-        Number(left.sort_order ?? left.order_index ?? 0) -
-          Number(right.sort_order ?? right.order_index ?? 0) ||
-        text(left.id).localeCompare(text(right.id)),
-    )
+    .sort(comparePackMediaCreatedAtThenId)
     .map((item, index) => ({
       id: text(item.id),
       path_or_key: `job_media:${text(item.id)}`,
@@ -1859,7 +1855,8 @@ export async function loadSesAssemblerLiveSnapshot(
         .from("job_media")
         .select("*")
         .eq("job_id", jobId)
-        .order("created_at", { ascending: true }),
+        .order("created_at", { ascending: true, nullsFirst: false })
+        .order("id", { ascending: true }),
       "job_media",
     ),
     many(
