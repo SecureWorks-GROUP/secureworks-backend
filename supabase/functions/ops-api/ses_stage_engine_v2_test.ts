@@ -163,6 +163,86 @@ Deno.test("r12: canonical_stage follows the corrected engine when the legacy lad
   assertEquals(ops.columns.report_ready.length, 0);
 });
 
+Deno.test("placement: allocated card with a submitted current-cycle trade report moves to Trade Report In", () => {
+  const [row] = buildCanonicalMakesafeRows([
+    baseRow({
+      id: "job-submitted-report",
+      board_stage: "allocated",
+      makesafe_details: {
+        substatus: "waiting_on_trade_report",
+        cycle_number: 1,
+      },
+      report: { status: "submitted", cycle_number: 1 },
+    }),
+  ], {
+    computedAt: NOW,
+    photoCountByJobId: { "job-submitted-report": 0 },
+  });
+
+  assertEquals(row.canonical_stage, "trade_report_in");
+  assertEquals(row.derived_stage_v2, "trade_report_in");
+  // M1 still requires its photo floor. The placement fix consumes report
+  // evidence directly and does not couple canonical_stage to computed_status.
+  assertEquals(row.computed_status, "allocated");
+});
+
+Deno.test("placement: allocated card waiting on a trade report stays Allocated", () => {
+  const rows = buildCanonicalMakesafeRows([
+    baseRow({
+      id: "job-waiting-report",
+      board_stage: "allocated",
+      makesafe_details: {
+        substatus: "waiting_on_trade_report",
+        cycle_number: 1,
+      },
+      report: null,
+    }),
+    baseRow({
+      id: "job-stale-report",
+      board_stage: "allocated",
+      makesafe_details: {
+        substatus: "waiting_on_trade_report",
+        cycle_number: 2,
+      },
+      report: { status: "submitted", cycle_number: 1 },
+    }),
+  ], { computedAt: NOW });
+
+  assertEquals(rows.map((row) => row.canonical_stage), [
+    "allocated",
+    "allocated",
+  ]);
+  assertEquals(rows.map((row) => row.derived_stage_v2), [
+    "allocated",
+    "allocated",
+  ]);
+});
+
+Deno.test("placement: reviewable pack with a qualifying current DRAFT still reaches Docs Ready", () => {
+  const [row] = buildCanonicalMakesafeRows([
+    baseRow({
+      id: "job-reviewable-pack",
+      board_stage: "trade_report_in",
+      report: { status: "submitted", cycle_number: 1 },
+      report_pack: {
+        status: "drafted",
+        review_state: "READY",
+        report_doc_id: "report-doc",
+        invoice_doc_id: "invoice-doc",
+        sent_at: null,
+      },
+      invoice_raw_status: "DRAFT",
+      invoice_qualifies_as_current_draft: true,
+      has_report_doc: true,
+      has_invoice_doc: true,
+      pack_sent: false,
+    }),
+  ], { computedAt: NOW });
+
+  assertEquals(row.canonical_stage, "report_ready");
+  assertEquals(row.derived_stage_v2, "report_ready");
+});
+
 Deno.test("shadow: the advisory fields never reach the trade projection", () => {
   const rows = buildCanonicalMakesafeRows([baseRow()], { computedAt: NOW });
   const trade = projectTradeMakesafeBoard(rows, {

@@ -71,7 +71,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r9-authorised-unsent";
+  "ses-stage-engine.v2-r10-submitted-report-placement";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -792,10 +792,29 @@ export function deriveSesStageV2(input: SesStageV2Input): SesStageV2Result {
   };
 }
 
+/** Current-cycle submitted report evidence for a physical make-safe. */
+function sesStagePhysicalReportIn(
+  input: SesStageV2Input,
+): { satisfied: boolean; missing: string[] } {
+  const cycle = Number(input.detail?.cycle_number ?? 1);
+  const submitted = (input.evidence?.serviceReports || []).some((report) =>
+    Number(report?.cycle_number ?? 1) === cycle &&
+    ["submitted", "approved"].includes(
+      String(report?.status || "").toLowerCase(),
+    )
+  );
+  return {
+    satisfied: submitted,
+    missing: submitted ? [] : ["current-cycle submitted service report"],
+  };
+}
+
 /**
- * The shared evidence ladder, with the own-template roof report-in substitution
- * applied for that family alone. Every other family goes through the ladder
- * untouched, so this adds a family-scoped reader rather than a second ladder.
+ * The shared evidence ladder, with family-scoped report-in substitutions.
+ * Physical placement reads the submitted report itself instead of M1's
+ * additional photo-floor rule; M1 remains unchanged. The other substitutions
+ * preserve the existing own-template and portal evidence contracts. Docs Ready
+ * stays first.
  */
 function deriveSesStageEvidence(
   input: SesStageV2Input,
@@ -804,6 +823,16 @@ function deriveSesStageEvidence(
   const docsReadyResult = sesStageDocsReady(input, family);
   const docsReadyReason =
     "the family pack is assembled, READY and unsent - one click from sending";
+  if (family.kind === "physical_makesafe") {
+    const reportIn = sesStagePhysicalReportIn(input);
+    return deriveMakesafeEvidenceStage(input as MakesafeStatusInput, {
+      reportIn,
+      reportInReason:
+        "a current-cycle submitted service report proves the trade report is in",
+      docsReady: docsReadyResult,
+      docsReadyReason,
+    });
+  }
   if (family.family === "own_template_roof") {
     const reportIn = sesStageOwnRoofReportIn(input);
     return deriveMakesafeEvidenceStage(input as MakesafeStatusInput, {
