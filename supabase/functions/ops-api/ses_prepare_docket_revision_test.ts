@@ -714,17 +714,19 @@ Deno.test("named AJS card persists to Docs Ready with DraftPack, curated and opt
     candidate.family === "physical_makesafe"
   )!;
   const input = fixtureInput(row);
-  let persistCalls = 0;
   const prepareRequest = request(input.identity.job_id, false);
   delete prepareRequest.draft_pack_output;
+  const ledger = new Map<string, DocketLedgerRow>();
+  const { client, rpcCalls } = docketLedgerClient(ledger);
   const result = (await prepareSesDocketRevision(
     prepareRequest,
     dependencies(input, {
       resolvePhysicalReportProof: async () => null,
-      persist: async () => {
-        persistCalls++;
-        return { committed_at: FIXED_TIME.toISOString() };
-      },
+      persist: createSesDocketPersistenceAdapter({
+        client,
+        org_id: "00000000-0000-0000-0000-000000000001",
+        created_by: "ses-f26-test",
+      }),
     }),
   )).results[0];
 
@@ -748,7 +750,6 @@ Deno.test("named AJS card persists to Docs Ready with DraftPack, curated and opt
     ),
     false,
   );
-  assertEquals(persistCalls, 1);
   assertEquals(result.persisted, true);
   assertEquals(result.state, "ready");
   assertEquals(result.envelope.pre_xero_docs_ready, true);
@@ -768,6 +769,58 @@ Deno.test("named AJS card persists to Docs Ready with DraftPack, curated and opt
       ) &&
       caveatCodes.includes("optional_swms_missing"),
   );
+  const commit = rpcCalls.find((call) =>
+    call.name === "commit_makesafe_docket_revision_v1"
+  );
+  assert(commit, "expected the real persistence adapter to commit the docket");
+  const persistedRevision = commit.args.p_revision as Record<string, unknown>;
+  assertEquals(
+    persistedRevision.blockers,
+    [],
+    "named-card caveats must not be re-promoted into the database hard-blocker column",
+  );
+  assertEquals(
+    rpcCalls.some((call) => call.name === "record_ses_docket_review_state_v1"),
+    true,
+    "the Docs Ready review-state handoff must remain reachable",
+  );
+});
+
+Deno.test("board batch retains DraftPack and curated findings in its existing blocker classification", async () => {
+  const row = SES_FAMILY_MATRIX.find((candidate) =>
+    candidate.builder_key === "AJBR" &&
+    candidate.family === "physical_makesafe"
+  )!;
+  const input = fixtureInput(row);
+  const prepareRequest = request(input.identity.job_id, false);
+  prepareRequest.selection = { mode: "board_batch", limit: 1 };
+  delete prepareRequest.draft_pack_output;
+  const persistedRevisions: SesPersistPayload["revision"][] = [];
+  const response = await prepareSesDocketRevision(
+    prepareRequest,
+    dependencies(input, {
+      listBoardJobs: async () => [{
+        mode: "job_id",
+        job_id: input.identity.job_id,
+      }],
+      resolvePhysicalReportProof: async () => null,
+      persist: async (payload) => {
+        persistedRevisions.push(payload.revision);
+        return { committed_at: FIXED_TIME.toISOString() };
+      },
+    }),
+  );
+
+  assertEquals(persistedRevisions.length, 1);
+  const persistedCodes = persistedRevisions[0].blockers.map((blocker) =>
+    blocker.reason_code
+  );
+  assert(
+    persistedCodes.includes("canonical_draft_pack_output_missing") &&
+      persistedCodes.includes("curated_source_missing"),
+    `expected unchanged batch blockers; got ${persistedCodes.join(", ")}`,
+  );
+  assertEquals(response.results[0].persisted, true);
 });
 
 Deno.test("artifact content-hash mismatch stays visible in a persisted review pack", async () => {
@@ -1411,7 +1464,8 @@ Deno.test("AJS report-only misclassification remains a visible exception review 
     },
   );
   const result = response.results[0];
-  assertEquals(result.state, "ready");
+  assertEquals(result.state, "blocked");
+  assertEquals(result.envelope.pre_xero_docs_ready, false);
   assert(
     blockerCodes(result).includes(
       "ajs_misclassified_as_roof_report",
@@ -4532,12 +4586,12 @@ Deno.test("persistence adapter writes only private docket artifacts and the appe
   });
   const persistPayload: SesPersistPayload = {
     revision: {
-      state: prepared.state,
+      state: "ready",
       docket_revision_id: prepared.docket_revision_id,
       input_content_hash: prepared.input_content_hash,
       output_content_hash: prepared.output_content_hash,
-      envelope: prepared.envelope,
-      blockers: prepared.blockers,
+      envelope: { ...prepared.envelope, pre_xero_docs_ready: true },
+      blockers: [],
       portal_evidence: prepared.portal_evidence,
       invoice_proposal: prepared.invoice_proposal,
       email_drafts: prepared.email_drafts,
@@ -5332,15 +5386,21 @@ Deno.test("canonical output exceptions retain an honest review pack and wrong-ca
     wrongCard,
     dependencies(input),
   )).results[0];
-  assertEquals(refused.envelope.pre_xero_docs_ready, true);
-  assertEquals(refused.state, "ready");
+  assertEquals(refused.envelope.pre_xero_docs_ready, false);
+  assertEquals(refused.state, "blocked");
   assertEquals(
     refused.blockers.find((blocker) =>
       blocker.reason_code === "draft_pack_reference_mismatch"
     )?.issue_class,
-    "send_gate",
+    "identity_safety_hard",
   );
-  assertInvoiceHandoffCallable(refused);
+  assertDraftZeroInvoice(refused, "draft_pack_reference_mismatch");
+  assert(
+    Array.isArray(reviewCard(refused).exception_review_codes) &&
+      (reviewCard(refused).exception_review_codes as string[]).includes(
+        "draft_pack_reference_mismatch",
+      ),
+  );
   assertEquals(
     object(
       object(reviewCard(refused).review_materials).make_safe_report,
@@ -5440,6 +5500,22 @@ function assertVisibleDraftZeroException(
   );
 }
 
+function assertVisibleHardException(
+  result: Awaited<
+    ReturnType<typeof prepareSesDocketRevision>
+  >["results"][number],
+  reasonCode: string,
+): void {
+  assertEquals(result.state, "blocked");
+  assertEquals(result.envelope.pre_xero_docs_ready, false);
+  assertDraftZeroInvoice(result, reasonCode);
+  const hardCodes = reviewCard(result).exception_review_codes;
+  assert(
+    Array.isArray(hardCodes) && hardCodes.includes(reasonCode),
+    `expected hard exception ${reasonCode}; got ${String(hardCodes)}`,
+  );
+}
+
 function assertVisibleNonBlockingCaveat(
   result: Awaited<
     ReturnType<typeof prepareSesDocketRevision>
@@ -5462,7 +5538,7 @@ Deno.test("Phase One keeps business findings visible under the named-card gate p
 
   const cancelled = fixtureInput(ajsPhysical);
   cancelled.classification.workflow = "cancellation";
-  assertVisibleDraftZeroException(
+  assertVisibleHardException(
     (await prepareSesDocketRevision(
       request(cancelled.identity.job_id),
       dependencies(cancelled),
@@ -5481,7 +5557,7 @@ Deno.test("Phase One keeps business findings visible under the named-card gate p
     suspected_sibling_job_number: "SWMS-TEST-SIBLING",
     suspected_invoice_number: null,
   };
-  assertVisibleNonBlockingCaveat(
+  assertVisibleHardException(
     (await prepareSesDocketRevision(
       request(duplicate.identity.job_id),
       dependencies(duplicate),

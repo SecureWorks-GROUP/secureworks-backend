@@ -424,6 +424,44 @@ function refusalFromStored(value: unknown): SesRefusal {
   };
 }
 
+/**
+ * Named-card prepare caveats are persisted in the review spec instead of the
+ * docket's hard-only `blockers` column. Rehydrate them at the release boundary
+ * so Docs Ready placement and DRAFT minting remain reachable while SEND IT and
+ * invoice authorisation continue to fail closed until the caveats are cleared.
+ */
+export function sesDocketReleaseCaveats(
+  docket: Record<string, unknown>,
+): SesRefusal[] {
+  const review = object(docket.review_spec);
+  const cards = Array.isArray(review.cards) ? review.cards : [];
+  const card = object(cards[0]);
+  const categories = [
+    ["review_assumption_codes", "review_assumptions"],
+    ["send_gate_codes", "send_gates"],
+  ] as const;
+  const seen = new Set<string>();
+  const caveats: SesRefusal[] = [];
+  for (const [codesKey, reasonsKey] of categories) {
+    const codes = Array.isArray(card[codesKey]) ? card[codesKey] : [];
+    const reasons = Array.isArray(card[reasonsKey]) ? card[reasonsKey] : [];
+    for (const [index, rawCode] of codes.entries()) {
+      const code = String(rawCode || "").trim();
+      if (!code || seen.has(code)) continue;
+      seen.add(code);
+      const fact = String(reasons[index] || "").trim();
+      caveats.push({
+        state: "refused",
+        code,
+        fact: fact || `The current docket still carries the ${code} caveat.`,
+        recovery_action:
+          "Resolve the named review caveat and prepare a fresh docket revision before release.",
+      });
+    }
+  }
+  return caveats;
+}
+
 function draftRoutes(docket: Record<string, any>): SesReviewRoute[] {
   const drafts = object(docket.email_drafts);
   const candidates: Array<[typeof SES_ROUTE_ORDER[number], unknown]> = [
@@ -824,6 +862,9 @@ function cleanInputFromRows(args: {
   const storedBlockers = Array.isArray(args.docket.blockers)
     ? args.docket.blockers.map(refusalFromStored)
     : [];
+  const storedCaveats = storedBlockers.length === 0
+    ? sesDocketReleaseCaveats(args.docket)
+    : [];
   const obligationBlockers = Array.isArray(args.obligation?.blockers)
     ? args.obligation.blockers.map(refusalFromStored)
     : [];
@@ -840,6 +881,7 @@ function cleanInputFromRows(args: {
     readiness_blockers: [
       ...blockers,
       ...storedBlockers,
+      ...storedCaveats,
       ...obligationBlockers,
     ],
     pricing_disposition: pricingDisposition,

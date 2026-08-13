@@ -2642,25 +2642,13 @@ function suppliedDraftPackOutput(
  * existing classification because no operator selected an exact card.
  */
 function isNormalNamedCardPrepare(
-  request: SesPrepareRequest,
+  operatorSelectedExactCard: boolean,
   input: SesAssemblerInputV1,
   row: SesFamilyMatrixRow | null,
 ): boolean {
-  return request.selection.mode !== "board_batch" && row !== null &&
+  return operatorSelectedExactCard && row !== null &&
     input.classification.workflow === "active" &&
     input.classification.builder_key !== "SYNTHETIC";
-}
-
-function neutraliseNamedCardPreparationHardStops(
-  normalNamedCard: boolean,
-  blockers: SesBlocker[],
-): void {
-  if (!normalNamedCard) return;
-  for (const blocker of blockers) {
-    if (isHardSesPreparationIssue(blocker)) {
-      blocker.issue_class = "send_gate";
-    }
-  }
 }
 
 async function prepareOne(
@@ -2671,6 +2659,7 @@ async function prepareOne(
       mode: "job_number";
       job_number: string;
     },
+  operatorSelectedExactCard: boolean,
   deps: SesPrepareDependencies,
 ): Promise<SesPreparedRevision> {
   const now = deps.now || (() => new Date());
@@ -2850,7 +2839,11 @@ async function prepareOne(
     );
   }
   const row = matrix.ok ? matrix.row : null;
-  const normalNamedCard = isNormalNamedCardPrepare(request, input, row);
+  const normalNamedCard = isNormalNamedCardPrepare(
+    operatorSelectedExactCard,
+    input,
+    row,
+  );
   if (
     matrix.ok &&
     (input.classification.report_only !== matrix.row.report_only ||
@@ -4133,8 +4126,6 @@ async function prepareOne(
       ),
     );
   }
-  const hadPreparationHardStop = blockers.some(isHardSesPreparationIssue);
-  neutraliseNamedCardPreparationHardStops(normalNamedCard, blockers);
   const issueBuckets = classifySesPreparationIssues(blockers);
   // Semantic and evidence findings remain visible caveats/send-holds on an
   // explicitly selected card. Only a typed invoice gate may replace a valid
@@ -4197,7 +4188,7 @@ async function prepareOne(
     ...sendGates,
     ...invoiceGates,
   ];
-  const drafts = row && !hadPreparationHardStop && !hardBlockers.length
+  const drafts = row && !hardBlockers.length
     ? buildEmailDrafts(
       input,
       row,
@@ -4431,7 +4422,7 @@ async function prepareOne(
     SES_DOCKET_LEGACY_OUTPUT_HASH_DOMAIN,
   );
   legacyRevisionIdentity.output_content_hash = legacyOutputContentHash;
-  const preXeroDocsReady = validatePreXero(
+  const preXeroDocsReady = hardBlockers.length === 0 && validatePreXero(
     manifest,
     reviewInvoiceProposal,
     artifacts,
@@ -4566,7 +4557,13 @@ async function prepareOne(
     ) {
       const persistedResult = await measure("T11", () =>
         deps.persist!({
-          revision: baseRevision,
+          // The database `blockers` column is the hard refusal input to the
+          // Docs Ready review-state RPC. Named-card caveats remain durable in
+          // review_spec/release_payload and still hold release, but must not be
+          // re-promoted into that hard-only column during the real commit.
+          revision: normalNamedCard
+            ? { ...baseRevision, blockers: hardBlockers }
+            : baseRevision,
           artifacts,
           idempotency_key: revisionIdentity.idempotency_key,
           legacy_identity: legacyRevisionIdentity,
@@ -4662,6 +4659,7 @@ async function prepareSesDocketRevision(
   deps: SesPrepareDependencies,
 ): Promise<SesPrepareResponse> {
   validateRequest(request);
+  const operatorSelectedExactCard = request.selection.mode !== "board_batch";
   let selections: Array<
     | { mode: "job_id"; job_id: string }
     | {
@@ -4702,6 +4700,7 @@ async function prepareSesDocketRevision(
             : request.idempotency_key,
         },
         selection,
+        operatorSelectedExactCard,
         deps,
       )
     ),
