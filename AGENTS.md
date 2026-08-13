@@ -3076,9 +3076,14 @@ _shared/sms_from_number_test.ts, ghl-proxy/sms_sender_default_test.ts.
 Signed-in browser callers are classified by ONE staff-operator predicate:
 _opsApiCallerIsStaffOperator / _opsApiStaffOperatorRole in
 supabase/functions/ops-api/index.ts (admin/owner/ops_manager — the exact set
-the front-door gate admits). Any per-action operator check must reuse it; a
-hand-rolled admin-only literal re-classifies an admitted operator as a trade
-deeper in the dispatch (the SWF-261098 add_note lockout). Deliberately-strict
+the front-door gate admits as staff). Any per-action operator check must reuse
+it; a hand-rolled admin-only literal re-classifies an admitted operator as a
+trade deeper in the dispatch (the SWF-261098 add_note lockout). The front door
+passes ONE role-scoped exception beside the staff set:
+LEAD_INSTALLER_READ_ACTIONS (pipeline/calendar/ops_summary/list_users — the
+reads trade.html's lead_installer dispatcher view boots on). It is
+deliberately NOT staff-set membership, so inner operator checks and every
+write/money surface still refuse the role; do not widen it. Deliberately-strict
 admin/owner gates (money, comms, credential, recovery, batch surfaces) stay
 literal on purpose — the audit table lives in PR #680/#681. Status codes:
 401 is reserved for user_jwt_required (no/invalid session — trade.html

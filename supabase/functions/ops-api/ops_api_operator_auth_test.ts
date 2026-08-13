@@ -468,7 +468,9 @@ Deno.test("#681: a signed-in trade on a staff-only action gets 403 operator_acce
   // `pipeline` moved out of this list on 2026-08-13: it is now a
   // LEAD_INSTALLER_READ_ACTIONS entitlement (see the lockout tests below).
   // A crew JWT still 403s on it, covered there too.
-  for (const action of ["makesafe_board", "job_financials", "list_work_orders"]) {
+  for (
+    const action of ["makesafe_board", "job_financials", "list_work_orders"]
+  ) {
     const decision = _authorizeOpsApiAction({
       url: actionUrl(action),
       authMode: "jwt",
@@ -518,7 +520,11 @@ Deno.test("outage fix: the entitlement is role-scoped — crew and other non-sta
       assertEquals(decision.ok, false, `${role}:${action}`);
       if (!decision.ok) {
         assertEquals(decision.status, 403, `${role}:${action}`);
-        assertEquals(decision.code, "operator_access_required", `${role}:${action}`);
+        assertEquals(
+          decision.code,
+          "operator_access_required",
+          `${role}:${action}`,
+        );
       }
     }
   }
@@ -534,7 +540,11 @@ Deno.test("outage fix: a missing or invalid session still gets 401 on the four r
       assertEquals(decision.ok, false, `${authMode}:${action}`);
       if (!decision.ok) {
         assertEquals(decision.status, 401, `${authMode}:${action}`);
-        assertEquals(decision.code, "user_jwt_required", `${authMode}:${action}`);
+        assertEquals(
+          decision.code,
+          "user_jwt_required",
+          `${authMode}:${action}`,
+        );
       }
     }
   }
