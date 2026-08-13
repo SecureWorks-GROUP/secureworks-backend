@@ -1126,7 +1126,11 @@ function portalCapturesFromDetail(base: any): MakesafePortalCapture[] {
         // validated ledger row and by nothing else. These entries come from
         // free-form card content (`portal_evidence`, `portal_captures`, a JSON
         // `portal_verified_signal`), so strip it rather than trust it.
-        const { attested_producer: _dropped, ...rest } = item as Record<
+        const {
+          attested_producer: _dropped,
+          legacy_verified: _legacyDropped,
+          ...rest
+        } = item as Record<
           string,
           unknown
         >;

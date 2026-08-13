@@ -217,6 +217,8 @@ Deno.test("computed status: AUTHORISED not-sent stays Docs Ready (no post-author
     completionPhotoCount: 8,
     invoiceStatus: "AUTHORISED",
     invoiceQualifiesAsCurrentDraft: false,
+    invoiceQualifiesAsCurrentCloseout: true,
+    documents: { invoice: true },
     packSent: false,
     packState: "READY",
     swmsRequired: true,

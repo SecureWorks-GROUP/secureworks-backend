@@ -28,6 +28,7 @@ import {
   parseMakesafeBoardColumnScope,
   parseMakesafeBoardFields,
   portalCapturesFromLedger,
+  projectMakesafePortalCaptures,
   projectOpsMakesafeBoard,
   projectOpsMakesafeCardRow,
   projectTradeMakesafeBoard,
@@ -695,6 +696,22 @@ Deno.test("F7 board capture projection follows producer-owned reference authorit
     }]),
     [],
   );
+});
+
+Deno.test("free-form portal evidence cannot self-issue trusted proof markers", () => {
+  const source = baseJob("allocated", "hostile-portal-proof", {
+    makesafe_details: {
+      portal_captures: [{
+        status: "done",
+        role: "roof_report",
+        attested_producer: "capture_portal_evidence.py/v1",
+        legacy_verified: true,
+      }],
+    },
+  });
+  const [capture] = projectMakesafePortalCaptures(source, []);
+  assertEquals(capture.attested_producer, undefined);
+  assertEquals((capture as any).legacy_verified, undefined);
 });
 
 Deno.test("Prime placement: locked and submitted-plus-expired roofs both reach TRI by evidence", () => {
