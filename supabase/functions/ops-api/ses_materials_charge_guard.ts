@@ -518,6 +518,15 @@ export function carriedMaterialsChargeDecision(input: {
 export type MaterialsChargeDecision =
   | { action: "none" }
   | {
+    action: "settled_charge_lines";
+    materials: string[];
+    lines: Array<{
+      description: string;
+      quantity: number;
+      unit_price_ex_gst: number;
+    }>;
+  }
+  | {
     action: "charge_line";
     materials: string[];
     amount_ex_gst: number;
@@ -578,7 +587,7 @@ export const MATERIALS_CHARGE_CLEAR_PATH =
 /**
  * Decide whether a standard_labour_materials proposal needs a materials charge
  * line, already has one (via priced typed materials), can accept the operator's
- * one-figure answer, or must refuse.
+ * one-figure answer, derive the two settled rate-card materials, or must refuse.
  *
  * `pricedMaterialsLineCount` is how many materials lines the proposal already
  * holds (typed materials with description + qty + unit price). Labour is not
@@ -713,6 +722,57 @@ export function decideStandardLabourMaterialsCharge(input: {
       materials,
       invoice: invoiced,
       provenance: invoicedMaterialsChargeMarker(invoiced, materials),
+    };
+  }
+
+  // Captain-settled rate-card carve-out (2026-08-13). Keep this deliberately
+  // local to the guard: silicone is $25 per cartridge and flashing tape is $25
+  // per roll, with any part-use billed as one whole unit. Anchored labels allow
+  // the trade form's quantity / part-use suffixes without turning work verbs,
+  // silicone spray, or unrelated flashing products into invoice materials.
+  const settledLines = materials.map((material) => {
+    const normalized = material.toLowerCase().replaceAll(/\s+/g, " ").trim();
+    if (
+      /^(?:(?:part(?:ial)?|half)(?:[- ](?:cartridge|tube))?(?:[- ]use(?:d)?)? )?silicone(?: sealant)?(?: (?:cartridge|tube))?(?:\s*(?:x|×)?\s*(?:\d+(?:\.\d+)?|half|part(?:ial)?)(?:\s*(?:cartridges?|tubes?|units?))?)?(?:\s*[-–—]\s*(?:part(?:ial)?|half)(?:\s+(?:cartridge|tube))?(?:\s+used)?)?$/
+        .test(
+          normalized,
+        )
+    ) {
+      const statedUnits = normalized.match(
+        /(?:x|×)\s*(\d+(?:\.\d+)?)\s*(?:cartridges?|tubes?|units?)?\b|\b(\d+(?:\.\d+)?)\s*(?:cartridges?|tubes?|units?)\b/,
+      );
+      return {
+        description: `Materials used: ${material} (whole cartridge)`,
+        quantity: statedUnits
+          ? Math.max(1, Math.ceil(Number(statedUnits[1] || statedUnits[2])))
+          : 1,
+        unit_price_ex_gst: 25,
+      };
+    }
+    if (
+      /^(?:(?:part(?:ial)?|half)(?:[- ]roll)?(?:[- ]use(?:d)?)? )?flashing[ -]+tape(?: roll)?(?:\s*(?:x|×)?\s*\d+(?:\.\d+)?\s*(?:m|metres?|meters?|rolls?|units?)?)?(?:\s*[-–—]\s*(?:part(?:ial)?|half)(?:\s+roll)?(?:\s+used)?)?$/
+        .test(
+          normalized,
+        )
+    ) {
+      const statedRolls = normalized.match(
+        /\b(\d+(?:\.\d+)?)\s*rolls?\b/,
+      );
+      return {
+        description: `Materials used: ${material} (whole roll)`,
+        quantity: statedRolls
+          ? Math.max(1, Math.ceil(Number(statedRolls[1])))
+          : 1,
+        unit_price_ex_gst: 25,
+      };
+    }
+    return null;
+  });
+  if (settledLines.length && settledLines.every((line) => line !== null)) {
+    return {
+      action: "settled_charge_lines",
+      materials,
+      lines: settledLines.filter((line) => line !== null),
     };
   }
 

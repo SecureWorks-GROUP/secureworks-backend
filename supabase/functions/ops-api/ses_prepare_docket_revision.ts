@@ -1538,6 +1538,17 @@ function localInvoiceProposal(
       );
       materialsChargeMeta = materialsDecision.provenance;
     }
+    if (materialsDecision.action === "settled_charge_lines") {
+      for (const settled of materialsDecision.lines) {
+        lines.push(
+          lineItem(
+            `${ref} - ${settled.description}`,
+            settled.quantity,
+            settled.unit_price_ex_gst,
+          ),
+        );
+      }
+    }
     if (
       materialsDecision.action === "no_charge_recorded" ||
       materialsDecision.action === "already_invoiced" ||
