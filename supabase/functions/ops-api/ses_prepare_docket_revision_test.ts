@@ -2404,6 +2404,97 @@ Deno.test(
 );
 
 Deno.test(
+  "settled silicone and flashing tape price at $25 per whole unit without a Captain ask",
+  async () => {
+    const result = await labourProposal("MLB", "physical_makesafe", {
+      trades: 2,
+      hours_per_trade: 2,
+      rate_ex_gst: 85,
+      materials: [],
+      materials_used: ["Silicone x 1", "Flashing Tape x 0.4m"],
+    });
+
+    assertEquals(
+      result.blockers.filter((item) =>
+        item.reason_code === "materials_charge_figure_required"
+      ).length,
+      0,
+    );
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assert(proposal, "settled materials must leave the assembler complete");
+    const lines = proposal.line_items as Array<Record<string, unknown>>;
+    assertEquals(lines.length, 3);
+    assertEquals(
+      lines.slice(1).map((line) => ({
+        quantity: line.quantity,
+        unit_price_ex_gst: line.unit_price_ex_gst,
+        amount_ex_gst: line.amount_ex_gst,
+      })),
+      [
+        { quantity: 1, unit_price_ex_gst: 25, amount_ex_gst: 25 },
+        { quantity: 1, unit_price_ex_gst: 25, amount_ex_gst: 25 },
+      ],
+    );
+    assertStringIncludes(String(lines[1].description), "whole cartridge");
+    assertStringIncludes(String(lines[2].description), "whole roll");
+    assertEquals(proposal.subtotal_ex_gst, 560);
+  },
+);
+
+Deno.test(
+  "part-use of one silicone cartridge bills one whole $25 unit",
+  async () => {
+    const result = await labourProposal("MLB", "physical_makesafe", {
+      trades: 1,
+      hours_per_trade: 3,
+      rate_ex_gst: 85,
+      materials: [],
+      materials_used: ["Silicone x 0.4 cartridge"],
+    });
+
+    assertEquals(
+      result.blockers.filter((item) =>
+        item.reason_code === "materials_charge_figure_required"
+      ).length,
+      0,
+    );
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assert(proposal, "part-use settled material must price");
+    const lines = proposal.line_items as Array<Record<string, unknown>>;
+    assertEquals(lines.length, 2);
+    assertEquals(lines[1].quantity, 1);
+    assertEquals(lines[1].unit_price_ex_gst, 25);
+    assertEquals(lines[1].amount_ex_gst, 25);
+  },
+);
+
+Deno.test(
+  "unknown off-card material still asks once and invents no rate",
+  async () => {
+    const result = await labourProposal("MLB", "physical_makesafe", {
+      trades: 1,
+      hours_per_trade: 3,
+      rate_ex_gst: 85,
+      materials: [],
+      materials_used: ["Silicone spray", "Roof flashing"],
+    });
+
+    assertEquals(
+      result.blockers.filter((item) =>
+        item.reason_code === "materials_charge_figure_required"
+      ).length,
+      1,
+    );
+    assertDraftZeroInvoice(result, "materials_charge_figure_required");
+    const blocker = result.blockers.find((item) =>
+      item.reason_code === "materials_charge_figure_required"
+    )!;
+    assertStringIncludes(blocker.reason, "Silicone spray");
+    assertStringIncludes(blocker.reason, "Roof flashing");
+  },
+);
+
+Deno.test(
   "an authorised materials figure is never silently discarded",
   async () => {
     // Nothing to charge for: the figure must refuse, not vanish into a
