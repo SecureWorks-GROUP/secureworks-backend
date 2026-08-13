@@ -1253,6 +1253,70 @@ Deno.test("repair stays explicitly typed and sealed through board projection", (
   assertEquals(canonical.ses_recipe_state, "sealed");
 });
 
+Deno.test("repair family authority in ses_family or report_type leaves the Captain Decision column", () => {
+  const fixtures = [
+    {
+      id: "repair-from-ses-family",
+      metadata: { ses_family: "repair" },
+      detail: {},
+    },
+    {
+      id: "repair-from-report-type",
+      metadata: {},
+      detail: { report_type: "repair" },
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const [canonical] = buildCanonicalMakesafeRows([
+      baseJob("new", fixture.id, {
+        status: "accepted",
+        assignments: [],
+        substatus: "company_contact_required",
+        metadata: fixture.metadata,
+        makesafe_details: {
+          substatus: "company_contact_required",
+          cycle_number: 1,
+          ...fixture.detail,
+        },
+      }),
+    ], { computedAt: NOW });
+
+    assertEquals(canonical.ses_family, "repair", fixture.id);
+    assertEquals(canonical.ses_family_label, "Repair", fixture.id);
+    assertEquals(canonical.ses_recipe_state, "sealed", fixture.id);
+    assertEquals(canonical.canonical_stage, "new", fixture.id);
+    assertEquals(canonical.derived_stage_v2_conflicts, [], fixture.id);
+    assertEquals(canonical.blockers.real, [{
+      code: "client_contact_required",
+      category: "client_availability",
+    }], fixture.id);
+  }
+});
+
+Deno.test("repair family authority preserves a genuine Captain Decision", () => {
+  const [canonical] = buildCanonicalMakesafeRows([
+    baseJob("decision_required", "repair-with-terminal-conflict", {
+      status: "complete",
+      assignments: [],
+      metadata: { ses_family: "repair" },
+      makesafe_details: {
+        report_type: "repair",
+        substatus: "company_contact_required",
+        cycle_number: 1,
+      },
+    }),
+  ], { computedAt: NOW });
+
+  assertEquals(canonical.ses_family, "repair");
+  assertEquals(canonical.ses_recipe_state, "sealed");
+  assertEquals(canonical.canonical_stage, "decision_required");
+  assertEquals(canonical.derived_stage_v2_conflicts, [
+    "terminal_without_issued_invoice",
+    "terminal_without_supporting_evidence",
+  ]);
+});
+
 Deno.test("captain-applied status is a display overlay and never rewrites declared or raw state", () => {
   // R12 cutover: the overlay's `source_status` is matched against the DERIVED
   // stage now, not the declared one, so the card carries the evidence that

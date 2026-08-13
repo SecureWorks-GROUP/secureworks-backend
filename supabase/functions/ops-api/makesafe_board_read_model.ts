@@ -312,6 +312,19 @@ export function projectOpsMakesafeCardRow(row: any) {
 /** The canonical family of a raw board row, from the one canonical deriver. */
 export function boardRowSesFamily(base: any) {
   const detail = base?.makesafe_details || {};
+  // Some Captain-reviewed repair corrections carry the ruling as
+  // `metadata.ses_family=repair` and/or the legacy detail authority
+  // `report_type=repair`, without the `makesafe_job_family` key read below.
+  // Admit only that exact alternate family signal here: treating every
+  // report_type as a family fallback would widen this repair into unrelated
+  // report-card reclassification.
+  if (
+    [base?.metadata?.ses_family, detail?.report_type].some((value) =>
+      canonicalSesFamilyFromCard({ makesafe_job_family: value }) === "repair"
+    )
+  ) {
+    return "repair";
+  }
   return canonicalSesFamilyFromCard({
     makesafe_job_family: base?.metadata?.makesafe_job_family,
     insurance_job_type: base?.metadata?.insurance_job_type,
@@ -1202,14 +1215,7 @@ export function buildCanonicalMakesafeRows(
     const report = base?.report || null;
     const pack = base?.report_pack || null;
     const detail = base?.makesafe_details || {};
-    const sesFamily = canonicalSesFamilyFromCard({
-      makesafe_job_family: base?.metadata?.makesafe_job_family,
-      insurance_job_type: base?.metadata?.insurance_job_type,
-      own_template_requested: base?.metadata?.own_template_requested,
-      strata: base?.metadata?.strata,
-      report_delivery: base?.metadata?.report_delivery ||
-        detail?.report_delivery,
-    });
+    const sesFamily = boardRowSesFamily(base);
     // Release 12: portal captures, holds and photo counts are PLACEMENT
     // evidence now (the corrected engine reads them), so card mode loads and
     // projects them like full mode. Card and full mode must place identically.
