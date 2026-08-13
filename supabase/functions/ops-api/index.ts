@@ -238,6 +238,10 @@ import {
   selectCurrentMakesafeReceivableInvoice,
 } from './makesafe_docs_ready_invoice.ts'
 import {
+  selectExistingInvoiceForPackBind,
+  SesBindExistingInvoiceError,
+} from './ses_bind_existing_invoice_pack.ts'
+import {
   createSesAssemblerRuntimeDependencies,
   normalizeSesPrepareRequest,
   SesAssemblerAdapterError,
@@ -7379,6 +7383,28 @@ if (import.meta.main) serve(async (req: Request) => {
             bindExistingInvoiceCloseout: bindExistingSesInvoiceCloseout,
           },
         ))
+      case 'bind_existing_makesafe_invoice_pack': {
+        // Privileged, bind-only repair for cards whose existing Xero invoice
+        // predates the SES lineage. It is intentionally absent from the routine
+        // allow-list: the Captain/ops key names the exact invoice to adopt.
+        if (authMode !== 'api_key') {
+          return json({
+            success: false,
+            code: 'bind_existing_invoice_requires_ops_privilege',
+            error: 'bind_existing_makesafe_invoice_pack requires the privileged ops key',
+          }, 403)
+        }
+        await assertNoSyntheticLivefireJobs(
+          client,
+          body.job_id ? [body.job_id] : [],
+          'bind_existing_makesafe_invoice_pack',
+        )
+        return json(await bindExistingMakesafeInvoicePack(client, {
+          job_id: body.job_id,
+          invoice_number: body.invoice_number,
+          actor: authUser?.email || body.actor || 'captain-bind-existing-invoice',
+        }))
+      }
       case 'resolve_ses_invoice_duplicates':
         return json(await resolveSesInvoiceDuplicatesAction(
           client,
@@ -18332,6 +18358,192 @@ async function bindExistingSesInvoiceCloseout(
     report_closeout: !!reportDoc?.id,
   }
 }
+
+interface BindExistingMakesafeInvoicePackDeps {
+  fetchAllAccrecInvoices?: (client: any) => Promise<any[]>
+  fetchInvoicePdfBytes?: (client: any, xeroInvoiceId: string) => Promise<Uint8Array>
+  attachDocument?: typeof attachMakesafeDocument
+  ensurePack?: typeof _ensurePackRowStrict
+  patchPack?: typeof _patchPackStrict
+}
+
+/**
+ * Bind a Captain-named, already-existing Xero invoice PDF into the main pack.
+ *
+ * This recovery deliberately does not read or create a SES lineage: older
+ * cards can have a blank lineage while their real Xero invoice already exists.
+ * Exact invoice identity is proved first, then the Xero PDF is fetched, and
+ * only local document/pack pointers are written. There is no Xero create,
+ * update, authorise, void, payment, email, SMS, or board-stage write in this
+ * function.
+ */
+async function bindExistingMakesafeInvoicePack(
+  client: any,
+  args: {
+    job_id: string
+    invoice_number: string
+    actor: string
+  },
+  deps: BindExistingMakesafeInvoicePackDeps = {},
+) {
+  const jobId = String(args.job_id || '').trim()
+  const invoiceNumber = String(args.invoice_number || '').trim()
+  if (!jobId) throw new ApiError('job_id required', 400)
+  if (!invoiceNumber) throw new ApiError('invoice_number required', 400)
+
+  const [jobResponse, detailResponse, packResponse] = await Promise.all([
+    client.from('jobs')
+      .select('id,job_number,metadata')
+      .eq('id', jobId).maybeSingle(),
+    client.from('makesafe_job_details')
+      .select('job_id,external_ref,reattend_count,last_reattend_at,attendance_cycle_id,cycle_number')
+      .eq('job_id', jobId).maybeSingle(),
+    client.from('makesafe_report_packs')
+      .select('id,status,sent_at,send_started_at,failed_step')
+      .eq('job_id', jobId).eq('pack_kind', 'main').maybeSingle(),
+  ])
+  if (jobResponse.error || !jobResponse.data) {
+    throw new ApiError(
+      `bind-only invoice job read failed: ${jobResponse.error?.message || 'job not found'}`,
+      jobResponse.error ? 503 : 404,
+    )
+  }
+  if (detailResponse.error || !detailResponse.data) {
+    throw new ApiError(
+      `bind-only invoice detail read failed: ${detailResponse.error?.message || 'make-safe detail not found'}`,
+      detailResponse.error ? 503 : 404,
+    )
+  }
+  if (packResponse.error) {
+    throw new ApiError(`bind-only invoice pack read failed: ${packResponse.error.message}`, 503)
+  }
+  const packStatus = String(packResponse.data?.status || '').toLowerCase()
+  if (
+    packResponse.data?.sent_at || packResponse.data?.send_started_at ||
+    ['sending', 'sent', 'sent_marker_failed', 'sent_not_closed', 'close_failed'].includes(packStatus)
+  ) {
+    throw new ApiError(
+      `bind-only invoice recovery refuses pack status '${packStatus || 'unknown'}' because send state already exists`,
+      409,
+    )
+  }
+
+  const fetchAll = deps.fetchAllAccrecInvoices || _fetchAllAccrecInvoices
+  let invoices: any[]
+  try {
+    invoices = await fetchAll(client)
+  } catch (error) {
+    throw new ApiError(
+      `bind-only invoice ACCREC scan failed: ${(error as Error)?.message || 'unknown error'}`,
+      503,
+    )
+  }
+  let invoice: any
+  try {
+    invoice = selectExistingInvoiceForPackBind({
+      job: jobResponse.data,
+      detail: detailResponse.data,
+      invoices,
+      expected_invoice_number: invoiceNumber,
+    })
+  } catch (error) {
+    if (error instanceof SesBindExistingInvoiceError) {
+      throw new ApiError(error.message, error.status, {
+        success: false,
+        code: error.code,
+        invoice_create_dispatched: false,
+        invoice_authorise_dispatched: false,
+        send_dispatched: false,
+      })
+    }
+    throw error
+  }
+
+  const fetchPdf = deps.fetchInvoicePdfBytes || (async (_client, invoiceId) => {
+    const { accessToken, tenantId } = await getToken(client)
+    return await _fetchXeroInvoicePdfBytes(accessToken, tenantId, invoiceId)
+  })
+  let pdf: Uint8Array
+  try {
+    pdf = await fetchPdf(client, invoice.xero_invoice_id)
+  } catch (error) {
+    throw new ApiError(
+      `Existing invoice ${invoice.invoice_number} was preserved, but its exact Xero PDF could not be fetched: ${(error as Error)?.message || 'unknown error'}`,
+      503,
+      {
+        success: false,
+        code: 'existing_invoice_pdf_unavailable',
+        invoice_create_dispatched: false,
+        invoice_authorise_dispatched: false,
+        send_dispatched: false,
+      },
+    )
+  }
+
+  const attachDocument = deps.attachDocument || attachMakesafeDocument
+  const attached = await attachDocument(
+    client,
+    {
+      job_id: jobId,
+      type: 'invoice',
+      file_name: `Xero Invoice - ${invoice.invoice_number}.pdf`,
+      pdf_base64: _bytesToBase64(pdf),
+      operator_email: args.actor,
+    },
+    {
+      attendance_cycle_id: detailResponse.data.attendance_cycle_id || null,
+      cycle_attribution: detailResponse.data.attendance_cycle_id ? 'bound' : null,
+      data_snapshot_json: {
+        source: 'bind_existing_makesafe_invoice_pack',
+        xero_invoice_id: invoice.xero_invoice_id,
+        invoice_number: invoice.invoice_number,
+        invoice_status: invoice.status,
+        bind_only: true,
+      },
+    },
+  )
+  if (!attached?.document_id) {
+    throw new ApiError('bind-only invoice document attach returned no document id', 503)
+  }
+
+  const ensurePack = deps.ensurePack || _ensurePackRowStrict
+  const patchPack = deps.patchPack || _patchPackStrict
+  await ensurePack(client, jobId, 'main')
+  await patchPack(client, jobId, 'main', {
+    xero_invoice_id: invoice.xero_invoice_id,
+    invoice_status: invoice.status,
+    invoice_doc_id: attached.document_id,
+    ...(packStatus === 'failed'
+      ? {
+        status: 'drafted',
+        failed_step: null,
+        error_detail: null,
+        send_started_at: null,
+      }
+      : {}),
+  })
+
+  return {
+    success: true,
+    state: 'existing_invoice_pack_bound',
+    job_id: jobId,
+    job_number: jobResponse.data.job_number || null,
+    invoice: {
+      xero_invoice_id: invoice.xero_invoice_id,
+      invoice_number: invoice.invoice_number,
+      status: invoice.status,
+      document_id: attached.document_id,
+    },
+    scanned_accrec: invoices.length,
+    lineage_required: false,
+    invoice_create_dispatched: false,
+    invoice_authorise_dispatched: false,
+    send_dispatched: false,
+    external_mutations: { xero: 0, email: 0 },
+  }
+}
+
+export const _bindExistingMakesafeInvoicePackForTest = bindExistingMakesafeInvoicePack
 
 // Test-only exports for the item-11 live-Graph attachment fallback.
 export const _pickGraphAttachmentForTest = pickGraphAttachment

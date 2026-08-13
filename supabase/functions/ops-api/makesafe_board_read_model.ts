@@ -1178,7 +1178,45 @@ function portalCapturesFromDetail(base: any): MakesafePortalCapture[] {
       String(capture.status || "").toLowerCase() === "done"
     )
   ) {
-    captures.push({ status: "done", role: "roof_report", cycle_number: cycle });
+    captures.push({
+      status: "done",
+      role: "roof_report",
+      cycle_number: cycle,
+      // Historical roof verification is a stored, cycle-scoped fact. It is
+      // roof-only by construction. Assessment has the stricter full-set branch
+      // below. The placing engine consumes this marker explicitly instead of
+      // pretending it was a new capture revision.
+      legacy_verified: true,
+    } as MakesafePortalCapture);
+  }
+  // The legacy observer predates the append-only capture ledger on a small
+  // assessment cohort. Admit it only when the stored signal explicitly proves
+  // the FULL portal set submitted/locked and the card still owns all three
+  // typed links. A timestamp or generic "verified" string is not enough.
+  if (
+    verifiedThisCycle && reportType === "assessmentreport" &&
+    /full portal set submitted\s*\/\s*locked/i.test(String(signal || ""))
+  ) {
+    const links = extractPortalLinks(detail?.external_links);
+    const byRole = new Map<string, string>();
+    for (const link of links) {
+      const role = linkRoleToBoardRole(link.role);
+      const url = canonicalSesPortalSourceUrl(link.url);
+      if (role && url) byRole.set(role, url);
+    }
+    const required = ["assessment_report", "photos", "quote"];
+    if (required.every((role) => byRole.has(role))) {
+      for (const role of required) {
+        captures.push({
+          status: "done",
+          role,
+          url: byRole.get(role),
+          locked: true,
+          cycle_number: cycle,
+          legacy_verified: true,
+        } as MakesafePortalCapture);
+      }
+    }
   }
   return captures;
 }
@@ -1198,7 +1236,8 @@ export function projectMakesafePortalCaptures(
 ): MakesafePortalCapture[] {
   const ledger = portalCapturesFromLedger(base, ledgerRows || []);
   const ledgerIdentities = new Set(
-    ledger.map(portalCaptureIdentity).filter(Boolean),
+    ledger.filter((capture) => capture.status !== "unreachable")
+      .map(portalCaptureIdentity).filter(Boolean),
   );
   return [
     ...ledger,

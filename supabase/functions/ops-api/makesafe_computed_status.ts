@@ -78,6 +78,8 @@ export interface MakesafePortalCapture {
    */
   attested_producer?: string | null;
   attested_by?: string | null;
+  /** Strict, cycle-scoped historical portal verification projected by the read model. */
+  legacy_verified?: boolean | null;
 }
 
 /**
@@ -264,7 +266,8 @@ export function donePortalRoles(input: MakesafeStatusInput): Set<string> {
         const proven =
           !!String(capture?.screenshot || capture?.screenshot_path || "")
             .trim() ||
-          capture?.attested_producer === MAKESAFE_ATTESTED_PORTAL_PRODUCER;
+          capture?.attested_producer === MAKESAFE_ATTESTED_PORTAL_PRODUCER ||
+          capture?.legacy_verified === true;
         return (
           String(capture?.status || "").toLowerCase() === "done" &&
           proven &&
