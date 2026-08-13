@@ -7,7 +7,10 @@ import {
   selectExistingInvoiceForPackBind,
   SesBindExistingInvoiceError,
 } from "./ses_bind_existing_invoice_pack.ts";
-import { _bindExistingMakesafeInvoicePackForTest } from "./index.ts";
+import {
+  _bindExistingInvoicePackStrictForTest,
+  _bindExistingMakesafeInvoicePackForTest,
+} from "./index.ts";
 
 const JOB_ID = "job-26740";
 const job = {
@@ -134,7 +137,7 @@ Deno.test("bind-only refuses an older named invoice when another row is current"
   );
 });
 
-function actionClient() {
+function actionClient(packOverrides: Record<string, unknown> = {}) {
   const rows: Record<string, any> = {
     jobs: { data: job, error: null },
     makesafe_job_details: {
@@ -148,6 +151,9 @@ function actionClient() {
         sent_at: null,
         send_started_at: null,
         failed_step: null,
+        xero_invoice_id: null,
+        invoice_doc_id: null,
+        ...packOverrides,
       },
       error: null,
     },
@@ -165,7 +171,7 @@ function actionClient() {
 }
 
 Deno.test("SWMS-26740 bind-only action attaches INV-0817 and dispatches no money or send", async () => {
-  const calls = { attach: 0, ensure: 0, patch: 0 };
+  const calls = { attach: 0, ensure: 0, bind: 0 };
   const result = await _bindExistingMakesafeInvoicePackForTest(
     actionClient() as any,
     {
@@ -190,22 +196,20 @@ Deno.test("SWMS-26740 bind-only action attaches INV-0817 and dispatches no money
       ensurePack: async () => {
         calls.ensure++;
       },
-      patchPack: async (
+      bindPack: async (
         _client: any,
         _jobId: string,
-        _kind: string,
-        patch: any,
+        selectedInvoice: any,
+        invoiceDocId: string,
       ) => {
-        calls.patch++;
-        assertEquals(patch, {
-          xero_invoice_id: "xero-0817",
-          invoice_status: "DRAFT",
-          invoice_doc_id: "invoice-doc-0817",
-        });
+        calls.bind++;
+        assertEquals(selectedInvoice.xero_invoice_id, "xero-0817");
+        assertEquals(selectedInvoice.status, "DRAFT");
+        assertEquals(invoiceDocId, "invoice-doc-0817");
       },
     },
   );
-  assertEquals(calls, { attach: 1, ensure: 1, patch: 1 });
+  assertEquals(calls, { attach: 1, ensure: 1, bind: 1 });
   assertEquals(result.state, "existing_invoice_pack_bound");
   assertEquals(result.lineage_required, false);
   assertEquals(result.invoice_create_dispatched, false);
@@ -242,8 +246,8 @@ Deno.test("bind-only PDF failure writes no document or pack", async () => {
         ensurePack: async () => {
           writes.push("ensure");
         },
-        patchPack: async () => {
-          writes.push("patch");
+        bindPack: async () => {
+          writes.push("bind");
         },
       },
     );
@@ -252,4 +256,150 @@ Deno.test("bind-only PDF failure writes no document or pack", async () => {
   }
   assertEquals(writes, []);
   assertEquals(message.includes("exact Xero PDF could not be fetched"), true);
+});
+
+Deno.test("bind-only refuses failed packs without clearing their failure", async () => {
+  let fetched = false;
+  let message = "";
+  try {
+    await _bindExistingMakesafeInvoicePackForTest(
+      actionClient({
+        status: "failed",
+        failed_step: "money_review_gate",
+      }) as any,
+      {
+        job_id: JOB_ID,
+        invoice_number: "INV-0817",
+        actor: "captain@test",
+      },
+      {
+        fetchAllAccrecInvoices: async () => {
+          fetched = true;
+          return [invoice()];
+        },
+      },
+    );
+  } catch (error) {
+    message = (error as Error).message;
+  }
+  assertEquals(fetched, false);
+  assertEquals(message.includes("refuses pack status 'failed'"), true);
+});
+
+Deno.test("bind-only refuses a divergent pack invoice before PDF or document writes", async () => {
+  const writes: string[] = [];
+  let message = "";
+  try {
+    await _bindExistingMakesafeInvoicePackForTest(
+      actionClient({ xero_invoice_id: "xero-other" }) as any,
+      {
+        job_id: JOB_ID,
+        invoice_number: "INV-0817",
+        actor: "captain@test",
+      },
+      {
+        fetchAllAccrecInvoices: async () => [invoice()],
+        fetchInvoicePdfBytes: async () => {
+          writes.push("pdf");
+          return new Uint8Array([37, 80, 68, 70]);
+        },
+        attachDocument: async () => {
+          writes.push("attach");
+          return { document_id: "unexpected" } as any;
+        },
+      },
+    );
+  } catch (error) {
+    message = (error as Error).message;
+  }
+  assertEquals(writes, []);
+  assertEquals(message.includes("refuses to replace pack invoice"), true);
+});
+
+Deno.test("bind-only is idempotent for the same already-bound invoice", async () => {
+  const writes: string[] = [];
+  const result = await _bindExistingMakesafeInvoicePackForTest(
+    actionClient({
+      xero_invoice_id: "xero-0817",
+      invoice_doc_id: "invoice-doc-0817",
+    }) as any,
+    {
+      job_id: JOB_ID,
+      invoice_number: "INV-0817",
+      actor: "captain@test",
+    },
+    {
+      fetchAllAccrecInvoices: async () => [invoice()],
+      fetchInvoicePdfBytes: async () => {
+        writes.push("pdf");
+        return new Uint8Array();
+      },
+      attachDocument: async () => {
+        writes.push("attach");
+        return { document_id: "unexpected" } as any;
+      },
+      ensurePack: async () => {
+        writes.push("ensure");
+      },
+      bindPack: async () => {
+        writes.push("bind");
+      },
+    },
+  );
+  assertEquals(writes, []);
+  assertEquals(result.state, "existing_invoice_pack_already_bound");
+  assertEquals(result.invoice.document_id, "invoice-doc-0817");
+});
+
+Deno.test("bind-only pack update loses cleanly to a concurrent send lock", async () => {
+  const filters: Array<[string, unknown]> = [];
+  const chain: any = {
+    update: () => chain,
+    eq: (column: string, value: unknown) => {
+      filters.push([`eq:${column}`, value]);
+      return chain;
+    },
+    in: (column: string, value: unknown) => {
+      filters.push([`in:${column}`, value]);
+      return chain;
+    },
+    is: (column: string, value: unknown) => {
+      filters.push([`is:${column}`, value]);
+      return chain;
+    },
+    or: (value: string) => {
+      filters.push(["or", value]);
+      return chain;
+    },
+    select: async () => ({ data: [], error: null }),
+  };
+  let message = "";
+  try {
+    await _bindExistingInvoicePackStrictForTest(
+      { from: () => chain } as any,
+      JOB_ID,
+      invoice() as any,
+      "invoice-doc-0817",
+    );
+  } catch (error) {
+    message = (error as Error).message;
+  }
+  assertEquals(message.includes("entered send state"), true);
+  assertEquals(
+    filters.some(([key, value]) => key === "is:sent_at" && value === null),
+    true,
+  );
+  assertEquals(
+    filters.some(([key, value]) =>
+      key === "is:send_started_at" && value === null
+    ),
+    true,
+  );
+  assertEquals(
+    filters.some(([key, value]) =>
+      key === "in:status" && Array.isArray(value) &&
+      !value.includes("failed") && !value.includes("sending")
+    ),
+    true,
+  );
 });

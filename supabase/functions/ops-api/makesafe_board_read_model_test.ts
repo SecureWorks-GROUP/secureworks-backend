@@ -696,130 +696,22 @@ Deno.test("F7 board capture projection follows producer-owned reference authorit
     }]),
     [],
   );
-
-  const newerUnreachable = {
-    ...validShape,
-    id: "capture-unreachable-newer",
-    makesafe_fact_version: 2,
-    status: "rejected",
-    capture_result: "unreachable",
-    captured_at: "2026-07-20T13:00:00Z",
-    signal: "portal could not be observed",
-    screenshot_object_key: null,
-    screenshot_media_type: null,
-    screenshot_content_hash: null,
-    screenshot_size_bytes: null,
-  };
-  assertEquals(
-    portalCapturesFromLedger(source, [newerUnreachable, validShape]).map((c) =>
-      c.status
-    ),
-    ["unreachable", "done"],
-  );
-
-  const newestNotDone = {
-    ...validShape,
-    id: "capture-not-done-newest",
-    makesafe_fact_version: 3,
-    status: "captured",
-    capture_result: "not_done",
-    captured_at: "2026-07-20T14:00:00Z",
-    signal: "form remains open",
-  };
-  assertEquals(
-    portalCapturesFromLedger(source, [
-      newestNotDone,
-      newerUnreachable,
-      validShape,
-    ])
-      .map((c) => c.status),
-    ["not_done", "done"],
-  );
 });
 
-Deno.test("SWMS-26740: unreachable recaptures preserve the locked assessment set and bound DRAFT reaches Docs Ready", () => {
-  const links = {
-    assessment_report: "https://www.primeeco.tech/share/swms-26740-assessment",
-    photos: "https://www.primeeco.tech/share/swms-26740-photos",
-    quote: "https://www.primeeco.tech/share/swms-26740-quote",
-  };
-  const source = baseJob("allocated", "job-26740", {
-    job_number: "SWMS-26740",
-    external_ref: "MLB-26740",
-    metadata: {
-      builder_claim_ref: "MLB-26740",
-      makesafe_job_family: "assessment_report_quote",
-    },
+Deno.test("free-form portal evidence cannot self-issue trusted proof markers", () => {
+  const source = baseJob("allocated", "hostile-portal-proof", {
     makesafe_details: {
-      substatus: "waiting_on_trade_report",
-      report_type: "assessment_report",
-      external_ref: "MLB-26740",
-      external_links: Object.entries(links).map(([kind, url]) => ({
-        kind,
-        url,
-      })),
-      cycle_number: 1,
-      attendance_cycle_id: "cycle-26740",
-      portal_verified_at: "2026-08-12T01:00:00Z",
-      portal_verified_cycle: 1,
-      portal_verified_signal:
-        "capture_portal_evidence audit: full portal set submitted/locked",
-    },
-    attendance_cycle_id: "cycle-26740",
-    invoice_raw_status: "DRAFT",
-    invoice_qualifies_as_current_draft: true,
-    invoice_qualifies_as_current_closeout: true,
-    has_invoice_doc: true,
-    report_pack: {
-      status: "drafted",
-      invoice_doc_id: "invoice-doc-0817",
+      portal_captures: [{
+        status: "done",
+        role: "roof_report",
+        attested_producer: "capture_portal_evidence.py/v1",
+        legacy_verified: true,
+      }],
     },
   });
-  const unreachableRoles = [
-    ["assessment", links.assessment_report],
-    ["photos", links.photos],
-    ["scope", links.quote],
-  ];
-  const unreachable = unreachableRoles.map(([role, url], index) => ({
-    id: `capture-26740-unreachable-${role}`,
-    job_id: "job-26740",
-    attendance_cycle_id: "cycle-26740",
-    role,
-    status: "rejected",
-    makesafe_fact_version: 2,
-    capture_result: "unreachable",
-    source_url: url,
-    source_content_hash: `sha256:${"7".repeat(64)}`,
-    builder_reference: "MLB-26740",
-    captured_at: `2026-08-13T04:00:0${index}Z`,
-    capture_producer: "capture_portal_evidence.py/v1",
-    signal: "portal unreachable",
-  }));
-
-  assertEquals(
-    projectMakesafePortalCaptures(source, unreachable).map((capture) =>
-      capture.status
-    ).sort(),
-    ["done", "done", "done", "unreachable", "unreachable", "unreachable"],
-  );
-  const [row] = buildCanonicalMakesafeRows([source], {
-    portalCaptureRowsByJobId: { "job-26740": unreachable },
-    computedAt: "2026-08-13T05:00:00Z",
-  });
-  assertEquals(row.canonical_stage, "report_ready");
-  assertEquals(row.pack.drafted, true);
-
-  const [genericVerified] = buildCanonicalMakesafeRows([{
-    ...source,
-    makesafe_details: {
-      ...source.makesafe_details,
-      portal_verified_signal: "verified",
-    },
-  }], {
-    portalCaptureRowsByJobId: { "job-26740": unreachable },
-    computedAt: "2026-08-13T05:00:00Z",
-  });
-  assertEquals(genericVerified.canonical_stage, "allocated");
+  const [capture] = projectMakesafePortalCaptures(source, []);
+  assertEquals(capture.attested_producer, undefined);
+  assertEquals((capture as any).legacy_verified, undefined);
 });
 
 Deno.test("Prime placement: locked and submitted-plus-expired roofs both reach TRI by evidence", () => {

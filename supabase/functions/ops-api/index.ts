@@ -18364,7 +18364,45 @@ interface BindExistingMakesafeInvoicePackDeps {
   fetchInvoicePdfBytes?: (client: any, xeroInvoiceId: string) => Promise<Uint8Array>
   attachDocument?: typeof attachMakesafeDocument
   ensurePack?: typeof _ensurePackRowStrict
-  patchPack?: typeof _patchPackStrict
+  bindPack?: typeof bindExistingInvoicePackStrict
+}
+
+const BIND_EXISTING_INVOICE_PACK_STATUSES = [
+  'drafted',
+  'admin_to_send_report',
+  'authorised_not_sent',
+  'portal_ready',
+] as const
+
+async function bindExistingInvoicePackStrict(
+  client: any,
+  jobId: string,
+  invoice: { xero_invoice_id: string; status: string },
+  invoiceDocId: string,
+) {
+  const { data, error } = await client.from('makesafe_report_packs')
+    .update({
+      xero_invoice_id: invoice.xero_invoice_id,
+      invoice_status: invoice.status,
+      invoice_doc_id: invoiceDocId,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('job_id', jobId)
+    .eq('pack_kind', 'main')
+    .in('status', [...BIND_EXISTING_INVOICE_PACK_STATUSES])
+    .is('sent_at', null)
+    .is('send_started_at', null)
+    .or(`xero_invoice_id.is.null,xero_invoice_id.eq.${invoice.xero_invoice_id}`)
+    .select('id')
+  if (error) {
+    throw new ApiError(`bind-only invoice pack update failed: ${error.message}`, 500)
+  }
+  if (!Array.isArray(data) || data.length !== 1) {
+    throw new ApiError(
+      'bind-only invoice pack changed, entered send state, or already belongs to another invoice',
+      409,
+    )
+  }
 }
 
 /**
@@ -18399,7 +18437,7 @@ async function bindExistingMakesafeInvoicePack(
       .select('job_id,external_ref,reattend_count,last_reattend_at,attendance_cycle_id,cycle_number')
       .eq('job_id', jobId).maybeSingle(),
     client.from('makesafe_report_packs')
-      .select('id,status,sent_at,send_started_at,failed_step')
+      .select('id,status,sent_at,send_started_at,failed_step,xero_invoice_id,invoice_doc_id')
       .eq('job_id', jobId).eq('pack_kind', 'main').maybeSingle(),
   ])
   if (jobResponse.error || !jobResponse.data) {
@@ -18418,10 +18456,10 @@ async function bindExistingMakesafeInvoicePack(
     throw new ApiError(`bind-only invoice pack read failed: ${packResponse.error.message}`, 503)
   }
   const packStatus = String(packResponse.data?.status || '').toLowerCase()
-  if (
-    packResponse.data?.sent_at || packResponse.data?.send_started_at ||
-    ['sending', 'sent', 'sent_marker_failed', 'sent_not_closed', 'close_failed'].includes(packStatus)
-  ) {
+  if (packResponse.data && (
+    packResponse.data.sent_at || packResponse.data.send_started_at ||
+    !(BIND_EXISTING_INVOICE_PACK_STATUSES as readonly string[]).includes(packStatus)
+  )) {
     throw new ApiError(
       `bind-only invoice recovery refuses pack status '${packStatus || 'unknown'}' because send state already exists`,
       409,
@@ -18457,6 +18495,40 @@ async function bindExistingMakesafeInvoicePack(
       })
     }
     throw error
+  }
+
+  const existingPackInvoiceId = String(packResponse.data?.xero_invoice_id || '').trim()
+  if (
+    existingPackInvoiceId &&
+    existingPackInvoiceId !== String(invoice.xero_invoice_id || '').trim()
+  ) {
+    throw new ApiError(
+      `bind-only invoice recovery refuses to replace pack invoice ${existingPackInvoiceId} with ${invoice.xero_invoice_id}`,
+      409,
+    )
+  }
+  if (
+    existingPackInvoiceId === String(invoice.xero_invoice_id || '').trim() &&
+    String(packResponse.data?.invoice_doc_id || '').trim()
+  ) {
+    return {
+      success: true,
+      state: 'existing_invoice_pack_already_bound',
+      job_id: jobId,
+      job_number: jobResponse.data.job_number || null,
+      invoice: {
+        xero_invoice_id: invoice.xero_invoice_id,
+        invoice_number: invoice.invoice_number,
+        status: invoice.status,
+        document_id: packResponse.data.invoice_doc_id,
+      },
+      scanned_accrec: invoices.length,
+      lineage_required: false,
+      invoice_create_dispatched: false,
+      invoice_authorise_dispatched: false,
+      send_dispatched: false,
+      external_mutations: { xero: 0, email: 0 },
+    }
   }
 
   const fetchPdf = deps.fetchInvoicePdfBytes || (async (_client, invoiceId) => {
@@ -18507,21 +18579,9 @@ async function bindExistingMakesafeInvoicePack(
   }
 
   const ensurePack = deps.ensurePack || _ensurePackRowStrict
-  const patchPack = deps.patchPack || _patchPackStrict
+  const bindPack = deps.bindPack || bindExistingInvoicePackStrict
   await ensurePack(client, jobId, 'main')
-  await patchPack(client, jobId, 'main', {
-    xero_invoice_id: invoice.xero_invoice_id,
-    invoice_status: invoice.status,
-    invoice_doc_id: attached.document_id,
-    ...(packStatus === 'failed'
-      ? {
-        status: 'drafted',
-        failed_step: null,
-        error_detail: null,
-        send_started_at: null,
-      }
-      : {}),
-  })
+  await bindPack(client, jobId, invoice, attached.document_id)
 
   return {
     success: true,
@@ -18544,6 +18604,7 @@ async function bindExistingMakesafeInvoicePack(
 }
 
 export const _bindExistingMakesafeInvoicePackForTest = bindExistingMakesafeInvoicePack
+export const _bindExistingInvoicePackStrictForTest = bindExistingInvoicePackStrict
 
 // Test-only exports for the item-11 live-Graph attachment fallback.
 export const _pickGraphAttachmentForTest = pickGraphAttachment
