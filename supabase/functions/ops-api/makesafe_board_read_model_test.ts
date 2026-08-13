@@ -1455,6 +1455,7 @@ Deno.test("repair stays explicitly typed and sealed through board projection", (
   assertEquals(canonical.ses_family, "repair");
   assertEquals(canonical.ses_family_label, "Repair");
   assertEquals(canonical.ses_recipe_state, "sealed");
+  assertEquals(canonical.makesafe_type, "Repair");
 });
 
 Deno.test("repair family authority in ses_family or report_type leaves the Captain Decision column", () => {
@@ -1489,6 +1490,7 @@ Deno.test("repair family authority in ses_family or report_type leaves the Capta
     assertEquals(canonical.ses_family, "repair", fixture.id);
     assertEquals(canonical.ses_family_label, "Repair", fixture.id);
     assertEquals(canonical.ses_recipe_state, "sealed", fixture.id);
+    assertEquals(canonical.makesafe_type, "Repair", fixture.id);
     assertEquals(canonical.canonical_stage, "new", fixture.id);
     assertEquals(canonical.derived_stage_v2_conflicts, [], fixture.id);
     assertEquals(canonical.blockers.real, [{

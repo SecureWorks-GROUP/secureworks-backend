@@ -226,6 +226,25 @@ export type MakeSafeJobFamily =
   | "repair"
   | "restoration";
 
+const RAPID_REPAIR_SUBJECT_RE = /\brapid\s+repairs?\b/i;
+const RAPID_REPAIR_DISPATCH_LINE_RE =
+  /(?:^|\n)\s*dispatch\s+(?:class|type)\s*:\s*rapid\s+repairs?\s*(?:$|\n)/i;
+
+/**
+ * Transport-level repair authority used by deterministic intake and repair
+ * reconciliation. A subject may carry the builder's explicit RAPID REPAIR
+ * label. Body text must use a labelled dispatch line so an ordinary email
+ * signature such as "Repair Coordinator | Rapid Repair" cannot retag a roof or
+ * make-safe instruction.
+ */
+export function hasExplicitRapidRepairSignal(
+  subject: string | null | undefined,
+  body: string | null | undefined,
+): boolean {
+  return RAPID_REPAIR_SUBJECT_RE.test(String(subject || "")) ||
+    RAPID_REPAIR_DISPATCH_LINE_RE.test(String(body || ""));
+}
+
 export function makeSafeJobFamilyLabel(
   family: MakeSafeJobFamily | string | null | undefined,
 ): string {

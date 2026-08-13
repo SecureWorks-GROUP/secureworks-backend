@@ -85,6 +85,18 @@ Deno.test("declared type: Scaffolding/Access Equipment is its own repair deliver
   assertEquals(read.declaredType, "repair");
 });
 
+Deno.test("declared type: standalone Rapid Repair header decides repair", () => {
+  const read = extractPdfDeclaredType(
+    woPdfText(
+      ["Rapid Repair"],
+      "Attend site and repair the damaged gates and driveway.",
+    ),
+  );
+  assertEquals(read.declaredType, "repair");
+  assertEquals(read.anchored, true);
+  assertEquals(read.headerLine, "Rapid Repair");
+});
+
 Deno.test("declared type: scope sentences never fire the header signal", () => {
   // "roof report" wording deep in an unanchored document must not classify.
   const read = extractPdfDeclaredType(

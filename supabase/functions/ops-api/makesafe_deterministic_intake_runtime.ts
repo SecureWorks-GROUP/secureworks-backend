@@ -3559,6 +3559,9 @@ async function ensureDraftAndJob(
     );
   }
   const key = plan.recoveryCursor.sideEffectKeys.draft;
+  const reviewedFields = deterministicSplitObligation(plan)
+    ? {}
+    : { makesafe_job_family: plan.identity.jobFamily };
   let draft = await findDraft(client, key);
   let draftCreated = false;
   if (!draft) {
@@ -3669,6 +3672,7 @@ async function ensureDraftAndJob(
         draft_id: draft.id,
         intake_case_id: caseId,
         approved_by: DETERMINISTIC_INTAKE_VERSION,
+        reviewed_fields: reviewedFields,
         review_notes:
           "Deterministic intake settlement retry for work-order evidence and post-board notification.",
       });
@@ -3728,6 +3732,7 @@ async function ensureDraftAndJob(
     draft_id: draft.id,
     intake_case_id: caseId,
     approved_by: DETERMINISTIC_INTAKE_VERSION,
+    reviewed_fields: reviewedFields,
     review_notes:
       "Deterministic adapter approval through the existing guarded intake gate. No allocation, invoice, send or money action.",
   });

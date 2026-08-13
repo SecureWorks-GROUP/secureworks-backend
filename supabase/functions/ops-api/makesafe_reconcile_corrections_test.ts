@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix no-explicit-any no-unused-vars
 import {
   assertEquals,
   assertRejects,
@@ -6,6 +7,7 @@ import {
 import {
   _assertReviewedFamilyConsistency,
   _convertMakesafeToInsurance,
+  _deterministicDraftFamilyForApprovalForTest,
   _updateMakesafeJobFamily,
 } from "./index.ts";
 
@@ -171,6 +173,65 @@ Deno.test("reviewed family correction accepts the repair family and clears repor
   assertEquals(store.events[0].event_type, "makesafe_job_family_corrected");
   assertEquals(store.events[0].detail_json.after_family, "repair");
   assertEquals(store.events[0].detail_json.after_report_type, null);
+});
+
+Deno.test("reviewed family correction can compare-and-set an unknown family to repair", async () => {
+  const store = fixture();
+  delete store.job.metadata.makesafe_job_family;
+  delete store.job.metadata.makesafe_job_family_label;
+  const result = await _updateMakesafeJobFamily(clientFor(store), {
+    job_id: "job-1",
+    expected_before_family_is_null: true,
+    makesafe_job_family: "repair",
+    reason: "source WO declares RAPID REPAIR",
+  });
+
+  assertEquals(result.before.makesafe_job_family, null);
+  assertEquals(result.after.makesafe_job_family, "repair");
+  assertEquals(store.job.metadata.makesafe_job_family, "repair");
+  assertEquals(store.events[0].detail_json.before_family, null);
+  assertEquals(store.events[0].detail_json.after_family, "repair");
+});
+
+Deno.test("reviewed family correction requires exactly one before-state guard", async () => {
+  const store = fixture();
+  await assertRejects(
+    () =>
+      _updateMakesafeJobFamily(clientFor(store), {
+        job_id: "job-1",
+        makesafe_job_family: "repair",
+      }),
+    Error,
+    "supply exactly one",
+  );
+  await assertRejects(
+    () =>
+      _updateMakesafeJobFamily(clientFor(store), {
+        job_id: "job-1",
+        expected_before_family: "general_makesafe",
+        expected_before_family_is_null: true,
+        makesafe_job_family: "repair",
+      }),
+    Error,
+    "supply exactly one",
+  );
+});
+
+Deno.test("deterministic approval preserves the stored repair family", () => {
+  assertEquals(
+    _deterministicDraftFamilyForApprovalForTest({
+      deterministic_intake: true,
+      makesafe_job_family: "repair",
+    }, false),
+    "repair",
+  );
+  assertEquals(
+    _deterministicDraftFamilyForApprovalForTest({
+      deterministic_intake: true,
+      makesafe_job_family: "roof_report",
+    }, true),
+    null,
+  );
 });
 
 Deno.test("captain conversion preserves the live job and classifies insurance ownership", async () => {
