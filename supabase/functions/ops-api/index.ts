@@ -4182,6 +4182,9 @@ if (import.meta.main) serve(async (req: Request) => {
       // docket revision/artifact ledger when dry_run=false; it cannot create,
       // authorise or send an invoice and cannot mutate job/board state.
       'prepare_ses_docket_revision',
+      // Screenshot-backed, append-only portal evidence. The handler preserves
+      // producer-trust, PNG and server-computed content-hash validation.
+      'record_ses_portal_capture_evidence',
       'bind_current_cycle_curated_makesafe_report',
       'create_intake_draft',
       // create_makesafe_job is allow-listed for the routine ONLY so it can reach its
@@ -5895,10 +5898,11 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       case 'record_ses_portal_capture_evidence': {
         const captureIsPrivileged = authMode === 'api_key' ||
+          authMode === 'routine' ||
           (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
         if (!captureIsPrivileged) {
           return json({
-            error: 'forbidden: record_ses_portal_capture_evidence requires the privileged ops key or an admin/owner session',
+            error: 'forbidden: record_ses_portal_capture_evidence requires the privileged ops key, the make-safe reporting routine, or an admin/owner session',
           }, 403)
         }
         if (req.method !== 'POST') {
