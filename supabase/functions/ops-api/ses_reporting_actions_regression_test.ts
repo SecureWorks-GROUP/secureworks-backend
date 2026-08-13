@@ -1572,10 +1572,16 @@ Deno.test(
       },
     )[0];
     assertEquals(draft.ready, true);
+    // The Xero draft identity lives on the SUBJECT; the body is builder-facing
+    // plain English and carries no bind-state wording at all (SWMS-261161 body
+    // leak: outbound bodies must never explain internal invoice state).
     assertStringIncludes(draft.subject, "INV-TEST-1");
-    assertStringIncludes(draft.body, "DRAFT");
-    assertStringIncludes(draft.body, "INV-TEST-1");
+    assertStringIncludes(
+      draft.body,
+      "Please find attached the invoice and supporting documents for REF-TEST-1.",
+    );
     assertEquals(draft.body.includes("No Xero invoice exists"), false);
+    assertEquals(draft.body.includes("DRAFT"), false);
     assertEquals(draft.attachment_hashes, ["report-hash", "swms-hash"]);
 
     // Same truth when the DRAFT is already on the docket binding.

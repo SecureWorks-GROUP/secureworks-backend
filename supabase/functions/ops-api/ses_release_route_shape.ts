@@ -179,6 +179,51 @@ export function mlbPrimeMailerRouteCarriesInvoice(args: {
 }
 
 /**
+ * Builder-facing body copy for sealed release routes (live leak SWMS-261161 /
+ * SWMS-261158, 2026-08-10/13): plain client English only — what is attached,
+ * the job reference, a thank-you. The stored `email_drafts` keep their
+ * operator annotations for the docket display surface; this producer is what
+ * every OUTBOUND route body must come from. AJS/AJBR keep their own pinned
+ * two-email wording in resolveDocketRoutes; every other shape (MLB physical,
+ * ordinary-mail exception included, and the universal three-route split) sets
+ * bodies here so a stored annotation can never ride out on a release again.
+ */
+export function sesBuilderRouteBody(
+  routeKind: "report" | "photo" | "invoice",
+  jobRef: string | null | undefined,
+  options?: { noAdditionalCharge?: boolean },
+): string {
+  const ref = String(jobRef || "").trim() || "this job";
+  if (routeKind === "photo") {
+    return `Please find attached site photos for ${ref}.\n\nThank you.`;
+  }
+  if (routeKind === "invoice") {
+    if (options?.noAdditionalCharge) {
+      return `Please find attached the supporting documents for ${ref}. There is no additional charge for this attendance.\n\nThank you.`;
+    }
+    return `Please find attached the invoice and supporting documents for ${ref}.\n\nThank you.`;
+  }
+  return `Please find attached the report for ${ref}.\n\nThank you.`;
+}
+
+/**
+ * Detects internal draft-annotation vocabulary in an outbound email body.
+ *
+ * The execute path refuses to dispatch any route whose PERSISTED body still
+ * trips this — a release prepared before the body producers were fixed (or a
+ * caller-passed stale route set) fails closed with "prepare a new release
+ * revision" instead of mailing the builder an internal annotation. Bodies from
+ * sesBuilderRouteBody / the pinned AJS wording never contain these terms, so a
+ * refusal always means a stale or hand-rolled body, not a producer bug.
+ */
+const SES_INTERNAL_BODY_ANNOTATION_RE =
+  /\b(?:drafts?|dockets?|packs?|routes?|cycles?|revisions?|threads?|threading|authorised|authorized)\b|mail\.send/i;
+
+export function sesBodyCarriesInternalAnnotation(body: unknown): boolean {
+  return SES_INTERNAL_BODY_ANNOTATION_RE.test(String(body || ""));
+}
+
+/**
  * Skill contract gate kinds — exact names from the backend release contract table.
  */
 export type SesClientSendGateKind =

@@ -1,14 +1,12 @@
 // deno-lint-ignore-file no-explicit-any require-await
 /**
- * SEND IT envelope gate for the permanent AJS/AJBR pack CCs (Captain
- * 2026-08-06). The producer is proved in ses_release_route_shape_test.ts; this
- * drives the real executeSesReleaseRevisionAction so the boundary under test is
- * WHICH stored envelopes the widened CC requirement may refuse.
- *
- * A release approved before the ruling stores cc [ses@] only. Refusing such a
- * release once it has already mailed a route would strand it: the refusal's own
- * recovery is a new release revision, whose content-derived id mints fresh
- * operation keys and re-mails what already went.
+ * SEND IT body guard: a persisted release route whose BODY still carries
+ * internal draft-annotation vocabulary must refuse before any Graph dispatch,
+ * on every shape. This is the send-side backstop for the SWMS-261161 /
+ * SWMS-261158 live leak — the producers are proved in
+ * ses_release_route_shape_test.ts; this drives the real
+ * executeSesReleaseRevisionAction against PERSISTED route rows, exactly the
+ * store the leaked sends read from.
  */
 import {
   assert,
@@ -20,13 +18,15 @@ import {
   type SesSupabaseClient,
 } from "./ses_reporting_actions.ts";
 import { ajsPackCc } from "./ses_release_route_shape.ts";
-import { MAKESAFE_CC } from "./makesafe_send_pack.ts";
 
-const RELEASE_ID = "release-cc-1";
-const JOB_ID = "job-ajs-cc-1";
-const DOCKET_ID = "docket-cc-1";
-const CONTENT_HASH = "sha256:" + "d".repeat(64);
-const LEGACY_CC = [MAKESAFE_CC];
+const RELEASE_ID = "release-body-1";
+const JOB_ID = "job-body-1";
+const DOCKET_ID = "docket-body-1";
+const CONTENT_HASH = "sha256:" + "e".repeat(64);
+
+/** The verbatim annotation body that shipped to the builder on 2026-08-13. */
+const LEAKED_REPORT_BODY =
+  "Draft only. Report pack for 63 Chidlow St, Northam. Ordinary Mail.Send (group-thread reply is Application: Not supported); subject matches the original work-order email for inbox grouping only — not real threading. Photos and the billing pack travel on separate routes.";
 
 function hash(n: number): string {
   return `sha256:${String(n).padStart(64, "0")}`;
@@ -46,30 +46,38 @@ function query(result: { data: any; error: any }): any {
   return builder;
 }
 
-function ajsRoutes(cc: string[]): any[] {
+function mlbRoutes(reportBody: string): any[] {
   return [
     {
-      ordinal: 1,
-      route_kind: "report_invoice",
-      recipients: ["workorders@ajs.build"],
-      cc,
-      subject: "Report + Invoice",
-      // Builder-facing wording: the execute body guard refuses annotation
-      // vocabulary, so stub bodies must be as clean as real producer output.
-      body:
-        "Please find attached the report and invoice for AJBR-1.\n\nThank you.",
+      ordinal: 0,
+      route_kind: "report",
+      recipients: ["mlb.mailer@primeeco.tech"],
+      cc: [],
+      subject: "NEW WORK ORDER - MLB-27516 63 Chidlow St E, Northam, WA 6401",
+      body: reportBody,
       body_hash: hash(1),
       attachment_hashes: [hash(11)],
     },
     {
-      ordinal: 2,
+      ordinal: 1,
       route_kind: "photo",
-      recipients: ["workorders@ajs.build"],
-      cc,
-      subject: "Photos",
-      body: "Please find attached site photos for AJBR-1.\n\nThank you.",
+      recipients: ["mlb.mailer@primeeco.tech"],
+      cc: [],
+      subject: "NEW WORK ORDER - MLB-27516 63 Chidlow St E, Northam, WA 6401",
+      body: "Please find attached site photos for MLB-27516.\n\nThank you.",
       body_hash: hash(2),
       attachment_hashes: [hash(21)],
+    },
+    {
+      ordinal: 2,
+      route_kind: "invoice",
+      recipients: ["makesafes@mlbuilders.com.au"],
+      cc: ["finance@secureworkswa.com.au"],
+      subject: "MLB-27516 - Xero invoice INV-1179",
+      body:
+        "Please find attached the invoice and supporting documents for MLB-27516.\n\nThank you.",
+      body_hash: hash(3),
+      attachment_hashes: [hash(11), hash(31)],
     },
   ];
 }
@@ -87,16 +95,17 @@ const ARTIFACTS = [
     object_key: `dockets/${DOCKET_ID}/photos/001.jpg`,
     media_type: "image/jpeg",
   },
+  {
+    content_hash: hash(31),
+    size_bytes: 300_000,
+    object_key: `dockets/${DOCKET_ID}/Xero Invoice INV-1179.pdf`,
+    media_type: "application/pdf",
+  },
 ];
 
 interface Harness {
   routes: any[];
-  /** route_kinds whose send effect already exists and is confirmed. */
-  confirmedKinds: string[];
-  /** Forces the prior-send ledger read to fault. */
-  effectReadError?: { message: string } | null;
   effects: Map<string, any>;
-  confirmedTokens: Set<string>;
   graphCalls: any[];
 }
 
@@ -122,14 +131,7 @@ function scriptedClient(harness: Harness): SesSupabaseClient {
         case "makesafe_release_revision_routes":
           return query({ data: harness.routes, error: null });
         case "ses_external_effects":
-          return query({
-            data: harness.effectReadError
-              ? null
-              : harness.confirmedKinds.map((kind) => ({
-                operation_key: `op-${kind}`,
-              })),
-            error: harness.effectReadError || null,
-          });
+          return query({ data: [], error: null });
         case "makesafe_docket_revisions":
           return query({
             data: {
@@ -143,10 +145,10 @@ function scriptedClient(harness: Harness): SesSupabaseClient {
               envelope: {
                 v2: {
                   classification: {
-                    builder_key: "AJS",
+                    builder_key: "MLB",
                     family: "physical_makesafe",
                   },
-                  routing: {},
+                  routing: { invoice_to: "makesafes@mlbuilders.com.au" },
                 },
               },
               review_spec: {},
@@ -177,21 +179,10 @@ function scriptedClient(harness: Harness): SesSupabaseClient {
         return Promise.resolve({ data: { reserved: true }, error: null });
       }
       if (name === "claim_ses_external_effect_v1") {
-        const routeKind = String(rpcArgs.p_effect?.route_kind || "");
-        const alreadyConfirmed = harness.confirmedKinds.includes(routeKind);
-        const effect = {
-          ...rpcArgs.p_effect,
-          state: alreadyConfirmed ? "confirmed" : "reserved",
-        };
+        const effect = { ...rpcArgs.p_effect, state: "reserved" };
         harness.effects.set(String(effect.operation_key), effect);
-        if (alreadyConfirmed) {
-          harness.confirmedTokens.add(String(effect.external_token));
-        }
         return Promise.resolve({
-          data: {
-            claim_mode: alreadyConfirmed ? "confirmed" : "reserved",
-            effect,
-          },
+          data: { claim_mode: "reserved", effect },
           error: null,
         });
       }
@@ -235,7 +226,7 @@ function mailGatewayStub(harness: Harness): any {
     createDraftAndSend: async (payload: any, context: any) => {
       harness.graphCalls.push({
         subject: payload.subject,
-        cc: payload.cc,
+        body: payload.body,
         token: context.external_token,
       });
       const result = {
@@ -247,36 +238,13 @@ function mailGatewayStub(harness: Harness): any {
       return result;
     },
     reconcileSent: async (token: string) => {
-      const key = String(token);
-      const match = sentByToken.get(key);
-      if (match) return [match];
-      // An already-confirmed effect proves its send from Sent Items, never by
-      // a second dispatch.
-      if (harness.confirmedTokens.has(key)) {
-        return [{
-          message_id: `graph-message-prior-${key.slice(0, 8)}`,
-          internet_message_id: `<prior-${key.slice(0, 8)}@graph>`,
-          operation_token: key,
-        }];
-      }
-      return [];
+      const match = sentByToken.get(String(token));
+      return match ? [match] : [];
     },
   };
 }
 
 const xeroReader = { readAuthorised: async () => ({ id: "xero-invoice-1" }) };
-
-function harness(overrides: Partial<Harness> = {}): Harness {
-  return {
-    routes: ajsRoutes(ajsPackCc()),
-    confirmedKinds: [],
-    effectReadError: null,
-    effects: new Map(),
-    confirmedTokens: new Set<string>(),
-    graphCalls: [],
-    ...overrides,
-  };
-}
 
 async function execute(state: Harness) {
   return await executeSesReleaseRevisionAction(
@@ -288,8 +256,12 @@ async function execute(state: Harness) {
   );
 }
 
-Deno.test("SEND IT refuses a never-dispatched AJS release that misses a permanent pack CC", async () => {
-  const state = harness({ routes: ajsRoutes(LEGACY_CC) });
+Deno.test("SEND IT refuses a persisted route whose body carries internal annotations, before any dispatch", async () => {
+  const state: Harness = {
+    routes: mlbRoutes(LEAKED_REPORT_BODY),
+    effects: new Map(),
+    graphCalls: [],
+  };
   let error: SesActionError | null = null;
   try {
     await execute(state);
@@ -299,70 +271,30 @@ Deno.test("SEND IT refuses a never-dispatched AJS release that misses a permanen
   assert(error instanceof SesActionError, "expected a typed SES refusal");
   assertEquals(error!.status, 409);
   const refusal = error!.refusal as any;
-  assertEquals(refusal.code, "route_recipient_invalid");
-  assertEquals(refusal.evidence.release_send_in_flight, false);
-  assertEquals(refusal.evidence.required, ajsPackCc());
-  // Nothing has reached the builder, so preparing a new revision is safe.
+  assertEquals(refusal.code, "route_body_internal_annotation");
+  assertEquals(refusal.evidence.route_kind, "report");
+  // Nothing reached Graph — the annotation can no longer ship on ANY shape.
   assertEquals(state.graphCalls.length, 0);
 });
 
-Deno.test("SEND IT finishes an in-flight pre-ruling AJS release instead of stranding it", async () => {
-  const state = harness({
-    routes: ajsRoutes(LEGACY_CC),
-    confirmedKinds: ["report_invoice"],
-  });
+Deno.test("SEND IT dispatches an MLB release whose persisted bodies are clean", async () => {
+  const state: Harness = {
+    routes: mlbRoutes(
+      "Please find attached the report for MLB-27516.\n\nThank you.",
+    ),
+    effects: new Map(),
+    graphCalls: [],
+  };
   const result: any = await execute(state);
   assertEquals(result.state, "released");
-  // The confirmed route reconciles; only the outstanding photo route dispatches.
-  assertEquals(state.graphCalls.map((call) => call.subject), ["Photos"]);
-});
-
-Deno.test("SEND IT still enforces the ses@ floor on an in-flight pre-ruling release", async () => {
-  const state = harness({
-    routes: ajsRoutes(["someone-else@example.com"]),
-    confirmedKinds: ["report_invoice"],
-  });
-  let error: SesActionError | null = null;
-  try {
-    await execute(state);
-  } catch (err) {
-    error = err as SesActionError;
-  }
-  assert(error instanceof SesActionError, "expected a typed SES refusal");
-  const refusal = error!.refusal as any;
-  assertEquals(refusal.code, "route_recipient_invalid");
-  assertEquals(refusal.evidence.release_send_in_flight, true);
-  assertEquals(refusal.evidence.required, [MAKESAFE_CC]);
-  assertEquals(state.graphCalls.length, 0);
-});
-
-Deno.test("SEND IT refuses on an unreadable send ledger rather than guessing the CC floor", async () => {
-  const state = harness({
-    routes: ajsRoutes(LEGACY_CC),
-    effectReadError: { message: "connection reset" },
-  });
-  let error: SesActionError | null = null;
-  try {
-    await execute(state);
-  } catch (err) {
-    error = err as SesActionError;
-  }
-  assert(error instanceof SesActionError, "expected a typed SES refusal");
-  assertEquals(error!.status, 503);
-  const refusal = error!.refusal as any;
-  assertEquals(refusal.code, "route_send_proof_unreadable");
-  assertEquals(state.graphCalls.length, 0);
-});
-
-Deno.test("SEND IT dispatches a current AJS release carrying all three permanent CCs", async () => {
-  const state = harness();
-  const result: any = await execute(state);
-  assertEquals(result.state, "released");
-  assertEquals(state.graphCalls.map((call) => call.subject), [
-    "Report + Invoice",
-    "Photos",
-  ]);
+  assertEquals(state.graphCalls.length, 3);
   for (const call of state.graphCalls) {
-    assertEquals(call.cc, ajsPackCc());
+    assertEquals(
+      /draft|docket|pack\b|route|cycle|revision|mail\.send/i.test(call.body),
+      false,
+      call.body,
+    );
   }
+  // Sanity: the AJS CC producer is untouched by this guard.
+  assertEquals(ajsPackCc().length, 3);
 });

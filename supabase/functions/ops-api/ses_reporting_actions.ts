@@ -68,6 +68,8 @@ import {
   isAjsBuilderKey,
   mlbPhysicalRouteRecipients,
   mlbPrimeMailerRouteCarriesInvoice,
+  sesBodyCarriesInternalAnnotation,
+  sesBuilderRouteBody,
   sesReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import {
@@ -618,6 +620,9 @@ export function resolveDocketRoutes(
   const workOrderSender = String(
     routing.report_to || routing.photo_to || "",
   ).trim();
+  const builderReference = String(
+    object(docket.local_invoice_proposal).builder_reference || "",
+  ).trim();
 
   const resolvedRoutes = draftRoutes(docket).map((route) => {
     const referenced = route.attachment_hashes.map((path) => byPath.get(path));
@@ -627,6 +632,15 @@ export function resolveDocketRoutes(
     if (route.route_kind !== "invoice") {
       return {
         ...route,
+        // Builder-facing body is SET here, never inherited from the stored
+        // draft: `email_drafts` bodies are operator annotations for the docket
+        // display and shipped verbatim to the builder on the MLB physical and
+        // universal shapes (SWMS-261161 / SWMS-261158 live leak). The AJS
+        // branch below overrides with its own pinned wording.
+        body: sesBuilderRouteBody(
+          route.route_kind === "photo" ? "photo" : "report",
+          builderReference,
+        ),
         attachment_hashes: resolved,
         ready: route.ready &&
           resolved.length === route.attachment_hashes.length,
@@ -657,8 +671,9 @@ export function resolveDocketRoutes(
       return {
         ...route,
         subject: `${reference || "Make-safe"} - no additional charge`,
-        body:
-          "This later attendance is recorded as document only with no additional charge. The current report and photo evidence are supplied through the accompanying approved routes.",
+        body: sesBuilderRouteBody("invoice", builderReference, {
+          noAdditionalCharge: true,
+        }),
         attachment_hashes: [...new Set(supportHashes)],
         ready: route.ready && !unsupportedReference,
       };
@@ -674,8 +689,10 @@ export function resolveDocketRoutes(
         ...route,
         subject: `${reference || "Make-safe"} - Xero draft ${invoiceNumber}`
           .trim(),
-        body:
-          `Xero DRAFT invoice ${invoiceNumber} is bound to this obligation revision. The builder-facing Xero PDF attaches when the draft is authorised. No release is approved yet.`,
+        // Builder-facing wording even while pre-authorise: the route is what
+        // execute sends, so its body can never carry bind-state annotations.
+        // The subject and readiness still say this is a Xero draft.
+        body: sesBuilderRouteBody("invoice", builderReference),
         attachment_hashes: [...new Set(supportHashes)],
         ready: route.ready && !unsupportedReference,
       };
@@ -684,6 +701,7 @@ export function resolveDocketRoutes(
     if (docket.stage !== "invoice_bound" || xeroStatus !== "AUTHORISED") {
       return {
         ...route,
+        body: sesBuilderRouteBody("invoice", builderReference),
         attachment_hashes: [...new Set(supportHashes)],
         // Support PDFs are not an invoice. Until a live Xero draft is bound
         // (above) or an authorised Xero PDF is bound (below), the
@@ -700,8 +718,7 @@ export function resolveDocketRoutes(
       ...route,
       subject: `${reference || "Make-safe"} - Xero invoice ${invoiceNumber}`
         .trim(),
-      body:
-        "Please find the authorised SecureWorks Xero invoice and the supporting current-cycle documents attached.",
+      body: sesBuilderRouteBody("invoice", builderReference),
       attachment_hashes: [...new Set(invoiceAttachments)],
       ready: route.ready && !!invoicePdf?.content_hash &&
         xeroStatus === "AUTHORISED" && !unsupportedReference,
@@ -5369,6 +5386,21 @@ export async function executeSesReleaseRevisionAction(
         sesRefusal(
           "route_draft_missing",
           `Prepare and approve the missing ${kind} route on a new release revision.`,
+        ),
+      );
+    }
+    // Outbound bodies must be plain client English (SWMS-261161 / SWMS-261158
+    // live leak: stored draft annotations rode the persisted routes to the
+    // builder). Refuse the whole release rather than dispatch or rewrite: a
+    // fresh prepare resolves clean bodies from the same dockets, so the only
+    // cost is a new press — never a builder-visible annotation.
+    if (sesBodyCarriesInternalAnnotation(route.body)) {
+      throw new SesActionError(
+        409,
+        sesRefusal(
+          "route_body_internal_annotation",
+          `The persisted ${kind} route body carries internal draft wording. Prepare and approve a new release revision; its routes now carry builder-facing wording.`,
+          { evidence: { route_kind: kind } },
         ),
       );
     }

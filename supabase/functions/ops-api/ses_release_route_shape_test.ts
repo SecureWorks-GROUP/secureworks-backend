@@ -13,6 +13,8 @@ import {
   mlbPrimeMailerRouteCarriesInvoice,
   SES_AJS_ROUTE_ORDER,
   SES_UNIVERSAL_ROUTE_ORDER,
+  sesBodyCarriesInternalAnnotation,
+  sesBuilderRouteBody,
   sesReleaseRouteOrder,
 } from "./ses_release_route_shape.ts";
 import {
@@ -631,6 +633,258 @@ Deno.test(
     );
   },
 );
+
+// ---------------------------------------------------------------------------
+// Builder-facing bodies on the MLB physical and universal shapes.
+//
+// Live leak (SWMS-261161 Mosman Park 2026-08-10, SWMS-261158 Northam
+// 2026-08-13): resolveDocketRoutes set bodies for the AJS shape only, so the
+// MLB physical and universal shapes inherited the stored draft ANNOTATIONS
+// ("Draft only. Report pack … Ordinary Mail.Send …") and mailed them to the
+// builder verbatim. These tests pin the producer for every non-AJS shape,
+// ordinary-mail exception included.
+// ---------------------------------------------------------------------------
+
+/** The exact annotation bodies that shipped live — must never resolve again. */
+const LEAKED_ANNOTATION_BODIES = [
+  "Draft only. Report pack for 63 Chidlow St, Northam. Ordinary Mail.Send (group-thread reply is Application: Not supported); subject matches the original work-order email for inbox grouping only — not real threading. Photos and the billing pack travel on separate routes.",
+  "Draft only. Photo pack. Ordinary Mail.Send; subject matches the original work-order email for inbox grouping only — not real threading. The complete, ordered original photo set is listed on the docket.",
+  "Draft only. Billing pack for makesafes@: make-safe report, SWMS, and the authorised Xero invoice. No release is approved until the invoice is AUTHORISED.",
+];
+
+const MLB_CLEAN_BODIES: Record<string, string> = {
+  report: "Please find attached the report for MLB-27516.\n\nThank you.",
+  photo: "Please find attached site photos for MLB-27516.\n\nThank you.",
+  invoice:
+    "Please find attached the invoice and supporting documents for MLB-27516.\n\nThank you.",
+};
+
+function mlbDocket(
+  stage: string,
+  xero: Record<string, unknown> | null,
+  builderKey = "MLB",
+) {
+  return {
+    id: "docket-mlb",
+    stage,
+    envelope: {
+      v2: {
+        classification: {
+          builder_key: builderKey,
+          family: "physical_makesafe",
+        },
+        routing: {
+          report_to: "makesafes@mlbuilders.com.au",
+          photo_to: "makesafes@mlbuilders.com.au",
+          invoice_to: "makesafes@mlbuilders.com.au",
+        },
+      },
+    },
+    local_invoice_proposal: { builder_reference: "MLB-27516" },
+    xero_binding: xero,
+    email_drafts: {
+      REPORT_EMAIL_DRAFT: [
+        "To: mlb.mailer@primeeco.tech",
+        "Cc:",
+        "Subject: NEW WORK ORDER - MLB-27516 63 Chidlow St E, Northam, WA 6401",
+        "Attachments: ARTIFACTS/report.pdf",
+        "",
+        LEAKED_ANNOTATION_BODIES[0],
+      ].join("\n"),
+      PHOTO_EMAIL_DRAFT: [
+        "To: mlb.mailer@primeeco.tech",
+        "Cc:",
+        "Subject: NEW WORK ORDER - MLB-27516 63 Chidlow St E, Northam, WA 6401",
+        "Attachments: ARTIFACTS/photo1.jpg",
+        "",
+        LEAKED_ANNOTATION_BODIES[1],
+      ].join("\n"),
+      INVOICE_EMAIL_DRAFT: [
+        "To: makesafes@mlbuilders.com.au",
+        "Cc: finance@secureworkswa.com.au",
+        "Subject: MLB-27516 - billing pack (report, SWMS, invoice)",
+        "Attachments: ARTIFACTS/report.pdf, ARTIFACTS/swms.pdf",
+        "",
+        LEAKED_ANNOTATION_BODIES[2],
+      ].join("\n"),
+    },
+  };
+}
+
+const MLB_ARTIFACTS = [
+  {
+    role: "supporting_report_pdf",
+    object_key: "bucket/docket-mlb/ARTIFACTS/report.pdf",
+    media_type: "application/pdf",
+    content_hash: "report-hash",
+  },
+  {
+    role: "swms_artifact",
+    object_key: "bucket/docket-mlb/ARTIFACTS/swms.pdf",
+    media_type: "application/pdf",
+    content_hash: "swms-hash",
+  },
+  {
+    role: "completion_photo",
+    object_key: "bucket/docket-mlb/ARTIFACTS/photo1.jpg",
+    media_type: "image/jpeg",
+    content_hash: "photo-hash-1",
+  },
+  {
+    role: "xero_invoice_pdf",
+    object_key: "bucket/docket-mlb/ARTIFACTS/xero-invoice.pdf",
+    media_type: "application/pdf",
+    content_hash: "xero-hash",
+    metadata: { xero_invoice_id: "xero-1", invoice_number: "INV-1179" },
+  },
+];
+
+const MLB_AUTHORISED_BINDING = {
+  status: "AUTHORISED",
+  xero_invoice_id: "xero-1",
+  invoice_number: "INV-1179",
+};
+
+Deno.test("sesBuilderRouteBody produces the pinned plain-English bodies", () => {
+  assertEquals(
+    sesBuilderRouteBody("report", "MLB-27516"),
+    MLB_CLEAN_BODIES.report,
+  );
+  assertEquals(
+    sesBuilderRouteBody("photo", "MLB-27516"),
+    MLB_CLEAN_BODIES.photo,
+  );
+  assertEquals(
+    sesBuilderRouteBody("invoice", "MLB-27516"),
+    MLB_CLEAN_BODIES.invoice,
+  );
+  assertEquals(
+    sesBuilderRouteBody("invoice", "MLB-27516", { noAdditionalCharge: true }),
+    "Please find attached the supporting documents for MLB-27516. There is no additional charge for this attendance.\n\nThank you.",
+  );
+  // Missing reference still yields client English, never an empty slot.
+  assertEquals(
+    sesBuilderRouteBody("report", ""),
+    "Please find attached the report for this job.\n\nThank you.",
+  );
+});
+
+Deno.test("sesBodyCarriesInternalAnnotation catches every leaked body and passes every producer body", () => {
+  for (const leaked of LEAKED_ANNOTATION_BODIES) {
+    assertEquals(sesBodyCarriesInternalAnnotation(leaked), true, leaked);
+  }
+  // The pre-fix authorised invoice wording carried "current-cycle".
+  assertEquals(
+    sesBodyCarriesInternalAnnotation(
+      "Please find the authorised SecureWorks Xero invoice and the supporting current-cycle documents attached.",
+    ),
+    true,
+  );
+  const producerBodies = [
+    sesBuilderRouteBody("report", "MLB-27516"),
+    sesBuilderRouteBody("photo", "MLB-27516"),
+    sesBuilderRouteBody("invoice", "MLB-27516"),
+    sesBuilderRouteBody("invoice", "MLB-27516", { noAdditionalCharge: true }),
+    // Pinned AJS bodies stay clean under the same detector.
+    "Please find attached the report and invoice for AJBR-70100.\n\nThank you.",
+    "Please find attached site photos for AJBR-70100.\n\nThank you.",
+    "Please find attached the report for AJBR-70100. There is no additional charge for this attendance.\n\nThank you.",
+  ];
+  for (const body of producerBodies) {
+    assertEquals(sesBodyCarriesInternalAnnotation(body), false, body);
+  }
+});
+
+Deno.test("MLB physical bodies are SET plain English on the ordinary-mail exception path", () => {
+  const routes = resolveDocketRoutes(
+    mlbDocket("invoice_bound", MLB_AUTHORISED_BINDING),
+    MLB_ARTIFACTS,
+    null,
+    { mlbOrdinaryMailSendFallback: true },
+  );
+  assertEquals(routes.map((r) => r.route_kind), ["report", "photo", "invoice"]);
+  for (const route of routes) {
+    assertEquals(
+      route.body,
+      MLB_CLEAN_BODIES[route.route_kind],
+      route.route_kind,
+    );
+    assertEquals(sesBodyCarriesInternalAnnotation(route.body), false);
+    assertEquals(route.ready, true, `${route.route_kind} must stay sendable`);
+  }
+  // Body fix must not move destinations, subjects, or transport stamps.
+  const [report, photo, invoice] = routes;
+  assertEquals(report.recipients, [MLB_PRIME_MAILER]);
+  assertEquals(photo.recipients, [MLB_PRIME_MAILER]);
+  assertEquals(invoice.recipients, ["makesafes@mlbuilders.com.au"]);
+  assertEquals(
+    report.subject,
+    "NEW WORK ORDER - MLB-27516 63 Chidlow St E, Northam, WA 6401",
+  );
+  assertEquals(
+    (report as any).mlb_transport,
+    "ordinary_mail_send_captain_exception_v1",
+  );
+  assertEquals((invoice as any).mlb_transport, null);
+  assertEquals(invoice.attachment_hashes.includes("xero-hash"), true);
+});
+
+Deno.test("MLB physical bodies stay plain English on the locked intake-thread shape", () => {
+  const routes = resolveDocketRoutes(
+    mlbDocket("invoice_bound", MLB_AUTHORISED_BINDING),
+    MLB_ARTIFACTS,
+    null,
+    { mlbOrdinaryMailSendFallback: false },
+  );
+  for (const route of routes) {
+    assertEquals(
+      route.body,
+      MLB_CLEAN_BODIES[route.route_kind],
+      route.route_kind,
+    );
+  }
+  // No intake thread id on this envelope: the locked shape refuses readiness,
+  // but the refusal never re-inherits the stored annotation body.
+  const report = routes.find((r) => r.route_kind === "report")!;
+  assertEquals((report as any).requires_thread_reply, true);
+  assertEquals(report.ready, false);
+});
+
+Deno.test("MLB pre-authorise routes already carry clean bodies (Northam ships without a docket re-prepare)", () => {
+  const routes = resolveDocketRoutes(
+    mlbDocket("pre_xero", null),
+    MLB_ARTIFACTS,
+    null,
+    { mlbOrdinaryMailSendFallback: true },
+  );
+  for (const route of routes) {
+    assertEquals(
+      route.body,
+      MLB_CLEAN_BODIES[route.route_kind],
+      route.route_kind,
+    );
+    assertEquals(sesBodyCarriesInternalAnnotation(route.body), false);
+  }
+  const invoice = routes.find((r) => r.route_kind === "invoice")!;
+  assertEquals(invoice.ready, false);
+});
+
+Deno.test("universal three-route shape also sets plain-English bodies", () => {
+  const routes = resolveDocketRoutes(
+    mlbDocket("invoice_bound", MLB_AUTHORISED_BINDING, "WESTERN"),
+    MLB_ARTIFACTS,
+    null,
+  );
+  assertEquals(routes.map((r) => r.route_kind), ["report", "photo", "invoice"]);
+  for (const route of routes) {
+    assertEquals(
+      route.body,
+      MLB_CLEAN_BODIES[route.route_kind],
+      route.route_kind,
+    );
+    assertEquals(sesBodyCarriesInternalAnnotation(route.body), false);
+  }
+});
 
 Deno.test("AJS/AJBR destinations are untouched by the MLB ruling", () => {
   const recipients = ajsPackRecipients({ workOrderSender: null });
