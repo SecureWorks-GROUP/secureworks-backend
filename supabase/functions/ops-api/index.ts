@@ -7365,6 +7365,9 @@ if (import.meta.main) serve(async (req: Request) => {
             retry_attempt_key: body.retry_attempt_key,
           },
           makeSesXeroGateway(client),
+          {
+            bindExistingInvoiceCloseout: bindExistingSesInvoiceCloseout,
+          },
         ))
       case 'resolve_ses_invoice_duplicates':
         return json(await resolveSesInvoiceDuplicatesAction(
@@ -18181,6 +18184,88 @@ export const _persistMakesafeStatusApplicationsForTest = persistMakesafeStatusAp
 
 // Test-only export for the close-out doc-attach path (typed + idempotent).
 export const _attachMakesafeDocumentForTest = attachMakesafeDocument
+
+async function bindExistingSesInvoiceCloseout(
+  client: any,
+  args: {
+    job_id: string
+    actor: string
+    invoice: {
+      xero_invoice_id: string
+      invoice_number: string
+      status: string
+    }
+    pdf: Uint8Array
+  },
+): Promise<Record<string, unknown>> {
+  const detailResponse = await client.from('makesafe_job_details')
+    .select('attendance_cycle_id,reattend_count,last_reattend_at')
+    .eq('job_id', args.job_id).maybeSingle()
+  if (detailResponse.error || !detailResponse.data) {
+    throw new ApiError(
+      `existing invoice closeout detail read failed: ${detailResponse.error?.message || 'missing make-safe detail'}`,
+      503,
+    )
+  }
+  const detail = detailResponse.data
+  const docsResponse = await client.from('job_documents')
+    .select('id,type,file_name,version,created_at,attendance_cycle_id,cycle_attribution')
+    .eq('job_id', args.job_id)
+  if (docsResponse.error) {
+    throw new ApiError(`existing invoice closeout document read failed: ${docsResponse.error.message}`, 503)
+  }
+  const currentCycleId = String(detail.attendance_cycle_id || '').trim()
+  const reportDocs = (docsResponse.data || []).filter((doc: any) => {
+    if (String(doc?.type || '').toLowerCase() !== 'makesafe_report') return false
+    if (Number(detail.reattend_count || 0) <= 0) return true
+    return currentCycleId &&
+      String(doc?.attendance_cycle_id || '') === currentCycleId &&
+      String(doc?.cycle_attribution || '') === 'bound'
+  })
+  const reportDoc = bestMakesafeDocByType(reportDocs, 'makesafe_report')
+  const attachedInvoice = await attachMakesafeDocument(
+    client,
+    {
+      job_id: args.job_id,
+      type: 'invoice',
+      file_name: `Xero Invoice - ${args.invoice.invoice_number || args.invoice.xero_invoice_id}.pdf`,
+      pdf_base64: _bytesToBase64(args.pdf),
+      operator_email: args.actor,
+    },
+    currentCycleId
+      ? { attendance_cycle_id: currentCycleId, cycle_attribution: 'bound' }
+      : {},
+  )
+  await _ensurePackRowStrict(client, args.job_id, 'main')
+  const packResponse = await client.from('makesafe_report_packs')
+    .select('status').eq('job_id', args.job_id).eq('pack_kind', 'main')
+    .maybeSingle()
+  if (packResponse.error || !packResponse.data) {
+    throw new ApiError(
+      `existing invoice closeout pack read failed: ${packResponse.error?.message || 'missing main pack'}`,
+      503,
+    )
+  }
+  const patch: Record<string, unknown> = {
+    xero_invoice_id: args.invoice.xero_invoice_id,
+    invoice_status: String(args.invoice.status || '').toUpperCase(),
+    invoice_doc_id: attachedInvoice.document_id,
+    ...(reportDoc?.id ? { report_doc_id: reportDoc.id } : {}),
+  }
+  if (String(packResponse.data.status || '').toLowerCase() === 'failed') {
+    patch.status = 'drafted'
+    patch.failed_step = null
+    patch.error_detail = null
+    patch.send_started_at = null
+  }
+  await _patchPackStrict(client, args.job_id, 'main', patch)
+  return {
+    invoice_doc_id: attachedInvoice.document_id,
+    report_doc_id: reportDoc?.id || null,
+    invoice_closeout: !!attachedInvoice.document_id,
+    report_closeout: !!reportDoc?.id,
+  }
+}
 
 // Test-only exports for the item-11 live-Graph attachment fallback.
 export const _pickGraphAttachmentForTest = pickGraphAttachment

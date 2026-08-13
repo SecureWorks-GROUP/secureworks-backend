@@ -111,6 +111,16 @@ function mintClient(opts: {
           ) {
             return { data: revision, error: null };
           }
+          if (table === "makesafe_job_details") {
+            return {
+              data: {
+                external_ref: "MLB-24732",
+                reattend_count: 0,
+                last_reattend_at: null,
+              },
+              error: null,
+            };
+          }
           return { data: null, error: null };
         },
         then: (resolve: any, reject: any) =>
@@ -506,7 +516,10 @@ Deno.test("A5: re-mint over this obligation's own DRAFT repairs a missing bindin
       actor: "skill@test",
     },
     gateway,
-    { fetchAllAccrecInvoices: async () => [mirrored] },
+    {
+      fetchAllAccrecInvoices: async () => [mirrored],
+      bindExistingInvoiceCloseout: async () => ({ invoice_closeout: true }),
+    },
   );
   assertEquals(result.skipped, true);
   assertEquals(gateway.createCalls, 0);
@@ -542,7 +555,10 @@ Deno.test("A5b: an unbound qualifying DRAFT is adopted with its real PDF and nev
       actor: "skill@test",
     },
     gateway,
-    { fetchAllAccrecInvoices: async () => [existing] },
+    {
+      fetchAllAccrecInvoices: async () => [existing],
+      bindExistingInvoiceCloseout: async () => ({ invoice_closeout: true }),
+    },
   );
 
   assertEquals(result.skipped, true);
@@ -559,8 +575,10 @@ Deno.test("A5b: an unbound qualifying DRAFT is adopted with its real PDF and nev
   );
 });
 
-Deno.test("A6: an AUTHORISED invoice on this obligation refuses instead of skipping", async () => {
+Deno.test("F30: an AUTHORISED invoice on this obligation binds closeout without minting", async () => {
   const gateway = draftGateway();
+  const closeoutCalls: any[] = [];
+  const revision = revisionRow();
   const authorised = {
     xero_invoice_id: "xero-auth-1",
     invoice_number: "INV-AUTH",
@@ -570,26 +588,128 @@ Deno.test("A6: an AUTHORISED invoice on this obligation refuses instead of skipp
     invoice_type: "ACCREC",
     invoice_obligation_revision_id: OBLIGATION_ID,
   };
+  const result = await createSesInvoiceDraftAction(
+    mintClient({ revision }) as any,
+    apiKeyAuth,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "skill@test",
+    },
+    gateway,
+    {
+      fetchAllAccrecInvoices: async () => [authorised],
+      bindExistingInvoiceCloseout: async (_client, args) => {
+        closeoutCalls.push(args);
+        return {
+          invoice_doc_id: "invoice-doc-existing",
+          report_doc_id: "report-doc-existing",
+          invoice_closeout: true,
+          report_closeout: true,
+        };
+      },
+    },
+  );
+  assertEquals(result.state, "existing_live_invoice_bound");
+  assertEquals(result.reason, "existing_live_invoice_closeout_bound");
+  assertEquals(result.invoice.invoice_number, "INV-AUTH");
+  assertEquals(result.invoice.status, "AUTHORISED");
+  assertEquals(result.invoice_create_dispatched, false);
+  assertEquals(result.send_dispatched, false);
+  assertEquals(result.external_mutations, { xero: 0, email: 0 });
+  assertEquals(gateway.createCalls, 0);
+  assertEquals(gateway.authoriseCalls, 0);
+  assertEquals(closeoutCalls.length, 1);
+  assertEquals(closeoutCalls[0].invoice.invoice_number, "INV-AUTH");
+  assertEquals(revision.state, "authorised");
+});
+
+Deno.test("F30: a blocked duplicate-live obligation binds its one safe invoice but never mints", async () => {
+  const gateway = draftGateway();
+  const existing = {
+    xero_invoice_id: "xero-auth-blocked",
+    invoice_number: "INV-1140",
+    status: "AUTHORISED",
+    reference: "MLB-24732",
+    job_id: JOB_ID,
+    invoice_type: "ACCREC",
+    invoice_obligation_revision_id: OBLIGATION_ID,
+  };
+  const result = await createSesInvoiceDraftAction(
+    mintClient({
+      revision: revisionRow({
+        state: "blocked",
+        pricing_disposition: "blocked_duplicate_live",
+        blockers: [{
+          state: "refused",
+          code: "invoice_duplicate_live",
+          fact: "A live invoice already exists.",
+          recovery_action: "Bind the existing invoice.",
+        }],
+      }),
+    }) as any,
+    apiKeyAuth,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "f30@test",
+    },
+    gateway,
+    {
+      fetchAllAccrecInvoices: async () => [existing],
+      bindExistingInvoiceCloseout: async () => ({
+        invoice_doc_id: "invoice-doc-1140",
+        report_doc_id: "report-doc-261025",
+      }),
+    },
+  );
+  assertEquals(result.invoice.invoice_number, "INV-1140");
+  assertEquals(result.state, "existing_live_invoice_bound");
+  assertEquals(gateway.createCalls, 0);
+  assertEquals(gateway.authoriseCalls, 0);
+  assertEquals(result.send_dispatched, false);
+});
+
+Deno.test("F30: blocked duplicate-live with no safe hit stays refused", async () => {
+  const gateway = draftGateway();
   const err = await assertRejects(
     () =>
       createSesInvoiceDraftAction(
-        mintClient() as any,
+        mintClient({
+          revision: revisionRow({
+            state: "blocked",
+            pricing_disposition: "blocked_duplicate_live",
+            blockers: [{
+              state: "refused",
+              code: "invoice_duplicate_live",
+              fact: "A live invoice already exists.",
+              recovery_action: "Resolve the existing invoice.",
+            }],
+          }),
+        }) as any,
         apiKeyAuth,
         {
           org_id: ORG_ID,
           job_id: JOB_ID,
           invoice_obligation_revision_id: OBLIGATION_ID,
-          actor: "skill@test",
+          actor: "f30@test",
         },
         gateway,
-        { fetchAllAccrecInvoices: async () => [authorised] },
+        {
+          fetchAllAccrecInvoices: async () => [],
+          bindExistingInvoiceCloseout: async () => {
+            throw new Error("must not bind without a hit");
+          },
+        },
       ),
     SesActionError,
   );
   assertEquals(err.status, 409);
-  assertStringIncludes(err.message, "INV-AUTH");
-  assertStringIncludes(err.message, "AUTHORISED");
+  assertStringIncludes(err.message, "live invoice already exists");
   assertEquals(gateway.createCalls, 0);
+  assertEquals(gateway.authoriseCalls, 0);
 });
 
 Deno.test("F1: live ACCREC on same job_id refuses second mint without createDraft", async () => {
