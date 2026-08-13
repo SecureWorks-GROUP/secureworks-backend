@@ -1,14 +1,21 @@
 // deno-lint-ignore-file no-import-prefix
 
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  assertEquals,
+  assertRejects,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  _assertAssignedOrMakesafeAccessForTest,
   _authorizeOpsApiAction,
   _opsApiActionNeedsSignedCaller,
   _opsApiActionNeedsStaffRole,
+  _opsApiCallerIsStaffOperator,
   _opsApiServerSecretPresented,
+  _opsApiStaffOperatorRole,
   _preferBearerForOpsApiAction,
   _resolveOpsApiAuthIntent,
   AGENT_READ_ALLOWED_ACTIONS,
+  OPS_API_STAFF_OPERATOR_ROLES,
 } from "./index.ts";
 
 function actionUrl(action: string, query = ""): URL {
@@ -79,7 +86,7 @@ Deno.test("authenticated operator JWT roles pass the existing users.role predica
       authMode: "jwt",
       role: "crew",
     }),
-    401,
+    403,
   );
 });
 
@@ -307,5 +314,236 @@ Deno.test("operator action families are protected and role-scoped Trade allocati
   assertEquals(
     authorizationStatus({ action: "allocate_job", authMode: "api_key" }),
     401,
+  );
+});
+
+// ── #680 SWF-261098 + #681 regression coverage ──────────────────────────────
+
+// Minimal query-builder mock in the makesafe_access_shape_test pattern: an
+// ordinary unassigned job with no makesafe detail, so the only way through
+// assertAssignedOrMakesafeAccess is the operator (isAdmin) bypass.
+function makeAccessClient(job: {
+  id: string;
+  type: string;
+  job_number: string;
+}) {
+  return {
+    from(table: string) {
+      const builder: {
+        select: () => typeof builder;
+        eq: () => typeof builder;
+        neq: () => typeof builder;
+        limit: () => typeof builder;
+        maybeSingle: () => Promise<{ data: unknown; error: null }>;
+      } = {
+        select: () => builder,
+        eq: () => builder,
+        neq: () => builder,
+        limit: () => builder,
+        maybeSingle: () => {
+          if (table === "jobs") {
+            return Promise.resolve({ data: job, error: null });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+      };
+      return builder;
+    },
+  };
+}
+
+Deno.test("the staff-operator predicate is the exact front-door role set", () => {
+  assertEquals(
+    [...OPS_API_STAFF_OPERATOR_ROLES].sort(),
+    ["admin", "owner", "ops_manager"].sort(),
+  );
+  for (const role of OPS_API_STAFF_OPERATOR_ROLES) {
+    assertEquals(_opsApiStaffOperatorRole(role), true, role);
+    assertEquals(_opsApiCallerIsStaffOperator("jwt", { role }), true, role);
+  }
+  for (const role of ["crew", "lead_installer", "estimator", "sales", ""]) {
+    assertEquals(_opsApiStaffOperatorRole(role), false, role);
+    assertEquals(_opsApiCallerIsStaffOperator("jwt", { role }), false, role);
+  }
+});
+
+Deno.test("SWF-261098: an ops_manager JWT is an add_note operator and bypasses the assignment check on a job they are not assigned to", async () => {
+  // add_note is profile-scoped (trades reach the handler), so the operator/
+  // trade split happens INSIDE the case via the shared staff predicate.
+  assertEquals(_opsApiActionNeedsStaffRole(actionUrl("add_note")), false);
+  for (const role of ["ops_manager", "owner", "admin"]) {
+    assertEquals(
+      authorizationStatus({ action: "add_note", authMode: "jwt", role }),
+      200,
+      role,
+    );
+    const noteIsAdmin = _opsApiCallerIsStaffOperator("jwt", { role });
+    assertEquals(noteIsAdmin, true, role);
+    // With the operator flag set, addNote's per-user assignment check is
+    // bypassed exactly as it always was for api_key dashboard callers.
+    await _assertAssignedOrMakesafeAccessForTest(
+      makeAccessClient({
+        id: "job-patio",
+        type: "patio",
+        job_number: "SWP-261098",
+      }),
+      "job-patio",
+      `${role}-user`,
+      noteIsAdmin,
+    );
+  }
+});
+
+Deno.test("a trade JWT still cannot note a job they are not assigned to", async () => {
+  const noteIsAdmin = _opsApiCallerIsStaffOperator("jwt", {
+    role: "lead_installer",
+  });
+  assertEquals(noteIsAdmin, false);
+  await assertRejects(
+    () =>
+      _assertAssignedOrMakesafeAccessForTest(
+        makeAccessClient({
+          id: "job-patio",
+          type: "patio",
+          job_number: "SWP-261098",
+        }),
+        "job-patio",
+        "trade-user",
+        noteIsAdmin,
+      ),
+    Error,
+    "You are not assigned to this job",
+  );
+});
+
+Deno.test("the api_key and service-role branches are unchanged by the operator predicate", () => {
+  assertEquals(_opsApiCallerIsStaffOperator("api_key", null), true);
+  for (const authMode of ["routine", "agent_read", "none"] as const) {
+    assertEquals(_opsApiCallerIsStaffOperator(authMode, null), false, authMode);
+    assertEquals(
+      _opsApiCallerIsStaffOperator(authMode, { role: "admin" }),
+      false,
+      authMode,
+    );
+  }
+  // Shared-key-only browser callers still get 401 at the front door; the
+  // distinct service-role secret still passes.
+  assertEquals(
+    authorizationStatus({ action: "add_note", authMode: "api_key" }),
+    401,
+  );
+  assertEquals(
+    authorizationStatus({
+      action: "add_note",
+      authMode: "api_key",
+      serverSecretPresented: true,
+    }),
+    200,
+  );
+});
+
+Deno.test("#681: trade login-path actions pass the front-door gate for a trade JWT", () => {
+  for (
+    const action of [
+      "get_crew_availability",
+      "add_note",
+      "trade_calendar",
+      "my_jobs",
+      "clock_event",
+    ]
+  ) {
+    assertEquals(_opsApiActionNeedsStaffRole(actionUrl(action)), false, action);
+    assertEquals(
+      authorizationStatus({ action, authMode: "jwt", role: "lead_installer" }),
+      200,
+      action,
+    );
+  }
+});
+
+Deno.test("#681: a signed-in trade on a staff-only action gets 403 operator_access_required, never a logout-inducing 401", () => {
+  for (const action of ["makesafe_board", "job_financials", "pipeline"]) {
+    const decision = _authorizeOpsApiAction({
+      url: actionUrl(action),
+      authMode: "jwt",
+      authUser: { role: "lead_installer" },
+    });
+    assertEquals(decision.ok, false, action);
+    if (!decision.ok) {
+      assertEquals(decision.status, 403, action);
+      assertEquals(decision.code, "operator_access_required", action);
+    }
+  }
+});
+
+Deno.test("#681: a missing or expired session still gets 401 user_jwt_required", () => {
+  for (
+    const input of [
+      { authMode: "none" as const },
+      { authMode: "jwt" as const }, // token rejected upstream -> no authUser
+      { authMode: "api_key" as const }, // shared browser key only
+    ]
+  ) {
+    const decision = _authorizeOpsApiAction({
+      url: actionUrl("makesafe_board"),
+      authMode: input.authMode,
+    });
+    assertEquals(decision.ok, false, input.authMode);
+    if (!decision.ok) {
+      assertEquals(decision.status, 401, input.authMode);
+      assertEquals(decision.code, "user_jwt_required", input.authMode);
+    }
+  }
+});
+
+Deno.test("deliberately-strict admin/owner gates still reject an ops_manager JWT", async () => {
+  const index = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  // Case-level strict gates: each must keep its literal admin/owner predicate
+  // and must NOT have been rewired to the broader staff-operator helper.
+  for (
+    const action of [
+      "heal_scope_revisions",
+      "auto_approve_clean_intake_drafts",
+      "recapture_intake_draft",
+      "makesafe_gap_fill_apply",
+    ]
+  ) {
+    const start = index.indexOf(`case '${action}': {`);
+    assertEquals(start >= 0, true, action);
+    const nextCase = index.indexOf("case '", start + 1);
+    assertEquals(nextCase > start, true, action);
+    const block = index.slice(start, nextCase);
+    assertEquals(
+      block.includes("_opsApiCallerIsStaffOperator"),
+      false,
+      action,
+    );
+    assertEquals(block.includes("'ops_manager'"), false, action);
+    assertEquals(block.includes("authUser?.role === 'admin'"), true, action);
+  }
+  // Credential surface: vault_sync_sw_api_key keeps its admin/owner-only JWT
+  // predicate.
+  const vaultStart = index.indexOf("async function vaultSyncSwApiKeyAction(");
+  assertEquals(vaultStart >= 0, true);
+  const vaultBlock = index.slice(vaultStart, vaultStart + 1200);
+  assertEquals(vaultBlock.includes("_opsApiCallerIsStaffOperator"), false);
+  assertEquals(
+    vaultBlock.includes(
+      "authUser?.role === 'admin' || authUser?.role === 'owner'",
+    ),
+    true,
+  );
+  // And the aligned sites really are wired to the ONE shared predicate.
+  assertEquals(
+    index.includes(
+      "const noteIsAdmin = _opsApiCallerIsStaffOperator(authMode, authUser)",
+    ),
+    true,
+  );
+  assertEquals(
+    index.includes(
+      "const approveIsPrivileged = _opsApiCallerIsStaffOperator(authMode, authUser)",
+    ),
+    true,
   );
 });

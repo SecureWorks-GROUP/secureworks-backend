@@ -3467,6 +3467,17 @@ const OPS_API_PROFILE_SCOPED_JWT_ACTIONS = new Set([
   'list_expenses',
   'suggest_job_for_expense',
   'update_expense',
+  // Trade login-path read (issue #681): trade.html loads crew availability on
+  // sign-in, so excluding it bounced every trade at login. NOTE: the handler
+  // returns ALL crew availability rows (with user name/email/phone) for the
+  // date range — no per-user scoping — which matches the pre-cutover shared-key
+  // behaviour trade.html always saw. Tightening that read is a separate call.
+  'get_crew_availability',
+  // Mixed ops/Trade write (issue #681): trade.html adds notes in 17 places.
+  // SAFE to profile-scope because addNote runs assertAssignedOrMakesafeAccess
+  // per-user for non-operators; staff operators are recognised inside the
+  // add_note case via _opsApiCallerIsStaffOperator (issue #680).
+  'add_note',
   // These mixed ops/Trade actions already enforce dispatcher, vertical-manager,
   // relationship, or job-scoped authority inside the route.
   'allocate_job',
@@ -3491,6 +3502,28 @@ export function _opsApiActionNeedsStaffRole(url: URL): boolean {
   return !OPS_API_PROFILE_SCOPED_JWT_ACTIONS.has(action)
 }
 
+// The ONE staff-operator role set for signed-in browser callers — identical to
+// what the front-door staff gate in _authorizeOpsApiAction admits. Per-action
+// operator predicates must reuse these helpers instead of re-listing roles, so
+// a role the front door admits as an operator is never re-classified as a
+// trade deeper in the dispatch (the SWF-261098 add_note lockout after the
+// PR #667 JWT cutover: ops_manager passed the front door, then fell into the
+// trade assignment path). Deliberately-strict admin/owner gates (money,
+// credential, recovery, automation surfaces) intentionally do NOT use these.
+export const OPS_API_STAFF_OPERATOR_ROLES = new Set(['admin', 'owner', 'ops_manager'])
+
+export function _opsApiStaffOperatorRole(role: unknown): boolean {
+  return OPS_API_STAFF_OPERATOR_ROLES.has(String(role || '').toLowerCase())
+}
+
+export function _opsApiCallerIsStaffOperator(
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none',
+  authUser?: Pick<TradeAuthContext, 'role'> | null,
+): boolean {
+  return authMode === 'api_key' ||
+    (authMode === 'jwt' && _opsApiStaffOperatorRole(authUser?.role))
+}
+
 export function _opsApiServerSecretPresented(input: {
   xApiKey: string | null
   bearerToken: string | null
@@ -3509,7 +3542,7 @@ export function _authorizeOpsApiAction(input: {
   authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none'
   authUser?: Pick<TradeAuthContext, 'role'> | null
   serverSecretPresented?: boolean
-}): { ok: true } | { ok: false; status: 401; code: string; error: string } {
+}): { ok: true } | { ok: false; status: 401 | 403; code: string; error: string } {
   const { url, authMode, authUser, serverSecretPresented = false } = input
   if (!_opsApiActionNeedsSignedCaller(url)) return { ok: true }
 
@@ -3537,11 +3570,15 @@ export function _authorizeOpsApiAction(input: {
   }
 
   if (_opsApiActionNeedsStaffRole(url)) {
-    const role = String(authUser.role || '').toLowerCase()
-    if (!['admin', 'owner', 'ops_manager'].includes(role)) {
+    if (!_opsApiStaffOperatorRole(authUser.role)) {
+      // 403, NOT 401: the caller IS validly signed in, they just lack the staff
+      // role. trade.html treats every 401 as an expired session and force-logs
+      // the trade out, so a 401 here turned any trade touching a staff route
+      // into a fleet-wide logout loop (issue #681). 401 stays reserved for
+      // user_jwt_required (no/invalid session) above.
       return {
         ok: false,
-        status: 401,
+        status: 403,
         code: 'operator_access_required',
         error: 'An authorised operator session is required.',
       }
@@ -5725,16 +5762,17 @@ if (import.meta.main) serve(async (req: Request) => {
       }
       // Wave 0 C2 gate (red-team + decision scoped-routine-key-2026-06-17): approving a
       // draft creates a LIVE make-safe job, so it is a PRIVILEGED action. Allowed callers:
-      // the master SW_API_KEY (the ops dashboard, authMode='api_key') OR a logged-in
-      // admin/owner JWT. The scoped automation routine (authMode='routine') is REJECTED:
-      // it may create/read drafts but the human tick (this approve) is the gate it must
-      // never cross. (This also fixes the earlier C2 regression that 403'd the dashboard,
-      // which authenticates with SW_API_KEY + anon bearer, never a user JWT.)
+      // the master SW_API_KEY (the ops dashboard pre-cutover, authMode='api_key') OR a
+      // logged-in staff-operator JWT (admin/owner/ops_manager — the same set the
+      // front-door staff gate admits; post-#667 the dashboard human IS an ops_manager
+      // JWT, so the boundary this gate protects is human-vs-automation, not
+      // admin-vs-ops_manager). The scoped automation routine (authMode='routine') is
+      // REJECTED: it may create/read drafts but the human tick (this approve) is the
+      // gate it must never cross.
       case 'approve_intake_draft': {
-        const approveIsPrivileged = authMode === 'api_key' ||
-          (authMode === 'jwt' && (authUser?.role === 'admin' || authUser?.role === 'owner'))
+        const approveIsPrivileged = _opsApiCallerIsStaffOperator(authMode, authUser)
         if (!approveIsPrivileged) {
-          return json({ error: 'forbidden: approve_intake_draft requires the privileged ops key or an admin/owner session; the make-safe automation routine cannot approve drafts' }, 403)
+          return json({ error: 'forbidden: approve_intake_draft requires the privileged ops key or an authorised staff operator session; the make-safe automation routine cannot approve drafts' }, 403)
         }
         return json(await approveIntakeDraft(client, body))
       }
@@ -6506,9 +6544,13 @@ if (import.meta.main) serve(async (req: Request) => {
         return json(result)
       }
       case 'add_note': {
-        // Dual auth: API key callers (MCP/Cowork) pass as admin, JWT callers pass their userId
+        // Dual auth: API key callers (MCP/Cowork) pass as admin, JWT callers pass their userId.
+        // The operator predicate is the SAME staff-role set the front-door gate admits
+        // (admin/owner/ops_manager) — before this, an ops_manager the front door had
+        // admitted fell into the trade assignment path and was refused notes on jobs
+        // they were not a listed trade on (SWF-261098, 13 Aug 2026, post-#667 cutover).
         const noteUserId = authMode === 'jwt' ? authUser!.id : (body.userId || body.user_id || null)
-        const noteIsAdmin = authMode === 'api_key' || authUser?.role === 'admin'
+        const noteIsAdmin = _opsApiCallerIsStaffOperator(authMode, authUser)
         return json(await addNote(client, { ...body, userId: noteUserId }, noteIsAdmin))
       }
       case 'delete_note': {
