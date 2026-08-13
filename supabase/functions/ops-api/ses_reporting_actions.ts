@@ -8,7 +8,10 @@ import {
   splitRefPo,
 } from "./makesafe_send_pack.ts";
 import { composeInvoiceReferenceWithPo } from "./ses_invoice_reference_grain.ts";
-import { qualifyMakesafeCurrentDraftInvoice } from "./makesafe_docs_ready_invoice.ts";
+import {
+  makesafeInvoiceIsCurrentAttendanceReceivable,
+  qualifyMakesafeCurrentDraftInvoice,
+} from "./makesafe_docs_ready_invoice.ts";
 import { canonicalMakesafeInvoiceContactName } from "./makesafe_invoice_contact.ts";
 // A sealed-release send used to leave `report_sent_at` untouched, so the field
 // was wrong in BOTH directions: false where the retired auto-stamp minted it,
@@ -1959,6 +1962,15 @@ export async function createSesInvoiceDraftAction(
     fetchAllAccrecInvoices?: (
       client: SesSupabaseClient,
     ) => Promise<any[]>;
+    bindExistingInvoiceCloseout?: (
+      client: SesSupabaseClient,
+      args: {
+        job_id: string;
+        actor: string;
+        invoice: SesXeroInvoiceResult;
+        pdf: Uint8Array;
+      },
+    ) => Promise<Record<string, unknown>>;
   } = {},
 ) {
   // Mint is agent/api_key/routine-safe; a browser session must still be an
@@ -1987,11 +1999,13 @@ export async function createSesInvoiceDraftAction(
         "This obligation is explicitly no additional charge, so no Xero invoice may be created.",
     });
   }
+  const bindExistingOnly = revision.state === "blocked" &&
+    revision.pricing_disposition === "blocked_duplicate_live";
   if (
-    revision.state === "blocked" ||
+    (revision.state === "blocked" && !bindExistingOnly) ||
     !["priced_from_canon", "priced_with_line_override"].includes(
-      revision.pricing_disposition,
-    )
+        revision.pricing_disposition,
+      ) && !bindExistingOnly
   ) {
     const blocker = Array.isArray(revision.blockers) &&
         revision.blockers.length > 0
@@ -2060,24 +2074,48 @@ export async function createSesInvoiceDraftAction(
       .select("external_ref,reattend_count,last_reattend_at")
       .eq("job_id", args.job_id)
       .maybeSingle();
-    if (detailResponse.error) {
+    if (detailResponse.error || !detailResponse.data) {
       throw new SesActionError(503, {
         state: "refused",
         fact:
           "The current attendance boundary could not be read, so the existing Xero invoice cannot be safely adopted or bypassed.",
       });
     }
+    const duplicate = resolveSesInvoiceDuplicates([{
+      job_id: args.job_id,
+      external_ref: externalRef,
+      obligation_revision_id: revision.id,
+    }], accrecRows)[0];
+    const safeCandidate = duplicate?.ambiguity === "none" &&
+        duplicate.live_invoices.length === 1
+      ? duplicate.live_invoices[0] as any
+      : null;
+    const safeStatus = String(safeCandidate?.status || "").toUpperCase();
+    const supportedExistingStatus = [
+      "DRAFT",
+      "AUTHORISED",
+      "SUBMITTED",
+      "PAID",
+    ].includes(safeStatus);
+    const safeLink = !safeCandidate?.job_id ||
+      String(safeCandidate.job_id) === String(args.job_id);
+    const attributedCandidate = safeCandidate
+      ? { ...safeCandidate, job_id: args.job_id }
+      : null;
+    const currentAttendance = supportedExistingStatus && safeLink &&
+      makesafeInvoiceIsCurrentAttendanceReceivable(
+        { id: args.job_id },
+        { ...object(detailResponse.data), external_ref: externalRef },
+        attributedCandidate,
+      );
     const binding = object(revision.xero_binding);
     const boundId = String(binding.xero_invoice_id || "");
-    const hitId = String(existingHit.xero_invoice_id || "");
-    const hitIsDraft = String(existingHit.status || "").toUpperCase() ===
-      "DRAFT";
+    const hitId = String(safeCandidate?.xero_invoice_id || "");
+    const hitIsDraft = safeStatus === "DRAFT";
     const sameBoundDraft = !!boundId && !!hitId && boundId === hitId &&
       hitIsDraft;
     // Idempotent re-mint: the live hit is already this obligation's SES-bound DRAFT.
-    const hitRow = (accrecRows || []).find((row) =>
-      String(row?.xero_invoice_id || "") === hitId
-    );
+    const hitRow = safeCandidate;
     const sameObligation = hitIsDraft && !!hitRow &&
       String(hitRow.invoice_obligation_revision_id || "") ===
         String(revision.id);
@@ -2085,9 +2123,10 @@ export async function createSesInvoiceDraftAction(
       qualifyMakesafeCurrentDraftInvoice(
         { id: args.job_id },
         { ...object(detailResponse.data), external_ref: externalRef },
-        hitRow,
+        attributedCandidate,
       ).qualifies;
-    if (sameBoundDraft || sameObligation || qualifyingUnboundDraft) {
+    const qualifyingExisting = currentAttendance && !!hitId;
+    if (qualifyingExisting) {
       // Repair, never assume: a first mint whose Xero create landed but whose
       // binding write did not would otherwise be stranded unapprovable here.
       const repairEffect = await buildSesEffect({
@@ -2098,22 +2137,21 @@ export async function createSesInvoiceDraftAction(
         payload: proposal,
       });
       const repairInvoice = {
-        xero_invoice_id: String(existingHit.xero_invoice_id || ""),
-        invoice_number: String(existingHit.invoice_number || ""),
-        status: String(existingHit.status || ""),
+        xero_invoice_id: hitId,
+        invoice_number: String(safeCandidate.invoice_number || ""),
+        status: safeStatus,
         reference: String(hitRow?.reference || externalRef),
-        total: Number(existingHit.total ?? 0),
+        total: Number(safeCandidate.total ?? 0),
       };
-      // Prefer any PDF already stamped on the live binding; otherwise fetch the
-      // real Xero DRAFT PDF so the Invoice tab never falls back to a local HTML
-      // invention on an idempotent re-mint.
+      // Prefer any PDF already stamped on a DRAFT binding for private storage,
+      // but always fetch the exact live Xero PDF for the typed pack document.
       const existingPdfKey = String(
         object(revision.xero_binding).pdf_object_key || "",
       ).trim();
       const existingPdfHash = String(
         object(revision.xero_binding).pdf_content_hash || "",
       ).trim();
-      const draftPdf = existingPdfKey && existingPdfHash
+      const draftPdf = hitIsDraft && existingPdfKey && existingPdfHash
         ? {
           pdf_object_key: existingPdfKey,
           pdf_content_hash: existingPdfHash,
@@ -2124,11 +2162,38 @@ export async function createSesInvoiceDraftAction(
             object(revision.xero_binding).pdf_stored_at || "",
           ),
         }
-        : await tryStoreSesDraftInvoicePdf(client, gateway, {
-          job_id: args.job_id,
-          invoice: repairInvoice,
+        : null;
+      let invoicePdfBytes: Uint8Array;
+      try {
+        invoicePdfBytes = await gateway.fetchAuthorisedPdf(hitId);
+      } catch (error) {
+        throw new SesActionError(503, {
+          state: "refused",
+          fact:
+            `The existing Xero invoice was preserved, but its exact PDF could not be fetched for closeout (${
+              (error as Error)?.message || "unknown error"
+            }). No invoice was created or sent.`,
         });
-      await bindSesDraftInvoiceToRevision(client, {
+      }
+      const storedPdf = draftPdf || await storeSesXeroInvoicePdfBytes(client, {
+        job_id: args.job_id,
+        invoice: repairInvoice,
+        pdf: invoicePdfBytes,
+      });
+      if (!deps.bindExistingInvoiceCloseout) {
+        throw new SesActionError(503, {
+          state: "refused",
+          fact:
+            "The existing invoice was preserved, but the pack closeout binder is unavailable. No invoice was created or sent.",
+        });
+      }
+      const closeout = await deps.bindExistingInvoiceCloseout(client, {
+        job_id: args.job_id,
+        actor: args.actor,
+        invoice: repairInvoice,
+        pdf: invoicePdfBytes,
+      });
+      await bindSesExistingInvoiceToRevision(client, {
         org_id: args.org_id,
         job_id: args.job_id,
         invoice_obligation_revision_id: revision.id,
@@ -2136,28 +2201,33 @@ export async function createSesInvoiceDraftAction(
           hitRow?.ses_external_token || repairEffect.external_token,
         ),
         invoice: repairInvoice,
-        draft_pdf: draftPdf,
+        invoice_pdf: storedPdf,
       });
       return {
-        state: "xero_draft_created",
+        state: hitIsDraft
+          ? "xero_draft_created"
+          : "existing_live_invoice_bound",
         skipped: true,
-        reason: qualifyingUnboundDraft && !sameBoundDraft && !sameObligation
+        reason: !hitIsDraft
+          ? "existing_live_invoice_closeout_bound"
+          : qualifyingUnboundDraft && !sameBoundDraft && !sameObligation
           ? "existing_qualifying_draft_adopted"
           : "existing_ses_bound_draft",
         invoice: {
-          xero_invoice_id: existingHit.xero_invoice_id,
-          invoice_number: existingHit.invoice_number,
-          status: existingHit.status,
+          xero_invoice_id: repairInvoice.xero_invoice_id,
+          invoice_number: repairInvoice.invoice_number,
+          status: repairInvoice.status,
           reference: externalRef,
-          total: existingHit.total ?? 0,
+          total: repairInvoice.total,
         },
-        draft_pdf: draftPdf
+        draft_pdf: storedPdf
           ? {
-            content_hash: draftPdf.pdf_content_hash,
-            size_bytes: draftPdf.pdf_size_bytes,
-            object_key: draftPdf.pdf_object_key,
+            content_hash: storedPdf.pdf_content_hash,
+            size_bytes: storedPdf.pdf_size_bytes,
+            object_key: storedPdf.pdf_object_key,
           }
           : null,
+        closeout,
         match_method: existingHit.match_method,
         scanned_accrec: accrecRows.length,
         invoice_create_dispatched: false,
@@ -2187,6 +2257,16 @@ export async function createSesInvoiceDraftAction(
         },
       ),
     );
+  }
+
+  if (bindExistingOnly) {
+    const blocker = Array.isArray(revision.blockers) && revision.blockers[0]
+      ? refusalFromStored(revision.blockers[0])
+      : sesRefusal(
+        "invoice_duplicate_live",
+        "Use the existing live invoice on this card; do not mint another invoice.",
+      );
+    throw new SesActionError(409, blocker);
   }
 
   // Optional SES obligation-index probe — never replaces the full-set guard above.
@@ -4284,6 +4364,44 @@ async function bindSesDraftInvoiceToRevision(
   requireValue(
     bindingUpdate,
     "The exact Xero draft exists under its SES token, but its invoice obligation binding could not be stored; reconcile that draft before resuming.",
+  );
+}
+
+async function bindSesExistingInvoiceToRevision(
+  client: SesSupabaseClient,
+  args: {
+    org_id: string;
+    job_id: string;
+    invoice_obligation_revision_id: string;
+    external_token: string;
+    invoice: SesXeroInvoiceResult;
+    invoice_pdf: SesDraftInvoicePdfBinding;
+  },
+) {
+  await persistSesInvoiceMirror(client, args);
+  const status = String(args.invoice.status || "").toUpperCase();
+  const state = status === "DRAFT" ? "create_executed" : "authorised";
+  const bindingUpdate = await client.from(
+    "makesafe_invoice_obligation_revisions",
+  ).update({
+    state,
+    xero_binding: {
+      xero_invoice_id: args.invoice.xero_invoice_id,
+      invoice_number: args.invoice.invoice_number,
+      status,
+      total: Number.isFinite(Number(args.invoice.total))
+        ? Number(args.invoice.total)
+        : null,
+      bound_at: new Date().toISOString(),
+      ...args.invoice_pdf,
+    },
+  }).eq("id", args.invoice_obligation_revision_id).in(
+    "state",
+    [...SES_DRAFT_BINDABLE_REVISION_STATES, "blocked", "authorised"],
+  ).select("id").maybeSingle();
+  requireValue(
+    bindingUpdate,
+    "The existing Xero invoice was preserved, but its SES obligation binding could not be stored; no new invoice was created.",
   );
 }
 
