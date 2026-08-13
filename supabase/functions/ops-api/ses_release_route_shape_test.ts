@@ -653,8 +653,7 @@ const LEAKED_ANNOTATION_BODIES = [
 ];
 
 const MLB_CLEAN_BODIES: Record<string, string> = {
-  report:
-    "Please find attached the report for MLB-27516.\n\nThank you.",
+  report: "Please find attached the report for MLB-27516.\n\nThank you.",
   photo: "Please find attached site photos for MLB-27516.\n\nThank you.",
   invoice:
     "Please find attached the invoice and supporting documents for MLB-27516.\n\nThank you.",
@@ -670,7 +669,10 @@ function mlbDocket(
     stage,
     envelope: {
       v2: {
-        classification: { builder_key: builderKey, family: "physical_makesafe" },
+        classification: {
+          builder_key: builderKey,
+          family: "physical_makesafe",
+        },
         routing: {
           report_to: "makesafes@mlbuilders.com.au",
           photo_to: "makesafes@mlbuilders.com.au",
@@ -802,7 +804,11 @@ Deno.test("MLB physical bodies are SET plain English on the ordinary-mail except
   );
   assertEquals(routes.map((r) => r.route_kind), ["report", "photo", "invoice"]);
   for (const route of routes) {
-    assertEquals(route.body, MLB_CLEAN_BODIES[route.route_kind], route.route_kind);
+    assertEquals(
+      route.body,
+      MLB_CLEAN_BODIES[route.route_kind],
+      route.route_kind,
+    );
     assertEquals(sesBodyCarriesInternalAnnotation(route.body), false);
     assertEquals(route.ready, true, `${route.route_kind} must stay sendable`);
   }
@@ -815,7 +821,10 @@ Deno.test("MLB physical bodies are SET plain English on the ordinary-mail except
     report.subject,
     "NEW WORK ORDER - MLB-27516 63 Chidlow St E, Northam, WA 6401",
   );
-  assertEquals((report as any).mlb_transport, "ordinary_mail_send_captain_exception_v1");
+  assertEquals(
+    (report as any).mlb_transport,
+    "ordinary_mail_send_captain_exception_v1",
+  );
   assertEquals((invoice as any).mlb_transport, null);
   assertEquals(invoice.attachment_hashes.includes("xero-hash"), true);
 });
@@ -828,7 +837,11 @@ Deno.test("MLB physical bodies stay plain English on the locked intake-thread sh
     { mlbOrdinaryMailSendFallback: false },
   );
   for (const route of routes) {
-    assertEquals(route.body, MLB_CLEAN_BODIES[route.route_kind], route.route_kind);
+    assertEquals(
+      route.body,
+      MLB_CLEAN_BODIES[route.route_kind],
+      route.route_kind,
+    );
   }
   // No intake thread id on this envelope: the locked shape refuses readiness,
   // but the refusal never re-inherits the stored annotation body.
@@ -845,7 +858,11 @@ Deno.test("MLB pre-authorise routes already carry clean bodies (Northam ships wi
     { mlbOrdinaryMailSendFallback: true },
   );
   for (const route of routes) {
-    assertEquals(route.body, MLB_CLEAN_BODIES[route.route_kind], route.route_kind);
+    assertEquals(
+      route.body,
+      MLB_CLEAN_BODIES[route.route_kind],
+      route.route_kind,
+    );
     assertEquals(sesBodyCarriesInternalAnnotation(route.body), false);
   }
   const invoice = routes.find((r) => r.route_kind === "invoice")!;
@@ -860,7 +877,11 @@ Deno.test("universal three-route shape also sets plain-English bodies", () => {
   );
   assertEquals(routes.map((r) => r.route_kind), ["report", "photo", "invoice"]);
   for (const route of routes) {
-    assertEquals(route.body, MLB_CLEAN_BODIES[route.route_kind], route.route_kind);
+    assertEquals(
+      route.body,
+      MLB_CLEAN_BODIES[route.route_kind],
+      route.route_kind,
+    );
     assertEquals(sesBodyCarriesInternalAnnotation(route.body), false);
   }
 });

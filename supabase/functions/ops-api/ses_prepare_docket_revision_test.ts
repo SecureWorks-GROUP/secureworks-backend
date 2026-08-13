@@ -1330,7 +1330,10 @@ Deno.test("composeSesSiteAddress never doubles a suburb already inside the addre
     "63 Chidlow St E, Northam, WA 6401",
   );
   assertEquals(composeSesSiteAddress("", "Northam"), "Northam");
-  assertEquals(composeSesSiteAddress("62 Example Street", ""), "62 Example Street");
+  assertEquals(
+    composeSesSiteAddress("62 Example Street", ""),
+    "62 Example Street",
+  );
   assertEquals(
     composeSesSiteAddress("25 RUDWICK ST, MOSMAN PARK", "Mosman Park"),
     "25 RUDWICK ST, MOSMAN PARK",
