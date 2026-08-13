@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 import {
-  makesafeInvoiceIsCurrentAttendanceReceivable,
+  makesafeInvoiceAttendanceCycle,
+  makesafeInvoiceReferenceMatchesCard,
   selectCurrentMakesafeReceivableInvoice,
 } from "./makesafe_docs_ready_invoice.ts";
 
@@ -43,9 +44,11 @@ function normalizedInvoiceNumber(value: unknown): string {
  *
  * This is deliberately stricter than the duplicate-mint guard: a reference
  * match is not enough. The invoice number must be unique in the fetched ACCREC
- * set, linked to this exact job, current for this attendance, and the selected
- * current receivable on the card. Nothing in this module can mint, authorise,
- * send, void, update, or otherwise mutate Xero.
+ * set, linked to this exact job, and match this card's reference. A known
+ * prior-cycle invoice is allowed only because this action requires the Captain
+ * to name its exact invoice number; unsolicited placement remains governed by
+ * the current-cycle selector. Nothing in this module can mint, authorise, send,
+ * void, update, or otherwise mutate Xero.
  */
 export function selectExistingInvoiceForPackBind(args: {
   job: any;
@@ -113,34 +116,46 @@ export function selectExistingInvoiceForPackBind(args: {
     );
   }
   if (
-    !makesafeInvoiceIsCurrentAttendanceReceivable(
-      args.job,
-      args.detail,
-      invoice,
-    )
+    !String(invoice?.reference || "").trim() ||
+    !makesafeInvoiceReferenceMatchesCard(args.job, args.detail, invoice)
   ) {
     throw new SesBindExistingInvoiceError(
       409,
       "named_invoice_not_current_card_receivable",
-      `${expected} does not satisfy the exact job, ACCREC, current-attendance, and card-reference boundary.`,
+      `${expected} does not satisfy the exact job, ACCREC, and card-reference boundary.`,
     );
   }
 
-  const selected = selectCurrentMakesafeReceivableInvoice(
-    (args.invoices || []).filter((candidate) =>
-      String(candidate?.job_id || "") === String(args.job?.id || "")
-    ),
-  );
-  if (
-    String(selected?.xero_invoice_id || "") !==
-      String(invoice.xero_invoice_id)
-  ) {
+  const attendanceCycle = makesafeInvoiceAttendanceCycle(args.detail, invoice);
+  if (attendanceCycle === "unknown") {
     throw new SesBindExistingInvoiceError(
       409,
-      "named_invoice_not_current_receivable",
-      `${expected} is not the current receivable selected for this card; bind-only recovery will not attach stale money.`,
+      "named_invoice_not_current_card_receivable",
+      `${expected} has unknown attendance-cycle attribution; bind-only recovery refuses to guess.`,
     );
   }
 
-  return { ...invoice, status };
+  if (attendanceCycle === "current") {
+    const selected = selectCurrentMakesafeReceivableInvoice(
+      (args.invoices || []).filter((candidate) =>
+        String(candidate?.job_id || "") === String(args.job?.id || "")
+      ),
+    );
+    if (
+      String(selected?.xero_invoice_id || "") !==
+        String(invoice.xero_invoice_id)
+    ) {
+      throw new SesBindExistingInvoiceError(
+        409,
+        "named_invoice_not_current_receivable",
+        `${expected} is not the current receivable selected for this card; bind-only recovery will not attach stale money.`,
+      );
+    }
+  }
+
+  return {
+    ...invoice,
+    status,
+    named_prior_cycle_bind: attendanceCycle === "prior",
+  };
 }

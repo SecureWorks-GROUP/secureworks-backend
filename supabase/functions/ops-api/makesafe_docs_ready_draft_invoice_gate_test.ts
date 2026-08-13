@@ -102,14 +102,14 @@ Deno.test("current DRAFT qualifier rejects every wrong lifecycle/link/type/refer
   }
 });
 
-Deno.test("current candidate selection never lets an older DRAFT outrank a newer lifecycle row", () => {
+Deno.test("current candidate selection never lets an older DRAFT outrank a newer live lifecycle row", () => {
   const olderDraft = {
     ...linkedInvoice("DRAFT"),
     id: "invoice-a",
     invoice_date: "2026-08-01",
   };
   for (
-    const status of ["AUTHORISED", "SUBMITTED", "PAID", "VOIDED", "DELETED"]
+    const status of ["AUTHORISED", "SUBMITTED", "PAID"]
   ) {
     const selected = selectCurrentMakesafeReceivableInvoice([
       olderDraft,
@@ -130,17 +130,33 @@ Deno.test("current candidate selection never lets an older DRAFT outrank a newer
       status,
     );
   }
+});
 
-  const sameInvoiceDate = selectCurrentMakesafeReceivableInvoice([
-    olderDraft,
-    {
-      ...olderDraft,
-      id: "invoice-newer",
-      status: "DELETED",
-      created_at: "2026-08-03T02:00:00Z",
-    },
-  ]);
-  assertEquals(sameInvoiceDate?.status, "DELETED");
+Deno.test("current candidate selection ignores newer DELETED and VOIDED tombstones", () => {
+  for (const status of ["DELETED", "VOIDED"]) {
+    const selected = selectCurrentMakesafeReceivableInvoice([
+      {
+        ...linkedInvoice("AUTHORISED"),
+        id: "invoice-live",
+        invoice_date: "2026-08-01",
+      },
+      {
+        ...linkedInvoice(status),
+        id: "invoice-tombstone",
+        invoice_date: "2026-08-12",
+        created_at: "2026-08-12T02:00:00Z",
+      },
+    ]);
+    assertEquals(selected?.status, "AUTHORISED", status);
+  }
+
+  assertEquals(
+    selectCurrentMakesafeReceivableInvoice([
+      linkedInvoice("DELETED"),
+      linkedInvoice("VOIDED"),
+    ]),
+    null,
+  );
 });
 
 Deno.test("current-cycle gate rejects a prior draft and accepts a post-reattend draft", () => {
