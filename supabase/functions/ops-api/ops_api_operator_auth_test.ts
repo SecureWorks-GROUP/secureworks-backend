@@ -15,6 +15,7 @@ import {
   _preferBearerForOpsApiAction,
   _resolveOpsApiAuthIntent,
   AGENT_READ_ALLOWED_ACTIONS,
+  LEAD_INSTALLER_READ_ACTIONS,
   OPS_API_STAFF_OPERATOR_ROLES,
 } from "./index.ts";
 
@@ -464,7 +465,10 @@ Deno.test("#681: trade login-path actions pass the front-door gate for a trade J
 });
 
 Deno.test("#681: a signed-in trade on a staff-only action gets 403 operator_access_required, never a logout-inducing 401", () => {
-  for (const action of ["makesafe_board", "job_financials", "pipeline"]) {
+  // `pipeline` moved out of this list on 2026-08-13: it is now a
+  // LEAD_INSTALLER_READ_ACTIONS entitlement (see the lockout tests below).
+  // A crew JWT still 403s on it, covered there too.
+  for (const action of ["makesafe_board", "job_financials", "list_work_orders"]) {
     const decision = _authorizeOpsApiAction({
       url: actionUrl(action),
       authMode: "jwt",
@@ -476,6 +480,88 @@ Deno.test("#681: a signed-in trade on a staff-only action gets 403 operator_acce
       assertEquals(decision.code, "operator_access_required", action);
     }
   }
+});
+
+// ── 2026-08-13 trade-app outage: lead_installer dispatcher-view reads ──
+
+Deno.test("lead installer read entitlement is exactly the four dispatcher-view actions", () => {
+  assertEquals(
+    [...LEAD_INSTALLER_READ_ACTIONS].sort(),
+    ["calendar", "list_users", "ops_summary", "pipeline"].sort(),
+  );
+  // The entitlement must never grow into staff-role membership.
+  assertEquals(_opsApiStaffOperatorRole("lead_installer"), false);
+  assertEquals(
+    _opsApiCallerIsStaffOperator("jwt", { role: "lead_installer" }),
+    false,
+  );
+});
+
+Deno.test("outage fix: a lead_installer JWT passes the front door on the four dispatcher-view reads", () => {
+  for (const action of LEAD_INSTALLER_READ_ACTIONS) {
+    assertEquals(
+      authorizationStatus({ action, authMode: "jwt", role: "lead_installer" }),
+      200,
+      action,
+    );
+  }
+});
+
+Deno.test("outage fix: the entitlement is role-scoped — crew and other non-staff JWTs still 403 on those reads", () => {
+  for (const role of ["crew", "estimator", "sales", ""]) {
+    for (const action of LEAD_INSTALLER_READ_ACTIONS) {
+      const decision = _authorizeOpsApiAction({
+        url: actionUrl(action),
+        authMode: "jwt",
+        authUser: { role },
+      });
+      assertEquals(decision.ok, false, `${role}:${action}`);
+      if (!decision.ok) {
+        assertEquals(decision.status, 403, `${role}:${action}`);
+        assertEquals(decision.code, "operator_access_required", `${role}:${action}`);
+      }
+    }
+  }
+});
+
+Deno.test("outage fix: a missing or invalid session still gets 401 on the four reads", () => {
+  for (const action of LEAD_INSTALLER_READ_ACTIONS) {
+    for (const authMode of ["none", "jwt", "api_key"] as const) {
+      const decision = _authorizeOpsApiAction({
+        url: actionUrl(action),
+        authMode,
+      });
+      assertEquals(decision.ok, false, `${authMode}:${action}`);
+      if (!decision.ok) {
+        assertEquals(decision.status, 401, `${authMode}:${action}`);
+        assertEquals(decision.code, "user_jwt_required", `${authMode}:${action}`);
+      }
+    }
+  }
+});
+
+Deno.test("outage fix: lead_installer stays a non-operator inside add_note — assignment check still applies", async () => {
+  // The four-read entitlement must not leak into the shared staff predicate
+  // that handlers (add_note, approvals) use for their inner operator split.
+  const noteIsAdmin = _opsApiCallerIsStaffOperator("jwt", {
+    role: "lead_installer",
+  });
+  assertEquals(noteIsAdmin, false);
+  await assertRejects(
+    () =>
+      _assertAssignedOrMakesafeAccessForTest(
+        makeAccessClient({
+          id: "job-patio",
+          type: "patio",
+          job_number: "SWP-261098",
+        }),
+        "job-patio",
+        "lead-installer-user",
+        noteIsAdmin,
+      ),
+    Error,
+    "You are not assigned to this job",
+  );
 });
 
 Deno.test("#681: a missing or expired session still gets 401 user_jwt_required", () => {
