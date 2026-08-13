@@ -71,7 +71,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r11-report-only-sendable-pack";
+  "ses-stage-engine.v2-r12-draft-only-docs-ready";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -534,9 +534,9 @@ export function sesStagePortalReportIn(
  *
  * | Family | What one click needs |
  * |---|---|
- * | physical make-safe | make-safe report, SWMS (where the docket requires it), draft invoice, pack READY and unsent |
- * | roof (portal or own-template) | invoice document, report-in proved, plus pack READY and unsent |
- * | assessment / quote | invoice document, report-in proved across all three typed roles, plus pack READY and unsent |
+ * | physical make-safe | make-safe report, SWMS (where the docket requires it), qualifying Xero DRAFT, pack READY and unsent |
+ * | roof (portal or own-template) | qualifying Xero DRAFT, report-in proved, plus pack READY and unsent |
+ * | assessment / quote | qualifying Xero DRAFT, report-in proved across all three typed roles, plus pack READY and unsent |
  * | temporary fencing, repair, restoration | the standard path — repair "match[es] the whole existing system"; restoration is "exactly the same as any other job" |
  *
  * Two boundaries from the rulings are structural here, not documented:
@@ -602,23 +602,7 @@ export function sesStageDocsReady(
     ) {
       missing.push("the SWMS this docket requires");
     }
-    // `docsReady()` above owns the lifecycle decision: either a qualifying
-    // current DRAFT, or an already-issued invoice whose pack remains unsent.
-    // This family gate only adds the physical pack's document requirement.
-    if (
-      !(input.evidence?.documents?.invoice === true || pack?.invoice_doc_id)
-    ) {
-      missing.push("the invoice document");
-    }
   } else {
-    // Report-only releases still send an email: the invoice route. A READY
-    // review state plus a qualifying invoice lifecycle is not enough when the
-    // pack itself has no invoice document; that WO-only stub is not sendable.
-    if (
-      !(input.evidence?.documents?.invoice === true || pack?.invoice_doc_id)
-    ) {
-      missing.push("the invoice document");
-    }
     // Roof and assessment produce no SecureWorks report. What one click needs
     // is that the builder's report is PROVED complete - by the deterministic
     // portal reader, by a trade tick, or by a submitted own-template draft.

@@ -1,15 +1,41 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 //
-// Captain ruling 2026-08-13: AJS/AJBR defaults to no SWMS unless the work is
-// HRCW. Other physical builders keep their standing SWMS requirement.
+// Captain lock 2026-08-13: Docs Ready requires SWMS only for MLB physical
+// MakeSafe. Matrix generation metadata remains separately explicit.
 
 import {
   assert,
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { resolveSesFamilyMatrixRow } from "./ses_family_matrix.ts";
+import {
+  resolveSesFamilyMatrixRow,
+  sesFamilyRequiresSwms,
+} from "./ses_family_matrix.ts";
 
-Deno.test("AJS/AJBR physical families default to no SWMS while other builders stay required", () => {
+Deno.test("Docs Ready requires SWMS only for the MLB physical MakeSafe family", () => {
+  assertEquals(sesFamilyRequiresSwms("MLB", "physical_makesafe"), true);
+  for (const builder of ["AJS", "AJBR", "WESTERN", "SYNTHETIC"] as const) {
+    assertEquals(
+      sesFamilyRequiresSwms(builder, "physical_makesafe"),
+      false,
+      builder,
+    );
+  }
+  for (
+    const family of [
+      "ordinary_roof_portal",
+      "own_template_roof",
+      "assessment_quote",
+      "temporary_fencing",
+      "repair",
+      "restoration",
+    ] as const
+  ) {
+    assertEquals(sesFamilyRequiresSwms("MLB", family), false, family);
+  }
+});
+
+Deno.test("matrix generation policies remain explicit for every physical-shaped row", () => {
   const PHYSICAL_FAMILIES = [
     "physical_makesafe",
     "temporary_fencing",

@@ -17,6 +17,7 @@ import {
 } from "./makesafe_cycle_evidence.ts";
 import {
   canonicalSesFamilyFromCard,
+  requiresMakesafeSwms,
   sesFamilyLabel,
 } from "./ses_family_matrix.ts";
 import {
@@ -1229,8 +1230,7 @@ export function buildCanonicalMakesafeRows(
       detail,
       false, // no photo attendance_cycle_id write path yet → reattend fail-closed
     );
-    const swmsRequired = base?.has_swms_doc === true || !!pack?.swms_doc_id ||
-      (Array.isArray(base?.missing_docs) && base.missing_docs.includes("swms"));
+    const swmsRequired = requiresMakesafeSwms(detail, base);
     const declaredStage = String(base?.board_stage || "new").toLowerCase();
     const application = extras.statusApplicationsByJobId?.[base?.id] || null;
     const invoiceQualifiesAsCurrentDraft =
@@ -1268,12 +1268,13 @@ export function buildCanonicalMakesafeRows(
         invoiceCreatedAt: base?.invoice_created_at || null,
         packSent,
         documents: {
-          report: base?.has_report_doc === true,
+          report: base?.has_report_doc === true || !!pack?.report_doc_id,
           ownRoofReportDocumentIds: extras?.ownRoofReportDocumentIdsByJobId?.[
             String(base?.id || "")
           ] ?? new Set<string>(),
-          invoice: base?.has_invoice_doc === true,
-          swms: base?.has_swms_doc === true,
+          invoice: base?.has_invoice_doc === true || !!pack?.invoice_doc_id ||
+            invoiceQualifiesAsCurrentDraft,
+          swms: base?.has_swms_doc === true || !!pack?.swms_doc_id,
         },
         swmsRequired,
         hold,
@@ -1375,9 +1376,11 @@ export function buildCanonicalMakesafeRows(
         // The card tick means the trade report is in, matching job detail.
         // Keep `documents.report` and `has_report_doc` above as the distinct
         // later fact that a report document has been attached.
-        report: reportIn.satisfied || base?.has_report_doc === true,
-        invoice: base?.has_invoice_doc === true,
-        swms: base?.has_swms_doc === true,
+        report: reportIn.satisfied || base?.has_report_doc === true ||
+          !!pack?.report_doc_id,
+        invoice: invoiceQualifiesAsCurrentDraft ||
+          base?.has_invoice_doc === true || !!pack?.invoice_doc_id,
+        swms: base?.has_swms_doc === true || !!pack?.swms_doc_id,
       },
     };
     const reportPayload = {

@@ -2067,9 +2067,9 @@ Deno.test("assessment triad produces an invoice-only draft at the sealed price",
   assertEquals(result.invoice_proposal?.total_inc_gst, 165);
   assertEquals(result.envelope.v2.items.swms_requirement, {
     state: "ready",
-    evidence: "rule:hrcw-requires-swms",
+    evidence: "rule:swms-required-only-for-mlb-physical-makesafe",
   });
-  assertEquals(result.envelope.v2.items.swms_artifact.state, "blocked");
+  assertEquals(result.envelope.v2.items.swms_artifact.state, "not_applicable");
 
   const fenceOnly = fixtureInput(row);
   fenceOnly.cycle_facts.hours_and_materials = { fence_only: true };
@@ -3636,7 +3636,7 @@ Deno.test("missing trade report blocks SWMS generation without instructing staff
   );
 });
 
-Deno.test("AJS HRCW still requires SWMS and surfaces an unsupported-template caveat", async () => {
+Deno.test("AJS HRCW does not turn missing SWMS into a Docs Ready blocker", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "AJS" &&
     candidate.family === "physical_makesafe"
@@ -3660,25 +3660,26 @@ Deno.test("AJS HRCW still requires SWMS and surfaces an unsupported-template cav
     dependencies(input),
   );
   assertEquals(response.results[0].state, "ready");
-  assert(
+  assertEquals(
     blockerCodes(response.results[0]).includes(
       "swms_generation_template_unavailable",
     ),
+    false,
   );
   assertEquals(
     response.results[0].envelope.v2.items.swms_requirement,
     {
       state: "ready",
-      evidence: "rule:hrcw-requires-swms",
+      evidence: "rule:swms-required-only-for-mlb-physical-makesafe",
     },
   );
   assertEquals(
     response.results[0].envelope.v2.items.swms_artifact.state,
-    "blocked",
+    "not_applicable",
   );
   assertEquals(
     blockerCodes(response.results[0]).includes("optional_swms_missing"),
-    false,
+    true,
   );
   assertInvoiceHandoffCallable(response.results[0]);
 });

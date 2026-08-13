@@ -30,6 +30,7 @@ import {
   SES_PHYSICAL_FAMILY_RECIPE_VERSION,
   type SesFamilyId,
   type SesFamilyMatrixRow,
+  sesFamilyRequiresSwms,
 } from "./ses_family_matrix.ts";
 import {
   ajsPackCc,
@@ -968,6 +969,13 @@ export function sesSwmsDecision(
   requirementEvidence: string;
   naRule: string | null;
 } {
+  if (!sesFamilyRequiresSwms(row.builder_key, row.family)) {
+    return {
+      required: false,
+      requirementEvidence: "rule:swms-required-only-for-mlb-physical-makesafe",
+      naRule: "swms-not-required-under-named-builder-job-rule",
+    };
+  }
   if (
     input.hrcw.hrcw ||
     input.hrcw.categories.length > 0 ||

@@ -354,10 +354,6 @@ Deno.test("named-branch preservation: every pre-existing physical Docs Ready con
       input.evidence.pack.report_doc_id = null;
       input.evidence.documents.report = false;
     }],
-    ["invoice document", (input) => {
-      input.evidence.pack.invoice_doc_id = null;
-      input.evidence.documents.invoice = false;
-    }],
     ["required SWMS", (input) => {
       input.evidence.pack.swms_doc_id = null;
       input.evidence.documents.swms = false;

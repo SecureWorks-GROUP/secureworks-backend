@@ -359,11 +359,9 @@ export function reportInEvidence(input: MakesafeStatusInput): {
 }
 
 export function docsReady(input: MakesafeStatusInput): boolean {
-  // Pre-authorise Docs Ready still requires a qualifying current DRAFT. After
-  // the money is raised (AUTHORISED/SUBMITTED/PAID) and the pack is not sent,
-  // the card must remain Docs Ready rather than regressing to Trade Report In.
-  const invoiceStatus = String(input.evidence?.invoiceStatus || "")
-    .toUpperCase();
+  // Docs Ready is the pre-authorisation review queue. A qualifying current
+  // Xero DRAFT is the money-side prerequisite; an AUTHORISED/SUBMITTED/PAID
+  // invoice without that fact must not over-promote an unsent card.
   const pack = input.evidence?.pack;
   const packStatus = String(pack?.status || "").toLowerCase();
   const packSentStatuses = [
@@ -372,13 +370,9 @@ export function docsReady(input: MakesafeStatusInput): boolean {
     "sent_not_closed",
     "close_failed",
   ];
-  const authorisedAwaitingSend =
-    ["AUTHORISED", "SUBMITTED", "PAID"].includes(invoiceStatus) &&
-    input.evidence?.packSent !== true &&
-    !packSentStatuses.includes(packStatus);
-
-  const qualifiesDraft = input.evidence?.invoiceQualifiesAsCurrentDraft === true;
-  if (!qualifiesDraft && !authorisedAwaitingSend) return false;
+  const qualifiesDraft =
+    input.evidence?.invoiceQualifiesAsCurrentDraft === true;
+  if (!qualifiesDraft) return false;
 
   const kind = classifyMakesafeJobType(input.detail, input.job);
   const recorded = String(input.evidence?.packState || "").toUpperCase();
@@ -389,16 +383,10 @@ export function docsReady(input: MakesafeStatusInput): boolean {
 
   // Legacy durable pack rows predate a persisted pack_state value. Read their
   // already-produced artifacts rather than re-running the reporting skill:
-  // first draft pack + (DRAFT or already-raised-not-sent) invoice + SWMS when
-  // the docket requires it.
+  // first draft pack + qualifying current DRAFT + SWMS when the docket requires
+  // it. The DRAFT itself is the invoice closeout fact; it need not also be
+  // duplicated into job_documents before the card can be reviewed.
   if (!pack || packSentStatuses.includes(packStatus)) return false;
-  if (
-    !authorisedAwaitingSend &&
-    String(input.evidence?.invoiceStatus || "").toUpperCase() !== "DRAFT"
-  ) {
-    return false;
-  }
-  if (!pack.invoice_doc_id && !authorisedAwaitingSend) return false;
   if (kind === "physical_makesafe" && !pack.report_doc_id) return false;
   if (input.evidence?.swmsRequired && !pack.swms_doc_id) return false;
   // A legacy pack row is accepted only when the underlying report evidence also

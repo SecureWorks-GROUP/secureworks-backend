@@ -78,7 +78,9 @@ function _eventNoteText(ev: any): string | null {
 // irreversible-action gates (send idempotency, resume-close, reset) rely on —
 // only the real send marker (in any spacing) is send-proof for a money/comms
 // action, never a freeform note.
-export function packSentMainTextMatches(text: string | null | undefined): boolean {
+export function packSentMainTextMatches(
+  text: string | null | undefined,
+): boolean {
   if (typeof text !== "string" || !text.trim()) return false;
   return _normalizeMarkerText(text).startsWith(_MAIN_PREFIX_NORM);
 }
@@ -110,7 +112,9 @@ export const LEGACY_BUNDLED_COVERAGE_PHRASES = [
 ] as const;
 const _INV_TOKEN = /\binv-?\d{3,}\b/i;
 
-export function isBundledCoverageSendNote(text: string | null | undefined): boolean {
+export function isBundledCoverageSendNote(
+  text: string | null | undefined,
+): boolean {
   const t = String(text || "").toLowerCase();
   if (!t || !_INV_TOKEN.test(t)) return false;
   return LEGACY_BUNDLED_COVERAGE_PHRASES.some((p) => t.includes(p));
@@ -361,7 +365,7 @@ export async function fetchAllAccrecInvoices(client: {
   for (let guard = 0; guard < 40; guard++) {
     const { data, error } = await client.from("xero_invoices")
       .select(
-        "xero_invoice_id, invoice_number, reference, status, job_id, invoice_type, invoice_date, sub_total, total, total_tax, line_items, invoice_obligation_revision_id, ses_external_token",
+        "xero_invoice_id, invoice_number, reference, status, job_id, invoice_type, invoice_date, created_at, sub_total, total, total_tax, line_items, invoice_obligation_revision_id, ses_external_token",
       )
       .eq("invoice_type", "ACCREC")
       .order("invoice_date", { ascending: false })
@@ -1027,7 +1031,8 @@ export function checkPhotoRouteClientSendGate(
     );
   }
   for (const name of names) {
-    if (name.toLowerCase().endsWith(".pdf") || isReportPdf(name) ||
+    if (
+      name.toLowerCase().endsWith(".pdf") || isReportPdf(name) ||
       isXeroInvoicePdf(name)
     ) {
       failures.push(

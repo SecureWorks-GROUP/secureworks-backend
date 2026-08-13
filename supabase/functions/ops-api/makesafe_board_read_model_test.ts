@@ -99,6 +99,7 @@ const READY_UNSENT_PACK = {
   review_state: "READY",
   report_doc_id: "doc-report",
   invoice_doc_id: "doc-invoice",
+  swms_doc_id: "doc-swms",
   docket_revision_id: "rev-ready",
   pre_xero_docs_ready: true,
   blockers: [],
@@ -126,7 +127,7 @@ function evidenceFor(stage: string): Record<string, unknown> {
         invoice_qualifies_as_current_draft: true,
         has_report_doc: true,
         has_invoice_doc: true,
-        has_swms_doc: false,
+        has_swms_doc: true,
         missing_docs: [],
       };
     // Raw state claims the job is finished, but no issued invoice corroborates
@@ -757,6 +758,106 @@ Deno.test("card report tick stays done when a report document is already attache
 
   assertEquals(card.canonical_stage, "allocated");
   assertEquals(card.pack.closeout_documents.report, true);
+});
+
+Deno.test("captain lock: MLB physical cards without SWMS stay Trade Report In", () => {
+  for (const jobNumber of ["SWMS-261190", "SWMS-261179", "SWMS-261175"]) {
+    const id = `missing-swms-${jobNumber}`;
+    const [card] = buildCanonicalMakesafeRows([
+      baseJob("trade_report_in", id, {
+        job_number: jobNumber,
+        report: SUBMITTED_REPORT,
+        report_pack: {
+          ...READY_UNSENT_PACK,
+          swms_doc_id: null,
+        },
+        invoice_status: "DRAFT",
+        invoice_qualifies_as_current_draft: true,
+        has_report_doc: true,
+        has_invoice_doc: false,
+        has_swms_doc: false,
+      }),
+    ], {
+      photoCountByJobId: photoFloorFor(id),
+      computedAt: NOW,
+    }, "card");
+
+    assertEquals(card.canonical_stage, "trade_report_in", jobNumber);
+    assertEquals(card.pack.drafted, true);
+    assertEquals(card.pack.closeout_documents.invoice, true);
+    assertEquals(card.pack.closeout_documents.swms, false);
+
+    const readyId = `with-swms-${jobNumber}`;
+    const [readyCard] = buildCanonicalMakesafeRows([
+      baseJob("trade_report_in", readyId, {
+        job_number: jobNumber,
+        report: SUBMITTED_REPORT,
+        report_pack: READY_UNSENT_PACK,
+        invoice_status: "DRAFT",
+        invoice_qualifies_as_current_draft: true,
+        has_report_doc: true,
+        has_invoice_doc: false,
+        has_swms_doc: true,
+      }),
+    ], {
+      photoCountByJobId: photoFloorFor(readyId),
+      computedAt: NOW,
+    }, "card");
+
+    assertEquals(readyCard.canonical_stage, "report_ready", jobNumber);
+    assertEquals(readyCard.pack.closeout_documents, {
+      report: true,
+      invoice: true,
+      swms: true,
+    });
+  }
+});
+
+Deno.test("card ticks consume the same drafted-pack artifacts as placement", () => {
+  const id = "mlb-physical-with-swms";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      ...evidenceFor("report_ready"),
+      has_report_doc: false,
+      has_invoice_doc: false,
+      has_swms_doc: false,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  assertEquals(card.canonical_stage, "report_ready");
+  assertEquals(card.pack.drafted, true);
+  assertEquals(card.pack.closeout_documents, {
+    report: true,
+    invoice: true,
+    swms: true,
+  });
+});
+
+Deno.test("AJS physical Docs Ready never blocks on a missing SWMS", () => {
+  const id = "ajs-physical-no-swms";
+  const [card] = buildCanonicalMakesafeRows([
+    baseJob("report_ready", id, {
+      ...evidenceFor("report_ready"),
+      requesting_company_name: "AJS",
+      external_ref: "AJBR-70001",
+      metadata: {
+        builder_claim_ref: "AJBR-70001",
+        builder_po_number: "PO-AJS-1",
+        makesafe_job_family: "physical_makesafe",
+      },
+      report_pack: { ...READY_UNSENT_PACK, swms_doc_id: null },
+      has_swms_doc: false,
+    }),
+  ], {
+    photoCountByJobId: photoFloorFor(id),
+    computedAt: NOW,
+  }, "card");
+
+  assertEquals(card.canonical_stage, "report_ready");
+  assertEquals(card.pack.closeout_documents.swms, false);
 });
 
 Deno.test("active column scope drops archive without moving other cards", () => {

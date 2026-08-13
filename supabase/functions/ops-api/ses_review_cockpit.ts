@@ -342,7 +342,9 @@ export function approveInvoiceDisabledReason(
       state.existingMoney &&
       (state.existingMoney.exists || !state.existingMoney.evaluated)
     ) {
-      return `${describeExistingCardMoney(state.existingMoney)} Do NOT mint a second invoice. ` +
+      return `${
+        describeExistingCardMoney(state.existingMoney)
+      } Do NOT mint a second invoice. ` +
         `Bind or link the existing invoice, or record an explicit disposition — ` +
         `this card is a finding for the Captain, not a mint.`;
     }
@@ -890,6 +892,7 @@ export interface SesCockpitDocket {
   family_evidence: Record<string, unknown>;
   swms: Record<string, unknown>;
   routes: SesReviewRoute[];
+  caveats?: SesReviewCaveat[];
   crew_and_trade_visits: unknown;
   clean_input: SesCleanInput;
   /**
@@ -897,6 +900,14 @@ export interface SesCockpitDocket {
    * card has no proved routes yet; any other kind must leave SEND_READY.
    */
   release_send_progress?: SesReleaseSendProgress;
+}
+
+export interface SesReviewCaveat {
+  state: "caveat";
+  code: string;
+  fact: string;
+  recovery_action: string;
+  evidence?: Record<string, unknown>;
 }
 
 export interface SesCockpitView {
@@ -912,6 +923,7 @@ export interface SesCockpitView {
     | "HOLD";
   stale: boolean;
   verdict: SesMechanicalCleanResult;
+  caveats: SesReviewCaveat[];
   sections: Record<string, unknown>;
   controls: {
     approve_invoice: {
@@ -1011,6 +1023,7 @@ export function buildSesCockpitView(
     status,
     stale,
     verdict,
+    caveats: docket.caveats || [],
     sections: {
       job_story: {
         job_id: docket.job_id,
@@ -1029,6 +1042,7 @@ export function buildSesCockpitView(
         status,
         stale,
         reasons: statusReasons,
+        caveats: docket.caveats || [],
         release_send_progress: releaseProgress,
       },
       insurance_work_order: docket.work_order || {

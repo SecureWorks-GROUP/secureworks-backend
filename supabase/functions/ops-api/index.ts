@@ -363,9 +363,12 @@ import { DETERMINISTIC_INTAKE_VERSION } from './makesafe_deterministic_intake.ts
 import { SYNTHETIC_LIVEFIRE_MARKER_PREFIX } from './makesafe_synthetic_livefire.ts'
 import {
   canonicalSesFamilyFromCard,
+  isMakesafeMlbCompany as _isMakesafeMlbCompany,
+  requiresMakesafeSwms as _requiresMakesafeSwms,
   resolveSesFamilyMatrixRow,
   SES_FAMILY_MATRIX_VERSION,
 } from './ses_family_matrix.ts'
+export { _isMakesafeMlbCompany, _requiresMakesafeSwms }
 import { presentSesPackHonesty } from './ses_pack_presentation.ts'
 import {
   assertReportingIntakeAccounting as _assertReportingIntakeAccounting,
@@ -14868,24 +14871,6 @@ function makesafeCompletedAt(job: any, detail: any, invoice: any): string | null
   return invoice?.invoice_date || invoice?.created_at || detail?.invoice_ready_at || job?.completed_at || job?.updated_at || null
 }
 
-// MLB (ML Builders / Major Loss Builders) identity. SWMS is a hard close-out
-// requirement only for MLB physical make-safes, not universally. We detect MLB
-// defensively from slug, company name, or the builder reference prefix because
-// the canonical company slug is not hard-coded here (see PR notes for review).
-export function _isMakesafeMlbCompany(detail: any, job: any): boolean {
-  const slug = String(
-    detail?.requesting_company_slug || detail?.makesafe_companies?.slug || job?.metadata?.requesting_company?.slug || ''
-  ).toLowerCase()
-  const name = String(
-    detail?.requesting_company_name || detail?.makesafe_companies?.name || job?.metadata?.requesting_company?.name || ''
-  ).toLowerCase()
-  const ref = String(detail?.external_ref || job?.metadata?.external_ref || '').toUpperCase()
-  if (slug.includes('mlb') || slug.includes('ml-builders') || slug.includes('major-loss')) return true
-  if (name.includes('ml builders') || name.includes('major loss')) return true
-  if (/\bMLB[-\s]?\d/.test(ref)) return true
-  return false
-}
-
 // B4 (Wave 0): Western Building / Builderwest identity. Mirrors _isMakesafeMlbCompany.
 // Western Building and Builderwest are the same operator group for portal routing,
 // but Captain ruling 2026-08-01 explicitly excludes them from the SWMS requirement.
@@ -14904,38 +14889,9 @@ export function _isMakesafeWesternCompany(detail: any, job: any): boolean {
   return false
 }
 
-// Captain ruling 2026-08-01: SWMS is required only for MLB physical make-safe
-// work. Resolve the persisted family through the sealed matrix so report-only
-// and non-MLB cards cannot acquire a close-out requirement from builder identity
-// alone. Legacy MLB cards that predate the family stamp retain the same physical
-// fallback as the existing send attachment path: report_type means report-only;
-// otherwise they are treated as physical until the canonical family is restored.
-export function _requiresMakesafeSwms(detail: any, job: any): boolean {
-  if (!_isMakesafeMlbCompany(detail, job) || !!detail?.report_type) return false
-
-  const metadata = job?.metadata || {}
-  const family = canonicalSesFamilyFromCard({
-    makesafe_job_family: metadata.makesafe_job_family ?? job?.ses_family,
-    insurance_job_type: metadata.insurance_job_type,
-    own_template_requested: metadata.own_template_requested,
-    strata: metadata.strata,
-    report_delivery: metadata.report_delivery,
-  })
-  if (family === 'unknown') return true
-
-  const matrix = resolveSesFamilyMatrixRow({
-    builder_key: 'MLB',
-    family,
-    strata: metadata.strata === true,
-    own_template_requested: metadata.own_template_requested === true,
-  })
-  return matrix.ok && !matrix.row.report_only && matrix.row.swms_policy === 'always'
-}
-
 // Close-out doc gate. A make-safe may only resolve to completed/archive once its
 // invoice + report PDFs are attached. SWMS is additionally required when
-// _requiresMakesafeSwms resolves the physical-family rule (Captain 2026-08-07:
-// every physical make-safe, any builder).
+// _requiresMakesafeSwms resolves the MLB physical MakeSafe rule.
 // Returns the set of docs that are still missing (empty => gate satisfied).
 export function _makesafeMissingCloseoutDocs(
   docs: { has_invoice_doc?: boolean; has_report_doc?: boolean; has_swms_doc?: boolean } | null | undefined,
@@ -14957,7 +14913,6 @@ export function _makesafeMissingCloseoutDocs(
 // cockpit feed (makesafeReportDrafts). Both must agree on:
 //   - sentClosed: the pack genuinely went out the door (never re-surface it).
 //   - readyForReview: a draft is rendered + draft invoice exists, awaiting send.
-//   - resumeNotSent: an authorised-but-not-sent pack to RESUME (never a fresh send).
 //   - tradeReportIn: report received but NOT yet drafted.
 // This is the SAFE predicate from the adversarial review. It only ever reads /
 // derives — it authorises nothing, sends nothing, charges nothing.
@@ -15003,14 +14958,6 @@ export interface MakesafeSurfacing {
   // (never re-show a packSent job as a fresh ready-to-send draft).
   gateSoftenSent: boolean
   readyForReview: boolean
-  resumeNotSent: boolean
-  /**
-   * Money is already AUTHORISED/SUBMITTED/PAID and the pack is not yet sent.
-   * The board must stay at Docs Ready (report_ready) — never regress to
-   * trade_report_in after the Captain commits money. Distinct from
-   * readyForReview (which still requires a DRAFT for pre-authorise review).
-   */
-  authorisedAwaitingSend: boolean
   tradeReportIn: boolean
 }
 
@@ -15098,30 +15045,13 @@ export function _deriveMakesafeSurfacing(
     invoiceIsDraft &&
     (u4DocsReady || hasReportDoc)
 
-  // resumeNotSent — the irreversible authorise happened but the send did not
-  // (durable pack status authorised_not_sent). Resume re-sends; it must NEVER
-  // re-authorise and must NEVER read as a fresh pre-authorise DRAFT review.
-  const resumeNotSent = !sentClosed &&
-    packStatus === 'authorised_not_sent' &&
-    invoiceAuthorisedLive
-
-  // authorisedAwaitingSend — money is raised and the pack is not yet sent, and
-  // the card would otherwise look like trade_report_in (report in, not a DRAFT
-  // readyForReview). Keep these in Docs Ready so approve/authorise never moves
-  // the board backwards. Does not steal the invoiceDone→completed path.
-  const authorisedAwaitingSend = !sentClosed &&
-    invoiceAuthorisedLive &&
-    hasSubmittedReport &&
-    !readyForReview
-
   // tradeReportIn — the trade report has come in (substatus admin_to_send_report)
-  // but the close-out pack is NOT yet drafted (no rendered report doc / no draft
-  // invoice) and it is not already sent. Scoped to the admin_to_send_report
-  // substatus so it can NEVER hijack a job already in the invoiced/complete
-  // close-out regime (those keep the existing invoiceDone + hard doc-gate path).
-  // Must not claim a card whose money is already raised — that is Docs Ready.
+  // but the full reviewable close-out state is absent. That includes an
+  // AUTHORISED-without-current-DRAFT card: Docs Ready is the pre-authorisation
+  // review queue, so raised money alone must not over-promote it. Scoped to the
+  // admin_to_send_report substatus so it cannot hijack a completed close-out.
   const tradeReportIn = normalizedSub === 'admin_to_send_report' &&
-    hasSubmittedReport && !readyForReview && !authorisedAwaitingSend &&
+    hasSubmittedReport && !readyForReview &&
     !sentClosed
 
   return {
@@ -15133,8 +15063,6 @@ export function _deriveMakesafeSurfacing(
     sentClosed,
     gateSoftenSent,
     readyForReview,
-    resumeNotSent,
-    authorisedAwaitingSend,
     tradeReportIn,
   }
 }
@@ -15269,9 +15197,6 @@ export function _deriveMakesafeBoardStage(
   if (!surf.sentClosed) {
     // a drafted-not-sent pack (rendered report + DRAFT invoice) awaiting send.
     if (surf.readyForReview) return 'report_ready'
-    // Money raised, pack not sent: stay Docs Ready for finish-send. Previously
-    // resumeNotSent returned trade_report_in (a backwards move after authorise).
-    if (surf.resumeNotSent || surf.authorisedAwaitingSend) return 'report_ready'
     // report received but NOT yet drafted -> Trade Report In.
     if (surf.tradeReportIn) return 'trade_report_in'
   }
@@ -15287,8 +15212,9 @@ export function _deriveMakesafeBoardStage(
     //  - NOT-verified-sent job: the HARD doc-gate stays. An un-sent job is never
     //    completed without its invoice + report (+ SWMS for MLB) attached. A
     //    missing-doc hold can no longer claim pre-Xero Docs Ready without the
-    //    qualifying DRAFT, so it continues through the existing evidence ladder
-    //    — but after approve/authorise it stays Docs Ready, never Trade Report In.
+    //    qualifying DRAFT, so it continues through the existing evidence ladder.
+    //    AUTHORISED without a current qualifying DRAFT is deliberately not a
+    //    Docs Ready positive.
     //    (When no docs map is supplied, preserve the prior ungated behaviour for
     //    callers that don't load docs.)
     if (!verifiedSent && docs !== undefined && docs !== null) {
@@ -15298,23 +15224,12 @@ export function _deriveMakesafeBoardStage(
     if (!closeoutBlockedByDocs) {
       return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
     }
-    // Money is raised, report evidence exists, close-out docs incomplete, pack
-    // not sent: hold in Docs Ready so the board does not regress after authorise.
-    // A bare raised invoice with no report evidence still falls to Allocated.
-    if (
-      !surf.sentClosed && surf.invoiceAuthorisedLive &&
-      (surf.hasSubmittedReport || surf.resumeNotSent)
-    ) return 'report_ready'
   }
   // The only remaining legacy Docs Ready positive is the historic
   // `ready_to_invoice`/report fallback. It now consumes the same qualifier as
   // U4 and the artifact path. A DRAFT satisfies only this invoice prerequisite;
   // every pre-existing report/substatus condition remains independently true.
   if (hasSubmittedReport && surf.invoiceIsDraft) return 'report_ready'
-  // Raised-not-sent with report evidence: Docs Ready, never Trade Report In.
-  if (hasActualReportEvidence && surf.invoiceAuthorisedLive && !surf.sentClosed) {
-    return 'report_ready'
-  }
   if (hasActualReportEvidence) return 'trade_report_in'
   if (jobStatus === 'complete' && !closeoutBlockedByDocs) {
     return _isMakesafeCompletedWithin7Days(makesafeCompletedAt(job, detail, invoice), nowIso) ? 'completed' : 'archive'
@@ -15669,9 +15584,9 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   //
   // Passing it through is closeout-safe, not a judgement call: `qualifies`
   // REQUIRES `status === 'DRAFT'`, and every closeout driver in the ladder
-  // (`invoiceDone`, `invoiceAuthorisedLive`, `resumeNotSent`,
-  // `authorisedAwaitingSend`, and the `makesafeCompletedAt` fallback behind
-  // them) requires `_makesafeInvoiceIsRaised` — AUTHORISED/SUBMITTED/PAID. A
+  // (`invoiceDone`, `invoiceAuthorisedLive`, and the `makesafeCompletedAt`
+  // fallback behind them) requires `_makesafeInvoiceIsRaised` —
+  // AUTHORISED/SUBMITTED/PAID. A
   // DRAFT satisfies none of them, so the only term this can reach is the
   // pre-Xero `invoiceIsDraft` Docs Ready positive. The closeout suppression
   // this line exists for is untouched.

@@ -1414,7 +1414,7 @@ Deno.test("docs ready: a READY pack alone is no longer one click from sending", 
   assertEquals(deriveSesStageV2(packOnly).stage, "new");
 });
 
-Deno.test("docs ready: a physical card needs report, SWMS when required, and draft invoice", () => {
+Deno.test("docs ready: a physical card needs report, required SWMS, and a qualifying draft", () => {
   const base = {
     packState: "READY",
     assignments: [{ id: "a1" }],
@@ -1429,12 +1429,23 @@ Deno.test("docs ready: a physical card needs report, SWMS when required, and dra
     deriveSesStageV2(input({ evidence: base })).stage,
     "report_ready",
   );
-  // Remove each required artifact in turn; none may be optional.
-  for (const drop of ["report", "invoice", "swms"]) {
+  // The current Xero DRAFT is the invoice fact; it does not also need a
+  // duplicated job_documents invoice row. Report and required SWMS remain
+  // independent physical artifacts.
+  for (const drop of ["report", "swms"]) {
     const documents = { ...base.documents, [drop]: false };
     const r = deriveSesStageV2(input({ evidence: { ...base, documents } }));
     assert(r.stage !== "report_ready", `${drop} must be required`);
   }
+  assertEquals(
+    deriveSesStageV2(input({
+      evidence: {
+        ...base,
+        documents: { ...base.documents, invoice: false },
+      },
+    })).stage,
+    "report_ready",
+  );
   // SWMS is required only where the docket requires it.
   const noSwmsNeeded = deriveSesStageV2(input({
     evidence: {
@@ -1469,7 +1480,7 @@ Deno.test("docs ready: READY_TO_BUILD is not a sendable pack", () => {
   );
 });
 
-Deno.test("docs ready: physical DRAFT and issued-unsent invoice paths remain sendable", () => {
+Deno.test("docs ready: only the qualifying DRAFT path is reviewable", () => {
   const base = {
     packState: "READY",
     assignments: [{ id: "a1" }],
@@ -1495,8 +1506,8 @@ Deno.test("docs ready: physical DRAFT and issued-unsent invoice paths remain sen
     "report_ready",
   );
 
-  // SWMS-261158-class regression: once that same unsent pack's invoice is
-  // issued, it remains one click from sending instead of falling backwards.
+  // SWMS-261158 regression: AUTHORISED without a qualifying current DRAFT was
+  // over-promoted. Issued/paid/submitted are not pre-authorisation review.
   for (const invoiceStatus of ["AUTHORISED", "PAID", "SUBMITTED"]) {
     assertEquals(
       deriveSesStageV2(input({
@@ -1507,8 +1518,8 @@ Deno.test("docs ready: physical DRAFT and issued-unsent invoice paths remain sen
         },
       }))
         .stage,
-      "report_ready",
-      `${invoiceStatus} unsent invoice regressed from Docs Ready`,
+      "trade_report_in",
+      `${invoiceStatus} without a qualifying DRAFT entered Docs Ready`,
     );
   }
 
@@ -1527,15 +1538,15 @@ Deno.test("docs ready: physical DRAFT and issued-unsent invoice paths remain sen
   }
 });
 
-Deno.test("docs ready: issued-unsent continuation preserves every physical safety fence", () => {
+Deno.test("docs ready: qualifying DRAFT preserves every physical safety fence", () => {
   const complete = {
     assignments: [{ id: "a1" }],
     serviceReports: [{ status: "submitted", cycle_number: 1 }],
     completionPhotoCount: 6,
     documents: { report: true, invoice: true, swms: true },
     swmsRequired: true,
-    invoiceStatus: "AUTHORISED",
-    invoiceQualifiesAsCurrentDraft: false,
+    invoiceStatus: "DRAFT",
+    invoiceQualifiesAsCurrentDraft: true,
     packSent: false,
   };
   const readyPack = {
@@ -1574,11 +1585,6 @@ Deno.test("docs ready: issued-unsent continuation preserves every physical safet
       ...readyIssued,
       packSent: true,
       pack: { ...readyPack, status: "sent" },
-    }],
-    ["missing invoice document", {
-      ...readyIssued,
-      documents: { ...complete.documents, invoice: false },
-      pack: { ...readyPack, invoice_doc_id: null },
     }],
     ["missing report document", {
       ...readyIssued,
@@ -1632,10 +1638,9 @@ Deno.test("docs ready: a roof card is never asked for a SecureWorks report", () 
   assert(deriveSesStageV2(unproved).stage !== "report_ready");
 });
 
-Deno.test("docs ready: a WO-only roof stub is not a sendable pack", () => {
-  // The portal report is complete and the invoice lifecycle qualifies, but the
-  // READY pack contains no invoice document. The roof release is invoice-only,
-  // so this shape cannot be sent by the Docs Ready button.
+Deno.test("docs ready: a qualifying Xero DRAFT is the roof invoice closeout fact", () => {
+  // The portal report is complete and the current DRAFT is real. It need not be
+  // copied into job_documents before the drafted pack becomes reviewable.
   const workOrderOnly = portalInput([ACCEPTED], {
     evidence: {
       assignments: [{ id: "a1" }],
@@ -1652,9 +1657,9 @@ Deno.test("docs ready: a WO-only roof stub is not a sendable pack", () => {
     workOrderOnly,
     resolveSesStageV2Family(workOrderOnly),
   );
-  assertEquals(gate.satisfied, false);
-  assert(gate.missing.includes("the invoice document"));
-  assert(deriveSesStageV2(workOrderOnly).stage !== "report_ready");
+  assertEquals(gate.satisfied, true);
+  assertEquals(gate.missing, []);
+  assertEquals(deriveSesStageV2(workOrderOnly).stage, "report_ready");
 });
 
 Deno.test("docs ready: an already-sent pack is not one click from sending", () => {

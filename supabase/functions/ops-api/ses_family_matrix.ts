@@ -224,6 +224,59 @@ export function canonicalSesFamilyFromCard(args: {
   }
 }
 
+/**
+ * MLB identity used by the one shared SWMS requirement predicate. Company
+ * slugs are preferable, but legacy cards may expose only the company name or
+ * the MLB builder reference.
+ */
+export function isMakesafeMlbCompany(detail: any, job: any): boolean {
+  const slug = String(
+    detail?.requesting_company_slug || detail?.makesafe_companies?.slug ||
+      job?.metadata?.requesting_company?.slug || "",
+  ).toLowerCase();
+  const name = String(
+    detail?.requesting_company_name || detail?.makesafe_companies?.name ||
+      job?.requesting_company_name ||
+      job?.metadata?.requesting_company?.name || "",
+  ).toLowerCase();
+  const ref = String(
+    detail?.external_ref || job?.external_ref || job?.metadata?.external_ref ||
+      "",
+  ).toUpperCase();
+  return slug.includes("mlb") || slug.includes("ml-builders") ||
+    slug.includes("major-loss") || name.includes("ml builders") ||
+    name.includes("major loss") || /\bMLB[-\s]?\d/.test(ref);
+}
+
+/**
+ * Captain lock: only an MLB physical MakeSafe requires SWMS for Docs Ready.
+ * Roof/report-only, AJS/AJBR, repair, restoration and temporary-fence families
+ * do not inherit the requirement from an artifact or a broad physical shape.
+ * Unknown legacy MLB cards retain the fail-closed physical fallback until the
+ * canonical family stamp is restored.
+ */
+export function requiresMakesafeSwms(detail: any, job: any): boolean {
+  if (!isMakesafeMlbCompany(detail, job) || !!detail?.report_type) return false;
+
+  const metadata = job?.metadata || {};
+  const family = canonicalSesFamilyFromCard({
+    makesafe_job_family: metadata.makesafe_job_family ?? job?.ses_family,
+    insurance_job_type: metadata.insurance_job_type,
+    own_template_requested: metadata.own_template_requested,
+    strata: metadata.strata,
+    report_delivery: metadata.report_delivery,
+  });
+  if (family === "unknown") return true;
+  return sesFamilyRequiresSwms("MLB", family);
+}
+
+export function sesFamilyRequiresSwms(
+  builderKey: SesBuilderKey,
+  family: SesFamilyId,
+): boolean {
+  return builderKey === "MLB" && family === "physical_makesafe";
+}
+
 export function sesFamilyLabel(family: SesFamilyId): string {
   switch (family) {
     case "restoration":
