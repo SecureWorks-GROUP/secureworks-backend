@@ -1465,6 +1465,8 @@ export function buildSesAssemblerInput(
   const lineageId = firstText(
     intakeCase?.lineage_id,
     identityRevision?.lineage_id,
+    identityRevision?.effective_case_id,
+    identityRevision?.authority_kind === "legacy_job_record" ? job.id : null,
   );
   const reportTo = firstText(company.report_recipient);
   const invoiceTo = matrix.ok ? matrix.row.invoice_to : null;

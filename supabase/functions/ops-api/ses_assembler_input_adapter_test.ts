@@ -3520,6 +3520,21 @@ Deno.test("SWMS-26980 seeded authority preserves the identity spine in U4", () =
   );
 });
 
+Deno.test("legacy job authority repairs a blank lineage id from the bound job", () => {
+  const live = snapshot();
+  live.identity_revision = {
+    authority_kind: "legacy_job_record",
+    source_instruction_id: `legacy-job:${live.job.id}`,
+    source_version: 1,
+    source_content_hash: `sha256:${"a".repeat(64)}`,
+    lineage_id: "",
+    effective_case_id: null,
+  };
+
+  const input = buildSesAssemblerInput(live);
+  assertEquals(input.identity.lineage_id, live.job.id);
+});
+
 Deno.test(
   "real restoration card shape selects the sealed physical recipe then evidence-blocks",
   async () => {

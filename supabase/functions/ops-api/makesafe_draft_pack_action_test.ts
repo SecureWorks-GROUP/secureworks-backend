@@ -643,8 +643,14 @@ Deno.test("draftMakesafeReportPack: preserved invoice pricing blocks ready state
   assertStringIncludes(calls.markFailed[0].message, "preserved");
 });
 
-Deno.test("draftMakesafeReportPack: existing non-DRAFT invoice does not attach a fake draft PDF", async () => {
-  const calls: Record<string, any[]> = { getToken: [], attachDoc: [] };
+Deno.test("draftMakesafeReportPack: binds an existing AUTHORISED invoice PDF without minting", async () => {
+  const calls: Record<string, any[]> = {
+    getToken: [],
+    fetchInvoicePdf: [],
+    attachDoc: [],
+    createDraftInvoice: [],
+    patch: [],
+  };
   const result = await draftMakesafeReportPack(
     {},
     {
@@ -674,36 +680,48 @@ Deno.test("draftMakesafeReportPack: existing non-DRAFT invoice does not attach a
         document_id: "report-doc-2",
         render_hash: "hash-2",
       }),
-      createDraftInvoice: async () => ({
-        skipped: true,
-        existing_invoice: {
-          xero_invoice_id: "xero-auth-1",
-          invoice_number: "INV-AUTH-1",
-          status: "AUTHORISED",
-        },
-      }),
+      createDraftInvoice: async () => {
+        calls.createDraftInvoice.push({});
+        return {
+          skipped: true,
+          existing_invoice: {
+            xero_invoice_id: "xero-auth-1",
+            invoice_number: "INV-AUTH-1",
+            status: "AUTHORISED",
+          },
+        };
+      },
       getToken: async () => {
         calls.getToken.push({});
         return { accessToken: "token", tenantId: "tenant" };
       },
-      fetchInvoicePdfBytes: async () => new Uint8Array([1]),
+      fetchInvoicePdfBytes: async (_accessToken, _tenantId, invoiceId) => {
+        calls.fetchInvoicePdf.push(invoiceId);
+        return new Uint8Array([1]);
+      },
       attachDoc: async (_client, body) => {
         calls.attachDoc.push(body);
-        return { document_id: "should-not-happen" };
+        return { document_id: "invoice-doc-auth-1" };
       },
       ensurePackRow: async () => {},
-      patchPack: async () => {},
+      patchPack: async (_client, _jobId, _packKind, patch) => {
+        calls.patch.push(patch);
+      },
       markReady: async () => {},
     },
   );
 
   assertEquals(result.invoice.status, "AUTHORISED");
-  assertEquals(result.invoice.document_id, null);
-  assertEquals(result.warnings, [
-    "draft_invoice_pdf_not_attached_existing_invoice_not_draft",
-  ]);
-  assertEquals(calls.getToken.length, 0);
-  assertEquals(calls.attachDoc.length, 0);
+  assertEquals(result.invoice.document_id, "invoice-doc-auth-1");
+  assertEquals(result.warnings, []);
+  assertEquals(calls.createDraftInvoice.length, 1);
+  assertEquals(calls.getToken.length, 1);
+  assertEquals(calls.fetchInvoicePdf, ["xero-auth-1"]);
+  assertEquals(calls.attachDoc.length, 1);
+  assertEquals(calls.attachDoc[0].file_name, "Xero Invoice - INV-AUTH-1.pdf");
+  assertEquals(calls.patch[0].xero_invoice_id, "xero-auth-1");
+  assertEquals(calls.patch[0].invoice_status, "AUTHORISED");
+  assertEquals(calls.patch[0].invoice_doc_id, "invoice-doc-auth-1");
 });
 
 Deno.test("createMakesafeDraftInvoice: revises an existing DRAFT invoice instead of silently reusing it", async () => {

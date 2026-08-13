@@ -15693,6 +15693,8 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
   // green one.
   const invoiceRaisedForCurrentAttendance = _makesafeInvoiceIsRaised(invoice) &&
     makesafeInvoiceIsCurrentAttendanceReceivable(j, detail, invoice)
+  const invoiceQualifiesForCurrentCloseout =
+    invoiceQualifiesForCurrentAttendance || invoiceRaisedForCurrentAttendance
   const invoiceForStage =
     (scoped.allowCloseoutFromEvidence || invoiceQualifiesForCurrentAttendance ||
         invoiceRaisedForCurrentAttendance)
@@ -15842,6 +15844,8 @@ function enrichMakesafeBoardJob(j: any, detail: any, assignments: any[] = [], re
     // commercial evidence that cannot close the current attendance.
     invoice_qualifies_as_current_draft:
       invoiceQualifiesForCurrentAttendance,
+    invoice_qualifies_as_current_closeout:
+      invoiceQualifiesForCurrentCloseout,
     invoice_draft_qualification_reason: draftQualification.reason,
     // sent_to_builder (audit F5): the honest SENT-chip signal. TRUE only with a
     // real send record (pack-sent marker OR durable pack sent-status) — NEVER a
@@ -38737,13 +38741,18 @@ async function draftMakesafeReportPack(
     const invoiceStatus = draftPackInvoiceStatus(invoiceResult)
     let invoiceDoc: { document_id?: string | null } | null = null
     const warnings: string[] = []
-    // Attach the DRAFT invoice PDF when the invoice is still DRAFT. If the dup guard
-    // finds an already-authorised invoice, do not pretend it is a fresh draft; leave
-    // that state to the send/resume state machine.
-    if (xeroInvoiceId && String(invoiceStatus || 'DRAFT').toUpperCase() === 'DRAFT') {
+    // A uniquely resolved live invoice belongs to this card regardless of whether
+    // it is still DRAFT or has already been raised. Reuse its Xero PDF so the pack
+    // can close out without minting a second invoice. VOIDED/DELETED invoices stay
+    // excluded by the duplicate resolver and are refused again here defensively.
+    const normalizedInvoiceStatus = String(invoiceStatus || 'DRAFT').toUpperCase()
+    if (xeroInvoiceId && !['VOIDED', 'DELETED'].includes(normalizedInvoiceStatus)) {
       const { accessToken, tenantId } = await _getToken(client)
       const invoiceBytes = await _fetchInvoicePdfBytes(accessToken, tenantId, xeroInvoiceId)
-      const invoicePdfName = `Draft Xero Invoice - ${draftPackInvoiceNumber(invoiceResult, xeroInvoiceId)}.pdf`
+      const invoicePdfPrefix = normalizedInvoiceStatus === 'DRAFT'
+        ? 'Draft Xero Invoice'
+        : 'Xero Invoice'
+      const invoicePdfName = `${invoicePdfPrefix} - ${draftPackInvoiceNumber(invoiceResult, xeroInvoiceId)}.pdf`
       invoiceDoc = await _attachDoc(client, {
         job_id: jobId,
         type: 'invoice',
@@ -38752,7 +38761,7 @@ async function draftMakesafeReportPack(
         uploaded_by: operator,
       })
     } else {
-      warnings.push('draft_invoice_pdf_not_attached_existing_invoice_not_draft')
+      warnings.push('invoice_pdf_not_attached_missing_or_void_invoice')
     }
 
     const packPatch: Record<string, any> = {
