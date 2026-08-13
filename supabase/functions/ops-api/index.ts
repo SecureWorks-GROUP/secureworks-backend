@@ -18609,6 +18609,7 @@ async function bindExistingMakesafeInvoicePack(
         invoice_number: invoice.invoice_number,
         invoice_status: invoice.status,
         bind_only: true,
+        named_prior_cycle_bind: invoice.named_prior_cycle_bind === true,
       },
     },
   )
@@ -18620,6 +18621,29 @@ async function bindExistingMakesafeInvoicePack(
   const bindPack = deps.bindPack || bindExistingInvoicePackStrict
   await ensurePack(client, jobId, 'main')
   await bindPack(client, jobId, invoice, attached.document_id)
+
+  if (invoice.named_prior_cycle_bind === true) {
+    try {
+      const { error: auditError } = await client.from('job_events').insert({
+        job_id: jobId,
+        event_type: 'named_prior_cycle_bind',
+        detail_json: {
+          source: 'bind_existing_makesafe_invoice_pack',
+          actor: args.actor,
+          xero_invoice_id: invoice.xero_invoice_id,
+          invoice_number: invoice.invoice_number,
+          invoice_status: invoice.status,
+          bind_only: true,
+        },
+      })
+      if (auditError) throw auditError
+    } catch (error) {
+      console.warn(
+        '[ops-api] named_prior_cycle_bind audit write failed:',
+        (error as Error).message,
+      )
+    }
+  }
 
   return {
     success: true,
@@ -18634,6 +18658,7 @@ async function bindExistingMakesafeInvoicePack(
     },
     scanned_accrec: invoices.length,
     lineage_required: false,
+    named_prior_cycle_bind: invoice.named_prior_cycle_bind === true,
     invoice_create_dispatched: false,
     invoice_authorise_dispatched: false,
     send_dispatched: false,

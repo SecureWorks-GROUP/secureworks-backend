@@ -56,6 +56,7 @@ for (const status of ["DRAFT", "AUTHORISED", "PAID"]) {
     });
     assertEquals(selected.xero_invoice_id, "xero-0817");
     assertEquals(selected.status, status);
+    assertEquals(selected.named_prior_cycle_bind, false);
   });
 }
 
@@ -110,7 +111,30 @@ Deno.test("bind-only refuses wrong type, reference, and lifecycle", () => {
   );
 });
 
-Deno.test("bind-only prior-cycle boundary fails closed", () => {
+Deno.test("bind-only allows the exact Captain-named prior-cycle invoice", () => {
+  const selected = selectExistingInvoiceForPackBind({
+    job,
+    detail: {
+      ...detail,
+      reattend_count: 1,
+      last_reattend_at: "2026-08-10T00:00:00Z",
+    },
+    invoices: [
+      invoice({ created_at: "2026-08-01T00:00:00Z" }),
+      invoice({
+        xero_invoice_id: "xero-current",
+        invoice_number: "INV-0999",
+        created_at: "2026-08-12T00:00:00Z",
+        invoice_date: "2026-08-12",
+      }),
+    ],
+    expected_invoice_number: "INV-0817",
+  });
+  assertEquals(selected.xero_invoice_id, "xero-0817");
+  assertEquals(selected.named_prior_cycle_bind, true);
+});
+
+Deno.test("bind-only still refuses unknown cycle attribution", () => {
   const error = assertThrows(
     () =>
       selectExistingInvoiceForPackBind({
@@ -118,9 +142,9 @@ Deno.test("bind-only prior-cycle boundary fails closed", () => {
         detail: {
           ...detail,
           reattend_count: 1,
-          last_reattend_at: "2026-08-10T00:00:00Z",
+          last_reattend_at: null,
         },
-        invoices: [invoice({ created_at: "2026-08-01T00:00:00Z" })],
+        invoices: [invoice()],
         expected_invoice_number: "INV-0817",
       }),
     SesBindExistingInvoiceError,
@@ -145,11 +169,41 @@ Deno.test("bind-only refuses an older named invoice when another row is current"
   );
 });
 
-function actionClient(packOverrides: Record<string, unknown> = {}) {
+Deno.test("bind-only ignores newer DELETED and VOIDED rows when selecting the named live invoice", () => {
+  for (const status of ["DELETED", "VOIDED"]) {
+    const selected = selectExistingInvoiceForPackBind({
+      job,
+      detail,
+      invoices: [
+        invoice({ status: "AUTHORISED", invoice_date: "2026-08-01" }),
+        invoice({
+          xero_invoice_id: `xero-${status.toLowerCase()}`,
+          invoice_number: `INV-${status}`,
+          status,
+          invoice_date: "2026-08-12",
+          created_at: "2026-08-12T00:00:00Z",
+        }),
+      ],
+      expected_invoice_number: "INV-0817",
+    });
+    assertEquals(selected.invoice_number, "INV-0817", status);
+  }
+});
+
+function actionClient(
+  packOverrides: Record<string, unknown> = {},
+  detailOverrides: Record<string, unknown> = {},
+  jobEventRows: any[] = [],
+) {
   const rows: Record<string, any> = {
     jobs: { data: job, error: null },
     makesafe_job_details: {
-      data: { ...detail, job_id: JOB_ID, attendance_cycle_id: "cycle-26740" },
+      data: {
+        ...detail,
+        job_id: JOB_ID,
+        attendance_cycle_id: "cycle-26740",
+        ...detailOverrides,
+      },
       error: null,
     },
     makesafe_report_packs: {
@@ -172,6 +226,10 @@ function actionClient(packOverrides: Record<string, unknown> = {}) {
         select: () => chain,
         eq: () => chain,
         maybeSingle: async () => rows[table],
+        insert: async (values: any) => {
+          if (table === "job_events") jobEventRows.push(values);
+          return { data: null, error: null };
+        },
       };
       return chain;
     },
@@ -220,6 +278,67 @@ Deno.test("SWMS-26740 bind-only action attaches INV-0817 and dispatches no money
   assertEquals(calls, { attach: 1, ensure: 1, bind: 1 });
   assertEquals(result.state, "existing_invoice_pack_bound");
   assertEquals(result.lineage_required, false);
+  assertEquals(result.invoice_create_dispatched, false);
+  assertEquals(result.invoice_authorise_dispatched, false);
+  assertEquals(result.send_dispatched, false);
+  assertEquals(result.external_mutations, { xero: 0, email: 0 });
+});
+
+Deno.test("named prior-cycle bind records the exception without minting or sending", async () => {
+  const calls = { attach: 0, ensure: 0, bind: 0 };
+  let snapshot: Record<string, unknown> = {};
+  const jobEvents: any[] = [];
+  const result = await _bindExistingMakesafeInvoicePackForTest(
+    actionClient({}, {
+      reattend_count: 4,
+      last_reattend_at: "2026-08-06T00:00:00Z",
+    }, jobEvents) as any,
+    {
+      job_id: JOB_ID,
+      invoice_number: "INV-1140",
+      actor: "captain@test",
+    },
+    {
+      fetchAllAccrecInvoices: async () => [invoice({
+        xero_invoice_id: "xero-1140",
+        invoice_number: "INV-1140",
+        created_at: "2026-08-05T00:00:00Z",
+      })],
+      fetchInvoicePdfBytes: async () => new Uint8Array([37, 80, 68, 70]),
+      attachDocument: async (_client: any, _body: any, options: any) => {
+        calls.attach++;
+        snapshot = options.data_snapshot_json;
+        return {
+          success: true,
+          document_id: "invoice-doc-1140",
+          type: "invoice",
+          url: "https://example.test/invoice.pdf",
+        };
+      },
+      ensurePack: async () => {
+        calls.ensure++;
+      },
+      bindPack: async () => {
+        calls.bind++;
+      },
+    },
+  );
+
+  assertEquals(calls, { attach: 1, ensure: 1, bind: 1 });
+  assertEquals(jobEvents, [{
+    job_id: JOB_ID,
+    event_type: "named_prior_cycle_bind",
+    detail_json: {
+      source: "bind_existing_makesafe_invoice_pack",
+      actor: "captain@test",
+      xero_invoice_id: "xero-1140",
+      invoice_number: "INV-1140",
+      invoice_status: "DRAFT",
+      bind_only: true,
+    },
+  }]);
+  assertEquals(snapshot.named_prior_cycle_bind, true);
+  assertEquals(result.named_prior_cycle_bind, true);
   assertEquals(result.invoice_create_dispatched, false);
   assertEquals(result.invoice_authorise_dispatched, false);
   assertEquals(result.send_dispatched, false);

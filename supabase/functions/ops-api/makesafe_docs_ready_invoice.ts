@@ -197,15 +197,18 @@ function invoiceBelongsToCurrentAttendance(detail: any, invoice: any): boolean {
 }
 
 /**
- * Choose the current candidate before applying lifecycle qualification. VOIDED
- * and DELETED rows stay visible to this selector so they cannot expose an older
- * DRAFT merely by being filtered out first.
+ * Choose the current live candidate before applying lifecycle qualification.
+ * VOIDED and DELETED rows are historical tombstones, not current receivables;
+ * they must never outrank an older DRAFT, AUTHORISED, or PAID invoice.
  */
 export function selectCurrentMakesafeReceivableInvoice(
   rows: any[] | null | undefined,
 ): any | null {
   const candidates = (rows || []).filter((row) =>
-    String(row?.invoice_type || "").toUpperCase() === "ACCREC"
+    String(row?.invoice_type || "").toUpperCase() === "ACCREC" &&
+    !["VOIDED", "DELETED"].includes(
+      String(row?.status || "").toUpperCase(),
+    )
   );
   candidates.sort((a, b) => {
     const byInvoiceDate = invoiceSortTimestamp(b?.invoice_date) -
