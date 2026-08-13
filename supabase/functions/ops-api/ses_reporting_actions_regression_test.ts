@@ -29,7 +29,7 @@ import {
   makesafeRendererAuthorityVersion,
 } from "./makesafe_report_renderer_authority.ts";
 
-Deno.test("persisted named-card caveats remain release holds outside the hard blocker column", () => {
+Deno.test("persisted named-card findings stay visible caveats outside the hard blocker column", () => {
   const caveats = sesDocketReleaseCaveats({
     blockers: [],
     review_spec: {
@@ -56,7 +56,7 @@ Deno.test("persisted named-card caveats remain release holds outside the hard bl
     "curated_source_missing",
     "independent_source_kind_missing",
   ]);
-  assertEquals(caveats.every((caveat) => caveat.state === "refused"), true);
+  assertEquals(caveats.every((caveat) => caveat.state === "caveat"), true);
 });
 
 async function rawSha256(bytes: Uint8Array): Promise<string> {
@@ -105,6 +105,7 @@ function reviewPackClient(
     docket_output_content_hash: `sha256:${"e".repeat(64)}`,
     assembler_version: "ses-pack-assembler/v1",
     family_matrix_version: "family-matrix-fixture",
+    review_state: "needs_review",
   };
   const docket = {
     id: "docket-fixture",
@@ -581,7 +582,7 @@ Deno.test(
   },
 );
 
-Deno.test("review pack suppresses unproved report bytes and exposes curated_source_missing", async () => {
+Deno.test("review pack serves unproved report bytes with a visible caveat", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nlegacy fixture");
   const artifact = {
     role: "supporting_report_pdf",
@@ -601,21 +602,22 @@ Deno.test("review pack suppresses unproved report bytes and exposes curated_sour
     { mode: "api_key", user: null },
     "docket-fixture",
   );
-  assertEquals(pack.artifacts, []);
-  assertEquals(pack.suppressed_artifacts[0].signed_url, null);
+  assertEquals(pack.artifacts.length, 1);
+  assertEquals(pack.artifacts[0].trust_state, "caveat");
+  assertEquals(pack.suppressed_artifacts, []);
   assertEquals(
-    pack.suppressed_artifacts[0].blocker_code,
+    pack.caveats[0].code,
     "curated_source_missing",
   );
-  assertEquals(pack.blockers[0].code, "curated_source_missing");
+  assertEquals(pack.blockers, []);
   assertEquals(
-    (pack.blockers[0] as any).evidence.suppression_reason,
+    (pack.caveats[0] as any).evidence.suppression_reason,
     "independent_source_kind_missing",
   );
-  assertEquals(signedPaths, []);
+  assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
 });
 
-Deno.test("Captain signoff refuses a report suppressed by the same read contract", async () => {
+Deno.test("Captain signoff remains reachable with a report-source caveat", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nlegacy fixture");
   const artifact = {
     role: "supporting_report_pdf",
@@ -630,37 +632,26 @@ Deno.test("Captain signoff refuses a report suppressed by the same read contract
     },
   };
   const { client, rpcCalls, review } = reviewPackClient(artifact, bytes);
-  const error = await assertRejects(
-    () =>
-      signOffSesDocketAction(
-        client,
-        {
-          mode: "jwt",
-          user: {
-            id: "captain-fixture",
-            email: "",
-            role: "owner",
-          },
-        },
-        {
-          docket_revision_id: "docket-fixture",
-          expected_output_content_hash: review.docket_output_content_hash,
-        },
-      ),
-    SesActionError,
-    "lacks an independently byte-bound",
+  await signOffSesDocketAction(
+    client,
+    {
+      mode: "jwt",
+      user: {
+        id: "captain-fixture",
+        email: "",
+        role: "owner",
+      },
+    },
+    {
+      docket_revision_id: "docket-fixture",
+      expected_output_content_hash: review.docket_output_content_hash,
+    },
   );
-  assertEquals((error as SesActionError).status, 409);
-  const refusal = (error as SesActionError).refusal as Record<string, unknown>;
-  assertStringIncludes(
-    String(refusal.recovery_action || ""),
-    "bind_current_cycle_curated_makesafe_report",
-  );
-  assertEquals(rpcCalls, []);
+  assertEquals(rpcCalls, ["record_ses_docket_review_state_v1"]);
 });
 
 Deno.test(
-  "review pack suppresses Tuart-style previously_committed report that lacks completeness proof",
+  "review pack serves Tuart-style report with missing completeness proof as a caveat",
   async () => {
     // Old code trusted this shape (byte-verified previously_committed without
     // report_input_hash). That is the self-vouch gate this task closes.
@@ -696,18 +687,19 @@ Deno.test(
       { mode: "api_key", user: null },
       "docket-fixture",
     );
-    assertEquals(pack.artifacts, []);
-    assertEquals(pack.suppressed_artifacts[0].signed_url, null);
+    assertEquals(pack.artifacts.length, 1);
+    assertEquals(pack.artifacts[0].trust_state, "caveat");
+    assertEquals(pack.suppressed_artifacts, []);
     assertEquals(
-      pack.suppressed_artifacts[0].blocker_code,
+      pack.caveats[0].code,
       "curated_source_missing",
     );
-    assertEquals(pack.blockers[0].code, "curated_source_missing");
+    assertEquals(pack.blockers, []);
     assertEquals(
-      (pack.blockers[0] as any).evidence.suppression_reason,
+      (pack.caveats[0] as any).evidence.suppression_reason,
       "independent_completeness_proof_missing",
     );
-    assertEquals(signedPaths, []);
+    assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
   },
 );
 
@@ -949,24 +941,26 @@ Deno.test(
     assertEquals(pack.blockers, []);
     assertEquals(signedPaths, ["docket-fixture/report.pdf"]);
 
-    // Same artifact, sibling bind event missing: the current pin is then the
-    // only acceptable stamp, so the superseded identity still refuses.
+    // Same artifact, sibling bind event missing: the renderer finding remains
+    // visible, but it is review context rather than a HOLD wall.
     const unbound = reviewPackClient(artifact, bytes, { jobEvents: [] });
     const refused = await getSesReviewablePackAction(
       unbound.client,
       { mode: "api_key", user: null },
       "docket-fixture",
     );
-    assertEquals(refused.artifacts, []);
+    assertEquals(refused.artifacts.length, 1);
+    assertEquals(refused.artifacts[0].trust_state, "caveat");
+    assertEquals(refused.suppressed_artifacts, []);
     assertEquals(
-      refused.suppressed_artifacts[0].suppression_reason,
+      String(refused.caveats[0].evidence?.suppression_reason || ""),
       "active_renderer_input_binding_missing",
     );
   },
 );
 
 Deno.test(
-  "the sibling bind read cannot admit a bundle whose sibling bind is invalid",
+  "sibling renderer-window findings remain caveats while unreadable audit stays hard",
   async () => {
     // Reaching into another job's audit trail is the one place bind-time
     // validity crosses a job boundary, so it is the one place a permissive read
@@ -1023,12 +1017,13 @@ Deno.test(
       { mode: "api_key", user: null },
       "docket-fixture",
     );
-    assertEquals(fenced.artifacts, []);
+    assertEquals(fenced.artifacts.length, 1);
+    assertEquals(fenced.suppressed_artifacts, []);
     assertEquals(
-      fenced.suppressed_artifacts[0].suppression_reason,
+      String(fenced.caveats[0].evidence?.suppression_reason || ""),
       "active_renderer_input_binding_missing",
     );
-    assertEquals(afterRepin.signedPaths, []);
+    assertEquals(afterRepin.signedPaths, ["docket-fixture/report.pdf"]);
 
     // 2. A sibling bind made BEFORE this identity's window opened is equally not
     //    authoritative. The window is a window, not a ceiling.
@@ -1040,9 +1035,10 @@ Deno.test(
       { mode: "api_key", user: null },
       "docket-fixture",
     );
-    assertEquals(early.artifacts, []);
+    assertEquals(early.artifacts.length, 1);
+    assertEquals(early.suppressed_artifacts, []);
     assertEquals(
-      early.suppressed_artifacts[0].suppression_reason,
+      String(early.caveats[0].evidence?.suppression_reason || ""),
       "active_renderer_input_binding_missing",
     );
 
@@ -1060,9 +1056,10 @@ Deno.test(
       { mode: "api_key", user: null },
       "docket-fixture",
     );
-    assertEquals(stale.artifacts, []);
+    assertEquals(stale.artifacts.length, 1);
+    assertEquals(stale.suppressed_artifacts, []);
     assertEquals(
-      stale.suppressed_artifacts[0].suppression_reason,
+      String(stale.caveats[0].evidence?.suppression_reason || ""),
       "active_renderer_input_binding_missing",
     );
 
@@ -1100,7 +1097,6 @@ function roofPortalCockpitClient(
   },
 ): any {
   const rows: Record<string, unknown> = {
-    ...extraRows,
     makesafe_docket_revisions_current: {
       id: "docket-fixture",
       job_id: "job-fixture",
@@ -1147,6 +1143,7 @@ function roofPortalCockpitClient(
     makesafe_docket_artifacts: [],
     job_assignments: [],
     job_service_reports: [],
+    ...extraRows,
   };
   return {
     storage: {
@@ -1220,11 +1217,23 @@ Deno.test("cockpit still demands the report email when the manifest does not dec
   assertEquals(cockpit.status, "HOLD");
 });
 
-Deno.test("named-card review caveats keep SEND IT held after Docs Ready persistence", async () => {
+Deno.test("named-card review caveats stay visible without locking DRAFT approval", async () => {
   const cockpit = await querySesReviewCockpitAction(
     roofPortalCockpitClient(
       "not_applicable",
-      {},
+      {
+        makesafe_invoice_obligation_revisions_current: {
+          id: "obligation-fixture",
+          pricing_disposition: "priced_from_canon",
+          blockers: [],
+          duplicate_probe: { allows_create: true, ambiguity: "none" },
+          xero_binding: {
+            xero_invoice_id: "xero-draft-fixture",
+            invoice_number: "INV-1201",
+            status: "DRAFT",
+          },
+        },
+      },
       {
         cards: [{
           family: "ordinary_roof_portal",
@@ -1240,17 +1249,17 @@ Deno.test("named-card review caveats keep SEND IT held after Docs Ready persiste
     "job-fixture",
   );
 
-  assertEquals(cockpit.status, "HOLD");
-  assertEquals(cockpit.controls.send_it.enabled, false);
+  assertEquals(cockpit.controls.approve_invoice.enabled, true);
   assertEquals(
     cockpit.verdict.blockers.some((blocker) =>
       blocker.code === "canonical_draft_pack_output_missing"
     ),
-    true,
+    false,
   );
+  assertEquals(cockpit.caveats[0].code, "canonical_draft_pack_output_missing");
 });
 
-Deno.test("cockpit response converts missing independent report proof into a visible HOLD", async () => {
+Deno.test("cockpit keeps missing independent report proof as a visible caveat", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\nlegacy fixture");
   const reportHash = await sesSha256Bytes(bytes);
   const rows: Record<string, unknown> = {
@@ -1349,9 +1358,13 @@ Deno.test("cockpit response converts missing independent report proof into a vis
   const blocker = cockpit.verdict.blockers.find((item) =>
     item.code === "curated_source_missing"
   );
-  assertEquals(blocker?.code, "curated_source_missing");
+  assertEquals(blocker, undefined);
+  const caveat = cockpit.caveats.find((item) =>
+    item.code === "curated_source_missing"
+  );
+  assertEquals(caveat?.code, "curated_source_missing");
   assertEquals(
-    (blocker as any).evidence.suppression_reason,
+    (caveat as any).evidence.suppression_reason,
     "independent_source_kind_missing",
   );
 });

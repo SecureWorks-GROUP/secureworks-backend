@@ -272,6 +272,7 @@ Deno.test("SWMS requirement follows the sealed MLB physical-family rule", () => 
   const assessment = {
     metadata: { makesafe_job_family: "assessment_report_quote" },
   };
+  const repair = { metadata: { makesafe_job_family: "repair" } };
 
   assertEquals(
     _requiresMakesafeSwms({ requesting_company_slug: "mlb" }, physical),
@@ -287,6 +288,14 @@ Deno.test("SWMS requirement follows the sealed MLB physical-family rule", () => 
   );
   assertEquals(
     _requiresMakesafeSwms({ requesting_company_slug: "builderwest" }, physical),
+    false,
+  );
+  assertEquals(
+    _requiresMakesafeSwms({ requesting_company_name: "AJS" }, physical),
+    false,
+  );
+  assertEquals(
+    _requiresMakesafeSwms({ requesting_company_slug: "mlb" }, repair),
     false,
   );
 });

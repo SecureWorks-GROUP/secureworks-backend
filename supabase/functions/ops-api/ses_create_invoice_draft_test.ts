@@ -458,6 +458,48 @@ Deno.test("A5: re-mint over this obligation's own DRAFT repairs a missing bindin
   );
 });
 
+Deno.test("A5b: an unbound qualifying DRAFT is adopted with its real PDF and never re-minted", async () => {
+  const revision = revisionRow({ xero_binding: null });
+  const client = mintClient({ revision });
+  const gateway = draftGateway();
+  const existing = {
+    xero_invoice_id: "xero-existing-qualifying",
+    invoice_number: "INV-1201",
+    status: "DRAFT",
+    reference: "MLB-24732",
+    job_id: JOB_ID,
+    invoice_type: "ACCREC",
+    invoice_obligation_revision_id: null,
+    ses_external_token: null,
+  };
+
+  const result = await createSesInvoiceDraftAction(
+    client as any,
+    apiKeyAuth,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "skill@test",
+    },
+    gateway,
+    { fetchAllAccrecInvoices: async () => [existing] },
+  );
+
+  assertEquals(result.skipped, true);
+  assertEquals(result.reason, "existing_qualifying_draft_adopted");
+  assertEquals(result.invoice.invoice_number, "INV-1201");
+  assertEquals(result.invoice_create_dispatched, false);
+  assertEquals(result.external_mutations, { xero: 0, email: 0 });
+  assertEquals(gateway.createCalls, 0);
+  assertEquals(typeof result.draft_pdf?.content_hash, "string");
+  assertEquals(revision.state, "create_executed");
+  assertEquals(
+    (revision.xero_binding as any)?.xero_invoice_id,
+    "xero-existing-qualifying",
+  );
+});
+
 Deno.test("A6: an AUTHORISED invoice on this obligation refuses instead of skipping", async () => {
   const gateway = draftGateway();
   const authorised = {

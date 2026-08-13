@@ -8,6 +8,7 @@ import {
   splitRefPo,
 } from "./makesafe_send_pack.ts";
 import { composeInvoiceReferenceWithPo } from "./ses_invoice_reference_grain.ts";
+import { qualifyMakesafeCurrentDraftInvoice } from "./makesafe_docs_ready_invoice.ts";
 // A sealed-release send used to leave `report_sent_at` untouched, so the field
 // was wrong in BOTH directions: false where the retired auto-stamp minted it,
 // absent where a pack demonstrably shipped. The route proof is the send record;
@@ -52,6 +53,7 @@ import {
   type SesApprovalAuth,
   type SesCleanInput,
   type SesCockpitDocket,
+  type SesReviewCaveat,
   type SesReviewRoute,
   sesVerdictWithExistingMoney,
 } from "./ses_review_cockpit.ts";
@@ -364,6 +366,41 @@ function curatedSourceMissingRefusal(reason: string): SesRefusal {
   );
 }
 
+const SES_SOFT_REVIEW_SOURCE_FINDINGS = new Set([
+  "supporting_report_pdf_missing",
+  "independent_source_kind_missing",
+  "source_revision_identity_missing",
+  "curated_contract_provenance_missing",
+  "sibling_bundle_provenance_missing",
+  "active_renderer_input_binding_missing",
+  "independent_completeness_proof_missing",
+  "source_document_missing",
+]);
+
+/** Missing provenance is review context; actual ambiguity or byte drift stays hard. */
+export function isSesSoftReviewSourceFinding(reason: string): boolean {
+  return SES_SOFT_REVIEW_SOURCE_FINDINGS.has(String(reason || ""));
+}
+
+function curatedSourceCaveat(reason: string): SesReviewCaveat {
+  const refusal = curatedSourceMissingRefusal(reason);
+  return { ...refusal, state: "caveat" };
+}
+
+function uniqueSesReviewCaveats(
+  caveats: SesReviewCaveat[],
+): SesReviewCaveat[] {
+  const seen = new Set<string>();
+  return caveats.filter((caveat) => {
+    const key = `${caveat.code}:${
+      String(caveat.evidence?.suppression_reason || "")
+    }`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function parseDraft(
   routeKind: "report" | "photo" | "invoice" | "report_invoice",
   value: unknown,
@@ -427,12 +464,12 @@ function refusalFromStored(value: unknown): SesRefusal {
 /**
  * Named-card prepare caveats are persisted in the review spec instead of the
  * docket's hard-only `blockers` column. Rehydrate them at the release boundary
- * so Docs Ready placement and DRAFT minting remain reachable while SEND IT and
- * invoice authorisation continue to fail closed until the caveats are cleared.
+ * so Docs Ready placement, review and approval remain reachable. They stay
+ * visible to the Captain but never re-enter the docket's hard blocker set.
  */
 export function sesDocketReleaseCaveats(
   docket: Record<string, unknown>,
-): SesRefusal[] {
+): SesReviewCaveat[] {
   const review = object(docket.review_spec);
   const cards = Array.isArray(review.cards) ? review.cards : [];
   const card = object(cards[0]);
@@ -441,7 +478,7 @@ export function sesDocketReleaseCaveats(
     ["send_gate_codes", "send_gates"],
   ] as const;
   const seen = new Set<string>();
-  const caveats: SesRefusal[] = [];
+  const caveats: SesReviewCaveat[] = [];
   for (const [codesKey, reasonsKey] of categories) {
     const codes = Array.isArray(card[codesKey]) ? card[codesKey] : [];
     const reasons = Array.isArray(card[reasonsKey]) ? card[reasonsKey] : [];
@@ -451,7 +488,7 @@ export function sesDocketReleaseCaveats(
       seen.add(code);
       const fact = String(reasons[index] || "").trim();
       caveats.push({
-        state: "refused",
+        state: "caveat",
         code,
         fact: fact || `The current docket still carries the ${code} caveat.`,
         recovery_action:
@@ -862,9 +899,6 @@ function cleanInputFromRows(args: {
   const storedBlockers = Array.isArray(args.docket.blockers)
     ? args.docket.blockers.map(refusalFromStored)
     : [];
-  const storedCaveats = storedBlockers.length === 0
-    ? sesDocketReleaseCaveats(args.docket)
-    : [];
   const obligationBlockers = Array.isArray(args.obligation?.blockers)
     ? args.obligation.blockers.map(refusalFromStored)
     : [];
@@ -881,7 +915,6 @@ function cleanInputFromRows(args: {
     readiness_blockers: [
       ...blockers,
       ...storedBlockers,
-      ...storedCaveats,
       ...obligationBlockers,
     ],
     pricing_disposition: pricingDisposition,
@@ -1034,6 +1067,7 @@ export async function loadSesCockpitDocket(
     family === "temporary_fencing";
   let cockpitArtifacts = artifactsResponse.data || [];
   let sourceRefusal: SesRefusal | null = null;
+  let sourceCaveat: SesReviewCaveat | null = null;
   if (physical) {
     const reportArtifacts = cockpitArtifacts.filter((artifact: any) =>
       artifact.role === "supporting_report_pdf"
@@ -1051,10 +1085,14 @@ export async function loadSesCockpitDocket(
           : "multiple_supporting_report_pdfs",
       };
     if (!trust.trusted) {
-      sourceRefusal = curatedSourceMissingRefusal(trust.reason);
-      cockpitArtifacts = cockpitArtifacts.filter((artifact: any) =>
-        artifact.role !== "supporting_report_pdf"
-      );
+      if (isSesSoftReviewSourceFinding(trust.reason)) {
+        sourceCaveat = curatedSourceCaveat(trust.reason);
+      } else {
+        sourceRefusal = curatedSourceMissingRefusal(trust.reason);
+        cockpitArtifacts = cockpitArtifacts.filter((artifact: any) =>
+          artifact.role !== "supporting_report_pdf"
+        );
+      }
     }
   }
   const [assignmentsResponse, reportsResponse] = await Promise.all([
@@ -1226,6 +1264,10 @@ export async function loadSesCockpitDocket(
     family_evidence: object(manifest.items),
     swms: object(manifest.items).swms_current_cycle || {},
     routes,
+    caveats: uniqueSesReviewCaveats([
+      ...sesDocketReleaseCaveats(docket),
+      ...(sourceCaveat ? [sourceCaveat] : []),
+    ]),
     crew_and_trade_visits: {
       assignments: assignmentsResponse.data || [],
       visit_reports: reportsResponse.data || [],
@@ -2007,6 +2049,17 @@ export async function createSesInvoiceDraftAction(
     externalRef,
   );
   if (existingHit) {
+    const detailResponse = await client.from("makesafe_job_details")
+      .select("external_ref,reattend_count,last_reattend_at")
+      .eq("job_id", args.job_id)
+      .maybeSingle();
+    if (detailResponse.error) {
+      throw new SesActionError(503, {
+        state: "refused",
+        fact:
+          "The current attendance boundary could not be read, so the existing Xero invoice cannot be safely adopted or bypassed.",
+      });
+    }
     const binding = object(revision.xero_binding);
     const boundId = String(binding.xero_invoice_id || "");
     const hitId = String(existingHit.xero_invoice_id || "");
@@ -2021,7 +2074,13 @@ export async function createSesInvoiceDraftAction(
     const sameObligation = hitIsDraft && !!hitRow &&
       String(hitRow.invoice_obligation_revision_id || "") ===
         String(revision.id);
-    if (sameBoundDraft || sameObligation) {
+    const qualifyingUnboundDraft = hitIsDraft && !!hitRow &&
+      qualifyMakesafeCurrentDraftInvoice(
+        { id: args.job_id },
+        { ...object(detailResponse.data), external_ref: externalRef },
+        hitRow,
+      ).qualifies;
+    if (sameBoundDraft || sameObligation || qualifyingUnboundDraft) {
       // Repair, never assume: a first mint whose Xero create landed but whose
       // binding write did not would otherwise be stranded unapprovable here.
       const repairEffect = await buildSesEffect({
@@ -2075,7 +2134,9 @@ export async function createSesInvoiceDraftAction(
       return {
         state: "xero_draft_created",
         skipped: true,
-        reason: "existing_ses_bound_draft",
+        reason: qualifyingUnboundDraft && !sameBoundDraft && !sameObligation
+          ? "existing_qualifying_draft_adopted"
+          : "existing_ses_bound_draft",
         invoice: {
           xero_invoice_id: existingHit.xero_invoice_id,
           invoice_number: existingHit.invoice_number,
@@ -2620,6 +2681,7 @@ export async function getSesReviewablePackAction(
     : { supersessions: [], bind_instants: new Map<string, string>() };
   const projectedArtifacts = await Promise.all(
     (artifactsResponse.data || []).map(async (artifact: any) => {
+      let sourceCaveat: SesReviewCaveat | null = null;
       if (physicalReview && artifact.role === "supporting_report_pdf") {
         const trust = await verifyStoredSupportingReport(
           client,
@@ -2627,19 +2689,24 @@ export async function getSesReviewablePackAction(
           bindAudit,
         );
         if (!trust.trusted) {
-          return {
-            suppressed: true as const,
-            artifact: {
-              role: artifact.role,
-              media_type: artifact.media_type,
-              content_hash: artifact.content_hash,
-              size_bytes: artifact.size_bytes,
-              signed_url: null,
-              trust_state: "blocked",
-              blocker_code: "curated_source_missing",
-              suppression_reason: trust.reason,
-            },
-          };
+          if (isSesSoftReviewSourceFinding(trust.reason)) {
+            sourceCaveat = curatedSourceCaveat(trust.reason);
+          } else {
+            return {
+              suppressed: true as const,
+              source_caveat: null,
+              artifact: {
+                role: artifact.role,
+                media_type: artifact.media_type,
+                content_hash: artifact.content_hash,
+                size_bytes: artifact.size_bytes,
+                signed_url: null,
+                trust_state: "blocked",
+                blocker_code: "curated_source_missing",
+                suppression_reason: trust.reason,
+              },
+            };
+          }
         }
       }
       const prefix = `${SES_DOCKET_BUCKET}/`;
@@ -2663,8 +2730,17 @@ export async function getSesReviewablePackAction(
       }
       return {
         suppressed: false as const,
+        source_caveat: sourceCaveat,
         artifact: {
           ...artifact,
+          ...(sourceCaveat
+            ? {
+              trust_state: "caveat",
+              caveat_code: sourceCaveat.code,
+              suppression_reason: sourceCaveat.evidence?.suppression_reason ||
+                null,
+            }
+            : {}),
           display_label: sesReviewArtifactDisplayLabel(artifact.role),
           signed_url: signed.data.signedUrl,
           signed_url_expires_in_seconds: 300,
@@ -2677,19 +2753,25 @@ export async function getSesReviewablePackAction(
   const suppressedArtifacts: Array<Record<string, any>> = projectedArtifacts
     .filter((entry) => entry.suppressed).map((entry) => entry.artifact);
   let sourceRefusal: SesRefusal | null = null;
+  const sourceCaveats = projectedArtifacts.flatMap((entry) =>
+    entry.source_caveat ? [entry.source_caveat] : []
+  );
   if (physicalReview) {
-    const trustedReports = artifacts.filter((artifact: any) =>
+    const servedReports = artifacts.filter((artifact: any) =>
       artifact.role === "supporting_report_pdf"
     );
-    if (trustedReports.length !== 1) {
-      sourceRefusal = curatedSourceMissingRefusal(
-        String(
-          suppressedArtifacts[0]?.suppression_reason ||
-            (trustedReports.length === 0
-              ? "supporting_report_pdf_missing"
-              : "multiple_supporting_report_pdfs"),
-        ),
+    if (servedReports.length !== 1) {
+      const reason = String(
+        suppressedArtifacts[0]?.suppression_reason ||
+          (servedReports.length === 0
+            ? "supporting_report_pdf_missing"
+            : "multiple_supporting_report_pdfs"),
       );
+      if (isSesSoftReviewSourceFinding(reason)) {
+        sourceCaveats.push(curatedSourceCaveat(reason));
+      } else {
+        sourceRefusal = curatedSourceMissingRefusal(reason);
+      }
     }
   }
 
@@ -2782,10 +2864,14 @@ export async function getSesReviewablePackAction(
   const reviewBlockers: Record<string, unknown>[] = sourceRefusal
     ? [...storedBlockers, sourceRefusal as unknown as Record<string, unknown>]
     : storedBlockers;
+  const responseCaveats = uniqueSesReviewCaveats([
+    ...sesDocketReleaseCaveats(docket),
+    ...sourceCaveats,
+  ]);
   const envelope = object(docket.envelope);
-  // Presentation honesty for the review surface: a green READY tick over a
-  // trust refusal is the defect this field removes. Kind is refused / ready /
-  // incomplete — never collapsed into a single warning.
+  // Presentation honesty: actual identity/byte drift remains a refusal, while
+  // review-source caveats remain visible without turning a drafted pack into a
+  // false U4_BLOCKED state.
   const presentation = presentSesPackHonesty({
     docket: {
       id: docket.id,
@@ -2833,11 +2919,12 @@ export async function getSesReviewablePackAction(
         ...docket,
         blockers: reviewBlockers,
       }
-      : docket,
+      : { ...docket, caveats: responseCaveats },
     artifacts,
     suppressed_artifacts: suppressedArtifacts,
     // All named refusals (stored + read-time trust), not only sourceRefusal.
     blockers: responseBlockers,
+    caveats: responseCaveats,
     // Operator-facing honesty: ready vs refused vs incomplete, with reason.
     presentation: {
       kind: presentation.kind,

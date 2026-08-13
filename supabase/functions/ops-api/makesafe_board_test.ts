@@ -303,7 +303,7 @@ Deno.test("T2(e) drafted job: pack row + DRAFT invoice + admin_to_send_report + 
   );
 });
 
-Deno.test("T2 authorisedAwaitingSend: AUTHORISED not-sent stays in Docs Ready (no regression)", () => {
+Deno.test("T2 AUTHORISED without a qualifying DRAFT stays in Trade Report In", () => {
   const job = { status: "processing", completed_at: NOW };
   const detail = {
     substatus: "admin_to_send_report",
@@ -311,7 +311,8 @@ Deno.test("T2 authorisedAwaitingSend: AUTHORISED not-sent stays in Docs Ready (n
   };
   const report = { status: "submitted" };
   const invoice = { status: "AUTHORISED", invoice_date: "2026-06-16" };
-  // Durable authorised_not_sent pack: previously trade_report_in via resumeNotSent.
+  // SWMS-261158 control: an issued invoice is not a pre-authorisation review
+  // fact, even when the pack says authorised_not_sent.
   assertEquals(
     _deriveMakesafeBoardStage(
       job,
@@ -324,10 +325,9 @@ Deno.test("T2 authorisedAwaitingSend: AUTHORISED not-sent stays in Docs Ready (n
       false,
       { status: "authorised_not_sent", report_doc_id: "doc-report-1" },
     ),
-    "report_ready",
+    "trade_report_in",
   );
-  // Re-prepare after approve (drafted pack, money already AUTHORISED, invoice
-  // PDF not yet on the job): must not fall back to trade_report_in.
+  // Re-prepare after approve still cannot manufacture a qualifying DRAFT.
   assertEquals(
     _deriveMakesafeBoardStage(
       job,
@@ -338,9 +338,13 @@ Deno.test("T2 authorisedAwaitingSend: AUTHORISED not-sent stays in Docs Ready (n
       NOW,
       { has_invoice_doc: false, has_report_doc: true, has_swms_doc: false },
       false,
-      { status: "drafted", report_doc_id: "doc-report-1", pre_xero_docs_ready: true },
+      {
+        status: "drafted",
+        report_doc_id: "doc-report-1",
+        pre_xero_docs_ready: true,
+      },
     ),
-    "report_ready",
+    "trade_report_in",
   );
 });
 
