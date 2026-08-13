@@ -738,7 +738,8 @@ export function portalCapturesFromLedger(
     detail?.cycle_number ?? base?.cycle_number ?? 1,
   );
   const captures: MakesafePortalCapture[] = [];
-  const seen = new Set<string>();
+  const seenLatest = new Set<string>();
+  const seenDone = new Set<string>();
 
   const ordered = [...(rows || [])].sort((a, b) =>
     Number(b?.makesafe_fact_version || 0) -
@@ -770,7 +771,7 @@ export function portalCapturesFromLedger(
       : (role === "roof_report" && result === "done" &&
         !row?.screenshot_object_key);
     if (
-      !role || !url || !expectedStatus || seen.has(identityKey) ||
+      !role || !url || !expectedStatus ||
       String(row?.job_id || "") !== jobId ||
       String(row?.attendance_cycle_id || "") !== attendanceCycleId ||
       !builderReferenceValid ||
@@ -783,7 +784,22 @@ export function portalCapturesFromLedger(
     ) {
       continue;
     }
-    seen.add(identityKey);
+    // Preserve two facts per typed portal identity:
+    //
+    // 1. the latest valid observation, which tells the UI whether the link is
+    //    currently filling, locked, or gone; and
+    // 2. the latest valid completion proof, which is monotonic within an
+    //    attendance cycle. A later unreachable/not-done observation cannot
+    //    erase an already locked Prime form or an authenticated trade tick.
+    //
+    // When the latest row is itself done the two facts are the same row and we
+    // emit it once. All existing cycle/source/producer/screenshot guards above
+    // remain unchanged.
+    const isLatest = !seenLatest.has(identityKey);
+    const isLastDone = result === "done" && !seenDone.has(identityKey);
+    if (!isLatest && !isLastDone) continue;
+    if (isLatest) seenLatest.add(identityKey);
+    if (isLastDone) seenDone.add(identityKey);
     captures.push({
       status: result,
       role,
@@ -1390,9 +1406,19 @@ export function buildCanonicalMakesafeRows(
         swms: base?.has_swms_doc === true || !!pack?.swms_doc_id,
       },
     };
+    const rawReportState = String(
+      report?.status || base?.report_status || "waiting_on_trade_report",
+    );
     const reportPayload = {
-      state: report?.status || base?.report_status ||
-        "waiting_on_trade_report",
+      // Portal completion evidence is the report for roof/assessment cards.
+      // Keep a real submitted/approved service-report state when one exists;
+      // otherwise bind the shared report-in predicate into this presentation
+      // field so a locked Prime capture cannot still read as waiting.
+      state: reportIn.satisfied
+        ? (["submitted", "approved"].includes(rawReportState.toLowerCase())
+          ? rawReportState
+          : "submitted")
+        : rawReportState,
       submitted_at: report?.submitted_at || report?.created_at ||
         base?.makesafe_details?.report_received_at || null,
       photo_count: photoCount,
