@@ -46,6 +46,32 @@ function normalizedInvoiceNumber(value: unknown): string {
   return String(value || "").trim().toUpperCase();
 }
 
+const SES_BIND_CURRENT_RECEIVABLE_PRIORITY = [
+  "PAID",
+  "AUTHORISED",
+  // An issued-but-not-authorised row must still block an older DRAFT even
+  // though the bind action itself refuses SUBMITTED.
+  "SUBMITTED",
+  "DRAFT",
+] as const;
+
+/**
+ * Apply the Captain's bind-only money preference without changing the board's
+ * recency-first current-cycle selector. Within one lifecycle, the shared
+ * selector keeps its deterministic newest-row choice.
+ */
+function selectPreferredCurrentReceivableForPackBind(rows: any[]): any | null {
+  for (const status of SES_BIND_CURRENT_RECEIVABLE_PRIORITY) {
+    const selected = selectCurrentMakesafeReceivableInvoice(
+      rows.filter((invoice) =>
+        String(invoice?.status || "").toUpperCase() === status
+      ),
+    );
+    if (selected) return selected;
+  }
+  return selectCurrentMakesafeReceivableInvoice(rows);
+}
+
 /**
  * Resolve one Captain-named Xero invoice for a bind-only pack repair.
  *
@@ -143,9 +169,10 @@ export function selectExistingInvoiceForPackBind(args: {
   }
 
   if (attendanceCycle === "current") {
-    const selected = selectCurrentMakesafeReceivableInvoice(
+    const selected = selectPreferredCurrentReceivableForPackBind(
       (args.invoices || []).filter((candidate) =>
-        String(candidate?.job_id || "") === String(args.job?.id || "")
+        String(candidate?.job_id || "") === String(args.job?.id || "") &&
+        makesafeInvoiceAttendanceCycle(args.detail, candidate) !== "prior"
       ),
     );
     if (

@@ -132,6 +132,38 @@ Deno.test("current candidate selection never lets an older DRAFT outrank a newer
   }
 });
 
+Deno.test("board selection keeps a newer current-cycle DRAFT ahead of prior-cycle paid money", () => {
+  const currentDraft = {
+    ...linkedInvoice("DRAFT"),
+    id: "invoice-current-draft",
+    invoice_date: "2026-08-12",
+    created_at: "2026-08-12T01:00:00Z",
+  };
+  const selected = selectCurrentMakesafeReceivableInvoice([
+    {
+      ...linkedInvoice("PAID"),
+      id: "invoice-prior-paid",
+      invoice_date: "2026-08-01",
+      created_at: "2026-08-01T01:00:00Z",
+    },
+    currentDraft,
+  ]);
+
+  assertEquals(selected?.id, "invoice-current-draft");
+  assertEquals(
+    makesafeHasQualifyingCurrentDraftInvoice(
+      { id: "job-current", job_number: "SWMS-TEST-1" },
+      {
+        external_ref: "MLB-99999",
+        reattend_count: 1,
+        last_reattend_at: "2026-08-10T00:00:00Z",
+      },
+      selected,
+    ),
+    true,
+  );
+});
+
 Deno.test("current candidate selection ignores newer DELETED and VOIDED tombstones", () => {
   for (const status of ["DELETED", "VOIDED"]) {
     const selected = selectCurrentMakesafeReceivableInvoice([
