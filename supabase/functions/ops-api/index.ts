@@ -3347,13 +3347,33 @@ export function _resolveOpsApiAuthIntent(input: {
   validKey?: string | null
   serviceKey?: string | null
   routineKey?: string | null
+  agentServerKey?: string | null
   preferBearerOverApiKey?: boolean
-}): 'api_key' | 'jwt' | 'routine' | 'none' {
-  const { xApiKey, bearerToken, validKey, serviceKey, routineKey, preferBearerOverApiKey } = input
+}): 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none' {
+  const {
+    xApiKey,
+    bearerToken,
+    validKey,
+    serviceKey,
+    routineKey,
+    agentServerKey,
+    preferBearerOverApiKey,
+  } = input
   // The service-role key is the existing non-browser server credential. Keep it
   // ahead of browser Bearer preference so an agent request cannot be downgraded
   // when an unrelated Authorization header is also present.
   if (serviceKey && (xApiKey === serviceKey || bearerToken === serviceKey)) return 'api_key'
+  // The headless agent credential is read-only and must remain distinct from
+  // every existing credential class. A collision is configuration failure, not
+  // an opportunity to inherit agent-read access.
+  const agentServerKeyIsDistinct = !!agentServerKey &&
+    agentServerKey !== validKey &&
+    agentServerKey !== routineKey &&
+    agentServerKey !== serviceKey
+  if (
+    agentServerKeyIsDistinct &&
+    (xApiKey === agentServerKey || bearerToken === agentServerKey)
+  ) return 'agent_read'
   if (routineKey && (xApiKey === routineKey || bearerToken === routineKey)) return 'routine'
   if (bearerToken && bearerToken === validKey) return 'api_key'
   // A user Bearer is the caller identity when the route opts into browser JWT
@@ -3363,6 +3383,14 @@ export function _resolveOpsApiAuthIntent(input: {
   if (bearerToken) return 'jwt'
   return 'none'
 }
+
+export const AGENT_READ_ALLOWED_ACTIONS = new Set([
+  'makesafe_board',
+  'makesafe_pipeline',
+  'makesafe_pipeline_items',
+  'makesafe_audit',
+  'intake_health',
+])
 
 const OPS_API_STATIC_KEY_COMPATIBLE_ACTIONS = new Set([
   // Non-operator metadata/share surfaces only. The deploy lane and the signed
@@ -3457,7 +3485,7 @@ export function _opsApiServerSecretPresented(input: {
 
 export function _authorizeOpsApiAction(input: {
   url: URL
-  authMode: 'api_key' | 'jwt' | 'routine' | 'none'
+  authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' | 'none'
   authUser?: Pick<TradeAuthContext, 'role'> | null
   serverSecretPresented?: boolean
 }): { ok: true } | { ok: false; status: 401; code: string; error: string } {
@@ -3466,6 +3494,9 @@ export function _authorizeOpsApiAction(input: {
 
   // Scoped routine callers retain their existing default-deny allow-list below.
   if (authMode === 'routine') return { ok: true }
+  // The agent-read caller is constrained by its own default-deny allow-list in
+  // the dispatch envelope below, before any action case can run.
+  if (authMode === 'agent_read') return { ok: true }
   if (authMode === 'api_key') {
     if (serverSecretPresented) return { ok: true }
     return {
@@ -3625,7 +3656,13 @@ export const _loadIntakeExceptionProjectionForBoardForTest =
 // ops role gate. Tests call this so non-JWT modes cannot bypass the case branch.
 async function makesafeBoardAction(
   client: any,
-  authMode: 'api_key' | 'jwt' | 'routine' | 'none' | MakesafeTradeProjectionAuthMode,
+  authMode:
+    | 'api_key'
+    | 'jwt'
+    | 'routine'
+    | 'agent_read'
+    | 'none'
+    | MakesafeTradeProjectionAuthMode,
   authUser: TradeAuthContext | null | undefined,
   projectionRaw: string | null | undefined,
   options: {
@@ -3913,8 +3950,8 @@ if (import.meta.main) serve(async (req: Request) => {
     }
   }
 
-  // ── Authentication: server secret + JWT (browser) + scoped routine ──
-  // Three caller classes (decision: scoped-routine-key-2026-06-17):
+  // ── Authentication: server secrets + JWT (browser) + scoped routine ──
+  // Four caller classes (decision: scoped-routine-key-2026-06-17):
   //   api_key  — internal legacy mode for the service-role key. The shared
   //              SW_API_KEY may classify this way but is rejected from every
   //              protected route by the signed-caller gate below.
@@ -3923,6 +3960,9 @@ if (import.meta.main) serve(async (req: Request) => {
   //              May read/create drafts and trigger the DB-allowlisted deterministic
   //              scanner; rejected by direct approve/authorise and cannot set or widen
   //              rollout authority. Forced-to-draft on direct live-job creation.
+  //   agent_read — the distinct OPS_AGENT_SERVER_KEY held only by headless
+  //                agents. It reaches the small read-only allow-list below and
+  //                is default-denied from every other action.
   // The routine key is a DISTINCT secret from SW_API_KEY; the routine env carries the
   // routine key ONLY, never SW_API_KEY (morning provisioning discipline). The env var
   // may be UNSET until provisioned, so we only ever match it when it is non-empty;
@@ -3931,11 +3971,13 @@ if (import.meta.main) serve(async (req: Request) => {
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
   const routineKeyEnv = Deno.env.get('MAKESAFE_ROUTINE_KEY')
   const routineKey = routineKeyEnv && routineKeyEnv.length > 0 ? routineKeyEnv : null
+  const agentServerKeyEnv = Deno.env.get('OPS_AGENT_SERVER_KEY')
+  const agentServerKey = agentServerKeyEnv && agentServerKeyEnv.length > 0 ? agentServerKeyEnv : null
   const xApiKey = req.headers.get('x-api-key')
   const authHeader = req.headers.get('authorization')
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
 
-  let authMode: 'api_key' | 'jwt' | 'routine' = 'api_key'
+  let authMode: 'api_key' | 'jwt' | 'routine' | 'agent_read' = 'api_key'
   let authUser: TradeAuthContext | null = null
   // Browser calls may carry both the legacy shared key and a signed-in user's
   // access token during cutover. Protected routes use the verified JWT identity;
@@ -3947,6 +3989,7 @@ if (import.meta.main) serve(async (req: Request) => {
     validKey,
     serviceKey,
     routineKey,
+    agentServerKey,
     preferBearerOverApiKey: preferBearerForSignedCaller,
   })
   const serverSecretPresented = _opsApiServerSecretPresented({
@@ -3959,6 +4002,9 @@ if (import.meta.main) serve(async (req: Request) => {
   if (authIntent === 'routine') {
     // Scoped automation caller (presents the routine key, NOT SW_API_KEY).
     authMode = 'routine'
+  } else if (authIntent === 'agent_read') {
+    // Scoped headless caller (presents OPS_AGENT_SERVER_KEY, never a browser key).
+    authMode = 'agent_read'
   } else if (authIntent === 'api_key') {
     authMode = 'api_key'
   } else if (authIntent === 'jwt') {
@@ -4016,6 +4062,52 @@ if (import.meta.main) serve(async (req: Request) => {
     const url = new URL(req.url)
     const action = url.searchParams.get('action')
     console.log(`[ops-api] action=${action} method=${req.method}`)
+
+    if (authMode === 'agent_read') {
+      // ── Scoped headless agent READ allow-list ──
+      // DEFAULT-DENY: this server-only credential may read only the canonical
+      // make-safe board, its compact pipeline/audit projections, and intake
+      // health. No write, money, send, allocation, approval, or future action is
+      // reachable unless it is explicitly reviewed and added here. Keep this
+      // dedicated dispatch exhaustive so agent_read can never fall through into
+      // a handler whose legacy api_key branch carries broader authority.
+      if (action && !AGENT_READ_ALLOWED_ACTIONS.has(action)) {
+        return json({ error: `forbidden: '${action}' is not permitted for the read-only ops agent credential (default-deny).` }, 403)
+      }
+      const agentReadClient = sb()
+      switch (action) {
+        case 'makesafe_board':
+          return await makesafeBoardAction(
+            agentReadClient,
+            authMode,
+            authUser,
+            url.searchParams.get('projection'),
+            {
+              contractVersion: url.searchParams.get('contract_version'),
+              fields: url.searchParams.get('fields'),
+              includeDiagnostics: url.searchParams.get('include_diagnostics'),
+              columns: url.searchParams.get('columns'),
+              includeArchive: url.searchParams.get('include_archive'),
+              limit: url.searchParams.get('limit'),
+              offset: url.searchParams.get('offset'),
+            },
+          )
+        case 'makesafe_pipeline':
+          return json(await makesafePipeline(agentReadClient, url.searchParams))
+        case 'makesafe_pipeline_items':
+          return json(await _makesafePipelineItems(agentReadClient, {
+            since: url.searchParams.get('since'),
+            mailbox: url.searchParams.get('mailbox'),
+            sent_status: url.searchParams.get('sent_status'),
+          }))
+        case 'makesafe_audit':
+          return json(await makesafeAudit(agentReadClient, url.searchParams))
+        case 'intake_health':
+          return json(await intakeHealth(agentReadClient))
+        default:
+          return json({ error: 'forbidden: no read-only ops agent action was provided.' }, 403)
+      }
+    }
 
     // ── Scoped routine ALLOW-LIST (decision scoped-routine-key-2026-06-17) ──
     // DEFAULT-DENY (fail-safe): the make-safe automation routine (authMode='routine')
@@ -4147,7 +4239,7 @@ if (import.meta.main) serve(async (req: Request) => {
     // it maps to the non-jwt floor 'api_key' (they grant privilege only to jwt
     // admin/owner; the routine is never that). No behaviour change for existing callers;
     // the routine cannot reach anything privileged here regardless (deny-list + gates).
-    const authModeLegacy: 'api_key' | 'jwt' = authMode === 'routine' ? 'api_key' : authMode
+    const authModeLegacy: 'api_key' | 'jwt' = authMode === 'jwt' ? 'jwt' : 'api_key'
 
     switch (action) {
       case 'ops_api_version': return json(opsApiVersion())
