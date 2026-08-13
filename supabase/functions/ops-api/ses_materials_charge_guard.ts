@@ -47,6 +47,7 @@ import type {
   SesInvoicedMaterialsEvidence,
   SesReleasedCycleEvidence,
 } from "./ses_invoiced_materials_evidence.ts";
+import { priceRecordedMaterialsFromRateCard } from "./ses_materials_rate_card.ts";
 
 export const MATERIALS_CHARGE_FIGURE_REQUIRED =
   "materials_charge_figure_required";
@@ -146,7 +147,11 @@ function materialLabel(value: unknown): string {
  * ticks are not evidence that anything was consumed.
  */
 export function recordedMaterialsUsed(materialsUsed: unknown): string[] {
-  const out: string[] = [];
+  return recordedMaterialEntries(materialsUsed).map(materialLabel);
+}
+
+function recordedMaterialEntries(materialsUsed: unknown): unknown[] {
+  const out: unknown[] = [];
   const seen = new Set<string>();
   const push = (raw: unknown) => {
     const label = materialLabel(raw);
@@ -154,7 +159,7 @@ export function recordedMaterialsUsed(materialsUsed: unknown): string[] {
     const key = label.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
-    out.push(label);
+    out.push(raw);
   };
   if (Array.isArray(materialsUsed)) {
     for (const item of materialsUsed) push(item);
@@ -518,6 +523,21 @@ export function carriedMaterialsChargeDecision(input: {
 export type MaterialsChargeDecision =
   | { action: "none" }
   | {
+    action: "rate_card_proposal";
+    materials: string[];
+    amount_ex_gst: number;
+    description: string;
+    provenance: Record<string, unknown>;
+    review_reason: string;
+    review_recovery_action: string;
+  }
+  | {
+    action: "rate_card_review_only";
+    materials: string[];
+    review_reason: string;
+    review_recovery_action: string;
+  }
+  | {
     action: "settled_charge_lines";
     materials: string[];
     lines: Array<{
@@ -587,7 +607,8 @@ export const MATERIALS_CHARGE_CLEAR_PATH =
 /**
  * Decide whether a standard_labour_materials proposal needs a materials charge
  * line, already has one (via priced typed materials), can accept the operator's
- * one-figure answer, derive the two settled rate-card materials, or must refuse.
+ * one-figure answer, derive a review proposal from the rate-card markdown, or
+ * must refuse an unsafe supplied figure.
  *
  * `pricedMaterialsLineCount` is how many materials lines the proposal already
  * holds (typed materials with description + qty + unit price). Labour is not
@@ -725,65 +746,43 @@ export function decideStandardLabourMaterialsCharge(input: {
     };
   }
 
-  // Captain-settled rate-card carve-out (2026-08-13). Keep this deliberately
-  // local to the guard: silicone is $25 per cartridge and flashing tape is $25
-  // per roll, with any part-use billed as one whole unit. Anchored labels allow
-  // the trade form's quantity / part-use suffixes without turning work verbs,
-  // silicone spray, or unrelated flashing products into invoice materials.
-  const settledLines = materials.map((material) => {
-    const normalized = material.toLowerCase().replaceAll(/\s+/g, " ").trim();
-    if (
-      /^(?:(?:part(?:ial)?|half)(?:[- ](?:cartridge|tube))?(?:[- ]use(?:d)?)? )?silicone(?: sealant)?(?: (?:cartridge|tube))?(?:\s*(?:x|×)?\s*(?:\d+(?:\.\d+)?|half|part(?:ial)?)(?:\s*(?:cartridges?|tubes?|units?))?)?(?:\s*[-–—]\s*(?:part(?:ial)?|half)(?:\s+(?:cartridge|tube))?(?:\s+used)?)?$/
-        .test(
-          normalized,
-        )
-    ) {
-      const statedUnits = normalized.match(
-        /(?:x|×)\s*(\d+(?:\.\d+)?)\s*(?:cartridges?|tubes?|units?)?\b|\b(\d+(?:\.\d+)?)\s*(?:cartridges?|tubes?|units?)\b/,
-      );
-      return {
-        description: `Materials used: ${material} (whole cartridge)`,
-        quantity: statedUnits
-          ? Math.max(1, Math.ceil(Number(statedUnits[1] || statedUnits[2])))
-          : 1,
-        unit_price_ex_gst: 25,
-      };
-    }
-    if (
-      /^(?:(?:part(?:ial)?|half)(?:[- ]roll)?(?:[- ]use(?:d)?)? )?flashing[ -]+tape(?: roll)?(?:\s*(?:x|×)?\s*\d+(?:\.\d+)?\s*(?:m|metres?|meters?|rolls?|units?)?)?(?:\s*[-–—]\s*(?:part(?:ial)?|half)(?:\s+roll)?(?:\s+used)?)?$/
-        .test(
-          normalized,
-        )
-    ) {
-      const statedRolls = normalized.match(
-        /\b(\d+(?:\.\d+)?)\s*rolls?\b/,
-      );
-      return {
-        description: `Materials used: ${material} (whole roll)`,
-        quantity: statedRolls
-          ? Math.max(1, Math.ceil(Number(statedRolls[1])))
-          : 1,
-        unit_price_ex_gst: 25,
-      };
-    }
-    return null;
-  });
-  if (settledLines.length && settledLines.every((line) => line !== null)) {
+  // F29 (Captain 2026-08-13): the markdown card is executable below committed
+  // invoice money. Settled silicone/tape reproduce their existing no-ask lines;
+  // every other quantified composition is an explicitly review-only proposal.
+  // The proposal reaches a Xero DRAFT and Docs Ready, while its durable caveat
+  // keeps release/send closed until the Captain reviews it.
+  const rateCard = priceRecordedMaterialsFromRateCard(
+    recordedMaterialEntries(input.materials_used),
+  );
+  if (rateCard.kind === "settled") {
     return {
       action: "settled_charge_lines",
       materials,
-      lines: settledLines.filter((line) => line !== null),
+      lines: rateCard.lines,
     };
   }
-
-  const listed = materials.join("; ");
+  if (rateCard.kind === "proposal") {
+    return {
+      action: "rate_card_proposal",
+      materials,
+      amount_ex_gst: rateCard.amount_ex_gst,
+      description: rateCard.description,
+      provenance: rateCard.provenance,
+      review_reason:
+        `The DRAFT carries a $${rateCard.amount_ex_gst} ex-GST materials proposal composed from the canonical materials rate card for ${
+          materials.join("; ")
+        }. It is proposed money, not a settled or approved charge.`,
+      review_recovery_action:
+        "Captain: review the proposed materials line against the trade-report quantities before release. Approve or replace the DRAFT figure through the existing review path; do not send while this caveat remains.",
+    };
+  }
   return {
-    action: "refuse",
+    action: "rate_card_review_only",
     materials,
-    reason_code: MATERIALS_CHARGE_FIGURE_REQUIRED,
-    reason:
-      `Trade recorded materials used (${listed}) but the invoice proposal has no materials charge. Silent labour-only pricing is refused.`,
-    recovery_action:
-      `Supply one materials charge figure ex GST for the listed materials, or typed materials lines with approved ex-GST unit prices. ${MATERIALS_CHARGE_OPERATOR_PATH} Do not invent unit prices, and do not raise the total by inflating labour hours or the sealed rate.`,
+    review_reason: `Trade recorded materials used (${
+      materials.join("; ")
+    }) without an executable quantity on the current report. The DRAFT preserves the fact as a review caveat and does not invent a quantity or hard-refuse the whole mint.`,
+    review_recovery_action:
+      "Captain: review the trade report and replace the DRAFT materials proposal only when the missing quantity is evidenced. Do not release or send while this caveat remains.",
   };
 }

@@ -124,6 +124,107 @@ Deno.test("review invoice gates refuse with a catalogue code and preserve exact 
   );
 });
 
+Deno.test("F29 review assumptions allow the proposed materials obligation to mint", async () => {
+  const docket = {
+    id: "40000000-0000-4000-8000-000000007505",
+    job_id: JOB,
+    stage: "pre_xero",
+    family_matrix_version: SES_FAMILY_MATRIX_VERSION,
+    attendance_cycle_ids: [CYCLE_1],
+    current_attendance_cycle_id: CYCLE_1,
+    envelope: { v2: { routing: { builder: "Major Loss Builders" } } },
+    local_invoice_proposal: {
+      builder_reference: "SWMS-261164",
+      line_items: [{
+        description: "SWMS-261164 - make-safe attendance",
+        quantity: 6,
+        unit_price_ex_gst: 85,
+      }, {
+        description:
+          "SWMS-261164 - Proposed materials for Captain review: Nails x 5; Timber x 0.2m",
+        quantity: 1,
+        unit_price_ex_gst: 71,
+      }],
+      subtotal_ex_gst: 581,
+      gst: 58.1,
+      total_inc_gst: 639.1,
+    },
+    review_spec: {
+      cards: [{
+        exception_review_codes: [],
+        invoice_gate_codes: [],
+        review_assumption_codes: [
+          "materials_rate_card_proposal_review_required",
+        ],
+      }],
+    },
+  };
+  const rows: Record<string, unknown> = {
+    makesafe_docket_revisions: docket,
+    makesafe_invoice_obligation_revisions_current: null,
+    xero_invoices: [],
+  };
+  const client = {
+    from(table: string) {
+      const response = () => ({ data: rows[table] ?? null, error: null });
+      const query = {
+        select() {
+          return query;
+        },
+        eq() {
+          return query;
+        },
+        in() {
+          return query;
+        },
+        not() {
+          return query;
+        },
+        or() {
+          return query;
+        },
+        order() {
+          return query;
+        },
+        limit() {
+          return query;
+        },
+        maybeSingle() {
+          return Promise.resolve(response());
+        },
+        then(resolve: (value: ReturnType<typeof response>) => unknown) {
+          return Promise.resolve(response()).then(resolve);
+        },
+      };
+      return query;
+    },
+    rpc() {
+      return Promise.resolve({
+        data: { state: "proposed", committed: true },
+        error: null,
+      });
+    },
+    storage: { from: () => ({}) },
+  } as unknown as SesSupabaseClient;
+
+  const result = await prepareSesInvoiceObligationAction(
+    client,
+    { mode: "routine", user: null },
+    {
+      org_id: ORG,
+      job_id: JOB,
+      docket_revision_id: docket.id,
+      created_by: "f29-regression",
+    },
+  );
+
+  assertEquals(result.state, "prepared");
+  assertEquals(result.blockers, []);
+  assertEquals(result.proposal.totals, { ex: 581, inc: 639.1 });
+  assertEquals(result.proposal.lines[1].unit_price, 71);
+  assertEquals(result.external_mutations, { xero: 0, email: 0 });
+});
+
 Deno.test("exception-review identity evidence refuses invoice mint without hiding the review pack", async () => {
   const docket = {
     id: "40000000-0000-4000-8000-000000007504",

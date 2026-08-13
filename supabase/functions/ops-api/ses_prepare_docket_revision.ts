@@ -76,6 +76,7 @@ import {
   classifySesPreparationIssues,
   isHardSesPreparationIssue,
 } from "./ses_preparation_issue_policy.ts";
+import { extractSesRateCardMaterialFacts } from "./ses_materials_rate_card.ts";
 import { buildSesReviewPackMaterials } from "./ses_review_pack_materials.ts";
 import {
   type DraftPackContext,
@@ -1085,6 +1086,7 @@ function localInvoiceProposal(
 ): {
   proposal: Record<string, unknown> | null;
   blocker: SesBlocker | null;
+  review_assumptions?: SesBlocker[];
   /**
    * The materials decision REFUSED the figure it was given. A refused figure
    * was never an accepted decision, so the caller must not stamp it as the
@@ -1303,6 +1305,7 @@ function localInvoiceProposal(
   let pricedMaterialsLineCount = 0;
   let existingFencePickets: number | null = null;
   const priceNeeded: Array<Record<string, unknown>> = [];
+  const materialsReviewAssumptions: SesBlocker[] = [];
   if (
     row.invoice_basis === "ajs_labour_materials" &&
     text(facts.existing_fence_star_picket_refusal)
@@ -1364,59 +1367,73 @@ function localInvoiceProposal(
     row.family === "temporary_fencing" &&
     row.invoice_basis !== "ajs_temporary_fence_labour_only"
   ) {
-    const panelCount = nonNegativeInteger(facts.panel_count);
-    const baseCount = nonNegativeInteger(facts.base_count);
-    if (panelCount === null || panelCount < 1 || baseCount === null) {
-      return {
-        proposal: null,
-        blocker: blocked(
-          "pricing_evidence_missing",
-          "Temporary-fencing pricing requires the number of panels and bases or blocks used.",
-          "Recover the panel and base or block quantities from the work order or structured scope before pricing.",
-          ["canonical-input-envelope"],
-          [],
-          undefined,
-          "invoice_gate",
-        ),
-      };
-    }
+    const reportMaterialFacts = extractSesRateCardMaterialFacts(
+      recordedMaterialsFact(input),
+    );
+    const reportedQuantity = (pattern: RegExp): number | null => {
+      const matches = reportMaterialFacts.filter((fact) =>
+        pattern.test(fact.label) && fact.quantity !== null
+      );
+      return matches.length
+        ? matches.reduce((sum, fact) => sum + Number(fact.quantity), 0)
+        : null;
+    };
+    const panelCount = nonNegativeInteger(facts.panel_count) ??
+      reportedQuantity(
+        /\b(?:temporary|temp)[ -]*fenc(?:e|ing) panels?\b|\bfence panels?\b/i,
+      );
     if (
       row.invoice_basis === "mlb_temporary_fence_hire" ||
       row.invoice_basis === "western_temporary_fence_hire"
     ) {
-      const pickets = nonNegativeInteger(facts.star_picket_count);
-      if (pickets === null) {
-        return {
-          proposal: null,
-          blocker: blocked(
-            "pricing_evidence_missing",
-            "Hire-card temporary fencing requires the number of star pickets used, including zero.",
-            "Recover the star-picket quantity from the work order or structured scope before pricing.",
-            ["canonical-input-envelope"],
-            [],
-            undefined,
-            "invoice_gate",
-          ),
-        };
-      }
+      const pickets = nonNegativeInteger(facts.star_picket_count) ??
+        reportedQuantity(/\bstar(?:[\W_]+)?pickets?\b/i);
       lines.push(
         lineItem(
           `${ref} - Temporary fencing retrieval, collection and loading allowance - 2 hours`,
           2,
           90,
         ),
-        lineItem(
-          `${ref} - Temporary fence hire: ${panelCount} panels x $5 per panel per week x 12 weeks`,
-          12,
-          panelCount * 5,
-        ),
       );
-      if (pickets > 0) {
+      if (panelCount !== null && panelCount > 0) {
+        lines.push(
+          lineItem(
+            `${ref} - Temporary fence hire: ${panelCount} panels x $5 per panel per week x 12 weeks`,
+            12,
+            panelCount * 5,
+          ),
+        );
+      } else {
+        materialsReviewAssumptions.push(
+          blocked(
+            "temporary_fence_panel_quantity_review_required",
+            "The DRAFT prices the executable temporary-fence lines but omits panel hire because neither structured scope nor the trade report records a positive panel quantity.",
+            "Captain: review the DRAFT and add panel hire only after the trade-report quantity is evidenced. Do not release or send while this caveat remains.",
+            ["canonical-input-envelope", "trade-materials-used"],
+            [],
+            undefined,
+            "review_assumption",
+          ),
+        );
+      }
+      if (pickets !== null && pickets > 0) {
         lines.push(
           lineItem(
             `${ref} - Star pickets supplied for temporary fencing make-safe`,
             pickets,
             13.5,
+          ),
+        );
+      } else if (pickets === null) {
+        materialsReviewAssumptions.push(
+          blocked(
+            "temporary_fence_picket_quantity_review_required",
+            "The DRAFT does not invent a star-picket quantity that is absent from structured scope and the trade report.",
+            "Captain: review the DRAFT and add a picket line only after the trade-report quantity is evidenced. Do not release or send while this caveat remains.",
+            ["canonical-input-envelope", "trade-materials-used"],
+            [],
+            undefined,
+            "review_assumption",
           ),
         );
       }
@@ -1546,6 +1563,52 @@ function localInvoiceProposal(
       );
       materialsChargeMeta = materialsDecision.provenance;
     }
+    if (materialsDecision.action === "rate_card_proposal") {
+      lines.push(
+        lineItem(
+          `${ref} - ${materialsDecision.description}`,
+          1,
+          materialsDecision.amount_ex_gst,
+        ),
+      );
+      materialsChargeMeta = materialsDecision.provenance;
+      materialsReviewAssumptions.push(
+        blocked(
+          "materials_rate_card_proposal_review_required",
+          materialsDecision.review_reason,
+          materialsDecision.review_recovery_action,
+          [
+            "canonical-input-envelope",
+            "trade-materials-used",
+            "materials-rate-card.md",
+          ],
+          [],
+          {
+            materials_used: materialsDecision.materials,
+            proposed_amount_ex_gst: materialsDecision.amount_ex_gst,
+            provenance: materialsDecision.provenance,
+          },
+          "review_assumption",
+        ),
+      );
+    }
+    if (materialsDecision.action === "rate_card_review_only") {
+      materialsReviewAssumptions.push(
+        blocked(
+          "materials_quantity_review_required",
+          materialsDecision.review_reason,
+          materialsDecision.review_recovery_action,
+          [
+            "canonical-input-envelope",
+            "trade-materials-used",
+            "materials-rate-card.md",
+          ],
+          [],
+          { materials_used: materialsDecision.materials },
+          "review_assumption",
+        ),
+      );
+    }
     if (materialsDecision.action === "settled_charge_lines") {
       for (const settled of materialsDecision.lines) {
         lines.push(
@@ -1595,6 +1658,7 @@ function localInvoiceProposal(
       ...(materialsChargeMeta ? { materials_charge: materialsChargeMeta } : {}),
     },
     blocker: invoiceGate,
+    review_assumptions: materialsReviewAssumptions,
   };
 }
 
@@ -4039,6 +4103,9 @@ async function prepareOne(
       };
     }
     addBlocker(blockers, priced.blocker);
+  }
+  for (const assumption of priced.review_assumptions || []) {
+    addBlocker(blockers, assumption);
   }
   if (reviewInvoiceProposal) {
     artifacts.push(

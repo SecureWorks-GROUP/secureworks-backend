@@ -252,6 +252,65 @@ Deno.test("A: create_ses_invoice_draft mints DRAFT with api_key and no approval"
   );
 });
 
+Deno.test("F29: a proposed materials line mints as DRAFT without authorise or send", async () => {
+  const reviewProposal = {
+    ...proposal,
+    lines: [
+      proposal.lines[0],
+      {
+        description:
+          "MLB-24732 - Proposed materials for Captain review: Nails x 5; Timber x 0.2m",
+        quantity: 1,
+        unit_price: 71,
+        account_code: "210",
+        evidence: {
+          source: "materials_rate_card_review_proposal",
+          quantities: [
+            { label: "Nails x 5", quantity: 5 },
+            { label: "Timber x 0.2m", quantity: 0.2, unit: "m" },
+          ],
+          captain_review_required: true,
+        },
+      },
+    ],
+    totals: { ex: 371, inc: 408.1 },
+    guard_result: {
+      hard_failures: [],
+      warnings: ["materials_rate_card_proposal_review_required"],
+    },
+  };
+  const gateway = draftGateway({ total: 408.1 });
+  const client = mintClient({
+    revision: revisionRow({ proposal: reviewProposal }),
+  });
+
+  const result = await createSesInvoiceDraftAction(
+    client as any,
+    apiKeyAuth,
+    {
+      org_id: ORG_ID,
+      job_id: JOB_ID,
+      invoice_obligation_revision_id: OBLIGATION_ID,
+      actor: "f29@test",
+    },
+    gateway,
+    { fetchAllAccrecInvoices: async () => [] },
+  );
+
+  assertEquals(result.state, "xero_draft_created");
+  assertEquals(result.invoice.status, "DRAFT");
+  assertEquals(gateway.lastProposal.lines[1].quantity, 1);
+  assertEquals(gateway.lastProposal.lines[1].unit_price, 71);
+  assertStringIncludes(gateway.lastProposal.lines[1].description, "Nails x 5");
+  assertStringIncludes(
+    gateway.lastProposal.lines[1].description,
+    "Timber x 0.2m",
+  );
+  assertEquals(gateway.createCalls, 1);
+  assertEquals(gateway.authoriseCalls, 0);
+  assertEquals(result.send_dispatched, false);
+});
+
 Deno.test("A1: a staff-locked $120 proposal mints exactly $120 ex without reapplying the AJS floor", async () => {
   const lockedProposal = {
     ...proposal,

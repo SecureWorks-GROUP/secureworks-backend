@@ -2226,24 +2226,22 @@ Deno.test("AJS/AJBR temporary fencing prices labour-only at the solo four-hour f
   }
 });
 
-Deno.test("MLB temporary fencing still rejects missing typed panel/base evidence", async () => {
+Deno.test("MLB temporary fencing parks missing quantities for Captain review", async () => {
   const result = await labourProposal("MLB", "temporary_fencing", {
     trades: 1,
     hours_per_trade: 4,
     rate_ex_gst: 85,
   });
 
-  assert(blockerCodes(result).includes("pricing_evidence_missing"));
-  assertDraftZeroInvoice(result, "pricing_evidence_missing");
-  const blocker = result.blockers.find((item) =>
-    item.reason_code === "pricing_evidence_missing"
-  )!;
-  assertStringIncludes(blocker.reason.toLowerCase(), "panels");
-  assertStringIncludes(blocker.reason.toLowerCase(), "bases");
-  assert(!blocker.reason.includes("panel_count"));
-  assert(!blocker.reason.includes("base_count"));
-  assert(!blocker.recovery_action.includes("panel_count"));
-  assert(!blocker.recovery_action.includes("base_count"));
+  assertEquals(
+    blockerCodes(result).includes("pricing_evidence_missing"),
+    false,
+  );
+  assert(result.invoice_proposal, "the reviewable DRAFT must still price");
+  const caveats = reviewCard(result).review_assumption_codes as string[];
+  assert(caveats.includes("temporary_fence_panel_quantity_review_required"));
+  assert(caveats.includes("temporary_fence_picket_quantity_review_required"));
+  assertEquals(result.envelope.client_send_approved, false);
 });
 
 Deno.test("non-temporary-fencing labour pricing remains independent of panel/base counts", async () => {
@@ -2377,7 +2375,7 @@ Deno.test("a two-hour MLB trade report prices at the sealed three-hour floor ins
 // the report and omitted from the invoice, so a complete-looking labour-only
 // proposal goes out in the builder's favour. This test is the structural catch.
 Deno.test(
-  "MLB physical with materials_used cannot produce a silent labour-only proposal",
+  "unquantified materials park as a review caveat while an operator figure still overrides",
   async () => {
     const silent = await labourProposal("MLB", "physical_makesafe", {
       trades: 2,
@@ -2389,20 +2387,19 @@ Deno.test(
         "Screws and fixings",
       ],
     });
-    assertDraftZeroInvoice(silent, "materials_charge_figure_required");
-    const blocker = silent.blockers.find((item) =>
-      item.reason_code === "materials_charge_figure_required"
+    assertEquals(
+      blockerCodes(silent).includes("materials_charge_figure_required"),
+      false,
     );
-    assert(blocker, "expected named materials_charge_figure_required blocker");
-    assertStringIncludes(blocker.reason, "Polycarb disposal / tipping");
-    assertStringIncludes(blocker.reason, "Screws and fixings");
-    // The recovery action must name an ops path the operator can actually run,
-    // never a trade-evidence rewrite.
-    assertStringIncludes(
-      blocker.recovery_action,
-      "prepare_ses_docket_revision",
+    const silentProposal = silent.invoice_proposal as Record<string, unknown>;
+    assert(silentProposal, "unquantified materials must not refuse the DRAFT");
+    assertEquals(silentProposal.subtotal_ex_gst, 510);
+    assert(
+      (reviewCard(silent).review_assumption_codes as string[]).includes(
+        "materials_quantity_review_required",
+      ),
     );
-    assertStringIncludes(blocker.recovery_action, "materials_charge");
+    assertEquals(silent.envelope.client_send_approved, false);
 
     // Operator answers the one-figure question on the sanctioned prepare
     // surface — materials become a separate charge line. Sealed labour
@@ -2454,6 +2451,43 @@ Deno.test(
     // The sealed labour facts are untouched by the commercial figure.
     assertEquals(proposal.reported_hours_per_trade, 2);
     assertEquals(proposal.billable_hours_per_trade, 3);
+  },
+);
+
+Deno.test(
+  "F29 nails and timber mint a priced review DRAFT without Captain input",
+  async () => {
+    const result = await labourProposal("MLB", "physical_makesafe", {
+      trades: 2,
+      hours_per_trade: 2,
+      rate_ex_gst: 85,
+      materials: [],
+      materials_used: ["Nails x 5", "Timber x 0.2m"],
+    });
+
+    assertEquals(
+      blockerCodes(result).includes("materials_charge_figure_required"),
+      false,
+    );
+    assertEquals(
+      blockerCodes(result).includes("pricing_evidence_missing"),
+      false,
+    );
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assert(proposal, "quantified report materials must reach a DRAFT proposal");
+    const lines = proposal.line_items as Array<Record<string, unknown>>;
+    assertEquals(lines.length, 2);
+    assertStringIncludes(String(lines[1].description), "Nails x 5");
+    assertStringIncludes(String(lines[1].description), "Timber x 0.2m");
+    assertEquals(lines[1].quantity, 1);
+    assertEquals(lines[1].unit_price_ex_gst, 71);
+    assertEquals(proposal.subtotal_ex_gst, 581);
+    assert(
+      (reviewCard(result).review_assumption_codes as string[]).includes(
+        "materials_rate_card_proposal_review_required",
+      ),
+    );
+    assertEquals(result.envelope.client_send_approved, false);
   },
 );
 
@@ -2523,7 +2557,7 @@ Deno.test(
 );
 
 Deno.test(
-  "unknown off-card material still asks once and invents no rate",
+  "unquantified off-card materials park without inventing a rate",
   async () => {
     const result = await labourProposal("MLB", "physical_makesafe", {
       trades: 1,
@@ -2534,17 +2568,19 @@ Deno.test(
     });
 
     assertEquals(
-      result.blockers.filter((item) =>
-        item.reason_code === "materials_charge_figure_required"
-      ).length,
-      1,
+      blockerCodes(result).includes("materials_charge_figure_required"),
+      false,
     );
-    assertDraftZeroInvoice(result, "materials_charge_figure_required");
-    const blocker = result.blockers.find((item) =>
-      item.reason_code === "materials_charge_figure_required"
-    )!;
-    assertStringIncludes(blocker.reason, "Silicone spray");
-    assertStringIncludes(blocker.reason, "Roof flashing");
+    const proposal = result.invoice_proposal as Record<string, unknown>;
+    assert(proposal, "a review DRAFT must still be assembled");
+    assertEquals((proposal.line_items as unknown[]).length, 1);
+    assertEquals(proposal.subtotal_ex_gst, 255);
+    assert(
+      (reviewCard(result).review_assumption_codes as string[]).includes(
+        "materials_quantity_review_required",
+      ),
+    );
+    assertEquals(result.envelope.client_send_approved, false);
   },
 );
 
@@ -2725,14 +2761,16 @@ Deno.test(
         resolvePriorMaterialsCharge: standingDecision,
       });
 
-    // UNSET: nobody has answered, so the card asks.
+    // UNSET: nobody has answered, so the card parks at review without refusing.
     const unset = await prepare();
-    assertDraftZeroInvoice(unset, "materials_charge_figure_required");
     assertEquals(
-      unset.blockers.some((item) =>
-        item.reason_code === "materials_charge_figure_required"
+      blockerCodes(unset).includes("materials_charge_figure_required"),
+      false,
+    );
+    assert(
+      (reviewCard(unset).review_assumption_codes as string[]).includes(
+        "materials_quantity_review_required",
       ),
-      true,
     );
     commit(unset);
 
@@ -2924,7 +2962,8 @@ Deno.test(
       (answered.invoice_proposal as Record<string, unknown>).materials_charge;
 
     // The trade re-attended and consumed different materials. Yesterday's
-    // figure was never authorised for them, so the card asks again.
+    // figure was never authorised for them, so the rate-card review path owns
+    // the new DRAFT rather than inheriting yesterday's money.
     const changed = await labourProposal(
       "MLB",
       "physical_makesafe",
@@ -2938,12 +2977,18 @@ Deno.test(
       undefined,
       { resolvePriorMaterialsCharge: async () => priorCharge },
     );
-    assertDraftZeroInvoice(changed, "materials_charge_figure_required");
     assertEquals(
-      changed.blockers.some((item) =>
-        item.reason_code === "materials_charge_figure_required"
+      blockerCodes(changed).includes("materials_charge_figure_required"),
+      false,
+    );
+    assert(
+      changed.invoice_proposal,
+      "changed materials must still reach DRAFT",
+    );
+    assert(
+      (reviewCard(changed).review_assumption_codes as string[]).includes(
+        "materials_quantity_review_required",
       ),
-      true,
     );
   },
 );
@@ -3304,7 +3349,7 @@ Deno.test("raising cost hours to the floor does not touch the rate check", async
   assertStringIncludes(blocker.reason, "85");
 });
 
-Deno.test("hire-card pricing blocks on a missing star-picket fact without naming its storage field", async () => {
+Deno.test("hire-card pricing parks a missing star-picket quantity for review", async () => {
   const row = SES_FAMILY_MATRIX.find((candidate) =>
     candidate.builder_key === "MLB" &&
     candidate.family === "temporary_fencing" &&
@@ -3321,13 +3366,17 @@ Deno.test("hire-card pricing blocks on a missing star-picket fact without naming
     request(input.identity.job_id),
     dependencies(input),
   )).results[0];
-  const blocker = result.blockers.find((item) =>
-    item.reason_code === "pricing_evidence_missing"
-  )!;
-  assertStringIncludes(blocker.reason.toLowerCase(), "star pickets");
-  assertStringIncludes(blocker.recovery_action.toLowerCase(), "work order");
-  assert(!blocker.reason.includes("star_picket_count"));
-  assert(!blocker.recovery_action.includes("star_picket_count"));
+  assertEquals(
+    blockerCodes(result).includes("pricing_evidence_missing"),
+    false,
+  );
+  assert(result.invoice_proposal, "the known hire lines must reach DRAFT");
+  assert(
+    (reviewCard(result).review_assumption_codes as string[]).includes(
+      "temporary_fence_picket_quantity_review_required",
+    ),
+  );
+  assertEquals(result.envelope.client_send_approved, false);
 });
 
 Deno.test("SWMS-required job with work order and trade report generates a provenance-bound artifact", async () => {
@@ -5104,7 +5153,7 @@ Deno.test(
 );
 
 Deno.test(
-  "a labour-only issued invoice still has to be answered by a human",
+  "a labour-only issued invoice leaves the rate-card DRAFT under review",
   async () => {
     const result = await labourProposal(
       "MLB",
@@ -5113,14 +5162,17 @@ Deno.test(
       undefined,
       materialsAnswerDeps(NOT_RELEASED, LABOUR_ONLY_INVOICE),
     );
-    assertDraftZeroInvoice(result, "materials_charge_figure_required");
-    const blocker = result.blockers.find((item) =>
-      item.reason_code === "materials_charge_figure_required"
+    assertEquals(
+      blockerCodes(result).includes("materials_charge_figure_required"),
+      false,
     );
+    assert(result.invoice_proposal, "the DRAFT must remain reviewable");
     assert(
-      blocker,
-      "an invoice that prices no materials must never silence the question",
+      (reviewCard(result).review_assumption_codes as string[]).includes(
+        "materials_quantity_review_required",
+      ),
     );
+    assertEquals(result.envelope.client_send_approved, false);
   },
 );
 

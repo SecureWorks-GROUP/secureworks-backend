@@ -1,3 +1,4 @@
+// deno-lint-ignore-file no-import-prefix
 import {
   assertEquals,
   assertStringIncludes,
@@ -7,7 +8,6 @@ import {
   carriedMaterialsChargeDecision,
   decideStandardLabourMaterialsCharge,
   MATERIALS_CHARGE_DECISION_FACT,
-  MATERIALS_CHARGE_FIGURE_REQUIRED,
   MATERIALS_CHARGE_FIGURE_UNSUPPORTED,
   materialsChargeDecisionFromRevision,
   materialsChargeDecisionMarker,
@@ -102,25 +102,35 @@ Deno.test("positiveMaterialsChargeExGst rejects zero and non-numbers", () => {
   assertEquals(positiveMaterialsChargeExGst("x"), null);
 });
 
-Deno.test("silent labour-only when materials_used is present must ask one figure", () => {
+Deno.test("unquantified materials become a review caveat, never a hard refusal", () => {
   const decision = decideStandardLabourMaterialsCharge({
     materials_used: ["Polycarb disposal / tipping", "Screws x 20"],
     standing_decision: null,
     priced_materials_line_count: 0,
   });
-  assertEquals(decision.action, "refuse");
-  if (decision.action !== "refuse") return;
-  assertEquals(decision.reason_code, MATERIALS_CHARGE_FIGURE_REQUIRED);
+  assertEquals(decision.action, "rate_card_review_only");
+  if (decision.action !== "rate_card_review_only") return;
   assertEquals(decision.materials, [
     "Polycarb disposal / tipping",
     "Screws x 20",
   ]);
-  // The recovery action must name a path the operator can actually run.
-  assertStringIncludes(
-    decision.recovery_action,
-    "prepare_ses_docket_revision",
-  );
-  assertStringIncludes(decision.recovery_action, "materials_charge");
+  assertStringIncludes(decision.review_reason, "does not invent a quantity");
+  assertStringIncludes(decision.review_recovery_action, "Do not release");
+});
+
+Deno.test("quantified non-settled materials propose from the rate card instead of refusing", () => {
+  const decision = decideStandardLabourMaterialsCharge({
+    materials_used: ["Nails x 5", "Timber x 0.2m"],
+    standing_decision: null,
+    priced_materials_line_count: 0,
+  });
+  assertEquals(decision.action, "rate_card_proposal");
+  if (decision.action !== "rate_card_proposal") return;
+  assertEquals(decision.amount_ex_gst, 71);
+  assertEquals(decision.provenance.captain_review_required, true);
+  assertStringIncludes(decision.description, "Nails x 5");
+  assertStringIncludes(decision.description, "Timber x 0.2m");
+  assertStringIncludes(decision.review_recovery_action, "do not send");
 });
 
 Deno.test("an authorised operator figure produces one builder-readable charge line", () => {
@@ -473,19 +483,20 @@ Deno.test("an issued invoice that prices materials answers instead of asking", (
   assertStringIncludes(String(decision.provenance.note), "INV-0942");
 });
 
-Deno.test("a labour-only invoice leaves the materials question standing", () => {
+Deno.test("a labour-only invoice leaves the rate-card review caveat standing", () => {
   // The load-bearing distinction. The reading refuses upstream, so what reaches
-  // the guard is a null evidence — and the ask must survive it unchanged.
+  // the guard is a null evidence — and the review caveat must survive it.
   const decision = decideStandardLabourMaterialsCharge({
     materials_used: RECORDED,
     standing_decision: null,
     priced_materials_line_count: 0,
     invoiced_materials_evidence: null,
   });
-  assertEquals(decision.action, "refuse");
-  if (decision.action !== "refuse") throw new Error("unreachable");
-  assertEquals(decision.reason_code, MATERIALS_CHARGE_FIGURE_REQUIRED);
-  assertStringIncludes(decision.recovery_action, "prepare_ses_docket_revision");
+  assertEquals(decision.action, "rate_card_review_only");
+  if (decision.action !== "rate_card_review_only") {
+    throw new Error("unreachable");
+  }
+  assertStringIncludes(decision.review_recovery_action, "Do not release");
 });
 
 Deno.test("an operator figure outranks the invoice reading", () => {
