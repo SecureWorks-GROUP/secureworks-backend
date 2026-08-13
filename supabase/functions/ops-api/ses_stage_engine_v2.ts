@@ -71,7 +71,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r12-draft-only-docs-ready";
+  "ses-stage-engine.v2-r13-drafted-pack-closeout-ready";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -567,7 +567,16 @@ export function sesStageDocsReady(
     };
   }
 
-  if (input.evidence?.packState !== "READY") {
+  const recordedPackState = String(input.evidence?.packState || "")
+    .toUpperCase();
+  const legacyDraftedPack = ["", "DRAFTED"].includes(recordedPackState) &&
+    String(input.evidence?.pack?.status || "").toLowerCase() === "drafted";
+  // Current U4 rows still require READY. Legacy durable rows predate that
+  // review_state stamp and persist only status=drafted; docsReady() above has
+  // already proved the qualifying DRAFT, report evidence, required SWMS and
+  // unsent pack, so that complete legacy shape is equally reviewable. Named
+  // refusal states such as U4_BLOCKED and READY_TO_BUILD remain excluded.
+  if (recordedPackState !== "READY" && !legacyDraftedPack) {
     return {
       satisfied: false,
       missing: ["a current-cycle READY draft pack"],
