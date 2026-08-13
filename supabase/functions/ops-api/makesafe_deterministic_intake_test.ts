@@ -18,6 +18,10 @@ import {
 import {
   loadDeterministicIntakeMode,
 } from "./makesafe_deterministic_intake_runtime.ts";
+import {
+  canonicalSesFamilyFromCard,
+  resolveSesFamilyMatrixRow,
+} from "./ses_family_matrix.ts";
 
 const PROFILES: DeterministicCompanyProfile[] = [
   {
@@ -1195,6 +1199,77 @@ Deno.test("RAPID adapter is pure and reaches confirmed state on complete evidenc
   assertEquals(
     buildDeterministicIntakePlan([item], PROFILES).cases[0].state,
     "confirmed_live_job",
+  );
+});
+
+Deno.test("RAPID REPAIR subject: Falcon gates/drive WO resolves to the typed repair path", () => {
+  const item = source({
+    postId: "swms-261163-falcon-rapid-repair",
+    subject:
+      "**RAPID REPAIR** NEW WORK ORDER - MLB-261163 - FALCON - Work Order: MLB-261163",
+    body: "Scope of Works: Make safe the damaged gates and drive.",
+    attachments: [pdf("swms-261163-falcon-rapid-repair")],
+  });
+  const intakeCase = buildDeterministicIntakePlan([item], PROFILES).cases[0];
+
+  assertEquals(intakeCase.identity.jobFamily, "repair");
+  const family = canonicalSesFamilyFromCard({
+    makesafe_job_family: intakeCase.identity.jobFamily,
+  });
+  assertEquals(family, "repair");
+  const matrix = resolveSesFamilyMatrixRow({
+    builder_key: "MLB",
+    family,
+    site_suburb: "Falcon",
+  });
+  assert(matrix.ok);
+  assertEquals(matrix.row.family, "repair");
+  assertEquals(matrix.row.job_type, "physical_makesafe");
+});
+
+Deno.test("RAPID REPAIR body: Boddington WO resolves repair", () => {
+  const item = source({
+    postId: "swms-261192-boddington-repair",
+    subject:
+      "NEW WORK ORDER - MLB-261192 - BODDINGTON - Work Order: MLB-261192",
+    body:
+      "Dispatch class: RAPID REPAIR\nScope of Works: Make safe the damaged building element.",
+    attachments: [pdf("swms-261192-boddington-repair")],
+  });
+
+  assertEquals(
+    buildDeterministicIntakePlan([item], PROFILES).cases[0].identity.jobFamily,
+    "repair",
+  );
+});
+
+Deno.test("bare RAPID emergency response without repair shape stays general make-safe", () => {
+  const item = source({
+    postId: "mlb-261193-urgent-rapid-response",
+    subject:
+      "URGENT RAPID RESPONSE NEW WORK ORDER - MLB-261193 - Work Order: MLB-261193",
+    body:
+      "Emergency attendance required. Please make safe the storm-damaged ceiling.",
+    attachments: [pdf("mlb-261193-urgent-rapid-response")],
+  });
+
+  assertEquals(
+    buildDeterministicIntakePlan([item], PROFILES).cases[0].identity.jobFamily,
+    "general_makesafe",
+  );
+});
+
+Deno.test("plain general make-safe WO remains general make-safe", () => {
+  const item = source({
+    postId: "mlb-261194-general-makesafe",
+    subject: "NEW WORK ORDER - MLB-261194 - Work Order: MLB-261194",
+    body: "Please attend and make safe the storm-damaged ceiling.",
+    attachments: [pdf("mlb-261194-general-makesafe")],
+  });
+
+  assertEquals(
+    buildDeterministicIntakePlan([item], PROFILES).cases[0].identity.jobFamily,
+    "general_makesafe",
   );
 });
 
