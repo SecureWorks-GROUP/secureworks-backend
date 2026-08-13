@@ -28,12 +28,14 @@ import {
   parseMakesafeBoardColumnScope,
   parseMakesafeBoardFields,
   portalCapturesFromLedger,
+  presentMakesafeBoardSubstatus,
   projectMakesafePortalCaptures,
   projectOpsMakesafeBoard,
   projectOpsMakesafeCardRow,
   projectTradeMakesafeBoard,
   TRADE_MAKESAFE_COLUMNS,
 } from "./makesafe_board_read_model.ts";
+import { MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION } from "./makesafe_computed_status.ts";
 import { observerPopulationForJobStatus } from "../../../scripts/ses-f7-prime-portal-observer.ts";
 
 const NOW = "2026-07-20T12:00:00Z";
@@ -1449,6 +1451,201 @@ Deno.test("canonical row carries report/photos, pack/send, notes, age and separa
   );
   assert(
     row.blockers.real.some((b: any) => b.code === "closeout_documents_missing"),
+  );
+});
+
+Deno.test("presentMakesafeBoardSubstatus demotes unbacked ready_to_invoice by family", () => {
+  // Pure presentation helper: ready_to_invoice is an operator CLAIM and may
+  // only surface when report-in evidence backs it.
+  assertEquals(
+    presentMakesafeBoardSubstatus({
+      rawSubstatus: "ready_to_invoice",
+      reportInSatisfied: false,
+      detail: { report_type: "roof_report" },
+      job: { metadata: { makesafe_job_family: "roof_report" } },
+    }),
+    {
+      substatus: MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
+      declared_substatus: "ready_to_invoice",
+      demoted: true,
+    },
+  );
+  assertEquals(
+    presentMakesafeBoardSubstatus({
+      rawSubstatus: "ready_to_invoice",
+      reportInSatisfied: false,
+      detail: {},
+      job: { metadata: { makesafe_job_family: "general_makesafe" } },
+    }),
+    {
+      substatus: "waiting_on_trade_report",
+      declared_substatus: "ready_to_invoice",
+      demoted: true,
+    },
+  );
+  assertEquals(
+    presentMakesafeBoardSubstatus({
+      rawSubstatus: "ready_to_invoice",
+      reportInSatisfied: true,
+      detail: { report_type: "roof_report" },
+      job: { metadata: { makesafe_job_family: "roof_report" } },
+    }),
+    {
+      substatus: "ready_to_invoice",
+      declared_substatus: "ready_to_invoice",
+      demoted: false,
+    },
+  );
+  assertEquals(
+    presentMakesafeBoardSubstatus({
+      rawSubstatus: "waiting_on_trade_report",
+      reportInSatisfied: false,
+      detail: { report_type: "roof_report" },
+      job: {},
+    }).demoted,
+    false,
+  );
+});
+
+Deno.test("ready_to_invoice cannot appear on Allocated roofs without portal capture (SWMS-261113/261123 class)", () => {
+  // Live defect: stored substatus ready_to_invoice while report is still
+  // waiting, no portal capture, no invoice. Engine correctly keeps allocated;
+  // the board must not paint the unbacked "ready" claim.
+  const source = baseJob("allocated", "261113", {
+    job_number: "SWMS-261113",
+    status: "accepted",
+    substatus: "ready_to_invoice",
+    metadata: { makesafe_job_family: "roof_report" },
+    makesafe_details: {
+      substatus: "ready_to_invoice",
+      report_type: "roof_report",
+      external_ref: "MLB-261113",
+      external_links: [{
+        kind: "roof_report",
+        url: "https://www.primeeco.tech/share/no-capture-yet",
+      }],
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-261113",
+    },
+    report: null,
+    report_status: "waiting_on_trade_report",
+    invoice_qualifies_as_current_draft: false,
+  });
+
+  const [row] = buildCanonicalMakesafeRows([source], { computedAt: NOW });
+  assertEquals(row.canonical_stage, "allocated");
+  assertEquals(row.report.state, "waiting_on_trade_report");
+  assertEquals(row.substatus, MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION);
+  assertEquals(row.substatus, "awaiting_portal_completion");
+  assert(
+    row.substatus !== "ready_to_invoice",
+    "unbacked ready_to_invoice must not appear on the board",
+  );
+  assertEquals(
+    row.blockers.stale_artifacts.some((a: any) =>
+      a.code === "stale_ready_to_invoice_substatus"
+    ),
+    true,
+  );
+
+  const ops = projectOpsMakesafeBoard([row]);
+  const card = ops.columns.allocated.find((r: any) =>
+    r.job_number === "SWMS-261113"
+  );
+  assert(card, "card stays Allocated");
+  assertEquals(card.substatus, "awaiting_portal_completion");
+
+  const trade = projectTradeMakesafeBoard([row], {
+    userId: "ops-reviewer",
+    role: "ops_manager",
+    managedVerticals: ["makesafe"],
+  });
+  const tradeCard = trade.columns.Allocated.find((r: any) =>
+    r.job_number === "SWMS-261113"
+  );
+  assert(tradeCard, "trade board keeps the card Allocated");
+  assertEquals(tradeCard.substatus, "awaiting_portal_completion");
+});
+
+Deno.test("ready_to_invoice surfaces only when portal lock evidence backs it", () => {
+  const sourceUrl = "https://www.primeeco.tech/share/roof-ready-backed";
+  const source = baseJob("allocated", "roof-ready-backed", {
+    job_number: "SWMS-261123",
+    status: "accepted",
+    substatus: "ready_to_invoice",
+    metadata: { makesafe_job_family: "roof_report" },
+    makesafe_details: {
+      substatus: "ready_to_invoice",
+      report_type: "roof_report",
+      external_ref: "MLB-261123",
+      external_links: [{ kind: "roof_report", url: sourceUrl }],
+      cycle_number: 1,
+      attendance_cycle_id: "cycle-261123",
+    },
+    report: null,
+    report_status: "waiting_on_trade_report",
+  });
+  const revision = {
+    id: "capture-roof-ready",
+    job_id: "roof-ready-backed",
+    attendance_cycle_id: "cycle-261123",
+    role: "roof_report",
+    status: "verified",
+    makesafe_fact_version: 1,
+    capture_result: "done",
+    source_url: sourceUrl,
+    source_content_hash: `sha256:${"c".repeat(64)}`,
+    builder_reference: "MLB-261123",
+    captured_at: NOW,
+    capture_producer: "capture_portal_evidence.py/v1",
+    signal: "submitted/locked observed",
+    screenshot_object_key:
+      "makesafe-docket-artifacts/portal-captures/job/cycle/roof/image.png",
+    screenshot_media_type: "image/png",
+    screenshot_content_hash: `sha256:${"d".repeat(64)}`,
+    screenshot_size_bytes: 4096,
+  };
+
+  const [row] = buildCanonicalMakesafeRows([source], {
+    portalCaptureRowsByJobId: { "roof-ready-backed": [revision] },
+    computedAt: NOW,
+  });
+
+  // Capture is placement evidence (at least TRI); the stored claim may stand.
+  assertEquals(row.report.state, "submitted");
+  assertEquals(row.substatus, "ready_to_invoice");
+  assertEquals(
+    row.blockers.stale_artifacts.some((a: any) =>
+      a.code === "stale_ready_to_invoice_substatus"
+    ),
+    false,
+  );
+});
+
+Deno.test("unbacked ready_to_invoice on physical cards presents waiting_on_trade_report", () => {
+  const [row] = buildCanonicalMakesafeRows([
+    baseJob("allocated", "physical-unbacked-ready", {
+      substatus: "ready_to_invoice",
+      metadata: { makesafe_job_family: "general_makesafe" },
+      makesafe_details: {
+        substatus: "ready_to_invoice",
+        cycle_number: 1,
+      },
+      report: null,
+      report_status: "waiting_on_trade_report",
+    }),
+  ], { computedAt: NOW });
+
+  assertEquals(row.canonical_stage, "allocated");
+  assertEquals(row.substatus, "waiting_on_trade_report");
+  assertEquals(
+    row.blockers.stale_artifacts[0],
+    {
+      code: "stale_ready_to_invoice_substatus",
+      source: "unbacked_operator_claim",
+      declared_substatus: "ready_to_invoice",
+      presented_substatus: "waiting_on_trade_report",
+    },
   );
 });
 

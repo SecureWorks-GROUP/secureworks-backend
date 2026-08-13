@@ -931,6 +931,15 @@ pack, send or digest path selects on it. Evidence, the money proof, the trade
 open-pool consequence and the before/after parity run:
 `docs/evidence/ses-f4-report-intake-stage-2026-08-02.md`.
 
+Board presentation of `ready_to_invoice` is evidence-backed
+(`presentMakesafeBoardSubstatus` in `makesafe_board_read_model.ts`): the stored
+claim may only surface when current-cycle `reportInEvidence` is satisfied
+(portal lock/capture for roof/assessment; submitted service report + photo floor
+for physical). An unbacked claim is demoted for display only
+(`awaiting_portal_completion` / `waiting_on_trade_report`) and stamped
+`stale_ready_to_invoice_substatus` — never a DB write, never a placement change.
+SWMS-261113 / 261123 class: Allocated roof with no capture must not wear "ready".
+
 ## `makesafe_content_hash` Is A ROW Fact Hash, Never A File Byte Hash
 
 Despite the name and the `sha256:<64hex>` shape, this column is stamped by

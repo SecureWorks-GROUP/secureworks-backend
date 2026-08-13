@@ -2,7 +2,9 @@
 // Canonical make-safe board row and its two audience projections.
 // Clients must never derive a board column from assignment status.
 import {
+  classifyMakesafeJobType,
   computeMakesafeStatus,
+  MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION,
   type MakesafePortalCapture,
   type MakesafeStatusHold,
   reportInEvidence,
@@ -987,15 +989,70 @@ function stampedPackPresentation(base: any): any | null {
   return stamp && typeof stamp === "object" && txt(stamp.kind) ? stamp : null;
 }
 
-function blockerFacts(base: any, assignments: any[]) {
+/**
+ * Operator substatus is a CLAIM. `ready_to_invoice` may only surface when
+ * current-cycle report-in evidence backs it (portal lock/capture for
+ * roof/assessment; submitted service report + photo floor for physical).
+ *
+ * Presentation only — never writes `makesafe_job_details.substatus`. An
+ * unbacked claim is rewritten so Allocated cards cannot wear a "ready"
+ * badge while report.state is still waiting and there is no capture/invoice
+ * (SWMS-261113 / 261123 class). Placement stays evidence-derived.
+ */
+export function presentMakesafeBoardSubstatus(args: {
+  rawSubstatus: string | null | undefined;
+  reportInSatisfied: boolean;
+  detail?: any;
+  job?: any;
+}): {
+  substatus: string | null;
+  declared_substatus: string | null;
+  demoted: boolean;
+} {
+  const raw = txt(args.rawSubstatus);
+  if (raw !== "ready_to_invoice") {
+    return {
+      substatus: raw,
+      declared_substatus: raw,
+      demoted: false,
+    };
+  }
+  if (args.reportInSatisfied === true) {
+    return {
+      substatus: raw,
+      declared_substatus: raw,
+      demoted: false,
+    };
+  }
+  const kind = classifyMakesafeJobType(args.detail, args.job);
+  const honest = kind === "physical_makesafe"
+    ? "waiting_on_trade_report"
+    : MAKESAFE_SUBSTATUS_AWAITING_PORTAL_COMPLETION;
+  return {
+    substatus: honest,
+    declared_substatus: raw,
+    demoted: true,
+  };
+}
+
+function blockerFacts(
+  base: any,
+  assignments: any[],
+  presented?: {
+    demoted: boolean;
+    declared_substatus: string | null;
+    substatus: string | null;
+  },
+) {
   const substatus = txt(base?.substatus || base?.makesafe_details?.substatus);
   const hasAllocation = assignments.length > 0 ||
     ["scheduled", "in_progress"].includes(
       String(base?.status || "").toLowerCase(),
     );
-  const stale = substatus === "company_contact_required" && hasAllocation;
+  const staleCompanyContact = substatus === "company_contact_required" &&
+    hasAllocation;
   const real: any[] = [];
-  if (substatus === "company_contact_required" && !stale) {
+  if (substatus === "company_contact_required" && !staleCompanyContact) {
     real.push({
       code: "client_contact_required",
       category: "client_availability",
@@ -1044,15 +1101,25 @@ function blockerFacts(base: any, assignments: any[]) {
       fact: txt(refusal.presentation_reason || refusal.reason),
     });
   }
+  const stale_artifacts: any[] = [];
+  if (staleCompanyContact) {
+    stale_artifacts.push({
+      code: "stale_company_contact_substatus",
+      source: "known_allocation_write_path",
+    });
+  }
+  if (presented?.demoted) {
+    stale_artifacts.push({
+      code: "stale_ready_to_invoice_substatus",
+      source: "unbacked_operator_claim",
+      declared_substatus: presented.declared_substatus,
+      presented_substatus: presented.substatus,
+    });
+  }
   return {
     blocked: real.length > 0,
     real,
-    stale_artifacts: stale
-      ? [{
-        code: "stale_company_contact_substatus",
-        source: "known_allocation_write_path",
-      }]
-      : [],
+    stale_artifacts,
   };
 }
 
@@ -1439,6 +1506,12 @@ export function buildCanonicalMakesafeRows(
       photo_count: photoCount,
       cycle_number: Number(report?.cycle_number || base?.cycle_number || 1),
     };
+    const presentedSubstatus = presentMakesafeBoardSubstatus({
+      rawSubstatus: base?.substatus || detail?.substatus,
+      reportInSatisfied: reportIn.satisfied,
+      detail,
+      job: base,
+    });
     const statusApplication = (applicationApplies || attestationAttaches)
       ? {
         effect: applicationApplies ? "override" : "attestation",
@@ -1468,7 +1541,8 @@ export function buildCanonicalMakesafeRows(
       // only `unknown` has no recipe.
       ses_recipe_state: sesFamily === "unknown" ? "unknown" : "sealed",
       job_state: base?.status || null,
-      substatus: base?.substatus || null,
+      // Evidence-backed presentation: unbacked ready_to_invoice is demoted.
+      substatus: presentedSubstatus.substatus,
       declared_stage: declaredStage,
       // Placement authority — identical in card and full mode. Release 12:
       // the corrected engine (+ overlay) places the card; `declared_stage`
@@ -1509,7 +1583,7 @@ export function buildCanonicalMakesafeRows(
       report: reportPayload,
       pack: packPayload,
       age: ageFacts(base),
-      blockers: blockerFacts(base, assignments),
+      blockers: blockerFacts(base, assignments, presentedSubstatus),
       cancelled: displayStage === "cancelled"
         ? {
           reason: base?.cancel_reason || null,
