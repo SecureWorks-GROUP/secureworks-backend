@@ -42,6 +42,43 @@ Deno.test("backfill report: text-only restoration parks unclassified (Ruling 15)
   assertEquals(summary.items[0].inferred_family, null);
 });
 
+Deno.test("backfill report: exact RAPID REPAIR draft becomes a repair candidate", () => {
+  const summary = summarizeMakesafeIntakeBackfillReport({
+    drafts: [{
+      id: "draft-rapid-repair",
+      external_ref: "MLB-261192",
+      requesting_company_slug: "mlb",
+      status: "needs_review",
+      subject: "NEW WORK ORDER - MLB-261192",
+      body_preview: "Dispatch class: RAPID REPAIR\nAttend site.",
+      extraction_json: {},
+    }],
+    jobs: [],
+  });
+
+  assertEquals(summary.counts.backfill_candidates, 1);
+  assertEquals(summary.items[0].inferred_family, "repair");
+  assertEquals(summary.items[0].confidence, "text");
+});
+
+Deno.test("backfill report: Rapid Repair signature does not retag a roof", () => {
+  const summary = summarizeMakesafeIntakeBackfillReport({
+    drafts: [{
+      id: "draft-roof-with-signature",
+      external_ref: "MLB-261197",
+      requesting_company_slug: "mlb",
+      status: "needs_review",
+      extraction_json: {
+        makesafe_job_family: "roof_report",
+        description: "Roof report required.\nRepair Coordinator | Rapid Repair",
+      },
+    }],
+    jobs: [],
+  });
+
+  assertEquals(summary.counts.family_mismatch_reviews, 0);
+});
+
 Deno.test("backfill report: unknown-family draft sharing ref/company with known variant is a suppression risk", () => {
   const summary = summarizeMakesafeIntakeBackfillReport({
     drafts: [

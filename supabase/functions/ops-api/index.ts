@@ -628,6 +628,7 @@ import {
   isReportOnlyType as _isReportOnlyType,
   reportTypeForJobFamily as _reportTypeForJobFamily,
   classifyMakeSafeJobFamily as _classifyMakeSafeJobFamily,
+  hasExplicitRapidRepairSignal as _hasExplicitRapidRepairSignal,
   makeSafeJobFamilyLabel as _makeSafeJobFamilyLabel,
   computeIntakeDraftStatus as _computeIntakeDraftStatus,
   type MakeSafeJobFamilyContext as _MakeSafeJobFamilyContext,
@@ -14345,16 +14346,20 @@ const RECONCILE_MAKESAFE_FAMILIES = new Set([
 ])
 
 // Privileged exact correction for a reviewed live card. Unlike the additive
-// backfill, this action may replace an incorrect non-null family, but only when
-// the caller supplies the family it observed before the write. It preserves all
-// other metadata, keeps report_type in sync, changes no stage/substatus, and
-// emits an audit event. The routine key cannot reach this action.
+// backfill, this action may replace an incorrect non-null family. The caller
+// must compare-and-set either the family it observed or an explicit null state.
+// It preserves all other metadata, keeps report_type in sync, changes no
+// stage/substatus, and emits an audit event. The routine key cannot reach it.
 async function updateMakesafeJobFamily(client: any, body: any) {
   const jId = body?.job_id || body?.jobId
   const family = cleanReviewedString(body?.makesafe_job_family || body?.family)
   const expectedBefore = cleanReviewedString(body?.expected_before_family || body?.expectedBeforeFamily)
+  const expectsNullBefore = body?.expected_before_family_is_null === true ||
+    body?.expectedBeforeFamilyIsNull === true
   if (!jId || !family) throw new ApiError('job_id and makesafe_job_family required', 400)
-  if (!expectedBefore) throw new ApiError('expected_before_family required', 400)
+  if ((!expectedBefore && !expectsNullBefore) || (expectedBefore && expectsNullBefore)) {
+    throw new ApiError('supply exactly one of expected_before_family or expected_before_family_is_null', 400)
+  }
   if (!RECONCILE_MAKESAFE_FAMILIES.has(family)) {
     throw new ApiError(`invalid makesafe_job_family '${family}'`, 400)
   }
@@ -14365,8 +14370,8 @@ async function updateMakesafeJobFamily(client: any, body: any) {
   if (job.type !== 'makesafe') throw new ApiError('job is not a make-safe', 409)
   const beforeMetadata = parseJsonObject(job.metadata)
   const beforeFamily = cleanReviewedString(beforeMetadata.makesafe_job_family)
-  if (beforeFamily !== expectedBefore) {
-    throw new ApiError(`family drift: expected '${expectedBefore}', found '${beforeFamily || 'null'}'`, 409)
+  if (expectsNullBefore ? beforeFamily !== null : beforeFamily !== expectedBefore) {
+    throw new ApiError(`family drift: expected '${expectsNullBefore ? 'null' : expectedBefore}', found '${beforeFamily || 'null'}'`, 409)
   }
 
   const { data: detail, error: detailErr } = await client.from('makesafe_job_details')
@@ -14529,6 +14534,7 @@ type ActiveBackfillMakeSafeJobFamily =
   | 'temp_fence_makesafe'
   | 'general_makesafe'
   | 'restoration'
+  | 'repair'
 
 function inferMakesafeFamilyForActiveBackfill(args: {
   notes?: string | null
@@ -14537,6 +14543,14 @@ function inferMakesafeFamilyForActiveBackfill(args: {
 }): ActiveBackfillMakeSafeJobFamily | null {
   const metadata = parseJsonObject(args.metadata)
   const detail = args.detail || {}
+  const explicitFamily = String(
+    metadata?.ses_family || detail?.report_type || '',
+  ).trim().toLowerCase()
+  if (explicitFamily === 'repair') return 'repair'
+  if (_hasExplicitRapidRepairSignal(
+    metadata?.builder_email_subject,
+    metadata?.builder_email_text_for_trade,
+  )) return 'repair'
   const text = [
     metadata?.makesafe_type,
     metadata?.job_type_detail,
@@ -14578,7 +14592,6 @@ function buildMakesafeFamilyBackfillCandidates(
   for (const job of (jobs || [])) {
     const metadata = parseJsonObject(job?.metadata)
     const currentFamily = metadata?.makesafe_job_family ? String(metadata.makesafe_job_family) : null
-    if (currentFamily) continue
     const detail = detailsMap[job.id] || null
     const inferred = inferMakesafeFamilyForActiveBackfill({
       notes: job?.notes || null,
@@ -14586,6 +14599,9 @@ function buildMakesafeFamilyBackfillCandidates(
       detail,
     })
     if (!inferred) continue
+    // The repair pass may correct only unknown/MakeSafe cards. In particular,
+    // never reinterpret or relabel a roof-family card from a transport hint.
+    if (currentFamily && !(currentFamily === 'general_makesafe' && inferred === 'repair')) continue
     out.push({
       job_id: job.id,
       job_number: job.job_number || null,
@@ -14644,6 +14660,7 @@ async function backfillMakesafeJobFamilies(client: any, body: any) {
     'temp_fence_makesafe',
     'general_makesafe',
     'restoration',
+    'repair',
   ])
 
   const { data: jobs, error: jobsErr } = await client.from('jobs')
@@ -14703,30 +14720,20 @@ async function backfillMakesafeJobFamilies(client: any, body: any) {
 
   for (const c of candidates) {
     const job = (jobs || []).find((j: any) => j.id === c.job_id)
-    const metadata = parseJsonObject(job?.metadata)
-    if (metadata?.makesafe_job_family) {
-      result.skipped.push({ ...c, reason: 'family became non-null before write' })
-      continue
-    }
-    const nextMetadata = {
-      ...metadata,
+    const corrected = await updateMakesafeJobFamily(client, {
+      job_id: c.job_id,
       makesafe_job_family: c.inferred_family,
-      makesafe_job_family_label: c.inferred_label,
-    }
-    const { data: updated, error } = await client.from('jobs')
-      .update({ metadata: nextMetadata, updated_at: new Date().toISOString() })
-      .eq('id', c.job_id)
-      .eq('type', 'makesafe')
-      .not('status', 'in', '("cancelled","archived","lost","invoiced","completed")')
-      .select('id, job_number, status, metadata')
-      .single()
-    if (error) throw error
+      ...(c.current_family
+        ? { expected_before_family: c.current_family }
+        : { expected_before_family_is_null: true }),
+      reason: 'bounded active repair-family backfill from source authority',
+    })
     result.updated.push({
-      job_id: updated.id,
-      job_number: updated.job_number,
-      status: updated.status,
-      makesafe_job_family: updated.metadata?.makesafe_job_family || null,
-      makesafe_job_family_label: updated.metadata?.makesafe_job_family_label || null,
+      job_id: corrected.job_id,
+      job_number: corrected.job_number,
+      status: job?.status || null,
+      makesafe_job_family: corrected.after.makesafe_job_family,
+      makesafe_job_family_label: _makeSafeJobFamilyLabel(corrected.after.makesafe_job_family),
     })
   }
 
@@ -20762,6 +20769,21 @@ function assertReviewedFamilyConsistency(
 }
 export const _assertReviewedFamilyConsistency = assertReviewedFamilyConsistency
 
+function deterministicDraftFamilyForApproval(
+  extraction: any,
+  splitObligation: boolean,
+): string | null {
+  if (extraction?.deterministic_intake !== true || splitObligation) return null
+  const family = cleanReviewedString(extraction?.makesafe_job_family)
+  if (!family) return null
+  if (!RECONCILE_MAKESAFE_FAMILIES.has(family)) {
+    throw new ApiError(`invalid deterministic makesafe_job_family '${family}'`, 400)
+  }
+  return family
+}
+export const _deterministicDraftFamilyForApprovalForTest =
+  deterministicDraftFamilyForApproval
+
 async function loadExistingJobBindingForDraft(client: any, draft: any): Promise<{
   correction: any
   targetJob: any
@@ -21088,11 +21110,16 @@ async function approveIntakeDraft(client: any, body: any) {
   // The split machinery below remains for compatibility with existing stored state;
   // no new multi-WO draft reaches its mint branch.
   const splitObligation = combinedSplitObligation(extraction)
+  const persistedDeterministicFamily = deterministicDraftFamilyForApproval(
+    extraction,
+    !!splitObligation,
+  )
+  const authoritativeFamily = reviewedFamily || persistedDeterministicFamily
   const requiredMintRoles = extraction?.deterministic_intake === true
     ? ['primary', ...(splitObligation ? ['secondary_report'] : [])]
     : []
   const primaryIsReportOnly = splitObligation ? false : isReportOnlyDraft
-  assertReviewedFamilyConsistency(reviewedFamily, effectiveReportType, !!splitObligation, primaryIsReportOnly)
+  assertReviewedFamilyConsistency(authoritativeFamily, effectiveReportType, !!splitObligation, primaryIsReportOnly)
   const choose = (key: string, fallback: any = null) => cleanReviewedString(reviewed[key]) || cleanReviewedString(draft[key]) || cleanReviewedString(extraction[key]) || cleanReviewedString(fallback)
 
   const approvedFields = {
@@ -21216,7 +21243,7 @@ async function approveIntakeDraft(client: any, body: any) {
 
   // On a combined split the primary is a PHYSICAL make-safe: don't inherit the
   // draft's roof/assessment family (that belongs to the secondary report card).
-  const approvedJobFamily = reviewedFamily || (splitObligation
+  const approvedJobFamily = authoritativeFamily || (splitObligation
     ? _classifyMakeSafeJobFamily(
       draft?.subject || approvedFields.external_ref || '',
       [extraction?.builder_email_text_for_trade, approvedFields.description, approvedFields.makesafe_type].filter(Boolean).join('\n'),

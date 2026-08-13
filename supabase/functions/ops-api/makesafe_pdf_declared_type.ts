@@ -26,8 +26,9 @@
 // "Roof Reports" (+ "EXTERNAL"), "Assessment Report & Quote" (+ "INTERNAL"),
 // "Temporary Fencing" + "Make Safe", "Restoration" + "Make Safe"
 // (MLB-27093, Ruling 9: the restoration label corroborates only — the type is
-// make safe), and "Scaffolding/Access Equipment" (MLB-25147 PO-56236,
-// Ruling 8: its own repair deliverable).
+// make safe), "Scaffolding/Access Equipment" (MLB-25147 PO-56236,
+// Ruling 8: its own repair deliverable), and a standalone "Rapid Repair"
+// declared-type line.
 //
 // SAFETY POSTURE. Label-anchored and standalone-line only: a declared-type
 // token must be its own header line, so scope sentences that merely mention
@@ -86,6 +87,7 @@ const TYPE_LINES: readonly TypeLinePattern[] = [
     re: /^scaffolding\s*\/?\s*access\s+equipment(?:\s+external)?$/i,
     type: "repair",
   },
+  { re: /^rapid\s+repairs?$/i, type: "repair" },
 ] as const;
 
 // The bare sub-line "Make Safe" is only decisive when it follows the anchor and

@@ -13,6 +13,7 @@
 
 import {
   classifyMakeSafeJobFamily,
+  hasExplicitRapidRepairSignal,
   type MakeSafeJobFamily,
 } from "./makesafe_intake_gate.ts";
 import {
@@ -27,6 +28,7 @@ const FAMILY_VALUES = new Set<string>([
   "temp_fence_makesafe",
   "general_makesafe",
   "restoration",
+  "repair",
 ]);
 
 const LIVE_OR_SUPPRESSING_STATES = new Set([
@@ -137,6 +139,7 @@ function familyFromReportType(
   if (rt === "general_makesafe" || rt === "make_safe" || rt === "makesafe") {
     return "general_makesafe";
   }
+  if (rt === "repair") return "repair";
   return null;
 }
 
@@ -162,6 +165,9 @@ function inferSafeFamily(input: {
 
   const text = `${input.subject || ""}\n${input.body || ""}`;
   if (!text.trim()) return { family: null, confidence: "none" };
+  if (hasExplicitRapidRepairSignal(input.subject, input.body)) {
+    return { family: "repair", confidence: "text" };
+  }
   const classified = classifyMakeSafeJobFamily(
     input.subject || null,
     input.body || null,
@@ -185,6 +191,7 @@ function textInferredFamily(
 ): MakeSafeJobFamily | null {
   const text = `${subject || ""}\n${body || ""}`;
   if (!text.trim()) return null;
+  if (hasExplicitRapidRepairSignal(subject, body)) return "repair";
   const classified = classifyMakeSafeJobFamily(
     subject || null,
     body || null,
@@ -380,8 +387,13 @@ export function summarizeMakesafeIntakeBackfillReport(input: {
     const inferred = inferSafeFamily({
       explicitFamily: metadata.makesafe_job_family,
       reportType: j.report_type,
-      subject: j.external_ref || null,
-      body: [metadata.description, metadata.builder_email_body_text, row?.notes]
+      subject: metadata.builder_email_subject || j.external_ref || null,
+      body: [
+        metadata.description,
+        metadata.builder_email_text_for_trade,
+        metadata.builder_email_body_text,
+        row?.notes,
+      ]
         .filter(Boolean).join("\n"),
     });
     const rc = refCompanyKey(
@@ -425,8 +437,13 @@ export function summarizeMakesafeIntakeBackfillReport(input: {
       // M-G FIX 2 — DRIFT FLAG on a live job: stored family disagrees with the
       // negation-aware classifier over the job's WO text. Flag-only (human retypes).
       const drift = textInferredFamily(
-        j.external_ref || null,
-        [metadata.description, metadata.builder_email_body_text, row?.notes]
+        metadata.builder_email_subject || j.external_ref || null,
+        [
+          metadata.description,
+          metadata.builder_email_text_for_trade,
+          metadata.builder_email_body_text,
+          row?.notes,
+        ]
           .filter(Boolean).join("\n"),
       );
       if (drift && drift !== current) {

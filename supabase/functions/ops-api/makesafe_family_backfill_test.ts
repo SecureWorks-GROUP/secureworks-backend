@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-import-prefix no-explicit-any
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _buildMakesafeFamilyBackfillCandidatesForTest,
   _filterMakesafeFamilyBackfillCandidatesForScopeForTest,
   _inferMakesafeFamilyForActiveBackfillForTest,
 } from "./index.ts";
@@ -45,6 +46,74 @@ Deno.test("active family backfill: all canonical families and no pseudo-types", 
     }),
     null,
   );
+  assertEquals(
+    _inferMakesafeFamilyForActiveBackfillForTest({
+      metadata: {
+        builder_email_subject: "**RAPID REPAIR** NEW WORK ORDER - MLB-261163",
+      },
+    }),
+    "repair",
+  );
+  assertEquals(
+    _inferMakesafeFamilyForActiveBackfillForTest({
+      detail: { report_type: "repair" },
+    }),
+    "repair",
+  );
+  assertEquals(
+    _inferMakesafeFamilyForActiveBackfillForTest({
+      metadata: {
+        builder_email_text_for_trade:
+          "Please attend.\nRepair Coordinator | Rapid Repair",
+      },
+    }),
+    null,
+  );
+});
+
+Deno.test("active family backfill: repairs unknown and MakeSafe cards but never roofs", () => {
+  const rows = [
+    {
+      id: "unknown-repair",
+      job_number: "SWMS-1",
+      status: "accepted",
+      metadata: {
+        builder_email_subject: "RAPID REPAIR NEW WORK ORDER",
+      },
+    },
+    {
+      id: "makesafe-repair",
+      job_number: "SWMS-2",
+      status: "accepted",
+      metadata: {
+        makesafe_job_family: "general_makesafe",
+        builder_email_subject: "RAPID REPAIR NEW WORK ORDER",
+      },
+    },
+    {
+      id: "roof-protected",
+      job_number: "SWMS-3",
+      status: "accepted",
+      metadata: {
+        makesafe_job_family: "roof_report",
+        builder_email_subject: "RAPID REPAIR NEW WORK ORDER",
+      },
+    },
+  ];
+  const candidates = _buildMakesafeFamilyBackfillCandidatesForTest(
+    rows,
+    {},
+    {},
+  );
+
+  assertEquals(candidates.map((row: any) => row.job_number), [
+    "SWMS-1",
+    "SWMS-2",
+  ]);
+  assertEquals(candidates.map((row: any) => row.inferred_family), [
+    "repair",
+    "repair",
+  ]);
 });
 
 Deno.test("active family backfill: explicit job-number scope can hold a stale approved write set", () => {

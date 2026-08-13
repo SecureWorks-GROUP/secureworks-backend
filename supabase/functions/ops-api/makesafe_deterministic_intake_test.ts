@@ -1243,6 +1243,55 @@ Deno.test("RAPID REPAIR body: Boddington WO resolves repair", () => {
   );
 });
 
+Deno.test("RAPID REPAIR PDF header: generic transport still resolves repair", () => {
+  const postId = "mlb-rapid-repair-pdf-only";
+  const item = source({
+    postId,
+    subject: "NEW WORK ORDER - MLB-261195 - Work Order: MLB-261195",
+    body: "Scope of Works: Attend site and complete the instructed works.",
+    attachments: [pdf(postId)],
+    pdfDocuments: [{
+      sourcePostId: postId,
+      attachmentId: `${postId}-pdf`,
+      attachmentName: "Work Order.pdf",
+      status: "extracted",
+      text: [
+        "Allocation Work Order",
+        "Site Contact: Fixture Contact",
+        "Rapid Repair",
+        "Attend site and repair the damaged gates.",
+      ].join("\n"),
+      charCount: 120,
+      pageCount: 1,
+      extractor: "fixture",
+      truncated: false,
+      reason: null,
+    }],
+  });
+
+  assertEquals(
+    buildDeterministicIntakePlan([item], PROFILES).cases[0].identity.jobFamily,
+    "repair",
+  );
+});
+
+Deno.test("Rapid Repair footer text does not retag an ordinary make-safe", () => {
+  const item = source({
+    postId: "mlb-rapid-repair-signature-only",
+    subject: "NEW WORK ORDER - MLB-261196 - Work Order: MLB-261196",
+    body: [
+      "Please attend and make safe the storm-damaged ceiling.",
+      "Repair Coordinator | Rapid Repair",
+    ].join("\n"),
+    attachments: [pdf("mlb-rapid-repair-signature-only")],
+  });
+
+  assertEquals(
+    buildDeterministicIntakePlan([item], PROFILES).cases[0].identity.jobFamily,
+    "general_makesafe",
+  );
+});
+
 Deno.test("bare RAPID emergency response without repair shape stays general make-safe", () => {
   const item = source({
     postId: "mlb-261193-urgent-rapid-response",

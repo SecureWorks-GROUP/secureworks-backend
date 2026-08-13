@@ -694,6 +694,67 @@ Deno.test("readInputs admits only a valid short-lived synthetic own-mail token",
 const approveDraft = (_client: any, _body: any) =>
   Promise.resolve({ job: { id: "job-abc" } });
 
+Deno.test("RAPID REPAIR family reaches the guarded mint callback", async () => {
+  const store = baseStore();
+  store.emails.push(email({
+    post_id: "rapid-repair-mint",
+    subject:
+      "**RAPID REPAIR** NEW WORK ORDER - MLB-261192 - Work Order: MLB-261192",
+    body_content: [
+      "Client: Fixture Client",
+      "Site Address: 1 Fixture Road, Perth",
+      "Scope of Works: Attend and repair the damaged gates.",
+    ].join("\n"),
+  }));
+  store.email_attachments.push({
+    id: "rapid-repair-mint-pdf",
+    email_id: "rapid-repair-mint",
+    name: "Work Order.pdf",
+    content_type: "application/pdf",
+    storage_path: "raw/rapid-repair-mint.pdf",
+    status: "uploaded",
+    size_bytes: 1024,
+  });
+  const client = fakeClient(store);
+  const inputs = await _readInputsForTest(client, {
+    days: 30,
+    onlyUnscanned: false,
+    nowIso: NOW,
+    maxSources: 4,
+    seedPostIds: ["rapid-repair-mint"],
+    cursor: null,
+  });
+  const plan = buildDeterministicIntakePlan(
+    inputs.sources,
+    inputs.profiles,
+  ).cases[0];
+  assertEquals(plan.identity.jobFamily, "repair");
+
+  let approvalBody: any = null;
+  const result = await _ensureDraftAndJobForTest(
+    client,
+    "rapid-repair-case",
+    plan,
+    new Map(inputs.sources.map((source) => [source.postId, source])),
+    (_client, body) => {
+      approvalBody = body;
+      return Promise.resolve({ job: { id: "rapid-repair-job" } });
+    },
+    () => {},
+    () => {},
+  );
+
+  assertEquals(result.jobId, "rapid-repair-job");
+  assertEquals(
+    approvalBody?.reviewed_fields?.makesafe_job_family,
+    "repair",
+  );
+  assertEquals(
+    store.makesafe_intake_drafts[0].extraction_json.makesafe_job_family,
+    "repair",
+  );
+});
+
 function cancellationFixture(
   statuses: readonly string[] = ["accepted"],
 ): Store {

@@ -1445,7 +1445,7 @@ export function buildCanonicalMakesafeRows(
       invoice_draft_qualification_reason:
         base?.invoice_draft_qualification_reason ?? "missing_invoice",
       commercial_warning: base?.commercial_warning ?? null,
-      makesafe_type: sesFamily === "restoration"
+      makesafe_type: sesFamily === "restoration" || sesFamily === "repair"
         ? sesFamilyLabel(sesFamily)
         : base?.metadata?.makesafe_job_family_label ||
           base?.metadata?.makesafe_job_family ||
