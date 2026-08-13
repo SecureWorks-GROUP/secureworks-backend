@@ -720,10 +720,19 @@ serve(async (req: Request) => {
       ? bccList.map((email: string) => ({ emailAddress: { address: email } }))
       : undefined
 
-    // Build message
+    // Build message. Login/access mails can opt out of the auto Maverick/admin
+    // signature with an HTML comment marker so passwords are not wrapped in
+    // ops-assist branding (Captain 2026-08-13).
+    const suppressSignature =
+      /<!--\s*suppress-auto-appended-default-signature\s*-->/i.test(
+        String(htmlBody || ''),
+      )
     const message: Record<string, unknown> = {
       subject,
-      body: { contentType: 'HTML', content: htmlBody + getSignature(from) },
+      body: {
+        contentType: 'HTML',
+        content: htmlBody + (suppressSignature ? '' : getSignature(from)),
+      },
       toRecipients,
     }
     if (ccRecipients) message.ccRecipients = ccRecipients
