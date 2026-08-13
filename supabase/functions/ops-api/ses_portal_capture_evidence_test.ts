@@ -3,7 +3,9 @@ import {
   assert,
   assertEquals,
   assertRejects,
+  assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { _authorizeOpsApiAction } from "./index.ts";
 import fixture from "./fixtures/ses_u4_swms_26980_live_snapshot.json" with {
   type: "json",
 };
@@ -18,6 +20,15 @@ import {
 } from "./ses_portal_capture_evidence.ts";
 
 type Row = Record<string, unknown>;
+
+const INDEX = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+
+function routeSlice(startMarker: string, endMarker: string): string {
+  const start = INDEX.indexOf(startMarker);
+  const end = INDEX.indexOf(endMarker, start);
+  assert(start >= 0 && end > start, `${startMarker} route slice must exist`);
+  return INDEX.slice(start, end);
+}
 
 function captureFixture() {
   const live = structuredClone(fixture) as unknown as Record<string, unknown>;
@@ -160,8 +171,22 @@ async function validBody(
 }
 
 Deno.test(
-  "record_ses_portal_capture_evidence persists the approved producer contract and content-addressed screenshot",
+  "routine record_ses_portal_capture_evidence reaches the handler and persists screenshot-backed evidence",
   async () => {
+    const routineAllowlist = routeSlice(
+      "const ROUTINE_ALLOWED_ACTIONS = new Set([",
+      "if (authMode === 'routine'",
+    );
+    const captureHandler = routeSlice(
+      "case 'record_ses_portal_capture_evidence':",
+      "case 'scan_ses_makesafes':",
+    );
+    assertStringIncludes(
+      routineAllowlist,
+      "'record_ses_portal_capture_evidence'",
+    );
+    assertStringIncludes(captureHandler, "authMode === 'routine'");
+
     const live = captureFixture();
     const calls: {
       upload?: { bucket: string; path: string; bytes: Uint8Array };
@@ -171,7 +196,7 @@ Deno.test(
     const result = await recordSesPortalCaptureEvidence(
       clientFor(live, calls),
       body,
-      "ops-api:api_key",
+      "ops-api:routine",
     );
 
     assert(calls.upload);
@@ -196,7 +221,7 @@ Deno.test(
     assertEquals(capture.source_url, body.source_url);
     assertEquals(capture.source_content_hash, body.source_content_hash);
     assertEquals(capture.capture_producer, SES_PORTAL_CAPTURE_PRODUCER);
-    assertEquals(capture.created_by, "ops-api:api_key");
+    assertEquals(capture.created_by, "ops-api:routine");
     assertEquals(result.id, "a2fc8aa8-02c2-5eb2-be87-0ed88266543b");
 
     const changedBytes = new Uint8Array([
@@ -218,7 +243,7 @@ Deno.test(
     await recordSesPortalCaptureEvidence(
       clientFor(live, changedCalls),
       changedBody,
-      "ops-api:api_key",
+      "ops-api:routine",
     );
     assert(changedCalls.upload);
     assertEquals(
@@ -235,7 +260,65 @@ Deno.test(
 );
 
 Deno.test(
-  "record_ses_portal_capture_evidence rejects screenshot bytes that do not match their claimed hash",
+  "anonymous callers remain denied and the capture handler retains its 403 guard",
+  () => {
+    const decision = _authorizeOpsApiAction({
+      url: new URL(
+        "https://example.invalid/ops-api?action=record_ses_portal_capture_evidence",
+      ),
+      authMode: "none",
+    });
+    assertEquals(decision.ok, false);
+    if (!decision.ok) assertEquals(decision.status, 401);
+
+    const captureHandler = routeSlice(
+      "case 'record_ses_portal_capture_evidence':",
+      "case 'scan_ses_makesafes':",
+    );
+    assertStringIncludes(captureHandler, "if (!captureIsPrivileged)");
+    assertStringIncludes(captureHandler, "}, 403)");
+  },
+);
+
+Deno.test(
+  "routine capture still rejects untrusted producers and non-PNG evidence",
+  async () => {
+    const live = captureFixture();
+
+    const untrustedBody = await validBody(live) as Record<string, unknown>;
+    untrustedBody.capture_producer = "untrusted-observer/v1";
+    const producerError = await assertRejects(
+      () =>
+        recordSesPortalCaptureEvidence(
+          clientFor(live, {}),
+          untrustedBody,
+          "ops-api:routine",
+        ),
+      SesPortalCaptureEvidenceError,
+      "capture_producer must be",
+    );
+    assertEquals(producerError.code, "ses_portal_capture_producer_unapproved");
+
+    const nonPngBody = await validBody(
+      live,
+      new Uint8Array([1, 2, 3, 4]),
+    );
+    const pngError = await assertRejects(
+      () =>
+        recordSesPortalCaptureEvidence(
+          clientFor(live, {}),
+          nonPngBody,
+          "ops-api:routine",
+        ),
+      SesPortalCaptureEvidenceError,
+      "must contain PNG bytes",
+    );
+    assertEquals(pngError.code, "ses_portal_capture_invalid");
+  },
+);
+
+Deno.test(
+  "routine capture still rejects screenshot bytes that do not match their claimed hash",
   async () => {
     const live = captureFixture();
     const body = await validBody(live);
@@ -245,12 +328,34 @@ Deno.test(
         recordSesPortalCaptureEvidence(
           clientFor(live, {}),
           body,
-          "ops-api:api_key",
+          "ops-api:routine",
         ),
       SesPortalCaptureEvidenceError,
       "screenshot.content_hash does not match",
     );
     assertEquals(error.code, "ses_portal_capture_hash_mismatch");
+  },
+);
+
+Deno.test(
+  "scan_ses_makesafes remains forbidden to the routine key",
+  () => {
+    const routineAllowlist = routeSlice(
+      "const ROUTINE_ALLOWED_ACTIONS = new Set([",
+      "if (authMode === 'routine'",
+    );
+    assert(
+      !routineAllowlist.includes("'scan_ses_makesafes'"),
+      "routine envelope must keep scan_ses_makesafes default-denied",
+    );
+
+    const scanHandler = routeSlice(
+      "case 'scan_ses_makesafes':",
+      "case 'makesafe_pdf_extraction_drain':",
+    );
+    assert(!scanHandler.includes("authMode === 'routine'"));
+    assertStringIncludes(scanHandler, "if (!scanIsPrivileged)");
+    assertStringIncludes(scanHandler, "}, 403)");
   },
 );
 
