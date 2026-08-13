@@ -9,6 +9,7 @@ import {
 } from "./makesafe_send_pack.ts";
 import { composeInvoiceReferenceWithPo } from "./ses_invoice_reference_grain.ts";
 import { qualifyMakesafeCurrentDraftInvoice } from "./makesafe_docs_ready_invoice.ts";
+import { canonicalMakesafeInvoiceContactName } from "./makesafe_invoice_contact.ts";
 // A sealed-release send used to leave `report_sent_at` untouched, so the field
 // was wrong in BOTH directions: false where the retired auto-stamp minted it,
 // absent where a pack demonstrably shipped. The route proof is the send record;
@@ -1847,7 +1848,13 @@ export async function prepareSesInvoiceObligationAction(
     pricing_canon_version: SES_PRICING_CANON_VERSION,
     company,
     reference,
-    contact_name: company,
+    // `company` is the raw builder label off the job record and is NOT safe as a
+    // Xero contact name: for MLB it reads "mlb" (the slug), and Xero mints a new
+    // contact for any name it does not already hold. That is how a third MLB
+    // contact appeared on 2026-08-04 and split their receivables three ways.
+    // The billing name is always the canonical one; `company` stays raw for
+    // display and evidence.
+    contact_name: canonicalMakesafeInvoiceContactName(reference, company),
     lines: explicitDocumentOnly ? [] : lines,
     guard_result: {
       hard_failures: [],

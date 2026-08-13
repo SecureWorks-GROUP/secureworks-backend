@@ -138,6 +138,10 @@ import { recordEvidence } from '../_shared/evidence/record_evidence.ts'
 import { isFlagOn } from '../_shared/evidence/feature_flag.ts'
 import { resolveSmsFromNumber } from '../_shared/sms_from_number.ts'
 import {
+  canonicalMakesafeBuilderDisplayName,
+  canonicalMakesafeInvoiceContactName,
+} from './makesafe_invoice_contact.ts'
+import {
   MAKESAFE_BOARD_CONTRACT_VERSION,
   MAKESAFE_BOARD_MAX_ARCHIVE_PAGE,
   OPS_MAKESAFE_STAGES,
@@ -1450,7 +1454,15 @@ function makeSesXeroGateway(
     async createDraft(proposal, context) {
       const created = await createInvoiceFn(client, {
         job_id: proposal.job_id,
-        contact_name: proposal.contact_name,
+        // Last boundary before Xero. The proposal is canonicalised when the
+        // obligation is prepared, but revisions persisted before that fix still
+        // carry the raw builder label ("mlb"), and re-minting one must not
+        // resurrect the duplicate contact. Canonicalising here too is cheap and
+        // makes the wrong contact unreachable from every caller.
+        contact_name: canonicalMakesafeInvoiceContactName(
+          proposal.reference,
+          proposal.contact_name,
+        ),
         reference: proposal.reference,
         line_items: proposal.lines,
         xero_status: 'DRAFT',
@@ -35801,21 +35813,11 @@ export function _makesafeDraftIdempotencyKey(jobId: string | null | undefined, r
 // MLB/Prime jobs must bill through the canonical Xero contact. Intake/board
 // labels may say "ML Builders", but Xero should use "Major Loss Builders" so
 // draft invoices do not create/use the wrong duplicate contact.
-function canonicalMakesafeInvoiceContactName(reference: any, contact: any): string {
-  const raw = String(contact || '').trim()
-  const ref = String(reference || '').trim().toUpperCase()
-  const norm = raw.toLowerCase().replace(/[^a-z0-9]+/g, '')
-  const hasMlbRef = /(^|[^A-Z0-9])MLB([^A-Z0-9]|$)/.test(ref) || /(^|[^A-Z0-9])MLB[-\s]*\d+/.test(ref) || ref.startsWith('MLB')
-  if (hasMlbRef || norm === 'mlbuilders' || norm === 'mlbuilder' || norm === 'majorlossbuilder' || norm === 'majorlossbuilders') {
-    return 'Major Loss Builders'
-  }
-  return raw
-}
+//
+// The implementation moved to makesafe_invoice_contact.ts so the SES draft path
+// can import it too. It could not import this file (cycle), so it billed the raw
+// builder label and minted an "mlb" contact in Xero on 2026-08-04.
 export const _canonicalMakesafeInvoiceContactNameForTest = canonicalMakesafeInvoiceContactName
-
-function canonicalMakesafeBuilderDisplayName(reference: any, requestedName: any, companyName: any): string {
-  return canonicalMakesafeInvoiceContactName(reference, requestedName || companyName || '')
-}
 export const _canonicalMakesafeBuilderDisplayNameForTest = canonicalMakesafeBuilderDisplayName
 
 interface CreateMakesafeDraftInvoiceDeps {
