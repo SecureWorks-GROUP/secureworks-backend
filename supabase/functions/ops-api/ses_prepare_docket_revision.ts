@@ -960,7 +960,7 @@ function inputBlockers(input: SesAssemblerInputV1): SesBlocker[] {
   return blockers;
 }
 
-function swmsDecision(
+export function sesSwmsDecision(
   input: SesAssemblerInputV1,
   row: SesFamilyMatrixRow,
 ): {
@@ -1791,7 +1791,7 @@ function portalSiblingCorrelationComplete(
 function markSpineEvidenceReady(
   manifest: SesManifestV2,
   input: SesAssemblerInputV1,
-  swms: ReturnType<typeof swmsDecision>,
+  swms: ReturnType<typeof sesSwmsDecision>,
   sourcePaths: string[],
 ): void {
   manifest.items.source_work_order_retrieval = ready(
@@ -1887,7 +1887,7 @@ function hardStopManifest(
 function manifestBase(
   input: SesAssemblerInputV1,
   row: SesFamilyMatrixRow,
-  swms: ReturnType<typeof swmsDecision>,
+  swms: ReturnType<typeof sesSwmsDecision>,
 ): SesManifestV2 {
   const items = initialManifestItems();
   const routeFailure = routingBlocker(input, row);
@@ -2873,7 +2873,7 @@ async function prepareOne(
     );
   }
 
-  const swms = row ? swmsDecision(input, row) : null;
+  const swms = row ? sesSwmsDecision(input, row) : null;
   const manifest = row && swms
     ? manifestBase(input, row, swms)
     : hardStopManifest(input, applicabilityBlocker!);
