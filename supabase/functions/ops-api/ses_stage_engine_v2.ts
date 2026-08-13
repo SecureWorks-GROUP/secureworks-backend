@@ -51,6 +51,7 @@ import {
   type MakesafeJobKind,
   type MakesafeStatusHold,
   type MakesafeStatusInput,
+  physicalReportCloseoutSatisfied,
 } from "./makesafe_computed_status.ts";
 import {
   isMakesafeTerminalDisplayStatus,
@@ -71,7 +72,7 @@ import {
  * past measurement stays attributable to the engine that produced it.
  */
 export const SES_STAGE_ENGINE_V2_VERSION =
-  "ses-stage-engine.v2-r13-drafted-pack-closeout-ready";
+  "ses-stage-engine.v2-r14-submitted-report-closeout-ready";
 
 /**
  * An invoice that has actually been issued. `DRAFT` is not terminal evidence —
@@ -599,10 +600,10 @@ export function sesStageDocsReady(
   }
 
   if (family.kind === "physical_makesafe") {
-    // The captain named four things for a physical make-safe. The email itself
-    // is composed at send time from the pack, so the three durable artifacts
-    // are what a card must carry to be one click away.
-    if (!(input.evidence?.documents?.report === true || pack?.report_doc_id)) {
+    // Physical closeout consumes the same current-cycle submitted-report
+    // predicate as docsReady(), with a typed/bound report document as stronger
+    // evidence when present. Required SWMS remains an independent artifact.
+    if (!physicalReportCloseoutSatisfied(input)) {
       missing.push("the make-safe report");
     }
     if (
